@@ -119,11 +119,33 @@ const maxCommitPreflightRetries = 3
 //
 // Caller holds d.applySem. Returns the pre-commit active config (for the #4234
 // deletion-clear diff) and the compiled promoted config.
+// discardGen is the #16719 rollback-discard token sampled by the
+// caller BEFORE it waited on applySem. commitWithGenBinding re-checks
+// it against the store's current token before every promotion attempt:
+// a mismatch proves a commit-confirmed rollback that discarded the
+// dirty candidate won applySem while this commit was parked, so the
+// candidate examined here no longer exists and binding its (reset)
+// generation would promote the rollback target and report success.
+// Sampled out here, not inside, because commitWithGenBinding runs
+// with applySem already held — sampling inside would read the
+// post-rollback value and fence nothing. InternalCommitter
+// authorities carry no mint epoch, so this semaphore-level fence is
+// what covers the shell / event-engine paths; store-minted
+// authorities are additionally refused at promotion by
+// verifyRollbackDiscardLocked.
 func (d *Daemon) commitWithGenBinding(
+	discardGen uint64,
 	preflight func(cand *config.Config) error,
 	commitFn func(expectedGen uint64) (*config.Config, error),
 ) (oldActive, compiled *config.Config, err error) {
 	for attempt := 0; ; attempt++ {
+		// #16719: refuse a commit whose examined candidate was
+		// discarded by a commit-confirmed rollback while it waited
+		// on applySem. Checked before the snapshot so the retry loop
+		// below can never re-bind the reset generation and adopt it.
+		if d.store.PromotionStale(discardGen) {
+			return nil, nil, configstore.ErrCommitConfirmedRolledBack
+		}
 		cand, gen, cerr := d.store.CompileCandidateGen()
 		if cerr == nil {
 			// Run the hardware pre-flight on the exact compiled snapshot,
@@ -231,6 +253,12 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 			"system rolls back automatically unless you confirm it from a still-reachable session)")
 	}
 
+	// #16719: sample the rollback-discard token BEFORE waiting on
+	// applySem. A commit-confirmed rollback that discards the dirty
+	// candidate while this commit is parked must be visible to the
+	// fence inside commitWithGenBinding; sampling after Acquire
+	// would read the post-rollback value and fence nothing.
+	discardGen := d.store.RollbackDiscardGen()
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -281,6 +309,7 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	// target, so the pre-flight passes nil.
 	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
 	oldActive, compiled, err := d.commitWithGenBinding(
+		discardGen,
 		func(cand *config.Config) error {
 			// #5840: reject a standalone<->cluster topology change BEFORE store
 			// promotion + any dataplane mutation — the boot-only cluster runtime
@@ -390,6 +419,13 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// from. applyConfigLocked takes that capture at the publication boundary;
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
+	// #16687: resolve DNS into a private clone BEFORE arming the
+	// invalidation plan, so the plan, the debt checks below, and the
+	// apply all key on the same (cloned) pointer the dataplane will
+	// publish. Arming with the pre-resolve pointer and applying the
+	// clone would make capturePolicyInvalidationLocked drop the plan
+	// as stale (plan.newCfg != cfg).
+	compiled = d.resolveDNSBeforeApply(compiled)
 	d.armPolicyInvalidationPlanWithRename(oldActive, compiled, renameApplyPtr)
 	// #9841: the committing wrapper, not the bare apply — it returns the
 	// response object projecting this attempt's unconverged-MTU records
@@ -404,7 +440,6 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// apply; the flush sweep inside repopulates it, and the projection
 	// below reads it alongside the old-vs-new full-admit comparison.
 	d.clearKeptSuspicious10752()
-	compiled = d.resolveDNSBeforeApply(compiled)
 	respCfg, applyErr := d.applyConfigLockedForCommit(d.applyCancelCtx(), compiled)
 	if applyErr != nil && !d.policyInvalidationPublishLanded {
 		if debt := d.policyInvalidationDebt; debt != nil &&
@@ -869,6 +904,9 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// from. applyConfigLocked takes that capture at the publication boundary;
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
+	// #16687: resolve first, arm second — same pointer discipline as
+	// the commit path (see applyAndSyncCommittedWithPeerSnapshotAuthorization).
+	compiled = d.resolveDNSBeforeApply(compiled)
 	if len(ancestry) > 0 {
 		d.armPolicyInvalidationPlanWithRename(oldActive, compiled, &pendingRenameApply{
 			descriptors: append([]configstore.RenameDescriptor(nil), ancestry...),
@@ -876,7 +914,6 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	} else {
 		d.armPolicyInvalidationPlan(oldActive, compiled)
 	}
-	compiled = d.resolveDNSBeforeApply(compiled)
 	applyErr := d.applyConfigLocked(d.applyCancelCtx(), compiled)
 	if applyErrSkipsPeerSync(applyErr) {
 		return nil, applyErr
@@ -923,6 +960,11 @@ func (d *Daemon) deviceMapPassiveAdmissionAlarm(synced *config.Config) {
 // commitConfirmedAndApply is the commit-confirmed analogue of
 // commitAndApply. Same atomicity guarantees.
 func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configstore.CommitAuthority, minutes int, syncPeer peerSyncPolicy) (*config.Config, error) {
+	// #16719: sample before Acquire, as in commitAndApply — a
+	// dirty-discarding rollback that wins applySem while this
+	// commit-confirmed is parked must refuse it, not let it re-arm
+	// a window over the rollback-reset candidate.
+	discardGen := d.store.RollbackDiscardGen()
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -944,17 +986,24 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 
 	// #5848 generation-bound commit transaction (commit-confirmed variant).
 	// #1956 R-8/V-3 device-map pre-flight: validate BOTH the candidate AND the
-	// rollback target (the currently-active config, restored on a confirmed-commit
-	// timeout) against present hardware. If EITHER would strand management on next
+	// rollback target (the config restored on a confirmed-commit timeout)
+	// against present hardware. If EITHER would strand management on next
 	// boot, reject while the operator is still connected — so when a timeout fires
 	// the target is KNOWN-safe and is applied UNCONDITIONALLY (OQ-15.2, no
 	// rollback-time abort). The pre-flight and the promotion are now bound to one
 	// candidate generation, so a concurrent candidate edit cannot slip a different
 	// candidate into the promotion after the pre-flight cleared the examined one.
-	// The rollback target (active) is stable across the transaction: it changes
+	// The rollback target is stable across the transaction: it changes
 	// only under d.applySem, held here from pre-flight through the commit.
+	// #16668: on a NESTED arm (a window already pending) the store retains
+	// the ORIGINAL rollback target, not the unconfirmed active config, so
+	// the gates below resolve the target via RollbackTargetForArm rather
+	// than ActiveConfig — pre-flighting the unconfirmed config falsely
+	// refuses an extension whose unconfirmed config is not yet appliable
+	// and falsely clears one whose true target is unappliable.
 	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
 	oldActive, compiled, err := d.commitWithGenBinding(
+		discardGen,
 		func(cand *config.Config) error {
 			// #5840: same standalone<->cluster topology guard as commitAndApply,
 			// keyed on the ACTUAL HA runtime (d.cluster != nil), not the old
@@ -1010,6 +1059,7 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// nothing has been promoted.
 			// #9588: the Go refusal mirror decides, with the LIVE feed overlay
 			// for this target (representability is feed-aware).
+			rollbackTarget, _, _ := d.store.RollbackTargetForArm()
 			// #16665: while in the #9615 refused-target bootstrap safe
 			// state the active config IS the refused target, so this gate
 			// would refuse every `commit confirmed` and leave no commit
@@ -1017,14 +1067,15 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// to the same safe state (re-checked at fire by #9615), not
 			// create a new store/dataplane split. The plain-commit exit
 			// above is primary; this keeps the confirmed route usable
-			// too. Outside that provenance the gate is unchanged.
-			rollbackTarget := d.store.ActiveConfig()
+			// too. Outside that provenance the gate is unchanged. On a
+			// nested arm the #16668 target resolution above stands: the
+			// refused target is the retained one, not the active config.
 			if !(d.inBootstrap() && d.bootstrapFromRefusedRollback.Load()) {
 				if rerr := rollbackTargetAppliablePreflight(rollbackTarget, d.feedSnapshotsForConfig(rollbackTarget)); rerr != nil {
 					return rerr
 				}
 			}
-			return d.deviceMapCommitPreflight(cand, d.store.ActiveConfig())
+			return d.deviceMapCommitPreflight(cand, rollbackTarget)
 		},
 		func(gen uint64) (*config.Config, error) {
 			return d.store.CommitConfirmedGenAs(authority, minutes, gen)
@@ -1273,6 +1324,11 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// from. applyConfigLocked takes that capture at the publication boundary;
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
+	// #16687: resolve first, arm second — same pointer discipline as
+	// the commit path. prevCfg here is the store's promoted rollback
+	// target (ActiveConfig()/confirmPrevCfg), a published pointer that
+	// must never be written through.
+	prevCfg = d.resolveDNSBeforeApply(prevCfg)
 	d.armPolicyInvalidationRollbackPlan(oldActive, prevCfg)
 	// #9811: latch the outcome. The log alone left the node ENFORCING the
 	// abandoned config C2 while the store, `show configuration`, the peer
@@ -1280,7 +1336,6 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// timer callback with no caller to report to, unlike the commit path where
 	// the operator sees the error and re-commits. noteConfigApplyResult also
 	// DISCHARGES on success, so an apply that works needs no separate site.
-	prevCfg = d.resolveDNSBeforeApply(prevCfg)
 	applyErr := d.applyConfigLocked(context.Background(), prevCfg)
 	d.noteConfigApplyResult(applyErr)
 	if applyErr != nil {

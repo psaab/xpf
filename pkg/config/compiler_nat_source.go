@@ -850,10 +850,10 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 						// shapes must also be read:
 						//   - hierarchical `range { <low> to <high>; }`:
 						//     endpoints are CHILDREN of `range`.
-						//   - schema-grouped flat `port range 5000 to 6000`:
-						//     SetPath groups it as port{ range; 5000{to
-						//     6000} } — a bare `range` child (no keys, no
-						//     children) whose endpoints are SIBLINGS.
+						//   - legacy schema-grouped `port range 5000 to 6000`:
+						//     before #16670, SetPath built port{ range;
+						//     5000{to 6000} }. Tolerant loads can still read
+						//     these persisted sibling endpoint trees.
 						// An empty range with endpoints nowhere (siblings
 						// handled by the parent loop below) records the
 						// "<empty>" sentinel via setPortRange(nil) ONLY
@@ -898,10 +898,10 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 						}
 					}
 				}
-				// #15675 deferred grouped-range pass. SetPath groups a
-				// flat `port range ...` leaf into port{range; <endpoint
-				// siblings>} (and may group SEVERAL range leaves into
-				// ONE port node, #13212). Each bare `range` child owns
+				// #15675 deferred grouped-range pass for legacy split trees.
+				// Before #16670, SetPath grouped flat `port range ...` as
+				// port{range; <endpoint siblings>} (possibly SEVERAL range
+				// leaves in ONE port node, #13212). Each bare `range` owns
 				// the endpoint tokens that FOLLOW it up to the next
 				// `range` child; other modifiers are not endpoints.
 				// Applying them in authored order preserves later-wins

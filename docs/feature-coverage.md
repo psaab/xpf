@@ -257,7 +257,10 @@ the userspace dataplane admission boundary is in
   (`validateVRRPAuthenticationAST`, `pkg/config/compiler_interfaces.go`).
 - **Redundancy-group IP monitoring** (`chassis cluster redundancy-group N
   ip-monitoring`): each configured target is ICMP-echo probed every poll,
-  driving weight-based failover. **`global-threshold` gates `global-weight`
+  driving weight-based failover. An omitted `global-weight` defaults to
+  **255** (Junos parity, #16667) — the aggregate deduction, and the weight
+  an unweighted target inherits, are never silently 0; an explicit
+  `global-weight 0` still means no demotion. **`global-threshold` gates `global-weight`
   (vSRX semantics, #5271):** when `global-threshold` is configured (> 0), each
   unreachable target's `weight` accumulates into a per-RG cumulative
   reachability-loss sum, and a **single** deduction of `global-weight` is
@@ -292,7 +295,16 @@ the userspace dataplane admission boundary is in
   sent from this node's source (bind or send failure on a non-primary) is
   not a measurement — it installs no debt and leaves dampening untouched,
   so the survivor stays promotable instead of being pinned at weight 0
-  with the RG ownerless after a primary loss.
+  with the RG ownerless after a primary loss. That neutrality holds only
+  while the node can measure in principle: for a bound target on a
+  non-primary with no `secondary-ip-address`, the node cannot measure
+  the target at all, so a not-completed probe instead RELEASES any
+  dampened down state measured in a prior primary epoch (#16734) — the
+  ip debt reconciles away and the demoted node becomes promotable again
+  after the upstream recovers, instead of staying frozen at weight 0
+  for the life of the process. A configured `secondary-ip-address` is
+  treated as held (measurable), so transient bind/send failures on it
+  keep the neutral treatment.
   When `global-threshold` is unset (0),
   the historical **independent per-target** behavior is preserved exactly: each
   unreachable target subtracts its own `weight` (or `global-weight` when the

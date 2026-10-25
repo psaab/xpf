@@ -45,7 +45,7 @@ class RetainShimVerdictTests(unittest.TestCase):
         else:
             processed, limit, headroom, slack = 800000, 1000000, 20.0, 50000
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "verified_at": datetime.now(timezone.utc).isoformat(),
             "object_sha256": hashlib.sha256(self.object_path.read_bytes()).hexdigest(),
             "verdict": "OVERRIDDEN" if override else "PASS",
@@ -64,6 +64,7 @@ class RetainShimVerdictTests(unittest.TestCase):
                 "pinned": True,
                 "bpf_linker": "0.10.2",
                 "codegen_env_digest": retain_shim_verdict._well_known_digest(self.root),
+                "kernel_release": "7.2.8+deb14-amd64",
             },
         }
 
@@ -136,6 +137,13 @@ class RetainShimVerdictTests(unittest.TestCase):
         verdict["provenance"]["bpf_linker"] = "0.9.0"
         self.write_verdict(verdict)
         with self.assertRaisesRegex(ValueError, "bpf-linker does not match"):
+            retain_shim_verdict.validate_verdict(self.root)
+
+    def test_missing_kernel_release_is_rejected_16701(self):
+        verdict = self.verdict()
+        del verdict["provenance"]["kernel_release"]
+        self.write_verdict(verdict)
+        with self.assertRaisesRegex(ValueError, "no kernel release"):
             retain_shim_verdict.validate_verdict(self.root)
 
 

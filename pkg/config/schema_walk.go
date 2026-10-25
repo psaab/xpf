@@ -189,6 +189,49 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 			return schemaPathErrorf(leafPath, "%v", err)
 		}
 	}
+	// #16679: `multihop` is a Junos presence container typed as a leaf
+	// with modifiers. Three authored shapes carry no packed TTL value
+	// for validateTypedLeaf to check and must not fall into its
+	// "missing value" refusal:
+	//   - bare `multihop;` / `set ... multihop` (no tokens, no
+	//     children): the Junos presence form; the compiler applies
+	//     the Junos default TTL 64.
+	//   - `multihop { ttl N; }` (blocked): the TTL rides a CHILD
+	//     node, where the modifier-child loop would read the value
+	//     as an unmodeled keyword. validateBGPMultihop16679
+	//     (nodeValidator above) already range-checked it.
+	//   - `multihop { no-nexthop-change; }`: already refused by name
+	//     by the nodeValidator above; reaching here means it passed.
+	// A multihop node whose ONLY children are `ttl` /
+	// `no-nexthop-change` therefore returns here, in every child
+	// shape (blocked `ttl 2`, flat-set `ttl` -> value grandchild):
+	// the ttl value, when present, was already range-checked by
+	// validateBGPMultihop16679. The flat-set packed shape
+	// (`multihop ttl` with the value as its sole child) returns
+	// here too, as does the fused variant (`multihop ttl` -> child
+	// ["3","passive"]: the ttl was range-checked; the fused tail
+	// token is a compiler-owned packed-run concern, strictly
+	// rejected only where the schema gate can segment it). Any
+	// other packed token, or any other child, re-enters the
+	// ordinary typed-leaf validation below (scalar TTL range,
+	// packed `ttl` modifier, unknown-modifier rejection).
+	if keyword == "multihop" && exactMatch && (len(node.Keys) == 1 || (len(node.Keys) == 2 && node.Keys[1] == "ttl")) {
+		onlyModifierChildren := true
+		for _, c := range node.Children {
+			if len(node.Keys) == 2 {
+				// Value child of the flat-set ttl shape — not a
+				// modifier child to judge here.
+				continue
+			}
+			if c == nil || len(c.Keys) == 0 || (c.Keys[0] != "ttl" && c.Keys[0] != "no-nexthop-change") {
+				onlyModifierChildren = false
+				break
+			}
+		}
+		if onlyModifierChildren {
+			return nil
+		}
+	}
 	// exactMatch is computed here rather than at its original site further
 	// down, because the TYPED-LEAF branch below now needs it too and that
 	// branch returns before the old declaration was reached. Same single

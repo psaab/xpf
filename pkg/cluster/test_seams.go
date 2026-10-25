@@ -273,6 +273,8 @@ func (s *SessionSync) SetScopedPolicyDeleteCapableForTesting(capable bool) {
 		flags |= uint32(capFlagScopedPolicyDelete)
 	}
 	s.peerCapabilityFlags.Store(flags)
+	// A realistic modern peer also advertises config-apply ACK (#16756).
+	s.peerCapabilityFlags2.Store(uint32(localCapabilityFlags2))
 }
 
 // ScopedDeleteJournalEntryForTesting returns the newest journaled scoped

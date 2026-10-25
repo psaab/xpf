@@ -1887,6 +1887,29 @@ warns once per distinct finding and keeps the pre-existing compiled
 shape (#1960). Coverage:
 `pkg/config/applications_level_16459_test.go` (flat + hierarchical,
 packed, group-inherited, controls for term bodies and apply-macro).
+### IP-monitoring `then` — unknown children are gated (#16712)
+
+`services ip-monitoring policy <p> then` was open-world and
+`compileIPMonitoring` reads only `preferred-route` under it, so the
+Junos interface action `then interface <if> enable|disable`
+committed clean with no warning and never ran — the backup
+interface was never enabled (or the primary never disabled) on
+probe failure, while the preferred-route half of the same policy
+still worked. The scoped pre-walk gate
+`validateIPMonThenChildrenAST16712` (in `runPreWalkGates`) judges
+exactly the `then` level against the schema-declared children
+(`preferred-route`), reading the permitted set from the schema,
+across flat-set, hierarchical, packed and group-inherited shapes.
+It is deliberately NOT `closedWorld` on `then`, which inherits
+into `preferred-route`/`route` and fires only on `SchemaValidate`;
+the gate covers both compile paths. Apply statements (#7029) are
+never judged. Strict commit rejects naming the policy and the
+unsupported interface action; tolerant load/peer-sync warns once
+per distinct finding and keeps the pre-existing compiled shape
+(#1960). Coverage: `pkg/config/ipmon_then_children_16712_test.go`
+and `pkg/configstore/ipmon_then_commit_16712_test.go` (flat +
+hierarchical + packed + group-inherited, CheckText and Store
+Commit, preferred-route-only control).
 ### Chassis cluster / redundancy-group levels — unknown statements are gated (#16456)
 
 The `chassis cluster` body and the `chassis cluster redundancy-group <n>`
@@ -3974,6 +3997,17 @@ Keys=[protocol tcp udp icmp]   IsLeaf=true   (no children)
   (`destination-port 20000 to 20003`) is absorbed identically (none of
   `20000`/`to`/`20003` is a sibling keyword), matching the hierarchical
   `Keys=[destination-port 20000 to 20003]`.
+
+**A wildcard parent normally ends a multi-leaf value run.** Source-NAT pool
+`port range` explicitly opts out with `absorbBeforeWildcard` (#16670):
+`range 1024 to 2048` and `range low 1024 high 2048` retain all operands on
+the `range` leaf, rather than re-homing `1024`/`low` as single-port wildcard
+children. Declared sibling keywords (for example `random-allocation`) still
+terminate that run. The direct `port 3000` wildcard remains supported and
+strict compilation validates every port specification. Other multi leaves
+under wildcard parents keep their existing behavior. Store-level tests cover
+`set`, `load set`, commit-check, commit, and display-set replay, alongside the
+hierarchical range control.
 
 **A nested BLOCK is a third shape, and it is not the flat-set chain (#6689).**
 The two shapes above are the ones the bracket-list contract is about. A leaf can
@@ -11407,20 +11441,28 @@ reserved for whole-dataplane selection where a rewrite shim
     the tunnel by claiming that peer's identity. Commit rejects that
     bare shape (`validateIPsecResponderIdentityStrict`); tolerant loads
     warn and the renderer skips the connection.
-  - **#15193 (fixed-address default identity / initiator PSK lookup):** a
-    fixed-address (`address <ip>`) PSK gateway with neither
-    `remote-identity` nor `local-identity` — the Junos default shape,
-    accepted by strict commit — now renders the Junos default remote
+  - **#15193 (fixed-address default identity / initiator PSK lookup), as
+    amended by #16708:** a fixed-address (`address <ip>`) PSK gateway with
+    neither `remote-identity` nor `local-identity` — the Junos default
+    shape, accepted by strict commit — renders the Junos default remote
     identity `remote { id = "<first gateway address>" }` in swanctl and
-    scopes the PSK by every gateway address PLUS a local owner (the
-    configured `local-id`, else the pinned local address, else `%any`).
-    Without the local owner charon-as-initiator found no secret for its
-    `(<local ip>, %any)` lookup and aborted IKE_AUTH, so every
-    xpf-initiated tunnel in the default shape failed. Explicit
+    scopes the PSK by every gateway address (peer selectors only).
+    #15193 originally also added a box-shared local owner (`local-id`,
+    else the pinned local address, else `%any`) so charon-as-initiator
+    found the secret; #16708 measured that owner matching the responder
+    side of every exchange (any owner matching either side enumerates
+    the secret, and the verifier tries them all), so a holder of one
+    VPN's PSK authenticated into every other VPN — the owner is removed
+    and the pinned `remote.id` alone carries the initiator lookup
+    (re-measured, `docs/log/16708.md`). Explicit
     `remote-identity`/`local-identity`, `dynamic hostname` gateways,
     responder-only gateways (#14591) and certificate gateways render
-    exactly as before. No new configuration knob is introduced — the
-    identities remain optional on a fixed-address gateway.
+    exactly as before. A hostname-addressed (`address <fqdn>`) PSK
+    gateway with no `remote-identity` now REQUIRES that identity at
+    commit (#16708, extending `validateIPsecResponderIdentityStrict`):
+    the hostname is a dial target, never the presented identity, so no
+    peer selector exists; tolerant loads warn and the renderer skips
+    the VPN. No new configuration knob is introduced.
   - `security nat static rule-set rule match` — declared the
     `source-address` / `destination-address` children the static-NAT
     compiler reads (the subtree was previously unreachable by the walker).
@@ -17481,20 +17523,27 @@ MAC defaults even when the operator configured hardened algorithms.
   `TestApplySSHConfig_ValidationGateBlocksReload` /
   `...ValidationGateRemovesWhenNoPrior` / `...ValidationPassesThenReloads`).
 
-- **Cross-connection password lockout (#11492)** — on non-appliance installs,
+- **Cross-connection password lockout (#11492, #16733)** — on non-appliance installs,
   `applySSHConfig` applies a Debian `pam_faillock` policy to the stock
   `/etc/pam.d/common-auth` sequence: five failed attempts in 10 minutes lock
-  the account for 5 minutes. The state is shared across sshd connections (and
-  any other PAM service using `common-auth`), so OpenSSH's per-connection
-  `MaxAuthTries 3` is no longer the only bound. The appliance image is skipped:
+  the account for 5 minutes. Each managed faillock line is guarded by
+  `pam_succeed_if.so service in sshd`, so the per-user tally is only read
+  or written by the sshd PAM service: the state is shared across sshd
+  connections, so OpenSSH's per-connection `MaxAuthTries 3` is no longer
+  the only bound, but a network peer cannot lock any account — root
+  included (`even_deny_root` is retained for the sshd side) — out of the
+  local console (`login`), `su`, or any other PAM service that includes
+  `common-auth`. The appliance image is skipped:
   it pins `PasswordAuthentication no` and is identified by `/etc/xpf/appliance`.
   xpf does not enable password authentication; this protects it when a
   non-appliance host already permits PAM-backed SSH passwords. Custom PAM
   stacks are left untouched with a warning and must be configured by their
   administrator. The cells in `pkg/daemon/ssh_faillock_11492_test.go` pin
   rendering, non-appliance apply wiring, safe appliance exclusion, and
-  idempotent removal; live password-attempt verification remains a lab gate.
-  Every faillock failure is advisory (#15229): a locally tuned (modified)
+  idempotent removal; `pkg/daemon/ssh_faillock_16733_test.go` executes the
+  rendered stack with the host's real PAM modules (console root login
+  succeeds after five sshd failures; sshd lockout for root and non-root
+  users is preserved). Every faillock failure is advisory (#15229): a locally tuned (modified)
   managed block, an unreadable common-auth, or any other PAM error is
   logged and the sshd drop-in apply proceeds, so a root-login revocation
   is never blocked by host PAM state xpf does not own; the tuned block
@@ -17808,3 +17857,32 @@ rejecting), are:
 Quarantined zone sets (StableZoneID collision losers / poisoned zones)
 and fully-quarantined scoped global rules are excluded from both counts,
 matching the snapshot builder.
+
+## SSH authorized-key leaves are commit-validated (#16740)
+
+The `ssh-ed25519` / `ssh-rsa` / `ssh-dsa` leaves under
+`system root-authentication` and `system login user <name>
+authentication` are typed leaves (`valueType: ValueString`,
+`validator: ValidateAuthorizedSSHKey` in
+`pkg/config/schema_validators_sshkey_16740.go`). The validator runs
+on EVERY value of the multi leaf at strict commit (`SchemaValidate`
+→ `validateMultiValueLeaf`), so a trailing token such as
+`from 10.1.1.1` (an authorized_keys option, not a key), a bare blob,
+an unknown key type, or a malformed blob is refused naming the leaf
+instead of committing durable and failing at apply — where the
+refusal previously skipped both install and revoke for that
+principal and left the previously installed key live.
+
+The accepted set is the OpenSSH authorized_keys key-type vocabulary
+(`SSHAuthorizedKeyTypes`: the ssh-* family plus ecdsa-sha2-nistp*,
+the FIDO sk-* variants, and the *-cert-v01@openssh.com forms), NOT
+the leaf name: an ecdsa key filed under an `ssh-*` leaf commits, as
+it applies (#14111). The single-key predicate lives in `pkg/config`
+(`ValidAuthorizedSSHKey`) and the daemon apply belt
+(`validateAuthorizedSSHKeys`) delegates to it, so commit-accepts and
+apply-accepts are one set by construction. The commit error names
+only the defect class and never echoes the submitted value (#16066).
+Strict on commit / commit-check; the tolerant `Store.Load` /
+`SyncApply` path downgrades the violation to a warning and the
+apply belt still refuses the bad key before any credential mutation
+(#1960).

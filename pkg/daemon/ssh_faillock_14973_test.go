@@ -53,7 +53,7 @@ func TestRenderSSHPAMFaillockUpgradesLegacyRules14973(t *testing.T) {
 	text := string(got)
 	for _, legacyLine := range []string{pamFaillockPreauthLegacy, pamFaillockAuthfailLegacy, pamFaillockAuthsuccLegacy} {
 		if strings.Contains(text, legacyLine+"\n") {
-			t.Fatalf("legacy rule %q not upgraded to even_deny_root:\n%s", legacyLine, text)
+			t.Fatalf("legacy rule %q not upgraded:\n%s", legacyLine, text)
 		}
 	}
 	for _, line := range []string{pamFaillockPreauth, pamFaillockAuthfail, pamFaillockAuthsucc} {

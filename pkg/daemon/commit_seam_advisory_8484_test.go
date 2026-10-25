@@ -62,6 +62,7 @@ func TestCommitSeamReturnsAdvisories_8484(t *testing.T) {
 	}
 
 	_, compiled, err := d.commitWithGenBinding(
+		0,
 		func(*config.Config) error { return nil },
 		func(gen uint64) (*config.Config, error) {
 			return d.store.CommitWithDescriptionGenAs(configstore.InternalCommitter(), "", gen)
@@ -112,6 +113,7 @@ func TestCommitSeamStaysSilentWithoutAdvisories_8484(t *testing.T) {
 	}
 
 	_, compiled, err := d.commitWithGenBinding(
+		0,
 		func(*config.Config) error { return nil },
 		func(gen uint64) (*config.Config, error) {
 			return d.store.CommitWithDescriptionGenAs(configstore.InternalCommitter(), "", gen)

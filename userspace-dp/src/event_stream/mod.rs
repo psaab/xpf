@@ -538,7 +538,6 @@ impl EventStreamWorkerHandle {
     pub(crate) fn record_dropped_frames(&self, n: u64) {
         self.shared.frames_dropped.fetch_add(n, Ordering::Relaxed);
     }
-
     fn try_send_frame(&self, frame: EventFrame) -> Result<(), EventStreamSendError> {
         match self.tx.try_send(frame) {
             Ok(()) => {
@@ -627,7 +626,10 @@ impl EventStreamWorkerHandle {
     /// worker past the heartbeat-stale threshold and self-inflict a spurious
     /// failover (#5468). Either way the give-up is a genuine `Err` the caller
     /// latches as loss-of-sync (forcing a full resync) — never a silent drop.
-    fn send_lossless_encoded<F>(&self, timeout: Duration, mut encode: F) -> Result<(), String>
+    /// #16627: on success returns the sequence of the frame that was
+    /// actually enqueued (the allocated seq for session deltas), so the
+    /// caller can stamp it onto the fallback-leg copy.
+    fn send_lossless_encoded<F>(&self, timeout: Duration, mut encode: F) -> Result<u64, String>
     where
         F: FnMut() -> (EventFrame, Option<u64>),
     {
@@ -654,7 +656,7 @@ impl EventStreamWorkerHandle {
                 let (frame, rollback_seq) = encode();
                 let reported_seq = frame.seq;
                 match self.tx.try_send(frame) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(reported_seq),
                     Err(mpsc::TrySendError::Full(_)) => {
                         // The next attempt re-allocates, so this attempt's seq
                         // must be freed for the next successful enqueue (and a
@@ -674,9 +676,9 @@ impl EventStreamWorkerHandle {
                 }
             };
             match outcome {
-                Ok(()) => {
+                Ok(seq) => {
                     self.shared.frames_sent.fetch_add(1, Ordering::Relaxed);
-                    return Ok(());
+                    return Ok(seq);
                 }
                 Err((EventStreamSendError::Full, reported_seq)) => {
                     if !self.shared.connected.load(Ordering::Acquire) {
@@ -708,6 +710,7 @@ impl EventStreamWorkerHandle {
     #[cfg_attr(not(test), allow(dead_code))]
     fn send_frame_lossless(&self, frame: EventFrame) -> Result<(), String> {
         self.send_lossless_encoded(LOSSLESS_QUEUE_TIMEOUT, move || (frame.clone(), None))
+            .map(|_| ())
     }
 
     fn encode_delta_frame(
@@ -807,6 +810,20 @@ impl EventStreamWorkerHandle {
         zone_name_to_id: &FxHashMap<String, u16>,
         budget: Duration,
     ) -> Result<(), String> {
+        self.push_delta_lossless_within_seq(delta, zone_name_to_id, budget)
+            .map(|_| ())
+    }
+
+    /// #16627: like [`push_delta_lossless_within`] but returns the wire
+    /// sequence assigned to the enqueued frame, so `flush_session_deltas`
+    /// can stamp `SessionDeltaInfo.stream_seq` and mirror the delta into
+    /// the RPC-fallback buffer ONLY when this enqueue did not succeed.
+    pub(crate) fn push_delta_lossless_within_seq(
+        &self,
+        delta: &SessionDelta,
+        zone_name_to_id: &FxHashMap<String, u16>,
+        budget: Duration,
+    ) -> Result<u64, String> {
         self.send_lossless_encoded(budget, || {
             let seq = self.next_seq();
             (

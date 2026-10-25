@@ -612,3 +612,27 @@ func (d *Daemon) reconcileIPMonGating() {
 	}
 	d.ipmon.SetPublishEnabled(d.ipmonPublishAllowed(cfg))
 }
+
+// scheduleIPMonGating re-evaluates ip-monitoring HA gating off the
+// event goroutine (#16690), mirroring scheduleFRRHAReconcile: the work
+// acquires applySem so queued edges coalesce to the latest ownership,
+// and event handlers never perform RPM/engine work inline. It is safe
+// on daemons without ip-monitoring wiring (nil applySem/store are
+// no-ops inside reconcileIPMonGating / the semaphore guard).
+func (d *Daemon) scheduleIPMonGating(reason string) {
+	if d == nil || d.store == nil || d.applySem == nil || d.isResetting() {
+		return
+	}
+	ctx := d.applyCancelCtx()
+	go func() {
+		if err := d.applySem.Acquire(ctx, 1); err != nil {
+			return
+		}
+		defer d.applySem.Release(1)
+		if d.isResetting() {
+			return
+		}
+		d.reconcileIPMonGating()
+		_ = reason
+	}()
+}

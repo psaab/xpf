@@ -1132,6 +1132,17 @@ func (ec *ExportConfig) SampledForOpen(inZone, outZone uint16, isIPv6 bool, inIf
 	return ec.ShouldExportIfaceDaemon(inZone, outZone, isIPv6, inIface, outIface)
 }
 
+// SampledForClose is the #16742 close-time fallback: when no exporter
+// of this instance recorded an open for a flow (RG failover with no
+// CREATE on the promoted node, exporter replacement, or a lost
+// SESSION_OPEN), the close makes the instance's one 1-in-N decision
+// here instead of exporting nothing. Semantically identical to
+// SampledForOpen; kept as a separate name so close-fallback
+// evaluations are distinguishable in SamplingStats review.
+func (ec *ExportConfig) SampledForClose(inZone, outZone uint16, isIPv6 bool, inIface, outIface string) bool {
+	return ec.ShouldExportIfaceDaemon(inZone, outZone, isIPv6, inIface, outIface)
+}
+
 // FlowDirection derives the NetFlow/IPFIX flowDirection (IE 61) for a flow
 // from the per-zone sampling-direction configuration for the flow's own
 // address family (#3270, per-family since #14608). Ingress wins ties.

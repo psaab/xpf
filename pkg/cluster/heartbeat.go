@@ -39,14 +39,15 @@ const (
 
 	// heartbeatRestartGrace bounds the seen-then-lost suppression of a receiver
 	// that REPLACED one which had already seen the peer (RestartHeartbeat,
-	// #9722). Such a restart happens on a node that is already up: every config
-	// apply that rebinds the management VRF rebuilds the heartbeat sockets.
-	// Arming the 30s cold-boot grace there meant a peer that died within 30s
-	// after a commit was declared lost up to 30s late. The restart's own
-	// disruption is the socket rebind, which RestartHeartbeat already retries
-	// for up to 5s, so the grace matches that window. A live peer whose
-	// heartbeats are briefly lost past it is still covered by the sync-recency
-	// guard handlePeerTimeout consults (the daemon's
+	// #9722; comms-restart StartHeartbeat, #16745). Such a restart happens on
+	// a node that is already up: every config apply that rebinds the
+	// management VRF rebuilds the heartbeat sockets. Arming the 30s cold-boot
+	// grace there meant a peer that died within 30s after a commit was
+	// declared lost up to 30s late. The restart's own disruption is the socket
+	// rebind, which RestartHeartbeat already retries for up to 5s, so the
+	// grace matches that window. A live peer whose heartbeats are briefly
+	// lost past it is still covered by the sync-recency guard
+	// handlePeerTimeout consults (the daemon's
 	// shouldSuppressPeerHeartbeatTimeout, #1792). The never-seen arm keeps the
 	// cold-boot floor: a replacement for a receiver that never saw the peer is
 	// not armed, so it IS a cold start.
@@ -816,6 +817,16 @@ type PeerGroupState struct {
 	// a cold-booting secondary at the arm floor is not mistaken for a
 	// peer that yielded (MAJOR-2).
 	peerWasPrimaryThisSession bool
+	// takeoverReady records that the peer's last heartbeat advertised a
+	// weight above the dataplane-arm floor. False means the peer cannot
+	// claim the RG is forwarding-armed yet — e.g. it is still before
+	// XDP arm completes under its startup sync hold — so a preempt
+	// incumbent must not yield to it (#16741). Derived from the wire
+	// weight: every fresh HA RG sits at the arm floor (weight 1, or 0
+	// with resigning debt) until its dataplane is proven, and a node
+	// that has genuinely finished arming advertises its real weight.
+	// Not a new wire field.
+	takeoverReady bool
 }
 
 // heartbeatSender sends periodic heartbeat packets.

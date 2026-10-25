@@ -277,6 +277,7 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverr
 	// same set installConn and full disconnect clear.
 	var snapshotProtocol uint32
 	var capabilityFlags uint32
+	var capabilityFlags2 uint32
 	var sessionSyncWire uint32
 	var primingConn net.Conn
 	switch keepIdx {
@@ -290,10 +291,12 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverr
 		snapshotProtocol = uint32(ac.peerSnapshotVersion)
 		capabilityFlags = uint32(ac.peerCapabilityFlags)
 		sessionSyncWire = uint32(ac.peerSessionSyncWire)
+		capabilityFlags2 = uint32(ac.peerCapabilityFlags2)
 	}
 	s.peerSnaps.peerSnapshotProtocol.Store(snapshotProtocol)
 	s.peerSnaps.peerSnapshotProtocolGeneration++
 	s.peerCapabilityFlags.Store(capabilityFlags)
+	s.peerCapabilityFlags2.Store(capabilityFlags2)
 	s.peerSessionSyncWire.Store(sessionSyncWire)
 	s.scopedPolicySuppressionWarned.Store(false)
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
@@ -889,8 +892,7 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 	// connection is tracked for shutdown by conn0/conn1 instead.
 	s.finishSetup(conn)
 	if err != nil {
-		slog.Warn("cluster sync: auth handshake failed, dropping connection",
-			"fabric", fabricIdx, "remote", connRemoteAddrString(conn), "err", err)
+		s.notePreAuthHandshakeFailed(fabricIdx, conn, err)
 		conn.Close()
 		return
 	}
@@ -1184,6 +1186,9 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 		// same learned set full disconnect clears, atomically with the
 		// advance (s.mu held throughout installConn).
 		s.peerCapabilityFlags.Store(0)
+		s.peerCapabilityFlags2.Store(0)
+		s.lastSentConfigAckCapable16756.Store(false)
+		s.peerConfigNackedGen16756.Store(0)
 		s.peerSessionSyncWire.Store(0)
 		s.scopedPolicySuppressionWarned.Store(false)
 		s.evictStaleIncarnationConnsLocked(fabricIdx, retiredIdentity)
@@ -1392,7 +1397,13 @@ func (s *SessionSync) acceptLoop(ctx context.Context, ln net.Listener, fabricIdx
 				continue
 			}
 		}
-		slog.Info("cluster sync: peer connected", "remote", conn.RemoteAddr(), "fabric", fabricIdx)
+		// #16748: pre-auth, so Debug only — an unauthenticated host on
+		// the sync segment must not drive one INFO per connection
+		// ahead of the #5303 rate limiter. The post-auth
+		// "handling new connection" INFO (and, when keyed, the
+		// "connection authenticated" INFO) remains the operator
+		// signal that a peer actually connected.
+		slog.Debug("cluster sync: peer connected", "remote", conn.RemoteAddr(), "fabric", fabricIdx)
 		// #5303: admit the connection into the bounded pre-auth setup pool BEFORE
 		// spawning a setup goroutine, so a connection flood that stalls before
 		// authentication cannot exhaust FDs/goroutines/socket-memory. Excess
@@ -1593,6 +1604,9 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// retained version: it would make every confirmed-fence takeover wait
 		// out its full timeout against a downgraded peer that cannot answer.
 		s.peerCapabilityFlags.Store(0)
+		s.peerCapabilityFlags2.Store(0)
+		s.lastSentConfigAckCapable16756.Store(false)
+		s.peerConfigNackedGen16756.Store(0)
 		// #9714 F5: the delete-suppression warning latch is scoped to the
 		// same incarnation. Keeping it latched would silence the alarm
 		// through exactly the reconnect that matters — a downgrade that

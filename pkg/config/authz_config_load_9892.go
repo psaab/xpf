@@ -77,6 +77,16 @@ func IsFlatLoadLine(line string) bool {
 // change which representation the store applies. An unterminated block
 // comment is rejected instead of allowing a partial import.
 //
+// A body routes flat only when a flat-verb line appears at brace depth 0
+// (#16698). A verb-led line inside a hierarchical block is a VALUE of the
+// enclosing stanza — the in-tree case is an unquoted event-options
+// change-configuration command, which Format renders bare at line start
+// (`set system host-name pwned;` inside `commands { ... }`) — so the
+// box's own `show` output must stay hierarchical or it cannot round-trip
+// through load override/merge. Braces inside quoted strings are data to
+// the real lexer, so the depth scan below tracks quotes (with the same
+// escape rule as readString) and ignores them.
+//
 // The token model here MUST mirror the real lexer (lexer.go). That lexer
 // only recognizes a comment opener in its gap scanner
 // (skipWhitespaceAndComments), i.e. where a token could START — never
@@ -97,6 +107,14 @@ func ClassifyLoadContent(content string) (flat bool, uncommented string, err err
 	var b strings.Builder
 	b.Grow(len(content))
 	inBlock, inQuote, escaped, inToken := false, false, false, false
+	// Brace depth (#16698): depth of '{' structure outside comments and
+	// quoted strings, in the comment-free text. A depth > 0 at a line's
+	// first token means the line is hierarchical content, however it
+	// begins. Quotes use the real lexer's escape rule (readString):
+	// every escaped byte is literal, so \" never closes the string.
+	lineBraceDepth := 0
+	lineHasToken := false
+	scanQuote, scanEscaped := false, false
 	for i := 0; i < len(content); i++ {
 		ch := content[i]
 		if ch == '\n' {
@@ -194,7 +212,46 @@ func ClassifyLoadContent(content string) (flat bool, uncommented string, err err
 		return false, uncommented, fmt.Errorf("unterminated block comment")
 	}
 	for _, line := range strings.Split(uncommented, "\n") {
-		if IsFlatLoadLine(strings.TrimSpace(line)) {
+		trimmed := strings.TrimSpace(line)
+		tokenStartDepth := lineBraceDepth
+		for i := range line {
+			ch := line[i]
+			if scanQuote {
+				if scanEscaped {
+					scanEscaped = false
+				} else if ch == '\\' {
+					scanEscaped = true
+				} else if ch == '"' {
+					scanQuote = false
+				}
+				lineHasToken = true
+				continue
+			}
+			switch ch {
+			case '"':
+				scanQuote = true
+				lineHasToken = true
+			case '{':
+				lineBraceDepth++
+				lineHasToken = true
+			case '}':
+				if lineBraceDepth > 0 {
+					lineBraceDepth--
+				}
+				if !lineHasToken {
+					tokenStartDepth = lineBraceDepth
+				}
+				lineHasToken = true
+			case ' ', '\t', '\r':
+			default:
+				if !lineHasToken {
+					tokenStartDepth = lineBraceDepth
+				}
+				lineHasToken = true
+			}
+		}
+		lineHasToken = false
+		if tokenStartDepth == 0 && IsFlatLoadLine(trimmed) {
 			flat = true
 			break
 		}

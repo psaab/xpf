@@ -291,16 +291,16 @@ func TestSendCapabilitiesCarriesBootID_9818(t *testing.T) {
 			"and the #9818 attribution is inert on it. On Linux this file always exists; a build "+
 			"or sandbox that hides it silently disables the guard", bootIDPath)
 	}
-	if len(got.payload) != 5+bootIncarnationLen {
-		t.Fatalf("capabilities payload = %d bytes, want %d (5B base + 16B boot id). "+
+	if len(got.payload) != 5+bootIncarnationLen+1 {
+		t.Fatalf("capabilities payload = %d bytes, want %d (5B base + 16B boot id + 1B flags2 #16756). "+
 			"A 5-byte payload means the sender never appends the field, so an upgraded "+
 			"receiver sees an un-attributed peer forever and the corpse eviction keeps "+
 			"eating the new process's pre-evidence connections",
-			len(got.payload), 5+bootIncarnationLen)
+			len(got.payload), 5+bootIncarnationLen+1)
 	}
-	if !bytes.Equal(got.payload[5:], want[:]) {
+	if !bytes.Equal(got.payload[5:5+bootIncarnationLen], want[:]) {
 		t.Fatalf("capabilities tail = %x, want this node's boot incarnation %s",
-			got.payload[5:], want)
+			got.payload[5:5+bootIncarnationLen], want)
 	}
 }
 
@@ -389,9 +389,9 @@ func TestSendCapabilitiesCarriesBootEpoch_9818(t *testing.T) {
 	if got.typ != syncMsgPeerCapabilities {
 		t.Fatalf("frame type = %d, want capabilities %d", got.typ, syncMsgPeerCapabilities)
 	}
-	if len(got.payload) != 5+bootIncarnationLen+8 {
+	if len(got.payload) != 5+bootIncarnationLen+8+1 {
 		t.Fatalf("capabilities payload = %d bytes, want %d (5B base + 16B boot id + 8B "+
-			"epoch)", len(got.payload), 5+bootIncarnationLen+8)
+			"epoch + 1B flags2 #16756)", len(got.payload), 5+bootIncarnationLen+8+1)
 	}
 	if gotEpoch := binary.LittleEndian.Uint64(got.payload[5+bootIncarnationLen:]); gotEpoch != wantEpoch {
 		t.Fatalf("capabilities epoch = %d, want %d", gotEpoch, wantEpoch)
@@ -416,9 +416,9 @@ func TestSendCapabilitiesCarriesProcessToken_9818(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("no capabilities frame was written")
 	}
-	if len(got.payload) != 5+bootIncarnationLen+8+8 {
-		t.Fatalf("capabilities payload = %d bytes, want %d with token",
-			len(got.payload), 5+bootIncarnationLen+8+8)
+	if len(got.payload) != 5+bootIncarnationLen+8+8+1 {
+		t.Fatalf("capabilities payload = %d bytes, want %d with token + flags2 #16756",
+			len(got.payload), 5+bootIncarnationLen+8+8+1)
 	}
 	if gotToken := binary.LittleEndian.Uint64(got.payload[5+bootIncarnationLen+8:]); gotToken != wantToken {
 		t.Fatalf("capabilities token = %#x, want %#x", gotToken, wantToken)
@@ -456,9 +456,9 @@ func TestSendCapabilitiesKeepsOneProcessIdentityAcrossReconnects_9818(t *testing
 		t.Fatal("no reconnect capabilities frame was written")
 	}
 	for name, frame := range map[string]syncFrame{"first": first, "reconnect": second} {
-		if len(frame.payload) != 5+bootIncarnationLen+8 {
+		if len(frame.payload) != 5+bootIncarnationLen+8+1 {
 			t.Fatalf("%s capabilities payload = %d bytes, want %d", name,
-				len(frame.payload), 5+bootIncarnationLen+8)
+				len(frame.payload), 5+bootIncarnationLen+8+1)
 		}
 		if got := binary.LittleEndian.Uint64(frame.payload[5+bootIncarnationLen:]); got != 1 {
 			t.Fatalf("%s capabilities epoch = %d, want the first sampled epoch 1", name, got)

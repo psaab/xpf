@@ -1399,6 +1399,7 @@ func TestRenameAncestryOwnershipTransfersAtBindTime10511(t *testing.T) {
 	}
 	defer d.applySem.Release(1)
 	oldActive, compiled, err := d.commitWithGenBinding(
+		0,
 		func(*config.Config) error { return nil },
 		func(gen uint64) (*config.Config, error) { return store.CommitWithDescriptionGen("", gen) },
 	)
@@ -1492,6 +1493,7 @@ func TestRenameAncestryPrunedOnNextBind(t *testing.T) {
 	bind := func(t *testing.T) uint64 {
 		t.Helper()
 		if _, _, err := d.commitWithGenBinding(
+			0,
 			func(*config.Config) error { return nil },
 			func(gen uint64) (*config.Config, error) { return store.CommitWithDescriptionGen("", gen) },
 		); err != nil {

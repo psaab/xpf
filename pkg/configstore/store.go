@@ -424,6 +424,23 @@ type Store struct {
 	// released-and-retaken one. Only a counter keyed to acquisition can.
 	holderEpoch uint64
 
+	// rollbackDiscardGen is a monotonic counter advanced on EVERY
+	// commit-confirmed rollback (PromoteRollback) that discards a
+	// dirty candidate (#16719). It is deliberately NOT holderEpoch:
+	// in the #16719 shape the holder never turns over, so a
+	// pre-discard mint and a post-discard mint by the same holder
+	// record the SAME holderEpoch and no comparison on that counter
+	// can separate them — a strict < misses the stale mint, a <=
+	// wedges every later commit by that holder until it re-enters.
+	// A dedicated counter separates them exactly: every store-minted
+	// authority records the value at mint time, and
+	// verifyCommitAuthorityLocked refuses a mint whose recorded
+	// value differs from the current one. Directly-constructed
+	// internal authorities record no mint value and are covered by
+	// the daemon's PromotionStale fence instead (sampled before
+	// applySem, re-checked inside commitWithGenBinding).
+	rollbackDiscardGen uint64
+
 	// commitCheckSem bounds concurrent full compiles driven by
 	// CommitCheckAs (#16070). CommitCheck runs a full strict compile of the
 	// shared candidate; without a bound a holder could queue unbounded
@@ -1287,6 +1304,13 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	syncSupersededConfirm := s.cancelPendingConfirmTimerLocked()
 	if syncSupersededConfirm {
 		s.notifyFirstCommitConfirmedLocked(firstCommitConfirm)
+		// #16721: an HA sync that supersedes a pending window is a
+		// confirmation path; journal it under the cluster-sync label.
+		s.journalLog(&JournalEntry{
+			Action:     "commit_confirm",
+			ConfigHash: journalConfigHash(s.active),
+			Principal:  "system:cluster-sync",
+		})
 		slog.Info("HA config-sync apply confirmed a pending commit-confirmed window")
 	}
 	// #9887: the sync ALSO supersedes the #8566 lost window. No timer was

@@ -533,6 +533,14 @@ pub(crate) struct Peer {
     /// confirmed-session gate. Was an engine-GLOBAL `AtomicBool` (S2a); this is
     /// the per-peer generalization so peer B's rekey drives B's attempt.
     pub(crate) rekey_request_pending: AtomicBool,
+    /// #16711: learned outer path MTU for this peer (0 = none), from a
+    /// validated underlay PTB quoting this peer's WG outer. Packed in
+    /// `wg::pmtu`; aged via `pmtu_learned_ns`. Peer-resident so it
+    /// survives same-engine reconciles like `live_endpoint`.
+    pub(crate) pmtu_mtu: AtomicU64,
+    /// #16711: CLOCK_MONOTONIC ns of the last accepted PTB for
+    /// `pmtu_mtu` (0 = never). See `wg::pmtu::WG_PMTU_AGE_NS`.
+    pub(crate) pmtu_learned_ns: AtomicU64,
 }
 
 impl std::fmt::Debug for Peer {
@@ -568,6 +576,8 @@ impl Peer {
             handshake_request_pending: AtomicBool::new(false),
             handshake_request_last_ns: AtomicU64::new(0),
             rekey_request_pending: AtomicBool::new(false),
+            pmtu_mtu: AtomicU64::new(0),
+            pmtu_learned_ns: AtomicU64::new(0),
         }
     }
 
@@ -592,6 +602,37 @@ impl Peer {
     /// control loop resets its own effective map.
     pub(crate) fn clear_live_endpoint(&self) {
         self.live_endpoint.store(None);
+    }
+    /// #16711: the fresh learned outer PMTU for this peer, if any.
+    #[inline]
+    pub(crate) fn learned_pmtu(&self, now_ns: u64) -> Option<usize> {
+        super::pmtu::effective_pmtu(
+            self.pmtu_mtu.load(Ordering::Relaxed),
+            self.pmtu_learned_ns.load(Ordering::Relaxed),
+            now_ns,
+        )
+    }
+
+    /// #16711: offer a validated PTB's advertised outer MTU. Only a
+    /// strictly smaller (floored) value lowers the store; every
+    /// accepted offer refreshes the aging stamp. Returns true when
+    /// the stored MTU changed.
+    #[inline]
+    pub(crate) fn offer_pmtu(&self, offered_mtu: usize, outer_v6: bool, now_ns: u64) -> bool {
+        let current = self.learned_pmtu(now_ns);
+        match super::pmtu::pmtu_after_offer(current, offered_mtu, outer_v6) {
+            Some(v) => {
+                self.pmtu_mtu.store(v as u64, Ordering::Relaxed);
+                self.pmtu_learned_ns.store(now_ns, Ordering::Relaxed);
+                true
+            }
+            None => {
+                // Refresh aging on a repeat/equal-or-larger PTB so a
+                // stable narrow path does not expire between PTBs.
+                self.pmtu_learned_ns.store(now_ns, Ordering::Relaxed);
+                false
+            }
+        }
     }
 
     /// #4092 responder handshake anti-replay check-and-update. Given the

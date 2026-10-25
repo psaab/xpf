@@ -342,7 +342,13 @@ func (m *Manager) ForceSecondary() error {
 		oldState := rg.State
 		m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
 		rg.transferCommitRolePinned = false
+		// #16743: pin weight 0 as a state fact (forcedSecondary), not just a
+		// value in the derived Weight field — recalcWeight honours the flag,
+		// so a later commit / peer config sync feeding monitors cannot
+		// recompute the drain away. Cleared with ManualFailover by
+		// ResetFailover / peer loss (see manager.go).
 		rg.Weight = 0
+		rg.forcedSecondary = true
 		rg.ManualFailover = true
 		rg.ManualFailoverAt = time.Now()
 		rg.State = StateSecondary
@@ -386,6 +392,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 		slog.Info("cluster: failover reset leaves kernel-upgrade hold in place (single-RG reset is not a node rejoin)", "rg", rgID)
 	}
 	rg.ManualFailover = false
+	rg.forcedSecondary = false
 	rg.transferCommitRolePinned = false
 	rg.ManualFailoverAt = time.Time{}
 	// Drop every piece of transfer-commit state for this RG (#14979, D34-04).
@@ -455,7 +462,10 @@ type manualFailoverHoldSnapshot struct {
 	state         NodeState
 	weight        int
 	restoreWeight bool
-	generation    uint64
+	// forcedSecondary records whether the snapshotted hold was an ISSU
+	// drain pin (#16743), so the abort restores the pin with the hold.
+	forcedSecondary bool
+	generation      uint64
 }
 
 func (m *Manager) restoreManualFailoverHoldLocked(rgID int, snapshot manualFailoverHoldSnapshot) {
@@ -471,7 +481,10 @@ func (m *Manager) restoreManualFailoverHoldLocked(rgID int, snapshot manualFailo
 	}
 	oldState := rg.State
 	rg.ManualFailover = true
-	if snapshot.restoreWeight {
+	rg.forcedSecondary = snapshot.forcedSecondary
+	// #16743: a forced hold's weight is pinned 0 regardless of the debt
+	// comparison captured at snapshot time.
+	if snapshot.restoreWeight || snapshot.forcedSecondary {
 		rg.Weight = snapshot.weight
 	}
 	rg.ManualFailoverAt = snapshot.at
@@ -576,15 +589,21 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	// failure must not silently release the existing transfer-out state.
 	if rg.ManualFailover {
 		hold = manualFailoverHoldSnapshot{
-			rg:            rg,
-			armed:         true,
-			at:            rg.ManualFailoverAt,
-			state:         rg.State,
-			weight:        rg.Weight,
-			restoreWeight: rg.Weight != m.debtDerivedWeightLocked(rg),
-			generation:    m.failoverGen[rgID],
+			rg:              rg,
+			armed:           true,
+			at:              rg.ManualFailoverAt,
+			state:           rg.State,
+			weight:          rg.Weight,
+			forcedSecondary: rg.forcedSecondary,
+			generation:      m.failoverGen[rgID],
 		}
+		// #10245/#16743: capture restoreWeight BEFORE clearing the pin —
+		// debtDerivedWeightLocked honours forcedSecondary (returns 0), so
+		// computing it after the clear would compare 0 against the real
+		// debt weight and mark a pinned hold as monitor-derived.
+		hold.restoreWeight = rg.Weight != m.debtDerivedWeightLocked(rg)
 		rg.ManualFailover = false
+		rg.forcedSecondary = false
 		rg.ManualFailoverAt = time.Time{}
 		m.recalcWeight(rg)
 	}
@@ -791,6 +810,7 @@ func (m *Manager) AbortRemoteTransferOut(rgID int, reqID uint64) error {
 		return nil
 	}
 	rg.ManualFailover = false
+	rg.forcedSecondary = false
 	rg.ManualFailoverAt = time.Time{}
 	m.manualFailoverRestoreWeightLocked(rg)
 	slog.Info("cluster: remote transfer-out aborted by requester, restoring owner", "rg", rgID, "req_id", reqID)
@@ -817,7 +837,16 @@ func (m *Manager) AbortRemoteTransferOutBatch(rgIDs []int, reqID uint64) error {
 
 // debtDerivedWeightLocked returns the monitor-derived weight for an RG without
 // changing it. Caller must hold m.mu.
+//
+// #16743: while the ISSU drain pin is set this returns 0, so every restore
+// path that recomputes weight through here (dual-resign guard, lease
+// expiry, peer loss, remote-transfer abort) keeps the drained weight until
+// the pin itself is cleared — ResetFailover clears the flag BEFORE its
+// recalcWeight, so the operator reset still restores the real weight.
 func (m *Manager) debtDerivedWeightLocked(rg *RedundancyGroupState) int {
+	if rg.forcedSecondary {
+		return 0
+	}
 	totalLost := 0
 	for _, iface := range rg.MonitorFails {
 		key := monitorKey{rgID: rg.GroupID, iface: iface}
@@ -853,6 +882,7 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 
 	oldState := rg.State
 	rg.ManualFailover = false
+	rg.forcedSecondary = false
 	rg.ManualFailoverAt = time.Time{}
 	rg.State = StateSecondary
 	rg.transferCommitRolePinned = true
@@ -1219,16 +1249,21 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	for _, rgID := range ids {
 		rg := m.groups[rgID]
 		if rg != nil && rg.ManualFailover {
-			holdSnapshots[rgID] = manualFailoverHoldSnapshot{
-				rg:            rg,
-				armed:         true,
-				at:            rg.ManualFailoverAt,
-				state:         rg.State,
-				weight:        rg.Weight,
-				restoreWeight: rg.Weight != m.debtDerivedWeightLocked(rg),
-				generation:    m.failoverGen[rgID],
+			// restoreWeight must be captured before the pin is cleared
+			// (see the single-RG twin, #10245/#16743).
+			snap := manualFailoverHoldSnapshot{
+				rg:              rg,
+				armed:           true,
+				at:              rg.ManualFailoverAt,
+				state:           rg.State,
+				weight:          rg.Weight,
+				forcedSecondary: rg.forcedSecondary,
+				generation:      m.failoverGen[rgID],
 			}
+			snap.restoreWeight = rg.Weight != m.debtDerivedWeightLocked(rg)
+			holdSnapshots[rgID] = snap
 			rg.ManualFailover = false
+			rg.forcedSecondary = false
 			rg.ManualFailoverAt = time.Time{}
 			m.recalcWeight(rg)
 		}
@@ -1377,6 +1412,7 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 		rg := m.groups[rgID]
 		oldState := rg.State
 		rg.ManualFailover = false
+		rg.forcedSecondary = false
 		rg.ManualFailoverAt = time.Time{}
 		rg.State = StateSecondary
 		rg.transferCommitRolePinned = true

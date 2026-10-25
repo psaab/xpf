@@ -140,14 +140,28 @@ func (d *Daemon) userspaceBulkSnapshotWithConfig(
 	// #16515: stream each page into the snapshot sink instead of retaining
 	// the whole []SessionDeltaInfo window. On error the partial sink is
 	// discarded with the (unframed) snapshot, preserving fail-closed.
+	// #16753: the bulk window is a fourth producer of the same
+	// SessionDeltaInfo export the #7194 gate withholds elsewhere, and the
+	// receiver treats it as authoritative. Record the export's own
+	// ProcessStatus fingerprint (only on success, mirroring the
+	// drain/FullResync rule) and refuse when the gate withholds, so a
+	// mismatch frames nothing and doBulkSync fails closed with the
+	// cold-prime/resync obligation still armed.
+	if !d.userspaceDeltaSchemaAdmits(0) {
+		return cluster.BulkSnapshot{}, errUserspaceDeltaSchemaWithheld
+	}
 	sink := newSnapshotDeltaSink()
 	zoneIDs := buildZoneIDs(cfg)
-	_, _, err := exporter.ExportOwnerRGSessionsPagedStream(rgIDs, dpuserspace.OwnerRGExportPageFunc(func(deltas []dpuserspace.SessionDeltaInfo) error {
+	status, _, err := exporter.ExportOwnerRGSessionsPagedStream(rgIDs, dpuserspace.OwnerRGExportPageFunc(func(deltas []dpuserspace.SessionDeltaInfo) error {
 		d.walkUserspaceSessionDeltas(ss, zoneIDs, deltas, sink)
 		return nil
 	}))
 	if err != nil {
 		return cluster.BulkSnapshot{}, fmt.Errorf("export owner-RG sessions: %w", err)
+	}
+	d.recordUserspaceDeltaSchema(status.SessionDeltaSchemaFingerprint)
+	if !d.userspaceDeltaSchemaAdmits(0) {
+		return cluster.BulkSnapshot{}, errUserspaceDeltaSchemaWithheld
 	}
 	return sink.snapshot(), nil
 }

@@ -36,6 +36,11 @@ type schemaNode struct {
 	children map[string]*schemaNode // known container children
 	wildcard *schemaNode            // matches any keyword not in children (for dynamic names)
 	multi    bool                   // true = multiple leaf values allowed (e.g. source-address); false = replace on set
+	// absorbBeforeWildcard lets a multi leaf retain its trailing values even
+	// when its parent has a wildcard instance slot. Explicit sibling keywords
+	// still terminate the value run. Opted in only for source-pool port range:
+	// its endpoints belong to range, not the parent's single-port wildcard.
+	absorbBeforeWildcard bool
 	// allChildKeysAreValues opts a typed multi leaf into validating every key
 	// of each hierarchical block-list child. Default behavior stays first-key
 	// only for leaves whose compiler reads just the child name; as-path-prepend

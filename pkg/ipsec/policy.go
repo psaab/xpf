@@ -582,6 +582,32 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 				"vpn", name, "gateway", vpn.Gateway)
 			continue
 		}
+		// #16708: a hostname-addressed PSK gateway (or inline hostname
+		// endpoint) with no explicit remote-identity has no peer
+		// identity to scope by either: the hostname is a dial target,
+		// never the identity the peer presents (#16680), so the secret
+		// would carry no peer selector at all. Pre-#16708 it carried
+		// only the box-shared local owner (%any / pinned local address /
+		// local-id), which charon's responder-side verifier tries
+		// against every peer (mem_cred matches a secret when ANY owner
+		// equals either side), so a holder of any other VPN's PSK was
+		// accepted on the strength of the shared local side alone.
+		// Fail closed exactly like the responder-only shape above:
+		// commit rejects (validateIPsecResponderIdentityStrict) and
+		// this belt skips the VPN on tolerant load / peer sync. A
+		// mixed hostname+IP list keeps rendering: its IP literals
+		// still scope the secret. Pubkey VPNs are unaffected.
+		if authMethod == "psk" && !responderOnlyGateway(gw) && len(pskPeerSelectors(remoteAddr, gw)) == 0 {
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: hostname-addressed gateway "+
+				"has no remote-identity, so its pre-shared key cannot "+
+				"be scoped to the peer — configure a remote-identity "+
+				"on the gateway or address it by IP literal "+
+				"(rendering the connection would let a holder of "+
+				"another VPN's key authenticate into it)",
+				"vpn", name, "gateway", vpn.Gateway)
+			continue
+		}
 
 		// This VPN passed every skip check. Fold it into its gateway
 		// connection (#15024): the first (sorted) member supplies the
@@ -817,8 +843,8 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 		// VPNs strongSwan can bind the wrong secret to a peer and IKE
 		// authentication fails. Each id-<n> narrows the secret to a
 		// peer whose IKE identity matches — the configured remote-id,
-		// else the remote gateway address — plus the local owner that
-		// lets charon's initiator-side lookup select it (#15193).
+		// else the remote gateway address (#16708: no box-shared local
+		// owner; see pskIDSelectorsLocal).
 		for i, sel := range pskIDSelectorsLocal(remoteAddr, localAddr, gw) {
 			fmt.Fprintf(&b, "    id-%d = \"%s\"\n", i+1,
 				escapeSwanctlQuoted(sanitizeSwanctlValue(sel)))
@@ -1311,57 +1337,76 @@ func escapeSwanctlQuoted(s string) string {
 // selector values that scope a PSK to its peer (#3952). A PSK secret with
 // no id matches ANY peer, so with two or more PSK VPNs strongSwan may bind
 // the wrong secret to a peer and IKE authentication fails. Each returned
-// value is an IKE identity strongSwan matches against the peer of the
-// exchange (the peer's identity must match at least one selector):
+// value is the remote peer's IKE identity — the discriminator between
+// two PSK VPNs to different peers:
 //
-//   - the remote peer identity: the configured remote-id when set, else
-//     the `dynamic hostname` identity (@FQDN, #14590) for a dynamic peer,
-//     otherwise the concrete remote gateway address (strongSwan uses the
-//     peer IP as its default identity when no id is negotiated) — one
-//     selector per IP-literal address when the gateway carries a
-//     comma-separated multi-address list (#14139). A hostname dial
-//     target contributes NO peer selector (#16680): it is not an IKE
-//     identity (the peer presents its resolved IP), so the secret is
-//     then selected by its local owner alone (see below; the shared-
-//     owner isolation question is #16708). This is the discriminator
-//     between two PSK VPNs to different peers;
-//   - the local owner, so the secret is also selected when strongSwan
-//     looks it up from the initiator side (#15193): the configured
-//     local-id when set, else the pinned local address / %any (below).
+//   - the configured remote-id when set, else the `dynamic hostname`
+//     identity (@FQDN, #14590) for a dynamic peer, otherwise the concrete
+//     remote gateway address (strongSwan uses the peer IP as its default
+//     identity when no id is negotiated) — one selector per IP-literal
+//     address when the gateway carries a comma-separated multi-address
+//     list (#14139). A hostname dial target contributes NO peer selector
+//     (#16680): it is not an IKE identity (the peer presents its resolved
+//     IP). A hostname-addressed PSK VPN with no remote-identity therefore
+//     has nothing to scope by and is skipped at render / rejected at
+//     commit (#16708, see below).
 //
-// Initiator lookup (#15193, D04-01). When charon initiates with no
-// identities configured it looks the shared key up by (my_id, other_id) =
-// (%any, <remote ip>) in IKEv1 and (local ip, %any) in IKEv2, and swanctl
-// matches a secret when ANY of its id values equals one side of that pair.
-// A secret carrying only the peer address therefore never matches either
-// lookup and IKE_AUTH aborts — every xpf-initiated path (establish-tunnels
-// immediately, the default trap, changed-VPN and HA re-initiation) failed,
-// and two default-shape xpf boxes never established the tunnel. The local
-// owner mirrors the local side's effective identity so both lookups hit:
+// No local owner (#16708, R3-VA16-S1 — supersedes #15193's local owner).
+// #15193 added a box-shared local owner to every non-responder secret —
+// the configured local-id, else the pinned local address, else %any — so
+// charon's initiator-side lookup would select the secret. Measured
+// against strongSwan 6.1.0 that owner also matches the RESPONDER side of
+// every exchange on the box: mem_cred enumerates a secret when ANY of
+// its owners matches EITHER side of the (me, other) pair, and the IKEv2
+// PSK verifier tries every enumerated secret against the peer's AUTH.
+// Every secret therefore verified every peer: a holder of one VPN's PSK
+// authenticated into another fixed-address VPN from that peer's address,
+// and into a responder-only `dynamic hostname` VPN from any address by
+// claiming its identity (reopening #14591). The peer selector does NOT
+// rescue this — verification accepts any enumerated secret, it does not
+// require the peer-side owner to be the one that matched.
 //
-//   - local-id configured: that identity (strongSwan uses it verbatim);
-//   - else a pinned local-address: the address itself (the IKEv2 key);
-//   - else %any: charon picks the source address per attempt, so only the
-//     wildcard owner matches whichever local IP it presents. %any as one
-//     owner AMONG peer selectors keeps #3952/#14591 isolation: selection
-//     still requires the peer selector to discriminate, and an extra local
-//     owner shared by every VPN on the box can never cause a wrong-peer
-//     match (charon additionally pins the chosen secret to the peer id).
+// Dropping the local owner is safe for the #15193 initiator cells
+// because the connection render pins `remote.id` for fixed-address PSK
+// gateways (defaultRemoteID / the inline arm), so charon's initiator
+// lookup carries the peer identity as other_id:
+//
+//   - IKEv2 build: get_shared(my_id, other_id) enumerates the secret via
+//     its peer owner (other_id = the pinned remote.id, or the peer's
+//     negotiated address identity when no id is pinned — multi-address
+//     and responder shapes);
+//   - IKEv1 phase1: the configured-identity lookup uses other_id = the
+//     pinned remote.id, and the address fallback lookup is keyed by the
+//     peer's socket address — both hit the peer owner.
+//
+// Re-measured in the netns charon lab (docs/log/16708.md): peer-only
+// secrets establish xpf-initiated and peer-initiated IKEv2 in the
+// default, pinned-local-address, configured-local-id, multi-address and
+// hostname-endpoint shapes, and the wrong-key attempts in both #16708
+// cases now get AUTH_FAILED from the xpf side.
 //
 // A dynamic responder-only peer (remote_addrs = %any) with no configured
-// remote-id and no dynamic hostname yields no address selector — %any is
-// not a usable peer identity. Since #14591 such a PSK VPN is skipped at render
+// remote-id and no dynamic hostname yields no selector — %any is not a
+// usable peer identity. Since #14591 such a PSK VPN is skipped at render
 // and rejected at commit (validateIPsecResponderIdentityStrict), an
 // unscoped secret never loads; the empty-list arm remains only for
-// non-responder shapes that offer nothing to scope by.
+// shapes the render belt has already skipped.
 func pskIDSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 	return pskIDSelectorsLocal(remoteAddr, "", gw)
 }
 
-// pskIDSelectorsLocal is pskIDSelectors with the connection's effective
-// local address ("" when none is pinned) — see the initiator-lookup note
-// above. Kept separate so existing callers/tests pin the peer-only shape.
-func pskIDSelectorsLocal(remoteAddr, localAddr string, gw *config.IPsecGateway) []string {
+// pskIDSelectorsLocal returns the peer-only selectors for a connection.
+// The localAddr parameter is retained only so existing call sites keep
+// passing the connection's effective local address; #16708 renders no
+// local owner, so the value is deliberately unused.
+func pskIDSelectorsLocal(remoteAddr, _ string, gw *config.IPsecGateway) []string {
+	return pskPeerSelectors(remoteAddr, gw)
+}
+
+// pskPeerSelectors is the peer-identity discriminator described on
+// pskIDSelectors: explicit remote-id, else the dynamic-hostname @FQDN,
+// else one selector per IP-literal gateway address.
+func pskPeerSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 	var ids []string
 	seen := make(map[string]bool)
 	add := func(v string) {
@@ -1391,37 +1436,17 @@ func pskIDSelectorsLocal(remoteAddr, localAddr string, gw *config.IPsecGateway) 
 		// defaults the peer identity to the resolved IP, and strongSwan
 		// likewise presents its IP when no id is negotiated, so a
 		// hostname string can never match the peer that actually
-		// presents. Skip non-IP entries here; the local owner below
-		// still lets charon's initiator lookup select the secret (via
-		// %any / the pinned local address / local-id), and when the
-		// peer initiates charon matches the secret by that local side
-		// as well — the hostname string itself scoping nothing is
-		// strictly better than pinning an identity nobody presents.
-		// IP literals keep the #3952/#14139 per-address discriminator.
-		// NOTE: the shared-local-owner isolation concern is tracked
-		// separately as #16708 (R3-VA16-S1); widening/narrowing THAT
-		// mechanism is out of scope here.
+		// presents. Skip non-IP entries here. IP literals keep the
+		// #3952/#14139 per-address discriminator. A hostname-only
+		// gateway with no remote-identity yields no selector: #16708
+		// skips/rejects that shape rather than scoping the secret by
+		// a box-shared local owner (see pskIDSelectors).
 		for _, addr := range strings.Split(remoteAddr, ",") {
 			addr = strings.TrimSpace(addr)
 			if _, err := netip.ParseAddr(addr); err != nil {
 				continue
 			}
 			add(addr)
-		}
-	}
-	// Local owner (#15193): the identity/address charon presents for this
-	// side, so its initiator-side shared-key lookup selects this secret.
-	switch {
-	case gw != nil && gw.LocalIDValue != "":
-		add(formatIdentity(gw.LocalIDType, gw.LocalIDValue))
-	case !responderOnlyGateway(gw):
-		// Fixed/inline peer we may initiate to. A responder-only peer
-		// never receives an initiator lookup from us, so no local owner
-		// is added there — its #14591 shape is unchanged.
-		if a := strings.TrimSpace(localAddr); a != "" && a != "%any" {
-			add(a)
-		} else {
-			add("%any")
 		}
 	}
 	return ids

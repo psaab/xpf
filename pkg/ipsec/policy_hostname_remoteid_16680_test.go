@@ -15,35 +15,37 @@ import (
 // refused in both directions (AUTH_FAILED) and the tunnel never
 // establishes, with no commit warning.
 //
-// Fix contract pinned here:
-//   - hostname-addressed gateway, no remote-identity: remote_addrs
-//     still dials the hostname (strongSwan DNS-resolves it), but NO
-//     remote.id is rendered (no hostname identity pin) and the secret
-//     carries no hostname peer selector; the local owner (%any /
-//     pinned local address / local-id) remains so charon's initiator
-//     lookup can still select the secret.
-//   - inline hostname endpoint (no gateway object): same — no
-//     remote.id pin, no hostname secret selector.
+// Fix contract pinned here (hostname cells updated by #16708):
+//   - hostname-addressed gateway, no remote-identity: NO remote.id is
+//     rendered (no hostname identity pin, #16680) — and since #16708 the
+//     VPN is SKIPPED at render (commit rejects it): the hostname yields
+//     no peer selector, and the pre-#16708 local-owner-only secret
+//     (%any / pinned local address) matched every peer on the box.
+//     Configure a remote-identity (or use an IP literal) to render it.
+//   - inline hostname endpoint (no gateway object): same — skipped.
 //   - IP-literal control (gateway and inline): remote.id = the IP and
 //     the secret peer selector = the IP, byte-identical to pre-fix
 //     (#15193/#3952 control).
 //   - explicit remote-identity on a hostname gateway still wins
 //     (rendered exactly as configured and used as the sole peer
-//     selector) — the documented workaround is unchanged.
+//     selector) — the documented workaround is unchanged, and it is now
+//     REQUIRED for hostname gateways to render at all.
 //   - IPv6 literal control keeps its pin (the IP check is
 //     family-agnostic, not v4-only).
 //   - mixed multi-address list (hostname + IP): only the IP element
-//     becomes a peer selector; the hostname element contributes none.
+//     becomes a peer selector; the hostname element contributes none,
+//     and the VPN still renders on the strength of the IP selector.
 //
 // FAIL-ON-REVERT: reverting the netip.ParseAddr gate in
-// defaultRemoteID, the inline arm, or pskIDSelectorsLocal restores the
-// hostname remote.id / hostname selector and turns the hostname cells
-// red, while the IP controls stay green.
+// defaultRemoteID, the inline arm, or pskPeerSelectors restores the
+// hostname remote.id / hostname selector; reverting the #16708 render
+// belt restores the local-owner-only secret — both turn the hostname
+// cells red, while the IP controls stay green.
 
 func TestHostnameAddressNoRemoteID16680(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 
-	t.Run("hostname gateway no remote id no hostname selector", func(t *testing.T) {
+	t.Run("hostname gateway no remote id is skipped by 16708 belt", func(t *testing.T) {
 		cfg := initiatorCfg15193(&config.IPsecGateway{
 			Name: "gw", Address: "peer.example.test",
 		}, "site-secret")
@@ -51,51 +53,34 @@ func TestHostnameAddressNoRemoteID16680(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
-		if !rendered["gw"] {
-			t.Fatalf("hostname-addressed VPN must render, rendered=%v:\n%s", rendered, text)
+		// #16680: no hostname remote.id. #16708: with no peer selector
+		// the VPN must not render at all (commit rejects it too) —
+		// pre-fix it rendered with a lone %any local-owner secret.
+		if rendered["gw"] {
+			t.Fatalf("hostname-addressed PSK VPN with no remote-identity must be skipped (#16708), rendered=%v:\n%s", rendered, text)
 		}
-		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw")
-		// The hostname is still the dial target.
-		conn.requireSetting(t, "remote_addrs", "peer.example.test")
-		// #16680 core: no hostname identity may be pinned.
-		conn.at(t, "remote").hasNoSetting(t, "id")
-		conn.at(t, "local").hasNoSetting(t, "id")
-
-		blk, ok := parseSecretBlocks(t, text)["ike-gw"]
-		if !ok {
-			t.Fatalf("missing ike-gw secret block:\n%s", text)
-		}
-		if containsStr(blk.ids, "peer.example.test") {
-			t.Errorf("id selectors %v contain hostname peer selector peer.example.test; a hostname is not the identity the peer presents (its resolved IP is)", blk.ids)
-		}
-		// Initiator selection must still work: with no local address
-		// or local-id configured the local owner is %any (#15193).
-		if !containsStr(blk.ids, "%any") {
-			t.Errorf("id selectors %v missing local initiator owner %%any; charon initiator lookup would find no key", blk.ids)
+		if _, ok := parseSecretBlocks(t, text)["ike-gw"]; ok {
+			t.Errorf("skipped hostname VPN must not emit a secret block:\n%s", text)
 		}
 	})
 
-	t.Run("hostname gateway with local address keeps local owner only", func(t *testing.T) {
+	t.Run("hostname gateway with local address is skipped by 16708 belt", func(t *testing.T) {
 		cfg := initiatorCfg15193(&config.IPsecGateway{
 			Name: "gw", Address: "peer.example.test", LocalAddress: "198.51.100.1",
 		}, "site-secret")
-		text := m.generateConfig(cfg)
-		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw")
-		conn.requireSetting(t, "remote_addrs", "peer.example.test")
-		conn.at(t, "remote").hasNoSetting(t, "id")
-		blk := parseSecretBlocks(t, text)["ike-gw"]
-		if containsStr(blk.ids, "peer.example.test") {
-			t.Errorf("id selectors %v contain hostname selector", blk.ids)
+		text, rendered, err := m.renderConfig(cfg)
+		if err != nil {
+			t.Fatalf("renderConfig: %v", err)
 		}
-		if !containsStr(blk.ids, "198.51.100.1") {
-			t.Errorf("id selectors %v missing pinned local owner 198.51.100.1", blk.ids)
+		if rendered["gw"] {
+			t.Fatalf("hostname+local-address PSK VPN with no remote-identity must be skipped (#16708; a pinned local address is still a box-shared owner), rendered=%v:\n%s", rendered, text)
 		}
-		if containsStr(blk.ids, "%any") {
-			t.Errorf("id selectors %v: %%any must not be added when the local address is pinned", blk.ids)
+		if _, ok := parseSecretBlocks(t, text)["ike-gw"]; ok {
+			t.Errorf("skipped hostname VPN must not emit a secret block:\n%s", text)
 		}
 	})
 
-	t.Run("inline hostname endpoint no remote id", func(t *testing.T) {
+	t.Run("inline hostname endpoint is skipped by 16708 belt", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
 				"tun": {Gateway: "peer.example.test", PSK: config.NewSecret("k")},
@@ -103,19 +88,15 @@ func TestHostnameAddressNoRemoteID16680(t *testing.T) {
 			Gateways:  map[string]*config.IPsecGateway{},
 			Proposals: map[string]*config.IPsecProposal{},
 		}
-		text := m.generateConfig(cfg)
-		conn := parseSwanctlDoc(t, text).at(t, "connections", "tun")
-		conn.requireSetting(t, "remote_addrs", "peer.example.test")
-		conn.at(t, "remote").hasNoSetting(t, "id")
-		blk, ok := parseSecretBlocks(t, text)["ike-tun"]
-		if !ok {
-			t.Fatalf("missing ike-tun secret block:\n%s", text)
+		text, rendered, err := m.renderConfig(cfg)
+		if err != nil {
+			t.Fatalf("renderConfig: %v", err)
 		}
-		if containsStr(blk.ids, "peer.example.test") {
-			t.Errorf("inline id selectors %v contain hostname selector peer.example.test", blk.ids)
+		if rendered["tun"] {
+			t.Fatalf("inline hostname PSK VPN with no remote-identity must be skipped (#16708), rendered=%v:\n%s", rendered, text)
 		}
-		if !containsStr(blk.ids, "%any") {
-			t.Errorf("inline id selectors %v missing local owner %%any", blk.ids)
+		if _, ok := parseSecretBlocks(t, text)["ike-tun"]; ok {
+			t.Errorf("skipped inline hostname VPN must not emit a secret block:\n%s", text)
 		}
 	})
 

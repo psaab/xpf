@@ -17,7 +17,6 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/daemon"
-	"github.com/psaab/xpf/pkg/dataplane"
 	_ "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -289,8 +288,8 @@ func main() {
 		// detached — a running daemon's loaded program keeps forwarding). Its
 		// spec validation does READ the live pins for ABI compatibility.
 		// Exit 3 is ONLY the kernel-verifier reject; any other refusal (for
-		// example a live pinned-map ABI mismatch) exits 1. Deploy tooling
-		// branches its remediation on that distinction (#9558).
+		// example a live pinned-map ABI mismatch) exits 1, except the
+		// #16701 headroom refusals (4 below floor, 5 unmeasured).
 		// Deploy tooling pushes the NEW binary to a temp path and runs
 		// this BEFORE stopping the old daemon; a REJECT refuses the deploy
 		// instead of killing the dataplane (the 2026-06-10 incident shape).
@@ -298,15 +297,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
-		if err := dataplane.VerifyEmbeddedUserspaceShim(); err != nil {
-			if errors.Is(err, dataplane.ErrUserspaceShimVerifierReject) {
-				fmt.Printf("REJECT embedded userspace shim\n%v\n", err)
-				os.Exit(3)
-			}
-			fmt.Fprintf(os.Stderr, "verify-dataplane: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("PASS embedded userspace shim (verifier accepted; no production state touched)")
+		// #16701: also enforce the headroom floor on THIS kernel
+		// (exit 4 below floor, 5 unmeasured) — see verify_dataplane.go.
+		runVerifyDataplaneCmd()
 		return
 
 	case cmdCheckConfig:

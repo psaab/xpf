@@ -312,9 +312,10 @@ type authConn struct {
 	// Guarded by SessionSync.mu; retained so a boot-id switch on this same
 	// priming stream can restore its already-proven capability set — and
 	// ONLY its set, never the retired incarnation's global observation.
-	peerSnapshotVersion uint16
-	peerCapabilityFlags uint8
-	peerSessionSyncWire uint16
+	peerSnapshotVersion  uint16
+	peerCapabilityFlags  uint8
+	peerSessionSyncWire  uint16
+	peerCapabilityFlags2 uint8
 	// peerCapabilitiesSeen records that this connection delivered the
 	// capabilities frame, including a legacy/short frame. Retirement defers
 	// eviction while this is false because the other fabric's frame may arrive

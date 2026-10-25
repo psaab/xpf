@@ -51,10 +51,12 @@ const defaultMasterPasswordPRF = "sha256"
 // questions — conflating them caused #5638 (codex-review-181 M30):
 //
 //  1. IS ENCRYPTION REQUIRED?  Conservative, fail-closed. ANY master-password
-//     anywhere — an active top-level `system` stanza (#4705), or any
-//     `master-password` under any `groups { ... }` block including an
+//     NODE PRESENT anywhere — an active top-level `system` stanza (#4705),
+//     or any `master-password` under any `groups { ... }` block including an
 //     UNAPPLIED or `<*>`-wildcard group (#5231) — means "encrypt, never leak
-//     plaintext." Over-encrypting a dormant/unapplied master-password is a
+//     plaintext," with or without a pseudorandom-function leaf (#16724:
+//     presence is the on/off switch, the leaf only selects the hash).
+//     Over-encrypting a dormant/unapplied master-password is a
 //     harmless false-positive; under-encrypting leaks secrets to disk. This is
 //     masterPasswordConfigured.
 //
@@ -117,6 +119,21 @@ func masterPasswordPRF(tree *config.ConfigTree) string {
 // means secrets have been or may be configured, and erring toward encryption is
 // always safe. Read-only and total (nil-safe, never errors) — it runs on the
 // config write path, which must not fail.
+//
+// #16724: presence is the on/off switch (README #6856: "Presence of the
+// subtree is the on/off switch; the leaf's value selects only the HKDF
+// hash"). The pre-fix scan keyed on a non-empty pseudorandom-function VALUE,
+// so a bare `set system master-password` — zero children, closed-world
+// schema accepts it — and the empty container left behind by
+// `delete system master-password pseudorandom-function` resolved to
+// plaintext with no master.key, no commit warning and no #4579 read-back
+// warning, while `show configuration` rendered `master-password;`.
+// Q2 (masterPasswordPRF) already falls back to defaultMasterPasswordPRF
+// when the applied config resolves no supported PRF, so a bare container
+// encrypts under the default once Q1 answers presence. The same presence
+// question also closes the packed-PRF-inside-groups/<*> shape: after the
+// compact fold, a master-password node packed onto a parent's Keys is a
+// present node even when its PRF token has not been folded into a child.
 func masterPasswordConfigured(tree *config.ConfigTree) bool {
 	if tree == nil {
 		return false
@@ -147,16 +164,51 @@ func masterPasswordConfigured(tree *config.ConfigTree) bool {
 	// returns the original tree when nothing folds and never mutates its
 	// argument, which callers persist.
 	tree = config.NormalizeCompactForScan(tree)
-	// Surface 1: every top-level `system { ... }` stanza (#4705).
-	if masterPasswordPRFInSystems(systemBlocksOf(tree)) != "" {
-		return true
+	// Surface 1: every top-level `system { ... }` stanza (#4705). Presence of
+	// any `master-password` child — with or without a PRF leaf (#16724).
+	for _, sys := range systemBlocksOf(tree) {
+		if hasMasterPassword(sys) {
+			return true
+		}
 	}
 	// Surface 2: any `master-password` anywhere under any `groups { ... }`
 	// block (#5231) — recursive so it catches a master-password nested under a
 	// `<*>` wildcard (or any other intervening node), not only a literal
-	// `system` child.
+	// `system` child. Presence only (#16724): a bare or packed container
+	// counts even when no PRF value can be read from it.
 	for _, groupsRoot := range groupsBlocksOf(tree) {
-		if masterPasswordPRFInSubtree(groupsRoot) != "" {
+		if masterPasswordInSubtree(groupsRoot) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasMasterPassword reports whether node directly carries a
+// `master-password` child, regardless of that child's PRF leaf (#16724).
+// After the compact fold a packed `system master-password ...` spelling is
+// a `master-password` child too, so this covers braced and elided forms.
+func hasMasterPassword(node *config.Node) bool {
+	if node == nil {
+		return false
+	}
+	return len(node.FindChildren("master-password")) > 0
+}
+
+// masterPasswordInSubtree reports whether node or any descendant IS a
+// `master-password` node (#16724 presence counterpart of
+// masterPasswordPRFInSubtree, which keeps answering Q2's value question).
+// Read-only and total — nil-safe and never errors — because it runs on the
+// config write path, which must not fail.
+func masterPasswordInSubtree(node *config.Node) bool {
+	if node == nil {
+		return false
+	}
+	if len(node.Keys) > 0 && node.Keys[0] == "master-password" {
+		return true
+	}
+	for _, child := range node.Children {
+		if masterPasswordInSubtree(child) {
 			return true
 		}
 	}

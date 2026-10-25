@@ -296,6 +296,14 @@ type compileOpts struct {
 	// callers that relax cluster-key validation must not accidentally suppress
 	// the fabric trust-boundary warning.
 	suppressFabricStampAdvisory bool
+	// suppressSSHUnmanagedAdvisory16737 (#16737) suppresses the commit-time
+	// advisory that a zone admits SSH with no `system services ssh` stanza
+	// (sshd keeps serving under base-image defaults). Set on the TOLERANT
+	// paths (Store.Load, Store.SyncApply) for the same reason as its
+	// siblings above: the condition is a property of a config already
+	// committed, so firing on every boot and peer sync trains the operator
+	// to skip it.
+	suppressSSHUnmanagedAdvisory16737 bool
 	// lenientIPsecPolicyProposalRef (#2073, #9919 F-090) downgrades the IPsec
 	// (Phase 2) reference-chain check from a hard error to a warning on the
 	// tolerant load / peer-sync paths. A dangling `proposals` reference, a
@@ -352,6 +360,15 @@ type compileOpts struct {
 	// must still boot (#1960); every other three-color defect stays
 	// strict, and commit / commit-check stay strict.
 	lenientThreeColorBurstFloor16610 bool
+	// lenientSingleRateBurstFloor16714 downgrades only the #16714
+	// one-frame burst-floor violation in
+	// validateFirewallPolicerLimitsStrict to a warning on tolerant
+	// load / peer-sync paths. A sub-frame burst persisted by an older
+	// binary (1500..1513, or any sub-frame value that reached the
+	// compiled gate) must still boot (#1960); missing limits and
+	// every other policer defect stay under their own gates, and
+	// commit / commit-check stay strict.
+	lenientSingleRateBurstFloor16714 bool
 	// lenientSchedulerWindowPairs11358 downgrades conflicting repeated
 	// start-time/stop-time boundaries (#11358) and weekday all-day, exclude,
 	// and time-window meanings split across separate weekday statements
@@ -649,6 +666,18 @@ type compileOpts struct {
 	// statement stays dropped, now flagged. Same doctrine as
 	// lenientChassisRGStatementArity.
 	lenientChassisClusterUnknown16456 bool
+
+	// lenientRGNodePriorityShape16672 (#16672) downgrades the
+	// redundancy-group `node` statement-shape gate
+	// (validateRGNodePriorityShapeAST) from a hard compile error to a
+	// cfg.Warnings entry on the tolerant load / peer-sync paths. A
+	// fused `node 1 priority 100 node 0 priority 200` (missing `;`)
+	// otherwise writes the second priority onto the first node and
+	// can invert RG primary placement. Commit / commit-check stay
+	// strict; an already-persisted config still BOOTS (#1960) with
+	// the first node's own priority kept. Same doctrine as
+	// lenientChassisClusterUnknown16456.
+	lenientRGNodePriorityShape16672 bool
 
 	// lenientLoginPackedStatements (#6662) downgrades the `system login`
 	// packed-body gate (validateLoginPackedStatementsAST) from a hard compile
@@ -1779,6 +1808,15 @@ type compileOpts struct {
 	// BOOTS (#1960). The child is inert either way: compileApplications
 	// reads only `application` and `application-set`.
 	lenientApplicationsLevelChildren16459 bool
+	// lenientIPMonThenChildren16712 (#16712) downgrades
+	// validateIPMonThenChildrenAST16712 from a hard compile error to a
+	// cfg.Warnings entry on the tolerant load / peer-sync paths, so a
+	// persisted or peer-synced config carrying an undeclared
+	// `services ip-monitoring policy <p> then` child (the Junos
+	// `then interface <if> enable|disable` action, or a typo) still
+	// BOOTS (#1960). The child is inert either way:
+	// compileIPMonitoring reads only `preferred-route` under `then`.
+	lenientIPMonThenChildren16712 bool
 	// lenientRoutingRuleWindows (#5854) downgrades the next-table / rib-group
 	// ip-rule admission-cap gate (validateRoutingRuleWindowsStrict) from a hard
 	// compile error to a cfg.Warnings entry. The runtime applier caps admitted
@@ -1919,6 +1957,15 @@ type compileOpts struct {
 	// refuses the whole rendered file, and every pool of the family
 	// stops serving.
 	lenientDHCPServerIfaceRef bool
+	// lenientDHCPServerRelayOverlap (#16694) downgrades the DHCP
+	// server/relay same-device gate
+	// (validateDHCPServerRelayOverlapStrict) to a cfg.Warnings entry on
+	// the tolerant load / peer-sync paths, so a persisted config with
+	// the same resolved device in both a server group and a relay group
+	// still boots (#1960). The strict commit / commit-check path
+	// hard-rejects it: Kea and the relay bind the same UDP port on that
+	// device and whichever starts second serves nothing there.
+	lenientDHCPServerRelayOverlap bool
 	// lenientWireguardPeers (#1434 multi-peer) downgrades the WireGuard
 	// per-peer gate (validateWireguardPeersStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3812,11 +3859,13 @@ func lenientCompileOpts() compileOpts {
 		suppressContestedTrunkZoneAdvisory:       true,
 		suppressFabricStampAdvisory:              true,
 		suppressDPDThresholdIKEv2Advisory:        true,
+		suppressSSHUnmanagedAdvisory16737:        true,
 		lenientIPsecPolicyProposalRef:            true,
 		lenientPolicySchedulerRef:                true,
 		lenientSchedulerMapRef:                   true,
 		lenientSchedulerDateRange15695:           true,
 		lenientThreeColorBurstFloor16610:         true,
+		lenientSingleRateBurstFloor16714:         true,
 		lenientSchedulerWindowPairs11358:         true,
 		lenientDuplicateRootLogin14447:           true,
 		lenientCodelTarget11825:                  true,
@@ -3844,6 +3893,7 @@ func lenientCompileOpts() compileOpts {
 		lenientChassisMonitorWeight:              true,
 		lenientChassisRGStatementArity:           true,
 		lenientChassisClusterUnknown16456:        true,
+		lenientRGNodePriorityShape16672:          true,
 		lenientLoginPackedStatements:             true,
 		lenientLoginClassShadowsBuiltin:          true,
 		lenientLoginClassRegex15712:              true,
@@ -3945,6 +3995,7 @@ func lenientCompileOpts() compileOpts {
 		lenientTunnelRITarget12520:               true,
 		lenientDHCPRelayChildTokens:              true,
 		lenientApplicationsLevelChildren16459:    true,
+		lenientIPMonThenChildren16712:            true,
 		lenientDHCPRelayV4Config:                 true,
 		lenientRoutingRuleWindows:                true,
 		lenientPolicyRouteMapSeq:                 true,
@@ -3963,6 +4014,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDHCPPoolValues:                    true,
 		lenientDHCPGroupInterfaces:               true,
 		lenientDHCPServerIfaceRef:                true,
+		lenientDHCPServerRelayOverlap:            true,
 		lenientWireguardPeers:                    true,
 		lenientTunnelOuterFamily:                 true,
 		lenientGreDuplicateOuter:                 true,

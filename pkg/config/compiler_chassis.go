@@ -1043,12 +1043,19 @@ func compileRGNodePriority(rg *RedundancyGroup, child *Node) {
 		}
 		nodeID = n
 	}
-	// Look for "priority" in inline keys or children
+	// #16672: only the FIRST inline `priority` belongs to this node.
+	// A missing `;` fuses a second `node <n> priority <p>` onto this
+	// node's Keys; scanning every `priority` assigned the second
+	// node's priority to this node, last-wins. The strict gate
+	// (validateRGNodePriorityShapeAST) rejects the fused shape at
+	// commit; on the tolerant path keep this node's own (first)
+	// priority and ignore the fused tail.
 	for i := 2; i < len(child.Keys)-1; i++ {
 		if child.Keys[i] == "priority" {
 			if n, err := strconv.Atoi(child.Keys[i+1]); err == nil {
 				rg.NodePriorities[nodeID] = n
 			}
+			break
 		}
 	}
 	if priNode := child.FindChild("priority"); priNode != nil {
@@ -1160,7 +1167,16 @@ func compileRGInterfaceMonitors(rg *RedundancyGroup, child *Node) {
 func compileRGIPMonitoring(rg *RedundancyGroup, child *Node) {
 	ipm := rg.IPMonitoring
 	if ipm == nil {
-		ipm = &IPMonitoring{}
+		// #16667: Junos defaults `global-weight` to 255 when it is
+		// omitted. Seeding the fresh record with that default (rather
+		// than the Go zero) keeps an omitted value from compiling to
+		// zero demotion debt — aggregate mode would deduct 0 and an
+		// unweighted target would inherit 0, so the RG never demotes.
+		// An explicit `global-weight` (including 0) overwrites below.
+		// Seeding only on creation preserves #13090 accumulation: a
+		// later folded block that omits the global must not reset an
+		// earlier explicit value back to the default.
+		ipm = &IPMonitoring{GlobalWeight: MaxInterfaceMonitorWeight}
 	}
 	// #6588: ip-monitoring installs redundancy-group demotion debt
 	// through the same election path as interface-monitor, and it
@@ -1260,9 +1276,10 @@ func isIPMonitoringProp(tok string) bool {
 //
 // This is the globals' counterpart to monitorWeightTokens, and exists for the
 // same reason (#6588): compileRGIPMonitoring reads a global with
-// findNamedNode + nodeVal, which is FIRST-WINS and silently leaves the 0
-// default when the value is missing or fails Atoi. A malformed or duplicated
-// global is therefore indistinguishable from `global-weight 0` in the compiled
+// findNamedNode + nodeVal, which is FIRST-WINS and silently keeps the seeded
+// default (255 for global-weight #16667, 0 for global-threshold) when the
+// value is missing or fails Atoi. A malformed or duplicated
+// global is therefore indistinguishable from an absent `global-weight` in the compiled
 // struct, so it has to be caught on the AST — and the gate must read the same
 // token the compiler does or the two can disagree about which value won.
 //

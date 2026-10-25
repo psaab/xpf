@@ -80,7 +80,8 @@ type Entry struct {
 	// both directions.
 	Schema    int       `json:"v,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
-	// Action: "commit", "commit_confirmed", "auto_rollback",
+	// Action: "commit", "commit_confirmed", "commit_confirm" (#16721:
+	// a pending commit-confirmed window was confirmed), "auto_rollback",
 	// "config_sync", "persist_error", "persist_recovered",
 	// "system_action" (destructive maintenance verb, #4108 F8).
 	Action string `json:"action"`

@@ -123,6 +123,12 @@ var astLeafForRedactedField = map[string]astLeafClaim{
 	"DDNSProvider.CheckIPURL": {
 		set: `set system services dynamic-dns provider p1 checkip-url "%s"`,
 	},
+	"PKICAProfile.EnrollmentURL": {
+		set: `set security pki ca-profile c1 enrollment url "%s"`,
+	},
+	"PKICAProfile.CRLURL": {
+		set: `set security pki ca-profile c1 revocation-check crl url "%s"`,
+	},
 }
 
 // discoverTypedURLRedactionSites returns "Type.Field" for every URL-redaction

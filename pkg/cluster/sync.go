@@ -629,15 +629,21 @@ type SyncStats struct {
 	// allocate the large session-sync socket buffers. A nonzero value means the
 	// cap absorbed a connection flood on the sync/control network; the reserved
 	// tail (preAuthPeerReserve) still admits the legitimate peer's reconnect.
-	PreAuthRejected    atomic.Uint64
-	Connected          atomic.Bool
-	BulkSyncStartTime  atomic.Int64
-	BulkSyncEndTime    atomic.Int64
-	BulkSyncSessions   atomic.Uint64
-	LastConfigSyncTime atomic.Int64
-	LastConfigSyncSize atomic.Uint64
-	LastFenceSeq       atomic.Uint64
-	LastFenceAckAt     atomic.Int64
+	PreAuthRejected atomic.Uint64
+	// PreAuthHandshakeFailed counts connections dropped because the
+	// pre-auth handshake failed (#16748): garbage/bad-magic frames,
+	// wrong PSK, or a stalled handshake on an admitted connection.
+	// Every failure increments it, so the rate-independent observable
+	// reflects all rejections even though the WARN is rate-limited.
+	PreAuthHandshakeFailed atomic.Uint64
+	Connected              atomic.Bool
+	BulkSyncStartTime      atomic.Int64
+	BulkSyncEndTime        atomic.Int64
+	BulkSyncSessions       atomic.Uint64
+	LastConfigSyncTime     atomic.Int64
+	LastConfigSyncSize     atomic.Uint64
+	LastFenceSeq           atomic.Uint64
+	LastFenceAckAt         atomic.Int64
 }
 
 // SyncStatsSnapshot is a point-in-time copy of SyncStats with plain
@@ -716,6 +722,7 @@ type SyncStatsSnapshot struct {
 	GenCapShrunk                         uint64 // #9915 F-044 review
 	AuthUpgradeIdentityErrors            uint64 // #9915 F-043 review
 	PreAuthRejected                      uint64
+	PreAuthHandshakeFailed               uint64 // #16748
 	OversizeFramesRefused                uint64 // #16041 per-type payload cap refusals
 	Connected                            bool
 	ActiveFabric                         int
@@ -1027,7 +1034,9 @@ type SessionSync struct {
 	// its pre-wire setup window (inbound AND outbound) so Stop() can close them
 	// and unblock a stalled handshake — the bool value records whether the entry
 	// holds a counted inbound admission slot. preAuthLogMono rate-limits the
-	// rejection warning to ~1/sec. All three are guarded by preAuthMu.
+	// rejection warning to ~1/sec; preAuthHandshakeLogMono does the same for
+	// the handshake-failure warning (#16748). The counters are guarded by
+	// preAuthMu; the mono fields are atomics.
 	// peerIPs is the construction-time resolved cache of the configured peer
 	// addresses (#14371): literals via parseAddrIP, hostnames resolved once
 	// (all v4+v6 answers). Written only by the constructors via refreshPeerIPs
@@ -1037,7 +1046,11 @@ type SessionSync struct {
 	preAuthInFlight int
 	setupConns      map[net.Conn]bool
 	preAuthLogMono  atomic.Int64
-	peerIPs         map[netip.Addr]struct{}
+	// preAuthHandshakeLogMono rate-limits the handshake-failure WARN
+	// to ~1/sec (#16748), independently of the admission-cap WARN so
+	// one flood class cannot starve the other's diagnostics.
+	preAuthHandshakeLogMono atomic.Int64
+	peerIPs                 map[netip.Addr]struct{}
 
 	listener   net.Listener
 	localAddr1 string
@@ -1440,6 +1453,14 @@ type SessionSync struct {
 	// exists for.
 	peerSessionSyncWire atomic.Uint32
 
+	// peerCapabilityFlags2 holds the peer's SECOND advertised capability
+	// byte (#16756), carried after the wire-version field in
+	// syncMsgPeerCapabilities because the first flags byte is full. Bit 0
+	// (capFlag2ConfigApplyAck) means the peer sends syncMsgConfigApplyAck.
+	// Cleared on full disconnect and on incarnation advance alongside
+	// peerCapabilityFlags, for the identical incarnation-scoping reason.
+	peerCapabilityFlags2 atomic.Uint32
+
 	// fenceSeq numbers sequenced peer fences (#7147). Starts at 0 and is only
 	// ever read via Add(1), so the first fence is seq 1 — seq 0 is reserved on
 	// the wire to mean "no ack requested", which is how a pre-#7147 fence's
@@ -1717,6 +1738,19 @@ type SessionSync struct {
 	// Highest config generation the peer positively acknowledged as applied.
 	// PeerConfigStale compares this with lastSentConfigGen.
 	peerAppliedConfigGen atomic.Uint64
+	// lastSentConfigAckCapable16756 records, atomically with
+	// lastSentConfigGen, whether the peer incarnation that was current
+	// when the newest generation was sent advertised config-apply-ACK
+	// support (#16756). It lets PeerConfigStale charge a missing ACK
+	// only to a peer that promised one. Cleared when a new peer
+	// incarnation advances (the send that follows re-records it).
+	lastSentConfigAckCapable16756 atomic.Bool
+	// peerConfigNackedGen16756 is the generation of the newest
+	// current-send NACK (#16756 legacy fallback), or 0. A NACK whose
+	// generation is behind lastSentConfigGen is a straggler and is
+	// ignored by the fallback exactly as handleConfigApplyNack ignores
+	// it for the re-push marker.
+	peerConfigNackedGen16756 atomic.Uint64
 
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64
@@ -2132,6 +2166,8 @@ func (s *SessionSync) initGenState() {
 	s.genState.sourceNatICMPSentV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
 	s.genState.policyIdentitySentV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
 	s.genState.policyIdentitySentV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
+	s.genState.appTimeoutLogSentV4 = make(map[dataplane.SessionKey]appTimeoutLogMemo)
+	s.genState.appTimeoutLogSentV6 = make(map[dataplane.SessionKeyV6]appTimeoutLogMemo)
 	s.genState.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 	s.genState.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	s.genState.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
@@ -2140,6 +2176,8 @@ func (s *SessionSync) initGenState() {
 	s.genState.sourceNatICMPRecvV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
 	s.genState.policyIdentityRecvV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
 	s.genState.policyIdentityRecvV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
+	s.genState.appTimeoutLogRecvV4 = make(map[dataplane.SessionKey]appTimeoutLogMemo)
+	s.genState.appTimeoutLogRecvV6 = make(map[dataplane.SessionKeyV6]appTimeoutLogMemo)
 	s.genState.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
 	s.genState.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 	// #3931: seed the config generation from the same monotonic base so the
@@ -2409,7 +2447,7 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		InstallsStaleIgnored:                 s.stats.InstallsStaleIgnored.Load(),
 		SessionsStaleConfigIgnored:           s.stats.SessionsStaleConfigIgnored.Load(),
 		GenMapOverflow:                       s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(),
-		PreAuthRejected: s.stats.PreAuthRejected.Load(), OversizeFramesRefused: s.stats.OversizeFramesRefused.Load(), Connected: s.stats.Connected.Load(),
+		PreAuthRejected: s.stats.PreAuthRejected.Load(), PreAuthHandshakeFailed: s.stats.PreAuthHandshakeFailed.Load(), OversizeFramesRefused: s.stats.OversizeFramesRefused.Load(), Connected: s.stats.Connected.Load(),
 		ActiveFabric:      activeFabric,
 		BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(),
 		BulkSyncSessions:   s.stats.BulkSyncSessions.Load(),

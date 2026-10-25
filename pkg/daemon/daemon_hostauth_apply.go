@@ -49,65 +49,19 @@ import (
 // apply-boundary validation immediately below.
 
 // validateAuthorizedSSHKeys enforces the authorized_keys apply-boundary format
-// shared by non-root login and root-authentication. OpenSSH accepts many key
-// types besides the ssh-* family (ecdsa-sha2-nistp256/384/521 and the FIDO
-// sk-* variants). Junos operators habitually store the full
-// "<type> <base64> <comment>" string as the leaf value, so an ecdsa key filed
-// under any ssh-* leaf reaches this point verbatim; requiring an ssh- prefix
-// rejected such a valid key and skipped ALL provisioning for that user
-// (#14111). The accepted set is therefore the OpenSSH authorized_keys key-type
-// vocabulary — still a fail-closed allowlist: an option-prefixed line
-// (`command="..." ssh-ed25519 ...`), a bare blob, or any unknown type is
-// refused before any credential mutation. A whitespace-separated base64 blob
-// must follow the type; the comment is optional.
-
-// sshAuthorizedKeyTypes is the OpenSSH authorized_keys key-type vocabulary
-// accepted at the apply boundary (#14111).
-var sshAuthorizedKeyTypes = map[string]bool{
-	"ssh-ed25519":                                 true,
-	"ssh-rsa":                                     true,
-	"ssh-dss":                                     true,
-	"ecdsa-sha2-nistp256":                         true,
-	"ecdsa-sha2-nistp384":                         true,
-	"ecdsa-sha2-nistp521":                         true,
-	"sk-ssh-ed25519@openssh.com":                  true,
-	"sk-ecdsa-sha2-nistp256@openssh.com":          true,
-	"ssh-ed25519-cert-v01@openssh.com":            true,
-	"ssh-rsa-cert-v01@openssh.com":                true,
-	"ssh-dss-cert-v01@openssh.com":                true,
-	"ecdsa-sha2-nistp256-cert-v01@openssh.com":    true,
-	"ecdsa-sha2-nistp384-cert-v01@openssh.com":    true,
-	"ecdsa-sha2-nistp521-cert-v01@openssh.com":    true,
-	"sk-ssh-ed25519-cert-v01@openssh.com":         true,
-	"sk-ecdsa-sha2-nistp256-cert-v01@openssh.com": true,
-}
-
-func validAuthorizedSSHKey(key string) bool {
-	typ, blob, ok := strings.Cut(key, " ")
-	if !ok || !sshAuthorizedKeyTypes[typ] {
-		return false
-	}
-	blob = strings.TrimLeft(blob, " ")
-	if blob == "" {
-		return false
-	}
-	if i := strings.IndexByte(blob, ' '); i >= 0 {
-		blob = blob[:i]
-	}
-	for _, r := range blob {
-		switch {
-		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-		case r == '+' || r == '/' || r == '=' || r == '-' || r == '_':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
+// shared by non-root login and root-authentication. The accepted set and the
+// single-key predicate live in pkg/config (config.ValidAuthorizedSSHKey /
+// config.SSHAuthorizedKeyTypes) so this apply belt and the #16740 commit-time
+// schema validator (config.ValidateAuthorizedSSHKey, wired onto every
+// ssh-ed25519/ssh-rsa/ssh-dsa leaf) judge identically — pkg/daemon imports
+// pkg/config, so the rule cannot live here for the commit gate to reach it.
+// This belt remains as defense in depth for values that reach apply without
+// a strict commit (tolerant load / peer-sync, #1960): a malformed key is
+// refused before any credential mutation, and (#14694) suppresses only the
+// key install/revoke for that principal, never the password/shell reconcile.
 func validateAuthorizedSSHKeys(principal string, keys []string) error {
 	for i, key := range keys {
-		if strings.ContainsAny(key, "\r\n") || !validAuthorizedSSHKey(key) {
+		if !config.ValidAuthorizedSSHKey(key) {
 			return fmt.Errorf("SSH key %d for %s must be a single-line OpenSSH public key", i+1, principal)
 		}
 	}

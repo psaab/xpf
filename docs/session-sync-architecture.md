@@ -357,7 +357,18 @@ userspace sessions do **not** flow back through `SetClusterSyncedSession*`.
 They are exported through:
 
 - the continuous userspace event stream (steady state), or its
-  `DrainSessionDeltas(...)` fallback poll when the stream is down
+  `DrainSessionDeltas(...)` fallback poll when the stream is down.
+  The two legs are alternatives, never both authoritative for one delta
+  (#16627): the helper mirrors a delta into the RPC-fallback buffer only
+  when its lossless event-stream enqueue did not succeed (the delta
+  carries its assigned stream sequence in `stream_seq` on the stream
+  leg; a fallback-only copy carries 0); and the daemon's 5 s connected
+  tick discards only
+  fallback copies at or below the stream's applied watermark
+  (`LastAppliedSequence`), queueing any copy the stream never carried,
+  so an already-streamed delta can never be replayed with a fresh
+  generation that would resurrect a closed session or delete a live
+  successor on the standby
 - a one-shot `ExportOwnerRGSessions(...)` bulk republish, triggered by an
   event-stream **FullResync** (a #2874 sequence gap or a #2442 delta-ring
   overflow) — **not** by the demotion-prep path
@@ -1763,6 +1774,17 @@ handshake:
   unblocking a stalled handshake read instead of waiting out the 5s shutdown
   budget. Outbound dials bypass the cap (they are our own, bounded to one per
   fabric) but are still tracked for this shutdown close.
+- **Bounded pre-auth logging (#16748).** The accept loop logs
+  "peer connected" at Debug only — it fires before authentication, so
+  at Info an unauthenticated host on the sync segment could drive one
+  journal line per connection ahead of the admission limiter. The
+  post-auth "handling new connection" Info (and, when keyed, the
+  "connection authenticated" Info) is the operator signal that a peer
+  actually connected. A failed handshake bumps
+  `PreAuthHandshakeFailed` on every failure and emits its WARN at
+  most ~1/sec through its own limiter (`notePreAuthHandshakeFailed`,
+  independent of the admission-cap limiter), carrying the cumulative
+  `failed_total` so the bound does not hide the volume.
 
 ### Bulk-Prime Retry Loop
 
@@ -2602,11 +2624,19 @@ been copied.
 | equal to the daemon's | match | proceed |
 | anything else | mismatch | WITHHOLD the delta batch |
 
-Enforcement sits on the two queue entry points the three producers use:
-`queueUserspaceSessionDeltas` for the binary stream and the JSON drain, and
-`queueUserspaceSessionDeltasComplete` for the FullResync export. The export's
-form reports a withheld batch as a failure, so its frame is not acknowledged
-(#9767).
+Enforcement sits on the queue entry points the producers use:
+`queueUserspaceSessionDeltas` for the binary stream and the JSON drain,
+`queueUserspaceSessionDeltasComplete` for the FullResync export, and
+`userspaceBulkSnapshotWithConfig` for the #6031 cold-prime / resync /
+inventory bulk snapshot (`BulkSnapshotSource`). The export's form reports
+a withheld batch as a failure, so its frame is not acknowledged (#9767);
+the bulk form returns `errUserspaceDeltaSchemaWithheld`, so `doBulkSync`
+frames no window and leaves the cold-prime/resync obligation armed
+(#16753). The bulk source records the export's returned `ProcessStatus`
+fingerprint before admitting, so it is gated even when no drain has run
+yet. The withheld-batch counter (`UserspaceDeltaSchemaWithheldCount`) is
+surfaced by `show chassis cluster statistics` on both the console and the
+remote gRPC renderer.
 
 **The refusal is loud on purpose.** Withholding quietly would trade a silent
 zero-fill for a silently dead HA sync — the standby would stop receiving

@@ -31,6 +31,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
 	"github.com/psaab/xpf/pkg/sysservices"
@@ -98,24 +99,14 @@ func (s *Server) showStorage(buf *strings.Builder) {
 // Returns error when the underlying configstore lookup fails so the
 // dispatcher can re-raise as a gRPC status error.
 func (s *Server) showCommitHistory(buf *strings.Builder) error {
-	entries, err := s.store.ListCommitHistory(50)
+	rows, err := s.store.ListCommitHistoryRows(50)
 	if err != nil {
 		return status.Errorf(codes.Internal, "commit history: %v", err)
 	}
-	if len(entries) == 0 {
-		buf.WriteString("No commit history available\n")
-		return nil
-	}
-	for i, e := range entries {
-		detail := ""
-		if e.Detail != "" {
-			// #15144: legacy journal lines may carry control characters;
-			// escape Detail so one entry renders as one line (new
-			// descriptions are rejected at commit in configstore).
-			detail = "  " + termsafe.SanitizeForDisplay(e.Detail)
-		}
-		fmt.Fprintf(buf, "  %d  %s  %s%s\n", i, e.Timestamp.Format("2006-01-02 15:04:05"), e.Action, detail)
-	}
+	// #16721: shared renderer with the in-process CLI —
+	// most-recent-first, rollback-slot labels, principal, and
+	// <rollback pending> while a window is armed.
+	buf.WriteString(configstore.RenderCommitHistory(rows, s.store.IsConfirmPending()))
 	return nil
 }
 
@@ -267,14 +258,19 @@ func (s *Server) showSystemServices(buf *strings.Builder) {
 	for _, line := range ls.Lines() {
 		fmt.Fprintln(buf, line)
 	}
+	if cfg.System.Services != nil && cfg.System.Services.SSH != nil {
+		// #16735: same effective-policy helper as the local CLI so
+		// the surfaces cannot diverge; unset leaf is the factory
+		// prohibit-password posture, not "deny".
+		fmt.Fprintf(buf, "  SSH:            enabled (root-login: %s)\n",
+			config.SSHRootLoginDisplayName(cfg.System.Services.SSH.RootLogin))
+	} else {
+		// #16737: sshd is not owned by the stanza — removing it only
+		// removes the xpf drop-in and sshd keeps serving under
+		// base-image defaults. Never drop the row silently.
+		fmt.Fprintln(buf, "  SSH:            running (not managed — no system services ssh; sshd serves under base-image defaults)")
+	}
 	if cfg.System.Services != nil {
-		if cfg.System.Services.SSH != nil {
-			rootLogin := cfg.System.Services.SSH.RootLogin
-			if rootLogin == "" {
-				rootLogin = "deny"
-			}
-			fmt.Fprintf(buf, "  SSH:            enabled (root-login: %s)\n", rootLogin)
-		}
 		if cfg.System.Services.NetconfSSH {
 			fmt.Fprintln(buf, "  NETCONF SSH:    configured but NOT served (no NETCONF daemon; tcp/830 not served)")
 		}

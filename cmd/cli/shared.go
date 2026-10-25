@@ -205,6 +205,7 @@ func (c *ctl) dispatchOperational(line string) error {
 		if err != nil {
 			return fmt.Errorf("%v", err)
 		}
+		c.editPath = nil
 		c.configMode.Store(true)
 		c.rl.SetPrompt(c.configPrompt())
 		if exclusive {
@@ -718,11 +719,21 @@ func (c *ctl) dispatchTopUp15082(line string) error {
 	// intact), not a re-join of lexed tokens.
 	c.editPath = append([]string{}, target...)
 	err := c.dispatchConfig(innerLine)
-	// #16608: restore the NORMALIZED cursor, not the raw saved spelling,
-	// so a pre-fix whitespace-bearing cursor cannot re-enter split.
-	c.editPath = config.NormalizeEditPathTokens(saved)
-	if c.rl != nil {
-		c.rl.SetPrompt(c.configPrompt())
+	// #16702: the inner command may have been a top-level exit/quit
+	// that released configuration mode (configMode=false,
+	// editPath=nil, operational prompt). Restoring the pre-exit
+	// cursor/prompt unconditionally would resurrect stale state:
+	// the next configure prints [edit] at the root while later
+	// commands are prefixed with the stale cursor. Restore only
+	// while still in configuration mode.
+	if c.configMode.Load() {
+		// #16608: restore the NORMALIZED cursor, not the raw saved
+		// spelling, so a pre-fix whitespace-bearing cursor cannot
+		// re-enter split.
+		c.editPath = config.NormalizeEditPathTokens(saved)
+		if c.rl != nil {
+			c.rl.SetPrompt(c.configPrompt())
+		}
 	}
 	return err
 }

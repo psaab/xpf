@@ -397,11 +397,16 @@ func (c *CLI) showSystemServices() error {
 	}
 
 	if cfg.System.Services != nil && cfg.System.Services.SSH != nil {
-		rootLogin := cfg.System.Services.SSH.RootLogin
-		if rootLogin == "" {
-			rootLogin = "deny"
-		}
-		fmt.Printf("  SSH:            enabled (root-login: %s)\n", rootLogin)
+		// #16735: report the EFFECTIVE root-login policy. An unset leaf
+		// emits no PermitRootLogin in the managed drop-in, so the factory
+		// prohibit-password posture applies — not "deny".
+		fmt.Printf("  SSH:            enabled (root-login: %s)\n",
+			config.SSHRootLoginDisplayName(cfg.System.Services.SSH.RootLogin))
+	} else {
+		// #16737: sshd is not owned by the stanza — removing it only
+		// removes the xpf drop-in and sshd keeps serving under
+		// base-image defaults. Never drop the row silently.
+		fmt.Println("  SSH:            running (not managed — no system services ssh; sshd serves under base-image defaults)")
 	}
 	if cfg.System.Services != nil && cfg.System.Services.NetconfSSH {
 		fmt.Println("  NETCONF SSH:    configured but NOT served (no NETCONF daemon; tcp/830 not served)")
@@ -633,12 +638,12 @@ func (c *CLI) showSystemUptime() error {
 // showSystemBootMessages shows recent boot messages via journalctl.
 
 func (c *CLI) showSystemBootMessages() error {
-	// #6584: this is the SAME journald text as `show log`, and it was not
-	// named in the issue — it was found by sweeping the predicate rather than
-	// the two cited sites. It has to be BUFFERED to be guarded at all: wiring
-	// cmd.Stdout straight to os.Stdout leaves no string to sanitize. The
-	// output is bounded at 100 lines, so buffering costs nothing.
-	out, err := exec.Command("journalctl", "--boot", "-n", "100", "--no-pager").CombinedOutput()
+	// #16725: -k restricts to kernel messages only (the Junos
+	// boot-messages contract). Without it, --boot returns the whole
+	// system journal (sshd/sudo/other daemons) to a view-only class.
+	// #6584: this is journald text like `show log`, buffered so it can
+	// be sanitized; output is bounded at 100 lines.
+	out, err := exec.Command("journalctl", "-k", "--boot", "-n", "100", "--no-pager").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("journalctl --boot: %w", err)
 	}
@@ -874,24 +879,14 @@ func (c *CLI) handleShowSystem(args []string) error {
 	case "commit":
 		// "show system commit history"
 		if len(args) >= 2 && args[1] == "history" {
-			entries, err := c.store.ListCommitHistory(50)
+			rows, err := c.store.ListCommitHistoryRows(50)
 			if err != nil {
 				return fmt.Errorf("commit history: %v", err)
 			}
-			if len(entries) == 0 {
-				fmt.Println("No commit history available")
-				return nil
-			}
-			for i, e := range entries {
-				detail := ""
-				if e.Detail != "" {
-					// #15144: legacy journal lines may carry control
-					// characters; escape Detail so one entry renders as
-					// one line (new descriptions are rejected at commit).
-					detail = "  " + termsafe.SanitizeForDisplay(e.Detail)
-				}
-				fmt.Printf("  %d  %s  %s%s\n", i, e.Timestamp.Format("2006-01-02 15:04:05"), e.Action, detail)
-			}
+			// #16721: most-recent-first, rollback-slot labels,
+			// <rollback pending> while a window is armed — shared
+			// renderer with the gRPC surface.
+			fmt.Print(configstore.RenderCommitHistory(rows, c.store.IsConfirmPending()))
 			return nil
 		}
 		fmt.Println("show system commit:")

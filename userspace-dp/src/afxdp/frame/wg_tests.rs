@@ -1992,3 +1992,145 @@ fn build_forwarded_frame_from_frame_encapsulates_wireguard_7167() {
          other builder the dispatcher could have selected"
     );
 }
+
+// === #16711: underlay PTB learning (per-peer outer PMTU soft state) ===
+
+/// The v6 WG fixture from `wg_encap_frame_sources_outer_from_physical_wan_primary_v6`,
+/// plus the local outer source in `local_v6` so a PTB addressed to it is ours.
+fn pmtu_v6_state() -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
+    let mut snap = wg_outer_mtu_snapshot();
+    snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
+    snap.interfaces[1].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00:dead::1/64".to_string(), scope: 0, ..Default::default() });
+    snap.routes.push(crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "inet6.0".to_string(),
+    family: "inet6".to_string(),
+    destination: "2001:db8:113::/48".to_string(),
+    next_hop_weights: vec![],
+    next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
+    discard: false,
+    next_table: String::new(),
+    preference: 0,
+    rule_priority: 0, mtu: 0, next_table_route: false });
+    snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
+    snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
+    snap.tunnel_endpoints[0].source = "2001:559:8585:80::8".to_string();
+    snap.tunnel_endpoints[0].destination = "2001:db8:113::7".to_string();
+    snap.tunnel_endpoints[0].wg_peers[0].wg_allowed_ips = vec!["fd00:123::/64".to_string()];
+    snap.tunnel_endpoints[0].wg_peers[0].wg_endpoint = "[2001:db8:113::7]:51820".to_string();
+    let mut state = build_forwarding_state(&snap);
+    install_v6_peer_next_hop_neighbor(&mut state);
+    let peer_ep: std::net::SocketAddr = "[2001:db8:113::7]:51820".parse().unwrap();
+    state.wg_engines.insert(1, Arc::new(established_initiator_engine(peer_ep, "fd00:123::/64")));
+    (state, peer_ep, inner_v6_frame())
+}
+
+/// Build an ICMPv6 Packet-Too-Big frame (eth + v6 + icmpv6) quoting a
+/// WG outer from `outer_src` to `peer_ep` with UDP ports src/dst.
+fn ptb_v6_frame(outer_src: &str, peer_ep: std::net::SocketAddr, mtu: u32, src_port: u16, dst_port: u16) -> Vec<u8> {
+    let src: std::net::Ipv6Addr = outer_src.parse().unwrap();
+    let dst = match peer_ep.ip() { IpAddr::V6(v6) => v6, _ => panic!("v6 peer") };
+    let mut quote = Vec::new();
+    quote.extend_from_slice(&[0x60, 0, 0, 0, 0, 40, 17, 64]);
+    quote.extend_from_slice(&src.octets());
+    quote.extend_from_slice(&dst.octets());
+    quote.extend_from_slice(&src_port.to_be_bytes());
+    quote.extend_from_slice(&dst_port.to_be_bytes());
+    quote.extend_from_slice(&[0u8; 36]);
+    let router: std::net::Ipv6Addr = "2001:559:8585:80::1".parse().unwrap();
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
+    f.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    f.extend_from_slice(&[0x86, 0xdd]);
+    f.extend_from_slice(&[0x60, 0, 0, 0]);
+    f.extend_from_slice(&((8 + quote.len()) as u16).to_be_bytes());
+    f.push(58); f.push(64);
+    f.extend_from_slice(&router.octets());
+    f.extend_from_slice(&src.octets());
+    f.push(2); f.push(0); f.extend_from_slice(&[0, 0]);
+    f.extend_from_slice(&mtu.to_be_bytes());
+    f.extend_from_slice(&quote);
+    f
+}
+
+/// Inner v6 frame with a UDP payload of `total_inner_len` L3 bytes.
+fn inner_v6_frame_sized(total_inner_len: usize) -> Vec<u8> {
+    let src_ip: std::net::Ipv6Addr = "fd00:61::50".parse().unwrap();
+    let dst_ip: std::net::Ipv6Addr = "fd00:123::9".parse().unwrap();
+    assert!(total_inner_len >= 48);
+    let payload_len = (total_inner_len - 40) as u16;
+    let data_len = total_inner_len - 40 - 8;
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    frame.extend_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
+    frame.extend_from_slice(&[0x86, 0xdd]);
+    frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    frame.extend_from_slice(&payload_len.to_be_bytes());
+    frame.push(PROTO_UDP);
+    frame.push(64);
+    frame.extend_from_slice(&src_ip.octets());
+    frame.extend_from_slice(&dst_ip.octets());
+    frame.extend_from_slice(&4000u16.to_be_bytes());
+    frame.extend_from_slice(&5000u16.to_be_bytes());
+    frame.extend_from_slice(&payload_len.to_be_bytes());
+    frame.extend_from_slice(&0u16.to_be_bytes());
+    frame.extend_from_slice(&vec![0xabu8; data_len]);
+    frame
+}
+
+#[test]
+fn wg_pmtu_ptb_learns_and_caps_encap_16711() {
+    let (state, peer_ep, _small) = pmtu_v6_state();
+    let decision = wg_encap_decision();
+    // Pre-PTB: a 1320-byte inner fits the 1500 local MTU (outer 1400).
+    let inner = inner_v6_frame_sized(1320);
+    assert!(wg_encap_frame(&inner, inner_v6_meta(), &decision, &state).is_some(),
+        "pre-PTB 1320 inner must encap at local 1500");
+    // Valid PTB(1400) quoting the live peer outer (src port = listen 51820).
+    let ptb = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 1400, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &ptb, 14), WgPtbOutcome::Learned);
+    // Post-PTB: post_transform inner MTU advertises wg_inner_mtu(v6,1400)=1320.
+    let inner_mtu = crate::afxdp::icmp_ptb::post_transform_inner_mtu(&decision, &state, false, libc::AF_INET6 as u8, 0, Some("fd00:123::9".parse().unwrap()));
+    assert_eq!(inner_mtu, crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET6, 1400));
+    assert_eq!(inner_mtu, 1320);
+    // Next 1321-byte inner now exceeds the learned budget (encap guard drops).
+    // (1320 exactly fits: outer = 1320+80 = 1400.)
+    assert!(wg_encap_frame(&inner, inner_v6_meta(), &decision, &state).is_some(),
+        "1320 inner must still encap after PTB(1400) (outer exactly 1400)");
+    let big = inner_v6_frame_sized(1321);
+    assert!(wg_encap_frame(&big, inner_v6_meta(), &decision, &state).is_none(),
+        "1321 inner must drop after PTB(1400): outer 1401 > learned 1400");
+}
+
+#[test]
+fn wg_pmtu_forged_ptb_ignored_16711() {
+    let (state, peer_ep, _s) = pmtu_v6_state();
+    // Wrong dst port (not the peer endpoint port).
+    let bad_port = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 1300, 51820, 9999);
+    assert_eq!(consume_wg_outer_ptb(&state, &bad_port, 14), WgPtbOutcome::Ignored);
+    // Wrong src port (not wg_listen_port).
+    let bad_src = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 1300, 1234, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &bad_src, 14), WgPtbOutcome::Ignored);
+    // Quoted dst is not any live peer endpoint.
+    let other: std::net::SocketAddr = "[2001:db8:999::7]:51820".parse().unwrap();
+    let bad_dst = ptb_v6_frame("2001:559:8585:80::8", other, 1300, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &bad_dst, 14), WgPtbOutcome::Ignored);
+    // A larger PTB must never raise a learned smaller value.
+    let good = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 1400, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &good, 14), WgPtbOutcome::Learned);
+    let bigger = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 1500, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &bigger, 14), WgPtbOutcome::Learned);
+    let engine = state.wg_engines.get(&1).unwrap();
+    let pk = engine.peer_endpoints()[0].0;
+    assert_eq!(engine.peer_pmtu(&pk, monotonic_nanos()), Some(1400),
+        "larger forged/repeat PTB must not raise the learned 1400");
+}
+
+#[test]
+fn wg_pmtu_floor_and_aging_16711() {
+    // Pure store rules: sub-floor v6 PTB clamps to 1280; aged entry expires.
+    assert_eq!(crate::afxdp::wg::pmtu::wg_pmtu_floor(true), 1280);
+    assert_eq!(crate::afxdp::wg::pmtu::pmtu_after_offer(None, 1000, true), Some(1280));
+    assert_eq!(crate::afxdp::wg::pmtu::pmtu_after_offer(Some(1400), 1500, true), None);
+    let t0 = 1_000_000u64;
+    assert_eq!(crate::afxdp::wg::pmtu::effective_pmtu(1400, t0, t0 + 1000), Some(1400));
+    assert_eq!(crate::afxdp::wg::pmtu::effective_pmtu(1400, t0, t0 + crate::afxdp::wg::pmtu::WG_PMTU_AGE_NS + 1), None);
+}

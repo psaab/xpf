@@ -1417,6 +1417,16 @@ type Daemon struct {
 	// stale-update detection.
 	rgStatesMu sync.RWMutex
 	rgStates   map[int]*rgStateMachine
+	// rethServicesApplied tracks the last RETH service ownership applied
+	// per RG in VRRP mode (#16696): true after applyRethServicesForRG,
+	// false/absent after clearRethServicesForRG. reconcileRGState compares
+	// it against snapshotRethMasterState every pass (level-triggered
+	// converger), so a service edge lost because the rg-state transition
+	// was produced by handleClusterEvent or a discarded sync-hold mirror
+	// refresh — neither of which runs the edge — is repaired on the next
+	// pass. Guarded by rethServicesMu.
+	rethServicesMu      sync.Mutex
+	rethServicesApplied map[int]bool
 
 	// blackholeRoutes tracks blackhole routes injected for inactive RG subnets.
 	// When an RG goes BACKUP, we inject blackhole routes for its RETH subnets
@@ -2242,6 +2252,7 @@ func New(opts Options) (*Daemon, error) {
 		neighListFn:                netlink.NeighList,
 		directAnnounceSchedule:     []time.Duration{0, 250 * time.Millisecond, 1 * time.Second, 2 * time.Second, 4 * time.Second, 6 * time.Second},
 		directVIPOwned:             make(map[int]bool),
+		rethServicesApplied:        make(map[int]bool),
 		localFailoverCommitReady:   make(map[int]bool),
 		localFailoverCommitTimeout: 3 * time.Second,
 		localFailoverCommitDelay:   200 * time.Millisecond,

@@ -273,9 +273,10 @@ Guard layers (`build-userspace-xdp.sh`):
    path. `RUST_BPF_TOOLCHAIN=...` overrides the pin for bisects, but
    installing an unpinned object additionally requires
    `XPF_SHIM_ALLOW_UNPINNED_INSTALL=1`.
-   **Build provenance (#15218, #16657)**: the gate verdict (schema 2)
+   **Build provenance (#15218, #16657, #16701)**: the gate verdict (schema 3)
    records the toolchain cargo ran, a `pinned` bool, the bpf-linker
-   version and a codegen-env digest. The recipe runs cargo under
+   version, a codegen-env digest, and (#16701) the `kernel_release`
+   the processed-insn count was measured on. The recipe runs cargo under
    `env -i` with an explicit allowlist, a repo-controlled empty
    `CARGO_HOME`, and forced `--config profile.release.*` /
    `target.bpfel-unknown-none.linker` values (a pinned build under
@@ -289,7 +290,15 @@ Guard layers (`build-userspace-xdp.sh`):
    longer ship as a plain PASS.
 3. **Deploy pre-flight** — `xpfd verify-dataplane` runs the same
    verify-only load against the object embedded in the invoked
-   binary (exit 0 PASS / 3 verifier REJECT / 1 other).
+   binary (exit 0 PASS / 3 verifier REJECT / 1 other / 4 loads but
+   below the headroom floor on this kernel / 5 loads but unmeasured;
+   #16701). It prints the processed-insn count, headroom, floor and
+   running kernel on every arm and enforces the same 15% floor
+   shimverify enforces on the build host, on the kernel that will
+   actually load the object — guest kernels have charged the same
+   object 3.8–6.1% more (#15645, #15854). There is no guest-side
+   override; a below-floor deploy is refused here and must be a
+   deliberate build-time decision instead.
    `test/incus/cluster-setup.sh deploy_vm()` pushes the new binary to
    a temp path and runs this BEFORE stopping the old daemon — a
    REJECT refuses the deploy with the old dataplane still forwarding.
@@ -553,18 +562,34 @@ Guard layers (`build-userspace-xdp.sh`):
      at 15% the slack is 65,825 against a cost of 87,000. **General form: a
      threshold whose sensitivity is defined relative to a moving value needs a
      check on the relationship, not on the value.**
-   - **Processed-insn counts did NOT vary by kernel, measured (#6884).** The
-     byte-identical tracked object (md5 `8799db9d…`) verifies at **784,175 on
-     both `7.0.13+deb14-amd64` and `7.0.0-rc7+`** — zero difference. This is
-     recorded because the opposite was *assumed* during #6884 and used to
-     argue for a ratio over a tracked absolute: the 947,188 figure in
-     `verify_userspace_shim_headroom_test.go` is annotated "kernel 7.0" and
-     was read as a cross-kernel data point, but it is the same kernel line as
-     today's host and simply an older, larger object. **The three known counts
-     — 990,796 → 947,188 → 784,175 — are a time series of the object
-     shrinking, not kernel spread.** No evidence either way for a wider
-     version gap (6.x vs 7.x); the measurement above bounds only 7.0.0-rc7 →
-     7.0.13.
+   - **Processed-insn counts DO vary by kernel — corrected (#16701).**
+     The #6884 measurement below was real but narrow: the byte-identical
+     tracked object (md5 `8799db9d…`) verified at **784,175 on both
+     `7.0.13+deb14-amd64` and `7.0.0-rc7+`** — zero difference across
+     that pair. It does NOT generalise. Repo records since then show
+     the loss-cluster guest kernels charging the same object materially
+     more: #15645 measured 977,241 on guest 7.0.0 against 920,733 on
+     the build host (+6.1%; guest headroom 2.28% vs host 7.93%), and
+     `docs/log/15854.md` records 963,340 on host 7.2.8 against a guest
+     7.0.0 REJECT at the 1M cap (≥+3.8%). A host-measured headroom
+     therefore overstates guest headroom by roughly that spread — the
+     recorded 14.34% was roughly 9% on the deployment kernel — and
+     twice a passing/overridden host verdict hid a guest REJECT until
+     the deploy pre-flight refused it (#15645, #15854). So: every
+     measurement now NAMES its kernel. The gate verdict (schema 3)
+     records `provenance.kernel_release` (`uname -r` of the measuring
+     kernel; consumers fail closed without it), the shimverify banner
+     prints it, and `xpfd verify-dataplane` prints the count/headroom/
+     floor on the RUNNING kernel and enforces the same 15% floor
+     there (exit 4 below floor, 5 unmeasured; no guest-side override).
+     The floor's early warning thus fires on the kernel that will
+     actually load the object, not only on the build host. Still true
+     from #6884: the 947,188 figure in
+     `verify_userspace_shim_headroom_test.go` is an older, larger
+     object on the same kernel line, and the three counts 990,796 →
+     947,188 → 784,175 are a time series of the object shrinking —
+     neither is, by itself, kernel-spread evidence; the spread
+     evidence is the paired host/guest records above.
    - **The decision lives in ONE place.** `decide()` maps
      `(stats, override)` to the verdict, and `run()` only PRESENTS it —
      `main()` is `os.Exit(run(...))` and nothing else. Before that, `main`

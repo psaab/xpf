@@ -75,8 +75,8 @@ const ipfixEnterpriseBit uint16 = 0x8000
 // #3748/#5312: RFC 7014 (Flow Selection Techniques) FLOW-selection Information
 // Elements carried by the Options Data Record that advertises the group's
 // 1-in-N sampling configuration to a collector. xpf samples at SESSION-RECORD
-// (Flow) granularity — ShouldExport applies the 1-in-N modulo per SESSION_CLOSE
-// event, selecting whole Flows, not packets. The PSAMP packet-selection IEs
+// (Flow) granularity — SampledForOpen applies the 1-in-N modulo at SESSION_OPEN,
+// selecting whole Flows, not packets. The PSAMP packet-selection IEs
 // (selectorAlgorithm 304 / samplingPacketInterval 305 / samplingPacketSpace 306)
 // would tell a standards collector this is PACKET sampling and to renormalize
 // each record's octet/packet counters by N — inflating the already-complete
@@ -844,6 +844,30 @@ func (e *IPFIXExporter) ExportSessionCloseRemainder(rec logging.EventRecord, evt
 	e.exportSessionCloseRemainder(rec, evt, true, basePkts, baseBytes, baseRevPkts, baseRevBytes)
 }
 
+// CloseFlowOrSample is the #16742 close path: recorded open state
+// exports without a second slot; absent state makes one close-time
+// decision via decide.
+func (e *IPFIXExporter) CloseFlowOrSample(key FlowKey, decide func() bool) (bool, uint64, uint64, uint64, uint64) {
+	return e.exporterCore.CloseFlowOrSample(key, decide)
+}
+
+// TransferFlowStateTo carries open state to the replacement exporter
+// for the same group key (#16742).
+func (e *IPFIXExporter) TransferFlowStateTo(dst *IPFIXExporter, key FlowKey) {
+	if dst == nil {
+		return
+	}
+	e.exporterCore.TransferFlowStateTo(&dst.exporterCore, key)
+}
+
+// AbsorbSampledInto transfers all open state to dst (#16742).
+func (e *IPFIXExporter) AbsorbSampledInto(dst *IPFIXExporter) {
+	if dst == nil {
+		return
+	}
+	e.exporterCore.AbsorbSampledInto(&dst.exporterCore)
+}
+
 func (e *IPFIXExporter) sendTemplates() {
 	// RFC 7011 §3.1 / §10.3.2: the IPFIX Sequence Number is the cumulative
 	// count of Data Records sent in all prior Messages for this Observation
@@ -886,7 +910,7 @@ func (e *IPFIXExporter) sendTemplates() {
 // cadence for sampled groups.
 //
 // FLOW-granularity representation (#5312): xpf samples 1-in-N at SESSION-RECORD
-// granularity — ShouldExport applies the modulo per SESSION_CLOSE event,
+// granularity — SampledForOpen applies the modulo at SESSION_OPEN,
 // selecting whole Flows, not 1-in-N packets in the datapath as Junos jflow
 // does. The record therefore carries the RFC 7014 flow-selection IEs
 // (flowSelectorAlgorithm=1 / samplingFlowInterval=1 / samplingFlowSpacing=N-1),

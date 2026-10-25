@@ -443,6 +443,131 @@ type HATakeoverReadiness struct {
 	SessionSocketTimeouts uint64
 }
 
+// HATakeoverBlocker is a stable, bounded blocker name that
+// HATakeoverReadiness can report. The vocabulary is the single source of
+// truth shared by the mapper below and the Prometheus emitter in pkg/api:
+// every value the mapper can return is listed, and the emitter renders one
+// series per entry plus a catch-all for values outside the vocabulary.
+type HATakeoverBlocker = string
+
+// Bounded userspace HA takeover blocker vocabulary (#16730). These are the
+// only specific names HATakeoverReadiness returns; any reason the mapper
+// does not recognise is reported as HATakeoverBlockerOther so a new
+// takeoverReadyLocked reason can never be silently dropped by the
+// metrics emitter (as fabric_not_converged / fabric_peer_unresolved
+// were, #15918) nor mislabelled as forwarding_unsupported (as the
+// unpublished-generation reason was).
+const (
+	HATakeoverBlockerHelperDown            HATakeoverBlocker = "helper_down"
+	HATakeoverBlockerNotEnabled            HATakeoverBlocker = "not_enabled"
+	HATakeoverBlockerForwardingUnsupported HATakeoverBlocker = "forwarding_unsupported"
+	HATakeoverBlockerNotArmed              HATakeoverBlocker = "not_armed"
+	HATakeoverBlockerNotActive             HATakeoverBlocker = "not_active"
+	HATakeoverBlockerXSKLivenessFailed     HATakeoverBlocker = "xsk_liveness_failed"
+	HATakeoverBlockerXSKUnproven           HATakeoverBlocker = "xsk_unproven"
+	HATakeoverBlockerSessionMirrorFailed   HATakeoverBlocker = "session_mirror_failed"
+	HATakeoverBlockerRepairOverflow        HATakeoverBlocker = "repair_overflow"
+	HATakeoverBlockerInventoryDebtOwed     HATakeoverBlocker = "inventory_debt_owed"
+	HATakeoverBlockerSnapshotRetryDebt     HATakeoverBlocker = "snapshot_retry_debt"
+	HATakeoverBlockerSnapshotUnpublished   HATakeoverBlocker = "snapshot_unpublished"
+	HATakeoverBlockerPendingHAClear        HATakeoverBlocker = "pending_ha_clear"
+	HATakeoverBlockerPendingHAReplay       HATakeoverBlocker = "pending_ha_replay"
+	HATakeoverBlockerEventStreamUnbound    HATakeoverBlocker = "event_stream_unbound"
+	HATakeoverBlockerFabricNotConverged    HATakeoverBlocker = "fabric_not_converged"
+	HATakeoverBlockerFabricPeerUnresolved  HATakeoverBlocker = "fabric_peer_unresolved"
+	HATakeoverBlockerOther                 HATakeoverBlocker = "other"
+)
+
+// HATakeoverBlockers is the bounded vocabulary emitted as
+// xpf_userspace_ha_takeover_blocker{blocker=...} series, in emit order.
+// HATakeoverBlockerOther is included so an unknown mapper value still
+// surfaces (at 1 under "other") instead of being discarded. Tests assert
+// the mapper never returns a name outside this list.
+var HATakeoverBlockers = []HATakeoverBlocker{
+	HATakeoverBlockerHelperDown,
+	HATakeoverBlockerNotEnabled,
+	HATakeoverBlockerForwardingUnsupported,
+	HATakeoverBlockerNotArmed,
+	HATakeoverBlockerNotActive,
+	HATakeoverBlockerXSKLivenessFailed,
+	HATakeoverBlockerXSKUnproven,
+	HATakeoverBlockerSessionMirrorFailed,
+	HATakeoverBlockerRepairOverflow,
+	HATakeoverBlockerInventoryDebtOwed,
+	HATakeoverBlockerSnapshotRetryDebt,
+	HATakeoverBlockerSnapshotUnpublished,
+	HATakeoverBlockerPendingHAClear,
+	HATakeoverBlockerPendingHAReplay,
+	HATakeoverBlockerEventStreamUnbound,
+	HATakeoverBlockerFabricNotConverged,
+	HATakeoverBlockerFabricPeerUnresolved,
+	HATakeoverBlockerOther,
+}
+
+// MapHATakeoverBlocker maps one free-text takeoverReadyLocked reason to
+// its bounded blocker name. The snapshot generation-unpublished and
+// snapshot-retry-debt reasons are matched before the forwarding default
+// so they are no longer mislabelled forwarding_unsupported. Capability
+// UnsupportedReasons arrive verbatim (e.g. "userspace three-color
+// policers require ...") and keep mapping to forwarding_unsupported;
+// any other unrecognised reason maps to "other", never to a specific
+// subsystem name.
+func MapHATakeoverBlocker(reason string) HATakeoverBlocker {
+	switch {
+	case strings.Contains(reason, "helper not running"):
+		return HATakeoverBlockerHelperDown
+	case strings.Contains(reason, "not enabled"):
+		return HATakeoverBlockerNotEnabled
+	case strings.Contains(reason, "snapshot retry debt"):
+		return HATakeoverBlockerSnapshotRetryDebt
+	case strings.Contains(reason, "snapshot generation") && strings.Contains(reason, "unpublished"):
+		return HATakeoverBlockerSnapshotUnpublished
+	case strings.Contains(reason, "forwarding unsupported"):
+		return HATakeoverBlockerForwardingUnsupported
+	case strings.Contains(reason, "not armed"):
+		return HATakeoverBlockerNotArmed
+	case strings.Contains(reason, "not active"):
+		return HATakeoverBlockerNotActive
+	case strings.Contains(reason, "liveness failed"):
+		return HATakeoverBlockerXSKLivenessFailed
+	case strings.Contains(reason, "liveness not proven"):
+		return HATakeoverBlockerXSKUnproven
+	case strings.Contains(reason, "session mirror unhealthy"):
+		return HATakeoverBlockerSessionMirrorFailed
+	case strings.Contains(reason, "repair overflow"):
+		return HATakeoverBlockerRepairOverflow
+	case strings.Contains(reason, "session inventory not reconciled"):
+		return HATakeoverBlockerInventoryDebtOwed
+	case strings.Contains(reason, "HA state clear pending"):
+		return HATakeoverBlockerPendingHAClear
+	case strings.Contains(reason, "HA state replay pending"):
+		return HATakeoverBlockerPendingHAReplay
+	case strings.Contains(reason, "event stream listener not bound"):
+		return HATakeoverBlockerEventStreamUnbound
+	case strings.Contains(reason, "fabric state not converged"):
+		return HATakeoverBlockerFabricNotConverged
+	case strings.Contains(reason, "fabric peer unresolved"):
+		return HATakeoverBlockerFabricPeerUnresolved
+	case strings.HasPrefix(reason, "userspace "):
+		// Verbatim capability UnsupportedReasons (the only remaining
+		// class produced by takeoverReadyLocked) mean forwarding is
+		// genuinely unsupported.
+		return HATakeoverBlockerForwardingUnsupported
+	default:
+		return HATakeoverBlockerOther
+	}
+}
+
+// IsHATakeoverBlocker reports whether name is in HATakeoverBlockers.
+func IsHATakeoverBlocker(name string) bool {
+	for _, b := range HATakeoverBlockers {
+		if b == name {
+			return true
+		}
+	}
+	return false
+}
+
 // HATakeoverReadiness returns the current readiness gates and session-socket
 // transport counters without performing RPCs or changing Manager state.
 func (m *Manager) HATakeoverReadiness() HATakeoverReadiness {
@@ -461,42 +586,7 @@ func (m *Manager) HATakeoverReadiness() HATakeoverReadiness {
 	}
 	m.mu.Unlock()
 	for _, reason := range reasons {
-		switch {
-		case strings.Contains(reason, "helper not running"):
-			s.Blockers = append(s.Blockers, "helper_down")
-		case strings.Contains(reason, "not enabled"):
-			s.Blockers = append(s.Blockers, "not_enabled")
-		case strings.Contains(reason, "forwarding unsupported"):
-			s.Blockers = append(s.Blockers, "forwarding_unsupported")
-		case strings.Contains(reason, "not armed"):
-			s.Blockers = append(s.Blockers, "not_armed")
-		case strings.Contains(reason, "not active"):
-			s.Blockers = append(s.Blockers, "not_active")
-		case strings.Contains(reason, "liveness failed"):
-			s.Blockers = append(s.Blockers, "xsk_liveness_failed")
-		case strings.Contains(reason, "liveness not proven"):
-			s.Blockers = append(s.Blockers, "xsk_unproven")
-		case strings.Contains(reason, "session mirror unhealthy"):
-			s.Blockers = append(s.Blockers, "session_mirror_failed")
-		case strings.Contains(reason, "repair overflow"):
-			s.Blockers = append(s.Blockers, "repair_overflow")
-		case strings.Contains(reason, "session inventory not reconciled"):
-			s.Blockers = append(s.Blockers, "inventory_debt_owed")
-		case strings.Contains(reason, "snapshot retry debt"):
-			s.Blockers = append(s.Blockers, "snapshot_retry_debt")
-		case strings.Contains(reason, "HA state clear pending"):
-			s.Blockers = append(s.Blockers, "pending_ha_clear")
-		case strings.Contains(reason, "HA state replay pending"):
-			s.Blockers = append(s.Blockers, "pending_ha_replay")
-		case strings.Contains(reason, "event stream listener not bound"):
-			s.Blockers = append(s.Blockers, "event_stream_unbound")
-		case strings.Contains(reason, "fabric state not converged"):
-			s.Blockers = append(s.Blockers, "fabric_not_converged")
-		case strings.Contains(reason, "fabric peer unresolved"):
-			s.Blockers = append(s.Blockers, "fabric_peer_unresolved")
-		default:
-			s.Blockers = append(s.Blockers, "forwarding_unsupported")
-		}
+		s.Blockers = append(s.Blockers, MapHATakeoverBlocker(reason))
 	}
 	return s
 }

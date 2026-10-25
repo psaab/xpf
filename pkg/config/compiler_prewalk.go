@@ -422,6 +422,22 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, eventInertWarnings...)
 
+	// #16712 ip-monitoring `then` gate. compileIPMonitoring reads only
+	// `preferred-route` under `then`, so the Junos interface action
+	// `then interface <if> enable|disable` (and any other undeclared
+	// `then` child) compiled to nothing with no warning — the backup
+	// interface was never enabled/disabled on probe failure. Scoped
+	// AST pre-walk (NOT closedWorld on `then`, which would inherit
+	// into preferred-route/route and only fire on SchemaValidate),
+	// permitted set read from the schema. Strict: hard-reject;
+	// lenient: warn so a persisted config still boots (#1960).
+	ipMonThenWarnings16712, err := validateIPMonThenChildrenAST16712(
+		tree.Children, opts.lenientIPMonThenChildren16712)
+	if err != nil {
+		return nil, nil, err
+	}
+	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, ipMonThenWarnings16712...)
+
 	// #4296 firewall-filter family-any specific-match gate. #4287 dual-compiles a
 	// `family any` filter into BOTH the inet and inet6 pools; a family-specific
 	// match under `family any` (a v4/v6 source/destination-address literal or a
@@ -930,6 +946,19 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 		return nil, nil, err
 	}
 
+	// #16672: a redundancy-group `node` statement that is not exactly
+	// `node <id> priority <value>` — above all the fused
+	// `node 1 priority 100 node 0 priority 200` a missing `;` makes,
+	// which the #8437 gate exempts as a same-keyword repeat and the
+	// compiler then wrote onto the first node, inverting RG primary
+	// placement. Strict at commit; warn on tolerant load, where the
+	// compiler keeps the first node's own priority.
+	rgNodePriorityWarnings16672, err := validateRGNodePriorityShapeAST(
+		tree.Children, opts.lenientRGNodePriorityShape16672)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// The #6662 packed-login-body gate and the #6701 built-in-class-shadow gate
 	// used to run here, on the ALREADY-EXPANDED single-node view. They now run
 	// PRE-EXPANSION as both-node unions from compileTree /
@@ -977,6 +1006,10 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	// them; a direct compile without SchemaValidate must still name
 	// the dropped statement, not only the generic #10707 advisory).
 	bgpAuthWarnings16621 := warnBGPAuth16621(tree)
+	// #16679: same treatment for the refused `multihop
+	// no-nexthop-change` spelling (strict gate refuses by name; the
+	// tolerant/direct compile paths must name the dropped statement).
+	bgpMultihopWarnings16679 := warnBGPMultihop16679(tree)
 
 	var warnings []string
 	warnings = append(warnings, ctrlCharWarnings...)
@@ -1027,11 +1060,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	warnings = append(warnings, monitorWeightWarnings...)
 	warnings = append(warnings, rgArityWarnings...)
 	warnings = append(warnings, clusterUnknownWarnings16456...)
+	warnings = append(warnings, rgNodePriorityWarnings16672...)
 	warnings = append(warnings, garpCountWarnings...)
 	warnings = append(warnings, bareLeafWarnings...)
 	warnings = append(warnings, staticRouteQNHWarnings...)
 	warnings = append(warnings, openWorldRoutingWarnings...)
 	warnings = append(warnings, bgpAuthWarnings16621...)
+	warnings = append(warnings, bgpMultihopWarnings16679...)
 	warnings = append(warnings, rootLoginDupWarnings...)
 	return warnings, uncovered16001, nil
 }

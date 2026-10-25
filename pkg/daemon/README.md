@@ -261,6 +261,18 @@ UNCONFIRMED B while the store and the tail subsystems say A, with the rollback
 announced as successful. The recovery mechanism has failed to recover, which is
 the #1960 no-brick concern in its concrete form.
 
+On a **nested** arm (re-issuing `commit confirmed` while a window is already
+pending, e.g. to extend it) the store retains the ORIGINAL rollback target —
+a nested `CommitConfirmed` cancels the timer but keeps `confirmPrevCfg`
+(`store_commit.go`) — so the timer would restore that original config, not
+the unconfirmed active one. Since #16668 both this gate and the device-map
+gate resolve the target through `Store.RollbackTargetForArm` (the retained
+target when a window is pending, the active config otherwise) instead of
+reading `ActiveConfig` unconditionally. Pre-flighting the unconfirmed config
+falsely refused an extension whenever that config was not yet appliable (for
+example it binds a feed that has not fetched yet) and named a binding the
+timer would never restore, and it never re-checked the true target at all.
+
 The rollback-target refusal is deliberately narrow: only `commit confirmed` is
 subject to it. Plain `commit` remains available to make a correction permanent.
 Gating the plain path would remove the only route OFF a poisoned active config.
@@ -271,6 +283,10 @@ compiled config, so there is nothing to validate.
 Regression coverage: `rollback_target_appliable_6707_test.go` (gate behaviour
 plus an AST wiring guard that the call is reached from `commitConfirmedAndApply`
 and absent from the plain-commit entry points),
+`nested_commit_confirmed_target_16668_test.go` (a nested arm over an
+unconfirmed feed-bound config succeeds against the healthy retained target,
+and a nested arm whose retained target is unappliable is refused naming that
+target),
 `peer_snapshot_commit_confirmed_10782_test.go` (incompatible-peer refusal
 before promotion plus capable-peer and disconnected-peer controls),
 `rollback_target_mirror_9588_test.go` (one tolerant-compiled row per refusal
@@ -322,11 +338,13 @@ always stays armed and the check runs twice:
     and attributes the refusal to DNS when the clone passes or still
     fails only with lookup-failed entries. At the cap the rollback
     *proceeds* instead of taking the safe state — promotion returns the
-    same object and the apply path re-resolves its dns-name entries in
-    place, so a recovered resolver yields the fresh answer and a
-    still-down resolver yields the per-entry fail-closed rendering
-    (#16595). The boot alarm names this class as waiting on dns-name
-    resolution rather than "refused by this build's dataplane".
+    target object and `executeConfirmedRollback` resolves its dns-name
+    entries into a private clone before the apply (#16687; published
+    configs are never written in place), so a recovered resolver yields
+    the fresh answer and a still-down resolver yields the per-entry
+    fail-closed rendering (#16595). The boot alarm names this class as
+    waiting on dns-name resolution rather than "refused by this build's
+    dataplane".
   - A target refused only because its feed producer is *absent* — the
     abandoned commit removed or renamed the feed, so its own apply
     cancelled the producer (#16661) — is not a late feed: nobody will
@@ -1700,6 +1718,27 @@ covers a dropped promotion event). A data RG that expects an instance
 but has none known yet stays gated on `AllVRRPMaster`. Guards:
 `failover_commit_ready_15165_test.go`.
 
+**A sync-hold mirror refresh is itself an edge producer (#16692).**
+`SetSyncHold` re-derives desired from the retained cluster/VRRP inputs, so
+clearing the hold can flip an RG active with no new event — and feeding the
+next input afterwards reports `Changed=false`. Every refresh must therefore
+HAND its transition to the edge consumers, not discard it:
+`watchVRRPEvents` and `watchClusterEvents` refresh the mirror scoped to the
+event's RG at the top of per-event handling (`syncRGSyncHoldTransition`) and
+merge it into the handler's `tr` (`mergeSyncHoldTransition`);
+`handleClusterEvent` re-refreshes scoped so direct callers are covered too;
+`reconcileRGState` keeps the pass-wide `syncRGSyncHold()` result and ORs each
+RG's transition into its `tr`. The scoped event-path form matters: a
+pass-wide refresh inside an event handler would consume an unrelated RG's
+pending release edge, whose services only that RG's own event or reconcile
+can run. Before #16692 the VRRP watcher never refreshed at all, so the
+preempt MASTER event `ReleaseSyncHold` itself triggers was judged against
+`syncHold=true` and the later cluster/reconcile refresh discarded the flip —
+the new owner wrote no `rg_active` and ran no `applyRethServicesForRG` (Kea
+RG groups, data-RG IPsec re-initiate) until some unrelated edge. Guards:
+`reth_sync_hold_vrrp_16692_test.go` (post-release MASTER row, release-only
+reconcile row, post-release promotion row, scoped-refresh row).
+
 **Where the wiring lives (#6428).** `startClusterComms` was a 602-line
 constructor; the sub-constructions were extracted verbatim into thirteen focused
 builders in **`daemon_ha_comms_wiring.go`** (VRF-device resolution, HA watchdog
@@ -2409,9 +2448,18 @@ never lock an operator out of a remote box it manages.
   The first-commit `PromoteRollback` branch also bumps `holderEpoch`, so a
   holder-bound commit authority minted before the timeout fails verification
   at promotion instead of promoting the reset candidate; an ordinary
-  (non-first) rollback does not bump it. `InternalCommitter` authorities are
-  stopped by the daemon recheck, not the epoch. Regression:
-  `bootstrap_commit_race_15055_test.go`.
+  (non-first) rollback over a CLEAN candidate does not bump it.
+  `InternalCommitter` authorities are stopped by the daemon recheck, not
+  the epoch. Regression: `bootstrap_commit_race_15055_test.go`.
+- **Dirty-discarding rollback fences parked commits (#16719).** A non-first
+  rollback that discards a DIRTY candidate (staged edits inside the window)
+  advances the store's `rollbackDiscardGen` counter instead of `holderEpoch`
+  (the holder did not change). Store-minted authorities record the counter
+  at mint and are refused at promotion with
+  `ErrCommitConfirmedRolledBack`; `InternalCommitter` commits are fenced by
+  sampling the counter before `applySem.Acquire` and re-checking it in
+  `commitWithGenBinding`. Regression: `commit_rollback_discard_16719_test.go`
+  (daemon + configstore).
 
 ## Notable gotchas
 
@@ -3655,6 +3703,15 @@ never lock an operator out of a remote box it manages.
   included) when an SSH stanza exists;
   `daemon_ssh_test.go` covers runtime rendering and
   `scripts/image/test_bake_sshd_password_auth_10771.py` checks the image drop-in.
+  **#16737:** that independence is a documented divergence from Junos —
+  deleting `system services ssh` removes only the managed drop-in, it
+  does NOT stop sshd. `show system services` therefore always prints an
+  SSH row (`running (not managed — no system services ssh; …)` when the
+  stanza is absent), and a commit whose zone host-inbound admits
+  `ssh`/`all`/`any-service` without the stanza carries a commit
+  advisory (`pkg/config/ssh_unmanaged_advisory_16737.go`). Owning sshd
+  enablement (stop/disable/mask) was deliberately not taken: lifeline
+  recovery depends on sshd existing outside xpf's config lifecycle.
 
   **Retry-owner visibility completed (#7615).** Six always-on loops in `Run`
   re-drive a failure that had no other owner. #6800 and #6802 published;
@@ -4364,7 +4421,11 @@ never lock an operator out of a remote box it manages.
   via `PublishRouteOverlaySnapshot` → `BumpFIBGeneration` ONLY after
   publish success, under `applySem`). The ip-monitoring engine lives
   in `pkg/ipmon`; RG transitions re-evaluate gating via
-  `reconcileIPMonGating` from `reconcileRGState`.
+  `reconcileIPMonGating` from `reconcileRGState` and, off the event
+  goroutine via `scheduleIPMonGating` (#16690), from the
+  `handleClusterEvent` ownership edges and the `tr.Changed` arms of
+  `watchVRRPEvents` — the event paths consume the rg-state edge, so
+  the reconcile safety net alone would see `Changed=false` and skip it.
 - `daemon_route_listener.go` filters kernel route events through
   `routing.LearnedRouteTableIDs` and marks a `pkg/coalesce` loop rather than
   publishing per event; subscription gaps and errors mark it as well. Coalesced

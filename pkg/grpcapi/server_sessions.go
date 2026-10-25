@@ -153,6 +153,31 @@ func (s *Server) sessionHAActive(inIf, outIf string, inZone, outZone uint16, zon
 	}
 }
 
+// stampSessionHAState sets HaActive/HaState from sessionHAActive (#16697).
+// Unknown ownership stamps HaState="unknown" and HaActive=false (retained
+// bool for compat); renderers must prefer HaState. Standalone (no cluster)
+// is Active/known.
+func (s *Server) stampSessionHAState(se *pb.SessionEntry, inZone, outZone uint16, zoneNames map[uint16]string) {
+	if active, known := s.sessionHAActive(se.IngressInterface, se.EgressInterface, inZone, outZone, zoneNames); known {
+		se.HaActive = active
+		if active {
+			se.HaState = "Active"
+		} else {
+			se.HaState = "Backup"
+		}
+	} else {
+		se.HaActive = false
+		se.HaState = "unknown"
+	}
+}
+
+func haStateFromActive(active bool) string {
+	if active {
+		return "Active"
+	}
+	return "Backup"
+}
+
 // getSessionsCursor implements cursor-based pagination.
 // It iterates only up to page_size matching entries, skips enrichment when
 // no_enrich is set, and computes the exact Total with a cancellation-sampled
@@ -254,11 +279,7 @@ func (s *Server) getSessionsCursor(ctx context.Context, req *pb.GetSessionsReque
 				}
 			}
 			se := sessionEntryV4(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, true)
-			if active, known := s.sessionHAActive(se.IngressInterface, se.EgressInterface, val.IngressZone, val.EgressZone, filter.zoneNames); known {
-				se.HaActive = active
-			} else if s.cluster != nil {
-				se.HaActive = false
-			}
+			s.stampSessionHAState(se, val.IngressZone, val.EgressZone, filter.zoneNames)
 			if !noEnrich {
 				se.Application = appid.ResolveSessionNameWithIndex(filter.appNames, filter.cfg, filter.appFallback, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID)
 			}
@@ -316,11 +337,7 @@ func (s *Server) getSessionsCursor(ctx context.Context, req *pb.GetSessionsReque
 				}
 			}
 			se := sessionEntryV6(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, true)
-			if active, known := s.sessionHAActive(se.IngressInterface, se.EgressInterface, val.IngressZone, val.EgressZone, filter.zoneNames); known {
-				se.HaActive = active
-			} else if s.cluster != nil {
-				se.HaActive = false
-			}
+			s.stampSessionHAState(se, val.IngressZone, val.EgressZone, filter.zoneNames)
 			if !noEnrich {
 				se.Application = appid.ResolveSessionNameWithIndex(filter.appNames, filter.cfg, filter.appFallback, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID)
 			}
@@ -930,11 +947,7 @@ func (s *Server) getSessionsLegacy(ctx context.Context, req *pb.GetSessionsReque
 				}
 			}
 			se := sessionEntryV4(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, true)
-			if active, known := s.sessionHAActive(se.IngressInterface, se.EgressInterface, val.IngressZone, val.EgressZone, filter.zoneNames); known {
-				se.HaActive = active
-			} else if s.cluster != nil {
-				se.HaActive = false
-			}
+			s.stampSessionHAState(se, val.IngressZone, val.EgressZone, filter.zoneNames)
 			if !noEnrich {
 				se.Application = appid.ResolveSessionNameWithIndex(filter.appNames, filter.cfg, filter.appFallback, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID)
 			}
@@ -963,11 +976,7 @@ func (s *Server) getSessionsLegacy(ctx context.Context, req *pb.GetSessionsReque
 				}
 			}
 			se := sessionEntryV6(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, true)
-			if active, known := s.sessionHAActive(se.IngressInterface, se.EgressInterface, val.IngressZone, val.EgressZone, filter.zoneNames); known {
-				se.HaActive = active
-			} else if s.cluster != nil {
-				se.HaActive = false
-			}
+			s.stampSessionHAState(se, val.IngressZone, val.EgressZone, filter.zoneNames)
 			if !noEnrich {
 				se.Application = appid.ResolveSessionNameWithIndex(filter.appNames, filter.cfg, filter.appFallback, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID)
 			}
@@ -2066,6 +2075,7 @@ func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now ui
 		TimeoutSeconds:   val.Timeout,
 		SessionId:        val.SessionID,
 		HaActive:         haActive,
+		HaState:          haStateFromActive(haActive),
 		Origin:           sessionOriginLabel(val.Flags),
 	}
 	if val.Created > 0 && now > val.Created {
@@ -2123,6 +2133,7 @@ func sessionEntryV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, no
 		TimeoutSeconds:   val.Timeout,
 		SessionId:        val.SessionID,
 		HaActive:         haActive,
+		HaState:          haStateFromActive(haActive),
 		Origin:           sessionOriginLabel(val.Flags),
 	}
 	if val.Created > 0 && now > val.Created {

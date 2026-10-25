@@ -317,10 +317,10 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 				// global-threshold sum a negative weight would otherwise
 				// mask), plus the Manager.SetMonitorWeight chokepoint.
 				"global-weight": {
-					desc:          "Default weight deducted when a monitored IP fails (0..255)",
+					desc:          "Weight deducted when monitored IPs fail; defaults to 255 when omitted (0..255)",
 					args:          1,
 					valueType:     ValueInteger,
-					valueDesc:     "Default weight deducted when a monitored IP fails (0..255)",
+					valueDesc:     "Weight deducted when monitored IPs fail (0..255; default 255 when omitted)",
 					valueExamples: []string{"255"},
 					validator:     ValidateInteger(0, 255),
 					children:      nil,

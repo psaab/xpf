@@ -53,14 +53,31 @@ func heartbeatUDPNetwork(addr string) string {
 // the previous goroutines — their stopCh is never closed, so N restarts leak
 // N heartbeat goroutines and duplicate the on-wire heartbeat rate (#4033).
 func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string) error {
-	return m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, 0, time.Time{})
+	// #16745: a comms restart is StopHeartbeat followed by StartHeartbeat in
+	// the same Manager lifetime. StopHeartbeat stashed the outgoing
+	// receiver's lastSeen/grace-end (hbCommsRestartSeed/Hold); seed from it
+	// when the Manager has seen a live peer, so the replacement is armed as
+	// a restart (#9722) instead of a cold start. Without the seed a peer
+	// silent from the restart onward was never declared lost (the
+	// never-seen arm is a no-op once peerEverSeen is set) and a peer heard
+	// once then lost was held for the 30s cold-boot grace. An explicit seed
+	// from RestartHeartbeat still wins: it passes restartSeed != 0 below.
+	// When no stash exists this is exactly the pre-#16745 cold start.
+	m.mu.RLock()
+	seed, hold := m.hbCommsRestartSeed, m.hbCommsRestartHold
+	if !(m.peerEverSeen && m.peerAlive) {
+		seed, hold = 0, time.Time{}
+	}
+	m.mu.RUnlock()
+	return m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, seed, hold)
 }
 
 // startHeartbeat is StartHeartbeat plus the replacement-receiver seed
 // RestartHeartbeat passes (#9722). A non-zero restartSeed arms the new receiver
 // (armRestart) with the replaced receiver's last-seen heartbeat and the short
-// restart grace, before the receiver starts. StartHeartbeat passes 0, which is
-// a cold start. inheritedHold is the end of any grace the replaced receiver was
+// restart grace, before the receiver starts. StartHeartbeat passes the
+// comms-restart stash StopHeartbeat left (#16745), or 0 on a true cold start.
+// inheritedHold is the end of any grace the replaced receiver was
 // still inside; the new receiver keeps it (#9722).
 func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string, restartSeed int64, inheritedHold time.Time) error {
 	// Serialize the whole stop-previous + create + install sequence so
@@ -202,6 +219,10 @@ func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	m.hbRestartOwed = false
 	m.hbRestartOwedSeed = 0
 	m.hbRestartOwedHold = time.Time{}
+	// #16745: a published start consumes the comms-restart stash (it either
+	// used it as restartSeed above or, for RestartHeartbeat, supplied its own).
+	m.hbCommsRestartSeed = 0
+	m.hbCommsRestartHold = time.Time{}
 	// Start the LOCALS, and start them INSIDE the critical section (#7257).
 	// Locals because the pre-#7257 code re-read m.hbReceiver/m.hbSender after
 	// unlocking, which raced StopHeartbeat nilling them — a nil-deref panic if
@@ -280,6 +301,23 @@ func (m *Manager) StopHeartbeat() {
 	m.hbRestartOwed = false
 	m.hbRestartOwedSeed = 0
 	m.hbRestartOwedHold = time.Time{}
+	// #16745: stash the outgoing receiver's peer-liveness seed for the next
+	// StartHeartbeat in this Manager lifetime (the comms-restart pair:
+	// stopClusterComms -> StopHeartbeat, next epoch -> StartHeartbeat).
+	// Only a receiver that had seen the peer leaves a seed; otherwise clear
+	// any older stash so a later cold start cannot inherit stale liveness.
+	// The internal stopHeartbeat paths (idempotent start teardown,
+	// RestartHeartbeat) do NOT touch the stash — RestartHeartbeat carries
+	// its own seed explicitly.
+	if m.hbReceiver != nil {
+		if seed := m.hbReceiver.lastSeen.Load(); seed != 0 {
+			m.hbCommsRestartSeed = seed
+			m.hbCommsRestartHold = m.hbReceiver.startedAt.Add(m.hbReceiver.seenThenLostGrace())
+		} else {
+			m.hbCommsRestartSeed = 0
+			m.hbCommsRestartHold = time.Time{}
+		}
+	}
 	m.mu.Unlock()
 	m.stopHeartbeat()
 	// #16022: queue a final durable latch/floor snapshot, but never join
@@ -725,6 +763,8 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	m.peerAlive = true
 	m.peerEverSeen = true
 	m.peerConfirmedAbsent = false
+	// #16751: a heard peer retires the Manager-owned never-seen clock.
+	m.disarmNeverSeenClockLocked()
 	if m.peerHeartbeatRecoveredFn != nil {
 		m.peerHeartbeatRecoveredFn()
 	}
@@ -803,6 +843,7 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 			heartbeatEchoSequence:     peerEchoSequence,
 			heartbeatEchoLeaseUntil:   leaseUntil,
 			peerWasPrimaryThisSession: wasPrimary || NodeState(g.State) == StatePrimary,
+			takeoverReady:             int(g.Weight) > maxRedundancyGroupWeight-DataplaneArmMonitorCost,
 		}
 	}
 	// Apply pending transfer-commit overrides + expire transfer-grace
@@ -940,22 +981,23 @@ func (m *Manager) handlePeerTimeout() {
 	// (under preempt, an unrequested move back). Only restore on abort;
 	// a takeover that proceeds keeps the clears exactly as before.
 	type peerLossHoldSnapshot15211 struct {
-		rg            *RedundancyGroupState
-		manual        bool
-		at            time.Time
-		state         NodeState
-		weight        int
-		overrideReqID uint64
-		hasOverride   bool
-		previous      peerGroupSnapshot
-		hasPrevious   bool
-		abortedReqID  uint64
-		hasAborted    bool
+		rg              *RedundancyGroupState
+		manual          bool
+		forcedSecondary bool
+		at              time.Time
+		state           NodeState
+		weight          int
+		overrideReqID   uint64
+		hasOverride     bool
+		previous        peerGroupSnapshot
+		hasPrevious     bool
+		abortedReqID    uint64
+		hasAborted      bool
 	}
 	holds15211 := make(map[int]peerLossHoldSnapshot15211)
 	if m.peerFencing == PeerFencingDisableRGConfirmed {
 		for _, rg := range m.groups {
-			snap := peerLossHoldSnapshot15211{rg: rg, manual: rg.ManualFailover, at: rg.ManualFailoverAt, state: rg.State, weight: rg.Weight}
+			snap := peerLossHoldSnapshot15211{rg: rg, manual: rg.ManualFailover, forcedSecondary: rg.forcedSecondary, at: rg.ManualFailoverAt, state: rg.State, weight: rg.Weight}
 			if reqID, ok := m.peerTransferOutOverride[rg.GroupID]; ok {
 				snap.overrideReqID, snap.hasOverride = reqID, true
 			}
@@ -994,6 +1036,10 @@ func (m *Manager) handlePeerTimeout() {
 		if rg.ManualFailover {
 			slog.Info("cluster: clearing manual failover (peer lost)", "rg", rg.GroupID)
 			rg.ManualFailover = false
+			// #16743: peer loss also ends the ISSU drain pin — the survivor
+			// must be able to take over (cleared BEFORE the weight restore
+			// so debtDerivedWeightLocked recomputes the real weight).
+			rg.forcedSecondary = false
 			rg.ManualFailoverAt = time.Time{}
 			m.manualFailoverRestoreWeightLocked(rg)
 		}
@@ -1067,6 +1113,7 @@ func (m *Manager) handlePeerTimeout() {
 				if snap.rg != nil && m.groups[rgID] == snap.rg && snap.manual {
 					oldState := snap.rg.State
 					snap.rg.ManualFailover = true
+					snap.rg.forcedSecondary = snap.forcedSecondary
 					snap.rg.ManualFailoverAt = snap.at
 					snap.rg.Weight = snap.weight
 					snap.rg.State = snap.state
@@ -1143,6 +1190,22 @@ func (m *Manager) handlePeerTimeout() {
 // this confirms absence without marking the peer ever seen, preserving the
 // readiness gate while allowing single-node promotion.
 func (m *Manager) handlePeerNeverSeen() {
+	// #16745 defense in depth: a receiver that never saw the peer on THIS
+	// incarnation (lastSeen==0) but whose Manager has seen a live peer is
+	// not a cold boot — it is a peer that was alive and is now silent (the
+	// comms-restart gap before the seed reaches a replacement, or any
+	// future unseeded replacement). Route it through the peer-loss path,
+	// which still honours the sync-recency/timeout guards, instead of
+	// returning on peerEverSeen and never declaring the peer lost. Cold
+	// boots (never seen, not alive) keep the absence-confirmation path
+	// below exactly as before (#4386/#11566).
+	m.mu.RLock()
+	seenAlive := m.peerEverSeen && m.peerAlive
+	m.mu.RUnlock()
+	if seenAlive {
+		m.handlePeerTimeout()
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1164,6 +1227,95 @@ func (m *Manager) handlePeerNeverSeen() {
 	m.history.Record(EventHeartbeat, -1, "Peer never seen (timeout)")
 	m.electSingleNode()
 }
+
+// neverSeenGrace is how long the Manager-owned never-seen clock waits before
+// confirming a never-heard peer absent. It is a package var only so the
+// #16751 cells can shorten the floor without sleeping 30s; production keeps
+// the cold-boot heartbeatStartupGrace — the same floor the receiver's
+// never-seen arm uses, because the hazard it guards (a simultaneous cold
+// boot whose first heartbeats are dropped by the local config-apply
+// disruption, #4386) is identical whichever component confirms absence.
+var neverSeenGrace = heartbeatStartupGrace
+
+// armNeverSeenClockLocked starts (or keeps) the Manager-owned never-seen
+// clock. It is armed only while all of these hold: a control link is
+// configured, no peer heartbeat has ever been seen, absence is not already
+// confirmed, and the manager is not stopped. The first arming stamps
+// neverSeenSince; re-arms (routine UpdateConfig re-applies) keep the
+// original stamp so a commit cannot push the floor out indefinitely. Any
+// state that makes the clock meaningless — peer seen, absence confirmed,
+// control link removed, stopped manager — disarms it.
+//
+// Caller must hold m.mu.
+func (m *Manager) armNeverSeenClockLocked() {
+	if m.stopped || m.controlInterface == "" || m.peerEverSeen || m.peerConfirmedAbsent {
+		m.disarmNeverSeenClockLocked()
+		return
+	}
+	if m.neverSeenTimer != nil {
+		return
+	}
+	if m.neverSeenSince.IsZero() {
+		m.neverSeenSince = time.Now()
+	}
+	remaining := neverSeenGrace - time.Since(m.neverSeenSince)
+	if remaining < 0 {
+		remaining = 0
+	}
+	m.neverSeenTimerGen++
+	gen := m.neverSeenTimerGen
+	m.neverSeenTimer = time.AfterFunc(remaining, func() { m.confirmNeverSeenIfDue(gen) })
+}
+
+// disarmNeverSeenClockLocked stops the Manager-owned never-seen clock and
+// invalidates any callback that already fired and is parked on m.mu.
+//
+// Caller must hold m.mu.
+func (m *Manager) disarmNeverSeenClockLocked() {
+	m.neverSeenTimerGen++
+	if m.neverSeenTimer != nil {
+		m.neverSeenTimer.Stop()
+		m.neverSeenTimer = nil
+	}
+	m.neverSeenSince = time.Time{}
+}
+
+// confirmNeverSeenIfDue is the Manager-owned never-seen clock's callback.
+// It re-checks every arming condition under m.mu — the peer may have been
+// heard, the control link removed, or the manager stopped while the timer
+// was in flight — and while fresh session-sync proof says the peer is
+// active it reschedules the check instead of confirming absence (#11566:
+// the suppression has no fixed cap, matching the receiver path). Otherwise
+// it drives the same confirmation the receiver drives.
+func (m *Manager) confirmNeverSeenIfDue(gen uint64) {
+	m.mu.Lock()
+	if gen != m.neverSeenTimerGen || m.stopped || m.controlInterface == "" ||
+		m.peerEverSeen || m.peerConfirmedAbsent {
+		m.mu.Unlock()
+		return
+	}
+	// This callback is the live timer firing: clear the handle before any
+	// re-arm so armNeverSeenClockLocked can schedule the sync-proof recheck.
+	m.neverSeenTimer = nil
+	if m.peerNeverSeenSyncFreshFn != nil && m.peerNeverSeenSyncFreshFn() {
+		slog.Debug("cluster: suppressing never-seen peer confirmation while session-sync proof is fresh")
+		m.neverSeenTimer = time.AfterFunc(neverSeenRecheckInterval, func() {
+			m.confirmNeverSeenIfDue(gen)
+		})
+		m.mu.Unlock()
+		return
+	}
+	m.neverSeenSince = time.Time{}
+	m.mu.Unlock()
+	m.handlePeerNeverSeen()
+}
+
+// neverSeenRecheckInterval is how often the Manager-owned clock re-probes
+// session-sync freshness while that proof suppresses absence confirmation.
+// It matches the heartbeat receiver's tick cadence order (the receiver
+// re-probes on every timeout tick) without coupling to the heartbeat
+// interval, which this clock deliberately does not depend on.
+const neverSeenRecheckInterval = time.Second
 
 // HeartbeatStats returns current heartbeat counters.
 //

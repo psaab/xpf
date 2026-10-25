@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -26,15 +27,43 @@ import (
 // Descriptor validity is a programmer invariant: NewDesc panics at
 // construction for an invalid name/help/variadic-label set, so a bad
 // descriptor fails at collector construction, never here.
+//
+// #16707: strings.ToValidUTF8(s, "�") is many-to-one — web\xffallow and
+// web\xfeallow both folded to web�allow. Two such identifiers in the
+// same scope then emitted duplicate series and Registry.Gather failed
+// the whole scrape (promhttp HTTPErrorOnError -> 500, zero samples).
+// sanitizeMetricLabelValue now escapes every invalid byte as \xNN
+// (lowercase hex), so distinct raw values that differ only in invalid
+// bytes keep distinct sanitized spellings. Valid values are never
+// rewritten, preserving the byte-identical fast path for healthy
+// config. Any residual duplicate-series source (the Y49-03 class) is
+// covered by the systemic ContinueOnError backstop in
+// metrics_handler.go, which drops the duplicate and counts it instead
+// of 500ing the whole scrape.
 
-// sanitizeMetricLabelValue returns s unchanged when it is valid UTF-8,
-// and s with each invalid byte folded to U+FFFD otherwise. ok reports
-// whether s was already valid.
+// sanitizeMetricLabelValue returns s unchanged when it is valid UTF-8.
+// Otherwise it returns s with each invalid byte escaped as \xNN, so the
+// mapping from raw byte strings to sanitized values is injective.
+// ok reports whether s was already valid.
 func sanitizeMetricLabelValue(s string) (out string, ok bool) {
 	if utf8.ValidString(s) {
 		return s, true
 	}
-	return strings.ToValidUTF8(s, "�"), false
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for i := 0; i < len(s); {
+		_, size := utf8.DecodeRuneInString(s[i:])
+		if size == 1 && s[i] >= utf8.RuneSelf {
+			// Invalid byte (including a truncated/invalid sequence head).
+			fmt.Fprintf(&b, "\\x%02x", s[i])
+			i++
+			continue
+		}
+		// Valid rune (size>=1) or ASCII byte: copy verbatim.
+		b.WriteString(s[i : i+size])
+		i += size
+	}
+	return b.String(), false
 }
 
 // sanitizeMetricLabelValues sanitizes values in place when the collector
@@ -103,4 +132,15 @@ func (c *xpfCollector) emitCollectorPanics(ch chan<- prometheus.Metric) {
 	}
 	c.emitConstMetric(ch, c.collectorPanicsTotal, prometheus.CounterValue,
 		float64(c.collectorPanics.Load()))
+}
+
+// emitGatherErrors publishes the cumulative count of scrapes whose
+// Registry.Gather returned duplicate-series (or other) errors that
+// promhttp's ContinueOnError salvaged (#16707). Nil-Desc safe.
+func (c *xpfCollector) emitGatherErrors(ch chan<- prometheus.Metric) {
+	if c == nil || c.gatherErrorsTotal == nil {
+		return
+	}
+	c.emitConstMetric(ch, c.gatherErrorsTotal, prometheus.CounterValue,
+		float64(c.gatherErrors.Load()))
 }

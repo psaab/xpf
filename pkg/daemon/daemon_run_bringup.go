@@ -286,6 +286,16 @@ func (d *Daemon) initManagers(failClosed bool) error {
 			d.vrrpMgr.SetSyncHold(30 * time.Second)
 			if d.cluster != nil {
 				d.cluster.SetStartupSyncHoldStatus("reth-vrrp", true, "")
+				// #16741: the incumbent must not yield to this held
+				// rejoiner under preempt; install the election debt that
+				// advertises the arm floor until the hold releases by
+				// either edge (bulk sync or the 30s timer).
+				d.cluster.SetStartupSyncHold(true)
+				d.vrrpMgr.SetOnSyncHoldRelease(func() {
+					if d.cluster != nil {
+						d.cluster.SetStartupSyncHold(false)
+					}
+				})
 			}
 		} else if cc.FabricInterface != "" && cc.FabricPeerAddress != "" {
 			// #7162: the no-RETH sibling of the hold above. These modes route

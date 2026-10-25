@@ -124,8 +124,14 @@ destination rule`, unknown selectors deny), matching the gRPC charges for
     emitted even when the dataplane is unloaded (#11806).
   - On a loopback bind the exposition is open to any local UID by default
     (#4162); `web-management api-auth metrics-require-auth` opts it into
-    requiring a valid api-auth credential even there (#16072). `/health`
-    is unaffected either way.
+    requiring a valid api-auth credential even there (#16072). On every
+    credential-gated leg (non-loopback bind, or loopback with
+    `metrics-require-auth`) the credential's login class must also hold
+    the `view` permission (#16727): a credential whose class lacks
+    `view` (e.g. `unauthorized`) gets 403, exactly as on every
+    `/api/v1` read, while a `view`-holding credential (e.g. `read-only`)
+    still scrapes. The ungated loopback default stays open to any local
+    UID. `/health` is unaffected either way.
 - `GET /api/v1/...` — REST mirrors of the gRPC API: sessions, routes,
   NAT, DHCP, IPsec, VRRP, OSPF, BGP, etc.
   - `GET /api/v1/security/policies` enumerates zone-pair policies AND
@@ -504,10 +510,14 @@ monitoring and support tooling on a box that never adopted RBAC keeps working
 byte-for-byte. What changes is a NON-root local uid outside the login model —
 exactly the population the issue exists to stop.
 
-**`/health` and `/metrics` stay open** and are not in the table. They carry no
-configuration, `authCheck` already exempts them, and the in-tree incus harnesses
-read `/metrics`. A sweep of every in-tree consumer found those two and nothing
-else touching REST at all, so gating `/api/v1` breaks no shipped tooling.
+**`/health` stays open; `/metrics` stays open only on the ungated
+loopback default.** `/health` carries no configuration and is exempt
+in authCheck. `/metrics` carries configured identifiers, so since
+#16727 a credential-gated leg (non-loopback, or loopback with
+`metrics-require-auth`) also requires the credential's class to hold
+`view`; the ungated loopback leg the in-tree incus harnesses read
+stays open. A sweep of every in-tree consumer found those two and nothing
+else touching REST at all, so gating the /api/v1 surface breaks no shipped tooling.
 
 `readAuthz` serves an UNGUARDED non-API safe route rather than refusing
 it — the opposite of the mutation gate's fail-closed default — precisely so
@@ -1188,9 +1198,11 @@ because the middleware does not consume the request body; the effect is that an
 `operator` principal cannot use its `clear-config-lock` verb over REST. It
 over-restricts rather than under-restricts.
 
-**Safe methods are untouched.** GET/HEAD/OPTIONS/TRACE, `/health`, `/metrics`
-and the SSE streams keep exactly their previous access rules (the #4162 metrics
-gate and `api-auth` still apply to them).
+**Safe methods keep their previous rules, with one addition.**
+GET/HEAD/OPTIONS/TRACE, `/health`, and the SSE streams are unchanged;
+since #16727 `GET /metrics` on a credential-gated leg additionally
+requires the credential's class to hold `view` (the #4162/#16072
+authN gate still applies first).
 
 **What this breaks, and the remedy.** One population changes behavior: a local
 process running as a **non-root UID that is not a configured `system login
@@ -1703,6 +1715,24 @@ the drop fails loudly instead of going quietly vacuous.
     re-enable, HTTPS-bind-only change, HTTP-change-keeps-HTTPS, auth swap,
     bind-failure retain-old). `Run`/`serveBound` remain the single-lifecycle test
     entry point.
+  - **VRF-scoped binds (#16709).** A leg whose address lives on a
+    VRF-enslaved interface (fxp0 in `vrf-mgmt`, or a tenant
+    virtual-router member in `vrf-<name>`) cannot bind unscoped: the
+    address exists only in the VRF's local table, so `net.Listen`
+    fails `EADDRNOTAVAIL` and `web-management ... interface fxp0.0`
+    never served. `Config.BindDevices` maps such a listen address to
+    its VRF master device; `Server.listenAddr` (the single bind entry
+    for Start, reconcile, `Run`, and cert recovery) then binds via a
+    `net.ListenConfig` whose Control sets `SO_BINDTODEVICE` to that
+    master — the grpcapi fabric-listener pattern. An injected
+    `Config.ListenFunc` always wins (tests never see a real socket
+    option). The scope is part of leg identity: `SetBindDevices`
+    publishes the desired map before a reconcile, adoption requires
+    the live leg's recorded scope to match, and the daemon's endpoint
+    fingerprint carries the map so a scope-only change still rebinds.
+    Default-VRF legs stay unscoped. Pinned by
+    `pkg/api/listener_vrf_16709_test.go` and the real-kernel netns
+    acceptance `TestWebMgmtVRFBind16709Netns` in `pkg/daemon`.
   - `EffectiveHTTPAddr()` (#6385/#6401) returns the live HTTP leg's ACTUAL bound
     address (`httpLeg.ln.Addr()`) — an ephemeral `:0` request resolves to its
     concrete port, a wildcard/hostname bind is normalized — or `""` when no HTTP
@@ -2426,25 +2456,35 @@ the drop fails loudly instead of going quietly vacuous.
     report 0/stale while `show firewall filter` shows real hits (#3461); the
     per-term counter-slot stride is the shared
     `config.FilterTermExpansionCount` SSOT (#3459).
-  - **Invalid-UTF-8 label values cannot crash a scrape** (#15086): every
+  - **Invalid-UTF-8 label values cannot crash a scrape** (#15086, #16707): every
     const-metric emit in this package goes through the single choke point
-    `emitConstMetric` (`metrics_emit_15086.go`), which folds any label
-    value carrying invalid UTF-8 to U+FFFD before calling the
-    error-returning `prometheus.NewConstMetric` — never the panicking
-    `Must*` form. A committed identifier with raw non-UTF-8 bytes (the
-    A44-01 probe's `web\xffallow` policy name) is therefore still
-    published, sanitized, instead of panicking inside
-    `Registry.Gather`'s goroutine and killing the daemon. Each sanitized
-    value bumps `xpf_metrics_invalid_label_values_total`; any residual
-    construction error (arity, invalid descriptor) skips the sample and
-    bumps `xpf_counter_read_errors_total` under the omit-plus-error
-    contract above. Legitimate values pass through byte-identical. As a
+    `emitConstMetric` (`metrics_emit_15086.go`), which escapes each invalid
+    byte in a label value as `\xNN` before calling the error-returning
+    `prometheus.NewConstMetric` — never the panicking `Must*` form. A
+    committed identifier with raw non-UTF-8 bytes (the A44-01 probe's
+    `web\xffallow` policy name) is therefore still published, sanitized,
+    instead of panicking inside `Registry.Gather`'s goroutine and killing
+    the daemon. The `\xNN` spelling is injective (#16707): the original
+    U+FFFD fold mapped `web\xffallow` and `web\xfeallow` to the same
+    series, and the resulting duplicate made every scrape answer 500.
+    Each sanitized value bumps `xpf_metrics_invalid_label_values_total`;
+    any residual construction error (arity, invalid descriptor) skips the
+    sample and bumps `xpf_counter_read_errors_total` under the
+    omit-plus-error contract above. Legitimate values pass through
+    byte-identical. As a systemic backstop for any remaining
+    duplicate-series source (e.g. a zone-pair rule and a scoped global
+    with the same name in the same zone pair), the metrics handler now
+    serves with `promhttp.ContinueOnError` (#16707): the offending series
+    is dropped from that scrape, the rest of the exposition answers 200,
+    and the drop is counted in `xpf_metrics_gather_errors_total` on the
+    next scrape (a wholly empty gather still answers 500). As a
     fail-closed backstop, `metricsLane.Collect` recovers any residual
     collector panic, bumps `xpf_metrics_collector_panics_total`, returns
     the lane to the pool, and lets that scrape fail instead of crashing
     the process; the bumped count is certified by the next scrape's
-    sample. Both health counters are always emitted, including at zero.
-    Pinned by `metrics_invalid_utf8_15086_test.go`.
+    sample. All health counters are always emitted, including at zero.
+    Pinned by `metrics_invalid_utf8_15086_test.go` and
+    `metrics_sanitize_collision_16707_test.go`.
   - **Text commands** print a `warning: ... counter read failed ...` line
     instead of a clean zero: `show security screen` / `show security
     alarms` / `show security flow statistics` / `show chassis cluster
@@ -2813,8 +2853,9 @@ the drop fails loudly instead of going quietly vacuous.
     bidirectional volume;
   - resolves `application` (`appid.ResolveSessionName`), `ingress_interface`/
     `egress_interface` (FIB ifindex+VLAN → unit name), `policy_name`,
-    `ingress_zone_name`/`egress_zone_name`, `session_id`, and `ha_active`
-    (wired from the daemon via `HAActiveFn`, default true standalone).
+    `ingress_zone_name`/`egress_zone_name`, `session_id`, `ha_active`, and
+    `ha_state` (#16697 tri-state "Active"/"Backup"/"unknown"; `ha_active`
+    is meaningful only for Active/Backup, default true standalone).
 
   It also accepts the gRPC filter set: `application=`, `interface=`,
   `nat_only=true`, and `source_nat_pool=<pool>` (an unresolved pool fails

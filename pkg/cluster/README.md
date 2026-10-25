@@ -471,6 +471,22 @@ readiness gate armed. A ready node promotes normally; an unready node stays
 secondary until the degraded fallback, which marks and warns on the degraded
 promotion. A peer heartbeat clears the confirmed-absent state.
 
+The never-seen clock is owned by the **Manager**, not only the receiver
+(#16751). `UpdateConfig` arms it (`armNeverSeenClockLocked`) whenever a
+control interface is configured and no peer has ever been seen; after the
+same `heartbeatStartupGrace` floor it drives `handlePeerNeverSeen` itself —
+re-probing the #11566 sync proof on a 1s recheck while that proof stays
+fresh. This closes the case where the receiver never exists: the control
+interface has no address (a back-to-back control cable with no carrier
+while the peer is powered off is not configured by networkd), the daemon's
+heartbeat start-retry exhausts, and previously nothing ever confirmed
+absence, so every non-preempt RG stayed secondary forever without even
+arming the degraded fallback. A peer heartbeat, removal of the control
+interface, or `Stop` disarms the clock; routine config re-applies keep the
+original arming stamp so a commit cannot push the floor out. The receiver's
+own never-seen arm is unchanged and races harmlessly with the Manager's:
+both funnel into `handlePeerNeverSeen`, which confirms at most once.
+
 ### Asymmetric peer visibility (#10775)
 
 Every current heartbeat carries a per-Manager session and increasing sequence,
@@ -520,9 +536,28 @@ sync-recency guard that `handlePeerTimeout` consults
 
 Two receivers are never armed and keep the cold-boot floor on both arms:
 - a replacement for a receiver that had NEVER seen the peer;
-- any receiver started by `StartHeartbeat` (boot, comms restart).
+- a cold-start receiver on a fresh Manager (daemon boot): `StartHeartbeat`
+  with no comms-restart stash (below).
 
 Cells: `heartbeat_restart_grace_9722_test.go`.
+
+**A comms restart is a restart too (#16745).** The production comms-restart
+path is not `RestartHeartbeat`: `stopClusterComms` calls the deliberate
+`StopHeartbeat`, and the next epoch's `startClusterComms` calls
+`StartHeartbeat`, which passed seed 0 — a cold start. If the peer was silent
+from the restart onward, the new receiver's `lastSeen` stayed 0, every tick
+took the never-seen arm, and `handlePeerNeverSeen` returned on
+`peerEverSeen`, so the peer was never declared lost and its RGs were never
+taken over; a peer heard once then lost was held for the 30s cold-boot
+grace. `StopHeartbeat` now stashes the outgoing receiver's `lastSeen` and
+grace end (`hbCommsRestartSeed`/`hbCommsRestartHold`, only when that
+receiver had seen the peer), and `StartHeartbeat` seeds from the stash when
+`peerEverSeen && peerAlive`, so its receiver is armed exactly like a
+`RestartHeartbeat` replacement. A published start consumes the stash; a
+fresh Manager has none. As defense in depth, `handlePeerNeverSeen` routes
+a Manager with `peerEverSeen && peerAlive` through `handlePeerTimeout`
+(guards intact) instead of returning. Cells:
+`heartbeat_comms_restart_16745_test.go`.
 
 **A restart never SHORTENS a grace still in progress.** The config apply at
 BOOT restarts the heartbeat too, about a second after the cold start, while the
@@ -612,6 +647,22 @@ recovered ready peer; clearing the hold does not automatically return
 ownership. The same keep can follow the two-minute degraded-promotion timeout
 if the hold lasts longer than that timeout.
 
+**Not-takeover-ready peers do not take the RG from a preempt incumbent
+(#16741).** The startup sync hold (#7162/#14406) gates only the rejoiner:
+it stays secondary until bulk sync completes or the 30s hold times out.
+That left the incumbent's preempt arm untouched, so a rejoining
+higher-priority node that had armed (weight back to 255) but was still
+held made the incumbent demote into an RG owned by neither node for the
+rest of the hold. While the hold is active the daemon installs a
+startup-hold election debt (`SetStartupSyncHold`, same floor-1 cost as
+the dataplane-arm debt) on the rejoiner, so its heartbeat advertises
+the arm floor — the shape the receiver records as
+`PeerGroupState.takeoverReady=false`. A preempt incumbent that already
+owns the RG then stays owner (its yield arms are skipped) until the
+hold releases and the real weight returns, at which point ordinary
+preempt ordering hands the RG over. A peer that IS primary is not
+covered — that is a dual-active to resolve, not a hold to wait out.
+
 It is FALSE for a peer that is merely `StateSecondary` with weight > 1, or
 at weight 1 without observed PRIMARY history (both are cold-boot shapes,
 where the gate must still hold), and for `peerGroup == nil` (peer loss or
@@ -647,6 +698,30 @@ manual failover issued within 30s of a peer restart still blackholed the RG.
 A promotion taken on this row sets `DegradedPromoted` and records its reason in
 the RG event history, the same as the #7161/#7939 timeout fallback, so
 `show chassis cluster status` distinguishes it from a normal promotion.
+
+### Both nodes at weight 0 from monitor debt (#16736)
+
+Junos keeps exactly one owner when neither node is healthier: "If the
+monitored interfaces of a redundancy group on both nodes reach their
+thresholds at the same time, the redundancy group becomes primary on
+the node with the lower node ID" (Juniper, Monitoring Chassis Cluster
+Interfaces). `electRG` implements this as a both-zero arm ahead of the
+"Local weight 0" / "Peer weight 0" arms: when the peer is alive, both
+weights are 0, the peer reports neither `StateSecondaryHold` nor
+`StatePrimary`, the local RG is not under `ManualFailover`, and the
+local weight is positively monitor-debt-derived
+(`localWeightIsMonitorDebtLocked`: `Weight == rgWeightFromDebt(totalLost)`
+with `totalLost > 0`), the lower node ID elects primary and the higher
+stays secondary. A `ForceSecondary` pin (weight 0 with no 255 debt)
+fails the debt test and stays drained; a local kernel-upgrade hold
+never reaches the arm (`electRG` returns first); a peer
+`StateSecondaryHold` is left to the "Peer transfer out" arm; duplicate
+node IDs fail closed to secondary (#4549 F11). A peer kernel hold
+advertises the same weight-0/secondary wire shape as monitor debt and
+cannot be distinguished in-band today — if the peer is in fact held,
+the lower node taking primary matches the existing #9452 held-peer
+degraded-promotion behaviour, and the held node itself never promotes.
+Cells: `election_both_zero_16736_test.go`.
 
 ## Duplicate node-id (invalid cluster, #4549 F11)
 
@@ -1016,7 +1091,8 @@ than summarised into a verdict:
    wins the election, `applyRG0OwnershipTransition(StatePrimary)` calls
    `d.store.SetClusterReadOnly(false)` and the now-primary node accepts a local
    commit of the same key. Restart the old primary and the pair converges keyed.
-   Same stop-one-node shape documented above for `configuration-synchronize`.
+   Same stop-one-node shape: stop `xpfd` on one node, let the peer
+   promote, act on the promoted node, then restart the stopped node.
 
    **This row had TWO preconditions; #6889 removed one of them.**
    - **STILL A PRECONDITION** — the secondary must be eligible. `election.go`
@@ -2542,122 +2618,75 @@ dual-accept. Put it in the shared (non-group) `chassis cluster` stanza, as
 the reference configs do.
 
 **Provision it out-of-band — do not rely on `configuration-synchronize` to
-carry it (#6629).** Config-sync serializes the active config and writes it
-over the session-sync stream, which is HMAC-authenticated but **not
-encrypted**; during the very first rollout that stream is also still
-unauthenticated (see below). Push the key to each node by the same trusted
-channel you use for any other secret.
+carry the key.** If config-sync were what first carried the key, the
+carrying connection would be one handshaked while both ends were still
+unkeyed (committing a key does not restart cluster comms — see "Rolling
+it onto a live unkeyed cluster" below); on that link the sealed payload
+below is still open to an active man-in-the-middle. Push the key to each
+node by the same trusted channel you use for any other secret. That
+out-of-band step is about bootstrap trust for the first connection, not
+about config-sync confidentiality between same-vintage peers, which
+#6629 and #15041 settled:
 
-Out-of-band provisioning alone does **not** avoid the exposure. Every
-shipped config sets `configuration-synchronize`, and the RG0 primary's
-commit calls `pushConfigToPeer`, which sends `Store.ShowActive()` — the RAW
-formatted tree, with no `ast_redact.go` pass on that path. So the cleartext
-PSK crosses the control segment at step 1 of the rollout below no matter how
-you delivered it. To actually avoid it, take config-sync out of the loop for
-the duration:
+- Against a peer of the same vintage, the config-sync payload is sealed
+  under a key derived from a fresh ephemeral X25519 exchange on every
+  connection (#6629; "Config sync and the PSK (#6629)" below). A passive
+  observer on the control segment does not learn the PSK from that push,
+  and — because the keypair is per connection — a capture does not unlock
+  later pushes either. There is no need to delete
+  `configuration-synchronize` to avoid that exposure, and no need to keep
+  it off on a keyed cluster.
+- On an AUTHENTICATED (Noise-keyed) connection there is no cleartext
+  fallback at all (#15041): the config key is derived from the handshake
+  secret, so suppressing the ephemeral key-exchange frames cannot force a
+  cleartext push.
+- Against a peer that predates #6629 the push still falls back to
+  CLEARTEXT, with a warning, and the sender latches the cleartext alarm
+  ("Config cleartext" in `show chassis cluster statistics`). The full
+  unredacted tree — PSK included — crosses in the clear for that
+  mixed-version window only. Let the window close (both nodes on a
+  #6629-capable build) and rotate the PSK afterwards: a capture taken
+  while the alarm was active still verifies, and no upgrade retires a
+  capture already taken.
 
-```
-delete chassis cluster configuration-synchronize   # see the caveats below
-<key both nodes out-of-band, per the rollout below>
-set chassis cluster configuration-synchronize      # ONLY once #6629 lands
-```
+So `configuration-synchronize` may stay enabled on a keyed cluster.
+Config-sync still ships `Store.ShowActive()` — the RAW formatted tree,
+with no `ast_redact.go` pass on that path — so the sealing above is the
+only thing between the PSK and the wire; that is why the same-vintage /
+mixed-version qualifier above is load-bearing rather than decorative.
 
-**Two caveats, both load-bearing — read them before running the above.**
+The caveats that still hold:
 
-*The restore does not restore safely.* An earlier version of this section
-claimed the restore commit was safe because it re-synchronises a config both
-nodes already hold, so the key is "no longer new information on the wire".
-That is wrong: the stream is authenticated but **not encrypted**, and a
-passive observer on the control segment reads the cleartext PSK off that
-re-sync regardless of whether the peers already know it. Confidentiality is
-not a function of who else already has the secret. Until #6629 gives that
-path either redaction or transport encryption, **the honest advice is to
-leave `configuration-synchronize` off on a keyed cluster** and manage config
-on both nodes out-of-band, accepting the operational cost. Restore it only
-when #6629 has landed.
-
-*By far the easiest path is to never reach this state.* Provision both
-nodes from text with `configuration-synchronize` ABSENT and the key
-already set, before the pair carries traffic. Note that the shipped
-reference configs (`docs/ha-cluster.conf`, `docs/ha-cluster-userspace.conf`)
-DO enable `configuration-synchronize`, and the Incus test harness pushes
-them unchanged — so neither is an example of this order; you have to
-remove the line from your own config first. On a new build or during a
-maintenance window you were taking anyway, this costs nothing.
-
-*On a LIVE pair whose secondary gate is ARMED, the delete cannot be done
-without the sync undoing it.* (Everything in this subsection assumes an armed
-gate; on the row-2 unarmed node the second delete needs no promotion at all.
-That is the #6890 hole, not a supported route — see the Recovery section. This
-subsection does not restate the caveat again.)
-`configuration-synchronize` is committed from the RG0 primary. Delete it
-there and the SECONDARY still has it enabled — so the moment that secondary
-is promoted, reconciliation (`daemon_ha.go:444`) sees sync enabled in its
-own local config and pushes its COMPLETE active configuration back to the
-former primary (`daemon_ha_sync.go:462`), restoring the very line you just
-deleted. You cannot simply "delete on both nodes": the second delete
-requires a promotion, and the promotion re-adds the first.
-
-There is one safe order you can RELY on for a live pair, and it is a controlled
-single-node outage — not a two-command sequence, and NOT a link cut:
-
-```
-# 1. On the RG0 primary: delete the line and commit.
-delete chassis cluster configuration-synchronize   # commit
-
-# 2. Stop xpfd on that SAME node and leave it down.
-systemctl stop xpfd
-
-# 3. Wait for the peer to promote AND for its session-sync to report the
-#    peer disconnected. Do not proceed on a timer — wait for the field.
-show chassis cluster status          # on the peer: it must be primary, and
-#   "Sync link statistics (control-link): Status: Down"   must be present
-
-# 4. On the now-primary peer: delete the line and commit.
-delete chassis cluster configuration-synchronize   # commit
-
-# 5. Verify BOTH persistent stores no longer carry it, then restart the
-#    stopped node. Sync is absent on both sides, so nothing pushes the
-#    line back regardless of which node ends up primary.
-systemctl start xpfd
-```
-
-Step 2 is what makes this work: with that node's `xpfd` down there is
-nobody for the promoted peer's reconciliation to push to, so the deletion
-survives the promotion.
-
-Two details worth stating rather than leaving to be discovered. RG0 `preempt`
-is unsupported: strict commits and `xpfd check-config` reject it, while
-tolerant load / peer-sync warns and ignores it. On supported RGs 1+, a
-returning higher-priority node can reclaim primary, so expect a failback.
-This does not matter for this procedure because sync is absent on both sides
-by then. The promoted peer may still attempt reconciliation before detecting
-the disconnect; that is harmless because config transmission writes directly
-to the active connection rather than queueing for replay. The stopped node
-cannot apply it, and during teardown it still considers itself RG0 primary
-and rejects incoming config.
-
-**Do NOT sever the link instead.** An earlier version of this section
-suggested cutting "the session-sync/fabric segment" before promoting.
-That is wrong and dangerous. Session and config sync run on the CONTROL
-link — the same interface as the heartbeat, port 4785 — and only fall
-back to fabric when no control interface is configured
-(`daemon_ha_sync.go`). So cutting fabric alone does not stop config sync
-in any shipped configuration, and cutting the control segment takes the
-heartbeat with it: both nodes stop hearing each other, both declare the
-peer dead, and both become primary. That is a dataplane split-brain with
-duplicate VIPs, not merely two nodes with independent config authority.
-A physical cut also races disconnect detection, so a promotion issued
-immediately after it can still find the session established.
-
-Once BOTH nodes have sync disabled, ongoing config management is manual and
-paired: treat only the RG0 primary as writable (that is the intent; see the
-#6890 caveat above for where the gate is not actually armed), so every change is
-a controlled RG0 promotion, an edit, verification on both stores, and a
-failback. That
-cost is the reason #6629 (redaction or transport encryption for the
-config-sync payload) is the real fix, and why this is documented as a
-constraint rather than recommended practice.
+- **It does NOT defeat an ACTIVE man-in-the-middle on an unkeyed link.**
+  The ephemeral exchange there is unauthenticated because there is
+  nothing yet to authenticate it with. An active attacker on an unkeyed
+  control segment can already drive election, call the allowlisted
+  fabric RPCs and inject sessions — that is the argument for keying at
+  all — so nothing new is conceded, but do not read the sealed payload
+  as a confidential channel on an unkeyed connection.
+- *By far the easiest path is to never reach the mixed-version state at
+  all.* Provision both nodes from text on the same vintage, with the key
+  already set, before the pair carries traffic. Note that the shipped
+  reference configs (`docs/ha-cluster.conf`,
+  `docs/ha-cluster-userspace.conf`) DO enable
+  `configuration-synchronize`, and the Incus test harness pushes them
+  unchanged — that is safe on a same-vintage pair for the reasons above;
+  it is the pre-#6629 peer, not the stanza itself, that reintroduces the
+  cleartext push.
+- *The controlled single-node outage that used to be documented here*
+  (delete `configuration-synchronize` on both nodes in turn by stopping
+  one node, then manage config in paired out-of-band edits) *is retired
+  as advice.* It bought protection against a passive observer that
+  same-vintage sealing already provides, and its cost — a deliberate
+  outage plus manual dual-node config management — buys nothing in
+  return. Do NOT sever the control link as a substitute either: session
+  and config sync and the heartbeat share that link (port 4785, fabric
+  only when no control interface is configured), so cutting it stops the
+  heartbeat too and both nodes become primary — a dataplane split-brain
+  with duplicate VIPs, not two nodes with independent config authority.
+  The only remaining reason to run that outage shape is the unrelated
+  keying/recovery procedure under "Recovery" above, which needs the
+  promotion for its own reasons.
 
 ### Rolling it onto a live unkeyed cluster
 
@@ -3887,10 +3916,16 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
     applied generation re-ACKs it, recovering a lost response. While a config
     is in flight the sender remains fail-closed; only its matching ACK clears
     the gate.
-  - Older peers do not send apply ACKs; once a config is pushed to one, handover
-    remains refused until an upgraded peer reconnects and positively
-    acknowledges the current generation. Reconnection alone does not clear the
-    gate. With no session sync there is no push that could have failed, so
+  - A peer predating the type-40 ACK (28556c2b19) can never ACK, so the
+    gate falls back for it to the pre-ACK semantics — stale iff the
+    newest sent generation was NACKed (#16756). ACK support is
+    advertised as `capFlag2ConfigApplyAck` in a second capability byte
+    appended after the identity tail of `syncMsgPeerCapabilities`; the
+    capability recorded at send time (`lastSentConfigAckCapable16756`)
+    decides which semantics a given send is judged by, and a
+    downgrade-on-reconnect re-judges under the current peer. The legacy
+    refusal names the real cause ("peer predates config-apply ACK").
+    With no session sync there is no push that could have failed, so
     handover proceeds as before. Crash takeover stays ungated.
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
@@ -4025,6 +4060,26 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   secondary-hold, on commit, on `ResetFailover`, on peer loss, and on RG
   removal, so a later legitimate transfer-out still promotes. The abort
   send is best-effort and never masks the original failover error.
+- **The ISSU drain pin is a state fact, not a derived weight (#16743).**
+  `ForceSecondary` sets `forcedSecondary` alongside `ManualFailover` and
+  `Weight=0`. While set, `recalcWeight`, `debtDerivedWeightLocked`, and
+  `reconcileMonitorDebtsLocked` keep the weight at 0 instead of recomputing
+  it from monitor debt. Before this, any commit or peer config sync with
+  interface monitors fed every monitor through `SetMonitorWeight` ->
+  `recalcWeight` (daemon apply tail), restoring weight 255 on the drained
+  node; its heartbeat then advertised 255 at the higher priority, the peer
+  preempt-yielded, and the drained node's `ManualFailover` arm parked it
+  secondary — zero owners after the CLI had reported the drain complete.
+  The pin is cleared wherever `ManualFailover` is deliberately cleared:
+  `ResetFailover` (hence `ResetAllFailover`), peer loss in
+  `handlePeerTimeout` (including the #15211 fence-abort snapshot/restore),
+  the electRG dual-resign/lease restores, a peer-transfer request consuming
+  the hold (snapshot carries the flag + pinned weight so a failed transfer
+  restores both, #10004/#10245), `FinalizePeerTransferOut`, and
+  `AbortRemoteTransferOut`. Plain `ManualFailover` does NOT set it — that
+  path preserves monitor-derived weight. Pinned by
+  `force_secondary_pin_16743_test.go` (two real managers, real heartbeats,
+  preempt + non-preempt rows).
 - **The applied-ack is the promotion gate, not the heartbeat (#16592,
   R3-B22-01 — #15164 residual).** The #15164 fix above covered only the
   post-ACK abort exits: the request-ACK error exit (`reqID, err := fn(...)`)

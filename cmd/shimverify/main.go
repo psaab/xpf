@@ -43,7 +43,13 @@
 // code and as the `OVERRIDDEN` status word on stdout, without anyone
 // parsing stderr. At install time the build recipe asks shimverify to write
 // a sidecar with the decision, override bit, verifier stats, reason and hash
-// of the candidate object.
+// of the candidate object. #16701: the measurement is bound to the
+// kernel that took it — provenance.kernel_release records uname -r
+// (schema 3), because guest kernels have charged the same object
+// 3.8-6.1% more than the build host (#15645, #15854) and a verdict
+// naming no kernel overstated deploy headroom by that spread. The
+// target-kernel floor is enforced where the object will actually
+// load: xpfd verify-dataplane (exit 4 below floor, 5 unmeasured).
 //
 // Exit codes: 0 PASS (measured, above the floor), 2 usage, 3 verifier
 // REJECT, 4 loads but headroom below the floor, 5 loads but headroom could
@@ -81,7 +87,7 @@ import (
 // case here, so the predicates now exist in exactly one place (`decide`) and
 // `run` only PRESENTS what it returns.
 func main() {
-	os.Exit(run(os.Args, os.Stdout, os.Stderr, os.Getenv, dataplane.VerifyUserspaceShimObjectStats))
+	os.Exit(runWithKernel(os.Args, os.Stdout, os.Stderr, os.Getenv, dataplane.VerifyUserspaceShimObjectStats, dataplane.KernelRelease))
 }
 
 // run is the whole of shimverify, with the process boundary (argv, the two
@@ -98,6 +104,28 @@ func run(
 	stdout, stderr io.Writer,
 	getenv func(string) string,
 	verify func(string) (dataplane.ShimVerifierStats, error),
+) int {
+	return runKernel(args, stdout, stderr, getenv, verify, dataplane.KernelRelease)
+}
+
+// runWithKernel is run with the kernel-release source injected, so
+// tests can pin the recorded provenance without a host uname.
+func runWithKernel(
+	args []string,
+	stdout, stderr io.Writer,
+	getenv func(string) string,
+	verify func(string) (dataplane.ShimVerifierStats, error),
+	kernelRelease func() (string, error),
+) int {
+	return runKernel(args, stdout, stderr, getenv, verify, kernelRelease)
+}
+
+func runKernel(
+	args []string,
+	stdout, stderr io.Writer,
+	getenv func(string) string,
+	verify func(string) (dataplane.ShimVerifierStats, error),
+	kernelRelease func() (string, error),
 ) int {
 	withVerdict := len(args) == 4 && args[2] == "--gate-verdict" && args[3] != ""
 	if len(args) != 2 && !withVerdict {
@@ -117,7 +145,7 @@ func run(
 
 	decision := decide(stats, getenv(allowLowHeadroomEnv) == "1")
 	if withVerdict && (decision.exit == 0 || decision.exit == 6) {
-		if err := writeGateVerdict(args[3], path, stats, decision, getenv("XPF_SHIM_BUILD_DIGEST"), getenv); err != nil {
+		if err := writeGateVerdict(args[3], path, stats, decision, getenv("XPF_SHIM_BUILD_DIGEST"), getenv, kernelRelease); err != nil {
 			fmt.Fprintf(stderr, "shimverify: write gate verdict %s: %v\n", args[3], err)
 			return 1
 		}
@@ -130,9 +158,10 @@ func run(
 	// 3% while the object reached 21.58%, at which point it admitted 1-2 whole
 	// extension-header iterations without a word. Printing slack on every build
 	// is what surfaces that drift when it happens instead of by archaeology.
-	summary := fmt.Sprintf("processed %d insns (limit %d), headroom %.2f%%, "+
+	summary := fmt.Sprintf("processed %d insns (limit %d) on kernel %s, headroom %.2f%%, "+
 		"%d insns of slack before the %.1f%% floor",
-		stats.ProcessedInsns, stats.InsnLimit, stats.HeadroomPct(),
+		stats.ProcessedInsns, stats.InsnLimit, kernelLabel(kernelRelease),
+		stats.HeadroomPct(),
 		stats.SlackToFloorInsns(dataplane.UserspaceShimMinVerifierHeadroomPct),
 		dataplane.UserspaceShimMinVerifierHeadroomPct)
 
@@ -364,6 +393,18 @@ type gateVerdictProvenance struct {
 	Pinned           bool   `json:"pinned"`
 	BPFLinker        string `json:"bpf_linker"`
 	CodegenEnvDigest string `json:"codegen_env_digest"`
+	KernelRelease    string `json:"kernel_release"`
+}
+
+// kernelLabel renders the measuring kernel for the banner; an
+// unreadable uname renders as "unknown" there (display only) —
+// the verdict WRITE still fails closed via buildProvenance.
+func kernelLabel(kernelRelease func() (string, error)) string {
+	k, err := kernelRelease()
+	if err != nil || k == "" {
+		return "unknown"
+	}
+	return k
 }
 
 type gateVerdict struct {
@@ -382,11 +423,16 @@ type gateVerdict struct {
 // Every field must be present and well-formed: a verdict written
 // without provenance is exactly the unverifiable PASS this issue
 // closes, so a partial env fails the write (and the run) closed.
-func buildProvenance(getenv func(string) string) (gateVerdictProvenance, error) {
+func buildProvenance(getenv func(string) string, kernelRelease func() (string, error)) (gateVerdictProvenance, error) {
+	kernel, kerr := kernelRelease()
 	p := gateVerdictProvenance{
 		Toolchain:        getenv("XPF_SHIM_TOOLCHAIN"),
 		BPFLinker:        getenv("XPF_SHIM_BPF_LINKER"),
 		CodegenEnvDigest: getenv("XPF_SHIM_CODEGEN_ENV_DIGEST"),
+		KernelRelease:    kernel,
+	}
+	if kerr != nil || kernel == "" {
+		return p, fmt.Errorf("missing kernel release provenance (uname -r): %v", kerr)
 	}
 	switch getenv("XPF_SHIM_PINNED") {
 	case "1":
@@ -406,8 +452,7 @@ func buildProvenance(getenv func(string) string) (gateVerdictProvenance, error) 
 	}
 	return p, nil
 }
-
-func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierStats, decision shimverifyDecision, buildDigest string, getenv func(string) string) error {
+func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierStats, decision shimverifyDecision, buildDigest string, getenv func(string) string, kernelRelease func() (string, error)) error {
 	if len(buildDigest) != sha256.Size*2 {
 		return fmt.Errorf("missing or invalid source build digest (XPF_SHIM_BUILD_DIGEST)")
 	}
@@ -427,12 +472,12 @@ func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierSt
 		reason = fmt.Sprintf("measured headroom %.2f%% is below the %.1f%% floor; installed with %s=1",
 			stats.HeadroomPct(), dataplane.UserspaceShimMinVerifierHeadroomPct, allowLowHeadroomEnv)
 	}
-	provenance, err := buildProvenance(getenv)
+	provenance, err := buildProvenance(getenv, kernelRelease)
 	if err != nil {
 		return err
 	}
 	verdict := gateVerdict{
-		SchemaVersion:    2,
+		SchemaVersion:    3,
 		VerifiedAt:       time.Now().UTC().Format(time.RFC3339Nano),
 		ObjectSHA256:     objectHash,
 		BuildDigest:      buildDigest,

@@ -1,10 +1,14 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -405,5 +409,143 @@ func TestResolveConfiguredPeerIPsLiteral14371(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Fatalf("resolved set = %v, want exactly the 3 literals", got)
+	}
+}
+
+// syncBuffer16748 is a goroutine-safe log sink: handleNewConnection runs
+// on its own goroutine, so the captured buffer needs its own lock.
+type syncBuffer16748 struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer16748) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer16748) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func withCapturedLog16748(t *testing.T, level slog.Level) *syncBuffer16748 {
+	t.Helper()
+	buf := &syncBuffer16748{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return buf
+}
+
+// driveGarbageHandshake16748 runs one admitted inbound connection whose
+// peer sends garbage instead of a Noise msg1, so the responder handshake
+// fails fast (bad frame) and handleNewConnection returns.
+func driveGarbageHandshake16748(t *testing.T, s *SessionSync) {
+	t.Helper()
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	if !s.beginSetup(srv, true) {
+		t.Fatal("beginSetup should admit the inbound connection")
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Accepted: this node is the Noise responder.
+		s.handleNewConnection(context.Background(), 0, srv, false)
+	}()
+	// 12 bytes of garbage — not a valid framed Noise msg1.
+	if _, err := cli.Write([]byte("garbage!!!!!")); err != nil {
+		t.Fatalf("write garbage: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleNewConnection did not return after garbage handshake")
+	}
+}
+
+// TestPreAuthHandshakeFailureWarnRateLimited16748 is #16748 cell 1:
+// repeated garbage handshakes through the real handleNewConnection must
+// produce at most one "auth handshake failed" WARN in the limiter
+// window, while PreAuthHandshakeFailed counts every failure.
+//
+// RED on revert: restoring the unconditional slog.Warn in
+// handleNewConnection yields one WARN per connection (here 20), and
+// removing the counter increment leaves PreAuthHandshakeFailed at 0.
+func TestPreAuthHandshakeFailureWarnRateLimited16748(t *testing.T) {
+	buf := withCapturedLog16748(t, slog.LevelDebug)
+	s := newAuthSync(t, []byte("psk-secret-key-for-16748-handshake-test"))
+
+	const n = 20
+	for range n {
+		driveGarbageHandshake16748(t, s)
+	}
+
+	if got := s.stats.PreAuthHandshakeFailed.Load(); got != n {
+		t.Fatalf("PreAuthHandshakeFailed = %d, want %d (every handshake failure counted)", got, n)
+	}
+	if got := s.Stats().PreAuthHandshakeFailed; got != n {
+		t.Fatalf("Stats().PreAuthHandshakeFailed = %d, want %d", got, n)
+	}
+	out := buf.String()
+	if c := strings.Count(out, "auth handshake failed"); c != 1 {
+		t.Fatalf("'auth handshake failed' WARN count = %d, want exactly 1 (rate-limited); log:\n%s", c, out)
+	}
+	if !strings.Contains(out, "failed_total=1") {
+		t.Fatalf("emitted WARN must carry failed_total=1 (first emission); log:\n%s", out)
+	}
+}
+
+// TestPreAuthPeerConnectedNotInfo16748 is #16748 cell 2: the accept
+// loop must not emit INFO "peer connected" before authentication.
+//
+// RED on revert: restoring slog.Info in acceptLoop yields one INFO
+// per accepted garbage connection.
+func TestPreAuthPeerConnectedNotInfo16748(t *testing.T) {
+	buf := withCapturedLog16748(t, slog.LevelInfo)
+	s := newAuthSync(t, []byte("psk-secret-key-for-16748-accept-test"))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.acceptLoop(ctx, ln, 0)
+
+	const n = 5
+	for range n {
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		if _, err := c.Write([]byte("garbage!!!!!")); err != nil {
+			t.Fatalf("write garbage: %v", err)
+		}
+		c.Close()
+	}
+
+	// All five handshakes must resolve (counted) before asserting on
+	// the log, so a slow accept cannot false-pass the INFO check.
+	deadline := time.Now().Add(3 * time.Second)
+	for s.stats.PreAuthHandshakeFailed.Load() < n && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := s.stats.PreAuthHandshakeFailed.Load(); got != n {
+		t.Fatalf("PreAuthHandshakeFailed = %d, want %d garbage handshakes counted", got, n)
+	}
+	out := buf.String()
+	if c := strings.Count(out, "level=INFO"); c != 0 {
+		t.Fatalf("pre-auth accept emitted %d INFO records, want 0; log:\n%s", c, out)
+	}
+	if c := strings.Count(out, "peer connected"); c != 0 {
+		t.Fatalf("'peer connected' records at INFO-capturing level = %d, want 0; log:\n%s", c, out)
+	}
+	if c := strings.Count(out, "auth handshake failed"); c > 1 {
+		t.Fatalf("'auth handshake failed' WARN count = %d, want at most 1; log:\n%s", c, out)
 	}
 }

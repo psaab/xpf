@@ -1,0 +1,145 @@
+package config
+
+import (
+	"strings"
+	"testing"
+)
+
+// #16722: the stamping gate must be a provable no-op detector — it may
+// skip the two full lenient compiles only when neither tree can compile
+// or raw-carry a change-configuration commands payload. These rows pin
+// both directions: payload shapes (direct, nested, grouped, packed,
+// inherited, policy-local apply-groups) must NOT skip, and configs with
+// no commands payload (including keyword lookalikes outside
+// event-options) MUST skip.
+
+func gate16722Hier(t *testing.T, src string) *ConfigTree {
+	t.Helper()
+	tree, errs := NewParser(src).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse %q: %v", src, errs)
+	}
+	return tree
+}
+
+func gate16722Flat(t *testing.T, lines ...string) *ConfigTree {
+	t.Helper()
+	tree := &ConfigTree{}
+	for _, line := range lines {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand %q: %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath %q: %v", line, err)
+		}
+	}
+	return tree
+}
+
+func TestTreeMayHaveEventCommands16722(t *testing.T) {
+	cases := []struct {
+		name string
+		tree *ConfigTree
+		want bool
+	}{
+		{"nil tree", nil, false},
+		{"empty tree", &ConfigTree{}, false},
+		{"host-name only",
+			gate16722Hier(t, `system { host-name fw; }`), false},
+		{"policy without commands",
+			gate16722Hier(t, `event-options { policy p { events ping_test_failed; } }`), false},
+		{"policy with plant-class but no commands",
+			gate16722Hier(t, `event-options { policy p { events e; plant-class alice; } }`), false},
+		{"bare commands keyword",
+			gate16722Hier(t, `event-options { policy p { events e; then { change-configuration { commands; } } } }`), false},
+		{"direct commands block",
+			gate16722Hier(t, `event-options { policy p { events e; then { change-configuration { commands "set system host-name x"; } } } }`), true},
+		{"direct commands packed",
+			gate16722Flat(t,
+				"set event-options policy p events ping_test_failed",
+				`set event-options policy p then change-configuration commands "set system host-name x"`), true},
+		{"flat child-shape commands",
+			func() *ConfigTree {
+				tree := &ConfigTree{}
+				if err := tree.SetPath([]string{"event-options", "policy", "p", "events", "ping_test_failed"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := tree.SetPath([]string{"event-options", "policy", "p", "then", "change-configuration", "commands", "set system host-name x"}); err != nil {
+					t.Fatal(err)
+				}
+				return tree
+			}(), true},
+		{"nested one-key-container policy",
+			gate16722Hier(t, `event-options { policy { p { events e; then { change-configuration { commands "set system host-name x"; } } } } }`), true},
+		{"grouped commands hier",
+			gate16722Hier(t, `groups { g { event-options { policy p { events e; then { change-configuration { commands "set system host-name x"; } } } } } } apply-groups g;`), true},
+		{"grouped commands flat",
+			gate16722Flat(t,
+				"set groups g event-options policy p events ping_test_failed",
+				`set groups g event-options policy p then change-configuration commands "set system host-name x"`,
+				"set apply-groups g"), true},
+		{"grouped policy without commands",
+			gate16722Hier(t, `groups { g { event-options { policy p { events e; } } } } apply-groups g;`), false},
+		{"policy-local apply-groups",
+			gate16722Hier(t, `event-options { policy p { events e; apply-groups g; } }`), true},
+		{"policy-local apply-groups-except",
+			gate16722Hier(t, `event-options { policy p { events e; apply-groups-except g; } }`), true},
+		{"unrelated then commands lookalike",
+			gate16722Hier(t, `firewall { family inet { filter f { term t { then { change-configuration { commands "x"; } } } } } }`), false},
+		{"unrelated description mentioning commands",
+			gate16722Flat(t,
+				"set system host-name fw",
+				"set interfaces ge-0/0/0 description change-configuration commands"), false},
+		{"inactive policy still counts (compiled prunes, raw fallback does not)",
+			gate16722Hier(t, `event-options { inactive: policy p { events e; then { change-configuration { commands "set system host-name x"; } } } }`), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := treeMayHaveEventCommands9984(tc.tree); got != tc.want {
+				t.Fatalf("treeMayHaveEventCommands9984 = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The gate is a pure skip: when it fires on both trees, stamping must
+// leave the after tree byte-identical (no plant-class node invented, no
+// commands disturbed). When either side carries commands, the existing
+// stamping semantics apply unchanged.
+func TestStampGateSkipsOnlyCommandless16722(t *testing.T) {
+	// Commandless mutation: host-name edit on a config whose only event
+	// policy has no commands. Stamping must be a no-op.
+	before := gate16722Hier(t, `system { host-name a; } event-options { policy p { events e; plant-class alice; } }`)
+	after := before.Clone()
+	if err := after.SetPath([]string{"system", "host-name", "b"}); err != nil {
+		t.Fatalf("SetPath host-name: %v", err)
+	}
+	want := after.FormatSet()
+	StampChangedEventPlantClasses(before, after, "mallory")
+	if got := after.FormatSet(); got != want {
+		t.Fatalf("commandless stamp mutated the tree:\nbefore-stamp:\n%s\nafter-stamp:\n%s", want, got)
+	}
+	if strings.Contains(after.FormatSet(), "mallory") {
+		t.Fatalf("commandless stamp planted mallory:\n%s", after.FormatSet())
+	}
+
+	// Commands present on the after side only (policy created by the
+	// mutation): must stamp exactly as before the gate existed.
+	before2 := gate16722Hier(t, `system { host-name a; }`)
+	after2 := gate16722Hier(t, `system { host-name a; } event-options { policy p { events e; then { change-configuration { commands "set system host-name x"; } } } }`)
+	StampChangedEventPlantClasses(before2, after2, "alice")
+	if pol := compiledPlantClass9984(t, after2); pol.PlantClass != "alice" {
+		t.Fatalf("new policy with commands stamped PlantClass=%q, want alice", pol.PlantClass)
+	}
+
+	// Commands present on the before side only (policy deleted by the
+	// mutation): stamping the survivor-less after tree must not invent
+	// a policy or marker.
+	before3 := gate16722Hier(t, `event-options { policy p { events e; plant-class alice; then { change-configuration { commands "set system host-name x"; } } } }`)
+	after3 := gate16722Hier(t, `system { host-name a; }`)
+	StampChangedEventPlantClasses(before3, after3, "mallory")
+	if strings.Contains(after3.FormatSet(), "event-options") {
+		t.Fatalf("stamp after policy deletion invented event-options:\n%s", after3.FormatSet())
+	}
+}

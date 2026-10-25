@@ -18,7 +18,11 @@ func buildAddrCfg(gwAddr, gwDyn, gwLocal, vpnLocal string) *config.IPsecConfig {
 	// chain is required (an absent ike-policy does not skip the VPN).
 	return &config.IPsecConfig{
 		Gateways: map[string]*config.IPsecGateway{
-			"gw": {Name: "gw", Address: gwAddr, DynamicHostname: gwDyn, LocalAddress: gwLocal},
+			// #16708: an explicit remote-identity keeps a hostname /
+			// injected-address gateway renderable (no peer selector
+			// would otherwise skip it); the sanitize assertions below
+			// are unaffected — they pin the address value, not the id.
+			"gw": {Name: "gw", Address: gwAddr, DynamicHostname: gwDyn, LocalAddress: gwLocal, RemoteIDType: "hostname", RemoteIDValue: "peer.example.com"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
 			"tun": {PSK: config.NewSecret("fixture-secret"), Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol", LocalAddr: vpnLocal},

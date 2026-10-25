@@ -96,11 +96,45 @@ func (d *Daemon) forEachRGState(fn func(rgID int, s *rgStateMachine)) {
 // modes no VRRP sync-hold is armed (that path has its own
 // armNoRethSyncHold readiness term), so InSyncHold is false and this
 // is a no-op there. Nil-safe for minimal daemon constructions.
-func (d *Daemon) syncRGSyncHold() {
+//
+// #16692: the returned transitions are load-bearing, not diagnostic.
+// SetSyncHold itself can flip desired (clearing re-derives it from the
+// retained cluster/VRRP inputs), so a caller that refreshes the mirror
+// and then feeds its own input gets Changed=false from that input even
+// though the RG just edged. Callers MUST merge the transition for each
+// RG they actuate (mergeSyncHoldTransition / the reconcile loop's OR);
+// refreshing without merging discards the edge, and with it the
+// rg_active write and the tr.Changed-gated services (Kea, IPsec).
+func (d *Daemon) syncRGSyncHold() map[int]rgTransition {
 	held := d.vrrpMgr != nil && d.vrrpMgr.InSyncHold()
-	d.forEachRGState(func(_ int, s *rgStateMachine) {
-		s.SetSyncHold(held)
+	out := make(map[int]rgTransition)
+	d.forEachRGState(func(rgID int, s *rgStateMachine) {
+		out[rgID] = s.SetSyncHold(held)
 	})
+	return out
+}
+
+// syncRGSyncHoldTransition refreshes the sync-hold mirror on ONE RG and
+// returns the resulting transition (#16692). The event handlers use this
+// scoped form rather than syncRGSyncHold so refreshing for the RG being
+// handled cannot consume (flip-and-discard) another RG's pending edge:
+// an untouched RG keeps its stale mirror until reconcileRGState's
+// pass-wide refresh, which merges every RG's transition in its loop.
+func (d *Daemon) syncRGSyncHoldTransition(s *rgStateMachine) rgTransition {
+	return s.SetSyncHold(d.vrrpMgr != nil && d.vrrpMgr.InSyncHold())
+}
+
+// mergeSyncHoldTransition folds a sync-hold mirror refresh into the
+// transition produced by the caller's own state-machine input (#16692).
+// Active/Epoch/InvalidateSeq stay the caller's — they describe the final
+// desired state; only Changed is widened, so the edge side effects gated
+// on it (rg_active, blackholes, RETH services) run exactly once for a
+// release whose own input no longer moves the machine.
+func mergeSyncHoldTransition(tr, mirror rgTransition) rgTransition {
+	if mirror.Changed {
+		tr.Changed = true
+	}
+	return tr
 }
 
 func (d *Daemon) syncRGKernelUpgradeHold() {
@@ -459,6 +493,66 @@ func (d *Daemon) snapshotRethMasterState() map[int]bool {
 	return out
 }
 
+// markRethServicesApplied records that rgID's RETH services were driven to
+// the given ownership (#16696). Called at the tail of
+// applyRethServicesForRG / clearRethServicesForRG so every edge producer
+// (VRRP event, direct-VIP, cluster event, reconcile converger) advances the
+// same marker the converger compares against.
+func (d *Daemon) markRethServicesApplied(rgID int, active bool) {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	if d.rethServicesApplied == nil {
+		d.rethServicesApplied = make(map[int]bool)
+	}
+	d.rethServicesApplied[rgID] = active
+}
+
+// rethServicesAppliedFor reports the last service ownership applied for
+// rgID; absent reads false (never applied / last cleared).
+func (d *Daemon) rethServicesAppliedFor(rgID int) bool {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	return d.rethServicesApplied[rgID]
+}
+
+// driveRethServicesEdge runs the per-RG service edge for a transition this
+// handler produced (#16696). handleClusterEvent makes rg-state edges in
+// legacy non-strict mode (desired = clusterPri || allVrrpMaster) whenever
+// the cluster input is the one that flips desired, but previously ran
+// neither apply nor clear — the edge was lost permanently because the
+// later VRRP/reconcile inputs then report Changed=false. Direct mode
+// (noRethVRRP) owns services inside reconcileDirectVIPOwnership and is
+// excluded. Idempotence when both inputs arrive: the second input reports
+// Changed=false, so the edge runs exactly once.
+func (d *Daemon) driveRethServicesEdge(rgID int, tr rgTransition, noRethVRRP bool) {
+	if noRethVRRP || !tr.Changed {
+		return
+	}
+	if tr.Active {
+		d.applyRethServicesForRG(rgID)
+	} else {
+		d.clearRethServicesForRG(rgID)
+	}
+}
+
+// convergeRethServices repairs a lost per-RG service edge (#16696): when
+// the desired ownership (snapshotRethMasterState, i.e. rgStateMachine
+// IsActive) disagrees with the last-applied service ownership, re-drive
+// the edge. Level-triggered, so it also covers edges swallowed by the
+// #15258 sync-hold mirror refresh (R3-A34-03 class) whose transitions no
+// caller consumes. A converged RG costs one map read per pass.
+func (d *Daemon) convergeRethServices(rgID int) {
+	desired := d.snapshotRethMasterState()[rgID]
+	if desired == d.rethServicesAppliedFor(rgID) {
+		return
+	}
+	if desired {
+		d.applyRethServicesForRG(rgID)
+	} else {
+		d.clearRethServicesForRG(rgID)
+	}
+}
+
 func (d *Daemon) watchClusterEvents(ctx context.Context) {
 	// Debounce VRRP updates: coalesce rapid cluster events into a single
 	// UpdateInstances call. Without this, every heartbeat-driven state change
@@ -475,7 +569,12 @@ func (d *Daemon) watchClusterEvents(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case ev := <-d.cluster.Events():
-			vrrpTimer = d.handleClusterEvent(ctx, ev, vrrpTimer)
+			// #16692: refresh the sync-hold mirror at the top of
+			// per-event handling, before the handler feeds its input,
+			// and hand the refresh's transition to the handler so a
+			// hold release it produced is actuated, not discarded.
+			mirror := d.syncRGSyncHoldTransition(d.getOrCreateRGState(ev.GroupID))
+			vrrpTimer = d.handleClusterEventMerged(ctx, ev, vrrpTimer, mirror)
 		}
 	}
 }
@@ -491,12 +590,24 @@ func (d *Daemon) watchClusterEvents(ctx context.Context) {
 // select loop so the handling is reachable from a test without an injectable
 // cluster event channel (cluster.Manager only exposes a receive-only Events()).
 func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent, vrrpTimer *time.Timer) *time.Timer {
+	return d.handleClusterEventMerged(ctx, ev, vrrpTimer, rgTransition{})
+}
+
+// handleClusterEventMerged is handleClusterEvent with the caller's
+// mirror-refresh transition pre-merged (#16692). watchClusterEvents
+// passes the scoped refresh it ran for ev.GroupID; the plain entry point
+// runs its own refresh, so no caller can feed a state-machine input
+// against a stale sync-hold mirror or discard the edge that clearing it
+// produced.
+func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.ClusterEvent, vrrpTimer *time.Timer, mirror rgTransition) *time.Timer {
 	noRethVRRP := d.isNoRethVRRP()
 	// #15258: refresh the sync-hold mirror before any state-machine
 	// input — a state created while held carries syncHold=true, and
 	// without this refresh a post-release event would stay suppressed
-	// until the next reconcile tick.
-	d.syncRGSyncHold()
+	// until the next reconcile tick. #16692: the refresh is scoped to
+	// this event's RG (a pass-wide refresh here would consume unrelated
+	// RGs' pending edges) and its transition is merged below.
+	mirror = mergeSyncHoldTransition(mirror, d.syncRGSyncHoldTransition(d.getOrCreateRGState(ev.GroupID)))
 
 	// Dual-active winner reaffirm: no state change but send
 	// GARPs to refresh upstream ARP/NDP caches after split-brain.
@@ -540,12 +651,15 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 	}
 	d.setLocalFailoverCommitReady(ev.GroupID, false)
 	s := d.getOrCreateRGState(ev.GroupID)
-	tr := s.SetCluster(isPrimary)
+	tr := mergeSyncHoldTransition(s.SetCluster(isPrimary), mirror)
 	clusterOwnershipEdge := ev.OldState != ev.NewState &&
 		(ev.OldState == cluster.StatePrimary || ev.NewState == cluster.StatePrimary)
 	if clusterOwnershipEdge && !isPrimary {
 		d.scheduleFRRHAReconcile("cluster-state")
 		d.scheduleConnectedRGRepublish("cluster-state")
+		// #16690: the event already consumed the rg-state edge, so the
+		// reconcile safety net will see Changed=false and skip gating.
+		d.scheduleIPMonGating("cluster-state")
 	}
 	if isPrimary {
 		// #16270 (option a): republish the connected RG prefixes
@@ -632,6 +746,11 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		if d.legacyNoRethVRRPCommitReady(ev.GroupID, s, noRethVRRP) {
 			d.setLocalFailoverCommitReady(ev.GroupID, true)
 		}
+		// #16696: in legacy non-strict mode this cluster edge may be the
+		// one that flipped desired (cluster-first promotion); run the
+		// service edge here or it is lost — the later VRRP MASTER and
+		// reconcile inputs report Changed=false.
+		d.driveRethServicesEdge(ev.GroupID, tr, noRethVRRP)
 	} else {
 		// Demotion: run preflight and resign VRRP BEFORE
 		// clearing rg_active (#485). The preflight shifts
@@ -716,6 +835,11 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		default:
 			d.signalFailoverActuated(ev.GroupID)
 		}
+		// #16696: in legacy non-strict mode this cluster edge may be the
+		// one that flipped desired (VRRP BACKUP arrived while cluster was
+		// still primary, so it changed nothing); clear the services here
+		// or the old owner keeps its Kea RG groups and RG-anchored SAs.
+		d.driveRethServicesEdge(ev.GroupID, tr, noRethVRRP)
 	}
 
 	// Strict VIP ownership: suppress GARP on secondary, allow on primary.
@@ -781,6 +905,8 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		// establish its restored sessions, so reconcile after ownership work.
 		d.scheduleFRRHAReconcile("cluster-state")
 		d.scheduleConnectedRGRepublish("cluster-state")
+		// #16690: re-gate probes + publish gate for the new owner.
+		d.scheduleIPMonGating("cluster-state")
 	}
 	return vrrpTimer
 }
@@ -976,6 +1102,89 @@ func isRethVRRPEvent(ev vrrp.VRRPEvent) bool {
 	return ev.Family == "" && isRethVRID(ev.GroupID)
 }
 
+// handleVRRPEvent applies one VRRP state-change event (MASTER or
+// BACKUP) for an already-classified RETH instance: it drives rg_active
+// through the rgStateMachine and runs the edge side effects. Split out
+// of watchVRRPEvents' select loop so the handling is reachable from a
+// test without driving the manager's event channel.
+//
+// mirror is the caller's scoped sync-hold refresh transition for this
+// RG (#16692); the zero value is fine for tests that never held.
+func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror rgTransition) {
+	rgID := rgIDFromVRID(ev.GroupID)
+	s := d.getOrCreateRGState(rgID)
+	// #15258/#16692: refresh the sync-hold mirror BEFORE feeding the
+	// event, mirroring handleClusterEvent — ReleaseSyncHold itself
+	// triggers the preempt MASTER event, and judging it against a stale
+	// held mirror loses the activation edge entirely. The refresh's own
+	// transition is merged so a release-only flip is actuated here too.
+	mirror = mergeSyncHoldTransition(mirror, d.syncRGSyncHoldTransition(s))
+	if ev.State == vrrp.StateMaster {
+		tr := mergeSyncHoldTransition(s.SetVRRP(ev.Interface, true), mirror)
+		if rt := d.dataplane(); tr.Changed && tr.Active && rt != nil {
+			// #16270 (option a): republish the connected RG
+			// prefixes synchronously BEFORE SetRGActive, so
+			// the helper FIB holds the /24 transit row when
+			// the RG reports forwarding-active (see the
+			// cluster-event twin in handleClusterEvent).
+			d.republishConnectedRGSync(ctx, "vrrp-master")
+			// Activation order: set rg_active FIRST, then
+			// remove blackhole routes. Re-read desired state
+			// to guard against interleaved cluster goroutine.
+			// Only activate when ALL VRRP instances in the RG
+			// are MASTER — prevents partial ownership (#132).
+			cur, _ := s.CurrentDesired()
+			if err := rt.HA().SetRGActive(ctx, rgID, cur); err != nil {
+				slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
+			} else {
+				recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+			}
+			go d.RefreshFabricFwd()
+		}
+		// Only remove blackholes and apply services when ALL
+		// VRRP instances in the RG are MASTER (#132).
+		if tr.Changed && tr.Active {
+			d.removeBlackholeRoutes(rgID)
+			d.addStableRethLinkLocal(rgID)
+			d.applyRethServicesForRG(rgID)
+			// #16690: legacy VRRP edge consumed the transition;
+			// reconcile will see Changed=false and skip gating.
+			d.scheduleIPMonGating("vrrp-master")
+		}
+		if d.cluster != nil && d.cluster.IsLocalPrimary(rgID) && s.AllVRRPMaster() {
+			d.setLocalFailoverCommitReady(rgID, true)
+		}
+	}
+	if ev.State == vrrp.StateBackup {
+		tr := mergeSyncHoldTransition(s.SetVRRP(ev.Interface, false), mirror)
+		if !s.AllVRRPMaster() {
+			d.setLocalFailoverCommitReady(rgID, false)
+		}
+		if tr.Changed && !tr.Active {
+			// Deactivation order: inject blackhole routes FIRST,
+			// then clear rg_active. Re-read desired state to
+			// guard against interleaved cluster goroutine.
+			d.injectBlackholeRoutes(rgID)
+			if rt := d.dataplane(); rt != nil {
+				cur, _ := s.CurrentDesired()
+				if !cur {
+					d.tryPrepareUserspaceRGDemotion(rgID)
+				}
+				if err := rt.HA().SetRGActive(ctx, rgID, cur); err != nil {
+					slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
+				} else {
+					recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+				}
+				go d.RefreshFabricFwd()
+			}
+			d.removeStableRethLinkLocal(rgID)
+			d.clearRethServicesForRG(rgID)
+			// #16690: re-gate probes + close publish gate on standby.
+			d.scheduleIPMonGating("vrrp-backup")
+		}
+	}
+}
+
 // watchVRRPEvents monitors VRRP state changes and logs transitions.
 // On MASTER transition, updates rg_active, removes blackhole routes, and
 // refreshes fabric forwarding. Neighbor readiness is maintained in the
@@ -1011,67 +1220,13 @@ func (d *Daemon) watchVRRPEvents(ctx context.Context) {
 				"group", ev.GroupID,
 				"rg", rgID,
 				"state", ev.State.String())
-			if ev.State == vrrp.StateMaster {
-				s := d.getOrCreateRGState(rgID)
-				tr := s.SetVRRP(ev.Interface, true)
-				if rt := d.dataplane(); tr.Changed && tr.Active && rt != nil {
-					// #16270 (option a): republish the connected RG
-					// prefixes synchronously BEFORE SetRGActive, so
-					// the helper FIB holds the /24 transit row when
-					// the RG reports forwarding-active (see the
-					// cluster-event twin in handleClusterEvent).
-					d.republishConnectedRGSync(ctx, "vrrp-master")
-					// Activation order: set rg_active FIRST, then
-					// remove blackhole routes. Re-read desired state
-					// to guard against interleaved cluster goroutine.
-					// Only activate when ALL VRRP instances in the RG
-					// are MASTER — prevents partial ownership (#132).
-					cur, _ := s.CurrentDesired()
-					if err := rt.HA().SetRGActive(ctx, rgID, cur); err != nil {
-						slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
-					} else {
-						recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
-					}
-					go d.RefreshFabricFwd()
-				}
-				// Only remove blackholes and apply services when ALL
-				// VRRP instances in the RG are MASTER (#132).
-				if tr.Changed && tr.Active {
-					d.removeBlackholeRoutes(rgID)
-					d.addStableRethLinkLocal(rgID)
-					d.applyRethServicesForRG(rgID)
-				}
-				if d.cluster != nil && d.cluster.IsLocalPrimary(rgID) && s.AllVRRPMaster() {
-					d.setLocalFailoverCommitReady(rgID, true)
-				}
-			}
-			if ev.State == vrrp.StateBackup {
-				s := d.getOrCreateRGState(rgID)
-				tr := s.SetVRRP(ev.Interface, false)
-				if !s.AllVRRPMaster() {
-					d.setLocalFailoverCommitReady(rgID, false)
-				}
-				if tr.Changed && !tr.Active {
-					// Deactivation order: inject blackhole routes FIRST,
-					// then clear rg_active. Re-read desired state to
-					// guard against interleaved cluster goroutine.
-					d.injectBlackholeRoutes(rgID)
-					if rt := d.dataplane(); rt != nil {
-						cur, _ := s.CurrentDesired()
-						if !cur {
-							d.tryPrepareUserspaceRGDemotion(rgID)
-						}
-						if err := rt.HA().SetRGActive(ctx, rgID, cur); err != nil {
-							slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
-						} else {
-							recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
-						}
-						go d.RefreshFabricFwd()
-					}
-					d.removeStableRethLinkLocal(rgID)
-					d.clearRethServicesForRG(rgID)
-				}
-			}
+			// #16692: refresh the sync-hold mirror at the top of
+			// per-event handling — before the handler feeds the event —
+			// and hand its transition to the handler. ReleaseSyncHold
+			// triggers this very preempt MASTER event, so refreshing here
+			// is what lets it be judged against the released hold.
+			mirror := d.syncRGSyncHoldTransition(d.getOrCreateRGState(rgID))
+			d.handleVRRPEvent(ctx, ev, mirror)
 		}
 	}
 }
@@ -1197,7 +1352,10 @@ func (d *Daemon) reconcileRGState() {
 	// #15258 (A89-02): mirror the VRRP sync-hold the same way, so this
 	// pass cannot re-activate an RG whose Primary event the #14406
 	// backstop suppressed — previously this lasted at most one tick.
-	d.syncRGSyncHold()
+	// #16692: keep the transitions; the per-RG loop ORs each into its
+	// tr so a release this refresh itself produced still runs the
+	// rg_active write and the tr.Changed-gated services below.
+	syncHoldTrs := d.syncRGSyncHold()
 
 	// #6889: re-derive the config read-only gate from RG0's authoritative
 	// state. Placed FIRST so no later early return in this function can skip
@@ -1311,7 +1469,7 @@ func (d *Daemon) reconcileRGState() {
 		}
 
 		s := d.getOrCreateRGState(rgID)
-		tr := s.Reconcile(clusterPri, vrrp)
+		tr := mergeSyncHoldTransition(s.Reconcile(clusterPri, vrrp), syncHoldTrs[rgID])
 
 		// Desired-vs-applied retry: even if the state machine didn't
 		// change this pass, a prior UpdateRGActive failure may have
@@ -1441,6 +1599,12 @@ func (d *Daemon) reconcileRGState() {
 				}
 			}
 			anyRGChanged = true
+		} else if !noRethVRRP {
+			// #16696: level-triggered repair for a service edge no
+			// producer ran — handleClusterEvent's legacy-mode edge
+			// (pre-fix) or a sync-hold mirror refresh whose transition
+			// syncRGSyncHold discarded. No-op once converged.
+			d.convergeRethServices(rgID)
 		}
 		// Stable link-local: ensure correct on EVERY reconcile tick.
 		// The kernel preserves NODAD addresses across daemon restarts,
@@ -1938,6 +2102,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	if cc := d.clusterConfig(); cc != nil && cc.IPsecSASync && d.getSessionSync() != nil {
 		go d.reinitiateIPsecSAsForRG(rgID)
 	}
+	d.markRethServicesApplied(rgID, true)
 }
 
 type raScopedClearer interface {
@@ -2100,6 +2265,7 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// governs peer advertisement/re-initiation, not local SA hygiene on a
 	// node-local demotion edge.
 	go d.terminateDemotedRGIPsecSAs(rgID)
+	d.markRethServicesApplied(rgID, false)
 }
 
 // stripUntaggedUnitSuffix normalizes a resolved Linux interface name by

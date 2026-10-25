@@ -284,6 +284,52 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 	// multi-token run is a missing leaf value. This preserves the pre-#1319
 	// schedulerHasTypedTransmitRate behaviour.
 	if leafSchema.children != nil {
+		// #16679: `multihop ttl 2` packed onto ONE node (the hierarchical
+		// lexer packs the whole statement) — the modifier-headed arm below
+		// would refuse it as a missing leaf value, but for multihop the
+		// `ttl` modifier IS the value carrier: Junos spells the pinned
+		// TTL only that way (or blocked). Accept exactly `ttl <v>` (plus
+		// a trailing refused-by-nodeValidator `no-nexthop-change`, which
+		// never reaches here), validating <v> against the modifier's own
+		// validator. Anything longer is a packed run the compiler
+		// expansions own, and stays refused here.
+		if leafName == "multihop" && first == "ttl" {
+			modSchema := leafSchema.children["ttl"]
+			// Flat-set child shape: `multihop ttl` with the value as
+			// a CHILD node (SetPath grouped only `ttl`); the sibling
+			// supplying the leaf VALUE is the value child itself,
+			// already range-checked by validateBGPMultihop16679.
+			if len(values) == 1 && len(node.Children) == 1 && len(node.Children[0].Keys) == 1 {
+				if modSchema != nil {
+					if err := modSchema.checkToken(vc, node.Children[0].Keys[0]); err != nil {
+						return typedLeafInvalidErrorf(append(append([]string(nil), path...), "ttl"), node.Children[0].Keys[0], err)
+					}
+				}
+				return nil
+			}
+			if len(values) == 2 && modSchema != nil {
+				if err := modSchema.checkToken(vc, values[1]); err != nil {
+					return typedLeafInvalidErrorf(append(append([]string(nil), path...), "ttl"), values[1], err)
+				}
+				return nil
+			}
+			// Packed run (hierarchical `neighbor ... multihop ttl 7
+			// passive`): the `ttl` value rides this node and the run
+			// continues with sibling statements the compiler
+			// expansions split. Accept when a valid TTL follows;
+			// the remaining tokens are validated where the expansion
+			// lands them.
+			if len(values) > 2 && modSchema != nil {
+				if err := modSchema.checkToken(vc, values[1]); err == nil {
+					return nil
+				}
+				return typedLeafInvalidErrorf(append(append([]string(nil), path...), "ttl"), values[1], modSchema.checkToken(vc, values[1]))
+			}
+			if len(values) == 1 {
+				return typedLeafErrorf(path, "modifier %q requires a value", first)
+			}
+			return typedLeafErrorf(path, "missing value")
+		}
 		if modSchema, isMod := leafSchema.children[first]; isMod {
 			// #15270: SetPath groups `host port 514` as host->[514] under a
 			// `host port` node; the braced sibling supplies the address.

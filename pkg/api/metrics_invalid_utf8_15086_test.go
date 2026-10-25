@@ -8,9 +8,11 @@
 // The fix has three legs, all pinned here:
 //  1. Label values are sanitized at the single emit choke point
 //     (emitConstMetric -> sanitizeMetricLabelValues): the bad sample is
-//     still published, with U+FFFD standing in for the invalid byte, and
-//     counted in xpf_metrics_invalid_label_values_total. Legitimate
-//     values pass through byte-identical (control below).
+//     still published, with each invalid byte escaped as \xNN (#16707;
+//     the original U+FFFD fold was many-to-one and collided distinct
+//     identifiers into duplicate series), and counted in
+//     xpf_metrics_invalid_label_values_total. Legitimate values pass
+//     through byte-identical (control below).
 //  2. metricsLane.Collect recovers any residual collector panic, counts
 //     it in xpf_metrics_collector_panics_total, and returns the lane to
 //     the pool, so a scrape fails instead of crashing the process.
@@ -95,15 +97,16 @@ func policyHitLabels15086(t *testing.T, got []prometheus.Metric) []map[string]st
 }
 
 // The probe's exact mechanism: rule "web\xffallow" must not panic the
-// collector; its sample is published with the invalid byte folded to
-// U+FFFD and counted once in the invalid-label counter.
+// collector; its sample is published with the invalid byte escaped as
+// \xff (#16707 injective spelling; previously folded to U+FFFD) and
+// counted once in the invalid-label counter.
 func TestCollectPolicyCountersInvalidUTF8RuleName15086(t *testing.T) {
 	c, got := collectPolicyMetrics15086(t, "web\xffallow")
 
 	hits := policyHitLabels15086(t, got)
 	found := false
 	for _, labels := range hits {
-		if labels["rule"] == "web�allow" {
+		if labels["rule"] == "web\\xffallow" {
 			found = true
 		}
 		if strings.Contains(labels["rule"], "\xff") {
@@ -111,7 +114,7 @@ func TestCollectPolicyCountersInvalidUTF8RuleName15086(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("no sanitized web�allow series in %v; the sample must be published sanitized, not dropped or panicking", hits)
+		t.Errorf("no sanitized web\\xffallow series in %v; the sample must be published sanitized, not dropped or panicking", hits)
 	}
 	if n := c.invalidLabelValues.Load(); n != 1 {
 		t.Errorf("invalidLabelValues = %d, want 1 (one label value carried an invalid byte)", n)
@@ -178,7 +181,9 @@ func TestMetricsScrapeInvalidUTF8RuleName15086(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("scrape %d: status = %d, want 200; body:\n%s", scrape, resp.StatusCode, body)
 		}
-		if !strings.Contains(string(body), "web�allow") {
+		// #16707: injective \xNN spelling; on the wire the backslash is
+		// exposition-escaped, so the body carries web\\xffallow.
+		if !strings.Contains(string(body), `web\\xffallow`) {
 			t.Errorf("scrape %d: sanitized series missing from body", scrape)
 		}
 		if strings.Contains(string(body), "web\xffallow") {

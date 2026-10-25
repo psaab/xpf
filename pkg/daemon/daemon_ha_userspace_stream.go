@@ -336,6 +336,10 @@ func (d *Daemon) watchUserspaceEventStreamCallbacks(ctx context.Context) {
 // loop now re-installs whenever it observes a different stream instance.
 func (d *Daemon) installEventStreamCallbacks(es *dpuserspace.EventStream) {
 	es.SetOnEvent(func(eventType uint8, seq uint64, delta dpuserspace.SessionDeltaInfo) bool {
+		// #16627: stamp the wire sequence onto the delta so the queued
+		// copy and any fallback copy share one identity; the connected
+		// drain discards fallback copies at or below LastAppliedSequence.
+		delta.StreamSeq = seq
 		return d.handleEventStreamDelta(eventType, delta)
 	})
 	es.SetOnFullResync(func() bool {
@@ -645,8 +649,9 @@ func (d *Daemon) repayOwedFullResyncIfDue() {
 
 // eventStreamFallbackLoop monitors the event stream connection and falls back
 // to polling via DrainSessionDeltas when the stream is disconnected.
-// When the event stream is live, polling slows to 5s reconciliation;
-// when disconnected, it runs at 100ms to compensate for the lost stream.
+// When the event stream is live, the 5s tick discards only the
+// already-applied fallback copies and runs the other per-tick work
+// (#16627); when disconnected, polling runs at 100ms to compensate.
 // wired is the stream whose callbacks are already installed; a different
 // instance observed on a later tick is re-wired in place (r6-F4).
 func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, wired *dpuserspace.EventStream) {
@@ -720,8 +725,21 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, wired *dpuserspace
 		}
 
 		if connected {
-			// Stream is live — run reconciliation drain to catch any
-			// missed events, but at the slow 5s cadence.
+			// #16627: while the stream is live it is the authoritative
+			// leg (docs/session-sync-architecture.md: steady state is the
+			// stream; DrainSessionDeltas is the fallback "when the stream
+			// is down"). The discard drain drops ONLY fallback copies at
+			// or below the stream's applied watermark — queueing such a
+			// copy re-stamps it with a fresh generation, so a partial
+			// replay resurrects sessions the stream already closed and
+			// transiently deletes live successors. Copies the stream
+			// never carried (StreamSeq 0 or ahead of the watermark) are
+			// queued, never discarded on mere connectedness. The drain
+			// still clears any covered backlog so a later disconnect
+			// falls back to fresh deltas only, records the helper's
+			// delta-schema fingerprint on a valid status, and keeps
+			// the other per-tick work above (owed FullResync repayment,
+			// #9915 capacity wiring) running at the 5 s cadence.
 			drainer, hasDrainer := d.currentSessionDeltaDrainer()
 			if !hasDrainer {
 				continue
@@ -737,9 +755,13 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, wired *dpuserspace
 			if cfg == nil {
 				continue
 			}
-			n, _ := d.drainUserspaceSessionDeltasLocked(drainer, cfg)
+			var appliedSeq uint64
+			if es != nil {
+				appliedSeq = es.LastAppliedSequence()
+			}
+			n, _ := d.discardUserspaceSessionDeltasLocked(drainer, cfg, appliedSeq)
 			if n > 0 {
-				slog.Info("userspace: reconciliation drain caught missed deltas", "count", n)
+				slog.Debug("userspace: discarded already-streamed session deltas from fallback buffer", "count", n)
 			}
 			continue
 		}
@@ -994,6 +1016,11 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 					continue
 				}
 				sink.openV4(key, val)
+				// #16742: a peer-synced open queued for the peer is
+				// also the promoted node's only open signal (no
+				// SESSION_CREATE, #15126); register it for flow
+				// export without a syslog CREATE.
+				d.trackFlowOpenFromSync(delta)
 				if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 					src, dst := userspaceDeltaFlowStrings(delta)
 					slog.Debug("userspace delta: admitted V4", "src", src, "dst", dst, "ownerRG", delta.OwnerRGID)
@@ -1011,6 +1038,7 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 					continue
 				}
 				sink.openV6(key, val)
+				d.trackFlowOpenFromSync(delta)
 				n++
 				if delta.FabricRedirect && !delta.FabricIngress {
 					if wireKey, wireVal, ok := userspaceForwardWireAliasV6(key, val); ok {

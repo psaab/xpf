@@ -51,6 +51,19 @@ func StampChangedEventPlantClasses(before, after *ConfigTree, class string) {
 		return
 	}
 	class = EventPlantClassForMutation(class)
+	// #16722: cheap raw gate. When neither tree carries a change-configuration
+	// commands payload, no policy can gain, lose, or rebind commands, so the
+	// two full lenient compiles below would compare empty policies and the
+	// raw census would find no commands — a provable no-op. The gate scans
+	// only the event-policy subtrees (including `groups { ... event-options
+	// ... }` bodies, where apply-groups can materialise an effective policy)
+	// and requires a real commands payload (tail values or children), never
+	// a bare keyword mention. A policy-local `apply-groups` can also
+	// materialise commands from an arbitrary group body, so its presence
+	// forces the full path as well.
+	if !treeMayHaveEventCommands9984(before) && !treeMayHaveEventCommands9984(after) {
+		return
+	}
 	beforeCompiled := compiledEventPolicies9984(before)
 	afterCompiled := compiledEventPolicies9984(after)
 	changed := make(map[string]bool)
@@ -130,6 +143,97 @@ func compiledEventPolicies9984(tree *ConfigTree) map[string]*EventPolicy {
 		}
 	}
 	return out
+}
+
+// treeMayHaveEventCommands9984 reports whether tree carries, anywhere an
+// event policy can live, a `then change-configuration commands` payload
+// with at least one value (the same payload test eventPolicyHasCommands9984
+// applies inside a policy), or a policy-local `apply-groups` /
+// `apply-groups-except` that could materialise / suppress such a payload
+// from a group body. It descends only into event-options subtrees, group
+// definition bodies (`groups { <name> { ... } }` — the group name is one
+// level below `groups`), and group-body subtrees, so an unrelated stanza
+// (a firewall `then`, a description mentioning "commands") never trips
+// it; a stanza outside those scopes cannot compile into an EventPolicy.
+// #16722 gate helper.
+func treeMayHaveEventCommands9984(tree *ConfigTree) bool {
+	if tree == nil {
+		return false
+	}
+	return nodesMayHaveEventCommands9984(tree.Children, 0)
+}
+
+// scopedNodesMayHaveEventCommands9984 walks top-level / group-body nodes
+// that may contain a scoping stanza.
+func nodesMayHaveEventCommands9984(nodes []*Node, depth int) bool {
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		switch node.Name() {
+		case "event-options":
+			if eventOptionsMayHaveEventCommands9984(node) {
+				return true
+			}
+		case "groups":
+			for _, body := range node.Children {
+				if body != nil && nodesMayHaveEventCommands9984(body.Children, depth+1) {
+					return true
+				}
+			}
+		default:
+			if depth > 0 && nodesMayHaveEventCommands9984(node.Children, depth) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func eventOptionsMayHaveEventCommands9984(node *Node) bool {
+	for _, child := range node.Children {
+		if child == nil || child.Name() != "policy" {
+			continue
+		}
+		for _, inst := range namedInstances([]*Node{child}) {
+			if inst.node != nil && policyMayHaveEventCommands9984(inst.node) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func policyMayHaveEventCommands9984(policy *Node) bool {
+	// Policy-local inheritance can materialise (or, via -except, suppress)
+	// commands authored in a group body this subtree does not contain.
+	for _, child := range policy.Children {
+		if child == nil {
+			continue
+		}
+		if child.Name() == "apply-groups" || child.Name() == "apply-groups-except" {
+			return true
+		}
+	}
+	if eventPolicyHasCommands9984([]*Node{policy}) {
+		return true
+	}
+	// Packed flat-set spelling: the policy and its commands ride on one
+	// leaf's Keys (`policy p then change-configuration commands ...`).
+	return eventOptionsKeysMayHaveCommands9984(policy.Keys)
+}
+
+// eventOptionsKeysMayHaveCommands9984 scans a packed key run for the
+// adjacent `change-configuration commands` pair followed by at least one
+// value token — the packed spelling of the payload. A bare trailing
+// `commands` keyword carries no value and compiles to zero commands.
+func eventOptionsKeysMayHaveCommands9984(keys []string) bool {
+	for i := range len(keys) - 2 {
+		if keys[i] == "change-configuration" && keys[i+1] == "commands" {
+			return true
+		}
+	}
+	return false
 }
 
 func eventPolicyNodes9984(tree *ConfigTree) map[string][]*Node {

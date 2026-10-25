@@ -519,27 +519,49 @@ func (s *Server) managementTLSGetCertificateFromSlot(slot *managementTLSCertific
 }
 
 func (s *Server) refreshManagementTLSCertificate() {
-	s.tlsCertificateMu.Lock()
-	defer s.tlsCertificateMu.Unlock()
-	s.refreshManagementTLSCertificateLocked()
+	// Lock order (#16706): tlsCertificateMu BEFORE lifeMu. The install /
+	// publish half runs under tlsCertificateMu; HTTPS-leg recovery
+	// (which takes lifeMu) is deferred until tlsCertificateMu is
+	// released, so this path never nests lifeMu inside tlsCertificateMu
+	// and the leg rebuild path (lifeMu -> tlsCertificateMu via
+	// buildHTTPSServer) shares the same canonical order. Previously
+	// recovery ran under tlsCertificateMu (tlsCertificateMu -> lifeMu),
+	// inverting the rebuild order and deadlocking the apply path.
+	recover := s.refreshManagementTLSCertificateUnderCertMu()
+	if recover {
+		s.recoverHTTPSLegsIfNeeded()
+	}
 }
 
-func (s *Server) refreshManagementTLSCertificateLocked() {
+// refreshManagementTLSCertificateUnderCertMu runs the certificate
+// install/publish half under tlsCertificateMu and reports whether
+// HTTPS-leg recovery should run after the caller releases that lock.
+// It NEVER takes lifeMu.
+func (s *Server) refreshManagementTLSCertificateUnderCertMu() bool {
+	s.tlsCertificateMu.Lock()
+	defer s.tlsCertificateMu.Unlock()
+	return s.refreshManagementTLSCertificateLocked()
+}
+
+// refreshManagementTLSCertificateLocked installs / publishes a fresh
+// certificate. Callers hold tlsCertificateMu; it MUST NOT take lifeMu.
+// It returns true when a successful (re)install should be followed by
+// HTTPS-leg recovery once tlsCertificateMu is released.
+func (s *Server) refreshManagementTLSCertificateLocked() bool {
 	if !s.tlsDesired.Load() && !s.tlsDesiredConfigured.Load() {
-		return
+		return false
 	}
 	files := s.managementTLSFiles()
 	current := s.tlsCertificateSlot.state.Load()
 	now := s.managementTLSNow()
 	if files.custom() {
-		s.refreshCustomManagementTLSCertificate(files, current, now)
-		return
+		return s.refreshCustomManagementTLSCertificate(files, current, now)
 	}
 
 	invalidAlreadyCounted := current != nil && current.invalid
 	if current != nil && current.source == managementTLSCertificateGenerated && !current.invalid {
 		if err := managementTLSCertificatePreflightError(current.chain, now); err == nil {
-			return
+			return false
 		} else {
 			s.failManagementTLSCertificate(current.source, current.bindHost, current.leaf, err, now)
 			invalidAlreadyCounted = true
@@ -564,20 +586,20 @@ func (s *Server) refreshManagementTLSCertificateLocked() {
 	}
 	if err != nil {
 		s.failManagementTLSCertificate(managementTLSCertificateGenerated, bindHost, invalidLoadedLeaf, err, now)
-		return
+		return false
 	}
 	state, err := newManagementTLSCertificateState(cert, managementTLSCertificateGenerated, bindHost)
 	if err != nil {
 		s.failManagementTLSCertificate(managementTLSCertificateGenerated, bindHost, nil, err, now)
-		return
+		return false
 	}
 	if err := managementTLSCertificatePreflightError(state.chain, now); err != nil {
 		s.failManagementTLSCertificate(managementTLSCertificateGenerated, bindHost, state.leaf, err, now)
-		return
+		return false
 	}
 	s.installManagementTLSCertificate(state)
 	s.publishManagementTLSCertificateToLiveLegs(state)
-	s.recoverHTTPSLegsIfNeededLocked()
+	return true
 }
 
 // publishManagementTLSCertificateToLiveLegs mirrors state into every live
@@ -594,29 +616,35 @@ func (s *Server) publishManagementTLSCertificateToLiveLegs(state *managementTLSC
 	})
 }
 
-// recoverHTTPSLegsIfNeededLocked creates HTTPS legs that were never
+// recoverHTTPSLegsIfNeeded creates HTTPS legs that were never
 // built because the initial certificate load failed (#15667). The
 // periodic monitor calls it (via refresh) after a successful reload
 // when no leg is serving but TLS is configured-desired and the server
 // has a root context and configured HTTPS templates. It is a no-op
 // when any template leg is already serving, when there are no
 // templates (ReconcileHTTPSAddrs-built servers), or when no root
-// context exists (Run/serveBound path). Callers hold tlsCertificateMu;
-// it takes lifeMu — the only place that nests lifeMu inside
-// tlsCertificateMu (buildHTTPSServer never runs under this call: legs
-// are built directly from the already-validated state).
-func (s *Server) recoverHTTPSLegsIfNeededLocked() {
+// context exists (Run/serveBound path).
+//
+// Lock order (#16706): callers MUST NOT hold tlsCertificateMu. This
+// function takes lifeMu itself. Canonical order is therefore
+// tlsCertificateMu -> (release) -> lifeMu: no path nests lifeMu
+// inside tlsCertificateMu, and the leg rebuild path nests
+// tlsCertificateMu inside lifeMu (lifeMu -> tlsCertificateMu via
+// buildHTTPSServer). Legs here are built directly from the
+// already-validated state, so buildHTTPSServer never runs under
+// this call.
+func (s *Server) recoverHTTPSLegsIfNeeded() {
 	// tlsDesired is armed by installManagementTLSCertificate just
 	// before this runs, so it cannot gate recovery; the configured
 	// desire plus the absence of a serving leg is the gate.
 	if !s.tlsDesiredConfigured.Load() {
 		return
 	}
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
 	if len(s.httpsDesiredAddrs) == 0 || s.rootCtx == nil {
 		return
 	}
-	s.lifeMu.Lock()
-	defer s.lifeMu.Unlock()
 	if len(s.httpsLegs) > 0 {
 		for _, leg := range s.httpsLegs {
 			if leg.serving() {
@@ -641,7 +669,7 @@ func (s *Server) recoverHTTPSLegsIfNeededLocked() {
 		if i < len(s.httpsServers) && s.httpsServers[i] != nil {
 			srv = s.httpsServers[i]
 		}
-		ln, err := s.listen("tcp", addr)
+		ln, err := s.listenAddr(addr)
 		if err != nil {
 			slog.Error("api: HTTPS listener bind failed during certificate recovery; HTTPS disabled until the next reconcile", "addr", addr, "err", err)
 			legs = append(legs, nil)
@@ -695,13 +723,18 @@ func (s *Server) ReconcileTLSCertificate(certificate, privateKey string) error {
 	if !s.tlsDesired.Load() {
 		return nil
 	}
-	// #14984: holding tlsCertificateMu makes refreshManagementTLSCertificateLocked
-	// atomic with the fallback read-back; refreshManagementTLSCertificate would
-	// self-deadlock if re-locked here.
+	// #14984: holding tlsCertificateMu makes
+	// refreshManagementTLSCertificateLocked atomic with the fallback
+	// read-back; refreshManagementTLSCertificate would self-deadlock
+	// if re-locked here. #16706: recovery runs AFTER the unlock, so
+	// lifeMu is never taken while tlsCertificateMu is held.
 	s.tlsCertificateMu.Lock()
-	s.refreshManagementTLSCertificateLocked()
+	recover := s.refreshManagementTLSCertificateLocked()
 	state := s.tlsCertificateSlot.state.Load()
 	s.tlsCertificateMu.Unlock()
+	if recover {
+		s.recoverHTTPSLegsIfNeeded()
+	}
 	if state == nil || state.invalid {
 		if state != nil {
 			return fmt.Errorf("management TLS certificate is unavailable: %s", state.reason)
@@ -751,7 +784,11 @@ func managementTLSStateForServer(srv *http.Server) *managementTLSCertificateStat
 	return nil
 }
 
-func (s *Server) refreshCustomManagementTLSCertificate(files *managementTLSCertificateFiles, current *managementTLSCertificateState, now time.Time) {
+// refreshCustomManagementTLSCertificate loads / installs a custom pair.
+// Callers hold tlsCertificateMu; it MUST NOT take lifeMu. Returns true
+// when a successful install should be followed by HTTPS-leg recovery
+// once tlsCertificateMu is released (#16706).
+func (s *Server) refreshCustomManagementTLSCertificate(files *managementTLSCertificateFiles, current *managementTLSCertificateState, now time.Time) bool {
 	bindHost := ""
 	if current != nil {
 		bindHost = current.bindHost
@@ -759,33 +796,33 @@ func (s *Server) refreshCustomManagementTLSCertificate(files *managementTLSCerti
 	if files.certificate == "" || files.privateKey == "" {
 		s.failManagementTLSCertificate(managementTLSCertificateCustom, bindHost, nil,
 			fmt.Errorf("custom management TLS requires both certificate and private-key paths"), now)
-		return
+		return false
 	}
 	cert, err := tls.LoadX509KeyPair(files.certificate, files.privateKey)
 	if err != nil {
 		s.failManagementTLSCertificate(managementTLSCertificateCustom, bindHost, nil,
 			fmt.Errorf("load custom management TLS certificate/key pair: %w", err), now)
-		return
+		return false
 	}
 	state, err := newManagementTLSCertificateState(cert, managementTLSCertificateCustom, bindHost)
 	if err != nil {
 		s.failManagementTLSCertificate(managementTLSCertificateCustom, bindHost, nil, err, now)
-		return
+		return false
 	}
 	if err := managementTLSCertificatePreflightError(state.chain, now); err != nil {
 		s.failManagementTLSCertificate(managementTLSCertificateCustom, bindHost, state.leaf, err, now)
-		return
+		return false
 	}
 	if current != nil && current.source == managementTLSCertificateCustom &&
 		current.fingerprint == state.fingerprint && !current.invalid {
-		return
+		return false
 	}
 	s.installManagementTLSCertificate(state)
 	s.publishManagementTLSCertificateToLiveLegs(state)
-	s.recoverHTTPSLegsIfNeededLocked()
 	if current != nil && current.fingerprint != state.fingerprint {
 		slog.Info("custom management TLS certificate rotated", "not_after", state.leaf.NotAfter.UTC().Format(time.RFC3339), "sans", managementTLSSANDiagnostic(state.leaf))
 	}
+	return true
 }
 
 func (s *Server) startManagementTLSCertificateMonitor(ctx context.Context) {

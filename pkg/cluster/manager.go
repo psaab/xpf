@@ -49,9 +49,26 @@ type RedundancyGroupState struct {
 	Preempt          bool
 	ManualFailover   bool      // true if manually forced
 	ManualFailoverAt time.Time // when ManualFailover was set (for deadlock detection)
-	Weight           int       // current effective weight (255 - sum of down monitor weights)
-	FailoverCount    int
-	MonitorFails     []string // names of currently-failed monitors
+	// forcedSecondary is the ISSU drain pin (#16743): ForceSecondary sets it
+	// alongside ManualFailover, and it pins Weight to 0 as a state fact. While
+	// set, recalcWeight / debtDerivedWeightLocked / reconcile keep Weight=0
+	// instead of recomputing it from monitor debt — otherwise any commit or
+	// peer config sync with interface monitors (which feeds every monitor
+	// through SetMonitorWeight -> recalcWeight) silently un-drains the node,
+	// and under preempt the peer then yields to the still-parked node,
+	// leaving no owner. Cleared wherever ManualFailover is deliberately
+	// cleared: ResetFailover (hence ResetAllFailover), peer loss in
+	// handlePeerTimeout, the electRG dual-resign/lease restores, a peer-
+	// transfer request consuming the hold, FinalizePeerTransferOut, and the
+	// AbortRemoteTransferOut restore. ManualFailover alone (operator
+	// `request chassis cluster failover`) does NOT set it — that path
+	// preserves monitor-derived weight. A stacked ManualFailover after
+	// ForceSecondary inherits the pin (State becomes SecondaryHold, weight
+	// stays 0) until one of the clears above.
+	forcedSecondary bool
+	Weight          int // current effective weight (255 - sum of down monitor weights)
+	FailoverCount   int
+	MonitorFails    []string // names of currently-failed monitors
 	// transferCommitRolePinned preserves the role granted by the last completed
 	// transfer against ordinary election until peer state or operator action
 	// establishes a new ownership decision.
@@ -198,8 +215,21 @@ type Manager struct {
 	// #7161 readiness gate still sees a cold boot (gated) rather than a peer
 	// loss (fail-open). Cleared when a peer heartbeat arrives. See #10697.
 	peerConfirmedAbsent bool
-	peerNodeID          int
-	peerGroups          map[int]PeerGroupState
+	// #16751: Manager-owned never-seen clock. Armed by UpdateConfig while a
+	// control link is configured and no peer has ever been seen, so peer
+	// absence is confirmed after heartbeatStartupGrace even when the
+	// heartbeat receiver never starts (e.g. the control interface has no
+	// address because a direct control cable has no carrier and networkd
+	// does not configure it). Previously the only driver of
+	// handlePeerNeverSeen was the receiver's checkTimeout, so a failed
+	// heartbeat start held every non-preempt RG secondary forever with no
+	// degraded fallback. Guarded by m.mu; neverSeenTimerGen invalidates a
+	// timer callback that raced a disarm.
+	neverSeenSince    time.Time
+	neverSeenTimer    *time.Timer
+	neverSeenTimerGen uint64
+	peerNodeID        int
+	peerGroups        map[int]PeerGroupState
 	// latestPeerHeartbeatSession/Sequence are the session/sequence of the
 	// most recent peer heartbeat frame accepted by handlePeerHeartbeat
 	// (zero when none, or when that frame carried no echo-capable
@@ -544,6 +574,17 @@ type Manager struct {
 	// hbRestartOwedHold is the grace end the failed restart was carrying
 	// (#9722): the retry's replacement inherits it.
 	hbRestartOwedHold time.Time
+	// hbCommsRestartSeed / hbCommsRestartHold carry the outgoing receiver's
+	// peer-liveness seed across a deliberate StopHeartbeat -> StartHeartbeat
+	// comms restart in the same Manager lifetime (#16745). StopHeartbeat
+	// stashes them (only when that receiver had seen the peer); the next
+	// published StartHeartbeat consumes them so its receiver is armed as a
+	// restart (armRestart, #9722) instead of a cold start. A start that
+	// publishes for any other reason also consumes/clears them, and a fresh
+	// Manager (daemon restart) has none — cold-boot semantics unchanged.
+	// Guarded by mu.
+	hbCommsRestartSeed int64
+	hbCommsRestartHold time.Time
 	// hbDeliberateStops counts exported StopHeartbeat calls. A failed restart
 	// records its debt only if none landed while it retried: a comms teardown
 	// in that window stopped the heartbeat on purpose (#9751).
@@ -1150,6 +1191,10 @@ func (m *Manager) Stop() {
 	// fired and its closure is parked on m.mu: it acquires the lock after this
 	// section releases it, observes m.stopped, and returns without electing.
 	m.stopped = true
+	// #16751: the Manager-owned never-seen clock is torn down with the
+	// manager; confirmNeverSeenIfDue also checks m.stopped for a callback
+	// already parked on m.mu.
+	m.disarmNeverSeenClockLocked()
 	for _, rg := range m.groups {
 		if rg.holdTimer != nil {
 			rg.holdTimer.Stop()

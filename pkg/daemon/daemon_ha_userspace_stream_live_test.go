@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -633,4 +634,242 @@ func TestEventStreamFallbackLoop_DrainerReresolvedOnTheConnectedBranch(t *testin
 
 	cancel()
 	<-loopDone
+}
+
+// --- #16627: the connected drain must not replay already-streamed deltas ---
+
+// replayDrainer16627 is a publishable backend that is BOTH a connected
+// event-stream provider and a session-delta drainer returning a fixed
+// batch. It models a helper whose RPC-fallback buffer still holds deltas
+// the stream already delivered (a pre-reconnect backlog, or an older
+// helper that mirrors unconditionally).
+type replayDrainer16627 struct {
+	runtimeOnlyApplyTestDP
+	es      *dpuserspace.EventStream
+	drains  atomic.Int64
+	mu      sync.Mutex
+	batches [][]dpuserspace.SessionDeltaInfo
+	// release gates when the replay batch is served: the test holds it
+	// until the stream sequence has been applied, mirroring production
+	// where the helpers fallback copy of a streamed delta can only be
+	// drained after that delta was streamed (and applied) first.
+	releaseOnce sync.Once
+	releaseCh   chan struct{}
+}
+
+func (r *replayDrainer16627) release() {
+	r.releaseOnce.Do(func() { close(r.releaseCh) })
+}
+
+func (r *replayDrainer16627) EventStream() *dpuserspace.EventStream { return r.es }
+
+func (r *replayDrainer16627) DrainSessionDeltas(uint32) ([]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error) {
+	if r.releaseCh != nil {
+		<-r.releaseCh
+	}
+	r.drains.Add(1)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.batches) == 0 {
+		return nil, dpuserspace.ProcessStatus{}, nil
+	}
+	b := r.batches[0]
+	r.batches = r.batches[1:]
+	return b, dpuserspace.ProcessStatus{}, nil
+}
+
+// TestConnectedDrainDiscardsStreamedReplay16627 is the #16627 daemon-level
+// acceptance cell. A stream sequence (open S1, close S1, open successor S2)
+// is applied to a real sender SessionSync and its frames to a real receiver
+// SessionSync, leaving the receiver in the stream-only state (S2 present,
+// egress from S2). A replay of ANY prefix or suffix of that sequence
+// through the connected fallback drain must leave the receiver in exactly
+// that state — the drain discards already-streamed deltas instead of
+// re-stamping them with fresh generations.
+//
+// Fail-on-revert: route the connected arm back through
+// drainUserspaceSessionDeltasLocked (queueing) and the {open S1} replay
+// resurrects the closed S1 (receiver reports S1's egress) while the
+// {close S1} replay deletes the live same-key S2. Discarding WITHOUT
+// the StreamSeq/watermark gate (blanket discard) fails the
+// unsequenced-replay subtest below and the discard unit cells.
+func TestConnectedDrainDiscardsStreamedReplay16627(t *testing.T) {
+	open1 := transitOpen9767() // S1: egress ifindex 12
+	open1.StreamSeq = 1
+	// S2 is the SAME-KEY successor of S1: identical tuple (same SrcPort),
+	// reincarnated after S1 closed, differing only in its egress. A
+	// replayed close of S1 therefore names S2's exact key — with a
+	// different SrcPort the close replay would miss S2 entirely and the
+	// successor-deletion arm would be test-only-green.
+	open2 := open1
+	open2.StreamSeq = 3
+	open2.EgressIfindex = 13
+	open2.TXIfindex = 13
+	close1 := open1
+	close1.StreamSeq = 2
+	close1.Event = "close"
+
+	cases := []struct {
+		name   string
+		replay []dpuserspace.SessionDeltaInfo
+	}{
+		{"replay open S1 only", []dpuserspace.SessionDeltaInfo{open1}},
+		{"replay close S1 only", []dpuserspace.SessionDeltaInfo{close1}},
+		{"replay open+close S1", []dpuserspace.SessionDeltaInfo{open1, close1}},
+		{"replay open S1 close S1 open S2", []dpuserspace.SessionDeltaInfo{open1, close1, open2}},
+		{"replay open S2 only", []dpuserspace.SessionDeltaInfo{open2}},
+		// Standalone suffix: the tail of the sequence on its own. A
+		// replay need not be a prefix — any contiguous tail the drain
+		// happens to pop must be equally inert.
+		{"replay close S1 open S2 suffix", []dpuserspace.SessionDeltaInfo{close1, open2}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			es := connectedEventStreamForDrainTest(t, ctx)
+
+			d, ss, _ := resyncFixture9767(t)
+			d.sessionSync = ss
+			zoneIDs := buildZoneIDs(d.store.ActiveConfig())
+			key2, _, ok := userspaceSessionFromDeltaV4(open2, zoneIDs)
+			if !ok {
+				t.Fatal("setup: successor delta did not convert")
+			}
+
+			// Stream-only sequence: open S1, close S1, open S2.
+			for i, step := range []struct {
+				typ   uint8
+				delta dpuserspace.SessionDeltaInfo
+			}{
+				{dpuserspace.EventTypeSessionOpen, open1},
+				{dpuserspace.EventTypeSessionClose, close1},
+				{dpuserspace.EventTypeSessionOpen, open2},
+			} {
+				if !d.handleEventStreamDelta(step.typ, step.delta) {
+					t.Fatalf("stream step %d returned not-ready", i)
+				}
+			}
+
+			receiverStore := newOrderingSessionStore9631()
+			receiver := cluster.NewSessionSync("127.0.0.1:0", "127.0.0.1:1", nil)
+			receiver.SetRuntimeDomains(receiverStore, nil)
+			applyToReceiver := func(what string) {
+				t.Helper()
+				if _, err := ss.ApplyQueuedMessagesForTesting(receiver); err != nil {
+					t.Fatalf("%s: apply queued messages: %v", what, err)
+				}
+			}
+			applyToReceiver("stream sequence")
+			// The three stream deltas were applied in order, so the
+			// stream's applied watermark is 3 — what the read loop
+			// would have recorded had these arrived as binary frames.
+			es.SetLastAppliedSequenceForTesting(3)
+			streamVal, streamOK := receiverStore.v4[key2]
+			if !streamOK {
+				t.Fatal("stream-only control: receiver must hold the successor S2")
+			}
+			streamCount := len(receiverStore.v4)
+
+			// Replay through the production connected fallback loop.
+			backend := &replayDrainer16627{es: es, batches: [][]dpuserspace.SessionDeltaInfo{tc.replay}, releaseCh: make(chan struct{})}
+			d.setDataplane(backend)
+			loopDone := make(chan struct{})
+			go func() {
+				defer close(loopDone)
+				d.eventStreamFallbackLoop(ctx, es)
+			}()
+			backend.release()
+			deadline := time.Now().Add(40 * time.Second)
+			for backend.drains.Load() == 0 {
+				if time.Now().After(deadline) {
+					cancel()
+					<-loopDone
+					t.Fatal("connected fallback loop never drained the replay backend")
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			// One drain is enough: the batch is discarded under the same
+			// lock the stream callback queues with, so once the drain has
+			// run the replay (if queued) is already in the send queue.
+			cancel()
+			<-loopDone
+			if !d.eventStreamConnected.Load() && backend.drains.Load() == 0 {
+				t.Fatal("loop never reported connected")
+			}
+			applyToReceiver("replay")
+			gotVal, gotOK := receiverStore.v4[key2]
+			if !gotOK {
+				t.Fatalf("#16627: replay %q deleted the live successor S2 from the receiver", tc.name)
+			}
+			// Compare the egress identity, not the whole value: a queued
+			// replay re-stamps timing fields, so value inequality alone
+			// would be test-only noise. The resurrection signature is
+			// S1's egress (12) replacing S2's (13) under the same key.
+			if gotVal.FibIfindex != streamVal.FibIfindex {
+				t.Fatalf("#16627: replay %q changed the receiver state: got fib=%d, stream-only fib=%d "+
+					"(a replayed open resurrected the closed S1 over S2)", tc.name, gotVal.FibIfindex, streamVal.FibIfindex)
+			}
+			if len(receiverStore.v4) != streamCount {
+				t.Fatalf("#16627: replay %q changed the receiver session count: got %d, stream-only %d",
+					tc.name, len(receiverStore.v4), streamCount)
+			}
+		})
+	}
+
+	// Disconnected control: with no stream, the SAME drain path must still
+	// queue fallback deltas (the fallback leg is authoritative while down).
+	t.Run("disconnected drain still queues", func(t *testing.T) {
+		d, ss, _ := resyncFixture9767(t)
+		drainer := &fakeUserspaceDeltaDrainer{batches: [][]dpuserspace.SessionDeltaInfo{{open1}}}
+		queued, err := d.drainUserspaceSessionDeltasWithConfig(drainer, d.store.ActiveConfig(), 1)
+		if err != nil {
+			t.Fatalf("disconnected drain: %v", err)
+		}
+		if queued != 1 {
+			t.Fatalf("disconnected drain queued %d, want 1 (fallback must carry deltas while the stream is down)", queued)
+		}
+		if types := queuedTypes9767(ss); len(types) != 1 || types[0] != "session_v4" {
+			t.Fatalf("disconnected drain send queue = %v, want [session_v4]", types)
+		}
+	})
+}
+
+// TestConnectedDrainQueuesUnsequencedReplay16627 pins the other half of
+// the #16627 gate through the production connected loop: a fallback
+// delta the stream never carried (StreamSeq 0) must still QUEUE while
+// connected. A blanket discard-while-connected fails this — it would
+// silently drop fallback-only deltas (produced while the stream was
+// down, CommandExport copies, or deltas whose lossless enqueue failed).
+func TestConnectedDrainQueuesUnsequencedReplay16627(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es := connectedEventStreamForDrainTest(t, ctx)
+
+	d, ss, _ := resyncFixture9767(t)
+	d.sessionSync = ss
+
+	open := transitOpen9767() // StreamSeq 0: never stream-carried
+	backend := &replayDrainer16627{es: es, batches: [][]dpuserspace.SessionDeltaInfo{{open}}}
+	d.setDataplane(backend)
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		d.eventStreamFallbackLoop(ctx, es)
+	}()
+	deadline := time.Now().Add(40 * time.Second)
+	for backend.drains.Load() == 0 {
+		if time.Now().After(deadline) {
+			cancel()
+			<-loopDone
+			t.Fatal("connected fallback loop never drained the replay backend")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	cancel()
+	<-loopDone
+	if types := queuedTypes9767(ss); len(types) != 1 || types[0] != "session_v4" {
+		t.Fatalf("#16627: unsequenced (StreamSeq 0) fallback delta through the connected drain queued %v, "+
+			"want [session_v4] — discard must be gated on the applied watermark, not on connectedness", types)
+	}
 }

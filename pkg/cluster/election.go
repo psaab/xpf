@@ -14,11 +14,47 @@ import (
 // effective = base_priority * (weight / 255)
 // Returns an integer value scaled to avoid floating-point issues.
 // Higher value = higher priority = more likely to be primary.
+//
+// The scaled value orders candidates only in the election arms that opt
+// into weight-decisiveness: the #12164 dataplane-arm-debt yield / pin
+// release (where a fresh node at the weight-1 floor must lose) and the
+// unmanaged cold-start / split-brain arms below. Preempt itself does NOT
+// use it while both weights are above zero (#16739): Junos fails an RG
+// over only when its monitor threshold reaches zero, so a partial
+// monitor loss must not move a preempt RG whose raw priority still wins.
 func EffectivePriority(basePriority, weight int) int {
 	if weight <= 0 {
 		return 0
 	}
 	return basePriority * weight / 255
+}
+
+// preemptEffectivePriority is the ordering electRG uses under preempt
+// while both weights are above zero (#16739). It returns the RAW base
+// priority: Junos "Interface failover occurs only when the redundancy
+// group's threshold reaches zero", so partial monitor debt (weight > 0)
+// must not demote a node whose configured priority still wins — a
+// Junos-sized config (e.g. two monitors of weight 128, priorities
+// 200/100) would otherwise fail over AND back on a single tolerated
+// link flap. Weight stays decisive exactly where it must:
+//
+//   - weight 0 is handled before the preempt arm (local weight 0 is
+//     always secondary; peer weight 0 hands us primary), so neither
+//     side reaches here at 0;
+//   - the #12164 dataplane-arm-debt yield and committed-pin release,
+//     which compare the SCALED EffectivePriority so a fresh node at
+//     the weight-1 arm floor (EffectivePriority truncates to 0 for
+//     small priorities) still loses to a healthy peer. That arm is
+//     non-preempt-only today, but the preempt pin-release conjunct
+//     shares the scaled comparison and must keep it.
+//
+// Both callers must therefore keep using EffectivePriority for the
+// arm-debt ordering and this helper only for the preempt comparison.
+func preemptEffectivePriority(basePriority, weight int) int {
+	if weight <= 0 {
+		return 0
+	}
+	return basePriority
 }
 
 // electionResult is the outcome of a per-RG election.
@@ -33,8 +69,9 @@ const (
 // elect performs election for a single RG considering peer state.
 // It implements the full Junos-style election logic:
 //   - If peer is lost, local becomes primary (if weight > 0)
-//   - If peer is alive, compare effective priorities
-//   - Preempt: higher effective priority wins immediately
+//   - If peer is alive, compare priorities
+//   - Preempt: higher RAW priority wins while weight > 0 (#16739);
+//     weight is decisive only at 0 and in the #12164 arm-debt rule
 //   - Non-preempt: incumbent stays, except a dataplane-unready data-RG
 //     incumbent (RG0 excluded) yields to a healthier peer
 //   - Split-brain (both primary): lower node ID wins
@@ -103,6 +140,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 				"rg", rg.GroupID, "req_id", m.remoteTransferOutLeaseReqID[rg.GroupID])
 			m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
 			rg.ManualFailover = false
+			rg.forcedSecondary = false
 			rg.ManualFailoverAt = time.Time{}
 			m.manualFailoverRestoreWeightLocked(rg)
 			clearedManualFailover = true
@@ -141,6 +179,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 				"peer_state", peerGroup.State.String(),
 				"peer_weight", peerGroup.Weight)
 			rg.ManualFailover = false
+			rg.forcedSecondary = false
 			rg.ManualFailoverAt = time.Time{}
 			// Recalculate weight (recalcWeight calls runElection which would
 			// recurse back to electRG).
@@ -182,6 +221,88 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 
 	localEff := EffectivePriority(localPriority, localWeight)
 	peerEff := EffectivePriority(peerPriority, peerWeight)
+
+	// #16736: both weights 0 from monitor debt — Junos keeps exactly one
+	// owner: "If the monitored interfaces of a redundancy group on both
+	// nodes reach their thresholds at the same time, the redundancy group
+	// becomes primary on the node with the lower node ID"
+	// (Juniper, Monitoring Chassis Cluster Interfaces). Without this,
+	// each node takes "Local weight 0" below and the RG is owned by
+	// NEITHER node for the duration of the fault.
+	//
+	// This arm MUST distinguish monitor debt from the other weight-0
+	// shapes, because electing on those would resurrect a node that
+	// deliberately resigned:
+	//
+	//   - Local explicit resignation: rg.ManualFailover (ManualFailover /
+	//     ForceSecondary). Local weight is then pinned 0 or the state is
+	//     secondary-hold; the ManualFailover block above has already
+	//     returned for a plain hold, and ForceSecondary also sets
+	//     ManualFailover, so reaching here with ManualFailover set means
+	//     the dual-resign guard just cleared it for THIS election —
+	//     that path already intends normal election (its restore puts
+	//     back the monitor-derived weight, so localWeight is the debt
+	//     weight, not a pin). The explicit !rg.ManualFailover check
+	//     below is therefore belt-and-braces for any future producer
+	//     that pins weight 0 without the flag.
+	//   - Local kernel-upgrade hold: electRG returned at the top
+	//     (m.kernelUpgradeHold); a held node never reaches here.
+	//   - Peer explicit resignation: the peer reports
+	//     StateSecondaryHold (ManualFailover) — excluded below; the
+	//     existing "Peer transfer out" arm owns that case.
+	//   - Peer kernel-upgrade hold: a held node keeps its local weight
+	//     but buildHeartbeat clamps its advertised weight to 0 and
+	//     perpetually reports StateSecondary (the hold blocks its
+	//     election; SetKernelUpgradeHold also demotes). That wire shape
+	//     is INDISTINGUISHABLE from a peer whose monitors took it to
+	//     weight 0 and which is likewise secondary. No in-band signal
+	//     separates them today (see peerYieldedOwnership). [INFERENCE]
+	//     The harm is bounded: if the peer is in fact held, the lower
+	//     node taking primary is exactly what the existing #9452
+	//     held-peer degraded promotion already does (availability
+	//     over ownerlessness), the held node itself never promotes
+	//     (its own electRG returns first), and when it clears the
+	//     hold ordinary election resumes. The alternative — treating
+	//     every both-zero peer as held — restores the defect.
+	//
+	// Monitor debt is positively identified locally: weight 0 is
+	// debt-derived iff rg.Weight equals the debt-derived weight AND
+	// that derivation actually consumed debt (totalLost > 0). A
+	// ForceSecondary pin (Weight=0 with no debt, or with debt smaller
+	// than 255) fails the equality/debt test. Debts >= 255 from
+	// helper-crash-loop cost (HelperCrashLoopMonitorCost) also read as
+	// debt here — deliberately: that producer resigns so a HEALTHIER
+	// peer takes over, and when both nodes are at 0 neither is
+	// healthier, so the Junos lower-ID owner is the availability-
+	// preserving outcome rather than an ownerless RG. [INFERENCE]
+	//
+	// Duplicate node ID (m.nodeID == m.peerNodeID) is INVALID
+	// (#4549 F11): no asymmetric tie-break exists, so fail closed to
+	// secondary and surface it, exactly as the preempt tie arm does.
+	// A peer reporting StatePrimary at weight 0 is left to the
+	// dual-active / peer-primary arms below rather than resolved
+	// here — this arm only fires when BOTH sides report non-primary.
+	if localWeight <= 0 && peerWeight <= 0 &&
+		peerGroup.State != StateSecondaryHold && peerGroup.State != StatePrimary &&
+		!rg.ManualFailover && m.localWeightIsMonitorDebtLocked(rg) {
+		if m.nodeID == m.peerNodeID {
+			m.warnDuplicateNodeIDLocked()
+			if rg.State != StateSecondary {
+				return electLocalSecondary, "Both weights 0: duplicate node-id yields (invalid config)"
+			}
+			return electNoChange, ""
+		}
+		if m.nodeID < m.peerNodeID {
+			if rg.State != StatePrimary {
+				return electLocalPrimary, "Both weights 0: lower node ID wins tie"
+			}
+			return electNoChange, ""
+		}
+		if rg.State != StateSecondary {
+			return electLocalSecondary, "Both weights 0: higher node ID loses tie"
+		}
+		return electNoChange, ""
+	}
 
 	// Weight 0 → always secondary.
 	if localWeight <= 0 {
@@ -289,12 +410,77 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			}
 		}
 	}
+	// #16741: a preempt incumbent must not yield to a higher-priority
+	// peer that is still at the dataplane-arm floor. Every fresh HA RG
+	// starts SECONDARY at weight 1 until XDP is proven, so weight 1 is
+	// a peer that has not finished arming and cannot claim the RG is
+	// forwarding-ready; demoting to it leaves the RG owned by neither
+	// node. A weight-0 peer is this shape too (an unready node that had
+	// resigning monitor debt clamps at 0 the same way). The carve-out
+	// is deliberately narrow: the peer must not be PRIMARY (a live
+	// primary is a dual-active to resolve) and the local node must
+	// currently own the RG. When the peer arms it advertises its real
+	// weight again and ordinary preempt ordering resumes, so the
+	// higher-priority rejoiner still takes over — just without the
+	// ownerless window in between. This is also the shape
+	// peerYieldedOwnership already trusts for the reverse direction
+	// (#12164's arm-debt yield), so both sides agree on what weight 1
+	// means.
+	peerCannotTakeOver := peerGroup.State != StatePrimary && !peerGroup.takeoverReady
 
-	// Preempt enabled: higher effective priority wins.
-	// This takes priority over split-brain detection since preempt explicitly
-	// requests priority-based election.
+	// #12164 arm-debt exception under preempt: a primary whose dataplane
+	// is not ready (positive arm debt, weight at the floor) must yield
+	// to a verified healthier peer even though its RAW priority still
+	// wins — otherwise the #16739 raw-priority rule would let an
+	// unready node blackhole the RG it just claimed. This mirrors the
+	// non-preempt yield below (RG0 excluded, positive arm debt only,
+	// greater peer raw weight, peer wins the SCALED receiver ordering,
+	// live echo lease) and is the "keep weight decisive in the #12164
+	// arm-debt rule" half of #16739. Ordinary monitor debt (partial
+	// loss, weight > 1) does NOT fire here: that is exactly the Junos
+	// partial-loss case that must keep the incumbent.
+	if rg.Preempt && rg.State == StatePrimary && rg.GroupID != 0 &&
+		m.dataplaneArmDebtLocked(rg.GroupID) > 0 &&
+		(peerGroup.State == StatePrimary || peerGroup.State == StateSecondary) &&
+		peerWeight > localWeight &&
+		(peerEff > localEff || (peerEff == localEff && m.peerNodeID < m.nodeID)) &&
+		peerGroup.heartbeatEchoSession == m.LocalProcessToken() &&
+		peerGroup.heartbeatEchoSequence > 0 &&
+		time.Now().Before(peerGroup.heartbeatEchoLeaseUntil) {
+		return electLocalSecondary, "Local dataplane not ready; verified peer takes over"
+	}
+
+	// Symmetric takeover: the peer has yielded at the arm-debt floor
+	// (secondary at weight 1, observed primary earlier this session,
+	// live echo). Promote over it even though the peer's raw priority
+	// might still win on paper — it has told us it cannot serve. The
+	// readiness gate's peerYieldedOwnership arm uses the same shape.
+	// Without this the promotion depends solely on the peer node's own
+	// yield firing; a wedged peer would strand the RG.
+	if rg.Preempt && rg.GroupID != 0 && rg.State != StatePrimary &&
+		peerGroup.State == StateSecondary && peerGroup.Weight == 1 &&
+		peerGroup.peerWasPrimaryThisSession &&
+		peerGroup.heartbeatEchoSession == m.LocalProcessToken() &&
+		peerGroup.heartbeatEchoSequence > 0 &&
+		time.Now().Before(peerGroup.heartbeatEchoLeaseUntil) {
+		return electLocalPrimary, "Peer yielded at arm-debt floor; taking over"
+	}
+
+	// Preempt enabled: higher priority wins. While both weights are
+	// above zero the comparison is on RAW priority (#16739): Junos
+	// fails over only at threshold 0, so partial monitor debt must not
+	// move the RG. Weight 0 never reaches here (handled above), and
+	// the #12164 arm-debt ordering keeps the scaled values computed at
+	// the top of this function. This takes priority over split-brain
+	// detection since preempt explicitly requests priority election.
+	// The lower-priority and tie-loss yield arms below are suppressed
+	// while peerCannotTakeOver and this node already owns the RG
+	// (#16741 above); a node that does not own the RG still
+	// yields/stands down exactly as before.
 	if rg.Preempt {
-		if localEff > peerEff {
+		localPreemptEff := preemptEffectivePriority(localPriority, localWeight)
+		peerPreemptEff := preemptEffectivePriority(peerPriority, peerWeight)
+		if localPreemptEff > peerPreemptEff {
 			if rg.State != StatePrimary {
 				return electLocalPrimary, "Preempt: higher priority"
 			}
@@ -305,7 +491,10 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 				// by the non-preempt dual-active path.
 				return electNoChange, "Dual-active: winner stays"
 			}
-		} else if localEff < peerEff {
+		} else if localPreemptEff < peerPreemptEff {
+			if rg.State == StatePrimary && peerCannotTakeOver {
+				return electNoChange, ""
+			}
 			if rg.State != StateSecondary {
 				return electLocalSecondary, "Preempt: lower priority"
 			}
@@ -319,6 +508,9 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 					return electNoChange, "Dual-active: winner stays"
 				}
 			} else if m.nodeID > m.peerNodeID {
+				if rg.State == StatePrimary && peerCannotTakeOver {
+					return electNoChange, ""
+				}
 				if rg.State != StateSecondary {
 					return electLocalSecondary, "Higher node ID loses tie"
 				}
@@ -836,6 +1028,27 @@ func (m *Manager) dataplaneArmDebtLocked(rgID int) int {
 	return m.monitorWeights[monitorKey{rgID: rgID, iface: DataplaneArmMonitorIface}]
 }
 
+// SetStartupSyncHold installs or clears the #16741 startup-sync-hold
+// election debt on every RG. While held, the RG's weight sits at the
+// arm floor (weight 1): a preempt incumbent on the peer reads that shape
+// as "cannot take over" and keeps the RG, so the rejoiner's hold delays
+// its takeover without removing the current owner. Clearing the hold
+// restores the debt-derived weight and re-runs election, so a
+// higher-priority rejoiner takes over through ordinary preempt ordering.
+// The cost never reaches weight 0 (it composes with the arm debt at the
+// same floor), so a lone held node retains VIP ownership.
+func (m *Manager) SetStartupSyncHold(held bool) {
+	m.mu.RLock()
+	ids := make([]int, 0, len(m.groups))
+	for id := range m.groups {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		m.SetMonitorWeight(id, startupSyncHoldMonitorIface, held, startupSyncHoldMonitorCost)
+	}
+}
+
 // maxRedundancyGroupWeight is the full (no-debt) redundancy-group weight AND
 // the largest value the weight domain admits. It is both the Junos starting
 // weight and the ceiling of the single-byte heartbeat weight field
@@ -866,6 +1079,19 @@ const DataplaneArmMonitorIface = "__dataplane-arm__"
 // [1,254]: that machinery already settled that "demoted" means the bottom of
 // the range, never out of it.
 const DataplaneArmMonitorCost = maxRedundancyGroupWeight - 1
+
+// startupSyncHoldMonitorIface is the election-debt key for the startup
+// session-sync hold (#16741). It carries the same floor-1 cost as the
+// dataplane-arm debt: they compose to weight 1 rather than stacking to
+// 0, so a held node with no peer still retains primary/VIP ownership,
+// and a held node's heartbeat advertises the arm floor — the shape a
+// preempt incumbent must not yield to.
+const startupSyncHoldMonitorIface = "__session-sync-startup-hold__"
+
+// startupSyncHoldMonitorCost is the election debt a startup sync hold
+// contributes while it is active. Same value as the arm cost by design:
+// both bottom out at weight 1 and neither may resign a standalone node.
+const startupSyncHoldMonitorCost = maxRedundancyGroupWeight - 1
 
 // HelperCrashLoopMonitorIface is the election-debt key for a userspace helper
 // that has exhausted its restart backoff. Unlike ordinary dataplane-arm debt,
@@ -911,14 +1137,26 @@ func rgWeightFromDebt(totalLost int) int {
 
 // recalcWeight recalculates the effective weight for a redundancy group
 // and triggers re-election if needed.
+//
+// #16743: while the ISSU drain pin (forcedSecondary) is set, the weight
+// stays 0. Without this, any recalc — e.g. the daemon apply tail feeding
+// every interface monitor through SetMonitorWeight on every commit or peer
+// config sync — recomputes 255 from (empty) monitor debt and silently
+// un-drains the node: its heartbeat then advertises weight 255 at the
+// higher priority, the peer preempt-yields, and this node's ManualFailover
+// arm parks it secondary, leaving no owner.
 func (m *Manager) recalcWeight(rg *RedundancyGroupState) {
-	totalLost := 0
-	for _, iface := range rg.MonitorFails {
-		key := monitorKey{rgID: rg.GroupID, iface: iface}
-		totalLost += m.monitorWeights[key]
-	}
 	oldWeight := rg.Weight
-	rg.Weight = rgWeightFromDebt(totalLost)
+	if rg.forcedSecondary {
+		rg.Weight = 0
+	} else {
+		totalLost := 0
+		for _, iface := range rg.MonitorFails {
+			key := monitorKey{rgID: rg.GroupID, iface: iface}
+			totalLost += m.monitorWeights[key]
+		}
+		rg.Weight = rgWeightFromDebt(totalLost)
+	}
 	if oldWeight != rg.Weight {
 		slog.Info("cluster: weight changed",
 			"rg", rg.GroupID, "old", oldWeight, "new", rg.Weight)
@@ -1033,22 +1271,47 @@ func (m *Manager) reconcileMonitorDebtsLocked(cfg *config.ClusterConfig) {
 
 	// Recompute the effective weight of each affected RG from its now-current
 	// debt set (mirrors recalcWeight's arithmetic without re-electing).
+	// #16743: a forced-secondary RG keeps weight 0 here too — UpdateConfig
+	// runs this on every commit, so recomputing from debt would un-drain it
+	// exactly as recalcWeight would.
 	for rgID := range affected {
 		rg, ok := m.groups[rgID]
 		if !ok {
 			continue
 		}
-		totalLost := 0
-		for _, iface := range rg.MonitorFails {
-			totalLost += m.monitorWeights[monitorKey{rgID: rgID, iface: iface}]
-		}
 		oldWeight := rg.Weight
-		rg.Weight = rgWeightFromDebt(totalLost)
+		if rg.forcedSecondary {
+			rg.Weight = 0
+		} else {
+			totalLost := 0
+			for _, iface := range rg.MonitorFails {
+				totalLost += m.monitorWeights[monitorKey{rgID: rgID, iface: iface}]
+			}
+			rg.Weight = rgWeightFromDebt(totalLost)
+		}
 		if oldWeight != rg.Weight {
 			slog.Info("cluster: monitor debt reconciled on config change",
 				"rg", rgID, "old", oldWeight, "new", rg.Weight)
 		}
 	}
+}
+
+// localWeightIsMonitorDebtLocked reports whether rg.Weight is the
+// monitor-debt-derived weight AND that derivation consumed real debt
+// (#16736). It positively separates monitor debt (interface monitors,
+// ip-monitoring, helper-crash-loop cost — all installed through
+// SetMonitorWeight into monitorWeights/MonitorFails) from a weight
+// pinned to 0 by ForceSecondary, which sets Weight=0 directly without
+// installing debt of 255: with no debt the derived weight is 255, and
+// with partial debt it is >0, so a pinned 0 fails the equality. A
+// kernel-upgrade hold never reaches the caller (electRG returns
+// first) and does not touch Weight at all. Caller must hold m.mu.
+func (m *Manager) localWeightIsMonitorDebtLocked(rg *RedundancyGroupState) bool {
+	totalLost := 0
+	for _, iface := range rg.MonitorFails {
+		totalLost += m.monitorWeights[monitorKey{rgID: rg.GroupID, iface: iface}]
+	}
+	return totalLost > 0 && rg.Weight == rgWeightFromDebt(totalLost)
 }
 
 // readinessGateVerdictLocked is the ONE readiness-gate decision, shared by both

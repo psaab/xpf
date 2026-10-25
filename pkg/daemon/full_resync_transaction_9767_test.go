@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -334,8 +335,10 @@ func TestFullResyncHoldsTheDeltaDrainOffItsExportAndQueueing_9766(t *testing.T) 
 	}
 }
 
-// Both of the fallback loop's drains go through the locked helper; an unlocked
-// drain could queue a close in the middle of a FullResync's export.
+// Every drain the fallback loop runs goes through a locked helper; an unlocked
+// drain could queue (or discard) a delta in the middle of a FullResync's
+// export. #16627: the connected arm discards instead of queueing, so the
+// locked calls are one discard + one queueing drain.
 func TestFallbackLoopDrainsUnderTheDeltaLock_9766(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "daemon_ha_userspace_stream.go", nil, 0)
@@ -343,7 +346,7 @@ func TestFallbackLoopDrainsUnderTheDeltaLock_9766(t *testing.T) {
 		t.Fatalf("parse daemon_ha_userspace_stream.go: %v", err)
 	}
 	found := false
-	locked, unlocked := 0, 0
+	locked, discard, unlocked := 0, 0, 0
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "eventStreamFallbackLoop" {
@@ -359,7 +362,9 @@ func TestFallbackLoopDrainsUnderTheDeltaLock_9766(t *testing.T) {
 				switch sel.Sel.Name {
 				case "drainUserspaceSessionDeltasLocked":
 					locked++
-				case "drainUserspaceSessionDeltasWithConfig":
+				case "discardUserspaceSessionDeltasLocked":
+					discard++
+				case "drainUserspaceSessionDeltasWithConfig", "drainUserspaceSessionDeltasWithConfigLocked":
 					unlocked++
 				}
 			}
@@ -369,9 +374,10 @@ func TestFallbackLoopDrainsUnderTheDeltaLock_9766(t *testing.T) {
 	if !found {
 		t.Fatal("eventStreamFallbackLoop is not in daemon_ha_userspace_stream.go")
 	}
-	if locked != 2 || unlocked != 0 {
-		t.Fatalf("#9766: eventStreamFallbackLoop drains %d times through drainUserspaceSessionDeltasLocked and "+
-			"%d times through the unlocked drain, want 2 and 0", locked, unlocked)
+	if locked != 1 || discard != 1 || unlocked != 0 {
+		t.Fatalf("#9766/#16627: eventStreamFallbackLoop drains %d times through drainUserspaceSessionDeltasLocked, "+
+			"%d times through discardUserspaceSessionDeltasLocked and %d times through an unlocked drain, want 1, 1 and 0",
+			locked, discard, unlocked)
 	}
 }
 
@@ -452,4 +458,91 @@ func TestUserspaceDeltaQueueCallsitesUseLockedHelper_9766(t *testing.T) {
 		t.Fatalf("#9766: handleEventStreamDelta mutex bracket = lock:%v queue:%v unlock:%v calls:%d, want one lock < queue < unlock",
 			lockPos, queuePos, unlockPos, handlerQueue)
 	}
+}
+
+// --- #16627: discard only at/below the applied watermark ---
+
+type discardDrainer16627 struct {
+	batches [][]dpuserspace.SessionDeltaInfo
+	status  dpuserspace.ProcessStatus
+	err     error
+	calls   int
+}
+
+func (f *discardDrainer16627) DrainSessionDeltas(uint32) ([]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error) {
+	f.calls++
+	if len(f.batches) == 0 {
+		return nil, f.status, f.err
+	}
+	b := f.batches[0]
+	f.batches = f.batches[1:]
+	return b, f.status, f.err
+}
+
+// TestDiscardOnlyCoveredByAppliedWatermark16627: covered deltas
+// (StreamSeq <= applied) are discarded; StreamSeq 0 and ahead-of-
+// watermark deltas queue. Fail-on-revert: discard-all fails the queue
+// assertions; queue-all fails the discarded count.
+func TestDiscardOnlyCoveredByAppliedWatermark16627(t *testing.T) {
+	d, ss, _ := resyncFixture9767(t)
+	cfg := d.store.ActiveConfig()
+	covered := transitOpen9767()
+	covered.StreamSeq = 2
+	unsequenced := transitOpen9767()
+	unsequenced.SrcPort = 41001 // distinct key so both installs queue
+	ahead := transitOpen9767()
+	ahead.SrcPort = 41002
+	ahead.StreamSeq = 99
+	drainer := &discardDrainer16627{batches: [][]dpuserspace.SessionDeltaInfo{{covered, unsequenced, ahead}}}
+	discarded, err := d.discardUserspaceSessionDeltasLocked(drainer, cfg, 3)
+	if err != nil {
+		t.Fatalf("discard drain: %v", err)
+	}
+	if discarded != 1 {
+		t.Fatalf("#16627: discarded = %d, want 1 (only the covered delta)", discarded)
+	}
+	if types := queuedTypes9767(ss); len(types) != 2 {
+		t.Fatalf("#16627: queued types = %v, want 2 installs (unsequenced + ahead-of-watermark must queue, not discard)", types)
+	}
+}
+
+// TestDiscardRecordsSchemaOnlyOnValidStatus16627: the schema
+// fingerprint is recorded only when err == nil.
+func TestDiscardRecordsSchemaOnlyOnValidStatus16627(t *testing.T) {
+	foreign := localSessionDeltaSchemaFingerprint() + 1
+
+	// Valid status: recorded.
+	d, _, _ := resyncFixture9767(t)
+	drainer := &discardDrainer16627{status: dpuserspace.ProcessStatus{SessionDeltaSchemaFingerprint: foreign}}
+	if _, err := d.discardUserspaceSessionDeltasLocked(drainer, d.store.ActiveConfig(), 10); err != nil {
+		t.Fatalf("valid-status discard: %v", err)
+	}
+	if got := d.userspaceDeltaSchemaFP.Load(); got != foreign {
+		t.Fatalf("#16627: valid status must record the fingerprint, got %d want %d", got, foreign)
+	}
+
+	// Error status: NOT recorded, error propagates, covered still discarded.
+	d2, ss2, _ := resyncFixture9767(t)
+	covered := transitOpen9767()
+	covered.StreamSeq = 1
+	wantErr := errors.New("status apply failed 16627")
+	drainer2 := &discardDrainer16627{
+		batches: [][]dpuserspace.SessionDeltaInfo{{covered}},
+		status:  dpuserspace.ProcessStatus{SessionDeltaSchemaFingerprint: foreign},
+		err:     wantErr,
+	}
+	discarded, err := d2.discardUserspaceSessionDeltasLocked(drainer2, d2.store.ActiveConfig(), 10)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("#16627: discard error = %v, want propagated status error", err)
+	}
+	if discarded != 1 {
+		t.Fatalf("#16627: discarded on error batch = %d, want 1", discarded)
+	}
+	if got := d2.userspaceDeltaSchemaFP.Load(); got != 0 {
+		t.Fatalf("#16627: error status must NOT record the fingerprint, got %d", got)
+	}
+	if got := d2.UserspaceDeltaDrainStatusErrorCount(); got != 1 {
+		t.Fatalf("#16627: status-error count = %d, want 1", got)
+	}
+	_ = ss2
 }

@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/logging"
@@ -25,53 +27,119 @@ func systemSyslogCfg15231(src string) *config.Config {
 	return cfg
 }
 
-func TestSystemSyslogRetryRecovers15231(t *testing.T) {
-	d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
+// commitSyslog15231 replaces the store's active config with the given
+// set lines, modelling the address appearing (or the stanza being
+// removed) without any daemon apply in between.
+func commitSyslog15231(t *testing.T, d *Daemon, lines ...string) {
+	t.Helper()
+	if err := d.store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if len(lines) == 0 {
+		if err := d.store.LoadOverride(""); err != nil {
+			t.Fatalf("LoadOverride(empty): %v", err)
+		}
+	} else if _, err := d.store.LoadSet(strings.Join(lines, "\n")); err != nil {
+		t.Fatalf("LoadSet: %v", err)
+	}
+	if _, err := d.store.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	d.store.ExitConfigure()
+}
+
+// newSystemSyslogDaemon15231 builds a store-backed Daemon whose only
+// syslog debt can be system debt: no eventReader is installed, so the
+// production tick's stream branch cannot run. #16716: this is the
+// fixture that makes M1 (system branch of rebuildSyslog dropped) and
+// M2 (tick gate narrowed to stream debt) observable — the old twin
+// reassertSystemSyslogOnceForTest bypassed applySem, the store and
+// rebuildSyslog entirely, so neither mutant red-ed any cell.
+func newSystemSyslogDaemon15231(t *testing.T, src string) *Daemon {
+	t.Helper()
+	d := &Daemon{
+		slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler()),
+		applySem:    semaphore.NewWeighted(1),
+		store: testStoreWithSetConfig(t, []string{
+			"set system syslog host 127.0.0.1 daemon info",
+			"set system syslog host 127.0.0.1 source-address " + src,
+		}),
+	}
+	d.store.ExitConfigure()
 	t.Cleanup(func() { d.slogHandler.SetClients(nil) })
+	return d
+}
+
+func TestSystemSyslogRetryRecovers15231(t *testing.T) {
+	ctx := context.Background()
+	d := newSystemSyslogDaemon15231(t, "192.0.2.77")
 
 	// Unbindable source: client construction fails (cannot assign requested address).
-	d.applySystemSyslog(systemSyslogCfg15231("192.0.2.77"))
+	d.applySystemSyslog(d.store.ActiveConfig())
 	if got := len(d.slogHandler.Clients()); got != 0 {
 		t.Fatalf("premise: unbindable system syslog must install 0, got %d", got)
 	}
 	if !d.systemSyslogRetryOwed() {
 		t.Fatal("#15231 A47-04: skipped system syslog host must arm retry debt")
 	}
-	// Still unbindable: retry stays owed.
-	d.reassertSystemSyslogOnceForTest(systemSyslogCfg15231("192.0.2.77"))
+	if d.syslogRetryOwed() {
+		t.Fatal("premise: fixture must carry system-only debt, stream debt armed")
+	}
+	// Still unbindable: production tick stays owed.
+	d.reassertSyslogOnce(ctx)
 	if !d.systemSyslogRetryOwed() {
 		t.Fatal("retry while still unbindable must remain owed")
 	}
 	if got := len(d.slogHandler.Clients()); got != 0 {
 		t.Fatalf("retry while unbindable installed %d, want 0", got)
 	}
-	// Bindable: retry installs host with no commit.
-	d.reassertSystemSyslogOnceForTest(systemSyslogCfg15231("127.0.0.1"))
+	// Address appears: active config now names a bindable source, with
+	// no commit-time apply — the production tick alone must recover.
+	commitSyslog15231(t, d,
+		"set system syslog host 127.0.0.1 daemon info",
+		"set system syslog host 127.0.0.1 source-address 127.0.0.1")
+	d.reassertSyslogOnce(ctx)
 	if got := len(d.slogHandler.Clients()); got != 1 {
-		t.Fatalf("#15231 A47-04: retry must install system syslog host after address appears, got %d", got)
+		t.Fatalf("#15231 A47-04/#16716: production tick must install system syslog host after address appears, got %d", got)
 	}
 	if d.systemSyslogRetryOwed() {
 		t.Fatal("successful system syslog retry must discharge debt")
 	}
-	// No hosts: debt cleared.
-	d.applySystemSyslog(&config.Config{})
+	// No hosts: debt cleared via the production apply path.
+	commitSyslog15231(t, d)
+	d.applySystemSyslog(d.store.ActiveConfig())
 	if d.systemSyslogRetryOwed() {
 		t.Fatal("removing system syslog hosts must clear retry debt")
 	}
 }
 
-// Loop wiring source check + behavioural loop using shortened interval.
+// Behavioural loop cell: tick syslogStreamRetryLoop with a shortened
+// interval and system-only debt. M1/M2 each leave the loop spinning
+// with the debt armed and no client installed, so this times out red.
 func TestSystemSyslogRetryLoopWired15231(t *testing.T) {
-	src := readDaemonSource(t, "daemon_run.go")
-	if !strings.Contains(src, "syslogStreamRetryLoop") {
-		t.Fatal("retry loop missing")
+	prev := syslogStreamRetryInterval
+	syslogStreamRetryInterval = 5 * time.Millisecond
+	t.Cleanup(func() { syslogStreamRetryInterval = prev })
+
+	d := newSystemSyslogDaemon15231(t, "127.0.0.1")
+	d.applySystemSyslog(systemSyslogCfg15231("192.0.2.77"))
+	if !d.systemSyslogRetryOwed() || d.syslogRetryOwed() {
+		t.Fatalf("premise: want system-only debt, system=%v stream=%v",
+			d.systemSyslogRetryOwed(), d.syslogRetryOwed())
 	}
-	// Stock loop must also re-drive system syslog: check rebuildSyslog source.
-	src2 := readDaemonSource(t, "daemon_syslog_retry_14597.go")
-	if !strings.Contains(src2, "applySystemSyslog") {
-		t.Fatal("#15231 A47-04: retry loop (rebuildSyslog/reassert) must re-drive applySystemSyslog")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.syslogStreamRetryLoop(ctx)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(d.slogHandler.Clients()) == 1 && !d.systemSyslogRetryOwed() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	_ = semaphore.NewWeighted(1)
+	t.Fatalf("#16716: syslogStreamRetryLoop never recovered system-only debt: clients=%d owed=%v",
+		len(d.slogHandler.Clients()), d.systemSyslogRetryOwed())
 }
 
 // --- A47-06: partial stream build must preserve healthy clients ---

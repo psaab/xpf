@@ -589,6 +589,27 @@ type SSHServiceConfig struct {
 	NoPasswords              bool
 }
 
+// SSHRootLoginDisplayName is the operator-facing effective root-login
+// policy for a configured SSH stanza, shared by the local CLI
+// (pkg/cli) and the remote gRPC renderer (pkg/grpcapi) so the two
+// `show system services` surfaces can never diverge (#16735).
+//
+// An unset leaf renders as "deny-password (default)": buildSSHDConfig
+// emits no PermitRootLogin line for "", so sshd's factory drop-in
+// (`PermitRootLogin prohibit-password`, scripts/image/bake.py, which
+// the managed 00-xpf.conf does not override without the leaf) — or
+// OpenSSH's compiled prohibit-password default — stays in force.
+// That admits root key login, so claiming "deny" misstates the
+// enforced posture. An explicitly set leaf renders as authored
+// (allow/deny/deny-password), which maps 1:1 to PermitRootLogin
+// yes/no/prohibit-password in the managed drop-in.
+func SSHRootLoginDisplayName(rootLogin string) string {
+	if rootLogin == "" {
+		return "deny-password (default)"
+	}
+	return rootLogin
+}
+
 // WebManagementConfig holds web management settings.
 type WebManagementConfig struct {
 	HTTP                bool

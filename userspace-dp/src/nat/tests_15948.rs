@@ -511,3 +511,63 @@ fn restore_displaced_refuses_at_cap_15956() {
     assert_eq!(alloc.debug_live_flow_translated(&flow), Some(t1));
     assert_eq!(alloc.live_flow_count(), 10);
 }
+
+/// #16713: steady-state REFRESH re-import must not walk the pool's
+/// persistent-lease table. Before the fix every refresh record
+/// evaluated `idle_merge_any_contended_by_other` (and
+/// `idle_pat_lease_covers` for any new remote), both of which scanned
+/// `persistent_by_source` end to end, so re-importing N records cost
+/// O(N^2) — measured 84 s for one 64K push in the research probe.
+/// The fix answers both helpers through the `persistent_by_translated`
+/// per-tuple index and evaluates the any-remote contention lazily,
+/// so a steady refresh does no per-record table walk at all.
+///
+/// Instead of a wall-clock ratio (flaky under load and orders of
+/// magnitude slower in debug builds), this cell counts every
+/// `persistent_by_source` iteration on the refresh path via the
+/// `debug_persistent_by_source_scans` test seam, which counts every
+/// contention-helper visit (full-table scan or indexed owner-set
+/// walk) plus the remaining full-table scan site: installing N
+/// leases and re-importing the same N (asserting `SkippedExisting`,
+/// i.e. the refresh/merge branch) must perform ZERO such visits on
+/// the steady path. A regression that reintroduces any per-record
+/// contention walk — eager or indexed — fails deterministically at
+/// any N, in any build profile.
+#[test]
+fn idle_lease_refresh_does_not_scan_persistent_table_16713() {
+    const N: usize = 1_000;
+    // One pool address, N ports: capacity = N tracked flows.
+    let alloc = PortAllocator::new(1, 1024, (1024 + N - 1) as u16);
+    let addrs = vec![IpAddr::V4(POOL)];
+    let remote = (IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443u16);
+    let mut records = Vec::with_capacity(N);
+    for i in 0..N {
+        let src = Ipv4Addr::new(
+            10,
+            ((i >> 16) & 0xff) as u8,
+            ((i >> 8) & 0xff) as u8,
+            (i & 0xff) as u8,
+        );
+        records.push(idle_record(src, 11, remote, (1024 + i) as u16));
+    }
+    for rec in &records {
+        assert_eq!(
+            alloc.import_idle_lease(rec, &addrs, TIMEOUT_NS, 1_000),
+            IdleLeaseImport::Installed,
+            "fresh install must succeed"
+        );
+    }
+    alloc.debug_reset_persistent_by_source_scans();
+    for rec in &records {
+        assert_eq!(
+            alloc.import_idle_lease(rec, &addrs, TIMEOUT_NS, 2_000),
+            IdleLeaseImport::SkippedExisting,
+            "re-import must take the refresh/merge branch"
+        );
+    }
+    assert_eq!(
+        alloc.debug_persistent_by_source_scans(),
+        0,
+        "refresh of {N} leases must not visit any contention helper at all"
+    );
+}

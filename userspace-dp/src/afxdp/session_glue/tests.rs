@@ -25321,3 +25321,195 @@ fn connected_owner_static_route_does_not_claim_16217() {
     assert_eq!(legacy, 0, "static route alone claims no connected owner");
     assert_eq!(indexed, legacy, "index must equal scan for static-route-only target");
 }
+
+// ---------------------------------------------------------------------------
+// #16627 — a stream-delivered delta must not be left in the RPC-fallback
+// buffer while the stream is connected.
+// ---------------------------------------------------------------------------
+
+/// One flush of a single Open through `flush_session_deltas` against a
+/// fresh binding buffer, with the given event-stream state. Returns
+/// (fallback deltas drained after the flush, HA frame seqs on the stream).
+fn flush_open_fallback_depth_16627(
+    stream: Option<crate::event_stream::EventStreamWorkerHandle>,
+    stream_rx: Option<&std::sync::mpsc::Receiver<crate::event_stream::EventFrame>>,
+    bulk_resync: bool,
+) -> (Vec<crate::protocol::SessionDeltaInfo>, Vec<u64>) {
+    let live = Arc::new(BindingLiveState::new());
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from(""),
+        ifindex: -1,
+    };
+    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let forwarding = ForwardingState::default();
+    let mut worker_lossless_wedged = false;
+    let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let __r3_reader = __r3_channel.reader();
+    let mut delta = delta_8593(&test_key(), bulk_resync);
+    delta.kind = SessionDeltaKind::Open;
+    delta.provenance = if bulk_resync {
+        crate::session::ExportProvenance::LossResync
+    } else {
+        crate::session::ExportProvenance::Incremental
+    };
+    flush_session_deltas(
+        &ident,
+        Some(&live),
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &dnat_fds,
+        &[delta],
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &recent_session_deltas,
+        &peer_worker_commands,
+        crate::afxdp::empty_worker_commands_by_id(),
+        &stream,
+        &forwarding,
+        &__r3_reader,
+        &mut worker_lossless_wedged,
+        None,
+    );
+    let drained = live.drain_session_deltas(usize::MAX);
+    let frames: Vec<u64> = stream_rx
+        .map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).map(|f| f.seq).collect())
+        .unwrap_or_default();
+    (drained, frames)
+}
+
+/// Flush one Open with an explicit provenance (the helper above picks
+/// Incremental/LossResync from `bulk_resync`).
+fn flush_open_with_provenance_16627(
+    stream: Option<crate::event_stream::EventStreamWorkerHandle>,
+    stream_rx: Option<&std::sync::mpsc::Receiver<crate::event_stream::EventFrame>>,
+    provenance: crate::session::ExportProvenance,
+) -> (Vec<crate::protocol::SessionDeltaInfo>, Vec<u64>) {
+    // Reuse the harness by temporarily encoding provenance via bulk flag
+    // is not possible for CommandExport, so this twin mirrors it.
+    let live = Arc::new(BindingLiveState::new());
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from(""),
+        ifindex: -1,
+    };
+    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let forwarding = ForwardingState::default();
+    let mut worker_lossless_wedged = false;
+    let channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let reader = channel.reader();
+    let mut delta = delta_8593(&test_key(), false);
+    delta.kind = SessionDeltaKind::Open;
+    delta.provenance = provenance;
+    flush_session_deltas(
+        &ident,
+        Some(&live),
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &dnat_fds,
+        &[delta],
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &recent_session_deltas,
+        &peer_worker_commands,
+        crate::afxdp::empty_worker_commands_by_id(),
+        &stream,
+        &forwarding,
+        &reader,
+        &mut worker_lossless_wedged,
+        None,
+    );
+    let drained = live.drain_session_deltas(usize::MAX);
+    let frames: Vec<u64> = stream_rx
+        .map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).map(|f| f.seq).collect())
+        .unwrap_or_default();
+    (drained, frames)
+}
+
+/// #16627 ACCEPTANCE (Rust leg): while the event stream is connected, a
+/// flushed delta is delivered on the stream and is NOT left in the
+/// RPC-fallback buffer — otherwise the Go 5 s reconciliation drain pops the
+/// duplicate and re-stamps it with a fresh generation, resurrecting closed
+/// sessions on the standby. While disconnected (or with no stream handle)
+/// the fallback buffer remains the delivery leg.
+///
+/// Fail-on-revert: drop the `stream_delivers` gate in `flush_session_deltas`
+/// and the connected arm's depth becomes 1.
+#[test]
+fn stream_delivered_delta_is_not_left_in_fallback_buffer_16627() {
+    let cfg = crate::event_stream::DataplaneEventRateLimitConfig {
+        events_per_second: 0,
+        burst: 0,
+        session_close_events_per_second: 0,
+        session_close_burst: 0,
+    };
+    // Connected + enqueue succeeds: stream carries seq 1, fallback empty.
+    let (handle, rx) = crate::event_stream::test_worker_handle_connected(8, cfg);
+    let (drained, frames) = flush_open_fallback_depth_16627(Some(handle), Some(&rx), false);
+    assert_eq!(frames, vec![1], "fixture: the connected stream must carry the HA frame with seq 1");
+    assert!(
+        drained.is_empty(),
+        "#16627: a stream-delivered delta must not be left in the RPC-fallback \
+         buffer — the reconciliation drain would replay it with a fresh generation"
+    );
+    // Bulk (LossResync) opens ride the stream too while connected.
+    let (handle, rx) = crate::event_stream::test_worker_handle_connected(8, cfg);
+    let (drained, frames) = flush_open_fallback_depth_16627(Some(handle), Some(&rx), true);
+    assert_eq!(frames, vec![1], "fixture: bulk open must ride the connected stream");
+    assert!(drained.is_empty(), "#16627: bulk stream-delivered delta left in fallback buffer");
+    // Connected but the lossless enqueue FAILS (channel full): the delta
+    // MUST be mirrored with stream_seq 0. An is_connected-only gate
+    // fails this arm — connectedness is not delivery.
+    let (handle, rx) = crate::event_stream::test_worker_handle_connected(1, cfg);
+    // Fill the single channel slot with a lossy filler frame.
+    let forwarding_for_zones = ForwardingState::default();
+    handle.push_delta(&delta_8593(&test_key(), false), &forwarding_for_zones.zone_name_to_id);
+    let (drained, frames) = flush_open_fallback_depth_16627(Some(handle), Some(&rx), false);
+    assert_eq!(
+        drained.len(),
+        1,
+        "#16627: a delta whose lossless enqueue failed must be mirrored to the fallback buffer even while connected"
+    );
+    assert_eq!(drained[0].stream_seq, 0, "a mirrored-after-failure delta must carry stream_seq 0 (never stream-carried)");
+    assert_eq!(frames.len(), 1, "only the filler frame may be on the stream channel");
+    // Disconnected: the fallback buffer is the only leg and must carry it.
+    let (handle, _rx) = crate::event_stream::test_worker_handle(8, cfg);
+    let (drained, _) = flush_open_fallback_depth_16627(Some(handle), None, false);
+    assert_eq!(drained.len(), 1, "while the stream is down the RPC-fallback buffer must carry the delta");
+    assert_eq!(drained[0].stream_seq, 0);
+    // No stream handle at all: fallback carries it.
+    let (drained, _) = flush_open_fallback_depth_16627(None, None, false);
+    assert_eq!(drained.len(), 1, "with no event stream the fallback buffer must carry the delta");
+    // CommandExport (#9630): never stream-echoed, always mirrored.
+    let (handle, rx) = crate::event_stream::test_worker_handle_connected(8, cfg);
+    let (drained, frames) = flush_open_with_provenance_16627(
+        Some(handle),
+        Some(&rx),
+        crate::session::ExportProvenance::CommandExport(7),
+    );
+    assert!(frames.is_empty(), "CommandExport must not echo on the event stream");
+    assert_eq!(drained.len(), 1, "CommandExport deltas ride the fallback/control leg");
+    assert_eq!(drained[0].stream_seq, 0);
+}

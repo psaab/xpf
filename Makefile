@@ -449,7 +449,21 @@ test-race-dp:
 		$(GO) test -list "^Test.*($$alt)" ./pkg/cluster/ | grep -q '^Test' || { echo "test-race-dp: pkg/cluster -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
 	$(GO) test -race ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|StartHeartbeatSupersededByStopDoesNotPublish7257' -count=2
+	$(GO) test -race -run 'Race|Concurrent' -count=1 $$($(GO) list ./pkg/... ./cmd/...)
 
+# #16715: the property leg above races every Race/Concurrent-named test
+# in pkg/ and cmd/ by property, not by a hand-kept package list, so the
+# SNMP #13127 and syslog #9916 cells (and the next race-named cell in
+# any package) run under -race in `make test-go` via the test-race-dp
+# prerequisite. It deliberately has no per-package -list pre-check:
+# -run 'Race|Concurrent' matching zero tests in a package is a
+# legitimate empty result, and pkg/docsref's
+# TestRaceGateCoversAllRaceNamedTests16715 census fails if any
+# race-named test falls outside every -race leg. Packages with no
+# such test still compile under -race, so a build-tag or vet-class
+# rot in a race build is not hidden. The three name-filtered legs
+# above keep their -count=2/-list pinning unchanged.
+#
 # #15241 (A58-04): each alternative of every test-race-dp -run pattern is
 # selected with `go test -list` before the race run, so renaming a
 # race-leg test (or mistyping an alternative, as HeartbeatStartSuperseded

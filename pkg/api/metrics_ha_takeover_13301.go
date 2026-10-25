@@ -6,13 +6,6 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-var haTakeoverBlockers13301 = [...]string{
-	"helper_down", "not_enabled", "forwarding_unsupported", "not_armed",
-	"not_active", "xsk_liveness_failed", "xsk_unproven", "session_mirror_failed",
-	"repair_overflow", "inventory_debt_owed", "snapshot_retry_debt",
-	"pending_ha_clear", "pending_ha_replay", "event_stream_unbound",
-}
-
 func (c *xpfCollector) emitHATakeoverReadiness13301(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
 	provider, ok := mgmtview.Probe(dp).(interface {
 		HATakeoverReadiness() dpuserspace.HATakeoverReadiness
@@ -26,12 +19,26 @@ func (c *xpfCollector) emitHATakeoverReadiness13301(ch chan<- prometheus.Metric,
 		ready = 1
 	}
 	c.emitConstMetric(ch, c.userspaceHATakeoverReady, prometheus.GaugeValue, ready)
-	for _, blocker := range haTakeoverBlockers13301 {
+	// The vocabulary is owned by pkg/dataplane/userspace (#16730): every
+	// name the mapper can return is emitted, and any value outside the
+	// vocabulary still surfaces under "other" instead of being dropped
+	// (fabric blockers, #15918) — a future mapper addition cannot be
+	// silently invisible to Prometheus.
+	active := make(map[string]bool, len(s.Blockers))
+	for _, current := range s.Blockers {
+		active[current] = true
+	}
+	for _, blocker := range dpuserspace.HATakeoverBlockers {
 		v := 0.0
-		for _, current := range s.Blockers {
-			if current == blocker {
-				v = 1
-				break
+		if active[blocker] {
+			v = 1
+		} else if blocker == dpuserspace.HATakeoverBlockerOther {
+			// Unknown names (not in the shared vocabulary) fold into other.
+			for current := range active {
+				if !dpuserspace.IsHATakeoverBlocker(current) {
+					v = 1
+					break
+				}
 			}
 		}
 		c.emitConstMetric(ch, c.userspaceHATakeoverBlocker, prometheus.GaugeValue, v, blocker)

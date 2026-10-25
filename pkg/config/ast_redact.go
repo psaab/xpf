@@ -52,10 +52,22 @@ import (
 //	preshared-key             WireGuard per-peer PSK
 //	community (under snmp)     SNMP v1/v2c community string (the identity token)
 //	trap-group (under snmp)    trap-group name = v1/v2c trap community (#16728)
-//	secret (under radius-server | tacplus-server | accounting)
-//	                          RADIUS/TACACS+ shared secret (#15019)
+//	secret (under radius-server | tacplus-server | accounting | outbound-ssh)
+//	                          RADIUS/TACACS+ shared secret (#15019); outbound-ssh
+//	                          client secret (#16731, unmodelled Junos leaf)
 //	user-password              AD bind credential under active-directory-access
 //	                          (#15996; unmodelled stanza, AST-side only)
+//	credential-shaped keywords (#16731 fail-closed): any keyword containing
+//	                          `secret` or `password`, equal to `auth-token`, or
+//	                          equal to `community-name` masks every trailing
+//	                          token in ANY context. This covers the unmodelled
+//	                          Junos leaves default-chap-secret, local-password,
+//	                          auth-token, community-name and dhcp/dhcp-relay
+//	                          `authentication password` without enumerating
+//	                          their ancestors. Valued `*-key` is deliberately
+//	                          NOT shape-masked: trusted-key/tsig-key/aws-access-key
+//	                          are public identifiers and GRE/chassis `key`
+//	                          stays gated on the OSPF md5 pair below.
 
 // SecretDataPlaceholder is the mask emitted in place of a secret leaf value on
 // the raw-AST render/display paths. It mirrors the Junos SECRET-DATA idiom and
@@ -838,12 +850,51 @@ func redactNodes(nodes []*Node, base []string) {
 // secretIndices returns the indices into the flattened key path fp that carry
 // a secret value and must be masked. It reuses #2053's secret-leaf signatures
 // (see the file header) and adds the unmodeled AD/LDAP bind-password contexts
-// from #10948. Generic keywords (key, password, community) are disambiguated by
+// from #10948. Generic keywords (key, community) are disambiguated by
 // required ancestor context so a GRE tunnel `key`, a chassis identity `key` or
 // a routing-policy `community` (all non-secret) are never masked.
+//
+// #16731 fail-closed arm: credential-SHAPED keywords mask in any context.
+// The closed enumeration kept missing unmodelled Junos credential leaves
+// (default-chap-secret, local-password, auth-token, community-name,
+// dhcp/dhcp-relay `authentication password`, outbound-ssh `secret`) that
+// commit clean on open-world/inert paths and are live credentials on
+// external systems. Shape, not ancestor enumeration, is the fix: a keyword
+// containing `secret`/`password`, or exactly `auth-token`/`community-name`,
+// has no non-secret valued use in the Junos grammar xpf accepts. Three
+// exact-name exemptions keep non-credentials legible: bare `secret` (a
+// generic token, gated below to api-auth/AAA/outbound-ssh), and the
+// value-less spellings `master-password` (closed container),
+// `no-password-authentication` / `no-passwords` (flags) — masking their
+// trailing tokens would hide the PRF name / sibling statements packed on
+// the same flattened path. Valued `*-key` is NOT shape-masked:
+// `trusted-key`/`tsig-key`/`aws-access-key` are public identifiers.
+func isCredentialShapedKeyword16731(k string) bool {
+	switch k {
+	case "auth-token", "community-name":
+		return true
+	case "secret", "master-password", "no-password-authentication", "no-passwords", "user-password":
+		// user-password (#15996) is structurally gated below: it is also a
+		// legal login user NAME, so shape-masking would hide the account
+		// identity in `system login user user-password class …`.
+		return false
+	}
+	return strings.Contains(k, "secret") || strings.Contains(k, "password")
+}
+
 func secretIndices(fp []string) []int {
 	var out []int
 	for i, k := range fp {
+		// #16731: fail closed on credential-shaped keywords in any context.
+		// Checked before the switch so gated keywords (password, secret via
+		// outbound-ssh, user-password) cannot fall through unmasked when
+		// their ancestor gate misses an unmodelled subtree.
+		if isCredentialShapedKeyword16731(k) {
+			for j := i + 1; j < len(fp); j++ {
+				out = append(out, j)
+			}
+			continue
+		}
 		switch k {
 		case "pre-shared-key":
 			// Value token(s) follow; keep a leading ascii-text|hexadecimal
@@ -930,10 +981,14 @@ func secretIndices(fp []string) []int {
 				}
 			}
 		case "secret":
-			// `secret` is generic; redact it only for named API-key identities
-			// and the AAA server stanzas (#15019), whose shared secret is
-			// valid on the external RADIUS/TACACS+ server.
-			if isAPIAuthNamedKeySecretPath(fp[:i]) || isAAASecretPath(fp[:i]) {
+			// `secret` alone is NOT credential-shaped by substring alone in
+			// the fail-closed sense — it is a bare generic token that could
+			// be an identifier — so it stays gated: named API-key identities,
+			// the AAA server stanzas (#15019), and outbound-ssh clients
+			// (#16731: `system services outbound-ssh client <c> secret <s>`
+			// is an unmodelled Junos leaf whose value is live on the
+			// management server).
+			if isAPIAuthNamedKeySecretPath(fp[:i]) || isAAASecretPath(fp[:i]) || containsAnyOf(fp[:i], "outbound-ssh") {
 				for j := i + 1; j < len(fp); j++ {
 					out = append(out, j)
 				}
