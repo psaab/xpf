@@ -113,8 +113,12 @@ func (d *Daemon) dhcpLeaseSyncEnabled(cfg *config.Config) bool {
 // node-level MASTER gate, identical in shape to ddnsWriterGateOpen. SOUND
 // without per-lease RG attribution for the same reason: the Kea config each
 // node serves is MASTER-FILTERED (filterDHCPConfigForMasterRGs), so this node's
-// lease set is ONLY its own MASTER-RG leases and the two nodes' sets are
-// disjoint by RG ownership. Standalone is never a pusher (the loop never runs).
+// live lease set is ONLY its own MASTER-RG leases and the two nodes' sets are
+// disjoint by RG ownership. The soundness holds ONLY for rows read from the
+// live control socket: when Kea is stopped the memfile survives with the last
+// served set (#16854), so pushDHCPLeasesOnce suppresses memfile-fallback rows
+// and advertises Served:false for every scope instead. Standalone is never a
+// pusher (the loop never runs).
 func (d *Daemon) dhcpLeaseSyncGateOpen() bool {
 	if d.cluster == nil {
 		return false
@@ -245,24 +249,42 @@ func (d *Daemon) pushDHCPLeasesOnce(ctx context.Context, force bool) {
 	now := time.Now()
 
 	if cfg.System.DHCPServer.DHCPLocalServer != nil {
-		leases, err := d.dhcpServer.GetSyncLeases4(rctx, now)
+		leases, live, err := d.dhcpServer.GetSyncLeases4WithSource(rctx, now)
 		if err != nil {
 			slog.Debug("cluster: DHCP v4 lease read failed (retrying)", "err", err)
 		} else {
-			d.maybePushFamily(4, d.makeDHCPLeaseSnapshot(cfg, 4, leases), force)
+			d.maybePushFamily(4, d.makeDHCPLeaseSnapshot(cfg, 4, pushableLeases(leases, live), live), force)
 		}
 	}
 	if cfg.System.DHCPServer.DHCPv6LocalServer != nil {
-		leases, err := d.dhcpServer.GetSyncLeases6(rctx, now)
+		leases, live, err := d.dhcpServer.GetSyncLeases6WithSource(rctx, now)
 		if err != nil {
 			slog.Debug("cluster: DHCP v6 lease read failed (retrying)", "err", err)
 		} else {
-			d.maybePushFamily(6, d.makeDHCPLeaseSnapshot(cfg, 6, leases), force)
+			d.maybePushFamily(6, d.makeDHCPLeaseSnapshot(cfg, 6, pushableLeases(leases, live), live), force)
 		}
 	}
 }
 
-func (d *Daemon) makeDHCPLeaseSnapshot(cfg *config.Config, family int, leases []dhcpserver.SyncLease) dhcpserver.LeaseSyncSnapshot {
+// pushableLeases returns the rows a push may carry. Only a live control-socket
+// read is the node's serving set; a memfile-fallback read is the last set this
+// node served before Kea stopped, and pushing it would re-bind released
+// addresses on the peer (#16854, the #9853 consequence class). A non-live read
+// therefore pushes an explicit empty set: the snapshot still carries the
+// Served:false scopes, which the receiver treats as negative proof.
+func pushableLeases(leases []dhcpserver.SyncLease, live bool) []dhcpserver.SyncLease {
+	if !live {
+		return nil
+	}
+	return leases
+}
+
+// makeDHCPLeaseSnapshot builds one family's push snapshot. live is the
+// live-socket proof from the lease read: only a live read may adopt the
+// Manager's Applied authority scopes. A memfile-fallback read keeps the
+// current-mastership scopes (Applied:false), because the applied Kea config
+// no longer proves what this node serves while its Kea is stopped (#16854).
+func (d *Daemon) makeDHCPLeaseSnapshot(cfg *config.Config, family int, leases []dhcpserver.SyncLease, live bool) dhcpserver.LeaseSyncSnapshot {
 	d.dhcpLeaseSync.authorityMu.Lock()
 	if d.dhcpLeaseSync.authorityGeneration == 0 {
 		d.dhcpLeaseSync.authorityGeneration = 1
@@ -272,10 +294,12 @@ func (d *Daemon) makeDHCPLeaseSnapshot(cfg *config.Config, family int, leases []
 
 	masters := d.snapshotRethMasterState()
 	scopes := dhcpLeaseScopeAuthorities(cfg, family, generation, false, masters)
-	resultGeneration, resultScopes, _ := d.dhcpServer.LeaseAuthorityResult(family)
-	if resultGeneration == generation &&
-		dhcpLeaseAuthorityScopesMatchCurrent(scopes, resultScopes, family, generation) {
-		scopes = resultScopes
+	if live {
+		resultGeneration, resultScopes, _ := d.dhcpServer.LeaseAuthorityResult(family)
+		if resultGeneration == generation &&
+			dhcpLeaseAuthorityScopesMatchCurrent(scopes, resultScopes, family, generation) {
+			scopes = resultScopes
+		}
 	}
 	return dhcpserver.LeaseSyncSnapshot{
 		Leases:     leases,
@@ -590,6 +614,78 @@ func (d *Daemon) waitForDHCPApplyGen(ctx context.Context, gen uint64, want4, wan
 }
 func (d *Daemon) dhcpLeaseAuthority(cfg *config.Config, family int) dhcpserver.LeaseSyncAuthority {
 	return dhcpserver.LeaseSyncAuthority{Scopes: dhcpLeaseScopeAuthorities(cfg, family, 0, false, d.snapshotRethMasterState())}
+}
+
+// dhcpScopeSetForMasters returns the set of pool CIDRs (per family) the
+// master-filtered config serves under masters, derived from the SAME scope
+// attribution the lease-authority proof uses. A scope the attribution cannot
+// prove (mixed-RG or node-local group) is absent, so an edge touching only
+// such a scope is not gated by #16854.
+func dhcpScopeSetForMasters(cfg *config.Config, family int, masters map[int]bool) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, scope := range dhcpLeaseScopeAuthorities(cfg, family, 0, false, masters) {
+		if scope.Served {
+			out[scope.CIDR] = struct{}{}
+		}
+	}
+	return out
+}
+
+// dhcpTakeoverWorkNeeded reports whether a MASTER edge for rgID changes the
+// DHCP-served scope set (#16854). The takeover pre-seed quiesces the live Kea
+// (dhcp-disable) and forces a restart, so it must run only when the edge
+// actually moves DHCP ownership. The decision is fail-open: takeover work is
+// skipped ONLY when the edge is provably DHCP-free, i.e. all of:
+//
+//   - rgID owns no attributable DHCP scope (the #10170 attribution, which
+//     requires an unambiguous single-RG group with pools), in either family;
+//   - the attributable served scope set is non-empty (so the attribution is
+//     known to describe this node's DHCP service — otherwise a node-local or
+//     mixed group could be affected and the proof is vacuous);
+//   - the served set with rgID mastered equals the set without it, so the
+//     edge moves no attributable scope.
+//
+// Every other shape — no DHCP config at all, an unattributable group, a
+// served set the attribution cannot describe — keeps the legacy takeover
+// behavior. An edge for a DHCP-less RG (the canonical WAN RG) on a node
+// already serving another RG satisfies all three and skips the quiesce,
+// the forced restart, and the peer seed.
+func dhcpTakeoverWorkNeeded(cfg *config.Config, rgID int, masters map[int]bool) bool {
+	if cfg == nil || !masters[rgID] {
+		return true // cannot prove the edge is DHCP-free; keep legacy behavior
+	}
+	servedAny := false
+	for _, family := range []int{4, 6} {
+		for _, scope := range dhcpLeaseScopeAuthorities(cfg, family, 0, false, masters) {
+			if scope.RGID == rgID && scope.Served {
+				return true // rgID owns a DHCP scope this node now serves
+			}
+			if scope.Served {
+				servedAny = true
+			}
+		}
+	}
+	if !servedAny {
+		return true // attribution describes no served scope; cannot prove free
+	}
+	without := make(map[int]bool, len(masters))
+	for rg, isMaster := range masters {
+		without[rg] = isMaster
+	}
+	without[rgID] = false
+	for _, family := range []int{4, 6} {
+		nowSet := dhcpScopeSetForMasters(cfg, family, masters)
+		prevSet := dhcpScopeSetForMasters(cfg, family, without)
+		if len(nowSet) != len(prevSet) {
+			return true
+		}
+		for cidr := range nowSet {
+			if _, ok := prevSet[cidr]; !ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // dhcpLeaseScopeAuthorities derives ownership by configured subnet CIDR and

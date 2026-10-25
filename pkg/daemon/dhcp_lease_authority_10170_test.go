@@ -51,13 +51,13 @@ func TestMakeDHCPLeaseSnapshotRejectsStaleAuthorityGeneration10170(t *testing.T)
 		applied:                  true,
 	}
 	d := &Daemon{dhcpServer: r, dhcpLeaseSync: dhcpLeaseSyncState{authorityGeneration: 2}}
-	snapshot := d.makeDHCPLeaseSnapshot(nil, 4, nil)
+	snapshot := d.makeDHCPLeaseSnapshot(nil, 4, nil, true)
 	if snapshot.Generation != 2 || len(snapshot.Scopes) != 0 {
 		t.Fatalf("stale authority result overwrote current generation: %+v", snapshot)
 	}
 
 	r.generation = 2
-	snapshot = d.makeDHCPLeaseSnapshot(nil, 4, nil)
+	snapshot = d.makeDHCPLeaseSnapshot(nil, 4, nil, true)
 	if snapshot.Generation != 2 || len(snapshot.Scopes) != 0 {
 		t.Fatalf("same-generation authority scope without a current local scope was accepted: %+v", snapshot)
 	}
@@ -89,13 +89,13 @@ func TestMakeDHCPLeaseSnapshotRejectsSameGenerationStaleServedScope10170(t *test
 		}}},
 	}
 	d.getOrCreateRGState(2).SetCluster(true)
-	snapshot := d.makeDHCPLeaseSnapshot(cfg, 4, nil)
+	snapshot := d.makeDHCPLeaseSnapshot(cfg, 4, nil, true)
 	if len(snapshot.Scopes) != 1 || !snapshot.Scopes[0].Served || !snapshot.Scopes[0].Applied {
 		t.Fatalf("matching generation/current mastership did not accept proof: %+v", snapshot)
 	}
 
 	d.getOrCreateRGState(2).SetCluster(false)
-	snapshot = d.makeDHCPLeaseSnapshot(cfg, 4, nil)
+	snapshot = d.makeDHCPLeaseSnapshot(cfg, 4, nil, true)
 	if len(snapshot.Scopes) != 1 || snapshot.Scopes[0].Served || snapshot.Scopes[0].Applied {
 		t.Fatalf("same-generation stale Served proof survived mastership change: %+v", snapshot)
 	}

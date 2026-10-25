@@ -49,6 +49,8 @@ type dhcpApplier interface {
 
 	GetSyncLeases4(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, error)
 	GetSyncLeases6(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, error)
+	GetSyncLeases4WithSource(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, bool, error)
+	GetSyncLeases6WithSource(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, bool, error)
 	SeedSyncLeases4(ctx context.Context, leases []dhcpserver.SyncLease, now time.Time) (int, error)
 	SeedSyncLeases6(ctx context.Context, leases []dhcpserver.SyncLease, now time.Time) (int, error)
 	PreSeedMemfileMerged4(ctx context.Context, peer []dhcpserver.SyncLease, now time.Time, stillMastering bool) error

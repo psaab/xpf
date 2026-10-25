@@ -859,6 +859,19 @@ func (m *Manager) SeedSyncLeases6(ctx context.Context, leases []SyncLease, now t
 	return m.seedSyncLeases(ctx, 6, leases, now)
 }
 
+// GetSyncLeases4WithSource is GetSyncLeases4 plus the live-socket proof: it
+// reports whether the rows came from Kea's live control socket (true) or the
+// persisted memfile fallback (false). A sender whose Kea is stopped must not
+// present memfile rows as its serving set (#16854).
+func (m *Manager) GetSyncLeases4WithSource(ctx context.Context, now time.Time) ([]SyncLease, bool, error) {
+	return m.getSyncLeasesWithSource(ctx, 4, now)
+}
+
+// GetSyncLeases6WithSource is the v6 counterpart of GetSyncLeases4WithSource.
+func (m *Manager) GetSyncLeases6WithSource(ctx context.Context, now time.Time) ([]SyncLease, bool, error) {
+	return m.getSyncLeasesWithSource(ctx, 6, now)
+}
+
 func (m *Manager) seedSyncLeases(ctx context.Context, family int, leases []SyncLease, now time.Time) (int, error) {
 	socket := m.controlSocket(family)
 	var seeded int
@@ -1228,6 +1241,62 @@ func mergeLeasesByIdentity(local, peer []SyncLease, family int) []SyncLease {
 	return oneOwnerPerAddress9791(union)
 }
 
+// familyRowsOf returns the rows of one family as a fresh slice, safe to
+// filter in place.
+func familyRowsOf(rows []SyncLease, family int) []SyncLease {
+	out := make([]SyncLease, 0, len(rows))
+	for _, lease := range rows {
+		if lease.Family == family {
+			out = append(out, lease)
+		}
+	}
+	return out
+}
+
+// peerScopesForReceiver returns every peer scope of this family at the
+// snapshot generation with an RG identity, split by proof kind. A peer that
+// explicitly reports Served:false for a scope proves it is NOT serving that
+// scope (#16854): its rows in that scope are stale memfile-fallback residue,
+// not live leases, so the receiver must exclude them. Served:true without
+// Applied keeps the conservative whole-union behavior (#10170).
+func peerScopesForReceiver(peer LeaseSyncSnapshot, family int) (proven, negative []LeaseScopeAuthority) {
+	for _, scope := range peer.Scopes {
+		if scope.Family != family || scope.CIDR == "" || scope.Generation != peer.Generation {
+			continue
+		}
+		switch {
+		case scope.Served && scope.Applied:
+			proven = append(proven, scope)
+		case !scope.Served:
+			negative = append(negative, scope)
+		}
+	}
+	return proven, negative
+}
+
+// excludePeerRowsInNegativeScopes drops peer rows whose address falls in a
+// scope the peer explicitly reported as not served (#16854). The peer's Kea
+// is stopped for that scope, so any row it still carries there came from the
+// surviving memfile, never from a live server. Rows is a freshly built slice
+// in every caller; it is filtered in place.
+func excludePeerRowsInNegativeScopes(rows []SyncLease, negative []LeaseScopeAuthority, localScopes []LeaseScopeAuthority) []SyncLease {
+	if len(negative) == 0 || len(rows) == 0 {
+		return rows
+	}
+	matched, _ := partitionPeerScopes(negative, localScopes)
+	if len(matched) == 0 {
+		return rows
+	}
+	out := rows[:0]
+	for _, lease := range rows {
+		if leaseInAnyScope(lease.Address, matched) {
+			continue
+		}
+		out = append(out, lease)
+	}
+	return out
+}
+
 // PeerLeasesForAuthority returns the peer rows eligible for this receiver's
 // family and served-scope authority. It is shared by memfile and post-start
 // seeding so both takeover paths make the same conservative decision.
@@ -1241,28 +1310,22 @@ func PeerLeasesForAuthority(peer LeaseSyncSnapshot, family int, authority LeaseS
 		}
 		return out
 	}
-	if !peer.Received || peer.Generation == 0 {
-		return familyRows(peer.Leases)
-	}
-	peerScopes := make([]LeaseScopeAuthority, 0, len(peer.Scopes))
-	for _, scope := range peer.Scopes {
-		if scope.Family == family && scope.CIDR != "" &&
-			scope.Generation == peer.Generation && scope.Served && scope.Applied {
-			peerScopes = append(peerScopes, scope)
-		}
-	}
 	localScopes := make([]LeaseScopeAuthority, 0, len(authority.Scopes))
 	for _, scope := range authority.Scopes {
 		if scope.Family == family && scope.CIDR != "" {
 			localScopes = append(localScopes, scope)
 		}
 	}
-	if len(peerScopes) == 0 || len(localScopes) == 0 {
+	if !peer.Received || peer.Generation == 0 {
 		return familyRows(peer.Leases)
+	}
+	peerScopes, negativeScopes := peerScopesForReceiver(peer, family)
+	if len(peerScopes) == 0 || len(localScopes) == 0 {
+		return excludePeerRowsInNegativeScopes(familyRows(peer.Leases), negativeScopes, localScopes)
 	}
 	matched, eligible := partitionPeerScopes(peerScopes, localScopes)
 	if len(matched) == 0 {
-		return familyRows(peer.Leases)
+		return excludePeerRowsInNegativeScopes(familyRows(peer.Leases), negativeScopes, localScopes)
 	}
 	return peerLeasesForScopes(peer, family, matched, eligible)
 }
@@ -1309,8 +1372,11 @@ func peerLeasesForScopes(peer LeaseSyncSnapshot, family int, known, eligible []L
 // mergeLeasesByAuthority applies the #10170 scope/generation gate before the
 // existing identity/address arbitration. Unknown scopes, unreceived snapshots,
 // generation mismatches, unapplied sender state, and ambiguous groups retain
-// the old whole-union behavior. Explicit authority proof narrows both local
-// stale rows and peer rows during staggered multi-RG takeover.
+// the old whole-union behavior — except that a peer scope explicitly reported
+// Served:false is negative proof (#16854): the peer is not serving it, so its
+// rows there are stale memfile residue and are excluded even without positive
+// proof. Explicit authority proof narrows both local stale rows and peer rows
+// during staggered multi-RG takeover.
 //
 // Contract ruling (see docs/log/10170.md): NO ordinal stale<current comparison.
 // Generation values are independent per-node counters, so cross-node age
@@ -1322,16 +1388,7 @@ func mergeLeasesByAuthority(local []SyncLease, peer LeaseSyncSnapshot, family in
 		return mergeLeasesByIdentity(local, peer.Leases, family)
 	}
 
-	peerScopes := make([]LeaseScopeAuthority, 0, len(peer.Scopes))
-	for _, scope := range peer.Scopes {
-		if scope.Family == family &&
-			scope.CIDR != "" &&
-			scope.Generation == peer.Generation &&
-			scope.Served &&
-			scope.Applied {
-			peerScopes = append(peerScopes, scope)
-		}
-	}
+	peerScopes, negativeScopes := peerScopesForReceiver(peer, family)
 	localScopes := make([]LeaseScopeAuthority, 0, len(authority.Scopes))
 	for _, scope := range authority.Scopes {
 		if scope.Family == family && scope.CIDR != "" {
@@ -1339,12 +1396,14 @@ func mergeLeasesByAuthority(local []SyncLease, peer LeaseSyncSnapshot, family in
 		}
 	}
 	if len(peerScopes) == 0 || len(localScopes) == 0 {
-		return mergeLeasesByIdentity(local, peer.Leases, family)
+		return mergeLeasesByIdentity(local,
+			excludePeerRowsInNegativeScopes(familyRowsOf(peer.Leases, family), negativeScopes, localScopes), family)
 	}
 
 	matchedPeerScopes, eligiblePeerScopes := partitionPeerScopes(peerScopes, localScopes)
 	if len(matchedPeerScopes) == 0 {
-		return mergeLeasesByIdentity(local, peer.Leases, family)
+		return mergeLeasesByIdentity(local,
+			excludePeerRowsInNegativeScopes(familyRowsOf(peer.Leases, family), negativeScopes, localScopes), family)
 	}
 	filteredLocal := make([]SyncLease, 0, len(local))
 	for _, lease := range local {

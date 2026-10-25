@@ -2017,29 +2017,40 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 		// must not make the applied config and advertised Served scopes disagree.
 		masters := d.snapshotRethMasterState()
 		dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
+		// #16854: the pre-seed quiesces the live Kea and the enqueued apply
+		// force-restarts it, so run that takeover work only when this edge
+		// changes the DHCP-served scope set. A MASTER edge for a DHCP-less RG
+		// (the canonical WAN RG) on a node already serving another RG must
+		// not bounce its Kea or merge the peer's stale rows into its memfile.
+		// The apply itself still runs: it is config-gated inside the Manager
+		// (an unchanged, already-loaded config needs no restart), and the
+		// periodic converger relies on the edge to re-drive a failed apply.
+		takeoverWork := dhcpTakeoverWorkNeeded(cfg, rgID, masters)
 		if dhcpCfg != nil {
-			// #2239 Q3: pre-seed the held peer leases into the Kea
-			// memfile BEFORE the (re)start so Kea loads the in-use
-			// bindings at boot and can never hand an in-use address to
-			// a different client even before the post-start lease-add
-			// seed runs (fully closes the duplicate-allocation window).
-			// Best-effort + fail-open; the post-start seed is the
-			// backstop.
-			//
-			// A later RG can transition while an earlier ApplyAsync restart
-			// still has Kea down. In that window, a peer-only fallback
-			// pre-seed would wipe leases for the already-MASTER RG. Keep the
-			// fallback union and its LFC generations whenever another RG is
-			// still MASTER; only the first/pure-backup takeover may replace
-			// them with the peer set.
-			stillMastering := false
-			for otherRG, isMaster := range masters {
-				if otherRG != rgID && isMaster {
-					stillMastering = true
-					break
+			if takeoverWork {
+				// #2239 Q3: pre-seed the held peer leases into the Kea
+				// memfile BEFORE the (re)start so Kea loads the in-use
+				// bindings at boot and can never hand an in-use address to
+				// a different client even before the post-start lease-add
+				// seed runs (fully closes the duplicate-allocation window).
+				// Best-effort + fail-open; the post-start seed is the
+				// backstop.
+				//
+				// A later RG can transition while an earlier ApplyAsync restart
+				// still has Kea down. In that window, a peer-only fallback
+				// pre-seed would wipe leases for the already-MASTER RG. Keep the
+				// fallback union and its LFC generations whenever another RG is
+				// still MASTER; only the first/pure-backup takeover may replace
+				// them with the peer set.
+				stillMastering := false
+				for otherRG, isMaster := range masters {
+					if otherRG != rgID && isMaster {
+						stillMastering = true
+						break
+					}
 				}
+				d.preSeedDHCPLeaseMemfile(stillMastering)
 			}
-			d.preSeedDHCPLeaseMemfile(stillMastering)
 			// ApplyAsync (#1835 F2): Kea reconcile shells out to
 			// systemctl with a 15s bound; running it inline would
 			// block this VRRP event loop. Latest-wins coalescing in
@@ -2057,9 +2068,12 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// backstop. Idempotent with the memfile pre-seed
 			// (lease-add → lease-update on collision). Nudge the push
 			// loop so this node replicates its now-owned set.
-			if cc := d.clusterConfig(); cc != nil && cc.DHCPLeaseSync && d.getSessionSync() != nil {
-				go d.seedDHCPLeasesFromPeerGen(context.Background(), applyGen)
-				d.nudgeDHCPLeaseSync()
+			// #16854: skipped when this edge moves no DHCP scope.
+			if takeoverWork {
+				if cc := d.clusterConfig(); cc != nil && cc.DHCPLeaseSync && d.getSessionSync() != nil {
+					go d.seedDHCPLeasesFromPeerGen(context.Background(), applyGen)
+					d.nudgeDHCPLeaseSync()
+				}
 			}
 		}
 	}
