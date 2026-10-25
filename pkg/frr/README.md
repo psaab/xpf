@@ -1861,6 +1861,15 @@ step. Both are required — neither sees the other's case:
   flat shape and the per-VRF nested shape, stamping `BGPPeerSummary.Instance`
   (bare instance name, `""` for default) from `vrfName`/the enclosing VRF key;
   all three renderers add an `Instance` column so VRF-only peers are listed.
+  **Default-instance scope (#16829).** `GetBGPSummaryVRF(ctx, "")` no longer
+  delegates to that `vrf all` query: it issues `show bgp summary json`
+  (default only) and filters returned peers to `Instance == ""`, because HA
+  routing readiness keys the default-instance BGP requirement by `""` and
+  a same-address tenant peer `Established` would otherwise satisfy it while
+  the default session was down. The daemon readiness predicate
+  (`hasEstablishedAdjacency`) independently requires
+  `peer.Instance == requirement.vrf`. `GetBGPSummary` (show surfaces) still
+  queries `vrf all`.
 - `vtysh -c` is run synchronously in batch mode for MOST state queries:
   `Vtysh` buffers the whole stdout into a string. The ONE streaming
   exception is `VtyshStream` (behind `StreamBGPRoutes`), added for the

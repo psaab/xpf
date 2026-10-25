@@ -81,7 +81,7 @@ func hasEstablishedAdjacency(requirement haRoutingRequirement, status haRoutingA
 		}
 	case "bgp":
 		for _, peer := range status.bgp[requirement.vrf] {
-			if strings.EqualFold(peer.State, "Established") && hasName(requirement.neighbors, peer.Neighbor) {
+			if peer.Instance == requirement.vrf && strings.EqualFold(peer.State, "Established") && hasName(requirement.neighbors, peer.Neighbor) {
 				return true
 			}
 		}

@@ -10,6 +10,17 @@ xpf (0.0.0) unstable; urgency=medium
     security policy (host-originated: ...)"; `from-zone nosuch` stays the
     unzoned-ingress deny and `to-zone junos-host` stays the host-gate
     verdict.
+  * FRR/HA: default-instance BGP transfer readiness is no longer
+    satisfied by another routing-instance's peer (#16829).
+    GetBGPSummaryVRF("") delegated to the #15265 "vrf all"
+    GetBGPSummary and hasEstablishedAdjacency never checked
+    BGPPeerSummary.Instance, so with the same neighbor in the
+    default instance (down) and a tenant instance (Established)
+    a transfer could proceed onto a routing-blind node. The
+    empty-VRF query now issues "show bgp summary json" (default
+    only), returned peers are filtered to the requested
+    instance, and readiness requires peer.Instance ==
+    requirement.vrf; the show surfaces still list all VRFs.
   * FRR/BFD: BFD profiles and peers now render only non-default
     timer lines, and an OSPFv3 BFD profile renders its bare
     `ipv6 ospf6 bfd` enable line first (#16813). bfdd elides
