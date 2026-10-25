@@ -665,6 +665,15 @@ func TestPrimaryLivenessUsesConfiguredTCPWindows16880(t *testing.T) {
 			profile: ReceiverSessionTimeoutProfile{TCPOpeningSeconds: 10},
 		},
 		{
+			name:    "established honors configured window without app override",
+			timeout: 10,
+			value: dataplane.SessionValue{
+				Timeout: long, SessionID: 10,
+				TCPHandshakeState: dataplane.TCPHandshakeStateEstablished,
+			},
+			profile: ReceiverSessionTimeoutProfile{TCPEstablishedSeconds: 10},
+		},
+		{
 			name:    "closing",
 			timeout: 12,
 			value: dataplane.SessionValue{

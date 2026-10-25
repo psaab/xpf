@@ -418,7 +418,11 @@ func primaryLivenessTimeoutWithProfile(
 			}
 			return min(appOverride, sessionTimeout)
 		}
-		return sessionTimeout
+		establishedTimeout := uint64(profile.TCPEstablishedSeconds)
+		if sessionTimeout == 0 {
+			return establishedTimeout
+		}
+		return min(sessionTimeout, establishedTimeout)
 	default:
 		receiverTimeout := uint64(config.DataplaneOtherSessionTimeoutSecs)
 		if protocol == primaryLivenessOSPFProtocol {
