@@ -487,6 +487,19 @@ type SessionDeltaInfo struct {
 	// 0 from an old helper = no evidence (fail-closed).
 	FwdPackets uint64 `json:"fwd_packets,omitempty"`
 	RevPackets uint64 `json:"rev_packets,omitempty"`
+	// StreamSeq (#16627): the event-stream sequence the helper assigned
+	// this delta when its lossless enqueue succeeded, carried on the JSON
+	// RPC-fallback leg so the daemon can tell an already-streamed copy
+	// from a fallback-only delta. 0 means the delta was never carried by
+	// the stream (stream down, no handle, CommandExport, or a failed
+	// lossless enqueue) and the fallback copy is authoritative. The
+	// binary leg does not need it: the frame header carries the seq,
+	// which installEventStreamCallbacks stamps here on decode. Participates
+	// in the #7194 derived fingerprint like every other wire name (both
+	// producers derive it, so the two halves still agree); additive and
+	// rolling-upgrade safe — an old helper omits it (0, fallback-only) and
+	// an old daemon ignores it.
+	StreamSeq uint64 `json:"stream_seq,omitempty"`
 	// PurgeRetirement (#9752): this Close retires exactly its key — the
 	// sender already decided the pair (fenced removal, linked or deliberately
 	// preserved companion, conditional worker delete). Every downstream

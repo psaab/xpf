@@ -502,6 +502,9 @@ pub(in crate::afxdp) fn session_delta_info(
         // Open/Update delta states the service observed so far.
         fwd_packets: delta.counters.fwd_packets,
         rev_packets: delta.counters.rev_packets,
+        // #16627: stamped by flush_session_deltas after the lossless
+        // stream enqueue succeeds; 0 here means not (yet) stream-carried.
+        stream_seq: 0,
     }
 }
 
@@ -930,25 +933,18 @@ pub(super) fn flush_session_deltas(
         } else {
             delta
         };
-        let info = session_delta_info(ident, delta, zone_id_to_name);
+        let mut info = session_delta_info(ident, delta, zone_id_to_name);
         let telemetry_only_seed =
             delta.origin == crate::session::SessionOrigin::MissingNeighborSeed;
         drop(_close_install_permits);
         // #13974: seed deltas are only input to the local RT_FLOW/event
         // channel below. They are never session-sync RPC or recent-delta
         // records, which are consumed by HA/control-plane paths.
-        if !telemetry_only_seed {
-            if let Some(live) = live {
-                // #8593: route on the DELTA, not on a flag the call site chose.
-                // A bulk owner-RG export delta whose push is refused must not
-                // arm the loss-of-sync latch — that latch triggers its export.
-                if delta.bulk_resync {
-                    live.push_session_delta_bulk_export(info.clone());
-                } else {
-                    live.push_session_delta(info.clone());
-                }
-            }
-        }
+        // #16627: `streamed_seq` records the event-stream sequence this
+        // delta is actually enqueued with below (0 = not stream-carried).
+        // The RPC-fallback mirror is deferred until after the stream
+        // attempt: mirror UNLESS the lossless enqueue succeeded.
+        let mut streamed_seq: u64 = 0;
         // Push to event stream (new path) alongside existing RPC fallback.
         // #9630: CommandExport has a complete, paged control response
         // (including its fail-closed token/drop accounting). Re-announcing
@@ -1019,19 +1015,27 @@ pub(super) fn flush_session_deltas(
                     !event_stream_out_of_sync
                 };
                 if gate_open && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed {
-                    if let Err(err) = es.push_delta_lossless_within(
+                    match es.push_delta_lossless_within_seq(
                         delta,
                         zone_name_to_id,
                         WORKER_LOSSLESS_QUEUE_BUDGET,
                     ) {
-                        if delta.bulk_resync {
-                            bulk_loss_this_batch = true;
-                            es.record_dropped_frames(1);
-                        } else {
-                            event_stream_out_of_sync = true;
-                            eprintln!(
-                                "xpf-event-stream: HA session-sync delta could not be queued losslessly ({err}); latching out-of-sync to force a full owner-RG resync"
-                            );
+                        Ok(seq) => {
+                            // #16627: the stream now carries this delta;
+                            // stamp its sequence and skip the fallback
+                            // mirror below.
+                            streamed_seq = seq;
+                        }
+                        Err(err) => {
+                            if delta.bulk_resync {
+                                bulk_loss_this_batch = true;
+                                es.record_dropped_frames(1);
+                            } else {
+                                event_stream_out_of_sync = true;
+                                eprintln!(
+                                    "xpf-event-stream: HA session-sync delta could not be queued losslessly ({err}); latching out-of-sync to force a full owner-RG resync"
+                                );
+                            }
                         }
                     }
                 }
@@ -1134,6 +1138,38 @@ pub(super) fn flush_session_deltas(
                         delta.decision.nat.rewrite_dst_port,
                     );
                     es.emit_session_create_rt_flow(delta, app_id, ident.ifindex as u32);
+                }
+            }
+        }
+        // #16627: mirror into the per-binding RPC-fallback buffer ONLY
+        // when the lossless stream enqueue did not succeed. The two legs
+        // are alternatives, never both authoritative for one delta
+        // (docs/session-sync-architecture.md: steady state is the stream,
+        // DrainSessionDeltas is its fallback poll "when the stream is
+        // down"). Mirroring a stream-carried delta leaves a duplicate in
+        // this FIFO; the Go connected drain would later pop it and
+        // re-stamp it with a FRESH generation, so a replayed open
+        // out-ranks the stream's earlier close and resurrects a closed
+        // session on the standby, and a replayed close transiently
+        // deletes a live same-tuple successor. A mere `is_connected`
+        // check is not enough: a connected-but-full channel fails the
+        // enqueue, and that delta must still be mirrored (with
+        // stream_seq 0) so the fallback leg carries it. CommandExport
+        // deltas never attempt the stream (#9630), so they always mirror.
+        // The failure also latches loss-of-sync above, so the #2442
+        // owner-RG resync re-exports table truth — deliver-or-resync.
+        if streamed_seq != 0 {
+            info.stream_seq = streamed_seq;
+        }
+        if !telemetry_only_seed && streamed_seq == 0 {
+            if let Some(live) = live {
+                // #8593: route on the DELTA, not on a flag the call site chose.
+                // A bulk owner-RG export delta whose push is refused must not
+                // arm the loss-of-sync latch — that latch triggers its export.
+                if delta.bulk_resync {
+                    live.push_session_delta_bulk_export(info.clone());
+                } else {
+                    live.push_session_delta(info.clone());
                 }
             }
         }
