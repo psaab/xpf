@@ -775,6 +775,7 @@ fn build_fallible_forwarding_state(
         time_wait: snapshot.flow.tcp_time_wait_timeout,
         time_wait_session_ageout: snapshot.flow.tcp_time_wait_session_ageout,
         time_wait_apply_to_half_closed: snapshot.flow.tcp_time_wait_apply_to_half_closed,
+        fin_invalidate_session: snapshot.flow.tcp_fin_invalidate_session,
     });
     // #10703: carry the TCP SYN-admission policy to the session-MISS gate.
     // Missing fields from older Go snapshots stay false: SYN-first is the

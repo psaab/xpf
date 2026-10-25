@@ -324,7 +324,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // one response, which crosses MAX_CONTROL_RESPONSE_BYTES at a legal
 // population and is refused by the Go bounded reader — the standby
 // then rebuilds NOTHING. Exact equality refuses that pairing instead.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 71;
+// v71 -> v72 (#16581): FlowSnapshot carries tcp_fin_invalidate_session;
+// a v71 helper ignores it and holds FIN-closed sessions for the
+// closing/TIME_WAIT window instead of immediate teardown on FIN close.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 72;
 
 /// #16589: hard cap on lease rows in ONE paged lease-export response.
 /// Sized so even a worst-case row (many permitted remotes) stays far

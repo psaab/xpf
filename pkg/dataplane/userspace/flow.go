@@ -157,6 +157,8 @@ func buildFlowSnapshot(cfg *config.Config) FlowSnapshot {
 		// #15946: the two time-wait-state flags were parse-once/read-nowhere.
 		snap.TCPTimeWaitSessionAgeout = ts.TimeWaitStateSessionAgeout
 		snap.TCPTimeWaitApplyToHalfClosed = ts.TimeWaitStateApplyToHalfClosed
+		// #16581: Junos fin-invalidate-session.
+		snap.TCPFinInvalidate = ts.FinInvalidateSession
 	}
 	snap.ALGDisableFlags = algDisableFlags(&cfg.Security.ALG)
 	return snap

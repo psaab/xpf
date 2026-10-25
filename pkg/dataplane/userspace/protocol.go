@@ -498,7 +498,11 @@ const (
 	// request field and answers the whole population in one response,
 	// which crosses MaxControlResponseBytes at a legal population and is
 	// refused by the bounded reader — the standby rebuilds NOTHING.
-	ProtocolVersion = 71
+	// v71 -> v72 (#16581): FlowSnapshot carries tcp_fin_invalidate_session;
+	// a v71 helper ignores it and holds FIN-closed sessions for the
+	// closing/TIME_WAIT window instead of tearing them down immediately
+	// on completed FIN close (the Junos fin-invalidate-session defect).
+	ProtocolVersion = 72
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1285,11 +1289,13 @@ type FlowSnapshot struct {
 	TCPNoSequenceCheck    bool `json:"tcp_no_sequence_check,omitempty"`
 	TCPRstSequenceCheck   bool `json:"tcp_rst_sequence_check,omitempty"`
 	TCPMaximumWindow      int  `json:"tcp_maximum_window,omitempty"`
-	// #15946: time-wait-state flags (Junos session-ageout / apply-to-half-closed).
+	// #15946: time-wait-state flags (Junos session-ageout / apply-to-half-close-state).
 	TCPTimeWaitSessionAgeout     bool `json:"tcp_time_wait_session_ageout,omitempty"`
 	TCPTimeWaitApplyToHalfClosed bool `json:"tcp_time_wait_apply_to_half_closed,omitempty"`
-	UDPSessionTimeout            int  `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
-	ICMPSessionTimeout           int  `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
+	// #16581: Junos fin-invalidate-session — immediate teardown on FIN close.
+	TCPFinInvalidate   bool `json:"tcp_fin_invalidate_session,omitempty"`
+	UDPSessionTimeout  int  `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
+	ICMPSessionTimeout int  `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
 	// GREAcceleration carries `security flow gre-performance-acceleration`
 	// (#3360). On vSRX this extracts the GRE key/call-id into the session tuple
 	// so multiple GRE tunnels between the same endpoints map to distinct

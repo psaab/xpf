@@ -386,12 +386,17 @@ type ALGConfig struct {
 // that repeats the authority is one more place to be wrong the next time the
 // authority moves, so the pointer above is all that is kept.
 type TCPSessionConfig struct {
-	EstablishedTimeout   int
-	InitialTimeout       int
-	ClosingTimeout       int
-	TimeWaitTimeout      int
-	NoSynCheck           bool // allow non-closing mid-stream TCP transit misses (#10703)
-	NoSynCheckInTunnel   bool // allow mid-stream TCP for tunnel traffic only (#15753)
+	EstablishedTimeout int
+	InitialTimeout     int
+	ClosingTimeout     int
+	TimeWaitTimeout    int
+	NoSynCheck         bool // allow non-closing mid-stream TCP transit misses (#10703)
+	NoSynCheckInTunnel bool // allow mid-stream TCP for tunnel traffic only (#15753)
+	// FinInvalidateSession (`fin-invalidate-session`, #16581): Junos
+	// invalidates (tears down) the session immediately when the close
+	// handshake's FIN/ACK sequence completes, rather than holding it for
+	// the TIME_WAIT/closing window.
+	FinInvalidateSession bool
 	RstInvalidateSession bool // immediately expire session on RST (#15753)
 	// RstSequenceCheck (`security flow tcp-session rst-sequence-check`,
 	// #15753): validate RST sequence against tracked receive window.
@@ -407,8 +412,10 @@ type TCPSessionConfig struct {
 	// TIME_WAIT sessions age out on the service-based established timeout.
 	TimeWaitStateSessionAgeout bool
 	// TimeWaitStateApplyToHalfClosed (`time-wait-state
-	// apply-to-half-closed-state`, #15946): TIME_WAIT window also governs
-	// half-closed (single-FIN) sessions.
+	// apply-to-half-close-state`, Junos spelling; the xpf spelling
+	// `apply-to-half-closed-state` is a deprecated alias for the same
+	// leaf, #16581): TIME_WAIT window also governs half-closed
+	// (single-FIN) sessions.
 	TimeWaitStateApplyToHalfClosed bool
 	// NoSequenceCheck disables TCP sequence-number validation for flow
 	// sessions (`set security flow tcp-session no-sequence-check`, #2008 M9).

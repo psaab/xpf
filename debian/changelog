@@ -17,6 +17,31 @@ xpf (0.0.0) unstable; urgency=medium
     extra LinkSetDown, and a re-down does not re-fire the
     liveness-change callback). Recovery on the first alive probe is
     unchanged.
+  * Config/flow: Junos `security flow tcp-session` spellings
+    `tcp-initial-timeout`, `fin-invalidate-session`, and
+    `time-wait-state apply-to-half-close-state` now commit (#16581,
+    residual of Y39-05/#15256). Previously the closed-world schema
+    rejected all three while only the xpf spellings `initial-timeout`
+    and `apply-to-half-closed-state` (#15753's misspelling) committed,
+    so vSRX flow configs using the Junos leaves were refused at
+    commit. The Junos spellings are canonical; the xpf spellings are
+    kept as deprecated aliases committing to the same fields
+    (`InitialTimeout`, `TimeWaitStateApplyToHalfClosed`), so existing
+    committed configs keep working. `fin-invalidate-session` is a new
+    enforced knob, not an alias: it compiles to
+    `TCPSessionConfig.FinInvalidateSession`, reaches the dataplane as
+    `tcp_fin_invalidate_session` (snapshot protocol v71 -> v72, Go and
+    Rust in lockstep, so a v70 helper that would ignore it and hold
+    FIN-closed sessions for the closing/TIME_WAIT window is fenced by
+    exact-version equality), and the Rust close-window selector
+    (`tcp_close_window_ns_with_app`) returns an immediate (zero)
+    window for the TIME_WAIT class — both FINs seen, close handshake
+    complete — while CLOSING (one FIN) and RST keep their windows.
+    Strict commit still rejects near-miss keywords, and the
+    `tcp-initial-timeout` value keeps the alias's
+    `0..MaxDurationSeconds` range gate. `show security flow` renders
+    the fin-invalidate row and names the canonical
+    `apply-to-half-close-state` in its TIME_WAIT annotation.
 
   * Userspace event stream: the SessionClose/SessionCreate telemetry queue
     budget is now released when a frame leaves the bounded channel, not when

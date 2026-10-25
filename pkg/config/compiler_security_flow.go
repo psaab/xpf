@@ -762,6 +762,9 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 			case "rst-invalidate-session":
 				sec.Flow.TCPSession.RstInvalidateSession = true
 				continue
+			case "fin-invalidate-session":
+				sec.Flow.TCPSession.FinInvalidateSession = true
+				continue
 			case "no-sequence-check":
 				sec.Flow.TCPSession.NoSequenceCheck = true
 				continue
@@ -784,7 +787,7 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 			switch opt.Name() {
 			case "established-timeout":
 				sec.Flow.TCPSession.EstablishedTimeout = val
-			case "initial-timeout":
+			case "initial-timeout", "tcp-initial-timeout":
 				sec.Flow.TCPSession.InitialTimeout = val
 			case "closing-timeout":
 				sec.Flow.TCPSession.ClosingTimeout = val
@@ -801,7 +804,7 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 				switch twOpt.Name() {
 				case "session-ageout":
 					sec.Flow.TCPSession.TimeWaitStateSessionAgeout = true
-				case "apply-to-half-closed-state":
+				case "apply-to-half-closed-state", "apply-to-half-close-state":
 					sec.Flow.TCPSession.TimeWaitStateApplyToHalfClosed = true
 				case "session-timeout":
 					if len(twOpt.Keys) >= 2 {

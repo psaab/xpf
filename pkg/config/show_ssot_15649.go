@@ -78,7 +78,7 @@ func RenderFlowTimeouts(w io.Writer, cfg *Config) {
 	// leaves. Without this, `time-wait-state session-ageout` held closed
 	// sessions for the established window (1800s by default) while every
 	// show surface printed the 30-150s TIME_WAIT figure, and
-	// `apply-to-half-closed-state` governed CLOSING sessions with the
+	// `apply-to-half-close-state` governed CLOSING sessions with the
 	// TIME_WAIT window while show printed closing-timeout.
 	//
 	// Effective windows, mirroring the Rust selector:
@@ -91,7 +91,7 @@ func RenderFlowTimeouts(w io.Writer, cfg *Config) {
 	//     window (established-timeout, 1800s by default). Ageout wins
 	//     over an explicit session-timeout (strict commit rejects that
 	//     combination, #16485; a leniently loaded one enforces ageout).
-	//   - apply-to-half-closed-state alone: CLOSING uses the TIME_WAIT
+	//   - apply-to-half-close-state alone: CLOSING uses the TIME_WAIT
 	//     window above instead of closing-timeout.
 	effectiveEstablished := tcp.EstablishedTimeout
 	establishedIsDefault := false
@@ -122,7 +122,7 @@ func RenderFlowTimeouts(w io.Writer, cfg *Config) {
 	}
 	const (
 		ageoutAnnotation     = "service/established timeout (session-ageout)"
-		halfClosedAnnotation = "time-wait window (apply-to-half-closed-state)"
+		halfClosedAnnotation = "time-wait window (apply-to-half-close-state)"
 	)
 	switch {
 	case tcp.TimeWaitStateApplyToHalfClosed && tcp.TimeWaitStateSessionAgeout:
@@ -140,6 +140,12 @@ func RenderFlowTimeouts(w io.Writer, cfg *Config) {
 		tcpRow("TCP time-wait timeout", TCPSessionTimeWaitTimeoutLeaf, 0)
 	} else {
 		tcpRow("TCP time-wait timeout", TCPSessionTimeWaitTimeoutLeaf, effectiveTimeWait)
+	}
+	// #16581: fin-invalidate-session tears the session down immediately
+	// when the FIN close handshake completes, so no closing/TIME_WAIT
+	// window is held for such sessions.
+	if tcp.FinInvalidateSession {
+		fmt.Fprintf(w, "  %-30s %s\n", "TCP fin-invalidate-session:", "enabled (immediate teardown on FIN close)")
 	}
 	fmt.Fprintf(w, "  %-30s %s\n", "UDP session timeout:", FlowTimeoutCell(flow.UDPSessionTimeout, DataplaneUDPSessionTimeoutSecs))
 	fmt.Fprintf(w, "  %-30s %s\n", "ICMP session timeout:", FlowTimeoutCell(flow.ICMPSessionTimeout, DataplaneICMPSessionTimeoutSecs))

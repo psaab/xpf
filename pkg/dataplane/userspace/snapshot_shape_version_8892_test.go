@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "b7f65ae8cf099c30084ae0bf0415bbabbee09da345a2dd2300901511b443ae7f"
+	snapshotShapeGolden8892 = "a1ddfa97475f1e51ca93c6330c7d26f7dfb951c9ac0b2ccd3b614bed49d424b5"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -634,7 +634,10 @@ const (
 	// config as opaque serde_json::Value. No helper of any vintage
 	// can observe the retype, so no golden regen and no
 	// ProtocolVersion bump.
-	snapshotShapeVersion8892 = 70
+	// v72 (#16581): FlowSnapshot carries tcp_fin_invalidate_session;
+	// a v71 helper ignores it and holds FIN-closed sessions for the
+	// closing/TIME_WAIT window (the defect). Golden regenerated.
+	snapshotShapeVersion8892 = 72
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
