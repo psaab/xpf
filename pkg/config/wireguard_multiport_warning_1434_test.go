@@ -87,12 +87,16 @@ func TestWireGuardSingleListenPortDoesNotWarn_1434(t *testing.T) {
 	}
 }
 
-// TestWireGuardSameListenPortDoesNotWarn_1434 binds the DISTINCT qualifier. Two
-// WireGuard tunnels that share one listen port contribute one set entry —
-// that port is programmed and covers both — so this gate must stay quiet. A
-// naive "more than one WireGuard tunnel" test would fire here and mislabel a
-// different problem (two tunnels on one port collide on the kernel UDP bind;
-// bind_wg_socket sets no SO_REUSEPORT) as a steering loss.
+// TestWireGuardSameListenPortDoesNotWarn_1434 binds the DISTINCT qualifier
+// of the STEERING gate only. Two WireGuard tunnels that share one listen
+// port contribute one steered-set entry — that port is programmed and
+// covers both — so the steering gate must stay quiet. It does NOT assert
+// the shape commits: since #16531 the two tunnels' listen sockets collide
+// (each binds its own [::]:51820 with no SO_REUSEPORT, the second bind
+// fails EADDRINUSE), so strict commit refuses the pair and this cell
+// drives the gate directly on a leniently-compiled config. A naive
+// "more than one WireGuard tunnel" steering test would fire here and
+// mislabel the bind collision as a steering loss.
 func TestWireGuardSameListenPortDoesNotWarn_1434(t *testing.T) {
 	lines := []string{
 		"set interfaces wg0 tunnel mode wireguard",
@@ -106,9 +110,15 @@ func TestWireGuardSameListenPortDoesNotWarn_1434(t *testing.T) {
 		"set system dataplane-type userspace",
 	}
 	tree := buildTree4953(t, lines)
-	cfg, err := CompileConfig(tree)
+	// Strict commit now refuses this shape (#16531); the lenient path
+	// keeps it bootable with a warning, which is how the steering gate
+	// can still be exercised on it.
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatalf("two same-port default-instance tunnels must be refused at strict commit (#16531)")
+	}
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("CompileConfig: %v", err)
+		t.Fatalf("CompileConfigLenient: %v", err)
 	}
 	if got := wgSteeringWarnings(cfg); len(got) != 0 {
 		t.Fatalf("two WG tunnels sharing ONE listen port must draw no steering advisory, got: %v", got)

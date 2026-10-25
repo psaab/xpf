@@ -1917,6 +1917,19 @@ type compileOpts struct {
 	// rather than ambiguously attributed. Same doctrine as
 	// lenientTunnelOuterFamily.
 	lenientGreDuplicateOuter bool
+	// lenientWireguardListenPortCollision (#16531) downgrades the
+	// duplicate-WireGuard-listen-socket gate
+	// (validateWireguardListenPortCollisionStrict) from a hard compile
+	// error to a cfg.Warnings entry. Two WG endpoints whose listen
+	// sockets collide (same port in one instance, or default plus any
+	// VRF) cannot both bind — the second control thread fails with
+	// EADDRINUSE and respawns forever — so the strict commit /
+	// commit-check path hard-rejects naming both tunnels. The tolerant
+	// load / peer-sync paths warn so an already-persisted config still
+	// BOOTS (#1960 no-brick); the colliding tunnel stays inert at
+	// runtime (its bind fails) rather than sharing a socket. Same
+	// doctrine as lenientGreDuplicateOuter.
+	lenientWireguardListenPortCollision bool
 
 	// lenientIpipTunnelMode (#4785 half 1) downgrades the IPIP-unimplemented
 	// gate (validateIpipTunnelUnimplementedStrict) from a hard compile error to
@@ -3852,6 +3865,7 @@ func lenientCompileOpts() compileOpts {
 		lenientWireguardPeers:                    true,
 		lenientTunnelOuterFamily:                 true,
 		lenientGreDuplicateOuter:                 true,
+		lenientWireguardListenPortCollision:      true,
 		lenientIpipTunnelMode:                    true,
 		lenientPolicyZoneRefs:                    true,
 		lenientZoneCount:                         true,

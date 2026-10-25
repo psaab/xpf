@@ -234,7 +234,13 @@ pub(in crate::afxdp) fn is_wg_listener_tuple(
 ///
 /// #14326: `(dst_port, transport_instance)` does not identify a listener
 /// when several tunnels share a port. A candidate must additionally pass
-/// the outer-zone ownership check for this ingress.
+/// the outer-zone ownership check for this ingress. This selection serves
+/// the AF_XDP worker path, where same-port tunnels are told apart by
+/// destination; it does not make the tunnels' kernel listen sockets
+/// coexist — since #16531, strict commit refuses same-port pairs whose
+/// helper sockets cannot both bind (same instance, or default plus any
+/// VRF), so a worker-visible same-port set is either VRF-separated or
+/// an already-committed (leniently loaded) configuration.
 ///
 /// #15123 (A86-04, #14326 residual): selection is two-pass and
 /// order-independent over the unordered `wg_engines` map.
