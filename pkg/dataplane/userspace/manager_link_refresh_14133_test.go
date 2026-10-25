@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/vishvananda/netlink"
 )
 
 // TestInterfaceLinkRefreshQuarantinesRecreatedRow14133 pins the quarantine
@@ -169,5 +171,78 @@ func TestInterfaceLinkRefreshAttachesRecreatedIfindex14133(t *testing.T) {
 	}
 	if len(attaches) != 0 {
 		t.Fatalf("unchanged refresh re-attached: %v", attaches)
+	}
+}
+
+// TestRefreshAttachAdmission16637 pins #16637: the refresh/revalidate
+// reconcile must admit exactly what Compile admits. Before the fix it
+// attached the shim to every untracked ingress ifindex — the raw-L3
+// wgN TUN compileZones' #8279 gate refuses, administratively disabled
+// interfaces, and non-tunnel VLAN children attachUserspaceShimXDP skips.
+//
+// FAIL-ON-REVERT: dropping refreshAttachAdmission from the reconcile
+// (or any arm of it) lets the matching refused ifindex below attach and
+// this goes RED. The positive controls (plain Ethernet owner, disabled
+// unit-0 sibling on an enabled base, unresolvable link, VLAN tunnel)
+// must still attach — a predicate that refuses everything would pass
+// the refusals and fail these.
+func TestRefreshAttachAdmission16637(t *testing.T) {
+	prevLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = prevLookup })
+	encapByName := map[string]string{
+		"ge-0-0-0": "ether",
+		"wg1408":   "none",
+		"ge-0-0-2": "ether",
+		"ge-0-0-3": "ether",
+		"ge-0-0-5": "ether",
+	}
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		encap, ok := encapByName[name]
+		if !ok {
+			return nil, errors.New("no such link")
+		}
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: name, EncapType: encap}}, nil
+	}
+
+	snap := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
+		{Name: "ge-0/0/0", LinuxName: "ge-0-0-0", Ifindex: 10, Zone: "trust"},
+		{Name: "wg1408", LinuxName: "wg1408", Ifindex: 40, Zone: "trust"},
+		{Name: "wg1408.0", LinuxName: "wg1408", Ifindex: 40, ParentIfindex: 40, Zone: "trust", Tunnel: true, IsUnit: true},
+		{Name: "ge-0/0/2", LinuxName: "ge-0-0-2", Ifindex: 13, Zone: "trust", AdminDisabled: true},
+		{Name: "ge-0/0/3.100", LinuxName: "ge-0-0-3.100", Ifindex: 31, ParentIfindex: 30, ParentLinuxName: "ge-0-0-3", VLANID: 100, Zone: "trust", IsUnit: true},
+		{Name: "ge-0/0/3", LinuxName: "ge-0-0-3", Ifindex: 30, Zone: "trust"},
+		{Name: "ge-0/0/5", LinuxName: "ge-0-0-5", Ifindex: 50, Zone: "trust"},
+		{Name: "ge-0/0/5.0", LinuxName: "ge-0-0-5", Ifindex: 50, ParentIfindex: 50, Zone: "trust", AdminDisabled: true, IsUnit: true},
+		{Name: "ge-0/0/9", LinuxName: "ge-0-0-9", Ifindex: 90, Zone: "trust"},
+	}}
+	m := New()
+	var attaches []int
+	m.attachInterfaceXDPHook = func(ifindex int, forceGeneric bool) error {
+		attaches = append(attaches, ifindex)
+		return nil
+	}
+	m.reconcileInterfaceAttachmentsForRefreshLocked(snap)
+	attached := map[int]bool{}
+	for _, idx := range attaches {
+		attached[idx] = true
+	}
+	for _, refused := range []int{40, 13, 31} {
+		if attached[refused] {
+			t.Errorf("ifindex %d attached but must be refused (#16637); attaches=%v", refused, attaches)
+		}
+	}
+	for _, want := range []int{10, 30, 50, 90} {
+		if !attached[want] {
+			t.Errorf("ifindex %d not attached but must be admitted (#16637); attaches=%v", want, attaches)
+		}
+	}
+	if !dataplane.ShimAttachRefused(&netlink.Device{LinkAttrs: netlink.LinkAttrs{EncapType: "none"}}, nil) {
+		t.Error("ShimAttachRefused(none) = false, want true (#8279/#16637)")
+	}
+	if dataplane.ShimAttachRefused(&netlink.Device{LinkAttrs: netlink.LinkAttrs{EncapType: "ether"}}, nil) {
+		t.Error("ShimAttachRefused(ether) = true, want false")
+	}
+	if dataplane.ShimAttachRefused(nil, errors.New("lookup failed")) {
+		t.Error("ShimAttachRefused(unresolvable) = true, want false (unknown keeps prior behaviour)")
 	}
 }

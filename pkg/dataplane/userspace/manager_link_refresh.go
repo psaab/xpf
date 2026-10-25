@@ -10,6 +10,7 @@ import (
 
 	"github.com/cilium/ebpf/link"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // InterfaceLinkNameRelevant reports whether linuxName backs an interface row
@@ -257,23 +258,27 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 // attachment set in line with next before next is published (#14133).
 // Caller holds m.mu.
 //
-// Attach half: every ingress ifindex in next that is not already tracked is
-// attached now. A recreated link has a new ifindex, so it lands here; an
-// unchanged link keeps its existing tracked link. The forceGeneric
-// classification mirrors Compile's attachUserspaceShimXDP: a tunnel netdev
-// (SecureTunnel row) or a VLAN child (ParentIfindex > 0) goes generic,
-// everything else tries native first with a generic fallback. An attach
-// failure is logged and left for the next refresh/full apply to retry — it
-// must not fail this publish, because the helper's snapshot update is still
-// correct and the unshimmed interface is fail-closed (no program,
-// fence-dropped transit), never fail-open.
+// Attach half: every ingress ifindex in next that passes
+// refreshAttachAdmission and is not already tracked is attached now. A
+// recreated link has a new ifindex, so it lands here; an unchanged link
+// keeps its existing tracked link. The forceGeneric classification
+// mirrors Compile's attachUserspaceShimXDP: a tunnel netdev (SecureTunnel
+// row) or a VLAN child (ParentIfindex > 0) goes generic, everything else
+// tries native first with a generic fallback. An attach failure is logged
+// and left for the next refresh/full apply to retry — it must not fail
+// this publish, because the helper's snapshot update is still correct and
+// the unshimmed interface is fail-closed (no program, fence-dropped
+// transit), never fail-open.
 //
 // Detach half is intentionally NOT done here: detaching an obsolete ifindex
 // before the helper accepts next would repeat the #5485 bypass if the
 // publish then failed and the retained snapshot still adjudicated it. The
 // obsolete attachment is reaped by the next full Compile's post-acceptance
 // syncInterfaceAttachments; the lingering shim is the bounded mirror
-// transient documented in applyCompiledSnapshot (#10642).
+// transient documented in applyCompiledSnapshot (#10642). A non-VLAN-child
+// ifindex the admission predicate refuses is additionally detached there
+// (#16637), because syncInterfaceAttachments' allowed set is the raw
+// ingress set and would otherwise keep a shim this predicate refused.
 func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnapshot) {
 	if m == nil || next == nil {
 		return
@@ -294,6 +299,9 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 		}
 		row := interfaceRowForIfindex(next, ifindex)
 		forceGeneric := row != nil && (row.SecureTunnel || row.ParentIfindex > 0 || row.Tunnel)
+		if !refreshAttachAdmission(next, ifindex, row) {
+			continue
+		}
 		var attach func(int, bool) error
 		if m.bpfShim != nil {
 			attach = m.bpfShim.AttachXDP
@@ -319,6 +327,72 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 				"ifindex", ifindex, "err", err, "issue", "#14133")
 		}
 	}
+}
+
+// refreshAttachAdmission is the single attach-admission predicate shared
+// by the refresh/revalidate reconcile and, by construction, Compile
+// (#16637). It refuses exactly what compileZones refuses to queue in
+// pendingXDP, so a link event or revalidating publish can never attach
+// the shim where Compile would not:
+//
+//   - a VLAN child (its own ifindex contributed with ParentIfindex > 0 and
+//     VLANID > 0): attachUserspaceShimXDP skips non-tunnel VLAN children —
+//     the parent handles VLAN traffic. Tunnel rows keep the generic
+//     attach, mirroring that function's tunnel carve-out.
+//   - an administratively disabled row (AdminDisabled): compileZones skips
+//     XDP/TC for disabled interfaces — they should not process traffic.
+//     Only a row that OWNS the ifindex can veto it; a disabled sibling
+//     sharing the netdev (a disabled unit on an enabled base, the
+//     canonical wgN.0 shape) must not strip the owner's attach.
+//   - a netdev whose framing is affirmatively known non-Ethernet
+//     (dataplane.ShimAttachRefused, #8279): raw-L3 TUNs such as wgN.
+//     An unresolvable link keeps the pre-existing attach behaviour.
+//
+// An ifindex with no owning row (a fabric parent contribution) has only
+// the framing gate to pass.
+func refreshAttachAdmission(snap *ConfigSnapshot, ifindex uint32, row *InterfaceSnapshot) bool {
+	owner := interfaceOwnerRowForIfindex(snap, ifindex)
+	if owner != nil {
+		if owner.VLANID > 0 && owner.ParentIfindex > 0 && !owner.Tunnel && !owner.SecureTunnel {
+			return false
+		}
+		if owner.AdminDisabled {
+			return false
+		}
+	} else if row != nil && row.VLANID > 0 && row.ParentIfindex > 0 && !row.Tunnel && !row.SecureTunnel {
+		// The contributing row is itself the VLAN child and no row owns
+		// the child ifindex (hand-built rows): same refusal.
+		return false
+	}
+	name := ""
+	if owner != nil {
+		name = owner.LinuxName
+	} else if row != nil {
+		if uint32(row.Ifindex) == ifindex {
+			name = row.LinuxName
+		} else if uint32(row.ParentIfindex) == ifindex {
+			name = row.ParentLinuxName
+		}
+	}
+	if name == "" {
+		return true
+	}
+	l, err := linkByNameFn(name)
+	return !dataplane.ShimAttachRefused(l, err)
+}
+
+// interfaceOwnerRowForIfindex returns the snapshot row whose OWN ifindex
+// is ifindex (not a parent contribution), or nil when no row owns it.
+func interfaceOwnerRowForIfindex(snap *ConfigSnapshot, ifindex uint32) *InterfaceSnapshot {
+	if snap == nil {
+		return nil
+	}
+	for i := range snap.Interfaces {
+		if uint32(snap.Interfaces[i].Ifindex) == ifindex {
+			return &snap.Interfaces[i]
+		}
+	}
+	return nil
 }
 
 // attachErrIsAlreadyAttached reports whether an AttachXDP error is the

@@ -121,6 +121,19 @@ func netdevFramingKnown(link netlink.Link, linkErr error) (string, bool) {
 	return link.Attrs().EncapType, true
 }
 
+// ShimAttachRefused reports whether attaching the userspace XDP shim to a
+// netdev whose kernel link resolves as link/linkErr must be refused
+// (#16637): the framing is affirmatively known and is not Ethernet, the
+// #8279 gate compileZones applies before queueing pendingXDP. An
+// unresolvable link is NOT refused — refusing it would guarantee a
+// coverage hole on a common NIC to avoid a possible misparse on a rare
+// one (see netdevFramingKnown). Exported so the userspace manager's
+// refresh/revalidate reconcile admits exactly what Compile admits.
+func ShimAttachRefused(link netlink.Link, linkErr error) bool {
+	encap, known := netdevFramingKnown(link, linkErr)
+	return known && !netdevCarriesEthernetFraming(encap)
+}
+
 // StillForwarding is TRUE and that is the point of the record. The netdev is
 // UP and in a zone, and it now has no XDP program, so its traffic enters the
 // Linux stack with no xpf adjudication point. (Pre-#10302 this read "with
