@@ -6,9 +6,17 @@
 // /interfaces, /stats/interfaces, gRPC, CLI and Prometheus (#3464
 // surfaces only flag Unavailable on error, so success+zero was final).
 //
-// Regression criterion (issue #15656): physical+tagged/VLAN snapshot
-// binding fixture — the VLAN subinterface returns the parent's
-// aggregated counters or an explicit error, never authoritative zero.
+// #16646 supersedes the parent-aggregate arm of #15656: returning the
+// parent's whole trunk total under every sibling unit's label made
+// siblings report identical numbers and made Prometheus (deduping by
+// kernel ifindex) emit the parent traffic N+1 times. Until the helper
+// exports per-(ifindex,vlan) counters, a VLAN child now fails closed
+// with an explicit unavailable error (consumers omit/Unavailable).
+//
+// Regression criterion (issue #15656, as amended by #16646):
+// physical+tagged/VLAN snapshot binding fixture — the VLAN
+// subinterface returns an explicit error, never authoritative zero
+// and never the parent aggregate.
 package userspace
 
 import (
@@ -19,7 +27,8 @@ import (
 
 // Physical parent (ifindex 7, two queues) carrying traffic, plus a VLAN
 // child row (ge-0/0/0.50, kernel ifindex 99, parent 7) in the retained
-// snapshot. Reading the child must return the parent aggregate.
+// snapshot. Reading the child must fail closed (#16646), not return
+// the parent aggregate and not return authoritative zero.
 func TestReadInterfaceCountersVLANChildResolvesToParent15656(t *testing.T) {
 	m := New()
 	seedStatus13273(m, ProcessStatus{
@@ -35,18 +44,15 @@ func TestReadInterfaceCountersVLANChildResolvesToParent15656(t *testing.T) {
 	}}
 
 	got, err := m.ReadInterfaceCounters(99)
-	if err != nil {
-		t.Fatalf("ReadInterfaceCounters(99 VLAN child): %v", err)
+	if err == nil {
+		t.Fatalf("ReadInterfaceCounters(99 VLAN child) = %+v, nil error; want explicit unavailable error (#16646: never the parent aggregate)", got)
 	}
-	want := dataplane.InterfaceCounterValue{RxPackets: 15, RxBytes: 1500, TxPackets: 23, TxBytes: 2300}
-	if got != want {
-		t.Fatalf("ReadInterfaceCounters(99) = %+v, want parent aggregate %+v", got, want)
-	}
-	if got == (dataplane.InterfaceCounterValue{}) {
-		t.Fatal("VLAN child returned authoritative zero while parent carried traffic")
+	if got != (dataplane.InterfaceCounterValue{}) {
+		t.Fatalf("ReadInterfaceCounters(99) = %+v on error, want zero value", got)
 	}
 
-	// Parent read is unchanged.
+	// Parent read is unchanged and returns the aggregate once.
+	want := dataplane.InterfaceCounterValue{RxPackets: 15, RxBytes: 1500, TxPackets: 23, TxBytes: 2300}
 	parent, err := m.ReadInterfaceCounters(7)
 	if err != nil || parent != want {
 		t.Fatalf("ReadInterfaceCounters(7) = %+v, %v; want %+v", parent, err, want)

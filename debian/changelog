@@ -29,6 +29,17 @@ xpf (0.0.0) unstable; urgency=medium
     now points the override at the in-tree helper and asserts both A/B
     slots are refreshed from the stale fixture, and the no-helper
     control injects a missing path explicitly.
+  * Dataplane counters: `ReadInterfaceCounters` no longer returns a
+    parent physical interface's whole traffic as a VLAN/logical
+    unit's own counters (#16646). Any logical child (ParentIfindex
+    distinct from its own ifindex — VLAN-tagged or not, disabled or
+    unzoned included) now fails with an explicit unavailable error
+    until the helper exports per-(ifindex,vlan) counters, so CLI
+    extensive, REST, gRPC and monitor flag the unit unavailable and
+    Prometheus omits its samples instead of emitting the parent
+    total under every sibling unit label (family sum = real traffic).
+    Directly bound interfaces and unit-0 rows collapsed onto the
+    parent netdev are unaffected.
   * Config/firewall: all four `firewall three-color-policer` burst
     leaves now enforce a one-frame floor of 1514 bytes (#16610):
     `committed-burst-size`/`excess-burst-size` (single-rate) and
