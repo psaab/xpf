@@ -115,14 +115,21 @@ func TestCommitDebt_GenuineRejection_CountsRejected_5063(t *testing.T) {
 		t.Errorf("Committed=%d CommittedWithDebt=%d; a genuine rejection must not count committed",
 			st.Committed, st.CommittedWithDebt)
 	}
-	// Cooldown must NOT arm on a rejection (a re-fire may legitimately retry).
+	// Committed cooldown must NOT arm on a rejection (a re-fire may
+	// legitimately retry). #16774: the separate failure-backoff anchor
+	// DOES arm — that is the per-policy throttle for non-promoting
+	// commits — so assert on committedTrigger, not lastTrigger.
 	time.Sleep(50 * time.Millisecond)
 	e.mu.Lock()
 	rt := e.runtime["p"]
-	armed := rt != nil && !rt.lastTrigger().IsZero()
+	armed := rt != nil && !rt.committedTrigger.IsZero()
+	backedOff := rt != nil && !rt.failedTrigger.IsZero()
 	e.mu.Unlock()
 	if armed {
 		t.Error("cooldown armed on a genuine rejection; only a committed generation arms the cooldown")
+	}
+	if !backedOff {
+		t.Error("failure backoff not armed on a genuine rejection (#16774)")
 	}
 	if got := s.ActiveConfig().System.HostName; got != "base" {
 		t.Errorf("host-name=%q; a rejected commit must not mutate the active config", got)

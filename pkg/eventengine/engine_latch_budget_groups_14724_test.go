@@ -37,7 +37,9 @@ func latch14724(e *Engine, pol, ev string) bool {
 }
 
 // (a) Transient commitFn (nil, err): latch released, budget refunded, and a
-// sustained fault re-fires after recovery.
+// sustained fault re-fires after recovery once the #16774 failure backoff
+// expires (the immediate re-fire #14724 allowed is now throttled per
+// policy; the latch release itself is unchanged).
 func TestCommitFailureReleasesLatchAndRefundsBudget14724(t *testing.T) {
 	s := newStore(t)
 	var fail atomic.Bool
@@ -71,9 +73,22 @@ func TestCommitFailureReleasesLatchAndRefundsBudget14724(t *testing.T) {
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("commitCalls=%d, want 1", got)
 	}
-	// Recovery: sustained fault (count stays >= threshold) must re-fire.
+	// Recovery (#16774): the failure backoff now throttles the immediate
+	// re-fire #14724 allowed. A sustained event inside the backoff parks
+	// instead of committing; after the backoff the parked replay commits.
 	fail.Store(false)
 	e.HandleEvent(eventFor("ping_test_failed"))
+	time.Sleep(100 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("commitCalls=%d inside failure backoff, want 1 (backed off)", got)
+	}
+	e.mu.Lock()
+	rt := e.runtime["remediate"]
+	if rt != nil && !rt.failedTrigger.IsZero() {
+		rt.failedTrigger = rt.failedTrigger.Add(-failureBackoff - time.Second)
+	}
+	e.mu.Unlock()
+	e.drainDeferred()
 	waitFor(t, "commit after recovery", func() bool { return e.Stats().Committed >= 1 })
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("commitCalls=%d after recovery, want 2 (policy wedged)", got)
