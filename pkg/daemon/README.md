@@ -1702,6 +1702,27 @@ covers a dropped promotion event). A data RG that expects an instance
 but has none known yet stays gated on `AllVRRPMaster`. Guards:
 `failover_commit_ready_15165_test.go`.
 
+**A sync-hold mirror refresh is itself an edge producer (#16692).**
+`SetSyncHold` re-derives desired from the retained cluster/VRRP inputs, so
+clearing the hold can flip an RG active with no new event — and feeding the
+next input afterwards reports `Changed=false`. Every refresh must therefore
+HAND its transition to the edge consumers, not discard it:
+`watchVRRPEvents` and `watchClusterEvents` refresh the mirror scoped to the
+event's RG at the top of per-event handling (`syncRGSyncHoldTransition`) and
+merge it into the handler's `tr` (`mergeSyncHoldTransition`);
+`handleClusterEvent` re-refreshes scoped so direct callers are covered too;
+`reconcileRGState` keeps the pass-wide `syncRGSyncHold()` result and ORs each
+RG's transition into its `tr`. The scoped event-path form matters: a
+pass-wide refresh inside an event handler would consume an unrelated RG's
+pending release edge, whose services only that RG's own event or reconcile
+can run. Before #16692 the VRRP watcher never refreshed at all, so the
+preempt MASTER event `ReleaseSyncHold` itself triggers was judged against
+`syncHold=true` and the later cluster/reconcile refresh discarded the flip —
+the new owner wrote no `rg_active` and ran no `applyRethServicesForRG` (Kea
+RG groups, data-RG IPsec re-initiate) until some unrelated edge. Guards:
+`reth_sync_hold_vrrp_16692_test.go` (post-release MASTER row, release-only
+reconcile row, post-release promotion row, scoped-refresh row).
+
 **Where the wiring lives (#6428).** `startClusterComms` was a 602-line
 constructor; the sub-constructions were extracted verbatim into thirteen focused
 builders in **`daemon_ha_comms_wiring.go`** (VRF-device resolution, HA watchdog
