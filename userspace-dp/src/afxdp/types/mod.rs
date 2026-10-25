@@ -78,6 +78,19 @@ pub(super) struct SharedNatAmbiguityIndex {
     // counted per (alias, owner) pair: re-publishing the same owner for
     // the same alias does not inflate the count.
     owners: FastMap<SessionKey, FastMap<SessionKey, u32>>,
+    /// #16564: bounded FIFO of `(alias, owner)` claims whose `remember`
+    /// was refused while saturated. `owners` records every claim even
+    /// then, but the alias record itself is dropped, so without this list
+    /// a session published inside a saturation excursion would stay
+    /// unresolvable for its whole lifetime. The list is drained, in
+    /// arrival order, only into free alias capacity (see
+    /// `backfill_unrecorded`); it is not a second alias map and never
+    /// grows the live population past `MAX_KEYS`.
+    unrecorded: std::collections::VecDeque<(SessionKey, SessionKey)>,
+    /// #16564: membership mirror of `unrecorded`, so re-observing the
+    /// same claim (re-publish of a saturated-era owner, repeated
+    /// removals) never duplicates a queued entry.
+    unrecorded_set: FastSet<(SessionKey, SessionKey)>,
 }
 
 impl Default for SharedNatAmbiguityIndex {
@@ -86,6 +99,8 @@ impl Default for SharedNatAmbiguityIndex {
             aliases: FastMap::default(),
             wire_owners: WireOwnerMultiset::default(),
             owners: FastMap::default(),
+            unrecorded: std::collections::VecDeque::default(),
+            unrecorded_set: FastSet::default(),
         }
     }
 }
@@ -100,6 +115,11 @@ pub(super) static WIRE_KEY_CAP_OVERRIDE: std::sync::atomic::AtomicUsize =
 
 impl SharedNatAmbiguityIndex {
     const MAX_KEYS: usize = 16_384;
+    /// #16564: hard cap on the unrecorded-claims FIFO, equal to the alias
+    /// bound. A deeper queue could never drain (each entry needs a free
+    /// alias slot), so claims past the cap are shed — they keep failing
+    /// closed, exactly as before this change.
+    const MAX_UNRECORDED: usize = Self::MAX_KEYS;
 
     /// #16561: roster capacity, DECOUPLED from the alias cap above. The
     /// alias index fails closed at 16,384 live keys (#15104); the wire
@@ -153,13 +173,106 @@ impl SharedNatAmbiguityIndex {
         self.aliases.len()
     }
 
+    /// #16564: count of claims still waiting for alias capacity
+    /// (test/diagnostic gauge).
+    #[cfg(test)]
+    pub(super) fn unrecorded_len(&self) -> usize {
+        self.unrecorded.len()
+    }
+
+    fn enqueue_unrecorded(&mut self, key: &SessionKey, owner: &SessionKey) {
+        let claim = (key.clone(), owner.clone());
+        if self.unrecorded_set.contains(&claim) {
+            return;
+        }
+        if self.unrecorded.len() >= Self::MAX_UNRECORDED {
+            return;
+        }
+        self.unrecorded_set.insert(claim.clone());
+        self.unrecorded.push_back(claim);
+    }
+
+    fn dequeue_unrecorded(&mut self, key: &SessionKey, owner: &SessionKey) {
+        let claim = (key.clone(), owner.clone());
+        if self.unrecorded_set.remove(&claim) {
+            self.unrecorded.retain(|queued| queued != &claim);
+        }
+    }
+
+    /// #16564: insert alias records for claims that were refused while
+    /// saturated, using only the alias capacity that is currently free.
+    /// Drained from `forget_owner` (the one place capacity is freed) and
+    /// from `observe` itself when it finds room, so no helper restart or
+    /// background pass is needed. Each candidate is revalidated against
+    /// the live `owners` multiset: a claim whose owner left, or whose
+    /// alias now names a different live owner, is stale and discarded.
+    /// When several live owners queue for one alias, the alias is
+    /// inserted ambiguous (`None`) — resolution keeps failing closed
+    /// for all of them, exactly as a never-saturated collision would.
+    /// Queue entries whose alias has no free slot yet stay queued.
+    fn backfill_unrecorded(&mut self) {
+        if self.unrecorded.is_empty() || self.saturated() {
+            return;
+        }
+        // Detach the queue so `remember` can run without borrow fights;
+        // entries that still cannot be placed are re-queued in order.
+        let pending = std::mem::take(&mut self.unrecorded);
+        self.unrecorded_set.clear();
+        for (key, owner) in pending {
+            let live = matches!(
+                self.owners.get(&key),
+                Some(bucket) if bucket.contains_key(&owner)
+            );
+            if !live {
+                continue;
+            }
+            if self.aliases.contains_key(&key) {
+                // Already recorded (ambiguously or by a twin claim):
+                // the queued claim adds no information.
+                continue;
+            }
+            if self.saturated() {
+                self.enqueue_unrecorded(&key, &owner);
+                continue;
+            }
+            let contested = self
+                .owners
+                .get(&key)
+                .is_some_and(|bucket| bucket.len() > 1);
+            if contested {
+                self.aliases.insert(key, None);
+            } else {
+                self.aliases.insert(key, Some(owner));
+            }
+        }
+    }
+
     fn remember(&mut self, key: SessionKey, owner: Option<SessionKey>) {
         if self.saturated() {
+            // #16564: a `None` mark names no owner, so there is no claim
+            // to backfill later; only owner claims are queued.
+            if let Some(owner) = &owner {
+                self.enqueue_unrecorded(&key, owner);
+            }
             return;
         }
         if let Some(existing) = self.aliases.get(&key) {
             if existing != &owner {
                 self.aliases.insert(key, None);
+            }
+            return;
+        }
+        // #16564: while queued claims still wait for capacity, a NEW
+        // alias must not steal their slot — queue this claim behind
+        // them instead. The one exception is a queued claim for this
+        // very alias (a `track_owner`-only claim): recording it now is
+        // exactly the backfill those claims wait for. Updates to an
+        // already-recorded alias above are unaffected.
+        if !self.unrecorded.is_empty()
+            && !self.unrecorded.iter().any(|(queued, _)| queued == &key)
+        {
+            if let Some(owner) = owner {
+                self.enqueue_unrecorded(&key, &owner);
             }
             return;
         }
@@ -176,7 +289,10 @@ impl SharedNatAmbiguityIndex {
             .or_default()
             .entry(owner.clone())
             .or_insert(0);
-        self.remember(key, Some(owner));
+        self.remember(key.clone(), Some(owner.clone()));
+        if self.aliases.contains_key(&key) {
+            self.dequeue_unrecorded(&key, &owner);
+        }
     }
 
     /// #15104: record that `owner` claimed `key` without changing the
@@ -185,10 +301,16 @@ impl SharedNatAmbiguityIndex {
     /// rather than by the observe that seeds the wire alias.
     pub(super) fn track_owner(&mut self, key: SessionKey, owner: SessionKey) {
         self.owners
-            .entry(key)
+            .entry(key.clone())
             .or_default()
-            .entry(owner)
+            .entry(owner.clone())
             .or_insert(0);
+        // #16564: a tracked claim published while saturated must also be
+        // recoverable, or the canonical alias of a saturated-era session
+        // stays unrecorded just like its wire alias.
+        if self.saturated() && !self.aliases.contains_key(&key) {
+            self.enqueue_unrecorded(&key, &owner);
+        }
     }
 
     /// #15104: drop `owner`'s claim on `key`. When no owner remains, the
@@ -198,6 +320,8 @@ impl SharedNatAmbiguityIndex {
     /// the record is restored to that owner so the shared lookup can
     /// resolve again.
     pub(super) fn forget_owner(&mut self, key: &SessionKey, owner: &SessionKey) {
+        // #16564: this claim can no longer be backfilled, recorded or not.
+        self.dequeue_unrecorded(key, owner);
         let mut bucket_empty = false;
         let mut sole_owner: Option<SessionKey> = None;
         if let Some(bucket) = self.owners.get_mut(key) {
@@ -215,6 +339,18 @@ impl SharedNatAmbiguityIndex {
         {
             self.aliases.insert(key.clone(), Some(sole));
         }
+        // #16564: the removal above may have freed alias capacity; give
+        // queued claims first use of it. A still-live sole owner whose
+        // alias was never recorded is restored here too.
+        if !bucket_empty
+            && !self.aliases.contains_key(key)
+            && let Some(bucket) = self.owners.get(key)
+            && bucket.len() == 1
+            && let Some(sole) = bucket.keys().next().cloned()
+        {
+            self.enqueue_unrecorded(key, &sole);
+        }
+        self.backfill_unrecorded();
     }
 
     pub(super) fn contains(&self, key: &SessionKey) -> bool {
@@ -232,7 +368,16 @@ impl SharedNatAmbiguityIndex {
     /// map. `observe`/`mark` cannot do this: `remember` keeps a `None`
     /// (ambiguous) record sticky forever.
     pub(super) fn reset_to_owner(&mut self, key: SessionKey, owner: SessionKey) {
+        // #16564: the record is (re)installed by this call, so any queued
+        // claim for the same pair is satisfied.
+        self.dequeue_unrecorded(&key, &owner);
         if self.saturated() && !self.aliases.contains_key(&key) {
+            // #16564: do not drop survivor ownership on the floor (the
+            // #14383 scan would have discarded it the same way): queue it
+            // so the next freed slot restores the survivor.
+            self.owners
+                .insert(key.clone(), FastMap::from_iter([(owner.clone(), 0u32)]));
+            self.enqueue_unrecorded(&key, &owner);
             return;
         }
         self.owners
@@ -242,7 +387,12 @@ impl SharedNatAmbiguityIndex {
             Some(_) => {
                 self.aliases.insert(key, Some(owner));
             }
-            None if self.aliases.len() == Self::MAX_KEYS => {}
+            None if self.aliases.len() == Self::MAX_KEYS => {
+                // Saturated between the guard above and here cannot
+                // happen (single lock hold, no re-entry); queue instead
+                // of growing past the bound if it ever did.
+                self.enqueue_unrecorded(&key, &owner);
+            }
             None => {
                 self.aliases.insert(key, Some(owner));
             }
@@ -254,6 +404,9 @@ impl SharedNatAmbiguityIndex {
     pub(super) fn forget(&mut self, key: &SessionKey) {
         self.aliases.remove(key);
         self.owners.remove(key);
+        // #16564: queued claims for a forgotten alias are dead.
+        self.unrecorded_set.retain(|(queued, _)| queued != key);
+        self.unrecorded.retain(|(queued, _)| queued != key);
     }
 
     pub(super) fn unique_owner(&self, key: &SessionKey) -> Option<&SessionKey> {
@@ -267,7 +420,10 @@ impl SharedNatAmbiguityIndex {
         self.aliases.clear();
         self.wire_owners.clear();
         self.owners.clear();
+        self.unrecorded.clear();
+        self.unrecorded_set.clear();
     }
+
 
     // ---- #15106: per-wire-key live-owner multiset -------------------------
     //
@@ -282,12 +438,10 @@ impl SharedNatAmbiguityIndex {
         // #16561: do NOT consult the alias saturation here. The alias
         // index fails closed at 16,384 live keys, but the wire roster is
         // decoupled from that cap and must keep recording every owner
-        // above it — coupling them (the pre-fix `if self.saturated()`
-        // latch arm) is exactly what made the roster untrusted for the
-        // whole 100k-row regime #15106 targeted. The only refusal is a
-        // NEW wire key while the LIVE roster population is at the
-        // roster ceiling: fail closed for that key, recover automatically
-        // when removals drop the population (`wire_saturated` is live).
+        // above it. The only refusal is a NEW wire key while the LIVE
+        // roster population is at the roster ceiling: fail closed for
+        // that key, recover automatically when removals drop the
+        // population (`wire_saturated` is live).
         match self.wire_owners.get_mut(&wire_key) {
             Some(roster) => {
                 if !roster.contains(&owner) {
@@ -325,16 +479,8 @@ impl SharedNatAmbiguityIndex {
 
     /// Whether a wire survivor answer from `wire_owners` can be trusted.
     /// #16561: a function of the LIVE populations only — false while the
-    /// alias index is saturated (its ambiguity verdict is fail-closed,
-    /// so a roster answer must not override it) or while the live roster
-    /// population is at its own ceiling (some wire keys were refused and
-    /// the roster may be partial). Both clear on removal; neither
-    /// latches. Note the alias arm can still make the roster untrusted
-    /// above 16,384 live ALIASES for keys the alias index tracks, but
-    /// the removal path below deliberately keys its trust decision to
-    /// the roster (`wire_roster_trusted_for_removal`), not to this
-    /// combined predicate, so a saturated alias index no longer forces
-    /// the O(table) fallback scan for NAT'd removals.
+    /// alias index is saturated or while the live roster population is
+    /// at its own ceiling. Both clear on removal; neither latches.
     pub(super) fn wire_owners_trusted(&self) -> bool {
         !self.wire_saturated() && !self.saturated()
     }
@@ -343,10 +489,7 @@ impl SharedNatAmbiguityIndex {
     /// `remove_shared_session_if`. The roster is exact for a wire key
     /// when it recorded the removed owner and the live roster
     /// population is below its ceiling — regardless of the alias
-    /// index's 16,384 saturation, which governs reverse/wire UNIQUENESS
-    /// proofs, not the roster's survivor count. Using the combined
-    /// predicate here re-armed the O(table) scan under the global mutex
-    /// for every NAT'd close above 16k live sessions.
+    /// index's 16,384 saturation.
     pub(super) fn wire_roster_trusted_for_removal(&self) -> bool {
         !self.wire_saturated()
     }
