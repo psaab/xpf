@@ -336,6 +336,61 @@ func CanonicalInterfaceUnitRef(ref string) string {
 	return base + "." + canon
 }
 
+// CanonicalNATInterfaceScopeRef resolves a NAT rule-set interface scope
+// (from/to interface) onto the logical-unit name the dataplane compares
+// (#16827). A unit-less ref naming a plain physical interface with no
+// configured non-zero unit is that interface's unit 0, so
+// "ge-0/0/1" becomes "ge-0/0/1.0". A unit-less ref naming a
+// multi-unit interface stays bare: it names no single unit and must never
+// be silently widened to unit 0 (the #9063 fan-up hazard). Suffixed refs
+// fold through CanonicalInterfaceUnitRef exactly as before. A nil Config,
+// or a bare ref that does not resolve to a plain physical interface,
+// returns the input unchanged so the #15278 undefined-scope gate keeps
+// its strict-reject / tolerant-warn disposition for it.
+func (c *Config) CanonicalNATInterfaceScopeRef(ref string) string {
+	if ref == "" {
+		return ref
+	}
+	split := c.SplitInterfaceUnitRef(ref)
+	if split.HasUnit {
+		return CanonicalInterfaceUnitRef(ref)
+	}
+	if c == nil {
+		return ref
+	}
+	base := split.Base
+	if base == "" {
+		base = ref
+	}
+	if base == "lo0" {
+		return "lo0.0"
+	}
+	ifc, ok := c.Interfaces.Interfaces[base]
+	if !ok || ifc == nil {
+		if _, bound := c.SecureTunnelNetdevForRef(ref); bound {
+			return ref
+		}
+		if _, bound := c.SecureTunnelNetdevForRef(ref + ".0"); bound {
+			return ref + ".0"
+		}
+		return ref
+	}
+	if len(ifc.Units) == 0 {
+		if ifc.Tunnel != nil && !ifc.AuthoredUnits {
+			return ref + ".0"
+		}
+		// No stanza-authored unit at all: nothing here proves the ref
+		// means unit 0, so leave it for the caller's diagnosis.
+		return ref
+	}
+	for unitNum, u := range ifc.Units {
+		if u != nil && unitNum != 0 {
+			return ref
+		}
+	}
+	return ref + ".0"
+}
+
 // InterfaceRefSplit is one parsed cross-subsystem interface reference
 // (#9821). The tuple shape mirrors strings.Cut deliberately so every
 // call-site swap reads as `Cut(x, ".")` → `Split(x)`, with declared-name

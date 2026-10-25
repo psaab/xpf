@@ -1449,6 +1449,23 @@ gate and its `lenientNATRuleSetScope` opt are removed; `interface`/
 `routing-instance` are now declared under the NAT rule-set `from`/`to` in
 `schema_security.go` for commit-time validation and CLI completion.
 
+**Unit-less NAT interface scopes fold to unit 0 (#16827):** the #15278
+undefined-scope gate admitted `from/to interface ge-0/0/1` verbatim, but
+the dataplane compares the scope against the logical-unit config name
+(`ge-0/0/1.0`), so the rule-set could never match. `Config.
+CanonicalNATInterfaceScopeRef` now resolves a unit-less ref on a plain
+physical interface (no configured non-zero unit) — and `lo0` — to
+`<ifd>.0` at compile (before the #15278 gate judges it) and again at
+the userspace snapshot builders for hand-built configs. A bare ref
+naming no unit traffic reaches it on (undeclared interface, no unit,
+only non-zero units, or several units) stays bare: strict commit
+rejects it and the tolerant path warns and records it in
+`LenientNATUndefinedScopeRuleSets`, exactly as an undefined scope.
+`snapshotInterfaceNameMatches` (`pkg/dataplane/userspace`) is
+deliberately unchanged: it is only the over-approximating #7717
+detection matcher, and the snapshots it reads now carry the canonical
+unit name.
+
 **Unsupported security-policy `match` leaves are rejected at commit (#3113,
 interim):** Junos SRX security policies match traffic with a rich `match`
 criteria set. Beyond the L3/L4 leaves xpf enforces, vSRX accepts unified-policy /

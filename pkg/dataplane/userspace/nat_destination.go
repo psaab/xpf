@@ -649,7 +649,7 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 							out = append(out, DestinationNATRuleSnapshot{
 								Name:                rule.Name,
 								FromZone:            rs.FromZone,
-								FromInterface:       rs.FromInterface,
+								FromInterface:       cfg.CanonicalNATInterfaceScopeRef(rs.FromInterface),
 								FromRoutingInstance: config.NATRoutingInstanceScopeWire(cfg, rs.FromRoutingInstance, rs.FromRoutingInstanceDefault),
 								SourceAddresses:     sourceAddrs,
 								DestinationAddress:  base,

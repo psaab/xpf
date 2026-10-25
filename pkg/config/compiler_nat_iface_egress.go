@@ -124,7 +124,11 @@ func ruleSetHasInterfaceModeSNAT(rs *NATRuleSet) bool {
 // does not constrain. When NO to-side scope is configured the rule-set is a
 // wildcard and every interface is a candidate.
 func interfaceInEgressScope(rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string, noBareRIFallback map[string]struct{}) bool {
-	if rs.ToInterface != "" && rs.ToInterface != logical && rs.ToInterface != ifName {
+	// #16827: a unit-less ToInterface authored before canonicalization
+	// (hand-built configs reach this mirror without a compile) still
+	// names the physical interface; a canonical "ge-0/0/2.0" no longer
+	// matches ifName, so only the logical comparison admits it.
+	if rs.ToInterface != "" && rs.ToInterface != logical {
 		return false
 	}
 	// #16604: an explicit master scope (`to routing-instance default`,

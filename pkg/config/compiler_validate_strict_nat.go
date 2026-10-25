@@ -181,17 +181,33 @@ func natInterfaceDefined15278(cfg *Config, ref string) bool {
 		base = ref
 	}
 	if !split.HasUnit {
-		if _, ok := cfg.Interfaces.Interfaces[base]; ok && cfg.Interfaces.Interfaces[base] != nil {
-			return true
-		}
 		if base == "lo0" {
 			return true
 		}
-		if _, bound := cfg.SecureTunnelNetdevForRef(ref); bound {
-			return true
-		}
+		// Materialized st0: a bare ref that resolves only through its
+		// unit-0 binding means that unit, not the bare device.
 		if _, bound := cfg.SecureTunnelNetdevForRef(ref + ".0"); bound {
 			return true
+		}
+		if _, bound := cfg.SecureTunnelNetdevForRef(ref); bound {
+			st0Defined := false
+			if ifc := cfg.Interfaces.Interfaces[base]; ifc != nil {
+				if _, ok := ifc.Units[0]; ok {
+					st0Defined = true
+				}
+			}
+			return st0Defined
+		}
+		if ifc := cfg.Interfaces.Interfaces[base]; ifc != nil {
+			// #16827: unit 0 must exist for a bare ref to be matchable;
+			// a stanza with no unit (or only non-zero units) leaves the
+			// bare ref naming no unit traffic reaches it on.
+			if u := ifc.Units[0]; u != nil {
+				return true
+			}
+			if ifc.Tunnel != nil && !ifc.AuthoredUnits {
+				return true
+			}
 		}
 		return false
 	}
@@ -327,6 +343,42 @@ func NATUndefinedScopeRuleSetNames(cfg *Config) map[string]bool {
 		add("static", rs.Name, bad)
 	}
 	return out
+}
+
+// canonicalizeNATInterfaceScopes rewrites every NAT rule-set interface
+// scope to the logical-unit name the dataplane compares (#16827),
+// resolving unit-less refs on plain physical interfaces to unit 0 via
+// Config.CanonicalNATInterfaceScopeRef. It runs after section compile
+// (interfaces known) and before the #15278 undefined-scope gate, so the
+// gate judges — and LenientNATUndefinedScopeRuleSets records — the
+// canonical spelling, and hand-built configs that reach the snapshot
+// builders without compile are still normalized there. Bare refs that
+// do not resolve stay bare and keep the gate's disposition.
+func canonicalizeNATInterfaceScopes(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		rs.FromInterface = cfg.CanonicalNATInterfaceScopeRef(rs.FromInterface)
+		rs.ToInterface = cfg.CanonicalNATInterfaceScopeRef(rs.ToInterface)
+	}
+	if dnat := cfg.Security.NAT.Destination; dnat != nil {
+		for _, rs := range dnat.RuleSets {
+			if rs == nil {
+				continue
+			}
+			rs.FromInterface = cfg.CanonicalNATInterfaceScopeRef(rs.FromInterface)
+		}
+	}
+	for _, rs := range cfg.Security.NAT.Static {
+		if rs == nil {
+			continue
+		}
+		rs.FromInterface = cfg.CanonicalNATInterfaceScopeRef(rs.FromInterface)
+	}
 }
 
 // validateNATMatchApplicationsStrict hard-rejects a source- or

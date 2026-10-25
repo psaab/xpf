@@ -274,9 +274,11 @@ func TestDNATInterfaceAddressExcludedByUnscopedAndToInterfaceSNAT_5837(t *testin
 }
 
 // The warning mirror must not suppress an advisory for a row that runtime
-// interface-NAT registration cannot own: lifelines, unzoned interfaces,
-// disabled interfaces, or a bare base name that does not match the runtime
-// logical interface name.
+// interface-NAT registration cannot own: lifelines, unzoned interfaces, or
+// disabled interfaces. (A bare `to interface ge-0/0/2` used to be a fourth
+// ineligible shape because it never equalled the logical name; since
+// #16827 it folds to unit 0 and IS eligible, so that cell now pins the
+// suppressed behaviour instead.)
 func TestDNATInterfaceAddressMirrorKeepsIneligibleSNATEgressWarnings_5837(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -284,11 +286,16 @@ func TestDNATInterfaceAddressMirrorKeepsIneligibleSNATEgressWarnings_5837(t *tes
 		zone        string
 		toInterface string
 		disabled    bool
+		// eligible (#16827): a unit-less to-interface on a plain
+		// interface now folds to unit 0, so the egress IS eligible and
+		// the advisory is correctly suppressed; the cell pins the new
+		// behaviour instead of the pre-fix inert-spelling expectation.
+		eligible bool
 	}{
 		{name: "lifeline", ifName: "fxp0", zone: "untrust"},
 		{name: "unzoned", ifName: "ge-0/0/2"},
 		{name: "disabled", ifName: "ge-0/0/2", zone: "untrust", disabled: true},
-		{name: "bare to-interface", ifName: "ge-0/0/2", zone: "untrust", toInterface: "ge-0/0/2"},
+		{name: "bare to-interface (pre-#16827 inert spelling; now folds to unit 0 and is eligible)", ifName: "ge-0/0/2", zone: "untrust", toInterface: "ge-0/0/2", eligible: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := []string{
@@ -319,6 +326,12 @@ func TestDNATInterfaceAddressMirrorKeepsIneligibleSNATEgressWarnings_5837(t *tes
 				t.Fatalf("config must compile, got: %v", err)
 			}
 			ws := nat5837Warnings(cfg)
+			if tc.eligible {
+				if len(ws) != 0 {
+					t.Fatalf("eligible SNAT egress must suppress the #5837 warning, got: %v", ws)
+				}
+				return
+			}
 			if len(ws) != 1 || !strings.Contains(ws[0], "172.16.50.8") {
 				t.Fatalf("ineligible SNAT egress must not suppress the #5837 warning, got: %v", ws)
 			}
