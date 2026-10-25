@@ -74,7 +74,7 @@ func NPTv6OverlapConflict(cfg *Config) string {
 			if rule == nil {
 				continue
 			}
-			if rule.Then == "" || rule.Match == "" {
+			if !rule.IsNPTv6 || rule.Then == "" || rule.Match == "" {
 				continue // not an NPTv6 rule
 			}
 			// Dropped by the snapshot builder — unsupported scope (#5818) or
