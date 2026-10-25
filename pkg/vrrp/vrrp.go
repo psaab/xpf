@@ -83,7 +83,14 @@ func CollectInstances(cfg *config.Config) []*Instance {
 	var instances []*Instance
 	for _, ifName := range sortedIfNames(cfg) {
 		ifc := cfg.Interfaces.Interfaces[ifName]
-		if ifc == nil {
+		// #16834: a disabled interface owns no address and must not run
+		// VRRP — the same premise #15763/#13149 use to drop its VIPs from
+		// every host-inbound drop scope. Without this gate the group
+		// still claims MASTER and installs its VIP on a down netdev, so
+		// the kernel input chain falls through to policy accept for
+		// VIP-destined host traffic (fail-open). CollectRethInstances
+		// already skips ifc.Disable (#16590).
+		if ifc == nil || ifc.Disable {
 			continue
 		}
 		unitNums := make([]int, 0, len(ifc.Units))
@@ -93,7 +100,9 @@ func CollectInstances(cfg *config.Config) []*Instance {
 		sort.Ints(unitNums)
 		for _, unitNum := range unitNums {
 			unit := ifc.Units[unitNum]
-			if unit == nil {
+			// #16834: a disabled unit owns no address (see the
+			// interface gate above); its vrrp-groups must not run.
+			if unit == nil || unit.Disable {
 				continue
 			}
 			// Resolve the CONFIGURED interface+unit to its KERNEL device name

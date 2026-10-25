@@ -17,8 +17,8 @@ import "github.com/psaab/xpf/pkg/config"
 // address and must not widen the keep — mirroring the DHCP rule that a
 // client owning no address on the interface does not widen it (#14594).
 // Disabled units are excluded by the callers, which already skip them
-// before consulting this predicate (CollectInstances itself does not
-// check Disable; the model arms mirror their existing disabled handling).
+// before consulting this predicate; CollectInstances also skips disabled
+// interfaces/units (#16834), matching that handling.
 func unitCarriesStandaloneVRRP(unit *config.InterfaceUnit) bool {
 	if unit == nil {
 		return false
