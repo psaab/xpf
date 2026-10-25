@@ -3243,21 +3243,26 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 	return warnings, nil
 }
 
-// validateNAT64ScopeStrict (#15678/#15932/#16049) validates the optional NAT64
-// ingress scoping (`from zone|routing-instance`, `match
+// validateNAT64ScopeStrict (#15678/#15932/#16049/#16550) validates the
+// optional NAT64 ingress scoping (`from zone|routing-instance`, `match
 // source-address[-name]`).
 //
 // Strict (commit): reject a rule-set carrying BOTH from axes (the
 // dataplane ANDs the axes, which the operator never authored as a
 // conjunction, and the Junos single-kind rule forbids it), an undefined
 // from-zone / routing-instance, an unparsable or non-IPv6
-// source-address, and an undefined source-address-name. Multiple values
-// of the SAME kind are a legitimate list: compileNAT64 unions them into
-// FromZones / FromRoutingInstances on the single authored rule-set, and
-// every member is checked here. Lenient: warn per defect (#1960); the
-// dataplane still fails closed — an unknown zone/RI name never equals
-// a packet's resolved scope, and an all-unparseable source list
-// matches nothing.
+// source-address, and an undefined source-address-name. #16550: a
+// source-address-name whose static closure resolves only to IPv4 (or
+// to no usable prefix at all) is likewise rejected — it has the same
+// never-match consequence as a literal IPv4 source. A closure with
+// at least one IPv6 prefix (mixed v4+v6) still commits; the v4
+// members simply never match an IPv6 source. Multiple values of the
+// SAME kind are a legitimate list: compileNAT64 unions them into
+// FromZones / FromRoutingInstances on the single authored rule-set,
+// and every member is checked here. Lenient: warn per defect (#1960);
+// the dataplane still fails closed — an unknown zone/RI name never
+// equals a packet's resolved scope, and an all-unparseable source
+// list matches nothing.
 func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 	if cfg == nil {
 		return nil, nil
@@ -3353,6 +3358,13 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 			if _, _, isWildcard := PolicyAddressWildcardFamilies(n); isWildcard {
 				continue
 			}
+			// #16550: a direct dynamic-address feed binding carries no
+			// static closure to judge — its prefixes arrive via the
+			// live feed overlay at snapshot build (mirrors the
+			// validateNATSourceAddressNameReferencesStrict carve-out).
+			if _, isFeed := cfg.Security.DynamicAddress.AddressBindings[n]; isFeed {
+				continue
+			}
 			found := false
 			if ab := cfg.Security.AddressBook; ab != nil {
 				if _, ok := ab.Addresses[n]; ok {
@@ -3368,10 +3380,87 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 					rs.Name, n, n)); err != nil {
 					return nil, err
 				}
+				continue
+			}
+			// #16550: resolve the static closure with the same static
+			// expander the other NAT strict gates use. A closure
+			// proven to yield no IPv6 prefix (IPv4-only, an empty
+			// set, or a closure whose members are all usable IPv4)
+			// can never match an IPv6 NAT64 source — reject it
+			// exactly like a literal IPv4 `match source-address`.
+			// A mixed v4+v6 closure commits; only the v6 members
+			// can match. A closure that is not statically decidable
+			// (dns-name with no snapshot yet, a dangling/unusable/
+			// tainted member, a failed expansion) is NOT rejected
+			// here: those states are runtime-resolved or already
+			// fail closed at the builder, and #15930 deliberately
+			// admits a defined dns-name at commit.
+			if nat64NameClosureNoIPv6(cfg.Security.AddressBook, n) {
+				if err := emit(fmt.Sprintf(
+					"security nat nat64 rule-set %q match source-address-name %q does not resolve to any IPv6 address; NAT64 sources are IPv6 — an IPv4-only address-book entry/set can never match (#16550)",
+					rs.Name, n)); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
 	return warnings, nil
+}
+
+// nat64NameClosureNoIPv6 reports whether the static address-book
+// closure of name is PROVEN to contain no IPv6 prefix (#16550): it
+// expands (a single address, or a set expanded to its leaf prefixes
+// via expandAddressSetLeaves) to at least one usable value, and every
+// usable value parses as an IPv4 prefix or address. It mirrors the
+// family test the literal arm applies to `match source-address`.
+//
+// Everything not statically decidable returns false: a dns-name /
+// range / wildcard entry whose UsableValues are empty only for lack
+// of a runtime snapshot, a tainted or dangling member, or a failed
+// expansion. Those closures are runtime-resolved or already poison
+// (fail closed) at the snapshot builder, and #15930 deliberately
+// admits a defined dns-name at commit — rejecting them here would
+// brick configs the builder handles correctly. Wildcard keywords
+// inside a set expand to `any` leaves carrying both families, so
+// they are never proven IPv4-only.
+func nat64NameClosureNoIPv6(ab *AddressBook, name string) bool {
+	if ab == nil {
+		return false
+	}
+	var values []string
+	if addr, ok := ab.Addresses[name]; ok && addr != nil {
+		values = addr.UsableValues()
+	} else {
+		leaves, err := expandAddressSetLeaves(name, ab)
+		if err != nil {
+			return false
+		}
+		for _, leaf := range leaves {
+			if member, ok := ab.Addresses[leaf]; ok && member != nil {
+				values = append(values, member.UsableValues()...)
+			}
+		}
+	}
+	if len(values) == 0 {
+		return false
+	}
+	for _, v := range values {
+		if pfx, err := netip.ParsePrefix(v); err == nil {
+			if pfx.Addr().Is6() {
+				return false
+			}
+			continue
+		}
+		if addr, err := netip.ParseAddr(v); err == nil {
+			if addr.Is6() {
+				return false
+			}
+			continue
+		}
+		// An unparseable usable value is not proven IPv4.
+		return false
+	}
+	return true
 }
 
 // validateStaticNATThenTargetStrict rejects a static-NAT rule that would install
