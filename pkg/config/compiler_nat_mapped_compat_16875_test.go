@@ -373,11 +373,19 @@ func TestMappedCompatPrefixContainsPredicate16875(t *testing.T) {
 		{"::ffff:0:0/120", true},
 		{"::ffff:127.0.0.0/120", true},
 		{"::203.0.113.0/120", true},
-		{"::/127", false},  // exactly {::, ::1}, both exempt
-		{"::1/127", false}, // masks to the same exempt-only set
-		{"::", false},      // single exempt host
-		{"::1", false},     // single exempt host
-		{"::/128", false},  // single exempt host
+		// Straddles: interval crosses into D2 without being rooted
+		// in it — intersection must still fire.
+		{"::fffe:0:0/95", true},
+		{"::fffc:0:0/94", true},
+		{"::ff00:0:0/88", true},
+		{"::/96", true},
+		{"::ffff:0:0/95", true}, // host-bits spelling, masks across D2
+		{"::/127", false},       // exactly {::, ::1}, both exempt
+		{"::1/127", false},      // masks to the same exempt-only set
+		{"::", false},           // single exempt host
+		{"::1", false},          // single exempt host
+		{"::/128", false},       // single exempt host
+		{"::1/128", false},
 		{"2001:db8::/64", false},
 		{"2001:db8::5", false},
 		{"0.0.0.0/0", false},
@@ -402,17 +410,131 @@ func TestMappedCompatPrefixContainsPredicate16875(t *testing.T) {
 		{"::/0", false},
 		{"0:0:0:0:0:0:0:0/0", false},
 		{"::/1", false},
+		{"::2/1", false},  // host-bits spelling of ::/1
+		{"::2/0", false},  // host-bits spelling of ::/0
 		{"::/127", false}, // exempt-only set
 		{"2001:db8::/64", false},
+		{"::/64", false},         // spans native space beyond ::/96
+		{"::fffe:0:0/95", false}, // straddles D2 but also native
+		{"::fffc:0:0/94", false},
+		{"::ff00:0:0/88", false},
+		{"::ffff:1.2.3.4/64", false}, // masks to ::/64, native-spanning
 		{"::/126", true},
+		{"::/96", true}, // exactly compat space
 		{"::2/127", true},
 		{"::203.0.113.0/120", true},
 		{"::ffff:0:0/96", true},
+		{"::ffff:0:0/95", false}, // straddle: also native above D2
 		{"::ffff:203.0.113.0/120", true},
 	} {
 		if got := natPrefixIsV4MappedOrCompatOnly(tc.in); got != tc.want {
 			t.Errorf("natPrefixIsV4MappedOrCompatOnly(%q) = %v, want %v", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestMappedCompatGateWitnesses16875(t *testing.T) {
+	// F2: compat-only match prefixes on the primary NAT kinds
+	// (mask-blind at the address predicate before this fold).
+	// (Subset question below, via the real compiler.)
+	for _, tc := range []struct {
+		name  string
+		lines []string
+	}{
+		{"snat source ::/96", []string{
+			"set security zones security-zone trust", "set security zones security-zone untrust",
+			"set security nat source pool P address 2001:db8::5",
+			"set security nat source rule-set rs1 from zone trust",
+			"set security nat source rule-set rs1 to zone untrust",
+			"set security nat source rule-set rs1 rule r1 match source-address ::/96",
+			"set security nat source rule-set rs1 rule r1 then source-nat pool P",
+		}},
+		{"dnat destination ::/96", []string{
+			"set security zones security-zone untrust",
+			"set security nat destination pool dp address 2001:db8::5",
+			"set security nat destination rule-set rs1 from zone untrust",
+			"set security nat destination rule-set rs1 rule r1 match destination-address ::/96",
+			"set security nat destination rule-set rs1 rule r1 then destination-nat pool dp",
+		}},
+		{"static source ::/96", []string{
+			"set security zones security-zone untrust",
+			"set security nat static rule-set rs1 from zone untrust",
+			"set security nat static rule-set rs1 rule r1 match source-address ::/96",
+			"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::5/128",
+			"set security nat static rule-set rs1 rule r1 then static-nat prefix 2001:db8:1::5/128",
+		}},
+		{"static block compat external", staticNATSet("::/126", "2001:db8::/126")},
+		{"static block compat target", staticNATSet("2001:db8::/126", "::/126")},
+		{"static block straddle target", staticNATSet("2001:db8::/95", "::fffe:0:0/95")},
+		{"nptv6 compat target", []string{
+			"set security zones security-zone trust",
+			"set security nat static rule-set rs1 from zone trust",
+			"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::/64",
+			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix ::/64",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(buildTree(t, tc.lines))
+			if err == nil || !strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") {
+				t.Fatalf("%s must be rejected as mapped/compat, got: %v", tc.name, err)
+			}
+		})
+	}
+	// Controls that must stay viable: broad match selectors,
+	// host-bits spellings, native block pairs, NPTv6 native pair
+	// and a compat-rooted NPTv6 MATCH (subset spans native ::/64).
+	for _, tc := range []struct {
+		name  string
+		lines []string
+	}{
+		{"snat source ::/0", snatFamilySet16600("source-address ::/0", "2001:db8::5")},
+		{"snat source ::2/0", snatFamilySet16600("source-address ::2/0", "2001:db8::5")},
+		{"static block native", staticNATSet("2001:db8::/64", "2001:db8:1::/64")},
+		{"nptv6 native pair", []string{
+			"set security zones security-zone trust",
+			"set security nat static rule-set rs1 from zone trust",
+			"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::/64",
+			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix fd00:1::/64",
+		}},
+		{"nptv6 compat-rooted match native target", []string{
+			"set security zones security-zone trust",
+			"set security nat static rule-set rs1 from zone trust",
+			"set security nat static rule-set rs1 rule r1 match destination-address ::/64",
+			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix 2001:db8:1::/64",
+		}},
+		{"book straddle selector", []string{
+			"set security address-book global address c1 ::fffe:0:0/95",
+		}},
+		{"book hostbits wildcard", []string{
+			"set security address-book global address c1 ::2/0",
+		}},
+		{"book native-spanning range ::2", []string{
+			"set security address-book global address r1 range-address ::2 to 2001:db8::9",
+		}},
+		{"book native-spanning range ::1", []string{
+			"set security address-book global address r1 range-address ::1 to 2001:db8::9",
+		}},
+	} {
+		t.Run("control/"+tc.name, func(t *testing.T) {
+			cfg, err := CompileConfig(buildTree(t, tc.lines))
+			if err != nil {
+				t.Fatalf("control %s must compile, got: %v", tc.name, err)
+			}
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "IPv4-mapped or IPv4-compatible") {
+					t.Fatalf("control %s must not warn mapped/compat, got: %v", tc.name, cfg.Warnings)
+				}
+			}
+			cfgL, err := CompileConfigLenient(buildTree(t, tc.lines))
+			if err != nil {
+				t.Fatalf("lenient control %s must compile: %v", tc.name, err)
+			}
+			for _, w := range cfgL.Warnings {
+				if strings.Contains(w, "IPv4-mapped or IPv4-compatible") {
+					t.Fatalf("lenient control %s must not warn mapped/compat, got: %v", tc.name, cfgL.Warnings)
+				}
+			}
+		})
 	}
 }
 

@@ -477,8 +477,14 @@ func TestStaticNATBlockZeroLengthV6Rejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("a ::/0 <-> ::/0 block static-NAT must be rejected (remaps the entire IPv6 family 1:1)")
 	}
-	if !strings.Contains(err.Error(), "zero-length") {
-		t.Fatalf("error must cite the zero-length /0 mapping, got: %v", err)
+	// The ::/0 match is viable (subset-false), but the fd00::/0
+	// TARGET interval intersects dropped-non-exempt space, so the
+	// #16875 intersection verdict can win this first-error slot over
+	// the #5658 zero-length verdict. Either rejection is correct;
+	// the zero-length-specific wording is pinned by the v4 twin
+	// above (no mapped/compat intersection on that path).
+	if !strings.Contains(err.Error(), "zero-length") && !strings.Contains(err.Error(), "IPv4-mapped or IPv4-compatible") {
+		t.Fatalf("error must cite the zero-length /0 mapping or the mapped/compat target intersection, got: %v", err)
 	}
 }
 

@@ -598,50 +598,41 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 // semantic rewrite at commit — whereas rejection names the spelling
 // and lets the operator author the intended family explicitly.
 //
-// The predicate is natAddrIsV4MappedOrCompat, mirroring the Rust
-// ingress predicate octet-for-octet (excluding ::/::1). Sites, in
+// Judging is interval arithmetic on the masked represented set
+// (see natPrefixInterval): dropped space D1=::/96 (compat) and
+// D2=::ffff:0:0/96 (mapped), exempt points :: and ::1. MATCH slots
+// (static/SNAT/DNAT source+destination, NAT64 source, book values)
+// reject iff the whole interval is dropped (subset question,
+// natPrefixIsV4MappedOrCompatOnly); ALLOCATION slots (SNAT/DNAT
+// pools, static `then` target, NAT64 translation prefix) reject
+// iff the interval intersects dropped-non-exempt space
+// (natPrefixContainsV4MappedOrCompat). Straddles (::fffe:0:0/95)
+// therefore pass match viability but reject as translation
+// endpoints; host-bits spellings (::2/0) mask first. Sites, in
 // deterministic order (static rule-sets in slice order, DNAT/SNAT
 // rule-sets sorted by name, DNAT pools sorted by name, SNAT pools
 // sorted by name):
 //
-//   - static-NAT: every authored match destination-address
-//     (MatchAddresses, falling back to the scalar Match), every
-//     match source-address (SourceAddresses, falling back to
-//     SourceAddress — honored as SourceConstraint, and the Rust
-//     ingress drop checks SRC or DST, so a mapped source selector
-//     is exactly as unsatisfiable as a mapped destination), and
-//     the `then static-nat prefix` target. NPTv6 rules are skipped:
-//     their match/target prefixes are genuine IPv6 translations
-//     owned by the NPTv6 gates, and an NPTv6 source-address scope
-//     is already rejected wholesale by validateNPTv6ScopeStrict
-//     (#5818). `then static-nat inet` rules are skipped (the NAT64
-//     keyword, owned by its own gate).
-//   - destination-NAT: every literal match source-address and
-//     destination-address, and every destination pool address.
-//   - source-NAT: every literal match source-address and
-//     destination-address, plus every pool member
-//     (SourceNATPoolMembers) of every pool — referenced or not,
-//     because a mapped member is the defect regardless of which
-//     rule references it today; an unreferenced pool carrying one
-//     is wrong config the next rule reference would silently
-//     activate. Pool/pool-target members are judged by the set
-//     they represent (natPrefixContainsV4MappedOrCompat), so a
-//     CIDR member rooted at an exempt base (::/126) still fires.
-//   - NAT64 (`security nat nat64` rule-sets): the /96 translation
-//     prefix and every match source-address, with the same
-//     represented-set semantics. The static `inet` sentinel stays
-//     with its own gate; this is the supported collection.
+//   - static-NAT: match destination (subset), match source
+//     (subset, SourceAddresses fallback SourceAddress — honored as
+//     SourceConstraint; the Rust drop checks SRC or DST), and the
+//     `then` target (intersection — including NPTv6's nptv6-prefix
+//     target; an NPTv6 compat-rooted ::/64 MATCH spans native
+//     space beyond ::/96 so its subset verdict passes, while a
+//     ::/64 target intersects dropped space). The static `inet`
+//     sentinel keeps its own gate.
+//   - destination/source-NAT: match source+destination (subset),
+//     destination pool address (intersection).
+//   - source-NAT pools: every member of every pool, referenced or
+//     not (intersection).
+//   - NAT64: translation prefix (intersection), match
+//     source-address (subset; ::/0 spellings are viable subset-false).
 //
-// Address-book names report false from the predicate (they are not
-// literals) — but they cannot smuggle the spelling either: the
-// address-book gate (validateAddressBookMappedPrefixesStrict)
-// rejects mapped (#10688) and, as of #16875, compatible book values
-// outright — inspecting Value AND the range/wildcard
-// ExpandedPrefixes — including values later folded into
-// `then prefix-name` targets. Unparseable tokens are left to their
-// existing gates. A prefix whose masked base is mapped/compat
-// (e.g. ::ffff:203.0.113.0/120) is rejected on its authored address
-// part, matching the ingress drop of every host in it.
+// Address-book names are not literals here — the book gate judges
+// them on their union with subset semantics (Value +
+// ExpandedPrefixes), so a native-spanning range compiles even
+// when its cover starts in compat space. Unparseable tokens are
+// left to their existing gates.
 //
 // Strict on commit / commit-check (hard reject naming the NAT kind,
 // rule-set/rule or pool, slot, and offending value); the registry
@@ -662,22 +653,22 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 		"IPv6-keyed entry, so a rule matching on it can never match and " +
 		"a translation onto it cannot carry return traffic — author " +
 		"the address in native IPv4 or native IPv6 form instead"
-	// Static NAT.
+	// Static NAT. Match slots (src+dst) use the subset (match)
+	// question; the `then` target is a translation endpoint and uses
+	// the intersection (allocation) question. NPTv6 rules get the
+	// same treatment instead of a blanket exemption: their match
+	// prefix is a selector (subset) and their nptv6-prefix is a
+	// translation endpoint (intersection) — a compat-rooted ::/64
+	// external is NOT subset (it spans native space beyond ::/96,
+	// so viability passes), while a ::/64 TARGET interval intersects
+	// dropped space and rejects. The static `inet` sentinel keeps
+	// its own gate.
 	for _, rs := range cfg.Security.NAT.Static {
 		if rs == nil {
 			continue
 		}
 		for _, rule := range rs.Rules {
 			if rule == nil || rule.Then == "inet" {
-				continue
-			}
-			// NPTv6 match/target prefixes are genuine IPv6
-			// translations owned by the NPTv6 gates and are exempt
-			// below; an NPTv6 rule's source-address scope, however,
-			// is already rejected wholesale by
-			// validateNPTv6ScopeStrict (#5818), so no source arm is
-			// needed for it here.
-			if rule.IsNPTv6 {
 				continue
 			}
 			matchAddrs := rule.MatchAddresses
@@ -688,17 +679,18 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 				if addr == "" {
 					continue
 				}
-				if natAddrIsV4MappedOrCompat(addr) {
+				if natPrefixIsV4MappedOrCompatOnly(addr) {
 					return fmt.Errorf(
 						"static-nat rule-set %q rule %q: match destination-address %q %s (#16875)",
 						rs.Name, rule.Name, addr, cause)
 				}
 			}
 			// The source selector is honored by the snapshot
-			// (SourceConstraint::from_list): a mapped/compat source
-			// can never be satisfied — an IPv6 frame with that src
-			// is ingress-dropped (the Rust drop checks SRC or DST)
-			// and an IPv4 frame never carries the IPv6 identity.
+			// (SourceConstraint::from_list): a selector entirely
+			// inside dropped space can never be satisfied — an
+			// IPv6 frame with that src is ingress-dropped (the
+			// Rust drop checks SRC or DST) and an IPv4 frame never
+			// carries the IPv6 identity.
 			srcAddrs := rule.SourceAddresses
 			if len(srcAddrs) == 0 && rule.SourceAddress != "" {
 				srcAddrs = []string{rule.SourceAddress}
@@ -707,13 +699,13 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 				if addr == "" {
 					continue
 				}
-				if natAddrIsV4MappedOrCompat(addr) {
+				if natPrefixIsV4MappedOrCompatOnly(addr) {
 					return fmt.Errorf(
 						"static-nat rule-set %q rule %q: match source-address %q %s (#16875)",
 						rs.Name, rule.Name, addr, cause)
 				}
 			}
-			if rule.Then != "" && natAddrIsV4MappedOrCompat(rule.Then) {
+			if rule.Then != "" && natPrefixContainsV4MappedOrCompat(rule.Then) {
 				return fmt.Errorf(
 					"static-nat rule-set %q rule %q: then static-nat prefix %q %s (#16875)",
 					rs.Name, rule.Name, rule.Then, cause)
@@ -742,14 +734,14 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 					continue
 				}
 				for _, raw := range rule.Match.SourceAddressList() {
-					if natAddrIsV4MappedOrCompat(raw) {
+					if natPrefixIsV4MappedOrCompatOnly(raw) {
 						return fmt.Errorf(
 							"%s-nat rule-set %q rule %q: match source-address %q %s (#16875)",
 							kind, rs.Name, rule.Name, raw, cause)
 					}
 				}
 				for _, raw := range rule.Match.DestinationAddressList() {
-					if natAddrIsV4MappedOrCompat(raw) {
+					if natPrefixIsV4MappedOrCompatOnly(raw) {
 						return fmt.Errorf(
 							"%s-nat rule-set %q rule %q: match destination-address %q %s (#16875)",
 							kind, rs.Name, rule.Name, raw, cause)
@@ -858,7 +850,7 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 // never match any packet.
 func natMappedCompatDNATMatch(rsName, ruleName string, destAddrs []string) error {
 	for _, raw := range destAddrs {
-		if natAddrIsV4MappedOrCompat(raw) {
+		if natPrefixIsV4MappedOrCompatOnly(raw) {
 			return fmt.Errorf(
 				"destination-nat rule-set %q rule %q: match destination-address %q is an IPv4-mapped or IPv4-compatible IPv6 literal (::ffff:a.b.c.d or ::a.b.c.d); the dataplane drops every IPv6 frame carrying such an identity at ingress before NAT (#10686), and an IPv4 packet keys IPv4 and misses the IPv6-keyed entry, so a rule matching on it can never match and a translation onto it cannot carry return traffic — author the address in native IPv4 or native IPv6 form instead (#16875)",
 				rsName, ruleName, raw)

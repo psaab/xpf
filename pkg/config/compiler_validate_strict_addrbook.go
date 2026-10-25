@@ -343,10 +343,35 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 	// value with Value empty past this backstop into a NAT name
 	// reference (review finding on #17697). DNS-resolved values are
 	// runtime data, not authored literals, and stay out of scope.
+	//
+	// Viability is judged on the entry's UNION, not per fragment: a
+	// native-spanning range whose CIDR cover starts in compat space
+	// (range ::2 to 2001:db8::9, first fragment ::2/127) still
+	// matches native traffic, so rejecting on ANY fragment is a
+	// false reject (gate review on #17697). The entry rejects as
+	// never-matching only when EVERY enforced value is subset-of-
+	// dropped; the mapped wire-family arm stays per-value.
 	valuesOf := func(address *Address) []string {
-		vals := []string{address.Value}
+		var vals []string
+		if address.Value != "" {
+			vals = append(vals, address.Value)
+		}
 		vals = append(vals, address.ExpandedPrefixes...)
 		return vals
+	}
+	// bookEntryViable reports whether any enforced value matches
+	// native (non-dropped) traffic: a subset-false value, or an
+	// unparseable value whose verdict belongs to another gate.
+	bookEntryViable := func(vals []string) bool {
+		for _, v := range vals {
+			if _, _, ok := natPrefixInterval(v); !ok {
+				return true
+			}
+			if !natPrefixIsV4MappedOrCompatOnly(v) {
+				return true
+			}
+		}
+		return false
 	}
 	check := func(scope string, book *AddressBook) error {
 		if book == nil {
@@ -365,10 +390,8 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 			if address == nil {
 				continue
 			}
-			for _, v := range valuesOf(address) {
-				if v == "" {
-					continue
-				}
+			vals := valuesOf(address)
+			for _, v := range vals {
 				if FRRAddrIsMapped(v) {
 					return fmt.Errorf(
 						"%s address-book address %q has IPv4-mapped IPv6 prefix %q; "+
@@ -377,20 +400,18 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 							"use a non-mapped IPv4 or IPv6 prefix (#10688)",
 						scope, name, v)
 				}
-				// Match-selector semantics: a book prefix is a
-				// MATCH value, so only a prefix whose EVERY member
-				// is mapped/compat (or exempt) can never match —
-				// broad native prefixes (::/0, ::/1) contain compat
-				// hosts as a subset yet match native traffic and
-				// must compile (round-3 review on #17697).
-				if natPrefixIsV4MappedOrCompatOnly(v) {
-					return fmt.Errorf(
-						"%s address-book address %q has IPv4-mapped or IPv4-compatible IPv6 prefix %q; "+
-							"the helper drops every IPv6 frame carrying such an identity at ingress "+
-							"before NAT/policy matching (#10686), so any rule resolving to it can "+
-							"never match; use a native IPv4 or IPv6 prefix (#16875)",
-						scope, name, v)
-				}
+			}
+			// Match-selector (subset) semantics on the union: only
+			// an entry whose every enforced value is subset-of-
+			// dropped can never match. Broad native prefixes
+			// (::/0, ::/1) and native-spanning ranges compile.
+			if len(vals) > 0 && !bookEntryViable(vals) {
+				return fmt.Errorf(
+					"%s address-book address %q has IPv4-mapped or IPv4-compatible IPv6 prefix %q; "+
+						"the helper drops every IPv6 frame carrying such an identity at ingress "+
+						"before NAT/policy matching (#10686), so any rule resolving to it can "+
+						"never match; use a native IPv4 or IPv6 prefix (#16875)",
+					scope, name, vals[0])
 			}
 		}
 		return nil
