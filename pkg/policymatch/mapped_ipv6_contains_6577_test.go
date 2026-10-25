@@ -95,12 +95,14 @@ func TestMappedIPv6DestMatchesV6DenyPrefix_6577(t *testing.T) {
 		SrcFamily: "v6",
 		DstFamily: config.NATAddrFamily(dstText),
 	})
-	if res.Action != config.PolicyDeny {
-		t.Fatalf("mapped dst %q is inside ::/0 so block-v6 must DENY (the dataplane does); got %v via policy %q",
-			dstText, res.Action, res.PolicyName)
-	}
-	if res.PolicyName != "block-v6" {
-		t.Fatalf("expected the DENY to be attributed to block-v6, got %q", res.PolicyName)
+	// #16803 supersedes the policy-attribution half at the Match level:
+	// since #10686 the box drops the mapped destination at ingress before
+	// policy, so Match reports the ingress drop (conservative deny, no
+	// policy name) rather than the block-v6 match. The helper-level
+	// containment contract this file pins is unchanged
+	// (TestMappedIPv6ContainmentMirrorsRustMask_6577).
+	if !res.V4MappedCompatIngressDrop || res.Action != config.PolicyDeny || res.PolicyName != "" {
+		t.Fatalf("mapped dst %q must report the #10686 ingress drop (#16803), got %+v", dstText, res)
 	}
 }
 

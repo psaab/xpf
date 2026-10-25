@@ -570,6 +570,11 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			// that can never take effect. Mirrors the REST / gRPC MatchPolicies
 			// DisplayAction() render.
 			fmt.Fprintf(buf, "%s\n", res.DisplayAction())
+		case res.V4MappedCompatIngressDrop:
+			// #16803: a v4-mapped/compatible IPv6 tuple is dropped at
+			// ingress before policy (#10686); surface the dedicated
+			// verdict instead of a fabricated default line.
+			fmt.Fprintf(buf, "%s\n", res.DisplayAction())
 		default:
 			// No zone-pair or global policy matched: report the configured
 			// default-policy, NOT a hard-coded "deny" (#3103). When the

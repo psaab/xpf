@@ -1282,6 +1282,14 @@ message MatchPoliciesResponse {
   // unzoned_ingress: junos-host is a reserved KNOWN context, not an
   // unknown zone, and there is no unconditional deny to report.
   bool host_originated = 35;
+  // #16803: v4_mapped_compat_ingress_drop is true when either side is an
+  // IPv4-mapped (::ffff:0:0/96) or IPv4-compatible (::/96, excluding ::
+  // and ::1) IPv6 address. The dataplane drops such frames at ingress
+  // before security-policy evaluation (#10686/#11669), for transit and
+  // host-bound queries alike, so `action` carries
+  // V4MappedCompatIngressDropActionString and matched/default_used are
+  // false — no simulated permit/deny/default verdict applies.
+  bool v4_mapped_compat_ingress_drop = 36;
 }
 
 // HostInboundAdmissionStatus classifies how the ingress zone's

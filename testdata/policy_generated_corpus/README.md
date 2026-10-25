@@ -8,12 +8,12 @@ input or uses a second expectation-only matcher.
 ## Row schema
 
 Each `rows/*.json` file is one pure policy-agreement row. The committed seed
-contains exactly 52 rows: the #9167 corpus plus generated boundary shapes for
+contains exactly 51 rows: the #9167 corpus plus generated boundary shapes for
 tiers, address families, exclusions, applications, ports, fragments, ICMP,
 defaults, ordering, active/inactive scheduler state, and feed-backed addresses.
-`seed_manifest.json` is the pinned 52-ID contract. Every gate requires all
+`seed_manifest.json` is the pinned 51-ID contract. Every gate requires all
 manifest IDs; committed-seed gates also require the directory to contain
-exactly 52 rows. To grow the corpus, add the row file, update
+exactly 51 rows. To grow the corpus, add the row file, update
 `seed_manifest.json`, regenerate `seed_rows.json`, and rerun all three Rust/Go
 seed gates before committing the complete set.
 
@@ -56,6 +56,15 @@ snapshot consumed by Rust. `TestPolicyGeneratedSeedIsFresh10587` rebuilds it fro
 `config_set_lines` and rejects drift; it exists so the Rust oracle evaluates the
 production snapshot, not a second hand-built matcher input.
 
+## Mapped/compatible IPv6 ingress-drop boundary (#16803)
+
+An IPv4-mapped IPv6 source (`::ffff:10.0.1.5`) is dropped by the dataplane
+at ingress before policy evaluation (#10686), so the Rust policy evaluator
+never sees the frame. `boundaries/mapped-v6-ingress-drop.json` pins this
+Go-only pre-policy contract separately (the former `mapped-v6-source`
+differential row, moved here when #16803 landed). It is not counted as a
+differential row. The Go test asserts `V4MappedCompatIngressDrop` directly.
+
 ## Unsupported tuple boundary
 
 Cross-family IPv4-to-IPv6 forwarding is rejected by the Go forwarding contract
@@ -69,7 +78,7 @@ configuration and asserts `UnsupportedTupleFamily` directly.
 
 * `rows/*.json` — pure policy-agreement seed rows.
 * `boundaries/*.json` — named pre-policy forwarding contracts.
-* `seed_manifest.json` — exact 52-ID seed contract used by every gate.
+* `seed_manifest.json` — exact 51-ID seed contract used by every gate.
 * `seed_rows.json` — canonical aggregate included by the Rust test binary. The
   Go freshness test requires it to match `rows/*.json` exactly, including
   snapshots.
@@ -133,7 +142,7 @@ passes `config.CompileConfig`, and every query uses concrete, same-family
 addresses.
 
 The Rust harness uses `PROPTEST_CASES` as a soak override. Normal CI uses
-bounded per-property defaults. P2/P4/P7 each accept only 2 of the 52 seed rows;
+bounded per-property defaults. P2/P4/P7 each accept only 2 of the 51 seed rows;
 with proptest's default 65,536 local-reject budget, approximately 2,500 cases
 is the supported soak used for this harness. A deep run records the effective
 case count, row count, and disagreement count in the PR/issue report;

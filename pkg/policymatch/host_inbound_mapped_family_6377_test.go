@@ -66,16 +66,27 @@ func TestHostInboundMappedIPv6DstClassifiedAsV6(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			res := Match(cfg, c.q)
-			if res.HostInbound == nil {
-				t.Fatalf("res.HostInbound == nil — host-inbound admission omitted")
+			// #16803: Match now returns the ingress-drop verdict for a
+			// mapped destination (the frame never reaches the host gate),
+			// so exercise the classifier directly — the ip6 classification
+			// contract this test pins is unchanged.
+			hi := hostInboundAdmission(cfg, c.q)
+			if hi == nil {
+				t.Fatalf("hostInboundAdmission == nil — host-inbound admission omitted")
 			}
-			if res.HostInbound.Status != c.wantStat {
-				t.Fatalf("status = %v, want %v (%+v)", res.HostInbound.Status, c.wantStat, *res.HostInbound)
+			if hi.Status != c.wantStat {
+				t.Fatalf("status = %v, want %v (%+v)", hi.Status, c.wantStat, *hi)
 			}
-			if c.wantTok != "" && res.HostInbound.Token != c.wantTok {
-				t.Fatalf("token = %q, want %q (%+v)", res.HostInbound.Token, c.wantTok, *res.HostInbound)
+			if c.wantTok != "" && hi.Token != c.wantTok {
+				t.Fatalf("token = %q, want %q (%+v)", hi.Token, c.wantTok, *hi)
 			}
 		})
+	}
+
+	// #16803: at the Match level the mapped-destination host-bound query
+	// reports the ingress drop, not a host-inbound admission.
+	res := Match(cfg, cases[0].q)
+	if !res.V4MappedCompatIngressDrop || res.HostInbound != nil {
+		t.Fatalf("mapped host-bound query must report the #10686 ingress drop (#16803), got %+v", res)
 	}
 }

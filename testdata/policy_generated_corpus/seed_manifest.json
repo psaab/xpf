@@ -1,5 +1,4 @@
 {
-  "schema_version": 1,
   "ids": [
     "active-permit-matches",
     "boundary-port-0",
@@ -31,7 +30,6 @@
     "junos-host-fragment-associated-deny-02",
     "junos-host-fragment-associated-deny-03",
     "junos-host-fragment-associated-deny-04",
-    "mapped-v6-source",
     "named-policy-then-reject-01",
     "named-policy-then-reject-02",
     "scoped-global-applies-only-in-scope-01",
@@ -53,5 +51,6 @@
     "zone-pair-wildcards-01",
     "zone-pair-wildcards-02",
     "zone-pair-wildcards-03"
-  ]
+  ],
+  "schema_version": 1
 }

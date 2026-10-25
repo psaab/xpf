@@ -687,7 +687,7 @@ when no hint is supplied. The fail-on-revert artifact is
 `mixed_family_tuple_5720_test.go`: dropping the gate makes the (V4 src, V6 dst)
 query fall through to a fabricated default verdict.
 
-### Colon-strict family — IPv4-mapped IPv6 source (#6377, resolved)
+### Colon-strict family — IPv4-mapped IPv6 source (#6377, resolved; ingress-drop verdict #16803)
 
 `net.IP.To4()` FOLDS an IPv4-mapped IPv6 literal:
 `net.ParseIP("::ffff:192.0.2.1").To4()` is non-nil. Before #6377 the gate read
@@ -695,12 +695,11 @@ family with `To4()` alone, so a source authored as `::ffff:192.0.2.1` against a
 `2001:db8::1` destination was classified (V4 src, V6 dst) and **falsely**
 reported `UnsupportedTupleFamily`, even though the colon-strict runtime matcher
 (`userspace-dp/src/policy.rs`) treats the mapped literal as V6 and sees a valid
-same-family V6/V6 tuple that should be evaluated normally. This is the
-documented Go/Rust family-parity trap: the authoritative colon-strict classifier
-is `config.NATAddrFamily` / `natAddrFamily`
-(`pkg/config/compiler_nat_helpers.go`), which keys family on the presence of a
-`':'` in the *original text* — precisely the signal `net.ParseIP` has already
-discarded by the time the gate sees `q.SrcIP`/`q.DstIP`.
+same-family V6/V6 tuple. This is the documented Go/Rust family-parity trap: the
+authoritative colon-strict classifier is `config.NATAddrFamily` /
+`natAddrFamily` (`pkg/config/compiler_nat_helpers.go`), which keys family on the
+presence of a `':'` in the *original text* — precisely the signal `net.ParseIP`
+has already discarded by the time the gate sees `q.SrcIP`/`q.DstIP`.
 
 The fix threads that colon-strict text family from every caller into the query.
 `Query` carries an optional `SrcFamily`/`DstFamily` ("v4"/"v6"/"") hint, and all
@@ -710,16 +709,49 @@ FIVE builders (`cli_request_testcmd.go`, `cli_show_security.go`,
 `config.NATAddrFamily` on the RAW operator string before `net.ParseIP` folds it.
 `queryTupleFamily` prefers the hint and falls back to `To4()` only when a caller
 supplies none (the `net.IP`-only callers, e.g. tests — their pre-#6377 fold is
-preserved). So `::ffff:192.0.2.1` now yields `SrcFamily == "v6"`, the tuple is a
-same-family V6/V6 pair, and the gate falls through to normal evaluation, exactly
-as the runtime does. A genuine dotted-quad `10.0.0.1 -> 2001:db8::1` still
-classifies (V4 src, V6 dst) and is still flagged. The fail-on-revert artifact is
-`mapped_ipv4_tuple_6377_test.go`
-(`TestMatchMappedIPv6SourceNotGated`): restoring the `To4()`-only gate folds the
-mapped source to v4 and falsely flags it. The pre-fix failure mode was a
-spurious "unsupported tuple" advisory on a diagnostic surface (fail-safe — it
-never hid or fabricated a permit), not a dataplane effect.
+preserved). So `::ffff:192.0.2.1` now yields `SrcFamily == "v6"` and the tuple
+is a same-family V6/V6 pair for the unsupported-tuple gate. A genuine dotted-quad
+`10.0.0.1 -> 2001:db8::1` still classifies (V4 src, V6 dst) and is still flagged.
 
+**#16803 supersedes the "evaluated normally" half of the original #6377
+reading.** Since #10686/#11669 the dataplane drops IPv4-mapped
+(`::ffff:0:0/96`) and IPv4-compatible (`::/96`, excluding `::` and `::1`)
+IPv6 frames at ingress BEFORE VLAN/zone/session/NAT/policy evaluation
+(`ipv6_addr_is_v4_mapped_or_compat` in
+`userspace-dp/src/afxdp/frame/inspect.rs`, gated in `poll_descriptor/mod.rs`;
+decapsulated and injected frames are re-checked after decapsulation). The
+gate precedes the host/transit disposition split, so host-bound queries are
+dropped too. `Match` therefore returns the first-class
+`Result.V4MappedCompatIngressDrop` verdict for any v6-family side in those
+ranges (source OR destination, mirroring the Rust SRC-OR-DST check):
+`Matched`/`DefaultUsed`/`HostInboundUnmatched` are false, `Action` is the
+conservative `PolicyDeny`, and `DisplayAction` renders
+`V4MappedCompatIngressDropActionString`. A config-wide `ContentRejected`
+advisory still rides the result and wins `DisplayAction` precedence
+(#9993 pattern). Detection is colon-strict where the caller supplies the
+hint: a side hinted `"v4"` is never gated (so the net.IP-only folded
+fallback above keeps its preserved unsupported-tuple answer and does not
+double-report), and an unhinted side that folds via `To4()` (a genuine
+dotted-quad, or the same folded mapped literal) is likewise never gated
+on bytes alone — `net.ParseIP` renders both as the identical `::ffff:`
+16-byte form, so only the threaded hint can separate them. A `"v6"`-hinted
+side, or an unhinted non-folding side (the IPv4-compatible `::/96` form,
+whose `To4()` is nil), is tested on its 16-byte bytes. The Rust WireGuard-underlay exemption (a UDP datagram
+to a locally-owned WG listen port is kernel/control-socket traffic) has no
+`Query` input and is not modelled; that datagram is never policy-evaluated
+either, so the ingress-drop verdict remains the correct policy-stage
+answer for it. Surfaces: REST carries the typed
+`v4_mapped_compat_ingress_drop` field, gRPC carries proto field 36
+(`v4_mapped_compat_ingress_drop`), and the three hand-rolled text renders
+plus the remote CLI each have an explicit `V4MappedCompatIngressDrop`
+branch printing `DisplayAction()`. Fail-on-revert artifacts:
+`v4_mapped_compat_ingress_drop_16803_test.go` (four transit defect rows +
+host-bound rows + v4/ordinary-v6/link-local/`::`/`::1` controls),
+`mapped_ipv4_tuple_6377_test.go` (updated: the mapped source now reports
+the ingress drop, never a fabricated V4 permit, and the folded fallback
+still gates as unsupported without double-reporting), the updated REST
+cells in `security_matchpolicies_mapped_ipv4_6377_test.go`, and
+`server_matchpolicies_mapped_compat_16803_test.go` (gRPC typed field).
 The same colon-strict family also governs the policy EVALUATOR, not just the
 up-front gate. `matchAddr` (the per-side address matcher) classifies the
 packet's family with `queryTupleFamily(ip, family)` — the threaded hint, falling

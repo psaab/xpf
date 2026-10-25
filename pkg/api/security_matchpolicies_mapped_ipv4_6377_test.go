@@ -50,10 +50,11 @@ security {
 type mappedMatchResponse struct {
 	Success bool `json:"success"`
 	Data    struct {
-		Matched     bool   `json:"matched"`
-		PolicyName  string `json:"policy_name"`
-		Action      string `json:"action"`
-		DefaultUsed bool   `json:"default_used"`
+		Matched                   bool   `json:"matched"`
+		PolicyName                string `json:"policy_name"`
+		Action                    string `json:"action"`
+		DefaultUsed               bool   `json:"default_used"`
+		V4MappedCompatIngressDrop bool   `json:"v4_mapped_compat_ingress_drop"`
 	} `json:"data"`
 }
 
@@ -129,10 +130,12 @@ security {
 func TestMatchPoliciesRESTMappedIPv6SourceNotEvaluatedAsV4_6377(t *testing.T) {
 	s := &Server{store: mappedV4RuleAPIStore(t)}
 
-	// Mapped-IPv6 source: must be evaluated as V6 → no V6 rule → default-deny.
-	// Assert the EXACT default-deny result (not merely "not permit"), proving it
-	// fell through to the configured default rather than some other non-permit
-	// path.
+	// Mapped-IPv6 source: must NOT be folded to v4 and matched against the
+	// V4-only permit rule. #16803 supersedes the fall-through half of the
+	// #6377 expectation: since #10686 the runtime drops the mapped tuple
+	// at ingress before policy, so REST now reports the ingress-drop
+	// verdict (typed flag + SSOT action string), not default-deny. The
+	// fail-open half is unchanged — never a fabricated permit.
 	mapped := mappedMatch(t, s, url.Values{
 		"from_zone": {"trust"}, "to_zone": {"untrust"},
 		"src_ip": {"::ffff:192.0.2.1"},
@@ -140,8 +143,8 @@ func TestMatchPoliciesRESTMappedIPv6SourceNotEvaluatedAsV4_6377(t *testing.T) {
 	if mapped.Data.Matched || mapped.Data.PolicyName != "" {
 		t.Fatalf("mapped-IPv6 source must NOT match the V4-only permit rule on REST (fabricated permit); got %+v", mapped.Data)
 	}
-	if mapped.Data.Action != "deny (default)" || !mapped.Data.DefaultUsed {
-		t.Fatalf("mapped-IPv6 source must fall to default-deny on REST (action=%q default_used=%v); got %+v", mapped.Data.Action, mapped.Data.DefaultUsed, mapped.Data)
+	if !mapped.Data.V4MappedCompatIngressDrop || mapped.Data.Action != policymatch.V4MappedCompatIngressDropActionString || mapped.Data.DefaultUsed {
+		t.Fatalf("mapped-IPv6 source must report the #10686 ingress drop on REST (#16803); got %+v", mapped.Data)
 	}
 
 	// Control: a genuine dotted-quad V4 source in-subnet MUST still permit via
@@ -175,8 +178,10 @@ func TestMatchPoliciesRESTMappedIPv6SourceNotEvaluatedAsV4_6377(t *testing.T) {
 func TestMatchPoliciesRESTMappedIPv6SourceNotGated6377(t *testing.T) {
 	s := &Server{store: mappedTupleAPIStore(t)}
 
-	// Mapped-IPv6 source against a genuine IPv6 destination: same-family V6/V6,
-	// must fall through to the permit-all policy.
+	// Mapped-IPv6 source against a genuine IPv6 destination: same-family
+	// V6/V6 for the #5720 gate (not unsupported), but #16803: since #10686
+	// the runtime drops the mapped tuple at ingress before policy, so REST
+	// reports the ingress-drop verdict instead of the permit-all policy.
 	mapped := mappedMatch(t, s, url.Values{
 		"from_zone": {"trust"}, "to_zone": {"untrust"},
 		"src_ip": {"::ffff:192.0.2.1"}, "dst_ip": {"2001:db8::1"},
@@ -184,8 +189,11 @@ func TestMatchPoliciesRESTMappedIPv6SourceNotGated6377(t *testing.T) {
 	if mapped.Data.Action == policymatch.UnsupportedTupleFamilyActionString {
 		t.Fatalf("mapped-IPv6 source must NOT be gated unsupported on REST (same-family V6/V6); got %+v", mapped.Data)
 	}
-	if !mapped.Data.Matched || mapped.Data.Action != "permit" || mapped.Data.PolicyName != "permit-all" {
-		t.Fatalf("mapped-IPv6 tuple must permit via permit-all; got %+v", mapped.Data)
+	if mapped.Data.Matched || mapped.Data.PolicyName != "" {
+		t.Fatalf("mapped-IPv6 tuple must not report a matched policy (#16803 ingress drop); got %+v", mapped.Data)
+	}
+	if !mapped.Data.V4MappedCompatIngressDrop || mapped.Data.Action != policymatch.V4MappedCompatIngressDropActionString {
+		t.Fatalf("mapped-IPv6 tuple must report the #10686 ingress drop on REST; got %+v", mapped.Data)
 	}
 
 	// Control: a GENUINE dotted-quad IPv4 source against an IPv6 destination is

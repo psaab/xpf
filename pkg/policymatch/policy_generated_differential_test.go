@@ -7,7 +7,7 @@ package policymatch
 // set-lines with the strict Go compiler and drives Match. No Go generator or
 // expectation-only oracle is used here.
 //
-// Normal CI consumes the committed seed rows (52 pure-agreement rows at land).
+// Normal CI consumes the committed seed rows (51 pure-agreement rows at land).
 // Operators can point the test at an emitted directory with
 // XPF_POLICY_ROWS_DIR. The Rust module honors PROPTEST_CASES for soak runs;
 // record the effective cases, rows, and disagreement count. Any disagreement
@@ -55,12 +55,13 @@ type generatedPolicyQuery10587 struct {
 }
 
 type generatedPolicyVerdict10587 struct {
-	Action                 string `json:"action"`
-	Matched                bool   `json:"matched"`
-	DefaultUsed            bool   `json:"default_used"`
-	UnsupportedTupleFamily bool   `json:"unsupported_tuple_family"`
-	PolicyName             string `json:"policy_name"`
-	PolicyID               uint32 `json:"policy_id"`
+	Action                    string `json:"action"`
+	Matched                   bool   `json:"matched"`
+	DefaultUsed               bool   `json:"default_used"`
+	UnsupportedTupleFamily    bool   `json:"unsupported_tuple_family"`
+	V4MappedCompatIngressDrop bool   `json:"v4_mapped_compat_ingress_drop,omitempty"`
+	PolicyName                string `json:"policy_name"`
+	PolicyID                  uint32 `json:"policy_id"`
 }
 
 type generatedPolicyRow10587 struct {
@@ -137,16 +138,16 @@ func generatedSeedManifestIDs10587(t *testing.T) []string {
 	if manifest.SchemaVersion != 1 {
 		t.Fatalf("seed_manifest.json schema = %d, want 1", manifest.SchemaVersion)
 	}
-	if len(manifest.IDs) != 52 {
-		t.Fatalf("seed_manifest.json has %d IDs, want exactly 52", len(manifest.IDs))
+	if len(manifest.IDs) != 51 {
+		t.Fatalf("seed_manifest.json has %d IDs, want exactly 51", len(manifest.IDs))
 	}
 	return manifest.IDs
 }
 
 func assertGeneratedSeedCoverage10587(t *testing.T, rows []generatedPolicyRow10587) {
 	t.Helper()
-	if len(rows) < 52 {
-		t.Fatalf("generated policy row contract collapsed to %d (want >=52)", len(rows))
+	if len(rows) < 51 {
+		t.Fatalf("generated policy row contract collapsed to %d (want >=51)", len(rows))
 	}
 	seen := make(map[string]generatedPolicyRow10587, len(rows))
 	for _, row := range rows {
@@ -246,12 +247,13 @@ func generatedVerdictFromGo10587(res Result) generatedPolicyVerdict10587 {
 		policyID = res.PolicyID
 	}
 	return generatedPolicyVerdict10587{
-		Action:                 policyActionName9167(res.Action),
-		Matched:                res.Matched,
-		DefaultUsed:            res.DefaultUsed,
-		UnsupportedTupleFamily: res.UnsupportedTupleFamily,
-		PolicyName:             policyName,
-		PolicyID:               policyID,
+		Action:                    policyActionName9167(res.Action),
+		Matched:                   res.Matched,
+		DefaultUsed:               res.DefaultUsed,
+		UnsupportedTupleFamily:    res.UnsupportedTupleFamily,
+		V4MappedCompatIngressDrop: res.V4MappedCompatIngressDrop,
+		PolicyName:                policyName,
+		PolicyID:                  policyID,
 	}
 }
 
@@ -268,8 +270,8 @@ func compareGeneratedVerdicts10587(t *testing.T, row generatedPolicyRow10587, go
 func TestPolicyGeneratedDifferential10587(t *testing.T) {
 	rows := readGeneratedRows10587(t, generatedRowsDir10587())
 	assertGeneratedSeedCoverage10587(t, rows)
-	if os.Getenv("XPF_POLICY_ROWS_DIR") == "" && len(rows) != 52 {
-		t.Fatalf("committed generated policy row contract has %d rows, want exactly 52", len(rows))
+	if os.Getenv("XPF_POLICY_ROWS_DIR") == "" && len(rows) != 51 {
+		t.Fatalf("committed generated policy row contract has %d rows, want exactly 51", len(rows))
 	}
 	for _, row := range rows {
 		if row.SchemaVersion != 1 {
@@ -292,10 +294,17 @@ func TestPolicyGeneratedDifferential10587(t *testing.T) {
 // is tested as its own contract rather than hidden behind an allowlist.
 func TestPolicyGeneratedUnsupportedTupleBoundary10587(t *testing.T) {
 	rows := readGeneratedRows10587(t, policyGeneratedBoundaryDir10587)
-	if len(rows) != 1 || rows[0].ID != "cross-family-v4-to-v6" {
-		t.Fatalf("unsupported-tuple boundary corpus drifted: %+v", rows)
+	if len(rows) != 2 {
+		t.Fatalf("boundary corpus drifted: want 2 rows, got %+v", rows)
 	}
-	row := rows[0]
+	byID := map[string]generatedPolicyRow10587{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	row, ok := byID["cross-family-v4-to-v6"]
+	if !ok {
+		t.Fatalf("cross-family boundary missing: %+v", rows)
+	}
 	cfg := generatedConfig10587(t, row)
 	res := Match(cfg, generatedQuery10587(t, row.Query))
 	if res.ContentRejected {
@@ -307,6 +316,22 @@ func TestPolicyGeneratedUnsupportedTupleBoundary10587(t *testing.T) {
 	}
 	if !res.UnsupportedTupleFamily {
 		t.Fatalf("cross-family boundary lost UnsupportedTupleFamily classification")
+	}
+	// #16803: a v4-mapped IPv6 source is dropped at ingress before policy
+	// (#10686); the Rust policy evaluator never sees the frame, so this
+	// row is a Go-only pre-policy boundary like the cross-family row.
+	mapped, ok := byID["mapped-v6-ingress-drop"]
+	if !ok {
+		t.Fatalf("mapped-v6 ingress-drop boundary missing: %+v", rows)
+	}
+	mcfg := generatedConfig10587(t, mapped)
+	mres := Match(mcfg, generatedQuery10587(t, mapped.Query))
+	mgot := generatedVerdictFromGo10587(mres)
+	if mapped.GoVerdict == nil || !reflect.DeepEqual(*mapped.GoVerdict, mgot) {
+		t.Fatalf("mapped-v6 boundary Go outcome changed: got %+v want %+v", mgot, mapped.GoVerdict)
+	}
+	if !mres.V4MappedCompatIngressDrop {
+		t.Fatalf("mapped-v6 boundary lost V4MappedCompatIngressDrop classification")
 	}
 }
 
@@ -320,8 +345,8 @@ func TestPolicyGeneratedSeedIsFresh10587(t *testing.T) {
 	}
 	rows := readGeneratedRows10587(t, policyGeneratedRowsDir10587)
 	assertGeneratedSeedCoverage10587(t, rows)
-	if len(rows) != 52 {
-		t.Fatalf("committed generated policy row contract has %d rows, want exactly 52", len(rows))
+	if len(rows) != 51 {
+		t.Fatalf("committed generated policy row contract has %d rows, want exactly 51", len(rows))
 	}
 	blob, err := os.ReadFile(filepath.Join(policyGeneratedCorpusDir10587, "seed_rows.json"))
 	if err != nil {
@@ -331,8 +356,8 @@ func TestPolicyGeneratedSeedIsFresh10587(t *testing.T) {
 	if err := json.Unmarshal(blob, &aggregate); err != nil {
 		t.Fatalf("seed_rows.json is invalid JSON: %v", err)
 	}
-	if aggregate.SchemaVersion != 1 || len(aggregate.Rows) != 52 {
-		t.Fatalf("seed_rows.json has schema %d and %d rows, want schema 1 and exactly 52",
+	if aggregate.SchemaVersion != 1 || len(aggregate.Rows) != 51 {
+		t.Fatalf("seed_rows.json has schema %d and %d rows, want schema 1 and exactly 51",
 			aggregate.SchemaVersion, len(aggregate.Rows))
 	}
 	if len(rows) != len(aggregate.Rows) {

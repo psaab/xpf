@@ -809,6 +809,10 @@ func (c *ctl) showMatchPolicies(args []string) error {
 		fmt.Printf("%s\n", resp.Action)
 		return nil
 	}
+	if resp.GetV4MappedCompatIngressDrop() {
+		fmt.Printf("%s\n", resp.Action)
+		return nil
+	}
 
 	if resp.Matched {
 		if resp.Global {

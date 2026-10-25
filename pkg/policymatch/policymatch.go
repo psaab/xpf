@@ -886,6 +886,25 @@ type Result struct {
 	// (#9993) and DisplayAction instead prioritizes the retention posture.
 	UnsupportedTupleFamily bool
 
+	// V4MappedCompatIngressDrop is true when either side of the query is an
+	// IPv6 address in ::ffff:0:0/96 (IPv4-mapped) or ::/96
+	// (IPv4-compatible), excluding :: and ::1 (#16803, mirroring #10686).
+	// The userspace helper drops such frames at ingress BEFORE zone,
+	// session, NAT and policy evaluation
+	// (userspace-dp/src/afxdp/frame/inspect.rs
+	// ipv6_addr_is_v4_mapped_or_compat, gated in poll_descriptor/mod.rs),
+	// for transit AND host-bound traffic alike — the gate precedes the
+	// host/transit disposition split. When set, Matched / DefaultUsed /
+	// HostInboundUnmatched are false and Action is the conservative
+	// PolicyDeny for a raw reader; DisplayAction renders the dedicated
+	// V4MappedCompatIngressDropActionString. Like the
+	// UnsupportedTupleFamily gate (#9993), a config-wide ContentRejected
+	// advisory still rides the result and wins DisplayAction precedence.
+	// Detection is colon-strict via Query.SrcFamily/DstFamily where the
+	// caller supplies it; a net.IP-only caller falls back to the 16-byte
+	// form of the parsed address (see queryHasV4MappedOrCompatSide).
+	V4MappedCompatIngressDrop bool
+
 	// HostInboundUnmatched is true ONLY for a `to-zone junos-host` query that
 	// matched no host-bound policy (#3285). The dataplane host gate
 	// (evaluate_junos_host_policy) returns None here — no security *policy*
@@ -1361,6 +1380,8 @@ func (r Result) DisplayAction() string {
 		return ContentRejectedActionString
 	case r.UnsupportedTupleFamily:
 		return UnsupportedTupleFamilyActionString
+	case r.V4MappedCompatIngressDrop:
+		return V4MappedCompatIngressDropActionString
 	case r.HostInboundUnmatched:
 		return HostInboundActionString
 	case r.HostOriginated:
@@ -1382,6 +1403,88 @@ func (r Result) DisplayAction() string {
 // tuple and the runtime matcher fails it closed; the simulator reports that
 // rather than a fabricated per-side verdict.
 const UnsupportedTupleFamilyActionString = "unsupported tuple: an IPv4 source with an IPv6 destination has no supported translation (NAT46 is not implemented), so the forwarding path never produces it and the runtime matcher fails closed — no simulated permit/deny/default verdict applies"
+
+// V4MappedCompatIngressDropActionString is the operator-facing verdict
+// rendered for a query carrying an IPv4-mapped (::ffff:0:0/96) or
+// IPv4-compatible (::/96, excluding :: and ::1) IPv6 source or destination
+// (#16803). The userspace helper drops such frames at ingress before any
+// policy evaluation (#10686/#11669), so no simulated permit/deny/default
+// verdict describes real forwarding for this tuple.
+const V4MappedCompatIngressDropActionString = "dropped at ingress (v4-mapped/compatible IPv6, #10686): an IPv4-mapped (::ffff:0:0/96) or IPv4-compatible (::/96) IPv6 source or destination is dropped by the dataplane before security-policy evaluation — no simulated permit/deny/default verdict applies"
+
+// V4MappedCompatIngressDropShowLine is the human-readable one-line
+// explanation the CLI / `show` / `request` match-policies surfaces print
+// for a V4MappedCompatIngressDrop result (#16803), kept here as the SSOT
+// so the text call sites cannot drift from each other or from
+// V4MappedCompatIngressDropActionString.
+const V4MappedCompatIngressDropShowLine = "dropped at ingress: an IPv4-mapped (::ffff:0:0/96) or IPv4-compatible (::/96) IPv6 address is dropped before security-policy evaluation (#10686)"
+
+// ipv6IsV4MappedOrCompat mirrors the Rust predicate
+// ipv6_addr_is_v4_mapped_or_compat
+// (userspace-dp/src/afxdp/frame/inspect.rs, #10686): true iff the 16-byte
+// form is ::ffff:a.b.c.d (IPv4-mapped, ::ffff:0:0/96) or ::a.b.c.d with a
+// zero first 96 bits (IPv4-compatible, ::/96), excluding :: (unspecified)
+// and ::1 (loopback), which fall inside ::/96 numerically but are
+// legitimate local addresses with their own handling.
+func ipv6IsV4MappedOrCompat(ip net.IP) bool {
+	b := ip.To16()
+	if b == nil || len(b) != 16 {
+		return false
+	}
+	// :: and ::1 exclusion (Rust is_unspecified / is_loopback).
+	if b[15] <= 1 {
+		allZero := true
+		for _, o := range b[:15] {
+			if o != 0 {
+				allZero = false
+				break
+			}
+		}
+		if allZero {
+			return false
+		}
+	}
+	for _, o := range b[:10] {
+		if o != 0 {
+			return false
+		}
+	}
+	// Mapped: bytes 10-11 are 0xff 0xff. Compatible: bytes 10-11 are zero.
+	return (b[10] == 0xff && b[11] == 0xff) || (b[10] == 0 && b[11] == 0)
+}
+
+// querySideIsV4MappedOrCompat reports whether one query side is a
+// v4-mapped/compatible IPv6 address for the #16803 ingress-drop gate. The
+// family is colon-strict where the caller supplied it: a side hinted "v4"
+// is never gated, and an UNHINTED side whose address folds via To4()
+// (a genuine dotted-quad, or a net.IP-only caller's folded mapped
+// literal) keeps the documented #6377 fallback and is never gated either
+// — net.ParseIP renders both as the same ::ffff: 16-byte form, so bytes
+// alone cannot separate them without the hint. A side hinted "v6", or an
+// unhinted side that does not fold (ordinary v6, including the
+// IPv4-compatible ::/96 form, whose To4() is nil), is tested on its
+// 16-byte bytes. A nil side is an omitted wildcard, never gated.
+func querySideIsV4MappedOrCompat(ip net.IP, fam string) bool {
+	if ip == nil {
+		return false
+	}
+	if fam == "v4" {
+		return false
+	}
+	if fam == "" && ip.To4() != nil {
+		return false
+	}
+	return ipv6IsV4MappedOrCompat(ip)
+}
+
+// queryHasV4MappedOrCompatSide is the #16803 gate predicate: any
+// v6-family side (source OR destination, mirroring the Rust
+// ipv6_frame_has_v4_mapped_or_compat SRC-OR-DST check) is v4-mapped or
+// v4-compatible.
+func queryHasV4MappedOrCompatSide(q Query) bool {
+	return querySideIsV4MappedOrCompat(q.SrcIP, q.SrcFamily) ||
+		querySideIsV4MappedOrCompat(q.DstIP, q.DstFamily)
+}
 
 // queryTupleFamily resolves the address family ("v4"/"v6"/"") of one side of a
 // query for the unsupported-tuple gate. It prefers the colon-strict text hint
@@ -1478,6 +1581,41 @@ func Match(cfg *config.Config, q Query) (res Result) {
 			}
 		}
 		return Result{UnsupportedTupleFamily: true, Action: config.PolicyDeny}
+	}
+	// #16803 (#10686/#11669): an IPv4-mapped (::ffff:0:0/96) or
+	// IPv4-compatible (::/96, excluding :: and ::1) IPv6 source OR
+	// destination is dropped by the userspace helper at ingress BEFORE
+	// VLAN/zone/session/NAT/policy evaluation
+	// (ipv6_frame_has_v4_mapped_or_compat in poll_descriptor/mod.rs; the
+	// decapsulated/injected path re-checks after decapsulation). The gate
+	// precedes the host/transit disposition split, so it applies to
+	// host-bound (junos-host) queries too — unlike the transit-only
+	// RouteDrop advisory below, which stays exempt for host-bound queries.
+	// Return the first-class ingress-drop verdict instead of certifying a
+	// policy verdict the runtime never reaches. This runs after the
+	// (V4 src, V6 dst) unsupported-tuple gate: the two are disjoint by
+	// family resolution (a mapped side hinted colon-strict "v6" never
+	// resolves "v4" for that gate, and a genuine v4 side is never
+	// mapped/compat), so ordering between them cannot mask either.
+	// ContentRejected rides additively exactly as on the tuple gate
+	// (#9993). The WireGuard-underlay exemption in the Rust gate (a UDP
+	// datagram to a locally-owned WG listen port is kernel/control-socket
+	// traffic, not policy-evaluated inner traffic) has no Query input and
+	// cannot be modelled here; an operator querying that exact underlay
+	// tuple still reads this ingress-drop verdict, which is the correct
+	// policy-stage answer — the underlay datagram itself is never
+	// policy-evaluated either.
+	if queryHasV4MappedOrCompatSide(q) {
+		if cfg != nil {
+			snapshot, _ := querySnapshotFor(cfg, q.FeedOverlay)
+			if len(snapshot.rejectionReasons) > 0 {
+				defer func() {
+					res.ContentRejected = true
+					res.ContentRejectionReasons = slices.Clone(snapshot.rejectionReasons)
+				}()
+			}
+		}
+		return Result{V4MappedCompatIngressDrop: true, Action: config.PolicyDeny}
 	}
 	// #4373 (E4/H2/H7): multicast / broadcast / unspecified / loopback transit
 	// destinations are dropped at ROUTE LOOKUP before policy. #11004 adds a
