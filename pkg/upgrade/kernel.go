@@ -71,11 +71,21 @@ const (
 	// NVRAM mutation (#5847). The INACTIVE slot's selector is (being) written,
 	// but `efibootmgr --bootnext` has NOT been positively confirmed via a
 	// readback. A journal stuck HERE — a crash between recording intent and the
-	// verified ARMED transition — is NOT a genuine in-flight trial: the firmware
-	// still boots the known-good default (no confirmed one-shot), so `Arm` may
-	// RE-ARM from ARMING and self-recovery must NOT suppress expired-lease
-	// failback on it (the drained node can rejoin). Only after a POSITIVE
-	// BootNext readback does the runner transition ARMING -> ARMED.
+	// verified ARMED transition — is NOT *by itself* a genuine in-flight trial:
+	// `Arm` may RE-ARM from ARMING and self-recovery must NOT suppress
+	// expired-lease failback on it (the drained node can rejoin). Only after a
+	// POSITIVE BootNext readback does the runner transition ARMING -> ARMED.
+	//
+	// #16809: ARMING alone does not prove "no one-shot was queued". Two paths
+	// reach ARMING with BootNext actually queued: (a) process death between
+	// SetBootNext and the ARMED rename, and (b) a SetBootNext error after the
+	// write landed (now cleared on the error branch; an unclearable or
+	// already-dead process cannot clear). So on BOOT the classification is
+	// evidence-based, not state-based: ARMING + BootCurrent == the inactive
+	// slot's entry + `uname -r` == CandidateVersion is a GENUINE trial and is
+	// gated exactly like ARMED (UnconfirmedTrial; see Promote). ARMING on any
+	// other boot (known-good slot, or a different running kernel) remains
+	// prepared intent: the firmware booted the known-good default.
 	KernelStateArming KernelState = "ARMING"
 
 	// KernelStateArmed: the INACTIVE slot's selector points at the candidate
@@ -276,10 +286,11 @@ type KernelSystem interface {
 	// dropped or partial-wrote the variable must not yield a false-ARMED journal.
 	GetBootNext() (string, error)
 	// ClearBootNext removes the one-shot BootNext variable (#6758). The
-	// two-phase arm calls it on EVERY failure that happens after SetBootNext
-	// has already succeeded, so NVRAM never stays armed while the durable
-	// journal records ARMING — a state the journal explicitly defines as "the
-	// firmware still boots the known-good default (no confirmed one-shot)".
+	// two-phase arm calls it on EVERY failure at or after the SetBootNext
+	// call (#16809: including SetBootNext's own error, whose write may
+	// have landed), so NVRAM never stays armed while the durable
+	// journal records ARMING — a state that, absent boot-time evidence
+	// of a trial (UnconfirmedTrial), means no confirmed one-shot.
 	// Clearing an already-absent BootNext is not an error.
 	ClearBootNext() error
 	// ArmWatchdog arms the persistent watchdog before the reboot (best

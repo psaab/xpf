@@ -171,16 +171,22 @@ func TestReadChannelStatusArmedAndIdle(t *testing.T) {
 	}
 }
 
-// ARMING is prepared intent whose firmware one-shot was never read back: the
-// next boot is the KNOWN-GOOD kernel. Reporting it as armed would tell an
-// operator a trial is in flight that will not happen.
+// ARMING is prepared intent whose firmware one-shot was never read back, on a
+// boot POSITIVELY known-good (the fake's default: no queued BootNext, running
+// kernel is the known-good). Reporting it as armed would tell an operator a
+// trial is in flight that will not happen. (An ARMING boot that IS the
+// candidate is the #16809 unconfirmed trial — kernel_arming_trial_16809_test.go.)
 func TestReadChannelStatusArmingIsNotArmed(t *testing.T) {
 	dir := t.TempDir()
 	f := newFakeKernelSystem()
 	r := newKernelRunner(t, f)
 	r.cfg.JournalPath = dir + "/kernel.state"
+	// A complete ARMING journal (candidate + both slots, as a real arm
+	// writes) so the #16809 boot classification has evidence to read: the
+	// fake boots the known-good slot and runs the known-good kernel.
 	if err := r.saveKernelJournal(&KernelJournal{
-		CandidateVersion: "cand", State: KernelStateArming,
+		CandidateVersion: "cand", KnownGoodVersion: "kg",
+		ActiveSlot: SlotA, InactiveSlot: SlotB, State: KernelStateArming,
 	}); err != nil {
 		t.Fatalf("saveKernelJournal: %v", err)
 	}
@@ -189,9 +195,19 @@ func TestReadChannelStatusArmingIsNotArmed(t *testing.T) {
 		t.Fatal("ARMING must NOT report armed — the firmware one-shot was " +
 			"never confirmed, so the next boot is known-good")
 	}
+	if st.UnconfirmedTrial {
+		t.Fatal("ARMING on a positively known-good boot must NOT report an " +
+			"unconfirmed trial (#16809 control)")
+	}
+	if st.TrialClassificationErr != nil {
+		t.Fatalf("known-good ARMING classification err = %v, want nil", st.TrialClassificationErr)
+	}
 	out := renderStatus(st)
 	if !strings.Contains(out, "ARMING is prepared intent only") {
 		t.Errorf("the ARMING distinction must be explained, not just implied:\n%s", out)
+	}
+	if !strings.Contains(out, "positively the KNOWN-GOOD") {
+		t.Errorf("the ARMING note must ground the known-good claim in this boot's evidence:\n%s", out)
 	}
 }
 

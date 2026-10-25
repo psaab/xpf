@@ -28,6 +28,20 @@ xpf (0.0.0) unstable; urgency=medium
     prefix was installed in table 999. It now resolves via
     cfg.ResolveKernelIfName (unit-0 collapse, VLAN, aliases),
     as transportVRFBinding already did since #15944.
+  * Upgrade/kernel: an ARMING journal is no longer asserted to mean
+    "the next boot is the known-good kernel" without boot evidence
+    (#16809). Two paths queued BootNext while the journal stayed
+    ARMING — process death between SetBootNext and the ARMED rename,
+    and a SetBootNext error after the write landed — so the candidate
+    could boot unverified while Promote, the HA election hold and the
+    status surface all treated it as an ordinary boot. The SetBootNext
+    error branch now clears BootNext like every other arm failure; on
+    boot, ARMING with BootCurrent on the candidate slot and the
+    candidate kernel running is gated as a genuine (unconfirmed) trial
+    by Promote, held SECONDARY by the daemon, and reported as an
+    unconfirmed trial in kernel status, with unreadable evidence
+    failing closed. ARMING on a positively known-good boot is
+    unchanged.
   * Cluster/heartbeat: the duplicate-node-id heartbeat warning now
     drops a replay of this node's own heartbeat (#16789). The #14705
     gate verified only the HMAC, so an on-link spoofer replaying a

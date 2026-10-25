@@ -51,15 +51,28 @@ log() { echo "xpf-kernel-promote: $*" >&2; }
 ARM_RECORD="/var/lib/xpf/kernel-promote-binary"
 
 # The kernel-channel journal, consulted for ONE BIT and never for a path (see
-# ABSENT MEANS NOTHING IS ARMED, below): is a candidate ARMED right now?
+# ABSENT MEANS NOTHING IS ARMED, below): is a candidate IN TRIAL right now?
 #
-# `ARMED` specifically — not ARMING. ARMING is prepared-intent recorded before
-# the firmware one-shot is read back; only the verified ARMED state is a trial
-# in flight, which is exactly the distinction `upgrade.IsArmed` draws. Both
-# constants are pinned against Go by drift canaries
+# That is `ARMED` (the verified trial), OR `ARMING` when the arm record is
+# ALSO present (#16809): arming writes the record (recordPromoteBinary)
+# BEFORE the verified ARMED transition, so a record present with the journal
+# still at ARMING means the process died — or a landed-but-errored
+# SetBootNext's clear never ran — with BootNext actually queued, and THIS
+# boot may be the unconfirmed candidate. The record's presence is what the
+# shell can prove; the Go half (upgrade.UnconfirmedTrial / Promote)
+# convicts on BootCurrent + `uname -r` and gates it. Treating ARMING as
+# never-a-trial here (the pre-#16809 rule) made the gate refuse that boot
+# as "armed but no record to run" — exactly backwards: it left the
+# unverified candidate running with no gate at all.
+#
+# ARMING WITHOUT a record stays not-a-trial: no binary was ever designated
+# to verify it, so there is nothing this gate can run, and the journal
+# state alone must not manufacture a loud refusal on every interrupted arm.
+# Both state constants are pinned against Go by drift canaries
 # (TestPromoteScriptJournalMatchesGo, pkg/upgrade).
 KERNEL_JOURNAL="/var/lib/xpf/kernel-upgrade.state"
 JOURNAL_ARMED_STATE="ARMED"
+JOURNAL_ARMING_STATE="ARMING"
 
 # The DURABLE TRACE a did-not-run outcome leaves behind (#6622).
 #
@@ -507,13 +520,22 @@ unit_exec_start() {
 }
 
 # journal_state answers ONE question about the kernel-channel journal — is a
-# candidate ARMED? — and echoes exactly one of:
+# candidate IN TRIAL? — and echoes exactly one of:
 #
 #   absent        : no journal at all. Nothing was ever armed here.
-#   not-armed     : a journal exists but is not at the verified ARMED state
-#                   (PREFLIGHT/INSTALLED/ARMING mid-run, or a terminal
-#                   PROMOTED/REVERTED that has not been cleared yet).
-#   armed         : a candidate kernel IS in trial right now.
+#   not-armed     : a journal exists but is not at a trial state
+#                   (PREFLIGHT/INSTALLED mid-run, or a terminal
+#                   PROMOTED/REVERTED that has not been cleared yet), OR it
+#                   is ARMING *with no arm record present* — prepared intent
+#                   whose one-shot was never shown to be queued (#16809).
+#   arming        : ARMING *with the arm record present*: the record is
+#                   written before the ARMED transition, so a one-shot may
+#                   have been queued without a verified ARMED record
+#                   (#16809). Only returned when the record exists; with the
+#                   record absent ARMING folds into not-armed, because there
+#                   is no designated binary to gate with either way. The Go
+#                   half convicts on BootCurrent + uname -r.
+#   armed         : a candidate kernel IS in a verified trial right now.
 #   indeterminate : a journal exists but cannot be read as one. Absence of
 #                   evidence is not evidence of absence, so this is NOT folded
 #                   into "not-armed".
@@ -524,11 +546,9 @@ unit_exec_start() {
 # and the reason the one-line sidecar exists. This function must never grow a
 # path extraction.
 #
-# The match is line-scoped and requires the closing quote, so `"ARMING"` and a
-# hypothetical `"ARMED_X"` do not satisfy it, and an escaped occurrence inside
-# some other value (`\"state\":`) cannot either. Its cost if it were ever wrong
-# is bounded to a message: this runs only when the record is absent, in which
-# case the gate cannot run regardless of the answer.
+# The match is line-scoped and requires the closing quote, so `"ARMING"` and
+# a hypothetical `"ARMED_X"` do not satisfy the ARMED pattern, and an escaped
+# occurrence inside some other value (`\"state\":`) cannot either.
 journal_state() {
     [ -e "$KERNEL_JOURNAL" ] || { echo absent; return 0; }
     if [ ! -f "$KERNEL_JOURNAL" ] || [ ! -r "$KERNEL_JOURNAL" ]; then
@@ -537,11 +557,19 @@ journal_state() {
     fi
     jline=""
     # `|| [ -n "$jline" ]` so a final line with no trailing newline is still
-    # examined: json.MarshalIndent output ends at `}` with no newline, and a
-    # compact single-line rendering would otherwise never be read at all.
+    # examined: json.MarshalIndent output ends at the closing brace with no
+    # newline, and a compact single-line rendering would otherwise never be
+    # read at all.
     while IFS= read -r jline || [ -n "$jline" ]; do
         case "$jline" in
             *'"state":'*"\"$JOURNAL_ARMED_STATE\""*) echo armed; return 0 ;;
+            *'"state":'*"\"$JOURNAL_ARMING_STATE\""*)
+                if [ -f "$ARM_RECORD" ] && [ -r "$ARM_RECORD" ]; then
+                    echo arming
+                else
+                    echo not-armed
+                fi
+                return 0 ;;
         esac
         jline=""
     done < "$KERNEL_JOURNAL"
@@ -692,9 +720,28 @@ if [ ! -e "$ARM_RECORD" ]; then
             exit 0
             ;;
     esac
-    log "no armed kernel candidate recorded ($ARM_RECORD absent, $KERNEL_JOURNAL" \
+    log "no kernel candidate in trial recorded ($ARM_RECORD absent, $KERNEL_JOURNAL" \
         "$JSTATE); nothing to promote"
     exit 0
+fi
+
+# #16809: the record is present but the journal never reached ARMED. That is
+# the unconfirmed-trial shape (process death between SetBootNext and the
+# ARMED rename, or a landed-but-errored SetBootNext): BootNext may have been
+# queued, and THIS boot may be the candidate. Do NOT refuse and do NOT take
+# the quiet exit — fall through and run the recorded binary; the Go half
+# (Promote/UnconfirmedTrial) convicts on BootCurrent + uname -r and either
+# gates the candidate or no-ops as an ordinary boot. Refusing here (the
+# pre-#16809 "ARMING is never a trial" reading) is the one outcome that
+# leaves an unverified candidate running with no gate at all. A journal in
+# any OTHER non-ARMED state with a record present keeps the existing flow:
+# the Go half no-ops or resolves it, exactly as a verified-ARMED journal's
+# gate run does.
+JSTATE=$(journal_state)
+if [ "$JSTATE" = arming ]; then
+    log "journal is ARMING with an arm record present — a one-shot may have been" \
+        "queued without a verified ARMED record (#16809); running the recorded" \
+        "gate, which classifies this boot on BootCurrent + uname -r"
 fi
 
 case "$RECORDED" in
