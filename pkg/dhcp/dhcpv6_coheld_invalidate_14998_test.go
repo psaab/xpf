@@ -281,10 +281,13 @@ func TestRunDHCPv6CoHeldInvalidationRemovesWANAddress14998(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRunDHCPv6PDPruneDoesNotResetT1Wait14998(t *testing.T) {
-	// LeaseTime 40s obtained 19s ago: T1 (20s) is only ~1s away, lease
-	// deadline (Obtained+40s) is ~21s away. PD already expired. If the
-	// PD-prune path restarts a fresh full m.after(t1=20s), the recorded
-	// post-prune wait is 20s; anchored, it is ~1s.
+	// LeaseTime 40s obtained 19s ago. The PD (valid 1s, already
+	// expired) is the shortest held binding, so #16553 anchors T1 at
+	// half its 1s valid lifetime — already past, so Renew fires
+	// immediately rather than at the IA_NA T1 (20s). If the PD-prune
+	// path restarted a fresh full IA_NA wait, the recorded wait would
+	// be 20s; anchored (#14998) + earliest-binding (#16553), no wait
+	// >= 10s may ever be issued.
 	leaseA := &Lease{
 		Interface: "wan0", Family: AFInet6,
 		Address:   netip.MustParsePrefix("2606:4700::50/128"),
@@ -369,16 +372,15 @@ func TestRunDHCPv6PDPruneDoesNotResetT1Wait14998(t *testing.T) {
 	default:
 		t.Fatal("RENEW exchange never fired")
 	}
-	if len(t1Durations) == 0 {
-		t.Fatal("no T1 wait was scheduled")
-	}
-	// Decisive: any wait issued after the first (i.e. after the PD prune)
-	// must be the remaining time to the anchored T1 (~1s), never the full
-	// t1 (20s). If exactly one wait was recorded the renew raced ahead of
-	// the prune — acceptable only because T1 was ~1s out in any case.
-	for i, d := range t1Durations[1:] {
+	// #16553: the expired PD drives T1, so Renew may fire with NO
+	// recorded >=1s wait at all (the anchored remaining time is ~0).
+	// The invariant that survives is that no wait is ever the full
+	// IA_NA t1 (20s) — neither as a fresh schedule nor as a post-prune
+	// reset. (Pre-#16553 this asserted >=1 recorded wait because T1
+	// was always the IA_NA half-life.)
+	for i, d := range t1Durations {
 		if d >= 10*time.Second {
-			t.Fatalf("post-prune T1 wait #%d = %v, want remaining ~1s (anchored), not full t1=20s reset", i+2, d)
+			t.Fatalf("T1 wait #%d = %v, want anchored PD-driven remainder, not full IA_NA t1=20s", i+1, d)
 		}
 	}
 }

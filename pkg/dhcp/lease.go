@@ -26,6 +26,15 @@ type Lease struct {
 	LeaseTime    time.Duration
 	Obtained     time.Time
 
+	// RenewAt / RebindAt are the server-supplied T1/T2 renewal timers
+	// (#16553): DHCPv6 IA_NA T1/T2 or DHCPv4 options 58/59. Zero means
+	// the server did not supply that timer, in which case the renewal
+	// schedule falls back to the RFC default for that tier (0.5 /
+	// 0.875 of the shortest held valid lifetime). They are durations
+	// from Obtained, not remaining times.
+	RenewAt  time.Duration
+	RebindAt time.Duration
+
 	// ClasslessRoutes holds RFC 3442 routes learned from DHCPv4 option 121/249
 	// and IPv6 Route Information options learned from Router Advertisements.
 	// The default route, when represented here, is programmed through the same

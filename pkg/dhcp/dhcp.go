@@ -101,6 +101,11 @@ type DelegatedPrefix struct {
 	PreferredLifetime time.Duration
 	ValidLifetime     time.Duration
 	Obtained          time.Time
+	// RenewAt / RebindAt are the IA_PD T1/T2 from the granting IA_PD
+	// option (#16553, RFC 8415 §18.2.4: earliest T1/T2 across IAs
+	// drives Renew/Rebind). Zero = server supplied none for this IA.
+	RenewAt  time.Duration
+	RebindAt time.Duration
 	// Pinned records that this delegation was accepted ONLY because an
 	// operator pin on its client covers it (#12533). Separate from any
 	// other provenance: it travels through reconcile into RA emission
