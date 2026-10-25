@@ -696,7 +696,7 @@ func (s *SessionSync) syncSweep() int {
 				suppressUnannouncedForPBRActivePeer(s, announced, "sweep_v4") {
 				return true
 			}
-			msg := encodeSessionV4(key, val)
+			msg := s.encodeSessionV4ForPeer(key, val)
 			if s.queueMessage(msg, &s.stats.SessionsSent, "sweep_v4") {
 				s.stats.SweepSessionsSent.Add(1)
 				count++
@@ -747,7 +747,7 @@ func (s *SessionSync) syncSweep() int {
 				suppressUnannouncedForPBRActivePeer(s, announced, "sweep_v6") {
 				return true
 			}
-			msg := encodeSessionV6(key, val)
+			msg := s.encodeSessionV6ForPeer(key, val)
 			if s.queueMessage(msg, &s.stats.SessionsSent, "sweep_v6") {
 				s.stats.SweepSessionsSent.Add(1)
 				count++

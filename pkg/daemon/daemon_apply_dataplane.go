@@ -202,12 +202,12 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				})
 				mgr.SetCaptureAuthorityCommitter(func(configGeneration uint64, snapshot *dpuserspace.ConfigSnapshot) {
 					d.publishIpsecCaptureSnapshotAuthorityForSnapshot(configGeneration, snapshot)
-					// #16880: use only the capture authority's applied snapshot;
-					// candidate configs can be published while the helper still
-					// enforces an older snapshot.
-					if snapshot != nil && snapshot.Config != nil {
-						d.updateSessionSyncTimeoutProfile(snapshot.Config)
-					}
+				})
+				// Timeout profiles follow full snapshots that actually became
+				// the applied config authority; FIB-only capture commits may
+				// carry a retained candidate in their capture snapshot.
+				mgr.SetAppliedConfigCommitter(func(_ uint64, cfg *config.Config) {
+					d.updateSessionSyncTimeoutProfile(cfg)
 				})
 				mgr.SetPolicySnapshotCommitter(d.policyInvalidationSnapshotPublished)
 				mgr.SetPolicySnapshotPublishFailure(d.rejectDeferredSnapshotPublish)

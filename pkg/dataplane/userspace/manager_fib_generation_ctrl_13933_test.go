@@ -75,6 +75,86 @@ func TestBumpFIBGenerationPublishesRouteOnlyGenerationToUserspaceCtrl13933(t *te
 	}
 }
 
+func TestBumpFIBGenerationDoesNotPromoteUnappliedTimeoutProfile16880(t *testing.T) {
+	m, ctrl := seamedManager(t)
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	m.proc = &exec.Cmd{Process: proc}
+	const priorFIB, bumpedFIB = 41, 42
+	appliedCfg, candidateCfg := &config.Config{}, &config.Config{}
+	appliedCfg.Security.Flow.UDPSessionTimeout = 10
+	candidateCfg.Security.Flow.UDPSessionTimeout = 60
+	m.lastSnapshot = &ConfigSnapshot{
+		Version:       ProtocolVersion,
+		Generation:    5,
+		FIBGeneration: priorFIB,
+		Config:        candidateCfg,
+	}
+	m.appliedSnapshot = appliedSnapshot{Config: appliedCfg, Generation: 4}
+	m.generation = 5
+	ctrl.haveStored = true
+	ctrl.stored = userspaceCtrlValue{
+		Enabled: 1, MetadataVersion: userspaceMetadataVersion,
+		ConfigGeneration: 5, FIBGeneration: priorFIB,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
+	}
+	m.ctrlWasEnabled = true
+	m.bumpFIBGenerationHook = func() (uint32, error) { return bumpedFIB, nil }
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type != "bump_fib_generation" {
+			return nil
+		}
+		*status = ProcessStatus{
+			Enabled:                true,
+			Workers:                1,
+			Bindings:               readyHelperStatus().Bindings,
+			NeighborGeneration:     1,
+			LastSnapshotGeneration: 5,
+			LastFIBGeneration:      req.Snapshot.FIBGeneration,
+		}
+		return nil
+	}
+
+	profileConfig := appliedCfg
+	var captureConfigGeneration, captureSnapshotGeneration uint64
+	var captureConfig *config.Config
+	m.SetCaptureAuthorityCommitter(func(generation uint64, snapshot *ConfigSnapshot) {
+		captureConfigGeneration = generation
+		if snapshot != nil {
+			captureSnapshotGeneration = snapshot.Generation
+			captureConfig = snapshot.Config
+		}
+	})
+	m.SetAppliedConfigCommitter(func(_ uint64, cfg *config.Config) {
+		profileConfig = cfg
+	})
+	if _, err := m.BumpFIBGeneration(); err != nil {
+		t.Fatalf("BumpFIBGeneration: %v", err)
+	}
+	if captureConfigGeneration != 4 || captureSnapshotGeneration != 6 || captureConfig != candidateCfg {
+		t.Fatalf("FIB-only capture commit = (config gen %d, snapshot gen %d, config %p), want (4, 6, candidate %p)",
+			captureConfigGeneration, captureSnapshotGeneration, captureConfig, candidateCfg)
+	}
+	if profileConfig != appliedCfg {
+		profileTimeout := 0
+		if profileConfig != nil {
+			profileTimeout = profileConfig.Security.Flow.UDPSessionTimeout
+		}
+		t.Fatalf("FIB-only callback promoted candidate timeout config %p (%ds), want applied config %p (10s)",
+			profileConfig, profileTimeout, appliedCfg)
+	}
+
+	m.mu.Lock()
+	m.markAppliedSnapshotLocked()
+	m.mu.Unlock()
+	if profileConfig != candidateCfg {
+		t.Fatalf("applied snapshot did not update timeout profile config: got %p, want candidate %p",
+			profileConfig, candidateCfg)
+	}
+}
+
 func TestBumpFIBGenerationHelperRefusalDoesNotPublishStaleCtrlGeneration13933(t *testing.T) {
 	m, ctrl := seamedManager(t)
 	proc, err := os.FindProcess(os.Getpid())

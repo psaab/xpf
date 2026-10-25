@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -674,6 +675,15 @@ func TestPrimaryLivenessUsesConfiguredTCPWindows16880(t *testing.T) {
 			profile: ReceiverSessionTimeoutProfile{TCPEstablishedSeconds: 10},
 		},
 		{
+			name:    "established zero-timeout mirror uses configured window",
+			timeout: 10,
+			value: dataplane.SessionValue{
+				Timeout: 0, SessionID: 10,
+				TCPHandshakeState: dataplane.TCPHandshakeStateEstablished,
+			},
+			profile: ReceiverSessionTimeoutProfile{TCPEstablishedSeconds: 10},
+		},
+		{
 			name:    "closing",
 			timeout: 12,
 			value: dataplane.SessionValue{
@@ -913,4 +923,82 @@ func TestNewDualSessionSyncWakesForShortTimeout16880(t *testing.T) {
 	if got := ss.sweepWakeScanIntervalSeconds.Load(); got != 1 {
 		t.Fatalf("dual-fabric queued scan request = %ds, want 1s", got)
 	}
+}
+
+func TestPrimaryLivenessMarkerRequiresPeerCapability16880(t *testing.T) {
+	key4 := dataplane.SessionKey{SrcPort: 1000, DstPort: 443, Protocol: 6}
+	val4 := dataplane.SessionValue{PrimaryLiveness: true}
+	key6 := dataplane.SessionKeyV6{SrcPort: 1000, DstPort: 443, Protocol: 6}
+	val6 := dataplane.SessionValueV6{PrimaryLiveness: true}
+
+	for _, tc := range []struct {
+		name string
+		ss   *SessionSync
+		want bool
+	}{
+		{name: "unknown peer", ss: &SessionSync{}},
+		{name: "capable peer", ss: func() *SessionSync {
+			ss := &SessionSync{}
+			ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+			return ss
+		}(), want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, got4, ok4 := decodeSessionV4Payload(tc.ss.encodeSessionV4PayloadForPeer(key4, val4))
+			_, got6, ok6 := decodeSessionV6Payload(tc.ss.encodeSessionV6PayloadForPeer(key6, val6))
+			if !ok4 || !ok6 {
+				t.Fatalf("peer-aware session encoding failed: v4=%v v6=%v", ok4, ok6)
+			}
+			if got4.PrimaryLiveness != tc.want || got6.PrimaryLiveness != tc.want {
+				t.Fatalf("primary-liveness markers v4/v6 = %v/%v, want %v",
+					got4.PrimaryLiveness, got6.PrimaryLiveness, tc.want)
+			}
+		})
+	}
+}
+
+func TestQueuedPrimaryLivenessFrameRechecksPeerAfterDowngrade16880(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	localConn, peerConn := net.Pipe()
+	defer localConn.Close()
+	defer peerConn.Close()
+	ss.mu.Lock()
+	ss.conn0 = localConn
+	ss.mu.Unlock()
+	ss.stats.Connected.Store(true)
+	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+
+	key := dataplane.SessionKey{SrcPort: 12345, DstPort: 443, Protocol: 6}
+	value := dataplane.SessionValue{PrimaryLiveness: true}
+	msg := ss.encodeSessionV4ForPeer(key, value)
+	_, queuedValue, ok := decodeSessionV4Payload(msg[syncHeaderSize:])
+	if !ok || !queuedValue.PrimaryLiveness {
+		t.Fatal("fixture did not queue a liveness-marked frame for the capable peer")
+	}
+	// The frame was encoded for the old capable peer, then the reconnect
+	// advertises an older peer before the queued bytes are written.
+	ss.testBeforeQueuedWrite = func() {
+		ss.peerCapabilityFlags2.Store(0)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ss.sendLoop(ctx)
+	}()
+	ss.sendCh <- msg
+
+	msgType, payload := readFrame(t, peerConn)
+	if msgType != syncMsgSessionV4 {
+		t.Fatalf("reconnected peer received frame type %d, want session v4", msgType)
+	}
+	_, got, ok := decodeSessionV4Payload(payload)
+	if !ok {
+		t.Fatal("reconnected peer received a malformed session frame")
+	}
+	if got.PrimaryLiveness {
+		t.Fatal("reconnected incapable peer received the stale liveness marker")
+	}
+	cancel()
+	<-done
 }

@@ -232,6 +232,29 @@ func encodeSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) [
 	binary.LittleEndian.PutUint32(hdr[8:12], uint32(len(payload)))
 	return append(hdr, payload...)
 }
+
+func (s *SessionSync) encodeSessionV4PayloadForPeer(key dataplane.SessionKey, val dataplane.SessionValue) []byte {
+	if !s.PrimaryLivenessCapable() {
+		val.PrimaryLiveness = false
+	}
+	return encodeSessionV4Payload(key, val)
+}
+
+func (s *SessionSync) encodeSessionV6PayloadForPeer(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
+	if !s.PrimaryLivenessCapable() {
+		val.PrimaryLiveness = false
+	}
+	return encodeSessionV6Payload(key, val)
+}
+
+func (s *SessionSync) encodeSessionV4ForPeer(key dataplane.SessionKey, val dataplane.SessionValue) []byte {
+	return encodeRawMessage(syncMsgSessionV4, s.encodeSessionV4PayloadForPeer(key, val))
+}
+
+func (s *SessionSync) encodeSessionV6ForPeer(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
+	return encodeRawMessage(syncMsgSessionV6, s.encodeSessionV6PayloadForPeer(key, val))
+}
+
 func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
 	buf := make([]byte, 512)
 	off := 0

@@ -59,6 +59,18 @@ func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, *ConfigSna
 	m.mu.Unlock()
 }
 
+// SetAppliedConfigCommitter wires a callback that runs when a full snapshot
+// becomes the applied-config authority. It does not run for FIB-only updates.
+// The callback runs under Manager.mu and MUST NOT re-enter the manager.
+func (m *Manager) SetAppliedConfigCommitter(committer func(uint64, *config.Config)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.appliedConfigCommitter = committer
+	m.mu.Unlock()
+}
+
 // SetPolicySnapshotCommitter wires the callback that runs after a full policy
 // snapshot has been acknowledged. Unlike capture-authority commits, this
 // excludes FIB-only generation bumps.
