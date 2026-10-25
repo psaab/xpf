@@ -1192,16 +1192,10 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                     // the alias and the record. Two or more survivors: the
                     // key stays ambiguous and unresolvable.
                     //
-                    // #15106 (A71-03): the #14383 code re-resolved survivors
-                    // by scanning every row of `shared_sessions` while holding
-                    // its mutex — the #11299 shape, O(table) per NAT'd removal.
-                    // The per-wire-key owner multiset maintained in
-                    // `publish_shared_session` now answers in O(1). The roster
-                    // is only trusted when it actually recorded the removed
-                    // owner and the index is not saturated; the legacy scan
-                    // below stays as a fail-closed-compatible fallback for
-                    // unrecorded/saturated state (e.g. a session seeded by a
-                    // bare map insert), reseeding the roster from its result.
+                    // #15106/#16561: the per-wire-key owner multiset in
+                    // `publish_shared_session` answers in O(1); the scan
+                    // below is only the fail-closed fallback for
+                    // unrecorded/at-ceiling state, reseeding the roster.
                     let mut forward_wire_sessions =
                         lock_shared_recover(shared_forward_wire_sessions);
                     let mut wire_ambiguities =
@@ -1209,7 +1203,9 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                     let roster_before = wire_ambiguities.wire_owner_count(&wire_key);
                     let remaining =
                         wire_ambiguities.remove_wire_owner(&wire_key, &entry.key);
-                    let roster_trusted = wire_ambiguities.wire_owners_trusted()
+                    // #16561: trust the roster on its own live state,
+                    // not the alias saturation (see types/mod.rs).
+                    let roster_trusted = wire_ambiguities.wire_roster_trusted_for_removal()
                         && roster_before > 0
                         && remaining == roster_before - 1;
                     // Verdict: 0 = drop alias + forget, 1 = restore the sole
@@ -1222,6 +1218,8 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                         };
                         (first, remaining)
                     } else {
+                        // #16561: counted (operator-visible O(table) work).
+                        SHARED_WIRE_FALLBACK_SCANS.fetch_add(1, Ordering::Relaxed);
                         // Legacy fallback: scan at most 2 survivors (same
                         // filter/take as pre-#15106), then reseed the roster
                         // so later removals take the O(1) path.

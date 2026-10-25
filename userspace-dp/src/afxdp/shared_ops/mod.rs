@@ -11,9 +11,11 @@ use std::sync::{MutexGuard, TryLockError};
 /// serialization question. On its own a publish rate says nothing; paired
 /// with `SHARED_SESSION_PUBLISH_LOCK_CONTENDED` it says whether the publish
 /// mutexes are where new flows queue up.
+mod counters;
 mod lookup;
 mod reverse_synth;
 mod store;
+pub(super) use counters::*;
 pub(super) use lookup::*;
 pub(super) use reverse_synth::*;
 pub(super) use store::*;

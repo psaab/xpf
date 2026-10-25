@@ -20,6 +20,7 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 		SharedNatAmbiguitySaturated:        1,
 		SharedWireAmbiguityKeys:            102,
 		SharedWireAmbiguitySaturated:       0,
+		SharedWireFallbackScansTotal:       103,
 		HATransitionDemoteDropped:          16,
 		HATransitionRefreshDropped:         17,
 		HATransitionVacateDropped:          18,
@@ -49,8 +50,8 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 	for metric := range ch {
 		got = append(got, metric)
 	}
-	if len(got) != 34 {
-		t.Fatalf("emitted %d metrics, want 34 counters / labeled series / gauges", len(got))
+	if len(got) != 35 {
+		t.Fatalf("emitted %d metrics, want 35 counters / labeled series / gauges", len(got))
 	}
 	// #15104: the four ambiguity gauges carry live values, not counters.
 	for _, gauge := range []struct {
@@ -89,6 +90,7 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 		{c.userspaceIoUringWriteRefusedBytes, 13},
 		{c.userspaceRouteChangeUnrejudgedSessions, 14},
 		{c.userspaceOwnerRGFilingsDeclined, 15},
+		{c.userspaceSharedWireFallbackScans, 103},
 		{c.userspaceSessionDeleteRefusedIdentity, 21},
 		{c.userspaceSessionDeleteDroppedReleased, 22},
 		{c.userspaceTunnelPurgeReservationsReleased, 23},

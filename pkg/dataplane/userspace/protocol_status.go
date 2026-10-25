@@ -451,6 +451,7 @@ type ProcessStatus struct {
 	SharedNatAmbiguitySaturated               uint64 `json:"shared_nat_ambiguity_saturated,omitempty"`
 	SharedWireAmbiguityKeys                   uint64 `json:"shared_wire_ambiguity_keys,omitempty"`
 	SharedWireAmbiguitySaturated              uint64 `json:"shared_wire_ambiguity_saturated,omitempty"`
+	SharedWireFallbackScansTotal              uint64 `json:"shared_wire_fallback_scans_total,omitempty"`
 	SharedSessionPublishLockAcquisitionsTotal uint64 `json:"shared_session_publish_lock_acquisitions_total,omitempty"`
 	SharedSessionPublishLockContendedTotal    uint64 `json:"shared_session_publish_lock_contended_total,omitempty"`
 	SessionReplicationUpsertsTotal            uint64 `json:"session_replication_upserts_total,omitempty"`

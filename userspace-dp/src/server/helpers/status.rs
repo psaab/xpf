@@ -142,6 +142,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.shared_nat_ambiguity_saturated = state.afxdp.shared_nat_ambiguity_saturated();
     state.status.shared_wire_ambiguity_keys = state.afxdp.shared_wire_ambiguity_keys();
     state.status.shared_wire_ambiguity_saturated = state.afxdp.shared_wire_ambiguity_saturated();
+    state.status.shared_wire_fallback_scans_total = state.afxdp.shared_wire_fallback_scans_total();
     state.status.shared_session_publish_lock_acquisitions_total =
         state.afxdp.shared_session_publish_lock_acquisitions_total();
     state.status.shared_session_publish_lock_contended_total =

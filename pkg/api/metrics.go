@@ -726,6 +726,7 @@ type xpfCollector struct {
 	userspaceSharedNatAmbiguitySaturated      *prometheus.Desc
 	userspaceSharedWireAmbiguityKeys          *prometheus.Desc
 	userspaceSharedWireAmbiguitySaturated     *prometheus.Desc
+	userspaceSharedWireFallbackScans          *prometheus.Desc
 	userspaceHATransitionDropped              *prometheus.Desc
 	userspaceHATransitionStaleSkipped         *prometheus.Desc
 	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc

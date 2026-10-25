@@ -3218,6 +3218,9 @@ fn remove_shared_session_if_resolves_wire_survivor_from_owner_index_15106() {
 /// the shared table. Release-only (mirrors the #11299 churn probe shape):
 /// medians over repeats at 1k vs 100k rows, ratio bound 2x. The legacy scan
 /// makes the 100k median scale ~linearly; the owner multiset keeps it flat.
+/// #16561: rows carry DISTINCT translated ports (distinct wire keys) so
+/// the 100k leg exercises the roster above the 16,384 alias bound — the
+/// regime where the pre-fix latch forced the O(table) fallback.
 /// Run with:
 /// `cargo test --release remove_shared_session_if_nat_removal_cost_15106 -- --ignored --nocapture`
 #[cfg(not(debug_assertions))]
@@ -3239,7 +3242,14 @@ fn remove_shared_session_if_nat_removal_cost_15106() {
                 resolution: test_resolution(),
                 nat: NatDecision {
                     rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
-                    rewrite_src_port: Some(50_000),
+                    // #16561: DISTINCT translated ports per row give
+                    // DISTINCT wire keys. The pre-fix fixture pinned
+                    // port 50_000 for every row, so all 100k sessions
+                    // shared one wire key and the roster never crossed
+                    // its 16,384 distinct-key cap — the probe proved
+                    // O(1) only in the one regime where the defect
+                    // cannot occur.
+                    rewrite_src_port: Some(1024 + (index % 60_000) as u16),
                     ..NatDecision::default()
                 },
                 install_table_domain: 0,

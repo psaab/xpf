@@ -364,12 +364,26 @@ impl super::Coordinator {
     }
 
     pub fn shared_wire_ambiguity_saturated(&self) -> u64 {
-        u64::from(
-            crate::afxdp::shared_ops::lock_shared_recover(
-                &self.sessions.owner_rg_indexes.wire_ambiguities,
-            )
-            .saturated(),
-        )
+        // #16561: read the LIVE wire saturation (alias bound OR roster
+        // ceiling), not `saturated()` alone — the pre-fix gauge read
+        // only the alias arm, so it reported 0 while the old
+        // `wire_saturated` latch was forcing every NAT'd removal into
+        // the O(table) fallback scan.
+        let idx = crate::afxdp::shared_ops::lock_shared_recover(
+            &self.sessions.owner_rg_indexes.wire_ambiguities,
+        );
+        u64::from(idx.saturated() || idx.wire_saturated())
+    }
+
+    /// #16561: NAT'd forward removals that fell back to the legacy
+    /// O(table) survivor scan because the wire-owner roster was not
+    /// trusted for that key. Zero on a healthy node (the roster is
+    /// sized to the shared-session ceiling and trust is a live
+    /// function); rising means O(table)-per-close under the global
+    /// mutex is back. Surfaced as
+    /// `xpf_userspace_shared_wire_fallback_scans_total`.
+    pub fn shared_wire_fallback_scans_total(&self) -> u64 {
+        crate::afxdp::shared_ops::SHARED_WIRE_FALLBACK_SCANS.load(Ordering::Relaxed)
     }
 
     pub fn session_replication_upserts_total(&self) -> u64 {

@@ -48,6 +48,11 @@ func (c *xpfCollector) initUserspaceStatus13280Descriptors() {
 		"1 when the shared forward-wire ambiguity index is at its live bound and failing closed (#15104).",
 		nil, nil,
 	)
+	c.userspaceSharedWireFallbackScans = prometheus.NewDesc(
+		"xpf_userspace_shared_wire_fallback_scans_total",
+		"NAT'd forward removals that fell back to the O(table) survivor scan because the wire-owner roster was not trusted (#16561).",
+		nil, nil,
+	)
 	c.userspaceHATransitionDropped = prometheus.NewDesc(
 		"xpf_userspace_ha_transition_dropped_total",
 		"HA redundancy-group transition commands dropped at worker queue capacity.",

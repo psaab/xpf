@@ -60,15 +60,17 @@ pub(super) type WireOwnerMultiset = FastMap<SessionKey, WireOwnerRoster>;
 /// (#15104: saturation is computed from the live size, never latched).
 pub(super) struct SharedNatAmbiguityIndex {
     aliases: FastMap<SessionKey, Option<SessionKey>>,
-    /// #15106: per-wire-key live-owner multiset. Its LOCK is shared with
-    /// `aliases` (the same mutex), so observe/remove and ambiguity state move
-    /// together. Soft-capped at the wire-key level: above the ingest cap the
-    /// roster saturates fail-closed via `wire_saturated`.
+    /// #15106/#16561: per-wire-key live-owner multiset. Its LOCK is shared
+    /// with `aliases` (the same mutex), so observe/remove and ambiguity
+    /// state move together. The roster is NOT capped at the alias bound:
+    /// its capacity is the shared-session ceiling (see `MAX_WIRE_KEYS`),
+    /// so a roster that recorded every owner stays exact for every
+    /// population the shared map can actually hold. Trust is a function
+    /// of the LIVE population (#16561): a `wire_saturated` latch that
+    /// never resets short of a full stop is forbidden — the only
+    /// untrusted state is a live population at/above the roster ceiling,
+    /// which removals clear without a helper restart (#15104 rule).
     wire_owners: WireOwnerMultiset,
-    /// #15106: set when `wire_owners` reaches its wire-key capacity. While
-    /// set, wire survivor resolution declines (fail-closed ambiguity
-    /// semantics) rather than trusting a partial roster.
-    wire_saturated: bool,
     // #15104: per-alias owner multiset. `aliases` alone cannot tell a
     // removal whether another live forward entry still maps to the same
     // alias, so publish/remove maintain this count and `forget_owner`
@@ -83,14 +85,62 @@ impl Default for SharedNatAmbiguityIndex {
         Self {
             aliases: FastMap::default(),
             wire_owners: WireOwnerMultiset::default(),
-            wire_saturated: false,
             owners: FastMap::default(),
         }
     }
 }
 
+/// #16561 test seam: live wire-key population at/above this bound makes
+/// the roster untrusted. Production always uses `MAX_WIRE_KEYS`; a test
+/// override lets cells exercise the live saturation/recovery boundary
+/// without publishing 2M sessions.
+#[cfg(test)]
+pub(super) static WIRE_KEY_CAP_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 impl SharedNatAmbiguityIndex {
     const MAX_KEYS: usize = 16_384;
+
+    /// #16561: roster capacity, DECOUPLED from the alias cap above. The
+    /// alias index fails closed at 16,384 live keys (#15104); the wire
+    /// roster must stay exact for every population the shared session
+    /// map can hold, so it is sized to the shared-session ceiling: the
+    /// synced-import ENTRY cap is `2 * worker_count *
+    /// DEFAULT_MAX_SESSIONS` (131,072 per worker, see
+    /// `synced_import_cap_for`). The roster counts DISTINCT WIRE KEYS,
+    /// at most one per live forward session, so the population it must
+    /// cover is bounded by the number of live forwards. Sized here as a
+    /// generous static bound (16 workers x 131,072) that covers the
+    /// appliance ceiling without needing a runtime worker count in this
+    /// index; above it the roster fails closed from the LIVE size (see
+    /// `wire_saturated`), never from a latch.
+    pub(super) const MAX_WIRE_KEYS: usize = 16 * 131_072;
+    pub(super) fn wire_key_cap(&self) -> usize {
+        #[cfg(test)]
+        {
+            let override_cap =
+                WIRE_KEY_CAP_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+            if override_cap != 0 {
+                return override_cap;
+            }
+        }
+        Self::MAX_WIRE_KEYS
+    }
+
+    /// #16561: roster saturation as a function of the LIVE population —
+    /// the roster holds a distinct wire key per live NAT'd forward, so
+    /// it is saturated exactly while that population is at/above the
+    /// roster ceiling. Removals drop the population and the roster
+    /// recovers with no latch, no reseed and no helper restart (the
+    /// #15104 rule that the old `wire_saturated` latch violated).
+    pub(super) fn wire_saturated(&self) -> bool {
+        self.wire_owners.len() >= self.wire_key_cap()
+    }
+
+    /// Live distinct wire keys recorded in the roster (gauge/test).
+    pub(super) fn wire_key_len(&self) -> usize {
+        self.wire_owners.len()
+    }
 
     /// #15104: saturation is a function of the LIVE population. A live
     /// population at or above `MAX_KEYS` fails closed; once removals drop
@@ -216,7 +266,6 @@ impl SharedNatAmbiguityIndex {
     pub(super) fn clear(&mut self) {
         self.aliases.clear();
         self.wire_owners.clear();
-        self.wire_saturated = false;
         self.owners.clear();
     }
 
@@ -230,13 +279,15 @@ impl SharedNatAmbiguityIndex {
     /// above the ingest cap are not recorded (fail-closed saturation),
     /// matching the `remember` alias policy.
     pub(super) fn observe_wire_owner(&mut self, wire_key: SessionKey, owner: SessionKey) {
-        if self.wire_saturated {
-            return;
-        }
-        if self.saturated() {
-            self.wire_saturated = true;
-            return;
-        }
+        // #16561: do NOT consult the alias saturation here. The alias
+        // index fails closed at 16,384 live keys, but the wire roster is
+        // decoupled from that cap and must keep recording every owner
+        // above it — coupling them (the pre-fix `if self.saturated()`
+        // latch arm) is exactly what made the roster untrusted for the
+        // whole 100k-row regime #15106 targeted. The only refusal is a
+        // NEW wire key while the LIVE roster population is at the
+        // roster ceiling: fail closed for that key, recover automatically
+        // when removals drop the population (`wire_saturated` is live).
         match self.wire_owners.get_mut(&wire_key) {
             Some(roster) => {
                 if !roster.contains(&owner) {
@@ -244,13 +295,12 @@ impl SharedNatAmbiguityIndex {
                 }
             }
             None => {
-                if self.wire_owners.len() == Self::MAX_KEYS {
-                    self.wire_saturated = true;
-                } else {
-                    let mut roster = WireOwnerRoster::new();
-                    roster.push(owner);
-                    self.wire_owners.insert(wire_key, roster);
+                if self.wire_owners.len() >= self.wire_key_cap() {
+                    return;
                 }
+                let mut roster = WireOwnerRoster::new();
+                roster.push(owner);
+                self.wire_owners.insert(wire_key, roster);
             }
         }
     }
@@ -273,10 +323,32 @@ impl SharedNatAmbiguityIndex {
         remaining
     }
 
-    /// Whether a wire survivor answer from `wire_owners` can be trusted:
-    /// false once either saturation latch is set (fail-closed).
+    /// Whether a wire survivor answer from `wire_owners` can be trusted.
+    /// #16561: a function of the LIVE populations only — false while the
+    /// alias index is saturated (its ambiguity verdict is fail-closed,
+    /// so a roster answer must not override it) or while the live roster
+    /// population is at its own ceiling (some wire keys were refused and
+    /// the roster may be partial). Both clear on removal; neither
+    /// latches. Note the alias arm can still make the roster untrusted
+    /// above 16,384 live ALIASES for keys the alias index tracks, but
+    /// the removal path below deliberately keys its trust decision to
+    /// the roster (`wire_roster_trusted_for_removal`), not to this
+    /// combined predicate, so a saturated alias index no longer forces
+    /// the O(table) fallback scan for NAT'd removals.
     pub(super) fn wire_owners_trusted(&self) -> bool {
-        !self.wire_saturated && !self.saturated()
+        !self.wire_saturated() && !self.saturated()
+    }
+
+    /// #16561: trust predicate for the removal path in
+    /// `remove_shared_session_if`. The roster is exact for a wire key
+    /// when it recorded the removed owner and the live roster
+    /// population is below its ceiling — regardless of the alias
+    /// index's 16,384 saturation, which governs reverse/wire UNIQUENESS
+    /// proofs, not the roster's survivor count. Using the combined
+    /// predicate here re-armed the O(table) scan under the global mutex
+    /// for every NAT'd close above 16k live sessions.
+    pub(super) fn wire_roster_trusted_for_removal(&self) -> bool {
+        !self.wire_saturated()
     }
 
     /// The first (published-first) live owner recorded for `wire_key`, used
