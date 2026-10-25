@@ -65,9 +65,10 @@ impl SessionTable {
     /// when the canonical wheel tick changes, so per-second touches within
     /// the same tick produce zero new wheel entries.
     ///
-    /// A held row preserves its pending, horizon-aligned recheck across
-    /// same-id snapshot imports. Recomputing a stale hint remains anchored to
-    /// `first_held_ns`, never to the latest call to this scheduler.
+    /// A held row preserves its pending horizon recheck across same-id
+    /// snapshot imports only while its idle-deadline inputs are unchanged.
+    /// Timeout/close changes enqueue the new idle deadline; the next HA HOLD
+    /// pass re-arms against that context's stale ceiling.
     ///
     /// MUST be called only AFTER `last_seen_ns` / `expires_after_ns`
     /// have been written and the `&mut` borrow on `self.entries` has
@@ -80,20 +81,31 @@ impl SessionTable {
         let new_tick = match self.entry_by_key_mut(key) {
             Some(entry) => {
                 if entry.first_held_ns != 0 && entry.held_wheel_tick != 0 {
-                    if entry.wheel_tick >= cursor_tick {
+                    let schedule_inputs_unchanged = entry.held_wheel_last_seen_ns
+                        == entry.last_seen_ns
+                        && entry.held_wheel_expires_after_ns == entry.expires_after_ns;
+                    if schedule_inputs_unchanged && entry.wheel_tick >= cursor_tick {
                         None
                     } else {
-                        let tick = Self::held_recheck_tick(
-                            now_ns,
-                            entry.first_held_ns,
-                            entry.expires_after_ns,
-                        );
+                        // A same-id snapshot preserves the pending held hint
+                        // only while its idle deadline and timeout are
+                        // unchanged. A timeout/close update invalidates the
+                        // horizon entry and gets an ordinary check at its new
+                        // idle deadline; that pass re-arms HOLD with the
+                        // current HA ceiling context.
+                        entry.held_wheel_tick = 0;
+                        entry.held_wheel_last_seen_ns = 0;
+                        entry.held_wheel_expires_after_ns = 0;
+                        let expiration_ns =
+                            entry.last_seen_ns.saturating_add(entry.expires_after_ns);
+                        let tick = target_tick_for(now_ns, expiration_ns);
                         entry.wheel_tick = tick;
-                        entry.held_wheel_tick = tick;
                         Some(tick)
                     }
                 } else {
                     entry.held_wheel_tick = 0;
+                    entry.held_wheel_last_seen_ns = 0;
+                    entry.held_wheel_expires_after_ns = 0;
                     let expiration_ns =
                         entry.last_seen_ns.saturating_add(entry.expires_after_ns);
                     let tick = target_tick_for(now_ns, expiration_ns);
@@ -353,7 +365,7 @@ impl SessionTable {
                                     &key,
                                     now_ns,
                                     first_held_ns,
-                                    e_expires_after_ns,
+                                    ha.stale_ceiling_ns(e_expires_after_ns),
                                 );
                                 continue;
                             }
@@ -556,6 +568,8 @@ impl SessionTable {
                         .expect("entry was just read via entry_by_key; no concurrent mutation");
                     entry_mut.wheel_tick = new_target_tick;
                     entry_mut.held_wheel_tick = 0;
+                    entry_mut.held_wheel_last_seen_ns = 0;
+                    entry_mut.held_wheel_expires_after_ns = 0;
                     self.wheel.buckets[new_bucket].push_back(WheelEntry {
                         key,
                         scheduled_tick: new_target_tick,
@@ -593,6 +607,8 @@ impl SessionTable {
         };
         entry_mut.wheel_tick = new_target_tick;
         entry_mut.held_wheel_tick = 0;
+        entry_mut.held_wheel_last_seen_ns = 0;
+        entry_mut.held_wheel_expires_after_ns = 0;
         self.wheel.buckets[new_bucket].push_back(WheelEntry {
             key: key.clone(),
             scheduled_tick: new_target_tick,
@@ -605,14 +621,16 @@ impl SessionTable {
         key: &SessionKey,
         now_ns: u64,
         first_held_ns: u64,
-        expires_after_ns: u64,
+        stale_ceiling_ns: u64,
     ) {
-        let scheduled_tick = Self::held_recheck_tick(now_ns, first_held_ns, expires_after_ns);
+        let scheduled_tick = Self::held_recheck_tick(now_ns, first_held_ns, stale_ceiling_ns);
         let entry_mut = self
             .entry_by_key_mut(key)
             .expect("HOLD: entry was just read via entry_by_key; no concurrent mutation");
         entry_mut.wheel_tick = scheduled_tick;
         entry_mut.held_wheel_tick = scheduled_tick;
+        entry_mut.held_wheel_last_seen_ns = entry_mut.last_seen_ns;
+        entry_mut.held_wheel_expires_after_ns = entry_mut.expires_after_ns;
         let bucket = bucket_for_tick(scheduled_tick);
         self.wheel.buckets[bucket].push_back(WheelEntry {
             key: key.clone(),
@@ -622,11 +640,8 @@ impl SessionTable {
     }
 
     #[inline]
-    fn held_recheck_tick(now_ns: u64, first_held_ns: u64, expires_after_ns: u64) -> u64 {
-        let ceiling_ns = expires_after_ns
-            .saturating_mul(STALE_SYNCED_CEILING_MULT)
-            .min(STALE_SYNCED_CEILING_ABS_NS);
-        let deadline_ns = first_held_ns.saturating_add(ceiling_ns);
+    fn held_recheck_tick(now_ns: u64, first_held_ns: u64, stale_ceiling_ns: u64) -> u64 {
+        let deadline_ns = first_held_ns.saturating_add(stale_ceiling_ns);
         // The wheel processes the target tick on the next GC call, so its
         // existing strict-`>` gate crosses the ceiling at deadline + one tick.
         let horizon_index = now_ns.saturating_sub(first_held_ns) / HELD_RECHECK_HORIZON_NS;

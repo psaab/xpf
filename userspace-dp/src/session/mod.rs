@@ -1287,6 +1287,10 @@ struct SessionEntry {
     /// Zero means no held recheck is pending; otherwise it matches
     /// `wheel_tick` and is anchored to the first HOLD observation.
     held_wheel_tick: u64,
+    /// #16881: inputs for the pending held recheck. Same-incarnation snapshot
+    /// imports preserve them, while timeout/close changes invalidate the hint.
+    held_wheel_last_seen_ns: u64,
+    held_wheel_expires_after_ns: u64,
     /// #7212: the `(config generation, logical ingress interface)` this
     /// direction's static input-filter verdict was last derived under, or
     /// [`FilterRevalidationStamp::UNVALIDATED`].

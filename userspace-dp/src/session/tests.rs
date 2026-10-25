@@ -7643,6 +7643,130 @@ fn held_same_id_reimports_keep_one_pending_recheck_16881() {
     );
 }
 
+/// A same-id import with a shortened timeout must invalidate its old held
+/// horizon and reap from the unchanged first-HOLD anchor (#16881).
+#[test]
+fn held_same_id_timeout_shrink_rearms_before_old_horizon_16881() {
+    use crate::SessionSyncRequest;
+    use crate::server::helpers::build_synced_session_entry;
+
+    const SEC: u64 = WHEEL_TICK_NS;
+
+    let mut table = SessionTable::new();
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 300, 0));
+    let request = SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "8.8.8.8".to_string(),
+        src_port: 12_345,
+        dst_port: 443,
+        ingress_zone_id: TEST_LAN_ZONE_ID,
+        egress_zone_id: TEST_WAN_ZONE_ID,
+        owner_rg_id: 1,
+        session_id: 77,
+        ..SessionSyncRequest::default()
+    };
+    let zones = rustc_hash::FxHashMap::default();
+    let import = |table: &mut SessionTable, now_ns| {
+        let entry =
+            build_synced_session_entry(&request, &zones, 0).expect("FIXTURE: synced request");
+        let key = entry.key.clone();
+        assert!(table.upsert_synced_with_origin(entry.into_session_install(now_ns), false));
+        key
+    };
+
+    let installed_at = SEC;
+    let key = import(&mut table, installed_at);
+    let held_at = installed_at + 302 * SEC;
+    table.last_gc_ns = installed_at;
+    assert!(run_expire_ha(&mut table, held_at, &[], &|_| 0).is_empty());
+    assert_eq!(table.first_held_ns_for(&key), Some(held_at));
+    let old_held_tick = table.entry_by_key(&key).unwrap().held_wheel_tick;
+
+    // The old idle deadline is already past. Shrinking the timeout on a
+    // same-id snapshot must schedule an immediate ordinary check, not preserve
+    // the 255-second horizon calculated under the old timeout.
+    let shortened_at = held_at + 10 * SEC;
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 1, 0));
+    assert_eq!(import(&mut table, shortened_at), key);
+    let entry = table.entry_by_key(&key).unwrap();
+    assert_eq!(entry.expires_after_ns, SEC);
+    assert_eq!(entry.first_held_ns, held_at);
+    assert_eq!(entry.held_wheel_tick, 0);
+    assert!(entry.wheel_tick < old_held_tick);
+
+    table.last_gc_ns = shortened_at;
+    let reap_at = shortened_at + 2 * SEC;
+    let expired = run_expire_ha(&mut table, reap_at, &[], &|_| 0);
+    assert_eq!(expired.len(), 1, "shortened ceiling reaps the held import");
+    assert_eq!(table.last_pop_stats().reaped_stale_synced, 1);
+    assert!(table.entry_by_key(&key).is_none());
+}
+
+/// A close propagated to a held peer-synced companion invalidates the old
+/// long-timeout hint and permits reap on the short RST ceiling (#16881).
+#[test]
+fn rst_close_reschedules_held_peer_synced_companion_16881() {
+    const SEC: u64 = WHEEL_TICK_NS;
+
+    let mut table = SessionTable::new();
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 0, 0));
+    let forward = key_v4();
+    let reverse = reverse_session_key(&forward, NatDecision::default());
+    let installed_at = SEC;
+    for (key, is_reverse) in [(&forward, false), (&reverse, true)] {
+        let mut md = metadata();
+        md.owner_rg_id = 1;
+        md.is_reverse = is_reverse;
+        assert!(table.install_with_protocol_with_origin(
+            (*key).clone(),
+            decision(),
+            md,
+            SessionOrigin::SyncImport,
+            installed_at,
+            PROTO_TCP,
+            TCP_ACK,
+        ));
+    }
+    let _ = table.drain_deltas(8);
+
+    // Keep the reverse half alive without refreshing its idle forward
+    // companion, so the forward row can enter HOLD while the reverse still
+    // accepts a real close packet.
+    let reverse_refresh_at = installed_at + 299 * SEC;
+    assert!(table.lookup(&reverse, reverse_refresh_at, TCP_ACK).is_some());
+    let held_at = installed_at + 302 * SEC;
+    table.last_gc_ns = installed_at;
+    assert!(run_expire_ha(&mut table, held_at, &[], &|_| 0).is_empty());
+    let old_held_tick = table.entry_by_key(&forward).unwrap().held_wheel_tick;
+    assert_eq!(table.first_held_ns_for(&forward), Some(held_at));
+
+    let close_at = held_at + SEC;
+    assert!(table.lookup(&reverse, close_at, TCP_RST).is_some());
+    let companion = table.entry_by_key(&forward).unwrap();
+    assert!(companion.closing && companion.reset);
+    assert_eq!(companion.expires_after_ns, TCP_RST_TIMEOUT_NS);
+    assert_eq!(companion.held_wheel_tick, 0);
+    assert!(companion.wheel_tick < old_held_tick);
+
+    // The propagated 2s close window gets an immediate first recheck. Its
+    // short ceiling is 3x the RST timeout, still measured from first HOLD.
+    let first_close_recheck = close_at + 4 * SEC;
+    table.last_gc_ns = held_at;
+    assert!(run_expire_ha(&mut table, first_close_recheck, &[], &|_| 0).is_empty());
+    assert!(table.entry_by_key(&forward).is_some());
+
+    table.last_gc_ns = first_close_recheck;
+    let reap_at = close_at + 6 * SEC;
+    let expired = run_expire_ha(&mut table, reap_at, &[], &|_| 0);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].key, forward);
+    assert!(table.entry_by_key(&forward).is_none());
+    assert!(table.entry_by_key(&reverse).is_some());
+}
+
 /// Held rows on a future horizon cannot defer an ordinary active-session
 /// expiry on the main wheel.
 #[test]
@@ -8061,48 +8185,56 @@ fn expire_reaps_held_past_relative_ceiling() {
 
 #[test]
 fn expire_reaps_held_at_abs_cap_for_long_timeout() {
-    // A 30-day TCP timeout session, held, is reaped at the ABS cap
-    // (~7d), NOT at 90 days (MULT x 30d). Bounds the pathological config.
-    // To keep the wheel walk bounded we install at a large `then` and
-    // jump in two bounded legs (~30d then ~7d) -- the wheel is O(elapsed
-    // ticks) but each tick is a near-empty bucket check.
+    // A true 30-day TCP timeout has a 90-day relative ceiling, but the
+    // absolute cap reaps it after 7 days. Installing directly keeps the
+    // helper's 300s test override from silently changing the behavior under
+    // test.
     let mut table = SessionTable::new();
     let key = key_v4();
     let then = 1_000_000_000u64;
     let thirty_days_secs = 30u64 * 24 * 60 * 60;
-    table.set_timeouts(SessionTimeouts::from_seconds(thirty_days_secs, 0, 0));
-    install_synced_tcp(&mut table, &key, 1, then);
-    table.last_gc_ns = then;
-    // Cross the 30-day timeout so the entry is idle-crossed. First hold
-    // observation arms first_held_ns at t1 with held_ns == 0 -> HELD
-    // (NOT reaped from its stale install-time last_seen).
     let thirty_days_ns = thirty_days_secs * 1_000_000_000;
+    table.set_timeouts(SessionTimeouts::from_seconds(thirty_days_secs, 0, 0));
+    let mut md = metadata();
+    md.owner_rg_id = 1;
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        decision(),
+        md,
+        SessionOrigin::SyncImport,
+        then,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let _ = table.drain_deltas(8);
+    assert_eq!(
+        table.entry_by_key(&key).unwrap().expires_after_ns,
+        thirty_days_ns,
+        "fixture must retain the configured 30-day timeout"
+    );
+
+    table.last_gc_ns = then;
     let t1 = then + thirty_days_ns + 2_000_000_000;
     let expired = run_expire_ha(&mut table, t1, &[], &|_| 0);
-    assert!(
-        expired.is_empty(),
-        "idle-crossed long session held on first observation, not reaped"
-    );
-    // This synthetic 30-day jump makes the ordinary wheel cursor sweep many
-    // ticks, but the first HOLD arms a future, first-HOLD-anchored horizon.
-    // Production advances about one tick per call; the load-bearing checks
-    // are retention and the stale-synced deadline anchor.
+    assert!(expired.is_empty());
     assert_eq!(table.last_pop_stats().held_standby, 1);
-    assert_eq!(
-        table.last_pop_stats().reaped_stale_synced,
-        0,
-        "not yet reaped"
-    );
-    // NOTE: presence via `table.len()`, NOT `lookup()` -- lookup refreshes
-    // last_seen_ns (it is the packet path) and would defeat the timeout.
-    assert_eq!(
-        table.len(),
-        1,
-        "long-timeout synced session retained on the standby"
-    );
-    // ABS cap is 7 days from first_held_ns (t1). After > 7 days it is
-    // reaped (the relative ceiling would be 90 days).
+    assert_eq!(table.last_pop_stats().reaped_stale_synced, 0);
+    assert_eq!(table.len(), 1, "first HOLD retains the long-timeout row");
+
+    // It remains held beyond the 900s relative ceiling a 300s helper
+    // override would have used. The actual relative ceiling is 90 days.
     table.last_gc_ns = t1;
+    let past_short_relative_ceiling = t1 + 901_000_000_000;
+    let expired = run_expire_ha(&mut table, past_short_relative_ceiling, &[], &|_| 0);
+    assert!(expired.is_empty());
+    assert_eq!(table.len(), 1);
+    assert!(
+        table.last_pop_stats().held_standby > 0,
+        "the stored long timeout must still govern the relative ceiling"
+    );
+
+    // The absolute 7-day cap wins over the 90-day relative ceiling.
+    table.last_gc_ns = past_short_relative_ceiling;
     let seven_days_ns = 7u64 * 24 * 60 * 60 * 1_000_000_000;
     let t2 = t1 + seven_days_ns + 1_000_000_000;
     let expired = run_expire_ha(&mut table, t2, &[], &|_| 0);

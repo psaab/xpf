@@ -37,8 +37,8 @@ structure.)
   `SessionOrigin`, `SessionDeltaKind`, `SessionDelta`, and
   `ExpiredSession`. The internal per-entry `SessionEntry` (and its #2120
   standby-gate fields `seen_rg_epoch` / `first_held_ns` plus the #16881
-  `held_wheel_tick`, see "Standby retention" below) stays file-private in
-  `mod.rs`, NOT here.
+  `held_wheel_tick` and its scheduling-input markers, see "Standby retention"
+  below) stays file-private in `mod.rs`, NOT here.
 - `key.rs` — `SessionKey`, `forward_wire_key` (ingress 5-tuple),
   `reverse_canonical_key` (post-NAT lookup), and
   `reply_matches_forward_session` (the predicate used to detect "this
@@ -1108,7 +1108,9 @@ Held entries are rechecked on the far edge of the timer-wheel window
 (255 seconds), not on each worker tick. Each next recheck is aligned to
 `first_held_ns` and capped at the original stale-synced deadline. The wheel
 processes that target on the following GC pass, preserving the gate's strict
-`>` ceiling check. Same-ID imports preserve the first-HOLD anchor and tick.
+`>` ceiling check. Same-ID imports preserve the first-HOLD anchor and pending
+tick only while the idle-deadline inputs are unchanged; timeout/close updates
+schedule the new idle deadline before another context-aware HOLD check.
 
 The HOLD keys on FORWARDING, not origin, so a still-`ForwardFlow`
 demotion-window entry (the demote flip not yet applied) is held too.
