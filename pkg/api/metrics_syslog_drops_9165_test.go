@@ -62,7 +62,7 @@ func TestSyslogDropCountersReachAScrape9165(t *testing.T) {
 	})
 	got := syslogDropSeries9165(t, gather9165(t, c))
 
-	if v, ok := got["addr=10.0.0.9:514,protocol=udp,reason=write"]; !ok || v != 7 {
+	if v, ok := got["addr=10.0.0.9:514,protocol=udp,reason=write,sink=security"]; !ok || v != 7 {
 		t.Fatalf("the UDP write-drop counter did not reach the scrape (got %v, present=%v); "+
 			"series seen: %v", v, ok, got)
 	}
@@ -78,7 +78,7 @@ func TestEveryDropReasonIsEmittedEvenAtZero9165(t *testing.T) {
 	})
 	got := syslogDropSeries9165(t, gather9165(t, c))
 	for _, reason := range []string{"write", "dial", "cooldown"} {
-		if _, ok := got["addr=10.0.0.9:514,protocol=udp,reason="+reason]; !ok {
+		if _, ok := got["addr=10.0.0.9:514,protocol=udp,reason="+reason+",sink=security"]; !ok {
 			t.Errorf("reason=%s is not emitted at zero, so it cannot be rated", reason)
 		}
 	}
@@ -93,13 +93,13 @@ func TestCollectorsAreDistinguishedByAddrAndProtocol9165(t *testing.T) {
 		{RemoteAddr: "10.0.0.10:514", Protocol: "tcp", Writes: 5, Dials: 2},
 	})
 	got := syslogDropSeries9165(t, gather9165(t, c))
-	if got["addr=10.0.0.9:514,protocol=udp,reason=write"] != 3 {
+	if got["addr=10.0.0.9:514,protocol=udp,reason=write,sink=security"] != 3 {
 		t.Errorf("udp collector series wrong: %v", got)
 	}
-	if got["addr=10.0.0.10:514,protocol=tcp,reason=write"] != 5 {
+	if got["addr=10.0.0.10:514,protocol=tcp,reason=write,sink=security"] != 5 {
 		t.Errorf("tcp collector write series wrong: %v", got)
 	}
-	if got["addr=10.0.0.10:514,protocol=tcp,reason=dial"] != 2 {
+	if got["addr=10.0.0.10:514,protocol=tcp,reason=dial,sink=security"] != 2 {
 		t.Errorf("tcp collector dial series wrong: %v", got)
 	}
 }
@@ -131,7 +131,23 @@ func TestNewServerCopiesTheSyslogDropHook9165(t *testing.T) {
 			"never reaches the collector and the family is permanently absent")
 	}
 	got := syslogDropSeries9165(t, gather9165(t, newCollector(srv)))
-	if got["addr=10.0.0.9:514,protocol=udp,reason=write"] != 4 {
+	if got["addr=10.0.0.9:514,protocol=udp,reason=write,sink=security"] != 4 {
 		t.Errorf("hook did not reach the scrape through NewServer: %v", got)
+	}
+}
+
+// #16769: the same collector on both sinks must not collapse into one
+// series — a system-syslog drop and a security-stream drop to the same
+// addr:port are different losses.
+func TestSyslogDropsDistinguishedBySink16769(t *testing.T) {
+	c := collectorWithSyslogDrops9165([]logging.SyslogDropStat{
+		{Sink: "security", RemoteAddr: "10.0.0.9:514", Protocol: "udp", Writes: 3},
+		{Sink: "system", RemoteAddr: "10.0.0.9:514", Protocol: "udp", Writes: 7},
+	})
+	got := syslogDropSeries9165(t, gather9165(t, c))
+	if got["addr=10.0.0.9:514,protocol=udp,reason=write,sink=security"] != 3 {
+		t.Errorf("security sink series wrong: %v", got)
+	}
+	if got["addr=10.0.0.9:514,protocol=udp,reason=write,sink=system"] != 7 {
 	}
 }
