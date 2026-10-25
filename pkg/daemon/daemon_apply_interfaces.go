@@ -479,8 +479,11 @@ func (d *Daemon) applyInterfaceReconcile(cfg *config.Config) error {
 	d.bindRoutingInstanceMembers(cfg)
 
 	// 1.7. Create bond (LAG) interfaces for fabric-options member-interfaces.
-	// Always call ApplyBonds (even with empty list) so stale bonds from
-	// previous configs get cleaned up via ClearBonds().
+	// Always call ApplyClusterBonds (even with empty list) so stale bonds
+	// from previous configs get cleaned up. #16587: pass the cluster
+	// identity so a peer-owned fab is not realized as a local empty bond;
+	// reapGhosts is armed only on this process's first reconcile, the
+	// upgrade window in which a pre-fix ghost may exist untracked.
 	var bondIfaces []*config.InterfaceConfig
 	for _, ifc := range cfg.Interfaces.Interfaces {
 		if ifc == nil {
@@ -490,7 +493,13 @@ func (d *Daemon) applyInterfaceReconcile(cfg *config.Config) error {
 			bondIfaces = append(bondIfaces, ifc)
 		}
 	}
-	if err := d.routing.ApplyBonds(bondIfaces); err != nil {
+	inCluster := cfg.Chassis.Cluster != nil
+	nodeID := 0
+	if inCluster {
+		nodeID = cfg.Chassis.Cluster.NodeID
+	}
+	reapGhosts := !d.bondGhostReapDone.Swap(true)
+	if err := d.routing.ApplyClusterBonds(bondIfaces, inCluster, nodeID, reapGhosts); err != nil {
 		slog.Warn("failed to apply bonds", "err", err)
 		errs = append(errs, fmt.Errorf("apply bonds: %w", err))
 	}

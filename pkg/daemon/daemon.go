@@ -148,6 +148,10 @@ type Daemon struct {
 	// torn-down backend published on purpose (#6741), so a non-nil cell is
 	// not proof of an armed forwarding path.
 	dataplaneArmed atomic.Bool
+	// bondGhostReapDone latches after this process's first interface
+	// reconcile so the #16587 untracked peer-fabric ghost reap runs only
+	// in the upgrade window, never on every commit.
+	bondGhostReapDone atomic.Bool
 	// transitGateOwned latches kernel-transit ownership once the appliance
 	// marker, committed config, or a successful dataplane arm establishes it.
 	// It stays true for this daemon lifetime so a first-commit rollback that
