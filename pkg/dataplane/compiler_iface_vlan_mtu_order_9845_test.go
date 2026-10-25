@@ -150,7 +150,7 @@ func applyWithKernelMTU9845(t *testing.T, cfg *config.Config, initialMTU map[str
 	})
 	origVLAN := ensureVLANSubInterfaceFn
 	t.Cleanup(func() { ensureVLANSubInterfaceFn = origVLAN })
-	ensureVLANSubInterfaceFn = func(parent string, vlanID int) (int, bool, error) {
+	ensureVLANSubInterfaceFn = func(parent string, vlanID int, _ bool) (int, bool, error) {
 		name := fmt.Sprintf("%s.%d", parent, vlanID)
 		idx, ok := h.index[name]
 		if !ok {

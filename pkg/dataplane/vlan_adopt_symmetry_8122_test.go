@@ -104,7 +104,7 @@ func TestVLANBringUpFailureIsNotRecordedAsACreateFailure_8122(t *testing.T) {
 
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			ensureVLANSubInterfaceFn = func(string, int) (int, bool, error) {
+			ensureVLANSubInterfaceFn = func(string, int, bool) (int, bool, error) {
 				return 0, row.created, row.err
 			}
 			result := newResult()
@@ -192,7 +192,7 @@ func TestVLANAcceptRAIsAppliedOnBothPaths_8122(t *testing.T) {
 		return nil, errors.New("no such device")
 	}
 
-	idx, created, err := ensureVLANSubInterface(parentName, 50)
+	idx, created, err := ensureVLANSubInterface(parentName, 50, false)
 	if err != nil {
 		t.Fatalf("adopt must succeed: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestVLANBringUpFailureCarriesTheSentinel_8122(t *testing.T) {
 			return errors.New("operation not permitted")
 		}
 
-		_, wasCreated, err := ensureVLANSubInterface(parentName, 50)
+		_, wasCreated, err := ensureVLANSubInterface(parentName, 50, false)
 		if err == nil {
 			t.Fatal("a failed LinkSetUp must be reported")
 		}
@@ -292,7 +292,7 @@ func TestVLANBringUpFailureCarriesTheSentinel_8122(t *testing.T) {
 		vlanLinkAddSeam = func(netlink.Link) error { return nil }
 		vlanLinkSetUpSeam = func(netlink.Link) error { return nil }
 
-		_, _, err := ensureVLANSubInterface(parentName, 50)
+		_, _, err := ensureVLANSubInterface(parentName, 50, false)
 		if !errors.Is(err, errVLANBringUpFailed) {
 			t.Fatalf("want errVLANBringUpFailed, got %v", err)
 		}
@@ -304,7 +304,7 @@ func TestVLANBringUpFailureCarriesTheSentinel_8122(t *testing.T) {
 		vlanLinkAddSeam = func(netlink.Link) error { return errors.New("operation not permitted") }
 		vlanLinkSetUpSeam = func(netlink.Link) error { return nil }
 
-		_, _, err := ensureVLANSubInterface(parentName, 50)
+		_, _, err := ensureVLANSubInterface(parentName, 50, false)
 		if !errors.Is(err, errVLANCreateFailed) {
 			t.Fatalf("the #6893 apply-failing sentinel must survive: got %v", err)
 		}
@@ -321,7 +321,7 @@ func TestVLANBringUpFailureCarriesTheSentinel_8122(t *testing.T) {
 		vlanLinkAddSeam = func(netlink.Link) error { added = true; return nil }
 		vlanLinkSetUpSeam = func(netlink.Link) error { return nil }
 
-		idx, wasCreated, err := ensureVLANSubInterface(parentName, 50)
+		idx, wasCreated, err := ensureVLANSubInterface(parentName, 50, false)
 		if err != nil {
 			t.Fatalf("a clean create must succeed: %v", err)
 		}

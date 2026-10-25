@@ -35,6 +35,9 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 		if ifc == nil {
 			continue
 		}
+		if ifc.Disable {
+			continue
+		}
 		if owns, ok := rgOwners[name]; !ok || owns != rgID {
 			continue
 		}
@@ -54,8 +57,8 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 		if ifc.TaggingEnabled() {
 			for _, n := range unitNums {
 				unit := ifc.Units[n]
-				// #6780: nil unit derefs at len(unit.Addresses).
-				if unit == nil || len(unit.Addresses) == 0 {
+				// #16590 (#14575 residual): a disabled unit owns no address.
+				if unit == nil || unit.Disable || len(unit.Addresses) == 0 {
 					continue
 				}
 				subIface := linuxName
@@ -68,7 +71,7 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 			var vips []string
 			for _, n := range unitNums {
 				unit := ifc.Units[n]
-				if unit == nil { // #6780
+				if unit == nil || unit.Disable { // #6780 / #16590
 					continue
 				}
 				vips = append(vips, unit.Addresses...)

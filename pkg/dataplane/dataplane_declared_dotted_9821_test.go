@@ -131,7 +131,7 @@ func installShimSeams9821(t *testing.T, vlanSub *struct {
 		addrLinkByNameSeam, addrListSeam, addrAddSeam, addrDelSeam = oldLink, oldList, oldAdd, oldDel
 		linkSetMTUSeam = oldMTU
 	})
-	ensureVLANSubInterfaceFn = func(parentName string, vlanID int) (int, bool, error) {
+	ensureVLANSubInterfaceFn = func(parentName string, vlanID int, _ bool) (int, bool, error) {
 		if vlanSub != nil {
 			vlanSub.parent, vlanSub.vlan = parentName, vlanID
 		}
