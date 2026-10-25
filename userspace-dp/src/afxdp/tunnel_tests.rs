@@ -70,15 +70,20 @@ fn local_tunnel_io_error_is_not_fatal_for_retryable_io() {
     ));
 }
 
-#[test]
-fn select_live_binding_for_ifindex_round_robins_without_allocating_candidates() {
+// #16520: fixture with two bound bindings on ifindex 10 (+ one on 11).
+fn select_fixture() -> (
+    BTreeMap<u32, BindingIdentity>,
+    BTreeMap<u32, Arc<BindingLiveState>>,
+    Arc<BindingLiveState>,
+    Arc<BindingLiveState>,
+    Arc<BindingLiveState>,
+) {
     let live_a = Arc::new(BindingLiveState::new());
     live_a.bound.store(true, Ordering::Relaxed);
     let live_b = Arc::new(BindingLiveState::new());
     live_b.bound.store(true, Ordering::Relaxed);
     let live_other = Arc::new(BindingLiveState::new());
     live_other.bound.store(true, Ordering::Relaxed);
-
     let identities = BTreeMap::from([
         (
             1,
@@ -111,21 +116,95 @@ fn select_live_binding_for_ifindex_round_robins_without_allocating_candidates() 
             },
         ),
     ]);
-    let live = BTreeMap::from([(1, live_a.clone()), (2, live_b.clone()), (3, live_other)]);
+    let live = BTreeMap::from([
+        (1, live_a.clone()),
+        (2, live_b.clone()),
+        (3, live_other.clone()),
+    ]);
+    (identities, live, live_a, live_b, live_other)
+}
 
-    assert!(Arc::ptr_eq(
-        &select_live_binding_for_ifindex(&identities, &live, 10, 0).expect("slot 0"),
-        &live_a
-    ));
-    assert!(Arc::ptr_eq(
-        &select_live_binding_for_ifindex(&identities, &live, 10, 1).expect("slot 1"),
-        &live_b
-    ));
-    assert!(Arc::ptr_eq(
-        &select_live_binding_for_ifindex(&identities, &live, 10, 2).expect("slot wrap"),
-        &live_a
-    ));
-    assert!(select_live_binding_for_ifindex(&identities, &live, 12, 0).is_none());
+#[test]
+fn select_live_binding_same_flow_stays_on_same_binding_16520() {
+    let (identities, live, _a, _b, _other) = select_fixture();
+    let key = dummy_session_key(1000);
+    // Regression: pre-fix per-packet counter alternated bindings for
+    // consecutive packets of this flow. Now repeated selection with
+    // the same flow key must always return the identical binding.
+    let first =
+        select_live_binding_for_ifindex(&identities, &live, 10, Some(&key)).expect("first");
+    for _ in 0..16 {
+        let next =
+            select_live_binding_for_ifindex(&identities, &live, 10, Some(&key)).expect("repeat");
+        assert!(
+            Arc::ptr_eq(&first, &next),
+            "same flow must not spray across bindings"
+        );
+    }
+}
+
+#[test]
+fn select_live_binding_distinct_flows_spread_16520() {
+    let (identities, live, live_a, live_b, _other) = select_fixture();
+    // Distinct flows must still spread across both bindings.
+    let mut seen_a = false;
+    let mut seen_b = false;
+    for id in 0..256u16 {
+        let key = dummy_session_key(id);
+        let picked =
+            select_live_binding_for_ifindex(&identities, &live, 10, Some(&key)).expect("flow");
+        if Arc::ptr_eq(&picked, &live_a) {
+            seen_a = true;
+        } else if Arc::ptr_eq(&picked, &live_b) {
+            seen_b = true;
+        } else {
+            panic!("flow on ifindex 10 picked a binding for another ifindex");
+        }
+    }
+    assert!(seen_a && seen_b, "distinct flows must spread over bindings");
+}
+
+#[test]
+fn select_live_binding_flowless_uses_fixed_binding_16520() {
+    let (identities, live, live_a, _b, _other) = select_fixture();
+    // Flowless packets pin to the first bound binding every time,
+    // never spray; unknown ifindex still yields None.
+    for _ in 0..8 {
+        let picked = select_live_binding_for_ifindex(&identities, &live, 10, None)
+            .expect("flowless");
+        assert!(Arc::ptr_eq(&picked, &live_a));
+    }
+    assert!(select_live_binding_for_ifindex(&identities, &live, 12, None).is_none());
+    assert!(select_live_binding_for_ifindex(
+        &identities,
+        &live,
+        12,
+        Some(&dummy_session_key(1))
+    )
+    .is_none());
+}
+
+#[test]
+fn select_live_binding_skips_unbound_and_missing_16520() {
+    let (identities, mut live, live_a, _b, _other) = select_fixture();
+    // Unbind B: every flow (and flowless) must land on A, the only
+    // bound candidate — hash modulo is over bound candidates only.
+    live.get(&2).unwrap().bound.store(false, Ordering::Relaxed);
+    for id in 0..32u16 {
+        let key = dummy_session_key(id);
+        let picked =
+            select_live_binding_for_ifindex(&identities, &live, 10, Some(&key)).expect("flow");
+        assert!(Arc::ptr_eq(&picked, &live_a));
+    }
+    // Remove A from live map entirely: only unbound B remains -> None.
+    live.remove(&1);
+    assert!(select_live_binding_for_ifindex(
+        &identities,
+        &live,
+        10,
+        Some(&dummy_session_key(1))
+    )
+    .is_none());
 }
 
 // --- #1881 D.1b rotation gate -----------------------------------------
