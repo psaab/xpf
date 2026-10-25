@@ -1,4 +1,5 @@
 xpf (0.0.0) unstable; urgency=medium
+
   * Docs: correct the session module contract for #9412 and the
     established timeout (#16493). The session README still documented
     #9412 as OPEN — close state "does NOT cross" the HA session-sync
@@ -29,6 +30,7 @@ xpf (0.0.0) unstable; urgency=medium
     ADMIT_FULL / ADMIT_SHUTDOWN / ADMIT_BAD_LEASE drops and a false
     attestation FAIL); they now take blocking locks with bounded holds,
     so E23 moves only at genuine queue/per-flow capacity.
+
   * Userspace DP: make deferred conntrack-delete retries O(1) and
     poison-recovering (#16491). The housekeeping retry locked the
     shared-session map with .expect (re-panicking on a poisoned
@@ -39,6 +41,25 @@ xpf (0.0.0) unstable; urgency=medium
     close_delta_is_stale_incarnation; a shared row in any scope
     sharing the bare tuple still fences the delete (the kernel
     conntrack row is bare-tuple keyed).
+
+
+  * Configstore: retire a #15273-deferred api-auth migration staging
+    record when a durable promotion supersedes it (#16492). The
+    deferred boot left `.configdb/api-auth-migration.json` and the
+    pre-migration rollback-sidecar binding in place; the next plain
+    commit (the documented remedy for the /health-503 lost-window
+    alarm) or HA config sync wrote a new active generation and rebound
+    the sidecar, so the following boot's staging-consistency gate
+    matched neither staged generation and xpfd refused to start
+    (ErrConfigDBUnreadable) on every boot until an operator deleted a
+    file no message named. Plain commit, commit-confirmed, SyncApply,
+    rollback, boot-recovery, and persist-retry heal now retire staging
+    once the sidecar binds the new disk generation exactly, Load
+    re-checks supersession before the gate so a lost retirement
+    self-heals, and the fatal error names the staging file. Genuinely
+    mismatched generations stay fail-closed.
+
+
   * API/daemon: surface journal legacy-scrub degradation on /health
     and Prometheus (#16490). The #15143 `JournalLegacyScrubDegraded`
     flag latched when a pre-#1896 journal segment could not be

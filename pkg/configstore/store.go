@@ -1382,6 +1382,12 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	// made the new tree visible, so the shifted save binds correctly.
 	if syncPersisted || syncActiveVisible {
 		s.saveRollbackFiles()
+		// #16492: the synced generation is durable (or visible post-
+		// rename) and its sidecar now binds it, so a deferred api-auth
+		// migration's staging record is superseded. On a pre-rename
+		// failure the shifted save is deferred and so is this retirement;
+		// the persist-retry heal retires it once the sync lands.
+		s.retireSupersededAPIAuthMigrationStaging()
 	} else if syncShiftedHistory {
 		s.rollbackPersistDelayed = true
 	}
