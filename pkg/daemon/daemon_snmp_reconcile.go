@@ -738,15 +738,32 @@ func (d *Daemon) reconcileSNMP(cfg *config.Config) bool {
 		return true
 	}
 
+	// #16626: the socket is bound to the VRF *device* (SO_BINDTODEVICE by
+	// name resolves to the ifindex at bind time). If vrf-mgmt was deleted
+	// and re-created out of band, the name is unchanged but the ifindex
+	// differs, so the running socket is pinned to a dead index and deaf.
+	// Compare the live ifindex against the one recorded at start; a
+	// mismatch (including the device being absent) forces the same
+	// restart as a name change. An unknown recorded index (0, e.g. an
+	// agent started before this tracking existed in a test) adopts the
+	// live index without bouncing.
+	vrfIndexChanged := false
+	if vrfDevice != "" && d.snmpVRFDevice == vrfDevice && d.snmpVRFIndex != 0 {
+		live, err := d.fabricLinkByName(vrfDevice)
+		if err != nil || live == nil || live.Attrs() == nil || live.Attrs().Index != d.snmpVRFIndex {
+			vrfIndexChanged = true
+		}
+	}
+
 	// Agent already running: idempotent no-op when the stanza and management
 	// VRF bind are unchanged.
-	if d.snmpHashSet && h == d.snmpHash && d.snmpVRFDevice == vrfDevice {
+	if d.snmpHashSet && h == d.snmpHash && d.snmpVRFDevice == vrfDevice && !vrfIndexChanged {
 		return false
 	}
 
 	// A changed management-VRF bind cannot be applied in place: the listener
 	// socket and trap senders are pinned to the device at agent start.
-	if d.snmpVRFDevice != vrfDevice {
+	if d.snmpVRFDevice != vrfDevice || vrfIndexChanged {
 		d.teardownSNMPLocked()
 		d.snmpHash, d.snmpHashSet = 0, false
 		if err := d.startSNMPLocked(cfg); err != nil {
@@ -870,6 +887,16 @@ func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
 		d.startSNMPMonitorLocked()
 	}
 	d.snmpVRFDevice = vrfDevice
+	// #16626: record the VRF ifindex the socket just bound to, so a later
+	// delete+re-create (new ifindex, same name) is detectable. Best-effort:
+	// a lookup failure leaves 0 (unknown) and the ifindex check is skipped
+	// rather than bouncing the listener on a transient netlink error.
+	d.snmpVRFIndex = 0
+	if vrfDevice != "" {
+		if link, err := d.fabricLinkByName(vrfDevice); err == nil && link != nil && link.Attrs() != nil {
+			d.snmpVRFIndex = link.Attrs().Index
+		}
+	}
 	slog.Info("SNMP agent started",
 		"communities", len(cfg.System.SNMP.Communities),
 		"v3_users", len(cfg.System.SNMP.V3Users),
@@ -915,6 +942,7 @@ func (d *Daemon) teardownSNMPLocked() {
 	d.snmpWg = nil
 	d.snmpMonitorRunning = false
 	d.snmpVRFDevice = ""
+	d.snmpVRFIndex = 0
 }
 
 // teardownSNMP stops the SNMP subsystem during daemon shutdown. The agent

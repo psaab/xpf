@@ -402,6 +402,15 @@ monitor to the committed config:
 - **enabled → enabled (unchanged)** — a no-op, gated on an FNV fingerprint of
   the SNMP stanza (`snmpConfigHash`): an unchanged stanza never bounces the
   listener.
+- **management VRF re-created out of band (#16626)** — the listener socket is
+  pinned by `SO_BINDTODEVICE`, which resolves the device name to its kernel
+  ifindex at bind time. If `vrf-mgmt` is deleted and re-created (the #15223
+  reassert path), the name and hash are unchanged but the ifindex differs, so
+  the old socket stays bound to a dead index and polls go unanswered. The
+  daemon records the bound ifindex at start (`snmpVRFIndex`); `reconcileSNMP`
+  compares it against the live device and restarts on a mismatch, and the
+  reassert tick that re-creates the device restarts the agent in the same
+  tick via `restartSNMPForVRFRecreate` — no commit or daemon restart needed.
 
 `snmpEnabled` is the single predicate both the boot start (`daemon_run.go`) and
 `reconcileSNMP` use, so boot and day-2 can never disagree on what "SNMP is on"
