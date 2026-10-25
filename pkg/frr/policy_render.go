@@ -1059,8 +1059,9 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// `longer`, whose match set is legitimately EMPTY: RouteFilter-
 		// EntrySkipped does not flag it, so it is never broadened to
 		// deny-all and keeps the undefined-list NOMATCH behaviour
-		// (#2103). Route-filters within a term are OR'd, so a
-		// partially-rendered group renders its valid subset.
+		// (#2103). A partially-rendered group renders its valid subset
+		// under Junos' default longest-match lookup (#16762, see
+		// renderRouteFilterListGroup).
 		routeFilterGroupDangling := func(rfs []indexedRouteFilter) bool {
 			if len(rfs) == 0 {
 				return false
@@ -1161,26 +1162,28 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				// "route-map … permit <seq>" with no match clauses, which
 				// FRR treats as match-ALL — flipping "/32 longer" from the
 				// empty set to permit-everything (Copilot #2110).
-				emitted := 0
-				for _, irf := range rfs {
-					// Family hint for the single-sequence case: the first
-					// PARSEABLE route-filter sets it (even if later skipped),
-					// the first EMITTED entry overrides. For a split sequence
-					// seqFam already fixed it.
-					if seqFam == "" && !matchFamilyKnown {
+				// #16762: renderRouteFilterListGroup re-sequences the
+				// permits longest-match-first and interposes stops; a
+				// zero-entry result keeps the historical undefined-list
+				// NOMATCH behaviour below, so no special-casing here.
+				// First-parseable sets the family hint when nothing
+				// emitted; the first emitted entry overrides it — the
+				// same precedence the pre-#16762 loop used.
+				if seqFam == "" && !matchFamilyKnown {
+					for _, irf := range rfs {
 						if _, _, err := net.ParseCIDR(irf.rf.Prefix); err == nil {
 							matchV6 = strings.Contains(irf.rf.Prefix, ":")
 							matchFamilyKnown = true
+							break
 						}
-					}
-					if renderRouteFilterEntry(&definitions, plName, irf.idx, irf.rf) {
-						if emitted == 0 && seqFam == "" {
-							matchV6 = strings.Contains(irf.rf.Prefix, ":")
-							matchFamilyKnown = true
-						}
-						emitted++
 					}
 				}
+				emitted, firstEmittedIsV6 := renderRouteFilterListGroup(&definitions, plName, rfs, seqFam)
+				if emitted > 0 && seqFam == "" {
+					matchV6 = firstEmittedIsV6
+					matchFamilyKnown = true
+				}
+				_ = emitted
 				if matchV6 {
 					fmt.Fprintf(&b, " match ipv6 address prefix-list %s\n", frrName(plName))
 				} else {

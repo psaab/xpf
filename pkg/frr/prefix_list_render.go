@@ -14,26 +14,48 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// renderRouteFilterEntry writes the single FRR `ip|ipv6 prefix-list`
-// entry line for one route-filter into list plName at seq slot
-// (idx+1)*5, applying the per-match-type ge/le derivation. It returns
-// emitted=true when a line was written, emitted=false when the entry was
-// skipped (a max-length `longer` empty set, a malformed prefix, an
-// out-of-range `prefix-length-range`, or an unhandled match-type) — see
-// the per-arm comments for the FRR-validity / fail-closed reasoning
-// (#2072/#2103/#2105/#2525). Family selection (the namespace `ip` vs
-// `ipv6`) is intrinsic to the prefix, so a single mixed-family
-// route-filter slice can be rendered correctly by calling this per entry.
+// renderRouteFilterEntry is the historical single-entry seam: it
+// renders one route-filter's permit line into list plName at seq slot
+// (idx+1)*5. It delegates to routeFilterDerivation16762.emit so the
+// term-level layout (renderRouteFilterListGroup, #16762) renders the
+// very same permit at longest-match sequence slots without a second
+// derivation. Family selection (the namespace `ip` vs `ipv6`) is
+// intrinsic to the prefix, so a single mixed-family route-filter slice
+// can be rendered correctly by calling this per entry.
 func renderRouteFilterEntry(b *strings.Builder, plName string, idx int, rf *config.RouteFilter) (emitted bool) {
-	isV6 := strings.Contains(rf.Prefix, ":")
+	return routeFilterDerivation16762{isV6: strings.Contains(rf.Prefix, ":"), plName: plName}.emit(b, idx, rf)
+}
+
+// routeFilterDerivation16762 carries the destination (plName) and family
+// (isV6) renderRouteFilterEntry formerly re-derived from its
+// arguments, so emit can render a permit line at ANY sequence slot.
+// The term-level layout (#16762) re-sequences entries after Junos'
+// longest-match ordering instead of the original (idx+1)*5 slot, so
+// emit takes the slot explicitly rather than reading a field.
+type routeFilterDerivation16762 struct {
+	isV6   bool
+	plName string // empty for body-only derivations (routeFilterPermitLine)
+}
+
+// emit writes `ip|ipv6 prefix-list <plName> seq <(seq+1)*5> permit
+// <entry>` for rf when plName is non-empty, else just the entry body
+// (`permit <prefix>[ ge/le]` plus a trailing newline). It applies the
+// per-match-type ge/le derivation and returns emitted=false, writing
+// nothing, for the skip cases (a max-length `longer` empty set, a
+// malformed prefix, an out-of-range `prefix-length-range`, or an
+// unhandled match-type) - see the per-arm comments for the
+// FRR-validity / fail-closed reasoning (#2072/#2103/#2105/#2525).
+func (p routeFilterDerivation16762) emit(b *strings.Builder, seq int, rf *config.RouteFilter) (emitted bool) {
 	matchStr := "le 32"
-	if isV6 {
+	if p.isV6 {
 		matchStr = "le 128"
 	}
 	// skipEntry suppresses this route-filter's prefix-list line entirely
@@ -68,7 +90,7 @@ func renderRouteFilterEntry(b *strings.Builder, plName string, idx int, rf *conf
 		if len(parts) == 2 {
 			if plen, err := strconv.Atoi(parts[1]); err == nil {
 				maxLen := 32
-				if isV6 {
+				if p.isV6 {
 					maxLen = 128
 				}
 				if plen+1 > maxLen {
@@ -92,7 +114,7 @@ func renderRouteFilterEntry(b *strings.Builder, plName string, idx int, rf *conf
 		// to the open-ended "le maxLen" default (the #2525 bug). FRR
 		// requires "len < ge-value", so RangeLow must be > baseLen.
 		maxLen := 32
-		if isV6 {
+		if p.isV6 {
 			maxLen = 128
 		}
 		baseLen := 0
@@ -169,19 +191,245 @@ func renderRouteFilterEntry(b *strings.Builder, plName string, idx int, rf *conf
 	}
 	if skipEntry {
 		// #2103/#2105: emit no prefix-list line for this entry. Its seq
-		// slot (idx+1)*5 is simply not used; gaps in seq are FRR-legal.
+		// slot (seq+1)*5 is simply not used; gaps in seq are FRR-legal.
 		return false
 	}
-	if isV6 {
-		fmt.Fprintf(b, "ipv6 prefix-list %s seq %d permit %s", frrName(plName), (idx+1)*5, sanitizeFRRValue(rf.Prefix))
+	if p.plName != "" {
+		if p.isV6 {
+			fmt.Fprintf(b, "ipv6 prefix-list %s seq %d permit %s", frrName(p.plName), (seq+1)*5, sanitizeFRRValue(rf.Prefix))
+		} else {
+			fmt.Fprintf(b, "ip prefix-list %s seq %d permit %s", frrName(p.plName), (seq+1)*5, sanitizeFRRValue(rf.Prefix))
+		}
 	} else {
-		fmt.Fprintf(b, "ip prefix-list %s seq %d permit %s", frrName(plName), (idx+1)*5, sanitizeFRRValue(rf.Prefix))
+		fmt.Fprintf(b, "permit %s", sanitizeFRRValue(rf.Prefix))
 	}
 	if matchStr != "" {
 		fmt.Fprintf(b, " %s", matchStr)
 	}
 	b.WriteString("\n")
 	return true
+}
+
+// routeFilterPermitLine computes the FRR prefix-list permit line body
+// (without the `ip|ipv6 prefix-list <name> seq <n>` header) for one
+// route-filter of the given family, applying renderRouteFilterEntry's
+// per-match-type ge/le derivation. emitted=false mirrors
+// renderRouteFilterEntry's skip cases (see its comments). Computing the
+// string up front — rather than writing straight into the builder as
+// renderRouteFilterEntry does — lets the term-level layout in
+// renderRouteFilterListGroup capture the permit for re-sequencing after
+// Junos' longest-match ordering (#16762) without parsing rendered text.
+func routeFilterPermitLine(isV6 bool, rf *config.RouteFilter) (string, bool) {
+	var b strings.Builder
+	d := routeFilterDerivation16762{isV6: isV6}
+	if !d.emit(&b, 0, rf) {
+		return "", false
+	}
+	return b.String(), true
+}
+
+// --- #16762: Junos longest-match layout for one term's route-filters ---
+//
+// Junos' default route-filter evaluation is a longest-match lookup over
+// ALL of a term's route-filters: the most specific filter whose prefix
+// contains the route decides — even when its match type then fails (the
+// route does NOT fall through to a broader filter; only the opt-in
+// `walkup` qualifier, which xpf does not model, changes that). FRR
+// prefix-lists are ordered first-match, so authoring-order permits gave
+// walkup/OR semantics instead (#16762). This layout restores
+// longest-match: sort permits by descending base-prefix length (stable,
+// so equal-length filters keep authoring order) and, after each
+// distinct prefix P, interpose `deny P le <max>` — but only when some
+// other renderable filter's base CONTAINS P, i.e. only when a route
+// under P that failed P's match type could otherwise fall through to
+// that broader permit. The failed route then first-matches the deny
+// and stops, exactly as Junos' failed longest match fails the term's
+// route-filter condition. P == the family root never gets a stop (no
+// broader filter can contain it). Single, disjoint, and same-base
+// lists therefore render byte-identically to the historical render, so
+// the common cases (including hierarchical `from` condition copies,
+// #11779) are untouched.
+
+// routeFilterLayoutEntry16762 is one renderable route-filter.
+type routeFilterLayoutEntry16762 struct {
+	rf     *config.RouteFilter
+	ipnet  *net.IPNet // parsed base prefix (nil when unparsable)
+	plen   int        // base prefix length, -1 when unknown
+	permit string     // routeFilterPermitLine body, no trailing newline
+}
+
+// parseRouteFilterPrefix16762 parses a route-filter's base CIDR once.
+// nil, -1 when unparsable — the permit derivation still renders valid
+// prefixes, so callers that already hold a permit may rely on a parsed
+// base, but same-prefix / containment helpers tolerate nil.
+func parseRouteFilterPrefix16762(s string) (*net.IPNet, int) {
+	_, ipnet, err := net.ParseCIDR(s)
+	if err != nil {
+		return nil, -1
+	}
+	plen, _ := ipnet.Mask.Size()
+	return ipnet, plen
+}
+
+// sameRouteFilterBase16762 reports whether two prefixes share the same
+// base network ADDRESS and prefix length (192.168.100.0/24 vs itself,
+// not vs 192.168.100.128/25). netip mask-normalisation plus the plen
+// comparison keeps host-bits variants (192.168.100.1/24 from a lenient
+// load) in one class, matching FRR's own prefix normalisation.
+func sameRouteFilterBase16762(a, b *net.IPNet) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	aa, aok := routeFilterBasePrefix16762(a)
+	bb, bok := routeFilterBasePrefix16762(b)
+	return aok && bok && aa.Addr() == bb.Addr()
+}
+
+// routeFilterBasePrefix16762 normalises a parsed base CIDR to its
+// masked netip prefix (host bits cleared), so base comparisons and
+// containment test the NETWORK, not the authored address.
+func routeFilterBasePrefix16762(n *net.IPNet) (netip.Prefix, bool) {
+	if n == nil {
+		return netip.Prefix{}, false
+	}
+	addr, ok := routeFilterAddr16762(n.IP)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	plen, _ := n.Mask.Size()
+	return netip.PrefixFrom(addr, plen).Masked(), true
+}
+
+func routeFilterAddr16762(ip net.IP) (netip.Addr, bool) {
+	// net.ParseCIDR returns a 4-byte IP for v4; a 16-byte IP may be
+	// v4-in-v6, so slices must be taken AFTER To4/To16, never from the
+	// raw IP (slicing the 16-byte form would read the mapped prefix).
+	if ip4 := ip.To4(); ip4 != nil {
+		return netip.AddrFrom4([4]byte(ip4)), true
+	}
+	if ip16 := ip.To16(); ip16 != nil {
+		return netip.AddrFrom16([16]byte(ip16)), true
+	}
+	return netip.Addr{}, false
+}
+
+// routeFilterContains16762: does base prefix a contain route address
+// addr with length rplen? Containment of another route-filter base b in
+// a is routeFilterContains16762(a, b.IP, plen(b)).
+func routeFilterContains16762(a *net.IPNet, addr net.IP, rplen int) bool {
+	if a == nil {
+		return false
+	}
+	ap, aok := routeFilterBasePrefix16762(a)
+	ra, rok := routeFilterAddr16762(addr)
+	if !aok || !rok || ap.Addr().Is4() != ra.Is4() {
+		return false
+	}
+	aplen, _ := a.Mask.Size()
+	return aplen <= rplen && ap.Contains(ra)
+}
+
+// routeFilterBaseContains16762 reports whether outer's base NETWORK
+// strictly contains inner's base network (outer broader, inner inside
+// it) — the only shape in which a route under inner can fall through
+// to outer.
+func routeFilterBaseContains16762(outer, inner *net.IPNet) bool {
+	if outer == nil || inner == nil {
+		return false
+	}
+	oplen, _ := outer.Mask.Size()
+	iplen, _ := inner.Mask.Size()
+	return oplen < iplen && routeFilterContains16762(outer, inner.IP, iplen)
+}
+
+// renderRouteFilterListGroup renders the FINAL prefix-list entries for
+// one term-family group (or single-family term) into definitions and
+// reports whether it emitted, plus the match family of the FIRST
+// emitted entry for the single-sequence case. The per-entry permits
+// come from the SAME routeFilterDerivation16762 seam as
+// renderRouteFilterEntry, so every historical skip rule (#2072 /
+// #2103 / #2105 / #2525) is judged here, never re-derived.
+func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs []indexedRouteFilter, seqFam string) (emitted int, firstIsV6 bool) {
+	if len(rfs) == 0 {
+		return 0, false
+	}
+	isV6Group := seqFam == "v6"
+	var entries []routeFilterLayoutEntry16762
+	for _, irf := range rfs {
+		isV6 := isV6Group
+		if seqFam == "" {
+			isV6 = strings.Contains(irf.rf.Prefix, ":")
+		}
+		body, ok := routeFilterPermitLine(isV6, irf.rf)
+		if !ok {
+			continue
+		}
+		ipnet, plen := parseRouteFilterPrefix16762(irf.rf.Prefix)
+		entries = append(entries, routeFilterLayoutEntry16762{
+			rf: irf.rf, ipnet: ipnet, plen: plen,
+			permit: strings.TrimSuffix(body, "\n"),
+		})
+	}
+	if len(entries) == 0 {
+		return 0, false
+	}
+	firstIsV6 = strings.Contains(entries[0].rf.Prefix, ":")
+	// Longest-match order: descending base length, stable. The emit
+	// loop derives canStillMatch per entry against the FULL set
+	// (broader-or-nil), independent of sorted position.
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].plen > entries[j].plen
+	})
+	seq := 0
+	for i := range entries {
+		e := entries[i]
+		kind := "ip"
+		maxLen := 32
+		if strings.Contains(e.rf.Prefix, ":") {
+			kind = "ipv6"
+			maxLen = 128
+		}
+		fmt.Fprintf(definitions, "%s prefix-list %s seq %d %s\n", kind, frrName(plName), (seq+1)*5, e.permit)
+		seq++
+		emitted++
+		if e.ipnet == nil || e.plen <= 0 {
+			continue
+		}
+		// canStillMatch: a renderable entry whose base CONTAINS this
+		// base (a nil-base entry renders orlonger-by-default, so it
+		// could still match and also forces the stop) would otherwise
+		// catch a route under this base whose match type failed.
+		canStillMatch := false
+		for j := range entries {
+			if entries[j].ipnet == nil {
+				canStillMatch = true
+				break
+			}
+			if routeFilterBaseContains16762(entries[j].ipnet, e.ipnet) {
+				canStillMatch = true
+				break
+			}
+		}
+		if !canStillMatch {
+			continue
+		}
+		// Only the LAST entry of each distinct base group can be
+		// followed by the deny: earlier same-base permits are sibling
+		// length-window slices whose union decides the base.
+		lastOfBase := true
+		for j := i + 1; j < len(entries); j++ {
+			if entries[j].ipnet != nil && sameRouteFilterBase16762(e.ipnet, entries[j].ipnet) {
+				lastOfBase = false
+				break
+			}
+		}
+		if !lastOfBase {
+			continue
+		}
+		fmt.Fprintf(definitions, "%s prefix-list %s seq %d deny %s le %d\n", kind, frrName(plName), (seq+1)*5, sanitizeFRRValue(e.rf.Prefix), maxLen)
+		seq++
+	}
+	return emitted, firstIsV6
 }
 
 // routeFilterEntrySkipped reports whether renderRouteFilterEntry would
