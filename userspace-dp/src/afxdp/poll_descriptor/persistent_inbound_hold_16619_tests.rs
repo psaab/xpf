@@ -122,7 +122,7 @@ fn acquire_persistent_inbound_hold_with_snat_takes_hold_16619() {
     };
     let took = acquire_persistent_inbound_hold(&forwarding, Some(lease_key), composed, 1_500_000_000);
     assert!(
-        took,
+        took.is_some(),
         "#16619: acquire_took_hold must be true for an inbound persistent session that is also source-NATed"
     );
     assert_eq!(
@@ -139,7 +139,7 @@ fn acquire_persistent_inbound_hold_with_snat_takes_hold_16619() {
         ..crate::nat::NatDecision::default()
     };
     assert!(
-        acquire_persistent_inbound_hold(&forwarding2, Some(lease_key2), dnat_only, 1_500_000_000),
+        acquire_persistent_inbound_hold(&forwarding2, Some(lease_key2), dnat_only, 1_500_000_000).is_some(),
         "#15111 control: DNAT-only inbound must still take the hold"
     );
     assert_eq!(inbound_flows_16619(&forwarding2), Some(1));
@@ -158,25 +158,25 @@ fn acquire_persistent_inbound_hold_exemptions_unchanged_16619() {
         ..crate::nat::NatDecision::default()
     };
     assert!(
-        !acquire_persistent_inbound_hold(
+        acquire_persistent_inbound_hold(
             &forwarding,
             Some(lease_key),
             crate::nat::NatDecision { nat64: true, ..base },
             1_500_000_000
-        ),
+        ).is_none(),
         "NAT64 exemption must stay exempt"
     );
     assert!(
-        !acquire_persistent_inbound_hold(
+        acquire_persistent_inbound_hold(
             &forwarding,
             Some(lease_key),
             crate::nat::NatDecision { nptv6: true, ..base },
             1_500_000_000
-        ),
+        ).is_none(),
         "NPTv6 exemption must stay exempt"
     );
     assert!(
-        !acquire_persistent_inbound_hold(
+        acquire_persistent_inbound_hold(
             &forwarding,
             Some(lease_key),
             crate::nat::NatDecision {
@@ -185,11 +185,11 @@ fn acquire_persistent_inbound_hold_exemptions_unchanged_16619() {
                 ..base
             },
             1_500_000_000
-        ),
+        ).is_none(),
         "no rewrite_dst => no persistent lease to hold"
     );
     assert!(
-        !acquire_persistent_inbound_hold(&forwarding, None, base, 1_500_000_000),
+        acquire_persistent_inbound_hold(&forwarding, None, base, 1_500_000_000).is_none(),
         "no stored lease key => no hold"
     );
     assert_eq!(

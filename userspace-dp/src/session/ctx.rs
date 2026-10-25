@@ -56,6 +56,9 @@ pub(crate) struct SessionInstall {
     /// #10888: owning-node TCP handshake state (`0` = legacy/established).
     /// Only `upsert_synced_with_origin` consults it.
     pub(crate) tcp_handshake_state: u8,
+    /// #16615: exact persistent-NAT lease key acquired for this session,
+    /// plus granting allocator shared identity. None means no recorded hold.
+    pub(crate) persistent_lease_hold: Option<(crate::nat::PersistentSourceKey, usize)>,
     /// #16217 (run11): the serving node's admitted per-direction packet
     /// counts carried on the HA wire / shared row (`SyncedSessionEntry`
     /// `fwd_packets`/`rev_packets`). Seeded onto the imported entry's

@@ -59,6 +59,7 @@ fn session_entry() -> SyncedSessionEntry {
     generation: 0,
     session_id: 0,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+    persistent_lease_hold: None,
     source_nat_static: None, }
 }
 

@@ -481,6 +481,7 @@ fn established_ri_snat_forward_11061(
     generation: 0,
     session_id: 0,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
     source_nat_static: None, };
     (forwarding, sessions, shared_entry)
 }
@@ -5439,6 +5440,7 @@ fn ha_synced_reverse_sessions_impl_15958(forwarding: &ForwardingState, now_ns: u
             policy_counter: None,
             nat_scope_ifindex,
         },
+        persistent_lease_hold: None,
         source_nat_static: Some(false),
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,
@@ -5744,6 +5746,7 @@ fn fw0_both_halves_sessions_15958b(forwarding: &ForwardingState, now_ns: u64) ->
             policy_counter: None,
             nat_scope_ifindex: None,
         },
+        persistent_lease_hold: None,
         source_nat_static: Some(false),
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,
@@ -5975,6 +5978,7 @@ fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64)
             policy_counter: None,
             nat_scope_ifindex: None,
         },
+        persistent_lease_hold: None,
         source_nat_static: Some(false),
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,
@@ -6430,6 +6434,7 @@ fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(forwarding: &Forwardi
             policy_counter: None,
             nat_scope_ifindex: None,
         },
+        persistent_lease_hold: None,
         source_nat_static: Some(false),
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,

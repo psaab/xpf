@@ -589,7 +589,9 @@ pub(crate) fn build_synced_session_entry(
     // across both nodes. An old peer omits the field => serde(default) 0,
     // which falls back to `alloc_session_id()` (rolling-upgrade safe).
     session_id: req.session_id,
-    source_nat_static, })
+    source_nat_static,
+    persistent_lease_hold: None,
+})
 }
 
 pub(crate) fn parse_session_sync_mac(value: &str) -> Result<Option<[u8; 6]>, String> {

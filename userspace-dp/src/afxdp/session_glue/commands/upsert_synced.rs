@@ -196,6 +196,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     );
     let pptp_call_ids = entry.pptp_call_ids;
     let leak_key = entry.key.clone();
+    let previous_persistent_hold_16615 = sessions.persistent_lease_hold_for(&key);
     if sessions.upsert_synced_with_origin(entry.into_session_install(now_ns), allow_replace_local) {
         if leak_incarnation != 0 {
             sessions.stamp_leak_incarnation(&leak_key, leak_incarnation);
@@ -225,7 +226,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         );
         if !new_entry_reserves || reservation_target_changed {
             if let Some((prev_decision, prev_metadata, _)) = previous_reservation {
-                release_source_nat_allocation_for_worker(
+                crate::nat::release_source_nat_allocation_for_worker_with_hold(
                     &forwarding.iface_nat_allocators,
                     &forwarding.source_nat_rules,
                     &key,
@@ -233,6 +234,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
                     prev_metadata.is_reverse,
                     now_ns,
                     worker_id,
+                    previous_persistent_hold_16615,
                 );
                 crate::nat64::release_nat64_allocation_for_worker(
                     &forwarding.nat64,
@@ -263,7 +265,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
                 static_externals: Some(&synced_static_externals),
                 nptv6_external_prefixes: &synced_nptv6_prefixes,
             };
-            reserve_synced_source_nat_allocation_for_worker(
+            let (_reserved_16615, persistent_hold_16615) = crate::nat::reserve_synced_source_nat_allocation_for_worker_with_hold(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
                 &key,
@@ -286,6 +288,9 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
                 worker_id,
                 synced_domains,
             );
+            if persistent_hold_16615.is_some() {
+                sessions.set_persistent_lease_hold(&key, persistent_hold_16615);
+            }
             // #4512: same treatment for NAT64. The translated `(pool v4, port)`
             // rides the synced `NatDecision` (`rewrite_src_port`), but the
             // standby never runs `allocate_source`, so without this its NAT64

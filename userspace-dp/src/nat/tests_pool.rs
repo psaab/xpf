@@ -2938,6 +2938,139 @@ fn persistent_inbound_last_release_downgrades_clear_tombstone_16652() {
 }
 
 
+
+/// #16615: cross-domain persistent inbound release must use the recorded
+/// lease key (scope 7), not the inbound session's arrival domain (0).
+/// Lease A (scope 7) and overlapping tenant B (scope 0, same internal
+/// tuple) both hold inbound references; releasing A's session with its
+/// recorded hold must drop A to 0 and reclaim it, leaving B at 1.
+/// Domain-0 control is unchanged (the 15111 test above).
+#[test]
+fn persistent_inbound_recorded_hold_releases_cross_domain_lease_16615() {
+    let rules = persistent_pool_rules(1, 40000, 40010);
+    let alloc = &rules[0].pool_allocator;
+    let alloc_id = alloc.debug_shared_identity();
+
+    let mint_scoped = |scope: u32, now_ns: u64| {
+        let mut counter = None;
+        expect_snat_decision(match_source_nat_result_for_tuple(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &NatScopeCtx {
+                routing_domain: scope,
+                ..NatScopeCtx::default()
+            },
+            "lan",
+            "wan",
+            "10.0.1.100".parse().unwrap(),
+            "8.8.8.8".parse().unwrap(),
+            Some(6),
+            12345,
+            53,
+            None,
+            None,
+            now_ns,
+            false,
+            false,
+            NatHolder::Untracked,
+            &mut counter,
+        ))
+    };
+    let flow_for = |scope: u32| crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "10.0.1.100".parse().unwrap(),
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: 12345,
+        dst_port: 53,
+        routing_scope: scope,
+    };
+    let lease_for = |scope: u32| PersistentSourceKey {
+        protocol: 6,
+        src_ip: "10.0.1.100".parse().unwrap(),
+        src_port: 12345,
+        routing_scope: scope,
+        remote: None,
+    };
+
+    // Mint both tenants, release outbound flows (leases go idle).
+    for scope in [7u32, 0u32] {
+        let decision = mint_scoped(scope, 1_000_000_000);
+        let mut outbound_key = session_key(12345, "8.8.8.8", 53);
+        outbound_key.routing_domain = scope;
+        crate::nat::release_source_nat_allocation(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &outbound_key,
+            decision,
+            false,
+            1_000_000_001,
+        );
+    }
+
+    // Both inbound sessions acquire on their own lease (recorded holds).
+    let hold_a = (lease_for(7), alloc_id);
+    let hold_b = (lease_for(0), alloc_id);
+    assert!(alloc.acquire_persistent_inbound(hold_a.0, 1_500_000_000));
+    assert!(alloc.acquire_persistent_inbound(hold_b.0, 1_500_000_000));
+    for (scope, want) in [(7u32, 1u32), (0u32, 1u32)] {
+        let lease = alloc
+            .debug_persistent_lease_for_flow(&flow_for(scope), PersistentNatPermit::AnyRemoteHost)
+            .expect("lease held");
+        assert_eq!(lease.inbound_flows, want, "scope {scope} precondition");
+    }
+
+    // Inbound session for A arrives in domain 0 (arrival != lease scope 7).
+    // Its session key carries domain 0; decision carries only rewrite_dst.
+    let mut inbound_key = session_key_from_src("8.8.8.8", 53, "203.0.113.10", 40000);
+    inbound_key.routing_domain = 0;
+    let inbound_nat = NatDecision {
+        rewrite_dst: Some("10.0.1.100".parse().unwrap()),
+        rewrite_dst_port: Some(12345),
+        ..NatDecision::default()
+    };
+
+    // Release exactly the recorded hold (what teardown now does).
+    crate::nat::release_source_nat_allocation_for_worker_with_hold(
+        &InterfaceNatAllocators::default(),
+        &rules,
+        &inbound_key,
+        inbound_nat,
+        false,
+        3_000_000_000,
+        0,
+        Some(hold_a),
+    );
+
+    let a = alloc
+        .debug_persistent_lease_for_flow(&flow_for(7), PersistentNatPermit::AnyRemoteHost)
+        .expect("A lease remains until re-armed expiry");
+    assert_eq!(a.inbound_flows, 0, "#16615: recorded release must drop A");
+    let b = alloc
+        .debug_persistent_lease_for_flow(&flow_for(0), PersistentNatPermit::AnyRemoteHost)
+        .expect("B lease remains");
+    assert_eq!(b.inbound_flows, 1, "#16615: cross-tenant B must stay held");
+
+    // GC reclaims A after re-armed expiry; B stays (held).
+    let _ = alloc.debug_gc_expired_chunked(5_000_000_000, 16);
+    assert!(
+        alloc
+            .debug_persistent_lease_for_flow(&flow_for(7), PersistentNatPermit::AnyRemoteHost)
+            .is_none(),
+        "#16615: A lease must be GC-reclaimed after recorded release"
+    );
+    let b = alloc
+        .debug_persistent_lease_for_flow(&flow_for(0), PersistentNatPermit::AnyRemoteHost)
+        .expect("B still held after GC");
+    assert_eq!(b.inbound_flows, 1);
+
+    // Releasing B with its recorded hold (domain-0 control path) drops it.
+    crate::nat::release_recorded_persistent_inbound(&rules, Some(hold_b), 5_000_000_000);
+    let b = alloc
+        .debug_persistent_lease_for_flow(&flow_for(0), PersistentNatPermit::AnyRemoteHost)
+        .expect("B remains until expiry");
+    assert_eq!(b.inbound_flows, 0, "domain-0 recorded release unchanged");
+}
+
 #[test]
 fn persistent_address_only_inbound_permission_is_checked() {
     let rules = notrans_persistent_rules(vec!["203.0.113.10/32"], "target-host-port", 300, false);

@@ -163,7 +163,7 @@ impl DeleteDropSweep {
                 // holder-aware release helpers are harmless no-ops.
                 if let Some((lookup, origin)) = sessions.probe_with_origin(key) {
                     if origin.is_peer_synced() {
-                        crate::nat::release_source_nat_allocation_for_worker(
+                        crate::nat::release_source_nat_allocation_for_worker_with_hold(
                             &forwarding.iface_nat_allocators,
                             &forwarding.source_nat_rules,
                             key,
@@ -171,6 +171,7 @@ impl DeleteDropSweep {
                             lookup.metadata.is_reverse,
                             now_ns,
                             worker_id,
+                            sessions.take_persistent_lease_hold(key),
                         );
                         crate::nat64::release_nat64_allocation_for_worker(
                             &forwarding.nat64,

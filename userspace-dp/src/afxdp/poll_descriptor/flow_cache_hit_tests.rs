@@ -6341,6 +6341,7 @@ fn adopted_flow_survives_subsequent_packet_revalidation_16217() {
         rev_packets: 1,
         fwd_packets: 1,
         pptp_call_ids: 0,
+        persistent_lease_hold: None,
         source_nat_static: None,
     };
     let shared_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
