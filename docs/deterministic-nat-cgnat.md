@@ -559,7 +559,10 @@ meaningless when ports are pre-partitioned into fixed per-subscriber blocks:
 
 - `blocks_total` = the pool's block capacity, `len(addresses) * floor(port-range
   / block-size)` (the same `totalBlocks` the compiler validates against the
-  provisioned subscriber count).
+  provisioned subscriber count). The port-range is the pool's own `port range`
+  when configured, else 1024-65535 — for mode 2 (IPv6/NAT64) pools as well
+  since #15283; the gauges previously hard-coded 1024-65535 for mode 2 and
+  overstated range-limited pools (#16822).
 - `blocks_allocated` = the port blocks statically allocated to the provisioned
   subscriber range (one block per subscriber). For an IPv4 subscriber CIDR this
   is the host-address count; for an IPv6 host the dataplane caps the subscriber
