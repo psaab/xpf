@@ -31,9 +31,12 @@ cd "$ROOT" || { echo "FATAL: cannot cd to repo root $ROOT" >&2; exit 1; }
 # Scratch pin (#14833): defaults only — an explicit caller env wins.
 # Children (python tempfile, shell mktemp, go test) inherit these, so
 # no leg can fall back to /tmp, /dev/shm, or /var/tmp by default.
+# #16494: GOTMPDIR defaults to the short /wtgt root (5 chars), not
+# /var/worktrees/.cache/go-tmp (28): Go test TempDir paths under the
+# long root exceed the 107-octet AF_UNIX sun_path limit. See Makefile.
 TMPDIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}"
 GOCACHE="${GOCACHE:-/var/worktrees/.cache/go-build}"
-GOTMPDIR="${GOTMPDIR:-/var/worktrees/.cache/go-tmp}"
+GOTMPDIR="${GOTMPDIR:-/wtgt}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/var/worktrees/.cache/cargo}"
 export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
 mkdir -p "$TMPDIR" "$GOCACHE" "$GOTMPDIR" "$CARGO_TARGET_DIR"

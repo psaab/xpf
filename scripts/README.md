@@ -43,7 +43,7 @@ that must flip the verdict.
 | `ci_affected_go_tests.sh` | A change runs its owning package, reverse importers, and the import-less census packages — seeding from non-Go paths must not silently select nothing | CI selector | `scripts/ci_affected_go_tests_selftest.sh` |
 | `mutate.sh` + `mutate-lib.sh` | A mutation scores KILLED only when the named target's own failure moves (occurrence-proven both directions, bounded, build-failure = VOID not survived) | per-issue drivers `mutate-*.py` (below) | `scripts/mutate-selftest.sh` |
 | `run-selftests.sh` interpreter census (§, inline) | Every `run_shell` registration is POSIX; a bash script registered with `run_shell` fails by name (dash `Bad substitution` is a syntax error, not a result) | `make selftest` | (inline; trips on the runner itself) |
-| Scratch pinning | No audited build/test path defaults scratch to `/tmp`, `/dev/shm`, or `/var/tmp`; `TMPDIR`/`GOCACHE`/`GOTMPDIR`/`CARGO_TARGET_DIR` default under `/var/worktrees/.cache` | `make selftest` | `scripts/scratch-pinning-selftest.sh` |
+| Scratch pinning | No audited build/test path defaults scratch to `/tmp`, `/dev/shm`, or `/var/tmp`; `TMPDIR`/`GOCACHE`/`CARGO_TARGET_DIR` default under `/var/worktrees/.cache`, `GOTMPDIR` defaults to the short `/wtgt` root (#16494, AF_UNIX sun_path bound, proven by the executed `scripts/sunpath-canary` bind) | `make selftest` | `scripts/scratch-pinning-selftest.sh` |
 | No `git stash` | No tracked script uses `git stash` (shared stack across concurrent worktrees) | `run-selftests.sh` | `scripts/no-git-stash-selftest.sh` |
 
 Not censuses, listed here so they are not mistaken for unindexed files:
