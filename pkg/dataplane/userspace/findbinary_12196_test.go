@@ -231,9 +231,18 @@ func TestFindBinaryNoexecNamespaceHelper12196(t *testing.T) {
 	if mountpoint == "" {
 		t.Skip("runs only inside the noexec tmpfs test namespace")
 	}
+	// #16846: this child runs as uid 0 in a user namespace. Host-owned
+	// ancestors of the PATH fixture (e.g. /var/worktrees) map to the
+	// overflow uid, so the new directory-chain check would refuse the
+	// PATH helper before the noexec arm is ever reached. Present such
+	// ancestors as root-owned here, exactly as the file-owner seam
+	// presents fixture files: the chain under test stays the noexec
+	// CWD candidate, not the sandbox's uid mapping.
+	oldUID := helperDirTrustUID
+	helperDirTrustUID = func(uint32) uint32 { return 0 }
+	defer func() { helperDirTrustUID = oldUID }()
 	cwd := filepath.Join(mountpoint, "cwd")
 	if err := os.Mkdir(cwd, 0o755); err != nil {
-		t.Fatal(err)
 	}
 	candidate := filepath.Join(cwd, findBinaryName12196)
 	if err := os.WriteFile(candidate, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {

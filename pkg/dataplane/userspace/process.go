@@ -558,32 +558,49 @@ func tuneSocketBuffers() {
 	}
 }
 
-// findBinary returns the absolute path of the exact file it validated,
-// so the file exec.Command runs is the file that was stat-checked —
-// never a bare name the exec layer would re-resolve through PATH or
-// the process CWD at Start time (#16054).
+// findBinary returns the absolute, symlink-resolved path of the exact
+// file it validated, so the file exec.Command runs is the file that was
+// stat-checked — never a bare name the exec layer would re-resolve
+// through PATH or the process CWD at Start time (#16054), and never an
+// unresolved symlink an attacker could flip between validation and
+// exec (#16846).
+//
+// When the daemon runs as root, the resolved helper file itself
+// (#16054) and EVERY symlink or containing-directory component on
+// either spelling of its path must be non-replaceable by a
+// less-privileged user: root-owned, with no non-root-group or
+// non-sticky world write. That is what makes the residual check→exec
+// gap unexploitable: an attacker who cannot remove an entry from any
+// directory above the file cannot flip either a symlink or the file
+// itself between validation and Start, so the resolved name still
+// names the validated inode. An fd-based exec (O_PATH + execveat)
+// would close the gap absolutely, but it requires custom exec
+// plumbing (os/exec cannot take an fd) and polling/error-handling
+// duplication; the trusted-directory-chain closes it under the same
+// ownership invariant ensureTrustedRuntimeDir already relies on for
+// the control socket. A non-root daemon gains no privilege, so only
+// symlink resolution applies there and the dev workflow is unchanged.
 func findBinary(explicit string) (string, error) {
 	if explicit != "" {
-		info, err := os.Stat(explicit)
+		resolved, err := validatedHelperPath(explicit)
 		if err != nil {
-			return "", fmt.Errorf("userspace dataplane binary not found: %s", explicit)
+			// #12196: keep the informative explicit-path errors stable.
+			info, statErr := os.Stat(explicit)
+			switch {
+			case statErr != nil:
+				return "", fmt.Errorf("userspace dataplane binary not found: %s", explicit)
+			case info.IsDir():
+				return "", fmt.Errorf("userspace dataplane binary is a directory, not executable: %s", explicit)
+			case info.Mode().Perm()&0o111 == 0:
+				return "", fmt.Errorf("userspace dataplane binary is not executable: %s (mode %s)", explicit, info.Mode())
+			default:
+				// #16054: an explicit path is operator intent, so an
+				// untrusted one is a hard error (never a silent
+				// PATH fallback).
+				return "", fmt.Errorf("userspace dataplane binary is not trusted: %s (%s)", explicit, err)
+			}
 		}
-		if info.IsDir() {
-			return "", fmt.Errorf("userspace dataplane binary is a directory, not executable: %s", explicit)
-		}
-		if info.Mode().Perm()&0o111 == 0 {
-			return "", fmt.Errorf("userspace dataplane binary is not executable: %s (mode %s)", explicit, info.Mode())
-		}
-		// #16054: an explicit path is operator intent, so an untrusted
-		// one is a hard error (never a silent PATH fallback).
-		if reason := helperBinaryTrustReason(info); reason != "" {
-			return "", fmt.Errorf("userspace dataplane binary is not trusted: %s (%s)", explicit, reason)
-		}
-		abs, err := filepath.Abs(explicit)
-		if err != nil {
-			return "", fmt.Errorf("userspace dataplane binary path is not resolvable: %s: %w", explicit, err)
-		}
-		return abs, nil
+		return resolved, nil
 	}
 	candidates := []string{
 		"./xpf-userspace-dp",
@@ -595,15 +612,9 @@ func findBinary(explicit string) (string, error) {
 		if c == "" || i > 0 && filepath.Clean(c) == filepath.Clean(candidates[0]) {
 			continue
 		}
-		executable, reason := executableBinaryCandidate(c)
-		if executable {
-			abs, err := filepath.Abs(c)
-			if err != nil {
-				slog.Warn("userspace: skipping dataplane helper candidate", "candidate", c, "reason", err)
-				skipped = append(skipped, fmt.Sprintf("%s: %s", c, err))
-				continue
-			}
-			return abs, nil
+		resolved, reason := validatedBinaryCandidate(c)
+		if resolved != "" {
+			return resolved, nil
 		}
 		if reason != "" {
 			slog.Warn("userspace: skipping dataplane helper candidate", "candidate", c, "reason", reason)
@@ -611,14 +622,8 @@ func findBinary(explicit string) (string, error) {
 		}
 	}
 	if p, err := exec.LookPath("xpf-userspace-dp"); err == nil {
-		if executable, reason := executableBinaryCandidate(p); executable {
-			abs, err := filepath.Abs(p)
-			if err != nil {
-				slog.Warn("userspace: skipping dataplane helper candidate", "candidate", p, "reason", err)
-				skipped = append(skipped, fmt.Sprintf("%s: %s", p, err))
-			} else {
-				return abs, nil
-			}
+		if resolved, reason := validatedBinaryCandidate(p); resolved != "" {
+			return resolved, nil
 		} else if reason != "" {
 			slog.Warn("userspace: skipping dataplane helper candidate", "candidate", p, "reason", reason)
 			skipped = append(skipped, fmt.Sprintf("%s: %s", p, reason))
@@ -629,6 +634,216 @@ func findBinary(explicit string) (string, error) {
 		return "", fmt.Errorf("%s; skipped candidates: %s", notFound, strings.Join(skipped, "; "))
 	}
 	return "", errors.New(notFound)
+}
+
+// resolveHelperPath canonicalizes candidate: an absolute path with
+// every symlink component resolved. ok=false means the candidate is
+// absent (silent skip, as before #16846), not that it is untrusted.
+func resolveHelperPath(candidate string) (resolved string, ok bool, err error) {
+	abs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", false, err
+	}
+	resolved, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return resolved, true, nil
+}
+
+// lstatTrustReason validates one NOT-followed path component under the
+// root-daemon invariant: no less-privileged user may replace what it
+// names. A symlink LINK is replaceable exactly when a non-owner can
+// remove it from its PARENT directory, which the caller proves for
+// every directory, so the link itself is judged only on ownership: a
+// root-owned link (every packaged live link) cannot be repointed
+// without write access to its trusted parent, and refusing lrwxrwxrwx
+// would refuse every packaged symlink on Debian. A DIRECTORY is
+// replaceable when it is not root-owned (its owner controls its
+// entries), when a non-root group can write it, or when anyone can
+// write it without the sticky bit; a root-owned sticky world-writable
+// directory (/tmp, /var/worktrees) lets no non-owner remove another's
+// entry, so it does not make the chain replaceable. Root-group write
+// is root-equivalent and trusted, mirroring runtimeDirTrustError. The
+// owner comes from the raw Lstat, not the helperFileOwnerUID seam
+// (which presents fixture FILES as root-owned); components are real
+// even under test.
+// helperDirTrustUID maps a directory owner's uid for the CHAIN check.
+// Production is identity; the #12196 user-namespace child presents
+// host ancestors as root-owned (they map to the overflow uid there).
+var helperDirTrustUID = func(uid uint32) uint32 { return uid }
+
+func lstatTrustReason(kind, component string, info os.FileInfo) string {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Sprintf("cannot verify owner of %s %s; refusing to execute it as root", kind, component)
+	}
+	if helperDirTrustUID(stat.Uid) != 0 {
+		return fmt.Sprintf("%s %s is owned by uid %d, not root; refusing to execute it as root", kind, component, stat.Uid)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return ""
+	}
+	mode := info.Mode().Perm()
+	if mode&0o002 != 0 && info.Mode()&os.ModeSticky == 0 {
+		return fmt.Sprintf("%s %s is world-writable without the sticky bit (mode %s); refusing to execute it as root", kind, component, info.Mode())
+	}
+	if mode&0o020 != 0 && stat.Gid != 0 && info.Mode()&os.ModeSticky == 0 {
+		return fmt.Sprintf("%s %s is group-writable (mode %s, group %d); refusing to execute it as root", kind, component, info.Mode(), stat.Gid)
+	}
+	return ""
+}
+
+// untrustedPathChainReason walks the UNRESOLVED candidate and refuses
+// any symlink or containing-directory component a less-privileged user
+// could replace. It runs first (#16846): a planted
+// ./xpf-userspace-dp -> /bin/true must be refused for the plant itself,
+// never admitted on the strength of its target. filepath.Walk does not
+// descend into a symlinked directory, so intermediate symlinked
+// directories (the /usr/local/sbin live links the packaged install
+// uses, /run/xpf/versions/current) are checked here as links and their
+// resolved chains below.
+func untrustedPathChainReason(abs string) string {
+	dir := filepath.Dir(abs)
+	for {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return fmt.Sprintf("cannot inspect helper directory %s: %v; refusing to execute it as root", dir, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if reason := lstatTrustReason("helper directory symlink", dir, info); reason != "" {
+				return reason
+			}
+		} else if reason := lstatTrustReason("helper directory", dir, info); reason != "" {
+			return reason
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	if linkInfo, err := os.Lstat(abs); err != nil {
+		return fmt.Sprintf("cannot inspect helper path %s: %v; refusing to execute it as root", abs, err)
+	} else if linkInfo.Mode()&os.ModeSymlink != 0 {
+		if reason := lstatTrustReason("helper symlink", abs, linkInfo); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+// resolvedPathChainReason applies the same walk to the symlink-resolved
+// path: EvalSymlinks resolves every intermediate directory symlink, so
+// this covers chains such as /usr/local/sbin/xpf-userspace-dp ->
+// versions/current/xpf-userspace-dp -> versions/<ver>/xpf-userspace-dp.
+func resolvedPathChainReason(resolved string) string {
+	dir := filepath.Dir(resolved)
+	for {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return fmt.Sprintf("cannot inspect helper directory %s: %v; refusing to execute it as root", dir, err)
+		}
+		if reason := lstatTrustReason("helper directory", dir, info); reason != "" {
+			return reason
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
+// validatedHelperPath is the shared validation behind findBinary: it
+// resolves symlinks, validates the resolved file (executable, plus the
+// root-daemon trust check), and — as root — refuses any replaceable
+// symlink or directory component on either spelling of the path. The
+// returned path names the exact validated inode through a chain no
+// less-privileged user can mutate. A returned error is a human reason,
+// never a verdict on existence: a dangling symlink reports a chain
+// reason, not "not found".
+func validatedHelperPath(candidate string) (string, error) {
+	resolved, ok, err := resolveHelperPath(candidate)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errors.New("does not exist")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", errors.New("is a directory")
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("not executable (mode %s)", info.Mode())
+	}
+	if reason := helperBinaryTrustReason(info); reason != "" {
+		return "", errors.New(reason)
+	}
+	if helperProcessEuid() == 0 {
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			return "", err
+		}
+		if reason := untrustedPathChainReason(abs); reason != "" {
+			return "", errors.New(reason)
+		}
+		if reason := resolvedPathChainReason(resolved); reason != "" {
+			return "", errors.New(reason)
+		}
+	}
+	return resolved, nil
+}
+
+// validatedBinaryCandidate returns the resolved path to exec for an
+// implicit candidate, or a skip reason. An empty reason means the
+// candidate does not exist.
+func validatedBinaryCandidate(path string) (resolved string, reason string) {
+	resolved, err := validatedHelperPath(path)
+	if err != nil {
+		if err.Error() == "does not exist" {
+			return "", ""
+		}
+		return "", err.Error()
+	}
+	if err := checkExecutableAccess(path, resolved); err != nil {
+		return "", err.Error()
+	}
+	return resolved, ""
+}
+
+// checkExecutableAccess mirrors exec.LookPath's effective-access check
+// (#12196). It probes the RESOLVED path: probing the unresolved spelling
+// would re-open the symlink race this change closes, and membership of
+// the probe subject changes only for a symlink plant, which the chain
+// check either already refused (root) or deliberately admits (non-root
+// dev workflow follows the developer's own symlinks).
+func checkExecutableAccess(candidate, resolved string) error {
+	if !strings.Contains(candidate, string(filepath.Separator)) {
+		return nil
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return err
+	}
+	err = unix.Faccessat(unix.AT_FDCWD, resolved, unix.X_OK, unix.AT_EACCESS)
+	if err == nil {
+		return nil
+	}
+	// Go's exec.LookPath uses this same permission-bit fallback when
+	// effective-access checks are unavailable or blocked by seccomp.
+	if err != unix.ENOSYS && err != unix.EPERM {
+		return fmt.Errorf("not executable (access check: %v; mode %s)", err, info.Mode())
+	}
+	return nil
 }
 
 // helperProcessEuid is a seam so tests can simulate a root daemon
@@ -670,39 +885,6 @@ func helperBinaryTrustReason(info os.FileInfo) string {
 		return fmt.Sprintf("owned by uid %d, not root; refusing to execute it as root", uid)
 	}
 	return ""
-}
-
-// executableBinaryCandidate mirrors exec.LookPath's executable access check
-// for implicit candidates with a path, plus the #16054 trust check for a
-// root daemon. An empty reason means the candidate does not exist; the
-// bare argv0-relative candidate can duplicate the cwd candidate, so it is
-// skipped and handled by the PATH fallback instead.
-func executableBinaryCandidate(path string) (bool, string) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false, ""
-	}
-	if info.IsDir() {
-		return false, "is a directory"
-	}
-	if info.Mode().Perm()&0o111 == 0 {
-		return false, fmt.Sprintf("not executable (mode %s)", info.Mode())
-	}
-	if reason := helperBinaryTrustReason(info); reason != "" {
-		return false, reason
-	}
-	if strings.Contains(path, string(filepath.Separator)) {
-		err = unix.Faccessat(unix.AT_FDCWD, path, unix.X_OK, unix.AT_EACCESS)
-		if err == nil {
-			return true, ""
-		}
-		// Go's exec.LookPath uses this same permission-bit fallback when
-		// effective-access checks are unavailable or blocked by seccomp.
-		if err != unix.ENOSYS && err != unix.EPERM {
-			return false, fmt.Sprintf("not executable (access check: %v; mode %s)", err, info.Mode())
-		}
-	}
-	return true, ""
 }
 
 func (m *Manager) stopLocked() {
