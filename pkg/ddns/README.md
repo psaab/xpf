@@ -1060,6 +1060,14 @@ regressed.
   Under skip-existing/strict-fail (which write no DHCID on the normal
   path) a successful same-device first-family add publishes the device
   marker once per updater so the sibling's proof has a wire target.
+  That marker now has an owner and a delete path (#16597): while a
+  same-device sibling survives, `markerSharedWithSibling`/
+  `KeepSiblingMarker` keep it; the last same-name family's delete
+  withdraws it value-specifically (exact device DHCID, never a
+  delete-RRset), so a fully released name leaves no RR and a later
+  single-family or other-client claim is not refused against xpf's
+  own leftover. Deleting a marker that was never published is an
+  exact-match no-op, so a foreign DHCID at the name is never removed.
 - **Unloadable ownership state fails CLOSED (#2650)** — a corrupt, unknown-
   future-version, or unreadable state file is NOT silently reset to an empty
   store. `loadDDNSState` returns the empty store plus a CLASSIFIED error
