@@ -213,6 +213,52 @@ func natPrefixContainsV4MappedOrCompat(raw string) bool {
 	return natIntervalIntersectsDroppedNonExempt(lo, hi)
 }
 
+// natPrefixBroadContainsV4MappedOrCompat is the BIDIRECTIONAL-
+// external intersection question with the broad-external scope
+// (gate5 direction (a) on #17697): identical to the allocation
+// intersection EXCEPT that an external interval spanning at least
+// a /64 (bits <= 64 — the documented subnet-translation widths,
+// NPTv6 /48+/64 and static block pairs) is treated as a partial-
+// viability selector rather than a rooted translation block: it
+// is rejected on intersection only when it is ALSO subset (fully
+// dropped — already covered by the subset question, kept here for
+// a single call), while narrower rooted blocks (/95-/127) reject
+// on any intersection. Rationale: a /64-or-broader external paired
+// with a native internal maps every internal host across the
+// whole external interval including its native population — the
+// translation is partially viable exactly like the broad match
+// selectors this gate deliberately keeps — whereas a narrow
+// rooted block's reverse population lives inside its small
+// interval, so an intersecting narrow block can strand its hosts
+// in dropped space with no native remainder in the block. The
+// broad scope also keeps ::/0 externals from pre-empting the
+// #6659 cardinality first-error for multi-prefix rules.
+func natPrefixBroadContainsV4MappedOrCompat(raw string) bool {
+	lo, hi, ok := natPrefixInterval(raw)
+	if !ok {
+		return false
+	}
+	if !natIntervalIntersectsDroppedNonExempt(lo, hi) {
+		return false
+	}
+	// Determine the prefix width from the interval size: count
+	// trailing 0xff-equivalent host bits via lo/hi comparison —
+	// simpler: recompute bits from the raw spelling.
+	bits := 128
+	if slash := strings.IndexByte(raw, '/'); slash >= 0 {
+		if n, err := strconv.Atoi(raw[slash+1:]); err == nil {
+			bits = n
+		}
+	} else {
+		return true // single dropped host: intersection == subset
+	}
+	if bits <= 64 {
+		// Broad external: reject only when fully dropped (subset).
+		return natIntervalSubsetOfDropped(lo, hi)
+	}
+	return true
+}
+
 // natPrefixIsV4MappedOrCompatOnly is the MATCH-slot question: is
 // every address in the represented interval dropped (subset of
 // D1 ∪ D2), with the exempt-only interval {::, ::1} (::/127)

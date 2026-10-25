@@ -469,17 +469,12 @@ func TestMappedCompatGateWitnesses16875(t *testing.T) {
 		{"static block straddle external /95", staticNATSet("::fffe:0:0/95", "2001:db8::/95")},
 		{"static block straddle external /94", staticNATSet("::fffc:0:0/94", "2001:db8::/94")},
 		{"static block straddle external /88", staticNATSet("::ff00:0:0/88", "2001:db8::/88")},
+		{"static narrow compat external /96", staticNATSet("::/96", "2001:db8::/96")},
 		{"nptv6 compat target", []string{
 			"set security zones security-zone trust",
 			"set security nat static rule-set rs1 from zone trust",
 			"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::/64",
 			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix ::/64",
-		}},
-		{"nptv6 compat external", []string{
-			"set security zones security-zone trust",
-			"set security nat static rule-set rs1 from zone trust",
-			"set security nat static rule-set rs1 rule r1 match destination-address ::/64",
-			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix 2001:db8:1::/64",
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -500,11 +495,19 @@ func TestMappedCompatGateWitnesses16875(t *testing.T) {
 		{"snat source ::/0", snatFamilySet16600("source-address ::/0", "2001:db8::5")},
 		{"snat source ::2/0", snatFamilySet16600("source-address ::2/0", "2001:db8::5")},
 		{"static block native", staticNATSet("2001:db8::/64", "2001:db8:1::/64")},
+		{"static broad external ::/64 native internal", staticNATSet("::/64", "2001:db8:1::/64")},
+		{"static broad straddle external ::/64", staticNATSet("::fffe:0:0/64", "2001:db8::/64")},
 		{"nptv6 native pair", []string{
 			"set security zones security-zone trust",
 			"set security nat static rule-set rs1 from zone trust",
 			"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8::/64",
 			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix fd00:1::/64",
+		}},
+		{"nptv6 compat-rooted external ::/64 broad", []string{
+			"set security zones security-zone trust",
+			"set security nat static rule-set rs1 from zone trust",
+			"set security nat static rule-set rs1 rule r1 match destination-address ::/64",
+			"set security nat static rule-set rs1 rule r1 then static-nat nptv6-prefix 2001:db8:1::/64",
 		}},
 		{"book straddle selector", []string{
 			"set security address-book global address c1 ::fffe:0:0/95",

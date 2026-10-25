@@ -606,20 +606,23 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 // slots, and INTERSECTION (reject iff the interval meets
 // dropped-non-exempt space — natPrefixContainsV4MappedOrCompat)
 // for translation/allocation endpoints. BIDIRECTIONAL slots
-// (static and NPTv6 external prefixes) must pass BOTH: the
-// external is the forward match and the reverse translation
-// endpoint, so a straddle (::fffe:0:0/95) that is viable as a
-// pure selector still rejects there, while it passes at
-// selector-only slots. Host-bits spellings (::2/0) mask first.
-// Sites, in deterministic order (static rule-sets in slice
-// order, DNAT/SNAT rule-sets sorted by name, DNAT pools sorted
-// by name, SNAT pools sorted by name):
+// (static and NPTv6 external prefixes) must pass subset AND the
+// broad-scoped intersection (natPrefixBroadContainsV4MappedOr-
+// Compat): the external is the forward match and the reverse
+// translation endpoint, so a narrow straddle (::fffe:0:0/95)
+// rejects there while a /64-or-broader external — partially
+// viable across its native population — passes, as do broad
+// selectors at selector-only slots. Host-bits spellings mask
+// first. Sites, in deterministic order (static rule-sets in
+// slice order, DNAT/SNAT rule-sets sorted by name, DNAT pools
+// sorted by name, SNAT pools sorted by name):
 //
 //   - static-NAT (incl. NPTv6): external match destination
-//     (BOTH questions), match source (subset, SourceAddresses
-//     fallback SourceAddress — SourceConstraint; the Rust drop
-//     checks SRC or DST), `then` target incl. nptv6-prefix
-//     (intersection). The static `inet` sentinel keeps its gate.
+//     (subset + broad-scoped intersection), match source
+//     (subset, SourceAddresses fallback SourceAddress —
+//     SourceConstraint; the Rust drop checks SRC or DST), `then`
+//     target incl. nptv6-prefix (full intersection). The static
+//     `inet` sentinel keeps its gate.
 //   - destination/source-NAT: match source+destination (subset),
 //     destination pool address (intersection).
 //   - source-NAT pools: every member of every pool, referenced
@@ -657,14 +660,19 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 	// prefix is both the forward match AND the reverse-direction
 	// translation endpoint (outbound sources are rewritten onto
 	// it), so it must pass BOTH questions — subset (forward match
-	// viable) and intersection (reverse target not dropped). The
-	// `then` prefix likewise. NPTv6 gets the same treatment: its
-	// external is also a reverse endpoint, so a compat-rooted ::/64
-	// external — viable as a pure selector because it spans native
-	// space — still rejects on intersection, exactly as a ::/64
-	// target does. Genuinely selector-only slots (source
-	// constraints, SNAT/DNAT matches, NAT64 sources, book values)
-	// keep subset only. The static `inet` sentinel keeps its gate.
+	// viable) and the broad-scoped intersection (reverse target
+	// not stranded in dropped space). The intersection on the
+	// external is scoped to rooted translation blocks narrower
+	// than /64 (natPrefixBroadContainsV4MappedOrCompat): a
+	// /64-or-broader external paired with a native internal maps
+	// across its whole interval including native space — partially
+	// viable like the broad selectors kept elsewhere — and the
+	// scope keeps ::/0 multi-prefix rules reporting the #6659
+	// cardinality verdict first (gate5 direction (a)). The `then`
+	// target keeps the full intersection question. NPTv6 gets the
+	// same treatment (its /48//64 externals judge subset; a target
+	// intersecting dropped space rejects). Genuinely
+	// selector-only slots keep subset only; `inet` keeps its gate.
 	for _, rs := range cfg.Security.NAT.Static {
 		if rs == nil {
 			continue
@@ -681,7 +689,7 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 				if addr == "" {
 					continue
 				}
-				if natPrefixIsV4MappedOrCompatOnly(addr) || natPrefixContainsV4MappedOrCompat(addr) {
+				if natPrefixIsV4MappedOrCompatOnly(addr) || natPrefixBroadContainsV4MappedOrCompat(addr) {
 					return fmt.Errorf(
 						"static-nat rule-set %q rule %q: match destination-address %q %s (#16875)",
 						rs.Name, rule.Name, addr, cause)
