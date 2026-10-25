@@ -179,35 +179,32 @@ func deterministicPoolBlockCapacity(pool *config.NATPool, poolName string, overB
 	if bs <= 0 {
 		return 0
 	}
-	portLow := pool.PortLow
-	if portLow == 0 {
-		portLow = 1024
+	// #16822: use the pool's own port range for BOTH modes. #15283 made
+	// mode 2 (IPv6 subscriber / NAT64) honour `port range` (default
+	// 1024-65535) in pkg/nat, the wire builder, and the Rust allocator;
+	// this gauge previously overrode it with the fixed 1024-65535
+	// window, overstating a range-limited pool by the range ratio.
+	// SourceNATPoolPortRange is the SSOT (default 1024-65535, invalid
+	// spec fails closed); SourceNATPoolReportableAddresses above has
+	// already returned 0 for an unusable pool, so !ok here is only a
+	// defensive guard.
+	portLow, portHigh, ok := config.SourceNATPoolPortRange(pool)
+	if !ok {
+		return 0
 	}
-	portHigh := pool.PortHigh
-	if portHigh == 0 {
-		portHigh = 65535
-	}
-	portRange := portHigh - portLow + 1
+	portRange := int(portHigh) - int(portLow) + 1
 	if portRange <= 0 || bs > portRange {
 		return 0
 	}
-	// Mode 2 uses the fixed NAT64 port range for block math (see
-	// deterministicSubscriberCapacity / nat64.go); Rust build_deterministic_v6
-	// derives host_count from the NAT64 pool_v4 length and that range. Keep
-	// the gauge on the same range or it overstates mode-2 capacity.
 	ipv6Subscriber := false
 	if _, n, err := net.ParseCIDR(pool.Deterministic.HostAddress); err == nil {
 		_, bits := n.Mask.Size()
 		ipv6Subscriber = bits == 128
 	}
-	rangeForBlocks := portRange
-	if ipv6Subscriber {
-		rangeForBlocks = 65535 - 1024 + 1
-	}
 	addrs := config.SourceNATPoolDeterministicV4AddressCount(pool, ipv6Subscriber)
 	maxInt := uint64(^uint(0) >> 1)
-	total := addrs * uint64(rangeForBlocks/bs)
-	if addrs != 0 && total/addrs != uint64(rangeForBlocks/bs) {
+	total := addrs * uint64(portRange/bs)
+	if addrs != 0 && total/addrs != uint64(portRange/bs) {
 		return int(maxInt)
 	}
 	if total > maxInt {
