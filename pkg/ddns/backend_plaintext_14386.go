@@ -73,8 +73,9 @@ func templateAuthorityUserinfo(s string) bool {
 }
 
 // templateCarriesLiteralToken mirrors config.ddnsTemplateCarriesLiteralToken:
-// ANY literal query value (#15225 A40-03), or a credential-named key=literal
-// pair in the path (#14439).
+// ANY literal query value (#15225 A40-03, #16573 for percent-escaped
+// values and percent-escaped keyless components), or a credential-named
+// key=literal pair in the path (#14439).
 func templateCarriesLiteralToken(tmpl string) bool {
 	tmpl = strings.TrimSpace(tmpl)
 	if i := strings.Index(tmpl, "#"); i >= 0 {
@@ -97,7 +98,7 @@ func templateCarriesLiteralToken(tmpl string) bool {
 		path, query = rest[:i], rest[i+1:]
 	}
 	isLiteral := func(v string) bool {
-		return v != "" && !strings.Contains(v, "%") && !strings.Contains(v, "{{")
+		return templateValueHasLiteral(v)
 	}
 	isCredKey := func(k string) bool {
 		switch strings.ToLower(k) {
@@ -114,9 +115,46 @@ func templateCarriesLiteralToken(tmpl string) bool {
 		}
 	}
 	for _, pair := range strings.Split(query, "&") {
-		if i := strings.Index(pair, "="); i > 0 && isLiteral(pair[i+1:]) {
+		if pair == "" {
+			continue
+		}
+		if i := strings.Index(pair, "="); i >= 0 {
+			if i > 0 {
+				if isLiteral(pair[i+1:]) {
+					return true
+				}
+			} else if v := pair[i+1:]; v != "" && strings.Contains(v, "%") && isLiteral(v) {
+				return true
+			}
+		} else if strings.Contains(pair, "%") && isLiteral(pair) {
 			return true
 		}
+	}
+	return false
+}
+
+// templateValueHasLiteral mirrors config.ddnsTemplateValueHasLiteral:
+// a value carries a literal byte when, after removing recognised
+// specifiers (%h/%i/%u/%p/%%) and terminated {{...}} placeholders, any
+// byte remains. Any other %x (percent-escapes such as %2B/%2F/%3D, a
+// trailing '%') is transmitted verbatim by renderGenericURL, hence
+// literal; an unterminated "{{" is likewise verbatim.
+func templateValueHasLiteral(v string) bool {
+	for i := 0; i < len(v); {
+		if v[i] == '%' && i+1 < len(v) {
+			switch v[i+1] {
+			case 'h', 'i', 'u', 'p', '%':
+				i += 2
+				continue
+			}
+		}
+		if v[i] == '{' && i+1 < len(v) && v[i+1] == '{' {
+			if end := strings.Index(v[i+2:], "}}"); end >= 0 {
+				i += 2 + end + 2
+				continue
+			}
+		}
+		return true
 	}
 	return false
 }

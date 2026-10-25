@@ -41,12 +41,18 @@ func ddnsBackendCarriesCredentials(p *DDNSProvider) bool {
 // api-token=, pwd=, p= and every provider-specific spelling, and any
 // literal query value on an http:// template is operator-supplied data
 // sent in cleartext — the safe rule is that a literal query value counts
-// as credential-carrying. A value counts as literal only when it is
-// non-empty and contains no '%' (excludes %u/%p/%h/%i specifiers) and no
-// "{{" (excludes placeholders). Bare path segments ("/update/SECRET")
-// are intentionally not flagged, while credential-NAMED path pairs
-// ("/update/token=SECRET", #14439) still are — see
-// ddnsBackendCarriesCredentials and the pinned controls.
+// as credential-carrying. A value counts as literal when, after removing
+// every recognised specifier (%h/%i/%u/%p/%%) and every {{...}}
+// placeholder, any byte remains (#16573): a percent-escaped token such
+// as %2B%2F%3D is NOT a specifier — renderGenericURL transmits unknown
+// %x verbatim, so the escaped credential goes out unchanged in
+// cleartext. A keyless query component counts as literal only when it
+// contains such an escaped/unknown '%' sequence (?%2B%2F%3D carries the
+// escaped token with no key at all); a plain keyless flag (?flag) is a
+// pinned value-less control and stays unflagged. Bare path segments
+// ("/update/SECRET") are intentionally not flagged, while
+// credential-NAMED path pairs ("/update/token=SECRET", #14439) still
+// are — see ddnsBackendCarriesCredentials and the pinned controls.
 func ddnsTemplateCarriesLiteralToken(tmpl string) bool {
 	tmpl = strings.TrimSpace(tmpl)
 	if i := strings.Index(tmpl, "#"); i >= 0 {
@@ -69,7 +75,7 @@ func ddnsTemplateCarriesLiteralToken(tmpl string) bool {
 		path, query = rest[:i], rest[i+1:]
 	}
 	isLiteral := func(v string) bool {
-		return v != "" && !strings.Contains(v, "%") && !strings.Contains(v, "{{")
+		return ddnsTemplateValueHasLiteral(v)
 	}
 	isCredKey := func(k string) bool {
 		switch strings.ToLower(k) {
@@ -86,9 +92,53 @@ func ddnsTemplateCarriesLiteralToken(tmpl string) bool {
 		}
 	}
 	for _, pair := range strings.Split(query, "&") {
-		if i := strings.Index(pair, "="); i > 0 && isLiteral(pair[i+1:]) {
+		if pair == "" {
+			continue
+		}
+		if i := strings.Index(pair, "="); i >= 0 {
+			if i > 0 {
+				if isLiteral(pair[i+1:]) {
+					return true
+				}
+			} else if v := pair[i+1:]; v != "" && strings.Contains(v, "%") && isLiteral(v) {
+				// Empty-key escaped value (= %2B...): the escaped-token cell
+				// with no key. A plain =value was unflagged pre-#16573.
+				return true
+			}
+		} else if strings.Contains(pair, "%") && isLiteral(pair) {
+			// Keyless escaped component (?%2B%2F%3D): the escaped token
+			// with no key at all. A plain keyless flag (?flag) and a
+			// specifier-only component (?%h) stay unflagged (pinned).
 			return true
 		}
+	}
+	return false
+}
+
+// ddnsTemplateValueHasLiteral reports whether a template value carries any
+// literal byte after removing recognised specifiers and placeholders.
+// Recognised specifiers are %h, %i, %u, %p and %% (renderGenericURL).
+// Any other %x — including percent-escapes such as %2B/%2F/%3D and a
+// trailing '%' — is transmitted verbatim, hence literal. An unterminated
+// "{{" is transmitted verbatim too, hence literal; a terminated
+// "{{...}}" placeholder (through the first "}}") is not.
+// Mirror: pkg/ddns templateValueHasLiteral — keep in lockstep.
+func ddnsTemplateValueHasLiteral(v string) bool {
+	for i := 0; i < len(v); {
+		if v[i] == '%' && i+1 < len(v) {
+			switch v[i+1] {
+			case 'h', 'i', 'u', 'p', '%':
+				i += 2
+				continue
+			}
+		}
+		if v[i] == '{' && i+1 < len(v) && v[i+1] == '{' {
+			if end := strings.Index(v[i+2:], "}}"); end >= 0 {
+				i += 2 + end + 2
+				continue
+			}
+		}
+		return true
 	}
 	return false
 }
