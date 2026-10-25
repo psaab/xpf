@@ -298,12 +298,15 @@ func natScopeParts(rs *config.NATRuleSet, cfg *config.Config, dest bool) (from, 
 		}
 		return name
 	}
-	side := func(zone, iface, ri string) natScopePart {
+	side := func(zone, iface, ri string, riDefault bool) natScopePart {
 		switch {
 		case iface != "":
 			return natScopePart{"interface", iface}
 		case ri != "":
 			return natScopePart{"routing-instance", ri}
+		case riDefault:
+			// #16604: explicit master scope, not match-any.
+			return natScopePart{"routing-instance", "default"}
 		case zone != "":
 			return natScopePart{"zone", qualify(zone)}
 		default:
@@ -313,11 +316,11 @@ func natScopeParts(rs *config.NATRuleSet, cfg *config.Config, dest bool) (from, 
 	if rs == nil {
 		return natScopePart{"zone", "any"}, natScopePart{}, false
 	}
-	from = side(rs.FromZone, rs.FromInterface, rs.FromRoutingInstance)
-	if dest && rs.ToZone == "" && rs.ToInterface == "" && rs.ToRoutingInstance == "" {
+	from = side(rs.FromZone, rs.FromInterface, rs.FromRoutingInstance, rs.FromRoutingInstanceDefault)
+	if dest && rs.ToZone == "" && rs.ToInterface == "" && rs.ToRoutingInstance == "" && !rs.ToRoutingInstanceDefault {
 		return from, natScopePart{}, false
 	}
-	return from, side(rs.ToZone, rs.ToInterface, rs.ToRoutingInstance), true
+	return from, side(rs.ToZone, rs.ToInterface, rs.ToRoutingInstance, rs.ToRoutingInstanceDefault), true
 }
 
 // natScopeLine renders the per-rule scope header for the source and

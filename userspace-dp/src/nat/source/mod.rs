@@ -1166,14 +1166,16 @@ impl SourceNatRule {
         if !self.to_interface.is_empty() && self.to_interface != scope.egress_ifname {
             return false;
         }
-        if !self.from_routing_instance.is_empty()
-            && self.from_routing_instance != scope.ingress_routing_instance
-        {
+        if !crate::nat::nat_ri_matches(
+            &self.from_routing_instance,
+            scope.ingress_routing_instance,
+        ) {
             return false;
         }
-        if !self.to_routing_instance.is_empty()
-            && self.to_routing_instance != scope.egress_routing_instance
-        {
+        if !crate::nat::nat_ri_matches(
+            &self.to_routing_instance,
+            scope.egress_routing_instance,
+        ) {
             return false;
         }
         true
@@ -1216,8 +1218,8 @@ impl SourceNatRule {
             &self.to_zone,
             &self.from_interface,
             &self.to_interface,
-            &self.from_routing_instance,
-            &self.to_routing_instance,
+            crate::nat::nat_ri_key(&self.from_routing_instance),
+            crate::nat::nat_ri_key(&self.to_routing_instance),
             packet_from_zone,
             packet_to_zone,
         )

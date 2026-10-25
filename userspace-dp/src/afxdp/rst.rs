@@ -55,8 +55,8 @@ pub(super) fn nat_translated_local_exclusions(
         let index = candidates.len();
         candidates.push(item);
         for mask in 0..8 {
+            // #16604: mask&2 on a main-instance iface is the token key, not a skip.
             if (mask & 1 != 0 && iface.name.is_empty())
-                || (mask & 2 != 0 && iface.routing_instance.is_empty())
                 || (mask & 4 != 0 && iface.egress_zone.is_empty())
             {
                 continue;
@@ -67,7 +67,12 @@ pub(super) fn nat_translated_local_exclusions(
                 ""
             };
             let to_routing_instance = if mask & 2 != 0 {
-                iface.routing_instance.as_str()
+                if iface.routing_instance.is_empty() {
+                    // #16604: main-instance also registers under token key.
+                    crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE
+                } else {
+                    iface.routing_instance.as_str()
+                }
             } else {
                 ""
             };
@@ -90,7 +95,7 @@ pub(super) fn nat_translated_local_exclusions(
         }
         let scope = (
             rule.to_interface.as_str(),
-            rule.to_routing_instance.as_str(),
+            crate::nat::nat_ri_key(rule.to_routing_instance.as_str()),
             rule.to_zone.as_str(),
         );
         if !seen_scopes.insert(scope) {

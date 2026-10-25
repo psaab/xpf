@@ -127,7 +127,15 @@ func interfaceInEgressScope(rs *NATRuleSet, ifName, logical string, zoneByIface,
 	if rs.ToInterface != "" && rs.ToInterface != logical && rs.ToInterface != ifName {
 		return false
 	}
-	if rs.ToRoutingInstance != "" {
+	// #16604: an explicit master scope (`to routing-instance default`,
+	// lowered to "" + flag, or a raw literal on a hand-built config)
+	// admits only interfaces in NO named instance.
+	wantRI := rs.ToRoutingInstance
+	explicitDefault := rs.ToRoutingInstanceDefault
+	if !explicitDefault && wantRI == FBFDefaultRoutingInstance {
+		wantRI, explicitDefault = "", true
+	}
+	if wantRI != "" || explicitDefault {
 		ri, ok := riByIface[logical]
 		if !ok {
 			if _, blocked := noBareRIFallback[ifName]; blocked {
@@ -135,7 +143,11 @@ func interfaceInEgressScope(rs *NATRuleSet, ifName, logical string, zoneByIface,
 			}
 			ri, ok = riByIface[ifName]
 		}
-		if !ok || ri != rs.ToRoutingInstance {
+		if explicitDefault {
+			if ok && ri != "" {
+				return false
+			}
+		} else if !ok || ri != wantRI {
 			return false
 		}
 	}

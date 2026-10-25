@@ -1239,6 +1239,13 @@ func (c *CLI) showNAT64(cfg *config.Config) error {
 		if len(ris) == 0 && rs.FromRoutingInstance != "" {
 			ris = []string{rs.FromRoutingInstance}
 		}
+		// #16604: a lowered explicit-master member ("") renders as the
+		// authored `default`, never as a blank list entry.
+		for i, ri := range ris {
+			if ri == "" {
+				ris[i] = "default"
+			}
+		}
 		if len(ris) > 0 {
 			fmt.Printf("  From routing-instances: %s\n", strings.Join(ris, ", "))
 		}

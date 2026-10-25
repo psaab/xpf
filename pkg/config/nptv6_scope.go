@@ -37,8 +37,9 @@ func NPTv6ScopeUnsupported(rs *StaticNATRuleSet, rule *StaticNATRule) bool {
 	}
 	// Rule-set scope: the wire carries only `from zone`, so an interface- or
 	// routing-instance-scoped rule would install as a broader zone/global
-	// rewrite.
-	if rs.FromInterface != "" || rs.FromRoutingInstance != "" {
+	// rewrite. #16604: an explicit master (`routing-instance default`)
+	// scope is likewise a constraint the wire would drop.
+	if rs.FromInterface != "" || rs.FromRoutingInstance != "" || rs.FromRoutingInstanceDefault {
 		return true
 	}
 	// Per-rule scope: a `match source-address` or `match destination-port` is

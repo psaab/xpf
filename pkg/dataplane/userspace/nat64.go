@@ -261,6 +261,9 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 				fromZones = append(fromZones, rs.FromZone)
 			}
 		}
+		// #16604: stamp every member in wire space — a raw authored
+		// literal `default` or the lowered ""+flag explicit master
+		// becomes the wire token; named instances pass through.
 		fromRIs := append([]string(nil), rs.FromRoutingInstances...)
 		if rs.FromRoutingInstance != "" {
 			seen := false
@@ -274,13 +277,27 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 				fromRIs = append(fromRIs, rs.FromRoutingInstance)
 			}
 		}
+		singularWire := config.NATRoutingInstanceScopeWire(cfg, rs.FromRoutingInstance, rs.FromRoutingInstanceDefault)
+		for i, ri := range fromRIs {
+			fromRIs[i] = config.NormalizeNATRoutingInstanceScope16604(cfg, ri)
+		}
+		if rs.FromRoutingInstanceDefault {
+			for i, ri := range fromRIs {
+				if ri == "" {
+					fromRIs[i] = config.NATDefaultRoutingInstanceWire
+				}
+			}
+			if len(fromRIs) == 0 {
+				fromRIs = []string{config.NATDefaultRoutingInstanceWire}
+			}
+		}
 		out = append(out, NAT64RuleSnapshot{
 			Name:                       rs.Name,
 			Prefix:                     config.NormaliseNAT64PrefixForSnapshot(rs.Prefix),
 			PoolAddresses:              poolAddresses,
 			FromZone:                   rs.FromZone,
 			FromZones:                  fromZones,
-			FromRoutingInstance:        rs.FromRoutingInstance,
+			FromRoutingInstance:        singularWire,
 			FromRoutingInstances:       fromRIs,
 			SourceAddresses:            sourceAddrs,
 			SourceConstrained:          authoredConstrained && !wildcardAuthored,

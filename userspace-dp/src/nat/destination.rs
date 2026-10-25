@@ -166,8 +166,7 @@ impl DnatEntry {
     /// fields are wildcards; present fields are AND-ed.
     fn scope_ok(&self, ingress_ifname: &str, ingress_routing_instance: &str) -> bool {
         (self.from_interface.is_empty() || self.from_interface.as_ref() == ingress_ifname)
-            && (self.from_routing_instance.is_empty()
-                || self.from_routing_instance.as_ref() == ingress_routing_instance)
+            && crate::nat::nat_ri_matches(&self.from_routing_instance, ingress_routing_instance)
     }
     /// Scope tier within the eligible candidates. Eligibility still ANDs all
     /// populated context axes; precedence uses the most-specific one.
@@ -2543,7 +2542,8 @@ fn off_scope_superset_common(
         && (off.from_interface.is_empty() || off.from_interface == slot.from_interface)
         // Routing-instance: RI-wildcard or the same from-routing-instance.
         && (off.from_routing_instance.is_empty()
-            || off.from_routing_instance == slot.from_routing_instance)
+            || crate::nat::nat_ri_key(&off.from_routing_instance)
+                == crate::nat::nat_ri_key(&slot.from_routing_instance))
         // Source: the exemption must match ANY source — a source-scoped off
         // leaves other sources translated.
         && !off.source_constrained

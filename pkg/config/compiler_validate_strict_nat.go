@@ -218,6 +218,12 @@ func natInterfaceDefined15278(cfg *Config, ref string) bool {
 	return false
 }
 
+// natRoutingInstanceDefined15278 reports whether a NAT routing-instance
+// scope name is defined. "" is unscoped; "default" is always defined —
+// as the master alias when no instance of that name is declared, or as
+// that declared instance when one is (#16604; the snapshot builders
+// and Rust matchers give the two readings their distinct match
+// semantics, so neither is inert).
 func natRoutingInstanceDefined15278(cfg *Config, name string) bool {
 	if name == "" || name == "default" {
 		return true
@@ -3162,7 +3168,11 @@ func validateNPTv6ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 				return nil, err
 			}
 		}
-		if rs.FromRoutingInstance != "" {
+		if rs.FromRoutingInstance != "" || rs.FromRoutingInstanceDefault {
+			riName := rs.FromRoutingInstance
+			if riName == "" {
+				riName = FBFDefaultRoutingInstance
+			}
 			if err := emit(fmt.Sprintf(
 				"security nat static rule-set %q is an NPTv6 (nptv6-prefix) rule-set "+
 					"scoped `from routing-instance %q`, but the NPTv6 dataplane honors "+
@@ -3170,7 +3180,7 @@ func validateNPTv6ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 					"and the prefix rewrite installed over a broader scope, translating "+
 					"traffic the routing-instance scope excludes — remove the routing-"+
 					"instance scope until scoped NPTv6 support lands (#5818)",
-				rs.Name, rs.FromRoutingInstance)); err != nil {
+				rs.Name, riName)); err != nil {
 				return nil, err
 			}
 		}
@@ -5933,18 +5943,36 @@ func nat64EffectiveZones(rs *NAT64RuleSet) []string {
 
 // nat64EffectiveRoutingInstances (#16049) is the routing-instance set
 // a NAT64 rule-set admits: the authored FromRoutingInstances list when
-// present, else the singular FromRoutingInstance.
+// present, else the singular FromRoutingInstance. #16604: an explicit
+// master scope (list member "" + flag, or the raw literal on a
+// hand-built config) keys as the wire token so it neither collides
+// with the unscoped key nor with a named instance.
 func nat64EffectiveRoutingInstances(rs *NAT64RuleSet) []string {
 	if rs == nil {
 		return nil
 	}
+	var out []string
 	if len(rs.FromRoutingInstances) > 0 {
-		return rs.FromRoutingInstances
+		out = append(out, rs.FromRoutingInstances...)
+	} else if rs.FromRoutingInstance != "" {
+		out = []string{rs.FromRoutingInstance}
 	}
-	if rs.FromRoutingInstance != "" {
-		return []string{rs.FromRoutingInstance}
+	if rs.FromRoutingInstanceDefault {
+		for i, ri := range out {
+			if ri == "" {
+				out[i] = NATDefaultRoutingInstanceWire
+			}
+		}
+		if len(out) == 0 {
+			out = []string{NATDefaultRoutingInstanceWire}
+		}
 	}
-	return nil
+	for i, ri := range out {
+		if ri == FBFDefaultRoutingInstance {
+			out[i] = NATDefaultRoutingInstanceWire
+		}
+	}
+	return out
 }
 
 // nat64PrefixOwnerKeyScoped is the SHADOW key (#9555/#15678): same

@@ -155,7 +155,7 @@ func applyStaticNATFromScope(rs *StaticNATRuleSet, s natMatchScope) {
 	case "interface":
 		rs.FromInterface = s.value
 	case "routing-instance":
-		rs.FromRoutingInstance = s.value
+		rs.FromRoutingInstance, rs.FromRoutingInstanceDefault = lowerNATRoutingInstanceScope16604(s.value)
 	default: // "zone"
 		rs.FromZone = s.value
 	}
