@@ -493,6 +493,14 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) packet_too_big_buckets:
         FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     pub(in crate::afxdp) egress: FastMap<i32, EgressInterface>,
+    /// #16513: ifindexes whose merged egress primary came from an
+    /// operator DESIGNATION (a marked address on some row sharing the
+    /// ifindex), per family. Build-time merge bookkeeping for
+    /// `populate_egress`: a designated primary wins over undesignated
+    /// order-based picks in either row order, and only a second,
+    /// different designation conflicts. Not read after the build.
+    pub(in crate::afxdp) egress_primary_v4_designated: FastSet<i32>,
+    pub(in crate::afxdp) egress_primary_v6_designated: FastSet<i32>,
     /// Logical units whose configured VLAN is carried untagged on the wire
     /// because their VLAN is the parent's native VLAN (#13979).
     pub(in crate::afxdp) native_vlan_egress_ifindexes: FastSet<i32>,
