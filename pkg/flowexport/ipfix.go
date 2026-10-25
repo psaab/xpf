@@ -844,6 +844,30 @@ func (e *IPFIXExporter) ExportSessionCloseRemainder(rec logging.EventRecord, evt
 	e.exportSessionCloseRemainder(rec, evt, true, basePkts, baseBytes, baseRevPkts, baseRevBytes)
 }
 
+// CloseFlowOrSample is the #16742 close path: recorded open state
+// exports without a second slot; absent state makes one close-time
+// decision via decide.
+func (e *IPFIXExporter) CloseFlowOrSample(key FlowKey, decide func() bool) (bool, uint64, uint64, uint64, uint64) {
+	return e.exporterCore.CloseFlowOrSample(key, decide)
+}
+
+// TransferFlowStateTo carries open state to the replacement exporter
+// for the same group key (#16742).
+func (e *IPFIXExporter) TransferFlowStateTo(dst *IPFIXExporter, key FlowKey) {
+	if dst == nil {
+		return
+	}
+	e.exporterCore.TransferFlowStateTo(&dst.exporterCore, key)
+}
+
+// AbsorbSampledInto transfers all open state to dst (#16742).
+func (e *IPFIXExporter) AbsorbSampledInto(dst *IPFIXExporter) {
+	if dst == nil {
+		return
+	}
+	e.exporterCore.AbsorbSampledInto(&dst.exporterCore)
+}
+
 func (e *IPFIXExporter) sendTemplates() {
 	// RFC 7011 §3.1 / §10.3.2: the IPFIX Sequence Number is the cumulative
 	// count of Data Records sent in all prior Messages for this Observation

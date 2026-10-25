@@ -41,11 +41,14 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/flowexport"
 	"github.com/psaab/xpf/pkg/logging"
 )
@@ -445,6 +448,9 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 		d.flowCancel = nil
 		d.flowWg = nil
 	}
+	// #16742: carry live open state to same-key replacements before
+	// publishing, so the swap does not drop every live flow's close.
+	d.carryFlowStateV9Locked(published)
 	d.flowBundle.Store(&exporterBundle{groups: published})
 	replaced := make(map[*flowexport.Exporter]bool)
 	for _, g := range published {
@@ -769,6 +775,8 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 		d.ipfixCancel = nil
 		d.ipfixWg = nil
 	}
+	// #16742: carry live open state to same-key replacements (v9 twin).
+	d.carryFlowStateIPFIXLocked(published)
 	d.ipfixBundlePtr.Store(&ipfixBundle{groups: published})
 	replaced := make(map[*flowexport.IPFIXExporter]bool)
 	for _, g := range published {
@@ -980,22 +988,46 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 		}
 		key := flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6)
 		if lead.ServesFamily(sd.IsIPv6) {
-			// #16303: the close does not make a second sampling decision.
-			// CloseFlow reports (and forgets) the one decision made at
-			// SESSION_OPEN for this exporter. A sampled open therefore
-			// exports its close without consuming another 1-in-N slot;
-			// an unsampled/absent open exports nothing.
+			// #16303: a close whose open was recorded does not make a
+			// second sampling decision. CloseFlow reports (and
+			// forgets) the one decision made at SESSION_OPEN for this
+			// exporter, so a sampled open exports its close without
+			// consuming another 1-in-N slot.
+			// #16742: when NO group of this instance recorded the
+			// open — an RG failover (the promoted node's helper emits
+			// no CREATE for peer-synced sessions), an exporter-
+			// replacing reconcile that did not carry state, or a lost
+			// SESSION_OPEN — the close makes ONE close-time 1-in-N
+			// decision (SampledForClose) shared across the instance's
+			// groups via the sync.OnceValue below, instead of
+			// exporting nothing while the sampler advertises 1-in-N.
 			// #16303 fold 3: baselines are PER EXPORTER. Same-instance
 			// template groups carry different active timeouts, so group A
 			// may hold baseline 200 while group B still holds 0 (or is
 			// untracked). Collapsing them into one tuple and applying it
 			// to every group over/under-subtracts all but the last.
+			anyState := false
+			for k := i; k < j; k++ {
+				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
+					continue
+				}
+				if b.groups[k].exp.HasFlowState(key) {
+					anyState = true
+					break
+				}
+			}
+			var decide func() bool
+			if !anyState {
+				decide = sync.OnceValue(func() bool {
+					return lead.SampledForClose(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
+				})
+			}
 			sampled := false
 			for k := i; k < j; k++ {
 				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
 					continue
 				}
-				s, p, by, rp, rb := b.groups[k].exp.CloseFlow(key)
+				s, p, by, rp, rb := b.groups[k].exp.CloseFlowOrSample(key, decide)
 				if !s {
 					continue
 				}
@@ -1072,11 +1104,29 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 		key := flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6)
 		if lead.ServesFamily(sd.IsIPv6) {
 			// #16303 fold 3: per-exporter baselines, as in the v9 callback.
+			// #16742: no recorded open anywhere in this instance ->
+			// one shared close-time decision, as in the v9 callback.
+			anyState := false
 			for k := i; k < j; k++ {
 				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
 					continue
 				}
-				s, p, by, rp, rb := b.groups[k].exp.CloseFlow(key)
+				if b.groups[k].exp.HasFlowState(key) {
+					anyState = true
+					break
+				}
+			}
+			var decide func() bool
+			if !anyState {
+				decide = sync.OnceValue(func() bool {
+					return lead.SampledForClose(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
+				})
+			}
+			for k := i; k < j; k++ {
+				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
+					continue
+				}
+				s, p, by, rp, rb := b.groups[k].exp.CloseFlowOrSample(key, decide)
 				if !s {
 					continue
 				}
@@ -1095,6 +1145,16 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 // also invokes. SampledForOpen consumes that one slot; the exporter
 // remembers the selection (tracker entry, or the close-only sampled
 // set) so the matching close exports without a second decision.
+//
+// #16742 promote arm: a peer->local promote after an RG failover gets
+// no SESSION_CREATE from the helper (#15126: only fresh admissions
+// emit CREATE, so no syslog CREATE is produced). The promoted node's
+// Go session-sync path still installs the session locally; the first
+// post-promote SESSION_OPEN-shaped signal the flowexport feed can see
+// is therefore absent by design. Registration for such flows happens
+// through trackFlowOpenFromSync, driven by the HA session-sync walker
+// for peer-synced opens, which calls trackFlowOpen with the gate byte
+// clear — an open for flow export without a syslog CREATE.
 func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
 	srcIP, dstIP, isV6 := parseAddrPair(rec.SrcAddr, rec.DstAddr)
 	key := flowexport.FlowKeyFromClose(srcIP, dstIP, parseSrcPort(rec.SrcAddr), parseSrcPort(rec.DstAddr), rec.ProtocolNum, isV6)
@@ -1150,6 +1210,95 @@ func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
 			}
 			i = j
 		}
+	}
+}
+
+// trackFlowOpenFromSync registers a peer-synced open for flow export
+// (#16742 promote arm). After an RG failover the promoted node's
+// helper emits no SESSION_CREATE for the session (#15126: only fresh
+// admissions emit CREATE), so the flowexport feed never sees a
+// SESSION_OPEN for it and its close would fall back to a fresh
+// close-time decision — or, before #16742, export nothing. The Go
+// session-sync path does learn the session: handleEventStreamDelta /
+// the fallback drain queue its open delta for the peer. That queueing
+// is the promote signal; this hook converts the delta into the same
+// SESSION_OPEN record trackFlowOpen consumes, WITHOUT any syslog
+// CREATE (no EventRecord is logged; only the exporter sampling /
+// tracker state is registered). Interface names are left empty: the
+// daemon sampling path falls back to zone semantics for nameless
+// records (#15946 scoping), and zone IDs come from the delta.
+func (d *Daemon) trackFlowOpenFromSync(delta dpuserspace.SessionDeltaInfo) {
+	if d == nil {
+		return
+	}
+	if d.flowBundle.Load() == nil && d.ipfixBundlePtr.Load() == nil {
+		return
+	}
+	rec := logging.EventRecord{
+		Type:           "SESSION_OPEN",
+		Time:           delta.Timestamp,
+		SrcAddr:        net.JoinHostPort(delta.SrcIP, strconv.Itoa(int(delta.SrcPort))),
+		DstAddr:        net.JoinHostPort(delta.DstIP, strconv.Itoa(int(delta.DstPort))),
+		ProtocolNum:    delta.Protocol,
+		InZone:         delta.IngressZoneID,
+		OutZone:        delta.EgressZoneID,
+		IngressIfindex: uint32(delta.IngressIfindex),
+		EgressIfindex:  uint32(delta.EgressIfindex),
+	}
+	if delta.NATSrcIP != "" {
+		rec.NATSrcAddr = net.JoinHostPort(delta.NATSrcIP, strconv.Itoa(int(delta.NATSrcPort)))
+	}
+	if delta.NATDstIP != "" {
+		rec.NATDstAddr = net.JoinHostPort(delta.NATDstIP, strconv.Itoa(int(delta.NATDstPort)))
+	}
+	// Zone names on the delta (JSON leg) do not map to IDs here; when
+	// only names are present the record carries zone 0 and the
+	// nameless/zone fallback in SampledForOpen decides as for an
+	// unresolved-ifindex open. Binary-leg deltas carry the IDs.
+	d.trackFlowOpen(rec)
+}
+
+// carryFlowStateV9Locked transfers live open state from the previously
+// published v9 groups to their same-key replacements (#16742). Called
+// with flowReconMu held, before the old generation is retired, so an
+// open -> exporter-replacing reconcile -> close still exports exactly
+// once (the replacement holds the state; the retired source's flush
+// never re-emits tracker state).
+func (d *Daemon) carryFlowStateV9Locked(published []v9Group) {
+	old := d.flowBundle.Load()
+	if old == nil || len(old.groups) == 0 {
+		return
+	}
+	oldByKey := make(map[string]v9Group, len(old.groups))
+	for _, g := range old.groups {
+		oldByKey[flowGroupKey(g.ec)] = g
+	}
+	for _, ng := range published {
+		og, ok := oldByKey[flowGroupKey(ng.ec)]
+		if !ok || og.exp == ng.exp {
+			continue
+		}
+		og.exp.AbsorbSampledInto(ng.exp)
+	}
+}
+
+// carryFlowStateIPFIXLocked is the IPFIX equivalent of
+// carryFlowStateV9Locked (#16742).
+func (d *Daemon) carryFlowStateIPFIXLocked(published []ipfixGroup) {
+	old := d.ipfixBundlePtr.Load()
+	if old == nil || len(old.groups) == 0 {
+		return
+	}
+	oldByKey := make(map[string]ipfixGroup, len(old.groups))
+	for _, g := range old.groups {
+		oldByKey[flowGroupKey(g.ec)] = g
+	}
+	for _, ng := range published {
+		og, ok := oldByKey[flowGroupKey(ng.ec)]
+		if !ok || og.exp == ng.exp {
+			continue
+		}
+		og.exp.AbsorbSampledInto(ng.exp)
 	}
 }
 

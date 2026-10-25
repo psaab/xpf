@@ -156,15 +156,22 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 		}
 	}
 
-	// Nameless close (ifindex absent from the map) has no sampled open
-	// under the single-decision model, so it exports nothing. The strict
-	// unit-level fail-closed contract itself is pinned in pkg/flowexport.
+	// Nameless close (ifindex absent from the map, so no interface
+	// name resolves) with no recorded open: #16742 makes ONE close-time
+	// fallback decision. In daemon scope a record naming no interface
+	// at all falls back to zone semantics (#15946 scoping): trust input
+	// is sampled, rate 1 here, so the close exports and consumes
+	// exactly one fallback slot. The strict unit-level fail-closed
+	// contract (ShouldExportIface) itself stays pinned in pkg/flowexport.
 	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(99, trust, untrust)) {
 		t.Fatal("ProcessRawEvent rejected nameless close")
 	}
+	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got < 1 {
+		t.Fatalf("v9 nameless no-open close: exported %d, want 1 via #16742 close-time fallback (zone semantics, rate 1)", got)
+	}
 	for _, s := range d.FlowExportSamplingStats() {
-		if s.Evaluated != 0 || s.Selected != 0 {
-			t.Fatalf("nameless flow consumed slots: %+v", s)
+		if s.Evaluated != 1 || s.Selected != 1 {
+			t.Fatalf("nameless no-open close must consume exactly one fallback slot: %+v", s)
 		}
 	}
 
@@ -186,8 +193,11 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 		t.Fatalf("ipfix exported %d sampled flows, want >=1", got)
 	}
 	for _, s := range d.FlowExportSamplingStats() {
-		if s.Evaluated != 1 || s.Selected != 1 {
-			t.Fatalf("sampled open/close must consume exactly one slot per instance, got %+v", s)
+		// One #16742 fallback evaluation (nameless close above) plus
+		// exactly one open evaluation for the sampled control; the
+		// control's close consumed no second slot.
+		if s.Evaluated != 2 || s.Selected != 2 {
+			t.Fatalf("sampled open/close must consume exactly one slot per instance (plus the one #16742 fallback), got %+v", s)
 		}
 	}
 }
