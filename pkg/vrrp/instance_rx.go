@@ -269,14 +269,22 @@ func (vi *vrrpInstance) masterAdverFloor() time.Duration {
 //
 // preemptHoldTimer is the optional `preempt hold-time` countdown (#2850). A
 // resigning (priority-0) master or a returning >= -priority master cancels any
-// in-flight hold: the first because takeover becomes immediate, the second
-// because there is no longer a lower-priority master to preempt. A persisting
-// lower-priority master leaves an armed hold running (this path intentionally
-// does not reset masterDownTimer on a lower advert). recordMasterAdvert
-// refreshes lastMasterSeen only from an accepted advert (#14706), which is
-// what keeps the #4584 masterDownTimer liveness watchdog (armed by
-// armPreemptHold) reading the held master as alive; if the accepted
+// in-flight hold: the first because takeover is no longer a preemption of a
+// live master, the second because there is no longer a lower-priority master
+// to preempt. A persisting lower-priority master leaves an armed hold running
+// (this path intentionally does not reset masterDownTimer on a lower advert).
+// recordMasterAdvert refreshes lastMasterSeen only from an accepted advert
+// (#14706), which is what keeps the #4584 masterDownTimer liveness watchdog
+// (armed by armPreemptHold) reading the held master as alive; if the accepted
 // adverts stop, the watchdog observes the staleness and takes over.
+//
+// On a priority-0 resign, RFC 5798 §6.4.2 sets Master_Down_Timer to
+// Skew_Time (§6.1) so the highest-priority backup promotes first. RETH
+// instances (isRethInstance, Family == "") keep the 1 ms fast path:
+// exactly two cluster nodes, no third-router contention, and zero-delay
+// planned failover is the designed behaviour there (#16771). Standalone
+// vrrp-groups arm Skew_Time from the local effective priority and the
+// learned (or local-fallback) Master_Adver_Interval.
 func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preemptHoldTimer *time.Timer) {
 	if vi.admitAndRecord(pkt) {
 		// #16018: forged resignation/owner claim from a non-master source
@@ -286,26 +294,38 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 	}
 	pri := vi.getPriority()
 	if pkt.Priority == 0 {
-		// Master is explicitly resigning — become Master immediately.
-		// RFC 5798 says use skew timer, but with only 2 HA nodes there's
-		// no contention risk, and immediate transition gives zero-delay
-		// planned failover (systemctl stop on primary). A pending preempt
-		// hold-time is irrelevant once the master has resigned: there is
-		// no live master left to blackhole. Cancel any in-flight hold and
-		// arm a one-shot bypass so the imminent 1ms masterDownTimer expiry
-		// promotes immediately instead of re-arming the hold (#2850). The
-		// last-seen master record is intentionally left untouched — the
-		// #2082 recordMasterAdvert contract owns it.
-		slog.Info("vrrp: peer resigned (priority 0), immediate takeover",
-			"key", vi.key())
+		// Master is explicitly resigning. Per RFC 5798 §6.4.2 the
+		// Master_Down_Timer is set to Skew_Time so that, with three or
+		// more routers, the highest-priority backup promotes first
+		// instead of every backup claiming MASTER in the same
+		// millisecond. RETH instances keep the 1 ms fast path: only two
+		// HA nodes, no contention risk, zero-delay planned failover
+		// (systemctl stop on primary). A pending preempt hold-time is
+		// irrelevant once the master has resigned: there is no live
+		// master left to blackhole. Cancel any in-flight hold and arm
+		// a one-shot bypass so the imminent masterDownTimer expiry
+		// promotes immediately instead of re-arming the hold (#2850).
+		// The last-seen master record is intentionally left untouched —
+		// the #2082 recordMasterAdvert contract owns it.
+		reth := isRethInstance(vi.cfg)
+		if reth {
+			slog.Info("vrrp: peer resigned (priority 0), immediate takeover",
+				"key", vi.key())
+		} else {
+			slog.Info("vrrp: peer resigned (priority 0), skew-time takeover",
+				"key", vi.key())
+		}
 		vi.disarmPreemptHold(preemptHoldTimer)
 		vi.mu.Lock()
 		vi.skipNextPreemptHold = true
-		// 1ms one-shot arm, not cfg-derived; note the interval from
-		// THIS lock hold (cfg as of the arm) rather than a
-		// post-Reset re-read. Priority is not noted (#15927): this
-		// arm puts nothing on the wire.
-		masterDownTimer.Reset(time.Millisecond)
+		// Note the interval from THIS lock hold (cfg as of the arm)
+		// rather than a post-Reset re-read. Priority is not noted
+		// (#15927): this arm puts nothing on the wire.
+		if reth {
+			masterDownTimer.Reset(time.Millisecond)
+		} else {
+			masterDownTimer.Reset(vi.skewTimeLocked())
+		}
 		vi.armIntervalAppliedLocked()
 		vi.mu.Unlock()
 		return
@@ -319,11 +339,12 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 	// advert does NOT reset the timer here — the timer expires and the owner
 	// reclaims MASTER (RFC 5798 §6.1, #4116).
 	// Also clear the one-shot resign bypass: it was armed by a prior
-	// priority-0 resign to make the imminent 1ms masterDownTimer expiry
-	// promote immediately, but a worthy master returning before that fire
-	// supersedes the resign. Tying the bypass's lifetime to the same
-	// condition that drains the hold prevents it leaking to a LATER
-	// legitimate masterDownTimer expiry where it would wrongly skip the
+	// priority-0 resign to make the imminent masterDownTimer expiry
+	// (1 ms RETH, Skew_Time standalone) promote immediately, but a
+	// worthy master returning before that fire supersedes the resign.
+	// Tying the bypass's lifetime to the same condition that drains
+	// the hold prevents it leaking to a LATER legitimate
+	// masterDownTimer expiry where it would wrongly skip the
 	// hold once.
 	if !vi.getPreempt() || int(pkt.Priority) >= pri {
 		vi.armMasterDownTimer(masterDownTimer)

@@ -128,6 +128,28 @@ func (vi *vrrpInstance) masterDownInterval() time.Duration {
 	return 3*advert + skew
 }
 
+// skewTime returns RFC 5798 §6.1 Skew_Time for the local effective
+// priority and the effective (learned-or-local) advertisement interval:
+// Skew_Time = ((256 - priority) * Master_Adver_Interval) / 256. Caller
+// MUST hold vi.mu (read or write); it never takes the lock itself. The
+// effective priority is computed exactly as armMasterDownTimer does
+// (0/255 pass through; track-down subtracts TrackPriorityCost clamped
+// to [1,254]) so the priority-0 resign arm in handleBackupRx agrees
+// with masterDownInterval's skew leg.
+func (vi *vrrpInstance) skewTimeLocked() time.Duration {
+	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
+	p := vi.cfg.Priority
+	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
+		p -= vi.cfg.TrackPriorityCost
+		if p < 1 {
+			p = 1
+		} else if p > 254 {
+			p = 254
+		}
+	}
+	return time.Duration(256-p) * advert / 256
+}
+
 // stopAndDrainTimer stops t and drains a pending fire from its channel so a
 // subsequent Reset arms a clean interval. Safe on an already-stopped or
 // already-drained timer.

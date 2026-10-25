@@ -332,9 +332,10 @@ establishes a source baseline.
 
 Since #16018, once a master source is learned and still fresh (within the
 master-down horizon), priority-0/255 adverts from a different source are
-dropped: they do not arm the backup 1 ms takeover, do not demote a master,
+dropped: they do not arm the backup takeover timer, do not demote a master,
 and do not replace the learned identity; the counter above still increments.
-A genuine priority-0 from the learned source still takes over in ~1 ms.
+A genuine priority-0 from the learned source arms the RETH 1 ms takeover
+or, on a standalone group, the RFC 5798 Skew_Time arm (#16771).
 Cold-start (no learned source) and stale-master records keep normal RFC
 behaviour, so first election and silent-master-death rescue are unaffected.
 When a stale record accepts a new owner's advert, the learned source hands
@@ -407,9 +408,15 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   itself (`handleBackupRx`/`handleMasterRx` timer and transition
   decisions) is unchanged.
 - Planned **legacy VRRP shutdown**: the resigning instance sends three
-  priority-0 advertisements; the backup arms a 1ms master-down timer, and the
-  run-loop test requires its MASTER advertisement within 50ms (test
-  constraint, not SLA). Private-RG operator failover is explicit peer transfer;
+  priority-0 advertisements; a **RETH** backup arms a 1ms master-down
+  timer, and the run-loop test requires its MASTER advertisement within
+  50ms (test constraint, not SLA). A **standalone** (`vrrp-group`)
+  backup instead arms RFC 5798 §6.4.2 Skew_Time on priority 0
+  (`(256 − effective priority) × Master_Adver_Interval / 256`, learned
+  interval with local fallback — e.g. ~23 ms at priority 250 / 1 s,
+  ~805 ms at priority 50 / 1 s) so the highest-priority backup promotes
+  first rather than every backup claiming MASTER at once (#16771).
+  Private-RG operator failover is explicit peer transfer;
   ordinary private-RG shutdown sends no resign/transfer frame, so after
   `rg_active` clears the peer promotes through heartbeat-loss detection, no
   sooner than the heartbeat threshold and potentially later under the
@@ -606,9 +613,10 @@ blackholing on takeover. Compiled to `Instance.PreemptHoldTime` (seconds);
   advert, or last seen beyond `masterDownInterval`) is takeover, not
   preemption — there is nothing forwarding to blackhole, so it promotes
   immediately. A graceful priority-0 resignation arms a one-shot
-  `skipNextPreemptHold` in `handleBackupRx` so the imminent 1 ms
+  `skipNextPreemptHold` in `handleBackupRx` so the imminent
   `masterDownTimer` expiry promotes immediately (planned failover stays
-  zero-delay).
+  zero-delay): 1 ms on RETH instances, Skew_Time on standalone groups
+  (#16771).
 - **Liveness watchdog — held master dies mid-hold (#4584)** — the master
   that was live when the hold armed can DIE *during* the hold. Arming the
   hold used to leave `masterDownTimer` idle (it fired to arm the hold, and
