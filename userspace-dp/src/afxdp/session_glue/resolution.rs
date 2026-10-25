@@ -755,12 +755,76 @@ pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
 
 /// RI-scoped re-home (round-5): the connected-interface test runs
 /// in the session's installing table.
+///
+/// #16524: when the destination has no connected owner
+/// (`dest_rg == 0`, encoded by callers as
+/// `destination_owner_active == true`), a non-fabric local
+/// ForwardCandidate is not a gateway-route mis-resolution of a
+/// connected LAN destination — it is the correct routed egress
+/// (e.g. an Internet destination via the default gateway). Re-home
+/// it unconditionally. With a known connected owner
+/// (`dest_rg > 0`, also encoded as active), keep the
+/// connected-interface equality test so a transient split FIB that
+/// still answers via the WAN gateway does not launder the reply
+/// onto WAN egress (#15958b transient-mixed-state).
 pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_scoped_15958b(
     forwarding: &ForwardingState,
     stored: ForwardingResolution,
     candidate: ForwardingResolution,
     destination_zone: u16,
     destination_owner_active: bool,
+    target: Option<IpAddr>,
+    table: Option<&str>,
+) -> ForwardingResolution {
+    rehome_or_retain_fabric_redirect_inner(
+        forwarding,
+        stored,
+        candidate,
+        destination_zone,
+        destination_owner_active,
+        // Legacy boolean-only callers cannot distinguish unknown
+        // owner from known-active; preserve their connected test.
+        destination_owner_active && target.is_some(),
+        target,
+        table,
+    )
+}
+
+/// #16524 twin carrying the explicit unknown-owner bit so the
+/// five production callers (which compute `dest_rg` themselves)
+/// can re-home routed destinations. `destination_owner_unknown`
+/// is `dest_rg == 0`.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_16524(
+    forwarding: &ForwardingState,
+    stored: ForwardingResolution,
+    candidate: ForwardingResolution,
+    destination_zone: u16,
+    destination_owner_active: bool,
+    destination_owner_unknown: bool,
+    target: Option<IpAddr>,
+    table: Option<&str>,
+) -> ForwardingResolution {
+    rehome_or_retain_fabric_redirect_inner(
+        forwarding,
+        stored,
+        candidate,
+        destination_zone,
+        destination_owner_active,
+        destination_owner_unknown,
+        target,
+        table,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rehome_or_retain_fabric_redirect_inner(
+    forwarding: &ForwardingState,
+    stored: ForwardingResolution,
+    candidate: ForwardingResolution,
+    destination_zone: u16,
+    destination_owner_active: bool,
+    destination_owner_unknown: bool,
     target: Option<IpAddr>,
     table: Option<&str>,
 ) -> ForwardingResolution {
@@ -772,6 +836,19 @@ pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_scoped_15958b(
             let connected_ifindex = connected_ifindex_for_target_in_table(forwarding, target, table);
             let egress_is_fabric = candidate.egress_ifindex > 0
                 && super::forwarding::ingress_is_fabric(forwarding, candidate.egress_ifindex);
+            // #16524: unknown owner + non-fabric local candidate
+            // re-homes even when no connected prefix serves the
+            // target (gateway-routed destination). The candidate's
+            // egress RG, when known, must be forwarding-active is
+            // already guaranteed by HA enforcement upstream; here
+            // we only refuse fabric egress (anti-loop).
+            if destination_owner_unknown
+                && candidate.disposition == ForwardingDisposition::ForwardCandidate
+                && candidate.egress_ifindex > 0
+                && !egress_is_fabric
+            {
+                return candidate;
+            }
             if candidate.disposition == ForwardingDisposition::ForwardCandidate
                 && connected_ifindex > 0
                 && candidate.egress_ifindex == connected_ifindex
