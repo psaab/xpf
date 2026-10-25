@@ -1,4 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon-kernel probe selftest: kill the -json=false, SKIP-guard
+    and go-exit mutants (#16507). Cell 9 asserted only the leg PASS
+    line, and its fake go's argv line was discarded by the leg's
+    output capture on a passing run, so dropping -json=false from
+    the leg survived. The argv line now goes to a side file and is
+    asserted to carry <-json=false>. Two new cells pin the
+    remaining guards: a top-level SKIP on a legacy cell must fail
+    by name, and a fake go that prints the full PASS list but
+    exits 1 must fail with 'go test exited 1'. Each of the three
+    mutants now reds the probe selftest (15 cells, was 13).
+
   * Userspace DP: deliver D11 terminals for stale-generation survivor
     descriptors and for every stop_inner reap (#16497, #15149 residual).
     Retiring a dead worker bumps the global worker-set generation, so

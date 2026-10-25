@@ -1084,7 +1084,7 @@ test-routing-kernel:
 # Single-sourced with the `make selftest` legs: each script here is the
 # SAME script the aggregate runs, so the target and the aggregate cannot
 # drift into testing different things. The probes pin the leg's
-# missing-tool and output-flag contracts hermetically (thirteen fixtures).
+# missing-tool and output-flag contracts hermetically (fifteen fixtures).
 test-daemon-kernel-lib:
 	sh ./test/daemon/selftest-daemon-kernel_15241.sh
 	sh ./test/daemon/selftest-daemon-probes_15241.sh
