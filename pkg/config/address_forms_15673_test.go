@@ -1,10 +1,97 @@
 package config
 
 import (
+	"math/big"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+// assertCoverExact16563 proves prefixes are pairwise disjoint and their
+// union is exactly [low, high]: total size matches, both endpoints are
+// covered, and both neighbours just outside are not (when they exist).
+func assertCoverExact16563(t *testing.T, prefixes []string, lowS, highS string) {
+	t.Helper()
+	low, err := netip.ParseAddr(lowS)
+	if err != nil {
+		t.Fatalf("low: %v", err)
+	}
+	high, err := netip.ParseAddr(highS)
+	if err != nil {
+		t.Fatalf("high: %v", err)
+	}
+	parsed := make([]netip.Prefix, 0, len(prefixes))
+	total := new(big.Int)
+	for _, s := range prefixes {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			t.Fatalf("cover prefix %q: %v", s, err)
+		}
+		if p != p.Masked() {
+			t.Fatalf("cover prefix %q is not a network address", s)
+		}
+		parsed = append(parsed, p)
+		hostBits := p.Addr().BitLen() - p.Bits()
+		total.Add(total, new(big.Int).Lsh(big.NewInt(1), uint(hostBits)))
+	}
+	for i := range parsed {
+		for j := i + 1; j < len(parsed); j++ {
+			if parsed[i].Overlaps(parsed[j]) {
+				t.Fatalf("cover prefixes %s and %s overlap", parsed[i], parsed[j])
+			}
+		}
+	}
+	span := new(big.Int).Sub(addrBig16563(high), addrBig16563(low))
+	span.Add(span, big.NewInt(1))
+	if total.Cmp(span) != 0 {
+		t.Fatalf("cover size %s, want range size %s (%v)", total, span, prefixes)
+	}
+	contains := func(a netip.Addr) bool {
+		for _, p := range parsed {
+			if p.Contains(a) {
+				return true
+			}
+		}
+		return false
+	}
+	if !contains(low) || !contains(high) {
+		t.Fatalf("cover %v misses an endpoint of %s-%s", prefixes, lowS, highS)
+	}
+	if prev, ok := prevAddr16563(low); ok && contains(prev) {
+		t.Fatalf("cover %v wrongly contains %s (just below low)", prefixes, prev)
+	}
+	if next, ok := nextAddr16563(high); ok && contains(next) {
+		t.Fatalf("cover %v wrongly contains %s (just above high)", prefixes, next)
+	}
+}
+
+func addrBig16563(a netip.Addr) *big.Int {
+	b := a.As16()
+	return new(big.Int).SetBytes(b[:])
+}
+
+func prevAddr16563(a netip.Addr) (netip.Addr, bool) {
+	zero := netip.AddrFrom16([16]byte{})
+	if a.Is4() {
+		zero = netip.AddrFrom4([4]byte{})
+	}
+	if a.Compare(zero) == 0 {
+		return netip.Addr{}, false
+	}
+	return a.Prev(), true
+}
+
+func nextAddr16563(a netip.Addr) (netip.Addr, bool) {
+	max := netip.AddrFrom16([16]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	if a.Is4() {
+		max = netip.AddrFrom4([4]byte{0xff, 0xff, 0xff, 0xff})
+	}
+	if a.Compare(max) == 0 {
+		return netip.Addr{}, false
+	}
+	return a.Next(), true
+}
 
 // #15673 — sole dns-name/range-address/wildcard-address forms must be caught
 // at strict commit (not silently warn-only), range-address must expand
@@ -77,7 +164,9 @@ func TestSoleAddressFormsRejectedAtCommit15673(t *testing.T) {
 	}
 }
 
-// range-address expands natively to /32 prefixes and is usable.
+// range-address expands natively to its minimal CIDR cover and is usable
+// (#16563: no host-count cap for address-book entries; NAT pools keep the
+// per-host 256 cap on expandAddressRange).
 func TestRangeAddressExpands15673(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -86,13 +175,13 @@ func TestRangeAddressExpands15673(t *testing.T) {
 	}{
 		{"hier", func(t *testing.T) *ConfigTree {
 			return soleFormTree(t, `address rng { range-address 192.0.2.1 { to { 192.0.2.3; } } }`)
-		}, []string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"}},
+		}, []string{"192.0.2.1/32", "192.0.2.2/31"}},
 		{"flat", func(t *testing.T) *ConfigTree {
 			return buildTree(t, []string{
 				"set security zones security-zone trust",
 				"set security address-book global address rng range-address 192.0.2.1 to 192.0.2.3",
 			})
-		}, []string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"}},
+		}, []string{"192.0.2.1/32", "192.0.2.2/31"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := CompileConfig(tc.tree(t))
@@ -111,25 +200,106 @@ func TestRangeAddressExpands15673(t *testing.T) {
 			}
 		})
 	}
-	// Oversized range: strict rejects, lenient boots unusable.
-	t.Run("oversized", func(t *testing.T) {
+	// Invalid range: strict rejects, lenient boots unusable.
+	t.Run("invalid", func(t *testing.T) {
 		tree := func() *ConfigTree {
 			return buildTree(t, []string{
 				"set security zones security-zone trust",
-				"set security address-book global address big range-address 10.0.0.0 to 10.0.1.255",
+				"set security address-book global address bad range-address 10.0.1.0 to 10.0.0.0",
 			})
 		}
 		if _, err := CompileConfig(tree()); err == nil {
-			t.Fatal("oversized range-address must reject at strict commit")
+			t.Fatal("reversed range-address must reject at strict commit")
 		}
 		cfg, err := CompileConfigLenient(tree())
 		if err != nil {
 			t.Fatalf("lenient must boot: %v", err)
 		}
-		if a := cfg.Security.AddressBook.Addresses["big"]; a == nil || a.UsableValue() != "" || len(a.UsableValues()) != 0 {
-			t.Fatalf("oversized lenient entry must be unusable, got %+v", a)
+		if a := cfg.Security.AddressBook.Addresses["bad"]; a == nil || a.UsableValue() != "" || len(a.UsableValues()) != 0 {
+			t.Fatalf("invalid lenient entry must be unusable, got %+v", a)
 		}
 	})
+}
+
+// #16563: address-book range-address commits at any host count via a
+// minimal CIDR cover — the cases PROBE pinned (512 and 1026 hosts, and
+// the IPv6 analogue) — and matches exactly [low, high]: every address
+// inside is covered, both neighbours outside are not, and the cover is
+// pairwise disjoint. A 256-host range yields at most 16 prefixes.
+func TestRangeAddressCIDRCover16563(t *testing.T) {
+	cases := []struct {
+		name, low, high string
+		want            []string
+		maxPrefixes     int
+	}{
+		{"v4-512-aligned", "10.0.0.0", "10.0.1.255", []string{"10.0.0.0/23"}, 16},
+		{"v4-1026-unaligned", "10.0.0.1", "10.0.4.2", []string{
+			"10.0.0.1/32", "10.0.0.2/31", "10.0.0.4/30", "10.0.0.8/29",
+			"10.0.0.16/28", "10.0.0.32/27", "10.0.0.64/26", "10.0.0.128/25",
+			"10.0.1.0/24", "10.0.2.0/23", "10.0.4.0/31", "10.0.4.2/32",
+		}, 16},
+		{"v4-256-bound", "10.0.0.1", "10.0.1.0", nil, 16},
+		{"v4-single", "192.0.2.7", "192.0.2.7", []string{"192.0.2.7/32"}, 16},
+		{"v4-full", "0.0.0.0", "255.255.255.255", []string{"0.0.0.0/0"}, 16},
+		{"v6-257", "2001:db8::", "2001:db8::100", []string{"2001:db8::/120", "2001:db8::100/128"}, 16},
+		{"v6 hi-aligned", "2001:db8::1", "2001:db8::ffff", []string{
+			"2001:db8::1/128", "2001:db8::2/127", "2001:db8::4/126",
+			"2001:db8::8/125", "2001:db8::10/124", "2001:db8::20/123",
+			"2001:db8::40/122", "2001:db8::80/121", "2001:db8::100/120",
+			"2001:db8::200/119", "2001:db8::400/118", "2001:db8::800/117",
+			"2001:db8::1000/116", "2001:db8::2000/115", "2001:db8::4000/114",
+			"2001:db8::8000/113",
+		}, 32},
+		{"v6 spanning", "2001:db8::1", "2001:db8::1:0", []string{
+			"2001:db8::1/128", "2001:db8::2/127", "2001:db8::4/126",
+			"2001:db8::8/125", "2001:db8::10/124", "2001:db8::20/123",
+			"2001:db8::40/122", "2001:db8::80/121", "2001:db8::100/120",
+			"2001:db8::200/119", "2001:db8::400/118", "2001:db8::800/117",
+			"2001:db8::1000/116", "2001:db8::2000/115", "2001:db8::4000/114",
+			"2001:db8::8000/113", "2001:db8::1:0/128",
+		}, 32},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := buildTree(t, []string{
+				"set security zones security-zone trust",
+				"set security address-book global address rng range-address " + tc.low + " to " + tc.high,
+			})
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("#16563: range %s to %s must commit: %v", tc.low, tc.high, err)
+			}
+			a := cfg.Security.AddressBook.Addresses["rng"]
+			if a == nil {
+				t.Fatal("rng missing")
+			}
+			if a.OversizedRange != "" {
+				t.Fatalf("OversizedRange must be empty for a valid range, got %q", a.OversizedRange)
+			}
+			got := a.UsableValues()
+			if tc.want != nil && !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("cover = %v, want %v", got, tc.want)
+			}
+			if len(got) > tc.maxPrefixes {
+				t.Fatalf("cover has %d prefixes, want at most %d: %v", len(got), tc.maxPrefixes, got)
+			}
+			assertCoverExact16563(t, got, tc.low, tc.high)
+		})
+	}
+	// Direct cover-expander error shapes mirror the per-host expander.
+	for _, tc := range [][2]string{
+		{"10.0.0.10", "10.0.0.1"},
+		{"10.0.0.1", "2001:db8::1"},
+		{"10.0.0.1/24", "10.0.0.9"},
+		{"bogus", "10.0.0.9"},
+	} {
+		if _, err := expandAddressRangeToCIDRCover(tc[0], tc[1]); err == nil {
+			t.Errorf("cover(%q,%q) must error", tc[0], tc[1])
+		}
+	}
+	if got, err := expandAddressRangeToCIDRCover("10.0.0.1/32", "10.0.0.1"); err != nil || !reflect.DeepEqual(got, []string{"10.0.0.1/32"}) {
+		t.Errorf("host-prefix endpoints: got %v err %v", got, err)
+	}
 }
 
 // wildcard-address expands to the wildcard-matched prefix (Junos polarity

@@ -35,7 +35,7 @@ func TestShowTextAddressBookForms16552(t *testing.T) {
 	out := renderShowTextBody(t, s, "address-book")
 	for _, want := range []string{
 		"h1", "10.0.0.1/32",
-		"range-address 192.0.2.1 to 192.0.2.3", "192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32",
+		"range-address 192.0.2.1 to 192.0.2.3", "192.0.2.1/32", "192.0.2.2/31",
 		"wildcard-address 10.1.2.3/255.255.255.0", "10.1.2.0/24",
 		"dns-name up.example.com", "[ipv4-only]", "198.51.100.10/32",
 		"dns-name down.example.com", "unresolved", "matches nothing",

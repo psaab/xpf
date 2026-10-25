@@ -817,10 +817,12 @@ program, correctly spelled denies included, behind only the #4168 advisory.
 name lookup), `junosHostAddrScoped` and the #4146 warning's
 `junosHostPolicySourceScoped` now read the SSOT.
 
-**Address value forms (#9524/#11508/#15673):** a Junos address takes exactly
+**Address value forms (#9524/#11508/#15673/#16563):** a Junos address takes exactly
 one value form. `range-address <low> to <high>` expands natively at compile
-time via `expandAddressRange` (256-address cap; oversized ranges are recorded
-in `Address.OversizedRange`, rejected at strict commit, unusable on tolerant
+time via `expandAddressRangeToCIDRCover` to the minimal CIDR cover of the
+range (at most 62 IPv4 / 254 IPv6 prefixes for any range, so no host-count
+cap applies; malformed/reversed/mixed-family ranges are recorded in
+`Address.OversizedRange`, rejected at strict commit, unusable on tolerant
 load), `wildcard-address <ip>/<wildcard-mask>` expands to the single
 wildcard-derived CIDR under Junos polarity (#16544: mask bits set to 1 are
 compared, 0 bits are ignored — `10.1.2.3/255.255.255.0` → `10.1.2.0/24`,

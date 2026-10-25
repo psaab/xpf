@@ -17,7 +17,7 @@ import (
 // AddressDisplayValue returns the single cell all three surfaces print
 // after the entry name: the authored form plus the enforced set from
 // UsableValues(). A tainted entry (unsupported/unknown form, duplicate
-// prefix, trailing tokens, oversized range) prints NOT ENFORCED with
+// prefix, trailing tokens, invalid range) prints NOT ENFORCED with
 // the taint; an untainted entry with no usable prefixes (unresolved
 // dns-name, or an entry with no value at all) prints an explicit
 // unresolved marker instead of a blank.
@@ -30,7 +30,7 @@ func addressDisplayTaint(a *Address) string {
 	case len(a.UnimplementedForms) > 0:
 		return "NOT ENFORCED: unsupported form " + strings.Join(a.UnimplementedForms, ", ")
 	case a.OversizedRange != "":
-		return "NOT ENFORCED: oversized range-address " + a.OversizedRange
+		return "NOT ENFORCED: invalid range-address " + a.OversizedRange
 	case len(a.DuplicatePrefixes) > 0:
 		return "NOT ENFORCED: duplicate prefixes " + strings.Join(a.DuplicatePrefixes, ", ")
 	case len(a.TrailingTokens) > 0:
