@@ -48,7 +48,23 @@ var controlVerbDeadlineFloors9344 = map[string]time.Duration{
 	// margin. This covers the helper's and caller's full-response work
 	// without raising the #7675 reachable bound or slowing unrelated verbs.
 	"fib_dump": fibDumpWorstCaseResponseWork11840 + controlBaseDeadline,
+	// #16589 (#11840 shape): a lease-export PAGE is requested with ~60
+	// bytes but the helper materializes and sorts the whole population
+	// before cutting the page, and the page itself may carry half the
+	// control cap. Budget the same five-pass / 10 MiB/s work model as
+	// fib_dump over the page budget (half the cap), plus one round trip.
+	"export_idle_leases":              leaseExportWorstCaseWork16589 + controlBaseDeadline,
+	"export_persistent_lease_display": leaseExportWorstCaseWork16589 + controlBaseDeadline,
 }
+
+const (
+	// One lease-export page is at most half the response cap (the
+	// helper's LEASE_EXPORT_PAGE_BUDGET); five full-page work passes at
+	// a pessimistic 10 MiB/s, mirroring the fib_dump model below.
+	leaseExportPageBudgetBytes16589 = MaxControlResponseBytes / 2
+	leaseExportWorstCaseWork16589   = time.Duration((leaseExportPageBudgetBytes16589*5+
+		(10*1024*1024)-1)/(10*1024*1024)) * time.Second
+)
 
 // ownerRGExportAckWait mirrors OWNER_RG_EXPORT_ACK_WAIT in
 // userspace-dp/src/afxdp/ha/export.rs.

@@ -82,6 +82,61 @@ func (m *Manager) ensurePersistentNatLeaseScopeProtocolLocked() error {
 		MinProtocolPersistentNatLeaseScope, "scope")
 }
 
+// ensurePersistentNatLeasePagingProtocolLocked gates the two lease
+// EXPORTS on a helper that pages them (#16589). Below v71 the helper
+// ignores lease_export and answers the whole population in one
+// response, which the bounded reader refuses past 64 MiB — so the
+// export must fail closed BEFORE the request rather than deliver
+// nothing after it. Imports are not gated here: their request size
+// is caller-controlled and already bounded.
+func (m *Manager) ensurePersistentNatLeasePagingProtocolLocked() error {
+	return m.ensurePersistentNatLeaseProtocolLocked(
+		MinProtocolPersistentNatLeasePaging, "paged lease export")
+}
+
+// maxLeaseExportPages16589 bounds one paged export's page count. At
+// the helper's 8192-row page ceiling this covers 16M leases — far
+// past any per-pool tracked-flow cap summed over realistic pools —
+// while still terminating a helper that repeats a continuation.
+const maxLeaseExportPages16589 = 2048
+
+// pagedLeaseExport16589 drives one paged lease export to completion.
+// fetch issues ONE page request for the given cursor. The sequence
+// fails closed on a repeated/empty-with-more continuation, on more
+// than maxLeaseExportPages16589 pages, or on any page error — a
+// partial population is never returned as if complete.
+func pagedLeaseExport16589[T any](
+	fetch func(cursor string) (page []T, more bool, continuation string, err error),
+) ([]T, error) {
+	var all []T
+	seen := map[string]struct{}{}
+	cursor := ""
+	for page := 0; ; page++ {
+		if page >= maxLeaseExportPages16589 {
+			return nil, fmt.Errorf("lease export did not terminate after %d pages", maxLeaseExportPages16589)
+		}
+		rows, more, next, err := fetch(cursor)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, rows...)
+		if !more {
+			if next != "" {
+				return nil, errors.New("lease export complete with continuation")
+			}
+			return all, nil
+		}
+		if next == "" {
+			return nil, errors.New("lease export incomplete without continuation")
+		}
+		if _, dup := seen[next]; dup {
+			return nil, fmt.Errorf("lease export repeated continuation %q", next)
+		}
+		seen[next] = struct{}{}
+		cursor = next
+	}
+}
+
 func validatePersistentNatRemotes(remotes []PersistentNatRemote) error {
 	if len(remotes) > MaxPersistentNatLeaseRemotes {
 		return fmt.Errorf("permission list has %d remotes; maximum is %d",
@@ -165,17 +220,27 @@ func (m *Manager) exportIdleLeasesLocked() ([]IdleLeaseWire, error) {
 	if err := m.ensurePersistentNatLeasePermissionProtocolLocked(); err != nil {
 		return nil, err
 	}
-	resp, err := m.requestDetailedLocked(ControlRequest{
-		Type:           "export_idle_leases",
-		SuppressStatus: true,
+	if err := m.ensurePersistentNatLeasePagingProtocolLocked(); err != nil {
+		return nil, err
+	}
+	leases, err := pagedLeaseExport16589(func(cursor string) ([]IdleLeaseWire, bool, string, error) {
+		resp, err := m.requestDetailedLocked(ControlRequest{
+			Type:           "export_idle_leases",
+			SuppressStatus: true,
+			LeaseExport:    &LeaseExportRequest{Paged: true, Cursor: cursor},
+		})
+		if err != nil {
+			return nil, false, "", err
+		}
+		if err := validateIdleLeaseScopes(resp.IdleLeases); err != nil {
+			return nil, false, "", err
+		}
+		return resp.IdleLeases, resp.LeaseExportMore, resp.LeaseExportContinuation, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if err := validateIdleLeaseScopes(resp.IdleLeases); err != nil {
-		return nil, err
-	}
-	return resp.IdleLeases, nil
+	return leases, nil
 }
 
 // ExportPersistentNatLeaseBatch pairs the lease snapshot with the durable
@@ -419,15 +484,25 @@ func (m *Manager) ExportPersistentLeaseDisplay() ([]DisplayLeaseWire, error) {
 	if err := m.ensurePersistentNatLeaseScopeProtocolLocked(); err != nil {
 		return nil, err
 	}
-	resp, err := m.requestDetailedLocked(ControlRequest{
-		Type:           "export_persistent_lease_display",
-		SuppressStatus: true,
-	})
-	rows, err := displayLeasesFromResponse(resp, err)
-	if err != nil {
+	if err := m.ensurePersistentNatLeasePagingProtocolLocked(); err != nil {
 		return nil, err
 	}
-	if err := validateDisplayLeaseScopes(rows); err != nil {
+	rows, err := pagedLeaseExport16589(func(cursor string) ([]DisplayLeaseWire, bool, string, error) {
+		resp, err := m.requestDetailedLocked(ControlRequest{
+			Type:           "export_persistent_lease_display",
+			SuppressStatus: true,
+			LeaseExport:    &LeaseExportRequest{Paged: true, Cursor: cursor},
+		})
+		page, err := displayLeasesFromResponse(resp, err)
+		if err != nil {
+			return nil, false, "", err
+		}
+		if err := validateDisplayLeaseScopes(page); err != nil {
+			return nil, false, "", err
+		}
+		return page, resp.LeaseExportMore, resp.LeaseExportContinuation, nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	return rows, nil

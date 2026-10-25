@@ -216,6 +216,8 @@ pub(crate) fn handle_stream(
         session_export_seq: 0,
         idle_leases: Vec::new(),
         display_leases: Vec::new(),
+        lease_export_more: false,
+        lease_export_continuation: String::new(),
         session_mirror_v4_count: 0,
         session_mirror_v6_count: 0,
         session_mirror_complete: false,
@@ -543,12 +545,14 @@ pub(crate) fn handle_stream(
             ),
             // #8121 part 2: the idle persistent-NAT lease channel. Both verbs
             // take the clock from the coordinator, never from the request.
-            "export_idle_leases" => idle_leases::export(&mut guard, &mut response),
+            "export_idle_leases" => {
+                idle_leases::export(&mut guard, request.lease_export.as_ref(), &mut response)
+            }
             // #8615: the DISPLAY read. Separate verb, separate response field,
             // separate record type — the SHOW table needs `active_flows`, which
             // the sync record is forbidden to carry.
             "export_persistent_lease_display" => {
-                idle_leases::export_display(&mut guard, &mut response)
+                idle_leases::export_display(&mut guard, request.lease_export.as_ref(), &mut response)
             }
             // #10784: revoke leases in the helper allocator, not only the Go display mirror.
             "clear_persistent_nat_leases" => {

@@ -15,8 +15,17 @@ use crate::afxdp::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
 use crate::nat::{
     IdleLeaseRecord, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS, MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS,
 };
-use crate::protocol::{DisplayLeaseWire, IdleLeaseWire, PermittedRemoteWire};
+use crate::protocol::{
+    DisplayLeaseWire, IdleLeaseWire, LeaseExportRequest, PermittedRemoteWire,
+    MAX_CONTROL_RESPONSE_BYTES, MAX_LEASE_EXPORT_PAGE,
+};
 use std::net::IpAddr;
+
+/// #16589: byte budget for ONE lease-export page's serialized response.
+/// Half the control cap leaves the response envelope and any future
+/// additive fields ample room while keeping every page far under the
+/// Go bounded reader's refusal point.
+const LEASE_EXPORT_PAGE_BUDGET: usize = MAX_CONTROL_RESPONSE_BYTES / 2;
 
 /// Whether an idle-lease import batch is worth a journald line.
 ///
@@ -216,13 +225,123 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
     })
 }
 
-pub(super) fn export(guard: &mut ServerState, response: &mut ControlResponse) {
-    response.idle_leases = guard
+/// #16589: stable sort key for one exported lease. The allocator's
+/// map iteration order is nondeterministic, so paging over the raw
+/// order would skip/duplicate across pages. The key covers the full
+/// wire identity (pool, protocol, source, scopes, translated,
+/// remotes) so distinct wire rows never compare equal.
+fn idle_lease_sort_key(w: &IdleLeaseWire) -> (String, u8, String, u16, u32, u32, String, u16, Vec<(String, u16)>, bool) {
+    (
+        w.pool_name.clone(),
+        w.protocol,
+        w.src_ip.clone(),
+        w.src_port,
+        w.routing_scope.unwrap_or(0),
+        w.egress_scope.unwrap_or(0),
+        w.translated_ip.clone(),
+        w.translated_port,
+        w.permitted_remotes
+            .iter()
+            .map(|r| (r.ip.clone(), r.port))
+            .collect(),
+        w.permit_any_remote,
+    )
+}
+
+fn display_lease_sort_key(w: &DisplayLeaseWire) -> (String, u8, String, u16, u32, u32, String, u16, Vec<(String, u16)>, bool) {
+    (
+        w.pool_name.clone(),
+        w.protocol,
+        w.src_ip.clone(),
+        w.src_port,
+        w.routing_scope.unwrap_or(0),
+        w.egress_scope.unwrap_or(0),
+        w.translated_ip.clone(),
+        w.translated_port,
+        w.permitted_remotes
+            .iter()
+            .map(|r| (r.ip.clone(), r.port))
+            .collect(),
+        w.permit_any_remote,
+    )
+}
+
+/// #16589: cut one sub-cap page out of a fully sorted wire population.
+///
+/// Returns `(page, more, next_cursor)`. The byte budget is enforced by
+/// measuring each candidate row's JSON and always emitting at least
+/// one row, so a single oversized row cannot wedge the pager (it is
+/// still far under the cap: a row's remotes are bounded by the
+/// allocator's 1024-remote ceiling).
+fn page_wire<T: serde::Serialize + Clone>(
+    all: &[T],
+    request: Option<&LeaseExportRequest>,
+) -> Result<(Vec<T>, bool, String), String> {
+    let Some(req) = request.filter(|r| r.paged) else {
+        // Pre-#16589 caller: single-shot, exactly as before.
+        return Ok((all.to_vec(), false, String::new()));
+    };
+    let offset: usize = if req.cursor.is_empty() {
+        0
+    } else {
+        req.cursor
+            .parse()
+            .map_err(|_| "invalid lease export cursor".to_string())?
+    };
+    if offset > all.len() {
+        return Err(format!(
+            "lease export cursor {offset} beyond population {}",
+            all.len()
+        ));
+    }
+    let count_cap = if req.max == 0 {
+        MAX_LEASE_EXPORT_PAGE
+    } else {
+        (req.max as usize).min(MAX_LEASE_EXPORT_PAGE)
+    };
+    let mut page: Vec<T> = Vec::new();
+    let mut bytes = 64usize; // response envelope slack
+    let mut idx = offset;
+    while idx < all.len() && page.len() < count_cap {
+        let row_len = serde_json::to_vec(&all[idx])
+            .map_err(|e| format!("encode lease row: {e}"))?
+            .len()
+            + 1;
+        if !page.is_empty() && bytes.saturating_add(row_len) > LEASE_EXPORT_PAGE_BUDGET {
+            break;
+        }
+        bytes = bytes.saturating_add(row_len);
+        page.push(all[idx].clone());
+        idx += 1;
+    }
+    let more = idx < all.len();
+    let next = if more { idx.to_string() } else { String::new() };
+    Ok((page, more, next))
+}
+
+pub(super) fn export(
+    guard: &mut ServerState,
+    request: Option<&LeaseExportRequest>,
+    response: &mut ControlResponse,
+) {
+    let mut all: Vec<IdleLeaseWire> = guard
         .afxdp
         .export_idle_persistent_leases_now()
         .iter()
         .map(to_wire)
         .collect();
+    all.sort_by(|a, b| idle_lease_sort_key(a).cmp(&idle_lease_sort_key(b)));
+    match page_wire(&all, request) {
+        Ok((page, more, next)) => {
+            response.idle_leases = page;
+            response.lease_export_more = more;
+            response.lease_export_continuation = next;
+        }
+        Err(e) => {
+            response.ok = false;
+            response.error = e;
+        }
+    }
 }
 
 pub(super) fn import(
@@ -547,6 +666,121 @@ mod tests {
              from the source port"
         );
     }
+
+    fn numbered_wire(i: u32, remotes: usize) -> IdleLeaseWire {
+        let mut w = wire();
+        w.src_ip = format!("10.{}.{}.{}", (i >> 16) & 0xff, (i >> 8) & 0xff, i & 0xff);
+        w.src_port = 1000 + (i % 60000) as u16;
+        w.translated_port = 1024 + (i % 60000) as u16;
+        w.permitted_remotes = (0..remotes)
+            .map(|r| PermittedRemoteWire {
+                ip: format!("8.8.{}.{}", r & 0xff, (r >> 8) & 0xff),
+                port: 0,
+            })
+            .collect();
+        w.remote_ip = String::new();
+        w.remote_port = 0;
+        w
+    }
+
+    /// #16589 acceptance (helper half): 300k remote-less leases page
+    /// completely, every page at/under the control cap, small
+    /// population stays single-page. RED on the pre-fix handler, which
+    /// ignored lease_export and returned all 300k in one response.
+    /// The remote-less control measures 62,040,918 B — just UNDER the
+    /// cap solo, so the control pairs one pool with 150k x 4-remotes
+    /// leases (the production shape: per-pool caps never bound the
+    /// SUM across pools) and crosses it.
+    #[test]
+    fn paged_export_300k_leases_each_page_under_cap_16589() {
+        let mut all: Vec<IdleLeaseWire> = (0..300_000).map(|i| numbered_wire(i, 0)).collect();
+        all.sort_by(|a, b| idle_lease_sort_key(a).cmp(&idle_lease_sort_key(b)));
+        // Control: 300k remote-less + 150k x 4 remotes unpaged crosses the cap.
+        let mut ctrl = ControlResponse::default();
+        ctrl.idle_leases = all.clone();
+        ctrl.idle_leases
+            .extend((0..150_000).map(|i| numbered_wire(300_000 + i, 4)));
+        let ctrl_bytes = serde_json::to_vec(&ctrl).expect("serialize control").len() + 1;
+        assert!(
+            ctrl_bytes > MAX_CONTROL_RESPONSE_BYTES,
+            "control: combined unpaged population must cross the cap, got {ctrl_bytes}"
+        );
+        let mut seen = Vec::new();
+        let mut cursor = String::new();
+        let mut pages = 0usize;
+        loop {
+            let req = LeaseExportRequest { paged: true, cursor: cursor.clone(), max: 0 };
+            let (page, more, next) = page_wire(&all, Some(&req)).expect("page");
+            let mut resp = ControlResponse::default();
+            resp.idle_leases = page.clone();
+            resp.lease_export_more = more;
+            resp.lease_export_continuation = next.clone();
+            let bytes = serde_json::to_vec(&resp).expect("serialize page").len() + 1;
+            assert!(bytes <= MAX_CONTROL_RESPONSE_BYTES, "page {pages} is {bytes} bytes, over cap");
+            seen.extend(page);
+            pages += 1;
+            if !more {
+                break;
+            }
+            assert!(!next.is_empty() && next != cursor, "continuation must advance");
+            cursor = next;
+            assert!(pages < 1000, "pager must terminate");
+        }
+        assert!(pages > 1, "300k must take multiple pages, got {pages}");
+        assert_eq!(seen.len(), 300_000);
+        assert_eq!(seen, all, "pages must reassemble the sorted population exactly");
+        // Small-population control stays single-page.
+        let small = &all[..3];
+        let req = LeaseExportRequest { paged: true, cursor: String::new(), max: 0 };
+        let (page, more, next) = page_wire(small, Some(&req)).expect("small page");
+        assert_eq!(page.len(), 3);
+        assert!(!more && next.is_empty(), "small population must be single-page");
+        // Unpaged (pre-#16589) request stays single-shot.
+        let (page, more, _) = page_wire(small, None).expect("unpaged");
+        assert_eq!(page.len(), 3);
+        assert!(!more);
+    }
+
+    /// #16589 acceptance: 150k leases x 4 remotes (~54 MiB unpaged by
+    /// the ledger's 361 B/lease measure, and over the cap once the
+    /// response envelope and wider fields count) — asserted here by
+    /// the stronger property that every paged response is under the
+    /// cap and the reassembly is exact; plus cursor refusal.
+    #[test]
+    fn paged_export_150k_by_4_remotes_and_cursor_refusal_16589() {
+        let mut all: Vec<IdleLeaseWire> = (0..150_000).map(|i| numbered_wire(i, 4)).collect();
+        all.sort_by(|a, b| idle_lease_sort_key(a).cmp(&idle_lease_sort_key(b)));
+        let mut seen = 0usize;
+        let mut cursor = String::new();
+        let mut pages = 0usize;
+        loop {
+            let req = LeaseExportRequest { paged: true, cursor: cursor.clone(), max: 0 };
+            let (page, more, next) = page_wire(&all, Some(&req)).expect("page");
+            let mut resp = ControlResponse::default();
+            resp.idle_leases = page;
+            let bytes = serde_json::to_vec(&resp).expect("serialize page").len() + 1;
+            assert!(bytes <= MAX_CONTROL_RESPONSE_BYTES, "page {pages} over cap: {bytes}");
+            seen += resp.idle_leases.len();
+            pages += 1;
+            if !more {
+                break;
+            }
+            cursor = next;
+            assert!(pages < 1000);
+        }
+        assert_eq!(seen, 150_000);
+        assert!(pages > 1, "150k x 4 remotes must page, got {pages}");
+        // A cursor past the population and a non-numeric cursor refuse.
+        let bad = LeaseExportRequest { paged: true, cursor: "150001".into(), max: 0 };
+        assert!(page_wire(&all, Some(&bad)).is_err(), "out-of-range cursor must refuse");
+        let bad = LeaseExportRequest { paged: true, cursor: "x".into(), max: 0 };
+        assert!(page_wire(&all, Some(&bad)).is_err(), "non-numeric cursor must refuse");
+        // max is honoured and clamped by the helper ceiling.
+        let req = LeaseExportRequest { paged: true, cursor: String::new(), max: 7 };
+        let (page, more, next) = page_wire(&all, Some(&req)).expect("max page");
+        assert_eq!(page.len(), 7);
+        assert!(more && next == "7");
+    }
 }
 
 /// #8615: the DISPLAY export. One-way by construction — there is no
@@ -620,13 +854,29 @@ fn to_display_wire(rec: &PoolDisplayLease) -> DisplayLeaseWire {
     }
 }
 
-pub(super) fn export_display(guard: &mut ServerState, response: &mut ControlResponse) {
-    response.display_leases = guard
+pub(super) fn export_display(
+    guard: &mut ServerState,
+    request: Option<&LeaseExportRequest>,
+    response: &mut ControlResponse,
+) {
+    let mut all: Vec<DisplayLeaseWire> = guard
         .afxdp
         .export_display_persistent_leases_now()
         .iter()
         .map(to_display_wire)
         .collect();
+    all.sort_by(|a, b| display_lease_sort_key(a).cmp(&display_lease_sort_key(b)));
+    match page_wire(&all, request) {
+        Ok((page, more, next)) => {
+            response.display_leases = page;
+            response.lease_export_more = more;
+            response.lease_export_continuation = next;
+        }
+        Err(e) => {
+            response.ok = false;
+            response.error = e;
+        }
+    }
 }
 
 /// #10784: revoke the authoritative allocator leases. Active flows retain

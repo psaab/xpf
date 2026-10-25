@@ -846,6 +846,7 @@
     "fabrics": null,
     "forwarding": null,
     "ha_state": null,
+    "lease_export": null,
     "neighbor_generation": 0,
     "neighbor_replace": false,
     "neighbors": null,
@@ -898,6 +899,11 @@
         "translated_port": 51400
       }
     ],
+    "lease_export": {
+      "cursor": "16132-cursor",
+      "max": 42,
+      "paged": true
+    },
     "neighbor_generation": 0,
     "neighbor_replace": false,
     "neighbors": null,
@@ -934,6 +940,8 @@
   },
   "control_response": {
     "fib_generation": 0,
+    "lease_export_continuation": "",
+    "lease_export_more": false,
     "ok": false,
     "persistent_nat_lease_count": 0,
     "policy_delete_complete": false,
@@ -1025,6 +1033,8 @@
         "translated_port": 51400
       }
     ],
+    "lease_export_continuation": "16132-next",
+    "lease_export_more": true,
     "ok": true,
     "persistent_nat_lease_count": 0,
     "policy_delete_complete": false,
@@ -2349,6 +2359,11 @@
     "if_id": 6,
     "logical_ifindex": 7,
     "stn": "st0.1"
+  },
+  "lease_export_request": {
+    "cursor": "",
+    "max": 0,
+    "paged": false
   },
   "map_pins": {
     "bindings": "",
