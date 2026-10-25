@@ -185,10 +185,12 @@ inline archive-site-password warning in #651).
   `Store.ConfirmOnly()` (the pure confirm-only predicate —
   confirm-pending && candidate unchanged — read under one lock hold so
   a concurrent edit cannot route a dirty candidate into the
-  confirm-only branch and drop it, #4000), `ClassifyCommitError`
-  (the structural (compiled, err) commit-error class shared by the
-  REST and gRPC commit handlers, #5742/#15281; each surface maps the
-  class onto its own wire codes), and `WarningsOf` (nil-safe
+  `ClassifyCommitError` + `ErrCommittedNotApplied` (the commit-error
+  classification shared by the REST and gRPC commit handlers,
+  #5742/#15281/#16828; #16828 adds the committed-but-not-applied class
+  for post-promotion aborts — the sentinel is checked before the
+  context arms and with or without the returned config; each surface
+  maps the class onto its own wire codes), and `WarningsOf` (nil-safe
   defensive-copy extraction of `cfg.Warnings`). None of them mints a
   commit authority: REST/gRPC mint holder-epoch authority via
   `AuthorizeCommitAs` before the confirm gate, while the local CLI

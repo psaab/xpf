@@ -53,6 +53,10 @@ func TestCommitErrorClassification_5742(t *testing.T) {
 
 	tailErr := errors.New("networkd write failed: transient control-socket hiccup")
 	rejectErr := errors.New("schema validation rejected: unknown zone reference")
+	// #16828: the daemon's post-promotion abort shape — promoted config
+	// returned with an ErrCommittedNotApplied-wrapped error.
+	notAppliedErr := fmt.Errorf("%w: %w", configstore.ErrCommittedNotApplied,
+		errors.New("policy session READ authority unavailable"))
 
 	cases := []struct {
 		name     string
@@ -74,6 +78,21 @@ func TestCommitErrorClassification_5742(t *testing.T) {
 			wantCode: codes.InvalidArgument, wantMsg: "schema validation rejected",
 		},
 		{
+			// #16828: committed but not applied — the config was promoted+
+			// persisted (active; live on a later apply/boot), so it must NOT
+			// be InvalidArgument (client would edit/abandon a persisted
+			// config) and must NOT be the tail class's Unavailable-live
+			// reading. FailedPrecondition: resolve the gate cause/restart.
+			name: "committed_not_applied", compiled: nonNil, err: notAppliedErr,
+			wantCode: codes.FailedPrecondition, wantMsg: "committed but not applied",
+		},
+		{
+			// #16828: the sentinel keys the class even for a discarding
+			// caller that passes a nil config.
+			name: "committed_not_applied_nil_config", compiled: nil, err: notAppliedErr,
+			wantCode: codes.FailedPrecondition, wantMsg: "committed but not applied",
+		},
+		{
 			// A busy apply-lock / daemon-stop abort: preserved verbatim.
 			name: "context_canceled", compiled: nil, err: fmt.Errorf("commit aborted: %w", context.Canceled),
 			wantCode: codes.Canceled, wantMsg: "",
@@ -84,6 +103,14 @@ func TestCommitErrorClassification_5742(t *testing.T) {
 			// classifier must check context errors BEFORE compiled != nil.
 			name: "context_canceled_beats_config", compiled: nonNil, err: fmt.Errorf("commit aborted: %w", context.Canceled),
 			wantCode: codes.Canceled, wantMsg: "",
+		},
+		{
+			// #16828 precedence: a POST-promotion abort wraps
+			// context.Canceled under the sentinel — the sentinel wins, the
+			// config WAS committed, so this is not a pre-promotion Canceled.
+			name: "committed_not_applied_beats_context", compiled: nonNil,
+			err:      fmt.Errorf("%w: %w", configstore.ErrCommittedNotApplied, context.Canceled),
+			wantCode: codes.FailedPrecondition, wantMsg: "committed but not applied",
 		},
 		{
 			name: "context_deadline", compiled: nil, err: fmt.Errorf("commit slow: %w", context.DeadlineExceeded),

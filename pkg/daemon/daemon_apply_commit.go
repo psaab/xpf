@@ -377,6 +377,16 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 // cluster peer unless the apply failed in a way that must not propagate.
 // Shared by commitAndApply and commitConfirmedAndApply. Caller holds d.applySem.
 //
+// Return contract (#16828): every non-nil error from this function is a
+// POST-promotion error — the config is the store's active config regardless
+// of the outcome. On a non-fatal tail error the committed config is returned
+// alongside the error (dataplane armed, only a subsystem step failed). On a
+// fatal applyErrSkipsPeerSync abort the promoted config is ALSO returned,
+// with the error wrapped in configstore.ErrCommittedNotApplied, so the
+// REST/gRPC classifiers can report "committed, not applied" rather than a
+// pre-promotion reject. Pre-promotion rejects never reach this function;
+// they return (nil, err) from commitWithGenBinding and stay rejects.
+//
 // #4034: the peer config-sync used to sit AFTER an unconditional
 // `if applyErr != nil { return nil, err }`, so ANY applyConfigLocked error —
 // including the NON-FATAL best-effort tail errors it joins (networkd write /
@@ -453,13 +463,24 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	if applyErrSkipsPeerSync(applyErr) {
 		// Fatal (required-protocol-gate: dataplane disarmed/fail-closed), a
 		// daemon-stop context abort (#2926 boundary), or a policy READ
-		// authority refusal that blocked local publication: report failure
-		// and do NOT push. The peer stays on its prior snapshot because this
-		// node could not safely apply the promoted config. The shutdown case
-		// converges on next boot + reverse-sync. Skip deletion-clear too:
-		// either the dataplane is disarmed/tearing down or no safe session
-		// candidate set was captured.
-		return nil, applyErr
+		// authority refusal that blocked local publication: do NOT push —
+		// the peer stays on its prior snapshot. The shutdown case converges
+		// on next boot + reverse-sync. Skip deletion-clear too: either the
+		// dataplane is disarmed/tearing down or no safe session candidate
+		// set was captured.
+		// #16828: the store has ALREADY promoted+persisted this config
+		// (see the function doc), so returning (nil, applyErr) here made
+		// the #5742/#15281 classifiers report a persisted config as a
+		// pre-promotion reject (REST 400 / gRPC InvalidArgument). Return
+		// the promoted config with the error wrapped in
+		// configstore.ErrCommittedNotApplied so the classifiers report
+		// "committed, not applied" instead. The wrap is additive:
+		// errors.Is against the underlying gate/authority/context
+		// sentinels still matches. The returned config is the applied
+		// pointer (compiled, after DNS resolution) — the same pointer
+		// the non-fatal path returns via resp; respCfg is a commit-only
+		// warning projection and carries no committed-state meaning here.
+		return compiled, fmt.Errorf("%w: %w", configstore.ErrCommittedNotApplied, applyErr)
 	}
 	// #4234 Junos-default deletion-clear + modified-policy re-eval + #4342
 	// default-policy re-eval: the config is committed + active and the dataplane
