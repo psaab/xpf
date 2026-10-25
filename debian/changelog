@@ -1,4 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon/bootstrap: the #9615 refused-target bootstrap safe state
+    now has a commit exit (#16665). Previously bootstrap refused
+    plain `commit` and the #6707 gate refused `commit confirmed`
+    on the very refused target that caused the bootstrap, so the
+    only way out was a reboot. The refused branch now records its
+    provenance: a plain `commit` of a corrected candidate is
+    allowed (the refused target is already the persisted committed
+    config) and the #6707 gate is skipped in that state (a timeout
+    returns to the same safe state). Generic bootstrap is unchanged.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was

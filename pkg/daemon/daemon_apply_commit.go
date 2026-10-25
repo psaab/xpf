@@ -212,7 +212,13 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	// the first confirmed commit is confirmed (bootstrap exits one-way),
 	// plain commits work normally. The day-0 image path never hits this —
 	// it resolves NOT-bootstrap before any interactive session.
-	if d.inBootstrap() {
+	// #16665: bootstrap entered from the #9615 refused-target branch is
+	// exempt. There the refused target is already the persisted committed
+	// active config, so a plain commit is a correction to an already-
+	// committed box, not a first takeover; and `commit confirmed` cannot
+	// be the exit because its #6707 gate refuses to arm over that same
+	// refused active target. Generic bootstrap keeps the refusal below.
+	if d.inBootstrap() && !d.bootstrapFromRefusedRollback.Load() {
 		// The daemon is in bootstrap mode (no interface takeover has been
 		// confirmed yet). A plain commit is refused regardless of whether
 		// this is literally the first commit — bootstrap only exits on a
@@ -241,7 +247,7 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	// success and persisting committed=1-empty — the state #1922 Item 1b /
 	// #7291 exist to prevent. beginBackgroundApply (#9884) already
 	// re-tests inBootstrap after Acquire for the same reason.
-	if d.inBootstrap() {
+	if d.inBootstrap() && !d.bootstrapFromRefusedRollback.Load() {
 		return nil, fmt.Errorf("system is in bootstrap mode: commit the takeover config with " +
 			"'commit confirmed <minutes>' (the interface takeover can cut off management, so the " +
 			"system rolls back automatically unless you confirm it from a still-reachable session)")
@@ -1004,9 +1010,19 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// nothing has been promoted.
 			// #9588: the Go refusal mirror decides, with the LIVE feed overlay
 			// for this target (representability is feed-aware).
+			// #16665: while in the #9615 refused-target bootstrap safe
+			// state the active config IS the refused target, so this gate
+			// would refuse every `commit confirmed` and leave no commit
+			// exit. Skip it in that provenance: a timeout would return
+			// to the same safe state (re-checked at fire by #9615), not
+			// create a new store/dataplane split. The plain-commit exit
+			// above is primary; this keeps the confirmed route usable
+			// too. Outside that provenance the gate is unchanged.
 			rollbackTarget := d.store.ActiveConfig()
-			if rerr := rollbackTargetAppliablePreflight(rollbackTarget, d.feedSnapshotsForConfig(rollbackTarget)); rerr != nil {
-				return rerr
+			if !(d.inBootstrap() && d.bootstrapFromRefusedRollback.Load()) {
+				if rerr := rollbackTargetAppliablePreflight(rollbackTarget, d.feedSnapshotsForConfig(rollbackTarget)); rerr != nil {
+					return rerr
+				}
 			}
 			return d.deviceMapCommitPreflight(cand, d.store.ActiveConfig())
 		},

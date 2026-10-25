@@ -1840,6 +1840,16 @@ type Daemon struct {
 	// constructed unconditionally (C1) so the bootstrap-exit reconcile wires
 	// every subsystem.
 	bootstrapMode atomic.Bool
+	// bootstrapFromRefusedRollback is set only when bootstrap was
+	// entered from the #9615 refused-target branch (#16665): the
+	// refused target has already been promoted and persisted as the
+	// committed active config, so the #1922 first-takeover rationale
+	// for refusing a plain commit does not apply. Plain commits are
+	// allowed in that bootstrap provenance so a corrected candidate
+	// can be made permanent without a reboot. Generic bootstrap
+	// (factory / fail-closed / first-commit rollback) leaves it false.
+	bootstrapFromRefusedRollback atomic.Bool
+
 
 	// bootstrapLifelineMu protects the pre-takeover snapshot from an explicit
 	// commit-confirm resolving the first-commit window outside applySem.
