@@ -952,6 +952,8 @@ pub(super) fn run_input_filter_accept_log_poll(
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -2028,6 +2030,8 @@ pub(super) fn txn_run_descriptor_with_screen_state_capturing_events(
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let (batch, debug) = txn_run_descriptor_inner_with_slow_path_impl(
@@ -2292,6 +2296,8 @@ pub(super) fn txn_run_descriptor_capturing_events(
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =

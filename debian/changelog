@@ -73,6 +73,16 @@ xpf (0.0.0) unstable; urgency=medium
     config over the open-time zone/interface snapshot and resolves
     masks in the ingress VRF, counting unresolved halves like the
     close path.
+  * Userspace event stream: SessionCreate now has its own separately
+    sized rate budget of 8192/s + burst 8192 per zone (#16744), like
+    SessionClose (#14609). Previously only closes received the 8192/s
+    budget while creates — the sole open-side input to flow export
+    since #15946/#16303 — were GCRA-shed at the shared 1000/s telemetry
+    rate, so above ~1000 new sessions/s per zone most flows never
+    reached the Go sampling/tracker decision and their closes exported
+    nothing. The bounded queue budget remains the flood bound; shed
+    creates stay counted in
+    event_stream_session_create_{dropped,rate_limited,queue_full,disconnected}.
   * Config/firewall: the single-rate `firewall policer`
     `burst-size-limit` floor is now the shared one-frame floor of
     1514 bytes (#16714), unified with the three-color leaves

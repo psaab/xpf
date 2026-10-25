@@ -726,6 +726,8 @@ fn build_live_forward_request_from_frame_drops_logged_output_filter_discard() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -906,6 +908,8 @@ fn build_live_forward_request_from_frame_output_filter_reject_sends_rst_3608() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     // Size the pipeline above the SYN-cookie-shared TX-frame reserve so the
@@ -1366,6 +1370,8 @@ fn output_filter_matches_post_snat_source_forward_leg_3642() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -1504,6 +1510,8 @@ fn output_filter_matches_post_snat_dest_reverse_leg_3642() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -1636,6 +1644,8 @@ fn output_filter_matches_post_dnat_dest_3642() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 

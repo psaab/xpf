@@ -168,6 +168,8 @@ fn run_one(
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let (batch, _dbg) = txn_run_descriptor_with_event_stream(
@@ -330,6 +332,8 @@ fn stage11_pbr_filter_log_emitted_once_16480() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let frame = udp_frame(500);

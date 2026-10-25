@@ -295,6 +295,8 @@ mod flowless_local_delivery_tests {
                 burst: 0,
                 session_close_events_per_second: 0,
                 session_close_burst: 0,
+                session_create_events_per_second: 0,
+                session_create_burst: 0,
             },
         );
         let fw = fw_with_host_inbound(ZONE, &["ssh"], &[]);
@@ -539,6 +541,8 @@ mod flowless_local_delivery_tests {
                 burst: 0,
                 session_close_events_per_second: 0,
                 session_close_burst: 0,
+                session_create_events_per_second: 0,
+                session_create_burst: 0,
             },
         );
         let flow = flowless_flow(PROTO_TCP);
@@ -621,6 +625,8 @@ mod flowless_local_delivery_tests {
                 burst: 0,
                 session_close_events_per_second: 0,
                 session_close_burst: 0,
+                session_create_events_per_second: 0,
+                session_create_burst: 0,
             },
         );
         // Wire flow: dst is the VIP; policy flow: dst rewritten to local.

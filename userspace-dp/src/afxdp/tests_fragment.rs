@@ -38,6 +38,8 @@ fn non_first_fragment_v4_not_dropped_by_port_matching_output_filter() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -310,6 +312,8 @@ fn control_icmp_v4_installs_no_synthesized_tx_flow_key() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -385,6 +389,8 @@ fn slack_tcp_v4_installs_no_synthesized_tx_flow_key_9894() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -446,6 +452,8 @@ fn flowless_non_fragmented_tcp_still_hits_port_matching_output_filter() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -2205,6 +2213,8 @@ fn non_first_fragment_v6_not_dropped_by_port_matching_output_filter() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 

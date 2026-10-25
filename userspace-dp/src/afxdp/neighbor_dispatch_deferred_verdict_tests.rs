@@ -229,6 +229,8 @@ fn flush_one(
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let mut counters = BatchCounters::default();

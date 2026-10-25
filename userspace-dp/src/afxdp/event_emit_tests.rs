@@ -78,6 +78,8 @@ fn unlimited_handle() -> (
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     )
 }

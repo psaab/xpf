@@ -1061,6 +1061,8 @@ fn poll_loop_wg_outer_ce_over_not_ect_counts_underlay_once_12289() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let (batch, dbg) = txn_run_descriptor_with_event_stream(
