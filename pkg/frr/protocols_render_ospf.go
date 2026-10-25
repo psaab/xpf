@@ -165,6 +165,12 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 				renderedAreaByInterface[iface.Name] = state
 			}
 		}
+		// Track actual activations, after duplicate-area and authentication
+		// omissions, rather than configured interface membership (#16631).
+		var activatedAreas16631 map[string]bool
+		if len(virtualLinks15016) != 0 {
+			activatedAreas16631 = make(map[string]bool)
+		}
 		for _, name := range interfaceOrder {
 			state := renderedAreaByInterface[name]
 			iface := state.settings.OSPFInterface
@@ -303,12 +309,27 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 			}
 			if validFRROSPFArea(state.area.id) {
 				fmt.Fprintf(b, " ip ospf area %s\n", state.area.id)
+				if activatedAreas16631 != nil {
+					activatedAreas16631[state.area.key] = true
+				}
 			} else {
 				slog.Warn("frr: omitting an OSPF interface area activation with an invalid area id (#9820)",
 					"area", sanitizeFRRValue(state.area.id), "interface", sanitizeFRRValue(iface.Name))
 			}
 			b.WriteString("exit\n!\n")
 		}
+		// The candidate slice is render-local; compact it in place without
+		// touching the committed virtual-link lists.
+		keptVirtualLinks16631 := virtualLinks15016[:0]
+		for _, e := range virtualLinks15016 {
+			if !activatedAreas16631[ospfAreaIdentity11400(e.vl.TransitArea)] {
+				slog.Warn("frr: omitting an OSPF virtual-link whose transit area renders no interface (#16631)",
+					"neighbor", sanitizeFRRValue(e.vl.NeighborID), "transit_area", sanitizeFRRValue(e.vl.TransitArea))
+				continue
+			}
+			keptVirtualLinks16631 = append(keptVirtualLinks16631, e)
+		}
+		virtualLinks15016 = keptVirtualLinks16631
 		// #15016: emit virtual links in a second router ospf stanza after
 		// interface activation, so FRR has the transit area on first load.
 		if len(virtualLinks15016) > 0 {

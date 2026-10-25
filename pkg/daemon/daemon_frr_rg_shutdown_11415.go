@@ -319,15 +319,29 @@ func (s *frrHADemotionState) inactiveInterface(cfg *config.Config, name string, 
 	return !s.globalActive
 }
 
+// filterOSPF drops inactive-RG interfaces and, after that pruning, drops
+// virtual links whose transit area retains no interface (#16631). ospfd
+// refuses `area X virtual-link N` on a non-ABR ("Configuring VLs on
+// non-ABRs is not allowed"), so a VL-only area kept by the old filter made
+// every FRR apply on a standby hard-fail. The transit test uses the
+// filtered area set (identity-normalized, #11400 spellings) and requires
+// an enabled transit interface. The renderer additionally checks actual
+// activation after its membership and authentication checks. Keep a
+// VL-only container when its separate transit area survives; drop areas
+// with neither interfaces nor surviving VLs. Never mutate the source.
 func (s *frrHADemotionState) filterOSPF(cfg *config.Config, source *config.OSPFConfig, instanceGroups []int) *config.OSPFConfig {
 	if source == nil {
 		return nil
 	}
 	filtered := *source
 	filtered.Areas = make([]*config.OSPFArea, 0, len(source.Areas))
+	// First pass: prune inactive interfaces per area.
+	drafts := make([]*config.OSPFArea, 0, len(source.Areas))
+	// Identity-normalized transit areas retaining an enabled interface.
+	transitWithInterface := make(map[string]bool)
 	for _, area := range source.Areas {
 		if area == nil {
-			filtered.Areas = append(filtered.Areas, nil)
+			drafts = append(drafts, nil)
 			continue
 		}
 		copyArea := *area
@@ -337,11 +351,51 @@ func (s *frrHADemotionState) filterOSPF(cfg *config.Config, source *config.OSPFC
 				copyArea.Interfaces = append(copyArea.Interfaces, iface)
 			}
 		}
-		if len(copyArea.Interfaces) != 0 || len(copyArea.VirtualLinks) != 0 {
-			filtered.Areas = append(filtered.Areas, &copyArea)
+		if ospfAreaHasEnabledInterface16631(&copyArea) {
+			transitWithInterface[config.OSPFAreaIdentity16631(copyArea.ID)] = true
+		}
+		drafts = append(drafts, &copyArea)
+	}
+	// Second pass: keep a VL only if its transit area retained an
+	// interface; keep an area only if it has interfaces or a surviving VL.
+	for _, areaCopy := range drafts {
+		if areaCopy == nil {
+			filtered.Areas = append(filtered.Areas, nil)
+			continue
+		}
+		if len(areaCopy.VirtualLinks) != 0 {
+			// VirtualLinks aliases the source by the shallow copy
+			// above; build the kept list fresh, never in place.
+			var kept []*config.OSPFVirtualLink
+			for _, vl := range areaCopy.VirtualLinks {
+				if vl == nil || transitWithInterface[config.OSPFAreaIdentity16631(vl.TransitArea)] {
+					kept = append(kept, vl)
+				} else {
+					slog.Warn("frr: omitting OSPF virtual-link whose transit area has no interface on this node (#16631)",
+						"neighbor", vl.NeighborID, "transit_area", vl.TransitArea)
+				}
+			}
+			areaCopy.VirtualLinks = kept
+		}
+		if len(areaCopy.Interfaces) != 0 || len(areaCopy.VirtualLinks) != 0 {
+			filtered.Areas = append(filtered.Areas, areaCopy)
 		}
 	}
 	return &filtered
+}
+
+// ospfAreaHasEnabledInterface16631 checks configured participation after
+// HA pruning. Only the renderer can decide whether activation is emitted.
+func ospfAreaHasEnabledInterface16631(area *config.OSPFArea) bool {
+	if area == nil {
+		return false
+	}
+	for _, iface := range area.Interfaces {
+		if iface != nil && !iface.Disable {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *frrHADemotionState) filterOSPFv3(cfg *config.Config, source *config.OSPFv3Config, instanceGroups []int) *config.OSPFv3Config {

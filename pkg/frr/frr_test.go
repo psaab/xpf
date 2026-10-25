@@ -3947,6 +3947,13 @@ func TestGenerateProtocols_OSPFVirtualLinkCustomTransitArea(t *testing.T) {
 					{NeighborID: "10.0.0.3", TransitArea: "0.0.0.2"},
 				},
 			},
+			{
+				// #16631: transit area renders an interface.
+				ID: "0.0.0.2",
+				Interfaces: []*config.OSPFInterface{
+					{Name: "trust1"},
+				},
+			},
 		},
 	}
 	got := m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)

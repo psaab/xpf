@@ -101,7 +101,12 @@ func ospfWellFormed9820() *config.OSPFConfig {
 				{NeighborID: "10.0.0.2", TransitArea: "0.0.0.2"},
 			},
 		}, {
+			// #16631: the transit area must render an interface or
+			// the VL is a non-ABR stanza ospfd refuses.
 			ID: "0.0.0.2",
+			Interfaces: []*config.OSPFInterface{
+				{Name: "trust1"},
+			},
 		}},
 	}
 }
