@@ -1164,6 +1164,15 @@ Shared:
   sequence is per-message, IPFIX sequence is the cumulative data-record
   count — and their wire bytes are frozen in `testdata/golden_16126.txt`
   (captured before the refactor; see `golden_16126_test.go`).
+- Tracker records (#16754): `exporterCore.collectDueExports` enriches
+  active-interim and inactive-final records drained from the FlowTracker
+  with the same field pipeline as the close path — Direction derived
+  from the exporter's sampling config (`FlowDirectionIface` over the
+  open-time zone/interface snapshot on the template) when the template
+  left it unset, and route masks resolved with the ingress VRF
+  (`resolveMasks`, InIf/OutIf). Before this, tracker records were
+  verbatim open-template copies with SrcMask/DstMask 0 and Direction 0
+  while the same flow's close record carried the resolved values.
 - `ExportConfig` — `manager.go`. Resolved per-group config: the collectors that
   referenced one template **and share one address family** (#2461 + #6811), that
   template's timeouts / field options, plus the instance-shared sampling state

@@ -63,6 +63,13 @@ type exporterCore struct {
 	// NewRouteMaskResolver so production records carry the real
 	// matching-route prefix length (#2866).
 	MaskResolver MaskResolver
+	// cfg is this exporter's sampling config, used only to derive the
+	// tracker-record flowDirection (IE 61) at drain time (#16754).
+	// The close path derives Direction in the daemon callback before
+	// ExportSessionClose; tracker records never pass that callback, so
+	// collectDueExports derives it here from the same config. Nil on
+	// zero-value exporters (Direction stays as templated).
+	cfg *ExportConfig
 	// tracker enforces active/inactive timeouts (#15655); nil means
 	// close-only export.
 	tracker *FlowTracker
@@ -206,13 +213,39 @@ func satSub(v, base uint64) uint64 {
 
 // collectDueExports drains due interim/final tracker records into the
 // batch (#15655). Shared by both exporters' CollectDueExports wrappers.
+//
+// #16754: tracker records are copies of the open template the daemon
+// built at SESSION_OPEN, which cannot carry route masks or direction
+// (the open callback never resolved them), so before this fix every
+// interim/final record exported SrcMask/DstMask 0 and Direction 0
+// while the same flow's close record carried the resolved values
+// (#2866/#3744 masks, #3270 IE 61). Enrich the drained records here,
+// at the single shared drain, with the same field pipeline the close
+// path uses: Direction, when the open snapshot left it unset (0), is
+// derived from this exporter's sampling config via FlowDirectionIface
+// for the flow's ingress/egress interfaces, and the route masks are
+// resolved with the ingress VRF (InIf, OutIf fallback) exactly as
+// resolveMasks scopes the close lookup. Templates that already carry
+// a direction (TrackFlowOpenRecord callers / TrackFlowOpenWithMeta)
+// keep it: 0 is the ingress value, so an egress-derived 1 would
+// otherwise be indistinguishable from unset and silently flipped to
+// the config derivation. Unresolved mask halves count into
+// routeMaskUnresolved, matching the close path (#3744).
 func (c *exporterCore) collectDueExports(now time.Time) []FlowRecord {
 	if c.tracker == nil {
 		return nil
 	}
 	due := c.tracker.CollectDueExports(now)
-	for _, r := range due {
-		c.batch.add(r)
+	for i := range due {
+		if c.cfg != nil && due[i].Direction == 0 {
+			due[i].Direction = c.cfg.FlowDirectionIface(due[i].InZone, due[i].OutZone, due[i].IsIPv6, due[i].InIface, due[i].OutIface)
+		}
+		srcMask, dstMask, misses := resolveMasks(c.MaskResolver, due[i].SrcIP, due[i].DstIP, due[i].InIf, due[i].OutIf)
+		due[i].SrcMask, due[i].DstMask = srcMask, dstMask
+		if misses > 0 {
+			c.routeMaskUnresolved.Add(misses)
+		}
+		c.batch.add(due[i])
 	}
 	return due
 }
@@ -438,6 +471,15 @@ func (c *exporterCore) TrackFlowOpen(key FlowKey, start time.Time) {
 	if c.tracker != nil {
 		c.tracker.TrackFlowOpenSimple(key, start)
 	}
+}
+
+// TrackFlowOpenWithMeta registers with a template that already carries
+// the close-side enrichment the daemon derives at SESSION_OPEN
+// (Direction via FlowDirectionIface, #16754). The scalar overload stays
+// so no call site needs a dummy template; collectDueExports derives
+// Direction from cfg for records whose template left it unset.
+func (c *exporterCore) TrackFlowOpenWithMeta(key FlowKey, start time.Time, template FlowRecord) {
+	c.TrackFlowOpenRecord(key, start, template)
 }
 
 // TrackFlowOpenRecord registers with a full template (#15946: NAT/ifindex/masks).

@@ -784,6 +784,7 @@ func NewIPFIXExporter(cfg *ExportConfig) (*IPFIXExporter, error) {
 		templateSet: encodeIPFIXTemplateSetDir(cfg.IncludeFlowDir),
 	}
 	e.MaskResolver = NewRouteMaskResolver(0)
+	e.exporterCore.cfg = cfg
 	e.tracker = NewFlowTracker(cfg.FlowActiveTimeout, cfg.FlowInactiveTimeout)
 
 	// #3748: advertise the 1-in-N sampling rate via an Options Template +
