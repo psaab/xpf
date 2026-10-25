@@ -1,6 +1,8 @@
 package frr
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -261,5 +263,94 @@ func TestComposedChainAliasCollision16867(t *testing.T) {
 	}}
 	if err := bgpComposedChainCollision(&FullConfig{BGP: bgp, PolicyOptions: poClean}); err != nil {
 		t.Errorf("control: overlong composed chain alone must be clean, got: %v", err)
+	}
+}
+
+// F1 (Gate4 Opus): frrName and the pkg/config mirror frrNameAlias16867
+// must agree on EVERY input, or the strict pair gate and the render belt
+// judge different pairs. pkg/config cannot import pkg/frr, so the mirror
+// is duplicated; this test is the pin the compiler_validate comment
+// cites — it runs the renderer's frrName against the mirror (exposed
+// via config.FRRNameAlias16867ForTest) over the full fixture space.
+func TestFRRNameAliasParity16867(t *testing.T) {
+	fixtures := []string{
+		"EXPORT", "export-v4", "p.1", "a_b", "",
+		"A B", "a\tb", "x\nrouter bgp 65000", "a b c",
+		strings.Repeat("a", config.FRRNameMaxLen-1),
+		strings.Repeat("a", config.FRRNameMaxLen),
+		strings.Repeat("a", config.FRRNameMaxLen+1),
+		strings.Repeat("a", 137),
+		strings.Repeat("a", 300),
+		strings.Repeat("Z9_", 90),
+		strings.Repeat("é", 64),  // exactly 128 bytes, multibyte
+		strings.Repeat("é", 100), // 200 bytes
+		"PL-xpfesc-deadbeef",     // literal forged alias (fixed point)
+		"name with-dash_and.dot",
+	}
+	for _, raw := range fixtures {
+		got, mirror := frrName(raw), config.FRRNameAlias16867ForTest(raw)
+		if got != mirror {
+			t.Errorf("parity: frrName(%q) = %q, config mirror = %q — the strict gate and render belt disagree", raw, got, mirror)
+		}
+	}
+}
+
+// F2 (Gate4 Opus): the ApplyFull-level refusal. The belt test above calls
+// frrNameAliasCollision directly; this cell drives the REAL ApplyFull
+// path (fake executor, temp frr.conf): install a last-good config, then
+// apply the persisted L/A prefix-list pair — ApplyFull must refuse with
+// the #16867 error and leave the on-disk last-good section byte-identical
+// (FRR keeps its last-good config).
+//
+// FAIL-ON-REVERT: deleting the frrNameAliasCollision call from ApplyFull
+// makes this apply succeed (and rewrites frr.conf) while the direct belt
+// test above stays green — that gap is what this cell closes.
+func TestApplyFullRefusesAliasPair16867(t *testing.T) {
+	confPath := filepath.Join(t.TempDir(), "frr.conf")
+	if err := os.WriteFile(confPath, []byte("log syslog informational\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{frrConf: confPath, exec: &fakeExecutor{}}
+	lastGood := &FullConfig{BGP: &config.BGPConfig{
+		LocalAS:   64512,
+		Neighbors: []*config.BGPNeighbor{{Address: "198.51.100.1", PeerAS: 64513, FamilyInet: true}},
+	}}
+	if err := m.ApplyFull(lastGood); err != nil {
+		t.Fatalf("ApplyFull(last-good): %v", err)
+	}
+	before, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	long := strings.Repeat("a", 137)
+	alias := frrName(long)
+	fc := &FullConfig{
+		BGP: lastGood.BGP,
+		PolicyOptions: &config.PolicyOptionsConfig{PrefixLists: map[string]*config.PrefixList{
+			long:  {Name: long, Prefixes: []string{"10.0.0.0/8"}},
+			alias: {Name: alias, Prefixes: []string{"192.168.0.0/16"}},
+		}},
+	}
+	err = m.ApplyFull(fc)
+	if err == nil || !strings.Contains(err.Error(), "#16867") || !strings.Contains(err.Error(), alias) {
+		t.Fatalf("ApplyFull accepted the persisted L/A alias pair; want a fail-closed #16867 refusal naming %q, got %v", alias, err)
+	}
+	after, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("refused apply rewrote frr.conf — FRR must keep its last-good config:\n got %q\nwant %q", after, before)
+	}
+	// Control: L alone applies clean through the same path.
+	fcOK := &FullConfig{
+		BGP: lastGood.BGP,
+		PolicyOptions: &config.PolicyOptionsConfig{PrefixLists: map[string]*config.PrefixList{
+			long: {Name: long, Prefixes: []string{"10.0.0.0/8"}},
+		}},
+	}
+	if err := m.ApplyFull(fcOK); err != nil {
+		t.Fatalf("control: overlong prefix-list alone must apply (aliased), got: %v", err)
 	}
 }

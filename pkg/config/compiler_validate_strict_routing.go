@@ -2441,6 +2441,11 @@ func sortedPolicyNames16867[V any](m map[string]V) []string {
 	return names
 }
 
+// FRRNameAlias16867ForTest exposes frrNameAlias16867 to the pkg/frr
+// parity test (TestFRRNameAliasParity16867). Test seam only; production
+// callers use validateFRRNameAliasCollisionStrict.
+func FRRNameAlias16867ForTest(name string) string { return frrNameAlias16867(name) }
+
 // frrNameAlias16867 mirrors pkg/frr's frrName EXACTLY: a single-token name
 // within FRRNameMaxLen renders unchanged; anything else renders as the
 // sanitized fragment plus "-xpfesc-" plus 8 hex chars of the SHA-256 of
