@@ -753,9 +753,27 @@ func (r *Runner) Run(opts Options) (err error) {
 		return nil
 	}
 
+	// #14720/#16765: if this cut re-stages the live version's committed
+	// predecessor, preserve its committed stamp + DB snapshot BEFORE
+	// PREFLIGHT. PREFLIGHT (and the #6556 resume re-snapshot below, and the
+	// cut-boundary re-snapshot after STOP) all rewrite .<TargetVersion>.dbsnap
+	// from the live DB; a backup taken afterwards would preserve the
+	// wrong-era DB, and the existence-only restore kept it (#16765). The
+	// backup is restored unconditionally on every failure arm below.
+	var predecessorBackup *predecessorStampBackup
+	if !j.State.atLeast(StateStopped) {
+		predecessorBackup = r.backupCommittedPredecessor(j, j.TargetVersion)
+		if predecessorBackup != nil {
+			predecessorBackup.stashImmune = true
+		}
+	}
+
 	// ---- PREFLIGHT (pure) ----
 	if !j.State.atLeast(StatePreflight) {
-		if err := r.preflight(j); err != nil {
+		if err := r.preflight(j, predecessorBackup); err != nil {
+			if predecessorBackup != nil {
+				r.restoreCommittedPredecessorBackup(predecessorBackup)
+			}
 			if isForwardEnvelopeGateRefusal(err) {
 				if cerr := r.clearJournal(); cerr != nil {
 					r.logf("upgrade: WARN clear journal on resumed envelope refuse: %v", cerr)
@@ -797,7 +815,7 @@ func (r *Runner) Run(opts Options) (err error) {
 		// current still names PreviousVersion or either execution signal names
 		// PreviousVersion (even when current already names the target), and
 		// preserves the original snapshot otherwise.
-		if err := r.snapshotConfigDB(j); err != nil {
+		if err := r.snapshotConfigDB(j, predecessorBackup); err != nil {
 			return fmt.Errorf("resume: re-snapshot config DB: %w", err)
 		}
 		// Persist immediately: DBSnapshotPath and AdvancedStateFloor can BOTH
@@ -812,20 +830,18 @@ func (r *Runner) Run(opts Options) (err error) {
 			"rollback cannot revert commits made during the interruption", j.State)
 	}
 
-	// #14720: if this cut re-stages the live version's committed predecessor,
-	// preserve its committed stamp + DB snapshot before COPY/VERIFY can
-	// demote, replace, or delete it. The journal records PreviousVersion as
-	// the live version, so the predecessor needs explicit protection; the
-	// backup is restored verbatim on a pre-STOP or auto-rollback failure.
-	var predecessorBackup *predecessorStampBackup
-	if !j.State.atLeast(StateStopped) {
-		predecessorBackup = r.backupCommittedPredecessor(j, j.TargetVersion)
-	}
-
 	// ---- COPY (pure) ----
 	if !j.State.atLeast(StateCopied) {
 		if err := r.copyStaged(j, predecessorBackup); err != nil {
+			r.discardPredecessorBackup(predecessorBackup)
 			return fmt.Errorf("copy: %w", err)
+		}
+		if predecessorBackup != nil {
+			// COPY has landed: post-COPY failures restore the backup
+			// (pre-STOP / verify arms) or leave the stashed snapshot for
+			// an auto-rollback, so a lingering stash must never be
+			// re-adopted by a cut-boundary re-snapshot (#16765).
+			predecessorBackup.stashImmune = false
 		}
 		if err := r.transition(j, StateCopied); err != nil {
 			return err
@@ -959,6 +975,7 @@ func (r *Runner) Run(opts Options) (err error) {
 		// rollback candidate until the final live-DB gate passes.
 		if r.committedPredecessorStamp(j, j.TargetVersion) != nil {
 			if err := r.stampInFlightVersion(j.TargetVersion); err != nil {
+				r.discardPredecessorBackup(predecessorBackup)
 				return fmt.Errorf("mark version %s non-committed after pre-STOP check: %w",
 					j.TargetVersion, err)
 			}
@@ -978,6 +995,7 @@ func (r *Runner) Run(opts Options) (err error) {
 			r.logf("upgrade: stopping %s before cut-boundary snapshot and flip", r.cfg.Unit)
 			stopAttempted = true
 			if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
+				r.discardPredecessorBackup(predecessorBackup)
 				return fmt.Errorf("stop unit: %w", err)
 			}
 			stoppedByRun = true
@@ -992,7 +1010,7 @@ func (r *Runner) Run(opts Options) (err error) {
 			r.logf("upgrade: restarted old daemon after cut-boundary failure")
 			return cause
 		}
-		if err := r.snapshotConfigDB(j); err != nil {
+		if err := r.snapshotConfigDB(j, predecessorBackup); err != nil {
 			return restartAfterBoundaryFailure(fmt.Errorf("cut-boundary snapshot config DB: %w", err))
 		}
 		if err := r.saveJournal(j); err != nil {
@@ -1059,7 +1077,7 @@ func (r *Runner) Run(opts Options) (err error) {
 			return cause
 		}
 		refreshSnapshot := func() error {
-			if err := r.snapshotConfigDB(j); err != nil {
+			if err := r.snapshotConfigDB(j, predecessorBackup); err != nil {
 				return restartOldAfterSnapshotFailure(
 					fmt.Errorf("resume STOPPED: fresh cut-boundary snapshot config DB: %w", err))
 			}
@@ -1126,6 +1144,7 @@ func (r *Runner) Run(opts Options) (err error) {
 	// version either way).
 	if !j.State.atLeast(StateFlipped) {
 		if err := r.flip(j.TargetVersion); err != nil {
+			r.discardPredecessorBackup(predecessorBackup)
 			return r.recoverFromFlipFailure(j, opts, err)
 		}
 		if err := r.transition(j, StateFlipped); err != nil {
@@ -1166,14 +1185,17 @@ func (r *Runner) Run(opts Options) (err error) {
 		}
 		if failErr := firstNonNil(startErr, healthErr); failErr != nil {
 			if opts.SkipStartHealthRollback {
+				r.discardPredecessorBackup(predecessorBackup)
 				return fmt.Errorf("new version %s failed to come up after flip (HA: "+
 					"rollback is operator-driven): %w", j.TargetVersion, failErr)
 			}
 			r.logf("upgrade: new version %s failed to come up after start (%v); AUTO-ROLLBACK",
 				j.TargetVersion, failErr)
 			if rbErr := r.rollback(j); rbErr != nil {
+				r.discardPredecessorBackup(predecessorBackup)
 				return fmt.Errorf("new version failed (%v) AND rollback failed: %w", failErr, rbErr)
 			}
+			r.discardPredecessorBackup(predecessorBackup)
 			return fmt.Errorf("new version %s failed to come up; rolled back to %s: %w",
 				j.TargetVersion, j.PreviousVersion, failErr)
 		}
@@ -1201,6 +1223,7 @@ func (r *Runner) Run(opts Options) (err error) {
 		return err
 	}
 	r.recordCommittedCut(j.TargetVersion)
+	r.discardPredecessorBackup(predecessorBackup)
 	return nil
 }
 
@@ -1408,7 +1431,7 @@ func isForwardEnvelopeGateRefusal(err error) bool {
 // preflight checks disk space (incl. the rollback DB snapshot), GCs
 // eligible versions if short, and takes the pre-upgrade DB snapshot. Pure:
 // no live mutation.
-func (r *Runner) preflight(j *Journal) error {
+func (r *Runner) preflight(j *Journal, predecessorBackups ...*predecessorStampBackup) error {
 	if err := r.validateForwardEnvelopeCompatibility(j.TargetVersion,
 		filepath.Join(r.sourceDir(j), "xpfd")); err != nil {
 		return &forwardEnvelopeGateRefusal{phase: "PREFLIGHT", err: err}
@@ -1469,7 +1492,7 @@ func (r *Runner) preflight(j *Journal) error {
 	}
 
 	// Take the pre-upgrade config-DB snapshot for binary+DB-atomic rollback.
-	return r.snapshotConfigDB(j)
+	return r.snapshotConfigDB(j, predecessorBackups...)
 }
 
 // snapshotConfigDB takes (or RE-takes) the rollback config-DB snapshot and
@@ -1497,7 +1520,15 @@ func (r *Runner) preflight(j *Journal) error {
 // directory. The cost is that peak disk briefly holds both copies; the config
 // DB is a handful of JSON files, and preflight's space check already budgets
 // a full dbSize.
-func (r *Runner) snapshotConfigDB(j *Journal) error {
+//
+// #16765: when this run re-stages the committed predecessor, the backup
+// taken before PREFLIGHT is stashed IN PLACE of the just-written snapshot
+// (the private backup copy is retained for failure-arm restores), so the
+// journal's DBSnapshotPath keeps naming .<target>.dbsnap while its content
+// stays the pre-cut bytes. The stash applies only while the backup is
+// stash-immune (before COPY lands); afterwards the snapshot is this cut's
+// own and an auto-rollback restores it.
+func (r *Runner) snapshotConfigDB(j *Journal, predecessorBackups ...*predecessorStampBackup) error {
 	dbPresent := false
 	if _, serr := statConfigDBDir(r.cfg.ConfigDBDir); serr == nil {
 		dbPresent = true
@@ -1530,6 +1561,13 @@ func (r *Runner) snapshotConfigDB(j *Journal) error {
 		// would be restored over a deliberately-empty config root.
 		_ = os.RemoveAll(snapDir)
 		r.logf("upgrade: no config DB at %s; skipping DB snapshot", r.cfg.ConfigDBDir)
+	}
+
+	if b := firstPredecessorBackup(predecessorBackups); b != nil && b.stashImmune && !b.demotedByReplacement {
+		r.applySnapshotStash(b, snapDir)
+		if b.dbsnapDir == snapDir {
+			j.DBSnapshotPath = snapDir
+		}
 	}
 
 	// Determine whether the new version raises the state-format floor.
@@ -1942,9 +1980,9 @@ func (r *Runner) cleanupFailedVerifyCopy(j *Journal, predecessorBackups ...*pred
 	// this is the same path preflight wrote. gc() also sweeps orphan .dbsnap
 	// dotfiles defensively. A committed predecessor's snapshot is NOT an
 	// orphan: it is the live version's rollback snapshot (#14720). The
-	// restore above already reinstalled the backup copy if this cut's
-	// PREFLIGHT overwrote it; skipping the removal keeps that restore.
-	// #15186: never remove the live version's snapshot, nor the snapshot of
+	// restore above unconditionally reinstalled the backup copy (taken
+	// before PREFLIGHT, #16765), replacing whatever this cut's PREFLIGHT
+	// overwrote it with; skipping the removal keeps that restore.
 	// the journal's PreviousVersion (the rollback target) — a same-version
 	// VERIFY failure must not delete the live .<ver>.dbsnap while claiming
 	// the live dataplane is untouched. `cur` is "" when indeterminate, in
