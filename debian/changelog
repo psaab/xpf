@@ -11,6 +11,18 @@ xpf (0.0.0) unstable; urgency=medium
     into a frame-size filter — the three-color twin of the #10310
     single-rate policer floor. A burst at exactly 1514 still
     commits.
+  * Routing: rib-group peer-return rules (kernel ip rules in
+    1001-1999 and their AF_XDP FIB mirror rows) are now installed
+    only for peer prefixes the source instance is authorized to
+    reach — its own interface-routes rib-group must name the
+    peer's rib (`<peer>.inet.0`/`<peer>.inet6.0`) in import-rib
+    (#16616). Previously every tenant leaking its interface
+    routes into inet.0 got returns to every other such tenant, so
+    two shared-services tenants were reachable from each other in
+    VRF context with no import-rib authorizing it. Tenants leaking
+    only into main now get `Network is unreachable` for each
+    other's prefixes (main->tenant still resolves); add the peer
+    rib to import-rib to authorize tenant->tenant returns.
   * Config/NAT: a source-NAT rule whose source match is
     single-family but whose pool has no member of that family
     (an IPv6-only pool, or an IPv4-mapped `::ffff:` literal, for

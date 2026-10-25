@@ -554,8 +554,10 @@ type ribGroupManager struct {
 // Phase 2 and warned at commit (pkg/config); this applier installs nothing
 // for them.
 //
-// #11062: each leaking source's return rules are destination-scoped to other
-// instances' leaked peer prefixes, so unrelated VRF misses stay terminated.
+// #11062/#16616: each leaking source's return rules are destination-scoped
+// to peer prefixes an import-rib of the source actually authorizes (the
+// peer's own rib named in the source's rib-group), so unrelated VRF misses
+// and unauthorized tenant->tenant reaches stay terminated.
 func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instances []*config.RoutingInstanceConfig, connectedPrefixes map[string][]string) error {
 	// Clean up old rib-group rules. As with next-table, a failed per-family
 	// list does not abort the apply; the clear error is captured and
@@ -687,9 +689,13 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 				"instance", inst.Name, "prefix", lr.prefix,
 				"table", sourceTable, "family", familyStr, "pref", priority)
 		}
-		// Return to other leaking instances through their own tables, but only
-		// for their leaked prefixes. Main-only destinations remain subject to
-		// the terminator.
+		// Return only to peers this source is authorized to reach: a peer
+		// prefix is returned to only when one of this source's own
+		// interface-routes rib-groups names the peer's rib in its
+		// import-rib list for that family (the VRF->VRF import case,
+		// #16616). Leaking into main alone authorizes main->tenant, not
+		// tenant->tenant, so unauthorized peers get no return rule and
+		// their prefixes hit the miss terminator from this VRF.
 		peerPrefixes, peerErrs := ribGroupPeerReturnPrefixes(
 			inst, instances, ribGroups, tableIDs, connectedPrefixes, installed)
 		errs = append(errs, peerErrs...)
@@ -701,9 +707,17 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 	return errors.Join(errs...)
 }
 
-// ribGroupPeerReturnPrefixes returns other instances' connected prefixes
-// that leak into main, restricted to address families in which this source
-// successfully installed its own leak.
+// ribGroupPeerReturnPrefixes returns peer connected prefixes this source
+// instance is authorized to reach, restricted to address families in which
+// this source successfully installed its own leak.
+//
+// Authorization (#16616): a peer prefix qualifies only when the source's
+// own interface-routes rib-group for that family names the peer's rib
+// (for example "b.inet.0") in its import-rib list. Both tenants leaking
+// only into inet.0 therefore get no tenant->tenant return rule; main->tenant
+// still resolves via the per-prefix leak rules in the 30000 band. A peer
+// must also leak into main for that family so its connected prefixes are
+// the leaked set being returned to.
 func ribGroupPeerReturnPrefixes(
 	instance *config.RoutingInstanceConfig,
 	instances []*config.RoutingInstanceConfig,
@@ -720,15 +734,19 @@ func ribGroupPeerReturnPrefixes(
 			continue
 		}
 		families := []struct {
-			family  int
-			group   string
-			enabled bool
+			family      int
+			group       string
+			sourceGroup string
+			enabled     bool
 		}{
-			{unix.AF_INET, peer.InterfaceRoutesRibGroup, len(installed[unix.AF_INET]) > 0},
-			{unix.AF_INET6, peer.InterfaceRoutesRibGroupV6, len(installed[unix.AF_INET6]) > 0},
+			{unix.AF_INET, peer.InterfaceRoutesRibGroup, instance.InterfaceRoutesRibGroup, len(installed[unix.AF_INET]) > 0},
+			{unix.AF_INET6, peer.InterfaceRoutesRibGroupV6, instance.InterfaceRoutesRibGroupV6, len(installed[unix.AF_INET6]) > 0},
 		}
 		for _, candidate := range families {
 			if !candidate.enabled || !ribGroupLeaksIntoMain(candidate.group, ribGroups, tableIDs, peer.Name, candidate.family) {
+				continue
+			}
+			if !ribGroupImportsInstanceRib(candidate.sourceGroup, ribGroups, peer.Name, candidate.family) {
 				continue
 			}
 			for _, raw := range connectedPrefixes[peer.Name] {
@@ -753,6 +771,31 @@ func ribGroupPeerReturnPrefixes(
 		}
 	}
 	return peers, errs
+}
+
+// ribGroupImportsInstanceRib reports whether the named rib-group's
+// import-rib list names peerName's rib for family (for example
+// "b.inet.0" for IPv4 or "b.inet6.0" for IPv6). Only the exact
+// family-matching instance rib authorizes a return to that peer for
+// that family; a sibling-family or main rib does not (#16616).
+func ribGroupImportsInstanceRib(rgName string, ribGroups map[string]*config.RibGroup, peerName string, family int) bool {
+	if rgName == "" || peerName == "" {
+		return false
+	}
+	rgDef, ok := ribGroups[rgName]
+	if !ok || rgDef == nil {
+		return false
+	}
+	want := peerName + ".inet.0"
+	if family == unix.AF_INET6 {
+		want = peerName + ".inet6.0"
+	}
+	for _, ribName := range rgDef.ImportRibs {
+		if ribName == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ribGroupLeaksIntoMain reports whether the named interface-routes rib-group

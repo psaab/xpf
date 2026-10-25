@@ -79,13 +79,17 @@ func TestRibGroupReturnLongestPrefixPriority14975(t *testing.T) {
 // the kernel first-match picks the narrower peer's table; clear() must sweep
 // the derived band on re-apply and on zero-transition.
 func TestRibGroupReturnRulesLPMApply14975(t *testing.T) {
+	// #16616: return rules exist only where the source's rib-group names
+	// the peer rib. src names broad+narrow; broad/narrow name src.
 	ribGroups := map[string]*config.RibGroup{
-		"leak": {Name: "leak", ImportRibs: []string{"inet.0", "inet6.0"}},
+		"src-leak":    {Name: "src-leak", ImportRibs: []string{"inet.0", "inet6.0", "broad.inet.0", "broad.inet6.0", "narrow.inet.0", "narrow.inet6.0"}},
+		"broad-leak":  {Name: "broad-leak", ImportRibs: []string{"inet.0", "inet6.0", "src.inet.0", "src.inet6.0"}},
+		"narrow-leak": {Name: "narrow-leak", ImportRibs: []string{"inet.0", "inet6.0", "src.inet.0", "src.inet6.0"}},
 	}
 	instances := []*config.RoutingInstanceConfig{
-		{Name: "src", TableID: 200, InterfaceRoutesRibGroup: "leak", InterfaceRoutesRibGroupV6: "leak"},
-		{Name: "broad", TableID: 300, InterfaceRoutesRibGroup: "leak", InterfaceRoutesRibGroupV6: "leak"},
-		{Name: "narrow", TableID: 400, InterfaceRoutesRibGroup: "leak", InterfaceRoutesRibGroupV6: "leak"},
+		{Name: "src", TableID: 200, InterfaceRoutesRibGroup: "src-leak", InterfaceRoutesRibGroupV6: "src-leak"},
+		{Name: "broad", TableID: 300, InterfaceRoutesRibGroup: "broad-leak", InterfaceRoutesRibGroupV6: "broad-leak"},
+		{Name: "narrow", TableID: 400, InterfaceRoutesRibGroup: "narrow-leak", InterfaceRoutesRibGroupV6: "narrow-leak"},
 	}
 	connected := map[string][]string{
 		"src":    {"10.30.0.0/24", "2001:db8:30::/64"},
@@ -198,11 +202,12 @@ func (f *eexistReturnOps14975) RuleAddDSCP(r *netlink.Rule, dscp uint8) error {
 
 func TestRibGroupReturnRulePreExistingEEXIST14975(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
-		"leak": {Name: "leak", ImportRibs: []string{"inet.0", "inet6.0"}},
+		"src-leak": {Name: "src-leak", ImportRibs: []string{"inet.0", "inet6.0", "b.inet.0", "b.inet6.0"}},
+		"b-leak":   {Name: "b-leak", ImportRibs: []string{"inet.0", "inet6.0", "src.inet.0", "src.inet6.0"}},
 	}
 	instances := []*config.RoutingInstanceConfig{
-		{Name: "src", TableID: 200, InterfaceRoutesRibGroup: "leak", InterfaceRoutesRibGroupV6: "leak"},
-		{Name: "b", TableID: 300, InterfaceRoutesRibGroup: "leak", InterfaceRoutesRibGroupV6: "leak"},
+		{Name: "src", TableID: 200, InterfaceRoutesRibGroup: "src-leak", InterfaceRoutesRibGroupV6: "src-leak"},
+		{Name: "b", TableID: 300, InterfaceRoutesRibGroup: "b-leak", InterfaceRoutesRibGroupV6: "b-leak"},
 	}
 	connected := map[string][]string{
 		"src": {"10.30.0.0/24"},
