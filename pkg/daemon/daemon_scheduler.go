@@ -267,18 +267,11 @@ func (d *Daemon) stopPolicySchedulerLoop() {
 	// #8597 (muse-004 K23): BOUNDED. This is a shutdown-path acquire, and
 	// daemon_run_shutdown.go states the rule at its own drain — "bound it
 	// defensively anyway so a wedged apply cannot block the whole shutdown past
-	// the drain budget". This was the one shutdown acquire that was not: with
-	// context.Background() a wedged apply held it forever, so the scheduler was
-	// never cancelled, HA relinquish never ran, and systemd's TimeoutStopSec
-	// ended the process with SIGKILL — no rg_active clear, no priority-0
-	// advert, no RA goodbye. That is the difference between a sub-second
-	// handover and a blackout.
-	//
-	// On timeout we proceed to cancel + join anyway. The acquire is only there
-	// to read+cancel schedulerCancel under the lock that guards it; skipping it
-	// costs the mutual exclusion, not correctness of the cancel itself, and a
-	// shutdown that reaches the cancel late is strictly better than one that
-	// never reaches it.
+	// the drain budget". This acquire used to use context.Background(); with a
+	// wedged apply the scheduler was never cancelled, HA relinquish never ran,
+	// and systemd's TimeoutStopSec ended the process with SIGKILL — no rg_active
+	// clear, no priority-0 advert, no RA goodbye. That is the difference between
+	// a sub-second handover and a blackout.
 	//
 	// #8660 CLOSED THE RESIDUAL this comment used to describe. A tick parked in
 	// publishPolicyScheduleState now acquires with the SCHEDULER'S ctx — handed
@@ -294,17 +287,11 @@ func (d *Daemon) stopPolicySchedulerLoop() {
 	// it work: cancel() must run before Wait(), and the cancel is of the ctx the
 	// tick is parked on. Reversing them, or handing the tick a different ctx,
 	// reinstates the stall.
-	acquired := false
-	if d.applySem != nil {
-		acqCtx, cancelAcq := context.WithTimeout(context.Background(), applyCloseoutDrainTimeout)
-		if err := d.applySem.Acquire(acqCtx, 1); err == nil {
-			acquired = true
-		} else {
-			slog.Warn("shutdown: timed out acquiring the apply semaphore to stop the "+
-				"policy scheduler; cancelling it anyway", "err", err,
-				"timeout", applyCloseoutDrainTimeout, "issue", "#8597")
-		}
-		cancelAcq()
+	acquired, acquireErr := d.acquireApplySemForShutdown()
+	if d.applySem != nil && !acquired {
+		slog.Warn("shutdown: timed out acquiring the apply semaphore to stop the "+
+			"policy scheduler; cancelling it anyway", "err", acquireErr,
+			"timeout", applyCloseoutDrainTimeout, "issue", "#8597")
 	}
 	d.schedulerStopped = true
 	cancel := d.schedulerCancel

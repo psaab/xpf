@@ -16,10 +16,11 @@ import (
 //
 // daemon_run_shutdown.go states the rule at its own drain: "bound it
 // defensively anyway so a wedged apply cannot block the whole shutdown past the
-// drain budget." A census of applySem acquires reachable from the shutdown
-// sequence finds exactly two — that drain, which was bounded, and this one,
-// which was not. (stopPinRetryLoop, the sibling cleanup called on the next
-// line, does not touch applySem at all.)
+// drain budget." The shutdown drain, this scheduler stop, and the final
+// host-tunable restore now share acquireApplySemForShutdown; the timing and
+// never-release-untaken-permit assertions below pin this site's contract.
+// stopPinRetryLoop, the sibling cleanup called on the next line, does not
+// touch applySem at all.
 //
 // What the stall costs: the scheduler is never cancelled, so shutdown never
 // reaches the HA relinquish that follows, and systemd's TimeoutStopSec ends the

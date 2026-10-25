@@ -19,6 +19,20 @@ import (
 // can never stall the whole stop past the drain budget.
 const applyCloseoutDrainTimeout = 5 * time.Second
 
+// acquireApplySemForShutdown applies the common shutdown bound to every
+// applySem acquisition in the teardown sequence. Callers handle timeout based
+// on whether they can safely continue without the permit; release follows
+// only a successful acquisition.
+func (d *Daemon) acquireApplySemForShutdown() (bool, error) {
+	if d.applySem == nil {
+		return false, nil
+	}
+	acqCtx, cancelAcq := context.WithTimeout(context.Background(), applyCloseoutDrainTimeout)
+	err := d.applySem.Acquire(acqCtx, 1)
+	cancelAcq()
+	return err == nil, err
+}
+
 // slogShutdownDrainTimeout bounds the orderly drain of the async syslog
 // writer at daemon exit (#16083 fold): queued records get this total
 // budget to reach a healthy collector before the remaining backlog is
@@ -157,14 +171,12 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 		// so this cannot hang on unbounded work; bound it defensively anyway so a
 		// wedged apply cannot block the whole shutdown past the drain budget.
 		if d.applySem != nil {
-			drainCtx, cancelDrain := context.WithTimeout(context.Background(), applyCloseoutDrainTimeout)
-			if err := d.applySem.Acquire(drainCtx, 1); err == nil {
+			if acquired, err := d.acquireApplySemForShutdown(); acquired {
 				d.applySem.Release(1)
 			} else {
 				slog.Warn("shutdown: timed out draining in-flight apply before teardown; "+
 					"host-authorization closeout may be incomplete", "err", err)
 			}
-			cancelDrain()
 		}
 	}
 

@@ -43,7 +43,6 @@
 package daemon
 
 import (
-	"context"
 	"log/slog"
 	"sort"
 	"time"
@@ -262,17 +261,22 @@ func (d *Daemon) restoreStep0TunablesOnShutdown() {
 	// guards the pointer read/write, while applyCoalescence /
 	// applyHostTunables / applyNeighRetransTime write the maps after the
 	// mutex is dropped. A DHCP lease apply can still be in flight when
-	// shutdown fires; it runs under d.applySem (via applyConfig), so
-	// acquiring applySem here serializes this restore's snapshot handoff +
-	// map iteration against that apply, matching the lock the apply path
-	// already holds. Without it, restore's os.Remove/write of the map entries
-	// races the apply's concurrent writes to the same maps.
+	// shutdown fires; it runs under d.applySem (via applyConfig), so acquiring
+	// applySem here serializes this restore's snapshot handoff + map iteration
+	// against that apply, matching the lock the apply path already holds.
+	//
+	// The acquire uses the shared shutdown bound, but unlike the drain and
+	// scheduler stop this path cannot safely proceed without the permit: it
+	// iterates and mutates the apply-owned snapshot maps. On timeout, retain the
+	// snapshot and skip the restore rather than race an in-flight apply.
 	if d.applySem != nil {
-		if err := d.applySem.Acquire(context.Background(), 1); err != nil {
-			slog.Warn("shutdown: host tunables restore could not acquire apply lock, "+
-				"proceeding without it", "err", err)
-		} else {
+		if acquired, err := d.acquireApplySemForShutdown(); acquired {
 			defer d.applySem.Release(1)
+		} else {
+			slog.Warn("shutdown: host tunables restore skipped because the apply lock "+
+				"was unavailable; captures retained for retry", "err", err,
+				"timeout", applyCloseoutDrainTimeout, "issue", "#17014")
+			return
 		}
 	}
 
