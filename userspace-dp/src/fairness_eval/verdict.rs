@@ -164,10 +164,24 @@ pub(crate) fn evaluate(input: VerdictInput<'_>) -> VerdictDecision {
 
     let mut failure_reasons: Vec<String> = Vec::new();
     if input.starved > 0 {
-        failure_reasons.push(format!(
-            "Gate 1 (starved flows): {} flow(s) below 1% of mean per-flow throughput for the entire steady-state window",
-            input.starved
-        ));
+        if input.n_iperf_streams > 0 && input.starved >= input.n_iperf_streams {
+            // #16540: every seeded flow starved can only mean the
+            // window delivered no throughput at all (starved_flow_count
+            // returns the full flow count exactly when total_bytes==0;
+            // a partial-starvation run always leaves a non-starved
+            // survivor by the `< 1% of mean` definition when any bytes
+            // flowed). Name the outage shape so an operator reading
+            // the reason does not have to infer it from avg_mbps ~ 0.
+            failure_reasons.push(format!(
+                "Gate 1 (starved flows): no throughput in steady-state window: all {} flow(s) delivered zero bytes (starved_flow_count == n_iperf_streams)",
+                input.starved
+            ));
+        } else {
+            failure_reasons.push(format!(
+                "Gate 1 (starved flows): {} flow(s) below 1% of mean per-flow throughput for the entire steady-state window",
+                input.starved
+            ));
+        }
     }
     if gap > EPSILON {
         failure_reasons.push(format!(
