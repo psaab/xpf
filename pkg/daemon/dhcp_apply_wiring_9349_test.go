@@ -116,6 +116,12 @@ func (r *recordingDHCPApplier9349) GetSyncLeases4(context.Context, time.Time) ([
 func (r *recordingDHCPApplier9349) GetSyncLeases6(context.Context, time.Time) ([]dhcpserver.SyncLease, error) {
 	return nil, nil
 }
+func (r *recordingDHCPApplier9349) GetSyncLeases4WithSource(context.Context, time.Time) ([]dhcpserver.SyncLease, bool, error) {
+	return nil, false, nil
+}
+func (r *recordingDHCPApplier9349) GetSyncLeases6WithSource(context.Context, time.Time) ([]dhcpserver.SyncLease, bool, error) {
+	return nil, false, nil
+}
 func (r *recordingDHCPApplier9349) SeedSyncLeases4(context.Context, []dhcpserver.SyncLease, time.Time) (int, error) {
 	return 0, nil
 }
@@ -129,6 +135,18 @@ func (r *recordingDHCPApplier9349) PreSeedMemfileMerged4(_ context.Context, _ []
 	return nil
 }
 func (r *recordingDHCPApplier9349) PreSeedMemfileMerged6(_ context.Context, _ []dhcpserver.SyncLease, _ time.Time, stillMastering bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.preSeed6StillMastering = append(r.preSeed6StillMastering, stillMastering)
+	return nil
+}
+func (r *recordingDHCPApplier9349) PreSeedMemfileMerged4WithAuthority(_ context.Context, _ dhcpserver.LeaseSyncSnapshot, _ time.Time, stillMastering bool, _ dhcpserver.LeaseSyncAuthority) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.preSeed4StillMastering = append(r.preSeed4StillMastering, stillMastering)
+	return nil
+}
+func (r *recordingDHCPApplier9349) PreSeedMemfileMerged6WithAuthority(_ context.Context, _ dhcpserver.LeaseSyncSnapshot, _ time.Time, stillMastering bool, _ dhcpserver.LeaseSyncAuthority) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.preSeed6StillMastering = append(r.preSeed6StillMastering, stillMastering)
