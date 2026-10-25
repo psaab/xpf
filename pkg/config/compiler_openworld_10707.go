@@ -322,6 +322,17 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 			if (childSchema.children == nil && childSchema.wildcard == nil) || childSchema.closedWorldOpaque {
 				continue
 			}
+			// #16679: `multihop` is modelled as a typed leaf with
+			// `ttl`/`no-nexthop-change` modifiers. Its value can
+			// ride this node's Keys or a value child/grandchild
+			// (flat-set shape), which this generic walker would
+			// misread as an unmodeled keyword ("2"). The statement
+			// is compiled (bgpMultihopTTLOf16679) and strictly
+			// validated (validateBGPMultihop16679), so the generic
+			// advisory must not claim it may be ignored.
+			if keyword == "multihop" {
+				continue
+			}
 			consumed, descend := consumeNodeKeys(node.Keys, childSchema)
 			pathLen := len(path)
 			path = append(path, node.Keys[:consumed]...)
