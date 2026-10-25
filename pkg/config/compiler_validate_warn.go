@@ -1100,6 +1100,25 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 			strings.Join(uniq, ", ")))
 	}
 
+	// #16814: Junos-valid sub-statements of the five modeled ALG classes
+	// (dns doctoring, sip inactive-media-timeout, ...) are accepted but
+	// not implemented. Warn so the operator knows the tuning has no
+	// effect, mirroring the #4232 advisory for unmodeled classes. The
+	// modeled `disable` flags are enforced and never recorded here.
+	if stmts := cfg.Security.ALG.InertSubstatements; len(stmts) > 0 {
+		seen := make(map[string]bool, len(stmts))
+		var uniq []string
+		for _, s := range stmts {
+			if !seen[s] {
+				seen[s] = true
+				uniq = append(uniq, s)
+			}
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"security alg %s accepted but inert — xpf does not implement these ALG sub-statements, so they have no effect (#16814)",
+			strings.Join(uniq, ", ")))
+	}
+
 	// #4232 (fable-167 P-4b): a DIRECT child of `policy <name>` whose keyword
 	// the compiler does not read (anything but match/then/description/
 	// scheduler-name) was silently dropped — a typo'd `descripton` /

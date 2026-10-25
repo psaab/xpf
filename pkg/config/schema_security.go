@@ -1416,19 +1416,22 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			}},
 		}},
 	}},
-	// #10078: the four wired ALG classes expose the compiler's `disable`
-	// child in both braced and flat spellings. Unsupported Junos ALG classes
-	// remain an explicit opaque wildcard: compileALG records their names for
-	// the #4232 accepted-but-inert warning, while their vendor-specific body
+	// #16814: the five modeled ALG classes accept their Junos-valid
+	// sub-statements as opaque accepted-but-inert children (grammar in
+	// schema_security_alg.go); only `disable` is enforced. Unknown tokens
+	// still reject via validateALGPackedTokens in both shapes, including
+	// packed statement bodies. Unsupported Junos ALG classes remain an
+	// explicit opaque wildcard: compileALG records their names for the
+	// #4232 accepted-but-inert warning, while their vendor-specific body
 	// is intentionally outside xpf's modeled grammar. The wildcard is not a
 	// blanket security escape — only this compiler-owned ALG value/body slot
 	// ends inherited closed-world enforcement.
-	"alg": {desc: "ALG (application layer gateway) control", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{
-		"dns":  {desc: "DNS ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable DNS ALG", children: nil}}},
-		"ftp":  {desc: "FTP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable FTP ALG", children: nil}}},
-		"sip":  {desc: "SIP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable SIP ALG", children: nil}}},
-		"tftp": {desc: "TFTP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable TFTP ALG", children: nil}}},
-		"pptp": {desc: "PPTP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable PPTP ALG", children: nil}}},
+	"alg": {desc: "ALG (application layer gateway) control", closedWorldOpaque: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{
+		"dns":  algProtoSchema16814("dns"),
+		"ftp":  algProtoSchema16814("ftp"),
+		"sip":  algProtoSchema16814("sip"),
+		"tftp": algProtoSchema16814("tftp"),
+		"pptp": algProtoSchema16814("pptp"),
 	}, wildcard: &schemaNode{desc: "Unsupported ALG class (accepted-only; compiler warning)", closedWorldOpaque: true, children: map[string]*schemaNode{
 		"disable": {desc: "Disable this ALG class", children: nil},
 	}}},

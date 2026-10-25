@@ -2,143 +2,123 @@ package config
 
 import "fmt"
 
-// validateALGPackedTokens rejects tokens that the ALG compiler does not consume.
-// Known ALG classes accept only the optional `disable` token; unknown classes
-// remain opaque because their vendor-specific bodies are intentionally tolerated.
-func validateALGPackedTokens(node *Node, _ *schemaNode) error {
+// validateALGPackedTokens validates modeled class statement heads, not inert
+// bodies. A packed inert head owns the remaining tokens AND children; they
+// must not be interpreted as class-level statements (especially `disable`).
+// parent is supplied by the schema walker, avoiding an initialization cycle.
+func validateALGPackedTokens(node *Node, parent *schemaNode) error {
 	if node == nil || len(node.Keys) == 0 {
 		return nil
 	}
-	proto := node.Keys[0]
-	tokens := node.Keys[1:]
-	if proto == "alg" {
-		if len(tokens) == 0 {
-			return nil
+	schema := parent.children[node.Name()]
+	if len(node.Keys) > 1 {
+		proto := node.Keys[1]
+		if ps := schema.children[proto]; ps != nil {
+			return validateALGBody16814(proto, node.Keys[2:], node.Children, ps)
 		}
-		proto = tokens[0]
-		tokens = tokens[1:]
+		return nil // Unmodeled classes retain their opaque admission policy.
 	}
-	switch proto {
-	case "dns", "ftp", "sip", "tftp", "pptp":
-		for _, token := range tokens {
-			if token != "disable" {
-				return fmt.Errorf("unknown configuration keyword %q under ALG %q (valid: disable)", token, proto)
+	for _, child := range node.Children {
+		if ps := schema.children[child.Name()]; ps != nil {
+			if err := validateALGBody16814(child.Name(), child.Keys[1:], child.Children, ps); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-// algDisabled reports whether `security alg <proto>` carries a `disable`
-// statement, in EITHER AST shape (#6564).
-//
-// `alg { dns { disable; } }` gives a "dns" child with a "disable" child, but
-// `alg { dns disable; }` is ONE leaf with Keys=["dns","disable"] and no
-// children at all — the parser packs a `;`-terminated statement onto a single
-// node. Reading Children alone (the pre-#6564 form) was blind to the second
-// spelling, so an operator-disabled ALG silently stayed ENABLED with no
-// warning: the #4232 unsupported-proto advisory does not fire either, because
-// the four protos here ARE wired.
-//
-// This is the same accumulate-both-sides discipline as firewallMatchValues /
-// addressSetMemberValues.
-func algDisabled(algNode *Node, proto string) bool {
-	for _, protoNode := range algNode.FindChildren(proto) {
-		if protoNode.FindChild("disable") != nil {
+func validateALGBody16814(proto string, tail []string, children []*Node, schema *schemaNode) error {
+	for _, token := range tail {
+		if token == "disable" {
+			continue
+		}
+		if statement := schema.children[token]; statement != nil && statement.closedWorldOpaque {
+			return nil // The rest is this accepted-but-inert statement's body.
+		}
+		if isApplyStatementKeyword(token) {
+			return nil
+		}
+		return fmt.Errorf("unknown configuration keyword %q under ALG %q", token, proto)
+	}
+	for _, child := range children {
+		if isApplyStatementKeyword(child.Name()) {
+			continue
+		}
+		statement := schema.children[child.Name()]
+		if statement == nil {
+			return fmt.Errorf("unknown configuration keyword %q under ALG %q", child.Name(), proto)
+		}
+		if child.Name() == "disable" && (len(child.Keys) != 1 || len(child.Children) != 0) {
+			return fmt.Errorf("ALG %q disable does not take arguments or children", proto)
+		}
+	}
+	return nil
+}
+
+// algPackedDisable reads class-level disable flags. A recognized inert
+// statement owns the remaining body, including any value named disable.
+// Unknown tokens retain the old tolerant-load scan; strict admission rejects
+// them before compilation.
+func algPackedDisable(tail []string, children []*Node, schema *schemaNode) bool {
+	for _, token := range tail {
+		if token == "disable" {
 			return true
 		}
-		for _, k := range protoNode.Keys[1:] {
-			if k == "disable" {
-				return true
-			}
+		if statement := schema.children[token]; statement != nil && statement.closedWorldOpaque {
+			return false
+		}
+	}
+	for _, child := range children {
+		if child.Name() == "disable" {
+			return true
 		}
 	}
 	return false
 }
 
 func compileALG(node *Node, sec *SecurityConfig) error {
-	sec.ALG.DNSDisable = sec.ALG.DNSDisable || algDisabled(node, "dns")
-	sec.ALG.FTPDisable = sec.ALG.FTPDisable || algDisabled(node, "ftp")
-	sec.ALG.SIPDisable = sec.ALG.SIPDisable || algDisabled(node, "sip")
-	sec.ALG.TFTPDisable = sec.ALG.TFTPDisable || algDisabled(node, "tftp")
-	sec.ALG.PPTPDisable = sec.ALG.PPTPDisable || algDisabled(node, "pptp")
-	// #4232 (fable-167 P-4a): record any `security alg <proto>` whose proto is
-	// not one of the four the dataplane wires. The whole stanza (bare `disable`
-	// or a richer child like `h323 gatekeeper ...`) was previously dropped
-	// silently; recording the proto lets the compiler emit an accepted-but-inert
-	// advisory (validateSecurityAcceptedOnly). Iterate node.Children in config
-	// order for a deterministic warning.
-	// #8823: the proto may be packed onto THIS node's Keys instead of being a
-	// child, in two shapes the loop below cannot read:
-	//
-	//	security { alg ftp disable; }      Keys=[alg ftp disable]  children=[]
-	//	security { alg ftp { disable; } }  Keys=[alg ftp]          children=[disable]
-	//
-	// In both, `alg` carries the PROTO and any children belong to the proto
-	// rather than to `alg`. Measured before the fix, on a clean commit:
-	//
-	//	alg ftp disable;        ftp=false  unsupported=[]          <- silent drop
-	//	alg ftp { disable; }    ftp=false  unsupported=[disable]   <- WRONG advisory
-	//	alg h323 { gatekeeper; }           unsupported=[gatekeeper]<- WRONG name
-	//
-	// The mixed shape is worse than the silent one: the #4232 advisory exists to
-	// report a proto the dataplane does not wire, and it named `disable` and
-	// `gatekeeper` -- a keyword and a sub-statement -- as though they were
-	// protocols. A reader acting on that looks for an ALG that does not exist.
-	//
-	// Handled HERE rather than by admitting ("alg",<proto>) to the #8690
-	// normalizer, and that choice was measured rather than reasoned. Admitting
-	// the pair fixes the four DECLARED protos and cannot reach an undeclared one
-	// at all -- the pass asks nothing for `h323` (`asked=[]`), which is the
-	// #8800 signature -- and declaring unsupported protos to make it ask would
-	// defeat the advisory those declarations exist to preserve. A compiler-side
-	// read covers both classes at one site. It also mirrors algDisabled, which
-	// already reads a packed tail one level down.
 	if len(node.Keys) > 1 {
-		proto := node.Keys[1]
-		tail := node.Keys[2:]
-		switch proto {
-		case "dns":
-			sec.ALG.DNSDisable = sec.ALG.DNSDisable || algPackedDisable(tail, node.Children)
-		case "ftp":
-			sec.ALG.FTPDisable = sec.ALG.FTPDisable || algPackedDisable(tail, node.Children)
-		case "sip":
-			sec.ALG.SIPDisable = sec.ALG.SIPDisable || algPackedDisable(tail, node.Children)
-		case "tftp":
-			sec.ALG.TFTPDisable = sec.ALG.TFTPDisable || algPackedDisable(tail, node.Children)
-		case "pptp":
-			sec.ALG.PPTPDisable = sec.ALG.PPTPDisable || algPackedDisable(tail, node.Children)
-		default:
-			sec.ALG.UnsupportedProtos = append(sec.ALG.UnsupportedProtos, proto)
-		}
-		// The children belong to the packed proto, not to `alg`, so the loop
-		// below must not read them as protos -- that is what produced
-		// `unsupported=[disable]`.
+		compileALGProto16814(node.Keys[1], node.Keys[2:], node.Children, &sec.ALG)
 		return nil
 	}
 	for _, child := range node.Children {
-		switch child.Name() {
-		case "dns", "ftp", "sip", "tftp", "pptp":
-			// wired above
-		default:
-			sec.ALG.UnsupportedProtos = append(sec.ALG.UnsupportedProtos, child.Name())
-		}
+		compileALGProto16814(child.Name(), child.Keys[1:], child.Children, &sec.ALG)
 	}
 	return nil
 }
 
-// algPackedDisable reports whether a packed proto's body carries `disable`, in
-// either the Keys tail (`alg ftp disable;`) or a child (`alg ftp { disable; }`).
-func algPackedDisable(tail []string, children []*Node) bool {
-	for _, k := range tail {
-		if k == "disable" {
-			return true
+func compileALGProto16814(proto string, tail []string, children []*Node, alg *ALGConfig) {
+	var control *bool
+	switch proto {
+	case "dns":
+		control = &alg.DNSDisable
+	case "ftp":
+		control = &alg.FTPDisable
+	case "sip":
+		control = &alg.SIPDisable
+	case "tftp":
+		control = &alg.TFTPDisable
+	case "pptp":
+		control = &alg.PPTPDisable
+	default:
+		alg.UnsupportedProtos = append(alg.UnsupportedProtos, proto)
+		return
+	}
+	schema := schemaForPath("security", "alg", proto)
+	*control = *control || algPackedDisable(tail, children, schema)
+	record := func(keyword string) {
+		if statement := schema.children[keyword]; statement != nil && statement.closedWorldOpaque {
+			alg.InertSubstatements = append(alg.InertSubstatements, proto+" "+keyword)
 		}
 	}
-	for _, c := range children {
-		if c.Name() == "disable" {
-			return true
+	for _, token := range tail {
+		if token != "disable" {
+			record(token)
+			return // Children belong to this packed statement, not the class.
 		}
 	}
-	return false
+	for _, child := range children {
+		record(child.Name())
+	}
 }

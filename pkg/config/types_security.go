@@ -373,6 +373,14 @@ type ALGConfig struct {
 	// accepted-but-inert advisory. The names are recorded in config order so
 	// the warning is deterministic.
 	UnsupportedProtos []string
+	// InertSubstatements records Junos-valid sub-statements of the five
+	// modeled ALG classes that xpf accepts but does not implement
+	// (#16814), as fully-qualified "<proto> <statement>" labels in config
+	// order (e.g. "dns doctoring"). compileALG records them so
+	// ValidateConfig can emit the accepted-but-inert advisory; the
+	// modeled `disable` flags above are NOT recorded here because they
+	// retain their existing control semantics.
+	InertSubstatements []string `json:",omitempty"`
 }
 
 // TCPSessionConfig holds TCP session timeout configuration.
