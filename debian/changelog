@@ -61,6 +61,16 @@ xpf (0.0.0) unstable; urgency=medium
     persisted record, the management leaf, and management-class names
     — so WAN addresses are fenced instead of exposing host services
     (sshd/IKE) on the untrust side until a compilable commit.
+  * Daemon/bootstrap: the first-commit `commit confirmed` rollback to
+    bootstrap now withdraws the abandoned config's Router Advertisement
+    senders (lifetime-0 goodbye), stops the Kea DHCP server units via
+    `Apply(nil)`, and stops the DHCP relay (#16678). Previously
+    `enterBootstrapMode` retired only networkd/FRR/dataplane/cluster
+    state, so the box kept advertising itself as an IPv6 default router
+    and kept leasing DHCP with itself as gateway on the abandoned
+    config's segments while forwarding nothing, until the next commit
+    or an xpfd restart. RA/Kea withdrawal failures now report the
+    rollback DEGRADED instead of claiming the takeover was removed.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was
