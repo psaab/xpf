@@ -724,10 +724,22 @@ func (c *CLI) dispatchTopUp15082(line string) error {
 	// tokens — the join stripped quotes, bracket lists, and pipes.
 	c.store.SetEditPath(target)
 	err := c.dispatchConfig(innerLine)
-	// #16608: restore the normalized cursor (see dispatchTopUp15082 above).
-	c.store.SetEditPath(config.NormalizeEditPathTokens(saved))
-	if c.rl != nil {
-		c.rl.SetPrompt(c.configPrompt())
+	// #16702: the inner command may have been a top-level exit/quit
+	// that released configuration mode (ExitConfigure cleared the
+	// cursor, operational prompt restored by exitConfigureTop).
+	// Restoring the pre-exit cursor and the config prompt
+	// unconditionally would resurrect stale state behind an
+	// operational session, so restore only while the store is
+	// still in configuration mode. (Not configOwned: direct
+	// dispatchConfig callers and tests hold the store lock without
+	// setting the session flag — #14986 routing already gates
+	// entry, and exitConfigureTop is what clears configOwned.)
+	if c.store.InConfigMode() {
+		// #16608: restore the normalized cursor (see above).
+		c.store.SetEditPath(config.NormalizeEditPathTokens(saved))
+		if c.rl != nil {
+			c.rl.SetPrompt(c.configPrompt())
+		}
 	}
 	return err
 }
