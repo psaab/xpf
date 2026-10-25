@@ -349,8 +349,8 @@ var admittedElisionCases8879 = []struct {
 		`routing-options interface-routes { rib-group inet rg-7717; }`,
 		func(c *Config) string { return "rg=" + c.RoutingOptions.InterfaceRoutesRibGroup }},
 	{"security ssh-known-hosts",
-		`security { ssh-known-hosts { host h7717.example.invalid { rsa-key AAAAB3NzaC1yc2EAAAADAQABAAABgQxx; } } }`,
-		`security ssh-known-hosts { host h7717.example.invalid { rsa-key AAAAB3NzaC1yc2EAAAADAQABAAABgQxx; } }`,
+		`security { ssh-known-hosts { host h7717.example.invalid { rsa-key AAAAB3NzaC1yc2EAAAADAQABAAABAQC9PksBOt2Uasv72iJQal1HN/BWQRwIzFyLl9lG/FJTW88yTcFIRZ6TZa+Kn3KiFOaFn+zfPhYyi9GWCTx+EN/+LPSoB7pKlOPwhgsG3p/e7eS/rqGKpT5h6EbmmjLaVtgI6aCzPLRaGqMO+9M1hGf3y9itikHPOehdEV0hNuvUpm4Fr8Ego5QF1Q5xC9CO/WWZz48HHBKzxPt0daEafYTWswfDLu+qoR7Ts+TGxw5lIWdPKg15BTuDR60c7J9hmJhkLORrjaqCFHjq37tB0YuHhzvSr4q6HSaew0ZpAUFh/o1iIU+CpQbBBgM+QRnnHdkcUuVnqIe9irDNSvgkzf9Z; } } }`,
+		`security ssh-known-hosts { host h7717.example.invalid { rsa-key AAAAB3NzaC1yc2EAAAADAQABAAABAQC9PksBOt2Uasv72iJQal1HN/BWQRwIzFyLl9lG/FJTW88yTcFIRZ6TZa+Kn3KiFOaFn+zfPhYyi9GWCTx+EN/+LPSoB7pKlOPwhgsG3p/e7eS/rqGKpT5h6EbmmjLaVtgI6aCzPLRaGqMO+9M1hGf3y9itikHPOehdEV0hNuvUpm4Fr8Ego5QF1Q5xC9CO/WWZz48HHBKzxPt0daEafYTWswfDLu+qoR7Ts+TGxw5lIWdPKg15BTuDR60c7J9hmJhkLORrjaqCFHjq37tB0YuHhzvSr4q6HSaew0ZpAUFh/o1iIU+CpQbBBgM+QRnnHdkcUuVnqIe9irDNSvgkzf9Z; } }`,
 		func(c *Config) string { return fmt.Sprintf("hosts=%d", len(c.Security.SSHKnownHosts)) }},
 	// 313, not 60/15 — those are the compiled defaults for the flow
 	// timeouts and a fixture carrying one reads clean while broken.

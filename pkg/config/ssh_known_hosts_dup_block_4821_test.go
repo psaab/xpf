@@ -34,10 +34,10 @@ func TestSSHKnownHostsDupBlock4821KeysMerge(t *testing.T) {
 security {
     ssh-known-hosts {
         host h1 {
-            ecdsa-sha2-nistp256-key AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY;
+            ecdsa-sha2-nistp256-key AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOzePLJ+YX/jjDmcAr2E4oB/RJ/6aCPsl39581dbjpCEDhdW6ahp+JDUUsHsHkYdJ0qw6cG8qlUbjezKfB3O4Rw=;
         }
         host h1 {
-            ssh-ed25519-key AAAAC3NzaC1lZDI1NTE5AAAA;
+            ssh-ed25519-key AAAAC3NzaC1lZDI1NTE5AAAAIJqDrKbo6C0jzXEzhtY8BYJeEn/6A1zK8lRDK+nXtLf5;
         }
     }
 }`)
@@ -54,12 +54,12 @@ security {
 		switch k.Type {
 		case "ecdsa-sha2-nistp256-key":
 			haveECDSA = true
-			if k.Key != "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY" {
+			if k.Key != "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOzePLJ+YX/jjDmcAr2E4oB/RJ/6aCPsl39581dbjpCEDhdW6ahp+JDUUsHsHkYdJ0qw6cG8qlUbjezKfB3O4Rw=" {
 				t.Fatalf("ecdsa key value = %q", k.Key)
 			}
 		case "ssh-ed25519-key":
 			haveED25519 = true
-			if k.Key != "AAAAC3NzaC1lZDI1NTE5AAAA" {
+			if k.Key != "AAAAC3NzaC1lZDI1NTE5AAAAIJqDrKbo6C0jzXEzhtY8BYJeEn/6A1zK8lRDK+nXtLf5" {
 				t.Fatalf("ed25519 key value = %q", k.Key)
 			}
 		}
@@ -80,10 +80,10 @@ func TestSSHKnownHostsDupBlock4821DifferentHostsUnaffected(t *testing.T) {
 security {
     ssh-known-hosts {
         host h1 {
-            ecdsa-sha2-nistp256-key AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY;
+            ecdsa-sha2-nistp256-key AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOzePLJ+YX/jjDmcAr2E4oB/RJ/6aCPsl39581dbjpCEDhdW6ahp+JDUUsHsHkYdJ0qw6cG8qlUbjezKfB3O4Rw=;
         }
         host h2 {
-            ssh-ed25519-key AAAAC3NzaC1lZDI1NTE5AAAA;
+            ssh-ed25519-key AAAAC3NzaC1lZDI1NTE5AAAAIJqDrKbo6C0jzXEzhtY8BYJeEn/6A1zK8lRDK+nXtLf5;
         }
     }
 }`)
@@ -108,7 +108,7 @@ func TestSSHKnownHostsDupBlock4821SingleBlockUnchanged(t *testing.T) {
 security {
     ssh-known-hosts {
         host 192.168.0.253 {
-            ecdsa-sha2-nistp256-key AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY;
+            ecdsa-sha2-nistp256-key AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOzePLJ+YX/jjDmcAr2E4oB/RJ/6aCPsl39581dbjpCEDhdW6ahp+JDUUsHsHkYdJ0qw6cG8qlUbjezKfB3O4Rw=;
         }
     }
 }`)
@@ -120,7 +120,7 @@ security {
 	if len(keys) != 1 {
 		t.Fatalf("host keys count = %d, want 1", len(keys))
 	}
-	if keys[0].Type != "ecdsa-sha2-nistp256-key" || keys[0].Key != "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY" {
+	if keys[0].Type != "ecdsa-sha2-nistp256-key" || keys[0].Key != "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOzePLJ+YX/jjDmcAr2E4oB/RJ/6aCPsl39581dbjpCEDhdW6ahp+JDUUsHsHkYdJ0qw6cG8qlUbjezKfB3O4Rw=" {
 		t.Fatalf("key = %+v, unexpected", keys[0])
 	}
 }

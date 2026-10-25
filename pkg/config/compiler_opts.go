@@ -1617,6 +1617,12 @@ type compileOpts struct {
 	// transport cannot bind a malformed or address-family-incompatible source.
 	// Non-local but valid sources remain a separate advisory in ValidateConfig.
 	lenientSamplingSourceAddress bool
+	// lenientSSHKnownHosts16770 (#16770) downgrades an invalid
+	// ssh-known-hosts host/key (unknown type, type/key mismatch,
+	// wildcard/malformed host) to a warning on tolerant load / peer-sync
+	// (#1960); the daemon renderer still skips it and, when every entry
+	// is invalid, removes the managed file so stale trust is revoked.
+	lenientSSHKnownHosts16770 bool
 	// lenientFlowExportSeconds (#6769) downgrades the flow-export template
 	// `seconds` range gate (validateFlowExportSecondsStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3987,6 +3993,7 @@ func lenientCompileOpts() compileOpts {
 		lenientSamplingInputRate:                 true,
 		lenientPortMirroringIngressAlias15651:    true,
 		lenientSamplingSourceAddress:             true,
+		lenientSSHKnownHosts16770:                true,
 		lenientFlowExportSeconds:                 true,
 		lenientApplicationSetMembers:             true,
 		lenientPolicyMatchApplications:           true,
