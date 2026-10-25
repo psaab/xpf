@@ -43,16 +43,22 @@ func stageDeprovisionShellEnv(t *testing.T, passwdContent, shadowContent string)
 	return passwd
 }
 
-// deprovisionFixture stages alice (UID 1001, /bin/bash) with account+password+
-// key markers, records usermod via the runCommandTimeout seam, and funnels both
-// the production (ownsAccount) and elevated-preexisting (shell-only) scenarios.
-func deprovisionFixture(t *testing.T, withAccountMarker bool) (passwdFile string, usermodCalls *[][]string) {
+// deprovisionFixture stages alice (UID 1001, /bin/bash). withAccountMarker
+// selects the legacy #16755 shape (account marker from a password apply on a
+// pre-existing account, NO shell marker); withShellMarker selects the fixed
+// useradd shape. Both seed password+key markers.
+func deprovisionFixture(t *testing.T, withMarkers ...bool) (passwdFile string, usermodCalls *[][]string) {
 	t.Helper()
 	passwdFile = stageDeprovisionShellEnv(t,
 		"root:x:0:0:root:/root:/bin/bash\nalice:x:1001:1001:,,,:/home/alice:/bin/bash\n",
 		"root:$6$r$h:19000:0:99999:7:::\nalice:$6$salt$activehash:19000:0:99999:7:::\n")
-	if withAccountMarker {
+	if len(withMarkers) > 0 && withMarkers[0] {
 		if err := markProvisioned("alice", 1001); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(withMarkers) > 1 && withMarkers[1] {
+		if err := markShellProvisioned("alice", 1001); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -96,11 +102,12 @@ func deprovisionFixture(t *testing.T, withAccountMarker bool) (passwdFile string
 
 // TestDeprovisionLoginUserResetsInteractiveShellToNologin is the #14695
 // decisive regression: an xpf-created super-user (useradd -m -s /bin/bash,
-// account marker) removed from config must have its interactive shell reset
-// to /usr/sbin/nologin via `usermod -s /usr/sbin/nologin -- alice` BEFORE
-// provenance markers are dropped, and a failed usermod must retain markers.
+// shell marker written at useradd, #16755) removed from config must have its
+// interactive shell reset to /usr/sbin/nologin via
+// `usermod -s /usr/sbin/nologin -- alice` BEFORE provenance markers are
+// dropped, and a failed usermod must retain markers.
 func TestDeprovisionLoginUserResetsInteractiveShellToNologin(t *testing.T) {
-	passwdFile, usermodCalls := deprovisionFixture(t, true)
+	passwdFile, usermodCalls := deprovisionFixture(t, true, true)
 
 	d := &Daemon{}
 	if err := d.deprovisionLoginUser("alice"); err != nil {
@@ -133,6 +140,9 @@ func TestDeprovisionLoginUserShellResetFailureRetainsProvenance(t *testing.T) {
 	if err := markProvisioned("alice", 1001); err != nil {
 		t.Fatal(err)
 	}
+	if err := markShellProvisioned("alice", 1001); err != nil {
+		t.Fatal(err)
+	}
 	if err := markPasswordProvisioned("alice", 1001); err != nil {
 		t.Fatal(err)
 	}
@@ -161,6 +171,9 @@ func TestDeprovisionLoginUserAlreadyNologinIsNoop(t *testing.T) {
 		"root:x:0:0:root:/root:/bin/bash\nalice:x:1001:1001:,,,:/home/alice:"+loginShellNologin+"\n",
 		"root:$6$r$h:19000:0:99999:7:::\nalice:!:19000:0:99999:7:::\n")
 	if err := markProvisioned("alice", 1001); err != nil {
+		t.Fatal(err)
+	}
+	if err := markShellProvisioned("alice", 1001); err != nil {
 		t.Fatal(err)
 	}
 	if err := markPasswordProvisioned("alice", 1001); err != nil {
@@ -274,4 +287,33 @@ func TestDeprovisionNonXpfAccountShellUntouched(t *testing.T) {
 		t.Fatal("non-xpf account enumerated by provisionedNames")
 	}
 	_ = config.Config{}
+}
+
+// TestDeprovisionPreexistingClassShellEqualKeepsShell is the #16755
+// decisive regression: a pre-existing account whose shell already equals
+// the class shell (/bin/bash for super-user) receives password+account
+// markers when xpf sets its password, but NO shell marker (applySystemLogin
+// changes nothing). On removal xpf must lock the password it set yet leave
+// the operator shell untouched. RED pre-fix: ownsShell was inferred from
+// ownsAccount, so usermod reset /bin/bash to nologin.
+func TestDeprovisionPreexistingClassShellEqualKeepsShell(t *testing.T) {
+	_, usermodCalls := deprovisionFixture(t, true)
+
+	d := &Daemon{}
+	if err := d.deprovisionLoginUser("alice"); err != nil {
+		t.Fatalf("deprovisionLoginUser: %v", err)
+	}
+	if len(*usermodCalls) != 0 {
+		t.Fatalf("usermod calls = %v, want none: pre-existing class-shell-equal account shell was never set by xpf (#16755)", *usermodCalls)
+	}
+	shell, found, err := loginUserShell("alice")
+	if err != nil || !found {
+		t.Fatalf("loginUserShell(alice) = %q,%v,%v", shell, found, err)
+	}
+	if shell != loginShellBash {
+		t.Fatalf("passwd shell after deprovision = %q, want %q preserved", shell, loginShellBash)
+	}
+	if _, err := os.Stat(markerPath("alice")); !os.IsNotExist(err) {
+		t.Fatalf("account marker survived deprovision (err=%v)", err)
+	}
 }

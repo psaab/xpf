@@ -269,6 +269,19 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 						"user", user.Name, "err", err)
 					fail(fmt.Errorf("mark provisioned %s: %w", user.Name, err))
 				}
+				// #16755: xpf chose this account's shell at useradd
+				// (-s shell above), so record shell ownership here.
+				// Deprovision derives shell ownership ONLY from this
+				// marker; the account marker also covers pre-existing
+				// accounts whose password xpf set, whose shells xpf may
+				// never have touched. Fail-visible like the account
+				// marker: a created-but-unmarked shell would orphan the
+				// grant on removal.
+				if err := markShellProvisioned(user.Name, uid); err != nil {
+					slog.Warn("failed to write provisioned-shell marker",
+						"user", user.Name, "err", err)
+					fail(fmt.Errorf("mark shell provisioned %s: %w", user.Name, err))
+				}
 			} else {
 				slog.Info("created system user", "user", user.Name, "uid", "unknown")
 			}

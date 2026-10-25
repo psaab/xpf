@@ -140,4 +140,13 @@ func TestApplySystemLoginCreatesRestrictedShell10833(t *testing.T) {
 	if got := strings.Split(strings.TrimSpace(string(data)), ":")[6]; got != cliShell {
 		t.Fatalf("new read-only account shell = %q, want CLI shell %q", got, cliShell)
 	}
+	// #16755: useradd chose the shell, so the shell marker must be recorded
+	// at creation — deprovision now derives shell ownership ONLY from it.
+	owned, err := shellProvisioned("alice", 1001)
+	if err != nil {
+		t.Fatalf("shellProvisioned(alice): %v", err)
+	}
+	if !owned {
+		t.Fatal("useradd-created account has no shell marker; removal would orphan its shell grant (#16755)")
+	}
 }
