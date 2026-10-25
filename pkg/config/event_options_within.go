@@ -53,6 +53,20 @@ import (
 // withinMatches fails CLOSED (does not fire) on a clause with no usable
 // positive threshold — the mis-arrived 0 no longer over-fires (#3751
 // defense-in-depth, pkg/eventengine/engine.go).
+//
+// #16654 folds one more class into validateEventWithinClause: any
+// `within` child other than `trigger`. The #14660/#15134 closed-world
+// gate (event_options_inert_14660.go) stops at the policy level, and
+// compileEventOptions reads only FindChildren("trigger") inside a
+// within clause, so Junos correlation children — `events X`,
+// `not events X` (the "fire only if X did NOT happen" negative gate),
+// `not { events X; }`, or any bogus token — committed clean and were
+// dropped; the remediation then fired without its correlation
+// condition. The clause validator now rejects (strict) / warns
+// (lenient) any such child, naming the policy and the token, via
+// withinChildTokens16654 which covers the braced, flat-set, and
+// packed-tail (Keys[2]) shapes. Implementing correlation is out of
+// scope; refusing it loudly is the fix.
 
 const (
 	// MinEventWithinSeconds / MaxEventWithinSeconds bound a within
@@ -172,6 +186,22 @@ func validateEventOptionsWithinAST(nodes []*Node, lenient bool) ([]string, error
 // clause. emit returns a non-nil error on the strict path (stopping the walk)
 // and accumulates a warning on the lenient path (continuing).
 func validateEventWithinClause(policy string, w *Node, emit func(string, ...any) error) error {
+	// #16654: descend into `within` for the closed-world gate. Junos
+	// correlation children (`events`, `not events`, or any other token
+	// besides `trigger`) are dropped by compileEventOptions, which reads
+	// only FindChildren("trigger") here. A `not events X` negative gate
+	// therefore disappears and the policy fires unconditionally — the
+	// fail-open direction. Reject (strict) / warn (lenient) any within
+	// child other than `trigger`, naming the policy and the token.
+	for _, childTok := range withinChildTokens16654(w) {
+		if childTok == "" || childTok == "trigger" || routingInstanceApplyMetaKeyword9323(childTok) {
+			continue
+		}
+		return emit("event-options policy %q within: %q is not a within statement "+
+			"xpf implements (known: trigger) — it compiles to NOTHING: the correlation "+
+			"condition is dropped and the policy may fire without it (#16654)",
+			policy, childTok)
+	}
 	// within time-interval — always the second key (nodeVal's child fallback
 	// would mis-read the `trigger` child as the value, so read Keys[1]
 	// directly).
@@ -273,4 +303,35 @@ func validateEventWithinClause(policy string, w *Node, emit func(string, ...any)
 	}
 
 	return nil
+}
+
+// withinChildTokens16654 returns the statement keywords one `within`
+// node carries, across the authorable AST shapes (#16654). Only the
+// child KEYWORD is returned; its value/body is never read, matching
+// how compileEventOptions would have dropped the whole child.
+//
+//   - Braced / flat (Keys=[within <seconds>]): children are siblings —
+//     `within 60 { events X; trigger on 1; }`,
+//     `within 60 { not events X; trigger on 1; }` (child Keys[0]=not),
+//     `within 60 { not { events X; } trigger on 1; }` (child Keys[0]=not),
+//     and the flat-set equivalents filed by SetPath as children under
+//     Keys=[within 60]. Every child's Keys[0] is a clause keyword.
+//   - Packed tail (Keys=[within <seconds> <child> ...]): brace-elided
+//     `within 60 events X;` / `within 60 not events X;` pack the child
+//     keyword on Keys[2]; any Children are that child's BODY, not
+//     siblings, so only Keys[2] counts.
+func withinChildTokens16654(w *Node) []string {
+	if w == nil {
+		return nil
+	}
+	if len(w.Keys) >= 3 {
+		return []string{w.Keys[2]}
+	}
+	var out []string
+	for _, ch := range w.Children {
+		if ch != nil && ch.Name() != "" {
+			out = append(out, ch.Name())
+		}
+	}
+	return out
 }

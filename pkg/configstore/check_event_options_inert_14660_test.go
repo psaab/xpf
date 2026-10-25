@@ -135,6 +135,119 @@ func TestCheckTextEventOptionsValid14660(t *testing.T) {
 	}
 }
 
+// TestCheckTextEventOptionsWithin16654 covers #16654 on the operator
+// surface: Junos correlation children under `within` (events / not
+// events / bogus token) must fail CheckText naming the policy and the
+// token, in hierarchical and flat-set spellings, while the
+// `within 60 { trigger on 3; }` control stays accepted. Store-level
+// CommitCheck is exercised via CheckText here; the dedicated
+// candidate CommitCheck path shares the same strict CompileConfig
+// pipeline (CheckText is its text form), and CompileConfig strict
+// cells live in pkg/config TestEventWithinCorrelationChildren16654*.
+func TestCheckTextEventOptionsWithin16654(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "hier braced not events",
+			text: "event-options {\n policy p {\n  events ping_test_failed;\n  within 60 { not events ping_test_completed; trigger on 1; }\n  then { change-configuration { commands \"set system host-name x\"; } }\n }\n}\n",
+			want: "not",
+		},
+		{
+			name: "hier braced events",
+			text: "event-options {\n policy p {\n  events ping_test_failed;\n  within 60 { events ping_test_completed; trigger on 1; }\n }\n}\n",
+			want: "events",
+		},
+		{
+			name: "hier braced bogus token",
+			text: "event-options {\n policy p {\n  events ping_test_failed;\n  within 60 { bogus-token foo; trigger on 1; }\n }\n}\n",
+			want: "bogus-token",
+		},
+		{
+			name: "hier packed not events tail (fused sibling)",
+			text: "event-options {\n policy p {\n  events ping_test_failed;\n  within 60 not events ping_test_completed;\n }\n}\n",
+			want: "events",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CheckText(tc.text, -1)
+			if err == nil {
+				t.Fatalf("CheckText accepted inert within correlation child (cfg=%+v); want reject naming %q", cfg, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CheckText error %q does not name %q", err.Error(), tc.want)
+			}
+			// Fused packed tails are rejected earlier by the #8437
+			// sibling gate (also naming the token); braced rows carry
+			// the #16654 tag from validateEventWithinClause.
+			if tc.name == "hier packed not events tail (fused sibling)" {
+				if !strings.Contains(err.Error(), "#8437") {
+					t.Fatalf("CheckText fused error %q does not cite #8437", err.Error())
+				}
+			} else if !strings.Contains(err.Error(), "#16654") {
+				t.Fatalf("CheckText error %q does not name #16654", err.Error())
+			}
+		})
+	}
+	// Flat-set rows (the issue's SetPath example) reject through the
+	// same strict pipeline.
+	flat := "set event-options policy p events ping_test_failed\nset event-options policy p within 60 not events ping_test_completed\nset event-options policy p within 60 trigger on 1\nset event-options policy p then change-configuration commands \"set system host-name x\"\n"
+	if _, err := CheckText(flat, -1); err == nil || !strings.Contains(err.Error(), "not") || !strings.Contains(err.Error(), "#16654") {
+		t.Fatalf("CheckText flat not-events = %v, want reject naming not + #16654", err)
+	}
+	// Control: plain within/trigger stays accepted with no #16654 warning.
+	control := "event-options {\n policy p {\n  events ping_test_failed;\n  within 60 { trigger on 3; }\n  then { change-configuration { commands \"set system host-name x\"; } }\n }\n}\n"
+	cfg, err := CheckText(control, -1)
+	if err != nil {
+		t.Fatalf("CheckText rejected within trigger control: %v", err)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "#16654") {
+			t.Fatalf("valid within control carried #16654 warning: %q", w)
+		}
+	}
+}
+
+// TestStoreCommitCheckWithin16654 binds the candidate-commit surface:
+// acceptance requires rejection by Store.CommitCheck (not only
+// CheckText/CompileConfig) naming the policy and token, with the
+// trigger control passing CommitCheck clean.
+func TestStoreCommitCheckWithin16654(t *testing.T) {
+	bad := "event-options {\n policy p {\n  events ping_test_failed;\n  within 60 { not events ping_test_completed; trigger on 1; }\n  then { change-configuration { commands \"set system host-name x\"; } }\n }\n}\n"
+	store := newTestStore(t)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(bad); err != nil {
+		t.Fatalf("LoadOverride(bad within) = %v, want staged candidate", err)
+	}
+	if _, err := store.CommitCheck(); err == nil || !strings.Contains(err.Error(), "not") || !strings.Contains(err.Error(), "#16654") {
+		t.Fatalf("CommitCheck bad within = %v, want reject naming not + #16654", err)
+	}
+	store.ExitConfigure()
+
+	good := "event-options {\n policy p {\n  events ping_test_failed;\n  within 60 { trigger on 3; }\n  then { change-configuration { commands \"set system host-name x\"; } }\n }\n}\n"
+	store2 := newTestStore(t)
+	if err := store2.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store2.LoadOverride(good); err != nil {
+		t.Fatalf("LoadOverride(good within) = %v", err)
+	}
+	cfg, err := store2.CommitCheck()
+	if err != nil {
+		t.Fatalf("CommitCheck good within = %v, want clean", err)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "#16654") {
+			t.Fatalf("CommitCheck control carried #16654 warning: %q", w)
+		}
+	}
+}
+
 // TestKnownEventNamesMatchesRPMProducers14660 guards drift between
 // config.KnownEventNames (the commit gate's SSOT) and the actual
 // fireEvent call sites in pkg/rpm — a new producer event added without

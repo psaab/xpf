@@ -4,7 +4,7 @@ Event-driven automation engine implementing Junos-style `event-options`
 policies. Matches RPM probe events against policy clauses (with optional
 temporal `within` windows) and triggers commit-and-apply actions.
 
-## Closed-world commit gate (#14660, #15134)
+## Closed-world commit gate (#14660, #15134, #16654)
 
 The only producer wired to `HandleEvent` is `pkg/rpm` (`fireEvent` in
 `pkg/daemon/daemon_apply_tail.go`), which fires exactly
@@ -20,10 +20,16 @@ other `then` action (`execute-commands`, `raise-trap`, `event-script`,
 policy child, and (#15134) any `change-configuration` child other than
 `commands` — including `commit-options { check; }` (verify-only in
 Junos), `user-name`, and `retry`, which `compileEventOptions` would
-otherwise drop before performing a live commit. On the tolerant load /
-peer-sync paths the same gate downgrades to a `cfg.Warnings` entry so
-a persisted config still boots (#1960); the inert policy then simply
-never fires, now surfaced.
+otherwise drop before performing a live commit. (#16654)
+`validateEventWithinClause` (the #3751 within/trigger walk) likewise
+rejects any `within` child other than `trigger` — Junos correlation
+`events` / `not events` or any bogus token, which `compileEventOptions`
+drops (`FindChildren("trigger")` only), so a "fire only if X did NOT
+happen" policy would otherwise fire unconditionally. The policy-level
+control `within 60 { trigger on 3; }` stays clean. On the tolerant
+load / peer-sync paths the same gates downgrade to a `cfg.Warnings`
+entry so a persisted config still boots (#1960); the inert policy then
+simply never fires, now surfaced.
 
 ## Entry points
 

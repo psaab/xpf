@@ -30,6 +30,13 @@ import (
 //     `change-configuration { commit-options { check; } commands "..."; }`
 //     intends "verify, do not activate", commits clean, and then
 //     performs a LIVE commit when the policy fires.
+//   - #16654: `within` children other than `trigger` (Junos correlation
+//     `events` / `not events` / any bogus token) are dropped by
+//     compileEventOptions (FindChildren("trigger") only). That class is
+//     gated one level down in validateEventWithinClause
+//     (event_options_within.go, #3751 walk, same strict/lenient split),
+//     not here: this walk's `within` case stays permitted-and-uninspected
+//     because the seconds/trigger numerics already live there.
 //
 // Before this gate all of the following committed with warnings=[] on
 // both the strict (CheckText / CompileConfig) and flat-set paths, so
