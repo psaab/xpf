@@ -360,23 +360,6 @@ func (in *netlinkInstaller) ipsecQuarantineState() (bool, error) {
 	return found, nil
 }
 
-func (in *netlinkInstaller) ipsecTablePresent(tableName string) (bool, error) {
-	c, err := in.newConn()
-	if err != nil {
-		return false, err
-	}
-	for _, family := range []gnft.TableFamily{gnft.TableFamilyINet, gnft.TableFamilyBridge} {
-		exists, err := tableExistsInFamily(c, family, tableName)
-		if err != nil {
-			return false, err
-		}
-		if exists {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func (in *netlinkInstaller) ipsecTableBothFamiliesPresent(tableName string) (bool, error) {
 	c, err := in.newConn()
 	if err != nil {

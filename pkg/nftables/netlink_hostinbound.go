@@ -305,14 +305,6 @@ func hostInboundAnyNDPDefault(views []HostInboundZoneView) bool {
 	return false
 }
 
-// hostInboundNDPDefaultNetlink is retained for the fence: the fence has
-// no per-service accepts, so its ND admit is the same scoped emission
-// (see emitHostInboundNDPAcceptsNetlink). It reports whether the scoped
-// ND admits should be emitted for this view set.
-func hostInboundNDPDefaultNetlink(views []HostInboundZoneView) bool {
-	return hostInboundAnyNDPDefault(views)
-}
-
 // emitHostInboundNDPAcceptsNetlink emits the ND (133-136) accepts
 // scoped to each retaining view's ingress (#15931), mirroring
 // emitHostInboundNDPAcceptsText rule-for-rule. Per retaining view:
@@ -561,39 +553,6 @@ func emitHostInboundNonUnicastScopeNetlink(p *nlPlan, v HostInboundZoneView, f n
 		}
 	}
 	scoped().emit(verdictDrop()...)
-}
-
-// emitHostInboundMulticastFenceDropsNetlink keeps the host-inbound cold-boot
-// fence fail-closed for every catalog group.
-func emitHostInboundMulticastFenceDropsNetlink(p *nlPlan, views []HostInboundZoneView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
-	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
-	for _, f := range []nlFamily{famV4, famV6} {
-		groups := config.HostInboundMulticastGroupsForFamily(familyToken(f))
-		if len(groups) == 0 {
-			continue
-		}
-		if len(unzonedIngressVRFSlaves) > 0 {
-			p.rule().sdifname(unzonedIngressVRFSlaves).daddr(f, groups, false).emit(verdictDrop()...)
-		}
-		if len(ambiguous) > 0 {
-			p.rule().iifname(ambiguous).daddr(f, groups, false).emit(verdictDrop()...)
-		}
-		if len(unzonedIngressNetdevs) > 0 {
-			p.rule().iifname(unzonedIngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
-		}
-		for _, v := range views {
-			direct := hostInboundDirectIngressNetdevs(v)
-			if len(direct) > 0 {
-				p.rule().iifname(direct).daddr(f, groups, false).emit(verdictDrop()...)
-			}
-			for _, scope := range v.IngressVRFScopes {
-				if scope.Master != "" && len(scope.Slaves) > 0 {
-					p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).
-						daddr(f, groups, false).emit(verdictDrop()...)
-				}
-			}
-		}
-	}
 }
 
 // emitHostInboundNonUnicastFenceDropsNetlink blocks limited broadcast and
@@ -1231,17 +1190,6 @@ func addHostInboundScreenFloodSet(p *nlPlan, rule HostInboundScreenFloodRule, so
 		Operation: uint32(unix.NFT_DYNSET_OP_UPDATE),
 		Exprs:     []expr.Any{screenFloodLimit(rate)},
 	}
-}
-
-// hostInboundNDPPositiveNetlink reports whether the view's positives
-// admit ND (explicit ndp, or protocols all which expands to it).
-func hostInboundNDPPositiveNetlink(v HostInboundZoneView) bool {
-	for _, tok := range v.Protocols {
-		if tok == "ndp" || tok == "all" {
-			return true
-		}
-	}
-	return false
 }
 
 // hostInboundNDPMulticastAdmitsNetlink mirrors the text form: every

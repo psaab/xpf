@@ -407,6 +407,19 @@ test-go: test-race-dp
 	sh scripts/go-buildtag-census.sh || status=$$?; \
 	exit $$status
 
+# #17008: require pkg/nftables and daemon nft mirrors to remain free of
+# unreachable code, including test-only helpers. deadcode filters packages, not
+# files, so analyze daemon/nftables and inspect only the requested file paths.
+# the go.mod tool directive pins x/tools; go.sum checksums its telemetry dependency.
+.PHONY: check-nft-deadcode
+check-nft-deadcode:
+	@out=$$($(GO) tool deadcode -test -filter 'pkg/(daemon|nftables)' ./cmd/xpfd ./pkg/daemon ./pkg/nftables 2>&1); status=$$?; \
+	if [ $$status -ne 0 ]; then printf '%s\n' "$$out"; exit $$status; fi; \
+	findings=$$(printf '%s\n' "$$out" | grep -E '^pkg/nftables/|^pkg/daemon/daemon_nft[^/]*\.go:' || true); \
+	if [ -n "$$findings" ]; then printf '%s\n' "$$findings"; echo "check-nft-deadcode: unreachable code found" >&2; exit 1; fi; \
+	test -z "$$findings"
+
+
 # #2114 scoped race gate: the dataplane-cell publication races
 # (bootstrap-exit clear vs sampler/watcher/confirm-timer readers) and the
 # A3 armed-gate registry races are only visible under -race — a plain

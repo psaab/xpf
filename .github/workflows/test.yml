@@ -26,14 +26,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # #16477: the repo pins scratch to /var/worktrees/.cache/tmpdir
-    # (Makefile ?=, #14833), which does not exist on a clean runner and
-    # cannot be created there; the census self-test now creates its own
-    # parent, and a runner-local TMPDIR keeps every other temp consumer
-    # (python tempfile, bare mktemp) off the pinned root too.
+    # (Makefile ?=, #14833), which does not exist on a clean runner. Use the
+    # runner's writable /tmp root for Python and bare mktemp consumers instead;
+    # the census self-test creates its own fixture subdirectory.
     env:
-      TMPDIR: ${{ runner.temp }}
+      TMPDIR: /tmp
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare temporary directory
+        run: mkdir -p "$TMPDIR"
       - name: Census runnable-harness reachability
         run: sh scripts/harness-census.sh
       - name: Self-test the census
@@ -62,13 +63,16 @@ jobs:
     name: Proto header and regen check
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # #16477: Makefile ?= would pin TMPDIR to the uncreatable
-    # /var/worktrees/.cache/tmpdir; proto_regen_check.sh's scratch and
-    # the Go toolchain need a runner-local temp root instead.
+    # #16477: Makefile's pinned cache/tmp roots are not writable on a clean runner.
+    # Use /tmp and prepare Go scratch directories before setup-go or make.
     env:
-      TMPDIR: ${{ runner.temp }}
+      TMPDIR: /tmp
+      GOTMPDIR: /tmp/go-tmp
+      GOCACHE: /tmp/go-build
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare Go temporary directories
+        run: mkdir -p "$TMPDIR" "$GOTMPDIR" "$GOCACHE"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -97,13 +101,14 @@ jobs:
     name: Advisory tooling (shellcheck + Python subset)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # #16477: same pinned-TMPDIR trap as the census/proto jobs -- the
-    # Python subset's tempfile and the scripts it drives must not
-    # default to /var/worktrees/.cache/tmpdir on a clean runner.
+    # #16477: use the runner's writable /tmp root for Python tempfile and the
+    # scripts it drives rather than Makefile's /var/worktrees/.cache/tmpdir pin.
     env:
-      TMPDIR: ${{ runner.temp }}
+      TMPDIR: /tmp
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare temporary directory
+        run: mkdir -p "$TMPDIR"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -114,17 +119,18 @@ jobs:
     name: Go build and affected tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # #16477: GOTMPDIR/GOCACHE stay on the Makefile pins only where a
-    # caller pre-creates them; on a clean runner the Go toolchain must
-    # use runner-local temp/cache roots, not /var/worktrees/.cache.
+    # #16477: use writable runner-local /tmp roots instead of the Makefile pins;
+    # prepare Go scratch/cache directories before setup-go and direct Go commands.
     env:
-      TMPDIR: ${{ runner.temp }}
-      GOTMPDIR: ${{ runner.temp }}/go-tmp
-      GOCACHE: ${{ runner.temp }}/go-build
+      TMPDIR: /tmp
+      GOTMPDIR: /tmp/go-tmp
+      GOCACHE: /tmp/go-build
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Prepare Go temporary directories
+        run: mkdir -p "$TMPDIR" "$GOTMPDIR" "$GOCACHE"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -140,6 +146,8 @@ jobs:
           command -v vtysh
       - name: Build all Go packages
         run: go build ./...
+      - name: Check scoped nftables and daemon netlink deadcode
+        run: make check-nft-deadcode
       - name: Test affected Go packages
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -153,11 +161,11 @@ jobs:
     container:
       image: debian:forky
     timeout-minutes: 20
-    # #16477: cargo's target dir and temp root must be runner-local on a
-    # clean runner; the Makefile /var/worktrees pins cannot be created.
+    # #16477: use container-local /tmp for temporary files and Cargo artifacts;
+    # the Makefile's /var/worktrees pins are unavailable in this job container.
     env:
-      TMPDIR: ${{ runner.temp }}
-      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo
+      TMPDIR: /tmp
+      CARGO_TARGET_DIR: /tmp/cargo
     steps:
       # Install first: the forky image ships no git, and checkout@v4 falls
       # back to a metadata-less archive when git is missing.
@@ -176,6 +184,8 @@ jobs:
             zlib1g-dev \
             libzstd-dev
       - uses: actions/checkout@v4
+      - name: Prepare Cargo target directory
+        run: mkdir -p "$CARGO_TARGET_DIR"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1

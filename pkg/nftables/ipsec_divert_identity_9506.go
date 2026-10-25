@@ -327,24 +327,6 @@ func (in *netlinkInstaller) readIpsecDivertIdentities9506(tableName string) ([]I
 	return identities, tables, nil
 }
 
-// readIpsecDivertIdentity is the single-witness convenience used by install
-// rollback checks. It rejects disagreeing family witnesses.
-func (in *netlinkInstaller) readIpsecDivertIdentity(tableName string) (IpsecDivertIdentity, bool, error) {
-	identities, _, err := in.readIpsecDivertIdentities9506(tableName)
-	if err != nil {
-		return IpsecDivertIdentity{}, false, err
-	}
-	if len(identities) == 0 {
-		return IpsecDivertIdentity{}, false, nil
-	}
-	for _, id := range identities[1:] {
-		if id != identities[0] {
-			return IpsecDivertIdentity{}, false, fmt.Errorf("ipsec divert: %s family identity mismatch", tableName)
-		}
-	}
-	return identities[0], true, nil
-}
-
 func (in *netlinkInstaller) checkIpsecDivertNoRollback(spec IpsecDivertSpec) error {
 	if spec.RunID == "" && spec.InstallSequence == 0 && spec.LabelSchema == "" {
 		return nil
