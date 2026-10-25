@@ -20,6 +20,23 @@ var policyTermThenValueActions12513 = map[string]bool{
 	"metric": true, "metric-type": true, "origin": true,
 }
 
+// policyTermKnownUnmodelledThen16569 names Junos routing-policy `then`
+// action keywords that are real Junos actions but that xpf does not model
+// (no schema child, no typed field, no FRR rendering). The child-path
+// `then` reader records these on PolicyTerm.UnknownThen (#16569) so strict
+// compilation rejects them and tolerant loads force the term to reject,
+// instead of silently dropping the modifier with only the #10707 advisory.
+// Arbitrary unknown words are deliberately absent: they remain the #10707
+// open-world case (#12517 B2), warn-only at strict compile.
+var policyTermKnownUnmodelledThen16569 = map[string]bool{
+	"preference": true, "tag": true, "color": true, "color2": true,
+	"metric2": true, "metric3": true, "metric4": true,
+	"forwarding-class": true, "loss-priority": true,
+	"damping": true, "trace": true, "install-nexthop": true,
+	"load-balance-groups": true, "ssb-main": true,
+	"as-path-expand": true, "community-count": true,
+}
+
 // policyTermMainSwitchKeyword12513 reports whether the main switch of
 // parsePolicyTermInlineKeys interprets tok itself: a clause or then-action
 // keyword, or a from-match word.

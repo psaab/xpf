@@ -60,6 +60,13 @@ type PolicyStatement struct {
 	// this channel. Compiler-only; not persisted.
 	DefaultActionsSeen []string
 	UnknownFrom        []string
+	// UnknownTo records statement-level `to` match leaves (#16569): the
+	// sibling of UnknownFrom for the `to` clause Junos treats like `from`
+	// in BGP import (`to neighbor` ≡ `from neighbor`, and `to protocol` /
+	// `to level` likewise scope the term). No typed matcher enforces them,
+	// so strict compilation rejects them and tolerant compilation forces
+	// the statement default and every term to reject.
+	UnknownTo []string
 }
 
 // PolicyTerm is a single match+action clause within a policy-statement.
@@ -90,7 +97,23 @@ type PolicyTerm struct {
 	// disappearing and widening the term; strict compilation rejects it, while
 	// tolerant compilation warns and forces the term to reject. Mirrors
 	// FirewallFilterTerm.UnknownFrom (#3307).
-	UnknownFrom  []string
+	UnknownFrom []string
+	// UnknownTo records `to` match leaves (#16569), the `to`-clause sibling
+	// of UnknownFrom. Junos allows most `from` match conditions under `to`
+	// (for BGP import, `to neighbor X` is equivalent to `from neighbor X`);
+	// xpf enforces none of them, so dropping one widens the term exactly as
+	// dropping a `from` leaf does. Strict compilation rejects it; tolerant
+	// compilation warns and forces the term to reject.
+	UnknownTo []string
+	// UnknownThen records `then` action keywords the routing-policy compiler
+	// does not enforce (#16569), e.g. Junos `then preference` or `then tag`.
+	// The child-path `then` reader silently skipped them (only the #10707
+	// advisory named them) while the packed term-line spelling was already
+	// rejected via #12517; dropping an action modifier can widen the term
+	// (an accept that Junos would deprioritise keeps default preference).
+	// Strict compilation rejects it; tolerant compilation warns and forces
+	// the term to reject.
+	UnknownThen  []string
 	RouteFilters []*RouteFilter // prefix matching
 	Action       string         // "accept", "reject"
 	// TerminalActions records every accept/reject keyword the term's
