@@ -403,7 +403,7 @@ The heal still adopts the winner's config. This is the issue's option (b): alarm
 loudly and name the slot, rather than refuse the sync on a node that has already
 yielded.
 
-### At-rest crypto hardening notes (#4579 A4-05/A4-06, #4705, #5231, #5638)
+### At-rest crypto hardening notes (#4579 A4-05/A4-06, #4705, #5231, #5638, #16724)
 
 - **Split `system` stanza resolution (#4705).** "The tree declares a
   master-password" is decided by `masterPasswordPRF`, which scans **every**
@@ -421,6 +421,17 @@ yielded.
   downgrade warning below also keys off `masterPasswordPRF`, centralizing the
   resolution here fixes that path for the split-stanza case too (the warning
   now fires when a second-stanza master-password DB is read back as plaintext).
+- **Bare `master-password` presence (#16724).** Q1 is presence, not a PRF
+  value: a bare `set system master-password`, the empty container left by
+  `delete system master-password pseudorandom-function`, a dormant/inactive
+  bare node, and bare nodes in split stanzas, unapplied groups or under a
+  groups `<*>` wildcard all require encryption; Q2 then falls back to
+  `defaultMasterPasswordPRF` (`sha256`) when no supported effective selector
+  resolves. Pre-fix, the value-keyed scan wrote `active.json`/`confirm.json`
+  in cleartext with no `master.key` and no #4579 warning while
+  `show configuration` rendered `master-password;`. The PRF-carrying and
+  absent controls are unchanged (configured selector wins; no
+  master-password stays plaintext and creates no `master.key`).
 - **Groups / apply-groups resolution (#5231).** The encrypt gate also covers a
   `master-password` declared inside a `groups { ... }` body and pulled in with
   `apply-groups <name>`. Such a master-password is **active at runtime** —
