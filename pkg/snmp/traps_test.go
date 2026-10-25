@@ -18,7 +18,7 @@ func TestBuildLinkTrap_LinkDown(t *testing.T) {
 		startTime: time.Now().Add(-10 * time.Second),
 	}
 
-	pkt := agent.buildLinkTrap("public", false, 5, "trust0")
+	pkt := agent.buildLinkTrap("public", false, 5, "trust0", true)
 	if len(pkt) == 0 {
 		t.Fatal("empty trap packet")
 	}
@@ -101,8 +101,8 @@ func TestBuildLinkTrap_LinkDown(t *testing.T) {
 		remaining = remaining[totalLen:]
 		count++
 	}
-	if count != 5 {
-		t.Fatalf("expected 5 varbinds, got %d", count)
+	if count != 6 {
+		t.Fatalf("expected 6 varbinds, got %d", count)
 	}
 }
 
@@ -116,7 +116,7 @@ func TestBuildLinkTrap_LinkUp(t *testing.T) {
 		startTime: time.Now().Add(-60 * time.Second),
 	}
 
-	pkt := agent.buildLinkTrap("secret", true, 2, "wan0")
+	pkt := agent.buildLinkTrap("secret", true, 2, "wan0", true)
 	if len(pkt) == 0 {
 		t.Fatal("empty trap packet")
 	}
@@ -145,8 +145,8 @@ func TestSendLinkTraps_NoConfig(t *testing.T) {
 		startTime: time.Now(),
 	}
 	// Should not panic with nil config.
-	agent.NotifyLinkDown(1, "eth0")
-	agent.NotifyLinkUp(1, "eth0")
+	agent.NotifyLinkDown(1, "eth0", true)
+	agent.NotifyLinkUp(1, "eth0", true)
 }
 
 func TestSendLinkTraps_NoTrapGroups(t *testing.T) {
@@ -160,8 +160,8 @@ func TestSendLinkTraps_NoTrapGroups(t *testing.T) {
 		startTime: time.Now(),
 	}
 	// Should return immediately (no targets).
-	agent.NotifyLinkDown(1, "eth0")
-	agent.NotifyLinkUp(1, "eth0")
+	agent.NotifyLinkDown(1, "eth0", true)
+	agent.NotifyLinkUp(1, "eth0", true)
 }
 
 func TestSendLinkTraps_WithTarget(t *testing.T) {
@@ -190,7 +190,7 @@ func TestSendLinkTraps_WithTarget(t *testing.T) {
 	}
 
 	// Send a linkDown trap.
-	agent.NotifyLinkDown(3, "dmz0")
+	agent.NotifyLinkDown(3, "dmz0", true)
 
 	// Read the received packet.
 	buf := make([]byte, 4096)
@@ -228,7 +228,7 @@ func TestTrapVarbindOIDs(t *testing.T) {
 		startTime: time.Now(),
 	}
 
-	pkt := agent.buildLinkTrap("c", false, 7, "tunnel0")
+	pkt := agent.buildLinkTrap("c", false, 7, "tunnel0", true)
 
 	// Navigate to varbind list.
 	_, body, _ := berDecodeHeader(pkt)

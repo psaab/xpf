@@ -893,13 +893,23 @@ packet handlers, and MIB view that call into them.
   `buildLinkTrapsForVersion`: `v1` emits an SNMPv1 Trap-PDU
   (`buildLinkTrapV1` — message version field 0, PDU tag 0xa4, the trap type
   carried in the enterprise/generic-trap/specific-trap/time-stamp fields per
-  RFC 1157, with ifIndex/ifDescr/ifOperStatus varbinds; enterprise =
-  `snmpTraps` 1.3.6.1.6.3.1.1.5 and agent-addr set to the source address
+  RFC 1157, with ifIndex/ifAdminStatus/ifOperStatus varbinds in RFC 2863
+  OBJECTS order plus ifDescr as a trailing additional varbind (#16778);
+  enterprise = `snmpTraps` 1.3.6.1.6.3.1.1.5 and agent-addr set to the source address
   toward the target per RFC 3584 §3.2 (#9123)), `v2` (or an
   unspecified/empty version — the default)
   emits the SNMPv2c trap (`buildLinkTrap`, version 1, PDU tag 0xa7), and `all`
   emits BOTH. Before #3948 the version was parsed but had no typed field, so a
   `version v1` group silently emitted v2c traps that a v1-only receiver drops.
+- **Link traps carry ifAdminStatus in OBJECTS order (#16778).** RFC 2863
+  linkDown/linkUp `OBJECTS { ifIndex, ifAdminStatus, ifOperStatus }` are
+  copied in order (v2c: varbinds 3-5 after sysUpTime.0/snmpTrapOID.0 per
+  RFC 3416 §4.2.6; v1: varbinds 1-3), with ifDescr only as a trailing
+  additional varbind. `adminUp` (IFF_UP at event time, threaded from
+  `applyLinkState` through `NotifyLinkUp/Down`, `sendLinkTraps` and the
+  deferred v1 `trapJob`) encodes 1=up / 2=down, so an operator `disable`
+  (ifAdminStatus=2) is distinguishable from a fault-down. Before #16778
+  ifDescr occupied varbind 4 (v2c) / 2 (v1) and ifAdminStatus was absent.
 - Don't add a third BER library to this package. The hand-coded encoder
   is intentional; keeping the surface small avoids bringing in an SNMP
   framework with its own poll loop and threading model.

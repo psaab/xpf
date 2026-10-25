@@ -123,7 +123,7 @@ func TestV1TrapCarriesTheSourceAddress9123(t *testing.T) {
 	target := ln.LocalAddr().String()
 
 	a := &Agent{}
-	pkt := a.buildLinkTrapV1("public", target, true, 5, "ge-0-0-0")
+	pkt := a.buildLinkTrapV1("public", target, true, 5, "ge-0-0-0", true)
 	got := decodeAgentAddr9123(t, pkt)
 
 	if got.Equal(net.IPv4zero) {
@@ -147,7 +147,7 @@ func TestV1TrapFallsBackToZeroWhenNoSourceExists9123(t *testing.T) {
 		{"IPv6-only target", "[::1]:162"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := decodeAgentAddr9123(t, a.buildLinkTrapV1("public", tc.target, true, 5, "ge-0-0-0"))
+			got := decodeAgentAddr9123(t, a.buildLinkTrapV1("public", tc.target, true, 5, "ge-0-0-0", true))
 			if !got.Equal(net.IPv4zero) {
 				t.Errorf("agent-addr = %v for %q, want 0.0.0.0 — that value is the "+
 					"RFC's fallback for exactly this case, and inventing an address "+
@@ -172,7 +172,7 @@ func TestV2cTrapIsUnaffectedByTheTargetMove9123(t *testing.T) {
 	a := &Agent{}
 	var lens []string
 	for _, target := range []string{"", "127.0.0.1:162", "10.9.9.9:162"} {
-		pkts := a.buildLinkTrapsForVersion("public", "v2", target, true, 5, "ge-0-0-0")
+		pkts := a.buildLinkTrapsForVersion("public", "v2", target, true, 5, "ge-0-0-0", true)
 		if len(pkts) != 1 {
 			t.Fatalf("v2 emitted %d packets for target %q, want 1", len(pkts), target)
 		}
@@ -200,13 +200,13 @@ func TestV2cTrapIsUnaffectedByTheTargetMove9123(t *testing.T) {
 	// REFERENCE ARM: the v1 packet DOES vary with the target, which is the whole
 	// change. If it did not, the assertions above would be trivially satisfied
 	// by a build that ignores the target entirely.
-	v1a := a.buildLinkTrapV1("public", "", true, 5, "ge-0-0-0")
+	v1a := a.buildLinkTrapV1("public", "", true, 5, "ge-0-0-0", true)
 	ln, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("no udp4 loopback available: %v", err)
 	}
 	defer ln.Close()
-	v1b := a.buildLinkTrapV1("public", ln.LocalAddr().String(), true, 5, "ge-0-0-0")
+	v1b := a.buildLinkTrapV1("public", ln.LocalAddr().String(), true, 5, "ge-0-0-0", true)
 	if decodeAgentAddr9123(t, v1a).Equal(decodeAgentAddr9123(t, v1b)) {
 		t.Error("the v1 agent-addr did not change between an empty target and a " +
 			"routable one, so nothing above is distinguishing v1 from v2c")
@@ -308,8 +308,8 @@ func berShape9335(t *testing.T, v []byte) string {
 // failure mode of every summarising comparison.
 func TestTheShapeSignatureDiscriminates9335(t *testing.T) {
 	a := &Agent{}
-	up := a.buildLinkTrapsForVersion("public", "v2", "", true, 5, "ge-0-0-0")
-	down := a.buildLinkTrapsForVersion("public", "v2", "", false, 5, "ge-0-0-0")
+	up := a.buildLinkTrapsForVersion("public", "v2", "", true, 5, "ge-0-0-0", true)
+	down := a.buildLinkTrapsForVersion("public", "v2", "", false, 5, "ge-0-0-0", true)
 	if len(up) != 1 || len(down) != 1 {
 		t.Fatalf("want one packet each, got %d and %d", len(up), len(down))
 	}
@@ -332,7 +332,7 @@ func TestTheShapeSignatureDiscriminates9335(t *testing.T) {
 	// immediately rather than in someone else's package.
 	base := berShape9335(t, upMsg)
 	for i := 0; i < 20; i++ {
-		pkts := a.buildLinkTrapsForVersion("public", "v2", "", true, 5, "ge-0-0-0")
+		pkts := a.buildLinkTrapsForVersion("public", "v2", "", true, 5, "ge-0-0-0", true)
 		msg, ok := berFind9123(t, pkts[0], tagSequence)
 		if !ok {
 			t.Fatal("no outer SEQUENCE")

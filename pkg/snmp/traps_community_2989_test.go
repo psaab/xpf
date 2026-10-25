@@ -46,7 +46,7 @@ func TestTrapCommunityReachesLinkTrap2989(t *testing.T) {
 	if community != "trapdest" {
 		t.Fatalf("community = %q, want trapdest", community)
 	}
-	pkt := agent.buildLinkTrap(community, true, 1, "ge-0-0-0")
+	pkt := agent.buildLinkTrap(community, true, 1, "ge-0-0-0", true)
 	if !containsBytes(pkt, []byte("trapdest")) {
 		t.Fatalf("built trap packet does not carry community %q", community)
 	}

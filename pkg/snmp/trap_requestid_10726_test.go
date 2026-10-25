@@ -12,7 +12,7 @@ import (
 // following the same BER path as TestBuildLinkTrap_LinkDown.
 func trapRequestIDOf(t *testing.T, agent *Agent) int {
 	t.Helper()
-	pkt := agent.buildLinkTrap("public", false, 5, "trust0")
+	pkt := agent.buildLinkTrap("public", false, 5, "trust0", true)
 	tag, body, err := berDecodeHeader(pkt)
 	if err != nil || tag != tagSequence {
 		t.Fatalf("decode outer sequence: tag=0x%02x err=%v", tag, err)

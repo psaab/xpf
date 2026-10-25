@@ -42,7 +42,7 @@ func v1TrapAgent9917(version string) *Agent {
 // worker builds it. RED on base (every job carries a caller-built pkt).
 func TestSendLinkTrapsDefersV1Build9917(t *testing.T) {
 	agent := v1TrapAgent9917("v1")
-	agent.NotifyLinkDown(7, "ge-0/0/0")
+	agent.NotifyLinkDown(7, "ge-0/0/0", true)
 
 	jobs := drainTrapQueue9917(agent)
 	if len(jobs) != 1 {
@@ -61,7 +61,7 @@ func TestSendLinkTrapsDefersV1Build9917(t *testing.T) {
 // stays prebuilt on the caller. RED on base (both legs prebuilt).
 func TestSendLinkTrapsAllVersionDefersOnlyV19917(t *testing.T) {
 	agent := v1TrapAgent9917("all")
-	agent.NotifyLinkDown(7, "ge-0/0/0")
+	agent.NotifyLinkDown(7, "ge-0/0/0", true)
 
 	jobs := drainTrapQueue9917(agent)
 	if len(jobs) != 2 {
@@ -103,7 +103,7 @@ func TestTrapWorkerDeliversDeferredV19917(t *testing.T) {
 	}
 	defer agent.Stop() // abandon backlog, join the lazily started worker
 
-	agent.NotifyLinkDown(7, "ge-0/0/0")
+	agent.NotifyLinkDown(7, "ge-0/0/0", true)
 
 	buf := make([]byte, 4096)
 	if err := pc.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
@@ -144,7 +144,7 @@ func TestTrapWorkerAllVersionOrder9917(t *testing.T) {
 	}
 	defer agent.Stop()
 
-	agent.NotifyLinkDown(7, "ge-0/0/0")
+	agent.NotifyLinkDown(7, "ge-0/0/0", true)
 
 	buf := make([]byte, 4096)
 	if err := pc.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {

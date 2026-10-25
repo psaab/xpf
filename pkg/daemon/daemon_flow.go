@@ -1271,7 +1271,7 @@ func (d *Daemon) runLinkStateSubscription(ctx context.Context, prevOper map[int]
 				continue
 			}
 			d.applyLinkState(prevOper, attrs.Index, attrs.Name,
-				linkOperUp(attrs), true)
+				linkOperUp(attrs), linkAdminUp(attrs), true)
 		}
 	}
 }
@@ -1298,7 +1298,7 @@ func (d *Daemon) resyncLinkState(prevOper map[int]bool, emit bool) {
 			continue
 		}
 		d.applyLinkState(prevOper, attrs.Index, attrs.Name,
-			linkOperUp(attrs), emit)
+			linkOperUp(attrs), linkAdminUp(attrs), emit)
 	}
 }
 
@@ -1317,36 +1317,47 @@ func linkOperUp(attrs *netlink.LinkAttrs) bool {
 	return cluster.LinkAttrsUp(attrs)
 }
 
+// linkAdminUp is the administrative state (IFF_UP) of a link, encoded as
+// ifAdminStatus in link traps (#16778). It mirrors the ifTable AdminStatus
+// derivation in buildSNMPIfData so a trap can never contradict ifTable for
+// the same ifIndex.
+func linkAdminUp(attrs *netlink.LinkAttrs) bool {
+	return attrs.Flags&net.FlagUp != 0
+}
+
 // applyLinkState records the up/down state for ifindex against prevOper
 // and, when the state changed from the last-known value AND emit is true,
-// emits an SNMP linkUp/linkDown trap. Shared by the streamed-event path and
-// the re-sync catch-up so both dedup identically against prevOper.
-func (d *Daemon) applyLinkState(prevOper map[int]bool, index int, name string, up, emit bool) {
+// emits an SNMP linkUp/linkDown trap. adminUp carries the interface's
+// IFF_UP state at event time so the trap's ifAdminStatus can distinguish
+// an operator disable from a fault-down (#16778). Shared by the streamed-
+// event path and the re-sync catch-up so both dedup identically against
+// prevOper.
+func (d *Daemon) applyLinkState(prevOper map[int]bool, index int, name string, up, adminUp, emit bool) {
 	was, known := prevOper[index]
 	if known && was == up {
 		return // no change
 	}
 	prevOper[index] = up
 	if emit {
-		d.emitLinkStateTrap(index, name, up)
+		d.emitLinkStateTrap(index, name, up, adminUp)
 	}
 }
 
 // emitLinkStateTrap dispatches one link up/down transition. The
 // linkStateEmit seam (if set) captures it for tests; otherwise it emits an
 // SNMP linkUp/linkDown trap via the snmp agent (a no-op when no agent).
-func (d *Daemon) emitLinkStateTrap(index int, name string, up bool) {
+func (d *Daemon) emitLinkStateTrap(index int, name string, up, adminUp bool) {
 	if d.linkStateEmit != nil {
-		d.linkStateEmit(index, name, up)
+		d.linkStateEmit(index, name, up, adminUp)
 		return
 	}
 	if d.snmpAgent == nil {
 		return
 	}
 	if up {
-		d.snmpAgent.NotifyLinkUp(index, name)
+		d.snmpAgent.NotifyLinkUp(index, name, adminUp)
 	} else {
-		d.snmpAgent.NotifyLinkDown(index, name)
+		d.snmpAgent.NotifyLinkDown(index, name, adminUp)
 	}
 }
 
