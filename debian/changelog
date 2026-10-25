@@ -14,6 +14,14 @@ xpf (0.0.0) unstable; urgency=medium
     disk and its set is promoted; charon's next start loads the
     committed generation instead of resurrecting a deleted/rotated
     VPN. Charon-up rejections still restore the prior file (#10712).
+  * HA/DHCP lease-sync: order the post-start lease-add backstop after the
+    takeover Kea restart (#16855). On an active/active takeover with a failed
+    memfile pre-seed, the seed dialed the still-running pre-restart Kea, was
+    rejected with "Invalid subnet-id" for the newly taken RG, and never
+    retried. The seed now waits for the takeover apply's authority generation
+    to be marked applied before seeding, and IAID-0 v6 bindings now emit
+    "iaid":0 on the seed wire form.
+
   * Cluster/session-sync: the #15176 NAT-scope fold now carries the
     tagged RETH unit (#16826). It folded the logical child's ifindex
     with vlan 0, truncating `reth0.80` to `reth0`, and the receiver

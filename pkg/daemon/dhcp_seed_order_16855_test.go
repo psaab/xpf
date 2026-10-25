@@ -1,0 +1,190 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"os"
+	"path/filepath"
+
+	"github.com/psaab/xpf/pkg/dhcpserver"
+)
+
+// #16855: the post-start lease-add backstop must not seed the pre-restart Kea.
+//
+// Modelled active/active takeover: an old Kea is already listening on the
+// control socket and rejects lease4-add with "Invalid subnet-id" (it has no
+// subnet for the newly taken RG). The takeover apply (restart) only completes
+// ~when the test flips the stub to the new Kea, which accepts. Pre-fix the
+// seed dials at once, hits the old Kea exactly once, and never retries
+// (oldAdds=1 newAdds=0). Post-fix the seed waits for the apply generation to
+// be marked applied, then seeds the new Kea (oldAdds=0 newAdds=1).
+//
+// Control (pure backup): no old Kea, socket appears only after the restart —
+// the seed must still land exactly once on the new Kea.
+//
+// The daemon side drives a real dhcpserver.Manager (not a fake applier): its
+// runSystemctl seam blocks the restart until released, and the daemon's
+// enqueue returns the authority generation the seed waits on. AppliedGeneration
+// flips only when that apply body finishes the restart.
+
+type flipKea16855 struct {
+	mu      sync.Mutex
+	isNew   bool
+	oldAdds int
+	newAdds int
+}
+
+func (f *flipKea16855) flip() {
+	f.mu.Lock()
+	f.isNew = true
+	f.mu.Unlock()
+}
+func (f *flipKea16855) counts() (int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.oldAdds, f.newAdds
+}
+
+func startFlipKea16855(t *testing.T, path string, f *flipKea16855) func() {
+	t.Helper()
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen %s: %v", path, err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				var req struct {
+					Command   string         `json:"command"`
+					Arguments map[string]any `json:"arguments"`
+				}
+				if err := json.NewDecoder(c).Decode(&req); err != nil {
+					return
+				}
+				f.mu.Lock()
+				isNew := f.isNew
+				if req.Command == "lease4-add" {
+					if isNew {
+						f.newAdds++
+					} else {
+						f.oldAdds++
+					}
+				}
+				f.mu.Unlock()
+				if req.Command == "lease4-add" && !isNew {
+					_, _ = c.Write([]byte(`{"result":1,"text":"Invalid subnet-id"}`))
+					return
+				}
+				_, _ = c.Write([]byte(`{"result":0,"text":"ok"}`))
+			}(c)
+		}
+	}()
+	return func() { _ = ln.Close() }
+}
+
+func TestSeedWaitsForTakeoverApply16855(t *testing.T) {
+	sock4 := shortTmpSocket(t, "k4.sock")
+	sock6 := shortTmpSocket(t, "k6.sock")
+	flip := &flipKea16855{}
+	defer startFlipKea16855(t, sock4, flip)()
+
+	d := leaseSyncTestDaemon(t, sock4, sock6, true)
+	// Real manager with temp conf paths + no-op systemctl: the enqueue below
+	// runs the genuine async apply (restart) instead of failing on /etc/kea.
+	restarting := make(chan struct{}, 1)
+	release := make(chan struct{})
+	confDir, _ := os.MkdirTemp("", "kea-conf")
+	t.Cleanup(func() { os.RemoveAll(confDir) })
+	mgr := dhcpserver.NewManagerForTesting(
+		confDir+"/kea-dhcp4.conf", filepath.Join(t.TempDir(), "kea-dhcp6.conf"),
+		func(args ...string) error {
+			select {
+			case restarting <- struct{}{}:
+			default:
+			}
+			<-release
+			return nil
+		},
+		func(string) bool { return true },
+	)
+	mgr.SetLeaseSyncSeamsForTesting(unixDialer(), sock4, sock6, "", "")
+	d.dhcpServer = mgr
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
+		{Family: 4, Address: "10.0.61.150", HWAddress: "aa:bb:cc:dd:ee:96",
+			SubnetID: 1, Remaining: 1800, PreferredRemaining: 1800, State: 0},
+	})
+
+	// Model the takeover apply: the restart is in flight (old Kea still
+	// serving) and completes only when released; completion publishes the
+	// authority generation as applied, which is what the seed waits on.
+	gen := d.enqueueDHCPApplyWithAuthorityState(
+		d.desiredClusterDHCPConfigWithMasters(d.store.ActiveConfig(), map[int]bool{1: true}), "vrrp MASTER rg-test", d.store.ActiveConfig(), nil)
+	if gen == 0 {
+		t.Fatal("enqueue returned generation 0")
+	}
+	// Simulate the async worker finishing the restart after a delay: flip to
+	// the new Kea and publish the applied generation via a real apply.
+	go func() {
+		<-restarting // async worker is inside the (modelled) restart
+		time.Sleep(200 * time.Millisecond)
+		flip.flip() // new Kea, with the taken-over subnet, is now serving
+		releaseOnce.Do(func() { close(release) })
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		d.seedDHCPLeasesFromPeerGen(context.Background(), gen)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("seed did not complete")
+	}
+	oldAdds, newAdds := flip.counts()
+	if oldAdds != 0 || newAdds != 1 {
+		t.Fatalf("seed hit old/new Kea = %d/%d, want 0/1 (pre-fix: 1/0)", oldAdds, newAdds)
+	}
+	if got := d.sessionSync.Stats().DHCPLeasesSeeded; got != 1 {
+		t.Fatalf("DHCPLeasesSeeded = %d, want 1", got)
+	}
+}
+
+// IAID-0 must survive the seed wire form (#16855 alongside): keaLeaseJSON with
+// omitempty dropped "iaid" for IAID 0; the pointer form must emit "iaid":0.
+func TestSeedIAIDZeroEmitted16855(t *testing.T) {
+	sock4 := shortTmpSocket(t, "k4.sock")
+	sock6 := shortTmpSocket(t, "k6.sock")
+	stub := &stubKeaServer{}
+	defer stub.start(t, sock6)()
+	_ = sock4
+	d := leaseSyncTestDaemon(t, sock4, sock6, true)
+	d.sessionSync.SetPeerDHCPLeasesForTesting(6, []dhcpserver.SyncLease{
+		{Family: 6, Address: "2001:db8::100", DUID: "00:01:00:01", IAID: 0,
+			LeaseType: "IA_NA", SubnetID: 1, Remaining: 2400, PreferredRemaining: 2400, State: 0},
+	})
+	d.seedDHCPLeasesFromPeer(context.Background())
+	adds := stub.adds()
+	if len(adds) != 1 {
+		t.Fatalf("expected 1 lease6-add, got %d: %+v", len(adds), adds)
+	}
+	iaid, ok := adds[0]["iaid"]
+	if !ok {
+		t.Fatalf("lease6-add dropped iaid for IAID-0 binding: %+v", adds[0])
+	}
+	if v, _ := iaid.(float64); v != 0 {
+		t.Fatalf("iaid = %v, want 0", iaid)
+	}
+}

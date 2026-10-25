@@ -2045,18 +2045,20 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// block this VRRP event loop. Latest-wins coalescing in
 			// the manager keeps final state correct; failures are
 			// logged by the worker with this reason.
-			d.enqueueDHCPApplyWithAuthorityState(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID), cfg, masters)
+			applyGen := d.enqueueDHCPApplyWithAuthorityState(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID), cfg, masters)
 			slog.Info("vrrp: DHCP server apply enqueued (MASTER)", "rg", rgID)
 			// #2239: after the async Kea start, seed the held peer
 			// leases via lease{4,6}-add (the reinitiateIPsecSAs
 			// precedent). Async so it never blocks this VRRP event
-			// loop; it waits a bounded time for the control socket and
-			// re-anchors lifetimes to the local clock. Idempotent with
-			// the memfile pre-seed (lease-add → lease-update on
-			// collision). Nudge the push loop so this node replicates
-			// its now-owned set.
+			// loop; #16855: the seed waits for this apply's generation
+			// to be marked applied before touching the control socket,
+			// so a still-running pre-restart Kea (active/active) cannot
+			// reject the adds with "Invalid subnet-id" and lose the
+			// backstop. Idempotent with the memfile pre-seed
+			// (lease-add → lease-update on collision). Nudge the push
+			// loop so this node replicates its now-owned set.
 			if cc := d.clusterConfig(); cc != nil && cc.DHCPLeaseSync && d.getSessionSync() != nil {
-				go d.seedDHCPLeasesFromPeer(context.Background())
+				go d.seedDHCPLeasesFromPeerGen(context.Background(), applyGen)
 				d.nudgeDHCPLeaseSync()
 			}
 		}
