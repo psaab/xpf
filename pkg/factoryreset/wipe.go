@@ -154,6 +154,10 @@ func isFsatomicTemp(name string) bool {
 //     is left untouched. No FRR reload: FRR restarts clean on the reboot.
 //   - swanctlSnippet (/etc/swanctl/conf.d/xpf.conf): the IKE PSKs live in this
 //     single xpf-owned snippet, so it is removed outright.
+//   - legacySwanctlSnippet (same conf.d, bpfrx.conf, #16852): the pre-rename
+//     managed snippet. Its cleartext PSKs survive every other leg — the
+//     Manager now removes it on Apply/Clear, but a post-zeroize boot skips
+//     that reconcile, so the wipe must erase it itself.
 //   - kea4/kea6 (/etc/kea/kea-dhcp{4,6}.conf): xpf owns these whole files, so
 //     they are removed outright.
 //
@@ -199,7 +203,8 @@ func wipeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 	// therefore NOT erased (left, not unlinked — unlike R-1 report-and-unlink).
 	// os.Remove on a link unlinks it and returns nil while the IKE/Kea/FRR
 	// secrets survive on the target volume. Order pinned: frr, swanctl,
-	// kea4, kea6, then per-dir temp sweeps in dedup slice order.
+	// legacy swanctl (#16852), kea4, kea6, then per-dir temp sweeps in dedup
+	// slice order.
 	var skipped []configstore.SymlinkedTarget
 	var hardlinks []configstore.HardlinkedPath
 	// FRR: strip only the xpf-managed section (the routing-auth secrets); the
@@ -227,10 +232,11 @@ func wipeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 			fail(serr)
 		}
 	}
-	// swanctl snippet + Kea configs: xpf owns these whole files, remove them —
+	// swanctl snippets + Kea configs: xpf owns these whole files, remove them —
 	// unless the final component is a link (refuse, leave the link).
 	for _, leg := range []struct{ what, path string }{
 		{"swanctl snippet", swanctlSnippet},
+		{"legacy swanctl snippet", legacySwanctlSnippetPath()},
 		{"kea4 config", kea4},
 		{"kea6 config", kea6},
 	} {
@@ -1302,14 +1308,27 @@ func readProvisionedMarkerUID(path string) (int, error) {
 var (
 	wipeFRRConf        = frr.DefaultFRRConf
 	wipeSwanctlSnippet = filepath.Join(ipsec.DefaultSwanctlDir, ipsec.BPFRXConfFile)
-	wipeKea4Conf       = dhcpserver.DefaultKea4ConfPath
-	wipeKea6Conf       = dhcpserver.DefaultKea6ConfPath
+	// wipeLegacySwanctlSnippet is the pre-rename conf.d/bpfrx.conf (#16852).
+	// Derived from wipeSwanctlSnippet's directory so the test seams that
+	// relocate wipeSwanctlSnippet relocate the legacy leg with it (every
+	// existing seam assigns wipeSwanctlSnippet under a throwaway tree, so
+	// the legacy file lands beside it — never the real /etc path). The
+	// production default equals
+	// filepath.Join(ipsec.DefaultSwanctlDir, ipsec.LegacyBPFRXConfFile).
+	wipeKea4Conf = dhcpserver.DefaultKea4ConfPath
+	wipeKea6Conf = dhcpserver.DefaultKea6ConfPath
 	// Non-secret best-effort legs — also package vars so the full-wipe primitive
 	// is fully hermetic under test (never touches the real /sys/fs/bpf or
 	// /etc/systemd/network). Production behavior unchanged.
 	wipeBPFPinDir   = "/sys/fs/bpf/xpf"
 	wipeNetworkdDir = "/etc/systemd/network"
 )
+
+// legacySwanctlSnippetPath resolves the legacy leg from the CURRENT
+// wipeSwanctlSnippet seam value (see wipeLegacySwanctlSnippet above).
+func legacySwanctlSnippetPath() string {
+	return filepath.Join(filepath.Dir(wipeSwanctlSnippet), ipsec.LegacyBPFRXConfFile)
+}
 
 // wipePendingRecord persists the pre-wipe inputs in both the configured
 // config root and the day-0 loader's fixed stamp path. The prefixed atomic
