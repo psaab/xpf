@@ -29,7 +29,7 @@ set security zones security-zone untrust
 set security nat source pool zeta address 203.0.113.20/32
 set security nat source pool alpha address 203.0.113.10/32
 set security nat source pool mid address 203.0.113.15/32
-set security nat source rule-set rs-surv from zone z174
+set security nat source rule-set rs-surv from zone zzq17760
 set security nat source rule-set rs-surv to zone untrust
 set security nat source rule-set rs-surv rule r1 match source-address 0.0.0.0/0
 set security nat source rule-set rs-surv rule r1 then source-nat interface`); err != nil {
@@ -39,20 +39,20 @@ set security nat source rule-set rs-surv rule r1 then source-nat interface`); er
 		t.Fatalf("Commit: %v", err)
 	}
 	cfg := store.ActiveConfig()
-	cfg.Security.Zones["z174"] = &config.ZoneConfig{Name: "z174"}
-	cfg.Security.Zones["z214"] = &config.ZoneConfig{Name: "z214"}
-	for _, name := range collisionNames13247(t, config.StableZoneID("z174")) {
+	cfg.Security.Zones["zzq17760"] = &config.ZoneConfig{Name: "zzq17760"}
+	cfg.Security.Zones["zzq8100"] = &config.ZoneConfig{Name: "zzq8100"}
+	for _, name := range collisionNames13247(t, config.StableZoneID("zzq17760")) {
 		cfg.Security.Zones[name] = &config.ZoneConfig{Name: name}
 	}
 	return store
 }
 
 func TestNATPoolStatsQuarantineSurvivor13247(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("premise broken: z174/z214 no longer collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("premise broken: zzq17760/zzq8100 no longer collide")
 	}
-	collidingID := config.StableZoneID("z174")
-	zoneIDs := map[string]uint16{"z174": collidingID, "z214": collidingID, "untrust": 8}
+	collidingID := config.StableZoneID("zzq17760")
+	zoneIDs := map[string]uint32{"zzq17760": collidingID, "zzq8100": collidingID, "untrust": 8}
 	for _, name := range collisionNames13247(t, collidingID) {
 		zoneIDs[name] = collidingID
 	}
@@ -64,11 +64,11 @@ func TestNATPoolStatsQuarantineSurvivor13247(t *testing.T) {
 	dpOverride := &quarantine13247DP{natIfaceSNATSessionsDP: dp, collidingID: collidingID}
 	store := quarantine13247Store(t)
 	cfg := store.ActiveConfig()
-	if config.ZoneQuarantineExcludedReason("z214", cfg) == "" {
-		t.Fatal("fixture does not quarantine colliding loser z214")
+	if config.ZoneQuarantineExcludedReason("zzq8100", cfg) == "" {
+		t.Fatal("fixture does not quarantine colliding loser zzq8100")
 	}
-	if config.ZoneQuarantineExcludedReason("z174", cfg) != "" {
-		t.Fatal("fixture quarantines survivor z174")
+	if config.ZoneQuarantineExcludedReason("zzq17760", cfg) != "" {
+		t.Fatal("fixture quarantines survivor zzq17760")
 	}
 	s := &Server{store: store, dp: dpOverride}
 	for iter := range 50 {
@@ -89,8 +89,8 @@ func TestNATPoolStatsQuarantineSurvivor13247(t *testing.T) {
 			byName[p.Name] = p
 			names = append(names, p.Name)
 		}
-		if got := byName["z174->untrust"].UsedPorts; got != 1 {
-			t.Fatalf("iter %d: survivor z174->untrust UsedPorts=%d, want 1 (quarantined loser stole colliding ID)", iter, got)
+		if got := byName["zzq17760->untrust"].UsedPorts; got != 1 {
+			t.Fatalf("iter %d: survivor zzq17760->untrust UsedPorts=%d, want 1 (quarantined loser stole colliding ID)", iter, got)
 		}
 		// Named pools sorted alpha,mid,zeta before interface rows.
 		want := []string{"alpha", "mid", "zeta"}
@@ -104,15 +104,15 @@ func TestNATPoolStatsQuarantineSurvivor13247(t *testing.T) {
 
 type quarantine13247DP struct {
 	*natIfaceSNATSessionsDP
-	collidingID uint16
+	collidingID uint32
 }
 
 func (d *quarantine13247DP) IterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
-	fn(dataplane.SessionKey{}, dataplane.SessionValue{Flags: dataplane.SessFlagSNAT, IngressZone: d.collidingID, EgressZone: 8})
+	fn(dataplane.SessionKey{}, dataplane.SessionValue{Flags: dataplane.SessFlagSNAT, IngressZone: uint16(d.collidingID), EgressZone: 8})
 	return nil
 }
 
-func collisionNames13247(t *testing.T, id uint16) []string {
+func collisionNames13247(t *testing.T, id uint32) []string {
 	t.Helper()
 	const want = 15
 	names := make([]string, 0, want)

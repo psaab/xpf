@@ -8,24 +8,24 @@ import (
 )
 
 // #15269 C09-02: applySyslogConfig must use survivor-aware zone names.
-// z174/z214 collide; survivor (sorted-first, non-quarantined) is z174.
-// Issue acceptance probe wording "z174:200" denotes survivor z174 wins
+// zzq17760/zzq8100 collide; survivor (sorted-first, non-quarantined) is zzq17760.
+// Issue acceptance probe wording "zzq17760:200" denotes survivor zzq17760 wins
 // the colliding id (StableZoneID, deterministic).
 
 func TestApplySyslogSurvivor15269(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
 		t.Fatal("premise collision broken")
 	}
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"z174": {Name: "z174"}, "z214": {Name: "z214"}, "trust": {Name: "trust"},
+		"zzq17760": {Name: "zzq17760"}, "zzq8100": {Name: "zzq8100"}, "trust": {Name: "trust"},
 	}
 	er := logging.NewEventReader(nil, nil)
 	d := &Daemon{}
 	d.applySyslogConfig(er, cfg)
-	id := config.StableZoneID("z174")
-	if got := er.ZoneName(id); got != "z174" {
-		t.Errorf("zone %d = %q, want z174 survivor", id, got)
+	id := config.StableZoneID("zzq17760")
+	if got := er.ZoneName(id); got != "zzq17760" {
+		t.Errorf("zone %d = %q, want zzq17760 survivor", id, got)
 	}
 	if got := er.ZoneName(config.StableZoneID("trust")); got != "trust" {
 		t.Errorf("trust = %q", got)

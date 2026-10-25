@@ -116,7 +116,7 @@ func TelemetryOf(provider any) Telemetry {
 }
 
 type ApplyResult struct {
-	ZoneIDs           map[string]uint16
+	ZoneIDs           map[string]uint32
 	ManagedInterfaces []networkd.InterfaceConfig
 	FilterIDs         map[string]uint32
 	FilterSpans       map[string]FilterCounterSpan
@@ -228,7 +228,7 @@ type Telemetry interface {
 	NewEventSource() (EventSource, error)
 	GlobalCounter(uint32) (uint64, error)
 	InterfaceCounters(int) (InterfaceCounterValue, error)
-	ZoneCounters(uint16, int) (CounterValue, error)
+	ZoneCounters(uint32, int) (CounterValue, error)
 	PolicyCounters(uint32) (CounterValue, error)
 	FilterCounters(uint32) (CounterValue, error)
 	NATRuleCounter(uint32) (CounterValue, error)
@@ -236,7 +236,7 @@ type Telemetry interface {
 	MapStats() []MapStats
 	// ReadFloodCounters returns the per-CPU aggregated flood/screen state for
 	// the given zone. Backends without BPF flood maps return a zero FloodState.
-	ReadFloodCounters(zoneID uint16) (FloodState, error)
+	ReadFloodCounters(zoneID uint32) (FloodState, error)
 }
 
 func ApplyResultFromCompileResult(result *CompileResult) *ApplyResult {
@@ -509,7 +509,7 @@ func (t dataPlaneTelemetry) GlobalCounter(index uint32) (uint64, error) {
 	return t.dp.ReadGlobalCounter(index)
 }
 
-func (t dataPlaneTelemetry) ReadFloodCounters(zoneID uint16) (FloodState, error) {
+func (t dataPlaneTelemetry) ReadFloodCounters(zoneID uint32) (FloodState, error) {
 	if t.dp == nil {
 		return FloodState{}, errors.New("nil dataplane")
 	}
@@ -523,7 +523,7 @@ func (t dataPlaneTelemetry) InterfaceCounters(ifindex int) (InterfaceCounterValu
 	return t.dp.ReadInterfaceCounters(ifindex)
 }
 
-func (t dataPlaneTelemetry) ZoneCounters(zoneID uint16, direction int) (CounterValue, error) {
+func (t dataPlaneTelemetry) ZoneCounters(zoneID uint32, direction int) (CounterValue, error) {
 	if t.dp == nil {
 		return CounterValue{}, errors.New("nil dataplane")
 	}

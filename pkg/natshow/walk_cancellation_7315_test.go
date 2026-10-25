@@ -122,7 +122,7 @@ func newCountingReader7315(ingress, egress uint16) *countingReader {
 // depending on the walk at all — a fixture that would have scored the
 // output-corroboration assertion as a real defect.
 func applyResult7315() *dataplane.ApplyResult {
-	return &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 7, "untrust": 8, "dmz": 9}}
+	return &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 7, "untrust": 8, "dmz": 9}}
 }
 
 // TestNATRenderersStopOnCancelledContext7315 is the mechanism cell: each

@@ -18,30 +18,30 @@ import (
 )
 
 // TestQuarantineCollidingZonesDropsAndScrubs exercises the pass directly on a
-// hand-built snapshot carrying the verified colliding pair z174/z214 plus a
-// distinct zone. It must drop the later-sorting zone (z214), keep the survivor
-// (z174) and the distinct zone, unzone z214's interface, drop z214's policy, and
+// hand-built snapshot carrying the verified colliding pair zzq17760/zzq8100 plus a
+// distinct zone. It must drop the later-sorting zone (zzq8100), keep the survivor
+// (zzq17760) and the distinct zone, unzone zzq8100's interface, drop zzq8100's policy, and
 // report the collision — leaving no two zones sharing an id.
 func TestQuarantineCollidingZonesDropsAndScrubs(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
-	collideID := config.StableZoneID("z174")
+	collideID := config.StableZoneID("zzq17760")
 	snap := &ConfigSnapshot{
 		Zones: []ZoneSnapshot{
 			{Name: "trust", ID: config.StableZoneID("trust")},
-			{Name: "z174", ID: config.StableZoneID("z174")},
-			{Name: "z214", ID: config.StableZoneID("z214")},
+			{Name: "zzq17760", ID: config.StableZoneID("zzq17760")},
+			{Name: "zzq8100", ID: config.StableZoneID("zzq8100")},
 		},
 		Interfaces: []InterfaceSnapshot{
-			{Name: "ge-0-0-0.0", Zone: "z174"},
-			{Name: "ge-0-0-1.0", Zone: "z214"},
+			{Name: "ge-0-0-0.0", Zone: "zzq17760"},
+			{Name: "ge-0-0-1.0", Zone: "zzq8100"},
 			{Name: "ge-0-0-2.0", Zone: "trust"},
 		},
 		Policies: []PolicyRuleSnapshot{
-			{Name: "p-survivor", FromZone: "z174", ToZone: "trust"},
-			{Name: "p-quarantined-from", FromZone: "z214", ToZone: "trust"},
-			{Name: "p-quarantined-to", FromZone: "trust", ToZone: "z214"},
+			{Name: "p-survivor", FromZone: "zzq17760", ToZone: "trust"},
+			{Name: "p-quarantined-from", FromZone: "zzq8100", ToZone: "trust"},
+			{Name: "p-quarantined-to", FromZone: "trust", ToZone: "zzq8100"},
 			{Name: "p-global", FromZone: "junos-global", ToZone: "junos-global"},
 		},
 	}
@@ -49,24 +49,24 @@ func TestQuarantineCollidingZonesDropsAndScrubs(t *testing.T) {
 	collisions := quarantineCollidingZones(snap)
 
 	// The colliding zone is dropped; the survivor + distinct zone remain.
-	names := map[string]uint16{}
+	names := map[string]uint32{}
 	for _, z := range snap.Zones {
 		if prev, dup := names[z.Name]; dup {
 			t.Fatalf("zone %q appears twice (%d, %d)", z.Name, prev, z.ID)
 		}
 		names[z.Name] = z.ID
 	}
-	if _, ok := names["z214"]; ok {
-		t.Fatalf("quarantined zone z214 still published: %v", names)
+	if _, ok := names["zzq8100"]; ok {
+		t.Fatalf("quarantined zone zzq8100 still published: %v", names)
 	}
-	if _, ok := names["z174"]; !ok {
-		t.Fatalf("survivor zone z174 was dropped: %v", names)
+	if _, ok := names["zzq17760"]; !ok {
+		t.Fatalf("survivor zone zzq17760 was dropped: %v", names)
 	}
 	if _, ok := names["trust"]; !ok {
 		t.Fatalf("distinct zone trust was dropped: %v", names)
 	}
 	// The core invariant: no two published zones share a numeric id.
-	seen := map[uint16]string{}
+	seen := map[uint32]string{}
 	for n, id := range names {
 		if prev, dup := seen[id]; dup {
 			t.Fatalf("two zones share id %d after quarantine: %q and %q", id, prev, n)
@@ -74,7 +74,7 @@ func TestQuarantineCollidingZonesDropsAndScrubs(t *testing.T) {
 		seen[id] = n
 	}
 
-	// z214's interface is unzoned (fail closed); the others keep their zone.
+	// zzq8100's interface is unzoned (fail closed); the others keep their zone.
 	byIface := map[string]string{}
 	for _, i := range snap.Interfaces {
 		byIface[i.Name] = i.Zone
@@ -82,20 +82,20 @@ func TestQuarantineCollidingZonesDropsAndScrubs(t *testing.T) {
 	if z := byIface["ge-0-0-1.0"]; z != "" {
 		t.Fatalf("interface in quarantined zone still bound to %q, want unzoned", z)
 	}
-	if z := byIface["ge-0-0-0.0"]; z != "z174" {
+	if z := byIface["ge-0-0-0.0"]; z != "zzq17760" {
 		t.Fatalf("survivor-zone interface lost its binding: %q", z)
 	}
 	if z := byIface["ge-0-0-2.0"]; z != "trust" {
 		t.Fatalf("distinct-zone interface lost its binding: %q", z)
 	}
 
-	// Policies referencing z214 (from OR to) are dropped; survivor + global kept.
+	// Policies referencing zzq8100 (from OR to) are dropped; survivor + global kept.
 	polNames := map[string]bool{}
 	for _, p := range snap.Policies {
 		polNames[p.Name] = true
 	}
 	if polNames["p-quarantined-from"] || polNames["p-quarantined-to"] {
-		t.Fatalf("policy referencing quarantined zone z214 survived: %v", polNames)
+		t.Fatalf("policy referencing quarantined zone zzq8100 survived: %v", polNames)
 	}
 	if !polNames["p-survivor"] || !polNames["p-global"] {
 		t.Fatalf("non-colliding policy was wrongly dropped: %v", polNames)
@@ -106,8 +106,8 @@ func TestQuarantineCollidingZonesDropsAndScrubs(t *testing.T) {
 		t.Fatalf("got %d collisions, want 1: %v", len(collisions), collisions)
 	}
 	c := collisions[0]
-	if c.ID != collideID || c.Survivor != "z174" || c.Quarantined != "z214" {
-		t.Fatalf("collision record = %+v, want {ID:%d Survivor:z174 Quarantined:z214}", c, collideID)
+	if c.ID != collideID || c.Survivor != "zzq17760" || c.Quarantined != "zzq8100" {
+		t.Fatalf("collision record = %+v, want {ID:%d Survivor:zzq17760 Quarantined:zzq8100}", c, collideID)
 	}
 }
 
@@ -116,22 +116,22 @@ func TestQuarantineCollidingZonesDropsAndScrubs(t *testing.T) {
 // publishes neither zone twice under one id, drops the later-sorting zone, and
 // records the collision on the (unexported) diagnostic the manager reads. On a
 // revert (buildZoneSnapshots emits both) this fails: two ZoneSnapshots carry id
-// 53547.
+// 1679679597.
 func TestBuildSnapshotQuarantinesCollidingZone(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust": {Name: "trust"},
-		"z174":  {Name: "z174"},
-		"z214":  {Name: "z214"},
+		"trust":    {Name: "trust"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
 	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 0, 0)
 	if err != nil {
 		t.Fatalf("buildSnapshot: %v", err)
 	}
-	seen := map[uint16]string{}
+	seen := map[uint32]string{}
 	var haveZ214 bool
 	for _, z := range snap.Zones {
-		if z.Name == "z214" {
+		if z.Name == "zzq8100" {
 			haveZ214 = true
 		}
 		if prev, dup := seen[z.ID]; dup {
@@ -140,14 +140,14 @@ func TestBuildSnapshotQuarantinesCollidingZone(t *testing.T) {
 		seen[z.ID] = z.Name
 	}
 	if haveZ214 {
-		t.Fatalf("later-sorting colliding zone z214 was published, want quarantined")
+		t.Fatalf("later-sorting colliding zone zzq8100 was published, want quarantined")
 	}
 	if len(snap.zoneIDCollisions) != 1 {
 		t.Fatalf("snap.zoneIDCollisions = %v, want exactly one collision", snap.zoneIDCollisions)
 	}
 	c := snap.zoneIDCollisions[0]
-	if c.Survivor != "z174" || c.Quarantined != "z214" {
-		t.Fatalf("collision = %+v, want survivor z174 / quarantined z214", c)
+	if c.Survivor != "zzq17760" || c.Quarantined != "zzq8100" {
+		t.Fatalf("collision = %+v, want survivor zzq17760 / quarantined zzq8100", c)
 	}
 }
 
@@ -160,18 +160,18 @@ func TestBuildSnapshotQuarantinesCollidingZone(t *testing.T) {
 // fresh-boot brick, the exact failure the quarantine prevents). RED-on-revert:
 // without the MatchFromZone/MatchToZone check the two global rules survive.
 func TestQuarantineDropsScopedGlobalPolicyOnQuarantinedZone(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	snap := &ConfigSnapshot{
 		Zones: []ZoneSnapshot{
-			{Name: "z174", ID: config.StableZoneID("z174")},
-			{Name: "z214", ID: config.StableZoneID("z214")},
+			{Name: "zzq17760", ID: config.StableZoneID("zzq17760")},
+			{Name: "zzq8100", ID: config.StableZoneID("zzq8100")},
 		},
 		Policies: []PolicyRuleSnapshot{
-			{Name: "g-scoped-from-quarantined", FromZone: "junos-global", ToZone: "junos-global", MatchFromZone: "z214"},
-			{Name: "g-scoped-to-quarantined", FromZone: "junos-global", ToZone: "junos-global", MatchToZone: "z214"},
-			{Name: "g-scoped-survivor", FromZone: "junos-global", ToZone: "junos-global", MatchFromZone: "z174"},
+			{Name: "g-scoped-from-quarantined", FromZone: "junos-global", ToZone: "junos-global", MatchFromZone: "zzq8100"},
+			{Name: "g-scoped-to-quarantined", FromZone: "junos-global", ToZone: "junos-global", MatchToZone: "zzq8100"},
+			{Name: "g-scoped-survivor", FromZone: "junos-global", ToZone: "junos-global", MatchFromZone: "zzq17760"},
 			{Name: "g-unscoped", FromZone: "junos-global", ToZone: "junos-global"},
 		},
 	}
@@ -179,7 +179,7 @@ func TestQuarantineDropsScopedGlobalPolicyOnQuarantinedZone(t *testing.T) {
 
 	// No published policy may reference the quarantined zone in ANY zone slot —
 	// including the out-of-band global match-zone.
-	published := map[string]uint16{}
+	published := map[string]uint32{}
 	for _, z := range snap.Zones {
 		published[z.Name] = z.ID
 	}
@@ -210,17 +210,17 @@ func TestQuarantineDropsScopedGlobalPolicyOnQuarantinedZone(t *testing.T) {
 // `match from-zone` is the quarantined zone must yield a snapshot with NO policy
 // referencing an unpublished zone (so feeding it to the Rust preflight cannot
 // brick). RED-on-revert: without the match-zone scrub the built snapshot carries
-// a global rule whose MatchFromZone == "z214" (dropped from Zones).
+// a global rule whose MatchFromZone == "zzq8100" (dropped from Zones).
 func TestBuildSnapshotDropsDanglingGlobalMatchZone(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"z174": {Name: "z174"},
-		"z214": {Name: "z214"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		{
 			Name:   "g-scoped-quarantined",
-			Match:  config.PolicyMatch{FromZones: []string{"z214"}, Applications: []string{"any"}},
+			Match:  config.PolicyMatch{FromZones: []string{"zzq8100"}, Applications: []string{"any"}},
 			Action: config.PolicyPermit,
 		},
 	}
@@ -246,57 +246,57 @@ func TestBuildSnapshotDropsDanglingGlobalMatchZone(t *testing.T) {
 
 // TestQuarantinePrunesScopedGlobalMemberNotWholeRule (#5577, fail-open): a scoped
 // global DENY whose match-zone SET carries several zones must keep protecting the
-// members that did NOT collide. A deny scoped from [z174, z214] where only z214 is
-// quarantined must SURVIVE, pruned to [z174] — NOT be dropped wholesale. Dropping
-// the whole rule is fail-open: z174 traffic would no longer hit the deny and would
+// members that did NOT collide. A deny scoped from [zzq17760, zzq8100] where only zzq8100 is
+// quarantined must SURVIVE, pruned to [zzq17760] — NOT be dropped wholesale. Dropping
+// the whole rule is fail-open: zzq17760 traffic would no longer hit the deny and would
 // reach a later/default permit while the snapshot publishes successfully.
 //
 // RED-on-revert: with the old any-member-drops-whole-rule logic the deny is
-// dropped entirely, so the g-deny-scoped assertion (deny survives for z174) fails.
+// dropped entirely, so the g-deny-scoped assertion (deny survives for zzq17760) fails.
 func TestQuarantinePrunesScopedGlobalMemberNotWholeRule(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	snap := &ConfigSnapshot{
 		Zones: []ZoneSnapshot{
 			{Name: "untrust", ID: config.StableZoneID("untrust")},
-			{Name: "z174", ID: config.StableZoneID("z174")},
-			{Name: "z214", ID: config.StableZoneID("z214")},
+			{Name: "zzq17760", ID: config.StableZoneID("zzq17760")},
+			{Name: "zzq8100", ID: config.StableZoneID("zzq8100")},
 		},
 		Policies: []PolicyRuleSnapshot{
-			// A multi-zone scoped global deny: from {z174, z214} to {untrust}.
-			// Only z214 collides; the deny must survive scoped to {z174}.
+			// A multi-zone scoped global deny: from {zzq17760, zzq8100} to {untrust}.
+			// Only zzq8100 collides; the deny must survive scoped to {zzq17760}.
 			{
 				Name: "g-deny-scoped", FromZone: "junos-global", ToZone: "junos-global",
 				Action:         "deny",
-				MatchFromZones: []string{"z174", "z214"},
-				MatchFromZone:  "z174",
+				MatchFromZones: []string{"zzq17760", "zzq8100"},
+				MatchFromZone:  "zzq17760",
 				MatchToZones:   []string{"untrust"},
 				MatchToZone:    "untrust",
 			},
-			// A middle-member collision: [untrust, z214, z174] -> [untrust, z174].
+			// A middle-member collision: [untrust, zzq8100, zzq17760] -> [untrust, zzq17760].
 			{
 				Name: "g-deny-middle", FromZone: "junos-global", ToZone: "junos-global",
 				Action:         "deny",
-				MatchFromZones: []string{"untrust", "z214", "z174"},
+				MatchFromZones: []string{"untrust", "zzq8100", "zzq17760"},
 				MatchFromZone:  "untrust",
 			},
-			// The to-side carries the collision: from {untrust} to {z174, z214}.
+			// The to-side carries the collision: from {untrust} to {zzq17760, zzq8100}.
 			{
 				Name: "g-deny-to", FromZone: "junos-global", ToZone: "junos-global",
 				Action:         "deny",
 				MatchFromZones: []string{"untrust"},
 				MatchFromZone:  "untrust",
-				MatchToZones:   []string{"z174", "z214"},
-				MatchToZone:    "z174",
+				MatchToZones:   []string{"zzq17760", "zzq8100"},
+				MatchToZone:    "zzq17760",
 			},
 			// EVERY match member collides -> the scope can no longer be honored;
 			// leaving it empty would broaden to all zones (fail-open), so DROP.
 			{
 				Name: "g-deny-all-quarantined", FromZone: "junos-global", ToZone: "junos-global",
 				Action:         "deny",
-				MatchFromZones: []string{"z214"},
-				MatchFromZone:  "z214",
+				MatchFromZones: []string{"zzq8100"},
+				MatchFromZone:  "zzq8100",
 			},
 		},
 	}
@@ -324,16 +324,16 @@ func TestQuarantinePrunesScopedGlobalMemberNotWholeRule(t *testing.T) {
 		}
 	}
 
-	// The core fail-open guard: the multi-zone deny SURVIVES, scoped to z174.
+	// The core fail-open guard: the multi-zone deny SURVIVES, scoped to zzq17760.
 	g, ok := byName["g-deny-scoped"]
 	if !ok {
-		t.Fatalf("multi-zone scoped global deny was dropped — fail-open: z174 traffic no longer hits the deny (#5577)")
+		t.Fatalf("multi-zone scoped global deny was dropped — fail-open: zzq17760 traffic no longer hits the deny (#5577)")
 	}
-	if got := g.effectiveMatchFromZones(); len(got) != 1 || got[0] != "z174" {
-		t.Fatalf("g-deny-scoped from-scope = %v, want [z174] (z214 pruned)", got)
+	if got := g.effectiveMatchFromZones(); len(got) != 1 || got[0] != "zzq17760" {
+		t.Fatalf("g-deny-scoped from-scope = %v, want [zzq17760] (zzq8100 pruned)", got)
 	}
-	if g.MatchFromZone != "z174" {
-		t.Fatalf("g-deny-scoped singular MatchFromZone = %q, want z174 (regenerated from surviving set)", g.MatchFromZone)
+	if g.MatchFromZone != "zzq17760" {
+		t.Fatalf("g-deny-scoped singular MatchFromZone = %q, want zzq17760 (regenerated from surviving set)", g.MatchFromZone)
 	}
 	if got := g.effectiveMatchToZones(); len(got) != 1 || got[0] != "untrust" {
 		t.Fatalf("g-deny-scoped to-scope = %v, want [untrust] (untouched)", got)
@@ -344,20 +344,20 @@ func TestQuarantinePrunesScopedGlobalMemberNotWholeRule(t *testing.T) {
 	if !ok {
 		t.Fatalf("g-deny-middle was dropped, want pruned survivors")
 	}
-	if got := m.effectiveMatchFromZones(); len(got) != 2 || got[0] != "untrust" || got[1] != "z174" {
-		t.Fatalf("g-deny-middle from-scope = %v, want [untrust z174]", got)
+	if got := m.effectiveMatchFromZones(); len(got) != 2 || got[0] != "untrust" || got[1] != "zzq17760" {
+		t.Fatalf("g-deny-middle from-scope = %v, want [untrust zzq17760]", got)
 	}
 
 	// To-side collision pruned; from-side untouched.
 	t2, ok := byName["g-deny-to"]
 	if !ok {
-		t.Fatalf("g-deny-to was dropped, want to-side pruned to [z174]")
+		t.Fatalf("g-deny-to was dropped, want to-side pruned to [zzq17760]")
 	}
-	if got := t2.effectiveMatchToZones(); len(got) != 1 || got[0] != "z174" {
-		t.Fatalf("g-deny-to to-scope = %v, want [z174]", got)
+	if got := t2.effectiveMatchToZones(); len(got) != 1 || got[0] != "zzq17760" {
+		t.Fatalf("g-deny-to to-scope = %v, want [zzq17760]", got)
 	}
-	if t2.MatchToZone != "z174" {
-		t.Fatalf("g-deny-to singular MatchToZone = %q, want z174", t2.MatchToZone)
+	if t2.MatchToZone != "zzq17760" {
+		t.Fatalf("g-deny-to singular MatchToZone = %q, want zzq17760", t2.MatchToZone)
 	}
 
 	// A rule whose every match member collided is dropped (would else broaden).
@@ -371,19 +371,19 @@ func TestQuarantinePrunesScopedGlobalMemberNotWholeRule(t *testing.T) {
 // quarantined is STRUCTURALLY unapplicable and must STILL be dropped (unchanged
 // behavior — pruning does not apply to a required singular endpoint).
 func TestQuarantineDropsZonePairEndpointStillDrops(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	snap := &ConfigSnapshot{
 		Zones: []ZoneSnapshot{
 			{Name: "untrust", ID: config.StableZoneID("untrust")},
-			{Name: "z174", ID: config.StableZoneID("z174")},
-			{Name: "z214", ID: config.StableZoneID("z214")},
+			{Name: "zzq17760", ID: config.StableZoneID("zzq17760")},
+			{Name: "zzq8100", ID: config.StableZoneID("zzq8100")},
 		},
 		Policies: []PolicyRuleSnapshot{
-			{Name: "zp-from-quarantined", FromZone: "z214", ToZone: "untrust", Action: "deny"},
-			{Name: "zp-to-quarantined", FromZone: "untrust", ToZone: "z214", Action: "deny"},
-			{Name: "zp-survivor", FromZone: "z174", ToZone: "untrust", Action: "deny"},
+			{Name: "zp-from-quarantined", FromZone: "zzq8100", ToZone: "untrust", Action: "deny"},
+			{Name: "zp-to-quarantined", FromZone: "untrust", ToZone: "zzq8100", Action: "deny"},
+			{Name: "zp-survivor", FromZone: "zzq17760", ToZone: "untrust", Action: "deny"},
 		},
 	}
 	quarantineCollidingZones(snap)
@@ -401,23 +401,23 @@ func TestQuarantineDropsZonePairEndpointStillDrops(t *testing.T) {
 
 // TestBuildSnapshotPrunesScopedGlobalMemberFromRealPath drives the REAL publish
 // path (buildSnapshot) end-to-end: a config with a StableZoneID collision AND a
-// scoped global DENY whose `match from-zone [z174 z214]` includes both the
+// scoped global DENY whose `match from-zone [zzq17760 zzq8100]` includes both the
 // survivor and the quarantined zone must publish a deny that SURVIVES scoped to
-// [z174] and references no unpublished zone. RED-on-revert: the old whole-rule
-// drop removes the deny entirely, so the "deny present, scoped to z174" assertion
-// fails and z174 traffic would fall through to the default permit.
+// [zzq17760] and references no unpublished zone. RED-on-revert: the old whole-rule
+// drop removes the deny entirely, so the "deny present, scoped to zzq17760" assertion
+// fails and zzq17760 traffic would fall through to the default permit.
 func TestBuildSnapshotPrunesScopedGlobalMemberFromRealPath(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"untrust": {Name: "untrust"},
-		"z174":    {Name: "z174"},
-		"z214":    {Name: "z214"},
+		"untrust":  {Name: "untrust"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		{
 			Name: "g-multi-deny",
 			Match: config.PolicyMatch{
-				FromZones:    []string{"z174", "z214"},
+				FromZones:    []string{"zzq17760", "zzq8100"},
 				ToZones:      []string{"untrust"},
 				Applications: []string{"any"},
 			},
@@ -451,8 +451,8 @@ func TestBuildSnapshotPrunesScopedGlobalMemberFromRealPath(t *testing.T) {
 	if deny == nil {
 		t.Fatalf("multi-zone scoped global deny was dropped from the built snapshot — fail-open (#5577)")
 	}
-	if got := deny.effectiveMatchFromZones(); len(got) != 1 || got[0] != "z174" {
-		t.Fatalf("built deny from-scope = %v, want [z174] (z214 pruned, deny survives for z174)", got)
+	if got := deny.effectiveMatchFromZones(); len(got) != 1 || got[0] != "zzq17760" {
+		t.Fatalf("built deny from-scope = %v, want [zzq17760] (zzq8100 pruned, deny survives for zzq17760)", got)
 	}
 }
 

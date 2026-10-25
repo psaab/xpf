@@ -93,7 +93,7 @@ pub(super) struct EmbeddedIcmpMatch {
     /// admits only when the actual arrival zone is nonzero and equals this
     /// value. Zero means unresolved and falls through to ordinary
     /// arrival-to-egress policy.
-    pub(super) related_expected_zone: u16,
+    pub(super) related_expected_zone: u32,
 }
 
 /// Borrow bundle threaded through both v4/v6 NAT-match paths and the
@@ -110,7 +110,7 @@ pub(in crate::afxdp::icmp_embed) struct NatMatchCtx<'a> {
     pub shared_nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub shared_owner_rg_indexes: Option<&'a crate::afxdp::types::SharedSessionOwnerRgIndexes>,
     pub shared_forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    pub ingress_zone_override: Option<u16>,
+    pub ingress_zone_override: Option<u32>,
 }
 
 /// Outcome of an embedded-ICMP match attempt. THREE states, not two: a
@@ -308,7 +308,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
     shared_owner_rg_indexes: &crate::afxdp::types::SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     try_embedded_icmp_nat_match_from_frame_inner(
         frame,
@@ -395,7 +395,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame_with_ingress_zone(
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     try_embedded_icmp_nat_match_from_frame_inner(
         frame,
@@ -424,7 +424,7 @@ fn try_embedded_icmp_nat_match_from_frame_inner(
     shared_owner_rg_indexes: Option<&crate::afxdp::types::SharedSessionOwnerRgIndexes>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     let l4 = meta.l4_offset as usize;
     let Some(icmp_type) = frame.get(l4).copied() else {
@@ -472,7 +472,7 @@ pub(super) fn try_nat64_icmp_error_match_from_frame(
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
 ) -> EmbeddedMatchOutcome<Nat64IcmpErrorMatch> {
     let mut ctx = NatMatchCtx {
         sessions,
@@ -549,7 +549,7 @@ pub(super) fn finalize_embedded_icmp_resolution_parts(
     now_secs: u64,
     ingress_ifindex: i32,
     resolution: ForwardingResolution,
-    ingress_zone: u16,
+    ingress_zone: u32,
 ) -> ForwardingResolution {
     builders::finalize_embedded_icmp_resolution_parts(
         forwarding,

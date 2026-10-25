@@ -10,7 +10,7 @@ import (
 // path both consume. The unknown/none/0 sentinels select zone 0 (#3338)
 // without an apply result; a named zone needs one; parsing fails closed.
 func TestParseEventFilterArgs(t *testing.T) {
-	zoneIDs := map[string]uint16{"trust": 1, "untrust": 2}
+	zoneIDs := map[string]uint32{"trust": 1, "untrust": 2}
 
 	t.Run("zone-0 sentinels select the unknown zone", func(t *testing.T) {
 		for _, s := range []string{"unknown", "none", "0", "UNKNOWN", "None"} {

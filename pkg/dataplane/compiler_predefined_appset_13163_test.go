@@ -22,7 +22,7 @@ func (*d13163DP) SetApplication(uint8, uint16, uint32, uint32, uint8, uint16, ui
 func (*d13163DP) SetAppRange(uint32, AppRangeEntry) error { return nil }
 func (*d13163DP) DeleteStaleApplications(map[AppKey]bool) {}
 
-func (d *d13163DP) SetZonePairPolicy(uint16, uint16, PolicySet) error { return nil }
+func (d *d13163DP) SetZonePairPolicy(uint32, uint32, PolicySet) error { return nil }
 func (d *d13163DP) SetPolicyRule(_ uint32, _ uint32, rule PolicyRule) error {
 	d.rules = append(d.rules, rule)
 	return nil
@@ -56,7 +56,7 @@ func TestCompilePoliciesPredefinedAppSetParity13163(t *testing.T) {
 		},
 	}
 	res := &CompileResult{
-		ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2},
+		ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2},
 		AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID),
 		PolicyNames: make(map[uint32]string),
 	}

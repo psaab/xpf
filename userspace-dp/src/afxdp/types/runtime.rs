@@ -550,8 +550,8 @@ pub(in crate::afxdp) struct ResolutionDebug {
     pub(in crate::afxdp) dst_port: u16,
     /// #919: stored as zone IDs; the slow-path `into_*` conversion
     /// looks up the name via `forwarding.zone_id_to_name`.
-    pub(in crate::afxdp) from_zone: Option<u16>,
-    pub(in crate::afxdp) to_zone: Option<u16>,
+    pub(in crate::afxdp) from_zone: Option<u32>,
+    pub(in crate::afxdp) to_zone: Option<u32>,
     /// Packet's ingress routing-domain identity, retained for attributing
     /// fail-closed ambiguous-fabric table drops.
     pub(in crate::afxdp) routing_domain: u32,

@@ -10,11 +10,11 @@ import (
 // #13099 (D3-08): a zone poisoned by DroppedEnforcementChild (#11575/#12623,
 // "the zone is unbound") must be quarantined in its own right. Before the fix
 // buildZoneSnapshots / quarantineCollidingZones / BuildZoneHostInboundViews /
-// ClassifyHostInbound never consulted the flag, so the poisoned z174 still
-// claimed its StableZoneID, quarantined the healthy colliding peer z214, and
+// ClassifyHostInbound never consulted the flag, so the poisoned zzq17760 still
+// claimed its StableZoneID, quarantined the healthy colliding peer zzq8100, and
 // classified as HostInboundTokenAdmit despite owning no bound interface.
 //
-// z174/z214 are the verified StableZoneID-colliding pair (frozen fold).
+// zzq17760/zzq8100 are the verified StableZoneID-colliding pair (frozen fold).
 
 func compileLenient13099(t *testing.T, cmds []string) *config.Config {
 	t.Helper()
@@ -37,23 +37,23 @@ func compileLenient13099(t *testing.T, cmds []string) *config.Config {
 
 func poisonedCollisionCfg13099(t *testing.T) *config.Config {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
 	cfg := compileLenient13099(t, []string{
 		"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.1/24",
 		"set interfaces ge-0/0/1 unit 0 family inet address 198.51.100.1/24",
-		"set security zones security-zone z174 interfaces ge-0/0/0.0",
-		"set security zones security-zone z174 host-inbound-traffic system-services ssh",
-		"set security zones security-zone z174 unknown-enforcement-knob foo",
-		"set security zones security-zone z214 interfaces ge-0/0/1.0",
-		"set security zones security-zone z214 host-inbound-traffic system-services ssh",
+		"set security zones security-zone zzq17760 interfaces ge-0/0/0.0",
+		"set security zones security-zone zzq17760 host-inbound-traffic system-services ssh",
+		"set security zones security-zone zzq17760 unknown-enforcement-knob foo",
+		"set security zones security-zone zzq8100 interfaces ge-0/0/1.0",
+		"set security zones security-zone zzq8100 host-inbound-traffic system-services ssh",
 	})
-	if z := cfg.Security.Zones["z174"]; z == nil || !z.DroppedEnforcementChild {
-		t.Fatalf("fixture: z174 must be poisoned, got %+v", z)
+	if z := cfg.Security.Zones["zzq17760"]; z == nil || !z.DroppedEnforcementChild {
+		t.Fatalf("fixture: zzq17760 must be poisoned, got %+v", z)
 	}
-	if z := cfg.Security.Zones["z214"]; z == nil || z.DroppedEnforcementChild {
-		t.Fatalf("fixture: z214 must be healthy, got %+v", z)
+	if z := cfg.Security.Zones["zzq8100"]; z == nil || z.DroppedEnforcementChild {
+		t.Fatalf("fixture: zzq8100 must be healthy, got %+v", z)
 	}
 	return cfg
 }
@@ -63,29 +63,29 @@ func TestPoisonedZoneDoesNotQuarantineHealthyCollisionPeer13099(t *testing.T) {
 
 	// Config-level quarantine verdict: poisoned excluded, healthy survivor not.
 	excluded := config.ZoneQuarantineExclusionsForConfig(cfg)
-	if _, ok := excluded["z174"]; !ok {
-		t.Fatalf("poisoned z174 must be quarantine-excluded, got %v", excluded)
+	if _, ok := excluded["zzq17760"]; !ok {
+		t.Fatalf("poisoned zzq17760 must be quarantine-excluded, got %v", excluded)
 	}
-	if _, ok := excluded["z214"]; ok {
-		t.Fatalf("healthy z214 must not be quarantine-excluded, got %v", excluded)
+	if _, ok := excluded["zzq8100"]; ok {
+		t.Fatalf("healthy zzq8100 must not be quarantine-excluded, got %v", excluded)
 	}
-	if r := config.ZoneQuarantineExcludedReason("z174", cfg); !strings.Contains(r, "unbound") {
-		t.Fatalf("z174 quarantine reason must name the poisoned/unbound cause, got %q", r)
+	if r := config.ZoneQuarantineExcludedReason("zzq17760", cfg); !strings.Contains(r, "unbound") {
+		t.Fatalf("zzq17760 quarantine reason must name the poisoned/unbound cause, got %q", r)
 	}
-	if r := config.ZoneQuarantineExcludedReason("z214", cfg); r != "" {
-		t.Fatalf("healthy z214 must have no quarantine reason, got %q", r)
+	if r := config.ZoneQuarantineExcludedReason("zzq8100", cfg); r != "" {
+		t.Fatalf("healthy zzq8100 must have no quarantine reason, got %q", r)
 	}
-	if owner := config.StableZoneIDOwnerForConfig(cfg, config.StableZoneID("z174")); owner != "z214" {
-		t.Fatalf("collision id owner must be healthy z214, got %q", owner)
+	if owner := config.StableZoneIDOwnerForConfig(cfg, config.StableZoneID("zzq17760")); owner != "zzq8100" {
+		t.Fatalf("collision id owner must be healthy zzq8100, got %q", owner)
 	}
 
 	// Interface resolution: healthy unit stays zoned, poisoned unit unzoned.
 	zoneByIface := buildInterfaceZoneMap(cfg)
-	if got := zoneByIface["ge-0/0/1.0"]; got != "z214" {
-		t.Fatalf("ge-0/0/1.0 must resolve to z214, got %q (map %v)", got, zoneByIface)
+	if got := zoneByIface["ge-0/0/1.0"]; got != "zzq8100" {
+		t.Fatalf("ge-0/0/1.0 must resolve to zzq8100, got %q (map %v)", got, zoneByIface)
 	}
 	if got := zoneByIface["ge-0/0/0.0"]; got != "" {
-		t.Fatalf("ge-0/0/0.0 must be unzoned (poisoned z174), got %q", got)
+		t.Fatalf("ge-0/0/0.0 must be unzoned (poisoned zzq17760), got %q", got)
 	}
 
 	// Snapshot quarantine: only the healthy zone survives.
@@ -95,57 +95,57 @@ func TestPoisonedZoneDoesNotQuarantineHealthyCollisionPeer13099(t *testing.T) {
 		Interfaces: buildInterfaceSnapshots(cfg),
 	}
 	collisions := quarantineCollidingZones(snap)
-	if len(snap.Zones) != 1 || snap.Zones[0].Name != "z214" {
-		t.Fatalf("expected only healthy z214 to survive quarantine, got %+v (collisions %v)", snap.Zones, collisions)
+	if len(snap.Zones) != 1 || snap.Zones[0].Name != "zzq8100" {
+		t.Fatalf("expected only healthy zzq8100 to survive quarantine, got %+v (collisions %v)", snap.Zones, collisions)
 	}
 	foundPoisonRecord := false
 	for _, c := range collisions {
-		if c.Quarantined == "z174" {
+		if c.Quarantined == "zzq17760" {
 			foundPoisonRecord = true
 		}
-		if c.Quarantined == "z214" {
-			t.Fatalf("healthy z214 must not be recorded quarantined: %v", collisions)
+		if c.Quarantined == "zzq8100" {
+			t.Fatalf("healthy zzq8100 must not be recorded quarantined: %v", collisions)
 		}
 	}
 	if !foundPoisonRecord {
-		t.Fatalf("expected a quarantine record for poisoned z174, got %v", collisions)
+		t.Fatalf("expected a quarantine record for poisoned zzq17760, got %v", collisions)
 	}
 	for _, ifc := range snap.Interfaces {
-		if ifc.Name == "ge-0/0/1.0" && ifc.Zone != "z214" {
-			t.Fatalf("healthy z214 interface must stay zoned, got %q", ifc.Zone)
+		if ifc.Name == "ge-0/0/1.0" && ifc.Zone != "zzq8100" {
+			t.Fatalf("healthy zzq8100 interface must stay zoned, got %q", ifc.Zone)
 		}
 		if ifc.Name == "ge-0/0/0.0" && ifc.Zone != "" {
-			t.Fatalf("poisoned z174 interface must be unzoned, got %q", ifc.Zone)
+			t.Fatalf("poisoned zzq17760 interface must be unzoned, got %q", ifc.Zone)
 		}
 	}
 
 	// Host-inbound views + classifier: poisoned admits nothing, healthy admits ssh.
 	views := BuildZoneHostInboundViews(cfg)
 	for _, v := range views {
-		if v.Zone == "z174" {
-			t.Fatalf("poisoned z174 must have no host-inbound view, got %+v", views)
+		if v.Zone == "zzq17760" {
+			t.Fatalf("poisoned zzq17760 must have no host-inbound view, got %+v", views)
 		}
 	}
 	found214 := false
 	for _, v := range views {
-		if v.Zone == "z214" {
+		if v.Zone == "zzq8100" {
 			found214 = true
 		}
 	}
 	if !found214 {
-		t.Fatalf("healthy z214 must keep a host-inbound view, got %+v", views)
+		t.Fatalf("healthy zzq8100 must keep a host-inbound view, got %+v", views)
 	}
-	if got := ClassifyHostInbound(cfg, "z174", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
-		t.Fatalf("poisoned unbound z174 must not classify as TokenAdmit, got %+v", got)
+	if got := ClassifyHostInbound(cfg, "zzq17760", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
+		t.Fatalf("poisoned unbound zzq17760 must not classify as TokenAdmit, got %+v", got)
 	}
-	if got := ClassifyHostInbound(cfg, "z214", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status != HostInboundTokenAdmit {
-		t.Fatalf("healthy z214 ssh must classify as TokenAdmit, got %+v", got)
+	if got := ClassifyHostInbound(cfg, "zzq8100", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status != HostInboundTokenAdmit {
+		t.Fatalf("healthy zzq8100 ssh must classify as TokenAdmit, got %+v", got)
 	}
-	if got := ClassifyHostInboundForInterface(cfg, "z174", "ge-0/0/0.0", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
-		t.Fatalf("poisoned z174 per-interface classify must not TokenAdmit, got %+v", got)
+	if got := ClassifyHostInboundForInterface(cfg, "zzq17760", "ge-0/0/0.0", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
+		t.Fatalf("poisoned zzq17760 per-interface classify must not TokenAdmit, got %+v", got)
 	}
-	if got := ClassifyHostInboundForInterface(cfg, "z214", "ge-0/0/1.0", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status != HostInboundTokenAdmit {
-		t.Fatalf("healthy z214 per-interface ssh must TokenAdmit, got %+v", got)
+	if got := ClassifyHostInboundForInterface(cfg, "zzq8100", "ge-0/0/1.0", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status != HostInboundTokenAdmit {
+		t.Fatalf("healthy zzq8100 per-interface ssh must TokenAdmit, got %+v", got)
 	}
 }
 

@@ -201,11 +201,11 @@ func TestDHCPServerHostInboundBypassWarningsConfigScopedZoneQuarantine12843(t *t
 		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*InterfaceUnit{1: {Number: 1}}},
 	}
 	cfg.Security.Zones = map[string]*ZoneConfig{
-		"z214": {Interfaces: []string{"ge-0/0/1.1"}, HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}}},
+		"zzq8100": {Interfaces: []string{"ge-0/0/1.1"}, HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}}},
 	}
 	// This collision exists only in the recorded node/group runtime view, not
 	// among the effective zone keys in Security.Zones.
-	cfg.ZoneQuarantineNames = []string{"z174", "z214"}
+	cfg.ZoneQuarantineNames = []string{"zzq17760", "zzq8100"}
 	cfg.System.DHCPServer.DHCPLocalServer = mkDHCPGroups("g1", "ge-0/0/1.1")
 
 	if w := validateDHCPServerHostInboundBypassWarnings(cfg); len(w) != 0 {

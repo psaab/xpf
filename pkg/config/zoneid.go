@@ -6,41 +6,55 @@ import (
 	"sort"
 )
 
-// ZoneIDReservedMin is the Go mirror of the Rust ZONE_ID_RESERVED_MIN
-// (userspace-dp/src/policy.rs: u16::MAX-1 = 0xFFFE). The top two ids of the
-// u16 zone space are reserved sentinels — JUNOS_GLOBAL_ZONE_ID (u16::MAX) and
-// the junos-host self-traffic zone (u16::MAX-1) — so the largest id a
-// CONFIGURED zone may carry is ZoneIDReservedMin-1 (65533). StableZoneID folds
-// strictly into [1, ZoneIDReservedMin-1] so a hashed zone id can never collide
-// with either sentinel.
-const ZoneIDReservedMin uint16 = 0xFFFE // mirrors Rust ZONE_ID_RESERVED_MIN
+// ZoneIDReservedMin is the first reserved id at the top of the u32 zone
+// space (#16557). The top two ids are reserved sentinels —
+// JUNOS_GLOBAL_ZONE_ID (u32::MAX) and the junos-host self-traffic zone
+// (u32::MAX-1) — so the largest id a CONFIGURED zone may carry is
+// ZoneIDReservedMin-1 (4294967293). StableZoneID maps strictly into
+// [1, ZoneIDReservedMin-1] so a hashed zone id can never collide with
+// either sentinel. This mirrors the Rust ZONE_ID_RESERVED_MIN
+// (userspace-dp/src/policy.rs).
+const ZoneIDReservedMin uint32 = 0xFFFFFFFE // mirrors Rust ZONE_ID_RESERVED_MIN
 
-// StableZoneID maps a security-zone name to a stable nonzero u16 zone id:
-// FNV-1a/64 xor-folded to 16 bits, mapped into [1, ZoneIDReservedMin-1].
+// StableZoneID maps a security-zone name to a stable nonzero u32 zone id:
+// FNV-1a/64 xor-folded to 32 bits, mapped into [1, ZoneIDReservedMin-1].
 //
-// THE FOLD IS WIRE-ADJACENT AND MUST NEVER CHANGE (#3075): zone ids ride the
-// daemon↔helper event-stream delta wire (a u16 field after #3075) and the
-// per-flow conntrack value, and both HA nodes must compute identical ids from
-// identical config. The id is a pure function of the zone NAME alone — never of
-// the rest of the zone set, the compile order, or allocation history — so
-// adding, renaming, or removing a zone can never renumber another zone (the
-// sorted-positional defect this replaces; see #3075), and both nodes plus a
-// cold-booting node agree by construction with zero synced/persisted state.
+// THE FOLD IS WIRE-ADJACENT AND MUST NEVER CHANGE lightly (#3075, #16557):
+// zone ids ride the daemon↔helper session/event wires and the per-flow
+// conntrack value, and both HA nodes must compute identical ids from
+// identical config. The id is a pure function of the zone NAME alone —
+// never of the rest of the zone set, the compile order, or allocation
+// history — so adding, renaming, or removing a zone can never renumber
+// another zone (the sorted-positional defect this replaces; see #3075),
+// and both nodes plus a cold-booting node agree by construction with zero
+// synced/persisted state.
 //
-// This is the #1873 tunnelid.go pattern, ported to zones now that the two
-// same-host event-stream u8 chokepoints have been widened to u16 (#3075). It
-// supersedes the #2391 u8 zone-count cap: the binding constraint is no longer a
-// 255-id wire field but the reserved-sentinel range, so the usable space is
-// [1, ZoneIDReservedMin-1] = [1, 65533].
+// #16557 widened the former u16 fold to u32: under the u16 fold, valid
+// pairs such as vlan163+vlan364 (both 51948) and zone109+zone237 (both
+// 9074) hard-failed strict commit, with ~12% birthday collision
+// probability at 128 zones. The u32 fold makes those pairs distinct and
+// pushes the same probability to ~100k zones. A residual u32 collision
+// is still possible in principle; validateZoneIDCollisionAST rejects it
+// at strict commit and the lenient path quarantines the later-sorting
+// zone (QuarantinedZoneNames), exactly as before — widened, not removed.
+//
+// Session/event records still carry zone ids in u16 fields on the
+// inter-node and daemon↔helper wires (a frozen ABI). Values above
+// u16::MAX therefore cannot round-trip on those records; affected zones'
+// sessions lose exact zone attribution on those paths (they resolve via
+// the surviving-name fallback / "unknown zone") instead of merging with
+// another zone — fail-closed for policy (the dataplane evaluates the
+// full u32 id) and never a silent zone merge. Widening those wire
+// fields is a separate flag-day change.
 //
 // 0 is never returned: id 0 means "unassigned / unknown zone" across the
 // dataplane.
-func StableZoneID(name string) uint16 {
+func StableZoneID(name string) uint32 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(name))
 	s := h.Sum64()
-	folded := uint16(s) ^ uint16(s>>16) ^ uint16(s>>32) ^ uint16(s>>48)
-	return folded%(ZoneIDReservedMin-1) + 1 // [1, 65533]
+	folded := uint32(s) ^ uint32(s>>32)
+	return folded%(ZoneIDReservedMin-1) + 1 // [1, 4294967293]
 }
 
 // collectZoneNamesAST appends the security-zone names declared under one
@@ -214,7 +228,7 @@ func validateZoneIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, []str
 	if len(sorted) < 2 {
 		return nil, runtime, nil
 	}
-	byID := make(map[uint16]string, len(sorted))
+	byID := make(map[uint32]string, len(sorted))
 	var warnings []string
 	for _, name := range sorted {
 		id := StableZoneID(name)
@@ -359,7 +373,7 @@ func quarantinedZoneNamesExcluding(names []string, excluded map[string]struct{})
 	sorted := make([]string, len(names))
 	copy(sorted, names)
 	sort.Strings(sorted)
-	owner := make(map[uint16]string, len(sorted))
+	owner := make(map[uint32]string, len(sorted))
 	var quarantined map[string]struct{}
 	mark := func(name string) {
 		if quarantined == nil {
@@ -533,7 +547,7 @@ func ScopedGlobalQuarantineDropped(from, to []string, quarantined map[string]str
 // numeric zone id among names. Reserved context names are excluded because
 // snapshot builders quarantine them rather than installing them. It returns
 // "" when no installed name in names folds to id.
-func StableZoneIDOwner(names []string, id uint16) string {
+func StableZoneIDOwner(names []string, id uint32) string {
 	owner := ""
 	for _, name := range names {
 		if _, reserved := reservedZoneNames[name]; reserved {
@@ -552,7 +566,7 @@ func StableZoneIDOwner(names []string, id uint16) string {
 // StableZoneIDOwnerForConfig is StableZoneIDOwner over cfg's runtime name
 // set, skipping poisoned zones so a poisoned collider never resolves as the
 // installed owner of its ID (#13099).
-func StableZoneIDOwnerForConfig(cfg *Config, id uint16) string {
+func StableZoneIDOwnerForConfig(cfg *Config, id uint32) string {
 	if cfg == nil {
 		return ""
 	}
@@ -594,13 +608,13 @@ func StableZoneIDOwnerForConfig(cfg *Config, id uint16) string {
 // predates, #3075) are kept: ExcludedReason only fires for names that set
 // quarantines, which can include a collider that exists only in a peer node's
 // view (#12247).
-func SurvivorZoneNames(zoneIDs map[string]uint16, cfg *Config) map[uint16]string {
+func SurvivorZoneNames(zoneIDs map[string]uint32, cfg *Config) map[uint32]string {
 	names := make([]string, 0, len(zoneIDs))
 	for name := range zoneIDs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	m := make(map[uint16]string, len(zoneIDs))
+	m := make(map[uint32]string, len(zoneIDs))
 	for _, name := range names {
 		id := zoneIDs[name]
 		if cfg != nil && ZoneQuarantineExcludedReason(name, cfg) != "" {

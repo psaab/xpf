@@ -161,9 +161,10 @@ func TestWalkPolicyRuleSlotsSkipsFullyQuarantinedScopedGlobalPolicies(t *testing
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			Zones: map[string]*config.ZoneConfig{
-				"trust":   {Name: "trust"},
-				"untrust": {Name: "untrust"},
-				colliding: {Name: colliding},
+				"trust":    {Name: "trust"},
+				"untrust":  {Name: "untrust"},
+				"zzq17760": {Name: "zzq17760"},
+				colliding:  {Name: colliding},
 			},
 			Policies: []*config.ZonePairPolicies{
 				{FromZone: "trust", ToZone: "untrust", Policies: d412Rules("survivor", 1)},

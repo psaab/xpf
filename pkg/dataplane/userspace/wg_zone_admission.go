@@ -24,7 +24,7 @@ type userspaceWGIngressZoneKey struct {
 }
 
 type userspaceWGAdmissionKey struct {
-	ZoneID     uint16
+	ZoneID     uint32
 	Port       uint16
 	AddrFamily uint8
 	Pad        [3]byte
@@ -37,13 +37,13 @@ type userspaceWGAddressKey struct {
 }
 
 type userspaceWGZoneMaps struct {
-	ingress   map[userspaceWGIngressZoneKey]uint16
+	ingress   map[userspaceWGIngressZoneKey]uint32
 	admission map[userspaceWGAdmissionKey]uint8
 }
 
-func userspaceWGZoneIDByName(snapshot *ConfigSnapshot) (map[string]uint16, error) {
-	ids := make(map[string]uint16, len(snapshot.Zones))
-	byID := make(map[uint16]string, len(snapshot.Zones))
+func userspaceWGZoneIDByName(snapshot *ConfigSnapshot) (map[string]uint32, error) {
+	ids := make(map[string]uint32, len(snapshot.Zones))
+	byID := make(map[uint32]string, len(snapshot.Zones))
 	for _, zone := range snapshot.Zones {
 		if zone.Name == "" || zone.ID == 0 {
 			return nil, fmt.Errorf("invalid WG zone identity: name=%q id=%d", zone.Name, zone.ID)
@@ -60,7 +60,7 @@ func userspaceWGZoneIDByName(snapshot *ConfigSnapshot) (map[string]uint16, error
 	return ids, nil
 }
 
-func addUserspaceWGIngressZone(dst map[userspaceWGIngressZoneKey]uint16, key userspaceWGIngressZoneKey, zoneID uint16) {
+func addUserspaceWGIngressZone(dst map[userspaceWGIngressZoneKey]uint32, key userspaceWGIngressZoneKey, zoneID uint32) {
 	if prior, exists := dst[key]; !exists {
 		dst[key] = zoneID
 	} else if prior != zoneID {
@@ -70,7 +70,7 @@ func addUserspaceWGIngressZone(dst map[userspaceWGIngressZoneKey]uint16, key use
 
 func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, error) {
 	plan := userspaceWGZoneMaps{
-		ingress:   make(map[userspaceWGIngressZoneKey]uint16),
+		ingress:   make(map[userspaceWGIngressZoneKey]uint32),
 		admission: make(map[userspaceWGAdmissionKey]uint8),
 	}
 	if snapshot == nil || !snapshot.ZoneSetValidated {
@@ -84,7 +84,7 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 	for _, ifindex := range buildUserspaceIngressIfindexes(snapshot) {
 		ingressIfindexes[ifindex] = struct{}{}
 	}
-	zoneID := func(name string) uint16 { return zoneIDs[name] }
+	zoneID := func(name string) uint32 { return zoneIDs[name] }
 
 	// Direct netdev arrivals and tagged parent arrivals are separate keys. An
 	// untagged packet uses VLANID=0xffff so a priority-tagged VID 0 cannot alias
@@ -120,7 +120,7 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 			continue
 		}
 		matches := 0
-		var nativeZone uint16
+		var nativeZone uint32
 		for _, unit := range snapshot.Interfaces {
 			if unit.ParentIfindex == base.Ifindex && unit.VLANID == base.NativeVLANID {
 				matches++
@@ -138,7 +138,7 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 	// Destination-address ownership must be unique. A duplicate address in two
 	// zones is not sufficient authority for either one to claim the WG record.
 	type addressOwner struct {
-		zoneID    uint16
+		zoneID    uint32
 		seen      bool
 		ambiguous bool
 	}
@@ -187,7 +187,7 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 	// underlay zone receiving its UDP listener. Attribute the listener through
 	// its local Source address, then admit that port only for destinations
 	// uniquely owned by the same underlay zone.
-	portsByZone := make(map[uint16]map[uint16]struct{})
+	portsByZone := make(map[uint32]map[uint16]struct{})
 	for _, endpoint := range snapshot.TunnelEndpoints {
 		if endpoint.Mode != "wireguard" || endpoint.WgListenPort == 0 || zoneID(endpoint.Zone) == 0 {
 			continue
@@ -257,9 +257,9 @@ func (m *Manager) syncUserspaceWGZoneMapsLocked(snapshot *ConfigSnapshot) error 
 		return errors.New("userspace_wg_zone_admission map not loaded")
 	}
 
-	currentIngress := make(map[userspaceWGIngressZoneKey]uint16)
+	currentIngress := make(map[userspaceWGIngressZoneKey]uint32)
 	var ingressKey userspaceWGIngressZoneKey
-	var ingressValue uint16
+	var ingressValue uint32
 	ingressIter := ingressMap.Iterate()
 	for ingressIter.Next(&ingressKey, &ingressValue) {
 		currentIngress[ingressKey] = ingressValue
@@ -310,7 +310,7 @@ func (m *Manager) syncUserspaceWGZoneMapsLocked(snapshot *ConfigSnapshot) error 
 	return nil
 }
 
-func sameUserspaceWGIngressZones(a, b map[userspaceWGIngressZoneKey]uint16) bool {
+func sameUserspaceWGIngressZones(a, b map[userspaceWGIngressZoneKey]uint32) bool {
 	if len(a) != len(b) {
 		return false
 	}

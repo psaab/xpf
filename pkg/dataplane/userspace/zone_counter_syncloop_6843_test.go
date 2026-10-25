@@ -17,8 +17,8 @@ import (
 // real loop.
 func TestSyncBPFCountersReplacesZoneOffsetsAcrossPolls6843(t *testing.T) {
 	m := New()
-	const kept uint16 = 50675 // config.StableZoneID("trust")
-	const gone uint16 = 20665 // config.StableZoneID("untrust")
+	const kept uint32 = 101 // synthetic slotted zone id (#16557: StableZoneID now exceeds dense slot space)
+	const gone uint32 = 102 // synthetic slotted zone id
 
 	// Poll N: the helper publishes both zones.
 	m.mu.Lock()
@@ -69,7 +69,7 @@ func TestSyncBPFCountersReplacesZoneOffsetsAcrossPolls6843(t *testing.T) {
 // that always clears cannot pass — the assertion is a transition, not a state.
 func TestSyncBPFCountersClearsZoneOffsetsWhenHelperStopsPublishing6843(t *testing.T) {
 	m := New()
-	const id uint16 = 56918 // config.StableZoneID("dmz")
+	const id uint32 = 103 // synthetic slotted zone id
 
 	m.mu.Lock()
 	m.syncBPFCountersLocked(&ProcessStatus{
@@ -108,7 +108,7 @@ func TestSyncBPFCountersClearsZoneOffsetsWhenHelperStopsPublishing6843(t *testin
 // Version 0 must therefore be handled like any other empty block: clear.
 func TestSyncBPFCountersClearsZoneOffsetsOnLayoutVersionZero6843(t *testing.T) {
 	m := New()
-	const id uint16 = 50675
+	const id uint32 = 101
 
 	// A populated poll from a current helper.
 	m.mu.Lock()

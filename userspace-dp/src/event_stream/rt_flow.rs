@@ -91,8 +91,8 @@ impl EventStreamWorkerHandle {
                     nat.rewrite_dst,
                     nat.rewrite_src_port.unwrap_or(0),
                     nat.rewrite_dst_port.unwrap_or(0),
-                    delta.metadata.ingress_zone,
-                    delta.metadata.egress_zone,
+                    delta.metadata.ingress_zone as u16,
+                    delta.metadata.egress_zone as u16,
                     // #3056: the admitting policy ID, so the SESSION_CLOSE
                     // RT_FLOW record (and the NetFlow/IPFIX close exporters) name
                     // the policy that admitted the flow instead of policy 0.
@@ -228,8 +228,8 @@ impl EventStreamWorkerHandle {
                     nat.rewrite_dst,
                     nat.rewrite_src_port.unwrap_or(0),
                     nat.rewrite_dst_port.unwrap_or(0),
-                    delta.metadata.ingress_zone,
-                    delta.metadata.egress_zone,
+                    delta.metadata.ingress_zone as u16,
+                    delta.metadata.egress_zone as u16,
                     // #3056: the admitting policy ID stamped on the session at
                     // install, so the SESSION_CREATE RT_FLOW record names the
                     // policy that admitted the flow instead of policy 0.

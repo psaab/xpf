@@ -810,6 +810,17 @@ xpf (0.0.0) unstable; urgency=medium
     applyConfigLocked is registered before the test seam so the
     retry owner's stubbed applies discharge the debt too.
 
+  * Widen security-zone ids from a 16-bit to a 32-bit stable name-hash
+    (#16557). Valid zone pairs that collided under the u16 fold
+    (vlan163/vlan364, zone109/zone237) now commit, ids stay a pure
+    function of the zone name (stable across unrelated zone add/remove
+    and identical on both HA nodes), and MaxUsableZoneID rises to
+    4294967293. A residual u32 collision is still rejected at strict
+    commit and quarantined on tolerant load. Zone ids above 65535 lose
+    exact attribution on the frozen u16 session/event/fabric records
+    and are uncounted by the dense per-zone counter slots (fail-closed,
+    never merged with another zone); see docs/config-schema.md #16557.
+
   * Config: a bare presence statement inline (`set system services
     ssh`, `set system syslog`) no longer discards a group's whole
     container for the same keyword (#16546). The #4325 cross-shape

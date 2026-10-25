@@ -4464,7 +4464,7 @@ fn source_nat_translation_matches_no_translation_to_pat_revokes_14128() {
 
 const NOW_14315: u64 = 1_000_000_000;
 
-fn meta_14315(ingress_zone: u16, egress_zone: u16) -> SessionMetadata {
+fn meta_14315(ingress_zone: u32, egress_zone: u32) -> SessionMetadata {
     SessionMetadata {
         ingress_zone,
         egress_zone,

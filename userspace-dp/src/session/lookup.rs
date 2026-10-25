@@ -2207,7 +2207,7 @@ impl SessionTable {
         &self,
         key: &SessionKey,
         now_ns: u64,
-        arrival_zone: u16,
+        arrival_zone: u32,
     ) -> Option<bool> {
         let entry = self.entry_by_key(key)?;
         if now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns {

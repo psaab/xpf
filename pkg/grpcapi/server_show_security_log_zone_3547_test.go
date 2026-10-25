@@ -40,7 +40,7 @@ func TestShowSecurityLogZoneFilterRemotePath(t *testing.T) {
 	eb.Add(logging.EventRecord{Type: "SESSION_OPEN", SrcAddr: "z2", DstAddr: "d", Protocol: "udp", InZone: 2, OutZone: 1})
 
 	dp := &zoneApplyGRPCDP{result: &dataplane.ApplyResult{
-		ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2},
+		ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2},
 	}}
 	s := &Server{eventBuf: eb, dp: dp}
 

@@ -19,19 +19,14 @@ import (
 
 func d412CollidingZoneName(t *testing.T) string {
 	t.Helper()
-	targetID := config.StableZoneID("trust")
-	for i := 0; i < 200000; i++ {
-		cand := fmt.Sprintf("z-coll-%d", i)
-		if config.StableZoneID(cand) == targetID {
-			q := config.QuarantinedZoneNames([]string{"trust", cand})
-			if _, ok := q[cand]; !ok {
-				t.Fatalf("colliding zone %q not quarantined: %v", cand, q)
-			}
-			return cand
-		}
+	// #16557 residual pair: zzq8100 collides with zzq17760 (both
+	// 1679679597) and sorts later, so it is the quarantine loser.
+	cand := "zzq8100"
+	q := config.QuarantinedZoneNames([]string{"zzq17760", cand})
+	if _, ok := q[cand]; !ok {
+		t.Fatalf("colliding zone %q not quarantined: %v", cand, q)
 	}
-	t.Fatalf("no colliding zone name for trust (id=%d)", targetID)
-	return ""
+	return cand
 }
 
 func d412Rules(prefix string, n int) []*config.Policy {
@@ -54,9 +49,10 @@ func d412Cfg(colliding string, sets ...*config.ZonePairPolicies) *config.Config 
 	return &config.Config{
 		Security: config.SecurityConfig{
 			Zones: map[string]*config.ZoneConfig{
-				"trust":   {Name: "trust"},
-				"untrust": {Name: "untrust"},
-				colliding: {Name: colliding},
+				"trust":    {Name: "trust"},
+				"untrust":  {Name: "untrust"},
+				"zzq17760": {Name: "zzq17760"},
+				colliding:  {Name: colliding},
 			},
 			Policies: sets,
 		},

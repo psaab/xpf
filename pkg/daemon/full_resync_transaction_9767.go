@@ -138,7 +138,7 @@ func (d *Daemon) discardUserspaceSessionDeltasLocked(drainer userspaceSessionDel
 // install against the send queue. It returns an error unless the gate admitted
 // the batch and every install reached the queue.
 func (d *Daemon) queueUserspaceSessionDeltasComplete(
-	zoneIDs map[string]uint16,
+	zoneIDs map[string]uint32,
 	deltas []dpuserspace.SessionDeltaInfo,
 	installWait time.Duration,
 ) (int, error) {
@@ -194,7 +194,7 @@ func (d *Daemon) queueUserspaceSessionDeltasCompleteStream(
 // first page carries the #7194 schema gate for the whole window (see
 // queueUserspaceSessionDeltasCompleteStream); missed-install accounting
 // lives on the sink itself.
-func (d *Daemon) walkPageIntoPacedSink(sink *pacedQueueDeltaSink, zoneIDs map[string]uint16, deltas []dpuserspace.SessionDeltaInfo) error {
+func (d *Daemon) walkPageIntoPacedSink(sink *pacedQueueDeltaSink, zoneIDs map[string]uint32, deltas []dpuserspace.SessionDeltaInfo) error {
 	ss := d.getSessionSync()
 	if ss == nil {
 		return errors.New("session sync not ready")

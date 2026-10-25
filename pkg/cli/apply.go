@@ -29,7 +29,7 @@ import (
 // gRPC/remote/API commits stayed correct (#3704 follow-up). StableZoneID is a
 // pure function of the name, so this write is byte-identical to the daemon's
 // regardless of reconcile ordering.
-func syslogZoneNameMap(cfg *config.Config) map[uint16]string {
+func syslogZoneNameMap(cfg *config.Config) map[uint32]string {
 	names := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
@@ -41,7 +41,7 @@ func syslogZoneNameMap(cfg *config.Config) map[uint16]string {
 	// Otherwise RT_FLOW/syslog could render a real zone's traffic under the
 	// wrong name.
 	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
-	znMap := make(map[uint16]string, len(names))
+	znMap := make(map[uint32]string, len(names))
 	for _, name := range names {
 		if _, drop := quarantined[name]; drop {
 			continue

@@ -67,10 +67,10 @@ func TestRestartWithIdenticalConfigInstallsZoneOwnership11760(t *testing.T) {
 		t.Fatalf("identical config sync changed history: got %d, want %d", got, historyLen)
 	}
 
-	if !ss.ShouldSyncZone(config.StableZoneID("trust")) {
+	if !ss.ShouldSyncZone(uint16(config.StableZoneID("trust"))) {
 		t.Fatal("restart-with-identical-config left the published session sync without trust-zone RG ownership")
 	}
-	if ss.ShouldSyncZone(config.StableZoneID("unmapped")) {
+	if ss.ShouldSyncZone(uint16(config.StableZoneID("unmapped"))) {
 		t.Fatal("unmapped zones must retain the RG0-secondary fallback")
 	}
 }
@@ -109,10 +109,10 @@ func TestLocalSessionSyncOwnershipSeedRequiresAppliedConfig11760(t *testing.T) {
 		if !ss.ZoneOwnershipInstalled() {
 			t.Fatal("applied active config did not seed constructor-local session sync")
 		}
-		if !ss.ShouldSyncZone(config.StableZoneID("trust")) {
+		if !ss.ShouldSyncZone(uint16(config.StableZoneID("trust"))) {
 			t.Fatal("pre-publish ownership seed omitted the active config's trust-zone RG")
 		}
-		if ss.ShouldSyncZone(config.StableZoneID("unmapped")) {
+		if ss.ShouldSyncZone(uint16(config.StableZoneID("unmapped"))) {
 			t.Fatal("pre-publish ownership seed changed the unmapped-zone fallback")
 		}
 		if d.getSessionSync() != nil {

@@ -71,21 +71,21 @@ type shimFakeDP9821 struct {
 	zones []struct {
 		ifindex int
 		vlan    uint16
-		zid     uint16
+		zid     uint32
 	}
 	vlanInfo []struct {
 		sub, parent int
 		vlan        uint16
 	}
 	txPorts []int
-	zoneCfg map[uint16]ZoneConfig
+	zoneCfg map[uint32]ZoneConfig
 }
 
-func (f *shimFakeDP9821) SetZone(ifindex int, vlanID uint16, zoneID uint16, _ uint32, _ uint8, _ uint8, _ uint32) error {
+func (f *shimFakeDP9821) SetZone(ifindex int, vlanID uint16, zoneID uint32, _ uint32, _ uint8, _ uint8, _ uint32) error {
 	f.zones = append(f.zones, struct {
 		ifindex int
 		vlan    uint16
-		zid     uint16
+		zid     uint32
 	}{ifindex, vlanID, zoneID})
 	return nil
 }
@@ -103,9 +103,9 @@ func (f *shimFakeDP9821) AddTxPort(ifindex int) error {
 	return nil
 }
 
-func (f *shimFakeDP9821) SetZoneConfig(zoneID uint16, cfg ZoneConfig) error {
+func (f *shimFakeDP9821) SetZoneConfig(zoneID uint32, cfg ZoneConfig) error {
 	if f.zoneCfg == nil {
-		f.zoneCfg = map[uint16]ZoneConfig{}
+		f.zoneCfg = map[uint32]ZoneConfig{}
 	}
 	f.zoneCfg[zoneID] = cfg
 	return nil

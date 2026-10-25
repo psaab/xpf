@@ -226,7 +226,7 @@ func ifaceInGroup(ifaces []string, want string) bool {
 // view as ClassifyHostInbound, rather than granting its raw configured service.
 func Test_5579_IngressInterfaceHonorsZoneQuarantine11068(t *testing.T) {
 	var first, second string
-	owners := map[uint16]string{}
+	owners := map[uint32]string{}
 	for i := 0; i < 300000 && second == ""; i++ {
 		name := fmt.Sprintf("host-inbound-quarantine-%d", i)
 		id := config.StableZoneID(name)

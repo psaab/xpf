@@ -2720,7 +2720,7 @@ fn unzoned_tunnel_base_row_must_not_clobber_zoned_unit_zone_host_inbound_13180()
     use crate::ZoneSnapshot;
 
     const SHARED_IFINDEX: i32 = 55;
-    const VPN_ZONE: u16 = 1;
+    const VPN_ZONE: u32 = 1;
     const PROTO_TCP: u8 = 6;
     const PROTO_ICMP: u8 = 1;
 
@@ -2877,8 +2877,8 @@ fn contested_trunk_parent_denies_transit_and_host_inbound_10503() {
     const PARENT_IFINDEX: i32 = 11;
     const WAN_IFINDEX: i32 = 12;
     const LAN_IFINDEX: i32 = 13;
-    const WAN_ZONE: u16 = 7;
-    const LAN_ZONE: u16 = 8;
+    const WAN_ZONE: u32 = 7;
+    const LAN_ZONE: u32 = 8;
     const PROTO_TCP: u8 = 6;
     const PROTO_ICMP: u8 = 1;
 
@@ -3082,7 +3082,7 @@ fn contested_parent_snapshot_10520(default_policy: &str) -> ConfigSnapshot {
 #[test]
 fn contested_trunk_parent_transit_is_unattributed_deny_in_both_default_modes_10520() {
     const PARENT_IFINDEX: i32 = 11;
-    const WAN_ZONE: u16 = 7;
+    const WAN_ZONE: u32 = 7;
     const PROTO_TCP: u8 = 6;
 
     for default_policy in ["deny", "permit"] {
@@ -3758,7 +3758,7 @@ fn retained_exposed_refusal_skips_sentinel_stays_zone_gated_10520_10556() {
 // interface overrides, and same-ifindex row conflicts. These are deliberately
 // separate fixtures because each guard must fail closed without changing the
 // other admission contract.
-fn any_service_zone_10503(name: &str, id: u16) -> ZoneSnapshot {
+fn any_service_zone_10503(name: &str, id: u32) -> ZoneSnapshot {
     ZoneSnapshot {
         name: name.into(),
         id,
@@ -3997,7 +3997,7 @@ fn shared_ifindex_disputed_unit_host_inbound_refused_in_both_row_orders_16057() 
 
 
     const SHARED: i32 = 16057;
-    const ZONE_ID: u16 = 7;
+    const ZONE_ID: u32 = 7;
     const PROTO_TCP: u8 = 6;
     const PROTO_ICMP: u8 = 1;
     let unit_a = InterfaceSnapshot {
@@ -4133,7 +4133,7 @@ fn shared_ifindex_agreed_or_single_unit_host_inbound_still_admitted_16057() {
 
     const SHARED: i32 = 16058;
     const OTHER: i32 = 16059;
-    const ZONE_ID: u16 = 7;
+    const ZONE_ID: u32 = 7;
     const PROTO_TCP: u8 = 6;
     let ssh_unit = |name: &str, ifindex: i32| InterfaceSnapshot {
         name: name.into(),
@@ -4259,7 +4259,7 @@ fn shared_ifindex_unconfigured_unit_zone_vote_disputes_configured_sibling_16501(
 
     const SHARED: i32 = 16501;
     const ALONE: i32 = 16502;
-    const ZONE_ID: u16 = 7;
+    const ZONE_ID: u32 = 7;
     const PROTO_TCP: u8 = 6;
     let configured = InterfaceSnapshot {
         name: "st0.1".into(),
@@ -4345,7 +4345,7 @@ fn shared_ifindex_reordered_unit_host_inbound_not_disputed_16057() {
     use crate::afxdp::forwarding::host_inbound_admits_iface;
 
     const SHARED: i32 = 16060;
-    const ZONE_ID: u16 = 7;
+    const ZONE_ID: u32 = 7;
     const PROTO_TCP: u8 = 6;
     let unit = |name: &str,
                 svc: Vec<&str>,
@@ -4488,7 +4488,7 @@ fn shared_ifindex_nd_only_difference_is_disputed_16057() {
     use crate::afxdp::forwarding::host_inbound_admits_iface;
 
     const SHARED: i32 = 16061;
-    const ZONE_ID: u16 = 7;
+    const ZONE_ID: u32 = 7;
     const PROTO_TCP: u8 = 6;
     let withdrawn = InterfaceSnapshot {
         name: "st0.0".into(),
@@ -4546,8 +4546,8 @@ fn refused_addressed_base_denies_host_bound_but_preserves_controls_10556() {
 
     const SHARED_IFINDEX: i32 = 611;
     const TAGGED_IFINDEX: i32 = 612;
-    const WAN_ZONE: u16 = 7;
-    const LAN_ZONE: u16 = 8;
+    const WAN_ZONE: u32 = 7;
+    const LAN_ZONE: u32 = 8;
     const PROTO_TCP: u8 = 6;
     const PROTO_ICMP: u8 = 1;
 
@@ -5492,7 +5492,7 @@ fn has_output_needs_tx_eval_matches_old_two_clause_gate() {
 
 /// #3075 fail-on-revert: a stable name-hash zone id > 255 (the common case) MUST
 /// be admitted to the forwarding zone table now that the event-stream wire is
-/// u16 — the former >u8::MAX skip is retired. Restoring that skip drops the zone
+/// u32 — the former >u8::MAX skip is retired. Restoring that skip drops the zone
 /// from zone_name_to_id / zone_id_to_name and this fails RED. The reserved-range
 /// reject (next test) is unaffected.
 #[test]
@@ -5517,7 +5517,7 @@ fn build_forwarding_state_admits_zone_id_above_255() {
 
 /// #919/#922: any zone with id ≥ ZONE_ID_RESERVED_MIN must be
 /// dropped at config-build time so a hostile/buggy snapshot cannot
-/// collide with the JUNOS_GLOBAL_ZONE_ID sentinel (u16::MAX).
+/// collide with the JUNOS_GLOBAL_ZONE_ID sentinel (u32::MAX).
 #[test]
 fn build_forwarding_state_rejects_reserved_zone_ids() {
     use crate::ZoneSnapshot;
@@ -10551,8 +10551,8 @@ fn config_apply_builds_both_per_zone_counter_slot_maps_3651() {
     use crate::afxdp::flood_counters::{flush_recorded_flood_counters, record_zone_flood_drop};
     use crate::afxdp::zone_counters::{flush_recorded_zone_counters, record_zone_traffic};
 
-    const TRUST: u16 = 50675; // config::StableZoneID("trust")
-    const UNTRUST: u16 = 20665; // config::StableZoneID("untrust")
+    const TRUST: u32 = 50675; // config::StableZoneID("trust")
+    const UNTRUST: u32 = 20665; // config::StableZoneID("untrust")
 
     let mut snapshot = ConfigSnapshot::default();
     snapshot.zones = vec![
@@ -10817,7 +10817,7 @@ fn zone_counter_prev_state() -> ForwardingState {
 
 /// A snapshot with the given zone set and an extra defect, used to trip one
 /// named fallible integrity belt.
-fn zone_counter_snapshot_with_zones(zone_ids: &[u16]) -> ConfigSnapshot {
+fn zone_counter_snapshot_with_zones(zone_ids: &[u32]) -> ConfigSnapshot {
     ConfigSnapshot {
         zones: zone_ids
             .iter()
@@ -10835,7 +10835,7 @@ fn zone_counter_snapshot_with_zones(zone_ids: &[u16]) -> ConfigSnapshot {
 /// zone 200 and ADDS a brand-new zone 300, so one drive exercises both live-store
 /// mutations a rejected build must not make — the destructive `reconcile` prune
 /// of 200, and the `ZoneCounterSlotMap::build` get-or-create of 300.
-const ZONE_COUNTER_CANDIDATE_ZONES: [u16; 2] = [100, 300];
+const ZONE_COUNTER_CANDIDATE_ZONES: [u32; 2] = [100, 300];
 
 /// FOUR of the inner builder's ten fallible integrity belts, chosen by
 /// POSITION: a snapshot carrying the candidate zone set plus that belt's
@@ -11170,8 +11170,8 @@ fn seed_live_counter_stores() -> (PolicyCounterStore, crate::nat::NatCounterStor
         ..Default::default()
     }];
     let mut zone_map = rustc_hash::FxHashMap::default();
-    zone_map.insert("live-zone-a".to_string(), 100u16);
-    zone_map.insert("live-zone-b".to_string(), 200u16);
+    zone_map.insert("live-zone-a".to_string(), 100u32);
+    zone_map.insert("live-zone-b".to_string(), 200u32);
     crate::policy::parse_policy_state_with_counters("deny", &live_rules, &zone_map, &[], &policy)
         .expect("the live seed policy must parse");
     let _ = nat.rule_counter(COUNTER_RESIDUE_LIVE_NAT_ID);
@@ -11695,7 +11695,7 @@ fn accepted_build_defers_the_prune_to_the_commit_point() {
     // Half 1 — the build itself is now ADDITIVE ONLY. Zone 200 is absent from
     // this snapshot and its totals are still here, because no apply has
     // committed yet.
-    let mut after_build: Vec<u16> = next
+    let mut after_build: Vec<u32> = next
         .zone_counter_store
         .snapshot()
         .iter()
@@ -11765,8 +11765,8 @@ fn flood_counter_prev_state() -> ForwardingState {
 }
 
 /// Sorted zone ids currently tracked by a state's flood store.
-fn flood_store_zone_ids(state: &ForwardingState) -> Vec<u16> {
-    let mut ids: Vec<u16> = state
+fn flood_store_zone_ids(state: &ForwardingState) -> Vec<u32> {
+    let mut ids: Vec<u32> = state
         .flood_counter_store
         .snapshot()
         .iter()
@@ -13612,7 +13612,7 @@ fn refused_native_unit_zero_trunk_parent_denies_host_inbound_10644() {
 
     const PARENT_IFINDEX: i32 = 11;
     const SIBLING_IFINDEX: i32 = 12;
-    const WAN_ZONE: u16 = 7;
+    const WAN_ZONE: u32 = 7;
     const PROTO_TCP: u8 = 6;
     const PROTO_ICMP: u8 = 1;
 
@@ -13710,7 +13710,7 @@ fn unzoned_tagged_vlan_unit_denies_host_inbound_10644() {
     const PARENT_IFINDEX: i32 = 11;
     const ZONED_IFINDEX: i32 = 12;
     const UNZONED_IFINDEX: i32 = 13;
-    const WAN_ZONE: u16 = 7;
+    const WAN_ZONE: u32 = 7;
     const PROTO_TCP: u8 = 6;
     const PROTO_ICMP: u8 = 1;
 
@@ -15613,7 +15613,7 @@ fn recursive_expansion_keeps_same_preference_rows_as_tiers_12613() {
 fn attach_zone_counters_ignores_skipped_zone_rows_13183() {
     use crate::ZoneSnapshot;
 
-    let mut zones: Vec<ZoneSnapshot> = (2..=64u16)
+    let mut zones: Vec<ZoneSnapshot> = (2..=64u32)
         .map(|id| ZoneSnapshot {
             name: format!("z{id}"),
             id,

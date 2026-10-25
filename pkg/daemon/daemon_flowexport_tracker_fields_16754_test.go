@@ -130,7 +130,7 @@ func TestTrackerInterimEgressDirectionAndMasks16754(t *testing.T) {
 	ipexp.MaskResolver = maskFor
 
 	trust, untrust := config.StableZoneID("trust"), config.StableZoneID("untrust")
-	if !d.eventReader.ProcessRawEvent(openRaw16303(44567, 11, 12, trust, untrust)) {
+	if !d.eventReader.ProcessRawEvent(openRaw16303(44567, 11, 12, uint16(trust), uint16(untrust))) {
 		t.Fatal("open rejected")
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 44567, DstPort: 443, Protocol: 6}
@@ -160,7 +160,7 @@ func TestTrackerInterimEgressDirectionAndMasks16754(t *testing.T) {
 
 	// Control: the close record for the same flow carries the same
 	// Direction/masks (close remainder after the interim baseline).
-	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 44567, 443, [4]byte{}, 0, trust, untrust)
+	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 44567, 443, [4]byte{}, 0, uint16(trust), uint16(untrust))
 	binary.LittleEndian.PutUint64(closeBuf[56:64], 280)
 	binary.LittleEndian.PutUint64(closeBuf[64:72], 28000)
 	if !d.eventReader.ProcessRawEvent(closeBuf) {

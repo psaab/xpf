@@ -158,7 +158,7 @@ func TestSessionCloseFlowDirectionEgress(t *testing.T) {
 		[4]byte{10, 0, 1, 102}, [4]byte{172, 16, 80, 200},
 		12345, 443,
 		[4]byte{172, 16, 80, 8}, 40000,
-		config.StableZoneID("a"), config.StableZoneID("c"),
+		uint16(config.StableZoneID("a")), uint16(config.StableZoneID("c")),
 	)
 	feedOpenThenClose15946(t, d, payload)
 

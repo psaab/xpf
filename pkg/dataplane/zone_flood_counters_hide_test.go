@@ -60,7 +60,7 @@ func TestReadZoneCountersHideForStableHashID(t *testing.T) {
 // counter is reported as available (nil error), NOT as ErrCounterNotPopulated.
 func TestZoneFloodCounterOffsetsPopulateAndClear(t *testing.T) {
 	m := New()
-	const id uint16 = 40000
+	const id uint32 = 40000
 
 	m.SetZoneCounterOffset(id, CounterValue{Packets: 5, Bytes: 600}, CounterValue{Packets: 3, Bytes: 400})
 	if v, err := m.ReadZoneCounters(id, 0); err != nil || v.Packets != 5 || v.Bytes != 600 {

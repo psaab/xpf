@@ -1035,7 +1035,7 @@ fn gre_transport_egress_matches(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
     ingress_logical_ifindex: i32,
-    ingress_zone_id: u16,
+    ingress_zone_id: u32,
 ) -> bool {
     gre_transport_egress_matches_counted(
         forwarding,
@@ -1052,7 +1052,7 @@ fn gre_transport_egress_matches_counted(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
     ingress_logical_ifindex: i32,
-    ingress_zone_id: u16,
+    ingress_zone_id: u32,
     counters: &GreDecapCounters,
 ) -> bool {
     let egress_ifindexes = gre_transport_egress_ifindexes(forwarding, endpoint);

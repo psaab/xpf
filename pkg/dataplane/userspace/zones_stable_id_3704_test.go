@@ -50,7 +50,7 @@ func TestBuildZoneSnapshotsStableZoneID(t *testing.T) {
 		t.Fatalf("got %d zone snapshots, want %d", len(snaps), len(cfg.Security.Zones))
 	}
 
-	seen := make(map[uint16]string, len(snaps))
+	seen := make(map[uint32]string, len(snaps))
 	positionalDivergences := 0
 	for i, z := range snaps {
 		want := config.StableZoneID(z.Name)
@@ -68,7 +68,7 @@ func TestBuildZoneSnapshotsStableZoneID(t *testing.T) {
 		// snaps is emitted in sorted-name order, so i+1 is exactly the legacy
 		// positional id this fix replaced. Confirm the fixture actually diverges
 		// so a positional revert is guaranteed to fail the assertion above.
-		if want != uint16(i+1) {
+		if want != uint32(i+1) {
 			positionalDivergences++
 		}
 	}
@@ -90,7 +90,7 @@ func TestBuildZoneSnapshotsSessionDisplayReverseMap(t *testing.T) {
 
 	// Namespace A: the display reverse map (api/sessions.go:600 builds
 	// zoneNames[id]=name from cr.ZoneIDs, i.e. config.StableZoneID).
-	zoneNames := make(map[uint16]string, len(cfg.Security.Zones))
+	zoneNames := make(map[uint32]string, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames[config.StableZoneID(name)] = name
 	}
@@ -124,12 +124,12 @@ func TestBuildZoneSnapshotsPerRGOwnershipLookup(t *testing.T) {
 
 	// The zoneRGMap key space, exactly as pkg/daemon.buildZoneRGMap produces it:
 	// keyed by config.StableZoneID(name) for zones on a RETH interface.
-	zoneRGMap := map[uint16]int{
+	zoneRGMap := map[uint32]int{
 		config.StableZoneID("trust"):   1, // trust -> reth0 -> RG 1
 		config.StableZoneID("untrust"): 2, // untrust -> reth1 -> RG 2
 	}
 
-	wireID := make(map[string]uint16)
+	wireID := make(map[string]uint32)
 	for _, z := range buildZoneSnapshots(cfg) {
 		wireID[z.Name] = z.ID
 	}

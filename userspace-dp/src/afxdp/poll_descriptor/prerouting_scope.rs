@@ -61,7 +61,7 @@ pub(super) fn prerouting_ingress_scope(
     forwarding: &ForwardingState,
     physical_ifindex: i32,
     ingress_vlan_id: u16,
-    zone_override: Option<u16>,
+    zone_override: Option<u32>,
     fabric_ingress_scope_ifindex: Option<i32>,
 ) -> PreroutingIngressScope<'_> {
     prerouting_ingress_scope_provenance(
@@ -104,7 +104,7 @@ fn prerouting_ingress_scope_provenance(
     forwarding: &ForwardingState,
     physical_ifindex: i32,
     ingress_vlan_id: u16,
-    zone_override: Option<u16>,
+    zone_override: Option<u32>,
     fabric_ingress_scope_ifindex: Option<i32>,
     ambiguous_provenance: bool,
 ) -> PreroutingIngressScope<'_> {
@@ -120,7 +120,7 @@ fn prerouting_ingress_scope_provenance(
     // interface/RI scope, but don't let any fallback zone answer an unknown
     // VID. A fabric-encoded override remains authoritative; only the local
     // ifindex-zone fallback is suppressed for an unknown local pair.
-    // #919: ingress_zone_override is Option<u16>; DNAT/static NAT lookups take
+    // #919: ingress_zone_override is Option<u32>; DNAT/static NAT lookups take
     // zone names, so resolve ID→name lazily on this miss path. A fabric-encoded
     // override wins; else resolve the LOGICAL unit's zone (#5802).
     let zone_name = zone_override

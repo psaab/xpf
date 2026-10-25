@@ -5339,7 +5339,7 @@ fn syn_cookie_master_key_rotation_clears_validated_cache() {
 // #2446: helper — drive a zone through a SYN-flood crossing into cookie
 // mode, then validate a returning ACK so a validated-cache entry is
 // installed for `tuple`. Returns the validated SYN-cookie 4-tuple.
-fn install_validated_syn_cookie_entry(state: &mut ScreenState, zone: &str, zone_id: u16) {
+fn install_validated_syn_cookie_entry(state: &mut ScreenState, zone: &str, zone_id: u32) {
     let syn = tcp_pkt(
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
         IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
@@ -5883,7 +5883,7 @@ fn extract_info_from_ipv4_frame() {
 // what gives established flows their immunity). `ZID` is an arbitrary but
 // fixed zone id; the per-zone keying is exercised in
 // `screen::scan::scan_tests` and `scan_sweep_per_zone_no_cross_count`.
-const ZID: u16 = 7;
+const ZID: u32 = 7;
 
 /// Junos default scan/sweep detection WINDOW (microseconds) for these tests
 /// (#4114). The detection COUNT is the fixed `super::scan::SCAN_DETECT_COUNT`.

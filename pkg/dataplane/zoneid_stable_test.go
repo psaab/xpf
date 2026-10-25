@@ -15,7 +15,7 @@ func cfgWithZones(names ...string) *config.Config {
 	return cfg
 }
 
-func zoneNameByID(cr *CompileResult, id uint16) string {
+func zoneNameByID(cr *CompileResult, id uint32) string {
 	for name, v := range cr.ZoneIDs {
 		if v == id {
 			return name
@@ -37,7 +37,7 @@ func zoneNameByID(cr *CompileResult, id uint16) string {
 // "alpha" would shift untrust from id 2 to id 3, and the stored id 2 would then
 // reverse-resolve to "trust".
 func TestAssignZoneIDStableAcrossEarlierZoneAdd(t *testing.T) {
-	first := &CompileResult{ZoneIDs: make(map[string]uint16)}
+	first := &CompileResult{ZoneIDs: make(map[string]uint32)}
 	assignZoneIDs(first, cfgWithZones("trust", "untrust"))
 	idUntrust := first.ZoneIDs["untrust"]
 	if idUntrust == 0 {
@@ -45,7 +45,7 @@ func TestAssignZoneIDStableAcrossEarlierZoneAdd(t *testing.T) {
 	}
 
 	// Add "alpha", which sorts before both. Sorted 1..N would renumber untrust.
-	second := &CompileResult{ZoneIDs: make(map[string]uint16)}
+	second := &CompileResult{ZoneIDs: make(map[string]uint32)}
 	assignZoneIDs(second, cfgWithZones("alpha", "trust", "untrust"))
 
 	if second.ZoneIDs["untrust"] != idUntrust {
@@ -61,11 +61,11 @@ func TestAssignZoneIDStableAcrossEarlierZoneAdd(t *testing.T) {
 // TestAssignZoneIDStableAcrossRemoval proves a surviving zone keeps its id when
 // an unrelated earlier-sorting zone is removed (the inverse edit).
 func TestAssignZoneIDStableAcrossRemoval(t *testing.T) {
-	withAlpha := &CompileResult{ZoneIDs: make(map[string]uint16)}
+	withAlpha := &CompileResult{ZoneIDs: make(map[string]uint32)}
 	assignZoneIDs(withAlpha, cfgWithZones("alpha", "trust", "untrust"))
 	idTrustWith := withAlpha.ZoneIDs["trust"]
 
-	withoutAlpha := &CompileResult{ZoneIDs: make(map[string]uint16)}
+	withoutAlpha := &CompileResult{ZoneIDs: make(map[string]uint32)}
 	assignZoneIDs(withoutAlpha, cfgWithZones("trust", "untrust"))
 	if withoutAlpha.ZoneIDs["trust"] != idTrustWith {
 		t.Fatalf("trust id changed when unrelated zone alpha was removed: was %d, now %d", idTrustWith, withoutAlpha.ZoneIDs["trust"])
@@ -76,7 +76,7 @@ func TestAssignZoneIDStableAcrossRemoval(t *testing.T) {
 // config.StableZoneID SSOT — the property the HA-symmetry test in pkg/daemon
 // (buildZoneIDs == this) and the wire round-trip both rely on.
 func TestAssignZoneIDMatchesSSOT(t *testing.T) {
-	result := &CompileResult{ZoneIDs: make(map[string]uint16)}
+	result := &CompileResult{ZoneIDs: make(map[string]uint32)}
 	zones := []string{"trust", "untrust", "dmz", "wan", "lan", "mgmt"}
 	assignZoneIDs(result, cfgWithZones(zones...))
 	for _, name := range zones {

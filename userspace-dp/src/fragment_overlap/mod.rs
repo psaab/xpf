@@ -233,7 +233,7 @@ pub(crate) struct OverlapKey {
     pub(crate) routing_domain: u32,
     /// Ingress security zone (#14321); see the struct doc. Part of
     /// membership (`overlap_same_datagram`) and of the per-zone quota.
-    pub(crate) ingress_zone: u16,
+    pub(crate) ingress_zone: u32,
     /// Pre-translation arrival identity, set only on keys derived by
     /// `translated_overlap_key`. It is NOT part of the reassembly key:
     /// downstream receivers merge fragments by the translated tuple
@@ -3370,7 +3370,7 @@ mod tests {
         // so the fill exhausts the domain and the victim drops ShardFull.
         let t = OverlapTracker::with_seed(1);
         let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
-        let mk = |src_last: u8, ident: u32, zone: u16| OverlapKey {
+        let mk = |src_last: u8, ident: u32, zone: u32| OverlapKey {
             addr_family: libc::AF_INET as u8,
             src: IpAddr::V4(Ipv4Addr::new(10, 0, 61, src_last)),
             dst,
@@ -3481,7 +3481,7 @@ mod tests {
         // zone only when the candidate is in a different routing domain.
         let t = OverlapTracker::with_seed(1);
         let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
-        let mk = |src_last: u8, ident: u32, zone: u16| OverlapKey {
+        let mk = |src_last: u8, ident: u32, zone: u32| OverlapKey {
             addr_family: libc::AF_INET as u8,
             src: IpAddr::V4(Ipv4Addr::new(10, 0, 71, src_last)),
             dst,
@@ -3684,7 +3684,7 @@ mod tests {
         // (failed anchors are poison and are never reclaimed).
         let t = OverlapTracker::with_seed(1);
         let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
-        let mk = |src_last: u8, ident: u32, zone: u16| OverlapKey {
+        let mk = |src_last: u8, ident: u32, zone: u32| OverlapKey {
             addr_family: libc::AF_INET as u8,
             src: IpAddr::V4(Ipv4Addr::new(10, 0, 81, src_last)),
             dst,
@@ -3696,7 +3696,7 @@ mod tests {
         };
         let probe = mk(101, 0, 1);
         let shard = t.shard_index(&probe);
-        let collect = |senders: &[u8], zone: u16, total: usize| -> Vec<(u8, u32)> {
+        let collect = |senders: &[u8], zone: u32, total: usize| -> Vec<(u8, u32)> {
             let mut out: Vec<(u8, u32)> = Vec::new();
             let mut counts: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
             let mut ident = 0u32;
@@ -3720,7 +3720,7 @@ mod tests {
             out
         };
         let find_key =
-            |t: &OverlapTracker, src_last: u8, zone: u16, skip: &[(u8, u32)]| -> OverlapKey {
+            |t: &OverlapTracker, src_last: u8, zone: u32, skip: &[(u8, u32)]| -> OverlapKey {
                 let mut ident = 0u32;
                 loop {
                     let k = mk(src_last, ident, zone);

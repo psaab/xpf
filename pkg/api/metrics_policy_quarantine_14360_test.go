@@ -27,34 +27,34 @@ import (
 //
 // FAIL-ON-REVERT: removing the quarantine skips/prune makes the
 // unpublished gauge count the scrubbed rules too (see the warmup
-// companion test) and the mixed global label "trust z214" instead of
+// companion test) and the mixed global label "trust zzq8100" instead of
 // "trust".
 
 func TestCollectPolicyCountersQuarantine14360(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	store := newDescriptorCoverageStore(t)
 	cfg := store.ActiveConfig()
-	// Quarantine fixture: z214 loses the StableZoneID collision to z174.
+	// Quarantine fixture: zzq8100 loses the StableZoneID collision to zzq17760.
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust":   {Name: "trust", Interfaces: []string{"if-trust"}},
-		"untrust": {Name: "untrust", Interfaces: []string{"if-untrust"}},
-		"z174":    {Name: "z174", Interfaces: []string{"if-survivor"}},
-		"z214":    {Name: "z214", Interfaces: []string{"if-quarantined"}},
+		"trust":    {Name: "trust", Interfaces: []string{"if-trust"}},
+		"untrust":  {Name: "untrust", Interfaces: []string{"if-untrust"}},
+		"zzq17760": {Name: "zzq17760", Interfaces: []string{"if-survivor"}},
+		"zzq8100":  {Name: "zzq8100", Interfaces: []string{"if-quarantined"}},
 	}
-	if config.ZoneQuarantineExcludedReason("z214", cfg) == "" {
-		t.Fatal("fixture does not quarantine z214")
+	if config.ZoneQuarantineExcludedReason("zzq8100", cfg) == "" {
+		t.Fatal("fixture does not quarantine zzq8100")
 	}
 	if config.ZoneQuarantineExcludedReason("trust", cfg) != "" ||
-		config.ZoneQuarantineExcludedReason("z174", cfg) != "" {
+		config.ZoneQuarantineExcludedReason("zzq17760", cfg) != "" {
 		t.Fatal("fixture quarantines a survivor/control zone")
 	}
 	cfg.Security.PolicyStatsEnabled = true
 	// Zone-pair sets: [0]=descriptor-coverage trust->untrust allow,
-	// [1]=quarantined trust->z214, [2]=ordinary trust->untrust control.
+	// [1]=quarantined trust->zzq8100, [2]=ordinary trust->untrust control.
 	cfg.Security.Policies = append(cfg.Security.Policies,
-		&config.ZonePairPolicies{FromZone: "trust", ToZone: "z214", Policies: []*config.Policy{
+		&config.ZonePairPolicies{FromZone: "trust", ToZone: "zzq8100", Policies: []*config.Policy{
 			{Name: "quarantined-pair", Action: config.PolicyPermit, Count: true},
 		}},
 		&config.ZonePairPolicies{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
@@ -67,11 +67,11 @@ func TestCollectPolicyCountersQuarantine14360(t *testing.T) {
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		{
 			Name: "mixed-global", Action: config.PolicyDeny, Count: true,
-			Match: config.PolicyMatch{FromZones: []string{"z214", "trust"}, ToZones: []string{"untrust"}},
+			Match: config.PolicyMatch{FromZones: []string{"zzq8100", "trust"}, ToZones: []string{"untrust"}},
 		},
 		{
 			Name: "dead-global", Action: config.PolicyDeny, Count: true,
-			Match: config.PolicyMatch{FromZones: []string{"z214"}, ToZones: []string{"untrust"}},
+			Match: config.PolicyMatch{FromZones: []string{"zzq8100"}, ToZones: []string{"untrust"}},
 		},
 	}
 
@@ -142,8 +142,8 @@ func TestCollectPolicyCountersQuarantine14360(t *testing.T) {
 	assertCounterClose(t, got, c.policyHitsTotal, map[string]string{
 		"from_zone": "trust", "to_zone": "untrust", "policy_name": "ordinary-pair",
 	}, 11)
-	// Mixed global survives with PRUNED scope: "trust", not "trust z214"
-	// (authored order z214,trust; pruned sorted label is "trust").
+	// Mixed global survives with PRUNED scope: "trust", not "trust zzq8100"
+	// (authored order zzq8100,trust; pruned sorted label is "trust").
 	assertCounterClose(t, got, c.policyHitsTotal, map[string]string{
 		"from_zone": "trust", "to_zone": "untrust", "policy_name": "mixed-global",
 	}, 42)
@@ -164,8 +164,8 @@ func TestCollectPolicyCountersQuarantine14360(t *testing.T) {
 		if labels["policy_name"] == "quarantined-pair" || labels["policy_name"] == "dead-global" {
 			t.Errorf("scrubbed rule emitted a series: %v", labels)
 		}
-		if labels["from_zone"] == "z214" || labels["to_zone"] == "z214" ||
-			labels["from_zone"] == "trust z214" || labels["from_zone"] == "z214 trust" {
+		if labels["from_zone"] == "zzq8100" || labels["to_zone"] == "zzq8100" ||
+			labels["from_zone"] == "trust zzq8100" || labels["from_zone"] == "zzq8100 trust" {
 			t.Errorf("quarantined zone leaked into labels: %v", labels)
 		}
 	}
@@ -177,20 +177,20 @@ func TestCollectPolicyCountersQuarantine14360(t *testing.T) {
 // Pre-fix gauge = live (coverage pair + ordinary + mixed + default) +
 // scrubbed (quarantined-pair + dead-global); post-fix only live count.
 func TestCollectPolicyCountersQuarantineUnpublishedGauge14360(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	store := newDescriptorCoverageStore(t)
 	cfg := store.ActiveConfig()
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust":   {Name: "trust", Interfaces: []string{"if-trust"}},
-		"untrust": {Name: "untrust", Interfaces: []string{"if-untrust"}},
-		"z174":    {Name: "z174", Interfaces: []string{"if-survivor"}},
-		"z214":    {Name: "z214", Interfaces: []string{"if-quarantined"}},
+		"trust":    {Name: "trust", Interfaces: []string{"if-trust"}},
+		"untrust":  {Name: "untrust", Interfaces: []string{"if-untrust"}},
+		"zzq17760": {Name: "zzq17760", Interfaces: []string{"if-survivor"}},
+		"zzq8100":  {Name: "zzq8100", Interfaces: []string{"if-quarantined"}},
 	}
 	cfg.Security.PolicyStatsEnabled = true
 	cfg.Security.Policies = append(cfg.Security.Policies,
-		&config.ZonePairPolicies{FromZone: "trust", ToZone: "z214", Policies: []*config.Policy{
+		&config.ZonePairPolicies{FromZone: "trust", ToZone: "zzq8100", Policies: []*config.Policy{
 			{Name: "quarantined-pair", Action: config.PolicyPermit, Count: true},
 		}},
 		&config.ZonePairPolicies{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
@@ -200,11 +200,11 @@ func TestCollectPolicyCountersQuarantineUnpublishedGauge14360(t *testing.T) {
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		{
 			Name: "mixed-global", Action: config.PolicyDeny, Count: true,
-			Match: config.PolicyMatch{FromZones: []string{"z214", "trust"}, ToZones: []string{"untrust"}},
+			Match: config.PolicyMatch{FromZones: []string{"zzq8100", "trust"}, ToZones: []string{"untrust"}},
 		},
 		{
 			Name: "dead-global", Action: config.PolicyDeny, Count: true,
-			Match: config.PolicyMatch{FromZones: []string{"z214"}, ToZones: []string{"untrust"}},
+			Match: config.PolicyMatch{FromZones: []string{"zzq8100"}, ToZones: []string{"untrust"}},
 		},
 	}
 

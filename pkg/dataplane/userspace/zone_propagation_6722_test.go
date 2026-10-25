@@ -244,23 +244,23 @@ func TestZonedTrunkEmitsUnzonedUnit0OnTheSharedIfindex_6722(t *testing.T) {
 // `quarantined_base_tunnel_snapshot_6722` in
 // userspace-dp/src/afxdp/test_fixtures.rs.
 //
-// The z174/z214 collision is real: z214 is the later-sorting name and is
+// The zzq17760/zzq8100 collision is real: zzq8100 is the later-sorting name and is
 // excluded from runtime zone maps before snapshot construction. Its authored
 // st0.0 claim therefore leaves no unit-0 owner; the unrelated st0.1 claim in
 // zzzz remains a positive control. The base key may be derived from that
 // surviving unit, but the shared base/unit-0 ifindex must not acquire an egress
 // zone from the sibling.
 func TestQuarantineDoesNotPromoteSiblingEgressZone_6722(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	lines := []string{
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.61.1/24",
 		"set interfaces st0 unit 0 family inet address 10.5.5.1/30",
 		"set interfaces st0 unit 1 family inet address 10.6.6.1/30",
 		"set security zones security-zone lan interfaces ge-0/0/1.0",
-		"set security zones security-zone z174 host-inbound-traffic system-services ping",
-		"set security zones security-zone z214 interfaces st0.0",
+		"set security zones security-zone zzq17760 host-inbound-traffic system-services ping",
+		"set security zones security-zone zzq8100 interfaces st0.0",
 		"set security zones security-zone zzzz interfaces st0.1",
 		"set security policies default-policy deny-all",
 	}
@@ -271,7 +271,7 @@ func TestQuarantineDoesNotPromoteSiblingEgressZone_6722(t *testing.T) {
 	// rejection here keeps the lenient compile from silently becoming the only
 	// path anyone tests.
 	if _, err := config.CompileConfig(treeFromSet6722(t, lines)); err == nil {
-		t.Fatalf("strict CompileConfig accepted the z174/z214 collision: the " +
+		t.Fatalf("strict CompileConfig accepted the zzq17760/zzq8100 collision: the " +
 			"commit-time gate is gone and this test no longer describes the only " +
 			"way a colliding snapshot reaches the quarantine")
 	}
@@ -282,7 +282,7 @@ func TestQuarantineDoesNotPromoteSiblingEgressZone_6722(t *testing.T) {
 	// The authored claim remains present but a StableZoneID loser is omitted
 	// from runtime maps before snapshot construction. Verify both halves so the
 	// empty unit-0 result below cannot pass because the config lacked the claim.
-	losingZone := cfg.Security.Zones["z214"]
+	losingZone := cfg.Security.Zones["zzq8100"]
 	authoredUnit0 := false
 	if losingZone != nil {
 		for _, ref := range losingZone.Interfaces {
@@ -293,10 +293,10 @@ func TestQuarantineDoesNotPromoteSiblingEgressZone_6722(t *testing.T) {
 		}
 	}
 	if !authoredUnit0 {
-		t.Fatalf("precondition: z214 does not author the st0.0 membership")
+		t.Fatalf("precondition: zzq8100 does not author the st0.0 membership")
 	}
-	if _, excluded := quarantinedZoneNames(cfg)["z214"]; !excluded {
-		t.Fatalf("precondition: z214 is not excluded by StableZoneID quarantine")
+	if _, excluded := quarantinedZoneNames(cfg)["zzq8100"]; !excluded {
+		t.Fatalf("precondition: zzq8100 is not excluded by StableZoneID quarantine")
 	}
 	if got := buildInterfaceZoneMap(cfg)["st0.0"]; got != "" {
 		t.Fatalf("quarantined st0.0 runtime zone = %q, want no owner", got)
@@ -351,8 +351,8 @@ func TestQuarantineDoesNotPromoteSiblingEgressZone_6722(t *testing.T) {
 		if z.Name == "zzzz" {
 			surviving = true
 		}
-		if z.Name == "z214" {
-			t.Errorf("quarantined zone z214 is still published with id %d", z.ID)
+		if z.Name == "zzq8100" {
+			t.Errorf("quarantined zone zzq8100 is still published with id %d", z.ID)
 		}
 	}
 	if !surviving {
@@ -367,7 +367,7 @@ func TestQuarantineDoesNotPromoteSiblingEgressZone_6722(t *testing.T) {
 //
 // The exemption's trigger has two halves: the row being a projection of a
 // declared RETH's netdev, and the row's own zone being empty. Tolerant runtime
-// maps omit the losing z214 membership before snapshots are built, so the
+// maps omit the losing zzq8100 membership before snapshots are built, so the
 // member row has no zone and the exemption covers it. It casts no vote, and the
 // ledger resolves the shared ifindex to the RETH's surviving zone.
 //
@@ -389,12 +389,12 @@ func TestQuarantineDoesNotPromoteSiblingEgressZone_6722(t *testing.T) {
 // outcome below is unchanged — it rests on the quarantine contract above,
 // which is name-independent.
 //
-// The collision is REAL, not simulated: z174 and z214 genuinely fold to one
+// The collision is REAL, not simulated: zzq17760 and zzq8100 genuinely fold to one
 // StableZoneID, and the premise is asserted so a change to the fold turns this
 // into a loud failure rather than a silently vacuous test.
 func TestQuarantinedMemberZoneLetsTheRethZoneResolve_6722(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	lines := []string{
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
@@ -415,24 +415,24 @@ func TestQuarantinedMemberZoneLetsTheRethZoneResolve_6722(t *testing.T) {
 		// names a row that does not exist and lands on no ifindex. Keeping the
 		// base claim proves the quarantine removes a real membership for the
 		// RETH-shared ifindex rather than passing vacuously.
-		"set security zones security-zone z214 interfaces ge-0/0/1",
-		"set security zones security-zone z174 host-inbound-traffic system-services ping",
+		"set security zones security-zone zzq8100 interfaces ge-0/0/1",
+		"set security zones security-zone zzq17760 host-inbound-traffic system-services ping",
 		// The RETH carries the SURVIVING zone — the one the ledger must resolve.
 		"set security zones security-zone lan interfaces reth1.0",
 		"set security policies default-policy deny-all",
 	}
 	if _, err := config.CompileConfig(treeFromSet6722(t, lines)); err == nil {
-		t.Fatalf("strict CompileConfig accepted the z174/z214 collision: the " +
+		t.Fatalf("strict CompileConfig accepted the zzq17760/zzq8100 collision: the " +
 			"commit-time gate is gone and this shape no longer reaches the quarantine")
 	}
 	cfg := compileWithStubbedLinks6722(t, lines,
 		map[string]int{"ge-0-0-1": 24, "reth1": 24},
 		map[string]string{"ge-0-0-1": "02:bf:72:01:00:01"}, true)
 
-	// The authored member claim remains present, but z214 is a StableZoneID
+	// The authored member claim remains present, but zzq8100 is a StableZoneID
 	// loser and must be omitted from runtime zone maps before snapshots. Check
 	// the raw config and the exclusion set so an empty row is not vacuous.
-	losingZone := cfg.Security.Zones["z214"]
+	losingZone := cfg.Security.Zones["zzq8100"]
 	authoredMember := false
 	if losingZone != nil {
 		for _, ref := range losingZone.Interfaces {
@@ -443,10 +443,10 @@ func TestQuarantinedMemberZoneLetsTheRethZoneResolve_6722(t *testing.T) {
 		}
 	}
 	if !authoredMember {
-		t.Fatalf("precondition: z214 does not author ge-0/0/1")
+		t.Fatalf("precondition: zzq8100 does not author ge-0/0/1")
 	}
-	if _, excluded := quarantinedZoneNames(cfg)["z214"]; !excluded {
-		t.Fatalf("precondition: z214 is not excluded by StableZoneID quarantine")
+	if _, excluded := quarantinedZoneNames(cfg)["zzq8100"]; !excluded {
+		t.Fatalf("precondition: zzq8100 is not excluded by StableZoneID quarantine")
 	}
 	if got := buildInterfaceZoneMap(cfg)["ge-0/0/1"]; got != "" {
 		t.Fatalf("quarantined ge-0/0/1 runtime zone = %q, want no owner", got)
@@ -474,7 +474,7 @@ func TestQuarantinedMemberZoneLetsTheRethZoneResolve_6722(t *testing.T) {
 			"ifindex, so the egress answer remains lan", member.EgressZone, "lan")
 	}
 	for _, s := range snap.Interfaces {
-		if s.EgressZone == "z214" {
+		if s.EgressZone == "zzq8100" {
 			t.Fatalf("interface %q carries EgressZone %q, a QUARANTINED zone; the "+
 				"quarantine drops that zone from the published set, so the Rust "+
 				"corroboration would reject it and the ifindex would silently lose "+
@@ -507,7 +507,7 @@ func TestQuarantinedMemberZoneLetsTheRethZoneResolve_6722(t *testing.T) {
 	}
 
 	// CONTROL: exactly ONE of the colliding pair is excluded from runtime
-	// installation — the later-sorting name. z214 is gone; z174 survives.
+	// installation — the later-sorting name. zzq8100 is gone; zzq17760 survives.
 	//
 	// This control corrected a wrong assertion in this test's first draft,
 	// which required BOTH names to vanish. Checking the exact published set
@@ -517,18 +517,18 @@ func TestQuarantinedMemberZoneLetsTheRethZoneResolve_6722(t *testing.T) {
 	var sawDoomed, sawWinner bool
 	for _, z := range snap.Zones {
 		switch z.Name {
-		case "z214":
+		case "zzq8100":
 			sawDoomed = true
-		case "z174":
+		case "zzq17760":
 			sawWinner = true
 		}
 	}
 	if sawDoomed {
 		t.Fatalf("quarantined zone %q is still published; the zone exclusion "+
-			"did not run to completion", "z214")
+			"did not run to completion", "zzq8100")
 	}
 	if !sawWinner {
 		t.Fatalf("collision winner %q was also excluded; exactly the later-sorting "+
-			"collider must be dropped", "z174")
+			"collider must be dropped", "zzq17760")
 	}
 }

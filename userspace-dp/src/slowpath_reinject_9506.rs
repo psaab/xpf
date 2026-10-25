@@ -27,7 +27,7 @@ pub(crate) const SUBMIT_MAX_FRAMES: usize = 64;
 pub(crate) const SUBMIT_MAX_DATA_LEN: usize = 65_535;
 /// Maximum complete binary message, including its type byte.
 pub(crate) const REINJECT_MAX_MSG: usize = 1_048_576;
-/// P-MECH submit tail: snapshot u64 + config u64 + FIB u32 + zone u16 +
+/// P-MECH submit tail: snapshot u64 + config u64 + FIB u32 + zone u32 +
 /// if_id u32 + inventory generation u64 + inventory FIB u32 + policy SHA-256
 /// (32 bytes) + absolute CLOCK_MONOTONIC deadline u64 + clock id u8 (79 bytes).
 pub(crate) const SUBMIT_PMECH_TAIL_LEN: usize = 79;
@@ -188,7 +188,7 @@ pub(crate) struct SubmitFrame {
     pub snapshot_generation: u64,
     pub config_generation: u64,
     pub fib_generation: u32,
-    pub zone_id: u16,
+    pub zone_id: u32,
     pub if_id: u32,
     pub pmech_inventory_generation: u64,
     pub pmech_inventory_fib_generation: u32,
@@ -1733,7 +1733,7 @@ pub(crate) fn encode_submit_batch(frames: &[SubmitFrame]) -> Vec<u8> {
         push_u64(&mut out, frame.snapshot_generation);
         push_u64(&mut out, frame.config_generation);
         push_u32(&mut out, frame.fib_generation);
-        push_u16(&mut out, frame.zone_id);
+        push_u32(&mut out, frame.zone_id);
         push_u32(&mut out, frame.if_id);
         push_u64(&mut out, frame.pmech_inventory_generation);
         push_u32(&mut out, frame.pmech_inventory_fib_generation);
@@ -1825,7 +1825,7 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
         let snapshot_generation = c.u64()?;
         let config_generation = c.u64()?;
         let fib_generation = c.u32()?;
-        let zone_id = c.u16()?;
+        let zone_id = c.u32()?;
         let if_id = c.u32()?;
         let pmech_inventory_generation = c.u64()?;
         let pmech_inventory_fib_generation = c.u32()?;
@@ -1881,7 +1881,7 @@ pub(crate) struct PooledSubmitFrame {
     pub snapshot_generation: u64,
     pub config_generation: u64,
     pub fib_generation: u32,
-    pub zone_id: u16,
+    pub zone_id: u32,
     pub if_id: u32,
     pub pmech_inventory_generation: u64,
     pub pmech_inventory_fib_generation: u32,
@@ -1929,7 +1929,7 @@ pub(crate) fn decode_submit_batch_into_pool(
             let snapshot_generation = c.u64()?;
             let config_generation = c.u64()?;
             let fib_generation = c.u32()?;
-            let zone_id = c.u16()?;
+            let zone_id = c.u32()?;
             let if_id = c.u32()?;
             let pmech_inventory_generation = c.u64()?;
             let pmech_inventory_fib_generation = c.u32()?;

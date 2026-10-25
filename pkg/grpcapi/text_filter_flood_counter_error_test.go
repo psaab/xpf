@@ -39,7 +39,7 @@ type floodErrGRPCDP struct {
 
 func (d *floodErrGRPCDP) IsLoaded() bool                          { return true }
 func (d *floodErrGRPCDP) LastApplyResult() *dataplane.ApplyResult { return d.apply }
-func (d *floodErrGRPCDP) ReadFloodCounters(uint16) (dataplane.FloodState, error) {
+func (d *floodErrGRPCDP) ReadFloodCounters(uint32) (dataplane.FloodState, error) {
 	return dataplane.FloodState{}, errors.New("counter bridge degraded")
 }
 
@@ -67,7 +67,7 @@ func TestShowZonesDetailTextWarnsOnReadError(t *testing.T) {
 		store: store,
 		dp: &policyZoneErrGRPCDP{
 			Manager: dataplane.New(),
-			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2, "dmz": 3}},
+			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2, "dmz": 3}},
 		},
 	}
 	var buf strings.Builder
@@ -101,7 +101,7 @@ func TestShowScreenStatisticsAllTextWarnsOnReadError(t *testing.T) {
 		store: store,
 		dp: &floodErrGRPCDP{
 			Manager: dataplane.New(),
-			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2, "dmz": 3}},
+			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2, "dmz": 3}},
 		},
 	}
 	var buf strings.Builder
@@ -122,7 +122,7 @@ type partialFloodErrGRPCDP struct {
 
 func (d *partialFloodErrGRPCDP) IsLoaded() bool                          { return true }
 func (d *partialFloodErrGRPCDP) LastApplyResult() *dataplane.ApplyResult { return d.apply }
-func (d *partialFloodErrGRPCDP) ReadFloodCounters(zoneID uint16) (dataplane.FloodState, error) {
+func (d *partialFloodErrGRPCDP) ReadFloodCounters(zoneID uint32) (dataplane.FloodState, error) {
 	if zoneID == 2 {
 		return dataplane.FloodState{}, errors.New("counter bridge degraded")
 	}
@@ -140,7 +140,7 @@ func TestShowScreenStatisticsAllTextSurfacesPerZoneReadError(t *testing.T) {
 		store: store,
 		dp: &partialFloodErrGRPCDP{
 			Manager: dataplane.New(),
-			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2}},
+			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2}},
 		},
 	}
 	var buf strings.Builder

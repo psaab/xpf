@@ -854,7 +854,7 @@ func BuildIPFIXExportConfig(svc *config.ServicesConfig, fo *config.ForwardingOpt
 // gets a non-nil empty map and fails closed; a non-nil empty family map
 // also results from a sampled interface referenced through an absent
 // unit, which must fail closed rather than widen to export-all.
-func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) FamilySamplingDirs {
+func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint32) FamilySamplingDirs {
 	var result FamilySamplingDirs
 	for zoneName, zone := range cfg.Security.Zones {
 		// A nil zone value is reachable on the tolerant/programmatic/
@@ -864,10 +864,12 @@ func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) FamilySam
 		if zone == nil {
 			continue
 		}
-		zid, ok := zoneIDs[zoneName]
-		if !ok {
+		zid32, ok := zoneIDs[zoneName]
+		if !ok || zid32 == 0 {
 			continue
 		}
+		// #16557: records carry the low 16 bits of the u32 zone id.
+		zid := uint16(zid32)
 		var dir4, dir6 SamplingDir
 		for _, ifaceRef := range zone.Interfaces {
 			physName, unitNum, ok := parseIfaceRef(ifaceRef)

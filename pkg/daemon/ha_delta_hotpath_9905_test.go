@@ -38,7 +38,7 @@ func natDelta9905() dpuserspace.SessionDeltaInfo {
 // TestForwardWireAliasNeedsNoDelta9905 and the (key, val) signatures).
 func TestV4ConvertFromDeltaAllocsBudget9905(t *testing.T) {
 	delta := natDelta9905()
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	if _, _, ok := userspaceSessionFromDeltaV4(delta, zoneIDs); !ok {
 		t.Fatal("fixture: delta does not convert, the budget assertion would be vacuous")
 	}
@@ -144,7 +144,7 @@ func binDelta9905() dpuserspace.SessionDeltaInfo {
 // convert to the same session the string leg produces. RED while convert is
 // string-only (drops at unparseable), GREEN after the binary carry-through.
 func TestBinaryDeltaConvertsWithoutStrings9905(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	key, val, ok := userspaceSessionFromDeltaV4(binDelta9905(), zoneIDs)
 	if !ok {
 		t.Fatal("binary-leg delta did not convert (strings empty, binary filled)")
@@ -222,7 +222,7 @@ func TestBinaryDeltaConvertsWithoutStrings9905(t *testing.T) {
 // drops exactly like an unparseable string (no per-field mixing, no partial
 // binary use).
 func TestBinaryDeltaFailClosed9905(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	cases := map[string]func(*dpuserspace.SessionDeltaInfo){
 		"bad length": func(d *dpuserspace.SessionDeltaInfo) { d.BinAddrLen = 9 },
 		"v6 family with v4 length": func(d *dpuserspace.SessionDeltaInfo) {
@@ -245,7 +245,7 @@ func TestBinaryDeltaFailClosed9905(t *testing.T) {
 // Nat64SnatV4Bin must reach val.Nat64SnatV4 so the peer rebuilds the reverse
 // (v4->v6) BIB after failover (#4565). The string stays empty on this leg.
 func TestBinaryDeltaV6NAT649905(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	d := transitOpenV6_9767()
 	d.SrcIP, d.DstIP = "", ""
 	d.NeighborMAC, d.SrcMAC = "", ""
@@ -279,7 +279,7 @@ func TestBinaryDeltaV6NAT649905(t *testing.T) {
 // nonzero byte" would flip this leg from present to absent; this cell pins
 // the (bytes, present) semantics instead. Green before and after.
 func TestStringLegZeroNATPreserved9905(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	d := transitOpen9767()
 	d.NATSrcIP = "0.0.0.0"
 	_, val, ok := userspaceSessionFromDeltaV4(d, zoneIDs)
@@ -408,7 +408,7 @@ func TestBinaryDeltaDropLogRendersTuple9905(t *testing.T) {
 	var buf bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	d := binDelta9905()
 	d.IngressZone = "nope"
 	if _, _, ok := userspaceSessionFromDeltaV4(d, zoneIDs); ok {
@@ -509,7 +509,7 @@ func TestForwardWireAliasNeedsNoDelta9905(t *testing.T) {
 // honors the flag explicitly (a flagless bin never stamps), string stays
 // flag-blind (legacy fallback).
 func TestNAT64SnatFlagGate9905(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	// String leg, flag unset, snat present → stamps (flag-blind legacy).
 	s := transitOpenV6_9767()
 	s.Nat64 = false
@@ -604,7 +604,7 @@ func TestNAT64SnatFlagGate9905(t *testing.T) {
 // calling Alias; this cell drives Alias directly and passes identically
 // without it).
 func TestForwardWireAliasFallsBackToBasePort9905(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	d := transitOpen9767()
 	d.NATSrcIP = "192.0.2.7"
 	d.NATSrcPort = 0 // present address, zero raw port → fallback

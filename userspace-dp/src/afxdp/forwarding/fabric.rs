@@ -414,7 +414,7 @@ pub(in crate::afxdp) fn zone_encoded_fabric_stamp_disposition(
     now_secs: u64,
     frame_dst_mac: &[u8],
     ingress_ifindex: i32,
-    zone_id: u16,
+    zone_id: u32,
 ) -> FabricStampDisposition {
     let Some(fabric) = fabric_for_ingress(forwarding, ingress_ifindex) else {
         return FabricStampDisposition::Invalid;
@@ -459,7 +459,7 @@ pub(in crate::afxdp) fn zone_encoded_fabric_stamp_valid(
     now_secs: u64,
     frame_dst_mac: &[u8],
     ingress_ifindex: i32,
-    zone_id: u16,
+    zone_id: u32,
 ) -> bool {
     zone_encoded_fabric_stamp_disposition(
         forwarding,
@@ -487,9 +487,9 @@ pub(in crate::afxdp) fn gate_fabric_zone_override_on_owner_rg(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     resolution: ForwardingResolution,
-) -> Option<u16> {
+) -> Option<u32> {
     let zone = ingress_zone_override?;
     let owner_rg = owner_rg_for_resolution(forwarding, resolution);
     if owner_rg > 0
@@ -519,9 +519,9 @@ pub(in crate::afxdp) fn promote_ambiguous_fabric_zone(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
-    ambiguous_zone: Option<u16>,
+    ambiguous_zone: Option<u32>,
     resolution: ForwardingResolution,
-) -> Option<u16> {
+) -> Option<u32> {
     gate_fabric_zone_override_on_owner_rg(
         forwarding,
         ha_state,
@@ -569,9 +569,9 @@ pub(in crate::afxdp) fn gate_fabric_zone_override_on_local_owner_rg(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     dst_ip: IpAddr,
-) -> Option<u16> {
+) -> Option<u32> {
     let zone = ingress_zone_override?;
     let owner_rg = owner_rg_for_local_address(forwarding, dst_ip);
     if owner_rg > 0
@@ -728,16 +728,16 @@ pub(in crate::afxdp) fn resolve_fabric_redirect_from_list(
 }
 
 /// #919/#922: ID-keyed zone-encoded redirect. Avoids the name-string
-/// round-trip: every caller already has a u16 zone ID (e.g. from
+/// round-trip: every caller already has a u32 zone ID (e.g. from
 /// `SessionMetadata.ingress_zone`). #6478: the name-keyed wrapper was
 /// removed with the cluster-peer return fast path (its last production
 /// caller); tests use this ID-keyed form directly.
 pub(in crate::afxdp) fn resolve_zone_encoded_fabric_redirect_by_id(
     forwarding: &ForwardingState,
-    zone_id: u16,
+    zone_id: u32,
 ) -> Option<ForwardingResolution> {
     let mut resolution = resolve_fabric_redirect(forwarding)?;
-    // #3075: the zone id is now a stable name-hash u16, so the synthetic fabric
+    // #3075: the zone id is now a stable name-hash u32, so the synthetic fabric
     // src MAC carries it in TWO bytes — high byte at [4], low byte at [5]
     // (big-endian), where the old u8 scheme hardcoded [4]=0x00. The decode in
     // frame/inspect.rs::parse_zone_encoded_fabric_ingress_from_frame and the
@@ -747,7 +747,10 @@ pub(in crate::afxdp) fn resolve_zone_encoded_fabric_redirect_by_id(
     if zone_id == 0 {
         return None;
     }
-    let [hi, lo] = zone_id.to_be_bytes();
+    // #16557: the fabric MAC stamp has only two bytes; ids above u16::MAX
+    // stamp their low 16 bits (the peer's zone override is advisory and
+    // owner-RG gated; policy still evaluates the full local id).
+    let [_, _, hi, lo] = zone_id.to_be_bytes();
     resolution.src_mac = Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     Some(resolution)
 }
@@ -757,7 +760,7 @@ pub(in crate::afxdp) fn resolve_zone_encoded_fabric_redirect_by_id(
 /// legacy single-table deployments retain the unstamped redirect.
 pub(in crate::afxdp) fn resolve_fabric_redirect_for_ingress_zone(
     forwarding: &ForwardingState,
-    ingress_zone_id: Option<u16>,
+    ingress_zone_id: Option<u32>,
 ) -> Option<ForwardingResolution> {
     if let Some(zone_id) = ingress_zone_id.filter(|zone_id| *zone_id != 0) {
         return resolve_zone_encoded_fabric_redirect_by_id(forwarding, zone_id);
@@ -772,7 +775,7 @@ pub(in crate::afxdp) fn resolve_fabric_redirect_for_ingress_zone(
 /// scope. Names, zone, and routing-instance are shared across HA nodes; Linux
 /// ifindexes are not. Collisions are rejected when the forwarding maps build.
 pub(in crate::afxdp) fn fabric_nat_scope_stamp_id(
-    zone_id: u16,
+    zone_id: u32,
     ifname: &str,
     routing_instance: &str,
 ) -> u32 {
@@ -794,7 +797,7 @@ pub(in crate::afxdp) fn fabric_nat_scope_stamp_id(
 
 fn resolve_fabric_redirect_with_nat_scope_id(
     forwarding: &ForwardingState,
-    zone_id: u16,
+    zone_id: u32,
     scope_id: u32,
 ) -> Option<ForwardingResolution> {
     if zone_id == 0 || !(1..=0x00ff_ffff).contains(&scope_id) {
@@ -824,7 +827,7 @@ fn resolve_fabric_redirect_with_nat_scope_id(
 /// identities that cannot be represented or validated as an HA member.
 pub(in crate::afxdp) fn resolve_fabric_redirect_for_ingress_identity(
     forwarding: &ForwardingState,
-    ingress_zone_id: Option<u16>,
+    ingress_zone_id: Option<u32>,
     ingress_scope_ifindex: Option<i32>,
 ) -> Option<ForwardingResolution> {
     if let (Some(zone_id), Some(ifindex)) = (
@@ -845,7 +848,7 @@ pub(in crate::afxdp) fn resolve_fabric_redirect_for_ingress_identity(
 pub(in crate::afxdp) fn fabric_nat_scope_stamp_mac_for_zone(
     forwarding: &ForwardingState,
     source_mac: &[u8],
-    zone_id: u16,
+    zone_id: u32,
 ) -> Option<[u8; 6]> {
     let source_mac: [u8; 6] = source_mac.try_into().ok()?;
     if source_mac[..3] != FABRIC_NAT_SCOPE_MAC_PREFIX {
@@ -884,7 +887,7 @@ pub(in crate::afxdp) fn redirect_via_fabric_if_needed(
     forwarding: &ForwardingState,
     resolution: ForwardingResolution,
     ingress_ifindex: i32,
-    ingress_zone_id: Option<u16>,
+    ingress_zone_id: Option<u32>,
 ) -> ForwardingResolution {
     redirect_via_fabric_if_needed_at(
         forwarding,
@@ -910,7 +913,7 @@ pub(in crate::afxdp) fn redirect_via_fabric_if_needed_at(
     now_secs: u64,
     resolution: ForwardingResolution,
     ingress_ifindex: i32,
-    ingress_zone_id: Option<u16>,
+    ingress_zone_id: Option<u32>,
 ) -> ForwardingResolution {
     let rescuable = matches!(
         resolution.disposition,
@@ -1202,8 +1205,8 @@ pub(in crate::afxdp) fn should_seed_fabric_punt(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn fabric_punt_seed_metadata(
     forwarding: &ForwardingState,
-    from_zone_id: u16,
-    to_zone_id: u16,
+    from_zone_id: u32,
+    to_zone_id: u32,
     owner_rg_id: i32,
     ingress_ifindex: u32,
     ingress_vlan_id: u16,

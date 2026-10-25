@@ -134,7 +134,7 @@ func TestGetNATPoolStatsInterfaceModePerRuleSet(t *testing.T) {
 	dp := &natSessionProviderGRPCDP{
 		Manager: dataplane.New(),
 		result: &dataplane.ApplyResult{
-			ZoneIDs: map[string]uint16{"trust": 2, "guest": 4, "wan": 5},
+			ZoneIDs: map[string]uint32{"trust": 2, "guest": 4, "wan": 5},
 		},
 		store: &natSessionGRPCStore{
 			v4: []dataplane.SessionValue{
@@ -208,7 +208,7 @@ func TestGetNATPoolStatsUsesSessionStoreProvider(t *testing.T) {
 	dp := &natSessionProviderGRPCDP{
 		Manager: dataplane.New(),
 		result: &dataplane.ApplyResult{
-			ZoneIDs: map[string]uint16{
+			ZoneIDs: map[string]uint32{
 				"trust":   1,
 				"untrust": 2,
 			},

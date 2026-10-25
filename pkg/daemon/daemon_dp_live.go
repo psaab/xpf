@@ -106,11 +106,11 @@ type liveDataPlaneSurface interface {
 
 	ReadGlobalCounter(index uint32) (uint64, error)
 	ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCounterValue, error)
-	ReadZoneCounters(zoneID uint16, direction int) (dataplane.CounterValue, error)
+	ReadZoneCounters(zoneID uint32, direction int) (dataplane.CounterValue, error)
 	ReadPolicyCounters(policyID uint32) (dataplane.CounterValue, error)
 	ReadFilterConfig(filterID uint32) (dataplane.FilterConfig, error)
 	ReadFilterCounters(ruleIdx uint32) (dataplane.CounterValue, error)
-	ReadFloodCounters(zoneID uint16) (dataplane.FloodState, error)
+	ReadFloodCounters(zoneID uint32) (dataplane.FloodState, error)
 	ReadNATRuleCounter(counterID uint32) (dataplane.CounterValue, error)
 	ReadNATPortCounter(id uint32) (uint64, error)
 
@@ -276,7 +276,7 @@ func (a liveDataPlane) ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCo
 	return s.ReadInterfaceCounters(ifindex)
 }
 
-func (a liveDataPlane) ReadZoneCounters(zoneID uint16, direction int) (dataplane.CounterValue, error) {
+func (a liveDataPlane) ReadZoneCounters(zoneID uint32, direction int) (dataplane.CounterValue, error) {
 	s, err := a.resolve()
 	if err != nil {
 		return dataplane.CounterValue{}, err
@@ -308,7 +308,7 @@ func (a liveDataPlane) ReadFilterCounters(ruleIdx uint32) (dataplane.CounterValu
 	return s.ReadFilterCounters(ruleIdx)
 }
 
-func (a liveDataPlane) ReadFloodCounters(zoneID uint16) (dataplane.FloodState, error) {
+func (a liveDataPlane) ReadFloodCounters(zoneID uint32) (dataplane.FloodState, error) {
 	s, err := a.resolve()
 	if err != nil {
 		return dataplane.FloodState{}, err

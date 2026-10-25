@@ -17,9 +17,10 @@ import (
 // QuarantinedZoneInterfaceKeys stripped the interface from the healthy zone
 // too and the dataplane snapshot blackholed its traffic.
 
-// mgmt/a177301 fold to the same StableZoneID and "a177301" sorts first, so a
-// node1-only security-zone a177301 quarantines the local mgmt cluster-wide.
-// z174/z214 are the #12829 pair, used the same way.
+// zzq17760/zzq8100 fold to the same StableZoneID (#16557 residual pair) and
+// "zzq17760" sorts first, so a node1-only zzq17760 quarantines the local
+// zzq8100 cluster-wide. (Pre-#16557 this used mgmt/a177301.)
+// zzq17760/zzq8100 are the #12829 pair, used the same way.
 
 const peerNodeQuarantineFixture13095 = `
 groups {
@@ -27,7 +28,7 @@ groups {
 	node1 {
 		security {
 			zones {
-				security-zone a177301;
+				security-zone zzq17760;
 			}
 		}
 	}
@@ -47,7 +48,7 @@ security {
 				ge-0/0/0.0;
 			}
 		}
-		security-zone mgmt {
+		security-zone zzq8100 {
 			interfaces {
 				ge-0/0/0.0;
 			}
@@ -60,8 +61,8 @@ security {
 // sync), a peer-node collision that quarantines local zone mgmt must NOT
 // cascade QuarantinedZoneInterfaceKeys onto healthy trust's interface.
 func TestPeerNodeZoneQuarantineStopsMembershipCascade13095(t *testing.T) {
-	if StableZoneID("mgmt") != StableZoneID("a177301") {
-		t.Fatalf("test premise broken: mgmt/a177301 no longer collide")
+	if StableZoneID("zzq17760") != StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
 	tree := parseHierText(t, peerNodeQuarantineFixture13095)
 	cfg, err := CompileConfigForNodeLenient(tree, 0)
@@ -71,8 +72,8 @@ func TestPeerNodeZoneQuarantineStopsMembershipCascade13095(t *testing.T) {
 	// Premise: the recorded runtime union (main + node0 + node1 views)
 	// quarantines local mgmt via the peer-only name, and leaves trust alone.
 	excluded := ZoneQuarantineExclusionsForConfig(cfg)
-	if _, ok := excluded["mgmt"]; !ok {
-		t.Fatalf("premise: peer-only a177301 did not quarantine local mgmt (exclusions=%v recorded=%v)",
+	if _, ok := excluded["zzq8100"]; !ok {
+		t.Fatalf("premise: peer-only zzq17760 did not quarantine local zzq8100 (exclusions=%v recorded=%v)",
 			excluded, cfg.ZoneQuarantineNames)
 	}
 	if _, ok := excluded["trust"]; ok {
@@ -80,13 +81,13 @@ func TestPeerNodeZoneQuarantineStopsMembershipCascade13095(t *testing.T) {
 	}
 	// Core #13095 assertion: the healthy zone keeps the contested interface.
 	if keys := QuarantinedZoneInterfaceKeys(cfg); len(keys) != 0 {
-		t.Fatalf("peer-quarantined zone mgmt cascaded interface quarantine onto healthy trust (keys=%v) (#13095)",
+		t.Fatalf("peer-quarantined zone zzq8100 cascaded interface quarantine onto healthy trust (keys=%v) (#13095)",
 			keys)
 	}
 	// The in-compile membership gate must not draw the false conflict either.
 	for _, w := range cfg.Warnings {
 		if strings.Contains(w, "is assigned to security zones") {
-			t.Fatalf("false zone-interface-membership diagnostic for peer-quarantined mgmt: %q (#13095)", w)
+			t.Fatalf("false zone-interface-membership diagnostic for peer-quarantined zzq8100: %q (#13095)", w)
 		}
 	}
 	// Doctrine: strict commit still rejects the colliding config outright.
@@ -139,14 +140,14 @@ security {
 // A cluster-quarantined zone must not be credited with authored bound
 // secure-tunnel unit refs (the #hb166 G-6 warning-suppression view).
 func TestZoneAuthoredBoundSecureTunnelUnitRefsSkipUnionQuarantined13095(t *testing.T) {
-	if StableZoneID("z174") != StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide")
+	if StableZoneID("zzq17760") != StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide")
 	}
 	mk := func() *Config {
 		return &Config{
 			Security: SecurityConfig{
 				Zones: map[string]*ZoneConfig{
-					"z214": {Interfaces: []string{"st0.0"}},
+					"zzq8100": {Interfaces: []string{"st0.0"}},
 				},
 				IPsec: IPsecConfig{
 					VPNs: map[string]*IPsecVPN{
@@ -161,9 +162,9 @@ func TestZoneAuthoredBoundSecureTunnelUnitRefsSkipUnionQuarantined13095(t *testi
 		t.Fatalf("premise: unquarantined zone's bound st0.0 not recognized, refs=%v", refs)
 	}
 	cfg = mk()
-	cfg.ZoneQuarantineNames = []string{"z174", "z214"}
+	cfg.ZoneQuarantineNames = []string{"zzq17760", "zzq8100"}
 	if refs := ZoneAuthoredBoundSecureTunnelUnitRefs(cfg); len(refs) != 0 {
-		t.Fatalf("cluster-quarantined zone z214 still credited bound secure-tunnel refs %v (#13095)", refs)
+		t.Fatalf("cluster-quarantined zone zzq8100 still credited bound secure-tunnel refs %v (#13095)", refs)
 	}
 }
 
@@ -185,7 +186,11 @@ func TestMgmtZoneAdvisorySkipsUnionQuarantined13095(t *testing.T) {
 		t.Fatalf("premise: unquarantined mgmt data member drew no advisory, warnings=%v", cfg.Warnings)
 	}
 	cfg = mk()
-	cfg.ZoneQuarantineNames = []string{"a177301", "mgmt"}
+	// #16557: no recorded name collides with "mgmt" under the u32 fold in
+	// test time; use the poison exclusion (same
+	// ZoneQuarantineExclusionsForConfig SSOT the union feeds) for the
+	// quarantined arm.
+	cfg.Security.Zones["mgmt"].DroppedEnforcementChild = true
 	appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
 	if len(cfg.Warnings) != 0 {
 		t.Fatalf("cluster-quarantined mgmt zone still drew advisory %v (#13095)", cfg.Warnings)
@@ -201,8 +206,8 @@ func TestBuildZoneInterfaceMapLocalSkipsUnionQuarantined13095(t *testing.T) {
 		return &Config{
 			Security: SecurityConfig{
 				Zones: map[string]*ZoneConfig{
-					"mgmt":  {Interfaces: []string{"ge-0/0/0.0"}},
-					"trust": {Interfaces: []string{"ge-0/0/0.0"}},
+					"zzq8100": {Interfaces: []string{"ge-0/0/0.0"}},
+					"trust":   {Interfaces: []string{"ge-0/0/0.0"}},
 				},
 			},
 		}
@@ -212,9 +217,9 @@ func TestBuildZoneInterfaceMapLocalSkipsUnionQuarantined13095(t *testing.T) {
 		t.Fatalf("premise: genuinely contested key must stay unresolved without a union, got %v", m)
 	}
 	cfg = mk()
-	cfg.ZoneQuarantineNames = []string{"a177301", "mgmt", "trust"}
+	cfg.ZoneQuarantineNames = []string{"zzq17760", "zzq8100", "trust"}
 	m := buildZoneInterfaceMapLocal(cfg)
 	if got := m["ge-0/0/0.0"]; got != "trust" {
-		t.Fatalf("healthy trust must own ge-0/0/0.0 once cluster-quarantined mgmt yields, got %q (map=%v) (#13095)", got, m)
+		t.Fatalf("healthy trust must own ge-0/0/0.0 once cluster-quarantined zzq8100 yields, got %q (map=%v) (#13095)", got, m)
 	}
 }

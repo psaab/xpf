@@ -10,15 +10,15 @@ import (
 // this test fails you changed the fold; revert. (The values were computed once
 // and frozen.)
 func TestStableZoneIDHashFreeze(t *testing.T) {
-	pins := map[string]uint16{
-		"trust":   50675,
-		"untrust": 20665,
-		"dmz":     56918,
-		"alpha":   2748,
-		// The verified colliding pair used by the gate tests below: both fold
-		// to 53547 under the frozen fold.
-		"z174": 53547,
-		"z214": 53547,
+	pins := map[string]uint32{
+		"trust":   2868932339,
+		"untrust": 1929257543,
+		"dmz":     1053679769,
+		"alpha":   254477713,
+		// #16557 residual single-fold collision pair used by the gate tests
+		// below: both fold to 1679679597 under the u32 fold.
+		"zzq8100":  1679679597,
+		"zzq17760": 1679679597,
 	}
 	for name, want := range pins {
 		if got := StableZoneID(name); got != want {
@@ -69,18 +69,18 @@ func TestStableZoneIDPureFunctionAcrossEarlierZone(t *testing.T) {
 // in compiler.go) makes this go green on the colliding config — the regression
 // it guards.
 func TestZoneIDCollisionFailsCommit(t *testing.T) {
-	if StableZoneID("z174") != StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if StableZoneID("zzq17760") != StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	tree := buildTree(t, []string{
-		"set security zones security-zone z174",
-		"set security zones security-zone z214",
+		"set security zones security-zone zzq17760",
+		"set security zones security-zone zzq8100",
 	})
 	_, err := CompileConfig(tree)
 	if err == nil {
 		t.Fatalf("CompileConfig accepted a colliding zone pair")
 	}
-	for _, want := range []string{"z174", "z214", "collision", "rename"} {
+	for _, want := range []string{"zzq17760", "zzq8100", "collision", "rename"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("collision error %q does not mention %q", err.Error(), want)
 		}
@@ -92,8 +92,8 @@ func TestZoneIDCollisionFailsCommit(t *testing.T) {
 // mirroring the tunnel-id gate.
 func TestZoneIDCollisionLenientWarns(t *testing.T) {
 	tree := buildTree(t, []string{
-		"set security zones security-zone z174",
-		"set security zones security-zone z214",
+		"set security zones security-zone zzq17760",
+		"set security zones security-zone zzq8100",
 	})
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
@@ -101,7 +101,7 @@ func TestZoneIDCollisionLenientWarns(t *testing.T) {
 	}
 	found := false
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "collision") && strings.Contains(w, "z174") {
+		if strings.Contains(w, "collision") && strings.Contains(w, "zzq17760") {
 			found = true
 		}
 	}
@@ -117,9 +117,9 @@ func TestZoneIDCollisionLenientWarns(t *testing.T) {
 // AND every groups block pre-expansion, so the verdict is node-independent.
 func TestZoneIDCollisionAcrossGroupsIsSymmetric(t *testing.T) {
 	tree := buildTree(t, []string{
-		"set groups node1 security zones security-zone z174",
-		"set security zones security-zone z214",
-		// No apply-groups: node0's effective config never contains z174 —
+		"set groups node1 security zones security-zone zzq17760",
+		"set security zones security-zone zzq8100",
+		// No apply-groups: node0's effective config never contains zzq17760 —
 		// the union check must still reject on both nodes.
 	})
 	if _, err := CompileConfigForNode(tree, 0); err == nil {
@@ -149,18 +149,18 @@ func TestZoneIDNoFalsePositiveOnOrdinaryZones(t *testing.T) {
 // id), so the dataplane never receives two zones sharing an id. Reverting the
 // quarantine (returning nil / empty) makes this RED.
 func TestQuarantinedZoneNamesDropsLaterColliding(t *testing.T) {
-	if StableZoneID("z174") != StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if StableZoneID("zzq17760") != StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
-	q := QuarantinedZoneNames([]string{"z214", "z174"}) // deliberately unsorted input
-	if _, dropped := q["z214"]; !dropped {
-		t.Fatalf("QuarantinedZoneNames did not quarantine the later-sorting colliding zone z214: %v", q)
+	q := QuarantinedZoneNames([]string{"zzq8100", "zzq17760"}) // deliberately unsorted input
+	if _, dropped := q["zzq8100"]; !dropped {
+		t.Fatalf("QuarantinedZoneNames did not quarantine the later-sorting colliding zone zzq8100: %v", q)
 	}
-	if _, dropped := q["z174"]; dropped {
-		t.Fatalf("QuarantinedZoneNames wrongly quarantined the earlier-sorting survivor z174: %v", q)
+	if _, dropped := q["zzq17760"]; dropped {
+		t.Fatalf("QuarantinedZoneNames wrongly quarantined the earlier-sorting survivor zzq17760: %v", q)
 	}
 	if len(q) != 1 {
-		t.Fatalf("QuarantinedZoneNames returned %d entries, want exactly 1 (only z214): %v", len(q), q)
+		t.Fatalf("QuarantinedZoneNames returned %d entries, want exactly 1 (only zzq8100): %v", len(q), q)
 	}
 }
 
@@ -179,45 +179,45 @@ func TestQuarantinedZoneNamesNoFalsePositive(t *testing.T) {
 // — the zone the dataplane actually installed — so id->name reverse maps never
 // name a quarantined zone.
 func TestStableZoneIDOwnerReturnsSurvivor(t *testing.T) {
-	id := StableZoneID("z174")
-	owner := StableZoneIDOwner([]string{"z214", "z174"}, id)
-	if owner != "z174" {
-		t.Fatalf("StableZoneIDOwner(%d) = %q, want the sorted-first survivor z174", id, owner)
+	id := StableZoneID("zzq17760")
+	owner := StableZoneIDOwner([]string{"zzq8100", "zzq17760"}, id)
+	if owner != "zzq17760" {
+		t.Fatalf("StableZoneIDOwner(%d) = %q, want the sorted-first survivor zzq17760", id, owner)
 	}
-	if got := StableZoneIDOwner([]string{"z174", "z214"}, 1); got != "" {
+	if got := StableZoneIDOwner([]string{"zzq17760", "zzq8100"}, 1); got != "" {
 		t.Fatalf("StableZoneIDOwner for an unclaimed id = %q, want empty", got)
 	}
 }
 func TestZoneQuarantineHelpersMatchRuntimeVerdict(t *testing.T) {
-	if StableZoneID("z174") != StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if StableZoneID("zzq17760") != StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
-	names := []string{"z214", "z174"}
+	names := []string{"zzq8100", "zzq17760"}
 	exclusions := ZoneQuarantineExclusions(names)
-	if _, ok := exclusions["z214"]; !ok {
+	if _, ok := exclusions["zzq8100"]; !ok {
 		t.Fatalf("ZoneQuarantineExclusions did not preserve the runtime exclusion: %v", exclusions)
 	}
-	if _, ok := exclusions["z174"]; ok {
+	if _, ok := exclusions["zzq17760"]; ok {
 		t.Fatalf("ZoneQuarantineExclusions excluded the surviving zone: %v", exclusions)
 	}
 
 	cfg := &Config{Security: SecurityConfig{Zones: map[string]*ZoneConfig{
-		"z174": {},
-		"z214": {},
+		"zzq17760": {},
+		"zzq8100":  {},
 	}}}
-	reason := ZoneQuarantineExcludedReason("z214", cfg)
-	for _, want := range []string{"z214", "z174", "stable ID"} {
+	reason := ZoneQuarantineExcludedReason("zzq8100", cfg)
+	for _, want := range []string{"zzq8100", "zzq17760", "stable ID"} {
 		if !strings.Contains(reason, want) {
 			t.Fatalf("quarantine reason %q does not mention %q", reason, want)
 		}
 	}
-	if got := ZoneQuarantineExcludedReason("z174", cfg); got != "" {
+	if got := ZoneQuarantineExcludedReason("zzq17760", cfg); got != "" {
 		t.Fatalf("surviving zone received a quarantine reason: %q", got)
 	}
 	if got := ZoneQuarantineExcludedReason("ordinary", cfg); got != "" {
 		t.Fatalf("ordinary zone received a quarantine reason: %q", got)
 	}
-	if got := ZoneQuarantineExcludedReason("z214", nil); got != "" {
+	if got := ZoneQuarantineExcludedReason("zzq8100", nil); got != "" {
 		t.Fatalf("nil config received a quarantine reason: %q", got)
 	}
 }
@@ -227,8 +227,8 @@ func TestZoneQuarantineHelpersMatchRuntimeVerdict(t *testing.T) {
 // "not installed" while the runtime published both (the pre-fix contradiction).
 func TestZoneIDCollisionLenientWarningStatesQuarantine(t *testing.T) {
 	tree := buildTree(t, []string{
-		"set security zones security-zone z174",
-		"set security zones security-zone z214",
+		"set security zones security-zone zzq17760",
+		"set security zones security-zone zzq8100",
 	})
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
@@ -236,14 +236,14 @@ func TestZoneIDCollisionLenientWarningStatesQuarantine(t *testing.T) {
 	}
 	var warn string
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "collision") && strings.Contains(w, "z214") {
+		if strings.Contains(w, "collision") && strings.Contains(w, "zzq8100") {
 			warn = w
 		}
 	}
 	if warn == "" {
-		t.Fatalf("no zone-id collision warning naming z214: %v", cfg.Warnings)
+		t.Fatalf("no zone-id collision warning naming zzq8100: %v", cfg.Warnings)
 	}
-	for _, want := range []string{"QUARANTINED", "z174", "z214", "DEGRADED"} {
+	for _, want := range []string{"QUARANTINED", "zzq17760", "zzq8100", "DEGRADED"} {
 		if !strings.Contains(warn, want) {
 			t.Fatalf("lenient warning %q does not mention %q", warn, want)
 		}

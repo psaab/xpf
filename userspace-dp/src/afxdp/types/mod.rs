@@ -715,7 +715,7 @@ pub(super) struct PendingNeighPacket {
     /// #10917: the validated fabric zone stamp is needed by the retry-time
     /// fragment-overlap key, which must use the same routing domain as inline
     /// fabric-ingress siblings.
-    pub(super) fabric_ingress_zone: Option<u16>,
+    pub(super) fabric_ingress_zone: Option<u32>,
 }
 
 /// Reverse packet held by its arrival binding until the owning IPsec install
@@ -783,8 +783,9 @@ pub(super) struct PendingPMechReversePacket {
 // mean a retried packet metered against a DIFFERENT tunnel's session than the
 // one it belongs to.
 // #10917: the fabric stamp uses the existing tail padding, so added no size.
+// #16557: fabric_ingress_zone widened u32->u32 (full StableZoneID), growing the packet 304 -> 312.
 const _: () = assert!(
-    core::mem::size_of::<PendingNeighPacket>() == 304,
+    core::mem::size_of::<PendingNeighPacket>() == 312,
     "PendingNeighPacket size changed — update afxdp.rs MAX_PENDING_NEIGH commentary",
 );
 
@@ -799,7 +800,7 @@ pub(super) struct UserspaceDpMeta {
     pub(super) ingress_vlan_id: u16,
     pub(super) ingress_pcp: u8,
     pub(super) ingress_vlan_present: u8,
-    pub(super) ingress_zone: u16,
+    pub(super) ingress_zone: u32,
     pub(super) routing_table: u32,
     pub(super) l3_offset: u16,
     pub(super) l4_offset: u16,

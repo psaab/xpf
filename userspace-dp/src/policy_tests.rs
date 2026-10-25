@@ -62,7 +62,7 @@ fn padded_policy_masks_match_helper_ipnet_grammar_12178() {
     }
 }
 
-fn test_zone_name_to_id() -> FxHashMap<String, u16> {
+fn test_zone_name_to_id() -> FxHashMap<String, u32> {
     let mut m = FxHashMap::default();
     m.insert("lan".to_string(), TEST_LAN_ZONE_ID);
     m.insert("wan".to_string(), TEST_WAN_ZONE_ID);
@@ -7589,7 +7589,7 @@ fn wildcard_rule(name: &str, from_zone: &str, to_zone: &str, action: &str) -> Po
     }
 }
 
-fn eval(state: &PolicyState, from_id: u16, to_id: u16) -> PolicyAction {
+fn eval(state: &PolicyState, from_id: u32, to_id: u32) -> PolicyAction {
     evaluate_policy(
         state,
         from_id,
@@ -8710,8 +8710,8 @@ fn global_policy_zone_scope_tier_ordering() {
         name: &'static str,
         default_policy: &'static str,
         rules: Vec<PolicyRuleSnapshot>,
-        from: u16,
-        to: u16,
+        from: u32,
+        to: u32,
         want_action: PolicyAction,
         want_match: Option<(u32, u32)>,
     }
@@ -10168,8 +10168,8 @@ fn configured_zone_pairs_bounded_matches_unbounded_prefix_15092() {
 fn configured_zone_pairs_bounded_8000_zones_15092() {
     use std::time::Instant;
 
-    const ZONES: u16 = 8000;
-    let mut zmap: FxHashMap<String, u16> = FxHashMap::default();
+    const ZONES: u32 = 8000;
+    let mut zmap: FxHashMap<String, u32> = FxHashMap::default();
     for id in 1..=ZONES {
         zmap.insert(format!("z{id}"), id);
     }
@@ -10457,7 +10457,7 @@ fn both_any_permit_snapshot_6682() -> PolicyRuleSnapshot {
     }
 }
 
-fn eval_6682(state: &PolicyState, from_id: u16, to_id: u16) -> PolicyEvaluationResult {
+fn eval_6682(state: &PolicyState, from_id: u32, to_id: u32) -> PolicyEvaluationResult {
     evaluate_policy_result_l3_aware(
         state,
         from_id,

@@ -69,7 +69,7 @@ fn forwarding(lan_a_moved_to_dmz: bool) -> ForwardingState {
     build_forwarding_state(&snapshot)
 }
 
-fn session(zone: u16, ingress_ifindex: i32, vlan: u16, is_reverse: bool) -> SessionMetadata {
+fn session(zone: u32, ingress_ifindex: i32, vlan: u16, is_reverse: bool) -> SessionMetadata {
     SessionMetadata {
         ingress_zone: zone,
         egress_zone: if is_reverse {
@@ -104,7 +104,7 @@ fn arrival(ifindex: i32, vlan: u16) -> UserspaceDpMeta {
     }
 }
 
-fn foreign(arrival_zone: u16, on_admitting_interface: bool) -> HitAuthority {
+fn foreign(arrival_zone: u32, on_admitting_interface: bool) -> HitAuthority {
     HitAuthority::Foreign {
         arrival_zone,
         on_admitting_interface,

@@ -115,7 +115,7 @@ func TestDualFormatOpenConsumesOneSlotPerInstance16303(t *testing.T) {
 	// each format (counter 1,2,3 -> selected={2}), not every flow as a
 	// double-evaluation (1,2 / 3,4 / 5,6) would produce.
 	for _, port := range []uint16{12345, 12346, 12347} {
-		if !d.eventReader.ProcessRawEvent(openRaw16303(port, 11, 12, trust, untrust)) {
+		if !d.eventReader.ProcessRawEvent(openRaw16303(port, 11, 12, uint16(trust), uint16(untrust))) {
 			t.Fatal("open rejected")
 		}
 	}
@@ -137,7 +137,7 @@ func TestDualFormatOpenConsumesOneSlotPerInstance16303(t *testing.T) {
 	}
 
 	// Its close exports in both formats without another evaluation.
-	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 12346, 443, [4]byte{}, 0, trust, untrust)
+	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 12346, 443, [4]byte{}, 0, uint16(trust), uint16(untrust))
 	binary.LittleEndian.PutUint32(closeBuf[128:132], 11)
 	if !d.eventReader.ProcessRawEvent(closeBuf) {
 		t.Fatal("close rejected")
@@ -172,7 +172,7 @@ func TestOutputOnlySampledOpenIsTracked16303(t *testing.T) {
 		t.Fatal("exporters must start")
 	}
 	trust, untrust := config.StableZoneID("trust"), config.StableZoneID("untrust")
-	if !d.eventReader.ProcessRawEvent(openRaw16303(23456, 11, 12, trust, untrust)) {
+	if !d.eventReader.ProcessRawEvent(openRaw16303(23456, 11, 12, uint16(trust), uint16(untrust))) {
 		t.Fatal("open rejected")
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 23456, DstPort: 443, Protocol: 6}

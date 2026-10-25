@@ -53,7 +53,7 @@ func newStatusCountingScrape(t *testing.T, status dpuserspace.ProcessStatus, sta
 			Manager: dataplane.New(),
 			status:  status,
 			apply: &dataplane.ApplyResult{
-				ZoneIDs:   map[string]uint16{"trust": 1, "untrust": 2},
+				ZoneIDs:   map[string]uint32{"trust": 1, "untrust": 2},
 				FilterIDs: map[string]uint32{"inet:fin": 0, "inet6:fin6": 100},
 			},
 		},

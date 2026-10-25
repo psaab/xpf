@@ -44,7 +44,7 @@ func TestScopedRuleDetailRendersScopeAndNoNumericZonePair_14579(t *testing.T) {
 		counters: map[uint32]dataplane.CounterValue{},
 	}
 	cr := &dataplane.ApplyResult{
-		ZoneIDs: map[string]uint16{"trust": 7, "untrust": 8, "dmz": 9},
+		ZoneIDs: map[string]uint32{"trust": 7, "untrust": 8, "dmz": 9},
 	}
 
 	var sb strings.Builder
@@ -88,7 +88,7 @@ func TestZoneScopedControlStillPrintsMeasuredCounts_14579(t *testing.T) {
 		counters: map[uint32]dataplane.CounterValue{},
 	}
 	cr := &dataplane.ApplyResult{
-		ZoneIDs: map[string]uint16{"trust": 7, "untrust": 8, "dmz": 9},
+		ZoneIDs: map[string]uint32{"trust": 7, "untrust": 8, "dmz": 9},
 	}
 	var sb strings.Builder
 	RenderSourceRuleDetail(context.Background(), &sb, cfg, dp, func() *dataplane.ApplyResult { return cr })
@@ -118,7 +118,7 @@ func TestGlobalRuleDetailNoNumericZonePair_14579(t *testing.T) {
 		},
 		counters: map[uint32]dataplane.CounterValue{},
 	}
-	cr := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 7, "untrust": 8}}
+	cr := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 7, "untrust": 8}}
 	var sb strings.Builder
 	RenderSourceRuleDetail(context.Background(), &sb, cfg, dp, func() *dataplane.ApplyResult { return cr })
 	out := sb.String()

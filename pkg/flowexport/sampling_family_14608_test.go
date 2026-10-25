@@ -62,7 +62,7 @@ security {
 }
 
 func TestSamplingPerFamily14608(t *testing.T) {
-	zoneIDs := map[string]uint16{"trust": 2, "untrust": 3}
+	zoneIDs := map[string]uint32{"trust": 2, "untrust": 3}
 
 	t.Run("inet only: IPv6 not exported and consumes no slot", func(t *testing.T) {
 		cfg := samplingFamilyConfig14608(t, "inet")

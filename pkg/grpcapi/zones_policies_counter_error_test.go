@@ -32,7 +32,7 @@ func (d *policyZoneErrGRPCDP) ReadPolicyCounters(uint32) (dataplane.CounterValue
 	return dataplane.CounterValue{}, errors.New("counter bridge degraded")
 }
 
-func (d *policyZoneErrGRPCDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, error) {
+func (d *policyZoneErrGRPCDP) ReadZoneCounters(uint32, int) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, errors.New("counter bridge degraded")
 }
 
@@ -55,7 +55,7 @@ func TestGetZonesFailsOnCounterReadError(t *testing.T) {
 		store: newSchedulerCounterGRPCStore(t),
 		dp: &policyZoneErrGRPCDP{
 			Manager: dataplane.New(),
-			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2, "dmz": 3}},
+			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2, "dmz": 3}},
 		},
 	}
 

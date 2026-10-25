@@ -22,8 +22,8 @@ import (
 // keeps serving its poll-N counts.
 func TestSyncBPFCountersReplacesFloodOffsetsAcrossPolls3651(t *testing.T) {
 	m := New()
-	const kept uint16 = 50675 // config.StableZoneID("trust")
-	const gone uint16 = 20665 // config.StableZoneID("untrust")
+	const kept uint32 = 101 // synthetic slotted zone id (#16557: StableZoneID now exceeds dense slot space)
+	const gone uint32 = 102 // synthetic slotted zone id
 
 	// Poll N: the helper publishes both zones.
 	m.mu.Lock()
@@ -75,7 +75,7 @@ func TestSyncBPFCountersReplacesFloodOffsetsAcrossPolls3651(t *testing.T) {
 // clears cannot pass.
 func TestSyncBPFCountersClearsFloodOffsetsWhenHelperStopsPublishing3651(t *testing.T) {
 	m := New()
-	const id uint16 = 56918 // config.StableZoneID("dmz")
+	const id uint32 = 103 // synthetic slotted zone id
 
 	m.mu.Lock()
 	m.syncBPFCountersLocked(&ProcessStatus{
@@ -104,7 +104,7 @@ func TestSyncBPFCountersClearsFloodOffsetsWhenHelperStopsPublishing3651(t *testi
 // offsets are stranded forever.
 func TestSyncBPFCountersClearsFloodOffsetsOnLayoutVersionZero3651(t *testing.T) {
 	m := New()
-	const id uint16 = 50675
+	const id uint32 = 101
 
 	m.mu.Lock()
 	m.syncBPFCountersLocked(&ProcessStatus{
@@ -133,7 +133,7 @@ func TestSyncBPFCountersClearsFloodOffsetsOnLayoutVersionZero3651(t *testing.T) 
 // too broadly would show up here. Stays GREEN under the replace-vs-set revert.
 func TestSyncBPFCountersKeepsTrafficAndFloodMirrorsIndependent3651(t *testing.T) {
 	m := New()
-	const id uint16 = 50675
+	const id uint32 = 101
 
 	// A poll carrying TRAFFIC only: the flood offsets must read not-populated,
 	// and the traffic offsets must be live.

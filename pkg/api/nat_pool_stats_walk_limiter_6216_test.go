@@ -38,7 +38,7 @@ func TestNatPoolStatsRespectsWalkLimiter6216(t *testing.T) {
 	dp := &natIfaceSNATSessionsDP{
 		Manager: dataplane.New(),
 		result: &dataplane.ApplyResult{
-			ZoneIDs: map[string]uint16{"trust": 2, "guest": 4, "wan": 5},
+			ZoneIDs: map[string]uint32{"trust": 2, "guest": 4, "wan": 5},
 		},
 	}
 	s := &Server{store: newIfaceNATStatsAPIStore(t), dp: dp}

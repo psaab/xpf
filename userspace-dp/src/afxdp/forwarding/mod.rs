@@ -52,7 +52,7 @@ pub(super) fn zone_pair_for_flow_with_override(
     // #921: this helper is `#[cfg_attr(not(test), allow(dead_code))]`
     // (see zone_pair_for_flow above) and is only called from tests.
     // After #921, `ifindex_to_zone_id` and `EgressInterface.zone_id`
-    // are u16. Resolve back to the name via `zone_id_to_name` for
+    // are u32. Resolve back to the name via `zone_id_to_name` for
     // the test-only String API. Slow path; allocations are fine.
     let from_zone = ingress_zone_override
         .map(|zone| zone.to_string())
@@ -78,8 +78,8 @@ pub(super) fn zone_pair_for_flow_with_override(
 }
 
 /// #919/#922: zero-allocation production zone-pair resolver. Returns
-/// `(from_id, to_id)` u16 pair directly without `String` materialisation.
-/// `ingress_zone_override` is `Option<u16>` (parsed from fabric MAC),
+/// `(from_id, to_id)` u32 pair directly without `String` materialisation.
+/// `ingress_zone_override` is `Option<u32>` (parsed from fabric MAC),
 /// not `Option<&str>` — callers no longer round-trip through names.
 /// Returns `(0, 0)` segments for ifindexes not in the zone maps; the
 /// caller treats `0` as "unknown" and falls back to default policy.
@@ -121,8 +121,8 @@ pub(super) fn zone_pair_for_flow_with_override(
 ///
 pub(in crate::afxdp) fn noroute_policy_denial(
     policy: &crate::policy::PolicyState,
-    from_zone_id: u16,
-    to_zone_id: u16,
+    from_zone_id: u32,
+    to_zone_id: u32,
     egress_ifindex: i32,
     src_ip: std::net::IpAddr,
     dst_ip: std::net::IpAddr,
@@ -149,8 +149,8 @@ pub(in crate::afxdp) fn noroute_policy_denial(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn noroute_policy_denial_at(
     policy: &crate::policy::PolicyState,
-    from_zone_id: u16,
-    to_zone_id: u16,
+    from_zone_id: u32,
+    to_zone_id: u32,
     egress_ifindex: i32,
     src_ip: std::net::IpAddr,
     dst_ip: std::net::IpAddr,
@@ -240,8 +240,8 @@ pub(in crate::afxdp) fn noroute_policy_denial_at(
 /// permits, the `from-zone any` tier and egress-scoped `junos-global` rules.
 pub(in crate::afxdp) fn noroute_policy_denial_gated(
     forwarding: &ForwardingState,
-    from_zone_id: u16,
-    to_zone_id: u16,
+    from_zone_id: u32,
+    to_zone_id: u32,
     egress_ifindex: i32,
     src_ip: std::net::IpAddr,
     dst_ip: std::net::IpAddr,
@@ -268,8 +268,8 @@ pub(in crate::afxdp) fn noroute_policy_denial_gated(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn noroute_policy_denial_gated_at(
     forwarding: &ForwardingState,
-    from_zone_id: u16,
-    to_zone_id: u16,
+    from_zone_id: u32,
+    to_zone_id: u32,
     egress_ifindex: i32,
     src_ip: std::net::IpAddr,
     dst_ip: std::net::IpAddr,
@@ -300,9 +300,9 @@ pub(in crate::afxdp) fn noroute_policy_denial_gated_at(
 pub(super) fn zone_pair_ids_for_flow_with_override(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     egress_ifindex: i32,
-) -> (u16, u16) {
+) -> (u32, u32) {
     // #921: single-hop direct lookup. Was two HashMap lookups
     // (ifindex → String → u16) and one String hash; now one
     // (ifindex → u16) for ingress and a struct field load for egress.
@@ -333,7 +333,7 @@ pub(super) fn zone_pair_ids_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     egress_ifindex: i32,
-) -> (u16, u16) {
+) -> (u32, u32) {
     zone_pair_ids_for_flow_with_override(forwarding, ingress_ifindex, None, egress_ifindex)
 }
 
@@ -439,7 +439,7 @@ pub(in crate::afxdp) fn ingress_routing_domain(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
-    fabric_ingress_zone: Option<u16>,
+    fabric_ingress_zone: Option<u32>,
 ) -> u32 {
     // Single-bool gate: a deployment with no routing-instance interface
     // membership never probes either map, so its session identity is
@@ -514,7 +514,7 @@ pub(in crate::afxdp) fn effective_routing_domain_for_flow(
     flow_domain: u32,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
-    fabric_ingress_zone: Option<u16>,
+    fabric_ingress_zone: Option<u32>,
 ) -> u32 {
     if flow_domain != 0 {
         flow_domain
@@ -542,7 +542,7 @@ pub(in crate::afxdp) fn native_route_table_for_flow_target(
     flow_domain: u32,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
-    fabric_ingress_zone: Option<u16>,
+    fabric_ingress_zone: Option<u32>,
     target: IpAddr,
 ) -> NativeRouteTable {
     let domain = effective_routing_domain_for_flow(

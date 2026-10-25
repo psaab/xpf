@@ -47,11 +47,11 @@ import (
 // will receive, with the same three exclusions, and `junos-host` resolves to
 // its reserved id without appearing in the map.
 type policyZoneResolver struct {
-	byName map[string]uint16
+	byName map[string]uint32
 }
 
 func newPolicyZoneResolver(zones []ZoneSnapshot) policyZoneResolver {
-	byName := make(map[string]uint16, len(zones))
+	byName := make(map[string]uint32, len(zones))
 	for _, z := range zones {
 		// Exactly `zone_name_to_id_from_snapshot`'s skips, in its order: a
 		// zero id and an empty name are unaddressable, and an id at or above

@@ -504,7 +504,7 @@ func (m *Manager) zoneNameByID(zoneID uint16) string {
 	// — which could name the QUARANTINED zone that forwards nothing.
 	owner := ""
 	for name, id := range cr.ZoneIDs {
-		if id != zoneID {
+		if id != uint32(zoneID) {
 			continue
 		}
 		if owner == "" || name < owner {

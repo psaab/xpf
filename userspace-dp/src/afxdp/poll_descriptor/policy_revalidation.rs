@@ -306,7 +306,7 @@ enum FromZoneSource {
     /// Live-resolve through the ledger from this ingress identity.
     LiveIfindex { ifindex: i32, vlan: u16 },
     /// Use the judged entry's recorded ingress zone.
-    RecordedZone(u16),
+    RecordedZone(u32),
 }
 
 /// #9604: what the cold judgment evaluates — always a FORWARD pair, no matter

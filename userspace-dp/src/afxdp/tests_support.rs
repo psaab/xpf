@@ -1043,7 +1043,7 @@ pub(super) fn assert_input_filter_accept_log_event(
     assert_eq!(event.src_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)));
     assert_eq!(event.dst_ip, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)));
     assert_eq!(event.dst_port, 5201);
-    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID as u16);
     assert_eq!(event.egress_zone_id, 0);
     assert_eq!(event_handle.dataplane_event_stats().filter_log.sent, 1);
 }

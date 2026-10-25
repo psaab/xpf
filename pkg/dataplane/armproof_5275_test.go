@@ -1082,7 +1082,7 @@ func TestArmProofUnarmedSurfacesAreDeduplicated(t *testing.T) {
 // tripwire saying the fixture stopped exercising the path it claims to.
 type armProofZoneDP struct{ DataPlane }
 
-func (armProofZoneDP) SetZoneConfig(uint16, ZoneConfig) error { return nil }
+func (armProofZoneDP) SetZoneConfig(uint32, ZoneConfig) error { return nil }
 
 // requireAbsentInterface asserts the fixture's premise: the netdev must NOT
 // exist on this host, because the whole path under test starts at
@@ -1124,7 +1124,7 @@ func zoneCfgForAbsentPhys(phys string, vlans []int, zones map[string][]string) *
 func unarmedFromZoneMaps(t *testing.T, cfg *config.Config) []string {
 	t.Helper()
 	result := &CompileResult{
-		ZoneIDs:             make(map[string]uint16),
+		ZoneIDs:             make(map[string]uint32),
 		ScreenIDs:           make(map[string]uint16),
 		ifCache:             make(map[string]*net.Interface),
 		rxTagStripOffCache:  make(map[string]bool),

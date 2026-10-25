@@ -756,7 +756,7 @@ pub(in crate::afxdp::icmp_embed) fn finalize_embedded_icmp_resolution_parts(
     now_secs: u64,
     ingress_ifindex: i32,
     resolution: ForwardingResolution,
-    ingress_zone: u16,
+    ingress_zone: u32,
 ) -> ForwardingResolution {
     let enforced = enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution);
     if !ingress_is_fabric(forwarding, ingress_ifindex)

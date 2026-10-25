@@ -294,14 +294,14 @@ type DataPlane interface {
 	LastCompileResult() *CompileResult
 
 	// Zone / interface mapping
-	SetZone(ifindex int, vlanID uint16, zoneID uint16, routingTable uint32, flags uint8, rgID uint8, screenFlags uint32) error
+	SetZone(ifindex int, vlanID uint16, zoneID uint32, routingTable uint32, flags uint8, rgID uint8, screenFlags uint32) error
 	SetVlanIfaceInfo(subIfindex int, parentIfindex int, vlanID uint16) error
 	ClearIfaceZoneMap() error
 	ClearVlanIfaceMap() error
-	SetZoneConfig(zoneID uint16, cfg ZoneConfig) error
+	SetZoneConfig(zoneID uint32, cfg ZoneConfig) error
 
 	// Policy
-	SetZonePairPolicy(fromZone, toZone uint16, ps PolicySet) error
+	SetZonePairPolicy(fromZone, toZone uint32, ps PolicySet) error
 	SetPolicyRule(policySetID uint32, ruleIndex uint32, rule PolicyRule) error
 	ClearZonePairPolicies() error
 	SetDefaultPolicy(action uint8) error
@@ -391,9 +391,9 @@ type DataPlane interface {
 	// Counters
 	ReadGlobalCounter(index uint32) (uint64, error)
 	IncrementGlobalCounter(index uint32, delta uint64) error
-	ReadFloodCounters(zoneID uint16) (FloodState, error)
+	ReadFloodCounters(zoneID uint32) (FloodState, error)
 	ReadInterfaceCounters(ifindex int) (InterfaceCounterValue, error)
-	ReadZoneCounters(zoneID uint16, direction int) (CounterValue, error)
+	ReadZoneCounters(zoneID uint32, direction int) (CounterValue, error)
 	ReadPolicyCounters(policyID uint32) (CounterValue, error)
 	ReadFilterCounters(ruleIdx uint32) (CounterValue, error)
 	ReadNATRuleCounter(counterID uint32) (CounterValue, error)

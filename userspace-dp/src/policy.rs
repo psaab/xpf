@@ -146,18 +146,18 @@ pub(crate) struct BookEntry {
 /// #922: zone-pair key packed as u32 (`from_id << 16 | to_id`).
 /// Replaces the previous `(String, String)` key that allocated two
 /// `String`s on every `evaluate_policy` call.
-pub(crate) type ZonePairKey = u32;
+pub(crate) type ZonePairKey = u64;
 
 #[inline]
-pub(crate) fn zone_pair_key(from_id: u16, to_id: u16) -> ZonePairKey {
-    ((from_id as u32) << 16) | (to_id as u32)
+pub(crate) fn zone_pair_key(from_id: u32, to_id: u32) -> ZonePairKey {
+    ((from_id as u64) << 32) | (to_id as u64)
 }
 
 /// #919/#922: sentinel for `junos-global` policy rules. Reserved at
-/// the top of the u16 space; `forwarding_build` rejects any zone
+/// the top of the u32 space; `forwarding_build` rejects any zone
 /// snapshot with id ≥ ZONE_ID_RESERVED_MIN.
-pub(crate) const JUNOS_GLOBAL_ZONE_ID: u16 = u16::MAX;
-pub(crate) const ZONE_ID_RESERVED_MIN: u16 = u16::MAX - 1;
+pub(crate) const JUNOS_GLOBAL_ZONE_ID: u32 = u32::MAX;
+pub(crate) const ZONE_ID_RESERVED_MIN: u32 = u32::MAX - 1;
 
 /// #3019: synthetic reserved zone id for the Junos `junos-host` self-traffic
 /// zone (`to-zone junos-host` / `from-zone junos-host` security policies). It
@@ -171,7 +171,7 @@ pub(crate) const ZONE_ID_RESERVED_MIN: u16 = u16::MAX - 1;
 /// policy gate. The Go control plane emits the `junos-host` zone NAME string
 /// in the rule snapshot; `parse_policy_state_with_counters` resolves that name
 /// to this id (Go↔Rust agreement is on the reserved name, not a wire id).
-pub(crate) const JUNOS_HOST_ZONE_ID: u16 = u16::MAX - 1;
+pub(crate) const JUNOS_HOST_ZONE_ID: u32 = u32::MAX - 1;
 
 /// #3402: build the policy-zone resolution map (`zone name → zone id`) from a
 /// snapshot's zone list, applying the SAME #919/#922 validity rules
@@ -179,7 +179,7 @@ pub(crate) const JUNOS_HOST_ZONE_ID: u16 = u16::MAX - 1;
 /// of 0, an empty name, or an id in the reserved range (`>= ZONE_ID_RESERVED_MIN`)
 /// is not addressable and is skipped (silently — `populate_zones` emits the
 /// per-reason diagnostics on the real build path). #3075 widened the
-/// event-stream zone field to u16, so the former >u8::MAX skip is retired.
+/// event-stream zone field to u32, so the former >u8::MAX skip is retired.
 ///
 /// The apply-time snapshot-integrity preflight MUST resolve a rule's zones
 /// against the INCOMING snapshot's own zones, NOT the live forwarding table.
@@ -194,7 +194,7 @@ pub(crate) const JUNOS_HOST_ZONE_ID: u16 = u16::MAX - 1;
 /// so the preflight and the real build resolve the identical set. A policy
 /// referencing a zone genuinely ABSENT from `snapshot.zones` still fails closed
 /// (the real #3402 fix).
-pub(crate) fn zone_name_to_id_from_snapshot(zones: &[ZoneSnapshot]) -> FxHashMap<String, u16> {
+pub(crate) fn zone_name_to_id_from_snapshot(zones: &[ZoneSnapshot]) -> FxHashMap<String, u32> {
     let mut map = FxHashMap::default();
     for zone in zones {
         if zone.id == 0 || zone.name.is_empty() {
@@ -381,7 +381,7 @@ pub(crate) enum GlobalZoneScope {
     /// 1-element set, bit-identical to the pre-#4626 `Zone(id)`); a larger scope
     /// spills to the heap once at build time (a cold path). The Go compiler
     /// sorts + de-duplicates the set, so membership is order-insensitive.
-    Zones(SmallVec<[u16; 2]>),
+    Zones(SmallVec<[u32; 2]>),
 }
 
 impl Default for GlobalZoneScope {
@@ -395,7 +395,7 @@ impl GlobalZoneScope {
     /// satisfies this scope. `Any` matches every zone; a `Zones` set matches iff
     /// `id` is a member (O(k), k = scope size ≈ 1-2, no allocation).
     #[inline]
-    pub(crate) fn matches(&self, id: u16) -> bool {
+    pub(crate) fn matches(&self, id: u32) -> bool {
         match self {
             GlobalZoneScope::Any => true,
             GlobalZoneScope::Zones(zs) => zs.contains(&id),
@@ -459,14 +459,14 @@ impl GlobalZoneScope {
 /// field is present). Every element is resolved and collected into a sorted,
 /// de-duplicated `Zones` set.
 fn build_global_zone_scope(
-    zone_name_to_id: &FxHashMap<String, u16>,
+    zone_name_to_id: &FxHashMap<String, u32>,
     names: &[String],
     rule_id: &str,
 ) -> Result<GlobalZoneScope, SnapshotIntegrityError> {
     if names.is_empty() || names.iter().any(|n| n == "any") {
         return Ok(GlobalZoneScope::Any);
     }
-    let mut ids: SmallVec<[u16; 2]> = SmallVec::with_capacity(names.len());
+    let mut ids: SmallVec<[u32; 2]> = SmallVec::with_capacity(names.len());
     for name in names {
         // #6464: an empty scope element is not the `any` wildcard — the Go
         // emit paths strip blanks, so only a corrupt / hand-built /
@@ -1851,19 +1851,19 @@ pub(crate) struct PolicyState {
     /// Host-scoped pairs (`to-zone junos-host`) are excluded — that is
     /// self traffic, not transit. Built once per snapshot; the resolved
     /// path never consults it.
-    exact_pair_deny_by_from: FxHashMap<u16, Vec<usize>>,
+    exact_pair_deny_by_from: FxHashMap<u32, Vec<usize>>,
     /// #3090: wildcard `from-zone any` index — key = the concrete to-zone id,
     /// value = indices (config order) of rules whose from-zone is the Junos
     /// wildcard `any` and whose to-zone is that concrete zone. Such a rule
     /// matches a flow into that to-zone REGARDLESS of ingress zone. Consulted
     /// in the single-wildcard precedence tier (after the exact zone pair,
     /// before both-any and global).
-    from_any_index: FxHashMap<u16, Vec<usize>>,
+    from_any_index: FxHashMap<u32, Vec<usize>>,
     /// #3090: wildcard `to-zone any` index — key = the concrete from-zone id,
     /// value = indices (config order) of rules whose to-zone is `any` and whose
     /// from-zone is that concrete zone. Matches a flow OUT of that from-zone
     /// regardless of egress zone.
-    to_any_index: FxHashMap<u16, Vec<usize>>,
+    to_any_index: FxHashMap<u32, Vec<usize>>,
     /// #3090: `from-zone any to-zone any` rules (the least-specific wildcard
     /// tier), in config order. Matches every defined zone pair. Consulted after
     /// the single-wildcard tier and before global rules.
@@ -1882,7 +1882,7 @@ pub(crate) struct PolicyState {
     /// Config-derived and deterministic, so both HA nodes derive the identical
     /// slot map from the identical config (the histogram is local per-node
     /// telemetry — not wire-synced — but its slot layout stays symmetric).
-    concrete_zone_ids: Vec<u16>,
+    concrete_zone_ids: Vec<u32>,
     /// #1606: deduplicated address-book table. Rules reference
     /// books by dense `u32` index (`PolicyRule::source_book_idxs`).
     /// #15091: behind `Arc` so `ForwardingState::clone` in
@@ -2286,7 +2286,7 @@ impl PolicyState {
 /// indistinguishable from an exactly-at-capacity one and the operator
 /// starvation flag would never fire for the wildcard/global tier.
 pub(crate) struct ConfiguredZonePairs {
-    pub(crate) pairs: Vec<(u16, u16)>,
+    pub(crate) pairs: Vec<(u32, u32)>,
     pub(crate) overflow: bool,
 }
 
@@ -2333,7 +2333,7 @@ impl PolicyState {
     /// unbounded set there); production builds the slot map via
     /// [`Self::configured_zone_pairs_bounded`] (#15092) for the
     /// `overflow` flag, which never materialises more than the budget.
-    pub(crate) fn configured_zone_pairs(&self) -> Vec<(u16, u16)> {
+    pub(crate) fn configured_zone_pairs(&self) -> Vec<(u32, u32)> {
         self.configured_zone_pairs_bounded(crate::afxdp::cold_path_hist::COLD_PATH_ASSIGNABLE_SLOTS)
             .pairs
     }
@@ -2363,7 +2363,7 @@ impl PolicyState {
         // A concrete, addressable transit zone id: non-zero and outside the
         // reserved sentinel range.
         #[inline]
-        fn is_concrete(id: u16) -> bool {
+        fn is_concrete(id: u32) -> bool {
             id != 0 && id < ZONE_ID_RESERVED_MIN
         }
 
@@ -2371,17 +2371,17 @@ impl PolicyState {
         let limit = limit.min(cap);
 
         // Tier 1: exact configured pairs (historical behavior).
-        let exact: BTreeSet<(u16, u16)> = self
+        let exact: BTreeSet<(u32, u32)> = self
             .zone_pair_index
             .keys()
-            .map(|&key| (((key >> 16) & 0xffff) as u16, (key & 0xffff) as u16))
+            .map(|&key| ((key >> 32) as u32, (key & 0xffff_ffff) as u32))
             .filter(|&(from, to)| is_concrete(from) && is_concrete(to))
             .collect();
 
         // The concrete-zone universe a wildcard `any` / unscoped-global side
         // can resolve to at runtime. `concrete_zone_ids` is sorted at parse
         // time; the filter preserves that order.
-        let concrete: Vec<u16> = self
+        let concrete: Vec<u32> = self
             .concrete_zone_ids
             .iter()
             .copied()
@@ -2393,11 +2393,11 @@ impl PolicyState {
         // `Any` side borrows the concrete universe; a `Zones` side owns
         // its filtered, sorted members.
         enum Side<'a> {
-            Universe(&'a [u16]),
-            List(Vec<u16>),
+            Universe(&'a [u32]),
+            List(Vec<u32>),
         }
         impl Side<'_> {
-            fn as_slice(&self) -> &[u16] {
+            fn as_slice(&self) -> &[u32] {
                 match self {
                     Side::Universe(s) => s,
                     Side::List(v) => v,
@@ -2412,7 +2412,7 @@ impl PolicyState {
             match scope {
                 GlobalZoneScope::Any => Side::Universe(&concrete),
                 GlobalZoneScope::Zones(zs) => {
-                    let mut v: Vec<u16> = zs.iter().copied().filter(|&z| is_concrete(z)).collect();
+                    let mut v: Vec<u32> = zs.iter().copied().filter(|&z| is_concrete(z)).collect();
                     v.sort_unstable();
                     v.dedup();
                     Side::List(v)
@@ -2428,7 +2428,7 @@ impl PolicyState {
             ti: usize,
         }
         impl ScopeStream<'_> {
-            fn peek(&self) -> Option<(u16, u16)> {
+            fn peek(&self) -> Option<(u32, u32)> {
                 let from = *self.froms.as_slice().get(self.fi)?;
                 let to = *self.tos.as_slice().get(self.ti)?;
                 Some((from, to))
@@ -2448,7 +2448,7 @@ impl PolicyState {
         // `from-zone any to-zone <Z>`: any concrete ingress zone -> Z.
         // Keys come from an FxHashMap (arbitrary order); sort for a
         // deterministic merge.
-        let mut from_any_tos: Vec<u16> = self
+        let mut from_any_tos: Vec<u32> = self
             .from_any_index
             .keys()
             .copied()
@@ -2465,7 +2465,7 @@ impl PolicyState {
             });
         }
         // `to-zone any from-zone <F>`: F -> any concrete egress zone.
-        let mut to_any_froms: Vec<u16> = self
+        let mut to_any_froms: Vec<u32> = self
             .to_any_index
             .keys()
             .copied()
@@ -2525,12 +2525,12 @@ impl PolicyState {
         // Cost is O((emitted + exact-skips) x streams): streams is bounded
         // by distinct wildcard keys + global rules, emitted by the budget.
         let slots_left = limit.saturating_sub(exact.len());
-        let mut wildcard_pairs: Vec<(u16, u16)> =
+        let mut wildcard_pairs: Vec<(u32, u32)> =
             Vec::with_capacity(slots_left.min(concrete.len().saturating_mul(2)));
         let mut overflow = false;
-        let mut last_emitted: Option<(u16, u16)> = None;
+        let mut last_emitted: Option<(u32, u32)> = None;
         loop {
-            let mut best: Option<(u16, u16)> = None;
+            let mut best: Option<(u32, u32)> = None;
             for s in &streams {
                 if let Some(p) = s.peek() {
                     best = Some(match best {
@@ -2559,7 +2559,7 @@ impl PolicyState {
         // Exact pairs first (slot priority), then the additional
         // wildcard/global pairs. Both halves are sorted, so the whole
         // assignment is deterministic and HA-symmetric.
-        let mut pairs: Vec<(u16, u16)> = Vec::with_capacity(exact.len() + wildcard_pairs.len());
+        let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(exact.len() + wildcard_pairs.len());
         pairs.extend(exact.iter().copied());
         pairs.extend(wildcard_pairs);
         ConfiguredZonePairs { pairs, overflow }
@@ -2577,7 +2577,7 @@ impl PolicyState {
 pub(crate) fn parse_policy_state(
     default_policy: &str,
     rules: &[PolicyRuleSnapshot],
-    zone_name_to_id: &FxHashMap<String, u16>,
+    zone_name_to_id: &FxHashMap<String, u32>,
 ) -> PolicyState {
     let counter_store = PolicyCounterStore::default();
     parse_policy_state_with_counters(default_policy, rules, zone_name_to_id, &[], &counter_store)
@@ -2591,7 +2591,7 @@ pub(crate) fn parse_policy_state(
 pub(crate) fn parse_policy_state_with_counters(
     default_policy: &str,
     rules: &[PolicyRuleSnapshot],
-    zone_name_to_id: &FxHashMap<String, u16>,
+    zone_name_to_id: &FxHashMap<String, u32>,
     address_books: &[AddressBookSnapshot],
     counter_store: &PolicyCounterStore,
 ) -> Result<PolicyState, SnapshotIntegrityError> {
@@ -2672,7 +2672,7 @@ pub(crate) fn parse_policy_state_with_counters(
     // and their first-packet latency samples are silently dropped. Reserved
     // sentinels (junos-host / junos-global, id >= ZONE_ID_RESERVED_MIN) and the
     // id-0 "unknown zone" are excluded — they never form a transit zone-pair.
-    let mut concrete_zone_ids: Vec<u16> = zone_name_to_id
+    let mut concrete_zone_ids: Vec<u32> = zone_name_to_id
         .values()
         .copied()
         .filter(|&id| id != 0 && id < ZONE_ID_RESERVED_MIN)
@@ -3494,8 +3494,8 @@ fn resolve_book_idxs(
 
 pub(crate) fn evaluate_policy(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3518,8 +3518,8 @@ fn policy_scheduler_now_ns(state: &PolicyState) -> u64 {
 }
 pub(crate) fn evaluate_policy_with_len(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3540,8 +3540,8 @@ pub(crate) fn evaluate_policy_with_len(
 /// unaffected.
 pub(crate) fn evaluate_policy_result_with_len(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3580,8 +3580,8 @@ pub(crate) fn evaluate_policy_result_with_len(
 /// diverge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PolicyQuery {
-    pub(crate) from_id: u16,
-    pub(crate) to_id: u16,
+    pub(crate) from_id: u32,
+    pub(crate) to_id: u32,
     pub(crate) src_ip: IpAddr,
     pub(crate) dst_ip: IpAddr,
     pub(crate) protocol: u8,
@@ -3599,7 +3599,7 @@ impl PolicyQuery {
     /// Counted, L4-present, resolved-egress evaluation at `now_ns` — the
     /// `evaluate_policy_result_with_icmp_at` mode.
     pub(crate) fn counted_at(
-        from_id: u16, to_id: u16, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
+        from_id: u32, to_id: u32, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
         src_port: u16, dst_port: u16, packet_icmp: Option<(u8, u8)>,
         packet_len: u64, now_ns: u64,
     ) -> Self {
@@ -3613,7 +3613,7 @@ impl PolicyQuery {
     /// Counted, L3-aware evaluation at `now_ns` — the
     /// `evaluate_policy_result_l3_aware_at` mode.
     pub(crate) fn l3_aware_at(
-        from_id: u16, to_id: u16, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
+        from_id: u32, to_id: u32, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
         src_port: u16, dst_port: u16, packet_icmp: Option<(u8, u8)>,
         packet_len: u64, l4_present: bool, now_ns: u64,
     ) -> Self {
@@ -3627,7 +3627,7 @@ impl PolicyQuery {
     /// Counted, L3-aware, unresolved-egress evaluation at `now_ns` — the
     /// `evaluate_policy_result_l3_aware_unresolved_egress_at` mode.
     pub(crate) fn l3_aware_unresolved_egress_at(
-        from_id: u16, to_id: u16, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
+        from_id: u32, to_id: u32, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
         src_port: u16, dst_port: u16, packet_icmp: Option<(u8, u8)>,
         packet_len: u64, l4_present: bool, now_ns: u64,
     ) -> Self {
@@ -3643,7 +3643,7 @@ impl PolicyQuery {
     /// forced to 0, matching that wrapper: bytes are meaningless when
     /// nothing is counted.
     pub(crate) fn without_counting_at(
-        from_id: u16, to_id: u16, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
+        from_id: u32, to_id: u32, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
         src_port: u16, dst_port: u16, packet_icmp: Option<(u8, u8)>, now_ns: u64,
     ) -> Self {
         Self {
@@ -3707,8 +3707,8 @@ impl PolicyHitCount {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_with_icmp(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3735,8 +3735,8 @@ pub(crate) fn evaluate_policy_result_with_icmp(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_with_icmp_at(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3767,8 +3767,8 @@ pub(crate) fn evaluate_policy_result_with_icmp_at(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_l3_aware(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3797,8 +3797,8 @@ pub(crate) fn evaluate_policy_result_l3_aware(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_l3_aware_at(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3831,8 +3831,8 @@ pub(crate) fn evaluate_policy_result_l3_aware_at(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3861,8 +3861,8 @@ pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress_at(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3895,8 +3895,8 @@ pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress_at(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_without_counting(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3922,8 +3922,8 @@ pub(crate) fn evaluate_policy_result_without_counting(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_without_counting_at(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -3944,8 +3944,8 @@ pub(crate) fn evaluate_policy_result_without_counting_at(
 #[allow(clippy::too_many_arguments)]
 fn evaluate_policy_result_counted(
     state: &PolicyState,
-    from_id: u16,
-    to_id: u16,
+    from_id: u32,
+    to_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -4376,7 +4376,7 @@ fn evaluate_policy_result_counted(
 /// zone can never be named `junos-host` (the Go strict validator + definition
 /// gate reject it), so this never shadows a real zone. All other names resolve
 /// through `zone_name_to_id` exactly as before.
-fn resolve_policy_zone_id(zone_name_to_id: &FxHashMap<String, u16>, name: &str) -> Option<u16> {
+fn resolve_policy_zone_id(zone_name_to_id: &FxHashMap<String, u32>, name: &str) -> Option<u32> {
     if name == JUNOS_HOST_ZONE_NAME {
         Some(JUNOS_HOST_ZONE_ID)
     } else {
@@ -4425,7 +4425,7 @@ fn resolve_policy_zone_id(zone_name_to_id: &FxHashMap<String, u16>, name: &str) 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_junos_host_policy(
     state: &PolicyState,
-    from_id: u16,
+    from_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -4488,7 +4488,7 @@ pub(crate) fn evaluate_junos_host_policy(
 /// come through here.
 pub(crate) fn evaluate_junos_host_policy_l3_aware(
     state: &PolicyState,
-    from_id: u16,
+    from_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -4517,7 +4517,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
     state: &PolicyState,
-    from_id: u16,
+    from_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -4548,7 +4548,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting(
     state: &PolicyState,
-    from_id: u16,
+    from_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -4585,7 +4585,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rederive_junos_host_policy_l3_aware_at(
     state: &PolicyState,
-    from_id: u16,
+    from_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -4613,7 +4613,7 @@ pub(crate) fn rederive_junos_host_policy_l3_aware_at(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting_at(
     state: &PolicyState,
-    from_id: u16,
+    from_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
@@ -4642,7 +4642,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting_at(
 #[allow(clippy::too_many_arguments)]
 fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
     state: &PolicyState,
-    from_id: u16,
+    from_id: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,

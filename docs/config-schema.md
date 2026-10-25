@@ -14551,8 +14551,11 @@ policy that simply omits `from-zone`/`to-zone`.
 ### #3075 — Stable zone ids (supersedes the #2391 u8 count cap)
 
 Security-zone ids are a **stable name-hash** (`config.StableZoneID`, `zoneid.go`):
-FNV-1a/64 xor-folded into `[1, ZoneIDReservedMin-1] = [1, 65533]`, a **pure
-function of the zone NAME** — never of the zone set or compile order. Adding,
+FNV-1a/64 xor-folded into `[1, ZoneIDReservedMin-1] = [1, 4294967293]` (#16557
+widened the former u16 fold to u32; pairs that collided under u16 —
+`vlan163`/`vlan364`, `zone109`/`zone237` — now commit, and the birthday
+collision probability reaches ~12% only around 100k zones instead of 128),
+a **pure function of the zone NAME** — never of the zone set or compile order. Adding,
 renaming, or removing a zone therefore can never renumber a surviving zone, so
 an established session's stored numeric zone id always reverse-resolves to the
 correct name after a config edit, and both HA nodes plus a cold-booting node
@@ -14605,6 +14608,18 @@ A commit-time **collision gate** (`validateZoneIDCollisionAST`, mirroring the
 id (strict on commit/commit-check; lenient warning on load/peer-sync), using the
 three-view (View 1 pre-expansion union + node0/node1 `${node}` expansion) union
 discipline so the verdict is identical on both cluster nodes.
+
+**#16557 residual limits.** A residual u32 hash collision is still possible
+in principle: the strict gate above still rejects it and the lenient path
+still quarantines the later-sorting zone (#3719). Zone ids above 65535
+cannot be carried by the frozen u16 session/event/HA record fields or the
+2-byte fabric MAC stamp, so such zones lose exact zone attribution on
+session displays, session sync, flow export and fabric stamps (they fall
+back to the unknown/zone-approximation path, fail-closed) while the
+dataplane itself evaluates policy with the full u32 id; per-zone traffic
+and flood counters use a dense u16-indexed slot map, so ids above 65535
+are uncounted (reported "not available", never truncated onto another
+zone). Widening those record fields is a separate flag-day change.
 
 **#3719 — lenient-path collision QUARANTINE (runtime enforcement of the
 warning).** The strict gate rejects a collision, but the lenient path only

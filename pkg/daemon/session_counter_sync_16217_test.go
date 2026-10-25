@@ -12,7 +12,7 @@ import (
 )
 
 func TestConvertCarriesPacketCounters16217(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	d4 := closeClassDelta9412(t, "open", 0)
 	d4.FwdPackets, d4.RevPackets = 12345, 6789
 	_, v4, ok := userspaceSessionFromDeltaV4(d4, zoneIDs)

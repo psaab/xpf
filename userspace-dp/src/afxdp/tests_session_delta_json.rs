@@ -103,8 +103,8 @@ fn test_binding_identity() -> BindingIdentity {
     }
 }
 
-fn zone_names() -> FastMap<u16, String> {
-    let mut m: FastMap<u16, String> = FastMap::default();
+fn zone_names() -> FastMap<u32, String> {
+    let mut m: FastMap<u32, String> = FastMap::default();
     m.insert(1, "lan".to_string());
     m.insert(2, "wan".to_string());
     m
@@ -292,7 +292,7 @@ struct BinaryAttribution {
 }
 
 fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
-    let zones: FxHashMap<String, u16> = FxHashMap::default();
+    let zones: FxHashMap<String, u32> = FxHashMap::default();
     let frame = EventFrame::encode_session_open(
         1,
         &delta.key,

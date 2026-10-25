@@ -27,8 +27,8 @@ const (
 func vlanClearServer16065(t *testing.T, dp *ifaceIdentity6960DP) *Server {
 	t.Helper()
 	dp.Manager = dataplane.New()
-	dp.apply = &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
-		"trust": clear16065Trust, "untrust": clear16065Untrust,
+	dp.apply = &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
+		"trust": uint32(clear16065Trust), "untrust": uint32(clear16065Untrust),
 	}}
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
 	if err := store.EnterConfigure(); err != nil {
@@ -139,8 +139,8 @@ set security policies default-policy deny-all`); err != nil {
 		},
 	}
 	dp.Manager = dataplane.New()
-	dp.apply = &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
-		"trust": clear16065Trust, "untrust": clear16065Untrust,
+	dp.apply = &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
+		"trust": uint32(clear16065Trust), "untrust": uint32(clear16065Untrust),
 	}}
 	s := &Server{
 		store: store,
@@ -201,8 +201,8 @@ set security policies default-policy deny-all`); err != nil {
 	}
 	dp := &ifaceIdentity6960DP{}
 	dp.Manager = dataplane.New()
-	dp.apply = &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
-		"trust": clear16065Trust, "untrust": clear16065Untrust,
+	dp.apply = &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
+		"trust": uint32(clear16065Trust), "untrust": uint32(clear16065Untrust),
 	}}
 	s := &Server{
 		store: store,

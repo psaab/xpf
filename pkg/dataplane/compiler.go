@@ -136,7 +136,7 @@ var runEthtool = func(args ...string) ([]byte, error) {
 
 // CompileResult holds the result of a config compilation for reference.
 type CompileResult struct {
-	ZoneIDs     map[string]uint16               // zone name -> zone ID
+	ZoneIDs     map[string]uint32               // zone name -> zone ID
 	ScreenIDs   map[string]uint16               // screen profile name -> profile ID (1-based)
 	AddrIDs     map[string]uint32               // address name -> address ID
 	AppIDs      map[string]config.AssignedAppID // application name -> assigned app ID

@@ -178,7 +178,7 @@ fn old_pow2_layout_would_fail_low_end_resolution() {
 
 #[test]
 fn direct_slot_map_assigns_sequential() {
-    let pairs = [(1u16, 2u16), (3, 4), (5, 6), (7, 8), (9, 10)];
+    let pairs = [(1u32, 2u32), (3, 4), (5, 6), (7, 8), (9, 10)];
     let (map, zeroed) = ColdPathSlotMap::build(None, &pairs);
     assert!(zeroed.is_empty(), "fresh build zeroes nothing");
     // Sorted/dedup input ⇒ slots assigned 0..5 in pair order.
@@ -198,8 +198,8 @@ fn direct_slot_map_no_collisions_at_capacity() {
     // 255 distinct in-range pairs ⇒ unique slots [0,255), no
     // overflow. (Slot 255 is reserved as the u8::MAX sentinel.)
     let mut pairs = Vec::new();
-    'outer: for from in 0u16..8 {
-        for to in 0u16..32 {
+    'outer: for from in 0u32..8 {
+        for to in 0u32..32 {
             pairs.push((from, to));
             if pairs.len() == COLD_PATH_ASSIGNABLE_SLOTS {
                 break 'outer;
@@ -222,8 +222,8 @@ fn direct_slot_map_no_collisions_at_capacity() {
 fn direct_slot_map_overflow_past_capacity() {
     // 256 in-range pairs: one more than the 255 assignable slots.
     let mut pairs = Vec::new();
-    'outer: for from in 0u16..16 {
-        for to in 0u16..17 {
+    'outer: for from in 0u32..16 {
+        for to in 0u32..17 {
             pairs.push((from, to));
             if pairs.len() == 256 {
                 break 'outer;
@@ -244,11 +244,11 @@ fn direct_slot_map_overflow_past_capacity() {
 #[test]
 fn direct_slot_map_immediate_reuse_after_removal_zeros_atomics() {
     // Build A with {(1,2),(3,4)}; record into both.
-    let pairs_a = [(1u16, 2u16), (3, 4)];
+    let pairs_a = [(1u32, 2u32), (3, 4)];
     let (map_a, _) = ColdPathSlotMap::build(None, &pairs_a);
     let slot_34 = lookup_slot(&map_a, 3, 4).unwrap();
     // Build B with {(1,2),(5,6)} — drop (3,4), add (5,6).
-    let pairs_b = [(1u16, 2u16), (5, 6)];
+    let pairs_b = [(1u32, 2u32), (5, 6)];
     let (map_b, zeroed) = ColdPathSlotMap::build(Some(&map_a), &pairs_b);
     // (1,2) retains its slot; (5,6) takes the freed (3,4) slot.
     assert_eq!(lookup_slot(&map_b, 1, 2), lookup_slot(&map_a, 1, 2));
@@ -278,10 +278,10 @@ fn direct_slot_map_immediate_reuse_after_removal_zeros_atomics() {
 
 #[test]
 fn direct_slot_map_retains_assignment_for_surviving_pairs() {
-    let pairs_a = [(1u16, 2u16), (3, 4), (5, 6)];
+    let pairs_a = [(1u32, 2u32), (3, 4), (5, 6)];
     let (map_a, _) = ColdPathSlotMap::build(None, &pairs_a);
     // Add a new pair; all original pairs survive.
-    let pairs_b = [(1u16, 2u16), (3, 4), (5, 6), (7, 8)];
+    let pairs_b = [(1u32, 2u32), (3, 4), (5, 6), (7, 8)];
     let (map_b, zeroed) = ColdPathSlotMap::build(Some(&map_a), &pairs_b);
     for &(from, to) in &pairs_a {
         assert_eq!(
@@ -313,7 +313,7 @@ fn build_assigns_slots_for_wide_stable_hash_zone_ids() {
     // such pair, silently dark-ing the #1635 cold-path histogram for
     // every real config. RED-on-revert: against the fixed-65 table
     // these lookups return None and overflow_active is true.
-    let pairs = [(300u16, 400u16), (40000, 1), (1, 65533), (65533, 65533)];
+    let pairs = [(300u32, 400u32), (40000, 1), (1, 65533), (65533, 65533)];
     let (map, _) = ColdPathSlotMap::build(None, &pairs);
     for &(from, to) in &pairs {
         assert!(
@@ -337,7 +337,7 @@ fn build_assigns_slots_for_zone_ids_up_to_64() {
     // ceiling 32) AND Copilot code-r2 (id 64 dropped at exclusive
     // ceiling 64). The 1-based MAX_ZONES=64 means the 64th zone has
     // id 64; it MUST get a slot.
-    let pairs = [(32u16, 33u16), (63, 1), (1, 63), (64, 64), (1, 64), (64, 1)];
+    let pairs = [(32u32, 33u32), (63, 1), (1, 63), (64, 64), (1, 64), (64, 1)];
     let (map, _) = ColdPathSlotMap::build(None, &pairs);
     for &(from, to) in &pairs {
         assert!(
@@ -353,7 +353,7 @@ fn build_assigns_slots_for_zone_ids_up_to_64() {
 
 #[test]
 fn lookup_slot_returns_none_for_unmapped_pair() {
-    let (map, _) = ColdPathSlotMap::build(None, &[(1u16, 2u16)]);
+    let (map, _) = ColdPathSlotMap::build(None, &[(1u32, 2u32)]);
     assert_eq!(lookup_slot(&map, 9, 9), None);
 }
 
@@ -374,11 +374,11 @@ fn cold_path_slot_assigned_for_wildcard_and_global_only_policy() {
     use crate::protocol::PolicyRuleSnapshot;
     use rustc_hash::FxHashMap;
 
-    const TRUST: u16 = crate::test_zone_ids::TEST_TRUST_ZONE_ID;
-    const UNTRUST: u16 = crate::test_zone_ids::TEST_UNTRUST_ZONE_ID;
-    const DMZ: u16 = crate::test_zone_ids::TEST_DMZ_ZONE_ID;
+    const TRUST: u32 = crate::test_zone_ids::TEST_TRUST_ZONE_ID;
+    const UNTRUST: u32 = crate::test_zone_ids::TEST_UNTRUST_ZONE_ID;
+    const DMZ: u32 = crate::test_zone_ids::TEST_DMZ_ZONE_ID;
 
-    let mut zone_name_to_id: FxHashMap<String, u16> = FxHashMap::default();
+    let mut zone_name_to_id: FxHashMap<String, u32> = FxHashMap::default();
     zone_name_to_id.insert("trust".to_string(), TRUST);
     zone_name_to_id.insert("untrust".to_string(), UNTRUST);
     zone_name_to_id.insert("dmz".to_string(), DMZ);
@@ -439,11 +439,11 @@ fn cold_path_slot_scoped_global_pins_single_pair() {
     use crate::protocol::PolicyRuleSnapshot;
     use rustc_hash::FxHashMap;
 
-    const TRUST: u16 = crate::test_zone_ids::TEST_TRUST_ZONE_ID;
-    const UNTRUST: u16 = crate::test_zone_ids::TEST_UNTRUST_ZONE_ID;
-    const DMZ: u16 = crate::test_zone_ids::TEST_DMZ_ZONE_ID;
+    const TRUST: u32 = crate::test_zone_ids::TEST_TRUST_ZONE_ID;
+    const UNTRUST: u32 = crate::test_zone_ids::TEST_UNTRUST_ZONE_ID;
+    const DMZ: u32 = crate::test_zone_ids::TEST_DMZ_ZONE_ID;
 
-    let mut zone_name_to_id: FxHashMap<String, u16> = FxHashMap::default();
+    let mut zone_name_to_id: FxHashMap<String, u32> = FxHashMap::default();
     zone_name_to_id.insert("trust".to_string(), TRUST);
     zone_name_to_id.insert("untrust".to_string(), UNTRUST);
     zone_name_to_id.insert("dmz".to_string(), DMZ);
@@ -483,7 +483,7 @@ fn build_flags_overflow_only_on_slot_capacity_exhaustion() {
     // (COLD_PATH_ASSIGNABLE_SLOTS) is exhausted, NOT by zone-id
     // magnitude — wide stable-hash ids are first-class now. A wide id
     // within capacity is assigned, not dropped.
-    let pairs = [(1u16, 2u16), (200, 5), (3, 4)];
+    let pairs = [(1u32, 2u32), (200, 5), (3, 4)];
     let (map, _) = ColdPathSlotMap::build(None, &pairs);
     assert!(
         lookup_slot(&map, 200, 5).is_some(),
@@ -494,8 +494,8 @@ fn build_flags_overflow_only_on_slot_capacity_exhaustion() {
     assert_eq!(occupied, 3);
 
     // Exceed the slot capacity with distinct wide pairs ⇒ overflow.
-    let mut many: Vec<(u16, u16)> = Vec::new();
-    for i in 0..(COLD_PATH_ASSIGNABLE_SLOTS as u16 + 1) {
+    let mut many: Vec<(u32, u32)> = Vec::new();
+    for i in 0..(COLD_PATH_ASSIGNABLE_SLOTS as u32 + 1) {
         many.push((1000 + i, 2000 + i));
     }
     let (full, _) = ColdPathSlotMap::build(None, &many);
@@ -522,8 +522,8 @@ fn bounded_pairs_overflow_reaches_slot_map_15092() {
     use rustc_hash::FxHashMap;
 
     // 20 zones ⇒ 400 both-any pairs ≫ 255 slots.
-    let mut zone_name_to_id: FxHashMap<String, u16> = FxHashMap::default();
-    for id in 1..=20u16 {
+    let mut zone_name_to_id: FxHashMap<String, u32> = FxHashMap::default();
+    for id in 1..=20u32 {
         zone_name_to_id.insert(format!("z{id}"), id);
     }
     let rules = vec![PolicyRuleSnapshot {
@@ -558,15 +558,15 @@ fn bounded_pairs_overflow_reaches_slot_map_15092() {
 #[test]
 fn build_zeros_slot_reassigned_after_intermediate_free() {
     // A: slot 0 = (1,2), slot 1 = (3,4).
-    let (map_a, za) = ColdPathSlotMap::build(None, &[(1u16, 2u16), (3, 4)]);
+    let (map_a, za) = ColdPathSlotMap::build(None, &[(1u32, 2u32), (3, 4)]);
     assert!(za.is_empty());
     let slot_12 = lookup_slot(&map_a, 1, 2).unwrap();
     // B: drop (1,2); keep (3,4). Slot for (1,2) is now free.
-    let (map_b, _zb) = ColdPathSlotMap::build(Some(&map_a), &[(3u16, 4u16)]);
+    let (map_b, _zb) = ColdPathSlotMap::build(Some(&map_a), &[(3u32, 4u32)]);
     assert_eq!(lookup_slot(&map_b, 1, 2), None);
     // C: keep (3,4); add NEW (5,6). It takes the lowest free slot,
     // which is the slot A used for (1,2).
-    let (map_c, zc) = ColdPathSlotMap::build(Some(&map_b), &[(3u16, 4u16), (5, 6)]);
+    let (map_c, zc) = ColdPathSlotMap::build(Some(&map_b), &[(3u32, 4u32), (5, 6)]);
     let slot_56 = lookup_slot(&map_c, 5, 6).unwrap();
     assert_eq!(slot_56, slot_12, "(5,6) reuses the slot A gave (1,2)");
     assert!(
@@ -603,8 +603,8 @@ fn zone_pair_packed_key_distinguishes_from_to() {
 fn zone_pair_packed_key_is_injective_over_small_box() {
     use std::collections::HashSet;
     let mut keys = HashSet::new();
-    for f in 0..8u16 {
-        for t in 0..8u16 {
+    for f in 0..8u32 {
+        for t in 0..8u32 {
             let k = zone_pair_packed_key(f, t);
             assert!(keys.insert(k), "duplicate packed key for ({f},{t}) -> {k}");
         }

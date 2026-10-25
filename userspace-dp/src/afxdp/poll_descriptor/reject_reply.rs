@@ -209,7 +209,7 @@ pub(super) fn enqueue_session_miss_rst(
     meta: UserspaceDpMeta,
     flow: &SessionFlow,
     counters: &mut BatchCounters,
-    from_zone_id: u16,
+    from_zone_id: u32,
     tcp_flags_unknown: bool,
 ) -> bool {
     if meta.protocol != PROTO_TCP
@@ -257,8 +257,8 @@ pub(super) fn deny_reply_and_emit(
     flow: &SessionFlow,
     counters: &mut BatchCounters,
     nat: &NatDecision,
-    from_zone_id: u16,
-    to_zone_id: u16,
+    from_zone_id: u32,
+    to_zone_id: u32,
     owner_rg_id: i32,
     policy_id: u32,
     action: PolicyAction,

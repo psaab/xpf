@@ -191,7 +191,7 @@ import (
 type discardingDataPlane struct{ DataPlane }
 
 func (discardingDataPlane) IsLoaded() bool                                                { return true }
-func (discardingDataPlane) SetZonePairPolicy(fromZone, toZone uint16, ps PolicySet) error { return nil }
+func (discardingDataPlane) SetZonePairPolicy(fromZone, toZone uint32, ps PolicySet) error { return nil }
 func (discardingDataPlane) SetPolicyRule(policySetID uint32, ruleIndex uint32, rule PolicyRule) error {
 	return nil
 }
@@ -486,7 +486,7 @@ func validationPhases(dp DataPlane, cfg *config.Config, result *CompileResult) [
 // avoid.
 func newValidationResult() *CompileResult {
 	return &CompileResult{
-		ZoneIDs:             make(map[string]uint16),
+		ZoneIDs:             make(map[string]uint32),
 		ScreenIDs:           make(map[string]uint16),
 		AddrIDs:             make(map[string]uint32),
 		AppIDs:              make(map[string]config.AssignedAppID),

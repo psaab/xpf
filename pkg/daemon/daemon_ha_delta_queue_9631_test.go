@@ -352,8 +352,8 @@ func sessionClosePayload9631(delta dpuserspace.SessionDeltaInfo) []byte {
 	copy(payload[6:10], src)
 	copy(payload[10:14], dst)
 	binary.LittleEndian.PutUint32(payload[14:18], uint32(int32(delta.OwnerRGID)))
-	binary.LittleEndian.PutUint16(payload[19:21], config.StableZoneID(delta.IngressZone))
-	binary.LittleEndian.PutUint16(payload[21:23], config.StableZoneID(delta.EgressZone))
+	binary.LittleEndian.PutUint16(payload[19:21], uint16(config.StableZoneID(delta.IngressZone)))
+	binary.LittleEndian.PutUint16(payload[21:23], uint16(config.StableZoneID(delta.EgressZone)))
 	return payload
 }
 

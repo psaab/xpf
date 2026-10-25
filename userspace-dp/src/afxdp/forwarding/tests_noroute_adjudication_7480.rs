@@ -17,14 +17,14 @@ use crate::{PolicyApplicationSnapshot, PolicyRuleSnapshot};
 use rustc_hash::FxHashMap;
 use std::net::IpAddr;
 
-const LAN: u16 = 11;
-const WAN: u16 = 12;
+const LAN: u32 = 11;
+const WAN: u32 = 12;
 /// The #3110 "unknown / no zone" sentinel. A base NoRoute has no logical
 /// egress identity (`egress_ifindex: 0`), so the caller resolves this as the
 /// to-zone. A tunnel NoRoute can retain a nonzero logical identity.
-const UNZONED: u16 = 0;
+const UNZONED: u32 = 0;
 
-fn zones() -> FxHashMap<String, u16> {
+fn zones() -> FxHashMap<String, u32> {
     let mut m = FxHashMap::default();
     m.insert("lan".to_string(), LAN);
     m.insert("wan".to_string(), WAN);

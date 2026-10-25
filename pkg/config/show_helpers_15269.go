@@ -8,11 +8,11 @@ import "fmt"
 // use: SurvivorZoneNames over buildZoneIDs-equivalent StableZoneID ids.
 // Quarantine-aware (collision loser / reserved names never claim an id),
 // matching cli.syslogZoneNameMap semantics via the shared survivor helper.
-func SyslogZoneNames(cfg *Config) map[uint16]string {
+func SyslogZoneNames(cfg *Config) map[uint32]string {
 	if cfg == nil {
-		return map[uint16]string{}
+		return map[uint32]string{}
 	}
-	ids := make(map[string]uint16, len(cfg.Security.Zones))
+	ids := make(map[string]uint32, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		ids[name] = StableZoneID(name)
 	}

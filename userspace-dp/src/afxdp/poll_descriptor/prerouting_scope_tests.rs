@@ -956,7 +956,7 @@ fn ambiguous_lan_stamp_frame_16045() -> Vec<u8> {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     frame
@@ -1205,7 +1205,7 @@ fn ambiguous_nat64_scoped_match_fails_closed_16045() {
         443,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = txn_meta_v6(21, frame.len());
@@ -1247,7 +1247,7 @@ fn ambiguous_nptv6_scoped_match_fails_closed_16045() {
         443,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = txn_meta_v6(21, frame.len());

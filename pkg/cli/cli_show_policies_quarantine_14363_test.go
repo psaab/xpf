@@ -26,15 +26,15 @@ func Test_14363_StandardViewQualifiesQuarantinedZones(t *testing.T) {
 
 	// Quarantined zone-pair: the To-zone header carries the qualifier, so
 	// its rules cannot read as ordinary live enforcement.
-	if !strings.Contains(out, "From zone: trust, To zone: z214 "+config.ZoneQuarantinePoliciesQualifier) {
+	if !strings.Contains(out, "From zone: trust, To zone: zzq8100 "+config.ZoneQuarantinePoliciesQualifier) {
 		t.Fatalf("standard view did not qualify the quarantined zone-pair header "+
-			"(want \"To zone: z214 %s\"):\n%s", config.ZoneQuarantinePoliciesQualifier, out)
+			"(want \"To zone: zzq8100 %s\"):\n%s", config.ZoneQuarantinePoliciesQualifier, out)
 	}
 
 	// Quarantine-dropped scoped global: its to-zone scope member is
 	// qualified (its unscoped from side stays the plain "any" placeholder).
 	dropped := flatPolicyBlock(t, out, "dropped-global")
-	if !strings.Contains(dropped, "To zones: z214 "+config.ZoneQuarantinePoliciesQualifier) {
+	if !strings.Contains(dropped, "To zones: zzq8100 "+config.ZoneQuarantinePoliciesQualifier) {
 		t.Fatalf("dropped-global block = %q, want the quarantined to-zone qualifier "+
 			"(standard view rendered a scrubbed global as live — #14363 regression)", dropped)
 	}

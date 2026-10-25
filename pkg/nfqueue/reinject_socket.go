@@ -614,7 +614,7 @@ func encodeSubmitBatch(frames []AdjudicatedFrame) ([]byte, error) {
 		putU64(&out, item.Frame.SnapshotGeneration)
 		putU64(&out, item.Frame.ConfigGeneration)
 		putU32(&out, item.Frame.FIBGeneration)
-		putU16(&out, item.ZoneID)
+		putU16(&out, uint16(item.ZoneID))
 		putU32(&out, item.IfID)
 		putU64(&out, item.Frame.PMechInventoryGeneration)
 		putU32(&out, item.Frame.PMechInventoryFIBGeneration)

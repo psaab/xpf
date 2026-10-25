@@ -90,7 +90,7 @@ func TestBuildSessionViewNilSlots5813(t *testing.T) {
 				store: store,
 				dp: &nilGuardRESTDP{
 					Manager: dataplane.New(),
-					result:  &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 1}},
+					result:  &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 1}},
 				},
 			}
 			var v sessionView

@@ -71,11 +71,11 @@ pub(super) enum SynCookieAckOutcome {
 /// raw zone only — never to the unproven claimed zone (see
 /// `docs/fabric-cross-chassis-fwd.md`).
 pub(super) struct FabricIngressOutcome {
-    pub(super) ingress_zone_override: Option<u16>,
+    pub(super) ingress_zone_override: Option<u32>,
     pub(super) ingress_nat_scope_ifindex: Option<i32>,
     pub(super) packet_fabric_ingress: bool,
     pub(super) invalid_zone_stamp: bool,
-    pub(super) ambiguous_zone: Option<u16>,
+    pub(super) ambiguous_zone: Option<u32>,
     pub(super) ambiguous_scope_ifindex: Option<i32>,
 }
 
@@ -979,9 +979,9 @@ fn flowless_l3_addrs(frame: &[u8], addr_family: u8, l3_off: usize) -> (IpAddr, I
 pub(super) fn screen_zone_with_state<'a>(
     worker_ctx: &'a WorkerContext,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     screen: &ScreenState,
-) -> Option<(u16, &'a str)> {
+) -> Option<(u32, &'a str)> {
     let roles = screen_zone_roles(worker_ctx, meta, ingress_zone_override, None, screen);
     roles
         .raw_zone
@@ -995,8 +995,8 @@ pub(super) fn screen_zone_with_state<'a>(
 /// claimed zone into the full-profile slot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct ScreenZoneRoles<'a> {
-    pub(super) raw_zone: Option<(u16, &'a str)>,
-    pub(super) claimed_zone: Option<(u16, &'a str)>,
+    pub(super) raw_zone: Option<(u32, &'a str)>,
+    pub(super) claimed_zone: Option<(u32, &'a str)>,
 }
 
 /// #16051 (RN-04): resolve positional screen roles without collapsing them.
@@ -1010,8 +1010,8 @@ pub(super) struct ScreenZoneRoles<'a> {
 pub(super) fn screen_zone_roles<'a>(
     worker_ctx: &'a WorkerContext,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
     screen: &ScreenState,
 ) -> ScreenZoneRoles<'a> {
     if !screen.has_screen_state() {
@@ -1071,7 +1071,7 @@ pub(super) fn stage_screen_check(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     now_ns: u64,
     now_secs: u64,
     screen: &mut ScreenState,
@@ -1101,8 +1101,8 @@ pub(super) fn stage_screen_check_with_ambiguous(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
     now_ns: u64,
     now_secs: u64,
     screen: &mut ScreenState,
@@ -1573,7 +1573,7 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     now_ns: u64,
     now_secs: u64,
     screen: &mut ScreenState,
@@ -1600,8 +1600,8 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
     now_ns: u64,
     now_secs: u64,
     screen: &mut ScreenState,
@@ -1843,7 +1843,7 @@ pub(super) enum IpsecPassthroughOutcome {
     /// host-inbound posture). The caller recycles the frame, accounts
     /// `host_inbound_denied_packets`, and emits the tuple-rich host-inbound
     /// deny event on `from_zone_id`.
-    Denied { from_zone_id: u16 },
+    Denied { from_zone_id: u32 },
 }
 
 /// #4323/#6471: resolve the LOGICAL ingress ifindex + from-zone exactly as the
@@ -1863,10 +1863,10 @@ pub(super) enum IpsecPassthroughOutcome {
 pub(super) fn ike_host_inbound_gate_context(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     now_secs: u64,
     worker_ctx: &WorkerContext,
-) -> (i32, u16, Option<u16>) {
+) -> (i32, u32, Option<u32>) {
     ike_host_inbound_gate_context_with_ambiguous(
         flow,
         meta,
@@ -1885,11 +1885,11 @@ pub(super) fn ike_host_inbound_gate_context(
 pub(super) fn ike_host_inbound_gate_context_with_ambiguous(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
     now_secs: u64,
     worker_ctx: &WorkerContext,
-) -> (i32, u16, Option<u16>) {
+) -> (i32, u32, Option<u32>) {
     let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
         worker_ctx.forwarding,
         meta.ingress_ifindex as i32,
@@ -1922,11 +1922,11 @@ fn ike_host_inbound_deny_zone(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     dst_port: u16,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
     now_secs: u64,
     worker_ctx: &WorkerContext,
-) -> Option<u16> {
+) -> Option<u32> {
     let (ingress_logical, from_zone_id, _ingress_zone_override) =
         ike_host_inbound_gate_context_with_ambiguous(
             flow,
@@ -2037,8 +2037,8 @@ pub(super) fn stage_ipsec_passthrough_check(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
     route_override_table: Option<&str>,
     binding_live: &BindingLiveState,
     worker_ctx: &WorkerContext,
@@ -2072,8 +2072,8 @@ pub(super) fn stage_ipsec_passthrough_check_with_scope(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
     _ambiguous_scope_ifindex: Option<i32>,
     route_override_table: Option<&str>,
     binding_live: &BindingLiveState,
@@ -2268,7 +2268,7 @@ fn ipsec_destination_matches_transit_dnat(
     forwarding: &crate::afxdp::ForwardingState,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     ingress_logical: i32,
 ) -> bool {
     // Mirror `prerouting_ingress_scope` exactly: a validated override wins;

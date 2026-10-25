@@ -6,7 +6,7 @@ use super::*;
 use crate::test_zone_ids::*;
 use std::collections::BTreeMap;
 
-fn test_zone_name_to_id() -> rustc_hash::FxHashMap<String, u16> {
+fn test_zone_name_to_id() -> rustc_hash::FxHashMap<String, u32> {
     let mut m = rustc_hash::FxHashMap::default();
     m.insert("lan".to_string(), TEST_LAN_ZONE_ID);
     m.insert("wan".to_string(), TEST_WAN_ZONE_ID);

@@ -55,7 +55,7 @@ security {
 
 func TestSamplingPerInterface15230(t *testing.T) {
 	cfg := samplingInterfaceConfig15230(t)
-	zoneIDs := map[string]uint16{"trust": 2, "untrust": 3}
+	zoneIDs := map[string]uint32{"trust": 2, "untrust": 3}
 	sz := BuildSamplingZones(cfg, zoneIDs)
 
 	// The per-interface maps must distinguish the two trust interfaces.
@@ -146,7 +146,7 @@ func TestSamplingPerInterfaceLegacyFallback15230(t *testing.T) {
 	}
 	// FlowDirection follows the same per-interface selection.
 	cfg := samplingInterfaceConfig15230(t)
-	ec := &ExportConfig{SamplingZones: BuildSamplingZones(cfg, map[string]uint16{"trust": 2, "untrust": 3})}
+	ec := &ExportConfig{SamplingZones: BuildSamplingZones(cfg, map[string]uint32{"trust": 2, "untrust": 3})}
 	if got := ec.FlowDirectionIface(2, 3, false, "ge-0/0/0.0", ""); got != 0 {
 		t.Fatalf("FlowDirectionIface sampled ingress = %d, want 0", got)
 	}

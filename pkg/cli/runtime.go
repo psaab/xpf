@@ -36,11 +36,11 @@ type cliRuntime interface {
 	// Counters
 	ReadGlobalCounter(idx uint32) (uint64, error)
 	ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCounterValue, error)
-	ReadZoneCounters(zoneID uint16, direction int) (dataplane.CounterValue, error)
+	ReadZoneCounters(zoneID uint32, direction int) (dataplane.CounterValue, error)
 	ReadPolicyCounters(ruleID uint32) (dataplane.CounterValue, error)
 	ReadFilterConfig(filterID uint32) (dataplane.FilterConfig, error)
 	ReadFilterCounters(filterID uint32) (dataplane.CounterValue, error)
-	ReadFloodCounters(zoneID uint16) (dataplane.FloodState, error)
+	ReadFloodCounters(zoneID uint32) (dataplane.FloodState, error)
 	ReadNATPortCounter(id uint32) (uint64, error)
 	ReadNATRuleCounter(id uint32) (dataplane.CounterValue, error)
 

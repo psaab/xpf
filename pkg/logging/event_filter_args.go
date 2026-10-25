@@ -48,7 +48,7 @@ const EventFilterArgsUsage = "usage: show security log [<count>] [zone <name>] "
 // Parsing fails CLOSED (#3347): an unknown token, a filter keyword with no
 // value, a non-positive count, or an unresolvable named zone is an error, not
 // a silently-ignored token that falls through to an unfiltered dump.
-func ParseEventFilterArgs(args []string, zoneIDs map[string]uint16, haveApply bool) (int, EventFilter, error) {
+func ParseEventFilterArgs(args []string, zoneIDs map[string]uint32, haveApply bool) (int, EventFilter, error) {
 	n := 50
 	var filter EventFilter
 	for i := 0; i < len(args); i++ {
@@ -73,7 +73,10 @@ func ParseEventFilterArgs(args []string, zoneIDs map[string]uint16, haveApply bo
 			if !ok {
 				return 0, EventFilter{}, fmt.Errorf("zone %q not found", zoneName)
 			}
-			filter.Zone = zid
+			// #16557: event records carry the low 16 bits of the u32
+			// zone id, so the filter selects by that truncation (the
+			// same key EventRecord.InZone/OutZone carry).
+			filter.Zone = uint16(zid)
 			filter.HasZone = true
 		case "protocol":
 			if i+1 >= len(args) {

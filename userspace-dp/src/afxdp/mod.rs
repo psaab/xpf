@@ -1215,7 +1215,7 @@ impl BatchCounters {
     pub(in crate::afxdp) fn record_screen_drop(
         &mut self,
         reason: &str,
-        zone_id: u16,
+        zone_id: u32,
         flood_slots: &crate::afxdp::flood_counters::FloodCounterSlotMap,
     ) {
         self.touched = true;

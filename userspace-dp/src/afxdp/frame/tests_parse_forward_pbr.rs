@@ -569,7 +569,7 @@ fn ingress_filter_routing_instance_steers_flow_into_native_gre_table() {
     assert_eq!(filter_event.filter_id, 0);
     assert_eq!(filter_event.term_id, 0);
     assert_eq!(filter_event.reason, FilterLogSource::Pbr.wire_reason());
-    assert_eq!(filter_event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(filter_event.ingress_zone_id, TEST_LAN_ZONE_ID as u16);
     assert_eq!(filter_event.egress_zone_id, 0);
     let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
         &state,

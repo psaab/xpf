@@ -407,7 +407,7 @@ pub(crate) const INJECT_PACKET_TUPLE_PROTOCOL_VERSION: i32 = 1;
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub(crate) struct ZoneTrafficCounterStatus {
     #[serde(rename = "zone_id", default)]
-    pub zone_id: u16,
+    pub zone_id: u32,
     #[serde(rename = "ingress_packets", default)]
     pub ingress_packets: u64,
     #[serde(rename = "ingress_bytes", default)]
@@ -432,7 +432,7 @@ pub(crate) struct ZoneTrafficCounterStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub(crate) struct ZoneFloodCounterStatus {
     #[serde(rename = "zone_id", default)]
-    pub zone_id: u16,
+    pub zone_id: u32,
     #[serde(rename = "syn_flood_events", default)]
     pub syn_flood_events: u64,
     #[serde(rename = "icmp_flood_events", default)]
@@ -1239,9 +1239,9 @@ pub(crate) struct SessionSyncRequest {
     /// these when nonzero; falls back to name lookup via
     /// `zone_name_to_id` otherwise.
     #[serde(rename = "ingress_zone_id", default)]
-    pub ingress_zone_id: u16,
+    pub ingress_zone_id: u32,
     #[serde(rename = "egress_zone_id", default)]
-    pub egress_zone_id: u16,
+    pub egress_zone_id: u32,
     /// #7095: the LOCAL ingress identity a peer-imported session should carry.
     ///
     /// The originating node could not send its own `ingress_ifindex` — an
@@ -1600,9 +1600,9 @@ pub(crate) struct SessionPolicyMatch {
     // session key/metadata/decision. All serde-defaulted: an older helper
     // omits them and the Go rematch fails closed to the deleted bucket.
     #[serde(rename = "ingress_zone_id", default)]
-    pub ingress_zone_id: u16,
+    pub ingress_zone_id: u32,
     #[serde(rename = "egress_zone_id", default)]
-    pub egress_zone_id: u16,
+    pub egress_zone_id: u32,
     #[serde(rename = "dnat", default)]
     pub dnat: bool,
     #[serde(rename = "nat_dst_ip", default)]

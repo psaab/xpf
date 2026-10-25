@@ -262,10 +262,10 @@ func (d *textErrCLIDP) LastApplyResult() *dataplane.ApplyResult { return d.apply
 func (d *textErrCLIDP) ReadPolicyCounters(uint32) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, errors.New("counter bridge degraded")
 }
-func (d *textErrCLIDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, error) {
+func (d *textErrCLIDP) ReadZoneCounters(uint32, int) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, errors.New("counter bridge degraded")
 }
-func (d *textErrCLIDP) ReadFloodCounters(uint16) (dataplane.FloodState, error) {
+func (d *textErrCLIDP) ReadFloodCounters(uint32) (dataplane.FloodState, error) {
 	return dataplane.FloodState{}, errors.New("counter bridge degraded")
 }
 func (d *textErrCLIDP) ReadFilterConfig(uint32) (dataplane.FilterConfig, error) {
@@ -291,7 +291,7 @@ func TestShowPoliciesBriefWarnsOnCounterReadError(t *testing.T) {
 func TestShowZonesDisplayWarnsOnCounterReadError(t *testing.T) {
 	store := newPolicyHitCountCLIStore(t, true) // has trust/untrust zones
 	c := &CLI{store: store, dp: &textErrCLIDP{
-		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2}},
+		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2}},
 	}}
 
 	out := captureStdout(t, func() {
@@ -325,7 +325,7 @@ func TestShowFirewallFiltersWarnsOnCounterReadError(t *testing.T) {
 func TestShowScreenStatisticsAllWarnsOnCounterReadError(t *testing.T) {
 	store := screenProfileStore(t) // has untrust zone + screen profile
 	c := &CLI{store: store, dp: &textErrCLIDP{
-		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"untrust": 1}},
+		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"untrust": 1}},
 	}}
 
 	out := captureStdout(t, func() {
@@ -347,7 +347,7 @@ type partialFloodErrCLIDP struct {
 
 func (d *partialFloodErrCLIDP) IsLoaded() bool                          { return true }
 func (d *partialFloodErrCLIDP) LastApplyResult() *dataplane.ApplyResult { return d.apply }
-func (d *partialFloodErrCLIDP) ReadFloodCounters(zoneID uint16) (dataplane.FloodState, error) {
+func (d *partialFloodErrCLIDP) ReadFloodCounters(zoneID uint32) (dataplane.FloodState, error) {
 	if zoneID == 2 {
 		return dataplane.FloodState{}, errors.New("counter bridge degraded")
 	}
@@ -366,7 +366,7 @@ func (d *partialFloodErrCLIDP) ReadFloodCounters(zoneID uint16) (dataplane.Flood
 func TestShowScreenStatisticsAllSurfacesPerZoneReadError(t *testing.T) {
 	store := newPolicyHitCountCLIStore(t, true) // trust + untrust zones
 	c := &CLI{store: store, dp: &partialFloodErrCLIDP{
-		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2}},
+		apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2}},
 	}}
 
 	out := captureStdout(t, func() {

@@ -92,7 +92,7 @@ func (d *invalDebtTestDP12073) ApplyConfig(ctx context.Context, _ *config.Config
 		return nil, outcome.err
 	}
 	out := &dataplane.ApplyResult{
-		ZoneIDs:                 map[string]uint16{},
+		ZoneIDs:                 map[string]uint32{},
 		SnapshotPublishDeferred: outcome.deferred,
 	}
 	d.gen++
@@ -123,7 +123,7 @@ func (d *invalDebtTestDP12073) LastApplyResult() *dataplane.ApplyResult {
 	if d.lastApply != nil {
 		return d.lastApply.Clone()
 	}
-	return &dataplane.ApplyResult{ZoneIDs: map[string]uint16{}}
+	return &dataplane.ApplyResult{ZoneIDs: map[string]uint32{}}
 }
 
 func (d *invalDebtTestDP12073) Link() dataplane.LinkController { return noopLinkController{} }

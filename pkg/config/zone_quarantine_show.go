@@ -31,7 +31,7 @@ const ZoneQuarantineDispositionText = "if this snapshot is applied, construction
 // the QUARANTINED head naming id + survivor, plus the shared disposition body.
 // Carries the two-space detail indent both text surfaces use; no trailing
 // newline so Printf and buffer callers both use it unchanged (#6895 shape).
-func ZoneQuarantineHeadlineFor(id uint16, survivor string) string {
+func ZoneQuarantineHeadlineFor(id uint32, survivor string) string {
 	if survivor == "" {
 		return fmt.Sprintf("  QUARANTINED (reserved context name; id %d omitted) — %s",
 			id, ZoneQuarantineDispositionText)
@@ -100,7 +100,7 @@ const ZoneQuarantineDriftNote = "note: zone inventory differs from last applied 
 // ZoneInventoryDiffers reports whether the active zone key set differs from
 // the last applied ZoneIDs key set. Shared by local CLI and gRPC text
 // renderers for the drift note (#7473 composition: one implementation).
-func ZoneInventoryDiffers(active []string, applied map[string]uint16) bool {
+func ZoneInventoryDiffers(active []string, applied map[string]uint32) bool {
 	if len(active) != len(applied) {
 		return true
 	}
@@ -115,7 +115,7 @@ func ZoneInventoryDiffers(active []string, applied map[string]uint16) bool {
 // ZoneQuarantineTestZoneQualifierFor qualifies a showTestZone
 // interface→zone match on a quarantined zone with the survivor/id the
 // interface's zone assignment would resolve against.
-func ZoneQuarantineTestZoneQualifierFor(id uint16, survivor string) string {
+func ZoneQuarantineTestZoneQualifierFor(id uint32, survivor string) string {
 	if survivor == "" {
 		return fmt.Sprintf("(quarantined: reserved context name; id %d would be unzoned if this snapshot is applied)",
 			id)

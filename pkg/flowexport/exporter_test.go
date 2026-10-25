@@ -92,7 +92,7 @@ func TestBuildSamplingZones(t *testing.T) {
 	}
 
 	// Deterministic zone IDs: dmz=1, trust=2, untrust=3 (sorted)
-	zoneIDs := map[string]uint16{"dmz": 1, "trust": 2, "untrust": 3}
+	zoneIDs := map[string]uint32{"dmz": 1, "trust": 2, "untrust": 3}
 	sz := BuildSamplingZones(cfg, zoneIDs)
 
 	// trust (id=2) should have both input and output, in both families.
@@ -142,7 +142,7 @@ func TestBuildSamplingZonesSkipsNilZone(t *testing.T) {
 	cfg.Security.Zones["bogus"] = nil
 	cfg.Interfaces.Interfaces["nilif"] = nil
 
-	zoneIDs := map[string]uint16{"trust": 2, "bogus": 9}
+	zoneIDs := map[string]uint32{"trust": 2, "bogus": 9}
 
 	// Must not panic on the nil "bogus" zone or nil interface value.
 	sz := BuildSamplingZones(cfg, zoneIDs)
@@ -344,7 +344,7 @@ func TestBuildSamplingZonesMalformedRefSkipped(t *testing.T) {
 		},
 	}
 
-	zoneIDs := map[string]uint16{"bad": 1, "good": 2}
+	zoneIDs := map[string]uint32{"bad": 1, "good": 2}
 	sz := BuildSamplingZones(cfg, zoneIDs)
 
 	// "bad" (id=1) must NOT enable sampling — the malformed ref is skipped,
@@ -388,7 +388,7 @@ func TestBuildSamplingZonesAbsentUnitDoesNotWidenExport(t *testing.T) {
 					},
 				},
 			}
-			ec := &ExportConfig{SamplingZones: BuildSamplingZones(cfg, map[string]uint16{"trust": 1})}
+			ec := &ExportConfig{SamplingZones: BuildSamplingZones(cfg, map[string]uint32{"trust": 1})}
 			if got := ec.ShouldExport(1, 99, false); got != tc.wantEligible {
 				t.Fatalf("ShouldExport(trust, unrelated) = %v, want %v (sampling zones: %#v)",
 					got, tc.wantEligible, ec.SamplingZones)

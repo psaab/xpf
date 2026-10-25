@@ -313,7 +313,7 @@ type NATRuleCounterStatus struct {
 // struct is ZoneTrafficCounterStatus (protocol/control.rs) with matching serde
 // rename tags.
 type ZoneTrafficCounterStatus struct {
-	ZoneID         uint16 `json:"zone_id,omitempty"`
+	ZoneID         uint32 `json:"zone_id,omitempty"`
 	IngressPackets uint64 `json:"ingress_packets,omitempty"`
 	IngressBytes   uint64 `json:"ingress_bytes,omitempty"`
 	EgressPackets  uint64 `json:"egress_packets,omitempty"`
@@ -330,7 +330,7 @@ type ZoneTrafficCounterStatus struct {
 // dataplane.FloodState SynCount/ICMPCount/UDPCount. The Rust struct is
 // ZoneFloodCounterStatus (protocol/control.rs) with matching serde rename tags.
 type ZoneFloodCounterStatus struct {
-	ZoneID          uint16 `json:"zone_id,omitempty"`
+	ZoneID          uint32 `json:"zone_id,omitempty"`
 	SynFloodEvents  uint64 `json:"syn_flood_events,omitempty"`
 	ICMPFloodEvents uint64 `json:"icmp_flood_events,omitempty"`
 	UDPFloodEvents  uint64 `json:"udp_flood_events,omitempty"`

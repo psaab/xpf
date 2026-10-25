@@ -70,7 +70,7 @@ func TestRematchRenamedV6NAT64Legacy12880(t *testing.T) {
 		SrcPort: 1234, DstPort: 443, Protocol: 6,
 	}
 	value := dataplane.SessionValueV6{
-		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 		Flags: dataplane.SessFlagDNAT | dataplane.SessFlagNAT64, NATDstIP: natDst, NATDstPort: 8443,
 	}
 	record, permitted := rematchRenamedV6(oldCfg, newCfg, binding, key, value)
@@ -109,8 +109,8 @@ func TestReauthorizeNAT64Candidate12880(t *testing.T) {
 		},
 		DNAT: true, NATDstIP: "10.0.0.1", NATDstPort: 8443,
 		ExpectedRTFlowSessionID: 12880,
-		IngressZoneID:           config.StableZoneID("lan"),
-		EgressZoneID:            config.StableZoneID("wan"),
+		IngressZoneID:           uint16(config.StableZoneID("lan")),
+		EgressZoneID:            uint16(config.StableZoneID("wan")),
 	}
 	capture := &policyInvalidationCapture{candidateRuleIDs: map[policyInvalidationMatchIdentity]string{}}
 	capture.deleted.policy = append(capture.deleted.policy, match)

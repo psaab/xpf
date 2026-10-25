@@ -128,7 +128,7 @@ pub(in crate::afxdp) const FLOOD_KINDS: usize = 3;
 /// why the flood half is coalesced the same way despite being on the drop path.
 pub(in crate::afxdp) struct FloodCounterSlotMap {
     slot_of: Box<[u8; 65536]>,
-    inverse: [u16; FLOOD_COUNTER_SLOTS],
+    inverse: [u32; FLOOD_COUNTER_SLOTS],
     /// Per-slot handle to the assigned zone's shared atomic block, resolved
     /// from the zone-id-keyed [`FloodCounterStore`] at build time so the
     /// per-batch fold never locks the store. `None` for an unassigned slot.
@@ -161,7 +161,7 @@ impl FloodCounterSlotMap {
     pub(in crate::afxdp) fn empty() -> Self {
         Self {
             slot_of: Box::new([0u8; 65536]),
-            inverse: [0u16; FLOOD_COUNTER_SLOTS],
+            inverse: [0u32; FLOOD_COUNTER_SLOTS],
             slot_totals: std::array::from_fn(|_| None),
             overflow_active: false,
         }
@@ -174,18 +174,24 @@ impl FloodCounterSlotMap {
     /// shared `Arc<FloodTotalsAtomic>` (get-or-create from `store`), so a zone
     /// surviving this apply keeps the same block and its counts never reset or
     /// double across a slot renumber.
-    pub(in crate::afxdp) fn build(zone_ids: &[u16], store: &FloodCounterStore) -> Self {
-        let mut ids: Vec<u16> = zone_ids.iter().copied().filter(|&z| z != 0).collect();
+    pub(in crate::afxdp) fn build(zone_ids: &[u32], store: &FloodCounterStore) -> Self {
+        let mut ids: Vec<u32> = zone_ids.iter().copied().filter(|&z| z != 0).collect();
         ids.sort_unstable();
         ids.dedup();
 
         let mut slot_of = Box::new([0u8; 65536]);
-        let mut inverse = [0u16; FLOOD_COUNTER_SLOTS];
+        let mut inverse = [0u32; FLOOD_COUNTER_SLOTS];
         let mut slot_totals: [Option<Arc<FloodTotalsAtomic>>; FLOOD_COUNTER_SLOTS] =
             std::array::from_fn(|_| None);
         let mut overflow_active = false;
         let mut next_slot = 1usize;
         for zid in ids {
+            if zid > u16::MAX as u32 {
+                // #16557: dense slot array is u16-indexed; ids above it are
+                // uncounted (slot-capacity overflow), never truncated.
+                overflow_active = true;
+                continue;
+            }
             if next_slot > FLOOD_COUNTER_ASSIGNABLE_SLOTS {
                 overflow_active = true;
                 break;
@@ -205,14 +211,18 @@ impl FloodCounterSlotMap {
 
     /// Resolve the hot-path slot for `zone_id` (0 = unassigned / uncounted).
     #[inline]
-    pub(in crate::afxdp) fn slot_of(&self, zone_id: u16) -> u8 {
+    pub(in crate::afxdp) fn slot_of(&self, zone_id: u32) -> u8 {
+        // #16557: dense array is u16-indexed; ids above it hold no slot.
+        if zone_id > u16::MAX as u32 {
+            return 0;
+        }
         self.slot_of[zone_id as usize]
     }
 
     /// #14619: zone ids currently holding a live flood slot, in slot
     /// order. Twin of `ZoneCounterSlotMap::slotted_zone_ids`; capacities
     /// are asserted equal so the two sets agree.
-    pub(in crate::afxdp) fn slotted_zone_ids(&self) -> Vec<u16> {
+    pub(in crate::afxdp) fn slotted_zone_ids(&self) -> Vec<u32> {
         self.inverse.iter().copied().filter(|&z| z != 0).collect()
     }
 }
@@ -235,7 +245,7 @@ impl FloodCounterSlotMap {
 pub(in crate::afxdp) fn publishable_flood_rows(
     store: &FloodCounterStore,
     slot_map: &FloodCounterSlotMap,
-    is_configured: impl Fn(u16) -> bool,
+    is_configured: impl Fn(u32) -> bool,
 ) -> Vec<ZoneFloodCounterStatus> {
     store
         .snapshot()
@@ -334,13 +344,13 @@ impl FloodTotalsAtomic {
 /// `ForwardingState` keeps every generation pointing at the same totals.
 #[derive(Clone, Debug, Default)]
 pub(in crate::afxdp) struct FloodCounterStore {
-    totals: Arc<Mutex<FxHashMap<u16, Arc<FloodTotalsAtomic>>>>,
+    totals: Arc<Mutex<FxHashMap<u32, Arc<FloodTotalsAtomic>>>>,
 }
 
 impl FloodCounterStore {
     /// Get-or-create the shared atomic block for a stable zone id, under the map
     /// mutex. Config-apply path only; NOT the hot path.
-    fn zone_totals(&self, zone_id: u16) -> Arc<FloodTotalsAtomic> {
+    fn zone_totals(&self, zone_id: u32) -> Arc<FloodTotalsAtomic> {
         let mut totals = self.totals.lock().expect("flood counter store poisoned");
         Arc::clone(totals.entry(zone_id).or_default())
     }
@@ -407,7 +417,7 @@ impl FloodCounterStore {
     /// Drop totals for zones that are no longer configured (config apply
     /// hygiene). A `configured` zone's `Arc` is retained, so a slot map rebuilt
     /// in the same apply resolves the SAME block (no reset/double).
-    pub(in crate::afxdp) fn reconcile(&self, configured: &FxHashSet<u16>) {
+    pub(in crate::afxdp) fn reconcile(&self, configured: &FxHashSet<u32>) {
         self.totals
             .lock()
             .expect("flood counter store poisoned")
@@ -440,9 +450,9 @@ impl FloodCounterStore {
     /// `snapshot`: see the note there for why the wire stays drops-only until
     /// the surface can render the alarming-and-permitting state.
     #[cfg(test)]
-    pub(in crate::afxdp) fn alarm_zones_for_test(&self) -> Vec<(u16, (u64, u64, u64))> {
+    pub(in crate::afxdp) fn alarm_zones_for_test(&self) -> Vec<(u32, (u64, u64, u64))> {
         let totals = self.totals.lock().expect("flood counter store poisoned");
-        let mut out: Vec<(u16, (u64, u64, u64))> = totals
+        let mut out: Vec<(u32, (u64, u64, u64))> = totals
             .iter()
             .map(|(&zone_id, t)| (zone_id, t.load_alarms()))
             .filter(|(_, (s, i, u))| *s != 0 || *i != 0 || *u != 0)
@@ -457,7 +467,7 @@ impl FloodCounterStore {
     #[cfg(test)]
     fn lock_totals_for_test(
         &self,
-    ) -> std::sync::MutexGuard<'_, FxHashMap<u16, Arc<FloodTotalsAtomic>>> {
+    ) -> std::sync::MutexGuard<'_, FxHashMap<u32, Arc<FloodTotalsAtomic>>> {
         self.totals.lock().expect("flood counter store poisoned")
     }
 }
@@ -525,7 +535,7 @@ thread_local! {
 #[inline]
 pub(in crate::afxdp) fn record_zone_flood_drop(
     slot_map: &FloodCounterSlotMap,
-    zone_id: u16,
+    zone_id: u32,
     reason: &str,
 ) {
     let Some(kind) = flood_reason_index(reason) else {
@@ -572,7 +582,7 @@ pub(in crate::afxdp) fn record_zone_flood_drop(
 #[inline]
 pub(in crate::afxdp) fn record_zone_flood_alarm(
     slot_map: &FloodCounterSlotMap,
-    zone_id: u16,
+    zone_id: u32,
     reason: &str,
 ) {
     let Some(kind) = flood_reason_index(reason) else {
@@ -724,10 +734,10 @@ mod tests {
     #[test]
     fn build_sets_overflow_past_capacity() {
         let store = FloodCounterStore::default();
-        let ids: Vec<u16> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u16 + 5)).collect();
+        let ids: Vec<u32> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u32 + 5)).collect();
         let map = FloodCounterSlotMap::build(&ids, &store);
         assert!(map.overflow_active);
-        let assigned = (1..=65535u16).filter(|&z| map.slot_of(z) != 0).count();
+        let assigned = (1..=65535u32).filter(|&z| map.slot_of(z) != 0).count();
         assert_eq!(assigned, FLOOD_COUNTER_ASSIGNABLE_SLOTS);
     }
 
@@ -737,7 +747,7 @@ mod tests {
     #[test]
     fn flood_and_traffic_slot_maps_cover_the_same_zones() {
         use crate::afxdp::zone_counters::{ZoneCounterSlotMap, ZoneCounterStore};
-        let ids: Vec<u16> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u16 + 3))
+        let ids: Vec<u32> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u32 + 3))
             .map(|z| z.wrapping_mul(37).max(1))
             .collect();
         let flood = FloodCounterSlotMap::build(&ids, &FloodCounterStore::default());
@@ -818,7 +828,7 @@ mod tests {
         record_zone_flood_drop(&map, 200, "udp-flood");
         flush_recorded_flood_counters(&store, &map);
         assert_eq!(store.snapshot().len(), 2);
-        let keep: FxHashSet<u16> = [100u16].into_iter().collect();
+        let keep: FxHashSet<u32> = [100u32].into_iter().collect();
         store.reconcile(&keep);
         let snap = store.snapshot();
         assert_eq!(snap.len(), 1);
@@ -851,7 +861,7 @@ mod tests {
     #[test]
     fn populated_zone_stops_publishing_once_pushed_past_capacity() {
         let store = FloodCounterStore::default();
-        const Z: u16 = 50675; // config::StableZoneID("trust")
+        const Z: u32 = 50675; // config::StableZoneID("trust")
         let map1 = FloodCounterSlotMap::build(&[Z], &store);
         assert_ne!(map1.slot_of(Z), 0);
         record_zone_flood_drop(&map1, Z, "syn-flood");
@@ -862,9 +872,9 @@ mod tests {
         assert_eq!(published[0].syn_flood_events, 2);
 
         // Apply 2: enough LOWER ids to consume every assignable slot.
-        let mut ids: Vec<u16> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u16)).collect();
+        let mut ids: Vec<u32> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
         ids.push(Z);
-        let configured: FxHashSet<u16> = ids.iter().copied().collect();
+        let configured: FxHashSet<u32> = ids.iter().copied().collect();
         store.reconcile(&configured);
         let map2 = FloodCounterSlotMap::build(&ids, &store);
         assert!(map2.overflow_active);
@@ -894,8 +904,8 @@ mod tests {
     #[test]
     fn publish_filter_drops_only_the_unslotted_and_unconfigured() {
         let store = FloodCounterStore::default();
-        let mut ids: Vec<u16> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u16)).collect();
-        const OVERFLOWED: u16 = 65533;
+        let mut ids: Vec<u32> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
+        const OVERFLOWED: u32 = 65533;
         ids.push(OVERFLOWED);
         let map = FloodCounterSlotMap::build(&ids, &store);
         assert!(map.overflow_active);
@@ -911,7 +921,7 @@ mod tests {
         flush_recorded_flood_counters(&store, &seed);
 
         // Zone 2 has a slot AND traffic but is NOT configured.
-        let configured: FxHashSet<u16> = [1u16, OVERFLOWED].into_iter().collect();
+        let configured: FxHashSet<u32> = [1u32, OVERFLOWED].into_iter().collect();
         let published = publishable_flood_rows(&store, &map, |z| configured.contains(&z));
         assert!(
             published.iter().any(|s| s.zone_id == 1),
@@ -997,7 +1007,7 @@ mod tests {
     /// decay on their own.
     #[test]
     fn clear_zeroes_the_alarm_triple_too_7086() {
-        const Z: u16 = 4242;
+        const Z: u32 = 4242;
         let store = FloodCounterStore::default();
         let map = FloodCounterSlotMap::build(&[Z], &store);
 
@@ -1028,7 +1038,7 @@ mod tests {
     /// against the broken reset.
     #[test]
     fn a_flushed_alarm_delta_is_not_refolded_by_the_next_batch_7086() {
-        const Z: u16 = 909;
+        const Z: u32 = 909;
         let store = FloodCounterStore::default();
         let map = FloodCounterSlotMap::build(&[Z], &store);
 
@@ -1062,7 +1072,7 @@ mod tests {
     /// silently include port scans.
     #[test]
     fn a_non_flood_reason_contributes_no_zone_alarm_7086() {
-        const Z: u16 = 77;
+        const Z: u32 = 77;
         let store = FloodCounterStore::default();
         let map = FloodCounterSlotMap::build(&[Z], &store);
 
@@ -1081,8 +1091,8 @@ mod tests {
     /// identically to the drop recorder — the `slot == 0` sentinel guard.
     #[test]
     fn an_unslotted_zone_contributes_no_alarm_7086() {
-        const MAPPED: u16 = 11;
-        const UNMAPPED: u16 = 12;
+        const MAPPED: u32 = 11;
+        const UNMAPPED: u32 = 12;
         let store = FloodCounterStore::default();
         let map = FloodCounterSlotMap::build(&[MAPPED], &store);
 

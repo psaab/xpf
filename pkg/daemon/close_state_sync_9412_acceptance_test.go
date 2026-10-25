@@ -78,7 +78,7 @@ func closeClassDelta9412(t *testing.T, event string, class int) dpuserspace.Sess
 }
 
 func TestConvertCarriesTheCloseClass9412(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	_, val, ok := userspaceSessionFromDeltaV4(closeClassDelta9412(t, "open", 1), zoneIDs)
 	if !ok {
 		t.Fatal("FIXTURE: delta did not convert")
@@ -90,7 +90,7 @@ func TestConvertCarriesTheCloseClass9412(t *testing.T) {
 }
 
 func TestConvertCarriesTCPHandshakeState10888(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	delta4 := closeClassDelta9412(t, "open", 0)
 	delta4.TCPHandshakeState = dataplane.TCPHandshakeStateHandshakePending
 	_, val4, ok := userspaceSessionFromDeltaV4(delta4, zoneIDs)
@@ -125,7 +125,7 @@ func primaryForRG1Daemon9412() (*Daemon, *cluster.SessionSync) {
 func TestTheCloseClassFixtureIsAdmittedAsAnOpen9412(t *testing.T) {
 	d, ss := primaryForRG1Daemon9412()
 	sink := &closeClassSink9412{}
-	n := d.walkUserspaceSessionDeltas(ss, map[string]uint16{"lan": 1, "wan": 2},
+	n := d.walkUserspaceSessionDeltas(ss, map[string]uint32{"lan": 1, "wan": 2},
 		[]dpuserspace.SessionDeltaInfo{closeClassDelta9412(t, "open", 0)}, sink)
 	if n != 1 || len(sink.opensV4) != 1 {
 		t.Fatalf("FIXTURE: an open delta was not admitted (n=%d opens=%d)", n, len(sink.opensV4))
@@ -135,7 +135,7 @@ func TestTheCloseClassFixtureIsAdmittedAsAnOpen9412(t *testing.T) {
 func TestAnUpdateDeltaIsSyncedWithItsCloseClass9412(t *testing.T) {
 	d, ss := primaryForRG1Daemon9412()
 	sink := &closeClassSink9412{}
-	n := d.walkUserspaceSessionDeltas(ss, map[string]uint16{"lan": 1, "wan": 2},
+	n := d.walkUserspaceSessionDeltas(ss, map[string]uint32{"lan": 1, "wan": 2},
 		[]dpuserspace.SessionDeltaInfo{closeClassDelta9412(t, "update", 2)}, sink)
 	if n != 1 || len(sink.opensV4) != 1 {
 		t.Fatalf("#9412 ACCEPTANCE: the helper reported a close-state UPDATE for a session "+

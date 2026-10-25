@@ -23,7 +23,7 @@ pub(in crate::afxdp) fn reverse_hit_departed_destination_redirect(
     is_reverse: bool,
     resolution_target: IpAddr,
     table: Option<&str>,
-    egress_zone: u16,
+    egress_zone: u32,
     disposition: ForwardingDisposition,
 ) -> Option<ForwardingResolution> {
     if !is_reverse
@@ -989,7 +989,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
 pub(in crate::afxdp) fn redirect_session_via_fabric_if_needed(forwarding: &ForwardingState,
 resolution: ForwardingResolution,
 fabric_ingress: bool,
-ingress_zone: u16,) -> ForwardingResolution {
+ingress_zone: u32,) -> ForwardingResolution {
     redirect_session_via_fabric_if_needed_at(
         forwarding,
         &BTreeMap::new(),
@@ -1014,7 +1014,7 @@ ha_state: &BTreeMap<i32, HAGroupRuntime>,
 now_secs: u64,
 resolution: ForwardingResolution,
 fabric_ingress: bool,
-ingress_zone: u16,) -> ForwardingResolution {
+ingress_zone: u32,) -> ForwardingResolution {
     let rescuable = matches!(
         resolution.disposition,
         ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive

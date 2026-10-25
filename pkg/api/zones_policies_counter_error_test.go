@@ -37,7 +37,7 @@ func (d *policyZoneErrAPIDP) ReadPolicyCounters(uint32) (dataplane.CounterValue,
 	return dataplane.CounterValue{}, errors.New("counter bridge degraded")
 }
 
-func (d *policyZoneErrAPIDP) ReadZoneCounters(uint16, int) (dataplane.CounterValue, error) {
+func (d *policyZoneErrAPIDP) ReadZoneCounters(uint32, int) (dataplane.CounterValue, error) {
 	return dataplane.CounterValue{}, errors.New("counter bridge degraded")
 }
 
@@ -61,7 +61,7 @@ func TestZonesHandlerSurfacesReadError(t *testing.T) {
 		store: newDescriptorCoverageStore(t),
 		dp: &policyZoneErrAPIDP{
 			Manager: dataplane.New(),
-			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2}},
+			apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 1, "untrust": 2}},
 		},
 	}
 	rr := httptest.NewRecorder()

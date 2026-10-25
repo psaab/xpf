@@ -90,7 +90,7 @@ type userspaceXSKBindingController interface {
 // survivor even when the colliders are node-scoped: a node whose only claimant
 // of a shared ID is the loser maps that ID to no RG, matching a dataplane that
 // installs no zone for it.
-func buildZoneRGMap(cfg *config.Config, zoneIDs map[string]uint16) cluster.ZoneRGMap {
+func buildZoneRGMap(cfg *config.Config, zoneIDs map[string]uint32) cluster.ZoneRGMap {
 	result := make(cluster.ZoneRGMap)
 	excluded := config.ZoneQuarantineExclusionsForConfig(cfg)
 	for zoneName, zone := range cfg.Security.Zones {
@@ -104,10 +104,14 @@ func buildZoneRGMap(cfg *config.Config, zoneIDs map[string]uint16) cluster.ZoneR
 		if zone == nil {
 			continue
 		}
-		zid, ok := zoneIDs[zoneName]
-		if !ok {
+		zid32, ok := zoneIDs[zoneName]
+		if !ok || zid32 == 0 {
 			continue
 		}
+		// #16557: session records carry the low 16 bits of the u32
+		// zone id, so ownership is keyed by that truncation (the key
+		// ShouldSyncZone is queried with).
+		zid := uint16(zid32)
 		for _, ifName := range zone.Interfaces {
 			// #9821 D17: the split base (declared-aware), suffix ignored as
 			// before — a dotted RG owner's member resolves to its declared stanza.

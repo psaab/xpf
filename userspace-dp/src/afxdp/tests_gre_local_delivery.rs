@@ -742,7 +742,7 @@ fn poll_descriptor_host_inbound_deny_counts_local_delivery_session_miss() {
     // LocalDelivery; add a present-but-empty host-inbound set on every zone so
     // the TCP/179 host-bound packet is denied (Junos deny-all posture).
     let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
-    let zone_ids: Vec<u16> = forwarding.zone_id_to_name.keys().copied().collect();
+    let zone_ids: Vec<u32> = forwarding.zone_id_to_name.keys().copied().collect();
     assert!(
         !zone_ids.is_empty(),
         "fixture must define at least one zone"
@@ -801,7 +801,7 @@ fn poll_descriptor_host_inbound_deny_counts_local_delivery_session_miss() {
 #[test]
 fn poll_descriptor_host_inbound_deny_emits_tuple_event_session_miss() {
     let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
-    let zone_ids: Vec<u16> = forwarding.zone_id_to_name.keys().copied().collect();
+    let zone_ids: Vec<u32> = forwarding.zone_id_to_name.keys().copied().collect();
     assert!(
         !zone_ids.is_empty(),
         "fixture must define at least one zone"
@@ -1168,7 +1168,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         event.kind,
         crate::event_stream::codec::DataplaneEventKind::PolicyDeny
     );
-    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID as u16);
     assert_eq!(event.src_port, 12345);
     assert_eq!(event.dst_port, 5201);
     assert_eq!(
@@ -2420,7 +2420,7 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
     // deny-all), while ICMP ERROR types stay globally admitted (#3171). This is
     // what makes the outer-vs-inner read observable: outer flags 0x0B decodes to
     // error type 11 (admit-exempt); inner type 8 is echo (deny).
-    let zone_ids: Vec<u16> = forwarding.zone_id_to_name.keys().copied().collect();
+    let zone_ids: Vec<u32> = forwarding.zone_id_to_name.keys().copied().collect();
     assert!(
         !zone_ids.is_empty(),
         "fixture must define at least one zone"
@@ -2575,7 +2575,7 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
     );
 
     // Tighten to a ping-less (present-but-EMPTY) host-inbound set on every zone.
-    let zone_ids: Vec<u16> = forwarding.zone_id_to_name.keys().copied().collect();
+    let zone_ids: Vec<u32> = forwarding.zone_id_to_name.keys().copied().collect();
     assert!(
         !zone_ids.is_empty(),
         "fixture must define at least one zone"

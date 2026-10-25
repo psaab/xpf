@@ -3318,7 +3318,7 @@ fn live_flow_cache_callsite_emits_the_cached_input_filter_log_6999() {
     assert_eq!(event.src_port, test_key().src_port);
     assert_eq!(event.dst_port, test_key().dst_port);
     assert_eq!(
-        event.ingress_zone_id, TEST_TRUST_ZONE_ID,
+        event.ingress_zone_id, TEST_TRUST_ZONE_ID as u16,
         "the record must carry the ingress zone the CACHED input-filter match \
          was resolved in"
     );
@@ -4501,8 +4501,8 @@ fn policy_deny_cache_hit_replays_counts_logs_and_exception_without_session_11073
     assert_eq!(deny_events[0].action, 0, "plain deny remains a silent DENY");
     assert_eq!(deny_events[0].policy_id, 77);
     assert_eq!(deny_events[0].application_id, 19);
-    assert_eq!(deny_events[0].ingress_zone_id, TEST_TRUST_ZONE_ID);
-    assert_eq!(deny_events[0].egress_zone_id, TEST_UNTRUST_ZONE_ID);
+    assert_eq!(deny_events[0].ingress_zone_id, TEST_TRUST_ZONE_ID as u16);
+    assert_eq!(deny_events[0].egress_zone_id, TEST_UNTRUST_ZONE_ID as u16);
     assert_eq!(
         events
             .iter()

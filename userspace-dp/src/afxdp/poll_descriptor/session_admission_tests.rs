@@ -33,7 +33,7 @@ mod new_flow_session_limit_tests {
         }
     }
 
-    fn meta(ingress_zone: u16) -> SessionMetadata {
+    fn meta(ingress_zone: u32) -> SessionMetadata {
         SessionMetadata {
             ingress_zone,
             egress_zone: 2,
@@ -84,7 +84,7 @@ mod new_flow_session_limit_tests {
     /// idempotent pre-clear).
     fn install_n(
         table: &mut SessionTable,
-        ingress_zone: u16,
+        ingress_zone: u32,
         src: IpAddr,
         dst: IpAddr,
         port_base: u16,

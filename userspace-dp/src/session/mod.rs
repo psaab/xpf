@@ -18,8 +18,8 @@ type SeededKeyMap<V> = HashMap<SessionKey, V, HotPathSeededState>;
 /// #10985: per-(ingress-zone, IP) session-limit counter map. Thresholds are
 /// per-zone (`screen_profiles[zone]`), so the counts must be too — an IP-keyed
 /// map lets sessions from other zones consume this zone's allowance
-/// (cross-zone false drops). Mirrors the scan/sweep `ScanKey = (u16, IpAddr)`.
-type SeededZoneIpMap<V> = HashMap<(u16, IpAddr), V, HotPathSeededState>;
+/// (cross-zone false drops). Mirrors the scan/sweep `ScanKey = (u32, IpAddr)`.
+type SeededZoneIpMap<V> = HashMap<(u32, IpAddr), V, HotPathSeededState>;
 
 /// #4399/#4438: the 1:N bucket type shared by ALL THREE NAT session lookup
 /// indexes — `nat_reverse_index`, `forward_wire_index`, and
@@ -1798,8 +1798,8 @@ pub(crate) struct PressureShedSession {
     /// Compared inside the shared-removal lock: a same-tuple replacement
     /// carries a different id and is never torn down in the victim's place.
     pub(crate) session_id: u64,
-    pub(crate) ingress_zone: u16,
-    pub(crate) egress_zone: u16,
+    pub(crate) ingress_zone: u32,
+    pub(crate) egress_zone: u32,
     pub(crate) ingress_zone_check: u32,
     pub(crate) egress_zone_check: u32,
     pub(crate) ingress_ifindex: u32,
@@ -1832,7 +1832,7 @@ struct PMechReservationRecord {
     session_ids: [u64; 2],
     install_epochs: [u64; 2],
     counted_limit: bool,
-    ingress_zone: u16,
+    ingress_zone: u32,
     src_ip: IpAddr,
     dst_ip: IpAddr,
 }
@@ -2002,7 +2002,7 @@ pub(crate) struct SessionTable {
     /// imported ESTABLISHED, so the opening branch is never taken for it; see
     /// `upsert_synced_with_origin`). Empty = no zone configures a syn-flood
     /// timeout, byte-identical to pre-#3527.
-    opening_overrides: FxHashMap<u16, u64>,
+    opening_overrides: FxHashMap<u32, u64>,
     /// #7212: the live `ValidationState::config_generation` this worker is
     /// forwarding under. The established-hit static input-filter revalidation
     /// compares a session's stamp against it, and `mark_filter_revalidated`
@@ -2685,7 +2685,7 @@ impl SessionTable {
         key: &SessionKey,
         resolution: ForwardingResolution,
         owner_rg_id: Option<i32>,
-        new_egress_zone: Option<u16>,
+        new_egress_zone: Option<u32>,
     ) -> bool {
         let Some(handle) = self.revalidation_handle(key) else {
             return false;
@@ -2769,7 +2769,7 @@ impl SessionTable {
     pub(crate) fn rebind_forward_egress_zone(
         &mut self,
         key: &SessionKey,
-        new_egress_zone: u16,
+        new_egress_zone: u32,
     ) -> bool {
         let Some(record) = self.revalidation_record(key) else {
             return false;
@@ -3391,7 +3391,7 @@ impl SessionTable {
     /// drops out of the new map and reverts to the global default on the next
     /// install/refresh. Empty map = no per-zone override (global default for
     /// every zone), the pre-#3527 behavior.
-    pub fn set_opening_overrides(&mut self, overrides: FxHashMap<u16, u64>) {
+    pub fn set_opening_overrides(&mut self, overrides: FxHashMap<u32, u64>) {
         self.opening_overrides = overrides;
     }
 
@@ -3400,7 +3400,7 @@ impl SessionTable {
     /// (no zone configures a syn-flood timeout) is an empty map and a single
     /// missed lookup.
     #[inline]
-    fn opening_override_for(&self, ingress_zone: u16) -> Option<u64> {
+    fn opening_override_for(&self, ingress_zone: u32) -> Option<u64> {
         if self.opening_overrides.is_empty() {
             return None;
         }
@@ -3449,7 +3449,7 @@ impl SessionTable {
     /// is created so the (limit+1)-th new flow is dropped only against its
     /// own zone's allowance. Read-only: an absent pair reads 0 (#2128).
     #[inline]
-    pub fn session_limit_src_count(&self, ingress_zone: u16, ip: IpAddr) -> u32 {
+    pub fn session_limit_src_count(&self, ingress_zone: u32, ip: IpAddr) -> u32 {
         self.session_limit_src_counts
             .get(&(ingress_zone, ip))
             .copied()
@@ -3465,7 +3465,7 @@ impl SessionTable {
     /// #2134/#10985: non-mutating read of the live count for one destination
     /// IP within an ingress zone. Mirror of [`session_limit_src_count`].
     #[inline]
-    pub fn session_limit_dst_count(&self, ingress_zone: u16, ip: IpAddr) -> u32 {
+    pub fn session_limit_dst_count(&self, ingress_zone: u32, ip: IpAddr) -> u32 {
         self.session_limit_dst_counts
             .get(&(ingress_zone, ip))
             .copied()
@@ -3482,7 +3482,7 @@ impl SessionTable {
     /// counted session. Caller MUST have evaluated the shared counted-class
     /// predicate (`!is_reverse && install::session_limit_origin_counted(origin)`).
     #[inline]
-    fn session_limit_inc(&mut self, ingress_zone: u16, src_ip: IpAddr, dst_ip: IpAddr) {
+    fn session_limit_inc(&mut self, ingress_zone: u32, src_ip: IpAddr, dst_ip: IpAddr) {
         let c = self
             .session_limit_src_counts
             .entry((ingress_zone, src_ip))
@@ -3503,7 +3503,7 @@ impl SessionTable {
     /// entry at zero (#2128). Caller MUST have evaluated the counted-class
     /// predicate.
     #[inline]
-    fn session_limit_dec(&mut self, ingress_zone: u16, src_ip: IpAddr, dst_ip: IpAddr) {
+    fn session_limit_dec(&mut self, ingress_zone: u32, src_ip: IpAddr, dst_ip: IpAddr) {
         let src_key = (ingress_zone, src_ip);
         if let Some(c) = self.session_limit_src_counts.get_mut(&src_key) {
             *c = c.saturating_sub(1);
@@ -6088,9 +6088,9 @@ impl SessionTable {
         policy_id: u32,
         policy_counter_idx: u32,
         policy_counter: std::sync::Arc<crate::policy::PolicyRuleCounter>,
-        ingress_zone: u16,
+        ingress_zone: u32,
         ingress_zone_check: u32,
-        egress_zone: u16,
+        egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
         let Some(forward) = self.entry_by_key(key) else {
@@ -6156,9 +6156,9 @@ impl SessionTable {
     pub(crate) fn rebind_zones_pair(
         &mut self,
         key: &SessionKey,
-        ingress_zone: u16,
+        ingress_zone: u32,
         ingress_zone_check: u32,
-        egress_zone: u16,
+        egress_zone: u32,
         egress_zone_check: u32,
     ) -> bool {
         let Some(forward) = self.entry_by_key(key) else {

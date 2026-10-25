@@ -184,7 +184,7 @@ func TestCompileUserspaceShim_DynamicAddressAndZoneLocalAddressBook(t *testing.T
 	legacyCfg.Security.GlobalPolicies = nil
 	dp := &dp13162{}
 	res := &CompileResult{
-		ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32),
+		ZoneIDs: make(map[string]uint32), AddrIDs: make(map[string]uint32),
 		AppIDs: make(map[string]config.AssignedAppID), implicitSets: make(map[string]uint32),
 		nextAddrID: 1,
 	}

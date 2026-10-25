@@ -324,7 +324,7 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
 pub(in crate::afxdp) fn session_delta_info(
     ident: &BindingIdentity,
     delta: &SessionDelta,
-    zone_id_to_name: &FastMap<u16, String>,
+    zone_id_to_name: &FastMap<u32, String>,
 ) -> SessionDeltaInfo {
     // #919/#922: emit both the resolved zone NAMES (legacy field,
     // empty when the ID is unknown) and the u16 IDs. New daemons
@@ -520,7 +520,7 @@ pub(in crate::afxdp) fn session_delta_info(
 pub(in crate::afxdp) fn export_open_direct(
     sessions: &crate::session::SessionTable,
     ident: &BindingIdentity,
-    zone_id_to_name: &FastMap<u16, String>,
+    zone_id_to_name: &FastMap<u32, String>,
     key: SessionKey,
     decision: SessionDecision,
     metadata: SessionMetadata,
@@ -538,7 +538,7 @@ pub(in crate::afxdp) fn export_open_direct(
 /// export window whose cursor may no longer visit the removed entry.
 pub(in crate::afxdp) fn export_close_direct(
     ident: &BindingIdentity,
-    zone_id_to_name: &FastMap<u16, String>,
+    zone_id_to_name: &FastMap<u32, String>,
     tombstone: &crate::session::ExpiredSession,
 ) -> SessionDeltaInfo {
     let delta = SessionDelta {

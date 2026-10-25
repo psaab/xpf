@@ -265,7 +265,7 @@ type EventReader struct {
 	callbackMu               sync.RWMutex
 	callbacks                []EventCallback
 	zoneNamesMu              sync.RWMutex
-	zoneNames                map[uint16]string // zone ID -> zone name
+	zoneNames                map[uint32]string // zone ID -> zone name
 	policyNamesMu            sync.RWMutex
 	policyNames              map[uint32]string // rule_id -> policy name
 	policyNamesGeneration    uint64            // generation of the positional policy ID map
@@ -287,13 +287,17 @@ func NewEventReader(source EventSource, buffer *EventBuffer) *EventReader {
 }
 
 // SetZoneNames updates the zone ID to name mapping (goroutine-safe).
-func (er *EventReader) SetZoneNames(names map[uint16]string) {
+func (er *EventReader) SetZoneNames(names map[uint32]string) {
 	er.zoneNamesMu.Lock()
 	er.zoneNames = names
 	er.zoneNamesMu.Unlock()
 }
 
 func (er *EventReader) resolveZoneName(id uint16) string {
+	return er.resolveZoneName32(uint32(id))
+}
+
+func (er *EventReader) resolveZoneName32(id uint32) string {
 	er.zoneNamesMu.RLock()
 	name := er.zoneNames[id]
 	er.zoneNamesMu.RUnlock()

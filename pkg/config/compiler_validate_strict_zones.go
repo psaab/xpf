@@ -155,7 +155,7 @@ func validateReservedZoneNamesStrict(cfg *Config) error {
 // stable id is a 1:1 function of the name into 65533 slots). The fold guarantees
 // no configured zone ever lands in the reserved range; the StableZoneID
 // collision gate (validateZoneIDCollisionAST) is the PRIMARY duplicate-id guard.
-const MaxUsableZoneID = int(ZoneIDReservedMin) - 1 // 65533
+const MaxUsableZoneID = int64(ZoneIDReservedMin) - 1 // 4294967293
 
 // validateZoneCountStrict hard-rejects a configuration that defines more
 // security zones than the u16 zone-id space can address. After #3075 zone ids
@@ -177,10 +177,10 @@ func validateZoneCountStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
-	n := len(cfg.Security.Zones)
+	n := int64(len(cfg.Security.Zones))
 	if n > MaxUsableZoneID {
 		return fmt.Errorf(
-			"configuration defines %d security zones, but the dataplane can address at most %d distinct zones (zone ids are a stable name-hash in a u16 space, top two ids reserved); reduce the zone count to %d or fewer",
+			"configuration defines %d security zones, but the dataplane can address at most %d distinct zones (zone ids are a stable name-hash in a u32 space, top two ids reserved); reduce the zone count to %d or fewer",
 			n, MaxUsableZoneID, MaxUsableZoneID)
 	}
 	return nil

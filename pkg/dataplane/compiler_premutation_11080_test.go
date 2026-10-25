@@ -11,7 +11,7 @@ type preMutationOrderingDP11080 struct {
 	events []string
 }
 
-func (d *preMutationOrderingDP11080) SetZoneConfig(zoneID uint16, cfg ZoneConfig) error {
+func (d *preMutationOrderingDP11080) SetZoneConfig(zoneID uint32, cfg ZoneConfig) error {
 	d.events = append(d.events, "phase-2")
 	return d.recordingDP.SetZoneConfig(zoneID, cfg)
 }

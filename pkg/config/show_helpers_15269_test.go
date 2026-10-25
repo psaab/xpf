@@ -5,17 +5,17 @@ import "testing"
 // #15269 C09-02/B18-05 helpers.
 
 func TestSyslogZoneNamesSurvivor15269(t *testing.T) {
-	if StableZoneID("z174") != StableZoneID("z214") {
-		t.Fatal("premise: z174/z214 must collide")
+	if StableZoneID("zzq17760") != StableZoneID("zzq8100") {
+		t.Fatal("premise: zzq17760/zzq8100 must collide")
 	}
 	cfg := &Config{}
 	cfg.Security.Zones = map[string]*ZoneConfig{
-		"z174": {Name: "z174"}, "z214": {Name: "z214"},
+		"zzq17760": {Name: "zzq17760"}, "zzq8100": {Name: "zzq8100"},
 	}
 	got := SyslogZoneNames(cfg)
-	id := StableZoneID("z174")
-	if got[id] != "z174" {
-		t.Errorf("SyslogZoneNames[%d]=%q, want z174 (survivor)", id, got[id])
+	id := StableZoneID("zzq17760")
+	if got[id] != "zzq17760" {
+		t.Errorf("SyslogZoneNames[%d]=%q, want zzq17760 (survivor)", id, got[id])
 	}
 	if len(got) != 1 {
 		t.Errorf("len=%d, want 1: %v", len(got), got)

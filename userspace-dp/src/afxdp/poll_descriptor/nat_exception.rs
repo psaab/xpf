@@ -376,8 +376,8 @@ pub(super) fn record_source_nat_failure(
     worker_ctx: &WorkerContext,
     meta: UserspaceDpMeta,
     flow: &SessionFlow,
-    from_zone_id: u16,
-    to_zone_id: u16,
+    from_zone_id: u32,
+    to_zone_id: u32,
     packet_length: u32,
     failure: &SourceNatFailure,
 ) {

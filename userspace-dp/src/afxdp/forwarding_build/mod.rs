@@ -490,7 +490,7 @@ fn attach_zone_counters(
     // `populate_zones` is the admission boundary: only ids represented in
     // `zone_id_to_name` are configured, non-empty, nonzero, and non-reserved.
     // Slot maps must use that exact admitted set, not raw snapshot rows.
-    let zone_ids: Vec<u16> = state.zone_id_to_name.keys().copied().collect();
+    let zone_ids: Vec<u32> = state.zone_id_to_name.keys().copied().collect();
     let store = previous
         .map(|p| p.zone_counter_store.clone())
         .unwrap_or_else(ZoneCounterStore::default);
@@ -574,7 +574,7 @@ fn attach_zone_counters(
 pub(in crate::afxdp) fn commit_zone_counter_prune(state: &ForwardingState) {
     // Match `populate_zones` admission so invalid and reserved snapshot rows
     // cannot keep counter blocks alive after a committed apply.
-    let configured: rustc_hash::FxHashSet<u16> =
+    let configured: rustc_hash::FxHashSet<u32> =
         state.zone_id_to_name.keys().copied().collect();
     state.zone_counter_store.reconcile(&configured);
     // #3651 flood half: same commit point, same `configured` set, same
@@ -1108,7 +1108,7 @@ fn build_fallible_forwarding_state(
     // Debug: dump zone mappings and policy rules
     #[cfg(feature = "debug-log")]
     {
-        // #921: ifindex_to_zone_id is u16 — render with names via
+        // #921: ifindex_to_zone_id is u32 — render with names via
         // zone_id_to_name for log readability.
         let ifindex_to_zone_named: Vec<(i32, &str)> = state
             .ifindex_to_zone_id

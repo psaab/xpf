@@ -3002,7 +3002,7 @@ fn half_open_session_reaps_at_opening_timeout() {
 
 /// `metadata()` for a specific ingress zone id — used by the #3527 per-zone
 /// half-open override tests.
-fn metadata_with_zone(zone: u16) -> SessionMetadata {
+fn metadata_with_zone(zone: u32) -> SessionMetadata {
     SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
@@ -3023,7 +3023,7 @@ fn metadata_with_zone(zone: u16) -> SessionMetadata {
 /// default, surviving at 6 s — the `expired.len() == 1` assert goes RED.
 #[test]
 fn per_zone_syn_flood_timeout_reaps_half_open_on_override() {
-    const SCREENED_ZONE: u16 = 7;
+    const SCREENED_ZONE: u32 = 7;
     let override_ns = 5 * WHEEL_TICK_NS; // 5 s syn-flood timeout
     let install_ns = 1_000_000_000u64;
     // Past the 5 s per-zone override, far short of the 20 s global default.
@@ -3098,7 +3098,7 @@ fn per_zone_syn_flood_timeout_reaps_half_open_on_override() {
 /// the operator's window across retransmits.
 #[test]
 fn per_zone_syn_flood_timeout_applies_on_opening_refresh() {
-    const SCREENED_ZONE: u16 = 9;
+    const SCREENED_ZONE: u32 = 9;
     let override_ns = 5 * WHEEL_TICK_NS;
     let now = 1_000_000_000u64;
     let mut overrides = rustc_hash::FxHashMap::default();
@@ -6862,7 +6862,7 @@ fn forward_wire_dnat_shared_backend_ambiguous_fails_closed_14382() {
 /// Build a reverse (reply-direction) SessionDecision whose NAT rewrites the
 /// destination to a shared backend and a reverse metadata carrying the given
 /// `zone` (used only to distinguish which reverse session resolved).
-fn shared_backend_reverse(backend: IpAddr, zone: u16) -> (SessionDecision, SessionMetadata) {
+fn shared_backend_reverse(backend: IpAddr, zone: u32) -> (SessionDecision, SessionMetadata) {
     let decision = SessionDecision {
         resolution: resolution(),
         nat: NatDecision {
@@ -9085,9 +9085,9 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
     ));
 
     let check_invariant = |table: &SessionTable, label: &str| {
-        let mut src_live: std::collections::HashMap<(u16, IpAddr), u32> =
+        let mut src_live: std::collections::HashMap<(u32, IpAddr), u32> =
             std::collections::HashMap::new();
-        let mut dst_live: std::collections::HashMap<(u16, IpAddr), u32> =
+        let mut dst_live: std::collections::HashMap<(u32, IpAddr), u32> =
             std::collections::HashMap::new();
         table.iter_with_origin(|key, _decision, md, origin| {
             // #3122/#10310: use the production counted-class predicate:
@@ -10916,7 +10916,7 @@ fn a_fabric_redirected_session_records_no_ingress_identity_7096() {
         (0, 0),
         "a fabric-redirected session must record NO ingress identity. The peer's \
          real ingress interface is not knowable here — the fabric stamp carries a \
-         u16 zone id and nothing else — so naming the local fabric member is a \
+         u32 zone id and nothing else — so naming the local fabric member is a \
          confidently WRONG answer, which is strictly worse than the zone \
          approximation the Go side falls back to on zero (#7096)"
     );

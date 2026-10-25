@@ -12,33 +12,33 @@ import (
 type quarantineScreenGRPCDP10489 struct {
 	*dataplane.Manager
 	apply   *dataplane.ApplyResult
-	readIDs []uint16
+	readIDs []uint32
 }
 
 func (d *quarantineScreenGRPCDP10489) IsLoaded() bool                          { return true }
 func (d *quarantineScreenGRPCDP10489) LastApplyResult() *dataplane.ApplyResult { return d.apply }
-func (d *quarantineScreenGRPCDP10489) ReadFloodCounters(id uint16) (dataplane.FloodState, error) {
+func (d *quarantineScreenGRPCDP10489) ReadFloodCounters(id uint32) (dataplane.FloodState, error) {
 	d.readIDs = append(d.readIDs, id)
 	return dataplane.FloodState{SynCount: 7, ICMPCount: 3, UDPCount: 5}, nil
 }
 
 func TestShowScreenStatisticsQuarantineProfileRetained10489(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	cfg := &config.Config{Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
-		"z174": {Name: "z174", ScreenProfile: "prof-10489"},
-		"z214": {Name: "z214", ScreenProfile: "prof-10489"},
+		"zzq17760": {Name: "zzq17760", ScreenProfile: "prof-10489"},
+		"zzq8100":  {Name: "zzq8100", ScreenProfile: "prof-10489"},
 	}}}
-	id := config.StableZoneID("z174")
+	id := config.StableZoneID("zzq17760")
 	dp := &quarantineScreenGRPCDP10489{
 		Manager: dataplane.New(),
-		apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"z174": id, "z214": id}},
+		apply:   &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"zzq17760": id, "zzq8100": id}},
 	}
 	s := &Server{dp: dp}
 
 	var survivorBuf strings.Builder
-	if _, err := s.showScreenStatistics(&pb.ShowTextRequest{Topic: "screen-statistics:z174"}, cfg, &survivorBuf); err != nil {
+	if _, err := s.showScreenStatistics(&pb.ShowTextRequest{Topic: "screen-statistics:zzq17760"}, cfg, &survivorBuf); err != nil {
 		t.Fatalf("showScreenStatistics survivor: %v", err)
 	}
 	survivorOut := survivorBuf.String()
@@ -51,7 +51,7 @@ func TestShowScreenStatisticsQuarantineProfileRetained10489(t *testing.T) {
 
 	dp.readIDs = nil
 	var loserBuf strings.Builder
-	if _, err := s.showScreenStatistics(&pb.ShowTextRequest{Topic: "screen-statistics:z214"}, cfg, &loserBuf); err != nil {
+	if _, err := s.showScreenStatistics(&pb.ShowTextRequest{Topic: "screen-statistics:zzq8100"}, cfg, &loserBuf); err != nil {
 		t.Fatalf("showScreenStatistics loser: %v", err)
 	}
 	loserOut := loserBuf.String()

@@ -1227,7 +1227,7 @@ pub(crate) struct ProcessStatus {
         default,
         skip_serializing_if = "Vec::is_empty"
     )]
-    pub zone_counter_slotted_zone_ids: Vec<u16>,
+    pub zone_counter_slotted_zone_ids: Vec<u32>,
     #[serde(
         rename = "zone_counter_overflow_active",
         default,
@@ -1271,7 +1271,7 @@ pub(crate) struct ProcessStatus {
         default,
         skip_serializing_if = "Vec::is_empty"
     )]
-    pub flood_counter_slotted_zone_ids: Vec<u16>,
+    pub flood_counter_slotted_zone_ids: Vec<u32>,
     #[serde(
         rename = "flood_counter_overflow_active",
         default,

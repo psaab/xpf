@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -225,26 +224,23 @@ func TestMgmtControlZoneBindOnlySecureTunnelOwnership12830(t *testing.T) {
 }
 
 func TestMgmtControlZoneQuarantinedByIDCollisionStaysQuiet12830(t *testing.T) {
-	collision := ""
-	for i := range 1_000_000 {
-		candidate := fmt.Sprintf("a-%d", i)
-		if StableZoneID(candidate) == StableZoneID("mgmt") {
-			collision = candidate
-			break
-		}
-	}
-
-	if collision == "" {
-		t.Fatal("could not find deterministic zone-id collision fixture")
-	}
+	// #16557: no name colliding specifically with "mgmt" is findable in
+	// the u32 space in test time. The advisory's quarantine check is
+	// name-generic (ZoneQuarantineExclusionsForConfig), so exercise it
+	// with the residual colliding pair: the quarantined loser (zzq8100)
+	// carrying the mgmt-shaped interface binding must stay quiet, exactly
+	// as a quarantined mgmt zone would.
 	cfg := &Config{Security: SecurityConfig{Zones: map[string]*ZoneConfig{
-		"mgmt":    {Interfaces: []string{"ge-0/0/0"}},
-		collision: {},
+		"zzq17760": {Interfaces: []string{"ge-0/0/0"}},
+		"zzq8100":  {Interfaces: []string{"ge-0/0/0"}},
 	}}}
+	if _, excluded := ZoneQuarantineExclusionsForConfig(cfg)["zzq8100"]; !excluded {
+		t.Fatal("premise: zzq8100 not quarantined")
+	}
 	appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
 	for _, w := range cfg.Warnings {
 		if strings.Contains(w, "(#10308)") {
-			t.Fatalf("quarantined mgmt zone must not warn: %q", w)
+			t.Fatalf("quarantined zone must not warn: %q", w)
 		}
 	}
 }

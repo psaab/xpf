@@ -87,7 +87,7 @@ pub(super) fn junos_host_policy_eval(
     // host-bound packet that only reached the firewall through a DNAT. See
     // [`host_bound_policy_dst`].
     policy_dst: (IpAddr, u16),
-    from_zone_id: u16,
+    from_zone_id: u32,
     packet_len: u64,
     l4_present: bool,
     packet_icmp: Option<(u8, u8)>,
@@ -169,7 +169,7 @@ pub(super) fn emit_junos_host_deny(
     meta: UserspaceDpMeta,
     policy_dst_port: u16,
     nat: &crate::nat::NatDecision,
-    from_zone_id: u16,
+    from_zone_id: u32,
     policy_id: u32,
     action: PolicyAction,
     reject_reply_enqueued: bool,
@@ -202,7 +202,7 @@ pub(super) fn emit_junos_host_deny_l4(
     meta: UserspaceDpMeta,
     policy_dst_port: u16,
     nat: &crate::nat::NatDecision,
-    from_zone_id: u16,
+    from_zone_id: u32,
     policy_id: u32,
     action: PolicyAction,
     reject_reply_enqueued: bool,
@@ -216,7 +216,7 @@ pub(super) fn emit_junos_host_deny_l4(
         meta,
         from_zone_id,
         // The egress "zone" is the firewall host itself. The reserved
-        // JUNOS_HOST_ZONE_ID (u16::MAX-1) does not fit the u8 wire zone-id slot
+        // JUNOS_HOST_ZONE_ID (u32::MAX-1) does not fit the u8 wire zone-id slot
         // (#919/#922), so the deny RT_FLOW carries 0 ("unknown / host", the
         // #3110 sentinel) rather than a value that would truncate into a real
         // zone id on the wire.
@@ -245,7 +245,7 @@ pub(super) fn emit_host_inbound_deny(
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    from_zone_id: u16,
+    from_zone_id: u32,
     policy_dst_port: u16,
     now_ns: u64,
 ) {
@@ -268,7 +268,7 @@ pub(super) fn emit_host_inbound_deny_l4(
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    from_zone_id: u16,
+    from_zone_id: u32,
     policy_dst_port: u16,
     l4_present: bool,
     now_ns: u64,
@@ -373,7 +373,7 @@ pub(super) fn junos_host_local_policy(
     // #15951: the destination translation behind `policy_dst`, carried into
     // the deny record's `nat_dst_*` fields. Default for untranslated traffic.
     nat: crate::nat::NatDecision,
-    from_zone_id: u16,
+    from_zone_id: u32,
     packet_len: u64,
     now_ns: u64,
     recheck_established: bool,

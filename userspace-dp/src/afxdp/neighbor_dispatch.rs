@@ -1736,8 +1736,8 @@ fn learn_dynamic_neighbor_with_mode(
 
 pub(super) fn build_missing_neighbor_session_metadata(
     forwarding: &ForwardingState,
-    ingress_zone: u16,
-    egress_zone: u16,
+    ingress_zone: u32,
+    egress_zone: u32,
     // #4983: the ingress binding of the frame that created this seed
     // (`meta.ingress_ifindex` / `meta.ingress_vlan_id`). A missing-neighbor
     // seed is a FORWARD session that survives for the life of the flow — the

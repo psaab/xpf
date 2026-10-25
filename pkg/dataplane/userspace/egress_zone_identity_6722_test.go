@@ -1182,7 +1182,7 @@ func quarantineCollisionLines6722(t *testing.T) []string {
 }
 
 func zoneIDCollisionPairs6722() [][2]string {
-	byID := map[uint16]string{}
+	byID := map[uint32]string{}
 	out := [][2]string{}
 	for i := 0; i < 4096; i++ {
 		name := "z" + itoa6722(i)

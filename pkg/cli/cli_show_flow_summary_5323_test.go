@@ -103,7 +103,7 @@ func TestLocalFlowSessionSummaryUnknownMax(t *testing.T) {
 type quarantineSummaryCLIDP10530 struct {
 	*dataplane.Manager
 	result *dataplane.ApplyResult
-	id     uint16
+	id     uint32
 }
 
 func (d *quarantineSummaryCLIDP10530) IsLoaded() bool { return true }
@@ -114,7 +114,7 @@ func (d *quarantineSummaryCLIDP10530) LastApplyResult() *dataplane.ApplyResult {
 
 func (d *quarantineSummaryCLIDP10530) IterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
 	key := dataplane.SessionKey{Protocol: 6}
-	val := dataplane.SessionValue{IngressZone: d.id, EgressZone: d.id}
+	val := dataplane.SessionValue{IngressZone: uint16(d.id), EgressZone: uint16(d.id)}
 	fn(key, val)
 	return nil
 }
@@ -127,15 +127,15 @@ func TestLocalFlowSessionSummaryQuarantineDisplayAtPrint10530(t *testing.T) {
 	store := newPolicyHitCountCLIStore(t, true)
 	cfg := store.ActiveConfig()
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust": {Name: "trust"},
-		"z174":  {Name: "z174"},
-		"z214":  {Name: "z214"},
+		"trust":    {Name: "trust"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
-	id := config.StableZoneID("z174")
-	result := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
-		"trust": config.StableZoneID("trust"),
-		"z174":  id,
-		"z214":  id,
+	id := config.StableZoneID("zzq17760")
+	result := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
+		"trust":    config.StableZoneID("trust"),
+		"zzq17760": id,
+		"zzq8100":  id,
 	}}
 	c := &CLI{
 		store: store,
@@ -146,11 +146,11 @@ func TestLocalFlowSessionSummaryQuarantineDisplayAtPrint10530(t *testing.T) {
 		},
 	}
 	out := captureStdout(t, func() {
-		if err := c.showFlowSession([]string{"summary", "zone", "z214"}); err != nil {
+		if err := c.showFlowSession([]string{"summary", "zone", "zzq8100"}); err != nil {
 			t.Fatalf("showFlowSession summary: %v", err)
 		}
 	})
-	wantPair := "z174 " + config.ZoneQuarantineReferenceQualifier + "->z174 " + config.ZoneQuarantineReferenceQualifier
+	wantPair := "zzq17760 " + config.ZoneQuarantineReferenceQualifier + "->zzq17760 " + config.ZoneQuarantineReferenceQualifier
 	if !strings.Contains(out, wantPair) {
 		t.Fatalf("quarantined summary did not annotate resolved survivor pair at print time:\n%s", out)
 	}

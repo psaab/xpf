@@ -3,7 +3,7 @@
 //! Populates `state.zone_name_to_id` and `state.zone_id_to_name`
 //! from `snapshot.zones`. Rejects reserved-range zone IDs
 //! (>= ZONE_ID_RESERVED_MIN). #3075 widened the event-stream zone
-//! field to u16, so ids up to ZONE_ID_RESERVED_MIN-1 are addressable
+//! field to u32, so ids up to ZONE_ID_RESERVED_MIN-1 are addressable
 //! (the former >u8::MAX skip is retired).
 
 use super::super::*;
@@ -30,7 +30,7 @@ use super::super::*;
 pub(super) fn reject_duplicate_zone_ids(
     snapshot: &ConfigSnapshot,
 ) -> Result<(), crate::policy::SnapshotIntegrityError> {
-    let mut owner: std::collections::HashMap<u16, &str> =
+    let mut owner: std::collections::HashMap<u32, &str> =
         std::collections::HashMap::with_capacity(snapshot.zones.len());
     for zone in &snapshot.zones {
         if zone.id == 0 || zone.name.is_empty() || zone.id >= crate::policy::ZONE_ID_RESERVED_MIN {
@@ -75,7 +75,7 @@ pub(super) fn populate_zones(snapshot: &ConfigSnapshot, state: &mut ForwardingSt
         .iter()
         .filter(|zone| zone.id != 0 && !zone.name.is_empty() && zone.id < crate::policy::ZONE_ID_RESERVED_MIN)
         .map(|zone| zone.id)
-        .collect::<std::collections::HashSet<u16>>()
+        .collect::<std::collections::HashSet<u32>>()
         .len()
         > 1;
     for zone in &snapshot.zones {
@@ -94,7 +94,7 @@ pub(super) fn populate_zones(snapshot: &ConfigSnapshot, state: &mut ForwardingSt
             );
             continue;
         }
-        // #3075: the event-stream codec now writes zone IDs as u16, so the
+        // #3075: the event-stream codec now writes zone IDs as u32, so the
         // former >u8::MAX skip is retired — a stable name-hash zone id in
         // [1, ZONE_ID_RESERVED_MIN-1] = [1, 65533] is fully addressable. The
         // reserved-range reject above (>= ZONE_ID_RESERVED_MIN) remains the only

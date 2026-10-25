@@ -58,8 +58,8 @@ use crate::filter::TermMatchExtra;
 /// false`.
 #[derive(Clone, Copy)]
 pub(super) struct PendingFilterLog {
-    pub(super) ingress_zone_id: u16,
-    pub(super) egress_zone_id: u16,
+    pub(super) ingress_zone_id: u32,
+    pub(super) egress_zone_id: u32,
     pub(super) filter_id: u32,
     pub(super) term_id: u32,
     pub(super) action: crate::filter::FilterAction,
@@ -148,9 +148,9 @@ pub(super) fn filter_terminal(
 pub(super) fn filter_log_ingress_zone_id(
     forwarding: &ForwardingState,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     ingress_logical_ifindex: i32,
-) -> u16 {
+) -> u32 {
     ingress_zone_override
         .filter(|id| forwarding.zone_id_to_name.contains_key(id))
         .or_else(|| {
@@ -174,7 +174,7 @@ pub(super) fn filter_log_ingress_zone_id(
 /// reading only `egress` here logged zone 0 for a MAC-less interface (an IPsec
 /// xfrmi) whose zone the ingress half resolved correctly.
 #[inline]
-pub(super) fn filter_log_egress_zone_id(forwarding: &ForwardingState, egress_ifindex: i32) -> u16 {
+pub(super) fn filter_log_egress_zone_id(forwarding: &ForwardingState, egress_ifindex: i32) -> u32 {
     forwarding.egress_zone_id(egress_ifindex)
 }
 
@@ -204,7 +204,7 @@ pub(super) fn evaluate_non_pbr_input_filter(
     extra: TermMatchExtra<'_>,
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     routing_eval_follows: bool,
     // #14120: `Inline` when this packet will not take a TX-selection leg
     // (host-bound / Stage-11 reinjection) so the input policer meters here;
@@ -625,7 +625,7 @@ pub(super) fn evaluate_non_pbr_input_filter_log_only(
     extra: TermMatchExtra<'_>,
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
 ) -> Option<CachedInputFilterLog> {
     let Some(flow) = flow else {
         return None;
@@ -921,7 +921,7 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
     flow: &SessionFlow,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     decision: SessionDecision,
     is_reverse: bool,
 ) -> Option<SessionHitPbrRouteRevalidation> {
@@ -1307,7 +1307,7 @@ pub(super) fn static_hit_log(
     filter: &crate::filter::Filter,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     logical_ingress_ifindex: i32,
     extra: crate::filter::TermMatchExtra<'_>,
 ) -> Option<(CachedInputFilterLog, FilterLogSource)> {
@@ -1327,7 +1327,7 @@ pub(super) fn static_hit_log_for_action(
     filter: &crate::filter::Filter,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     logical_ingress_ifindex: i32,
     extra: crate::filter::TermMatchExtra<'_>,
     final_action: Option<crate::filter::FilterAction>,
@@ -1403,7 +1403,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
     frame: &[u8],
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     // #14120: the stored decision's disposition decides who owns the input
     // policer meter on this hit: LocalDelivery (host-bound) meters inline —
     // no TX-selection leg follows — transit defers to that leg.
@@ -1987,7 +1987,7 @@ fn static_input_filter_deny_eval(
     logical_ingress_ifindex: i32,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
 ) -> Option<(NonPbrInputFilterEval, FilterLogSource)> {
     // #16502: keep the deliberate `default()` extra (see fn doc) but apply
     // the shared (0,0) rule — a synthetic L3-only tuple must fail
@@ -2107,7 +2107,7 @@ fn sessionless_static_input_filter_verdict(
     logical_ingress_ifindex: i32,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
 ) -> (Option<SessionHitInputFilterEval>, bool) {
     match static_input_filter_deny_eval(
         forwarding,
@@ -2175,7 +2175,7 @@ fn revalidate_static_input_filter_on_session_hit(
     // reading it would invite the next author to "use it".
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
 ) -> (Option<SessionHitInputFilterEval>, bool) {
     // #8114: the verdict derivation moved to `static_input_filter_deny_eval`,
     // shared verbatim with the sessionless path so the two cannot drift on WHAT
@@ -2422,7 +2422,7 @@ pub(super) fn apply_lo0_filter_action(
     // (`evaluate_non_pbr_input_filter`, `..._log_only`, `..._counters_cached`)
     // all resolve it before calling `filter_log_ingress_zone_id`.
     logical_ingress_ifindex: i32,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     // #5857: poll-iteration monotonic timestamp — threaded so the lo0 filter
     // METERS each matched term's three-color policer (control-plane rate limit).
     now_ns: u64,
@@ -2499,7 +2499,7 @@ pub(super) fn stage11_input_filter_terminal(
     extra: TermMatchExtra<'_>,
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
+    ingress_zone_override: Option<u32>,
     // #14120: Stage-11 packets reinject to the host and never take a
     // TX-selection leg, so the input policer meters inline here.
     now_ns: u64,
@@ -2565,7 +2565,7 @@ pub(super) fn stage11_input_filter_terminal(
 pub(super) fn host_inbound_gated_lo0_action(
     forwarding: &ForwardingState,
     logical_ingress_ifindex: i32,
-    host_inbound_zone: u16,
+    host_inbound_zone: u32,
     dst_ip: IpAddr,
     dst_port: u16,
     is_v6: bool,
@@ -2573,7 +2573,7 @@ pub(super) fn host_inbound_gated_lo0_action(
     extra: TermMatchExtra<'_>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    lo0_ingress_zone_override: Option<u16>,
+    lo0_ingress_zone_override: Option<u32>,
     // #5857: poll-iteration monotonic timestamp for the lo0 policer meter.
     now_ns: u64,
 ) -> Option<(crate::filter::FilterAction, Option<PendingFilterLog>)> {
@@ -2636,7 +2636,7 @@ pub(super) fn lo0_action_for_solicited_reply(
     extra: TermMatchExtra<'_>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
-    lo0_ingress_zone_override: Option<u16>,
+    lo0_ingress_zone_override: Option<u32>,
     now_ns: u64,
 ) -> (crate::filter::FilterAction, Option<PendingFilterLog>) {
     apply_lo0_filter_action(
@@ -2664,9 +2664,9 @@ mod lo0_gate_tests {
     use std::sync::atomic::Ordering;
 
     // A configured host-inbound zone with an empty admit set denies TCP/443.
-    const DENY_ZONE: u16 = 1;
+    const DENY_ZONE: u32 = 1;
     // A zone absent from the table => admit-all default (pre-#3070 behaviour).
-    const ADMIT_ZONE: u16 = 2;
+    const ADMIT_ZONE: u32 = 2;
 
     /// ForwardingState whose lo0 v4 filter is a single COUNTING REJECT term
     /// matching TCP/443, with `DENY_ZONE` present-but-empty in the host-inbound
@@ -3050,8 +3050,8 @@ mod lo0_gate_tests {
     fn lo0_filter_log_zone_uses_the_logical_vlan_ifindex_8321() {
         const PHYS_IFINDEX: u32 = 11;
         const LOGICAL_IFINDEX: i32 = 3011;
-        const PARENT_ZONE: u16 = 7;
-        const UNIT_ZONE: u16 = 9;
+        const PARENT_ZONE: u32 = 7;
+        const UNIT_ZONE: u32 = 9;
 
         // A lo0 filter whose term LOGS, so a PendingFilterLog is produced at
         // all. The shared `forwarding_with_lo0_reject` fixture counts but does
@@ -3085,7 +3085,7 @@ mod lo0_gate_tests {
             fw
         };
 
-        let zone_of = |fw: &ForwardingState| -> u16 {
+        let zone_of = |fw: &ForwardingState| -> u32 {
             let (flow, mut meta) = tcp_443_flow_and_meta();
             meta.ingress_ifindex = PHYS_IFINDEX;
             // Driven through the WRAPPER, not `apply_lo0_filter_action`
@@ -4195,7 +4195,7 @@ mod filter_log_egress_zone_tests {
         // rate-limit budget are per handle), so reusing one receiver across two
         // emissions makes the SECOND assertion depend on stream internals rather
         // than on the zone. A fresh handle isolates each.
-        let logged_zone_for = |egress_ifindex: i32| -> u16 {
+        let logged_zone_for = |egress_ifindex: i32| -> u32 {
             let (handle, rx) = crate::event_stream::test_worker_handle(
                 8,
                 crate::event_stream::DataplaneEventRateLimitConfig {
@@ -4293,8 +4293,8 @@ mod filter_log_egress_zone_tests {
                 .expect("cached output filter-log event")
                 .decode_dataplane_event()
                 .expect("filter-log payload");
-            assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
-            event.egress_zone_id
+            assert_eq!(u32::from(event.ingress_zone_id), TEST_LAN_ZONE_ID);
+            u32::from(event.egress_zone_id)
         };
 
         assert_eq!(

@@ -28,7 +28,7 @@ pub(crate) struct SessionDecision {
 }
 
 /// #919: zone names dropped from the fast path. `ingress_zone` and
-/// `egress_zone` are now `u16` IDs that index into
+/// `egress_zone` are now `u32` IDs that index into
 /// `forwarding.zone_id_to_name` for slow-path consumers (logging,
 /// gRPC export, status). `0` means "unknown / unset" (matches the
 /// existing `UserspaceDpMeta.ingress_zone` default at afxdp/types/mod.rs:64).
@@ -47,7 +47,7 @@ pub(crate) struct SessionDecision {
 /// is in a `#[cfg(test)]` fixture. So it is the LOCAL fabric member's netdev.
 ///
 /// The peer's real ingress interface is NOT KNOWABLE here, and that is structural
-/// rather than an omission: the fabric stamp carries a u16 zone id and nothing
+/// rather than an omission: the fabric stamp carries a u32 zone id and nothing
 /// else — two bytes big-endian in the synthetic fabric MAC
 /// (`parse_zone_encoded_fabric_ingress_from_frame`, #3075). There is no interface
 /// identity on the wire to recover.
@@ -120,8 +120,8 @@ pub(crate) fn zone_identity_check(name: &str) -> u32 {
 /// under; the fence later compares this against the then-current name for
 /// the same id.
 pub(crate) fn zone_vintage_check_for_id(
-    zone_id_to_name: &rustc_hash::FxHashMap<u16, String>,
-    zone_id: u16,
+    zone_id_to_name: &rustc_hash::FxHashMap<u32, String>,
+    zone_id: u32,
 ) -> u32 {
     if zone_id == 0 {
         return 0;
@@ -134,8 +134,8 @@ pub(crate) fn zone_vintage_check_for_id(
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionMetadata {
-    pub(crate) ingress_zone: u16,
-    pub(crate) egress_zone: u16,
+    pub(crate) ingress_zone: u32,
+    pub(crate) egress_zone: u32,
     /// #10620: vintage check binding `ingress_zone` to the NAME its id was
     /// bound to when this entry was stamped (`zone_identity_check` of the
     /// then-current `zone_id_to_name` entry). A same-id/different-name
@@ -936,8 +936,8 @@ mod zone_vintage_10620_tests {
     #[test]
     fn vintage_lookup_falls_back_to_zero_10620() {
         let map = rustc_hash::FxHashMap::from_iter([
-            (1u16, "lan".to_string()),
-            (2u16, "wan".to_string()),
+            (1u32, "lan".to_string()),
+            (2u32, "wan".to_string()),
         ]);
         assert_eq!(
             zone_vintage_check_for_id(&map, 1),

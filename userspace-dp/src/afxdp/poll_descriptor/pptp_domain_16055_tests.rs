@@ -33,7 +33,7 @@ use super::*;
 use std::net::{IpAddr, Ipv4Addr};
 
 const FABRIC_IFINDEX: i32 = 21;
-const TENANT_ZONE: u16 = 7;
+const TENANT_ZONE: u32 = 7;
 const CLAIMED_DOMAIN: u32 = crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | TENANT_ZONE as u32;
 
 fn peer_a() -> IpAddr {

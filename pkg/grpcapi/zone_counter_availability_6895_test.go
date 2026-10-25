@@ -24,12 +24,12 @@ import (
 type availabilityGRPCDP struct {
 	*dataplane.Manager
 	apply       *dataplane.ApplyResult
-	populatedID uint16
+	populatedID uint32
 }
 
 func (d *availabilityGRPCDP) IsLoaded() bool                          { return true }
 func (d *availabilityGRPCDP) LastApplyResult() *dataplane.ApplyResult { return d.apply }
-func (d *availabilityGRPCDP) ReadZoneCounters(id uint16, dir int) (dataplane.CounterValue, error) {
+func (d *availabilityGRPCDP) ReadZoneCounters(id uint32, dir int) (dataplane.CounterValue, error) {
 	if id == d.populatedID {
 		if dir == 0 {
 			return dataplane.CounterValue{Packets: 11, Bytes: 2200}, nil
@@ -45,7 +45,7 @@ func TestGetZonesStampsCounterAvailability6895(t *testing.T) {
 		store: store,
 		dp: &availabilityGRPCDP{
 			Manager:     dataplane.New(),
-			apply:       &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 40000, "untrust": 41000, "dmz": 42000}},
+			apply:       &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 40000, "untrust": 41000, "dmz": 42000}},
 			populatedID: 41000, // only untrust has a reading
 		},
 	}

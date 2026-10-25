@@ -169,7 +169,7 @@ func (s *Server) GetNATDestination(ctx context.Context, _ *pb.GetNATDestinationR
 
 		var zoneByID map[uint16]string
 		if cr := s.applyResult(); cr != nil {
-			zoneByID = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
+			zoneByID = survivorZoneNames16(cr.ZoneIDs, cfg)
 		}
 		counts := s.countDNATSessions(walkCtx, zoneByID)
 		resp.TotalActiveTranslations = clampInt32(counts.total)
@@ -362,7 +362,7 @@ func (s *Server) GetNATPoolStats(ctx context.Context, _ *pb.GetNATPoolStatsReque
 
 		var zoneByID map[uint16]string
 		if cr != nil {
-			zoneByID = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
+			zoneByID = survivorZoneNames16(cr.ZoneIDs, cfg)
 		}
 		counts = s.countSNATSessions(walkCtx, zoneByID)
 	}

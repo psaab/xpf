@@ -52,20 +52,20 @@ func TestSyslogZoneNameMapUsesStableZoneID(t *testing.T) {
 // QUARANTINED later-sorting zone — otherwise RT_FLOW/syslog would render the
 // survivor's traffic under the wrong (quarantined) zone name. Reverting
 // syslogZoneNameMap to the unconditional overwrite makes the result depend on
-// map-iteration order (nondeterministic; can name z214).
+// map-iteration order (nondeterministic; can name zzq8100).
 func TestSyslogZoneNameMapCollisionResolvesToSurvivor(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"z174": {Name: "z174"},
-		"z214": {Name: "z214"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
 	got := syslogZoneNameMap(cfg)
-	id := config.StableZoneID("z174")
-	if got[id] != "z174" {
-		t.Fatalf("collision id %d resolves to %q, want the survivor z174 (never the quarantined z214)", id, got[id])
+	id := config.StableZoneID("zzq17760")
+	if got[id] != "zzq17760" {
+		t.Fatalf("collision id %d resolves to %q, want the survivor zzq17760 (never the quarantined zzq8100)", id, got[id])
 	}
 	if len(got) != 1 {
 		t.Fatalf("map has %d entries for a colliding pair, want 1 (the survivor only): %v", len(got), got)

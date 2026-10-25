@@ -66,7 +66,7 @@ func newHA16697Server(t *testing.T, withReth bool) *Server {
 	mgr := cluster.NewManager(0, 1)
 	mgr.UpdateConfig(cfg.Chassis.Cluster)
 	mgr.SetGroupStateForTesting(1, cluster.StatePrimary)
-	apply := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 1}}
+	apply := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 1}}
 	dp := &ha16697DP{filteredTotalDP: &filteredTotalDP{Manager: dataplane.New(), v4: []v4Session{{
 		key: dataplane.SessionKey{SrcIP: [4]byte{10, 0, 1, 11}, DstIP: [4]byte{172, 16, 80, 8}, SrcPort: hostToNetwork16(40011), DstPort: hostToNetwork16(443), Protocol: 6},
 		val: dataplane.SessionValue{State: dataplane.SessStateEstablished, IngressZone: 1, EgressZone: 1},

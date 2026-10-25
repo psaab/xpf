@@ -10,11 +10,11 @@ import (
 // #12896: the zone-detail policy summary must annotate each row's LIVE
 // applicability instead of delegating quarantine labeling to callers that only
 // annotate the viewed zone. Two defect directions are pinned here against the
-// classic z174/z214 StableZoneID collision (sorted z174 survives, z214 is the
+// classic zzq17760/zzq8100 StableZoneID collision (sorted zzq17760 survives, zzq8100 is the
 // quarantined loser):
 //
 //   - healthy viewed zone: rows whose peer zone is quarantined (exact
-//     `trust -> z214` and wildcard `any -> z214`) would be DROPPED by the
+//     `trust -> zzq8100` and wildcard `any -> zzq8100`) would be DROPPED by the
 //     apply-time scrub, so they carry ZoneQuarantinePoliciesQualifier instead
 //     of reading as governing; a scoped global whose configured side the scrub
 //     prunes renders the surviving scope (authored scope when the prune empties
@@ -28,8 +28,8 @@ import (
 
 func quarantineSummaryConfig12896(t *testing.T) *config.Config {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	anyMatch := func() config.PolicyMatch {
 		return config.PolicyMatch{
@@ -41,10 +41,10 @@ func quarantineSummaryConfig12896(t *testing.T) *config.Config {
 	return &config.Config{
 		Security: config.SecurityConfig{
 			DefaultPolicy: config.PolicyDeny,
-			Zones:         zones("trust", "untrust", "z174", "z214"),
+			Zones:         zones("trust", "untrust", "zzq17760", "zzq8100"),
 			Policies: []*config.ZonePairPolicies{
 				{ // config idx 0 — exact, names the quarantined loser
-					FromZone: "trust", ToZone: "z214",
+					FromZone: "trust", ToZone: "zzq8100",
 					Policies: []*config.Policy{{Name: "peer-dead", Action: config.PolicyPermit, Match: anyMatch()}},
 				},
 				{ // config idx 1 — exact, both sides live
@@ -60,13 +60,13 @@ func quarantineSummaryConfig12896(t *testing.T) *config.Config {
 					Policies: []*config.Policy{{Name: "live-anyany", Action: config.PolicyDeny, Match: anyMatch()}},
 				},
 				{ // config idx 4 — single wildcard whose concrete side is the loser
-					FromZone: "any", ToZone: "z214",
+					FromZone: "any", ToZone: "zzq8100",
 					Policies: []*config.Policy{{Name: "wild-dead", Action: config.PolicyPermit, Match: anyMatch()}},
 				},
 			},
 			GlobalPolicies: []*config.Policy{
 				// unscoped global: applies to every INSTALLED zone — live under
-				// trust, excluded under quarantined z214.
+				// trust, excluded under quarantined zzq8100.
 				{Name: "g-unscoped", Action: config.PolicyDeny, Match: anyMatch()},
 				// scoped global whose whole to-side is the quarantined loser:
 				// the scrub empties the side and drops the rule.
@@ -75,16 +75,16 @@ func quarantineSummaryConfig12896(t *testing.T) *config.Config {
 						SourceAddresses:      []string{"any"},
 						DestinationAddresses: []string{"any"},
 						Applications:         []string{"any"},
-						ToZones:              []string{"z214"},
+						ToZones:              []string{"zzq8100"},
 					}},
-				// scoped global with a surviving member: the scrub prunes z214
+				// scoped global with a surviving member: the scrub prunes zzq8100
 				// and keeps the rule for trust.
 				{Name: "g-mixed", Action: config.PolicyDeny,
 					Match: config.PolicyMatch{
 						SourceAddresses:      []string{"any"},
 						DestinationAddresses: []string{"any"},
 						Applications:         []string{"any"},
-						ToZones:              []string{"trust", "z214"},
+						ToZones:              []string{"trust", "zzq8100"},
 					}},
 			},
 		},
@@ -111,20 +111,20 @@ func TestZoneDetailPolicySummaryHealthyZoneQualifiesScrubbedRows12896(t *testing
 
 	// RED on master: the exact peer-dead row was rendered as governing.
 	if l := summaryLine12896(t, lines, "peer-dead"); !strings.Contains(l, qual) {
-		t.Fatalf("exact trust->z214 row lacks scrub qualifier:\n%s", l)
+		t.Fatalf("exact trust->zzq8100 row lacks scrub qualifier:\n%s", l)
 	}
 	// RED on master: the wildcard row whose concrete side is the loser.
 	if l := summaryLine12896(t, lines, "wild-dead"); !strings.Contains(l, qual) {
-		t.Fatalf("wildcard any->z214 row lacks scrub qualifier:\n%s", l)
+		t.Fatalf("wildcard any->zzq8100 row lacks scrub qualifier:\n%s", l)
 	}
 	// RED on master: the scoped global rendered its authored (scrubbed) scope
 	// with no qualifier.
 	if l := summaryLine12896(t, lines, "g-dead-scope"); !strings.Contains(l, qual) {
 		t.Fatalf("emptied-scope global lacks scrub qualifier:\n%s", l)
-	} else if !strings.Contains(l, "-> z214:") {
+	} else if !strings.Contains(l, "-> zzq8100:") {
 		t.Fatalf("emptied-scope global should keep its authored scope on the dead row:\n%s", l)
 	}
-	// RED on master: the mixed-scope global rendered "trust z214" unqualified;
+	// RED on master: the mixed-scope global rendered "trust zzq8100" unqualified;
 	// post-fix it shows the surviving scope plus the qualifier.
 	if l := summaryLine12896(t, lines, "g-mixed"); !strings.Contains(l, qual) || !strings.Contains(l, "any -> trust:") {
 		t.Fatalf("mixed-scope global must render pruned scope + qualifier:\n%s", l)
@@ -143,7 +143,7 @@ func TestZoneDetailPolicySummaryHealthyZoneQualifiesScrubbedRows12896(t *testing
 // longer list (nothing governns an omitted zone), while the literal references
 // that name the loser stay visible, each scrub-marked.
 func TestZoneDetailPolicySummaryQuarantinedZoneExcludesGoverningRows12896(t *testing.T) {
-	got := strings.Join(ZoneDetailPolicySummary(quarantineSummaryConfig12896(t), "z214", nil, false), "\n")
+	got := strings.Join(ZoneDetailPolicySummary(quarantineSummaryConfig12896(t), "zzq8100", nil, false), "\n")
 	qual := config.ZoneQuarantinePoliciesQualifier
 
 	// RED on master: these listed as governing the quarantined zone.
@@ -154,12 +154,12 @@ func TestZoneDetailPolicySummaryQuarantinedZoneExcludesGoverningRows12896(t *tes
 	}
 	// RED on master: the literal reference listed without the qualifier.
 	if l := summaryLine12896(t, strings.Split(got, "\n"), "peer-dead"); !strings.Contains(l, qual) {
-		t.Fatalf("literal trust->z214 reference under the loser lacks scrub qualifier:\n%s", l)
+		t.Fatalf("literal trust->zzq8100 reference under the loser lacks scrub qualifier:\n%s", l)
 	}
 	if l := summaryLine12896(t, strings.Split(got, "\n"), "wild-dead"); !strings.Contains(l, qual) {
-		t.Fatalf("literal any->z214 reference under the loser lacks scrub qualifier:\n%s", l)
+		t.Fatalf("literal any->zzq8100 reference under the loser lacks scrub qualifier:\n%s", l)
 	}
-	// The scoped globals that literally name z214 stay for diagnosis: the
+	// The scoped globals that literally name zzq8100 stay for diagnosis: the
 	// emptied one dead-marked with its authored scope, the mixed one pruned to
 	// its surviving member. RED on master: both rendered unqualified.
 	if l := summaryLine12896(t, strings.Split(got, "\n"), "g-dead-scope"); !strings.Contains(l, qual) {

@@ -1834,7 +1834,7 @@ impl SessionDomainView<'_> {
     /// #919: zone name -> ID, for translating a legacy peer's
     /// `SessionSyncRequest.ingress_zone` string when it does not populate the
     /// ID fields.
-    pub(crate) fn zone_name_to_id(&self) -> &FastMap<String, u16> {
+    pub(crate) fn zone_name_to_id(&self) -> &FastMap<String, u32> {
         &self.view.forwarding().zone_name_to_id
     }
     pub(crate) fn publish_mirror_only(

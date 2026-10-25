@@ -49,23 +49,23 @@ func TestPolicyContentRejectionReasonsPostQuarantine12850(t *testing.T) {
 	})
 
 	t.Run("collision_loser_content_does_not_leave_phantom", func(t *testing.T) {
-		if config.StableZoneID("z174") != config.StableZoneID("z214") {
-			t.Fatalf("premise: z174/z214 no longer collide")
+		if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+			t.Fatalf("premise: zzq17760/zzq8100 no longer collide")
 		}
 		cfg := compileLenient9570(t, cat9570(
 			[]string{
-				"set security zones security-zone z174",
-				"set security zones security-zone z214",
+				"set security zones security-zone zzq17760",
+				"set security zones security-zone zzq8100",
 				"set security zones security-zone trust",
 				"set security policies default-policy deny-all",
 			},
-			zonePair9570("trust", "z214", "loser-rule", "permit"),
-			zonePair9570("trust", "z174", "winner-rule", "permit"),
+			zonePair9570("trust", "zzq8100", "loser-rule", "permit"),
+			zonePair9570("trust", "zzq17760", "winner-rule", "permit"),
 		))
 		// Make the loser rule independently helper-refused. Since quarantine
 		// removes that whole rule, its content must not reject the snapshot.
 		for _, pair := range cfg.Security.Policies {
-			if pair.ToZone == "z214" {
+			if pair.ToZone == "zzq8100" {
 				pair.Policies[0].Match.Applications = []string{"no-such-application"}
 			}
 		}
@@ -96,19 +96,19 @@ func TestPolicyContentRejectionReasonsPostQuarantine12850(t *testing.T) {
 	t.Run("partially_pruned_scoped_global_uses_survivors", func(t *testing.T) {
 		cfg := compileLenient9570(t, cat9570(
 			[]string{
-				"set security zones security-zone z174",
-				"set security zones security-zone z214",
+				"set security zones security-zone zzq17760",
+				"set security zones security-zone zzq8100",
 				"set security zones security-zone trust",
 				"set security policies default-policy deny-all",
 			},
-			global9570("pruned-global", "deny", "from-zone z214", "from-zone z174"),
+			global9570("pruned-global", "deny", "from-zone zzq8100", "from-zone zzq17760"),
 		))
 		snap := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 1, 0)
 		var found bool
 		for _, p := range snap.Policies {
 			if p.Name == "pruned-global" {
 				found = true
-				if !slices.Equal(p.effectiveMatchFromZones(), []string{"z174"}) || p.MatchFromZone != "z174" {
+				if !slices.Equal(p.effectiveMatchFromZones(), []string{"zzq17760"}) || p.MatchFromZone != "zzq17760" {
 					t.Fatalf("scoped-global did not prune loser and preserve winner: plural=%v singular=%q", p.effectiveMatchFromZones(), p.MatchFromZone)
 				}
 			}

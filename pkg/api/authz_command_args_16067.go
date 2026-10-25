@@ -553,10 +553,10 @@ func restMatchForms(r *http.Request, base string) ([]string, bool) {
 // through StableZoneIDOwnerForConfig, the same owner resolution the
 // session surfaces render from.
 func restZoneNameForID(cfg *config.Config, id uint32) (string, bool) {
-	if cfg == nil || id == 0 || id > 65535 {
+	if cfg == nil || id == 0 {
 		return "", false
 	}
-	name := config.StableZoneIDOwnerForConfig(cfg, uint16(id))
+	name := config.StableZoneIDOwnerForConfig(cfg, id)
 	return name, name != ""
 }
 

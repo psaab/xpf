@@ -210,19 +210,19 @@ func TestSendSiteRefusesBothZeroedPartialPublish(t *testing.T) {
 // raw-count arm; the production-path twin is
 // TestBuildSnapshotDropsDanglingGlobalMatchZone).
 func TestBuilderFullyQuarantinedConfigPasses(t *testing.T) {
-	if config.StableZoneID("z174") == config.StableZoneID("z214") {
+	if config.StableZoneID("zzq17760") == config.StableZoneID("zzq8100") {
 		// keep the premise explicit; the collision pair is fixed upstream
 	} else {
-		t.Skip("premise: z174/z214 no longer collide")
+		t.Skip("premise: zzq17760/zzq8100 no longer collide")
 	}
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"z174": {Name: "z174"},
-		"z214": {Name: "z214"},
+		"zzq17760": {Name: "zzq17760"},
+		"zzq8100":  {Name: "zzq8100"},
 	}
 	cfg.Security.GlobalPolicies = []*config.Policy{{
 		Name:   "g-scoped-quarantined",
-		Match:  config.PolicyMatch{FromZones: []string{"z214"}, Applications: []string{"any"}},
+		Match:  config.PolicyMatch{FromZones: []string{"zzq8100"}, Applications: []string{"any"}},
 		Action: config.PolicyPermit,
 	}}
 	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 3, 0)

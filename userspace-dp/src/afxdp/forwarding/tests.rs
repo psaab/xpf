@@ -1679,7 +1679,7 @@ fn fabric_redirect_requires_zone_stamp_when_routing_domains_exist_11061() {
 #[test]
 fn zone_encoded_fabric_redirect_round_trips_zone_id_above_255() {
     let mut state = build_forwarding_state(&nat_snapshot_with_fabric());
-    let zone_id: u16 = 300; // 0x012c — above the old u8 cap
+    let zone_id: u32 = 300; // 0x012c — above the old u8 cap
     state.zone_id_to_name.insert(zone_id, "highzone".into());
     // #6458: a configured high-id zone is RG-bound (a reth member), so the
     // stamp validation finds it in `zone_to_rgs`.
@@ -1806,8 +1806,8 @@ fn zone_stamp_parser_distinguishes_absent_and_invalid_claims_11061() {
         ingress_ifindex: 21,
         ..UserspaceDpMeta::default()
     };
-    let frame_with_stamp = |magic: u8, zone: u16| {
-        let [hi, lo] = zone.to_be_bytes();
+    let frame_with_stamp = |magic: u8, zone: u32| {
+        let [_, _, hi, lo] = zone.to_be_bytes();
         let mut frame = vec![0u8; 64];
         frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
         frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, magic, hi, lo]);
@@ -1854,7 +1854,7 @@ fn zone_stamp_parser_distinguishes_absent_and_invalid_claims_11061() {
         ZoneEncodedFabricStamp::Invalid,
         "a complete marker without the full zone id is malformed"
     );
-    for (zone, reason) in [(0, "zero zone"), (u16::MAX, "unknown stale zone")] {
+    for (zone, reason) in [(0, "zero zone"), (u32::MAX, "unknown stale zone")] {
         assert_eq!(
             parse_zone_encoded_fabric_ingress_from_frame(
                 &frame_with_stamp(FABRIC_ZONE_MAC_MAGIC, zone),
@@ -1950,7 +1950,7 @@ fn zone_encoded_fabric_stamp_ambiguous_when_claimed_zone_rg_local_15916() {
 #[test]
 fn zone_encoded_fabric_stamp_rejected_for_zone_without_rg_members_6458() {
     let mut state = build_forwarding_state(&nat_snapshot_with_fabric());
-    let mgmt_id: u16 = 9;
+    let mgmt_id: u32 = 9;
     state.zone_id_to_name.insert(mgmt_id, "mgmt".into());
     // No zone_to_rgs entry: mgmt has no RG-bound members.
     let mut frame = vec![0u8; 64];
@@ -5174,8 +5174,8 @@ fn policy_selection_deny_emits_rt_flow_event() {
     assert_eq!(event.kind, DataplaneEventKind::PolicyDeny);
     assert_eq!(event.action, 0);
     assert_eq!(event.reason, 5);
-    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
-    assert_eq!(event.egress_zone_id, TEST_WAN_ZONE_ID);
+    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID as u16);
+    assert_eq!(event.egress_zone_id, TEST_WAN_ZONE_ID as u16);
     assert_eq!(event.ingress_ifindex, 24);
     assert_eq!(event.policy_id, 42);
     assert_eq!(event.rule_id, 42);
@@ -9401,7 +9401,7 @@ fn fabric_link_empty_peer_mac_is_skipped_as_unresolved_peer() {
 
 /// The zone id the #6713 fixture gives the tunnel's `vpn` zone. Reuses an
 /// existing test-only constant; only distinctness from the LAN zone matters.
-const TEST_VPN_ZONE_ID_6713: u16 = TEST_DMZ_ZONE_ID;
+const TEST_VPN_ZONE_ID_6713: u32 = TEST_DMZ_ZONE_ID;
 
 const TUNNEL_IFINDEX_6713: i32 = 42;
 const LAN_IFINDEX_6713: i32 = 24;
@@ -9684,7 +9684,7 @@ fn secure_tunnel_to_zone_reaches_policy_6713() {
     );
 
     // The String twin used by test-only callers must agree with the production
-    // u16 resolver -- it reads the same egress-zone helper.
+    // u32 resolver -- it reads the same egress-zone helper.
     let (from_zone, to_zone) =
         zone_pair_for_flow(&state, LAN_IFINDEX_6713, resolution.egress_ifindex);
     assert_eq!(from_zone, "lan");
@@ -9876,7 +9876,7 @@ fn adjudicate_lan_transit_6722(
     state: &ForwardingState,
     dst: &str,
     expect_ifindex: i32,
-) -> (u16, crate::policy::PolicyEvaluationResult) {
+) -> (u32, crate::policy::PolicyEvaluationResult) {
     let resolution = lookup_forwarding_resolution_v4(
         state,
         None,
@@ -10679,7 +10679,7 @@ fn adjudicate_wan_to_lan_transit_6722(
     state: &ForwardingState,
     dst: &str,
     expect_ifindex: i32,
-) -> (u16, u16, crate::policy::PolicyEvaluationResult) {
+) -> (u32, u32, crate::policy::PolicyEvaluationResult) {
     let resolution = lookup_forwarding_resolution_v4(
         state,
         None,

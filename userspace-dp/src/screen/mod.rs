@@ -840,7 +840,7 @@ impl ScreenState {
     pub fn check_packet_with_zone_id(
         &mut self,
         zone: &str,
-        zone_id: u16,
+        zone_id: u32,
         pkt: &ScreenPacketInfo,
         now_secs: u64,
     ) -> ScreenVerdict {
@@ -912,7 +912,7 @@ impl ScreenState {
         &mut self,
         zone: &str,
         // #9740: unused; SYN cookies bind the zone's name tag, not this ID.
-        _zone_id: u16,
+        _zone_id: u32,
         pkt: &ScreenPacketInfo,
         now_ns: u64,
         now_secs: u64,
@@ -1369,7 +1369,7 @@ impl ScreenState {
     pub fn scan_sweep_drop_on_new_flow(
         &mut self,
         zone: &str,
-        zone_id: u16,
+        zone_id: u32,
         pkt: &ScreenPacketInfo,
         now_micros: u64,
     ) -> Option<&'static str> {
@@ -1512,7 +1512,7 @@ impl ScreenState {
         &mut self,
         zone: &str,
         // #9740: the cookie binds the zone NAME (syn_cookie_zone_tag), not this ID.
-        _zone_id: u16,
+        _zone_id: u32,
         pkt: &ScreenPacketInfo,
         now_ns: u64,
         now_secs: u64,

@@ -906,8 +906,9 @@ type SessionValueV6 struct {
 
 // ZoneConfig mirrors the C struct zone_config.
 type ZoneConfig struct {
-	ZoneID          uint16
+	ZoneID          uint32
 	ScreenProfileID uint16
+	Pad0            uint16
 	HostInbound     uint32
 	TCPRst          uint8
 	Pad             [3]uint8
@@ -915,8 +916,8 @@ type ZoneConfig struct {
 
 // ZonePairKey mirrors the C struct zone_pair_key.
 type ZonePairKey struct {
-	FromZone uint16
-	ToZone   uint16
+	FromZone uint32
+	ToZone   uint32
 }
 
 // PolicySet mirrors the C struct policy_set.
@@ -1687,8 +1688,7 @@ var ScreenReasonCounters = [ScreenReasonDropCount]ScreenReasonCounter{
 // SessionCountKey mirrors the C struct session_count_key.
 type SessionCountKey struct {
 	IP     uint32
-	ZoneID uint16
-	Pad    uint16
+	ZoneID uint32
 }
 
 // SessionCountValue mirrors the C struct session_count_value.
@@ -1753,9 +1753,10 @@ type IfaceZoneKey struct {
 
 // IfaceZoneValue mirrors the C struct iface_zone_value.
 type IfaceZoneValue struct {
-	ZoneID       uint16
-	Flags        uint8  // IFACE_FLAG_* bits
-	RGID         uint8  // redundancy group ID (0 = standalone/non-RETH)
+	ZoneID       uint32
+	Flags        uint8 // IFACE_FLAG_* bits
+	RGID         uint8 // redundancy group ID (0 = standalone/non-RETH)
+	Pad          uint16
 	RoutingTable uint32 // kernel table ID, 0 = main table
 	ScreenFlags  uint32 // precomputed screen_config.flags for ingress fast-path
 }

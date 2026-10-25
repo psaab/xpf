@@ -200,7 +200,7 @@ func (s *Server) showSecurityLog(filter string, buf *strings.Builder) {
 	// message the local CLI returns rather than silently widening to all
 	// events.
 	cr := s.applyResult()
-	var zoneIDs map[string]uint16
+	var zoneIDs map[string]uint32
 	if cr != nil {
 		zoneIDs = cr.ZoneIDs
 	}
@@ -248,7 +248,7 @@ func (s *Server) showSecurityLog(filter string, buf *strings.Builder) {
 	evZoneNames := make(map[uint16]string)
 	if s.dp != nil {
 		if cr := s.applyResult(); cr != nil {
-			evZoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
+			evZoneNames = survivorZoneNames16(cr.ZoneIDs, cfg)
 		}
 	}
 	zoneName := func(stored string, id uint16) string {

@@ -18,7 +18,7 @@ import (
 
 func quarantinedPoliciesResp14363() *pb.GetPoliciesResponse {
 	return &pb.GetPoliciesResponse{Policies: []*pb.PolicyInfo{
-		{FromZone: "trust", ToZone: "z214", Rules: []*pb.PolicyRule{
+		{FromZone: "trust", ToZone: "zzq8100", Rules: []*pb.PolicyRule{
 			{Name: "loser-rule", Action: "permit", Count: true,
 				HitPackets: 5, HitBytes: 500,
 				HitCountersUnavailable: true, Quarantined: true},
@@ -28,13 +28,13 @@ func quarantinedPoliciesResp14363() *pb.GetPoliciesResponse {
 		}},
 		{FromZone: "*", ToZone: "*", Rules: []*pb.PolicyRule{
 			{Name: "dropped-global", Action: "deny",
-				MatchToZones:           []string{"z214"},
+				MatchToZones:           []string{"zzq8100"},
 				HitCountersUnavailable: true, Quarantined: true},
 			// #12897 control: a mixed-scope global stays enforced for its
 			// live members, so the server leaves Quarantined=false and its
 			// counters stay live — no qualifier, no unavailable cell.
 			{Name: "mixed-global", Action: "deny",
-				MatchFromZones: []string{"trust", "z214"}, MatchToZones: []string{"untrust"},
+				MatchFromZones: []string{"trust", "zzq8100"}, MatchToZones: []string{"untrust"},
 				Count: true, HitPackets: 17, HitBytes: 1700},
 			{Name: "live-global", Action: "permit"},
 		}},
@@ -72,7 +72,7 @@ func Test_14363_ShowPoliciesFilteredQualifiesQuarantined(t *testing.T) {
 	// the wire carries no per-endpoint bit, so both endpoints are
 	// qualified — the conservative reading that never presents the
 	// pair as live.
-	if !strings.Contains(out, "From zone: trust "+config.ZoneQuarantinePoliciesQualifier+", To zone: z214 "+config.ZoneQuarantinePoliciesQualifier) {
+	if !strings.Contains(out, "From zone: trust "+config.ZoneQuarantinePoliciesQualifier+", To zone: zzq8100 "+config.ZoneQuarantinePoliciesQualifier) {
 		t.Fatalf("standard remote view did not qualify the quarantined zone-pair header:\n%s", out)
 	}
 	// Its hit count reads as the quarantine disposition, never the generic
@@ -87,7 +87,7 @@ func Test_14363_ShowPoliciesFilteredQualifiesQuarantined(t *testing.T) {
 
 	// Quarantine-dropped scoped global: header + hit disposition qualified.
 	dropped := ruleSection14363(t, out, "dropped-global")
-	if !strings.Contains(out, "From zone: any, To zone: z214 "+config.ZoneQuarantinePoliciesQualifier) {
+	if !strings.Contains(out, "From zone: any, To zone: zzq8100 "+config.ZoneQuarantinePoliciesQualifier) {
 		t.Fatalf("standard remote view did not qualify the dropped-global header:\n%s", out)
 	}
 	if !strings.Contains(dropped, "Hit count: "+config.ZoneQuarantineLiveCountersUnavailable) {

@@ -47,7 +47,7 @@ func sessionDeltaV6ForSessionID(srcPort uint16, slot uint32) dpuserspace.Session
 // assertion: a few hundred conversions cannot span a monotonic second boundary
 // more than once, so the pre-fix code yields at most two distinct ids.
 func TestUserspaceSyncedSessionIDDistinctPerSession6198(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	const sessions = 512
 
 	for _, tc := range []struct {
@@ -98,7 +98,7 @@ func TestUserspaceSyncedSessionIDDistinctPerSession6198(t *testing.T) {
 // these sessions get distinct ids. Restoring the mask makes the 65536/65537
 // pairs collide with 0/1 within a monotonic second.
 func TestUserspaceSyncedSessionIDSlotBoundary6198(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 	slots := []uint32{0, 1, 65535, 65536, 65537, 131072}
 
 	seen := make(map[uint64]uint32, len(slots))
@@ -126,7 +126,7 @@ func TestUserspaceSyncedSessionIDSlotBoundary6198(t *testing.T) {
 // (`now<<16 | slot`), so slots 1 and 2 differ regardless of `now`. A control
 // that also reds on revert would be a co-signer, not a control.
 func TestUserspaceSyncedSessionIDDistinctSlotsBelowBoundary6198(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 
 	_, valA, ok := userspaceSessionFromDeltaV4(sessionDeltaV4ForSessionID(41000, 1), zoneIDs)
 	if !ok {
@@ -352,7 +352,7 @@ func TestUserspaceSyncedSessionIDDistinctAwayFromWrap6198(t *testing.T) {
 // base entry: they are two conntrack keys for ONE logical session. Re-converting
 // the delta for the alias (the pre-#6198 shape) would mint a second id.
 func TestUserspaceForwardWireAliasSharesBaseSessionID6198(t *testing.T) {
-	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
 
 	deltaV4 := sessionDeltaV4ForSessionID(39906, 0)
 	deltaV4.NATSrcIP = "172.16.80.8"

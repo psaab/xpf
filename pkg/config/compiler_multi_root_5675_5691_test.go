@@ -215,7 +215,7 @@ interfaces {
 // one well before the cap).
 func findZoneCollisionPair(t *testing.T) (string, string) {
 	t.Helper()
-	seen := map[uint16]string{}
+	seen := map[uint32]string{}
 	for i := 0; i < 300000; i++ {
 		name := fmt.Sprintf("zone%d", i)
 		id := StableZoneID(name)

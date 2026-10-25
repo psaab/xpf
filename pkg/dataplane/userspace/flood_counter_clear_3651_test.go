@@ -72,7 +72,7 @@ func TestClearAllCountersSendsFloodClearIPCAndIsDurable(t *testing.T) {
 	}
 	defer ln.Close()
 
-	const zoneID = uint16(50675) // config.StableZoneID("trust")
+	const zoneID = uint32(2868932339) // config.StableZoneID("trust")
 	cumulative := []ZoneFloodCounterStatus{
 		{ZoneID: zoneID, SynFloodEvents: 42, ICMPFloodEvents: 43, UDPFloodEvents: 44},
 	}
@@ -201,7 +201,7 @@ func TestClearAllCountersZerosCachedFloodCountersWithoutHelper(t *testing.T) {
 	m := New()
 	m.proc = nil // no live helper
 	m.lastStatus = ProcessStatus{
-		ZoneFloodCounters: []ZoneFloodCounterStatus{{ZoneID: 50675, SynFloodEvents: 9}},
+		ZoneFloodCounters: []ZoneFloodCounterStatus{{ZoneID: 2868932339, SynFloodEvents: 9}},
 	}
 	assertOnlyNoBPFMapsError(t, m.ClearAllCounters())
 	if len(m.lastStatus.ZoneFloodCounters) != 0 {

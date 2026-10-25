@@ -66,8 +66,8 @@ const userspaceLandScreenMapCapacity = 65536
 // than letting map iteration order pick a winner; the StableZoneID
 // quarantine normally prevents collisions from reaching the published
 // set at all.
-func buildUserspaceLandScreenEntries(snapshot *ConfigSnapshot) map[uint16]uint8 {
-	entries := make(map[uint16]uint8)
+func buildUserspaceLandScreenEntries(snapshot *ConfigSnapshot) map[uint32]uint8 {
+	entries := make(map[uint32]uint8)
 	if snapshot == nil {
 		return entries
 	}
@@ -124,9 +124,9 @@ func checkLandScreenCapacity(desired int) error {
 // the desired set by iterating the live map (the WG-zone-map pattern),
 // so rows left by a previous daemon in the pinned map are reaped even
 // though no in-process inventory names them.
-func (m *Manager) syncUserspaceLandScreenMapLocked(landMap *ebpf.Map, desired map[uint16]uint8) error {
-	current := make(map[uint16]uint8)
-	var key uint16
+func (m *Manager) syncUserspaceLandScreenMapLocked(landMap *ebpf.Map, desired map[uint32]uint8) error {
+	current := make(map[uint32]uint8)
+	var key uint32
 	var value uint8
 	iter := landMap.Iterate()
 	for iter.Next(&key, &value) {

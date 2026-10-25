@@ -2,7 +2,7 @@ package userspace
 
 type ZoneSnapshot struct {
 	Name string `json:"name"`
-	ID   uint16 `json:"id"`
+	ID   uint32 `json:"id"`
 	// HostInbound* carry the zone's `host-inbound-traffic` admission set
 	// (#3070). Before #3070 the zone's host-inbound system-service / protocol
 	// set was parsed and modeled in Go but NEVER reached the dataplane, so

@@ -172,7 +172,7 @@ type AdjudicatedFrame struct {
 	Frame           CaptureFrame
 	Origin          CaptureOrigin
 	Lease           ReinjectLease
-	ZoneID          uint16
+	ZoneID          uint32
 	IfID            uint32
 	DeadlineMonoNS  uint64
 	DeadlineClockID uint8
@@ -923,7 +923,7 @@ func (p *CapturePipeline) submitEligible(frames []CaptureFrame) {
 			p.mu.Unlock()
 			admitted = append(admitted, AdjudicatedFrame{
 				Frame: frame, Origin: frame.origin, Lease: lease,
-				ZoneID: uint16(evaluation.ZoneID), IfID: evaluation.IfID,
+				ZoneID: evaluation.ZoneID, IfID: evaluation.IfID,
 				Flags: ReinjectSubmitFlagForward,
 			})
 			pending = append(pending, item)
@@ -1688,14 +1688,14 @@ const (
 )
 
 type ZoneResolution struct {
-	ZoneID uint16
+	ZoneID uint32
 	IfID   uint32
 	Reason ZoneReason
 }
 
 type ZoneEvaluation struct {
 	Decision ZoneDecision
-	ZoneID   uint16
+	ZoneID   uint32
 	IfID     uint32
 	Reason   ZoneReason
 }

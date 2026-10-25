@@ -444,7 +444,7 @@ func TestConfigDerivedNamesCannotForgeAnSDParamOnTheWire9321(t *testing.T) {
 
 		reader := NewEventReader(nil, NewEventBuffer(8))
 		reader.SetPolicyNames(map[uint32]string{policyID: policyName})
-		reader.SetZoneNames(map[uint16]string{ingressZone: zoneName})
+		reader.SetZoneNames(map[uint32]string{uint32(ingressZone): zoneName})
 		reader.ReplaceLocalWriters([]*LocalLogWriter{lw})
 
 		frame := rawSessionFrame(eventTypeSessionOpen, 1)

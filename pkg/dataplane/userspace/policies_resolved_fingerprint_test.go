@@ -13,14 +13,14 @@ import (
 // scrubPoliciesForQuarantinedZones step the publish path applies via
 // quarantineCollidingZones / policySnapshotAfterZoneQuarantine. A commit
 // whose only enforcement change is a zone becoming quarantined (StableZoneID
-// collision z174/z214, or a poisoned zone) therefore produced identical
+// collision zzq17760/zzq8100, or a poisoned zone) therefore produced identical
 // fingerprints/ID maps while the published snapshot dropped or narrowed the
 // rule, so daemon_policy_invalidate never flagged live sessions for
 // policy-rematch re-evaluation.
 //
-// Fixture uses the verified colliding pair z174/z214 (z214 is the
+// Fixture uses the verified colliding pair zzq17760/zzq8100 (zzq8100 is the
 // later-sorting loser). The "quarantined" config differs from "clean" only
-// by adding z214 to the zone set — no policy text changes.
+// by adding zzq8100 to the zone set — no policy text changes.
 
 func fingerprintQuarantineConfig(zones []string, pol *config.Policy) *config.Config {
 	z := make(map[string]*config.ZoneConfig, len(zones))
@@ -50,23 +50,23 @@ func fingerprintQuarantinePolicy(fromZones []string) *config.Policy {
 }
 
 func TestPolicyResolvedFingerprintsReflectZoneQuarantineScrub(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatalf("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatalf("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	const key = "junos-global->junos-global/g-scoped"
 
 	t.Run("multi_zone_partial_quarantine_changes_fingerprint", func(t *testing.T) {
-		// Global policy scoped from [z174 z214]: quarantining z214 must
-		// prune the scope to [z174] in the published snapshot, so the
+		// Global policy scoped from [zzq17760 zzq8100]: quarantining zzq8100 must
+		// prune the scope to [zzq17760] in the published snapshot, so the
 		// resolved fingerprint must change even though policy text is
 		// identical.
 		clean := fingerprintQuarantineConfig(
-			[]string{"z174", "untrust"},
-			fingerprintQuarantinePolicy([]string{"z174", "z214"}),
+			[]string{"zzq17760", "untrust"},
+			fingerprintQuarantinePolicy([]string{"zzq17760", "zzq8100"}),
 		)
 		quarantined := fingerprintQuarantineConfig(
-			[]string{"z174", "z214", "untrust"},
-			fingerprintQuarantinePolicy([]string{"z174", "z214"}),
+			[]string{"zzq17760", "zzq8100", "untrust"},
+			fingerprintQuarantinePolicy([]string{"zzq17760", "zzq8100"}),
 		)
 
 		// Positive control: the publish path really does narrow the rule.
@@ -77,8 +77,8 @@ func TestPolicyResolvedFingerprintsReflectZoneQuarantineScrub(t *testing.T) {
 		if len(snap.Policies) != 1 {
 			t.Fatalf("published policies = %d, want 1 pruned survivor", len(snap.Policies))
 		}
-		if got := snap.Policies[0].effectiveMatchFromZones(); len(got) != 1 || got[0] != "z174" {
-			t.Fatalf("published from-scope = %v, want [z174] (z214 pruned)", got)
+		if got := snap.Policies[0].effectiveMatchFromZones(); len(got) != 1 || got[0] != "zzq17760" {
+			t.Fatalf("published from-scope = %v, want [zzq17760] (zzq8100 pruned)", got)
 		}
 
 		before := PolicyResolvedFingerprints(clean, nil)
@@ -90,7 +90,7 @@ func TestPolicyResolvedFingerprintsReflectZoneQuarantineScrub(t *testing.T) {
 			t.Fatalf("pruned rule must retain fingerprint key %q: %v", key, after)
 		}
 		if after[key] == before[key] {
-			t.Fatalf("#14330: quarantining z214 from a multi-zone global policy did not change "+
+			t.Fatalf("#14330: quarantining zzq8100 from a multi-zone global policy did not change "+
 				"PolicyResolvedFingerprints (unscrubbed hash masks the published narrowing): %v", before)
 		}
 
@@ -115,18 +115,18 @@ func TestPolicyResolvedFingerprintsReflectZoneQuarantineScrub(t *testing.T) {
 	})
 
 	t.Run("sole_zone_quarantine_removes_key", func(t *testing.T) {
-		// Global policy scoped solely to z214: quarantining z214 drops the
+		// Global policy scoped solely to zzq8100: quarantining zzq8100 drops the
 		// whole rule from the published snapshot (leaving the side empty
 		// would broaden to all zones). Its key must vanish from the
 		// fingerprint and ID maps so the deletion-clear / rematch paths
 		// re-evaluate its live sessions.
 		clean := fingerprintQuarantineConfig(
-			[]string{"z174", "untrust"},
-			fingerprintQuarantinePolicy([]string{"z214"}),
+			[]string{"zzq17760", "untrust"},
+			fingerprintQuarantinePolicy([]string{"zzq8100"}),
 		)
 		quarantined := fingerprintQuarantineConfig(
-			[]string{"z174", "z214", "untrust"},
-			fingerprintQuarantinePolicy([]string{"z214"}),
+			[]string{"zzq17760", "zzq8100", "untrust"},
+			fingerprintQuarantinePolicy([]string{"zzq8100"}),
 		)
 
 		// Positive control: the publish path drops the rule entirely.
@@ -233,12 +233,12 @@ func TestPolicyResolvedFingerprintsReflectZoneQuarantineScrub(t *testing.T) {
 				Action: config.PolicyPermit,
 			})
 		}
-		before := PolicyResolvedFingerprints(mk([]string{"z174", "untrust"}), nil)
-		after := PolicyResolvedFingerprints(mk([]string{"z174", "z214", "untrust"}), nil)
+		before := PolicyResolvedFingerprints(mk([]string{"zzq17760", "untrust"}), nil)
+		after := PolicyResolvedFingerprints(mk([]string{"zzq17760", "zzq8100", "untrust"}), nil)
 		if before[key] == "" || after[key] != before[key] {
 			t.Fatalf("unscoped global fingerprint changed across quarantine: before=%v after=%v", before, after)
 		}
-		if _, ok := PolicyIDsByStableKey(mk([]string{"z174", "z214", "untrust"}))[key]; !ok {
+		if _, ok := PolicyIDsByStableKey(mk([]string{"zzq17760", "zzq8100", "untrust"}))[key]; !ok {
 			t.Fatalf("unscoped global missing from PolicyIDsByStableKey")
 		}
 	})

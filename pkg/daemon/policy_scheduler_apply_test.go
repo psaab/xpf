@@ -100,7 +100,7 @@ func (d *runtimeOnlyApplyTestDP) ApplyConfig(ctx context.Context, _ *config.Conf
 	if d.applyResult != nil {
 		out = d.applyResult.Clone()
 	} else {
-		out = &dataplane.ApplyResult{ZoneIDs: map[string]uint16{}}
+		out = &dataplane.ApplyResult{ZoneIDs: map[string]uint32{}}
 	}
 	if !d.holdLastApply {
 		d.gen++
@@ -114,7 +114,7 @@ func (d *runtimeOnlyApplyTestDP) LastApplyResult() *dataplane.ApplyResult {
 	if d.lastApply != nil {
 		return d.lastApply.Clone()
 	}
-	return &dataplane.ApplyResult{ZoneIDs: map[string]uint16{}}
+	return &dataplane.ApplyResult{ZoneIDs: map[string]uint32{}}
 }
 
 func (d *runtimeOnlyApplyTestDP) Link() dataplane.LinkController {

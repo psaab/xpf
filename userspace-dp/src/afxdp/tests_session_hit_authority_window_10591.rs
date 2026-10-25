@@ -116,7 +116,7 @@ const PEER_BASE_PORT: u16 = 5201;
 /// production rename assigns a new StableZoneID hash, so the old ID (1) has
 /// no entry in the new map (the `None` arm of
 /// `removed_zone_ids_for_rotation`).
-const RENAMED_LAN_ZONE_ID: u16 = 101;
+const RENAMED_LAN_ZONE_ID: u32 = 101;
 
 fn drive_at(
     binding: &mut BindingWorker,

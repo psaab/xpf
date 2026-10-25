@@ -63,8 +63,8 @@ func restIface6960View(t *testing.T) sessionView {
 		store: restIface6960Store(t),
 		dp: &restIface6960DP{
 			Manager: dataplane.New(),
-			result: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
-				"trust": restIface6960Trust, "untrust": restIface6960Untrust,
+			result: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
+				"trust": uint32(restIface6960Trust), "untrust": uint32(restIface6960Untrust),
 			}},
 		},
 		// The test box has no ge-0-0-* netdevs; without the injected lookup

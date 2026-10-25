@@ -162,7 +162,7 @@ func TestIpsecCaptureRezone32StagesWithoutQuarantine15068(t *testing.T) {
 	}
 	assertStagedGeneration15068(t, second, 32)
 	resolution := second.zoneSnapshot.ResolveSTN("st0.0")
-	if resolution.Reason != nfqueue.ZoneReasonZoned || resolution.ZoneID != config.StableZoneID("zone-b") {
+	if resolution.Reason != nfqueue.ZoneReasonZoned || uint32(resolution.ZoneID) != config.StableZoneID("zone-b") {
 		t.Fatalf("staged zone authority = %+v, want zone-b=%d", resolution, config.StableZoneID("zone-b"))
 	}
 	_ = second.close()

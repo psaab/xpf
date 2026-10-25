@@ -17,7 +17,7 @@ import (
 func compileZoneMaps10216(t *testing.T, cfg *config.Config) *CompileResult {
 	t.Helper()
 	result := &CompileResult{
-		ZoneIDs:             make(map[string]uint16),
+		ZoneIDs:             make(map[string]uint32),
 		ScreenIDs:           make(map[string]uint16),
 		ifCache:             make(map[string]*net.Interface),
 		rxTagStripOffCache:  make(map[string]bool),

@@ -299,8 +299,12 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 				if _, drop := quarantined[name]; drop {
 					continue
 				}
-				id := cr.ZoneIDs[name]
-				owner := config.StableZoneIDOwner(quarantineNames, id)
+				id32 := cr.ZoneIDs[name]
+				if id32 > 0xFFFF {
+					continue
+				}
+				id := uint16(id32)
+				owner := config.StableZoneIDOwner(quarantineNames, id32)
 				if owner == "" {
 					if _, exists := zoneByID[id]; exists {
 						continue
@@ -926,8 +930,12 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 			if _, drop := quarantined[name]; drop {
 				continue
 			}
-			id := cr.ZoneIDs[name]
-			owner := config.StableZoneIDOwner(quarantineNames, id)
+			id32 := cr.ZoneIDs[name]
+			if id32 > 0xFFFF {
+				continue
+			}
+			id := uint16(id32)
+			owner := config.StableZoneIDOwner(quarantineNames, id32)
 			if owner == "" {
 				if _, exists := zoneByID[id]; exists {
 					continue

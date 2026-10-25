@@ -243,7 +243,7 @@ fn known_go_collision_pair_collides_here_too_9752() {
 #[test]
 fn fabric_quarantine_domains_are_reserved_and_disjoint_11061() {
     let max_real_domain = DOMAIN_BAND_BASE + DOMAIN_BAND_SPAN - 1;
-    let max_ambiguous_zone_domain = AMBIGUOUS_FABRIC_DOMAIN_BASE | u32::from(u16::MAX);
+    let max_ambiguous_zone_domain = AMBIGUOUS_FABRIC_DOMAIN_BASE | u32::from(u32::MAX);
     assert!(max_real_domain < INVALID_FABRIC_STAMP_DOMAIN);
     assert!(INVALID_FABRIC_STAMP_DOMAIN < AMBIGUOUS_FABRIC_DOMAIN_BASE);
     assert!(AMBIGUOUS_FABRIC_DOMAIN_BASE <= max_ambiguous_zone_domain);

@@ -1014,7 +1014,7 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		p.pending[lease.RequestID] = item
 		p.stats.Adjudicated++
 		p.mu.Unlock()
-		admitted = append(admitted, AdjudicatedFrame{Frame: frame, Origin: frame.origin, Lease: lease, ZoneID: uint16(evaluation.ZoneID), IfID: evaluation.IfID})
+		admitted = append(admitted, AdjudicatedFrame{Frame: frame, Origin: frame.origin, Lease: lease, ZoneID: evaluation.ZoneID, IfID: evaluation.IfID})
 		pending = append(pending, item)
 	}
 	if len(admitted) == 0 {

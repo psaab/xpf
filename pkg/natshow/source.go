@@ -86,8 +86,9 @@ func renderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 			if _, drop := quarantined[name]; drop {
 				continue
 			}
-			id := cr.ZoneIDs[name]
-			owner := config.StableZoneIDOwner(quarantineNames, id)
+			// #16557: sessions carry the low 16 bits of the u32 id.
+			id := uint16(cr.ZoneIDs[name])
+			owner := config.StableZoneIDOwner(quarantineNames, cr.ZoneIDs[name])
 			if owner == "" {
 				if _, exists := zoneByID[id]; exists {
 					continue

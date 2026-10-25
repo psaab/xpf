@@ -131,8 +131,8 @@ type Manager struct {
 	// about production, not an API-wide absolute -- SetFloodCounterOffset is
 	// exported and tests do write it. Surfaces render "not available", never a
 	// misleading 0.
-	zoneCounterOffsets  map[uint16][2]CounterValue // [zoneID] -> {ingress, egress}
-	floodCounterOffsets map[uint16]FloodState      // [zoneID]
+	zoneCounterOffsets  map[uint32][2]CounterValue // [zoneID] -> {ingress, egress}
+	floodCounterOffsets map[uint32]FloodState      // [zoneID]
 
 	// #863: refcount of XDP-attached ifindexes that "claim" the
 	// IFACE_FLAG_XDP_ATTACHED bit on each iface_zone_map entry.
@@ -438,12 +438,12 @@ type userspaceShimCompileDataplane struct {
 
 func (d userspaceShimCompileDataplane) AddTxPort(int) error { return nil }
 
-func (d userspaceShimCompileDataplane) SetZone(int, uint16, uint16, uint32, uint8, uint8, uint32) error {
+func (d userspaceShimCompileDataplane) SetZone(int, uint16, uint32, uint32, uint8, uint8, uint32) error {
 	return nil
 }
 
 func (d userspaceShimCompileDataplane) SetVlanIfaceInfo(int, int, uint16) error { return nil }
-func (d userspaceShimCompileDataplane) SetZoneConfig(uint16, ZoneConfig) error  { return nil }
+func (d userspaceShimCompileDataplane) SetZoneConfig(uint32, ZoneConfig) error  { return nil }
 func (d userspaceShimCompileDataplane) ClearAddressBookV4() error               { return nil }
 func (d userspaceShimCompileDataplane) ClearAddressBookV6() error               { return nil }
 func (d userspaceShimCompileDataplane) ClearAddressMembership() error           { return nil }
@@ -462,7 +462,7 @@ func (d userspaceShimCompileDataplane) SetApplication(uint8, uint16, uint32, uin
 	return nil
 }
 func (d userspaceShimCompileDataplane) ClearZonePairPolicies() error { return nil }
-func (d userspaceShimCompileDataplane) SetZonePairPolicy(uint16, uint16, PolicySet) error {
+func (d userspaceShimCompileDataplane) SetZonePairPolicy(uint32, uint32, PolicySet) error {
 	return nil
 }
 func (d userspaceShimCompileDataplane) SetPolicyRule(uint32, uint32, PolicyRule) error {
@@ -937,7 +937,7 @@ func (m *Manager) setXDPAttachedFlag(ifindex int, attached bool) error {
 }
 
 // SetZone maps an {ifindex, vlanID} to a security zone and routing table in the BPF map.
-func (m *Manager) SetZone(ifindex int, vlanID uint16, zoneID uint16, routingTable uint32, flags uint8, rgID uint8, screenFlags uint32) error {
+func (m *Manager) SetZone(ifindex int, vlanID uint16, zoneID uint32, routingTable uint32, flags uint8, rgID uint8, screenFlags uint32) error {
 	zm, present, st := m.lookupMapLocked("iface_zone_map")
 	if st == registryFresh {
 		return fmt.Errorf("%w: iface_zone_map", ErrDataplaneNotArmed)

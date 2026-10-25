@@ -14,7 +14,7 @@ import (
 // the wire and its interfaces are unzoned so the dataplane cannot confuse it
 // with a real zone or special context.
 type ZoneIDCollision struct {
-	ID          uint16
+	ID          uint32
 	Survivor    string
 	Quarantined string
 	// Poisoned marks a DroppedEnforcementChild quarantine (#13099): the zone

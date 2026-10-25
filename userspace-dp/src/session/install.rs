@@ -1,4 +1,4 @@
-fn decrement_reserved_count(counts: &mut SeededZoneIpMap<u32>, key: (u16, IpAddr)) {
+fn decrement_reserved_count(counts: &mut SeededZoneIpMap<u32>, key: (u32, IpAddr)) {
     let Some(count) = counts.get_mut(&key) else {
         return;
     };

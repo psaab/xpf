@@ -100,8 +100,8 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     scratch_forwards: &mut Vec<PendingForwardRequest>,
     now_ns: u64,
     now_secs: u64,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
 ) -> EmbeddedIcmpReversal {
     #[cfg(feature = "debug-log")]
     let icmpv6_trace = meta.protocol == PROTO_ICMPV6
@@ -530,8 +530,8 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
 pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     queued_frame: &[u8],
     ingress_meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
+    ingress_zone_override: Option<u32>,
+    ambiguous_zone: Option<u32>,
     resolution: ForwardingResolution,
     worker_ctx: &WorkerContext,
     now_ns: u64,
@@ -699,7 +699,7 @@ pub(super) fn outer_is_pmtud_error(packet_frame: &[u8], meta: UserspaceDpMeta) -
 /// #10666: the quoted session's FORWARD-direction zones (ingress side →
 /// egress side), normalizing a reverse-half match back to the forward
 /// flow so the RELATED arrival check reads one way for every match arm.
-pub(in crate::afxdp) fn related_forward_zones(metadata: &SessionMetadata) -> (u16, u16) {
+pub(in crate::afxdp) fn related_forward_zones(metadata: &SessionMetadata) -> (u32, u32) {
     if metadata.is_reverse {
         (metadata.egress_zone, metadata.ingress_zone)
     } else {
@@ -714,8 +714,8 @@ pub(in crate::afxdp) fn related_forward_zones(metadata: &SessionMetadata) -> (u1
 pub(super) fn actual_embedded_icmp_ingress_zone(
     forwarding: &ForwardingState,
     meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u16>,
-) -> u16 {
+    ingress_zone_override: Option<u32>,
+) -> u32 {
     ingress_zone_override.unwrap_or_else(|| {
         let logical_ifindex = super::resolve_ingress_logical_ifindex(
             forwarding,
@@ -735,7 +735,7 @@ pub(super) fn actual_embedded_icmp_ingress_zone(
 mod tests_12866 {
     use super::*;
 
-    fn meta(parent: i32, vlan: u16, shim_zone: u16) -> UserspaceDpMeta {
+    fn meta(parent: i32, vlan: u16, shim_zone: u32) -> UserspaceDpMeta {
         let mut m = UserspaceDpMeta::default();
         m.ingress_ifindex = parent as u32;
         m.ingress_vlan_id = vlan;

@@ -94,7 +94,7 @@ type recordingDP struct {
 // mis-marked rather than depending on the wrong classification.
 func (*recordingDP) xpfValidationPass() bool { return false }
 
-func (r *recordingDP) SetZoneConfig(zoneID uint16, zc ZoneConfig) error {
+func (r *recordingDP) SetZoneConfig(zoneID uint32, zc ZoneConfig) error {
 	r.zoneConfigCalls++
 	return errStopBeforeHostReconcile
 }
@@ -242,7 +242,7 @@ func TestValidConfigStillReachesZoneCompile_4960(t *testing.T) {
 // counter the control test asserts is zero — a defence-in-depth counter, not
 // the one that binds the tripwire (see recordingDP, #6894 r3 F2).
 func (r *recordingDP) AddTxPort(ifindex int) error { r.ifaceSetupCalls++; return nil }
-func (r *recordingDP) SetZone(ifindex int, vlanID uint16, zoneID uint16, routingTable uint32, flags uint8, rgID uint8, screenFlags uint32) error {
+func (r *recordingDP) SetZone(ifindex int, vlanID uint16, zoneID uint32, routingTable uint32, flags uint8, rgID uint8, screenFlags uint32) error {
 	r.ifaceSetupCalls++
 	return nil
 }

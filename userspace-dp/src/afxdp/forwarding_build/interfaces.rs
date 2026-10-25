@@ -738,7 +738,7 @@ pub(super) fn populate_interfaces(
         std::collections::BTreeSet::new();
     let mut contested_parent_zones: std::collections::BTreeMap<
         i32,
-        std::collections::BTreeSet<u16>,
+        std::collections::BTreeSet<u32>,
     > = std::collections::BTreeMap::new();
 
     // #7509: what the LOGICAL UNIT rows on each ifindex say about its zone,
@@ -751,7 +751,7 @@ pub(super) fn populate_interfaces(
     // #7509: ifindexes whose zone a unit row REFUSED, with the zone ids that
     // were refused. Reported after the walk for the same reason the contest is
     // — a silent unzoning is a blackhole with no error anywhere on the box.
-    let mut unit_refused_zones: std::collections::BTreeMap<i32, std::collections::BTreeSet<u16>> =
+    let mut unit_refused_zones: std::collections::BTreeMap<i32, std::collections::BTreeSet<u32>> =
         std::collections::BTreeMap::new();
     // #10556: only ifindexes with the same local-target/tunnel exposure that
     // makes #5659 meaningful may receive the refused-ifindex sentinel.
@@ -942,8 +942,8 @@ pub(super) fn populate_interfaces(
         if iface.secure_tunnel {
             state.lladdrless_egress.insert(iface.ifindex);
         }
-        // #921: resolve zone NAME → u16 once at config build, so every read on
-        // the hot path is one HashMap lookup (ifindex → u16). An unzoned row
+        // #921: resolve zone NAME → u32 once at config build, so every read on
+        // the hot path is one HashMap lookup (ifindex → u32). An unzoned row
         // resolves to 0, the "no zone" sentinel.
         // #2391: a non-empty zone NAME that is not in the zone table
         // (dropped at populate_zones for a u8-overflow id, or a
@@ -951,7 +951,7 @@ pub(super) fn populate_interfaces(
         // collapsing to zone 0 — collapsing bypasses every zone-pair policy
         // (fail-open under a permit default). The Go commit-time cap is the
         // primary gate; this is the helper-boundary backstop.
-        let row_zone_id: u16 = if iface.zone.is_empty() {
+        let row_zone_id: u32 = if iface.zone.is_empty() {
             0
         } else {
             match state.zone_name_to_id.get(&iface.zone).copied() {
@@ -1829,7 +1829,7 @@ pub(super) fn populate_interfaces(
     // attribute that alias to its child contributors instead of inventing a
     // default-domain member; the child rows are independently walked below.
     if state.has_routing_domains {
-        let mut parent_zone_domains: FastMap<(i32, u16), FastSet<u32>> = FastMap::default();
+        let mut parent_zone_domains: FastMap<(i32, u32), FastSet<u32>> = FastMap::default();
         for iface in &snapshot.interfaces {
             if iface.parent_ifindex <= 0 || iface.zone.is_empty() {
                 continue;
@@ -1845,7 +1845,7 @@ pub(super) fn populate_interfaces(
             }
         }
 
-        let mut ambiguous: FastSet<u16> = FastSet::default();
+        let mut ambiguous: FastSet<u32> = FastSet::default();
         for (ifindex, zone_id) in state.ifindex_to_zone_id.iter() {
             if *zone_id == 0 {
                 continue;
@@ -1912,7 +1912,7 @@ pub(super) fn populate_egress(
 ) -> Result<(), crate::policy::SnapshotIntegrityError> {
     let mut tagged_only_ingress_ifindexes = FastSet::default();
     let mut untagged_unit_ifindexes = FastSet::default();
-    let mut row_zone_by_ifindex = BTreeMap::<i32, Option<u16>>::new();
+    let mut row_zone_by_ifindex = BTreeMap::<i32, Option<u32>>::new();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
@@ -2076,7 +2076,7 @@ pub(super) fn populate_egress(
             Some(mac) => mac,
             None => continue,
         };
-        // #921: resolve zone name → u16 at build time.
+        // #921: resolve zone name → u32 at build time.
         // #2391: a non-empty zone name absent from the zone table fails CLOSED
         // (consistent with populate_interfaces); an empty zone (unzoned
         // interface) maps to 0, the legitimate "no zone" case. Kept as the
@@ -2415,7 +2415,7 @@ pub(super) fn populate_egress(
 /// (built from the Go-stamped `egress_zone`, which the member row
 /// shares) remains the authority.
 pub(super) fn populate_zone_to_rgs(snapshot: &ConfigSnapshot, state: &mut ForwardingState) {
-    let mut row_zone_by_ifindex = BTreeMap::<i32, Option<u16>>::new();
+    let mut row_zone_by_ifindex = BTreeMap::<i32, Option<u32>>::new();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
@@ -2484,7 +2484,7 @@ pub(super) fn populate_zone_to_rgs(snapshot: &ConfigSnapshot, state: &mut Forwar
 /// Linux ifindex. If a 24-bit hash collides, both identities are omitted so a
 /// fabric packet can never be scoped to the wrong interface or routing instance.
 pub(super) fn populate_fabric_nat_scope_ids(state: &mut ForwardingState) {
-    let mut scope_by_id: BTreeMap<u32, (u16, String, String, i32, i32)> = BTreeMap::new();
+    let mut scope_by_id: BTreeMap<u32, (u32, String, String, i32, i32)> = BTreeMap::new();
     let mut ambiguous = BTreeSet::new();
 
     for (ifindex, zone_id) in &state.ifindex_to_zone_id {
@@ -2893,7 +2893,7 @@ mod routing_domain_7160_tests {
         }
     }
 
-    fn zone(name: &str, id: u16) -> ZoneSnapshot {
+    fn zone(name: &str, id: u32) -> ZoneSnapshot {
         ZoneSnapshot {
             name: name.into(),
             id,
@@ -3279,7 +3279,7 @@ mod config_name_16061_tests {
         }
     }
 
-    fn zone(name: &str, id: u16) -> ZoneSnapshot {
+    fn zone(name: &str, id: u32) -> ZoneSnapshot {
         ZoneSnapshot {
             name: name.into(),
             id,
@@ -3438,7 +3438,7 @@ mod row_identity_9821_tests {
         }
     }
 
-    fn zone(name: &str, id: u16) -> ZoneSnapshot {
+    fn zone(name: &str, id: u32) -> ZoneSnapshot {
         ZoneSnapshot {
             name: name.into(),
             id,

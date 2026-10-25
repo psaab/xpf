@@ -1804,7 +1804,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
             &[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
             "FabricRedirect prebuilt must target the peer MAC"
         );
-        let [zone_hi, zone_lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+        let [_, _, zone_hi, zone_lo] = TEST_WAN_ZONE_ID.to_be_bytes();
         assert_eq!(
             &prebuilt[6..12],
             &[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, zone_hi, zone_lo],
@@ -1868,7 +1868,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                     crate::event_stream::codec::DataplaneEventKind::PolicyDeny
                 );
                 assert_eq!(
-                    event.ingress_zone_id,
+                    u32::from(event.ingress_zone_id),
                     match ingress_ifindex {
                         24 => TEST_LAN_ZONE_ID,
                         32 => TEST_UNTRUST_ZONE_ID,
@@ -1876,7 +1876,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                     }
                 );
                 assert_eq!(
-                    event.egress_zone_id,
+                    u32::from(event.egress_zone_id),
                     if quote_reply_reverse_half {
                         TEST_WAN_ZONE_ID
                     } else {
@@ -2392,7 +2392,7 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
         PROTO_TCP,
         TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     n6472_patch_ptb(&mut frame, 34);
     frame[14 + 8] = 64;
@@ -2637,7 +2637,7 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
         PROTO_TCP,
         TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     n6472_patch_ptb(&mut frame, 34);
     frame[14 + 8] = 64;
@@ -3301,7 +3301,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
             _ => panic!("NAT64 FabricRedirect must queue a prebuilt frame"),
         };
         assert_eq!(&out[0..6], &[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
-        let [zone_hi, zone_lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+        let [_, _, zone_hi, zone_lo] = TEST_WAN_ZONE_ID.to_be_bytes();
         assert_eq!(
             &out[6..12],
             &[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, zone_hi, zone_lo]
@@ -3380,14 +3380,14 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
                 crate::event_stream::codec::DataplaneEventKind::PolicyDeny
             );
             assert_eq!(
-                event.ingress_zone_id,
+                u32::from(event.ingress_zone_id),
                 if arrival_ifindex == 32 {
                     TEST_UNTRUST_ZONE_ID
                 } else {
                     TEST_WAN_ZONE_ID
                 }
             );
-            assert_eq!(event.egress_zone_id, TEST_LAN_ZONE_ID);
+            assert_eq!(u32::from(event.egress_zone_id), TEST_LAN_ZONE_ID);
             assert_eq!(event.ingress_ifindex, arrival_ifindex as i32);
             assert_eq!(
                 event.src_ip,
@@ -7319,8 +7319,8 @@ fn run_pptp_control_reply_policy_case(policy_denied: bool) {
             event.kind,
             crate::event_stream::codec::DataplaneEventKind::PolicyDeny
         );
-        assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
-        assert_eq!(event.egress_zone_id, TEST_WAN_ZONE_ID);
+        assert_eq!(u32::from(event.ingress_zone_id), TEST_LAN_ZONE_ID);
+        assert_eq!(u32::from(event.egress_zone_id), TEST_WAN_ZONE_ID);
         assert_eq!(event.ingress_ifindex, 24);
         assert_eq!(event.src_port, 1723);
         assert_eq!(event.dst_port, 49152);
@@ -7645,15 +7645,15 @@ fn poll_descriptor_policy_deny_keys_logical_ingress_zone_3021() {
     // (ifindex 11). Reverting the production site to meta.ingress_ifindex
     // makes this report wan and the test fails RED.
     assert_eq!(
-        event.ingress_zone_id, TEST_LAN_ZONE_ID,
+        u32::from(event.ingress_zone_id), TEST_LAN_ZONE_ID,
         "the VLAN sub-interface's OWN logical ingress zone (lan) must drive \
          the zone-pair policy (#3021); a physical-keyed lookup reports wan"
     );
     assert_ne!(
-        event.ingress_zone_id, TEST_WAN_ZONE_ID,
+        u32::from(event.ingress_zone_id), TEST_WAN_ZONE_ID,
         "the physical parent's wan zone must NOT be used for the VLAN unit"
     );
-    assert_eq!(event.egress_zone_id, TEST_WAN_ZONE_ID);
+    assert_eq!(u32::from(event.egress_zone_id), TEST_WAN_ZONE_ID);
     assert_eq!(event.ingress_ifindex, 11);
     assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
 }
@@ -7856,7 +7856,7 @@ fn poll_descriptor_input_filter_discard_drops_and_logs() {
     );
     assert_eq!(event.reason, FilterLogSource::Input.wire_reason());
     assert_eq!(event.action, 0);
-    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(u32::from(event.ingress_zone_id), TEST_LAN_ZONE_ID);
     assert!(binding.scratch.scratch_forwards.is_empty());
     assert_eq!(sessions.len(), 0);
     assert_eq!(event_handle.dataplane_event_stats().filter_log.sent, 1);
@@ -8095,7 +8095,7 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
         .expect("DSCP input filter-log payload");
     assert_eq!(event.reason, FilterLogSource::Input.wire_reason());
     assert_eq!(event.action, 0);
-    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(u32::from(event.ingress_zone_id), TEST_LAN_ZONE_ID);
     assert!(binding.scratch.scratch_forwards.is_empty());
     assert_eq!(sessions.len(), 1, "per-packet input drop keeps session");
     assert_eq!(event_handle.dataplane_event_stats().filter_log.sent, 1);
@@ -8292,7 +8292,7 @@ fn poll_descriptor_lo0_filter_discard_drops_without_reinject() {
     );
     assert_eq!(event.reason, FilterLogSource::Lo0.wire_reason());
     assert_eq!(event.action, 0);
-    assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(u32::from(event.ingress_zone_id), TEST_LAN_ZONE_ID);
     assert!(binding.scratch.scratch_forwards.is_empty());
     assert_eq!(sessions.len(), 0);
     assert_eq!(binding.live.slow_path_drops.load(Ordering::Relaxed), 0);
@@ -14200,7 +14200,7 @@ fn syn_ack_miss_alarm_emits_on_originating_packet_12872() {
         assert_eq!(event.kind, DataplaneEventKind::ScreenDrop);
         assert_eq!(event.action, 1, "alarm is a PERMIT, not a drop");
         assert_eq!(event.screen_id, 1 << 20, "syn-flood-alarm reason");
-        assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+        assert_eq!(u32::from(event.ingress_zone_id), TEST_LAN_ZONE_ID);
         assert_eq!(event.src_ip, IpAddr::V4(src));
         assert_eq!(event.dst_ip, IpAddr::V4(dst));
         assert_eq!(event.src_port, src_port);

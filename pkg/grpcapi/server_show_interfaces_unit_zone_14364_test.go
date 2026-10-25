@@ -38,14 +38,14 @@ func unitZone14364VLANRow(t *testing.T, out, iface, unit string) string {
 }
 
 func TestShowVLANsUnitQualifiedZone14364(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	cfg := &config.Config{
 		Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
-			"trust": {Name: "trust", Interfaces: []string{"ge-0/0/9.50"}},
-			"z174":  {Name: "z174", Interfaces: []string{"ge-0/0/0"}},
-			"z214":  {Name: "z214", Interfaces: []string{"ge-0/0/1.0"}},
+			"trust":    {Name: "trust", Interfaces: []string{"ge-0/0/9.50"}},
+			"zzq17760": {Name: "zzq17760", Interfaces: []string{"ge-0/0/0"}},
+			"zzq8100":  {Name: "zzq8100", Interfaces: []string{"ge-0/0/1.0"}},
 		}},
 	}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -70,12 +70,12 @@ func TestShowVLANsUnitQualifiedZone14364(t *testing.T) {
 	}
 	// Unit-0-qualified quarantined binding: zone + qualifier.
 	rowQ := unitZone14364VLANRow(t, out, "ge-0/0/1", "0")
-	if !strings.Contains(rowQ, "z214") || !strings.Contains(rowQ, config.ZoneQuarantineInterfacesQualifier) {
+	if !strings.Contains(rowQ, "zzq8100") || !strings.Contains(rowQ, config.ZoneQuarantineInterfacesQualifier) {
 		t.Fatalf("show vlans quarantined unit-0 row missing zone/qualifier (#14364): %q\n%s", rowQ, out)
 	}
 	// Bare binding control: still resolves, and the survivor is not qualified.
 	rowBare := unitZone14364VLANRow(t, out, "ge-0/0/0", "0")
-	if !strings.Contains(rowBare, "z174") {
+	if !strings.Contains(rowBare, "zzq17760") {
 		t.Fatalf("show vlans bare binding regressed: %q\n%s", rowBare, out)
 	}
 	if strings.Contains(rowBare, config.ZoneQuarantineInterfacesQualifier) {
@@ -107,8 +107,8 @@ func physicalBlock14364(out, name string) string {
 }
 
 func TestShowInterfacesDetailExtensiveUnit0Zone14364(t *testing.T) {
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	realIf := firstNonLoopbackLink(t)
 	if realIf == "" {
@@ -116,8 +116,8 @@ func TestShowInterfacesDetailExtensiveUnit0Zone14364(t *testing.T) {
 	}
 	cfg := &config.Config{
 		Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
-			"z174": {Name: "z174", Interfaces: []string{realIf + ".50"}},
-			"z214": {Name: "z214", Interfaces: []string{realIf + ".0"}},
+			"zzq17760": {Name: "zzq17760", Interfaces: []string{realIf + ".50"}},
+			"zzq8100":  {Name: "zzq8100", Interfaces: []string{realIf + ".0"}},
 		}},
 	}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -135,14 +135,14 @@ func TestShowInterfacesDetailExtensiveUnit0Zone14364(t *testing.T) {
 	if detail == "" {
 		t.Fatalf("detail output missing physical block for %q:\n%s", realIf, buf.String())
 	}
-	if !strings.Contains(detail, "Security zone: z214") ||
+	if !strings.Contains(detail, "Security zone: zzq8100") ||
 		!strings.Contains(detail, config.ZoneQuarantineInterfacesQualifier) {
 		t.Fatalf("detail missing unit-0 zone/qualifier for %s.0 (#14364):\n%s", realIf, detail)
 	}
-	// A .50-only attribution must not leak onto the physical row: z174 is
+	// A .50-only attribution must not leak onto the physical row: zzq17760 is
 	// bound only via unit 50, so its name must not appear as this row's zone.
-	if strings.Contains(detail, "Security zone: z174") {
-		t.Fatalf("detail misattributed unit-50 zone z174 to physical row:\n%s", detail)
+	if strings.Contains(detail, "Security zone: zzq17760") {
+		t.Fatalf("detail misattributed unit-50 zone zzq17760 to physical row:\n%s", detail)
 	}
 
 	buf.Reset()
@@ -153,11 +153,11 @@ func TestShowInterfacesDetailExtensiveUnit0Zone14364(t *testing.T) {
 	if ext == "" {
 		t.Fatalf("extensive output missing physical block for %q:\n%s", realIf, buf.String())
 	}
-	if !strings.Contains(ext, "Security zone: z214") ||
+	if !strings.Contains(ext, "Security zone: zzq8100") ||
 		!strings.Contains(ext, config.ZoneQuarantineInterfacesQualifier) {
 		t.Fatalf("extensive missing unit-0 zone/qualifier for %s.0 (#14364):\n%s", realIf, ext)
 	}
-	if strings.Contains(ext, "Security zone: z174") {
-		t.Fatalf("extensive misattributed unit-50 zone z174 to physical row:\n%s", ext)
+	if strings.Contains(ext, "Security zone: zzq17760") {
+		t.Fatalf("extensive misattributed unit-50 zone zzq17760 to physical row:\n%s", ext)
 	}
 }

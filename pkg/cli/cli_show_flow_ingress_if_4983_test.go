@@ -224,10 +224,10 @@ security {
 		store: store,
 		dp: &ingressIfColumnCLIDP{
 			Manager: dataplane.New(),
-			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
-				"trust":      ingressIfColumnTrustZoneID,
-				"untrust":    ingressIfColumnUntrustZoneID,
-				"quarantine": ingressIfColumnEmptyZoneID,
+			apply: &dataplane.ApplyResult{ZoneIDs: map[string]uint32{
+				"trust":      uint32(ingressIfColumnTrustZoneID),
+				"untrust":    uint32(ingressIfColumnUntrustZoneID),
+				"quarantine": uint32(ingressIfColumnEmptyZoneID),
 			}},
 			ifindex:     ifindex,
 			vlanID:      vlanID,

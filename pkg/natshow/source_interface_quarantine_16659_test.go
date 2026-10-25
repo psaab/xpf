@@ -40,7 +40,7 @@ func TestRenderSourceRuleDetailInterfaceQuarantinePair16659(t *testing.T) {
 			{Flags: dataplane.SessFlagSNAT, IsReverse: 0, IngressZone: 7, EgressZone: 8},
 		},
 	}
-	cr := &dataplane.ApplyResult{ZoneIDs: map[string]uint16{"trust": 7, "untrust": 8}}
+	cr := &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 7, "untrust": 8}}
 
 	// Contested: ge-0/0/0.0 claimed by both zones.
 	contested := mk(map[string][]string{

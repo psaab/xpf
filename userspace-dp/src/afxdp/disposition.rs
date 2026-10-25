@@ -109,8 +109,8 @@ pub(crate) struct ExceptionEvent {
     pub(in crate::afxdp) dst_port: u16,
     /// #919: zone IDs — resolved to names on the control thread via
     /// `forwarding.zone_id_to_name`, exactly as the old inline path did.
-    pub(in crate::afxdp) from_zone_id: Option<u16>,
-    pub(in crate::afxdp) to_zone_id: Option<u16>,
+    pub(in crate::afxdp) from_zone_id: Option<u32>,
+    pub(in crate::afxdp) to_zone_id: Option<u32>,
     /// SNAT-failure only; `Arc<str>` clone on the (sampler-gated) SNAT path.
     pub(in crate::afxdp) rule_name: Option<Arc<str>>,
     pub(in crate::afxdp) pool_name: Option<Arc<str>>,
@@ -144,7 +144,7 @@ impl ExceptionEvent {
     ) -> ExceptionStatus {
         // #919: zone IDs render as zone names; unknown IDs render as the
         // empty string (unchanged behaviour).
-        let zone_name_for = |id: Option<u16>| -> String {
+        let zone_name_for = |id: Option<u32>| -> String {
             id.and_then(|z| forwarding.zone_id_to_name.get(&z).cloned())
                 .unwrap_or_default()
         };

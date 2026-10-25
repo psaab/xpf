@@ -10,14 +10,14 @@ import (
 
 func quarantineTestZoneCLI10489(t *testing.T) *CLI {
 	t.Helper()
-	if config.StableZoneID("z174") != config.StableZoneID("z214") {
-		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	if config.StableZoneID("zzq17760") != config.StableZoneID("zzq8100") {
+		t.Fatal("test premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 	}
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
 	if _, err := store.SyncApply(`security {
     zones {
-        security-zone z174 { interfaces { ge-0/0/0.0; } }
-        security-zone z214 { interfaces { ge-0/0/1.0; } }
+        security-zone zzq17760 { interfaces { ge-0/0/0.0; } }
+        security-zone zzq8100 { interfaces { ge-0/0/1.0; } }
     }
 }`, nil); err != nil {
 		t.Fatalf("SyncApply colliding zones: %v", err)
@@ -32,8 +32,8 @@ func TestTestSecurityZoneQualifiesQuarantined10489(t *testing.T) {
 			t.Fatalf("testSecurityZone loser: %v", err)
 		}
 	})
-	want := config.ZoneQuarantineTestZoneQualifierFor(config.StableZoneID("z214"), "z174")
-	if !strings.Contains(out, "belongs to zone: z214") || !strings.Contains(out, want) {
+	want := config.ZoneQuarantineTestZoneQualifierFor(config.StableZoneID("zzq8100"), "zzq17760")
+	if !strings.Contains(out, "belongs to zone: zzq8100") || !strings.Contains(out, want) {
 		t.Fatalf("quarantined test-zone match missing qualifier %q:\n%s", want, out)
 	}
 	survivorOut := captureStdout(t, func() {
@@ -49,7 +49,7 @@ func TestTestSecurityZoneQualifiesQuarantined10489(t *testing.T) {
 func TestTestSecurityZoneSortedAndNilSafe10489(t *testing.T) {
 	c := quarantineTestZoneCLI10489(t)
 	cfg := c.store.ActiveConfig()
-	cfg.Security.Zones["z214"].Interfaces = append(cfg.Security.Zones["z214"].Interfaces, "ge-0/0/0.0")
+	cfg.Security.Zones["zzq8100"].Interfaces = append(cfg.Security.Zones["zzq8100"].Interfaces, "ge-0/0/0.0")
 	cfg.Security.Zones["nilzone"] = nil
 	for i := 0; i < 20; i++ {
 		out := captureStdout(t, func() {
@@ -57,8 +57,8 @@ func TestTestSecurityZoneSortedAndNilSafe10489(t *testing.T) {
 				t.Fatalf("testSecurityZone duplicate: %v", err)
 			}
 		})
-		if !strings.Contains(out, "belongs to zone: z174") {
-			t.Fatalf("duplicate interface resolved nondeterministically (want sorted-first z174):\n%s", out)
+		if !strings.Contains(out, "belongs to zone: zzq17760") {
+			t.Fatalf("duplicate interface resolved nondeterministically (want sorted-first zzq17760):\n%s", out)
 		}
 	}
 }

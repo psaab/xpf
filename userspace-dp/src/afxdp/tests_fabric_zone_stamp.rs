@@ -34,7 +34,7 @@ use crate::{
 
 /// Control-zone id for the restrictive-fabric fixture (arbitrary test id,
 /// distinct from the `test_zone_ids` constants — lan=1, wan=2).
-const TEST_CONTROL_ZONE_ID: u16 = 9;
+const TEST_CONTROL_ZONE_ID: u32 = 9;
 
 /// The fabric link in `nat_snapshot_with_fabric` (parent ifindex 21) has
 /// local MAC 02:bf:72:ff:00:01; the legitimate peer unicasts the redirect
@@ -47,7 +47,7 @@ const TEST_CONTROL_ZONE_ID: u16 = 9;
 /// queues a forward — the two observables the forged-frame pins assert
 /// against (a connected-subnet dst would strand in MissingNeighbor and
 /// make the deny assertions vacuous).
-fn stamped_fabric_frame(zone_id: u16, tcp_flags: u8) -> Vec<u8> {
+fn stamped_fabric_frame(zone_id: u32, tcp_flags: u8) -> Vec<u8> {
     let mut frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -56,7 +56,7 @@ fn stamped_fabric_frame(zone_id: u16, tcp_flags: u8) -> Vec<u8> {
         tcp_flags,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = zone_id.to_be_bytes();
+    let [_, _, hi, lo] = zone_id.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     frame
@@ -907,7 +907,7 @@ fn forged_fabric_stamp_denied_for_host_inbound_when_owner_rg_remote_6458() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
@@ -958,7 +958,7 @@ fn legitimate_fabric_punted_host_inbound_still_admitted_6458() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
@@ -1002,7 +1002,7 @@ fn co_moved_host_inbound_punt_admitted_when_all_data_rgs_local_15916() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
@@ -1055,7 +1055,7 @@ fn split_rg_host_inbound_punt_evaluates_under_the_claimed_zone_10645() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
@@ -1195,7 +1195,7 @@ fn co_moved_punt_admitted_when_all_data_rgs_local_15916() {
         443,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame6[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame6[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let mut binding6 = fabric_binding();
@@ -1358,7 +1358,7 @@ fn fabric_ingress_syn_ack_seeds_no_reverse_session_6478() {
         TCP_FLAG_SYN | TCP_FLAG_ACK,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN | TCP_FLAG_ACK, frame.len() as u16);
@@ -1426,7 +1426,7 @@ fn fabric_ingress_icmp_echo_reply_seeds_no_reverse_session_6478() {
     frame[icmp_start + 2..icmp_start + 4].copy_from_slice(&[0, 0]);
     let icmp_csum = checksum16(&frame[icmp_start..]);
     frame[icmp_start + 2..icmp_start + 4].copy_from_slice(&icmp_csum.to_be_bytes());
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
@@ -1582,8 +1582,8 @@ fn reject_fabric_snapshot(dmz_tcp_rst: bool) -> ConfigSnapshot {
 /// The dst MAC is the fabric link's own `02:bf:72:ff:00:01` because the #6458
 /// V1a check requires the redirect to be unicast to it — byte-identical to what
 /// a legitimate cluster peer emits.
-fn stamped_fabric_frag_frame(zone_id: u16, frag_word: u16, id: u16) -> Vec<u8> {
-    let [hi, lo] = zone_id.to_be_bytes();
+fn stamped_fabric_frag_frame(zone_id: u32, frag_word: u16, id: u16) -> Vec<u8> {
+    let [_, _, hi, lo] = zone_id.to_be_bytes();
     let mut f = vec![
         0x02,
         0xbf,
@@ -1626,7 +1626,7 @@ fn stamped_fabric_frag_frame(zone_id: u16, frag_word: u16, id: u16) -> Vec<u8> {
 /// of these, the test silently stops being a zone test — the
 /// `differing == 1` assertion in the guard below exists to catch exactly that.
 
-fn stamped_fabric_frag_frame_src(zone_id: u16, frag_word: u16, id: u16, src: Ipv4Addr) -> Vec<u8> {
+fn stamped_fabric_frag_frame_src(zone_id: u32, frag_word: u16, id: u16, src: Ipv4Addr) -> Vec<u8> {
     let mut frame = stamped_fabric_frag_frame(zone_id, frag_word, id);
     frame[26..30].copy_from_slice(&src.octets());
     frame
@@ -1888,8 +1888,8 @@ fn unknown_zone_override_does_not_reach_the_frag_authority_7050() {
     let forwarding = build_forwarding_state(&frag_stamp_snapshot());
     let meta = stamped_fabric_frag_meta();
 
-    const UNKNOWN_A: u16 = 65000;
-    const UNKNOWN_B: u16 = 65001;
+    const UNKNOWN_A: u32 = 65000;
+    const UNKNOWN_B: u32 = 65001;
 
     // PREMISE. If either id were configured this test would be comparing two
     // honored overrides and would pass for the wrong reason.
@@ -1907,7 +1907,7 @@ fn unknown_zone_override_does_not_reach_the_frag_authority_7050() {
          positive control cannot show that a VALID override still wins"
     );
 
-    let authority = |o: Option<u16>| {
+    let authority = |o: Option<u32>| {
         crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(&forwarding, meta, o)
     };
 
@@ -2031,8 +2031,8 @@ fn fabric_snapshot_with_lan_neighbor_7770() -> ConfigSnapshot {
 }
 
 /// Stamp `frame` as a fabric punt claiming `zone_id`, the #6458 shape.
-fn stamp_fabric_zone_7770(frame: &mut [u8], zone_id: u16) {
-    let [hi, lo] = zone_id.to_be_bytes();
+fn stamp_fabric_zone_7770(frame: &mut [u8], zone_id: u32) {
+    let [_, _, hi, lo] = zone_id.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
 }
@@ -2171,7 +2171,7 @@ fn fabric_ingress_return_traffic_is_denied_on_the_lan_node_7770() {
         // The load-bearing pair. Counters alone cannot distinguish a validated
         // `wan` stamp from no stamp at all (measured: identical). These can.
         assert_eq!(
-            event.ingress_zone_id, TEST_WAN_ZONE_ID,
+            event.ingress_zone_id, TEST_WAN_ZONE_ID as u16,
             "{form}: the RETURN packet was NOT adjudicated under the \
              #6458-validated stamped zone. An unstamped frame reports \
              ingress_zone_id 0 and produces byte-identical counters, so the \
@@ -2179,7 +2179,7 @@ fn fabric_ingress_return_traffic_is_denied_on_the_lan_node_7770() {
              the assertion that can (#7770)"
         );
         assert_eq!(
-            event.egress_zone_id, TEST_LAN_ZONE_ID,
+            event.egress_zone_id, TEST_LAN_ZONE_ID as u16,
             "{form}: the egress zone is not the LAN zone, so the pair being \
              evaluated is not `wan -> lan` and this cell is describing some \
              other flow"
@@ -2261,7 +2261,7 @@ fn lan_binding_7770() -> BindingWorker {
 /// egress_zone, is_reverse)`.
 fn session_shapes_7770(
     sessions: &SessionTable,
-) -> Vec<(SessionOrigin, ForwardingDisposition, u16, u16, bool)> {
+) -> Vec<(SessionOrigin, ForwardingDisposition, u32, u32, bool)> {
     let mut out = Vec::new();
     sessions.iter_with_origin(|_key, decision, metadata, origin| {
         out.push((
@@ -2953,7 +2953,7 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
         TCP_FLAG_ACK,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = txn_meta_v4(21, TCP_FLAG_ACK, frame.len() as u16);
@@ -3340,7 +3340,7 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
     );
     assert_eq!(sessions.len(), 1);
 
-    let reverse_ack = |zone_id: u16| {
+    let reverse_ack = |zone_id: u32| {
         let mut frame = build_txn_tcp_syn_frame_v4(
             Ipv4Addr::new(8, 8, 8, 8),
             Ipv4Addr::new(10, 0, 61, 102),
@@ -3349,7 +3349,7 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
             TCP_FLAG_ACK,
             crate::afxdp::tests_support::TEST_FABRIC_MAC,
         );
-        let [hi, lo] = zone_id.to_be_bytes();
+        let [_, _, hi, lo] = zone_id.to_be_bytes();
         frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
         frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
         frame
@@ -3607,7 +3607,7 @@ fn stamped_parent_not_redirected_10314() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
@@ -4128,7 +4128,7 @@ fn flowless_icmp_error_pbr_discard_on_quarantine_counts_11061() {
         PROTO_TCP,
         [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -4244,7 +4244,7 @@ fn v2_stamped_fabric_policy_reject_suppresses_rst_on_real_poll_12051() {
 /// #12319: build a valid IPv4/UDP frame for the real-poll stamped-fabric
 /// reject regression. The source MAC is the V1 zone stamp; the caller replaces
 /// it with the producer-minted V2 stamp for the V2 coverage.
-fn stamped_fabric_udp_frame_12319(zone_id: u16) -> Vec<u8> {
+fn stamped_fabric_udp_frame_12319(zone_id: u32) -> Vec<u8> {
     let mut frame = stamped_fabric_frame(zone_id, TCP_FLAG_SYN);
     frame[16..18].copy_from_slice(&28u16.to_be_bytes());
     frame[23] = crate::ip_proto::PROTO_UDP;
@@ -4654,7 +4654,7 @@ fn fabric_stamped_icmp_error_resolves_tenant_session_13647() {
         PROTO_TCP,
         [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
     );
-    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -4725,7 +4725,7 @@ fn fabric_stamped_icmpv6_error_gates_nptv6_on_stamped_zone_13647() {
     let internal_client: Ipv6Addr = "fd35:1940:27:100::102".parse().unwrap();
     let server_ip: Ipv6Addr = "2607:f8b0:4005:814::200e".parse().unwrap();
     let echo_id: u16 = 0x8236;
-    const ZONE_B_ID: u16 = 42;
+    const ZONE_B_ID: u32 = 42;
 
     let nptv6 = Nptv6State::from_snapshots(&[crate::Nptv6RuleSnapshot {
         name: "nptv6-zone-b".to_string(),
@@ -5180,7 +5180,7 @@ fn ambiguous_ike_poll_descriptor_denies_under_claimed_zone_15925() {
     payload.extend_from_slice(&28u32.to_be_bytes());
     let mut frame = Vec::new();
     frame.extend_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]); // dst: fabric link MAC
-    let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    let [_, _, hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
     frame.extend_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]); // src: wan stamp
     frame.extend_from_slice(&[0x08, 0x00]);
     let src = Ipv4Addr::new(172, 16, 80, 200);

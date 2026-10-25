@@ -59,12 +59,12 @@ fn rule_with_zones(
 }
 
 fn policy(rules: &[crate::PolicyRuleSnapshot]) -> PolicyState {
-    let zones: FxHashMap<String, u16> = [
-        ("lan".to_string(), 1u16),
-        ("wan".to_string(), 2u16),
-        ("dmz".to_string(), 3u16),
-        ("lan-v2".to_string(), 4u16),
-        ("wan-v2".to_string(), 5u16),
+    let zones: FxHashMap<String, u32> = [
+        ("lan".to_string(), 1u32),
+        ("wan".to_string(), 2u32),
+        ("dmz".to_string(), 3u32),
+        ("lan-v2".to_string(), 4u32),
+        ("wan-v2".to_string(), 5u32),
     ]
     .into_iter()
     .collect();
@@ -129,7 +129,7 @@ fn view_with_removed_zone_metadata(
     rules: &[crate::PolicyRuleSnapshot],
     policy_rematch_extensive: bool,
     policy_rename_ancestry: Vec<crate::protocol::PolicyRenameAncestry>,
-    removed_zone_id: u16,
+    removed_zone_id: u32,
 ) -> (Arc<RuntimeView>, Arc<ForwardingState>) {
     let (base_view, base_forwarding) = view_with_policy_metadata(
         generation,
@@ -449,7 +449,7 @@ impl RotationHarness {
         new_rules: &[crate::PolicyRuleSnapshot],
         policy_rematch_extensive: bool,
         policy_rename_ancestry: &[crate::protocol::PolicyRenameAncestry],
-        removed_zone_id: Option<u16>,
+        removed_zone_id: Option<u32>,
     ) {
         let (new_view, _new_forwarding) = if let Some(removed_zone_id) = removed_zone_id {
             view_with_removed_zone_metadata(
@@ -610,7 +610,7 @@ fn rotate_with_metadata(
     new_rules: &[crate::PolicyRuleSnapshot],
     policy_rematch_extensive: bool,
     policy_rename_ancestry: &[crate::protocol::PolicyRenameAncestry],
-    removed_zone_id: Option<u16>,
+    removed_zone_id: Option<u32>,
 ) -> Presence {
     let harness = RotationHarness::start();
     harness.publish(

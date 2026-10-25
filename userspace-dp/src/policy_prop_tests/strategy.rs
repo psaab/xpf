@@ -187,7 +187,7 @@ pub(crate) fn generated_config_strategy() -> impl Strategy<Value = GeneratedConf
                     ));
                     zone_snapshots.push(ZoneSnapshot {
                         name: zone.clone(),
-                        id: (i as u16) + 1,
+                        id: (i as u32) + 1,
                         host_inbound_configured: true,
                         ..ZoneSnapshot::default()
                     });

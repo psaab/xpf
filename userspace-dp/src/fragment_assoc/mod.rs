@@ -334,7 +334,7 @@ pub(crate) struct FragAuthority {
     /// already-admitted-flow property the flow-backed session table has across
     /// an RG transition; do not describe it as bounded by a shorter lifetime
     /// than the 10s absolute cap.
-    pub(crate) ingress_zone: u16,
+    pub(crate) ingress_zone: u32,
     /// Routing instance / VRF the ingress resolves in — **inert in production**
     /// (#7051): every assignment of `meta.routing_table` is a literal 0, so on a
     /// real packet this is always 0.
