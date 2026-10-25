@@ -9,6 +9,15 @@ xpf (0.0.0) unstable; urgency=medium
     with no refusal. The first install passing every guard (including
     the restored count high-water) now becomes and persists the epoch;
     live epochs are never moved by this arm.
+  * Userspace NAT: `release_persistent_inbound` now downgrades the
+    `u64::MAX` clear tombstone to `now + 60s` replay horizon when the
+    last inbound hold of a revoked persistent lease drops (#16652),
+    mirroring `complete_persistent_lease_locked` and `rollback_flow`.
+    Previously an inbound-only last holder left the source key
+    clear-fenced forever: idle-lease imports were refused
+    (`SkippedClearFenced`), synced reserves lost persistence, the
+    fence was never pruned, and after failover that host lost its
+    persistent mapping (healing only on pool reseed/restart).
   * Daemon/RPM: `rpmProbeTestGating` source-address→VIP matching is
     now canonical (#16639): RETH unit addresses and `vrrp-group`
     virtual-addresses key the VIP→RG map by parsed `netip.Addr`

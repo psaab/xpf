@@ -2848,6 +2848,95 @@ fn persistent_inbound_hold_keeps_lease_past_expiry_15111() {
         _ => {}
     }
 }
+#[test]
+fn persistent_inbound_last_release_downgrades_clear_tombstone_16652() {
+    // Defect arm: inbound-only hold is the last holder at clear time.
+    let rules = persistent_pool_rules(1, 40000, 40010);
+    let alloc = &rules[0].pool_allocator;
+    let first = expect_snat_decision(tuple_snat_lookup(
+        &rules, 12345, "8.8.8.8", 53, 1_000_000_000,
+    ));
+    let public_ip = first.rewrite_src.unwrap();
+    let public_port = first.rewrite_src_port.unwrap();
+    let outbound_key = session_key(12345, "8.8.8.8", 53);
+    crate::nat::release_source_nat_allocation(
+        &InterfaceNatAllocators::default(), &rules, &outbound_key, first, false, 1_000_000_001,
+    );
+    let key = match alloc.persistent_inbound_lookup(
+        6, public_ip, public_port, "8.8.8.8".parse().unwrap(), 53, 1_500_000_000, "", "",
+    ) {
+        PersistentInbound::Permitted { lease_key, .. } => lease_key.expect("lease key"),
+        other => panic!("idle lease must permit inbound, got {other:?}"),
+    };
+    assert!(alloc.acquire_persistent_inbound(key, 1_500_000_000));
+    assert_eq!(alloc.clear_persistent_leases(2_000_000_000), 1);
+    {
+        let live = alloc.debug_live();
+        assert_eq!(live.revoked_persistent.get(&key), Some(&u64::MAX));
+        assert!(live.persistent_by_source[&key].revoked);
+        assert_eq!(live.persistent_by_source[&key].inbound_flows, 1);
+        assert_eq!(live.persistent_by_source[&key].active_flows, 0);
+    }
+    assert!(alloc.debug_live().persistent_nat_import_is_key_clear_fenced(&key, 2_000_000_000));
+    let release_ns = 3_000_000_000_u64;
+    alloc.release_persistent_inbound(key, release_ns);
+    {
+        let live = alloc.debug_live();
+        let expected = release_ns
+            .saturating_add(super::allocator::PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
+        assert_eq!(
+            live.revoked_persistent.get(&key),
+            Some(&expected),
+            "#16652: last inbound release must downgrade MAX tombstone to now+horizon"
+        );
+    }
+    assert!(alloc.debug_live().persistent_nat_import_is_key_clear_fenced(&key, release_ns));
+    let after_ns = release_ns + 1_000 * 1_000_000_000_u64;
+    assert!(
+        !alloc.debug_live().persistent_nat_import_is_key_clear_fenced(&key, after_ns),
+        "#16652: key must not stay clear-fenced forever after last inbound release"
+    );
+    {
+        let mut live = alloc.debug_live();
+        live.prune_expired_persistent_nat_clear_fences(after_ns);
+        assert!(!live.revoked_persistent.contains_key(&key));
+    }
+    let _ = alloc.debug_gc_expired_chunked(after_ns, 16);
+    assert!(alloc.debug_live().persistent_by_source.get(&key).is_none());
+    // Control (outbound last holder): unchanged downgrade behaviour.
+    let rules2 = persistent_pool_rules(1, 40000, 40010);
+    let alloc2 = &rules2[0].pool_allocator;
+    let f2 = expect_snat_decision(tuple_snat_lookup(
+        &rules2, 12345, "8.8.8.8", 53, 1_000_000_000,
+    ));
+    let tuple2 = crate::nat::TranslatedTuple {
+        ip: f2.rewrite_src.unwrap(),
+        port: f2.rewrite_src_port.unwrap(),
+    };
+    let flow2 = crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "10.0.1.100".parse().unwrap(),
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: 12345,
+        dst_port: 53,
+        routing_scope: 0,
+    };
+    let key2 = flow2.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    assert_eq!(alloc2.clear_persistent_leases(2_000_000_000), 1);
+    assert_eq!(alloc2.debug_live().revoked_persistent.get(&key2), Some(&u64::MAX));
+    assert!(alloc2.release_flow(flow2, tuple2, release_ns, NatHolder::Untracked));
+    {
+        let live = alloc2.debug_live();
+        let expected = release_ns
+            .saturating_add(super::allocator::PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
+        assert_eq!(live.revoked_persistent.get(&key2), Some(&expected));
+    }
+    assert!(
+        !alloc2.debug_live().persistent_nat_import_is_key_clear_fenced(&key2, after_ns),
+        "control: outbound last-holder downgrade unchanged"
+    );
+}
+
 
 #[test]
 fn persistent_address_only_inbound_permission_is_checked() {
