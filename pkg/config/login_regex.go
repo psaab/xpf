@@ -415,7 +415,19 @@ func (c CompiledLoginRegexes) EvaluateForms(command, prefix string, more ...stri
 			// $-anchored to the core, so it cannot match the piped
 			// spelling): when a pipe-less form is allowed on its core,
 			// the full form's denial does not stand.
-			if c.pipeBoundary && !denyingCoreTier {
+			//
+			// #16780: the save must not apply when the vetoing deny
+			// matches only pipe/format text (`display set`, `| match`,
+			// an anchored `… \| display set` spelling) and the core
+			// itself is allowed — there is no core denial for an
+			// exception allow to out-measure, the pipe is matched
+			// as typed, and that denial stands. Saving it let any
+			// class allowed the pipe-less command ignore a
+			// documented pipe-text deny. A core that is itself
+			// tier-denied (the `^show log 100$` exception, whose
+			// bare core hits `^show log$`) is not pipe-only, so its
+			// save is untouched.
+			if c.pipeBoundary && !denyingCoreTier && !c.pipeOnlyDeny(forms[0]) {
 				saved := false
 				for _, f := range forms[1:] {
 					if c.allowSet && c.evaluateForm(coreOf(f)).Allowed && longestMatchLen(c.allow, coreOf(f)) >= 0 {
@@ -423,11 +435,17 @@ func (c CompiledLoginRegexes) EvaluateForms(command, prefix string, more ...stri
 					}
 				}
 				// Also saved when a pipe-less form carries the core
-				// exception against the vetoing prefix (public-vrf).
+				// exception against the vetoing prefix (public-vrf):
+				// the carrying allow must out-measure, on cores, a
+				// deny that actually matches the vetoing form's core.
+				// A pair whose truncated form is denied only through
+				// pipe text carries no such exception (isCoreException
+				// alone reports "exception" whenever the truncated core
+				// has no deny hit at all).
 				if c.allowSet {
 					for _, f := range forms[1:] {
 						for _, tf := range forms[1:] {
-							if c.evaluateForm(coreOf(f)).Allowed && c.isCoreException(f, tf) {
+							if c.evaluateForm(coreOf(f)).Allowed && c.isCoreException(f, tf) && longestMatchLen(c.deny, coreOf(tf)) >= 0 {
 								saved = true
 							}
 						}
@@ -463,7 +481,7 @@ func (c CompiledLoginRegexes) EvaluateForms(command, prefix string, more ...stri
 		// Same override measured from a pipe-less allowed form: the
 		// full form may be tier-denied only through its pipe text while
 		// the pipe-less command form is the exception's own spelling.
-		if c.pipeBoundary && !denyingCoreTier {
+		if c.pipeBoundary && !denyingCoreTier && !c.pipeOnlyDeny(forms[0]) {
 			saved := false
 			for _, f := range forms[1:] {
 				if c.allowSet && c.evaluateForm(coreOf(f)).Allowed && longestMatchLen(c.allow, coreOf(f)) >= 0 {
@@ -490,6 +508,12 @@ func (c CompiledLoginRegexes) EvaluateForms(command, prefix string, more ...stri
 	// above; this arm handles the allowlist-only case where the pipe-less
 	// form simply does not match the allow.
 	if c.pipeBoundary {
+		// #16780: a full-form tier denial driven only by pipe text
+		// (the core itself is allowed) must stand — no later affirm
+		// arm may resurrect the piped command through its core.
+		if isTierDeny(verdicts[0]) && c.pipeOnlyDeny(forms[0]) {
+			return verdicts[0]
+		}
 		// The pipe-less COMMAND form (the last form: prefix is forms[1]
 		// when present, command forms follow it) must affirm by core, or
 		// carry the exception geometry against the prefix. Checking the
@@ -515,7 +539,25 @@ func (c CompiledLoginRegexes) EvaluateForms(command, prefix string, more ...stri
 		// exception geometry against a vetoing truncated form affirms
 		// the piped command even though its truncated spellings are
 		// tier-denied (public-vrf: allow 27 on the command core vs deny
-		// 16 on the truncated core, allow absent there).
+		// 16 on the truncated core, allow absent there). A full-form
+		// verdict tier-denied on its core (`^show log 100$` /
+		// `^show log$` over `show log 100 | match x`: the deny wins
+		// the core 8 > 0) is that same geometry with the roles
+		// reversed in the verdict table, so it affirms here too:
+		// some pipe-less form is allowed and carries the exception
+		// against a core-denied truncated form.
+		if isTierDeny(verdicts[0]) && !c.pipeOnlyDeny(forms[0]) {
+			for _, f := range forms[1:] {
+				if !c.evaluateForm(coreOf(f)).Allowed {
+					continue
+				}
+				for _, tf := range forms[1:] {
+					if !c.evaluateForm(coreOf(tf)).Allowed && c.isCoreException(f, tf) {
+						return c.evaluateForm(coreOf(f))
+					}
+				}
+			}
+		}
 		if !denyingCoreTier {
 			for _, f := range forms[1:] {
 				for _, tf := range forms[1:] {
@@ -575,6 +617,26 @@ func coreOf(form string) string {
 		return strings.TrimSpace(form[:i])
 	}
 	return form
+}
+
+// pipeOnlyDeny reports whether form is tier-denied only because the
+// deny reaches into its pipe text: the deny hits the full (piped) form
+// but never the pipe-less core, and the pipe-less core itself is
+// allowed (#16780 — `display set` / `| match` / an anchored
+// `… \| display set` spelling under `allow ^show`). Such a denial is
+// not the pipe-inflated reading of a core deny, so the pipe-boundary
+// saves must not overturn it; a genuine core denial (the
+// deny-with-exceptions save's premise, verdicts tier-denied on the
+// core) still may be saved.
+func (c CompiledLoginRegexes) pipeOnlyDeny(form string) bool {
+	if !c.denySet {
+		return false
+	}
+	core := coreOf(form)
+	if core == form {
+		return false // no pipe text for the deny to live in
+	}
+	return longestMatchLen(c.deny, core) < 0 && longestMatchLen(c.deny, form) >= 0 && c.evaluateForm(core).Allowed
 }
 
 // isCoreException reports the deny-with-exceptions geometry between the
