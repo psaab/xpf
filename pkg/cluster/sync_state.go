@@ -14,11 +14,19 @@ type SyncStatsProvider interface {
 	// pair. The compiler asks the question instead.
 	PeerSessionSyncWireVersion() uint16
 	// UnauthenticatedSessionConns lists the remote address of every established
-	// session-sync connection that has never authenticated while this node holds
-	// a control-link key (#9717), or nil when it holds none. It is on THIS
-	// interface for the reason above: an assertion that silently failed would list
-	// no connections, which reads exactly like the all-authenticated state.
+	// session-sync connection in the stale population — never authenticated, or
+	// authenticated under a key that has left the accepted set (#16857) — while
+	// this node holds a control-link key (#9717), or nil when it holds none. It
+	// is on THIS interface for the reason above: an assertion that silently
+	// failed would list no connections, which reads exactly like the
+	// all-authenticated state.
 	UnauthenticatedSessionConns() []string
+	// RetiredKeySessionConns lists the retired-key subset of
+	// UnauthenticatedSessionConns (#16857): connections authenticated under a
+	// key outside the accepted set. On THIS interface for the same reason:
+	// the status must distinguish a retired-key connection (frames still
+	// verify under retired-key-derived keys) from a never-authenticated one.
+	RetiredKeySessionConns() []string
 }
 
 // SetSyncReady marks session sync as ready (bulk sync received, or the
@@ -171,7 +179,7 @@ func (m *Manager) PeerSessionSyncWireVersion() uint16 {
 }
 
 // unauthenticatedSessionConns reports, through the sync-stats provider, the
-// established session-sync connections that have never authenticated (#9717),
+// established session-sync connections in the stale population (#9717/#16857),
 // or nil when no provider is set. A Manager with no provider has no session-sync
 // connection to report.
 func (m *Manager) unauthenticatedSessionConns() []string {
@@ -185,4 +193,20 @@ func (m *Manager) unauthenticatedSessionConns() []string {
 		return nil
 	}
 	return p.UnauthenticatedSessionConns()
+}
+
+// retiredKeySessionConns reports, through the sync-stats provider, the
+// established session-sync connections authenticated under a retired key
+// (#16857), or nil when no provider is set.
+func (m *Manager) retiredKeySessionConns() []string {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	p := m.syncStats
+	m.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.RetiredKeySessionConns()
 }

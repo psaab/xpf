@@ -11,10 +11,17 @@
 // and gives a live upgrade one round trip. It is set once, so commits cannot
 // re-arm it, and uses monotonic time so wall-clock steps cannot extend it.
 //
-// Only connections that have NEVER authenticated (len(authPSK) == 0) are
-// eligible. A connection authenticated under a retired key during rotation
-// has already proved it holds a key and is re-derived in place by the
-// reconciler.
+// #16857 extends the same population to a connection whose authPSK has left
+// the accepted set (authAcceptedKeys). Finalize ("the retired key stops
+// authenticating", README rotation step 5) previously left such a connection
+// untouched: both this eviction and the #9717 listing keyed only on
+// len(authPSK)==0, so a holder of the retired key kept verifying frames under
+// retired-key-derived connection keys for as long as it declined the #6628
+// rekey. It now anchors a set-once monotonic grace at the reconcile where
+// its key leaves the accepted set, is listed by UnauthenticatedSessionConns
+// during that grace, and is evicted at expiry. A cooperating peer that
+// rekeys (or whose key is re-accepted) within the grace clears the anchor
+// and is never evicted.
 //
 // HISTORY (#7441 -> #10717): eviction was operator-declared because no live
 // signal distinguishes a hostile silent peer from a legitimate keyed peer on
@@ -28,6 +35,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"net"
@@ -86,17 +94,80 @@ func (s *SessionSync) noteStrictAuthGraceStartLocked(ac *authConn) {
 		return
 	}
 	ac.strictGraceStart = MonotonicNanos()
+	ac.strictGraceRetired = false
+}
+
+// noteRetiredKeyGraceStartLocked anchors the #16857 eviction grace for a
+// connection authenticated under a key that has left the accepted set, once
+// per stale episode. Set-once for the same reason as the pre-key anchor: a
+// peer able to induce commits must not push its own deadline forward.
+//
+// Caller must hold s.writeMu.
+func (s *SessionSync) noteRetiredKeyGraceStartLocked(ac *authConn) {
+	if ac == nil || ac.strictGraceStart != 0 {
+		return
+	}
+	ac.strictGraceStart = MonotonicNanos()
+	ac.strictGraceRetired = true
+}
+
+// clearStrictAuthGraceLocked clears the eviction grace when the connection
+// is (again) authenticated under an accepted key: either it completed a
+// rekey to the new key, or its key was re-accepted (e.g. re-added as the
+// additional key). A later retirement then anchors a fresh grace.
+//
+// Caller must hold s.writeMu.
+func (s *SessionSync) clearStrictAuthGraceLocked(ac *authConn) {
+	if ac == nil {
+		return
+	}
+	ac.strictGraceStart = 0
+	ac.strictGraceRetired = false
+}
+
+// authPSKAccepted reports whether psk is in the accepted set. An empty psk
+// (never authenticated) is never accepted.
+func authPSKAccepted(psk []byte, accepted [][]byte) bool {
+	if len(psk) == 0 {
+		return false
+	}
+	for _, k := range accepted {
+		if bytes.Equal(psk, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// connAuthStaleLocked reports whether ac belongs to the eviction/listing
+// population: never authenticated, or authenticated under a key outside the
+// accepted set (#16857). Caller must hold s.writeMu (authPSK is read).
+func connAuthStaleLocked(ac *authConn, accepted [][]byte) bool {
+	if ac == nil {
+		return false
+	}
+	if len(ac.authPSK) == 0 {
+		return true
+	}
+	return !authPSKAccepted(ac.authPSK, accepted)
 }
 
 // enforceStrictSessionAuth closes every established session-sync connection
 // that must not survive on a keyed node, and returns how many it closed.
 //
 // #10717 made eviction the DEFAULT when a key is configured: the predicate is
-// this node holds a control-link key AND the connection has never authenticated
-// AND its grace anchor is set and has elapsed. The #7441 operator posture
+// this node holds a control-link key AND the connection is in the stale
+// population AND its grace anchor is set and has elapsed. The stale
+// population is (a) never authenticated, or (b) #16857: authenticated under
+// a key that has left the accepted set. The #7441 operator posture
 // (`chassis cluster strict-session-auth`) is retained for compatibility but no
-// longer gates enforcement; a pre-key stream that declines the in-place upgrade
-// is evicted whether or not the leaf is set.
+// longer gates enforcement; a stream that declines the in-place upgrade or
+// rekey is evicted whether or not the leaf is set.
+//
+// The accepted set is re-read live on every pass, so a connection whose key
+// is re-accepted (or which rekeys to an accepted key) before expiry has its
+// anchor cleared here and is never evicted — enforcement must not close a
+// connection that is no longer stale merely because an anchor exists.
 //
 // authPSK and strictGraceStart are both written under s.writeMu (authPSK by
 // the upgrade exchange, the anchor by the reconciler), so they are read here
@@ -111,36 +182,51 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 		// session sync on a cluster that never asked for authentication.
 		return 0
 	}
+	accepted := s.authAcceptedKeys()
 	now := MonotonicNanos()
 	s.mu.Lock()
 	conns := []net.Conn{s.conn0, s.conn1}
 	s.mu.Unlock()
 
 	var doomed []net.Conn
+	var doomedRetired []bool
 	s.writeMu.Lock()
 	for _, c := range conns {
 		ac, ok := c.(*authConn)
 		if !ok || ac == nil {
 			continue
 		}
-		if len(ac.authPSK) > 0 {
-			continue // authenticated on this connection; not our population
+		if !connAuthStaleLocked(ac, accepted) {
+			// Authenticated under an accepted key (or re-accepted): clear
+			// any retired-key anchor so a later retirement starts fresh.
+			if ac.strictGraceRetired {
+				s.clearStrictAuthGraceLocked(ac)
+			}
+			continue
 		}
 		if ac.strictGraceStart == 0 {
-			continue // no reconcile has attempted an upgrade yet
+			continue // no reconcile has attempted an upgrade/rekey yet
 		}
 		if now-ac.strictGraceStart < strictSessionAuthGrace.Nanoseconds() {
 			continue // still inside the in-place-upgrade grace
 		}
 		doomed = append(doomed, c)
+		doomedRetired = append(doomedRetired, ac.strictGraceRetired)
 	}
 	s.writeMu.Unlock()
 
-	for _, c := range doomed {
-		slog.Warn("cluster sync: closing a pre-key session-sync connection that never authenticated "+
-			"within the upgrade grace (#10717); a keyed peer reconnects and authenticates "+
-			"at connection setup",
-			"remote", connRemoteAddrString(c), "grace", strictSessionAuthGrace)
+	for i, c := range doomed {
+		if doomedRetired[i] {
+			slog.Warn("cluster sync: closing a session-sync connection authenticated "+
+				"under a retired control-link key that did not rekey within the grace "+
+				"(#16857); a keyed peer reconnects and authenticates at connection setup",
+				"remote", connRemoteAddrString(c), "grace", strictSessionAuthGrace)
+		} else {
+			slog.Warn("cluster sync: closing a pre-key session-sync connection that never authenticated "+
+				"within the upgrade grace (#10717); a keyed peer reconnects and authenticates "+
+				"at connection setup",
+				"remote", connRemoteAddrString(c), "grace", strictSessionAuthGrace)
+		}
 		s.stats.PreKeyAuthEvictions.Add(1)
 		s.handleDisconnect(c)
 	}
@@ -148,8 +234,9 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 }
 
 // UnauthenticatedSessionConns returns the remote address of every installed
-// session-sync connection that has never authenticated, when this node holds a
-// control-link key (#9717).
+// session-sync connection in the stale population — never authenticated, or
+// authenticated under a key that has left the accepted set (#16857) — when
+// this node holds a control-link key (#9717).
 //
 // It returns nil when the node is unkeyed. An unkeyed cluster authenticates
 // nothing by the operator's choice, and listing every connection there would
@@ -162,6 +249,7 @@ func (s *SessionSync) UnauthenticatedSessionConns() []string {
 	if len(s.authKey()) == 0 {
 		return nil
 	}
+	accepted := s.authAcceptedKeys()
 	s.mu.Lock()
 	conns := []net.Conn{s.conn0, s.conn1}
 	s.mu.Unlock()
@@ -170,7 +258,45 @@ func (s *SessionSync) UnauthenticatedSessionConns() []string {
 	s.writeMu.Lock()
 	for _, c := range conns {
 		ac, ok := c.(*authConn)
-		if !ok || ac == nil || len(ac.authPSK) > 0 {
+		if !ok || ac == nil {
+			continue
+		}
+		if !connAuthStaleLocked(ac, accepted) {
+			continue
+		}
+		out = append(out, connRemoteAddrString(c))
+	}
+	s.writeMu.Unlock()
+	return out
+}
+
+// RetiredKeySessionConns returns the remote address of every installed
+// session-sync connection authenticated under a key that has left the
+// accepted set (#16857), when this node holds a control-link key. It is the
+// retired-key subset of UnauthenticatedSessionConns, split out so the
+// operator status can distinguish "never authenticated, frames accepted
+// without HMAC" from "authenticated under a retired key, frames still
+// verify under retired-key-derived keys".
+//
+// It returns nil when the node is unkeyed. Same locking as
+// UnauthenticatedSessionConns.
+func (s *SessionSync) RetiredKeySessionConns() []string {
+	if len(s.authKey()) == 0 {
+		return nil
+	}
+	accepted := s.authAcceptedKeys()
+	s.mu.Lock()
+	conns := []net.Conn{s.conn0, s.conn1}
+	s.mu.Unlock()
+
+	var out []string
+	s.writeMu.Lock()
+	for _, c := range conns {
+		ac, ok := c.(*authConn)
+		if !ok || ac == nil || len(ac.authPSK) == 0 {
+			continue
+		}
+		if authPSKAccepted(ac.authPSK, accepted) {
 			continue
 		}
 		out = append(out, connRemoteAddrString(c))

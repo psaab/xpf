@@ -967,7 +967,10 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 // keying remains unauthenticated while the #6628 in-place upgrade is pending;
 // #10717 closes it after the bounded grace if authentication never completes.
 // During that grace the status names the connection rather than claiming all
-// control-channel frames are authenticated.
+// control-channel frames are authenticated. #16857: a connection
+// authenticated under a retired key is named distinctly — its frames still
+// verify under retired-key-derived keys, not "without HMAC" — until it
+// rekeys or is evicted at grace expiry.
 //
 // It only inspects len(key) and never renders the secret.
 func (m *Manager) controlLinkAuthStatus() string {
@@ -979,10 +982,35 @@ func (m *Manager) controlLinkAuthStatus() string {
 	// A local key is sufficient for heartbeat enforcement. An established
 	// session-sync connection that predates keying may still be unauthenticated,
 	// so name it rather than claiming every control channel is authenticated.
-	if unauth := m.unauthenticatedSessionConns(); len(unauth) > 0 {
-		return fmt.Sprintf("heartbeat engaged (local key; %d session-sync connection(s) "+
+	// #16857: split the stale population so a retired-key connection is not
+	// misdescribed as unauthenticated.
+	retired := m.retiredKeySessionConns()
+	unauthAll := m.unauthenticatedSessionConns()
+	// UnauthenticatedSessionConns includes the retired subset; the
+	// never-authenticated remainder is the difference.
+	retiredSet := make(map[string]struct{}, len(retired))
+	for _, r := range retired {
+		retiredSet[r] = struct{}{}
+	}
+	var neverAuth []string
+	for _, u := range unauthAll {
+		if _, ok := retiredSet[u]; !ok {
+			neverAuth = append(neverAuth, u)
+		}
+	}
+	var clauses []string
+	if len(neverAuth) > 0 {
+		clauses = append(clauses, fmt.Sprintf("%d session-sync connection(s) "+
 			"NOT authenticated, frames still accepted without HMAC: %s",
-			len(unauth), strings.Join(unauth, ", "))
+			len(neverAuth), strings.Join(neverAuth, ", ")))
+	}
+	if len(retired) > 0 {
+		clauses = append(clauses, fmt.Sprintf("%d session-sync connection(s) "+
+			"authenticated under a RETIRED key, frames still verify under retired-key-derived keys: %s",
+			len(retired), strings.Join(retired, ", ")))
+	}
+	if len(clauses) > 0 {
+		return fmt.Sprintf("heartbeat engaged (local key; %s", strings.Join(clauses, "; ")) + ")"
 	}
 	return "engaged (local key configured; unauthenticated heartbeat frames rejected)"
 }

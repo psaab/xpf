@@ -2802,8 +2802,20 @@ one grace period (`strictSessionAuthGrace`, 10s) to complete the #6628 in-place
 upgrade. If the upgrade does not complete, the connection is closed, whether or
 not the legacy `strict-session-auth` config leaf is set. The grace starts when
 the key is first observed, is not re-armed by later commits, and uses monotonic
-time. A connection that authenticated under a retired rotation key is not part
-of this population; it is re-keyed in place by the reconciler.
+time.
+
+**Retired-key connection eviction (#16857).** The same grace now also covers a
+connection whose `authPSK` has left the accepted set — the post-finalize shape
+after `delete chassis cluster additional-authentication-key`. Previously both
+the eviction and the #9717 listing keyed only on `len(authPSK)==0`, so a holder
+of the retired key kept verifying frames under retired-key-derived connection
+keys for as long as it declined the #6628 rekey, and nothing surfaced it. The
+grace anchors set-once (monotonic) at the reconcile where the key leaves the
+accepted set, the connection is listed during the grace, and it is evicted at
+expiry. A cooperating peer that rekeys within the grace, or whose key is
+re-accepted as the additional key, clears the anchor and is never evicted.
+While a rotation window is still open (the old key still in the accepted set),
+an old-key connection is not part of this population.
 
 This grace preserves the in-place-upgrade path for a peer that can authenticate,
 while bounding how long a silent or incompatible pre-key stream can continue
@@ -2821,8 +2833,9 @@ Confirm the state with `show chassis cluster statistics`, whose
 `Authentication:` line (`controlLinkAuthStatus`) covers both heartbeat and
 session-sync authentication. While a pre-key session-sync connection remains
 inside its upgrade grace, the line names it and reports that its frames are
-still accepted without HMAC; after authentication or eviction, it returns to
-the normal `engaged` line.
+still accepted without HMAC; while a retired-key connection remains inside its
+grace, the line names it distinctly as authenticated under a RETIRED key; after
+authentication, rekey, or eviction, it returns to the normal `engaged` line.
 
 **Rolling BACK is not symmetric.** A keyed node rejects unsigned heartbeats
 from the first datagram, regardless of whether this process has previously

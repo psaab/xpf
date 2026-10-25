@@ -357,9 +357,10 @@ func (s *SessionSync) fabricIndexOf(conn net.Conn) (int, bool) {
 // heals on the next one. The daemon calls it after a config apply.
 //
 // A keyed node also anchors the bounded pre-key eviction grace on each
-// never-authenticated connection. This call enforces an already-expired grace
-// immediately; the periodic enforcement loop handles a grace that expires
-// between config applies.
+// never-authenticated connection, and the #16857 retired-key grace on each
+// connection whose authPSK has left the accepted set. This call enforces an
+// already-expired grace immediately; the periodic enforcement loop handles a
+// grace that expires between config applies.
 func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 	key := s.authKey()
 	if len(key) == 0 {
@@ -370,6 +371,7 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 		// the next connection.
 		return
 	}
+	accepted := s.authAcceptedKeys()
 	s.mu.Lock()
 	conns := []net.Conn{s.conn0, s.conn1}
 	s.mu.Unlock()
@@ -382,9 +384,23 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 		// responder a Request, and a peer that cannot upgrade answers neither.
 		// Anchoring at key arrival bounds the connection after keying, while
 		// set-once prevents later commits from extending its lifetime.
-		if ac, ok := c.(*authConn); ok && len(ac.authPSK) == 0 {
+		// #16857: the same discipline for a retired-key connection — anchor
+		// at the first reconcile where its key is outside the accepted set,
+		// before beginAuthUpgrade prompts for the rekey it may decline.
+		// A connection back inside the accepted set has any retired anchor
+		// cleared so a later retirement starts a fresh grace.
+		if ac, ok := c.(*authConn); ok {
 			s.writeMu.Lock()
-			s.noteStrictAuthGraceStartLocked(ac)
+			switch {
+			case len(ac.authPSK) == 0:
+				s.noteStrictAuthGraceStartLocked(ac)
+			case authPSKAccepted(ac.authPSK, accepted):
+				if ac.strictGraceRetired {
+					s.clearStrictAuthGraceLocked(ac)
+				}
+			default:
+				s.noteRetiredKeyGraceStartLocked(ac)
+			}
 			s.writeMu.Unlock()
 		}
 		err := s.beginAuthUpgrade(c, idx, key, reason)

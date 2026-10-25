@@ -354,14 +354,28 @@ type authConn struct {
 
 	// strictGraceStart anchors the #10717 default eviction grace: the
 	// MONOTONIC instant of the first reconcile at which this node was keyed
-	// and this connection was not authenticated. Zero until then, which is
-	// why an unkeyed node evicts nothing.
+	// and this connection was not authenticated (for the pre-key population),
+	// or at which its authPSK first left the accepted set (#16857, for the
+	// retired-key population). Zero until then, which is why an unkeyed node
+	// evicts nothing.
 	//
-	// SET ONCE, so later commits cannot extend the connection's lifetime.
+	// SET ONCE per stale episode, so later commits cannot extend the
+	// connection's lifetime. Cleared when the connection (re)authenticates
+	// under an accepted key, so a later retirement anchors a fresh grace.
 	// Monotonic time prevents wall-clock steps from extending the grace.
 	//
 	// Written and read under SessionSync.writeMu, like authPSK above.
 	strictGraceStart int64
+
+	// strictGraceRetired records whether strictGraceStart was anchored for
+	// the retired-key population (#16857) rather than the never-authenticated
+	// one. The distinction matters only when the accepted set widens again
+	// (a retired key is re-accepted as the additional key): a retired-key
+	// anchor must then be cleared so the connection is no longer considered
+	// stale, whereas a never-authenticated anchor must survive (the
+	// connection still has never authenticated). Written and read under
+	// SessionSync.writeMu.
+	strictGraceRetired bool
 
 	sendSeq atomic.Uint64 // monotonic per-connection send counter
 	// recvSeq/recvSeen are the replay watermark, touched only by the single
