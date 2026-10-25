@@ -340,3 +340,11 @@ func (s *SessionSync) DeleteJournalGenerationV6ForTesting(key dataplane.SessionK
 func (s *SessionSync) StampIngressFoldForTesting(ifindex uint32, vlan uint16) uint32 {
 	return s.stampIngressIfaceFold(ifindex, vlan)
 }
+
+// StampNatScopeFoldForTesting stamps a NAT-scope logical ifindex through
+// the currently installed scope fold, exactly as stampInstallGen does
+// (#16826). It lets daemon/cluster cells observe the pair fold without a
+// wire round trip.
+func (s *SessionSync) StampNatScopeFoldForTesting(ifindex int32) uint32 {
+	return s.stampNatScopeFold(ifindex)
+}

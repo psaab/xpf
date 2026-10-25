@@ -1517,7 +1517,15 @@ type SessionSync struct {
 	// value a legacy peer sends and a fabric-redirected session records. The
 	// consumer falls back to the zone approximation, so an unwired node retains
 	// the pre-#7095 behavior.
-	ingressFoldFn    func(ifindex uint32, vlan uint16) uint32
+	ingressFoldFn func(ifindex uint32, vlan uint16) uint32
+	// natScopeFoldFn folds a NAT-scope identity as the (parent physical
+	// ifindex, VLAN) pair (#16826): NatScopeIfindex is the LOGICAL unit's
+	// ifindex (a VLAN child, or a synthetic logical-only index), which is
+	// not a kernel netdev an ifindex->name lookup can resolve. The daemon
+	// injector derives the pair from its snapshot rows, so the wire fold
+	// names `reth0.80`, not the `reth0` the child device name truncated to.
+	// Nil keeps the legacy vlan-0 fold.
+	natScopeFoldFn   func(ifindex int32) uint32
 	deleteJournalMu  sync.Mutex
 	deleteJournal    [][]byte
 	deleteJournalCap int
@@ -2383,14 +2391,40 @@ func (s *SessionSync) stampEgressIfaceFold(ifindex uint32, vlan uint16) uint32 {
 
 // stampNatScopeFold fills the #15176 wire field: the cluster-stable fold
 // of the session's validated NAT-scope logical ingress ifindex, carried
-// on the helper delta as NatScopeIfindex (0 = none recorded). The same
-// direction-agnostic resolver folds it; the peer resolves it back to its
-// own logical unit for session-hit NAT revalidation.
+// on the helper delta as NatScopeIfindex (0 = none recorded). The peer
+// resolves it back to its own logical unit for session-hit NAT
+// revalidation.
+//
+// #16826: the recorded ifindex names the LOGICAL unit (the VLAN child
+// `ge-0-0-2.80`, or a synthetic logical-only index), not a kernel netdev
+// the generic {ifindex, vlan} resolver can name — folding it with vlan 0
+// truncated `ge-0-0-2.80` to the parent and shipped `reth0`, so the peer
+// revalidated against the parent's interface/RI scope. When the daemon
+// wired natScopeFoldFn, that injector maps the logical ifindex to its
+// (parent physical, VLAN) pair and folds `reth0.80`; without it the
+// legacy vlan-0 fold is kept byte-identically.
 func (s *SessionSync) stampNatScopeFold(ifindex int32) uint32 {
 	if ifindex <= 0 {
 		return 0
 	}
+	s.zoneRGMu.Lock()
+	fn := s.natScopeFoldFn
+	s.zoneRGMu.Unlock()
+	if fn != nil {
+		return fn(ifindex)
+	}
 	return s.stampIngressIfaceFold(uint32(ifindex), 0)
+}
+
+// SetNatScopeFoldFn wires the #16826 logical-ifindex -> (parent, VLAN)
+// NAT-scope fold. It advances the ownership generation with the other
+// fold wiring: a bulk snapshot that captured the previous folder must
+// not reconcile against it after this changes.
+func (s *SessionSync) SetNatScopeFoldFn(fn func(ifindex int32) uint32) {
+	s.zoneRGMu.Lock()
+	s.natScopeFoldFn = fn
+	s.zoneRGMapGen++
+	s.zoneRGMu.Unlock()
 }
 
 // SetRuntime wires the backend-neutral runtime used by SessionSync.

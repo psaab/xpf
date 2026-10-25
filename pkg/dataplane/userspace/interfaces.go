@@ -38,6 +38,16 @@ const syntheticIfindexExhausted = -1
 // exhaustion that is unreachable in practice (it needs >1<<20 logical-only
 // VLAN units on one box) but must degrade gracefully instead of panicking
 // and crash-looping the daemon (#5557).
+// SyntheticLogicalIfindexForUnit returns the synthetic logical-only
+// ifindex the snapshot builder assigns to unitName/vlanID (#16826: the
+// daemon's NAT-scope folder must key the same value). Production minting
+// goes through buildInterfaceSnapshots with its shared used-set; this
+// single-unit probe uses a fresh set, matching the builder when no
+// synthetic collision displaced the unit.
+func SyntheticLogicalIfindexForUnit(unitName string, vlanID int) int {
+	return syntheticLogicalIfindex(unitName, vlanID, nil)
+}
+
 func syntheticLogicalIfindex(name string, vlanID int, used map[int]struct{}) int {
 	if used == nil {
 		used = make(map[int]struct{})

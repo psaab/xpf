@@ -8271,3 +8271,73 @@ fn declined_reverse_hit_packet_outcomes_16217() {
     );
     assert!(sessions2.entry_with_origin(&case.1).is_some(), "sessionless: local reverse row kept");
 }
+
+// ---------------------------------------------------------------------------
+// #16826: an HA-imported session on a tagged RETH unit (reth0.80) whose
+// NAT scope was folded to the PARENT is revalidated against the parent's
+// interface/RI scope and revoked; with the logical scope it survives.
+// ---------------------------------------------------------------------------
+
+fn imported_reth_vlan_forwarding_16826() -> ForwardingState {
+    // Parent 20 (no own zone/config scope for the rule), logical 22 = reth0.80.
+    let mut forwarding = imported_snat_forwarding(false);
+    forwarding.ifindex_to_config_name.insert(20, "ge-7/0/2".to_string());
+    forwarding.ifindex_to_config_name.insert(22, "reth0.80".to_string());
+    forwarding.ifindex_to_zone_id.insert(22, 1);
+    forwarding.ifindex_unambiguous_zone_id.insert(12, 2);
+    forwarding.ingress_logical_ifindex.insert((20, 80), 22);
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
+            name: "reth80-pool".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            from_interface: "reth0.80".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            ..Default::default()
+        }]);
+    forwarding
+}
+
+fn imported_reth_vlan_hit_16826(nat_scope_ifindex: Option<i32>) -> Option<PolicyRevocation> {
+    let forwarding = imported_reth_vlan_forwarding_16826();
+    let (_f, decision, mut metadata, key) =
+        snat_vlan_trunk_case_12861(forwarding.clone(), 20, 80, false);
+    metadata.nat_scope_ifindex = nat_scope_ifindex;
+    scoped_snat_hit_15176(&forwarding, decision, &metadata, &key)
+}
+
+#[test]
+fn imported_reth_vlan_logical_scope_survives_16826() {
+    assert!(
+        imported_reth_vlan_hit_16826(Some(22)).is_none(),
+        "imported reth0.80 session with logical scope 22 must survive its first hit"
+    );
+}
+
+#[test]
+fn imported_reth_vlan_parent_scope_revokes_16826() {
+    // Anti-mutant / defect shape: the parent scope the pre-#16826 fold shipped.
+    let revocation = imported_reth_vlan_hit_16826(Some(20))
+        .expect("parent-scoped reth0.80 session must revoke (the #16826 defect)");
+    assert!(matches!(revocation.reason, PolicyRevocationReason::StaleSourceNat));
+}
+
+#[test]
+fn imported_reth_vlan_scopeless_kept_16826() {
+    // Control unchanged: no recorded scope keeps (#15176 discipline). The
+    // imported row carries a real ingress identity (20,80), so the keep
+    // arm requires the scope-less decline to hold for it.
+    let (decision, metadata, key) = {
+        let forwarding = imported_reth_vlan_forwarding_16826();
+        let (_f, d, mut m, k) = snat_vlan_trunk_case_12861(forwarding, 20, 80, false);
+        m.nat_scope_ifindex = None;
+        (d, m, k)
+    };
+    let forwarding = imported_reth_vlan_forwarding_16826();
+    // Identity present + no scope: revalidation derives (20,80)->22, so it
+    // also survives — either path must not revoke.
+    assert!(scoped_snat_hit_15176(&forwarding, decision, &metadata, &key).is_none());
+}

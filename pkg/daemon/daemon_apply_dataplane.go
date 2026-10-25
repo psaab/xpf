@@ -328,6 +328,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			zoneRG = buildZoneRGMap(cfg, applyResult.ZoneIDs)
 		}
 		ss.SetZoneOwnership(zoneRG, buildZoneFoldRGMap(cfg), buildIngressFoldFn(cfg))
+		ss.SetNatScopeFoldFn(buildNatScopeFoldFn(cfg))
 	}
 	// And the reverse direction, used when a peer's session is imported: the
 	// fold the peer sent becomes THIS node's ifindex. Both closures share the

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // ingress_fold_7095.go — #7095: the daemon side of the cluster-stable ingress
@@ -131,6 +132,13 @@ func buildIngressFoldFn(cfg *config.Config) func(ifindex uint32, vlan uint16) ui
 	if err != nil {
 		return nil
 	}
+	return buildIngressFoldFnWithIfaces(cfg, ifaces)
+}
+
+func buildIngressFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) func(ifindex uint32, vlan uint16) uint32 {
+	if cfg == nil {
+		return nil
+	}
 	nameByIndex := make(map[uint32]string, len(ifaces))
 	for _, ifc := range ifaces {
 		if ifc.Index > 0 {
@@ -149,4 +157,115 @@ func buildIngressFoldFn(cfg *config.Config) func(ifindex uint32, vlan uint16) ui
 		}
 		return config.StableIfaceID(cfg.ClusterStableIfaceName(name, vlan))
 	}
+}
+
+// buildNatScopeFoldFn folds a #15176 NAT-scope ifindex the way the
+// ingress fold folds a packet identity: as (parent physical, VLAN)
+// (#16826). NatScopeIfindex names the LOGICAL unit — a kernel VLAN child
+// (`ge-0-0-2.80`), or, for a bondless RETH unit with no child netdev, the
+// synthetic logical-only ifindex the snapshot builder mints — so it is
+// not a key into the kernel ifindex table and the generic
+// {ifindex, vlan} folder truncated it to the parent (`reth0`).
+//
+// The (parent, VLAN) pair is derived from the config, keyed by the
+// logical ifindex each shape carries, mirroring how the snapshot builder
+// assigns it: a unit with a VLAN child netdev keys on that child's kernel
+// ifindex (its Linux name is `<parent>.<vid>`); a bondless RETH VLAN unit
+// keys on the synthetic ifindex `syntheticLogicalIfindex(<reth>.<unit>,
+// vid)`; anything else (an untagged unit, a plain interface) keys on its
+// own ifindex and folds with vlan 0 exactly as before. An ifindex no
+// derivation names folds to 0 — the unknown sentinel — so the peer keeps
+// the #15176 no-scope keep rather than judging against a guessed parent
+// scope. Captured once per apply (and rebuilt on the link refresh),
+// matching buildIngressFoldFn's snapshot discipline.
+func buildNatScopeFoldFn(cfg *config.Config) func(ifindex int32) uint32 {
+	if cfg == nil {
+		return nil
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	return buildNatScopeFoldFnWithIfaces(cfg, ifaces)
+}
+
+func buildNatScopeFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) func(ifindex int32) uint32 {
+	if cfg == nil {
+		return nil
+	}
+	fold := buildIngressFoldFnWithIfaces(cfg, ifaces)
+	if fold == nil {
+		return nil
+	}
+	if !snapshotHasRethVlanUnit(cfg) {
+		return nil
+	}
+	indexByLinuxName := make(map[string]uint32, len(ifaces))
+	for _, ifc := range ifaces {
+		if ifc.Index > 0 {
+			indexByLinuxName[ifc.Name] = uint32(ifc.Index)
+		}
+	}
+	type parentVLAN struct {
+		parent uint32
+		vlan   uint16
+	}
+	byIfindex := make(map[int32]parentVLAN)
+	for _, ifc := range ifaces {
+		if ifc.Index > 0 {
+			byIfindex[int32(ifc.Index)] = parentVLAN{uint32(ifc.Index), 0}
+		}
+	}
+	for name, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		for _, unit := range iface.Units {
+			if unit == nil || unit.VlanID <= 0 {
+				continue
+			}
+			unitName := name + "." + strconv.Itoa(unit.Number)
+			parentName := cfg.ResolveReth(name)
+			parentLinux := config.LinuxIfName(parentName)
+			parentIdx, ok := indexByLinuxName[parentLinux]
+			if !ok || parentIdx == 0 {
+				continue
+			}
+			childLinux := parentLinux + "." + strconv.Itoa(unit.VlanID)
+			if childIdx, ok := indexByLinuxName[childLinux]; ok && childIdx != 0 {
+				byIfindex[int32(childIdx)] = parentVLAN{parentIdx, uint16(unit.VlanID)}
+			}
+			if strings.HasPrefix(name, "reth") {
+				if syn := dpuserspace.SyntheticLogicalIfindexForUnit(unitName, unit.VlanID); syn > 0 {
+					byIfindex[int32(syn)] = parentVLAN{parentIdx, uint16(unit.VlanID)}
+				}
+			}
+		}
+	}
+	return func(ifindex int32) uint32 {
+		pv, ok := byIfindex[ifindex]
+		if !ok {
+			return 0
+		}
+		return fold(pv.parent, pv.vlan)
+	}
+}
+
+// snapshotHasRethVlanUnit reports whether the config declares a tagged
+// RETH unit — the only shape whose logical unit can differ from its
+// parent. buildNatScopeFoldFn engages (returns non-nil) only then, so a
+// config with no such unit keeps the legacy vlan-0 fold bit-identically
+// instead of newly resolving (or dropping) scopes it folded before.
+func snapshotHasRethVlanUnit(cfg *config.Config) bool {
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil || !strings.HasPrefix(name, "reth") {
+			continue
+		}
+		for _, unit := range ifc.Units {
+			if unit != nil && unit.VlanID > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
