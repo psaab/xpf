@@ -3687,6 +3687,15 @@ never lock an operator out of a remote box it manages.
   included) when an SSH stanza exists;
   `daemon_ssh_test.go` covers runtime rendering and
   `scripts/image/test_bake_sshd_password_auth_10771.py` checks the image drop-in.
+  **#16737:** that independence is a documented divergence from Junos —
+  deleting `system services ssh` removes only the managed drop-in, it
+  does NOT stop sshd. `show system services` therefore always prints an
+  SSH row (`running (not managed — no system services ssh; …)` when the
+  stanza is absent), and a commit whose zone host-inbound admits
+  `ssh`/`all`/`any-service` without the stanza carries a commit
+  advisory (`pkg/config/ssh_unmanaged_advisory_16737.go`). Owning sshd
+  enablement (stop/disable/mask) was deliberately not taken: lifeline
+  recovery depends on sshd existing outside xpf's config lifecycle.
 
   **Retry-owner visibility completed (#7615).** Six always-on loops in `Run`
   re-drive a failure that had no other owner. #6800 and #6802 published;

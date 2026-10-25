@@ -65,6 +65,7 @@ var lenientCompletenessAllowlist16166 = map[string]string{
 	"suppressContestedTrunkZoneAdvisory": "advisory suppressor (#7509), true in lenientCompileOpts",
 	"suppressDPDThresholdIKEv2Advisory":  "advisory suppressor (#15025), true in lenientCompileOpts",
 	"suppressFabricStampAdvisory":        "advisory suppressor (#10105), true in lenientCompileOpts",
+	"suppressSSHUnmanagedAdvisory16737":  "advisory suppressor (#16737), true in lenientCompileOpts",
 }
 
 // walkBoolFields16166 visits every bool field reachable from v,
@@ -259,7 +260,8 @@ func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 	// forgotten registration hides. Removing one from
 	// lenientCompileOpts() must fail here, not pass via the allowlist.
 	if !opts.suppressClusterNTPAdvisory || !opts.suppressContestedTrunkZoneAdvisory ||
-		!opts.suppressDPDThresholdIKEv2Advisory || !opts.suppressFabricStampAdvisory {
+		!opts.suppressDPDThresholdIKEv2Advisory || !opts.suppressFabricStampAdvisory ||
+		!opts.suppressSSHUnmanagedAdvisory16737 {
 		t.Error("a suppress* advisory bool is false in lenientCompileOpts(): the tolerant " +
 			"paths would re-fire commit-time advisories on every boot / peer sync; " +
 			"restore its `true` entry in lenientCompileOpts()")

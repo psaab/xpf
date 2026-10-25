@@ -856,6 +856,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	appendDPDThresholdIKEv2AdvisoryLocked(cfg, opts)
 	appendGreUnitFilterShadowAdvisoryLocked(cfg, opts)
 	appendWgUnitFilterShadowAdvisory16059Locked(cfg, opts)
+	appendSSHUnmanagedAdvisory16737Locked(cfg, opts)
 	// Warning ORDER is operator-visible and differed between the former
 	// twins at exactly this suffix (#16167 review folds). Site-by-site,
 	// the parent orders were:
