@@ -67,5 +67,22 @@ func runUniformGatesScreen(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 		}
 	}
 
+	// #16571 screen missing-value gate. Strict on commit / commit-check
+	// (hard-reject a screen numeric leaf authored without its number,
+	// e.g. a packed `source-threshold;` the opaque-family schema walk
+	// never reaches). Lenient on load / peer-sync (warn so a persisted
+	// config still boots — #1960 no-brick). Runs on the fully-compiled
+	// *Config so the typed profile list (with MissingValue populated by
+	// compileScreen) is available, after the #3317/#3318 gates so their
+	// first-error precedence is unchanged.
+	if err := validateScreenMissingValueStrict(cfg); err != nil {
+		if opts.lenientScreenMissingValue {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("screen missing value (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

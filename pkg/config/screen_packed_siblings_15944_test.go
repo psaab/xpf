@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // #15944 H13-03: a depth-1 packed screen family
 // (`tcp syn-flood alarm-threshold 100 attack-threshold 500;`) must
@@ -69,14 +72,21 @@ func TestScreenPackedSynFloodThreeSiblings15944(t *testing.T) {
 }
 
 // Valueless limit-session leaves: `limit-session source-ip-based;`
-// carries no value. Per the #3317 doctrine an EMPTY value is "enabled
-// without an explicit threshold" — it must neither record a bad
-// numeric nor silently invent a positive threshold; the leaf stays 0
-// (disabled) exactly as the braced spelling of the same statement
-// compiles today. This pins the observed direction so a future
-// default-arming change is deliberate.
+// carries no value. #16571 deliberately amends the compile-level
+// contract pinned here: a valueless numeric leaf is no longer
+// "enabled without an explicit threshold" — it is a missing value.
+// Strict commit now rejects it; the tolerant path keeps the leaf 0
+// (disabled, no invented threshold) and warns. BadNumeric stays empty:
+// a missing value is recorded on MissingValue, not as a bad number.
 func TestScreenValuelessLimitSession15944(t *testing.T) {
-	cfg := compileHierStrict(t,
+	if _, err := CompileConfig(parseHierText(t,
+		"security { screen { ids-option s1 { limit-session source-ip-based; } } }\n")); err == nil {
+		t.Fatalf("strict commit accepted a valueless limit-session leaf (#16571)")
+	} else if !strings.Contains(err.Error(), "limit-session source-ip-based") ||
+		!strings.Contains(err.Error(), "declares a value and none was given") {
+		t.Fatalf("strict error does not name the valueless leaf: %v", err)
+	}
+	cfg := compileHierLenient(t,
 		"security { screen { ids-option s1 { limit-session source-ip-based; } } }\n")
 	prof := cfg.Security.Screen["s1"]
 	if prof.LimitSession.SourceIPBased != 0 {
@@ -84,6 +94,9 @@ func TestScreenValuelessLimitSession15944(t *testing.T) {
 	}
 	if len(prof.BadNumeric) != 0 {
 		t.Fatalf("valueless leaf must not record BadNumeric: %v", prof.BadNumeric)
+	}
+	if len(prof.MissingValue) != 1 || prof.MissingValue[0] != "limit-session source-ip-based" {
+		t.Fatalf("valueless leaf MissingValue = %v, want [limit-session source-ip-based]", prof.MissingValue)
 	}
 	// Positive control: the valued spelling lands, and the defaulted
 	// syn-flood case (no attack-threshold) still arms at the Junos

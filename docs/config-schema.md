@@ -531,6 +531,32 @@ appear in the measured `testdata/compact_block_divergences_2419.txt` inventory,
 and a valueless boolean flag cannot appear there at all — which is issue 9056's
 whole finding. 9056 owns that general class (83 sites) and is not closed by this.
 
+### A valueless numeric leaf inside an opaque family (16571)
+
+The four screen families (`icmp`/`tcp`/`ip`/`udp` under
+`screen ids-option`) are `closedWorldOpaque`, so the #8597
+valueless-leaf gate in the schema walk stops at the family boundary.
+A numeric leaf authored without its number in a packed tail —
+`tcp syn-flood attack-threshold 300 source-threshold;`,
+`icmp flood threshold;` — therefore committed strict-clean: the
+compiler's normaliser split the tail, read `""` as "enabled without an
+explicit threshold", and dropped the sub-cap (or substituted the Junos
+default), while the braced spelling of the same statement was
+rejected. The strict verdict depended on spelling.
+
+`compileScreen` now records every authored-but-valueless numeric leaf
+on `ScreenProfile.MissingValue` — the flood/scan/sweep `threshold`
+sub-leaves, the syn-flood `alarm/attack/source/destination-threshold`
+and `timeout` leaves, and the `limit-session` caps — and
+`validateScreenMissingValueStrict` refuses them at strict commit with
+the #8597 message; the tolerant load / peer-sync path downgrades to a
+warning and keeps the default/disabled value. This deliberately
+amends the compile-level contract `TestScreenValuelessLimitSession15944`
+previously pinned. The boundary is *authored vs unset*: a bare
+`flood;` / `port-scan;` / `ip-sweep;` with no `threshold` keyword
+authors no numeric leaf and still arms the #3230 Junos default, and an
+unset syn-flood subfield or limit-session cap stays disabled (#15269).
+
 ### Bracketed lists: when to ACCUMULATE and when to REFUSE (9424)
 
 The lexer strips `[`/`]`, so a bracketed list collapses onto ONE leaf's `Keys`

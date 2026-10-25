@@ -1788,6 +1788,17 @@ type ScreenProfile struct {
 	// the commit fail-closed instead of silently defaulting. Each entry names
 	// the screen leaf path and the offending value.
 	BadNumeric []ScreenBadNumeric
+	// MissingValue records screen numeric leaves that were AUTHORED
+	// without a value (#16571): the leaf keyword is present (possibly as
+	// the `threshold` sub-leaf of a flood/scan/sweep check, or directly as
+	// a syn-flood sub-threshold / limit-session cap) but carries no
+	// number. It is distinct from an UNSET leaf (no leaf authored at
+	// all), which legitimately arms the Junos default (#3230) for
+	// flood/scan/sweep or stays disabled for syn-flood subfields and
+	// limit-session (#15269). validateScreenMissingValueStrict rejects
+	// these at strict commit; the tolerant path warns. Each entry is the
+	// full `<family> <leaf>` path, same spelling as BadNumeric paths.
+	MissingValue []string
 	// UnknownLeaves records screen leaves the dataplane does NOT support
 	// (#3318). The screen schema subtrees are open and compileScreen switched
 	// only on known child names with no default case, so a misspelled or

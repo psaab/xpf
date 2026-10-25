@@ -382,20 +382,26 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 					// so it accepted the spelling its siblings rejected and
 					// rejected the one they accepted.
 					floodVal := ""
+					floodSawThreshold := false
 					if len(opt.Keys) > 2 {
 						floodVal = opt.Keys[2]
+						floodSawThreshold = true
 					}
 					for _, fOpt := range opt.Children {
 						if fOpt.Name() != "threshold" {
 							profile.UnknownLeaves = append(profile.UnknownLeaves, "icmp flood "+fOpt.Name())
 							continue
 						}
+						floodSawThreshold = true
 						recordKeyExtras("icmp flood threshold", fOpt, 2)
 						// Prefix is the FLOOD path, not the threshold path: a
 						// trailing token after the value is garbage on `icmp flood`,
 						// and that is the leaf name the #3332 gate reports.
 						recordChildExtras("icmp flood", fOpt)
 						floodVal = numVal(fOpt, 1)
+					}
+					if floodSawThreshold && floodVal == "" {
+						profile.MissingValue = append(profile.MissingValue, "icmp flood threshold")
 					}
 					if n, ok := parseThresh("icmp flood", floodVal); ok {
 						profile.ICMP.FloodThreshold = n
@@ -415,7 +421,11 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 						case "threshold":
 							recordKeyExtras("icmp ip-sweep threshold", swOpt, 2)
 							recordChildExtras("icmp ip-sweep threshold", swOpt)
-							if n, ok := parseThresh("icmp ip-sweep threshold", numVal(swOpt, 1)); ok {
+							v := numVal(swOpt, 1)
+							if v == "" {
+								profile.MissingValue = append(profile.MissingValue, "icmp ip-sweep threshold")
+							}
+							if n, ok := parseThresh("icmp ip-sweep threshold", v); ok {
 								profile.IP.IPSweepThreshold = n
 							}
 						default:
@@ -451,7 +461,11 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 						case "threshold":
 							recordKeyExtras("ip ip-sweep threshold", swOpt, 2)
 							recordChildExtras("ip ip-sweep threshold", swOpt)
-							if n, ok := parseThresh("ip ip-sweep threshold", numVal(swOpt, 1)); ok {
+							v := numVal(swOpt, 1)
+							if v == "" {
+								profile.MissingValue = append(profile.MissingValue, "ip ip-sweep threshold")
+							}
+							if n, ok := parseThresh("ip ip-sweep threshold", v); ok {
 								profile.IP.IPSweepThreshold = n
 							}
 						default:
@@ -513,30 +527,45 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 						case "alarm-threshold":
 							recordKeyExtras("tcp syn-flood alarm-threshold", sfOpt, 2)
 							recordChildExtras("tcp syn-flood alarm-threshold", sfOpt)
+							if val == "" {
+								profile.MissingValue = append(profile.MissingValue, "tcp syn-flood alarm-threshold")
+							}
 							if n, ok := parseThresh("tcp syn-flood alarm-threshold", val); ok {
 								sf.AlarmThreshold = n
 							}
 						case "attack-threshold":
 							recordKeyExtras("tcp syn-flood attack-threshold", sfOpt, 2)
 							recordChildExtras("tcp syn-flood attack-threshold", sfOpt)
+							if val == "" {
+								profile.MissingValue = append(profile.MissingValue, "tcp syn-flood attack-threshold")
+							}
 							if n, ok := parseThresh("tcp syn-flood attack-threshold", val); ok {
 								sf.AttackThreshold = n
 							}
 						case "source-threshold":
 							recordKeyExtras("tcp syn-flood source-threshold", sfOpt, 2)
 							recordChildExtras("tcp syn-flood source-threshold", sfOpt)
+							if val == "" {
+								profile.MissingValue = append(profile.MissingValue, "tcp syn-flood source-threshold")
+							}
 							if n, ok := parseThresh("tcp syn-flood source-threshold", val); ok {
 								sf.SourceThreshold = n
 							}
 						case "destination-threshold":
 							recordKeyExtras("tcp syn-flood destination-threshold", sfOpt, 2)
 							recordChildExtras("tcp syn-flood destination-threshold", sfOpt)
+							if val == "" {
+								profile.MissingValue = append(profile.MissingValue, "tcp syn-flood destination-threshold")
+							}
 							if n, ok := parseThresh("tcp syn-flood destination-threshold", val); ok {
 								sf.DestinationThreshold = n
 							}
 						case "timeout":
 							recordKeyExtras("tcp syn-flood timeout", sfOpt, 2)
 							recordChildExtras("tcp syn-flood timeout", sfOpt)
+							if val == "" {
+								profile.MissingValue = append(profile.MissingValue, "tcp syn-flood timeout")
+							}
 							if n, ok := parseThresh("tcp syn-flood timeout", val); ok {
 								sf.Timeout = n
 							}
@@ -589,7 +618,11 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 						case "threshold":
 							recordKeyExtras("tcp port-scan threshold", psOpt, 2)
 							recordChildExtras("tcp port-scan threshold", psOpt)
-							if n, ok := parseThresh("tcp port-scan threshold", numVal(psOpt, 1)); ok {
+							v := numVal(psOpt, 1)
+							if v == "" {
+								profile.MissingValue = append(profile.MissingValue, "tcp port-scan threshold")
+							}
+							if n, ok := parseThresh("tcp port-scan threshold", v); ok {
 								profile.TCP.PortScanThreshold = n
 							}
 						default:
@@ -624,20 +657,26 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 					// so it accepted the spelling its siblings rejected and
 					// rejected the one they accepted.
 					floodVal := ""
+					floodSawThreshold := false
 					if len(opt.Keys) > 2 {
 						floodVal = opt.Keys[2]
+						floodSawThreshold = true
 					}
 					for _, fOpt := range opt.Children {
 						if fOpt.Name() != "threshold" {
 							profile.UnknownLeaves = append(profile.UnknownLeaves, "udp flood "+fOpt.Name())
 							continue
 						}
+						floodSawThreshold = true
 						recordKeyExtras("udp flood threshold", fOpt, 2)
 						// Prefix is the FLOOD path, not the threshold path: a
 						// trailing token after the value is garbage on `udp flood`,
 						// and that is the leaf name the #3332 gate reports.
 						recordChildExtras("udp flood", fOpt)
 						floodVal = numVal(fOpt, 1)
+					}
+					if floodSawThreshold && floodVal == "" {
+						profile.MissingValue = append(profile.MissingValue, "udp flood threshold")
 					}
 					if n, ok := parseThresh("udp flood", floodVal); ok {
 						profile.UDP.FloodThreshold = n
@@ -666,12 +705,18 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 				case "source-ip-based":
 					recordKeyExtras("limit-session source-ip-based", opt, 2)
 					recordChildExtras("limit-session source-ip-based", opt)
+					if val == "" {
+						profile.MissingValue = append(profile.MissingValue, "limit-session source-ip-based")
+					}
 					if n, ok := parseThresh("limit-session source-ip-based", val); ok {
 						profile.LimitSession.SourceIPBased = n
 					}
 				case "destination-ip-based":
 					recordKeyExtras("limit-session destination-ip-based", opt, 2)
 					recordChildExtras("limit-session destination-ip-based", opt)
+					if val == "" {
+						profile.MissingValue = append(profile.MissingValue, "limit-session destination-ip-based")
+					}
 					if n, ok := parseThresh("limit-session destination-ip-based", val); ok {
 						profile.LimitSession.DestinationIPBased = n
 					}
