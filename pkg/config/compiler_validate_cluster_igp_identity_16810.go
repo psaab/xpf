@@ -253,7 +253,20 @@ func igpIdentityNodeViewsDistinct16810(tree *ConfigTree) bool {
 		if !spans[0] && !spans[1] {
 			continue
 		}
-		if ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
+		if ids[0] == "" || ids[1] == "" {
+			return false
+		}
+		// #16865 R2: IS-IS identities compare by canonical NET bytes
+		// so case/grouping-equivalent spellings of one NET do not
+		// count as distinct node identities. OSPF router-ids keep
+		// raw comparison.
+		same := ids[0] == ids[1]
+		if strings.HasSuffix(key, "/isis") {
+			if c0, c1 := canonicalNET16865(ids[0]), canonicalNET16865(ids[1]); c0 != "" && c1 != "" {
+				same = c0 == c1
+			}
+		}
+		if same {
 			return false
 		}
 		excused = true
@@ -350,9 +363,19 @@ func igpIdentityScopes16810(cfg *Config) []igpIdentityScope16810 {
 					names = append(names, iface.Name)
 				}
 			}
+			// #16865 B-NEW-1: IS-IS identity is canonical NET bytes
+			// for every comparison in this file (gate + exemption),
+			// so case/grouping spellings of one NET are one identity
+			// whether the NET came from `protocols isis net` or ISO
+			// derivation. Invalid values fall back to raw (the NET
+			// gate owns those diagnostics).
+			identity := isis.NET
+			if canon := canonicalNET16865(identity); canon != "" {
+				identity = canon
+			}
 			scopes = append(scopes, igpIdentityScope16810{
 				key: key + "/isis", scopeLabel: prefix + "protocols isis",
-				protoLabel: "protocols isis", identity: isis.NET,
+				protoLabel: "protocols isis", identity: identity,
 				rgs: distinctDataRGs(names),
 			})
 		}

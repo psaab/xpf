@@ -94,9 +94,13 @@ func isoNETSources16865(cfg *Config) []isoNETSource16865 {
 }
 
 // riOwnedRefs16865 returns the interface refs owned by routing
-// instances: member refs themselves plus, for a bare member, every
-// unit ref of that interface (Junos per-instance loopback units use
-// the bare form).
+// instances, keyed by CANONICAL ref (SplitInterfaceUnitRef Literal)
+// so alias spellings (`ge-0/0/2.00`, signed units, declared dotted
+// names) match the canonical source keys generated in
+// isoNETSources16865 (#16865 R1). A bare member owns every unit ref
+// of that interface (Junos per-instance loopback units use the bare
+// form); declared-name precedence comes from the splitter, not a
+// dot heuristic.
 func riOwnedRefs16865(cfg *Config) map[string]string {
 	owned := map[string]string{}
 	if cfg == nil {
@@ -107,11 +111,16 @@ func riOwnedRefs16865(cfg *Config) map[string]string {
 			continue
 		}
 		for _, m := range ri.Interfaces {
-			owned[m] = ri.Name
-			if !strings.Contains(m, ".") {
-				if ifc := cfg.Interfaces.Interfaces[m]; ifc != nil {
+			split := cfg.SplitInterfaceUnitRef(m)
+			key := split.Literal
+			if key == "" {
+				key = m
+			}
+			owned[key] = ri.Name
+			if !split.HasUnit {
+				if ifc := cfg.Interfaces.Interfaces[split.Base]; ifc != nil {
 					for n := range ifc.Units {
-						owned[fmt.Sprintf("%s.%d", m, n)] = ri.Name
+						owned[fmt.Sprintf("%s.%d", split.Base, n)] = ri.Name
 					}
 				}
 			}
@@ -121,15 +130,21 @@ func riOwnedRefs16865(cfg *Config) map[string]string {
 }
 
 // isoNETCandidatesForScope16865 returns the distinct (by canonical
-// bytes) ISO NETs visible to one scope. instance "" is the default
-// scope (interfaces owned by no RI); otherwise only that instance's
-// members. First-authored spelling wins per canonical identity.
+// NET bytes) ISO NETs visible to one scope. instance "" is the
+// default scope (interfaces owned by no RI); otherwise only that
+// instance's members. First-authored spelling wins per identity.
 func isoNETCandidatesForScope16865(cfg *Config, instance string) []isoNETSource16865 {
 	owned := riOwnedRefs16865(cfg)
 	seen := map[string]bool{}
 	var out []isoNETSource16865
 	for _, src := range isoNETSources16865(cfg) {
-		owner := owned[src.ref]
+		// Source keys are generated canonical (declared base + int
+		// unit); canonicalize defensively through the same splitter.
+		srcKey := cfg.SplitInterfaceUnitRef(src.ref).Literal
+		if srcKey == "" {
+			srcKey = src.ref
+		}
+		owner := owned[srcKey]
 		if instance == "" {
 			if owner != "" {
 				continue
