@@ -25,23 +25,6 @@ fn pool_rule(name: &str, pool: &str, addrs: &[&str]) -> SourceNATRuleSnapshot {
     }
 }
 
-fn set_configured_forwarding_rgs(coordinator: &mut Coordinator, rgs: &[i32]) {
-    for rg in rgs.iter().copied().filter(|rg| *rg > 0) {
-        coordinator.forwarding.egress.insert(
-            rg,
-            crate::afxdp::EgressInterface {
-                bind_ifindex: rg,
-                vlan_id: 0,
-                mtu: 1500,
-                src_mac: [0; 6],
-                zone_id: 0,
-                redundancy_group: rg,
-                primary_v4: None,
-                primary_v6: None,
-            },
-        );
-    }
-}
 
 /// Seed an idle lease through the IMPORT path. `allocate_translation` is
 /// private to `nat`, and these cells are about ROUTING rather than minting —
@@ -737,7 +720,6 @@ fn imported_idle_lease_reaches_restarted_owner_after_promotion_16876() {
         let mut standby = Coordinator::new();
         standby.forwarding.source_nat_rules =
             parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
-        set_configured_forwarding_rgs(&mut standby, &[1]);
 
         let local = mint_local_idle_lease(&active, "P");
         let advertised = active.export_idle_persistent_leases(3_000);
@@ -818,7 +800,6 @@ fn imported_idle_lease_arriving_after_promotion_is_exportable_16876() {
         "P",
         &["203.0.113.1"],
     )]);
-    set_configured_forwarding_rgs(&mut primary, &[1]);
     primary
         .update_ha_state(&[crate::HAGroupStatus {
             rg_id: 1,
@@ -850,7 +831,6 @@ fn mixed_rg_import_refresh_is_additive_without_promotion_16876() {
     let mut mixed = Coordinator::new();
     mixed.forwarding.source_nat_rules =
         parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
-    set_configured_forwarding_rgs(&mut mixed, &[1, 2]);
     mixed
         .update_ha_state(&[
             crate::HAGroupStatus {
@@ -905,7 +885,6 @@ fn late_partial_import_promotes_only_installed_records_16876() {
         pool_rule("r1", "P", &["203.0.113.1"]),
         pool_rule("r2", "Q", &["203.0.113.2"]),
     ]);
-    set_configured_forwarding_rgs(&mut primary, &[1]);
     primary
         .update_ha_state(&[crate::HAGroupStatus {
             rg_id: 1,
@@ -953,11 +932,11 @@ fn late_partial_import_promotes_only_installed_records_16876() {
     );
 }
 
-/// Gate2 production shape: the helper inventory carries all 16 rg_active slots,
-/// but only RGs 1 and 2 are configured. Configured-all-active must promote
-/// despite inactive unused slots; a configured peer-owned RG must still block.
-fn ha_inventory(active: &[i32]) -> Vec<crate::HAGroupStatus> {
-    (0..16)
+/// The Go manager filters its fixed 16-slot BPF arrays against its seeded HA
+/// inventory before sending groups here. These coordinator tests model that
+/// configured inventory, including an inactive RG with no egress interface.
+fn configured_ha_inventory(active: &[i32]) -> Vec<crate::HAGroupStatus> {
+    (1..=2)
         .map(|rg_id| crate::HAGroupStatus {
             rg_id,
             active: active.contains(&rg_id),
@@ -967,10 +946,11 @@ fn ha_inventory(active: &[i32]) -> Vec<crate::HAGroupStatus> {
 }
 
 #[test]
-fn promotion_ignores_unused_inactive_slots_16876_gate2() {
-    // Configured RGs 1,2 active; slots 3..15 present but inactive/unused.
-    let groups = ha_inventory(&[1, 2]);
-    assert_eq!(groups.len(), 16, "fixture must carry the full 16-slot inventory");
+fn promotion_uses_configured_ha_inventory_16876_gate2() {
+    // Unused slots are removed by the Go manager before this coordinator sees
+    // the configured RG1/RG2 statuses.
+    let groups = configured_ha_inventory(&[1, 2]);
+    assert_eq!(groups.len(), 2, "coordinator receives only configured RGs");
 
     // Activation path.
     let mut source = Coordinator::new();
@@ -980,8 +960,12 @@ fn promotion_ignores_unused_inactive_slots_16876_gate2() {
     let mut standby = Coordinator::new();
     standby.forwarding.source_nat_rules =
         parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
-    set_configured_forwarding_rgs(&mut standby, &[1, 2]);
-    assert_eq!(standby.import_idle_persistent_leases(&[advertised.clone()], 10_000).installed, 1);
+    assert_eq!(
+        standby
+            .import_idle_persistent_leases(&[advertised.clone()], 10_000)
+            .installed,
+        1
+    );
     standby.update_ha_state(&groups).expect("HA update");
     assert_eq!(
         standby.export_idle_persistent_leases(14_000).len(),
@@ -993,9 +977,13 @@ fn promotion_ignores_unused_inactive_slots_16876_gate2() {
     let mut primary = Coordinator::new();
     primary.forwarding.source_nat_rules =
         parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
-    set_configured_forwarding_rgs(&mut primary, &[1, 2]);
     primary.update_ha_state(&groups).expect("HA update");
-    assert_eq!(primary.import_idle_persistent_leases(&[advertised], 20_000).installed, 1);
+    assert_eq!(
+        primary
+            .import_idle_persistent_leases(&[advertised], 20_000)
+            .installed,
+        1
+    );
     assert_eq!(
         primary.export_idle_persistent_leases(21_000).len(),
         1,
@@ -1005,8 +993,9 @@ fn promotion_ignores_unused_inactive_slots_16876_gate2() {
 
 #[test]
 fn promotion_blocked_by_configured_inactive_rg_16876_gate2() {
-    // Configured RG2 is peer-owned/inactive; promotion must not run.
-    let groups = ha_inventory(&[1]);
+    // RG2 is present in the manager-seeded inventory but has no egress entry
+    // in this coordinator snapshot; its inactive status must still block.
+    let groups = configured_ha_inventory(&[1]);
     let mut source = Coordinator::new();
     source.forwarding.source_nat_rules =
         parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
@@ -1014,7 +1003,6 @@ fn promotion_blocked_by_configured_inactive_rg_16876_gate2() {
     let mut standby = Coordinator::new();
     standby.forwarding.source_nat_rules =
         parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
-    set_configured_forwarding_rgs(&mut standby, &[1, 2]);
     assert_eq!(
         standby
             .import_idle_persistent_leases(&[advertised.clone()], 10_000)
@@ -1032,7 +1020,6 @@ fn promotion_blocked_by_configured_inactive_rg_16876_gate2() {
     let mut late_primary = Coordinator::new();
     late_primary.forwarding.source_nat_rules =
         parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
-    set_configured_forwarding_rgs(&mut late_primary, &[1, 2]);
     late_primary.update_ha_state(&groups).expect("HA update");
     assert_eq!(
         late_primary

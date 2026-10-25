@@ -325,6 +325,8 @@ func (m *Manager) refreshHAWatchdogOnlyFromMapsLocked() error {
 	return wdIter.Err()
 }
 
+// The existing groups are the manager's config-seeded HA inventory. BPF maps
+// include fixed-array slots for unused groups, so refresh only known entries.
 func mergeHAStateFromMaps(rgMap, wdMap *ebpf.Map, existing map[int]HAGroupStatus) (map[int]HAGroupStatus, error) {
 	seen := make(map[int]HAGroupStatus, len(existing))
 	for rgID, group := range existing {
@@ -337,10 +339,14 @@ func mergeHAStateFromMaps(rgMap, wdMap *ebpf.Map, existing map[int]HAGroupStatus
 	)
 	rgIter := rgMap.Iterate()
 	for rgIter.Next(&rgKey, &rgVal) {
-		group := seen[int(rgKey)]
-		group.RGID = int(rgKey)
+		rgID := int(rgKey)
+		group, configured := seen[rgID]
+		if !configured {
+			continue
+		}
+		group.RGID = rgID
 		group.Active = rgVal != 0
-		seen[int(rgKey)] = group
+		seen[rgID] = group
 	}
 	if err := rgIter.Err(); err != nil {
 		return nil, fmt.Errorf("iterate rg_active: %w", err)
@@ -352,10 +358,14 @@ func mergeHAStateFromMaps(rgMap, wdMap *ebpf.Map, existing map[int]HAGroupStatus
 	)
 	wdIter := wdMap.Iterate()
 	for wdIter.Next(&wdKey, &wdVal) {
-		group := seen[int(wdKey)]
-		group.RGID = int(wdKey)
+		rgID := int(wdKey)
+		group, configured := seen[rgID]
+		if !configured {
+			continue
+		}
+		group.RGID = rgID
 		group.WatchdogTimestamp = wdVal
-		seen[int(wdKey)] = group
+		seen[rgID] = group
 	}
 	if err := wdIter.Err(); err != nil {
 		return nil, fmt.Errorf("iterate ha_watchdog: %w", err)
