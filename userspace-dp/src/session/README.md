@@ -2447,7 +2447,8 @@ pre-session screen stage.
   source scanning zone `wan` no longer bleeds its count into the `dmz`
   threshold evaluation. The backing maps are bounded on both
   attacker-driven axes: `MAX_SOURCES_PER_ZONE` distinct sources per zone
-  and `MAX_UNIQUE_PER_SOURCE` unique entries per source. On a SOURCE-axis
+  and `MAX_UNIQUE_PER_SOURCE` recorded entries per source (= the fixed
+  detection count since #16498, see below). On a SOURCE-axis
   overflow the tracker SKIPS the new source (degrades to not-counting that
   source) and bumps a `skipped_pressure` counter — that can only make a
   drop verdict LESS likely, never grow without bound. The per-tick cleanup
@@ -2461,19 +2462,41 @@ pre-session screen stage.
 - **#4114 (Junos µs-window semantics).** The port-scan / ip-sweep
   `threshold` is a Junos MICROSECOND detection WINDOW, and the detection
   COUNT is the fixed `SCAN_DETECT_COUNT` (10) in `screen/scan.rs`. The
-  tracker resets its per-`(zone, src)` distinct-destination set each
-  `window_micros` and fires once the set reaches 10. `MAX_UNIQUE_PER_SOURCE`
-  (1024) is now purely a MEMORY bound — the fixed count sits well under it,
-  so the verdict is never gated by the cap. This replaced the buggy
-  pre-#4114 shape (a configurable COUNT over a hard-coded 10-second window
-  plus a `MAX_UNIQUE_PER_SOURCE - 1` fail-closed clamp): a copied Junos
-  `threshold 5000` was misread as a count and clamped to never-fire, while
-  the default-armed sweep false-dropped normal browsing. The Go control
-  plane (`pkg/config/compiler_security_screen.go`) defaults the window to
+  tracker resets its per-`(zone, src)` distinct-destination record each
+  `window_micros` and fires once the record reaches 10.
+  `MAX_UNIQUE_PER_SOURCE` was then purely a MEMORY bound (1024) — the
+  fixed count sat well under it, so the verdict was never gated by the
+  cap. This replaced the buggy pre-#4114 shape (a configurable COUNT over
+  a hard-coded 10-second window plus a `MAX_UNIQUE_PER_SOURCE - 1`
+  fail-closed clamp): a copied Junos `threshold 5000` was misread as a
+  count and clamped to never-fire, while the default-armed sweep
+  false-dropped normal browsing. The Go control plane
+  (`pkg/config/compiler_security_screen.go`) defaults the window to
   5000 us (Junos default) and emits a commit-time ADVISORY
   (`validateScreenScanSweepWindows`) when a value falls outside the Junos
-  [1000, 1000000] us range — the count->window migration net, never a hard
-  reject (no-brick). `SCAN_DETECT_COUNT` mirrors the Go `scanSweepDetectCount`.
+  [1000, 1000000] us range — the count->window migration net, never a
+  hard reject (no-brick). `SCAN_DETECT_COUNT` mirrors the Go
+  `scanSweepDetectCount`.
+
+- **#16498 (per-source state capped at the detection count).** #4114
+  left a 100x gap: detection fired at 10 distinct destinations, but each
+  source kept inserting into a heap `FxHashSet` up to 1024 entries, the
+  window reset's `clear()` retained that bucket allocation, and the
+  least-suspicious eviction preserved the fullest sets — a
+  spoofed-source fan-out flood could pin ~144 MiB (ip-sweep) + ~24 MiB
+  (port-scan) of heap per worker per screened zone (~1 GiB at 6 workers
+  with both screens on). `MAX_UNIQUE_PER_SOURCE` now EQUALS
+  `SCAN_DETECT_COUNT` and the destinations live in an inline
+  `[Option<T>; SCAN_DETECT_COUNT]` buffer in each source record: no
+  per-source heap, nothing retained across a window reset, and no
+  hashing of destinations 11-1024 for zero verdict gain. A distinct
+  destination past the count is not stored; it counts on the existing
+  `skipped_pressure` signal (as the old over-1024 path did) and the
+  verdict — already true — is unchanged. Published bound: a saturated
+  source record is 200 B (ip-sweep) / 64 B (port-scan), so both screens
+  together cost at most 4096 x (200 + 64) B ~= 1.03 MiB per worker per
+  zone for the per-source records (plus the unchanged source-axis index
+  overhead).
 
 - **Perf (#2209).** The per-packet `check_packet_with_zone_id` no longer
   clones the whole `ScreenProfile` per screened packet — it borrows it and
@@ -2562,8 +2585,8 @@ ceiling never clamps a configurable window, so the evasion is closed for EVERY
 configurable window. This is a RECLAMATION-TIMING bound only: `MAX_SOURCES_PER_
 ZONE` / `MAX_UNIQUE_PER_SOURCE` are enforced at INSERT time, so the table stays
 bounded regardless of the window — a 71-min worst case is bounded by the SAME
-4096-source / 1024-entry caps as a 5-second window; a longer floor only defers
-reclamation of idle entries.
+4096-source / 10-entry inline buffers (#16498) as a 5-second window; a longer
+floor only defers reclamation of idle entries.
 
 ## TCP SYN-check selectors on the transit session-miss path (#4400/#10270/#10703)
 

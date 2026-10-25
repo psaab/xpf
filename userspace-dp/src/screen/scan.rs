@@ -20,15 +20,16 @@
 //! - **Bounded, fail-safe state.** The backing maps are attacker-driven
 //!   (a spoofed-source flood multiplies the source keys; a fan-out flood
 //!   multiplies the inner unique entries). Both axes are capped:
-//!   `MAX_SOURCES_PER_ZONE` distinct source keys per zone and
-//!   `MAX_UNIQUE_PER_SOURCE` unique entries per source. On the UNIQUE-entry
-//!   axis the set is capped, but the detection threshold is CLAMPED to
-//!   `MAX_UNIQUE_PER_SOURCE - 1` so a source that fills the set ALWAYS
-//!   crosses it: a threshold larger than the cap detects AT THE CAP rather
-//!   than never (fail-CLOSED, #2227 MAJOR-1). The maps never grow without
-//!   bound. This mirrors the #2134/#2177 session-limit per-IP bound
-//!   discipline (skip-on-full, never a phantom growth) plus a fail-closed
-//!   clamp on the inner axis.
+//!   `MAX_SOURCES_PER_ZONE` distinct source keys per zone and, per source,
+//!   only the first [`SCAN_DETECT_COUNT`] (10) distinct destinations are
+//!   recorded (#16498, see the #16498 bullet below). The detection count
+//!   sits at the inner cap by construction, so a source that fills its
+//!   inline buffer HAS crossed it (fail-CLOSED by construction; the
+//!   pre-#16498 code instead kept inserting to `MAX_UNIQUE_PER_SOURCE`
+//!   (1024) and clamped a configurable count to `MAX_UNIQUE_PER_SOURCE
+//!   - 1`). The maps never grow without bound. This mirrors the
+//!   #2134/#2177 session-limit per-IP bound discipline (skip-on-full,
+//!   never a phantom growth).
 //!
 //! - **Bounded per-zone eviction on source-axis saturation (#2234, #4890,
 //!   #14673).**
@@ -113,7 +114,9 @@
 //!   NEVER bite a configurable window — the pre-#4418 5-min ceiling reopened
 //!   the same evasion for any window > 5 min. Memory stays bounded by the
 //!   per-source/zone caps regardless (the ceiling is a reclamation-timing
-//!   bound, never a memory bound).
+//!   bound, never a memory bound — with #16498 the per-source axis is
+//!   [`SCAN_DETECT_COUNT`] inline slots, so the ceiling only defers
+//!   reclamation of a fixed-size record).
 //!
 //! - **Least-suspicious source-saturation eviction (#4418).** When a zone is
 //!   at `MAX_SOURCES_PER_ZONE` and a brand-new source arrives, the bounded
@@ -131,7 +134,37 @@
 //!   a pinned prefix), so the sample rotates (above) — the victim is the
 //!   least-suspicious entry of a ROTATING seeded window, not of a fixed
 //!   attacker-chosen set.
-
+//!
+//! - **Per-source state capped at the detection count (#16498).**
+//!   Detection is decided once a source has touched [`SCAN_DETECT_COUNT`]
+//!   (10) distinct destinations in its window, so destinations 11+ carry
+//!   no verdict information. The pre-#16498 code nevertheless kept
+//!   inserting them into a per-source `FxHashSet` up to
+//!   `MAX_UNIQUE_PER_SOURCE` (1024): a spoofed-source fan-out flood could
+//!   pin ~144 MiB (ip-sweep: 4096 sources x 1024 `IpAddr` buckets) +
+//!   ~24 MiB (port-scan: 4096 x 1024 `u16` buckets) of heap per worker
+//!   per screened zone (~1 GiB at 6 workers with both screens on), the
+//!   window reset's `clear()` RETAINED that bucket allocation, and the
+//!   least-suspicious eviction preserved the fullest sets. Each source
+//!   now stores its distinct destinations in an inline
+//!   `[Option<T>; SCAN_DETECT_COUNT]` buffer (no heap allocation, nothing
+//!   retained across a window reset). New distinct destinations beyond
+//!   the count are not stored — `check` still returns the (already-true)
+//!   verdict and counts them on `skipped_pressure`, exactly as the old
+//!   over-cap path did — and no destination is ever hashed 11-1024 times
+//!   for zero verdict gain.
+//!
+//!   The published per-worker, per-zone bound (both screens armed) is
+//!   therefore FIXED-SIZE per source: at `MAX_SOURCES_PER_ZONE` (4096)
+//!   sources, `SrcEntry<IpAddr>` is 200 B and `SrcEntry<u16>` is 64 B
+//!   per source (inline buffer included), i.e. at most
+//!   `4096 x (200 + 64)` B = 1,081,344 B ~= 1.03 MiB per worker per zone
+//!   for the per-source records, plus the `per_src` / `per_zone_srcs` /
+//!   `key_ring` index overhead shared by the source AXIS (its layout did
+//!   not change). The old per-source sets ALONE added up to ~168 MiB on
+//!   top of that. The `per_source_state_capped_at_detect_count_16498`
+//!   cell in `scan_tests` measures the record sizes and the saturated
+//!   inner-byte total so this bound is a tested fact, not a comment.
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::IpAddr;
 
@@ -143,17 +176,24 @@ use std::net::IpAddr;
 const MAX_SOURCES_PER_ZONE: usize = 4096;
 
 /// Maximum unique entries (dst ports for port-scan, dst IPs for IP-sweep)
-/// tracked per source within the window. This caps memory for a source
-/// whose unique fan-out is large; the bounded set can hold at most
-/// `MAX_UNIQUE_PER_SOURCE` entries.
+/// RECORDED per source within the window (#16498).
 ///
-/// This is purely a MEMORY bound. Detection fires at the fixed
-/// [`SCAN_DETECT_COUNT`] (10), which is far below this cap, so the verdict is
-/// never gated by it. #4114 removed the pre-existing configurable-COUNT
-/// semantics (and its `MAX_UNIQUE_PER_SOURCE - 1` fail-closed clamp): the
-/// detection count is now a fixed Junos constant well under this cap, and the
-/// configurable `threshold` is the detection WINDOW in microseconds instead.
-const MAX_UNIQUE_PER_SOURCE: usize = 1024;
+/// #16498: this IS [`SCAN_DETECT_COUNT`]. Detection fires at the fixed
+/// count (10), so distinct destinations 11+ carry no verdict information;
+/// recording them (the pre-#16498 cap was 1024) only grew attacker-driven
+/// heap ~100x past what detection requires — 4096 saturated sources per
+/// zone pinned ~144 MiB (ip-sweep) + ~24 MiB (port-scan) per worker per
+/// screened zone, the window-reset `clear()` retained the allocation, and
+/// least-suspicious eviction preserved the fullest sets. The recorded
+/// entries now live in an inline `[Option<T>; SCAN_DETECT_COUNT]` buffer
+/// in `SrcEntry` (no heap, nothing retained across a reset), and a new
+/// distinct destination beyond the count is not stored: `check` still
+/// returns the already-true verdict and counts it on `skipped_pressure`,
+/// exactly as the pre-existing over-cap path did. #4114 had already
+/// removed the configurable-COUNT semantics (and its
+/// `MAX_UNIQUE_PER_SOURCE - 1` fail-closed clamp); this change removes
+/// the now-pointless gap between the memory cap and the fixed count.
+const MAX_UNIQUE_PER_SOURCE: usize = SCAN_DETECT_COUNT;
 
 /// Maximum candidates a single `cleanup` call EXAMINES — and therefore the
 /// most it can remove — per tick (#6239). Bounds the worst-case per-tick
@@ -217,9 +257,9 @@ pub(super) const SCAN_DETECT_COUNT: usize = 10;
 /// [`ScanCore::check`] at INSERT time, so the table is bounded regardless of
 /// the window — a longer floor only defers reclamation of idle entries, it
 /// cannot grow the ceiling. The 71-min worst case is bounded by the SAME
-/// 4096-source / 1024-entry caps as a 5-min or 5-second window. The exact
-/// per-zone `window_micros` still governs the inline reset/verdict in
-/// [`ScanCore::check`] and the eviction path.
+/// 4096-source / 10-entry inline buffers (#16498) as a 5-min or 5-second
+/// window. The exact per-zone `window_micros` still governs the inline
+/// reset/verdict in [`ScanCore::check`] and the eviction path.
 const MAX_CLEANUP_WINDOW_MICROS: u64 = u32::MAX as u64;
 
 /// Compile-time guard: the eviction sample must be smaller than the per-zone
@@ -229,10 +269,11 @@ const MAX_CLEANUP_WINDOW_MICROS: u64 = u32::MAX as u64;
 /// saturated (`per_zone_srcs[zone].len() >= MAX_SOURCES_PER_ZONE`).
 const _: () = assert!(EVICT_SCAN_LIMIT > 0 && EVICT_SCAN_LIMIT < MAX_SOURCES_PER_ZONE);
 
-/// Compile-time guard: the fixed detection count must sit strictly below the
-/// per-source memory cap so a scanning source can always reach it before the
-/// bounded set saturates (otherwise detection could never fire) (#4114).
-const _: () = assert!(SCAN_DETECT_COUNT > 0 && SCAN_DETECT_COUNT < MAX_UNIQUE_PER_SOURCE);
+/// Compile-time guard (#16498): the per-source recorded-entry cap EQUALS the
+/// fixed detection count — a scanning source reaches detection exactly as
+/// its inline buffer fills, and no destination beyond the verdict is ever
+/// stored. `SCAN_DETECT_COUNT` must stay positive.
+const _: () = assert!(SCAN_DETECT_COUNT > 0 && MAX_UNIQUE_PER_SOURCE == SCAN_DETECT_COUNT);
 
 /// Test-only accessor for the per-zone source cap, used by the
 /// `ScreenState`-level bounded-state test in `screen/tests.rs`.
@@ -258,15 +299,86 @@ type ScanKey = (u16, IpAddr);
 /// [`ScanCore::insert_src`] / [`ScanCore::remove_src`]; nothing outside those
 /// primitives may mutate it.
 #[derive(Debug, Clone)]
-struct SrcEntry<T> {
-    /// Window open time (monotonic microseconds). The distinct-entry set is
-    /// cleared and this is reset once the configured window elapses.
+struct SrcEntry<T: Copy> {
+    /// Window open time (monotonic microseconds). The distinct-entry
+    /// buffer is reset (`count = 0`) once the configured window elapses.
     window_start: u64,
-    /// Distinct destinations (dst ports for port-scan, dst IPs for IP-sweep)
-    /// seen within the current window; bounded to `MAX_UNIQUE_PER_SOURCE`.
-    entries: FxHashSet<T>,
+    /// Distinct destinations (dst ports for port-scan, dst IPs for
+    /// IP-sweep) seen within the current window, stored inline (#16498).
+    /// Detection needs only the first [`SCAN_DETECT_COUNT`] distinct
+    /// values, so the buffer never holds more: no heap set per source.
+    entries: [Option<T>; SCAN_DETECT_COUNT],
+    /// Number of non-`None` slots in `entries` (`0..=SCAN_DETECT_COUNT`).
+    count: usize,
     /// This key's position in `key_ring` — the O(1) swap-remove index.
     slot: usize,
+}
+
+impl<T: Copy> SrcEntry<T> {
+    /// Number of distinct destinations recorded in the current window
+    /// (`0..=SCAN_DETECT_COUNT`; saturates AT the detection count).
+    #[inline]
+    fn distinct_count(&self) -> usize {
+        self.count
+    }
+
+    /// Whether the window currently records no destination.
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Reset the window's distinct-destination record (#16498). No heap
+    /// is owned, so there is nothing to retain — the pre-#16498
+    /// `FxHashSet::clear` kept the 1024-entry bucket allocation alive
+    /// across the reset.
+    #[inline]
+    fn reset_entries(&mut self) {
+        self.entries = [None; SCAN_DETECT_COUNT];
+        self.count = 0;
+    }
+
+    /// Record `val` if new. Returns `true` iff `val` was not already
+    /// present AND was stored. Once `count == SCAN_DETECT_COUNT` the
+    /// verdict is already decided, so a further distinct value is not
+    /// stored (the caller counts it as cap pressure) and memory/CPU
+    /// stay at the detection bound (#16498).
+    #[inline]
+    fn insert_unique(&mut self, val: T) -> bool
+    where
+        T: Eq,
+    {
+        if self.entries[..self.count].contains(&Some(val)) {
+            return false;
+        }
+        if self.count >= SCAN_DETECT_COUNT {
+            return false;
+        }
+        self.entries[self.count] = Some(val);
+        self.count += 1;
+        true
+    }
+
+    /// Whether `val` is one of the recorded destinations. Only the first
+    /// [`SCAN_DETECT_COUNT`] distinct destinations are recorded, so a
+    /// destination first seen after the count was reached is NOT recorded
+    /// and reports `false` (it counts as cap pressure on every arrival).
+    #[inline]
+    fn contains_recorded(&self, val: &T) -> bool
+    where
+        T: Eq,
+    {
+        self.entries[..self.count].contains(&Some(*val))
+    }
+
+    /// In-memory size of this per-source record (#16498, test-only): the
+    /// inline record itself. There is no heap set, so this is the WHOLE
+    /// per-source inner-state cost — pre-#16498 a saturated ip-sweep
+    /// source additionally held a 36,880 B heap set.
+    #[cfg(test)]
+    fn recorded_entry_bytes(&self) -> usize {
+        size_of::<Self>()
+    }
 }
 
 /// Shared bounded windowed-unique tracker core (#2209/#2227/#2234). Both
@@ -276,7 +388,7 @@ struct SrcEntry<T> {
 /// "one source of truth" — the pre-#2234 free functions duplicated the
 /// formula across the two trackers).
 #[derive(Debug, Clone)]
-struct ScanCore<T: std::hash::Hash + Eq> {
+struct ScanCore<T: Copy + Eq + std::hash::Hash> {
     per_src: FxHashMap<ScanKey, SrcEntry<T>>,
     /// Per-zone index of the distinct source IPs tracked in `per_src`
     /// (`zone_id -> {src_ip}`). The per-zone source count is
@@ -338,10 +450,11 @@ struct ScanCore<T: std::hash::Hash + Eq> {
     #[cfg(test)]
     evict_examined_log: Vec<ScanKey>,
     /// Count of records skipped because a per-source unique-entry cap was
-    /// hit, or because eviction could not free a same-zone slot within the
-    /// bounded per-zone sample (rare). Pure observability — exposed for the
-    /// bounded-state tests and the screen status surface. Never affects a
-    /// verdict.
+    /// hit (#16498: a distinct destination arriving after the detection
+    /// count was already recorded), or because eviction could not free a
+    /// same-zone slot within the bounded per-zone sample (rare). Pure
+    /// observability — exposed for the bounded-state tests and the screen
+    /// status surface. Never affects a verdict.
     skipped_pressure: u64,
     /// Count of stalest-eviction events on the source-saturation path
     /// (#2234): a brand-new source displaced an expired-or-stalest existing
@@ -354,13 +467,13 @@ struct ScanCore<T: std::hash::Hash + Eq> {
     pressure_event_at: u64,
 }
 
-impl<T: std::hash::Hash + Eq> Default for ScanCore<T> {
+impl<T: Copy + Eq + std::hash::Hash> Default for ScanCore<T> {
     fn default() -> Self {
         Self::with_seed(crate::hot_hash_seed::hot_path_hash_seed())
     }
 }
 
-impl<T: std::hash::Hash + Eq> ScanCore<T> {
+impl<T: Copy + Eq + std::hash::Hash> ScanCore<T> {
     /// Seed-pinned constructor (#14673). Production goes through `Default`,
     /// which draws the per-boot secret; tests pin the seed to assert
     /// seed-dependent start offsets and cross-seed reshuffling.
@@ -384,7 +497,7 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
     }
 }
 
-impl<T: std::hash::Hash + Eq> ScanCore<T> {
+impl<T: Copy + Eq + std::hash::Hash> ScanCore<T> {
     /// Bounded windowed-unique check (#4114 Junos semantics). `entry_val` is
     /// the per-(zone_id, src_ip) unique entry (dst port or dst IP). Detection
     /// fires when the distinct-entry count reaches the FIXED
@@ -405,12 +518,13 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
     ///   decoy flood within one sample; the skip-on-full fallback (bumps
     ///   `skipped_pressure`, returns `false`) remains only as a defensive
     ///   guard for a zone below the cap with no evictable entry (bounded).
-    /// - a new unique entry for a source whose set already holds
-    ///   `MAX_UNIQUE_PER_SOURCE` entries is SKIPPED, but the fixed detection
-    ///   count is still evaluated against the current (capped) set size. The
-    ///   count (10) sits well below the cap (1024), so the memory bound never
-    ///   gates the verdict (#4114 removed the pre-existing configurable-count
-    ///   fail-closed clamp — there is no operator count to exceed the cap).
+    /// - a new distinct entry for a source that already holds
+    ///   `SCAN_DETECT_COUNT` recorded destinations is NOT stored (#16498:
+    ///   the verdict is already decided; storing it would only grow
+    ///   attacker-driven heap). It counts as `skipped_pressure` — as the
+    ///   pre-#16498 over-1024 path did — and the verdict is still evaluated
+    ///   against the recorded count, which is exactly the detection count,
+    ///   so the memory bound can never gate or mask the verdict.
     #[inline]
     fn check(
         &mut self,
@@ -448,23 +562,26 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
             .get_mut(&key)
             .expect("entry inserted above or pre-existing");
         // Reset the window if the configured microsecond window has elapsed
-        // since it opened.
+        // since it opened. #16498: the distinct destinations live in an
+        // inline buffer, so a reset frees nothing and retains nothing —
+        // there is no bucket allocation for `clear()` to keep alive.
         if now_micros.saturating_sub(entry.window_start) >= window_micros {
             entry.window_start = now_micros;
-            entry.entries.clear();
+            entry.reset_entries();
         }
-        // Per-source unique-entry bound: once the set is full, skip new
-        // entries (counting pressure) but still evaluate the detection count.
-        if entry.entries.len() >= MAX_UNIQUE_PER_SOURCE {
-            if !entry.entries.contains(&entry_val) {
-                self.skipped_pressure += 1;
-            }
-        } else {
-            entry.entries.insert(entry_val);
+        // Per-source unique-entry bound (#16498): once the source holds
+        // SCAN_DETECT_COUNT distinct destinations the verdict is already
+        // decided, so a further DISTINCT destination is not stored — it is
+        // counted as cap pressure and the verdict below is still evaluated
+        // (and stays true). Pre-#16498 this kept hashing/inserting into a
+        // heap set up to 1024 entries for zero verdict gain. A repeat of an
+        // already-recorded destination is neither stored nor pressure.
+        if !entry.insert_unique(entry_val) && !entry.contains_recorded(&entry_val) {
+            self.skipped_pressure += 1;
         }
         // Junos verdict: fire once the source has touched SCAN_DETECT_COUNT
         // distinct destinations within the window.
-        entry.entries.len() >= SCAN_DETECT_COUNT
+        entry.distinct_count() >= SCAN_DETECT_COUNT
     }
 
     /// Insert a brand-new source key, wiring `per_src`, the per-zone source
@@ -480,7 +597,8 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
             key,
             SrcEntry {
                 window_start: now_micros,
-                entries: FxHashSet::default(),
+                entries: [None; SCAN_DETECT_COUNT],
+                count: 0,
                 slot,
             },
         );
@@ -635,13 +753,13 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
                 }
             };
             // An expired-or-empty window is dead weight — evict it first.
-            if now_micros.saturating_sub(e.window_start) >= window_micros || e.entries.is_empty() {
+            if now_micros.saturating_sub(e.window_start) >= window_micros || e.is_empty() {
                 expired_victim = Some(src);
                 break;
             }
             // Least-suspicious first: fewest distinct destinations, then
             // the stalest window on a tie (#4418 / #2234).
-            let count = e.entries.len();
+            let count = e.distinct_count();
             if count < victim_count || (count == victim_count && e.window_start < victim_start) {
                 victim_count = count;
                 victim_start = e.window_start;
@@ -698,12 +816,12 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
                             continue;
                         };
                         if now_micros.saturating_sub(e.window_start) >= window_micros
-                            || e.entries.is_empty()
+                            || e.is_empty()
                         {
                             exp2 = Some(*src);
                             break;
                         }
-                        let count = e.entries.len();
+                        let count = e.distinct_count();
                         if count < v2_count || (count == v2_count && e.window_start < v2_start) {
                             v2_count = count;
                             v2_start = e.window_start;
@@ -789,9 +907,7 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
             self.examined_log.push(key);
             examined += 1;
             let expired = match self.per_src.get(&key) {
-                Some(e) => {
-                    now_micros.saturating_sub(e.window_start) >= floor || e.entries.is_empty()
-                }
+                Some(e) => now_micros.saturating_sub(e.window_start) >= floor || e.is_empty(),
                 // Ring/table skew (should not happen — lock-step maintained);
                 // reclaim the dangling ring slot defensively.
                 None => true,
@@ -1027,13 +1143,28 @@ mod scan_tests {
     }
 
     /// Build a `SrcEntry` for tests that seed `per_src` DIRECTLY (bypassing
-    /// [`ScanCore::check`]). The `slot` back-pointer is a placeholder; every
-    /// such test then calls [`ScanCore::rebuild_zone_index_for_test`], which
-    /// rebuilds the ring and stamps the correct slot indices (#6239).
-    fn seed_entry<T>(window_start: u64, entries: FxHashSet<T>) -> SrcEntry<T> {
+    /// [`ScanCore::check`]). `entries` is drained into the inline buffer;
+    /// the count is capped at `SCAN_DETECT_COUNT` per #16498, so a seeded
+    /// set larger than that keeps only its first `SCAN_DETECT_COUNT`
+    /// values. No seed needs more: the largest legitimate seed is
+    /// `SCAN_DETECT_COUNT - 1` (a near-threshold scanner). The `slot`
+    /// back-pointer is a placeholder; every such test then calls
+    /// [`ScanCore::rebuild_zone_index_for_test`], which rebuilds the ring
+    /// and stamps the correct slot indices (#6239).
+    fn seed_entry<T: Copy>(window_start: u64, entries: FxHashSet<T>) -> SrcEntry<T> {
+        let mut buf = [None; SCAN_DETECT_COUNT];
+        let mut count = 0;
+        for v in entries.iter().copied() {
+            if count >= SCAN_DETECT_COUNT {
+                break;
+            }
+            buf[count] = Some(v);
+            count += 1;
+        }
         SrcEntry {
             window_start,
-            entries,
+            entries: buf,
+            count,
             slot: 0,
         }
     }
@@ -1168,14 +1299,20 @@ mod scan_tests {
         let mut t = IpSweepTracker::default();
         let src = v4(1);
         // A single wide window (nothing resets); flood unique dst IPs past the
-        // per-source memory cap. Detection fires early (ignored) but the set
-        // is still bounded at MAX_UNIQUE_PER_SOURCE.
+        // per-source recorded-entry cap. Detection fires at the 10th (ignored
+        // here) and #16498 records nothing beyond it.
         for i in 0..(MAX_UNIQUE_PER_SOURCE + 100) {
             let dst = IpAddr::V4(Ipv4Addr::from(0x0c00_0000u32 + i as u32));
             t.check(7, src, dst, 100, 1_000_000);
         }
-        // The inner set is capped; the surplus is recorded as pressure.
+        // The recorded destinations stay at the detection count; the surplus
+        // distinct destinations are recorded as pressure (one each).
         assert_eq!(t.tracked_sources(), 1);
+        assert_eq!(
+            t.core.per_src.get(&(7, src)).map(SrcEntry::distinct_count),
+            Some(SCAN_DETECT_COUNT),
+            "recorded destinations must cap AT the detection count (#16498)"
+        );
         assert!(
             t.skipped_pressure() >= 100,
             "surplus unique entries record pressure: {}",
@@ -1283,7 +1420,8 @@ mod scan_tests {
             s
         };
         let stale_src = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1));
-        core.per_src.insert((9, stale_src), seed_entry(100, nonempty(1)));
+        core.per_src
+            .insert((9, stale_src), seed_entry(100, nonempty(1)));
         for i in 2..=8u32 {
             let s = IpAddr::V4(Ipv4Addr::from(0x0a09_0000u32 + i));
             core.per_src
@@ -1348,14 +1486,15 @@ mod scan_tests {
         let mut core: ScanCore<u16> = ScanCore::default();
         let zone = 9u16;
         let window = 1_000_000u64; // 1s — every seeded entry is LIVE below
-        // The slow scanner opened its window FIRST (oldest start=100) and has
-        // already probed SCAN_DETECT_COUNT-1 distinct ports (near threshold).
+                                   // The slow scanner opened its window FIRST (oldest start=100) and has
+                                   // already probed SCAN_DETECT_COUNT-1 distinct ports (near threshold).
         let scanner = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
         let mut scanner_set = FxHashSet::default();
         for p in 0..(SCAN_DETECT_COUNT as u16 - 1) {
             scanner_set.insert(8000 + p);
         }
-        core.per_src.insert((zone, scanner), seed_entry(100, scanner_set));
+        core.per_src
+            .insert((zone, scanner), seed_entry(100, scanner_set));
         // Fill the rest of a full bounded sample with FRESHER decoys at count 1
         // (a high-cardinality spoofed flood: one probe each, later windows).
         for i in 1..EVICT_SCAN_LIMIT as u64 {
@@ -1363,7 +1502,8 @@ mod scan_tests {
             let mut s = FxHashSet::default();
             s.insert(1u16);
             // fresher than scanner
-            core.per_src.insert((zone, d), seed_entry(100 + i, s));
+            core.per_src
+                .insert((zone, d), seed_entry(100 + i as u64, s));
         }
         core.rebuild_zone_index_for_test();
         // `now` after every start but well within the 1s window → nothing is
@@ -1443,7 +1583,8 @@ mod scan_tests {
             for p in 0..count {
                 set.insert(9000 + p);
             }
-            core.per_src.insert((target_zone, src), seed_entry(start, set));
+            core.per_src
+                .insert((target_zone, src), seed_entry(start, set));
             src
         };
         let victim = seed(1, 2); // fewest distinct dsts → the eviction victim
@@ -1662,9 +1803,9 @@ mod scan_tests {
         // A 10-minute operator window (> the pre-#4418 5-min cleanup cap). This
         // is what #4379/#4418 passes to cleanup as the window-aware reap floor.
         let window = 600_000_000u64; // 10 min
-        // Ten distinct probes spread one per minute → the span (9 min) exceeds
-        // the old 5-min cap but stays inside the 10-min window, so every probe
-        // is within the window and the count must accumulate to the trip.
+                                     // Ten distinct probes spread one per minute → the span (9 min) exceeds
+                                     // the old 5-min cap but stays inside the 10-min window, so every probe
+                                     // is within the window and the count must accumulate to the trip.
         let step = 60_000_000u64; // 1 min between probes
         let mut now = 1_000_000u64;
         let mut fired = false;
@@ -1734,11 +1875,12 @@ mod scan_tests {
         );
     }
 
-    /// #4379: the memory caps still bound state independently of the
+    /// #4379/#16498: the memory caps still bound state independently of the
     /// window-aware cleanup floor. Even with a huge window (so cleanup would
-    /// retain everything), a single source's unique-entry set is capped at
-    /// `MAX_UNIQUE_PER_SOURCE` and the surplus is counted as pressure — the
-    /// cleanup floor change does not unbound memory.
+    /// retain everything), a single source records at most
+    /// `MAX_UNIQUE_PER_SOURCE` (= `SCAN_DETECT_COUNT`, #16498) destinations
+    /// and the surplus is counted as pressure — the cleanup floor change
+    /// does not unbound memory.
     #[test]
     fn memory_caps_bound_state_under_wide_window() {
         let mut t = IpSweepTracker::default();
@@ -1749,9 +1891,16 @@ mod scan_tests {
             t.check(9, src, dst, 100, wide);
         }
         assert_eq!(t.tracked_sources(), 1);
+        assert_eq!(
+            t.core.per_src.get(&(9, src)).map(SrcEntry::distinct_count),
+            Some(MAX_UNIQUE_PER_SOURCE),
+            "recorded destinations must cap at MAX_UNIQUE_PER_SOURCE even \
+             under a wide window (#16498)"
+        );
         assert!(
             t.skipped_pressure() >= 50,
-            "the per-source set stays capped even under a wide window: {}",
+            "the per-source recorded destinations stay capped even under a \
+             wide window: {}",
             t.skipped_pressure()
         );
     }
@@ -1922,11 +2071,7 @@ mod scan_tests {
     }
     /// #14673 helpers: seed a core with `n` zone-`zone` entries of given
     /// `(src, count, window_start)` directly (O(few), bypasses the cap).
-    fn seed_core(
-        seed: u64,
-        zone: u16,
-        specs: &[(IpAddr, u16, u64)],
-    ) -> ScanCore<u16> {
+    fn seed_core(seed: u64, zone: u16, specs: &[(IpAddr, u16, u64)]) -> ScanCore<u16> {
         let mut core: ScanCore<u16> = ScanCore::with_seed(seed);
         for (src, count, start) in specs {
             let mut set = FxHashSet::default();
@@ -1937,6 +2082,142 @@ mod scan_tests {
         }
         core.rebuild_zone_index_for_test();
         core
+    }
+
+    /// #16498 decisive regression (the reported defect): ONE source driven
+    /// with 2000 DISTINCT destinations inside ONE window. Detection must
+    /// fire exactly on the 10th distinct destination and stay fired, the
+    /// recorded destinations must NEVER exceed `SCAN_DETECT_COUNT` (the
+    /// pre-#16498 code grew the inner `FxHashSet` to 1024 entries — the
+    /// `distinct_count()` / `recorded_entry_bytes` assertions are RED on
+    /// that shape), and every further DISTINCT destination counts as cap
+    /// pressure while a REPEAT of an already-recorded destination does
+    /// not (it was recorded, not skipped). Both instantiations (`IpAddr`
+    /// ip-sweep, `u16` port-scan) are driven.
+    #[test]
+    fn single_source_fanout_capped_at_detect_count_16498() {
+        let mut sweep = IpSweepTracker::default();
+        let src = v4(1);
+        let mut fired_at = None;
+        for i in 0..2000u32 {
+            let dst = IpAddr::V4(Ipv4Addr::from(0x0a64_0000u32 + i));
+            if sweep.check(0, src, dst, 1_000, 1_000_000) && fired_at.is_none() {
+                fired_at = Some(i + 1);
+            }
+        }
+        assert_eq!(
+            fired_at,
+            Some(SCAN_DETECT_COUNT as u32),
+            "detection must fire exactly on the SCAN_DETECT_COUNT-th distinct \
+             destination"
+        );
+        let entry = sweep.core.per_src.get(&(0, src)).unwrap();
+        assert_eq!(
+            entry.distinct_count(),
+            SCAN_DETECT_COUNT,
+            "recorded destinations must cap AT the detection count (#16498): \
+             pre-fix this source held a 1024-entry heap set"
+        );
+        assert!(
+            entry.recorded_entry_bytes() <= SCAN_DETECT_COUNT * size_of::<IpAddr>() + 64,
+            "the recorded destinations occupy inline slots only ({} B), never \
+             a grown heap set",
+            entry.recorded_entry_bytes()
+        );
+        assert_eq!(
+            sweep.skipped_pressure(),
+            (2000 - SCAN_DETECT_COUNT) as u64,
+            "each distinct destination past the detection count counts once \
+             as cap pressure"
+        );
+        // A repeat of an already-recorded destination is not new pressure
+        // and does not change the verdict.
+        let first = IpAddr::V4(Ipv4Addr::from(0x0a64_0000u32));
+        assert!(sweep.check(0, src, first, 1_000, 1_000_000));
+        assert_eq!(
+            sweep.skipped_pressure(),
+            (2000 - SCAN_DETECT_COUNT) as u64,
+            "repeating a recorded destination must not count as pressure"
+        );
+        assert_eq!(
+            sweep
+                .core
+                .per_src
+                .get(&(0, src))
+                .map(SrcEntry::distinct_count),
+            Some(SCAN_DETECT_COUNT)
+        );
+
+        // Port-scan instantiation (`u16` destinations).
+        let mut scan = PortScanTracker::default();
+        let mut fired_at = None;
+        for port in 0..2000u16 {
+            if scan.check(0, src, port, 1_000, 1_000_000) && fired_at.is_none() {
+                fired_at = Some(port + 1);
+            }
+        }
+        assert_eq!(fired_at, Some(SCAN_DETECT_COUNT as u16));
+        let entry = scan.core.per_src.get(&(0, src)).unwrap();
+        assert_eq!(entry.distinct_count(), SCAN_DETECT_COUNT);
+        assert!(
+            entry.recorded_entry_bytes() <= SCAN_DETECT_COUNT * size_of::<Option<u16>>() + 64,
+            "port-scan destinations occupy inline slots only ({} B)",
+            entry.recorded_entry_bytes()
+        );
+        assert_eq!(scan.skipped_pressure(), (2000 - SCAN_DETECT_COUNT) as u64);
+    }
+
+    /// #16498 zone-fill bound: a full zone (every source saturated at the
+    /// detection count, the attack shape from the report) holds at most
+    /// `MAX_SOURCES_PER_ZONE x per-source record` bytes for the per-source
+    /// records of EACH tracker — a small constant per source, not the
+    /// pre-#16498 ~36 KiB (ip-sweep) / ~6 KiB (port-scan) of grown heap set
+    /// per source. The measured record sizes also pin the module-doc
+    /// per-worker/per-zone byte bound (200 B / 64 B on this target).
+    #[test]
+    fn per_source_state_capped_at_detect_count_16498() {
+        assert_eq!(
+            MAX_UNIQUE_PER_SOURCE, SCAN_DETECT_COUNT,
+            "#16498: the recorded-entry cap IS the detection count"
+        );
+        assert_eq!(size_of::<[Option<IpAddr>; SCAN_DETECT_COUNT]>(), 170);
+        assert_eq!(size_of::<[Option<u16>; SCAN_DETECT_COUNT]>(), 40);
+        assert_eq!(size_of::<SrcEntry<IpAddr>>(), 200);
+        assert_eq!(size_of::<SrcEntry<u16>>(), 64);
+
+        // Zone fill: every source at the detection count.
+        let mut sweep: ScanCore<IpAddr> = ScanCore::default();
+        for i in 0..MAX_SOURCES_PER_ZONE {
+            let s = IpAddr::V4(Ipv4Addr::from(0x0a00_0000u32 + i as u32));
+            for d in 0..SCAN_DETECT_COUNT as u32 {
+                sweep.check(
+                    0,
+                    s,
+                    IpAddr::V4(Ipv4Addr::from(0x0e00_0000u32 + d)),
+                    100,
+                    1_000_000,
+                );
+            }
+        }
+        assert_eq!(sweep.per_src.len(), MAX_SOURCES_PER_ZONE);
+        assert!(
+            sweep
+                .per_src
+                .values()
+                .all(|e| e.distinct_count() == SCAN_DETECT_COUNT),
+            "every saturated source records exactly the detection count"
+        );
+        let sweep_bytes: usize = sweep
+            .per_src
+            .values()
+            .map(SrcEntry::recorded_entry_bytes)
+            .sum();
+        assert_eq!(
+            sweep_bytes,
+            MAX_SOURCES_PER_ZONE * size_of::<SrcEntry<IpAddr>>(),
+            "a saturated ip-sweep zone holds sources x one fixed-size record"
+        );
+        sweep.assert_consistent();
     }
 
     /// #14673 decisive regression (static-prefix self-evict): the report's
@@ -2069,8 +2350,7 @@ mod scan_tests {
             })
             .collect();
         let mut core = seed_core(7, zone, &specs);
-        let expected: FxHashSet<ScanKey> =
-            core.key_ring.iter().copied().collect();
+        let expected: FxHashSet<ScanKey> = core.key_ring.iter().copied().collect();
         let mut seen: FxHashSet<ScanKey> = FxHashSet::default();
         let mut fresh_counter: u32 = 0;
         for _ in 0..(total * 3) {
@@ -2147,13 +2427,7 @@ mod scan_tests {
         let zone = 3u16;
         let window = 1_000_000u64;
         let specs: Vec<(IpAddr, u16, u64)> = (0..128u32)
-            .map(|i| {
-                (
-                    IpAddr::V4(Ipv4Addr::from(0x0a03_0000u32 + i)),
-                    3u16,
-                    100,
-                )
-            })
+            .map(|i| (IpAddr::V4(Ipv4Addr::from(0x0a03_0000u32 + i)), 3u16, 100))
             .collect();
         let first_of = |seed: u64| -> ScanKey {
             let mut core = seed_core(seed, zone, &specs);
@@ -2176,13 +2450,7 @@ mod scan_tests {
         let zone = 5u16;
         let expired_src = IpAddr::V4(Ipv4Addr::new(10, 5, 0, 50));
         let mut specs: Vec<(IpAddr, u16, u64)> = (0..100u32)
-            .map(|i| {
-                (
-                    IpAddr::V4(Ipv4Addr::from(0x0a05_1000u32 + i)),
-                    1u16,
-                    1_000,
-                )
-            })
+            .map(|i| (IpAddr::V4(Ipv4Addr::from(0x0a05_1000u32 + i)), 1u16, 1_000))
             .collect();
         specs.push((expired_src, 0, 0));
         // Only the empty expired entry (window_start 0) is expired at
@@ -2248,7 +2516,10 @@ mod scan_tests {
                 "scanner must survive decoy-triggered eviction round {round} (#14673)"
             );
         }
-        assert!(detected, "scanner must reach SCAN_DETECT_COUNT through decoy evictions");
+        assert!(
+            detected,
+            "scanner must reach SCAN_DETECT_COUNT through decoy evictions"
+        );
         assert_eq!(t.tracked_sources(), MAX_SOURCES_PER_ZONE);
     }
 }

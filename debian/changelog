@@ -12,6 +12,21 @@ xpf (0.0.0) unstable; urgency=medium
     instead of by the 5 ms Go ack deadline; enforcement is unchanged
     (fail-closed either way).
 
+  * Screen: cap per-source scan/sweep state at the detection count
+    (#16498). Port-scan/IP-sweep detection fires at 10 distinct
+    destinations per source window, but each source kept inserting
+    into a heap set up to 1024 entries, the window reset retained
+    that allocation, and eviction preserved the fullest sets — a
+    spoofed-source fan-out flood could pin ~144 MiB (ip-sweep)
+    plus ~24 MiB (port-scan) per worker per screened zone.
+    Recorded destinations now live in an inline 10-slot buffer in
+    each source record (no per-source heap), the recorded-entry cap
+    equals the detection count, and distinct destinations past the
+    count count on the existing skipped-pressure signal with the
+    verdict unchanged. Saturated per-source records are 200 B
+    (ip-sweep) / 64 B (port-scan), i.e. at most ~1.03 MiB per
+    worker per zone for both screens' source records.
+
   * Userspace DP: stop cloning counter/policer handles on live
     TX-selection walks (#16496). `merge_matched_tx_modifiers` pushed
     an `Arc::clone` of every matched term's counter and three-color
