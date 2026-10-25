@@ -1779,6 +1779,15 @@ type compileOpts struct {
 	// BOOTS (#1960). The child is inert either way: compileApplications
 	// reads only `application` and `application-set`.
 	lenientApplicationsLevelChildren16459 bool
+	// lenientIPMonThenChildren16712 (#16712) downgrades
+	// validateIPMonThenChildrenAST16712 from a hard compile error to a
+	// cfg.Warnings entry on the tolerant load / peer-sync paths, so a
+	// persisted or peer-synced config carrying an undeclared
+	// `services ip-monitoring policy <p> then` child (the Junos
+	// `then interface <if> enable|disable` action, or a typo) still
+	// BOOTS (#1960). The child is inert either way:
+	// compileIPMonitoring reads only `preferred-route` under `then`.
+	lenientIPMonThenChildren16712 bool
 	// lenientRoutingRuleWindows (#5854) downgrades the next-table / rib-group
 	// ip-rule admission-cap gate (validateRoutingRuleWindowsStrict) from a hard
 	// compile error to a cfg.Warnings entry. The runtime applier caps admitted
@@ -3945,6 +3954,7 @@ func lenientCompileOpts() compileOpts {
 		lenientTunnelRITarget12520:               true,
 		lenientDHCPRelayChildTokens:              true,
 		lenientApplicationsLevelChildren16459:    true,
+		lenientIPMonThenChildren16712:            true,
 		lenientDHCPRelayV4Config:                 true,
 		lenientRoutingRuleWindows:                true,
 		lenientPolicyRouteMapSeq:                 true,

@@ -1887,6 +1887,29 @@ warns once per distinct finding and keeps the pre-existing compiled
 shape (#1960). Coverage:
 `pkg/config/applications_level_16459_test.go` (flat + hierarchical,
 packed, group-inherited, controls for term bodies and apply-macro).
+### IP-monitoring `then` — unknown children are gated (#16712)
+
+`services ip-monitoring policy <p> then` was open-world and
+`compileIPMonitoring` reads only `preferred-route` under it, so the
+Junos interface action `then interface <if> enable|disable`
+committed clean with no warning and never ran — the backup
+interface was never enabled (or the primary never disabled) on
+probe failure, while the preferred-route half of the same policy
+still worked. The scoped pre-walk gate
+`validateIPMonThenChildrenAST16712` (in `runPreWalkGates`) judges
+exactly the `then` level against the schema-declared children
+(`preferred-route`), reading the permitted set from the schema,
+across flat-set, hierarchical, packed and group-inherited shapes.
+It is deliberately NOT `closedWorld` on `then`, which inherits
+into `preferred-route`/`route` and fires only on `SchemaValidate`;
+the gate covers both compile paths. Apply statements (#7029) are
+never judged. Strict commit rejects naming the policy and the
+unsupported interface action; tolerant load/peer-sync warns once
+per distinct finding and keeps the pre-existing compiled shape
+(#1960). Coverage: `pkg/config/ipmon_then_children_16712_test.go`
+and `pkg/configstore/ipmon_then_commit_16712_test.go` (flat +
+hierarchical + packed + group-inherited, CheckText and Store
+Commit, preferred-route-only control).
 ### Chassis cluster / redundancy-group levels — unknown statements are gated (#16456)
 
 The `chassis cluster` body and the `chassis cluster redundancy-group <n>`
