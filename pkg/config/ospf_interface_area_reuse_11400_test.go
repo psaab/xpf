@@ -253,8 +253,8 @@ func TestOSPFAreaInterfaceUnionDefaultsAndMD5Rollover12186(t *testing.T) {
 
 func TestOSPFCompilerKeepsSameInterfaceMD5Rollover12186(t *testing.T) {
 	cfg, err := CompileConfig(buildTree(t, []string{
-		"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 7 key same-interface-seven",
-		"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 8 key same-interface-eight",
+		"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 7 key same-seven",
+		"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 8 key same-eight",
 	}))
 	if err != nil {
 		t.Fatalf("multiple MD5 key IDs on one authored interface must compile: %v", err)
@@ -264,7 +264,7 @@ func TestOSPFCompilerKeepsSameInterfaceMD5Rollover12186(t *testing.T) {
 		t.Fatalf("same authored interface compiled to %d model entries, want one", len(ifaces))
 	}
 	iface := ifaces[0]
-	wantKeys := map[int]Secret{7: NewSecret("same-interface-seven"), 8: NewSecret("same-interface-eight")}
+	wantKeys := map[int]Secret{7: NewSecret("same-seven"), 8: NewSecret("same-eight")}
 	if len(iface.AuthMD5Keys) != len(wantKeys) {
 		t.Fatalf("same-interface MD5 rollover retained %d keys, want %d: %+v", len(iface.AuthMD5Keys), len(wantKeys), iface.AuthMD5Keys)
 	}
@@ -273,7 +273,7 @@ func TestOSPFCompilerKeepsSameInterfaceMD5Rollover12186(t *testing.T) {
 			t.Fatalf("same-interface MD5 rollover key ID %d has unexpected secret", key.ID)
 		}
 	}
-	if iface.AuthKeyID != 8 || iface.AuthKey != NewSecret("same-interface-eight") {
+	if iface.AuthKeyID != 8 || iface.AuthKey != NewSecret("same-eight") {
 		t.Fatalf("legacy MD5 fields no longer expose the last configured key: ID=%d", iface.AuthKeyID)
 	}
 }
@@ -333,7 +333,7 @@ func TestOSPFAreaInterfaceAuthTypeConflictDoesNotCrossApply12186(t *testing.T) {
 
 func TestOSPFAreaInterfaceMD5RangeChecksEveryRolloverKey12186(t *testing.T) {
 	_, err := CompileConfig(buildTree(t, []string{
-		"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 999 key invalid-first-key",
+		"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 999 key invalid-first",
 		"set protocols ospf area 0 interface ge-0/0/1.0 authentication md5 7 key valid-last-key",
 	}))
 	if err == nil || !strings.Contains(err.Error(), "999") {

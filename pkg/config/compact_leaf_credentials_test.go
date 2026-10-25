@@ -61,7 +61,7 @@ func compileBothSpellings(t *testing.T, compact, block string) (compactCfg, bloc
 // FAIL-ON-REVERT: restore `prop.Children` in compiler_protocols.go and the
 // compact sub-tests RED with an empty AuthType.
 func TestOSPFInterfaceAuthCompactSpelling_6818(t *testing.T) {
-	const secret = "ospf-shared-secret"
+	const secret = "ospf-pw"
 	compact, block := compileBothSpellings(t,
 		`protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 { authentication simple-password "`+secret+`"; } } } }`,
 		`protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 { authentication { simple-password "`+secret+`"; } } } } }`)

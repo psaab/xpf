@@ -10,7 +10,7 @@ import (
 // `md5 1 2 { key SECRET; }` — flattened [..., authentication, md5, 1, 2,
 // key, SECRET] — leaked the live OSPF MD5 key on every redacted display
 // surface, while the compiler still installs it (key-id stays 1).
-const md5NonAdjacentSecret14389 = "LIVE-OSPF-MD5-SECRET-14389"
+const md5NonAdjacentSecret14389 = "LIVE-MD5-KEY"
 
 func hierarchicalMD5Tree14389(t *testing.T, secret string) *ConfigTree {
 	t.Helper()

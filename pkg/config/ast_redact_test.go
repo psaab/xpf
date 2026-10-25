@@ -93,7 +93,7 @@ var redactionSecretSet = []string{
 	"set security ike policy pol1 pre-shared-key ascii-text LEAK-IKE-PSK",
 	"set security ipsec vpn site-a pre-shared-key LEAK-IPSEC-VPN-PSK",
 	"set protocols ospf area 0.0.0.0 interface ge-0-0-1 authentication md5 1 key LEAK-OSPF-MD5KEY",
-	"set protocols ospf area 0.0.0.0 interface ge-0-0-9 authentication simple-password LEAK-OSPF-SIMPLE",
+	"set protocols ospf area 0.0.0.0 interface ge-0-0-9 authentication simple-password LEAK-SIM",
 	"set protocols rip authentication-key LEAK-RIP-AUTHKEY",
 	"set protocols isis authentication-key LEAK-ISIS-AREA-AUTHKEY",
 	"set protocols isis interface ge-0-0-2 authentication-key LEAK-ISIS-IFACE-AUTHKEY",
@@ -119,7 +119,7 @@ var redactionSecretSet = []string{
 }
 
 var redactionSentinels = []string{
-	"LEAK-IKE-PSK", "LEAK-IPSEC-VPN-PSK", "LEAK-OSPF-MD5KEY", "LEAK-OSPF-SIMPLE",
+	"LEAK-IKE-PSK", "LEAK-IPSEC-VPN-PSK", "LEAK-OSPF-MD5KEY", "LEAK-SIM",
 	"LEAK-RIP-AUTHKEY", "LEAK-ISIS-AREA-AUTHKEY", "LEAK-ISIS-IFACE-AUTHKEY",
 	"LEAK-BGP-AUTHPW", "LEAK-VRRP-AUTHKEY", "LEAK-API-USER-PW", "LEAK-API-KEY-TOKEN",
 	"LEAK-API-NAMED-KEY-SECRET",

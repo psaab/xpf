@@ -13,7 +13,7 @@ import (
 // makes the AST-display leak a live-credential leak rather than a
 // display-only artifact.
 func TestOSPFMD5NonAdjacentKeyRendersLive14389(t *testing.T) {
-	const secret = "LIVE-OSPF-MD5-SECRET-14389"
+	const secret = "LIVE-MD5-KEY"
 	tree, errs := config.NewParser(`protocols {
     ospf {
         area 0.0.0.0 {
