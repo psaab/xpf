@@ -36,9 +36,9 @@ pub(super) use queue_ops::{
 pub(super) use queue_ops::{cos_queue_pop_front, cos_queue_pop_front_with_cap};
 pub(super) use queue_service::drain_shaped_tx;
 pub(super) use token_bucket::{
-    COS_MIN_BURST_BYTES, CoSQueueLeaseAcquireTelemetry, cos_refill_ns_until,
-    maybe_top_up_cos_queue_lease, refill_cos_tokens, release_all_cos_queue_leases,
-    release_all_cos_root_leases,
+    COS_MIN_BURST_BYTES, CoSQueueLeaseAcquireTelemetry, cos_effective_burst_bytes,
+    cos_refill_ns_until, maybe_top_up_cos_queue_lease, refill_cos_tokens,
+    release_all_cos_queue_leases, release_all_cos_root_leases,
 };
 pub(super) use tx_completion::{
     clear_all_cos_exact_backlogs_for_binding, mark_cos_queue_runnable, publish_cos_exact_backlog,

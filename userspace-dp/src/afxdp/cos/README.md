@@ -22,7 +22,7 @@ where every recent fairness mechanism kill happened (#1236, #1237,
 | `flow_hash.rs` | Per-queue flow-hash machinery for SFQ admission + promotion. The bucket key is the flow's 5-tuple plus its routing domain and tunnel discriminator, each mixed only when non-default, so identical 5-tuples in two routing instances or two GRE tunnels share a bucket only by chance, never by construction (#9645). A splitmix64 avalanche finalizer runs before the bucket truncation so every bit of every field can move the bucket (#15099). |
 | `queue_ops/` | CoS queue primitives: accessors, enqueue/dequeue, MQFQ ordering bookkeeping, V-min slot lifecycle. Per-byte hot-path fns carry `#[inline]` to preserve cross-module inlining. |
 | `queue_service/` | CoS dispatch / drain / submit subsystem. Hot-path call chain: `drain_shaped_tx → select_cos_*_batch → service_exact_*_queue_direct → drain_exact_*_to_scratch → submit_cos_batch → settle_exact_*`. |
-| `token_bucket.rs` | Token-bucket lease / refill plumbing for TX pacing. Owns `COS_MIN_BURST_BYTES` (64 × MTU) — the universal floor for both root and per-queue burst caps. |
+| `token_bucket.rs` | Token-bucket lease / refill plumbing for TX pacing. Owns `COS_MIN_BURST_BYTES` (64 × MTU) — the default (unset) floor for both root and per-queue burst caps; explicit values use the one-frame floor via `cos_effective_burst_bytes` (#16545). |
 | `tx_completion.rs` | TX-completion + interface timer wheel. Owns the wheel advance / cascade / wake-due slot management, the apply paths (`apply_direct_exact_send_result`, `apply_cos_send_result`, `apply_cos_prepared_result`), and the queue-scoped `DrainShape` phase counters (`guarantee`, `surplus`, `nonexact_while_exact_backlogged`). |
 
 `queue_ops/` and `queue_service/` are sub-directories; see their own
@@ -316,7 +316,11 @@ mod.rs for further file-level breakdown.
   Single-shard callers are bit-identical to the pre-#16536 formula.
 - `COS_MIN_BURST_BYTES` (64 × MTU) is canonically owned by
   `token_bucket.rs`; siblings import it via the `cos/mod.rs`
-  re-export.
+  re-export. It is the DEFAULT (unset) floor only: an explicit
+  buffer/burst value is honoured as configured, floored at one
+  max frame (`tx_frame_capacity`) via `cos_effective_burst_bytes`
+  (#16545), so a sub-96 KB latency/burst bound is not silently
+  raised to 96 KB.
 - Scheduler `buffer-size <n>%` is resolved before runtime queue creation
   as `<n>%` of the interface CoS burst pool. The pool is the explicit
   `class-of-service interfaces ... shaping-rate burst-size` value when

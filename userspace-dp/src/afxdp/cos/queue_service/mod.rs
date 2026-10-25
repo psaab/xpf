@@ -30,7 +30,7 @@ use crate::afxdp::{FastMap, FastSet, TX_BATCH_SIZE, tx_frame_capacity};
 use crate::xsk_ffi::xdp::XdpDesc;
 
 use super::{
-    COS_MIN_BURST_BYTES, CoSQueueLeaseAcquireTelemetry, cos_item_len,
+    COS_MIN_BURST_BYTES, CoSQueueLeaseAcquireTelemetry, cos_effective_burst_bytes, cos_item_len,
     cos_queue_clear_orphan_snapshot_after_drop, cos_queue_front, cos_queue_front_with_cap,
     cos_queue_is_empty, cos_queue_peek_min_bucket, cos_queue_pop_known_bucket,
     cos_queue_push_front, cos_queue_remove_orphan_snapshot_at,
@@ -449,7 +449,7 @@ fn residual_rate_and_burst(
     }
     let residual_burst = (residual_rate / 100)
         .max(COS_MIN_BURST_BYTES)
-        .min(root.burst_bytes.max(COS_MIN_BURST_BYTES));
+        .min(cos_effective_burst_bytes(root.burst_bytes));
     Some((residual_rate, residual_burst))
 }
 

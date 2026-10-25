@@ -1,8 +1,8 @@
 // Per-flow admission gates (share/buffer caps, ECN CE-marking) +
-// flow-fair (SFQ) queue promotion. `COS_MIN_BURST_BYTES` is
-// imported via `super::COS_MIN_BURST_BYTES` (cos/mod.rs re-export)
-// so admission stays agnostic to which sibling module owns the
-// constant.
+// flow-fair (SFQ) queue promotion. `cos_effective_burst_bytes` is
+// imported via `super::cos_effective_burst_bytes` (cos/mod.rs
+// re-export) so admission stays agnostic to which sibling module
+// owns the helper (#16545: explicit buffer honoured, one-frame floor).
 
 use crate::afxdp::tx_frame_capacity;
 use crate::afxdp::types::{
@@ -12,7 +12,7 @@ use crate::afxdp::umem::MmapArea;
 
 use super::ecn::{maybe_mark_ecn_ce, maybe_mark_ecn_ce_prepared};
 use super::flow_hash::{cos_flow_hash_seed_from_os, cos_queue_prospective_active_flows};
-use super::COS_MIN_BURST_BYTES;
+use super::{COS_MIN_BURST_BYTES, cos_effective_burst_bytes};
 
 /// Minimum per-flow admission share. Sized so TCP fast-retransmit can
 /// trigger reliably on a single-packet drop:
@@ -330,7 +330,7 @@ pub(in crate::afxdp) fn cos_flow_aware_buffer_limit(
     queue: &CoSQueueRuntime,
     flow_bucket: usize,
 ) -> u64 {
-    let base = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    let base = cos_effective_burst_bytes(queue.config.buffer_bytes);
     cos_flow_aware_buffer_limit_from_base(queue, flow_bucket, base)
 }
 
@@ -389,7 +389,7 @@ pub(in crate::afxdp) fn cos_shared_exact_buffer_limit(
     flow_bucket: usize,
     active_shards: usize,
 ) -> u64 {
-    let buffer_bytes = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    let buffer_bytes = cos_effective_burst_bytes(queue.config.buffer_bytes);
     let shard_limit = cos_shared_exact_buffer_shard_limit(buffer_bytes, active_shards);
     cos_flow_aware_buffer_limit_from_base(queue, flow_bucket, shard_limit)
 }

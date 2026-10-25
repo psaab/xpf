@@ -290,7 +290,15 @@ sizes the queue by drain time, so it converts against the queue's **drain
 rate** — strictly after the rate, including after `remainder` when both are set
 on one queue. That combination is **legal**: temporal is well defined once
 remainder resolves, and rejecting a combination the model supports would break
-valid Junos. Rounding and clamping mirror `buffer-size percent` exactly.
+valid Junos. Rounding and clamping mirror `buffer-size percent` exactly. The
+resolved byte value is honoured as configured: an explicit
+`buffer-size` (bytes, percent, or temporal) or `shaping-rate
+burst-size` below 96 KB is NOT raised to the 64×1500 default floor —
+that floor applies only to unset/default sizing, and explicit values
+are floored only at one max frame so a single frame always fits
+(#16545). On a low-rate class this is the latency bound itself:
+`temporal 10000` (10 ms) at 125 kB/s resolves to 1250 B, not 96 KB
+(768 ms).
 
 The drain rate is not the same thing as a *resolved* transmit-rate, and the
 difference matters for the advisory. A queue with no guarantee of its own keeps
@@ -1002,8 +1010,9 @@ sized for the level rate with a different unit rate would mismatch them
 (e.g. a level `shaping-rate 100m burst-size 200000` with a unit override
 `shaping-rate 1g` would otherwise carry a 200000-byte burst computed for
 100m — 10x of intent). When such an override leaves `burst-size` unset it
-stays 0 and the dataplane applies its rate-independent
-`COS_MIN_BURST_BYTES` floor, exactly as for a fresh unit that sets
+stays 0 and the dataplane applies its rate-independent default
+`COS_MIN_BURST_BYTES` floor (unset only; an explicit non-zero burst is
+honoured, #16545), exactly as for a fresh unit that sets
 `shaping-rate` alone. A unit that inherits the rate (sets no
 `shaping-rate`) still inherits both the level rate and the level burst as
 a pair.
@@ -1096,8 +1105,11 @@ for compatibility with existing snapshots. For each interface unit, the
 sum of percent buffers across the scheduler-map entries bound to that
 unit must be at most 100% of the interface CoS burst pool. xpf
 intentionally rejects `buffer-size 0%` even though Junos accepts it,
-because zero is the legacy absent-field value on the userspace protocol
-and runtime queues still retain a minimum burst floor.
+because zero is the legacy absent-field value on the userspace protocol.
+Unset/default queue sizing retains the 64×1500 (96 KB) floor; an explicit
+non-zero `buffer-size`/`burst-size` is honoured as configured (floored
+only at one max frame, #16545), so `show class-of-service` reports the
+value the runtime actually enforces.
 
 `buffer-size` also accepts the Junos `temporal <microseconds>` form
 (#4228 Gap 2 follow-up) — size the buffer by a target queue delay rather

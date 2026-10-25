@@ -275,3 +275,58 @@ fn build_cos_interface_runtime_zero_queue_rate_starts_with_full_queue_tokens() {
     );
     assert_eq!(queue.transmit_rate_bytes(), 0);
 }
+
+// #16545: an explicit sub-96 KB buffer/burst is an operator latency bound,
+// not a default. It must reach the runtime floored only at one frame
+// (4096 B here), while a zero (unset) value keeps the 96 KB default floor.
+#[test]
+fn build_cos_interface_runtime_preserves_explicit_sub_floor_sizes_16545() {
+    let config = |burst_bytes: u64, buffer_bytes: u64| CoSInterfaceConfig {
+        queue_id_bitmap: [0; 4],
+        shaping_rate_bytes: 125_000,
+        burst_bytes,
+        default_queue: 0,
+        dscp_classifier: String::new(),
+        ieee8021_classifier: String::new(),
+        dscp_queue_by_dscp: [u8::MAX; 64],
+        ieee8021_queue_by_pcp: [u8::MAX; 8],
+        queue_by_forwarding_class: FastMap::default(),
+        queues: vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "best-effort".into(),
+            priority: 5,
+            transmit_rate_bytes: 125_000,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+        oversubscription_guarantee_fraction: 0.0,
+        priority_low_min_share_bytes: 0,
+        inet_precedence_classifier: String::new(),
+        inet_precedence_queue_by_prec: [u8::MAX; 8],
+    };
+
+    // Acceptance probe: temporal 10 ms at 125 kB/s resolves to 1250 B;
+    // explicit root burst 15000 B. Both are below 96 KB. The 1250 B
+    // buffer is floored at one frame (4096 B), NOT raised to 96 KB.
+    let runtime = build_cos_interface_runtime(&config(15_000, 1_250), 1_000_000_000);
+    assert_eq!(runtime.burst_bytes, 15_000);
+    assert_eq!(runtime.queues[0].config.buffer_bytes, 4_096);
+
+    // Explicit values below one frame still admit one max frame.
+    let runtime = build_cos_interface_runtime(&config(100, 100), 1_000_000_000);
+    assert_eq!(runtime.burst_bytes, 4_096);
+    assert_eq!(runtime.queues[0].config.buffer_bytes, 4_096);
+
+    // Unset (0) keeps the default 96 KB floor.
+    let runtime = build_cos_interface_runtime(&config(0, 0), 1_000_000_000);
+    assert_eq!(runtime.burst_bytes, COS_MIN_BURST_BYTES);
+    assert_eq!(runtime.queues[0].config.buffer_bytes, COS_MIN_BURST_BYTES);
+}

@@ -1,7 +1,9 @@
 // Token-bucket lease/refill plumbing for TX pacing.
 //
-// `COS_MIN_BURST_BYTES` (64 × MTU) is the universal floor for both
-// root and per-queue burst caps and lives here as canonical owner.
+// `COS_MIN_BURST_BYTES` (64 × MTU) is the DEFAULT (unset) floor for
+// both root and per-queue burst caps and lives here as canonical
+// owner. Explicit values use the one-frame floor via
+// `cos_effective_burst_bytes` (#16545).
 //
 // The 3 per-byte helpers (`refill_cos_tokens`,
 // `maybe_top_up_cos_root_lease`, `maybe_top_up_cos_queue_lease`)
@@ -20,11 +22,31 @@ use crate::afxdp::types::{
 use crate::afxdp::worker::BindingWorker;
 use crate::afxdp::worker_runtime::CoSQueueLeaseUndergrantCounters;
 
-/// Universal floor for both root and per-queue burst-byte caps
-/// (64 × default MTU = 96 KB). Sized so a single max-len frame can
-/// always fit a freshly-allocated queue without immediately tripping
-/// the buffer-limit gate.
+/// Default (unset) floor for both root and per-queue burst-byte caps
+/// (64 × default MTU = 96 KB). Applied only when no explicit value was
+/// configured (`forwarding_build` substitutes this floor for a zero
+/// rate-derived default, and zero buffer/burst reaching the runtime is
+/// treated as unset). Explicit operator values are NOT raised to this
+/// floor — see `cos_effective_burst_bytes`.
 pub(in crate::afxdp) const COS_MIN_BURST_BYTES: u64 = 64 * 1500;
+
+/// Effective burst/buffer cap for a configured value (#16545).
+///
+/// An explicit (non-zero) value is honoured as configured, floored only
+/// at one max frame (`tx_frame_capacity`) so a single max-len frame can
+/// always fit. A zero value means unset and keeps the
+/// `COS_MIN_BURST_BYTES` default floor. Raising explicit values to
+/// 96 KB silently defeated documented low-rate latency/burst bounds
+/// (e.g. `buffer-size temporal 10ms` at 125 kB/s = 1250 B became
+/// 96 KB = 768 ms of queueing).
+#[inline]
+pub(in crate::afxdp) fn cos_effective_burst_bytes(configured: u64) -> u64 {
+    if configured == 0 {
+        COS_MIN_BURST_BYTES
+    } else {
+        configured.max(tx_frame_capacity() as u64)
+    }
+}
 
 /// Worker-local observation of v8 queue-lease acquisitions. The hot path
 /// accumulates this in `WorkerCos`, not in the shared lease, so the
@@ -118,7 +140,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_root_lease(
     // skip the lease acquire — the per-queue token buckets continue
     // to gate per-queue rates as configured.
     if root.shaping_rate_bytes == 0 {
-        root.tokens = root.burst_bytes.max(COS_MIN_BURST_BYTES);
+        root.tokens = cos_effective_burst_bytes(root.burst_bytes);
         return;
     }
     // Ensure the target is at least tx_frame_capacity() so that a maximum-sized frame
@@ -127,7 +149,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_root_lease(
     let lease_bytes = shared_root_lease
         .lease_bytes()
         .max(tx_frame_capacity() as u64)
-        .min(root.burst_bytes.max(COS_MIN_BURST_BYTES));
+        .min(cos_effective_burst_bytes(root.burst_bytes));
     if root.tokens >= lease_bytes {
         return;
     }
@@ -135,7 +157,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_root_lease(
     root.tokens = root
         .tokens
         .saturating_add(grant)
-        .min(root.burst_bytes.max(COS_MIN_BURST_BYTES));
+        .min(cos_effective_burst_bytes(root.burst_bytes));
 }
 
 /// #1229 Phase 6 v8: dispatch lease acquisition between v8 (per-worker
@@ -217,7 +239,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
     // exact caps with a non-zero scheduler rate are unaffected
     // (queue.transmit_rate_bytes() > 0 in that case).
     if queue.transmit_rate_bytes() == 0 {
-        queue.hot.tokens = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+        queue.hot.tokens = cos_effective_burst_bytes(queue.config.buffer_bytes);
         queue.hot.last_refill_ns = now_ns;
         return CoSQueueLeaseAcquireTelemetry::default();
     }
@@ -249,7 +271,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
             .lease_bytes()
             .max(COS_EXACT_QUEUE_LEASE_BANK_BYTES)
             .max(tx_frame_capacity() as u64)
-            .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
+            .min(cos_effective_burst_bytes(queue.config.buffer_bytes));
         if queue.hot.tokens >= lease_bytes {
             return CoSQueueLeaseAcquireTelemetry::default();
         }
@@ -263,7 +285,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
             .hot
             .tokens
             .saturating_add(grant)
-            .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
+            .min(cos_effective_burst_bytes(queue.config.buffer_bytes));
         queue.hot.last_refill_ns = now_ns;
         return telemetry;
     }
@@ -272,7 +294,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
         refill_cos_tokens(
             &mut queue.hot.tokens,
             transmit_rate_bytes,
-            queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES),
+            cos_effective_burst_bytes(queue.config.buffer_bytes),
             &mut queue.hot.last_refill_ns,
             now_ns,
         );
@@ -281,7 +303,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
     let lease_bytes = shared_queue_lease
         .lease_bytes()
         .max(tx_frame_capacity() as u64)
-        .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
+        .min(cos_effective_burst_bytes(queue.config.buffer_bytes));
     if queue.hot.tokens >= lease_bytes {
         return CoSQueueLeaseAcquireTelemetry::default();
     }
@@ -295,7 +317,7 @@ pub(in crate::afxdp) fn maybe_top_up_cos_queue_lease(
         .hot
         .tokens
         .saturating_add(grant)
-        .min(queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES));
+        .min(cos_effective_burst_bytes(queue.config.buffer_bytes));
     queue.hot.last_refill_ns = now_ns;
     telemetry
 }

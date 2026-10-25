@@ -145,7 +145,10 @@ here. For the common single-LAN-segment deployment this caveat is moot.
 - Burst defaults to `max(shaping_rate_bytes / 100, 64 * MTU)` (about
   10 ms of rate); override with
   `set class-of-service interfaces <if> unit <u> shaping-rate burst-size <bytes>`
-  if you need tighter or looser bursting.
+  if you need tighter or looser bursting. An explicit burst-size is
+  honoured as configured even below the 96 KB default floor (floored
+  only at one max frame, #16545) — the tighter bursting this knob
+  promises on low-rate uplinks.
 
 ## DiffServ variant (EF/BE tiers)
 

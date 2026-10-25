@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use super::COS_MIN_BURST_BYTES;
+use super::{COS_MIN_BURST_BYTES, cos_effective_burst_bytes};
 use super::admission::apply_cos_queue_flow_fair_promotion;
 use super::tx_completion::cos_tick_for_ns;
 use crate::afxdp::types::{
@@ -124,7 +124,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
     // tokens to the burst cap so the very first packet doesn't see
     // an empty bucket on the cold path before the first top-up call.
     let initial_root_tokens = if config.shaping_rate_bytes == 0 {
-        config.burst_bytes.max(COS_MIN_BURST_BYTES)
+        cos_effective_burst_bytes(config.burst_bytes)
     } else {
         0
     };
@@ -133,7 +133,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
 
     CoSInterfaceRuntime {
         shaping_rate_bytes: config.shaping_rate_bytes,
-        burst_bytes: config.burst_bytes.max(COS_MIN_BURST_BYTES),
+        burst_bytes: cos_effective_burst_bytes(config.burst_bytes),
         tokens: initial_root_tokens,
         nonexact_surplus_under_exact_tokens: 0,
         nonexact_surplus_under_exact_last_refill_ns: 0,
@@ -188,7 +188,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
                     // live `WorkerCoSQueueFastPath.shared_exact` signal.
                     shared_exact: false,
                     surplus_weight: queue.surplus_weight,
-                    buffer_bytes: queue.buffer_bytes.max(COS_MIN_BURST_BYTES),
+                    buffer_bytes: cos_effective_burst_bytes(queue.buffer_bytes),
                     dscp_rewrite: queue.dscp_rewrite,
                     // #1614 A3: copy CoDel target from intermediate
                     // CoSQueueConfig (populated in forwarding_build
@@ -216,11 +216,11 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
                     // (single-owner low-rate: a private per-worker bucket,
                     // no shared lease) keeps pre-filling its burst.
                     tokens: if queue.transmit_rate_bytes == 0 {
-                        queue.buffer_bytes.max(COS_MIN_BURST_BYTES)
+                        cos_effective_burst_bytes(queue.buffer_bytes)
                     } else if queue.exact || queue.is_shared_lease_metered() {
                         0
                     } else {
-                        queue.buffer_bytes.max(COS_MIN_BURST_BYTES)
+                        cos_effective_burst_bytes(queue.buffer_bytes)
                     },
                     last_refill_ns: if queue.exact && queue.transmit_rate_bytes != 0 {
                         0
