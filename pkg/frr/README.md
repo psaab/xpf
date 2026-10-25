@@ -1674,6 +1674,20 @@ step. Both are required — neither sees the other's case:
   `TestBFDProfileEnableLines15015` pins both ordered pairs, the
   inside-the-interface-block placement (#2942), and the bare/no-BFD
   controls.
+- **BFD renders only what FRR keeps (#16813).** bfdd is
+  northbound/YANG-backed (`frr-bfdd.yang` defaults: multiplier 3,
+  intervals 300ms): a default-valued leaf is elided from
+  `show running-config`, so `bfdSection.render()` (via
+  `renderBFDTimers16813`) emits `detect-multiplier` /
+  `receive-interval` / `transmit-interval` only for non-default
+  values — an all-default profile/peer is the bare header FRR holds.
+  Likewise the OSPFv3 profile branch emits ` ipv6 ospf6 bfd` before
+  ` ipv6 ospf6 bfd profile <name>`, because `ospf6_bfd_write_config`
+  always prints both. Rendering the elided/profile-only forms made
+  every `frr-reload.py --test` show a perpetual diff, so the #15203
+  benign-reload re-check could never certify convergence.
+  Live-verified on FRR 10.7.1; `TestBFDDefaultRender16813` pins the
+  default/mixed/non-default render cells.
 - **Community-lists: `standard` vs `expanded` is per-DEFINITION (#2643).**
   An FRR `standard` community-list accepts ONLY literal community values
   (`ASN:VALUE`, or a well-known name such as `no-export` /

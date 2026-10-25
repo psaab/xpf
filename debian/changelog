@@ -1,4 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
+  * FRR/BFD: BFD profiles and peers now render only non-default
+    timer lines, and an OSPFv3 BFD profile renders its bare
+    `ipv6 ospf6 bfd` enable line first (#16813). bfdd elides
+    default-valued leaves (multiplier 3, intervals 300ms) from
+    running-config and ospf6d always holds both ospf6 bfd lines,
+    so the old render was a perpetual `frr-reload.py --test` diff
+    and the #15203 benign-reload re-check could never certify an
+    IS-IS-interface removal on such a box (false degraded reload).
   * Daemon/mgmt-VRF: the #11362 cluster control/fabric classless
     fence now resolves unit-spelled control/fabric interfaces
     (#16806). mgmtVRFControlFabricInterfaces mapped the authored

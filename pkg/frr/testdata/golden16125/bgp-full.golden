@@ -30,19 +30,10 @@ exit
 !
 bfd
  peer 192.0.2.1
-  detect-multiplier 3
-  receive-interval 300
-  transmit-interval 300
  exit
  peer 10.0.0.9 multihop local-address 10.0.0.3
-  detect-multiplier 3
-  receive-interval 300
-  transmit-interval 300
  exit
  profile xpf-300-3
-  detect-multiplier 3
-  receive-interval 300
-  transmit-interval 300
  exit
 exit
 !

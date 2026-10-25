@@ -2466,13 +2466,20 @@ func TestGenerateProtocols_BGPBFD(t *testing.T) {
 	}
 	got := m.generateProtocols(nil, nil, bgp, nil, nil, "", 0, nil, nil)
 
+	// #16813: the peer's multiplier is unset (FRR default 3), so no
+	// detect-multiplier line is rendered — bfdd elides default-valued
+	// leaves from running-config and rendering it would be a perpetual
+	// `frr-reload.py --test` diff. The non-default 100ms intervals are
+	// still rendered.
 	checks := []string{
 		"neighbor 10.0.2.1 bfd\n",
 		"bfd\n",
 		"peer 10.0.2.1\n",
-		"detect-multiplier 3\n",
 		"receive-interval 100\n",
 		"transmit-interval 100\n",
+	}
+	if strings.Contains(got, "detect-multiplier") {
+		t.Errorf("default multiplier must not render a detect-multiplier line (#16813), got:\n%s", got)
 	}
 	for _, want := range checks {
 		if !strings.Contains(got, want) {

@@ -40,9 +40,6 @@ exit
 !
 bfd
  profile xpf-300-3
-  detect-multiplier 3
-  receive-interval 300
-  transmit-interval 300
  exit
 exit
 !
