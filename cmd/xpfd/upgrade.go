@@ -34,6 +34,18 @@ func runUpgradeSubcommand(args []string) {
 		return
 	}
 
+	// #16796: capture SIGINT/SIGHUP/SIGTERM for the WHOLE verb (binary
+	// cut, rollback, rolling, and the kernel sub-verb below) so an
+	// operator Ctrl-C or a dropped SSH session cannot kill the runner
+	// after StopUnit and strand the daemon. Before STOP the Runner
+	// honours the signal as a clean abort; at/after STOP it defers it
+	// until START/rollback completes. `status` above is read-only and
+	// deliberately stays outside the capture.
+	guard, stopGuard := upgrade.InstallSignalGuard(func(format string, a ...any) {
+		fmt.Printf(format+"\n", a...)
+	})
+	defer stopGuard()
+
 	// #1930: `xpfd upgrade kernel ...` is the LANE-1 verify-gated in-place
 	// kernel channel (a distinct sub-verb from the #1917 binary cut-over).
 	if upgradeArgsSelectKernel(args) {
@@ -64,7 +76,7 @@ func runUpgradeSubcommand(args []string) {
 			clearBinaryUpgradeStatus(r, upgrade.CommittedCut{})
 			return
 		}
-		if err := r.RollbackTo(flags.target, upgrade.RollbackOptions{}); err != nil {
+		if err := r.RollbackTo(flags.target, upgrade.RollbackOptions{SignalGuard: guard}); err != nil {
 			fmt.Fprintf(os.Stderr, "upgrade --rollback: %v\n", err)
 			os.Exit(1)
 		}
@@ -116,7 +128,7 @@ func runUpgradeSubcommand(args []string) {
 		os.Exit(1)
 	}
 
-	if err := r.Run(upgrade.Options{}); err != nil {
+	if err := r.Run(upgrade.Options{SignalGuard: guard}); err != nil {
 		fmt.Fprintf(os.Stderr, "upgrade: %v\n", err)
 		os.Exit(1)
 	}

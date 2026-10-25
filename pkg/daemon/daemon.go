@@ -347,8 +347,17 @@ type Daemon struct {
 	// ipsecTerminateFn overrides the swanctl terminate call. Test seam only
 	// (#15194); nil in production. See Daemon.ipsecTerminate.
 	ipsecTerminateFn func(name string) error
-	ra               *ra.Manager
-	dhcp             *dhcp.Manager
+	// ipsecRGOwnershipEpochs tracks per-RG ownership epochs (#16820).
+	// Every promotion/demotion edge bumps the epoch for that RG; a
+	// demotion sweep captures the epoch at launch and re-checks it (plus
+	// !IsLocalPrimary) immediately before each terminate, so a sweep
+	// still running when the RG fails back cannot terminate the SA
+	// the now-primary node just re-initiated. Guarded by
+	// ipsecRGEpochMu; lazily initialised so zero-value Daemons work.
+	ipsecRGEpochMu         sync.Mutex
+	ipsecRGOwnershipEpochs map[int]uint64
+	ra                     *ra.Manager
+	dhcp                   *dhcp.Manager
 	// dnsBootDone gates the #1715 DNS boot policy. It is false during the
 	// single boot-time applyConfig (which runs before DHCP clients start,
 	// so the lease set is empty) and set true immediately after. While
@@ -1194,13 +1203,17 @@ type Daemon struct {
 	// table installed the "a protecting table exists" premise no longer holds, so
 	// a later enforceable generation whose first real load fails must take the
 	// cold-boot fence path rather than assume a retained table (#5790). A teardown
-	// FAILURE (a table may still be installed) does NOT clear it. True proves
-	// neither current xpf_hostinbound table presence nor coverage of every current
-	// local address — the day-2 COVERAGE gap is tracked separately by
-	// hostInboundCoveredAddrs (#5789, #5790). Production access is serialized
-	// under applySem; atomic.Bool preserves the existing type, not a current
-	// readiness reader. nft success and the following Store are ordered
-	// operations in separate state domains, not one atomic publication.
+	// FAILURE (a table may still be installed) does NOT clear it. #16823: the
+	// #15264 kernel-truth recheck ALSO Stores false (and clears the coverage
+	// sets) when an established table is kernel-proven gone after an out-of-band
+	// `nft flush ruleset` — the retention premise is equally false there, and a
+	// failed re-apply must fence instead of trusting the stale covered set.
+	// True proves neither current xpf_hostinbound table presence nor coverage
+	// of every current local address — the day-2 COVERAGE gap is tracked
+	// separately by hostInboundCoveredAddrs (#5789, #5790). Production access
+	// is serialized under applySem; atomic.Bool preserves the existing type,
+	// not a current readiness reader. nft success and the following Store are
+	// ordered operations in separate state domains, not one atomic publication.
 	hostInboundEnforced atomic.Bool
 	// hostInboundPreActivationFence retains temporary address drops across
 	// consecutive applies until a successful full host-inbound render retires
@@ -1219,6 +1232,22 @@ type Daemon struct {
 	// never be reinstalled. Serialized under applySem with the handoff sites
 	// (plus the single-threaded bootstrap path, which runs before applies).
 	earlyInputHandoffDone atomic.Bool
+
+	// earlyInputHandoffPendingSince is the wall-clock start of the current
+	// pre-handoff pending hold (#16785): the first apply that retained the
+	// barrier for pending DHCP intent, lo0 failure, changed addresses, or
+	// an uncovered fallback. Zero when no hold is open. The bounded
+	// handoff compares it against earlyInputPendingHandoffBound; the 30s
+	// host-inbound gap loop re-drives an apply so the bound fires without
+	// a commit. Serialized under applySem like earlyInputHandoffDone.
+	earlyInputHandoffPendingSince time.Time
+	// earlyInputHandoffPendingDetail names the scopes holding the barrier
+	// (e.g. "untrust/ge-0-0-1.0 inet6"), for the retained log and the
+	// HostInboundApplied projection. Guarded by applySem.
+	earlyInputHandoffPendingDetail string
+	// earlyInputBarrierRetainedNowFn is the wall clock for the pending
+	// hold. A var so #16785 tests drive the bound deterministically.
+	earlyInputBarrierRetainedNowFn func() time.Time
 
 	// earlyInputGuardSwapFailed latches a failed bootstrap lifeline-guard
 	// swap (the global barrier was retained instead). Surfaced via the
@@ -1268,6 +1297,20 @@ type Daemon struct {
 	hostInboundLastApplyFailed     atomic.Bool
 	hostInboundLastFailureUnixNano atomic.Int64
 	hostInboundGapFenceActive      atomic.Bool
+	// hostInboundEstablished15264 is the STICKY historical establishment bit
+	// behind HostInboundApplied().Established (#16823): set wherever a real
+	// load or scoped fallback first establishes host-inbound protection
+	// (every hostInboundEnforced Store(true) site), cleared only by a
+	// successful no-enforcement teardown — the same transitions that used to
+	// drive Established through hostInboundEnforced. It exists separately
+	// because #16823 clears hostInboundEnforced on kernel-proven drift (so a
+	// failed re-apply takes the cold-boot fence path) while Established must
+	// keep reporting "established but stale" until a real install succeeds,
+	// and because the #15264 recheck probe gate must survive that clearing
+	// (a latch-gated probe would go blind after the first drift episode).
+	// Set under applySem alongside hostInboundEnforced; read atomically by
+	// the recheck tick and the operator projections.
+	hostInboundEstablished15264 atomic.Bool
 	// hostDriftNoticed15264 de-dupes the #15264 kernel-drift Warn to one
 	// line per episode (mirrors mgmtReassertNoticed #6803): set when the
 	// low-rate kernel-truth recheck first finds an established table

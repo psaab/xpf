@@ -567,8 +567,11 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 			// the reverse direction: source VRF table → peer table, for this
 			// destination prefix only. Looking up main here could select
 			// main's default. RulePriority carries the kernel priority so the
-			// helper's leak index orders overlapping returns longest-first,
-			// exactly as the kernel RPDB does.
+			// helper's leak index orders overlapping returns longest-first;
+			// since #16799 the helper also keys the (1000,2000) band off
+			// that priority to defer the row until the source table's own
+			// lookup misses, exactly as the kernel RPDB's l3mdev rule at
+			// 1000 precedes these return rules.
 			if routing.IsRibGroupReturnRulePriority(rule.Priority) {
 				sourceName, ok := ribGroupReturnRuleInstance(rule, instanceNameToTableID)
 				if !ok {

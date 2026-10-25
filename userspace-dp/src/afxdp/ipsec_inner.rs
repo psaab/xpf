@@ -802,6 +802,7 @@ mod tests {
                 prefix,
                 next_table: "tenant.inet.0".into(),
                 rule_priority: 1,
+                post_table: false,
                 incarnation: 1,
             }],
         );

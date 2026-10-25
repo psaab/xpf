@@ -64,6 +64,19 @@ journal. The ONLY live-state mutations are STOP and FLIP-then-START;
 PREFLIGHT / COPY / VERIFY are pure and abortable (a failure there leaves
 the running daemon and config untouched).
 
+**Interrupt disposition (#16796).** `xpfd upgrade` (binary cut,
+`--rollback`, `--rolling`, and the `upgrade kernel` sub-verb) captures
+SIGINT/SIGHUP/SIGTERM for the whole run via
+`upgrade.InstallSignalGuard`. Before STOP a captured signal aborts the
+run cleanly with the daemon still live; at/after STOP it is logged as
+deferred and the run finishes START (or its auto-/operator rollback)
+first, honouring the signal only once the unit is running again — so a
+Ctrl-C during the visible "upgrade: stopping xpfd" wait, or an SSH drop
+(SIGHUP), can no longer strand a standalone daemon. A second interrupt
+after STOP is likewise deferred; SIGKILL/power loss remain covered only
+by the journal resume above. The read-only `xpfd upgrade status` verb
+installs no capture.
+
 **Superseded stale cut (a NEWER version was staged before the old cut
 finished).** When the journaled target differs from the newly-staged
 version, the live system is recovered to a consistent state BEFORE a fresh

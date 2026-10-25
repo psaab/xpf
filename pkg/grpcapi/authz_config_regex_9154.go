@@ -106,7 +106,12 @@ func (s *Server) authorizeRPCConfigMutation(cfg *config.Config, class, fullMetho
 		// #9633: Load and Rollback write more than one line.
 		return s.authorizeRPCLoadAndRollback(cfg, class, fullMethod, req)
 	}
-	if err := config.AuthorizeConfigMutation(cfg, class, nil, line); err != nil {
+	if s.store != nil {
+		// #16784: price subtree verbs against the pre-mutation candidate.
+		if err := config.AuthorizeConfigMutationOnCandidate(cfg, class, nil, line, s.store.CandidateTree()); err != nil {
+			return fmt.Errorf("%w", err)
+		}
+	} else if err := config.AuthorizeConfigMutation(cfg, class, nil, line); err != nil {
 		return fmt.Errorf("%w", err)
 	}
 	// #14981: a Set/Delete whose path creates or triggers groups is judged

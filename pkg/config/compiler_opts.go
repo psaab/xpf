@@ -1617,6 +1617,12 @@ type compileOpts struct {
 	// transport cannot bind a malformed or address-family-incompatible source.
 	// Non-local but valid sources remain a separate advisory in ValidateConfig.
 	lenientSamplingSourceAddress bool
+	// lenientSSHKnownHosts16770 (#16770) downgrades an invalid
+	// ssh-known-hosts host/key (unknown type, type/key mismatch,
+	// wildcard/malformed host) to a warning on tolerant load / peer-sync
+	// (#1960); the daemon renderer still skips it and, when every entry
+	// is invalid, removes the managed file so stale trust is revoked.
+	lenientSSHKnownHosts16770 bool
 	// lenientFlowExportSeconds (#6769) downgrades the flow-export template
 	// `seconds` range gate (validateFlowExportSecondsStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -2133,6 +2139,10 @@ type compileOpts struct {
 	// only for instances that would create a vrf-<name> device; forwarding
 	// instances create no VRF device and remain active.
 	lenientRoutingInstanceKernelName bool
+	// lenientBridgeDomainKernelName (#16792) skips the strict derived bridge
+	// device-name gate. Tolerant load and peer-sync quarantine an invalid name
+	// in compileBridgeDomains; every bridge domain creates a br-<name> device.
+	lenientBridgeDomainKernelName bool
 	// lenientAddressBookNames (#3061, narrowed in #4340) downgrades the
 	// address-book / zone name gate (validateAddressBookEntryNamesStrict) from a
 	// hard compile error to a cfg.Warnings entry. The strict commit /
@@ -3254,6 +3264,10 @@ type compileOpts struct {
 	// authoring order. Same doctrine as lenientPolicyCommunityRef.
 	lenientPolicyASPathRegex    bool
 	lenientPolicyCommunityRegex bool // #8449: sibling of the as-path gate; see lenientPolicyASPathRegex
+	// lenientBGPNeighborDescriptionPipe16776 (#16776) downgrades the
+	// neighbor-description "| " rejection to a warning on tolerant
+	// load / peer-sync (#1960); the render belt omits the line.
+	lenientBGPNeighborDescriptionPipe16776 bool
 	// lenientPolicyThenOperands downgrades the compiled #12070/#12513 operand
 	// gate and the #12517 then-tail gate to warnings for tolerant loads. The
 	// FRR renderer omits invalid operands; quoted-then reject parsing retains
@@ -3987,6 +4001,7 @@ func lenientCompileOpts() compileOpts {
 		lenientSamplingInputRate:                 true,
 		lenientPortMirroringIngressAlias15651:    true,
 		lenientSamplingSourceAddress:             true,
+		lenientSSHKnownHosts16770:                true,
 		lenientFlowExportSeconds:                 true,
 		lenientApplicationSetMembers:             true,
 		lenientPolicyMatchApplications:           true,
@@ -4039,6 +4054,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingInstanceTableIDCollision:   true,
 		lenientReservedRoutingInstanceName:       true,
 		lenientRoutingInstanceKernelName:         true,
+		lenientBridgeDomainKernelName:            true,
 		lenientAddressBookNames:                  true,
 		lenientReservedZoneLocalRefs:             true,
 		lenientReservedAddressNames:              true,
@@ -4138,6 +4154,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyASPathRef:                   true,
 		lenientPolicyASPathRegex:                 true,
 		lenientPolicyCommunityRegex:              true,
+		lenientBGPNeighborDescriptionPipe16776:   true,
 		lenientPolicyThenOperands:                true,
 		lenientPolicyNamelessTerm12521:           true,
 		lenientPolicyReservedRedistName:          true,

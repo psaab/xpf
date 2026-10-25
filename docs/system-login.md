@@ -1011,7 +1011,14 @@ allow such as `^show.*` cannot outgrow an end-anchored deny
 allow phrase that occurs only inside pipe filter text
 (`show configuration | except show interfaces` under
 `allow-commands "show interfaces"`) authorizes nothing — the pipe-less
-spelling affirms no allow, so the allowlist denies it. The one escape from
+spelling affirms no allow, so the allowlist denies it. The converse
+holds too (#16780): a deny that matches only pipe or format text
+(`deny-commands "display set"`, `"\| match"`, or an anchored
+`show configuration security \| display set` spelling) vetoes the
+piped command even when the class's allow matches the pipe-less core
+(`allow-commands "^show"`) — the pipe is matched as typed, so that
+denial is not the pipe-inflated reading of a core deny and no core
+allow saves it. The one escape from
 a truncated-spelling veto is the deny-with-exceptions geometry itself:
 the vetoing deny matches only the truncated spelling and the allow that
 carries the full spelling matches only there (`^show log 100$` beside
@@ -1227,6 +1234,28 @@ its `allow-configuration`) cannot move a permitted policy ahead of it;
 an insert with both endpoints allowed runs unchanged on the CLI, gRPC
 and REST surfaces, which share `config.AuthorizeConfigMutation`.
 
+#### Subtree mutations are priced on every descendant they act on (#16784)
+
+`delete`, `deactivate`, `activate`, `copy` and `rename` act on the
+whole subtree rooted at the path they name, so pricing only that path
+let a restricted class destroy or relocate a denied descendant by
+naming an ancestor (`delete security` under
+`deny-configuration "^security policies policy guard"`). The shared
+gate now enumerates the pre-mutation candidate subtree as `set` lines
+(the #15995 descendant walk) and adjudicates each one: any denied
+descendant — or, under an `allow-configuration` allowlist, any
+descendant the allow does not cover — refuses the whole mutation on
+the CLI, gRPC and REST surfaces
+(`config.AuthorizeConfigMutationOnCandidate`). For `copy`/`rename`
+only the source subtree is priced this way; a destination that
+already exists is refused by the executor, so it is not priced as
+overwritten. The commit gate prices removal symmetrically for every
+tree: lines present in the expanded active tree but gone from the
+candidate (`AuthorizeExpandedCandidate`) are adjudicated as removals,
+which also covers deleting an `apply-groups` linker whose group body
+supplied a denied leaf. An ancestor mutation whose subtree contains
+no denied descendant, and classes with no `*-configuration` regexes,
+are unaffected.
 
 ### Write the body as a block or as `set` — never packed on the line (#6662)
 

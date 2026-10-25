@@ -67,8 +67,8 @@ func TestCommunityRenderBeltDoesNotNarrowValidMembers_8449(t *testing.T) {
 	cases := map[string]string{
 		"65000:100":    "bgp community-list standard c1 permit 65000:100",
 		"no-export":    "bgp community-list standard c1 permit no-export",
-		"65000:.*":     "bgp community-list expanded c1 permit 65000:.*",
-		"^65000:":      "bgp community-list expanded c1 permit ^65000:",
+		"65000:.*":     "bgp community-list expanded c1 permit 65000:[^ ]*",
+		"^65000:":      "bgp community-list expanded c1 permit (^|[ ])65000:",
 		"65000:1{2,3}": "bgp community-list expanded c1 permit 65000:1{2,3}",
 	}
 	for member, want := range cases {

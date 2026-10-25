@@ -161,6 +161,25 @@ func (t *ConfigTree) ResolvedRenameDestination(src, dst []string) []string {
 	return out
 }
 
+// ResolveCopyRenameDestination returns the full destination path a
+// copy/rename will act on (#16825): it applies the edit cursor exactly
+// as the executors do (PrependEditPathForCopyDst — a bare destination
+// stays under the SOURCE parent, any other destination is
+// cursor-prepended), then resolves a bare destination under the
+// source parent (ResolveBareCopyRenameDestination, #15757). src and
+// dst are the typed endpoints; src must be relative to editPath (the
+// full source is derived inside). This is the one helper the
+// authorization gate and every cursor-prepending executor share, so
+// the destination adjudicated is the destination acted on and the
+// two cannot diverge (#9938 / #14147 / #15757 / #16825 family).
+func ResolveCopyRenameDestination(editPath, src, dst []string) []string {
+	fullSrc := make([]string, 0, len(editPath)+len(src))
+	fullSrc = append(fullSrc, editPath...)
+	fullSrc = append(fullSrc, src...)
+	expanded := PrependEditPathForCopyDst(editPath, fullSrc, dst)
+	return ResolveBareCopyRenameDestination(fullSrc, expanded)
+}
+
 // PrependEditPathForCopyDst prepends the edit cursor to a copy/rename
 // destination UNLESS it is bare (#15237 A53-04): a bare destination
 // is a new identity under the SOURCE parent, so prepending the

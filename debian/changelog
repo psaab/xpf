@@ -10,6 +10,24 @@ xpf (0.0.0) unstable; urgency=medium
     security policy (host-originated: ...)"; `from-zone nosuch` stays the
     unzoned-ingress deny and `to-zone junos-host` stays the host-gate
     verdict.
+  * FRR/BFD: BFD profiles and peers now render only non-default
+    timer lines, and an OSPFv3 BFD profile renders its bare
+    `ipv6 ospf6 bfd` enable line first (#16813). bfdd elides
+    default-valued leaves (multiplier 3, intervals 300ms) from
+    running-config and ospf6d always holds both ospf6 bfd lines,
+    so the old render was a perpetual `frr-reload.py --test` diff
+    and the #15203 benign-reload re-check could never certify an
+    IS-IS-interface removal on such a box (false degraded reload).
+  * Daemon/mgmt-VRF: the #11362 cluster control/fabric classless
+    fence now resolves unit-spelled control/fabric interfaces
+    (#16806). mgmtVRFControlFabricInterfaces mapped the authored
+    ref with LinuxIfName (slash-only), so `control-interface
+    em0.0` never matched the vrf-mgmt member set and the fence
+    protected no interface; with the classless trust override
+    set, an fxp0 DHCP option-121 route inside the control
+    prefix was installed in table 999. It now resolves via
+    cfg.ResolveKernelIfName (unit-0 collapse, VLAN, aliases),
+    as transportVRFBinding already did since #15944.
   * Cluster/heartbeat: the duplicate-node-id heartbeat warning now
     drops a replay of this node's own heartbeat (#16789). The #14705
     gate verified only the HMAC, so an on-link spoofer replaying a
@@ -20,6 +38,13 @@ xpf (0.0.0) unstable; urgency=medium
     differ from this process's own heartbeat session; a genuine
     duplicate chassis (different process, different session) still
     warns, and the unkeyed legacy path is unchanged.
+  * Kernel upgrade: a candidate prune deferred because the failed
+    candidate is still the running kernel (#16811) is now persisted
+    in a prune-owed sidecar and collected exactly once on the next
+    boot that is positively off the candidate (or discharged when
+    the same version is re-armed and promoted). Previously the
+    revert cleared the journal, so every failed candidate kernel
+    stayed installed and on disk permanently.
   * Interfaces/networkd: an untagged unit's address on a tagged
     non-RETH parent is now rendered on the VLAN-parent .network
     (#16795). The netlink reconcile installed it on the parent, but
@@ -30,6 +55,50 @@ xpf (0.0.0) unstable; urgency=medium
     parents keep only the VRRP advert source, standalone-vrrp-group
     units stay foreign-kept and unrendered, and tagged-only parents
     render exactly as before.
+  * BGP route reflection: a `router bgp` stanza (default or VRF)
+    that renders a `route-reflector-client` neighbor now also renders
+    `bgp route-reflector allow-outbound-policy` (#16800). Without it,
+    FRR evaluates the outbound route-map for reflected (IBGP->IBGP)
+    advertisements on a dummy attribute copy, silently discarding
+    every export-policy set clause — the `then next-hop self`
+    lowering, local-preference and community — so RR clients received
+    the original next-hop and blackholed traffic with no IGP path to
+    it (the #2977 failure returning through the RR). Stanzas with no
+    rendered route-reflector-client are byte-identical.
+  * Remote CLI: `cli -c` no longer exits 0 having done nothing when
+    a keyword-only node gets an unknown or unimplemented subcommand
+    (#16798). `dispatchOperational` now consults
+    `cmdtree.ValidateOperationalLine` before routing and refuses such
+    lines as `unknown <path> command: <token>` (exit 1), covering
+    `clear security ike security-associations`, `request system
+    software add`, a misspelt `failover`, and the 32-node census.
+    Bare keyword nodes keep their help; value-slot and leaf failures
+    keep their existing handler errors.
+  * Userspace FIB: rib-group return rows (kernel ip-rule priorities
+    1001-1999) now run after the source VRF table's own lookup in the
+    AF_XDP helper, matching the kernel's l3mdev rule at 1000 (#16799).
+    Previously every return row was evaluated before the source table's
+    longest-prefix match, so tenant A's own default — and even a
+    more-specific route in A — lost to a return row into tenant B,
+    steering A's traffic into B (or dropping it on zone policy) while
+    the kernel and Junos used A's route. A return row now fires only
+    when the source table misses; the 30000-band leaks into inet.0 are
+    unchanged.
+  * Upgrade signals: `xpfd upgrade` (binary cut, --rollback, --rolling
+    and the `upgrade kernel` sub-verb) now captures SIGINT/SIGHUP/
+    SIGTERM for the whole run (#16796). Previously no disposition was
+    installed, so Ctrl-C or an SSH drop during the STOP window killed
+    the runner after `systemctl stop xpfd` and left a standalone
+    daemon down with nothing to restart it. A signal before STOP
+    aborts cleanly with the daemon live; at/after STOP it is logged
+    as deferred and honoured only after START/rollback completes
+    with the unit running.
+  * Config: bridge-domain names whose derived `br-<name>` device exceeds
+    IFNAMSIZ (15 bytes) or fails dev_valid_name (e.g. contains `:`) are now
+    rejected at strict commit/commit-check and quarantined on tolerant load
+    (#16792). Previously an L2-only domain such as `customer-vlan-100`
+    committed clean while networkd discarded its `.netdev`, so the bridge
+    never existed. A 12-byte name (br- + 12 = 15) still commits.
   * Cluster/config: an omitted `redundancy-group ip-monitoring
     global-weight` now defaults to 255, the Junos default (#16667).
     Previously it compiled to 0, so aggregate mode deducted nothing
@@ -62,6 +131,25 @@ xpf (0.0.0) unstable; urgency=medium
     and a stamped mismatch is suppressed on both the stream and
     system-syslog sinks. The local `show security log` buffer is
     unchanged. Same-generation `then syslog` forwarding is unchanged.
+  * CLI/login-class: a deny-commands pattern matching only pipe or
+    format text (`display set`, `| match`, an anchored
+    `… \| display set` spelling) now vetoes the piped command even
+    when the class's allow matches the pipe-less core (#16780).
+    Previously the #14686 pipe-boundary save overturned the full-form
+    denial whenever the bare command was allowed, so the documented
+    Junos-style "may run show but not `| display set`" rule silently
+    had no effect on the on-box CLI. The deny-with-exceptions idiom
+    (`^show log 100$` beside `^show log$`, public-vrf) still runs
+    through a benign pipe.
+  * FRR/community: no rendered frr.conf line contains "| " (#16776).
+    FRR's vty pipe hook refused such lines with "% Unknown action"
+    while frr-reload.py exited 0, so multi-member community-lists
+    (literal boundaries "(^| )") and operator regex members silently
+    never installed and reject terms over them failed open.
+    Community members are pipe-free via the #16788 per-community
+    translation (any "| " member refuses at commit / fails closed),
+    and "| " neighbor descriptions are refused at commit and
+    omitted on tolerant paths.
   * Shim verifier provenance/headroom (#16701): the gate verdict is
     now schema 3 and records provenance.kernel_release (the uname -r
     the processed-insn count was measured on); freshness and release

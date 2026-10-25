@@ -49,7 +49,10 @@ func mgmtVRFControlFabricInterfaces(cfg *config.Config, mgmtSet map[string]bool)
 		if name == "" {
 			continue
 		}
-		name = config.LinuxIfName(name)
+		// #16806/#15944 H23-02 residual: resolve via cfg, not LinuxIfName —
+		// LinuxIfName only converts "/", so "em0.0" never matched mgmtSet
+		// {em0} and the #11362 fence had no control/fabric links.
+		name = cfg.ResolveKernelIfName(name)
 		if name == "" || !mgmtSet[name] {
 			continue
 		}

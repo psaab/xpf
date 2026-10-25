@@ -67,6 +67,10 @@ type SyslogSlogHandler struct {
 type syslogClientSet struct {
 	mu      sync.RWMutex
 	clients []*SyslogClient
+	// retired folds drop counters of replaced `system syslog host` clients
+	// per destination so the exported counters survive rebuilds (#16769).
+	// Guarded by mu.
+	retired syslogDropAccumulator
 }
 
 // NewSyslogSlogHandler wraps a base slog.Handler with syslog forwarding.
@@ -111,6 +115,19 @@ func (h *SyslogSlogHandler) SetClients(clients []*SyslogClient) {
 	s.mu.Lock()
 	old := s.clients
 	s.clients = append([]*SyslogClient(nil), clients...)
+	// Fold retired clients BEFORE Close (#16769): Close stops the event
+	// writer, whose discarded queue is counted into DroppedWrites.
+	if len(old) > 0 {
+		next := make(map[*SyslogClient]bool, len(s.clients))
+		for _, c := range s.clients {
+			next[c] = true
+		}
+		for _, c := range old {
+			if !next[c] {
+				s.retired.retire("system", c)
+			}
+		}
+	}
 	s.mu.Unlock()
 
 	for _, c := range old {
@@ -132,6 +149,12 @@ func (h *SyslogSlogHandler) SetClientsPreserving(clients []*SyslogClient) {
 	s.mu.Lock()
 	old := s.clients
 	s.clients = append([]*SyslogClient(nil), clients...)
+	// Fold superseded clients BEFORE Close (#16769), as in SetClients.
+	for _, c := range old {
+		if !next[c] {
+			s.retired.retire("system", c)
+		}
+	}
 	s.mu.Unlock()
 
 	for _, c := range old {
@@ -158,6 +181,33 @@ func (h *SyslogSlogHandler) Clients() []*SyslogClient {
 	return append([]*SyslogClient(nil), s.clients...)
 }
 
+// SyslogDropStats snapshots the `system syslog host` clients' drop counters
+// (#16769), folded with retired generations' totals so the counters are
+// cumulative per destination across rebuilds. Nil-safe.
+func (h *SyslogSlogHandler) SyslogDropStats() []SyslogDropStat {
+	if h == nil {
+		return nil
+	}
+	s := h.loadShared()
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]SyslogDropStat, 0, len(s.clients))
+	for _, c := range s.clients {
+		if c == nil {
+			continue
+		}
+		out = append(out, syslogDropsFromClient("system", c))
+	}
+	out = s.retired.merge(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // Close closes all syslog clients. Queued writer records are discarded
 // and counted (the reconfigure path: a client swap must not wait on the
 // old collector).
@@ -169,6 +219,9 @@ func (h *SyslogSlogHandler) Close() {
 	s.mu.Lock()
 	clients := s.clients
 	s.clients = nil
+	for _, c := range clients {
+		s.retired.retire("system", c)
+	}
 	s.mu.Unlock()
 
 	for _, c := range clients {
@@ -197,6 +250,9 @@ func (h *SyslogSlogHandler) ShutdownTimeout(timeout time.Duration) {
 	s.mu.Lock()
 	clients := s.clients
 	s.clients = nil
+	for _, c := range clients {
+		s.retired.retire("system", c)
+	}
 	s.mu.Unlock()
 
 	if timeout <= 0 {

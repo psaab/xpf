@@ -878,6 +878,13 @@ func (vi *vrrpInstance) updateConfigHeld(cfg Instance, heldRETH bool) {
 	}
 	vi.mu.Unlock()
 
+	// #16821: this priority assignment supersedes a pending
+	// resignation. The configured (in practice cluster-restored)
+	// priority was just installed in cfg.Priority above, so the
+	// stashed resigning 0 must not survive to be actuated by a
+	// later, unrelated becomeBackup.
+	vi.discardPendingResign()
+
 	// Wake the run-loop select (MASTER and BACKUP both consume
 	// configUpdatedCh since #15689) so timers and an armed preempt hold
 	// can be re-validated against the new config. Non-blocking: when
@@ -1068,6 +1075,13 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 		// unless a PREVIOUS removal failed and its #5482 reconcile has not yet
 		// cleared the address, in which case a VIP may still be answering ARP
 		// and this is not a two-owner-safe resignation.
+		// #16821: the VIPs are already off the wire, so actuating the
+		// stashed priority 0 here is safe and REQUIRED — ResignRG's contract
+		// is that the resigned instance keeps 0 until restored. Leaving the
+		// marker pending kept the pre-resign priority in getPriority (so a
+		// later MASTER tenure advertised normally) and let a later,
+		// unrelated becomeBackup silently install the stale 0.
+		vi.applyPendingResign()
 		vi.notifyResigned(vi.staleVIPResignErr())
 	case <-vi.configUpdatedCh:
 		// A config update landed (updateConfig) while this BACKUP select

@@ -256,6 +256,10 @@ type EventReader struct {
 	buffer                   *EventBuffer
 	syslogMu                 sync.RWMutex
 	syslogClients            []*SyslogClient
+	// syslogRetired folds drop counters of replaced security-log clients
+	// per destination so the exported counters survive rebuilds (#16769).
+	// Guarded by syslogMu.
+	syslogRetired syslogDropAccumulator
 	localMu                  sync.RWMutex
 	localWriters             []*LocalLogWriter
 	callbackMu               sync.RWMutex
@@ -434,9 +438,24 @@ func (er *EventReader) CallbackCount() int {
 }
 
 // SetSyslogClients replaces the set of syslog clients (goroutine-safe).
+// Clients that leave the set are folded into the retired drop accumulator
+// (#16769) so their counters survive the rebuild; callers that close the
+// superseded clients still do so, after this snapshot is taken.
 func (er *EventReader) SetSyslogClients(clients []*SyslogClient) {
 	er.syslogMu.Lock()
+	old := er.syslogClients
 	er.syslogClients = clients
+	if len(old) > 0 {
+		next := make(map[*SyslogClient]bool, len(clients))
+		for _, c := range clients {
+			next[c] = true
+		}
+		for _, c := range old {
+			if !next[c] {
+				er.syslogRetired.retire("security", c)
+			}
+		}
+	}
 	er.syslogMu.Unlock()
 }
 
@@ -494,10 +513,24 @@ func (er *EventReader) ReplaceLocalWriters(writers []*LocalLogWriter) {
 }
 
 // ReplaceSyslogClients atomically swaps syslog clients and closes old ones.
+// Retired clients' drop counters are folded BEFORE Close (#16769): Close
+// stops the event writer, whose discarded queue is counted into
+// DroppedWrites, and folding first keeps those final counts.
 func (er *EventReader) ReplaceSyslogClients(clients []*SyslogClient) {
 	er.syslogMu.Lock()
 	old := er.syslogClients
 	er.syslogClients = clients
+	if len(old) > 0 {
+		next := make(map[*SyslogClient]bool, len(clients))
+		for _, c := range clients {
+			next[c] = true
+		}
+		for _, c := range old {
+			if !next[c] {
+				er.syslogRetired.retire("security", c)
+			}
+		}
+	}
 	er.syslogMu.Unlock()
 	for _, c := range old {
 		c.Close()

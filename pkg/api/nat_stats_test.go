@@ -37,7 +37,11 @@ func newNATStatsAPIStore(t *testing.T) *configstore.Store {
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure() error = %v", err)
 	}
-	if _, err := store.LoadSet(`set security nat source rule-set trust-to-untrust from zone trust
+	if _, err := store.LoadSet(`set security zones security-zone trust
+set security zones security-zone untrust
+set security zones security-zone wan
+set security zones security-zone guest
+set security nat source rule-set trust-to-untrust from zone trust
 set security nat source rule-set trust-to-untrust to zone untrust
 set security nat source rule-set trust-to-untrust rule r1 match source-address 10.0.0.0/8
 set security nat source rule-set trust-to-untrust rule r1 then source-nat interface
@@ -84,7 +88,9 @@ func newNATPoolStatsAPIStore(t *testing.T) *configstore.Store {
 	}
 	// Pool config text declares ONE address and the default port window. The
 	// runtime helper will report a DIFFERENT (authoritative) view.
-	if _, err := store.LoadSet(`set security nat source pool p1 address 203.0.113.10/32
+	if _, err := store.LoadSet(`set security zones security-zone trust
+set security zones security-zone untrust
+set security nat source pool p1 address 203.0.113.10/32
 set security nat source pool p1 port range low 1024 high 2023
 set security nat source rule-set rs from zone trust
 set security nat source rule-set rs to zone untrust
@@ -245,7 +251,10 @@ func newIfaceNATStatsAPIStore(t *testing.T) *configstore.Store {
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure() error = %v", err)
 	}
-	if _, err := store.LoadSet(`set security nat source rule-set trust-to-wan from zone trust
+	if _, err := store.LoadSet(`set security zones security-zone trust
+set security zones security-zone wan
+set security zones security-zone guest
+set security nat source rule-set trust-to-wan from zone trust
 set security nat source rule-set trust-to-wan to zone wan
 set security nat source rule-set trust-to-wan rule r1 match source-address 0.0.0.0/0
 set security nat source rule-set trust-to-wan rule r1 then source-nat interface

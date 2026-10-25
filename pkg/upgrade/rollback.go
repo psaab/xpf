@@ -28,6 +28,10 @@ type RollbackOptions struct {
 	// post-start readiness gate. The production CLI leaves it false; HA uses
 	// the normal target-version helper-health gate before rejoining.
 	SkipHealthCheck bool
+	// SignalGuard is the #16796 interrupt capture for this rollback
+	// (may be nil). A pending signal aborts only before StopUnit;
+	// at/after STOP it is deferred until StartUnit/health complete.
+	SignalGuard *SignalGuard
 }
 
 type rollbackPlan struct {
@@ -49,6 +53,15 @@ type rollbackPlan struct {
 // undoing the operator rollback.
 func (r *Runner) RollbackTo(target string, opts RollbackOptions) error {
 	r.resetCommittedCut()
+	// #16796: abort only before STOP. A ROLLINGBACK journal means a
+	// prior attempt may already have stopped the unit, so the signal
+	// check that can abort runs after the plan resolves (below); here
+	// only a fresh, never-stopped invocation aborts at entry.
+	if sig, abort := opts.SignalGuard.MayAbort(true); abort {
+		if lj, lerr := r.loadJournal(); lerr != nil || lj.State != StateRollingBack {
+			return fmt.Errorf("upgrade --rollback: aborted by %s before STOP; the daemon was not stopped (#16796)", sig)
+		}
+	}
 	if !opts.ClusterCoordinated {
 		present, err := r.clusterNodeIDPresent()
 		if err != nil {
@@ -80,6 +93,15 @@ func (r *Runner) RollbackTo(target string, opts RollbackOptions) error {
 			return fmt.Errorf("upgrade --rollback: %w: %w", errRollbackRefusedBeforeStop, err)
 		}
 		return fmt.Errorf("upgrade --rollback: %w", err)
+	}
+	// #16796 boundary (fresh rollback, immediately before the journal
+	// write that precedes STOP): a pending signal aborts here. The
+	// ROLLINGBACK-resume branch above skips this — it may already have
+	// stopped the unit, so its signal defers inside executeRollback.
+	if j.State != StateRollingBack {
+		if sig, abort := opts.SignalGuard.MayAbort(true); abort {
+			return fmt.Errorf("upgrade --rollback: aborted by %s before STOP; the daemon was not stopped (#16796)", sig)
+		}
 	}
 	if j.State == StateRollingBack {
 		return r.executeRollback(plan, j, opts)
@@ -283,6 +305,9 @@ func (r *Runner) executeRollback(plan rollbackPlan, j *Journal, opts RollbackOpt
 			}
 		}
 	}
+	// #16796: past this StopUnit any pending signal defers until
+	// StartUnit + health complete (see the completion honour below).
+	r.logDeferredSignal(opts.SignalGuard, "rollback STOP")
 	if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
 		return fmt.Errorf("upgrade --rollback: stop current daemon %s: %w", plan.fromVersion, err)
 	}
@@ -328,6 +353,10 @@ func (r *Runner) executeRollback(plan rollbackPlan, j *Journal, opts RollbackOpt
 		return fmt.Errorf("upgrade --rollback: clear rollback journal: %w", err)
 	}
 	_ = j // j documents the persisted invariant; execute uses the immutable plan.
+	if sig, pending := opts.SignalGuard.Pending(); pending {
+		r.logf("upgrade: rollback to %s complete; deferred %s now honoured with the daemon running (#16796)", plan.toVersion, sig)
+		return fmt.Errorf("upgrade --rollback: rolled back to %s, then honoured deferred %s (#16796)", plan.toVersion, sig)
+	}
 	return nil
 }
 

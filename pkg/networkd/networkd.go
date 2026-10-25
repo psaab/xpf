@@ -980,13 +980,18 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 					rule.hasMAC = false
 					continue
 				}
-				// Each MACAddress= assignment replaces the previous
-				// list (systemd parses it as a set-valued assignment
-				// cleared by the empty form, and network_verify sees
-				// only the effective list). Rebuild from this line's
-				// words alone so a later all-invalid assignment
-				// resets an earlier valid one instead of leaving the
-				// stale words live for MatchesForApply (#14701).
+				// Words are filtered with the same parser systemd
+				// uses (config_parse_hw_addrs → parse_hw_addr_full
+				// with expected_len 0): unparseable words are
+				// dropped, IPv4/IPv6 literals are kept as 4/16-byte
+				// tunnel hardware addresses (#16797). The #14701
+				// per-assignment rebuild is retained: a later
+				// assignment whose words are all dropped empties
+				// macPatterns, so hasMAC clears and the reset is
+				// visible to the gates below (systemd's set only
+				// grows across non-empty assignments — its
+				// reset-by-invalid-assignment shape is xpf's
+				// conservative choice, kept and pinned).
 				rule.macPatterns = nil
 				validWords := 0
 				for _, pattern := range strings.Fields(value) {
@@ -1019,19 +1024,23 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 	return result
 }
 
-// externalPatternListMatches implements systemd's net_condition_test_strv:
-// any matching negative rule vetoes; otherwise a positive must match if one
-// exists, and an all-negative or empty rule set matches by default. A run
-// of leading "!" collapses to a single negation (#14701): the parser
-// prefixes "!" onto every word of a line-negated Name= assignment, so a
-// word that itself starts with "!" (Name=!eth0 !eth1) would otherwise be
-// stored as "!!eth1" and fnmatched literally, losing the veto.
+// externalPatternListMatches implements systemd's net_condition_test_strv
+// (v262 src/shared/net-condition.c): exactly one leading "!" is the
+// negation marker (invert = *q == '!'; q += invert) — a pattern stored
+// as "!!eth1" is a NEGATED pattern "!eth1", not a veto of eth1. Any
+// matching negative pattern vetoes; otherwise a positive must match if
+// one exists, and an all-negative or empty pattern set matches by
+// default. #16797: the #14701 "run of ! collapses" rule was wrong — the
+// parser already prefixes "!" onto every word of a line-negated Name=
+// (config_parse_match_ifnames), so Name=!eth0 !eth1 is stored as
+// ["!eth0", "!!eth1"]; stripping one "!" leaves "!eth1", which fnmatches
+// no real interface name, so eth1 is NOT vetoed and (all-negative) the
+// file matches it — exactly what real networkd 262 does.
 func externalPatternListMatches(patterns []string, value string) bool {
 	hasPositive, positiveMatched := false, false
 	for _, pattern := range patterns {
-		negative := false
-		for strings.HasPrefix(pattern, "!") {
-			negative = true
+		negative := strings.HasPrefix(pattern, "!")
+		if negative {
 			pattern = pattern[1:]
 		}
 		if !negative {
@@ -1366,8 +1375,13 @@ func fnmatchPOSIXCharacterClass(name string, value rune) (bool, bool) {
 	}
 }
 
-// externalMACAddressListMatches compares normalized hardware addresses. Unlike
-// Name=, systemd's MACAddress= accepts address lists, not shell globs.
+// externalMACAddressListMatches compares parsed hardware addresses.
+// Unlike Name=, systemd's MACAddress= accepts address lists, not shell
+// globs. Both the pattern words and the interface's address string go
+// through parseExternalMACAddress, so an IPv4/IPv6 literal on either
+// side compares as its raw 4/16 bytes (systemd parses MACAddress= with
+// parse_hw_addr_full(word, 0, ...) — ltype 0 — which accepts the IP
+// forms for tunnel hardware addresses, #16797).
 func externalMACAddressListMatches(patterns []string, address string) bool {
 	actual, ok := parseExternalMACAddress(address)
 	if !ok {
@@ -1382,15 +1396,35 @@ func externalMACAddressListMatches(patterns []string, address string) bool {
 	return false
 }
 
+// parseExternalMACAddress parses one MACAddress= word (or an interface's
+// hardware-address string) the way systemd 262's parse_hw_addr_full
+// with expected_len 0 does (config_parse_hw_addrs, ltype 0): an IPv4 or
+// IPv6 literal is a 4- or 16-byte hardware address (tunnel local
+// addresses, e.g. ipgre's "192.0.2.1" shown by networkctl as
+// c0:00:02:01); otherwise exactly 4/6/16/20-byte colon/hyphen forms, or
+// the 6-byte dotted form of three variable-width 16-bit fields. Like
+// systemd, a word that parses to any other length (separator-less hex)
+// is dropped; the 8-group colon spelling is claimed by the IPv6 branch
+// below as 16 bytes, never as 8 single bytes. A mixed-separator word
+// is invalid. Negated "!" words never parse (systemd has no negation
+// for MACAddress=), so they stay inert.
 func parseExternalMACAddress(value string) ([]byte, bool) {
-	// IP literals are not hardware addresses: systemd's
-	// config_parse_hw_addrs parses each word as a hardware address
-	// and drops non-EUI-48 forms, so an IP-literal MACAddress= word
-	// is dropped like any other unparseable word (#14701). Accepting
-	// it via net.ParseIP made an IP-only file a valid MAC predicate
-	// that could match an interface whose "MAC" string was that IP.
+	// IPv4 literals ARE hardware addresses for tunnels: parse_hw_addr_full
+	// tries in_addr_from_string(AF_INET) first when expected_len is 0,
+	// so "192.0.2.1" is the 4-byte address [192 0 2 1] — the same bytes
+	// as the colon form "c0:00:02:01" networkctl displays for gre1.
+	// IPv6 likewise: inet_pton accepts EIGHT colon-separated hex groups
+	// without "::" too — each group a 16-bit field, so
+	// "52:54:00:aa:bb:cc:dd:ee" is a 16-byte IPv6-form address, not the
+	// 8 single bytes its groups suggest. Return the 16 raw bytes; the
+	// colon-group parser below independently accepts the same bytes
+	// spelled as 16 single-byte groups, and a 6-byte caller's string
+	// can never equal either form.
 	if ip := net.ParseIP(value); ip != nil {
-		return nil, false
+		if ip4 := ip.To4(); ip4 != nil {
+			return []byte(ip4), true
+		}
+		return []byte(ip.To16()), true
 	}
 	// net.ParseMAC accepts separator-less hex and 8-byte EUI-64 values, but
 	// systemd's MACAddress= does not accept either form. Require a separator.
@@ -1398,7 +1432,7 @@ func parseExternalMACAddress(value string) ([]byte, bool) {
 	if !strings.ContainsAny(value, ":-.") {
 		return nil, false
 	}
-	if hw, err := net.ParseMAC(value); err == nil && len(hw) == 6 {
+	if hw, err := net.ParseMAC(value); err == nil && (len(hw) == 6 || len(hw) == 20) {
 		return []byte(hw), true
 	}
 	// The six-byte dotted form groups bytes into three variable-width 16-bit fields.
@@ -1417,12 +1451,12 @@ func parseExternalMACAddress(value string) ([]byte, bool) {
 					return nil, false
 				}
 			}
-			value, err := strconv.ParseUint(group, 16, 16)
+			n, err := strconv.ParseUint(group, 16, 16)
 			if err != nil {
 				return nil, false
 			}
-			hw[i*2] = byte(value >> 8)
-			hw[i*2+1] = byte(value)
+			hw[i*2] = byte(n >> 8)
+			hw[i*2+1] = byte(n)
 		}
 		return hw, true
 	}
@@ -1431,7 +1465,10 @@ func parseExternalMACAddress(value string) ([]byte, bool) {
 		separator = '-'
 	}
 	groups := strings.Split(value, string(separator))
-	if len(groups) != 6 {
+	// systemd accepts exactly 4 (IPv4 tunnel colon form, e.g.
+	// c0:00:02:01), 6 (EUI-48), 16 (IPv6 tunnel colon form) or 20
+	// (IPoIB) single-byte groups; every other count is dropped.
+	if len(groups) != 4 && len(groups) != 6 && len(groups) != 16 && len(groups) != 20 {
 		return nil, false
 	}
 	hw := make([]byte, len(groups))
@@ -1444,11 +1481,11 @@ func parseExternalMACAddress(value string) ([]byte, bool) {
 				return nil, false
 			}
 		}
-		value, err := strconv.ParseUint(group, 16, 8)
+		n, err := strconv.ParseUint(group, 16, 8)
 		if err != nil {
 			return nil, false
 		}
-		hw[i] = byte(value)
+		hw[i] = byte(n)
 	}
 	return hw, true
 }

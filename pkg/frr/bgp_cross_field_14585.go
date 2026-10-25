@@ -35,6 +35,20 @@ func renderBGPRouteReflectorClient14585(b *strings.Builder, routerAS uint32, n *
 	fmt.Fprintf(b, "  neighbor %s route-reflector-client\n", n.Address)
 }
 
+// bgpRRAllowsOutboundPolicy16800 reports whether this `router bgp`
+// stanza renders at least one `route-reflector-client` neighbor (the
+// #14585 predicate above, driven by the already-excluded
+// validNeighbors set) and therefore has a reflected, IBGP->IBGP
+// advertisement for outbound policy to modify (#16800).
+func bgpRRAllowsOutboundPolicy16800(routerAS uint32, neighbors []*config.BGPNeighbor) bool {
+	for _, n := range neighbors {
+		if n != nil && n.RouteReflectorClient && (n.PeerAS == 0 || bgpNeighborIBGP14585(routerAS, n)) {
+			return true
+		}
+	}
+	return false
+}
+
 // #15202: Junos `remove-private` strips the private-AS run at the head
 // (most-recently-prepended end) of the advertised AS path even when a
 // public AS follows it. The bare FRR `remove-private-AS` strips only an

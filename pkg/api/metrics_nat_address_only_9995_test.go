@@ -7,6 +7,8 @@ import "testing"
 // a port-capacity budget nor a translation-state usage sample to publish.
 func TestNATPoolMetricsOmitAddressOnlyPortUsage9995(t *testing.T) {
 	setLines := []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security nat source pool p1 address 203.0.113.10/32",
 		"set security nat source pool p1 port no-translation",
 		"set security nat source pool p2 address 203.0.113.11/32",

@@ -512,6 +512,7 @@ var collectorDescUserspaceSession = []int{
 	xpfCollectorDescFieldIndex("userspaceSessionGCHealedOnPromote"),
 	xpfCollectorDescFieldIndex("userspaceSessionGCAgedOwnerRGZeroActiveNode"),
 	xpfCollectorDescFieldIndex("userspaceSessionGCKeptAliveByCompanion"),
+	xpfCollectorDescFieldIndex("userspaceSessionGCExpired"),
 	xpfCollectorDescFieldIndex("userspacePptpUnassociatedPackets"),
 	xpfCollectorDescFieldIndex("userspacePptpExpiredIdle"),
 	xpfCollectorDescFieldIndex("userspacePptpHandleCollisions"),
@@ -746,6 +747,7 @@ var collectorDescBinding = []int{
 	xpfCollectorDescFieldIndex("bindingTableUnavailablePackets"),
 	xpfCollectorDescFieldIndex("bindingSlowPathLocalDeliveryPackets"),
 	xpfCollectorDescFieldIndex("bindingSlowPathMissingNeighborPackets"),
+	xpfCollectorDescFieldIndex("bindingFlowCacheEvictionsArm"),
 }
 
 // initFairnessDescriptors (metrics_descriptors_fairness.go).

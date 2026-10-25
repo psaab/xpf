@@ -24,7 +24,8 @@ func quarantine13247Store(t *testing.T) *configstore.Store {
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
-	if _, err := store.LoadSet(`set security zones security-zone untrust
+	if _, err := store.LoadSet(`set security zones security-zone z174
+set security zones security-zone untrust
 set security nat source pool zeta address 203.0.113.20/32
 set security nat source pool alpha address 203.0.113.10/32
 set security nat source pool mid address 203.0.113.15/32

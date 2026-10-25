@@ -483,10 +483,18 @@ pub(in crate::afxdp) fn leak_incarnation_for_resolution(
             if local_v4_owned_by_table(state, ip, table.as_ref()) {
                 return None;
             }
+            // #16799: a deferred return owns the destination only when
+            // the source table misses it; when the source owns it, the
+            // return carries nothing and must not be stamped (a stamp
+            // would let a later return removal kill a session the
+            // source route legitimately carries — fail-closed but
+            // wrong). Immediate leaks keep stage-1 ownership.
+            let source_owns = source_table_owns_v4(state, ip, table.as_ref(), true, None);
             state.leak_rules_v4.get(table.as_ref()).and_then(|rules| {
                 rules
                     .iter()
                     .filter(|leak| leak.prefix.contains(ip))
+                    .filter(|leak| !leak.post_table || !source_owns)
                     .find_map(|leak| {
                         let next_table = canonical_next_table(&leak.next_table, false);
                         table_has_v4_route(state, ip, next_table.as_ref(), true)
@@ -501,10 +509,12 @@ pub(in crate::afxdp) fn leak_incarnation_for_resolution(
             if local_v6_owned_by_table(state, ip, table.as_ref()) {
                 return None;
             }
+            let source_owns = source_table_owns_v6(state, ip, table.as_ref(), true, None);
             state.leak_rules_v6.get(table.as_ref()).and_then(|rules| {
                 rules
                     .iter()
                     .filter(|leak| leak.prefix.contains(ip))
+                    .filter(|leak| !leak.post_table || !source_owns)
                     .find_map(|leak| {
                         let next_table = canonical_next_table(&leak.next_table, true);
                         table_has_v6_route(state, ip, next_table.as_ref(), true)
@@ -773,6 +783,131 @@ fn table_has_v4_route_suppressing(
             .is_some_and(|tables| tables.contains(table))
 }
 
+/// #16799: true when `table`'s own lookup owns `ip` — a usable ordinary
+/// route entry, a connected prefix, or a per-table local/NAT/anycast
+/// ownership — so a deferred (post-table) rib-group return must NOT
+/// steal it. Discard/reject entries count: they are the source table's
+/// own terminal answer, which the kernel's l3mdev lookup returns before
+/// ever reaching the (1000, 2000) return rules. Entries whose only
+/// next-hops are tunnels the caller forbade do not count (they resolve
+/// to NoRoute, i.e. a miss).
+#[inline]
+fn source_table_owns_v4(
+    state: &ForwardingState,
+    ip: Ipv4Addr,
+    table: &str,
+    allow_tunnels: bool,
+    suppress_nat_local: Option<IpAddr>,
+) -> bool {
+    table_has_v4_route_suppressing(state, ip, table, allow_tunnels, suppress_nat_local)
+}
+
+#[inline]
+fn source_table_owns_v6(
+    state: &ForwardingState,
+    ip: Ipv6Addr,
+    table: &str,
+    allow_tunnels: bool,
+    suppress_nat_local: Option<IpAddr>,
+) -> bool {
+    table_has_v6_route_suppressing(state, ip, table, allow_tunnels, suppress_nat_local)
+}
+
+/// #16799: try the deferred (`post_table`) leaks of `table` in priority
+/// order, with the same target-miss fall-through as stage 1 (#9955 /
+/// #14319). Returns `Some` only when a deferred target actually
+/// resolves (non-NoRoute); otherwise the caller keeps its source-miss
+/// (NoRoute) outcome — never a fabricated result.
+#[allow(clippy::too_many_arguments)]
+fn try_deferred_leaks_v4(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    ip: Ipv4Addr,
+    table: &str,
+    depth: usize,
+    allow_tunnels: bool,
+    ecmp_flow_hash: Option<u64>,
+    suppress_nat_local: Option<IpAddr>,
+) -> Option<ForwardingLookupResult> {
+    let leaks = state.leak_rules_v4.get(table)?;
+    for leak in leaks
+        .iter()
+        .filter(|leak| leak.post_table && leak.prefix.contains(ip))
+    {
+        let next_table_name = canonical_next_table(&leak.next_table, false);
+        if !table_has_v4_route_suppressing(
+            state,
+            ip,
+            next_table_name.as_ref(),
+            allow_tunnels,
+            suppress_nat_local,
+        ) {
+            continue;
+        }
+        let resolved = lookup_forwarding_resolution_v4_inner(
+            state,
+            dynamic_neighbors,
+            ip,
+            next_table_name.as_ref(),
+            depth + 1,
+            false,
+            allow_tunnels,
+            ecmp_flow_hash,
+            suppress_nat_local,
+        );
+        if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+            continue;
+        }
+        return Some(resolved);
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_deferred_leaks_v6(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    ip: Ipv6Addr,
+    table: &str,
+    depth: usize,
+    allow_tunnels: bool,
+    ecmp_flow_hash: Option<u64>,
+    suppress_nat_local: Option<IpAddr>,
+) -> Option<ForwardingLookupResult> {
+    let leaks = state.leak_rules_v6.get(table)?;
+    for leak in leaks
+        .iter()
+        .filter(|leak| leak.post_table && leak.prefix.contains(ip))
+    {
+        let next_table_name = canonical_next_table(&leak.next_table, true);
+        if !table_has_v6_route_suppressing(
+            state,
+            ip,
+            next_table_name.as_ref(),
+            allow_tunnels,
+            suppress_nat_local,
+        ) {
+            continue;
+        }
+        let resolved = lookup_forwarding_resolution_v6_inner(
+            state,
+            dynamic_neighbors,
+            ip,
+            next_table_name.as_ref(),
+            depth + 1,
+            false,
+            allow_tunnels,
+            ecmp_flow_hash,
+            suppress_nat_local,
+        );
+        if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+            continue;
+        }
+        return Some(resolved);
+    }
+    None
+}
+
 #[inline]
 fn local_delivery_resolution_v4(
     state: &ForwardingState,
@@ -973,8 +1108,15 @@ fn lookup_forwarding_resolution_v4_inner(
         // table's LPM stage. The target call disables this stage: an ip-rule
         // action performs LPM in its selected table and does not restart the
         // rule list.
+        // #16799: deferred (post_table) rib-group returns are skipped here;
+        // in the kernel they sit at (1000, 2000), AFTER the l3mdev lookup
+        // of the source VRF table at 1000, so they run only on a source
+        // miss (see the tail of this function).
         if let Some(leaks) = state.leak_rules_v4.get(table) {
-            for leak in leaks.iter().filter(|leak| leak.prefix.contains(ip)) {
+            for leak in leaks
+                .iter()
+                .filter(|leak| !leak.post_table && leak.prefix.contains(ip))
+            {
                 let next_table_name = canonical_next_table(&leak.next_table, false);
                 if !table_has_v4_route_suppressing(
                     state,
@@ -1040,7 +1182,14 @@ fn lookup_forwarding_resolution_v4_inner(
             }
         }
     }
-    match select_v4_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
+    // #16799: capture whether the source table owns `ip` BEFORE consuming
+    // the LPM result, so a source miss can fall through to deferred
+    // returns while any source-owned outcome (forward, discard/reject,
+    // MissingNeighbor via a selected member) stays authoritative — as
+    // the kernel's l3mdev lookup result is before the return rules.
+    let source_owns_v4 = evaluate_leaks
+        && source_table_owns_v4(state, ip, table, allow_tunnels, suppress_nat_local);
+    let result = match select_v4_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV4::Connected {
             ifindex,
             tunnel_endpoint_id,
@@ -1217,7 +1366,29 @@ fn lookup_forwarding_resolution_v4_inner(
             selected_route_lookup_result(state, table, resolution)
         }
         None => no_route_lookup_result(no_route_resolution(None)),
+    };
+    // #16799: deferred rib-group returns run only on a genuine source
+    // miss: the LPM produced NoRoute AND the source table owns nothing
+    // for `ip`. A source-owned outcome — including MissingNeighbor from
+    // a selected-but-unresolved member — is returned bit-identically.
+    if evaluate_leaks
+        && !source_owns_v4
+        && result.resolution.disposition == ForwardingDisposition::NoRoute
+    {
+        if let Some(deferred) = try_deferred_leaks_v4(
+            state,
+            dynamic_neighbors,
+            ip,
+            table,
+            depth,
+            allow_tunnels,
+            ecmp_flow_hash,
+            suppress_nat_local,
+        ) {
+            return deferred;
+        }
     }
+    result
 }
 
 pub(in crate::afxdp) fn lookup_forwarding_resolution_v6(
@@ -1366,8 +1537,13 @@ fn lookup_forwarding_resolution_v6_inner(
         // #9955: perform the rule stage once. The target lookup disables
         // `evaluate_leaks`, so a target-table miss resumes this same rule
         // list rather than restarting it from the selected table.
+        // #16799: deferred (post_table) returns are skipped here and run
+        // only on a source miss (see the tail; v4 twin).
         if let Some(leaks) = state.leak_rules_v6.get(table) {
-            for leak in leaks.iter().filter(|leak| leak.prefix.contains(ip)) {
+            for leak in leaks
+                .iter()
+                .filter(|leak| !leak.post_table && leak.prefix.contains(ip))
+            {
                 let next_table_name = canonical_next_table(&leak.next_table, true);
                 if !table_has_v6_route_suppressing(
                     state,
@@ -1424,7 +1600,10 @@ fn lookup_forwarding_resolution_v6_inner(
             }
         }
     }
-    match select_v6_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
+    // #16799: v4 twin — source ownership gates the deferred tail.
+    let source_owns_v6 = evaluate_leaks
+        && source_table_owns_v6(state, ip, table, allow_tunnels, suppress_nat_local);
+    let result = match select_v6_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV6::Connected {
             ifindex,
             tunnel_endpoint_id,
@@ -1584,7 +1763,26 @@ fn lookup_forwarding_resolution_v6_inner(
             selected_route_lookup_result(state, table, resolution)
         }
         None => no_route_lookup_result(no_route_resolution(None)),
+    };
+    // #16799: v4 twin — deferred returns only on a genuine source miss.
+    if evaluate_leaks
+        && !source_owns_v6
+        && result.resolution.disposition == ForwardingDisposition::NoRoute
+    {
+        if let Some(deferred) = try_deferred_leaks_v6(
+            state,
+            dynamic_neighbors,
+            ip,
+            table,
+            depth,
+            allow_tunnels,
+            ecmp_flow_hash,
+            suppress_nat_local,
+        ) {
+            return deferred;
+        }
     }
+    result
 }
 
 pub(in crate::afxdp) fn no_route_resolution(next_hop: Option<IpAddr>) -> ForwardingResolution {

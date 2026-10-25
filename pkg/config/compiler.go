@@ -588,6 +588,15 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 			return nil, err
 		}
 	}
+	// #16792: strict commit verifies that every bridge domain can become its
+	// derived br-<name> Linux device (the #11391 gate covered only vrf- via
+	// irb-backed domains). Tolerant paths skip this gate and quarantine only
+	// invalid names in compileBridgeDomains.
+	if !opts.lenientBridgeDomainKernelName {
+		if err := validateBridgeDomainKernelNameAST(tree, nodeID); err != nil {
+			return nil, err
+		}
+	}
 
 	// #5180: duplicate hierarchical named-block gate. Runs PRE-expansion on the
 	// top-level stanzas (never a group body — apply-groups deep-merges rather
@@ -1017,6 +1026,9 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// P5 cross-section derivations below.
 	if err := compileSections(tree, cfg, opts); err != nil {
 		return nil, err
+	}
+	if opts.lenientBridgeDomainKernelName && len(cfg.BridgeDomains) > 0 {
+		cfg.BridgeDomains = quarantineInvalidBridgeDomains16792(cfg)
 	}
 	// #16001: mark the tolerated uncovered-family `except` terms the AST
 	// gate found, now that both pools are compiled. Builders refuse those

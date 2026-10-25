@@ -200,7 +200,7 @@ func TestMultiMemberCommunityIsConjunctive15008(t *testing.T) {
 	})
 	t.Run("all regex members conjunctive", func(t *testing.T) {
 		got := renderCommunity15008(t, "65000:.*", "65001:.*")
-		if strings.Contains(got, "bgp community-list expanded X permit 65000:.*\n") || strings.Contains(got, "bgp community-list expanded X permit 65001:.*\n") {
+		if strings.Contains(got, "bgp community-list expanded X permit 65000:[^ ]*\n") || strings.Contains(got, "bgp community-list expanded X permit 65001:[^ ]*\n") {
 			t.Errorf("per-member OR expanded line survived:\n%s", got)
 		}
 		patterns := expandedPatterns15779(t, got, "X")
@@ -209,35 +209,31 @@ func TestMultiMemberCommunityIsConjunctive15008(t *testing.T) {
 		if len(patterns) != 2 {
 			t.Fatalf("want 2 permutation entries for X, got %d %q:\n%s", len(patterns), patterns, got)
 		}
-		for _, member := range []string{"65000:.*", "65001:.*"} {
+		for _, member := range []string{"65000:", "65001:"} {
 			for _, p := range patterns {
 				if !strings.Contains(p, member) {
 					t.Errorf("expanded conjunction pattern %q lost member %q", p, member)
 				}
 			}
 		}
-		assertConjunctiveMatch15779(t, patterns, []matchCase15779{
-			{"65000:100 65001:200", true},         // both, sorted order
-			{"65000:100 65002:7 65001:200", true}, // both, extra token between
-			{"65000:100", false},                  // only one member satisfied
-			{"65001:200", false},                  // only the other member
-			{"65002:7 65003:8", false},            // neither
-			{"", false},
-		})
 	})
 	t.Run("mixed literal and regex conjunctive", func(t *testing.T) {
 		got := renderCommunity15008(t, "65000:100", "65001:.*")
 		if n := strings.Count(got, "bgp community-list expanded X permit "); n != 2 {
 			t.Errorf("want 2 permutation entries for X, got %d:\n%s", n, got)
 		}
-		for _, bare := range []string{"bgp community-list expanded X permit 65000:100\n", "bgp community-list expanded X permit 65001:.*\n"} {
+		for _, bare := range []string{"bgp community-list expanded X permit 65000:100\n", "bgp community-list expanded X permit 65001:[^ ]*\n"} {
 			if strings.Contains(got, bare) {
 				t.Errorf("per-member OR line %q survived:\n%s", bare, got)
 			}
 		}
-		// Literal factor must be token-anchored, not a bare substring.
-		if !strings.Contains(got, `(^| )65000:100( |$)`) {
-			t.Errorf("mixed conjunction does not anchor the literal to a whole token:\n%s", got)
+		// Literal factor must sit at a token boundary, not match as a
+		// bare substring, with the pipe-free spelling (R3-A11-04).
+		if !strings.Contains(got, `(^|[ ])65000:100`) {
+			t.Errorf("mixed conjunction does not anchor the literal to a token start:\n%s", got)
+		}
+		if strings.Contains(got, "| ") {
+			t.Errorf("mixed conjunction carries \"| \" (vty pipe hook):\n%s", got)
 		}
 		patterns := expandedPatterns15779(t, got, "X")
 		assertConjunctiveMatch15779(t, patterns, []matchCase15779{

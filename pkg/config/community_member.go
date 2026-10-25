@@ -123,7 +123,50 @@ func ValidCommunityMember(member string) error {
 			"FRR `expanded` community-list, but it is not a valid POSIX extended "+
 			"regular expression: %w", CommunityRegexChars, err)
 	}
+	// #16788: a compilable member can still be untranslatable to FRR's
+	// whole-joined-string match (interior anchors, a space-matching
+	// construct, a non-POSIX escape). Junos evaluates the member
+	// against each community individually; a member that cannot be
+	// confined to one community token must not commit, and the render
+	// belt omits its whole definition so referencing terms fail closed.
+	if err := ValidCommunityMemberRegex(member); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ValidCommunityMemberPipe16776 is the #16776 pipe axis retained for
+// the strict gate and render-belt call sites that predate #16788: it
+// reports whether a regex member can be rendered without any "| ".
+// Since #16788 (`TranslateCommunityMemberRegex`, now folded into
+// ValidCommunityMember above), every regex member is confined
+// per-community or refused, and the translator itself rejects "| "
+// and any literal space — so the pipe-safe members are exactly the
+// translatable ones, and this delegates to that shared predicate
+// rather than maintaining a second grouping analysis. Kept as a
+// named predicate so the #16776 refusal is attributable at its
+// call sites (strict gate, and historically the render belt; since
+// #16788 the belt's communityListRenderable subsumes it).
+func ValidCommunityMemberPipe16776(member string) error {
+	if !CommunityMemberIsRegex(member) {
+		return nil
+	}
+	if _, err := TranslateCommunityMemberRegex(member); err != nil {
+		return fmt.Errorf("%v — under #16776 FRR's vty pipe hook refuses any line "+
+			"containing \"| \" with \"%% Unknown action\" while frr-reload.py exits 0, "+
+			"so the list would silently never install; spell a literal space as [ ] "+
+			"or remove the space after an alternation (\"a|b\")", err)
+	}
+	return nil
+}
+
+// FRRDescriptionPipeSafe16776 reports whether a BGP neighbor
+// description can be rendered without hitting the #16776 vty pipe
+// hook: descriptions are literal free text with no regex grouping,
+// so any "| " is refused. Shared by the strict commit gate and the
+// render belt so they cannot drift.
+func FRRDescriptionPipeSafe16776(s string) bool {
+	return !strings.Contains(s, "| ")
 }
 
 // badLiteralCharCommunityMember returns the first character of a NON-REGEX

@@ -556,9 +556,23 @@ this module states the divergence, not only the compiler.
 - `Start(ctx context.Context) error` — `agent.go`. Blocks until ctx cancelled.
 - `Stop()` — `agent.go`.
 
-- `SetVRFDevice(device)` — call before `Bind` to pin UDP/161 and trap sends to a
-  Linux VRF device. The daemon sets it to `vrf-mgmt`, so management polls reply
-  through the management VRF and link traps use the same routing context.
+- `SetVRFDevice(device)` — call before `Bind` to name the management VRF
+  device. The daemon sets it to `vrf-mgmt` when any management interface is
+  configured. With a device set, `Bind` opens two UDP/161 listeners
+  (#16781): one `SO_BINDTODEVICE`-pinned to the device so management polls
+  reply through the management VRF (#11427; link traps use the same routing
+  context) and one unbound main-table listener so in-band polls admitted by
+  `host-inbound-traffic system-services snmp` on data zones are answered
+  too — a VRF-only listener never receives those datagrams. Both sockets
+  set `SO_REUSEPORT` (coexistence, not load-balancing: the kernel
+  demultiplexes by L3 domain under `udp_l3mdev_accept=1`) and arm
+  `IP_PKTINFO`/`IPV6_RECVPKTINFO`; each reply is written on the socket that
+  received its request with pktinfo pinning the egress interface and
+  source to the request's ingress, so an in-band reply leaves from the
+  polled trust/reth address and a management reply from the fxp0 address.
+  Without a device there is a single unbound listener. Packet handling
+  stays serialized across both sockets (`handleMu`) because the v3
+  `lastPacket` auth state is per-Agent.
 - `SetIfDataFn(fn)` — `agent.go`. Caller-supplied accessor for live
   interface data. The daemon wires `buildSNMPIfData`, which does a full
   netlink `LinkList` (RTM_GETLINK dump) per call — so the request path must

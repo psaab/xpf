@@ -317,5 +317,17 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesUnknownSecurityPoliciesChild12217(cfg, opts); err != nil {
 		return err
 	}
+	// #16770: appended dead-last so it cannot steal an established
+	// first-error slot. An ssh-known-hosts entry whose host/key the
+	// daemon renderer would skip must fail strict commit; tolerant
+	// loads warn and the daemon revokes the stale managed file.
+	if err := ValidateSSHKnownHostsStrict(cfg); err != nil {
+		if opts.lenientSSHKnownHosts16770 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ssh-known-hosts (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	return nil
 }

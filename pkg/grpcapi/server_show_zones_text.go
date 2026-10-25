@@ -160,6 +160,9 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 					buf.WriteString("  Host-inbound gap fence: ACTIVE " +
 						"(an address is denied by the additive fence, not the main table)\n")
 				}
+				if ap.BarrierRetained {
+					fmt.Fprintf(buf, "  Host-inbound barrier: RETAINED (early input barrier still dropping new host-bound connections; pending: %s)\n", ap.BarrierPendingDetail)
+				}
 			}
 		}
 		// Traffic counters. Never read the survivor's live counters under a

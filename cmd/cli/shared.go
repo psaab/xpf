@@ -174,6 +174,23 @@ func (c *ctl) dispatchOperational(line string) error {
 		return nil
 	}
 
+	// #16798: refuse an unknown/unimplemented token under a
+	// keyword-only node before routing. Without this, handlers for
+	// such nodes print tree help and return nil, so `cli -c` exits 0
+	// having done nothing (e.g. `clear security ike
+	// security-associations`, `request system software add`, a
+	// misspelt `failover`). Bare keyword nodes canonicalize OK and
+	// keep their help; value-slot/leaf failures fall through to the
+	// existing strict handlers. `?`/`help` are client verbs absent
+	// from the operational tree and are handled below.
+	if parts[0] != "?" && parts[0] != "help" {
+		if prefix, bad, ambiguous, badOK := cmdtree.ValidateOperationalLine(parts); badOK {
+			if ambiguous {
+				return fmt.Errorf("ambiguous %s command: %s", strings.Join(prefix, " "), bad)
+			}
+			return fmt.Errorf("unknown %s command: %s", strings.Join(prefix, " "), bad)
+		}
+	}
 	switch parts[0] {
 	case "configure":
 		// Hard-error when the readline instance is nil (i.e. `cli -c
@@ -412,11 +429,11 @@ func (c *ctl) dispatchConfig(line string) error {
 			return nil
 		}
 		if norm := config.NormalizeEditPathTokens(c.editPath); len(norm) > 0 {
+			// #16825: resolve via the one shared helper the server
+			// gate adjudicates with (cursor-prepend unless bare,
+			// then bare-resolve under the source parent).
+			dstParts = config.ResolveCopyRenameDestination(norm, srcParts, dstParts)
 			srcParts = append(append([]string{}, norm...), srcParts...)
-			// #15237 A53-04: a bare destination stays under the
-			// source parent — do NOT prepend the cursor to it.
-			// The daemon applies the same rule (BareDestinationParent).
-			dstParts = config.PrependEditPathForCopyDst(norm, srcParts, dstParts)
 		}
 		fullInput := parts[0] + " " + config.JoinConfigPathTokens(srcParts) + " to " + config.JoinConfigPathTokens(dstParts)
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: fullInput})

@@ -609,6 +609,11 @@ mod tests_leak_overlap_9955;
 #[cfg(test)]
 #[path = "tests_leak_precheck_14319.rs"]
 mod tests_leak_precheck_14319;
+// #16799: rib-group return rows (1000, 2000) run after the source VRF
+// table's own LPM, not before it.
+#[cfg(test)]
+#[path = "tests_return_order_16799.rs"]
+mod tests_return_order_16799;
 // #9956 F-052: the SNAT scope must resolve on the logical ingress unit.
 #[cfg(test)]
 #[path = "tests_snat_scope_9956.rs"]

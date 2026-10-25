@@ -249,6 +249,72 @@ func hostInboundHasPendingEnforcingIntentFromSnapshots(cfg *config.Config, snaps
 	return dpuserspace.HostInboundPendingIntentFromSnapshots(cfg, snaps)
 }
 
+// earlyInputPendingHandoffBound bounds how long a pre-handoff pending
+// hold may keep the #10751 early input barrier standing (#16785). A
+// zoned DHCP/DHCPv6 unit that never leases — an unplugged backup WAN,
+// an ISP that never answers — otherwise holds the global policy-DROP
+// barrier over every data-zone host service indefinitely while commits
+// succeed. Five minutes is far beyond a normal first lease (seconds,
+// including the 30s link-local wait) yet short enough that a stranded
+// box recovers without operator intervention. A var so tests shrink it.
+var earlyInputPendingHandoffBound = 5 * time.Minute
+
+// earlyInputBarrierNow is the daemon's wall clock for the pending hold:
+// the per-daemon test seam when set, else time.Now.
+func (d *Daemon) earlyInputBarrierNow() time.Time {
+	if d != nil && d.earlyInputBarrierRetainedNowFn != nil {
+		return d.earlyInputBarrierRetainedNowFn()
+	}
+	return time.Now()
+}
+
+// noteEarlyInputBarrierRetained records (or refreshes) the pre-handoff
+// pending hold and reports whether the bounded handoff has expired:
+// true means the caller must hand off now instead of retaining again.
+// The first retention opens the hold at now; later retentions keep the
+// original start so repeated applies cannot extend the bound. Must be
+// called under applySem (the handoff sites are serialized there).
+func (d *Daemon) noteEarlyInputBarrierRetained(detail string) (expired bool) {
+	now := d.earlyInputBarrierNow()
+	if d.earlyInputHandoffPendingSince.IsZero() {
+		d.earlyInputHandoffPendingSince = now
+	}
+	d.earlyInputHandoffPendingDetail = detail
+	return !now.Before(d.earlyInputHandoffPendingSince.Add(earlyInputPendingHandoffBound))
+}
+
+// earlyInputPendingExpired reports whether an open pending hold has
+// crossed the bound, without opening or refreshing one.
+func (d *Daemon) earlyInputPendingExpired() bool {
+	if d.earlyInputHandoffPendingSince.IsZero() {
+		return false
+	}
+	return !d.earlyInputBarrierNow().Before(d.earlyInputHandoffPendingSince.Add(earlyInputPendingHandoffBound))
+}
+
+// clearEarlyInputBarrierRetained closes the pending hold (handoff done
+// or no longer pending).
+func (d *Daemon) clearEarlyInputBarrierRetained() {
+	d.earlyInputHandoffPendingSince = time.Time{}
+	d.earlyInputHandoffPendingDetail = ""
+}
+
+// hostInboundPendingDetail renders the pending scopes holding the
+// barrier for logs and the HostInboundApplied projection: per-interface
+// "zone/iface family" entries, falling back to addressless-zone names.
+func hostInboundPendingDetail(cfg *config.Config, snaps []dpuserspace.InterfaceSnapshot) string {
+	var parts []string
+	for _, e := range dpuserspace.AddresslessEnforcingInterfacesFromSnapshots(cfg, snaps) {
+		parts = append(parts, e.Zone+"/"+e.Interface+" "+e.Family)
+	}
+	if len(parts) == 0 {
+		for _, z := range dpuserspace.AddresslessEnforcingZonesFromSnapshots(cfg, snaps) {
+			parts = append(parts, z.Zone)
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
 // hostInboundCoverageNewcomers renders the desired host-inbound destinations
 // from snaps and returns those NOT covered by installed — the destination
 // set the standing enforcement was rendered from (#10751 R5-B). Unlike raw

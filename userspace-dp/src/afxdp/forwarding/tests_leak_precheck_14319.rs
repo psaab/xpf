@@ -57,6 +57,7 @@ fn leak_only_via_interface_nat_v4_resolves_local_delivery_14319() {
             prefix: PrefixV4::from_net("198.51.100.0/24".parse().unwrap()),
             next_table: "inet.0".to_string(),
             rule_priority: 1,
+            post_table: false,
             incarnation: 77,
         }],
     );
@@ -91,6 +92,7 @@ fn leak_only_via_interface_nat_v6_resolves_local_delivery_14319() {
             prefix: PrefixV6::from_net("2001:db8:99::/64".parse().unwrap()),
             next_table: "inet6.0".to_string(),
             rule_priority: 1,
+            post_table: false,
             incarnation: 78,
         }],
     );
@@ -127,6 +129,7 @@ fn leak_only_via_subnet_router_anycast_v6_resolves_local_delivery_14319() {
             prefix: PrefixV6::from_net("2001:db8:77::/64".parse().unwrap()),
             next_table: "red.inet6.0".to_string(),
             rule_priority: 1,
+            post_table: false,
             incarnation: 79,
         }],
     );
@@ -166,12 +169,14 @@ fn leak_walk_continues_past_no_route_to_next_leak_v4_14319() {
                 prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
                 next_table: "spoke.inet.0".to_string(),
                 rule_priority: 1,
+                post_table: false,
                 incarnation: 81,
             },
             LeakRuleV4 {
                 prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
                 next_table: "hub.inet.0".to_string(),
                 rule_priority: 2,
+                post_table: false,
                 incarnation: 82,
             },
         ],
@@ -240,6 +245,7 @@ fn tunnel_only_leak_target_falls_through_to_local_route_v4_14319() {
             prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
             next_table: "spoke.inet.0".to_string(),
             rule_priority: 1,
+            post_table: false,
             incarnation: 83,
         }],
     );
@@ -306,12 +312,14 @@ fn leak_walk_continues_past_no_route_to_next_leak_v6_14319() {
                 prefix: PrefixV6::from_net("2001:db8:100::/64".parse().unwrap()),
                 next_table: "spoke.inet6.0".to_string(),
                 rule_priority: 1,
+                post_table: false,
                 incarnation: 84,
             },
             LeakRuleV6 {
                 prefix: PrefixV6::from_net("2001:db8:100::/64".parse().unwrap()),
                 next_table: "hub.inet6.0".to_string(),
                 rule_priority: 2,
+                post_table: false,
                 incarnation: 85,
             },
         ],
@@ -375,6 +383,7 @@ fn tunnel_leak_target_still_selected_when_tunnels_allowed_v4_14319() {
             prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
             next_table: "spoke.inet.0".to_string(),
             rule_priority: 1,
+            post_table: false,
             incarnation: 86,
         }],
     );
@@ -448,12 +457,14 @@ fn mixed_tunnel_longest_prefix_falls_to_next_leak_v4_15934() {
                 prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
                 next_table: "spoke.inet.0".to_string(),
                 rule_priority: 1,
+                post_table: false,
                 incarnation: 91,
             },
             LeakRuleV4 {
                 prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
                 next_table: "hub.inet.0".to_string(),
                 rule_priority: 2,
+                post_table: false,
                 incarnation: 92,
             },
         ],
@@ -555,12 +566,14 @@ fn leak_terminal_discard_is_not_continued_v4_15934() {
                 prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
                 next_table: "spoke.inet.0".to_string(),
                 rule_priority: 1,
+                post_table: false,
                 incarnation: 93,
             },
             LeakRuleV4 {
                 prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
                 next_table: "hub.inet.0".to_string(),
                 rule_priority: 2,
+                post_table: false,
                 incarnation: 94,
             },
         ],
@@ -637,6 +650,7 @@ fn mixed_topology_stamp_is_first_leak_and_fails_closed_15934() {
                 prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
                 next_table: "spoke.inet.0".to_string(),
                 rule_priority: 1,
+                post_table: false,
                 incarnation: 91,
             });
         }
@@ -645,6 +659,7 @@ fn mixed_topology_stamp_is_first_leak_and_fails_closed_15934() {
                 prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
                 next_table: "hub.inet.0".to_string(),
                 rule_priority: 2,
+                post_table: false,
                 incarnation: 92,
             });
         }

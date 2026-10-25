@@ -5,7 +5,12 @@ import "time"
 // #15264: the latch is also reconciled against kernel truth by the low-rate
 // recheck in host_kernel_truth_15264.go — an out-of-band `nft flush ruleset`
 // that removes an established table marks the state stale (LastApplyFailed)
-// instead of leaving it Current until the next apply.
+// instead of leaving it Current until the next apply. #16823: that drift
+// also clears the day-2 retention latch (hostInboundEnforced) and coverage
+// sets so a failed re-apply fences; Established below is therefore backed
+// by the separate sticky hostInboundEstablished15264 bit, NOT by
+// hostInboundEnforced, and stays true (Stale) until a real install succeeds
+// or a daemon teardown clears it.
 
 // HostInboundAppliedState is the operator-facing APPLIED state of the
 // host-inbound nftables surface (`inet xpf_hostinbound`), as opposed to the
@@ -35,11 +40,15 @@ import "time"
 // #5789 gap fence for the difference. Rendering it as the first row is the
 // confidently-wrong answer #5719 refused to ship on the counter side.
 type HostInboundAppliedState struct {
-	// Established mirrors hostInboundEnforced: a real load or scoped fallback
-	// (a local-address or catalog-multicast ingress drop) has established some
-	// host-inbound protection at a generation. FALSE is the cold-boot /
-	// torn-down case — nothing has ever protected, so a projection must NOT
-	// report configured default-deny as being in force.
+	// Established mirrors the sticky hostInboundEstablished15264 bit: a real
+	// load or scoped fallback (a local-address or catalog-multicast ingress
+	// drop) has established some host-inbound protection at a generation.
+	// FALSE is the cold-boot / torn-down case — nothing has ever protected,
+	// so a projection must NOT report configured default-deny as being in
+	// force. It deliberately does NOT mirror hostInboundEnforced: #16823
+	// clears that retention latch on kernel-proven drift, while Established
+	// must keep reporting the historical establishment (with
+	// LastApplyFailed rendering it Stale) until a real install succeeds.
 	Established bool
 
 	// Generation counts SUCCESSFUL real installs. Zero means none has ever
@@ -70,6 +79,18 @@ type HostInboundAppliedState struct {
 	// through two tables, and an operator diagnosing reachability needs to
 	// know which one is answering.
 	GapFenceActive bool
+
+	// BarrierRetained reports that the #10751 early input barrier is
+	// still standing because a pre-handoff hold is open (#16785): the
+	// real table may be Current while every non-lifeline host-bound
+	// connection is still dropped by the barrier's policy DROP. Without
+	// this field a retained barrier read as plain Current and the
+	// operator chased the wrong subsystem.
+	BarrierRetained bool
+
+	// BarrierPendingDetail names the scopes holding the barrier (zone /
+	// interface / family), empty when no hold is open.
+	BarrierPendingDetail string
 }
 
 // Current reports whether the applied surface is both established and not
@@ -91,13 +112,17 @@ func (d *Daemon) HostInboundApplied() HostInboundAppliedState {
 		return HostInboundAppliedState{}
 	}
 	st := HostInboundAppliedState{
-		Established:     d.hostInboundEnforced.Load(),
+		Established:     d.hostInboundEnforced.Load() || d.hostInboundEstablished15264.Load(),
 		Generation:      d.hostInboundApplyGen.Load(),
 		LastApplyFailed: d.hostInboundLastApplyFailed.Load(),
 		GapFenceActive:  d.hostInboundGapFenceActive.Load(),
 	}
 	if at := d.hostInboundLastFailureUnixNano.Load(); at != 0 {
 		st.LastFailureAt = time.Unix(0, at)
+	}
+	if !d.earlyInputHandoffDone.Load() && !d.earlyInputHandoffPendingSince.IsZero() {
+		st.BarrierRetained = true
+		st.BarrierPendingDetail = d.earlyInputHandoffPendingDetail
 	}
 	return st
 }
@@ -113,9 +138,12 @@ func (d *Daemon) noteHostInboundApplyFailed(now time.Time) {
 // noteHostInboundApplySucceeded records a successful real install: the
 // generation advances, the staleness flag and its timestamp clear, and any gap
 // fence is no longer active because the real table now covers the desired set.
+// #16823: it also re-arms the sticky established bit — belt-and-braces for
+// any success path that did not pass an enforced Store(true) site.
 func (d *Daemon) noteHostInboundApplySucceeded() {
 	d.hostInboundApplyGen.Add(1)
 	d.hostInboundLastApplyFailed.Store(false)
 	d.hostInboundLastFailureUnixNano.Store(0)
 	d.hostInboundGapFenceActive.Store(false)
+	d.hostInboundEstablished15264.Store(true)
 }
