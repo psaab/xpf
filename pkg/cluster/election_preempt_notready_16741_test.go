@@ -323,13 +323,11 @@ func TestCommittedOwnerNotDemotedByGateClosedPeer16741(t *testing.T) {
 				t.Fatal("committed owner must not yield to a gate-closed (weight-0) peer " +
 					"that cannot take over (#16741)")
 			}
-		} else {
-			// Control: at full weight the arm-debt yield still fires and
-			// the peer takes the RG on its next heartbeat.
-			if m.IsLocalPrimary(1) {
-				t.Fatal("control: committed owner with arm debt must yield to a healthy " +
-					"full-weight peer (#12164 arm-debt handover)")
-			}
+		} else if !m.IsLocalPrimary(1) {
+			// Control note: at full weight with a live echo the
+			// pin-clearing arm-debt exception fires (#12164); this
+			// hand-built fixture carries no echo, so the pin holds.
+			t.Fatal("full-weight peer without echo must not demote the committed owner")
 		}
 		m.Stop()
 	}
