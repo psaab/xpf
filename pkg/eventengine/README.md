@@ -116,6 +116,13 @@ while #15945's evaluate-time gate (only matched crossings park) and its
 legacy-edge live-window re-check keep sub-threshold/latched edges from
 replaying.
 
+Cooldown parks are captured under `e.mu` and inserted under `pendingMu` only
+after evaluation releases `e.mu` (#16645): evaluation never drops `e.mu`
+mid-loop, so a concurrent same-name redefinition cannot pair the old policy's
+commands/plant class with the new semantic revision and slip past the #3750
+"policy redefined" gate. The parked action keeps the revision of the
+generation that produced it and is rejected as stale after a redefinition.
+
 The slot is reserved only when the action is ready to commit, and a commit
 that never promotes — a transient `commitFn` returning `(nil, err)`, a
 standalone commit failure, or an `ErrClusterReadOnly` deferral — refunds
