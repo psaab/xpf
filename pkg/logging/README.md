@@ -840,6 +840,17 @@ client set; standalone CLI still builds via `buildSyslogClients`.
 (A47-06) `applySyslogConfig` caches built clients per stream (per-stream
 fingerprint) and preserves healthy clients across a partial-build retry,
 warming only freshly built clients.
+(#16767) `applySystemSyslog` now carries the same treatment on the
+system surface: a whole-set fingerprint (`systemSyslogFingerprint`,
+gated on the installed set still being exactly the cached set, fail-
+open on any drift) plus per-host reuse keyed by
+(address, port, source) with a per-host fingerprint over the stamped
+facility and derived severity — so an unchanged stanza performs zero
+dials, a DNS outage no longer closes a working hostname collector's
+client, and the 30 s retry rebuilds only unbuilt hosts.
+`SyslogSlogHandler.SetClientsPreserving` performs the preserving swap
+for that surface (identity in both sets is neither closed nor
+replaced); plain `SetClients` keeps its close-everything contract.
 
 `security log stream <s> host` is also a typed leaf now (`ValidateSyslogHost`:
 an IP address or a DNS name, the `ValidateNTPServer` shape). It was `args: 1`

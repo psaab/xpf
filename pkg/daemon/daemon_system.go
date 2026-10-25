@@ -173,6 +173,214 @@ func currentHostnameForFingerprint15231() string {
 	return h
 }
 
+// ===== #16767 system-syslog idempotence =====
+
+// newSystemSyslogClientFn constructs one system syslog host client.
+// Test seam only; production is logging.NewSyslogClientWithSource. The
+// mirror of syslogWarmFn (#9326): a cell that must count dials cannot
+// do it by timing, and a real DNS dial cannot be made to fail on cue
+// mid-test. Set/restored only by tests, which in this package never
+// run applies in parallel.
+var newSystemSyslogClientFn = logging.NewSyslogClientWithSource
+
+// systemSyslogHostPort resolves a host's effective UDP port.
+func systemSyslogHostPort(host *config.SyslogHostConfig) int {
+	if host == nil || host.Port <= 0 {
+		return 514
+	}
+	return host.Port
+}
+
+// systemSyslogHostKey identifies one system syslog host destination
+// for the per-host cache (#16767): everything that changes how its
+// client is constructed.
+func systemSyslogHostKey(host *config.SyslogHostConfig) string {
+	if host == nil {
+		return ""
+	}
+	return host.Address + "\x00" + strconv.Itoa(systemSyslogHostPort(host)) + "\x00" + host.SourceAddress
+}
+
+// systemSyslogHostFingerprint hashes one host's resolved build inputs
+// (#16767): address, port, source, the facility the client will stamp,
+// the severity threshold derived from its selectors, and the selectors
+// themselves — so a cached client is reused only when everything that
+// would change its construction is unchanged.
+func systemSyslogHostFingerprint(host *config.SyslogHostConfig, facility, minSeverity int) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "addr=%s\nport=%d\nsrc=%s\nfac=%d\nminsev=%d\n", host.Address, systemSyslogHostPort(host), host.SourceAddress, facility, minSeverity)
+	for _, f := range host.Facilities {
+		fmt.Fprintf(h, "sel=%s\x00%s\n", f.Facility, f.Severity)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// systemSyslogFingerprint hashes everything applySystemSyslog's client
+// rebuild reads (#16767, the #9326 twin for the system surface): the
+// stanza in authored order, the derived facility/threshold per host,
+// and the system hostname.
+//
+// ok=false means "could not fingerprint" (nil host entry) and the
+// caller must rebuild and must not let the gate hold.
+func systemSyslogFingerprint(cfg *config.Config) (string, bool) {
+	if cfg == nil || cfg.System.Syslog == nil {
+		return "", false
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "hostname=%s\n", currentHostnameForFingerprint15231())
+	for _, host := range cfg.System.Syslog.Hosts {
+		if host == nil {
+			return "", false
+		}
+		facility, _, minSev := systemSyslogHostDerived(host)
+		fmt.Fprintf(h, "host=%s\n", systemSyslogHostFingerprint(host, facility, minSev))
+	}
+	return hex.EncodeToString(h.Sum(nil)), true
+}
+
+// systemSyslogHostDerived computes the stamped facility, whether a
+// severity threshold applies, and the threshold itself for one host:
+// the pure derivation applySystemSyslog stamps onto the client.
+func systemSyslogHostDerived(host *config.SyslogHostConfig) (facility int, hasMin bool, minSeverity int) {
+	facility = logging.FacilityDaemon
+	if len(host.Facilities) > 0 {
+		f, _ := logging.ParseFacilityChecked(host.Facilities[0].Facility)
+		facility = f
+		minSeverity = syslogHostMinSeverity(host.Facilities, facility)
+		hasMin = true
+	}
+	return facility, hasMin, minSeverity
+}
+
+// warnSystemSyslogHostSelectors emits the #5797/#6829 facility
+// diagnostics for one host. Pure config reads; called on every apply
+// (the gate scopes the client rebuild alone, never the diagnostics).
+func warnSystemSyslogHostSelectors(host *config.SyslogHostConfig, facility int) {
+	if len(host.Facilities) == 0 {
+		return
+	}
+	raw := host.Facilities[0].Facility
+	_, known := logging.ParseFacilityChecked(raw)
+	if !known && !logging.FacilityIsWildcard(raw) {
+		slog.Warn("system syslog: unrecognized facility name; local0 selected — "+
+			"this name is not in the Junos `[edit system syslog]` vocabulary, so "+
+			"it is most likely a typo. If this host's client is installed, its "+
+			"records will carry a facility the configuration does not name (#5797)",
+			"host", host.Address, "facility", raw, "using", "local0")
+	}
+	for _, sel := range host.Facilities {
+		if logging.FacilityIsWildcard(sel.Facility) ||
+			logging.ParseFacility(sel.Facility) == facility {
+			continue
+		}
+		slog.Warn("system syslog: selector names a facility this host's client does not "+
+			"emit, so it selects nothing — every record to this host carries the "+
+			"stamped facility (#5797)",
+			"host", host.Address, "selector", sel.Facility,
+			"severity", sel.Severity, "stamped", facility)
+	}
+}
+
+func (d *Daemon) systemSyslogCachedClient(key, fp string) *logging.SyslogClient {
+	d.systemSyslogBuiltMu.Lock()
+	defer d.systemSyslogBuiltMu.Unlock()
+	if d.systemSyslogBuiltByKey == nil {
+		return nil
+	}
+	c, ok := d.systemSyslogBuiltByKey[key]
+	if !ok {
+		return nil
+	}
+	if fp == "" {
+		// Seeded entry (adopted from a pre-installed handler set): any
+		// fingerprint change must still rebuild it, so the cache only
+		// vouches for identity, never for construction inputs.
+		return nil
+	}
+	if d.systemSyslogBuiltFP[key] != fp {
+		return nil
+	}
+	return c
+}
+
+func (d *Daemon) systemSyslogCacheClient(key, fp string, c *logging.SyslogClient) {
+	d.systemSyslogBuiltMu.Lock()
+	defer d.systemSyslogBuiltMu.Unlock()
+	if d.systemSyslogBuiltByKey == nil {
+		d.systemSyslogBuiltByKey = map[string]*logging.SyslogClient{}
+		d.systemSyslogBuiltFP = map[string]string{}
+	}
+	d.systemSyslogBuiltByKey[key] = c
+	d.systemSyslogBuiltFP[key] = fp
+}
+
+// systemSyslogForgetCached drops cache entries whose keys are not in
+// keep (nil keep drops all). Returned clients are NOT closed here: the
+// preserving install closes superseded installed clients, and a cached
+// client that was never installed has no owner to close it through.
+func (d *Daemon) systemSyslogForgetCached(keep map[string]bool) {
+	d.systemSyslogBuiltMu.Lock()
+	defer d.systemSyslogBuiltMu.Unlock()
+	for key := range d.systemSyslogBuiltByKey {
+		if keep == nil || !keep[key] {
+			delete(d.systemSyslogBuiltByKey, key)
+			delete(d.systemSyslogBuiltFP, key)
+		}
+	}
+}
+
+// systemSyslogSeedCacheIfEmpty adopts the handler's currently
+// installed clients into the cache on the first vetted apply, keyed by
+// their config host keys with an empty fingerprint. Adoption keeps a
+// pre-installed healthy client alive across its first idempotence-
+// vetted apply (e.g. a client planted before the cache existed); the
+// empty fingerprint means the next apply always re-dials it once, so
+// adoption can never pin a stale construction. Only seeds when the
+// cache is empty, so it runs at most once per daemon.
+func (d *Daemon) systemSyslogSeedCacheIfEmpty(cfg *config.Config) {
+	d.systemSyslogBuiltMu.Lock()
+	empty := len(d.systemSyslogBuiltByKey) == 0
+	d.systemSyslogBuiltMu.Unlock()
+	if !empty {
+		return
+	}
+	installed := d.slogHandler.Clients()
+	if len(installed) == 0 {
+		return
+	}
+	byKey := make(map[string]*logging.SyslogClient, len(cfg.System.Syslog.Hosts))
+	for _, host := range cfg.System.Syslog.Hosts {
+		if host == nil {
+			continue
+		}
+		key := systemSyslogHostKey(host)
+		for _, c := range installed {
+			byKey[key] = c
+		}
+	}
+	d.systemSyslogBuiltMu.Lock()
+	defer d.systemSyslogBuiltMu.Unlock()
+	if len(d.systemSyslogBuiltByKey) != 0 {
+		return
+	}
+	if d.systemSyslogBuiltByKey == nil {
+		d.systemSyslogBuiltByKey = map[string]*logging.SyslogClient{}
+		d.systemSyslogBuiltFP = map[string]string{}
+	}
+	for key, c := range byKey {
+		d.systemSyslogBuiltByKey[key] = c
+		d.systemSyslogBuiltFP[key] = ""
+	}
+}
+
+// installSystemSyslogClientsPreserving mirrors
+// installSyslogClientsPreserving15231 for the slog handler: the
+// preserving swap leaves shared clients open, and closes superseded
+// ones exactly once.
+func installSystemSyslogClientsPreserving(d *Daemon, next []*logging.SyslogClient) {
+	d.slogHandler.SetClientsPreserving(next)
+}
+
 // buildIfNames builds the EventReader's kernel-ifindex -> operator-facing
 // interface-name map (#15094), through config.SessionIfNamesByIfindex
 // (#16065): the SAME per-unit derivation the session surfaces use, so
@@ -1658,141 +1866,166 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 
 	if cfg.System.Syslog == nil || len(cfg.System.Syslog.Hosts) == 0 {
 		d.slogHandler.SetClients(nil)
+		d.systemSyslogForgetCached(nil)
+		d.systemSyslogHashSet = false
 		d.setSystemSyslogRetryOwed(false)
 		return
 	}
 
+	// #16767 IDEMPOTENCE GATE: the system-syslog twin of the
+	// syslogClientFingerprint gate in applySyslogConfig (#9326). The
+	// early return needs ALL of: a latched fingerprint, a fingerprint
+	// match, no retry debt, and the handler still holding exactly the
+	// cached set — drifted installed pointers (foreign SetClients,
+	// ShutdownTimeout drain) must never be certified by the hash alone.
+	// Computed and checked; a fingerprint failure fails OPEN (rebuild).
+	syslogFP, syslogFPOK := systemSyslogFingerprint(cfg)
+	fingerprintMatch := syslogFPOK && d.systemSyslogHashSet && syslogFP == d.systemSyslogHash
+	pendingSystemHash, pendingSystemHashOK := syslogFP, syslogFPOK
+	gateHeld := false
+	if fingerprintMatch && !d.systemSyslogRetryOwed() {
+		d.systemSyslogBuiltMu.Lock()
+		cached := make([]*logging.SyslogClient, 0, len(d.systemSyslogBuiltByKey))
+		fpOK := true
+		for _, host := range cfg.System.Syslog.Hosts {
+			if host == nil {
+				fpOK = false
+				break
+			}
+			key := systemSyslogHostKey(host)
+			c, present := d.systemSyslogBuiltByKey[key]
+			if !present || d.systemSyslogBuiltFP[key] == "" {
+				fpOK = false
+				break
+			}
+			cached = append(cached, c)
+		}
+		d.systemSyslogBuiltMu.Unlock()
+		if fpOK {
+			installed := d.slogHandler.Clients()
+			if len(installed) == len(cached) {
+				same := true
+				for i := range cached {
+					if installed[i] != cached[i] {
+						same = false
+						break
+					}
+				}
+				if same {
+					gateHeld = true
+				}
+			}
+		}
+	}
+
+	// #5797/#6829: facility diagnostics are pure config reads and fire
+	// on EVERY apply, gate-held or not — production warns once per
+	// apply today, so the gate scopes the client rebuild alone.
+	derived := make([]struct {
+		facility    int
+		hasMin      bool
+		minSeverity int
+	}, len(cfg.System.Syslog.Hosts))
+	for i, host := range cfg.System.Syslog.Hosts {
+		if host == nil {
+			continue
+		}
+		facility, hasMin, minSev := systemSyslogHostDerived(host)
+		derived[i].facility = facility
+		derived[i].hasMin = hasMin
+		derived[i].minSeverity = minSev
+		warnSystemSyslogHostSelectors(host, facility)
+	}
+
+	if gateHeld {
+		return
+	}
+
+	// First vetted apply after boot/restart: adopt any pre-installed
+	// clients so the preserving swap below does not close a healthy
+	// one merely because the cache had not seen it yet.
+	d.systemSyslogSeedCacheIfEmpty(cfg)
+
 	var clients []*logging.SyslogClient
 	skippedSystem15231 := 0
-	for _, host := range cfg.System.Syslog.Hosts {
+	keepKeys := make(map[string]bool, len(cfg.System.Syslog.Hosts))
+	for i, host := range cfg.System.Syslog.Hosts {
+		if host == nil {
+			skippedSystem15231++
+			continue
+		}
+		key := systemSyslogHostKey(host)
+		keepKeys[key] = true
+		fp := systemSyslogHostFingerprint(host, derived[i].facility, derived[i].minSeverity)
+		if cached := d.systemSyslogCachedClient(key, fp); cached != nil {
+			clients = append(clients, cached)
+			continue
+		}
 		// #4303 S-1: honor `host <h> port <n>` and `source-address <ip>`.
-		// Both were previously misparsed into bogus facility entries and
-		// never reached the client; the port stayed pinned at 514 and the
-		// source bind was ignored.
-		port := 514
-		if host.Port > 0 {
-			port = host.Port
-		}
-		// #6829: classify the facility BEFORE constructing the client, because
-		// construction DIALS. NewSyslogClientWithSource resolves and dials
-		// (logging/syslog.go), and on UDP a dial failure returns a nil client,
-		// so the `continue` below used to skip the classification entirely — an
-		// operator whose collector hostname does not resolve was never told
-		// their facility name is also unmappable, which is the one diagnosis
-		// that does not depend on the network being up. Classification reads
-		// only the config, so it belongs on this side of the dial. It also makes
-		// the warning observable in a restricted runner where socket creation is
-		// denied, instead of the test dying at construction before reaching it.
-		facility := logging.FacilityDaemon
-		if len(host.Facilities) > 0 {
-			// #5797: an UNMAPPED facility name silently resolved to local0 here,
-			// so records left under a facility the operator never authored and
-			// the collector's facility-based routing misfiled them with no
-			// signal anywhere.
-			//
-			// There is NO commit gate on this name. `<facility> <severity>` is a
-			// schema WILDCARD (syslogFacilitySeverityLeaf): the validator sits on
-			// the severity VALUE, and the facility KEY has none — so an ordinary
-			// `set system syslog host 10.0.0.1 authorization info` commits clean
-			// and arrives here. That is not an exotic tolerant-load case: Junos
-			// spells this vocabulary `authorization` / `kernel` /
-			// `interactive-commands`, and ParseFacility knows only the
-			// BSD/rsyslog spellings, so a correct-looking vSRX config is the
-			// COMMON way to hit it.
-			//
-			// Forwarding is deliberately NOT withheld: which facility a
-			// misconfigured host lands under is an availability-affecting
-			// contract question, and the selector redesign owns it. The warning
-			// is the whole fix — TestApplySystemSyslogWarnsOnUnmappedFacility_5797
-			// pins that it fires.
-			raw := host.Facilities[0].Facility
-			f, known := logging.ParseFacilityChecked(raw)
-			// #6829 A3: `any` is the canonical Junos wildcard and names no
-			// facility on purpose — warning about it is a false alarm on a
-			// correct config.
-			if !known && !logging.FacilityIsWildcard(raw) {
-				// #6830: say WHICH facility is wrong and what the right answer
-				// is, not just that a substitution happened. Junos publishes
-				// the mapping, so for a real Junos facility name the warning
-				// can name the target — which is the difference between an
-				// operator knowing something is off and knowing what to do.
-				// A name in neither vocabulary is a typo and is reported as
-				// one; conflating the two sent an operator looking for a
-				// mapping bug when they had a spelling mistake, and vice
-				// versa.
-				// #6830: the MISFILED arm is gone because it can no longer be
-				// reached. It described a name that IS in the documented Junos
-				// vocabulary but which this box emitted under a different code
-				// — and ParseFacility now consults that table first, so the
-				// two agree by construction. Keeping a warning whose input
-				// cannot occur would be dead code that no test can exercise
-				// without a seam invented for it.
-				//
-				// The property it protected did not go away, it moved: pkg/logging's
-				// TestNothingInTheTableIsMisfiled6830 asserts, over the whole
-				// table, that the emit path and the documented mapping agree —
-				// so a row added without wiring, or a wiring regression, reds
-				// there rather than warning here.
-				//
-				// What reaches this branch now is a name in NEITHER vocabulary:
-				// a typo, where local0 is a substitution for something that
-				// means nothing.
-				slog.Warn("system syslog: unrecognized facility name; local0 selected — "+
-					"this name is not in the Junos `[edit system syslog]` vocabulary, so "+
-					"it is most likely a typo. If this host's client is installed, its "+
-					"records will carry a facility the configuration does not name (#5797)",
-					"host", host.Address, "facility", raw, "using", "local0")
+		c, err := newSystemSyslogClientFn(host.Address, systemSyslogHostPort(host), host.SourceAddress)
+		if err != nil || c == nil {
+			if err == nil {
+				err = fmt.Errorf("syslog: client constructor returned nil client")
 			}
-			facility = f
-
-			// #5797: a selector naming a facility OTHER than the one this
-			// client stamps can never match a record it sends, so it no longer
-			// contributes to the threshold (syslogHostMinSeverity). That is the
-			// correct semantics, and it is also a silent no-op the operator has
-			// no way to see — they asked for `authorization critical` and get
-			// neither the records nor a complaint. Say so, once per apply.
-			//
-			// This is not the unmapped-name warning above: the name may be
-			// perfectly well-formed (`kern`, `auth`) and still be inapplicable,
-			// because a client carries ONE facility. Honoring several needs a
-			// source facility on the event envelope, which is the successor
-			// issue's architecture.
-			for _, sel := range host.Facilities {
-				if logging.FacilityIsWildcard(sel.Facility) ||
-					logging.ParseFacility(sel.Facility) == facility {
-					continue
-				}
-				slog.Warn("system syslog: selector names a facility this host's client does not "+
-					"emit, so it selects nothing — every record to this host carries the "+
-					"stamped facility (#5797)",
-					"host", host.Address, "selector", sel.Facility,
-					"severity", sel.Severity, "stamped", facility)
-			}
-		}
-
-		c, err := logging.NewSyslogClientWithSource(host.Address, port, host.SourceAddress)
-		if err != nil {
 			skippedSystem15231++
 			slog.Warn("failed to create system syslog client",
 				"host", host.Address, "err", err)
+			// A failed first construction leaves nothing worth
+			// preserving — clear any stale adoption for this key so
+			// the next apply re-dials rather than serving "".
+			keyFP := fp
+			d.systemSyslogBuiltMu.Lock()
+			if d.systemSyslogBuiltFP[key] == keyFP {
+				delete(d.systemSyslogBuiltByKey, key)
+				delete(d.systemSyslogBuiltFP, key)
+			}
+			d.systemSyslogBuiltMu.Unlock()
 			continue
 		}
 
-		c.Facility = facility
-		if len(host.Facilities) > 0 {
-			// #5797: keyed on the facility this client actually stamps, so a
-			// selector naming a DIFFERENT facility cannot restrict (or, with
-			// `none`, silence) records it can never match.
-			c.MinSeverity = syslogHostMinSeverity(host.Facilities, facility)
+		c.Facility = derived[i].facility
+		if derived[i].hasMin {
+			c.MinSeverity = derived[i].minSeverity
 		}
-
+		d.systemSyslogCacheClient(key, fp, c)
 		clients = append(clients, c)
 		slog.Info("system syslog forwarding configured",
 			"host", host.Address, "facility", c.Facility)
 	}
 
+	// A duplicate key can put the same client pointer in clients twice.
+	// One physical client per key: dedup, keeping the first occurrence.
+	seen := make(map[*logging.SyslogClient]bool, len(clients))
+	deduped := clients[:0]
+	for _, c := range clients {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		deduped = append(deduped, c)
+	}
+	clients = deduped
+
+	// Drop cache entries for hosts no longer configured (before the
+	// install, mirroring the stream path). Their installed clients are
+	// closed by the preserving install below.
+	d.systemSyslogForgetCached(keepKeys)
+
+	// #16767: a partial build must NOT latch the fingerprint — the
+	// next apply (or the 30 s retry) then rebuilds only the unbuilt
+	// hosts, and the preserving install keeps the healthy ones open.
+	// This is the #14597 latch rule, applied to the system surface.
+	if skippedSystem15231 == 0 {
+		if pendingSystemHashOK {
+			d.systemSyslogHash, d.systemSyslogHashSet = pendingSystemHash, true
+		} else {
+			d.systemSyslogHashSet = false
+		}
+	} else {
+		d.systemSyslogHashSet = false
+	}
 	d.setSystemSyslogRetryOwed(skippedSystem15231 > 0)
-	d.slogHandler.SetClients(clients)
+	installSystemSyslogClientsPreserving(d, clients)
 }
 
 func (d *Daemon) systemSyslogRetryOwed() bool { return d.systemSyslogRetryDebt.Load() }

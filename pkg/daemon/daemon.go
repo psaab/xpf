@@ -1860,7 +1860,6 @@ type Daemon struct {
 	// (factory / fail-closed / first-commit rollback) leaves it false.
 	bootstrapFromRefusedRollback atomic.Bool
 
-
 	// bootstrapLifelineMu protects the pre-takeover snapshot from an explicit
 	// commit-confirm resolving the first-commit window outside applySem.
 	bootstrapLifelineMu sync.Mutex
@@ -1987,6 +1986,22 @@ type Daemon struct {
 	syslogBuiltMu          sync.Mutex
 	syslogBuiltByName15231 map[string]*logging.SyslogClient
 	syslogBuiltFP15231     map[string]string
+	// systemSyslogHash / systemSyslogHashSet gate the applySystemSyslog
+	// client rebuild (#16767): the system-syslog twin of the stream gate
+	// above. Written only from applySystemSyslog and the test-only
+	// client-construction seam, which run under applySem on the
+	// apply/retry path; a stream apply that closes the shared client's
+	// writer can observe it through the seam's Close hook (known narrow
+	// race, see docs/log/16767.md). Seeded from
+	// d.slogHandler.Clients() on the first vetted apply, so a
+	// pre-installed set is adopted loss-free (empty-key entries only)
+	// and a host whose client a foreign close already retired re-dials
+	// fresh.
+	systemSyslogHash       string
+	systemSyslogHashSet    bool
+	systemSyslogBuiltMu    sync.Mutex
+	systemSyslogBuiltByKey map[string]*logging.SyslogClient
+	systemSyslogBuiltFP    map[string]string
 
 	// archiveTransfer performs one upload from a serialized active-config file.
 	// The commit, periodic-timer, and retained-debt paths share this transport;
