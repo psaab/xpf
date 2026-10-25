@@ -134,6 +134,162 @@ func TestChassisInterfaceMonitorDefinedNameCommits_15037(t *testing.T) {
 	}
 }
 
+// #16574: the fabric cases above carried NO other physical interface, so
+// the declared set was {fabric member} only via the member arm — but on
+// the broken code the member arm never ran outside `groups`, the set
+// stayed empty, and the empty-set fallback in
+// interfaceMonitorNameAttributable (`len(declared) == 0 -> true`)
+// admitted the monitor anyway. The cell therefore passed even with the
+// arm deleted. Every case below declares an UNRELATED physical interface
+// (ge-0/0/5), which makes the set non-empty, so the fabric member is
+// admitted ONLY if the `interfaces > fabN > fabric-options >
+// member-interfaces` arm actually mints it.
+//
+// FAIL-ON-REVERT / MUTANT: delete (or gate out) the member-interfaces
+// case in collectPhysicalInterfaces and every commit case below goes
+// red with the strict fabric refusal, while the stray-path reject case
+// stays red in both states (it pins that the fix does not widen to any
+// member-interfaces spelling anywhere).
+func TestChassisInterfaceMonitorFabricMemberWithOtherPhysical_16574(t *testing.T) {
+	const unrelated = "set interfaces ge-0/0/5 unit 0 family inet address 10.0.0.1/30"
+
+	commit := []struct {
+		name  string
+		iface string
+		extra []string
+	}{
+		{"flat-set local fabric member beside unrelated physical", "ge-0/0/0", []string{
+			"set interfaces fab0 fabric-options member-interfaces ge-0/0/0",
+			unrelated,
+		}},
+		{"flat-set peer fabric member beside unrelated physical", "ge-7/0/0", []string{
+			"set interfaces fab1 fabric-options member-interfaces ge-7/0/0",
+			unrelated,
+		}},
+		{"flat-set bracket fabric members beside unrelated physical", "ge-0/0/1", []string{
+			"set interfaces fab0 fabric-options member-interfaces [ ge-0/0/0 ge-0/0/1 ]",
+			unrelated,
+		}},
+		{"dash spelling of fabric member beside unrelated physical", "ge-0-0-0", []string{
+			"set interfaces fab0 fabric-options member-interfaces ge-0/0/0",
+			unrelated,
+		}},
+	}
+	for _, tc := range commit {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := buildTree(t, ifMonNameSetLines(tc.iface, tc.extra...))
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("interface-monitor %q naming a fabric "+
+					"member-interfaces entry must commit even when "+
+					"another physical interface is declared (#16574), "+
+					"got %v", tc.iface, err)
+			}
+			mons := onlyRGInterfaceMonitors(t, cfg)
+			if len(mons) != 1 || mons[0].Interface != tc.iface {
+				t.Fatalf("expected the single monitor %q to compile, got %+v", tc.iface, mons)
+			}
+		})
+	}
+
+	// Hierarchical spellings: the names sit on the member-interfaces
+	// node's own Keys (single / bracket) or on leaf children (block),
+	// at depth 3 below a top-level `interfaces` node.
+	hier := []struct {
+		name string
+		src  string
+	}{
+		{"hier single fabric member beside unrelated physical", `
+chassis {
+    cluster {
+        cluster-id 1;
+        authentication-key test-cluster-psk-6611;
+        redundancy-group 1 {
+            node 0 priority 200;
+            interface-monitor ge-0/0/0 weight 255;
+        }
+    }
+}
+interfaces {
+    fab0 { fabric-options { member-interfaces ge-0/0/0; } }
+    ge-0/0/5 { unit 0 { family inet { address 10.0.0.1/30; } } }
+}
+`},
+		{"hier block fabric members beside unrelated physical", `
+chassis {
+    cluster {
+        cluster-id 1;
+        authentication-key test-cluster-psk-6611;
+        redundancy-group 1 {
+            node 0 priority 200;
+            interface-monitor ge-0/0/0 weight 255;
+        }
+    }
+}
+interfaces {
+    fab0 { fabric-options { member-interfaces { ge-0/0/0; ge-7/0/0; } } }
+    ge-0/0/5 { unit 0 { family inet { address 10.0.0.1/30; } } }
+}
+`},
+		{"hier bracket fabric members beside unrelated physical", `
+chassis {
+    cluster {
+        cluster-id 1;
+        authentication-key test-cluster-psk-6611;
+        redundancy-group 1 {
+            node 0 priority 200;
+            interface-monitor ge-0/0/0 weight 255;
+        }
+    }
+}
+interfaces {
+    fab0 { fabric-options { member-interfaces [ ge-0/0/0 ge-7/0/0 ]; } }
+    ge-0/0/5 { unit 0 { family inet { address 10.0.0.1/30; } } }
+}
+`},
+	}
+	for _, tc := range hier {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewParser(tc.src)
+			tree, perrs := p.Parse()
+			if len(perrs) > 0 {
+				t.Fatalf("parse: %v", perrs)
+			}
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("hierarchical fabric member-interfaces entry "+
+					"must attribute its member beside an unrelated "+
+					"physical interface (#16574), got %v", err)
+			}
+			mons := onlyRGInterfaceMonitors(t, cfg)
+			if len(mons) != 1 || mons[0].Interface != "ge-0/0/0" {
+				t.Fatalf("expected the single ge-0/0/0 monitor to compile, got %+v", mons)
+			}
+		})
+	}
+
+	// Negative control: a member-interfaces entry under a NON-fabric
+	// interface is not a fabric member-interfaces entry. The monitor
+	// naming only that entry's member, beside the unrelated declared
+	// interface, must still be strict-rejected — the fix mints on the
+	// `interfaces > fabN > fabric-options` path only, not on any
+	// member-interfaces spelling anywhere in the tree.
+	t.Run("member-interfaces under non-fabric interface does not attribute", func(t *testing.T) {
+		tree := buildTree(t, ifMonNameSetLines("ge-0/0/9",
+			"set interfaces ge-0/0/5 fabric-options member-interfaces ge-0/0/9",
+			unrelated))
+		_, err := CompileConfig(tree)
+		if err == nil {
+			t.Fatalf("interface-monitor ge-0/0/9 naming only a " +
+				"member-interfaces entry under a non-fabric interface " +
+				"must be rejected, got nil error")
+		}
+		if !strings.Contains(err.Error(), "interface-monitor ge-0/0/9") {
+			t.Fatalf("error %q does not name the offending interface-monitor", err)
+		}
+	})
+}
+
 func TestChassisInterfaceMonitorUndefinedNameTolerantWarns_15037(t *testing.T) {
 	tree := buildTree(t, ifMonNameSetLines("reth0",
 		"set interfaces reth0 redundant-ether-options redundancy-group 1"))
