@@ -92,6 +92,7 @@ func (d *Daemon) stampDigestIfConvergedUnderSem(err error, digest string) bool {
 // with a request-bound context so a slow lock holder surfaces 503
 // to the client rather than hanging the request.
 func (d *Daemon) applyConfig(cfg *config.Config) {
+	cfg = d.resolveDNSBeforeApply(cfg)
 	if !d.beginBackgroundApply(context.Background(), "applyConfig") {
 		return
 	}
@@ -217,16 +218,25 @@ func (d *Daemon) beginBackgroundApply(ctx context.Context, who string) bool {
 // config" — the commit paths use applyConfigLocked directly, and tests drive a
 // synthetic config through it.
 func (d *Daemon) applyActiveConfig() {
+	if d.store == nil {
+		return
+	}
+	pre := d.store.ActiveConfig()
+	if pre == nil {
+		return
+	}
+	// Resolve outside applySem on a clone if pre is published (#16601).
+	resolved := d.resolveDNSBeforeApply(pre)
 	if !d.beginBackgroundApply(context.Background(), "applyActiveConfig") {
 		return
 	}
 	defer d.applySem.Release(1)
-	if d.store == nil {
-		return
-	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
 		return
+	}
+	if cfg == pre {
+		cfg = resolved
 	}
 	d.applyConfigUnderSem(cfg)
 }
@@ -249,24 +259,26 @@ func (d *Daemon) applyActiveConfig() {
 // that must not pre-capture a config, so keeping a dead copy would invite the
 // #6716 inversion straight back in.
 func (d *Daemon) applyActiveConfigResult() error {
-	if !d.beginBackgroundApply(context.Background(), "applyActiveConfigResult") {
-		// A fenced daemon is not a rejected feed: returning an error here would
-		// make the feed manager record publication DEBT for content it should
-		// simply stop retrying, on a process that is exiting. Report the same
-		// vacuous success the pre-boot nil-config case returns.
-		return nil
-	}
-	defer d.applySem.Release(1)
 	if d.store == nil {
 		return nil
 	}
+	pre := d.store.ActiveConfig()
+	if pre == nil {
+		return nil
+	}
+	resolved := d.resolveDNSBeforeApply(pre)
+	if !d.beginBackgroundApply(context.Background(), "applyActiveConfigResult") {
+		return nil
+	}
+	defer d.applySem.Release(1)
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
 		return nil
 	}
+	if cfg == pre {
+		cfg = resolved
+	}
 	err := d.applyConfigLocked(context.Background(), cfg)
-	// Stamp before releasing applySem so a competing promotion cannot
-	// inherit this successful apply result.
 	d.stampActiveAppliedIfConvergedUnderSem(err)
 	return err
 }
@@ -281,8 +293,11 @@ func (d *Daemon) applyConfigUnderSem(cfg *config.Config) {
 		slog.Warn("apply config failed", "err", err)
 		return
 	}
-	// A complete successful background apply converges any prior retry debt.
-	d.noteHostInboundGapApplyResult(nil)
+	// #16601: cfg may be a DNS-resolved clone of the active config; the
+	// store still points at the original pointer, so stamp/baseline must
+	// key on the applied clone's answers, not pointer identity alone.
+	// recordAppliedDNSBaseline (deferred in applyConfigLocked) already
+	// handled the clone; stampActive checks digest, not pointer.
 	// #4957: the active config completed a full apply through the boot /
 	// background (DHCP callback, feed, config-poll, in-process CLI commit,
 	// rollback) path. Stamp it applied so a peer config-sync of the same text

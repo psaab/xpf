@@ -850,15 +850,19 @@ compared, 0 bits are ignored — `10.1.2.3/255.255.255.0` → `10.1.2.0/24`,
 Cisco-polarity spelling `.../0.0.0.255`, have no CIDR equivalent and stay
 unimplemented), and `dns-name <fqdn> [ipv4-only|ipv6-only]` is modelled in
 `Address.DNSName`/`DNSFamily` with the current resolution in
-`Address.DNSAddresses` — refreshed at apply time and periodically by the
-daemon (`RefreshDNSAddressBooks`); a lookup FAILURE keeps the last good
-answer (stale-while-error, `Address.DNSLookupFailed`, #16595) while a
-successful lookup with no usable address matches nothing (fail-closed),
-and the strict commit gate warns rather than depending on live DNS.
-`RefreshDNSAddressBooks` mutates its argument in place, so
-the daemon's periodic tick resolves into a `CloneForDNSRefresh` private
-copy and publishes it under the apply lock — never into the published
-active config (#15933).
+`Address.DNSAddresses`. #16601: compile performs NO network I/O — it
+reads the daemon-owned answer cache (miss = fail-closed empty). A lookup
+FAILURE keeps the last good answer (stale-while-error,
+`Address.DNSLookupFailed`, #16595, retained in the cache) while a
+successful lookup with no usable address matches nothing (fail-closed).
+Resolution (`RefreshDNSAddressBooks`: bounded 8-worker pool, 10s
+aggregate deadline, per-name 5s cap) runs only outside `configstore`
+`s.mu` and the daemon `applySem`: the daemon resolves before acquiring
+`applySem`, and the periodic tick resolves its clone outside the
+semaphore and applies it without re-resolving. `RefreshDNSAddressBooks`
+mutates its argument in place, so it must never be given the published
+active config (#15933); refreshed answers publish as a new store
+generation (#16606).
 These expansions live in `Address.ExpandedPrefixes` /
 `DNSAddresses` and are returned by `Address.UsableValues()`, which every
 resolver (policy, NAT, junos-host, userspace book table) now consumes so a

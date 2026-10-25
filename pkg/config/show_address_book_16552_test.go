@@ -25,6 +25,7 @@ func TestAddressDisplayValue16552(t *testing.T) {
 		if err != nil {
 			t.Fatalf("compile %q: %v", body, err)
 		}
+		RefreshDNSAddressBooks(cfg) // #16601: compile is cache-only
 		for _, a := range cfg.Security.AddressBook.Addresses {
 			return a
 		}

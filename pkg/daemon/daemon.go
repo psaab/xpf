@@ -1097,6 +1097,10 @@ type Daemon struct {
 	dnsRefreshMu          sync.Mutex
 	lastDNSRefreshBase    *config.Config
 	lastDNSRefreshAnswers map[string][]string
+	// dnsResolvedConfigs marks configs already resolved outside applySem
+	// (#16601) — notably the DNS refresher's clone — so the pre-apply
+	// resolver does not resolve them again. Guarded by dnsRefreshMu.
+	dnsResolvedConfigs map[*config.Config]struct{}
 	// buildRuntimeDataPlaneForTest replaces dataplane construction in the
 	// startup fixture. It is nil in production and exists so the setup path
 	// can be exercised without arming a host dataplane.

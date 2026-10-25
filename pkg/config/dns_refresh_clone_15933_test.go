@@ -34,6 +34,19 @@ func dnsRefreshFixture15933(t *testing.T) *Config {
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
+	// #16601: compile is cache-only; populate the premise answers with
+	// the off-lock refresh the daemon now performs before apply.
+	restore2 := SetLookupAddressDNSNameForTest(func(fqdn string) ([]string, error) {
+		switch fqdn {
+		case "global.example.com":
+			return []string{"10.0.0.1"}, nil
+		case "local.example.com":
+			return []string{"10.0.0.2"}, nil
+		}
+		return nil, nil
+	})
+	RefreshDNSAddressBooks(cfg)
+	restore2()
 	return cfg
 }
 

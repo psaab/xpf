@@ -77,6 +77,17 @@ func dnsDaemon15933(t *testing.T) (*Daemon, *configstore.Store) {
 	if _, err := s.SyncApply(dnsCfg15933, nil); err != nil {
 		t.Fatalf("SyncApply premise config: %v", err)
 	}
+	// #16601: SyncApply compiles cache-only, so the premise answers the
+	// old compile-time resolve produced now arrive via the daemon's
+	// off-lock refresh into the cache + a cache-populate of the active
+	// config's private DNS entries. The active config's entries are
+	// populated from cache here (test premise, standing in for the
+	// pre-apply resolve at boot).
+	if cfg := s.ActiveConfig(); cfg != nil {
+		probe := cfg.CloneForDNSRefresh()
+		config.RefreshDNSAddressBooks(probe)
+		config.PopulateDNSFromCache(cfg)
+	}
 	d := &Daemon{
 		applySem: semaphore.NewWeighted(1),
 		store:    s,
@@ -275,6 +286,12 @@ func dnsRealDaemon15962(t *testing.T) (*Daemon, *runtimeOnlyApplyTestDP, *config
 	if _, err := s.SyncApply(dnsCfg15933, nil); err != nil {
 		t.Fatalf("SyncApply premise config: %v", err)
 	}
+	// #16601: populate premise answers off-lock (compile is cache-only).
+	if cfg := s.ActiveConfig(); cfg != nil {
+		probe := cfg.CloneForDNSRefresh()
+		config.RefreshDNSAddressBooks(probe)
+		config.PopulateDNSFromCache(cfg)
+	}
 	dp := &runtimeOnlyApplyTestDP{}
 	d := &Daemon{
 		applySem: semaphore.NewWeighted(1),
@@ -362,9 +379,11 @@ func TestDNSRefreshBaselineReconciledAfterBackgroundReapply15962(t *testing.T) {
 	if dp.applyCalls != 2 {
 		t.Fatalf("background applies = %d, want 2", dp.applyCalls)
 	}
-	if got := globalSvc15933(t, cfg); !reflect.DeepEqual(got, []string{"10.9.9.9/32"}) {
-		t.Fatalf("applied cfg global = %v, want B (premise: real apply landed B)", got)
+	if got := globalSvc15933(t, cfg); reflect.DeepEqual(got, []string{"10.9.9.9/32"}) {
+		t.Fatalf("published cfg mutated by background apply: %v (background apply must land B on its resolved clone only, #16601)", got)
 	}
+	// Baseline must now hold B (the background apply's clone answers) —
+	// proven by the flap-back publish count below.
 	// 3) Flap back to seed: tick MUST reapply (apply 3). Without the
 	// exit reconcile, baseline is still seed and this stays 2 -> RED.
 	set(map[string][]string{"global.example.com": {"10.1.1.1"}, "local.example.com": {"10.0.0.2"}})
@@ -446,31 +465,30 @@ func TestDNSRefreshInterleavedSameGenApplyFlapBack15962(t *testing.T) {
 		t.Fatalf("same-generation applies = %d, want 2", dp.applyCalls)
 	}
 
-	// Tick publish: apply-time re-resolution lands T2 last.
+	// Tick publish: under #16601 there is NO apply-time re-resolution;
+	// the tick's own proposal P (10.8.8.8) lands last.
 	phase.Store(3)
 	close(release)
 	<-tickDone
 	if dp.applyCalls != 3 {
 		t.Fatalf("tick publish applies = %d, want 3", dp.applyCalls)
 	}
-	// Baseline must be the actually-applied T2, not the surviving W:
-	// assert the global identity directly (identity keys are scoped).
-	// #16606: re-read the published generation (T2's clone is active).
+	// #16606: re-read the published generation (P's clone is active).
 	cfg = s.ActiveConfig()
 	base := d.dnsBaselineFor(cfg)
-	foundT2 := false
+	foundP := false
 	for _, vs := range base {
 		for _, v := range vs {
-			if v == "10.6.6.6/32" {
-				foundT2 = true
+			if v == "10.8.8.8/32" {
+				foundP = true
 			}
 			if v == "10.7.7.7/32" {
-				t.Fatalf("baseline still holds W after tick applied T2 last: baseline=%v", base)
+				t.Fatalf("baseline still holds W after tick applied P last: baseline=%v", base)
 			}
 		}
 	}
-	if !foundT2 {
-		t.Fatalf("baseline = %v, want T2 10.6.6.6/32 (newest applied record dropped)", base)
+	if !foundP {
+		t.Fatalf("baseline = %v, want P 10.8.8.8/32 (newest applied record dropped)", base)
 	}
 
 	// Flap back to W: the tick MUST republish (apply 4), then quiesce.

@@ -19,6 +19,8 @@ func TestShowAddressBookForms16552(t *testing.T) {
 		return nil, nil
 	})
 	defer restore()
+	seed := config.SeedDNSAnswerCacheForTest("up.example.com", "ipv4-only", []string{"198.51.100.10/32"})
+	defer seed()
 
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
 	if err := store.EnterConfigure(); err != nil {

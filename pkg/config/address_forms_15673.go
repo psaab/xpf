@@ -6,6 +6,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,10 +34,182 @@ import (
 // Unknown/future forms and any entry mixing a prefix with another form stay
 // in UnimplementedForms (#9524) and are unusable.
 
-// lookupAddressDNSName resolves fqdn to IP strings. It is a package var so
-// tests can substitute a deterministic resolver without network access.
+// dnsResolveWorkers bounds concurrent dns-name lookups (#16601).
+const dnsResolveWorkers = 8
+
+// dnsResolveAggregateTimeout bounds one whole refresh batch (#16601).
+const dnsResolveAggregateTimeout = 10 * time.Second
+
+const dnsPerNameTimeout = 5 * time.Second
+
+// dnsAnswerCache is the daemon-owned answer cache compile reads
+// (#16601). Compile performs NO network I/O: applyDNSName populates
+// DNSAddresses only from this cache (miss => fail-closed empty, exactly
+// like an unresolvable name). Resolution happens only in
+// RefreshDNSAddressBooks, which callers must invoke OUTSIDE
+// configstore s.mu and daemon applySem.
+var dnsAnswerCache = struct {
+	sync.RWMutex
+	m map[string][]string
+	// ok marks keys resolved successfully (even to empty); a success
+	// that found no family-matching IPs must NOT be re-looked-up by
+	// Peek. A failed/timed-out lookup leaves ok false so Peek retries.
+	ok map[string]bool
+}{m: make(map[string][]string), ok: make(map[string]bool)}
+
+func dnsCacheKey(fqdn, family string) string { return fqdn + "\x00" + family }
+
+func dnsCacheGet(fqdn, family string) ([]string, bool) {
+	dnsAnswerCache.RLock()
+	defer dnsAnswerCache.RUnlock()
+	v, ok := dnsAnswerCache.m[dnsCacheKey(fqdn, family)]
+	if !ok {
+		return nil, false
+	}
+	return append([]string(nil), v...), true
+}
+
+func dnsCachePut(fqdn, family string, prefixes []string) {
+	dnsCachePutOK(fqdn, family, prefixes, true)
+}
+
+// dnsCachePutOK stores prefixes; success=false records the values
+// (fail-closed for compile) without marking the key resolved, so a
+// Peek in the daemon re-resolves instead of trusting a failure.
+func dnsCachePutOK(fqdn, family string, prefixes []string, success bool) {
+	dnsAnswerCache.Lock()
+	defer dnsAnswerCache.Unlock()
+	k := dnsCacheKey(fqdn, family)
+	dnsAnswerCache.m[k] = append([]string(nil), prefixes...)
+	if success {
+		dnsAnswerCache.ok[k] = true
+	} else {
+		delete(dnsAnswerCache.ok, k)
+	}
+}
+
+// dnsCacheFailed reports whether the cached entry's last resolution
+// failed (#16595 stale-while-error flag for compile-time populate).
+func dnsCacheFailed(fqdn, family string) bool {
+	dnsAnswerCache.RLock()
+	defer dnsAnswerCache.RUnlock()
+	k := dnsCacheKey(fqdn, family)
+	_, present := dnsAnswerCache.m[k]
+	return present && !dnsAnswerCache.ok[k]
+}
+
+// dnsCachePutFailed stores a failed resolution retaining prefixes
+// (last-good, #16595) and marks the key not-ok so Peek retries it.
+func dnsCachePutFailed(fqdn, family string, prefixes []string) {
+	dnsAnswerCache.Lock()
+	defer dnsAnswerCache.Unlock()
+	k := dnsCacheKey(fqdn, family)
+	dnsAnswerCache.m[k] = append([]string(nil), prefixes...)
+	delete(dnsAnswerCache.ok, k)
+}
+
+// dnsCacheMarkFailed flags an existing cached answer as stale-failed
+// without discarding its prefixes (#16595).
+func dnsCacheMarkFailed(fqdn, family string) {
+	dnsAnswerCache.Lock()
+	defer dnsAnswerCache.Unlock()
+	delete(dnsAnswerCache.ok, dnsCacheKey(fqdn, family))
+}
+
+// SeedDNSAnswerCacheForTest pre-populates the answer cache so tests in
+// other packages can drive compile/apply without network (#16601).
+func SeedDNSAnswerCacheForTest(fqdn, family string, prefixes []string) func() {
+	key := dnsCacheKey(fqdn, family)
+	dnsAnswerCache.Lock()
+	old, existed := dnsAnswerCache.m[key]
+	oldOk := dnsAnswerCache.ok[key]
+	dnsAnswerCache.m[key] = append([]string(nil), prefixes...)
+	dnsAnswerCache.ok[key] = true
+	dnsAnswerCache.Unlock()
+	return func() {
+		dnsAnswerCache.Lock()
+		if existed {
+			dnsAnswerCache.m[key] = old
+		} else {
+			delete(dnsAnswerCache.m, key)
+		}
+		if oldOk {
+			dnsAnswerCache.ok[key] = true
+		} else {
+			delete(dnsAnswerCache.ok, key)
+		}
+		dnsAnswerCache.Unlock()
+	}
+}
+
+// PeekDNSNames lists distinct (fqdn,family) pairs in cfg not yet
+// successfully resolved in the answer cache (#16601). Daemon callers
+// use it to compile a text config WITHOUT network (e.g. a discarding
+// SyncApply) and resolve only when there is something to resolve.
+func PeekDNSNames(cfg *Config) [][2]string {
+	if cfg == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out [][2]string
+	add := func(b *AddressBook) {
+		if b == nil {
+			return
+		}
+		for _, a := range b.Addresses {
+			if a == nil || a.DNSName == "" {
+				continue
+			}
+			k := dnsCacheKey(a.DNSName, a.DNSFamily)
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			dnsAnswerCache.RLock()
+			_, resolved := dnsAnswerCache.ok[k]
+			dnsAnswerCache.RUnlock()
+			if !resolved {
+				out = append(out, [2]string{a.DNSName, a.DNSFamily})
+			}
+		}
+	}
+	add(cfg.Security.AddressBook)
+	for _, nb := range cfg.Security.NamedAddressBooks {
+		if nb != nil {
+			add(&nb.AddressBook)
+		}
+	}
+	for _, z := range cfg.Security.Zones {
+		if z != nil {
+			add(z.AddressBook)
+		}
+	}
+	return out
+}
+
+// ResolveDNSNames resolves the given (fqdn,family) pairs into the
+// answer cache with the bounded pool (network, outside all locks).
+func ResolveDNSNames(pairs [][2]string) {
+	if len(pairs) == 0 {
+		return
+	}
+	entries := make([]dnsEntryRef, 0, len(pairs))
+	holders := make([]*Address, 0, len(pairs))
+	for _, p := range pairs {
+		a := &Address{DNSName: p[0], DNSFamily: p[1]}
+		holders = append(holders, a)
+		entries = append(entries, dnsEntryRef{a, p[0], p[1]})
+	}
+	_ = holders
+	resolveDNSEntriesParallel(entries)
+}
+
+// lookupAddressDNSName resolves fqdn to IP strings. Package var so tests
+// can substitute a deterministic resolver. Only
+// RefreshDNSAddressBooks (outside all locks) may call it via
+// resolveDNSEntriesParallel; compile never reaches it (#16601).
 var lookupAddressDNSName = func(fqdn string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), dnsPerNameTimeout)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, fqdn)
 	if err != nil {
@@ -94,33 +267,149 @@ func dnsIPsToPrefixes(ips []string, family string) []string {
 	return out
 }
 
-// resolveDNSAddressEntry (re)resolves one dns-name entry in place (#16595).
-// A lookup error keeps the previous DNSAddresses (stale-while-error) and
-// sets DNSLookupFailed, so a transient resolver outage does not discard
-// the last answer. A successful lookup — even one yielding no addresses,
-// or none in the entry's family — replaces the answer and clears the
-// flag: "name has no addresses" stays distinct from "resolver failed".
+// resolveDNSAddressEntry populates one entry FROM THE CACHE ONLY
+// (#16601): no network I/O, safe under any lock. Cache hit (key present,
+// even with a failed-flag) stamps the cached prefixes and the cached
+// DNSLookupFailed state (#16595 stale-while-error is preserved because
+// the cache retains the last good answer on failure). Cache miss
+// leaves no usable prefixes (fail-closed), same as unresolvable.
 func resolveDNSAddressEntry(a *Address) {
 	if a == nil || a.DNSName == "" {
 		return
 	}
-	ips, err := lookupAddressDNSName(a.DNSName)
-	if err != nil {
-		a.DNSLookupFailed = true
+	if prefixes, ok := dnsCacheGet(a.DNSName, a.DNSFamily); ok {
+		a.DNSAddresses = prefixes
+		a.DNSLookupFailed = dnsCacheFailed(a.DNSName, a.DNSFamily)
 		return
 	}
+	a.DNSAddresses = nil
 	a.DNSLookupFailed = false
-	a.DNSAddresses = dnsIPsToPrefixes(ips, a.DNSFamily)
+}
+
+type dnsEntryRef struct {
+	addr   *Address
+	fqdn   string
+	family string
+}
+
+// resolveDNSEntriesParallel resolves distinct (fqdn,family) pairs with
+// a bounded worker pool and aggregate deadline, writes results into
+// the cache, then populates entries from the cache (#16601/#16595).
+// On lookup error the cache KEEPS the last good prefixes and marks the
+// key failed (stale-while-error); entries sharing a name resolve once.
+func resolveDNSEntriesParallel(entries []dnsEntryRef) {
+	if len(entries) == 0 {
+		return
+	}
+	// Capture prior cache state per entry for stale retention: on
+	// failure an entry with no cache history keeps its own current
+	// DNSAddresses (the clone's seed, #16595).
+	prior := make(map[*Address][]string, len(entries))
+	for _, e := range entries {
+		prior[e.addr] = append([]string(nil), e.addr.DNSAddresses...)
+	}
+	type job struct{ fqdn, family string }
+	seen := make(map[string]struct{})
+	var jobs []job
+	for _, e := range entries {
+		k := dnsCacheKey(e.fqdn, e.family)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		jobs = append(jobs, job{e.fqdn, e.family})
+	}
+	results := make(map[string][]string, len(jobs))
+	succeeded := make(map[string]bool, len(jobs))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, dnsResolveWorkers)
+	deadline := time.Now().Add(dnsResolveAggregateTimeout)
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(j job) {
+			defer wg.Done()
+			if time.Now().After(deadline) {
+				return
+			}
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			default:
+				sem <- struct{}{}
+				defer func() { <-sem }()
+			}
+			if time.Now().After(deadline) {
+				return
+			}
+			ips, err := lookupAddressDNSName(j.fqdn)
+			var prefixes []string
+			ok := err == nil
+			if ok {
+				prefixes = dnsIPsToPrefixes(ips, j.family)
+			}
+			mu.Lock()
+			results[dnsCacheKey(j.fqdn, j.family)] = prefixes
+			succeeded[dnsCacheKey(j.fqdn, j.family)] = ok
+			mu.Unlock()
+		}(j)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(dnsResolveAggregateTimeout):
+	}
+	for _, j := range jobs {
+		k := dnsCacheKey(j.fqdn, j.family)
+		mu.Lock()
+		prefixes := results[k]
+		ok := succeeded[k]
+		mu.Unlock()
+		if ok {
+			dnsCachePutOK(j.fqdn, j.family, prefixes, true)
+		} else {
+			// Stale-while-error (#16595): keep last good cache answer
+			// if any; otherwise leave the key present-failed with the
+			// first entry's prior value handled per-entry below.
+			if _, has := dnsCacheGet(j.fqdn, j.family); !has {
+				dnsCachePutFailed(j.fqdn, j.family, nil)
+			} else {
+				dnsCacheMarkFailed(j.fqdn, j.family)
+			}
+		}
+	}
+	for _, e := range entries {
+		k := dnsCacheKey(e.fqdn, e.family)
+		mu.Lock()
+		ok := succeeded[k]
+		mu.Unlock()
+		if ok {
+			if prefixes, has := dnsCacheGet(e.fqdn, e.family); has {
+				e.addr.DNSAddresses = prefixes
+			} else {
+				e.addr.DNSAddresses = nil
+			}
+			e.addr.DNSLookupFailed = false
+		} else {
+			e.addr.DNSLookupFailed = true
+			if prefixes, has := dnsCacheGet(e.fqdn, e.family); has && len(prefixes) > 0 {
+				e.addr.DNSAddresses = prefixes
+			} else if len(prior[e.addr]) > 0 {
+				e.addr.DNSAddresses = prior[e.addr]
+				// Seed the cache with this stale answer so compile
+				// (cache-only) sees the same retained value.
+				dnsCachePutFailed(e.fqdn, e.family, prior[e.addr])
+			} else {
+				e.addr.DNSAddresses = nil
+			}
+		}
+	}
 }
 
 // DNSEntryLookupFailed reports whether a (possibly nested) address-book
 // name's closure contains a dns-name entry whose latest resolution FAILED
-// (#16595). Such an entry is runtime-empty, not statically unresolvable:
-// consumers that would otherwise treat an empty expansion as a static
-// shape (the strict commit gate, the junos-host projection) must not let
-// a resolver outage veto them. An entry that resolved successfully to
-// zero addresses is NOT lookup-failed. Cycle-safe; mirrors the closure
-// walks of the strict resolver.
+// (#16595). Cycle-safe; mirrors the strict resolver's closure walks.
 func (ab *AddressBook) DNSEntryLookupFailed(name string) bool {
 	if ab == nil {
 		return false
@@ -152,23 +441,81 @@ func (ab *AddressBook) DNSEntryLookupFailed(name string) bool {
 	return walk(name)
 }
 
-// RefreshDNSAddressBooks re-resolves every dns-name entry in the global,
-// named, and zone-local books. Called at compile time and periodically by
-// the daemon so a changed DNS answer republishes through the normal snapshot
-// path.
-//
-// It MUTATES cfg in place: every Address.DNSAddresses field is replaced.
-// cfg MUST NOT be a published active config (#15933): a config handed out
-// by configstore (ActiveConfig / ActiveSnapshot) is shared with concurrent
-// applies and readers, so the daemon refresh path resolves into a private
-// copy (CloneForDNSRefresh) and publishes through the apply lock instead of
-// writing into the shared generation. Compile-time callers own their cfg
-// exclusively, as do callers already holding the daemon apply semaphore.
+// RefreshDNSAddressBooks re-resolves every dns-name entry with a
+// bounded worker pool and aggregate deadline (#16601). NETWORK I/O:
+// call only outside configstore s.mu and daemon applySem. MUTATES cfg
+// in place; cfg MUST NOT be a published active config (#15933).
 func RefreshDNSAddressBooks(cfg *Config) {
 	if cfg == nil {
 		return
 	}
-	refresh := func(b *AddressBook) {
+	var entries []dnsEntryRef
+	collect := func(b *AddressBook) {
+		if b == nil {
+			return
+		}
+		for _, a := range b.Addresses {
+			if a != nil && a.DNSName != "" {
+				entries = append(entries, dnsEntryRef{a, a.DNSName, a.DNSFamily})
+			}
+		}
+	}
+	collect(cfg.Security.AddressBook)
+	for _, nb := range cfg.Security.NamedAddressBooks {
+		if nb != nil {
+			collect(&nb.AddressBook)
+		}
+	}
+	for _, z := range cfg.Security.Zones {
+		if z != nil {
+			collect(z.AddressBook)
+		}
+	}
+	resolveDNSEntriesParallel(entries)
+}
+
+// ResolveDNSForConfig names the lock contract for daemon callers
+// (#16601): resolve before acquiring applySem.
+func ResolveDNSForConfig(cfg *Config) { RefreshDNSAddressBooks(cfg) }
+
+// HasDNSNames reports whether cfg carries any dns-name entry.
+func HasDNSNames(cfg *Config) bool {
+	if cfg == nil {
+		return false
+	}
+	has := false
+	scan := func(b *AddressBook) {
+		if b == nil || has {
+			return
+		}
+		for _, a := range b.Addresses {
+			if a != nil && a.DNSName != "" {
+				has = true
+				return
+			}
+		}
+	}
+	scan(cfg.Security.AddressBook)
+	for _, nb := range cfg.Security.NamedAddressBooks {
+		if nb != nil {
+			scan(&nb.AddressBook)
+		}
+	}
+	for _, z := range cfg.Security.Zones {
+		if z != nil {
+			scan(z.AddressBook)
+		}
+	}
+	return has
+}
+
+// PopulateDNSFromCache fills DNSAddresses/DNSLookupFailed from the
+// answer cache only (no network) (#16601).
+func PopulateDNSFromCache(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	pop := func(b *AddressBook) {
 		if b == nil {
 			return
 		}
@@ -176,15 +523,15 @@ func RefreshDNSAddressBooks(cfg *Config) {
 			resolveDNSAddressEntry(a)
 		}
 	}
-	refresh(cfg.Security.AddressBook)
+	pop(cfg.Security.AddressBook)
 	for _, nb := range cfg.Security.NamedAddressBooks {
 		if nb != nil {
-			refresh(&nb.AddressBook)
+			pop(&nb.AddressBook)
 		}
 	}
 	for _, z := range cfg.Security.Zones {
 		if z != nil {
-			refresh(z.AddressBook)
+			pop(z.AddressBook)
 		}
 	}
 }
