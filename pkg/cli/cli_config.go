@@ -575,6 +575,9 @@ func (c *CLI) handleConfigShow(args []string) error {
 				slotSnap := c.renderSnapshot15995("slot")
 				switch {
 				case c.snapshotsCaptured15995():
+					if slotErr := c.renderSlotErr(); slotErr != nil {
+						return slotErr
+					}
 					// Gate stashed (slot, candidate) via
 					// setRenderSnapshots15995: slot in "slot",
 					// candidate in "other".

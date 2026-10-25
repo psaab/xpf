@@ -928,6 +928,9 @@ func (c *CLI) handleShowSystem(args []string) error {
 				}
 				var diff string
 				if slotSnap := c.renderSnapshot15995("slot"); c.snapshotsCaptured15995() {
+					if slotErr := c.renderSlotErr(); slotErr != nil {
+						return slotErr
+					}
 					other := c.renderSnapshot15995("other")
 					if redact {
 						diff = configstore.RenderCompareRedacted(slotSnap, other, nil, true)
@@ -1012,6 +1015,9 @@ func (c *CLI) handleShowSystem(args []string) error {
 				}
 				var diff string
 				if slotSnap := c.renderSnapshot15995("slot"); c.snapshotsCaptured15995() {
+					if slotErr := c.renderSlotErr(); slotErr != nil {
+						return slotErr
+					}
 					other := c.renderSnapshot15995("other")
 					if redact {
 						diff = configstore.RenderCompareRedacted(slotSnap, other, comparePath, true)
@@ -1034,6 +1040,11 @@ func (c *CLI) handleShowSystem(args []string) error {
 			case rbPiped && rbFormat != displayPipeNone:
 				// #15657 V48-02: every display format is honoured,
 				// scoped to the pre-pipe subtree path.
+				if c.snapshotsCaptured15995() {
+					if slotErr := c.renderSlotErr(); slotErr != nil {
+						return slotErr
+					}
+				}
 				var content string
 				slotSnap := c.renderSnapshot15995("slot")
 				rbFormatName := ""
@@ -1092,6 +1103,9 @@ func (c *CLI) handleShowSystem(args []string) error {
 				// pre-pipe subtree path (rbPath, empty = whole tree).
 				var content string
 				if slotSnap := c.renderSnapshot15995("slot"); c.snapshotsCaptured15995() {
+					if slotErr := c.renderSlotErr(); slotErr != nil {
+						return slotErr
+					}
 					if redact {
 						content = configstore.RenderShowRedacted(slotSnap, rbPath, "text")
 					} else {

@@ -67,9 +67,11 @@ func (c *CLI) dispatch(line string) error {
 	// that frame prices and clears its own snapshots.)
 	c.renderSnapshots15995 = nil
 	c.renderPath15995, c.renderComparePath15995 = nil, nil
+	c.renderSlotErr16613 = nil
 	defer func() {
 		c.renderSnapshots15995 = nil
 		c.renderPath15995, c.renderComparePath15995 = nil, nil
+		c.renderSlotErr16613 = nil
 	}()
 	if cmd, pipeType, pipeArg, ok := cliterm.SplitPipe(line); ok {
 		return c.dispatchWithPipe(cmd, pipeType, pipeArg)
