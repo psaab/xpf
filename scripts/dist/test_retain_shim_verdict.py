@@ -27,6 +27,9 @@ class RetainShimVerdictTests(unittest.TestCase):
         self.object_path.parent.mkdir(parents=True)
         self.verdict_path.parent.mkdir(parents=True, exist_ok=True)
         self.object_path.write_bytes(b"release shim object")
+        header_path = self.root / retain_shim_verdict._HEADER
+        header_path.parent.mkdir(parents=True, exist_ok=True)
+        header_path.write_text("#define MAX_INTERFACES 65536\n", encoding="utf-8")
         toolchain_path = self.root / retain_shim_verdict._TOOLCHAIN_TOML
         toolchain_path.parent.mkdir(parents=True, exist_ok=True)
         toolchain_path.write_text('[toolchain]\nchannel = "nightly-2026-05-23"\n', encoding="utf-8")
@@ -60,7 +63,7 @@ class RetainShimVerdictTests(unittest.TestCase):
                 "toolchain": "nightly-2026-05-23",
                 "pinned": True,
                 "bpf_linker": "0.10.2",
-                "codegen_env_digest": hashlib.sha256(b"RUSTFLAGS=\nCARGO_ENCODED_RUSTFLAGS=\n").hexdigest(),
+                "codegen_env_digest": retain_shim_verdict._well_known_digest(self.root),
             },
         }
 

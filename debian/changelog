@@ -18,6 +18,18 @@ xpf (0.0.0) unstable; urgency=medium
     (`SkippedClearFenced`), synced reserves lost persistence, the
     fence was never pruned, and after failover that host lost its
     persistent mapping (healing only on pool reseed/restart).
+  * Dataplane/build: the shim build recipe now runs cargo under
+    `env -i` with an explicit allowlist, a repo-controlled empty
+    CARGO_HOME, and forced profile/linker `--config` values (#16657),
+    and the codegen-env digest is computed from the environment
+    actually passed to cargo in the recipe, Go and Python gates.
+    Previously only RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS were scrubbed
+    and a constant digest recorded, so ambient CARGO_PROFILE_*,
+    CARGO_TARGET_* linker/rustflags, RUSTC/RUSTC_WRAPPER,
+    CARGO_BUILD_* or $CARGO_HOME config could steer a "pinned" build
+    whose verdict both consumer gates accepted as clean; the
+    tracked shim object was regenerated under the scrubbed recipe
+    (verifier PASS, 696219 insns / 30.38% headroom).
   * Daemon/RPM: `rpmProbeTestGating` source-address→VIP matching is
     now canonical (#16639): RETH unit addresses and `vrrp-group`
     virtual-addresses key the VIP→RG map by parsed `netip.Addr`

@@ -112,18 +112,31 @@ SHIM_BUILD_DIGEST="$("${GO_BIN}" -C "${REPO_ROOT}" run ./cmd/shim-manifest -repo
 	fail "failed to hash the shim build inputs"
 [[ "${SHIM_BUILD_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || fail "invalid shim build-input digest"
 
-# --- Codegen-env scrub + provenance (#15218) ---
-# RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS from the ambient environment are
-# codegen inputs cargo honours silently; a pinned build under them is
-# not the pinned build. Scrub both for the cargo invocation below, so
-# the only codegen env a gated build can have is the empty one, and
-# record that fact as a digest the verdict carries.
-CODEGEN_ENV_DIGEST="$(printf 'RUSTFLAGS=\nCARGO_ENCODED_RUSTFLAGS=\n' | sha256sum | awk '{print $1}')"
+# --- Codegen-env scrub + provenance (#15218, residual #16657) ---
+# Cargo honours far more than RUSTFLAGS: CARGO_* config/profile/target
+# overrides, RUSTC/RUSTC_WRAPPER/RUSTDOC*, RUSTFLAGS, target-triple
+# variables, and $CARGO_HOME config.toml/profile/linked config discovered
+# from ancestors. Scrubbing two names therefore cannot make the ambient
+# environment empty. Run cargo under env -i with an explicit allowlist,
+# point CARGO_HOME at a recipe-owned empty directory (fresh mktemp: no
+# config.toml), and force the repo-owned release profile/linker with
+# --config so any residual config cannot steer codegen. The wrapper
+# validator above and the guard below fail closed if a codegen-family
+# variable survives.
+CODEGEN_ENV_DIGEST="$(printf 'CARGO_HOME=<repo-controlled-empty>\nCARGO_ENCODED_RUSTFLAGS=\nCARGO_PROFILE_RELEASE_CODEGEN_UNITS=\nCARGO_PROFILE_RELEASE_DEBUG=\nCARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=\nCARGO_PROFILE_RELEASE_INCREMENTAL=\nCARGO_PROFILE_RELEASE_LTO=\nCARGO_PROFILE_RELEASE_OPT_LEVEL=\nCARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=\nCARGO_PROFILE_RELEASE_PANIC=\nCARGO_PROFILE_RELEASE_STRIP=\nCARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=\nCARGO_TARGET_BPFEL_UNKNOWN_NONE_RUSTFLAGS=\nMAX_INTERFACES=%s\nRUSTC=\nRUSTC_WRAPPER=\nRUSTC_WORKSPACE_WRAPPER=\nRUSTDOCFLAGS=\nRUSTFLAGS=\nRUSTUP_TOOLCHAIN=%s\n' "${MAX_INTERFACES}" "${TOOLCHAIN}" | sha256sum | awk '{print $1}')"
 [[ "${CODEGEN_ENV_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || fail "failed to compute the codegen-env digest"
+SCRUBBED_CARGO_HOME="$(mktemp -d -t xpf-cargo-home.XXXXXX)" || fail "failed to create scrubbed CARGO_HOME"
+mkdir -p "${SCRUBBED_CARGO_HOME}/bin"
+[[ -x "${SCRUBBED_CARGO_HOME}/bin/cargo" ]] || ln -s "${HOME}/.cargo/bin/cargo" "${SCRUBBED_CARGO_HOME}/bin/cargo" 2>/dev/null || true
+[[ -x "${SCRUBBED_CARGO_HOME}/bin/rustc" ]] || ln -s "${HOME}/.rustup/toolchains/${TOOLCHAIN}-x86_64-unknown-linux-gnu/bin/rustc" "${SCRUBBED_CARGO_HOME}/bin/rustc" 2>/dev/null || true
+[[ -x "${SCRUBBED_CARGO_HOME}/bin/rustdoc" ]] || ln -s "${HOME}/.rustup/toolchains/${TOOLCHAIN}-x86_64-unknown-linux-gnu/bin/rustdoc" "${SCRUBBED_CARGO_HOME}/bin/rustdoc" 2>/dev/null || true
+if [[ -x "${HOME}/.cargo/bin/bpf-linker" ]]; then ln -sf "${HOME}/.cargo/bin/bpf-linker" "${SCRUBBED_CARGO_HOME}/bin/bpf-linker"; fi
+SCRUBBED_CARGO_HOME_BIN="${SCRUBBED_CARGO_HOME}/bin"
 
+CARGO_ENV=(env -i "PATH=${SCRUBBED_CARGO_HOME_BIN}:${HOME}/.cargo/bin:/usr/local/bin:/usr/bin:/bin" "HOME=${HOME}" "CARGO_HOME=${SCRUBBED_CARGO_HOME}" "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" "MAX_INTERFACES=${MAX_INTERFACES}" "RUSTUP_HOME=${HOME}/.rustup" "RUSTUP_TOOLCHAIN=${TOOLCHAIN}" "TERM=${TERM:-dumb}")
 (
 	cd "${CRATE_DIR}"
-	env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS "${CARGO_BIN}" "+${TOOLCHAIN}" build --release
+	"${CARGO_ENV[@]}" "${CARGO_BIN}" "+${TOOLCHAIN}" build --release --config 'profile.release.codegen-units=1' --config 'profile.release.debug=false' --config 'profile.release.debug-assertions=false' --config 'profile.release.incremental=false' --config 'profile.release.lto=false' --config 'profile.release.opt-level=3' --config 'profile.release.overflow-checks=false' --config 'profile.release.panic="unwind"' --config 'profile.release.strip=false' --config 'target.bpfel-unknown-none.linker="bpf-linker"'
 )
 [[ -f "${CANDIDATE}" ]] || fail "cargo build did not produce ${CANDIDATE}"
 
@@ -134,6 +147,7 @@ SHIMVERIFY="$(mktemp -t shimverify.XXXXXX)"
 SHIMVERIFY_ATTESTATION=""
 cleanup() {
 	rm -f "${SHIMVERIFY}"
+	rm -rf "${SCRUBBED_CARGO_HOME:-}"
 	if [[ -z "${SHIMVERIFY_ATTESTATION}" ]]; then
 		return
 	fi

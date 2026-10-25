@@ -16,13 +16,52 @@ from typing import Callable
 _OBJECT = Path("pkg/dataplane/userspace_xdp_bpfel.o")
 _VERDICT = Path("pkg/dataplane/userspace_xdp_gate_verdict.json")
 _TOOLCHAIN_TOML = Path("userspace-xdp/rust-toolchain.toml")
+_HEADER = Path("bpf/headers/xpf_common.h")
 
 # Mirrors ShimPinnedBPFLinkerVersion in pkg/dataplane and
 # PINNED_BPF_LINKER_VERSION in build-userspace-xdp.sh (#15218).
 _PINNED_BPF_LINKER = "0.10.2"
-# SHA-256 of "RUSTFLAGS=\nCARGO_ENCODED_RUSTFLAGS=\n": the scrubbed
-# codegen environment build-userspace-xdp.sh enforces (#15218).
-_WELL_KNOWN_CODEGEN_ENV_DIGEST = hashlib.sha256(b"RUSTFLAGS=\nCARGO_ENCODED_RUSTFLAGS=\n").hexdigest()
+
+
+def _max_interfaces(repo_root: Path) -> str:
+    try:
+        for line in (repo_root / _HEADER).read_text(encoding="utf-8").splitlines():
+            f = line.split()
+            if len(f) == 3 and f[0] == "#define" and f[1] == "MAX_INTERFACES":
+                return f[2]
+    except OSError as exc:
+        raise ValueError(f"cannot read MAX_INTERFACES: {exc}") from exc
+    raise ValueError("MAX_INTERFACES not found in bpf/headers/xpf_common.h")
+
+
+def _well_known_digest(repo_root: Path) -> str:
+    # Mirrors ShimCodegenEnvDigest in pkg/dataplane (#16657): SHA-256
+    # over the canonical stream the scrubbed recipe passes to cargo.
+    tc = _pinned_toolchain(repo_root)
+    mi = _max_interfaces(repo_root)
+    s = (
+        "CARGO_HOME=<repo-controlled-empty>\n"
+        "CARGO_ENCODED_RUSTFLAGS=\n"
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=\n"
+        "CARGO_PROFILE_RELEASE_DEBUG=\n"
+        "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=\n"
+        "CARGO_PROFILE_RELEASE_INCREMENTAL=\n"
+        "CARGO_PROFILE_RELEASE_LTO=\n"
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL=\n"
+        "CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=\n"
+        "CARGO_PROFILE_RELEASE_PANIC=\n"
+        "CARGO_PROFILE_RELEASE_STRIP=\n"
+        "CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=\n"
+        "CARGO_TARGET_BPFEL_UNKNOWN_NONE_RUSTFLAGS=\n"
+        f"MAX_INTERFACES={mi}\n"
+        "RUSTC=\n"
+        "RUSTC_WRAPPER=\n"
+        "RUSTC_WORKSPACE_WRAPPER=\n"
+        "RUSTDOCFLAGS=\n"
+        "RUSTFLAGS=\n"
+        f"RUSTUP_TOOLCHAIN={tc}\n"
+    )
+    return hashlib.sha256(s.encode()).hexdigest()
 
 
 def _pinned_toolchain(repo_root: Path) -> str:
@@ -94,7 +133,7 @@ def validate_verdict(repo_root: Path) -> Path:
         raise ValueError("shim gate verdict toolchain does not match the rust-toolchain.toml pin")
     if provenance.get("bpf_linker") != _PINNED_BPF_LINKER:
         raise ValueError("shim gate verdict bpf-linker does not match the pin")
-    if provenance.get("codegen_env_digest") != _WELL_KNOWN_CODEGEN_ENV_DIGEST:
+    if provenance.get("codegen_env_digest") != _well_known_digest(repo_root):
         raise ValueError("shim gate verdict was built under an unscrubbed codegen environment")
 
     stats = verdict.get("stats")
