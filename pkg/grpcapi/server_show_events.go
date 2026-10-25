@@ -44,11 +44,25 @@ func (s *Server) GetEvents(_ context.Context, req *pb.GetEventsRequest) (*pb.Get
 	// has_zone=true + zone=0 combination isolates the unknown-zone events. A
 	// bare zone=0 with has_zone=false stays "no filter" (match-all), preserving
 	// the #3334 sentinel.
+	// #16688: resolve the protocol token through the logging/appid SSOT
+	// and fail closed (InvalidArgument) on an unknown token, instead of
+	// storing it raw where the matcher compared it against the rendered
+	// name — "6"/"58"/"50"/"icmp6" and typos all silently matched
+	// nothing. An absent protocol stays "no filter"; the deliberate "0"
+	// (HOPOPT) resolves and stays selectable via HasProtocol.
 	filter := logging.EventFilter{
-		Zone:     uint16(req.Zone),
-		HasZone:  req.GetHasZone() || req.Zone != 0,
-		Action:   req.Action,
-		Protocol: req.Protocol,
+		Zone:    uint16(req.Zone),
+		HasZone: req.GetHasZone() || req.Zone != 0,
+		Action:  req.Action,
+	}
+	if req.Protocol != "" {
+		num, ok := logging.ResolveEventProtocol(req.Protocol)
+		if !ok {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid protocol %q", req.Protocol)
+		}
+		filter.Protocol = req.Protocol
+		filter.ProtocolNum = num
+		filter.HasProtocol = true
 	}
 
 	var events []logging.EventRecord

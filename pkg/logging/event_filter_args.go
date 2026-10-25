@@ -4,7 +4,23 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/appid"
 )
+
+// ResolveEventProtocol resolves an operator protocol token (name, alias,
+// or numeric 0..255) to its IP protocol number through the appid SSOT
+// (#16688). It is the event-log counterpart of the session surfaces'
+// appid.ParseProtocolFilterToken: every name the event log renders
+// (TCP/ICMPv6/ESP via protoName -> appid.ProtocolName) and every numeric
+// form the outputs print (protocol-id="6") must parse back to the same
+// number, so a scoped forensic query never silently narrows to nothing.
+// ok=false means the token is neither a known name/alias nor a valid
+// 0..255 numeric; callers fail closed with a usage error. The deliberate
+// "0" (HOPOPT) resolves to (0, true).
+func ResolveEventProtocol(token string) (uint8, bool) {
+	return appid.ProtocolNumber(token)
+}
 
 // EventFilterArgsUsage is the canonical usage string for the
 // `show security log` argument grammar, shared by the local CLI and the
@@ -64,7 +80,19 @@ func ParseEventFilterArgs(args []string, zoneIDs map[string]uint16, haveApply bo
 				return 0, EventFilter{}, fmt.Errorf("missing value for %q\n%s", "protocol", EventFilterArgsUsage)
 			}
 			i++
+			// #16688: resolve via the appid SSOT and fail closed on an
+			// unknown token, instead of storing it raw where the matcher
+			// compared it against the rendered name (TCP/ICMPv6/ESP) —
+			// "6"/"58"/"50"/"icmp6" and typos like "tcpx" all silently
+			// matched nothing. Store the number; keep the raw token for
+			// diagnostics.
+			num, ok := ResolveEventProtocol(args[i])
+			if !ok {
+				return 0, EventFilter{}, fmt.Errorf("unknown protocol %q\n%s", args[i], EventFilterArgsUsage)
+			}
 			filter.Protocol = args[i]
+			filter.ProtocolNum = num
+			filter.HasProtocol = true
 		case "action":
 			if i+1 >= len(args) {
 				return 0, EventFilter{}, fmt.Errorf("missing value for %q\n%s", "action", EventFilterArgsUsage)

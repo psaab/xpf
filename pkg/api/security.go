@@ -630,9 +630,24 @@ func (s *Server) eventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #16688: resolve the protocol token through the logging/appid SSOT
+	// and fail closed (HTTP 400) on an unknown token, instead of storing
+	// it raw where the matcher compared it against the rendered name —
+	// "6"/"58"/"50"/"icmp6" and typos all silently matched nothing. An
+	// absent/empty protocol stays "no filter"; the deliberate "0"
+	// (HOPOPT) resolves and stays selectable via HasProtocol.
 	filter := logging.EventFilter{
-		Action:   r.URL.Query().Get("action"),
-		Protocol: r.URL.Query().Get("protocol"),
+		Action: r.URL.Query().Get("action"),
+	}
+	if proto := r.URL.Query().Get("protocol"); proto != "" {
+		num, ok := logging.ResolveEventProtocol(proto)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid protocol filter: "+proto)
+			return
+		}
+		filter.Protocol = proto
+		filter.ProtocolNum = num
+		filter.HasProtocol = true
 	}
 	// Zone filter: presence of the `zone` query parameter selects the filter,
 	// so zone 0 — the "unknown" / unassigned zone carried by pre-classification
