@@ -535,7 +535,12 @@ Repeating the same action and non-terminal modifiers (`local-preference`,
 beside an inline terminal (or vice versa) likewise materializes so the
 `#11780` gate rejects the conflict in both directions (#15259); a
 group `next policy` beside a modifier-only or identical `next policy`
-term remains valid.
+term remains valid. `then next term` (#16872) is the explicit spelling
+of modifier-only fall-through: it sets `PolicyTerm.NextTerm`, keeps
+`Action` empty, renders byte-identically to the term without it
+(`permit` + `on-match next`), and is displayed by `show policy-options`;
+beside a terminal action it is contradictory (Junos skips the terminal)
+and the #11780 gate rejects it in both group/inline directions.
 
 Distinct conflicting terminal actions on a lenient load retain the compiler's
 last-wins action only as an internal parse result; `LenientContentDropped`

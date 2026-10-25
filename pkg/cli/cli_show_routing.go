@@ -886,6 +886,9 @@ func (c *CLI) showPolicyOptions() error {
 					}
 					fmt.Printf("      from route-filter %s %s\n", rf.Prefix, match)
 				}
+				if t.NextTerm {
+					fmt.Println("      then next term")
+				}
 				if t.NextPolicy {
 					fmt.Println("      then next policy")
 				}

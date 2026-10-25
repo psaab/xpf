@@ -2555,8 +2555,18 @@ func policyFromOpaqueChildNames11779(node *Node) []string {
 }
 
 func recordPolicyNextAction11780(term *PolicyTerm, value string) {
-	if value == "policy" {
+	switch value {
+	case "policy":
 		term.NextPolicy = true
+		return
+	case "term":
+		// #16872: `then next term` is a documented Junos flow-control
+		// action (skip to the next term of the same policy; modifiers
+		// already recorded still apply). It is the explicit spelling of
+		// the fall-through a modifier-only term already gets, so no
+		// Action is recorded — only the marker for display/conflict
+		// judgement.
+		term.NextTerm = true
 		return
 	}
 	term.invalidNextPolicy11780 = true
