@@ -511,6 +511,19 @@ func lexConfigPath14716(fragment string) (tokens []string, quoted []bool, ok boo
 // cursor minted before the fix — or by any writer that stored raw
 // strings.Fields output — is adjudicated and executed as the path the
 // store lexer produces, never as the raw spelling.
+//
+// #16608: a stored token bearing interior whitespace (`lan in`, from
+// `edit ... filter "lan in"`) is already ONE lexed element, so the cursor
+// must be re-lexed from its QUOTED join (JoinConfigPathTokens) — the
+// space-joined form splits it into two tokens and every later mutation
+// silently lands on `filter lan` while commit check passes. A cursor with
+// NO whitespace-bearing token keeps the raw joined lex #14716 requires:
+// raw decorated tokens (`"system"`, a `/*`…`*/` pair split across stored
+// tokens) only collapse when re-lexed as typed, and quoting them would
+// turn them into inert data. The two spellings cannot coexist in one real
+// cursor — a raw Fields writer could never store a whitespace token, and
+// a lexing writer never stores comment/quote decoration — so the branch
+// is unambiguous for every cursor either writer can mint.
 func NormalizeEditPathTokens(editPath []string) []string {
 	if len(editPath) == 0 {
 		return nil
@@ -521,7 +534,14 @@ func NormalizeEditPathTokens(editPath []string) []string {
 	// re-lexes — and fall back to per-token lexing only when the joined
 	// form is malformed (an unterminated comment opened by the cursor
 	// and not yet closed, whose opener is lexically invisible anyway).
-	if lexed, ok := ParseConfigPath(strings.Join(editPath, " ")); ok {
+	joined := strings.Join(editPath, " ")
+	for _, tok := range editPath {
+		if strings.ContainsAny(tok, " \t\r\n") {
+			joined = JoinConfigPathTokens(editPath)
+			break
+		}
+	}
+	if lexed, ok := ParseConfigPath(joined); ok {
 		return lexed
 	}
 	out := make([]string, 0, len(editPath))
@@ -549,7 +569,15 @@ func normalizeEditPath14716(editPath, lineTokens []string, lineQuoted []bool) ([
 	if len(editPath) == 0 || len(lineTokens) == 0 {
 		return base, lineTokens, lineQuoted
 	}
-	joined := strings.Join(editPath, " ") + " " + strings.Join(lineTokens, " ")
+	// #16608: re-lex the RAW joined text only while it still yields the
+	// normalized cursor as a prefix (the split-comment case below). A
+	// whitespace-bearing cursor element would split there and fail the
+	// prefix check, so the plain return keeps the lexed cursor intact;
+	// joining with JoinConfigPathTokens instead would quote a stored
+	// split-comment `/*` opener into an inert token and the spanning
+	// comment would never collapse. Raw join + prefix guard is therefore
+	// the correct joined form here, unlike NormalizeEditPathTokens.
+	joined := strings.Join(editPath, " ") + " " + JoinConfigPathTokens(lineTokens)
 	lexed, lexedQuoted, ok := lexConfigPath14716(joined)
 	if !ok {
 		return base, lineTokens, lineQuoted

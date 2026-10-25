@@ -867,7 +867,10 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 		}
 		if allRecursable {
 			for _, e := range entries {
-				childPath := append(append([]string{}, editPath...), strings.Fields(e.oldNode.KeyPath())...)
+				// #16608: child path from the node's Keys, never
+				// strings.Fields(KeyPath()) — a whitespace-bearing
+				// key ("lan in") would split into two header tokens.
+				childPath := append(append([]string{}, editPath...), e.oldNode.Keys...)
 				diffNodes(b, e.oldNode.Children, e.newNode.Children, childPath)
 			}
 			return
@@ -941,7 +944,7 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 				})
 			case o.Annotation != n.Annotation && !o.IsLeaf && !n.IsLeaf && o.Inactive == n.Inactive:
 				addOwn(func(sb *strings.Builder) { formatAnnotationChange(sb, indent, o, n) })
-				childPath := append(append([]string{}, editPath...), strings.Fields(o.KeyPath())...)
+				childPath := append(append([]string{}, editPath...), o.Keys...)
 				sections = append(sections, section{oldNode: o, newNode: n, childPath: childPath})
 			case !o.IsLeaf && !n.IsLeaf && o.Inactive == n.Inactive:
 				// #15935: not annotation-changing (handled above) but
@@ -949,7 +952,7 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 				// changed descendants render; dropping this arm
 				// suppressed an unrelated sibling change whenever
 				// another block forced the annotation fallback.
-				childPath := append(append([]string{}, editPath...), strings.Fields(o.KeyPath())...)
+				childPath := append(append([]string{}, editPath...), o.Keys...)
 				sections = append(sections, section{oldNode: o, newNode: n, childPath: childPath})
 			default:
 				addOwn(func(sb *strings.Builder) {
@@ -962,10 +965,12 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 
 	// This level's [edit <path>] header — at the root (empty editPath)
 	// it is a bare [edit]. Printed lazily, immediately before each run
-	// of this level's own lines (#15169).
+	// of this level's own lines (#15169). #16608: quote tokens that
+	// would not re-lex as themselves so a whitespace-bearing element
+	// reads as one token (`[edit ... filter "lan in"]`), not two.
 	header := "[edit]\n"
 	if len(editPath) > 0 {
-		header = fmt.Sprintf("[edit %s]\n", strings.Join(editPath, " "))
+		header = fmt.Sprintf("[edit %s]\n", JoinConfigPathTokens(editPath))
 	}
 	headerPending := hasOwn
 	for _, s := range sections {

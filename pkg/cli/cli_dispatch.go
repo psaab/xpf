@@ -523,12 +523,17 @@ func (c *CLI) dispatchConfig(line string) error {
 			fmt.Println("edit: missing path")
 			return nil
 		}
-		newPath := append(c.store.GetEditPath(), frag...)
+		// #16608: normalize the EXISTING cursor (which may hold a
+		// whitespace-bearing element) before appending the freshly lexed
+		// fragment, and keep the result as lexed tokens — never re-lex a
+		// space-joined cursor. The banner quotes tokens that would not
+		// re-lex as themselves so `filter "lan in"` reads as one element.
+		newPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), frag...)
 		c.store.SetEditPath(config.NormalizeEditPathTokens(newPath))
 		if c.rl != nil {
 			c.rl.SetPrompt(c.configPrompt())
 		}
-		fmt.Printf("[edit %s]\n", strings.Join(c.store.GetEditPath(), " "))
+		fmt.Printf("[edit %s]\n", config.JoinConfigPathTokens(c.store.GetEditPath()))
 		return nil
 	case "top", "up":
 		// #15082: `top <cmd>` / `up [n] <cmd>` execute cmd at the
@@ -655,7 +660,7 @@ func (c *CLI) dispatchConfig(line string) error {
 				c.rl.SetPrompt(c.configPrompt())
 			}
 			if len(target) > 0 {
-				fmt.Printf("[edit %s]\n", strings.Join(target, " "))
+				fmt.Printf("[edit %s]\n", config.JoinConfigPathTokens(target))
 			} else {
 				fmt.Println("[edit]")
 			}
@@ -692,7 +697,9 @@ func (c *CLI) exitConfigureTop() error {
 // execution here must act on exactly that command and cursor.
 func (c *CLI) dispatchTopUp15082(line string) error {
 	saved := c.store.GetEditPath()
-	target, inner, innerLine, ok := config.ParseTopUpPrefix15082(saved, line)
+	// #16608: resolve top/up against the normalized (lexed) cursor so a
+	// whitespace-bearing element counts as one identity, not two tokens.
+	target, inner, innerLine, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(saved), line)
 	if !ok {
 		return fmt.Errorf("%s: invalid up count or malformed prefix", strings.Fields(line)[0])
 	}
@@ -702,7 +709,7 @@ func (c *CLI) dispatchTopUp15082(line string) error {
 			c.rl.SetPrompt(c.configPrompt())
 		}
 		if len(target) > 0 {
-			fmt.Printf("[edit %s]\n", strings.Join(target, " "))
+			fmt.Printf("[edit %s]\n", config.JoinConfigPathTokens(target))
 		} else {
 			fmt.Println("[edit]")
 		}
@@ -715,7 +722,8 @@ func (c *CLI) dispatchTopUp15082(line string) error {
 	// tokens — the join stripped quotes, bracket lists, and pipes.
 	c.store.SetEditPath(target)
 	err := c.dispatchConfig(innerLine)
-	c.store.SetEditPath(saved)
+	// #16608: restore the normalized cursor (see dispatchTopUp15082 above).
+	c.store.SetEditPath(config.NormalizeEditPathTokens(saved))
 	if c.rl != nil {
 		c.rl.SetPrompt(c.configPrompt())
 	}

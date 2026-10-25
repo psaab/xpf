@@ -298,11 +298,13 @@ func (c *ctl) dispatchConfig(line string) error {
 			fmt.Println("edit: missing path")
 			return nil
 		}
-		c.editPath = append(config.NormalizeEditPathTokens(c.editPath), frag...)
+		// #16608: store the lexed cursor (Normalize is idempotent on it)
+		// and quote the banner, as the local CLI does.
+		c.editPath = config.NormalizeEditPathTokens(append(config.NormalizeEditPathTokens(c.editPath), frag...))
 		if c.rl != nil {
 			c.rl.SetPrompt(c.configPrompt())
 		}
-		fmt.Printf("[edit %s]\n", strings.Join(c.editPath, " "))
+		fmt.Printf("[edit %s]\n", config.JoinConfigPathTokens(c.editPath))
 		return nil
 
 	case "top", "up":
@@ -482,7 +484,7 @@ func (c *ctl) dispatchConfig(line string) error {
 				c.rl.SetPrompt(c.configPrompt())
 			}
 			if len(c.editPath) > 0 {
-				fmt.Printf("[edit %s]\n", strings.Join(c.editPath, " "))
+				fmt.Printf("[edit %s]\n", config.JoinConfigPathTokens(c.editPath))
 			} else {
 				fmt.Println("[edit]")
 			}
@@ -703,7 +705,7 @@ func (c *ctl) dispatchTopUp15082(line string) error {
 			c.rl.SetPrompt(c.configPrompt())
 		}
 		if len(target) > 0 {
-			fmt.Printf("[edit %s]\n", strings.Join(target, " "))
+			fmt.Printf("[edit %s]\n", config.JoinConfigPathTokens(target))
 		} else {
 			fmt.Println("[edit]")
 		}
@@ -716,7 +718,9 @@ func (c *ctl) dispatchTopUp15082(line string) error {
 	// intact), not a re-join of lexed tokens.
 	c.editPath = append([]string{}, target...)
 	err := c.dispatchConfig(innerLine)
-	c.editPath = saved
+	// #16608: restore the NORMALIZED cursor, not the raw saved spelling,
+	// so a pre-fix whitespace-bearing cursor cannot re-enter split.
+	c.editPath = config.NormalizeEditPathTokens(saved)
 	if c.rl != nil {
 		c.rl.SetPrompt(c.configPrompt())
 	}
