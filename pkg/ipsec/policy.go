@@ -67,18 +67,76 @@ type pskValue struct {
 	hex   bool
 }
 
-func gatewayKeyFor(ipsecCfg *config.IPsecConfig, name string, vpn *config.IPsecVPN, gw *config.IPsecGateway) string {
-	if gw != nil && ipsecCfg != nil {
-		if _, ok := ipsecCfg.Gateways[vpn.Gateway]; ok && vpn.Gateway != "" {
-			// A named gateway is the shared IKE endpoint. Inline endpoints
-			// (gw==nil shape) and the empty endpoint keep per-VPN conns.
-			if vpn.Gateway == name {
-				// Degenerate self-named gateway: unchanged.
+// isNamedGatewayVPN reports whether vpn references a defined gateway
+// object (the #15024 grouped shape), as opposed to an inline endpoint
+// or the empty endpoint, which keep per-VPN connections.
+func isNamedGatewayVPN(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) bool {
+	if ipsecCfg == nil || vpn == nil || vpn.Gateway == "" {
+		return false
+	}
+	_, ok := ipsecCfg.Gateways[vpn.Gateway]
+	return ok
+}
+
+// gatewayKeyCollision reports whether the sanitized key is claimed by
+// both a named-gateway connection and an inline/empty-endpoint VPN
+// connection (#16676). Only that cross-kind fold is unsafe: two VPNs
+// referencing the SAME gateway object intentionally share one
+// connection, and two VPNs referencing DIFFERENT gateway objects can
+// never share a key because the key IS the gateway name. An
+// inline/empty VPN keys by its own name, so it collides with a
+// gateway connection exactly when its name equals a gateway name
+// that at least one other VPN references as a gateway object.
+func gatewayKeyCollision(ipsecCfg *config.IPsecConfig, key string) bool {
+	if ipsecCfg == nil || key == "" {
+		return false
+	}
+	if _, isGateway := ipsecCfg.Gateways[key]; !isGateway {
+		return false
+	}
+	hasGatewayMember, hasInlineMember := false, false
+	for name, vpn := range ipsecCfg.VPNs {
+		if vpn == nil {
+			continue
+		}
+		if isNamedGatewayVPN(ipsecCfg, vpn) {
+			if sanitizeSwanctlValue(vpn.Gateway) == key {
+				hasGatewayMember = true
 			}
-			return sanitizeSwanctlValue(vpn.Gateway)
+		} else if sanitizeSwanctlValue(name) == key {
+			hasInlineMember = true
 		}
 	}
-	return sanitizeSwanctlValue(name)
+	return hasGatewayMember && hasInlineMember
+}
+
+// gatewayKeyFor returns the swanctl connection name for vpn. A VPN
+// referencing a defined gateway renders under the gateway name
+// (#15024, shared by every VPN referencing that gateway); any other
+// VPN (inline endpoint, empty endpoint, dangling reference) renders
+// under its own name — EXCEPT when that key is cross-kind colliding
+// (#16676): an inline/empty VPN whose name equals a gateway name
+// used by another VPN. Folding those would drop the later member's
+// peer/auth/proposals and negotiate its children (including the
+// st0 if_id) with the wrong peer, so the inline VPN is prefixed
+// with "inline-" to keep two distinct connections. The gateway
+// connection keeps the bare gateway name (CONTROL unchanged). The
+// prefix cannot itself collide: gateway and VPN names are
+// section-safe (letters/digits/'-'/'_' via the #9495 gate), and a
+// gateway literally named "inline-<x>" keys bare as "inline-<x>"
+// while an inline VPN named "<x>" colliding with gateway "<x>"
+// keys as "inline-<x>" — distinct gateway names give distinct
+// prefixed keys, and an inline VPN can only collide with the
+// gateway whose name equals its own.
+func gatewayKeyFor(ipsecCfg *config.IPsecConfig, name string, vpn *config.IPsecVPN, gw *config.IPsecGateway) string {
+	if gw != nil && isNamedGatewayVPN(ipsecCfg, vpn) {
+		return sanitizeSwanctlValue(vpn.Gateway)
+	}
+	key := sanitizeSwanctlValue(name)
+	if gatewayKeyCollision(ipsecCfg, key) {
+		return "inline-" + key
+	}
+	return key
 }
 
 func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
@@ -301,6 +359,26 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 				"or non-ASCII); rename the VPN to letters, digits, '-' and '_' (#9495)",
 				"vpn", name)
 			continue
+		}
+
+		// #16676 render belt: a surviving VPN whose gatewayKeyFor key
+		// is already owned by a group with different IKE parameters
+		// (resolved gateway object, remote/local address, or auth
+		// method) must never fold silently — the first member would
+		// supply the peer and this VPN's children would negotiate
+		// with the wrong peer. gatewayKeyFor already separates the
+		// known cross-kind (inline-vs-gateway-name) collision by
+		// construction; this belt catches any residual same-key
+		// different-peer fold (e.g. sanitized-name aliasing) on the
+		// tolerant load / peer-sync path: skip the later VPN, keep
+		// the first, never drop its peer silently.
+		if existing, ok := groups[connKey]; ok {
+			if existing.gw != gw || existing.remoteAddr != remoteAddr || existing.localAddr != localAddr || existing.authMethod != authMethod {
+				skipped[name] = true
+				slog.Warn("skipping IPsec VPN: its swanctl connection name is already claimed by a VPN with a different gateway endpoint — rename the VPN or the gateway so each peer gets its own connection (#16676)",
+					"vpn", name, "connection", connKey)
+				continue
+			}
 		}
 
 		// #10681: a NON-EMPTY bind-interface that resolves to no XFRM if_id

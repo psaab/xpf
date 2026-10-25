@@ -127,6 +127,20 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #16676: reject an inline/empty-endpoint VPN whose name equals a
+	// gateway object referenced by another VPN. Since #15024 both key
+	// one swanctl connection namespace; folding them drops one peer
+	// silently and negotiates its children with the wrong peer. Strict
+	// on commit; lenient warns (the render belt separates them).
+	if err := validateIPsecGatewayNameCollisionStrict(cfg); err != nil {
+		if opts.lenientIPsecGatewayNameCollision {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec gateway name collision (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #11380: multiple VPNs on one XFRM bind are safe only when every rendered
 	// local/remote selector pair is disjoint. Strict commit rejects ambiguous
 	// SAs; tolerant load warns so an existing configuration still boots.

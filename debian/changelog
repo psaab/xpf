@@ -108,6 +108,13 @@ xpf (0.0.0) unstable; urgency=medium
     table now keys on (interface, chassis subtype + raw bytes, port
     subtype + raw bytes); subtype-truncated binary IDs are rejected
     with the other truncated mandatory TLVs.
+  * IPsec: an inline-endpoint VPN whose name equals a gateway object
+    referenced by another VPN no longer folds into that gateway's
+    swanctl connection (#16676). Strict commit rejects the naming;
+    tolerant load renders the inline VPN as `inline-<name>` so each
+    peer keeps its own connection, children and st0 if_id. Previously
+    the first sorted member supplied the peer and the other VPN's
+    traffic was negotiated with the wrong peer with no diagnostic.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was
