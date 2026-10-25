@@ -1345,6 +1345,15 @@ type SessionSync struct {
 	// means "never recorded", which is why the first observation only records.
 	peerEpochAtIncarnation uint64
 	lastSweepTime          uint64
+	// lastPrimaryLivenessSweepTime bounds full mirror walks used to find
+	// previously-created sessions that are still active on their owner.
+	lastPrimaryLivenessSweepTime uint64
+	// primaryLivenessScanIntervalSeconds adapts full mirror walks to half the
+	// shortest live owner-session timeout, bounded to [1s, 10s].
+	primaryLivenessScanIntervalSeconds uint64
+	// sweepWakeCh interrupts a long idle sweep timer when peer capability
+	// discovery changes the liveness cadence.
+	sweepWakeCh chan struct{}
 	syncBackfillNeeded     atomic.Bool
 	// rebootAwaiting names the half of the CURRENT incarnation's reboot
 	// evidence that has not arrived yet; it is live only while

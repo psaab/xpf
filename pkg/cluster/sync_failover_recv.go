@@ -255,7 +255,7 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 	s.peerSnaps.peerSnapshotProtocol.Store(uint32(peerProto))
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	s.peerCapabilityFlags.Store(uint32(peerFlags))
-	s.peerCapabilityFlags2.Store(uint32(peerFlags2))
+	s.storePeerCapabilityFlags2(uint32(peerFlags2))
 	s.peerSessionSyncWire.Store(uint32(peerWire))
 	s.mu.Unlock()
 	// #10512 learn-trigger: learning completed (capable or not) —

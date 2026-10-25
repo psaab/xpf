@@ -469,6 +469,27 @@ func (s *SessionSync) PrimaryLivenessCapable() bool {
 	return s != nil && uint8(s.peerCapabilityFlags2.Load())&capFlag2PrimaryLiveness != 0
 }
 
+func (s *SessionSync) storePeerCapabilityFlags2(flags uint32) {
+	if s == nil {
+		return
+	}
+	old := s.peerCapabilityFlags2.Swap(flags)
+	livenessMask := uint32(capFlag2PrimaryLiveness)
+	if old&livenessMask != flags&livenessMask {
+		s.wakeSyncSweep()
+	}
+}
+
+func (s *SessionSync) wakeSyncSweep() {
+	if s == nil || s.sweepWakeCh == nil {
+		return
+	}
+	select {
+	case s.sweepWakeCh <- struct{}{}:
+	default:
+	}
+}
+
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been
 // decoded for the CURRENT peer incarnation.
 //

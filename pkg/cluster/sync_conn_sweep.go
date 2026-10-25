@@ -25,6 +25,14 @@ func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
+			case <-s.sweepWakeCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(s.capSweepIntervalForLiveness(interval))
 			case <-timer.C:
 				activeInterval, idleInterval = s.sweepIntervals()
 				synced := s.syncSweep()

@@ -296,7 +296,7 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverr
 	s.peerSnaps.peerSnapshotProtocol.Store(snapshotProtocol)
 	s.peerSnaps.peerSnapshotProtocolGeneration++
 	s.peerCapabilityFlags.Store(capabilityFlags)
-	s.peerCapabilityFlags2.Store(capabilityFlags2)
+	s.storePeerCapabilityFlags2(capabilityFlags2)
 	s.peerSessionSyncWire.Store(sessionSyncWire)
 	s.scopedPolicySuppressionWarned.Store(false)
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
@@ -1186,7 +1186,7 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 		// same learned set full disconnect clears, atomically with the
 		// advance (s.mu held throughout installConn).
 		s.peerCapabilityFlags.Store(0)
-		s.peerCapabilityFlags2.Store(0)
+		s.storePeerCapabilityFlags2(0)
 		s.lastSentConfigAckCapable16756.Store(false)
 		s.peerConfigNackedGen16756.Store(0)
 		s.peerSessionSyncWire.Store(0)
@@ -1604,7 +1604,7 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// retained version: it would make every confirmed-fence takeover wait
 		// out its full timeout against a downgraded peer that cannot answer.
 		s.peerCapabilityFlags.Store(0)
-		s.peerCapabilityFlags2.Store(0)
+		s.storePeerCapabilityFlags2(0)
 		s.lastSentConfigAckCapable16756.Store(false)
 		s.peerConfigNackedGen16756.Store(0)
 		// #9714 F5: the delete-suppression warning latch is scoped to the

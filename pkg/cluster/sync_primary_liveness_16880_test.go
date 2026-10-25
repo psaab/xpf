@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 )
 
 func TestBusyPrimarySessionIsResyncedAcrossTenTimeouts16880(t *testing.T) {
@@ -149,6 +150,103 @@ func TestStartSyncSweepKeepsShortTimeoutLivenessCadence16880(t *testing.T) {
 			}
 		case <-timeout.C:
 			t.Fatal("idle short-timeout session received no timer-driven primary-liveness refresh within 2.9s")
+		}
+	}
+}
+
+type livenessSweepProfileSource16880 struct{}
+
+func (livenessSweepProfileSource16880) DrainSessionDeltas(uint32) (dpruntime.SessionDeltaSnapshot, error) {
+	return dpruntime.SessionDeltaSnapshot{}, nil
+}
+
+func (livenessSweepProfileSource16880) ExportOwnerRGSessions([]int, uint32) (dpruntime.SessionDeltaSnapshot, error) {
+	return dpruntime.SessionDeltaSnapshot{}, nil
+}
+
+func (livenessSweepProfileSource16880) SessionSyncSweepProfile() (bool, time.Duration, time.Duration) {
+	return true, 15 * time.Second, 60 * time.Second
+}
+
+type livenessProfiledSessionStore16880 struct {
+	dataplane.SessionStore
+	source dpruntime.SessionDeltaSource
+}
+
+func (s livenessProfiledSessionStore16880) SessionDeltas() dpruntime.SessionDeltaSource {
+	return s.source
+}
+
+func TestStartSyncSweepWakesWhenLivenessCapabilityDiscovered16880(t *testing.T) {
+	const base = uint64(10_000)
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2},
+		SrcPort: 12345, DstPort: 443, Protocol: 6,
+	}
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: {
+				State:      dataplane.SessStateEstablished,
+				Created:    base - 10,
+				LastSeen:   base - 10,
+				Timeout:    2,
+				AppTimeout: 2,
+			},
+		},
+		sessionCounter: 1,
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.sessions = livenessProfiledSessionStore16880{
+		SessionStore: ss.sessions,
+		source:       livenessSweepProfileSource16880{},
+	}
+	ss.stats.Connected.Store(true)
+	ss.IsPrimaryFn = func() bool { return true }
+
+	var sweepCalls uint64
+	ss.testSweepNow = func() uint64 {
+		sweepCalls++
+		if sweepCalls == 1 {
+			ss.lastSweepTime = base
+			ss.lastPrimaryLivenessSweepTime = base
+		}
+		return base + sweepCalls
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		ss.wg.Wait()
+	}()
+	ss.StartSyncSweep(ctx)
+
+	// Userspace starts at a 15s interval. Learning liveness support after that
+	// timer was armed must wake it so the primary begins its 1s refresh cadence.
+	payload := capabilityFrame9714(t, 0)
+	payload = append(payload, make([]byte, 5+bootIncarnationLen+8+8+1-len(payload))...)
+	payload[len(payload)-1] = capFlag2PrimaryLiveness
+	ss.handleMessage(nil, syncMsgPeerCapabilities, payload)
+
+	timeout := time.NewTimer(2900 * time.Millisecond)
+	defer timeout.Stop()
+	for {
+		select {
+		case frame := <-ss.sendCh:
+			if len(frame) < syncHeaderSize {
+				t.Fatalf("unexpected short sync frame: len=%d", len(frame))
+			}
+			if frame[4] != syncMsgSessionV4 {
+				t.Fatalf("unexpected sync frame type: %d", frame[4])
+			}
+			_, value, ok := decodeSessionV4Payload(frame[syncHeaderSize:])
+			if !ok {
+				t.Fatal("could not decode timer-driven session frame")
+			}
+			if value.PrimaryLiveness {
+				return
+			}
+		case <-timeout.C:
+			t.Fatal("discovering primary-liveness capability did not wake the 15s userspace sweep timer")
 		}
 	}
 }
