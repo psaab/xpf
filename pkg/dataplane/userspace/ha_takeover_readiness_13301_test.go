@@ -49,14 +49,8 @@ func TestHATakeoverReadinessBlockerEnumBounded13301(t *testing.T) {
 		t.Fatalf("Ready=%v Blockers=%v, want blocked", s.Ready, s.Blockers)
 	}
 	for _, b := range s.Blockers {
-		switch b {
-		case "helper_down", "not_enabled", "forwarding_unsupported", "not_armed",
-			"not_active", "xsk_liveness_failed", "xsk_unproven",
-			"session_mirror_failed", "repair_overflow", "inventory_debt_owed",
-			"snapshot_retry_debt", "pending_ha_clear", "pending_ha_replay",
-			"event_stream_unbound":
-		default:
-			t.Fatalf("unbounded blocker %q in %v", b, s.Blockers)
+		if !IsHATakeoverBlocker(b) {
+			t.Fatalf("unbounded blocker %q in %v, want member of HATakeoverBlockers", b, s.Blockers)
 		}
 	}
 	if !s.InventoryDebtOwed || !s.PendingHAStateClear || !s.PendingHAStateReplay || !s.RepairOverflow {

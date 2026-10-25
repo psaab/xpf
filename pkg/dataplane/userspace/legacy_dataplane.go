@@ -1204,7 +1204,7 @@ func (a *LegacyDataPlaneAdapter) TakeoverReady() (bool, []string) {
 // adapter published by Boot, so Prometheus probes the production runtime type.
 func (a *LegacyDataPlaneAdapter) HATakeoverReadiness() HATakeoverReadiness {
 	if a == nil || a.manager == nil {
-		return HATakeoverReadiness{Blockers: []string{"helper_down"}}
+		return HATakeoverReadiness{Blockers: []string{HATakeoverBlockerHelperDown}}
 	}
 	return a.manager.HATakeoverReadiness()
 }
