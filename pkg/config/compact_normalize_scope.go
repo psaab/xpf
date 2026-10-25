@@ -1806,6 +1806,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"tcp-session closing-timeout",
 		"tcp-session established-timeout",
 		"tcp-session initial-timeout",
+		"tcp-session tcp-initial-timeout",
 		"tcp-session time-wait-timeout",
 		"then log",
 		"thursday start-time",
@@ -1901,7 +1902,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"tcp-session no-syn-check",
 		"tcp-session no-syn-check-in-tunnel",
 		"tcp-session rst-invalidate-session",
-		"tcp-session strict-syn-check",
+		"tcp-session fin-invalidate-session",
 		"vpn-monitor optimized":
 		return true
 	}

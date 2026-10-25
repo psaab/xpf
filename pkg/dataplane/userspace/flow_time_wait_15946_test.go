@@ -40,3 +40,35 @@ func TestTimeWaitStateFlagsReachWire15946(t *testing.T) {
 		}
 	}
 }
+
+// #16581: fin-invalidate-session must reach the wire, and the Junos
+// tcp-initial-timeout row (same InitialTimeout field as the xpf
+// initial-timeout alias) keeps its existing carrier.
+func TestFinInvalidateReachesWire16581(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Flow.TCPSession = &config.TCPSessionConfig{
+		InitialTimeout: 20, FinInvalidateSession: true,
+	}
+	b, err := json.Marshal(buildFlowSnapshot(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]string{
+		"tcp_initial_timeout":        "20",
+		"tcp_fin_invalidate_session": "true",
+	} {
+		if string(m[k]) != want {
+			t.Errorf("%s=%s want %s (%s)", k, m[k], want, b)
+		}
+	}
+	b2, _ := json.Marshal(buildFlowSnapshot(&config.Config{}))
+	var m2 map[string]json.RawMessage
+	_ = json.Unmarshal(b2, &m2)
+	if _, ok := m2["tcp_fin_invalidate_session"]; ok {
+		t.Errorf("unset tcp_fin_invalidate_session emitted: %s", b2)
+	}
+}

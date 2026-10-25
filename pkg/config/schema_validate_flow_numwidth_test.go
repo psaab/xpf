@@ -91,7 +91,7 @@ func TestNumWidth_Tier2_SessionTimeouts(t *testing.T) {
 
 	// tcp-session: all four typed timeouts (only established reaches wire,
 	// the rest share the Duration-overflow ceiling).
-	for _, kind := range []string{"established-timeout", "initial-timeout", "closing-timeout", "time-wait-timeout"} {
+	for _, kind := range []string{"established-timeout", "initial-timeout", "tcp-initial-timeout", "closing-timeout", "time-wait-timeout"} {
 		rangeAccept(t, "set security flow tcp-session "+kind+" 1800")
 		rangeAccept(t, "set security flow tcp-session "+kind+" 0")
 		rangeReject(t, kind, "set security flow tcp-session "+kind+" -1")
@@ -107,6 +107,7 @@ func TestNumWidth_Tier2_SessionTimeouts(t *testing.T) {
 	// tcp-session presence flags still accepted (declared presence-only).
 	rangeAccept(t, "set security flow tcp-session no-syn-check")
 	rangeAccept(t, "set security flow tcp-session rst-invalidate-session")
+	rangeAccept(t, "set security flow tcp-session fin-invalidate-session")
 	rangeAccept(t, "set security flow tcp-session no-sequence-check") // #2008 M9
 
 	// udp-session / icmp-session timeout.
@@ -294,8 +295,8 @@ func TestNumWidth_CompletionParity(t *testing.T) {
 		}
 	}
 	want(t, []string{"security", "flow", "tcp-session"},
-		"established-timeout", "initial-timeout", "closing-timeout", "time-wait-timeout",
-		"no-syn-check", "no-syn-check-in-tunnel", "rst-invalidate-session", "no-sequence-check")
+		"established-timeout", "initial-timeout", "tcp-initial-timeout", "closing-timeout", "time-wait-timeout",
+		"no-syn-check", "no-syn-check-in-tunnel", "rst-invalidate-session", "fin-invalidate-session", "no-sequence-check")
 	want(t, []string{"security", "flow", "udp-session"}, "timeout")
 	want(t, []string{"security", "flow", "icmp-session"}, "timeout")
 	want(t, []string{"forwarding-options", "sampling", "instance", "i1", "input"}, "rate")

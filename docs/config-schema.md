@@ -15160,7 +15160,9 @@ the value sits in a single typed slot:
     default for an out-of-range value so a running exporter is safe even on a
     config admitted leniently.
   - `security flow tcp-session` expanded to a container: `established-timeout`
-    (Rust u64 TCPSessionTimeout), `initial-timeout`, `closing-timeout`,
+    (Rust u64 TCPSessionTimeout), `tcp-initial-timeout` (Junos spelling,
+    #16581; `initial-timeout` is the deprecated xpf alias for the same
+    leaf/field), `closing-timeout`,
     `time-wait-timeout` (all four wire-reaching and enforced since **#7342**;
     see **#6539** below for the interval when three of them were not)
     all `ValidateInteger(0, MaxDurationSeconds)` — the Duration-overflow ceiling,
@@ -15171,7 +15173,9 @@ the value sits in a single typed slot:
     i64::MAX / 1e9`) so an out-of-band snapshot or future caller that bypasses
     this gate can never wrap `secs*1e9` into a tiny premature-expiry timeout;
     plus the presence flags `no-syn-check`, `no-syn-check-in-tunnel`,
-    `rst-invalidate-session`, and `no-sequence-check` (#2008 M9). `no-syn-check`
+    `rst-invalidate-session`, `fin-invalidate-session` (#16581: Junos
+    immediate teardown when the FIN close handshake completes; protocol
+    v72, `tcp_fin_invalidate_session`), and `no-sequence-check` (#2008 M9). `no-syn-check`
     and `strict-syn-check` are carried in the additive flow snapshot and
     enforced at transit session-MISS admission (#10703): without either flag,
     non-SYN TCP misses are dropped; `no-syn-check` permits non-closing
@@ -15197,7 +15201,10 @@ the value sits in a single typed slot:
     `no-sequence-check` disables validation). New leaves
     `rst-sequence-check`, `maximum-window <bytes>`, and
     `time-wait-state { session-timeout; session-ageout;
-    apply-to-half-closed-state; }` are schema-accepted (#15753) and
+    apply-to-half-close-state; }` are schema-accepted (#15753; Junos
+    spelling `apply-to-half-close-state` canonical since #16581, with
+    `apply-to-half-closed-state` kept as the deprecated xpf alias for
+    the same leaf/field) and
     enforced since #15946 (protocol v67; `show` renders the effective
     TIME_WAIT including the session-timeout override). #16485: `show`
     now derives the closing and TIME_WAIT rows from the same selector
@@ -15206,9 +15213,9 @@ the value sits in a single typed slot:
     annotated "service/established timeout (session-ageout)" (per
     session the dataplane uses the session's application inactivity
     timeout, falling back to that window), and with
-    `apply-to-half-closed-state` alone the closing row renders the
+    `apply-to-half-close-state` alone the closing row renders the
     TIME_WAIT window annotated "time-wait window
-    (apply-to-half-closed-state)". `session-ageout` together with
+    (apply-to-half-close-state)". `session-ageout` together with
     `session-timeout` is rejected at strict commit
     (`validateTimeWaitStateAgeoutStrict`) and warned on the tolerant
     load / peer-sync path, where the dataplane's ageout-wins

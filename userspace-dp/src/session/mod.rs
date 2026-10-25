@@ -555,8 +555,11 @@ pub(crate) struct SessionTimeouts {
     pub(crate) tcp_time_wait_ns: u64,
     /// #15946: `time-wait-state session-ageout`.
     pub(crate) tcp_time_wait_session_ageout: bool,
-    /// #15946: `time-wait-state apply-to-half-closed-state`.
+    /// #15946: `time-wait-state apply-to-half-close-state`.
     pub(crate) tcp_time_wait_apply_to_half_closed: bool,
+    /// #16581: `fin-invalidate-session` — FIN-closed (TIME_WAIT class)
+    /// sessions tear down immediately instead of holding their window.
+    pub(crate) tcp_fin_invalidate_session: bool,
     pub(crate) udp_ns: u64,
     pub(crate) icmp_ns: u64,
 }
@@ -578,9 +581,11 @@ pub(crate) struct TcpSessionWindowSecs {
     /// #15946: `time-wait-state session-ageout` — TIME_WAIT ages on the
     /// service-based established timeout.
     pub(crate) time_wait_session_ageout: bool,
-    /// #15946: `time-wait-state apply-to-half-closed-state` — TIME_WAIT
+    /// #15946: `time-wait-state apply-to-half-close-state` — TIME_WAIT
     /// window also governs half-closed (CLOSING) sessions.
     pub(crate) time_wait_apply_to_half_closed: bool,
+    /// #16581: `fin-invalidate-session`.
+    pub(crate) fin_invalidate_session: bool,
 }
 
 impl Default for SessionTimeouts {
@@ -592,6 +597,7 @@ impl Default for SessionTimeouts {
             tcp_time_wait_ns: TCP_CLOSING_TIMEOUT_NS,
             tcp_time_wait_session_ageout: false,
             tcp_time_wait_apply_to_half_closed: false,
+            tcp_fin_invalidate_session: false,
             udp_ns: DEFAULT_UDP_SESSION_TIMEOUT_NS,
             icmp_ns: DEFAULT_ICMP_SESSION_TIMEOUT_NS,
         }
@@ -619,6 +625,7 @@ impl SessionTimeouts {
             tcp_time_wait_ns: TCP_CLOSING_TIMEOUT_NS,
             tcp_time_wait_session_ageout: false,
             tcp_time_wait_apply_to_half_closed: false,
+            tcp_fin_invalidate_session: false,
             udp_ns: if udp_secs > 0 {
                 secs_to_ns_saturating(udp_secs)
             } else {
@@ -654,6 +661,7 @@ impl SessionTimeouts {
         }
         self.tcp_time_wait_session_ageout = secs.time_wait_session_ageout;
         self.tcp_time_wait_apply_to_half_closed = secs.time_wait_apply_to_half_closed;
+        self.tcp_fin_invalidate_session = secs.fin_invalidate_session;
         self
     }
 }
@@ -915,7 +923,7 @@ pub(crate) fn tcp_close_window_for_entry(
 }
 
 /// #15946: close window with the per-session service-based timeout.
-/// `session-ageout` makes TIME_WAIT (and, with apply-to-half-closed,
+/// `session-ageout` makes TIME_WAIT (and, with apply-to-half-close-state,
 /// CLOSING) age on the established/app window. When both ageout and an
 /// explicit TW `session-timeout` are configured, ageout wins:
 /// `tcp_time_wait_ns` (which folds in the session-timeout override) is
@@ -944,7 +952,13 @@ pub(crate) fn tcp_close_window_ns_with_app(
             }
         }
         TcpCloseClass::TimeWait => {
-            if timeouts.tcp_time_wait_session_ageout {
+            // #16581: fin-invalidate-session — the FIN close handshake
+            // has completed (both FINs seen), so Junos invalidates the
+            // session immediately rather than holding the TIME_WAIT
+            // window. Closing (one FIN) is unaffected.
+            if timeouts.tcp_fin_invalidate_session {
+                0
+            } else if timeouts.tcp_time_wait_session_ageout {
                 app_override_ns.unwrap_or(timeouts.tcp_established_ns)
             } else {
                 timeouts.tcp_time_wait_ns

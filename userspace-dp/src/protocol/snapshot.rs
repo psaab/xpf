@@ -447,9 +447,14 @@ pub(crate) struct FlowSnapshot {
     /// #15946: `time-wait-state session-ageout`.
     #[serde(rename = "tcp_time_wait_session_ageout", default)]
     pub tcp_time_wait_session_ageout: bool,
-    /// #15946: `time-wait-state apply-to-half-closed-state`.
+    /// #15946: `time-wait-state apply-to-half-close-state` (Junos spelling;
+    /// xpf `apply-to-half-closed-state` is a deprecated alias, #16581).
     #[serde(rename = "tcp_time_wait_apply_to_half_closed", default)]
     pub tcp_time_wait_apply_to_half_closed: bool,
+    /// #16581: `fin-invalidate-session` — immediate teardown when the FIN
+    /// close handshake completes.
+    #[serde(rename = "tcp_fin_invalidate_session", default)]
+    pub tcp_fin_invalidate_session: bool,
     #[serde(rename = "udp_session_timeout", default)]
     pub udp_session_timeout: u64,
     #[serde(rename = "icmp_session_timeout", default)]

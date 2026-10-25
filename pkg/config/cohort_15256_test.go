@@ -7,7 +7,9 @@ import (
 
 // #15256 cohort: A85-01 screen Junos spellings, A85-04 port-mirroring
 // silent acceptance, A85-02 trap-group categories, A85-03 docs (docs
-// asserted by inspection in docs/log/15256.md, not here).
+// asserted by inspection in docs/log/15256.md, not here). The
+// tcp-session Junos spellings (Y39-05) were NOT fixed here; they are
+// #16581 (tcp_session_junos_spellings_16581_test.go).
 //
 // FAIL-ON-REVERT: removing the icmp ip-sweep / tcp tcp-no-flag arms
 // makes the Junos spellings strict-reject again; removing the

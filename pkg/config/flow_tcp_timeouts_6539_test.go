@@ -90,13 +90,18 @@ func TestTCPSessionTimeoutTableCoversSchema_6539(t *testing.T) {
 		if child.args != 1 {
 			t.Errorf("schema leaf %q takes %d args, want 1 (not a value leaf?)", leaf, child.args)
 		}
+		if leaf == TCPSessionInitialTimeoutAliasLeaf {
+			// #16581: deprecated alias of tcp-initial-timeout; same
+			// field/row, not a fifth leaf.
+			continue
+		}
 		if !covered[leaf] {
 			t.Errorf("schema declares tcp-session %q but the #6539 enforcement table does not cover it — "+
 				"it would render with no enforcement annotation", leaf)
 		}
 	}
-	if found != len(covered) {
-		t.Errorf("schema declares %d tcp-session *-timeout leaves, table covers %d", found, len(covered))
+	if found != len(covered)+1 {
+		t.Errorf("schema declares %d tcp-session *-timeout leaves, table covers %d (+1 deprecated alias initial-timeout, #16581)", found, len(covered))
 	}
 	if found == 0 {
 		t.Fatal("found no tcp-session *-timeout leaves in the schema — the walk is vacuous")

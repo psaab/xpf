@@ -31,6 +31,7 @@ func TestCompileTimeWaitStateFlags15946(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security flow tcp-session time-wait-state session-ageout",
 		"set security flow tcp-session time-wait-state apply-to-half-closed-state",
+		"set security flow tcp-session time-wait-state apply-to-half-close-state",
 		"set security flow tcp-session time-wait-state session-timeout 99",
 	})
 	cfg, err := CompileConfigLenient(tree)
@@ -102,7 +103,7 @@ func TestRenderFlowTimeoutsTimeWaitState16485(t *testing.T) {
 			name: "half-closed closing renders time-wait window",
 			ts:   &TCPSessionConfig{ClosingTimeout: 10, TimeWaitStateSessionTimeout: 120, TimeWaitStateApplyToHalfClosed: true},
 			want: map[string]string{
-				"TCP closing timeout:":   "120s (time-wait window (apply-to-half-closed-state))",
+				"TCP closing timeout:":   "120s (time-wait window (apply-to-half-close-state))",
 				"TCP time-wait timeout:": "120s",
 			},
 		},
@@ -110,7 +111,7 @@ func TestRenderFlowTimeoutsTimeWaitState16485(t *testing.T) {
 			name: "half-closed closing renders default time-wait window",
 			ts:   &TCPSessionConfig{ClosingTimeout: 10, TimeWaitStateApplyToHalfClosed: true},
 			want: map[string]string{
-				"TCP closing timeout:": "30s (default) (time-wait window (apply-to-half-closed-state))",
+				"TCP closing timeout:": "30s (default) (time-wait window (apply-to-half-close-state))",
 			},
 		},
 		{

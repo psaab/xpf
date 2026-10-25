@@ -25,6 +25,7 @@ fn configured() -> SessionTimeouts {
         time_wait: TIME_WAIT_SECS,
         time_wait_session_ageout: false,
         time_wait_apply_to_half_closed: false,
+        fin_invalidate_session: false,
     })
 }
 
@@ -421,6 +422,25 @@ fn time_wait_state_flags_15946() {
     assert_eq!(tcp_close_window_ns(TcpCloseClass::Reset, &t), TCP_RST_TIMEOUT_NS);
 }
 
+/// #16581: fin-invalidate-session — a completed FIN close (TimeWait
+/// class, both FINs seen) reaps immediately (window 0); a half-close
+/// (Closing, one FIN) and RST keep their windows.
+/// FAIL-ON-REVERT: dropping the fin arm returns 150s below.
+#[test]
+fn fin_invalidate_session_16581() {
+    let mut t = SessionTimeouts::default();
+    t.tcp_time_wait_ns = 150_000_000_000;
+    t.tcp_closing_ns = 30_000_000_000;
+    t.tcp_established_ns = 1800_000_000_000u64;
+    t.tcp_fin_invalidate_session = true;
+    assert_eq!(tcp_close_window_ns(TcpCloseClass::TimeWait, &t), 0);
+    assert_eq!(tcp_close_window_ns(TcpCloseClass::Closing, &t), 30_000_000_000);
+    assert_eq!(tcp_close_window_ns(TcpCloseClass::Reset, &t), TCP_RST_TIMEOUT_NS);
+    // Control: without the knob TIME_WAIT keeps its window.
+    t.tcp_fin_invalidate_session = false;
+    assert_eq!(tcp_close_window_ns(TcpCloseClass::TimeWait, &t), 150_000_000_000);
+}
+
 /// #16485: ageout wins over an explicit TW session-timeout. Here
 /// `tcp_time_wait_ns` already folds in the session-timeout override
 /// (150s, as from_seconds does), so with ageout set and no per-app
@@ -458,7 +478,7 @@ fn time_wait_ageout_wins_over_session_timeout_16485() {
 /// #16303: service-based ageout must reach the real lookup path. Distinct
 /// windows: established 1800s (in configured()), closing 7s, TIME_WAIT
 /// 150s, app 900s. With session-ageout, TIME_WAIT reaps on the APP window
-/// (900s), not global established; with apply-to-half-closed also set,
+/// (900s), not global established; with apply-to-half-close-state also set,
 /// one FIN (Closing) uses the app window too. Without the flags the old
 /// windows are untouched, and RST always keeps its fixed window.
 #[test]

@@ -31,11 +31,17 @@ package config
 
 // Junos leaf names under `security flow tcp-session`. Callers key the
 // enforcement table by these rather than by a bare string literal.
+// #16581: `tcp-initial-timeout` is the Junos-canonical spelling;
+// `initial-timeout` is the deprecated xpf alias for the same leaf and
+// compiles to the same InitialTimeout field/enforcement row.
 const (
 	TCPSessionEstablishedTimeoutLeaf = "established-timeout"
-	TCPSessionInitialTimeoutLeaf     = "initial-timeout"
-	TCPSessionClosingTimeoutLeaf     = "closing-timeout"
-	TCPSessionTimeWaitTimeoutLeaf    = "time-wait-timeout"
+	TCPSessionInitialTimeoutLeaf     = "tcp-initial-timeout"
+	// TCPSessionInitialTimeoutAliasLeaf is the deprecated xpf spelling
+	// of TCPSessionInitialTimeoutLeaf (#16581).
+	TCPSessionInitialTimeoutAliasLeaf = "initial-timeout"
+	TCPSessionClosingTimeoutLeaf      = "closing-timeout"
+	TCPSessionTimeWaitTimeoutLeaf     = "time-wait-timeout"
 )
 
 // Fixed session windows mirrored from userspace-dp/src/session/mod.rs,
@@ -77,7 +83,7 @@ func TCPSessionTimeoutDataplaneDefault(leaf string) (int, bool) {
 	switch leaf {
 	case TCPSessionEstablishedTimeoutLeaf:
 		return DataplaneTCPEstablishedWindowSecs, true
-	case TCPSessionInitialTimeoutLeaf:
+	case TCPSessionInitialTimeoutLeaf, TCPSessionInitialTimeoutAliasLeaf:
 		return DataplaneTCPOpeningWindowSecs, true
 	case TCPSessionClosingTimeoutLeaf:
 		return DataplaneTCPClosingWindowSecs, true
@@ -97,7 +103,7 @@ func TCPSessionTimeoutDataplaneDefault(leaf string) (int, bool) {
 // TCPSessionTimeoutEnforcement describes whether one `security flow
 // tcp-session` timeout leaf reaches the userspace AF_XDP dataplane.
 type TCPSessionTimeoutEnforcement struct {
-	// Leaf is the Junos leaf name, e.g. "initial-timeout".
+	// Leaf is the Junos leaf name, e.g. "tcp-initial-timeout" (#16581).
 	Leaf string
 	// Enforced is true only when the value has BOTH a wire carrier and a live
 	// dataplane consumer. A leaf that is merely modeled and committed is not
@@ -114,8 +120,8 @@ type TCPSessionTimeoutEnforcement struct {
 // #7342: all four are enforced. The three that were not each needed a
 // different thing, and the order matters for why this is one change:
 //
-//   - initial-timeout and closing-timeout needed only a wire carrier — they map
-//     1:1 onto windows the dataplane already had (`tcp_opening_ns`, and the
+//   - tcp-initial-timeout (xpf alias initial-timeout) and closing-timeout
+//     needed only a wire carrier — they map
 //     post-FIN window);
 //   - time-wait-timeout needed a STATE first. `session_timeout_ns` split a TCP
 //     close only into RST and not-RST, so there was no TIME_WAIT window
