@@ -1074,23 +1074,28 @@ or peer-synced config an older binary accepted still boots (#1960 no-brick).
 This is config-only commit-time validation — it never touches the VRRP
 runtime/state machine. Same fail-closed-on-load doctrine as #2911.
 
-**VRRP virtual-address must carry a prefix (#15050):** the structured
-`virtual-address` leaf is CIDR-gated (`ValidateIPv4CIDR`/`ValidateIPv6CIDR`),
-but the PACKED hierarchical one-liner `vrrp-group 1 virtual-address 10.0.1.100;`
-packs the value onto the instance node's Keys as an unvalidated identity token,
-so a bare Junos-style VIP passed `SchemaValidate` and strict compile verbatim.
-At runtime `pkg/vrrp` passes it to `netlink.ParseAddr`, which requires a
-prefix; the parse failure makes every promotion fail-closed (#5082) and revert
-to BACKUP — the gateway has no owner on every node carrying the config.
-`validateVRRPVIPPrefixStrict` (`compiler_validate_strict_vrrp_vipprefix.go`),
-wired beside the #8483 timers gate, hard-rejects a prefix-less VIP at
-commit/commit-check naming the interface, unit, group and VIP. The tolerant
-load/peer-sync path downgrades to a warning (`lenientVRRPVIPPrefix`, #1960
-no-brick) and `normalizeBareVRRPVIPs` rewrites the bare VIP with the enclosing
-unit address prefix (or `/32`/`/128` when no same-family prefix exists) so the
-leniently-loaded config actuates instead of reverting every promotion. Garbage
-literals that parse as neither CIDR nor IP remain the #7577 empty gate's
-concern and are not re-reported here.
+**VRRP virtual-address prefix handling (#15050, narrowed by #16558):** at
+runtime `pkg/vrrp` passes the compiled VIP string to `netlink.ParseAddr`,
+which requires a prefix; a bare literal that reached it made every promotion
+fail-closed (#5082) and revert to BACKUP. Junos accepts the bare spelling
+(`virtual-address 192.168.1.15;`), so since #16558 every compile path
+normalizes a bare VIP to its same-family enclosing unit prefix
+(`normalizeBareVRRPVIPs` in `compiler_validate_strict_vrrp_vipprefix.go`,
+run before the uniform gates and again in the tail gates), and the Juniper
+example commits to the same `VRRPGroup` as the CIDR form. The schema leaf
+accepts bare-or-CIDR (`ValidateIPv4CIDROrBare`/`ValidateIPv6CIDROrBare`);
+garbage and wrong-family literals still reject there. A bare VIP with NO
+same-family enclosing prefix is strict-rejected by
+`validateVRRPVIPPrefixStrict` (inventing a host prefix would install it
+without a connected route, the #3013 blackhole); the tolerant path warns
+and host-prefixes it (`/32`/`/128`, `lenientVRRPVIPPrefix`, #1960 no-brick)
+so a persisted bare VIP still boots and actuates. Junos
+`inet6-advertise-interval` (milliseconds, 100..40000) maps to
+`VRRPGroup.Inet6AdvertiseIntervalMS` and on to the IPv6 instance's ms
+cadence in `pkg/vrrp`; `virtual-link-local-address` is name-refused on the
+strict path (warned tolerant) because xpf auto-derives the virtual-router
+link-local (#5089) with no per-group override. Garbage literals that parse
+as neither CIDR nor IP remain the #7577 empty gate's concern.
 
 **VRRP virtual-address count must fit one advertisement (#6779):** RFC 5798
 §5.2.4 makes an advertisement's "Count IPvX Addr" a single byte, so one advert

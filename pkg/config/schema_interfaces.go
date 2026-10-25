@@ -399,20 +399,22 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 // except for the VIP validator means completion and commit validation
 // behave the same across families.
 func vrrpGroupSchemaNode(v6 bool) *schemaNode {
-	// xpf-DIVERGENT from Junos (bare IP): the VIP string is
-	// netlink.ParseAddr'd verbatim when the group masters
-	// (pkg/vrrp/instance.go:1076) and that parser REQUIRES a /prefix — a
-	// bare Junos-style virtual-address still gets advertised (sendAdvert
-	// strips an optional prefix, instance.go:897) but the address is
-	// never installed on the interface: a silent half-working group.
-	// VRRPConfig documents the CIDR contract (pkg/vrrp/vrrp.go:20).
-	vaDesc := "Virtual IPv4 address with prefix length (e.g. 10.0.1.1/24; xpf requires the prefix, unlike Junos)"
-	vaExamples := []string{"10.0.1.1/24"}
-	vaValidator := ValidateIPv4CIDR
+	// #16558: Junos accepts a BARE virtual address (`virtual-address
+	// 192.168.1.15;`); the compiler normalizes it to CIDR form with the
+	// enclosing unit prefix (or a host prefix when no same-family
+	// enclosing prefix exists) on every path, so the schema validator
+	// accepts bare-or-CIDR. Garbage and wrong-family literals still
+	// reject. Previously this leaf required CIDR, so the flat `set`
+	// spelling was strict-rejected while the tolerant compile normalized
+	// the same text (#15050's gate comment claimed `set` normalized —
+	// it did not).
+	vaDesc := "Virtual IPv4 address, bare or with prefix length (e.g. 10.0.1.1 or 10.0.1.1/24; bare Junos form gains the enclosing unit prefix)"
+	vaExamples := []string{"10.0.1.1/24", "10.0.1.1"}
+	vaValidator := ValidateIPv4CIDROrBare
 	if v6 {
-		vaDesc = "Virtual IPv6 address with prefix length (e.g. 2001:db8::1/64; xpf requires the prefix, unlike Junos)"
-		vaExamples = []string{"2001:db8::1/64"}
-		vaValidator = ValidateIPv6CIDR
+		vaDesc = "Virtual IPv6 address, bare or with prefix length (e.g. 2001:db8::1 or 2001:db8::1/64; bare Junos form gains the enclosing unit prefix)"
+		vaExamples = []string{"2001:db8::1/64", "2001:db8::1"}
+		vaValidator = ValidateIPv6CIDROrBare
 	}
 	// #8839: keyValidator on the IDENTITY slot. Without it a non-numeric id is
 	// accepted at commit and the group silently vanishes -- parseVRRPGroups does
@@ -481,6 +483,37 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 		// #15199 (A05-07): the Junos IPv6 spelling carries its VIPs under
 		// `virtual-inet6-address` inside `vrrp-inet6-group`. Declared only
 		// on the v6 node so the v4 group keeps rejecting it as unknown.
+	}
+	if v6 {
+		// #16558: Junos `inet6-advertise-interval` is MILLISECONDS
+		// (100..40000) for the IPv6 group; it maps to
+		// VRRPGroup.Inet6AdvertiseIntervalMS and then directly to the
+		// pkg/vrrp instance cadence (which works in ms).
+		// Declared only on the v6 node: the v4 group keeps rejecting it.
+		children["inet6-advertise-interval"] = &schemaNode{
+			desc:          "IPv6 advertisement interval (Junos spelling, milliseconds)",
+			args:          1,
+			placeholder:   "<milliseconds>",
+			valueType:     ValueInteger,
+			valueDesc:     "IPv6 advertisement interval in milliseconds (100..40000; Junos inet6-advertise-interval)",
+			valueExamples: []string{"100", "1000", "5000"},
+			validator:     ValidateInteger(100, 40000),
+			children:      nil,
+		}
+		// #16558: Junos `virtual-link-local-address` names the virtual
+		// router's link-local. xpf auto-derives that address (#5089), so
+		// the statement is name-refused with that explanation rather
+		// than silently dropped or stored inert.
+		children["virtual-link-local-address"] = &schemaNode{
+			desc:          "Virtual link-local address (Junos; xpf auto-derives it — unsupported, see commit error)",
+			args:          1,
+			placeholder:   "<address>",
+			valueType:     ValueIPAddress,
+			valueDesc:     "Virtual IPv6 link-local address (fe80::/10); xpf auto-derives the virtual-router link-local, so this statement is refused by name",
+			valueExamples: []string{"fe80::1"},
+			validator:     ValidateIPv6Address,
+			children:      nil,
+		}
 	}
 	if v6 {
 		children["virtual-inet6-address"] = &schemaNode{

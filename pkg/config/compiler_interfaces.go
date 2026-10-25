@@ -46,18 +46,20 @@ func normalizePinnedPrefixes12533(in []string) []string {
 // a vrrp-group block. Used to delimit multi-value runs (virtual-address)
 // when properties are packed into a single node's Keys (#1813).
 var vrrpGroupPropertyKeywords = map[string]bool{
-	"virtual-address":       true,
-	"virtual-inet6-address": true,
-	"priority":              true,
-	"preempt":               true,
-	"no-preempt":            true,
-	"accept-data":           true,
-	"advertise-interval":    true,
-	"authentication-type":   true,
-	"authentication-key":    true,
-	"track-interface":       true,
-	"track":                 true,
-	"track-priority-cost":   true,
+	"virtual-address":            true,
+	"virtual-inet6-address":      true,
+	"priority":                   true,
+	"preempt":                    true,
+	"no-preempt":                 true,
+	"accept-data":                true,
+	"advertise-interval":         true,
+	"inet6-advertise-interval":   true,
+	"virtual-link-local-address": true,
+	"authentication-type":        true,
+	"authentication-key":         true,
+	"track-interface":            true,
+	"track":                      true,
+	"track-priority-cost":        true,
 }
 
 // parseInterfaceNumeric9899 parses a canonical unsigned decimal token in
@@ -1665,6 +1667,20 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 						vg.AdvertiseInterval = n
 					}
 				}
+			case "inet6-advertise-interval":
+				// #16558: Junos milliseconds (100..40000 schema-gated).
+				if i+1 < len(keys) {
+					i++
+					if n, err := strconv.Atoi(keys[i]); err == nil {
+						vg.Inet6AdvertiseIntervalMS = n
+					}
+				}
+			case "virtual-link-local-address":
+				// #16558: recorded for the name-refusal gate; never actuated.
+				if i+1 < len(keys) {
+					i++
+					vg.VirtualLinkLocalAddress = keys[i]
+				}
 			case "authentication-type":
 				if i+1 < len(keys) {
 					i++
@@ -1801,6 +1817,16 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 						vg.AdvertiseInterval = n
 					}
 				}
+			case "inet6-advertise-interval":
+				// #16558: Junos milliseconds (100..40000 schema-gated).
+				if v := nodeVal(prop); v != "" {
+					if n, err := strconv.Atoi(v); err == nil {
+						vg.Inet6AdvertiseIntervalMS = n
+					}
+				}
+			case "virtual-link-local-address":
+				// #16558: recorded for the name-refusal gate; never actuated.
+				vg.VirtualLinkLocalAddress = nodeVal(prop)
 			case "authentication-type":
 				vg.AuthType = nodeVal(prop)
 			case "authentication-key":

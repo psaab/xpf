@@ -78,6 +78,16 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	}
 	cfg.Warnings = append(cfg.Warnings, brWarnings...)
 
+	// #16558: normalize bare Junos virtual-addresses on EVERY path.
+	// NOTE the phase order: runUniformGates (with the strict
+	// validateVRRPVIPPrefixStrict check) runs BEFORE these tail gates,
+	// so on the strict path a with-enclosing bare VIP is already
+	// normalized by the pre-uniform normalization in compileExpanded
+	// (see compiler.go) and this call is a no-op; on the tolerant path
+	// the uniform gate only warned, and this call performs the
+	// host-fallback normalization. Strict here: enclosing-only.
+	cfg.Warnings = append(cfg.Warnings, normalizeBareVRRPVIPs(cfg, opts.lenientVRRPVIPPrefix)...)
+
 	// #3013: VRRP virtual-address subnet-containment gate. A virtual-address
 	// must fall within a subnet configured on the same interface unit for the
 	// matching family — otherwise the installed VIP has no connected route and
@@ -90,16 +100,6 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		return err
 	}
 	cfg.Warnings = append(cfg.Warnings, vaWarnings...)
-
-	// #15050: tolerant-path normalization for the bare-virtual-address
-	// gate. The uniform-gate phase already warned (lenient) or rejected
-	// (strict, so this never runs with a bare VIP left); here a leniently
-	// loaded bare VIP gains its enclosing prefix (or /32//128) so it
-	// actuates instead of reverting every promotion. Strict path: no
-	// bare VIP survives the gate, so this is a no-op there.
-	if opts.lenientVRRPVIPPrefix {
-		cfg.Warnings = append(cfg.Warnings, normalizeBareVRRPVIPs(cfg)...)
-	}
 
 	// #4114: port-scan / ip-sweep detection-window advisory. The `threshold`
 	// is a Junos MICROSECOND detection WINDOW (the detection count is a fixed

@@ -322,15 +322,17 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
-	// #15050 VRRP bare-virtual-address gate, beside the #8483 timers gate.
-	// Strict on commit / commit-check (hard-reject a prefix-less
-	// virtual-address — netlink.ParseAddr requires a prefix, so the VIP
-	// never actuates and #5082 fail-closed reverts every promotion,
-	// leaving the gateway ownerless). The packed hierarchical one-liner
-	// bypasses the schema's ValidateIPv4CIDR/ValidateIPv6CIDR leaf for
-	// the reason documented above. Lenient on load / peer-sync (#1960
-	// no-brick): warn here; the tail gates normalize the bare VIP to its
-	// enclosing prefix (or /32//128) so the tolerant config actuates.
+	// #15050/#16558 VRRP bare-virtual-address + Junos inet6 leaves gate,
+	// beside the #8483 timers gate. The tail gates have already
+	// normalized every bare VIP that has a same-family enclosing prefix
+	// (every path), so a bare VIP reaching here on the strict path is
+	// one with NO enclosing prefix — rejected by name rather than
+	// inventing a host prefix that would install without a connected
+	// route. The same function name-refuses `virtual-link-local-address`
+	// (auto-derived, #5089) and range-checks `inet6-advertise-interval`
+	// (Junos milliseconds 100..40000). Lenient on load / peer-sync
+	// (#1960 no-brick): warn here; the tail gates already host-prefix
+	// normalized the bare VIP so the tolerant config actuates.
 	if err := validateVRRPVIPPrefixStrict(cfg); err != nil {
 		if opts.lenientVRRPVIPPrefix {
 			cfg.Warnings = append(cfg.Warnings,

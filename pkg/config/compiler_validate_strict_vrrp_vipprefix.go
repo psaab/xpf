@@ -17,32 +17,34 @@ import (
 // every promotion. The VRRP-protected gateway therefore has no owner on
 // every node carrying the config.
 //
-// The structured spellings ARE gated: vrrpGroupSchemaNode's
-// virtual-address leaf carries ValidateIPv4CIDR / ValidateIPv6CIDR. The
-// PACKED hierarchical one-liner `vrrp-group 1 virtual-address 10.0.1.100;`
-// packs the value onto the instance node's Keys, which the schema walker
-// consumes as an unvalidated identity token (walkInstanceChildren) — the
-// same bypass #5184 (priority) and #8483 (timers) closed one leaf over.
-// It is reachable through hierarchical `load` / day-0 / config-sync, not
-// through `set` (SetPath normalizes packed tokens into schema-structured
-// children).
+// #16558: Junos accepts the bare spelling, so EVERY compile path now
+// normalizes it (normalizeBareVRRPVIPs, called unconditionally from
+// the tail gates BEFORE the subnet gate) to the enclosing unit prefix
+// of the same family, and the Juniper example commits to the same
+// VRRPGroup as the CIDR form. A bare VIP with NO same-family enclosing
+// prefix is still strict-rejected by validateVRRPVIPPrefixStrict
+// below: inventing a host prefix (/32//128) would install a VIP with
+// no connected route (the #3013 blackhole). The tolerant path keeps
+// the #1960 no-brick host-prefix fallback so an already-persisted
+// bare VIP still boots and actuates.
 //
-// validateVRRPVIPPrefixStrict is the compiled-*Config gate beside the
-// #8483 timers gate. It runs on the typed VirtualAddresses, so it catches
-// both the packed spelling and any other spelling that produced a bare
-// literal. A bare literal is a VALID IP (vrrpVIPHostIP parses it) with no
-// "/" — garbage literals stay the #7577 empty gate's concern (they parse
+// Earlier this gate rejected ANY bare VIP and its comment claimed the
+// flat `set` spelling was already normalized by SetPath. It was not:
+// SetPath structured the leaf, whose CIDR validator then rejected the
+// bare value at SchemaValidate, while the tolerant compile normalized
+// the identical text — a strict/tolerant disagreement over the same
+// config. The schema validator now accepts bare-or-CIDR
+// (ValidateIPv4CIDROrBare / ValidateIPv6CIDROrBare) and this file's
+// remaining strict job is the no-enclosing-prefix case only.
+//
+// validateVRRPVIPPrefixStrict runs on the typed VirtualAddresses, so
+// it catches both the packed spelling and any other spelling that
+// produced a bare literal. It must run AFTER normalization (the tail
+// gates guarantee that order): a bare literal that still reaches it
+// on the strict path is one normalization could not place. A bare
+// literal is a VALID IP (vrrpVIPHostIP parses it) with no "/" —
+// garbage literals stay the #7577 empty gate's concern (they parse
 // as neither CIDR nor IP) and are not re-reported here.
-//
-// On the tolerant load / peer-sync paths the call site downgrades this
-// to a warning AND normalizes (normalizeBareVRRPVIPs in the tail gates,
-// opts.lenientVRRPVIPPrefix) so an already-persisted or peer-synced
-// config an older binary accepted still boots AND actuates (#1960
-// no-brick): the bare VIP gains the enclosing address prefix of its
-// unit, or a host prefix (/32, /128) when no enclosing prefix of the
-// matching family exists. Without the normalization the tolerant path
-// would boot a group that reverts every promotion forever — the exact
-// defect, merely warned about.
 
 // isBareVRRPVIP reports whether vip is a parseable IP literal with no
 // prefix — the shape netlink.ParseAddr rejects. CIDRs and unparseable
@@ -54,11 +56,14 @@ func isBareVRRPVIP(vip string) bool {
 	return net.ParseIP(vip) != nil
 }
 
-// validateVRRPVIPPrefixStrict hard-rejects, at commit / commit-check, an
-// explicit `vrrp-group` carrying a prefix-less virtual-address (#15050).
-// Scope: explicit groups only — RETH-derived instances take their VIPs
-// from unit Addresses, which are authored CIDRs, so there is no bare
-// literal source there (same scope reasoning as #7577).
+// validateVRRPVIPPrefixStrict hard-rejects, at commit / commit-check, a
+// bare virtual-address that normalization could not place: one with no
+// same-family enclosing prefix on its unit (#16558). Bare VIPs WITH an
+// enclosing prefix never reach here on either path — the tail gates
+// normalized them first. Scope: explicit groups only — RETH-derived
+// instances take their VIPs from unit Addresses, which are authored
+// CIDRs, so there is no bare literal source there (same scope
+// reasoning as #7577).
 func validateVRRPVIPPrefixStrict(cfg *Config) error {
 	if cfg == nil || cfg.Interfaces.Interfaces == nil {
 		return nil
@@ -97,12 +102,33 @@ func validateVRRPVIPPrefixStrict(cfg *Config) error {
 					if !isBareVRRPVIP(vip) {
 						continue
 					}
+					fam := "inet"
+					if net.ParseIP(vip).To4() == nil {
+						fam = "inet6"
+					}
 					return fmt.Errorf("interfaces %s unit %d vrrp-group %d virtual-address %s "+
-						"has no prefix length — pkg/vrrp installs VIPs with netlink.ParseAddr, "+
-						"which requires a prefix, so this address would fail to actuate and "+
-						"every promotion would roll back to BACKUP with no owner for the "+
-						"gateway — write it with its prefix (e.g. %s)",
-						ifName, un, vg.ID, vip, bareVIPExample(vip, unit))
+						"has no prefix length and no family %s address with a prefix is "+
+						"configured on the unit to enclose it — a bare Junos virtual-address "+
+						"gains the enclosing unit prefix at compile, and with none it would "+
+						"install without a connected route; write it with its prefix "+
+						"(e.g. %s) or configure a family %s address on the unit",
+						ifName, un, vg.ID, vip, fam, bareVIPExample(vip, unit), fam)
+				}
+				if vg.Inet6AdvertiseIntervalMS != 0 &&
+					(vg.Inet6AdvertiseIntervalMS < MinInet6AdvertiseIntervalMS || vg.Inet6AdvertiseIntervalMS > MaxInet6AdvertiseIntervalMS) {
+					return fmt.Errorf("interfaces %s unit %d vrrp-group %d inet6-advertise-interval %d "+
+						"is outside %d..%d milliseconds (Junos range; the VRRPv3 Max Advert Int "+
+						"field is 12 bits of centiseconds) — set it in %d..%d or omit it",
+						ifName, un, vg.ID, vg.Inet6AdvertiseIntervalMS,
+						MinInet6AdvertiseIntervalMS, MaxInet6AdvertiseIntervalMS,
+						MinInet6AdvertiseIntervalMS, MaxInet6AdvertiseIntervalMS)
+				}
+				if vg.VirtualLinkLocalAddress != "" {
+					return fmt.Errorf("interfaces %s unit %d vrrp-group %d virtual-link-local-address %s "+
+						"is not supported: xpf auto-derives the virtual-router link-local address "+
+						"for IPv6 VRRP (RFC 5798 %s) and has no per-group override — remove the "+
+						"statement; the derived link-local is advertised as address[0]",
+						ifName, un, vg.ID, vg.VirtualLinkLocalAddress, "§6.1")
 				}
 			}
 		}
@@ -114,9 +140,15 @@ func validateVRRPVIPPrefixStrict(cfg *Config) error {
 // the bare VIP with the enclosing prefix when one is known, else a host
 // prefix. Display only — the strict path does not mutate the config.
 func bareVIPExample(vip string, unit *InterfaceUnit) string {
-	normalized, _ := normalizeBareVIP(vip, unit)
+	normalized, _ := normalizeBareVIP(vip, unit, true)
 	return normalized
 }
+
+// Junos `inet6-advertise-interval` bounds in milliseconds (#16558).
+const (
+	MinInet6AdvertiseIntervalMS = 100
+	MaxInet6AdvertiseIntervalMS = 40000
+)
 
 // enclosingPrefixLen returns the prefix length of the first unit address
 // of the VIP's family whose subnet contains the VIP, or of the first
@@ -147,17 +179,22 @@ func enclosingPrefixLen(ip net.IP, unit *InterfaceUnit) int {
 	return first
 }
 
-// normalizeBareVIP rewrites one bare VIP to CIDR form: the enclosing
-// address prefix of the unit when available, else the host prefix
-// (/32 or /128). The second return reports whether a change was made.
-// Non-bare values are returned unchanged.
-func normalizeBareVIP(vip string, unit *InterfaceUnit) (string, bool) {
+// normalizeBareVIP rewrites one bare VIP to CIDR form with the enclosing
+// address prefix of the unit. When no same-family enclosing prefix
+// exists it returns ok=false UNLESS hostFallback is set (the tolerant
+// path), in which case it falls back to the host prefix (/32 or /128)
+// so a persisted bare VIP still actuates. Non-bare values are returned
+// unchanged with ok=false.
+func normalizeBareVIP(vip string, unit *InterfaceUnit, hostFallback bool) (string, bool) {
 	if !isBareVRRPVIP(vip) {
 		return vip, false
 	}
 	ip := net.ParseIP(vip)
 	ones := enclosingPrefixLen(ip, unit)
 	if ones < 0 {
+		if !hostFallback {
+			return vip, false
+		}
 		if ip.To4() != nil {
 			ones = 32
 		} else {
@@ -169,15 +206,17 @@ func normalizeBareVIP(vip string, unit *InterfaceUnit) (string, bool) {
 	return ip.String() + "/" + strconv.Itoa(ones), true
 }
 
-// normalizeBareVRRPVIPs rewrites every bare VIP in the compiled config in
-// place and returns one operator warning per rewritten address. It runs
-// only on the tolerant path (see the call site in compiler_tailgates.go):
-// the strict path rejects instead of silently rewriting an operator's
-// commit. After this pass the strict gate passes, so the tolerant config
-// actuates instead of reverting every promotion. Post-normalization
-// duplicates (a bare VIP and its CIDR spelling in one group) are deduped
-// with the same helper parseVRRPGroups uses.
-func normalizeBareVRRPVIPs(cfg *Config) []string {
+// normalizeBareVRRPVIPs rewrites every bare VIP in the compiled config
+// in place and returns one operator warning per rewritten address. It
+// runs on EVERY compile path (#16558, see compiler_tailgates.go): the
+// Juniper bare spelling commits to the same VRRPGroup as the CIDR form.
+// hostFallback selects the tolerant behaviour for a bare VIP with no
+// same-family enclosing prefix (host prefix + warning); on the strict
+// path such a VIP is left bare so validateVRRPVIPPrefixStrict rejects
+// it by name. Post-normalization duplicates (a bare VIP and its CIDR
+// spelling in one group) are deduped with the same helper
+// parseVRRPGroups uses.
+func normalizeBareVRRPVIPs(cfg *Config, hostFallback bool) []string {
 	if cfg == nil || cfg.Interfaces.Interfaces == nil {
 		return nil
 	}
@@ -214,16 +253,18 @@ func normalizeBareVRRPVIPs(cfg *Config) []string {
 				}
 				changed := false
 				for i, vip := range vg.VirtualAddresses {
-					normalized, ok := normalizeBareVIP(vip, unit)
+					normalized, ok := normalizeBareVIP(vip, unit, hostFallback)
 					if !ok {
 						continue
 					}
-					warnings = append(warnings, fmt.Sprintf(
-						"interfaces %s unit %d vrrp-group %d virtual-address %s "+
-							"has no prefix length (downgraded to warning on tolerant path): "+
-							"normalized to %s so the VIP can actuate; write the prefix "+
-							"explicitly to silence this",
-						ifName, un, vg.ID, vip, normalized))
+					if hostFallback {
+						warnings = append(warnings, fmt.Sprintf(
+							"interfaces %s unit %d vrrp-group %d virtual-address %s "+
+								"has no prefix length (downgraded to warning on tolerant path): "+
+								"normalized to %s so the VIP can actuate; write the prefix "+
+								"explicitly to silence this",
+							ifName, un, vg.ID, vip, normalized))
+					}
 					vg.VirtualAddresses[i] = normalized
 					changed = true
 				}
