@@ -302,7 +302,7 @@ func parseUpgradeArgs(args []string) (upgradeFlags, error) {
 	rollback := fs.Bool("rollback", false,
 		"rollback the current runtime to a retained compatible version; combine with --rolling on HA")
 	target := fs.String("target", "",
-		"rollback target version (default: newest restorable non-current version)")
+		"rollback target version (default: committed predecessor of current; bare rollback refuses when it is not restorable)")
 	stagedDir := fs.String("staged-dir", upgrade.DefaultStagedDir, "dpkg-staged binary set dir")
 	versionsDir := fs.String("versions-dir", upgrade.DefaultVersionsDir, "runtime versioned dir")
 	stagedGenDir := fs.String("staged-gen-dir", upgrade.DefaultStagedGenDir,

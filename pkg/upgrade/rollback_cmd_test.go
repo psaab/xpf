@@ -265,6 +265,119 @@ func TestGC_RanksCommittedVersionsBeforeDirectoryMtime(t *testing.T) {
 		}
 	}
 }
+
+// TestRollbackTo_BareChainNeverMovesForward16525 is the #16525 regression:
+// cuts 1->2->3->4, GC retains only {2,3,4} (1 is removed as the probe's
+// history describes), then bare rollbacks 4->3->2 must REFUSE at 2 rather
+// than falling back to committed[0]=4.0.0 (newer than current). A mutant
+// reverting to the newest-committed fallback selects 4.0.0 here.
+func TestRollbackTo_BareChainNeverMovesForward16525(t *testing.T) {
+	fx := setupRollback(t, "4.0.0", "3.0.0", rollbackV1Snap)
+	writeCompleteVersionDir(t, fx.cfg, "2.0.0")
+	// Note: 1.0.0 is intentionally absent (GC'd predecessor of 2.0.0).
+	stampCommittedForTest(t, fx, "4.0.0", "3.0.0", 400)
+	stampCommittedForTest(t, fx, "3.0.0", "2.0.0", 300)
+	stampCommittedForTest(t, fx, "2.0.0", "1.0.0", 200)
+	// Snapshots keyed by the FROM version of each bare rollback.
+	for _, from := range []string{"3.0.0", "2.0.0"} {
+		mkfile(t, filepath.Join(fx.cfg.VersionsDir, "."+from+".dbsnap", "active.json"), rollbackV1Snap+"{}")
+	}
+	chain := []string{"4.0.0"}
+	if err := fx.r.RollbackTo("", RollbackOptions{}); err != nil {
+		t.Fatalf("bare rollback 4->3: %v", err)
+	}
+	chain = append(chain, currentTarget(t, fx.cfg))
+	if err := fx.r.RollbackTo("", RollbackOptions{}); err != nil {
+		t.Fatalf("bare rollback 3->2: %v", err)
+	}
+	chain = append(chain, currentTarget(t, fx.cfg))
+	// Step 3: predecessor 1.0.0 is missing; only newer 4.0.0/3.0.0 remain
+	// as committed candidates besides current 2.0.0. Must refuse, and
+	// must not have stopped/started the daemon.
+	callsBefore := rollbackCalls(fx.fs)
+	err := fx.r.RollbackTo("", RollbackOptions{})
+	if err == nil {
+		t.Fatalf("bare rollback at 2.0.0 with GC'd predecessor succeeded (chain %v -> %s); want refusal requiring --target", chain, currentTarget(t, fx.cfg))
+	}
+	if !strings.Contains(err.Error(), "--target") {
+		t.Errorf("refusal %q does not direct operator to --target", err)
+	}
+	if !strings.Contains(err.Error(), "1.0.0") || !strings.Contains(err.Error(), "2.0.0") {
+		t.Errorf("refusal %q does not name missing predecessor 1.0.0 and current 2.0.0", err)
+	}
+	if got := currentTarget(t, fx.cfg); got != "2.0.0" {
+		t.Errorf("current -> %q after refused bare rollback, want 2.0.0 (chain %v)", got, chain)
+	}
+	if after := rollbackCalls(fx.fs); len(after) != len(callsBefore) {
+		t.Errorf("refused bare rollback mutated the unit: calls before=%v after=%v", callsBefore, after)
+	}
+	// Explicit --target still recovers (operator's explicit choice; the
+	// bare-rollback older-only gate does not override it).
+	if err := fx.r.RollbackTo("3.0.0", RollbackOptions{}); err != nil {
+		t.Fatalf("explicit RollbackTo(3.0.0) from 2.0.0: %v", err)
+	}
+	if got := currentTarget(t, fx.cfg); got != "3.0.0" {
+		t.Errorf("current -> %q after explicit --target, want 3.0.0", got)
+	}
+}
+
+// TestRollbackTo_ControlChainYields3To2To1_16525 is the positive control:
+// with the full retained chain, bare rollbacks yield 3->2->1.
+func TestRollbackTo_ControlChainYields3To2To1_16525(t *testing.T) {
+	fx := setupRollback(t, "3.0.0", "2.0.0", rollbackV1Snap)
+	writeCompleteVersionDir(t, fx.cfg, "1.0.0")
+	stampCommittedForTest(t, fx, "3.0.0", "2.0.0", 300)
+	stampCommittedForTest(t, fx, "2.0.0", "1.0.0", 200)
+	stampCommittedForTest(t, fx, "1.0.0", "", 100)
+	mkfile(t, filepath.Join(fx.cfg.VersionsDir, ".2.0.0.dbsnap", "active.json"), rollbackV1Snap+"{}")
+	if err := fx.r.RollbackTo("", RollbackOptions{}); err != nil {
+		t.Fatalf("bare rollback 3->2: %v", err)
+	}
+	if got := currentTarget(t, fx.cfg); got != "2.0.0" {
+		t.Fatalf("current -> %q, want 2.0.0", got)
+	}
+	if err := fx.r.RollbackTo("", RollbackOptions{}); err != nil {
+		t.Fatalf("bare rollback 2->1: %v", err)
+	}
+	if got := currentTarget(t, fx.cfg); got != "1.0.0" {
+		t.Fatalf("current -> %q, want 1.0.0", got)
+	}
+}
+
+// TestDefaultRollbackTarget_NoPredecessorRecordPicksOlderCommitted16525
+// pins the second #16525 arm: current has a committed stamp but no
+// predecessor name; the fallback must pick the newest committed version
+// OLDER than current, never the newer rejected release.
+func TestDefaultRollbackTarget_NoPredecessorRecordPicksOlderCommitted16525(t *testing.T) {
+	fx := setupRollback(t, "2.0.0", "1.0.0", rollbackV1Snap)
+	writeCompleteVersionDir(t, fx.cfg, "4.0.0")
+	stampCommittedForTest(t, fx, "2.0.0", "", 200)
+	stampCommittedForTest(t, fx, "1.0.0", "", 100)
+	stampCommittedForTest(t, fx, "4.0.0", "2.0.0", 400)
+	got, err := fx.r.defaultRollbackTarget("2.0.0")
+	if err != nil {
+		t.Fatalf("defaultRollbackTarget(2.0.0): %v", err)
+	}
+	if got != "1.0.0" {
+		t.Fatalf("defaultRollbackTarget(2.0.0) = %q, want older committed 1.0.0 (not newer 4.0.0)", got)
+	}
+}
+
+// TestDefaultRollbackTarget_NoPredecessorRecordOnlyNewerRefuses16525 pins
+// refusal when no older committed candidate exists at all.
+func TestDefaultRollbackTarget_NoPredecessorRecordOnlyNewerRefuses16525(t *testing.T) {
+	fx := setupRollback(t, "2.0.0", "4.0.0", rollbackV1Snap)
+	stampCommittedForTest(t, fx, "2.0.0", "", 200)
+	stampCommittedForTest(t, fx, "4.0.0", "2.0.0", 400)
+	got, err := fx.r.defaultRollbackTarget("2.0.0")
+	if err == nil {
+		t.Fatalf("defaultRollbackTarget(2.0.0) = %q, want refusal (only newer committed candidate)", got)
+	}
+	if !strings.Contains(err.Error(), "--target") {
+		t.Errorf("refusal %q does not direct operator to --target", err)
+	}
+}
+
 func TestRollbackTo_TargetEqualsCurrentRefuses(t *testing.T) {
 	fx := setupRollback(t, "2.0.0", "1.0.0", rollbackV1Snap)
 	if err := fx.r.RollbackTo("2.0.0", RollbackOptions{}); err == nil {
