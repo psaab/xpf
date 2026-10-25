@@ -39,16 +39,15 @@ package config
 //     out — binding a bare destination leaf is the sibling #16543
 //     question, not this one), and a tail the schema cannot carry all
 //     keep the existing leaf path;
-//   - a destination written bare (`interface ge-0/0/0.0;`) is likewise
-//     the sibling bare-leaf question: after this fix the packed template
-//     at least invents no phantom, exactly as its braced spelling behaves
-//     today, and the two spellings stay equal either way.
+//   - a destination written bare (`interface ge-0/0/0.0;`) is the
+//     sibling #16543 bare-leaf binding (landed in 4975225633): the two
+//     spellings stay equal there by construction, since both route
+//     through the same wildcard branch after this split.
 //
 // The destination side needs no new code: a braced destination already
 // takes the fan-out, a brace-elided destination is promoted by #15032
-// inside the wildcard branch, and a bare-leaf destination is whatever
-// the braced spelling does (zone leaves via #9801, the general bare-leaf
-// rule when #16543 lands).
+// inside the wildcard branch, and a bare-leaf destination takes the
+// #9801/#16543 promotion in that same branch.
 
 // packedWildcardLeafBraced16548 returns the braced equivalent of a packed
 // group leaf whose identity span carries a wildcard key, or nil when s is

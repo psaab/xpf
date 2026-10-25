@@ -14,9 +14,9 @@ import (
 // unauthenticated behind only the indirect #9405 advisory. The braced
 // spelling of the same template fanned out correctly. Measured at
 // 3027e34128: packed compiled interfaces [<*> ge-0/0/0.0] with the phantom
-// carrying md5 and ge-0/0/0.0 carrying no auth; braced applied md5 to
-// ge-0/0/0.0 (against its braced destination — binding a BARE destination
-// leaf is the sibling #16543 question, equal for both spellings).
+// carrying md5 and ge-0/0/0.0 carrying no auth; ctl-braced applied md5 to
+// ge-0/0/0.0 only once the bare-leaf sibling #16543 landed (4975225633),
+// and this fix makes the packed spelling equal it.
 //
 // Acceptance: def-packed equals ctl-braced, and no compiled instance name
 // contains `<`.
@@ -90,6 +90,28 @@ func TestPackedWildcardOSPFEqualsBraced16548(t *testing.T) {
 		if !reflect.DeepEqual(g, w) {
 			t.Fatalf("packed and braced spellings diverge on %q:\n packed=%+v\n braced=%+v (#16548)", name, g, w)
 		}
+	}
+}
+
+// The issue's verbatim fixture: a single real interface written BARE
+// (`interface ge-0/0/0.0;`). At the original base this compiled the
+// phantom <*> with md5 and left ge-0/0/0.0 unauthenticated; the packed
+// template must now authenticate the real interface with no phantom
+// (the braced spelling against a bare destination binds via the
+// sibling #16543 rule, merged in 4975225633, and the packed spelling
+// must equal it).
+func TestPackedWildcardOSPFIssueFixture16548(t *testing.T) {
+	text := `groups { AUTH { protocols { ospf { area 0.0.0.0 { interface <*> authentication md5 1 key "` + packedWildcardOSPF16548Secret + `"; } } } } }
+apply-groups AUTH;
+interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
+protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0; } } }
+`
+	cfg := compileWildcard9423(t, text)
+	assertNoPhantom16548(t, cfg)
+	iface := ospfIfaces16548(t, cfg)["ge-0/0/0.0"]
+	if iface == nil || iface.AuthType != "md5" || len(iface.AuthMD5Keys) != 1 ||
+		iface.AuthMD5Keys[0].Key.Reveal() != packedWildcardOSPF16548Secret {
+		t.Fatalf("the issue fixture must authenticate ge-0/0/0.0 with the group md5 key, got %+v (#16548)", iface)
 	}
 }
 
