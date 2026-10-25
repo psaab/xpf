@@ -93,15 +93,15 @@ func bgpComposedChains(bgp *BGPConfig, pss map[string]*PolicyStatement, dst map[
 }
 
 // validateBGPComposedChainSequenceBoundStrict rejects a composed BGP policy
-// chain whose members' SUMMED route-map sequence count exceeds the FRR ceiling.
-// renderComposedRouteMap concatenates the chain's members into ONE route-map
-// with a running sequence number, so a chain of individually-in-bounds policies
-// can still emit a `route-map` line past seq 65535 — the exact #5701
-// frr-reload-poisoning overflow, re-introduced at the chain level (#5732). This
-// is the CHAIN companion to the per-policy validatePolicyRouteMapSequenceBoundStrict
-// (kept for defense in depth); both share the ComposedChainSequenceCount /
-// RouteMapSequenceCount SSOT and the MaxRouteMapSequences ceiling.
-//
+// chain whose summed rendered sequence count, including any #15157 carved
+// export tail, exceeds the FRR ceiling. renderComposedRouteMap concatenates
+// the chain's members into ONE route-map with a running sequence number, so a
+// chain of individually-in-bounds policies can still emit a `route-map` line
+// past seq 65535 — the exact #5701 frr-reload-poisoning overflow, re-introduced
+// at the chain level (#5732). This is the CHAIN companion to the per-policy
+// validatePolicyRouteMapSequenceBoundStrict (kept for defense in depth); both
+// share the base-count SSOT plus the #16869 carved reserve and the same
+// MaxRouteMapSequences ceiling.
 // Strict on commit / commit-check (hard reject naming the chain); downgraded to
 // a warning on the tolerant load / peer-sync paths (opts.lenientPolicyRouteMapSeq,
 // #1960) — renderComposedRouteMap independently SKIPS an over-ceiling chain
@@ -126,6 +126,7 @@ func validateBGPComposedChainSequenceBoundStrict(cfg *Config) error {
 	if len(chains) == 0 {
 		return nil
 	}
+	_, carvedComposed := carvedBGPExportShapes16890(cfg)
 	names := make([]string, 0, len(chains))
 	for name := range chains {
 		names = append(names, name)
@@ -133,9 +134,16 @@ func validateBGPComposedChainSequenceBoundStrict(cfg *Config) error {
 	sort.Strings(names)
 	for _, name := range names {
 		chain := chains[name]
-		if n := ComposedChainSequenceCount(&cfg.PolicyOptions, pss, chain); n > MaxRouteMapSequences {
+		base := ComposedChainSequenceCount(&cfg.PolicyOptions, pss, chain)
+		reserve := CarvedComposedExtraSequences16869(&cfg.PolicyOptions, chain, len(carvedComposed[name]) > 0, "permit")
+		n := AddCarvedSequenceReserve16869(base, reserve)
+		if n > MaxRouteMapSequences {
+			carved := ""
+			if reserve > 0 {
+				carved = " including its carved BGP export tail"
+			}
 			return fmt.Errorf(
-				"BGP composed policy chain [ %s ] expands to %d route-map sequences, "+
+				"BGP composed policy chain [ %s ] expands to %d route-map sequences%s, "+
 					"over the FRR ceiling of %d — renderComposedRouteMap concatenates "+
 					"the chain's members into ONE route-map %q with a running sequence "+
 					"number, so it would emit a `route-map` line past sequence %d, which "+
@@ -143,7 +151,7 @@ func validateBGPComposedChainSequenceBoundStrict(cfg *Config) error {
 					"chain or reduce the members' `from prefix-list` / `from community` / "+
 					"`from as-path` values (each member's Cartesian product drives its "+
 					"count)",
-				strings.Join(chain, " "), n, MaxRouteMapSequences, name, frrMaxRouteMapSeq)
+				strings.Join(chain, " "), n, carved, MaxRouteMapSequences, name, frrMaxRouteMapSeq)
 		}
 	}
 	return nil

@@ -55,21 +55,11 @@ import (
 const bgpDefaultExportName15157 = config.BGPDefaultExportName
 
 // bgpInstanceHasOrigination15157 reports whether this BGP instance
-// originates any route via #14586: the union of effective export
-// chains selects at least one non-self, node-fitting source at either
-// family node. A policy whose only source is bgp itself originates
-// nothing (self-drop), so it does not trigger the carve.
+// originates any non-self route from its effective export chains. The
+// shared config predicate is used by both the strict #5701 gate and
+// the renderer's #15157 carve trigger.
 func bgpInstanceHasOrigination15157(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) bool {
-	if bgp == nil || po == nil {
-		return false
-	}
-	policies := bgpExportPolicies14586(bgp, po)
-	if len(policies) == 0 {
-		return false
-	}
-	m := &Manager{}
-	return len(m.bgpPolicyRedistEntries14586(policies, po)) > 0 ||
-		len(m.bgpPolicyIPv6RedistEntries14586(policies, po)) > 0
+	return config.BGPHasOriginationForCarvedExport16890(bgp, po)
 }
 
 // bgpExportBGPOnlyDefault15157 is the per-instance trigger shared by
