@@ -851,8 +851,11 @@ Cisco-polarity spelling `.../0.0.0.255`, have no CIDR equivalent and stay
 unimplemented), and `dns-name <fqdn> [ipv4-only|ipv6-only]` is modelled in
 `Address.DNSName`/`DNSFamily` with the current resolution in
 `Address.DNSAddresses` — refreshed at apply time and periodically by the
-daemon (`RefreshDNSAddressBooks`); an unresolvable name matches nothing
-(fail-closed). `RefreshDNSAddressBooks` mutates its argument in place, so
+daemon (`RefreshDNSAddressBooks`); a lookup FAILURE keeps the last good
+answer (stale-while-error, `Address.DNSLookupFailed`, #16595) while a
+successful lookup with no usable address matches nothing (fail-closed),
+and the strict commit gate warns rather than depending on live DNS.
+`RefreshDNSAddressBooks` mutates its argument in place, so
 the daemon's periodic tick resolves into a `CloneForDNSRefresh` private
 copy and publishes it under the apply lock — never into the published
 active config (#15933).

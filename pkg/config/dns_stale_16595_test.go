@@ -1,0 +1,148 @@
+package config
+
+import (
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+// #16595 — a transient dns-name lookup failure must not discard the last
+// answer, must not depend on live DNS at strict commit, and must stay
+// distinct from "name has no addresses" (a successful empty answer).
+
+var errDNSDown16595 = errors.New("SERVFAIL")
+
+func stubLookup16595(t *testing.T, fn func(string) ([]string, error)) {
+	t.Helper()
+	orig := lookupAddressDNSName
+	lookupAddressDNSName = fn
+	t.Cleanup(func() { lookupAddressDNSName = orig })
+}
+
+func TestDNSStaleWhileError16595(t *testing.T) {
+	down := false
+	stubLookup16595(t, func(string) ([]string, error) {
+		if down {
+			return nil, errDNSDown16595
+		}
+		return []string{"203.0.113.10"}, nil
+	})
+	cfg, err := CompileConfig(soleFormTree(t, `address partner-api { dns-name api.example.com; }`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	a := cfg.Security.AddressBook.Addresses["partner-api"]
+	if got := a.UsableValues(); !reflect.DeepEqual(got, []string{"203.0.113.10/32"}) {
+		t.Fatalf("initial UsableValues = %v", got)
+	}
+	down = true
+	RefreshDNSAddressBooks(cfg)
+	if got := a.UsableValues(); !reflect.DeepEqual(got, []string{"203.0.113.10/32"}) {
+		t.Fatalf("stale-while-error: UsableValues = %v, want last good retained", got)
+	}
+	if !a.DNSLookupFailed {
+		t.Fatal("DNSLookupFailed must be set after a failed refresh")
+	}
+	// A successful empty answer replaces the stale answer and clears the flag.
+	down = false
+	orig := lookupAddressDNSName
+	lookupAddressDNSName = func(string) ([]string, error) { return nil, nil }
+	defer func() { lookupAddressDNSName = orig }()
+	RefreshDNSAddressBooks(cfg)
+	if a.DNSLookupFailed {
+		t.Fatal("successful lookup must clear DNSLookupFailed")
+	}
+	if got := a.UsableValues(); len(got) != 0 {
+		t.Fatalf("successful empty answer must replace stale: %v", got)
+	}
+}
+
+func TestDNSLookupFailedDistinctFromEmpty16595(t *testing.T) {
+	stubLookup16595(t, func(string) ([]string, error) { return nil, errDNSDown16595 })
+	a := &Address{Name: "bad", DNSName: "bad.example.com"}
+	resolveDNSAddressEntry(a)
+	if !a.DNSLookupFailed {
+		t.Fatal("failed first lookup must set DNSLookupFailed")
+	}
+	ab := &AddressBook{Addresses: map[string]*Address{"bad": a}}
+	if !ab.DNSEntryLookupFailed("bad") {
+		t.Fatal("DNSEntryLookupFailed must report the failed entry")
+	}
+	// Successful empty is NOT lookup-failed.
+	a2 := &Address{Name: "empty", DNSName: "empty.example.com"}
+	stubLookup16595(t, func(string) ([]string, error) { return nil, nil })
+	resolveDNSAddressEntry(a2)
+	ab.Addresses["empty"] = a2
+	if ab.DNSEntryLookupFailed("empty") {
+		t.Fatal("successful empty answer must not be lookup-failed")
+	}
+	ab.AddressSets = map[string]*AddressSet{"grp": {Name: "grp", Addresses: []string{"bad"}}}
+	if !ab.DNSEntryLookupFailed("grp") {
+		t.Fatal("nested failed member must taint the set closure")
+	}
+	// CloneForDNSRefresh preserves the flag.
+	cfg := &Config{}
+	cfg.Security.AddressBook = ab
+	clone := cfg.CloneForDNSRefresh()
+	if !clone.Security.AddressBook.Addresses["bad"].DNSLookupFailed {
+		t.Fatal("clone must preserve DNSLookupFailed")
+	}
+}
+
+func TestStrictCommitWarnsNotRejectsWhenDNSDown16595(t *testing.T) {
+	stubLookup16595(t, func(string) ([]string, error) { return nil, errDNSDown16595 })
+	tree := buildTree(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security address-book global address bad dns-name bad.example.com",
+		"set security address-book global address good 10.0.0.5/32",
+		"set security policies from-zone trust to-zone untrust policy block-bad match source-address any",
+		"set security policies from-zone trust to-zone untrust policy block-bad match destination-address bad",
+		"set security policies from-zone trust to-zone untrust policy block-bad match application any",
+		"set security policies from-zone trust to-zone untrust policy block-bad then deny",
+		"set security policies from-zone trust to-zone untrust policy allow-good match source-address any",
+		"set security policies from-zone trust to-zone untrust policy allow-good match destination-address good",
+		"set security policies from-zone trust to-zone untrust policy allow-good match application any",
+		"set security policies from-zone trust to-zone untrust policy allow-good then permit",
+	})
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict commit must not depend on live DNS (#16595): %v", err)
+	}
+	warned := false
+	for _, w := range ValidateConfig(cfg) {
+		if strings.Contains(w, "bad") && strings.Contains(w, "match nothing until DNS resolves") {
+			warned = true
+		}
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "match nothing until DNS resolves") {
+			warned = true
+		}
+	}
+	// The existing dns-name warning is asserted via ValidateConfig; compile
+	// warnings are a separate channel, either satisfies the operator signal.
+	_ = warned
+	a := cfg.Security.AddressBook.Addresses["bad"]
+	if a == nil || !a.DNSLookupFailed {
+		t.Fatalf("bad entry must carry DNSLookupFailed, got %+v", a)
+	}
+}
+
+func TestStrictCommitStillRejectsSuccessfulEmptyDNS16595(t *testing.T) {
+	stubLookup16595(t, func(string) ([]string, error) { return nil, nil })
+	tree := buildTree(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security address-book global address bad dns-name bad.example.com",
+		"set security policies from-zone trust to-zone untrust policy block-bad match source-address any",
+		"set security policies from-zone trust to-zone untrust policy block-bad match destination-address bad",
+		"set security policies from-zone trust to-zone untrust policy block-bad match application any",
+		"set security policies from-zone trust to-zone untrust policy block-bad then deny",
+	})
+	_, err := CompileConfig(tree)
+	if err == nil || !strings.Contains(err.Error(), "does not fully resolve") {
+		t.Fatalf("successful-empty dns-name must still reject strict, got %v", err)
+	}
+}

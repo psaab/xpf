@@ -553,10 +553,13 @@ security {
 // Codex gate 3 (#15962, round-2 F4): the baseline records what the real
 // apply actually resolved, not the tick's pre-apply proposal. The
 // resolver therefore succeeds on the TICK's lookup and fails on the
-// APPLY's re-lookup (call-indexed), so the applied state is fail-closed
-// empty while the proposal was B; the next healthy tick must recover B.
-// FAIL-ON-REVERT: caching the proposal makes recovery compare equal and
-// this cell goes RED.
+// APPLY's re-lookup (call-indexed). With #16595 stale-while-error the
+// apply-time failure retains proposal B instead of emptying the entry,
+// so the actually-applied state IS B and the baseline must record B:
+// the next healthy tick is steady state, not a redundant recovery.
+// FAIL-ON-REVERT: caching the proposal makes this indistinguishable;
+// discarding the stale answer on error (pre-#16595) makes the applied
+// state empty and this cell's steady-state arm goes RED.
 func TestDNSRefreshBaselineRecordsActuallyApplied15962(t *testing.T) {
 	var callIdx atomic.Int64
 	restore := config.SetLookupAddressDNSNameForTest(func(fqdn string) ([]string, error) {
@@ -566,7 +569,7 @@ func TestDNSRefreshBaselineRecordsActuallyApplied15962(t *testing.T) {
 		n := callIdx.Add(1)
 		// Call 1: compile-time (inside dnsRealDaemon15962) — answer A.
 		// Call 2: tick lookup — answer B (success).
-		// Call 3: apply-time re-lookup — fail (fail-closed empty applied).
+		// Call 3: apply-time re-lookup — fail (stale-while-error keeps B).
 		// Later: healthy B.
 		switch n {
 		case 1:
@@ -580,25 +583,20 @@ func TestDNSRefreshBaselineRecordsActuallyApplied15962(t *testing.T) {
 	t.Cleanup(restore)
 
 	d, dp, _ := dnsRealDaemon15962(t)
-	// First tick: proposal B, apply-time lookup fails, empty applied.
+	// First tick: proposal B, apply-time lookup fails but stale-while-error
+	// retains B, so B is actually applied.
 	d.refreshDNSOnce()
 	if dp.applyCalls != 1 {
 		t.Fatalf("first tick applies = %d, want 1 (real apply)", dp.applyCalls)
 	}
-	// Healthy DNS: the same B must now be published (recovery) — only
-	// possible if the baseline stayed at the actually-applied empty/A
-	// state instead of the unapplied proposal B.
+	// The baseline recorded the actually-applied B, so a healthy tick
+	// resolving the same B is steady state — no redundant republish.
 	d.refreshDNSOnce()
-	if dp.applyCalls != 2 {
-		t.Fatalf("recovery tick applies = %d, want 2 (baseline suppressed recovery — proposal was cached)", dp.applyCalls)
+	if dp.applyCalls != 1 {
+		t.Fatalf("steady tick after stale-retained apply republished: applies = %d, want 1", dp.applyCalls)
 	}
-	// Steady state: tick publishes the clone whose DNS view is now B
-	// (the store copy still holds A), and the actually-applied baseline
-	// is B, so detection compares clone==baseline and does not
-	// republish. (A tick always re-resolves the clone; the assert is on
-	// publish count, not lookup count.)
 	d.refreshDNSOnce()
-	if dp.applyCalls != 2 {
+	if dp.applyCalls != 1 {
 		t.Fatalf("steady-state tick republished: applies = %d", dp.applyCalls)
 	}
 	if got := d.dnsBaselineFor(d.store.ActiveConfig()); got == nil {

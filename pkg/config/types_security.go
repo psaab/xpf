@@ -1967,6 +1967,14 @@ type Address struct {
 	DNSName      string   `json:"-"`
 	DNSFamily    string   `json:"-"`
 	DNSAddresses []string `json:"-"`
+	// DNSLookupFailed records that the latest (re)resolution attempt
+	// FAILED (resolver error) rather than returning an answer — possibly
+	// an empty one. It keeps "resolver failed" distinct from "name has
+	// no addresses" (#16595): on failure DNSAddresses retains the last
+	// good answer (stale-while-error), so a transient outage neither
+	// poisons the policy snapshot nor withdraws a junos-host program.
+	// Runtime state, never persisted.
+	DNSLookupFailed bool `json:"-"`
 	// ExpandedPrefixes holds the native expansion of `range-address` /
 	// `wildcard-address` (#15673): the minimal CIDR cover of the range
 	// (#16563; at most 62 IPv4 / 254 IPv6 prefixes, no host-count cap)

@@ -161,8 +161,22 @@ func buildOneRuleSnapshot(
 	dstDropExcludedEmpty := pol.Match.DestinationAddressExcluded &&
 		len(dstDroppedFeedRefs) > 0 &&
 		!policyAddressSideHasConcretePrefix(cfg, feedOverlay, nameToID, pol.Match.DestinationAddresses)
-	srcUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.SourceAddresses) || srcDropExcludedEmpty
-	dstUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.DestinationAddresses) || dstDropExcludedEmpty
+	// #16595: a side that is empty ONLY because a dns-name lookup failed
+	// (never resolved) must not carry the address sentinel. For a positive
+	// PERMIT side the empty book row is already match-none: the permit
+	// simply never matches (fail-closed for that rule), so no sentinel is
+	// needed and the rest of the snapshot loads. For a DENY / REJECT rule,
+	// or an excluded side, match-none would fall through to a later permit
+	// or invert to match-all, so just this rule is poisoned below via its
+	// application terms (dnsFailClosed).
+	srcDNSMatchNone := sideDNSMatchNone(cfg, addrRepresentable, ruleSideAddressTokens(pol, false))
+	dstDNSMatchNone := sideDNSMatchNone(cfg, addrRepresentable, ruleSideAddressTokens(pol, true))
+	denyClass := pol.Action == config.PolicyDeny || pol.Action == config.PolicyReject
+	srcDNSFailClosed := srcDNSMatchNone && (denyClass || pol.Match.SourceAddressExcluded)
+	dstDNSFailClosed := dstDNSMatchNone && (denyClass || pol.Match.DestinationAddressExcluded)
+	dnsFailClosed := srcDNSFailClosed || dstDNSFailClosed
+	srcUnrepresentable := (!allAddressTokensRepresentable(addrRepresentable, pol.Match.SourceAddresses) && !srcDNSMatchNone) || srcDropExcludedEmpty
+	dstUnrepresentable := (!allAddressTokensRepresentable(addrRepresentable, pol.Match.DestinationAddresses) && !dstDNSMatchNone) || dstDropExcludedEmpty
 	var sourceAddresses, destinationAddresses []string
 	if srcUnrepresentable {
 		sourceAddresses = []string{unsupportedAddressSentinel}
@@ -202,6 +216,22 @@ func buildOneRuleSnapshot(
 		// an all-dropped non-empty term list, and reject the WHOLE snapshot via
 		// SnapshotIntegrityError (keeping the previous good state) — an
 		// action-agnostic fail-closed for both permit and deny rules.
+		applicationTerms = []PolicyApplicationSnapshot{{
+			Name:     unsupportedApplicationSentinel,
+			Protocol: unsupportedApplicationSentinel,
+		}}
+	}
+	// #16595: a DENY/REJECT (or excluded-side) rule whose address side is
+	// empty only because DNS never resolved must fail closed, not fall
+	// through to a later permit (deny) and not invert to match-all
+	// (excluded). Poison this rule's application terms: the current Rust
+	// helper rejects such a snapshot and retains previous-good (fresh-boot
+	// default-deny), so the rule can never be enforced as a permit — while
+	// the Go builder emits NO address sentinel and NO PolicyContentRejected
+	// entry for the DNS cause. Positive PERMIT sides instead take the
+	// empty book row (match-none) and need no poison, so their snapshot
+	// loads and enforces every sibling rule.
+	if dnsFailClosed {
 		applicationTerms = []PolicyApplicationSnapshot{{
 			Name:     unsupportedApplicationSentinel,
 			Protocol: unsupportedApplicationSentinel,
@@ -315,6 +345,7 @@ func buildOneRuleSnapshot(
 		// build-time-only rejection metadata.
 		unknownSecurityPoliciesChildren: pol.UnknownSecurityPoliciesChildren,
 		rejectedScheduler:               rejectedScheduler,
+		dnsLookupFailClosed:             dnsFailClosed,
 	}
 }
 
