@@ -44,8 +44,10 @@ import (
 // Strictness follows the sibling chassis gates: hard-reject at commit /
 // commit-check, downgrade to a cfg.Warnings entry on the tolerant load /
 // peer-sync paths (#1960 no-brick) — an already-persisted or peer-pushed config
-// an older binary accepted must still BOOT. The compiled 0 default is what the
-// tolerant path keeps, now flagged rather than silent.
+// an older binary accepted must still BOOT. On the tolerant path a malformed
+// per-entry weight keeps the compiled 0 default, and a malformed
+// `global-weight` keeps the Junos 255 default the compiler seeds (#16667),
+// now flagged rather than silent.
 
 // validateMonitorWeightTokensAST walks the chassis cluster subtree and reports
 // every redundancy-group monitor weight that is present but unusable. It runs
@@ -90,10 +92,12 @@ func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, erro
 	// out the runtime effect, which differs between a per-entry weight and a
 	// group-wide global.
 	//
-	// An empty token list means the field is absent, which is legal: the
-	// documented 0 default (#6549). A PRESENT keyword with no value yields one
-	// empty-string token from the readers below, so it is reported as malformed
-	// rather than mistaken for absent.
+	// An empty token list means the field is absent, which is legal. For
+	// `global-weight` the compiler applies the Junos default 255 (#16667);
+	// for a per-entry weight the documented 0 default applies (#6549). A
+	// PRESENT keyword with no value yields one empty-string token from
+	// the readers below, so it is reported as malformed rather than
+	// mistaken for absent.
 	checkTokens := func(where, subject, consequence string, toks []string) error {
 		if len(toks) == 0 {
 			return nil

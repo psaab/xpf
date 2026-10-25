@@ -191,6 +191,13 @@ type InterfaceMonitor struct {
 }
 
 // IPMonitoring defines IP reachability monitoring for a redundancy group.
+//
+// GlobalWeight is the Junos `global-weight`: the weight deducted (aggregate
+// mode) or inherited by an unweighted target (independent mode) when
+// monitored IPs fail. Junos defaults it to 255 when `global-weight` is
+// omitted; compileRGIPMonitoring applies that default so an omitted value
+// never silently installs zero demotion debt (#16667). An explicit
+// `global-weight 0` remains legal and means no demotion.
 type IPMonitoring struct {
 	GlobalWeight    int
 	GlobalThreshold int

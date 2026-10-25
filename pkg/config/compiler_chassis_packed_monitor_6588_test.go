@@ -956,16 +956,67 @@ func TestChassisIPMonitoringGlobalsValidStillCommit_6588(t *testing.T) {
 		if rg.IPMonitoring == nil {
 			t.Fatal("redundancy group carries no compiled ip-monitoring")
 		}
-		if rg.IPMonitoring.GlobalWeight != 0 || rg.IPMonitoring.GlobalThreshold != 0 {
-			t.Fatalf("absent globals must stay at the 0 default, got %d/%d",
+		// #16667: an omitted global-weight takes the Junos default 255;
+		// global-threshold has no such default and stays 0 (independent
+		// mode). Pre-fix GlobalWeight was 0, so aggregate debt and an
+		// unweighted target's inherited debt were both 0.
+		if rg.IPMonitoring.GlobalWeight != 255 || rg.IPMonitoring.GlobalThreshold != 0 {
+			t.Fatalf("absent global-weight must default to 255 and absent global-threshold to 0, got %d/%d",
 				rg.IPMonitoring.GlobalWeight, rg.IPMonitoring.GlobalThreshold)
+		}
+	})
+}
+
+// TestChassisIPMonitoringOmittedGlobalWeightDefaults255_16667 pins the
+// #16667 Junos default across every spelling: when `ip-monitoring` is
+// present and `global-weight` is absent, the compiled GlobalWeight is
+// 255, not 0. An explicit `global-weight 0` (covered by
+// TestChassisIPMonitoringGlobalsValidStillCommit_6588) still means no
+// demotion, and a later folded block omitting the global must not reset
+// an earlier explicit value (#13090 accumulation).
+//
+// Fail-on-revert: drop the 255 seed in compileRGIPMonitoring and every
+// omitted row compiles to 0 again.
+func TestChassisIPMonitoringOmittedGlobalWeightDefaults255_16667(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"PackedTargetOnly", "            ip-monitoring family inet 10.0.1.1 weight 100;"},
+		{"BlockTargetOnly", "            ip-monitoring {\n                family inet {\n                    10.0.1.1 weight 100;\n                }\n            }"},
+		{"ThresholdOnlyAggregate", "            ip-monitoring global-threshold 100 family inet 10.0.1.1 weight 100;"},
+		{"UnweightedTarget", "            ip-monitoring family inet 10.0.1.1;"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rg := compileMonitorText(t, packedMonitorConfig(tc.body))
+			if rg.IPMonitoring == nil {
+				t.Fatal("redundancy group carries no compiled ip-monitoring")
+			}
+			if rg.IPMonitoring.GlobalWeight != 255 {
+				t.Fatalf("omitted global-weight = %d, want Junos default 255", rg.IPMonitoring.GlobalWeight)
+			}
+		})
+	}
+	t.Run("FoldedSecondBlockKeepsExplicitZero", func(t *testing.T) {
+		rg := compileMonitorText(t, packedMonitorConfig(
+			"            ip-monitoring global-weight 0;\n            ip-monitoring family inet 10.0.1.1 weight 100;"))
+		if rg.IPMonitoring == nil || rg.IPMonitoring.GlobalWeight != 0 {
+			t.Fatalf("folded blocks = %+v, want explicit global-weight 0 preserved", rg.IPMonitoring)
+		}
+	})
+	t.Run("FoldedSecondBlockKeepsExplicit100", func(t *testing.T) {
+		rg := compileMonitorText(t, packedMonitorConfig(
+			"            ip-monitoring global-weight 100;\n            ip-monitoring family inet 10.0.1.1 weight 100;"))
+		if rg.IPMonitoring == nil || rg.IPMonitoring.GlobalWeight != 100 {
+			t.Fatalf("folded blocks = %+v, want explicit global-weight 100 preserved", rg.IPMonitoring)
 		}
 	})
 }
 
 // TestChassisIPMonitoringGlobalMalformedTolerantNoBrick_6588 pins the #1960
 // posture for the new gate: an already-persisted or peer-synced config carrying
-// a malformed global must still BOOT, with a warning, keeping the 0 default.
+// a malformed global must still BOOT, with a warning. #16667: the malformed
+// token never parses, so the compiler keeps the seeded Junos default 255.
 func TestChassisIPMonitoringGlobalMalformedTolerantNoBrick_6588(t *testing.T) {
 	p := NewParser(packedMonitorConfig("            ip-monitoring global-weight nope;"))
 	tree, perrs := p.Parse()
@@ -980,8 +1031,8 @@ func TestChassisIPMonitoringGlobalMalformedTolerantNoBrick_6588(t *testing.T) {
 		t.Fatalf("lenient compile should have warned; warnings=%v", cfg.Warnings)
 	}
 	rg := onlyRG6588(t, cfg)
-	if rg.IPMonitoring == nil || rg.IPMonitoring.GlobalWeight != 0 {
-		t.Fatalf("lenient compile must keep the 0 default, got %+v", rg.IPMonitoring)
+	if rg.IPMonitoring == nil || rg.IPMonitoring.GlobalWeight != 255 {
+		t.Fatalf("lenient compile must keep the 255 default, got %+v", rg.IPMonitoring)
 	}
 }
 
