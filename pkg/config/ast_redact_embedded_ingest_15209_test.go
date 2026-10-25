@@ -206,9 +206,12 @@ func TestEmbeddedRedactedURLIngestRefused15209(t *testing.T) {
 // TestEmbeddedNonSecretPlaceholderIngestAllowed15209 pins the deliberate
 // narrowness, mirroring TestRedactionPlaceholderIngest_NonSecretScoped: the
 // placeholder inside a NON-secret embedded command (host-name), a GRE tunnel
-// key, or a delete command is never produced by RedactedClone, so ingesting
-// it must stay allowed — the embedded arm must judge inner tokens with the
-// same secretIndices/urlLeafIndices gates, not a substring scan.
+// key, or a value-less delete command is never produced by RedactedClone, so
+// ingesting it must stay allowed — the embedded arm must judge inner tokens
+// with the same secretIndices/urlLeafIndices gates, not a substring scan.
+// (#16726: a delete carrying a secret VALUE token IS now masked on display,
+// so its placeholder form is refused — see
+// TestEmbeddedNonSetPlaceholderIngestRefused16726.)
 func TestEmbeddedNonSecretPlaceholderIngestAllowed15209(t *testing.T) {
 	cases := map[string]*ConfigTree{
 		"non-secret host-name command": embeddedIngest15209FlatTree(t,
