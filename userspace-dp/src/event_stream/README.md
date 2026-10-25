@@ -273,13 +273,16 @@ periodic ACK from the daemon.
   `event_stream_session_create_{sent,dropped}`), not a bare `try_send`.
   Budget/limiter consequence (#15946): because creates are now one per
   fresh admission rather than one per session-init-logged admission,
-  SessionCreate volume scales with the new-flow rate. It still shares
-  the shared 1000/s + burst 1024 telemetry GCRA and its per-kind queue
-  share (only SessionClose has the separately sized 8192/s budget,
-  #14609); a shed create is counted under
-  `event_stream_session_create_{sent,dropped}` and loses that flow's
-  open-side tracker/sampling registration (the close still exports via
-  its own path), never a fail-open of the SYSLOG gate.
+  SessionCreate volume scales with the new-flow rate. (#16744) it no
+  longer shares the shared 1000/s + burst 1024 telemetry GCRA: like
+  SessionClose (#14609) it has a separately sized 8192/s + burst 8192
+  GCRA, because it is the sole open-side input to flow export (the Go
+  1-in-N sampling decision and tracker registration happen at
+  SESSION_OPEN; a close whose open was shed exports nothing). A shed
+  create is counted under
+  `event_stream_session_create_{sent,dropped,rate_limited,queue_full,disconnected}`
+  and loses that flow's open-side tracker/sampling registration (its
+  close then exports nothing), never a fail-open of the SYSLOG gate.
   `MSG_FILTER_LOG` intentionally reuses the RT_FLOW `reason` byte as a
   filter-log source discriminator (`pbr`, `input`, `output`, `cached-output`,
   or `lo0`). Close events interpret that same byte as a close reason. #13971
@@ -313,12 +316,20 @@ periodic ACK from the daemon.
   `xpf_userspace_event_stream_producer_frames_total{outcome="session_close_*"}`,
   so the IPFIX 1-in-N sampler record (computed in Go over delivered
   closes) is never silently falsified by an invisible rate shed below
-  the channel capacity. The other kinds keep the shared 1000/s limit.
-  That includes `SessionCreate` (#15946): creates arrive at the
-  new-flow rate (one per fresh admission), so under a new-flow burst
-  they are the kind most likely to hit the shared limiter — size and
-  alert on `event_stream_session_create_{sent,dropped}`, not on the
-  close counters, when flowexport opens appear missing.
+  the channel capacity. (#16744) `SessionCreate` likewise does NOT share
+  the 1000/s GCRA: since #15946/#16303 it is the sole open-side input to
+  flow export, so its buckets use a separately sized GCRA
+  (`session_create_events_per_second` / `session_create_burst`,
+  production 8192/s + burst 8192). Above that the bounded queue budget
+  still sheds, counted in
+  `event_stream_session_create_{dropped,queue_full,disconnected}` /
+  `xpf_userspace_event_stream_producer_frames_total{outcome="session_create_*"}`.
+  The remaining kinds (PolicyDeny / ScreenDrop / FilterLog) keep the
+  shared 1000/s limit. Creates arrive at the new-flow rate (one per
+  fresh admission), so under a new-flow burst they are the kind most
+  likely to shed at the queue budget — size and alert on
+  `event_stream_session_create_{sent,dropped}`, not on the close
+  counters, when flowexport opens appear missing.
 - `codec_tests.rs`, `producer_tests.rs`, `tests.rs` — co-located.
 
 ## Why push

@@ -17,6 +17,8 @@ fn test_emit_session_close_rt_flow_pairs_with_ha_delta() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let zone_map = FxHashMap::default();
@@ -87,6 +89,8 @@ fn test_emit_session_close_rt_flow_carries_close_reason_13971() {
                 burst: 0,
                 session_close_events_per_second: 0,
                 session_close_burst: 0,
+                session_create_events_per_second: 0,
+                session_create_burst: 0,
             },
         );
         let mut delta = test_close_delta(crate::session::SessionDeltaKind::Close);
@@ -180,6 +184,8 @@ fn test_emit_session_close_rt_flow_carries_real_created_stamp() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     // Anchor the delta's monotonic timestamps to the live CLOCK_MONOTONIC so
@@ -231,6 +237,8 @@ fn test_emit_session_close_rt_flow_carries_app_id() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close);
@@ -279,6 +287,8 @@ fn test_emit_session_close_rt_flow_carries_admitting_policy_id() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Close);
@@ -316,6 +326,8 @@ fn test_emit_session_close_rt_flow_zero_created_stays_zero() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close); // created_ns == 0
@@ -344,6 +356,8 @@ fn test_emit_session_close_rt_flow_ignores_open_delta() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Open);
@@ -380,6 +394,8 @@ fn test_emit_session_close_rt_flow_accounts_under_session_close_kind() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close);
@@ -431,6 +447,8 @@ fn test_emit_session_close_rt_flow_rate_limited_is_counted() {
             burst: 0,
             session_close_events_per_second: 1_000,
             session_close_burst: 2, // only 2 closes allowed in the instantaneous burst
+            session_create_events_per_second: 2,
+            session_create_burst: 2,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close);
@@ -458,6 +476,44 @@ fn test_emit_session_close_rt_flow_rate_limited_is_counted() {
 }
 
 #[test]
+fn test_emit_session_create_rt_flow_rate_limited_is_counted() {
+    // #16744 fail-on-revert: a SESSION_CREATE burst beyond its OWN
+    // per-(kind,zone) rate-limiter token budget must be counted as a
+    // SessionCreate `rate_limited` drop. Since #16744 the create kind has
+    // a separately sized GCRA, so this test configures THAT budget
+    // (1000/s, burst 2) explicitly; the shared telemetry fields stay
+    // unlimited so only the create limiter can shed. If creates fell
+    // back to the shared limiter this counter would stay 0.
+    let (handle, rx) = test_worker_handle(
+        64, // large channel/budget so the limiter, not the queue, is the gate
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+            session_create_events_per_second: 1_000,
+            session_create_burst: 2, // only 2 creates allowed in the instantaneous burst
+        },
+    );
+    let delta = test_close_delta(crate::session::SessionDeltaKind::Open);
+
+    for _ in 0..5 {
+        handle.emit_session_create_rt_flow(&delta, 0, 0);
+    }
+
+    let stats = handle.dataplane_event_stats();
+    assert_eq!(stats.session_create.sent, 2, "burst of 2 creates admitted");
+    assert_eq!(
+        stats.session_create.rate_limited, 3,
+        "the 3 creates past the burst are rate-limited, not silently sent"
+    );
+    assert_eq!(stats.session_create.dropped, 3);
+    // Exactly the admitted prefix reached the channel.
+    let frames: Vec<EventFrame> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert_eq!(frames.len(), 2);
+}
+
+#[test]
 fn test_emit_session_create_rt_flow_accounts_under_session_create_kind() {
     // #2512: the SESSION_CREATE (type 15) sibling of the close path also
     // rides the per-kind budget under DataplaneEventKind::SessionCreate.
@@ -468,6 +524,8 @@ fn test_emit_session_create_rt_flow_accounts_under_session_create_kind() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Open);
@@ -501,6 +559,8 @@ fn test_emit_session_create_rt_flow_carries_app_id_and_ifindex() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Open);
@@ -533,6 +593,8 @@ fn test_emit_session_create_rt_flow_carries_egress_ifindex() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Open);
@@ -565,6 +627,8 @@ fn test_emit_session_create_rt_flow_carries_admitting_policy_id() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Open);
@@ -604,6 +668,8 @@ fn test_emit_session_create_rt_flow_carries_admission_timestamp() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let (now_mono, _now_wall) = read_mono_and_wall_clocks();
@@ -650,6 +716,8 @@ fn test_emit_session_create_rt_flow_zero_created_stays_zero() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Open); // created_ns == 0
@@ -678,6 +746,8 @@ fn test_emit_session_create_rt_flow_flowexport_only_16579() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Open);
@@ -820,4 +890,65 @@ fn test_session_close_burst_5000_without_ack_16570() {
     assert_eq!(stats.session_close.sent, 5000);
     assert_eq!(stats.session_close.dropped, 0);
     assert_eq!(drained, 5000);
+}
+
+#[test]
+fn test_session_create_survives_production_rate_16744() {
+    // #16744 acceptance: with the PRODUCTION limiter config
+    // (DataplaneEventRateLimitConfig::default()) a burst of 5000
+    // back-to-back creates from ONE zone must all reach the channel.
+    // Since #15946/#16303 SessionCreate is the sole open-side input to
+    // flow export (the Go trackFlowOpen 1-in-N sampling decision and
+    // tracker registration happen at SESSION_OPEN; a close whose open
+    // was shed exports nothing), but before #16744 it still shared the
+    // 1000/s + burst 1024 telemetry GCRA — only SessionClose got the
+    // separately sized #14609 budget. Mirrors
+    // test_session_close_survives_production_rate_14609: capacity 8192
+    // mirrors CHANNEL_CAPACITY and the channel is drained between
+    // batches through the REAL production drain
+    // (drain_channel_into_write_buf, no ACK trim), which releases each
+    // frame's per-kind queue budget at channel exit (#16570).
+    let (handle, rx) = test_worker_handle(8192, DataplaneEventRateLimitConfig::default());
+    let mut delta = test_close_delta(crate::session::SessionDeltaKind::Open);
+    delta.metadata.ingress_zone = 7;
+    let mut replay_buf: VecDeque<EventFrame> = VecDeque::new();
+    let mut write_buf = WriteBacklog::with_capacity(WRITE_BACKLOG_MAX_BYTES);
+    let mut received = 0usize;
+    for batch in 0..10 {
+        for _ in 0..500 {
+            handle.emit_session_create_rt_flow(&delta, 0, 0);
+        }
+        let stats = handle.dataplane_event_stats();
+        assert_eq!(
+            stats.session_create.rate_limited, 0,
+            "batch {batch}: no create may be rate-shed under the separately sized budget"
+        );
+        assert_eq!(
+            stats.session_create.queue_full, 0,
+            "batch {batch}: queue budget must not shed while drained between batches"
+        );
+        assert_eq!(stats.session_create.sent, ((batch + 1) * 500) as u64);
+        // Positive control: the close kind's accounting stays untouched.
+        assert_eq!(stats.session_close.sent, 0);
+        assert_eq!(stats.session_close.dropped, 0);
+        let outcome = drain_channel_into_write_buf(
+            &rx,
+            &handle.shared,
+            &mut replay_buf,
+            &mut write_buf,
+            false,
+            &mut None,
+        );
+        assert!(outcome.drained_any, "batch {batch}: drain must move frames");
+        assert!(!outcome.stalled, "batch {batch}: backlog must not stall");
+        received += 500usize;
+        assert_eq!(
+            write_buf.pending_len(),
+            received * (FRAME_HEADER_SIZE + 168)
+        );
+    }
+    assert_eq!(
+        received, 5000,
+        "all 5000 creates must reach the channel under the production limiter"
+    );
 }

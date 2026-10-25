@@ -548,6 +548,8 @@ fn ingress_filter_routing_instance_steers_flow_into_native_gre_table() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     // #4392: an accept (non-drop) routing-instance term still forwards via the

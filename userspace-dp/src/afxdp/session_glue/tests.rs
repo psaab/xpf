@@ -12903,6 +12903,8 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let event_stream = Some(event_handle);
@@ -13133,6 +13135,8 @@ fn flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191()
                     burst: 0,
                     session_close_events_per_second: 0,
                     session_close_burst: 0,
+                    session_create_events_per_second: 0,
+                    session_create_burst: 0,
                 },
             );
             let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -13315,6 +13319,8 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -13938,6 +13944,8 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let command_event_stream = Some(command_handle);
@@ -13980,6 +13988,8 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let loss_event_stream = Some(loss_handle);
@@ -19811,7 +19821,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
         // refuses it before any frame reaches the channel.
         crate::event_stream::test_worker_handle_connected(
             8,
-            crate::event_stream::DataplaneEventRateLimitConfig { events_per_second: 0, burst: 0, session_close_events_per_second: 0, session_close_burst: 0 },
+            crate::event_stream::DataplaneEventRateLimitConfig { events_per_second: 0, burst: 0, session_close_events_per_second: 0, session_close_burst: 0, session_create_events_per_second: 0, session_create_burst: 0 },
         );
         let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
         let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -24106,6 +24116,8 @@ fn resync_and_promote_do_not_reemit_session_create_15126() {
                 burst: 0,
                 session_close_events_per_second: 0,
                 session_close_burst: 0,
+                session_create_events_per_second: 0,
+                session_create_burst: 0,
             },
         );
         let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -25464,6 +25476,8 @@ fn stream_delivered_delta_is_not_left_in_fallback_buffer_16627() {
         burst: 0,
         session_close_events_per_second: 0,
         session_close_burst: 0,
+        session_create_events_per_second: 0,
+        session_create_burst: 0,
     };
     // Connected + enqueue succeeds: stream carries seq 1, fallback empty.
     let (handle, rx) = crate::event_stream::test_worker_handle_connected(8, cfg);

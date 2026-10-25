@@ -212,6 +212,8 @@ fn miss_local_red_policer_leaves_no_permit_log_or_gate_counters_15949() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -352,6 +354,8 @@ fn miss_local_non_syn_red_leaves_no_permit_log_15949() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -528,6 +532,8 @@ fn snat_excluded_local_target_still_meters_15949() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let mut frame = build_txn_tcp_syn_frame_v4(
@@ -722,6 +728,8 @@ fn accepted_then_screen_dropped_still_emits_filter_log_15949() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -849,6 +857,8 @@ fn red_plus_screen_drop_emits_both_audits_15949() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 

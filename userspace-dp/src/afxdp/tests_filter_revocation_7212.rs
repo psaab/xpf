@@ -310,6 +310,8 @@ fn drive_packets(
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let slow_path = second_packet.then(|| Arc::new(SlowPathReinjector::new_without_worker(1500)));

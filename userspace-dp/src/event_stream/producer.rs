@@ -34,6 +34,21 @@ const DEFAULT_DATAPLANE_EVENT_BURST: u64 = 1_024;
 const DEFAULT_SESSION_CLOSE_RATE_PER_SEC: u64 = 8_192;
 const DEFAULT_SESSION_CLOSE_BURST: u64 = 8_192;
 
+// #16744: SessionCreate is the sole open-side input to flow export since
+// #15946/#16303 (the Go trackFlowOpen 1-in-N sampling decision and the
+// active/inactive tracker registration happen at SESSION_OPEN; a close
+// whose open was shed exports nothing), so it must not share the 1000/s
+// deny-flood GCRA either: above ~1000 creates/s/zone the open was
+// systematically shed while the IPFIX sampler record still advertised
+// 1-in-N over the survivors only. Like SessionClose it gets its own GCRA
+// sized at the session channel's drain capacity; the bounded queue
+// budget remains the flood bound, and any queue/disconnect shed stays
+// counted in ProcessStatus.event_stream_session_create_{dropped,
+// queue_full,disconnected} and the matching Prometheus series (#10979).
+// The remaining telemetry kinds keep the shared 1000/s flood limit.
+const DEFAULT_SESSION_CREATE_RATE_PER_SEC: u64 = 8_192;
+const DEFAULT_SESSION_CREATE_BURST: u64 = 8_192;
+
 /// Per-kind/per-source-zone rate-limit configuration for dataplane telemetry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DataplaneEventRateLimitConfig {
@@ -49,6 +64,13 @@ pub(crate) struct DataplaneEventRateLimitConfig {
     pub(crate) session_close_events_per_second: u64,
     /// #14609: instantaneous SessionClose burst per bucket.
     pub(crate) session_close_burst: u64,
+    /// #16744: sustained SessionCreate rate per `(SessionCreate, ingress
+    /// zone)` bucket; zero disables limiting for that kind. Kept separate
+    /// from `events_per_second` so flow export's open-side input is not
+    /// starved by the shared telemetry flood limit.
+    pub(crate) session_create_events_per_second: u64,
+    /// #16744: instantaneous SessionCreate burst per bucket.
+    pub(crate) session_create_burst: u64,
 }
 
 impl Default for DataplaneEventRateLimitConfig {
@@ -58,6 +80,8 @@ impl Default for DataplaneEventRateLimitConfig {
             burst: DEFAULT_DATAPLANE_EVENT_BURST,
             session_close_events_per_second: DEFAULT_SESSION_CLOSE_RATE_PER_SEC,
             session_close_burst: DEFAULT_SESSION_CLOSE_BURST,
+            session_create_events_per_second: DEFAULT_SESSION_CREATE_RATE_PER_SEC,
+            session_create_burst: DEFAULT_SESSION_CREATE_BURST,
         }
     }
 }
@@ -96,6 +120,15 @@ impl DataplaneEventRateLimitConfig {
         Self::runtime_for(
             self.session_close_events_per_second,
             self.session_close_burst,
+        )
+    }
+
+    // #16744: the SessionCreate GCRA; a zero rate disables limiting for
+    // that kind even when the shared telemetry limit stays finite.
+    fn session_create_runtime(self) -> DataplaneEventRateLimit {
+        Self::runtime_for(
+            self.session_create_events_per_second,
+            self.session_create_burst,
         )
     }
 }
@@ -150,6 +183,9 @@ pub(super) struct DataplaneEventRateLimiter {
     // SessionClose row of `buckets` reads this limit (see `limit_for`); the
     // buckets themselves stay one fixed array, so no allocation is added.
     session_close_limit: DataplaneEventRateLimit,
+    // #16744: separate GCRA parameters for SessionCreate buckets. Only the
+    // SessionCreate row of `buckets` reads this limit.
+    session_create_limit: DataplaneEventRateLimit,
     buckets: [DataplaneEventRateBucket; DATAPLANE_EVENT_RATE_BUCKETS],
 }
 
@@ -158,6 +194,7 @@ impl DataplaneEventRateLimiter {
         Self {
             limit: config.runtime(),
             session_close_limit: config.session_close_runtime(),
+            session_create_limit: config.session_create_runtime(),
             buckets: array::from_fn(|_| DataplaneEventRateBucket::default()),
         }
     }
@@ -165,6 +202,7 @@ impl DataplaneEventRateLimiter {
     fn limit_for(&self, kind: DataplaneEventKind) -> DataplaneEventRateLimit {
         match kind {
             DataplaneEventKind::SessionClose => self.session_close_limit,
+            DataplaneEventKind::SessionCreate => self.session_create_limit,
             _ => self.limit,
         }
     }

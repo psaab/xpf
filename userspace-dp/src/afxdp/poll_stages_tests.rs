@@ -282,6 +282,8 @@ fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -541,6 +543,8 @@ fn unresolved_screen_profile_zone_continues_to_policy_5806() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -744,6 +748,8 @@ fn screen_parse_fail_on_unscreened_zone_passes_12875() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_12875 =
@@ -945,6 +951,8 @@ fn syn_cookie_ack_stage_parse_fail_on_unscreened_zone_passes_12875() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_12875 =
@@ -1106,6 +1114,8 @@ fn priority_tagged_vlan0_screen_stage_parses_l3_at_offset_18() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -2733,6 +2743,8 @@ fn screen_zone_lookup_uses_logical_ingress_ifindex_3022() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -2995,6 +3007,8 @@ fn run_stage_screen_capture_in(
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -3708,6 +3722,8 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -4027,6 +4043,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -4273,6 +4291,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -4529,6 +4549,8 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -4896,6 +4918,8 @@ fn run_stage11_on_ifindex(
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -5426,6 +5450,8 @@ fn stage_ipsec_ambiguous_claim_does_not_grant_transit_dnat_16047() {
                 burst: 0,
                 session_close_events_per_second: 0,
                 session_close_burst: 0,
+                session_create_events_per_second: 0,
+                session_create_burst: 0,
             },
         );
         let __pptp_control_7699 =
@@ -7243,6 +7269,8 @@ impl ScreenTestRig {
                 burst: 0,
                 session_close_events_per_second: 0,
                 session_close_burst: 0,
+                session_create_events_per_second: 0,
+                session_create_burst: 0,
             },
         );
         Self {

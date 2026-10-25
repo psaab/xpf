@@ -926,6 +926,8 @@ fn build_live_forward_request_emits_output_filter_log_event() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -1084,6 +1086,8 @@ fn live_forward_filter_log_zones_6722(egress_ifindex: i32) -> (ForwardingState, 
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 

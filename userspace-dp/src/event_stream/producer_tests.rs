@@ -102,6 +102,8 @@ fn dataplane_event_rate_limit_is_per_kind_and_ingress_zone() {
         burst: 1,
         session_close_events_per_second: 0,
         session_close_burst: 0,
+        session_create_events_per_second: 0,
+        session_create_burst: 0,
     };
     // #2512: capacity 32 → total budget 16, per-kind budget ceil(16/5) = 4,
     // enough to admit the 3 PolicyDeny frames this test queues without the
@@ -165,6 +167,8 @@ fn dataplane_event_kind_budget_prevents_one_kind_from_monopolizing_shared_queue(
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -207,6 +211,8 @@ fn dataplane_event_total_budget_reserves_shared_queue_capacity_for_session_frame
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     let kinds = [
@@ -247,6 +253,8 @@ fn dataplane_event_queue_full_counts_per_kind_drop() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
 
@@ -291,6 +299,8 @@ fn dataplane_event_channel_full_does_not_burn_seq_3878() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     assert!(handle.try_send(crate::event_stream::EventFrame::encode_drain_complete(100)));
@@ -328,6 +338,8 @@ fn dataplane_event_disconnected_counts_per_kind_drop() {
             burst: 0,
             session_close_events_per_second: 0,
             session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
         },
     );
     drop(rx);
