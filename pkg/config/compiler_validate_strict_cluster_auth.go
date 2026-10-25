@@ -225,6 +225,108 @@ func validateClusterAuthKeyOverlapStrict(cfg *Config) error {
 		"Set it to the OTHER key of the rotation, or remove it to finalize")
 }
 
+// validateClusterAuthKeyTransitionStrict rejects a candidate whose
+// SIGNING key the active config does not already ACCEPT (#16858,
+// R3-B04-02).
+//
+// The stateless gates above judge a config in isolation. They cannot see
+// the defect this gate closes: from active {A} (signs A, accepts {A}) a
+// one-shot `set chassis cluster authentication-key B` yields candidate
+// {B} (signs B, accepts {B}). Each node, once committed, signs a key the
+// peer's still-active config does not accept, so every heartbeat from
+// the committed node is a present-but-invalid HMAC at the peer. admitFrame
+// rejects those without refreshing lastSeen; after the heartbeat
+// threshold plus the 5s sync-recency suppression cap both nodes declare
+// the peer lost and take over their redundancy groups — the dual-master
+// window #6630's overlap exists to close. The same shape arises on
+// `rollback N` from a finalized {B} config to a pre-rotation {A} config,
+// and on `load override` staging the same candidate; all three reach
+// this gate through the strict candidate pipeline, because rollback and
+// load override only stage the candidate and commit is what promotes it.
+//
+// The rule is local and asymmetrical, mirroring the runtime acceptance
+// relation: the CANDIDATE's signing (primary) key must already be a
+// member of the ACTIVE config's accepted set {active primary, active
+// additional}. It need not be the active signing key — step 3/4 of the
+// #6630 procedure (`authentication-key B`, `additional-authentication-key
+// A` from active {signs A, accepts A+B}) signs B, and B is accepted by
+// the active config exactly because steps 1/2 staged it. Conversely the
+// candidate's accepted set is irrelevant to the peer's ability to verify
+// THIS node: what the peer must accept is what this node will sign.
+//
+// Cases that pass, by construction:
+//   - No active cluster config (current == nil, or no cluster stanza, or
+//     no active key): first keying of a cluster. There is no peer-held
+//     accepted set to violate; the README "rolling onto a live unkeyed
+//     cluster" path keys the running cluster this way.
+//   - Candidate removes the cluster stanza, or removes its key: the
+//     candidate signs nothing new. Removing the key while keeping the
+//     stanza is refused by validateClusterAuthKeyStrictWithCurrent; the
+//     transition gate does not second-guess it.
+//   - Candidate signing key == active primary (routine commits, steps
+//     1/2 which change only the additional key, step 5 finalize which
+//     drops it, and the #16025 staged exception which keeps the old
+//     primary while staging its replacement).
+//   - Candidate signing key == active additional (steps 3/4).
+//
+// Cases refused: any candidate whose primary is neither the active
+// primary nor the active additional — the one-shot rotation and the
+// rollback-past-finalize above, whether the candidate's own additional
+// key names the old key or not. A candidate {signs B, accepts B+A} from
+// active {A} is still refused: this node accepting A does not make the
+// peer accept B, and it is the peer's rejection of this node's B-signed
+// frames that loses liveness.
+//
+// Current state comes only from configstore's candidate pipeline
+// (s.compiled, the config active immediately before the candidate),
+// exactly like the #16025 fold-2 exception. Fresh/day-0/CheckText and
+// direct CompileConfig have no active config and keep the gate closed —
+// there is no transition to judge. The peer-strict pipeline (#9619)
+// passes the same current, so a shared commit is judged on the peer
+// view against the same active accepted set. On the tolerant path the
+// rejection downgrades to a warning (#1960 no-brick): a persisted or
+// peer-synced config whose key differs from a notional predecessor must
+// still boot; SyncApply never supplies a current config, so in practice
+// the warning fires only if a future tolerant caller does.
+//
+// Neither key is echoed — the whole point of Secret. The message names
+// the five-step procedure so the operator is sent to the overlap rather
+// than to a re-typed key.
+// clusterAcceptedKeys16858 is the active config's accepted key set: the
+// signing primary plus the accept-only additional key (#6630), trimmed.
+// It is the smallest state the #16858 interlock needs, carried in
+// compileOpts so the gate never holds the whole active *Config. Held
+// only for equality checks and never logged or rendered.
+type clusterAcceptedKeys16858 struct {
+	primary    string
+	additional string
+}
+
+func validateClusterAuthKeyTransitionStrict(cfg *Config, active *clusterAcceptedKeys16858) error {
+	if cfg == nil || cfg.Chassis.Cluster == nil || active == nil {
+		return nil
+	}
+	candidateSigning := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal())
+	if candidateSigning == "" {
+		return nil
+	}
+	if active.primary == "" && active.additional == "" {
+		return nil
+	}
+	if candidateSigning == active.primary || candidateSigning == active.additional {
+		return nil
+	}
+	return fmt.Errorf("chassis cluster: `authentication-key` changes the signing key to one the " +
+		"active configuration does not already accept — the peer still runs the active " +
+		"configuration, so it will reject this node's heartbeats as present-but-invalid " +
+		"HMACs until it commits the matching key, and past the heartbeat threshold both " +
+		"nodes take over (dual-master); rotate through the overlap instead: on BOTH nodes " +
+		"first `set chassis cluster additional-authentication-key <new-key>`, then on both " +
+		"nodes `set chassis cluster authentication-key <new-key>` with " +
+		"`set chassis cluster additional-authentication-key <old-key>`, then on both nodes " +
+		"`delete chassis cluster additional-authentication-key` (#16858)")
+}
+
 // MinAdvisedControlLinkKeyLen is the length below which
 // ClusterAuthKeyStrengthWarnings flags a control-link PSK as weak. The PSK
 // backs HMAC-SHA256 on the heartbeat, the fabric bearer token, the session-sync

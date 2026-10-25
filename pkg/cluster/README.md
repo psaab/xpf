@@ -2922,6 +2922,25 @@ Do not skip step 2. Going straight from 1 to 3 puts node1 — which has not
 opened its window — in front of a B-signed frame it cannot verify, which is the
 outage this replaces.
 
+Since #16858 the procedure is enforced, not just documented. The strict
+commit path (`validateClusterAuthKeyTransitionStrict` in
+`pkg/config/compiler_validate_strict_cluster_auth.go`) compares the
+candidate's signing key against the **active** config's accepted set
+{`authentication-key`, `additional-authentication-key`}: a candidate may
+only sign with a key the active config already accepts. A one-shot
+`set chassis cluster authentication-key B` from active {A} is therefore
+refused at commit (and at `commit check`), with a pointer to this
+procedure — as is a `rollback N` (or a `load override` candidate) that
+would sign A from a finalized {B} config, and a rollback is only
+admitted while the overlap is still open (active accepts A as its
+additional key). Every step above passes by construction: steps 1/2 keep
+signing A, steps 3/4 sign the B that steps 1/2 staged, and step 5 keeps
+signing B. The gate needs the active config, so it is armed only on the
+configstore candidate pipeline (commit / commit-check, including the
+peer view checked by #9619); a fresh day-0 config has no predecessor to
+violate, and the tolerant load / config-sync ingress still boots a
+mismatched config rather than bricking a node (#1960).
+
 #### Knowing when it is safe to finalize
 
 ```

@@ -684,6 +684,14 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 			return err
 		}
 	}
+	if err := validateClusterAuthKeyTransitionStrict(cfg, opts.currentClusterAccepted16858); err != nil {
+		if opts.lenientClusterAuthKey {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("cluster authentication (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	// #6611/#16025 key-strength policy. Absence is rejected above. A short
 	// primary is also rejected on strict commit unless the same short

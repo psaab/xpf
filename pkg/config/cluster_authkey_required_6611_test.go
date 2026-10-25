@@ -511,3 +511,128 @@ func TestStrengthWarningNeverRendersTheKey_6611(t *testing.T) {
 		}
 	}
 }
+
+// #16858 (R3-B04-02): the transition interlock. A strict candidate may
+// only sign with a key the ACTIVE config already accepts. RED pre-fix:
+// CompileConfigWithCurrentClusterPrimary accepted the one-shot and
+// rollback candidates below, because no gate compared candidate against
+// active.
+
+const (
+	keyA16858 = "alpha-key-0123456789abcdef"
+	keyB16858 = "bravo-key-0123456789abcdef"
+)
+
+func clusterTree16858(t *testing.T, primary, additional string) *ConfigTree {
+	t.Helper()
+	lines := []string{"set chassis cluster cluster-id 1"}
+	if primary != "" {
+		lines = append(lines, "set chassis cluster authentication-key "+primary)
+	}
+	if additional != "" {
+		lines = append(lines, "set chassis cluster additional-authentication-key "+additional)
+	}
+	return buildTree(t, lines)
+}
+
+func currentConfig16858(t *testing.T, primary, additional string) *Config {
+	t.Helper()
+	cfg, err := CompileConfigLenient(clusterTree16858(t, primary, additional))
+	if err != nil {
+		t.Fatalf("current fixture (%q/%q): %v", primary, additional, err)
+	}
+	return cfg
+}
+
+func TestOneShotKeyChangeRejected16858(t *testing.T) {
+	current := currentConfig16858(t, keyA16858, "")
+	// One-shot A -> B.
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyB16858, ""), current); err == nil {
+		t.Fatal("one-shot A->B committed; the peer's active {A} does not accept B (#16858)")
+	} else {
+		if strings.Contains(err.Error(), keyA16858) || strings.Contains(err.Error(), keyB16858) {
+			t.Fatalf("transition rejection leaked key material: %v", err)
+		}
+		if !strings.Contains(err.Error(), "additional-authentication-key") {
+			t.Fatalf("transition rejection must point at the overlap procedure: %v", err)
+		}
+	}
+	// One-shot with the old key kept as the candidate's own additional
+	// key is still refused: this node accepting A does not make the
+	// peer accept B.
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyB16858, keyA16858), current); err == nil {
+		t.Fatal("one-shot A->B with candidate additional A committed; peer still accepts only {A} (#16858)")
+	}
+	// Fresh candidate (no current): gate closed, first keying commits.
+	if _, err := CompileConfig(clusterTree16858(t, keyB16858, "")); err != nil {
+		t.Fatalf("fresh keyed candidate rejected without an active config: %v", err)
+	}
+}
+
+func TestRollbackPastFinalizeRejected16858(t *testing.T) {
+	current := currentConfig16858(t, keyB16858, "")
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyA16858, ""), current); err == nil {
+		t.Fatal("rollback from finalized {B} to pre-rotation {A} committed; peer's active {B} does not accept A (#16858)")
+	}
+}
+
+func TestRotationProcedureStepsAccepted16858(t *testing.T) {
+	// Step 1/2 shape: active {A}, candidate signs A, accepts A+B.
+	activeA := currentConfig16858(t, keyA16858, "")
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyA16858, keyB16858), activeA); err != nil {
+		t.Fatalf("step 1/2 (stage B beside A) rejected: %v", err)
+	}
+	// Step 3/4 shape (the vb04 control arm): active signs A accepts
+	// A+B, candidate signs B accepts B+A.
+	activeStaged := currentConfig16858(t, keyA16858, keyB16858)
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyB16858, keyA16858), activeStaged); err != nil {
+		t.Fatalf("step 3/4 (sign B, accept B+A) rejected: %v", err)
+	}
+	// Rollback while the overlap is still open (vb04 control arm):
+	// active signs B accepts B+A, candidate signs A accepts A+B.
+	activeSwapped := currentConfig16858(t, keyB16858, keyA16858)
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyA16858, keyB16858), activeSwapped); err != nil {
+		t.Fatalf("rollback while overlap open rejected: %v", err)
+	}
+	// Step 5 finalize: active signs B accepts B+A, candidate signs B.
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyB16858, ""), activeSwapped); err != nil {
+		t.Fatalf("step 5 finalize rejected: %v", err)
+	}
+	// Routine commit: signing key unchanged.
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyA16858, ""), activeA); err != nil {
+		t.Fatalf("routine same-key commit rejected: %v", err)
+	}
+	// Whitespace-trimmed equality: the runtime compares raw bytes but
+	// the existing gates trim; a padded spelling of the active key is
+	// the same transition as the unpadded one.
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, " "+keyA16858+" ", ""), activeA); err != nil {
+		t.Fatalf("padded same-key commit rejected: %v", err)
+	}
+}
+
+func TestTransitionGateTolerantAndStandalone16858(t *testing.T) {
+	// Tolerant path: a persisted mismatched config still boots (#1960).
+	// CompileConfigLenient supplies no current, so the interlock is
+	// closed and the config compiles.
+	cfg, err := CompileConfigLenient(clusterTree16858(t, keyB16858, ""))
+	if err != nil {
+		t.Fatalf("tolerant load rejected a keyed cluster: %v", err)
+	}
+	if cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal() != keyB16858 {
+		t.Fatal("tolerant load dropped the signing key")
+	}
+	// Standalone: no cluster stanza in candidate or current is untouched.
+	plain := buildTree(t, []string{"set system host-name node0"})
+	if _, err := CompileConfigWithCurrentClusterPrimary(plain, currentConfig16858(t, keyA16858, "")); err != nil {
+		t.Fatalf("standalone candidate rejected by transition gate: %v", err)
+	}
+	// Candidate adds a cluster stanza where active had none: first
+	// keying, accepted.
+	noClusterCurrent, err := CompileConfigLenient(plain)
+	if err != nil {
+		t.Fatalf("no-cluster current fixture: %v", err)
+	}
+	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyB16858, ""), noClusterCurrent); err != nil {
+		t.Fatalf("first keying over a clusterless active config rejected: %v", err)
+	}
+}
