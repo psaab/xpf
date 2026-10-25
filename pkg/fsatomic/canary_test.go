@@ -45,6 +45,11 @@ var allowedFunctions = map[string]string{
 	"daemon::setRethIPv6Knobs":          "procfs accept_dad / addr_gen_mode",
 	"daemon::setVLANSubAddrGenMode":     "procfs addr_gen_mode (VLAN sub-iface)",
 	"daemon::setFibMultipathHashPolicy": "procfs fib_multipath_hash_policy",
+	// #16723 classification: icmpv6 ratelimit restore and the redirect
+	// sysctl writer are the same BestEffortKernelKnob class — sysctl
+	// files where rename(2) is impossible by construction.
+	"daemon::reconcileICMPv6Ratelimit": "sysctl icmpv6 ratelimit restore knob",
+	"daemon::writeRedirectKnobs":      "sysctl send_redirects knobs",
 	// pkg/dataplane — RPS/RFS/XPS + accept_ra sysfs/procfs knobs.
 	"dataplane::CompileResult.tuneInterfaceBuffers": "sysfs RPS/RFS/XPS knobs",
 	"dataplane::ensureVLANSubInterface":             "procfs accept_ra knob",
@@ -56,6 +61,10 @@ var allowedFunctions = map[string]string{
 	// (restoreSlowPathRPFilterOn); only the leaf holds the direct write,
 	// so only the leaf is allowlisted (#10155).
 	"networkd::restoreSlowPathRPFilterOn": "procfs rp_filter knob",
+	// #16723 classification: a test seam planting a fixture marker file
+	// in a redirected tree (never production state); durability is
+	// irrelevant by construction and the write is setup, not output.
+	"factoryreset::RedirectWipePathsForTesting": "test seam: fixture appliance-marker file in a redirected tree",
 }
 
 // funcKey formats the receiver-aware allowlist key for a FuncDecl in the

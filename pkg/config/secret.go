@@ -435,16 +435,16 @@ func (s *Secret) UnmarshalYAML(value *yaml.Node) error {
 // TestSecretLeafKeywordsExistInSchema (no dead entries) and against the known
 // credential leaves by TestSecretLeafKeywordsCoverKnownCredentials.
 var secretLeafKeywords = map[string]bool{
-	"authentication-key": true,
-	"pre-shared-key":     true,
-	"preshared-key":      true,
-	"private-key":        true,
-	"encrypted-password": true,
-	"plain-text-password": true,
+	"authentication-key":        true,
+	"pre-shared-key":            true,
+	"preshared-key":             true,
+	"private-key":               true,
+	"encrypted-password":        true,
+	"plain-text-password":       true,
 	"plain-text-password-value": true,
-	"password":           true,
-	"tsig-secret":        true,
-	"api-key":            true,
+	"password":                  true,
+	"tsig-secret":               true,
+	"api-key":                   true,
 }
 
 // secretLeafKeywordsByRoot qualifies a DUAL-USE keyword by the top-level

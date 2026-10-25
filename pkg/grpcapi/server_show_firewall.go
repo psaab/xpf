@@ -462,7 +462,7 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			// #3104: skip scheduler-inactive policies like the runtime does, so
 			// the `test policy` diagnostic falls through to the next active rule
 			// / default-policy, agreeing with the dataplane.
-			PolicyInactiveFn: s.policyInactiveFn(),
+			PolicyInactiveForFn: s.policyInactiveForFn(cfg),
 		})
 		if res.PostNATInputNote != "" {
 			fmt.Fprintf(buf, "NOTE: %s\n", res.PostNATInputNote)

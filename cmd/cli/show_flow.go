@@ -394,7 +394,6 @@ func printSessionSummaryBlock(resp *pb.GetSessionSummaryResponse) {
 	}
 }
 
-
 // resolveSessionZone binds `show security flow session zone <name>` to the zone
 // id GetSessions filters on (#9065).
 //

@@ -117,16 +117,16 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 
 	families := []dhcpHostInboundFamily{
 		{
-			srv:    cfg.System.DHCPServer.DHCPLocalServer,
-			stanza: "dhcp-local-server",
-			token:  "dhcp",
+			srv:                         cfg.System.DHCPServer.DHCPLocalServer,
+			stanza:                      "dhcp-local-server",
+			token:                       "dhcp",
 			mechanism:                   "the client sends to the 255.255.255.255 broadcast, which the XDP shim passes to the kernel without entering the AF_XDP userspace dataplane, while Kea's AF_PACKET raw socket receives before the netfilter input hook",
 			servesDespiteMissingService: true,
 		},
 		{
-			srv:    cfg.System.DHCPServer.DHCPv6LocalServer,
-			stanza: "dhcpv6-local-server",
-			token:  "dhcpv6",
+			srv:                         cfg.System.DHCPServer.DHCPv6LocalServer,
+			stanza:                      "dhcpv6-local-server",
+			token:                       "dhcpv6",
 			mechanism:                   "the client sends to the ff02::1:2 multicast group, which the #13925 per-zone link-scope gate admits on UDP 546/547 only when this zone permits dhcpv6",
 			servesDespiteMissingService: false,
 		},

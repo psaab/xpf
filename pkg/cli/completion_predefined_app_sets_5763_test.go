@@ -146,9 +146,9 @@ func TestCompleteConfig_PredefinedApplicationSets_5763(t *testing.T) {
 	}
 
 	for _, command := range []string{
-		"applications application junos-ms-rpc protocol tcp",
-		"applications application junos-ms-rpc destination-port 9999",
-		"applications application junos-ms-rpc description \"configured application shadow\"",
+		"applications application my-ms-rpc protocol tcp",
+		"applications application my-ms-rpc destination-port 9999",
+		"applications application my-ms-rpc description \"configured application shadow\"",
 		"applications application-set junos-sip application junos-http",
 	} {
 		if err := store.SetFromInput(command); err != nil {
@@ -166,12 +166,12 @@ func TestCompleteConfig_PredefinedApplicationSets_5763(t *testing.T) {
 	if active := store.ActiveConfig(); active == nil {
 		t.Fatal("ActiveConfig() remained nil after shadow Commit()")
 	}
-	shadowApp := shadowConfig.Applications.Applications["junos-ms-rpc"]
+	shadowApp := shadowConfig.Applications.Applications["my-ms-rpc"]
 	if shadowApp == nil {
-		t.Fatal("compiled Applications[\"junos-ms-rpc\"] is nil")
+		t.Fatal("compiled Applications[\"my-ms-rpc\"] is nil")
 	}
 	if shadowApp.Description != "configured application shadow" {
-		t.Fatalf("compiled junos-ms-rpc description = %q, want %q", shadowApp.Description, "configured application shadow")
+		t.Fatalf("compiled my-ms-rpc description = %q, want %q", shadowApp.Description, "configured application shadow")
 	}
 	if shadowSet := shadowConfig.Applications.ApplicationSets["junos-sip"]; shadowSet == nil {
 		t.Fatal("compiled ApplicationSets[\"junos-sip\"] is nil")

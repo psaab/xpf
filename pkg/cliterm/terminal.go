@@ -22,6 +22,8 @@ import (
 	"strings"
 
 	"github.com/chzyer/readline"
+
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 // StripSurroundingQuotes removes one layer of matching leading/trailing
@@ -295,16 +297,15 @@ func RecordHistoryLine(path, line string) error {
 		for _, l := range seed {
 			b.WriteString(l + "\n")
 		}
-		// Rewrite via a same-directory temp + rename so a crash mid-write
-		// cannot leave a half-written history (readline's own rewriteLocked
-		// used the same pattern); the temp is created 0600 and renamed over
-		// the 0600 original, preserving SecureReadlineHistory's guarantee.
-		tmp := path + ".tmp"
-		if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+		// Rewrite atomically so a crash mid-write cannot leave a
+		// half-written history (readline's own rewriteLocked used the
+		// same pattern); WriteFileAtomic stages a 0600 temp in the same
+		// directory and renames it over the 0600 original, preserving
+		// SecureReadlineHistory's guarantee. History is advisory
+		// operator state, not DurableState, so the non-durable atomic
+		// class is the right one (#16723 fsatomic classification).
+		if err := fsatomic.WriteFileAtomic(path, []byte(b.String()), 0o600); err != nil {
 			return fmt.Errorf("rewrite history file: %w", err)
-		}
-		if err := os.Rename(tmp, path); err != nil {
-			return fmt.Errorf("replace history file: %w", err)
 		}
 		return nil
 	}

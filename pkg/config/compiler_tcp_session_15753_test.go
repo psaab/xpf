@@ -13,7 +13,9 @@ func TestCompileTCPSessionFidelityKnobs15753(t *testing.T) {
 		"set security flow tcp-session no-syn-check-in-tunnel",
 	})
 	cfg, err := CompileConfig(tree)
-	if err != nil { t.Fatalf("CompileConfig: %v", err) }
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
 	ts := cfg.Security.Flow.TCPSession
 	if ts == nil || !ts.RstSequenceCheck || ts.MaximumWindow != 32768 || !ts.RstInvalidateSession || !ts.NoSynCheckInTunnel {
 		t.Fatalf("fidelity knobs not compiled: %+v", ts)

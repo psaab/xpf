@@ -26,7 +26,6 @@ func natSideBook12627() *config.AddressBook {
 	}
 }
 
-
 // Probe F: a poisoned name taints the WHOLE SNAT selector side — bracket lists
 // and literal companions are cleared rather than publishing a surviving subset.
 func TestNATPoisonedNameTaintsWholeSide12627(t *testing.T) {
@@ -38,7 +37,7 @@ func TestNATPoisonedNameTaintsWholeSide12627(t *testing.T) {
 			{
 				Name: "mixed",
 				Match: config.NATMatch{
-					SourceAddresses:  []string{"192.0.2.0/24"},
+					SourceAddresses:    []string{"192.0.2.0/24"},
 					SourceAddressNames: []string{"good-set", "flawed-set"},
 				},
 				Then: config.NATThen{Type: config.NATSource, Interface: true},

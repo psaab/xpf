@@ -391,6 +391,17 @@ func (a *LegacyDataPlaneAdapter) PolicySchedulerActiveState() map[string]bool {
 	return m.PolicySchedulerActiveState()
 }
 
+// PolicySchedulerDesiredStateAndFailClosed forwards the staged
+// scheduler inputs (state + fail-closed latch) for simulator surfaces
+// that must reproduce the builder's per-action disposition (#16723).
+func (a *LegacyDataPlaneAdapter) PolicySchedulerDesiredStateAndFailClosed() (map[string]bool, bool) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil, false
+	}
+	return m.PolicySchedulerDesiredStateAndFailClosed()
+}
+
 // SetRouteOverlay forwards the ip-monitoring overlay cache (#1827).
 func (a *LegacyDataPlaneAdapter) SetRouteOverlay(overlay []config.RouteOverlayEntry) {
 	m, err := a.managerOrErr()

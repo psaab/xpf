@@ -490,6 +490,18 @@ type Query struct {
 	// inactive exactly as the dataplane treats it rather than certified active.
 	PolicyInactiveFn func(schedulerName string) bool
 
+	// PolicyInactiveForFn, when non-nil, is the action-aware scheduler
+	// predicate (#16723): it receives the whole policy, so the
+	// fail-closed latch and #16010 Unresolvable dispositions (a
+	// scheduled DENY/REJECT stays eligible while permits fail closed)
+	// are reproduced exactly as the snapshot builder computes them.
+	// It takes precedence over PolicyInactiveFn, which cannot express
+	// those dispositions (it sees only the scheduler name). Live
+	// surfaces build it via
+	// dataplane/userspace.PolicyInactiveFnWithLatch from the desired
+	// scheduler state + latch.
+	PolicyInactiveForFn func(pol *config.Policy) bool
+
 	// SrcFamily / DstFamily carry the COLON-STRICT address family ("v4"/"v6"/"")
 	// of the source/destination, derived by the caller from the RAW operator
 	// text before net.ParseIP folded it (#6377). net.ParseIP renders `192.0.2.1`
@@ -2146,6 +2158,18 @@ func matchedResult(ids map[[2]uint32]uint32, pol *config.Policy, global bool, fr
 	}
 }
 
+// policyInactive reports whether pol is scheduler-inactive for this
+// query, preferring the action-aware predicate (#16723).
+func (q Query) policyInactive(pol *config.Policy) bool {
+	if q.PolicyInactiveForFn != nil {
+		return q.PolicyInactiveForFn(pol)
+	}
+	if q.PolicyInactiveFn != nil {
+		return q.PolicyInactiveFn(pol.SchedulerName)
+	}
+	return false
+}
+
 func ruleMatchesWithMemo(cfg *config.Config, q Query, pol *config.Policy, addressMemo *addressExpansionMemo) bool {
 	// #3104: scheduler gate, FIRST — mirror policy.rs try_match_rule, which
 	// returns None for a scheduler-inactive rule before any app/address
@@ -2154,7 +2178,7 @@ func ruleMatchesWithMemo(cfg *config.Config, q Query, pol *config.Policy, addres
 	// nil when the caller has no live scheduler state (simulate as-if-active),
 	// and reports an empty scheduler name as active, so a non-scheduled policy
 	// is never skipped.
-	if q.PolicyInactiveFn != nil && q.PolicyInactiveFn(pol.SchedulerName) {
+	if q.policyInactive(pol) {
 		return false
 	}
 	// #14337: feed-publication debt is scoped to THIS rule. Static dimensions
@@ -3148,7 +3172,7 @@ func isSkippedFragDenyWithMemo(
 	pol *config.Policy,
 	addressMemo *addressExpansionMemo,
 ) bool {
-	if q.PolicyInactiveFn != nil && q.PolicyInactiveFn(pol.SchedulerName) {
+	if q.policyInactive(pol) {
 		return false
 	}
 	if pol.Action != config.PolicyDeny && pol.Action != config.PolicyReject {

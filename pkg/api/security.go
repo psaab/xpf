@@ -975,6 +975,12 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 	if s.policySchedActiveFn != nil {
 		schedState, _ = s.policySchedActiveFn()
 	}
+	// #16723: PolicyInactiveFn (name-only) stays the predicate here —
+	// pkg/api has no latch plumbing (policySchedActiveFn carries no
+	// fail-closed latch), and the name-only predicate is STRICTER for
+	// scheduled denies than the builder's latch disposition: it never
+	// certifies a permit past a deny the runtime might still enforce.
+	// Surfaces with latch access (CLI, gRPC) use PolicyInactiveForFn.
 	inactiveFn := dpuserspace.PolicyInactiveFn(schedState)
 	res := policymatch.Match(cfg, policymatch.Query{
 		FromZone: fromZone,

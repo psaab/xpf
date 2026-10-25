@@ -7,7 +7,6 @@ import "testing"
 // (a surface that has not proven it reconstructs arguments) the #8189
 // advisory keeps speaking.
 
-
 func loginClassCfgAllow(t *testing.T, allow string) *Config {
 	t.Helper()
 	tree := &ConfigTree{}

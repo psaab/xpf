@@ -469,7 +469,6 @@ func (d *Daemon) peerRAConfig(localCfg *config.Config) (*config.Config, bool) {
 	return peerCfg, true
 }
 
-
 // sortRAPrefixes orders an RA interface's advertised prefixes by a stable, total
 // key so the desired-set digest and ra.configEqual observe a deterministic order
 // regardless of the source (map-iteration) order. nil entries sort last so a

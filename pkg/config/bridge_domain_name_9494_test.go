@@ -23,7 +23,7 @@ func TestBridgeDomainNameRejectsPathSeparators_9494(t *testing.T) {
 		return tr
 	}
 	for _, bad := range []string{`x/../../pwnbd`, `x/../../../../../../etc/cron.d/pwn`, `a\\b`} {
-		err := SchemaValidate(build(`set bridge-domains "`+bad+`" vlan-id-list 10`))
+		err := SchemaValidate(build(`set bridge-domains "` + bad + `" vlan-id-list 10`))
 		if err == nil || !strings.Contains(err.Error(), "path separator") {
 			t.Fatalf("#9494: bridge-domain %q must be rejected at commit, got %v", bad, err)
 		}

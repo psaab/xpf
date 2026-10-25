@@ -1850,7 +1850,6 @@ type Daemon struct {
 	// (factory / fail-closed / first-commit rollback) leaves it false.
 	bootstrapFromRefusedRollback atomic.Bool
 
-
 	// bootstrapLifelineMu protects the pre-takeover snapshot from an explicit
 	// commit-confirm resolving the first-commit window outside applySem.
 	bootstrapLifelineMu sync.Mutex

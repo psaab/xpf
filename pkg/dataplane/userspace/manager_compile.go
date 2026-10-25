@@ -258,6 +258,16 @@ func (m *Manager) PolicySchedulerActiveState() map[string]bool {
 	return m.policySchedulerActiveStateSnapshot()
 }
 
+// PolicySchedulerDesiredStateAndFailClosed returns the DESIRED
+// (staged, not yet necessarily applied) scheduler inputs the next
+// snapshot build will use, including the fail-closed latch (#16723).
+// Simulator surfaces that must agree with the builder's per-action
+// disposition read this pair rather than the applied-state view
+// (PolicySchedulerActiveState), which carries no latch.
+func (m *Manager) PolicySchedulerDesiredStateAndFailClosed() (map[string]bool, bool) {
+	return m.policySchedulerDesiredStateAndFailClosedSnapshot()
+}
+
 // SetPolicySchedulerActiveState stages the active-state map for the next
 // snapshot with the normal scheduler disposition.
 func (m *Manager) SetPolicySchedulerActiveState(activeState map[string]bool) {

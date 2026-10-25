@@ -142,11 +142,22 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 	// Still-sanitized route-map payloads survive collapsed onto their single
 	// directive line (newline → space). The prefix-list entries are rejected by
 	// ParseCIDR, and the malformed community values are rejected by #12069.
+	// #16723: the source-protocol slot moved OUT of this list by #16577.
+	// A token FRR cannot parse as a routing protocol (the injected
+	// "bgp\n router bgp 65000") is now OMITTED by the
+	// RoutingProtocolResolvable belt — the bare deny sequence renders
+	// instead — which is strictly stronger than sanitizing it onto one
+	// line, exactly like the #12070/#4919 arms below. The negative
+	// assertion after this block pins that omission; the sanitized
+	// rendering of a RESOLVABLE protocol is pinned by the 15157/14586
+	// route-map cells (`match source-protocol bgp`).
+	if strings.Contains(got, " match source-protocol ") {
+		t.Errorf("unknown source-protocol must be omitted by the #16577 belt, got:\n%s", got)
+	}
 	wantOnOneLine := []struct {
 		slot string
 		want string
 	}{
-		{"match source-protocol", " match source-protocol bgp  router bgp 65000\n"},
 		// #9493: the three NAME slots (match community, match as-path, set
 		// comm-list) render through frrName, not sanitizeFRRValue, and are
 		// asserted below. Collapsing a name onto one line still split it into

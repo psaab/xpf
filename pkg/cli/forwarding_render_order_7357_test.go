@@ -30,12 +30,17 @@ func mirrorOrderStore(t *testing.T) *configstore.Store {
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure() error = %v", err)
 	}
-	for _, name := range []string{
+	names := []string{
 		"zulu", "delta", "november", "alpha", "kilo", "echo", "mike", "golf",
-	} {
+	}
+	for i, name := range names {
 		for _, line := range []string{
-			"set forwarding-options port-mirroring instance " + name + " output ge-0/0/9",
-			"set forwarding-options port-mirroring instance " + name + " input ingress ge-0/0/1",
+			// #16723: one ingress interface may be mirrored by only one
+			// instance (later strict gate), so each instance mirrors a
+			// distinct ingress interface; the ordering subject (instance
+			// names from a map) is unchanged.
+			"set forwarding-options port-mirroring instance " + name + " output interface ge-0/0/9",
+			"set forwarding-options port-mirroring instance " + name + " input ingress interface ge-0/0/" + string(rune('1'+i)),
 		} {
 			if _, err := store.LoadSet(line); err != nil {
 				t.Fatalf("LoadSet(%q) error = %v", line, err)

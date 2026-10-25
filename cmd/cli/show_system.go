@@ -61,6 +61,16 @@ func (c *ctl) handleShowSystem(args []string) error {
 			if err != nil {
 				return err
 			}
+			// #16723 (#13202 half): a bare token after the slot is not a
+			// pipe modifier and not, without a `| display`, a request the
+			// surface honours — `rollback 1 bogus` / `rollback 1 display
+			// set` used to fall through to ShowRollback with the token as
+			// an unchecked subtree path and exit 0. A subtree path is
+			// only meaningful WITH a display format (#15657); without a
+			// pipe, any trailing token is stray and errors before any RPC.
+			if len(pipe) == 0 && len(path) > 0 {
+				return fmt.Errorf("usage: show system rollback <N> [ | display <format> | | compare ]")
+			}
 			if len(pipe) > 0 && pipe[0] == "compare" {
 				if len(pipe) != 1 {
 					return fmt.Errorf("usage: show system rollback <N> | compare")

@@ -140,9 +140,14 @@ func TestCLIFlowCollectorSurfacesAnnotateTheSkippedCollector7422(t *testing.T) {
 // for a renderer that annotated the healthy one.
 func collectorLine7422(t *testing.T, out, addr string) string {
 	t.Helper()
+	// #16723: the two surfaces label the same collector differently
+	// ("Collector:" in showFlowMonitoring, "Flow server:" in
+	// showForwardingOptions), and one surface's block can contain the
+	// other label's address line — matching on the address alone
+	// collected both. Isolate by the surface's own label.
 	var hits []string
 	for _, l := range strings.Split(out, "\n") {
-		if strings.Contains(l, addr) {
+		if strings.Contains(l, addr) && (strings.Contains(l, "Collector:") || strings.Contains(l, "Flow server:")) {
 			hits = append(hits, l)
 		}
 	}

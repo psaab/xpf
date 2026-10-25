@@ -171,7 +171,7 @@ func compileWire11056(t *testing.T, tree *config.ConfigTree) *config.Config {
 func wire11056Tuple(proto string, dstPort int) Query {
 	return Query{
 		FromZone: "lan", ToZone: "wan",
-		SrcIP:    net.ParseIP("10.0.61.102"), // CLUSTER_LAN_HOST, the burst sender
+		SrcIP:    net.ParseIP("10.0.61.102"),   // CLUSTER_LAN_HOST, the burst sender
 		DstIP:    net.ParseIP("172.16.80.201"), // the VLAN-80 capture point
 		Protocol: proto, DstPort: dstPort,
 	}

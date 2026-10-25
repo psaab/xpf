@@ -150,7 +150,6 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// resolve the not-yet-published config before acquiring applySem.
 	// No network I/O runs here under applySem.
 
-
 	// 1.96. Refresh the dataplane's dynamic-address feed overlay from the
 	// feed manager BEFORE the full snapshot build (#2049). The feed manager
 	// fetches threat-feed/allowlist prefixes and its onUpdate callback

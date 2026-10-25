@@ -120,6 +120,8 @@ var valueSlotBindings = map[string]slotAdjudication{
 	"test policy to-zone":           {bindSharedParser, "main.go testPolicy: policymatch.ParseSelectorArgs (#15721)"},
 	"test policy ingress-interface": {bindSharedParser, "main.go testPolicy: policymatch.ParseSelectorArgs (#15721)"},
 	"test routing instance":         {bindKeyword, "main.go testRouting loop"},
+	"clear dhcp client-identifier interface": {bindFixedPosition, "clear.go handleClearDHCP: req.Interface = args[2] after the `interface` keyword check"},
+
 	"test security-zone interface":  {bindKeyword, "main.go testSecurityZone loop"},
 }
 

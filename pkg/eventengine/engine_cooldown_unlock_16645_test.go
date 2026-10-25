@@ -17,6 +17,22 @@ import (
 // Fix: capture cooldown parks under e.mu and insert them under pendingMu
 // only after evaluate returns; e.mu is never released inside the loop.
 //
+// #16723 supersession: #16650 (Apply reconciles parked edges — a parked
+// entry whose semRev no longer matches the live revision is purged on
+// Apply, and its policy's suppressedDirection is cleared so the successor
+// can park) redefined the end state this cell pins. The pre-#16650
+// assertion "the OLD p2 edge stays parked stamped with the OLD revision
+// and staleReason then rejects it" cannot hold together with #16650's
+// "the successor's edge must not be swallowed by the stale entry": the
+// purge deletes the old edge precisely so it can never replay. The
+// security property is unchanged and now stronger — the stale batch is
+// GONE, not merely gated at commit time. This cell now pins: (1) no
+// triggered policy pairs the old p2 pointer with the new revision
+// (the original #16645 pairing defect); (2) the redefinition purges the
+// old p2 parked edge (gone, not replayable); (3) p1's unchanged edge
+// survives stamped with its live revision; and (4) the commit-time
+// backstop still rejects a synthetic old-generation action for p2, so
+// the gate the purge complements is still exercised.
 // Interleave: p1 and p2 both list ping_test_failed and both are in cooldown.
 // The test holds pendingMu, so pre-fix p1's park blocks with e.mu RELEASED;
 // ApplyWithConfig then redefines p2 and the old loop stamps old p2 with the
@@ -122,23 +138,26 @@ func TestEvaluateCooldownUnlockRedefinition16645(t *testing.T) {
 	}
 	e.pendingMu.Unlock()
 
-	p2Edge, ok := parked["p2\x00ping_test_failed"]
+	// #16650 supersession (#16723): the redefinition purges the old p2
+	// parked edge instead of leaving it for the commit-time gate. The
+	// stale batch must be ABSENT — present-but-gated would still occupy
+	// the key and swallow the successor's edge (#16650's defect).
+	if _, ok := parked["p2\x00ping_test_failed"]; ok {
+		t.Fatalf("old p2 cooldown edge survived the redefinition; parked keys=%v", keysOf16645(parked))
+	}
+	// The commit-time backstop the purge complements must still reject
+	// an old-generation action for p2 (belt and suspenders: a batch
+	// stamped with the superseded revision is never committable).
+	stale := plannedAction{policyName: "p2", semRev: oldRevP2}
+	if reason := e.staleReason(stale); reason != "policy redefined" {
+		t.Fatalf("staleReason(old-generation p2 action) = %q, want %q", reason, "policy redefined")
+	}
+	p1Edge, ok := parked["p1\x00ping_test_failed"]
 	if !ok {
-		t.Fatalf("p2 cooldown edge not parked; parked keys=%v", keysOf16645(parked))
-	}
-	if p2Edge.action.semRev != oldRevP2 {
-		t.Fatalf("parked p2 action semRev=%q, want old generation %q; a stale batch would pass the #3750 redefined gate", p2Edge.action.semRev, oldRevP2)
-	}
-	if len(p2Edge.action.ops) == 0 {
-		t.Fatal("parked p2 action has no ops")
-	}
-	// The worker commit-time backstop must reject the parked old batch now
-	// that the redefinition has landed.
-	if reason := e.staleReason(p2Edge.action); reason != "policy redefined" {
-		t.Fatalf("staleReason(parked old p2) = %q, want %q", reason, "policy redefined")
-	}
-	if _, ok := parked["p1\x00ping_test_failed"]; !ok {
 		t.Fatalf("p1 cooldown edge not parked; parked keys=%v", keysOf16645(parked))
+	}
+	if len(p1Edge.action.ops) == 0 {
+		t.Fatal("parked p1 action has no ops")
 	}
 }
 

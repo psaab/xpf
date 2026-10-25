@@ -361,7 +361,6 @@ func TestShowWholeHandlerStaleInterleave15995(t *testing.T) {
 	}
 }
 
-
 func wholeReq15995() *pb.ShowConfigRequest {
 	return &pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE}
 }
@@ -378,6 +377,7 @@ func wholeReq15995() *pb.ShowConfigRequest {
 //     open class and verify handler rendering, then verify the
 //     restricted class cannot obtain an admitted context by ANY of
 //     stale/current cfg through the gate entry.
+//
 // Production has no seam to inject a stale cfg INTO
 // authorizeRPCContext itself (cfg := s.activeConfig() is read inside
 // it immediately before the gate call, one statement, no hook) —

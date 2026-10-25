@@ -276,4 +276,3 @@ func poisonScopedGlobalZoneLocalRefs16596(cfg *Config) {
 		}
 	}
 }
-

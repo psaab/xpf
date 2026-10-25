@@ -46,7 +46,7 @@ func setupRetirePipeline13975(t *testing.T, submitter ReinjectSubmitter) (*Captu
 func enqueue13975(t *testing.T, p *CapturePipeline, flowKey string, id uint32) {
 	t.Helper()
 	frame := CaptureFrame{
-		Packet:     pipelineTestPacket(77, 2, 2, 7, id),
+		Packet:  pipelineTestPacket(77, 2, 2, 7, id),
 		FlowKey: flowKey, QueueNumber: 77, QueueEpoch: 1,
 		Generation: 1, SnapshotGeneration: 1, ConfigGeneration: 1, FIBGeneration: 1,
 	}

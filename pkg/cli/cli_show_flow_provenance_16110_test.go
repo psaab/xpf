@@ -78,4 +78,3 @@ func TestPeerSessionOriginLabel16110(t *testing.T) {
 		t.Fatalf("numeric proto: got %d", got)
 	}
 }
-

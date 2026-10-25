@@ -41,6 +41,7 @@ func TestTightenedScopesIngressDenyNewGeneration13105(t *testing.T) {
 		t.Fatal("addressless zone must not create a transition advisory")
 	}
 }
+
 // A live DHCP lease is not in the static interface stanza. When the address
 // view groups an overridden unit with a zone-default unit having identical
 // tokens, snapshot ownership must prevent attribution to the sibling's zone

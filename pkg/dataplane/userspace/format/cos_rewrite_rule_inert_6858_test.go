@@ -398,6 +398,8 @@ func TestFormatCoSRewriteRulesDanglingInterfaceBindingIsNotEnforced6858(t *testi
 	}, {
 		name: "interface configured but the bound UNIT is not",
 		extra: []string{
+			"set interfaces ge-0-0-1 vlan-tagging",
+			"set interfaces ge-0-0-1 unit 100 vlan-id 100",
 			"set interfaces ge-0-0-1 unit 100 family inet address 10.9.0.1/24",
 			"set class-of-service interfaces ge-0-0-1 unit 0 rewrite-rules dscp " + rule,
 		},
@@ -459,6 +461,9 @@ func TestFormatCoSRewriteRulesZoneAuthoredBindOnlyTunnelIsEnforced11788(t *testi
 			" forwarding-class best-effort loss-priority low code-point be",
 		"set class-of-service interfaces st0 unit 1 rewrite-rules dscp "+rule,
 		"set security ipsec vpn vpn1 bind-interface st0.1",
+		"set security ike gateway gw1 address 192.0.2.1",
+		"set security ipsec vpn vpn1 ike gateway gw1",
+		"set security ipsec vpn vpn1 pre-shared-key test-psk-11788",
 		"set security zones security-zone vpn interfaces st0.1",
 		"set system dataplane-type userspace",
 	)

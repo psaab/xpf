@@ -71,9 +71,9 @@ func TestScopedCancelDispatchesArmedD11FrameToAttestation13233(t *testing.T) {
 		Submitter:   submitter,
 		LeaseMinter: minter,
 		Attestation: &D11AttestationConfig{
-			Armer:    armer,
-			Ledger:   ledger,
-			OriginValid: func(CaptureOrigin) bool { return true },
+			Armer:            armer,
+			Ledger:           ledger,
+			OriginValid:      func(CaptureOrigin) bool { return true },
 			AuthorityCurrent: func() bool { return true },
 		},
 		ZoneEvaluator: passZoneEvaluator9506{},
@@ -97,9 +97,9 @@ func TestScopedCancelDispatchesArmedD11FrameToAttestation13233(t *testing.T) {
 	pkt := pipelineTestPacket(77, 2, 2, 7, 203)
 	pkt.payload = payload
 	frame := CaptureFrame{
-		Packet:    pkt,
-		FlowKey:   "d11-flow",
-		phase:     PipelineEnforcing,
+		Packet:     pkt,
+		FlowKey:    "d11-flow",
+		phase:      PipelineEnforcing,
 		Generation: 1, SnapshotGeneration: 1, ConfigGeneration: 1,
 		FIBGeneration: 1, QueueNumber: 77, QueueEpoch: 1,
 		origin:    CaptureOrigin{Family: CaptureFamilyInet, Hook: CaptureHookForward, Owner: "owner-a", STN: "st0", OwnedIfindex: 7},
