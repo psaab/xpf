@@ -360,6 +360,7 @@ func (s *SocketReinjectSubmitter) DrainReinjectCompletions(max uint32) ([]Reinje
 				// pending work closed instead of expiring it as
 				// an ack timeout; Rust releases the batch for
 				// redelivery on the next connection.
+				_ = s.complete.Close()
 				s.complete = nil
 				s.completeBuf = nil
 				return nil, fmt.Errorf("nfqueue: read reinject completion: %w", readErr)
