@@ -425,7 +425,7 @@ run_shell test/routing/selftest-routing-probes_9812.sh
 # user namespaces are unavailable.
 run_shell test/daemon/selftest-daemon-kernel_15241.sh
 # The probes pin missing-tool behavior and the -json=false argv contract.
-# Thirteen hermetic fixture cells: no Go build or netns.
+# Fifteen hermetic fixture cells: no Go build or netns.
 run_shell test/daemon/selftest-daemon-probes_15241.sh
 # #10771: prove the BPF leg's privilege contract with fake tools: without
 # passwordless sudo it SKIPs; when available, the compiled probe is invoked as
