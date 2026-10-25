@@ -1212,6 +1212,22 @@ which share `config.AuthorizeConfigMutation`. Flat `load set` /
 `LoadMutationLines`; the hierarchical branch already rendered through
 `FormatSet`.
 
+#### `insert` is adjudicated on both endpoints (#16786)
+
+`insert <element> before|after <ref>` moves an existing element relative
+to a reference element under the same parent. In a first-match list
+(security policies, firewall terms) that reorder changes the
+reference's effective position even though its statement is untouched,
+so the mutation gate adjudicates the resolved reference path — built
+exactly as the executors build it (`InsertRefPath` over the
+edit-resolved element) — alongside the element path, the same
+two-endpoint pricing `copy`/`rename` already had. A class denied the
+reference policy (anchored or plain `deny-configuration`, or outside
+its `allow-configuration`) cannot move a permitted policy ahead of it;
+an insert with both endpoints allowed runs unchanged on the CLI, gRPC
+and REST surfaces, which share `config.AuthorizeConfigMutation`.
+
+
 ### Write the body as a block or as `set` — never packed on the line (#6662)
 
 Junos accepts a statement written on the instance line; xpf compiles the body
