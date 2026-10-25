@@ -126,6 +126,12 @@ func TestVRRPCrossGroupExplicitVsRethFailsCommit(t *testing.T) {
 		if l == "set chassis cluster no-private-rg-election" {
 			continue
 		}
+		// #16764: the fixture VIP equals the reth0 unit address, which is
+		// independently the RFC 5798 owner shape the owner gate rejects
+		// regardless of RETH synthesis. Use a distinct VIP here so this arm
+		// isolates what it means to pin: with RETH synthesis off there is no
+		// second claimant, so the explicit group commits.
+		l = strings.Replace(l, "virtual-address 10.0.0.100/24", "virtual-address 10.0.0.101/24", 1)
 		kept = append(kept, l)
 	}
 	if _, err := CompileConfig(buildTree(t, kept)); err != nil {

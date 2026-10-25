@@ -1128,6 +1128,23 @@ or peer-synced config an older binary accepted still boots (#1960 no-brick).
 This is config-only commit-time validation — it never touches the VRRP
 runtime/state machine. Same fail-closed-on-load doctrine as #2911.
 
+**VRRP virtual-address must not equal a unit address (#16764):** a VIP
+equal to any address configured on the SAME unit is the RFC 5798 IP
+address-owner shape (§1.6, priority 255 per §5.2.4). pkg/vrrp does not
+implement owner addressing — its advert source is the lowest non-VIP
+address and every VIP is removed on BACKUP, at run start and on shutdown
+— so the owner advertised nothing while reporting MASTER (peers timed it
+out and also claimed MASTER) and lost its own unit address at every start
+and stop. `validateVRRPVIPOwnerStrict`
+(`compiler_validate_strict_vrrp_vipowner.go`) hard-rejects the shape at
+strict commit naming the interface, unit, group, VIP and matched unit
+address, at any priority (the mechanism is priority-independent); the
+tolerant load/peer-sync path downgrades to a warning
+(`lenientVRRPVIPOwner`, #1960 no-brick). Explicit groups only: RETH-derived
+instances carry unit addresses as VIPs by construction and are never
+owners. Implementing RFC 5798 §6.4.1 owner semantics in pkg/vrrp would
+supersede this gate.
+
 **VRRP virtual-address prefix handling (#15050, narrowed by #16558):** at
 runtime `pkg/vrrp` passes the compiled VIP string to `netlink.ParseAddr`,
 which requires a prefix; a bare literal that reached it made every promotion

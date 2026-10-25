@@ -22,9 +22,11 @@ import (
 // VIP is contained by the unit subnet the #3013 containment gate requires.
 func vipCountV4(n int) []string {
 	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		// Start at 10.9.0.2 so the unit's own .1 address is not duplicated.
-		out = append(out, fmt.Sprintf("10.9.%d.%d", (i+1)>>8, (i+1)&0xff))
+	for i := range n {
+		// Start at 10.9.1.1, skipping 10.9.0.1: at n=255 the sweep would
+		// otherwise reach the unit's own address, which #16764 rejects as
+		// the address-owner shape for an unrelated reason.
+		out = append(out, fmt.Sprintf("10.9.%d.%d", ((i+1)>>8)+1, (i+1)&0xff))
 	}
 	return out
 }
