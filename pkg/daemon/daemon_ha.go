@@ -1006,6 +1006,7 @@ func (d *Daemon) reconcileRG0ConfigOwnership() {
 func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState, demotionProven bool) {
 	switch newState {
 	case cluster.StatePrimary:
+		d.bumpIPsecRGOwnershipEpoch(0)
 		d.rg0WasPrimary.Store(true)
 		slog.Info("cluster: became primary for RG0, enabling config writes")
 		d.store.SetClusterReadOnly(false)
@@ -1038,6 +1039,7 @@ func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState, demotio
 		}
 
 	case cluster.StateSecondary, cluster.StateSecondaryHold:
+		rg0Epoch := d.bumpIPsecRGOwnershipEpoch(0)
 		primaryInThisIncarnation := d.rg0WasPrimary.Swap(false)
 		genuineDemotion := demotionProven || primaryInThisIncarnation
 		peerTakeoverObserved := false
@@ -1070,7 +1072,7 @@ func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState, demotio
 			// stale SA left in charon collides with the returning owner's
 			// initiate on failback. Genuine demotions only — initial
 			// secondary seating never held these SAs in this incarnation.
-			go d.terminateDemotedRGIPsecSAs(0)
+			go d.terminateDemotedRGIPsecSAs(0, rg0Epoch)
 		}
 		d.store.SetClusterReadOnly(true)
 	}
@@ -1988,6 +1990,7 @@ func (d *Daemon) reconcileBlackholeRoutes() {
 // transition — these services must only run on the primary to avoid
 // dual-router / dual-DHCP issues.
 func (d *Daemon) applyRethServicesForRG(rgID int) {
+	d.bumpIPsecRGOwnershipEpoch(rgID)
 	// The VRRP event loop holds no applySem, so a takeover racing factory
 	// reset would otherwise pre-seed prior leases and enqueue Kea applies
 	// against a half-wiped box. The enqueue is fenced itself; this guard
@@ -2190,6 +2193,7 @@ func clearRethRASendersWithoutGoodbyePeer(clearer raScopedClearer, cfg, peerCfg 
 // for RETH interfaces belonging to the given RG. Called on VRRP BACKUP
 // transition. If other RGs are still MASTER, their services remain active.
 func (d *Daemon) clearRethServicesForRG(rgID int) {
+	rgEpoch := d.bumpIPsecRGOwnershipEpoch(rgID)
 	// #9087: nudged FIRST, and before the early returns, because the demote
 	// side of the window is the one that leaves a wrong answerer on the wire.
 	// This node no longer owns rgID, so the #8297 gate will now suppress its
@@ -2264,7 +2268,7 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// this runs on the VRRP event path. Ungated by IPsecSASync — that flag
 	// governs peer advertisement/re-initiation, not local SA hygiene on a
 	// node-local demotion edge.
-	go d.terminateDemotedRGIPsecSAs(rgID)
+	go d.terminateDemotedRGIPsecSAs(rgID, rgEpoch)
 	d.markRethServicesApplied(rgID, false)
 }
 
@@ -3055,6 +3059,30 @@ func (d *Daemon) ipsecSAsForRG(names []string, rg int) []string {
 	return out
 }
 
+// bumpIPsecRGOwnershipEpoch advances the ownership epoch for rg and
+// returns the new value (#16820). Called on every promotion and
+// demotion edge for the RG (applyRethServicesForRG,
+// clearRethServicesForRG, and both arms of
+// applyRG0OwnershipTransition). Any demotion sweep captured under an
+// older epoch is stale once this runs.
+func (d *Daemon) bumpIPsecRGOwnershipEpoch(rg int) uint64 {
+	d.ipsecRGEpochMu.Lock()
+	defer d.ipsecRGEpochMu.Unlock()
+	if d.ipsecRGOwnershipEpochs == nil {
+		d.ipsecRGOwnershipEpochs = make(map[int]uint64)
+	}
+	d.ipsecRGOwnershipEpochs[rg]++
+	return d.ipsecRGOwnershipEpochs[rg]
+}
+
+// ipsecRGOwnershipEpoch returns the current ownership epoch for rg
+// (0 if no edge has been recorded for it).
+func (d *Daemon) ipsecRGOwnershipEpoch(rg int) uint64 {
+	d.ipsecRGEpochMu.Lock()
+	defer d.ipsecRGEpochMu.Unlock()
+	return d.ipsecRGOwnershipEpochs[rg]
+}
+
 // terminateDemotedRGIPsecSAs terminates this node's live IKE SAs anchored
 // on rg, which this node has just lost (#15194). It reads the live set
 // rather than the peer-advertised set: the SAs to kill are LOCAL, and a
@@ -3064,7 +3092,21 @@ func (d *Daemon) ipsecSAsForRG(names []string, rg int) []string {
 // takeover belt in reinitiateIPsecSAsForRG retries the same name before
 // initiating (only on an edge for that name's RG, #16710), and the next
 // demotion edge re-reads the live set.
-func (d *Daemon) terminateDemotedRGIPsecSAs(rg int) {
+//
+// #16820: the sweep is launched as a fire-and-forget goroutine and can
+// still be running (the live-SA read and each per-SA terminate shell
+// out, so the window grows with SA count) when the same RG fails back
+// and this node becomes primary again. Without a re-check, the sweep
+// would then force-terminate the SA reinitiateIPsecSAsForRG (or the
+// remote peer, via the VIP) just re-established — recreating the
+// #15194 failback black hole on the owning node. The caller captures
+// the RG ownership epoch at demotion; immediately before EACH
+// terminate the sweep re-checks that the epoch is unchanged AND that
+// this node is still not primary for rg. Either changing aborts the
+// remainder of the sweep. When d.cluster is nil (non-clustered test
+// Daemons that drive this function directly) only the epoch check
+// applies, so existing direct-call cells keep their behaviour.
+func (d *Daemon) terminateDemotedRGIPsecSAs(rg int, epoch uint64) {
 	if d.ipsec == nil && d.ipsecTerminateFn == nil {
 		return
 	}
@@ -3075,6 +3117,11 @@ func (d *Daemon) terminateDemotedRGIPsecSAs(rg int) {
 		return
 	}
 	for _, name := range d.ipsecSAsForRG(names, rg) {
+		if d.ipsecRGOwnershipEpoch(rg) != epoch || (d.cluster != nil && d.cluster.IsLocalPrimary(rg)) {
+			slog.Info("cluster: aborting demoted RG IPsec terminate sweep; RG ownership changed during sweep",
+				"rg", rg, "name", name)
+			return
+		}
 		if err := d.ipsecTerminate(name); err != nil {
 			slog.Warn("cluster: failed to terminate demoted RG IPsec SA", "rg", rg, "name", name, "err", err)
 		} else {

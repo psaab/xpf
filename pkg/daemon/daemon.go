@@ -347,8 +347,17 @@ type Daemon struct {
 	// ipsecTerminateFn overrides the swanctl terminate call. Test seam only
 	// (#15194); nil in production. See Daemon.ipsecTerminate.
 	ipsecTerminateFn func(name string) error
-	ra               *ra.Manager
-	dhcp             *dhcp.Manager
+	// ipsecRGOwnershipEpochs tracks per-RG ownership epochs (#16820).
+	// Every promotion/demotion edge bumps the epoch for that RG; a
+	// demotion sweep captures the epoch at launch and re-checks it (plus
+	// !IsLocalPrimary) immediately before each terminate, so a sweep
+	// still running when the RG fails back cannot terminate the SA
+	// the now-primary node just re-initiated. Guarded by
+	// ipsecRGEpochMu; lazily initialised so zero-value Daemons work.
+	ipsecRGEpochMu         sync.Mutex
+	ipsecRGOwnershipEpochs map[int]uint64
+	ra                     *ra.Manager
+	dhcp                   *dhcp.Manager
 	// dnsBootDone gates the #1715 DNS boot policy. It is false during the
 	// single boot-time applyConfig (which runs before DHCP clients start,
 	// so the lease set is empty) and set true immediately after. While
