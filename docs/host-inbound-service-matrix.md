@@ -2554,6 +2554,18 @@ helper never sees it, so a helper crash cannot lock management out).
   terms, denying unmatched direct host-bound traffic without changing the
   userspace no-match behavior or turning a permit into a fine `accept`.
 
+  **Mandatory L3 admits precede the fine jump (#16862).** The `xpf_hostinbound`
+  input chain emits the ICMPv6 error (1-4), per-view ND (133-136, honouring
+  `ndp except`), and ICMPv4 error (3/11/12) accepts BEFORE any
+  `iifname <zone> jump junos_host_<n>_<zone>`. A restricted permit's terminal
+  `meta nfproto ipv6 drop` — including the IPv6 terminal a v4-only permit
+  adds — or an explicit `application any` deny therefore cannot drop
+  NS/NA/RS/RA or PMTUD errors and break IPv6 neighbour resolution on that
+  zone. Echo and other ICMP remain subject to authored denies; an
+  `ndp except` view still drops ND. The text oracle
+  (`buildHostInboundFilterPayload`) and the netlink builder
+  (`buildHostInboundNetlink`) keep this order in lock-step (T1 parity).
+
   Before #9504 a permit could be projected only as a `saddr !=` SUBTRACTION of
   later denies. That cannot express a carve narrowed on any other dimension, so a
   narrow-application, source-excluded or destination-scoped permit made the WHOLE

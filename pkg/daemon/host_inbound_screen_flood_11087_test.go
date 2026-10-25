@@ -58,8 +58,10 @@ func TestHostInboundScreenFloodTextOrder11087(t *testing.T) {
 		originalRule += replyAccept + len("    ct state established,related ct direction reply accept")
 	}
 	globalICMP := strings.Index(payload, "    icmpv6 type { 1, 2, 3, 4 }")
-	if fineJump < replyAccept || originalRule <= fineJump || globalICMP <= originalRule {
-		t.Fatalf("original-direction screens must follow fine policy and precede global ICMP accepts (jump=%d screen=%d icmp=%d):\n%s", fineJump, originalRule, globalICMP, payload)
+	// #16862: mandatory ICMP admits now precede the fine jump; the
+	// original-direction screens still follow the fine policy.
+	if fineJump < replyAccept || originalRule <= fineJump || globalICMP < 0 || globalICMP >= fineJump {
+		t.Fatalf("mandatory ICMP accepts must precede the fine jump and original-direction screens must follow it (jump=%d screen=%d icmp=%d):\n%s", fineJump, originalRule, globalICMP, payload)
 	}
 	for _, fragment := range []string{
 		"meta nfproto ipv4",
