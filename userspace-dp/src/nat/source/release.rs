@@ -169,13 +169,16 @@ pub(crate) fn release_source_nat_allocation_for_worker(
     );
 }
 
-/// #15111: release the persistent lease held by an inbound session.
+/// #15111/#16619: release the persistent lease held by an inbound session.
 /// The inbound session's forward key is (remote -> public tuple) and its
-/// decision carries only `rewrite_dst` (internal host), so the outbound
+/// decision carries `rewrite_dst` (internal host) — with #16619 it may ALSO
+/// carry a `rewrite_src` (the inbound SNAT of the remote), which does not
+/// change which lease the inbound hold was taken on. The outbound
 /// `rewrite_src` gate in `release_source_nat_allocation_with_mode` would
-/// return early and strand the hold. Derive the lease key from the
-/// decision: internal endpoint + session routing domain, then drop one
-/// inbound reference on every pool allocator that holds that lease.
+/// return early and strand the hold, so this runs first and is NOT gated
+/// on `rewrite_src`. Derive the lease key from the decision: internal
+/// endpoint + session routing domain, then drop one inbound reference on
+/// every pool allocator that holds that lease.
 /// No-op for non-persistent DNAT/static decisions (no lease matches).
 pub(crate) fn release_persistent_inbound_for_session(
     rules: &[SourceNatRule],

@@ -68,6 +68,9 @@ mod resolver_enqueue;
 mod rx_telemetry;
 mod session_admission;
 mod session_hit_authority;
+#[cfg(test)]
+#[path = "persistent_inbound_hold_16619_tests.rs"]
+mod persistent_inbound_hold_16619_tests;
 
 use crate::nat::PersistentInbound;
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
@@ -990,10 +993,20 @@ fn should_record_rx_descriptor_telemetry(is_injected: bool, was_replay: bool) ->
     !is_injected && !was_replay
 }
 
-#[allow(clippy::too_many_arguments)]
-/// #15111: take the inbound persistent lease hold once the final NAT
-/// decision is known. Skipped when SNAT composed a source rewrite (that
-/// flow joins the lease via active_flows instead) or for NAT64/NPTv6.
+/// #15111/#16619: take the inbound persistent lease hold once the final NAT
+/// decision is known. Skipped only for NAT64/NPTv6 (unchanged exemptions).
+///
+/// #16619: a composed `rewrite_src` must NOT skip the hold. The premise that
+/// "SNAT joined the lease via active_flows" is false for an inbound
+/// persistent session: the SNAT allocation in the poll loop is keyed by the
+/// remote's source (`nat/source/keys.rs` — the flow's `src_ip`/`src_port` is
+/// the remote), so it joins (or mints) the *remote's* lease, never the
+/// internal host's lease admitted by `persistent_inbound_lookup`. The
+/// internal host's lease key is exactly the stored `hold` argument; take the
+/// hold whenever that lookup admitted the flow and the final decision still
+/// carries its `rewrite_dst`, regardless of `rewrite_src`. Release stays
+/// exact for this arm: `release_persistent_inbound_for_session` re-derives
+/// the same internal endpoint from the session's `rewrite_dst`.
 pub(super) fn acquire_persistent_inbound_hold(
     forwarding: &crate::afxdp::ForwardingState,
     hold: Option<crate::nat::PersistentSourceKey>,
@@ -1003,11 +1016,7 @@ pub(super) fn acquire_persistent_inbound_hold(
     let Some(key) = hold else {
         return false;
     };
-    if decision_nat.rewrite_src.is_some()
-        || decision_nat.rewrite_dst.is_none()
-        || decision_nat.nat64
-        || decision_nat.nptv6
-    {
+    if decision_nat.rewrite_dst.is_none() || decision_nat.nat64 || decision_nat.nptv6 {
         return false;
     }
     for rule in &forwarding.source_nat_rules {
@@ -7377,7 +7386,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                     None
                                 };
-                                // #15111: final NAT is composed; take the inbound lease hold unless SNAT joined it via active_flows.
+                                // #15111/#16619: final NAT is composed; take the inbound lease hold whenever the persistent lookup admitted the flow and rewrite_dst survives composition (SNAT's remote-keyed lease does not cover it).
                                 let mut persistent_inbound_acquired =
                                     acquire_persistent_inbound_hold(
                                         worker_ctx.forwarding,
