@@ -17523,20 +17523,27 @@ MAC defaults even when the operator configured hardened algorithms.
   `TestApplySSHConfig_ValidationGateBlocksReload` /
   `...ValidationGateRemovesWhenNoPrior` / `...ValidationPassesThenReloads`).
 
-- **Cross-connection password lockout (#11492)** — on non-appliance installs,
+- **Cross-connection password lockout (#11492, #16733)** — on non-appliance installs,
   `applySSHConfig` applies a Debian `pam_faillock` policy to the stock
   `/etc/pam.d/common-auth` sequence: five failed attempts in 10 minutes lock
-  the account for 5 minutes. The state is shared across sshd connections (and
-  any other PAM service using `common-auth`), so OpenSSH's per-connection
-  `MaxAuthTries 3` is no longer the only bound. The appliance image is skipped:
+  the account for 5 minutes. Each managed faillock line is guarded by
+  `pam_succeed_if.so service in sshd`, so the per-user tally is only read
+  or written by the sshd PAM service: the state is shared across sshd
+  connections, so OpenSSH's per-connection `MaxAuthTries 3` is no longer
+  the only bound, but a network peer cannot lock any account — root
+  included (`even_deny_root` is retained for the sshd side) — out of the
+  local console (`login`), `su`, or any other PAM service that includes
+  `common-auth`. The appliance image is skipped:
   it pins `PasswordAuthentication no` and is identified by `/etc/xpf/appliance`.
   xpf does not enable password authentication; this protects it when a
   non-appliance host already permits PAM-backed SSH passwords. Custom PAM
   stacks are left untouched with a warning and must be configured by their
   administrator. The cells in `pkg/daemon/ssh_faillock_11492_test.go` pin
   rendering, non-appliance apply wiring, safe appliance exclusion, and
-  idempotent removal; live password-attempt verification remains a lab gate.
-  Every faillock failure is advisory (#15229): a locally tuned (modified)
+  idempotent removal; `pkg/daemon/ssh_faillock_16733_test.go` executes the
+  rendered stack with the host's real PAM modules (console root login
+  succeeds after five sshd failures; sshd lockout for root and non-root
+  users is preserved). Every faillock failure is advisory (#15229): a locally tuned (modified)
   managed block, an unreadable common-auth, or any other PAM error is
   logged and the sshd drop-in apply proceeds, so a root-login revocation
   is never blocked by host PAM state xpf does not own; the tuned block

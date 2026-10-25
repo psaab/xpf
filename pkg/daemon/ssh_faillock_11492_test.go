@@ -41,6 +41,12 @@ func TestRenderSSHPAMFaillockAddsAccountLockout11492(t *testing.T) {
 	if strings.Count(text, "pam_faillock.so") != 3 {
 		t.Fatalf("rendered PAM stack has %d faillock calls, want preauth/authfail/authsucc", strings.Count(text, "pam_faillock.so"))
 	}
+	// #16733: every faillock line is preceded by its own sshd-only
+	// guard (covered in full by the 16733 cells); the bare counts here
+	// keep the original shape pin honest about the guard lines too.
+	if strings.Count(text, "pam_succeed_if.so") != 3 {
+		t.Fatalf("rendered PAM stack has %d sshd-only guards, want one per faillock line", strings.Count(text, "pam_succeed_if.so"))
+	}
 }
 
 func TestRenderSSHPAMFaillockIsIdempotentAndReversible11492(t *testing.T) {
