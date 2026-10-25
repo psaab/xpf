@@ -219,7 +219,7 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 					action = "reject"
 				}
 				ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
-				ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+				ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 				var pkts, bytes uint64
 				published := true
 				if !ruleQuarantined && (statsEnabled || pol.Count) && readPolicy != nil {
@@ -295,7 +295,7 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 			// live and the quarantined member alone carries the qualifier in
 			// the zone columns.
 			ruleQuarantined := config.ScopedGlobalQuarantineDropped(pol.Match.FromZones, pol.Match.ToZones, quarantinedZones)
-			ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+			ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 			var pkts, bytes uint64
 			published := true
 			if !ruleQuarantined && (statsEnabled || pol.Count) && readPolicy != nil {
@@ -540,7 +540,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 					action = "reject"
 				}
 				capAction := strings.ToUpper(action[:1]) + action[1:]
-				ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+				ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 				// #3062: a scheduler-inactive policy appends State: inactive +
 				// the scheduler name. Active/non-scheduled policies stay
 				// bit-identical (no suffix), keeping the gRPC text plane in
@@ -612,7 +612,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 				action = "reject"
 			}
 			capAction := strings.ToUpper(action[:1]) + action[1:]
-			ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+			ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 			// #3062: scheduler-inactive global policy appends State: inactive.
 			fmt.Fprintf(buf, "\n  Policy: %s, action-type: %s%s, Index: %d\n", pol.Name, capAction,
 				policyDetailStateSuffix(pol.SchedulerName, schedActive, haveSched),

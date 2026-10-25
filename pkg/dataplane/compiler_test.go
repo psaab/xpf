@@ -83,8 +83,8 @@ func TestCompilePoliciesRecordsExpandedPolicyScheduleSlots(t *testing.T) {
 	want := []PolicyScheduleRuleSlot{
 		{PolicySetID: 0, RuleIndex: 1, RuleID: 1, PolicyName: "scheduled", SchedulerName: "workhours"},
 		{PolicySetID: 0, RuleIndex: 2, RuleID: 2, PolicyName: "scheduled", SchedulerName: "workhours"},
-		{PolicySetID: 1, RuleIndex: 0, RuleID: MaxRulesPerPolicy, PolicyName: "global-scheduled", SchedulerName: "night"},
-		{PolicySetID: 1, RuleIndex: 1, RuleID: MaxRulesPerPolicy + 1, PolicyName: "global-scheduled", SchedulerName: "night"},
+		{PolicySetID: 1, RuleIndex: 0, RuleID: 3, PolicyName: "global-scheduled", SchedulerName: "night"},
+		{PolicySetID: 1, RuleIndex: 1, RuleID: 4, PolicyName: "global-scheduled", SchedulerName: "night"},
 	}
 	if len(result.PolicyScheduleRuleSlots) != len(want) {
 		t.Fatalf("got %d slots, want %d: %#v", len(result.PolicyScheduleRuleSlots), len(want), result.PolicyScheduleRuleSlots)
@@ -99,15 +99,10 @@ func TestCompilePoliciesRecordsExpandedPolicyScheduleSlots(t *testing.T) {
 	}
 }
 
-// TestCompilePoliciesExactMaxRulesBoundary covers the #3404 off-by-one in the
-// legacy compiler guard. A zone-pair set with exactly MaxRulesPerPolicy (256)
-// expanded rules occupies RuleIDs policySetID*256+0..255 — all inside its own
-// namespace — and must compile; a 257th rule would need index 256 and spill, so
-// it is rejected. Each policy here has no applications, expanding to one rule.
-//
-// Fail-on-revert: with the old `len(expanded) >= MaxRulesPerPolicy` guard the
-// exact-256 case is rejected and the first assertion fails RED.
-func TestCompilePoliciesExactMaxRulesBoundary(t *testing.T) {
+// TestCompilePoliciesContiguousIDs16560 covers #16560 in the legacy
+// compiler: 256 and 257 expanded rules in one set both compile with
+// contiguous RuleIDs 0..N-1; there is no per-set rejection.
+func TestCompilePoliciesContiguousIDs16560(t *testing.T) {
 	mkCfg := func(n int) *config.Config {
 		cfg := &config.Config{}
 		pols := make([]*config.Policy, 0, n)
@@ -131,25 +126,22 @@ func TestCompilePoliciesExactMaxRulesBoundary(t *testing.T) {
 	result := func() *CompileResult {
 		return &CompileResult{ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2}}
 	}
-
-	// Exactly 256 expanded rules: in-namespace (IDs 0..255), must compile.
-	dp := &policyScheduleSlotTestDP{}
-	if err := compilePolicies(dp, mkCfg(MaxRulesPerPolicy), result()); err != nil {
-		t.Fatalf("compilePolicies(256 rules) returned error, want success: %v", err)
-	}
-	if len(dp.rules) != MaxRulesPerPolicy {
-		t.Fatalf("compiled %d rules, want %d", len(dp.rules), MaxRulesPerPolicy)
-	}
-	for _, r := range dp.rules {
-		if r.RuleID >= MaxRulesPerPolicy {
-			t.Fatalf("rule RuleID %d >= %d (spilled out of policy-set 0 namespace)", r.RuleID, MaxRulesPerPolicy)
+	for _, n := range []int{256, 257, 1000} {
+		dp := &policyScheduleSlotTestDP{}
+		if err := compilePolicies(dp, mkCfg(n), result()); err != nil {
+			t.Fatalf("compilePolicies(%d rules) err = %v, want success (#16560)", n, err)
 		}
-	}
-
-	// 257 expanded rules: would require index 256, rejected fail-closed.
-	dp2 := &policyScheduleSlotTestDP{}
-	if err := compilePolicies(dp2, mkCfg(MaxRulesPerPolicy+1), result()); err == nil {
-		t.Fatalf("compilePolicies(257 rules) succeeded, want MaxRulesPerPolicy rejection")
+		if len(dp.rules) != n {
+			t.Fatalf("compiled %d rules, want %d", len(dp.rules), n)
+		}
+		for i, r := range dp.rules {
+			if r.RuleID != uint32(i) {
+				t.Fatalf("rule %d RuleID %d, want contiguous %d", i, r.RuleID, i)
+			}
+		}
+		if dp.rules[0].PolicySetID != 0 {
+			t.Fatalf("PolicySetID %d", dp.rules[0].PolicySetID)
+		}
 	}
 }
 

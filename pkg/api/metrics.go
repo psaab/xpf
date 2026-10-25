@@ -11,7 +11,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/singleflight"
 
-	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 
 	"github.com/psaab/xpf/pkg/sysservices"
@@ -1831,7 +1830,7 @@ func bucketUpperBoundNs(i int) uint64 {
 }
 
 func policyCounterID(policySetID uint32, ruleIndex int) uint32 {
-	return policySetID*dataplane.MaxRulesPerPolicy + uint32(ruleIndex)
+	return dpuserspace.PolicyCounterID(policySetID, uint32(ruleIndex))
 }
 
 // sortedKeys6800 returns a map's keys in a stable order. Prometheus does not

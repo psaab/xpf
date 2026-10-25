@@ -456,7 +456,7 @@ func (c *CLI) handleShowSecurity(args []string) error {
 						// read below (and its "not yet published" bookkeeping)
 						// must not run for it.
 						ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
-						ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+						ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 						// Default to "0" (consistent with the hit-count table
 						// and the gRPC/REST surfaces, which render 0 whenever
 						// the counter is unavailable or the knob is off);
@@ -517,7 +517,7 @@ func (c *CLI) handleShowSecurity(args []string) error {
 					// counter stays live and only the quarantined member carries
 					// the qualifier in the From/To columns.
 					ruleQuarantined := config.ScopedGlobalQuarantineDropped(pol.Match.FromZones, pol.Match.ToZones, quarantinedZones)
-					ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+					ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 					// Default to "0" for the same cross-surface
 					// consistency reason as the zone-pair branch above.
 					hits := "0"

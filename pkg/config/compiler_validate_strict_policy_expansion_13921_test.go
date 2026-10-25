@@ -145,8 +145,9 @@ func TestPolicyExpandedRuleCountTotalLimit65536AndLenientIndependence(t *testing
 		if err != nil {
 			t.Fatalf("lenient err = %v", err)
 		}
-		if err := validatePolicyExpandedRuleCountStrict(cfg2); err == nil || !strings.Contains(err.Error(), "MaxRulesPerPolicy") {
-			t.Fatalf("surviving 257-rule set err = %v, want MaxRulesPerPolicy reject", err)
+		// #16560: no per-set cap — a surviving 257-rule set is accepted.
+		if err := validatePolicyExpandedRuleCountStrict(cfg2); err != nil {
+			t.Fatalf("surviving 257-rule set err = %v, want nil (#16560)", err)
 		}
 	})
 
@@ -182,8 +183,9 @@ func TestPolicyExpandedRuleCountTotalLimit65536AndLenientIndependence(t *testing
 		for i := range 257 {
 			cfg2.Security.GlobalPolicies = append(cfg2.Security.GlobalPolicies, &Policy{Name: fmt.Sprintf("g%d", i)})
 		}
-		if err := validatePolicyExpandedRuleCountStrict(cfg2); err == nil || !strings.Contains(err.Error(), "MaxRulesPerPolicy") {
-			t.Fatalf("unscoped 257 globals err = %v, want MaxRulesPerPolicy reject", err)
+		// #16560: no per-set cap — 257 unscoped globals are accepted.
+		if err := validatePolicyExpandedRuleCountStrict(cfg2); err != nil {
+			t.Fatalf("unscoped 257 globals err = %v, want nil (#16560)", err)
 		}
 	})
 
@@ -217,8 +219,11 @@ func TestPolicyExpandedRuleCountTotalLimit65536AndLenientIndependence(t *testing
 		if !hasExpansionWarning14353(cfg, "policy match application", "NO_SUCH_APP_14353") {
 			t.Fatalf("lenient warnings missing undefined-application warning: %v", cfg.Warnings)
 		}
-		if !hasExpansionWarning14353(cfg, "MaxRulesPerPolicy") {
-			t.Fatalf("lenient warnings missing expansion (MaxRulesPerPolicy) warning; expansion gate was suppressed by the earlier undefined application: %v", cfg.Warnings)
+		// #16560: 258 rules in one set no longer trigger a per-set
+		// expansion warning; the undefined-application warning must
+		// still be present (asserted above).
+		if hasExpansionWarning14353(cfg, "MaxRulesPerPolicy") {
+			t.Fatalf("lenient warnings must not carry per-set cap warning (#16560): %v", cfg.Warnings)
 		}
 	})
 

@@ -110,8 +110,8 @@ func buildPolicySnapshotsWithAddressBookAndFailClosed(cfg *config.Config, active
 	// policy-ID namespace (#3143/#3145). Using it on the snapshot WRITE side
 	// guarantees the IDs assigned here decode back to the same policy on the
 	// counter READ side (policyRuleIDForCounter), and enforces the
-	// MaxRulesPerPolicy cap so an app-set expansion cannot spill into the next
-	// policy set's namespace.
+	// contiguous allocation so IDs stay unique across sets.
+	// policy set's contiguous range (#16560).
 	if err := walkPolicyRuleSlots(cfg, func(slot policyRuleSlot) error {
 		policyID := slot.policyID()
 		snap := buildOneRuleSnapshot(cfg, nameToID, feedOverlay, addrRepresentable, slot.Policy, slot.FromZone, slot.ToZone, policyID, activeState, failClosed)

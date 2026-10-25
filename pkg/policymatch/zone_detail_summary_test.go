@@ -78,7 +78,7 @@ func TestZoneDetailPolicySummaryMetadata(t *testing.T) {
 		"  Policy summary (evaluation order: zone-pair, global, default-policy):",
 		"    [zone-pair] trust -> untrust: sched-off (permit) [id 0, scheduler workhours (inactive)]",
 		"    [zone-pair] trust -> untrust: logged-rule (permit) [id 1, log at-create,at-close, count, source-address (except), destination-address (except)]",
-		"    [global] any -> any: g-sched-off (deny) [id 256, scheduler workhours (inactive)]",
+		"    [global] any -> any: g-sched-off (deny) [id 2, scheduler workhours (inactive)]",
 		"    [default] default-policy: permit [id 4294967295, log at-create]",
 	} {
 		if !strings.Contains(got, want) {

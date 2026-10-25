@@ -104,7 +104,7 @@ func TestGRPCZoneDetailPolicyMetadata(t *testing.T) {
 		// M11 + M12: id, log modes, count, source-address (except).
 		"[zone-pair] trust -> untrust: logged-rule (permit) [id 1, log at-create,at-close, count, source-address (except)]",
 		// H03 on the global tier (id in the post-zone-pair namespace).
-		"[global] any -> any: g-sched-off (deny) [id 256, scheduler workhours (inactive)]",
+		"[global] any -> any: g-sched-off (deny) [id 2, scheduler workhours (inactive)]",
 		// M13: default-policy sentinel id + log posture.
 		"[default] default-policy: permit [id 4294967295, log at-create]",
 	} {

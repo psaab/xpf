@@ -488,9 +488,9 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		return err
 	}
 
-	// #14353 (#13921): policy expanded-rule-count gate — per-set
-	// MaxPolicyRulesPerSet (256) and total MaxTotalPolicyRuleExpansion
-	// (65536) across all non-quarantined sets, mirroring
+	// #14353 (#13921, #16560): policy expanded-rule-count gate — total
+	// MaxTotalPolicyRuleExpansion (65536) and MaxPolicySets across all
+	// non-quarantined sets (no per-set cap since #16560), mirroring
 	// walkPolicyRuleSlots. Registered HERE, independently, rather than
 	// chained onto validatePolicyMatchApplicationsStrict: that gate
 	// returns on the first undefined application, which suppressed this

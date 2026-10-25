@@ -85,7 +85,7 @@
       },
       {
         "rule_id": "junos-global->junos-global/g-deny",
-        "policy_id": 256,
+        "policy_id": 1,
         "name": "g-deny",
         "from_zone": "junos-global",
         "to_zone": "junos-global",

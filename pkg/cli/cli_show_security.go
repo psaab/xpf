@@ -141,7 +141,7 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 					action = "Reject"
 				}
 				ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
-				ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+				ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 				var count uint64
 				published := true
 				if !ruleQuarantined && (statsEnabled || pol.Count) {
@@ -211,7 +211,7 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 			// live and the quarantined member alone carries the qualifier in
 			// the zone columns.
 			ruleQuarantined := config.ScopedGlobalQuarantineDropped(pol.Match.FromZones, pol.Match.ToZones, quarantinedZones)
-			ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+			ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 			var count uint64
 			published := true
 			if !ruleQuarantined && (statsEnabled || pol.Count) {
@@ -476,7 +476,7 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 				{
 					var sd int
 					var rerr error
-					c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, policySetID*dataplane.MaxRulesPerPolicy+uint32(i), &sd, &rerr)
+					c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, dpuserspace.PolicyCounterID(policySetID, uint32(i)), &sd, &rerr)
 					_ = sd
 					_ = rerr
 				}
@@ -547,7 +547,7 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			{
 				var sd int
 				var rerr error
-				c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, policySetID*dataplane.MaxRulesPerPolicy+uint32(i), &sd, &rerr)
+				c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, dpuserspace.PolicyCounterID(policySetID, uint32(i)), &sd, &rerr)
 				_ = sd
 				_ = rerr
 			}

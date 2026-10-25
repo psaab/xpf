@@ -124,9 +124,9 @@ func TestCLIZoneDetailPolicyMetadata(t *testing.T) {
 	}
 	// H03 on the GLOBAL tier: a scheduler-inactive global is marked too. The
 	// global tier's runtime id lives in the policy-set namespace AFTER the
-	// zone-pair sets (id 256 == policy-set 1 * MaxRulesPerPolicy), matching the
+	// zone-pair sets (contiguous id, #16560), matching the
 	// span-accumulated id the RT_FLOW/inventory path assigns.
-	if !strings.Contains(block, "[global] any -> any: g-sched-off (deny) [id 256, scheduler workhours (inactive)]") {
+	if !strings.Contains(block, "[global] any -> any: g-sched-off (deny) [id 2, scheduler workhours (inactive)]") {
 		t.Fatalf("global scheduler-inactive row missing/incorrect (H03):\n%s", block)
 	}
 	// M13: the default-policy catch-all carries the reserved sentinel id and

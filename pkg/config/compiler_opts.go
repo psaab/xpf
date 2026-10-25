@@ -1625,10 +1625,10 @@ type compileOpts struct {
 	// refuses such a policy, so a leniently-loaded bad config is no worse off,
 	// now flagged. Same doctrine as lenientPolicyMatchApplications.
 	lenientPolicyMatchAddressSetMembers bool
-	// lenientPolicyExpandedRuleCount (#14353, extends #13921) downgrades
-	// the policy expanded-rule-count gate
-	// (validatePolicyExpandedRuleCountStrict — per-set
-	// MaxPolicyRulesPerSet and total MaxTotalPolicyRuleExpansion) from a
+	// lenientPolicyExpandedRuleCount (#14353, extends #13921; #16560)
+	// downgrades the policy expanded-rule-count gate
+	// (validatePolicyExpandedRuleCountStrict — total
+	// MaxTotalPolicyRuleExpansion and MaxPolicySets; no per-set cap) from a
 	// hard compile error to a cfg.Warnings entry. A config whose
 	// application expansion overflows the runtime policy-ID namespace or
 	// the total expansion ceiling was previously rejected only at

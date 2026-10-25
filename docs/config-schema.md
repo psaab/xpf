@@ -17586,3 +17586,28 @@ Regression coverage: `pkg/config/compiler_default_policy_node_fallback_15031_tes
 Format-identity and stanza materialization, legitimate-config controls)
 and `pkg/configstore/node_fallback_15031_test.go` (standalone
 `CheckText` rejects the conflict, benign `${node}` config stays green).
+
+## Security policy rule-count limits (#16560)
+
+There is **no per-zone-pair or per-global-set limit** on the number of
+security policy rules (counted after application-set expansion). A single
+`from-zone trust to-zone untrust` pair, or the global policy set, may hold
+257, 1000, or more expanded rules. Runtime policy IDs are allocated as
+contiguous per-set ranges in configuration order, so IDs stay unique
+across sets without a fixed per-set block.
+
+The remaining limits, enforced identically at strict commit and at
+dataplane apply (the tolerant load / peer-sync path warns instead of
+rejecting), are:
+
+- **Total expanded rules: 65536** across all non-quarantined zone-pair
+  sets plus the global set (`MaxTotalPolicyRuleExpansion`). The dataplane
+  evaluates policy tiers linearly per new flow, so this bounds per-flow
+  CPU. Split, prune, or collapse application-set expansions to reduce it.
+- **Policy sets: 4096** non-quarantined zone-pair stanzas plus the global
+  set when it holds a surviving rule (`MaxPolicySets`, the legacy
+  `MAX_POLICIES` map capacity behind the per-policy counter handles).
+
+Quarantined zone sets (StableZoneID collision losers / poisoned zones)
+and fully-quarantined scoped global rules are excluded from both counts,
+matching the snapshot builder.

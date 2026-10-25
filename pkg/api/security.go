@@ -348,7 +348,7 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 					// raw-slice-index SSOT. (Nil rules are not reachable via any
 					// production config path today; this is defensive
 					// SSOT-alignment, like #3476/#3494.)
-					policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+					policyID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 					ctrs, err := readPolicy(policyID)
 					switch {
 					case err == nil:
@@ -467,7 +467,7 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 
 			if !scopeQuarantined && (statsEnabled || rule.Count) {
 				if readPolicy != nil {
-					policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+					policyID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
 					ctrs, err := readPolicy(policyID)
 					switch {
 					case err == nil:

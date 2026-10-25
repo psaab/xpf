@@ -194,7 +194,7 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 	}
 	policies, err := buildPolicySnapshotsWithAddressBook(cfg, nil, feedOverlay, nameToID)
 	if err != nil {
-		// A policy-snapshot build error (e.g. a MaxRulesPerPolicy overflow)
+		// A policy-snapshot build error (e.g. a total-expansion overflow)
 		// is itself fail-closed: buildSnapshot returns the error, the apply path
 		// rejects the config, and the helper retains its previous state.
 		return []string{fmt.Sprintf("policy snapshot cannot be built (fail-closed): %v", err)}

@@ -38,7 +38,7 @@
     "default_used": false,
     "unsupported_tuple_family": false,
     "policy_name": "to-any-permit",
-    "policy_id": 256
+    "policy_id": 1
   },
   "rust_verdict": {
     "action": "permit",
@@ -46,7 +46,7 @@
     "default_used": false,
     "unsupported_tuple_family": false,
     "policy_name": "to-any-permit",
-    "policy_id": 256
+    "policy_id": 1
   },
   "snapshot": {
     "default_policy": "deny",
@@ -85,7 +85,7 @@
       },
       {
         "rule_id": "untrust->any/to-any-permit",
-        "policy_id": 256,
+        "policy_id": 1,
         "name": "to-any-permit",
         "from_zone": "untrust",
         "to_zone": "any",
