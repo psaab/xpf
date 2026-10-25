@@ -57,6 +57,15 @@ xpf (0.0.0) unstable; urgency=medium
     a `within` window shorter than the cooldown is no longer
     silently discarded; synthetically parked legacy edges keep the
     #15945 live-window re-check.
+  * Daemon/RPM: on the first probe apply after xpfd starts, every
+    ip-monitoring-referenced probe now runs the bounded initial
+    burst previously used only on HA takeover (#16636). Previously
+    a restarted daemon rendered FRR and the helper snapshot from
+    an empty ip-monitoring overlay — withdrawing the failover
+    preferred route for a dead uplink — and re-derived the FAIL
+    verdict only after (successive-loss-1) x test-interval
+    (about 120s at defaults), sending traffic back onto the dead
+    path for that window on every upgrade or crash-restart.
   * Config/firewall: all four `firewall three-color-policer` burst
     leaves now enforce a one-frame floor of 1514 bytes (#16610):
     `committed-burst-size`/`excess-burst-size` (single-rate) and

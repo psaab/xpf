@@ -841,6 +841,26 @@ func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 	if haTransition {
 		burstProbeNames = newlyEnabledIPMonProbeNames(cfg, d.rpmEffective, effective)
 	}
+	// #16636: a freshly started process is in the same position as a
+	// newly promoted primary — it has no probe verdict at all, and
+	// its first apply renders FRR / the helper snapshot from an empty
+	// ip-monitoring overlay, withdrawing any distance-1 preferred
+	// route the previous process had injected for a dead uplink.
+	// Burst every ip-monitoring-referenced probe that is runnable in
+	// the effective set on the first apply of this process so the
+	// first verdict arrives within the burst bound instead of after
+	// (successive-loss-1) x test-interval. Only the first hash-gated
+	// apply bursts; later config changes keep normal cadence (or the
+	// HA-takeover burst above when applicable).
+	firstReconcile := !d.rpmFirstReconcileDone
+	if firstReconcile {
+		for name := range ipMonReferencedProbeNames(cfg, effective) {
+			if burstProbeNames == nil {
+				burstProbeNames = make(map[string]struct{})
+			}
+			burstProbeNames[name] = struct{}{}
+		}
+	}
 	rethMap := cfg.RethToPhysical()
 	h := rpmConfigHash(effective, rethMap)
 	applyPins := d.probePinApplyFn()
@@ -907,6 +927,7 @@ func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 		d.rpm.SetPinInstallResults(failed)
 	}
 	d.activeRPMHash = h
+	d.rpmFirstReconcileDone = true
 	probes := 0
 	if effective != nil {
 		probes = len(effective.Probes)
@@ -940,6 +961,32 @@ func newlyEnabledIPMonProbeNames(cfg *config.Config, previous, effective *config
 			continue
 		}
 		if probe, nowActive := effective.Probes[name]; !nowActive || probe == nil {
+			continue
+		}
+		if burst == nil {
+			burst = make(map[string]struct{})
+		}
+		burst[name] = struct{}{}
+	}
+	return burst
+}
+
+// ipMonReferencedProbeNames reports every ip-monitoring-referenced
+// probe that is runnable in effective (#16636 process-start burst).
+// Unlike newlyEnabledIPMonProbeNames it has no HA-gating or
+// previously-active filter: on a fresh process every referenced
+// probe lacks a verdict, standalone deployments included.
+func ipMonReferencedProbeNames(cfg *config.Config, effective *config.RPMConfig) map[string]struct{} {
+	if cfg == nil || effective == nil || cfg.Services.IPMonitoring == nil {
+		return nil
+	}
+	var burst map[string]struct{}
+	for _, policy := range cfg.Services.IPMonitoring.Policies {
+		if policy == nil || policy.MatchRPMProbe == "" {
+			continue
+		}
+		name := policy.MatchRPMProbe
+		if probe, active := effective.Probes[name]; !active || probe == nil {
 			continue
 		}
 		if burst == nil {

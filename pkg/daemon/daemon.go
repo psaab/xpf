@@ -481,6 +481,14 @@ type Daemon struct {
 	// fresh cfg in hand). Guarded by rpmMu.
 	rpmEffective *config.RPMConfig
 	rpmRethMap   map[string]string
+	// rpmFirstReconcileDone latches after the first hash-gated RPM
+	// apply in this process (#16636). Until it does, the first apply
+	// bursts every ip-monitoring-referenced probe, like an HA
+	// takeover: a restarted process has no verdict at all, so its
+	// empty overlay must not wait (successive-loss-1)x test-interval
+	// to re-derive a fail that was active before the restart.
+	// Guarded by rpmMu.
+	rpmFirstReconcileDone bool
 	// probePinRetryEvery overrides the periodic pin-health cadence
 	// (tests); 0 = probePinRetryInterval.
 	probePinRetryEvery time.Duration
