@@ -677,14 +677,27 @@ func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold manual
 	// request cannot re-promote us via "Peer transfer out". Then notify the
 	// owner (best-effort, outside m.mu) so it restores promptly; its lease
 	// remains the fallback if the frame is lost.
+	//
+	// #16818: the election below must run UNCONDITIONALLY. The commit may
+	// already have promoted this node, and the #16592 aborted-marker arm in
+	// electRG is what demotes it ("Peer transfer aborted"). Re-running only
+	// when a peer snapshot was restored left the outcome to that snapshot:
+	// restoring the pre-request PRIMARY snapshot made the demotion a
+	// dual-active decision a higher-priority requester wins, and restoring
+	// the owner's hold snapshot (hold heartbeat seen before the commit)
+	// ran no election at all — so RequestPeerFailover reported failure
+	// while this node kept the RG. Demoting here, under the marker and
+	// before the abort frame can restore the owner, also closes the race
+	// where the owner's restored (non-hold) heartbeat expires the marker
+	// in applyTransferCommitOverridesOnPeerStateLocked before any election
+	// has applied it.
 	m.mu.Lock()
 	m.abortedPeerTransferReqID[rgID] = reqID
-	restoredOverride := m.restorePeerTransferOutOverrideLocked(rgID, reqID)
-	if restoredOverride {
+	if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
 		delete(m.peerTransferCommitGraceUntil, rgID)
-		m.runElection()
 	}
 	m.restoreManualFailoverHoldLocked(rgID, hold)
+	m.runElection()
 	m.mu.Unlock()
 	if abortFn != nil {
 		if err := abortFn(rgID, reqID); err != nil {
@@ -1340,21 +1353,20 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 }
 
 func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]manualFailoverHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error) {
+	// #16818: batch form of abortRequestedPeerFailover — the election must
+	// run unconditionally so the aborted-marker arm demotes every RG the
+	// batch commit promoted, whatever snapshot the override restore left.
 	m.mu.Lock()
-	restoredOverride := false
 	for _, rgID := range rgIDs {
 		m.abortedPeerTransferReqID[rgID] = reqID
 		if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
 			delete(m.peerTransferCommitGraceUntil, rgID)
-			restoredOverride = true
 		}
-	}
-	if restoredOverride {
-		m.runElection()
 	}
 	for _, rgID := range rgIDs {
 		m.restoreManualFailoverHoldLocked(rgID, holds[rgID])
 	}
+	m.runElection()
 	m.mu.Unlock()
 	if abortFn != nil {
 		if err := abortFn(rgIDs, reqID); err != nil {
