@@ -105,11 +105,14 @@ func authorizedMutationPrincipal(r *http.Request) (authz.Principal, bool) {
 // The finer question whether reads should be REDACTED by class rather than
 // denied is a different contract and remains open.
 //
-// /health and /metrics are NOT here and stay open. They carry no configuration,
-// authCheck already exempts them, and the in-tree harnesses read /metrics
-// (test/incus/*.sh) -- a sweep of every in-tree consumer found those two and
-// nothing else touching REST at all, so gating the /api/v1 surface breaks no
-// shipped tooling.
+// /health stays open. /metrics is NOT in this table either, but since
+// #16727 readAuthz prices it at PermView whenever the leg's effective
+// metrics gate is on (non-loopback bind, or loopback with
+// metrics-require-auth): on those legs it carries configured
+// identifiers (zones, policies, NAT pools, interfaces) to a credential
+// principal, and a class without view must not receive it. The
+// unauthenticated loopback default (gate off) stays open — the
+// in-tree harnesses read /metrics there (test/incus/*.sh).
 //
 // WHY THIS IS NOT A NO-BRICK PROBLEM. PrincipalForUID returns a SUPERUSER
 // principal for uid 0 unconditionally, with no login model required, so
@@ -886,10 +889,11 @@ func credentialPrincipalUser(cfg AuthConfig, r *http.Request) (string, bool) {
 //
 // An UNGUARDED NON-API safe route is served, not refused -- the opposite of
 // the mutation gate's fail-closed default. That asymmetry is deliberate too.
-// /health and /metrics are safe routes with no entry in the table and must
-// keep serving: authCheck already exempts them, the in-tree incus harnesses
-// read /metrics, and a fail-closed default here would break them at the
-// first request. Inside the API namespace the default is CLOSED (#9903
+// /health is a safe route with no entry in the table and must keep
+// serving. So must /metrics on the unauthenticated loopback default;
+// on a credential-gated leg readAuthz prices /metrics at PermView
+// before this fall-through is reached (#16727). Inside the API
+// namespace the default is CLOSED (#9903
 // F-129): an /api/v1 path with no table entry is refused, because a NEW
 // read route added without a table entry would otherwise serve with no
 // authorization decision. TestEveryReadRouteHasAPermission_6660 enumerates
@@ -1023,6 +1027,47 @@ func logRESTLoginDenial(r *http.Request, p authz.Principal, required, decision s
 }
 
 func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	// #16727: GET /metrics on a credential-gated leg (non-loopback bind,
+	// or loopback with metrics-require-auth) was authenticated by
+	// authCheck but received NO login-class decision, so a credential
+	// whose class lacks view (built-in unauthorized, or a custom class)
+	// — refused every /api/v1 read — still received the exposition
+	// naming zones, policies, NAT pools and interfaces. When the leg's
+	// effective metrics gate is on, the request carries a credential
+	// principal and is priced at PermView here. The unauthenticated
+	// loopback default (gate off) stays open: that leg carries no
+	// credential principal, and gating it is Y07-03's separate decision.
+	// HEAD is priced as GET (the mux aliases it to the GET handler,
+	// #9134). Only the coarse bit is charged: /metrics is exempt from
+	// the operational command-regex gate (restNoCommandExempt14146),
+	// because it is not an operational command.
+	if r.URL.Path == "/metrics" && isSafeHTTPMethod(r.Method) {
+		if !s.metricsGateForRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		cfg, p, _ := s.authorizeInputs(r)
+		if p.Source == authz.SourceNone {
+			// No ConnContext peer identity (handler-direct tests):
+			// the credential row is the only identity that can
+			// speak, exactly as principalFrom's row 4 resolves it.
+			// Production requests carry a peer identity and keep
+			// the full precedence (a placed local caller may not
+			// borrow the credential).
+			if _, ok := peerIdentityFrom(r.Context()); !ok {
+				if cp := s.metricsCredentialPrincipal(r); cp.Source != authz.SourceNone {
+					p = cp
+				}
+			}
+		}
+		if err := authz.Authorize(cfg, p, config.PermView); err != nil {
+			logRESTLoginDenial(r, p, authz.PermissionName(config.PermView), "read-policy")
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		next.ServeHTTP(w, r)
+		return
+	}
 	required, known := readPermissionFor(r.Method, r.URL.Path)
 	if !known {
 		// #9903 F-129: fail closed for the API namespace. An unlisted
@@ -1065,6 +1110,25 @@ func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Han
 	r, stop := s.watchReadAuthorization(r, required)
 	defer stop()
 	next.ServeHTTP(w, r)
+}
+
+// metricsCredentialPrincipal resolves the api-auth credential principal
+// for a /metrics request that carries no ConnContext peer identity
+// (handler-direct tests drive listenerHandler without a socket). It
+// mirrors principalFrom's credential row without the peer wait: a
+// valid credential yields its class-scoped principal, anything else
+// is unauthenticated. Production requests always carry a peer
+// identity and never reach this fallback.
+func (s *Server) metricsCredentialPrincipal(r *http.Request) authz.Principal {
+	a := s.authForRequest(r)
+	if a == nil {
+		return authz.Unauthenticated("no api-auth credential")
+	}
+	identity, class, ok := credentialPrincipalIdentity(*a, r)
+	if !ok {
+		return authz.Unauthenticated("no valid api-auth credential")
+	}
+	return authz.CredentialPrincipal(identity, class)
 }
 
 func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {

@@ -58,8 +58,9 @@ import (
 // shape (authorizeRPCCommand: resolved=false denies). The only routes that
 // still return nil for a restricted class are the ones with a DIFFERENT
 // authorization family in force — config-mode (the *-configuration pair) and
-// the genuinely unauthenticated / differently-gated probes (/health, /metrics,
-// whose handlers never see a login-class principal here) — and the
+// the differently-gated probes (/health, which is unauthenticated, and
+// /metrics, whose coarse PermView decision readAuthz makes on
+// credential-gated legs since #16727) — and the
 // request-decoded routes resolve per-request or deny. Every other declared
 // route denies: its reason records why no command EXISTS, not an exemption.
 
@@ -129,7 +130,7 @@ var restRouteCommand = map[string]string{
 // *-configuration regexes still apply on their own paths.
 var restRoutesNoCommand = map[string]string{
 	"GET /health":  "unauthenticated liveness probe; authMiddleware exempts it unconditionally, so there is no principal to charge",
-	"GET /metrics": "Prometheus exposition, not an operational command; gated by the #4162 metrics auth rule",
+	"GET /metrics": "Prometheus exposition, not an operational command; on credential-gated legs readAuthz charges the coarse PermView bit (#16727), and it carries no canonical command to charge here",
 
 	// SESSION PLUMBING, NOT COMMANDS (#15077). The REST twins of the
 	// gRPC plumbing probes: daemon liveness/cluster facts and
@@ -187,8 +188,10 @@ var restRoutesNoCommand = map[string]string{
 // restNoCommandExempt14146 is the exhaustive set of restRoutesNoCommand routes
 // that still return nil for a class with operational regexes. Every member is
 // exempt because a DIFFERENT authorization decision governs it, never because
-// it is a read: /health and /metrics never carry a login-class principal on
-// this path (health is unauthenticated, metrics has its own #4162 rule), the
+// it is a read: /health never carries a login-class principal on this
+// path (it is unauthenticated), /metrics is charged the coarse
+// PermView bit by readAuthz on credential-gated legs (#16727) and is
+// not an operational command, the
 // config-mode routes are governed by the *-configuration pair (#9633), and
 // the two status probes are session plumbing governed by the coarse
 // permission authorization alone (#15077).
