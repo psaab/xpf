@@ -567,6 +567,7 @@ var collectorDescUserspaceStatus13280 = []int{
 	xpfCollectorDescFieldIndex("userspaceSharedNatAmbiguitySaturated"),
 	xpfCollectorDescFieldIndex("userspaceSharedWireAmbiguityKeys"),
 	xpfCollectorDescFieldIndex("userspaceSharedWireAmbiguitySaturated"),
+	xpfCollectorDescFieldIndex("userspaceSharedWireFallbackScans"),
 	xpfCollectorDescFieldIndex("userspaceHATransitionDropped"),
 	xpfCollectorDescFieldIndex("userspaceHATransitionStaleSkipped"),
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteRefusedIdentity"),

@@ -490,6 +490,12 @@ pub(crate) struct ProcessStatus {
     pub shared_wire_ambiguity_keys: u64,
     #[serde(rename = "shared_wire_ambiguity_saturated", default)]
     pub shared_wire_ambiguity_saturated: u64,
+    /// #16561: NAT'd forward removals that fell back to the legacy
+    /// O(table) survivor scan under the shared-session mutex because
+    /// the wire-owner roster was not trusted for that key. Additive /
+    /// defaulted for backward compatibility.
+    #[serde(rename = "shared_wire_fallback_scans_total", default)]
+    pub shared_wire_fallback_scans_total: u64,
     #[serde(rename = "shared_session_publish_lock_acquisitions_total", default)]
     pub shared_session_publish_lock_acquisitions_total: u64,
     #[serde(rename = "shared_session_publish_lock_contended_total", default)]

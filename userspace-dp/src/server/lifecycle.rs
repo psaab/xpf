@@ -479,6 +479,7 @@ pub(crate) fn run() -> Result<(), String> {
             shared_nat_ambiguity_saturated: 0,
             shared_wire_ambiguity_keys: 0,
             shared_wire_ambiguity_saturated: 0,
+            shared_wire_fallback_scans_total: 0,
             shared_session_publish_lock_acquisitions_total: 0,
             shared_session_publish_lock_contended_total: 0,
             session_replication_upserts_total: 0,

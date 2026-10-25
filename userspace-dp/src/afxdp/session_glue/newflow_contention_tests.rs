@@ -44,7 +44,8 @@ use super::*;
 use crate::afxdp::counter_test_lock::{CounterExempt, counter_reader_guard, movers_waiting};
 use crate::afxdp::shared_ops::{
     SHARED_SESSION_PUBLISH_LOCK_ACQUISITIONS, SHARED_SESSION_PUBLISH_LOCK_CONTENDED,
-    SHARED_SESSION_PUBLISHES, publish_shared_session, remove_shared_session,
+    SHARED_SESSION_PUBLISHES, SHARED_WIRE_FALLBACK_SCANS, publish_shared_session,
+    remove_shared_session,
 };
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -1091,4 +1092,153 @@ fn shared_nat_ambiguity_survivor_controls_15104() {
         !ambiguities.is_unique_for(&probe, &first.key),
         "forgotten alias must not resolve for a removed owner"
     );
+}
+
+// #16561 (R3-A71-03): the wire-owner roster must stay trusted above the
+// 16,384 alias bound. Pre-fix, `observe_wire_owner` latched
+// `wire_saturated` (from the alias `saturated()` arm or the 16,384
+// wire-key cap) and nothing but a full stop cleared it, so every later
+// NAT'd removal fell back to the O(table) scan under the shared mutex.
+// This cell drives the REAL 16,384 bound through the real
+// publish/remove path with DISTINCT wire keys (the #15106 probe pinned
+// one wire key, which is why it never saw this), then proves trust
+// recovers from the LIVE population alone, with no fallback scan.
+//
+// Distinct wire keys: SNAT entries whose translated port varies per
+// entry, so `forward_wire_key` differs per session (rewrite_src is the
+// same address; the port makes the wire key distinct). Sessions that
+// share one wire key are covered by the #15106 mechanism cell.
+
+fn snat_distinct_wire_entry_16561(i: u32) -> SyncedSessionEntry {
+    let mut e = entry(10_000 + (i % 1000) as u16);
+    e.key.dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, (i / 256) as u8, (i % 256) as u8));
+    e.key.dst_port = 5201 + (i % 500) as u16;
+    e.decision.nat.rewrite_src = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)));
+    // Port span 1024..61023 stays a valid nonzero u16 for i < 16,385.
+    e.decision.nat.rewrite_src_port = Some(1024 + (i % 60_000) as u16);
+    e
+}
+
+#[test]
+fn wire_roster_stays_trusted_above_alias_bound_16561() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    let fallbacks_before = SHARED_WIRE_FALLBACK_SCANS.load(Ordering::Relaxed);
+    // 16,385 live NAT'd forwards with distinct wire keys: one past the
+    // alias bound. Every one must be recorded in the wire roster.
+    let mut entries = Vec::new();
+    for i in 0..16_385u32 {
+        entries.push(snat_distinct_wire_entry_16561(i));
+    }
+    for e in &entries {
+        maps.publish(e);
+    }
+    {
+        let idx = maps
+            .indexes
+            .wire_ambiguities
+            .lock()
+            .expect("wire ambiguity index");
+        assert!(
+            idx.saturated(),
+            "alias index must be saturated at 16,385 live aliases (precondition)"
+        );
+        assert!(
+            idx.wire_roster_trusted_for_removal(),
+            "roster sized to the session ceiling must stay trusted above the alias bound"
+        );
+        assert_eq!(
+            idx.wire_key_len(),
+            16_385,
+            "every distinct wire key must be recorded above the alias bound"
+        );
+        assert!(
+            !idx.wire_saturated(),
+            "live roster population (16,385) is far below its ceiling"
+        );
+    }
+    // Remove the surplus entry: roster trust must survive (no latch, no
+    // fallback scan) — the removal itself proves the O(1) path.
+    maps.remove(&entries[16_384].key);
+    assert_eq!(
+        SHARED_WIRE_FALLBACK_SCANS.load(Ordering::Relaxed),
+        fallbacks_before,
+        "removal above the alias bound must not fall back to the O(table) scan"
+    );
+    // Remove one more: still trusted, still no scan.
+    maps.remove(&entries[0].key);
+    assert_eq!(
+        SHARED_WIRE_FALLBACK_SCANS.load(Ordering::Relaxed),
+        fallbacks_before,
+        "later removals must stay on the O(1) roster path (no latch)"
+    );
+    {
+        let idx = maps
+            .indexes
+            .wire_ambiguities
+            .lock()
+            .expect("wire ambiguity index");
+        assert!(idx.wire_roster_trusted_for_removal());
+        assert_eq!(idx.wire_key_len(), 16_383);
+    }
+}
+
+#[test]
+fn wire_roster_live_ceiling_fails_closed_and_recovers_16561() {
+    let _g = counter_reader_guard();
+    // Exercise the roster's OWN live ceiling via the test seam so the
+    // fail-closed/recovery boundary is reachable without 2M sessions.
+    let prev = crate::afxdp::types::WIRE_KEY_CAP_OVERRIDE
+        .swap(4, Ordering::Relaxed);
+    let maps = SharedMaps::new();
+    let fallbacks_before = SHARED_WIRE_FALLBACK_SCANS.load(Ordering::Relaxed);
+    let mut entries = Vec::new();
+    for i in 0..6u32 {
+        entries.push(snat_distinct_wire_entry_16561(20_000 + i));
+    }
+    for e in &entries {
+        maps.publish(e);
+    }
+    {
+        let idx = maps
+            .indexes
+            .wire_ambiguities
+            .lock()
+            .expect("wire ambiguity index");
+        assert!(
+            idx.wire_saturated(),
+            "live roster population at the ceiling must fail closed"
+        );
+        assert!(!idx.wire_roster_trusted_for_removal());
+    }
+    // Removing entries drops the LIVE population below the ceiling:
+    // trust must recover with no latch, reseed or restart.
+    for e in &entries[..3] {
+        maps.remove(&e.key);
+    }
+    // The first removals above ran untrusted (live ceiling), so the
+    // fallback counter may have advanced; what matters is that it stops
+    // advancing once the population is below the ceiling.
+    let fallbacks_mid = SHARED_WIRE_FALLBACK_SCANS.load(Ordering::Relaxed);
+    let _ = fallbacks_before;
+    {
+        let idx = maps
+            .indexes
+            .wire_ambiguities
+            .lock()
+            .expect("wire ambiguity index");
+        assert!(
+            !idx.wire_saturated(),
+            "dropping below the live roster ceiling must clear saturation"
+        );
+        assert!(idx.wire_roster_trusted_for_removal());
+    }
+    maps.remove(&entries[3].key);
+    assert_eq!(
+        SHARED_WIRE_FALLBACK_SCANS.load(Ordering::Relaxed),
+        fallbacks_mid,
+        "removal below the live roster ceiling must use the O(1) roster path"
+    );
+    crate::afxdp::types::WIRE_KEY_CAP_OVERRIDE
+        .store(prev, Ordering::Relaxed);
 }
