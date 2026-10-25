@@ -68,6 +68,19 @@ if [ -f /etc/xpf/bpfrx.conf ] && [ ! -f /etc/xpf/xpf.conf ]; then
     mv /etc/xpf/bpfrx.conf /etc/xpf/xpf.conf
 fi
 
+# --- Remove legacy swanctl snippet (#16852) ---
+# The pre-rename daemon wrote /etc/swanctl/conf.d/bpfrx.conf; the renamed
+# daemon writes xpf.conf and nothing removed the old file. charon includes
+# conf.d/*.conf, so the stale connections and IKE secrets kept loading on
+# every reload — a deleted VPN stayed authorized and its peer could
+# re-establish. Remove the file and any fsatomic crash temp staged for it
+# (".bpfrx.conf.tmp-*", holding the same cleartext render). Foreign
+# conf.d/*.conf files are the operator's and are left untouched.
+if [ -e /etc/swanctl/conf.d/bpfrx.conf ] || compgen -G '/etc/swanctl/conf.d/.bpfrx.conf.tmp-*' >/dev/null; then
+    info "Removing legacy /etc/swanctl/conf.d/bpfrx.conf (stale pre-rename IPsec config + secrets)"
+    rm -f /etc/swanctl/conf.d/bpfrx.conf /etc/swanctl/conf.d/.bpfrx.conf.tmp-*
+fi
+
 # --- Migrate networkd files ---
 renamed=0
 for f in /etc/systemd/network/10-bpfrx-*; do

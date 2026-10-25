@@ -97,6 +97,15 @@ const (
 	DefaultSwanctlDir = "/etc/swanctl/conf.d"
 	// BPFRXConfFile is the config file xpf manages.
 	BPFRXConfFile = "xpf.conf"
+	// LegacyBPFRXConfFile is the pre-rename (#16852) managed snippet name.
+	// The bpfrx->xpf rename (b67f80edf9) stopped writing it but nothing
+	// removed it; charon's `include conf.d/*.conf` keeps loading its
+	// connections and `ike-*` secrets on every reload, so a deleted VPN
+	// stays authorized (and can re-establish) and a cleartext PSK survives
+	// factory reset. It is removed before every --load-all the Manager
+	// drives (applyConfig/clearConfig) and is exported for the
+	// factory-reset wipe leg (pkg/factoryreset) and operators.
+	LegacyBPFRXConfFile = "bpfrx.conf"
 )
 
 // Manager handles strongSwan config generation and SA queries.
@@ -190,6 +199,63 @@ func NewWithConfigDir(dir string) *Manager {
 		configDir:  dir,
 		configPath: filepath.Join(dir, BPFRXConfFile),
 	}
+}
+
+// removeLegacySwanctlSnippet deletes the pre-rename conf.d/bpfrx.conf
+// (#16852) from the Manager's conf.d, including any fsatomic crash temp
+// staged for it (".bpfrx.conf.tmp-*"). It must run BEFORE `swanctl
+// --load-all`, because charon globs conf.d/*.conf: leaving the file in
+// place while the reload runs would let charon (re)load the stale
+// connections/secrets and merge stale children into a same-named xpf
+// connection even though the file is gone afterwards.
+//
+// Only the exact legacy basename and its temps are touched — a foreign
+// operator conf.d/*.conf is never removed (charon loading it is the
+// operator's explicit include). Identical-ness to the live snippet is
+// deliberately not consulted: legacyConfigPath is always bpfrx.conf and
+// configPath is always xpf.conf, so the two never alias.
+//
+// A removal failure (permission, a planted directory at the legacy path,
+// a non-empty-directory temp, ...) is returned, never logged-and-continued:
+// reporting reload success while the stale secret file still sits in
+// conf.d would be exactly the #16852 fail-open. Absence is not an error.
+func (m *Manager) removeLegacySwanctlSnippet() error {
+	legacy := m.legacyConfigPath()
+	if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove legacy swanctl snippet %s: %w", legacy, err)
+	} else if err == nil {
+		slog.Warn("removed legacy pre-rename swanctl snippet; its connections and secrets are no longer loaded (#16852)", "path", legacy)
+	}
+	// fsatomic crash temps staged for the legacy base: a daemon killed
+	// between CreateTemp and the atomic rename left ".bpfrx.conf.tmp-*"
+	// holding the full cleartext pre-rename render. No next write to that
+	// base will ever self-heal them, so sweep them with the file itself.
+	entries, err := os.ReadDir(m.configDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("list swanctl conf.d %s for legacy temp sweep: %w", m.configDir, err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "."+LegacyBPFRXConfFile+".tmp-") {
+			continue
+		}
+		p := filepath.Join(m.configDir, name)
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove legacy swanctl crash temp %s: %w", p, err)
+		}
+		slog.Warn("removed legacy pre-rename swanctl crash temp (#16852)", "path", p)
+	}
+	return nil
+}
+
+// legacyConfigPath is the pre-rename snippet path inside the Manager's
+// existing configDir seam, so tests using NewWithConfigDir redirect it
+// with everything else.
+func (m *Manager) legacyConfigPath() string {
+	return filepath.Join(m.configDir, LegacyBPFRXConfFile)
 }
 
 // Apply generates swanctl config and reloads strongSwan.
@@ -403,6 +469,16 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 
 	if err := os.MkdirAll(m.configDir, 0755); err != nil {
 		return nil, nil, fmt.Errorf("create config dir: %w", err)
+	}
+
+	// #16852: the legacy snippet must be gone BEFORE the reload below,
+	// because charon globs conf.d/*.conf and would otherwise load (or
+	// merge) the stale pre-rename connections/secrets this apply is
+	// meant to supersede. A removal failure aborts before any write:
+	// xpf.conf still holds the prior generation on disk, matching what
+	// charon still runs.
+	if err := m.removeLegacySwanctlSnippet(); err != nil {
+		return nil, nil, err
 	}
 
 	// #10712: snapshot the prior file BEFORE replacing it. reload() runs
@@ -781,6 +857,16 @@ func connNamesInConfigText14589(text string) []string {
 // would stay authorized and could re-initiate. This now mirrors applyConfig,
 // which already propagates reload errors (the #4433 contract).
 func (m *Manager) clearConfig(written func()) error {
+	// #16852: remove the legacy pre-rename snippet BEFORE the reload
+	// below, so deleting the last VPN (or Clear) actually unloads it —
+	// charon globs conf.d/*.conf, so leaving bpfrx.conf in place while
+	// reloading would keep its connections/secrets authorized even
+	// though xpf.conf is gone. A removal failure aborts before any
+	// mutation: xpf.conf still holds the prior generation on disk,
+	// matching what charon still runs.
+	if err := m.removeLegacySwanctlSnippet(); err != nil {
+		return err
+	}
 	// #10712: snapshot the prior file BEFORE removing it, mirroring applyConfig:
 	// if the reload below fails, charon still runs the OLD config, so the
 	// removed file must be restored — otherwise charon's own next start or

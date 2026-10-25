@@ -491,7 +491,7 @@ func TestZeroizeRenderedRefusesSymlinkedSnippets10100(t *testing.T) {
 			}
 			// Best-effort past the skip: sibling regulars still erased.
 			for _, sib := range []struct{ what, path string }{
-				{"swanctl", swan}, {"kea4", kea4}, {"kea6", kea6},
+				{"swanctl", swan}, {"legacy swanctl", filepath.Join(filepath.Dir(swan), "bpfrx.conf")}, {"kea4", kea4}, {"kea6", kea6},
 			} {
 				if sib.path == linkPath {
 					continue
@@ -539,7 +539,7 @@ func TestZeroizeRenderedSweepRefusesTempSymlink10100(t *testing.T) {
 		t.Fatalf("R-2 temp-sweep: victim not byte-identical:\n%s", got)
 	}
 	// Exact-path removals still ran past the sweep skip.
-	for _, sib := range []string{swan, kea4} {
+	for _, sib := range []string{swan, filepath.Join(filepath.Dir(swan), "bpfrx.conf"), kea4} {
 		if _, serr := os.Lstat(sib); !os.IsNotExist(serr) {
 			t.Fatalf("R-2 temp-sweep: sibling regular %s was not erased", sib)
 		}
@@ -588,7 +588,7 @@ func TestZeroizeRenderedRefusesSymlinkedFRR10100(t *testing.T) {
 		t.Fatalf("R-2 frr: frr.conf link was replaced/unlinked: %v", lerr)
 	}
 	// Best-effort: sibling snippet regulars still erased past the frr skip.
-	for _, sib := range []string{swan, kea4, kea6} {
+	for _, sib := range []string{swan, filepath.Join(filepath.Dir(swan), "bpfrx.conf"), kea4, kea6} {
 		if _, serr := os.Lstat(sib); !os.IsNotExist(serr) {
 			t.Fatalf("R-2 frr: sibling regular %s was not erased", sib)
 		}

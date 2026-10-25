@@ -831,6 +831,10 @@ func wipeServiceBackupSweepTargets() []wipeBackupSweepTarget {
 	add(wipeSSHHostKeyDir, filepath.Base(wipeManagedHostKeysPath))
 	add(filepath.Dir(wipeFRRConf), filepath.Base(wipeFRRConf))
 	add(filepath.Dir(wipeSwanctlSnippet), filepath.Base(wipeSwanctlSnippet))
+	// #16852: editor backups of the legacy pre-rename snippet (bpfrx.conf~ /
+	// bpfrx.conf.bak, ...) carry the same cleartext PSKs; sweep them with
+	// the xpf.conf backups in the same conf.d.
+	add(filepath.Dir(wipeSwanctlSnippet), ipsec.LegacyBPFRXConfFile)
 	add(filepath.Dir(wipeKea4Conf), filepath.Base(wipeKea4Conf))
 	add(filepath.Dir(wipeKea6Conf), filepath.Base(wipeKea6Conf))
 	var out []wipeBackupSweepTarget
