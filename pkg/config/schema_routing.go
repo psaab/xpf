@@ -504,6 +504,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 		"import": {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 		"group": {desc: "BGP group", args: 1, placeholder: "<group-name>", children: map[string]*schemaNode{
+			"type":               {desc: "BGP group type (internal | external)", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "BGP group type (internal | external)", valueExamples: []string{"internal", "external"}, validator: ValidateBGPGroupType, children: nil},
 			"peer-as":            {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
 			"local-as":           {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
 			"local-address":      {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateBGPLocalAddress, children: nil},

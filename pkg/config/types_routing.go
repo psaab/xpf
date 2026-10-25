@@ -816,6 +816,7 @@ type BGPConfig struct {
 type BGPNeighbor struct {
 	Address              string // peer IP
 	PeerAS               uint32
+	GroupType            string `json:"-"` // authored group type for compiler validation; "" = undeclared
 	LocalAS              uint32 // per-peering local-as (FRR `neighbor X local-as`); 0 = inherit router AS
 	LocalAddress         string // BGP session source (FRR `neighbor X update-source`); "" = none
 	HoldTime             int    // hold-time in seconds (FRR `neighbor X timers <keepalive> <hold>`); 0 = FRR default (180)
@@ -852,6 +853,9 @@ type BGPNeighbor struct {
 	PrefixLimitTeardownPctInet6 int
 	PrefixLimitIdleTimeoutInet6 int
 	PrefixLimitIdleForeverInet6 bool
+	// Presence, not validity: never replace an authored invalid peer-as with
+	// the internal-group default. The peer-as gate must still reject it.
+	peerASConfigured bool
 }
 
 // TunnelMode is a tunnel encapsulation mode (#16141). It is a

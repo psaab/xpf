@@ -1004,11 +1004,24 @@ step. Both are required — neither sees the other's case:
   `LocalAS == 0` and the renderer omits `router bgp`; #11313 now rejects this
   on strict commit / commit-check and warns on tolerant load / peer-sync. The
   render guard remains defense-in-depth for malformed persisted configs.
+- **BGP group `type internal|external` is enforced (#16567).** An internal
+  group may omit `peer-as`: compilation derives it from the neighbor's
+  effective local AS (neighbor/group `local-as`, else the resolved router
+  AS), after all inheritance and routing-instance overrides. For example,
+  `autonomous-system 65000` plus `group ibgp { type internal; neighbor
+  10.0.2.3; }` renders `neighbor 10.0.2.3 remote-as 65000`.
+  Strict compilation rejects an unknown or missing type value, including
+  in an empty group, and rejects internal peers with a foreign AS or
+  external peers with the effective local AS. An omitted `type` retains
+  the existing explicit-peer-as behavior. An authored invalid `peer-as`
+  is not repaired by derivation. Tolerant loads warn about invalid types
+  and contradictions but preserve the existing peer-as-driven sessions;
+  no `type` statement is emitted to FRR.
 - **A BGP neighbor's peer-as (remote-as) is validated at commit (#2963).**
-  `peer-as` is optional in the parser/compiler, so a neighbor authored
-  without one (and without an inherited group `peer-as`) keeps a zero
-  `BGPNeighbor.PeerAS`, and `generateProtocols` would emit `neighbor <addr>
-  remote-as 0`. AS 0 is reserved (RFC 7607) and FRR/vtysh rejects
+  Without an explicit/inherited `peer-as` or the internal-group default
+  above, a neighbor keeps a zero `BGPNeighbor.PeerAS`, and an unguarded
+  renderer would emit `neighbor <addr> remote-as 0`.
+  AS 0 is reserved (RFC 7607) and FRR/vtysh rejects
   `remote-as 0`, which fails the WHOLE `frr-reload` (a single `vtysh -f`
   add-batch exits non-zero on any `CMD_WARNING_CONFIG_FAILED`) and leaves
   dynamic routing broken/stale — a commit-accepted config the routing daemon

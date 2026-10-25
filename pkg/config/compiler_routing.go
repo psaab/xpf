@@ -1578,6 +1578,34 @@ func resolveBGPAutonomousSystem(cfg *Config) {
 	}
 }
 
+// resolveBGPGroupType16567 supplies omitted internal-group peer ASes only
+// after router-AS resolution and all group/neighbor overrides (#16567).
+// Explicit peer-as, including an invalid value parsed as zero, is untouched.
+func resolveBGPGroupType16567(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	fill := func(bgp *BGPConfig) {
+		if bgp == nil {
+			return
+		}
+		for _, n := range bgp.Neighbors {
+			if n == nil || n.GroupType != "internal" || n.PeerAS != 0 || n.peerASConfigured {
+				continue
+			}
+			if eff := BGPNeighborEffectiveLocalAS15663(bgp.LocalAS, n); eff != 0 {
+				n.PeerAS = eff
+			}
+		}
+	}
+	fill(cfg.Protocols.BGP)
+	for _, ri := range cfg.RoutingInstances {
+		if ri != nil {
+			fill(ri.BGP)
+		}
+	}
+}
+
 // resolveRoutingOptionsRouterID fills empty protocol router-ids from the
 // global Junos `routing-options router-id` default. Explicit protocol-level
 // values take precedence. Run after the full tree is compiled because the

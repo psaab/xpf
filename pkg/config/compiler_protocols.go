@@ -624,6 +624,8 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 
 		for _, groupInst := range namedInstances(bgpExpanded.FindChildren("group")) {
 			var peerAS uint32
+			var peerASConfigured bool
+			var groupType string
 			var groupLocalAS uint32
 			var groupLocalAddress string
 			var groupHoldTime int
@@ -707,7 +709,20 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 						continue
 					}
 					switch child.Name() {
+					case "type":
+						// Validate even an empty group, before its type can
+						// disappear through the neighbor-only config model.
+						if err := validateBGPGroupTypeNode(child); err != nil {
+							if !opts.lenientBGPGroupType16567 {
+								return fmt.Errorf("BGP group %q: %w", groupInst.name, err)
+							}
+							if warnings != nil {
+								*warnings = append(*warnings, fmt.Sprintf("BGP group %q type (downgraded to warning on tolerant path): %v", groupInst.name, err))
+							}
+						}
+						groupType = nodeVal(child)
 					case "peer-as":
+						peerASConfigured = true
 						if v := nodeVal(child); v != "" {
 							// #4713: no silent uint32 wrap — leave unset on a
 							// negative/oversized AS (inert on lenient load).
@@ -862,6 +877,8 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 								neighbor = &BGPNeighbor{
 									Address:                 nAddr,
 									PeerAS:                  peerAS,
+									peerASConfigured:        peerASConfigured,
+									GroupType:               groupType,
 									LocalAS:                 groupLocalAS,
 									LocalAddress:            groupLocalAddress,
 									HoldTime:                groupHoldTime,

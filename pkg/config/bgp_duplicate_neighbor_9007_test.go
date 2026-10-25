@@ -74,7 +74,7 @@ func TestBGPDuplicateNeighborChannels9007(t *testing.T) {
 	sameGroupSplitNode := []string{
 		"set policy-options policy-statement PS then accept",
 		"set protocols bgp local-as 65001",
-		"set protocols bgp group G type external",
+		"set protocols bgp group G type internal",
 		"set protocols bgp group G peer-as 65001",
 		"set protocols bgp group G neighbor 10.0.2.2",
 		"set protocols bgp group G neighbor 10.0.2.2 import PS",

@@ -761,16 +761,10 @@ func validateBGPNeighborAddressStrict(cfg *Config) error {
 // validateBGPNeighborPeerASStrict hard-rejects a BGP neighbor whose effective
 // peer-as (remote-as) is missing/0 or out of the valid AS range (#2963).
 //
-// peer-as is optional in the parser/compiler (compiler_protocols.go assigns
-// BGPNeighbor.PeerAS only when a per-neighbor `peer-as` token or an inherited
-// group `peer-as` is present; otherwise it stays the zero value). The FRR
-// renderer (pkg/frr/policy_render.go) emits `neighbor <addr> remote-as <PeerAS>`
-// unconditionally, so a neighbor authored without a peer-as renders
-// `neighbor <addr> remote-as 0`. AS 0 is reserved (RFC 7607) and FRR/vtysh
-// rejects it: the whole frr-reload fails (a single vtysh -f add-batch exits
-// non-zero on any CMD_WARNING_CONFIG_FAILED), leaving dynamic routing in a
-// broken/stale state. That is a commit-accepted config the routing daemon
-// cannot load — exactly the fail-class this gate closes.
+// PeerAS comes from an explicit/inherited peer-as, or from the effective
+// local AS when type internal omits peer-as (#16567). Without either source
+// it stays zero. An unguarded FRR renderer would emit `remote-as 0`, which
+// FRR rejects (AS 0 is reserved, RFC 7607), failing the whole frr-reload.
 //
 // The valid 4-byte AS space is 1..4294967295 (uint32 max); 0 is reserved
 // (RFC 7607) and 23456 (AS_TRANS) is reserved for 4-byte transition but is a
@@ -820,6 +814,61 @@ func validateBGPNeighborPeerASStrict(cfg *Config) error {
 		return nil
 	}
 
+	if err := checkBGP("", cfg.Protocols.BGP); err != nil {
+		return err
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		scope := fmt.Sprintf("routing-instance %s ", ri.Name)
+		if err := checkBGP(scope, ri.BGP); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateBGPGroupTypeStrict checks group intent against each peer's
+// effective ASes after inheritance and internal-group derivation (#16567).
+// Missing ASes remain the responsibility of the existing AS gates.
+// Tolerant loads warn but retain the pre-existing peer-as-driven session;
+// the group type itself is never sent to FRR.
+func validateBGPGroupTypeStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	checkBGP := func(scope string, bgp *BGPConfig) error {
+		if bgp == nil {
+			return nil
+		}
+		for _, n := range bgp.Neighbors {
+			if n == nil || n.GroupType == "" {
+				continue
+			}
+			detail := fmt.Sprintf("%sprotocols bgp neighbor %s", scope, n.Address)
+			if n.GroupName != "" {
+				detail = fmt.Sprintf("%sprotocols bgp group %s neighbor %s", scope, n.GroupName, n.Address)
+			}
+			if err := ValidateBGPGroupType(n.GroupType); err != nil {
+				return fmt.Errorf("%s: %w", detail, err)
+			}
+			if n.PeerAS == 0 {
+				continue
+			}
+			eff := BGPNeighborEffectiveLocalAS15663(bgp.LocalAS, n)
+			if eff == 0 {
+				continue
+			}
+			if n.GroupType == "internal" && n.PeerAS != eff {
+				return fmt.Errorf("%s: type internal contradicts peer-as %d (effective local AS %d) — all peers in an internal (iBGP) group are in the same AS; set peer-as %d or change the group type to external", detail, n.PeerAS, eff, eff)
+			}
+			if n.GroupType == "external" && n.PeerAS == eff {
+				return fmt.Errorf("%s: type external contradicts peer-as %d (effective local AS %d) — an external (eBGP) peer is in a different AS; set a foreign peer-as or change the group type to internal", detail, n.PeerAS, eff)
+			}
+		}
+		return nil
+	}
 	if err := checkBGP("", cfg.Protocols.BGP); err != nil {
 		return err
 	}
