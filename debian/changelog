@@ -73,6 +73,17 @@ xpf (0.0.0) unstable; urgency=medium
     controls; deleting either production term now turns a named cell red.
     The #13241 memo cell is documented as covering memo invalidation
     only. No production behaviour changes.
+  * Config/eventengine: the #14413 embedded `change-configuration
+    commands` redactor now fails closed (#16726). It previously masked
+    only a lexable lower-case `set` command, so a stored `delete …`,
+    mis-cased `Set …`, unknown-verb, or unbalanced-quote command carrying
+    a credential rendered it in cleartext on the PermView `show
+    configuration` / `show event-options` surfaces and in the xpfd
+    journal via classifyPlan warnings. Every value token after a secret
+    keyword is now masked regardless of verb or case, a command that
+    does not lex cleanly and marks no secret in its lexed prefix is
+    masked as a whole payload, and classifyPlan logs the redacted
+    command. Well-formed `set` commands render as before.
   * Config: packed hierarchical `security flow tcp-session
     time-wait-state session-timeout N;` / `session-ageout;` (and the
     half-close leaves, including multi-leaf packed runs) now compile

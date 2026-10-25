@@ -442,17 +442,22 @@ func fingerprintCompareNodes(nodes []*Node, base []string) {
 
 // RedactEmbeddedChangeConfigCommand masks credential values inside one
 // `event-options … then change-configuration commands` payload for DISPLAY
-// (#14413). The stored command is never mutated by callers: the event engine
-// executes the raw text, so this is a render-time transform shared by
-// RedactedClone, `show event-options` (gRPC and CLI), and FormatCompareRedacted.
+// (#14413, fail-closed #16726). The stored command is never mutated by
+// callers: the event engine executes the raw text, so this is a render-time
+// transform shared by RedactedClone, `show event-options` (gRPC and CLI),
+// FormatCompareRedacted, and the event-engine journal warnings.
 //
-// The command is lexed with the real config lexer (never strings.Fields, so
-// quoted segments and escapes match the engine's own ParseSetCommand view).
-// A leading set/delete verb is required (classifyPlan's contract); anything
-// else is returned unchanged. The inner path is then judged by the SAME
-// secretIndices/urlLeafIndices sets the AST redactor uses — no second list —
-// so `pre-shared-key`, gated `password`/`key`/`community`, URL userinfo and
-// every other existing leaf keep their exact semantics inside a command.
+// Fail closed (#16726): the redactor must cover what the store holds, not
+// only what classifyPlan would run. Any verb (any case), or no verb at all,
+// is judged by the SAME secretIndices/urlLeafIndices sets the AST redactor
+// uses — no second list — so `pre-shared-key`, gated
+// `password`/`key`/`community`, URL userinfo and every other existing leaf
+// keep their exact semantics inside a command, and the value token(s) after
+// a secret keyword are masked regardless of the leading verb. When the
+// command does not lex cleanly end-to-end, the lenient lexer's prefix is
+// judged; if it marks nothing, the credential may sit in the dropped tail,
+// so the whole payload is replaced by SecretDataPlaceholder. An empty
+// command is returned unchanged (there is no payload to mask).
 // Masked tokens are replaced by SecretDataPlaceholder; tokens are re-joined
 // with quoteKey so a multi-word value stays one re-parseable token.
 func RedactEmbeddedChangeConfigCommand(cmd string) string {
@@ -464,11 +469,28 @@ func RedactEmbeddedChangeConfigCommand(cmd string) string {
 // compare-fingerprint variant: a masked secret token gets the same
 // \x00xpf-sha256= suffix fingerprintCompareNodes appends, so FormatCompare
 // preserves secret-equality without leaking the value.
+//
+// Lexing: the lenient lexer's PREFIX tokens are judged even when the line
+// does not lex cleanly end-to-end. If the prefix already marks a secret/URL
+// token (an unbalanced quote AFTER the credential, a `@` truncating a
+// credential URL — `@` is not an identifier char, so every bare URL lexes
+// as a prefix), that token is masked and the command renders from the
+// masked prefix: the raw credential tail is never re-joined. Only when the
+// prefix marks NOTHING but the line still does not lex cleanly — the
+// credential may sit in the dropped tail (`… ascii-text "<secret>`) — is
+// the whole payload replaced (fingerprinted as one unit in compare mode,
+// so two different unjudgeable credentials still diff as changed).
 func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
-	tokens, _ := lexConfigMutationLine9938(cmd)
-	changed := redactEmbeddedTokens(tokens, fingerprint)
+	tokens, _, lexOK := lexConfigMutationLineStrict15167(cmd)
 	if len(tokens) == 0 {
-		return cmd, changed
+		if lexOK || strings.TrimSpace(cmd) == "" {
+			return cmd, false
+		}
+		return wholePayloadMask16726(cmd, fingerprint)
+	}
+	changed := redactEmbeddedTokens(tokens, fingerprint)
+	if !lexOK && !changed {
+		return wholePayloadMask16726(cmd, fingerprint)
 	}
 	parts := make([]string, len(tokens))
 	for i, tok := range tokens {
@@ -477,20 +499,32 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 	return strings.Join(parts, " "), changed
 }
 
+func wholePayloadMask16726(cmd string, fingerprint bool) (string, bool) {
+	if fingerprint {
+		return SecretDataPlaceholder + compareFingerprintSuffix(cmd), true
+	}
+	return SecretDataPlaceholder, true
+}
+
 // redactEmbeddedTokens masks secret/URL token indices in one lexed embedded
-// command in place. Only a `set` command can mint a credential (`delete`
-// removes a path and carries no secret value), so a non-set verb is left
-// alone. Returns whether any token changed.
+// command in place (#16726). There is no verb gate: a `delete`, a mis-cased
+// `Set`/`SET`, or any other verb can carry a credential value token in the
+// stored text (the store holds it whether or not classifyPlan would run
+// it), so every token is judged. The leading verb token itself (index 0) is
+// never masked — secretIndices/urlLeafIndices never mark it for a real
+// command, and a bare secret keyword with no following value masks nothing.
+// Returns whether any token changed.
 func redactEmbeddedTokens(tokens []string, fingerprint bool) bool {
-	if len(tokens) < 2 || tokens[0] != "set" {
+	if len(tokens) == 0 {
 		return false
 	}
+	judged := embeddedJudgedTokens16726(tokens)
 	idxs := make(map[int]bool)
-	for _, idx := range secretIndices(tokens) {
+	for _, idx := range secretIndices(judged) {
 		idxs[idx] = true
 	}
 	urls := make(map[int]bool)
-	for _, idx := range urlLeafIndices(tokens) {
+	for _, idx := range urlLeafIndices(judged) {
 		if !idxs[idx] {
 			urls[idx] = true
 		}
@@ -527,6 +561,45 @@ func redactEmbeddedTokens(tokens []string, fingerprint bool) bool {
 		changed = true
 	}
 	return changed
+}
+
+// embeddedJudgedTokens16726 returns the token slice secretIndices /
+// urlLeafIndices must judge for an embedded command (#16726):
+//
+//   - A command whose first token IS a secret keyword (`pre-shared-key
+//     ascii-text <v>`, no verb at all) is judged as-is: prepending a verb
+//     would shift the keyword off its value.
+//   - Otherwise the first token is a verb slot: an exact `set` is judged
+//     as-is (isADUserPasswordLeaf15996 skips it), and any other verb is
+//     rewritten to `set` in a COPY so that gate aligns for delete/Set/any
+//     verb. The rendered tokens keep the authored verb.
+//   - A single-token command has no verb+path structure; judged as-is.
+func embeddedJudgedTokens16726(tokens []string) []string {
+	if len(tokens) < 2 || tokens[0] == "set" || isSecretKeywordToken16726(tokens[0]) {
+		return tokens
+	}
+	judged := append([]string(nil), tokens...)
+	judged[0] = "set"
+	return judged
+}
+
+// isSecretKeywordToken16726 reports whether k is a token secretIndices /
+// urlLeafIndices can mark values after (distinctive or gated), so a command
+// STARTING with it carries its credential without any verb.
+func isSecretKeywordToken16726(k string) bool {
+	switch k {
+	case "pre-shared-key", "authentication-key", "additional-authentication-key",
+		"authentication-password", "privacy-password", "encrypted-password",
+		"simple-password", "api-key", "tsig-secret", "plain-text-password",
+		"plain-text-password-value", "api-token", "aws-secret-key",
+		"private-key", "preshared-key", "client-secret", "shared-secret",
+		"radius-shared-secret", "user-password", "password", "secret",
+		"key", "community", "url", "url-template", "checkip-url",
+		"server", "update-server", "target", "path", "hostname",
+		"endpoint", "archive-sites":
+		return true
+	}
+	return false
 }
 
 // redactEmbeddedCommands14413 applies embedded-command redaction to the
@@ -1473,13 +1546,15 @@ func findRedactionPlaceholder(nodes []*Node, base []string) string {
 // judges the inner tokens with the SAME secretIndices/urlLeafIndices sets.
 // It returns (urlHit, secretHit): urlHit is the flattened outer path when an
 // inner URL token contains SecretRedacted, secretHit when an inner secret
-// token equals SecretDataPlaceholder. Only a `set` command can mint a
-// credential, mirroring redactEmbeddedTokens. A non-secret inner leaf
-// carrying the placeholder, or the placeholder glued inside a larger token,
-// is NOT a hit — RedactedClone replaces whole tokens, so neither spelling
-// is one it produces. The reported path is the outer flattened path up to
-// and including the payload token (quoted command) or the whole node
-// (unquoted joined tail / block child), naming the offending config path.
+// token equals SecretDataPlaceholder. There is no verb gate (#16726),
+// mirroring redactEmbeddedTokens: any verb's credential placeholder is a
+// hit. A non-secret inner leaf carrying the placeholder, or the placeholder
+// glued inside a larger token, is NOT a hit — RedactedClone replaces whole
+// tokens (or, for an unlexable command, the whole payload), so neither
+// glued spelling is one it produces. The reported path is the outer
+// flattened path up to and including the payload token (quoted command) or
+// the whole node (unquoted joined tail / block child), naming the offending
+// config path.
 func embeddedRedactionHit15209(n *Node, full, base []string) (string, string) {
 	ci := -1
 	for i := 0; i+1 < len(full); i++ {
@@ -1579,29 +1654,66 @@ func embeddedChildRedactionHit15209(child *Node, parentFull []string) (string, s
 	return "", ""
 }
 
-// embeddedCommandSecretHit15209 lexes one embedded command and reports
-// path when a secretIndices token equals SecretDataPlaceholder.
+// embeddedCommandSecretHit15209 reports path when an embedded command
+// ALREADY carries SecretDataPlaceholder in a secret VALUE position
+// (#15209, #16726) — i.e. it is a redacted export being re-ingested, not a
+// cleartext command (whose secret value renders to the placeholder only
+// AFTER redaction, so judging the render would false-positive on every
+// cleartext credential). No verb gate: judged on the same verb-normalised
+// copy as redactEmbeddedTokens. The bare whole-payload placeholder is a
+// hit. Because the placeholder starts with `#`, an authored (unquoted-tail
+// / re-lexed) occurrence truncates the command as a lexer comment: that
+// truncation is a hit iff the surviving prefix ends at a secret keyword
+// (plus optional qualifier). The placeholder glued inside a larger token,
+// or standing as a non-secret value (host-name, GRE key, value-less
+// delete), is NOT a hit — the redactor replaces whole secret tokens only.
 func embeddedCommandSecretHit15209(cmd, path string) string {
-	tokens, _ := lexConfigMutationLine9938(cmd)
-	if len(tokens) < 2 || tokens[0] != "set" {
+	if cmd == SecretDataPlaceholder {
+		return path
+	}
+	tokens, _, lexOK := lexConfigMutationLineStrict15167(cmd)
+	if !lexOK {
 		return ""
 	}
-	for _, idx := range secretIndices(tokens) {
+	for _, idx := range secretIndices(embeddedJudgedTokens16726(tokens)) {
 		if idx >= 0 && idx < len(tokens) && tokens[idx] == SecretDataPlaceholder {
 			return path
+		}
+	}
+	// The placeholder starts with `#`: inside an authored command the
+	// lexer treats it (and everything after it) as a comment, so a
+	// re-ingested redacted command truncates exactly at the placeholder.
+	// The truncation is a hit iff the surviving prefix ends at a secret
+	// keyword (optionally past its ascii-text/hexadecimal qualifier) —
+	// i.e. the placeholder occupied the secret VALUE position. A
+	// non-secret truncation (`… host-name ##…`) ends elsewhere and is
+	// not a hit.
+	if i := strings.Index(cmd, SecretDataPlaceholder); i >= 0 {
+		prefix := strings.TrimSpace(cmd[:i])
+		ptoks, _, _ := lexConfigMutationLineStrict15167(prefix)
+		if len(ptoks) == 0 {
+			return ""
+		}
+		judged := embeddedJudgedTokens16726(ptoks)
+		probe := append(append([]string(nil), judged...), "x")
+		for _, idx := range secretIndices(probe) {
+			if idx == len(judged) {
+				return path
+			}
 		}
 	}
 	return ""
 }
 
-// embeddedCommandURLHit15209 lexes one embedded command and reports path
-// when a urlLeafIndices token contains SecretRedacted.
+// embeddedCommandURLHit15209 reports path when a urlLeafIndices token
+// contains SecretRedacted (#15209, #16726): no verb gate, judged on the
+// same verb-normalised copy and the lenient lexer's prefix tokens (a bare
+// URL truncates at `@`, and the sentinel sits before it in every RedactURL
+// output). A cleartext credential URL contains no sentinel, so it is not
+// a hit — only an already-redacted export is refused.
 func embeddedCommandURLHit15209(cmd, path string) string {
 	tokens, _ := lexConfigMutationLine9938(cmd)
-	if len(tokens) < 2 || tokens[0] != "set" {
-		return ""
-	}
-	for _, idx := range urlLeafIndices(tokens) {
+	for _, idx := range urlLeafIndices(embeddedJudgedTokens16726(tokens)) {
 		if idx >= 0 && idx < len(tokens) && strings.Contains(tokens[idx], SecretRedacted) {
 			return path
 		}

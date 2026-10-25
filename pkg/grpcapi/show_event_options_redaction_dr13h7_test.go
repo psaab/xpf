@@ -208,8 +208,9 @@ event-options {
 
 // TestRedactEmbeddedChangeConfigCommand14413 pins the shared helper directly:
 // credential leaves mask (with the qualifier kept), gated keywords obey
-// their AST context, non-secret and delete commands pass through verbatim,
-// and a GRE `key` (non-secret) is never masked.
+// their AST context, non-secret commands pass through verbatim, and a GRE
+// `key` (non-secret) is never masked. (The delete-with-value and other
+// non-set shapes are pinned by #16726 in pkg/config.)
 func TestRedactEmbeddedChangeConfigCommand14413(t *testing.T) {
 	cases := []struct{ in, notContain, contain string }{
 		{"set security ike policy p1 pre-shared-key ascii-text PSK-DISTINCTIVE-7Q", "PSK-DISTINCTIVE-7Q", "pre-shared-key ascii-text \"" + config.SecretDataPlaceholder + "\""},

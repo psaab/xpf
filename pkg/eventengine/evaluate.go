@@ -52,7 +52,7 @@ func (e *Engine) classifyPlan(pol *config.EventPolicy) ([]plannedOp, bool) {
 			path, err := config.ParseSetCommand("set " + input)
 			if err != nil {
 				slog.Warn("event-options: set parse failed (batch rejected)",
-					"policy", pol.Name, "cmd", cmd, "err", err)
+					"policy", pol.Name, "cmd", config.RedactEmbeddedChangeConfigCommand(cmd), "err", err)
 				return nil, false
 			}
 			ops = append(ops, plannedOp{setInput: input, critical: criticalConfigPath(path), raw: cmd})
@@ -68,13 +68,13 @@ func (e *Engine) classifyPlan(pol *config.EventPolicy) ([]plannedOp, bool) {
 			path, _, grouped, err := config.ParseSetCommandGrouped("set " + input)
 			if err != nil {
 				slog.Warn("event-options: delete parse failed (batch rejected)",
-					"policy", pol.Name, "cmd", cmd, "err", err)
+					"policy", pol.Name, "cmd", config.RedactEmbeddedChangeConfigCommand(cmd), "err", err)
 				return nil, false
 			}
 			ops = append(ops, plannedOp{isDelete: true, delPath: path, delGrouped: grouped, critical: criticalConfigPath(path), raw: cmd})
 		default:
 			slog.Warn("event-options: unsupported command type (batch rejected)",
-				"policy", pol.Name, "cmd", cmd)
+				"policy", pol.Name, "cmd", config.RedactEmbeddedChangeConfigCommand(cmd))
 			return nil, false
 		}
 	}
