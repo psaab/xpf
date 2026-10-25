@@ -1585,7 +1585,31 @@ func (d *Daemon) dischargePolicyInvalidationAfterPublish(generation uint64) {
 			return
 		}
 	}
+	d.installDeferredFilterTermSyslog(generation)
 	d.completeDeferredSnapshotApply(generation)
+}
+
+// installDeferredFilterTermSyslog installs the generation-bound
+// filter-term syslog projection when a deferred snapshot publish lands
+// (#16775). Until this runs the event reader keeps the previous
+// generation's map, matching the snapshot the dataplane still enforces;
+// stamped new-generation hits in that window are suppressed by the
+// generation mismatch, never forwarded under the old map.
+func (d *Daemon) installDeferredFilterTermSyslog(generation uint64) {
+	if d == nil || d.eventReader == nil || generation == 0 {
+		return
+	}
+	if d.store == nil {
+		return
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil {
+		return
+	}
+	if cr := d.applyResult(); cr != nil && cr.Generation != 0 && generation < cr.Generation {
+		return
+	}
+	d.eventReader.SetFilterTermSyslogForGeneration(generation, dpuserspace.FilterTermSyslogMap(cfg))
 }
 
 // dischargePolicyInvalidationDebtLocked consumes the captured debt only after

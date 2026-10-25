@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/logging"
 )
@@ -70,6 +72,39 @@ func TestApplySyslogConfigWiresTheFilterTermSyslogMap6859(t *testing.T) {
 	if got[logging.FilterTermSyslogKey(0, 0)] {
 		t.Fatalf("the `then log` term (filter 0, term 0) is marked syslog-eligible, "+
 			"so its hits would still go off-box: %v", got)
+	}
+}
+
+// TestApplySyslogConfigBindsFilterTermSyslogGeneration16775 pins #16775:
+// when an apply result with a generation is present, applySyslogConfig
+// installs the projection generation-bound; a deferred publish keeps the
+// previous generation's map until the publish lands.
+func TestApplySyslogConfigBindsFilterTermSyslogGeneration16775(t *testing.T) {
+	er := logging.NewEventReader(nil, logging.NewEventBuffer(4))
+	dp := &runtimeOnlyApplyTestDP{applyResult: &dataplane.ApplyResult{}}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	if _, err := dp.ApplyConfig(context.Background(), filterCfg6859()); err != nil {
+		t.Fatal(err)
+	}
+	publishedGen := dp.LastApplyResult().Generation
+	if publishedGen == 0 {
+		t.Fatal("fake did not publish a generation")
+	}
+	d.applySyslogConfig(er, filterCfg6859())
+	gen, set := er.FilterTermSyslogGeneration()
+	if !set || gen != publishedGen {
+		t.Fatalf("FilterTermSyslogGeneration = %d,%v; want %d,true (map not generation-bound at publish)", gen, set, publishedGen)
+	}
+	if !er.FilterTermSyslog()[logging.FilterTermSyslogKey(0, 1)] {
+		t.Fatal("generation-bound map lost the `then syslog` term")
+	}
+	// Deferred completion with no store is a no-op (previous map retained).
+	d.eventReader = er
+	d.installDeferredFilterTermSyslog(publishedGen + 1)
+	gen, set = er.FilterTermSyslogGeneration()
+	if !set || gen != publishedGen {
+		t.Fatalf("deferred completion without store changed generation to %d,%v; want retained %d,true", gen, set, publishedGen)
 	}
 }
 

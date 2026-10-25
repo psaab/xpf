@@ -35,6 +35,20 @@ import "sync"
 // emitting that line and marks a gated FILTER_LOG record
 // suppress-system-syslog, so the handler withholds its remote copy while
 // the local (base-handler) copy and the buffer entry are unchanged.
+//
+// #16775: the positional ids are generation-bound. The dataplane publish
+// (daemon_apply steps 1.9-2.7) precedes the apply-tail install (step
+// 14b), so without a generation the gate held the PREVIOUS config's map
+// while the dataplane already emitted new-config positional ids — a
+// `then log` hit whose new index collided with an old `then syslog`
+// term was forwarded off-box, and a `then syslog` hit at a new index
+// was suppressed. FILTER_LOG frames now stamp the filter-snapshot
+// generation via the GEN1 marker at [140:144] + generation at
+// [144:152] (additive; legacy 144-byte frames are unstamped), the map
+// is installed with SetFilterTermSyslogForGeneration at the dataplane
+// publish, and a stamped event whose generation mismatches the
+// installed map is suppressed on both remote sinks. The local buffer
+// record is unchanged. Sibling of the #11698 policy-name generation.
 
 // filterSyslogRoute holds the (filter_id, term_id) -> `then syslog` map the
 // filter-log fan-out gate consults.
@@ -46,18 +60,37 @@ import "sync"
 // terms" — and is what a config with all filters removed installs, so the
 // reader cannot resume forwarding under deleted terms' ids.
 type filterSyslogRoute struct {
-	mu sync.RWMutex
-	m  map[uint64]bool
+	mu            sync.RWMutex
+	m             map[uint64]bool
+	generation    uint64
+	generationSet bool
 }
 
 // allows reports whether a FILTER_LOG event from (filterID, termID) may be
 // forwarded to the syslog clients.
+//
+// #16775: a stamped event is trusted only when its generation equals the
+// generation the installed map was installed under; a mismatch is
+// suppressed (fail-closed for a `then log` hit that would otherwise leave
+// the box, at the cost of a transient missing `then syslog` hit).
+// Unstamped frames keep the pre-#16775 behaviour against the current map
+// so a legacy helper / eBPF record is not silently dropped.
 func (r *filterSyslogRoute) allows(filterID, termID uint32) bool {
+	return r.allowsAtGeneration(filterID, termID, 0, false)
+}
+
+// allowsAtGeneration is allows with the event's stamped generation.
+func (r *filterSyslogRoute) allowsAtGeneration(filterID, termID uint32, generation uint64, stamped bool) bool {
 	r.mu.RLock()
 	m := r.m
+	installedGen := r.generation
+	installedSet := r.generationSet
 	r.mu.RUnlock()
 	if m == nil {
 		return true
+	}
+	if stamped && installedSet && generation != installedGen {
+		return false
 	}
 	return m[FilterTermSyslogKey(filterID, termID)]
 }
@@ -85,7 +118,29 @@ func FilterTermSyslogKey(filterID, termID uint32) uint64 {
 func (er *EventReader) SetFilterTermSyslog(m map[uint64]bool) {
 	er.filterSyslogRoute.mu.Lock()
 	er.filterSyslogRoute.m = m
+	er.filterSyslogRoute.generation = 0
+	er.filterSyslogRoute.generationSet = false
 	er.filterSyslogRoute.mu.Unlock()
+}
+
+// SetFilterTermSyslogForGeneration installs the #6859 map together with
+// the filter-snapshot generation it was projected from (#16775).
+// Stamped FILTER_LOG events from any other generation are suppressed.
+// A generation of 0 is treated as unstamped/unversioned (legacy map).
+func (er *EventReader) SetFilterTermSyslogForGeneration(generation uint64, m map[uint64]bool) {
+	er.filterSyslogRoute.mu.Lock()
+	er.filterSyslogRoute.m = m
+	er.filterSyslogRoute.generation = generation
+	er.filterSyslogRoute.generationSet = generation != 0
+	er.filterSyslogRoute.mu.Unlock()
+}
+
+// FilterTermSyslogGeneration returns the generation the installed map
+// was installed under and whether it is versioned.
+func (er *EventReader) FilterTermSyslogGeneration() (uint64, bool) {
+	er.filterSyslogRoute.mu.RLock()
+	defer er.filterSyslogRoute.mu.RUnlock()
+	return er.filterSyslogRoute.generation, er.filterSyslogRoute.generationSet
 }
 
 // FilterTermSyslog returns a copy of the installed #6859 routing map

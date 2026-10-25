@@ -26,6 +26,21 @@ xpf (0.0.0) unstable; urgency=medium
     reconciler now returns before acquiring in exactly that settled
     state; non-SAFE, un-ACKed, removal-pending and divert-active
     states are unchanged.
+  * Logging/firewall: FILTER_LOG events now stamp the filter-snapshot
+    generation (#16775) and the filter-term syslog gate is
+    generation-bound. Previously the gate held the previous config's
+    positional (filter,term) map from the dataplane publish until
+    apply-tail step 14b, so a `then log` hit whose new index collided
+    with an old `then syslog` term was forwarded off-box and a
+    `then syslog` hit at a new index was suppressed. The Rust emitter
+    stamps `meta.config_generation` via the GEN1 marker at [140:144]
+    plus generation at [144:152] (additive; legacy 144-byte frames
+    stay unstamped and keep the current-map behaviour), the daemon
+    installs the projection with SetFilterTermSyslogForGeneration at
+    the publish (retained across a deferred publish until it lands),
+    and a stamped mismatch is suppressed on both the stream and
+    system-syslog sinks. The local `show security log` buffer is
+    unchanged. Same-generation `then syslog` forwarding is unchanged.
   * Shim verifier provenance/headroom (#16701): the gate verdict is
     now schema 3 and records provenance.kernel_release (the uname -r
     the processed-insn count was measured on); freshness and release

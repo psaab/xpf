@@ -139,7 +139,9 @@ fn test_dataplane_event_v4(kind: DataplaneEventKind) -> DataplaneEventPayload {
         application_id: 303,
         filter_id: 404,
         screen_id: 606,
-        config_generation: if kind == DataplaneEventKind::PolicyDeny {
+        config_generation: if kind == DataplaneEventKind::PolicyDeny
+            || kind == DataplaneEventKind::FilterLog
+        {
             41
         } else {
             0
@@ -181,7 +183,9 @@ fn test_dataplane_event_v6(kind: DataplaneEventKind) -> DataplaneEventPayload {
         application_id: 0,
         filter_id: 909,
         screen_id: 1102,
-        config_generation: if kind == DataplaneEventKind::PolicyDeny {
+        config_generation: if kind == DataplaneEventKind::PolicyDeny
+            || kind == DataplaneEventKind::FilterLog
+        {
             42
         } else {
             0
@@ -243,6 +247,17 @@ fn assert_dataplane_event_round_trip(event: DataplaneEventPayload, msg_type: u8)
         assert_eq!(
             u32::from_le_bytes(payload[60..64].try_into().unwrap()),
             event.term_id
+        );
+    }
+    if event.kind == DataplaneEventKind::FilterLog {
+        // #16775: generation tail at [144:152] under the GEN1 marker.
+        assert_eq!(
+            u32::from_le_bytes(payload[140..144].try_into().unwrap()),
+            POLICY_CONFIG_GENERATION_MARKER
+        );
+        assert_eq!(
+            u64::from_le_bytes(payload[144..152].try_into().unwrap()),
+            event.config_generation
         );
     }
     assert_eq!(

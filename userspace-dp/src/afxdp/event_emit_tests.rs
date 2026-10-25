@@ -536,6 +536,11 @@ fn filter_log_event_emit_builds_rt_flow_payload() {
     assert_eq!(event.action, RT_FLOW_ACTION_PERMIT);
     assert_eq!(event.filter_id, 23);
     assert_eq!(event.term_id, 5);
+    // #16775 fail-on-revert: the FILTER_LOG frame stamps the evaluating
+    // snapshot generation (test_meta config_generation=41) in the
+    // [144:152] tail; reverting to config_generation: 0 makes Go resolve
+    // the positional (filter,term) under whatever map is installed.
+    assert_eq!(event.config_generation, 41);
     assert_eq!(event.reason, FilterLogSource::Input.wire_reason());
     assert_eq!(event.ingress_zone_id, 7);
     assert_eq!(event.egress_zone_id, 0);

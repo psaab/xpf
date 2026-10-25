@@ -229,19 +229,29 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		if cr.AppNames != nil {
 			er.SetAppNames(cr.AppNames)
 		}
+		// #16775: install the filter-term syslog projection TOGETHER
+		// with the dataplane publish, generation-bound. cr.Generation is
+		// the generation of the snapshot the dataplane now enforces
+		// (LastApplyResult is set inside ApplyConfig at publish), so a
+		// FILTER_LOG stamped with the new generation resolves against
+		// this map, and a queued old-generation hit whose positional id
+		// now collides is suppressed instead of forwarded. This runs on
+		// every applySyslogConfig call (apply-tail 14b, daemon start,
+		// syslog retry); the generation makes the transient window
+		// fail-closed rather than mis-routed. When SnapshotPublishDeferred
+		// the snapshot has not landed: keep the previous generation's map
+		// (the dataplane still enforces it) and let the deferred-publish
+		// completion install the new one (installDeferredFilterTermSyslog).
+		if !cr.SnapshotPublishDeferred && cr.Generation != 0 {
+			er.SetFilterTermSyslogForGeneration(cr.Generation, dpuserspace.FilterTermSyslogMap(cfg))
+		} else if cr.Generation == 0 {
+			er.SetFilterTermSyslog(dpuserspace.FilterTermSyslogMap(cfg))
+		}
+	} else {
+		// No apply result (no dataplane / not yet applied): keep the
+		// unversioned install so the gate is still wired.
+		er.SetFilterTermSyslog(dpuserspace.FilterTermSyslogMap(cfg))
 	}
-
-	// #6859: wire the (filter_id, term_id) -> `then syslog` map so the event
-	// reader can keep a `then log` hit off the syslog clients, the way Junos
-	// does. Derived from cfg through the SAME snapshot builder whose output is
-	// pushed to the dataplane, so the ids agree with the ones the events carry.
-	//
-	// Set UNCONDITIONALLY on every apply, including a config with no filters
-	// (an empty non-nil map): the empty case is exactly a config whose filters
-	// were all removed, and leaving the previous map installed would keep
-	// forwarding under a deleted term's spelling. Nil is reserved for "never
-	// wired" and would restore the pre-#6859 fan-out.
-	er.SetFilterTermSyslog(dpuserspace.FilterTermSyslogMap(cfg))
 
 	// Wire interface names (ifindex -> operator-facing name) from config
 	// through buildIfNames (#15094/#16065): per-unit resolution via
