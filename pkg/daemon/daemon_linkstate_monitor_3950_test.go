@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -18,14 +19,15 @@ type linkStateEmitRecorder struct {
 }
 
 type linkStateEvent struct {
-	index int
-	name  string
-	up    bool
+	index   int
+	name    string
+	up      bool
+	adminUp bool
 }
 
-func (r *linkStateEmitRecorder) emit(index int, name string, up bool) {
+func (r *linkStateEmitRecorder) emit(index int, name string, up, adminUp bool) {
 	r.mu.Lock()
-	r.events = append(r.events, linkStateEvent{index, name, up})
+	r.events = append(r.events, linkStateEvent{index, name, up, adminUp})
 	r.mu.Unlock()
 }
 
@@ -48,6 +50,7 @@ func linkFor(index int, name string, up bool) netlink.Link {
 		Index:     index,
 		Name:      name,
 		OperState: oper,
+		Flags:     net.FlagUp,
 	}}
 }
 

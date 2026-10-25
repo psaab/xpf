@@ -2045,10 +2045,11 @@ type Daemon struct {
 	// post-ENOBUFS catch-up re-sync. nil ⇒ netlink.LinkList (#3950).
 	linkStateList func() ([]netlink.Link, error)
 	// linkStateEmit is invoked for every observed up/down transition (from a
-	// streamed event OR a post-resubscribe catch-up re-sync). nil ⇒ an SNMP
-	// linkUp/linkDown trap via d.snmpAgent. Overridable so tests can capture
-	// transitions without wiring an SNMP agent (#3950).
-	linkStateEmit func(index int, name string, up bool)
+	// streamed event OR a post-resubscribe catch-up re-sync), with the
+	// interface's admin (IFF_UP) state for ifAdminStatus (#16778). nil ⇒ an
+	// SNMP linkUp/linkDown trap via d.snmpAgent. Overridable so tests can
+	// capture transitions without wiring an SNMP agent (#3950).
+	linkStateEmit func(index int, name string, up, adminUp bool)
 	// linkStateResubBackoff is the delay between a subscription close and the
 	// resubscribe attempt. Zero ⇒ linkStateResubBackoffDefault (#3950).
 	linkStateResubBackoff time.Duration

@@ -81,6 +81,8 @@ var (
 	oidIfIndex = []int{1, 3, 6, 1, 2, 1, 2, 2, 1, 1}
 	// ifDescr column: 1.3.6.1.2.1.2.2.1.2
 	oidIfDescr = []int{1, 3, 6, 1, 2, 1, 2, 2, 1, 2}
+	// ifAdminStatus column: 1.3.6.1.2.1.2.2.1.7
+	oidIfAdminStatus = []int{1, 3, 6, 1, 2, 1, 2, 2, 1, 7}
 	// ifOperStatus column: 1.3.6.1.2.1.2.2.1.8
 	oidIfOperStatus = []int{1, 3, 6, 1, 2, 1, 2, 2, 1, 8}
 )
@@ -108,7 +110,9 @@ func trapRequestID() int32 {
 }
 
 // buildLinkTrap builds an SNMPv2c trap PDU for a link up/down event.
-func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname string) []byte {
+// adminUp is the interface's administrative state (IFF_UP) at event time;
+// it becomes ifAdminStatus (1=up, 2=down).
+func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname string, adminUp bool) []byte {
 	// sysUpTime in hundredths of a second.
 	uptime := int(time.Since(a.startTime).Milliseconds() / 10)
 
@@ -119,8 +123,15 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 		trapOID = oidLinkUp
 		operStatus = 1 // up
 	}
+	adminStatus := 2 // down
+	if adminUp {
+		adminStatus = 1 // up
+	}
 
-	// Build varbinds:
+	// Build varbinds. RFC 2863 linkDown/linkUp OBJECTS { ifIndex,
+	// ifAdminStatus, ifOperStatus } are copied in order after
+	// sysUpTime.0/snmpTrapOID.0 (RFC 3416 §4.2.6); ifDescr follows only
+	// as a trailing additional varbind (#16778).
 	// 1. sysUpTime.0 — TimeTicks
 	vb1OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(oidSysUpTime))
 	vb1Val := berEncodeTLV(tagTimeTicks, berEncodeTimeTicks(uptime))
@@ -137,10 +148,10 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 	vb3Val := berEncodeIntegerTLV(ifindex)
 	vb3 := berEncodeTLV(tagSequence, append(vb3OID, vb3Val...))
 
-	// 4. ifDescr.<ifindex> — OctetString
-	ifDescrOID := append(append([]int{}, oidIfDescr...), ifindex)
-	vb4OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifDescrOID))
-	vb4Val := berEncodeTLV(tagOctetString, []byte(ifname))
+	// 4. ifAdminStatus.<ifindex> — Integer (1=up, 2=down)
+	ifAdminOID := append(append([]int{}, oidIfAdminStatus...), ifindex)
+	vb4OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifAdminOID))
+	vb4Val := berEncodeIntegerTLV(adminStatus)
 	vb4 := berEncodeTLV(tagSequence, append(vb4OID, vb4Val...))
 
 	// 5. ifOperStatus.<ifindex> — Integer (1=up, 2=down)
@@ -149,6 +160,12 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 	vb5Val := berEncodeIntegerTLV(operStatus)
 	vb5 := berEncodeTLV(tagSequence, append(vb5OID, vb5Val...))
 
+	// 6. ifDescr.<ifindex> — OctetString (trailing additional varbind)
+	ifDescrOID := append(append([]int{}, oidIfDescr...), ifindex)
+	vb6OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifDescrOID))
+	vb6Val := berEncodeTLV(tagOctetString, []byte(ifname))
+	vb6 := berEncodeTLV(tagSequence, append(vb6OID, vb6Val...))
+
 	// Varbind list
 	var vbList []byte
 	vbList = append(vbList, vb1...)
@@ -156,6 +173,7 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 	vbList = append(vbList, vb3...)
 	vbList = append(vbList, vb4...)
 	vbList = append(vbList, vb5...)
+	vbList = append(vbList, vb6...)
 	vbListEncoded := berEncodeTLV(tagSequence, vbList)
 
 	// PDU body: request-id, error-status(0), error-index(0), varbinds
@@ -189,16 +207,16 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 // direction of the mapping; RFC 3584 §3.2 instead requires the originator's IP
 // address for IP notifications. 0.0.0.0 is the fallback for non-IP transport.
 // agent_addr_9123.go.
-func (a *Agent) buildLinkTrapV1(community, target string, linkUp bool, ifindex int, ifname string) []byte {
+func (a *Agent) buildLinkTrapV1(community, target string, linkUp bool, ifindex int, ifname string, adminUp bool) []byte {
 	// sysUpTime in hundredths of a second.
-	return a.buildLinkTrapV1WithUptime(community, target, linkUp, ifindex, ifname, int(time.Since(a.startTime).Milliseconds()/10))
+	return a.buildLinkTrapV1WithUptime(community, target, linkUp, ifindex, ifname, int(time.Since(a.startTime).Milliseconds()/10), adminUp)
 }
 
 // buildLinkTrapV1WithUptime is buildLinkTrapV1 with the time-stamp supplied by
 // the caller. The trap worker uses it for deferred v1 jobs (#9917 F-134) with
 // the uptime captured at event time, so a trap delivered after backlog carries
 // the event's time-stamp rather than the delivery time's.
-func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool, ifindex int, ifname string, uptime int) []byte {
+func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool, ifindex int, ifname string, uptime int, adminUp bool) []byte {
 
 	genericTrap := genericTrapLinkDown
 	operStatus := 2 // down
@@ -206,18 +224,24 @@ func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool,
 		genericTrap = genericTrapLinkUp
 		operStatus = 1 // up
 	}
+	adminStatus := 2 // down
+	if adminUp {
+		adminStatus = 1 // up
+	}
 
-	// Varbinds: ifIndex, ifDescr, ifOperStatus. sysUpTime.0 and snmpTrapOID.0
-	// are NOT repeated as varbinds in v1 — they map to the time-stamp field
-	// and the generic-trap/enterprise fields respectively.
+	// Varbinds: ifIndex, ifAdminStatus, ifOperStatus, then ifDescr as a
+	// trailing additional varbind (RFC 2863 OBJECTS order, #16778).
+	// sysUpTime.0 and snmpTrapOID.0 are NOT repeated as varbinds in v1 —
+	// they map to the time-stamp field and the generic-trap/enterprise
+	// fields respectively.
 	ifIndexOID := append(append([]int{}, oidIfIndex...), ifindex)
 	vb1OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifIndexOID))
 	vb1Val := berEncodeIntegerTLV(ifindex)
 	vb1 := berEncodeTLV(tagSequence, append(vb1OID, vb1Val...))
 
-	ifDescrOID := append(append([]int{}, oidIfDescr...), ifindex)
-	vb2OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifDescrOID))
-	vb2Val := berEncodeTLV(tagOctetString, []byte(ifname))
+	ifAdminOID := append(append([]int{}, oidIfAdminStatus...), ifindex)
+	vb2OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifAdminOID))
+	vb2Val := berEncodeIntegerTLV(adminStatus)
 	vb2 := berEncodeTLV(tagSequence, append(vb2OID, vb2Val...))
 
 	ifOperOID := append(append([]int{}, oidIfOperStatus...), ifindex)
@@ -225,10 +249,16 @@ func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool,
 	vb3Val := berEncodeIntegerTLV(operStatus)
 	vb3 := berEncodeTLV(tagSequence, append(vb3OID, vb3Val...))
 
+	ifDescrOID := append(append([]int{}, oidIfDescr...), ifindex)
+	vb4OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifDescrOID))
+	vb4Val := berEncodeTLV(tagOctetString, []byte(ifname))
+	vb4 := berEncodeTLV(tagSequence, append(vb4OID, vb4Val...))
+
 	var vbList []byte
 	vbList = append(vbList, vb1...)
 	vbList = append(vbList, vb2...)
 	vbList = append(vbList, vb3...)
+	vbList = append(vbList, vb4...)
 	vbListEncoded := berEncodeTLV(tagSequence, vbList)
 
 	// Trap-PDU body: enterprise, agent-addr, generic-trap, specific-trap,
@@ -263,17 +293,17 @@ func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool,
 // must agree with the source address the trap will leave from. On a multi-homed
 // box that differs per target, so the packet is built per target rather than
 // once per group.
-func (a *Agent) buildLinkTrapsForVersion(community, version, target string, linkUp bool, ifindex int, ifname string) [][]byte {
+func (a *Agent) buildLinkTrapsForVersion(community, version, target string, linkUp bool, ifindex int, ifname string, adminUp bool) [][]byte {
 	switch version {
 	case "v1":
-		return [][]byte{a.buildLinkTrapV1(community, target, linkUp, ifindex, ifname)}
+		return [][]byte{a.buildLinkTrapV1(community, target, linkUp, ifindex, ifname, adminUp)}
 	case "all":
 		return [][]byte{
-			a.buildLinkTrapV1(community, target, linkUp, ifindex, ifname),
-			a.buildLinkTrap(community, linkUp, ifindex, ifname),
+			a.buildLinkTrapV1(community, target, linkUp, ifindex, ifname, adminUp),
+			a.buildLinkTrap(community, linkUp, ifindex, ifname, adminUp),
 		}
 	default: // "v2", "" (unspecified), or anything else -> v2c
-		return [][]byte{a.buildLinkTrap(community, linkUp, ifindex, ifname)}
+		return [][]byte{a.buildLinkTrap(community, linkUp, ifindex, ifname, adminUp)}
 	}
 }
 
@@ -339,18 +369,21 @@ func sendTrapOnVRF(target string, pkt []byte, device string) error {
 	return nil
 }
 
-// NotifyLinkDown sends an SNMPv2c linkDown trap to all configured trap targets.
-func (a *Agent) NotifyLinkDown(ifindex int, ifname string) {
-	a.sendLinkTraps(false, ifindex, ifname)
+// NotifyLinkDown sends a linkDown trap to all configured trap targets.
+// adminUp is the interface's administrative state (IFF_UP) at event time,
+// encoded as ifAdminStatus so receivers can tell an operator disable
+// (adminUp=false, ifAdminStatus=2) from a fault-down (#16778).
+func (a *Agent) NotifyLinkDown(ifindex int, ifname string, adminUp bool) {
+	a.sendLinkTraps(false, ifindex, ifname, adminUp)
 }
 
-// NotifyLinkUp sends an SNMPv2c linkUp trap to all configured trap targets.
-func (a *Agent) NotifyLinkUp(ifindex int, ifname string) {
-	a.sendLinkTraps(true, ifindex, ifname)
+// NotifyLinkUp sends a linkUp trap to all configured trap targets.
+func (a *Agent) NotifyLinkUp(ifindex int, ifname string, adminUp bool) {
+	a.sendLinkTraps(true, ifindex, ifname, adminUp)
 }
 
 // sendLinkTraps builds and sends link traps to all configured trap group targets.
-func (a *Agent) sendLinkTraps(linkUp bool, ifindex int, ifname string) {
+func (a *Agent) sendLinkTraps(linkUp bool, ifindex int, ifname string, adminUp bool) {
 	// Read the live config under cfgMu — the same lock UpdateConfig swaps it
 	// under — so a commit-time reconcile cannot race trap delivery.
 	cfg := a.snapshotCfg()
@@ -406,22 +439,22 @@ func (a *Agent) sendLinkTraps(linkUp bool, ifindex int, ifname string) {
 				a.enqueueTrap(trapJob{
 					target: target, group: tg.Name, event: "link" + direction,
 					iface: ifname, ifindex: ifindex,
-					deferredV1: true, community: community, linkUp: linkUp, uptime: uptime,
+					deferredV1: true, community: community, linkUp: linkUp, uptime: uptime, adminUp: adminUp,
 				})
 			case "all":
 				a.enqueueTrap(trapJob{
 					target: target, group: tg.Name, event: "link" + direction,
 					iface: ifname, ifindex: ifindex,
-					deferredV1: true, community: community, linkUp: linkUp, uptime: uptime,
+					deferredV1: true, community: community, linkUp: linkUp, uptime: uptime, adminUp: adminUp,
 				})
-				for _, pkt := range a.buildLinkTrapsForVersion(community, "v2", target, linkUp, ifindex, ifname) {
+				for _, pkt := range a.buildLinkTrapsForVersion(community, "v2", target, linkUp, ifindex, ifname, adminUp) {
 					a.enqueueTrap(trapJob{
 						target: target, pkt: pkt, group: tg.Name,
 						event: "link" + direction, iface: ifname, ifindex: ifindex,
 					})
 				}
 			default: // "v2", "" (unspecified), or anything else -> v2c
-				for _, pkt := range a.buildLinkTrapsForVersion(community, tg.Version, target, linkUp, ifindex, ifname) {
+				for _, pkt := range a.buildLinkTrapsForVersion(community, tg.Version, target, linkUp, ifindex, ifname, adminUp) {
 					a.enqueueTrap(trapJob{
 						target: target, pkt: pkt, group: tg.Name,
 						event: "link" + direction, iface: ifname, ifindex: ifindex,
@@ -677,7 +710,7 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 				// #9917 F-134: build the v1 Trap-PDU here, on the worker. The
 				// agent-addr dial runs off the link monitor; the deferred build
 				// wins over any carried pkt by the trapJob contract.
-				pkt = a.buildLinkTrapV1WithUptime(job.community, job.target, job.linkUp, job.ifindex, job.iface, job.uptime)
+				pkt = a.buildLinkTrapV1WithUptime(job.community, job.target, job.linkUp, job.ifindex, job.iface, job.uptime, job.adminUp)
 				// #4916: the build above can block up to agentAddrDialTimeout,
 				// so re-check stop before delivering -- a Stop that landed
 				// mid-build must still abandon this trap rather than deliver

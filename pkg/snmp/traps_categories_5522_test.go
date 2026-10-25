@@ -66,7 +66,7 @@ func linkTrapDelivered(t *testing.T, categories []string) bool {
 		},
 		startTime: time.Now().Add(-10 * time.Second),
 	}
-	a.NotifyLinkDown(3, "ge-0-0-1")
+	a.NotifyLinkDown(3, "ge-0-0-1", true)
 
 	buf := make([]byte, 4096)
 	pc.SetReadDeadline(time.Now().Add(750 * time.Millisecond))

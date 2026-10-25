@@ -122,7 +122,7 @@ func TestTrapGroupOnlyStartsAgentAndMonitor15232(t *testing.T) {
 	}
 	// Simulated link transition enqueues one trap via the monitor path.
 	before, _, _ := d.snmpAgent.TrapStats()
-	d.emitLinkStateTrap(99, "ge-0-0-9", true)
+	d.emitLinkStateTrap(99, "ge-0-0-9", true, true)
 	after, _, _ := d.snmpAgent.TrapStats()
 	if after <= before {
 		t.Fatalf("link transition enqueued no trap: before=%d after=%d", before, after)

@@ -349,11 +349,13 @@ type trapJob struct {
 	ifindex int
 	// Deferred v1 build parameters (used only when deferredV1 is set). uptime
 	// is captured at event time so the v1 time-stamp keeps event-time
-	// semantics instead of skewing to delivery time under backlog.
+	// semantics instead of skewing to delivery time under backlog. adminUp
+	// likewise carries the event-time ifAdminStatus source (#16778).
 	deferredV1 bool
 	community  string
 	linkUp     bool
 	uptime     int
+	adminUp    bool
 }
 
 // trapQueueDepth bounds the number of pending trap deliveries. A handful of

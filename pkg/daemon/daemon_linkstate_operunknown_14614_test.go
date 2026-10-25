@@ -147,9 +147,9 @@ func TestMonitorLinkStateOperUnknownTunnel14614(t *testing.T) {
 	}()
 
 	want := []linkStateEvent{
-		{index: 10, name: "gr-0-0-1", up: true}, // new tunnel: linkUp, never linkDown
-		{index: 9, name: "gr-0-0-0", up: false}, // seeded tunnel down: exactly one linkDown
-		{index: 9, name: "gr-0-0-0", up: true},  // seeded tunnel back: exactly one linkUp
+		{index: 10, name: "gr-0-0-1", up: true, adminUp: true},  // new tunnel: linkUp, never linkDown
+		{index: 9, name: "gr-0-0-0", up: false, adminUp: false}, // seeded tunnel down: exactly one linkDown
+		{index: 9, name: "gr-0-0-0", up: true, adminUp: true},   // seeded tunnel back: exactly one linkUp
 	}
 	ok := waitUntil(t, 2*time.Second, func() bool {
 		return len(rec.snapshot()) >= len(want)

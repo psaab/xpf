@@ -33,9 +33,9 @@ func decodeTrapVersionAndPDU(t *testing.T, pkt []byte) (version int, pduTag byte
 
 // TestBuildLinkTrapV1_Structure verifies the SNMPv1 Trap-PDU shape (#3948):
 // version field 0, PDU tag 0xa4, the snmpTraps enterprise OID, the correct
-// generic-trap code (2=linkDown, 3=linkUp), specific-trap 0, and 3 varbinds
-// (ifIndex, ifDescr, ifOperStatus — sysUpTime.0/snmpTrapOID.0 are NOT repeated
-// as varbinds in v1).
+// generic-trap code (2=linkDown, 3=linkUp), specific-trap 0, and 4 varbinds
+// (ifIndex, ifAdminStatus, ifOperStatus, ifDescr — sysUpTime.0/snmpTrapOID.0
+// are NOT repeated as varbinds in v1; #16778).
 func TestBuildLinkTrapV1_Structure(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -47,7 +47,7 @@ func TestBuildLinkTrapV1_Structure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &Agent{startTime: time.Now().Add(-30 * time.Second)}
-			pkt := a.buildLinkTrapV1("public", "", tc.linkUp, 5, "ge-0-0-0")
+			pkt := a.buildLinkTrapV1("public", "", tc.linkUp, 5, "ge-0-0-0", true)
 
 			version, pduTag := decodeTrapVersionAndPDU(t, pkt)
 			if version != snmpVersion1 {
@@ -112,7 +112,7 @@ func TestBuildLinkTrapV1_Structure(t *testing.T) {
 			}
 			pduBody3 = pduBody3[berEncodedLen(pduBody3):]
 
-			// varbind list: 3 varbinds
+			// varbind list: 4 varbinds (#16778 OBJECTS order + trailing ifDescr)
 			vbTag, vbList, err := berDecodeHeader(pduBody3)
 			if err != nil || vbTag != tagSequence {
 				t.Fatalf("varbind list: tag=0x%02x err=%v", vbTag, err)
@@ -126,8 +126,8 @@ func TestBuildLinkTrapV1_Structure(t *testing.T) {
 				vbList = vbList[n:]
 				count++
 			}
-			if count != 3 {
-				t.Fatalf("v1 varbind count = %d, want 3", count)
+			if count != 4 {
+				t.Fatalf("v1 varbind count = %d, want 4", count)
 			}
 		})
 	}
@@ -155,7 +155,7 @@ func recvTrapVersions(t *testing.T, groupVersion string, want int) [][2]int {
 		},
 		startTime: time.Now().Add(-10 * time.Second),
 	}
-	a.NotifyLinkDown(3, "ge-0-0-1")
+	a.NotifyLinkDown(3, "ge-0-0-1", true)
 
 	var got [][2]int
 	buf := make([]byte, 4096)

@@ -48,7 +48,7 @@ func TestSendLinkTraps_DoesNotBlock(t *testing.T) {
 	done := make(chan struct{})
 	start := time.Now()
 	go func() {
-		agent.NotifyLinkDown(7, "ge-0-0-7")
+		agent.NotifyLinkDown(7, "ge-0-0-7", true)
 		close(done)
 	}()
 
@@ -106,7 +106,7 @@ func TestSendLinkTraps_AsyncDelivers(t *testing.T) {
 		startTime: time.Now(),
 	}
 
-	agent.NotifyLinkUp(2, "ge-0-0-2")
+	agent.NotifyLinkUp(2, "ge-0-0-2", true)
 
 	buf := make([]byte, 4096)
 	pc.SetReadDeadline(time.Now().Add(3 * time.Second))

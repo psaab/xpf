@@ -46,7 +46,7 @@ func recvTrapPairs(t *testing.T, cfg *config.SNMPConfig, want int) [][2]interfac
 		}
 	}
 	a := &Agent{cfg: cfg, startTime: time.Now().Add(-10 * time.Second)}
-	a.NotifyLinkDown(3, "ge-0-0-1")
+	a.NotifyLinkDown(3, "ge-0-0-1", true)
 
 	var got [][2]interface{}
 	buf := make([]byte, 4096)
@@ -141,7 +141,7 @@ func TestTrapCommunityPerGroupDistinct15052(t *testing.T) {
 		},
 	}
 	a := &Agent{cfg: cfg, startTime: time.Now().Add(-10 * time.Second)}
-	a.NotifyLinkDown(3, "ge-0-0-1")
+	a.NotifyLinkDown(3, "ge-0-0-1", true)
 
 	readOne := func(pc net.PacketConn, wantComm string, wantVer int) {
 		t.Helper()

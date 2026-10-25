@@ -86,7 +86,7 @@ func TestSetVRFDeviceConcurrentAccess13127(t *testing.T) {
 			defer wg.Done()
 			for range 200 {
 				_ = a.sendTrapViaVRF("127.0.0.1", []byte{1})
-				_ = a.buildLinkTrapV1("public", "127.0.0.1", true, 5, "ge-0-0-0")
+				_ = a.buildLinkTrapV1("public", "127.0.0.1", true, 5, "ge-0-0-0", true)
 			}
 		}()
 	}

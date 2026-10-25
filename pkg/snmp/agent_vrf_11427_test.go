@@ -108,7 +108,7 @@ func TestSNMPManagementVRFReplyAndTrap11427(t *testing.T) {
 		if agent.trapSender == nil {
 			t.Fatal("constructed agent has no trap sender")
 		}
-		pkt := agent.buildLinkTrapV1("public", target, true, 1, "fxp0")
+		pkt := agent.buildLinkTrapV1("public", target, true, 1, "fxp0", true)
 		if got := decodeAgentAddr9123(t, pkt); !got.Equal(net.ParseIP("192.0.2.1")) {
 			t.Fatalf("v1 agent-addr = %v, want management source 192.0.2.1", got)
 		}
