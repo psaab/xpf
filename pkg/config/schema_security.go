@@ -690,7 +690,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					// #3906: `range <low> to <high>` (Junos) and the legacy
 					// `range low <lo> high <hi>` both collapse onto this multi
 					// leaf; the compiler parses both via parseSourcePoolPortRange.
-					"range": {desc: "Explicit source port range for the pool (<low> to <high>)", multi: true, children: nil},
+					"range": {desc: "Explicit source port range for the pool (<low> to <high>)", multi: true, absorbBeforeWildcard: true, children: nil},
 					// #3906: preserve the original source port (1:1) — the
 					// pool translates the address only. Value-less leaf.
 					"no-translation": {desc: "Preserve the source port (translate the address only)", children: nil},
