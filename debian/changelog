@@ -23,6 +23,15 @@ xpf (0.0.0) unstable; urgency=medium
     only into main now get `Network is unreachable` for each
     other's prefixes (main->tenant still resolves); add the peer
     rib to import-rib to authorize tenant->tenant returns.
+  * Config authz: the #14981 commit-time expanded deny-configuration
+    verdict is now bound to the candidate it priced (#16611). The
+    gRPC/REST gate stamps the priced candidate generation into the
+    commit authority and promotion re-prices a changed candidate
+    under the store lock, so a same-holder copy/rename/apply-groups
+    landing while a commit waits for the daemon apply lock can no
+    longer be promoted unadjudicated; changed candidates must be
+    re-committed. Unchanged candidates and unrestricted classes are
+    unaffected.
   * Config/NAT: a source-NAT rule whose source match is
     single-family but whose pool has no member of that family
     (an IPv6-only pool, or an IPv4-mapped `::ffff:` literal, for

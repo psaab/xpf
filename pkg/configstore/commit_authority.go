@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // ErrCommitAuthorityMissing is returned by the authority-bound commit entry
@@ -36,6 +38,20 @@ var ErrCommitAuthorityMissing = errors.New(
 var ErrConfigHolderTurnover = errors.New(
 	"config lock changed hands during commit preparation; the commit was not applied " +
 		"(re-enter configuration mode and commit again)")
+
+// ErrCommitCandidateChanged is returned when a commit whose expanded
+// candidate was priced by the #14981 gate at the transport interceptor
+// reaches promotion against a different candidate generation (#16611).
+// It is deliberately NOT ErrCandidateGenerationConflict: that sentinel
+// feeds commitWithGenBinding's adopt-on-conflict retry, which would
+// re-snapshot and promote the changed candidate without re-pricing it
+// for the committing class. A gate-bound commit whose candidate moved
+// must be refused outright; the operator re-issues the commit, the
+// interceptor prices the new candidate, and only that priced tree may
+// be promoted.
+var ErrCommitCandidateChanged = errors.New(
+	"candidate configuration changed after the commit authorization gate priced it; " +
+		"the commit was not applied (re-issue the commit so the new candidate is adjudicated)")
 
 // commitAuthorityKind distinguishes the three states a CommitAuthority can be
 // in. The zero value is deliberately the INVALID one — see
@@ -100,6 +116,17 @@ type CommitAuthority struct {
 	// session can legitimately re-enter, and a wall-clock stamp cannot tell
 	// a held lock from a re-taken one.
 	epoch uint64
+	// gateBound records that the transport interceptor priced the
+	// candidate's group-expanded paths for gateClass (#16611) against
+	// gateCandidateGen / gateActive. verifyCommitAuthorityLocked refuses
+	// promotion when the candidate generation moved — the promoted tree
+	// would be one the gate never adjudicated. cfg/class/active are the
+	// priced snapshot; they are consulted only when gateBound is set.
+	gateBound        bool
+	gateClass        string
+	gateCandidateGen uint64
+	gateActive       *config.ConfigTree
+	gateCfg          *config.Config
 }
 
 // InternalCommitter returns an explicitly unattributed authority for a
@@ -158,17 +185,45 @@ func (s *Store) verifyCommitAuthorityLocked(a CommitAuthority) error {
 			return fmt.Errorf("%w (internal authority minted unheld at holder epoch %d; now %q at epoch %d)",
 				ErrConfigHolderTurnover, a.epoch, s.effectiveHolderLocked(), s.holderEpoch)
 		}
-		return nil
+		return s.verifyGateBindingLocked(a)
 	case authorityHolder:
 		holder := s.effectiveHolderLocked()
 		if holder != a.sessionID || s.holderEpoch != a.epoch {
 			return fmt.Errorf("%w (authorized for session %q at holder epoch %d; now %q at epoch %d)",
 				ErrConfigHolderTurnover, a.sessionID, a.epoch, holder, s.holderEpoch)
 		}
-		return nil
+		return s.verifyGateBindingLocked(a)
 	default:
 		return ErrCommitAuthorityMissing
 	}
+}
+
+// verifyGateBindingLocked re-adjudicates a gate-bound commit at
+// promotion (#16611). When the candidate generation is unchanged the
+// priced tree is exactly the tree being promoted, so no work is
+// needed. When it moved, the candidate is expanded and priced again
+// for the committing class against the priced active snapshot: a
+// same-holder copy/rename that landed between the interceptor gate
+// and promotion is refused here, under the store lock, even though
+// the daemon's generation-bound promote loop re-snapshotted it. An
+// expansion or class error fails closed.
+func (s *Store) verifyGateBindingLocked(a CommitAuthority) error {
+	if !a.gateBound {
+		return nil
+	}
+	if s.candidateGen == a.gateCandidateGen {
+		return nil
+	}
+	if s.candidate == nil {
+		return fmt.Errorf("%w (priced generation %d, candidate gone)",
+			ErrCommitCandidateChanged, a.gateCandidateGen)
+	}
+	candidate := s.candidate.Clone()
+	if err := config.AuthorizeExpandedCandidate(a.gateCfg, a.gateClass, candidate, a.gateActive); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w (priced generation %d, current %d)",
+		ErrCommitCandidateChanged, a.gateCandidateGen, s.candidateGen)
 }
 
 // AuthorizeCommit verifies that sessionID may commit and mints the authority to
@@ -241,6 +296,50 @@ func (s *Store) AuthorizeCommitAs(sessionID, principal string) (CommitAuthority,
 		epoch:            s.holderEpoch,
 	}, nil
 }
+
+// WithCommitGate binds this authority to the candidate the transport
+// interceptor priced for class at gateCandidateGen (#16611). The cfg
+// and active arguments are the priced snapshots the interceptor
+// adjudicated against; they are retained so promotion can re-price a
+// changed candidate for the same class under the store lock. A zero
+// class leaves the authority unbound (unrestricted classes are
+// unaffected). Calling it on an internal authority is a no-op: system
+// committers carry no login class to price.
+func (a CommitAuthority) WithCommitGate(cfg *config.Config, class string, candidateGen uint64, active *config.ConfigTree) CommitAuthority {
+	if class == "" || a.kind == authorityInternal || a.kind == authorityUnset {
+		return a
+	}
+	a.gateBound = true
+	a.gateClass = class
+	a.gateCandidateGen = candidateGen
+	// Deep-copy cfg: the caller may retain and mutate the admitted
+	// snapshot (a test fixture, a re-resolved active config), and the
+	// priced verdict must be recomputed against the rules as priced.
+	if cfg != nil {
+		clone := *cfg
+		if cfg.System.Login != nil {
+			login := *cfg.System.Login
+			login.Classes = make([]*config.LoginClass, len(cfg.System.Login.Classes))
+			for i, lc := range cfg.System.Login.Classes {
+				if lc == nil {
+					continue
+				}
+				lcClone := *lc
+				login.Classes[i] = &lcClone
+			}
+			clone.System.Login = &login
+		}
+		a.gateCfg = &clone
+	}
+	if active != nil {
+		a.gateActive = active.Clone()
+	}
+	return a
+}
+
+// GateBound reports whether this authority carries a #16611 priced-gate
+// binding. Exported for tests asserting which commits are bound.
+func (a CommitAuthority) GateBound() bool { return a.gateBound }
 
 // HolderEpoch returns the current holder epoch. Exported for tests asserting
 // that acquisition and release advance it.

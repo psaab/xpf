@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -326,6 +327,41 @@ func (s *Server) authorizeRESTConfigCommit14981(r *http.Request, cfg *config.Con
 		return nil
 	}
 	return config.AuthorizeExpandedCandidate(cfg, p.Class, s.store.CandidateTree(), s.store.ActiveTree())
+}
+
+// restCommitGatePriceKey carries the #16611 priced snapshot from the
+// middleware gate to the commit handler, mirroring the gRPC
+// commitGatePrice stash.
+type restCommitGatePriceKey struct{}
+
+type restCommitGatePrice struct {
+	cfg          *config.Config
+	class        string
+	candidateGen uint64
+	active       *config.ConfigTree
+}
+
+// priceRESTCommitGate16611 runs the commit gate and, on success,
+// returns the request carrying the priced snapshot. The verdict is
+// authorizeRESTConfigCommit14981's single verdict.
+func (s *Server) priceRESTCommitGate16611(r *http.Request, cfg *config.Config, p authz.Principal) (*http.Request, error) {
+	if err := s.authorizeRESTConfigCommit14981(r, cfg, p); err != nil {
+		return r, err
+	}
+	route := r.Method + " " + r.URL.Path
+	if (route != "POST /api/v1/config/commit" && route != "POST /api/v1/config/commit-confirmed") || s.store == nil || p.Class == "" || p.Superuser {
+		return r, nil
+	}
+	if restricted, rerr := restConfigClassRestricted(cfg, p.Class); rerr == nil && !restricted {
+		return r, nil
+	}
+	price := restCommitGatePrice{cfg: cfg, class: p.Class, candidateGen: s.store.CandidateGeneration(), active: s.store.ActiveTree()}
+	return r.WithContext(context.WithValue(r.Context(), restCommitGatePriceKey{}, price)), nil
+}
+
+func restCommitGatePriceFrom(r *http.Request) (restCommitGatePrice, bool) {
+	p, ok := r.Context().Value(restCommitGatePriceKey{}).(restCommitGatePrice)
+	return p, ok
 }
 
 // candidateAfterRESTMutation14981 replays a verb-led line onto a candidate

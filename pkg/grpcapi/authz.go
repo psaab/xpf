@@ -292,9 +292,11 @@ func (s *Server) authorizeRPCContext(ctx context.Context, fullMethod string, req
 		// #9154: the class's `*-configuration` regexes, which this surface did
 		// not consult at all. #7172's acceptance says both dispatch surfaces
 		// must use them and "neither may be gated alone"; only pkg/cli did.
-		if err := s.authorizeRPCConfigMutation(cfg, p.Class, fullMethod, req); err != nil {
+		pricedCtx, err := s.authorizeRPCCommitGate16611(ctx, cfg, p.Class, fullMethod, req)
+		if err != nil {
 			return nil, denyRPC(fullMethod, required, p, err)
 		}
+		ctx = pricedCtx
 		// #14707: the config-READ pair. ShowConfig/ShowCompare/ShowRollback
 		// rendered denied subtrees because the command gate saw only the
 		// bare "show configuration" and the mutation gate ignores reads.

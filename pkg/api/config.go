@@ -221,6 +221,18 @@ func journalPrincipalForRequest(r *http.Request, sessionID string) string {
 	return configstore.FormatJournalPrincipal(p.Source.String(), p.UID, p.Username, p.Class, sessionID)
 }
 
+// bindCommitGate attaches the #16611 priced-gate binding captured by
+// the REST middleware (priceRESTCommitGate16611) to authority. Absent
+// a priced snapshot — a direct handler call or an unrestricted
+// class — the authority is left unbound.
+func (s *Server) bindCommitGate(r *http.Request, authority configstore.CommitAuthority) configstore.CommitAuthority {
+	price, ok := restCommitGatePriceFrom(r)
+	if !ok {
+		return authority
+	}
+	return authority.WithCommitGate(price.cfg, price.class, price.candidateGen, price.active)
+}
+
 func (s *Server) configEnterHandler(w http.ResponseWriter, r *http.Request) {
 	// #16069: the minting principal is bound to the token before the store is
 	// entered, and every follow-up request must present the same principal.
@@ -460,6 +472,7 @@ func (s *Server) configCommitHandler(w http.ResponseWriter, r *http.Request) {
 		writeConfigMutationError(w, err)
 		return
 	}
+	authority = s.bindCommitGate(r, authority)
 
 	// Bare commit during a pending commit-confirmed window (#4000). Confirm
 	// the pending config only when the candidate is UNCHANGED; new staged
@@ -897,6 +910,7 @@ func (s *Server) configCommitConfirmedHandler(w http.ResponseWriter, r *http.Req
 		writeConfigMutationError(w, err)
 		return
 	}
+	authority = s.bindCommitGate(r, authority)
 	if s.commitConfirmedFn == nil {
 		writeError(w, http.StatusInternalServerError, "commit-confirmed handler not wired")
 		return
