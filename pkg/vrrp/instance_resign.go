@@ -35,8 +35,10 @@ func (vi *vrrpInstance) beginResign() bool {
 
 // applyPendingResign installs the stashed resigning priority into
 // cfg.Priority. Called by becomeBackup once the VIP release has been
-// actuated, so priority 0 never reaches a routine advert while this
-// node still holds its VIPs. No-op when no resign is pending.
+// actuated, and by the stepBackup resign arm for an already-BACKUP
+// instance (whose VIPs are already off the wire), so priority 0 never
+// reaches a routine advert while this node still holds its VIPs.
+// No-op when no resign is pending.
 func (vi *vrrpInstance) applyPendingResign() {
 	vi.resignMu.Lock()
 	if !vi.resignPending {
@@ -49,6 +51,19 @@ func (vi *vrrpInstance) applyPendingResign() {
 	vi.mu.Lock()
 	vi.cfg.Priority = pri
 	vi.mu.Unlock()
+}
+
+// discardPendingResign drops a pending resignation WITHOUT installing
+// its stashed priority (#16821). A superseding priority assignment
+// (UpdateRGPriority, updateConfig) is cluster-authoritative: the RG has
+// been driven back to Primary (or reconfigured) before becomeBackup
+// actuated the resign, so the stashed 0 must not survive to be
+// installed by a later, unrelated step-down. The caller has already
+// written the replacement priority to cfg.Priority.
+func (vi *vrrpInstance) discardPendingResign() {
+	vi.resignMu.Lock()
+	defer vi.resignMu.Unlock()
+	vi.resignPending = false
 }
 
 // resignIsPending reports whether a forced resignation is queued but
