@@ -9908,6 +9908,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             EmbeddedIcmpReversal::NotHandled => {}
                         }
                     }
+                    // #16711: an underlay PTB quoting OUR WG outer is
+                    // addressed to a local outer source, so it is not
+                    // the #5690 arm's business (no NAT session quotes a
+                    // WG outer). Learn the per-peer outer PMTU from a
+                    // validated quote, then fall through: the PTB
+                    // itself is host-bound and the normal flowless
+                    // LocalDelivery handling below delivers it to the
+                    // kernel exactly as before (no gate weakened).
+                    if is_embedded_icmp_error
+                        && !worker_ctx.forwarding.wg_engines.is_empty()
+                        && crate::afxdp::frame::frame_l3_offset(packet_frame).is_some_and(|l3| {
+                            crate::afxdp::frame::consume_wg_outer_ptb(
+                                worker_ctx.forwarding,
+                                packet_frame,
+                                l3,
+                            ) == crate::afxdp::frame::WgPtbOutcome::Learned
+                        })
+                    {
+                        telemetry.counters.touched = true;
+                    }
                     // #3291: flowless transit enforcement. A non-first fragment
                     // / no-L4 transit packet (#2344 makes it flowless so payload
                     // bytes are never read as L4 ports) STILL carries L3 identity

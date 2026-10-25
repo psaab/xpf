@@ -1029,6 +1029,29 @@ impl WgEngine {
         }
     }
 
+    /// #16711: the fresh learned outer PMTU for `peer_pubkey`, if a
+    /// validated underlay PTB has been accepted for that peer and the
+    /// entry has not aged out. Lock-free per-packet read.
+    pub(crate) fn peer_pmtu(&self, peer_pubkey: &[u8; WG_KEY_LEN], now_ns: u64) -> Option<usize> {
+        self.peer_arc(peer_pubkey)?.learned_pmtu(now_ns)
+    }
+
+    /// #16711: record a validated underlay PTB for `peer_pubkey`.
+    /// Returns true when the stored PMTU was lowered. No-op (false)
+    /// for an unknown peer.
+    pub(crate) fn note_peer_pmtu(
+        &self,
+        peer_pubkey: &[u8; WG_KEY_LEN],
+        offered_mtu: usize,
+        outer_v6: bool,
+        now_ns: u64,
+    ) -> bool {
+        let Some(peer) = self.peer_arc(peer_pubkey) else {
+            return false;
+        };
+        peer.offer_pmtu(offered_mtu, outer_v6, now_ns)
+    }
+
     /// Whether the named peer currently has a confirmed (usable for
     /// egress) transport session — key-confirmed AND not yet past
     /// REJECT_AFTER_TIME. The control thread uses this to decide
