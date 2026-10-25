@@ -1110,13 +1110,15 @@ func (m *Manager) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6) (int, err
 // domains under its clear fence, deletes helper authority + BPF rows,
 // and reports deleted counts; Go holds no key snapshot at all.
 //
-// Bounds (P4): the helper snapshot is hard-capped at 262144 keys
-// (take(cap+1) bounds the transient Vec ≈18MB max even against a
-// hostile table; over-cap fails closed touching nothing and surfaces
-// here as an error). Go sends one request and retains one response
+// Bounds (#16649): the helper PAGES internally in bounded batches
+// (262144 keys per round, transient Vec ≈18MB max per round even
+// against a hostile table) under one clear fence, looping until the
+// table is empty — there is no table-size ceiling, so clear-all
+// succeeds at any admitted table size. Per-round memory stays
+// bounded; the fence is held across rounds so no publish slips
+// between batches. Go sends one request and retains one response
 // (counts only) — no paging state, no continuation loop, no fence
-// tracking. Memory: Go O(1) keys; helper O(min(table, cap)) one-shot.
-//
+// tracking. Memory: Go O(1) keys; helper O(batch) per round.
 // Fail-closed atomic (P11, revises #5882): counts are
 // helper-confirmed DELETED sessions — (0,0) on ANY failure,
 // including pre-response transport errors. Nothing is partially
@@ -1134,9 +1136,10 @@ func (m *Manager) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6) (int, err
 //
 // Terminal: complete-with-empty is the only success. Incomplete,
 // complete-with-continuation (contradictory), or any continuation
-// (the helper never pages) is a contract-breach error. #5380's
-// multi-dial fast-fail is structural now: one dial exists, so a hung
-// helper costs exactly one round-trip deadline by construction.
+// (Go never pages; the helper's internal paging is invisible here)
+// is a contract-breach error. #5380's multi-dial fast-fail is
+// structural now: one dial exists, so a hung helper costs exactly
+// one round-trip deadline by construction.
 func (m *Manager) ClearAllSessions() (int, int, error) {
 	deadline := time.Now().Add(clearAllDeadline)
 	m.mu.Lock()
