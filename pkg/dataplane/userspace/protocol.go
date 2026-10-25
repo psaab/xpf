@@ -492,7 +492,13 @@ const (
 	// foreign session hit outright. A v69 helper ignores it and forwards
 	// the packet on the owner's entry/NAT/egress — the exact fail-open
 	// the operator enabled the knob to close.
-	ProtocolVersion = 70
+	// v70 -> v71 (#16589): export_idle_leases and
+	// export_persistent_lease_display are paged (lease_export request +
+	// lease_export_more/continuation response). A v70 helper ignores the
+	// request field and answers the whole population in one response,
+	// which crosses MaxControlResponseBytes at a legal population and is
+	// refused by the bounded reader — the standby rebuilds NOTHING.
+	ProtocolVersion = 71
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -564,6 +570,12 @@ const (
 	// whose helper lease records preserve inbound permission scopes. A helper
 	// below this version can silently import permission-less leases.
 	MinProtocolPersistentNatLeasePermissions = 48
+	// MinProtocolPersistentNatLeasePaging is the first protocol version
+	// whose helper pages export_idle_leases /
+	// export_persistent_lease_display (#16589). Below it the helper
+	// answers the whole population in one response, which the bounded
+	// reader refuses past 64 MiB — the export delivers nothing.
+	MinProtocolPersistentNatLeasePaging = 71
 
 	// MinProtocolSecureTunnelRefusal: the device-level AF_XDP binding refusal
 	// contract spans THREE bumps on the #5619/#6691 branch — v5 added
@@ -725,6 +737,9 @@ type ControlRequest struct {
 	// before — the control socket is shared with the 1/s status poll and with
 	// session installs, and an empty array on every request is waste there.
 	IdleLeases []IdleLeaseWire `json:"idle_leases,omitempty"`
+	// LeaseExport is the #16589 paging window for export_idle_leases /
+	// export_persistent_lease_display. Present only on those two verbs.
+	LeaseExport *LeaseExportRequest `json:"lease_export,omitempty"`
 	// ClearGenerationValidated is set only after the manager's durable remote
 	// generation check, allowing current batches past the helper's
 	// generation-less replay fence.
@@ -746,6 +761,15 @@ type ControlRequest struct {
 	NeighborGeneration uint64             `json:"neighbor_generation,omitempty"`
 	NeighborReplace    bool               `json:"neighbor_replace,omitempty"`
 	Fabrics            []FabricSnapshot   `json:"fabrics,omitempty"`
+}
+
+// LeaseExportRequest is the #16589 paging window for the lease exports.
+// Paged distinguishes a caller that will follow continuations from a
+// pre-#16589 caller that sent no lease_export at all.
+type LeaseExportRequest struct {
+	Paged  bool   `json:"paged"`
+	Cursor string `json:"cursor,omitempty"`
+	Max    uint32 `json:"max,omitempty"`
 }
 
 type ControlResponse struct {
@@ -792,6 +816,11 @@ type ControlResponse struct {
 
 	// DisplayLeases is the export_persistent_lease_display result (#8615).
 	DisplayLeases []DisplayLeaseWire `json:"display_leases,omitempty"`
+	// LeaseExportMore / LeaseExportContinuation are the #16589 paging
+	// metadata for the two lease exports above.
+	LeaseExportMore         bool   `json:"lease_export_more,omitempty"`
+	LeaseExportContinuation string `json:"lease_export_continuation,omitempty"`
+
 	// SessionCounters is the session_counters result (#7919), one row per
 	// worker. Empty for every other verb — callers must NOT read emptiness as
 	// "no worker holds this session": an unimplemented verb is reported by the

@@ -105,6 +105,7 @@ func wireSpecimenTypes() map[string]any {
 		"ha_state_update_request":                       &HAStateUpdateRequest{},
 		"idle_lease_wire":                               &IdleLeaseWire{},
 		"inject_packet_request":                         &InjectPacketRequest{},
+		"lease_export_request":                          &LeaseExportRequest{},
 		"interface_address_snapshot":                    &InterfaceAddressSnapshot{},
 		"interface_snapshot":                            &InterfaceSnapshot{},
 		"interface_snapshot_populated":                  &InterfaceSnapshot{},

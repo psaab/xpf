@@ -316,7 +316,22 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // foreign session hit outright. A v69 helper ignores it and forwards the
 // packet on the owner's entry/NAT/egress — the exact fail-open the
 // operator enabled the knob to close.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 70;
+// v70 -> v71 (#16589): `export_idle_leases` and
+// `export_persistent_lease_display` are paged. The request carries
+// `lease_export` (cursor + max) and the response carries
+// `lease_export_more` / `lease_export_continuation`. A v70 helper
+// ignores the request field and answers with the whole population in
+// one response, which crosses MAX_CONTROL_RESPONSE_BYTES at a legal
+// population and is refused by the Go bounded reader — the standby
+// then rebuilds NOTHING. Exact equality refuses that pairing instead.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 71;
+
+/// #16589: hard cap on lease rows in ONE paged lease-export response.
+/// Sized so even a worst-case row (many permitted remotes) stays far
+/// under MAX_CONTROL_RESPONSE_BYTES; the handler additionally shrinks
+/// the page by serialized size, so this is a count ceiling, not the
+/// byte guarantee.
+pub(crate) const MAX_LEASE_EXPORT_PAGE: usize = 8192;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -510,6 +525,13 @@ pub(crate) struct ControlRequest {
     /// verb). Absent for every other verb.
     #[serde(rename = "idle_leases", default, skip_serializing_if = "Vec::is_empty")]
     pub idle_leases: Vec<IdleLeaseWire>,
+    /// #16589: paging window for `export_idle_leases` /
+    /// `export_persistent_lease_display`. Absent (or `paged=false`) from
+    /// an old caller means the pre-#16589 single-shot answer; a v71
+    /// caller always sends it with `paged=true` and the helper then
+    /// never returns more than one sub-cap page.
+    #[serde(rename = "lease_export", default)]
+    pub lease_export: Option<LeaseExportRequest>,
     /// True only when the Go manager has durably validated the origin's
     /// persistent-NAT clear generation for this import batch.
     #[serde(rename = "clear_generation_validated", default)]
@@ -1069,6 +1091,17 @@ pub(crate) struct ControlResponse {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub display_leases: Vec<DisplayLeaseWire>,
+    /// #16589: paging metadata for the two lease exports. `more=true`
+    /// means at least one lease remains past this page; `continuation`
+    /// is the opaque cursor (decimal offset) the caller echoes in the
+    /// next request's `lease_export.cursor`. An old helper omits both;
+    /// a v71 caller never sees that because the Go pager's
+    /// MinProtocolPersistentNatLeasePaging gate refuses a pre-v71
+    /// helper before the first lease request.
+    #[serde(rename = "lease_export_more", default)]
+    pub lease_export_more: bool,
+    #[serde(rename = "lease_export_continuation", default)]
+    pub lease_export_continuation: String,
     /// #10512: mirror-clear transaction metadata. Non-clear verbs carry zero
     /// values; additive serde defaults preserve rolling compatibility.
     #[serde(rename = "session_mirror_v4_count", default)]
@@ -1574,6 +1607,26 @@ pub(crate) struct SessionPolicyMatch {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SessionDeltaDrainRequest {
+    #[serde(default)]
+    pub max: u32,
+}
+
+/// #16589: paging window for `export_idle_leases` /
+/// `export_persistent_lease_display`.
+///
+/// `paged` distinguishes a caller that will follow continuations from
+/// a pre-#16589 caller that sent no `lease_export` at all: only a
+/// paged caller may be answered with a truncated page, because only
+/// it will ask for the remainder. `cursor` is the opaque continuation
+/// echoed from the previous response (empty = first page); `max`
+/// caps rows on this page (0 = helper default, itself capped by
+/// MAX_LEASE_EXPORT_PAGE and by serialized size).
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct LeaseExportRequest {
+    #[serde(default)]
+    pub paged: bool,
+    #[serde(default)]
+    pub cursor: String,
     #[serde(default)]
     pub max: u32,
 }

@@ -2840,6 +2840,10 @@ fn wire_invariant_default_specimens() {
         dump(&SessionDeltaDrainRequest::default()),
     );
     s.insert(
+        "lease_export_request".into(),
+        dump(&LeaseExportRequest::default()),
+    );
+    s.insert(
         "session_delta_info".into(),
         dump(&SessionDeltaInfo::default()),
     );
@@ -3110,6 +3114,11 @@ fn wire_invariant_default_specimens() {
         "control_request_populated".into(),
         dump(&ControlRequest {
             idle_leases: vec![populated_idle_lease.clone()],
+            lease_export: Some(LeaseExportRequest {
+                paged: true,
+                cursor: "16132-cursor".into(),
+                max: 42,
+            }),
             session_policy_list: Some(SessionPolicyListRequest {
                 policy_ids: vec![11],
                 mode: "16132".into(),
@@ -3154,6 +3163,8 @@ fn wire_invariant_default_specimens() {
                 pool_name: "p16132".into(),
                 ..Default::default()
             }],
+            lease_export_more: true,
+            lease_export_continuation: "16132-next".into(),
             policy_delete_errors: vec!["16132-delete".into()],
             fib_routes: vec![populated_fib_route.clone()],
             ..Default::default()
