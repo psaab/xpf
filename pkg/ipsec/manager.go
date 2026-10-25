@@ -1271,13 +1271,28 @@ func vpnEagerlyInitiates(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) boo
 	return gw == nil || !responderOnlyGateway(gw)
 }
 
-// terminateIKE issues `swanctl --terminate --ike <name>` for a single
+// terminateIKE issues `swanctl --terminate --ike <name> --force` for a single
 // connection and reports whether it succeeded. The error is logged here and
 // converted to a false return so the caller can carry the teardown debt
 // (#6542); it is deliberately not wrapped and propagated, because a single
 // failure must not abort the teardown of the OTHER affected connections.
+//
+// --force (#16851 R3-B02-01): this is the fail-closed teardown on the commit
+// and Clear paths for a connection that was REMOVED or security-changed, so
+// the connection is no longer authorized and no peer acknowledgement is
+// needed. A graceful delete waits for the peer's INFORMATIONAL DELETE ack;
+// an unresponsive (or revoked, suspected-compromised) peer never sends it,
+// so swanctl blocked until the 15 s swanctlTimeout killed it — stalling the
+// commit under applySem for 15 s per such connection, returning a teardown-
+// debt error, and leaving the SA in charon DELETING with its kernel XFRM
+// states installed until charon's retransmits ran out (~165 s at defaults).
+// Forcing the terminate closes the tunnel immediately, matching the HA
+// TerminateConnection primitive (ike.go, #15194), which documents the same
+// graceful-delete stall. The operator-initiated TerminateAllSAs (ike.go)
+// deliberately stays graceful: it is not a de-authorization, and its caller
+// reports per-SA failure to the operator instead of riding a commit.
 func (m *Manager) terminateIKE(name string) bool {
-	if out, err := m.sc("--terminate", "--ike", name); err != nil {
+	if out, err := m.sc("--terminate", "--ike", name, "--force"); err != nil {
 		slog.Warn("swanctl terminate for stale IPsec VPN failed "+
 			"(SA may already be down); teardown retried on next commit",
 			"ike", name, "err", err, "output", string(out))

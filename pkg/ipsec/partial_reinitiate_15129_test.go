@@ -67,7 +67,7 @@ func (c *partialReinitCharon15129) run(args ...string) ([]byte, error) {
 func (c *partialReinitCharon15129) terminateCalls() []string {
 	var names []string
 	for _, call := range c.calls {
-		if len(call) == 3 && call[0] == "--terminate" && call[1] == "--ike" {
+		if len(call) == 4 && call[0] == "--terminate" && call[1] == "--ike" && call[3] == "--force" {
 			names = append(names, call[2])
 		}
 	}
@@ -77,7 +77,7 @@ func (c *partialReinitCharon15129) terminateCalls() []string {
 func (c *partialReinitCharon15129) initiateCalls() []string {
 	var names []string
 	for _, call := range c.calls {
-		if len(call) == 3 && call[0] == "--initiate" && call[1] == "--child" {
+		if len(call) == 5 && call[0] == "--initiate" && call[1] == "--child" && call[3] == "--timeout" {
 			names = append(names, call[2])
 		}
 	}

@@ -20,6 +20,11 @@ import (
 
 // swanctlRecorder is a swanctl exec double. It records every invocation and
 // returns a programmable `--list-sas` body so a test can present live SAs.
+// The --terminate branch matches any `--terminate --ike <name>...` form so
+// the programmed per-connection error applies to BOTH the forced commit-path
+// terminate (#16851, `--force` appended) and the graceful operator
+// TerminateAllSAs form; terminateCalls() below only reports the forced
+// commit-path calls, which is what its callers assert.
 type swanctlRecorder struct {
 	calls   [][]string
 	listSAs string // body returned for `swanctl --list-sas`
@@ -36,7 +41,7 @@ func (r *swanctlRecorder) run(args ...string) ([]byte, error) {
 	if len(args) > 0 && args[0] == "--list-sas" {
 		return []byte(r.listSAs), r.listErr
 	}
-	if len(args) == 3 && args[0] == "--terminate" && args[1] == "--ike" {
+	if len(args) >= 3 && args[0] == "--terminate" && args[1] == "--ike" {
 		if err := r.terminateErr[args[2]]; err != nil {
 			return []byte("terminate failed"), err
 		}
@@ -49,7 +54,21 @@ func (r *swanctlRecorder) run(args ...string) ([]byte, error) {
 func (r *swanctlRecorder) terminateCalls() []string {
 	var names []string
 	for _, c := range r.calls {
-		if len(c) == 3 && c[0] == "--terminate" && c[1] == "--ike" {
+		if len(c) == 4 && c[0] == "--terminate" && c[1] == "--ike" && c[3] == "--force" {
+			names = append(names, c[2])
+		}
+	}
+	return names
+}
+
+// allTerminateCalls returns the connection names of EVERY terminate call,
+// graceful or forced. TerminateAllSAs (operator clear) stays graceful
+// (#16851 scope), so its tests must count through this helper, not
+// terminateCalls (which pins the forced commit-path shape).
+func (r *swanctlRecorder) allTerminateCalls() []string {
+	var names []string
+	for _, c := range r.calls {
+		if len(c) >= 3 && c[0] == "--terminate" && c[1] == "--ike" {
 			names = append(names, c[2])
 		}
 	}
@@ -60,7 +79,7 @@ func (r *swanctlRecorder) terminateCalls() []string {
 func (r *swanctlRecorder) initiateCalls() []string {
 	var names []string
 	for _, c := range r.calls {
-		if len(c) == 3 && c[0] == "--initiate" && c[1] == "--child" {
+		if len(c) == 5 && c[0] == "--initiate" && c[1] == "--child" && c[3] == "--timeout" {
 			names = append(names, c[2])
 		}
 	}
@@ -296,10 +315,10 @@ func TestChangedVPNSecurityTerminatesAndReinitiatesLiveSA(t *testing.T) {
 	}
 	terminateAt, initiateAt := -1, -1
 	for i, call := range rec.calls {
-		if len(call) == 3 && call[0] == "--terminate" && call[1] == "--ike" {
+		if len(call) == 4 && call[0] == "--terminate" && call[1] == "--ike" && call[3] == "--force" {
 			terminateAt = i
 		}
-		if len(call) == 3 && call[0] == "--initiate" && call[1] == "--child" {
+		if len(call) == 5 && call[0] == "--initiate" && call[1] == "--child" && call[3] == "--timeout" {
 			initiateAt = i
 		}
 	}
