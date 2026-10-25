@@ -407,6 +407,22 @@ impl ShardedNeighborMap {
             .unwrap_or_else(|e| e.into_inner());
         shard.remove(key);
     }
+    /// #16505: drop only a MAC-bound token for `key`, preserving a
+    /// key-only (locally-issued) token. A refused kernel `NUD_PROBE`
+    /// must not erase evidence of a dataplane-initiated probe already
+    /// in flight — that key-only evidence is what lets a genuine MAC
+    /// move converge when its answer arrives.
+    pub(crate) fn clear_mac_bound_neighbor_probe(&self, key: &(i32, IpAddr)) {
+        let idx = shard_idx(key);
+        let mut shard = self.arp_solicited_at[idx]
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if shard.get(key).is_some_and(|probed| probed.mac.is_some()) {
+            shard.remove(key);
+        }
+    }
+
 
     /// #13661: peek at recent-probe evidence WITHOUT consuming it.
     /// Authorization is only needed for accepted updates (a first learn or a
@@ -851,6 +867,27 @@ impl ShardedNeighborMap {
         }
         removed
     }
+    /// #16505: remove `key` only if it still maps to `expected_mac`.
+    /// Used when a held-MAC verification probe went unanswered: the
+    /// binding must be dropped so fresh resolution can adopt the new
+    /// MAC, but a concurrent genuine update to a different MAC must
+    /// not be clobbered.
+    pub(crate) fn remove_if_mac_matches(
+        &self,
+        key: &(i32, IpAddr),
+        expected_mac: [u8; 6],
+    ) -> bool {
+        let idx = shard_idx(key);
+        let mut shard = self.lock_shard(idx);
+        if shard.get(key).is_some_and(|r| r.entry.mac == expected_mac) {
+            shard.remove(key);
+            self.bump_shard_epoch(idx);
+            true
+        } else {
+            false
+        }
+    }
+
 
     /// Expire idle RX source-learned entries after the configured age plus
     /// coalescing grace. Manager-owned keys are excluded even if a packet

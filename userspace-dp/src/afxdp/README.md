@@ -317,9 +317,12 @@ sync.
         must succeed before the entry is promoted to REACHABLE, and a
         fire-and-forget poison ages out on its own. This matches Linux
         `arp_accept=0` gratuitous-ARP handling (refresh to STALE, never
-        blind-promote) and PRESERVES #3048: a legitimate upstream
-        VRRP-failover MAC change observed on the wire still updates the
-        binding, just as STALE so the kernel confirms it.
+        blind-promote). Post-#16505 a legitimate upstream VRRP-failover
+        / genuine MAC change still updates the binding — through
+        solicited evidence, `NUD_PERMANENT`, or the held-MAC
+        verification cycle below — just as STALE so the kernel
+        confirms it. A kernel `NUD_PROBE` of a differing MAC alone
+        no longer updates it (see the refused-probe contract below).
       - **NDP NA honors the Override (O) flag** (`parser.rs`
         `NdpNeighborAdvert::override_flag` → the `stage_link_layer_classify`
         NA arm). An NA with Override=0 is NOT allowed to overwrite a cached
@@ -334,17 +337,29 @@ sync.
     to the kernel, so the RTM_NEWNEIGH neighbor monitor is the production
     input to `dynamic_neighbors` (the XSK parser arm is guarded as well).
     #10704 records bounded, one-shot evidence for five seconds after a
-    successful userspace probe. A differing-MAC IPv4 monitor update is
-    accepted only with that evidence, after a kernel `NUD_PROBE` event, or
-    from an authoritative `NUD_PERMANENT` entry; otherwise it follows
-    Override=0 semantics and can only create a first
-    binding or refresh the same MAC. The check and map write share one shard
-    lock. Refused unsolicited IPv4 updates, including gratuitous overwrites,
-    increment the exact refusal count and emit a warning at most once per
-    minute. The kernel may update its own table before the monitor receives
-    the event, but the dataplane cache keeps its existing live binding.
-    Probe evidence comes from the warmer, MissingNeighbor path, pending-neighbor
-    retry, and on-demand resolver.
+    successful userspace probe. Post-#15097/#16505, a differing-MAC
+    IPv4 monitor update is accepted only with that solicited evidence
+    (key-only local-probe token, or a token bound to exactly the
+    candidate MAC), or from an authoritative `NUD_PERMANENT` entry;
+    otherwise it follows Override=0 semantics and can only create a
+    first binding or refresh the same MAC. A kernel `NUD_PROBE` event
+    by itself is NOT acceptance evidence for a differing MAC: a probe
+    of the held MAC mints only a MAC-bound token for that MAC, and a
+    probe of a differing (refused) MAC mints nothing, preserves any
+    key-only local-probe token, and starts held-MAC verification —
+    the dataplane solicits the held MAC and, if it stays silent
+    through the 5 s verification window, drops the held binding so
+    fresh resolution adopts the new MAC. The kernel entry is NEVER
+    REPLACE-re-asserted with the held MAC on the first refused probe
+    (#16505: that overwrote the kernel's already-correct new MAC on
+    a genuine move). The check and map write share one shard lock.
+    Refused unsolicited IPv4 updates, including gratuitous overwrites,
+    increment the exact refusal count and emit a warning at most once
+    per minute. The kernel may update its own table before the monitor
+    receives the event, but the dataplane cache keeps its existing
+    live binding. Probe evidence comes from the warmer,
+    MissingNeighbor path, pending-neighbor retry, and on-demand
+    resolver.
   - **Bounded kernel-program rate limit (`#5288`,
     `neighbor_program_limiter.rs`):** `add_kernel_neighbor` allocates
     request/IP `Vec`s, opens a raw `AF_NETLINK` socket, `sendto`s an
