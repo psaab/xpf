@@ -31,9 +31,19 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime
 # These are defaults (:?=) — an explicit caller TMPDIR/GOCACHE/GOTMPDIR/
 # CARGO_TARGET_DIR wins. They exist so Go/Python/cargo subprocesses spawned
 # by any recipe cannot fall back to /tmp, /dev/shm, or /var/tmp.
+# #16494: GOTMPDIR is the exception — it must stay SHORT, not under
+# /var/worktrees/.cache. Go's testing.TempDir builds
+# <GOTMPDIR>/<name[:64]><random>/001/<sock>, so even /wtgt (5 chars)
+# yields a 97-octet control.sock path and the old 28-char go-tmp root
+# yielded 120 octets, past the 107-octet sun_path limit: 45+ socket
+# tests failed with "bind: invalid argument". /wtgt is created below
+# (and by scratch-pinning-selftest) when missing; if it cannot be
+# created, go test legs fail loudly at TempDir instead of silently
+# falling back to a long root. The executed canary in
+# scripts/scratch-pinning-selftest.sh pins this bound both ways.
 TMPDIR ?= /var/worktrees/.cache/tmpdir
 GOCACHE ?= /var/worktrees/.cache/go-build
-GOTMPDIR ?= /var/worktrees/.cache/go-tmp
+GOTMPDIR ?= /wtgt
 CARGO_TARGET_DIR ?= /var/worktrees/.cache/cargo
 export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
 $(shell mkdir -p $(TMPDIR) $(GOCACHE) $(GOTMPDIR) $(CARGO_TARGET_DIR))
@@ -232,12 +242,14 @@ test-root: test-shim-run test-memlock-guards test-xfrm-lifecycle
 # line, and the package set is DERIVED from the registry rather than written
 # down, so adding a guard in a new package cannot leave it unrun.
 #
-# Scratch pin (#14833): all build/test scratch lives under /var/worktrees.
+# Scratch pin (#14833): all build/test scratch lives under /var/worktrees,
+# except GOTMPDIR (#16494, see the pin at the top of this file).
 # Several of these guards bind an AF_UNIX control socket under the temp
-# dir, and a long TMPDIR pushes the path past the 108-byte sun_path limit
-# — "bind: invalid argument", which reads like a dataplane defect and is
-# not one. /var/worktrees/.cache/go-tmp is 28 chars, so a Go test temp
-# dir (<TMPDIR>/Test<Name><random>/sock) stays well under 108 bytes.
+# dir, and a long TMPDIR pushes the path past the 107-octet sun_path
+# limit — "bind: invalid argument", which reads like a dataplane defect
+# and is not one. /wtgt is 5 chars, so a Go test temp dir
+# (<TMPDIR>/Test<Name><random>/001/sock) stays under 107 octets; the
+# executed canary in scripts/scratch-pinning-selftest.sh proves it.
 .PHONY: test-memlock-guards
 test-memlock-guards:
 	@if [ "$$(id -u)" != "0" ]; then \
@@ -256,7 +268,7 @@ test-memlock-guards:
 		exit 1; \
 	fi; \
 	echo "test-memlock-guards: packages $$pkgs"; \
-	out=$$(mkdir -p /var/worktrees/.cache/go-tmp && TMPDIR=/var/worktrees/.cache/go-tmp XPF_REQUIRE_MEMLOCK_GUARDS=1 $(GO) test -json=false -count=1 -v $$pkgs ./pkg/memlockcensus/ 2>&1); \
+	out=$$(mkdir -p /wtgt && TMPDIR=/wtgt GOTMPDIR=/wtgt XPF_REQUIRE_MEMLOCK_GUARDS=1 $(GO) test -json=false -count=1 -v $$pkgs ./pkg/memlockcensus/ 2>&1); \
 	status=$$?; \
 	echo "$$out"; \
 	missing=''; \

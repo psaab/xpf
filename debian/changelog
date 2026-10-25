@@ -12,6 +12,16 @@ xpf (0.0.0) unstable; urgency=medium
     a new pkg/docsref gate pins the contract (including the #16486
     OSPF 60 s / Other-protocols 1800 s rows). Documentation only; no
     runtime behaviour changes.
+  * Build/test: shorten the pinned GOTMPDIR root to /wtgt (#16494).
+    The #14833 pin used /var/worktrees/.cache/go-tmp (28 chars); Go
+    test TempDir paths under it exceed the 107-octet AF_UNIX
+    sun_path limit (120 octets for a worst-case control.sock), so
+    45+ socket tests failed with "bind: invalid argument" under
+    `make test-go`. GOTMPDIR (Makefile, run-selftests.sh, and the
+    memlock-guards leg) now defaults to /wtgt (5 chars, 97-octet
+    worst case), and scratch-pinning-selftest replaces its modelled
+    71-byte path check with the executed scripts/sunpath-canary
+    bind, required to pass under /wtgt and fail under a long root.
   * API/daemon: surface journal legacy-scrub degradation on /health
     and Prometheus (#16490). The #15143 `JournalLegacyScrubDegraded`
     flag latched when a pre-#1896 journal segment could not be

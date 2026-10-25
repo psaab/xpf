@@ -83,9 +83,10 @@ echo "ok: audited $(printf '%s\n' "$FILES" | wc -l) files for forbidden defaults
 
 # Positive pins.
 grep -q 'TMPDIR ?= /var/worktrees/.cache/tmpdir' "$root/Makefile" || { echo "FAIL: Makefile TMPDIR default missing"; fail=1; }
-grep -q 'GOTMPDIR ?= /var/worktrees/.cache/go-tmp' "$root/Makefile" || { echo "FAIL: Makefile GOTMPDIR default missing"; fail=1; }
+grep -q 'GOTMPDIR ?= /wtgt' "$root/Makefile" || { echo "FAIL: Makefile GOTMPDIR default missing or not the short /wtgt root (#16494)"; fail=1; }
 grep -q 'CARGO_TARGET_DIR ?= /var/worktrees/.cache/cargo' "$root/Makefile" || { echo "FAIL: Makefile CARGO_TARGET_DIR default missing"; fail=1; }
-grep -q 'TMPDIR=/var/worktrees/.cache/go-tmp' "$root/Makefile" || { echo "FAIL: memlock TMPDIR not pinned"; fail=1; }
+grep -q 'TMPDIR=/wtgt' "$root/Makefile" || { echo "FAIL: memlock TMPDIR not pinned to the short root"; fail=1; }
+grep -q 'GOTMPDIR:-/wtgt' "$root/scripts/run-selftests.sh" || { echo "FAIL: run-selftests GOTMPDIR default missing or not the short /wtgt root (#16494)"; fail=1; }
 grep -q 'TMPDIR:-/var/worktrees/.cache/tmpdir' "$root/scripts/run-selftests.sh" || { echo "FAIL: run-selftests TMPDIR default missing"; fail=1; }
 grep -q 'mkdir -p "$WORK"' "$root/scripts/mutate.sh" || { echo "FAIL: mutate.sh lost mkdir -p \$WORK"; fail=1; }
 grep -q 'MUTATE_WORKDIR:-/var/worktrees/.cache/tmpdir' "$root/scripts/mutate.sh" || { echo "FAIL: mutate WORK not pinned"; fail=1; }
@@ -105,11 +106,35 @@ for f in test/incus/harness-census-selftest.sh \
   grep -q 'FATAL: cannot create work dir\|FATAL: work dir not created\|cannot create sandbox dir\|cannot create leg cell dir' "$root/$f" || { echo "FAIL: $f does not fail loudly on mktemp failure (#16477)"; fail=1; }
 done
 
-# AF_UNIX sun_path budget: worst memlock guard socket is
-# <GOTMPDIR>/Test<Name><random>/<sock>. Allow root(28)+testdir(60)+sock(20).
-sock=/var/worktrees/.cache/go-tmp/TestMemlockGuard1234567890/0123456789.sock
-n=$(printf %s "$sock" | wc -c)
-[ "$n" -lt 108 ] || { echo "FAIL: modelled guard socket path $n >= 108 bytes"; fail=1; }
-mkdir -p /var/worktrees/.cache/tmpdir /var/worktrees/.cache/go-tmp /var/worktrees/.cache/go-build /var/worktrees/.cache/cargo || { echo "FAIL: cannot create scratch dirs"; fail=1; }
-echo "scratch-pinning-selftest: fail=$fail (modelled socket=$n bytes)"
+# AF_UNIX sun_path budget (#16494): executed canary, not a modelled
+# path. The pre-#16494 check modelled a 71-byte socket Go never
+# produces (26-char test dir, no /001 sequence dir); Go's real
+# testing.TempDir shape is <GOTMPDIR>/<name[:64]><random>/001/<sock>,
+# which under the old 28-char root is 120 octets for control.sock.
+# scripts/sunpath-canary reproduces that shape and binds it. It must
+# PASS under the pinned short root and FAIL under a long root, so a
+# canary that stops binding reds here too. If /wtgt cannot be created
+# (unprivileged host without the dir), the positive leg SKIPs loudly
+# rather than falling back to a long root; the negative leg still runs.
+mkdir -p /var/worktrees/.cache/tmpdir /var/worktrees/.cache/go-build /var/worktrees/.cache/cargo || { echo "FAIL: cannot create scratch dirs"; fail=1; }
+GO=${GO:-go}
+canary_out=""
+if mkdir -p /wtgt 2>/dev/null; then
+  if canary_out=$(GOTMPDIR=/wtgt TMPDIR=/wtgt GOCACHE="${GOCACHE:-/var/worktrees/.cache/go-build}" "$GO" run ./scripts/sunpath-canary 2>&1); then
+    echo "ok: sunpath canary binds under pinned /wtgt root: $canary_out"
+  else
+    echo "FAIL: sunpath canary does not bind under pinned /wtgt root: $canary_out"; fail=1
+  fi
+else
+  echo "SKIP: cannot create /wtgt; sunpath canary positive leg not run (create /wtgt writable to enable it)"
+fi
+longroot=/var/worktrees/.cache/go-tmp-canary-longroot-16494
+mkdir -p "$longroot" || { echo "FAIL: cannot create long canary root"; fail=1; }
+if canary_out=$(GOTMPDIR="$longroot" TMPDIR="$longroot" GOCACHE="${GOCACHE:-/var/worktrees/.cache/go-build}" "$GO" run ./scripts/sunpath-canary 2>&1); then
+  echo "FAIL: sunpath canary unexpectedly binds under long root $longroot: $canary_out"; fail=1
+else
+  echo "ok: sunpath canary reds under long root ($longroot): $canary_out"
+fi
+rmdir "$longroot" 2>/dev/null || true
+echo "scratch-pinning-selftest: fail=$fail"
 exit $fail
