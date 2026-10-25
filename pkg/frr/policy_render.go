@@ -1331,9 +1331,14 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 					// no `from` match still renders a match-all sequence, so a
 					// genuinely neighbor-wide `then next-hop self` keeps its
 					// neighbor-wide effect. Like the old `force`, an outbound
-					// `set` overrides the next-hop on iBGP / route-reflector-
-					// reflected routes too, so the #2977 iBGP blackhole stays
-					// fixed — now correctly scoped to the term's routes.
+					// `set` overrides the next-hop on iBGP routes — and on
+					// route-reflector-REFLECTED routes too, provided the
+					// stanza renders `bgp route-reflector
+					// allow-outbound-policy` (#16800: without it bgpd runs
+					// the outbound route-map on a dummy attribute copy for
+					// IBGP->IBGP advertisements and discards every `set`
+					// clause), so the #2977 iBGP blackhole stays fixed —
+					// now correctly scoped to the term's routes.
 					//
 					// The session AF is unknown at render time; emit both forms
 					// and FRR applies each only to its matching address family
