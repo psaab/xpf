@@ -60,9 +60,12 @@ XPF_APT_BASE_URL="${XPF_APT_BASE_URL:-$_baked_url}"
 CHANNEL="${XPF_CHANNEL:-${_baked_channel:-stable}}"
 DRY="${XPF_DRY_RUN:-0}"
 
-# Cleanup-on-failure state: remove the apt source written by this run and
-# restore/remove the managed channel pin if the installer does not finish.
+# Cleanup-on-failure state: restore the pre-existing apt source (or remove
+# a source this run created) and restore/remove the managed channel pin if
+# the installer does not finish.
 SRC_WRITTEN=0
+SRC_BACKUP=''
+SRC_TEMP=''
 INSTALL_OK=0
 PIN_WRITTEN=0
 PIN_BACKUP=''
@@ -80,8 +83,9 @@ SRC=/etc/apt/sources.list.d/xpf.sources
 PIN=/etc/apt/preferences.d/xpf-channel.pref
 PIN_MARKER="# xpf appliance channel pin; Managed by install.sh (#11133)"
 
-# cleanup_on_fail removes the apt source written by this run and restores the
-# prior managed channel pin. It rolls the keyring back (restores the previous
+# cleanup_on_fail restores the previous apt source when this run overwrote
+# one (or removes the source only when it did not pre-exist) and restores
+# the prior managed channel pin. It rolls the keyring back (restores the previous
 # file, or removes the bootstrap write on first install) only while the live
 # path is still this installer's object: the device:inode recorded before the
 # rename AND the bytes it wrote (#12543). Equal bytes on a new inode (a dpkg
@@ -91,9 +95,24 @@ PIN_MARKER="# xpf appliance channel pin; Managed by install.sh (#11133)"
 cleanup_on_fail() {
     _rc=$?
     if [ "$INSTALL_OK" != "1" ] && [ "$DRY" != "1" ]; then
+        if [ -n "$SRC_TEMP" ]; then
+            rm -f "$SRC_TEMP" || _rc=1
+        fi
         if [ "$SRC_WRITTEN" = "1" ]; then
-            info "install failed (rc=$_rc) — removing $SRC so it does not break apt update"
-            rm -f "$SRC" || _rc=1
+            if [ -n "$SRC_BACKUP" ]; then
+                info "install failed (rc=$_rc) — restoring previous $SRC"
+                if mv -f "$SRC_BACKUP" "$SRC"; then
+                    SRC_BACKUP=''
+                else
+                    echo "xpf-install ERROR: could not restore previous $SRC" >&2
+                    _rc=1
+                fi
+            else
+                info "install failed (rc=$_rc) — removing $SRC so it does not break apt update"
+                rm -f "$SRC" || _rc=1
+            fi
+        elif [ -n "$SRC_BACKUP" ]; then
+            rm -f "$SRC_BACKUP" || _rc=1
         fi
         if [ -n "$PIN_TEMP" ]; then
             rm -f "$PIN_TEMP" || _rc=1
@@ -150,6 +169,8 @@ cleanup_on_fail() {
             rm -f "$KEYRING_BACKUP" || _rc=1
         fi
     else
+        [ -z "$SRC_TEMP" ] || rm -f "$SRC_TEMP" || _rc=1
+        [ -z "$SRC_BACKUP" ] || rm -f "$SRC_BACKUP" || _rc=1
         [ -z "$PIN_TEMP" ] || rm -f "$PIN_TEMP" || _rc=1
         [ -z "$PIN_BACKUP" ] || rm -f "$PIN_BACKUP" || _rc=1
         [ -z "$KEYRING_TEMP" ] || rm -f "$KEYRING_TEMP" || _rc=1
@@ -400,6 +421,12 @@ install_keyring() {
 
 # ── 3. apt source ──────────────────────────────────────────────────────────
 # Inputs are already validated in validate(); this function only WRITES.
+# The new source is staged in the same directory and renamed over the live
+# path, like the keyring and pin writes, so a failed write never truncates
+# a working source. A pre-existing source is backed up first (#16534): on
+# failure cleanup_on_fail restores it byte-for-byte, and removes the source
+# only when this run created it. Refusals mirror the pin: a symlinked or
+# non-regular source is never replaced.
 write_source() {
     info "writing apt source -> $SRC (suite=$CHANNEL uri=$XPF_APT_BASE_URL)"
     body=$(cat <<EOF
@@ -414,10 +441,26 @@ EOF
 )
     if [ "$DRY" = "1" ]; then
         echo "  (dry-run) $SRC contents:"; printf '%s\n' "$body" | sed 's/^/      /'
-    else
-        printf '%s\n' "$body" > "$SRC"
-        SRC_WRITTEN=1   # arm the cleanup trap (H-16)
+        return
     fi
+    [ ! -L "$SRC" ] || die "refusing to replace symlink at $SRC"
+    if [ -e "$SRC" ]; then
+        [ -f "$SRC" ] \
+            || die "refusing to replace non-regular apt source at $SRC"
+    fi
+    _src_dir=$(dirname "$SRC")
+    install -d -m 0755 "$_src_dir"
+    SRC_TEMP=$(mktemp "$_src_dir/.xpf.sources.tmp.XXXXXX")
+    printf '%s\n' "$body" > "$SRC_TEMP"
+    chmod 0644 "$SRC_TEMP"
+    if [ -e "$SRC" ]; then
+        SRC_BACKUP=$(mktemp "$_src_dir/.xpf.sources.backup.XXXXXX")
+        cp -p "$SRC" "$SRC_BACKUP"
+    fi
+    # Arm rollback before the rename so an unsuccessful move is reversible.
+    SRC_WRITTEN=1
+    mv -f "$SRC_TEMP" "$SRC"
+    SRC_TEMP=''
 }
 
 # Persist the selected channel for later apt upgrades. The selected identity
@@ -550,7 +593,7 @@ main() {
     install_keyring # ── mutation begins here ──
     write_source
     do_install
-    INSTALL_OK=1    # commit the source/pin; cleanup only removes pin backups
+    INSTALL_OK=1    # commit source/pin/keyring; cleanup only removes backups
     next_steps
 }
 
