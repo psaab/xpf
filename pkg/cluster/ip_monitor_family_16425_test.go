@@ -77,7 +77,7 @@ func TestProbeSourceForFamilySelection16425(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, mon, rg := primaryMonitor16425(t, tc.addrs, tc.target)
-			src, device := mon.probeSourceFor(rg, tc.target)
+			src, device, _ := mon.probeSourceFor(rg, tc.target)
 			if src != tc.wantSrc {
 				t.Fatalf("probeSourceFor src = %q, want %q (#16425)", src, tc.wantSrc)
 			}

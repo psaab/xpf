@@ -460,17 +460,18 @@ func (mon *Monitor) pollCycle(ctx context.Context) {
 	mon.mu.Unlock()
 
 	// Phase 1: immutable IP-target snapshot in stable order. Each task
-	// carries the resolved probe source/device for its RG+target (#15038):
-	// the primary probes from the RG's VIP on the target interface, the
-	// secondary from secondary-ip-address; unbound targets keep src="".
+	// carries the resolved probe source/device/measurability for its
+	// RG+target (#15038, #16734): the primary probes from the RG's VIP
+	// on the target interface, the secondary from secondary-ip-address;
+	// unbound targets keep src="" and stay measurable.
 	var ipTasks []ipProbeTask
 	for _, rg := range groups {
 		if rg.IPMonitoring == nil || len(rg.IPMonitoring.Targets) == 0 {
 			continue
 		}
 		for _, target := range rg.IPMonitoring.Targets {
-			src, device := mon.probeSourceFor(rg, target)
-			ipTasks = append(ipTasks, ipProbeTask{target: target, rgID: rg.ID, src: src, device: device})
+			src, device, canMeasure := mon.probeSourceFor(rg, target)
+			ipTasks = append(ipTasks, ipProbeTask{target: target, rgID: rg.ID, src: src, device: device, canMeasure: canMeasure})
 		}
 	}
 
@@ -487,11 +488,25 @@ func (mon *Monitor) pollCycle(ctx context.Context) {
 		if rg.IPMonitoring != nil && len(rg.IPMonitoring.Targets) > 0 {
 			for _, target := range rg.IPMonitoring.Targets {
 				res := ipResults[ipIdx]
+				task := ipTasks[ipIdx]
 				ipIdx++
 				if !res.completed {
-					// Probe deferred or aborted this cycle (cycle deadline or
-					// Stop) — leave the dampening state untouched rather than
-					// counting an unmeasured target as a failure.
+					if !task.canMeasure {
+						// #16734: this node cannot measure the target at
+						// all (not primary and no secondary source it
+						// holds). A DOWN state measured while primary
+						// must not stay frozen: release it so the RG
+						// debt reconciles away and the node is again
+						// promotable. Genuinely unmeasurable only —
+						// cycle-deadline/Stop aborts on a measurable
+						// node arrive with canMeasure=true and keep
+						// the #15038/#5301 neutral treatment.
+						mon.releaseIPTargetState(rg, target)
+					}
+					// Otherwise probe deferred or aborted this cycle
+					// (cycle deadline or Stop) — leave the dampening
+					// state untouched rather than counting an
+					// unmeasured target as a failure.
 					continue
 				}
 				mon.updateIPTargetDampenedState(rg, target, res.reachable)
@@ -644,6 +659,13 @@ type ipProbeTask struct {
 	rgID   int
 	src    string
 	device string
+	// canMeasure is true when this node holds a source it can probe
+	// from for this target (#16734): it is primary for the RG, the
+	// target is unbound (legacy, kernel chooses), or it holds a
+	// secondary-ip-address. When false the node cannot measure the
+	// target at all, so a not-completed outcome must release any
+	// dampened DOWN state rather than leave it frozen.
+	canMeasure bool
 }
 
 // ipCycleTimeout returns the overall deadline for one IP-probe sweep. A caller-
@@ -668,45 +690,51 @@ func (mon *Monitor) ipCycleTimeout(numTargets int) time.Duration {
 	return time.Duration(waves)*ipProbeReadDeadline + ipProbeCycleSlack
 }
 
-// probeSourceFor resolves the source address and egress device a probe of
-// target should use on THIS node (#15038):
+// probeSourceFor resolves the source address, egress device, and
+// measurability a probe of target should use on THIS node (#15038, #16734):
 //
-//   - No interface configured: ("", "") — the legacy unbound probe.
+//   - No interface configured: ("", "", true) — the legacy unbound probe;
+//     the kernel chooses a source, so the node can measure.
 //   - This node is primary for the RG: the first unit address (VIP
 //     first, then the configured unit addresses) of the TARGET's address
-//     family (#16425) on the resolved device. Without one, ("", device)
-//     so the probe is device-bound but source-free; strict commit
-//     rejects that shape for a bound target, and a leniently-loaded one
-//     probes source-free (the kernel picks a same-family source) rather
-//     than binding the wrong family's address and never completing.
-//   - Otherwise: secondary-ip-address (an address the secondary actually
-//     holds) on the resolved device; without one, ("", device) so the
-//     probe is device-bound but source-free.
+//     family (#16425) on the resolved device, measurable. Without one,
+//     ("", device, true) so the probe is device-bound but source-free;
+//     strict commit rejects that shape for a bound target, and a
+//     leniently-loaded one probes source-free (the kernel picks a
+//     same-family source) rather than binding the wrong family's
+//     address and never completing.
+//   - Otherwise with secondary-ip-address: (secondary, device, true) —
+//     an address the secondary actually holds, so it can measure.
+//   - Otherwise (bound target, not primary, no secondary address):
+//     ("", device, false) — the node holds no source for this target
+//     and cannot measure it at all. A not-completed probe for such a
+//     target must release any dampened DOWN state (#16734) instead of
+//     leaving it frozen; see pollCycle.
 //
 // The device is the Linux name of the target interface with any RETH
 // resolved to its local physical member (VLAN sub-interface when the
 // unit is tagged), matching RethVIPsForRG's key derivation.
-func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IPMonitorTarget) (src, device string) {
+func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IPMonitorTarget) (src, device string, canMeasure bool) {
 	if target == nil || target.Interface == "" {
-		return "", ""
+		return "", "", true
 	}
 	cfg := mon.config()
 	device, unitAddrs := resolveProbeInterface(cfg, target.Interface)
 	if mon.mgr != nil && mon.mgr.IsLocalPrimary(rg.ID) {
 		if cfg != nil {
 			if addr := firstAddrOfFamily(cfg.RethVIPsForRG(rg.ID)[device], target.Address); addr != "" {
-				return addr, device
+				return addr, device, true
 			}
 		}
 		if addr := firstAddrOfFamily(unitAddrs, target.Address); addr != "" {
-			return addr, device
+			return addr, device, true
 		}
-		return "", device
+		return "", device, true
 	}
 	if target.SecondaryIPAddress != "" {
-		return target.SecondaryIPAddress, device
+		return target.SecondaryIPAddress, device, true
 	}
-	return "", device
+	return "", device, false
 }
 
 // firstAddrOfFamily returns the address part of the first entry of addrs
@@ -984,6 +1012,32 @@ func (mon *Monitor) updateIPTargetDampenedState(rg *config.RedundancyGroup, targ
 	if transitioned {
 		slog.Info("cluster monitor: IP probe reachability changed",
 			"rg", rg.ID, "address", target.Address, "reachable", reachable)
+	}
+}
+
+// releaseIPTargetState drops a target's dampened DOWN state when this
+// node cannot measure the target at all (#16734). It runs on the poll
+// goroutine in Phase 3, in the same serial order as
+// updateIPTargetDampenedState, and under the same mon.mu discipline
+// (#6550): it touches only mon.ipState and makes no manager call — the
+// following reconcileRGIPDebts derives the debt removal from the
+// cleared state and replays SetMonitorWeight outside the lock. The
+// whole per-target state is dropped (not just down=false) so stale
+// fail/pass counters from the primary epoch do not leak into the next
+// primary epoch; a later measurable probe re-dampens from scratch,
+// exactly like a fresh target. No-op when no state exists.
+func (mon *Monitor) releaseIPTargetState(rg *config.RedundancyGroup, target *config.IPMonitorTarget) {
+	key := ipMonitorKey{rgID: rg.ID, address: target.Address}
+	mon.mu.Lock()
+	st, ok := mon.ipState[key]
+	wasDown := ok && st != nil && st.down
+	if ok {
+		delete(mon.ipState, key)
+	}
+	mon.mu.Unlock()
+	if wasDown {
+		slog.Info("cluster monitor: IP probe unmeasurable on this node, releasing dampened down state",
+			"rg", rg.ID, "address", target.Address)
 	}
 }
 
