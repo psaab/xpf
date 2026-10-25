@@ -1068,6 +1068,13 @@ func (d *Daemon) publishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSync
 			"publish_gen", gen, "current_gen", d.clusterCommsGen)
 		return false
 	}
+	// An applied-profile callback may have run after constructor-local seeding
+	// but before this object became visible. Reconcile the cached authority
+	// under the publication lock; a callback racing after this load waits for
+	// the lock, then observes and updates the newly-published object.
+	if profile := d.sessionSyncTimeoutProfile.Load(); profile != nil {
+		ss.SetReceiverSessionTimeoutProfile(*profile)
+	}
 	// #6650: stamp this node's config-snapshot protocol version onto every
 	// session-sync instance as it is published, so the peer's commit path can
 	// refuse to push a config this node cannot represent. Done HERE rather than

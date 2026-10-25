@@ -102,8 +102,10 @@ func (d *Daemon) updateSessionSyncTimeoutProfile(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
+	profile := receiverSessionTimeoutProfileFromConfig(cfg)
+	d.sessionSyncTimeoutProfile.Store(&profile)
 	if ss := d.getSessionSync(); ss != nil {
-		ss.SetReceiverSessionTimeoutProfile(receiverSessionTimeoutProfileFromConfig(cfg))
+		ss.SetReceiverSessionTimeoutProfile(profile)
 	}
 }
 

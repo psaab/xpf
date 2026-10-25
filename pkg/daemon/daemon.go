@@ -1645,6 +1645,9 @@ type Daemon struct {
 	// a newer epoch's session/endpoints. The mutex makes every read/write of
 	// these fields race-free; clusterCommsGen provides publish-if-current.
 	clusterCommsMu sync.Mutex
+	// sessionSyncTimeoutProfile is the latest applied timeout profile. The
+	// atomic snapshot bridges apply callbacks and asynchronous sync publication.
+	sessionSyncTimeoutProfile atomic.Pointer[cluster.ReceiverSessionTimeoutProfile]
 
 	// clusterCommsGen is the cluster-comms epoch counter (#4958). Both
 	// startClusterComms and stopClusterComms bump it under clusterCommsMu;
