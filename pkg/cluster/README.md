@@ -1035,7 +1035,8 @@ than summarised into a verdict:
    wins the election, `applyRG0OwnershipTransition(StatePrimary)` calls
    `d.store.SetClusterReadOnly(false)` and the now-primary node accepts a local
    commit of the same key. Restart the old primary and the pair converges keyed.
-   Same stop-one-node shape documented above for `configuration-synchronize`.
+   Same stop-one-node shape: stop `xpfd` on one node, let the peer
+   promote, act on the promoted node, then restart the stopped node.
 
    **This row had TWO preconditions; #6889 removed one of them.**
    - **STILL A PRECONDITION** — the secondary must be eligible. `election.go`
@@ -2561,122 +2562,75 @@ dual-accept. Put it in the shared (non-group) `chassis cluster` stanza, as
 the reference configs do.
 
 **Provision it out-of-band — do not rely on `configuration-synchronize` to
-carry it (#6629).** Config-sync serializes the active config and writes it
-over the session-sync stream, which is HMAC-authenticated but **not
-encrypted**; during the very first rollout that stream is also still
-unauthenticated (see below). Push the key to each node by the same trusted
-channel you use for any other secret.
+carry the key.** If config-sync were what first carried the key, the
+carrying connection would be one handshaked while both ends were still
+unkeyed (committing a key does not restart cluster comms — see "Rolling
+it onto a live unkeyed cluster" below); on that link the sealed payload
+below is still open to an active man-in-the-middle. Push the key to each
+node by the same trusted channel you use for any other secret. That
+out-of-band step is about bootstrap trust for the first connection, not
+about config-sync confidentiality between same-vintage peers, which
+#6629 and #15041 settled:
 
-Out-of-band provisioning alone does **not** avoid the exposure. Every
-shipped config sets `configuration-synchronize`, and the RG0 primary's
-commit calls `pushConfigToPeer`, which sends `Store.ShowActive()` — the RAW
-formatted tree, with no `ast_redact.go` pass on that path. So the cleartext
-PSK crosses the control segment at step 1 of the rollout below no matter how
-you delivered it. To actually avoid it, take config-sync out of the loop for
-the duration:
+- Against a peer of the same vintage, the config-sync payload is sealed
+  under a key derived from a fresh ephemeral X25519 exchange on every
+  connection (#6629; "Config sync and the PSK (#6629)" below). A passive
+  observer on the control segment does not learn the PSK from that push,
+  and — because the keypair is per connection — a capture does not unlock
+  later pushes either. There is no need to delete
+  `configuration-synchronize` to avoid that exposure, and no need to keep
+  it off on a keyed cluster.
+- On an AUTHENTICATED (Noise-keyed) connection there is no cleartext
+  fallback at all (#15041): the config key is derived from the handshake
+  secret, so suppressing the ephemeral key-exchange frames cannot force a
+  cleartext push.
+- Against a peer that predates #6629 the push still falls back to
+  CLEARTEXT, with a warning, and the sender latches the cleartext alarm
+  ("Config cleartext" in `show chassis cluster statistics`). The full
+  unredacted tree — PSK included — crosses in the clear for that
+  mixed-version window only. Let the window close (both nodes on a
+  #6629-capable build) and rotate the PSK afterwards: a capture taken
+  while the alarm was active still verifies, and no upgrade retires a
+  capture already taken.
 
-```
-delete chassis cluster configuration-synchronize   # see the caveats below
-<key both nodes out-of-band, per the rollout below>
-set chassis cluster configuration-synchronize      # ONLY once #6629 lands
-```
+So `configuration-synchronize` may stay enabled on a keyed cluster.
+Config-sync still ships `Store.ShowActive()` — the RAW formatted tree,
+with no `ast_redact.go` pass on that path — so the sealing above is the
+only thing between the PSK and the wire; that is why the same-vintage /
+mixed-version qualifier above is load-bearing rather than decorative.
 
-**Two caveats, both load-bearing — read them before running the above.**
+The caveats that still hold:
 
-*The restore does not restore safely.* An earlier version of this section
-claimed the restore commit was safe because it re-synchronises a config both
-nodes already hold, so the key is "no longer new information on the wire".
-That is wrong: the stream is authenticated but **not encrypted**, and a
-passive observer on the control segment reads the cleartext PSK off that
-re-sync regardless of whether the peers already know it. Confidentiality is
-not a function of who else already has the secret. Until #6629 gives that
-path either redaction or transport encryption, **the honest advice is to
-leave `configuration-synchronize` off on a keyed cluster** and manage config
-on both nodes out-of-band, accepting the operational cost. Restore it only
-when #6629 has landed.
-
-*By far the easiest path is to never reach this state.* Provision both
-nodes from text with `configuration-synchronize` ABSENT and the key
-already set, before the pair carries traffic. Note that the shipped
-reference configs (`docs/ha-cluster.conf`, `docs/ha-cluster-userspace.conf`)
-DO enable `configuration-synchronize`, and the Incus test harness pushes
-them unchanged — so neither is an example of this order; you have to
-remove the line from your own config first. On a new build or during a
-maintenance window you were taking anyway, this costs nothing.
-
-*On a LIVE pair whose secondary gate is ARMED, the delete cannot be done
-without the sync undoing it.* (Everything in this subsection assumes an armed
-gate; on the row-2 unarmed node the second delete needs no promotion at all.
-That is the #6890 hole, not a supported route — see the Recovery section. This
-subsection does not restate the caveat again.)
-`configuration-synchronize` is committed from the RG0 primary. Delete it
-there and the SECONDARY still has it enabled — so the moment that secondary
-is promoted, reconciliation (`daemon_ha.go:444`) sees sync enabled in its
-own local config and pushes its COMPLETE active configuration back to the
-former primary (`daemon_ha_sync.go:462`), restoring the very line you just
-deleted. You cannot simply "delete on both nodes": the second delete
-requires a promotion, and the promotion re-adds the first.
-
-There is one safe order you can RELY on for a live pair, and it is a controlled
-single-node outage — not a two-command sequence, and NOT a link cut:
-
-```
-# 1. On the RG0 primary: delete the line and commit.
-delete chassis cluster configuration-synchronize   # commit
-
-# 2. Stop xpfd on that SAME node and leave it down.
-systemctl stop xpfd
-
-# 3. Wait for the peer to promote AND for its session-sync to report the
-#    peer disconnected. Do not proceed on a timer — wait for the field.
-show chassis cluster status          # on the peer: it must be primary, and
-#   "Sync link statistics (control-link): Status: Down"   must be present
-
-# 4. On the now-primary peer: delete the line and commit.
-delete chassis cluster configuration-synchronize   # commit
-
-# 5. Verify BOTH persistent stores no longer carry it, then restart the
-#    stopped node. Sync is absent on both sides, so nothing pushes the
-#    line back regardless of which node ends up primary.
-systemctl start xpfd
-```
-
-Step 2 is what makes this work: with that node's `xpfd` down there is
-nobody for the promoted peer's reconciliation to push to, so the deletion
-survives the promotion.
-
-Two details worth stating rather than leaving to be discovered. RG0 `preempt`
-is unsupported: strict commits and `xpfd check-config` reject it, while
-tolerant load / peer-sync warns and ignores it. On supported RGs 1+, a
-returning higher-priority node can reclaim primary, so expect a failback.
-This does not matter for this procedure because sync is absent on both sides
-by then. The promoted peer may still attempt reconciliation before detecting
-the disconnect; that is harmless because config transmission writes directly
-to the active connection rather than queueing for replay. The stopped node
-cannot apply it, and during teardown it still considers itself RG0 primary
-and rejects incoming config.
-
-**Do NOT sever the link instead.** An earlier version of this section
-suggested cutting "the session-sync/fabric segment" before promoting.
-That is wrong and dangerous. Session and config sync run on the CONTROL
-link — the same interface as the heartbeat, port 4785 — and only fall
-back to fabric when no control interface is configured
-(`daemon_ha_sync.go`). So cutting fabric alone does not stop config sync
-in any shipped configuration, and cutting the control segment takes the
-heartbeat with it: both nodes stop hearing each other, both declare the
-peer dead, and both become primary. That is a dataplane split-brain with
-duplicate VIPs, not merely two nodes with independent config authority.
-A physical cut also races disconnect detection, so a promotion issued
-immediately after it can still find the session established.
-
-Once BOTH nodes have sync disabled, ongoing config management is manual and
-paired: treat only the RG0 primary as writable (that is the intent; see the
-#6890 caveat above for where the gate is not actually armed), so every change is
-a controlled RG0 promotion, an edit, verification on both stores, and a
-failback. That
-cost is the reason #6629 (redaction or transport encryption for the
-config-sync payload) is the real fix, and why this is documented as a
-constraint rather than recommended practice.
+- **It does NOT defeat an ACTIVE man-in-the-middle on an unkeyed link.**
+  The ephemeral exchange there is unauthenticated because there is
+  nothing yet to authenticate it with. An active attacker on an unkeyed
+  control segment can already drive election, call the allowlisted
+  fabric RPCs and inject sessions — that is the argument for keying at
+  all — so nothing new is conceded, but do not read the sealed payload
+  as a confidential channel on an unkeyed connection.
+- *By far the easiest path is to never reach the mixed-version state at
+  all.* Provision both nodes from text on the same vintage, with the key
+  already set, before the pair carries traffic. Note that the shipped
+  reference configs (`docs/ha-cluster.conf`,
+  `docs/ha-cluster-userspace.conf`) DO enable
+  `configuration-synchronize`, and the Incus test harness pushes them
+  unchanged — that is safe on a same-vintage pair for the reasons above;
+  it is the pre-#6629 peer, not the stanza itself, that reintroduces the
+  cleartext push.
+- *The controlled single-node outage that used to be documented here*
+  (delete `configuration-synchronize` on both nodes in turn by stopping
+  one node, then manage config in paired out-of-band edits) *is retired
+  as advice.* It bought protection against a passive observer that
+  same-vintage sealing already provides, and its cost — a deliberate
+  outage plus manual dual-node config management — buys nothing in
+  return. Do NOT sever the control link as a substitute either: session
+  and config sync and the heartbeat share that link (port 4785, fabric
+  only when no control interface is configured), so cutting it stops the
+  heartbeat too and both nodes become primary — a dataplane split-brain
+  with duplicate VIPs, not two nodes with independent config authority.
+  The only remaining reason to run that outage shape is the unrelated
+  keying/recovery procedure under "Recovery" above, which needs the
+  promotion for its own reasons.
 
 ### Rolling it onto a live unkeyed cluster
 
