@@ -1133,6 +1133,12 @@ type NAT64RuleSet struct {
 	// stamps the whole list here; validators check every member.
 	// #16049 (the RI sibling of #15932's zone union).
 	FromRoutingInstances []string
+	// FromRoutingInstanceDefault (#16604) records that the authored
+	// `from routing-instance default` was the master-instance alias
+	// (lowered to "" above), not an absent scope. Snapshot builders
+	// stamp NATDefaultRoutingInstanceWire so the dataplane matches
+	// main-instance traffic only.
+	FromRoutingInstanceDefault bool
 	// SourceAddresses is the full `match source-address` list (CIDRs or bare
 	// IPv6 hosts). Empty = match any source. #15678.
 	SourceAddresses []string
@@ -1162,7 +1168,11 @@ type StaticNATRuleSet struct {
 	// FromRoutingInstance scopes the rule-set to traffic in this routing
 	// instance / VRF. "" = the default instance / unscoped. #3096.
 	FromRoutingInstance string
-	Rules               []*StaticNATRule
+	// FromRoutingInstanceDefault (#16604): the authored
+	// `from routing-instance default` master alias, lowered to "".
+	// See NAT64RuleSet.FromRoutingInstanceDefault.
+	FromRoutingInstanceDefault bool
+	Rules                      []*StaticNATRule
 }
 
 // DestinationNATConfig holds destination NAT pools and rule sets.
@@ -1192,7 +1202,12 @@ type NATRuleSet struct {
 	// instance / unscoped. #3096.
 	FromRoutingInstance string
 	ToRoutingInstance   string
-	Rules               []*NATRule
+	// FromRoutingInstanceDefault / ToRoutingInstanceDefault (#16604):
+	// the authored `routing-instance default` master alias on that
+	// side, lowered to "". See NAT64RuleSet.FromRoutingInstanceDefault.
+	FromRoutingInstanceDefault bool
+	ToRoutingInstanceDefault   bool
+	Rules                      []*NATRule
 	// These private flags record compiler-injected match-any defaults only
 	// for absent from/to clauses. Present-but-empty clauses are rejected
 	// before typed compilation. The markers are intentionally not serialized;
@@ -1208,7 +1223,7 @@ func (rs *NATRuleSet) HasNATFromScopeStamp() bool {
 		return false
 	}
 	return rs.FromZone != "" || rs.FromInterface != "" ||
-		rs.FromRoutingInstance != "" || rs.fromUnscopedStamped
+		rs.FromRoutingInstance != "" || rs.FromRoutingInstanceDefault || rs.fromUnscopedStamped
 }
 
 // HasNATToScopeStamp reports whether the to side has a non-empty scope field
@@ -1218,7 +1233,7 @@ func (rs *NATRuleSet) HasNATToScopeStamp() bool {
 		return false
 	}
 	return rs.ToZone != "" || rs.ToInterface != "" ||
-		rs.ToRoutingInstance != "" || rs.toUnscopedStamped
+		rs.ToRoutingInstance != "" || rs.ToRoutingInstanceDefault || rs.toUnscopedStamped
 }
 
 // NATRule is a single NAT rule.

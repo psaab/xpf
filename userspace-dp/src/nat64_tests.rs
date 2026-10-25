@@ -10282,3 +10282,18 @@ fn nat64_15956_into_builders_byte_identical_with_poisoned_dst() {
         check("nonfirst-v4to6", &want, &dst[..n]);
     }
 }
+
+// #16604: NAT64 `from routing-instance default` (wire token) admits only
+// main-instance ("") ingress, never a named VRF.
+#[test]
+fn nat64_default_routing_instance_matches_only_main_16604() {
+    let mut snap = scoped_snap("", crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE, vec![]);
+    snap.from_routing_instances = vec![crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE.to_string()];
+    let state = Nat64State::from_snapshots(&[snap]);
+    let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    assert!(matches!(state.classify_ipv6_packet_scoped(src, dst, "", ""), Nat64Match::MatchReady { .. }),
+        "nat64 rule=default ingress=main must match");
+    assert_eq!(state.classify_ipv6_packet_scoped(src, dst, "", "VR1"), Nat64Match::NoPrefixMatch,
+        "nat64 rule=default ingress=VR1 must NOT match");
+}

@@ -145,17 +145,54 @@ func SourceNATScopeTier(fromIface, fromZone, fromRI, toIface, toZone, toRI strin
 	return from
 }
 
+// SourceNATScopeTierScoped is SourceNATScopeTier for callers holding
+// the #16604 explicit-master provenance flags: an explicit
+// `routing-instance default` side ranks at the routing-instance tier
+// (it IS a routing-instance scope), where the lowered "" alone would
+// read as unscoped.
+func SourceNATScopeTierScoped(fromIface, fromZone, fromRI string, fromDefault bool, toIface, toZone, toRI string, toDefault bool) int {
+	from := NATContextScopeTier(fromIface, fromZone, fromRI)
+	if fromDefault && from > SourceNATTierRoutingInstance {
+		from = SourceNATTierRoutingInstance
+	}
+	to := NATContextScopeTier(toIface, toZone, toRI)
+	if toDefault && to > SourceNATTierRoutingInstance {
+		to = SourceNATTierRoutingInstance
+	}
+	if to < from {
+		return to
+	}
+	return from
+}
+
 // natRuleSetScopeTier is SourceNATScopeTier over a rule-set, nil-safe. A nil
 // rule-set sorts LAST (the budget walk skips it); it can never outrank a real
-// rule-set for a budget slot.
+// rule-set for a budget slot. #16604: explicit-master flags rank at the
+// routing-instance tier via SourceNATScopeTierScoped.
 func natRuleSetScopeTier(rs *NATRuleSet) int {
 	if rs == nil {
 		return SourceNATTierUnscoped + 1
 	}
-	return SourceNATScopeTier(
-		rs.FromInterface, rs.FromZone, rs.FromRoutingInstance,
-		rs.ToInterface, rs.ToZone, rs.ToRoutingInstance,
+	return SourceNATScopeTierScoped(
+		rs.FromInterface, rs.FromZone, rs.FromRoutingInstance, rs.FromRoutingInstanceDefault,
+		rs.ToInterface, rs.ToZone, rs.ToRoutingInstance, rs.ToRoutingInstanceDefault,
 	)
+}
+
+// NATContextScopeTierWire maps a WIRE context (post-#16604 lowering,
+// where the explicit-master token may appear) to its tier: the token
+// ranks at the routing-instance tier exactly like a named instance.
+func NATContextScopeTierWire(iface, zone, routingInstance string) int {
+	if IsNATDefaultRoutingInstanceWire(routingInstance) {
+		if iface != "" {
+			return SourceNATTierInterface
+		}
+		if zone != "" {
+			return SourceNATTierZone
+		}
+		return SourceNATTierRoutingInstance
+	}
+	return NATContextScopeTier(iface, zone, routingInstance)
 }
 
 // NATContextScopeTier maps a single NAT from/to context to its Junos

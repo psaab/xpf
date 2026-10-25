@@ -518,7 +518,12 @@ impl Nat64ScopeKey {
         // folds the singular into the plural), so read them back.
         Self {
             from_zones: prefix.from_zones.clone(),
-            from_routing_instances: prefix.from_routing_instances.clone(),
+            // #16604: fold literal to wire token so key equality is spelling-blind.
+            from_routing_instances: prefix
+                .from_routing_instances
+                .iter()
+                .map(|ri| crate::nat::nat_ri_key(ri).to_string())
+                .collect(),
             source_prefixes: prefix.source_prefixes.clone(),
             source_constrained: prefix.source_constrained,
         }
@@ -575,6 +580,11 @@ pub(super) fn nat64_snapshot_scope(snap: &NAT64RuleSnapshot) -> Nat64ScopeKey {
     if !source_constrained {
         source_prefixes.clear();
     }
+    // #16604: fold literal to wire token (mirrors Nat64ScopeKey::of_prefix).
+    let from_routing_instances: Vec<String> = from_routing_instances
+        .iter()
+        .map(|ri| crate::nat::nat_ri_key(ri).to_string())
+        .collect();
     Nat64ScopeKey {
         from_zones,
         from_routing_instances,
@@ -1600,13 +1610,17 @@ impl Nat64State {
             return false;
         }
         // #16049: routing-instance list is a union — any authored RI admits.
+        // #16604: each member matches via nat_ri_matches, so the explicit-
+        // master token / literal admits only main-instance ("") traffic.
         if !prefix.from_routing_instances.is_empty() {
-            if !prefix.from_routing_instances.iter().any(|ri| ri == routing_instance) {
+            if !prefix
+                .from_routing_instances
+                .iter()
+                .any(|ri| crate::nat::nat_ri_matches(ri, routing_instance))
+            {
                 return false;
             }
-        } else if !prefix.from_routing_instance.is_empty()
-            && prefix.from_routing_instance != routing_instance
-        {
+        } else if !crate::nat::nat_ri_matches(&prefix.from_routing_instance, routing_instance) {
             return false;
         }
         if !prefix.source_constrained {

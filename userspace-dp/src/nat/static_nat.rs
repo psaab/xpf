@@ -120,7 +120,7 @@ fn static_scope_ok(
 ) -> bool {
     (from_zone.is_empty() || from_zone == zone)
         && (from_interface.is_empty() || from_interface == ifname)
-        && (from_routing_instance.is_empty() || from_routing_instance == routing_instance)
+        && crate::nat::nat_ri_matches(from_routing_instance, routing_instance)
 }
 
 /// #16045: is a static rule's `from` scope constrained on ANY ingress
@@ -133,7 +133,9 @@ fn static_scope_constrained(
     from_interface: &str,
     from_routing_instance: &str,
 ) -> bool {
-    !(from_zone.is_empty() && from_interface.is_empty() && from_routing_instance.is_empty())
+    !(from_zone.is_empty()
+        && from_interface.is_empty()
+        && !crate::nat::nat_ri_constrained(from_routing_instance))
 }
 
 #[inline]

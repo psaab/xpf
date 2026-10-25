@@ -1311,3 +1311,43 @@ fn static_nat_ambiguous_block_winner_selection_precedes_suppression_16045() {
         "unscoped winning block must still translate"
     );
 }
+
+// #16604: `routing-instance default` (wire token or literal) is an explicit
+// master scope: matches main-instance ("") traffic only, never a named VRF.
+// Unscoped ("") still matches both. Fail-on-revert: dropping the token arm
+// in nat_ri_matches makes the VR1 assertion match (literal) or the main
+// assertion fail (token).
+#[test]
+fn nat_default_routing_instance_matches_only_main_16604() {
+    for spelling in [crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE, "default"] {
+        let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+            name: "snat".to_string(),
+            to_routing_instance: spelling.to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            interface_mode: true,
+            ..SourceNATRuleSnapshot::default()
+        }]);
+        let src: IpAddr = "10.0.61.102".parse().unwrap();
+        let dst: IpAddr = "172.16.80.200".parse().unwrap();
+        let egress_v4 = Some("172.16.80.8".parse().unwrap());
+        let main = NatScopeCtx { egress_routing_instance: "", ..NatScopeCtx::default() };
+        assert!(match_source_nat(&InterfaceNatAllocators::default(), &rules, &main, "", "", src, dst, egress_v4, None).is_some(),
+            "rule=default ({spelling}) egress=main must match");
+        let vr1 = NatScopeCtx { egress_routing_instance: "VR1", ..NatScopeCtx::default() };
+        assert!(match_source_nat(&InterfaceNatAllocators::default(), &rules, &vr1, "", "", src, dst, egress_v4, None).is_none(),
+            "rule=default ({spelling}) egress=VR1 must NOT match");
+    }
+    // Zone control + unscoped control unchanged.
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "snat".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    let src: IpAddr = "10.0.61.102".parse().unwrap();
+    let dst: IpAddr = "172.16.80.200".parse().unwrap();
+    let egress_v4 = Some("172.16.80.8".parse().unwrap());
+    let vr1 = NatScopeCtx { egress_routing_instance: "VR1", ..NatScopeCtx::default() };
+    assert!(match_source_nat(&InterfaceNatAllocators::default(), &rules, &vr1, "", "", src, dst, egress_v4, None).is_some(),
+        "unscoped SNAT must still match VR1 egress");
+}

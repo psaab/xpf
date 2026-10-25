@@ -1071,7 +1071,19 @@ fn build_fallible_forwarding_state(
         nat_local_targets.push((ip, instance.to_string(), translated_ip));
     }
     for (ip, instance, translated_ip) in nat_local_targets {
-        let wildcard = instance.is_empty();
+        // #16604: explicit master (wire token / literal) is NOT wildcard:
+        // it owns only the main-instance tables, so resolve its table via
+        // connected_route_tables("") by normalizing to "" here; the
+        // wildcard (truly unscoped) case keeps table-agnostic registration.
+        let explicit_master = crate::nat::nat_ri_constrained(&instance)
+            && crate::nat::nat_ri_matches(&instance, "");
+        let instance: String = if explicit_master {
+            String::new()
+        } else {
+            instance
+        };
+        let instance = instance.as_str();
+        let wildcard = instance.is_empty() && !explicit_master;
         let (table_v4, table_v6) = interfaces::connected_route_tables(&instance);
         let to_self = match translated_ip {
             std::net::IpAddr::V4(v4) => state.configured_iface_v4.contains(&v4),

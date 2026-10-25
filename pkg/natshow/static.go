@@ -24,6 +24,8 @@ func RenderStatic(w io.Writer, cfg *config.Config) {
 			fmt.Fprintf(w, "  From interface: %s\n", rs.FromInterface)
 		case rs.FromRoutingInstance != "":
 			fmt.Fprintf(w, "  From routing-instance: %s\n", rs.FromRoutingInstance)
+		case rs.FromRoutingInstanceDefault:
+			fmt.Fprintf(w, "  From routing-instance: default\n")
 		case rs.FromZone != "":
 			fmt.Fprintf(w, "  From zone: %s\n", rs.FromZone)
 		default:
@@ -96,7 +98,10 @@ func RenderStaticRule(w io.Writer, cfg *config.Config, detail bool) {
 		if rs.FromRoutingInstance != "" {
 			fmt.Fprintf(w, "  From routing-instance: %s\n", rs.FromRoutingInstance)
 		}
-		if detail && rs.FromZone == "" && rs.FromInterface == "" && rs.FromRoutingInstance == "" {
+		if rs.FromRoutingInstanceDefault {
+			fmt.Fprintf(w, "  From routing-instance: default\n")
+		}
+		if detail && rs.FromZone == "" && rs.FromInterface == "" && rs.FromRoutingInstance == "" && !rs.FromRoutingInstanceDefault {
 			fmt.Fprintf(w, "  From zone: any\n")
 		}
 		for _, rule := range rs.Rules {

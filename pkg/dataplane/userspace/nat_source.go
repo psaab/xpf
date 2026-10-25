@@ -301,8 +301,8 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 				ToZone:                           rs.ToZone,
 				FromInterface:                    rs.FromInterface,
 				ToInterface:                      rs.ToInterface,
-				FromRoutingInstance:              rs.FromRoutingInstance,
-				ToRoutingInstance:                rs.ToRoutingInstance,
+				FromRoutingInstance:              config.NATRoutingInstanceScopeWire(cfg, rs.FromRoutingInstance, rs.FromRoutingInstanceDefault),
+				ToRoutingInstance:                config.NATRoutingInstanceScopeWire(cfg, rs.ToRoutingInstance, rs.ToRoutingInstanceDefault),
 				SourceAddresses:                  sourceAddrs,
 				DestinationAddresses:             destAddrs,
 				InterfaceMode:                    rule.Then.Interface,
@@ -375,10 +375,14 @@ const (
 // tiers. The rule (including why an EMPTY context, not a zone literally named
 // "any", is the wildcard) lives on config.SourceNATScopeTier.
 func sourceNATScopeTier(s SourceNATRuleSnapshot) int {
-	return config.SourceNATScopeTier(
-		s.FromInterface, s.FromZone, s.FromRoutingInstance,
-		s.ToInterface, s.ToZone, s.ToRoutingInstance,
-	)
+	// #16604: wire values — the explicit-master token ranks at the
+	// routing-instance tier via NATContextScopeTierWire.
+	from := config.NATContextScopeTierWire(s.FromInterface, s.FromZone, s.FromRoutingInstance)
+	to := config.NATContextScopeTierWire(s.ToInterface, s.ToZone, s.ToRoutingInstance)
+	if to < from {
+		return to
+	}
+	return from
 }
 
 // natProtoAny is the source-NAT match-term protocol wildcard, mirroring the

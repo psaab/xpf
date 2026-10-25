@@ -650,7 +650,7 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 								Name:                rule.Name,
 								FromZone:            rs.FromZone,
 								FromInterface:       rs.FromInterface,
-								FromRoutingInstance: rs.FromRoutingInstance,
+								FromRoutingInstance: config.NATRoutingInstanceScopeWire(cfg, rs.FromRoutingInstance, rs.FromRoutingInstanceDefault),
 								SourceAddresses:     sourceAddrs,
 								DestinationAddress:  base,
 								DestinationPrefix:   prefix,
@@ -687,9 +687,9 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 	// specificity. Stable sorting preserves rule-set and within-set order for
 	// equal tiers while placing interface > zone > routing-instance > unscoped.
 	sort.SliceStable(out, func(i, j int) bool {
-		return config.NATContextScopeTier(
+		return config.NATContextScopeTierWire(
 			out[i].FromInterface, out[i].FromZone, out[i].FromRoutingInstance,
-		) < config.NATContextScopeTier(
+		) < config.NATContextScopeTierWire(
 			out[j].FromInterface, out[j].FromZone, out[j].FromRoutingInstance,
 		)
 	})

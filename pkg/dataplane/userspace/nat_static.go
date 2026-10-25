@@ -75,7 +75,7 @@ func buildStaticNATSnapshots(cfg *config.Config, natCounterIDs map[string]uint32
 				Name:                 rule.Name,
 				FromZone:             rs.FromZone,
 				FromInterface:        rs.FromInterface,
-				FromRoutingInstance:  rs.FromRoutingInstance,
+				FromRoutingInstance:  config.NATRoutingInstanceScopeWire(cfg, rs.FromRoutingInstance, rs.FromRoutingInstanceDefault),
 				SourceAddresses:      sourceAddrs,
 				ExternalIP:           rule.Match,
 				InternalIP:           rule.Then,
@@ -88,9 +88,9 @@ func buildStaticNATSnapshots(cfg *config.Config, natCounterIDs map[string]uint32
 	// #11351: sort by the Junos from-context hierarchy. Stable sorting retains
 	// config order within a tier and keeps rules from equal-tier sets ordered.
 	sort.SliceStable(out, func(i, j int) bool {
-		return config.NATContextScopeTier(
+		return config.NATContextScopeTierWire(
 			out[i].FromInterface, out[i].FromZone, out[i].FromRoutingInstance,
-		) < config.NATContextScopeTier(
+		) < config.NATContextScopeTierWire(
 			out[j].FromInterface, out[j].FromZone, out[j].FromRoutingInstance,
 		)
 	})

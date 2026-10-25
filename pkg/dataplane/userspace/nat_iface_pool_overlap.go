@@ -132,8 +132,16 @@ func interfaceInSnapshotEgressScope(rule SourceNATRuleSnapshot, ifc InterfaceSna
 	if rule.ToInterface != "" && !snapshotInterfaceNameMatches(rule.ToInterface, ifc.Name) {
 		return false
 	}
-	if rule.ToRoutingInstance != "" && rule.ToRoutingInstance != ifc.RoutingInstance {
-		return false
+	// #16604: wire-space match — explicit-master token/literal admits
+	// only a main-instance ("") interface; "" is unscoped.
+	if rule.ToRoutingInstance != "" {
+		if config.IsNATDefaultRoutingInstanceWire(rule.ToRoutingInstance) || rule.ToRoutingInstance == "default" {
+			if ifc.RoutingInstance != "" {
+				return false
+			}
+		} else if rule.ToRoutingInstance != ifc.RoutingInstance {
+			return false
+		}
 	}
 	if rule.ToZone != "" && rule.ToZone != ifc.Zone {
 		return false
@@ -184,6 +192,7 @@ func hostOfSnapshotAddress(addr string) string {
 	}
 	return ip.String()
 }
+
 // poolMemberCandidateHosts returns candidate egress hosts contained in one
 // pool member (#14367). Handles bare host, "host/len", CIDR prefix, and
 // "A-B" range spellings; anything else contributes nothing.
@@ -234,7 +243,6 @@ func poolMemberCandidateHosts(member string, candidates map[string]string) []str
 	}
 	return nil
 }
-
 
 // detectInterfaceSNATPoolOverlaps reports every (pool address, interface-mode
 // egress address) coincidence in the snapshot.

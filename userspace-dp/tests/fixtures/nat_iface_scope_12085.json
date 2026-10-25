@@ -153,6 +153,24 @@
       "name": "non-matching-scope",
       "rule": { "name": "snat-other", "to_zone": "missing", "interface_mode": true },
       "want": []
+    },
+    {
+      "name": "to-routing-instance-default",
+      "rule": { "name": "snat-default", "to_routing_instance": "default", "interface_mode": true },
+      "want": [
+        "198.51.100.2", "2001:db8::2",
+        "198.18.1.9",
+        "10.255.192.42", "2001:db8:4::42"
+      ]
+    },
+    {
+      "name": "to-routing-instance-default-wire",
+      "rule": { "name": "snat-default-wire", "to_routing_instance": "\u0000xpf-default-routing-instance", "interface_mode": true },
+      "want": [
+        "198.51.100.2", "2001:db8::2",
+        "198.18.1.9",
+        "10.255.192.42", "2001:db8:4::42"
+      ]
     }
   ]
 }

@@ -2325,7 +2325,9 @@ func buildNATTranslatedLocalAddressExclusions(snapshot *ConfigSnapshot) (map[use
 			if mask&2 == 0 {
 				scope.toRoutingInstance = ""
 			} else if scope.toRoutingInstance == "" {
-				continue
+				// #16604: a main-instance interface also registers
+				// under the explicit-master token key.
+				scope.toRoutingInstance = config.NATDefaultRoutingInstanceWire
 			}
 			if mask&4 == 0 {
 				scope.toZone = ""
@@ -2342,9 +2344,14 @@ func buildNATTranslatedLocalAddressExclusions(snapshot *ConfigSnapshot) (map[use
 		if !nat.InterfaceMode || nat.Off {
 			continue
 		}
+		// #16604: normalize literal to the token key.
+		natRI := nat.ToRoutingInstance
+		if natRI == "default" {
+			natRI = config.NATDefaultRoutingInstanceWire
+		}
 		scope := registrationScope{
 			toInterface:       nat.ToInterface,
-			toRoutingInstance: nat.ToRoutingInstance,
+			toRoutingInstance: natRI,
 			toZone:            nat.ToZone,
 		}
 		if _, seen := seenScopes[scope]; seen {

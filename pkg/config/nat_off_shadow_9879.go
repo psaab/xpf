@@ -341,9 +341,16 @@ func dnatOffHasApplication(rule *NATRule) bool {
 }
 
 func dnatOffRuleSetScopesMayOverlap(a, b *NATRuleSet) bool {
+	// #16604: compare routing-instance scopes in wire space, where an
+	// explicit master scope is the wire token — two lowered "" scopes
+	// with different provenance (explicit-master vs unscoped) must not
+	// read as the same axis value here: unscoped overlaps everything,
+	// explicit-master overlaps only explicit-master and unscoped.
+	aRI := NATRoutingInstanceScopeWire(nil, a.FromRoutingInstance, a.FromRoutingInstanceDefault)
+	bRI := NATRoutingInstanceScopeWire(nil, b.FromRoutingInstance, b.FromRoutingInstanceDefault)
 	return dnatOffScopeAxisMayOverlap(a.FromZone, b.FromZone) &&
 		dnatOffScopeAxisMayOverlap(a.FromInterface, b.FromInterface) &&
-		dnatOffScopeAxisMayOverlap(a.FromRoutingInstance, b.FromRoutingInstance)
+		dnatOffScopeAxisMayOverlap(aRI, bRI)
 }
 
 func dnatOffScopeAxisMayOverlap(a, b string) bool {
