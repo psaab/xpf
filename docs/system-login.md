@@ -1170,6 +1170,24 @@ adjudicated on its group-expanded paths on every surface:
 An unrestricted class (no `*-configuration` leaves) is never affected, and
 a group whose expanded paths are all allowed inherits exactly as before.
 
+#### A flat `set` line is adjudicated as the statements it executes (#16598)
+
+A flat `set` line is not necessarily one statement: the store re-splits
+the token run at schema arity, so a multi-value leaf closes after its
+value and the next keyword becomes a sibling statement — `set system
+domain-search x login user evil class super-user` writes both
+`system domain-search x` and `system login user evil class super-user`.
+`deny-configuration` / `allow-configuration` (and the #16080 credential
+surcharge) are therefore matched against every executed statement —
+rendered by applying the parsed line to a scratch tree and formatting
+it back to `set` lines — in addition to the joined line as typed. Any
+denied (or, under an allowlist, out-of-scope) executed statement
+refuses the whole line on the CLI, gRPC, REST and event-engine gates,
+which share `config.AuthorizeConfigMutation`. Flat `load set` /
+`load merge` content goes through the same rendering in
+`LoadMutationLines`; the hierarchical branch already rendered through
+`FormatSet`.
+
 ### Write the body as a block or as `set` — never packed on the line (#6662)
 
 Junos accepts a statement written on the instance line; xpf compiles the body
