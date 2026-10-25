@@ -2,7 +2,6 @@
 package daemon
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -145,13 +144,14 @@ func (d *Daemon) onDHCPAddressChange() {
 // a full recompile (#1777) and must NOT apply inline (#16559, below).
 //
 // #16559: this MUST NOT apply inline. It runs on the DHCP client goroutine
-// (commitLease -> notifyLeaseStateChanged), and applyActiveConfig parks
-// uncancellably on applySem (context.Background). If the apply holding
-// applySem reaches reconcileDHCPClients and stops/restarts this client,
-// Reconcile waits on its done channel — which can never close while this
-// goroutine is parked — so applySem never releases and every later commit,
-// rollback, sync and background apply hangs until restart. The non-blocking
-// nudge keeps the client goroutine free; the retry loop owns the apply.
+// (commitLease -> notifyLeaseStateChanged), and applyActiveConfig may park
+// on applySem during normal operation. Shutdown cancellation does not
+// prevent the live-apply re-entrancy cycle: if the apply holding applySem
+// reaches reconcileDHCPClients and stops/restarts this client, Reconcile
+// waits on its done channel — which can never close while this goroutine is
+// parked — so applySem never releases and every later commit, rollback,
+// sync and background apply hangs until restart. The non-blocking nudge
+// keeps the client goroutine free; the retry loop owns the apply.
 func (d *Daemon) onDHCPUnchangedLease() {
 	if d.hostInboundGapOwed() {
 		d.nudgeHostInboundGapReassert()
@@ -192,7 +192,7 @@ func (d *Daemon) managementOnlyLeaseRefresh() {
 	if d.applySem == nil {
 		return
 	}
-	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+	if err := d.acquireBackgroundApplySem(); err != nil {
 		slog.Warn("mgmt VRF routes: failed to acquire apply lock for DHCP lease refresh", "err", err)
 		return
 	}
@@ -263,7 +263,7 @@ func (d *Daemon) reapplyIPsecForLeaseChange(cfg *config.Config) {
 	if !ipsec.HasDHCPBoundGateway(cfg) {
 		return
 	}
-	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+	if err := d.acquireBackgroundApplySem(); err != nil {
 		slog.Warn("IPsec: failed to acquire apply lock for DHCP lease re-render", "err", err)
 		return
 	}
@@ -371,7 +371,7 @@ func (d *Daemon) rebindWebMgmtForLeaseChange(cfg *config.Config) {
 	if !webMgmtBindsToDHCPInterface(cfg) {
 		return
 	}
-	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+	if err := d.acquireBackgroundApplySem(); err != nil {
 		slog.Warn("web-management: failed to acquire apply lock for DHCP lease rebind", "err", err)
 		return
 	}

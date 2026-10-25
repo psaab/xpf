@@ -13,6 +13,16 @@ import (
 // package so external packages (e.g. pkg/api tests) can use these
 // without internal-export tricks. Not for production callers.
 
+// SetRecompileDebounceForTesting overrides the process-wide debounce used by
+// scheduleRecompile and returns a restore function. External package tests use
+// it to make the real lease-callback timer deterministic; callers must not use
+// it from production code paths or parallel tests.
+func SetRecompileDebounceForTesting(delay time.Duration) func() {
+	previous := recompileDebounce
+	recompileDebounce = delay
+	return func() { recompileDebounce = previous }
+}
+
 // SeedLeaseForTesting installs a lease record for tests. Callers
 // must not use this from production code paths.
 func (m *Manager) SeedLeaseForTesting(ifaceName string, af AddressFamily, lease *Lease) {
