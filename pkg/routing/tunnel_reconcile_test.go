@@ -372,29 +372,30 @@ func TestWgTunMTUForEndpointModel(t *testing.T) {
 		t.Fatalf("sub-1500 operator MTU: got %d, want 1400", got)
 	}
 
-	// No operator MTU, v4 endpoint → v4 overhead (60) + pad (15).
+	// No operator MTU, v4 endpoint → v4 overhead (60). #16499: no pad
+	// subtraction — the encap pad is capped at this budget.
 	v4 := wgTC()
 	v4.WgPeers = []config.WgPeerConfig{{
 		PublicKeyHex: "b02020202020202020202020202020202020202020202020202020202020202b",
 		Endpoint:     "203.0.113.5:51820",
 	}}
-	if got, want := wgTunMTUForEndpoint(v4), wgDefaultOuterMTU-wgOverheadV4-wgPadWorst; got != want {
+	if got, want := wgTunMTUForEndpoint(v4), wgDefaultOuterMTU-wgOverheadV4; got != want {
 		t.Fatalf("v4 endpoint default: got %d, want %d", got, want)
 	}
 
-	// No operator MTU, v6 endpoint → v6 overhead (80) + pad (15).
+	// No operator MTU, v6 endpoint → v6 overhead (80).
 	v6 := wgTC()
 	v6.WgPeers = []config.WgPeerConfig{{
 		PublicKeyHex: "b02020202020202020202020202020202020202020202020202020202020202b",
 		Endpoint:     "[2001:db8::1]:51820",
 	}}
-	if got, want := wgTunMTUForEndpoint(v6), wgDefaultOuterMTU-wgOverheadV6-wgPadWorst; got != want {
+	if got, want := wgTunMTUForEndpoint(v6), wgDefaultOuterMTU-wgOverheadV6; got != want {
 		t.Fatalf("v6 endpoint default: got %d, want %d", got, want)
 	}
 
 	// No operator MTU, responder-only (no endpoint) → conservative v6.
 	none := wgTC()
-	if got, want := wgTunMTUForEndpoint(none), wgDefaultOuterMTU-wgOverheadV6-wgPadWorst; got != want {
+	if got, want := wgTunMTUForEndpoint(none), wgDefaultOuterMTU-wgOverheadV6; got != want {
 		t.Fatalf("responder-only default: got %d, want %d", got, want)
 	}
 }

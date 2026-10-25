@@ -344,6 +344,22 @@ pub(crate) const fn pad_to_16(n: usize) -> usize {
     (n + 15) & !15
 }
 
+/// §5.4.6 padded length capped at the inner budget, matching Linux
+/// `calculate_skb_padding` (`min(mtu, ALIGN(last, 16))`) and
+/// wireguard-go `calculatePaddingSize` (`if padded > mtu { padded = mtu }`).
+/// `mtu` is the largest inner packet the caller will emit (the outer-MTU-
+/// derived inner budget, or the engine ceiling when unbounded). The cap
+/// never truncates payload: when `len > mtu` the packet is oversize for
+/// other reasons and keeps its full rounded length so size guards still
+/// reject it; when `len <= mtu` the padded length is at most `mtu`, so a
+/// full-MTU inner packet emits exactly at budget instead of up to 15 bytes
+/// over (#16499).
+#[inline]
+pub(crate) const fn padded_len_capped(len: usize, mtu: usize) -> usize {
+    let padded = pad_to_16(len);
+    if padded > mtu && len <= mtu { mtu } else { padded }
+}
+
 /// Total per-packet WG overhead for IPv4 outer:
 ///   outer IP (20) + UDP (8) + WG data header (16) + Poly1305 tag (16).
 pub(crate) const WG_OVERHEAD_V4: usize = 20 + 8 + WG_DATA_HEADER_LEN + POLY1305_TAG_LEN;

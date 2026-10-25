@@ -854,36 +854,88 @@ fn poll_timeout_ms_clamps_and_converts() {
     assert_eq!(poll_timeout_ms(now - 1, now), 0);
 }
 
-/// The guard math this protects: at the v4/v6 boundary the same
-/// padded inner either fits (v4 outer) or exceeds (v6 outer) the
-/// 1500 outer MTU — the live-blackhole window.
+/// #16499: with the pad capped at the inner budget, a full-budget inner
+/// packet encapps to exactly the outer MTU. Budget v6/1500 = 1420,
+/// v4/1500 = 1440, v4/1492 = 1432, v4/1450 = 1390, v6/1450 = 1370.
 #[test]
-fn encapped_size_v4_vs_v6_window() {
-    // inner 1409 pads to 1424: v4 outer = 1484 (fits), v6 = 1504 (drops).
-    assert!(wg_encapped_size(1409, false) <= WG_DEFAULT_OUTER_MTU);
-    assert!(wg_encapped_size(1409, true) > WG_DEFAULT_OUTER_MTU);
-    // inner 1408 fits either way (the pre-fix observable cutoff).
-    assert!(wg_encapped_size(1408, true) <= WG_DEFAULT_OUTER_MTU);
+fn encapped_size_capped_pad_fits_standard_formula_rows_16499() {
+    use super::mtu::{wg_encapped_size_with_outer_mtu, wg_inner_budget};
+    for (outer_mtu, outer_v6, budget) in [
+        (1500usize, true, 1420usize),
+        (1500, false, 1440),
+        (1492, false, 1432),
+        (1450, false, 1390),
+        (1450, true, 1370),
+    ] {
+        assert_eq!(wg_inner_budget(outer_mtu, outer_v6), budget);
+        for len in budget.saturating_sub(15)..=budget {
+            assert!(
+                wg_inner_fits_outer_mtu(len, outer_v6, outer_mtu),
+                "len {len} budget {budget} outer {outer_mtu} v6={outer_v6} must fit (#16499)"
+            );
+        }
+        assert_eq!(wg_encapped_size_with_outer_mtu(budget, outer_v6, outer_mtu), outer_mtu);
+        assert!(!wg_inner_fits_outer_mtu(budget + 1, outer_v6, outer_mtu));
+    }
+    assert!(wg_inner_fits_outer_mtu(1440, false, 1500));
+    assert!(wg_inner_fits_outer_mtu(1400, true, 1500));
 }
 
-/// #2300: the egress guard uses the THREADED outer MTU, not the
-/// 1500 constant. A 1409-byte inner (v4 outer, encapped 1484) fits a
-/// 1500 link but MUST be dropped on a 1450 underlay (PPPoE-class) —
-/// the topology-dependent bug the old hardcode created.
+/// The guard math this protects: at the v4/v6 boundary the cutoff is
+/// the budget itself (1440 v4 / 1420 v6, #16499), not budget-15.
+#[test]
+fn encapped_size_v4_vs_v6_window() {
+    assert!(wg_inner_fits_outer_mtu(1420, true, WG_DEFAULT_OUTER_MTU));
+    assert!(wg_inner_fits_outer_mtu(1420, false, WG_DEFAULT_OUTER_MTU));
+    assert!(!wg_inner_fits_outer_mtu(1421, true, WG_DEFAULT_OUTER_MTU));
+    assert!(wg_inner_fits_outer_mtu(1421, false, WG_DEFAULT_OUTER_MTU));
+}
+
+/// #2300/#16499: the egress guard uses the THREADED outer MTU, not the
+/// 1500 constant. A 1409-byte inner (v4, budget 1440 at 1500) fits a
+/// 1500 link but MUST be dropped on a 1450 underlay (budget 1390).
 #[test]
 fn guard_uses_threaded_outer_mtu_not_constant() {
-    // 1500 link: 1409 fits.
     assert!(wg_inner_fits_outer_mtu(1409, false, 1500));
-    // 1450 link: 1484 > 1450, dropped. Fail-on-revert: a hardcoded
-    // 1500 guard would have let this through and forced the underlay
-    // to fragment or drop.
     assert!(!wg_inner_fits_outer_mtu(1409, false, 1450));
-    // 1492 link (PPPoE): 1484 still fits.
     assert!(wg_inner_fits_outer_mtu(1409, false, 1492));
-    // Jumbo 9000 link: a 5000-byte inner (encapped ~5044) fits —
-    // the old constant would have capped this at 1500.
     assert!(wg_inner_fits_outer_mtu(5000, false, 9000));
     assert!(!wg_inner_fits_outer_mtu(5000, false, 1500));
+}
+
+/// #16499 acceptance: `encap_and_send` with a 1420-byte inner, v6 peer,
+/// outer_mtu 1500 returns Sent with a capped 1452-byte WG record
+/// (pre-fix: MtuDrop, 16+1424+16+40+8 = 1504 > 1500).
+#[test]
+fn encap_and_send_full_mtu_v6_inner_sends_capped_16499() {
+    let (tx, tx_is_v6) = bind_wg_socket(0).expect("bind tx");
+    let (rx, _rx_is_v6) = bind_wg_socket(0).expect("bind rx");
+    rx.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    let rx_port = rx.local_addr().expect("rx addr").port();
+    let (init_engine, resp_engine, _init_pub, resp_pub) =
+        crate::afxdp::wg::tests::established_pair(
+            vec!["0.0.0.0/0".parse().unwrap()],
+            vec!["0.0.0.0/0".parse().unwrap()],
+        );
+    let mut inner = vec![0u8; 1420];
+    inner[0] = 0x45;
+    inner[2..4].copy_from_slice(&1420u16.to_be_bytes());
+    inner[12..16].copy_from_slice(&[10, 0, 0, 5]);
+    inner[16..20].copy_from_slice(&[10, 0, 1, 5]);
+    let target: SocketAddr = format!("[::1]:{rx_port}").parse().unwrap();
+    let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let mut out = vec![0u8; 4096];
+    let outcome = encap_and_send(
+        &init_engine, &tx, tx_is_v6, &resp_pub, target, &inner, &mut out, 1500, "wg0", &exceptions,
+    );
+    assert!(matches!(outcome, EncapOutcome::Sent), "full-budget v6 inner must Sent (#16499)");
+    let mut buf = [0u8; 4096];
+    let (n, _from) = rx.recv_from(&mut buf).expect("capped datagram must arrive");
+    assert_eq!(n, 16 + 1420 + 16, "capped WG record must be 1452, not uncapped 1456");
+    let mut plain = [0u8; 4096];
+    let dec = resp_engine.try_decap(&buf[..n], &mut plain).expect("decap capped record");
+    assert_eq!(dec.len, 1420);
+    assert_eq!(&plain[..1420], &inner[..]);
 }
 
 // =======================================================================

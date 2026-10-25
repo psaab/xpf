@@ -1004,13 +1004,12 @@ mod mode_aware_segmentation_tests {
 
     #[test]
     fn wireguard_segmentation_uses_wg_inner_mtu_not_gre() {
-        // At a 1500 v4 outer MTU the WG inner-L3 budget is 1425 (pad-aware:
-        // 1500 - 20 IP - 8 UDP - 16 WG hdr - 16 tag = 1440, minus the
-        // worst-case 15-byte WG §5.4.6 transport padding = 1425, the
-        // conservative bound `wg_inner_mtu` subtracts for any alignment).
+        // At a 1500 v4 outer MTU the WG inner-L3 budget is 1440 (#16499
+        // capped pad: 1500 - 20 IP - 8 UDP - 16 WG hdr - 16 tag = 1440;
+        // the pad is capped at the budget, so no worst-pad subtraction).
         // The GRE inner budget would be 1476 (only IP+GRE). A
         // 2000-byte inner payload must therefore split with each inner IP
-        // total length <= 1425, NOT <= 1476. A revert to GRE math sizes the
+        // total length <= 1440, NOT <= 1476. A revert to GRE math sizes the
         // first segment to ~1476 and this assertion fails.
         let mtu = 1500usize;
         let wg_budget = crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET, mtu);
@@ -1092,7 +1091,7 @@ mod mode_aware_segmentation_tests {
             );
         }
         // The full (largest) segment must be sized exactly to the WG inner
-        // budget (1425), NOT the larger GRE budget (1476). This is the
+        // budget (1440), NOT the larger GRE budget (1476). This is the
         // direct revert sentinel for the mode-aware MTU gate: a GRE-blind
         // revert would size the full segment to 1476.
         let max_inner = *inner_lens.iter().max().unwrap();
@@ -1137,7 +1136,7 @@ mod mode_aware_segmentation_tests {
         // GRE outer is IPv4 (fixture outer_family inet): eth(14) + IPv4(20)
         // + GRE(4) + inner. Inner IP total length must reach the GRE budget,
         // proving the GRE math is untouched (still 1476, NOT the smaller WG
-        // 1425 budget).
+        // 1440 budget).
         let outer_eth = 14usize;
         let gre_inner_start = outer_eth + 20 + 4;
         let max_inner = segments
@@ -1874,7 +1873,7 @@ mod mode_aware_segmentation_tests {
         // to the LOGICAL 1420 — and charged the row family — yielding a
         // budget that mismatches the selected peer's physical guard.
         // Post-fix the largest inner must equal the selected-peer budget
-        // wg_inner_mtu(AF_INET6, 1500) = 1405. Reverting the segmenter to
+        // wg_inner_mtu(AF_INET6, 1500) = 1420 (#16499). Reverting the segmenter to
         // `tunnel_outer_mtu`+row family fails this exact-equality check.
         let mut snap = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
         snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
@@ -1935,7 +1934,7 @@ mod mode_aware_segmentation_tests {
         .expect("WG segmentation must produce frames for the selected v6 peer");
         assert!(segments.len() > 1);
         let want = crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET6, 1500);
-        assert_eq!(want, 1405);
+        assert_eq!(want, 1420);
         let eth_len = if segments[0][12] == 0x81 { 18 } else { 14 };
         let inner_lens: Vec<usize> = segments
             .iter()
@@ -1948,7 +1947,7 @@ mod mode_aware_segmentation_tests {
         assert_eq!(
             inner_lens.iter().max().copied(),
             Some(want),
-            "full segment must be sized to the SELECTED peer (v6/1405), not the endpoint row family (v4)"
+            "full segment must be sized to the SELECTED peer (v6/1420), not the endpoint row family (v4)"
         );
     }
 
