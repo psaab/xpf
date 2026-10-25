@@ -2051,6 +2051,18 @@ type compileOpts struct {
 	// no-brick); the fold's no-clobber guard keeps such a config from silently
 	// overwriting an operator entry. Same doctrine as lenientZoneCount.
 	lenientAddressBookNames bool
+	// lenientReservedZoneLocalRefs (#16554) downgrades the reserved
+	// `zone-local/` reference-token gate
+	// (validateReservedZoneLocalRefTokensStrict) to a warning on the tolerant
+	// load / peer-sync paths. The strict commit / commit-check path rejects
+	// any authored policy, global-policy, NAT, NAT64, static-NAT prefix-name,
+	// or address-set-member token beginning with the reserved prefix, checked
+	// on the pristine books before the zone-local fold. The tolerant path
+	// keeps the config bootable (#1960) but poisons the offenders
+	// (poisonReservedZoneLocalRefs16554) so a cross-zone binding never
+	// enforces another zone's zone-local object. Same doctrine as
+	// lenientAddressBookNames.
+	lenientReservedZoneLocalRefs bool
 	// lenientReservedAddressNames (#9523) downgrades the reserved address-name
 	// gate (validateReservedAddressNamesStrict) from a hard compile error to a
 	// cfg.Warnings entry. The strict commit / commit-check path rejects an
@@ -3875,6 +3887,7 @@ func lenientCompileOpts() compileOpts {
 		lenientReservedRoutingInstanceName:       true,
 		lenientRoutingInstanceKernelName:         true,
 		lenientAddressBookNames:                  true,
+		lenientReservedZoneLocalRefs:             true,
 		lenientReservedAddressNames:              true,
 		lenientHelperStateFile:                   true,
 		lenientAddressBookNameCollision:          true,

@@ -109,6 +109,25 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #16554 — reject any AUTHORED reference token beginning with the reserved
+	// `zone-local/` prefix (policy / global-policy match addresses, NAT and
+	// NAT64 address-name references, static-NAT prefix-name, address-set
+	// members). MUST run here on the pristine tree before
+	// resolveZoneLocalAddressBooks: after the fold a literal
+	// `zone-local/trust/web` is indistinguishable from a compiler-minted key
+	// and the post-fold global book contains it, so every downstream gate
+	// accepted a cross-zone binding. Strict rejects; tolerant warns and
+	// poisons (LenientContentDropped / LenientMatchDropped / CollidingNames)
+	// so the binding never enforces another zone's object.
+	if err := validateReservedZoneLocalRefTokensStrict(cfg); err != nil {
+		if opts.lenientReservedZoneLocalRefs {
+			poisonReservedZoneLocalRefs16554(cfg)
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("reserved zone-local reference (downgraded to warning on tolerant path; the referencing policy/NAT rule is poisoned and the name is quarantined): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #9523 — reject an address-book address / address-set (global or
 	// zone-local) or a dynamic-address address-name named after a policy
 	// match-all keyword. On the pristine books, for the same reason as the gate
