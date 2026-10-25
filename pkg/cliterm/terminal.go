@@ -10,9 +10,10 @@
 // the same answer — so the loop lives here once rather than being duplicated
 // and held in step by a test.
 //
-// The package is deliberately tiny and dependency-light (readline plus the
-// standard library) so the remote CLI binary can import it without pulling in
-// the whole interactive console.
+// The package is deliberately tiny and dependency-light (readline plus
+// the standard library, and pkg/config for the secret-leaf SSOT the
+// history filter resolves through, #16794) so the remote CLI binary can
+// import it without pulling in the whole interactive console.
 package cliterm
 
 import (
@@ -23,6 +24,7 @@ import (
 
 	"github.com/chzyer/readline"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
@@ -197,59 +199,134 @@ func SeedHistory(rl *readline.Instance, lines []string) error {
 
 // IsSensitiveHistoryLine reports whether a submitted CLI line carries a
 // credential and must never be persisted to the on-disk history file.
-//
-// The token set mirrors the secret-leaf signatures in
-// pkg/config/ast_redact.go (secretIndices) — the codebase's single reviewed
-// list of credential-bearing config keywords — applied to a flat command
-// line instead of a flattened AST path: the distinctive keywords
-// (pre-shared-key, authentication-key, authentication-password,
-// privacy-password, encrypted-password, simple/password under a credential
-// context, api-key, tsig-secret, api-token, aws-secret-key, private-key,
-// preshared-key, community under snmp, key under `authentication md5`,
-// secret under an api-auth key stanza). Two deliberate differences from
-// ast_redact, both fail-closed (over-suppress, never under-suppress):
-//
-//   - `password` and bare `secret` are treated as sensitive wherever they
-//     appear as a token. On a flat CLI line there is no ancestor path to
-//     gate on, and a history file is a strictly worse place to be wrong
-//     than a display redactor: suppressing a benign `show ... password ...`
-//     line from disk costs one history entry; persisting a bind password
-//     costs a credential. In-memory recall still works either way.
-//   - `community` is sensitive only directly after `snmp` (same as
-//     ast_redact): `set snmp community <string>` carries the v1/v2c shared
-//     secret as the token after `community`. A routing `community`
-//     (policy-options) has no `snmp` predecessor on a CLI line either.
-//
-// `key` stays gated on the `authentication md5 <id> key <secret>` context
-// (same as ast_redact) because bare `key` is common in non-secret commands
-// (`show ... key ...`, GRE tunnel keys are identifiers, not credentials, in
-// Junos spelling `tunnel ... key <id>` is a numeric identifier). Tokens are
-// compared after stripping surrounding quotes, so
-// `pre-shared-key ascii-text "hunter2"` and quoted keywords still match.
+// It is the no-cursor form of IsSensitiveHistoryLineAt: the line alone,
+// with no edit context. Callers that know the operator's edit cursor
+// MUST use IsSensitiveHistoryLineAt / RecordHistoryLineAt so
+// context-gated secrets resolve against their full path (#16794).
 func IsSensitiveHistoryLine(line string) bool {
-	fields := strings.Fields(line)
-	for i, raw := range fields {
-		tok := strings.Trim(raw, `"'`)
-		switch tok {
-		case "pre-shared-key", "authentication-key", "additional-authentication-key",
-			"authentication-password", "privacy-password", "encrypted-password",
-			"simple-password", "api-key", "tsig-secret", "api-token",
-			"aws-secret-key", "private-key", "preshared-key",
-			"password", "secret":
+	return IsSensitiveHistoryLineAt(nil, line)
+}
+
+// IsSensitiveHistoryLineAt is IsSensitiveHistoryLine judged against the
+// operator's resolved config path: editPath (the lexed `edit` cursor,
+// e.g. store.GetEditPath() / the remote CLI's c.editPath) followed by
+// the line's own lexed tokens.
+//
+// #16794: the previous predicate was a hand-copied token list applied
+// to the flat line. It missed plain-text-password(-value) entirely and
+// every edit-context spelling of the context-gated secrets: after
+// `edit snmp`, `set community <s>` has no `snmp` token on the line;
+// after `edit ... authentication md5 1`, `set key <s>` has no
+// `authentication md5` window; after `edit ... authentication`,
+// `set md5 1 key <s>` likewise. Those lines persisted cleartext
+// credentials to ~/.xpf_history / ~/.xpf_cli_history — the #10743
+// contract broken by the denylist that replaced the blanket ban.
+//
+// Resolution is now the config SSOT, not a copy: the resolved path is
+// judged by config.IsSecretValueInPath16794, the union of
+// secretIndices (ast_redact.go) and secretLeafKeywords (secret.go) —
+// the same resolution that masks these values on every display
+// surface, so the history filter cannot drift from it (pinned by
+// TestHistoryPredicatePinnedToSecretSSOT16794). Lexing uses the
+// store's lexer (config.ParseConfigMutationLine): quotes are consumed,
+// so a quoted keyword or value is judged as the token the executor
+// will act on.
+//
+// Verb handling: `set`/`edit` lines are judged on editPath + path
+// tokens (for `edit`, the resolved NEW cursor — entering a secret
+// stanza is navigation, but a value token after a secret keyword on
+// that line, e.g. `edit snmp community <s>`, is a credential);
+// `top`/`up <cmd>` prefixes are first resolved to their target cursor
+// (config.ParseTopUpPrefix15082) so the inner command is judged where
+// it will run; every other line (operational commands, bare
+// navigation, show/…) is judged on its own tokens with no cursor,
+// because it does not act relative to the cursor.
+//
+// Fail-closed arms beyond the SSOT, deliberate for a history file
+// (over-suppress costs one history entry; under-suppress persists a
+// credential; in-memory recall works either way):
+//
+//   - A config-mode set/edit/top/up line that does not lex cleanly is
+//     sensitive: the unlexed tail may carry a credential the lexer
+//     never produced (the #16726/#15167 doctrine).
+//   - Bare `password`/`secret` tokens suppress wherever they appear,
+//     as before (#15284): on a flat operational line there is no
+//     ancestor path to gate on. The resolved config path needs no
+//     such arm — the SSOT gates those keywords by context there —
+//     but the flat arm also covers the resolved path, so it is kept
+//     for both.
+func IsSensitiveHistoryLineAt(editPath []string, line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	// Flat fail-closed arm (#15284, kept): bare password/secret tokens
+	// anywhere on the raw line. Quote-stripped Fields, as before, so a
+	// quoted keyword still matches even on a line the config lexer
+	// would refuse (e.g. an operational command with shell-ish text).
+	for _, raw := range strings.Fields(line) {
+		switch strings.Trim(raw, `"'`) {
+		case "password", "secret":
 			return true
-		case "community":
-			if i >= 1 && strings.Trim(fields[i-1], `"'`) == "snmp" {
-				return true
-			}
-		case "key":
-			// `authentication md5 <key-id> key <secret>` — mirrors ast_redact.
-			if i >= 3 && strings.Trim(fields[i-2], `"'`) == "md5" &&
-				strings.Trim(fields[i-3], `"'`) == "authentication" {
-				return true
-			}
 		}
 	}
-	return false
+	tokens, _, lexOK := config.ParseConfigMutationLine(line)
+	if len(tokens) == 0 {
+		// Nothing lexed: an operational line the flat arm already
+		// judged, or an unlexable line whose first token never
+		// surfaced. A set/edit/top/up opener hiding in the unlexed
+		// text cannot be ruled out when lexing failed — fail closed
+		// only for those openers, spotted on the raw Fields view.
+		if !lexOK {
+			if f := strings.Fields(line); len(f) > 0 {
+				switch strings.Trim(f[0], `"'`) {
+				case "set", "edit", "top", "up":
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return sensitiveTokensAt(editPath, tokens, lexOK, line)
+}
+
+// sensitiveTokensAt judges lexed tokens against editPath; lexOK is the
+// config lexer's clean-end-to-end flag for the line they came from, and
+// line is that raw line (top/up resolution re-lexes its prefix the way
+// the executor does). Recursive top/up calls pass lexOK=true with the
+// inner tokens already lexed, so no re-joined string is ever re-judged
+// with different tokenization than the executor's.
+func sensitiveTokensAt(editPath []string, tokens []string, lexOK bool, line string) bool {
+	switch tokens[0] {
+	case "top", "up":
+		target, inner, _, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(editPath), line)
+		if !ok {
+			// Malformed prefix with a trailing command: the inner
+			// command's target cannot be resolved — fail closed.
+			// Bare malformed navigation carries no value token.
+			return len(tokens) > 1
+		}
+		if len(inner) == 0 {
+			return false // bare navigation: no path, no value
+		}
+		if !lexOK {
+			return true
+		}
+		return sensitiveTokensAt(target, inner, true, strings.Join(inner, " "))
+	case "set", "edit":
+		if !lexOK {
+			return true
+		}
+		resolved := append(append([]string{}, config.NormalizeEditPathTokens(editPath)...), tokens[1:]...)
+		return config.IsSecretValueInPath16794(resolved)
+	default:
+		// Operational / other lines do not act relative to the cursor;
+		// judge the line's own tokens through the same SSOT union
+		// (which marks values after distinctive and gated keywords
+		// wherever their context appears on the line itself), plus
+		// the flat bare password/secret arm in the caller.
+		return config.IsSecretValueInPath16794(tokens)
+	}
 }
 
 // maxPersistedHistoryLines bounds the on-disk history file. readline's
@@ -262,21 +339,32 @@ const maxPersistedHistoryLines = 10000
 
 // RecordHistoryLine persists one submitted CLI line to the history file at
 // path, unless the line is empty or credential-bearing (IsSensitiveHistoryLine).
-// It appends rather than rewriting (except for the bound trim above):
-// readline (with HistoryFile cleared) never rewrites or truncates the file,
-// so this append is the only writer and file order is submission order. The
-// caller must have tightened the file with SecureReadlineHistory first; the
-// append opens with 0600 so a file created here (SecureReadlineHistory
-// normally pre-creates it) is never laxer. Duplicate and consecutive-duplicate
-// lines are appended as submitted — readline's in-memory dedup governs
-// recall, and suppressing a duplicate on disk would make the persisted order
-// diverge from what the operator ran.
+// It is the no-cursor form of RecordHistoryLineAt; callers that know the
+// operator's edit cursor MUST use RecordHistoryLineAt (#16794).
 func RecordHistoryLine(path, line string) error {
+	return RecordHistoryLineAt(nil, path, line)
+}
+
+// RecordHistoryLineAt is RecordHistoryLine with the operator's edit
+// cursor: the line is filtered by IsSensitiveHistoryLineAt(editPath, …)
+// so a context-gated secret typed relative to an `edit` stanza is
+// suppressed exactly as its flat spelling is. It appends rather than
+// rewriting (except for the bound trim below): readline (with
+// HistoryFile cleared) never rewrites or truncates the file, so this
+// append is the only writer and file order is submission order. The
+// caller must have tightened the file with SecureReadlineHistory first;
+// the append opens with 0600 so a file created here
+// (SecureReadlineHistory normally pre-creates it) is never laxer.
+// Duplicate and consecutive-duplicate lines are appended as submitted —
+// readline's in-memory dedup governs recall, and suppressing a duplicate
+// on disk would make the persisted order diverge from what the operator
+// ran.
+func RecordHistoryLineAt(editPath []string, path, line string) error {
 	line = strings.TrimSpace(line)
 	if line == "" || path == "" {
 		return nil
 	}
-	if IsSensitiveHistoryLine(line) {
+	if IsSensitiveHistoryLineAt(editPath, line) {
 		return nil
 	}
 	// Read-then-append is not atomic against a second CLI process sharing

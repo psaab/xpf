@@ -740,7 +740,11 @@ func (c *CLI) Run() error {
 			return err
 		}
 
-		if recErr := cliterm.RecordHistoryLine(c.historyFile, line); recErr != nil {
+		var editPath []string
+		if c.store != nil {
+			editPath = c.store.GetEditPath()
+		}
+		if recErr := cliterm.RecordHistoryLineAt(editPath, c.historyFile, line); recErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: record history: %v\n", recErr)
 		}
 		line = strings.TrimSpace(line)

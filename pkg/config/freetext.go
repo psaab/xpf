@@ -242,6 +242,68 @@ func secretValueIndicesFlat(fp []string) map[int]bool {
 	return out
 }
 
+// IsSecretValueInPath16794 reports whether the flattened config path fp
+// carries a secret value at any position, resolved by the union of the
+// tree's two secret resolutions (secretIndices and secretLeafKeywords —
+// secretValueIndicesFlat). It is the exported form of that union for
+// callers outside package config that judge a flat token path rather
+// than an AST node — pkg/cliterm's history filter (#16794) resolves an
+// operator's resolved set/edit path (edit cursor + line tokens) through
+// this predicate so the history denylist cannot drift from the SSOT:
+// a keyword either resolution claims as a credential suppresses the
+// line, exactly as it would be masked on every display surface.
+func IsSecretValueInPath16794(fp []string) bool {
+	return len(secretValueIndicesFlat(fp)) > 0
+}
+
+// SecretLeafKeywordSet16794 returns a copy of the schema-pinned
+// secretLeafKeywords set (#6625) so out-of-package pins (pkg/cliterm's
+// history drift test, #16794) can iterate it without the map being
+// mutable through the return value.
+func SecretLeafKeywordSet16794() map[string]bool {
+	out := make(map[string]bool, len(secretLeafKeywords))
+	for k, v := range secretLeafKeywords {
+		out[k] = v
+	}
+	return out
+}
+
+// SecretContextKeywords16794 returns the gated and distinctive keyword
+// spellings secretIndices resolves beyond secretLeafKeywords: dual-use
+// keywords secret only under an ancestor/root context, the gated
+// generic keywords, and the credential-shaped/distinctive spellings
+// the AST resolution knows. It exists solely so pkg/cliterm's drift
+// pin (#16794) can enumerate the full keyword population both
+// resolutions know; the behavioural resolution stays secretIndices /
+// secretValueIndicesFlat, and callers must judge paths through
+// IsSecretValueInPath16794 rather than re-implementing gates from
+// this list.
+func SecretContextKeywords16794() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(k string) {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	for kw := range secretLeafKeywordsByRoot {
+		add(kw)
+	}
+	for _, k := range []string{"password", "secret", "key", "community", "trap-group", "user-password"} {
+		add(k)
+	}
+	for _, k := range []string{
+		"additional-authentication-key", "authentication-password",
+		"privacy-password", "simple-password", "api-token",
+		"aws-secret-key", "client-secret", "shared-secret",
+		"radius-shared-secret", "auth-token", "community-name",
+	} {
+		add(k)
+	}
+	return out
+}
+
 // isSecretValueIndex reports whether position idx of the flattened key path is a
 // secret VALUE token.
 func isSecretValueIndex(fp []string, idx int) bool {

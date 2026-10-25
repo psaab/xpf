@@ -322,7 +322,11 @@ func main() {
 			break
 		}
 
-		if recErr := cliterm.RecordHistoryLine(historyFile, line); recErr != nil {
+		var editPath []string
+		if c.configMode.Load() {
+			editPath = c.editPath
+		}
+		if recErr := cliterm.RecordHistoryLineAt(editPath, historyFile, line); recErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: record history: %v\n", recErr)
 		}
 		line = strings.TrimSpace(line)
