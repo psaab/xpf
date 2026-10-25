@@ -1716,3 +1716,59 @@ Implementing the chain needs a per-route forwarding-policy evaluation with a
 stated composition rule and a rendering target able to express it — a feature,
 not a wiring gap. #7455 records the measurement behind that decision.
 
+## Predefined junos-defaults names omitted: uuid / rpc-program-number terms (#16815)
+
+The predefined application table (`pkg/config/predefined.go`) is diffed
+against the Junos OS **12.1X44-D35.5**
+[`show configuration groups junos-defaults` capture](https://www.51sec.org/2014/09/21/juniper-junos-pre-defined-applications-and-application-sets-details/)
+(2014-09-21; 159 applications + 23 application-sets) by
+`TestPredefined16815_CaptureDiff`. Its normalized application bodies and
+set memberships are pinned in
+`pkg/config/testdata/junos-defaults-12.1X44-D35.5.json`.
+The comparison covers protocol/port tuples, term order, set membership,
+and inactivity-timeouts; it does **not** claim ALG behavior parity.
+The capture is version-bounded and does not establish current-release
+vSRX parity. Both captured explicit timeouts, `junos-snmp-agentx` and
+`junos-wxcontrol`, are 7560 seconds and reach the userspace policy snapshot.
+
+The omitted names below are NOT widened to their bare protocol:
+their capture terms carry an MS-RPC `uuid` or Sun-RPC
+`rpc-program-number` constraint that xpf does not implement (#9603
+refuses the same leaves on user-defined applications). Their sets are
+also omitted in full, not reduced to their supported endpoint-mapper
+members. Policies citing an omitted name without a user definition
+still fail the strict commit gate (#3144), naming the token.
+`junos-persistent-nat` (protocol 255, source/destination-port 65535)
+is likewise omitted: its non-TCP/UDP protocol plus transport-port
+constraints cannot be represented as a supported L4 application.
+
+Omitted MS-RPC (uuid) applications: `junos-ms-rpc-epm`,
+`junos-ms-rpc-msexchange-directory-rfr`,
+`junos-ms-rpc-msexchange-info-store`,
+`junos-ms-rpc-msexchange-directory-nsp`, `junos-ms-rpc-wmic-admin`,
+`junos-ms-rpc-wmic-webm-level1login`, `junos-ms-rpc-wmic-admin2`,
+`junos-ms-rpc-wmic-mgmt`, `junos-ms-rpc-iis-com-1`,
+`junos-ms-rpc-iis-com-adminbase`, `junos-ms-rpc-uuid-any-tcp`,
+`junos-ms-rpc-uuid-any-udp`; and the sets built on them:
+`junos-ms-rpc-msexchange`, `junos-ms-rpc-wmic`, `junos-ms-rpc-iis-com`,
+`junos-ms-rpc-any`.
+
+Omitted Sun-RPC (rpc-program-number) applications:
+`junos-sun-rpc-portmap-tcp/udp`, `junos-sun-rpc-nfs-tcp/udp`,
+`junos-sun-rpc-mountd-tcp/udp`, `junos-sun-rpc-ypbind-tcp/udp`,
+`junos-sun-rpc-status-tcp/udp`, `junos-sun-rpc-ypserv-tcp/udp`,
+`junos-sun-rpc-rquotad-tcp/udp`, `junos-sun-rpc-nlockmgr-tcp/udp`,
+`junos-sun-rpc-ruserd-tcp/udp`, `junos-sun-rpc-sadmind-tcp/udp`,
+`junos-sun-rpc-sprayd-tcp/udp`, `junos-sun-rpc-walld-tcp/udp`,
+`junos-sun-rpc-any-tcp/udp`; and the sets built on them:
+`junos-sun-rpc-portmap`, `junos-sun-rpc-nfs`, `junos-sun-rpc-mountd`,
+`junos-sun-rpc-ypbind`, `junos-sun-rpc-status`,
+`junos-sun-rpc-nfs-access`, `junos-sun-rpc-ypserv`,
+`junos-sun-rpc-rquotad`, `junos-sun-rpc-nlockmgr`,
+`junos-sun-rpc-ruserd`, `junos-sun-rpc-sadmind`,
+`junos-sun-rpc-sprayd`, `junos-sun-rpc-walld`, `junos-sun-rpc-any`.
+
+Implementing any of these needs uuid / rpc-program-number matching in
+the application model and dataplane first; until then the fail-visible
+commit rejection is the correct behaviour.
+
