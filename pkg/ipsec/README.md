@@ -960,7 +960,15 @@ all files stay in `package ipsec`, so the public API is unchanged.
   render, so an unscoped secret never loads. Configure
   `remote-identity` on the gateway (or use `dynamic hostname <fqdn>`);
   the peer presenting that identity with this VPN's key is then the
-  only one the secret matches. Since #15989 (H-4) the same rule covers
+  only one the secret matches. Since #16845 (R3-F15-02) every one of
+  those selectors is screened by the shared `config.IsAnyIPsecSelector` /
+  `config.IsAnyIPsecRemoteIdentity` / `config.HasDiscriminatingIPsecAddress`
+  predicates: an ID_ANY spelling (`""`, `%any`, `%any6`, `*`, `0.0.0.0`,
+  `::`, `0::0`, any unspecified IP) as gateway address, inline endpoint,
+  or `inet`/`inet6` `remote-identity` discriminates no peer, so strict
+  commit refuses it and the render belts skip it exactly like the
+  empty-selector shapes above; a mixed `0.0.0.0,<real-ip>` list renders
+  scoped by the real address only. Since #15989 (H-4) the same rule covers
   a gateway-less PSK VPN (no `ike gateway` leaf): it renders with no
   `remote_addrs` and no peer selector — commit rejects it and the
   render belt skips it. Inline IP endpoints (a usable IP literal in
