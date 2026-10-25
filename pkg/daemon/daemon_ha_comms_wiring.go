@@ -588,8 +588,8 @@ func (d *Daemon) wireSessionSyncFailoverCallbacks(ss *cluster.SessionSync) {
 		}
 		return nil
 	}
-	// #15164: the requester aborted after our ACK — restore promptly
-	// instead of waiting for the #5079 lease to expire.
+	// #15164/#16592: the transfer was abandoned (also on a failed fence or
+	// request-ACK timeout) — restore without waiting for the #5079 lease.
 	ss.OnRemoteFailoverAbort = func(rgID int, reqID uint64) error {
 		return d.cluster.AbortRemoteTransferOut(rgID, reqID)
 	}

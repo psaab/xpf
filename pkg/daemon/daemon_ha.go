@@ -329,9 +329,12 @@ func (d *Daemon) signalFailoverActuated(rgID int) {
 // signalFailoverActuationFailed releases rgID's barrier with a FAILURE verdict:
 // the demotion side effects did not land (e.g. the dataplane rejected the
 // rg_active clear), so this node may still be forwarding for the RG. The waiter
-// surfaces cause, the sync layer downgrades the applied-ack to failed, and the
-// peer holds instead of promoting into a two-owner window (#6371). cause must
-// be non-nil; a nil cause would be indistinguishable from success.
+// surfaces cause and the sync layer downgrades the applied-ack to failed; the
+// requester then records the aborted request, the sync layer restores this
+// owner, and the requester's election refuses "Peer transfer out" for that
+// hold (#16592) — a failed ack alone never held the requester, which promotes
+// on the secondary-hold heartbeat. cause must be non-nil; a nil cause would
+// be indistinguishable from success.
 func (d *Daemon) signalFailoverActuationFailed(rgID int, cause error) {
 	if cause == nil {
 		cause = fmt.Errorf("redundancy group %d demotion not actuated", rgID)
@@ -408,13 +411,14 @@ const rethVIPReleaseTimeout = 500 * time.Millisecond
 // addresses inline on this goroutine.
 //
 // A failed release, and an expiry, both resolve the barrier with a FAILURE
-// verdict: the sync layer downgrades the applied-ack to failed and the peer
-// HOLDS rather than promoting into a window where both nodes answer for the
-// VIP. That is the safe direction — a held failover is recoverable, a
-// duplicate-address window is not — and it is not the common case: a VRRP
-// instance that is already BACKUP consumes the resign token on its next loop
-// hop and reports a clean release, and an RG with no RETH instances at all
-// yields a barrier that is born complete.
+// verdict: the sync layer downgrades the applied-ack to failed, restores
+// this owner, and the requester records the abort so its election refuses
+// the secondary-hold heartbeat instead of promoting into a window where
+// both nodes answer for the VIP (#16592). That is the safe direction — a
+// held failover is recoverable, a duplicate-address window is not — and it
+// is not the common case: a VRRP instance that is already BACKUP consumes
+// the resign token on its next loop hop and reports a clean release, and
+// an RG with no RETH instances at all yields a barrier that is born complete.
 func (d *Daemon) awaitRethVIPRelease(rgID int, barrier vipReleaseBarrier) {
 	timeout := d.rethVIPReleaseTimeout
 	if timeout <= 0 {
@@ -690,10 +694,12 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		//
 		// #6371: when the rg_active write above FAILED, the fence did not
 		// complete — resolve the barrier with that error instead, so the
-		// applied-ack downgrades to failed and the peer holds rather than
-		// promoting into a two-owner window. Reporting the failure (rather
-		// than staying silent) keeps the waiter from burning its full
-		// timeout on a fence that is already known not to have landed.
+		// applied-ack downgrades to failed; the sync layer then restores
+		// this owner and the requester records the aborted request, so
+		// its election holds rather than promoting on our secondary-hold
+		// heartbeat into a two-owner window (#16592). Reporting the
+		// failure (rather than staying silent) keeps the waiter from
+		// burning its full timeout on a fence already known not to have landed.
 		//
 		// #6177 item 1: on the RETH-VRRP path the VIP removal runs on the VRRP
 		// instance goroutine, so at this point the resignation is only

@@ -3323,14 +3323,34 @@ The fix gates the applied-ack on a fence-completion barrier:
    stalling, so a clean failover is not downgraded to a hold.
 6. The wait is bounded by the actuation registry timeout (3s default). A demotion that
    never actuates (superseded reset, event-channel drop) downgrades the ack to
-   `failoverAckFailed` so the peer **holds** rather than promoting into the
-   two-owner window — safety over latency in the race. On the normal path the
-   barrier releases as soon as the local resign completes, so failover latency is
-   unchanged.
+   `failoverAckFailed`. **A failed ack alone does not hold the requester**
+   (#16592): the owner has already demoted to secondary-hold, and the
+   requester's heartbeat election historically promoted on that hold via
+   "Peer transfer out" regardless of the ack verdict — including before a
+   successful ack arrived, and after a failed/timed-out one while the fence
+   was known not to have landed. The ack is now the real gate, in three
+   parts: (a) while `RequestPeerFailover` holds its per-RG reservation and
+   has not received `failoverAckApplied`, `electRG` refuses "Peer transfer
+   out" for that RG, so a mid-request heartbeat cannot promote; (b) on every
+   request-ack error exit (single and batch) the requester records the
+   aborted reqID (`abortedPeerTransferReqID`, the #15164 marker) and sends
+   the reqID-bound abort frame. The marker blocks all promotion paths;
+   ordinary priority election must not bypass it when a higher-priority
+   non-preempt requester observes the stale hold.
+   `SendFailover`/`SendFailoverBatch` return the reqID even on ack timeout
+   so the abort can be bound (zero denotes local rejection or send failure).
+   (c) When the owner's fence barrier
+   fails, the sync layer restores the owner itself (the same reqID-bound
+   abort path) before replying `failoverAckFailed`, so the owner returns
+   toward primary instead of sitting in secondary-hold under its lease.
+   The #5079 lease remains the fallback if an abort frame is lost. On the
+   normal path the barrier releases as soon as the local resign completes,
+   so failover latency is unchanged.
 
 The batch path (`handleRemoteFailoverBatch` / `WaitFailoverAppliedBatch`) applies
 the same barrier across the whole set, all members armed under the one batch
-request id; the first non-nil verdict fails the batch ack.
+request id; the first non-nil verdict fails the batch ack, restores the
+batch owner, and the requester records the batch abort on the same exit.
 
 **Closed (#6177 item 1).** The RETH-VRRP path used to release the barrier once
 resignation had been *signalled* (priority 0 set synchronously) and `rg_active`

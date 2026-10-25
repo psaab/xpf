@@ -55,6 +55,27 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		return electNoChange, ""
 	}
 
+	// #16592: an aborted transfer is not authority to promote through ANY
+	// election arm. Skipping only "Peer transfer out" lets a higher-priority
+	// non-preempt requester win the subsequent "neither is primary" election
+	// on the same stale hold. Peer loss, a fresh non-hold heartbeat, reset,
+	// or a new acknowledged transfer clears this marker.
+	if _, aborted := m.abortedPeerTransferReqID[rg.GroupID]; aborted {
+		if rg.State == StatePrimary {
+			return electLocalSecondary, "Peer transfer aborted"
+		}
+		return electNoChange, ""
+	}
+	// The reservation spans the entire request, but the override is installed
+	// only after the applied ACK. Until then, a hold heartbeat cannot authorize
+	// promotion, including via weight-zero or dual-resign recovery.
+	if peerGroup != nil && peerGroup.State == StateSecondaryHold &&
+		m.failoverInProgress[rg.GroupID] != 0 {
+		if _, acknowledged := m.peerTransferOutOverride[rg.GroupID]; !acknowledged {
+			return electNoChange, ""
+		}
+	}
+
 	clearedManualFailover := false
 
 	// ManualFailover normally blocks election (stays secondary-hold until
@@ -196,18 +217,10 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// normal priority/tie-break election instead of unconditionally claiming
 	// primary on both nodes.
 	if peerGroup.State == StateSecondaryHold && !clearedManualFailover {
-		// #15164: a hold left by a request THIS node aborted must not
-		// re-promote us. The requester already reported the failover as
-		// failed; taking "Peer transfer out" here moves ownership contrary
-		// to that outcome (and under preempt the owner reclaims it at lease
-		// expiry, an unrequested second move). Fall through to normal
-		// election while the aborted hold is still what the peer advertises.
-		if _, aborted := m.abortedPeerTransferReqID[rg.GroupID]; !aborted {
-			if rg.State != StatePrimary {
-				return electLocalPrimary, "Peer transfer out"
-			}
-			return electNoChange, ""
+		if rg.State != StatePrimary {
+			return electLocalPrimary, "Peer transfer out"
 		}
+		return electNoChange, ""
 	}
 
 	// A completed operator transfer pins both ownership roles until the

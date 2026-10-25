@@ -556,6 +556,12 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	}
 	reqID, err := fn(rgID)
 	if err != nil {
+		// #16592: the owner may already be holding without a successful
+		// fence. Retain the abort marker before releasing our reservation
+		// and send the bound abort. The local manual hold is unchanged.
+		if reqID != 0 {
+			m.abortRequestedPeerFailover(rgID, reqID, manualFailoverHoldSnapshot{}, abortFn)
+		}
 		return err
 	}
 	var hold manualFailoverHoldSnapshot
@@ -761,8 +767,8 @@ func (m *Manager) clearRemoteTransferOutLeaseLocked(rgID int) {
 	delete(m.remoteTransferOutLeaseReqID, rgID)
 }
 
-// AbortRemoteTransferOut restores this node after the requester aborted a
-// previously acknowledged transfer-out (#15164). It is reqID-bound exactly
+// AbortRemoteTransferOut restores this node after an abandoned transfer-out,
+// including a failed/timed-out ACK (#15164/#16592). It is reqID-bound exactly
 // like the lease clear: only the request that armed the current lease may
 // abort it, so a stale abort cannot restore an owner demoted by a newer
 // request. Restoring clears the manual hold, restores monitor-derived
@@ -1201,6 +1207,10 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 
 	reqID, err := fn(ids)
 	if err != nil {
+		// #16592: batch form of the single-RG request-ack failure above.
+		if reqID != 0 {
+			m.abortRequestedPeerFailoverBatch(ids, reqID, nil, abortFn)
+		}
 		return err
 	}
 
