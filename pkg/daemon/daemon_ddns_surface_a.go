@@ -281,6 +281,10 @@ func (d *Daemon) buildSurfaceAScopes(cfg *config.Config) ([]ddns.SurfaceAScope, 
 			return
 		}
 		// A per-binding source-address overrides the provider's default.
+		// The provider copy keeps the committed install-id verbatim;
+		// the SurfaceAManager stamps its per-process mint onto it at
+		// backend resolution (#16585), so scopes and the withdraw
+		// catalog rebuild derive one Cloudflare tag.
 		p := *prov
 		if b.SourceAddress != "" {
 			p.SourceAddress = b.SourceAddress

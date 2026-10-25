@@ -39,6 +39,7 @@ var ddnsProviderStringProps = map[string]bool{
 	"hosted-zone-id":    true,
 	"checkip-url":       true,
 	"checkip-allowlist": true,
+	"install-id":        true,
 }
 
 // compileDDNSServices compiles the `system services dynamic-dns` block into a
@@ -298,6 +299,7 @@ func compileDDNSProvider(name string, nodes ...*Node) *DDNSProvider {
 		HostedZoneID:         props["hosted-zone-id"],
 		CheckIPURL:           props["checkip-url"],
 		CheckIPAllowlist:     props["checkip-allowlist"],
+		InstallID:            props["install-id"],
 	}
 	if p.Backend == "" && p.UpdateServer == "" && p.ForwardZone == "" && p.ReverseZone == "" && p.TSIGKeyName == "" &&
 		p.TSIGAlgorithm == "" && p.TSIGSecret.Reveal() == "" && !p.RequireTSIG && p.SourceAddress == "" &&
@@ -306,7 +308,7 @@ func compileDDNSProvider(name string, nodes ...*Node) *DDNSProvider {
 		p.URLTemplate == "" && p.OKResponse == "" && p.APIToken.Reveal() == "" &&
 		p.Zone == "" && p.AWSAccessKeyID == "" && p.AWSSecretAccessKey.Reveal() == "" &&
 		p.AWSRegion == "" && p.HostedZoneID == "" && p.CheckIPURL == "" &&
-		p.CheckIPAllowlist == "" {
+		p.CheckIPAllowlist == "" && p.InstallID == "" {
 		return nil
 	}
 	return p

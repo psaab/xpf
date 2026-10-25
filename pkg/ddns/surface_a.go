@@ -433,6 +433,17 @@ type SurfaceAManager struct {
 	// (standalone tests); a routing-instance still resolves to vrf-<name>.
 	ifResolver func(string) string
 
+	// mintedInstallIDs caches the per-process install-id minted for a
+	// provider whose committed config carries no (valid) install-id
+	// (#16585), keyed by provider name. Without it each reconcile would
+	// mint a fresh id and orphan the records the previous pass stamped.
+	// It is deliberately process-scoped: durability across restarts
+	// comes from the operator pinning the minted value via the
+	// `install-id` leaf (committed config syncs it to the HA peer);
+	// until then a restart re-mints and pre-restart rows stay reachable
+	// only via the logged value-scoped fallback. Guarded by mu.
+	mintedInstallIDs map[string]string
+
 	now func() time.Time
 
 	// counters (observability, plan §5.5).
@@ -563,6 +574,39 @@ func newSurfaceAManagerForTesting(statePath string, backend DNSUpdater, now func
 	m.seedFromStore()
 	m.rebuildWireRRClaimsLocked() // #5748: seed the cross-surface claim snapshot
 	return m
+}
+
+// providerWithInstallID returns a copy of p carrying this node's
+// durable install identity for provider name (#16585): a valid
+// committed InstallID is used verbatim (HA peers sharing the
+// committed config derive one Cloudflare tag); otherwise the
+// per-process mint cached in mintedInstallIDs is stamped, minting
+// on first use. Caller holds m.mu. The provider itself is never
+// mutated — the catalog entry stays as committed.
+func (m *SurfaceAManager) providerWithInstallID(p *config.DDNSProvider) *config.DDNSProvider {
+	if p == nil {
+		return nil
+	}
+	if validInstallID(p.InstallID) {
+		return p
+	}
+	if m.mintedInstallIDs == nil {
+		m.mintedInstallIDs = map[string]string{}
+	}
+	cp := *p
+	if id, ok := m.mintedInstallIDs[p.Name]; ok {
+		cp.InstallID = id
+		return &cp
+	}
+	if _, err := EnsureInstallID(&cp); err != nil {
+		// crypto/rand failure: return p unmodified. Backends then
+		// derive the deterministic empty-install tag, and the
+		// legacy fallback still bounds cross-install harm to the
+		// pre-#16585 posture for this (unreachable) fault alone.
+		return p
+	}
+	m.mintedInstallIDs[p.Name] = cp.InstallID
+	return &cp
 }
 
 // productionSurfaceABackend resolves a provider-catalog entry into a live
@@ -2037,6 +2081,8 @@ func canonicalDDNSName(fqdn string) string {
 
 // backendFor resolves the live Backend for a scope's provider (resolve-per-
 // Reconcile). The static `backend` field (test injection) wins when set.
+// The provider is first stamped with this node's install identity
+// (#16585) so every backend built through the manager shares it.
 func (m *SurfaceAManager) backendFor(sc SurfaceAScope) (DNSUpdater, error) {
 	if m.newBackend == nil {
 		if m.backend != nil {
@@ -2044,7 +2090,7 @@ func (m *SurfaceAManager) backendFor(sc SurfaceAScope) (DNSUpdater, error) {
 		}
 		return nopUpdater{}, nil
 	}
-	return m.newBackend(sc.Provider, sc.FQDN, sc.TTL)
+	return m.newBackend(m.providerWithInstallID(sc.Provider), sc.FQDN, sc.TTL)
 }
 
 // backendFingerprint returns a STABLE, NON-SECRET fingerprint of a provider's
@@ -2199,7 +2245,7 @@ func (m *SurfaceAManager) classifyOwnedBackend(owned ownedRecord, catalog map[st
 			return nopUpdater{}, ownedBackendEndpointChanged, nil
 		}
 	}
-	b, err := m.newBackend(prov, owned.FQDN, owned.TTL)
+	b, err := m.newBackend(m.providerWithInstallID(prov), owned.FQDN, owned.TTL)
 	return b, ownedBackendOK, err
 }
 

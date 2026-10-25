@@ -484,6 +484,17 @@ type DDNSProvider struct {
 	// ignore in a checkip response (the inadyn except[] case — e.g. a checkip
 	// page that embeds the resolver/anycast IP like 1.1.1.1). Empty ⇒ none.
 	CheckIPAllowlist string
+	// InstallID is the durable per-install Cloudflare ownership component
+	// (#16585): a random id minted once per install (or per HA cluster,
+	// when the operator copies the same value to both peers) and carried
+	// in committed config so it syncs to the peer. It feeds ONLY the
+	// Cloudflare record-comment tag; other backends ignore it. Empty
+	// means "not pinned": the SurfaceAManager mints one per process and
+	// caches it (pkg/ddns providerWithInstallID); pinning it via the
+	// `install-id` leaf makes it durable across restarts. It is not a
+	// credential — it is visible in Cloudflare record comments by design
+	// — so it is rendered in cleartext like Zone.
+	InstallID string
 }
 
 // String redacts every credential-bearing field so a %v/%s/slog format of a
@@ -512,12 +523,12 @@ func (p *DDNSProvider) String() string {
 		"destination-interface=%q routing-instance=%q server=%q username=%q "+
 		"password=%q url-template=%q ok-response=%q api-token=%q zone=%q "+
 		"aws-access-key=%q aws-secret-key=%q aws-region=%q hosted-zone-id=%q "+
-		"checkip-url=%q checkip-allowlist=%q}",
+		"checkip-url=%q checkip-allowlist=%q install-id=%q}",
 		p.Name, p.Backend, RedactURL(p.UpdateServer), p.TSIGKeyName, p.TSIGAlgorithm,
 		red(p.TSIGSecret), p.SourceAddress, p.DestinationInterface, p.RoutingInstance,
 		RedactURL(p.Server), p.Username, red(p.Password), RedactURL(p.URLTemplate), p.OKResponse,
 		red(p.APIToken), p.Zone, p.AWSAccessKeyID, red(p.AWSSecretAccessKey),
-		p.AWSRegion, p.HostedZoneID, RedactURL(p.CheckIPURL), p.CheckIPAllowlist)
+		p.AWSRegion, p.HostedZoneID, RedactURL(p.CheckIPURL), p.CheckIPAllowlist, p.InstallID)
 }
 
 // MarshalJSON redacts the URL-bearing leaves on every JSON render of a

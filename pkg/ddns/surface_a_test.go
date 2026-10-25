@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #2691 P2 Surface A engine tests. Everything is driven through a fakeUpdater
@@ -51,6 +53,40 @@ func fixedObserver(addr string) AddressObserver {
 	a := netip.MustParseAddr(addr)
 	return func(context.Context, SurfaceAScope) (AddressObservation, bool) {
 		return AddressObservation{Addr: a, Source: AddressSourceDHCP}, true
+	}
+}
+
+// TestProviderWithInstallID16585 pins the #16585 manager cache: an
+// unpinned provider gets ONE minted id shared by every stamped copy
+// (so publish and withdraw backends agree), the catalog entry itself
+// is never mutated, a pinned id is used verbatim, and two managers
+// (two installs) mint different ids.
+func TestProviderWithInstallID16585(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	m1 := newSurfaceATestManager(t, newFakeUpdater(), func() time.Time { return now })
+	m2 := newSurfaceATestManager(t, newFakeUpdater(), func() time.Time { return now })
+
+	unpinned := &config.DDNSProvider{Name: "cf", Backend: "cloudflare", Zone: "example.net"}
+	a := m1.providerWithInstallID(unpinned)
+	b := m1.providerWithInstallID(unpinned)
+	if !validInstallID(a.InstallID) {
+		t.Fatalf("#16585: minted id %q must be well-formed", a.InstallID)
+	}
+	if a.InstallID != b.InstallID {
+		t.Fatalf("#16585: one manager must reuse its mint: %q vs %q", a.InstallID, b.InstallID)
+	}
+	if unpinned.InstallID != "" {
+		t.Fatalf("#16585: catalog entry must not be mutated, got %q", unpinned.InstallID)
+	}
+	if other := m2.providerWithInstallID(unpinned); other.InstallID == a.InstallID {
+		t.Fatal("#16585: two installs (managers) must mint different ids")
+	}
+	const pinned = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	if got := m1.providerWithInstallID(&config.DDNSProvider{Name: "cf", InstallID: pinned}); got.InstallID != pinned {
+		t.Fatalf("#16585: pinned id must be used verbatim, got %q", got.InstallID)
+	}
+	if m1.providerWithInstallID(nil) != nil {
+		t.Fatal("#16585: nil provider must stay nil")
 	}
 }
 

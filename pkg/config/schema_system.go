@@ -1173,6 +1173,7 @@ func ddnsServicesSchema() *schemaNode {
 			"hosted-zone-id":    {desc: "Route 53 hosted-zone id (e.g. Z123456ABCDEF)", args: 1, placeholder: "<zone-id>", children: nil},
 			"checkip-url":       {desc: "optional external check-IP URL for behind-NAT address detection (opt-in, #2691 P3)", args: 1, placeholder: "<url>", children: nil},
 			"checkip-allowlist": {desc: "comma/space-separated bogus addresses to ignore in a check-IP response (e.g. 1.1.1.1)", args: 1, placeholder: "<addr-list>", children: nil},
+			"install-id":        {desc: "durable per-install Cloudflare ownership id (#16585; auto-minted when unset, copy the same value to both HA peers)", args: 1, placeholder: "<hex>", children: nil, valueType: ValueString, validator: ValidateDDNSInstallID},
 		}},
 		"forced-refresh":    {desc: "Wire-update floor for an unchanged address (duration, e.g. 24h, or seconds; default 24h)", args: 1, placeholder: "<duration>", children: nil},
 		"error-backoff-max": {desc: "Cap for the per-scope error backoff (duration, e.g. 1h, or seconds; default 1h)", args: 1, placeholder: "<duration>", children: nil},
