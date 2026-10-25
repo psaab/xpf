@@ -857,6 +857,30 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				}
 			}
 		}
+		// #16548: a packed group leaf whose identity span carries a
+		// wildcard (`interface <*> authentication ...;`) is the braced
+		// wildcard container wearing a leaf's shape. Split it at its
+		// identity span and merge the braced equivalent through the
+		// wildcard branch below, so it fans out to every matching
+		// destination (or, matching nothing, invents nothing) instead of
+		// being adopted literally as a phantom instance named `<*>`.
+		if braced := packedWildcardLeafBraced16548(ancestorPath, s); braced != nil {
+			if haveExcept {
+				contrib := s.fromGroups
+				if len(contrib) == 0 {
+					contrib = []string{group}
+				}
+				addNodeContrib9862(braced.Children, contrib)
+			}
+			appendDuplicateBlockMergeMarkersToLeaves9023(braced.Children, markers)
+			if err := budget.charge(countNodes(braced.Children)); err != nil {
+				return err
+			}
+			if err := mergeNodes(dst, []*Node{braced}, ancestorPath, budget, group, vars, level, haveExcept, deferWildcards); err != nil {
+				return err
+			}
+			continue
+		}
 		if s.IsLeaf {
 			// #15716: a group packed `system services ssh root-login
 			// <val>;` leaf at the top level has no leaf peer (the inline
