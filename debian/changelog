@@ -1,4 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon/RPM: `rpmProbeTestGating` source-address→VIP matching is
+    now canonical (#16639): RETH unit addresses and `vrrp-group`
+    virtual-addresses key the VIP→RG map by parsed `netip.Addr`
+    (`Unmap`), as does the test's `source-address` lookup.
+    Previously both sides compared the authored strings exactly, so
+    a non-canonical IPv6 spelling (case, zero-run) or a 4-in-6 form
+    on either side missed, and an ip-monitoring-referenced test
+    bound by source-address only fell back to the lowest data RG:
+    in a split-RG cluster it ran only on the node that does not
+    hold the VIP (held without a verdict) and was dropped on the
+    node that does — that uplink's ip-monitoring failover dead
+    while ownership was split. Unparseable or unrelated
+    source-addresses still match nothing and keep the fallback.
   * Config/firewall: all four `firewall three-color-policer` burst
     leaves now enforce a one-frame floor of 1514 bytes (#16610):
     `committed-burst-size`/`excess-burst-size` (single-rate) and

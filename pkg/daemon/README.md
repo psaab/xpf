@@ -4238,6 +4238,10 @@ never lock an operator out of a remote box it manages.
   (`filterRPMForHAGating`): gating is per RPM test (#15074) — a probe whose
   tests bind RETHs in different RGs runs exactly the tests this node is
   primary for, deterministically, instead of picking one probe-wide RG.
+  Source-address→VIP matching is canonical (`netip.Addr`, `Unmap`,
+  #16639): unit addresses and `vrrp-group` virtual-addresses key the
+  VIP map by parsed address, so a non-canonical IPv6 spelling on
+  either side still gates by the VIP owner's RG.
 - `daemon_ipmon.go` — `assembleFRRConfig` (the SOLE `frr.FullConfig`
   constructor, shared by the full apply path and the routes-only
   actuator) + `actuateRouteOverlay` (FRR re-render → snapshot publish
