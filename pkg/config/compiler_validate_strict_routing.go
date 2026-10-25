@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"slices"
@@ -2378,6 +2380,102 @@ func validateBGPNeighborDescriptionPipeStrict16776(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// validateFRRNameAliasCollisionStrict hard-rejects a policy-options
+// config in which two distinct operator names in the same FRR object
+// class render to the SAME final FRR name (#16867). The renderer's
+// frrName is deliberately lossy: it aliases whitespace/control-bearing
+// names and single-token names over FRR's 128-byte YANG list-name bound
+// to "<fragment>-xpfesc-<hash>". A literal alias A = alias(L) therefore
+// renders byte-identically to its raw source L; FRR keys each object
+// class by name and MERGES same-named objects, so the pair would
+// silently fuse two distinct policies. The per-name half is closed at
+// the leaf: ValidateFRRObjectName rejects any name carrying the
+// reserved alias marker, so a literal alias can never be authored.
+// This gate is the pair-level backstop over the fully-compiled
+// *Config (authoring order cannot hide a pair), evaluating each class
+// with the SAME frrName function the renderer uses. Strict on commit /
+// commit-check; lenient on load / peer-sync (warn — #1960; the
+// render-side frrNameAliasCollision fails the apply CLOSED). Mirrors
+// validatePolicyReservedChainNameStrict.
+func validateFRRNameAliasCollisionStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	po := cfg.PolicyOptions
+	classes := []struct {
+		kind  string
+		names []string
+	}{
+		{"prefix-list", sortedPolicyNames16867(po.PrefixLists)},
+		{"community", sortedPolicyNames16867(po.Communities)},
+		{"as-path", sortedPolicyNames16867(po.ASPaths)},
+		{"policy-statement", sortedPolicyNames16867(po.PolicyStatements)},
+	}
+	for _, class := range classes {
+		seen := make(map[string]string, len(class.names))
+		for _, name := range class.names {
+			final := frrNameAlias16867(name)
+			if prev, ok := seen[final]; ok && prev != name {
+				return fmt.Errorf(
+					"%s names %q and %q render as the same FRR name %q; "+
+						"FRR merges same-named objects and would silently fuse "+
+						"two distinct policies (#16867) — rename one of them",
+					class.kind, prev, name, final)
+			}
+			seen[final] = name
+		}
+	}
+	return nil
+}
+
+// sortedPolicyNames16867 returns the keys of a PolicyOptions name map in
+// sorted order (deterministic first-error reporting).
+func sortedPolicyNames16867[V any](m map[string]V) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// frrNameAlias16867 mirrors pkg/frr's frrName EXACTLY: a single-token name
+// within FRRNameMaxLen renders unchanged; anything else renders as the
+// sanitized fragment plus "-xpfesc-" plus 8 hex chars of the SHA-256 of
+// the FULL raw name (fragment truncated so the alias stays within
+// FRRNameMaxLen). pkg/config cannot import pkg/frr (the renderer imports
+// config), so the derivation is duplicated here and pinned to the
+// renderer by TestFRRNameAliasParity16867 in pkg/frr, which asserts both
+// implementations agree on every fixture name.
+func frrNameAlias16867(name string) string {
+	if FRRSingleToken(name) && len(name) <= FRRNameMaxLen {
+		return name
+	}
+	frag := sanitizeFRRIdent16867(name)
+	if max := FRRNameMaxLen - len(FRRNameEscapeMarker) - 8; len(frag) > max {
+		frag = frag[:max]
+	}
+	sum := sha256.Sum256([]byte(name))
+	return frag + FRRNameEscapeMarker + hex.EncodeToString(sum[:4])
+}
+
+// sanitizeFRRIdent16867 mirrors pkg/frr's sanitizeFRRIdent: every rune
+// outside [A-Za-z0-9_] becomes '_', so the output is pure ASCII and a
+// later byte-length truncation can never split a multi-byte rune.
+func sanitizeFRRIdent16867(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func validatePolicyASPathRegexStrict(cfg *Config) error {

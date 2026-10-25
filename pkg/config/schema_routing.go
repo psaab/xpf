@@ -187,7 +187,7 @@ var schemaRoutingOptions = &schemaNode{desc: "Routing options", children: map[st
 }}
 
 var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[string]*schemaNode{
-	"prefix-list": {desc: "Prefix list", args: 1, placeholder: "<name>", keyValidator: ValidateFRRObjectName, children: nil},
+	"prefix-list": {desc: "Prefix list", args: 1, placeholder: "<name>", keyValidator: ValidateFRRPrefixListName, children: nil},
 	"community": {desc: "Community", args: 1, placeholder: "<name>", keyValidator: ValidateFRRObjectName, closedWorld: true, children: map[string]*schemaNode{
 		"members": {desc: "Community members", args: 1, multi: true, placeholder: "<community>", children: nil},
 	}},

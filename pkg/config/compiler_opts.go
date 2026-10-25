@@ -3330,6 +3330,12 @@ type compileOpts struct {
 	lenientPrefixListReservedRIPGate16866 bool
 	// lenientPolicyReservedOrName16868 downgrades the #16868 OR-namespace gate.
 	lenientPolicyReservedOrName16868 bool
+	// lenientFRRNameAliasCollision16867 (#16867) downgrades the
+	// frrName-alias pair-collision gate to a warning on tolerant paths:
+	// a config persisted by an older binary may already carry a literal
+	// alias beside its source name. It must still boot (#1960); the
+	// render-side frrNameAliasCollision fails the apply CLOSED.
+	lenientFRRNameAliasCollision16867 bool
 	// lenientVRRPVirtualAddress (#3013) downgrades the VRRP virtual-address
 	// subnet-containment gate (validateVRRPVirtualAddressSubnet) from a hard
 	// compile error to a cfg.Warnings entry. A VRRP virtual-address that does
@@ -4198,6 +4204,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyReservedChainName:           true,
 		lenientPrefixListReservedRIPGate16866:    true,
 		lenientPolicyReservedOrName16868:         true,
+		lenientFRRNameAliasCollision16867:        true,
 		lenientVRRPVirtualAddress:                true,
 		lenientVRRPVIPCount:                      true,
 		lenientVRRPVIPEmpty:                      true,

@@ -43,18 +43,37 @@ func frrOperandOrOmit(operand, v string) bool {
 // as-path access-list) as ONE token.
 //
 // A name FRR can carry is returned unchanged, so every existing render is
-// byte-identical. A name the commit gate now refuses, persisted or peer-synced
+// byte-identical. #16867: a single-token name over FRR's 128-byte YANG
+// `list-name` bound (FRRNameMaxLen) is NOT carried unchanged — FRR rejects
+// the leaf yet leaves a half-built match-condition node that aborts the
+// routing daemons on the next `show running-config` — so it takes the
+// alias below too, with its fragment truncated to keep the alias within
+// the bound. A name the commit gate now refuses, persisted or peer-synced
 // before the gate existed, carries whitespace, and FRR splits it into extra
 // arguments. Skipping such a line is not safe here, because omitting a
 // `neighbor ... route-map ... out` REMOVES the outbound filter. So it is rendered
 // under a deterministic alias instead: the sanitizeFRRIdent fragment plus a hash
 // of the full name. The hash is what keeps `a b` and `a_b` apart. Every
 // definition AND reference site calls this on the same final string, so they
-// always agree.
+// always agree. The alias carries config.FRRNameEscapeMarker, which the
+// commit gate reserves (ValidateFRRObjectName rejects it), so no committed
+// operator name can be spelled identically to another name's alias;
+// frrNameAliasCollision fails the apply closed when a tolerant-path
+// config still carries such a pair.
 func frrName(name string) string {
-	if config.FRRSingleToken(name) {
+	if config.FRRSingleToken(name) && len(name) <= config.FRRNameMaxLen {
 		return name
 	}
+	// #16867: an OVERLONG single-token name takes the same alias. The
+	// fragment is bounded so fragment + "-xpfesc-" + 8 hex stays within
+	// FRRNameMaxLen; the hash of the FULL name keeps two long names that
+	// share the truncated fragment apart, and definition and reference
+	// sites agree because both call frrName on the same final string.
+	frag := sanitizeFRRIdent(name)
+	suffix := config.FRRNameEscapeMarker
+	if max := config.FRRNameMaxLen - len(suffix) - 8; len(frag) > max {
+		frag = frag[:max]
+	}
 	sum := sha256.Sum256([]byte(name))
-	return sanitizeFRRIdent(name) + "-xpfesc-" + hex.EncodeToString(sum[:4])
+	return frag + suffix + hex.EncodeToString(sum[:4])
 }
