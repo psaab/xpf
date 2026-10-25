@@ -10,6 +10,18 @@ xpf (0.0.0) unstable; urgency=medium
     1500-overhead (1476/1472 IPv4 unkeyed/keyed, 1456/1452 IPv6),
     mirroring native_gre_inner_mtu; a configured MTU is unchanged
     and a smaller hand-set MTU is never raised.
+  * wire-routing-separation #11416 fixture-shape guards: stop matching
+    the script's own text (#16516). The two cells matched $(cat "$0")
+    against needles that also appear on the guard's own lines, so
+    dropping the populated lan->wire-vrf policy and SNAT statements
+    (and their cleanup deletes) stayed green. The populated add/delete
+    transaction is now rendered by a single pure printer,
+    populated_cli_transcript, which cli_commit_populated pipes live and
+    the selftest calls directly with the fixture defaults pinned,
+    asserting the rendered zone/policy/SNAT sets and cleanup deletes
+    as whole lines (and no wan zone). The policy/NAT-drop mutant now
+    reds both cells and a wan-zone mutant still reds the first
+    (33 cells, unchanged count).
 
   * Daemon-kernel probe selftest: kill the -json=false, SKIP-guard
     and go-exit mutants (#16507). Cell 9 asserted only the leg PASS
