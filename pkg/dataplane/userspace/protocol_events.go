@@ -57,14 +57,16 @@ const (
 	// EventTypeSessionClose HA session-sync delta — both are produced per
 	// close; the HA sync path is unchanged.
 	EventFrameTypeSessionClose uint8 = 14 // helper → daemon (RT_FLOW session close)
-	// #2508: RT_FLOW SESSION_CREATE on the raw dataplane-event channel,
+	// #2508/#15946: RT_FLOW SESSION_CREATE on the raw dataplane-event channel,
 	// carrying the canonical 144-byte dataplane.Event payload (#3056) with the
 	// event-type byte = dataplane.EventTypeSessionOpen (1). Emitted by the
-	// helper ONLY for sessions admitted by a policy configured with
-	// `then log session-init` — there is no flowexport consumer of session
-	// opens, so this frame is gated entirely at the producer. Routed
+	// helper for every fresh admission — flowexport consumes SESSION_OPEN
+	// (tracker registration and the open-side sampling decision) — with the
+	// per-policy syslog gate at payload [135] reflecting
+	// `then log session-init`, enforced on the Go side. Routed
 	// through the same decodeDataplaneEventPayload → ProcessRawEvent path;
-	// logEvent then formats it as an RT_FLOW_SESSION_CREATE syslog record.
+	// logEvent then formats it as an RT_FLOW_SESSION_CREATE syslog record
+	// when the gate is set.
 	EventFrameTypeSessionCreate uint8 = 15 // helper → daemon (RT_FLOW session create)
 )
 

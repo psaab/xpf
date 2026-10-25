@@ -825,18 +825,19 @@ func (er *EventReader) logEvent(data []byte) {
 		rec.SessionID = rec.EventSeq
 	}
 
-	// #2508: per-policy RT_FLOW SYSLOG gate. The userspace-dp
+	// #2508/#15946: per-policy RT_FLOW SYSLOG gate. The userspace-dp
 	// SESSION_CREATE/SESSION_CLOSE frames carry a "should-log-to-syslog"
 	// bit in the final payload byte: it is set ONLY when the admitting
 	// policy was configured with `then log session-init`/`session-close`.
 	// When the bit is clear, suppress the human-facing log consumers
 	// (security-log buffer, slog, syslog clients, local event writers) but
 	// STILL run the registered callbacks below — the global NetFlow/IPFIX
-	// session-close exporter (#2460) accounts every close regardless. For
-	// every other event type the byte is 0 and this gate never fires
-	// (those frames are unconditionally logged); session opens are
-	// producer-gated in the helper, so a SESSION_CREATE frame that reaches
-	// here always has the bit set.
+	// exporters (#2460/#15946) account every close and consume every
+	// open (tracker/sampling) regardless. For every other event type the
+	// byte is 0 and this gate never fires (those frames are
+	// unconditionally logged); since #15946 the helper emits a
+	// SESSION_CREATE for every fresh admission, so a create that reaches
+	// here may have the bit clear (flowexport-only open).
 	//
 	// This gate is SCOPED to the userspace-dp event-stream path
 	// (`er.source == nil`, i.e. records fed via ProcessRawEvent) — the ONLY

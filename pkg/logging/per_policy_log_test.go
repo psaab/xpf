@@ -81,9 +81,9 @@ func TestPerPolicyLogGate_CloseLoggedWhenFlagSet(t *testing.T) {
 }
 
 func TestPerPolicyLogGate_OpenSuppressedWhenFlagUnset(t *testing.T) {
-	// A SESSION_CREATE frame with the gate clear should never reach the
-	// human-facing log path. (In practice the helper producer-gates the
-	// create frame, but the Go side must defend against it independently.)
+	// Since #15946 the helper emits a SESSION_CREATE for every fresh
+	// admission, including flowexport-only opens with the gate clear;
+	// those must never reach the human-facing log path.
 	reader, buffer, cbCount := newGatedReader(t)
 
 	if ok := reader.ProcessRawEvent(rawSessionFrame(eventTypeSessionOpen, 0)); !ok {
@@ -93,9 +93,9 @@ func TestPerPolicyLogGate_OpenSuppressedWhenFlagUnset(t *testing.T) {
 	if got := len(buffer.Latest(16)); got != 0 {
 		t.Fatalf("open with gate=0: buffer count = %d, want 0 (per-policy SYSLOG record must be suppressed)", got)
 	}
-	// There is no flowexport consumer of opens, but the callback fan-out is
-	// type-agnostic, so it still fires; the human-facing suppression is the
-	// behavior under test.
+	// Flowexport consumes opens (#15946 tracker/sampling) via the
+	// type-agnostic callback fan-out, so it still fires; the
+	// human-facing suppression is the behavior under test.
 	if *cbCount != 1 {
 		t.Fatalf("open with gate=0: callback count = %d, want 1", *cbCount)
 	}
@@ -180,12 +180,13 @@ func TestPerPolicyLogGate_Matrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reader, buffer, _ := newGatedReader(t)
 
-			// The helper emits the create frame only when init is set and the
-			// close frame always (gated on the Go side by the close flag).
-			if tc.initFlag != 0 {
-				if ok := reader.ProcessRawEvent(rawSessionFrame(eventTypeSessionOpen, tc.initFlag)); !ok {
-					t.Fatalf("ProcessRawEvent(open) returned false")
-				}
+			// Since #15946 the helper always emits the create frame on a
+			// fresh admission (gate byte = init flag) and always emits
+			// the close frame (gate byte = close flag); the Go side gates
+			// the human-facing record on each frame's own flag, so feed
+			// both frames unconditionally.
+			if ok := reader.ProcessRawEvent(rawSessionFrame(eventTypeSessionOpen, tc.initFlag)); !ok {
+				t.Fatalf("ProcessRawEvent(open) returned false")
 			}
 			if ok := reader.ProcessRawEvent(rawSessionFrame(eventTypeSessionClose, tc.closeFlag)); !ok {
 				t.Fatalf("ProcessRawEvent(close) returned false")

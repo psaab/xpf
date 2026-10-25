@@ -229,16 +229,30 @@ periodic ACK from the daemon.
   (flowexport needs every close), but its final payload byte (offset 135)
   carries a per-policy SYSLOG gate — the Go `logEvent` path emits the
   RT_FLOW_SESSION_CLOSE SYSLOG record only when the bit is set, while the
-  registered callbacks (NetFlow/IPFIX, #2460) always run. There is NO
-  flowexport consumer of session opens, so `MSG_SESSION_CREATE_RT_FLOW`
-  (15) is producer-gated: it is emitted (via `emit_session_create_rt_flow`)
-  ONLY when the admitting policy requested `then log session-init`, carries
-  the same 168-byte session payload with the event-type byte set to SESSION_OPEN
-  (1, rendered as RT_FLOW_SESSION_CREATE on the Go side; the create frame
-  leaves the #2749 [144:152] class-of-service block zero). The SESSION_CREATE
+  registered callbacks (NetFlow/IPFIX, #2460) always run.
+  (#15946) `MSG_SESSION_CREATE_RT_FLOW` (15) is likewise emitted for
+  EVERY fresh admission (`delta.kind == Open && delta.is_admission` in
+  `afxdp/session_delta.rs`; #15126 suppresses re-announced opens from
+  LossResync re-export and peer-to-local promote): flowexport is a real
+  SESSION_OPEN consumer — the daemon's `trackFlowOpen` feed registers
+  the flow with the active/inactive tracker and makes the single
+  1-in-N sampling decision at open, so gating creates on
+  `log session-init` would starve timeout export and output-only
+  sampled flows for policies without session-init logging. The create
+  carries the same 168-byte session payload with the event-type byte
+  set to SESSION_OPEN (1, rendered as RT_FLOW_SESSION_CREATE on the Go
+  side). Unlike the close, offset [135] on a create carries the
+  per-policy SYSLOG gate for THIS frame: set only when the admitting
+  policy requested `then log session-init` (#15946), so the Go side
+  suppresses the human-facing RT_FLOW_SESSION_CREATE record when clear
+  while the registered flowexport callbacks still run. (#16303) the
+  create stamps its resolved egress ifindex at [148:152] (LE u32) —
+  the same additive slot the close frame stamps — so the Go decoder
+  can name the open's output interface for per-interface sampling;
+  [144:148] (ToS / TCP flags / direction / reserved on a close) stay 0
+  on a create: no traffic has been observed yet. The SESSION_CREATE
   frame carries the #3056 admitting policy ID in the usual [44:48] slot (it
-  has no created-subsec-nanos), and always sets
-  the gate byte. (#12889) the create frame also carries the session's
+  has no created-subsec-nanos). (#12889) the create frame also carries the session's
   ADMISSION instant in `timestamp_ns` (offset 0, absolute Unix
   **nanoseconds**, little-endian u64) — the same anchored
   monotonic→wall-clock conversion the close frame runs (#2465), applied to
@@ -257,6 +271,15 @@ periodic ACK from the daemon.
   frame, the create frame rides the
   per-kind budget path under `DataplaneEventKind::SessionCreate` (counters
   `event_stream_session_create_{sent,dropped}`), not a bare `try_send`.
+  Budget/limiter consequence (#15946): because creates are now one per
+  fresh admission rather than one per session-init-logged admission,
+  SessionCreate volume scales with the new-flow rate. It still shares
+  the shared 1000/s + burst 1024 telemetry GCRA and its per-kind queue
+  share (only SessionClose has the separately sized 8192/s budget,
+  #14609); a shed create is counted under
+  `event_stream_session_create_{sent,dropped}` and loses that flow's
+  open-side tracker/sampling registration (the close still exports via
+  its own path), never a fail-open of the SYSLOG gate.
   `MSG_FILTER_LOG` intentionally reuses the RT_FLOW `reason` byte as a
   filter-log source discriminator (`pbr`, `input`, `output`, `cached-output`,
   or `lo0`). Close events interpret that same byte as a close reason. #13971
@@ -291,6 +314,11 @@ periodic ACK from the daemon.
   so the IPFIX 1-in-N sampler record (computed in Go over delivered
   closes) is never silently falsified by an invisible rate shed below
   the channel capacity. The other kinds keep the shared 1000/s limit.
+  That includes `SessionCreate` (#15946): creates arrive at the
+  new-flow rate (one per fresh admission), so under a new-flow burst
+  they are the kind most likely to hit the shared limiter — size and
+  alert on `event_stream_session_create_{sent,dropped}`, not on the
+  close counters, when flowexport opens appear missing.
 - `codec_tests.rs`, `producer_tests.rs`, `tests.rs` — co-located.
 
 ## Why push

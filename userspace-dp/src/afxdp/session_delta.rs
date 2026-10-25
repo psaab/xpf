@@ -964,7 +964,7 @@ pub(super) fn flush_session_deltas(
                 // #13974: a MissingNeighborSeed delta exists to drive local
                 // RT_FLOW and flow export, not to claim HA authority. Keep it
                 // out of the lossless session-sync stream while letting the
-                // producer-gated telemetry frames below run normally.
+                // best-effort telemetry frames below run normally.
                 // #14646: a bulk_resync (LossResync) delta that cannot be
                 // queued does NOT re-arm the latch — the same non-arming
                 // contract as the RPC fallback leg above (#8593). During
@@ -1068,14 +1068,13 @@ pub(super) fn flush_session_deltas(
                         policy_generation,
                     );
                 }
-                // #2508: a session admitted by a policy configured with
-                // `then log session-init` emits an RT_FLOW SESSION_CREATE frame
-                // (type 15) on the same raw dataplane-event channel. Unlike the
-                // close frame this is producer-gated: there is no flowexport
-                // consumer of session opens, so we only ever send it when the
-                // admitting policy requested session-init logging. The
-                // SESSION_CLOSE syslog record is gated on the Go side (via the
-                // frame's gate byte) because flowexport still needs every close.
+                // #2508/#15946: a fresh admission emits an RT_FLOW
+                // SESSION_CREATE frame (type 15) on the same raw
+                // dataplane-event channel. Since #15946 flowexport's
+                // tracker is a real SESSION_OPEN consumer, the create is
+                // NOT gated on `then log session-init` at the producer;
+                // the per-policy syslog selection rides the frame's gate
+                // byte and is enforced on the Go side, as for closes.
                 // #15126: only a fresh admission may emit CREATE. A
                 // LossResync re-export (bulk_resync) or a peer->local
                 // promote re-announces a session already created and

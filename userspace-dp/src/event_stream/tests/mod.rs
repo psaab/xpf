@@ -160,6 +160,8 @@ fn test_close_delta(kind: crate::session::SessionDeltaKind) -> crate::session::S
 
 mod backpressure;
 mod control_frames;
+// #16579: SESSION_CREATE documentation-contract guards.
+mod create_docs_16579;
 mod drain;
 mod replay_budget;
 mod rt_flow;

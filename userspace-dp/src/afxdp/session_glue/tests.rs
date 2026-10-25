@@ -12995,8 +12995,9 @@ fn flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191()
     decision.nat.rewrite_dst = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)));
     decision.nat.rewrite_dst_port = Some(22);
     let mut metadata = test_metadata();
-    // SESSION_CREATE is producer-gated on the admitting policy's session-init
-    // log selection; SESSION_CLOSE always emits.
+    // SESSION_CREATE fires for every fresh admission (#15946); this
+    // specimen sets session-init logging so its gate byte is set too.
+    // SESSION_CLOSE always emits.
     metadata.log_session_init = true;
 
     let make_delta = |kind| SessionDelta {

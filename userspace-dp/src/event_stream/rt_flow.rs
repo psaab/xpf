@@ -163,13 +163,16 @@ impl EventStreamWorkerHandle {
         );
     }
 
-    /// #2508: emit an RT_FLOW SESSION_CREATE frame (type 15) for a session
-    /// admitted by a policy configured with `then log session-init`. There is
-    /// NO flowexport consumer of session opens, so unlike the close frame this
-    /// is gated entirely at the producer: the caller invokes it only when
-    /// `delta.metadata.log_session_init` is set. The frame rides the same raw
-    /// dataplane-event channel and is formatted as RT_FLOW_SESSION_CREATE by
-    /// the Go logEvent path. Best-effort (`try_send`).
+    /// #2508/#15946: emit an RT_FLOW SESSION_CREATE frame (type 15) for
+    /// every fresh admission. Flowexport is a real SESSION_OPEN consumer
+    /// (the daemon tracker/sampling feed), so unlike the pre-#15946
+    /// contract this is NOT gated on `log session-init` at the producer:
+    /// the caller (`afxdp/session_delta.rs`) invokes it for every
+    /// `Open && is_admission` delta. The per-policy syslog selection
+    /// rides the frame's [135] gate byte (`delta.metadata.log_session_init`)
+    /// and is enforced on the Go side, as for closes. The frame rides the
+    /// same raw dataplane-event channel and is formatted as
+    /// RT_FLOW_SESSION_CREATE by the Go logEvent path when the gate is set.
     /// #2615: `app_id` is the application resolved for the new session's
     /// 5-tuple (caller runs the same `app_catalog.lookup` the close path uses,
     /// mirroring #2520) and `ingress_ifindex` is the admitting binding's
@@ -189,11 +192,11 @@ impl EventStreamWorkerHandle {
         }
         let nat = &delta.decision.nat;
         // #2512: same per-kind budget path as the close frame (see
-        // emit_session_close_rt_flow). SESSION_CREATE is producer-gated by
-        // the caller (only emitted for `log session-init` policies), but it
-        // still rides the shared dataplane-event channel so it MUST honor the
-        // same limiter / budget / counters under
-        // DataplaneEventKind::SessionCreate rather than a bare `try_send`.
+        // emit_session_close_rt_flow). SESSION_CREATE is emitted for every
+        // fresh admission (#15946), but it still rides the shared
+        // dataplane-event channel so it MUST honor the same limiter /
+        // budget / counters under DataplaneEventKind::SessionCreate
+        // rather than a bare `try_send`.
         // #12889: stop discarding the wall-clock half of the anchored reading.
         // Convert the Open delta's monotonic admission instant
         // (`created_ns`, stamped at install) to an absolute wall-clock value
