@@ -212,7 +212,8 @@ func redistVariantTerm16864(po *config.PolicyOptionsConfig, term *config.PolicyT
 		return &c, false, false
 	}
 	// The verb the generic renderer assigns this term.
-	actionDeny := (term.Action == "reject" && !term.NextPolicy) || (term.NextPolicy && term.Action != "")
+	actionDeny := (term.Action == "reject" && !term.NextPolicy) || (term.NextPolicy && term.Action != "") ||
+		(term.NextTerm && term.Action != "") || (term.NextTerm && term.NextPolicy)
 
 	if len(term.FromCommunity) > 0 || len(term.FromASPath) > 0 {
 		if proto != "bgp" {

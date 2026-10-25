@@ -39,7 +39,7 @@ func policyStatementHasNextPolicy(ps *PolicyStatement) bool {
 		return false
 	}
 	for _, term := range ps.Terms {
-		if term != nil && term.NextPolicy && term.Action == "" {
+		if term != nil && term.NextPolicy && term.Action == "" && !term.NextTerm {
 			return true
 		}
 	}

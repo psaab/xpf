@@ -86,11 +86,12 @@ func narrowedSurvivorShape10129(kept []string, po *config.PolicyOptionsConfig) s
 			// member's remaining terms and explicit default. Later
 			// unconditional actions therefore cannot prove that the
 			// survivor terminates before the next member / fallback.
-			if term.NextPolicy && term.Action == "" {
+			if term.NextPolicy && term.Action == "" && !term.NextTerm {
 				break
 			}
-			if term.NextPolicy && term.Action != "" {
-				// Contradictory actions render as deny: matching routes
+			if (term.NextPolicy && term.Action != "") || (term.NextTerm && term.Action != "") ||
+				(term.NextTerm && term.NextPolicy) {
+				// Contradictory continuations render as deny: matching routes
 				// terminate while non-matching routes continue.
 				if !policyTermHasAuthoredMatch10129(term) {
 					return "match-all"

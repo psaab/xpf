@@ -25,3 +25,21 @@ func TestShowPolicyOptionsDisplaysBothConflictingActions11780(t *testing.T) {
 		}
 	}
 }
+
+func TestShowPolicyOptionsDisplaysNextTerm16872(t *testing.T) {
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if _, err := store.SyncApply(`policy-options { policy-statement p1 { term t1 { then { local-preference 200; next term; } } } }`, nil); err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+	c := &CLI{store: store}
+	var showErr error
+	out := captureStdout(t, func() {
+		showErr = c.handleShow([]string{"policy-options"})
+	})
+	if showErr != nil {
+		t.Fatalf("show policy-options: %v", showErr)
+	}
+	if !strings.Contains(out, "then next term") {
+		t.Errorf("show policy-options output missing %q:\n%s", "then next term", out)
+	}
+}

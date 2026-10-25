@@ -988,7 +988,7 @@ func policyHasNextPolicyTerm(ps *config.PolicyStatement) bool {
 		return false
 	}
 	for _, term := range ps.Terms {
-		if term != nil && term.NextPolicy && term.Action == "" {
+		if term != nil && term.NextPolicy && term.Action == "" && !term.NextTerm {
 			return true
 		}
 	}
@@ -1050,8 +1050,9 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// to Action=reject (#12517); the ordinary action mapping below keeps
 		// tolerant FRR rendering denied rather than flipping it to permit.
 		action := "permit"
-		validNextPolicy := term.NextPolicy && term.Action == ""
-		if term.Action == "reject" && !term.NextPolicy || term.NextPolicy && term.Action != "" {
+		validNextPolicy := term.NextPolicy && term.Action == "" && !term.NextTerm
+		if term.Action == "reject" && !term.NextPolicy || term.NextPolicy && term.Action != "" ||
+			term.NextTerm && term.Action != "" || term.NextTerm && term.NextPolicy {
 			action = "deny"
 		}
 
@@ -1081,7 +1082,8 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// Ordinary fall-through reaches the policy default; next-policy
 		// jumps over it. The selected continuation is emitted after the
 		// term's match/set clauses, immediately before `exit`, below.
-		nonTerminating := !term.NextPolicy && term.Action != "accept" && term.Action != "reject"
+		nonTerminating := !term.NextPolicy && term.Action != "accept" && term.Action != "reject" &&
+			!(term.NextTerm && term.NextPolicy)
 
 		// #9881 fail-closed term rule (parent-review HIGH): the access-list
 		// loop omits flagged/invalid lists, but a `match as-path` reference

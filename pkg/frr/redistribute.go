@@ -549,6 +549,12 @@ func termCanAcceptForRedist14698(term *config.PolicyTerm) bool {
 	if term.NextPolicy && term.Action != "" {
 		return false // renders deny (contradictory actions)
 	}
+	if term.NextTerm && term.Action != "" {
+		return false // renders deny (contradictory next term + terminal, #16872)
+	}
+	if term.NextTerm && term.NextPolicy {
+		return false // renders deny (mixed continuations, #16872)
+	}
 	return !(term.Action == "reject" && !term.NextPolicy)
 }
 

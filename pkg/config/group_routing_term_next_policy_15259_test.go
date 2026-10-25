@@ -64,15 +64,15 @@ policy-options { policy-statement P { term t1 { then next policy; } apply-groups
 			term: "reject",
 		},
 		{
-			// Malformed flow-control (`next term` is not `next policy` in
-			// routing) supplied by a group beside an inline terminal must
-			// also materialise so the #11780 malformed gate sees it, instead
-			// of being dropped to a clean accept. Its diagnostic names the
-			// malformed value, not the surviving terminal.
-			name: "group-malformed-next-container-then-vs-inline-accept-leaf",
+			// #16872: `next term` is now a valid routing flow-control
+			// action, but beside an inline terminal it is contradictory
+			// (Junos skips the terminal), so it must still materialise
+			// and the gate must reject it — now via the next-term
+			// conflict arm, whose diagnostic names both actions.
+			name: "group-next-term-container-then-vs-inline-accept-leaf",
 			src: `groups { G { policy-options { policy-statement P { term t1 { then next term; } } } } }
 policy-options { policy-statement P { term t1 { then accept; } apply-groups G; } }`,
-			term: "term",
+			term: "accept",
 		},
 	}
 	for _, tc := range cases {

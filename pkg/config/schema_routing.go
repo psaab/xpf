@@ -232,10 +232,12 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 			"then": {desc: "Action", packedFlatRun: true, children: map[string]*schemaNode{
 				// `then next policy` leaves this policy's remaining terms and
 				// default action, then continues at the next policy in the chain.
-				"next": {desc: "Continue with the next policy", args: 1,
-					valueType: ValueEnumOf, valueDesc: "Policy continuation (policy)",
-					valueExamples: []string{"policy"}, validator: ValidateEnum([]string{"policy"}),
-					placeholder: "<policy>", children: nil},
+				// `then next term` (#16872) skips to the next term of the same
+				// policy — the explicit spelling of modifier-only fall-through.
+				"next": {desc: "Continue with the next policy or next term", args: 1,
+					valueType: ValueEnumOf, valueDesc: "Policy continuation (policy) or next term (term)",
+					valueExamples: []string{"policy", "term"}, validator: ValidateEnum([]string{"policy", "term"}),
+					placeholder: "<policy|term>", children: nil},
 				"accept": {desc: "Accept route", children: nil},
 				"reject": {desc: "Reject route", children: nil},
 				"next-hop": {

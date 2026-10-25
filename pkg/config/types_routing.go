@@ -199,6 +199,15 @@ type PolicyTerm struct {
 	// NextPolicy skips the remaining terms and the policy default, then resumes
 	// at the next policy in the evaluated policy chain.
 	NextPolicy bool
+	// NextTerm is the explicit non-terminating marker `then next term`
+	// (#16872): modifiers apply and evaluation continues at the next term
+	// of the same policy. It renders exactly like a modifier-only term
+	// (permit + on-match next, the existing fall-through), so it needs no
+	// renderer state; the flag lets `show policy-options` display the
+	// authored action. Junos skips any accept/reject in the same then, so
+	// NextTerm beside a terminal action is contradictory and is judged by
+	// the same #11780 conflict arm as NextPolicy.
+	NextTerm bool
 	// hasNextHopOperand12070 / hasASPathPrependOperand12070 preserve action
 	// presence when an empty, whitespace-only, or keyword-valued operand would
 	// otherwise be erased before the #12070 compiled-term gate. Those inputs
