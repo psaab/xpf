@@ -314,8 +314,21 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 	// #7121: a routing-policy `from protocol` token is rendered verbatim as
 	// ` match source-protocol` and ONE FRR-rejected line degrades the whole
 	// managed reload, so an unknown token cannot be left to the render side.
+	// #16577: strict on commit / commit-check; tolerant load / peer-sync
+	// downgrade to a warning and poison the offending term to reject (the
+	// renderer then omits its unknown match line) so a persisted or
+	// peer-synced config carrying a Junos token FRR cannot emit
+	// (aggregate/local/access-internal, a typo) still boots (#1960).
+	// Junos ospf3/ospf2 alias to ospf6/ospf in FRRRoutingProtocolKeyword
+	// and never reach this gate.
 	if err := validateRoutingPolicyProtocolsStrict(cfg); err != nil {
-		strictErrs = append(strictErrs, err)
+		if opts.lenientRoutingPolicyProtocols16577 {
+			failClosedRoutingPolicyProtocols16577(cfg)
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("routing policy protocol (downgraded to warning on tolerant path; the offending term is forced to reject and renders no source-protocol match): %v", err))
+		} else {
+			strictErrs = append(strictErrs, err)
+		}
 	}
 	// #1830 (e): the #1733 equal-flow worker-cap validator
 	// (validateEqualFlowWorkerCapStrict / MaxEqualFlowWorkers) is retired.

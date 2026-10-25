@@ -503,6 +503,18 @@ Multi-value matches survive `Format` / `FormatSet` replay. List closure is
 tracked structurally: bare or quoted clause words are values inside a balanced
 list, while an unclosed bracketed `from` list fails closed.
 
+**Routing-policy `from protocol` value domain (#7121, tolerant downgrade
+#16577):** `validateRoutingPolicyProtocolsStrict` checks every term token
+against the `FRRRoutingProtocolKeyword` SSOT. Junos `ospf3`/`ospf2` alias
+to `ospf6`/`ospf` there, so they strict-commit as OSPFv3/OSPFv2 and render
+`match source-protocol ospf6`/`ospf`. Tokens FRR cannot emit (`aggregate`,
+`local`, `access-internal`, typos) strict-reject; on tolerant load /
+peer-sync (`lenientRoutingPolicyProtocols16577`) they warn and
+`failClosedRoutingPolicyProtocols16577` forces the offending term to
+`reject`, and the FRR renderer omits its unknown `match source-protocol`
+line — a persisted config boots instead of failing Store.Load into
+bootstrap/lifeline (#1960).
+
 **Routing-policy `to` matches and unmodelled `then` actions fail closed
 (#16569):** the `to` sibling of `from` (Junos BGP-import `to neighbor` ≡
 `from neighbor`) is recorded on `UnknownTo` (term and statement level) and

@@ -1774,6 +1774,14 @@ type compileOpts struct {
 	// `from`-leaf gate to a warning on tolerant loads; matching fails closed by
 	// changing any affected term to reject.
 	lenientPolicyFromUnknown11779 bool
+	// lenientRoutingPolicyProtocols16577 (#16577) downgrades the routing-
+	// policy `from protocol` value-domain gate
+	// (validateRoutingPolicyProtocolsStrict, #7121) to a warning on tolerant
+	// loads; the offending term is poisoned to reject so the renderer omits
+	// its unknown `match source-protocol` line. Junos ospf3/ospf2 are NOT
+	// downgraded — they alias to ospf6/ospf in FRRRoutingProtocolKeyword and
+	// strict-commit. Same #1960 doctrine as lenientPolicyFromUnknown11779.
+	lenientRoutingPolicyProtocols16577 bool
 	// lenientRoutingTermTerminalConflict (#14425) downgrades the routing
 	// policy-statement term conflicting-terminal-action gate to a warning
 	// on tolerant loads; conflicting terms fail closed to reject.
@@ -3860,6 +3868,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyDefaultConflict14433:        true,
 		lenientRoutingTermTerminalConflict:       true,
 		lenientPolicyFromUnknown11779:            true,
+		lenientRoutingPolicyProtocols16577:       true,
 		lenientRouteDispositionConflict:          true,
 		lenientStaticNextHopFamily:               true,
 		lenientStaticRouteCIDRMaskSpelling:       true,

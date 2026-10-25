@@ -1263,13 +1263,24 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// route-map sequence, so emitVariants dispatches one sequence per
 			// unique canonical protocol value and this body emits at most one match line.
 			if fromProtocol != "" {
-				fromProtocol = config.CanonicalSourceProtocol(fromProtocol)
-				// #4498: sanitize the protocol token — the same #4097/#4482
-				// render-side belt the other route-map free-text slots use.
-				// A tolerant-load / peer-synced / rolled-back FromProtocols
-				// value with an embedded newline must not inject an extra
-				// frr.conf line regardless of the load path (#1960).
-				fmt.Fprintf(&b, " match source-protocol %s\n", sanitizeFRRValue(fromProtocol))
+				// #16577 render belt: a poisoned tolerant-load term is
+				// forced to deny by the compiler, but its authored token
+				// stays in FromProtocols. Never emit a token FRR cannot
+				// parse — one rejected `match source-protocol` line
+				// degrades the whole managed reload (#1880/#2223). The
+				// sequence renders as a bare deny, matching the poison.
+				if !config.RoutingProtocolResolvable(fromProtocol) {
+					slog.Warn("frr: omitting unknown source-protocol match on tolerant-loaded term",
+						"route_map", routeMapName, "term", term.Name, "protocol", fromProtocol)
+				} else {
+					fromProtocol = config.CanonicalSourceProtocol(fromProtocol)
+					// #4498: sanitize the protocol token — the same #4097/#4482
+					// render-side belt the other route-map free-text slots use.
+					// A tolerant-load / peer-synced / rolled-back FromProtocols
+					// value with an embedded newline must not inject an extra
+					// frr.conf line regardless of the load path (#1960).
+					fmt.Fprintf(&b, " match source-protocol %s\n", sanitizeFRRValue(fromProtocol))
+				}
 			}
 
 			// fromCommunity / fromASPath are ONE entry of a possibly
