@@ -968,6 +968,11 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	// be silently discarded by the section compiler. Surface those keywords as
 	// warnings on both strict commit and tolerant load / peer-sync paths.
 	openWorldRoutingWarnings := warnUnknownRoutingLeaves10707(tree)
+	// #16621: specific warning for refused BGP keychain/algorithm
+	// spellings on both compile paths (the strict schema gate refuses
+	// them; a direct compile without SchemaValidate must still name
+	// the dropped statement, not only the generic #10707 advisory).
+	bgpAuthWarnings16621 := warnBGPAuth16621(tree)
 
 	var warnings []string
 	warnings = append(warnings, ctrlCharWarnings...)
@@ -1022,6 +1027,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	warnings = append(warnings, bareLeafWarnings...)
 	warnings = append(warnings, staticRouteQNHWarnings...)
 	warnings = append(warnings, openWorldRoutingWarnings...)
+	warnings = append(warnings, bgpAuthWarnings16621...)
 	warnings = append(warnings, rootLoginDupWarnings...)
 	return warnings, uncovered16001, nil
 }

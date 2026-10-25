@@ -502,9 +502,15 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		"router-id":  {desc: "Router ID", args: 1, placeholder: "<address>", children: nil},
 		"cluster-id": {desc: "Cluster ID", args: 1, valueType: ValueIPAddress, valueDesc: "Route-reflector cluster-id (IPv4 dotted-quad, or 32-bit integer 1..4294967295)", valueExamples: []string{"10.0.0.1", "1"}, validator: ValidateBGPClusterID, placeholder: "<id>", children: nil},
 		// #16572: whole-protocol shut (BGPConfig.Disable).
-		"disable":          {desc: "Disable BGP", children: nil},
-		"graceful-restart": {desc: "Graceful restart", children: nil},
-		"log-updown":       {desc: "Log up/down events", children: nil},
+		"disable": {desc: "Disable BGP", children: nil},
+		// #16621: top-level key inherited by every group and neighbor
+		// (most-specific wins: neighbor > group > bgp). Rendered as
+		// FRR `neighbor X password` (TCP-MD5) via BGPNeighbor.AuthPassword.
+		"authentication-key":       {desc: "Authentication key inherited by all BGP peers (TCP-MD5)", args: 1, placeholder: "<key>", children: nil},
+		"authentication-key-chain": unmodeledBGPKeychainLeaf(),
+		"authentication-algorithm": unmodeledBGPAuthAlgorithmLeaf(),
+		"graceful-restart":         {desc: "Graceful restart", children: nil},
+		"log-updown":               {desc: "Log up/down events", children: nil},
 		"multipath": {desc: "Multipath", children: map[string]*schemaNode{
 			"multiple-as": {desc: "Multiple AS", children: nil},
 			"ibgp":        {desc: "Enable iBGP multipath", children: nil},
@@ -526,15 +532,17 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			"passive":       {desc: "Passive mode (do not initiate connections)", children: nil},
 			// #16572: group-level shut, inherited by its neighbors
 			// (BGPNeighbor.Disable).
-			"disable":            {desc: "Disable this BGP group", children: nil},
-			"description":        {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
-			"multihop":           {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
-			"export":             {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-			"import":             {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-			"authentication-key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
-			"default-originate":  {desc: "Default originate", children: nil},
-			"loops":              {desc: "BGP AS-path loop count (1..10)", args: 1, valueType: ValueInteger, valueDesc: "Allowed occurrences of the local AS in a received AS path", valueExamples: []string{"1", "10"}, placeholder: "<count>", validator: ValidateInteger(1, MaxBGPAllowASIn), children: nil},
-			"remove-private":     {desc: "Remove private AS", children: nil},
+			"disable":                  {desc: "Disable this BGP group", children: nil},
+			"description":              {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
+			"multihop":                 {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
+			"export":                   {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+			"import":                   {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+			"authentication-key":       {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
+			"authentication-key-chain": unmodeledBGPKeychainLeaf(),
+			"authentication-algorithm": unmodeledBGPAuthAlgorithmLeaf(),
+			"default-originate":        {desc: "Default originate", children: nil},
+			"loops":                    {desc: "BGP AS-path loop count (1..10)", args: 1, valueType: ValueInteger, valueDesc: "Allowed occurrences of the local AS in a received AS path", valueExamples: []string{"1", "10"}, placeholder: "<count>", validator: ValidateInteger(1, MaxBGPAllowASIn), children: nil},
+			"remove-private":           {desc: "Remove private AS", children: nil},
 			"family": {desc: "Address family", compoundKey: true, children: map[string]*schemaNode{
 				"inet": {desc: "IPv4", children: map[string]*schemaNode{
 					"unicast": {desc: "Unicast", children: map[string]*schemaNode{
@@ -573,15 +581,17 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				"hold-time":     {desc: "Hold time (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateBGPHoldTime, children: nil},
 				"passive":       {desc: "Passive mode (do not initiate connections)", children: nil},
 				// #16572: neighbor-level shut (BGPNeighbor.Disable).
-				"disable":                {desc: "Disable this BGP neighbor", children: nil},
-				"multihop":               {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
-				"export":                 {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-				"import":                 {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-				"authentication-key":     {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
-				"route-reflector-client": {desc: "Route reflector client", children: nil},
-				"default-originate":      {desc: "Default originate", children: nil},
-				"loops":                  {desc: "BGP AS-path loop count (1..10)", args: 1, valueType: ValueInteger, valueDesc: "Allowed occurrences of the local AS in a received AS path", valueExamples: []string{"1", "10"}, placeholder: "<count>", validator: ValidateInteger(1, MaxBGPAllowASIn), children: nil},
-				"remove-private":         {desc: "Remove private AS", children: nil},
+				"disable":                  {desc: "Disable this BGP neighbor", children: nil},
+				"multihop":                 {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
+				"export":                   {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+				"import":                   {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+				"authentication-key":       {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
+				"authentication-key-chain": unmodeledBGPKeychainLeaf(),
+				"authentication-algorithm": unmodeledBGPAuthAlgorithmLeaf(),
+				"route-reflector-client":   {desc: "Route reflector client", children: nil},
+				"default-originate":        {desc: "Default originate", children: nil},
+				"loops":                    {desc: "BGP AS-path loop count (1..10)", args: 1, valueType: ValueInteger, valueDesc: "Allowed occurrences of the local AS in a received AS path", valueExamples: []string{"1", "10"}, placeholder: "<count>", validator: ValidateInteger(1, MaxBGPAllowASIn), children: nil},
+				"remove-private":           {desc: "Remove private AS", children: nil},
 				"family": {desc: "Address family", compoundKey: true, children: map[string]*schemaNode{
 					"inet": {desc: "IPv4", children: map[string]*schemaNode{
 						"unicast": {desc: "Unicast", children: map[string]*schemaNode{
