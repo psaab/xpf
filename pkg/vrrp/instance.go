@@ -77,9 +77,12 @@ type VRRPEvent struct {
 	VIPUpdateFailures uint64
 }
 
-// deafMasterDownInterval is the master-down interval used while this node is
-// NOT preempting and has heard no peer advertisement — the window in which it
-// cannot yet distinguish "there is no master" from "I am not listening yet".
+// deafMasterDownInterval is the floor of the master-down interval used while
+// this node is NOT preempting and has heard no peer advertisement — the window
+// in which it cannot yet distinguish "there is no master" from "I am not
+// listening yet". The interval actually armed is max(deafMasterDownInterval,
+// masterDownInterval()) (deafShieldInterval, #16768): the shield may only
+// lengthen the RFC 5798 §6.1 horizon, never replace it with a shorter one.
 //
 // A BACKUP promotes when the master-down timer expires, and that arm is
 // deliberately ungated by `preempt` (RFC 5798: preempt governs displacing a

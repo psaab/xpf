@@ -13,12 +13,22 @@ import (
 // EXTRACTED so the deafness policy is checkable rather than a literal inside a
 // run-loop local (#7579). It is the STARTUP half of the pair; the release half
 // is masterDownAfterSyncHoldRelease below, and the two sharing
-// deafMasterDownInterval is what stops one drifting from the other.
+// deafShieldInterval is what stops one drifting from the other.
 func (vi *vrrpInstance) initialMasterDownInterval() time.Duration {
 	if !vi.getPreempt() {
-		return deafMasterDownInterval
+		return vi.deafShieldInterval()
 	}
 	return vi.masterDownInterval()
+}
+
+// deafShieldInterval is the master-down interval armed while this node is
+// NOT preempting and has heard no peer advertisement. The deafness shield
+// may only LENGTHEN the RFC 5798 §6.1 Master_Down_Interval, never shorten
+// it (#16768): with an advertise interval above ~1s the RFC horizon exceeds
+// the fixed 3s shield, and arming the bare shield let a restarting
+// no-preempt node promote into a live master before its next advert.
+func (vi *vrrpInstance) deafShieldInterval() time.Duration {
+	return max(deafMasterDownInterval, vi.masterDownInterval())
 }
 
 // masterDownAfterSyncHoldRelease reports the master-down interval to arm when a
@@ -29,7 +39,7 @@ func (vi *vrrpInstance) initialMasterDownInterval() time.Duration {
 // flag. Such a node wants the short interval and a prompt promotion, and
 // re-arming it would be a failover regression.
 //
-// Returns (deafMasterDownInterval, true) otherwise: the release declined to
+// Returns (deafShieldInterval(), true) otherwise: the release declined to
 // promote, so this node stays BACKUP, and it is entering the second deafness
 // window described on deafMasterDownInterval. Self-limiting — handleBackupRx
 // resets to the short interval on the first advert heard.
@@ -37,7 +47,7 @@ func (vi *vrrpInstance) masterDownAfterSyncHoldRelease() (time.Duration, bool) {
 	if vi.getPreempt() {
 		return 0, false
 	}
-	return deafMasterDownInterval, true
+	return vi.deafShieldInterval(), true
 }
 
 // advertInterval returns the advertisement interval as a Duration.
