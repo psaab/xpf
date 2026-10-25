@@ -232,27 +232,83 @@ func persistentNatBindingsFromDisplayLeases(
 			lastSeen = now.Add(-(timeout - remaining))
 		}
 		out = append(out, &dataplane.PersistentNATBinding{
-			SrcIP:    srcIP,
-			SrcPort:  l.SrcPort,
-			NatIP:    natIP,
-			NatPort:  l.TranslatedPort,
-			PoolName: l.Pool,
-			LastSeen: lastSeen,
-			Timeout:  timeout,
-			Permit:   persistentNatPermitFromDisplayWire(l),
+			SrcIP:            srcIP,
+			SrcPort:          l.SrcPort,
+			NatIP:            natIP,
+			NatPort:          l.TranslatedPort,
+			PoolName:         l.Pool,
+			LastSeen:         lastSeen,
+			Timeout:          timeout,
+			Protocol:         l.Protocol,
+			RoutingScope:     leaseRoutingScope(l.RoutingScope),
+			Permit:           persistentNatPermitFromGrants(l.PermitAnyRemote, l.PermittedRemotes, l.RemoteIP, l.RemotePort),
+			PermittedRemotes: persistentNatRemotesFromWire(l.PermittedRemotes),
 		})
 	}
 	return out
 }
 
-func persistentNatPermitFromDisplayWire(l dpuserspace.DisplayLeaseWire) config.PersistentNATPermit {
-	if l.RemoteIP == "" {
+func leaseRoutingScope(scope *uint32) uint32 {
+	if scope == nil {
+		return 0
+	}
+	return *scope
+}
+
+// persistentNatRemotesFromWire parses the helper's granted remotes, skipping
+// an unparseable grant rather than rendering a zero address.
+func persistentNatRemotesFromWire(remotes []dpuserspace.PersistentNatRemote) []dataplane.PersistentNATRemote {
+	if len(remotes) == 0 {
+		return nil
+	}
+	out := make([]dataplane.PersistentNATRemote, 0, len(remotes))
+	for _, r := range remotes {
+		addr, err := netip.ParseAddr(r.IP)
+		if err != nil || addr.Zone() != "" {
+			continue
+		}
+		out = append(out, dataplane.PersistentNATRemote{IP: addr.Unmap(), Port: r.Port})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// persistentNatPermitFromGrants derives the three-way permit (#16647).
+//
+// Since #13945 the helper records grants in permit_any_remote /
+// permitted_remotes and leaves remote empty on every row, so keying on
+// RemoteIP rendered every binding any-remote-host. The grant set is the
+// authority: any_remote means any-remote-host; otherwise a grant with a
+// zero port is a target-host wildcard and any ported grant makes the lease
+// target-host-port when no wildcard exists. Legacy RemoteIP/RemotePort are
+// consulted only when no grant data is present at all (pre-#13945 helper).
+// A target-mode lease with no recorded grant renders target-host-port (the
+// config default) rather than widening to any-remote-host.
+func persistentNatPermitFromGrants(permitAnyRemote bool, remotes []dpuserspace.PersistentNatRemote, remoteIP string, remotePort uint16) config.PersistentNATPermit {
+	if permitAnyRemote {
 		return config.PersistentNATPermitAnyRemoteHost
 	}
-	if l.RemotePort == 0 {
-		return config.PersistentNATPermitTargetHost
+	if len(remotes) > 0 {
+		for _, r := range remotes {
+			if r.Port == 0 {
+				return config.PersistentNATPermitTargetHost
+			}
+		}
+		return config.PersistentNATPermitTargetHostPort
+	}
+	if remoteIP != "" {
+		if remotePort == 0 {
+			return config.PersistentNATPermitTargetHost
+		}
+		return config.PersistentNATPermitTargetHostPort
 	}
 	return config.PersistentNATPermitTargetHostPort
+}
+
+func persistentNatPermitFromDisplayWire(l dpuserspace.DisplayLeaseWire) config.PersistentNATPermit {
+	return persistentNatPermitFromGrants(l.PermitAnyRemote, l.PermittedRemotes, l.RemoteIP, l.RemotePort)
 }
 
 // applyPersistentNatShowRefresh is the DECISION half, extracted so the
@@ -317,11 +373,10 @@ func persistentNatShowTable(rt dataplane.RuntimeDataPlane) *dataplane.Persistent
 // from a value it never had. Back-dating by (timeout - remaining) makes the
 // rendered column the helper's actual remaining lifetime.
 //
-// Permit is derived from the remote tuple the wire already carries, because the
-// record does not carry the mode itself: the #8121 comment states the
-// convention ("Empty => permit-any-remote-host") and the port half distinguishes
-// target-host from target-host-port. That is a read of the same three-way scope
-// #2823/#3193 added, not a new one.
+// Permit is derived from the grant set the helper records (#16647): since
+// #13945 remote is empty on every row and grants live in permit_any_remote /
+// permitted_remotes, so keying on RemoteIP rendered every binding
+// any-remote-host. See persistentNatPermitFromGrants.
 func persistentNatBindingsFromLeases(leases []dpuserspace.IdleLeaseWire, now time.Time) []*dataplane.PersistentNATBinding {
 	if len(leases) == 0 {
 		return nil
@@ -342,25 +397,22 @@ func persistentNatBindingsFromLeases(leases []dpuserspace.IdleLeaseWire, now tim
 			remaining = timeout
 		}
 		out = append(out, &dataplane.PersistentNATBinding{
-			SrcIP:    srcIP,
-			SrcPort:  l.SrcPort,
-			NatIP:    natIP,
-			NatPort:  l.TranslatedPort,
-			PoolName: l.Pool,
-			LastSeen: now.Add(-(timeout - remaining)),
-			Timeout:  timeout,
-			Permit:   persistentNatPermitFromWire(l),
+			SrcIP:            srcIP,
+			SrcPort:          l.SrcPort,
+			NatIP:            natIP,
+			NatPort:          l.TranslatedPort,
+			PoolName:         l.Pool,
+			LastSeen:         now.Add(-(timeout - remaining)),
+			Timeout:          timeout,
+			Protocol:         l.Protocol,
+			RoutingScope:     leaseRoutingScope(l.RoutingScope),
+			Permit:           persistentNatPermitFromWire(l),
+			PermittedRemotes: persistentNatRemotesFromWire(l.PermittedRemotes),
 		})
 	}
 	return out
 }
 
 func persistentNatPermitFromWire(l dpuserspace.IdleLeaseWire) config.PersistentNATPermit {
-	if l.RemoteIP == "" {
-		return config.PersistentNATPermitAnyRemoteHost
-	}
-	if l.RemotePort == 0 {
-		return config.PersistentNATPermitTargetHost
-	}
-	return config.PersistentNATPermitTargetHostPort
+	return persistentNatPermitFromGrants(l.PermitAnyRemote, l.PermittedRemotes, l.RemoteIP, l.RemotePort)
 }

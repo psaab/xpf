@@ -111,11 +111,10 @@ func TestPersistentBindingTimeoutIsTheHELPERSRemaining8607(t *testing.T) {
 	}
 }
 
-// TestPersistentPermitScopeComesFromTheRemoteTuple8607 pins the three-way
-// #2823/#3193 scope, which the wire does not carry directly.
-//
-// All three arms in one cell: with only the any-remote-host case a derivation
-// that returned it unconditionally would pass.
+// TestPersistentPermitScopeComesFromTheRemoteTuple8607 pins the legacy
+// fallback: when a lease carries no grant data at all, the pre-#13945 remote
+// tuple still distinguishes the three modes. The grant-based derivation is
+// pinned by the #16647 cells in persistent_nat_show_16647_test.go.
 //
 // MUTATION: return PersistentNATPermitAnyRemoteHost unconditionally -> the
 // second and third rows red.
@@ -126,9 +125,8 @@ func TestPersistentPermitScopeComesFromTheRemoteTuple8607(t *testing.T) {
 		remotePort uint16
 		want       config.PersistentNATPermit
 	}{
-		{"no remote", "", 0, config.PersistentNATPermitAnyRemoteHost},
-		{"remote host", "203.0.113.9", 0, config.PersistentNATPermitTargetHost},
-		{"remote host+port", "203.0.113.9", 443, config.PersistentNATPermitTargetHostPort},
+		{"legacy ported remote", "203.0.113.9", 443, config.PersistentNATPermitTargetHostPort},
+		{"legacy host remote", "203.0.113.9", 0, config.PersistentNATPermitTargetHost},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

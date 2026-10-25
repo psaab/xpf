@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"strconv"
 	"time"
 
+	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -133,13 +135,33 @@ func RenderPersistentDetail(ctx context.Context, w io.Writer, dp Reader) {
 		fmt.Fprintf(w, "  Reflexive IP:       %s\n", b.NatIP)
 		fmt.Fprintf(w, "  Reflexive port:     %d\n", b.NatPort)
 		fmt.Fprintf(w, "  Pool:               %s\n", b.PoolName)
+		if b.Protocol != 0 {
+			fmt.Fprintf(w, "  Protocol:           %s\n", persistentProtocolName(b.Protocol))
+		}
+		fmt.Fprintf(w, "  Routing scope:      %d\n", b.RoutingScope)
 		// #3193: render the full three-way persistent-NAT permit mode
 		// (any-remote-host / target-host / target-host-port), not the
 		// pre-#3193 binary any-remote-host flag — an operator could not
 		// otherwise tell target-host from target-host-port.
 		fmt.Fprintf(w, "  Permit:             %s\n", b.PermitMode())
+		for _, remote := range b.PermittedRemotes {
+			if remote.Port == 0 {
+				fmt.Fprintf(w, "  Permitted remote:   %s (any port)\n", remote.IP)
+			} else {
+				fmt.Fprintf(w, "  Permitted remote:   %s:%d\n", remote.IP, remote.Port)
+			}
+		}
 		fmt.Fprintf(w, "  Current sessions:   %d\n", sessions)
 		fmt.Fprintf(w, "  Left time:          %s\n", remaining.Truncate(time.Second))
 		fmt.Fprintf(w, "  Configured timeout: %ds\n", int(b.Timeout.Seconds()))
 	}
+}
+
+// persistentProtocolName renders a lease protocol number, falling back to
+// the decimal number for protocols appid does not name.
+func persistentProtocolName(protocol uint8) string {
+	if name := appid.ProtocolName(protocol); name != "" {
+		return name
+	}
+	return strconv.Itoa(int(protocol))
 }
