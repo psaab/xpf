@@ -1896,9 +1896,16 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 		}
 
 		if effectiveCfg.TaggingEnabled() {
-			// VLAN parent: none of its units' addresses, just rename. The one
-			// exception is the VRRP advert source (#9721, vlanParentVRRPSource).
+			// VLAN parent: none of its tagged units' addresses, just rename. The
+			// exceptions are the addresses the parent carries itself:
+			// the VRRP advert source of a VRRP-backed RETH (#9721,
+			// vlanParentVRRPSource) and, on a non-RETH parent, the real
+			// addresses of untagged units (#16795, untaggedUnitAddresses),
+			// which planPhysDesired installs on this device.
 			parentAddrs := vlanParentVRRPSource(effectiveCfg, isVRRPReth, clusterNodeID)
+			if own := untaggedUnitAddresses(effectiveCfg, isVRRPReth); len(own) > 0 {
+				parentAddrs = append(parentAddrs, own...)
+			}
 			if !seen[linuxName] {
 				seen[linuxName] = true
 				result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
@@ -1916,12 +1923,19 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					// networkctl reload keeps the VIPs VRRP adds to this
 					// device, as on every other RETH device. Both only when the
 					// parent carries the source: a tagged-only parent renders
-					// exactly as before.
+					// exactly as before. #16795: untaggedUnitAddresses occupy
+					// the same field, so they render as Address= lines and
+					// keepConfigurationValue reports the static class when
+					// KeepAddresses is set — as it is whenever the field is
+					// non-empty (the len(parentAddrs) arm below).
 					VLANParentAddresses: parentAddrs,
 					// #9721 KeepAddresses when the parent carries the RETH
 					// advert source; #15061: also when an untagged unit
 					// carries a standalone vrrp-group, whose instance binds
 					// to this parent device and installs its VIPs here.
+					// #16795: also when the parent carries an untagged unit's
+					// real addresses, so the rendered addresses survive a
+					// reconfigure instead of being stripped as foreign.
 					// Tagged-only parents render exactly as before.
 					KeepAddresses: len(parentAddrs) > 0 || interfaceCarriesStandaloneVRRP(effectiveCfg),
 					// #15061: an untagged standalone VIP is foreign (never

@@ -90,10 +90,13 @@ Standard library only.
   it (#9721).** `IsVLANParent` suppresses every `Address=` line built from
   `Addresses`, so a sub-interface's addresses cannot leak onto the parent
   (`TestGenerateNetwork_VLANParent`). `VLANParentAddresses` is the explicit
-  exception, and it renders only on a VLAN parent. Its one producer is
+  exception, and it renders only on a VLAN parent. Its producers are
   `pkg/dataplane`'s `buildInterfaceNetworkdModels`: a VRRP-backed RETH whose
   untagged unit (no `vlan-id`) binds its VRRP instance to the parent gets the
-  `169.254.<rg>.<node+1>/32` advert source there, with `KeepAddresses`.
+  `169.254.<rg>.<node+1>/32` advert source there, with `KeepAddresses`
+  (#9721), and a non-RETH parent gets the real addresses of its untagged
+  units there, also with `KeepAddresses`, because `planPhysDesired`
+  installs those addresses on the parent device itself (#16795).
   Routing that address through `Addresses` instead would drop it silently.
 - VRF and tunnel interfaces created elsewhere are excluded from the
   unmanaged-interface scan via the `daemonOwned` map.
