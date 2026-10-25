@@ -7428,13 +7428,14 @@ fn expire_holds_peer_synced_when_rg_inactive() {
     assert_eq!(s.reaped_stale_synced, 0);
 }
 
-/// Repeated HOLD checks use a separate fixed-budget queue, while the
-/// stale-synced ceiling remains anchored to the first HOLD observation.
+/// Held sessions wait for the next first-HOLD-anchored wheel horizon instead
+/// of being rechecked on every GC tick; their leak ceiling stays anchored to
+/// that first HOLD despite repeated scheduling (#16881).
 #[test]
-fn held_synced_entries_use_bounded_rechecks_without_sliding_deadline_16881() {
-    const HELD_BUDGET: usize = super::expire::HELD_RECHECK_BUDGET;
-    const ENTRY_COUNT: u16 = (HELD_BUDGET * 2 + 13) as u16;
+fn held_synced_entries_use_horizon_rechecks_without_sliding_deadline_16881() {
+    const ENTRY_COUNT: u16 = 32;
     const SEC: u64 = WHEEL_TICK_NS;
+    const HORIZON_TICKS: u64 = super::expire::HELD_RECHECK_HORIZON_NS / SEC;
     const CEILING_NS: u64 = TEST_CEIL_MULT * 300_000_000_000;
 
     let mut table = SessionTable::new();
@@ -7446,15 +7447,15 @@ fn held_synced_entries_use_bounded_rechecks_without_sliding_deadline_16881() {
     let held_at = installed_at + 302 * SEC;
     table.last_gc_ns = installed_at;
     assert!(run_expire_ha(&mut table, held_at, &[], &|_| 0).is_empty());
-    assert_eq!(table.last_pop_stats().scanned, ENTRY_COUNT as usize);
-    assert_eq!(table.last_pop_stats().held_standby, ENTRY_COUNT as usize);
+    assert!(table.last_pop_stats().scanned >= ENTRY_COUNT as usize);
+    assert!(table.last_pop_stats().held_standby > 0);
 
     let first_key = key_with_port(10_000);
     assert_eq!(table.first_held_ns_for(&first_key), Some(held_at));
     let first_held_tick = table.entry_by_key(&first_key).unwrap().held_wheel_tick;
-    assert_ne!(first_held_tick, 0);
+    assert_eq!(first_held_tick, held_at / SEC + HORIZON_TICKS);
 
-    // Repeated scheduler calls while held must not move the pending check or
+    // Repeated scheduler calls while held must not move the horizon check or
     // the first-hold deadline.
     for offset in 1..=100 {
         table.push_to_wheel(&first_key, held_at + offset * SEC);
@@ -7463,26 +7464,51 @@ fn held_synced_entries_use_bounded_rechecks_without_sliding_deadline_16881() {
         assert_eq!(entry.first_held_ns, held_at);
     }
 
+    // No held row is scanned between the original HOLD and the first
+    // horizon-aligned recheck.
+    let mut last_check = held_at;
+    for _ in 1..=HORIZON_TICKS {
+        let check_at = last_check + SEC;
+        table.last_gc_ns = last_check;
+        assert!(run_expire_ha(&mut table, check_at, &[], &|_| 0).is_empty());
+        assert_eq!(table.last_pop_stats().scanned, 0);
+        assert_eq!(table.last_pop_stats().held_standby, 0);
+        last_check = check_at;
+    }
+
+    let first_recheck_at = last_check + SEC;
+    table.last_gc_ns = last_check;
+    assert!(run_expire_ha(&mut table, first_recheck_at, &[], &|_| 0).is_empty());
+    assert!(table.last_pop_stats().scanned > 0);
+    assert!(table.last_pop_stats().held_standby > 0);
+    assert_eq!(
+        table.entry_by_key(&first_key).unwrap().held_wheel_tick,
+        first_held_tick + HORIZON_TICKS
+    );
+    last_check = first_recheck_at;
+
     let original_deadline = held_at + CEILING_NS;
     let mut expired_count = 0;
-    let mut last_check = held_at;
+    let mut held_rechecks = 1;
     while last_check < original_deadline + 10 * SEC {
         let check_at = last_check + SEC;
         table.last_gc_ns = last_check;
         expired_count += run_expire_ha(&mut table, check_at, &[], &|_| 0).len();
-        assert!(
-            table.last_pop_stats().held_standby <= HELD_BUDGET,
-            "each pass rechecks at most one held batch"
-        );
-        assert!(
-            table.last_pop_stats().scanned <= HELD_BUDGET * 3,
-            "held staging, gate checks, and ordinary reaps stay separately bounded"
-        );
-        if table.entry_by_key(&first_key).is_some() {
+        let stats = table.last_pop_stats();
+        if stats.held_standby > 0 {
+            assert_eq!(
+                check_at,
+                held_at + (HORIZON_TICKS + held_rechecks * HORIZON_TICKS + 1) * SEC,
+                "held entries are rechecked only at first-HOLD-anchored horizons"
+            );
+            assert!(stats.held_standby > 0);
+            held_rechecks += 1;
+        }
+        if table.len() != 0 {
             assert_eq!(
                 table.first_held_ns_for(&first_key),
                 Some(held_at),
-                "repeated HOLD scheduling must retain the original anchor"
+                "repeated HOLD checks must retain the original anchor"
             );
         }
         last_check = check_at;
@@ -7490,18 +7516,13 @@ fn held_synced_entries_use_bounded_rechecks_without_sliding_deadline_16881() {
             break;
         }
     }
-    assert_eq!(
-        expired_count,
-        ENTRY_COUNT as usize,
-        "all held entries must reap shortly after the original ceiling"
-    );
-    assert!(
-        last_check <= original_deadline + 4 * SEC,
-        "bounded rechecks must not grant another HOLD interval"
-    );
+    assert_eq!(held_rechecks, 3, "only horizon checks precede the ceiling");
+    assert!(expired_count > 0);
+    assert_eq!(table.len(), 0, "the anchored ceiling reaps every held entry");
+    assert!(last_check <= original_deadline + 3 * SEC);
 }
 
-/// Same-ID snapshot replacement retains one pending held-queue hint; repeated
+/// Same-ID snapshot replacement retains one pending horizon hint; repeated
 /// imports cannot re-arm the original stale-synced deadline (#16881).
 #[test]
 fn held_same_id_reimports_keep_one_pending_recheck_16881() {
@@ -7509,6 +7530,7 @@ fn held_same_id_reimports_keep_one_pending_recheck_16881() {
     use crate::server::helpers::build_synced_session_entry;
 
     const SEC: u64 = WHEEL_TICK_NS;
+    const HORIZON_TICKS: u64 = super::expire::HELD_RECHECK_HORIZON_NS / SEC;
     const HOLD_CEILING_NS: u64 = TEST_CEIL_MULT * 300 * SEC;
 
     let mut table = SessionTable::new();
@@ -7546,7 +7568,7 @@ fn held_same_id_reimports_keep_one_pending_recheck_16881() {
     assert!(run_expire_ha(&mut table, held_at, &[], &|_| 0).is_empty());
     assert_eq!(table.first_held_ns_for(&key), Some(held_at));
     let first_held_tick = table.entry_by_key(&key).unwrap().held_wheel_tick;
-    assert_ne!(first_held_tick, 0);
+    assert_eq!(first_held_tick, held_at / SEC + HORIZON_TICKS);
 
     for step in 1..=100u64 {
         let reimported_key = import(&mut table, held_at + step * SEC);
@@ -7555,41 +7577,77 @@ fn held_same_id_reimports_keep_one_pending_recheck_16881() {
         assert_eq!(entry.first_held_ns, held_at);
         assert_eq!(
             entry.held_wheel_tick, first_held_tick,
-            "same-ID re-import must preserve one pending held hint"
+            "same-ID re-import must preserve one pending horizon hint"
         );
     }
 
-    table.last_gc_ns = held_at;
-    assert!(run_expire_ha(&mut table, held_at + SEC, &[], &|_| 0).is_empty());
-    assert_eq!(table.last_pop_stats().scanned, 2);
+    let mut last_check = held_at;
+    for _ in 1..=HORIZON_TICKS {
+        let check_at = last_check + SEC;
+        table.last_gc_ns = last_check;
+        assert!(run_expire_ha(&mut table, check_at, &[], &|_| 0).is_empty());
+        assert_eq!(table.last_pop_stats().scanned, 0);
+        last_check = check_at;
+    }
+    let first_recheck_at = last_check + SEC;
+    table.last_gc_ns = last_check;
+    assert!(run_expire_ha(&mut table, first_recheck_at, &[], &|_| 0).is_empty());
+    assert_eq!(table.last_pop_stats().scanned, 1);
     assert_eq!(table.last_pop_stats().held_standby, 1);
     assert_eq!(
         table.entry_by_key(&key).unwrap().held_wheel_tick,
-        first_held_tick + 1
+        first_held_tick + HORIZON_TICKS
     );
+    assert_eq!(table.first_held_ns_for(&key), Some(held_at));
 
     let original_deadline = held_at + HOLD_CEILING_NS;
-    let mut last_check = held_at + SEC;
+    last_check = first_recheck_at;
     let mut expired_count = 0;
+    let mut held_rechecks = 1;
     while last_check < original_deadline + 5 * SEC {
         let check_at = last_check + SEC;
         table.last_gc_ns = last_check;
         expired_count += run_expire_ha(&mut table, check_at, &[], &|_| 0).len();
+        let stats = table.last_pop_stats();
+        if stats.held_standby > 0 {
+            assert_eq!(
+                check_at,
+                held_at + (HORIZON_TICKS + held_rechecks * HORIZON_TICKS + 1) * SEC
+            );
+            assert_eq!(stats.held_standby, 1);
+            held_rechecks += 1;
+        }
         last_check = check_at;
         if table.len() == 0 {
             break;
         }
     }
     assert_eq!(expired_count, 1);
+    assert_eq!(held_rechecks, 3);
     assert_eq!(table.len(), 0);
     assert!(last_check <= original_deadline + 3 * SEC);
+    // A new entry after physical removal gets a fresh HOLD clock; the old
+    // expired row cannot be resurrected by its stale wheel hint.
+    let fresh_at = last_check + SEC;
+    assert_eq!(import(&mut table, fresh_at), key);
+    let fresh_entry = table.entry_by_key(&key).unwrap();
+    assert_eq!(fresh_entry.first_held_ns, 0);
+    assert_eq!(fresh_entry.held_wheel_tick, 0);
+    let fresh_hold_at = fresh_at + 302 * SEC;
+    table.last_gc_ns = fresh_at;
+    assert!(run_expire_ha(&mut table, fresh_hold_at, &[], &|_| 0).is_empty());
+    assert_eq!(table.first_held_ns_for(&key), Some(fresh_hold_at));
+    assert_eq!(
+        table.entry_by_key(&key).unwrap().held_wheel_tick,
+        fresh_hold_at / SEC + HORIZON_TICKS
+    );
 }
 
-/// A populated held queue cannot defer an ordinary active-session expiry.
+/// Held rows on a future horizon cannot defer an ordinary active-session
+/// expiry on the main wheel.
 #[test]
-fn held_recheck_budget_does_not_delay_active_expiry_16881() {
-    const HELD_BUDGET: usize = super::expire::HELD_RECHECK_BUDGET;
-    const ENTRY_COUNT: u16 = (HELD_BUDGET * 2 + 13) as u16;
+fn held_horizon_does_not_delay_active_expiry_16881() {
+    const ENTRY_COUNT: u16 = 300;
     const SEC: u64 = WHEEL_TICK_NS;
 
     let mut table = SessionTable::new();
@@ -7619,18 +7677,47 @@ fn held_recheck_budget_does_not_delay_active_expiry_16881() {
 
     table.last_gc_ns = held_at;
     assert!(run_expire_ha(&mut table, held_at + SEC, &[2], &|_| 0).is_empty());
-    assert_eq!(table.last_pop_stats().held_standby, HELD_BUDGET);
+    assert_eq!(table.last_pop_stats().held_standby, 0);
+    assert_eq!(table.last_pop_stats().scanned, 0);
     assert!(table.entry_by_key(&active_key).is_some());
 
     table.last_gc_ns = held_at + SEC;
     let expired = run_expire_ha(&mut table, held_at + 2 * SEC, &[2], &|_| 0);
     assert_eq!(expired.len(), 1);
     assert_eq!(expired[0].key, active_key);
-    assert_eq!(table.last_pop_stats().held_standby, HELD_BUDGET);
-    assert!(
-        table.last_pop_stats().scanned <= HELD_BUDGET * 2 + 1,
-        "the ordinary wheel processes active expiry independently of held work"
-    );
+    assert_eq!(table.last_pop_stats().held_standby, 0);
+    assert_eq!(table.last_pop_stats().scanned, 1);
+}
+
+
+/// A held entry self-heals on the first expiry pass after its horizon-aligned
+/// promotion, without waiting for another idle timeout (#16881).
+#[test]
+fn held_horizon_self_heals_after_promotion_16881() {
+    const SEC: u64 = WHEEL_TICK_NS;
+    const HORIZON_TICKS: u64 = super::expire::HELD_RECHECK_HORIZON_NS / SEC;
+
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    let installed_at = SEC;
+    install_synced_tcp(&mut table, &key, 1, installed_at);
+    let held_at = installed_at + 302 * SEC;
+    table.last_gc_ns = installed_at;
+    assert!(run_expire_ha(&mut table, held_at, &[], &|_| 0).is_empty());
+    let first_held_tick = table.entry_by_key(&key).unwrap().held_wheel_tick;
+    assert_eq!(first_held_tick, held_at / SEC + HORIZON_TICKS);
+
+    // The promotion is visible on the first pass after the pending horizon.
+    let promotion_at = held_at + (HORIZON_TICKS + 1) * SEC;
+    table.last_gc_ns = held_at;
+    assert!(run_expire_ha(&mut table, promotion_at, &[1], &|_| 1).is_empty());
+    assert_eq!(table.last_pop_stats().healed_on_promote, 1);
+    assert_eq!(table.last_pop_stats().held_standby, 0);
+    let entry = table.entry_by_key(&key).unwrap();
+    assert_eq!(entry.first_held_ns, held_at);
+    assert_eq!(entry.held_wheel_tick, 0);
+    assert_eq!(entry.last_seen_ns, promotion_at);
+    assert_eq!(entry.seen_rg_epoch, 1);
 }
 
 #[test]
@@ -7862,7 +7949,7 @@ fn expire_in_promotion_window_survives() {
     // Second pass: RG1 now active AND epoch bumped to 1 (promotion), but
     // RefreshOwnerRGS has not re-stamped. SELF-HEAL fires.
     table.last_gc_ns = t1;
-    let t2 = t1 + 2_000_000_000;
+    let t2 = t1 + super::expire::HELD_RECHECK_HORIZON_NS + WHEEL_TICK_NS;
     let expired = run_expire_ha(&mut table, t2, &[1], &|_| 1);
     assert!(expired.is_empty(), "self-heal must keep the entry alive");
     let s = table.last_pop_stats();
@@ -7908,7 +7995,7 @@ fn expire_owner_rg_zero_survives_promotion() {
     // bumped to 1. owner_rg_id==0 -> forwards_here == node_active true,
     // epoch_of(0)==1 != seen(0) -> SELF-HEAL.
     table.last_gc_ns = t1;
-    let t2 = t1 + 2_000_000_000;
+    let t2 = t1 + super::expire::HELD_RECHECK_HORIZON_NS + WHEEL_TICK_NS;
     let expired = run_expire_ha(&mut table, t2, &[1], &|_| 1);
     assert!(
         expired.is_empty(),
@@ -7997,9 +8084,9 @@ fn expire_reaps_held_at_abs_cap_for_long_timeout() {
         "idle-crossed long session held on first observation, not reaped"
     );
     // This synthetic 30-day jump makes the ordinary wheel cursor sweep many
-    // ticks, but the first HOLD transfers the row to its separate queue, so it
-    // is classified once. Production advances about one tick per call; the
-    // load-bearing checks are retention and the first-hold deadline anchor.
+    // ticks, but the first HOLD arms a future, first-HOLD-anchored horizon.
+    // Production advances about one tick per call; the load-bearing checks
+    // are retention and the stale-synced deadline anchor.
     assert_eq!(table.last_pop_stats().held_standby, 1);
     assert_eq!(
         table.last_pop_stats().reaped_stale_synced,
@@ -8163,7 +8250,7 @@ fn expire_hold_does_not_poison_selfheal_under_epoch_skew() {
     // (HOLD did not stamp it), so current(7) != seen(0) -> SELF-HEAL.
     // Pre-fix (HOLD stamps seen=7) this would AGE -> failover drop.
     table.last_gc_ns = t1;
-    let t2 = t1 + 2_000_000_000;
+    let t2 = t1 + super::expire::HELD_RECHECK_HORIZON_NS + WHEEL_TICK_NS;
     let expired = run_expire_ha(&mut table, t2, &[1], &|_| 7);
     assert!(
         expired.is_empty(),

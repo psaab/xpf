@@ -31,7 +31,7 @@ structure.)
   (the per-tick bucket drain / lazy-delete GC pass), the throttled
   `push_to_wheel` scheduler, `wheel_observe`, and the #2120 standby
   retention gate (`expire_stale_entries_ha` + `standby_gate_decision` +
-  `process_held_rechecks`).
+  first-HOLD-anchored horizon scheduling).
 - `entry.rs` — the PUBLIC session data types: `SessionDecision`,
   `SessionMetadata`, `SessionLookup`, `ForwardSessionMatch`,
   `SessionOrigin`, `SessionDeltaKind`, `SessionDelta`, and
@@ -43,12 +43,13 @@ structure.)
   `reverse_canonical_key` (post-NAT lookup), and
   `reply_matches_forward_session` (the predicate used to detect "this
   inbound packet matches an existing outbound flow").
-- `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets), plus the
-  separate queue for held-session rechecks. The worker still sweeps ordinary
-  expiry once per second from its poll loop (`expire_stale_entries` in
-  `afxdp/worker/loop_body/mod.rs`); at most 256 held entries are rechecked per
-  pass, independently of active-session AGE/Close work. Packet lookups enforce
-  the same strict idle deadline and return a miss once
+- `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets). Held
+  entries are rechecked at the far edge of the wheel window (255 s), with
+  the recheck tick anchored to `first_held_ns`; same-ID snapshot imports
+  preserve the pending tick. The worker still sweeps expiry once per second
+  from its poll loop (`expire_stale_entries` in
+  `afxdp/worker/loop_body/mod.rs`). Packet lookups enforce the same strict idle
+  deadline and return a miss once
   `now - last_seen_ns > expires_after_ns`; the stale entry remains for the
   wheel's physical cleanup (including HA HOLD/SELF-HEAL retention). The former
   "lazy-delete on lookup" wording is obsolete: lookups reject idle-crossed
@@ -1103,11 +1104,11 @@ every idle entry ages, exactly as before):
 - **AGE** — normal removal: active-node-owned, standalone, fabric-ingress,
   or a held entry past the ceiling.
 
-Held entries remain due for recheck at the worker's one-second cadence, but a
-separate queue limits each expiry pass to 256 held checks. The stale-synced
-deadline remains anchored to `first_held_ns` regardless of recheck or repeated
-same-id snapshot import; imports preserve the pending held tick and hold anchor
-so they cannot duplicate a hint or re-arm the original deadline.
+Held entries are rechecked on the far edge of the timer-wheel window
+(255 seconds), not on each worker tick. Each next recheck is aligned to
+`first_held_ns` and capped at the original stale-synced deadline (plus one
+wheel tick for the existing strict-`>` expiry rule). Same-ID imports preserve
+both the first-HOLD anchor and pending tick, so they cannot slide expiry.
 
 The HOLD keys on FORWARDING, not origin, so a still-`ForwardFlow`
 demotion-window entry (the demote flip not yet applied) is held too.

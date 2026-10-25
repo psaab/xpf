@@ -1165,7 +1165,7 @@ impl SessionTable {
                 fin_peer: matches!(wire_close, Some(TcpCloseClass::TimeWait)),
                 // #16881: same-incarnation re-imports preserve both pending
                 // wheel hints, so snapshot resends cannot duplicate ordinary
-                // or held-queue entries.
+                // or held horizon entries.
                 wheel_tick: preserved_wheel_tick.unwrap_or(0),
                 held_wheel_tick: preserved_held_wheel_tick.unwrap_or(0),
                 // #2120: a re-imported synced entry leaves the held world
