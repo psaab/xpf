@@ -28,6 +28,14 @@ xpf (0.0.0) unstable; urgency=medium
     advertised a Next-Hop MTU 8 bytes too large, so every DF-clear
     retry still exceeded the IPv6 bottleneck and PMTUD never
     converged. Unfragmented quotes keep the -20 adjustment.
+  * API/TLS: fix AB-BA lock inversion that could permanently wedge
+    config apply (#16706). HTTPS leg recovery after a certificate
+    (re)install ran under tlsCertificateMu and took lifeMu, while an
+    HTTPS leg rebuild held lifeMu and took tlsCertificateMu in
+    buildHTTPSServer; an overlapping hourly monitor reinstall and
+    apply deadlocked, freezing every later commit until restart.
+    Recovery now runs after tlsCertificateMu is released, so the
+    only nesting is lifeMu -> tlsCertificateMu.
   * Routing/VRF: instance-to-VRF-device mapping is now unconditional
     (#16664). `diagcmd.VRFDeviceName` previously returned a
     `vrf-`-prefixed routing-instance name unchanged (#2143), while the
