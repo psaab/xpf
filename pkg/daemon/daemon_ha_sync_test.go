@@ -151,7 +151,11 @@ func TestStartClusterCommsLaunchesFabricForwardingWhenPrimarySyncUnaddressed(t *
 }
 
 // TestStartClusterCommsRebuildsDualSessionSyncWhenFab1AddressArrivesLate
-// is the #15687 acceptance regression for the fab1 leg.
+// is the #15687 acceptance regression for the fab1 leg, narrowed by
+// #16842: the debt no longer rides on BindingChanged (which the #11448
+// reassert consumed every 30 s, churning the working epoch), so this
+// test pins Fab1Debt instead and drives the late upgrade through the
+// reassert tick's fab1-ready gate.
 //
 // Epoch 1: fab0 (lo) resolves, fab1 (nonexistent) exhausts its poll, so
 // the epoch builds a SINGLE SessionSync and latches
@@ -164,7 +168,10 @@ func TestStartClusterCommsLaunchesFabricForwardingWhenPrimarySyncUnaddressed(t *
 // RED on pre-fix code: epoch 1 recorded no debt
 // (activeTransport().BindingChanged stayed false), so
 // reconcileClusterTransportBinding returned without restarting and the
-// single-fabric SessionSync / disabled latch survived.
+// single-fabric SessionSync / disabled latch survived. RED on the
+// #16842 defect shape (debt on BindingChanged): the Fab1Debt assertions
+// below fail and the reassert-stability cell in
+// fab1_debt_churn_16842_test.go counts 5 restarts over 5 ticks.
 func TestStartClusterCommsRebuildsDualSessionSyncWhenFab1AddressArrivesLate(t *testing.T) {
 	exhaustSyncAddressPolls15687(t)
 	if resolveClusterInterfaceAddr(nil, "lo", "127.0.0.1", "") == "" {
@@ -199,9 +206,13 @@ func TestStartClusterCommsRebuildsDualSessionSyncWhenFab1AddressArrivesLate(t *t
 	if !disabled1 {
 		t.Fatal("epoch 1 did not latch syncPeerAddr1Disabled for the missing fab1")
 	}
-	if !d.activeTransport().BindingChanged {
-		t.Fatal("fab1 poll expiry recorded no transport debt: a late fab1 " +
+	if !d.activeTransport().Fab1Debt {
+		t.Fatal("fab1 poll expiry recorded no fab1 debt: a late fab1 " +
 			"address would never restart comms (#15687)")
+	}
+	if d.activeTransport().BindingChanged {
+		t.Fatal("fab1 debt rode on BindingChanged: the #11448 reassert " +
+			"would churn this working epoch every 30 s (#16842)")
 	}
 
 	// The address "arrives": the corrected config names lo for fab1.
@@ -235,7 +246,7 @@ func TestStartClusterCommsRebuildsDualSessionSyncWhenFab1AddressArrivesLate(t *t
 	if peer1 != "127.0.0.3" {
 		t.Fatalf("syncPeerAddr1 = %q, want 127.0.0.3 after dual rebuild", peer1)
 	}
-	if d.activeTransport().BindingChanged {
+	if d.activeTransport().BindingChanged || d.activeTransport().Fab1Debt {
 		t.Fatal("healthy dual epoch still carries transport debt")
 	}
 }

@@ -31,18 +31,24 @@ func (d *Daemon) mgmtVRFReassertLoop(ctx context.Context) {
 // reassertMgmtVRFOnce restores drifted members under applySem, then refreshes
 // their DHCP routes in the management table. Its quick gate also watches the
 // active transport's sticky binding mismatch, since kernel drift may already
-// have been repaired before the background pass runs.
+// have been repaired before the background pass runs. #16842: a fab1-debt
+// epoch whose fab1 has become resolvable also passes the gate, so the
+// background tick — not only the next commit — performs the one dual
+// upgrade; a fab1-debt epoch whose fab1 is still unaddressed does NOT
+// pass, which is what stops the 30 s teardown/rebuild churn.
 func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 	if d.applySem == nil {
 		return
 	}
-	bindingChanged := d.activeTransport().BindingChanged
+	active := d.activeTransport()
+	bindingChanged := active.BindingChanged
+	fab1Ready := d.fab1DebtUpgradeReady(active)
 	missing := d.routing != nil && d.mgmtVRFMissing()
 	var drifted []string
 	if d.routing != nil && !missing {
 		drifted = d.mgmtVRFInterfacesOutsideVRF()
 	}
-	if !missing && len(drifted) == 0 && !bindingChanged {
+	if !missing && len(drifted) == 0 && !bindingChanged && !fab1Ready {
 		return
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
@@ -61,12 +67,14 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 		}
 		recreated = true
 	}
-	bindingChanged = d.activeTransport().BindingChanged
+	active = d.activeTransport()
+	bindingChanged = active.BindingChanged
+	fab1Ready = d.fab1DebtUpgradeReady(active)
 	drifted = nil
 	if d.routing != nil {
 		drifted = d.mgmtVRFInterfacesOutsideVRF()
 	}
-	if len(drifted) == 0 && !bindingChanged {
+	if len(drifted) == 0 && !bindingChanged && !fab1Ready {
 		if recreated {
 			d.restartSNMPForVRFRecreate()
 		}
@@ -84,7 +92,7 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 		rebound = true
 		slog.Info("management interface bound to the management VRF", "interface", name)
 	}
-	if rebound || bindingChanged {
+	if rebound || bindingChanged || fab1Ready {
 		var cfg *config.Config
 		if d.store != nil {
 			cfg = d.store.ActiveConfig()
@@ -100,6 +108,21 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 	if recreated {
 		d.restartSNMPForVRFRecreate()
 	}
+}
+
+// fab1DebtUpgradeReady reports whether active carries fab1 debt (#16842)
+// and the store's current config now resolves fab1, so a reassert tick
+// should perform the single upgrade restart. Nil store / no cluster
+// config is not ready; reconcile's config-change comparison owns those.
+func (d *Daemon) fab1DebtUpgradeReady(active clusterTransportKey) bool {
+	if !active.Fab1Debt || d.store == nil {
+		return false
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return false
+	}
+	return fab1UpgradeReady(cfg)
 }
 
 // restartSNMPForVRFRecreate rebinds the SNMP listener after vrf-mgmt was

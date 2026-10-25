@@ -1147,7 +1147,8 @@ var (
 // the live key (flag set) against a freshly computed key (flag clear),
 // so the mark makes the next apply restart comms; the #11448 reassert
 // restarts on the same flag when its gate fires. Only a new epoch
-// clears it.
+// clears it. Fab1 debt deliberately does NOT use this marker (#16842):
+// see markClusterCommsFab1Debt.
 func (d *Daemon) markClusterTransportBindingChanged(gen uint64) {
 	if gen == 0 {
 		return
@@ -1171,14 +1172,51 @@ func (d *Daemon) markClusterCommsAddressDebt(gen uint64) {
 // markClusterCommsFab1Debt records that fab1 had no usable address when
 // its poll exhausted (#15687): the epoch comes up single-fabric and
 // wireSessionSyncTransportRefs latches syncPeerAddr1Disabled for it.
-// Without this mark nothing ever re-runs the constructor, so a fab1
-// address arriving later never upgrades SessionSync to
-// NewDualSessionSync. The config (hence the transport key) is
-// unchanged, so the debt travels on BindingChanged; the restarted
-// epoch's wireSessionSyncTransportRefs clears syncPeerAddr1Disabled
-// when it publishes the dual pair.
+//
+// #16842 narrows the #15687 mechanism: the debt no longer rides on
+// BindingChanged. BindingChanged is consumed unconditionally by step 20
+// and by the #11448 30 s reassert, so a fab1-debt epoch was torn down
+// and rebuilt every tick for as long as fab1 stayed unaddressed — the
+// re-marked debt made every cycle identical, indefinitely. Instead the
+// debt travels on Fab1Debt, which neither restart path treats as a
+// mismatch on its own. Reconcile restarts the epoch only once
+// fab1UpgradeReady reports fab1 resolvable, so a late fab1 address
+// still upgrades SessionSync to NewDualSessionSync exactly once, and a
+// working single-fabric epoch is otherwise left alone. Only a new
+// epoch may clear the flag (startClusterComms publishes a fresh key).
 func (d *Daemon) markClusterCommsFab1Debt(gen uint64) {
-	d.markClusterTransportBindingChanged(gen)
+	if gen == 0 {
+		return
+	}
+	active := d.activeTransport()
+	if active.Fab1Debt {
+		return
+	}
+	active.Fab1Debt = true
+	d.setActiveTransportIfCurrent(gen, active)
+}
+
+// fab1UpgradeReady reports whether the fab1 leg of cfg now resolves to a
+// usable address, i.e. whether restarting a fab1-debt epoch would
+// actually upgrade it to dual fabric (#16842). It mirrors the
+// constructor's own gate: fabric transport only (a fully configured
+// control link makes fab1 irrelevant to session sync), fab1 configured,
+// and resolveClusterInterfaceAddr non-empty — the same resolution the
+// new epoch's poll would perform. A config whose fab1 was removed is
+// not "ready": its key differs from the active key, so the ordinary
+// config-change comparison restarts comms on that commit anyway.
+func fab1UpgradeReady(cfg *config.Config) bool {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return false
+	}
+	cc := cfg.Chassis.Cluster
+	if _, _, transport := clusterSyncTransport(cc); transport != "fabric" {
+		return false
+	}
+	if cc.Fabric1Interface == "" || cc.Fabric1PeerAddress == "" {
+		return false
+	}
+	return resolveClusterInterfaceAddr(cfg, cc.Fabric1Interface, cc.Fabric1PeerAddress, "") != ""
 }
 
 // sessionSyncStartAttempts / sessionSyncStartRetryDelay bound the Start retry
@@ -1372,13 +1410,14 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 					slog.Info("cluster: dual fabric transport configured",
 						"fab0_local", syncLocal, "fab1_local", syncLocal1)
 				} else {
-					// #15687: single-fabric for THIS epoch only. Record
-					// transport debt below (after the epoch publishes its
-					// transport refs) so the next apply restarts comms and
-					// a late fab1 address upgrades to dual instead of
-					// being locked out for the epoch's life.
+					// #15687/#16842: single-fabric for THIS epoch. Record
+					// fab1 debt so a late fab1 address upgrades to dual
+					// exactly once (next apply, or the #11448 reassert
+					// once fab1 resolves) instead of being locked out —
+					// and, per #16842, without churning this working
+					// epoch every 30 s while fab1 stays unaddressed.
 					slog.Warn("cluster: fabric1 address not available, using single fabric only; "+
-						"marking comms for restart on next apply",
+						"will upgrade to dual when fabric1 resolves",
 						"interface", cc.Fabric1Interface)
 					d.markClusterCommsFab1Debt(commsGen)
 				}
@@ -1856,6 +1895,12 @@ type clusterTransportKey struct {
 	// BindingChanged remains true for this epoch once a retry resolves a
 	// different device than VRFDevice; only a new epoch may clear it.
 	BindingChanged bool `log:"binding_changed"`
+	// Fab1Debt records that this epoch exhausted its fab1 address poll
+	// and came up single-fabric (#15687, narrowed by #16842). Unlike
+	// BindingChanged it does NOT by itself force a comms restart: the
+	// working single-fabric epoch is torn down only once fab1 actually
+	// resolves (see fab1UpgradeReady). Only a new epoch may clear it.
+	Fab1Debt bool `log:"fab1_debt"`
 }
 
 // transportChangeLogArgs builds the key/value pairs for step 20's

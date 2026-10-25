@@ -535,6 +535,16 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 // current kernel/published evidence and restarts it when the binding changed.
 // restartOwed is consumed only by step 20; background callers always pass
 // false. Callers serialize this with config applies via applySem.
+//
+// #16842: a live key that differs from the fresh key ONLY by Fab1Debt is
+// not a mismatch while fab1 is still unaddressed — restarting would
+// rebuild the identical single-fabric epoch (and, via the #11448
+// reassert, do so every 30 s indefinitely). The restart fires once
+// fab1UpgradeReady reports the address present, so the late upgrade to
+// dual still happens exactly once. Every other difference — including
+// BindingChanged (off-key binds, primary-address debt) and any config
+// field, e.g. fab1 removed from config — restarts unconditionally, as
+// before.
 func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwed bool) {
 	if d.cluster == nil || d.daemonCtx == nil {
 		return
@@ -543,11 +553,25 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 	// #6290: ONE guarded snapshot. Boot startup writes this field without
 	// applySem, so the snapshot must remain protected by clusterCommsMu.
 	active := d.activeTransport()
-	if active == (clusterTransportKey{}) || (newTransport == active && !restartOwed) {
+	if active == (clusterTransportKey{}) {
 		return
 	}
-	if newTransport != active {
+	fab1Only := active
+	fab1Only.Fab1Debt = false
+	if newTransport == fab1Only && active.Fab1Debt && !fab1UpgradeReady(cfg) {
+		// #16842: fab1-debt epoch, fab1 still unaddressed — keep the
+		// working single-fabric epoch; do not churn it.
+		return
+	}
+	if newTransport == active && !restartOwed {
+		return
+	}
+	fab1Upgrade := newTransport == fab1Only && active.Fab1Debt
+	if newTransport != active && !fab1Upgrade {
 		slog.Info("cluster: transport config changed, restarting comms",
+			transportChangeLogArgs(active, newTransport)...)
+	} else if fab1Upgrade {
+		slog.Info("cluster: fab1 address now available, restarting comms to upgrade to dual fabric (#16842)",
 			transportChangeLogArgs(active, newTransport)...)
 	} else {
 		slog.Info("cluster: restarting comms owed by a teardown that did not "+
