@@ -88,10 +88,27 @@
 // #14639 aggregation), so IID rotation stays ONE source. The aggregate
 // still caps the zone as a whole; what changes is that a saturated source
 // tier can no longer consume the whole aggregate on the zone's behalf.
+//
+// #16510 (R3-A67-01, #15248 regression): /64-only keying made every host of
+// one LAN /64 share that single 15/s + burst-15 slot — a LAN zone is
+// typically ONE SLAAC /64, so its whole IPv6 generated-reply budget fell
+// from 1000/s (pre-#15248, per-/128) to 15/s and one host at ~15 pps
+// suppressed its neighbours. Fix: keep the /64 as an OUTER tier and add a
+// per-/128 (v4: per-/32) source tier INSIDE it. Order is host -> /64 ->
+// aggregate; a deny at any tier consumes nothing outward. Budgets (see
+// `src_budget` / `prefix64_budget`): a host keeps the #15248 fair share
+// (aggregate/65; 15/s + burst 15) and a /64 gets HOSTS_PER_64 (32) host
+// shares, clamped to the aggregate (480/s + burst 480 at production) —
+// so 30 same-/64 hosts each keep their full share (the 30x3 burst admits
+// 90/90), one host still cannot exceed its own share however it rotates
+// IIDs, and ~67+ fully-saturating /64s (not one host) are needed to press
+// the 1000/s aggregate, exactly the pre-existing distinct-source bound.
+// State stays fixed (64 host slots + 64 /64 slots + overflow + aggregate,
+// no attacker-growable map).
 
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::neighbor::monotonic_nanos;
 use crate::afxdp::types::ForwardingState;
@@ -233,35 +250,65 @@ impl TokenBucket {
         }
     }
 }
-/// #9901 (F-074): number of fixed per-source slots in a `ZoneLimiter`. A
+/// #9901 (F-074): number of fixed per-source slots in a `ZoneLimiter`, and
+/// (#16510) the same number of fixed IPv6-/64 slots in its outer tier. A
 /// power of two so the slot is one modulo over the seeded mix; 64 bounds the
-/// limiter to ~1.5KB (64 tags + 66 buckets) while keeping incidental
-/// collisions rare for the handful of concurrent error sources a zone sees.
+/// limiter while keeping incidental collisions rare for the handful of
+/// concurrent error sources a zone sees.
 const SRC_SLOT_COUNT: usize = 64;
 
-/// #15248 (A67-01): the per-source FAIR-SHARE divisor. Every one of the
-/// `SRC_SLOT_COUNT` source slots plus the `None`-source overflow bucket
+/// #15248 (A67-01): the per-HOST FAIR-SHARE divisor. Every one of the
+/// `SRC_SLOT_COUNT` host slots plus the `None`-source overflow bucket
 /// enforces `aggregate / SRC_FAIR_SHARE_DIVISOR` (rate and burst alike,
-/// each clamped to at least 1), so the sum of all per-source entitlements
-/// is at most the zone aggregate itself: no coalition of sources — and no
-/// single host rotating IPv6 IIDs inside its /64 — can make the source
-/// tier admit more than the aggregate would. At the production aggregate
-/// (1000/s + burst 1000) each slot gets 1000/65 = 15/s + burst 15: still
+/// each clamped to at least 1), so the sum of all per-host entitlements
+/// is at most the zone aggregate itself: no coalition of hosts — and no
+/// single host, however it rotates IPv6 IIDs — can make the host tier
+/// admit more than the aggregate would. At the production aggregate
+/// (1000/s + burst 1000) each host gets 1000/65 = 15/s + burst 15: still
 /// far above any benign source's trickle (traceroute / PMTUD are a
 /// handful per flow), while one flooder now spends at most ~1.5% of the
 /// zone budget instead of a tenth. Fixed divisor, not a gate parameter —
 /// the tier always tracks whatever aggregate rate/burst the gate carries.
 const SRC_FAIR_SHARE_DIVISOR: u64 = SRC_SLOT_COUNT as u64 + 1;
 
-/// #15248 (A67-01): the per-source budget for an aggregate of
+/// #16510: how many full host fair-shares one IPv6 /64 may draw. A LAN /64
+/// legitimately holds dozens of hosts, each entitled to its own share
+/// (the acceptance cells drive 30 hosts x 3); 32 covers that with margin
+/// while still bounding one /64 — however many IIDs it rotates, however
+/// spoofed — to under half the zone aggregate, so a single-/64 flood
+/// leaves the majority of the zone budget for other /64s, other zones'
+/// sources being unaffected regardless. Two fully-saturating /64s plus
+/// change can still press the aggregate: that is the pre-existing
+/// distinct-source envelope (any ~67 hosts at full share do the same),
+/// not a new weakening — the aggregate cap itself is unchanged.
+const HOSTS_PER_64: u64 = 32;
+
+/// #15248 (A67-01) / #16510: the per-host budget for an aggregate of
 /// `rate_per_sec`/`burst`: the fair share of the aggregate across all
-/// slots + overflow, never below 1 (a zero budget would fail-close every
-/// source under a degenerate gate burst, inverting the opt-out shape of
-/// `TokenBucket`).
+/// host slots + overflow, never below 1 (a zero budget would fail-close
+/// every source under a degenerate gate burst, inverting the opt-out
+/// shape of `TokenBucket`).
 fn src_budget(rate_per_sec: u64, burst: u64) -> (u64, u64) {
     (
         (rate_per_sec / SRC_FAIR_SHARE_DIVISOR).max(1),
         (burst / SRC_FAIR_SHARE_DIVISOR).max(1),
+    )
+}
+
+/// #16510: the per-/64 outer-tier budget: `HOSTS_PER_64` host fair-shares,
+/// clamped to the aggregate itself (a degenerate small test aggregate
+/// must not let one /64 out-admit the zone). At production this is
+/// 32 x 15 = 480/s + burst 480. The clamp uses the HOST budget's rounded
+/// share, so the /64 budget is always an exact multiple of the host
+/// budget and a /64 full of hosts at their shares is never clipped by
+/// its own outer tier before the hosts' shares sum to it.
+fn prefix64_budget(rate_per_sec: u64, burst: u64) -> (u64, u64) {
+    let (host_rate, host_burst) = src_budget(rate_per_sec, burst);
+    (
+        host_rate
+            .saturating_mul(HOSTS_PER_64)
+            .min(rate_per_sec.max(1)),
+        host_burst.saturating_mul(HOSTS_PER_64).min(burst.max(1)),
     )
 }
 
@@ -270,69 +317,119 @@ fn src_budget(rate_per_sec: u64, burst: u64) -> (u64, u64) {
 /// until the first source claims it. Hint-only either way — see `ZoneLimiter`.
 const TAG_EMPTY: u64 = 0;
 
-/// #9901 (F-074): a per-source-fair hierarchical generated-error limiter —
-/// the per-zone budget that used to be a single `TokenBucket`.
+/// #9901 (F-074) / #16510: a per-source-fair hierarchical generated-error
+/// limiter — the per-zone budget that used to be a single `TokenBucket`.
 ///
 /// Structure: one zone `aggregate` bucket (the #3618/#5856 budget, still
-/// parameterized by the gate's rate/burst) fronted by a per-source tier: 64
-/// fixed `src_slots` (each the aggregate's fair share, #15248 A67-01 —
-/// aggregate/(64+1); 15/s + burst 15 at the production 1000/1000) selected
-/// by `diffuse64(seed ^ addr_fold) % 64`, plus one `overflow` bucket (same
-/// fair-share budget) for a `None` source. Gate order is source-FIRST then
-/// aggregate: a source-deny consumes NOTHING shared (the #5567
-/// principle applied to the tier order), so one flooder cannot starve another
-/// source in the same zone — only the zone aggregate can still deny, exactly
-/// as before.
+/// parameterized by the gate's rate/burst) fronted by TWO source tiers:
+/// 64 fixed HOST slots (per-/128 for IPv6, per-/32 for IPv4; each the
+/// aggregate's fair share, #15248 A67-01 — aggregate/(64+1); 15/s + burst
+/// 15 at the production 1000/1000) selected by
+/// `diffuse64(seed ^ addr_fold_host) % 64`, plus one `overflow` bucket
+/// (same fair-share budget) for a `None` source; and, for IPv6 only, 64
+/// fixed /64 slots (`prefix64_slots`, budget `prefix64_budget` =
+/// HOSTS_PER_64 host shares clamped to the aggregate; 480/s + burst 480
+/// at production) selected by `diffuse64(seed ^ addr_fold_64) % 64`.
+/// Gate order is host-FIRST, then /64, then aggregate: a deny at any tier
+/// consumes NOTHING outward (the #5567 principle applied to the tier
+/// order), so one flooder cannot starve another host in the same zone —
+/// only the zone aggregate can still deny, exactly as before. IPv4 has
+/// no prefix tier above the host: a /32 IS the host, so host -> aggregate
+/// is the whole chain (#16510 changes nothing for IPv4).
 ///
-/// `src_tags` records the current claimant of each slot (best-effort CAS,
-/// result ignored). The tag is HINT-ONLY: on takeover the slot's bucket is
-/// NOT reset — colliders share the slot's sustained rate. There is no
-/// attacker-growable map (fixed 64 slots) and no lock (one atomic word per
-/// tier consult). The per-boot seed (`hot_path_hash_seed`) keeps the
-/// source→slot mapping unpredictable off-box, so an attacker cannot
-/// precompute a colliding source set.
+/// Why the /64 tier exists (#15248) and why it is no longer the ONLY
+/// IPv6 tier (#16510): keying IPv6 solely on the /64 bounds IID rotation
+/// (one host minting IIDs stays one budget) but couples every legitimate
+/// host of a LAN /64 into that one budget. With the host tier inside it,
+/// each /128 keeps its own fair share AND the /64 as a whole — however
+/// many distinct /128s, spoofed or real, it presents — stays bounded to
+/// HOSTS_PER_64 shares. Rotation gains an attacker nothing: every IID
+/// shares the /64 budget, and each IID is still host-capped on its way
+/// there.
 ///
-/// Memory: ~1.5KB per limiter (64 × u64 tags + 66 buckets × 2 × u64), held
-/// behind `Arc` in `ForwardingState` exactly as the old per-zone buckets
-/// were. Wire-maximum cardinality (65533 zones × 3 reasons) is ~300MB in the
-/// absurd all-zones-configured case; realistic zone counts cost KBs. Accepted
-/// and documented — the alternative (lazy per-zone build) would admit a
-/// fail-open window or a config-path lock.
+/// `src_tags` / `prefix64_tags` record the current claimant of each slot
+/// (best-effort CAS, result ignored). Tags are HINT-ONLY: on takeover the
+/// slot's bucket is NOT reset — colliders share the slot's sustained
+/// rate. There is no attacker-growable map (fixed 64+64 slots) and no
+/// lock (one atomic word per tier consult). The per-boot seed
+/// (`hot_path_hash_seed`) keeps the source->slot mappings unpredictable
+/// off-box, so an attacker cannot precompute a colliding source set.
+///
+/// Memory: ~2.3KB per limiter (128 x u64 tags + 130 buckets x 2 x u64),
+/// held behind `Arc` in `ForwardingState` exactly as the old per-zone
+/// buckets were. Wire-maximum cardinality (65533 zones x 3 reasons) is
+/// ~460MB in the absurd all-zones-configured case; realistic zone counts
+/// cost KBs. Accepted and documented — the alternative (lazy per-zone
+/// build) would admit a fail-open window or a config-path lock.
 #[derive(Debug)]
 pub(in crate::afxdp) struct ZoneLimiter {
     /// The zone aggregate budget — the former per-zone `TokenBucket`.
     aggregate: TokenBucket,
-    /// Current-claimant hint per source slot (`TAG_EMPTY` = never claimed).
+    /// Current-claimant hint per host slot (`TAG_EMPTY` = never claimed).
     src_tags: [AtomicU64; SRC_SLOT_COUNT],
-    /// Fixed per-source buckets, each enforcing the aggregate's fair share
+    /// Fixed per-host buckets, each enforcing the aggregate's fair share
     /// (#15248 A67-01: aggregate/(slots+overflow) = 15/s + burst 15 at the
-    /// production 1000/1000 aggregate).
+    /// production 1000/1000 aggregate). Keyed per-/128 (v6) / per-/32 (v4).
     src_slots: [TokenBucket; SRC_SLOT_COUNT],
-    /// The `None`-source budget (same fair share), shared by all sourceless
-    /// errors. A real bucket, never a fail-open skip.
+    /// Current-claimant hint per /64 slot (`TAG_EMPTY` = never claimed).
+    prefix64_tags: [AtomicU64; SRC_SLOT_COUNT],
+    /// Fixed per-/64 buckets (IPv6 only), each enforcing
+    /// `prefix64_budget` (#16510: HOSTS_PER_64 host shares clamped to the
+    /// aggregate = 480/s + burst 480 at production).
+    prefix64_slots: [TokenBucket; SRC_SLOT_COUNT],
+    /// The `None`-source budget (same host fair share), shared by all
+    /// sourceless errors. A real bucket, never a fail-open skip.
     overflow: TokenBucket,
 }
 
-/// Fold a source address to 64 bits. No diffusion here — `diffuse64` runs
-/// over `seed ^ fold` at the call site, so every output bit depends on every
-/// address bit AND every seed bit.
+/// Fold a source HOST address to 64 bits for the host tier. No diffusion
+/// here — `diffuse64` runs over `seed ^ fold` at the call site, so every
+/// output bit depends on every address bit AND every seed bit.
 ///
-/// #15248 (A67-01): an IPv6 source folds its /64 ONLY (host bits dropped
-/// before the fold), so every IID one host rotates inside its own /64 keys
-/// the SAME source slot with the SAME budget — the WireGuard #14639
-/// aggregation ("ratelimit the whole /64"). Distinct /64s still fold from
-/// distinct high halves and keep independent budgets. IPv4 folds the full
-/// /32 host address, unchanged.
+/// #16510: IPv6 folds the full /128 again (this tier is per-host; the
+/// #15248 /64 aggregation moved OUT to its own tier, `addr_fold_64`), so
+/// distinct hosts of one /64 key distinct host budgets. A v4-mapped IPv6
+/// source (`::ffff:a.b.c.d`) canonicalises to the v4 fold so both wire
+/// forms of one host share one budget (the WireGuard `source_bucket_key`
+/// precedent); without it the mapped form's /64 would alias every mapped
+/// host into the `::ffff:0:0/96` prefix bucket. IPv4 folds the full /32.
 fn addr_fold(addr: &IpAddr) -> u64 {
     match addr {
         IpAddr::V4(v4) => u32::from(*v4) as u64,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => u32::from(v4) as u64,
+            None => {
+                let x = u128::from(*v6);
+                // Full /128 host fold. The 0xA67 tag (the issue's A67-01
+                // marker) keeps a v6 fold from aliasing a v4 fold of the
+                // same numeric value.
+                ((x >> 64) as u64) ^ ((x as u64) << 1) ^ 0xA67
+            }
+        },
+    }
+}
+
+/// Fold an IPv6 source's /64 to 64 bits for the outer prefix tier
+/// (#15248 A67-01, retained by #16510 as the outer tier): host bits are
+/// dropped before the fold, so every IID one host rotates inside its own
+/// /64 keys the SAME /64 slot with the SAME budget — the WireGuard
+/// #14639 aggregation ("ratelimit the whole /64"). Distinct /64s fold
+/// from distinct high halves and keep independent budgets. Returns
+/// `None` for IPv4 (a /32 has no prefix tier above the host) and for
+/// v4-mapped IPv6 (canonicalised to the v4 host, which likewise has
+/// none).
+fn addr_fold_64(addr: &IpAddr) -> Option<u64> {
+    match addr {
+        IpAddr::V4(_) => None,
         IpAddr::V6(v6) => {
+            if v6.to_ipv4_mapped().is_some() {
+                return None;
+            }
             let x = u128::from(*v6);
             // /64 aggregation: only the routing prefix identifies the
-            // source. The 0xA67 tag (the issue's A67-01 marker) keeps an
-            // aggregate-folded v6 source from aliasing a v4 fold of the
-            // same numeric value.
-            ((x >> 64) as u64) ^ 0xA67
+            // /64. The 0xA67 tag keeps a prefix fold from aliasing a v4
+            // fold of the same numeric value.
+            Some(((x >> 64) as u64) ^ 0xA67)
         }
     }
 }
@@ -351,14 +448,40 @@ fn diffuse64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The source slot and claimant tag for `addr` under `seed`. The tag folds
-/// the bits above the slot index and is forced non-zero so it never reads
-/// `TAG_EMPTY`.
-fn slot_and_tag(seed: u64, addr: &IpAddr) -> (usize, u64) {
-    let h = diffuse64(seed ^ addr_fold(addr));
+/// The slot and claimant tag for a pre-folded key under `seed`. The tag
+/// folds the bits above the slot index and is forced non-zero so it never
+/// reads `TAG_EMPTY`.
+fn slot_and_tag_for_fold(seed: u64, fold: u64) -> (usize, u64) {
+    let h = diffuse64(seed ^ fold);
     let slot = (h % SRC_SLOT_COUNT as u64) as usize;
     let tag = (h >> 6) | 1;
     (slot, tag)
+}
+
+/// The HOST slot and claimant tag for `addr` under `seed` (per-/128 v6,
+/// per-/32 v4; v4-mapped v6 canonicalised to v4).
+fn slot_and_tag(seed: u64, addr: &IpAddr) -> (usize, u64) {
+    slot_and_tag_for_fold(seed, addr_fold(addr))
+}
+
+/// The /64 slot and claimant tag for `addr` under `seed`, or `None` when
+/// the address has no prefix tier (IPv4 / v4-mapped). Domain-separated
+/// from the host fold by construction: the host fold mixes the low half
+/// in (`<< 1`), the prefix fold drops it, so a /64 and its `::` host do
+/// not systematically alias one slot index across the two tables.
+fn prefix64_slot_and_tag(seed: u64, addr: &IpAddr) -> Option<(usize, u64)> {
+    addr_fold_64(addr).map(|fold| slot_and_tag_for_fold(seed, fold))
+}
+
+/// Best-effort claimant claim for one slot (hint-only, never a gate): on a
+/// race the loser still shares the slot, and no bucket is reset on
+/// takeover. Shared by the host and /64 tiers so both claim identically.
+fn claim_tag(tags: &[AtomicU64; SRC_SLOT_COUNT], slot: usize, tag: u64) {
+    let observed = tags[slot].load(Ordering::Relaxed);
+    if observed != tag {
+        let _ =
+            tags[slot].compare_exchange_weak(observed, tag, Ordering::Relaxed, Ordering::Relaxed);
+    }
 }
 
 impl ZoneLimiter {
@@ -368,19 +491,24 @@ impl ZoneLimiter {
             aggregate: TokenBucket::new(),
             src_tags: std::array::from_fn(|_| AtomicU64::new(TAG_EMPTY)),
             src_slots: std::array::from_fn(|_| TokenBucket::new()),
+            prefix64_tags: std::array::from_fn(|_| AtomicU64::new(TAG_EMPTY)),
+            prefix64_slots: std::array::from_fn(|_| TokenBucket::new()),
             overflow: TokenBucket::new(),
         }
     }
 
-    /// Source-FIRST, aggregate-second admission. Returns true when the reply
-    /// MAY be sent (both tiers had a token). A source-deny bumps the
-    /// reason's aggregate `*_RATE_LIMITED_TOTAL` (the observable metric)
-    /// WITHOUT touching the aggregate bucket; an aggregate-deny is accounted
-    /// by the shared `take_and_account` site. `rate_per_sec == 0` disables
-    /// the limiter (both tiers), preserving the `TokenBucket` opt-out. The
-    /// source tier enforces the aggregate's fair share (#15248 A67-01:
-    /// `src_budget(rate_per_sec, burst)`), so the source tier as a whole
-    /// can never out-admit the aggregate it fronts.
+    /// Host-FIRST, then /64, then aggregate admission (#16510; the #9901
+    /// host->aggregate order with the #15248 /64 tier moved outward).
+    /// Returns true when the reply MAY be sent (every tier on the chain
+    /// had a token). A deny at any tier bumps the reason's aggregate
+    /// `*_RATE_LIMITED_TOTAL` (the observable metric) WITHOUT touching
+    /// any outward bucket; an aggregate-deny is accounted by the shared
+    /// `take_and_account` site. `rate_per_sec == 0` disables the limiter
+    /// (all tiers), preserving the `TokenBucket` opt-out. The host tier
+    /// enforces the aggregate's fair share (#15248 A67-01:
+    /// `src_budget(rate_per_sec, burst)`) and the /64 tier
+    /// `prefix64_budget`, so neither tier as a whole can out-admit the
+    /// aggregate it fronts.
     fn allow(
         &self,
         reason: GeneratedErrorReason,
@@ -392,30 +520,32 @@ impl ZoneLimiter {
         if rate_per_sec == 0 {
             return true;
         }
-        let src_bucket = match src {
+        let seed = crate::hot_hash_seed::hot_path_hash_seed();
+        let (src_bucket, prefix64_bucket) = match src {
             Some(addr) => {
-                let (slot, tag) = slot_and_tag(crate::hot_hash_seed::hot_path_hash_seed(), &addr);
-                let observed = self.src_tags[slot].load(Ordering::Relaxed);
-                if observed != tag {
-                    // Best-effort claim; the result is ignored — on a race
-                    // the loser still shares the slot (hint-only, never a
-                    // gate), and no bucket is reset on takeover.
-                    let _ = self.src_tags[slot].compare_exchange_weak(
-                        observed,
-                        tag,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    );
-                }
-                &self.src_slots[slot]
+                let (slot, tag) = slot_and_tag(seed, &addr);
+                claim_tag(&self.src_tags, slot, tag);
+                let prefix = prefix64_slot_and_tag(seed, &addr).map(|(slot, tag)| {
+                    claim_tag(&self.prefix64_tags, slot, tag);
+                    &self.prefix64_slots[slot]
+                });
+                (&self.src_slots[slot], prefix)
             }
-            None => &self.overflow,
+            None => (&self.overflow, None),
         };
         let (src_rate, src_burst) = src_budget(rate_per_sec, burst);
         if !src_bucket.try_take(now_ns, src_rate, src_burst) {
             src_bucket.rate_limited.fetch_add(1, Ordering::Relaxed);
             rate_limited_total(reason).fetch_add(1, Ordering::Relaxed);
             return false;
+        }
+        if let Some(prefix_bucket) = prefix64_bucket {
+            let (p64_rate, p64_burst) = prefix64_budget(rate_per_sec, burst);
+            if !prefix_bucket.try_take(now_ns, p64_rate, p64_burst) {
+                prefix_bucket.rate_limited.fetch_add(1, Ordering::Relaxed);
+                rate_limited_total(reason).fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
         }
         take_and_account(&self.aggregate, reason, now_ns, rate_per_sec, burst)
     }
@@ -429,21 +559,22 @@ impl ZoneLimiter {
         self.aggregate.arrival_ns()
     }
 
-    /// Reset EVERY tier (aggregate, overflow, all source slots + tags) to
-    /// full at epoch `now_ns`, mirroring the single-bucket reset. GCRA: a
-    /// full bucket at `now_ns` is `tat == now_ns`.
+    /// Reset EVERY tier (aggregate, overflow, all host + /64 slots + tags)
+    /// to full at epoch `now_ns`, mirroring the single-bucket reset. GCRA:
+    /// a full bucket at `now_ns` is `tat == now_ns`.
     #[cfg(test)]
     fn reset_for_test(&self, now_ns: u64) {
         for bucket in [&self.aggregate, &self.overflow]
             .into_iter()
             .chain(self.src_slots.iter())
+            .chain(self.prefix64_slots.iter())
         {
             bucket
                 .theoretical_arrival_ns
                 .store(now_ns, Ordering::Relaxed);
             bucket.rate_limited.store(0, Ordering::Relaxed);
         }
-        for tag in self.src_tags.iter() {
+        for tag in self.src_tags.iter().chain(self.prefix64_tags.iter()) {
             tag.store(TAG_EMPTY, Ordering::Relaxed);
         }
     }
@@ -464,12 +595,21 @@ impl ZoneLimiter {
         while self.aggregate.try_take(now_ns, rate_per_sec, burst) {}
     }
 
-    /// The source slot `addr` maps to under the live seed. Test-only: lets
+    /// The HOST slot `addr` maps to under the live seed. Test-only: lets
     /// cells pick same-slot (collision) vs distinct-slot sources without
     /// hardcoding a seed-dependent layout.
     #[cfg(test)]
     pub(in crate::afxdp) fn slot_for_test(addr: &IpAddr) -> usize {
         slot_and_tag(crate::hot_hash_seed::hot_path_hash_seed(), addr).0
+    }
+
+    /// The /64 slot `addr` maps to under the live seed, or `None` for
+    /// IPv4 / v4-mapped sources. Test-only, same purpose as
+    /// `slot_for_test`.
+    #[cfg(test)]
+    pub(in crate::afxdp) fn prefix64_slot_for_test(addr: &IpAddr) -> Option<usize> {
+        prefix64_slot_and_tag(crate::hot_hash_seed::hot_path_hash_seed(), addr)
+            .map(|(slot, _)| slot)
     }
 }
 
@@ -589,10 +729,10 @@ pub(in crate::afxdp) fn allow_generated_error_zoned(
 }
 
 /// Testable core of [`allow_generated_error_zoned`] with an injected clock +
-/// rate / burst (which parameterize the zone AGGREGATE tier; the per-source
-/// tier takes the aggregate's fair share, #15248 A67-01), so the unit tests
-/// can drive a deterministic per-zone burst-then-drain sequence without
-/// sleeping.
+/// rate / burst (which parameterize the zone AGGREGATE tier; the host tier
+/// takes the aggregate's fair share and the /64 tier HOSTS_PER_64 shares,
+/// #15248 A67-01 / #16510), so the unit tests can drive a deterministic
+/// per-zone burst-then-drain sequence without sleeping.
 pub(in crate::afxdp) fn allow_generated_error_zoned_at(
     forwarding: &ForwardingState,
     reason: GeneratedErrorReason,

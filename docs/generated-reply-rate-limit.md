@@ -26,19 +26,22 @@ addressed to the trigger's spoofable source). The limiter is modelled on Linux's
 `net.ipv4.icmp_msgs_per_sec` (default 1000/s): bounded-state GCRA tiers with
 fixed cardinality, so there is no attacker-driven map growth.
 
-The `ZoneLimiter` is a per-source-fair hierarchy (#9901 F-074): a per-source
-tier (64 fixed slots, each the zone aggregate's fair share — aggregate/(64+1)
-= 15/s + burst 15 at the production 1000/1000 aggregate, #15248 A67-01 — plus
-a same-share overflow bucket for sourceless errors) in front of the zone
-aggregate (1000/s + burst 1000). Each tier is a single-atomic-word GCRA
+The `ZoneLimiter` is a per-source-fair hierarchy (#9901 F-074, extended
+by #16510): a per-HOST tier (64 fixed slots, each the zone aggregate's
+fair share — aggregate/(64+1) = 15/s + burst 15 at the production
+1000/1000 aggregate, #15248 A67-01 — plus a same-share overflow bucket
+for sourceless errors), then — for IPv6 only — a per-/64 tier (64 fixed
+slots at HOSTS_PER_64 = 32 host shares, clamped to the aggregate =
+480/s + burst 480 at production, #16510), in front of the zone aggregate
+(1000/s + burst 1000). Each tier is a single-atomic-word GCRA
 (theoretical-arrival-time); refill and consume commit together in one CAS so
 concurrent workers can never double-credit or over-admit (#2955). Gate order
-is source-FIRST then aggregate: a source-deny consumes NOTHING shared, so one
-flooder cannot starve another source in the same zone. Default aggregate
+is host-FIRST, then /64, then aggregate: a deny at any tier consumes NOTHING
+outward, so one flooder cannot starve another host in the same zone. Default aggregate
 rate/burst are compile-time constants `DEFAULT_RATE_PER_SEC =
 DEFAULT_BURST = 1000` (mirroring Linux's `icmp_msgs_per_sec`); a zero rate
 disables the limiter. Slot collisions share the slot's sustained rate (tag
-hint-only, no takeover reset); cardinality is config-bounded (~1.5KB per zone
+hint-only, no takeover reset); cardinality is config-bounded (~2.3KB per zone
 limiter), never attacker-growable.
 
 ## #15248 (A67-01): fair-share slots and /64 source keying
@@ -51,16 +54,17 @@ and one IPv6 host rotating IIDs inside its own /64 minted a fresh slot per
 /128, needing no coalition at all. Two changes close it, both inside
 `icmp_ratelimit.rs`:
 
-- **Fair-share budgets.** Each slot and the overflow bucket now enforce
+- **Fair-share budgets.** Each host slot and the overflow bucket now enforce
   `aggregate / 65` (rate and burst, each clamped to at least 1), computed
   from whatever aggregate rate/burst the gate carries. The sum of all
-  per-source entitlements can never exceed the aggregate, so a saturated
-  source tier leaves the aggregate's headroom for sources that have not
+  per-host entitlements can never exceed the aggregate, so a saturated
+  host tier leaves the aggregate's headroom for sources that have not
   spent their share; the aggregate still caps the zone as a whole.
 - **IPv6 keys on the /64.** `addr_fold` drops the host bits before folding
   (the WireGuard #14639 aggregation), so IID rotation inside one /64 is
   ONE source with ONE budget. Distinct /64s — and every IPv4 /32 — keep
-  independent budgets.
+  independent budgets. (#16510 below keeps this /64 budget but moves it
+  to an OUTER tier behind a per-/128 host tier.)
 
 Deliberate behaviour delta: a single legitimate source's burst is now the
 fair share (15 at the production aggregate) instead of 100. A real
@@ -69,6 +73,42 @@ below 15/s sustained, so benign behaviour is unchanged; only a source
 trying to consume more than 1/65 of a zone's generated-reply budget is
 clipped earlier than before — which is exactly the fairness the tier
 exists to provide.
+
+## #16510 (R3-A67-01): per-/128 inside a bounded /64
+
+#15248 keyed IPv6 SOLELY on the /64, so every host of one LAN /64 shared a
+single 15/s + burst-15 budget. A LAN zone is typically one SLAAC /64, so
+that zone's whole IPv6 generated-reply budget fell from 1000/s
+(pre-#15248, per-/128) to 15/s, and one host at ~15 pps suppressed its
+neighbours' Time Exceeded / Packet Too Big / reject replies (the trigger
+is dropped either way; only the generated reply is lost).
+
+Fix, both inside `icmp_ratelimit.rs`:
+
+- **Per-host tier restored.** IPv6 hosts key per-/128 again (IPv4
+  per-/32, v4-mapped IPv6 canonicalised to the v4 host), each at the
+  #15248 fair share (aggregate/65 = 15/s + burst 15 at production). Two
+  hosts of one /64 therefore keep independent budgets: one at 20/s
+  cannot suppress a neighbour at 1/s, and 30 hosts x 3 burst admits
+  90/90.
+- **/64 kept as an OUTER tier.** Behind the host tier, each /64 gets
+  `HOSTS_PER_64` (32) host shares, clamped to the aggregate (480/s +
+  burst 480 at production). IID rotation still gains nothing — every
+  IID shares the /64 budget on top of its own host cap — and one /64,
+  however many /128s it presents, cannot take more than ~48% of the
+  zone aggregate. Pressing the aggregate still needs ~67 hosts at full
+  share, the pre-existing distinct-source envelope; the 1000/s zone cap
+  itself is unchanged.
+- **Gate order host -> /64 -> aggregate**, deny consumes nothing
+  outward, fixed 64+64 slots + overflow + aggregate (~2.3KB per zone
+  limiter), no attacker-growable state, denial still fails closed with
+  `*_rate_limited_total` bumped exactly once.
+
+Deliberate behaviour delta vs #15248: a /64 of more than 32
+simultaneously-saturating hosts now shares 480/s among the excess
+instead of 15/s among all of them, and a single host's burst stays 15
+(unchanged). Benign per-host behaviour is unchanged from #15248; what
+returns is per-host independence WITHIN a /64.
 
 ## #2472 → #3618 → #5856: why every reason is per-zone
 
@@ -243,18 +283,24 @@ unchanged.)
   `verdict.dscp_rewrite`. The trigger-packet disposition is unchanged (the caller
   drops the trigger on a `false` return regardless); only WHEN the token advances
   changed.
-- #9901 (F-074): WITHIN a zone the tier order is source-FIRST then aggregate —
+- #9901 (F-074): WITHIN a zone the tier order is host-FIRST then aggregate —
   the #5567 build-before-consume principle applied to the tier order. A
-  source-denied reply consumes NOTHING shared (only the reason's aggregate
+  host-denied reply consumes NOTHING shared (only the reason's aggregate
   deny counter moves, for observability), so one flooder cannot spend another
   source's budget or the zone aggregate. An aggregate-denied reply consumed
-  its source token first (conservative: the source spent budget on a reply
+  its host token first (conservative: the source spent budget on a reply
   the zone could not emit); the alternative (peeking the aggregate without
   consuming) would race under concurrent workers for no operator benefit.
-- #15248 (A67-01): the per-source tier can no longer out-admit the zone
-  aggregate it fronts: each slot's budget is the aggregate's fair share
-  (aggregate/65), and IPv6 sources aggregate on the /64, so neither a
-  multi-source coalition nor one host rotating IIDs can drain the
-  aggregate and starve another source's PTB / Time-Exceeded / reject
-  replies. Source-tier denial still fails closed (reply dropped, counter
-  bumped) exactly as before.
+- #15248 (A67-01): the per-host tier can no longer out-admit the zone
+  aggregate it fronts: each host slot's budget is the aggregate's fair share
+  (aggregate/65), so a multi-source coalition cannot drain the aggregate
+  through the host tier alone. Host-tier denial still fails closed (reply
+  dropped, counter bumped) exactly as before.
+- #16510 (R3-A67-01): the /64 tier sits BETWEEN host and aggregate for
+  IPv6, so one host rotating IIDs — or any number of spoofed /128s in one
+  /64 — still cannot drain the aggregate: the whole /64 is bounded to
+  HOSTS_PER_64 host shares (480/s at production). A /64-denied reply has
+  spent its host token (same conservative order as the aggregate leg);
+  a host-denied reply spends no /64 token. Denial at either tier fails
+  closed exactly as before, and distinct hosts of one /64 keep
+  independent host budgets up to the /64 cap.
