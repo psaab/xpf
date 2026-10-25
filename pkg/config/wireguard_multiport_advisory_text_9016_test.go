@@ -124,7 +124,10 @@ func TestMultiportAdvisoryDoesNotClaimTheTunnelIsDead9016(t *testing.T) {
 		t.Fatalf("a single listen-port must produce NO multi-port advisory, got: %v", adv)
 	}
 
-	// CONTROL: two tunnels sharing ONE port are not a multi-port config either.
+	// CONTROL: two tunnels sharing ONE port are not a multi-port config
+	// either. (Since #16531 that shape is refused at strict commit and
+	// warned on this lenient path; the steering gate itself, called
+	// directly here, still owes it no advisory.)
 	if adv := validateWireguardSteeredPortSet(wgMultiportTree9016(t, "51820", "51820")); len(adv) != 0 {
 		t.Fatalf("two tunnels on the SAME port are all steered; no advisory is due, got: %v", adv)
 	}

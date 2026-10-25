@@ -183,11 +183,13 @@ func EmitTunnelEndpointNames(cfg *Config) []TunnelEndpointName {
 // TUNNEL-level -- "one kernel UDP socket, one local identity per WG interface"
 // -- while WgPeers is the per-peer set. So a unit's peers are additive to the
 // one interface, and emitting a second endpoint per unit would put two
-// endpoints on one listen port and one private key. Nothing would catch that:
-// two WireGuard tunnels sharing a listen port compile without complaint today
-// and WireGuardListenPorts() simply de-duplicates them. A unit that overrides
-// the port or the key is a different local identity and is refused at commit
-// instead (compiler_validate_wireguard.go), so it never reaches here.
+// endpoints on one listen port and one private key. Two DISTINCT WG
+// interfaces sharing a listen port are refused at strict commit by the
+// #16531 collision gate when their sockets cannot both bind; the merge
+// here is what keeps one interface's units from ever looking like that
+// pair. A unit that overrides the port or the key is a different local
+// identity and is refused at commit instead
+// (compiler_validate_wireguard.go), so it never reaches here.
 //
 // Within each per-unit tunnel, the peer set cannot conflict on the strict
 // path: validateOneWireguardTunnel rejects duplicate public keys. The

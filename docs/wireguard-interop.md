@@ -1050,8 +1050,17 @@ Handshakes still complete and outbound traffic still flows, so those tunnels
 can come up and still pass no inbound traffic. (#9587.)
 ```
 
-Two WG tunnels that SHARE one listen port contribute one set entry and draw no
-warning.
+Two WG tunnels that SHARE one listen port contribute one set entry and draw
+no steering warning. Sharing a port is not thereby permitted: since #16531,
+two tunnels whose listen sockets cannot both bind — the same
+routing-instance, or the default instance plus any VRF (the default socket
+is wildcard) — are refused at strict commit naming both tunnels
+(`validateWireguardListenPortCollisionStrict`), because each tunnel binds
+its own `[::]:port` socket with no port sharing and the second bind fails
+with EADDRINUSE, leaving that tunnel permanently unable to handshake. Two
+tunnels in DIFFERENT VRFs may share a port: each socket is bound to its own
+`vrf-<instance>` device. An already-committed colliding config still loads
+with a warning (#1960).
 
 Fail-on-revert guards: `TestWireGuardTwoListenPortsDrawNoAdvisory9587`,
 `TestWireGuardSingleListenPortDoesNotWarn_1434`,

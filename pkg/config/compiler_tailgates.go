@@ -313,6 +313,21 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		return err
 	}
 	cfg.Warnings = append(cfg.Warnings, wgRoutingInstanceWarnings...)
+	// #16531: duplicate-WireGuard-listen-socket gate. Two WG endpoints
+	// on one listen-port whose sockets collide (same instance, or
+	// default plus any VRF) commit clean per-tunnel, but each binds its
+	// own [::]:port socket with no reuse option, so the second bind
+	// fails EADDRINUSE and that tunnel never handshakes. Strict:
+	// hard-reject naming both tunnels. Lenient: warn so an
+	// already-committed config still boots (#1960). Runs after the
+	// #9909 scope gate so an unsupported-scope error still wins the
+	// first-error slot, and before the steered-port advisory so a
+	// colliding pair is refused rather than merely warned about.
+	wgListenPortWarnings, err := validateWireguardListenPortCollisionStrict(cfg, opts.lenientWireguardListenPortCollision)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, wgListenPortWarnings...)
 
 	// #9587 (#1434 Increment 2, landed): the AF_XDP shim's WG-RX steering is a
 	// bounded SET of at most MaxSteeredWireGuardPorts listen ports

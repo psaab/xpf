@@ -49,8 +49,9 @@ const MaxSteeredWireGuardPorts = 8
 // WireGuard gate (validateOneWireguardTunnel, #3863) rejects it at commit, so
 // it only arises on a tolerant load, and it contributes no steerable port
 // either way. Two tunnels SHARING one listen port contribute one entry
-// (dedup); they collide on the kernel UDP bind instead (bind_wg_socket sets
-// no SO_REUSEPORT), which is a different failure and not this gate's subject.
+// (dedup) for steering purposes; whether their listen sockets may both
+// exist is the #16531 collision gate's subject
+// (validateWireguardListenPortCollisionStrict), not this gate's.
 func SteeredWireGuardListenPorts(cfg *Config) []uint16 {
 	if cfg == nil {
 		return nil
@@ -143,9 +144,9 @@ func SplitSteeredPorts(emitterOrdered []uint16) (full, selected, overflow []uint
 // dataplane programs — so the ports this warning names ARE the ports the shim
 // steers, including when a warned tunnel's netdev is absent at runtime. Two
 // WireGuard tunnels that SHARE one listen port contribute one set entry and
-// draw no warning; they collide on the kernel UDP bind instead
-// (bind_wg_socket sets no SO_REUSEPORT), which is a different failure and not
-// this gate's subject.
+// draw no warning from THIS gate; whether the pair may commit at all is
+// the #16531 listen-socket collision gate's decision (strict: refuse when
+// the sockets collide; lenient: warn), which runs before this advisory.
 func validateWireguardSteeredPortSet(cfg *Config) []string {
 	_, selected, overflow := SplitSteeredPorts(SteeredWireGuardListenPorts(cfg))
 	if len(overflow) == 0 {
