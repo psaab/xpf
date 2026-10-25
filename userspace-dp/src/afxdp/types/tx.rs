@@ -86,6 +86,22 @@ pub(in crate::afxdp) enum PendingForwardFrame {
     Live,
     Owned(Vec<u8>),
     Prebuilt(crate::afxdp::cos::redirect_pool::PooledBuffer),
+    /// #16603: a Prebuilt transit frame (embedded-ICMP NAT/NAT64
+    /// reversal) together with the original ingress identity needed to
+    /// mirror the RECEIVED frame, not the translated egress frame.
+    /// `frame` is the already-rewritten wire frame to forward;
+    /// `ingress_frame`/`ingress_meta` describe the packet as it arrived
+    /// (pre-reversal addresses, ingress L2/VLAN, original family/TTL),
+    /// which is what the plan-1376 mirror contract requires the analyzer
+    /// to receive ("full original Ethernet frame"). Device-generated
+    /// replies (Time-Exceeded) have no such original transit frame and
+    /// stay plain `Prebuilt`, mirroring their generated wire bytes as
+    /// before (#15947 deliberate choice).
+    PrebuiltTransit {
+        frame: crate::afxdp::cos::redirect_pool::PooledBuffer,
+        ingress_frame: Vec<u8>,
+        ingress_meta: ForwardPacketMeta,
+    },
 }
 
 impl Default for PendingForwardFrame {

@@ -1785,7 +1785,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
             "inactive owner-RG error must resolve to the peer-owned fabric"
         );
         assert!(
-            matches!(fwd.frame, PendingForwardFrame::Prebuilt(_)),
+            matches!(fwd.frame, PendingForwardFrame::PrebuiltTransit { .. }),
             "FabricRedirect embedded error must use a prebuilt frame"
         );
         assert_eq!(
@@ -1793,7 +1793,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
             "FabricRedirect prebuilt must dispatch on the fabric parent"
         );
         let prebuilt = match &fwd.frame {
-            PendingForwardFrame::Prebuilt(bytes) => bytes,
+            PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
             _ => unreachable!("prebuilt asserted above"),
         };
         assert_eq!(
@@ -1961,7 +1961,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let reversed = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("embedded-ICMP reversal must queue a PREBUILT reversed frame"),
     };
     let (out_l3, out_l4) = if quote_reply_reverse_half {
@@ -2571,7 +2571,7 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
     assert!(
         matches!(
             binding.scratch.scratch_forwards[0].frame,
-            PendingForwardFrame::Prebuilt(_)
+            PendingForwardFrame::PrebuiltTransit { .. }
         ),
         "co-moved PMTUD must queue a prebuilt reversed frame"
     );
@@ -3294,7 +3294,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         );
         assert_eq!(fwd.target_ifindex, 21);
         let out = match &fwd.frame {
-            PendingForwardFrame::Prebuilt(bytes) => bytes,
+            PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
             _ => panic!("NAT64 FabricRedirect must queue a prebuilt frame"),
         };
         assert_eq!(&out[0..6], &[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
@@ -3411,7 +3411,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("the NAT64 error translation must queue a PREBUILT frame"),
     };
     // L2: toward the client on the LAN unit (untagged, ethertype IPv6).
@@ -3695,7 +3695,7 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_im
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("the NAT64 error translation must queue a PREBUILT frame"),
     };
     // L2: toward the WAN gateway, VLAN 80 tagged (18-byte eth header).
@@ -4770,7 +4770,7 @@ fn n9162_capture(binding: &BindingWorker, sessions_delta: i64) -> N9162Outcome {
     let (prebuilt, target_ifindex, flow_key_none) = match binding.scratch.scratch_forwards.first() {
         Some(fwd) => (
             match &fwd.frame {
-                PendingForwardFrame::Prebuilt(bytes) => Some(bytes.buf.clone()),
+                PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => Some(bytes.buf.clone()),
                 _ => None,
             },
             fwd.target_ifindex,
@@ -5210,7 +5210,7 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let reversed = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("same-family reversal must queue a PREBUILT frame"),
     };
     // Same-family (NAT44) outcome: v4 in, v4 out — the outer dst and the
@@ -5411,7 +5411,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_6474() {
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("the outbound re-NAT must queue a PREBUILT frame"),
     };
     // L2 toward the WAN gateway (default route), VLAN 80 tagged.
@@ -5575,7 +5575,7 @@ fn poll_descriptor_snat_outbound_icmp_error_policy_judges_pre_snat_src_13649() {
                 "#13649: policy permitting the PRE-SNAT source must deliver the re-NAT'd error even when the SNAT pool source is denied"
             );
             let out = match &binding.scratch.scratch_forwards[0].frame {
-                PendingForwardFrame::Prebuilt(bytes) => bytes,
+                PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
                 _ => panic!("#13649: permitted outbound SNAT error must queue a PREBUILT frame"),
             };
             let ip = &out[18..];
@@ -5690,7 +5690,7 @@ fn poll_descriptor_snat_outbound_icmp_error_fabric_redirect_judges_pre_snat_src_
             ForwardingDisposition::FabricRedirect
         );
         let fabric_frame = match &local_forward.frame {
-            PendingForwardFrame::Prebuilt(bytes) => bytes.clone(),
+            PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes.clone(),
             _ => panic!("#13772: first pass must hand off a prebuilt frame"),
         };
         let fabric_meta = local_forward.meta;
@@ -5890,7 +5890,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_6474() {
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("the outbound re-NAT must queue a PREBUILT frame"),
     };
     assert_eq!(&out[12..14], &[0x81, 0x00], "VLAN tag (reth0.80) present");
@@ -6024,7 +6024,7 @@ fn poll_descriptor_snat66_outbound_icmp_error_policy_judges_pre_snat_src_13649()
         if expect_queued {
             assert_eq!(binding.scratch.scratch_forwards.len(), 1);
             let out = match &binding.scratch.scratch_forwards[0].frame {
-                PendingForwardFrame::Prebuilt(bytes) => bytes,
+                PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
                 _ => panic!("permitted outbound SNAT66 error must queue a PREBUILT frame"),
             };
             assert_eq!(&out[18 + 8..18 + 24], &snat_ip.octets());
@@ -6149,7 +6149,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_in_routing_instance_9162() 
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("the outbound re-NAT must queue a PREBUILT frame"),
     };
     let ip = &out[18..];
@@ -6250,7 +6250,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_in_routing_instance_9162() 
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("the outbound re-NAT must queue a PREBUILT frame"),
     };
     let ip = &out[18..];
@@ -9599,7 +9599,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let reversed = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("embedded-ICMP reversal must queue a PREBUILT reversed frame"),
     };
     assert_eq!(
@@ -9744,7 +9744,7 @@ fn gre_decapped_nat64_icmp_error_reads_the_inner_frame_8271() {
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("the NAT64 ICMP error translation must queue a PREBUILT frame"),
     };
     // The cross-family translation is the payload of the fix: these bytes can
@@ -10029,7 +10029,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let reversed = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("embedded-ICMP reversal must queue a PREBUILT reversed frame"),
     };
     assert_eq!(
@@ -12039,7 +12039,7 @@ fn poll_flood_queues_burst_and_recycles_excess_9901() {
             // Leak pin: every queued error must carry the EXTERNAL source.
             // The re-NAT arm builds a VLAN-tagged prebuilt (18B eth); an
             // untranslated fallthrough keeps the internal client source.
-            if let PendingForwardFrame::Prebuilt(bytes) = &fwd.frame {
+            if let PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } = &fwd.frame {
                 let ip = if bytes.len() > 18 && bytes[12..14] == [0x81, 0x00] {
                     &bytes[18..]
                 } else {
@@ -12570,7 +12570,7 @@ fn poll_descriptor_untranslated_v4_error_admission_knob_impl(
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let admitted = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("RELATED ICMP error must queue a PREBUILT frame"),
     };
     assert_eq!(
@@ -13017,7 +13017,7 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let admitted = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("RELATED ICMPv6 error must queue a PREBUILT frame"),
     };
     assert_eq!(admitted[54], 2, "admitted frame stays PTB type 2");
@@ -13394,7 +13394,7 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         "reply-quoting error must egress toward the quoted sender (server leg)"
     );
     let admitted = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("RELATED ICMP error must queue a PREBUILT frame"),
     };
     assert_eq!(
@@ -13759,7 +13759,7 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         "reply-quoting PTB must egress toward the quoted server, not the client"
     );
     let admitted = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("RELATED ICMPv6 error must queue a PREBUILT frame"),
     };
     assert_eq!(admitted[54], 2, "admitted frame stays PTB type 2");
@@ -15408,7 +15408,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_with_reverse_half_14628() {
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("#14628: outbound re-NAT must queue a PREBUILT frame"),
     };
     assert_eq!(&out[0..6], &N6472_WAN_GW_MAC, "eth dst = WAN gateway");
@@ -15529,7 +15529,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_with_reverse_half_14628() {
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("#14628: outbound re-NAT must queue a PREBUILT frame"),
     };
     assert_eq!(&out[12..14], &[0x81, 0x00], "VLAN tag (reth0.80) present");
@@ -15651,7 +15651,7 @@ fn poll_descriptor_nptv6_outbound_icmp_error_renat_with_reverse_half_14628() {
     );
     let fwd = &binding.scratch.scratch_forwards[0];
     let out = match &fwd.frame {
-        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes,
         _ => panic!("#14628: outbound re-NAT must queue a PREBUILT frame"),
     };
     let ip = &out[18..];
