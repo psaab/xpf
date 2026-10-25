@@ -52,6 +52,36 @@ func rollbackTargetRefusedOnlyForFeeds(target *config.Config) bool {
 	return len(dpuserspace.PolicyContentRejectionReasons(target, overlay)) == 0
 }
 
+// rollbackTargetFeedProducersAbsent reports whether any feed named by
+// target's dynamic-address bindings has no running producer in d.feeds
+// (#16661). A missing producer means the abandoned config's apply cancelled
+// it (feed removed/renamed by C2); no fetch will ever install its snapshot
+// while C2 stays enforced, so deferring on it cannot converge. A producer
+// that exists but has not fetched yet is the #9615 late-feed case and is NOT
+// absent. Returns false when there is no feed manager / no bindings to
+// inspect (cannot prove absence — keep the existing deferral semantics).
+func (d *Daemon) rollbackTargetFeedProducersAbsent(target *config.Config) bool {
+	if d == nil || d.feeds == nil || target == nil {
+		return false
+	}
+	bindings := target.Security.DynamicAddress.AddressBindings
+	if len(bindings) == 0 {
+		return false
+	}
+	live := d.feeds.AllFeeds()
+	for _, b := range bindings {
+		if b == nil {
+			continue
+		}
+		for _, feedName := range b.FeedNames {
+			if _, ok := live[feedName]; !ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // rollbackTargetRefusedOnlyForDNS reports whether target's refusal is
 // attributable to dns-name entries whose resolution failed when the
 // target was compiled at Store.Load (#16612). It re-resolves a private
@@ -126,11 +156,16 @@ func targetHasFailedDNSLookup(cfg *config.Config) bool {
 //     deferred, up to confirmRollbackFeedRetryMax attempts, without
 //     promoting; at the DNS cap the rollback proceeds (return false) so
 //     the normal promotion + apply path re-resolves and decides each
-//     entry, while at the feed cap the safe state is taken;
-//   - any other refusal, or a feed still unready at the cap, promotes the store
-//     to the target (persisted as committed, as #6538 does for a recovered
-//     target that no longer compiles) and enters the bootstrap/lifeline safe
-//     state instead of applying a target the dataplane refuses.
+//     entry, while at the feed cap the safe state is taken — EXCEPT when
+//     the target's feed producer is absent because the abandoned config
+//     removed/renamed it (#16661): the producers are then reconciled FOR
+//     THE TARGET and the deferral restarts, so bootstrap is never reached
+//     for a refusal whose producer nobody was running;
+//   - any other refusal, or a feed still unready at the cap (with its
+//     producer running), promotes the store to the target (persisted as
+//     committed, as #6538 does for a recovered target that no longer
+//     compiles) and enters the bootstrap/lifeline safe state instead of
+//     applying a target the dataplane refuses.
 //
 // #15056 (A32-03): the refused branch is also a rollback for #3868 purposes.
 // The standby holds the abandoned unconfirmed config (C2) as its permanent
@@ -155,6 +190,27 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
 	}
 	feedOnly := rollbackTargetRefusedOnlyForFeeds(target)
 	dnsOnly := !feedOnly && rollbackTargetRefusedOnlyForDNS(target)
+	if feedOnly && d.rollbackTargetFeedProducersAbsent(target) {
+		// #16661: the abandoned config's apply cancelled the target's feed
+		// producer (feed removed or renamed by C2). Deferring would wait
+		// forever on a producer only this rollback's own apply would restart,
+		// then enter bootstrap at the cap. Reconcile the producers FOR THE
+		// TARGET (as a normal apply of the target would) so its feed fetch
+		// starts now; then defer this fire — the restarted fetch installs
+		// asynchronously and its onUpdate / the next deferred fire re-checks
+		// the pre-flight with a live producer. Never reach bootstrap for a
+		// feed-only refusal whose producer was absent. The deferral counter
+		// is reset: the restarted producer gets its own bounded window, so a
+		// feed that never installs (server down) still converges to the
+		// #9615 safe state two minutes after its producer restarts rather
+		// than having burned the whole budget while no producer existed.
+		d.reconcileFeeds(target)
+		slog.Warn("commit confirmed timed out and its rollback target binds a dynamic-address "+
+			"feed whose producer the abandoned config removed; reconciled the feed producers "+
+			"for the rollback target so its fetch can install before the rollback is decided",
+			"err", rerr, "issue", "#16661")
+		delete(d.confirmFeedDeferrals, gen)
+	}
 	if (feedOnly || dnsOnly) && d.confirmFeedDeferrals[gen] < confirmRollbackFeedRetryMax {
 		if d.store.DeferConfirmTimer(gen, confirmRollbackFeedRetryInterval) {
 			if d.confirmFeedDeferrals == nil {
