@@ -39,6 +39,58 @@ import (
 // where frr references config.ReservedRedistSuffix directly).
 const ReservedChainSuffix = config.ReservedChainSuffix
 
+// reservedGeneratedRouteMaps16871 is the render-side registry of the fixed
+// (non-parameterised) route-map names xpf generates into FRR's global
+// name-keyed namespace. MEMBERSHIP IS NOT ENUMERATED HERE: the name set is
+// derived from config.ReservedGeneratedRouteMaps16871 — the single
+// enumeration in pkg/config, whose EmptiedChainDenyName/BGPDefaultExportName
+// constants the frr constants emptiedChainDenyName/bgpDefaultExportName15157
+// alias — so a name added there is covered here structurally and cannot
+// drift. reservedMeta16871 below only attaches render-side error text
+// (kind/ref) to a name; a config name with no metadata entry still registers
+// (generic text), so forgetting the metadata cannot reopen the forge.
+//
+// Why it exists: every such name ends in ReservedChainSuffix, so the strict
+// commit path already forbids an operator policy-statement from being NAMED
+// one — but a composed chain joins several legally named policies, and
+// composedChainName(["xpf","default-export"]) is byte-identical to
+// bgpDefaultExportName15157 exactly as (["xpf","emptied","chain"]) is to
+// emptiedChainDenyName (#16871, #8362 follow-up). bgpComposedChainCollision
+// consults this registry so a future generated name needs no new
+// hand-written comparison (the #15157 name shipped without one).
+// Parameterised derivations (composed chains themselves, narrowed aliases,
+// redist maps) are not fixed names and are guarded by their own
+// derivations, not this registry.
+type reservedGeneratedRouteMap16871 struct {
+	name string
+	kind string // operator-facing description of the generated map
+	ref  string // issue that owns the generated map
+}
+
+// reservedMeta16871 is render-side error text keyed by reserved name. It is
+// NOT the membership list — membership comes from
+// config.ReservedGeneratedRouteMaps16871.
+var reservedMeta16871 = map[string]reservedGeneratedRouteMap16871{
+	emptiedChainDenyName:      {name: emptiedChainDenyName, kind: "emptied-chain deny", ref: "#7625"},
+	bgpDefaultExportName15157: {name: bgpDefaultExportName15157, kind: "default-export", ref: "#15157"},
+}
+
+// reservedGeneratedRouteMaps16871 derives the registry, in config-list
+// order, from config.ReservedGeneratedRouteMaps16871.
+var reservedGeneratedRouteMaps16871 = deriveReservedGeneratedRouteMaps16871()
+
+func deriveReservedGeneratedRouteMaps16871() []reservedGeneratedRouteMap16871 {
+	out := make([]reservedGeneratedRouteMap16871, 0, len(config.ReservedGeneratedRouteMaps16871))
+	for _, name := range config.ReservedGeneratedRouteMaps16871 {
+		if meta, ok := reservedMeta16871[name]; ok {
+			out = append(out, meta)
+		} else {
+			out = append(out, reservedGeneratedRouteMap16871{name: name, kind: "generated", ref: "#16871"})
+		}
+	}
+	return out
+}
+
 // hasNonEmptyPolicy reports whether names holds at least one non-empty entry.
 // It replaces the old lastNonEmpty("") != "" idiom for "does this neighbor set
 // its own import/export?", independent of whether the entries resolve to
@@ -282,28 +334,31 @@ func bgpComposedChainCollision(fc *FullConfig) error {
 				return
 			}
 			name := composedChainName(chain)
-			// #8362 follow-up: a composed name can also collide with the
-			// RESERVED emptied-chain deny (emptiedChainDenyName). The reserved
-			// ReservedChainSuffix does NOT make that name unforgeable, which the
-			// #7625 comment wrongly claimed: strict rejects a policy-statement
-			// whose name ENDS in the suffix, but nothing stops several legally
-			// named policies from JOINING into it —
-			// composedChainName(["xpf","emptied","chain"]) is byte-identical to
-			// "xpf-emptied-chain" + ReservedChainSuffix. FRR merges same-named
-			// route-maps, so the composed chain's permits would fuse into the
-			// deny and reopen the unfiltered-direction hole #7625 closed, while
-			// the composed chain's own filter is corrupted by the deny's
-			// sequence. Fail the apply CLOSED, same posture as the two
-			// collisions below.
-			if name == emptiedChainDenyName {
-				firstErr = fmt.Errorf(
-					"composed BGP policy-chain route-map %q (from chain %v) collides "+
-						"with the reserved emptied-chain deny route-map of that exact "+
-						"name; FRR merges same-named route-maps, so this would fuse "+
-						"operator permits into the deny that closes an unfiltered "+
-						"direction — refusing to render (rename a chain member, #7625)",
-					name, chain)
-				return
+			// #8362 follow-up / #16871: a composed name can also collide with a
+			// RESERVED generated route-map (see reservedGeneratedRouteMaps16871).
+			// The reserved ReservedChainSuffix does NOT make those names
+			// unforgeable: strict rejects a policy-statement whose name ENDS in
+			// the suffix, but nothing stops several legally named policies from
+			// JOINING into one — composedChainName(["xpf","emptied","chain"]) is
+			// byte-identical to emptiedChainDenyName and
+			// composedChainName(["xpf","default-export"]) to
+			// bgpDefaultExportName15157. FRR merges same-named route-maps, so the
+			// composed chain's permits would fuse into the generated map (reopening
+			// the hole it closes) while the chain's own filter is corrupted in the
+			// same merge. Fail the apply CLOSED, same posture as the collisions
+			// below. The table is the single place a future generated name is
+			// registered; do not add another hand-written comparison here.
+			for _, reserved := range reservedGeneratedRouteMaps16871 {
+				if name == reserved.name {
+					firstErr = fmt.Errorf(
+						"composed BGP policy-chain route-map %q (from chain %v) collides "+
+							"with the reserved %s route-map of that exact name; FRR merges "+
+							"same-named route-maps, so this would fuse the composed chain "+
+							"with the generated map and corrupt both filters — refusing to "+
+							"render (rename a chain member, %s)",
+						name, chain, reserved.kind, reserved.ref)
+					return
+				}
 			}
 			if _, ok := fc.PolicyOptions.PolicyStatements[name]; ok {
 				firstErr = fmt.Errorf(

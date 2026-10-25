@@ -22,9 +22,12 @@ package frr
 //     today) gets the generated `xpf-default-export-xpf-chain`
 //     route-map: permit `match source-protocol bgp`, then deny. The
 //     name ends in ReservedChainSuffix like the other generated chain
-//     maps; it is not derivable by composedChainName (a single member
-//     never composes), and the collision belt below refuses the apply
-//     if an operator policy forges the exact name.
+//     maps. It IS derivable by composedChainName —
+//     composedChainName(["xpf","default-export"]) is byte-identical to
+//     it (#16871) — so bgpComposedChainCollision consults
+//     reservedGeneratedRouteMaps16871 and refuses the apply when a
+//     legally named chain joins into it, and the collision belt below
+//     refuses the apply if an operator policy forges the exact name.
 //  2. The #2998 plain `permit` tail of EXPORT maps (single via
 //     renderRouteMapForPolicyExport15157, composed via
 //     renderComposedRouteMapExport15157) becomes, in an instance with
@@ -49,7 +52,7 @@ import (
 // strict commit path forbids operator policy-statements from using;
 // the render-side collision belt below covers the lenient path exactly
 // as emptiedChainDenyCollision does for the #7625 deny.
-const bgpDefaultExportName15157 = "xpf-default-export" + ReservedChainSuffix
+const bgpDefaultExportName15157 = config.BGPDefaultExportName
 
 // bgpInstanceHasOrigination15157 reports whether this BGP instance
 // originates any route via #14586: the union of effective export
