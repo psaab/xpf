@@ -2401,6 +2401,11 @@ type compileOpts struct {
 	// from a commit error to a warning on tolerant load / peer-sync. The FRR
 	// renderer omits the entire router BGP stanza when LocalAS is zero.
 	lenientBGPRouterAS bool
+	// lenientBGPGroupType16567 downgrades the BGP group type vs peer-as
+	// cross-check (validateBGPGroupTypeStrict) to a warning on tolerant
+	// load / peer-sync (#1960); strict commit rejects a typo'd type and
+	// a type contradicting the effective peer-as/local AS.
+	lenientBGPGroupType16567 bool
 
 	// lenientBGPDuplicateNeighbor (#9007) downgrades the duplicate BGP
 	// neighbor gate (validateBGPDuplicateNeighborStrict) from a hard compile
@@ -3915,6 +3920,7 @@ func lenientCompileOpts() compileOpts {
 		lenientBGPAllowASIn11795:                 true,
 		lenientBGPCrossField14585:                true,
 		lenientBGPRouterAS:                       true,
+		lenientBGPGroupType16567:                 true,
 		lenientBGPDuplicateNeighbor:              true,
 		lenientBGPNeighborAddress:                true,
 		lenientRouterID:                          true,

@@ -314,6 +314,7 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 				}
 			}
 		case "peer-as":
+			neighbor.peerASConfigured = true
 			if v := nodeVal(prop); v != "" {
 				// #4713: no silent uint32 wrap — leave the
 				// inherited group peer-as in place on a

@@ -378,6 +378,21 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #16567: BGP group type internal|external cross-check. A typo'd type
+	// or a type contradicting the effective peer-as/local AS previously
+	// committed with only the generic advisory while FRR followed peer-as.
+	// Strict on commit; lenient warns (#1960). Runs BEFORE the peer-as gate
+	// so a typo'd type is named as a type error, not masked as missing
+	// peer-as (internal groups have already derived PeerAS in
+	// resolveDerivedConfig, so the contradiction check sees it).
+	if err := validateBGPGroupTypeStrict(cfg); err != nil {
+		if opts.lenientBGPGroupType16567 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("BGP group type (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #2963: BGP neighbor peer-as gate. peer-as (remote-as) is optional in
 	// the parser/compiler, so a neighbor authored without one keeps a zero
 	// PeerAS and the FRR renderer emitted `neighbor <addr> remote-as 0`. AS 0
