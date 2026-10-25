@@ -52,6 +52,14 @@ token (`ospf`, `ospf3`, or `rip`); `all` and an effective interface override
 that includes the token satisfy the gate. The error identifies the interface
 and zone and directs the operator to add the missing admission.
 
+Effectively passive OSPF/OSPFv3 interfaces are exempt (#16565): a passive
+interface sends no hellos and forms no adjacency, so there is no host-bound
+multicast to isolate. For OSPFv2 an interface is effectively passive when it
+sets `passive`, or when the protocol-level passive default applies and the
+interface does not override it with `no-passive`; OSPFv3 uses its
+per-interface `passive` flag. An interface active in any area/fragment for
+the same name, and the `interface all` wildcard, still require admission.
+
 Tolerant load / peer-sync follows the #1960 no-brick path: it keeps the
 configuration bootable and records a warning, but the packet remains
 default-denied until the protocol is explicitly admitted. This avoids silently

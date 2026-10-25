@@ -43,6 +43,17 @@ func hostInboundAdmitsRoutingProtocol(protocols []string, token string) bool {
 // global `protocols` stanza and each routing-instance's protocols. BGP/LDP/MSDP
 // are unicast (no multicast group) and out of scope; PIM is unmanaged today
 // (docs/feature-gaps.md) so it has no managed source to cross-check.
+//
+// #16565: an effectively passive OSPF/OSPFv3 interface sends no hellos and
+// forms no adjacency, so there is no host-bound multicast for the gate to
+// isolate and it needs no host-inbound token. OSPFv2 effective passivity is
+// per-interface `passive`, or the protocol-level passive default unless the
+// interface overrides it with `no-passive`; OSPFv3 carries only the
+// per-interface flag. An interface named in several areas/fragments is
+// active if ANY fragment for the same authored name is active (mirroring
+// the renderer's union), except that the `all` wildcard is never passive:
+// it expands to every zone interface, including ones with no passive
+// setting, so it always requires admission.
 func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	if cfg == nil || cfg.Security.Zones == nil {
 		return nil
@@ -95,15 +106,36 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	collect := func(instance string, ospf *OSPFConfig, ospfv3 *OSPFv3Config, rip *RIPConfig) []managedRP {
 		var out []managedRP
 		if ospf != nil {
-			var ifs []string
+			active := make(map[string]bool)
+			var order []string
+			note := func(name string, isActive bool) {
+				if _, seen := active[name]; !seen {
+					order = append(order, name)
+				}
+				// Any-active wins (#16565): a name passive in one
+				// fragment but active in another still forms an adjacency.
+				active[name] = active[name] || isActive
+			}
 			for _, a := range ospf.Areas {
 				if a == nil {
 					continue
 				}
 				for _, i := range a.Interfaces {
-					if i != nil && i.Name != "" {
-						ifs = append(ifs, i.Name)
+					if i == nil || i.Name == "" {
+						continue
 					}
+					if i.Name == "all" {
+						note(i.Name, true)
+						continue
+					}
+					effectivelyPassive := i.Passive || (ospf.PassiveDefault && !i.NoPassive)
+					note(i.Name, !effectivelyPassive)
+				}
+			}
+			var ifs []string
+			for _, name := range order {
+				if active[name] {
+					ifs = append(ifs, name)
 				}
 			}
 			if len(ifs) > 0 {
@@ -111,15 +143,33 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 			}
 		}
 		if ospfv3 != nil {
-			var ifs []string
+			active := make(map[string]bool)
+			var order []string
+			note := func(name string, isActive bool) {
+				if _, seen := active[name]; !seen {
+					order = append(order, name)
+				}
+				active[name] = active[name] || isActive
+			}
 			for _, a := range ospfv3.Areas {
 				if a == nil {
 					continue
 				}
 				for _, i := range a.Interfaces {
-					if i != nil && i.Name != "" {
-						ifs = append(ifs, i.Name)
+					if i == nil || i.Name == "" {
+						continue
 					}
+					if i.Name == "all" {
+						note(i.Name, true)
+						continue
+					}
+					note(i.Name, !i.Passive)
+				}
+			}
+			var ifs []string
+			for _, name := range order {
+				if active[name] {
+					ifs = append(ifs, name)
 				}
 			}
 			if len(ifs) > 0 {
