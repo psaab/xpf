@@ -3532,6 +3532,7 @@ fn wire_invariant_default_specimens() {
     s.insert(
         "session_sync_request_populated".into(),
         dump(&SessionSyncRequest {
+            primary_liveness: true,
             policy_matches: Some(vec![populated_policy_match.clone()]),
             ..Default::default()
         }),
@@ -4468,6 +4469,29 @@ fn session_sync_request_generation_roundtrip_2170() {
         serde_json::from_str(r#"{"operation":"upsert","src_ip":"10.0.0.1"}"#)
             .expect("legacy SessionSyncRequest without generation decodes");
     assert_eq!(legacy.generation, 0, "missing generation must default to 0");
+}
+
+#[test]
+fn session_sync_request_primary_liveness_roundtrip_16880() {
+    let req = SessionSyncRequest {
+        primary_liveness: true,
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
+    assert!(
+        json.contains("\"primary_liveness\":true"),
+        "true liveness marker must be serialized"
+    );
+    let back: SessionSyncRequest =
+        serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
+    assert!(back.primary_liveness, "primary-liveness marker must round-trip");
+
+    let legacy: SessionSyncRequest =
+        serde_json::from_str(r#"{"operation":"upsert"}"#).expect("legacy request decodes");
+    assert!(
+        !legacy.primary_liveness,
+        "missing liveness marker must default to false"
+    );
 }
 
 // #2785: the per-policy log flags must round-trip on the session-sync wire,

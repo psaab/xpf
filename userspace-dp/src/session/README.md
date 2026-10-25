@@ -1121,13 +1121,15 @@ re-fire perpetually.
 The **stale-synced ceiling** is
 `min(STALE_SYNCED_CEILING_MULT × expires_after_ns,
 STALE_SYNCED_CEILING_ABS_NS)` (MULT = 3, ABS ≈ 7 days), measured from
-`first_held_ns` (when the entry FIRST entered the held state). It bounds
-the lost-primary-delete leak: a held entry whose Close delta AND journal
-entry were both lost is reaped without a primary delete. RELATIVE so a
-live long-`inactivity-timeout` session is never reaped on the standby
-before failover; ABS-capped to bound the pathological `MaxDurationSeconds`
-config; `first_held_ns`-based so self-heal re-stamps on a flapping RG
-cannot reset the clock.
+`first_held_ns`. A negotiated primary-liveness refresh for a still-live
+owner-RG session deliberately re-anchors this timestamp; ordinary same-id
+snapshot re-imports and local HOLD re-bucketing do not. For capable peers, a
+live long-inactivity-timeout session is therefore retained while refreshes
+continue, and a lost-primary-delete entry is reaped relative to the last
+refresh once they stop. A peer that does not advertise primary-liveness support
+retains the legacy first-HOLD-relative behavior. The ceiling bounds lost
+primary deletes, and `first_held_ns`-based so self-heal re-stamps on a flapping
+RG cannot reset the clock.
 
 The command-landed `RefreshOwnerRGS` activation scan
 (`afxdp/session_glue/commands/refresh_owner_rgs.rs::handle_refresh_owner_rgs`)

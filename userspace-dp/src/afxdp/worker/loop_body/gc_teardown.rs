@@ -371,6 +371,7 @@ pub(super) fn count_local_session_expiries(
             // false, publish bumps nothing — counting its expiry would wrap
             // the Current-sessions gauge the same way).
             SessionOrigin::SyncImport
+            | SessionOrigin::SyncLiveness
             | SessionOrigin::SharedMaterialize
             | SessionOrigin::SharedPromote
             | SessionOrigin::WorkerLocalImport

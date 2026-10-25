@@ -224,3 +224,63 @@ fn zero_id_reimport_keeps_fresh_anchor_16043() {
         "#16043: zero-id re-import has no identity to fence and anchors fresh"
     );
 }
+
+/// A primary-liveness frame is distinct from a snapshot resend: it refreshes
+/// the standby HOLD anchor while the primary keeps the session live, but a
+/// lost Close is still reaped after those frames stop.
+#[test]
+fn primary_liveness_refreshes_hold_clock_until_signal_stops_16880() {
+    let mut table = SessionTable::new();
+    let installed_at = 10 * SEC;
+    let udp = crate::ip_proto::PROTO_UDP;
+    let key = import(&mut table, &request(udp, 77), installed_at);
+    let timeout = table.timeouts.udp_ns;
+
+    let hold_at = installed_at + timeout + WHEEL_TICK_NS_FOR_TEST + 1;
+    let held = expire_as_standby(&mut table, hold_at);
+    assert!(
+        !held.iter().any(|entry| entry.key == key),
+        "FIXTURE: first sweep must HOLD"
+    );
+    assert_eq!(table.first_held_ns_for(&key), Some(hold_at));
+
+    let mut live_request = request(udp, 77);
+    live_request.primary_liveness = true;
+    let mut last_liveness_at = hold_at;
+    for step in 1..=10u64 {
+        last_liveness_at = hold_at + step * timeout;
+        import(&mut table, &live_request, last_liveness_at);
+        assert_eq!(
+            table.first_held_ns_for(&key),
+            Some(last_liveness_at),
+            "#16880: a primary-liveness frame must re-anchor HOLD at step {step}"
+        );
+        let held = expire_as_standby(&mut table, last_liveness_at + WHEEL_TICK_NS_FOR_TEST + 1);
+        assert!(
+            !held.iter().any(|entry| entry.key == key),
+            "#16880: a primary-live session must remain held at step {step}"
+        );
+    }
+
+    // Local activity may refresh the idle anchor, but it cannot extend the
+    // absolute HOLD deadline established by the last primary-liveness frame.
+    let ceiling = STALE_SYNCED_CEILING_MULT * timeout;
+    let activity_at = last_liveness_at + ceiling - timeout / 2;
+    table.touch(&key, activity_at);
+    assert_eq!(
+        table.first_held_ns_for(&key),
+        Some(last_liveness_at),
+        "#16880: local traffic must not move the primary-liveness HOLD anchor"
+    );
+
+    let reap_at = activity_at + timeout + WHEEL_TICK_NS_FOR_TEST + 1;
+    assert!(
+        reap_at > last_liveness_at + ceiling,
+        "FIXTURE: post-traffic reap must be beyond the primary-liveness ceiling"
+    );
+    let expired = expire_as_standby(&mut table, reap_at);
+    assert!(
+        expired.iter().any(|entry| entry.key == key),
+        "#16880: traffic after the last primary-liveness frame must not extend HOLD"
+    );
+}

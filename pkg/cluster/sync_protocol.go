@@ -133,7 +133,12 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// fields above, then #9752 InstallTableDomain+Check (4+4), #10227 high
 	// SessionValue.Flags (1), #11064 source-NAT ICMP identity (3), and up to
 	// three bytes for the optional rule-ID prefix plus handshake state.
-	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8+1+3+3)
+	payloadSize := keySize + valSize + 8 + 8 + 8 + 8 + 4 + 8 + 4 + 1 + 8 + 1 + 3 + 3
+	payloadCapacity := payloadSize
+	if val.PrimaryLiveness {
+		payloadCapacity += primaryLivenessTailLen
+	}
+	buf := make([]byte, payloadSize, payloadCapacity)
 	off := 0
 	copy(buf[off:], key.SrcIP[:])
 	off += 4
@@ -213,7 +218,11 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	off += 2
 	tail := sessionValueTailView{&val}.sessionTail()
 	off = encodeSessionTailPreNat64(buf, off, tail)
-	return encodeSessionTailPostNat64(buf, off, tail)
+	payload := encodeSessionTailPostNat64(buf, off, tail)
+	if val.PrimaryLiveness {
+		payload = appendPrimaryLivenessMarker(payload)
+	}
+	return payload
 }
 func encodeSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
 	payload := encodeSessionV6Payload(key, val)
@@ -309,7 +318,11 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	// where the hand-written ladder carried it.
 	copy(buf[off:off+4], val.Nat64SnatV4[:])
 	off += 4
-	return encodeSessionTailPostNat64(buf, off, tail)
+	payload := encodeSessionTailPostNat64(buf, off, tail)
+	if val.PrimaryLiveness {
+		payload = appendPrimaryLivenessMarker(payload)
+	}
+	return payload
 }
 
 // appendSessionSyncMetadataTail preserves the optional legacy rule-ID and
@@ -355,6 +368,29 @@ func appendPptpCallIDs(payload []byte, callIDs uint64) []byte {
 	var pair [8]byte
 	binary.LittleEndian.PutUint64(pair[:], callIDs)
 	return append(payload, pair[:]...)
+}
+
+const primaryLivenessTailLen = 9
+
+var primaryLivenessTailMagic = [8]byte{0x00, 0xff, 'x', 'p', 'f', 'P', 'L', 'V'}
+
+func appendPrimaryLivenessMarker(payload []byte) []byte {
+	payload = append(payload, primaryLivenessTailMagic[:]...)
+	return append(payload, 1)
+}
+
+func stripPrimaryLivenessMarker(payload []byte) (base []byte, primaryLiveness, valid bool) {
+	if len(payload) < primaryLivenessTailLen {
+		return payload, false, true
+	}
+	start := len(payload) - primaryLivenessTailLen
+	for i, b := range primaryLivenessTailMagic {
+		if payload[start+i] != b {
+			return payload, false, true
+		}
+	}
+	flag := payload[len(payload)-1]
+	return payload[:start], flag == 1, flag <= 1
 }
 
 // sessionTail is the sync-only trailing field set both session value
@@ -831,6 +867,12 @@ func keepSyncedALGTypeConsistent(protocol uint8, srcPort, dstPort uint16, isReve
 func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.SessionValue, bool) {
 	var key dataplane.SessionKey
 	var val dataplane.SessionValue
+	basePayload, primaryLiveness, markerValid := stripPrimaryLivenessMarker(payload)
+	if !markerValid {
+		return key, val, false
+	}
+	payload = basePayload
+
 	if len(payload) < 16 {
 		return key, val, false
 	}
@@ -962,6 +1004,8 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 	var tail sessionTail
 	off = decodeSessionTailPreNat64(payload, off, &tail)
 	decodeSessionTailPostNat64(payload, off, &tail)
+	val.PrimaryLiveness = primaryLiveness
+
 	sessionValueTailView{&val}.setSessionTail(tail)
 	return key, val, true
 }
@@ -971,6 +1015,12 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.SessionValueV6, bool) {
 	var key dataplane.SessionKeyV6
 	var val dataplane.SessionValueV6
+	basePayload, primaryLiveness, markerValid := stripPrimaryLivenessMarker(payload)
+	if !markerValid {
+		return key, val, false
+	}
+	payload = basePayload
+
 	if len(payload) < 40 {
 		return key, val, false
 	}
@@ -1087,7 +1137,9 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 	}
 	decodeSessionTailPostNat64(payload, off, &tail)
 	sessionValueV6TailView{&val}.setSessionTail(tail)
+	val.PrimaryLiveness = primaryLiveness
 	return key, val, true
+
 }
 
 // encodeIPsecSAPayload encodes a list of IPsec SA names (child SA names; the IKE

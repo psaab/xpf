@@ -490,6 +490,9 @@ type SessionValue struct {
 	// import. Unlike the positional counter index, it is safe across rule
 	// reordering.
 	PolicyRuleID string `json:"-"`
+	// PrimaryLiveness marks a low-rate liveness refresh of an existing
+	// session. It is sync-only and never part of the BPF/C conntrack ABI.
+	PrimaryLiveness bool `json:"-"`
 }
 
 // SessionKeyV6 mirrors the C struct session_key_v6 (5-tuple with 128-bit IPs).
@@ -902,6 +905,8 @@ type SessionValueV6 struct {
 	SourceNatICMPCode  uint8
 	// PolicyRuleID (#11070) is sync-only metadata; never part of the BPF/C ABI.
 	PolicyRuleID string `json:"-"`
+	// PrimaryLiveness is the sync-only v6 twin of the v4 liveness marker.
+	PrimaryLiveness bool `json:"-"`
 }
 
 // ZoneConfig mirrors the C struct zone_config.

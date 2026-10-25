@@ -88,6 +88,10 @@ type SessionPolicyMatch struct {
 }
 type SessionSyncRequest struct {
 	Operation string `json:"operation,omitempty"`
+	// PrimaryLiveness is an explicit primary-side heartbeat for this synced
+	// session; older helpers decode its absence as false.
+	PrimaryLiveness bool `json:"primary_liveness,omitempty"`
+
 	// #10512: every helper-first tuple mutation carries a process-generation
 	// epoch and a manager-local idempotency identity. Older helpers ignore these
 	// additive fields; the new helper uses them to quarantine stale retries.

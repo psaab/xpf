@@ -168,6 +168,7 @@ var syncWireOnlySessionFields16176 = map[string]string{
 	"SourceNatICMPType":   "#11064 source-NAT ICMP type",
 	"SourceNatICMPCode":   "#11064 source-NAT ICMP code",
 	"PolicyRuleID":        "#11070 stable admitting-rule identity (string, tail-carried)",
+	"PrimaryLiveness":     "#16880 low-rate primary-side liveness marker; sync-only, never in either BPF ABI",
 	"Nat64SnatV4":         "#4565 v6-only NAT64 pool source; NO v4 member by design (v6-only exception)",
 }
 

@@ -1486,9 +1486,10 @@ type SessionSync struct {
 	// syncMsgPeerCapabilities because the first flags byte is full. Bit 0
 	// (capFlag2ConfigApplyAck) means the peer sends syncMsgConfigApplyAck;
 	// bit 1 (capFlag2PersistentNatLeaseProvenance) means it decodes lease
-	// provenance frames (types 50/51). Cleared on full disconnect and on
-	// incarnation advance alongside peerCapabilityFlags, for the identical
-	// incarnation-scoping reason.
+	// provenance frames (types 50/51); bit 2 (capFlag2PrimaryLiveness) means it
+	// accepts the primary-liveness marker on session frames. Cleared on full
+	// disconnect and on incarnation advance alongside peerCapabilityFlags, for
+	// the identical incarnation-scoping reason.
 	peerCapabilityFlags2 atomic.Uint32
 
 	// fenceSeq numbers sequenced peer fences (#7147). Starts at 0 and is only

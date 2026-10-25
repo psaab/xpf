@@ -2278,6 +2278,7 @@ fn reverse_companion_from_source(
         | SessionOrigin::LocalMiss
         | SessionOrigin::MissingNeighborSeed
         | SessionOrigin::SyncImport
+        | SessionOrigin::SyncLiveness
         | SessionOrigin::SharedMaterialize
         | SessionOrigin::SharedPromote
         | SessionOrigin::WorkerLocalImport

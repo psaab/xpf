@@ -915,6 +915,13 @@ impl SessionTable {
             fwd_packets: wire_fwd_packets,
             rev_packets: wire_rev_packets,
         } = req;
+        let primary_liveness = origin == SessionOrigin::SyncLiveness;
+        let origin = if primary_liveness {
+            SessionOrigin::SyncImport
+        } else {
+            origin
+        };
+
         let session_limit_zone = metadata.ingress_zone;
         // #9412: the close class the owning node stated. `None` (0, or a class
         // this build does not know) imports exactly as before.
@@ -959,7 +966,7 @@ impl SessionTable {
         // (legacy peer / local replica) has no identity to match and keeps
         // the fresh-anchor behavior; a changed id is a new incarnation and
         // also anchors fresh.
-        let (preserved_last_seen_ns, preserved_first_held_ns) = if wire_session_id != 0 {
+        let (preserved_last_seen_ns, mut preserved_first_held_ns) = if wire_session_id != 0 {
             match self.entry_by_key(&key) {
                 Some(existing) => {
                     let same_id = existing.session_id == wire_session_id;
@@ -987,6 +994,12 @@ impl SessionTable {
         } else {
             (None, 0)
         };
+        // A primary-liveness frame renews the HOLD ceiling without changing
+        // the preserved inactivity anchor above.
+        if primary_liveness {
+            preserved_first_held_ns = now_ns;
+        }
+
         // Same guard semantics as install_with_protocol_with_origin:
         // remove_entry has 3 debug_assert!s (stale-handle,
         // primary-key, no_index_points_at) that catch invariant
