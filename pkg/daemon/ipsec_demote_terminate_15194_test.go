@@ -104,7 +104,7 @@ func TestClearRethServicesTerminatesDemotedRGIPsec15194(t *testing.T) {
 		ipsecTerminateFn: rec.recordTerminated,
 	}
 	// This node holds live SAs for all three connections, then loses RG1.
-	active = []string{"vpn-rg1", "vpn-rg2", "vpn-plain"}
+	active = []string{"vpn-rg1", "vpn-rg2", "vpn-rg0"}
 	cm.SetGroupStateForTesting(1, cluster.StateSecondary)
 
 	d.clearRethServicesForRG(1)
@@ -115,7 +115,7 @@ func TestClearRethServicesTerminatesDemotedRGIPsec15194(t *testing.T) {
 	got := rec.terminatedNames()
 	if len(got) != 1 || got[0] != "vpn-rg1" {
 		t.Fatalf("#15194: demoting RG1 must terminate exactly [vpn-rg1], got %v "+
-			"(vpn-rg2 is still owned by this node; vpn-plain follows RG0, still owned)", got)
+			"(vpn-rg2 is still owned by this node; vpn-rg0 follows RG0, still owned)", got)
 	}
 }
 
@@ -152,7 +152,7 @@ func TestRG0DemotionTerminatesRG0IPsec15194(t *testing.T) {
 		cluster: cm,
 		store:   store,
 		ipsecActiveNamesFn: func() ([]string, error) {
-			return []string{"vpn-rg1", "vpn-plain"}, nil
+			return []string{"vpn-rg1", "vpn-rg0"}, nil
 		},
 		ipsecTerminateFn: rec.recordTerminated,
 	}
@@ -161,12 +161,12 @@ func TestRG0DemotionTerminatesRG0IPsec15194(t *testing.T) {
 	d.rg0WasPrimary.Store(true)
 	d.applyRG0OwnershipTransition(cluster.StateSecondary, true)
 
-	waitFor15194(t, "terminate of vpn-plain", func() bool {
+	waitFor15194(t, "terminate of vpn-rg0", func() bool {
 		return len(rec.terminatedNames()) > 0
 	})
 	got := rec.terminatedNames()
-	if len(got) != 1 || got[0] != "vpn-plain" {
-		t.Fatalf("#15194: RG0 demotion must terminate exactly [vpn-plain] (RG0-anchored), got %v; "+
+	if len(got) != 1 || got[0] != "vpn-rg0" {
+		t.Fatalf("#15194: RG0 demotion must terminate exactly [vpn-rg0] (RG0-anchored), got %v; "+
 			"vpn-rg1 belongs to RG1 which this node still owns", got)
 	}
 }
@@ -181,7 +181,7 @@ func TestRG0InitialSecondaryDoesNotTerminateIPsec15194(t *testing.T) {
 		cluster: cm,
 		store:   store,
 		ipsecActiveNamesFn: func() ([]string, error) {
-			return []string{"vpn-plain"}, nil
+			return []string{"vpn-rg0"}, nil
 		},
 		ipsecTerminateFn: rec.recordTerminated,
 	}
@@ -225,7 +225,7 @@ func TestReinitiateTerminatesStaleLocalDuplicate15194(t *testing.T) {
 			return rec.recordInitiated(name)
 		},
 	}
-	d.reinitiateIPsecSAs()
+	d.reinitiateIPsecSAsForRG(1)
 	mu.Lock()
 	defer mu.Unlock()
 	want := []string{"terminate:vpn-rg1", "initiate:vpn-rg1"}
@@ -256,7 +256,7 @@ func TestReinitiateWithoutLocalDuplicateDoesNotTerminate15194(t *testing.T) {
 		ipsecTerminateFn: rec.recordTerminated,
 		ipsecInitiateFn:  rec.recordInitiated,
 	}
-	d.reinitiateIPsecSAs()
+	d.reinitiateIPsecSAsForRG(1)
 	if got := rec.terminatedNames(); len(got) != 0 {
 		t.Fatalf("#15194: no local duplicate, so takeover must terminate nothing, got %v", got)
 	}
