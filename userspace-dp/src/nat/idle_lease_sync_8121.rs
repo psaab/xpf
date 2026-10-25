@@ -521,24 +521,32 @@ impl PortAllocator {
                         )
                     }
                 };
-                // Own-grant subtraction: the counts map holds this
-                // lease's Any/AnyWildcard keys, so an any-remote query
-                // always self-hits. It is genuinely contended only
-                // when another owner holds the base (helper excludes
-                // only this lease's own idle contribution).
-                let any_contended_by_other =
-                    live.idle_merge_any_contended_by_other(rec.protocol, translated, &key);
+                // #16713: evaluate the any-remote contention lazily —
+                // only when this record actually widens to any-remote
+                // (`widen_any`) AND the live-owner check already says
+                // the base is contended. On a steady refresh
+                // `widen_any` is false (the lease already holds
+                // any-remote, or the record does not carry it), so the
+                // per-tuple index lookup in
+                // `idle_merge_any_contended_by_other` is skipped
+                // entirely. `&&` short-circuit preserves the exact
+                // pre-lazy semantics: the old expression was
+                // `widen_any && (contended(None) &&
+                // any_contended_by_other)`, and making the third term
+                // lazy does not change its value when it is evaluated.
                 // #15948 fold: an IDLE PAT lease holding this tuple
                 // (bitmap bit + grants, no live owner count) contends
                 // exactly as a fresh PAT import's bitmap claim would
                 // refuse it — check it for the widening and each new
                 // remote.
                 let idle_pat_busy = (widen_any
-                    && live.idle_pat_lease_covers(translated, &key, None))
-                    || new_remotes
-                        .iter()
-                        .any(|remote| live.idle_pat_lease_covers(translated, &key, Some(*remote)));
-                let merge_busy = (widen_any && (contended(None) && any_contended_by_other))
+                    && live.idle_pat_lease_covers(translated, &key, None, rec.protocol))
+                    || new_remotes.iter().any(|remote| {
+                        live.idle_pat_lease_covers(translated, &key, Some(*remote), rec.protocol)
+                    });
+                let merge_busy = (widen_any
+                    && contended(None)
+                    && live.idle_merge_any_contended_by_other(rec.protocol, translated, &key))
                     || idle_pat_busy
                     || new_remotes.iter().any(|remote| {
                         // A new remote self-hits only if an own grant

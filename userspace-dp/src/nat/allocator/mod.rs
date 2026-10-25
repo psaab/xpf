@@ -1144,6 +1144,13 @@ impl PortAllocatorLiveState {
         }
     }
 
+    /// #16713 test seam: a full `persistent_by_source` iteration is
+    /// starting. Bumps the thread-local scan counter.
+    #[cfg(test)]
+    fn note_persistent_by_source_scan(&self) {
+        PERSISTENT_BY_SOURCE_SCANS.with(|c| c.set(c.get() + 1));
+    }
+
     pub(super) fn increment_persistent_address_only_owner(
         &mut self,
         key: PersistentAddressOnlyOwnerKey,
@@ -1463,6 +1470,8 @@ impl PortAllocatorLiveState {
             translated_ip: translated.ip,
             translated_port: translated.port,
         };
+        #[cfg(test)]
+        self.note_persistent_by_source_scan();
         self.persistent_by_source.iter().any(|(key, lease)| {
             // Only IDLE leases contend here: a live lease's flows hold live
             // address_only_owners tokens, which the caller already checks
@@ -1593,10 +1602,23 @@ impl PortAllocatorLiveState {
         }
     }
 
-    /// #15948 (H31-02): is the translated base owned by anyone OTHER
-    /// than `candidate_key`'s idle lease, for an any-remote widening?
-    /// Live owners (either live map) and other idle address-only
-    /// leases count; the candidate's own counted Any key does not.
+    /// #16713: is the translated base owned by anyone OTHER than
+    /// `candidate_key`'s idle lease, for an any-remote widening? Live
+    /// owners (either live map) and other idle address-only leases
+    /// count; the candidate's own counted Any key does not.
+    ///
+    /// The idle address-only part is answered through
+    /// `persistent_by_translated` (the per-tuple key set maintained by
+    /// `insert_persistent_lease` / `remove_persistent_lease`) instead
+    /// of walking the whole `persistent_by_source` table: the set for
+    /// one `(protocol, translated)` base holds exactly the leases that
+    /// can contend for that base. This preserves the pre-index
+    /// predicate term-for-term — every lease in the set has
+    /// `translated == translated` by construction of the index, and
+    /// the remaining filters (`address_only`, `!revoked`, idle) are
+    /// re-checked per owner — so `persistent_address_only_owner_counts`
+    /// (which is keyed per remote scope, not per base) could not
+    /// answer this base question alone.
     pub(super) fn idle_merge_any_contended_by_other(
         &self,
         protocol: u8,
@@ -1608,36 +1630,78 @@ impl PortAllocatorLiveState {
             translated_ip: translated.ip,
             translated_port: translated.port,
         };
-        self.address_only_owner_counts_by_base.contains_key(&base)
+        if self.address_only_owner_counts_by_base.contains_key(&base)
             || self.pat_owner_counts_by_base.contains_key(&base)
-            || self.persistent_by_source.iter().any(|(k, l)| {
-                k != candidate_key
-                    && l.address_only
-                    && !l.revoked
-                    && l.active_flows == 0
-                    && l.inbound_flows == 0
-                    && l.translated == translated
-            })
+        {
+            return true;
+        }
+        // The candidate's own counted `Any` key would self-hit, so the
+        // counted index alone cannot answer "by OTHER". The
+        // `persistent_address_only_owner_counts` map is keyed per
+        // remote scope (Any/Host/Exact variants), not per base, so it
+        // cannot be consulted for a base-scoped "other owner" question
+        // without distinguishing the candidate's contribution. Walking
+        // the small per-base owner set from `persistent_by_translated`
+        // and excluding `candidate_key` preserves the original
+        // semantics exactly.
+        let Some(owners) = self.persistent_by_translated.get(&base) else {
+            return false;
+        };
+        #[cfg(test)]
+        self.note_persistent_by_source_scan();
+        owners.iter().any(|k| {
+            k != candidate_key
+                && self.persistent_by_source.get(k).is_some_and(|l| {
+                    l.address_only
+                        && !l.revoked
+                        && l.active_flows == 0
+                        && l.inbound_flows == 0
+                        && l.translated == translated
+                })
+        })
     }
 
-    /// #15948 (H31-02, fold): does an IDLE PAT lease (address_only ==
-    /// false) hold `translated` with a grant covering `remote` (or any
-    /// remote when `remote` is None)? An idle PAT lease keeps its
-    /// occupancy bit and its permission grants until expiry —
-    /// exactly the identity a fresh PAT import refuses via the bitmap
-    /// claim — but it has no live PAT owner count and no address-only
-    /// owner keys, so idle_import_identity_contended cannot see it.
-    /// The merge path must refuse the same grant overlap the fresh
-    /// path would. `candidate_key`'s own lease never contends.
+    /// #16713: does an IDLE PAT lease (address_only == false) hold
+    /// `translated` with a grant covering `remote` (or any remote when
+    /// `remote` is None)? An idle PAT lease keeps its occupancy bit
+    /// and its permission grants until expiry — exactly the identity a
+    /// fresh PAT import refuses via the bitmap claim — but it has no
+    /// live PAT owner count and no address-only owner keys, so
+    /// idle_import_identity_contended cannot see it. The merge path
+    /// must refuse the same grant overlap the fresh path would.
+    /// `candidate_key`'s own lease never contends.
+    ///
+    /// Answered through `persistent_by_translated`: the per-tuple key
+    /// set for this base holds exactly the leases whose `translated`
+    /// equals `translated` (by construction of the index), so the
+    /// per-owner predicate below is term-for-term the pre-index one
+    /// with the `lease.translated != translated` check discharged by
+    /// the index lookup.
     pub(super) fn idle_pat_lease_covers(
         &self,
         translated: TranslatedTuple,
         candidate_key: &PersistentSourceKey,
         remote: Option<(IpAddr, u16)>,
+        protocol: u8,
     ) -> bool {
-        self.persistent_by_source.iter().any(|(k, lease)| {
-            if k == candidate_key
-                || lease.address_only
+        let base = ReverseIdentityBaseKey {
+            protocol,
+            translated_ip: translated.ip,
+            translated_port: translated.port,
+        };
+        let Some(owners) = self.persistent_by_translated.get(&base) else {
+            return false;
+        };
+        #[cfg(test)]
+        self.note_persistent_by_source_scan();
+        owners.iter().any(|k| {
+            if k == candidate_key {
+                return false;
+            }
+            let Some(lease) = self.persistent_by_source.get(k) else {
+                return false;
+            };
+            if lease.address_only
                 || lease.revoked
                 || lease.active_flows != 0
                 || lease.inbound_flows != 0
@@ -2014,6 +2078,15 @@ impl Default for PortAllocator {
 #[cfg(test)]
 thread_local! {
     static PORT_ALLOCATOR_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// #16713 test seam: thread-local count of contention-helper visits
+/// (full `persistent_by_source` scans and indexed owner-set walks).
+/// Thread-local (like `PORT_ALLOCATOR_BUILDS`) so parallel
+/// `cargo test` threads cannot flake each other's counts (#6819).
+#[cfg(test)]
+thread_local! {
+    static PERSISTENT_BY_SOURCE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Test-only: reset the calling thread's construction counter and return a
@@ -2817,6 +2890,17 @@ impl PortAllocator {
     #[cfg(test)]
     pub(super) fn debug_occupancy_words(&self) -> usize {
         self.shared.occupancy.iter().map(|o| o.words.len()).sum()
+    }
+
+    /// #16713 test seam: reset / read the full-table scan counter.
+    #[cfg(test)]
+    pub(crate) fn debug_reset_persistent_by_source_scans(&self) {
+        PERSISTENT_BY_SOURCE_SCANS.with(|c| c.set(0));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_persistent_by_source_scans(&self) -> usize {
+        PERSISTENT_BY_SOURCE_SCANS.with(|c| c.get())
     }
 
     /// Test-only: identity of the shared allocator state, for proving a
@@ -8328,6 +8412,7 @@ impl SourceNatReservationSnapshot {
                 previous.translated,
                 candidate,
                 Some((self.flow.dst_ip, self.flow.dst_port)),
+                self.flow.protocol,
             ) {
                 return false;
             }
