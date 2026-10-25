@@ -96,9 +96,12 @@ func promoteZoneMacroLeaf13112(d *Node) {
 // leaf lost the group's statements. #13112 extends that parity to the valid
 // `security-zone <name> apply-macro <macro>;` spelling.
 //
-// The scope is zones on purpose. An interface or a routing instance written as
-// a leaf compiles no instance at all (#9838). Letting a wildcard group turn it
-// into a container would create the instance only when a group applies.
+// Zones were the original scope. #16543 generalizes the flip to every
+// bare named-instance leaf whose schema slot is a container that
+// compiles from a leaf (bareInstanceLeaf16543), keeping the #9838
+// exclusion for top-level interfaces / routing-instances: a bare leaf
+// there compiles no instance at all, so a wildcard group must not turn
+// it into one.
 func zoneLeafTakesWildcard9801(ancestorPath [][]string, d *Node) bool {
 	return d != nil && d.IsLeaf && underZones9801(ancestorPath) &&
 		((len(d.Keys) == 2 && d.Keys[0] == "security-zone") || zoneLeafHasApplyMacroTail13112(d))

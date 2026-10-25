@@ -2324,6 +2324,15 @@ names. Both rules apply only to `security-zone` statements directly under
   the wildcard merge visited only non-leaf destinations, so
   `security-zone trust;` lost a group's screen that `security-zone trust { }`
   took.
+- #16543 generalizes that flip: a `<*>` group reaches ANY bare named-instance
+  leaf whose schema slot is a container that compiles from a leaf
+  (`bareInstanceLeaf16543`, `group_merge_bare_leaf_16543.go`) — OSPF/OSPFv3/
+  IS-IS interface, BGP neighbor, RA interface, LLDP interface, and the like.
+  Before #16543 `interface ge-0/0/0.0;` / `neighbor 192.0.2.2;` lost a wildcard
+  OSPF-MD5 / BGP-MD5 template and ran unauthenticated on a clean commit. The
+  #9838 exclusion is kept: a bare top-level `interfaces <name>;` /
+  `routing-instances <name>;` leaf still compiles no instance and still
+  refuses, group or not.
 - A brace-elided interface instance (`ge-0/0/0 unit 0 family inet
   address A;`, a packed leaf under `interfaces`) is promoted to its
   braced shape before group merge (#15032,
