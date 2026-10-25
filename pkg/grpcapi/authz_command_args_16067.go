@@ -157,20 +157,30 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 		if !isDetail || sd == nil {
 			return nil, false
 		}
+		// #16605: the request discriminates the typed line — Terse
+		// selects `show interfaces terse` (or, filtered, the
+		// name-filtered terse table the cli refuses to type but the
+		// handler serves), bare/filtered selects `show interfaces
+		// [<name>]`. Judge that line as forms[0]; the `detail` charge
+		// and the sibling spelling join via withAliasForms16605.
 		if sd.GetFilter() == "" {
-			return chargeForms16472(base), true
+			if sd.GetTerse() {
+				return canonicalArgumentForms("show interfaces terse", base)
+			}
+			return canonicalArgumentForms("show interfaces", base)
 		}
 		// The handler applies the filter as a prefix in terse mode too
 		// (showInterfacesTerse receives filterName and skips
 		// non-matching rows), so a filtered terse request still
-		// executes the filtered command; the charge's bare form is a
-		// detail spelling, so judge the filter under the executed
-		// `show interfaces <name>` family rather than dropping it
-		// (#16378 fold).
+		// executes the filtered command (#16378 fold). The typed
+		// spelling is the judged form; the `detail <name>` charge
+		// spelling does not canonicalise (detail takes no name in
+		// the tree), so only the bare `detail` charge form carries
+		// that spelling's path.
 		if sd.GetTerse() {
 			return canonicalArgumentForms("show interfaces "+sd.GetFilter(), base)
 		}
-		return canonicalArgumentForms(base+" "+sd.GetFilter(), base)
+		return canonicalArgumentForms("show interfaces "+sd.GetFilter(), base)
 	}
 	// Every other method's typed fields are selectors the on-box command
 	// does not carry as free argument text the operator typed (or the
