@@ -7873,6 +7873,181 @@ fn drain_session_deltas_survive_write_state_failure_5294() {
     );
 }
 
+// -------------------------------------------------------------
+// #16584: a drained delta batch whose response never reaches the
+// peer must arm loss-of-sync, not vanish with the connection.
+// -------------------------------------------------------------
+
+/// #16584 fail-on-revert: seed a binding, drive the real dispatcher with
+/// the client end already dropped, and assert the latch armed on exactly
+/// the drained binding — plus a follow-up drain finding the buffer empty
+/// (the batch was destructively popped) and a non-contributing binding
+/// staying clear. Pre-fix the handler returns Err(Broken pipe) with the
+/// latch still false, so this cell is RED.
+#[test]
+fn drain_session_deltas_write_failure_arms_delta_loss_16584() {
+    use std::io::Write as _;
+    let mut coord = afxdp::Coordinator::new();
+    coord.seed_pending_session_deltas_for_test(0, 5);
+    coord.seed_pending_session_deltas_for_test(1, 3);
+    let state = Arc::new(Mutex::new(ServerState {
+        status: ProcessStatus::default(),
+        snapshot: None,
+        afxdp: coord,
+        state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
+    }));
+    let state_file = unique_state_file("drain-16584");
+
+    // Connected control: a healthy drain delivers and arms nothing.
+    let mut ok_req = req("drain_session_deltas");
+    ok_req.session_deltas = Some(crate::SessionDeltaDrainRequest { max: 256 });
+    // Re-seed after this control below; first prove slot 1 alone does not arm.
+    let resp = run_request(state.clone(), ok_req.clone());
+    assert!(resp.ok, "connected drain failed: {}", resp.error);
+    assert_eq!(resp.session_deltas.len(), 8, "connected control drains all");
+    {
+        let guard = state.lock().expect("state");
+        assert!(
+            !guard.afxdp.take_delta_loss_for_test(0),
+            "connected drain must not arm loss on slot 0"
+        );
+        assert!(
+            !guard.afxdp.take_delta_loss_for_test(1),
+            "connected drain must not arm loss on slot 1"
+        );
+    }
+
+    // Defect arm: re-seed only slot 0, then drop the client before the
+    // handler writes so encode/write/flush fails after the drain.
+    {
+        let mut guard = state.lock().expect("state");
+        guard.afxdp.seed_pending_session_deltas_for_test(0, 5);
+    }
+    let (mut client, server) =
+        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let running = Arc::new(AtomicBool::new(true));
+    let handle = {
+        let state = state.clone();
+        let state_file = state_file.clone();
+        let sd = state.lock().expect("state").afxdp.session_domain().clone();
+        std::thread::spawn(move || {
+            handle_stream(server, &state_file, state, running, sd, SocketMode::Main)
+        })
+    };
+    serde_json::to_writer(&mut client, &ok_req).expect("write request");
+    client.write_all(b"\n").expect("newline");
+    client
+        .shutdown(std::net::Shutdown::Both)
+        .expect("shutdown client");
+    drop(client);
+    let handler_result = handle.join().expect("handler thread");
+    assert!(
+        handler_result.is_err(),
+        "closed-client drain must surface the write failure, got {handler_result:?}"
+    );
+    let guard = state.lock().expect("state");
+    assert!(
+        guard.afxdp.take_delta_loss_for_test(0),
+        "#16584: a drained batch lost to a failed response write must arm \
+         delta loss on the contributing binding (slot 0)"
+    );
+    assert!(
+        !guard.afxdp.take_delta_loss_for_test(1),
+        "slot 1 contributed nothing to the lost batch and must stay clear"
+    );
+    drop(guard);
+
+    // Follow-up drain: the lost batch is gone (destructively popped), so
+    // nothing remains to deliver — recovery is the armed resync, not a
+    // re-queue.
+    let follow = run_request(state.clone(), ok_req);
+    assert!(follow.ok, "follow-up drain failed: {}", follow.error);
+    assert_eq!(
+        follow.session_deltas.len(),
+        0,
+        "the lost batch was destructively drained; the follow-up must be empty"
+    );
+    let _ = std::fs::remove_file(&state_file);
+}
+
+/// #16584: the owner-RG collect leg shares the same tail — a page drained
+/// from a worker's export buffer whose response write fails must arm loss
+/// on that worker's bindings (via identities), and a worker that
+/// contributed nothing stays clear.
+#[test]
+fn owner_rg_collect_write_failure_arms_delta_loss_16584() {
+    use std::io::Write as _;
+    use std::sync::atomic::Ordering;
+    let state = new_state(ProcessStatus::default());
+    let (ack0, ack1) = {
+        let mut guard = state.lock().expect("lock state");
+        let ack0 = guard.afxdp.test_install_export_worker(0);
+        let ack1 = guard.afxdp.test_install_export_worker(1);
+        guard.afxdp.test_seed_export_buffer_deltas(0, 5);
+        // Worker 0's binding is the contributor; worker 1 owns slot 9 and
+        // contributes nothing.
+        guard
+            .afxdp
+            .seed_pending_deltas_with_worker_for_test(7, 0, 0);
+        guard
+            .afxdp
+            .seed_pending_deltas_with_worker_for_test(9, 1, 0);
+        (ack0, ack1)
+    };
+    // Ack every sequence on BOTH workers so the collect reaches its
+    // terminal page instead of burning the 15 s ack-wait (which would
+    // return Err with no deltas and arm nothing — a harness artifact,
+    // not the defect under test).
+    ack0.store(u64::MAX, Ordering::Release);
+    ack1.store(u64::MAX, Ordering::Release);
+    let state_file = unique_state_file("export-16584");
+    let mut request = req("export_owner_rg_sessions");
+    request.session_export = Some(SessionExportRequest {
+        owner_rgs: vec![1],
+        max: 256,
+        protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+        continuation: false,
+        continuation_incarnation: 0,
+        continuation_sequence: 0,
+    });
+    let (mut client, server) =
+        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let running = Arc::new(AtomicBool::new(true));
+    let handle = {
+        let state = state.clone();
+        let state_file = state_file.clone();
+        let sd = state.lock().expect("state").afxdp.session_domain().clone();
+        std::thread::spawn(move || {
+            handle_stream(server, &state_file, state, running, sd, SocketMode::Main)
+        })
+    };
+    serde_json::to_writer(&mut client, &request).expect("write request");
+    client.write_all(b"\n").expect("newline");
+    client
+        .shutdown(std::net::Shutdown::Both)
+        .expect("shutdown client");
+    drop(client);
+    let handler_result = handle.join().expect("handler thread");
+    assert!(
+        handler_result.is_err(),
+        "closed-client export must surface the write failure, got {handler_result:?}"
+    );
+    let guard = state.lock().expect("state");
+    assert!(
+        guard.afxdp.take_delta_loss_for_test(7),
+        "#16584: a collected export page lost to a failed response write must \
+         arm delta loss on the contributing worker's binding (slot 7)"
+    );
+    assert!(
+        !guard.afxdp.take_delta_loss_for_test(9),
+        "worker 1 contributed nothing and its binding must stay clear"
+    );
+    drop(guard);
+    let _ = std::fs::remove_file(&state_file);
+}
+
 // ---------------------------------------------------------------------------
 // #3651 / #6938: the flood-counter PRODUCTION call sites, not the helpers.
 //

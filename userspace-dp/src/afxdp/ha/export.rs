@@ -101,6 +101,7 @@ impl crate::afxdp::Coordinator {
                 sequence,
                 incarnation,
                 export_buffers,
+                export_worker_ids,
                 ack_atomics,
                 dropped_at_begin,
                 shed,
@@ -126,6 +127,7 @@ impl crate::afxdp::Coordinator {
                 dropped_at_begin,
                 ack_atomics,
                 export_buffers,
+                export_worker_ids,
                 sessions: self.sessions.clone(),
             });
         }
@@ -141,6 +143,7 @@ impl crate::afxdp::Coordinator {
                 dropped_at_begin: Vec::new(),
                 ack_atomics: Vec::new(),
                 export_buffers: Vec::new(),
+                export_worker_ids: Vec::new(),
                 sessions: self.sessions.clone(),
             });
         }
@@ -160,6 +163,7 @@ impl crate::afxdp::Coordinator {
             .saturating_add(1);
         let mut ack_atomics = Vec::with_capacity(self.workers.records().len());
         let mut export_buffers = Vec::with_capacity(self.workers.records().len());
+        let mut export_worker_ids = Vec::with_capacity(self.workers.records().len());
         let mut shed = 0u32;
         let mut refused: Vec<u32> = Vec::new();
         for (worker_id, rec) in self.workers.records().iter() {
@@ -185,6 +189,7 @@ impl crate::afxdp::Coordinator {
             }
             ack_atomics.push(handle.session_export_ack.clone());
             export_buffers.push(rec.export_buffer.clone());
+            export_worker_ids.push(*worker_id);
         }
         if !refused.is_empty() {
             // Do not open a window: its ack can never arrive. Already-queued
@@ -196,8 +201,14 @@ impl crate::afxdp::Coordinator {
         }
         let incarnation = self.sessions.export_incarnation();
         let dropped_at_begin = export_buffers.iter().map(|b| b.export_dropped()).collect();
-        self.sessions
-            .open_export_begin(sequence, now_ns, &export_buffers, &ack_atomics, shed);
+        self.sessions.open_export_begin(
+            sequence,
+            now_ns,
+            &export_buffers,
+            &export_worker_ids,
+            &ack_atomics,
+            shed,
+        );
         Ok(OwnerRgExportWait {
             sequence,
             incarnation,
@@ -207,6 +218,7 @@ impl crate::afxdp::Coordinator {
             dropped_at_begin,
             ack_atomics,
             export_buffers,
+            export_worker_ids,
             sessions: self.sessions.clone(),
         })
     }
@@ -493,6 +505,11 @@ pub struct OwnerRgExportWait {
     /// Per-worker export buffers captured at kick time; drained
     /// incrementally while workers produce (worker-keyed, W-F10).
     export_buffers: Vec<Arc<crate::afxdp::binding_state::ExportBufferState>>,
+    /// #16584: worker ids parallel to `export_buffers` (same kick-time
+    /// capture order). Drained-for-token counts on each buffer let the
+    /// dispatcher attribute a collected page to its contributing workers
+    /// when the response write then fails.
+    export_worker_ids: Vec<u32>,
     /// Session state for the open-window guard: the wait refreshes activity
     /// per page and clears-if-ours on terminal pages and error paths.
     sessions: Arc<SessionManager>,
@@ -535,6 +552,32 @@ impl OwnerRgExportWait {
     /// pages remain: true when `max` capped this page, false at the terminal
     /// page (every worker acked AND a re-drain found nothing new).
     pub fn wait_and_collect(&self) -> Result<(Vec<SessionDeltaInfo>, bool), String> {
+        self.wait_and_collect_attributed().map(|(d, m, _)| (d, m))
+    }
+
+    /// #16584: [`Self::wait_and_collect`] plus the worker ids that
+    /// contributed at least one delta to this page (diffed from each
+    /// buffer's cumulative drained counter). The dispatcher arms loss on
+    /// exactly those workers' bindings if the response carrying the page
+    /// then fails to reach the peer. A collect error contributes nothing.
+    pub fn wait_and_collect_attributed(
+        &self,
+    ) -> Result<(Vec<SessionDeltaInfo>, bool, Vec<u32>), String> {
+        let drained_before: Vec<u64> =
+            self.export_buffers.iter().map(|b| b.export_drained()).collect();
+        let (deltas, more) = self.wait_and_collect_inner()?;
+        let contributed: Vec<u32> = self
+            .export_buffers
+            .iter()
+            .zip(drained_before.iter())
+            .zip(self.export_worker_ids.iter())
+            .filter(|((buf, before), _)| buf.export_drained() > **before)
+            .map(|(_, wid)| *wid)
+            .collect();
+        Ok((deltas, more, contributed))
+    }
+
+    fn wait_and_collect_inner(&self) -> Result<(Vec<SessionDeltaInfo>, bool), String> {
         if self.skip {
             return Ok((Vec::new(), false));
         }

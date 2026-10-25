@@ -259,6 +259,12 @@ pub(crate) fn handle_stream(
     // HA state updates. As with `export_wait`, the post-match status attach is
     // deferred until after the push.
     let mut all_export: Option<crate::afxdp::AllSessionsExport> = None;
+    // #16584: bindings (drain verb) / workers (owner-RG collect) that
+    // contributed to the destructively-drained batch in
+    // `response.session_deltas`. The tail arms loss on exactly these if the
+    // response write fails.
+    let mut drained_delta_slots: Vec<u32> = Vec::new();
+    let mut drained_delta_workers: Vec<u32> = Vec::new();
     // #5862: the binding-settle wait follows the same split. The locked arm only
     // RECORDS that a settle is owed; the 2 s poll runs below with the lock
     // released and re-taken per iteration, so an HA `sync_session` on the
@@ -569,6 +575,7 @@ pub(crate) fn handle_stream(
                 request.session_deltas.as_ref(),
                 &mut response,
                 &mut persist_state,
+                &mut drained_delta_slots,
             ),
             "export_owner_rg_sessions" => {
                 // #2962: locked phase only — enqueue + capture the wait
@@ -648,7 +655,12 @@ pub(crate) fn handle_stream(
         response.session_counters = session_counters::collect(wait);
     }
     if let Some(wait) = export_wait {
-        export::owner_rg_collect(wait, &mut response, &mut persist_state);
+        export::owner_rg_collect(
+            wait,
+            &mut response,
+            &mut persist_state,
+            &mut drained_delta_workers,
+        );
         if !suppress_status {
             let mut guard = lock_server_state_recover(&state);
             // GPT-4: quarantined state yields no status (see above).
@@ -692,29 +704,51 @@ pub(crate) fn handle_stream(
     // failure. The state file is best-effort observability, not a restore source
     // (the Go control plane re-applies the full snapshot on restart) and
     // self-corrects on the next periodic write_state, so it must never strand an
-    // already-drained delta batch. Attempt the persist first (unchanged
-    // ordering), but ALWAYS encode+flush the response so the drained deltas reach
-    // the peer, then surface any persist error to the accept loop (logged) only
-    // AFTER the response is on the wire. Delta order is preserved end-to-end:
-    // the response carries the batch exactly as drained.
+    // already-drained delta batch.
+    //
+    // #16584: the persist now runs AFTER a successful flush, and a failed
+    // encode/write/flush arms loss on every contributing binding. Previously
+    // the persist ran first (still before the error surfaced, but a slow
+    // `write_state` could burn the peer's deadline with the batch hostage),
+    // and a write failure after the destructive drain just returned `Err`:
+    // the batch vanished with the connection, no re-queue, no latch — the
+    // closes in it left stale standby rows until peer GC. Now any delivery
+    // failure arms `set_delta_loss` on exactly the drained contributors
+    // (deliver-or-resync, #2442/#2874/#5290) so the owning workers re-export
+    // table truth; an empty batch arms nothing. Delta order is preserved
+    // end-to-end: the response carries the batch exactly as drained.
     if is_fib_dump {
         enforce_fib_response_cap(&mut response, MAX_CONTROL_RESPONSE_BYTES)?;
     }
-    let persist_result = if persist_state {
-        write_state(state_file, &state)
-    } else {
+    let write_result = (|| -> Result<(), String> {
+        let mut writer = BufWriter::new(&stream);
+        serde_json::to_writer(&mut writer, &response)
+            .map_err(|e| format!("encode response: {e}"))?;
+        writer
+            .write_all(b"\n")
+            .map_err(|e| format!("write response newline: {e}"))?;
+        writer.flush().map_err(|e| format!("flush response: {e}"))?;
         Ok(())
-    };
-
-    let mut writer = BufWriter::new(stream);
-    serde_json::to_writer(&mut writer, &response).map_err(|e| format!("encode response: {e}"))?;
-    writer
-        .write_all(b"\n")
-        .map_err(|e| format!("write response newline: {e}"))?;
-    writer.flush().map_err(|e| format!("flush response: {e}"))?;
+    })();
+    if let Err(err) = write_result {
+        if !response.session_deltas.is_empty()
+            && (!drained_delta_slots.is_empty() || !drained_delta_workers.is_empty())
+        {
+            let mut guard = lock_server_state_recover(&state);
+            if !guard.quarantined_after_panic {
+                guard.afxdp.arm_delta_loss_for_slots(&drained_delta_slots);
+                guard
+                    .afxdp
+                    .arm_delta_loss_for_workers(&drained_delta_workers);
+            }
+        }
+        return Err(err);
+    }
 
     // #5294: surface a persist failure ONLY after the response — carrying the
     // drained session deltas — has been flushed to the peer.
-    persist_result?;
+    if persist_state {
+        write_state(state_file, &state)?;
+    }
     Ok(())
 }

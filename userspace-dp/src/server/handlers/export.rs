@@ -54,20 +54,33 @@ pub(super) fn owner_rg_kick(
 /// Lock-free phase: block for the worker acks, drain the deltas, and fold the
 /// result into the response. Called by the dispatcher with the `ServerState`
 /// lock RELEASED. Mirrors the pre-split `Ok`/`Err` handling (deltas + persist
+/// state) verbatim — the only refold split introduces is on the error path,
+/// which now attaches the token so the Go side can correlate a timeout or
+/// partial drain with the export that produced it (#2962). #16584: a
+/// successful collect also reports the contributing worker ids and only
+/// flags a persist when the page was non-empty.
 pub(super) fn owner_rg_collect(
     wait: OwnerRgExportWait,
     response: &mut ControlResponse,
     persist_state: &mut bool,
+    drained_delta_workers: &mut Vec<u32>,
 ) {
     let (incarnation, sequence) = wait.token();
-    match wait.wait_and_collect() {
-        Ok((deltas, more)) => {
+    match wait.wait_and_collect_attributed() {
+        Ok((deltas, more, contributed)) => {
+            // #16584: remember exactly which workers this destructive
+            // collect took deltas from. The dispatcher tail arms loss on
+            // their bindings only if the response fails to reach the peer.
+            *drained_delta_workers = contributed;
+            let drained_any = !deltas.is_empty();
             response.session_deltas = deltas;
             response.session_export_more = more;
             response.session_export_incarnation = incarnation;
             response.session_export_seq = sequence;
             response.session_export_dropped = wait.dropped_count();
-            *persist_state = true;
+            if drained_any {
+                *persist_state = true;
+            }
         }
         Err(err) => {
             response.ok = false;
