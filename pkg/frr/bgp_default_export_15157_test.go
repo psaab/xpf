@@ -319,3 +319,91 @@ func TestBGPInstanceNoExportGetsDefaultExport15157(t *testing.T) {
 		t.Errorf("default-export definition missing for instance use:\n%s", got)
 	}
 }
+
+// #16870 (R3-B08-02, residual of #15157): a family-less, policy-less
+// IPv4 neighbour also needs the default-export attachment, but the
+// IPv4 AF classifier only admitted it for declared `family inet`, a
+// global/per-neighbour policy, or an AF attribute — so it landed in
+// neither set and FRR default-activated it with NO out-map, leaking
+// another peer's originated routes.
+func TestBGPFamilylessIPv4NeighborGetsDefaultExport16870(t *testing.T) {
+	fc := &FullConfig{
+		PolicyOptions: leakPO15157(),
+		BGP: &config.BGPConfig{
+			LocalAS:  65001,
+			RouterID: "1.1.1.1",
+			Neighbors: []*config.BGPNeighbor{
+				// A: the exporting peer (own export EXP).
+				{Address: "192.0.2.1", PeerAS: 65002, FamilyInet: true, Export: []string{"EXP"}},
+				// Y: family-less, policy-less IPv4 — the leak victim.
+				{Address: "192.0.2.3", PeerAS: 65003},
+			},
+		},
+	}
+	got := New().buildManagedSection(fc)
+	if !strings.Contains(got, "  neighbor 192.0.2.3 activate\n") {
+		t.Errorf("family-less IPv4 neighbour must activate under ipv4 unicast:\n%s", got)
+	}
+	if !strings.Contains(got, "neighbor 192.0.2.3 route-map "+bgpDefaultExportNameForTest15157+" out\n") {
+		t.Errorf("family-less IPv4 neighbour must attach the default-export map:\n%s", got)
+	}
+	if routeMapBlock15157(got, bgpDefaultExportNameForTest15157) == "" {
+		t.Errorf("default-export definition missing:\n%s", got)
+	}
+	// The activation and attachment must be inside the ipv4 block, not ipv6.
+	v4 := strings.Index(got, " address-family ipv4 unicast\n")
+	v6 := strings.Index(got, " address-family ipv6 unicast\n")
+	act := strings.Index(got, "  neighbor 192.0.2.3 activate\n")
+	if v4 < 0 || act < v4 || (v6 >= 0 && act > v6) {
+		t.Errorf("family-less IPv4 activation must be in the ipv4 block:\n%s", got)
+	}
+}
+
+// Control: without origination a family-less, policy-less IPv4
+// neighbour keeps the pre-#15157 no-block shape (no AF block opened
+// solely for it, no default-export map).
+func TestBGPFamilylessNoOriginationNoDefaultExport16870(t *testing.T) {
+	fc := &FullConfig{
+		PolicyOptions: leakPO15157(),
+		BGP: &config.BGPConfig{
+			LocalAS:  65001,
+			RouterID: "1.1.1.1",
+			Neighbors: []*config.BGPNeighbor{
+				{Address: "192.0.2.3", PeerAS: 65003},
+			},
+		},
+	}
+	got := New().buildManagedSection(fc)
+	if strings.Contains(got, bgpDefaultExportNameForTest15157) {
+		t.Errorf("no origination must not emit the default-export map:\n%s", got)
+	}
+	if strings.Contains(got, "192.0.2.3 activate") {
+		t.Errorf("family-less policyless neighbour must not render AF lines without origination:\n%s", got)
+	}
+}
+
+// VRF instance: the same family-less leak exists per routing-instance.
+func TestBGPInstanceFamilylessGetsDefaultExport16870(t *testing.T) {
+	fc := &FullConfig{
+		PolicyOptions: leakPO15157(),
+		Instances: []InstanceConfig{{
+			Name:    "CUST-A",
+			VRFName: "cust-a",
+			BGP: &config.BGPConfig{
+				LocalAS:  65010,
+				RouterID: "2.2.2.2",
+				Neighbors: []*config.BGPNeighbor{
+					{Address: "198.51.100.1", PeerAS: 65020, FamilyInet: true, Export: []string{"EXP"}},
+					{Address: "198.51.100.3", PeerAS: 65021},
+				},
+			},
+		}},
+	}
+	got := New().buildManagedSection(fc)
+	if !strings.Contains(got, "  neighbor 198.51.100.3 activate\n") {
+		t.Errorf("instance family-less neighbour must activate under ipv4 unicast:\n%s", got)
+	}
+	if !strings.Contains(got, "neighbor 198.51.100.3 route-map "+bgpDefaultExportNameForTest15157+" out\n") {
+		t.Errorf("instance family-less neighbour must attach the default-export map:\n%s", got)
+	}
+}

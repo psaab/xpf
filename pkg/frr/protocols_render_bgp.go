@@ -447,7 +447,15 @@ func (m *Manager) renderBGP16125(b *strings.Builder, bgp *config.BGPConfig, vali
 			// SAFIs xpf cannot render must not fall through to FRR's default
 			// IPv4-unicast activation (the original labeled-unicast miscompile,
 			// #11815). Explicitly supported unicast remains independently valid.
-			if (n.FamilyInet || ((policyDefault || hasAFNeighborAttributes) && !n.FamilyInet6 && !hasUnrenderableFamily)) && !isIPv6Peer {
+			// #16870: a neighbour that will attach the #15157 default-export
+			// map must also be classified into the AF that renders that
+			// attachment. A family-less, policy-less IPv4 peer otherwise
+			// lands in no set while FRR default-activates it in IPv4
+			// unicast with no out-map, leaking another peer's originated
+			// routes. Definition (bgpUsesDefaultExport15157) and attachment
+			// now share this one predicate.
+			needsDefaultExport := bgpNeighborNeedsDefaultExport15157(n, bgp, globalExportChain, policyOptions)
+			if (n.FamilyInet || ((policyDefault || hasAFNeighborAttributes || needsDefaultExport) && !n.FamilyInet6 && !hasUnrenderableFamily)) && !isIPv6Peer {
 				inet4Neighbors = append(inet4Neighbors, n)
 			}
 			if !n.FamilyInet && (n.FamilyInet6 || isIPv6Peer || hasUnrenderableFamily) {
