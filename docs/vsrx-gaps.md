@@ -265,6 +265,7 @@ Last updated: 2026-02-13
 | **Configuration Groups (apply-groups)** | Template inheritance for config reuse | Medium | No |
 | **System Alarms on License Expiry** | License monitoring and alarming | Simple | No — xpf has no licensing |
 | **Interface Redundancy (LAG)** | Link aggregation groups (ae interfaces) | Medium | No — `ae` / `802.3ad` is schema-advertised and commits clean but is inert (no bond, no enslaving, no LACP, `minimum-links` not honoured) and carries an accepted-only advisory (#6544). The `.netdev`/netlink bond generators already exist; only `fabric-options member-interfaces` reaches them. This row is the tracker for wiring `ae` into them. |
+| **Reth LAG (multi-child reth)** | Two or more child interfaces per node on one reth (Junos: up to 8 per node, remaining links take over a failed link's load) | Medium | No — xpf binds one child per node (`RethToPhysical`); a second local child is strict-rejected at commit and warned on tolerant load, naming the reth, node and ignored children (#16586). |
 | **Storm Control** | Broadcast/multicast storm protection | Simple | No |
 | **MACsec** | Layer 2 encryption (802.1AE) | Complex | No |
 | **Primary/Preferred Address** | Interface address selection for sourcing traffic | Simple | Yes — `PrimaryAddress`/`PreferredAddress` parsed, not wired |

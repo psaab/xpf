@@ -533,6 +533,18 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 		return nil, tunnelIDErr
 	}
 
+	// #16586: reth LAG gate. Like the tunnel gate above it runs on the
+	// PRE-expansion tree and unions the authored view with the node0 /
+	// node1 expansions, so a reth with two or more local children per
+	// node rejects identically on both cluster nodes even when the
+	// children live only in per-node groups. Strict hard-rejects;
+	// lenient warns (#1960). Read-only on clones.
+	rethLAGWarnings, rethLAGErr := validateRethMultiChildAST(
+		tree, opts.lenientRethMultiChild)
+	if rethLAGErr != nil {
+		return nil, rethLAGErr
+	}
+
 	// #3075: stable-zone-id collision gate. Like the tunnel gate above it runs
 	// on the PRE-expansion tree and unions zone names across all groups (Views
 	// 1/2/3, see zoneid.go) so both cluster nodes accept/reject identically.
@@ -808,6 +820,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// so the runtime fails closed rather than resolving all-day widest.
 	markSchedulersUnresolvable16010(cfg, schedulerUnresolvable16010)
 	cfg.Warnings = append(cfg.Warnings, tunnelIDWarnings...)
+	cfg.Warnings = append(cfg.Warnings, rethLAGWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, riTableIDWarnings...)
