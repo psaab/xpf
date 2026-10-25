@@ -18,7 +18,10 @@ Fix shape asserted here (RED on master, GREEN after):
     The ESP paths under /boot/efi/EFI/ubuntu are written by grub-install
     outside dpkg and can never fire a file trigger.
   - `debian/xpf.postinst` handles `triggered` (runs the helper when it is
-    installed, exits 0 without it) and keeps `configure` succeeding.
+    installed, exits 0 without it) and keeps `configure` succeeding. The
+    helper path defaults to /usr/local/sbin/xpf-uefi-slots and is
+    overridable via XPF_UEFI_SLOTS_BIN so the hermetic cell points it at
+    the in-tree helper and observes the stale-slot refresh (#16644).
   - `scripts/image/validate.py` hash-compares each slot loader against
     EFI/ubuntu (`HASH` probe lines + `_ab_slot_loader_hash_verdict`), so a
     stale or divergent slot fails the Tier-1 gate instead of passing on
@@ -325,22 +328,46 @@ class DpkgTriggerWiringTests(unittest.TestCase):
                 "grub-install writes it outside dpkg (#16452)")
 
     def test_postinst_triggered_runs_refresh_and_exits_zero(self):
+        # #16644: point the postinst at the REAL in-tree helper via
+        # XPF_UEFI_SLOTS_BIN (default is the installed absolute path)
+        # and observe the refresh on the stale-slot ESP fixture. A
+        # broken/disabled helper invocation in the `triggered` arm
+        # leaves both slots on v1 and reds this cell (previously the
+        # absolute path was absent on the test host, the arm never ran
+        # the helper, and only rc 0 was asserted — the same as the
+        # no-helper control below).
+        esp = self._esp_with_stale_slot()
         env = dict(os.environ)
-        env["XPF_UEFI_SLOTS_ESP"] = str(self._esp_with_stale_slot())
-        # Point the postinst at the in-tree helper via PATH-independent
-        # absolute? The postinst calls /usr/local/sbin/xpf-uefi-slots; in
-        # the hermetic run that path does not exist, so `triggered` must
-        # still exit 0 (foreign host without the bake substrate).
+        env["XPF_UEFI_SLOTS_ESP"] = str(esp)
+        env["XPF_UEFI_SLOTS_BIN"] = str(HELPER)
         res = subprocess.run(
             ["sh", str(POSTINST), "triggered"],
             env=env, capture_output=True, text=True, check=False)
         self.assertEqual(res.returncode, 0, res.stderr)
+        for slot in ("xpf-A", "xpf-B"):
+            self.assertEqual(
+                (esp / "EFI" / slot / "shimx64.efi").read_bytes(), b"shim-v2",
+                f"{slot} shim not refreshed by postinst triggered (#16644)")
+            self.assertEqual(
+                (esp / "EFI" / slot / "grubx64.efi").read_bytes(), b"grub-v2",
+                f"{slot} grub not refreshed by postinst triggered (#16644)")
+            self.assertEqual(
+                (esp / "EFI" / slot / "xpf.selector").read_text(),
+                'set xpf_slot_kernel="vmlinuz-1"\n')
 
     def _esp_with_stale_slot(self):
         tmp = Path(tempfile.mkdtemp(prefix="xpf-postinst-trigger."))
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
         (tmp / "EFI" / "ubuntu").mkdir(parents=True)
-        (tmp / "EFI" / "ubuntu" / "shimx64.efi").write_bytes(b"v2")
+        (tmp / "EFI" / "ubuntu" / "shimx64.efi").write_bytes(b"shim-v2")
+        (tmp / "EFI" / "ubuntu" / "grubx64.efi").write_bytes(b"grub-v2")
+        for slot in ("xpf-A", "xpf-B"):
+            d = tmp / "EFI" / slot
+            d.mkdir(parents=True)
+            (d / "shimx64.efi").write_bytes(b"shim-v1")
+            (d / "grubx64.efi").write_bytes(b"grub-v1")
+            (d / "xpf.selector").write_text(
+                'set xpf_slot_kernel="vmlinuz-1"\n')
         return tmp
 
     def test_postinst_triggered_branch_is_wired(self):
@@ -351,16 +378,33 @@ class DpkgTriggerWiringTests(unittest.TestCase):
         arm = text.split("triggered)", 1)[1].split(";;", 1)[0]
         self.assertIn("xpf-uefi-slots", arm)
         self.assertIn("--sync-only", arm)
+        # Pin the exact production default so renaming it (e.g. to
+        # xpf-uefi-slots.disabled) reds even though the hermetic cell
+        # overrides the path (#16644 mutant).
+        self.assertIn(
+            "${XPF_UEFI_SLOTS_BIN:-/usr/local/sbin/xpf-uefi-slots}", arm,
+            "triggered arm default helper path is not the installed "
+            "/usr/local/sbin/xpf-uefi-slots (#16644)")
+        self.assertIn('[ -x "$UEFI_SLOTS_BIN" ]', arm)
+        self.assertIn('"$UEFI_SLOTS_BIN" --sync-only', arm)
 
     def test_postinst_triggered_without_helper_stays_green(self):
-        # Control: `triggered` on a host without the helper / ESP (a
-        # foreign install) must exit 0 and not perturb anything.
+        # Control: `triggered` with the helper absent (a foreign
+        # install) must exit 0 and not perturb the ESP. The missing
+        # path is injected explicitly so the control is hermetic even
+        # on a host that has the real helper installed.
+        esp = self._esp_with_stale_slot()
         env = dict(os.environ)
-        env.pop("XPF_UEFI_SLOTS_ESP", None)
+        env["XPF_UEFI_SLOTS_ESP"] = str(esp)
+        env["XPF_UEFI_SLOTS_BIN"] = str(esp / "no-such-xpf-uefi-slots")
         res = subprocess.run(
             ["sh", str(POSTINST), "triggered"],
             env=env, capture_output=True, text=True, check=False)
         self.assertEqual(res.returncode, 0, res.stderr)
+        for slot in ("xpf-A", "xpf-B"):
+            self.assertEqual(
+                (esp / "EFI" / slot / "shimx64.efi").read_bytes(), b"shim-v1",
+                f"{slot} perturbed without a helper")
 
 
 @unittest.skipUnless(_HAVE_REAL_DPKG,
@@ -372,8 +416,8 @@ class RealDpkgTriggerTests(unittest.TestCase):
     Builds probe packages in a temp dir:
       - `xpf` carrying the REAL debian/xpf.triggers and a postinst whose
         `triggered` arm is extracted verbatim from the REAL
-        debian/xpf.postinst (helper path rewritten to a sandbox copy of
-        the REAL xpf-uefi-slots, ESP via XPF_UEFI_SLOTS_ESP);
+        debian/xpf.postinst (sandbox copy of the REAL xpf-uefi-slots
+        injected via XPF_UEFI_SLOTS_BIN, ESP via XPF_UEFI_SLOTS_ESP);
       - `shimprobe` v1/v2 unpacking /usr/lib/shim/shimx64.efi.signed,
         whose postinst mimics the real providers: on configure it
         copies the unpacked payload into EFI/ubuntu (what grub-install
@@ -413,16 +457,17 @@ class RealDpkgTriggerTests(unittest.TestCase):
     def _triggered_postinst(self, helper):
         """Extract the real `triggered)` arm, wrapped in a minimal case.
 
-        The arm text is taken verbatim from debian/xpf.postinst (only
-        the absolute helper path is rewritten to the sandbox copy, the
-        same sed technique as test/debian/postinst-test.sh), so a
+        The arm text is taken verbatim from debian/xpf.postinst, so a
         broken or removed helper invocation in the real arm reds here.
+        The sandbox copy of the REAL xpf-uefi-slots is injected via
+        the arm's XPF_UEFI_SLOTS_BIN override (set in the dpkg env
+        below), not by rewriting the arm text (#16644).
         """
         text = POSTINST.read_text()
         self.assertIn("triggered)", text)
         arm = text.split("triggered)", 1)[1].split(";;", 1)[0]
-        self.assertIn("/usr/local/sbin/xpf-uefi-slots", arm)
-        arm = arm.replace("/usr/local/sbin/xpf-uefi-slots", str(helper))
+        self.assertIn(
+            "${XPF_UEFI_SLOTS_BIN:-/usr/local/sbin/xpf-uefi-slots}", arm)
         return ("#!/bin/sh\nset -e\ncase \"$1\" in\n"
                 f"  triggered){arm};;\n"
                 "  configure) ;;\n"
@@ -511,6 +556,7 @@ class RealDpkgTriggerTests(unittest.TestCase):
 
         env = dict(os.environ)
         env["XPF_UEFI_SLOTS_ESP"] = str(esp)
+        env["XPF_UEFI_SLOTS_BIN"] = str(helper)
         # dpkg refuses to run without ldconfig + start-stop-daemon in
         # PATH even chrootless, and it disregards the inherited PATH's
         # non-standard entries — prepend the standard sbin dirs. A host

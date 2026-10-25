@@ -585,8 +585,14 @@ case "$1" in
         # substrate (no helper, no ESP ubuntu dir) is a no-op, and the
         # boot-time sync in xpf-uefi-slots.service retries on the next
         # boot — so this arm must never fail the triggering package.
-        if [ -x /usr/local/sbin/xpf-uefi-slots ]; then
-            /usr/local/sbin/xpf-uefi-slots --sync-only || true
+        # XPF_UEFI_SLOTS_BIN overrides the helper path only for the
+        # hermetic test (test_slot_refresh_15089.py), which points it at
+        # the in-tree helper; production keeps the installed absolute
+        # path. An empty override is ignored (falls back to the default)
+        # so a stray empty env var cannot disable the refresh.
+        UEFI_SLOTS_BIN="${XPF_UEFI_SLOTS_BIN:-/usr/local/sbin/xpf-uefi-slots}"
+        if [ -x "$UEFI_SLOTS_BIN" ]; then
+            "$UEFI_SLOTS_BIN" --sync-only || true
         fi
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)
