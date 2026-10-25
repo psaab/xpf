@@ -118,6 +118,29 @@ func (h *SyslogSlogHandler) SetClients(clients []*SyslogClient) {
 	}
 }
 
+// SetClientsPreserving replaces the set of syslog clients without closing
+// any old client that also appears in the next set (#16767): identity-
+// matching across a nil-tolerant comparison, preserving the #9916 copy
+// discipline for the arriving slice. Superseded clients are closed after
+// the swap, outside the lock — the same posture as SetClients.
+func (h *SyslogSlogHandler) SetClientsPreserving(clients []*SyslogClient) {
+	s := h.loadOrAllocShared()
+	next := map[*SyslogClient]bool{}
+	for _, c := range clients {
+		next[c] = true
+	}
+	s.mu.Lock()
+	old := s.clients
+	s.clients = append([]*SyslogClient(nil), clients...)
+	s.mu.Unlock()
+
+	for _, c := range old {
+		if !next[c] {
+			c.Close()
+		}
+	}
+}
+
 // Clients returns the currently installed syslog clients.
 //
 // #6829 A5: exported so a caller's wiring can be asserted on the VALUE that
