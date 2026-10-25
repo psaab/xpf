@@ -13384,3 +13384,287 @@ fn family_differential_other_walkers_16128() {
         assert_eq!(counters.len(), 0, "{family}: cached counter capture must be empty for empty+positive");
     }
 }
+
+// ---------------------------------------------------------------------------
+// #16496: live TX-selection walks must not clone counter/policer handles.
+// `merge_matched_tx_modifiers` pushed an `Arc::clone` of every matched
+// term's counter and three-color policer into the result on EVERY walk,
+// including the metered/counted live transit walks that immediately drop
+// them — a strong-count RMW on the cross-worker shared line per counted
+// term per packet, plus a heap spill at >=3 handles (inline-2 SmallVec).
+// Only the deferred generated-reply walk (#15268) consumes the handles.
+//
+// FAIL-ON-REVERT: removing the `collect_deferred` gate (collecting on
+// every walk again) makes the live strong counts rise while the result
+// is alive and the live result's handle sets non-empty -> RED below.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn live_tx_selection_walks_do_not_clone_handles_16496() {
+    use std::sync::Arc as StdArc;
+    let rt = |id: u32, name: &str| {
+        let state = ThreeColorPolicerState::sr_tcm(1_000_000, 100_000, 50_000, true)
+            .expect("valid srTCM");
+        StdArc::new(ThreeColorPolicerRuntime::new(id, name.into(), state))
+    };
+    let make_term = |id: u32,
+                     name: &str,
+                     pol: &StdArc<ThreeColorPolicerRuntime>,
+                     counter: &StdArc<FilterTermCounter>,
+                     cont: bool| FilterTerm {
+        id,
+        name: name.into(),
+        source_v4: Vec::new(),
+        source_v6: Vec::new(),
+        dest_v4: Vec::new(),
+        dest_v6: Vec::new(),
+        source_addr_constrained: false,
+        dest_addr_constrained: false,
+        source_except: false,
+        dest_except: false,
+        protocol_bitmap: [0; 4],
+        protocol_match_enabled: false,
+        source_ports: PortMatcher::Any,
+        dest_ports: PortMatcher::Any,
+        source_port_constrained: false,
+        dest_port_constrained: false,
+        source_port_except: false,
+        dest_port_except: false,
+        dscp_bitmap: 0,
+        dscp_match_enabled: false,
+        tcp_flags_mask: None,
+        tcp_flags_forbidden: None,
+        is_fragment: false,
+        icmp_type_bitmap: [0; 4],
+        icmp_type_match_enabled: false,
+        icmp_code_bitmap: [0; 4],
+        icmp_code_match_enabled: false,
+        flex_enabled: false,
+        flex_offset: 0,
+        flex_length: 0,
+        flex_value: 0,
+        flex_mask: 0,
+        flex_match_start: FlexMatchStart::Layer3,
+        action: FilterAction::Accept,
+        continue_term: cont,
+        count: "hits".into(),
+        has_count: true,
+        log: false,
+        policer_name: StdArc::from(""),
+        three_color_policer: Some(StdArc::clone(pol)),
+        routing_instance: StdArc::from(""),
+        forwarding_class: StdArc::from(""),
+        dscp_rewrite: None,
+        counter: StdArc::clone(counter),
+    };
+    // Three fall-through counted+policed terms then a terminal accept:
+    // >=3 handles would spill the inline-2 SmallVec to the heap if the
+    // live walk collected them.
+    let pols: Vec<_> = (0..3)
+        .map(|i| rt(96_400 + i, &format!("pol-{i}")))
+        .collect();
+    let counters: Vec<_> = (0..3)
+        .map(|_| StdArc::new(FilterTermCounter::default()))
+        .collect();
+    let mut terms: Vec<FilterTerm> = (0..3)
+        .map(|i| make_term(i as u32 + 1, &format!("t{i}"), &pols[i], &counters[i], true))
+        .collect();
+    terms.push(make_term(4, "terminal", &pols[0], &counters[0], false));
+    let filter = Filter {
+        id: 1,
+        name: "counted-policed".into(),
+        family: "inet".into(),
+        terms,
+        affects_tx_selection: true,
+        affects_route_lookup: false,
+        has_counter_terms: true,
+        has_log_terms: false,
+        has_terminal_action_terms: true,
+        has_dscp_match_terms: false,
+        has_per_packet_l4_match_terms: false,
+        has_three_color_policer_terms: true,
+    };
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    // NB: the counted walks charge via the thread-local coalescer, which
+    // holds ONE pending `Arc` (the last-recorded counter) until flush.
+    // The baselines below are taken after a flush, and every strong-count
+    // assertion runs either on a flushed thread or accounts for that
+    // single pending handle explicitly — the invariant under test is
+    // that the RESULT holds no clone, not that charging holds none.
+    crate::filter::flush_recorded_filter_counters();
+    let counter_counts_before: Vec<usize> =
+        counters.iter().map(StdArc::strong_count).collect();
+    let policer_counts_before: Vec<usize> = pols.iter().map(StdArc::strong_count).collect();
+
+    // (a) Metered live walk (now_ns = Some): charges inline, collects nothing.
+    let metered = evaluate_filter_ref_tx_selection_runtime_counted(
+        &filter,
+        src,
+        dst,
+        PROTO_TCP,
+        12345,
+        443,
+        0,
+        TermMatchExtra::default(),
+        100,
+        0,
+    );
+    assert!(
+        metered.counters.is_empty(),
+        "#16496: metered live walk must collect no counter handles"
+    );
+    assert!(
+        metered.three_color_policers.is_empty(),
+        "#16496: metered live walk must collect no policer handles"
+    );
+    // The result holds no clone; the coalescer holds its one pending
+    // handle on the LAST charged counter (counters[0], via the terminal
+    // term) until flushed.
+    for (i, counter) in counters.iter().enumerate() {
+        let pending = if i == 0 { 1 } else { 0 };
+        assert_eq!(
+            StdArc::strong_count(counter),
+            counter_counts_before[i] + pending,
+            "#16496: metered walk result must not clone counter {i} (strong count changed while result alive)"
+        );
+    }
+    for (i, pol) in pols.iter().enumerate() {
+        assert_eq!(
+            StdArc::strong_count(pol),
+            policer_counts_before[i],
+            "#16496: metered walk must not clone policer {i} (strong count changed while result alive)"
+        );
+    }
+    drop(metered);
+    crate::filter::flush_recorded_filter_counters();
+    // Positive control: the counted walk DID charge inline (the cell above
+    // cannot pass on a walk that matched nothing).
+    for (i, counter) in counters.iter().enumerate() {
+        // Counter 0 charges twice: its fall-through term plus the
+        // terminal term that re-uses it. Counters 1/2 charge once.
+        let expected = if i == 0 { 2 } else { 1 };
+        assert_eq!(
+            counter.packets.load(Ordering::Relaxed),
+            expected,
+            "#16496 control: metered counted walk must charge counter {i} inline"
+        );
+    }
+
+    // (b) Unmetered counted walk (now_ns = None, the plain counted entry):
+    // same invariant — it is a live walk, not the deferred one.
+    let counted = evaluate_filter_ref_tx_selection_counted(
+        &filter,
+        src,
+        dst,
+        PROTO_TCP,
+        12345,
+        443,
+        0,
+        TermMatchExtra::default(),
+        100,
+    );
+    assert!(
+        counted.counters.is_empty() && counted.three_color_policers.is_empty(),
+        "#16496: unmetered counted walk must collect no handles"
+    );
+    // Same accounting as (a): the result holds nothing; the coalescer's
+    // one pending handle sits on counters[0] (last charged, via the
+    // terminal term) until the drop+flush path runs.
+    for (i, counter) in counters.iter().enumerate() {
+        let pending = if i == 0 { 1 } else { 0 };
+        assert_eq!(
+            StdArc::strong_count(counter),
+            counter_counts_before[i] + pending,
+            "#16496: unmetered counted walk result must not clone counter {i}"
+        );
+    }
+    drop(counted);
+
+    // (c) Counter-suppressed live walk (ingress leg): also collects nothing.
+    let uncounted = evaluate_filter_ref_tx_selection_uncounted(
+        &filter,
+        src,
+        dst,
+        PROTO_TCP,
+        12345,
+        443,
+        0,
+        TermMatchExtra::default(),
+        100,
+    );
+    assert!(
+        uncounted.counters.is_empty() && uncounted.three_color_policers.is_empty(),
+        "#16496: counter-suppressed live walk must collect no handles"
+    );
+    for (i, pol) in pols.iter().enumerate() {
+        assert_eq!(
+            StdArc::strong_count(pol),
+            policer_counts_before[i],
+            "#16496: counter-suppressed walk must not clone policer {i}"
+        );
+    }
+    drop(uncounted);
+    // (d) Deferred walk (#15268): the ONLY collecting walk. It must retain
+    // every matched handle (3 fall-through + terminal re-uses pols[0]/
+    // counters[0], deduped by the Cached* containers to 3 + 3) and hold
+    // them alive (strong counts +1 over the flushed baseline) while the
+    // result lives, without charging inline.
+    crate::filter::flush_recorded_filter_counters();
+    let packets_before: Vec<u64> = counters
+        .iter()
+        .map(|c| c.packets.load(Ordering::Relaxed))
+        .collect();
+    let deferred = evaluate_filter_ref_tx_selection_deferred(
+        &filter,
+        src,
+        dst,
+        PROTO_TCP,
+        12345,
+        443,
+        0,
+        TermMatchExtra::default(),
+        100,
+    );
+    assert_eq!(
+        deferred.counters.len(),
+        3,
+        "#16496: deferred walk must collect each distinct matched counter"
+    );
+    assert_eq!(
+        deferred.three_color_policers.len(),
+        3,
+        "#16496: deferred walk must collect each distinct matched policer"
+    );
+    for (i, counter) in counters.iter().enumerate() {
+        assert_eq!(
+            StdArc::strong_count(counter),
+            counter_counts_before[i] + 1,
+            "#16496: deferred walk must hold counter {i} alive (+1 while result alive)"
+        );
+        assert_eq!(
+            counter.packets.load(Ordering::Relaxed),
+            packets_before[i],
+            "#16496: deferred walk must not charge counter {i} inline"
+        );
+    }
+    for (i, pol) in pols.iter().enumerate() {
+        assert_eq!(
+            StdArc::strong_count(pol),
+            policer_counts_before[i] + 1,
+            "#16496: deferred walk must hold policer {i} alive (+1 while result alive)"
+        );
+    }
+    // Settlement replay charges each collected counter exactly once.
+    deferred
+        .counters
+        .for_each(|c| record_filter_counter(c, 100));
+    crate::filter::flush_recorded_filter_counters();
+    for (i, counter) in counters.iter().enumerate() {
+        assert_eq!(
+            counter.packets.load(Ordering::Relaxed),
+            packets_before[i] + 1,
+            "#16496: deferred replay must charge counter {i} exactly once"
+        );
+    }
+}

@@ -1286,7 +1286,7 @@ fn resolve_cos_tx_selection_internal(
             // closed. The counted variants record `then count` exactly once
             // (this is the only output-filter walk on the flowless path).
             let output_result = if defer_side_effects {
-                crate::filter::evaluate_filter_ref_tx_selection_uncounted(
+                crate::filter::evaluate_filter_ref_tx_selection_deferred(
                     output_filter,
                     src_ip,
                     dst_ip,
@@ -1391,7 +1391,7 @@ fn resolve_cos_tx_selection_internal(
                 let mut input_extra = extra;
                 input_extra.ports_unknown = true;
                 let ingress_result = if defer_side_effects {
-                    crate::filter::evaluate_filter_ref_tx_selection_uncounted(
+                    crate::filter::evaluate_filter_ref_tx_selection_deferred(
                         ingress_filter,
                         src_ip,
                         dst_ip,
@@ -1548,7 +1548,7 @@ fn resolve_cos_tx_selection_internal(
     // `interface_output_filter_needing_tx_eval`, so no second `.filter()`.
     let output_result = if let Some(output_filter) = output_filter {
         if defer_side_effects {
-            crate::filter::evaluate_filter_ref_tx_selection_uncounted(
+            crate::filter::evaluate_filter_ref_tx_selection_deferred(
                 output_filter,
                 flow_key.src_ip,
                 flow_key.dst_ip,
@@ -1620,7 +1620,7 @@ fn resolve_cos_tx_selection_internal(
         // #5158: re-walk on the PRE-NAT ingress tuple, not `flow_key` (the
         // post-NAT egress wire key the output filter used above).
         let ingress_result = if defer_side_effects {
-            crate::filter::evaluate_filter_ref_tx_selection_uncounted(
+            crate::filter::evaluate_filter_ref_tx_selection_deferred(
                 ingress_filter,
                 ingress_key.src_ip,
                 ingress_key.dst_ip,

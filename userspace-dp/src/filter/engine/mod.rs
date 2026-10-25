@@ -42,7 +42,9 @@ pub(crate) use policer::{
     apply_cached_three_color_policers, filter_state_has_input_three_color_policer,
 };
 pub(crate) use tx_selection::{
-    evaluate_filter_ref_tx_selection_counted, evaluate_filter_ref_tx_selection_runtime_counted,
+    evaluate_filter_ref_tx_selection_counted,
+    evaluate_filter_ref_tx_selection_deferred,
+    evaluate_filter_ref_tx_selection_runtime_counted,
     evaluate_filter_ref_tx_selection_runtime_routing_bearing,
     evaluate_filter_ref_tx_selection_runtime_uncounted, evaluate_filter_ref_tx_selection_uncounted,
     evaluate_interface_filter_tx_selection_counted,

@@ -44,6 +44,7 @@ pub(crate) fn evaluate_filter_ref_tx_selection_counted<'a>(
         packet_bytes,
         None,
         true,
+        false,
     )
 }
 
@@ -80,6 +81,7 @@ pub(crate) fn evaluate_filter_ref_tx_selection_uncounted<'a>(
         packet_bytes,
         None,
         false,
+        false,
     )
 }
 
@@ -107,6 +109,7 @@ pub(crate) fn evaluate_filter_ref_tx_selection_runtime_counted<'a>(
         packet_bytes,
         Some(now_ns),
         true,
+        false,
     )
 }
 
@@ -139,6 +142,42 @@ pub(crate) fn evaluate_filter_ref_tx_selection_runtime_uncounted<'a>(
         packet_bytes,
         Some(now_ns),
         false,
+        false,
+    )
+}
+
+/// #16496: deferrable TX-selection walk for generated replies (#15268).
+/// Neither records `then count` nor meters three-color policers inline;
+/// matched handles are COLLECTED (`collect_deferred == true`) so the caller
+/// can replay them exactly once after admission. This is the ONLY walk
+/// that collects handles — live metered/counted walks charge inline and
+/// must not pay per-packet `Arc` strong-count RMWs or SmallVec spill for
+/// handles they immediately discard.
+#[inline]
+pub(crate) fn evaluate_filter_ref_tx_selection_deferred<'a>(
+    filter: &'a Filter,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+    packet_bytes: u64,
+) -> TxSelectionFilterResult<'a> {
+    evaluate_filter_ref_tx_selection_runtime(
+        filter,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        dscp,
+        extra,
+        packet_bytes,
+        None,
+        false,
+        true,
     )
 }
 
@@ -160,6 +199,11 @@ fn evaluate_filter_ref_tx_selection_runtime<'a>(
     // tx-selection leg passes false — the input-filter action-eval owns that
     // count.
     count_terms: bool,
+    // #16496: when true, matched counter/policer handles are collected
+    // into the result for deferred replay (#15268 generated replies).
+    // Only the deferrable walk passes true; live walks charge inline and
+    // collect nothing.
+    collect_deferred: bool,
 ) -> TxSelectionFilterResult<'a> {
     evaluate_filter_ref_tx_selection_runtime_inner(
         filter,
@@ -173,6 +217,7 @@ fn evaluate_filter_ref_tx_selection_runtime<'a>(
         packet_bytes,
         now_ns,
         count_terms,
+        collect_deferred,
         0,
     )
 }
@@ -191,6 +236,7 @@ fn evaluate_filter_ref_tx_selection_runtime_inner<'a>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
+    collect_deferred: bool,
     // #15189: first term index to walk; 0 for every full walk. The inline
     // routing-bearing remainder passes its defer index so already-metered
     // terms are not charged again.
@@ -210,6 +256,7 @@ fn evaluate_filter_ref_tx_selection_runtime_inner<'a>(
             packet_bytes,
             now_ns,
             count_terms,
+            collect_deferred,
             from_term,
         ),
         (IpAddr::V6(src), IpAddr::V6(dst)) => evaluate_filter_ref_tx_selection_counted_v6(
@@ -224,6 +271,7 @@ fn evaluate_filter_ref_tx_selection_runtime_inner<'a>(
             packet_bytes,
             now_ns,
             count_terms,
+            collect_deferred,
             from_term,
         ),
         _ => TxSelectionFilterResult::default(),
@@ -244,6 +292,7 @@ fn evaluate_filter_ref_tx_selection_counted_family<'a, F: AddrFamily>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
+    collect_deferred: bool,
     from_term: usize,
 ) -> TxSelectionFilterResult<'a> {
     // #2544: accumulate modifiers across fall-through terms (forwarding-class,
@@ -270,7 +319,14 @@ fn evaluate_filter_ref_tx_selection_counted_family<'a, F: AddrFamily>(
         // policer meter, forwarding-class, dscp-rewrite, log — and let the
         // `!continue_term` arm below return. Deferring here discarded all
         // of them on the transit TX-selection leg, the sole enforcer.
-        merge_matched_tx_modifiers(&mut acc, filter, term, now_ns, packet_bytes);
+        merge_matched_tx_modifiers(
+            &mut acc,
+            filter,
+            term,
+            now_ns,
+            packet_bytes,
+            collect_deferred,
+        );
         if !term.continue_term {
             acc.action = term.action;
             return acc;
@@ -293,11 +349,12 @@ fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
+    collect_deferred: bool,
     from_term: usize,
 ) -> TxSelectionFilterResult<'a> {
     evaluate_filter_ref_tx_selection_counted_family::<V4Family>(
         filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
-        count_terms, from_term,
+        count_terms, collect_deferred, from_term,
     )
 }
 
@@ -317,21 +374,27 @@ fn merge_matched_tx_modifiers<'a>(
     term: &'a FilterTerm,
     now_ns: Option<u64>,
     packet_bytes: u64,
+    // #16496: only the deferrable walk collects handles for replay;
+    // live walks charge inline and must not clone them.
+    collect_deferred: bool,
 ) {
-    // #15268: deferrable walks (`now_ns == None`) collect the policer handle
-    // and meter at admission instead of metering a reply that may never be
-    // sent. Metered walks keep metering inline exactly as before.
+    // #15268: deferrable walks (`now_ns == None` + `collect_deferred`)
+    // collect the policer handle and meter at admission instead of
+    // metering a reply that may never be sent. Metered walks keep
+    // metering inline exactly as before.
     let policer_action = if now_ns.is_some() {
         apply_term_three_color_policer(term, now_ns, packet_bytes)
     } else {
         ThreeColorPolicerAction::default()
     };
-    if let Some(runtime) = term.three_color_policer.as_ref() {
-        acc.three_color_policers
-            .push(std::sync::Arc::clone(runtime));
-    }
-    if term.has_count {
-        acc.counters.push(term.counter.clone());
+    if collect_deferred {
+        if let Some(runtime) = term.three_color_policer.as_ref() {
+            acc.three_color_policers
+                .push(std::sync::Arc::clone(runtime));
+        }
+        if term.has_count {
+            acc.counters.push(term.counter.clone());
+        }
     }
     if !term.forwarding_class.is_empty() {
         acc.forwarding_class = Some(term.forwarding_class.as_ref());
@@ -359,11 +422,12 @@ fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
+    collect_deferred: bool,
     from_term: usize,
 ) -> TxSelectionFilterResult<'a> {
     evaluate_filter_ref_tx_selection_counted_family::<V6Family>(
         filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
-        count_terms, from_term,
+        count_terms, collect_deferred, from_term,
     )
 }
 
@@ -396,6 +460,7 @@ pub(crate) fn evaluate_filter_ref_tx_selection_runtime_routing_bearing<'a>(
         extra,
         packet_bytes,
         Some(now_ns),
+        false,
         false,
         0,
     )
@@ -435,6 +500,7 @@ pub(crate) fn routing_bearing_remainder_policer_drop_from(
         extra,
         packet_bytes,
         Some(now_ns),
+        false,
         false,
         from_term,
     )
