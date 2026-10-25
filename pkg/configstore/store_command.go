@@ -748,20 +748,46 @@ func hasFlatVerb(line string) bool {
 	return config.IsFlatLoadLine(line)
 }
 
+// isFlatAnnotateLine16522 reports whether line is a replayable annotate
+// line for the flat gate in replayFlatLinesMode15999. The shared
+// config.IsFlatLoadLine deliberately refuses any annotate line ending
+// in ';' (the #10305 hierarchical-transcript trigger), but applyEditLine
+// itself accepts exactly one trailing structural ';' after a complete
+// strict annotate split (#16522). Accept that same shape here so a
+// display-set body whose only flat-looking line is such an annotate
+// line is not refused before applyEditLine can replay it. Structural
+// ';' controls (extra statements) still fail: they are not a complete
+// strict split. This helper is used ONLY as an additional accept in
+// the flat replay gate; body classification (ClassifyLoadContent /
+// IsFlatLoadLine) is unchanged, so a hierarchical trigger body still
+// routes hierarchical in LoadMerge/LoadOverride.
+func isFlatAnnotateLine16522(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "annotate ") && trimmed != "annotate" {
+		return false
+	}
+	_, _, ok := config.ParseAnnotateCommandStrict16522(strings.TrimSuffix(trimmed, ";"))
+	return ok
+}
+
 func applyEditLine(tree *config.ConfigTree, line string) error {
 	// #15718: annotate lines carry a quoted comment ParseSetVerb would
 	// fold into the path; split them with the canonical annotate parser.
-	// A single trailing ';' (the hierarchical transcript spelling) is
-	// stripped first. A ';' anywhere else makes the line malformed here:
-	// the lenient annotate lexer would silently drop the tail, applying
-	// only the gated prefix (#15167 class).
+	// #16522: a ';' inside a quoted path element or the quoted comment
+	// is annotation text (ValidateAnnotationText permits it, and the
+	// hierarchical /* ... */ form accepts it), so the raw byte test
+	// that refused every ';' rejected the box's own `show | display
+	// set` output. Instead strip at most one trailing structural ';'
+	// (the hierarchical transcript spelling) and require the rest to
+	// lex cleanly end to end via the strict lexer: any structural
+	// ';' (an extra statement, #15167 class) makes it not-ok and the
+	// line is refused, while a quoted ';' lexes as part of its string
+	// token. Use the strict tokens/quoted directly so the path acted
+	// on is the path the strict lexer reported.
 	annLine := strings.TrimSpace(line)
-	annTrim := strings.TrimSuffix(annLine, ";")
 	if strings.HasPrefix(annLine, "annotate ") || annLine == "annotate" {
-		if strings.Contains(annTrim, ";") {
-			return fmt.Errorf("invalid annotate command")
-		}
-		path, comment, ok := config.ParseAnnotateCommand(annTrim)
+		annTrim := strings.TrimSuffix(annLine, ";")
+		path, comment, ok := config.ParseAnnotateCommandStrict16522(annTrim)
 		if !ok {
 			return fmt.Errorf("invalid annotate command")
 		}
@@ -862,7 +888,7 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if !hasFlatVerb(line) {
+		if !hasFlatVerb(line) && !isFlatAnnotateLine16522(line) {
 			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
 		// Charge from the PARSER's tokenization (quoted string = 1

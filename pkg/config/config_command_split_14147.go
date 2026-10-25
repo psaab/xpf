@@ -163,6 +163,27 @@ func ParseAnnotateCommand(line string) (path []string, comment string, ok bool) 
 	return splitAnnotateTokens(tokens, quoted)
 }
 
+// ParseAnnotateCommandStrict16522 is ParseAnnotateCommand requiring the
+// whole line to lex cleanly end to end (#16522, #15167 class). The
+// lenient ParseAnnotateCommand drops everything from the first
+// structural token (';' '{' '}' '|', an unterminated string/comment, or
+// a TokenError) onward, so `annotate system host-name "x"; delete ...`
+// would apply only the gated prefix. Here a structural ';' inside a
+// QUOTED path element or the quoted comment lexes as part of its
+// string token and is accepted (it is annotation text
+// ValidateAnnotationText permits), while any unquoted structural ';'
+// makes the strict lexer report not-ok and the caller must refuse.
+// Callers that historically allow a trailing structural ';' strip at
+// most one before calling. The returned split is identical to
+// ParseAnnotateCommand's, so the path adjudicated is the path acted on.
+func ParseAnnotateCommandStrict16522(line string) (path []string, comment string, ok bool) {
+	tokens, quoted, lexOK := lexConfigMutationLineStrict15167(line)
+	if !lexOK {
+		return nil, "", false
+	}
+	return splitAnnotateTokens(tokens, quoted)
+}
+
 // ParseAnnotateRemainder is ParseAnnotateCommand for a line whose
 // `annotate` verb has already been stripped (the gRPC Set handler
 // and the remote CLI strip it before routing). It re-adds the verb
