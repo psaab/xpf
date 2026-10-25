@@ -61,11 +61,16 @@ import (
 // `forwarding && (proxy_ndp) && pndisc_is_router(target, dev) >= 0`, and
 // `pndisc_is_router` is a bare `pneigh_lookup` with NO route lookup and hence
 // nothing corresponding to `rt->dst.dev != dev`. The kernel answers v6 proxy
-// NDP for a same-subnet target correctly, and `reconcileProxyARP` already
-// installs the v6 entries and sets `proxy_ndp`. Adding a v6 responder here
-// would DUPLICATE a working kernel path, and two responders for one family can
-// disagree while only one of them is gated by RG ownership. If you are reading
-// this because v6 looks missing: it is absent on purpose.
+// NDP for a same-subnet target correctly WHEN THE NS ARRIVES ON THE NETDEV
+// THE ENTRY SITS ON — the pneigh lookup is per-device, so arrival device is
+// the one qualification (#16660: the userspace XDP shim publishes the v6
+// proxy target set and passes on-link unicast NDP to it on its ingress
+// netdev; without that pass the NS was delivered into the `xpf-usp0` TUN
+// and the lookup missed). `reconcileProxyARP` already installs the v6
+// entries and sets `proxy_ndp`. Adding a v6 responder here would DUPLICATE
+// a working kernel path, and two responders for one family can disagree
+// while only one of them is gated by RG ownership. If you are reading this
+// because v6 looks missing: it is absent on purpose.
 
 const (
 	arpFrameLen     = 42 // 14 ethernet + 28 ARP

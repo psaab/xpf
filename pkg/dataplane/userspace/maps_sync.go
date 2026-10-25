@@ -509,6 +509,10 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 	if err := checkInterfaceNATAddressCapacity(len(natV4), len(natV6)); err != nil {
 		return err
 	}
+	proxyV6 := buildDesiredProxyNDPAddressSets(snapshot)
+	if err := checkProxyNDPAddressCapacity(len(proxyV6)); err != nil {
+		return err
+	}
 	if err := checkIngressDomainCapacity(len(buildUserspaceIngressDomainEntries(snapshot))); err != nil {
 		return err
 	}
@@ -524,7 +528,10 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 	if err := m.syncUserspaceLandScreenLocked(snapshot); err != nil {
 		return err
 	}
-	return m.syncInterfaceNATAddressMapsWithSetsLocked(natV4, natV6, rstV4, rstV6)
+	if err := m.syncInterfaceNATAddressMapsWithSetsLocked(natV4, natV6, rstV4, rstV6); err != nil {
+		return err
+	}
+	return m.syncProxyNDPAddressMapsWithSetsLocked(proxyV6)
 }
 
 type userspaceCtrlLookupHook func(ctrlMapUpdater, uint32, *userspaceCtrlValue) error
@@ -1014,7 +1021,7 @@ func (m *Manager) readDegradedPathStatsLocked() map[string]uint64 {
 // agreement test in xdp_branch_stats_16241_test.go reads the shim
 // constants and requires this table to match index-for-index, so adding
 // an arm in Rust enrols it here automatically.
-var xdpBranchArmNames = [27]string{
+var xdpBranchArmNames = [28]string{
 	0:  "l2_parse_fail",
 	1:  "non_ip_pass",
 	2:  "qinq_drop",
@@ -1042,6 +1049,7 @@ var xdpBranchArmNames = [27]string{
 	24: "meta_bounds_fail",
 	25: "ctrl_disabled_drop",
 	26: "ctrl_disabled_local",
+	27: "session_miss_proxy_ndp",
 }
 
 // readXDPBranchStatsLocked reads the #16241 per-arm hit counters and
@@ -1625,6 +1633,82 @@ func pruneNATAddressKeys(
 		return err
 	}
 	return nil
+}
+
+// #16660: the v6 proxy-NDP target set for the shim, keyed by the routing
+// domain of the interface each proxy entry is configured on. The source
+// of truth is the same `security nat proxy-arp`/`proxy-ndp` set that
+// ReconcileProxyARP installs as kernel pneigh entries: an address the
+// kernel answers for on that interface's netdev must also be recognised
+// by the shim on ingress in that netdev's domain, or the NS never
+// reaches the kernel there. IPv6 only — IPv4 proxy-ARP is answered by
+// the userspace responder (#8621), not the kernel. Entries whose
+// interface has no snapshot row (or is admin-disabled) contribute
+// nothing: there is no domain to key them under, and guessing domain 0
+// would pass NDP in a foreign domain. Parse failures are skipped
+// exactly as the installer skips them.
+func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot) map[userspaceLocalV6Key]struct{} {
+	desired := make(map[userspaceLocalV6Key]struct{})
+	if snapshot == nil || snapshot.Config == nil {
+		return desired
+	}
+	for _, entry := range snapshot.Config.Security.NAT.ProxyARP {
+		if entry == nil {
+			continue
+		}
+		for _, iface := range snapshot.Interfaces {
+			if iface.Name != entry.Interface || iface.AdminDisabled {
+				continue
+			}
+			for _, cidr := range entry.Addresses {
+				prefix, err := netip.ParsePrefix(cidr)
+				if err != nil {
+					continue
+				}
+				addr := prefix.Addr().Unmap()
+				if !addr.Is6() || addr.Is4In6() {
+					continue
+				}
+				desired[userspaceLocalV6Key{Domain: iface.RoutingDomain, Addr: addr.As16()}] = struct{}{}
+			}
+		}
+	}
+	return desired
+}
+
+func (m *Manager) syncProxyNDPAddressMapsWithSetsLocked(desiredV6 map[userspaceLocalV6Key]struct{}) error {
+	proxyMap := m.bpfShim.Map(mapNameUserspaceProxyNDPv6)
+	if proxyMap == nil {
+		return errors.New("userspace_proxy_ndp_v6_domain map not loaded")
+	}
+	if err := checkProxyNDPAddressCapacity(len(desiredV6)); err != nil {
+		return err
+	}
+	var key userspaceLocalV6Key
+	var val uint8
+	iter := proxyMap.Iterate()
+	var stale []userspaceLocalV6Key
+	for iter.Next(&key, &val) {
+		if _, keep := desiredV6[key]; !keep {
+			stale = append(stale, key)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate userspace_proxy_ndp_v6_domain: %w", err)
+	}
+	return reconcileAddressMapKeys(stale, desiredV6,
+		func(key userspaceLocalV6Key) error {
+			if err := proxyMap.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				return fmt.Errorf("delete userspace_proxy_ndp_v6_domain %+v: %w", key, err)
+			}
+			return nil
+		},
+		func(key userspaceLocalV6Key) error {
+			if err := proxyMap.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update userspace_proxy_ndp_v6_domain %+v: %w", key, err)
+			}
+			return nil
+		})
 }
 
 func buildDesiredInterfaceNATAddressSets(snapshot *ConfigSnapshot) (map[userspaceLocalV4Key]struct{}, map[userspaceLocalV6Key]struct{}, []netip.Addr, []netip.Addr) {
