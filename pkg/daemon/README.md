@@ -4242,6 +4242,10 @@ never lock an operator out of a remote box it manages.
   #16639): unit addresses and `vrrp-group` virtual-addresses key the
   VIP map by parsed address, so a non-canonical IPv6 spelling on
   either side still gates by the VIP owner's RG.
+  The first hash-gated apply of a process also bursts every
+  ip-monitoring-referenced runnable probe (#16636, `rpmFirstReconcileDone`):
+  a restarted daemon has no verdict and would otherwise render an empty
+  overlay for (successive-loss-1) x test-interval.
 - `daemon_ipmon.go` — `assembleFRRConfig` (the SOLE `frr.FullConfig`
   constructor, shared by the full apply path and the routes-only
   actuator) + `actuateRouteOverlay` (FRR re-render → snapshot publish

@@ -113,17 +113,23 @@ out-of-range value to a warning.
   `SetEventCallback` replays it, so a boot-time failover edge is never dropped
   (#3755). Regression-locked by `TestFireEventBufferedUntilCallbackRegistered`.
 
-- **HA takeover probe bursts (#11414).** A newly promoted primary has no
-  authoritative standby verdict for probes that were HA-gated off. The daemon
-  uses `ApplyWithProbeBurst` for only those newly active ip-monitoring probes;
-  it installs pin results after old loops stop and before starting the burst, so
-  a temporary pin-reprogram hold cannot consume the initial attempt. Initial
-  test cycles skip configured inter-probe and test-interval waits until the
-  first verdict; a setup failure remains neutral and returns to normal cadence.
-  Burst-derived failure transitions are marked `TakeoverBurst`, allowing
-  ip-monitoring to publish them without its normal debounce while retaining the
-  shared actuation throttle. Later cycles and unrelated probes retain configured
-  cadence.
+- **HA takeover and process-start probe bursts (#11414/#16636).** A newly
+  promoted primary has no authoritative standby verdict for probes that were
+  HA-gated off. The daemon uses `ApplyWithProbeBurst` for only those newly
+  active ip-monitoring probes; it installs pin results after old loops stop
+  and before starting the burst, so a temporary pin-reprogram hold cannot
+  consume the initial attempt. Initial test cycles skip configured
+  inter-probe and test-interval waits until the first verdict; a setup
+  failure remains neutral and returns to normal cadence. Burst-derived
+  failure transitions are marked `TakeoverBurst`, allowing ip-monitoring to
+  publish them without its normal debounce while retaining the shared
+  actuation throttle. Later cycles and unrelated probes retain configured
+  cadence. The same burst applies on the FIRST `reconcileRPM` of a fresh
+  process (#16636, `rpmFirstReconcileDone` in `pkg/daemon`): a restarted
+  xpfd has no verdict at all and renders FRR / the helper snapshot from an
+  empty overlay, so every ip-monitoring-referenced probe runnable in the
+  effective set bursts once at boot; the latch makes later config changes
+  keep normal cadence.
 - **icmp-ping sends a real ICMP echo since #1827** (raw socket, id/seq
   matching, 3 s timeout). The pre-#1827 prober never put a packet on
   the wire (raw-IP dial + UDP connect fallback — a route-existence
