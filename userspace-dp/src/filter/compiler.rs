@@ -324,6 +324,19 @@ fn parse_filter_table(
 /// filter lookup by bare ifindex (inner unit identity is not carried
 /// per-packet for WG/output), so per-unit maps would be dead state.
 ///
+/// #16847: a single claimant is NOT unambiguous. When wg0.1 alone names
+/// F2 and wg0.0 names nothing, installing ifindex(wg0)->F2 evaluates
+/// every wg0.0 packet through F2 — the sibling that configured no filter
+/// is policed/VRF-steered/discarded by a filter it never named, with no
+/// warning. Junos binds a filter per-unit; the ifindex-keyed fast map
+/// cannot, so a hook is disputed whenever more than one unit row shares
+/// its (ifindex, family, direction) and they do not ALL name the same
+/// filter, counting an empty name as a claim (rendered `<none>` in the
+/// error so the unfiltered sibling is visible). Refuse, mirroring the
+/// #16063 shared-tunnel-unit refusal and the #16061 contested-name
+/// withdrawal on the identical shape. Exactly one unit row on the
+/// ifindex (single-unit device) is unaffected.
+///
 /// EXCLUSION — GRE input (#10816): GRE decap attributes a shared tunnel
 /// identity to the FIRST row in snapshot order BY DESIGN (pinned by
 /// `gre_decap_attributes_shared_identity_to_first_sibling_row_10816`).
@@ -355,9 +368,15 @@ fn assign_interface_filters(
     let is_gre_input = |iface: &crate::InterfaceSnapshot, direction: &str| {
         direction == "input" && matches!(iface.tunnel_mode.as_str(), "gre" | "ip6gre")
     };
-    // (ifindex, family, direction) -> (first interface name, filter name)
-    let mut first_by_hook: rustc_hash::FxHashMap<(i32, &'static str, &'static str), (&str, &str)> =
-        rustc_hash::FxHashMap::default();
+    // (ifindex, family, direction) -> rows seen on that hook, in snapshot
+    // order. #16847: every non-base, non-GRE-input row counts, even one
+    // naming no filter — an empty name on a shared ifindex is a claim
+    // that the unit is unfiltered, which the ifindex-keyed fast map
+    // cannot honour alongside a sibling's filter.
+    let mut rows_by_hook: rustc_hash::FxHashMap<
+        (i32, &'static str, &'static str),
+        Vec<(&str, &str)>,
+    > = rustc_hash::FxHashMap::default();
     for iface in interfaces {
         if iface.ifindex <= 0 {
             continue;
@@ -369,33 +388,65 @@ fn assign_interface_filters(
             ("inet6", "output", &iface.filter_output_v6),
         ];
         for (family, direction, filter_name) in hooks {
-            if filter_name.is_empty()
-                || iface.is_unit == Some(false)
-                || is_gre_input(iface, direction)
-            {
+            if iface.is_unit == Some(false) || is_gre_input(iface, direction) {
                 continue;
             }
-            let key = (iface.ifindex, family, direction);
-            match first_by_hook.get(&key) {
-                Some(&(first_interface, first_filter)) if first_filter != filter_name => {
-                    return Err(
-                        SnapshotIntegrityError::InterfaceFilterSharedIfindexConflict {
-                            ifindex: iface.ifindex,
-                            family: family.to_string(),
-                            direction: direction.to_string(),
-                            first_interface: first_interface.to_string(),
-                            first_filter: first_filter.to_string(),
-                            second_interface: iface.name.clone(),
-                            second_filter: filter_name.to_string(),
-                        },
-                    );
-                }
-                Some(_) => {}
-                None => {
-                    first_by_hook.insert(key, (iface.name.as_str(), filter_name));
-                }
-            }
+            rows_by_hook
+                .entry((iface.ifindex, family, direction))
+                .or_default()
+                .push((iface.name.as_str(), filter_name));
         }
+    }
+    // Deterministic refusal: report the disputed hook whose first row
+    // appears first in snapshot order (FxHashMap iteration is unordered).
+    let mut disputed: Option<(
+        usize,
+        i32,
+        &'static str,
+        &'static str,
+        (&str, &str),
+        (&str, &str),
+    )> = None;
+    for ((ifindex, family, direction), rows) in &rows_by_hook {
+        if rows.len() < 2 || rows.iter().all(|&(_, name)| name == rows[0].1) {
+            continue;
+        }
+        // First row vs the first row that disagrees with it (an empty
+        // name disagrees with a named filter and vice versa, #16847).
+        let second = rows
+            .iter()
+            .copied()
+            .find(|&(_, name)| name != rows[0].1)
+            .expect("disputed hook has a disagreeing row");
+        // Snapshot position of the first row, for stable ordering.
+        let pos = interfaces
+            .iter()
+            .position(|i| i.name == rows[0].0)
+            .unwrap_or(usize::MAX);
+        let candidate = (pos, *ifindex, *family, *direction, rows[0], second);
+        if disputed.as_ref().is_none_or(|d| candidate.0 < d.0) {
+            disputed = Some(candidate);
+        }
+    }
+    if let Some((_, ifindex, family, direction, first, second)) = disputed {
+        let render = |name: &str| {
+            if name.is_empty() {
+                "<none>".to_string()
+            } else {
+                name.to_string()
+            }
+        };
+        return Err(
+            SnapshotIntegrityError::InterfaceFilterSharedIfindexConflict {
+                ifindex,
+                family: family.to_string(),
+                direction: direction.to_string(),
+                first_interface: first.0.to_string(),
+                first_filter: render(first.1),
+                second_interface: second.0.to_string(),
+                second_filter: render(second.1),
+            },
+        );
     }
     for iface in interfaces {
         if iface.ifindex <= 0 {

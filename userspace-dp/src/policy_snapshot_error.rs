@@ -653,14 +653,17 @@ pub(crate) enum SnapshotIntegrityError {
         first_interface: String,
         second_interface: String,
     },
-    /// #16059: two logical-unit rows sharing a kernel ifindex name different
-    /// firewall filters for the same family+direction. The per-interface
-    /// filter fast maps are keyed by ifindex alone, so accepting both would
-    /// silently last-win and the losing unit's filter would never evaluate
-    /// (fail-open for a deny filter). Reject the snapshot (preflight keeps
-    /// prior good state). Identical names and known base rows
-    /// (`is_unit == Some(false)`, which carry no filter fields) do not
-    /// conflict.
+    /// #16059/#16847: two logical-unit rows sharing a kernel ifindex do not
+    /// all name the same firewall filter for the same family+direction,
+    /// counting an empty name as a claim (`<none>` in the error). The
+    /// per-interface filter fast maps are keyed by ifindex alone, so
+    /// accepting a single claimant would install that filter for the whole
+    /// ifindex and evaluate the unfiltered sibling's packets through it
+    /// (fail-closed-ish: discard/policer/VRF steering misapplied, no
+    /// enforcement lost). Reject the snapshot (preflight keeps prior good
+    /// state). Identical names, exactly one unit row on the ifindex, and
+    /// known base rows (`is_unit == Some(false)`, which carry no filter
+    /// fields) do not conflict.
     InterfaceFilterSharedIfindexConflict {
         ifindex: i32,
         family: String,
