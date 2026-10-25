@@ -138,6 +138,10 @@ pub(super) struct EmbeddedV6ToV4Layout<'a> {
     pub(super) fragment_word: u16,
     pub(super) identification: u16,
     pub(super) l4_protocol: u8,
+    /// #16666: whether the quoted packet carries an IPv6 Fragment Header.
+    /// The PTB arm needs it to apply the RFC 7915 §5.2 MTU adjustment:
+    /// a translated fragment is `v4_len + 28`, not `v4_len + 20`.
+    pub(super) has_fragment_header: bool,
 }
 
 pub(super) fn embedded_v6_to_v4_layout<'a>(embedded: &'a [u8]) -> Option<EmbeddedV6ToV4Layout<'a>> {
@@ -176,7 +180,8 @@ pub(super) fn embedded_v6_to_v4_layout<'a>(embedded: &'a [u8]) -> Option<Embedde
     // RFC 7915 §5.2 defers to §5.1 for embedded fragmentation fields. A
     // non-first fragment was rejected above; copy the available first/atomic
     // fragment geometry or keep header-less quote behavior unchanged.
-    let (fragment_word, identification) = match ipv6_fragment_header(quote_in) {
+    let frag_header = ipv6_fragment_header(quote_in);
+    let (fragment_word, identification) = match frag_header {
         Some(info) => {
             let more = if info.more { 0x2000u16 } else { 0 };
             (more | (info.offset_units & 0x1FFF), (info.ident & 0xFFFF) as u16)
@@ -192,6 +197,7 @@ pub(super) fn embedded_v6_to_v4_layout<'a>(embedded: &'a [u8]) -> Option<Embedde
         fragment_word,
         identification,
         l4_protocol,
+        has_fragment_header: frag_header.is_some(),
     })
 }
 
@@ -284,10 +290,34 @@ pub(super) fn translate_icmpv6_message_to_icmpv4(
             // ICMPv4 Fragmentation-Needed instead carries the Next-Hop MTU in
             // its low 16 bits (bytes 6-7), with bytes 4-5 unused (RFC 1191).
             let mtu = u32::from_be_bytes([src[4], src[5], src[6], src[7]]);
-            // The translated v4 datagram is 20 bytes smaller than the v6 one, so
-            // advertise an MTU 20 bytes smaller (clamped to a sane 16-bit range
-            // and never below the v4 minimum). RFC 7915 5.2.
-            let v4_mtu = mtu.saturating_sub(NAT64_HEADER_DELTA).clamp(68, 0xffff) as u16;
+            // RFC 7915 §5.2: "The MTU field MUST be adjusted for the
+            // difference between the IPv4 and IPv6 header sizes, taking
+            // into account whether or not the packet in error includes
+            // a Fragment Header" (#16666). An unfragmented translated
+            // datagram is 20 bytes smaller than the v6 one, but a
+            // translated fragment carries the 8-byte Fragment Header
+            // and is therefore `v4_len + 28` in v6 terms, so the delta
+            // is 28, not 20. Advertising `mtu - 20` for a fragment quote
+            // leaves the relayed MTU 8 bytes too large: every retry at
+            // that MTU still exceeds the IPv6 bottleneck and elicits
+            // another PTB — a non-converging PMTUD black hole.
+            //
+            // Inspect the embedded quote via the shared layout walk,
+            // which already locates the Fragment Header (and rejects
+            // non-first fragments). A quote that fails the layout
+            // (truncated / ineligible / unsupported) aborts the whole
+            // error translation below anyway, so falling back to the
+            // plain 20-byte delta here cannot emit a wrong MTU.
+            let embedded_in = src.get(8..);
+            let has_frag = embedded_in
+                .and_then(embedded_v6_to_v4_layout)
+                .is_some_and(|layout| layout.has_fragment_header);
+            let delta = if has_frag {
+                NAT64_HEADER_DELTA + NAT64_FRAGMENT_HEADER_LEN
+            } else {
+                NAT64_HEADER_DELTA
+            };
+            let v4_mtu = mtu.saturating_sub(delta).clamp(68, 0xffff) as u16;
             write_icmpv4_error_with_embedded(
                 dst,
                 src,
@@ -364,6 +394,19 @@ pub(super) fn translate_icmpv4_message_to_icmpv6(
             // a truncated or malformed quote has no usable Total Length and
             // keeps the 1280 floor rather than dropping the error. Non-zero
             // MTUs keep the plain +20 translation below.
+            // #16666 mirror check (RFC 7915 §4.2): the packet in error
+            // here is the OUTER IPv4 packet, whose MF/offset live in
+            // its IP header — not in `src` (the ICMP message) and not
+            // in the embedded quote (a different packet). The outer
+            // translators drop fragmented ICMP before reaching this
+            // arm (#2562: `is_fragment && protocol == PROTO_ICMP`), so
+            // the +28 case is unreachable here today; the quoted
+            // packet's own fragment state is handled independently by
+            // `translate_embedded_v4_to_v6`, which emits the quote's
+            // Fragment Header. The plain +20 below is therefore
+            // correct for every input that can reach this arm; a
+            // future caller admitting fragmented outer ICMP must add
+            // the +8 here.
             // The translated v6 datagram is 20 bytes larger than the v4 one, so
             // the v6 path MTU is 20 bytes larger; clamp to the v6 minimum link
             // MTU (1280) so a v6 client is never told to go below it.
