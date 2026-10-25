@@ -615,6 +615,10 @@ type Config struct {
 	// (eligible evaluations, selected sessions, zone-filtered sessions and
 	// excluded flow-server stanzas) for #13307.
 	FlowExportSamplingStatsFn func() []flowexport.SamplingStatsSnapshot
+	// FlowExportLiveFeedMissesFn returns live-feed session-store lookup
+	// misses for tracked flows (#16760) for
+	// xpf_flow_export_live_feed_misses_total. Optional; nil omits it.
+	FlowExportLiveFeedMissesFn func() uint64
 	// FeedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#2049): an address-name -> union-of-feed-CIDRs map for the active
 	// config, the same view the AF_XDP helper enforces. It is consulted by
@@ -854,6 +858,7 @@ type Server struct {
 	flowExportBuildStateFn               func() []flowexport.BuildState
 	flowExportBatchStatsFn               func() []flowexport.ExporterBatchStats
 	flowExportSamplingStatsFn            func() []flowexport.SamplingStatsSnapshot
+	flowExportLiveFeedMissesFn           func() uint64
 	feedOverlayFn                        func() map[string][]string
 	policySchedActiveFn                  func() (map[string]bool, bool)
 	haActiveFn                           func() bool
@@ -993,6 +998,7 @@ func NewServer(cfg Config) *Server {
 		flowExportBuildStateFn:               cfg.FlowExportBuildStateFn,
 		flowExportBatchStatsFn:               cfg.FlowExportBatchStatsFn,
 		flowExportSamplingStatsFn:            cfg.FlowExportSamplingStatsFn,
+		flowExportLiveFeedMissesFn:           cfg.FlowExportLiveFeedMissesFn,
 		feedOverlayFn:                        cfg.FeedOverlayFn,
 		policySchedActiveFn:                  cfg.PolicySchedulerActiveStateFn,
 		haActiveFn:                           cfg.HAActiveFn,
