@@ -241,20 +241,20 @@ func (c *xpfCollector) initGlobalDescriptors() {
 		"Total NAT64 (IPv6<->IPv4) packet translations.",
 		nil, nil,
 	)
-	// #15086: scrape-health signals for the A44-01 fix. Always emitted,
-	// including at zero, so an alert on `> 0` distinguishes "bad label
-	// values are reaching the exporter" from "the exporter stopped
-	// reporting". invalidLabelValuesTotal counts label VALUES sanitized
-	// (one per value, not per byte); collectorPanicsTotal counts
-	// collector passes the metrics lane recovered — a nonzero value is
-	// always a bug, since sanitization should make panics unreachable.
+	// #15086/#16707: scrape-health signals. Always emitted, including at
+	// zero, so an alert on `> 0` distinguishes "bad label values are
+	// reaching the exporter" from "the exporter stopped reporting".
+	// invalidLabelValuesTotal counts label VALUES sanitized (one per
+	// value, not per byte); collectorPanicsTotal counts collector
+	// passes the metrics lane recovered — a nonzero value is always a
+	// bug, since sanitization should make panics unreachable.
 	c.invalidLabelValuesTotal = prometheus.NewDesc(
 		"xpf_metrics_invalid_label_values_total",
 		"Total Prometheus label values that carried invalid UTF-8 and "+
-			"were folded to U+FFFD at emit time (#15086). The sample is "+
-			"still published with the sanitized value; a nonzero count "+
-			"means a committed config identifier holds raw non-UTF-8 "+
-			"bytes.",
+			"were escaped as \\xNN at emit time (#15086, #16707). The "+
+			"sample is still published with the sanitized value; a "+
+			"nonzero count means a committed config identifier holds "+
+			"raw non-UTF-8 bytes.",
 		nil, nil,
 	)
 	c.collectorPanicsTotal = prometheus.NewDesc(
@@ -262,6 +262,19 @@ func (c *xpfCollector) initGlobalDescriptors() {
 		"Total metric collector passes recovered by the metrics lane "+
 			"after a panic (#15086). A panicking pass fails that scrape "+
 			"instead of crashing the daemon; any nonzero value is a bug.",
+		nil, nil,
+	)
+	// #16707: with ContinueOnError a Gather error (e.g. a duplicate
+	// series) no longer 500s the whole scrape; the offending family
+	// is dropped from that scrape and counted here. Always emitted,
+	// including at zero, mirroring the #15086 health counters.
+	c.gatherErrorsTotal = prometheus.NewDesc(
+		"xpf_metrics_gather_errors_total",
+		"Total metric scrapes where Registry.Gather returned an error "+
+			"and promhttp ContinueOnError served the remaining families "+
+			"(#16707). The dropped series is absent from that scrape; "+
+			"a nonzero count means a duplicate or inconsistent series "+
+			"is being dropped — rename the colliding identifier.",
 		nil, nil,
 	)
 }

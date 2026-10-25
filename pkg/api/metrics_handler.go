@@ -7,6 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 )
 
 type metricsHandler struct {
@@ -19,6 +20,26 @@ type metricsLane struct {
 	owner     *metricsHandler
 	collector *xpfCollector
 	ctx       context.Context
+}
+
+// gatherCountingGatherer wraps a lane registry so every Gather error is
+// counted on the collector before promhttp sees it (#16707). With
+// ContinueOnError promhttp serves the families Gather did return and
+// drops only the offending series; without a count that drop would be
+// silent except for promhttp's own per-registry error counter, which
+// is not part of the xpf_* exposition. The count is cumulative and is
+// published as xpf_metrics_gather_errors_total on the next scrape.
+type gatherCountingGatherer struct {
+	registry  *prometheus.Registry
+	collector *xpfCollector
+}
+
+func (g gatherCountingGatherer) Gather() ([]*dto.MetricFamily, error) {
+	mfs, err := g.registry.Gather()
+	if err != nil && g.collector != nil {
+		g.collector.gatherErrors.Add(1)
+	}
+	return mfs, err
 }
 
 func newMetricsHandler(collector *xpfCollector, timeout time.Duration) http.Handler {
@@ -34,7 +55,17 @@ func newMetricsHandler(collector *xpfCollector, timeout time.Duration) http.Hand
 		lane := &metricsLane{owner: h, collector: collector}
 		registry := prometheus.NewRegistry()
 		registry.MustRegister(lane)
-		lane.handler = promhttp.HandlerFor(registry, promhttp.HandlerOpts{Timeout: timeout})
+		// #16707: ContinueOnError so a duplicate series (the many-to-one
+		// sanitization collision, or the Y49-03 zone-pair vs scoped-global
+		// same-name case) drops only that series instead of answering 500
+		// for the whole exposition. Gather errors are counted via the
+		// wrapping gatherer above and surfaced as
+		// xpf_metrics_gather_errors_total on the next scrape. When Gather
+		// returns zero families promhttp still answers 500, preserving
+		// the fail-visible behaviour for a wholly failed scrape.
+		lane.handler = promhttp.HandlerFor(
+			gatherCountingGatherer{registry: registry, collector: collector},
+			promhttp.HandlerOpts{Timeout: timeout, ErrorHandling: promhttp.ContinueOnError})
 		h.available <- lane
 	}
 	return h
