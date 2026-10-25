@@ -2365,11 +2365,25 @@ never lock an operator out of a remote box it manages.
   calls into a backend the rollback has just torn down. The monitor is
   rebuilt fresh on a corrected re-arm because it is not restartable after
   `Stop`), stops the abandoned config's DHCP clients, and retires
-  config-driven `.network` files while keeping `.link` rename files. Bootstrap
-  exit snapshots `fxp0.network` before the first config's networkd reconcile —
-  the exact bytes whatever they are, including an absent or unmarked file
-  (captured/present flags distinguish the shapes). That snapshot is restored
-  only for the genuine first-commit rollback; a later #9615 safe-state entry on
+  config-driven `.network` files while keeping `.link` rename files — with
+  one exception (#16675): bootstrap exit first captures the pre-takeover
+  kernel name of a non-index-0 lifeline that positional naming is about to
+  rename (`captureBootstrapLifelineRenamePreExit`, persisted in the same
+  generation-bound record), and the first-commit rollback removes that
+  NIC's takeover `.link` and renames it back, so the host's own
+  kernel-name-keyed configuration matches again. Without that, the
+  rollback reported success while the management NIC stayed renamed and
+  unaddressed across reboots — console-only. The rename restore is
+  fail-closed on provenance (a `.link` whose `OriginalName=` disagrees
+  with the captured kernel name, or no captured pair at all, retains the
+  file and the live name and reports DEGRADED) and renames before it
+  removes the file, so a failed rename-back never destroys the evidence.
+  Index-0 fxp0 renames are untouched: the `.network` restore below
+  already covers them. Bootstrap exit snapshots `fxp0.network` before
+  the first config's networkd reconcile — the exact bytes whatever they
+  are, including an absent or unmarked file (captured/present flags
+  distinguish the shapes). That snapshot is restored only for the
+  genuine first-commit rollback; a later #9615 safe-state entry on
   a committed box never rewrites `fxp0` from the day-0 snapshot. Confirmation
   of the first-commit window clears the in-memory snapshot.
 

@@ -162,6 +162,13 @@ type bootstrapLifelineSnapshotRecord struct {
 	// absence (#14993). Absent in old records decodes false, which the
 	// restore gate rejects without authentic provenance.
 	Present bool `json:"present"`
+	// LifelineKernelName / LifelineLogicalName record the pre-takeover
+	// kernel name of a non-index-0 foreign-host lifeline and the logical
+	// name bootstrap-exit positional naming renamed it to (#16675).
+	// Empty on old records and whenever the lifeline was index-0 fxp0
+	// (that path is covered by the .network restore above).
+	LifelineKernelName  string `json:"lifeline_kernel_name,omitempty"`
+	LifelineLogicalName string `json:"lifeline_logical_name,omitempty"`
 }
 
 // applianceMarkerFile marks a host that was PROVISIONED FROM THE XPF APPLIANCE
@@ -435,8 +442,13 @@ func (d *Daemon) exitBootstrapMode(reason string) {
 //     later confirmed commit can re-arm it).
 //
 // Renames persist deliberately — reverting them would link-cycle a degraded
-// box for cosmetic benefit. Post-rollback state = renamed NICs + no abandoned
-// networkd addresses + the validated bootstrap lifeline when available + zero
+// box for cosmetic benefit. The ONE exception is the non-fxp0 lifeline
+// rename (#16675): on a foreign host that NIC's addressing lives in the
+// host's own kernel-name-keyed config, so keeping the rename keeps the
+// lockout. The first-commit path renames that NIC back and removes its
+// takeover .link (see restoreBootstrapLifelineRename). Post-rollback
+// state = renamed NICs (lifeline excepted) + no abandoned networkd
+// addresses + the validated bootstrap lifeline when available + zero
 // config-driven claims. The caller holds d.applySem.
 //
 // #12154: the lifeline .network restore is scoped to the FIRST-commit rollback
@@ -753,6 +765,11 @@ func isBootstrapLifelineNetwork(content []byte) bool {
 // it on the abandoned GuardedHash. The Store generation is read BEFORE taking
 // bootstrapLifelineMu — the confirm hook takes this mutex under Store.mu, and
 // reversing that order deadlocked the daemon (NEW-MAJOR-A).
+//
+// #16675: the non-fxp0 lifeline rename pair is captured BEFORE exit by
+// captureBootstrapLifelineRenamePreExit and persisted in the same
+// generation-bound record, so the first-commit rollback can remove the
+// takeover .link and rename back.
 func (d *Daemon) captureBootstrapLifelineNetwork() {
 	// NEW-MAJOR-A: read the Store generation BEFORE taking
 	// bootstrapLifelineMu (the confirm hook takes this mutex under
@@ -809,12 +826,110 @@ func (d *Daemon) captureBootstrapLifelineNetwork() {
 	if !isBootstrapLifelineNetwork(content) {
 		slog.Debug("bootstrap exit: captured an unmarked pre-takeover fxp0 network file",
 			"path", path)
+		// #16675: even an unmarked fxp0 file must not suppress the durable
+		// record when a non-fxp0 rename was captured — otherwise the
+		// across-restart rollback loses rename-back provenance. The
+		// restore gate rejects a non-marker Present record as before.
+		if d.bootstrapLifelineKernelName != "" {
+			d.persistBootstrapLifelineSnapshotLocked(content, generation)
+		}
 		return
 	}
 	d.persistBootstrapLifelineSnapshotLocked(content, generation)
 	slog.Debug("bootstrap exit: captured pre-takeover management lifeline network",
 		"path", path)
 }
+
+// captureBootstrapLifelineRenamePreExit records, BEFORE bootstrap-exit
+// naming runs, whether the recorded lifeline NIC will be renamed to a
+// non-fxp0 logical name by positional naming (#16675). It must be called
+// before runBootstrapExitStartup: after the rename the lifeline record
+// resolves to the logical name and the pre-takeover kernel name is lost.
+//
+// Only positional mode is captured: device-map mode never claims an
+// unmapped lifeline, and its strand pre-flight already refuses a rename
+// that would strand management. Index-0 lifelines rename to fxp0 and are
+// covered by the fxp0 .network restore, so they record nothing.
+//
+// The logical name is computed with the same assignName the positional
+// pass will use (same nodeID/clusterMode derivation), so the recorded
+// pair matches the .link the takeover actually writes. Any observation
+// failure records nothing — the exit then proceeds exactly as before and
+// the rollback keeps its prior (fxp0-only) behaviour rather than guessing.
+func (d *Daemon) captureBootstrapLifelineRenamePreExit(cfg *config.Config) {
+	if d.opts.NoDataplane || cfg == nil || deviceMapNamingActive(cfg) {
+		return
+	}
+	kernelName, ok := resolveLifelineCurrentNameFn()
+	if !ok || kernelName == "" || kernelName == defaultMgmtInterface {
+		return
+	}
+	if isPositionalLogicalName(kernelName) {
+		return
+	}
+	nics, err := enumeratePCINICsFn()
+	if err != nil || len(nics) == 0 {
+		return
+	}
+	idx := -1
+	for i, nic := range nics {
+		if nic.name == kernelName {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return
+	}
+	nodeID, clusterMode, _, _, _ := namingParamsFromConfig(cfg)
+	fpc := 0
+	if clusterMode && nodeID == 1 {
+		fpc = 7
+	}
+	logical := assignName(idx, fpc, clusterMode)
+	if logical == "" || logical == kernelName || logical == defaultMgmtInterface {
+		return
+	}
+	d.bootstrapLifelineMu.Lock()
+	d.bootstrapLifelineKernelName = kernelName
+	d.bootstrapLifelineLogicalName = logical
+	d.bootstrapLifelineMu.Unlock()
+	slog.Info("bootstrap exit: recorded non-fxp0 lifeline rename for first-commit rollback",
+		"kernel", kernelName, "logical", logical, "issue", "#16675")
+}
+
+// isPositionalLogicalName reports whether name is one positional naming
+// can assign (fxp0, em0, or ge-<fpc>-0-<n>).
+func isPositionalLogicalName(name string) bool {
+	if name == defaultMgmtInterface || name == "em0" {
+		return true
+	}
+	if !strings.HasPrefix(name, "ge-") {
+		return false
+	}
+	rest := strings.TrimPrefix(name, "ge-")
+	fpcStr, tail, ok := strings.Cut(rest, "-0-")
+	if !ok || fpcStr == "" || tail == "" {
+		return false
+	}
+	for _, c := range fpcStr + tail {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// bootstrapLifelineRenamePair returns the captured (kernel, logical) pair.
+func (d *Daemon) bootstrapLifelineRenamePair() (kernel, logical string) {
+	d.bootstrapLifelineMu.Lock()
+	defer d.bootstrapLifelineMu.Unlock()
+	return d.bootstrapLifelineKernelName, d.bootstrapLifelineLogicalName
+}
+
+// resolveLifelineCurrentNameFn is a seam so the pre-exit capture is
+// testable without sysfs/netlink. Production is resolveLifelineCurrentName.
+var resolveLifelineCurrentNameFn = resolveLifelineCurrentName
 
 // persistBootstrapLifelineSnapshotLocked writes the generation-bound durable
 // snapshot record (#12155). Caller holds bootstrapLifelineMu and passes the
@@ -829,9 +944,11 @@ func (d *Daemon) persistBootstrapLifelineSnapshotLocked(content []byte, generati
 	}
 	d.bootstrapLifelineGeneration = generation
 	record, err := json.Marshal(bootstrapLifelineSnapshotRecord{
-		Generation: d.bootstrapLifelineGeneration,
-		Network:    content,
-		Present:    true,
+		Generation:          d.bootstrapLifelineGeneration,
+		Network:             content,
+		Present:             true,
+		LifelineKernelName:  d.bootstrapLifelineKernelName,
+		LifelineLogicalName: d.bootstrapLifelineLogicalName,
 	})
 	if err == nil {
 		record = append(record, '\n')
@@ -858,8 +975,10 @@ func (d *Daemon) persistAbsentBootstrapLifelineSnapshotLocked(generation string)
 	}
 	d.bootstrapLifelineGeneration = generation
 	record, err := json.Marshal(bootstrapLifelineSnapshotRecord{
-		Generation: generation,
-		Present:    false,
+		Generation:          generation,
+		Present:             false,
+		LifelineKernelName:  d.bootstrapLifelineKernelName,
+		LifelineLogicalName: d.bootstrapLifelineLogicalName,
 	})
 	if err == nil {
 		record = append(record, '\n')
@@ -879,6 +998,8 @@ func (d *Daemon) clearBootstrapLifelineNetwork() {
 	d.bootstrapLifelineCaptured = false
 	d.bootstrapLifelinePresent = false
 	d.bootstrapLifelineNetwork = nil
+	d.bootstrapLifelineKernelName = ""
+	d.bootstrapLifelineLogicalName = ""
 	d.bootstrapLifelineMu.Unlock()
 }
 
@@ -910,6 +1031,172 @@ func (d *Daemon) loadBootstrapLifelineSnapshot() (snapshot []byte, generation st
 		return nil, "", false, false, true
 	}
 	return append([]byte(nil), record.Network...), record.Generation, record.Present, true, false
+}
+
+// loadBootstrapLifelineRename reads ONLY the #16675 rename pair from the
+// durable record, with the same generation binding the .network restore
+// enforces. Returns ("","") when there is no authentic pair: no record,
+// unreadable record, generation mismatch, or a half-empty pair. The
+// caller treats "" as "no rename to undo" — but see
+// restoreBootstrapLifelineRename, which fails closed when a takeover
+// .link for the lifeline exists without provenance.
+func (d *Daemon) loadBootstrapLifelineRename() (kernel, logical string) {
+	if d.store == nil || !d.store.FirstCommitTeardownOwed() {
+		return "", ""
+	}
+	data, err := readBootstrapLifelineSnapshot(filepath.Join(linkDir, bootstrapLifelineSnapshotBase))
+	if err != nil || len(data) > maxBootstrapLifelineSnapshotSize {
+		return "", ""
+	}
+	var record bootstrapLifelineSnapshotRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return "", ""
+	}
+	if record.Generation == "" || record.Generation != d.store.FirstCommitTeardownGeneration() {
+		return "", ""
+	}
+	if record.LifelineKernelName == "" || record.LifelineLogicalName == "" ||
+		record.LifelineKernelName == record.LifelineLogicalName {
+		return "", ""
+	}
+	return record.LifelineKernelName, record.LifelineLogicalName
+}
+
+// bootstrapLifelineRenameForTeardown resolves the rename pair for this
+// teardown: the in-memory capture on the live path, else the durable
+// generation-bound record on the across-restart path.
+func (d *Daemon) bootstrapLifelineRenameForTeardown() (kernel, logical string) {
+	if k, l := d.bootstrapLifelineRenamePair(); k != "" && l != "" && k != l {
+		return k, l
+	}
+	// Adopt the durable pair into memory so a retry in this process (and
+	// the confirmed-clear) sees the same provenance.
+	k, l := d.loadBootstrapLifelineRename()
+	if k != "" {
+		d.bootstrapLifelineMu.Lock()
+		if d.bootstrapLifelineKernelName == "" {
+			d.bootstrapLifelineKernelName, d.bootstrapLifelineLogicalName = k, l
+		}
+		k2, l2 := d.bootstrapLifelineKernelName, d.bootstrapLifelineLogicalName
+		d.bootstrapLifelineMu.Unlock()
+		return k2, l2
+	}
+	return "", ""
+}
+
+// lifelineLinkOriginal parses the OriginalName= recorded in the takeover
+// .link for logical. Returns "" when the file is absent, unreadable, or
+// records no OriginalName (MAC-form / name-only claims carry none).
+func lifelineLinkOriginal(logical string) string {
+	data, err := os.ReadFile(filepath.Join(linkDir, linkPrefix+logical+".link"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "OriginalName=") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "OriginalName="))
+		}
+	}
+	return ""
+}
+
+// restoreBootstrapLifelineRename undoes the bootstrap-exit positional
+// rename of a non-fxp0 lifeline (#16675): it removes the takeover .link
+// and renames the NIC back to its pre-takeover kernel name so the host's
+// own kernel-name-keyed config (netplan `[Match] Name=enp6s0`, ifupdown,
+// networkd Name=) matches again.
+//
+// Provenance is fail-closed. The pair must come from the captured record
+// (memory or generation-bound durable), AND the takeover .link — when
+// present — must record OriginalName=<kernel>. A .link that disagrees,
+// or a logical .link present with no captured pair at all, is reported
+// as an error with BOTH the file and the live name retained: guessing a
+// rename-back target is how a rollback strands a different NIC.
+//
+// Ordering (load-bearing): rename FIRST, remove the .link only after the
+// rename succeeds. Removing the file first and then failing the rename
+// would leave the NIC under its logical name with no record of its
+// kernel name — the exact lockout being fixed, minus the evidence.
+//
+// Returns (renamed, err). renamed is true when a live rename ran (the
+// caller then owes a networkctl reload in addition to any .network one).
+func (d *Daemon) restoreBootstrapLifelineRename() (bool, error) {
+	kernel, logical := d.bootstrapLifelineRenameForTeardown()
+	linkName := ""
+	if logical != "" {
+		linkName = linkPrefix + logical + ".link"
+	}
+	if kernel == "" || logical == "" {
+		// No captured pair. If the lifeline record still resolves and a
+		// takeover .link claims that logical name with a kernel
+		// OriginalName, that is a rename we cannot provenance — fail
+		// closed rather than silently keeping it. We can only see this
+		// shape when the live name is logical; check every candidate
+		// .link whose OriginalName is a non-logical kernel name and
+		// whose target resolves as the lifeline would be a guess, so
+		// the check is scoped: a .link is suspect only when the
+		// lifeline currently wears its Name=. resolveLifelineCurrentName
+		// reads sysfs; in unit tests with no record it returns false
+		// and this stays a no-op (the index-0 cells' premise).
+		if cur, ok := resolveLifelineCurrentNameFn(); ok && isPositionalLogicalName(cur) && cur != defaultMgmtInterface {
+			if orig := lifelineLinkOriginal(cur); orig != "" && orig != cur {
+				return false, fmt.Errorf(
+					"bootstrap rollback: lifeline wears %s claimed by %s (OriginalName=%s) but no captured pre-takeover rename provenance is available; retaining the .link and the live name",
+					cur, linkPrefix+cur+".link", orig)
+			}
+		}
+		return false, nil
+	}
+	// A captured pair exists. Verify the takeover .link agrees when it
+	// is present; a mismatch means the file on disk is not the rename
+	// we recorded (replaced, or another NIC's claim) — retain and fail.
+	linkPath := filepath.Join(linkDir, linkName)
+	if _, err := os.Stat(linkPath); err == nil {
+		if orig := lifelineLinkOriginal(logical); orig != kernel {
+			return false, fmt.Errorf(
+				"bootstrap rollback: takeover .link %s records OriginalName=%q, want captured kernel name %q; retaining the .link and the live name",
+				linkName, orig, kernel)
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("bootstrap rollback: inspect takeover .link %s: %w", linkName, err)
+	}
+	renamed := false
+	cur, curOK := resolveLifelineCurrentNameFn()
+	switch {
+	case curOK && cur == logical:
+		if err := renameInterfaceFn(logical, kernel); err != nil {
+			return false, fmt.Errorf("bootstrap rollback: rename lifeline %s -> %s: %w", logical, kernel, err)
+		}
+		renamed = true
+		slog.Info("bootstrap rollback: renamed lifeline back to its pre-takeover kernel name",
+			"from", logical, "to", kernel, "issue", "#16675")
+	case curOK && cur == kernel:
+		// Already back (a prior teardown renamed it, or it never took
+		// effect). Fall through to reclaim the .link idempotently.
+	case curOK:
+		// The lifeline resolves to some other name entirely — not the
+		// logical we recorded and not its kernel name. Renaming that
+		// device, or deleting the .link, on this evidence could strand
+		// a different NIC. Retain both and fail closed.
+		return false, fmt.Errorf(
+			"bootstrap rollback: lifeline currently wears %q, neither the captured logical %q nor its kernel name %q; retaining the .link and the live name",
+			cur, logical, kernel)
+	default:
+		// Lifeline device not present (removed, or unresolvable in a
+		// unit sandbox). No live rename is possible; reclaiming the
+		// .link is still correct — it must not re-claim the name at
+		// the next boot — and is not an error.
+		slog.Info("bootstrap rollback: lifeline device not present; reclaiming its takeover .link without a live rename",
+			"logical", logical, "kernel", kernel, "issue", "#16675")
+	}
+	// Rename succeeded (or was unnecessary): now reclaim the .link.
+	if err := os.Remove(linkPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return renamed, fmt.Errorf("bootstrap rollback: remove takeover .link %s: %w", linkName, err)
+	}
+	slog.Info("bootstrap rollback: removed takeover lifeline .link",
+		"file", linkName, "issue", "#16675")
+	return renamed, nil
 }
 
 // restoreBootstrapLifelineNetwork restores exact pre-takeover bytes: from the
@@ -1035,6 +1322,8 @@ func (d *Daemon) clearBootstrapLifelineSnapshot(generation string) {
 	}
 	d.bootstrapLifelineNetwork = nil
 	d.bootstrapLifelineGeneration = ""
+	d.bootstrapLifelineKernelName = ""
+	d.bootstrapLifelineLogicalName = ""
 }
 
 func (d *Daemon) runBootstrapTeardownSteps(restoreLifeline bool) []bootstrapTeardownStep {
@@ -1042,6 +1331,8 @@ func (d *Daemon) runBootstrapTeardownSteps(restoreLifeline bool) []bootstrapTear
 
 	// (2) Retire xpf-written takeover .network files. Keep .link files so names
 	// remain stable; the fxp0 file is handled separately by content, not name.
+	// The one exception is the non-fxp0 lifeline's takeover .link, undone by
+	// the #16675 rename restore below (first-commit path only).
 	lifelineNetwork := linkPrefix + "fxp0.network"
 	networkReloadOwed := d.firstCommitNetworkdReloadOwed
 	entries, err := os.ReadDir(linkDir)
@@ -1087,6 +1378,18 @@ func (d *Daemon) runBootstrapTeardownSteps(restoreLifeline bool) []bootstrapTear
 			networkChanged = true
 			slog.Info("bootstrap rollback: restored management lifeline network",
 				"file", lifelineNetwork)
+		}
+		// #16675: undo the bootstrap-exit rename of a non-fxp0 lifeline.
+		// Runs only on this first-commit path — restoreLifeline is the
+		// recorded confirmPrevFirst scope (#12154), so a later safe-state
+		// entry on a committed box never renames a NIC back.
+		if renamed, err := d.restoreBootstrapLifelineRename(); err != nil {
+			steps = append(steps, bootstrapTeardownStep{
+				name: "restore lifeline kernel name",
+				err:  err,
+			})
+		} else if renamed {
+			networkChanged = true
 		}
 	}
 	// Reload after removing or restoring any networkd file; a lifeline-only

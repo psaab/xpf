@@ -131,6 +131,16 @@ xpf (0.0.0) unstable; urgency=medium
     peer keeps its own connection, children and st0 if_id. Previously
     the first sorted member supplied the peer and the other VPN's
     traffic was negotiated with the wrong peer with no diagnostic.
+  * Daemon/bootstrap: a timed-out first `commit confirmed` now renames
+    a non-index-0 foreign-host lifeline back to its pre-takeover kernel
+    name and removes its takeover `10-xpf-*.link` (#16675). Bootstrap
+    exit captures the (kernel, logical) pair before positional naming
+    runs and persists it in the generation-bound lifeline record; the
+    first-commit rollback verifies the `.link` `OriginalName=` against
+    it, renames back, then removes the file. Previously the rollback
+    kept both, leaving the management NIC renamed and unaddressed
+    across reboots (its host config keys on the kernel name) while
+    reporting success — console-only recovery.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was
