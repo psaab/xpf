@@ -72,11 +72,10 @@ func TestBuildPingArgvVRFInnerSeparator(t *testing.T) {
 	assertSeparatorBeforeTarget(t, argv, "-bad")
 }
 
-// TestBuildPingArgvVRFNoDoublePrefix locks the #2143 invariant on the
-// REST surface: a bare routing-instance gets one "vrf-" prefix, an
-// already-prefixed name is not doubled. REST already had the guard; this
-// pins it so a future refactor cannot regress it back to the CLI's old
-// unconditional-prepend behavior.
+// TestBuildPingArgvVRFNoDoublePrefix locks the #16664 mapping on the
+// REST surface: instance N maps to "vrf-"+N unconditionally, so a bare
+// "red" gets "vrf-red" and instance "vrf-red" gets "vrf-vrf-red" (the
+// #2143 exactly-once guard probed sibling instance "red").
 func TestBuildPingArgvVRFNoDoublePrefix(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -84,14 +83,14 @@ func TestBuildPingArgvVRFNoDoublePrefix(t *testing.T) {
 		wantDev string
 	}{
 		{"bare name gets one prefix", "red", "vrf-red"},
-		{"already-prefixed name not doubled", "vrf-red", "vrf-red"},
+		{"vrf-prefixed instance gets prefix again", "vrf-red", "vrf-vrf-red"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			argv := buildPingArgv(PingRequest{Target: "192.0.2.1", RoutingInstance: tt.vrf}, 5)
 			exec := indexOf(argv, "exec")
 			if exec < 0 || exec+1 >= len(argv) || argv[exec+1] != tt.wantDev {
-				t.Fatalf("argv %v: VRF device != %q (double-prefix regression?)", argv, tt.wantDev)
+				t.Fatalf("argv %v: VRF device != %q (wrong-instance regression?)", argv, tt.wantDev)
 			}
 		})
 	}

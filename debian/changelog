@@ -1,4 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Routing/VRF: instance-to-VRF-device mapping is now unconditional
+    (#16664). `diagcmd.VRFDeviceName` previously returned a
+    `vrf-`-prefixed routing-instance name unchanged (#2143), while the
+    daemon and FRR always realise instance N as `vrf-`+N, so instance
+    `vrf-X` silently targeted sibling instance `X`'s VRF (or a
+    nonexistent device) for ping/traceroute, DDNS SO_BINDTODEVICE
+    egress and HA routing-readiness FRR queries. The mapping now lives
+    in `routing.VRFDeviceName` (single source of truth, prepends
+    always); diagcmd, frr status queries and DDNS resolve through it,
+    and an instance named `vrf-mgmt` maps to `vrf-vrf-mgmt`, never the
+    management VRF.
   * Config/chassis-cluster: the four raw-AST commit gates (monitor
     weight #6588, RG/node identity #5694, no-argument RG statement
     arity #6588, gratuitous-arp-count #5695) now resolve the cluster

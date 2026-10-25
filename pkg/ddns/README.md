@@ -1367,9 +1367,9 @@ P1b (closes **#2663, #2664, #2665**) builds on the P1a spine:
   `SurfaceAManager.Reconcile` resolver arg (read by `resolveBackend` /
   `CheckIPClient`); both are `cfg.ResolveKernelIfName`. A `routing-instance` is
   realized as the kernel VRF master device `vrf-<name>` (pkg/routing), resolved
-  through `diagcmd.VRFDeviceName` — the single source of truth for that prefix
-  (applied exactly once, #2143; a name already typed `vrf-red` is returned
-  unchanged). `routingInst` retains the raw name for informational use only.
+  through `routing.VRFDeviceName` — the single source of truth for that prefix
+  (applied unconditionally, #16664; an instance named `vrf-red` binds
+  `vrf-vrf-red`, never sibling `red`). `routingInst` retains the raw name for informational use only.
   Before #5070 the raw token went straight to `SO_BINDTODEVICE`, targeting a
   nonexistent device so every RFC 2136 / HTTP-provider / check-IP exchange over
   the binding hard-failed at dial. The RFC 2136 constructor now also VALIDATES

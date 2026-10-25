@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/diagcmd"
+	"github.com/psaab/xpf/pkg/routing"
 )
 
 // backend_bind.go: source / interface / VRF binding for the RFC 2136 UPDATE
@@ -118,11 +118,12 @@ func resolveBindConfig(c *config.DHCPDynamicDNSConfig, resolve func(string) stri
 	// latter yields fictitious devices ("reth0.100", "ge-0-0-2.50") for exactly
 	// the reth / VLAN cases the HA-cluster WAN binding targets. A
 	// routing-instance is realized as a kernel VRF master device named
-	// "vrf-<name>" (pkg/routing), so resolve it through diagcmd.VRFDeviceName —
-	// the single source of truth for that prefix (applied exactly once, #2143;
-	// a name already typed "vrf-red" is returned unchanged). Without this
-	// mapping SO_BINDTODEVICE targets a nonexistent device and every RFC 2136 /
-	// HTTP-provider / check-IP exchange hard-fails at dial.
+	// "vrf-<name>", so resolve it through routing.VRFDeviceName — the
+	// single source of truth for that prefix, applied unconditionally
+	// (#16664; an instance named "vrf-red" binds "vrf-vrf-red", never
+	// sibling "red"). Without this mapping SO_BINDTODEVICE targets a
+	// nonexistent device and every RFC 2136 / HTTP-provider / check-IP
+	// exchange hard-fails at dial.
 	//
 	// routingInst keeps the RAW routing-instance name (informational only; it
 	// is never used for the socket op — only bindDevice is).
@@ -131,7 +132,7 @@ func resolveBindConfig(c *config.DHCPDynamicDNSConfig, resolve func(string) stri
 	case c.DestinationInterface != "":
 		b.bindDevice = resolveIfKernelName(resolve, c.DestinationInterface)
 	case c.RoutingInstance != "":
-		b.bindDevice = diagcmd.VRFDeviceName(c.RoutingInstance)
+		b.bindDevice = routing.VRFDeviceName(c.RoutingInstance)
 	}
 	return b, nil
 }

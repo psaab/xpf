@@ -178,8 +178,8 @@ func (s *Server) Ping(req *pb.PingRequest, stream grpc.ServerStreamingServer[pb.
 }
 
 // buildPingArgv builds the argv for the gRPC Ping diag. It delegates to
-// the shared diagcmd builder so the VRF-device normalization (apply
-// "vrf-" exactly once, #2143) and the "--" end-of-options separator
+// the shared diagcmd builder so the VRF-device mapping (apply
+// "vrf-"+instance unconditionally, #16664) and the "--" end-of-options separator
 // (option-confusion hardening, #2084) match the CLI and REST surfaces
 // byte-for-byte. count is the already-clamped probe count.
 func buildPingArgv(req *pb.PingRequest, count int) []string {
@@ -242,7 +242,7 @@ func (s *Server) Traceroute(req *pb.TracerouteRequest, stream grpc.ServerStreami
 
 // buildTracerouteArgv builds the argv for the gRPC Traceroute diag.
 // Like buildPingArgv it delegates to the shared diagcmd builder so VRF
-// normalization (#2143) and the "--" separator (#2084) stay identical
+// normalization (#16664) and the "--" separator (#2084) stay identical
 // across the CLI, REST, and gRPC surfaces.
 func buildTracerouteArgv(req *pb.TracerouteRequest) []string {
 	return diagcmd.TracerouteArgv(diagcmd.TracerouteOptions{

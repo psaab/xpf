@@ -114,13 +114,10 @@ var listenICMP = func(network, source, bindDevice string) (probeConn, error) {
 	return listenBoundICMP(network, source, bindDevice)
 }
 
-// keepaliveVRFDeviceName mirrors pkg/rpm.vrfDeviceName: routing-instance
-// names map to Linux VRF master devices named vrf-<instance>.
+// keepaliveVRFDeviceName resolves a routing-instance name to its Linux
+// VRF master device through the shared VRFDeviceName (#16664).
 func keepaliveVRFDeviceName(transportInstance string) string {
-	if transportInstance == "" {
-		return ""
-	}
-	return "vrf-" + transportInstance
+	return VRFDeviceName(transportInstance)
 }
 
 // listenBoundICMP is the SO_BINDTODEVICE equivalent of icmp.ListenPacket.

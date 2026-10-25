@@ -189,13 +189,12 @@ func configuredRoutingInstanceTableID(name string, instances []*config.RoutingIn
 	return 0
 }
 
-// GetVRFRoutes reads routes from a VRF's routing table by VRF device name.
+// GetVRFRoutes reads routes from a VRF's routing table by routing-instance
+// name (its only caller, GetInstanceRoutes, passes an instance name). The
+// name is mapped through VRFDeviceName unconditionally (#16664), so an
+// instance named "vrf-cust" reads "vrf-vrf-cust", not sibling "cust".
 func (rr *routeReader) GetVRFRoutes(vrfName string) ([]RouteEntry, error) {
-	// VRF devices are created with "vrf-" prefix.
-	devName := vrfName
-	if !strings.HasPrefix(devName, "vrf-") {
-		devName = "vrf-" + devName
-	}
+	devName := VRFDeviceName(vrfName)
 	link, err := rr.ops.LinkByName(devName)
 	if err != nil {
 		return nil, fmt.Errorf("VRF %q not found: %w", vrfName, err)

@@ -5,10 +5,11 @@ import (
 	"testing"
 )
 
-// TestVRFDeviceName locks the single-application invariant at the root:
-// the "vrf-" prefix is added to a bare name and NOT re-added to a name
-// the operator already typed with the prefix. The "vrf-vrf-red" case is
-// the exact #2143 regression — it must never reappear.
+// TestVRFDeviceName locks the unconditional mapping at the root
+// (#16664): the argument is a routing-instance name and the daemon
+// always realises instance N as "vrf-"+N, so a vrf- prefixed instance
+// name gets the prefix again. The #2143 exactly-once guard resolved
+// instance "vrf-cust" onto sibling instance "cust".
 func TestVRFDeviceName(t *testing.T) {
 	tests := []struct {
 		name string
@@ -17,7 +18,9 @@ func TestVRFDeviceName(t *testing.T) {
 	}{
 		{"empty stays empty", "", ""},
 		{"bare name gets prefix", "red", "vrf-red"},
-		{"already-prefixed name unchanged", "vrf-red", "vrf-red"},
+		{"control: sibling cust still maps to its own device", "cust", "vrf-cust"},
+		{"vrf-prefixed instance gets prefix again", "vrf-cust", "vrf-vrf-cust"},
+		{"vrf-mgmt instance does not map onto management VRF", "vrf-mgmt", "vrf-vrf-mgmt"},
 		{"only a hyphen-bare name like vrf gets prefixed", "vrf", "vrf-vrf"},
 		{"name containing vrf- mid-string is bare", "myvrf-x", "vrf-myvrf-x"},
 	}
@@ -31,10 +34,10 @@ func TestVRFDeviceName(t *testing.T) {
 }
 
 // TestPingArgvExact asserts the full argv produced for ping across the
-// with/without-VRF and bare/already-prefixed routing-instance axes. It
+// with/without-VRF and bare/vrf-prefixed routing-instance axes. It
 // is intentionally exact (reflect.DeepEqual on the whole argv) so any
-// reintroduction of the double-prefix bug, a missing "--" separator, or
-// argv-ordering drift FAILS.
+// reintroduction of the #16664 exactly-once guard, a missing "--"
+// separator, or argv-ordering drift FAILS.
 func TestPingArgvExact(t *testing.T) {
 	tests := []struct {
 		name string
@@ -57,10 +60,11 @@ func TestPingArgvExact(t *testing.T) {
 			want: []string{"ip", "vrf", "exec", "vrf-red", "ping", "-c", "5", "--", "192.0.2.1"},
 		},
 		{
-			// #2143: operator typed "vrf-red"; must NOT become vrf-vrf-red.
-			name: "already-prefixed vrf name is not doubled",
+			// #16664: instance "vrf-red" is realised as vrf-vrf-red;
+			// vrf-red is sibling instance "red".
+			name: "vrf-prefixed instance name gets prefix again",
 			opts: PingOptions{Target: "192.0.2.1", Count: "5", RoutingInstance: "vrf-red"},
-			want: []string{"ip", "vrf", "exec", "vrf-red", "ping", "-c", "5", "--", "192.0.2.1"},
+			want: []string{"ip", "vrf", "exec", "vrf-vrf-red", "ping", "-c", "5", "--", "192.0.2.1"},
 		},
 		{
 			name: "vrf with v6 source and dash-prefixed target",
@@ -101,10 +105,10 @@ func TestTracerouteArgvExact(t *testing.T) {
 			want: []string{"ip", "vrf", "exec", "vrf-red", "traceroute", "--", "192.0.2.1"},
 		},
 		{
-			// #2143: must NOT become vrf-vrf-green.
-			name: "already-prefixed vrf name is not doubled",
+			// #16664: as for ping, instance "vrf-green" -> vrf-vrf-green.
+			name: "vrf-prefixed instance name gets prefix again",
 			opts: TracerouteOptions{Target: "2001:db8::1", RoutingInstance: "vrf-green"},
-			want: []string{"ip", "vrf", "exec", "vrf-green", "traceroute", "--", "2001:db8::1"},
+			want: []string{"ip", "vrf", "exec", "vrf-vrf-green", "traceroute", "--", "2001:db8::1"},
 		},
 		{
 			name: "vrf with source and dash-prefixed target",
