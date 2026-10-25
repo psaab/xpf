@@ -2493,13 +2493,20 @@ impl PortAllocator {
         true
     }
     /// #15111: release one inbound reference; on last holder re-arms expiry.
+    /// #16652: on last holder of a revoked lease, also downgrade the
+    /// `u64::MAX` clear tombstone to `now + horizon` (mirrors
+    /// `complete_persistent_lease_locked` / `rollback_flow`), otherwise the
+    /// key stays clear-fenced forever and is never pruned.
     pub(crate) fn release_persistent_inbound(&self, key: PersistentSourceKey, now_ns: u64) {
         let mut live = self.lock_live();
         let mut refresh = None;
+        let revoked_until_ns = live.revoked_persistent.get(&key).copied();
+        let mut revoked = false;
         if let Some(lease) = live.persistent_by_source.get_mut(&key) {
             if lease.inbound_flows == 0 {
                 return;
             }
+            revoked = lease.revoked;
             lease.inbound_flows = lease.inbound_flows.saturating_sub(1);
             if lease.inbound_flows == 0 && lease.active_flows == 0 {
                 let old = lease.expires_at_ns;
@@ -2511,6 +2518,15 @@ impl PortAllocator {
                 lease.expires_at_ns = new;
                 refresh = Some((lease.addr_index, old, new));
             }
+        }
+        if revoked
+            && revoked_until_ns == Some(ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS)
+            && refresh.is_some()
+        {
+            live.revoked_persistent.insert(
+                key,
+                now_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS),
+            );
         }
         if let Some((addr, old, new)) = refresh {
             Self::remove_lease_expiration_locked(&mut live, addr, old, key);
