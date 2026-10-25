@@ -922,7 +922,10 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 				}
 			}
 		}
-		for _, tsInst := range namedInstances(inst.node.FindChildren("traffic-selector")) {
+		// #16759: selectors chained after other VPN leaves in one flat
+		// set run are nested inside the run, not direct children; read
+		// them through the run-aware helper the #4098/#5692 gate uses.
+		for _, tsInst := range trafficSelectorInstances16759(inst.node) {
 			if vpn.TrafficSelectors == nil {
 				vpn.TrafficSelectors = make(map[string]*IPsecTrafficSelector)
 			}

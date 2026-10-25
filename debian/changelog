@@ -108,6 +108,17 @@ xpf (0.0.0) unstable; urgency=medium
     nothing. The bounded queue budget remains the flood bound; shed
     creates stay counted in
     event_stream_session_create_{dropped,rate_limited,queue_full,disconnected}.
+  * Config: an IPsec `traffic-selector` chained after other VPN leaves
+    in one flat `set` command (e.g. `... bind-interface st0.0
+    traffic-selector ts1 local-ip 10.1.0.0/24 remote-ip 10.2.0.0/24`)
+    is now compiled and validated instead of silently dropped
+    (#16759). Previously the chained selector never reached the typed
+    VPN, so a route-based tunnel negotiated any<->any
+    (0.0.0.0/0,::/0) selectors and its values bypassed the #4098/#5692
+    commit gates, while `show configuration` still displayed it. The
+    chained spelling now compiles to the authored prefixes and an
+    invalid chained local-ip is rejected at strict commit (warned on
+    tolerant load), matching the split and braced spellings.
   * Config/firewall: the single-rate `firewall policer`
     `burst-size-limit` floor is now the shared one-frame floor of
     1514 bytes (#16714), unified with the three-color leaves
