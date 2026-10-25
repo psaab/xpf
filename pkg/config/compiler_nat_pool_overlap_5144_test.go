@@ -493,11 +493,15 @@ func TestNAT5144IPv6BareVs128DuplicateRejected(t *testing.T) {
 //
 // #16875: a mapped SNAT pool member is now rejected at commit outright
 // (it can be allocated outbound but its return traffic is
-// ingress-dropped), so the full CompileConfig path no longer reaches
-// the overlap verdict for this pair. The family-distinctness property
-// itself is asserted at the predicate level below; the compile-level
-// assertion is that the mapped member draws the #16875 rejection,
-// not an overlap collision.
+// ingress-dropped), and the uniform gates return before the tail
+// phase that runs the overlap check, so the full CompileConfig path
+// no longer reaches the overlap verdict for this pair. The overlap
+// property is therefore driven DIRECTLY against
+// validateNATPoolExternalTupleOverlapStrict on the tolerantly
+// compiled fixture (review fold on #17697: an earlier-gate rejection
+// plus a family-predicate comparison does not exercise the overlap
+// implementation's own classification). The strict path is asserted
+// separately to reject (for the mapped member, not an overlap).
 func TestNAT5144MappedV6VsGenuineV4Accepted(t *testing.T) {
 	cmds := []string{
 		"set security nat source pool A address 203.0.113.5",
@@ -505,20 +509,22 @@ func TestNAT5144MappedV6VsGenuineV4Accepted(t *testing.T) {
 	}
 	cmds = append(cmds, srcRule("RSA", "r1", "A")...)
 	cmds = append(cmds, srcRuleDmz("RSB", "r1", "B")...)
-	_, err := CompileConfig(natOverlapTree(t, cmds...))
-	// Any strict rejection that is NOT the #5144 overlap verdict
-	// proves the pair did not collide: the mapped member draws the
-	// #16875 rejection on the current gate order, and drew the
-	// #16600 family rejection before it — both name the mapped
-	// member, neither is an overlap collision.
-	if err == nil || strings.Contains(err.Error(), "#5144") || strings.Contains(err.Error(), "overlap") {
-		t.Fatalf("mapped vs genuine v4 must NOT draw an overlap collision, got: %v", err)
+	// Strict commit rejects (mapped member / family verdicts fire in
+	// the uniform gates) — and the rejection is not an overlap one.
+	if _, err := CompileConfig(natOverlapTree(t, cmds...)); err == nil ||
+		strings.Contains(err.Error(), "#5144") || strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("strict commit must reject for a non-overlap cause, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), `"B"`) {
-		t.Fatalf("rejection must name pool B (the mapped member's pool), got: %v", err)
+	// Direct overlap-validator drive on the tolerant shape: mapped
+	// (v6) and genuine (v4) are distinct families, so no collision.
+	cfg, err := CompileConfigLenient(natOverlapTree(t, cmds...))
+	if err != nil {
+		t.Fatalf("lenient shape must compile: %v", err)
 	}
-	// The parity property the original test guarded: mapped keys V6,
-	// genuine keys V4 — distinct families, so no overlap pair exists.
+	warnings, err := validateNATPoolExternalTupleOverlapStrict(cfg, false)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("overlap validator must find no collision for mapped-v6 vs genuine-v4, got warnings=%v err=%v", warnings, err)
+	}
 	if natAddrFamily(natCIDRIPPart("::ffff:203.0.113.5")) == natAddrFamily(natCIDRIPPart("203.0.113.5")) {
 		t.Fatal("mapped and genuine v4 must classify as different families")
 	}

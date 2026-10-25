@@ -566,22 +566,30 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 // static-NAT, destination-NAT or source-NAT literal that is IPv4-mapped
 // (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d, excluding :: and ::1).
 //
-// A MATCH literal in this form can never match. The helper drops
-// every native (non-WG-underlay) IPv6 frame whose src OR dst is
-// v4-mapped/compatible at ingress before NAT (#10686/#11669,
-// ipv6_addr_is_v4_mapped_or_compat /
+// A MATCH literal in this form can never match as authored. The
+// helper drops every native (non-WG-underlay) IPv6 frame whose src
+// OR dst is v4-mapped/compatible at ingress before NAT
+// (#10686/#11669, ipv6_addr_is_v4_mapped_or_compat /
 // ipv6_frame_has_v4_mapped_or_compat in
 // userspace-dp/src/afxdp/frame/inspect.rs, dropped in
 // poll_descriptor with v4_mapped_ipv6_dropped += 1), so no IPv6
 // packet carrying the identity ever reaches the NAT tables. An IPv4
 // packet to the embedded v4 address keys IpAddr::V4 and misses the
-// V6-keyed static/DNAT entry (parse_nat_prefix in nat/static_nat.rs
-// keeps IpAddr::V6(::ffff:...)). A mapped TARGET/pool identity is
-// different and worse than inert: the SNAT allocator retains the
-// member in its V6 pool and allocates it to ANY native-IPv6 source
+// V6-keyed static entry (parse_nat_prefix in nat/static_nat.rs
+// keeps IpAddr::V6(::ffff:...)). One lowering nuance, stated so the
+// rationale does not overclaim: the DNAT builder canonicalizes a
+// mapped /128 destination and pool host through net.IP.String()
+// (nat_destination.go / DNATPoolHostIP), so a mapped-to-mapped DNAT
+// pair could be emitted as a native IPv4 pair on the tolerant path
+// and translate — rejecting the mapped spelling uniformly is
+// therefore an explicit operator-surface choice (one spelling, one
+// family, no silent canonicalization), not a claim that every such
+// historical pair was inert. A mapped TARGET/pool identity in the
+// SNAT allocator is different again: it retains the member in its
+// V6 pool and allocates it to ANY native-IPv6 source
 // (nat/source/{expand,match_rules}.rs), so a flow can be rewritten
-// ONTO the mapped identity — and the return traffic addressed to it
-// is then dropped at ingress. Such a translation cannot support
+// ONTO the mapped identity — and the return traffic addressed to
+// it is then dropped at ingress. Such a translation cannot support
 // normal bidirectional forwarding. Proxy-ARP already unmaps this
 // spelling (#8631); NAT does not, so the product handled the
 // identical literal inconsistently. This gate rejects rather than
@@ -616,17 +624,24 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 //     because a mapped member is the defect regardless of which
 //     rule references it today; an unreferenced pool carrying one
 //     is wrong config the next rule reference would silently
-//     activate.
+//     activate. Pool/pool-target members are judged by the set
+//     they represent (natPrefixContainsV4MappedOrCompat), so a
+//     CIDR member rooted at an exempt base (::/126) still fires.
+//   - NAT64 (`security nat nat64` rule-sets): the /96 translation
+//     prefix and every match source-address, with the same
+//     represented-set semantics. The static `inet` sentinel stays
+//     with its own gate; this is the supported collection.
 //
 // Address-book names report false from the predicate (they are not
 // literals) — but they cannot smuggle the spelling either: the
 // address-book gate (validateAddressBookMappedPrefixesStrict)
 // rejects mapped (#10688) and, as of #16875, compatible book values
-// outright, including values later folded into `then prefix-name`
-// targets. Unparseable tokens are left to their existing gates. A
-// prefix whose masked base is mapped/compat (e.g.
-// ::ffff:203.0.113.0/120) is rejected on its authored address part,
-// matching the ingress drop of every host in it.
+// outright — inspecting Value AND the range/wildcard
+// ExpandedPrefixes — including values later folded into
+// `then prefix-name` targets. Unparseable tokens are left to their
+// existing gates. A prefix whose masked base is mapped/compat
+// (e.g. ::ffff:203.0.113.0/120) is rejected on its authored address
+// part, matching the ingress drop of every host in it.
 //
 // Strict on commit / commit-check (hard reject naming the NAT kind,
 // rule-set/rule or pool, slot, and offending value); the registry
@@ -760,7 +775,7 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 			if pool == nil || pool.Address == "" {
 				continue
 			}
-			if natAddrIsV4MappedOrCompat(pool.Address) {
+			if natPrefixContainsV4MappedOrCompat(pool.Address) {
 				return fmt.Errorf(
 					"destination-nat pool %q: address %q %s (#16875)",
 					name, pool.Address, cause)
@@ -773,7 +788,10 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 	// Source NAT: pool members (the R3-A08-02 cohort site). All pools,
 	// sorted by name — a mapped member is allocated onto an identity
 	// whose return traffic is ingress-dropped, whether or not a rule
-	// references the pool today.
+	// references the pool today. Members are judged by the SET they
+	// represent (natPrefixContainsV4MappedOrCompat): a CIDR member
+	// expands to every host in the prefix, so ::/126 represents
+	// ::2/::3 even though its base :: is itself exempt.
 	{
 		names := make([]string, 0, len(cfg.Security.NAT.SourcePools))
 		for name := range cfg.Security.NAT.SourcePools {
@@ -786,11 +804,47 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 				continue
 			}
 			for _, a := range SourceNATPoolMembers(pool) {
-				if natAddrIsV4MappedOrCompat(a) {
+				if natPrefixContainsV4MappedOrCompat(a) {
 					return fmt.Errorf(
 						"source-nat pool %q: address %q %s (#16875)",
 						name, a, cause)
 				}
+			}
+		}
+	}
+	// NAT64 rule-sets (the supported `security nat nat64` collection,
+	// distinct from the rejected static `inet` sentinel): the /96
+	// translation prefix and every match source-address. A mapped/
+	// compat prefix makes every translated destination identity
+	// ingress-dropped before the NAT64 lookup; a mapped/compat
+	// source selector can never be satisfied. Judged with prefix
+	// semantics: a wider-than-host prefix rooted in compat/mapped
+	// space contains such identities even when its base is exempt.
+	for _, rs := range cfg.Security.NAT.NAT64 {
+		if rs == nil {
+			continue
+		}
+		if rs.Prefix != "" && natPrefixContainsV4MappedOrCompat(rs.Prefix) {
+			return fmt.Errorf(
+				"nat64 rule-set %q: prefix %q %s (#16875)",
+				rs.Name, rs.Prefix, cause)
+		}
+		for _, a := range rs.SourceAddresses {
+			// ::/0 (and the other wildcard spellings the NAT64 scope
+			// gate classifies as match-any) is the authored
+			// match-any source, not a compat identity: it matches
+			// native IPv6 sources, so the represented-set argument
+			// that fires for pool prefixes must not fire here.
+			if a == "" || a == "::/0" {
+				continue
+			}
+			if _, _, isWildcard := PolicyAddressWildcardFamilies(a); isWildcard {
+				continue
+			}
+			if natPrefixContainsV4MappedOrCompat(a) {
+				return fmt.Errorf(
+					"nat64 rule-set %q: match source-address %q %s (#16875)",
+					rs.Name, a, cause)
 			}
 		}
 	}

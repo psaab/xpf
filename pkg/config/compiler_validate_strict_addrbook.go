@@ -336,6 +336,18 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
+	// Every statically enforced value of the entry is inspected:
+	// the plain Value AND the range-address / wildcard-address
+	// expansions in ExpandedPrefixes (exposed via UsableValues).
+	// Reading Value alone let a range/wildcard entry carry a compat
+	// value with Value empty past this backstop into a NAT name
+	// reference (review finding on #17697). DNS-resolved values are
+	// runtime data, not authored literals, and stay out of scope.
+	valuesOf := func(address *Address) []string {
+		vals := []string{address.Value}
+		vals = append(vals, address.ExpandedPrefixes...)
+		return vals
+	}
 	check := func(scope string, book *AddressBook) error {
 		if book == nil {
 			return nil
@@ -353,21 +365,26 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 			if address == nil {
 				continue
 			}
-			if FRRAddrIsMapped(address.Value) {
-				return fmt.Errorf(
-					"%s address-book address %q has IPv4-mapped IPv6 prefix %q; "+
-						"the userspace snapshot builder files it in prefixes_v4, "+
-						"but the helper parses it as IPv6 and rejects the entire policy snapshot; "+
-						"use a non-mapped IPv4 or IPv6 prefix (#10688)",
-					scope, name, address.Value)
-			}
-			if natAddrIsV4MappedOrCompat(address.Value) {
-				return fmt.Errorf(
-					"%s address-book address %q has IPv4-compatible IPv6 prefix %q; "+
-						"the helper drops every IPv6 frame carrying such an identity at ingress "+
-						"before NAT/policy matching (#10686), so any rule resolving to it can "+
-						"never match; use a native IPv4 or IPv6 prefix (#16875)",
-					scope, name, address.Value)
+			for _, v := range valuesOf(address) {
+				if v == "" {
+					continue
+				}
+				if FRRAddrIsMapped(v) {
+					return fmt.Errorf(
+						"%s address-book address %q has IPv4-mapped IPv6 prefix %q; "+
+							"the userspace snapshot builder files it in prefixes_v4, "+
+							"but the helper parses it as IPv6 and rejects the entire policy snapshot; "+
+							"use a non-mapped IPv4 or IPv6 prefix (#10688)",
+						scope, name, v)
+				}
+				if natPrefixContainsV4MappedOrCompat(v) {
+					return fmt.Errorf(
+						"%s address-book address %q has IPv4-mapped or IPv4-compatible IPv6 prefix %q; "+
+							"the helper drops every IPv6 frame carrying such an identity at ingress "+
+							"before NAT/policy matching (#10686), so any rule resolving to it can "+
+							"never match; use a native IPv4 or IPv6 prefix (#16875)",
+						scope, name, v)
+				}
 			}
 		}
 		return nil

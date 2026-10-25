@@ -193,15 +193,18 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
-	// #10688 — an IPv4-mapped IPv6 address-book prefix is currently folded into
-	// prefixes_v4 by Go, but parsed as IPv6 by the helper. Reject it before the
-	// zone-local fold so the error names the authored entry; tolerant loads keep
-	// the old config and warn, while the userspace rejection mirror reports the
-	// wrong-family prefix at publish time.
+	// #10688/#16875 — an IPv4-mapped IPv6 address-book prefix is currently
+	// folded into prefixes_v4 by Go, but parsed as IPv6 by the helper (the
+	// helper rejects the policy snapshot); an IPv4-compatible prefix is IPv6
+	// on both sides but its identity is dropped at ingress before any
+	// NAT/policy match, so a rule resolving to it can never match. Reject
+	// both before the zone-local fold so the error names the authored entry;
+	// tolerant loads keep the old config and warn (the validator's own text
+	// names which of the two causes fired).
 	if err := validateAddressBookMappedPrefixesStrict(cfg); err != nil {
 		if opts.lenientAddressBookMappedPrefixes {
 			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("mapped address-book prefix (downgraded to warning on tolerant path; the userspace helper rejects the policy snapshot): %v", err))
+				fmt.Sprintf("mapped/compatible address-book prefix (downgraded to warning on tolerant path): %v", err))
 		} else {
 			return err
 		}

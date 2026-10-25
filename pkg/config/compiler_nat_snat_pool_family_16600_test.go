@@ -74,9 +74,10 @@ func TestSourceNATPoolFamilyAccepted16600(t *testing.T) {
 	}
 	// #16875 supersedes the "v6 rule mapped pool" acceptance: a
 	// ::ffff: pool member keys V6 (so the family gate alone passed
-	// it) but no mapped-identity frame survives ingress, so the
-	// member can never be allocated to a real flow. It is rejected
-	// as mapped/compat; the family classification (mapped == v6) is
+	// it) and CAN be allocated outbound to a native-IPv6 source, but
+	// return traffic to the mapped identity is ingress-dropped, so
+	// it cannot carry bidirectional forwarding. It is rejected as
+	// mapped/compat; the family classification (mapped == v6) is
 	// still pinned by sourceNATRuleSingleFamily16600 below.
 	t.Run("v6 rule mapped pool rejected 16875", func(t *testing.T) {
 		_, err := CompileConfig(buildTree(t, snatFamilySet16600(

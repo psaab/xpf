@@ -98,6 +98,80 @@ func natAddrIsV4MappedOrCompat(raw string) bool {
 	return o[10] == o[11] && (o[10] == 0 || o[10] == 0xff)
 }
 
+// natPrefixContainsV4MappedOrCompat reports whether the PREFIX raw
+// (a bare IP or a CIDR) REPRESENTS at least one IPv4-mapped or
+// IPv4-compatible address — the pool/prefix-slot companion of
+// natAddrIsV4MappedOrCompat. The packet predicate's exact ::/::1
+// exemptions are per-ADDRESS: a prefix rooted at :: still contains
+// ::2/::3 (compat, ingress-dropped), so judging a pool prefix by its
+// base address alone exempts every subnet starting at :: (review
+// finding on #17697: `address ::/126` allocated ::2/::3 outbound).
+//
+// Rule: mask the address to its prefix; the represented set contains
+// a mapped/compat address iff the masked base is itself mapped/
+// compat, OR the prefix is wider than a host and its base lies in
+// ::/96 (compat space, first 96 bits zero) or ::ffff:0:0/96 (mapped
+// space) — a wider block rooted inside either space necessarily
+// contains further mapped/compat hosts beyond any exempt base.
+// A bare address or /128 is a single host and defers to the address
+// predicate (so bare ::, ::1 and their /128 forms stay exempt, and
+// a match-side ::/0 — whose base ::/96 argument would otherwise
+// fire — is only judged here where callers mean a represented SET;
+// match slots keep using the address predicate).
+func natPrefixContainsV4MappedOrCompat(raw string) bool {
+	if natAddrIsV4MappedOrCompat(raw) {
+		return true
+	}
+	ipPart := natCIDRIPPart(raw)
+	addr, err := netip.ParseAddr(ipPart)
+	if err != nil || !addr.Is6() || addr.Zone() != "" {
+		return false
+	}
+	bits := 128
+	if slash := strings.IndexByte(raw, '/'); slash >= 0 {
+		n, err := strconv.Atoi(raw[slash+1:])
+		if err != nil || n < 0 || n > 128 {
+			return false
+		}
+		bits = n
+	}
+	if bits >= 128 {
+		return false // single host; address predicate already decided
+	}
+	p := netip.PrefixFrom(addr, bits).Masked()
+	base := p.Addr()
+	if base == netip.IPv6Unspecified() {
+		// Any wider prefix rooted at :: contains ::2.. (compat).
+		// bits < 128 here, so the set has at least two addresses and
+		// cannot be only the exempt :: itself.
+		return true
+	}
+	o := base.As16()
+	// Inside compat space ::/96 (first 12 bytes zero) or mapped
+	// space ::ffff:0:0/96 (80 zero bits + ffff + zero): a wider
+	// block contains mapped/compat hosts beyond its base.
+	compatSpace := true
+	for i := range 12 {
+		if o[i] != 0 {
+			compatSpace = false
+			break
+		}
+	}
+	if compatSpace {
+		return true
+	}
+	mappedSpace := o[10] == 0xff && o[11] == 0xff && o[12] == 0 && o[13] == 0 && o[14] == 0 && o[15] == 0
+	if !mappedSpace {
+		return false
+	}
+	for i := range 10 {
+		if o[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // isHostMaskAddress reports whether addr is a host route the static-NAT
 // dataplane can install: a bare IP (no mask) or the canonical host mask
 // (/32 for IPv4, /128 for IPv6). It mirrors EXACTLY the Rust host-mask gate
