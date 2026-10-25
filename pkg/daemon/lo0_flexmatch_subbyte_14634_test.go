@@ -22,13 +22,13 @@ func TestNftFlexMatchExprSubByteMSBAligned14634(t *testing.T) {
 		fm   config.FlexMatchConfig
 		want string
 	}{
-		{"sub-byte-4-default-mask", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 0, BitLength: 4, Value: 0x4, Mask: 0xF}, "@nh,0,8 & 0xf0 == 0x40"},
-		{"sub-byte-4-explicit-mask", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 0, BitLength: 4, Value: 0x4, Mask: 0xF}, "@nh,0,8 & 0xf0 == 0x40"},
-		{"sub-byte-12", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 12, Value: 0xABC, Mask: 0xFFF}, "@nh,48,16 & 0xfff0 == 0xabc0"},
-		{"sub-byte-20", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 0, BitLength: 20, Value: 0xABCDE, Mask: 0xFFFFF}, "@nh,0,24 & 0xfffff0 == 0xabcde0"},
-		{"byte-aligned-8-control", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 9, BitLength: 8, Value: 0x11, Mask: 0xFF}, "@nh,72,8 & 0xff == 0x11"},
-		{"full-32-control", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 12, BitLength: 32, Value: 0x0A000001, Mask: 0xFFFFFFFF}, "@nh,96,32 & 0xffffffff == 0xa000001"},
-		{"layer-4-sub-byte-4", config.FlexMatchConfig{MatchStart: "layer-4", ByteOffset: 0, BitLength: 4, Value: 0x4, Mask: 0xF}, "@th,0,8 & 0xf0 == 0x40"},
+		{"sub-byte-4-default-mask", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 0, BitLength: 4, Value: 0x4, Mask: 0xF, ValueSet: true, MaskSet: true}, "@nh,0,8 & 0xf0 == 0x40"},
+		{"sub-byte-4-explicit-mask", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 0, BitLength: 4, Value: 0x4, Mask: 0xF, ValueSet: true, MaskSet: true}, "@nh,0,8 & 0xf0 == 0x40"},
+		{"sub-byte-12", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 12, Value: 0xABC, Mask: 0xFFF, ValueSet: true, MaskSet: true}, "@nh,48,16 & 0xfff0 == 0xabc0"},
+		{"sub-byte-20", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 0, BitLength: 20, Value: 0xABCDE, Mask: 0xFFFFF, ValueSet: true, MaskSet: true}, "@nh,0,24 & 0xfffff0 == 0xabcde0"},
+		{"byte-aligned-8-control", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 9, BitLength: 8, Value: 0x11, Mask: 0xFF, ValueSet: true, MaskSet: true}, "@nh,72,8 & 0xff == 0x11"},
+		{"full-32-control", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 12, BitLength: 32, Value: 0x0A000001, Mask: 0xFFFFFFFF, ValueSet: true, MaskSet: true}, "@nh,96,32 & 0xffffffff == 0xa000001"},
+		{"layer-4-sub-byte-4", config.FlexMatchConfig{MatchStart: "layer-4", ByteOffset: 0, BitLength: 4, Value: 0x4, Mask: 0xF, ValueSet: true, MaskSet: true}, "@th,0,8 & 0xf0 == 0x40"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := nftFlexMatchExpr(tc.fm); got != tc.want {
@@ -41,7 +41,7 @@ func TestNftFlexMatchExprSubByteMSBAligned14634(t *testing.T) {
 // End-to-end through the term renderer: a representable sub-byte term must
 // render the aligned predicate (not match-nothing, not the low bits).
 func TestNftRuleSubByteFlexRendersAligned14634(t *testing.T) {
-	fm := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 0, BitLength: 4, Value: 0x4, Mask: 0xF}
+	fm := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 0, BitLength: 4, Value: 0x4, Mask: 0xF, ValueSet: true, MaskSet: true}
 	got := nftRule(t, &config.FirewallFilterTerm{
 		Name: "flex-subbyte", FlexMatch: &fm, Action: config.FilterActionDiscard,
 	}, "ip", map[string]*config.PrefixList{})

@@ -1182,7 +1182,7 @@ func validateFilterFlexMatchStrictOpts(cfg *Config, allowValueMissing bool) erro
 						len(term.FlexMatchRangeNames),
 						strings.Join(term.FlexMatchRangeNames, ", "))
 				}
-				// #15943 (H12-01): a value-less range, an explicit mask the
+				// #15943 (H12-01) / #16849: a value-less range, an explicit mask the
 				// finaliser would have overwritten (now preserved via
 				// MaskSet), or a value/mask carrying bits outside
 				// bit-length cannot be represented as authored. The
@@ -1190,17 +1190,24 @@ func validateFilterFlexMatchStrictOpts(cfg *Config, allowValueMissing bool) erro
 				// silently truncate; reject at commit instead. The
 				// tolerant path fails the term closed via FlexMatchValid
 				// in the snapshot/lo0 builders.
-				// Open (tolerant buddy) compile shares this helper through
-				// uniform gates but the caller downgrades this specific
-				// missing-value error to a warning when its option allows:
-				// see validateFilterFlexMatchValueMissingWarning; bad width
-				// remains hard on both paths.
-				if term.FlexMatch != nil && len(term.UnknownFlexMatch) == 0 && !FlexMatchValid(term.FlexMatch) && !(allowValueMissing && term.FlexMatch.ValueMissing) {
+				// #16849: on the strict path a value-less range on a
+				// discard/reject term is hard-rejected (allowValueMissing
+				// is true only on the tolerant path, where the caller
+				// downgrades to a warning). A value-less accept/next-term
+				// term remains strict-accepted with a warning and is
+				// refused at the dataplane via FromUnrepresentable so
+				// its traffic cannot fall through widened; bad width
+				// remains hard on both paths regardless of action.
+				missingExempt := allowValueMissing && term.FlexMatch != nil && term.FlexMatch.ValueMissing
+				if !allowValueMissing && term.FlexMatch != nil && term.FlexMatch.ValueMissing && term.Action != FilterActionDiscard && term.Action != FilterActionReject {
+					missingExempt = true
+				}
+				if term.FlexMatch != nil && len(term.UnknownFlexMatch) == 0 && !FlexMatchValid(term.FlexMatch) && !missingExempt {
 					return fmt.Errorf(
 						"firewall family %s filter %q term %q: flexible-match-range "+
 							"must specify a match-value and explicit match-mask that fit within bit-length; "+
 							"a range with no match-value would match value 0 and an "+
-							"an out-of-width value or explicit mask would be silently truncated (#15943)",
+							"an out-of-width value or explicit mask would be silently truncated (#15943/#16849)",
 						family, name, term.Name)
 				}
 				if len(term.UnknownFlexMatch) == 0 {
@@ -2434,7 +2441,8 @@ func validateFirewallPolicerThenConflictStrict(cfg *Config) error {
 
 // flexMatchValueMissingWarning returns an operator-visible warning for a
 // value-less flexible-match-range admitted on the tolerant compile path.
-// It names the first such term deterministically; builders poison the term.
+// It names the first such term deterministically; builders refuse the
+// candidate snapshot so prior-good state is retained (#16849).
 func flexMatchValueMissingWarning(cfg *Config) string {
 	if cfg == nil {
 		return ""
@@ -2455,7 +2463,7 @@ func flexMatchValueMissingWarning(cfg *Config) string {
 			}
 			for _, term := range f.Terms {
 				if term != nil && term.FlexMatch != nil && term.FlexMatch.ValueMissing {
-					return fmt.Sprintf("firewall family %s filter %q term %q: flexible-match-range has no match-value; accepted on this compile path but its term fails closed in the dataplane until a match-value is configured (#15943)", family.name, name, term.Name)
+					return fmt.Sprintf("firewall family %s filter %q term %q: flexible-match-range has no match-value; accepted on this compile path but the dataplane refuses the candidate snapshot (prior-good retained) until a match-value is configured (#15943/#16849)", family.name, name, term.Name)
 				}
 			}
 		}

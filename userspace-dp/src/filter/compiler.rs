@@ -1028,6 +1028,23 @@ fn preflight_term_markers(
             term: snap.name.clone(),
         });
     }
+    // #16849: a hand-built / version-drifted flex_match whose match_start is
+    // not layer-3/layer-4 (the Go builder's "unrepresentable" sentinel, or
+    // any other unsupported base) must refuse the WHOLE snapshot — per-term
+    // match-nothing would let a discard/reject term's traffic fall through
+    // to later terms or the implicit accept. Compiled configs also set
+    // from_unrepresentable for FlexMatchValid failures; this arm catches
+    // hand-built snapshots that carry only the sentinel flex_match.
+    if let Some(fm) = snap.flex_match.as_ref() {
+        if !matches!(fm.match_start.as_str(), "" | "layer-3" | "layer-4") {
+            return Err(SnapshotIntegrityError::UnrepresentableFilterFlexMatchStart {
+                family: filter_family.to_string(),
+                filter: filter_name.to_string(),
+                term: snap.name.clone(),
+                match_start: fm.match_start.clone(),
+            });
+        }
+    }
     Ok(())
 }
 

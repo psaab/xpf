@@ -138,13 +138,11 @@ func buildLo0TermNetlink(p *nlPlan, t Lo0FilterTerm, f nlFamily) {
 			tcpFailClosed = true
 		}
 	}
-	// #6804: fail-closed for an unrepresentable flexible-match-range.
-	//
-	// The direction is NOT the tcp-flags drop, and mirroring userspace is what
-	// decides that. Userspace poisons such a term to FlexMatchStart::Unsupported
-	// so flex_matches() returns false and the term matches NOTHING — later terms
-	// still run (pkg/dataplane/userspace/filters.go). The kernel equivalent of
-	// "matches nothing" is to emit NO RULE for the term.
+	// #6804/#16849: fail-closed for an unrepresentable flexible-match-range.
+	// A FlexMatchValid failure already refused the whole plan above via
+	// FromUnrepresentable (#16849); this arm covers the remaining causes
+	// (multi-range, UnknownFlexMatch, bad match-start/width) and emits NO
+	// RULE for the term — the kernel equivalent of match-nothing.
 	//
 	// A drop would be wrong here in a way it is not for tcp-flags: a tcp-flags
 	// constraint only ever matches TCP, so #5512 can scope its drop with
@@ -153,8 +151,7 @@ func buildLo0TermNetlink(p *nlPlan, t Lo0FilterTerm, f nlFamily) {
 	// and deny ALL host-inbound traffic — turning a fail-open into a lockout.
 	if t.FlexMatchUnrepresentable || (t.FlexMatch != nil && !flexMatchRepresentable(*t.FlexMatch)) {
 		slog.Warn("lo0 netlink mirror: unrepresentable flexible-match-range; the "+
-			"term matches NOTHING (mirroring the userspace fail-closed) so its "+
-			"narrowing is never silently dropped", "term", t.Name)
+			"term matches NOTHING so its narrowing is never silently dropped", "term", t.Name)
 		return
 	}
 	// addPorts resolves one port-token list and appends its transport-port match.

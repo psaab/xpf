@@ -12333,12 +12333,13 @@ fn flex_match_layer4_fails_closed_without_l4_slice() {
 
 #[test]
 fn flex_match_unsupported_start_fails_closed() {
-    // Defense-in-depth for the tolerant peer-sync path: a match-start the Go
-    // commit gate rejects (e.g. "payload") could still arrive on the wire. It
-    // lowers to FlexMatchStart::Unsupported and must FAIL CLOSED — never be
-    // silently evaluated at the L3 base (the #3232 bug). The L3/L4 bytes both
-    // match the value, so only the Unsupported gate can produce a non-match.
-    let state = make_filter_state(
+    // #16849: a match-start the Go commit gate rejects (e.g. "payload")
+    // must refuse the WHOLE snapshot — per-term match-nothing would let
+    // a discard term's traffic fall through to the trailing accept.
+    // Pre-#16849 it lowered to FlexMatchStart::Unsupported and merely
+    // failed the term closed (the #3232 defense-in-depth, now superseded
+    // by whole-snapshot refusal).
+    let err = parse_filter_state(
         &flex_filter(
             "inet",
             "tcp",
@@ -12351,25 +12352,61 @@ fn flex_match_unsupported_start_fails_closed() {
             },
         ),
         &[],
-    );
-    let l3 = [0x45u8, 0x00, 0x00, 0x28, 0xde, 0xad];
-    let l4 = [0x45u8, 0x00, 0x00, 0x50];
-    let res = evaluate_filter(
-        &state,
-        "inet:fx",
-        v4(10, 0, 0, 1),
-        v4(10, 0, 0, 2),
-        PROTO_TCP,
-        1000,
-        80,
-        0,
-        extra_flex_l3_l4(&l3, &l4),
-    );
-    assert_eq!(
-        res.action,
-        FilterAction::Accept,
-        "an unsupported match-start must fail closed, not evaluate at the L3 base"
-    );
+        &[],
+        "",
+        "",
+    )
+    .expect_err("an unsupported match-start must refuse the snapshot (#16849)");
+    match err {
+        SnapshotIntegrityError::UnrepresentableFilterFlexMatchStart { match_start, .. } => {
+            assert_eq!(match_start, "payload");
+        }
+        other => panic!("expected UnrepresentableFilterFlexMatchStart, got {other:?}"),
+    }
+}
+
+#[test]
+fn flex_match_unrepresentable_sentinel_refuses_snapshot_16849() {
+    // #16849 RED-on-revert: the Go builder's "unrepresentable" sentinel
+    // (emitted for a value-less / out-of-width flex range on a discard
+    // term) must refuse the WHOLE snapshot. Pre-fix it lowered to
+    // FlexMatchStart::Unsupported and the term merely matched nothing,
+    // so its traffic fell through to the trailing accept.
+    let err = filter_with_marked_term("inet", |t| {
+        t.flex_match = Some(FlexMatchSnapshot {
+            offset: 0,
+            length: 1,
+            value: 0,
+            mask: 0,
+            match_start: "unrepresentable".into(),
+        });
+    })
+    .expect_err("the unrepresentable sentinel must refuse the snapshot (#16849)");
+    match err {
+        SnapshotIntegrityError::UnrepresentableFilterFlexMatchStart {
+            family,
+            filter,
+            term,
+            match_start,
+        } => {
+            assert_eq!(family, "inet");
+            assert_eq!(filter, "f");
+            assert_eq!(term, "marked");
+            assert_eq!(match_start, "unrepresentable");
+        }
+        other => panic!("expected UnrepresentableFilterFlexMatchStart, got {other:?}"),
+    }
+    // A representable layer-3 flex term still compiles.
+    filter_with_marked_term("inet", |t| {
+        t.flex_match = Some(FlexMatchSnapshot {
+            offset: 0,
+            length: 1,
+            value: 0x11,
+            mask: 0xFF,
+            match_start: String::new(),
+        });
+    })
+    .expect("a representable flex term must compile");
 }
 
 // === #3205 (agy-070 #08): port-except must FAIL CLOSED on an unresolved port ===
