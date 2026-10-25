@@ -769,7 +769,7 @@ is exactly that layer.
   XChaCha20-Poly1305 is a NEW primitive vs snow's transport ChaChaPoly (24-
   vs 12-byte nonce); the `chacha20poly1305` crate was already transitive via
   snow (0.10.1) and is promoted to a direct, `default-features = false` dep.
-- **Per-source reply bucket (#4332, #13958)** — `CookieChecker::source_reply_allowed(src_ip, now)` enforces a small per-source token bucket (`SOURCE_REPLIES_PER_SEC` 20/s sustained, `SOURCE_REPLY_BURST` 5 burst, `PACKET_COST_NS`/`MAX_TOKENS_NS` accrued-time credit), mirroring wireguard-go `device/ratelimiter.go`. It runs for under-load cookie challenges after the MAC1/MAC2 checks; there is no tunnel-global reply cap, so fresh source addresses cannot consume a shared reply budget and starve another peer's first challenge. The bucket table is GC-swept every `SOURCE_GC_INTERVAL_NS` (1 s; idle buckets dropped) and capped at `SOURCE_TABLE_MAX` (2048); when full, a new source replaces the least-recently-refilled bucket to remain eligible while keeping memory bounded. The refill obeys the same monotonic-clock discipline as the SYN-cookie token bucket (#4330/#4321): a backwards `now_ns` credits nothing (`saturating_sub`) and never lowers a bucket's `last_ns` high-water mark. Per-source throttle drops (and cookie-reply construction failures) are counted by `hs_cookie_reply_budget_drops`.
+- **Unthrottled cookie replies (#16526; supersedes the #4332 per-source reply bucket)** — under load, every valid-MAC1 / MAC2-absent initiation gets a cookie reply; there is no per-source or global reply rate gate. The reply's source key is unauthenticated (MAC1 proves only knowledge of the responder public key), so the former `CookieChecker::source_reply_allowed` bucket (20/s, burst 5, keyed on IPv4 /32 or IPv6 /64) let one source-spoofing attacker spend a victim peer's reply budget and silently drop the victim's own initiations without a cookie. Both references reply without a limit — wireguard-go `SendHandshakeCookie` has no limiter and Linux sends the cookie whenever `packet_needs_cookie` — and rate-limit only MAC2-valid packets (the #9908 bucket below), a key the attacker cannot forge. A cookie reply (64 B) is smaller than the triggering initiation (148 B), so unthrottled replies are not an amplification vector. Per-source throttle drops no longer occur; `hs_cookie_reply_budget_drops` now counts only cookie-reply construction failures (fail-closed on a broken CSPRNG).
 - **Valid-MAC2 handshake admission (#9908)** — a non-spoofed source can
   legitimately obtain a cookie and replay the same valid-MAC2 initiation.
   Under load, after MAC1/MAC2 verification and BEFORE the responder Noise
@@ -778,8 +778,8 @@ is exactly that layer.
   source that exhausts its bucket is returned as `Drop` and increments
   `hs_rx_under_load_admission_drops`; it never reaches
   `consume_initiation_create_response`/the responder DH on that packet.
-  The handshake bucket has the same 2048-entry fail-closed cap and GC as
-  the reply bucket, and keys on source IP (not UDP port). It does not alter
+  The handshake bucket table is capped at 2048 aggregated keys (LRU
+  eviction at the cap, 1 s GC) and keys on source IP (not UDP port). It does not alter
   MAC2, cookie, or TAI64N semantics. This is deliberately a rate bound,
   rather than an exact-replay cache, because rotating a valid-cookie
   initiation must not restore an unbounded Noise admission path.

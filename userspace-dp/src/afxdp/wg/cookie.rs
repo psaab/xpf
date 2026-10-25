@@ -18,14 +18,28 @@
 //! #9908 closes the remaining valid-MAC2 admission gap: under load, a
 //! per-source handshake token bucket runs after MAC2 verification but
 //! before Noise, so a cookie holder cannot make the control thread pay
-//! responder DH for an unbounded replay flood. Its state is independent
-//! of the cookie-reply bucket and is bounded by the same source-table cap.
+//! responder DH for an unbounded replay flood.
 //!
-//! #14639: both buckets key on the aggregated source key (IPv6 /64,
-//! IPv4 /32 after v4-mapped canonicalisation — [`source_bucket_key`]),
-//! and a full table evicts the least-recently-refilled bucket instead
-//! of refusing a new key, so one /64 refreshing many /128s cannot lock
-//! every legitimate peer out of rekey.
+//! #14639: the handshake bucket keys on the aggregated source key
+//! (IPv6 /64, IPv4 /32 after v4-mapped canonicalisation —
+//! [`source_bucket_key`]), and a full table evicts the
+//! least-recently-refilled bucket instead of refusing a new key, so
+//! one /64 refreshing many /128s cannot lock every legitimate peer
+//! out of rekey.
+//!
+//! #16526: under-load cookie replies are NOT rate-limited. The cookie
+//! source IP is unauthenticated (any spoofer who knows the responder
+//! public key passes MAC1), so a per-source reply bucket let one
+//! spoofer spend a victim's reply budget — the victim's own
+//! initiations were then dropped silently without a cookie. Both
+//! references reply unthrottled (wireguard-go `SendHandshakeCookie`
+//! has no limiter; Linux sends the cookie whenever
+//! `packet_needs_cookie`) and rate-limit only MAC2-valid packets,
+//! a key the attacker cannot forge. A cookie reply (64 B) is also
+//! smaller than the initiation that triggers it (148 B), so an
+//! unthrottled reply is not an amplification vector. The earlier
+//! #4332 per-source reply bucket (and the #13958 no-global-cap
+//! rationale built on it) is removed, not merely bypassed.
 //!
 //! ## Construction (§5.4.7)
 //!
@@ -61,11 +75,12 @@
 //!
 //! Like the rest of `wg/`, this module stays free of the wider `afxdp`
 //! type web (only `std` + the crypto crates). The load gate, secret
-//! rotation, and reply budget are all `std::sync::Mutex`-guarded; the sole
-//! caller is the per-tunnel control thread (`dispatch_inbound`), so the
-//! locks are effectively uncontended — they exist for `&self` interior
-//! mutability, not cross-thread contention. NEVER log a secret, a cookie,
-//! or the encryption key.
+//! rotation, and handshake-admission budget are all
+//! `std::sync::Mutex`-guarded; the sole caller is the per-tunnel
+//! control thread (`dispatch_inbound`), so the locks are effectively
+//! uncontended — they exist for `&self` interior mutability, not
+//! cross-thread contention. NEVER log a secret, a cookie, or the
+//! encryption key.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -106,33 +121,29 @@ const UNDER_LOAD_GRACE_NS: u64 = 1_000_000_000;
 /// connectivity. Tunable named constant, not a magic number.
 pub(crate) const INITIATIONS_UNDER_LOAD_THRESHOLD: u64 = 25;
 
-/// #4332 per-SOURCE cookie-reply token bucket. Fresh-source bursts are
-/// independent; a tunnel-wide first-come cap lets rotating sources starve
-/// legitimate peers (#13958). The constants mirror wireguard-go
-/// `device/ratelimiter.go` (`packetsPerSecond` / `packetsBurstable` /
-/// `packetCost` / `maxTokens` / `garbageCollectTime`).
-pub(crate) const SOURCE_REPLIES_PER_SEC: u64 = 20;
-/// Burst depth: how many replies a fresh source may draw back-to-back before
-/// the sustained [`SOURCE_REPLIES_PER_SEC`] rate applies.
-
-pub(crate) const SOURCE_REPLY_BURST: u64 = 5;
-/// #9908 per-SOURCE handshake-admission token bucket. It deliberately uses
-/// the same 20/s sustained rate and 5-packet burst as the #4332 cookie-
-/// reply bucket: a legitimate source can complete a fresh handshake plus a
-/// quick retransmit, while a valid-MAC2 replay flood reaches Noise at most
-/// five times before the frozen-clock bucket fails closed.
-pub(crate) const SOURCE_HANDSHAKES_PER_SEC: u64 = SOURCE_REPLIES_PER_SEC;
-pub(crate) const SOURCE_HANDSHAKE_BURST: u64 = SOURCE_REPLY_BURST;
+/// #9908 per-SOURCE handshake-admission token bucket: a legitimate
+/// source can complete a fresh handshake plus a quick retransmit, while
+/// a valid-MAC2 replay flood reaches Noise at most five times before
+/// the frozen-clock bucket fails closed. wireguard-go's `Allow` (called
+/// only AFTER `CheckMAC2` succeeds) and Linux `wg_cookie_validate_packet`
+/// both rate-limit only MAC2-valid packets with these rates
+/// (`packetsPerSecond` / `packetsBurstable`); under-load cookie replies
+/// themselves are sent unthrottled (see #16526 below), so there is
+/// deliberately NO reply bucket any more — the handshake bucket is the
+/// only source-keyed token bucket.
+pub(crate) const SOURCE_HANDSHAKES_PER_SEC: u64 = 20;
+/// Burst depth: how many admissions a fresh source may draw back-to-back
+/// before the sustained [`SOURCE_HANDSHAKES_PER_SEC`] rate applies.
+pub(crate) const SOURCE_HANDSHAKE_BURST: u64 = 5;
+/// Token cost of one admission, in nanoseconds of accrued time
+/// (`1e9 / SOURCE_HANDSHAKES_PER_SEC` = 50 ms). One second of idle
+/// accrues exactly `SOURCE_HANDSHAKES_PER_SEC` tokens.
 const HANDSHAKE_PACKET_COST_NS: u64 = 1_000_000_000 / SOURCE_HANDSHAKES_PER_SEC;
+/// Token ceiling: a bucket never accrues more than one burst's worth of
+/// tokens (`HANDSHAKE_PACKET_COST_NS * SOURCE_HANDSHAKE_BURST` =
+/// 250 ms). Signed to make the refill/spend arithmetic and the
+/// monotonic-clock guard total.
 const HANDSHAKE_MAX_TOKENS_NS: i64 = (HANDSHAKE_PACKET_COST_NS * SOURCE_HANDSHAKE_BURST) as i64;
-/// Token cost of one reply, in nanoseconds of accrued time
-/// (`1e9 / SOURCE_REPLIES_PER_SEC` = 50 ms). One second of idle accrues exactly
-/// `SOURCE_REPLIES_PER_SEC` tokens.
-pub(crate) const PACKET_COST_NS: u64 = 1_000_000_000 / SOURCE_REPLIES_PER_SEC;
-/// Token ceiling: a bucket never accrues more than one burst's worth of tokens
-/// (`PACKET_COST_NS * SOURCE_REPLY_BURST` = 250 ms). Signed to make the
-/// refill/spend arithmetic and the monotonic-clock guard total.
-pub(crate) const MAX_TOKENS_NS: i64 = (PACKET_COST_NS * SOURCE_REPLY_BURST) as i64;
 /// Run the per-source table GC at most this often (mirrors wireguard-go
 /// `garbageCollectTime`, 1 s); a bucket idle for a full interval is dropped.
 const SOURCE_GC_INTERVAL_NS: u64 = 1_000_000_000;
@@ -140,8 +151,8 @@ const SOURCE_GC_INTERVAL_NS: u64 = 1_000_000_000;
 /// (IPv6 on /64, IPv4 on /32 after v4-mapped canonicalisation — see
 /// [`source_bucket_key`]), so this bounds distinct /64s / v4 hosts, not
 /// /128s. Bounds map memory under spoofed-source floods; overflow evicts
-/// the least-recently-refilled bucket in both tables, allowing new peers
-/// to enter while preserving this memory bound (#14639).
+/// the least-recently-refilled bucket, allowing new peers to enter
+/// while preserving this memory bound (#14639).
 const SOURCE_TABLE_MAX: usize = 2048;
 
 /// Cookie MAC length (keyed-BLAKE2s-128 output).
@@ -318,27 +329,28 @@ struct LoadState {
     under_load_until_ns: u64,
 }
 
-/// #4332 per-source token bucket. `last_ns` is a MONOTONIC high-water mark of
-/// the last refill (never lowered by a backwards clock step — #4330/#4321),
-/// `tokens_ns` the accrued-time credit (signed, capped at [`MAX_TOKENS_NS`]).
+/// #9908 per-source token bucket. `last_ns` is a MONOTONIC high-water
+/// mark of the last refill (never lowered by a backwards clock step —
+/// #4330/#4321), `tokens_ns` the accrued-time credit (signed, capped
+/// at [`HANDSHAKE_MAX_TOKENS_NS`]).
 struct SourceBucket {
     last_ns: u64,
     tokens_ns: i64,
 }
 
-/// #4332 per-source cookie-reply buckets plus #9908 per-source
-/// handshake-admission buckets. Both are bounded and share one GC lock.
-/// Each map has its own token state so valid-MAC2 admissions never consume
-/// cookie-reply budget, and vice versa.
+/// #9908 per-source handshake-admission buckets. Bounded and GC-swept;
+/// the only source-keyed rate-limit state (#16526 removed the #4332
+/// cookie-reply buckets — cookie replies are unthrottled, matching the
+/// reference implementations).
 struct SourceTable {
-    buckets: HashMap<IpAddr, SourceBucket>,
     handshake_buckets: HashMap<IpAddr, SourceBucket>,
     last_gc_ns: Option<u64>,
 }
 
-/// Responder cookie checker: secret rotation + load detection + per-source
-/// reply limiting + MAC2 verification, all keyed to one tunnel's responder
-/// static key. One per [`super::WgEngine`].
+/// Responder cookie checker: secret rotation + load detection +
+/// per-source handshake-admission limiting + MAC2 verification, all
+/// keyed to one tunnel's responder static key. One per
+/// [`super::WgEngine`].
 pub(crate) struct CookieChecker {
     /// `BLAKE2s-256("cookie--" || our_pub)`. Public-key-derived, not
     /// secret, but never logged for hygiene.
@@ -385,7 +397,6 @@ impl CookieChecker {
                 under_load_until_ns: 0,
             }),
             per_source: Mutex::new(SourceTable {
-                buckets: HashMap::new(),
                 handshake_buckets: HashMap::new(),
                 last_gc_ns: None,
             }),
@@ -428,93 +439,34 @@ impl CookieChecker {
         now_ns < s.under_load_until_ns
     }
 
-    /// #4332: per-SOURCE cookie-reply admission. A token bucket keyed by
-    /// the aggregated source key ([`source_bucket_key`]: IPv6 /64, IPv4
-    /// /32) admits at most [`SOURCE_REPLIES_PER_SEC`] replies/s with a
-    /// [`SOURCE_REPLY_BURST`] burst. Per-key throttling avoids one
-    /// source draining another peer's budget (#13958); /64 aggregation
-    /// stops one IPv6 host minting unbounded /128 keys (#14639).
-    ///
-    /// Fail CLOSED against unbounded map growth: the table is GC-swept every
-    /// [`SOURCE_GC_INTERVAL_NS`] and capped at [`SOURCE_TABLE_MAX`]. Overflow
-    /// replaces the least-recently-refilled bucket, so new peers remain
-    /// eligible without allowing an attacker to grow the map.
-    ///
-    /// Monotonic-clock discipline mirrors #4330/#4321: elapsed is
-    /// `saturating_sub` (a backwards `now_ns` credits nothing) and `last_ns` is
-    /// a high-water mark (`.max(now_ns)`, never lowered), so a clock glitch
-    /// cannot be replayed into an over-credit to the ceiling on the next forward
-    /// step — the exact weakening that guard prevents.
-    pub(crate) fn source_reply_allowed(&self, src_ip: IpAddr, now_ns: u64) -> bool {
-        let src_ip = source_bucket_key(src_ip);
-        let mut t = self.per_source.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Periodic GC — at most once per interval — drops buckets idle for a
-        // full GC interval, so a transient spoofed-IP burst does not keep the
-        // table full once it stops. Runs BEFORE the cap check so reclaimed
-        // slots are available to a legit new source in the same call.
-        let gc_due = match t.last_gc_ns {
-            None => true,
-            Some(last) => now_ns.saturating_sub(last) >= SOURCE_GC_INTERVAL_NS,
-        };
-        if gc_due {
-            t.last_gc_ns = Some(now_ns);
-            t.buckets
-                .retain(|_, b| now_ns.saturating_sub(b.last_ns) < SOURCE_GC_INTERVAL_NS);
-            t.handshake_buckets
-                .retain(|_, b| now_ns.saturating_sub(b.last_ns) < SOURCE_GC_INTERVAL_NS);
-        }
-
-        // Keep the table bounded without permanently locking out new peers:
-        // discard the least-recently-refilled entry when a fresh key
-        // arrives at capacity. A rotating source flood cannot make every
-        // later legitimate source fail closed forever.
-        evict_lru_if_full(&mut t.buckets, &src_ip);
-
-        // A fresh bucket starts full (one whole burst of credit) so a legit
-        // source's first challenge is never throttled by table churn.
-        let bucket = t.buckets.entry(src_ip).or_insert(SourceBucket {
-            last_ns: now_ns,
-            tokens_ns: MAX_TOKENS_NS,
-        });
-        // Refill by elapsed time (never negative — saturating_sub), cap at the
-        // burst ceiling; keep last_ns a monotonic high-water mark.
-        let elapsed = now_ns.saturating_sub(bucket.last_ns) as i64;
-        bucket.last_ns = bucket.last_ns.max(now_ns);
-        bucket.tokens_ns = (bucket.tokens_ns + elapsed).min(MAX_TOKENS_NS);
-        let cost = PACKET_COST_NS as i64;
-        if bucket.tokens_ns >= cost {
-            bucket.tokens_ns -= cost;
-            true
-        } else {
-            false
-        }
-    }
 
     /// #9908 per-source handshake-admission gate. Called only after a
     /// valid MAC1 + MAC2 has been verified and before the responder enters
-    /// Noise. The bucket is independent of #4332's reply bucket: valid
-    /// MAC2 admissions never spend cookie-reply tokens. Keyed by the
-    /// aggregated source key ([`source_bucket_key`]: IPv6 /64, IPv4 /32,
-    /// #14639); a tracked key receives a 5-packet burst and refills at
-    /// 20/s. When the bounded table is full, a new key evicts the
-    /// least-recently-refilled bucket instead of failing closed, so one
-    /// /64 refreshing many keys cannot lock other peers out forever.
+    /// Noise. Keyed by the aggregated source key ([`source_bucket_key`]:
+    /// IPv6 /64, IPv4 /32, #14639); a tracked key receives a 5-packet
+    /// burst and refills at 20/s. When the bounded table is full, a new
+    /// key evicts the least-recently-refilled bucket instead of failing
+    /// closed, so one /64 refreshing many keys cannot lock other peers
+    /// out forever. This is the ONLY source-keyed rate limit: under-load
+    /// cookie replies are unthrottled (#16526), matching the references,
+    /// because their source key is unauthenticated and spoofable.
+    ///
+    /// Monotonic-clock discipline mirrors #4330/#4321: elapsed is
+    /// `saturating_sub` (a backwards `now_ns` credits nothing) and
+    /// `last_ns` is a high-water mark (`.max(now_ns)`, never lowered),
+    /// so a clock glitch cannot be replayed into an over-credit.
     pub(crate) fn source_handshake_allowed(&self, src_ip: IpAddr, now_ns: u64) -> bool {
         let src_ip = source_bucket_key(src_ip);
         let mut t = self.per_source.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Keep both per-source maps bounded and reclaim idle entries before
-        // rejecting a new source. The one GC clock covers both maps under
-        // the same mutex, so the table cannot be observed half-swept.
+        // Keep the per-source map bounded and reclaim idle entries
+        // before admitting a new source.
         let gc_due = match t.last_gc_ns {
             None => true,
             Some(last) => now_ns.saturating_sub(last) >= SOURCE_GC_INTERVAL_NS,
         };
         if gc_due {
             t.last_gc_ns = Some(now_ns);
-            t.buckets
-                .retain(|_, b| now_ns.saturating_sub(b.last_ns) < SOURCE_GC_INTERVAL_NS);
             t.handshake_buckets
                 .retain(|_, b| now_ns.saturating_sub(b.last_ns) < SOURCE_GC_INTERVAL_NS);
         }
@@ -784,31 +736,24 @@ impl CookieChecker {
         }
     }
 
-    /// #4332 test hook: number of distinct source IPs currently tracked in the
-    /// per-source reply-bucket table (asserts the [`SOURCE_TABLE_MAX`] bound and
-    /// GC reclaim).
-    #[cfg(test)]
-    pub(crate) fn source_table_len_for_test(&self) -> usize {
-        self.per_source.lock().unwrap().buckets.len()
-    }
-
-    /// #4332 test hook: whether a specific source has a live bucket.
-    /// The argument is aggregated with [`source_bucket_key`] first, so
-    /// any address inside a tracked /64 reports present (#14639).
-    #[cfg(test)]
-    pub(crate) fn source_contains_for_test(&self, ip: IpAddr) -> bool {
-        self.per_source
-            .lock()
-            .unwrap()
-            .buckets
-            .contains_key(&source_bucket_key(ip))
-    }
-
     /// #9908 test hook: number of distinct aggregated source keys
     /// currently tracked in the per-source handshake-admission table.
     #[cfg(test)]
     pub(crate) fn handshake_source_table_len_for_test(&self) -> usize {
         self.per_source.lock().unwrap().handshake_buckets.len()
+    }
+
+    /// #9908 test hook: whether a specific source has a live handshake
+    /// bucket. The argument is aggregated with [`source_bucket_key`]
+    /// first, so any address inside a tracked /64 reports present
+    /// (#14639).
+    #[cfg(test)]
+    pub(crate) fn handshake_source_contains_for_test(&self, ip: IpAddr) -> bool {
+        self.per_source
+            .lock()
+            .unwrap()
+            .handshake_buckets
+            .contains_key(&source_bucket_key(ip))
     }
 }
 

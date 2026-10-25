@@ -2066,12 +2066,8 @@ fn classify_initiation_under_load_requires_mac2() {
     );
 
     // Drive the arrival rate past the threshold within the same 1 s window,
-    // each arrival from a DISTINCT source so the #4332 per-source reply bucket
-    // is not the limiting factor here — this test isolates the MAC2 requirement
-    // (a single source's own budget is covered by the cookie.rs unit tests and
-    // `classify_initiation_per_source_budget_isolation`). `from` itself is not
-    // used in the flood, so its per-source bucket stays full for the assertions
-    // below.
+    // each arrival from a DISTINCT source — this test isolates the MAC2
+    // requirement. `from` itself is not used in the flood.
     for i in 0..(INITIATIONS_UNDER_LOAD_THRESHOLD + 4) {
         let s: SocketAddr = format!("192.0.2.{}:51820", (i % 250) + 1).parse().unwrap();
         engine.classify_initiation(&init, s, &mut out, now);
@@ -2127,41 +2123,99 @@ fn classify_initiation_under_load_requires_mac2() {
     assert!(c.hs_rx_under_load_no_mac2.load(Ordering::Relaxed) >= 2);
 }
 
-/// #4332 per-source throttling keeps a single flooder's burst local, so a
-/// legitimate source can still get its first challenge.
+/// #16526 regression (va69 probe): a spoofer who knows the responder
+/// public key sends valid-MAC1, no-MAC2 initiations spoofing the
+/// VICTIM's source at a modest rate. Pre-fix, those packets spent the
+/// victim's per-source cookie-reply bucket (20/s, burst 5, keyed on the
+/// unauthenticated source IP), so the victim's own initiations were
+/// dropped silently without a cookie. Cookie replies are now
+/// unthrottled (matching wireguard-go and Linux, which rate-limit only
+/// MAC2-valid packets): every spoofed packet AND every victim packet
+/// gets a cookie. RED on the pre-fix tree (the victim's tries return
+/// `Drop` once the spoof flood drains the shared bucket).
 #[test]
-fn classify_initiation_per_source_budget_isolation() {
+fn classify_initiation_spoofed_source_cannot_starve_victim_cookie_16526() {
     use crate::afxdp::wg::cookie::INITIATIONS_UNDER_LOAD_THRESHOLD;
     use std::net::SocketAddr;
 
     let (engine, _our_pub, init) = under_load_fixture();
-    let now = 10_000_000_000u64; // frozen: A's bucket never refills mid-flood
+    // Frozen clock: no bucket refill can mask the starvation.
+    let now = 10_000_000_000u64;
     engine.set_mock_now_ns(now);
     let mut out = [0u8; 256];
 
-    let flood: SocketAddr = "203.0.113.9:51820".parse().unwrap();
-    let legit: SocketAddr = "198.51.100.7:51820".parse().unwrap();
+    // The victim's real source (any port — the pre-fix bucket ignored
+    // the port; the v6 arm below covers the shared-/64 form).
+    let victim: SocketAddr = "203.0.113.9:51820".parse().unwrap();
 
-    // Repeated source-A attempts exceed its per-source burst; that throttle
-    // must not consume source B's independent bucket.
+    // Trip under-load, then flood valid-MAC1 initiations spoofing the
+    // victim's source — exactly what an off-path spoofer who knows the
+    // responder public key can forge (MAC1 keys on the public key).
     let shots = INITIATIONS_UNDER_LOAD_THRESHOLD + 50;
+    let mut spoof_cookies = 0u64;
     for _ in 0..shots {
-        engine.classify_initiation(&init, flood, &mut out, now);
+        if matches!(
+            engine.classify_initiation(&init, victim, &mut out, now),
+            InitiationAction::SendCookie(_)
+        ) {
+            spoof_cookies += 1;
+        }
     }
 
-    // A legit peer at a DIFFERENT source is still challenged — its first cookie
-    // is NOT starved by A's flood (the #4332 per-source isolation).
-    let action = engine.classify_initiation(&init, legit, &mut out, now);
-    assert!(
-        matches!(action, InitiationAction::SendCookie(_)),
-        "a legit source must still be cookie-challenged despite a flood from \
-         another source (per-source budget isolation), got {action:?}"
+    // The victim's own initiations must ALL still be challenged:
+    // victim_cookies == victim_tries. Pre-fix the reply bucket (burst
+    // 5) is long drained by the same-source spoof flood, so these
+    // return Drop.
+    let victim_tries = 10u64;
+    let mut victim_cookies = 0u64;
+    for _ in 0..victim_tries {
+        if matches!(
+            engine.classify_initiation(&init, victim, &mut out, now),
+            InitiationAction::SendCookie(_)
+        ) {
+            victim_cookies += 1;
+        }
+    }
+    assert_eq!(
+        victim_cookies, victim_tries,
+        "a same-source spoof flood must not starve the victim's cookie \
+         replies (#16526); spoof flood itself drew {spoof_cookies} cookies"
+    );
+
+    // IPv6 arm: spoofed sources anywhere in the victim's /64 (the
+    // pre-fix bucket aggregated to /64) must not starve a victim host
+    // in that same /64 either.
+    let victim6: SocketAddr = "[2001:db8:aaaa::42]:51820".parse().unwrap();
+    for i in 0..shots {
+        let spoof6: SocketAddr = format!("[2001:db8:aaaa::{i:x}]:51820").parse().unwrap();
+        engine.classify_initiation(&init, spoof6, &mut out, now);
+    }
+    let mut victim6_cookies = 0u64;
+    for _ in 0..victim_tries {
+        if matches!(
+            engine.classify_initiation(&init, victim6, &mut out, now),
+            InitiationAction::SendCookie(_)
+        ) {
+            victim6_cookies += 1;
+        }
+    }
+    assert_eq!(
+        victim6_cookies, victim_tries,
+        "a same-/64 spoof flood must not starve the victim's cookie replies (#16526)"
     );
 }
 
-/// #13958 (residual of #4332): rotating-source valid-MAC1 floods must not
-/// starve a legitimate peer's first cookie challenge. Each fresh source gets
-/// a full bucket; no global first-come cap can be shared across the sources.
+/// #13958 (residual of #4332), kept under #16526: rotating-source
+/// valid-MAC1 floods must not starve a legitimate peer's first cookie
+/// challenge. There is no reply rate gate at all now (no per-source
+/// bucket, no global cap): once the flood trips under-load, EVERY
+/// rotating source is challenged and the legitimate source after them
+/// still is. The exact count pins the unthrottled behaviour — the
+/// first `INITIATIONS_UNDER_LOAD_THRESHOLD` arrivals are still at or
+/// below the load threshold (`count > threshold` trips it) and take
+/// the not-under-load `Process` path, so exactly
+/// `3000 - threshold` replies are expected; any reintroduced reply
+/// limiter drops the count below that.
 #[test]
 fn classify_initiation_rotating_source_flood_keeps_legit_challenge() {
     use crate::afxdp::wg::cookie::INITIATIONS_UNDER_LOAD_THRESHOLD;
@@ -2183,9 +2237,10 @@ fn classify_initiation_rotating_source_flood_keeps_legit_challenge() {
             replies += 1;
         }
     }
-    assert!(
-        replies > 40,
-        "distinct sources should not share a global reply cap; got {replies}"
+    assert_eq!(
+        replies,
+        3000 - INITIATIONS_UNDER_LOAD_THRESHOLD,
+        "every under-load rotating source must be cookie-challenged (unthrottled replies, #16526)"
     );
 
     let legit: SocketAddr = "198.51.100.7:51820".parse().unwrap();
@@ -2399,8 +2454,8 @@ fn initiator_consume_completes_handshake_under_load() {
     );
 
     // 2. Drive the responder under load with filler valid-MAC1 initiations
-    //    from DISTINCT sources (so the per-source reply bucket is not the
-    //    limiter), then challenge the initiator's real initiation.
+    //    from DISTINCT sources, then challenge the initiator's real
+    //    initiation.
     let noise = [0x3Cu8; crate::afxdp::wg::handshake::MSG_INIT_NOISE_LEN];
     let mut filler = [0u8; crate::afxdp::wg::WG_MSG_INIT_LEN];
     crate::afxdp::wg::handshake::build_initiation(&mut filler, 0x1234_5678, &noise, &resp_pub)
