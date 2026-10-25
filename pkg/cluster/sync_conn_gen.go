@@ -141,14 +141,16 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 // while guard keys are forward sessions (#9915 F-044). Nothing reads it
 // directly except maxCap()'s clamp; every map goes through sentCap()/recvCap().
 //
-// TWENTY-FOUR map families share the two side caps. The sender side bounds
-// FOURTEEN by sentCap() — genSentV4/V6, closeClassSentV4/V6 (#9412),
+// TWENTY-EIGHT map families share the two side caps. The sender side bounds
+// SIXTEEN by sentCap() — genSentV4/V6, closeClassSentV4/V6 (#9412),
 // tcpHandshakeSentV4/V6 (#10888), installTableSentV4/V6 (#9752),
-// sourceNatICMPSentV4/V6 (#11064), policyIdentitySentV4/V6 (#14359), and
-// genSentScopedV4/V6 (#10512). The receiver side bounds TEN by recvCap() —
+// sourceNatICMPSentV4/V6 (#11064), policyIdentitySentV4/V6 (#14359),
+// appTimeoutLogSentV4/V6 (#16700), and
+// genSentScopedV4/V6 (#10512). The receiver side bounds TWELVE by recvCap() —
 // recvGenV4/V6 (with their #9719 tombstone orders, which index the same
 // entries rather than adding new ones), installTableRecvV4/V6,
-// sourceNatICMPRecvV4/V6 (#11064), policyIdentityRecvV4/V6 (#14359), and
+// sourceNatICMPRecvV4/V6 (#11064), policyIdentityRecvV4/V6 (#14359),
+// appTimeoutLogRecvV4/V6 (#16700), and
 // recvGenScopedV4/V6 (#10512, with their own tombstone orders). Every family
 // grows on full-of-live demand and skip-records at the cap.
 //
@@ -158,7 +160,7 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 // cap down (growGuardCapSide) and every read clamps to the ceiling in force
 // (sentCap/recvCap); the receiver side is additionally reclaimed at a
 // namespace-reset bulk barrier (resetRecvGen), while sender maps self-drain on
-// delete-echo. All twenty-four families are evicted on delete (#14358: a
+// delete-echo. All twenty-eight families are evicted on delete (#14358: a
 // bare delete reclaims every scoped entry naming its tuple, and a delete in
 // either space tombstones the other space at the same generation); the cap
 // is a safety valve for keys whose delete never arrives (e.g. dropped close
@@ -823,8 +825,8 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 		&s.genState.genSentScopedV4, &s.genState.genSentScopedByTupleV4, &s.genState.genSentOverflowScopedV4,
 		scopedKeyOf,
 		&s.genState.closeClassSentV4, &s.genState.tcpHandshakeSentV4, &s.genState.installTableSentV4,
-		&s.genState.sourceNatICMPSentV4, &s.genState.policyIdentitySentV4,
-		&s.genState.installTableRecvV4, &s.genState.sourceNatICMPRecvV4, &s.genState.policyIdentityRecvV4)
+		&s.genState.sourceNatICMPSentV4, &s.genState.policyIdentitySentV4, &s.genState.appTimeoutLogSentV4,
+		&s.genState.installTableRecvV4, &s.genState.sourceNatICMPRecvV4, &s.genState.policyIdentityRecvV4, &s.genState.appTimeoutLogRecvV4)
 }
 
 // stampInstallGenV6 is the IPv6 twin of stampInstallGenV4.
@@ -837,8 +839,8 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 		&s.genState.genSentScopedV6, &s.genState.genSentScopedByTupleV6, &s.genState.genSentOverflowScopedV6,
 		scopedKeyOfV6,
 		&s.genState.closeClassSentV6, &s.genState.tcpHandshakeSentV6, &s.genState.installTableSentV6,
-		&s.genState.sourceNatICMPSentV6, &s.genState.policyIdentitySentV6,
-		&s.genState.installTableRecvV6, &s.genState.sourceNatICMPRecvV6, &s.genState.policyIdentityRecvV6)
+		&s.genState.sourceNatICMPSentV6, &s.genState.policyIdentitySentV6, &s.genState.appTimeoutLogSentV6,
+		&s.genState.installTableRecvV6, &s.genState.sourceNatICMPRecvV6, &s.genState.policyIdentityRecvV6, &s.genState.appTimeoutLogRecvV6)
 }
 
 // sessionStampView is the per-family field view stampInstallGen needs.
@@ -855,6 +857,7 @@ type sessionStampView interface {
 	stampInstallTable() (*uint32, *uint32)
 	stampSourceNatICMP() (*bool, *uint8, *uint8)
 	stampPolicyIdentity() (*string, *uint32)
+	stampAppTimeoutLog() (*uint32, *uint8)
 }
 
 type sessionValueView struct{ v *dataplane.SessionValue }
@@ -872,6 +875,9 @@ func (w sessionValueView) stampSourceNatICMP() (*bool, *uint8, *uint8) {
 func (w sessionValueView) stampPolicyIdentity() (*string, *uint32) {
 	return &w.v.PolicyRuleID, &w.v.PolicyCounterIdx
 }
+func (w sessionValueView) stampAppTimeoutLog() (*uint32, *uint8) {
+	return &w.v.AppTimeout, &w.v.LogFlags
+}
 
 type sessionValueV6View struct{ v *dataplane.SessionValueV6 }
 
@@ -887,6 +893,9 @@ func (w sessionValueV6View) stampSourceNatICMP() (*bool, *uint8, *uint8) {
 }
 func (w sessionValueV6View) stampPolicyIdentity() (*string, *uint32) {
 	return &w.v.PolicyRuleID, &w.v.PolicyCounterIdx
+}
+func (w sessionValueV6View) stampAppTimeoutLog() (*uint32, *uint8) {
+	return &w.v.AppTimeout, &w.v.LogFlags
 }
 
 // scopedKeyOf/scopedKeyOfV6 build the scoped sender keys; plain
@@ -923,9 +932,11 @@ func stampInstallGen[K comparable, SK comparable](
 	installTableSent *map[K]sentInstallTable,
 	sourceNatSent *map[K]sourceNatICMPMemo,
 	policySent *map[K]policyIdentityMemo,
+	appTimeoutLogSent *map[K]appTimeoutLogMemo,
 	installTableRecv *map[K]recvInstallTable,
 	sourceNatRecv *map[K]sourceNatICMPMemo,
 	policyRecv *map[K]policyIdentityMemo,
+	appTimeoutLogRecv *map[K]appTimeoutLogMemo,
 ) {
 	g := s.nextInstallGen()
 	*genOut = g
@@ -1012,6 +1023,22 @@ func stampInstallGen[K comparable, SK comparable](
 		s.genState.recvGenMu.Lock()
 		if rid, cnt, ok := lookupPolicyIdentityLocked(*policyRecv, key, sessionID); ok {
 			*ruleID, *counter = rid, cnt
+		}
+		s.genState.recvGenMu.Unlock()
+	}
+	// #16700: per-app timeout (incl. 86401 never) and then-log flags;
+	// restore last sent / received on a stamp-less mirror resend.
+	appTimeout, logFlags := view.stampAppTimeoutLog()
+	if *appTimeoutLogSent == nil {
+		*appTimeoutLogSent = make(map[K]appTimeoutLogMemo)
+	}
+	if !stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, s.sentCap()) && s.growSentCap() {
+		stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, s.sentCap())
+	}
+	if *appTimeout == 0 && *logFlags == 0 && sessionID != 0 {
+		s.genState.recvGenMu.Lock()
+		if at, lf, ok := lookupAppTimeoutLogLocked(*appTimeoutLogRecv, key, sessionID); ok {
+			*appTimeout, *logFlags = at, lf
 		}
 		s.genState.recvGenMu.Unlock()
 	}
@@ -1119,8 +1146,8 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 		&s.genState.genSentV4, &s.genState.genSentOverflowV4,
 		&s.genState.genSentScopedV4, &s.genState.genSentScopedByTupleV4,
 		&s.genState.closeClassSentV4, &s.genState.tcpHandshakeSentV4,
-		&s.genState.installTableSentV4, &s.genState.sourceNatICMPSentV4, &s.genState.policyIdentitySentV4,
-		&s.genState.installTableRecvV4, &s.genState.sourceNatICMPRecvV4, &s.genState.policyIdentityRecvV4)
+		&s.genState.installTableSentV4, &s.genState.sourceNatICMPSentV4, &s.genState.policyIdentitySentV4, &s.genState.appTimeoutLogSentV4,
+		&s.genState.installTableRecvV4, &s.genState.sourceNatICMPRecvV4, &s.genState.policyIdentityRecvV4, &s.genState.appTimeoutLogRecvV4)
 }
 
 func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
@@ -1128,8 +1155,8 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 		&s.genState.genSentV6, &s.genState.genSentOverflowV6,
 		&s.genState.genSentScopedV6, &s.genState.genSentScopedByTupleV6,
 		&s.genState.closeClassSentV6, &s.genState.tcpHandshakeSentV6,
-		&s.genState.installTableSentV6, &s.genState.sourceNatICMPSentV6, &s.genState.policyIdentitySentV6,
-		&s.genState.installTableRecvV6, &s.genState.sourceNatICMPRecvV6, &s.genState.policyIdentityRecvV6)
+		&s.genState.installTableSentV6, &s.genState.sourceNatICMPSentV6, &s.genState.policyIdentitySentV6, &s.genState.appTimeoutLogSentV6,
+		&s.genState.installTableRecvV6, &s.genState.sourceNatICMPRecvV6, &s.genState.policyIdentityRecvV6, &s.genState.appTimeoutLogRecvV6)
 }
 
 // takeDeleteGen is the shared sender take-delete behind
@@ -1150,9 +1177,11 @@ func takeDeleteGen[K comparable, SK comparable](
 	installTableSent *map[K]sentInstallTable,
 	sourceNatSent *map[K]sourceNatICMPMemo,
 	policySent *map[K]policyIdentityMemo,
+	appTimeoutLogSent *map[K]appTimeoutLogMemo,
 	installTableRecv *map[K]recvInstallTable,
 	sourceNatRecv *map[K]sourceNatICMPMemo,
 	policyRecv *map[K]policyIdentityMemo,
+	appTimeoutLogRecv *map[K]appTimeoutLogMemo,
 ) uint64 {
 	if hook := s.testBeforeDeleteGen; hook != nil {
 		hook()
@@ -1175,12 +1204,14 @@ func takeDeleteGen[K comparable, SK comparable](
 	delete(*installTableSent, key)
 	delete(*sourceNatSent, key)
 	delete(*policySent, key)
+	delete(*appTimeoutLogSent, key)
 	// #9752 round 3: and for the identity received for it (genSentMu is
 	// a leaf, so nesting recvGenMu here cannot cycle).
 	s.genState.recvGenMu.Lock()
 	delete(*installTableRecv, key)
 	delete(*sourceNatRecv, key)
 	delete(*policyRecv, key)
+	delete(*appTimeoutLogRecv, key)
 	s.genState.recvGenMu.Unlock()
 	if _, ok := (*genSent)[key]; !ok {
 		if *overflow {
@@ -1551,6 +1582,9 @@ func (s *SessionSync) resetRecvSessionGen(preserve bool) {
 		// would re-bind the dead incarnation's rule on a stamp-less re-prime.
 		s.genState.policyIdentityRecvV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
 		s.genState.policyIdentityRecvV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
+		// #16700: same for received app timeout / log flags.
+		s.genState.appTimeoutLogRecvV4 = make(map[dataplane.SessionKey]appTimeoutLogMemo)
+		s.genState.appTimeoutLogRecvV6 = make(map[dataplane.SessionKeyV6]appTimeoutLogMemo)
 		s.genState.recvTombV4.reset()
 		s.genState.recvTombV6.reset()
 		s.genState.recvTombScopedV4.reset()
@@ -1812,6 +1846,12 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	if !stampPolicyIdentityLocked(s.genState.policyIdentityRecvV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap()) && s.growRecvCap() {
 		stampPolicyIdentityLocked(s.genState.policyIdentityRecvV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap())
 	}
+	if s.genState.appTimeoutLogRecvV4 == nil {
+		s.genState.appTimeoutLogRecvV4 = make(map[dataplane.SessionKey]appTimeoutLogMemo)
+	}
+	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap()) && s.growRecvCap() {
+		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap())
+	}
 	s.genState.recvGenMu.Unlock()
 	err := s.sessions.PutClusterSyncedV4(key, val)
 	if err == nil {
@@ -1873,6 +1913,12 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	}
 	if !stampPolicyIdentityLocked(s.genState.policyIdentityRecvV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap()) && s.growRecvCap() {
 		stampPolicyIdentityLocked(s.genState.policyIdentityRecvV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap())
+	}
+	if s.genState.appTimeoutLogRecvV6 == nil {
+		s.genState.appTimeoutLogRecvV6 = make(map[dataplane.SessionKeyV6]appTimeoutLogMemo)
+	}
+	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap()) && s.growRecvCap() {
+		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap())
 	}
 	s.genState.recvGenMu.Unlock()
 	err := s.sessions.PutClusterSyncedV6(key, val)
@@ -1953,6 +1999,7 @@ func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen 
 	delete(s.genState.installTableRecvV4, key)
 	delete(s.genState.sourceNatICMPRecvV4, key)
 	delete(s.genState.policyIdentityRecvV4, key)
+	delete(s.genState.appTimeoutLogRecvV4, key)
 	s.genState.recvGenMu.Unlock()
 	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)
@@ -1983,6 +2030,7 @@ func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGe
 	delete(s.genState.installTableRecvV6, key)
 	delete(s.genState.sourceNatICMPRecvV6, key)
 	delete(s.genState.policyIdentityRecvV6, key)
+	delete(s.genState.appTimeoutLogRecvV6, key)
 	s.genState.recvGenMu.Unlock()
 	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)
@@ -2012,6 +2060,8 @@ func (s *SessionSync) deleteClusterSyncedScopedV4(domain uint32, key dataplane.S
 	s.genState.recvGenMu.Lock()
 	delete(s.genState.installTableRecvV4, key)
 	delete(s.genState.sourceNatICMPRecvV4, key)
+	delete(s.genState.policyIdentityRecvV4, key)
+	delete(s.genState.appTimeoutLogRecvV4, key)
 	s.genState.recvGenMu.Unlock()
 	if err := s.sessions.DeleteClusterScopedV4(key, domain, expectedID); err != nil {
 		s.stats.Errors.Add(1)
@@ -2039,6 +2089,8 @@ func (s *SessionSync) deleteClusterSyncedScopedV6(domain uint32, key dataplane.S
 	s.genState.recvGenMu.Lock()
 	delete(s.genState.installTableRecvV6, key)
 	delete(s.genState.sourceNatICMPRecvV6, key)
+	delete(s.genState.policyIdentityRecvV6, key)
+	delete(s.genState.appTimeoutLogRecvV6, key)
 	s.genState.recvGenMu.Unlock()
 	if err := s.sessions.DeleteClusterScopedV6(key, domain, expectedID); err != nil {
 		s.stats.Errors.Add(1)

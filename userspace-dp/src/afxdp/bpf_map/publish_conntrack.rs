@@ -23,6 +23,7 @@ use super::{
     SESS_STATE_ESTABLISHED, SessionDecision, SessionKey, SessionMetadata, bpf_session_key_v4,
     bpf_session_key_v6, reverse_session_key,
 };
+use crate::session::SessionSyncAttribution;
 use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
 use core::ffi::{c_int, c_void};
 use std::io;
@@ -269,12 +270,19 @@ pub(super) fn build_conntrack_value_v4(
     };
     let nat_dst_port = decision.nat.rewrite_dst_port.unwrap_or(0).to_be();
 
+    // #16700: publish the real per-app timeout (86401 = never) and the
+    // per-policy then-log bits so an HA sweep reading this mirror row
+    // cannot wipe them on the standby. Bits mirror Go LogFlag* (0/1).
+    let attribution = SessionSyncAttribution::from_session(&decision, metadata);
+    let log_flags = (metadata.log_session_init as u8)
+        | ((metadata.log_session_close as u8) << 1)
+        | ((metadata.fabric_ingress as u8) << 7);
     Some(BpfSessionValueV4 {
         state: SESS_STATE_ESTABLISHED,
         flags,
         tcp_state: 0,
         is_reverse: if metadata.is_reverse { 1 } else { 0 },
-        app_timeout: 0,
+        app_timeout: attribution.inactivity_timeout_secs,
         // #5213: the stable session id from the session table (was hardcoded 0).
         session_id,
         created: now_secs,
@@ -313,7 +321,7 @@ pub(super) fn build_conntrack_value_v4(
         rev_bytes: 0,
         reverse_key: rev_key,
         alg_type,
-        log_flags: 0,
+        log_flags,
         app_id,
         fib_ifindex: 0,
         fib_vlan_id: 0,
@@ -525,12 +533,17 @@ pub(super) fn build_conntrack_value_v6(
     };
     let nat_dst_port = decision.nat.rewrite_dst_port.unwrap_or(0).to_be();
 
+    // #16700: v6 twin of the v4 app_timeout/log_flags publish above.
+    let attribution = SessionSyncAttribution::from_session(&decision, metadata);
+    let log_flags = (metadata.log_session_init as u8)
+        | ((metadata.log_session_close as u8) << 1)
+        | ((metadata.fabric_ingress as u8) << 7);
     Some(BpfSessionValueV6 {
         state: SESS_STATE_ESTABLISHED,
         flags,
         tcp_state: 0,
         is_reverse: if metadata.is_reverse { 1 } else { 0 },
-        app_timeout: 0,
+        app_timeout: attribution.inactivity_timeout_secs,
         // #5213: the stable session id from the session table (was hardcoded 0).
         session_id,
         created: now_secs,
@@ -552,7 +565,7 @@ pub(super) fn build_conntrack_value_v6(
         rev_bytes: 0,
         reverse_key: rev_key,
         alg_type,
-        log_flags: 0,
+        log_flags,
         app_id,
         fib_ifindex: 0,
         fib_vlan_id: 0,
@@ -1108,5 +1121,29 @@ mod routing_domain_row_9546_tests {
         )
         .expect("a same-family v4 key must build a row");
         assert_eq!(row.routing_domain, ROUTING_DOMAIN_WIRE_ABSENT);
+    }
+
+    #[test]
+    fn built_rows_carry_app_timeout_and_log_flags_16700() {
+        let mut meta = metadata(false);
+        meta.inactivity_timeout_ns = Some(30_000_000_000);
+        meta.log_session_init = true;
+        meta.log_session_close = true;
+        let v4 = build_conntrack_value_v4(&key_v4(0), decision(), &meta, 0, 1, 2, 0, 0, 0, 0, 0)
+            .expect("v4 row");
+        assert_eq!(v4.app_timeout, 30);
+        assert_eq!(v4.log_flags, 0b11);
+        let v6 = build_conntrack_value_v6(&key_v6(0), decision(), &meta, 0, 1, 2, 0, 0, 0, 0, 0)
+            .expect("v6 row");
+        assert_eq!(v6.app_timeout, 30);
+        assert_eq!(v6.log_flags, 0b11);
+        // never sentinel round-trips as 86401, fabric bit preserved
+        meta.inactivity_timeout_ns = Some(u64::MAX);
+        meta.fabric_ingress = true;
+        meta.log_session_init = false;
+        let never = build_conntrack_value_v4(&key_v4(0), decision(), &meta, 0, 1, 2, 0, 0, 0, 0, 0)
+            .expect("never row");
+        assert_eq!(never.app_timeout, 86401);
+        assert_eq!(never.log_flags, 0b1000_0010);
     }
 }
