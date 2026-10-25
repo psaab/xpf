@@ -60,6 +60,18 @@ xpf (0.0.0) unstable; urgency=medium
     whose verdict both consumer gates accepted as clean; the
     tracked shim object was regenerated under the scrubbed recipe
     (verifier PASS, 696219 insns / 30.38% headroom).
+  * Event-options: parked deferred edges are now reconciled on every
+    policy Apply (#16650). The pending cooldown/budget maps are keyed
+    by policy name (cooldown also by event) with no generation, so a
+    predecessor's parked entry previously survived a same-name
+    redefine, occupied the key, and silently swallowed the
+    redefined policy's in-cooldown edge; the stale entry was then
+    deleted at drain on semantic-revision mismatch and the
+    successor's only remediation edge (RPM emits ping_test_failed
+    only on a status change) was lost. Apply now purges parked
+    entries whose stamped revision no longer matches the live
+    revision, adjusting the pending-deferred gauge; entries for
+    unchanged policies survive and still replay after the cooldown.
   * Daemon/RPM: `rpmProbeTestGating` source-address→VIP matching is
     now canonical (#16639): RETH unit addresses and `vrrp-group`
     virtual-addresses key the VIP→RG map by parsed `netip.Addr`
