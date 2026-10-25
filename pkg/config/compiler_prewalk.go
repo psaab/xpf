@@ -946,6 +946,19 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 		return nil, nil, err
 	}
 
+	// #16672: a redundancy-group `node` statement that is not exactly
+	// `node <id> priority <value>` — above all the fused
+	// `node 1 priority 100 node 0 priority 200` a missing `;` makes,
+	// which the #8437 gate exempts as a same-keyword repeat and the
+	// compiler then wrote onto the first node, inverting RG primary
+	// placement. Strict at commit; warn on tolerant load, where the
+	// compiler keeps the first node's own priority.
+	rgNodePriorityWarnings16672, err := validateRGNodePriorityShapeAST(
+		tree.Children, opts.lenientRGNodePriorityShape16672)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// The #6662 packed-login-body gate and the #6701 built-in-class-shadow gate
 	// used to run here, on the ALREADY-EXPANDED single-node view. They now run
 	// PRE-EXPANSION as both-node unions from compileTree /
@@ -1043,6 +1056,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredF
 	warnings = append(warnings, monitorWeightWarnings...)
 	warnings = append(warnings, rgArityWarnings...)
 	warnings = append(warnings, clusterUnknownWarnings16456...)
+	warnings = append(warnings, rgNodePriorityWarnings16672...)
 	warnings = append(warnings, garpCountWarnings...)
 	warnings = append(warnings, bareLeafWarnings...)
 	warnings = append(warnings, staticRouteQNHWarnings...)

@@ -167,6 +167,15 @@ xpf (0.0.0) unstable; urgency=medium
     kept both, leaving the management NIC renamed and unaddressed
     across reboots (its host config keys on the kernel name) while
     reporting success — console-only recovery.
+  * Config/cluster: a redundancy-group `node` statement that is not
+    exactly `node <0|1> priority <1..254>` is now rejected at commit
+    (#16672). A missing `;` fused `node 1 priority 100 node 0
+    priority 200` into one statement — the #8437 fused-statement gate
+    exempts a same-keyword repeat — and the compiler wrote the second
+    priority onto the first node, inverting RG primary placement.
+    Missing, non-numeric, duplicate, or trailing priority tokens are
+    refused on the same gate; tolerant load warns and keeps the
+    first node's own priority.
   * Feeds: a feed restored with a count baseline but no usable content
     epoch now re-establishes the epoch on its first guarded install
     (#16651). Legacy count-only records, records whose epoch digest was
