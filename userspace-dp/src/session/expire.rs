@@ -201,6 +201,19 @@ impl SessionTable {
             let bucket_idx = bucket_for_tick(self.wheel.cursor_tick);
             let due_count = self.wheel.buckets[bucket_idx].len();
             for _ in 0..due_count {
+                // The modulo bucket can be visited before a future absolute
+                // tick when this call catches up after a long GC pause. Keep
+                // that hint queued until the cursor reaches its scheduled tick.
+                if self.wheel.buckets[bucket_idx]
+                    .front()
+                    .is_some_and(|entry| entry.scheduled_tick > self.wheel.cursor_tick)
+                {
+                    let future = self.wheel.buckets[bucket_idx]
+                        .pop_front()
+                        .expect("bucket length snapshot bounds the iteration");
+                    self.wheel.buckets[bucket_idx].push_back(future);
+                    continue;
+                }
                 let WheelEntry {
                     key,
                     scheduled_tick,
