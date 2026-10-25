@@ -130,7 +130,10 @@ func (c *CLI) checkConfigRegexGroups14981(line string) error {
 			verb := fields[0]
 			if verb == "set" || verb == "delete" || verb == "deactivate" || verb == "activate" {
 				rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), verb))
-				full = verb + " " + strings.Join(append(append([]string(nil), config.NormalizeEditPathTokens(edit)...), strings.Fields(rest)...), " ")
+				// #16608: quote the cursor (and keep the raw remainder, which
+				// already carries any quoted whitespace) so the replay lexes
+				// the same path the executor will act on.
+				full = verb + " " + config.JoinConfigPathTokens(config.NormalizeEditPathTokens(edit)) + " " + rest
 			}
 		}
 	}
@@ -156,7 +159,9 @@ func lineTouchesGroupsCLI14981(c *CLI, line string) bool {
 	}
 	if len(edit) > 0 {
 		if fields := strings.Fields(line); len(fields) > 0 {
-			joined := fields[0] + " " + strings.Join(append(append([]string(nil), edit...), fields[1:]...), " ")
+			// #16608: quote the normalized cursor so a whitespace-bearing
+			// element stays one token for the groups predicate.
+			joined := fields[0] + " " + config.JoinConfigPathTokens(append(append([]string(nil), config.NormalizeEditPathTokens(edit)...), fields[1:]...))
 			return config.LineTouchesGroups14981(joined)
 		}
 	}
