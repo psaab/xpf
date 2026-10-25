@@ -566,21 +566,26 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 // static-NAT, destination-NAT or source-NAT literal that is IPv4-mapped
 // (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d, excluding :: and ::1).
 //
-// Such a literal commits clean today but can never match. The helper
-// drops every native (non-WG-underlay) IPv6 frame whose src OR dst is
+// A MATCH literal in this form can never match. The helper drops
+// every native (non-WG-underlay) IPv6 frame whose src OR dst is
 // v4-mapped/compatible at ingress before NAT (#10686/#11669,
 // ipv6_addr_is_v4_mapped_or_compat /
 // ipv6_frame_has_v4_mapped_or_compat in
 // userspace-dp/src/afxdp/frame/inspect.rs, dropped in
-// poll_descriptor with v4_mapped_ipv6_dropped += 1), so no IPv6 packet
-// carrying the identity ever reaches the NAT tables. An IPv4 packet to
-// the embedded v4 address keys IpAddr::V4 and misses the V6-keyed
-// static/DNAT entry (parse_nat_prefix in nat/static_nat.rs keeps
-// IpAddr::V6(::ffff:...)); a SNAT pool member keyed V6 is likewise
-// allocated only from the dropped v6 identity. Proxy-ARP already
-// unmaps this spelling (#8631); NAT does not, so the product handled
-// the identical literal inconsistently. This gate rejects rather
-// than unmaps: rewriting a NAT match/target to IPv4 would change the
+// poll_descriptor with v4_mapped_ipv6_dropped += 1), so no IPv6
+// packet carrying the identity ever reaches the NAT tables. An IPv4
+// packet to the embedded v4 address keys IpAddr::V4 and misses the
+// V6-keyed static/DNAT entry (parse_nat_prefix in nat/static_nat.rs
+// keeps IpAddr::V6(::ffff:...)). A mapped TARGET/pool identity is
+// different and worse than inert: the SNAT allocator retains the
+// member in its V6 pool and allocates it to ANY native-IPv6 source
+// (nat/source/{expand,match_rules}.rs), so a flow can be rewritten
+// ONTO the mapped identity — and the return traffic addressed to it
+// is then dropped at ingress. Such a translation cannot support
+// normal bidirectional forwarding. Proxy-ARP already unmaps this
+// spelling (#8631); NAT does not, so the product handled the
+// identical literal inconsistently. This gate rejects rather than
+// unmaps: rewriting a NAT match/target to IPv4 would change the
 // rule's family and its #13922 cross-family verdict — a silent
 // semantic rewrite at commit — whereas rejection names the spelling
 // and lets the operator author the intended family explicitly.
@@ -588,8 +593,8 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 // The predicate is natAddrIsV4MappedOrCompat, mirroring the Rust
 // ingress predicate octet-for-octet (excluding ::/::1). Sites, in
 // deterministic order (static rule-sets in slice order, DNAT
-// rule-sets sorted by name, DNAT pools sorted by name, SNAT pools in
-// referenced order then sorted for the unreferenced sweep):
+// rule-sets sorted by name, DNAT pools sorted by name, SNAT pools
+// sorted by name):
 //
 //   - static-NAT: every authored match destination-address
 //     (MatchAddresses, falling back to the scalar Match), the
@@ -603,8 +608,8 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 //   - source-NAT: every pool member (SourceNATPoolMembers) of every
 //     pool — referenced or not, because a mapped member is the
 //     defect regardless of which rule references it today; an
-//     unreferenced pool carrying one is inert-but-wrong config the
-//     next rule reference would silently activate.
+//     unreferenced pool carrying one is wrong config the next rule
+//     reference would silently activate.
 //
 // Address-book names and unparseable tokens report false from the
 // predicate and are left to their existing gates. A prefix whose
@@ -615,9 +620,11 @@ func natMatchEmptyAppSetError(natKind, ruleSet, ruleName, name string) error {
 // Strict on commit / commit-check (hard reject naming the NAT kind,
 // rule-set/rule or pool, slot, and offending value); the registry
 // call site downgrades to a warning on the tolerant load / peer-sync
-// path (#1960 no-brick) — the dataplane already fails such rules
-// closed (the entry never matches), so a leniently-loaded config
-// boots and forwards untranslated exactly as before.
+// path (#1960 no-brick). The lenient disposition is unchanged from
+// before this gate: a mapped match entry installs but never matches,
+// and a mapped pool member can still be allocated outbound (its
+// return traffic is ingress-dropped) — the warning, not a scrub, is
+// what the tolerant path adds.
 func validateNATMappedCompatStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -626,8 +633,9 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 		"(::ffff:a.b.c.d or ::a.b.c.d); the dataplane drops every IPv6 " +
 		"frame carrying such an identity at ingress before NAT " +
 		"(#10686), and an IPv4 packet keys IPv4 and misses the " +
-		"IPv6-keyed entry, so the rule can never match — author the " +
-		"address in native IPv4 or native IPv6 form instead"
+		"IPv6-keyed entry, so a rule matching on it can never match and " +
+		"a translation onto it cannot carry return traffic — author " +
+		"the address in native IPv4 or native IPv6 form instead"
 	// Static NAT.
 	for _, rs := range cfg.Security.NAT.Static {
 		if rs == nil {
@@ -704,8 +712,9 @@ func validateNATMappedCompatStrict(cfg *Config) error {
 		}
 	}
 	// Source NAT: pool members (the R3-A08-02 cohort site). All pools,
-	// sorted by name — a mapped member never serves a flow whether or
-	// not a rule references the pool today.
+	// sorted by name — a mapped member is allocated onto an identity
+	// whose return traffic is ingress-dropped, whether or not a rule
+	// references the pool today.
 	{
 		names := make([]string, 0, len(cfg.Security.NAT.SourcePools))
 		for name := range cfg.Security.NAT.SourcePools {
@@ -741,7 +750,7 @@ func natMappedCompatDNATMatch(rsName, ruleName string, destAddrs []string) error
 	for _, raw := range destAddrs {
 		if natAddrIsV4MappedOrCompat(raw) {
 			return fmt.Errorf(
-				"destination-nat rule-set %q rule %q: match destination-address %q is an IPv4-mapped or IPv4-compatible IPv6 literal (::ffff:a.b.c.d or ::a.b.c.d); the dataplane drops every IPv6 frame carrying such an identity at ingress before NAT (#10686), and an IPv4 packet keys IPv4 and misses the IPv6-keyed entry, so the rule can never match — author the address in native IPv4 or native IPv6 form instead (#16875)",
+				"destination-nat rule-set %q rule %q: match destination-address %q is an IPv4-mapped or IPv4-compatible IPv6 literal (::ffff:a.b.c.d or ::a.b.c.d); the dataplane drops every IPv6 frame carrying such an identity at ingress before NAT (#10686), and an IPv4 packet keys IPv4 and misses the IPv6-keyed entry, so a rule matching on it can never match and a translation onto it cannot carry return traffic — author the address in native IPv4 or native IPv6 form instead (#16875)",
 				rsName, ruleName, raw)
 		}
 	}

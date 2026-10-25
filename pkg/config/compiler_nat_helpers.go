@@ -70,16 +70,22 @@ func NATCIDRIPPart(cidr string) string { return natCIDRIPPart(cidr) }
 // (mapped), and :: (unspecified) and ::1 (loopback) are EXCLUDED —
 // both fall inside ::/96 numerically but are legitimate local IPv6
 // identities with their own handling, never a v4 identity smuggled
-// past family-typed policy. Parsing goes through netip.ParseAddr,
-// never net.IP.To4 (which folds the mapped form); a zone-bearing or
-// unparseable token is not this predicate's concern and reports
-// false. Octet compares only, no allocation beyond the parse.
+// past family-typed policy. The exclusions compare the EXACT IPv6
+// identities (netip.IPv6Unspecified / netip.IPv6Loopback), NOT
+// addr.IsLoopback(): netip's IsLoopback Unmaps first, so it also
+// reports the whole mapped 127/8 (::ffff:127.0.0.0/24) as loopback,
+// while Rust's Ipv6Addr::is_loopback is ::1 only and its ingress
+// predicate drops ::ffff:127.x.x.x as mapped. Parsing goes through
+// netip.ParseAddr, never net.IP.To4 (which folds the mapped form);
+// a zone-bearing or unparseable token is not this predicate's
+// concern and reports false. Octet compares only, no allocation
+// beyond the parse.
 func natAddrIsV4MappedOrCompat(raw string) bool {
 	addr, err := netip.ParseAddr(natCIDRIPPart(raw))
 	if err != nil || !addr.Is6() || addr.Zone() != "" {
 		return false
 	}
-	if addr.IsUnspecified() || addr.IsLoopback() {
+	if addr == netip.IPv6Unspecified() || addr == netip.IPv6Loopback() {
 		return false
 	}
 	o := addr.As16()

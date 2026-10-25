@@ -7,17 +7,20 @@ import (
 
 // #16875 (R3-B09-03): static-NAT and destination-NAT match/target
 // literals in IPv4-mapped (::ffff:a.b.c.d) or IPv4-compatible
-// (::a.b.c.d, excluding :: and ::1) form commit clean but can never
-// match: the userspace helper drops every native IPv6 frame whose src
-// or dst is v4-mapped/compatible at ingress before NAT
-// (#10686/#11669, ipv6_addr_is_v4_mapped_or_compat in
+// (::a.b.c.d, excluding :: and ::1) form commit clean but a match in
+// that form can never match: the userspace helper drops every native
+// IPv6 frame whose src or dst is v4-mapped/compatible at ingress
+// before NAT (#10686/#11669, ipv6_addr_is_v4_mapped_or_compat in
 // userspace-dp/src/afxdp/frame/inspect.rs), and an IPv4 packet keys
-// V4, missing the V6-keyed entry. The strict gates now reject such
-// literals (warn on lenient), mirroring that predicate. The SNAT
-// pool site named as this finding's cohort sibling is covered too:
-// validateNATMappedCompatStrict walks source pools as well, because
-// a mapped/compat pool member keys V6, is allocated only from the
-// (ingress-dropped) v6 identity, and can never serve a flow.
+// V4, missing the V6-keyed entry. A mapped TARGET/pool identity can
+// be allocated outbound (the SNAT allocator keeps it in the V6 pool
+// for any native-IPv6 source) but its return traffic is
+// ingress-dropped, so it cannot carry bidirectional forwarding. The
+// strict gates now reject such literals (warn on lenient),
+// mirroring that predicate. Note the mapped 127/8 range
+// (::ffff:127.x.x.x) is NOT exempt: Rust excludes only the exact
+// ::1, and Go's netip IsLoopback would wrongly fold the mapped
+// range out of the rejection (review fold on #17697).
 
 func mappedStaticSet16875(match, prefix string) []string {
 	return staticNATSet(match, prefix)
@@ -30,6 +33,10 @@ func TestMappedCompatStaticNATRejected16875(t *testing.T) {
 		{"mapped match only", "::ffff:203.0.113.5/128", "2001:db8::5/128"},
 		{"compat target only", "2001:db8::1/128", "::10.0.0.5/128"},
 		{"mapped bare match", "::ffff:203.0.113.5", "::ffff:10.0.0.5"},
+		{"mapped loopback match", "::ffff:127.0.0.1/128", "2001:db8::5/128"},
+		{"mapped loopback range match", "::ffff:127.0.0.2/128", "2001:db8::5/128"},
+		{"mapped loopback hex match", "::ffff:7f00:2/128", "2001:db8::5/128"},
+		{"mapped loopback target", "2001:db8::1/128", "::ffff:127.0.0.1/128"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(buildTree(t, mappedStaticSet16875(tc.match, tc.prefix)))
@@ -69,6 +76,27 @@ func TestMappedCompatStaticNATLenientWarns16875(t *testing.T) {
 	}
 }
 
+func TestMappedCompatMappedLoopbackLenientWarns16875(t *testing.T) {
+	// The mapped 127/8 range must warn on the tolerant path too — it
+	// is inside the mapped rejection, not inside the ::1 exemption.
+	cfg, err := CompileConfigLenient(buildTree(t, mappedStaticSet16875(
+		"::ffff:127.0.0.1/128", "2001:db8::5/128")))
+	if err != nil {
+		t.Fatalf("lenient load must not fail: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "IPv4-mapped or IPv4-compatible") {
+		t.Fatalf("lenient load must warn about the mapped loopback literal, got: %v", cfg.Warnings)
+	}
+	cfg, err = CompileConfigLenient(buildTree(t, snatFamilySet16600(
+		"source-address 2001:db8:1::/64", "::ffff:127.0.0.1")))
+	if err != nil {
+		t.Fatalf("lenient SNAT load must not fail: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "IPv4-mapped or IPv4-compatible") {
+		t.Fatalf("lenient load must warn about the mapped loopback pool member, got: %v", cfg.Warnings)
+	}
+}
+
 func TestMappedCompatDNATRejected16875(t *testing.T) {
 	for _, tc := range []struct{ name, match, pool string }{
 		{"mapped match + mapped pool", "::ffff:203.0.113.5/128", "::ffff:10.0.0.5"},
@@ -76,6 +104,8 @@ func TestMappedCompatDNATRejected16875(t *testing.T) {
 		{"mapped match native pool", "::ffff:203.0.113.5/128", "2001:db8::5"},
 		{"native match mapped pool", "2001:db8::1/128", "::ffff:10.0.0.5"},
 		{"mapped prefix match", "::ffff:203.0.113.0/120", "::ffff:10.0.0.5"},
+		{"mapped loopback match native pool", "::ffff:127.0.0.1/128", "2001:db8::5"},
+		{"native match mapped loopback pool", "2001:db8::1/128", "::ffff:127.0.0.1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := []string{
@@ -139,6 +169,8 @@ func TestMappedCompatSNATPoolRejected16875(t *testing.T) {
 		{"mapped pool member", "::ffff:192.0.2.1"},
 		{"compat pool member", "::192.0.2.1"},
 		{"mapped pool prefix", "::ffff:192.0.2.0/120"},
+		{"mapped loopback pool member", "::ffff:127.0.0.1"},
+		{"mapped loopback pool prefix", "::ffff:127.0.0.0/120"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(buildTree(t, snatFamilySet16600(
@@ -189,8 +221,18 @@ func TestMappedCompatPredicate16875(t *testing.T) {
 		{"::ffff:0:0", true}, // hex spelling of the mapped form
 		{"::203.0.113.5", true},
 		{"::203.0.113.5/128", true},
-		{"::", false},  // unspecified excluded (Rust predicate)
-		{"::1", false}, // loopback excluded
+		// Mapped 127/8: Rust excludes only the exact ::1, so the whole
+		// mapped loopback range is mapped (ingress-dropped). Go's
+		// netip IsLoopback Unmaps and would exempt these — the
+		// predicate must not use it (#17697 review fold).
+		{"::ffff:127.0.0.1", true},
+		{"::ffff:127.0.0.1/128", true},
+		{"::ffff:127.0.0.2", true},
+		{"::ffff:127.255.255.254/128", true},
+		{"::ffff:7f00:1", true}, // hex spelling of ::ffff:127.0.0.1
+		{"::127.0.0.1", true},   // compat loopback-range spelling
+		{"::", false},           // unspecified excluded (Rust predicate)
+		{"::1", false},          // loopback excluded
 		{"::/0", false},
 		{"::1/128", false},
 		{"2001:db8::5", false},
