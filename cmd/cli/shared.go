@@ -351,12 +351,24 @@ func (c *ctl) dispatchConfig(line string) error {
 		// the input prefix. The gRPC Set handler prefix-routes "deactivate "/
 		// "activate " to Deactivate/ActivateFromInput; sending the bare path
 		// (or using the Delete RPC) would mangle it into a junk "set" path.
-		if len(parts) < 2 {
-			return fmt.Errorf("%s: missing path", parts[0])
+		// #16790: lex the path with the canonical config lexer, as the
+		// console (pkg/cli) and the remote set/delete arms do. The previous
+		// strings.Fields split broke a quoted element (`policy "allow
+		// web"`) into `policy`, `"allow`, `web"` and JoinConfigPathTokens
+		// re-quoted those literals, so a whitespace-bearing name could
+		// never be (de)activated remotely (fail-closed: path not found),
+		// and a comment's words leaked into the wire path. Refuse a line
+		// that does not lex cleanly instead of sending a Fields path.
+		verb, lexedPath, ok := config.ParseDeactivateActivateCommand(line)
+		if !ok {
+			return fmt.Errorf("%s: invalid path", parts[0])
 		}
-		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), parts[1:]...)
+		if len(lexedPath) == 0 {
+			return fmt.Errorf("%s: missing path", verb)
+		}
+		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), lexedPath...)
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{
-			Input: parts[0] + " " + config.JoinConfigPathTokens(fullPath),
+			Input: verb + " " + config.JoinConfigPathTokens(fullPath),
 		})
 		if err != nil {
 			return fmt.Errorf("%v", err)
@@ -435,7 +447,18 @@ func (c *ctl) dispatchConfig(line string) error {
 		return nil
 
 	case "show":
-		return c.handleConfigShow(parts[1:])
+		// #16790 (R3-A54-03 leg): lex the typed path with the canonical
+		// config lexer before splitting the pipe, as the console does.
+		// The previous strings.Fields hand-off split a quoted element
+		// (show security zones security-zone "lan in") into `"lan` /
+		// `in"` and the server looked up a path that does not exist
+		// (fail-closed: not found), and comment words leaked into the
+		// lookup path. A quoted "|" stays data, not a pipe.
+		showArgs, showOK := lexConfigShowArgs16790(line)
+		if !showOK {
+			return fmt.Errorf("show: invalid path")
+		}
+		return c.handleConfigShow(showArgs)
 
 	case "commit":
 		return c.handleCommit(parts[1:])
@@ -575,6 +598,63 @@ func rawRemainderAfterVerb(line, verb string) string {
 		return strings.TrimSpace(line)
 	}
 	return strings.TrimLeft(trimmed[len(verb):], " \t")
+}
+
+// lexConfigShowArgs16790 lexes a full config-mode `show ...` line into
+// the argument list handleConfigShow consumes (#16790). Path tokens come
+// from the canonical config lexer (config.ParseConfigMutationLine):
+// quoted elements are unquoted to single tokens and comments are skipped,
+// exactly as the console adjudicates. The config lexer itself rejects a
+// bare pipe (TokenPipe is not an identifier/string), so the pipe and its
+// modifier are recovered from the raw remainder after the lexed path: a
+// remainder starting with "|" is the pipe modifier tokens (Fields is safe
+// there — modifiers are bare keywords/numbers), and a quoted "|" inside
+// the path was already consumed as a string token, so it never reaches
+// the remainder. ok is false when the line does not lex cleanly (including
+// a quoted "show" verb, mirroring ParseTopUpPrefix15082), so the caller
+// refuses instead of sending a Fields path nobody lexed.
+func lexConfigShowArgs16790(line string) ([]string, bool) {
+	tokens, _, ok := config.ParseConfigMutationLine(line)
+	if ok {
+		if len(tokens) == 0 || tokens[0] != "show" {
+			return nil, false
+		}
+		return tokens[1:], true
+	}
+	// The strict lexer stops at a bare pipe; re-lex just the path head
+	// before the first unquoted pipe. Find that pipe by scanning with
+	// the lexer: tokens up to TokenPipe are the path.
+	lex := config.NewLexer(line)
+	var path []string
+	sawShow := false
+	for {
+		tok := lex.Next()
+		switch tok.Type {
+		case config.TokenIdentifier, config.TokenString:
+			if !sawShow {
+				if tok.Type == config.TokenString || tok.Value != "show" {
+					return nil, false
+				}
+				sawShow = true
+				continue
+			}
+			path = append(path, tok.Value)
+		case config.TokenPipe:
+			if !sawShow {
+				return nil, false
+			}
+			rest := strings.TrimSpace(line[lex.Position():])
+			if rest == "" {
+				// Trailing pipe: let handleConfigShow report the
+				// missing modifier.
+				return append(path, "|"), true
+			}
+			args := append(append([]string{}, path...), "|")
+			return append(args, strings.Fields(rest)...), true
+		default:
+			return nil, false
+		}
+	}
 }
 
 // --- Help ---

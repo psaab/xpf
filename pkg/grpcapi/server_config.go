@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -207,9 +206,14 @@ func (s *Server) Set(ctx context.Context, req *pb.SetRequest) (*pb.SetResponse, 
 			}
 			var err error
 			if verb == "deactivate" {
-				err = s.store.DeactivateFromInputAsPlantClass(sessionID, plantClass, strings.Join(path, " "))
+				// #16790: re-join with JoinConfigPathTokens, not
+				// strings.Join. The store re-lexes the input
+				// (applyEditLine), so a whitespace-bearing element
+				// (policy "allow web") must be re-quoted or it splits
+				// into two tokens and the path is not found.
+				err = s.store.DeactivateFromInputAsPlantClass(sessionID, plantClass, config.JoinConfigPathTokens(path))
 			} else {
-				err = s.store.ActivateFromInputAsPlantClass(sessionID, plantClass, strings.Join(path, " "))
+				err = s.store.ActivateFromInputAsPlantClass(sessionID, plantClass, config.JoinConfigPathTokens(path))
 			}
 			if err != nil {
 				return nil, configMutationStatus(err)

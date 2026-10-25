@@ -425,7 +425,9 @@ func (c *ctl) handleConfigShow(args []string) error {
 
 // splitShowPipe separates a show command's path from its single pipe modifier.
 // Unlike substring matching, it never interprets a path/token containing
-// "compare" or "display" as a modifier, and it rejects malformed pipe syntax.
+// "compare" or "display" as a modifier. A token that merely CONTAINS "|"
+// (a quoted path element such as `a|b`, #16790) is path data, not a pipe;
+// only the bare "|" token separates.
 func splitShowPipe(args []string) (path, pipe []string, err error) {
 	pipeIndex := -1
 	for i, arg := range args {
@@ -434,8 +436,6 @@ func splitShowPipe(args []string) (path, pipe []string, err error) {
 				return nil, nil, fmt.Errorf("syntax error: only one pipe modifier is allowed")
 			}
 			pipeIndex = i
-		} else if strings.Contains(arg, "|") {
-			return nil, nil, fmt.Errorf("syntax error: pipe modifier must be separated by spaces")
 		}
 	}
 	if pipeIndex < 0 {
