@@ -55,7 +55,7 @@ func (h *partialUpdateHarness6986) sent(t *testing.T, kind string) []ControlRequ
 
 func newPartialUpdateHarness6986(t *testing.T) *partialUpdateHarness6986 {
 	t.Helper()
-	dir := t.TempDir()
+	dir := shortSockDir9322(t)
 	controlSock := filepath.Join(dir, "control.sock")
 	ln, err := net.Listen("unix", controlSock)
 	if err != nil {
@@ -101,6 +101,12 @@ func newPartialUpdateHarness6986(t *testing.T) *partialUpdateHarness6986 {
 	m := New()
 	m.proc = &exec.Cmd{Process: proc}
 	m.cfg.ControlSocket = controlSock
+	// #16843: cfg is clustered (Chassis.Cluster), so the #15919 send-site
+	// gate refuses every apply_snapshot until the RG provider is wired.
+	// These cells exercise the #6986 deferred-publish property, not the
+	// unwired refusal (covered by routes_connected_nil_provider_15919_test.go),
+	// so wire a provider as the daemon does before publishing.
+	m.SetRGPrimaryProvider(func(int) (bool, bool) { return true, true })
 	return &partialUpdateHarness6986{m: m, cfg: cfg, mu: &mu, requests: &requests}
 }
 
@@ -133,6 +139,9 @@ func (h *partialUpdateHarness6986) seedDeferredPublish(t *testing.T) {
 	deferred := *published
 	deferred.Generation = 10
 	deferred.Zones = []ZoneSnapshot{{Name: deferredMarkerZone6986, ID: 77}}
+	// #16843: the deferred snapshot now carries one zone, so its Summary
+	// must declare it or the #16056 send-site section gate refuses it.
+	deferred.Summary.ZoneCount = len(deferred.Zones)
 
 	h.m.mu.Lock()
 	h.m.lastSnapshot = &deferred

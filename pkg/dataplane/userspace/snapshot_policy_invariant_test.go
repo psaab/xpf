@@ -68,6 +68,21 @@ func hardeningPolicyCfg() *config.Config {
 	}
 	cfg.System.HostName = "fw-census"
 	cfg.System.DataplaneType = "userspace"
+	// #16843: populate the two sections the census previously exempted
+	// as "representative config sets no …", so dropping the builder's
+	// Flow: or StaticNAT: literal now fails this census instead of
+	// surviving the suite. Flow needs a non-zero option (TCPMSSAllTCP);
+	// StaticNAT needs one valid 1:1 rule.
+	cfg.Security.Flow.TCPMSSAllTCP = 1350
+	cfg.Security.NAT.Static = []*config.StaticNATRuleSet{{
+		Name:     "static-census",
+		FromZone: "wan",
+		Rules: []*config.StaticNATRule{{
+			Name:  "web",
+			Match: "198.51.100.10/32",
+			Then:  "192.0.2.10/32",
+		}},
+	}}
 	return cfg
 }
 
@@ -281,7 +296,6 @@ func TestFullBuilderPopulatesEverySnapshotField(t *testing.T) {
 		"ClearPolicies":                 "authorized-clear marker set only by Manager.Compile on an empty full build; the representative build is non-empty",
 		"DestinationNAT":                "representative config has no destination NAT rules",
 		"SourceNAT":                     "representative config has no source NAT rules",
-		"StaticNAT":                     "representative config has no static NAT rules",
 		"NAT64":                         "representative config has no NAT64 rules",
 		"Nptv6":                         "representative config has no NPTv6 rules",
 		"Screens":                       "representative config has no screen profiles",
@@ -304,7 +318,6 @@ func TestFullBuilderPopulatesEverySnapshotField(t *testing.T) {
 		"Routes":                        "representative config has no static routes",
 		"TunnelEndpoints":               "representative config has no tunnel endpoints",
 		"FIBGeneration":                 "test builds with fib_generation 0; Compile stamps the live FIB generation",
-		"Flow":                          "representative config sets no security flow options (zero FlowSnapshot is the default)",
 		"PolicyRematchExtensive":        "only with policy-rematch extensive configuration",
 		"AddressBooks":                  "representative config declares no address-book entries (any is a keyword, not a book)",
 		"AppCatalog":                    "representative config uses only the `any` application, which needs no catalog row",
@@ -334,6 +347,17 @@ func TestFullBuilderPopulatesEverySnapshotField(t *testing.T) {
 	// must never be exempt or empty for this config.
 	if len(snap.Policies) == 0 {
 		t.Error("census premise: representative config published no policies")
+	}
+	// #16843: Flow and StaticNAT were previously exempt, so deleting
+	// their builder literals survived this census. The representative
+	// config now populates both; assert them explicitly so a dropped
+	// Flow:/StaticNAT: literal fails here even if the reflection walk
+	// is later weakened.
+	if snap.Flow.TCPMSSAllTCP != 1350 {
+		t.Errorf("census premise: Flow.TCPMSSAllTCP = %d, want 1350 from the representative config (dropped Flow: literal?)", snap.Flow.TCPMSSAllTCP)
+	}
+	if len(snap.StaticNAT) != 1 || snap.StaticNAT[0].ExternalIP != "198.51.100.10/32" || snap.StaticNAT[0].InternalIP != "192.0.2.10/32" {
+		t.Errorf("census premise: StaticNAT = %+v, want the one representative 1:1 rule (dropped StaticNAT: literal?)", snap.StaticNAT)
 	}
 	// Nested census (GLM fold): reflect into Summary so a dropped literal
 	// INSIDE the nested struct (e.g. `PolicyCount: len(policies),` deleted
