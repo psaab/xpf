@@ -446,13 +446,20 @@ tuned independently because Kea renders the block once per family.)
   configuring it; a naive `if x > 0` render would make 0 un-expressible. The
   schema is `dhcpExpiredLeasesSchema()` (`pkg/config/schema_system.go`),
   returned fresh per call so the two parents do not alias a mutable map.
-- **Schema floor split (fail-safe):** the three TIMERS (`reclaim-timer`,
-  `flush-timer`, `hold-time`) use `ValidateIntegerMin(1)` because a 0 some
-  Kea versions reject would take DHCP DOWN on the fail-closed restart; the
-  two CAP knobs use `ValidateIntegerMin(0)` (0 = unlimited is documented Kea
-  behaviour) and `unwarned-cycles` is `Min(0)`. No schema-only upper cap
-  (Kea documents no hard ceiling; min-only validation per the
-  `docs/config-schema.md` range policy).
+- **Schema ranges (commit gate + tolerant render):** the three TIMERS
+  (`reclaim-timer`, `flush-timer`, `hold-time`) keep a floor of 1 because
+  a 0 some Kea versions reject would take DHCP DOWN on the fail-closed
+  restart; the two CAP knobs allow 0 (0 = unlimited is documented Kea
+  behaviour) and `unwarned-cycles` allows 0. Every leaf also carries
+  Kea's hard maximum (#16691): reclaim/flush timers and unwarned-cycles
+  65535, `max-time` 10000, `hold-time` / `max-leases` 4294967295 — the
+  deployed Kea parser rejects anything above and then refuses the
+  whole family file, so a min-only schema turned a tuning knob into a
+  family-wide DHCP kill switch on a clean commit. The renderer mirrors
+  the same bounds: a knob that arrives out of range via the tolerant
+  load / peer-sync path (where the schema gate only warns) is omitted
+  with a warning naming the leaf instead of rendered, so Kea falls
+  back to its default for that knob and the family keeps serving.
 - **Compile:** `compileDHCPExpiredLeases` (`pkg/config/compiler_services.go`),
   handling both the hierarchical and flat-set AST shapes (walk +
   first-value-wins, mirroring `compileDHCPDynamicDNS`); a truly empty /
@@ -469,9 +476,10 @@ tuned independently because Kea renders the block once per family.)
   pre-#1387 output, the cardinal invariant H1). Each numeric field emits
   only when set (an operator tunes one knob without pinning the rest); the
   two cap knobs emit on their `*Set` bool so `max-reclaim-leases: 0`
-  (unlimited) is rendered distinctly. `Enabled` with no knobs renders a
-  present empty `{}` (Kea reads it as "reclaim with built-in defaults"; the
-  block surfaces that the feature is on).
+  (unlimited) is rendered distinctly. Out-of-range knobs are omitted
+  with a warning (#16691, see the range bullet above). `Enabled` with
+  no knobs renders a present empty `{}` (Kea reads it as "reclaim with
+  built-in defaults"; the block surfaces that the feature is on).
 - **No service-lifecycle / HA change.** The block is read by Kea on the
   existing (re)start / reconfigure path exactly like every other generated
   key — no new `systemctl` call, no extra daemon. It is in the

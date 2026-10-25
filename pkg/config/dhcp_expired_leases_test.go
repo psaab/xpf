@@ -339,3 +339,72 @@ func TestDHCPExpiredLeasesLenientCompile(t *testing.T) {
 		t.Fatalf("lenient compile dropped the v6 block / max-leases set state: %+v", c6)
 	}
 }
+
+// validateELPLeaf16691 builds a flat-set tree carrying one
+// expired-leases-processing leaf under the given family and returns the
+// SchemaValidate error (nil when the leaf commits clean).
+func validateELPLeaf16691(t *testing.T, family, leaf, value string) error {
+	t.Helper()
+	tree := &ConfigTree{}
+	cmd := "set system services " + family + " expired-leases-processing " + leaf + " " + value
+	path, err := ParseSetCommand(cmd)
+	if err != nil {
+		t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+	}
+	if err := tree.SetPath(path); err != nil {
+		t.Fatalf("SetPath(%q): %v", cmd, err)
+	}
+	_, _ = CompileConfig(tree)
+	return SchemaValidate(tree)
+}
+
+// TestDHCPExpiredLeasesSchemaRejectsAboveKeaMax pins #16691: every
+// expired-leases-processing leaf refuses a value above the bound the
+// deployed Kea parser enforces, naming the leaf, on BOTH families.
+// Before the fix the schema was min-only, so each row below committed
+// clean and Kea then refused the whole family file.
+func TestDHCPExpiredLeasesSchemaRejectsAboveKeaMax(t *testing.T) {
+	rows := []struct{ leaf, value string }{
+		{"reclaim-timer", "65536"},
+		{"flush-timer", "65536"},
+		{"unwarned-cycles", "65536"},
+		{"max-time", "10001"},
+		{"hold-time", "4294967296"},
+		{"max-leases", "4294967296"},
+	}
+	for _, family := range []string{"dhcp-local-server", "dhcpv6-local-server"} {
+		for _, r := range rows {
+			err := validateELPLeaf16691(t, family, r.leaf, r.value)
+			if err == nil || !strings.Contains(err.Error(), r.leaf) {
+				t.Errorf("%s %s %s must be refused at commit naming the leaf, got %v", family, r.leaf, r.value, err)
+			}
+		}
+	}
+}
+
+// TestDHCPExpiredLeasesSchemaAcceptsKeaBoundary pins the other side of
+// #16691: every leaf at its Kea maximum (and the max-time probe from
+// the issue just below it) still commits clean on both families, so
+// the new maxima do not reject a value Kea accepts.
+func TestDHCPExpiredLeasesSchemaAcceptsKeaBoundary(t *testing.T) {
+	rows := []struct{ leaf, value string }{
+		{"reclaim-timer", "65535"},
+		{"reclaim-timer", "1"},
+		{"flush-timer", "65535"},
+		{"hold-time", "4294967295"},
+		{"hold-time", "1"},
+		{"max-leases", "4294967295"},
+		{"max-leases", "0"},
+		{"max-time", "10000"},
+		{"max-time", "0"},
+		{"unwarned-cycles", "65535"},
+		{"unwarned-cycles", "0"},
+	}
+	for _, family := range []string{"dhcp-local-server", "dhcpv6-local-server"} {
+		for _, r := range rows {
+			if err := validateELPLeaf16691(t, family, r.leaf, r.value); err != nil {
+				t.Errorf("%s %s %s is at Kea's boundary and must commit, got %v", family, r.leaf, r.value, err)
+			}
+		}
+	}
+}
