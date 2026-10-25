@@ -302,19 +302,163 @@ func zoneInterfaceMembershipConflicts(cfg *Config) []zoneInterfaceMembershipConf
 	return conflicts
 }
 
-// QuarantinedZoneInterfaceKeys returns every logical interface key claimed by
-// more than one security zone. Tolerant loads omit these mappings so ambiguity
-// fails closed instead of selecting a zone by sorted-name order.
-func QuarantinedZoneInterfaceKeys(cfg *Config) map[string]struct{} {
+// ZoneInterfaceQuarantineExclusions returns, for every logical interface key
+// claimed by more than one security zone, the shared fail-closed verdict:
+// the sorted names of the zones claiming that key. Tolerant loads omit these
+// mappings so ambiguity fails closed instead of selecting a zone by
+// sorted-name order (#3072). The snapshot builder and every operator surface
+// consult this ONE verdict so the two halves cannot diverge (#16556, #6534).
+func ZoneInterfaceQuarantineExclusions(cfg *Config) map[string][]string {
 	conflicts := zoneInterfaceMembershipConflicts(cfg)
 	if len(conflicts) == 0 {
 		return nil
 	}
-	keys := make(map[string]struct{}, len(conflicts))
+	out := make(map[string][]string, len(conflicts))
 	for _, conflict := range conflicts {
-		keys[conflict.key] = struct{}{}
+		// firstZone sorts before secondZone (the walk visits zones in
+		// sorted order), so the pair is already deterministic.
+		out[conflict.key] = []string{conflict.firstZone, conflict.secondZone}
+	}
+	return out
+}
+
+// QuarantinedZoneInterfaceKeys returns every logical interface key claimed by
+// more than one security zone. Tolerant loads omit these mappings so ambiguity
+// fails closed instead of selecting a zone by sorted-name order.
+func QuarantinedZoneInterfaceKeys(cfg *Config) map[string]struct{} {
+	exclusions := ZoneInterfaceQuarantineExclusions(cfg)
+	if len(exclusions) == 0 {
+		return nil
+	}
+	keys := make(map[string]struct{}, len(exclusions))
+	for key := range exclusions {
+		keys[key] = struct{}{}
 	}
 	return keys
+}
+
+// ZoneInterfaceQuarantineReason returns the operator-facing reason an
+// authored zone member (zone, ref) is UNBOUND at runtime, or "" when the
+// member's logical keys are claimed by that zone alone. The verdict expands
+// ref exactly as zoneInterfaceMembershipConflicts does (bare refs fan down
+// to every configured unit), so a bare claim contested on one unit is
+// reported unbound rather than bound (#16556). Contesting zone names come
+// from ZoneInterfaceQuarantineExclusions, the same set the builder omits.
+func ZoneInterfaceQuarantineReason(cfg *Config, _ string, ref string) string {
+	if cfg == nil || ref == "" {
+		return ""
+	}
+	exclusions := ZoneInterfaceQuarantineExclusions(cfg)
+	if len(exclusions) == 0 {
+		return ""
+	}
+	for _, key := range zoneIfaceLogicalKeys(cfg, ref) {
+		claimants, conflicted := exclusions[key]
+		if !conflicted {
+			continue
+		}
+		return fmt.Sprintf(
+			"interface %s is claimed by security zones %s and is bound to neither (quarantined by duplicate membership, #3072) — it matches no zone policy and fails closed; remove it from all but one zone",
+			ref, strings.Join(claimants, " and "))
+	}
+	return ""
+}
+
+// ZoneInterfaceQuarantineClaimants returns the sorted zones claiming the
+// logical keys an authored member ref expands to, or nil when no expanded
+// key is quarantined. It is the claimant half of
+// ZoneInterfaceQuarantineReason for renderers that mark the member inline
+// (the reason string stays the alarm / structured-wire form).
+func ZoneInterfaceQuarantineClaimants(cfg *Config, ref string) []string {
+	if cfg == nil || ref == "" {
+		return nil
+	}
+	exclusions := ZoneInterfaceQuarantineExclusions(cfg)
+	if len(exclusions) == 0 {
+		return nil
+	}
+	for _, key := range zoneIfaceLogicalKeys(cfg, ref) {
+		if claimants, conflicted := exclusions[key]; conflicted {
+			return claimants
+		}
+	}
+	return nil
+}
+
+// ZoneInterfaceQuarantineClaimantsForRows returns, for a renderer keyed by
+// logical interface rows ("base.unit" plus bare bases), the claimant zones
+// for every row key whose interface is quarantined. Rows are derived from
+// the authored member refs themselves, so a bare member contested on one
+// unit marks that unit's row and a unit member marks its own row. A
+// renderer that resolves a row's zone through its own base/unit maps must
+// consult this verdict instead of printing a map-order-chosen claimant
+// (#16556).
+func ZoneInterfaceQuarantineClaimantsForRows(cfg *Config) map[string][]string {
+	exclusions := ZoneInterfaceQuarantineExclusions(cfg)
+	if len(exclusions) == 0 {
+		return nil
+	}
+	out := make(map[string][]string)
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	for _, zoneName := range zoneNames {
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		for _, ref := range zone.Interfaces {
+			if ref == "" {
+				continue
+			}
+			for _, key := range zoneIfaceLogicalKeys(cfg, ref) {
+				if claimants, conflicted := exclusions[key]; conflicted {
+					out[key] = claimants
+				}
+			}
+			// A unit ref also governs its base row in the extensive /
+			// detail renderers (they key by base name): if the unit is
+			// contested, the base row must not claim a single zone.
+			if s := cfg.SplitInterfaceUnitRef(ref); s.HasUnit && s.Base != "" {
+				if _, conflicted := exclusions[s.Literal]; conflicted {
+					if _, exists := out[s.Base]; !exists {
+						out[s.Base] = exclusions[s.Literal]
+					}
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ZoneInterfaceQuarantineAlarmWarnings returns one alarm line per logical
+// interface key quarantined by duplicate zone membership. Unlike the
+// downgraded cfg.Warnings entry (a compile-time advisory the alarm
+// renderers deliberately do not surface wholesale), this is derived from
+// the active config on every render, so `show system alarms` names the
+// interface for as long as the tolerant config stays loaded (#16556).
+func ZoneInterfaceQuarantineAlarmWarnings(cfg *Config) []string {
+	exclusions := ZoneInterfaceQuarantineExclusions(cfg)
+	if len(exclusions) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(exclusions))
+	for key := range exclusions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	warnings := make([]string, 0, len(keys))
+	for _, key := range keys {
+		warnings = append(warnings, fmt.Sprintf(
+			"interface %s is claimed by security zones %s and is bound to neither (quarantined by duplicate membership, #3072) — it matches no zone policy and fails closed; remove it from all but one zone",
+			key, strings.Join(exclusions[key], " and ")))
+	}
+	return warnings
 }
 
 // ZoneAuthoredBoundSecureTunnelUnitRefs returns non-quarantined unit refs

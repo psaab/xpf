@@ -93,11 +93,16 @@ func (c *CLI) showInterfacesExtensiveFiltered(filterName string) error {
 			fmt.Printf("  Description: %s\n", desc)
 		}
 		if zone, ok := ifZoneMap[dispName]; ok {
-			qualifier := ""
-			if cfg != nil && config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
-				qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+			if claimants := config.ZoneInterfaceQuarantineClaimantsForRows(cfg)[dispName]; claimants != nil {
+				fmt.Printf("  Security zone: (none) %s\n",
+					config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+			} else {
+				qualifier := ""
+				if cfg != nil && config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+					qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+				}
+				fmt.Printf("  Security zone: %s%s\n", zone, qualifier)
 			}
-			fmt.Printf("  Security zone: %s%s\n", zone, qualifier)
 		}
 		// #4328: annotate a physical reth member with its aenet aggregation.
 		if rethName, ok := rethMaps.LookupMember(attrs.Name); ok && cfg != nil {

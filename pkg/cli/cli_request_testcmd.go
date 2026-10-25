@@ -451,6 +451,12 @@ func (c *CLI) testSecurityZone(args []string) error {
 
 	sort.Strings(allZoneNames)
 	quarantineNames := config.ZoneQuarantineNamesForConfig(cfg)
+	// #16556: a contested interface belongs to NEITHER claimant at runtime.
+	if claimants := config.ZoneInterfaceQuarantineClaimants(cfg, ifName); claimants != nil {
+		fmt.Printf("Interface %s belongs to zone: (none) %s\n", ifName,
+			config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+		return nil
+	}
 	for _, zoneName := range allZoneNames {
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value

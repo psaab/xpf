@@ -125,6 +125,12 @@ type ZoneInfo struct {
 	TcpRst        bool     `json:"tcp_rst,omitempty"`
 	ScreenProfile string   `json:"screen_profile,omitempty"`
 	Interfaces    []string `json:"interfaces"`
+	// UnboundInterfaces (#16556) lists authored members of this zone that
+	// duplicate zone membership left bound to NEITHER claiming zone (the
+	// runtime map omits them; they fail closed). They still appear in
+	// Interfaces (the authored list) but MUST NOT be read as bound.
+	// Omitted when empty; mirrors gRPC ZoneInfo.unbound_interfaces.
+	UnboundInterfaces []string `json:"unbound_interfaces,omitempty"`
 	// HostInbound is the LEGACY flattened admission set: system-services +
 	// protocols concatenated. Kept as a back-compat alias (#3328); new
 	// consumers should read the split fields below.

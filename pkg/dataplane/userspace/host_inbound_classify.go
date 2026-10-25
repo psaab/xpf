@@ -268,7 +268,7 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 	if hostInboundLifelineInterface(split.Literal, hostInboundLifelineSet(cfg)) {
 		return HostInboundAdmission{Status: HostInboundNotComputed}
 	}
-	if _, quarantined := config.QuarantinedZoneInterfaceKeys(cfg)[split.Literal]; quarantined {
+	if _, quarantined := config.ZoneInterfaceQuarantineExclusions(cfg)[split.Literal]; quarantined {
 		return classifyOneView(ZoneHostInboundView{Zone: fromZone, Interfaces: []string{ifaceRef}}, proto, hasProto, dstPort, icmpType, family)
 	}
 	zone := cfg.Security.Zones[fromZone]
@@ -402,7 +402,7 @@ func ResolveHostInboundIngressInterface(cfg *config.Config, fromZone, ifaceRef s
 	// smallest unit. The zone probe follows on the split Literal, so
 	// `p.0.01` validates against the zone its canonical unit binds.
 	split := cfg.SplitInterfaceUnitRef(ifaceRef)
-	if _, quarantined := config.QuarantinedZoneInterfaceKeys(cfg)[split.Literal]; quarantined {
+	if _, quarantined := config.ZoneInterfaceQuarantineExclusions(cfg)[split.Literal]; quarantined {
 		return fmt.Errorf("ingress-interface %q is quarantined because it is claimed by multiple security zones", ifaceRef)
 	}
 	if !split.HasUnit {

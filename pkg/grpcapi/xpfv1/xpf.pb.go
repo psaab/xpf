@@ -2796,8 +2796,16 @@ type ZoneInfo struct {
 	// QUARANTINED. It names the earlier-sorting zone that owns the shared
 	// StableZoneID. It is empty for UNKNOWN and NOT_QUARANTINED.
 	QuarantineSurvivorZone string `protobuf:"bytes,19,opt,name=quarantine_survivor_zone,json=quarantineSurvivorZone,proto3" json:"quarantine_survivor_zone,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// unbound_interfaces (#16556) lists authored members of THIS zone that
+	// duplicate zone membership left bound to NEITHER claiming zone: the
+	// runtime interface->zone map omits them and no XDP shim is attached, so
+	// they match no zone policy and fail closed. Such a member still appears
+	// in `interfaces` (the authored list) but MUST NOT be read as bound; it
+	// is excluded from any bound count. Empty for a zone with no contested
+	// member. An old server omits the field, which reads as empty.
+	UnboundInterfaces []string `protobuf:"bytes,20,rep,name=unbound_interfaces,json=unboundInterfaces,proto3" json:"unbound_interfaces,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ZoneInfo) Reset() {
@@ -2961,6 +2969,13 @@ func (x *ZoneInfo) GetQuarantineSurvivorZone() string {
 		return x.QuarantineSurvivorZone
 	}
 	return ""
+}
+
+func (x *ZoneInfo) GetUnboundInterfaces() []string {
+	if x != nil {
+		return x.UnboundInterfaces
+	}
+	return nil
 }
 
 // InterfaceHostInbound (#3328, #3362) is a per-interface host-inbound-traffic
@@ -10117,7 +10132,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x11\n" +
 	"\x0fGetZonesRequest\":\n" +
 	"\x10GetZonesResponse\x12&\n" +
-	"\x05zones\x18\x01 \x03(\v2\x10.xpf.v1.ZoneInfoR\x05zones\"\x96\a\n" +
+	"\x05zones\x18\x01 \x03(\v2\x10.xpf.v1.ZoneInfoR\x05zones\"\xc5\a\n" +
 	"\bZoneInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\rR\x02id\x12%\n" +
@@ -10140,7 +10155,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\x13lifeline_interfaces\x18\x10 \x03(\tR\x12lifelineInterfaces\x12b\n" +
 	"\x1dper_zone_counter_availability\x18\x11 \x01(\x0e2\x1f.xpf.v1.ZoneCounterAvailabilityR\x1aperZoneCounterAvailability\x12F\n" +
 	"\x10quarantine_state\x18\x12 \x01(\x0e2\x1b.xpf.v1.ZoneQuarantineStateR\x0fquarantineState\x128\n" +
-	"\x18quarantine_survivor_zone\x18\x13 \x01(\tR\x16quarantineSurvivorZone\"\x9b\x01\n" +
+	"\x18quarantine_survivor_zone\x18\x13 \x01(\tR\x16quarantineSurvivorZone\x12-\n" +
+	"\x12unbound_interfaces\x18\x14 \x03(\tR\x11unboundInterfaces\"\x9b\x01\n" +
 	"\x14InterfaceHostInbound\x12\x1c\n" +
 	"\tinterface\x18\x01 \x01(\tR\tinterface\x12\x1e\n" +
 	"\n" +

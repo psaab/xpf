@@ -148,11 +148,16 @@ func (c *CLI) showVlans() error {
 		if e.vlanID == 0 {
 			vid = "native"
 		}
+		zoneLabel := e.zone
 		qualifier := ""
-		if config.ZoneQuarantineExcludedReason(e.zone, cfg) != "" {
+		rowKey := fmt.Sprintf("%s.%d", e.iface, e.unit)
+		if claimants := config.ZoneInterfaceQuarantineClaimantsForRows(cfg)[rowKey]; claimants != nil {
+			zoneLabel = "(none)"
+			qualifier = " " + config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants)
+		} else if config.ZoneQuarantineExcludedReason(e.zone, cfg) != "" {
 			qualifier = " " + config.ZoneQuarantineInterfacesQualifier
 		}
-		fmt.Printf("%-16s %-6d %-8s %-12s%s %s\n", e.iface, e.unit, vid, e.zone, qualifier, mode)
+		fmt.Printf("%-16s %-6d %-8s %-12s%s %s\n", e.iface, e.unit, vid, zoneLabel, qualifier, mode)
 	}
 	return nil
 }

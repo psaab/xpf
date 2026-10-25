@@ -89,7 +89,7 @@ func authoredZoneRefs(cfg *config.Config) map[string]string {
 	}
 	sort.Strings(zoneNames)
 	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
-	conflictedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
+	conflictedInterfaces := config.ZoneInterfaceQuarantineExclusions(cfg)
 	for _, zoneName := range zoneNames {
 		if _, excluded := excludedZones[zoneName]; excluded {
 			continue
