@@ -96,12 +96,12 @@ type stableRethLinkLocalTarget struct {
 }
 
 // stableRethLinkLocalTargets mirrors daemon.addStableRethLinkLocal. That
-// routine installs fe80::bf72:<cluster>:<rg> on the RETH base device and on
-// IPv6-bearing non-zero units. Unit 0 with no VLAN collapses onto the base
-// device, so the unit-qualified name is the host-inbound zone identity for
-// that address; a VLAN unit 0 is a distinct device and the stable address
-// remains on the base identity. An explicit unit-0 link-local suppresses the
-// daemon-managed address for the whole RETH interface.
+// routine installs fe80::bf72:<cluster>:<rg> on the netdev selected by
+// unit.VlanID > 0 (#16686): a tagged unit 0 lives on <member>.<vlan-id>,
+// an untagged unit 0 on the bare member. The host-inbound identity is the
+// unit-qualified name (reth0.<unit>), so a tagged unit 0 scopes reth0.0,
+// not the bare interface. A unit's explicit link-local suppresses the
+// stable LL on that unit only (#15684).
 //
 // This helper is intentionally local to pkg/dataplane/userspace: importing
 // pkg/cluster here would create the existing cluster → dataplane dependency
@@ -130,36 +130,30 @@ func stableRethLinkLocalTargets(cfg *config.Config) []stableRethLinkLocalTarget 
 			continue
 		}
 		ifc := cfg.Interfaces.Interfaces[ifName]
-		if ifc == nil || ifc.Disable || stableRethUnitHasConfiguredLinkLocal(ifc, 0) {
+		if ifc == nil || ifc.Disable {
 			continue
 		}
 		addr := stableRethLinkLocalString(clusterID, rgID)
-
-		// addStableRethLinkLocal always puts the address on the base netdev.
-		// A native unit-0 row is the same host-inbound identity; a VLAN unit
-		// 0 is distinct, so retain the bare interface identity there.
-		baseRef := ifName
-		if unit0 := ifc.Units[0]; unit0 != nil && unit0.VlanID == 0 {
-			baseRef = fmt.Sprintf("%s.0", ifName)
-		}
-		out = append(out, stableRethLinkLocalTarget{iface: baseRef, addr: addr})
-
 		unitNums := make([]int, 0, len(ifc.Units))
 		for unitNum := range ifc.Units {
-			if unitNum > 0 {
-				unitNums = append(unitNums, unitNum)
-			}
+			unitNums = append(unitNums, unitNum)
 		}
 		sort.Ints(unitNums)
+		seen := make(map[string]bool)
 		for _, unitNum := range unitNums {
 			unit := ifc.Units[unitNum]
 			if unit == nil || unit.Disable || !stableRethUnitHasIPv6(unit) {
 				continue
 			}
-			out = append(out, stableRethLinkLocalTarget{
-				iface: fmt.Sprintf("%s.%d", ifName, unitNum),
-				addr:  addr,
-			})
+			if stableRethUnitHasConfiguredLinkLocal(ifc, unitNum) {
+				continue
+			}
+			iface := fmt.Sprintf("%s.%d", ifName, unitNum)
+			if seen[iface] {
+				continue
+			}
+			seen[iface] = true
+			out = append(out, stableRethLinkLocalTarget{iface: iface, addr: addr})
 		}
 	}
 	return out

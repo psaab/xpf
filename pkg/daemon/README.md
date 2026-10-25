@@ -1768,6 +1768,17 @@ to `Apply`'s graceful goodbye (#14978). If both nodes are BACKUP, a stale
 host route may remain until Router Lifetime expiry; a later MASTER's RA
 refresh repairs it.
 
+**Stable-LL placement (#16686).** `addStableRethLinkLocal` installs the
+stable router link-local on the netdev selected by `unit.VlanID > 0`
+(the `RethVIPsForRG`/`ResolveKernelIfName` rule): a tagged unit 0 lives
+on `<member>.<vlan-id>`, an untagged unit 0 on the bare member, and only
+IPv6-bearing units without their own configured link-local receive it.
+Keying on `unitNum > 0` instead left a tagged unit 0's RA sender bound
+to an address never installed on its VLAN sub-interface, so no RAs were
+sent on that VLAN. `removeStableRethLinkLocal`, the direct-mode router
+NA, and `stableRethLinkLocalTargets` (userspace host-inbound) use the
+same rule.
+
 **Idempotence.** A stable digest of the desired set (`lastRAReconcileHash`,
 updated only on a successful apply) gates the actual `ra.Apply`, so the
 periodic safety pass costs nothing when nothing moved and a transient apply
