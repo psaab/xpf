@@ -5,12 +5,15 @@ import (
 	"testing"
 )
 
-// #16059: units of an interface-level WireGuard tunnel share one wgN
+// #16059/#16847: units of an interface-level WireGuard tunnel share one wgN
 // device/ifindex, and the dataplane keys interface filters by ifindex
-// alone — differing per-unit filters would last-win (Rust now refuses
-// the snapshot). The commit advisory must fire for differing input AND
-// output filters, and stay silent for uniform, single-claimant,
-// single-unit, per-unit-stanza, and GRE shapes (#10816 owns GRE input).
+// alone — differing per-unit filters would last-win (Rust refuses the
+// snapshot), and a filter on one unit alone would be installed for the
+// whole device, filtering the unfiltered sibling (Rust also refuses).
+// The commit advisory must fire for differing input AND output filters
+// and for the single-claimant shape, and stay silent for uniform,
+// both-unfiltered, single-unit, per-unit-stanza, and GRE shapes (#10816
+// owns GRE input).
 // Fail-on-revert: unhook the advisory and the firing assertions go RED.
 func TestWgUnitFilterShadowAdvisory16059(t *testing.T) {
 	compile := func(t *testing.T, lines []string) *Config {
@@ -49,11 +52,12 @@ func TestWgUnitFilterShadowAdvisory16059(t *testing.T) {
 		return append(append([]string{}, base...), extra...)
 	}
 
-	// (a) differing OUTPUT v4 filters → exactly one #16059 warning.
+	// (a) differing OUTPUT v4 filters → exactly one #16059/#16847 warning.
 	cfgA := compile(t, with(
 		"set interfaces wg0 unit 0 family inet filter output F1",
 		"set interfaces wg0 unit 1 family inet filter output F2",
 	))
+	// The warning cites #16847 as well as #16059; match on either.
 	gotA := warningsMentioning(cfgA, "#16059")
 	if len(gotA) != 1 {
 		t.Fatalf("(a) differing WG output filters must warn once, got %d: %v", len(gotA), cfgA.Warnings)
@@ -84,13 +88,20 @@ func TestWgUnitFilterShadowAdvisory16059(t *testing.T) {
 		t.Fatalf("(c) uniform filters must be silent, got: %v", got)
 	}
 
-	// (d) single claimant (other unit names no filter) → silent: the one
-	// configured filter deterministically applies.
+	// (d) #16847 single claimant: only unit 0 names a filter, unit 1 names
+	// none — the one filter would be installed for the whole device, so
+	// the advisory fires once and names the unfiltered sibling <none>.
 	cfgD := compile(t, with(
 		"set interfaces wg0 unit 0 family inet filter output F1",
 	))
-	if got := warningsMentioning(cfgD, "#16059"); len(got) != 0 {
-		t.Fatalf("(d) single claimant must be silent, got: %v", got)
+	gotD := warningsMentioning(cfgD, "#16847")
+	if len(gotD) != 1 {
+		t.Fatalf("(d) single claimant must warn once (#16847), got %d: %v", len(gotD), cfgD.Warnings)
+	}
+	for _, want := range []string{"wg0.0", "wg0.1", "<none>", "output"} {
+		if !strings.Contains(gotD[0], want) {
+			t.Fatalf("(d) warning must mention %q, got: %s", want, gotD[0])
+		}
 	}
 
 	// (e) per-unit WG stanza on unit 1 (own device) → silent.
@@ -117,5 +128,21 @@ func TestWgUnitFilterShadowAdvisory16059(t *testing.T) {
 	})
 	if got := warningsMentioning(cfgF, "#16059"); len(got) != 0 {
 		t.Fatalf("(f) GRE parent must be silent for #16059, got: %v", got)
+	}
+
+	// (g) #16847 reversed claimant: only unit 1 names a filter (the
+	// issue's exact trace), unit 0 names none → still fires once, with
+	// the unfiltered unit rendered <none>.
+	cfgG := compile(t, with(
+		"set interfaces wg0 unit 1 family inet filter input F1",
+	))
+	gotG := warningsMentioning(cfgG, "#16847")
+	if len(gotG) != 1 {
+		t.Fatalf("(g) unit-1-only claimant must warn once (#16847), got %d: %v", len(gotG), cfgG.Warnings)
+	}
+	for _, want := range []string{"wg0.0", "wg0.1", "<none>", "input"} {
+		if !strings.Contains(gotG[0], want) {
+			t.Fatalf("(g) warning must mention %q, got: %s", want, gotG[0])
+		}
 	}
 }

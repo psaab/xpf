@@ -22,6 +22,17 @@ xpf (0.0.0) unstable; urgency=medium
     to be marked applied before seeding, and IAID-0 v6 bindings now emit
     "iaid":0 on the seed wire form.
 
+  * Firewall/filter: a filter configured on only one unit of a shared
+    WireGuard device no longer filters its sibling units (#16847). The
+    #16059 gate refused only two different non-empty filter names, so
+    wg0.1's filter was installed for the whole wg0 ifindex and every
+    wg0.0 packet was evaluated by it with no warning. The Rust filter
+    compiler now counts an empty filter name as a claim and refuses the
+    snapshot whenever unit rows sharing an (ifindex, family, direction)
+    hook do not all name the same filter (the unfiltered sibling is
+    rendered `<none>`); uniform names and single-unit devices stay
+    valid, GRE input keeps its #10816 first-wins exemption, and the Go
+    commit advisory warns for the single-claimant shape as well.
   * Cluster/session-sync: the #15176 NAT-scope fold now carries the
     tagged RETH unit (#16826). It folded the logical child's ifindex
     with vlan 0, truncating `reth0.80` to `reth0`, and the receiver

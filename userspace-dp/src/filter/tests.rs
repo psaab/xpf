@@ -3992,8 +3992,9 @@ fn accept_filter_16059(name: &str, family: &str) -> FirewallFilterSnapshot {
 /// #16059 decisive: differing WG output filters on a shared ifindex
 /// reject (before the fix this compiled Ok and `plain` last-won, so
 /// `deny-out` never evaluated). Each family+direction arm rejects;
-/// identical names and single-claimant mixes stay valid (an empty hook
-/// names no filter, so nothing is shadowed).
+/// identical names stay valid. #16847: a single claimant (one unit
+/// filtered, sibling naming no filter) also rejects — see
+/// `shared_ifindex_single_claimant_rejects_16847`.
 #[test]
 fn shared_ifindex_wg_filters_conflict_rejects_16059() {
     // WG/output v4 — the issue's headline arm.
@@ -4103,26 +4104,24 @@ fn shared_ifindex_wg_filters_conflict_rejects_16059() {
         Some("plain")
     );
 
-    // One unit filtered, sibling unfiltered: single claimant wins in
-    // either row order.
+    // #16847: one unit filtered, sibling unfiltered on a shared ifindex
+    // must reject (was "single claimant wins"). The full matrix lives in
+    // `shared_ifindex_single_claimant_rejects_16847`; here the former
+    // acceptance cell now refuses in both row orders.
     let mut a = wg_unit_16059("wg0.0", 42);
     a.filter_output_v4 = "plain".into();
     let b = wg_unit_16059("wg0.1", 42);
     for ifaces in [vec![a.clone(), b.clone()], vec![b, a]] {
-        let state = parse_filter_state(
-            &[accept_filter_16059("plain", "inet")],
-            &[],
-            &ifaces,
-            "",
-            "",
-        )
-        .expect("single claimant on shared ifindex is unambiguous");
-        assert_eq!(
-            state
-                .iface_filter_out_v4_fast
-                .get(&42)
-                .map(|f| f.name.as_str()),
-            Some("plain")
+        assert!(
+            parse_filter_state(
+                &[accept_filter_16059("plain", "inet")],
+                &[],
+                &ifaces,
+                "",
+                "",
+            )
+            .is_err(),
+            "single claimant on shared ifindex must reject (#16847)"
         );
     }
 
@@ -4269,6 +4268,173 @@ fn shared_ifindex_wg_filters_conflict_rejects_16059() {
         )
         .is_err(),
         "GRE output conflict must still reject"
+    );
+}
+
+/// #16847 decisive: a filter on ONE unit of a shared-ifindex device must
+/// reject, in every family+direction and both row orders — pre-fix the
+/// gate skipped empty names, so wg0.1's filter was installed for the
+/// whole ifindex and wg0.0 packets were evaluated by it with no warning.
+/// Uniform names and a lone unit row stay valid; both-unfiltered and
+/// distinct-ifindex shapes stay valid. Fail-on-revert: restoring the
+/// empty-name skip makes every reject cell compile Ok (RED).
+#[test]
+fn shared_ifindex_single_claimant_rejects_16847() {
+    // Headline: wg0.1 filtered, wg0.0 unfiltered — error names the
+    // unfiltered sibling as `<none>` so the operator sees who is hit.
+    let a = wg_unit_16059("wg0.0", 42);
+    let mut b = wg_unit_16059("wg0.1", 42);
+    b.filter_input_v4 = "plain".into();
+    let err = parse_filter_state(
+        &[accept_filter_16059("plain", "inet")],
+        &[],
+        &[a.clone(), b.clone()],
+        "",
+        "",
+    )
+    .expect_err("single claimant input v4 on shared ifindex must reject");
+    match err {
+        crate::policy::SnapshotIntegrityError::InterfaceFilterSharedIfindexConflict {
+            ifindex,
+            ref family,
+            ref direction,
+            ref first_interface,
+            ref first_filter,
+            ref second_interface,
+            ref second_filter,
+        } => {
+            assert_eq!(ifindex, 42);
+            assert_eq!(family, "inet");
+            assert_eq!(direction, "input");
+            assert_eq!(first_interface, "wg0.0");
+            assert_eq!(first_filter, "<none>");
+            assert_eq!(second_interface, "wg0.1");
+            assert_eq!(second_filter, "plain");
+        }
+        other => panic!("expected InterfaceFilterSharedIfindexConflict, got {other:?}"),
+    }
+
+    // Every arm, filtered-first and unfiltered-first row orders.
+    for hook in ["in4", "out4", "in6", "out6"] {
+        let family = if hook.ends_with('6') { "inet6" } else { "inet" };
+        for filtered_first in [true, false] {
+            let mut filtered = wg_unit_16059("wg0.1", 42);
+            match hook {
+                "in4" => filtered.filter_input_v4 = "plain".into(),
+                "out4" => filtered.filter_output_v4 = "plain".into(),
+                "in6" => filtered.filter_input_v6 = "plain".into(),
+                _ => filtered.filter_output_v6 = "plain".into(),
+            }
+            let bare = wg_unit_16059("wg0.0", 42);
+            let ifaces = if filtered_first {
+                vec![filtered, bare]
+            } else {
+                vec![bare, filtered]
+            };
+            assert!(
+                parse_filter_state(
+                    &[accept_filter_16059("plain", family)],
+                    &[],
+                    &ifaces,
+                    "",
+                    "",
+                )
+                .is_err(),
+                "{hook} single claimant (filtered_first={filtered_first}) must reject"
+            );
+        }
+    }
+
+    // Three units, two filtered identically + one unfiltered: still
+    // disputed — the empty name is a claim.
+    let mut a = wg_unit_16059("wg0.0", 42);
+    a.filter_output_v4 = "plain".into();
+    let mut b = wg_unit_16059("wg0.1", 42);
+    b.filter_output_v4 = "plain".into();
+    let c = wg_unit_16059("wg0.2", 42);
+    assert!(
+        parse_filter_state(
+            &[accept_filter_16059("plain", "inet")],
+            &[],
+            &[a, b, c],
+            "",
+            "",
+        )
+        .is_err(),
+        "two claimants + one unfiltered sibling must reject"
+    );
+
+    // Both units unfiltered everywhere: nothing to dispute, compiles.
+    parse_filter_state(
+        &[],
+        &[],
+        &[wg_unit_16059("wg0.0", 42), wg_unit_16059("wg0.1", 42)],
+        "",
+        "",
+    )
+    .expect("both-unfiltered shared ifindex is valid");
+
+    // Lone unit row on the ifindex (single-unit device): its filter
+    // applies to exactly the device that configured it — valid, and the
+    // fast map holds it.
+    let mut only = wg_unit_16059("wg0.0", 42);
+    only.filter_output_v4 = "plain".into();
+    let state = parse_filter_state(
+        &[accept_filter_16059("plain", "inet")],
+        &[],
+        &[only],
+        "",
+        "",
+    )
+    .expect("single unit row on the ifindex stays valid");
+    assert_eq!(
+        state
+            .iface_filter_out_v4_fast
+            .get(&42)
+            .map(|f| f.name.as_str()),
+        Some("plain")
+    );
+
+    // Distinct ifindices, one filtered: no sharing, no conflict.
+    let mut a = wg_unit_16059("wg0.0", 42);
+    a.filter_output_v4 = "plain".into();
+    let b = wg_unit_16059("wg1.0", 43);
+    parse_filter_state(
+        &[accept_filter_16059("plain", "inet")],
+        &[],
+        &[a, b],
+        "",
+        "",
+    )
+    .expect("distinct ifindices with a single claimant are unaffected");
+
+    // GRE-input exemption keeps its #10816 first-wins model even when a
+    // sibling names no input filter (#16847 must not widen into GRE).
+    let gre_unit = |name: &str| crate::InterfaceSnapshot {
+        name: name.into(),
+        ifindex: 77,
+        is_unit: Some(true),
+        tunnel: true,
+        tunnel_mode: "gre".into(),
+        ..Default::default()
+    };
+    let mut g0 = gre_unit("gr-0/0/0.0");
+    g0.filter_input_v4 = "plain".into();
+    let g1 = gre_unit("gr-0/0/0.1");
+    let state = parse_filter_state(
+        &[accept_filter_16059("plain", "inet")],
+        &[],
+        &[g0, g1],
+        "",
+        "",
+    )
+    .expect("GRE input single claimant keeps #10816 first-wins");
+    assert_eq!(
+        state
+            .iface_filter_v4_fast
+            .get(&77)
+            .map(|f| f.name.as_str()),
+        Some("plain")
     );
 }
 
