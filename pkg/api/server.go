@@ -991,7 +991,7 @@ func NewServer(cfg Config) *Server {
 	// #16081: bound concurrent connections across every REST leg. Installed
 	// here (not lazily) so every NewServer-built server — Start legs,
 	// reconcile legs and the Run/serveBound path alike — shares one gate.
-	s.connGate.Store(newAPIConnGate(apiMaxConnsTotal))
+	s.connGate.Store(newAPIConnGate(apiMaxConnsTotal, apiMaxConnsPerSource))
 	// #5561: the peer-identity resolver behind the authorization gate. nil
 	// means the real kernel socket-table lookup (authz.LookupPeer), and nil
 	// PeerLocalityFn means the real fresh enumeration

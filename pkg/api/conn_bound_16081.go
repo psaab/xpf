@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -46,6 +47,17 @@ import (
 //     hijack tracker (which received the same wrapped conn), so the slot
 //     is still released at drain. A handler that hijacks and never closes
 //     holds its slot — the same standard the hijack tracker already sets.
+// #16622: the global count alone let ONE unauthenticated source hold all
+// 256 slots and lock every operator out of every leg. The gate therefore
+// also enforces a per-source sub-limit (apiMaxConnsPerSource, 32): one
+// source IP (IPv6: one /64, mirroring normalizeAuthThrottleSource) can
+// hold at most 32 of the 256 slots, so at least eight distinct sources
+// must cooperate to exhaust the global pool. Sources behind one NAT share
+// their 32 — generous for a management plane (browsers hold a handful of
+// keep-alive connections each) while a single host can no longer deny
+// every other source. Per-source entries are deleted when their count
+// reaches zero, so the tracking map holds at most one entry per source
+// with a live connection (bounded by the global limit itself).
 //
 // Limit: apiMaxConnsTotal (256) is a var so tests can shrink it; production
 // never assigns it (TestRESTConnBoundDefault16081 pins the shipped value,
@@ -59,38 +71,72 @@ import (
 // one Server (HTTP + HTTPS, every bind family). See the file doc above.
 var apiMaxConnsTotal = 256
 
+// apiMaxConnsPerSource bounds concurrent connections from ONE source
+// (IPv4 address, or IPv6 /64) across all REST legs of one Server (#16622).
+var apiMaxConnsPerSource = 32
+
 // apiConnGate is the Server-wide admission gate for accepted connections.
 // The zero value is NOT usable; construct with newAPIConnGate. It lives on
 // Server behind an atomic pointer so bare &Server{} fixtures (handler
 // tests that never serve) observe a nil gate and skip wrapping, while every
 // NewServer-built server gets one.
 type apiConnGate struct {
-	limit    int
-	active   atomic.Int64
-	refusals atomic.Uint64
+	limit     int
+	perSource int
+	active    atomic.Int64
+	refusals  atomic.Uint64
 	// lastRefusalLog rate-limits the refusal log line (~1/sec); the counter
 	// above is the rate-independent observable.
 	lastRefusalLog atomic.Int64 // unix nanos
+	// mu guards sources. Accept is not a hot path (management plane), so a
+	// plain mutex keeps the global+per-source check atomic without CAS
+	// loops spanning two counters.
+	mu      sync.Mutex
+	sources map[string]int
 }
 
-func newAPIConnGate(limit int) *apiConnGate {
-	return &apiConnGate{limit: limit}
+func newAPIConnGate(limit, perSource int) *apiConnGate {
+	return &apiConnGate{limit: limit, perSource: perSource, sources: make(map[string]int)}
 }
 
-// tryAcquire claims one slot. It never blocks: a full gate refuses.
-func (g *apiConnGate) tryAcquire() bool {
-	for {
-		cur := g.active.Load()
-		if cur >= int64(g.limit) {
-			return false
-		}
-		if g.active.CompareAndSwap(cur, cur+1) {
-			return true
-		}
+// connGateSourceKey partitions a remote address into its gate source:
+// an IPv4 address, an IPv6 /64, or the raw address string when it is not
+// an IP address at all (real TCP peers always are).
+func connGateSourceKey(remote net.Addr) string {
+	if remote == nil {
+		return ""
 	}
+	return normalizeAuthThrottleSource(remote.String())
 }
 
-func (g *apiConnGate) release() { g.active.Add(-1) }
+// tryAcquire claims one slot for remote's source. It never blocks: a
+// full gate — globally, or for this source — refuses.
+func (g *apiConnGate) tryAcquire(remote net.Addr) bool {
+	key := connGateSourceKey(remote)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.active.Load() >= int64(g.limit) {
+		return false
+	}
+	if g.perSource > 0 && g.sources[key] >= g.perSource {
+		return false
+	}
+	g.sources[key]++
+	g.active.Add(1)
+	return true
+}
+
+func (g *apiConnGate) release(remote net.Addr) {
+	key := connGateSourceKey(remote)
+	g.mu.Lock()
+	if n := g.sources[key]; n <= 1 {
+		delete(g.sources, key)
+	} else {
+		g.sources[key] = n - 1
+	}
+	g.mu.Unlock()
+	g.active.Add(-1)
+}
 
 // refusalsCount is the cumulative refused-connection count.
 func (g *apiConnGate) refusalsCount() uint64 { return g.refusals.Load() }
@@ -106,7 +152,7 @@ func (g *apiConnGate) noteRefusal(addr net.Addr) {
 		return
 	}
 	slog.Warn("api: REST connection refused at connection-count bound (#16081)",
-		"remote", addr.String(), "limit", g.limit, "refusals_total", g.refusals.Load())
+		"remote", addr.String(), "limit", g.limit, "per_source_limit", g.perSource, "refusals_total", g.refusals.Load())
 }
 
 // RestConnRefusals returns the cumulative REST connections refused at the
@@ -167,7 +213,7 @@ func (l *boundedListener) Accept() (net.Conn, error) {
 		// connection and claim no slot.
 		return nil, err
 	}
-	if !l.gate.tryAcquire() {
+	if !l.gate.tryAcquire(c.RemoteAddr()) {
 		l.gate.noteRefusal(c.RemoteAddr())
 		_ = c.Close()
 		// Refusal must not surface as an Accept error: http.Server treats a
@@ -177,7 +223,7 @@ func (l *boundedListener) Accept() (net.Conn, error) {
 		// listener until another connection arrives.
 		return nil, temporaryAcceptError{err: errors.New("api: REST connection-count bound reached")}
 	}
-	return &gatedConn{Conn: c, gate: l.gate}, nil
+	return &gatedConn{Conn: c, gate: l.gate, source: c.RemoteAddr()}, nil
 }
 
 // temporaryAcceptError implements net.Error with Temporary() == true so
@@ -195,13 +241,14 @@ func (e temporaryAcceptError) Unwrap() error   { return e.err }
 type gatedConn struct {
 	net.Conn
 	gate     *apiConnGate
+	source   net.Addr
 	released atomic.Bool
 }
 
 func (c *gatedConn) Close() error {
 	err := c.Conn.Close()
 	if c.released.CompareAndSwap(false, true) {
-		c.gate.release()
+		c.gate.release(c.source)
 	}
 	return err
 }
