@@ -54,10 +54,15 @@ func (c *CLI) checkConfigRegex(line string) error {
 		cfg = c.store.ActiveConfig()
 	}
 	var editPath []string
+	var candidate *config.ConfigTree
 	if c.store != nil {
 		editPath = c.store.GetEditPath()
+		// #16784: price subtree verbs against the pre-mutation
+		// candidate, so deleting/deactivating/renaming an ancestor
+		// cannot destroy or relocate a denied descendant.
+		candidate = c.store.CandidateTree()
 	}
-	return checkConfigRegexWith(cfg, c.UserClass(), editPath, line)
+	return checkConfigRegexWithCandidate(cfg, c.UserClass(), editPath, line, candidate)
 }
 
 // checkConfigRegexWith is the store-free whole decision.
@@ -94,6 +99,13 @@ func (c *CLI) checkConfigRegex(line string) error {
 // decision stayed behind, where the other two surfaces could not call it.
 func checkConfigRegexWith(cfg *config.Config, class string, editPath []string, line string) error {
 	return config.AuthorizeConfigMutation(cfg, class, editPath, line)
+}
+
+// checkConfigRegexWithCandidate is checkConfigRegexWith plus #16784
+// subtree pricing against the pre-mutation candidate (nil = no
+// candidate held; the commit gate remains the backstop).
+func checkConfigRegexWithCandidate(cfg *config.Config, class string, editPath []string, line string, candidate *config.ConfigTree) error {
+	return config.AuthorizeConfigMutationOnCandidate(cfg, class, editPath, line, candidate)
 }
 
 // checkExpandedConfigRegex14981 adjudicates the candidate's group-expanded

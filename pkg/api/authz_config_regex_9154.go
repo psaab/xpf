@@ -294,7 +294,12 @@ func (s *Server) authorizeRESTConfigMutation(r *http.Request, cfg *config.Config
 	// The edit path is empty: REST has no cursor, so the body carries the
 	// resolved path — which is exactly what the store will act on.
 	line := route.verb + " " + input
-	if err := config.AuthorizeConfigMutation(cfg, p.Class, nil, line); err != nil {
+	if s.store != nil {
+		// #16784: price subtree verbs against the pre-mutation candidate.
+		if err := config.AuthorizeConfigMutationOnCandidate(cfg, p.Class, nil, line, s.store.CandidateTree()); err != nil {
+			return err
+		}
+	} else if err := config.AuthorizeConfigMutation(cfg, p.Class, nil, line); err != nil {
 		return err
 	}
 	// #14981: a group/apply-groups line is judged above only literally.
