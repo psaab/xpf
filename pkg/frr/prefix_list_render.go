@@ -282,7 +282,7 @@ func sameRouteFilterBase16762(a, b *net.IPNet) bool {
 	}
 	aa, aok := routeFilterBasePrefix16762(a)
 	bb, bok := routeFilterBasePrefix16762(b)
-	return aok && bok && aa.Addr() == bb.Addr()
+	return aok && bok && aa == bb
 }
 
 // routeFilterBasePrefix16762 normalises a parsed base CIDR to its

@@ -416,6 +416,21 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #16866 gate5 R1: reserved RIP-gate prefix-list namespace.
+	// pkg/frr generates `xpf-rip-<inst>-grp-<n>[-v6]` gates into
+	// FRR's flat prefix-list namespace; an operator prefix-list
+	// with that prefix merges with a generated gate. Strict
+	// rejects; lenient warns (#1960) and the pkg/frr apply guard
+	// fails closed.
+	if err := validatePrefixListReservedRIPGateStrict(cfg); err != nil {
+		if opts.lenientPrefixListReservedRIPGate16866 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("reserved RIP gate prefix-list namespace (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #16567: BGP group type internal|external cross-check. A typo'd type
 	// or a type contradicting the effective peer-as/local AS previously
 	// committed with only the generic advisory while FRR followed peer-as.

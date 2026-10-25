@@ -116,13 +116,25 @@ func (m *Manager) renderRIP16125(b *strings.Builder, rip *config.RIPConfig, vrfS
 			if len(rip.Interfaces) > 0 && len(enrolled16625) == 0 && len(rip.Groups) > 0 {
 				// fail closed: nothing safe to enroll
 			} else {
-				ripDefs16625 := ""
-				ripBody16625 := ""
-				grouped16625 := len(rip.Groups) > 0
-				if grouped16625 {
-					ripDefs16625, ripBody16625 = m.renderRIPPerGroup16625(rip, enrolled16625, policyOptions, clusterMode, qnhMetrics, m.nextRIPGroupIndex16625())
-					b.WriteString(ripDefs16625)
+				// #16866: the per-interface outbound gate applies
+				// to EVERY RIP render, grouped or not. ripd's
+				// `network <if>` originates connected subnets and
+				// re-advertises RIP-learned routes outside the
+				// redistribute route-maps; Junos advertises
+				// neither without an export policy that accepts
+				// them. Group-less renders synthesize one implicit
+				// group carrying the Redistribute chain (bare
+				// tokens / undefined names are inexpressible and
+				// render deny-all), so no enrolled interface is
+				// ever left ungated.
+				ripForRender16866 := rip
+				if len(rip.Groups) == 0 && len(enrolled16625) > 0 {
+					synth := *rip
+					synth.Groups = []*config.RIPGroup{{Name: "xpf-implicit-16866", Interfaces: append([]string(nil), enrolled16625...), Export: append([]string(nil), rip.Redistribute...)}}
+					ripForRender16866 = &synth
 				}
+				ripDefs16866, ripBody16866 := m.renderRIPPerGroup16625(ripForRender16866, enrolled16625, policyOptions, clusterMode, qnhMetrics, m.nextRIPGroupIndex16625())
+				b.WriteString(ripDefs16866)
 				fmt.Fprintf(b, "router rip%s\n", vrfSuffix)
 				// #16620: pin RIP to the Junos RIP preference 100; see
 				// protocol_distance_16620.go.
@@ -136,11 +148,7 @@ func (m *Manager) renderRIP16125(b *strings.Builder, rip *config.RIPConfig, vrfS
 					}
 					fmt.Fprintf(b, " passive-interface %s\n", iface)
 				}
-				if !grouped16625 {
-					b.WriteString(m.resolveRedistributeChainCluster15158(rip.Redistribute, policyOptions, "rip", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
-				} else {
-					b.WriteString(ripBody16625)
-				}
+				b.WriteString(ripBody16866)
 				// #12531: restore per-QNH RIP metrics with ripd-native
 				// offset-lists. ripd ignores route-map set metric for
 				// redistributed statics (live FRR 10.7.1: map readback had

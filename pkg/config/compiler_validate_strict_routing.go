@@ -2074,6 +2074,47 @@ func validateBGPComposedChainReservedNameStrict(cfg *Config) error {
 	return nil
 }
 
+// ReservedRIPGatePrefix is the prefix-list name prefix xpf
+// RESERVES for the generated RIP per-interface distribute-list
+// gates (#16866 gate5 R1): pkg/frr names them
+// `xpf-rip-<instance>-grp-<chain>[-v6]` in FRR's flat
+// prefix-list namespace. An operator prefix-list in that
+// namespace merges with a generated gate in one FRR object —
+// surviving foreign permits leak outside the export policy and
+// a deny-all gate overwrites an unrelated policy's entries.
+// The renderer and this validator share the exact string.
+const ReservedRIPGatePrefix = "xpf-rip-"
+
+// validatePrefixListReservedRIPGateStrict hard-rejects an
+// operator prefix-list whose name intrudes on
+// ReservedRIPGatePrefix. Strict on commit / commit-check;
+// lenient warns on load / peer-sync (#1960) and the pkg/frr
+// apply guard (ripGateNameCollision16866) fails the
+// managed-section apply closed. Mirrors
+// validatePolicyReservedRedistNameStrict.
+func validatePrefixListReservedRIPGateStrict(cfg *Config) error {
+	if cfg == nil || cfg.PolicyOptions.PrefixLists == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.PolicyOptions.PrefixLists))
+	for name := range cfg.PolicyOptions.PrefixLists {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if strings.HasPrefix(name, ReservedRIPGatePrefix) {
+			return fmt.Errorf(
+				"prefix-list %q uses the reserved %q namespace xpf reserves for "+
+					"generated RIP distribute-list gates (#16866); FRR merges "+
+					"same-named prefix-lists, so an operator name in this namespace "+
+					"could merge with a generated gate and silently alter RIP "+
+					"advertisement — rename the prefix-list off the reserved prefix",
+				name, ReservedRIPGatePrefix)
+		}
+	}
+	return nil
+}
+
 // validatePolicyASPathRegexStrict hard-rejects a `policy-options as-path
 // <name>` whose Junos regular expression cannot be translated to FRR —
 // an EMPTY regex, a malformed one, or one outside the Junos AS-path
