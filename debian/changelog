@@ -17,6 +17,15 @@ xpf (0.0.0) unstable; urgency=medium
     #9045 canary again parses the real race line (not the -list
     pre-check), and a new pkg/docsref census fails when any
     race-named test falls outside every -race leg.
+  * Configstore: the pre-commit diff summary (CLI/gRPC commit) no longer
+    allocates a full (lines+1)x(lines+1) LCS table (#16718). At 12k set
+    lines that was ~1.1 GiB inside xpfd on every commit (2 GiB at 16k,
+    OOM risk on the 4 GiB appliance). The diff now trims the common
+    prefix/suffix and computes the exact LCS length with two DP rows,
+    falling back to multiset counts only for an oversized middle section
+    (full rewritten/reordered block above ~4M cells). A 50k-line config
+    with a one-line edit now summarises in well under 10 MiB; order- and
+    duplicate-sensitive counts are unchanged for ordinary edits.
   * Config: packed hierarchical `security flow tcp-session
     time-wait-state session-timeout N;` / `session-ageout;` (and the
     half-close leaves, including multi-leaf packed runs) now compile
