@@ -9739,6 +9739,185 @@ fn export_owner_rg_sessions_skips_locally_demoted_entries() {
     );
 }
 
+/// #16880: each primary refresh goes through Coordinator import, reverse
+/// synthesis, worker fan-out, and the worker's `UpsertSynced` handler. Both
+/// HOLD clocks must follow the ten-T refresh sequence; when it stops, both
+/// halves hit the same bounded stale-synced ceiling. Before reverse synthesis
+/// propagated `SyncLiveness`, the reverse row kept its first HOLD anchor and
+/// failed this test while the forward row continued to refresh.
+#[test]
+fn sync_liveness_refresh_renews_both_session_halves_until_refreshes_stop_16880() {
+    const SECOND: u64 = 1_000_000_000;
+
+    let forwarding = test_forwarding_state();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ha_state = BTreeMap::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let mut coordinator = super::super::Coordinator::new();
+    coordinator.set_forwarding_for_test(forwarding.clone());
+    coordinator.workers.register(
+        0,
+        super::super::WorkerRuntimeRecord::for_test(super::super::WorkerHandle {
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            heartbeat: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            commands: commands.clone(),
+            session_export_ack: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cos_status: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+            runtime_atomics: Arc::new(super::super::worker_runtime::WorkerRuntimeAtomics::new()),
+            cold_path_atomics: Arc::new(super::super::cold_path_hist::WorkerColdPathAtomics::new()),
+        }),
+        None,
+    );
+    let mut table = SessionTable::new();
+    let timeout = crate::session::SessionTimeouts::default().udp_ns;
+
+    let mut forward = test_synced_entry();
+    forward.key.protocol = crate::ip_proto::PROTO_UDP;
+    forward.protocol = crate::ip_proto::PROTO_UDP;
+    forward.session_id = 16_880;
+    let forward_key = forward.key.clone();
+    let reverse_key = reverse_session_key(&forward.key, forward.decision.nat);
+
+    // Let the coordinator produce the real pair of UpsertSynced fan-out
+    // commands, then dispatch each through the same handler as the worker
+    // loop with an explicit clock so ten T intervals need no sleeping.
+    let import_pair = |coordinator: &super::super::Coordinator,
+                       commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+                       table: &mut SessionTable,
+                       entry: &SyncedSessionEntry,
+                       now_ns: u64| {
+        assert_eq!(
+            coordinator.upsert_synced_session(entry.clone()),
+            super::super::SyncedImportOutcome::Applied,
+            "coordinator must accept and fan out each forward import"
+        );
+        let fanned_out: Vec<_> = commands
+            .lock()
+            .expect("worker command queue")
+            .drain(..)
+            .collect();
+        assert_eq!(
+            fanned_out.len(),
+            2,
+            "one forward import must fan out its forward and synthesized reverse"
+        );
+        let mut reverse = None;
+        for command in fanned_out {
+            let WorkerCommand::UpsertSynced(half) = command else {
+                panic!("expected an UpsertSynced fan-out command, got {command:?}");
+            };
+            if half.metadata.is_reverse {
+                assert_eq!(half.key, reverse_key);
+                assert!(reverse.replace(half.clone()).is_none());
+            } else {
+                assert_eq!(half.key, entry.key);
+            }
+            super::commands::upsert_synced::handle_upsert_synced(
+                table,
+                SteeringMap::unshared_for_test(-1),
+                &forwarding,
+                &ha_state,
+                &dynamic_neighbors,
+                half,
+                now_ns,
+                now_ns / SECOND,
+                0,
+            );
+        }
+        reverse.expect("coordinator must fan out a reverse companion")
+    };
+    let expire_as_standby = |table: &mut SessionTable, now_ns: u64| {
+        let forwards_rg = |_rg: i32| false;
+        let epoch_of = |_rg: i32| 0;
+        let node_served = |_key: &SessionKey| crate::session::NodeServedEvidence::default();
+        let ha = crate::session::ExpireHaContext {
+            node_active: false,
+            forwards_rg: &forwards_rg,
+            epoch_of: &epoch_of,
+            ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
+            ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
+            node_served: &node_served,
+        };
+        table.expire_stale_entries_ha(now_ns, Some(&ha))
+    };
+
+    let installed_at = 10 * SECOND;
+    let initial_reverse = import_pair(&coordinator, &commands, &mut table, &forward, installed_at);
+    assert_eq!(initial_reverse.origin, SessionOrigin::SyncImport);
+    let hold_at = installed_at + timeout + crate::session::WHEEL_TICK_NS_FOR_TEST + 1;
+    assert!(
+        expire_as_standby(&mut table, hold_at).is_empty(),
+        "first standby sweep must HOLD both imported halves"
+    );
+    assert_eq!(table.first_held_ns_for(&forward_key), Some(hold_at));
+    assert_eq!(table.first_held_ns_for(&reverse_key), Some(hold_at));
+
+    let mut live_forward = forward;
+    live_forward.origin = SessionOrigin::SyncLiveness;
+    let mut last_liveness_at = hold_at;
+    for step in 1..=10u64 {
+        last_liveness_at = hold_at + step * timeout;
+        let live_reverse = import_pair(
+            &coordinator,
+            &commands,
+            &mut table,
+            &live_forward,
+            last_liveness_at,
+        );
+        assert_eq!(
+            live_reverse.origin,
+            SessionOrigin::SyncLiveness,
+            "both halves of refresh {step} must carry primary liveness"
+        );
+        assert_eq!(
+            table.first_held_ns_for(&forward_key),
+            Some(last_liveness_at),
+            "forward HOLD anchor must renew at refresh {step}"
+        );
+        assert_eq!(
+            table.first_held_ns_for(&reverse_key),
+            Some(last_liveness_at),
+            "reverse HOLD anchor must renew at refresh {step}"
+        );
+
+        let expired = expire_as_standby(
+            &mut table,
+            last_liveness_at + crate::session::WHEEL_TICK_NS_FOR_TEST + 1,
+        );
+        assert!(
+            !expired
+                .iter()
+                .any(|entry| entry.key == forward_key || entry.key == reverse_key),
+            "both halves must remain held during refresh {step}"
+        );
+    }
+
+    let hold_ceiling_ns = crate::session::STALE_SYNCED_CEILING_MULT
+        .saturating_mul(timeout)
+        .min(crate::session::STALE_SYNCED_CEILING_ABS_NS);
+    assert!(
+        last_liveness_at - hold_at > hold_ceiling_ns,
+        "ten refresh periods must exceed one stale-synced HOLD ceiling"
+    );
+    assert_ne!(table.session_id_for(&forward_key), 0);
+    assert_ne!(table.session_id_for(&reverse_key), 0);
+
+    // Once the primary stops refreshing, neither half may outlive the
+    // existing stale-synced bound (plus one GC wheel tick).
+    let reap_at = last_liveness_at + hold_ceiling_ns + crate::session::WHEEL_TICK_NS_FOR_TEST + 1;
+    let expired = expire_as_standby(&mut table, reap_at);
+    assert!(
+        expired.iter().any(|entry| entry.key == forward_key),
+        "forward half must expire after primary liveness stops"
+    );
+    assert!(
+        expired.iter().any(|entry| entry.key == reverse_key),
+        "reverse half must expire after primary liveness stops"
+    );
+    assert_eq!(table.session_id_for(&forward_key), 0);
+    assert_eq!(table.session_id_for(&reverse_key), 0);
+}
+
 #[test]
 fn synthesized_synced_reverse_entry_preserves_fabric_ingress_and_reverse_flag() {
     let forwarding = test_forwarding_state();

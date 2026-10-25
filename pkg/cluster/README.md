@@ -4303,15 +4303,19 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   only on `val.Created >= threshold`; it deliberately does not re-publish an
   established flow on packet activity (`LastSeen`) (#270 narrowed this). A
   negotiated primary-liveness scan re-walks the session mirror at most every
-  10s (or half the shortest eligible owner-session timeout, bounded to 1s)
-  and sends a low-rate, phase-staggered refresh for an existing owner-RG row.
-  The primary's authoritative session-row presence is the liveness evidence;
-  the mirror's `LastSeen` may lag due to budgeted refreshes. Per-session
-  refreshes are spaced by roughly the effective inactivity timeout (including
-  an application timeout, capped at one hour), not by the scan cadence; the
-  marker is sent only to a peer advertising the capability. It re-anchors the
-  standby HOLD clock without treating the snapshot as packet activity. When
-  refreshes stop, the Rust timer wheel's stale-synced ceiling (#2120,
+  10s (or half the shortest receiver-safe owner-session timeout, bounded to
+  1s) and sends a low-rate, phase-staggered refresh for an existing owner-RG
+  row. The primary's authoritative session-row presence is the liveness
+  evidence; the mirror's `LastSeen` may lag due to budgeted refreshes.
+  Per-session refresh cadence uses the tighter of the primary row's effective
+  timeout and the receiver's import-time timeout: unpromoted non-TCP app
+  overrides cannot outlive the receiver's global protocol window, and TCP
+  opening/closing rows use their state-specific windows. Newly queued shorter-
+  timeout rows and capability discovery wake/re-cap an idle timer. The marker
+  is sent only to a peer advertising the capability and is propagated to the
+  synthesized reverse companion, so both imported halves renew the standby
+  HOLD clock without treating the snapshot as packet activity. When refreshes
+  stop, the Rust timer wheel's stale-synced ceiling (#2120,
   `userspace-dp/src/session/expire.rs`) still reaps a lost-Close twin. Do not
   restore `LastSeen`-based re-sync: that would re-introduce the per-second
   control-socket contention #270 removed.

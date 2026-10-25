@@ -6,13 +6,15 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"golang.org/x/sys/unix"
 )
 
 func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 	s.lastSweepTime = monotonicSeconds()
 	s.lastPrimaryLivenessSweepTime = s.lastSweepTime
-	s.primaryLivenessScanIntervalSeconds = initialPrimaryLivenessScanIntervalSeconds
+	s.primaryLivenessScanIntervalSeconds.Store(initialPrimaryLivenessScanIntervalSeconds)
 
 	s.wg.Add(1)
 	go func() {
@@ -26,6 +28,10 @@ func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-s.sweepWakeCh:
+				requestedScanSeconds := s.sweepWakeScanIntervalSeconds.Load()
+				if requestedScanSeconds > 0 {
+					interval = min(interval, time.Duration(requestedScanSeconds)*time.Second)
+				}
 				if !timer.Stop() {
 					select {
 					case <-timer.C:
@@ -34,6 +40,7 @@ func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 				}
 				timer.Reset(s.capSweepIntervalForLiveness(interval))
 			case <-timer.C:
+				s.sweepWakeScanIntervalSeconds.Store(0)
 				activeInterval, idleInterval = s.sweepIntervals()
 				synced := s.syncSweep()
 				if synced > 0 || s.syncBackfillNeeded.Load() {
@@ -55,11 +62,29 @@ func (s *SessionSync) capSweepIntervalForLiveness(interval time.Duration) time.D
 	if !s.PrimaryLivenessCapable() {
 		return interval
 	}
-	scanSeconds := s.primaryLivenessScanIntervalSeconds
+	scanSeconds := s.primaryLivenessScanIntervalSeconds.Load()
 	if scanSeconds == 0 {
 		scanSeconds = initialPrimaryLivenessScanIntervalSeconds
 	}
 	return min(interval, time.Duration(scanSeconds)*time.Second)
+}
+
+// wakeSweepForQueuedSession shortens an armed idle timer only when a newly
+// queued row requires a faster liveness scan than the current adaptive cadence.
+// Long-lived rows do not disturb backoff; the buffered wake channel coalesces
+// bursts of shorter rows.
+func (s *SessionSync) wakeSweepForQueuedSession(protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8) {
+	if s == nil || !s.PrimaryLivenessCapable() {
+		return
+	}
+	requested := primaryLivenessScanInterval(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass)
+	current := s.primaryLivenessScanIntervalSeconds.Load()
+	if current == 0 {
+		current = initialPrimaryLivenessScanIntervalSeconds
+	}
+	if requested < current {
+		s.wakeSyncSweepForInterval(requested)
+	}
 }
 func (s *SessionSync) sweepIntervals() (time.Duration, time.Duration) {
 	if s.sessions != nil {
@@ -124,7 +149,7 @@ func (s *SessionSync) stampSweepV4(
 		(!primaryLiveness && current.Created < threshold) ||
 		current.Created > now ||
 		(primaryLiveness && (!s.PrimaryLivenessCapable() ||
-			!primaryLivenessDue(current.Created, current.Timeout, current.AppTimeout, current.SessionID, livenessThreshold, now))) ||
+			!primaryLivenessDue(current.Created, key.Protocol, current.Timeout, current.AppTimeout, current.RevPackets, current.TCPHandshakeState, current.TCPCloseClass, current.SessionID, livenessThreshold, now))) ||
 		!s.ShouldSyncSessionV4(current) {
 		return dataplane.SessionValue{}, false
 	}
@@ -147,7 +172,7 @@ func (s *SessionSync) stampSweepV6(
 		(!primaryLiveness && current.Created < threshold) ||
 		current.Created > now ||
 		(primaryLiveness && (!s.PrimaryLivenessCapable() ||
-			!primaryLivenessDue(current.Created, current.Timeout, current.AppTimeout, current.SessionID, livenessThreshold, now))) ||
+			!primaryLivenessDue(current.Created, key.Protocol, current.Timeout, current.AppTimeout, current.RevPackets, current.TCPHandshakeState, current.TCPCloseClass, current.SessionID, livenessThreshold, now))) ||
 		!s.ShouldSyncSessionV6(current) {
 		return dataplane.SessionValueV6{}, false
 	}
@@ -160,17 +185,82 @@ const (
 	initialPrimaryLivenessScanIntervalSeconds = uint64(1)
 	maxPrimaryLivenessScanIntervalSeconds     = uint64(10)
 	maxPrimaryLivenessIntervalSeconds         = uint64(60 * 60)
+	primaryLivenessOSPFProtocol               = uint8(89)
 )
 
-func primaryLivenessTimeout(timeout, appTimeout uint32) uint64 {
-	if appTimeout > 0 && appTimeout <= 86_400 {
-		return uint64(appTimeout)
+func primaryNonTCPLivenessTimeout(sessionTimeout, appOverride uint64, replyPackets uint64, receiverTimeout uint64) uint64 {
+	primaryTimeout := sessionTimeout
+	if appOverride != 0 && replyPackets > 0 {
+		if primaryTimeout == 0 {
+			primaryTimeout = appOverride
+		} else {
+			primaryTimeout = min(primaryTimeout, appOverride)
+		}
 	}
-	return uint64(timeout)
+	if primaryTimeout == 0 {
+		return receiverTimeout
+	}
+	return min(primaryTimeout, receiverTimeout)
 }
 
-func primaryLivenessScanInterval(timeout, appTimeout uint32) uint64 {
-	period := primaryLivenessTimeout(timeout, appTimeout)
+// primaryLivenessTimeout returns the tighter of the primary's active idle
+// timeout and the receiver's import-time timeout. Non-TCP app overrides are
+// promoted only after reply traffic on the primary, but the receiver does not
+// learn that reply-promotion state from the sync row and therefore uses its
+// global per-protocol timeout. For TCP, session-row timeouts may carry the
+// 1800s no-entry fallback, so opening and closing rows are capped at their
+// source-derived state defaults before applying a shorter measured window.
+func primaryLivenessTimeout(protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8) uint64 {
+	appOverride := uint64(appTimeout)
+	if appOverride == 0 || appOverride > 86_400 {
+		appOverride = 0
+	}
+	sessionTimeout := uint64(timeout)
+
+	switch protocol {
+	case unix.IPPROTO_UDP, unix.IPPROTO_ICMP, unix.IPPROTO_ICMPV6:
+		receiverTimeout := uint64(config.DataplaneUDPSessionTimeoutSecs)
+		if protocol == unix.IPPROTO_ICMP || protocol == unix.IPPROTO_ICMPV6 {
+			receiverTimeout = uint64(config.DataplaneICMPSessionTimeoutSecs)
+		}
+		return primaryNonTCPLivenessTimeout(sessionTimeout, appOverride, replyPackets, receiverTimeout)
+	case unix.IPPROTO_TCP:
+		if closeClass != 0 {
+			closeTimeout := uint64(config.DataplaneTCPClosingWindowSecs)
+			if closeClass == 3 {
+				closeTimeout = uint64(config.DataplaneTCPRSTWindowSecs)
+			}
+			if sessionTimeout == 0 {
+				return closeTimeout
+			}
+			return min(sessionTimeout, closeTimeout)
+		}
+		if handshakeState != dataplane.TCPHandshakeStateAbsent &&
+			handshakeState != dataplane.TCPHandshakeStateEstablished {
+			openingTimeout := uint64(config.DataplaneTCPOpeningWindowSecs)
+			if sessionTimeout == 0 {
+				return openingTimeout
+			}
+			return min(sessionTimeout, openingTimeout)
+		}
+		if appOverride != 0 {
+			if sessionTimeout == 0 {
+				return appOverride
+			}
+			return min(appOverride, sessionTimeout)
+		}
+		return sessionTimeout
+	default:
+		receiverTimeout := uint64(config.DataplaneOtherSessionTimeoutSecs)
+		if protocol == primaryLivenessOSPFProtocol {
+			receiverTimeout = uint64(config.DataplaneOSPFSessionTimeoutSecs)
+		}
+		return primaryNonTCPLivenessTimeout(sessionTimeout, appOverride, replyPackets, receiverTimeout)
+	}
+}
+
+func primaryLivenessScanInterval(protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8) uint64 {
+	period := primaryLivenessTimeout(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass)
 	if period == 0 {
 		return maxPrimaryLivenessScanIntervalSeconds
 	}
@@ -183,8 +273,8 @@ func primaryLivenessScanInterval(timeout, appTimeout uint32) uint64 {
 // LastSeen is only mirrored into that map on a budgeted, multi-second cycle.
 // The previous watermark advances only after a complete scan, so one scan
 // emits at most one refresh even if it crosses multiple periods.
-func primaryLivenessDue(created uint64, timeout, appTimeout uint32, sessionID, previous, now uint64) bool {
-	idleTimeout := primaryLivenessTimeout(timeout, appTimeout)
+func primaryLivenessDue(created uint64, protocol uint8, timeout, appTimeout uint32, replyPackets uint64, handshakeState, closeClass uint8, sessionID, previous, now uint64) bool {
+	idleTimeout := primaryLivenessTimeout(protocol, timeout, appTimeout, replyPackets, handshakeState, closeClass)
 	if idleTimeout == 0 || created > now {
 		return false
 	}
@@ -329,7 +419,7 @@ func (s *SessionSync) syncSweep() int {
 
 	livenessThreshold := s.lastPrimaryLivenessSweepTime
 	livenessCapable := s.PrimaryLivenessCapable()
-	livenessScanInterval := s.primaryLivenessScanIntervalSeconds
+	livenessScanInterval := s.primaryLivenessScanIntervalSeconds.Load()
 	if livenessScanInterval == 0 {
 		livenessScanInterval = initialPrimaryLivenessScanIntervalSeconds
 	}
@@ -372,14 +462,14 @@ func (s *SessionSync) syncSweep() int {
 		}
 		regular := val.Created >= threshold && val.Created <= now
 		liveness := livenessScanDue && val.Created < threshold &&
-			primaryLivenessDue(val.Created, val.Timeout, val.AppTimeout, val.SessionID, livenessThreshold, now)
+			primaryLivenessDue(val.Created, key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass, val.SessionID, livenessThreshold, now)
 		syncable := false
 		if livenessCapable || regular {
 			syncable = s.ShouldSyncSessionV4(val)
 		}
 		if livenessCapable && syncable {
 			minimumLivenessScanInterval = min(minimumLivenessScanInterval,
-				primaryLivenessScanInterval(val.Timeout, val.AppTimeout))
+				primaryLivenessScanInterval(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass))
 		}
 		if (regular || liveness) && syncable {
 			announced := s.installTableAnnouncedV4(key)
@@ -422,14 +512,14 @@ func (s *SessionSync) syncSweep() int {
 		}
 		regular := val.Created >= threshold && val.Created <= now
 		liveness := livenessScanDue && val.Created < threshold &&
-			primaryLivenessDue(val.Created, val.Timeout, val.AppTimeout, val.SessionID, livenessThreshold, now)
+			primaryLivenessDue(val.Created, key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass, val.SessionID, livenessThreshold, now)
 		syncable := false
 		if livenessCapable || regular {
 			syncable = s.ShouldSyncSessionV6(val)
 		}
 		if livenessCapable && syncable {
 			minimumLivenessScanInterval = min(minimumLivenessScanInterval,
-				primaryLivenessScanInterval(val.Timeout, val.AppTimeout))
+				primaryLivenessScanInterval(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass))
 		}
 		if (regular || liveness) && syncable {
 			announced := s.installTableAnnouncedV6(key)
@@ -483,7 +573,7 @@ func (s *SessionSync) syncSweep() int {
 		slog.Info("cluster sync: sweep replay recovered", "queued", count, "threshold", threshold)
 	}
 	if livenessCapable {
-		s.primaryLivenessScanIntervalSeconds = minimumLivenessScanInterval
+		s.primaryLivenessScanIntervalSeconds.Store(minimumLivenessScanInterval)
 		if livenessScanDue {
 			s.lastPrimaryLivenessSweepTime = now
 		}

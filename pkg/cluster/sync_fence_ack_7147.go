@@ -490,6 +490,22 @@ func (s *SessionSync) wakeSyncSweep() {
 	}
 }
 
+func (s *SessionSync) wakeSyncSweepForInterval(scanSeconds uint64) {
+	if s == nil || s.sweepWakeCh == nil || scanSeconds == 0 {
+		return
+	}
+	for {
+		old := s.sweepWakeScanIntervalSeconds.Load()
+		if old != 0 && old <= scanSeconds {
+			return
+		}
+		if s.sweepWakeScanIntervalSeconds.CompareAndSwap(old, scanSeconds) {
+			break
+		}
+	}
+	s.wakeSyncSweep()
+}
+
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been
 // decoded for the CURRENT peer incarnation.
 //

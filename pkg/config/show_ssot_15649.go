@@ -16,13 +16,14 @@ import (
 
 // --- V11-04: flow session timeouts ---------------------------------------
 
-// Dataplane UDP/ICMP session windows mirrored from
-// userspace-dp/src/session/mod.rs (DEFAULT_UDP_SESSION_TIMEOUT_NS /
-// DEFAULT_ICMP_SESSION_TIMEOUT_NS, both 60s). Re-pinned against the Rust
-// constants by flow_show_15649_test.go.
+// Dataplane session windows mirrored from userspace-dp/src/session/mod.rs:
+// UDP/ICMP/OSPF are 60s; remaining non-TCP protocols are 1800s. Re-pinned
+// against the Rust constants by show_ssot_15649_test.go.
 const (
-	DataplaneUDPSessionTimeoutSecs  = 60
-	DataplaneICMPSessionTimeoutSecs = 60
+	DataplaneUDPSessionTimeoutSecs   = 60
+	DataplaneICMPSessionTimeoutSecs  = 60
+	DataplaneOSPFSessionTimeoutSecs  = 60
+	DataplaneOtherSessionTimeoutSecs = 1800
 )
 
 // FlowTimeoutCell renders one timeout value: the configured seconds, or

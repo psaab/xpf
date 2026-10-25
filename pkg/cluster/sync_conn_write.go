@@ -140,6 +140,9 @@ func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.Ses
 	}
 	msg := encodeSessionV4(key, val)
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v4")
+	// The local row remains available to the sweep if the delta frame could
+	// not be enqueued, so evaluate its liveness cadence independently.
+	s.wakeSweepForQueuedSession(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass)
 }
 
 // QueueSessionV6 queues a v6 session for synchronization to the peer.
@@ -153,6 +156,9 @@ func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.S
 	}
 	msg := encodeSessionV6(key, val)
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v6")
+	// The local row remains available to the sweep if the delta frame could
+	// not be enqueued.
+	s.wakeSweepForQueuedSession(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass)
 }
 
 // pacedQueuePoll is how often a paced enqueue re-checks the connection while
@@ -175,7 +181,9 @@ func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplan
 	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
 		return false
 	}
-	return s.queueMessagePaced(encodeSessionV4(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
+	queued := s.queueMessagePaced(encodeSessionV4(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
+	s.wakeSweepForQueuedSession(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass)
+	return queued
 }
 
 // QueueSessionV6Paced is the v6 form of QueueSessionV4Paced.
@@ -187,7 +195,9 @@ func (s *SessionSync) QueueSessionV6Paced(key dataplane.SessionKeyV6, val datapl
 	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
 		return false
 	}
-	return s.queueMessagePaced(encodeSessionV6(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
+	queued := s.queueMessagePaced(encodeSessionV6(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
+	s.wakeSweepForQueuedSession(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass)
+	return queued
 }
 
 // queueMessagePaced is queueMessage with a bounded wait for room. A disconnect
