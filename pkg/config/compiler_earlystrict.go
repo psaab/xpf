@@ -243,6 +243,28 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #16596 — reject a single-zone scoped global policy whose address token
+	// is defined only in that zone's (attached or inline) book. Junos
+	// requires global-policy addresses to be defined in the global address
+	// book; the former #3287 rewrite silently rebound such a token to the
+	// zone-local object (and rebound it back when a second scope zone was
+	// added). MUST run here, after resolveNamedAddressBooks15672 (so
+	// attached books are visible as zone books) and BEFORE
+	// resolveZoneLocalAddressBooks folds zone-local entries into the global
+	// book under qualified keys, erasing the authored/global distinction.
+	// Strict on commit / commit-check; tolerant load / peer-sync downgrades
+	// to a warning and poisons the referencing policy
+	// (poisonScopedGlobalZoneLocalRefs16596) so the wrong object is never
+	// enforced (#1960 no-brick).
+	if err := validateScopedGlobalZoneLocalRefsStrict(cfg); err != nil {
+		if opts.lenientScopedGlobalZoneLocal16596 {
+			poisonScopedGlobalZoneLocalRefs16596(cfg)
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("scoped global zone-local address (downgraded to warning on tolerant path; the referencing global policy is poisoned and enforces neither the zone-local object nor a global twin): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #3061 — fold zone-local address books into the global book under
 	// zone-qualified internal names and rewrite policy match tokens. Runs after
 	// the name gate (above) and before the policy match-address resolution

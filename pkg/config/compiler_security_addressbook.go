@@ -305,12 +305,25 @@ func validateNamedAddressBookAttachStrict(cfg *Config) error {
 // downstream resolution path (wire snapshot, nameToID, classifyPolicyAddresses,
 // strict/warn validators) keeps operating on a single flat global book.
 //
-// Junos scoping: a policy's source-address resolves against its FROM zone's
-// book, destination-address against its TO zone's book — zone-local first,
-// then the global book. A token defined in a zone's local book is rewritten
-// to that zone's qualified name (zone-local wins); a token NOT in the zone's
-// local book is left unchanged so it falls back to the global book. A name
-// present only in zone A's book is therefore invisible to a policy in zone B.
+// Junos scoping: a zone-pair policy's source-address resolves against its FROM
+// zone's book, destination-address against its TO zone's book — zone-local
+// first, then the global book. A token defined in a zone's local book is
+// rewritten to that zone's qualified name (zone-local wins); a token NOT in
+// the zone's local book is left unchanged so it falls back to the global book.
+// A name present only in zone A's book is therefore invisible to a policy in
+// zone B.
+//
+// Global policies are different (#16596): Junos requires their addresses to
+// be defined in the GLOBAL address book, even when the policy carries a
+// single-zone `match from-zone`/`to-zone` scope. A scoped-global token is
+// therefore never rewritten to a zone-local entry. When such a token is
+// defined only in the scoped zone's book (the #3287 zone-local extension,
+// now superseded), the pre-fold gate in compiler_earlystrict.go rejects it
+// at strict commit and, on the tolerant path, warns and poisons the policy
+// (LenientContentDropped) so the wrong object is never enforced. This
+// function still folds the zone-local entries themselves: zone-pair
+// policies keep resolving them, and a global token that IS in the global
+// book resolves there regardless of a same-named zone-local twin.
 func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 	hasLocal := false
 	for _, z := range sec.Zones {
@@ -493,33 +506,15 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 			rewrite(zpp.ToZone, p.Match.DestinationAddresses)
 		}
 	}
-	// #3287: a scoped global policy (#3148, `match from-zone <z>` /
-	// `match to-zone <z>`) resolves its zone-local address references against
-	// that zone's local book, exactly like a zone-pair policy. Without this the
-	// bare token kept pointing at the global book (where the entry exists only
-	// under its zone-qualified name), so the address constraint silently
-	// resolved to match-none and legitimate zone-scoped global traffic fell
-	// through to default-deny. An unscoped global (empty / `any` scope) has no
-	// single zone-local book and is left to resolve against the global book.
-	//
-	// #4626 M03: the scope is now a zone SET. Zone-local book resolution stays
-	// defined only for a SINGLE concrete zone — a multi-zone scope
-	// (`[ trust dmz ]`) has no single zone-local book, so it resolves against
-	// the GLOBAL book, the same carve-out an unscoped/`any` global already gets
-	// (a documented parity limitation: multi-zone scoped globals cannot use
-	// zone-local address books). A one-element scope keeps the pre-#4626
-	// single-zone behaviour exactly; `rewrite` itself no-ops for `any`/empty.
-	for _, p := range sec.GlobalPolicies {
-		if p == nil {
-			continue
-		}
-		if len(p.Match.FromZones) == 1 {
-			rewrite(p.Match.FromZones[0], p.Match.SourceAddresses)
-		}
-		if len(p.Match.ToZones) == 1 {
-			rewrite(p.Match.ToZones[0], p.Match.DestinationAddresses)
-		}
-	}
+	// #16596: global policies (scoped or not) are NOT rewritten here. Junos
+	// requires global-policy addresses to be defined in the global book, so a
+	// scoped global's bare token already names the global entry and must keep
+	// doing so even when the scoped zone's book defines the same name. A
+	// token defined only in the scoped zone's book is diagnosed before this
+	// fold (see compiler_earlystrict.go): strict commit rejects it, the
+	// tolerant path warns and poisons the policy. The former #3287
+	// single-zone rewrite is removed; multi-zone and unscoped globals
+	// already resolved globally, so all global scopes now agree.
 }
 
 // compileAddressBook folds one `security address-book` block into the global

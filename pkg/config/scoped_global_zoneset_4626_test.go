@@ -144,10 +144,11 @@ func TestScopedGlobalStrictGate(t *testing.T) {
 	}
 }
 
-// TestScopedGlobalMultiZoneAddressBookGlobalResolution pins A7: a scoped global
-// with a MULTI-zone scope resolves its zone-local address references against the
-// GLOBAL book (no single zone-local book exists for a set), while a
-// single-concrete-zone scope keeps the pre-#4626 zone-local resolution.
+// TestScopedGlobalMultiZoneAddressBookGlobalResolution pins A7 as narrowed
+// by #16596: a scoped global resolves its address references against the
+// GLOBAL book for EVERY scope — Junos requires global-policy addresses to
+// be in the global book, so a single-concrete-zone scope no longer keeps
+// the former #3287/#4626 zone-local resolution either. All scopes agree.
 func TestScopedGlobalMultiZoneAddressBookGlobalResolution(t *testing.T) {
 	// A zone-local book entry `foo` under trust, and a distinct global `foo`.
 	base := append(zoneSet4626Base(),
@@ -170,12 +171,12 @@ func TestScopedGlobalMultiZoneAddressBookGlobalResolution(t *testing.T) {
 		return cfg
 	}
 
-	// Single concrete zone: `foo` resolves against trust's LOCAL book
-	// (zone-qualified token).
+	// Single concrete zone (#16596): `foo` stays the bare name (GLOBAL book),
+	// exactly like the multi-zone scope — the zone scope narrows which flows
+	// the policy applies to, it does not rebind its address names.
 	single := buildWith("trust")
-	if got := single.Security.GlobalPolicies[0].Match.SourceAddresses; len(got) != 1 ||
-		!strings.Contains(got[0], "trust") {
-		t.Fatalf("single-zone scope source-address = %q, want a trust zone-local qualification", got)
+	if got := single.Security.GlobalPolicies[0].Match.SourceAddresses; len(got) != 1 || got[0] != "foo" {
+		t.Fatalf("single-zone scope source-address = %q, want the bare global-book name \"foo\" (#16596)", got)
 	}
 
 	// Multi-zone scope: `foo` stays the bare name (GLOBAL book) — no zone-local
