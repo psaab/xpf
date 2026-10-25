@@ -290,6 +290,24 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// #16764 VIP-equals-own-unit-address (RFC 5798 address owner) gate.
+	// Strict on commit / commit-check (hard-reject a `vrrp-group` whose
+	// virtual-address equals an address configured on the same unit —
+	// pkg/vrrp excludes VIPs from the advert source and deletes every VIP
+	// on BACKUP/stop, so the owner would advertise nothing while
+	// reporting MASTER and would strip its own unit address). Lenient on
+	// load / peer-sync (#1960 no-brick). Explicit groups only: RETH-derived
+	// instances carry the unit addresses as VIPs by construction and are
+	// never priority-255 owners.
+	if err := validateVRRPVIPOwnerStrict(cfg); err != nil {
+		if opts.lenientVRRPVIPOwner {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("vrrp virtual-address equals unit address (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #15688 VRRP instance-identity gate. Strict on commit / commit-check
 	// (hard-reject a duplicate (kernelInterface, VRID, family) identity —
 	// the same VRID under two addresses of one unit+family, or units that

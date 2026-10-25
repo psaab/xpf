@@ -3362,6 +3362,18 @@ type compileOpts struct {
 	// the second claimant, so a leniently-loaded duplicate is bounded to
 	// one seated election rather than two masters for one VIP.
 	lenientVRRPVIPCrossGroup bool
+	// lenientVRRPVIPOwner (#16764) downgrades the VIP-equals-own-unit-address
+	// gate (validateVRRPVIPOwnerStrict) from a hard compile error to a
+	// cfg.Warnings entry. The shape is the RFC 5798 address owner (VIP ==
+	// a real unit address, priority 255), which pkg/vrrp cannot serve: the
+	// advert source excludes VIPs and every VIP is deleted on BACKUP/stop,
+	// so the group advertises nothing while reporting MASTER and strips
+	// the unit's own address. The strict commit / commit-check path
+	// hard-rejects naming the interface, unit, group and VIP; the tolerant
+	// load / peer-sync paths warn so an already-persisted or peer-synced
+	// config still boots (#1960 no-brick) and keeps today's behaviour
+	// until corrected.
+	lenientVRRPVIPOwner bool
 	// lenientVRRPInstanceIdentity (#15688) downgrades the VRRP instance
 	// identity gate (validateVRRPInstanceIdentityStrict) from a hard compile
 	// error to a cfg.Warnings entry. A duplicate (kernelInterface, VRID,
@@ -4134,6 +4146,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVRRPVIPCount:                      true,
 		lenientVRRPVIPEmpty:                      true,
 		lenientVRRPVIPCrossGroup:                 true,
+		lenientVRRPVIPOwner:                      true,
 		lenientVRRPInstanceIdentity:              true,
 		lenientVRRPTrackRef:                      true,
 		lenientVRRPVIPPrefix:                     true,
