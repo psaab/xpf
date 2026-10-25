@@ -8,6 +8,14 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+// PersistentNATRemote is one granted inbound remote endpoint (#16647). Port
+// zero is the target-host wildcard: every port on this host. It mirrors the
+// helper's permitted-remotes wire shape so the SHOW detail can render grants.
+type PersistentNATRemote struct {
+	IP   netip.Addr
+	Port uint16
+}
+
 // PersistentNATBinding holds a NAT port mapping that survives session GC.
 type PersistentNATBinding struct {
 	SrcIP    netip.Addr
@@ -17,6 +25,17 @@ type PersistentNATBinding struct {
 	PoolName string
 	LastSeen time.Time
 	Timeout  time.Duration
+	// Protocol is the IP protocol number of the helper lease (#16647):
+	// 6=TCP, 17=UDP. Zero marks a pre-#16647 record (legacy session-store
+	// preserve, which carries no protocol selection).
+	Protocol uint8
+	// RoutingScope is the helper's routing-domain identity (#10018/#16647):
+	// overlapping source tuples in different instances are distinct leases.
+	RoutingScope uint32
+	// PermittedRemotes are the granted inbound endpoints (#16647), rendered
+	// in the detail SHOW. Empty unless Permit is a target mode and the
+	// helper reported explicit grants.
+	PermittedRemotes []PersistentNATRemote
 	// Permit is the three-way persistent-NAT remote scope (#2823/#3193):
 	// any-remote-host / target-host / target-host-port. The pre-#2823
 	// binary PermitAnyRemoteHost bool could not distinguish target-host
@@ -36,9 +55,11 @@ func (b *PersistentNATBinding) PermitMode() string {
 }
 
 type persistentNATKey struct {
-	SrcIP   netip.Addr
-	SrcPort uint16
-	Pool    string
+	SrcIP        netip.Addr
+	SrcPort      uint16
+	Pool         string
+	Protocol     uint8
+	RoutingScope uint32
 }
 
 // PersistentNATPoolInfo holds per-pool persistent NAT configuration.
@@ -165,12 +186,36 @@ func (t *PersistentNATTable) LookupPool(natIP netip.Addr) (string, PersistentNAT
 }
 
 // Lookup finds an existing persistent binding. Returns nil if not found
-// or if the binding has expired.
+// or if the binding has expired. It scans the (SrcIP, SrcPort, Pool) matches
+// regardless of protocol/scope, for legacy callers that hold no lease
+// identity; LookupScoped is the exact-match form new callers should use.
+// It returns a copy so callers cannot alias table state.
 func (t *PersistentNATTable) Lookup(srcIP netip.Addr, srcPort uint16, pool string) *PersistentNATBinding {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	for key, b := range t.bindings {
+		if key.SrcIP != srcIP || key.SrcPort != srcPort || key.Pool != pool {
+			continue
+		}
+		if time.Since(b.LastSeen) > b.Timeout {
+			continue
+		}
+		cp := *b
+		if b.PermittedRemotes != nil {
+			cp.PermittedRemotes = append([]PersistentNATRemote(nil), b.PermittedRemotes...)
+		}
+		return &cp
+	}
+	return nil
+}
 
-	key := persistentNATKey{SrcIP: srcIP, SrcPort: srcPort, Pool: pool}
+// LookupScoped finds a binding by its full #16647 identity, including
+// protocol and routing scope, so overlapping tenants stay distinct.
+func (t *PersistentNATTable) LookupScoped(srcIP netip.Addr, srcPort uint16, pool string, protocol uint8, routingScope uint32) *PersistentNATBinding {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	key := persistentNATKey{SrcIP: srcIP, SrcPort: srcPort, Pool: pool, Protocol: protocol, RoutingScope: routingScope}
 	b, ok := t.bindings[key]
 	if !ok {
 		return nil
@@ -191,7 +236,7 @@ func (t *PersistentNATTable) Lookup(srcIP netip.Addr, srcPort uint16, pool strin
 // permit any-remote-host left the table rendering 192.0.2.1:5000, 1h,
 // target-host.
 //
-// The key is (SrcIP, SrcPort, Pool), so a re-save under the same key is the
+// The key is (SrcIP, SrcPort, Pool, Protocol, RoutingScope), so a re-save under the same key is the
 // SAME binding with new facts about it, never a different one. There is
 // nothing in the discarded record the stored one was more right about: the only
 // caller, preservePersistentNATV4/V6, builds every field fresh from the session
@@ -215,12 +260,13 @@ func (t *PersistentNATTable) Save(b *PersistentNATBinding) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	key := persistentNATKey{SrcIP: b.SrcIP, SrcPort: b.SrcPort, Pool: b.PoolName}
+	key := persistentNATKey{SrcIP: b.SrcIP, SrcPort: b.SrcPort, Pool: b.PoolName, Protocol: b.Protocol, RoutingScope: b.RoutingScope}
 	if existing, ok := t.bindings[key]; ok {
 		existing.NatIP = b.NatIP
 		existing.NatPort = b.NatPort
 		existing.Timeout = b.Timeout
 		existing.Permit = b.Permit
+		existing.PermittedRemotes = append([]PersistentNATRemote(nil), b.PermittedRemotes...)
 		existing.LastSeen = time.Now()
 		return
 	}
@@ -305,7 +351,7 @@ func indexPersistentNATBindings(bindings []*PersistentNATBinding) map[persistent
 		if b == nil {
 			continue
 		}
-		next[persistentNATKey{SrcIP: b.SrcIP, SrcPort: b.SrcPort, Pool: b.PoolName}] = b
+		next[persistentNATKey{SrcIP: b.SrcIP, SrcPort: b.SrcPort, Pool: b.PoolName, Protocol: b.Protocol, RoutingScope: b.RoutingScope}] = b
 	}
 	return next
 }
@@ -336,9 +382,8 @@ func (t *PersistentNATTable) Len() int {
 // Save()/GC() mutates in place (e.g. Save updating LastSeen under the write
 // lock). Returning the live pointers here was a real, -race-detectable data
 // race between the SHOW path (pkg/natshow) reading LastSeen and the packet
-// path calling Save() (#4811). All PersistentNATBinding fields are value
-// types (netip.Addr, ints, string, time.Time, config.PersistentNATPermit),
-// so a struct value copy is a complete, independent snapshot.
+// path calling Save() (#4811). Scalar fields copy by value; PermittedRemotes
+// is deep-copied so a snapshot cannot alias the live slice (#16647).
 func (t *PersistentNATTable) All() []*PersistentNATBinding {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -346,6 +391,9 @@ func (t *PersistentNATTable) All() []*PersistentNATBinding {
 	result := make([]*PersistentNATBinding, 0, len(t.bindings))
 	for _, b := range t.bindings {
 		cp := *b
+		if b.PermittedRemotes != nil {
+			cp.PermittedRemotes = append([]PersistentNATRemote(nil), b.PermittedRemotes...)
+		}
 		result = append(result, &cp)
 	}
 	return result

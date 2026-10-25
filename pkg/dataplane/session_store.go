@@ -1187,14 +1187,16 @@ func (s dataPlaneSessionStore) preservePersistentNATV4(key SessionKey, val Sessi
 	natIP := netip.AddrFrom4(natIPBytes)
 	if poolName, poolCfg, ok := pnat.LookupPool(natIP); ok {
 		pnat.Save(&PersistentNATBinding{
-			SrcIP:    netip.AddrFrom4(key.SrcIP),
-			SrcPort:  key.SrcPort,
-			NatIP:    natIP,
-			NatPort:  val.NATSrcPort,
-			PoolName: poolName,
-			LastSeen: time.Now(),
-			Timeout:  poolCfg.Timeout,
-			Permit:   poolCfg.Permit,
+			SrcIP:        netip.AddrFrom4(key.SrcIP),
+			SrcPort:      key.SrcPort,
+			NatIP:        natIP,
+			NatPort:      val.NATSrcPort,
+			PoolName:     poolName,
+			LastSeen:     time.Now(),
+			Timeout:      poolCfg.Timeout,
+			Permit:       poolCfg.Permit,
+			Protocol:     key.Protocol,
+			RoutingScope: val.RoutingDomain,
 		})
 	}
 }
@@ -1210,14 +1212,16 @@ func (s dataPlaneSessionStore) preservePersistentNATV6(key SessionKeyV6, val Ses
 	natIP := netip.AddrFrom16(val.NATSrcIP)
 	if poolName, poolCfg, ok := pnat.LookupPool(natIP); ok {
 		pnat.Save(&PersistentNATBinding{
-			SrcIP:    netip.AddrFrom16(key.SrcIP),
-			SrcPort:  key.SrcPort,
-			NatIP:    natIP,
-			NatPort:  val.NATSrcPort,
-			PoolName: poolName,
-			LastSeen: time.Now(),
-			Timeout:  poolCfg.Timeout,
-			Permit:   poolCfg.Permit,
+			SrcIP:        netip.AddrFrom16(key.SrcIP),
+			SrcPort:      key.SrcPort,
+			NatIP:        natIP,
+			NatPort:      val.NATSrcPort,
+			PoolName:     poolName,
+			LastSeen:     time.Now(),
+			Timeout:      poolCfg.Timeout,
+			Permit:       poolCfg.Permit,
+			Protocol:     key.Protocol,
+			RoutingScope: val.RoutingDomain,
 		})
 	}
 }
