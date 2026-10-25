@@ -459,6 +459,66 @@ func (d *Daemon) snapshotRethMasterState() map[int]bool {
 	return out
 }
 
+// markRethServicesApplied records that rgID's RETH services were driven to
+// the given ownership (#16696). Called at the tail of
+// applyRethServicesForRG / clearRethServicesForRG so every edge producer
+// (VRRP event, direct-VIP, cluster event, reconcile converger) advances the
+// same marker the converger compares against.
+func (d *Daemon) markRethServicesApplied(rgID int, active bool) {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	if d.rethServicesApplied == nil {
+		d.rethServicesApplied = make(map[int]bool)
+	}
+	d.rethServicesApplied[rgID] = active
+}
+
+// rethServicesAppliedFor reports the last service ownership applied for
+// rgID; absent reads false (never applied / last cleared).
+func (d *Daemon) rethServicesAppliedFor(rgID int) bool {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	return d.rethServicesApplied[rgID]
+}
+
+// driveRethServicesEdge runs the per-RG service edge for a transition this
+// handler produced (#16696). handleClusterEvent makes rg-state edges in
+// legacy non-strict mode (desired = clusterPri || allVrrpMaster) whenever
+// the cluster input is the one that flips desired, but previously ran
+// neither apply nor clear — the edge was lost permanently because the
+// later VRRP/reconcile inputs then report Changed=false. Direct mode
+// (noRethVRRP) owns services inside reconcileDirectVIPOwnership and is
+// excluded. Idempotence when both inputs arrive: the second input reports
+// Changed=false, so the edge runs exactly once.
+func (d *Daemon) driveRethServicesEdge(rgID int, tr rgTransition, noRethVRRP bool) {
+	if noRethVRRP || !tr.Changed {
+		return
+	}
+	if tr.Active {
+		d.applyRethServicesForRG(rgID)
+	} else {
+		d.clearRethServicesForRG(rgID)
+	}
+}
+
+// convergeRethServices repairs a lost per-RG service edge (#16696): when
+// the desired ownership (snapshotRethMasterState, i.e. rgStateMachine
+// IsActive) disagrees with the last-applied service ownership, re-drive
+// the edge. Level-triggered, so it also covers edges swallowed by the
+// #15258 sync-hold mirror refresh (R3-A34-03 class) whose transitions no
+// caller consumes. A converged RG costs one map read per pass.
+func (d *Daemon) convergeRethServices(rgID int) {
+	desired := d.snapshotRethMasterState()[rgID]
+	if desired == d.rethServicesAppliedFor(rgID) {
+		return
+	}
+	if desired {
+		d.applyRethServicesForRG(rgID)
+	} else {
+		d.clearRethServicesForRG(rgID)
+	}
+}
+
 func (d *Daemon) watchClusterEvents(ctx context.Context) {
 	// Debounce VRRP updates: coalesce rapid cluster events into a single
 	// UpdateInstances call. Without this, every heartbeat-driven state change
@@ -635,6 +695,11 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		if d.legacyNoRethVRRPCommitReady(ev.GroupID, s, noRethVRRP) {
 			d.setLocalFailoverCommitReady(ev.GroupID, true)
 		}
+		// #16696: in legacy non-strict mode this cluster edge may be the
+		// one that flipped desired (cluster-first promotion); run the
+		// service edge here or it is lost — the later VRRP MASTER and
+		// reconcile inputs report Changed=false.
+		d.driveRethServicesEdge(ev.GroupID, tr, noRethVRRP)
 	} else {
 		// Demotion: run preflight and resign VRRP BEFORE
 		// clearing rg_active (#485). The preflight shifts
@@ -719,6 +784,11 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		default:
 			d.signalFailoverActuated(ev.GroupID)
 		}
+		// #16696: in legacy non-strict mode this cluster edge may be the
+		// one that flipped desired (VRRP BACKUP arrived while cluster was
+		// still primary, so it changed nothing); clear the services here
+		// or the old owner keeps its Kea RG groups and RG-anchored SAs.
+		d.driveRethServicesEdge(ev.GroupID, tr, noRethVRRP)
 	}
 
 	// Strict VIP ownership: suppress GARP on secondary, allow on primary.
@@ -1451,6 +1521,12 @@ func (d *Daemon) reconcileRGState() {
 				}
 			}
 			anyRGChanged = true
+		} else if !noRethVRRP {
+			// #16696: level-triggered repair for a service edge no
+			// producer ran — handleClusterEvent's legacy-mode edge
+			// (pre-fix) or a sync-hold mirror refresh whose transition
+			// syncRGSyncHold discarded. No-op once converged.
+			d.convergeRethServices(rgID)
 		}
 		// Stable link-local: ensure correct on EVERY reconcile tick.
 		// The kernel preserves NODAD addresses across daemon restarts,
@@ -1948,6 +2024,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	if cc := d.clusterConfig(); cc != nil && cc.IPsecSASync && d.getSessionSync() != nil {
 		go d.reinitiateIPsecSAsForRG(rgID)
 	}
+	d.markRethServicesApplied(rgID, true)
 }
 
 type raScopedClearer interface {
@@ -2110,6 +2187,7 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// governs peer advertisement/re-initiation, not local SA hygiene on a
 	// node-local demotion edge.
 	go d.terminateDemotedRGIPsecSAs(rgID)
+	d.markRethServicesApplied(rgID, false)
 }
 
 // stripUntaggedUnitSuffix normalizes a resolved Linux interface name by
