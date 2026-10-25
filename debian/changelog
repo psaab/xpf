@@ -22,6 +22,15 @@ xpf (0.0.0) unstable; urgency=medium
     as whole lines (and no wan zone). The policy/NAT-drop mutant now
     reds both cells and a wan-zone mutant still reds the first
     (33 cells, unchanged count).
+  * Userspace DP: generated-reply limiter keys IPv6 per-/128 inside a
+    bounded /64 again (#16510). #15248 keyed solely on the /64, so every
+    host of one LAN /64 shared a single 15/s + burst-15 budget and one
+    host at ~15 pps suppressed its neighbours' Time Exceeded / Packet
+    Too Big / reject replies. Hosts now keep independent fair-share
+    budgets (15/s) with the /64 as an outer tier at 32 host shares
+    (480/s), so IID rotation stays bounded, one /64 cannot take more
+    than ~48% of the zone aggregate, and 30 same-/64 hosts burst 90/90.
+    Denial still fails closed; the 1000/s zone cap is unchanged.
 
   * Daemon-kernel probe selftest: kill the -json=false, SKIP-guard
     and go-exit mutants (#16507). Cell 9 asserted only the leg PASS

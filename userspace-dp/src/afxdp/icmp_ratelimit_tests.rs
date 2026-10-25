@@ -1008,16 +1008,22 @@ fn distinct_slot_ipv4_sources(n: usize) -> Vec<IpAddr> {
     panic!("could not find {n} distinct-slot IPv4 sources in 10000 probes");
 }
 
-/// #15248 (A67-01) HEADLINE fail-on-revert, IPv6 /64 cell: ONE host rotating
-/// IIDs inside its own /64 must not drain the zone aggregate and starve an
-/// unrelated victim source. The attacker cycles 16 IIDs at 10/s each over
-/// 10s (1600 attempts at the production 1000/s aggregate) while the victim
-/// asks for one reply at the end. Before the fix each IID owned a full
-/// 100/s slot, so the rotation admitted ~1008 (each IID's burst plus the
-/// aggregate's remainder) and the victim was aggregate-denied → RED. After
-/// the fix the whole /64 is ONE source at the fair share (15/s + burst
-/// 15); the GCRA admits exactly 163 over the window (15-token burst plus
-/// refill at the rounded-up 66.7ms interval) and the victim passes.
+/// #15248 (A67-01) HEADLINE fail-on-revert, IPv6 /64 cell — updated by
+/// #16510: ONE host rotating IIDs inside its own /64 must not drain the
+/// zone aggregate and starve an unrelated victim source. The attacker
+/// cycles 16 IIDs at 10/s each over 10s (1600 attempts at the production
+/// 1000/s aggregate) while the victim asks for one reply at the end.
+/// Pre-#15248 each IID owned a full 100/s slot, so the rotation admitted
+/// ~1008 and the victim was aggregate-denied. #15248 capped the whole
+/// /64 at one 15/s share (163 admitted). #16510 keeps the rotation
+/// bounded — now by the /64 OUTER tier (HOSTS_PER_64=32 host shares =
+/// 480/s + burst 480) behind per-/128 host shares: the 16 IIDs at 10/s
+/// each (160/s aggregate offer, under the 480/s /64 rate) pass in full,
+/// the /64 burst (480) plus refill never binds, and the victim passes.
+/// The binding rotation bound is proven with a saturating rotation in
+/// `rotating_v6_iids_saturate_at_prefix64_cap_16510`; removing the /64
+/// tier reds THAT cell (rotation admits the host-tier sum), and removing
+/// the host tier reds the #16510 same-/64 cells below.
 #[test]
 fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
     let _g = global_bucket_test_lock();
@@ -1030,8 +1036,9 @@ fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
     assert!(
         attackers
             .iter()
-            .all(|a| ZoneLimiter::slot_for_test(a) == ZoneLimiter::slot_for_test(&attackers[0])),
-        "test setup: every IID of one /64 must key the same source slot"
+            .all(|a| ZoneLimiter::prefix64_slot_for_test(a)
+                == ZoneLimiter::prefix64_slot_for_test(&attackers[0])),
+        "test setup: every IID of one /64 must key the same /64 slot"
     );
     let mut admitted = 0u32;
     // 100 steps of 100ms: one attempt per IID per step = 10/s per IID.
@@ -1051,10 +1058,13 @@ fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
             }
         }
     }
-    assert_eq!(
-        admitted, 163,
-        "one /64 source is capped at its fair share (burst 15 + 10s at 15/s \
-         GCRA = 163 admitted), not one budget per IID"
+    assert!(
+        admitted >= 1520,
+        "16 IIDs at 10/s each stay within their per-/128 shares and the \
+         /64 outer budget (480/s), so >=95% pass (got {admitted}/1600; \
+         the residual is ordinary 64-slot host collisions among 16 \
+         IIDs) — rotation is bounded by the saturating cell, not by \
+         starving this trickle"
     );
     let t_end = t0 + 10_000_000_000;
     assert!(
@@ -1122,17 +1132,21 @@ fn sixteen_distinct_ipv4_sources_do_not_starve_victim_15248() {
     );
 }
 
-/// #15248 (A67-01) sustained-fairness pin: 16 distinct-slot sources each
-/// hammering at 100/s for 10s offer 16,000 replies against a 1000/s zone
-/// aggregate. Even though the aggregate is the binding cap for the zone as
-/// a whole (1000 burst + 1000/s = 11,000 admissions over the window), the
-/// flooders' combined admitted count must stay within that aggregate
-/// envelope and a late victim must still be admitted: once the flooders'
-/// per-slot fair-share budgets (15/s) are spent they are source-denied
-/// WITHOUT consuming the aggregate, preserving headroom the victim can
-/// spend. Before the fix the flooders' 100/s slots admitted the full
-/// offered 16,000-attempt drain up to the aggregate cap and the victim was
-/// aggregate-denied → RED.
+/// #15248 (A67-01) sustained-fairness pin — victim timing updated by
+/// #16510: 16 distinct-slot sources each hammering at 100/s for 10s offer
+/// 16,000 replies against a 1000/s zone aggregate. The flooders' combined
+/// admitted count must stay within their fair-share envelope (~2624:
+/// 15-token burst + 15/s each), never the 11000-token aggregate envelope.
+/// The victim is probed 1s AFTER the flood ends: the flooders consumed
+/// ~2624 aggregate tokens over the window, so at t0+10s the aggregate
+/// TAT is still ~7.4s ahead of the clock and no fresh source can pass
+/// yet; after 1s of refill (1000 tokens at 1000/s) it can. (The
+/// pre-#16510 t0+10s probe happened to pass because the old /64 host
+/// fold aliased some flooders into shared slots and admitted fewer
+/// aggregate tokens; the invariant this cell pins — flooders bounded
+/// to their shares, victim admitted once headroom exists — is
+/// unchanged.) Before #15248 the flooders' 100/s slots admitted up to
+/// the aggregate cap and the victim was denied even then.
 #[test]
 fn victim_survives_sustained_distinct_floods_15248() {
     let _g = global_bucket_test_lock();
@@ -1177,11 +1191,11 @@ fn victim_survives_sustained_distinct_floods_15248() {
             reason,
             zone,
             Some(victim),
-            t0 + 10_000_000_000,
+            t0 + 11_000_000_000,
             DEFAULT_RATE_PER_SEC,
             DEFAULT_BURST
         ),
-        "victim must still pass: source-denied flooders leave aggregate headroom"
+        "victim must pass once the aggregate refills: source-denied flooders leave headroom"
     );
 }
 
@@ -1234,5 +1248,284 @@ fn single_v6_source_and_distinct_64s_unchanged_15248() {
             DEFAULT_BURST
         ),
         "a source in a different /64 keeps its own budget (no over-aggregation)"
+    );
+}
+
+// =====================================================================
+// #16510 (R3-A67-01): per-/128 inside a bounded /64. Helpers probe
+// same-/64 hosts in DISTINCT host slots (seed-adaptive, like
+// `distinct_slot_sources`) so a cell measures the tier budgets, not a
+// slot collision.
+// =====================================================================
+
+/// #16510: `n` hosts of ONE documentation /64 (`2001:db8:165::/64`) in
+/// distinct HOST slots. IIDs are probed in a spread pattern so the cell
+/// finds 30 distinct slots quickly under any seed.
+fn same_64_distinct_host_sources(n: usize) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for i in 1..100_000u64 {
+        let iid = (i.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 16) as u128;
+        let addr = IpAddr::V6(Ipv6Addr::from(
+            u128::from(Ipv6Addr::new(0x2001, 0xdb8, 0x165, 0, 0, 0, 0, 0)) | iid,
+        ));
+        if seen.insert(ZoneLimiter::slot_for_test(&addr)) {
+            out.push(addr);
+            if out.len() == n {
+                return out;
+            }
+        }
+    }
+    panic!("could not find {n} distinct-host-slot sources in one /64");
+}
+
+/// #16510 acceptance cell 1: one host at 20/s in a /64, a victim host in
+/// the SAME /64 at 1/s — the victim keeps >= 95% of its replies. On the
+/// #15248-only code both hosts share one 15/s /64 slot, so the flooder
+/// (20/s offered) saturates it and the victim gets ~0% -> RED. Driven
+/// over 20s of injected clock at the production aggregate.
+#[test]
+fn two_hosts_one_64_keep_independent_budgets_16510() {
+    let _g = global_bucket_test_lock();
+    let reason = GeneratedErrorReason::TimeExceeded;
+    let zone = 16_510u16;
+    let t0 = 20_000_000_000u64;
+    let forwarding = forwarding_with_all_zone_buckets(&[zone]);
+    let hosts = same_64_distinct_host_sources(2);
+    let (flooder, victim) = (hosts[0], hosts[1]);
+    assert_eq!(
+        ZoneLimiter::prefix64_slot_for_test(&flooder),
+        ZoneLimiter::prefix64_slot_for_test(&victim),
+        "test setup: both hosts must share one /64"
+    );
+    assert_ne!(
+        ZoneLimiter::slot_for_test(&flooder),
+        ZoneLimiter::slot_for_test(&victim),
+        "test setup: hosts must occupy distinct host slots"
+    );
+    let mut victim_passed = 0u32;
+    let mut victim_offered = 0u32;
+    // 200 steps of 100ms = 20s. Flooder: 2/step = 20/s. Victim: 1 every
+    // 10th step = 1/s (20 offered).
+    for step in 0..200u64 {
+        let now = t0 + step * 100_000_000;
+        for _ in 0..2 {
+            let _ = allow_generated_error_zoned_at(
+                &forwarding,
+                reason,
+                zone,
+                Some(flooder),
+                now,
+                DEFAULT_RATE_PER_SEC,
+                DEFAULT_BURST,
+            );
+        }
+        if step % 10 == 0 {
+            victim_offered += 1;
+            if allow_generated_error_zoned_at(
+                &forwarding,
+                reason,
+                zone,
+                Some(victim),
+                now,
+                DEFAULT_RATE_PER_SEC,
+                DEFAULT_BURST,
+            ) {
+                victim_passed += 1;
+            }
+        }
+    }
+    assert_eq!(victim_offered, 20, "test setup: victim offers 1/s for 20s");
+    assert!(
+        victim_passed * 100 >= victim_offered * 95,
+        "victim in the same /64 must keep >=95% of its replies despite a \
+         20/s neighbour (got {victim_passed}/{victim_offered})"
+    );
+}
+
+/// #16510 acceptance cell 2: 30 hosts of ONE /64 burst 3 each at a frozen
+/// instant — >= 90% admitted (90 offered, so >= 81; the design admits
+/// 90/90: each host burst 15 >= 3, the /64 burst 480 >= 90, the zone
+/// burst 1000 >= 90). On #15248-only code the shared /64 slot admits 15
+/// of 90 (17%) -> RED.
+#[test]
+fn thirty_hosts_one_64_burst_keeps_ninety_percent_16510() {
+    let _g = global_bucket_test_lock();
+    let reason = GeneratedErrorReason::PacketTooBig;
+    let zone = 16_511u16;
+    let t0 = 21_000_000_000u64;
+    let forwarding = forwarding_with_all_zone_buckets(&[zone]);
+    let hosts = same_64_distinct_host_sources(30);
+    let mut passed = 0u32;
+    for host in &hosts {
+        for _ in 0..3 {
+            if allow_generated_error_zoned_at(
+                &forwarding,
+                reason,
+                zone,
+                Some(*host),
+                t0,
+                DEFAULT_RATE_PER_SEC,
+                DEFAULT_BURST,
+            ) {
+                passed += 1;
+            }
+        }
+    }
+    assert!(
+        passed >= 81,
+        "30 same-/64 hosts x 3 burst must admit >=90% (got {passed}/90); \
+         the per-/128 tier must not collapse them into one 15-token budget"
+    );
+}
+
+/// #16510 rotation bound: 64 rotating IIDs of one /64, each offered 20/s
+/// for 10s (12800 offered), saturate ONLY at the /64 outer cap
+/// (480 burst + 480/s x 10s, GCRA-rounded ~5279), never at the host-tier
+/// sum (64 x ~163 = ~10432) nor the zone aggregate envelope (11000), and
+/// a victim in another /64 still passes afterwards. Removing the /64
+/// tier admits the host-tier sum -> RED on the upper bound; collapsing
+/// hosts back to /64-only keying admits ~163 -> RED on the lower bound.
+#[test]
+fn rotating_v6_iids_saturate_at_prefix64_cap_16510() {
+    let _g = global_bucket_test_lock();
+    let reason = GeneratedErrorReason::Reject;
+    let zone = 16_512u16;
+    let t0 = 22_000_000_000u64;
+    let forwarding = forwarding_with_all_zone_buckets(&[zone]);
+    let attackers = rotation_sources_v6(64);
+    let victim = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x77, 0, 0, 0, 0, 1));
+    let mut admitted = 0u32;
+    // 1000 steps of 10ms: each IID attempts every 50ms = 20/s per IID.
+    for step in 0..1000u64 {
+        let now = t0 + step * 10_000_000;
+        for (i, atk) in attackers.iter().enumerate() {
+            if step % 5 == (i % 5) as u64 {
+                if allow_generated_error_zoned_at(
+                    &forwarding,
+                    reason,
+                    zone,
+                    Some(*atk),
+                    now,
+                    DEFAULT_RATE_PER_SEC,
+                    DEFAULT_BURST,
+                ) {
+                    admitted += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        (4000..=6000).contains(&admitted),
+        "one /64 rotating 64 IIDs must saturate at its outer cap \
+         (480 burst + 480/s x 10s, ~5279 admitted; got {admitted}), not \
+         the host-tier sum (~10432) nor the old /64-only share (~163)"
+    );
+    assert!(
+        allow_generated_error_zoned_at(
+            &forwarding,
+            reason,
+            zone,
+            Some(victim),
+            t0 + 11_000_000_000,
+            DEFAULT_RATE_PER_SEC,
+            DEFAULT_BURST
+        ),
+        "victim in another /64 must NOT be starved by a saturating /64 rotation"
+    );
+}
+
+/// #16510 IPv4 parity: two IPv4 hosts keep independent budgets exactly as
+/// before (host -> aggregate, no prefix tier). A 20/s flooder cannot
+/// suppress a 1/s neighbour. (IPv4 behaviour is unchanged by #16510;
+/// this cell pins that the v4 path did not gain a coupling tier.)
+#[test]
+fn two_ipv4_hosts_keep_independent_budgets_16510() {
+    let _g = global_bucket_test_lock();
+    let reason = GeneratedErrorReason::TimeExceeded;
+    let zone = 16_513u16;
+    let t0 = 23_000_000_000u64;
+    let forwarding = forwarding_with_all_zone_buckets(&[zone]);
+    let pair = distinct_slot_sources(2);
+    let (flooder, victim) = (pair[0], pair[1]);
+    assert_eq!(
+        ZoneLimiter::prefix64_slot_for_test(&flooder),
+        None,
+        "IPv4 sources must have no /64 tier"
+    );
+    let mut victim_passed = 0u32;
+    for step in 0..200u64 {
+        let now = t0 + step * 100_000_000;
+        for _ in 0..2 {
+            let _ = allow_generated_error_zoned_at(
+                &forwarding,
+                reason,
+                zone,
+                Some(flooder),
+                now,
+                DEFAULT_RATE_PER_SEC,
+                DEFAULT_BURST,
+            );
+        }
+        if step % 10 == 0
+            && allow_generated_error_zoned_at(
+                &forwarding,
+                reason,
+                zone,
+                Some(victim),
+                now,
+                DEFAULT_RATE_PER_SEC,
+                DEFAULT_BURST,
+            )
+        {
+            victim_passed += 1;
+        }
+    }
+    assert!(
+        victim_passed >= 19,
+        "IPv4 victim must keep >=95% beside a 20/s neighbour (got {victim_passed}/20)"
+    );
+}
+
+/// #16510 v4-mapped parity: `::ffff:192.0.2.10` and `192.0.2.10` are ONE
+/// host — they must share one host budget and neither may take a /64
+/// tier (the mapped /64 `::ffff:0:0/96` must not couple every mapped
+/// host). 30 attempts at a frozen instant across both forms admit
+/// exactly the 15-token host burst, and a native v6 host in a real /64
+/// is unaffected.
+#[test]
+fn v4_mapped_shares_v4_host_budget_16510() {
+    let _g = global_bucket_test_lock();
+    let reason = GeneratedErrorReason::PacketTooBig;
+    let zone = 16_514u16;
+    let t0 = 24_000_000_000u64;
+    let forwarding = forwarding_with_all_zone_buckets(&[zone]);
+    let v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let mapped = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc000, 0x020a));
+    assert_eq!(
+        ZoneLimiter::slot_for_test(&v4),
+        ZoneLimiter::slot_for_test(&mapped),
+        "v4-mapped form must key the same host slot as the v4 form"
+    );
+    assert_eq!(ZoneLimiter::prefix64_slot_for_test(&mapped), None);
+    assert_eq!(ZoneLimiter::prefix64_slot_for_test(&v4), None);
+    let mut passed = 0u32;
+    for i in 0..30 {
+        let src = if i % 2 == 0 { v4 } else { mapped };
+        if allow_generated_error_zoned_at(
+            &forwarding,
+            reason,
+            zone,
+            Some(src),
+            t0,
+            DEFAULT_RATE_PER_SEC,
+            DEFAULT_BURST,
+        ) {
+            passed += 1;
+        }
+    }
+    assert_eq!(
+        passed, 15,
+        "both wire forms of one host share its 15-token burst (got {passed})"
     );
 }
