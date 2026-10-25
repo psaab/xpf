@@ -1057,70 +1057,117 @@ func TestBGPOrForgedOrderedNameRefused16868(t *testing.T) {
 	}
 }
 
-// splitWitnessPO16868 builds the gate5 fixture: LA/LB singleton
-// acceptors (.50/.60) and the ordered forgery chain members
-// xpf / or-<digest>-xpf / or (.60-reject, .70, .80 accepts).
+// splitWitness16868 builds the gate5/gate6 fixture with the
+// ORIGINAL witness semantics: LA/LB singleton acceptors (.50/.60,
+// default reject) and the ordered forgery chain
+// [xpf or-<digest>-xpf or] whose middle member accepts .70 with NO
+// policy default (nonterminal — it must not truncate the chain, or
+// the ordered name loses its final -or member and never equals
+// the OR name), xpf rejects .60, and or accepts .80 with default
+// reject.
 func splitWitness16868() (*config.PolicyOptionsConfig, string, string) {
 	la := strings.Repeat("A", 50)
 	lb := strings.Repeat("B", 50)
 	po := &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{}}
-	acc := func(n, pfx string) {
-		po.PolicyStatements[n] = &config.PolicyStatement{Name: n, Terms: []*config.PolicyTerm{
+	acc := func(n, pfx string, withDefault bool) {
+		ps := &config.PolicyStatement{Name: n, Terms: []*config.PolicyTerm{
 			{Name: "t", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: pfx, MatchType: "exact"}}, Action: "accept"},
-		}, DefaultAction: "reject"}
+		}}
+		if withDefault {
+			ps.DefaultAction = "reject"
+		}
+		po.PolicyStatements[n] = ps
 	}
-	acc(la, "192.168.50.0/24")
-	acc(lb, "192.168.60.0/24")
-	acc("or-2aff27e47a5d420d-xpf", "192.168.70.0/24")
-	acc("or", "192.168.80.0/24")
+	acc(la, "192.168.50.0/24", true)
+	acc(lb, "192.168.60.0/24", true)
+	acc("or-2aff27e47a5d420d-xpf", "192.168.70.0/24", false) // middle: NO default
+	acc("or", "192.168.80.0/24", true)
 	po.PolicyStatements["xpf"] = &config.PolicyStatement{Name: "xpf", Terms: []*config.PolicyTerm{
 		{Name: "r", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: "192.168.60.0/24", MatchType: "exact"}}, Action: "reject"},
 	}}
 	return po, la, lb
 }
 
-// TestBGPOrSplitNameRefusedBothOrders16868 (gate5 B1): the marker
-// split across three legal members [xpf or-<digest>-xpf or] joins
-// to the OR hash name. Both collection orders (ordered-first and
-// OR-first) must refuse through the production guard, with a real
-// VRF and distinct route sets.
+// TestBGPOrSplitNameRefusedBothOrders16868 (gate5 B1, gate6 F1):
+// the marker split across three legal members joins to the OR
+// hash name. The test first PROVES the witness is real — the
+// ordered attachment name and the OR attachment name are EQUAL —
+// then requires the structural-collision refusal (two distinct
+// programs claimed that name), not merely any guard error, in
+// both collection orders with a real VRF.
 func TestBGPOrSplitNameRefusedBothOrders16868(t *testing.T) {
 	po, la, lb := splitWitness16868()
+	const sharedName = "xpf-or-2aff27e47a5d420d-xpf-or-xpf-chain-static-xpf-redist"
+	orderedChain := []string{"xpf", "or-2aff27e47a5d420d-xpf", "or"}
+
+	// Witness validity: ordered name == OR name.
+	orderedName := redistChainRouteMapName15156(orderedChain, "static")
+	// The effective ordered chain must retain all three members.
+	m := New()
+	eff, _, _ := m.redistChainForSource15156(orderedChain, po, "bgp", "bgp", "static")
+	if len(eff) != 3 {
+		t.Fatalf("ordered witness chain truncated to %v; middle member must stay nonterminal", eff)
+	}
+	orBGP := &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1", Neighbors: []*config.BGPNeighbor{
+		{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{la}},
+		{Address: "192.0.2.3", PeerAS: 65003, FamilyInet: true, Export: []string{lb}},
+	}}
+	orName := redistOrRouteMapName16868(orBGP, po, "bgp", "bgp", "static")
+	if orderedName != orName || orName != sharedName {
+		t.Fatalf("witness broken: ordered %q, OR %q, want both %q", orderedName, orName, sharedName)
+	}
+	// Attachments also agree: ordered entries name the shared map.
+	ordEntries := m.redistChainEntries15156(orderedChain, po, "bgp", "bgp")
+	foundOrd := false
+	for _, e := range ordEntries {
+		if e.proto == "static" && e.routeMap == sharedName {
+			foundOrd = true
+		}
+	}
+	if !foundOrd {
+		t.Fatalf("ordered chain must attach %q, entries %+v", sharedName, ordEntries)
+	}
+
 	orderedNB := []*config.BGPNeighbor{
-		{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{"xpf", "or-2aff27e47a5d420d-xpf", "or"}},
+		{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: orderedChain},
 	}
 	orNB := []*config.BGPNeighbor{
 		{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{la}},
 		{Address: "192.0.2.3", PeerAS: 65003, FamilyInet: true, Export: []string{lb}},
 	}
-	mkFC := func(orderedFirst bool) *FullConfig {
+	for _, orderedFirst := range []bool{true, false} {
 		defBGP := &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1"}
-		blue := InstanceConfig{VRFName: "blue", BGP: &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1"}}
+		blueBGP := &config.BGPConfig{LocalAS: 65001, RouterID: "1.1.1.1"}
 		if orderedFirst {
 			defBGP.Neighbors = orderedNB
-			blue.BGP.Neighbors = orNB
+			blueBGP.Neighbors = orNB
 		} else {
 			defBGP.Neighbors = orNB
-			blue.BGP.Neighbors = []*config.BGPNeighbor{
-				{Address: "192.0.2.2", PeerAS: 65002, FamilyInet: true, Export: []string{"xpf", "or-2aff27e47a5d420d-xpf", "or"}},
-			}
-			// ordered in blue needs its own BGP; def holds OR.
-			return &FullConfig{
-				PolicyOptions: po,
-				BGP:           defBGP,
-				Instances:     []InstanceConfig{{VRFName: "blue", BGP: blue.BGP}},
-			}
+			blueBGP.Neighbors = orderedNB
 		}
-		return &FullConfig{PolicyOptions: po, BGP: defBGP, Instances: []InstanceConfig{blue}}
-	}
-	for _, orderedFirst := range []bool{true, false} {
-		fc := mkFC(orderedFirst)
-		if err := redistChainMapCollision15156(fc); err == nil {
-			t.Errorf("orderedFirst=%v: split-name forgery must be refused, not silently merged", orderedFirst)
+		fc := &FullConfig{
+			PolicyOptions: po,
+			BGP:           defBGP,
+			Instances:     []InstanceConfig{{VRFName: "blue", BGP: blueBGP}},
+		}
+		// The collector must have poisoned the shared name:
+		// two structurally distinct programs claimed it.
+		reqs := redistComposedChains15156(fc)
+		req, ok := reqs[sharedName]
+		if !ok || req.poisoned == "" {
+			t.Errorf("orderedFirst=%v: shared name %q must be poisoned by distinct programs, req=%+v present=%v", orderedFirst, sharedName, req, ok)
+		}
+		err := redistChainMapCollision15156(fc)
+		if err == nil {
+			t.Errorf("orderedFirst=%v: structural collision on %q must be refused", orderedFirst, sharedName)
+		} else if !strings.Contains(err.Error(), "structurally distinct") && !strings.Contains(err.Error(), "claimed by two") {
+			t.Errorf("orderedFirst=%v: refusal must be the structural-collision refusal, got: %v", orderedFirst, err)
 		}
 	}
-	// Positive control: identical OR requests in two instances
-	// dedupe to one map without refusal.
+
+	// Positive control: identical OR programs in two instances
+	// dedupe — one collected request, no refusal, and the rendered
+	// map's sequences are defined exactly once (no duplicates).
 	po2, la2, lb2 := splitWitness16868()
 	fc := &FullConfig{
 		PolicyOptions: po2,
@@ -1136,8 +1183,32 @@ func TestBGPOrSplitNameRefusedBothOrders16868(t *testing.T) {
 	if err := redistChainMapCollision15156(fc); err != nil {
 		t.Errorf("identical OR programs must dedupe, got refusal: %v", err)
 	}
+	reqs := redistComposedChains15156(fc)
+	count := 0
+	for name, r := range reqs {
+		if name == sharedName {
+			count++
+			if r.poisoned != "" {
+				t.Errorf("identical programs must not poison")
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("identical programs must collect exactly one request for %q, got %d", sharedName, count)
+	}
 	got := New().buildManagedSection(fc)
-	if n := strings.Count(got, "route-map xpf-or-2aff27e47a5d420d-xpf-or-xpf-chain-static-xpf-redist permit"); n == 0 {
-		t.Errorf("shared OR map must be defined once:\n%s", got)
+	seqs := parseOrSeqs16868(t, got, sharedName) // asserts unique, increasing seqs
+	if len(seqs) == 0 {
+		t.Fatalf("shared OR map must be defined")
+	}
+	// Each sequence number appears in exactly one definition line.
+	seenSeq := map[string]int{}
+	for _, ln := range strings.Split(routeMapBlock11447(got, sharedName), "\n") {
+		if strings.HasPrefix(ln, "route-map "+sharedName+" ") {
+			seenSeq[ln]++
+			if seenSeq[ln] > 1 {
+				t.Errorf("sequence defined twice: %q", ln)
+			}
+		}
 	}
 }

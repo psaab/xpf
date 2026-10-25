@@ -610,11 +610,12 @@ type redistOrSeqSpan16868 struct {
 //     fail-closed fall-off).
 //   - Only a permit without a continuation settles origination.
 //
-// Set and call clauses are stripped from every emitted sequence:
-// origination acceptance is a pure match question, a rejected
-// chain's mutations must never leak into a later chain's matches
-// or the originated attributes, and per-peer route-map out
-// re-applies each peer's own sets for advertisement.
+// Sets are preserved on kept sequences (later terms of the same
+// chain must observe them); only demoted reject sequences are
+// match-only, and `call` clauses are dropped. A set applied by a
+// chain that later rejects can still be observed by a later chain
+// inside this one map — FRR has no attribute snapshot; that spill
+// is documented in docs/log/16868.md.
 //
 // Guards that stay map-wide and are never spliced: the cluster tag
 // deny (cluster static only) is emitted once at seq 5 and scratch
