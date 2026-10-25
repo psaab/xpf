@@ -119,6 +119,7 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	if err != nil {
 		return false, fmt.Errorf("build interface-link refresh routes: %w", err)
 	}
+	next.builtRouteOverlay = cloneRouteOverlay(m.routeOverlay)
 	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
 	next.Fabrics = buildFabricSnapshotsFrom(cfg, liveXfrm)
 	next.TunnelEndpoints = buildTunnelEndpointSnapshots(cfg, next.Interfaces)

@@ -200,11 +200,13 @@ func (m *Manager) rebuildDerivedSectionsAfterRevalidate(snap *ConfigSnapshot) {
 		}
 	}
 	rgPrimary := m.rgPrimaryNowLocked()
-	if routes, capped, err := buildRouteSnapshotsWithRGPrimary(cfg, snap.Interfaces, m.routeOverlayForSnapshot(snap), rgPrimary); err != nil {
+	rebuildOverlay := m.routeOverlayForSnapshot(snap)
+	if routes, capped, err := buildRouteSnapshotsWithRGPrimary(cfg, snap.Interfaces, rebuildOverlay, rgPrimary); err != nil {
 		slog.Warn("userspace: keeping prior routes after apply-time rebuild failure (#14209)",
 			"err", err)
 	} else {
 		snap.Routes = routes
+		snap.builtRouteOverlay = cloneRouteOverlay(rebuildOverlay)
 		snap.Interfaces = markConnectedRGPeerOwned(cfg, snap.Interfaces, rgPrimary)
 		snap.LearnedRouteImportCapped = capped
 	}

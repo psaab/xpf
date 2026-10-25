@@ -1244,6 +1244,17 @@ type ConfigSnapshot struct {
 	policySnapshotIdentityValid bool
 	pmechInventoryConfig        *config.Config
 	pmechInventoryRows          []IpsecTunnelRowSnapshot
+	// builtRouteOverlay is the ip-monitoring overlay this snapshot's Routes
+	// were built with (#16640). Unexported, so it never rides the wire or
+	// the content hash. The apply-time derived-section rebuild
+	// (rebuildDerivedSectionsAfterRevalidate) re-derives Routes from this
+	// recorded input instead of inferring it from config pointer identity:
+	// a fresh Compile snapshot's Config differs from the retained config,
+	// yet its routes already carry this overlay and a rebuild must not
+	// discard it. Partial publishers that rebuild Routes from their own
+	// explicit overlay re-record it at that site; clones that inherit
+	// Routes verbatim inherit this record with them.
+	builtRouteOverlay []config.RouteOverlayEntry
 }
 
 // AddressBookSnapshot is #1606: one row of the deduplicated address-book
