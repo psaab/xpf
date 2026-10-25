@@ -373,9 +373,11 @@ sync.
     starve a victim (#6129): with 4 ways per bucket the victim lands in a
     different way. Owed bindings are per-bucket since #15770: each way
     carries one `(desired_key, desired_mac)` owed pair, so a bucket
-    retains up to 4 distinct owed bindings — a hot-bucket refusal or an
-    in-owned-way rate-limited MAC change is recorded on its bucket and
-    retried by the victim's next advert even after its way is evicted.
+    retains up to 4 distinct owed bindings — at most one owed way per
+    key, updated in place when that key advertises a newer MAC (#16508)
+    — a hot-bucket refusal or an in-owned-way rate-limited MAC change
+    is recorded on its bucket and retried by the victim's next advert
+    even after its way is evicted.
     Residual (bounded, self-healing): more than 4 simultaneously-owed
     distinct keys in one bucket evict the oldest owed entry, and that
     key's kernel program then waits for its next *changed* advert; the
