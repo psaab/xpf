@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -150,8 +151,8 @@ func ConfigureReadlineHistory(cfg *readline.Config) *readline.Config {
 // ReadHistorySeed returns the persisted history lines from path in file order
 // (oldest first), skipping blank lines exactly as readline's own loader does.
 // A missing file is an empty seed, not an error: first-run has no history.
-// The seed filter replays config-mode navigation so legacy lines are judged
-// with the edit cursor that was active when submitted.
+// The seed filter replays config-mode navigation and retains all cursor
+// interpretations made possible by an unrecorded EOF before re-entry.
 func ReadHistorySeed(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -169,23 +170,73 @@ func ReadHistorySeed(path string) ([]string, error) {
 		lines = append(lines, line)
 	}
 	// Defense in depth: files written before cursor-aware history filtering
-	// (or hand-edited) may contain credentials. Judge each line against the
-	// cursor at submission time, then advance navigation even when the line
-	// itself is filtered, so later lines retain their original context.
-	var editPath []string
-	configMode := false
+	// (or hand-edited) may contain credentials. Track every cursor state
+	// consistent with history, judge each line under all of them, then
+	// advance navigation even when the line itself is filtered.
+	states := make([]historySeedCursor, 1, 2)
+	scratch := make([]historySeedCursor, 0, 2)
 	filtered := lines[:0]
 	for _, line := range lines {
-		cursor := editPath
-		if !configMode {
-			cursor = nil
+		configureReentry := isHistorySeedConfigureReentry(line)
+		sensitive := false
+		for _, state := range states {
+			cursor := state.editPath
+			if !state.configMode {
+				cursor = nil
+			}
+			if IsSensitiveHistoryLineAt(cursor, line) {
+				sensitive = true
+				break
+			}
 		}
-		if !IsSensitiveHistoryLineAt(cursor, line) {
+		if !sensitive {
 			filtered = append(filtered, line)
 		}
-		editPath, configMode = advanceHistorySeedCursor(editPath, configMode, line)
+
+		next := scratch[:0]
+		for _, state := range states {
+			path, mode := advanceHistorySeedCursor(state.editPath, state.configMode, line)
+			next = appendHistorySeedCursor(next, historySeedCursor{editPath: path, configMode: mode})
+			// History cannot distinguish a rejected in-config configure
+			// from a real operational re-entry after an unrecorded EOF.
+			// Retain both possible cursor interpretations.
+			if state.configMode && configureReentry {
+				next = appendHistorySeedCursor(next, historySeedCursor{configMode: true})
+			}
+		}
+		states, scratch = next, states[:0]
 	}
 	return filtered, nil
+}
+
+type historySeedCursor struct {
+	editPath   []string
+	configMode bool
+}
+
+func appendHistorySeedCursor(states []historySeedCursor, candidate historySeedCursor) []historySeedCursor {
+	for _, state := range states {
+		if state.configMode == candidate.configMode && slices.Equal(state.editPath, candidate.editPath) {
+			return states
+		}
+	}
+	return append(states, candidate)
+}
+
+func isHistorySeedConfigureReentry(line string) bool {
+	for {
+		command, _, _, ok := SplitPipe(line)
+		if !ok {
+			break
+		}
+		line = command
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	verb, ok := resolveHistoryOperationalVerb(fields[0])
+	return ok && verb == "configure"
 }
 
 // advanceHistorySeedCursor mirrors the local and remote CLI's navigation
@@ -219,11 +270,9 @@ func advanceHistorySeedCursor(editPath []string, configMode bool, line string) (
 	}
 	switch fields[0] {
 	// dispatchConfig accepts only exact config-mode verbs, and configure
-	// is not one of them. Keep the cursor on an in-config configure-like
-	// line: it was rejected live. History has no session markers, so a
-	// later configure after unrecorded EOF can be indistinguishable; this
-	// fail-closed choice may over-filter benign lines, but cannot leak a
-	// secret. Explicit exit/quit above makes a genuine re-entry operational.
+	// is not one of them. Preserve the rejected in-config interpretation
+	// here; ReadHistorySeed also tracks the possible root re-entry after an
+	// unrecorded EOF and filters a line if either cursor flags it sensitive.
 	case "edit":
 		fragment, ok := config.ParseEditFragment(line)
 		if ok && len(fragment) > 0 {
@@ -263,6 +312,7 @@ func advanceHistorySeedCursor(editPath []string, configMode bool, line string) (
 // prefix rule as pkg/cli.dispatchOperational. Config-mode dispatch switches
 // on exact tokens instead, so its edit/top/up/exit/quit verbs intentionally
 // remain exact here too.
+
 var historyOperationalCommands = [...]string{
 	"configure", "show", "clear", "ping", "test", "traceroute",
 	"monitor", "request", "quit", "exit",

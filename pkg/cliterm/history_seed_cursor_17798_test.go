@@ -124,6 +124,54 @@ func TestReadHistorySeedCursorAware17798(t *testing.T) {
 	}
 }
 
+// Ambiguous configure after edit <stanza> (Ctrl-D/EOF unrecorded):
+// replay cannot tell genuine re-entry from rejected in-config verb.
+// Seed MUST drop the following credential under BOTH hypotheses --
+// 3 verbs x 2 credential forms. Pre-fix keeps stale cursor so the
+// root-only sensitive path (services/…/user-password) is missed.
+func TestReadHistorySeedReentryDualCursor17972(t *testing.T) {
+	verbs := []string{"configure", "conf", "config"}
+	for _, v := range verbs {
+		// Form A: full-path set after re-entry verb (terminal.go:424 stale prefix).
+		t.Run(v+"/full-set", func(t *testing.T) {
+			credential := "set services user-identification active-directory-access user-password SECRET17972A"
+			lines := []string{"configure", "edit snmp", v, credential}
+			seed, err := ReadHistorySeed(writeSeedFile17798(t, lines))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if slices.Contains(seed, credential) {
+				t.Fatalf("seed leaked credential %q", credential)
+			}
+		})
+		// Form B: ADA prefix via edit, then relative set user-password.
+		t.Run(v+"/relative-set", func(t *testing.T) {
+			credential := "set user-password SECRET17972B"
+			lines := []string{"configure", "edit snmp", v,
+				"edit services user-identification active-directory-access", credential}
+			seed, err := ReadHistorySeed(writeSeedFile17798(t, lines))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if slices.Contains(seed, credential) {
+				t.Fatalf("seed leaked credential %q", credential)
+			}
+		})
+		// Root-reentry hypothesis must preserve benign GRE key controls.
+		t.Run(v+"/benign-GRE-key", func(t *testing.T) {
+			lines := []string{"configure", "edit snmp", v,
+				"edit interfaces gr-0/0/0 unit 0 tunnel", "set key 4242"}
+			seed, err := ReadHistorySeed(writeSeedFile17798(t, lines))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(seed, lines) {
+				t.Fatalf("seed=%q want %q", seed, lines)
+			}
+		})
+	}
+}
+
 func TestAdvanceHistorySeedCursorUpExitRestoresOriginalCursor17798(t *testing.T) {
 	for _, verb := range []string{"exit", "quit"} {
 		t.Run(verb, func(t *testing.T) {
