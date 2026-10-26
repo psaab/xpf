@@ -208,8 +208,8 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 					if !ok {
 						continue
 					}
-					// #16628: ospfd truncates an MD5 key over 16
-					// characters, so rendering it verbatim churns
+					// #16628/#17680: ospfd truncates an MD5 key over
+					// 16 bytes, so rendering it verbatim churns
 					// every frr-reload (delete-and-add) and the
 					// effective key diverges from the config.
 					// Withhold only this entry; a valid rollover
@@ -217,11 +217,11 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 					// and if none survives the #14388 omission
 					// below drops the whole interface. Length is
 					// the resolved (post-$9$-decode) token, in
-					// runes, matching the config gate.
-					if len([]rune(tok)) > config.MaxOSPFMD5KeyLen {
-						slog.Warn("frr: omitting OSPF MD5 key exceeding the 16-character maximum accepted by ospfd; ospfd would truncate it and every reload would delete and re-add it (#16628)",
+					// bytes, matching the config gate.
+					if n := len(tok); n > config.MaxOSPFMD5KeyLen {
+						slog.Warn("frr: omitting OSPF MD5 key exceeding the 16-byte maximum accepted by ospfd; ospfd would truncate it and every reload would delete and re-add it (#16628)",
 							"interface", sanitizeFRRValue(iface.Name), "key_id", key.ID,
-							"key_len", len([]rune(tok)), "max", config.MaxOSPFMD5KeyLen)
+							"key_len", n, "max", config.MaxOSPFMD5KeyLen)
 						continue
 					}
 					if !authEmitted {
@@ -270,18 +270,18 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 						"interface", sanitizeFRRValue(iface.Name))
 					continue
 				}
-				// #16628: ospfd truncates a simple-password over 8
-				// characters, so rendering it verbatim churns every
+				// #16628/#17680: ospfd truncates a simple-password
+				// over 8 bytes, so rendering it verbatim churns every
 				// frr-reload (delete-and-add) and the effective
 				// password diverges from the config. Fail closed
 				// exactly like the unrenderable-token arm: omit the
 				// whole interface rather than activating it
 				// unauthenticated or with a truncated key. Length
-				// is the resolved token, in runes.
-				if len([]rune(tok)) > config.MaxOSPFSimplePasswordLen {
-					slog.Warn("frr: omitting OSPF interface with a simple-password exceeding the 8-character maximum accepted by ospfd; ospfd would truncate it and every reload would delete and re-add it (#16628)",
+				// is the resolved token, in bytes.
+				if n := len(tok); n > config.MaxOSPFSimplePasswordLen {
+					slog.Warn("frr: omitting OSPF interface with a simple-password exceeding the 8-byte maximum accepted by ospfd; ospfd would truncate it and every reload would delete and re-add it (#16628)",
 						"interface", sanitizeFRRValue(iface.Name),
-						"key_len", len([]rune(tok)), "max", config.MaxOSPFSimplePasswordLen)
+						"key_len", n, "max", config.MaxOSPFSimplePasswordLen)
 					continue
 				}
 				ospfSimpleTok14977 = tok

@@ -1083,8 +1083,8 @@ type compileOpts struct {
 	// activating it unauthenticated.
 	lenientOSPFAuthKeyPresence14397 bool
 	// lenientOSPFKeyLength16628 downgrades the #16628 OSPF key-length
-	// rejection (MD5 key >16 characters, simple-password >8, which
-	// FRR ospfd silently truncates so every frr-reload deletes and
+	// rejection (MD5 key >16 bytes, simple-password >8 bytes, which FRR
+	// ospfd silently truncates so every frr-reload deletes and
 	// re-adds the key) to a warning on the tolerant paths
 	// (Store.Load, Store.SyncApply). A config an older binary
 	// accepted must still BOOT (#1960); the FRR renderer withholds

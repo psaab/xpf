@@ -83,7 +83,7 @@ func TestJunos9RoutingKeysDecodedAtCompile15051(t *testing.T) {
 
 // TestJunos9OSPFSimpleDecodedAtCompile15051 pins the OSPF
 // simple-password leaf separately: its decoded plaintext
-// (junos9Plain15051, 10 chars) exceeds the #16628 8-character bound,
+// (junos9Plain15051, 10 bytes) exceeds the #16628 8-byte bound,
 // so strict compile must REFUSE it (the bound applies to the decoded
 // plaintext ospfd would hold), while the tolerant path still boots
 // with the plaintext installed and a #16628 warning.
@@ -92,7 +92,7 @@ func TestJunos9OSPFSimpleDecodedAtCompile15051(t *testing.T) {
 		"set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication simple-password \"" + junos9Blob15051 + "\"",
 	}
 	if _, err := CompileConfig(buildTree(t, lines)); err == nil {
-		t.Fatalf("strict compile accepted a $9$ simple-password decoding to %d chars over the #16628 bound", len(junos9Plain15051))
+		t.Fatalf("strict compile accepted a $9$ simple-password decoding to %d bytes over the #16628 bound", len(junos9Plain15051))
 	} else if !strings.Contains(err.Error(), "16628") {
 		t.Fatalf("strict refusal does not cite #16628: %v", err)
 	}

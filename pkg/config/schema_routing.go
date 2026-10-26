@@ -427,12 +427,12 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 						keyValueType: ValueInteger, keyValueDesc: "OSPF MD5 key-id (1..255)",
 						keyValueExamples: []string{"1", "7", "255"},
 						keyValidator:     ValidateInteger(1, 255), children: map[string]*schemaNode{
-							"key": {desc: "Authentication key (1..16 characters)", args: 1, placeholder: "<key>",
-								valueType: ValueIdentifier, valueDesc: "OSPF MD5 key (1..16 characters; FRR ospfd / RFC 2328 maximum)",
+							"key": {desc: "Authentication key (1..16 bytes)", args: 1, placeholder: "<key>",
+								valueType: ValueIdentifier, valueDesc: "OSPF MD5 key (1..16 bytes; FRR ospfd / RFC 2328 maximum)",
 								validator: ValidateOSPFMD5KeyLength, children: nil},
 						}},
-					"simple-password": {desc: "Simple password (1..8 characters)", args: 1, placeholder: "<password>",
-						valueType: ValueIdentifier, valueDesc: "OSPF simple password (1..8 characters; FRR ospfd / RFC 2328 maximum)",
+					"simple-password": {desc: "Simple password (1..8 bytes)", args: 1, placeholder: "<password>",
+						valueType: ValueIdentifier, valueDesc: "OSPF simple password (1..8 bytes; FRR ospfd / RFC 2328 maximum)",
 						validator: ValidateOSPFSimplePasswordLength, children: nil},
 				}},
 				"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
