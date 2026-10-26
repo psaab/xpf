@@ -7,10 +7,9 @@ import (
 )
 
 // STEP-0 RED cells for #9810 (SYN-WIN-01 counting unit + N==0 agreement).
-// Each leak costs one ip-rule slot per default-instance ingress interface at
-// the applier (per-ingress rules since #9420), but the strict gate and
-// StaticRouteExclusions still count one slot per leak. With N=4 and L=30 the
-// gate passes (30 <= 100) while the kernel fits only 25 leaks.
+// Each route/ingress pair consumes one admission slot; the applier expands it
+// into three physical ip-rules. The strict gate and StaticRouteExclusions use
+// the same route/ingress accounting. With N=4 and L=30, only 25 routes fit.
 
 // mk9810LeakCfg builds a config with n unclaimed default-instance ingress
 // units (ge-0/0/0..n-1 unit 0) and L global next-table leaks at DISTINCT
@@ -41,7 +40,7 @@ func mk9810LeakCfg(n, l int) *Config {
 // must be refused and L=25 must pass.
 func TestStrictGateCountsPerIngressInterface_9810(t *testing.T) {
 	if err := validateRoutingRuleWindowsStrict(mk9810LeakCfg(4, 30)); err == nil {
-		t.Fatal("30 leaks over 4 ingress interfaces need 120 ip-rule slots; " +
+		t.Fatal("30 leaks over 4 ingress interfaces need 120 admission slots; " +
 			"the gate must refuse, got nil")
 	} else if !strings.Contains(err.Error(), "next-table") {
 		t.Fatalf("refusal must name next-table, got %q", err)

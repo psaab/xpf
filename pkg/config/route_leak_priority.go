@@ -4,18 +4,37 @@ package config
 // share the LPM-ordered priority range.
 type RouteLeakRuleKind uint8
 
+const RouteLeakRulePriorityStride = 4
+
 const (
 	RouteLeakNextTable RouteLeakRuleKind = iota
 	RouteLeakRibGroup
 )
 
-// RouteLeakRulePriority returns a priority that orders longer prefixes before
-// shorter prefixes across next-table and rib-group rules. Each additional
-// prefix bit reserves two priorities: next-table precedes rib-group only when
-// the prefixes have equal length. Callers pass the parsed prefix and address
-// bit lengths.
+// RouteLeakNextTableProbePriority returns the main-table LPM probe that allows
+// more-specific main-table routes to carve out destinations from a leak.
+func RouteLeakNextTableProbePriority(prefixLength, addressBits int) int {
+	return RouteLeakRulePriority(prefixLength, addressBits, RouteLeakNextTable)
+}
+
+// RouteLeakNextTableLookupPriority returns the target-table lookup priority.
+func RouteLeakNextTableLookupPriority(prefixLength, addressBits int) int {
+	return RouteLeakNextTableProbePriority(prefixLength, addressBits) + 1
+}
+
+// RouteLeakNextTableShadowPriority returns the fail-closed miss priority.
+func RouteLeakNextTableShadowPriority(prefixLength, addressBits int) int {
+	return RouteLeakNextTableProbePriority(prefixLength, addressBits) + 2
+}
+
+// RouteLeakRulePriority returns the first of four priorities reserved for a
+// leak. The sequence is [main-probe, target lookup, unreachable shadow,
+// rib-group], so assigning priorities as (addressBits-prefixLength)*4+kind
+// keeps every longer prefix's complete sequence before every shorter prefix.
+// Next-table rows use slot 0; kernel-model rib-group rows use slot 3. Callers
+// pass the parsed prefix and address bit lengths.
 func RouteLeakRulePriority(prefixLength, addressBits int, kind RouteLeakRuleKind) int {
-	return NextTableRulePriorityBase + (addressBits-prefixLength)*2 + int(kind)
+	return NextTableRulePriorityBase + RouteLeakRulePriorityStride*(addressBits-prefixLength) + int(kind)*3
 }
 
 // Rib-group return rules (#9819/#11062, #14975) live in the open interval

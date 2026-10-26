@@ -87,7 +87,7 @@ func TestBuildRouteSnapshotsCarriesRulePriority9955(t *testing.T) {
 	t.Cleanup(func() { ruleListFn = orig })
 	v4 := mustCIDR9955(t, "10.1.2.0/24")
 	v6 := mustCIDR9955(t, "2001:db8:1::/48")
-	v4NextPriority := uint32(config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable))
+	v4NextPriority := uint32(config.RouteLeakNextTableLookupPriority(24, 32))
 	v4RibPriority := uint32(config.RouteLeakRulePriority(24, 32, config.RouteLeakRibGroup))
 	v6RibPriority := uint32(config.RouteLeakRulePriority(48, 128, config.RouteLeakRibGroup))
 	ruleListFn = func(family int) ([]netlink.Rule, error) {
@@ -183,7 +183,7 @@ func TestLiveRuleReplacesConfigLeakMirror9955(t *testing.T) {
 	orig := ruleListFn
 	t.Cleanup(func() { ruleListFn = orig })
 	dst := mustCIDR9955(t, "10.1.2.0/24")
-	nextPriority := uint32(config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable))
+	nextPriority := uint32(config.RouteLeakNextTableLookupPriority(24, 32))
 	ribPriority := uint32(config.RouteLeakRulePriority(24, 32, config.RouteLeakRibGroup))
 	ruleListFn = func(family int) ([]netlink.Rule, error) {
 		if family == syscall.AF_INET {
@@ -198,6 +198,7 @@ func TestLiveRuleReplacesConfigLeakMirror9955(t *testing.T) {
 	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{{
 		Destination: "10.1.2.0/24",
 		NextTable:   "red",
+		Preference:  17,
 	}}
 	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
@@ -209,6 +210,13 @@ func TestLiveRuleReplacesConfigLeakMirror9955(t *testing.T) {
 			priorities = append(priorities, route.RulePriority)
 			if route.NextTable != "red.inet.0" {
 				t.Fatalf("live row retained noncanonical target %q", route.NextTable)
+			}
+			if route.RulePriority == nextPriority &&
+				(!route.NextTableRoute || route.Preference != 17) {
+				t.Errorf("matching config next-table lookup lost Junos semantics: %+v", route)
+			}
+			if route.RulePriority == ribPriority && route.NextTableRoute {
+				t.Errorf("kernel-model rib-group row must remain a priority-walk leak: %+v", route)
 			}
 		}
 	}
@@ -243,9 +251,9 @@ func TestBuildRouteSnapshotsConfigRulePriorityMatchesKernelWindow9955(t *testing
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
 	want := map[string]uint32{
-		"10.1.2.0/24":      uint32(config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable)),
-		"2001:db8:10::/48": uint32(config.RouteLeakRulePriority(48, 128, config.RouteLeakNextTable)),
-		"2001:db8:11::/48": uint32(config.RouteLeakRulePriority(48, 128, config.RouteLeakNextTable)),
+		"10.1.2.0/24":      uint32(config.RouteLeakNextTableLookupPriority(24, 32)),
+		"2001:db8:10::/48": uint32(config.RouteLeakNextTableLookupPriority(48, 128)),
+		"2001:db8:11::/48": uint32(config.RouteLeakNextTableLookupPriority(48, 128)),
 	}
 	for destination, priority := range want {
 		route, ok := findRouteSnapshot9955(routes, destination, "")
@@ -290,7 +298,7 @@ func TestBuildRouteSnapshotsConfigRulePriorityIndependentOfCap9955(t *testing.T)
 	}
 	for i := range wantCount {
 		destination := fmt.Sprintf("10.10.%d.0/24", i)
-		want := uint32(config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable))
+		want := uint32(config.RouteLeakNextTableLookupPriority(24, 32))
 		if got := published[destination]; got != want {
 			t.Fatalf("priority for route %d = %d, want %d for /24", i, got, want)
 		}
@@ -332,7 +340,7 @@ func TestRouteOverlayKeepsLeakAndReplacesOrdinary9955(t *testing.T) {
 			ordinary = route
 		}
 	}
-	wantPriority := uint32(config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable))
+	wantPriority := uint32(config.RouteLeakNextTableLookupPriority(24, 32))
 	if leak == nil || leak.NextTable != "red" || leak.RulePriority != wantPriority {
 		t.Fatalf("leak after overlay = %+v, want preserved priority-%d leak", leak, wantPriority)
 	}
@@ -356,7 +364,7 @@ func TestLearnedRouteGapIgnoresLeak9955(t *testing.T) {
 		if family == syscall.AF_INET {
 			return []netlink.Rule{{
 				Dst: leakDestination, Table: 501,
-				Priority: config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable),
+				Priority: config.RouteLeakNextTableLookupPriority(24, 32),
 			}}, nil
 		}
 		return nil, nil
@@ -638,12 +646,12 @@ func corpusControlShapes9955(t *testing.T) []leakCorpusShape9955 {
 		if family == "inet6" {
 			shapes = append(shapes, leakCorpusShape9955{
 				name: "single_leak_inet6_9955", destination: leakProbeV6_9955, cfg: cfg,
-				rulesV6: []netlink.Rule{{Dst: mustCIDR9955(t, prefixContaining9955(family, 48)), Table: 501, Priority: config.RouteLeakRulePriority(48, 128, config.RouteLeakNextTable)}},
+				rulesV6: []netlink.Rule{{Dst: mustCIDR9955(t, prefixContaining9955(family, 48)), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(48, 128)}},
 			})
 		} else {
 			shapes = append(shapes, leakCorpusShape9955{
 				name: "single_leak_inet_9955", destination: leakProbeV4_9955, cfg: cfg,
-				rulesV4: []netlink.Rule{{Dst: mustCIDR9955(t, prefixContaining9955(family, 24)), Table: 501, Priority: config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable)}},
+				rulesV4: []netlink.Rule{{Dst: mustCIDR9955(t, prefixContaining9955(family, 24)), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(24, 32)}},
 			})
 		}
 
@@ -655,13 +663,13 @@ func corpusControlShapes9955(t *testing.T) []leakCorpusShape9955 {
 			cfg.RoutingOptions.Inet6StaticRoutes = []*config.StaticRoute{targetRoute9955("2001:db8:1::/64", "2001:db8:52::1@ge-0/0/14.50")}
 			shapes = append(shapes, leakCorpusShape9955{
 				name: "leak_versus_ordinary_inet6_9955", destination: leakProbeV6_9955, cfg: cfg,
-				rulesV6: []netlink.Rule{{Dst: mustCIDR9955(t, "2001:db8::/32"), Table: 501, Priority: config.RouteLeakRulePriority(32, 128, config.RouteLeakNextTable)}},
+				rulesV6: []netlink.Rule{{Dst: mustCIDR9955(t, "2001:db8::/32"), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(32, 128)}},
 			})
 		} else {
 			cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{targetRoute9955("10.1.2.0/24", "172.16.52.1@ge-0/0/14.50")}
 			shapes = append(shapes, leakCorpusShape9955{
 				name: "leak_versus_ordinary_inet_9955", destination: leakProbeV4_9955, cfg: cfg,
-				rulesV4: []netlink.Rule{{Dst: mustCIDR9955(t, "10.0.0.0/8"), Table: 501, Priority: config.RouteLeakRulePriority(8, 32, config.RouteLeakNextTable)}},
+				rulesV4: []netlink.Rule{{Dst: mustCIDR9955(t, "10.0.0.0/8"), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(8, 32)}},
 			})
 		}
 
@@ -672,13 +680,13 @@ func corpusControlShapes9955(t *testing.T) []leakCorpusShape9955 {
 			cfg.RoutingOptions.Inet6StaticRoutes = []*config.StaticRoute{targetRoute9955("2001:db8::/32", "2001:db8:52::1@ge-0/0/14.50")}
 			shapes = append(shapes, leakCorpusShape9955{
 				name: "empty_target_fallback_inet6_9955", destination: leakProbeV6_9955, cfg: cfg,
-				rulesV6: []netlink.Rule{{Dst: mustCIDR9955(t, "2001:db8:1::/48"), Table: 501, Priority: config.RouteLeakRulePriority(48, 128, config.RouteLeakNextTable)}},
+				rulesV6: []netlink.Rule{{Dst: mustCIDR9955(t, "2001:db8:1::/48"), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(48, 128)}},
 			})
 		} else {
 			cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{targetRoute9955("10.0.0.0/8", "172.16.52.1@ge-0/0/14.50")}
 			shapes = append(shapes, leakCorpusShape9955{
 				name: "empty_target_fallback_inet_9955", destination: leakProbeV4_9955, cfg: cfg,
-				rulesV4: []netlink.Rule{{Dst: mustCIDR9955(t, "10.1.2.0/24"), Table: 501, Priority: config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable)}},
+				rulesV4: []netlink.Rule{{Dst: mustCIDR9955(t, "10.1.2.0/24"), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(24, 32)}},
 			})
 		}
 
@@ -690,16 +698,16 @@ func corpusControlShapes9955(t *testing.T) []leakCorpusShape9955 {
 			shapes = append(shapes, leakCorpusShape9955{
 				name: "next_rule_fallback_inet6_9955", destination: leakProbeV6_9955, cfg: cfg,
 				rulesV6: []netlink.Rule{
-					{Dst: mustCIDR9955(t, "2001:db8:1::/48"), Table: 501, Priority: config.RouteLeakRulePriority(48, 128, config.RouteLeakNextTable)},
-					{Dst: mustCIDR9955(t, "2001:db8::/32"), Table: 502, Priority: config.RouteLeakRulePriority(32, 128, config.RouteLeakNextTable)},
+					{Dst: mustCIDR9955(t, "2001:db8:1::/48"), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(48, 128)},
+					{Dst: mustCIDR9955(t, "2001:db8::/32"), Table: 502, Priority: config.RouteLeakNextTableLookupPriority(32, 128)},
 				},
 			})
 		} else {
 			shapes = append(shapes, leakCorpusShape9955{
 				name: "next_rule_fallback_inet_9955", destination: leakProbeV4_9955, cfg: cfg,
 				rulesV4: []netlink.Rule{
-					{Dst: mustCIDR9955(t, "10.1.2.0/24"), Table: 501, Priority: config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable)},
-					{Dst: mustCIDR9955(t, "10.0.0.0/8"), Table: 502, Priority: config.RouteLeakRulePriority(8, 32, config.RouteLeakNextTable)},
+					{Dst: mustCIDR9955(t, "10.1.2.0/24"), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(24, 32)},
+					{Dst: mustCIDR9955(t, "10.0.0.0/8"), Table: 502, Priority: config.RouteLeakNextTableLookupPriority(8, 32)},
 				},
 			})
 		}

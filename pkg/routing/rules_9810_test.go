@@ -251,7 +251,7 @@ func TestNextTableInstallIsFaultAtomic_9810(t *testing.T) {
 			bPrios = append(bPrios, r.Priority)
 		}
 	}
-	want := config.RouteLeakRulePriority(16, 32, config.RouteLeakNextTable)
+	want := config.RouteLeakNextTableLookupPriority(16, 32)
 	var lookupPrios []int
 	for _, pr := range bPrios {
 		if pr == want {
@@ -471,8 +471,8 @@ func TestNextTableRollbackDeleteFailureSurfaced_9810(t *testing.T) {
 		t.Errorf("two rollback deletes failed, so the partial first leak should remain twice; got %d",
 			byDestination["10.21.0.0/16"])
 	}
-	if byDestination["10.22.0.0/16"] != 2*len(iifs) {
-		t.Errorf("the later leak should still be attempted on all interfaces; got %d copies",
+	if byDestination["10.22.0.0/16"] != 3*len(iifs) {
+		t.Errorf("the later leak should install its probe, lookup, and shadow on all interfaces; got %d copies",
 			byDestination["10.22.0.0/16"])
 	}
 }
@@ -509,7 +509,7 @@ func TestNextTableEEXISTDoesNotBlockFollowingLeak_9810(t *testing.T) {
 	if err := nt.Apply(routes, instances, iifs); err != nil {
 		t.Fatalf("EEXIST content is converged and must not fail the apply, got %v", err)
 	}
-	wantPriority := config.RouteLeakRulePriority(16, 32, config.RouteLeakNextTable)
+	wantPriority := config.RouteLeakNextTableLookupPriority(16, 32)
 	var got []netlink.Rule
 	for _, rule := range inner.rules[unix.AF_INET] {
 		if rule.Dst != nil && rule.Dst.String() == "10.24.0.0/16" && rule.Priority == wantPriority {

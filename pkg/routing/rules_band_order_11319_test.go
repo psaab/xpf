@@ -108,16 +108,19 @@ func TestKernelBandOrderAppliesInBothFamilies11319(t *testing.T) {
 		var ntPrios, rgPrios, pbrPrios []int
 		var returnPrios []int
 		for _, rule := range ntOps.rules[family] {
-			if rule.Priority == config.NextTableMissTerminatorPriority {
-				continue // #16614 shadow, not a leak lookup
-			}
 			ntPrios = append(ntPrios, rule.Priority)
 			if rule.Dst == nil {
 				t.Errorf("family %d: next-table rule has no destination: %+v", family, rule)
 				continue
 			}
 			prefixLength, addressBits := rule.Dst.Mask.Size()
-			want := config.RouteLeakRulePriority(prefixLength, addressBits, config.RouteLeakNextTable)
+			want := config.RouteLeakNextTableLookupPriority(prefixLength, addressBits)
+			switch {
+			case isNextTableMainProbeShape(rule):
+				want = config.RouteLeakNextTableProbePriority(prefixLength, addressBits)
+			case isNextTableMissTerminatorShape(rule):
+				want = config.RouteLeakNextTableShadowPriority(prefixLength, addressBits)
+			}
 			if rule.Priority != want {
 				t.Errorf("family %d: next-table %s priority = %d, want prefix-derived %d",
 					family, rule.Dst, rule.Priority, want)
@@ -305,8 +308,8 @@ echo "C_PBR_VS_LEAK_V6=$(g6 2001:db8:9::1 from 2001:db8:10::77 iif duma)"
 echo "D_NONPBR_V4=$(g 10.9.0.2 from 10.10.0.99 iif duma)"
 echo "D_NONPBR_V6=$(g6 2001:db8:9::2 from 2001:db8:10::99 iif duma)"
 `,
-		config.RouteLeakRulePriority(16, 32, config.RouteLeakNextTable),
-		config.RouteLeakRulePriority(48, 128, config.RouteLeakNextTable),
+		config.RouteLeakNextTableLookupPriority(16, 32),
+		config.RouteLeakNextTableLookupPriority(48, 128),
 		config.RouteLeakRulePriority(24, 32, config.RouteLeakRibGroup),
 		config.RouteLeakRulePriority(64, 128, config.RouteLeakRibGroup),
 		pbrRulePriority, pbrRulePriority,

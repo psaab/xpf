@@ -26,21 +26,21 @@ func TestManagementInterfacesDoNotGetNextTableIngressRules_12061(t *testing.T) {
 		t.Fatalf("apply next-table rules: %v", err)
 	}
 
-	got := map[string]bool{}
+	got := map[string]int{}
 	count := 0
 	for _, familyRules := range ops.rules {
 		for _, rule := range familyRules {
 			count++
-			got[rule.IifName] = true
+			got[rule.IifName]++
 		}
 	}
 	want := map[string]bool{"ge-0-0-1": true, "ge-0-0-2": true}
-	if count != 2*len(want) || len(got) != len(want) {
-		t.Fatalf("installed %d rules for ingress ifnames %v; want only %v", count, got, want)
+	if count != 3*len(want) || len(got) != len(want) {
+		t.Fatalf("installed %d rules for ingress ifnames %v; want 3 each for only %v", count, got, want)
 	}
 	for iif := range want {
-		if !got[iif] {
-			t.Errorf("missing next-table rule for ordinary ingress %q: got %v", iif, got)
+		if got[iif] != 3 {
+			t.Errorf("ordinary ingress %q received %d rules, want probe+lookup+shadow", iif, got[iif])
 		}
 	}
 	for iif := range got {

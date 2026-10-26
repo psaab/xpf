@@ -1,18 +1,16 @@
 package routing
 
 import (
-	"net"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
-// TestNextTableMissTerminatorInstalled16614: every admitted leak installs
-// a selector-identical unreachable shadow at 32765 per ingress iif, and
-// the shadow does not consume an admission slot (100 leaks still admit).
+// TestNextTableMissTerminatorInstalled16614: every admitted leak installs a
+// main-table probe, target lookup, and unreachable shadow per ingress iif.
+// These helper rules do not consume admission slots (100 leaks still admit).
 func TestNextTableMissTerminatorInstalled16614(t *testing.T) {
 	ops := newFakeRuleOps()
 	nt := &nextTableManager{ops: ops}
@@ -21,38 +19,43 @@ func TestNextTableMissTerminatorInstalled16614(t *testing.T) {
 	if err := nt.Apply(routes, instances, []string{"ge-0-0-0", "ge-0-0-1"}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	var lookups, shadows int
+	var probes, lookups, shadows int
 	for _, r := range ops.rules[unix.AF_INET] {
-		switch r.Priority {
-		case config.NextTableMissTerminatorPriority:
+		switch {
+		case isNextTableMainProbeShape(r):
+			probes++
+			if r.Table != mainTableID || r.SuppressPrefixlen != 8 ||
+				r.Priority != config.RouteLeakNextTableProbePriority(8, 32) {
+				t.Errorf("bad main-table probe: %+v", r)
+			}
+		case isNextTableMissTerminatorShape(r):
 			shadows++
-			if r.Type != nl.FR_ACT_UNREACHABLE || r.Dst.String() != "10.0.0.0/8" || r.IifName == "" {
+			if r.Type != nl.FR_ACT_UNREACHABLE || r.Dst.String() != "10.0.0.0/8" || r.IifName == "" ||
+				r.Priority != config.RouteLeakNextTableShadowPriority(8, 32) {
 				t.Errorf("bad shadow: %+v", r)
 			}
 		default:
 			lookups++
-			if r.Table != 100 {
-				t.Errorf("lookup targets %d, want 100", r.Table)
+			if r.Table != 100 || r.Priority != config.RouteLeakNextTableLookupPriority(8, 32) {
+				t.Errorf("bad target lookup: %+v", r)
 			}
 		}
 	}
-	if lookups != 2 || shadows != 2 {
-		t.Fatalf("lookups=%d shadows=%d, want 2+2", lookups, shadows)
+	if probes != 2 || lookups != 2 || shadows != 2 {
+		t.Fatalf("probes=%d lookups=%d shadows=%d, want 2 of each", probes, lookups, shadows)
 	}
-	// Clear removes shadows too (re-apply keeps count stable).
+	// Clear removes all three rules per interface (re-apply keeps count stable).
 	if err := nt.Apply(routes, instances, []string{"ge-0-0-0", "ge-0-0-1"}); err != nil {
 		t.Fatalf("re-Apply: %v", err)
 	}
-	if got := ops.count(unix.AF_INET); got != 4 {
-		t.Fatalf("re-apply count=%d, want 4 (no shadow leak)", got)
+	if got := ops.count(unix.AF_INET); got != 6 {
+		t.Fatalf("re-apply count=%d, want 6 (no helper-rule leak)", got)
 	}
-	// Empty apply removes shadows.
+	// Empty apply removes probes and shadows as well as lookups.
 	if err := nt.Apply(nil, nil, testNextTableIifs); err != nil {
 		t.Fatalf("empty Apply: %v", err)
 	}
 	if got := ops.count(unix.AF_INET); got != 0 {
 		t.Fatalf("empty apply left %d rules, want 0", got)
 	}
-	_ = net.IPv4zero
-	_ = netlink.Rule{}
 }

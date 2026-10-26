@@ -59,13 +59,11 @@ const PROBE: Ipv4Addr = Ipv4Addr::new(10, 1, 2, 5);
 const ROUTE_LEAK_PRIORITY_BASE: u32 = 30_000;
 
 fn leak_priority(prefix_len: u8, address_bits: u8, kind: LeakKind) -> u32 {
-    let kind_offset = match kind {
-        LeakKind::NextTable => 0,
-        LeakKind::RibGroup => 1,
+    let slot = match kind {
+        LeakKind::NextTable => 1,
+        LeakKind::RibGroup => 3,
     };
-    ROUTE_LEAK_PRIORITY_BASE
-        + 2 * (u32::from(address_bits) - u32::from(prefix_len))
-        + kind_offset
+    ROUTE_LEAK_PRIORITY_BASE + 4 * (u32::from(address_bits) - u32::from(prefix_len)) + slot
 }
 
 fn prefix_containing_probe(len: u8) -> String {
@@ -85,31 +83,41 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
     let mut routes = Vec::new();
     for leak in leaks {
         // The leak itself, in the main table.
-        routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: prefix_containing_probe(leak.prefix_len),
-        next_hop_weights: vec![],
-        next_hops: vec![],
-        discard: false,
-        next_table: format!("{}.inet.0", leak.target),
-        preference: 0,
-        rule_priority: leak.rule_priority,
-        mtu: 0, next_table_route: false });
+        routes.push(RouteSnapshot {
+            reject: false,
+            cluster_terminal: false,
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: prefix_containing_probe(leak.prefix_len),
+            next_hop_weights: vec![],
+            next_hops: vec![],
+            discard: false,
+            next_table: format!("{}.inet.0", leak.target),
+            preference: 0,
+            rule_priority: leak.rule_priority,
+            mtu: 0,
+            next_table_route: false,
+        });
         // A route in the target table so the recursion resolves to something
         // distinguishable.
-        routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: format!("{}.inet.0", leak.target),
-        family: "inet".to_string(),
-        destination: "10.0.0.0/8".to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec![format!(
-            "172.16.{}.1@ge-0/0/{}.50",
-            leak.subnet, leak.egress_ifindex
-        )],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0, next_table_route: false });
+        routes.push(RouteSnapshot {
+            reject: false,
+            cluster_terminal: false,
+            table: format!("{}.inet.0", leak.target),
+            family: "inet".to_string(),
+            destination: "10.0.0.0/8".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec![format!(
+                "172.16.{}.1@ge-0/0/{}.50",
+                leak.subnet, leak.egress_ifindex
+            )],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+            mtu: 0,
+            next_table_route: false,
+        });
     }
 
     let interfaces = leaks
@@ -267,6 +275,231 @@ fn leak_overlap_resolution_matches_the_kernel_9955() {
     );
 }
 
+fn mark_config_next_table(snapshot: &mut crate::ConfigSnapshot, destination: &str) {
+    let mut marked = 0;
+    for route in &mut snapshot.routes {
+        if route.table == "inet.0"
+            && route.destination == destination
+            && !route.next_table.is_empty()
+        {
+            route.next_table_route = true;
+            marked += 1;
+        }
+    }
+    assert_eq!(
+        marked, 1,
+        "expected one config next-table row for {destination}"
+    );
+}
+
+/// Config next-table routes and kernel-model leak rules share one prefix
+/// priority order. The helper fixture marks only the config-authored row;
+/// kernel-model rows remain `next_table_route == false`.
+#[test]
+fn config_next_table_and_kernel_leaks_share_prefix_order_17684() {
+    let broad_rib = Leak {
+        prefix_len: 8,
+        rule_priority: leak_priority(8, 32, LeakKind::RibGroup),
+        target: "red",
+        egress_ifindex: 12,
+        subnet: 50,
+    };
+    let narrow_config = Leak {
+        prefix_len: 16,
+        rule_priority: leak_priority(16, 32, LeakKind::NextTable),
+        target: "blue",
+        egress_ifindex: 13,
+        subnet: 51,
+    };
+    let mut snapshot = snapshot_for(&[broad_rib, narrow_config]);
+    mark_config_next_table(&mut snapshot, "10.1.0.0/16");
+    let state = build_forwarding_state(&snapshot);
+    let narrow = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE)).resolution;
+    assert_eq!(narrow.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(
+        narrow.egress_ifindex, 13,
+        "specific config next-table route must beat broad kernel rib-group leak"
+    );
+
+    let broad_config = Leak {
+        prefix_len: 8,
+        rule_priority: leak_priority(8, 32, LeakKind::NextTable),
+        target: "blue",
+        egress_ifindex: 13,
+        subnet: 51,
+    };
+    let narrow_rib = Leak {
+        prefix_len: 16,
+        rule_priority: leak_priority(16, 32, LeakKind::RibGroup),
+        target: "red",
+        egress_ifindex: 12,
+        subnet: 50,
+    };
+    let mut reverse = snapshot_for(&[broad_config, narrow_rib]);
+    mark_config_next_table(&mut reverse, "10.0.0.0/8");
+    let state = build_forwarding_state(&reverse);
+    let narrow = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE)).resolution;
+    assert_eq!(narrow.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(
+        narrow.egress_ifindex, 12,
+        "specific kernel rib-group leak must beat broad config next-table route"
+    );
+}
+
+#[test]
+fn config_next_table_and_kernel_leaks_share_prefix_order_ipv6_17684() {
+    let snapshot = super::super::test_fixtures::v5(crate::ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/12.50".to_string(),
+                routing_instance: "red".to_string(),
+                zone: "wan".to_string(),
+                linux_name: "ge-0-0-12.50".to_string(),
+                ifindex: 12,
+                hardware_addr: "02:bf:72:00:50:08".to_string(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet6".to_string(),
+                    address: "2001:db8:50::8/64".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0/0/13.50".to_string(),
+                routing_instance: "blue".to_string(),
+                zone: "wan".to_string(),
+                linux_name: "ge-0-0-13.50".to_string(),
+                ifindex: 13,
+                hardware_addr: "02:bf:72:00:50:08".to_string(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet6".to_string(),
+                    address: "2001:db8:51::8/64".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
+        forwarding_tables: vec![
+            "inet6.0".to_string(),
+            "red.inet6.0".to_string(),
+            "blue.inet6.0".to_string(),
+        ],
+        routes: vec![
+            RouteSnapshot {
+                table: "inet6.0".to_string(),
+                family: "inet6".to_string(),
+                destination: "2001:db8::/32".to_string(),
+                next_table: "red.inet6.0".to_string(),
+                rule_priority: leak_priority(32, 128, LeakKind::RibGroup),
+                ..Default::default()
+            },
+            RouteSnapshot {
+                table: "inet6.0".to_string(),
+                family: "inet6".to_string(),
+                destination: "2001:db8:1::/48".to_string(),
+                next_table: "blue.inet6.0".to_string(),
+                rule_priority: leak_priority(48, 128, LeakKind::NextTable),
+                next_table_route: true,
+                ..Default::default()
+            },
+            RouteSnapshot {
+                table: "red.inet6.0".to_string(),
+                family: "inet6".to_string(),
+                destination: "2001:db8::/32".to_string(),
+                next_hops: vec!["2001:db8:50::1@ge-0/0/12.50".to_string()],
+                ..Default::default()
+            },
+            RouteSnapshot {
+                table: "blue.inet6.0".to_string(),
+                family: "inet6".to_string(),
+                destination: "2001:db8:1::/48".to_string(),
+                next_hops: vec!["2001:db8:51::1@ge-0/0/13.50".to_string()],
+                ..Default::default()
+            },
+        ],
+        neighbors: vec![
+            NeighborSnapshot {
+                interface: "ge-0-0-12.50".to_string(),
+                ifindex: 12,
+                family: "inet6".to_string(),
+                ip: "2001:db8:50::1".to_string(),
+                mac: "00:11:22:33:44:55".to_string(),
+                state: "reachable".to_string(),
+                router: true,
+                ..Default::default()
+            },
+            NeighborSnapshot {
+                interface: "ge-0-0-13.50".to_string(),
+                ifindex: 13,
+                family: "inet6".to_string(),
+                ip: "2001:db8:51::1".to_string(),
+                mac: "00:11:22:33:44:55".to_string(),
+                state: "reachable".to_string(),
+                router: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let selected = lookup_forwarding_resolution(
+        &state,
+        IpAddr::V6("2001:db8:1::5".parse().expect("IPv6 address")),
+    )
+    .resolution;
+    assert_eq!(
+        selected.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(
+        selected.egress_ifindex, 13,
+        "specific config next-table route must beat broad IPv6 kernel rib-group leak"
+    );
+}
+
+#[test]
+fn config_next_table_target_miss_is_terminal_before_broad_kernel_leak_17684() {
+    let broad_rib = Leak {
+        prefix_len: 8,
+        rule_priority: leak_priority(8, 32, LeakKind::RibGroup),
+        target: "red",
+        egress_ifindex: 12,
+        subnet: 50,
+    };
+    let narrow_config = Leak {
+        prefix_len: 16,
+        rule_priority: leak_priority(16, 32, LeakKind::NextTable),
+        target: "blue",
+        egress_ifindex: 13,
+        subnet: 51,
+    };
+    let mut snapshot = snapshot_for(&[broad_rib, narrow_config]);
+    mark_config_next_table(&mut snapshot, "10.1.0.0/16");
+    snapshot.routes.retain(|route| route.table != "blue.inet.0");
+    let state = build_forwarding_state(&snapshot);
+    let selected = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE)).resolution;
+    assert_eq!(
+        selected.disposition,
+        ForwardingDisposition::RejectRoute,
+        "specific config target miss must not fall through to broad rib-group route"
+    );
+    let control = lookup_forwarding_resolution(
+        &state,
+        IpAddr::V4("10.2.0.5".parse().expect("IPv4 address")),
+    )
+    .resolution;
+    assert_eq!(control.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(
+        control.egress_ifindex, 12,
+        "broad rib-group control must still resolve"
+    );
+}
+
 /// #16614 flip of the pre-#16614 kernel-model expectation: a CONFIG
 /// next-table route is a Junos route in inet.0, so it competes by LPM.
 /// A matching /8 next-table route therefore LOSES to a more-specific
@@ -290,16 +523,21 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
     }
     // An ordinary, more-specific route in the SAME table as the leak, out a
     // third interface so the winner is unambiguous.
-    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "10.1.2.0/24".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, next_table_route: false });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "10.1.2.0/24".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+        next_table_route: false,
+    });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
         zone: "wan".to_string(),
@@ -310,8 +548,8 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
             family: "inet".to_string(),
             address: "172.16.52.8/24".to_string(),
             scope: 0,
-        ..Default::default()
-    }],
+            ..Default::default()
+        }],
         ..Default::default()
     });
     snapshot.neighbors.push(NeighborSnapshot {
@@ -369,16 +607,21 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
     // Remove the target table's route so the leak lands on an EMPTY table.
     snapshot.routes.retain(|r| r.table != "red.inet.0");
     // Main can route it perfectly well, via a BROADER prefix.
-    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "10.0.0.0/8".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, next_table_route: false });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "10.0.0.0/8".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+        next_table_route: false,
+    });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
         zone: "wan".to_string(),
@@ -389,8 +632,8 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
             family: "inet".to_string(),
             address: "172.16.52.8/24".to_string(),
             scope: 0,
-        ..Default::default()
-    }],
+            ..Default::default()
+        }],
         ..Default::default()
     });
     snapshot.neighbors.push(NeighborSnapshot {
@@ -693,7 +936,8 @@ fn v4_leak_target_preserves_local_delivery_9955() {
         ..Default::default()
     });
     let state = build_forwarding_state(&snapshot);
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 1))).resolution;
+    let resolved =
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 1))).resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 12);
 }
@@ -724,10 +968,12 @@ fn v4_nat_only_leak_target_preserves_local_delivery_9955() {
     });
     let state = build_forwarding_state(&snapshot);
     assert!(state.local_v4.contains(&target));
-    assert!(state
-        .local_tables_v4
-        .get(&target)
-        .is_some_and(|tables| tables.contains("red.inet.0")));
+    assert!(
+        state
+            .local_tables_v4
+            .get(&target)
+            .is_some_and(|tables| tables.contains("red.inet.0"))
+    );
     assert!(
         state
             .routes_v4
@@ -851,8 +1097,8 @@ fn snapshot_12086_leak_parity(
                     family: wan_family.to_string(),
                     address: wan_addr.to_string(),
                     scope: 0,
-                ..Default::default()
-            }],
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
         ],
@@ -898,8 +1144,17 @@ fn assert_12086_leak_parity(
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let mk = |with_snat: bool| {
         build_forwarding_state(&snapshot_12086_leak_parity(
-            lan_ri, wan_ri, with_snat, leak_table, leak_family, leak_dest, leak_next,
-            leak_len, addr_bits, wan_addr, wan_family,
+            lan_ri,
+            wan_ri,
+            with_snat,
+            leak_table,
+            leak_family,
+            leak_dest,
+            leak_next,
+            leak_len,
+            addr_bits,
+            wan_addr,
+            wan_family,
         ))
     };
     let snat = mk(true);
@@ -1010,7 +1265,6 @@ fn interface_nat_leak_into_owner_table_shape_b_v6_12086() {
     );
 }
 
-
 #[test]
 fn leak_target_identity_and_miss_stay_distinct_v9506() {
     let leak = Leak {
@@ -1048,7 +1302,9 @@ fn leak_target_identity_and_miss_stay_distinct_v9506() {
 
     let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE));
     assert_eq!(
-        resolved.selected_route.map(|route| (route.domain, route.table)),
+        resolved
+            .selected_route
+            .map(|route| (route.domain, route.table)),
         Some((501, 501)),
         "a terminal route reached through next-table must report the target identity"
     );
@@ -1058,7 +1314,9 @@ fn leak_target_identity_and_miss_stay_distinct_v9506() {
         IpAddr::V4("192.0.2.77".parse().expect("IPv4 address")),
     );
     assert_ne!(
-        missed.selected_route.map(|route| (route.domain, route.table)),
+        missed
+            .selected_route
+            .map(|route| (route.domain, route.table)),
         Some((0, 254)),
         "a miss must not claim the default main-table identity"
     );
@@ -1093,33 +1351,81 @@ fn junos_next_table_acceptance_probe_16614() {
         }
     }
     // inet.0: 172.16.5.0/24 + default via xwan ifindex 14.
-    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
-    family: "inet".to_string(), destination: "172.16.5.0/24".to_string(), next_hop_weights: vec![],
-    next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()], discard: false, next_table: String::new(),
-    preference: 0, rule_priority: 0, mtu: 0, next_table_route: false });
-    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
-    family: "inet".to_string(), destination: "0.0.0.0/0".to_string(), next_hop_weights: vec![],
-    next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()], discard: false, next_table: String::new(),
-    preference: 0, rule_priority: 0, mtu: 0, next_table_route: false });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "172.16.5.0/24".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+        next_table_route: false,
+    });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+        next_table_route: false,
+    });
     snapshot.interfaces.push(InterfaceSnapshot {
-        name: "ge-0/0/14.50".to_string(), zone: "wan".to_string(), linux_name: "ge-0-0-14.50".to_string(),
-        ifindex: 14, hardware_addr: "02:bf:72:00:50:08".to_string(),
-        addresses: vec![InterfaceAddressSnapshot { family: "inet".to_string(), address: "172.16.52.8/24".to_string(), scope: 0, ..Default::default() }],
+        name: "ge-0/0/14.50".to_string(),
+        zone: "wan".to_string(),
+        linux_name: "ge-0-0-14.50".to_string(),
+        ifindex: 14,
+        hardware_addr: "02:bf:72:00:50:08".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "172.16.52.8/24".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
         ..Default::default()
     });
     snapshot.neighbors.push(NeighborSnapshot {
-        interface: "ge-0-0-14.50".to_string(), ifindex: 14, family: "inet".to_string(), ip: "172.16.52.1".to_string(),
-        mac: "00:11:22:33:44:55".to_string(), state: "reachable".to_string(), router: true, link_local: false, ..Default::default()
+        interface: "ge-0-0-14.50".to_string(),
+        ifindex: 14,
+        family: "inet".to_string(),
+        ip: "172.16.52.1".to_string(),
+        mac: "00:11:22:33:44:55".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
     });
     let state = build_forwarding_state(&snapshot);
-    let hole = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1))).resolution;
-    assert_eq!(hole.disposition, ForwardingDisposition::RejectRoute, "10.99.0.1 hole must be unreachable, got {:?}", hole.disposition);
-    let wan = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(172, 16, 5, 9))).resolution;
+    let hole =
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1))).resolution;
+    assert_eq!(
+        hole.disposition,
+        ForwardingDisposition::RejectRoute,
+        "10.99.0.1 hole must be unreachable, got {:?}",
+        hole.disposition
+    );
+    let wan =
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(172, 16, 5, 9))).resolution;
     assert_eq!(wan.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(wan.egress_ifindex, 14, "172.16.5.9 must resolve via xwan");
-    let ctl = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 1, 0, 5))).resolution;
+    let ctl =
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 1, 0, 5))).resolution;
     assert_eq!(ctl.disposition, ForwardingDisposition::ForwardCandidate);
-    assert_eq!(ctl.egress_ifindex, 12, "10.1.0.5 control must egress red unchanged");
+    assert_eq!(
+        ctl.egress_ifindex, 12,
+        "10.1.0.5 control must egress red unchanged"
+    );
 }
 
 /// #16614: a more-specific ordinary inet.0 carve-out beats a broader
@@ -1140,22 +1446,55 @@ fn junos_more_specific_inet0_route_beats_next_table_16614() {
         }
     }
     // inet.0 carve-out 10.99.0.0/16 via xwan (14).
-    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
-    family: "inet".to_string(), destination: "10.99.0.0/16".to_string(), next_hop_weights: vec![],
-    next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()], discard: false, next_table: String::new(),
-    preference: 0, rule_priority: 0, mtu: 0, next_table_route: false });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "10.99.0.0/16".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+        next_table_route: false,
+    });
     snapshot.interfaces.push(InterfaceSnapshot {
-        name: "ge-0/0/14.50".to_string(), zone: "wan".to_string(), linux_name: "ge-0-0-14.50".to_string(),
-        ifindex: 14, hardware_addr: "02:bf:72:00:50:08".to_string(),
-        addresses: vec![InterfaceAddressSnapshot { family: "inet".to_string(), address: "172.16.52.8/24".to_string(), scope: 0, ..Default::default() }],
+        name: "ge-0/0/14.50".to_string(),
+        zone: "wan".to_string(),
+        linux_name: "ge-0-0-14.50".to_string(),
+        ifindex: 14,
+        hardware_addr: "02:bf:72:00:50:08".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "172.16.52.8/24".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
         ..Default::default()
     });
     snapshot.neighbors.push(NeighborSnapshot {
-        interface: "ge-0-0-14.50".to_string(), ifindex: 14, family: "inet".to_string(), ip: "172.16.52.1".to_string(),
-        mac: "00:11:22:33:44:55".to_string(), state: "reachable".to_string(), router: true, link_local: false, ..Default::default()
+        interface: "ge-0-0-14.50".to_string(),
+        ifindex: 14,
+        family: "inet".to_string(),
+        ip: "172.16.52.1".to_string(),
+        mac: "00:11:22:33:44:55".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
     });
     let state = build_forwarding_state(&snapshot);
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1))).resolution;
-    assert_eq!(resolved.disposition, ForwardingDisposition::ForwardCandidate);
-    assert_eq!(resolved.egress_ifindex, 14, "inet.0 /16 carve-out must beat the /8 next-table route");
+    let resolved =
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1))).resolution;
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(
+        resolved.egress_ifindex, 14,
+        "inet.0 /16 carve-out must beat the /8 next-table route"
+    );
 }

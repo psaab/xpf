@@ -8,10 +8,10 @@ import (
 // maxNextTableRules is the local alias for the shared next-table admission
 // cap. Both rule kinds use the same destination-leak priority range, whose
 // priorities are assigned by descending prefix length; these limits instead
-// bound how many rules each manager installs:
+// bound how many route/ingress pairs each manager admits:
 //
-//   - next-table: NextTableRuleWindow entries. Each leak costs one rule per
-//     default-instance ingress interface (#9420), so the eligible route count
+//   - next-table: NextTableRuleWindow pairs. Each admitted pair installs a
+//     probe, target lookup, and unreachable shadow; the eligible route count
 //     is floor(window/N), with N from the shared resolver (#9810).
 //   - rib-group:  MaxRibGroupLeakRules connected-prefix rules per family
 //     (defined in rib_instance.go, shared with pkg/routing — #16203).
@@ -22,10 +22,10 @@ const maxNextTableRules = NextTableRuleWindow
 
 // nextTableRouteCount counts the static routes (global inet + inet6) that carry
 // a next-table VRF-leak target. Since #9420 the applier
-// (pkg/routing.nextTableManager) feeds each of these into its admission cap
-// once per default-instance ingress interface — one RULE per (leak, interface),
-// drawn down leak-atomically — so the cap cost of a config is this count
-// times len(DefaultInstanceIngressIfaces(cfg)) (#9810 SYN-WIN-01).
+// (pkg/routing.nextTableManager) consumes one admission slot per
+// default-instance ingress interface — one route/ingress pair, expanded to a
+// three-rule sequence — drawn down leak-atomically. The cap cost of a config is
+// this count times len(DefaultInstanceIngressIfaces(cfg)) (#9810 SYN-WIN-01).
 
 // The count stays CONSERVATIVE: it includes leaks the applier would skip
 // (unknown target, unparseable CIDR). That is safe on the strict path because
@@ -131,14 +131,14 @@ func ribGroupLeakPrefixCount(cfg *Config) (inet, inet6 int) {
 // validateRoutingRuleWindowsStrict hard-rejects a config that would exceed the
 // next-table or interface-routes rib-group admission caps (#5854).
 //
-// The applier admits up to 100 next-table rules, one per default-instance
-// ingress interface per leak (#9810), and 1000 rib-group connected-prefix
-// rules per address family (pkg/routing/rules.go). Priorities for both kinds
-// are assigned independently from the shared prefix-derived range. A route
-// beyond an admission cap is never installed. A config exceeding a cap used
-// to commit green while the reconciler silently stopped at its cap and
-// returned success: the committed generation CLAIMED routes the kernel never
-// programs.
+// The applier admits up to 100 next-table route/ingress pairs; each admitted
+// pair installs a three-rule sequence. Rib-group installs up to 1000
+// connected-prefix rules per address family (pkg/routing/rules.go). Priorities
+// for both kinds are assigned independently from the shared prefix-derived
+// range. A route beyond an admission cap is never installed. A config
+// exceeding a cap used to commit green while the reconciler silently stopped
+// at its cap and returned success: the committed generation CLAIMED routes the
+// kernel never programs.
 // The result is a blackhole / asymmetric routing / silent inter-VRF leak loss
 // with no operator-visible signal, because truncation was previously only a
 // WARNING (ValidateConfig, the pre-#5854 warn-only path).
@@ -159,10 +159,10 @@ func validateRoutingRuleWindowsStrict(cfg *Config) error {
 		return nil
 	}
 	if n := nextTableRouteCount(cfg); n > 0 {
-		// #9810 SYN-WIN-01: each leak costs one ip-rule entry per default-instance
-		// ingress interface (per-ingress rules since #9420), drawn down
-		// leak-atomically: what fits is floor(cap/N) LEAKS, with N from the
-		// shared resolver the applier consumes.
+		// #9810 SYN-WIN-01: each leak costs one admission slot per
+		// default-instance ingress interface, drawn down leak-atomically:
+		// what fits is floor(cap/N) LEAKS, with N from the shared resolver
+		// the applier consumes. Each admitted pair expands to three kernel rules.
 		ingress := len(DefaultInstanceIngressIfaces(cfg))
 		if ingress == 0 {
 			// The applier installs nothing without an ingress interface (#9420
@@ -173,19 +173,19 @@ func validateRoutingRuleWindowsStrict(cfg *Config) error {
 			// cycles; do NOT reorder the gates to "fix" the attribution).
 			return fmt.Errorf(
 				"routing-options: %d static routes use next-table, but only 0 can be "+
-					"programmed as kernel ip rules with 0 default-instance ingress "+
-					"interfaces (each leak costs one rule per ingress interface and no "+
-					"interface resolves to scope to — the applier installs nothing "+
-					"without ingress scope).",
+					"programmed as three-rule kernel sequences with 0 default-instance "+
+					"ingress interfaces (each leak costs one admission slot per ingress "+
+					"interface and no interface resolves to scope to — the applier installs "+
+					"nothing without ingress scope).",
 				n)
 		}
 		if capacity := maxNextTableRules / ingress; n > capacity {
 			return fmt.Errorf(
 				"routing-options: %d static routes use next-table, but only %d can be "+
-					"programmed as kernel ip rules with %d default-instance ingress "+
-					"interfaces (each leak costs one rule per ingress interface: %d "+
-					"entries of the %d-rule admission cap); routes beyond the limit "+
-					"would be dropped at apply time (the committed routes are not "+
+					"programmed as three-rule kernel sequences with %d default-instance "+
+					"ingress interfaces (each leak costs one admission slot per ingress "+
+					"interface: %d slots of the %d-slot admission cap); routes beyond the "+
+					"limit would be dropped at apply time (the committed routes are not "+
 					"programmed — blackhole / asymmetric routing). Reduce the number of "+
 					"next-table routes to at most %d.",
 				n, capacity, ingress, n*ingress, maxNextTableRules, capacity)

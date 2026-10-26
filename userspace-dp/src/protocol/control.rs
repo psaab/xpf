@@ -338,7 +338,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v74 -> v75 (#16877): idle persistent-NAT lease records carry the
 // permission bucket's mint_from_zone provenance. A v74 helper drops it, so
 // the manager's lease verb gate requires v75.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 75;
+// v75 -> v76 (#17684): config next-table RouteSnapshot priorities move to
+// the target-lookup slot of a four-priority per-prefix sequence and compete
+// with kernel-model leaks by shared priority. A v75 helper uses the old
+// ordering and may select a broader leak, so exact snapshot equality refuses.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 76;
 
 /// #16589: hard cap on lease rows in ONE paged lease-export response.
 /// Sized so even a worst-case row (many permitted remotes) stays far

@@ -9,11 +9,13 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
 // testNextTableIifs is the #9420 ingress-scoping set used by next-table rule
-// tests: one default-instance ingress interface, so each leak costs one rule.
+// tests: one default-instance ingress interface, so each route consumes one
+// admission slot and expands to a probe, lookup, and shadow.
 var testNextTableIifs = []string{"ge-0-0-0"}
 
 // fakeRuleOps is an in-memory ip-rule table implementing ruleOps. It
@@ -546,11 +548,11 @@ func TestNextTableRulesApply_Fake(t *testing.T) {
 	if !ops.hasTable(unix.AF_INET6, 101) {
 		t.Errorf("expected IPv6 next-table rule for table 101, rules=%v", ops.rules[unix.AF_INET6])
 	}
-	if got := ops.count(unix.AF_INET); got != 2 {
-		t.Errorf("expected 2 IPv4 rules (lookup+shadow, unknown-vr skipped), got %d", got)
+	if got := ops.count(unix.AF_INET); got != 3 {
+		t.Errorf("expected 3 IPv4 rules (probe+lookup+shadow, unknown-vr skipped), got %d", got)
 	}
-	if got := ops.count(unix.AF_INET6); got != 2 {
-		t.Errorf("expected 2 IPv6 rules (lookup+shadow), got %d", got)
+	if got := ops.count(unix.AF_INET6); got != 3 {
+		t.Errorf("expected 3 IPv6 rules (probe+lookup+shadow), got %d", got)
 	}
 }
 
@@ -584,8 +586,8 @@ func TestNextTableApplyAggregatesAddErrors(t *testing.T) {
 	}
 
 	// Single-family failure: forward progress preserved — the v4 add fails
-	// (error aggregated) while the sibling v6 rule still installs, and Apply
-	// still returns the aggregated error rather than swallowing it.
+	// (error aggregated) while the sibling v6 sequence still installs, and
+	// Apply still returns the aggregated error rather than swallowing it.
 	ops2 := newFakeRuleOps()
 	ops2.failAdd(unix.AF_INET, errors.New("netlink EPERM on v4"))
 	nt2 := &nextTableManager{ops: ops2}
@@ -595,8 +597,8 @@ func TestNextTableApplyAggregatesAddErrors(t *testing.T) {
 	if ops2.count(unix.AF_INET) != 0 {
 		t.Errorf("failed v4 rule must not be recorded, got %d", ops2.count(unix.AF_INET))
 	}
-	if ops2.count(unix.AF_INET6) != 2 {
-		t.Errorf("sibling v6 rules must still install (forward progress), got %d", ops2.count(unix.AF_INET6))
+	if ops2.count(unix.AF_INET6) != 3 {
+		t.Errorf("sibling v6 sequence must still install (forward progress), got %d", ops2.count(unix.AF_INET6))
 	}
 }
 
@@ -618,13 +620,13 @@ func TestNextTableApplyIdempotentReapply(t *testing.T) {
 	if err := nt.Apply(routes, instances, testNextTableIifs); err != nil {
 		t.Fatalf("clean Apply must return nil, got %v", err)
 	}
-	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 4 {
-		t.Fatalf("expected 4 rules after clean apply (lookup+shadow per family), got %d", got)
+	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 6 {
+		t.Fatalf("expected 6 rules after clean apply (probe+lookup+shadow per family), got %d", got)
 	}
 	if err := nt.Apply(routes, instances, testNextTableIifs); err != nil {
 		t.Fatalf("idempotent re-apply must return nil, got %v", err)
 	}
-	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 4 {
+	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 6 {
 		t.Fatalf("re-apply must keep a stable rule set, got %d", got)
 	}
 }
@@ -656,8 +658,8 @@ func TestNextTableAdmissionCap(t *testing.T) {
 			t.Fatalf("Apply: %v", err)
 		}
 		total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6)
-		if total != 2*config.NextTableRuleWindow {
-			t.Fatalf("expected all %d routes programmed at the limit (lookup+shadow), got %d", config.NextTableRuleWindow, total)
+		if total != 3*config.NextTableRuleWindow {
+			t.Fatalf("expected all %d routes programmed at the limit (probe+lookup+shadow), got %d", config.NextTableRuleWindow, total)
 		}
 		assertNextTableLookupsInRange16614(t, ops)
 	})
@@ -673,8 +675,8 @@ func TestNextTableAdmissionCap(t *testing.T) {
 			t.Fatal("over-limit Apply must return a degraded error naming the cap (#6467)")
 		}
 		total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6)
-		if total != 2*config.NextTableRuleWindow {
-			t.Fatalf("expected cap to hold at %d programmed rules (lookup+shadow), got %d", config.NextTableRuleWindow, total)
+		if total != 3*config.NextTableRuleWindow {
+			t.Fatalf("expected cap to hold at %d programmed rules (probe+lookup+shadow), got %d", config.NextTableRuleWindow, total)
 		}
 
 		// Re-apply must leave no residue: every programmed rule is inside
@@ -685,8 +687,8 @@ func TestNextTableAdmissionCap(t *testing.T) {
 			t.Fatal("re-apply over-limit must still surface the degraded error (#6467)")
 		}
 		total = ops.count(unix.AF_INET) + ops.count(unix.AF_INET6)
-		if total != 2*config.NextTableRuleWindow {
-			t.Fatalf("re-apply leaked rules: expected %d, got %d", 2*config.NextTableRuleWindow, total)
+		if total != 3*config.NextTableRuleWindow {
+			t.Fatalf("re-apply leaked rules: expected %d, got %d", 3*config.NextTableRuleWindow, total)
 		}
 	})
 }
@@ -820,20 +822,77 @@ func assertAllRulesInRange(t *testing.T, ops *fakeRuleOps, lo, hi int) {
 	}
 }
 
-// assertNextTableLookupsInRange16614 checks every next-table lookup stays
-// in the shared leak window and every shadow sits at the terminator
-// priority — both are inside clear()'s ownership, so neither leaks.
+// assertNextTableLookupsInRange16614 verifies every admitted prefix has
+// exactly one main-table probe, target lookup, and unreachable shadow per
+// ingress interface, all inside clear()'s owned priority range.
 func assertNextTableLookupsInRange16614(t *testing.T, ops *fakeRuleOps) {
 	t.Helper()
+	type ruleKey struct {
+		family      int
+		destination string
+		iif         string
+	}
+	lookups := make(map[ruleKey]netlink.Rule)
+	probes := make(map[ruleKey]netlink.Rule)
+	shadows := make(map[ruleKey]netlink.Rule)
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		for _, r := range ops.rules[family] {
-			if r.Priority == config.NextTableMissTerminatorPriority {
+		for _, rule := range ops.rules[family] {
+			if rule.Priority < nextTableRulePriority ||
+				rule.Priority >= nextTableRulePriority+config.RouteLeakRulePriorityWindow {
+				t.Errorf("next-table rule priority %d outside cleared window", rule.Priority)
+			}
+			if rule.Dst == nil || rule.IifName == "" {
+				t.Errorf("next-table rule lacks destination or ingress scope: %+v", rule)
 				continue
 			}
-			if r.Priority < nextTableRulePriority || r.Priority >= nextTableRulePriority+config.RouteLeakRulePriorityWindow {
-				t.Errorf("lookup priority %d outside cleared window", r.Priority)
+			key := ruleKey{family: family, destination: rule.Dst.String(), iif: rule.IifName}
+			switch {
+			case isNextTableMainProbeShape(rule):
+				if _, exists := probes[key]; exists {
+					t.Errorf("duplicate main-table probe for %+v", key)
+				}
+				probes[key] = rule
+			case isNextTableMissTerminatorShape(rule):
+				if rule.Type != nl.FR_ACT_UNREACHABLE {
+					t.Errorf("shadow action %d, want unreachable: %+v", rule.Type, rule)
+				}
+				if _, exists := shadows[key]; exists {
+					t.Errorf("duplicate miss shadow for %+v", key)
+				}
+				shadows[key] = rule
+			default:
+				if rule.Table == mainTableID || rule.SuppressPrefixlen != -1 {
+					t.Errorf("unexpected next-table helper rule shape: %+v", rule)
+				}
+				if _, exists := lookups[key]; exists {
+					t.Errorf("duplicate target lookup for %+v", key)
+				}
+				lookups[key] = rule
 			}
 		}
+	}
+	for key, lookup := range lookups {
+		prefixLength, addressBits := lookup.Dst.Mask.Size()
+		if lookup.Priority != config.RouteLeakNextTableLookupPriority(prefixLength, addressBits) {
+			t.Errorf("target lookup priority %d for %+v does not match its prefix", lookup.Priority, key)
+		}
+		probe, ok := probes[key]
+		if !ok {
+			t.Errorf("target lookup has no main-table probe: %+v", key)
+		} else if probe.Priority != config.RouteLeakNextTableProbePriority(prefixLength, addressBits) ||
+			probe.SuppressPrefixlen != prefixLength {
+			t.Errorf("main-table probe %+v does not match target lookup %+v", probe, lookup)
+		}
+		shadow, ok := shadows[key]
+		if !ok {
+			t.Errorf("target lookup has no unreachable shadow: %+v", key)
+		} else if shadow.Priority != config.RouteLeakNextTableShadowPriority(prefixLength, addressBits) {
+			t.Errorf("miss shadow %+v does not match target lookup %+v", shadow, lookup)
+		}
+	}
+	if len(probes) != len(lookups) || len(shadows) != len(lookups) {
+		t.Errorf("triplet counts probes=%d lookups=%d shadows=%d differ",
+			len(probes), len(lookups), len(shadows))
 	}
 }
 

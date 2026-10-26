@@ -384,11 +384,11 @@ external networkd restart is healed without a commit.
   nexthops still fail verification.
 - `30000–30999`: the shared destination-leak priority range for next-table
   inter-VRF leaks and rib-group per-prefix interface-route leaks.
-  `config.RouteLeakRulePriority` maps destination prefix length into this
-  range, with more-specific prefixes receiving lower (earlier) priorities
-  regardless of leak source. For equal prefixes, next-table precedes
-  rib-group. This makes kernel first-match routing agree with userspace
-  longest-prefix matching when leaked destinations overlap.
+  `config.RouteLeakRulePriority` assigns a four-priority sequence per prefix:
+  next-table main-table probe, target lookup, unreachable miss shadow, then
+  rib-group lookup. More-specific prefixes receive lower (earlier) priorities,
+  independent of leak source. This lets a more-specific main-table route
+  carve out a destination before a less-specific next-table handoff.
   See [`docs/rib-group-route-leaking.md`](../../docs/rib-group-route-leaking.md)
   for the supported Junos interface-route leak configuration and kernel/helper
   precedence details.
@@ -396,13 +396,12 @@ external networkd restart is healed without a commit.
   The `maxNextTableRules` admission cap remains separate from priority
   assignment. Its eligible routes are drawn down IPv4-first (#6583), with
   `nextTableFamilyOrdered` preserving the caller's order within each family.
-  The userspace FIB mirrors that cap and family order
+  The userspace FIB mirrors this cap and family order
   (`pkg/dataplane/userspace/routes.go`: `addRoutes("inet.0", …)` then
   `addRoutes("inet6.0", …)`), so kernel and FIB admit the same route set.
-  Each admitted next-table route still expands to one scoped rule per
-  default-instance ingress interface; all copies share its prefix-derived
-  priority.
-
+  Each admitted next-table route expands to a scoped probe, lookup, and shadow
+  per default-instance ingress interface; rib-group lookups use the fourth
+  priority slot.
 
   Rib-group admission is bounded independently for IPv4 and IPv6 (#11442):
   each address family can install up to 1000 connected-prefix rules. The
@@ -440,8 +439,9 @@ external networkd restart is healed without a commit.
   `cfg.RoutingOptions.StaticRoutes` + `Inet6StaticRoutes`), so the
   default instance is the authoring instance. Consequences:
 
-  - **One leak now costs one rule per default-instance ingress
-    interface**, and the 100-entry admission cap is drawn down
+  - **One admission slot per leak and default-instance ingress interface**
+    expands to a three-rule sequence (main-table probe, target lookup, and
+    unreachable shadow). The 100-entry admission cap is drawn down
     **leak-atomically** — a leak whose full expansion does not fit is dropped
     whole rather than installed on a subset of its interfaces. The overflow
     error names the multiplier.
@@ -643,15 +643,13 @@ external networkd restart is healed without a commit.
   (the guard never fires); an over-cap term steers nothing in the kernel mirror
   (the userspace filter path still enforces it exactly), so the operator sees the
   degraded gauge/log and authors a tighter match.
-- `32765`: the #16614 next-table miss terminator — one
-  selector-identical `unreachable` shadow per admitted config
-  next-table leak and ingress interface, immediately before main
-  (32766). A target-table miss ends here instead of reaching main's
-  default. In the AF_XDP FIB the config static is instead a Junos
-  inet.0 route (LPM + terminal target miss, protocol v73); the kernel
-  RPDB cannot express the LPM carve-out rescue, so kernel-only traffic
-  to a carved-out prefix is blackholed (fail-closed). See
-  `docs/log/16614.md`.
+- `32765`: the legacy #16614 fixed-priority next-table miss terminator.
+  Current config next-table rules use their prefix-derived unreachable shadow
+  inside the shared `30000–30999` band; `nextTableManager.clear()` still
+  recognizes the old selector-identical shadow for in-place upgrades.
+  In the AF_XDP FIB, config statics remain Junos routes (LPM + terminal target
+  miss, protocol v73). Kernel main-table carve-outs are rescued by the
+  suppress-prefixlen probe before the next-table target lookup.
 - `32000–32099`: legacy next-table leak priorities, cleared only to remove
   stale rules left by an in-place upgrade.
 - `33000–33099`: legacy pre-#3876 blanket rib-group rules. New rules are

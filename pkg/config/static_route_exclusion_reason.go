@@ -171,13 +171,14 @@ func staticRouteDestinationUsable(destination string) bool {
 // StaticRouteExclusions returns the exclusion reason for every static route in
 // `cfg` that buildRouteSnapshots drops, keyed by the route pointer.
 //
-// It exists for the ORDER-DEPENDENT eighth reason. The kernel programs global
-// next-table leaks as ip rules capped at NextTableRuleWindow entries — one
-// slot per default-instance ingress interface per leak since #9420 (#9810) —
-// and the applier advances that counter only for an ELIGIBLE route, drawn down
-// leak-atomically in parsed-CIDR v4-first order. So whether a given route falls
-// outside the window depends on how many eligible ones came before it, in the
-// applier's own order, times the shared ingress count.
+// It exists for the ORDER-DEPENDENT eighth reason. The kernel admits global
+// next-table leaks under NextTableRuleWindow route/ingress slots — one slot per
+// default-instance ingress interface per leak since #9420 (#9810) — and expands
+// each admitted pair into three physical rules. The applier advances that
+// counter only for an ELIGIBLE route, drawn down leak-atomically in parsed-CIDR
+// v4-first order. So whether a given route falls outside the window depends on
+// how many eligible ones came before it, in the applier's own order, times the
+// shared ingress count.
 //
 // That order is reproduced exactly and it is narrower than it looks: the window
 // counter advances ONLY on the global path (`perInstance == false`), so
@@ -224,9 +225,10 @@ func StaticRouteExclusions(cfg *Config) map[*StaticRoute]string {
 		}
 		if window+ingress > NextTableRuleWindow {
 			out[sr] = fmt.Sprintf(
-				"beyond the %d-entry next-table ip-rule window with %d default-instance "+
-					"ingress interfaces (each leak costs one rule per ingress interface) "+
-					"— the kernel installs no rule for it",
+				"beyond the %d-entry next-table admission cap with %d default-instance "+
+					"ingress interfaces (each admitted route consumes one cap entry per "+
+					"ingress interface and installs three kernel rules) — the kernel "+
+					"installs no rule sequence for it",
 				NextTableRuleWindow, ingress)
 			continue
 		}
