@@ -450,8 +450,14 @@ func evaluateRESTForms9952(rules config.CompiledLoginRegexes, class, cmd, route 
 			"request's arguments cannot be named as a command, so the restriction cannot be "+
 			"applied to it", class)
 	}
+	// #17836 note:
+	// This post-buffer judge keeps full EvaluateForms unanimity,
+	// including allowlist misses: the argument-bearing forms are
+	// known here, so an unmatched argument-scoped allow must deny.
+	// (Pass 1, authorizeRESTCommandBare, is the one restricted to
+	// DENY-side verdicts — see #17836.)
 	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
-		if restDistinctRescue16472(rules, forms) {
+			if restDistinctRescue16472(rules, forms) {
 			return nil
 		}
 		return fmt.Errorf("permission denied: login class %q denies %q (%s)", class, cmd, decision.Reason)
@@ -472,12 +478,15 @@ var restBodyIndependentCommandRoutes = map[string]bool{
 }
 
 // authorizeRESTCommandBare judges only the argument-free charge of a
-// body-independent route, without touching r.Body. It mirrors
-// evaluateRESTForms9952's bare-form unanimity for the pre-buffer pass:
-// a deny that matches the bare command (or any canonical spelling of
-// it) vetoes, while an argument-scoped pattern simply does not match
-// the bare form and is left for the post-buffer pass to judge with
-// the full argument-bearing forms.
+// body-independent route, without touching r.Body. It denies
+// pre-buffer only a verdict that is FINAL on the bare charge
+// (config.BareVerdictFinal, #17836): an argument-scoped allow can
+// never match the bare form, so an allowlist miss defers to the
+// post-buffer pass, and a bare tier denial defers whenever an
+// argument-bearing extension could carry the deny-with-exceptions
+// geometry. Non-final verdicts are judged by evaluateRESTForms9952
+// once the body exists; deferral is fail-safe because that pass
+// still denies every argued form the class does not permit.
 func (s *Server) authorizeRESTCommandBare(r *http.Request, cfg *config.Config, p authz.Principal) error {
 	class := p.Class
 	if class == "" || p.Superuser {
@@ -502,9 +511,18 @@ func (s *Server) authorizeRESTCommandBare(r *http.Request, cfg *config.Config, p
 			"request's arguments cannot be named as a command, so the restriction cannot be "+
 			"applied to it", class)
 	}
-	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
+	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed && decision.DecidedBy == config.LoginRegexDeny {
 		if restDistinctRescue16472(rules, forms) {
 			return nil
+		}
+		// #17836: deny pre-buffer only when the bare denial is final
+		// on every charge spelling; an exception candidate defers to
+		// the post-buffer full-form judge instead of refusing a grant
+		// the argued form would carry.
+		for _, f := range forms {
+			if !rules.BareVerdictFinal(f) {
+				return nil
+			}
 		}
 		return fmt.Errorf("permission denied: login class %q denies %q (%s)", class, cmd, decision.Reason)
 	}
