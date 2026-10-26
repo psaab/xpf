@@ -39,6 +39,8 @@ FAKE_EXECSTART="/usr/local/sbin/xpfd"
 # ordering invariant the pre-flight exists to hold.
 FAKE_VERIFY_RC=0
 FAKE_UID=0
+FAKE_HELPER_SYMLINK=0
+FAKE_HELPER_LINK_UID=0
 # A FILE, not an array: every call under test runs in a subshell (die() exits,
 # so the rc has to be caught), and an array mutated in a subshell is discarded
 # on return. A file survives, so "what did NOT happen" is still assertable
@@ -60,6 +62,8 @@ setup_fake_vm() {
 	FAKE_EXECSTART="/usr/local/sbin/xpfd"
 	FAKE_VERIFY_RC=0
 	FAKE_UID=0
+	FAKE_HELPER_SYMLINK=0
+	FAKE_HELPER_LINK_UID=0
 	FAKE_CALL_LOG=$(mktemp)
 	FAKE_APT_RC=0
 	FAKE_REJECT_EXISTING=0
@@ -236,8 +240,16 @@ _fake_exec() {
 		;;
 	stat)
 		shift
-		if [[ "$1" == "-c" && "$2" == "%u" && -n "$FAKE_UID" ]]; then
-			printf '%s\n' "$FAKE_UID"
+		local stat_uid="$FAKE_UID" followed=0
+		if [[ "$1" == "-L" ]]; then
+			followed=1
+			shift
+		fi
+		if [[ "$1" == "-c" && "$2" == "%u" && -n "$stat_uid" ]]; then
+			if [[ "$FAKE_HELPER_SYMLINK" == "1" && $followed -eq 0 ]]; then
+				stat_uid="$FAKE_HELPER_LINK_UID"
+			fi
+			printf '%s\n' "$stat_uid"
 			return 0
 		fi
 		return 1
@@ -439,6 +451,18 @@ test_verify_pushed_uid_nonroot_hardfails() {
 		bad "verify_pushed_uid: non-root helper MUST hard-fail"
 	else
 		ok "verify_pushed_uid: non-root helper hard-fails"
+	fi
+	teardown_fake_vm
+}
+test_verify_pushed_uid_follows_symlink_hardfails() {
+	setup_fake_vm
+	FAKE_UID=1000
+	FAKE_HELPER_SYMLINK=1
+	FAKE_HELPER_LINK_UID=0
+	if ( deploy_verify_pushed_uid vm /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp ) >/dev/null 2>&1; then
+		bad "verify_pushed_uid: must check a symlink target, not its root-owned link"
+	else
+		ok "verify_pushed_uid: follows helper symlink and rejects non-root target"
 	fi
 	teardown_fake_vm
 }
@@ -2772,6 +2796,7 @@ test_verify_pushed_sha_mismatch_hardfails
 test_verify_pushed_sha_absent_hardfails
 test_verify_pushed_uid_root_passes
 test_verify_pushed_uid_nonroot_hardfails
+test_verify_pushed_uid_follows_symlink_hardfails
 test_verify_pushed_uid_empty_hardfails
 test_cluster_helper_raw_deploy_uses_root_ownership
 test_deb_repush_uses_distinct_remote_slots

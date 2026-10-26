@@ -140,10 +140,12 @@ deploy_verify_pushed_sha() {
 # unless the push pins --uid 0 --gid 0 (#18029): the pushed file lands
 # uid-1000-owned and the helper can never start. HARD FAIL on a
 # non-root uid or an empty readback, same as deploy_verify_pushed_sha.
+# `-L` matches sha256sum's target semantics: managed binaries may remain valid
+# symlinks, and their link-owner metadata does not describe the executable.
 deploy_verify_pushed_uid() {
 	local rinst="$1" remote_path="$2" label="$3"
 	local vm_uid
-	vm_uid=$(incus exec "$rinst" -- stat -c %u "$remote_path" 2>/dev/null || true)
+	vm_uid=$(incus exec "$rinst" -- stat -L -c %u "$remote_path" 2>/dev/null || true)
 	if [[ -z "$vm_uid" ]]; then
 		die "$label not present on $rinst after push (uid readback empty: $remote_path)"
 	fi
