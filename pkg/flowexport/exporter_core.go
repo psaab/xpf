@@ -473,9 +473,19 @@ func (c *exporterCore) MarkFlowSampledAtOpen(key FlowKey) {
 	c.sampledMu.Unlock()
 }
 
+// rejectedFlowsMax bounds rejected open decisions retained by one
+// exporter (#17815 fold of the #16747 idle-marker ceiling). Keys are
+// normally removed at close, but close events can be lost after the
+// open was observed; without a ceiling the set would grow toward one
+// key per live session for the daemon's lifetime. At the cap the set
+// is cleared and later closes for evicted keys degrade to the pre-fix
+// close-fallback decision rather than leaking memory.
+const rejectedFlowsMax = 8192
+
 // MarkFlowRejectedAtOpen remembers that an observed open was not selected
 // by this instance. Its close is decided already and must not consume a
-// close-fallback slot (#17815).
+// close-fallback slot (#17815). At rejectedFlowsMax the retained set is
+// cleared before inserting (the idle-marker hard-ceiling idiom).
 func (c *exporterCore) MarkFlowRejectedAtOpen(key FlowKey) {
 	if c.tracker != nil && c.tracker.Has(key) {
 		return
@@ -485,17 +495,11 @@ func (c *exporterCore) MarkFlowRejectedAtOpen(key FlowKey) {
 		if c.rejectedFlows == nil {
 			c.rejectedFlows = make(map[FlowKey]struct{})
 		}
+		if _, exists := c.rejectedFlows[key]; !exists && len(c.rejectedFlows) >= rejectedFlowsMax {
+			clear(c.rejectedFlows)
+		}
 		c.rejectedFlows[key] = struct{}{}
 	}
-	c.sampledMu.Unlock()
-}
-
-// ForgetFlowSampledAtOpen drops an open-side decision without treating
-// it as a close export decision (used when an exporter is retired).
-func (c *exporterCore) ForgetFlowSampledAtOpen(key FlowKey) {
-	c.sampledMu.Lock()
-	delete(c.sampledFlows, key)
-	delete(c.rejectedFlows, key)
 	c.sampledMu.Unlock()
 }
 

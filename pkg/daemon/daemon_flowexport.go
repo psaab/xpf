@@ -408,7 +408,9 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	retainedGroups, retainedExps := d.retainedV9Locked(failedInstances, desiredKeys, oldByKey)
 	if len(newGroups) == 0 && len(retainedGroups) == 0 {
 		if !wasRunning {
+			d.flowStateMu.Lock()
 			d.flowBundle.Store(&exporterBundle{})
+			d.flowStateMu.Unlock()
 		}
 		d.flowHashSet = false
 		d.flowExportErr = failedErr
@@ -467,8 +469,10 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	}
 	// #16742: carry live open state to same-key replacements before
 	// publishing, so the swap does not drop every live flow's close.
+	d.flowStateMu.Lock()
 	d.carryFlowStateV9Locked(published)
 	d.flowBundle.Store(&exporterBundle{groups: published})
+	d.flowStateMu.Unlock()
 	publishedExp := make(map[*flowexport.Exporter]bool)
 	for _, g := range published {
 		publishedExp[g.exp] = true
@@ -603,8 +607,10 @@ func joinWithBudget(wg *sync.WaitGroup, what string) bool {
 }
 
 func (d *Daemon) teardownV9Locked() {
+	d.flowStateMu.Lock()
 	live := d.flowBundle.Load()
 	d.flowBundle.Store(&exporterBundle{})
+	d.flowStateMu.Unlock()
 	d.teardownV9GroupsLocked(liveGroupsV9(live))
 }
 
@@ -732,7 +738,9 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 	retainedGroups, retainedExps := d.retainedIPFIXLocked(failedInstances, desiredKeys, oldByKey)
 	if len(newGroups) == 0 && len(retainedGroups) == 0 {
 		if !wasRunning {
+			d.flowStateMu.Lock()
 			d.ipfixBundlePtr.Store(&ipfixBundle{})
+			d.flowStateMu.Unlock()
 		}
 		d.ipfixHashSet = false
 		d.ipfixExportErr = failedErr
@@ -788,8 +796,10 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 		d.ipfixWg = nil
 	}
 	// #16742: carry live open state to same-key replacements (v9 twin).
+	d.flowStateMu.Lock()
 	d.carryFlowStateIPFIXLocked(published)
 	d.ipfixBundlePtr.Store(&ipfixBundle{groups: published})
+	d.flowStateMu.Unlock()
 	publishedExp := make(map[*flowexport.IPFIXExporter]bool)
 	for _, g := range published {
 		publishedExp[g.exp] = true
@@ -854,8 +864,10 @@ func (d *Daemon) retainedIPFIXLocked(failedInstances map[string]bool, desiredKey
 
 // teardownIPFIXLocked is the IPFIX equivalent of teardownV9Locked.
 func (d *Daemon) teardownIPFIXLocked() {
+	d.flowStateMu.Lock()
 	live := d.ipfixBundlePtr.Load()
 	d.ipfixBundlePtr.Store(&ipfixBundle{})
+	d.flowStateMu.Unlock()
 	d.teardownIPFIXGroupsLocked(liveGroupsIPFIX(live))
 }
 
@@ -907,9 +919,9 @@ func (d *Daemon) IPFIXExportError() error {
 }
 
 // flowExportCallback is the single, stable NetFlow v9 session-close
-// handler registered on the EventReader exactly once. It reads the live
-// set of template-group exporters lock-free from the atomic bundle, so
-// reconcile can swap the exporters without ever touching the callback list.
+// handler registered on the EventReader exactly once. It loads the live
+// set of template-group exporters from the atomic bundle while holding
+// flowStateMu, which also serializes state carry and publication.
 //
 // #2461: the template groups of ONE instance share one ShouldExport state
 // (the 1-in-N counter + sampling zones), so the sampling decision is made
@@ -937,6 +949,8 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 	if rec.Type != "SESSION_CLOSE" {
 		return
 	}
+	d.flowStateMu.Lock()
+	defer d.flowStateMu.Unlock()
 	b := d.flowBundle.Load()
 	if b == nil || len(b.groups) == 0 {
 		return
@@ -1055,6 +1069,8 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 	if rec.Type != "SESSION_CLOSE" {
 		return
 	}
+	d.flowStateMu.Lock()
+	defer d.flowStateMu.Unlock()
 	b := d.ipfixBundlePtr.Load()
 	if b == nil || len(b.groups) == 0 {
 		return
@@ -1141,9 +1157,17 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 // post-promote SESSION_OPEN-shaped signal the flowexport feed can see
 // is therefore absent by design. Registration for such flows happens
 // through trackFlowOpenFromSync, driven by the HA session-sync walker
-// for peer-synced opens, which calls trackFlowOpen with the gate byte
-// clear — an open for flow export without a syslog CREATE.
+// for peer-synced opens, which calls the same locked admission path with
+// the gate byte clear — an open for flow export without a syslog CREATE.
 func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
+	d.flowStateMu.Lock()
+	defer d.flowStateMu.Unlock()
+	d.trackFlowOpenLocked(rec)
+}
+
+// trackFlowOpenLocked makes the per-instance decision and registers its
+// selected/rejected state atomically. The caller must hold flowStateMu.
+func (d *Daemon) trackFlowOpenLocked(rec logging.EventRecord) {
 	srcIP, dstIP, isV6 := parseAddrPair(rec.SrcAddr, rec.DstAddr)
 	key := flowexport.FlowKeyFromClose(srcIP, dstIP, parseSrcPort(rec.SrcAddr), parseSrcPort(rec.DstAddr), rec.ProtocolNum, isV6)
 	tmpl := flowexport.FlowRecord{
@@ -1256,6 +1280,8 @@ func (d *Daemon) trackFlowOpenFromSync(delta dpuserspace.SessionDeltaInfo) {
 	if d == nil {
 		return
 	}
+	d.flowStateMu.Lock()
+	defer d.flowStateMu.Unlock()
 	if d.flowBundle.Load() == nil && d.ipfixBundlePtr.Load() == nil {
 		return
 	}
@@ -1284,7 +1310,7 @@ func (d *Daemon) trackFlowOpenFromSync(delta dpuserspace.SessionDeltaInfo) {
 	// only names are present the record carries zone 0 and the
 	// nameless/zone fallback in SampledForOpen decides as for an
 	// unresolved-ifindex open. Binary-leg deltas carry the IDs.
-	d.trackFlowOpen(rec)
+	d.trackFlowOpenLocked(rec)
 }
 
 // carryFlowStateV9Locked transfers live open state from the previously

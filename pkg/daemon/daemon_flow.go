@@ -997,18 +997,19 @@ func logFinalStats(ready dataplaneReadyProbe, telemetry dataplane.Telemetry) {
 
 // stopFlowExporter stops the running NetFlow v9 exporter (shutdown).
 //
-// #2075: the exporter is now (re)started by reconcileFlowExporters, not
-// startFlowExporter. This stop is called only at shutdown. It takes
-// flowReconMu so it cannot race a concurrent reconcile swap, and it is
-// nil-safe / idempotent (a reconcile that already stopped the exporter
-// leaves flowCancel/flowExporter nil; context.CancelFunc is idempotent).
+// #2075: reconcile starts exporters; this function is shutdown-only.
+// flowReconMu prevents a concurrent reconcile, and flowStateMu linearizes
+// unpublication against open/close decision processing. It is nil-safe and
+// idempotent when reconcile already stopped the exporter.
 func (d *Daemon) stopFlowExporter() {
 	d.flowReconMu.Lock()
 	defer d.flowReconMu.Unlock()
 	// Capture the live groups before unpublishing (#16752): teardown
 	// retires exactly those per-exporter contexts.
+	d.flowStateMu.Lock()
 	live := d.flowBundle.Load()
 	d.flowBundle.Store(&exporterBundle{})
+	d.flowStateMu.Unlock()
 	d.teardownV9GroupsLocked(liveGroupsV9(live))
 	d.flowExportErr = nil
 }
@@ -1017,10 +1018,12 @@ func (d *Daemon) stopFlowExporter() {
 func (d *Daemon) stopIPFIXExporter() {
 	d.ipfixReconMu.Lock()
 	defer d.ipfixReconMu.Unlock()
+	d.flowStateMu.Lock()
 	live := d.ipfixBundlePtr.Load()
 	d.ipfixBundlePtr.Store(&ipfixBundle{})
+	d.flowStateMu.Unlock()
 	d.teardownIPFIXGroupsLocked(liveGroupsIPFIX(live))
-	d.ipfixExportErr = nil
+	d.flowExportErr = nil
 }
 
 // parseAddrPair parses "ip:port" or "[ip]:port" into net.IPs and IPv6 flag.

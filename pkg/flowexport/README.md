@@ -552,26 +552,29 @@ slot via `SampledForOpen` (the daemon zone/interface gate,
 `ShouldExportIfaceDaemon`). A sampled open is remembered per exporter
 group: `TrackFlowOpenRecord` registers the tracker entry carrying the
 open-time template (tuple/NAT/ifindex/ToS/flags), or, for a close-only
-exporter, `MarkFlowSampledAtOpen` records the key in the sampled set
-(deleted at close, so it is bounded by live sampled sessions). The
-SESSION_CLOSE callbacks (`flowExportCallback` / `ipfixExportCallback`)
-skip SESSION_OPEN records, make no second 1-in-N decision at close, and
-export only groups whose `CloseFlow` reports the key was sampled at
-open; each such group queues `ExportSessionCloseRemainder`.
+exporter, `MarkFlowSampledAtOpen` records the key in `sampledFlows`.
+An observed but unselected open is also remembered in `rejectedFlows`,
+so its close is not mistaken for an orphan and cannot consume another
+sampling slot. Repeated local/HA sync opens and updates are idempotent
+per protocol instance; same-key replacement exporters inherit these
+decisions. The rejected set is bounded at 8192 keys per exporter:
+inserting a novel key at the cap clears the set before retaining that
+key. A later close for a cleared rejection follows the existing orphan
+close-fallback behavior (#16742). The SESSION_CLOSE callbacks
+(`flowExportCallback` / `ipfixExportCallback`) skip SESSION_OPEN records,
+and do not make another decision for selected or retained-rejected
+opens; selected groups queue `ExportSessionCloseRemainder`.
 
-**Absent-open and unsampled closes export nothing.** A close whose open
-was never sampled, whose SESSION_OPEN was never delivered to this
-exporter object (exporter generation rebuilt at a commit, node freshly
-promoted with no CREATE for pre-existing flows), or whose flow already
-left the tracker (inactive expiry, below) finds no sampled/tracked key:
-`CloseFlow` returns `sampled=false` and the close produces no record.
-That is the deliberate single-decision semantics — re-deciding at close
-would consume a second 1-in-N slot and corrupt the cadence — but it
-means closes spanning an exporter rebuild or a promotion without a
-CREATE are not exported; operators must not expect a close-only record
-for them. (The underlying absent-open/evicted-flow gaps are tracked
-separately as R3-A46-01/02/03; this section documents current
-behaviour, it does not claim they are fixed.)
+**Close handling for retained and missing state.** A close for a key
+retained from a selected or rejected open consumes that decision without
+another sampling slot; selected groups queue `ExportSessionCloseRemainder`,
+while rejected opens export nothing. Same-key replacements inherit live
+decision state, with daemon admission/close processing serialized against
+the carry-and-publish transition. When no state remains — for example, the
+open was never delivered or its rejected marker was evicted at the 8192-key
+cap — the existing #16742 close-time fallback makes one sampling decision
+and exports only if selected. Exporter retirement without a same-key
+replacement likewise leaves the new exporter to treat a close as an orphan.
 
 **Tracker active/inactive semantics (#15655, `tracker_15655.go`).**
 `NewFlowTracker(FlowActiveTimeout, FlowInactiveTimeout)` returns nil
