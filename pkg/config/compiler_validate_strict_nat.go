@@ -1924,22 +1924,22 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
 // allocation-failure counters. This is the SNAT twin of the #13922
 // DNAT/static cross-family strict reject.
 //
-// #17408 SCOPING (narrowed again by #17847). As first merged, this
-// gate also rejected the pre-existing valid grammar shapes asserted
-// by #5627/#5875: v6-only (or unscoped-v6) pools referenced by
-// rules whose source match is the DUAL-family scaffold
+// #17408 SCOPING (narrowed again by #17847 and #17941). As first
+// merged, this gate also rejected the pre-existing valid grammar
+// shapes asserted by #5627/#5875: v6-only (or unscoped-v6) pools
+// referenced by rules whose source match is the DUAL-family scaffold
 // `[ 10.0.0.0/24 2001:db8:9::/64 ]` — the scaffold is not a
 // single-family match at all, and those shapes stay compiling.
 // The #17411 scoping additionally exempted an authored /0 literal
 // (a deliberate dual-stack migration shape, it argued); #17847
-// removed that exemption: `0.0.0.0/0` matches only IPv4 sources,
-// so against a v6-only pool it is exactly the proven single-family
-// mismatch this gate exists to reject. Authored literals — proper
-// subsets AND whole-family wildcards — count as narrow. The one
-// remaining narrow-only arm is named address-book closures: a name
-// resolving solely to a family wildcard is the scaffold shape, so
-// only a proper-subset member makes a name narrow (see
-// addressBookNameFamily16600).
+// removed that exemption because `0.0.0.0/0` matches only IPv4
+// sources, so against a v6-only pool it is exactly the proven
+// single-family mismatch this gate exists to reject. #17941 extends
+// the same ruling to names: a closure whose every value is a
+// family wildcard is still single-family, just like the equivalent
+// literal, so it is narrow. The scaffold rationale applies only to
+// a genuinely dual-family closure such as a `[v4 v6]` pair; it stays
+// dual and admitted.
 //
 // Single-family determination considers BOTH authored source axes:
 // literal `match source-address` values and `match source-address-name`
@@ -2038,14 +2038,15 @@ func validateSourceNATPoolFamilyStrict(cfg *Config) error {
 // sourceNATRuleSingleFamily16600 reports whether a source-NAT rule's
 // authored source match is proven single-family, and which family
 // ("v4" or "v6"). See validateSourceNATPoolFamilyStrict for the
-// provenance rules, including the #17408/#17847 scoping: the
+// provenance rules, including the #17408/#17847/#17941 scoping: the
 // verdict is single-family when the proven single-family source set
-// is non-empty under the narrowness rules in the #17408/#17847
-// scoping above (literals always narrow; names only via a
-// proper-subset member). A direct feed binding or
-// an undecidable name closure makes the whole rule undecidable (not
-// single-family), because such a rule may match either family at
-// runtime.
+// is non-empty under the narrowness rules described there. Literal
+// values and every decidable single-family name-closure value are
+// narrow, including family-wildcard values; the #17408 exemption
+// applies to absent or genuinely dual-family matches, not to the
+// name syntax. A direct feed binding or an undecidable name closure
+// makes the whole rule undecidable (not single-family), because
+// such a rule may match either family at runtime.
 func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 	family := ""
 	narrow := false
@@ -2122,27 +2123,11 @@ func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 	return family, true
 }
 
-// natPrefixIsFamilyWildcard reports whether raw is a prefix covering
-// its entire family: an explicit /0, or a bare address that is the
-// family wildcard (0.0.0.0 or ::). A bare host is narrow. Unparseable
-// values are not wildcards (no family is proven either way).
-func natPrefixIsFamilyWildcard(raw string) bool {
-	ipPart := natCIDRIPPart(raw)
-	if slash := strings.IndexByte(raw, '/'); slash >= 0 {
-		// Normalize tolerated spellings (/+0, /000) before comparing.
-		mask := strings.TrimLeft(strings.TrimPrefix(raw[slash+1:], "+"), "0")
-		return mask == ""
-	}
-	ip := net.ParseIP(ipPart)
-	if ip == nil {
-		return false
-	}
-	return ip.IsUnspecified()
-}
-
 // addressBookNameFamily16600 resolves one address-book name's static
-// closure to a single family, reporting also whether at least one
-// closure value is narrow (not its family's /0 wildcard, #17408).
+// closure to a single family, reporting also whether its decidable
+// values are narrow. Every decidable single-family value counts as
+// narrow, including its family's /0 or bare unspecified-address
+// wildcard (#17941 supersedes the name-closure exemption in #17408).
 // decidable is false when the closure is empty, mixed-family,
 // tainted, dangling, or otherwise not statically resolvable
 // (dns-name without a snapshot, wildcard members) — the same
@@ -2196,15 +2181,8 @@ func addressBookNameFamily16600(ab *AddressBook, name string) (family string, na
 		} else if family != f {
 			return "", false, false
 		}
-		if !natPrefixIsFamilyWildcard(v) {
-			narrow = true
-		}
+		narrow = true
 	}
-	// A named closure's narrowness follows the same #17408 scoping as
-	// literals before #17847: only a proper-subset member makes the
-	// name narrow. The #17847 fix deliberately covers authored
-	// literal matches and wildcard keywords, not name closures (a
-	// name resolving to a family wildcard is the #17408 scaffold).
 	return family, narrow, true
 }
 
