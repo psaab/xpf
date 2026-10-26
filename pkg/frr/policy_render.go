@@ -242,6 +242,11 @@ func communityFactorForMember(member string) (communityFactor16788, error) {
 func communitySequencePattern16788(seq []communityFactor16788) string {
 	var b strings.Builder
 	b.WriteString("(^|[ ])")
+	// #17853: an unanchored first factor may also match mid-token,
+	// exactly as later factors do after their separator handling.
+	if len(seq) > 0 && !seq[0].anchoredStart {
+		b.WriteString("[^ ]*")
+	}
 	for i, f := range seq {
 		if i > 0 {
 			prev := seq[i-1]
