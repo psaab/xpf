@@ -1,6 +1,6 @@
 package ddnsplaintextvectors
 
-// ddns_plaintext_vectors.go: the single shared test-vector table for the
+// vectors.go: the single shared test-vector table for the
 // DDNS plaintext-credential detector (#17005, R4-Q40-03).
 //
 // Previously pkg/config (ddns_plaintext_15225_test.go, 6 probes) and
