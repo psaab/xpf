@@ -51,7 +51,8 @@ func TestProbeFailingCommitsBoundedByFailureBackoff16774(t *testing.T) {
 		return nil, errors.New("simulated persistent commit failure")
 	})
 	defer e.Close()
-	e.nowFn = func() time.Time { return base }
+	var advanceSecs atomic.Int64
+	e.nowFn = func() time.Time { return base.Add(time.Duration(advanceSecs.Load()) * time.Second) }
 
 	const policyCount = 16
 	pols := make([]*config.EventPolicy, 0, policyCount)
@@ -97,7 +98,7 @@ func TestProbeFailingCommitsBoundedByFailureBackoff16774(t *testing.T) {
 
 	// After the backoff expires the parked edges replay: exactly one more
 	// attempt per policy (which fails again and re-arms the backoff).
-	e.nowFn = func() time.Time { return base.Add(failureBackoff + time.Second) }
+	advanceSecs.Store(int64(failureBackoff/time.Second) + 1)
 	e.drainDeferred()
 	waitFor(t, "backoff-expired replay attempts", func() bool {
 		return calls.Load() >= 2*policyCount
@@ -217,7 +218,8 @@ func TestReadOnlyRefundArmsNoFailureBackoff16774(t *testing.T) {
 func TestFailureBackoffClearsOnRecovery16774(t *testing.T) {
 	s := newStore(t)
 	base := time.Unix(1_800_000_000, 0)
-	cur := base
+	var cur atomic.Int64
+	cur.Store(base.Unix())
 	var fail atomic.Bool
 	fail.Store(true)
 	var calls atomic.Int32
@@ -229,7 +231,7 @@ func TestFailureBackoffClearsOnRecovery16774(t *testing.T) {
 		return s.CommitWithDescriptionAs("system:event-engine", desc)
 	})
 	defer e.Close()
-	e.nowFn = func() time.Time { return cur }
+	e.nowFn = func() time.Time { return time.Unix(cur.Load(), 0) }
 	pol := &config.EventPolicy{Name: "remediate", Events: []string{"ping_test_failed"}, ThenCommands: []string{"set system host-name remediated"}}
 	applyPolicies9984(e, []*config.EventPolicy{pol})
 
@@ -240,13 +242,13 @@ func TestFailureBackoffClearsOnRecovery16774(t *testing.T) {
 	}
 	// A fresh edge inside the backoff parks for replay; after expiry the
 	// drain replays it and the recovered commit clears the anchor.
-	cur = base.Add(5 * time.Second)
+	cur.Store(base.Add(5 * time.Second).Unix())
 	e.HandleEvent(eventFor("ping_test_failed"))
 	if got := e.Stats().PendingDeferred; got != 1 {
 		t.Fatalf("PendingDeferred=%d, want 1 (backed-off edge parked)", got)
 	}
 	fail.Store(false)
-	cur = base.Add(failureBackoff + time.Second)
+	cur.Store(base.Add(failureBackoff + time.Second).Unix())
 	e.drainDeferred()
 	waitFor(t, "recovery commit", func() bool { return e.Stats().Committed >= 1 })
 	if !failedTrigger16774(e, "remediate").IsZero() {

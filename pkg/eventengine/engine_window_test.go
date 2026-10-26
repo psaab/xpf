@@ -1,6 +1,7 @@
 package eventengine
 
 import (
+	"sync/atomic"
 	"sort"
 	"testing"
 	"time"
@@ -56,12 +57,13 @@ func TestWindow_NoWithinClauseBounded_2216A(t *testing.T) {
 
 	// Deterministic clock: each event is 1 simulated second after the last.
 	base := time.Unix(1_700_000_000, 0)
-	var tick int64
-	e.nowFn = func() time.Time { return base.Add(time.Duration(tick) * time.Second) }
+	var tick atomic.Int64
+	e.nowFn = func() time.Time { return base.Add(time.Duration(tick.Load()) * time.Second) }
 	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	const events = 1000
-	for tick = 0; tick < events; tick++ {
+	for i := int64(0); i < events; i++ {
+		tick.Store(i)
 		e.HandleEvent(rpm.Event{Name: "ping_probe_failed", TestOwner: "o", TestName: "t"})
 	}
 
@@ -103,13 +105,14 @@ func TestWindow_BelowTriggerThresholdBounded_2216A(t *testing.T) {
 	defer e.Close()
 
 	base := time.Unix(1_700_000_000, 0)
-	var tick int64
-	e.nowFn = func() time.Time { return base.Add(time.Duration(tick) * time.Second) }
+	var tick atomic.Int64
+	e.nowFn = func() time.Time { return base.Add(time.Duration(tick.Load()) * time.Second) }
 	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	const events = 1000
 	triggered := 0
-	for tick = 0; tick < events; tick++ {
+	for i := int64(0); i < events; i++ {
+		tick.Store(i)
 		got := e.evaluateEvent(rpm.Event{Name: "ping_probe_failed", TestOwner: "o", TestName: "t"})
 		triggered += len(got)
 	}
