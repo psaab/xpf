@@ -13,12 +13,12 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-// TestV6ExchangeUsesSolicitedRouterAdvertisements10703 is a RED-on-revert
+// TestV6ExchangeUsesSolicitedRouterAdvertisements10763 is a RED-on-revert
 // guard: after a successful DHCPv6 reply, v6Exchange must solicit and choose
 // an advertised default router by RFC 4191 preference, ignoring
 // router-lifetime-0 advertisers. The direct parse helper alone does not run
 // this RA-discovery orchestration.
-func TestV6ExchangeUsesSolicitedRouterAdvertisements10703(t *testing.T) {
+func TestV6ExchangeUsesSolicitedRouterAdvertisements10763(t *testing.T) {
 	called := false
 	m := &Manager{
 		routerAdvertisementsForTest: func(_ context.Context, iface string) []observedRouter {
@@ -54,7 +54,7 @@ func TestV6ExchangeUsesSolicitedRouterAdvertisements10703(t *testing.T) {
 	}
 }
 
-func TestV6ExchangeDoesNotUseLifetimeZeroRouter10703(t *testing.T) {
+func TestV6ExchangeDoesNotUseLifetimeZeroRouter10763(t *testing.T) {
 	m := &Manager{
 		routerAdvertisementsForTest: func(context.Context, string) []observedRouter {
 			return []observedRouter{{addr: netip.MustParseAddr("fe80::1"), lifetime: 0, pref: raPrefHigh}}

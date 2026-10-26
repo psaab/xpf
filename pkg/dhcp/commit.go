@@ -38,57 +38,25 @@ import (
 // v4RenewDest, buildV6RenewMessage in renew.go) are pure and
 // unit-tested directly — see renew_test.go.
 
-// renewalTimers computes the two waits of one renewal cycle from a lease
-// duration with no server-supplied T1/T2, following the RFC 2131
-// §4.4.5 / RFC 8415 §18.2.4 default schedule: t1 is the wait until the
-// renew (RENEWING) attempt at 50% of the lease, and t2Remaining is the
-// ADDITIONAL wait from T1 to the rebind (REBINDING) attempt at 87.5%
-// of the lease (87.5% − 50% = 37.5% of the lease). ok reports whether
-// the lease is a usable finite lease; a non-positive leaseTime is
-// invalid and the caller must fail closed into re-acquisition rather
-// than schedule a renewal (see below). Callers holding server T1/T2
-// (#16553) use renewalSchedule directly.
-//
-// No fixed minimum is applied. A fixed 30s T1 / 1s T2 floor previously
-// clamped both waits (#5795): for any finite lease shorter than 60s that
-// pushed T1 past the RFC half-life, and for a lease shorter than 30s it
-// scheduled the renew attempt AT OR AFTER lease expiry — the run loop
-// kept using the address while it waited, so a short-lease WAN could
-// forward on an already-expired binding and then churn into
-// re-acquisition instead of renewing on time. The RFC ratios are
-// themselves proportional to the lease, so they are their own floor: for
-// the smallest lease the wire can express (1 second — DHCP/DHCPv6 lease
-// times are whole seconds) t1 is 500ms and t2Remaining is 375ms, both
-// strictly before expiry, and T1 (50%) < T2 (87.5%) < 100% holds for
-// every positive lease. A non-positive lease is rejected via ok=false
-// instead of being clamped to a manufactured 30s schedule.
-//
-// The remainder is computed as leaseTime/8*3 (divide-before-multiply)
-// rather than the algebraically equal leaseTime*7/8 - leaseTime/2: the
-// latter overflows int64 for a lease above ~41.8yr (MaxInt64/7 ns) —
-// notably the 0xFFFFFFFF-second RFC infinite sentinel — wrapping negative
-// and clamping T2 low (#4526). The divide-first form has no intermediate
-// above the lease itself, so the infinite sentinel yields a sane 3/8
-// remainder. For every whole-second lease the two forms are bit-identical
-// (1e9 ns is divisible by 8, so no rounding divergence). The split is
-// extracted here so both v4/v6 run loops share one definition and tests
-// can pin the schedule.
-
 // renewalSchedule computes the T1 wait and the additional T1→T2 wait
 // for one renewal cycle, honoring server-supplied T1/T2 (#16553).
 //
 // The fallback base is the shortest valid lifetime among the lease
-// (LeaseTime) and every held delegated prefix: a tier the server left
-// at zero uses the RFC default ratio of that shortest lifetime
-// (T1 0.5, T2 0.875). Server timers are the earliest non-zero value
-// across the lease's own RenewAt/RebindAt and every held prefix's
-// RenewAt/RebindAt (RFC 8415 §18.2.4: Renew/Rebind not later than the
-// T1/T2 of ANY binding). Both tiers are then clamped so
-// 0 < T1 < T2 < shortest whenever the shortest lifetime is finite:
-// a server T1/T2 at/after expiry or a T2 <= T1 must never schedule a
-// renewal at/after the binding it renews, nor collapse the tiers.
-// The infinite sentinel is exempt from the before-expiry clamp (no
-// finite expiry exists), but T1 < T2 and T1 > 0 still hold.
+// (LeaseTime) and every held delegated prefix. With no server-supplied
+// timers, the RFC default is T1 at 50% and T2 at 87.5% of that base; no
+// fixed minimum is applied (#5795). The additional T1→T2 wait for that
+// fallback is computed as base/8*3 (divide-before-multiply), avoiding the
+// overflow in base*7/8 - base/2 for long leases, including the RFC
+// infinite sentinel (#4526).
+//
+// Server timers are the earliest non-zero value across the lease's own
+// RenewAt/RebindAt and every held prefix's RenewAt/RebindAt (RFC 8415
+// §18.2.4: Renew/Rebind not later than the T1/T2 of ANY binding). Both
+// tiers are clamped so 0 < T1 < T2 < shortest whenever the shortest
+// lifetime is finite: a server T1/T2 at/after expiry or a T2 <= T1 must
+// never schedule a renewal at/after the binding it renews, nor collapse
+// the tiers. The infinite sentinel is exempt from the before-expiry
+// clamp (no finite expiry exists), but T1 < T2 and T1 > 0 still hold.
 //
 // ok=false only when leaseTime <= 0 (unchanged #5795 fail-closed
 // contract). A positive leaseTime with degenerate server T1/T2 still
@@ -160,7 +128,7 @@ func remainingTimer(deadline, now time.Time) time.Duration {
 }
 
 // reacquireBackstop paces DHCP re-acquisition after a server grants a
-// lease with a non-positive lifetime (see renewalTimers). Such a lease is
+// lease with a non-positive lifetime (see renewalSchedule). Such a lease is
 // unusable, so the run loop abandons the renewal cycle and re-acquires
 // rather than scheduling a renewal past an already-lapsed lease. The wait
 // keeps a misbehaving server that repeatedly grants a 0-second lease from

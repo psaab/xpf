@@ -9,7 +9,7 @@ package dhcp
 // lifetime (or the 3600s floor). commitLease then stores that address-less
 // lease WITHOUT removing the previously installed kernel WAN address
 // (its remove-old only fires when the new lease HAS an address), and the
-// renewalTimers are recomputed from the bogus lease. The WAN kernel address
+// renewal schedule is recomputed from the bogus lease. The WAN kernel address
 // is orphaned while the lease record still (implicitly) holds it.
 //
 // Leg 2 (timer reset): a legitimately co-held lease sitting in the T1 wait

@@ -12,16 +12,16 @@ import (
 )
 
 // #16553: the client never read server T1/T2 (IA_NA / IA_PD T1/T2,
-// DHCPv4 options 58/59). renewalTimers was always 50%/87.5% of the
+// DHCPv4 options 58/59). The prior default schedule was always 50%/87.5% of the
 // single IA_NA LeaseTime, so a PD whose valid lifetime ended before
 // that T1 was pruned and withdrawn from LAN RA, only re-requested at
 // the IA_NA T1, every cycle. RFC 8415 §18.2.4 requires Renew/Rebind
 // not later than the earliest T1/T2 of ANY held binding; RFC 2131
 // §4.4.5 makes 0.5/0.875 only defaults when options 58/59 are absent.
 //
-// RED-on-revert: drop the RenewAt/RebindAt plumbing (lease/PD fields
-// stay zero, run loops call renewalTimers) and every server-timer
-// row below fails — the schedule collapses to 50%/87.5% of LeaseTime.
+// RED-on-revert: drop the RenewAt/RebindAt plumbing (lease/PD fields stay zero)
+// and every server-timer row fails because the schedule collapses to 50%/87.5%
+// of LeaseTime.
 
 func TestRenewalScheduleServerT1T2_16553(t *testing.T) {
 	hour := time.Hour

@@ -122,8 +122,8 @@ the debounced `onAddressChange` callback when content changed.
   of the **shortest held valid lifetime** (T1 50%, T2 87.5%;
   `t2Remaining` is the additional T1→T2 wait), so a delegated prefix
   can never be scheduled to expire before its Renew fires. Before
-  #16553 the client never read any server T1/T2: `renewalTimers` was
-  always 50%/87.5% of the single IA_NA `LeaseTime`, so a PD with
+  #16553 the client never read any server T1/T2: `renewalSchedule` used the
+  single IA_NA `LeaseTime` at 50%/87.5%, so a PD with
   valid < IA_NA T1 was pruned/withdrawn from LAN RA and only
   re-requested at the IA_NA T1, every cycle. Server timers are
   clamped so `0 < T1 < T2 < shortest-valid` for finite lifetimes (a
@@ -320,7 +320,7 @@ the debounced `onAddressChange` callback when content changed.
   (`(prior \ withdrawn) ∪ live`, never a blunt clear-all) so it is neither
   stored nor re-advertised, and fires the recompile so the RA sender drops it
   (#4874 B). See the zero-lifetime IA_PD note under Gotchas.
-- The decision logic is concentrated in `commitLease` / `renewalTimers`
+- The decision logic is concentrated in `commitLease` / `renewalSchedule`
   / `leaseContentChanged` / `delegatedPrefixesChanged` and pinned by
   `commit_test.go`. The run-loop state machine itself (the
   acquire→renew→rebind→re-acquire transitions and lease preservation)
