@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -273,6 +274,22 @@ func TestRemoveAllExporterGroupsJoinsEveryWorker17801(t *testing.T) {
 	}
 }
 
+func assertGroupStillRunning17801(t *testing.T, family string, wg *sync.WaitGroup) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-done:
+		t.Fatalf("%s retained worker exited before remove-all", family)
+	case <-timer.C:
+	}
+}
+
 func TestRemoveAllExporterGroupsJoinsRetainedFailedSiblings17801(t *testing.T) {
 	d := newFlowTestDaemon()
 	t.Cleanup(d.stopFlowExporter)
@@ -289,14 +306,18 @@ func TestRemoveAllExporterGroupsJoinsRetainedFailedSiblings17801(t *testing.T) {
 	}
 	var retainedV9 *flowexport.Exporter
 	var retainedIPFIX *flowexport.IPFIXExporter
+	var retainedV9Group v9Group
+	var retainedIPFIXGroup ipfixGroup
 	for _, g := range initialV9.groups {
 		if g.ec.InstanceName == "b" {
 			retainedV9 = g.exp
+			retainedV9Group = g
 		}
 	}
 	for _, g := range initialIPFIX.groups {
 		if g.ec.InstanceName == "b" {
 			retainedIPFIX = g.exp
+			retainedIPFIXGroup = g
 		}
 	}
 	if retainedV9 == nil || retainedIPFIX == nil {
@@ -324,6 +345,8 @@ func TestRemoveAllExporterGroupsJoinsRetainedFailedSiblings17801(t *testing.T) {
 	if !foundV9 || !foundIPFIX {
 		t.Fatal("failed b siblings must remain published until remove-all")
 	}
+	assertGroupStillRunning17801(t, "v9", retainedV9Group.wg)
+	assertGroupStillRunning17801(t, "IPFIX", retainedIPFIXGroup.wg)
 
 	v9Groups := append([]v9Group(nil), v9Bundle.groups...)
 	ipfixGroups := append([]ipfixGroup(nil), ipfixBundle.groups...)
