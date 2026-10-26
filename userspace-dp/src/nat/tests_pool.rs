@@ -2559,7 +2559,7 @@ fn persistent_inbound_hold_with_snat_keeps_lease_past_expiry_16619() {
 /// held and the binding expired under the live synced session.
 #[test]
 fn synced_inbound_hold_with_snat_16619() {
-    let rules = persistent_pool_rules(300, 40000, 40010);
+    let rules = persistent_pool_rules(300, 40001, 40010);
     let alloc = &rules[0].pool_allocator;
     // Mint X's lease outbound, then release so it is idle.
     let first = expect_snat_decision(tuple_snat_lookup(
@@ -2595,13 +2595,15 @@ fn synced_inbound_hold_with_snat_16619() {
 
     // Synced INBOUND session: key is (remote -> public tuple), decision
     // carries rewrite_dst=X AND rewrite_src (SNAT of the remote).
+    // Pool PAT selects any free port in the configured range. Keeping 40000
+    // outside it makes a stale hard-coded inbound tuple fail deterministically.
     let inbound_key = crate::session::SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: 6,
         src_ip: "8.8.8.8".parse().unwrap(),
         dst_ip: "203.0.113.10".parse().unwrap(),
         src_port: 53,
-        dst_port: 40000,
+        dst_port: first.rewrite_src_port.expect("minted SNAT public port"),
         discriminator: Default::default(),
         routing_domain: 0,
     };
