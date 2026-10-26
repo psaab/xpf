@@ -220,7 +220,6 @@ func (r *KernelRunner) Arm(candidateVersion string) error {
 	}
 	j.CandidatePackageVersion = candidatePackageVersion
 
-
 	// A FRESH arm of the SAME version a prune-owed record names supersedes
 	// that record (#16811): the re-armed trial re-installs and re-tests the
 	// candidate, so the deferred "un-promoted candidate" debt is void — if
@@ -932,7 +931,6 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 	if err := r.checkKernelFloor(j); err != nil {
 		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("anti-rollback floor: %w", err))
 	}
-
 
 	// Gate 3: verify-dataplane (the #1864 kernel verifier) on the candidate.
 	ok, err := sys.VerifyDataplane()

@@ -13,21 +13,21 @@ import (
 // state machine performs, so the Arm/Promote/revert logic is exercised without
 // a live UEFI host.
 type fakeKernelSystem struct {
-	uefi        bool
-	efibootmgr  bool
-	entries     map[string]string // label -> Boot#### id
-	order       []string          // BootOrder (front = default)
-	submenuOK   bool
-	wdPresent   bool
-	wdPersist   bool
-	freeBytes   map[string]uint64
-	running     string
-	held        bool
-	installRet  string // uname -r returned by InstallCandidateKernel
-	installErr  error
-	candidatePackageVersion string
+	uefi                       bool
+	efibootmgr                 bool
+	entries                    map[string]string // label -> Boot#### id
+	order                      []string          // BootOrder (front = default)
+	submenuOK                  bool
+	wdPresent                  bool
+	wdPersist                  bool
+	freeBytes                  map[string]uint64
+	running                    string
+	held                       bool
+	installRet                 string // uname -r returned by InstallCandidateKernel
+	installErr                 error
+	candidatePackageVersion    string
 	candidatePackageVersionErr error
-	moveDefault bool // if true, InstallCandidateKernel moves the default
+	moveDefault                bool // if true, InstallCandidateKernel moves the default
 
 	selectors map[string]string // slot -> uname -r
 	bootNext  string
@@ -125,7 +125,7 @@ func (f *fakeKernelSystem) CandidateKernelPackageVersion(unameR string) (string,
 func (f *fakeKernelSystem) InstalledKernelPackageVersion(unameR string) (string, error) {
 	return f.CandidateKernelPackageVersion(unameR)
 }
-func (f *fakeKernelSystem) KernelHeld() (bool, error)      { return f.held, nil }
+func (f *fakeKernelSystem) KernelHeld() (bool, error) { return f.held, nil }
 func (f *fakeKernelSystem) InstallCandidateKernel(v string) (string, error) {
 	f.log("install:" + v)
 	if f.installErr != nil {

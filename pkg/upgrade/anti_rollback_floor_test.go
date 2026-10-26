@@ -229,3 +229,28 @@ func TestParseAptCandidatePackageVersion10848(t *testing.T) {
 		}
 	}
 }
+
+// #10848 (B1): the publish-time check refuses a replayed old package
+// before any generation is published.
+func TestCheckBinaryFloorAtRefusesReplay10848(t *testing.T) {
+	dir := t.TempDir()
+	floorPath := filepath.Join(dir, "binary-floor")
+	// Unenrolled: anything publishes (first install cannot be refused).
+	if err := CheckBinaryFloorAt(floorPath, "0.0.100"); err != nil {
+		t.Fatalf("unenrolled floor must allow publish: %v", err)
+	}
+	f := highWaterFloor{Path: floorPath}
+	if err := f.advance("1.2.3"); err != nil {
+		t.Fatalf("enroll floor: %v", err)
+	}
+	if err := CheckBinaryFloorAt(floorPath, "1.2.2"); err == nil ||
+		!strings.Contains(err.Error(), "BELOW") {
+		t.Fatalf("below-floor publish must refuse naming both versions, got: %v", err)
+	}
+	if err := CheckBinaryFloorAt(floorPath, "1.2.3"); err != nil {
+		t.Fatalf("at-floor publish must allow: %v", err)
+	}
+	if err := CheckBinaryFloorAt(floorPath, "9.9.9"); err != nil {
+		t.Fatalf("above-floor publish must allow: %v", err)
+	}
+}

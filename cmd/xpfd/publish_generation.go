@@ -68,6 +68,19 @@ func runPublishGenerationSubcommand(args []string) {
 		os.Exit(1)
 	}
 
+	// #10848 (B1): the postinst runs the JUST-UNPACKED package's xpfd, so
+	// a replayed pre-floor .deb would otherwise publish and cut with no
+	// floor logic at all. The unpack-time dpkg-query IS this binary's
+	// candidate ordinal: check it against the enrolled floor BEFORE
+	// publishing, from the durable floor file (which lives outside the
+	// package payload). Refusal ("this package is below the floor") vs
+	// silent postinst warning distinguishes attacker replay from a
+	// legitimate older repair only via the named rollback path — the
+	// operator clears/reinstalls deliberately in that case.
+	if ferr := upgrade.CheckBinaryFloorAt(upgrade.DefaultBinaryFloorPath, packageVersion); ferr != nil {
+		fmt.Fprintf(os.Stderr, "publish-generation: %v\n", ferr)
+		os.Exit(1)
+	}
 
 	cfg := stagedgen.Config{
 		StagedDir:      flags.stagedDir,

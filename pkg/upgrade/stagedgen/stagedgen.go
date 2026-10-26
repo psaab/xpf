@@ -198,6 +198,7 @@ func (c Config) currentGenPath() string { return filepath.Join(c.Dir, CurrentGen
 //  3. record package identity in the .partial, fsync it, atomic-rename to
 //     staged-gen/<genid>, and fsync Dir;
 //  4. repoint current-gen -> <genid> via temp-symlink + rename + dir-fsync.
+//
 // The caller is responsible for holding the host-wide upgrade lock (the
 // postinst path serializes publish against an operator cut so GC cannot
 // delete a generation a cut is reading). Publish does NOT take the lock

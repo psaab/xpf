@@ -149,6 +149,20 @@ func (f highWaterFloor) advance(version string) error {
 //
 // what names the channel in refusal text ("binary upgrade target",
 // "kernel candidate").
+// CheckBinaryFloorAt checks candidate against the binary-channel
+// floor persisted at floorPath — the publish-time half of the
+// anti-rollback floor for the postinst auto-cut. The publish path
+// below (stagedgen.Publish) stamps the dpkg package version from
+// dpkg-query rather than a package-embedded identity, so the
+// replayed old package cannot supply a spoofed caller version.
+func CheckBinaryFloorAt(floorPath, candidate string) error {
+	f, err := loadHighWaterFloor(floorPath)
+	if err != nil {
+		return fmt.Errorf("read binary anti-rollback floor: %w", err)
+	}
+	return f.checkForward("binary package", candidate, "publish")
+}
+
 func (f highWaterFloor) checkForward(what, candidate, phase string) error {
 	if !f.Enrolled {
 		return nil
