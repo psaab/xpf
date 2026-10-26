@@ -364,6 +364,30 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
 }
 
 #[inline]
+fn session_miss_zone_pair_ids(
+    forwarding: &ForwardingState,
+    ingress_logical_ifindex: i32,
+    ingress_zone_override: Option<u32>,
+    resolution: ForwardingResolution,
+) -> (u32, u32) {
+    let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
+        forwarding,
+        ingress_logical_ifindex,
+        ingress_zone_override,
+        resolution.egress_ifindex,
+    );
+    let to_zone_id = if to_zone_id == 0
+        && resolution.disposition == ForwardingDisposition::ClusterTerminalHAInactive
+        && resolution.source_ifindex > 0
+    {
+        forwarding.egress_zone_id(resolution.source_ifindex)
+    } else {
+        to_zone_id
+    };
+    (from_zone_id, to_zone_id)
+}
+
+#[inline]
 pub(super) fn stage11_raw_protocol_requires_drop(protocol: u8) -> bool {
     protocol == crate::ip_proto::PROTO_ESP || protocol == crate::ip_proto::PROTO_AH
 }
@@ -501,9 +525,9 @@ fn record_ipsec_sa_miss_sample(
 }
 
 use cookie_reply::{
-    SynCookieReply, enqueue_syn_cookie_reply, syn_cookie_final_admission,
-    syn_cookie_final_admission_with_fence, syn_cookie_host_admission,
-    syn_cookie_reply_admitted,
+    SynCookieReply, enqueue_syn_cookie_reply, syn_cookie_challenge_is_session_miss,
+    syn_cookie_final_admission, syn_cookie_final_admission_with_fence,
+    syn_cookie_host_admission,
 };
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
 use prerouting_scope::{
@@ -1482,26 +1506,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         StageOutcome::Continue(ScreenCheckOutcome::SynCookieChallenge(
                             challenge,
                         )) => {
-                            // Final fold: this positive prescreen is not
-                            // final admission, so no SYN-ACK is emitted
-                            // here. Defer a plausible challenge to the
-                            // actual session-miss path below, which
-                            // re-derives translation/PBR/host or transit
-                            // admission before replying. A failed
-                            // prescreen recycles as before; a plausible
-                            // challenge keeps the descriptor live so the
-                            // ordinary miss machinery can also handle
-                            // established/session races correctly.
-                            if syn_cookie_reply_admitted(
-                                worker_ctx.forwarding,
-                                worker_ctx.ha_state,
+                            // The challenge has only an ingress tuple here;
+                            // effective translation, route, and HA state are
+                            // selected on the miss path. Keep only the live-
+                            // session retransmit guard at this early stage;
+                            // final admission below is authoritative.
+                            if syn_cookie_challenge_is_session_miss(
                                 sessions,
                                 flow.as_ref(),
-                                packet_frame,
-                                meta,
-                                ingress_zone_override,
                                 now_ns,
-                                now_secs,
                             ) {
                                 deferred_syn_cookie_challenge = Some(challenge);
                             } else {
@@ -5362,38 +5375,28 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         let ingress_nat_scope_ifindex = ingress_nat_scope_ifindex
                             .or(ambiguous_scope_ifindex)
                             .filter(|_| ingress_zone_override.is_some());
-                        let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
+                        let (mut from_zone_id, mut to_zone_id) = session_miss_zone_pair_ids(
                             worker_ctx.forwarding,
                             ingress_logical,
                             ingress_zone_override,
-                            resolution.egress_ifindex,
+                            resolution,
                         );
-                        // #15742h: cluster-terminal zeroes egress; derive
-                        // the would-be egress zone from source_ifindex so
-                        // policy/seed adjudication sees lan->wan, not lan->0.
-                        let to_zone_id = if to_zone_id == 0
-                            && resolution.disposition
-                                == ForwardingDisposition::ClusterTerminalHAInactive
-                            && resolution.source_ifindex > 0
-                        {
-                            worker_ctx
-                                .forwarding
-                                .egress_zone_id(resolution.source_ifindex)
-                        } else {
-                            to_zone_id
-                        };
+                        // #7770 authorization is on the real routed pair,
+                        // before any HA fabric redirect changes the egress.
+                        let route_from_zone_id = from_zone_id;
+                        let route_to_zone_id = to_zone_id;
                         admission_to_zone = to_zone_id;
                         // Borrow zone names as &str for string-typed downstream
                         // callers (static_nat, match_source_nat_for_flow, debug
                         // log). No clone — the borrow lives only inside this
                         // miss-path block while `worker_ctx.forwarding` is held.
-                        let from_zone: &str = worker_ctx
+                        let mut from_zone: &str = worker_ctx
                             .forwarding
                             .zone_id_to_name
                             .get(&from_zone_id)
                             .map(|s| s.as_str())
                             .unwrap_or("");
-                        let to_zone: &str = worker_ctx
+                        let mut to_zone: &str = worker_ctx
                             .forwarding
                             .zone_id_to_name
                             .get(&to_zone_id)
@@ -5565,6 +5568,36 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ha_startup_grace_until_secs,
                             );
                             decision.resolution = final_resolution;
+                            // The counted policy/NAT path uses the finalized
+                            // resolution's zone pair. Punt-seed authorization
+                            // retains the original routed pair above (#7770).
+                            (from_zone_id, to_zone_id) = session_miss_zone_pair_ids(
+                                worker_ctx.forwarding,
+                                ingress_logical,
+                                ingress_zone_override,
+                                final_resolution,
+                            );
+                            // #12865: accounting follows the routed egress
+                            // zone, not the fabric transport parent's zone.
+                            admission_to_zone = if final_resolution.disposition
+                                == ForwardingDisposition::FabricRedirect
+                            {
+                                route_to_zone_id
+                            } else {
+                                to_zone_id
+                            };
+                            from_zone = worker_ctx
+                                .forwarding
+                                .zone_id_to_name
+                                .get(&from_zone_id)
+                                .map(|s| s.as_str())
+                                .unwrap_or("");
+                            to_zone = worker_ctx
+                                .forwarding
+                                .zone_id_to_name
+                                .get(&to_zone_id)
+                                .map(|s| s.as_str())
+                                .unwrap_or("");
                             if miss_input_policer_gate_covers(final_resolution.disposition) {
                                 let (verdict, policers) = meter_miss_local_input_policers(
                                     worker_ctx.forwarding,
@@ -5778,9 +5811,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         flow,
                                         meta,
                                         ingress_zone_override,
+                                        packet_fabric_ingress,
+                                        fabric_link_ingress,
+                                        ha_startup_grace_until_secs,
                                         decision.resolution,
                                         effective_resolution_target,
                                         policy_dst_port,
+                                        decision.nat.rewrite_dst,
                                         fence_dropped,
                                         now_ns,
                                         now_secs,
@@ -5824,9 +5861,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     flow,
                                     meta,
                                     ingress_zone_override,
+                                    packet_fabric_ingress,
+                                    fabric_link_ingress,
+                                    ha_startup_grace_until_secs,
                                     decision.resolution,
                                     effective_resolution_target,
                                     policy_dst_port,
+                                    decision.nat.rewrite_dst,
                                     now_ns,
                                     now_secs,
                                 )
@@ -8405,11 +8446,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             if owner_rg_id > 0 {
                                 flow_cache_owner_rg_id = owner_rg_id;
                             }
-                            let seed_to_zone_id = if terminal_source > 0 && to_zone_id == 0 {
-                                worker_ctx.forwarding.egress_zone_id(terminal_source)
-                            } else {
-                                to_zone_id
-                            };
+                            let seed_to_zone_id =
+                                if terminal_source > 0 && route_to_zone_id == 0 {
+                                    worker_ctx.forwarding.egress_zone_id(terminal_source)
+                                } else {
+                                    route_to_zone_id
+                                };
                             // New flow to inactive RG: fabric-redirect to the peer
                             // that owns the egress RG.  Use from_zone_arc directly
                             // (always in scope) rather than going through the debug
@@ -8417,7 +8459,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #919/#922: ID-keyed redirect — no name lookup.
                             if let Some(redirect) = resolve_fabric_redirect_for_ingress_identity(
                                 worker_ctx.forwarding,
-                                Some(from_zone_id),
+                                Some(route_from_zone_id),
                                 fabric_nat_scope_ifindex_for_redirect,
                             ) {
                                 // #12865: capture the adjudicated egress zone
@@ -8443,7 +8485,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 let seed_owner_rg = owner_rg_id;
                                 if let Some(seed_metadata) = fabric_punt_seed_metadata(
                                     worker_ctx.forwarding,
-                                    from_zone_id,
+                                    route_from_zone_id,
                                     seed_to_zone_id,
                                     seed_owner_rg,
                                     meta.ingress_ifindex,
@@ -8599,12 +8641,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // the full chain and for why the authorisation has to
                             // live here rather than in the fabric stamp.
                             //
-                            // Adjudicate the flow's REAL zone pair — `from_zone_id`
-                            // / `to_zone_id` were resolved at the top of this miss
-                            // arm from the PRE-redirect resolution, so `to_zone_id`
-                            // is still the flow's true egress zone and not the
-                            // fabric parent's — and, on a permit, record a seed so
-                            // the return is a session HIT.
+                            // Adjudicate the flow's REAL zone pair —
+                            // `route_from_zone_id` / `route_to_zone_id` were
+                            // resolved before the redirect, so the to-zone
+                            // remains the true egress zone, not the fabric parent's.
                             //
                             // THIS SEED HELPER NEVER CHANGES THE CURRENT PACKET'S
                             // DISPOSITION. A deny, an unresolvable zone pair, or
@@ -8636,8 +8676,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
                             if let Some(seed_metadata) = fabric_punt_seed_metadata(
                                 worker_ctx.forwarding,
-                                from_zone_id,
-                                to_zone_id,
+                                route_from_zone_id,
+                                route_to_zone_id,
                                 owner_rg_id,
                                 // The non-fabric gate above makes the frame's own
                                 // ingress identity the TRUE one, so it is read
