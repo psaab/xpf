@@ -168,23 +168,22 @@ func renderDHCPDDNSPolicy(label string, ddns *config.DHCPDynamicDNSConfig) {
 func (c *CLI) showDHCPDynamicDNS(detail bool) error {
 	cfg := c.store.ActiveConfig()
 	var ddns, ddns6 *config.DHCPDynamicDNSConfig
+	var inheritedFrom int
 	if cfg != nil {
-		ddns = cfg.System.DHCPServer.DynamicDNS
-		ddns6 = cfg.System.DHCPServer.DynamicDNSv6
+		ddns, ddns6, inheritedFrom = cfg.System.DHCPServer.EffectiveDynamicDNS()
 	}
 	if ddns == nil && ddns6 == nil {
 		fmt.Println("DHCP dynamic-DNS: not configured")
 		return nil
 	}
-	if ddns != nil && ddns6 != nil {
+	switch inheritedFrom {
+	case 4:
+		renderDHCPDDNSPolicy("IPv4, applies to IPv6 by inheritance", ddns)
+	case 6:
+		renderDHCPDDNSPolicy("IPv6, applies to IPv4 by inheritance", ddns6)
+	default:
 		renderDHCPDDNSPolicy("IPv4", ddns)
 		renderDHCPDDNSPolicy("IPv6", ddns6)
-	} else if ddns != nil {
-		// Single-family inheritance (#2663): the lone policy applies to both
-		// families at reconcile time.
-		renderDHCPDDNSPolicy("IPv4, applies to IPv6 by inheritance", ddns)
-	} else {
-		renderDHCPDDNSPolicy("IPv6, applies to IPv4 by inheritance", ddns6)
 	}
 	if c.ddnsStatsFn == nil {
 		fmt.Println("\n  Runtime counters: unavailable")

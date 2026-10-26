@@ -34,20 +34,18 @@ import (
 func validateDDNSBackendWarnings(cfg *Config) []string {
 	d4 := cfg.System.DHCPServer.DynamicDNS
 	d6 := cfg.System.DHCPServer.DynamicDNSv6
+	_, _, inheritedFrom := cfg.System.DHCPServer.EffectiveDynamicDNS()
 
 	warnings := ddnsBackendWarningsForPolicy(d4, "dhcp dynamic-dns")
 	v6 := ddnsBackendWarningsForPolicy(d6, "dhcpv6 dynamic-dns")
 
-	// The inheritance surprise, stated where it is actionable. pkg/ddns
-	// ReconcileScoped tests the block for NIL, not for enabled, so this
-	// condition mirrors the runtime exactly.
-	if len(warnings) > 0 && d6 == nil {
+	if len(warnings) > 0 && inheritedFrom == 4 {
 		warnings = append(warnings, "dhcp dynamic-dns is the only dynamic-dns "+
 			"block configured, so it also governs DHCPv6 leases (a family with no "+
 			"block of its own inherits the other's); the warnings above apply to "+
 			"both families")
 	}
-	if len(v6) > 0 && d4 == nil {
+	if len(v6) > 0 && inheritedFrom == 6 {
 		v6 = append(v6, "dhcpv6 dynamic-dns is the only dynamic-dns block "+
 			"configured, so it also governs DHCPv4 leases (a family with no block "+
 			"of its own inherits the other's); the warnings above apply to both "+

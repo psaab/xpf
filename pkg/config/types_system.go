@@ -2020,6 +2020,23 @@ type DHCPServerConfig struct {
 	DynamicDNSv6 *DHCPDynamicDNSConfig
 }
 
+// EffectiveDynamicDNS returns the v4 and v6 DHCP DDNS policies after applying
+// the #2663 single-block inheritance rule. When exactly one policy is set, it
+// applies to both families and inheritedFrom is that configured family's IP
+// version (4 or 6); when both or neither are set, inheritedFrom is 0.
+func (c *DHCPServerConfig) EffectiveDynamicDNS() (v4, v6 *DHCPDynamicDNSConfig, inheritedFrom int) {
+	if c == nil {
+		return nil, nil, 0
+	}
+	v4, v6 = c.DynamicDNS, c.DynamicDNSv6
+	if v4 == nil && v6 != nil {
+		v4, inheritedFrom = v6, 6
+	} else if v6 == nil && v4 != nil {
+		v6, inheritedFrom = v4, 4
+	}
+	return v4, v6, inheritedFrom
+}
+
 // DHCPDynamicDNSConfig is the opt-in dynamic-DNS policy for the DHCP
 // server (#1387). When DHCP clients take a lease, the firewall can
 // publish forward (A/AAAA) and reverse (PTR) records into an external

@@ -17,15 +17,7 @@ func (m *Manager) WithdrawForReset(ctx context.Context, cfg *config.DHCPServerCo
 	if m == nil {
 		return nil
 	}
-	var ddns4, ddns6 *config.DHCPDynamicDNSConfig
-	if cfg != nil {
-		ddns4, ddns6 = cfg.DynamicDNS, cfg.DynamicDNSv6
-	}
-	if ddns4 == nil && ddns6 != nil {
-		ddns4 = ddns6
-	} else if ddns6 == nil && ddns4 != nil {
-		ddns6 = ddns4
-	}
+	ddns4, ddns6, _ := cfg.EffectiveDynamicDNS()
 	policies := [2]ddnsPolicy{policyFromConfig(ddns4), policyFromConfig(ddns6)}
 	configs := [2]*config.DHCPDynamicDNSConfig{ddns4, ddns6}
 
