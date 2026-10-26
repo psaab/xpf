@@ -403,6 +403,15 @@ func (f *statefulRuleOps18005) flushPBR() int {
 	f.rules = kept
 	return removed
 }
+func (f *statefulRuleOps18005) removeRuleFamilyPriority(family, priority int) bool {
+	for i, rule := range f.rules {
+		if rule.Family == family && rule.Priority == priority {
+			f.rules = append(f.rules[:i], f.rules[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
 
 func ruleRecoveryConfig18005(withVRF, withPBR bool) string {
 	var text strings.Builder
@@ -505,60 +514,57 @@ func TestPBRPolicyBandRecovery18005(t *testing.T) {
 		if counts := routing.DesiredPolicyRulePriorityCounts(cfg); len(counts) == 0 {
 			t.Fatal("fixture must produce desired PBR policy rules")
 		}
+		wantRules := append([]netlink.Rule(nil), rules.rules...)
 		if rules.flushPBR() == 0 {
 			t.Fatal("fixture had no PBR rules to flush")
 		}
 		if owed, _, _ := d.RoutingReconcileDebt(); owed {
 			t.Fatal("precondition: no routing debt before the post-flush tick")
 		}
-		policyCalls := 0
-		installRoutingRecoverySeams18005(t, rules, &policyCalls)
+		installRoutingRecoverySeams18005(t, rules, nil)
 
 		d.reassertRoutingReconcileOnce(context.Background())
 
-		if policyCalls != 1 {
-			t.Fatalf("policy recovery calls = %d, want 1", policyCalls)
-		}
-		if len(routing.DesiredPolicyRulePriorityCounts(cfg)) == 0 {
-			t.Fatal("fixture lost its desired rule inventory")
-		}
+		assertRuleSetEqual18005(t, rules.rules, wantRules)
 		if rules.termAdds != 0 || hasRulePriority18005(rules, vrfMissTerminatorPriority16804) {
 			t.Fatal("PBR-only recovery must not install the global pref-2000 canary")
 		}
-		assertDesiredRulePriorities18005(t, rules, routing.DesiredPolicyRulePriorityCounts(cfg))
 		if owed, _, last := d.RoutingReconcileDebt(); owed {
 			t.Fatalf("successful no-debt recovery latched debt: %q", last)
 		}
 		addsBefore, delsBefore := rules.addCalls, rules.delCalls
 		d.reassertRoutingReconcileOnce(context.Background())
-		if policyCalls != 1 {
-			t.Fatalf("idempotent recovery calls = %d, want 1", policyCalls)
-		}
 		if rules.addCalls != addsBefore || rules.delCalls != delsBefore {
 			t.Fatalf("idempotent recovery rewrote healthy bands: adds %d→%d, deletes %d→%d",
 				addsBefore, rules.addCalls, delsBefore, rules.delCalls)
 		}
 	})
 
-	t.Run("missing PBR is detected with the canary still present", func(t *testing.T) {
-		d, rules, cfg := policyRecoveryDaemon18005(t, true, true)
-		if !hasRulePriority18005(rules, vrfMissTerminatorPriority16804) {
-			t.Fatal("fixture must start with the owned VRF canary")
+	t.Run("one PBR rule is recovered with both canaries retained", func(t *testing.T) {
+		d, rules, _ := policyRecoveryDaemon18005(t, true, true)
+		wantRules := append([]netlink.Rule(nil), rules.rules...)
+		if !hasRuleFamilyPriority18005(rules, unix.AF_INET, vrfMissTerminatorPriority16804) ||
+			!hasRuleFamilyPriority18005(rules, unix.AF_INET6, vrfMissTerminatorPriority16804) {
+			t.Fatal("fixture must start with both family canaries")
 		}
-		if rules.flushPBR() == 0 {
-			t.Fatal("fixture had no PBR rules to flush")
+		if !rules.removeRuleFamilyPriority(unix.AF_INET, config.PBRRulePriorityBase) {
+			t.Fatal("fixture lacks the first IPv4 PBR lookup rule")
 		}
-		policyCalls := 0
-		installRoutingRecoverySeams18005(t, rules, &policyCalls)
+		if !hasRuleFamilyPriority18005(rules, unix.AF_INET, vrfMissTerminatorPriority16804) ||
+			!hasRuleFamilyPriority18005(rules, unix.AF_INET6, vrfMissTerminatorPriority16804) {
+			t.Fatal("selective policy deletion must retain both family canaries")
+		}
+		installRoutingRecoverySeams18005(t, rules, nil)
 
 		d.reassertRoutingReconcileOnce(context.Background())
 
-		if policyCalls != 1 {
-			t.Fatalf("selective-band recovery calls = %d, want 1", policyCalls)
+		assertRuleSetEqual18005(t, rules.rules, wantRules)
+		if !hasRuleFamilyPriority18005(rules, unix.AF_INET, vrfMissTerminatorPriority16804) ||
+			!hasRuleFamilyPriority18005(rules, unix.AF_INET6, vrfMissTerminatorPriority16804) {
+			t.Fatal("policy recovery must preserve both family canaries")
 		}
-		assertDesiredRulePriorities18005(t, rules, routing.DesiredPolicyRulePriorityCounts(cfg))
-		if !hasRulePriority18005(rules, vrfMissTerminatorPriority16804) {
-			t.Fatal("policy recovery must preserve the existing VRF canary")
+		if owed, _, last := d.RoutingReconcileDebt(); owed {
+			t.Fatalf("successful selective recovery latched debt: %q", last)
 		}
 	})
 
@@ -607,6 +613,37 @@ func hasRulePriority18005(rules *statefulRuleOps18005, priority int) bool {
 		}
 	}
 	return false
+}
+
+func hasRuleFamilyPriority18005(rules *statefulRuleOps18005, family, priority int) bool {
+	for _, rule := range rules.rules {
+		if rule.Family == family && rule.Priority == priority {
+			return true
+		}
+	}
+	return false
+}
+
+func assertRuleSetEqual18005(t *testing.T, actual, want []netlink.Rule) {
+	t.Helper()
+	if len(actual) != len(want) {
+		t.Fatalf("recovered rule set has %d entries, want snapshot with %d: got=%+v want=%+v",
+			len(actual), len(want), actual, want)
+	}
+	matched := make([]bool, len(want))
+	for _, got := range actual {
+		found := false
+		for i, expected := range want {
+			if !matched[i] && reflect.DeepEqual(got, expected) {
+				matched[i] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("unexpected recovered rule %+v; initial rule snapshot was %+v", got, want)
+		}
+	}
 }
 
 func assertDesiredRulePriorities18005(t *testing.T, rules *statefulRuleOps18005, desired []routing.PolicyRulePriorityCount) {
