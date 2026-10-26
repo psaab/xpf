@@ -1215,6 +1215,10 @@ pub(crate) struct InjectPacketRequest {
 pub(crate) struct SessionSyncRequest {
     #[serde(default)]
     pub operation: String,
+    /// Low-rate primary-side liveness refresh for this synced session.
+    #[serde(rename = "primary_liveness", default, skip_serializing_if = "is_false")]
+    pub primary_liveness: bool,
+
     /// #10512: helper process epoch and idempotency identity. Additive for
     /// rolling upgrades; tuple verbs reject an epoch older than the process.
     #[serde(rename = "helper_epoch", default)]

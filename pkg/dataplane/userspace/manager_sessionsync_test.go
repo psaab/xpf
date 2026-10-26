@@ -980,3 +980,17 @@ func TestSessionSocketPathEmpty(t *testing.T) {
 		t.Fatalf("sessionSocketPath() = %q, want empty", got)
 	}
 }
+
+func TestBuildSessionSyncRequestCarriesPrimaryLiveness16880(t *testing.T) {
+	m := &Manager{}
+	v4 := m.buildSessionSyncRequestV4("upsert", dataplane.SessionKey{Protocol: 6},
+		&dataplane.SessionValue{PrimaryLiveness: true})
+	if !v4.PrimaryLiveness {
+		t.Fatal("v4 session-sync request dropped the primary-liveness marker")
+	}
+	v6 := m.buildSessionSyncRequestV6("upsert", dataplane.SessionKeyV6{Protocol: 6},
+		&dataplane.SessionValueV6{PrimaryLiveness: true})
+	if !v6.PrimaryLiveness {
+		t.Fatal("v6 session-sync request dropped the primary-liveness marker")
+	}
+}

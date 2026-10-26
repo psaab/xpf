@@ -1345,7 +1345,27 @@ type SessionSync struct {
 	// means "never recorded", which is why the first observation only records.
 	peerEpochAtIncarnation uint64
 	lastSweepTime          uint64
-	syncBackfillNeeded     atomic.Bool
+	// lastPrimaryLivenessSweepTime bounds full mirror walks used to find
+	// previously-created sessions that are still active on their owner.
+	lastPrimaryLivenessSweepTime uint64
+	// primaryLivenessScanIntervalSeconds adapts full mirror walks to half the
+	// shortest live owner-session timeout, bounded to [1s, 10s].
+	primaryLivenessScanIntervalSeconds atomic.Uint64
+	// primaryLivenessScanIntervalMu serializes queued-row cadence tightening
+	// with the scanner's post-enumeration cadence publication.
+	primaryLivenessScanIntervalMu             sync.Mutex
+	receiverSessionTimeouts                   atomic.Pointer[ReceiverSessionTimeoutProfile]
+	pendingPrimaryLivenessScanIntervalSeconds uint64
+	// pendingPrimaryLivenessScanGeneration counts registrations under this
+	// mutex so a publication cannot consume a request made after enumeration.
+	pendingPrimaryLivenessScanGeneration uint64
+	// sweepWakeCh interrupts a long idle sweep timer when peer capability
+	// discovery or a newly queued shorter-timeout row tightens liveness cadence.
+	sweepWakeCh chan struct{}
+	// sweepWakeScanIntervalSeconds coalesces the shortest queued-row scan
+	// request until the timer fires.
+	sweepWakeScanIntervalSeconds atomic.Uint64
+	syncBackfillNeeded           atomic.Bool
 	// rebootAwaiting names the half of the CURRENT incarnation's reboot
 	// evidence that has not arrived yet; it is live only while
 	// rebootAwaitingInc equals peerIncarnation (#9636). Guarded by mu.
@@ -1486,9 +1506,10 @@ type SessionSync struct {
 	// syncMsgPeerCapabilities because the first flags byte is full. Bit 0
 	// (capFlag2ConfigApplyAck) means the peer sends syncMsgConfigApplyAck;
 	// bit 1 (capFlag2PersistentNatLeaseProvenance) means it decodes lease
-	// provenance frames (types 50/51). Cleared on full disconnect and on
-	// incarnation advance alongside peerCapabilityFlags, for the identical
-	// incarnation-scoping reason.
+	// provenance frames (types 50/51); bit 2 (capFlag2PrimaryLiveness) means it
+	// accepts the primary-liveness marker on session frames. Cleared on full
+	// disconnect and on incarnation advance alongside peerCapabilityFlags, for
+	// the identical incarnation-scoping reason.
 	peerCapabilityFlags2 atomic.Uint32
 
 	// fenceSeq numbers sequenced peer fences (#7147). Starts at 0 and is only
@@ -2163,6 +2184,7 @@ func NewSessionSync(localAddr, peerAddr string, rt clusterRuntime) *SessionSync 
 		localAddr:                  localAddr,
 		peerAddr:                   peerAddr,
 		sendCh:                     make(chan []byte, 4096),
+		sweepWakeCh:                make(chan struct{}, 1),
 		deleteJournalCap:           deleteJournalDefaultCap,
 		failoverWaiters:            make(map[int]failoverWaiter),
 		failoverCommitWaiters:      make(map[int]failoverWaiter),
@@ -2272,6 +2294,7 @@ func NewDualSessionSync(local, peer, local1, peer1 string, rt clusterRuntime) *S
 		localAddr1:                 local1,
 		peerAddr1:                  peer1,
 		sendCh:                     make(chan []byte, 4096),
+		sweepWakeCh:                make(chan struct{}, 1),
 		deleteJournalCap:           deleteJournalDefaultCap,
 		failoverWaiters:            make(map[int]failoverWaiter),
 		failoverCommitWaiters:      make(map[int]failoverWaiter),

@@ -225,6 +225,7 @@ type Manager struct {
 	clusterHA                      bool
 	captureEpochProvider           CaptureEpochProvider
 	captureAuthorityCommitter      func(configGeneration uint64, snapshot *ConfigSnapshot)
+	appliedConfigCommitter         func(configGeneration uint64, cfg *config.Config)
 	policySnapshotCommitter        func(configGeneration uint64)
 	policySnapshotPrePublisher     func(generation uint64) error
 	// policySnapshotPrepublishGeneration records the deferred full snapshot

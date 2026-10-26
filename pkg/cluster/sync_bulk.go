@@ -450,7 +450,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 			fenced = true
 			return false
 		}
-		msg := encodeSessionV4Payload(key, val)
+		msg := s.encodeSessionV4PayloadForPeer(key, val)
 		s.writeMu.Lock()
 		err := writeMsg(conn, syncMsgSessionV4, msg)
 		s.writeMu.Unlock()
@@ -513,7 +513,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 			fenced = true
 			return false
 		}
-		msg := encodeSessionV6Payload(key, val)
+		msg := s.encodeSessionV6PayloadForPeer(key, val)
 		s.writeMu.Lock()
 		err := writeMsg(conn, syncMsgSessionV6, msg)
 		s.writeMu.Unlock()

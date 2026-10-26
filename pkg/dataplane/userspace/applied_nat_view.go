@@ -145,6 +145,9 @@ func (m *Manager) markAppliedSnapshotLocked() {
 	if committer := m.captureAuthorityCommitter; committer != nil {
 		committer(m.appliedSnapshot.Generation, m.lastSnapshot)
 	}
+	if committer := m.appliedConfigCommitter; committer != nil {
+		committer(m.appliedSnapshot.Generation, m.appliedSnapshot.Config)
+	}
 	if committer := m.policySnapshotCommitter; committer != nil {
 		committer(m.appliedSnapshot.Generation)
 	}

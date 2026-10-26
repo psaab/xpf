@@ -41,6 +41,12 @@ func (s *SessionSync) SetConnectedForTesting(connected bool) {
 	s.stats.Connected.Store(connected)
 }
 
+// ReceiverSessionTimeoutProfileForTesting reads the profile currently used
+// by liveness cadence, for daemon publication-handoff tests.
+func (s *SessionSync) ReceiverSessionTimeoutProfileForTesting() ReceiverSessionTimeoutProfile {
+	return s.receiverSessionTimeoutProfile()
+}
+
 // SetPeerReceiveAgeForTesting injects the last inbound sync receive age
 // without a wire round trip. It lets daemon hook tests exercise the real
 // receive-recency predicate at controlled ages (#11682).

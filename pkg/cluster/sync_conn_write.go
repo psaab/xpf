@@ -138,8 +138,11 @@ func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.Ses
 	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
 		return
 	}
-	msg := encodeSessionV4(key, val)
+	msg := s.encodeSessionV4ForPeer(key, val)
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v4")
+	// The local row remains available to the sweep if the delta frame could
+	// not be enqueued, so evaluate its liveness cadence independently.
+	s.wakeSweepForQueuedSession(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass)
 }
 
 // QueueSessionV6 queues a v6 session for synchronization to the peer.
@@ -151,8 +154,11 @@ func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.S
 	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
 		return
 	}
-	msg := encodeSessionV6(key, val)
+	msg := s.encodeSessionV6ForPeer(key, val)
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v6")
+	// The local row remains available to the sweep if the delta frame could
+	// not be enqueued.
+	s.wakeSweepForQueuedSession(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass)
 }
 
 // pacedQueuePoll is how often a paced enqueue re-checks the connection while
@@ -175,7 +181,9 @@ func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplan
 	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
 		return false
 	}
-	return s.queueMessagePaced(encodeSessionV4(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
+	queued := s.queueMessagePaced(s.encodeSessionV4ForPeer(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
+	s.wakeSweepForQueuedSession(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass)
+	return queued
 }
 
 // QueueSessionV6Paced is the v6 form of QueueSessionV4Paced.
@@ -187,7 +195,9 @@ func (s *SessionSync) QueueSessionV6Paced(key dataplane.SessionKeyV6, val datapl
 	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
 		return false
 	}
-	return s.queueMessagePaced(encodeSessionV6(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
+	queued := s.queueMessagePaced(s.encodeSessionV6ForPeer(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
+	s.wakeSweepForQueuedSession(key.Protocol, val.Timeout, val.AppTimeout, val.RevPackets, val.TCPHandshakeState, val.TCPCloseClass)
+	return queued
 }
 
 // queueMessagePaced is queueMessage with a bounded wait for room. A disconnect
@@ -980,6 +990,32 @@ func (s *SessionSync) sendCapabilities(conn net.Conn) {
 	}
 }
 
+// writeQueuedFrameForPeer revalidates an encoded liveness marker against the
+// peer currently selected by sendLoop. Queued frames can survive a reconnect,
+// so queue-time capability checks alone are insufficient. The send loop owns
+// msg; temporarily shorten its header/payload view to preserve the original
+// queued bytes for a retry if this write fails.
+func (s *SessionSync) writeQueuedFrameForPeer(conn net.Conn, msg []byte) error {
+	if s.PrimaryLivenessCapable() || len(msg) < syncHeaderSize+primaryLivenessTailLen {
+		return writeFull(conn, msg)
+	}
+	if msg[4] != syncMsgSessionV4 && msg[4] != syncMsgSessionV6 {
+		return writeFull(conn, msg)
+	}
+	payloadLength := binary.LittleEndian.Uint32(msg[8:12])
+	if uint64(payloadLength) != uint64(len(msg)-syncHeaderSize) {
+		return writeFull(conn, msg)
+	}
+	base, _, valid := stripPrimaryLivenessMarker(msg[syncHeaderSize:])
+	if !valid || len(base) == len(msg)-syncHeaderSize {
+		return writeFull(conn, msg)
+	}
+	binary.LittleEndian.PutUint32(msg[8:12], uint32(len(base)))
+	err := writeFull(conn, msg[:syncHeaderSize+len(base)])
+	binary.LittleEndian.PutUint32(msg[8:12], payloadLength)
+	return err
+}
+
 func (s *SessionSync) sendLoop(ctx context.Context) {
 	sendOne := func(msg []byte) {
 		delivered := false
@@ -1053,7 +1089,7 @@ func (s *SessionSync) sendLoop(ctx context.Context) {
 				s.queuedFrameWriteStarted()
 				writeStarted = true
 			}
-			err := writeFull(conn, msg)
+			err := s.writeQueuedFrameForPeer(conn, msg)
 			s.writeMu.Unlock()
 			s.bulkStartMu.Unlock()
 			if moved {

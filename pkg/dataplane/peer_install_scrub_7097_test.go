@@ -432,10 +432,8 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		typ  reflect.Type
 		want int
 	}{
-		// 47/48 total: #7095 IngressIfaceFold and #12075 EgressIfaceFold
-		// are cluster-stable name folds, not node-local indexes. They are
-		// preserved by ScrubNodeLocal and each has a distinct consumer
-		// direction.
+		// The field totals are a pinned census; sync-only fields remain
+		// classified separately from the BPF ABI and node-local fields.
 		// The #7239 classification, stated rather than assumed, because this is
 		// the step #6928 skipped: RoutingDomain is
 		// `StableRoutingInstanceTableID(name)`, a pure function of the
@@ -469,12 +467,12 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		// source-NAT selection across HA reconstruction. They are cluster-
 		// stable packet identity, not node-local resources, and must remain on
 		// the synced value.
-		// 46/47 immediately before #12075; the new egress fold brings the
-		// current totals to 47/48 and remains sync-only, not a BPF field or a
-		// node-local resource.
+		// The #16880 primary-liveness marker adds one Go-only field per family:
+		// the base has 50/51 fields, so the current pin is 51/52. The older
+		// 47/48 count predates other sync-only fields and is not this delta.
 
-		{"SessionValue", reflect.TypeOf(SessionValue{}), 47},
-		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 48},
+		{"SessionValue", reflect.TypeOf(SessionValue{}), 51},
+		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 52},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.typ.NumField(); got != tc.want {

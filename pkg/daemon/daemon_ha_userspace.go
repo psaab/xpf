@@ -56,6 +56,59 @@ func (d *Daemon) seedActiveSessionSyncZoneOwnership(ss *cluster.SessionSync) {
 	ss.SetNatScopeFoldFn(buildNatScopeFoldFn(cfg))
 }
 
+func receiverSessionTimeoutProfileFromConfig(cfg *config.Config) cluster.ReceiverSessionTimeoutProfile {
+	if cfg == nil {
+		return cluster.ReceiverSessionTimeoutProfile{}
+	}
+	flow := cfg.Security.Flow
+	profile := cluster.ReceiverSessionTimeoutProfile{
+		UDPSessionSeconds:  flow.UDPSessionTimeout,
+		ICMPSessionSeconds: flow.ICMPSessionTimeout,
+	}
+	if tcp := flow.TCPSession; tcp != nil {
+		profile.TCPEstablishedSeconds = tcp.EstablishedTimeout
+		profile.TCPOpeningSeconds = tcp.InitialTimeout
+		profile.TCPClosingSeconds = tcp.ClosingTimeout
+		profile.TCPTimeWaitSeconds = tcp.TimeWaitTimeout
+		if tcp.TimeWaitStateSessionTimeout > 0 {
+			profile.TCPTimeWaitSeconds = tcp.TimeWaitStateSessionTimeout
+		}
+		profile.TCPTimeWaitSessionAgeout = tcp.TimeWaitStateSessionAgeout
+		profile.TCPTimeWaitApplyToHalfClosed = tcp.TimeWaitStateApplyToHalfClosed
+		profile.TCPFinInvalidateSession = tcp.FinInvalidateSession
+	}
+	return profile
+}
+
+func (d *Daemon) seedActiveSessionSyncTimeoutProfile(ss *cluster.SessionSync) {
+	if ss == nil {
+		return
+	}
+	rt := d.dataplane()
+	cfg := policyInvalidationAppliedConfig(rt)
+	if cfg == nil && rt != nil && !hasSessionTimeoutCaptureAuthority(rt) {
+		// The legacy dataplane has no capture snapshot API and applies
+		// synchronously; its stable applied marker is the corresponding
+		// authority.
+		_, cfg = d.activeAppliedZoneOwnershipSnapshot()
+	}
+	if cfg == nil {
+		return
+	}
+	ss.SetReceiverSessionTimeoutProfile(receiverSessionTimeoutProfileFromConfig(cfg))
+}
+
+func (d *Daemon) updateSessionSyncTimeoutProfile(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	profile := receiverSessionTimeoutProfileFromConfig(cfg)
+	d.sessionSyncTimeoutProfile.Store(&profile)
+	if ss := d.getSessionSync(); ss != nil {
+		ss.SetReceiverSessionTimeoutProfile(profile)
+	}
+}
+
 // activeAppliedZoneOwnershipSnapshot captures only a stable active snapshot
 // that has completed apply. Constructor seeding deliberately avoids applySem:
 // stopClusterComms may join the constructor while its caller still owns it.

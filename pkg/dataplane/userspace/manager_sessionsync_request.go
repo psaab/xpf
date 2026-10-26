@@ -284,6 +284,12 @@ func (m *Manager) buildSessionSyncScopedDeleteV6(op string, key dataplane.Sessio
 // snapshot resolution happens here, once; the characterization goldens
 // pin its byte output for both families.
 func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRequest) {
+	if view.val4 != nil {
+		req.PrimaryLiveness = view.val4.PrimaryLiveness
+	} else {
+		req.PrimaryLiveness = view.val6.PrimaryLiveness
+	}
+
 	// Every field below reads the value through the borrowed view; the
 	// field list is the union of the two pre-collapse twin bodies, in
 	// the twins' original order (NAT64 is the one V6-only insertion).

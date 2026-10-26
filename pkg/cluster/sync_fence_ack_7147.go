@@ -207,6 +207,10 @@ const (
 	// provenance. Absent or unlearned peers receive the legacy 41/43
 	// layouts so their lease refreshes continue without unsupported data.
 	capFlag2PersistentNatLeaseProvenance uint8 = 1 << 1
+	// capFlag2PrimaryLiveness (#16880): the peer accepts the primary-liveness
+	// marker appended to session frames. Senders omit it until this bit is
+	// advertised, preserving the legacy frame shape for older peers.
+	capFlag2PrimaryLiveness uint8 = 1 << 2
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
@@ -216,10 +220,10 @@ const (
 const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity | capFlagConfigAncestry | capFlagConfigEpochReverseTag | capFlagIpsecTunnelDiscriminator
 
 // localCapabilityFlags2 is what this build advertises in the second
-// capability byte (#16756, extended by #16877), appended after the
+// capability byte (#16756, extended by #16877 and #16880), appended after the
 // wire-version field in syncMsgPeerCapabilities. Compile-time for the same
 // reason as localCapabilityFlags: a property of the binary, not runtime state.
-const localCapabilityFlags2 = capFlag2ConfigApplyAck | capFlag2PersistentNatLeaseProvenance
+const localCapabilityFlags2 = capFlag2ConfigApplyAck | capFlag2PersistentNatLeaseProvenance | capFlag2PrimaryLiveness
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -456,6 +460,50 @@ func (s *SessionSync) PersistentNatLeaseProvenanceCapable() bool {
 		return false
 	}
 	return uint8(s.peerCapabilityFlags2.Load())&capFlag2PersistentNatLeaseProvenance != 0
+}
+
+// PrimaryLivenessCapable reports whether the current peer advertised support
+// for the sync-only primary-liveness marker. Before discovery or with an older
+// peer, liveness refreshes are withheld to preserve the legacy wire format.
+func (s *SessionSync) PrimaryLivenessCapable() bool {
+	return s != nil && uint8(s.peerCapabilityFlags2.Load())&capFlag2PrimaryLiveness != 0
+}
+
+func (s *SessionSync) storePeerCapabilityFlags2(flags uint32) {
+	if s == nil {
+		return
+	}
+	old := s.peerCapabilityFlags2.Swap(flags)
+	livenessMask := uint32(capFlag2PrimaryLiveness)
+	if old&livenessMask != flags&livenessMask {
+		s.wakeSyncSweep()
+	}
+}
+
+func (s *SessionSync) wakeSyncSweep() {
+	if s == nil || s.sweepWakeCh == nil {
+		return
+	}
+	select {
+	case s.sweepWakeCh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *SessionSync) wakeSyncSweepForInterval(scanSeconds uint64) {
+	if s == nil || s.sweepWakeCh == nil || scanSeconds == 0 {
+		return
+	}
+	for {
+		old := s.sweepWakeScanIntervalSeconds.Load()
+		if old != 0 && old <= scanSeconds {
+			return
+		}
+		if s.sweepWakeScanIntervalSeconds.CompareAndSwap(old, scanSeconds) {
+			break
+		}
+	}
+	s.wakeSyncSweep()
 }
 
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been

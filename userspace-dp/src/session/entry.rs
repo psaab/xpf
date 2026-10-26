@@ -586,6 +586,10 @@ pub(crate) enum SessionOrigin {
     /// claiming authority for one flow is what #518/#5007 exist to prevent.
     FabricPuntSeed,
     SyncImport,
+    /// Import-only marker: this sync frame carries fresh primary liveness.
+    /// `upsert_synced_with_origin` consumes it and stores `SyncImport`.
+    SyncLiveness,
+
     SharedMaterialize,
     SharedPromote,
     #[allow(dead_code)] // enum variant for completeness
@@ -616,6 +620,8 @@ impl SessionOrigin {
             Self::MissingNeighborSeed => "missing_neighbor_seed",
             Self::FabricPuntSeed => "fabric_punt_seed",
             Self::SyncImport => "sync_import",
+            Self::SyncLiveness => "sync_liveness",
+
             Self::SharedMaterialize => "shared_materialize",
             Self::SharedPromote => "shared_promote",
             Self::WorkerLocalImport => "worker_local_import",
@@ -636,7 +642,10 @@ impl SessionOrigin {
     pub(crate) fn is_peer_synced(self) -> bool {
         matches!(
             self,
-            Self::SyncImport | Self::SharedMaterialize | Self::WorkerLocalImport
+            Self::SyncImport
+                | Self::SyncLiveness
+                | Self::SharedMaterialize
+                | Self::WorkerLocalImport
         )
     }
 
@@ -645,11 +654,17 @@ impl SessionOrigin {
     /// authored session; it participates in peer-synced control gates but must
     /// not be stamped as peer-originated in the BPF row.
     pub(crate) fn is_cluster_synced_origin(self) -> bool {
-        matches!(self, Self::SyncImport | Self::SharedMaterialize)
+        matches!(
+            self,
+            Self::SyncImport | Self::SyncLiveness | Self::SharedMaterialize
+        )
     }
 
     pub(crate) fn is_promotable_synced(self) -> bool {
-        matches!(self, Self::SyncImport | Self::SharedMaterialize)
+        matches!(
+            self,
+            Self::SyncImport | Self::SyncLiveness | Self::SharedMaterialize
+        )
     }
 
     pub(crate) fn worker_replica_origin(self) -> Self {

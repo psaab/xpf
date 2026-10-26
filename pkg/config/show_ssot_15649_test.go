@@ -51,14 +51,21 @@ func TestDataplaneTimeoutConstantsMatchRust15649(t *testing.T) {
 		t.Skipf("rust source unavailable: %v", err)
 	}
 	s := string(b)
-	if !strings.Contains(s, "DEFAULT_UDP_SESSION_TIMEOUT_NS: u64 = 60_") {
-		t.Fatalf("rust UDP default drifted")
+	for _, rustDefault := range []string{
+		"DEFAULT_UDP_SESSION_TIMEOUT_NS: u64 = 60_",
+		"DEFAULT_ICMP_SESSION_TIMEOUT_NS: u64 = 60_",
+		"OSPF_SESSION_TIMEOUT_NS: u64 = 60_",
+		"OTHER_SESSION_TIMEOUT_NS: u64 = 1_800_",
+	} {
+		if !strings.Contains(s, rustDefault) {
+			t.Fatalf("rust default drifted: missing %q", rustDefault)
+		}
 	}
-	if !strings.Contains(s, "DEFAULT_ICMP_SESSION_TIMEOUT_NS: u64 = 60_") {
-		t.Fatalf("rust ICMP default drifted")
-	}
-	if DataplaneUDPSessionTimeoutSecs != 60 || DataplaneICMPSessionTimeoutSecs != 60 {
-		t.Fatalf("go defaults drifted")
+	if DataplaneUDPSessionTimeoutSecs != 60 ||
+		DataplaneICMPSessionTimeoutSecs != 60 ||
+		DataplaneOSPFSessionTimeoutSecs != 60 ||
+		DataplaneOtherSessionTimeoutSecs != 1800 {
+		t.Fatal("Go dataplane timeout defaults drifted")
 	}
 }
 

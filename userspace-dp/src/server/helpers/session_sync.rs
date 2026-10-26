@@ -578,7 +578,11 @@ pub(crate) fn build_synced_session_entry(
         nat_scope_ifindex: (req.nat_scope_ifindex > 0).then_some(req.nat_scope_ifindex),
     },
     leak_incarnation: 0,
-    origin: crate::session::SessionOrigin::SyncImport,
+    origin: if req.primary_liveness {
+        crate::session::SessionOrigin::SyncLiveness
+    } else {
+        crate::session::SessionOrigin::SyncImport
+    },
     // #2170: carry the peer's install generation onto the helper entry.
     generation: req.generation,
     // #5212: carry the ORIGINATING node's stable RT_FLOW session id off the
