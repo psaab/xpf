@@ -162,6 +162,30 @@ func TestWGZoneMapLayoutsMatchRust17996(t *testing.T) {
 				tc.name, mapSpec.KeySize, mapSpec.ValueSize, tc.keySize, tc.valueSize)
 		}
 	}
+	ingressSpec := spec.Maps["userspace_wg_ingress_zones"]
+	if ingressSpec == nil {
+		t.Fatal("embedded Rust object is missing userspace_wg_ingress_zones")
+	}
+	ingressPlan, err := buildUserspaceWGZoneMaps(wg12855TrunkSnapshot())
+	if err != nil {
+		t.Fatalf("build WG ingress plan: %v", err)
+	}
+	for key, want := range map[userspaceWGIngressZoneKey]uint32{
+		wgZone12855Key(10, userspaceWGUnTaggedVLANID): 2,
+		wgZone12855Key(10, 100):                       1,
+	} {
+		value, ok := ingressPlan.ingress[key]
+		if !ok || value != want {
+			t.Fatalf("planned ingress row %+v = (%d, %v), want %d", key, value, ok, want)
+		}
+		encoded, err := binary.Append(nil, binary.NativeEndian, value)
+		if err != nil {
+			t.Fatalf("marshal planned ingress value: %v", err)
+		}
+		if got := uint32(len(encoded)); got != ingressSpec.ValueSize {
+			t.Fatalf("planned ingress value marshals to %d bytes, embedded Rust map expects %d", got, ingressSpec.ValueSize)
+		}
+	}
 }
 
 func TestBuildUserspaceWGZoneAdmissionRequiresSameUniqueZone11574(t *testing.T) {

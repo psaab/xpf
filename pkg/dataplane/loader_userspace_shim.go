@@ -890,7 +890,7 @@ func reconcileRebuiltCollectionPin(pinPath string, spec *ebpf.MapSpec) error {
 	}
 	defer existing.Close()
 	if rebuiltPinShapeMatches(existing.Type(), existing.KeySize(),
-		existing.ValueSize(), existing.MaxEntries(), spec) {
+		existing.ValueSize(), existing.MaxEntries(), existing.Flags(), spec) {
 		return nil
 	}
 	slog.Info("reconciling incompatible rebuilt shim map pin on upgrade",
@@ -899,10 +899,12 @@ func reconcileRebuiltCollectionPin(pinPath string, spec *ebpf.MapSpec) error {
 		"pinned_key_size", existing.KeySize(),
 		"pinned_value_size", existing.ValueSize(),
 		"pinned_max_entries", existing.MaxEntries(),
+		"pinned_flags", existing.Flags(),
 		"want_type", spec.Type.String(),
 		"want_key_size", spec.KeySize,
 		"want_value_size", spec.ValueSize,
-		"want_max_entries", spec.MaxEntries)
+		"want_max_entries", spec.MaxEntries,
+		"want_flags", spec.Flags)
 	if err := existing.Unpin(); err != nil {
 		return fmt.Errorf("unpin incompatible rebuildable pin %s: %w", pinPath, err)
 	}
@@ -911,16 +913,17 @@ func reconcileRebuiltCollectionPin(pinPath string, spec *ebpf.MapSpec) error {
 
 // rebuiltPinShapeMatches reports whether an on-disk pinned map's shape matches
 // the spec closely enough for the PinByName collection load to accept it.
-// Incompatible type, key/value width, or capacity requires rebuilding the map.
+// Incompatible type, key/value width, capacity, or flags requires rebuilding.
 func rebuiltPinShapeMatches(
 	pinnedType ebpf.MapType,
-	pinnedKeySize, pinnedValueSize, pinnedMaxEntries uint32,
+	pinnedKeySize, pinnedValueSize, pinnedMaxEntries, pinnedFlags uint32,
 	spec *ebpf.MapSpec,
 ) bool {
 	return pinnedType == spec.Type &&
 		pinnedKeySize == spec.KeySize &&
 		pinnedValueSize == spec.ValueSize &&
-		pinnedMaxEntries == spec.MaxEntries
+		pinnedMaxEntries == spec.MaxEntries &&
+		pinnedFlags == spec.Flags
 }
 
 func ensureUserspaceMapPinned(name string, m *ebpf.Map, path string) error {

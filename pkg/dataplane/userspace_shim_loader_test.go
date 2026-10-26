@@ -603,22 +603,24 @@ func TestRebuiltPinShapeMatches(t *testing.T) {
 		keySize    uint32
 		valueSize  uint32
 		maxEntries uint32
+		flags      uint32
 		match      bool
 	}{
-		{"stale-array-from-old-daemon", ebpf.Array, 4, 8, 16, false},
-		{"already-migrated-percpu", ebpf.PerCPUArray, 4, 8, 16, true},
-		{"value-size-drift", ebpf.PerCPUArray, 4, 16, 16, false},
-		{"max-entries-drift", ebpf.PerCPUArray, 4, 8, 32, false},
-		{"key-size-drift", ebpf.PerCPUArray, 8, 8, 16, false},
+		{"stale-array-from-old-daemon", ebpf.Array, 4, 8, 16, 0, false},
+		{"already-migrated-percpu", ebpf.PerCPUArray, 4, 8, 16, 0, true},
+		{"value-size-drift", ebpf.PerCPUArray, 4, 16, 16, 0, false},
+		{"max-entries-drift", ebpf.PerCPUArray, 4, 8, 32, 0, false},
+		{"key-size-drift", ebpf.PerCPUArray, 8, 8, 16, 0, false},
+		{"flags-drift", ebpf.PerCPUArray, 4, 8, 16, unix.BPF_F_NO_PREALLOC, false},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := rebuiltPinShapeMatches(tt.pinType, tt.keySize, tt.valueSize, tt.maxEntries, want)
+			got := rebuiltPinShapeMatches(tt.pinType, tt.keySize, tt.valueSize, tt.maxEntries, tt.flags, want)
 			if got != tt.match {
-				t.Fatalf("rebuiltPinShapeMatches(%v, k=%d v=%d n=%d) = %v, want %v",
-					tt.pinType, tt.keySize, tt.valueSize, tt.maxEntries, got, tt.match)
+				t.Fatalf("rebuiltPinShapeMatches(%v, k=%d v=%d n=%d flags=%#x) = %v, want %v",
+					tt.pinType, tt.keySize, tt.valueSize, tt.maxEntries, tt.flags, got, tt.match)
 			}
 		})
 	}
