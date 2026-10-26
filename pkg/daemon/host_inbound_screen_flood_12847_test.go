@@ -15,7 +15,7 @@ func TestHostInboundScreenFloodTextMixedIngressAddressFallback12847(t *testing.T
 		Addresses:      []string{"192.0.2.2"},
 	}
 	var rules []string
-	emitHostInboundScreenFloodText(&rules, []xnft.HostInboundScreenFloodRule{screen}, false)
+	emitHostInboundScreenFloodText(&rules, []xnft.HostInboundScreenFloodRule{screen}, xnft.HostInboundScreenFloodOriginal)
 	payload := strings.Join(rules, "\n")
 	if !strings.Contains(payload, `iifname "ge-0-0-0" meta nfproto ipv4 meta l4proto 17`) {
 		t.Fatalf("direct ingress flood scope missing:\n%s", payload)

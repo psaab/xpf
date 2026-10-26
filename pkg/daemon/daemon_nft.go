@@ -2774,7 +2774,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		)...)
 		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts)
 		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts)
-		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodReplyDirection)
 		emitJunosHostMulticastProgramJumps(&rules, programs)
 		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// (2) Firewall-ORIGINATED reply traffic (host-OUTBOUND flow return).
@@ -2783,6 +2783,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		// original-direction established inbound falls through to the DROP below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
 		// (3) #16862: mandatory L3 admits before the fine jumps (see above).
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodOriginalICMP)
 		emitHostInboundICMPAccepts(&rules, views, programs)
 		// (4) Fine junos-host programs: per ingress zone, the retained ident-RST
 		// shield and an iifname-scoped jump to the zone's first-match subchain
@@ -2790,7 +2791,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		for i, p := range programs {
 			emitJunosHostProgramJump(&rules, i, p)
 		}
-		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodOriginalNonICMP)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2812,14 +2813,14 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		)...)
 		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts)
 		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts)
-		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodReplyDirection)
 		emitJunosHostMulticastProgramJumps(&rules, programs)
 		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// Firewall-ORIGINATED reply traffic is accepted before ingress
 		// adjudication; original-direction established traffic reaches the
 		// residual accept only after the ingress-zone rules below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
-		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodOriginal)
 		emitHostInboundICMPAccepts(&rules, views, nil)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
@@ -3138,13 +3139,20 @@ func appendHostInboundScreenFloodSet(rules *[]string, name, keyType string, size
 	)
 }
 
-// emitHostInboundScreenFloodText places reply-direction backstop rules before
-// the established-reply accept and original-direction rules after fine
-// junos-host policy, matching the kernel renderer.
-func emitHostInboundScreenFloodText(rules *[]string, screens []xnft.HostInboundScreenFloodRule, repliesOnly bool) {
+// emitHostInboundScreenFloodText mirrors the netlink screen phases: reply
+// screens precede the reply accept, original ICMP screens precede mandatory
+// ICMP accepts, and other original screens remain after fine junos-host policy.
+func emitHostInboundScreenFloodText(rules *[]string, screens []xnft.HostInboundScreenFloodRule, phase xnft.HostInboundScreenFloodPhase) {
 	for _, screen := range screens {
+		isICMP := screen.Protocol == "icmp" || screen.Protocol == "icmpv6"
+		if phase == xnft.HostInboundScreenFloodOriginalICMP && !isICMP {
+			continue
+		}
+		if phase == xnft.HostInboundScreenFloodOriginalNonICMP && isICMP {
+			continue
+		}
 		prefix := ""
-		if repliesOnly {
+		if phase == xnft.HostInboundScreenFloodReplyDirection {
 			prefix = "ct state established,related ct direction reply "
 		}
 		emit := func(base string) {

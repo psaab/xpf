@@ -1024,10 +1024,10 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		{Zone: "shared-trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.91.1"}, V6Addrs: []string{"fe80::91"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"trust-slave"}}}, IngressDenyNetdevs: []string{"shared-parent"}},
 		{Zone: "shared-untrust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.92.1"}, V6Addrs: []string{"2001:db8:92::1"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"untrust-slave"}}}},
 		{Zone: "shared-trust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.91.2"}, V6Addrs: []string{"fe80::92"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"trust-slave-2"}}}},
-		// #15931/#17894: an any-service retaining view beside an ND-except
-		// sibling, with a matching fine-program zone to pin early any-service
-		// ND admits as well as the counterless fence behavior.
-		{Zone: "ndany", SystemServices: []string{"any-service"}, V4Addrs: []string{"10.0.17.1"}, V6Addrs: []string{"2001:db8:17::1"}, IngressNetdevs: []string{"ge-0-0-17"}},
+		// #15931/#17894: any-service retaining beside an ND-except sibling,
+		// with a matching fine program and ICMP screen; parity pins early ND
+		// after the screen while preserving counterless fence behavior.
+		{Zone: "ndany", SystemServices: []string{"any-service"}, V4Addrs: []string{"10.0.17.1"}, V6Addrs: []string{"2001:db8:17::1"}, ICMPFloodThreshold: 5, IngressNetdevs: []string{"ge-0-0-17"}},
 		{Zone: "ndexcept", SystemServices: []string{"ssh"}, Protocols: []string{"ospf"}, ProtocolsExcept: []string{"ndp"}, V4Addrs: []string{"10.0.18.1"}, V6Addrs: []string{"2001:db8:18::1"}, IngressNetdevs: []string{"ge-0-0-18"}},
 		// #16861: VRF-member ND — member-iifname admit must parity-match
 		// master+sdif in both renderers, and the ndp-except VRF view

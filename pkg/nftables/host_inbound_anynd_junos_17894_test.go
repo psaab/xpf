@@ -132,3 +132,118 @@ func TestHostInboundAnyServiceNDBeforeJunosJump17894(t *testing.T) {
 		t.Fatalf("ndp-except view got a counted ND accept on ge-0-0-2:\n%s", rules)
 	}
 }
+
+func TestHostInboundAnyServiceNDICMPScreenBeforeJunosJump17894(t *testing.T) {
+	views := []HostInboundZoneView{
+		{
+			Zone:               "untrust",
+			SystemServices:     []string{"any-service"},
+			V4Addrs:            []string{"192.0.2.10"},
+			V6Addrs:            []string{"2001:db8:2::10"},
+			ICMPFloodThreshold: 3,
+			IngressNetdevs:     []string{"ge-0-0-1"},
+		},
+		{
+			Zone:           "trust",
+			SystemServices: []string{"ssh"},
+			V4Addrs:        []string{"192.0.2.1"},
+			V6Addrs:        []string{"2001:db8:1::10"},
+			IngressNetdevs: []string{"ge-0-0-0"},
+		},
+	}
+	p := newBuildPlan(t, "xpf_17894_screen", hostInboundPriority)
+	buildHostInboundNetlink(p, HostInboundSpec{
+		Views: views,
+		Programs: []JunosHostProgram{{
+			Zone:           "untrust",
+			IngressIfnames: []string{"ge-0-0-1"},
+			RulesV4: []JunosHostDenyRule{
+				{Family: "ip", SrcAny: true, DstAny: true, Verdict: config.JunosHostDrop},
+			},
+		}},
+		DataplaneFresh: true,
+	})
+	if p.err != nil {
+		t.Fatalf("build error: %v", p.err)
+	}
+	findRules := func(needle string) (int, int) {
+		first, count := -1, 0
+		for i, r := range p.rules {
+			if strings.Contains(canonRule(p, r), needle) {
+				if first < 0 {
+					first = i
+				}
+				count++
+			}
+		}
+		return first, count
+	}
+	ndAt, jumpAt := -1, -1
+	targetAddr := addrHex(t, "2001:db8:2::10")
+	for i, r := range p.rules {
+		line := canonRule(p, r)
+		if strings.HasSuffix(line, "verdict(-3)") && !strings.Contains(line, "payload(base=1") && jumpAt < 0 {
+			jumpAt = i
+		}
+		if strings.Contains(line, HostInboundAcceptCounterName(HostInboundAcceptICMP6ND)) &&
+			strings.Contains(line, nd17894IfnameHex("ge-0-0-1")) &&
+			strings.Contains(line, targetAddr) && strings.Contains(line, "verdict(1)") && ndAt < 0 {
+			ndAt = i
+		}
+	}
+	if ndAt < 0 || jumpAt < 0 || ndAt >= jumpAt {
+		t.Fatalf("untrust ND accept must remain before the fine junos-host jump (ND=%d jump=%d)", ndAt, jumpAt)
+	}
+	err6At, err6Count := findRules(HostInboundAcceptCounterName(HostInboundAcceptICMP6Error))
+	err4At, err4Count := findRules(HostInboundAcceptCounterName(HostInboundAcceptICMP4Error))
+	if err6Count != 1 || err4Count != 1 {
+		t.Fatalf("mandatory ICMP accepts missing/duplicated (v6=%d/%d v4=%d/%d)", err6At, err6Count, err4At, err4Count)
+	}
+	seenV4, seenV6 := false, false
+	for _, screen := range HostInboundScreenFloodRules(views) {
+		if screen.Protocol != "icmp" && screen.Protocol != "icmpv6" {
+			continue
+		}
+		switch screen.Protocol {
+		case "icmp":
+			seenV4 = true
+		case "icmpv6":
+			seenV6 = true
+		}
+		for _, source := range []bool{true, false} {
+			name := HostInboundScreenFloodCounterName(screen, source)
+			var screenIndices []int
+			for i, r := range p.rules {
+				if strings.Contains(canonRule(p, r), name) {
+					screenIndices = append(screenIndices, i)
+				}
+			}
+			if len(screenIndices) != 2 {
+				t.Fatalf("%s meter rule count = %d, want one reply and one original-direction rule (rules:\n%s)", name, len(screenIndices), canonRules(p))
+			}
+			replyRules, originalAt := 0, -1
+			for _, at := range screenIndices {
+				line := canonRule(p, p.rules[at])
+				if !strings.Contains(line, "verdict(0)") {
+					t.Fatalf("%s screen must retain its over-threshold drop action: %s", name, line)
+				}
+				if strings.Contains(line, "ct(key=1,") {
+					replyRules++
+				} else {
+					originalAt = at
+				}
+			}
+			if replyRules != 1 || originalAt < 0 {
+				t.Fatalf("%s meters need exactly one reply and one original-direction rule (reply=%d original=%d)",
+					name, replyRules, originalAt)
+			}
+			if originalAt >= err6At || originalAt >= err4At || originalAt >= ndAt {
+				t.Fatalf("%s original-direction screen must run before every mandatory ICMP/ND accept; screen=%d mandatory-v6=%d mandatory-v4=%d ND=%d",
+					name, originalAt, err6At, err4At, ndAt)
+			}
+		}
+	}
+	if !seenV4 || !seenV6 {
+		t.Fatalf("fixture must exercise both IPv4 and IPv6 ICMP screens (v4=%t v6=%t)", seenV4, seenV6)
+	}
+}
