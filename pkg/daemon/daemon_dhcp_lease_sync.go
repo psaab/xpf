@@ -475,32 +475,16 @@ func (d *Daemon) preSeedDHCPLeaseMemfile(stillMastering bool) {
 			continue
 		}
 		authority := d.dhcpLeaseAuthority(cfg, family)
-		if preSeeder, ok := d.dhcpServer.(interface {
-			PreSeedMemfileMerged4WithAuthority(context.Context, dhcpserver.LeaseSyncSnapshot, time.Time, bool, dhcpserver.LeaseSyncAuthority) error
-			PreSeedMemfileMerged6WithAuthority(context.Context, dhcpserver.LeaseSyncSnapshot, time.Time, bool, dhcpserver.LeaseSyncAuthority) error
-		}); ok {
-			var err error
-			if family == 4 {
-				err = preSeeder.PreSeedMemfileMerged4WithAuthority(ctx, snapshot, now, stillMastering, authority)
-			} else {
-				err = preSeeder.PreSeedMemfileMerged6WithAuthority(ctx, snapshot, now, stillMastering, authority)
-			}
-			if err != nil {
-				slog.Warn("cluster: DHCP lease memfile pre-seed failed (post-start lease-add is backstop)", "family", family, "err", err)
-			}
-			continue
-		}
-		leases := dhcpserver.PeerLeasesForAuthority(snapshot, family, authority)
 		var err error
 		if family == 4 {
-			err = d.dhcpServer.PreSeedMemfileMerged4(ctx, leases, now, stillMastering)
+			err = d.dhcpServer.PreSeedMemfileMerged4WithAuthority(ctx, snapshot, now, stillMastering, authority)
 		} else {
-			err = d.dhcpServer.PreSeedMemfileMerged6(ctx, leases, now, stillMastering)
+			err = d.dhcpServer.PreSeedMemfileMerged6WithAuthority(ctx, snapshot, now, stillMastering, authority)
 		}
 		if err != nil {
 			slog.Warn("cluster: DHCP lease memfile pre-seed failed (post-start lease-add is backstop)", "family", family, "err", err)
 		} else {
-			slog.Info("cluster: DHCP leases pre-seeded into memfile before Kea start", "family", family, "count", len(leases))
+			slog.Info("cluster: DHCP leases pre-seeded into memfile before Kea start", "family", family)
 		}
 	}
 }
