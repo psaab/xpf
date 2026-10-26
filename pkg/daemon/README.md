@@ -3947,8 +3947,8 @@ never lock an operator out of a remote box it manages.
   fails the commit closed. A failed commit is the retry owner (the next apply
   re-reconciles). The rebind skips only a confirmed missing link for a configured
   tagged management unit that was not materialized (for example, an unzoned
-  parent); missing base interfaces and all other lookup/bind failures still fail
-  closed. The heartbeat restart that follows the rebind is surfaced the
+  parent), or a confirmed-missing chassis fabric interface (#18034); missing
+  base interfaces and all other lookup/bind failures still fail closed. The heartbeat restart that follows the rebind is surfaced the
   same way (#9751): `restartHeartbeatAfterRebind` joins a restart that exhausted
   its bind retries into `networkdErr`. That restart leaves the heartbeat stopped,
   owing a retry the next apply performs. The old call discarded
