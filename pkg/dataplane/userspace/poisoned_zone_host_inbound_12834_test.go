@@ -43,6 +43,14 @@ func TestPoisonedZoneOverrideAbsentFromKernelHostInboundView12834(t *testing.T) 
 		},
 	}
 	views := BuildZoneHostInboundViewsFromSnapshots(cfg, snaps)
+	unzonedV4, _ := BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps)
+	if !sliceHas(unzonedV4, "10.0.0.1") {
+		t.Errorf("quarantined zulu address missing from real-table unzoned catch-all: %v", unzonedV4)
+	}
+	unzonedIngress, _ := BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps, views)
+	if !sliceHas(unzonedIngress, "ge-0/0/0") {
+		t.Errorf("quarantined zulu ingress missing from real-table unzoned catch-all: %v", unzonedIngress)
+	}
 	for _, view := range views {
 		if view.Zone == "alpha" && len(view.Interfaces) != 0 {
 			t.Fatalf("poisoned alpha still owns kernel host-inbound view interfaces %v", view.Interfaces)

@@ -18,14 +18,18 @@ func BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg *config.Config, snap
 	}
 	lifelines := hostInboundLifelineSet(cfg)
 	quarantined := quarantinedZoneNames(cfg)
+	quarantinedInterfaces := config.ZoneInterfaceQuarantineExclusions(cfg)
 	unzonedFanUpBaseRows := hostInboundUnzonedFanUpBaseRows(cfg, snaps)
+	nativeVLANUnits := nativeVLANUnitRefs(cfg, snaps)
 	claimed := make(map[string]bool)
 	// An ambiguous zoned netdev may not appear in an ingress scope because its
 	// view intentionally declines to claim the shared iifname/VRF master. Keep
 	// that raw VRF slave out of the earlier unzoned blanket-drop rule too: the
 	// zone's destination-qualified rules must still reach its own addresses.
 	zoneInterfaces := make(map[string]bool)
+	zoneHasView := make(map[string]bool, len(views))
 	for _, view := range views {
+		zoneHasView[view.Zone] = true
 		for _, name := range view.Interfaces {
 			zoneInterfaces[name] = true
 		}
@@ -64,10 +68,21 @@ func BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg *config.Config, snap
 		if netdev == "" || protected[netdev] {
 			continue
 		}
-		if snap.Zone != "" && !unzonedFanUpBaseRows[snap.Name] {
-			if _, drop := quarantined[snap.Zone]; !drop {
-				continue
+		policyIface, viewZone := snap.Name, snap.Zone
+		if !snap.IsUnit {
+			if nativeUnit := nativeVLANUnits[snap.Name]; nativeUnit.name != "" {
+				policyIface = nativeUnit.name
+				viewZone = nativeUnit.zone
 			}
+		}
+		_, snapshotQuarantined := quarantinedInterfaces[snap.Name]
+		_, policyQuarantined := quarantinedInterfaces[policyIface]
+		_, zoneQuarantined := quarantined[viewZone]
+		// Quarantined identities and stale snapshot labels are not covered by
+		// a surviving zone view, so fail closed through the unzoned ingress set.
+		if viewZone != "" && !unzonedFanUpBaseRows[snap.Name] &&
+			!snapshotQuarantined && !policyQuarantined && !zoneQuarantined && zoneHasView[viewZone] {
+			continue
 		}
 		if vrfEnslaved[netdev] {
 			// Views claim the LOCAL_IN VRF master, not this slave. Do not let a

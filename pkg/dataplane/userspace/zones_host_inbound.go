@@ -1082,11 +1082,15 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 	lifelines := hostInboundLifelineSet(cfg)
 	lifelineShared := hostInboundLifelineSharedAddrsFromSnaps(cfg, snaps)
 	quarantined := quarantinedZoneNames(cfg)
+	quarantinedInterfaces := config.ZoneInterfaceQuarantineExclusions(cfg)
 	unzonedFanUpBaseRows := hostInboundUnzonedFanUpBaseRows(cfg, snaps)
+	nativeVLANUnits := nativeVLANUnitRefs(cfg, snaps)
 	// Addresses already covered by a zone deny — exclude so the unzoned catch-all
 	// never duplicates or conflicts with a zone rule for the same daddr.
 	zoned := map[string]bool{}
+	zoneHasView := map[string]bool{}
 	for _, view := range buildZoneHostInboundViewsFromSnaps(cfg, snaps, false) {
+		zoneHasView[view.Zone] = true
 		for _, a := range view.V4Addrs {
 			zoned[a] = true
 		}
@@ -1117,10 +1121,22 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 		if snap.AdminDisabled {
 			continue
 		}
-		if snap.Zone != "" && !unzonedFanUpBaseRows[snap.Name] {
-			if _, drop := quarantined[snap.Zone]; !drop {
-				continue
+		policyIface, viewZone := snap.Name, snap.Zone
+		if !snap.IsUnit {
+			if nativeUnit := nativeVLANUnits[snap.Name]; nativeUnit.name != "" {
+				policyIface = nativeUnit.name
+				viewZone = nativeUnit.zone
 			}
+		}
+		_, snapshotQuarantined := quarantinedInterfaces[snap.Name]
+		_, policyQuarantined := quarantinedInterfaces[policyIface]
+		_, zoneQuarantined := quarantined[viewZone]
+		// A quarantined identity or stale zone label has no surviving view to
+		// deny its address. Keep it in the real-table unzoned catch-all rather
+		// than letting the policy-accept default expose the host address.
+		if viewZone != "" && !unzonedFanUpBaseRows[snap.Name] &&
+			!snapshotQuarantined && !policyQuarantined && !zoneQuarantined && zoneHasView[viewZone] {
+			continue
 		}
 		for _, a := range snap.Addresses {
 			addUnzoned(hostIPFromCIDR(a.Address))

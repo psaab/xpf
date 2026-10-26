@@ -63,6 +63,26 @@ func TestQuarantinedZoneHasNoHostInboundView17912(t *testing.T) {
 		},
 	}
 	views := BuildZoneHostInboundViewsFromSnapshots(cfg, snaps)
+	unzonedV4, _ := BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps)
+	if !sliceHas(unzonedV4, "10.0.0.1") {
+		t.Errorf("quarantined zulu address missing from real-table unzoned catch-all: %v", unzonedV4)
+	}
+	unzonedIngress, _ := BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps, views)
+	if !sliceHas(unzonedIngress, "ge-0/0/0") {
+		t.Errorf("quarantined zulu ingress missing from real-table unzoned catch-all: %v", unzonedIngress)
+	}
+	if !sliceHas(unzonedV4, "10.0.2.1") {
+		t.Errorf("quarantined interface with healthy stale zone label missing from unzoned catch-all: %v", unzonedV4)
+	}
+	if sliceHas(unzonedV4, "10.0.1.1") || sliceHas(unzonedV4, "10.0.3.1") {
+		t.Errorf("surviving healthy addresses leaked into unzoned catch-all: %v", unzonedV4)
+	}
+	if !sliceHas(unzonedIngress, "ge-0/0/2") {
+		t.Errorf("quarantined interface with healthy stale zone label missing from unzoned ingress: %v", unzonedIngress)
+	}
+	if sliceHas(unzonedIngress, "ge-0/0/1") || sliceHas(unzonedIngress, "ge-0/0/3") {
+		t.Errorf("surviving healthy ingress leaked into unzoned catch-all: %v", unzonedIngress)
+	}
 	seenHealthy := false
 	for _, view := range views {
 		if view.Zone == "zulu" {
@@ -133,6 +153,14 @@ func TestQuarantinedUnitZeroParentNotPublishedWithSurvivingZoneInterface17912(t 
 		},
 	}
 	views := BuildZoneHostInboundViewsFromSnapshots(cfg, snaps)
+	unzonedV4, _ := BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps)
+	if !sliceHas(unzonedV4, "10.0.0.1") {
+		t.Errorf("quarantined unit-zero address missing from real-table unzoned catch-all: %v", unzonedV4)
+	}
+	unzonedIngress, _ := BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps, views)
+	if !sliceHas(unzonedIngress, "ge-0/0/0") {
+		t.Errorf("quarantined unit-zero ingress missing from real-table unzoned catch-all: %v", unzonedIngress)
+	}
 	var seenZulu bool
 	for _, view := range views {
 		if view.Zone != "zulu" {
