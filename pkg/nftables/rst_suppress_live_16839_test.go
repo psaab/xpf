@@ -1,6 +1,7 @@
 package nftables
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"syscall"
@@ -10,39 +11,20 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// TestRSTSuppressionSparesLiveSocketRSTLive16839 is the live-kernel
-// regression test for #16839. The #15727 raw-priority chain matched
-// `ct state invalid` alone, but at raw (-300) the OUTPUT conntrack hook
-// (-200) has not run yet, so a live local socket's abortive RST --
-// sourced FROM the protected interface-NAT address -- also reads
-// INVALID and was dropped, and the peer never saw the reset. The
-// pre-existing "tracked" control in the 15727 live test could not catch
-// this: its client RST is sourced from the ephemeral client address
-// (127.0.0.1), outside the rule's saddr scope as well as tracked, so it
-// passes with or without the bug.
+// TestRSTSuppressionSparesLiveSocketRSTLive16839 exercises both address
+// families against the installed table. Each family must suppress a
+// socketless kernel RST from the protected address and deliver a live,
+// address-bound socket's RST to its peer.
 //
-// This test installs the real xpf_dp_rst table and runs both cells
-// against the protected address itself:
+// IPv4's spurious RST is backed by the wildcard-bound tcp_rst_sock control
+// mini-socket. IPv6's socketless RST skb has no skb->sk, so nft_socket_eval
+// BREAKs; #17868 adds an earlier live-socket return rule followed by a
+// socketless drop rule. The per-family counter proves the socketless case
+// still drops, while ECONNRESET and an unchanged counter prove a live RST
+// survives.
 //
-//   - Spurious cell (must still drop): SYNs to a closed port on the
-//     protected address elicit the kernel's no-socket RST
-//     (tcp_v4_send_reset via the wildcard-bound tcp_rst_sock control
-//     mini-socket). The drop counter must move.
-//   - Live-socket cell (must deliver, #16839): a server socket bound to
-//     the protected address accepts a connection and aborts it with
-//     SO_LINGER 0, emitting a genuine RST sourced from the protected
-//     address. The client must observe ECONNRESET and the drop counter
-//     must NOT move.
-//
-// Fail-on-revert: removing the socket-wildcard predicate from
-// rstDropExprs makes the live-socket RST match `ct invalid` at raw and
-// be dropped -- the client read then times out instead of resetting
-// and the counter moves, failing both assertions. Inverting the
-// wildcard value likewise fails (spurious cell stops counting, live
-// cell starts).
-//
-// Needs CAP_NET_ADMIN for the netns; SKIPs otherwise (see
-// enterPrivateNetns). Run with:
+// Needs CAP_NET_ADMIN for the netns; SKIPs otherwise (see enterPrivateNetns).
+// Run with:
 //
 //	unshare -rn go test ./pkg/nftables/ -run TestRSTSuppressionSparesLiveSocketRSTLive16839 -count=1 -v
 func TestRSTSuppressionSparesLiveSocketRSTLive16839(t *testing.T) {
@@ -55,17 +37,42 @@ func TestRSTSuppressionSparesLiveSocketRSTLive16839(t *testing.T) {
 	if err := netlink.LinkSetUp(lo); err != nil {
 		t.Fatalf("bring lo up: %v", err)
 	}
-	snat := netip.MustParseAddr("127.0.0.2")
-	addr, err := netlink.ParseAddr(snat.String() + "/8")
-	if err != nil {
-		t.Fatalf("parse addr: %v", err)
+
+	families := []struct {
+		name    string
+		addr    netip.Addr
+		prefix  string
+		network string
+	}{
+		{name: "ipv4", addr: netip.MustParseAddr("127.0.0.2"), prefix: "/8", network: "tcp4"},
+		{name: "ipv6", addr: netip.MustParseAddr("fd00::2"), prefix: "/128", network: "tcp6"},
 	}
-	addr.Scope = int(netlink.SCOPE_HOST)
-	if err := netlink.AddrAdd(lo, addr); err != nil {
-		t.Fatalf("assign %s to lo: %v", snat, err)
+	for _, tc := range families {
+		addr, err := netlink.ParseAddr(tc.addr.String() + tc.prefix)
+		if err != nil {
+			t.Fatalf("%s parse addr: %v", tc.name, err)
+		}
+		addr.Scope = int(netlink.SCOPE_HOST)
+		if err := netlink.AddrAdd(lo, addr); err != nil {
+			t.Fatalf("%s assign %s to lo: %v", tc.name, tc.addr, err)
+		}
 	}
 
-	if err := InstallRSTSuppression([]netip.Addr{snat}, nil); err != nil {
+	for _, tc := range families {
+		t.Logf("testing %s RST suppression for %s", tc.name, tc.addr)
+		exerciseRSTSuppressionFamily16839(t, tc.addr, tc.network)
+	}
+}
+
+func exerciseRSTSuppressionFamily16839(t *testing.T, snat netip.Addr, network string) {
+	t.Helper()
+	var v4, v6 []netip.Addr
+	if snat.Is4() {
+		v4 = []netip.Addr{snat}
+	} else {
+		v6 = []netip.Addr{snat}
+	}
+	if err := InstallRSTSuppression(v4, v6); err != nil {
 		t.Fatalf("InstallRSTSuppression: %v", err)
 	}
 	before, err := rstDropPackets()
@@ -74,10 +81,11 @@ func TestRSTSuppressionSparesLiveSocketRSTLive16839(t *testing.T) {
 	}
 	t.Logf("counter before: packets=%d", before)
 
-	// Spurious cell: SYN to a closed port on the protected address.
+	// A SYN to a closed port elicits a socketless kernel RST from the
+	// protected source address. It must be dropped in either family.
 	dst := net.JoinHostPort(snat.String(), "44999")
 	for range 3 {
-		c, err := net.DialTimeout("tcp4", dst, 500*time.Millisecond)
+		c, err := net.DialTimeout(network, dst, 500*time.Millisecond)
 		if err == nil {
 			_ = c.Close()
 			t.Fatalf("dial %s unexpectedly succeeded (something is listening)", dst)
@@ -88,26 +96,24 @@ func TestRSTSuppressionSparesLiveSocketRSTLive16839(t *testing.T) {
 	for {
 		mid, err = rstDropPackets()
 		if err != nil {
-			t.Fatalf("read counter after spurious RSTs: %v", err)
+			t.Fatalf("read counter after socketless RSTs: %v", err)
 		}
 		if mid > before || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Logf("counter after spurious RSTs: packets=%d", mid)
+	t.Logf("counter after socketless RSTs: packets=%d", mid)
 	if mid <= before {
-		t.Fatalf("rule counter did not move for conntrack-less RSTs: before=%d after=%d "+
-			"— the socket-wildcard predicate must still admit the kernel's no-socket RST (#16839)", before, mid)
+		t.Fatalf("%s rule counter did not move for socketless RSTs: before=%d after=%d",
+			network, before, mid)
 	}
 
-	// Live-socket cell: server bound to the protected address aborts an
-	// accepted connection with SO_LINGER 0. Its RST is sourced from
-	// the protected address, belongs to a live full socket, and must
-	// be delivered to the client (ECONNRESET), not dropped.
-	ln, err := net.Listen("tcp4", net.JoinHostPort(snat.String(), "44998"))
+	// A live server bound to the protected address aborts an accepted
+	// connection. Its full socket owns the RST, which must reach the client.
+	ln, err := net.Listen(network, net.JoinHostPort(snat.String(), "44998"))
 	if err != nil {
-		t.Fatalf("listen on protected address: %v", err)
+		t.Fatalf("listen on protected address %s: %v", snat, err)
 	}
 	defer ln.Close()
 	accepted := make(chan net.Conn, 1)
@@ -117,7 +123,7 @@ func TestRSTSuppressionSparesLiveSocketRSTLive16839(t *testing.T) {
 			accepted <- c
 		}
 	}()
-	cli, err := net.DialTimeout("tcp4", ln.Addr().String(), 2*time.Second)
+	cli, err := net.DialTimeout(network, ln.Addr().String(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial live-socket control: %v", err)
 	}
@@ -126,10 +132,8 @@ func TestRSTSuppressionSparesLiveSocketRSTLive16839(t *testing.T) {
 	select {
 	case srv = <-accepted:
 	case <-time.After(2 * time.Second):
-		t.Fatalf("server did not accept the live-socket connection")
+		t.Fatal("server did not accept the live-socket connection")
 	}
-	// Let the connection settle so the abort emits a RST for an
-	// established, conntrack-tracked connection.
 	time.Sleep(200 * time.Millisecond)
 	if tc, ok := srv.(*net.TCPConn); ok {
 		if raw, err := tc.SyscallConn(); err == nil {
@@ -144,14 +148,10 @@ func TestRSTSuppressionSparesLiveSocketRSTLive16839(t *testing.T) {
 
 	_ = cli.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, rerr := cli.Read(make([]byte, 16))
-	if rerr == nil {
-		t.Fatalf("client read unexpectedly succeeded after server abort (no RST, no data)")
+	if !errors.Is(rerr, syscall.ECONNRESET) {
+		t.Fatalf("client read error = %v, want ECONNRESET from live socket", rerr)
 	}
-	if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
-		t.Fatalf("client saw NO RST from the live socket on the protected address "+
-			"(read timed out: %v) — the raw-priority rule dropped a live socket's RST (#16839)", rerr)
-	}
-	t.Logf("client observed RST from live socket: %v", rerr)
+	t.Logf("client observed ECONNRESET from live socket: %v", rerr)
 
 	time.Sleep(300 * time.Millisecond)
 	after, err := rstDropPackets()
@@ -160,7 +160,7 @@ func TestRSTSuppressionSparesLiveSocketRSTLive16839(t *testing.T) {
 	}
 	t.Logf("counter after live-socket RST: packets=%d", after)
 	if after != mid {
-		t.Fatalf("counter moved for a live socket's RST from the protected address: mid=%d after=%d "+
-			"— socket-owned RSTs must not be dropped (#16839)", mid, after)
+		t.Fatalf("counter moved for live socket's RST from %s: mid=%d after=%d",
+			snat, mid, after)
 	}
 }
