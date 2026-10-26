@@ -329,12 +329,14 @@ func (d *Daemon) systemSyslogForgetCached(keep map[string]bool) {
 
 // systemSyslogSeedCacheIfEmpty adopts the handler's currently
 // installed clients into the cache on the first vetted apply, keyed by
-// their config host keys with an empty fingerprint. Adoption keeps a
-// pre-installed healthy client alive across its first idempotence-
-// vetted apply (e.g. a client planted before the cache existed); the
-// empty fingerprint means the next apply always re-dials it once, so
-// adoption can never pin a stale construction. Only seeds when the
-// cache is empty, so it runs at most once per daemon.
+// their config host keys with an empty fingerprint. Each installed
+// client is matched by its own remote and source address; foreign
+// destinations are not adopted. Adoption records the per-host
+// association for a pre-installed set (e.g. clients planted before the
+// cache existed) so later cache bookkeeping keys each client to its
+// own host; the empty fingerprint means the next apply always re-dials
+// it once, so adoption can never pin a stale construction. Only seeds
+// when the cache is empty, so it runs at most once per daemon.
 func (d *Daemon) systemSyslogSeedCacheIfEmpty(cfg *config.Config) {
 	d.systemSyslogBuiltMu.Lock()
 	empty := len(d.systemSyslogBuiltByKey) == 0
@@ -352,8 +354,23 @@ func (d *Daemon) systemSyslogSeedCacheIfEmpty(cfg *config.Config) {
 			continue
 		}
 		key := systemSyslogHostKey(host)
+		remoteAddr := net.JoinHostPort(host.Address, strconv.Itoa(systemSyslogHostPort(host)))
+		// Multiple distinct clients for one destination are ambiguous; do not
+		// adopt either, while repeated references to one pointer remain safe.
+		var matching *logging.SyslogClient
+		ambiguous := false
 		for _, c := range installed {
-			byKey[key] = c
+			if c == nil || c.RemoteAddr() != remoteAddr || c.SourceAddr() != host.SourceAddress {
+				continue
+			}
+			if matching != nil && matching != c {
+				ambiguous = true
+				break
+			}
+			matching = c
+		}
+		if matching != nil && !ambiguous {
+			byKey[key] = matching
 		}
 	}
 	d.systemSyslogBuiltMu.Lock()
@@ -1828,8 +1845,11 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 	}
 
 	// First vetted apply after boot/restart: adopt any pre-installed
-	// clients so the preserving swap below does not close a healthy
-	// one merely because the cache had not seen it yet.
+	// clients into the cache (see systemSyslogSeedCacheIfEmpty).
+	// Seeded entries carry an empty fingerprint, so they never match
+	// a real fingerprint below and are always re-dialed/superseded
+	// on this apply; seeding records the per-host association only
+	// and does not keep a seeded client alive across the swap.
 	d.systemSyslogSeedCacheIfEmpty(cfg)
 
 	var clients []*logging.SyslogClient

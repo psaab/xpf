@@ -43,10 +43,10 @@ func rotationSync16859(m *Manager) *SessionSync {
 	return s
 }
 
-// TestRotationLineFabricTransportConnect16859 is the acceptance cell: after
-// an authenticated session-sync connect handshake with a peer signing the
-// current key, the rotation line must report safe to finalize on BOTH
-// nodes (initiator and responder), with no heartbeat ever running.
+// TestRotationLineFabricTransportConnect16859 verifies that session sync
+// reports the peer signing key only to the connect responder. The initiator
+// proves the peer accepts its signing key, not that the peer signs with it,
+// so that side must stay UNKNOWN until it gets a peer-signing observation.
 func TestRotationLineFabricTransportConnect16859(t *testing.T) {
 	// Both nodes at step 4: sign B, accept B+A.
 	m0 := rotationManager16859(t, 0, rotKeyB, rotKeyA)
@@ -80,22 +80,32 @@ func TestRotationLineFabricTransportConnect16859(t *testing.T) {
 		t.Fatalf("both ends must authenticate, got initiator=%d responder=%d", ar.mode, br.mode)
 	}
 
+	// The responder has identified the initiator's signing key. The
+	// initiator's successful handshake only proves its peer accepts B, so
+	// it must keep the peer-signing observation UNKNOWN (#17891).
 	wantID := controlLinkKeyID(rotKeyB)
-	for i, m := range []*Manager{m0, m1} {
-		if got := m.PeerControlKeyID(); got != wantID {
-			t.Fatalf("node%d: PeerControlKeyID = %q, want signing-key id %q — the session-sync "+
-				"handshake must feed the rotation observation in fabric-transport mode (#16859)", i, got, wantID)
-		}
-		if !m.HeartbeatPeerAuthSeen() {
-			t.Fatalf("node%d: the process-lifetime auth bit must still be armed by session sync", i)
-		}
-		if !m.ControlLinkRotationSafeToFinalize() {
-			t.Fatalf("node%d: peer signing the current key must be safe to finalize", i)
-		}
-		if line := m.controlLinkRotationStatus(); !strings.Contains(line, "safe to finalize") {
-			t.Fatalf("node%d: rotation line must report safe to finalize after an authenticated "+
-				"session-sync handshake, got %q", i, line)
-		}
+	if got := m0.PeerControlKeyID(); got != "" {
+		t.Fatalf("initiator: PeerControlKeyID = %q, want unknown because the responder only proved it accepts B (#17891)", got)
+	}
+	if !m0.HeartbeatPeerAuthSeen() {
+		t.Fatal("initiator: the process-lifetime auth bit must still be armed by session sync")
+	}
+	if m0.ControlLinkRotationSafeToFinalize() || !strings.Contains(m0.controlLinkRotationStatus(), "UNKNOWN") {
+		t.Fatalf("initiator: PSK acceptance must not prove peer signing identity or safe finalization, got %q", m0.controlLinkRotationStatus())
+	}
+	if got := m1.PeerControlKeyID(); got != wantID {
+		t.Fatalf("responder: PeerControlKeyID = %q, want signing-key id %q — the session-sync "+
+			"handshake must feed the rotation observation in fabric-transport mode (#16859)", got, wantID)
+	}
+	if !m1.HeartbeatPeerAuthSeen() {
+		t.Fatal("responder: the process-lifetime auth bit must still be armed by session sync")
+	}
+	if !m1.ControlLinkRotationSafeToFinalize() {
+		t.Fatal("responder: peer signing the current key must be safe to finalize")
+	}
+	if line := m1.controlLinkRotationStatus(); !strings.Contains(line, "safe to finalize") {
+		t.Fatalf("responder: rotation line must report safe to finalize after an authenticated "+
+			"session-sync handshake, got %q", line)
 	}
 }
 
@@ -131,26 +141,31 @@ func TestRotationLineFabricTransportPeerOnRetiredKey16859(t *testing.T) {
 		t.Fatalf("node0: line must refuse finalize for a peer on the retired key, got %q", line)
 	}
 
-	// node1 (initiator, signing A) authenticated under A, so it records A as
-	// the peer's key; A IS node1's signing key, so its own line reads safe —
-	// correct: from node1's seat the peer (node0) also accepts/signs in the
-	// B+A window and node1's finalize retires B, which node0 no longer needs
-	// as its additional once it signs B... the predicate is defined against
-	// the local signing key, and this pins that the initiator direction
-	// feeds its own signing key rather than nothing.
-	if got, want := m1.PeerControlKeyID(), controlLinkKeyID(rotKeyA); got != want {
-		t.Fatalf("node1: PeerControlKeyID = %q, want its signing-key id %q", got, want)
+	// The initiator (node1) proved node0 accepts A, but cannot infer node0
+	// signs with A. In this step-3 state node0 still signs B, so reporting
+	// A here would incorrectly tell node1 that retiring its additional B is
+	// safe. This is the fail-on-revert regression for #17891.
+	if got := m1.PeerControlKeyID(); got != "" {
+		t.Fatalf("node1 initiator: PeerControlKeyID = %q, want unknown (PSK acceptance does not identify peer signing key)", got)
+	}
+	if !m1.HeartbeatPeerAuthSeen() {
+		t.Fatal("node1 initiator: successful handshake must still arm the process-lifetime auth bit")
+	}
+	if m1.ControlLinkRotationSafeToFinalize() {
+		t.Fatal("node1 initiator: acceptance of A must not make retiring B safe while node0 signs B")
+	}
+	if line := m1.controlLinkRotationStatus(); !strings.Contains(line, "UNKNOWN") || !strings.Contains(line, "not known safe to finalize") {
+		t.Fatalf("node1 initiator: peer signing key must remain UNKNOWN, got %q", line)
 	}
 }
 
-// TestRotationLineFabricTransportUpgrade16859 covers the second feed the
-// issue names: the #6628 in-place upgrade responder's matched key (and the
-// initiator's round key). An established unauthenticated connection that
-// upgrades under B must feed the rotation line on both ends.
+// TestRotationLineFabricTransportUpgrade16859 verifies that the #6628
+// in-place-upgrade responder records the initiator's signing key, while the
+// initiator's proof of peer acceptance does not report the peer's signing key.
+// An established unauthenticated connection is upgraded under B.
 func TestRotationLineFabricTransportUpgrade16859(t *testing.T) {
-	// Established unauthenticated ends, then both keyed at step 4 (sign B,
-	// accept B+A). Real Managers are the providers so the recorder feed is
-	// the production one.
+	// Both nodes are at step 4 (sign B, accept B+A). Real Managers are the
+	// providers so the recorder feed is the production one.
 	m0 := rotationManager16859(t, 0, rotKeyB, rotKeyA)
 	m1 := rotationManager16859(t, 1, rotKeyB, rotKeyA)
 
@@ -176,12 +191,24 @@ func TestRotationLineFabricTransportUpgrade16859(t *testing.T) {
 	}
 
 	wantID := controlLinkKeyID(rotKeyB)
-	for i, m := range []*Manager{m0, m1} {
-		if got := m.PeerControlKeyID(); got != wantID {
-			t.Fatalf("node%d: PeerControlKeyID = %q, want %q after the #6628 upgrade feed (#16859)", i, got, wantID)
-		}
-		if line := m.controlLinkRotationStatus(); !strings.Contains(line, "safe to finalize") {
-			t.Fatalf("node%d: line must report safe to finalize after the upgrade, got %q", i, line)
-		}
+	if got := m0.PeerControlKeyID(); got != "" {
+		t.Fatalf("initiator: PeerControlKeyID = %q, want unknown because msg2 only proves peer acceptance (#17891)", got)
+	}
+	if !m0.HeartbeatPeerAuthSeen() || m0.ControlLinkRotationSafeToFinalize() {
+		t.Fatalf("initiator: auth proof must arm peer-authenticated state but not safe finalization; bit=%t line=%q",
+			m0.HeartbeatPeerAuthSeen(), m0.controlLinkRotationStatus())
+	}
+	if line := m0.controlLinkRotationStatus(); !strings.Contains(line, "UNKNOWN") {
+		t.Fatalf("initiator: rotation line must stay UNKNOWN after the PSK-acceptance proof, got %q", line)
+	}
+	if got := m1.PeerControlKeyID(); got != wantID {
+		t.Fatalf("responder: PeerControlKeyID = %q, want %q after the #6628 upgrade feed (#16859)", got, wantID)
+	}
+	if !m1.HeartbeatPeerAuthSeen() || !m1.ControlLinkRotationSafeToFinalize() {
+		t.Fatalf("responder: authenticated peer signing with B must be safe to finalize; bit=%t line=%q",
+			m1.HeartbeatPeerAuthSeen(), m1.controlLinkRotationStatus())
+	}
+	if line := m1.controlLinkRotationStatus(); !strings.Contains(line, "safe to finalize") {
+		t.Fatalf("responder: line must report safe to finalize after the upgrade, got %q", line)
 	}
 }
