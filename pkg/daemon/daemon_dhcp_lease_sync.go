@@ -673,8 +673,8 @@ func (d *Daemon) dhcpLeaseAuthority(cfg *config.Config, family int) dhcpserver.L
 // dhcpScopeSetForMasters returns the set of pool CIDRs (per family) the
 // master-filtered config serves under masters, derived from the SAME scope
 // attribution the lease-authority proof uses. A scope the attribution cannot
-// prove (mixed-RG or node-local group) is absent, so an edge touching only
-// such a scope is not gated by #16854.
+// prove is absent; the takeover gate separately refuses to skip work if any
+// configured DHCP group cannot be fully attributed.
 func dhcpScopeSetForMasters(cfg *config.Config, family int, masters map[int]bool) map[string]struct{} {
 	out := make(map[string]struct{})
 	for _, scope := range dhcpLeaseScopeAuthorities(cfg, family, 0, false, masters) {
@@ -685,28 +685,78 @@ func dhcpScopeSetForMasters(cfg *config.Config, family int, masters map[int]bool
 	return out
 }
 
+// dhcpScopeAttributionComplete reports whether every configured pool in a
+// family can be tied to exactly one RG. The takeover fast path may skip only
+// with complete proof; an unattributed, filtered, or mixed-RG group might
+// change its served config even though it is absent from the authority scopes.
+func dhcpScopeAttributionComplete(cfg *config.Config, family int) bool {
+	if cfg == nil {
+		return false
+	}
+	var groups map[string]*config.DHCPServerGroup
+	switch family {
+	case 4:
+		if cfg.System.DHCPServer.DHCPLocalServer != nil {
+			groups = cfg.System.DHCPServer.DHCPLocalServer.Groups
+		}
+	case 6:
+		if cfg.System.DHCPServer.DHCPv6LocalServer != nil {
+			groups = cfg.System.DHCPServer.DHCPv6LocalServer.Groups
+		}
+	}
+	owners := cfg.RethRGOwners()
+	for _, group := range groups {
+		if group == nil {
+			return false
+		}
+		if len(group.Pools) == 0 {
+			continue
+		}
+		if group.MembersFiltered || len(group.Interfaces) == 0 {
+			return false
+		}
+		rgID := 0
+		for i, iface := range group.Interfaces {
+			rg, ok := dhcpLeaseRGForInterface(cfg, iface, owners)
+			if !ok || (i > 0 && rg != rgID) {
+				return false
+			}
+			rgID = rg
+		}
+		for _, pool := range group.Pools {
+			if pool == nil || pool.Subnet == "" {
+				return false
+			}
+			if _, _, err := net.ParseCIDR(pool.Subnet); err != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // dhcpTakeoverWorkNeeded reports whether a MASTER edge for rgID changes the
 // DHCP-served scope set (#16854). The takeover pre-seed quiesces the live Kea
 // (dhcp-disable) and forces a restart, so it must run only when the edge
 // actually moves DHCP ownership. The decision is fail-open: takeover work is
 // skipped ONLY when the edge is provably DHCP-free, i.e. all of:
 //
-//   - rgID owns no attributable DHCP scope (the #10170 attribution, which
-//     requires an unambiguous single-RG group with pools), in either family;
-//   - the attributable served scope set is non-empty (so the attribution is
-//     known to describe this node's DHCP service — otherwise a node-local or
-//     mixed group could be affected and the proof is vacuous);
-//   - the served set with rgID mastered equals the set without it, so the
-//     edge moves no attributable scope.
+//   - rgID owns no DHCP scope this node now serves;
+//   - every configured pool in both families is attributable to one RG;
+//   - the attributable served scope set is non-empty;
+//   - the served set with rgID mastered equals the set without it.
 //
-// Every other shape — no DHCP config at all, an unattributable group, a
-// served set the attribution cannot describe — keeps the legacy takeover
-// behavior. An edge for a DHCP-less RG (the canonical WAN RG) on a node
-// already serving another RG satisfies all three and skips the quiesce,
-// the forced restart, and the peer seed.
+// Every other shape — no DHCP config at all, an unattributable or mixed-RG
+// group, or a served set the attribution cannot describe — keeps the legacy
+// takeover behavior. An edge for a DHCP-less RG (the canonical WAN RG) on a
+// node already serving another RG satisfies all four conditions and skips the
+// quiesce, the forced restart, and the peer seed.
 func dhcpTakeoverWorkNeeded(cfg *config.Config, rgID int, masters map[int]bool) bool {
 	if cfg == nil || !masters[rgID] {
 		return true // cannot prove the edge is DHCP-free; keep legacy behavior
+	}
+	if !dhcpScopeAttributionComplete(cfg, 4) || !dhcpScopeAttributionComplete(cfg, 6) {
+		return true // an unknown group could change service outside the attributed scopes
 	}
 	servedAny := false
 	for _, family := range []int{4, 6} {
