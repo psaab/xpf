@@ -76,3 +76,25 @@ func TestPolicySchedulerAppliedStateAndFailClosed17837(t *testing.T) {
 		t.Fatal("applied accessor aliases manager map")
 	}
 }
+
+func TestBuildSnapshotRetainsUserspaceConfig17837(t *testing.T) {
+	ucfg := config.UserspaceConfig{Binary: "userspace-helper", Workers: 6}
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "nil config"},
+		{name: "configured", cfg: schedCfg10005()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap, err := buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(
+				tc.cfg, ucfg, 1, 0, nil, nil, nil, nil, false)
+			if err != nil {
+				t.Fatalf("build snapshot: %v", err)
+			}
+			if snap.Userspace.Binary != ucfg.Binary || snap.Userspace.Workers != ucfg.Workers {
+				t.Fatalf("snapshot Userspace = %+v, want Binary=%q Workers=%d", snap.Userspace, ucfg.Binary, ucfg.Workers)
+			}
+		})
+	}
+}
