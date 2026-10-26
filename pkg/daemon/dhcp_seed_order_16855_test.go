@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"os"
-	"path/filepath"
 
 	"github.com/psaab/xpf/pkg/dhcpserver"
 )
@@ -135,6 +136,22 @@ func startDHCPLeaseSeedForTesting(t *testing.T, d *Daemon, gen uint64, warnAfter
 	return done
 }
 
+func waitForDHCPApplyWaitStack17884(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	stack := make([]byte, 4<<20)
+	observed := 0
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(stack, true)
+		observed = strings.Count(string(stack[:n]), "waitForDHCPApplyGen(")
+		if observed >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("observed %d DHCP apply-wait stacks, want at least %d", observed, want)
+}
+
 func TestSeedWaitsForTakeoverApply16855(t *testing.T) {
 	sock4 := shortTmpSocket(t, "k4.sock")
 	sock6 := shortTmpSocket(t, "k6.sock")
@@ -218,7 +235,8 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 	v6Kea := &stubKeaServer{}
 	defer v6Kea.start(t, sock6)()
 	d := leaseSyncTestDaemon(t, sock4, sock6, true)
-	d.dhcpLeaseSync.seedWaitStarted = make(chan int, 2)
+	// The seed-wait stack witness below proves it captured both two-second
+	// leases before they expired.
 
 	restarting := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -276,18 +294,9 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 	snapshotsAt := time.Now()
 	done := startDHCPLeaseSeedForTesting(t, d, gen, 200*time.Millisecond)
 
-	waiting := map[int]bool{}
-	deadline := time.After(time.Second)
-	for !waiting[4] || !waiting[6] {
-		select {
-		case family := <-d.dhcpLeaseSync.seedWaitStarted:
-			waiting[family] = true
-			if time.Since(snapshotsAt) >= 2*time.Second {
-				t.Fatalf("#17884: family %d entered its wait only after the two-second lease expired", family)
-			}
-		case <-deadline:
-			t.Fatalf("#17884: seed did not enter both family waits before lease expiry; observed=%v", waiting)
-		}
+	waitForDHCPApplyWaitStack17884(t, 2)
+	if time.Since(snapshotsAt) >= 2*time.Second {
+		t.Fatal("#17884: both family waits began only after the two-second peer lease expired")
 	}
 
 	time.Sleep(2200 * time.Millisecond)
@@ -375,7 +384,6 @@ func TestSeedFamiliesApplyIndependently17884(t *testing.T) {
 			defer kea4.start(t, sock4)()
 			defer kea6.start(t, sock6)()
 			d := leaseSyncTestDaemon(t, sock4, sock6, true)
-			d.dhcpLeaseSync.seedWaitStarted = make(chan int, 2)
 			confDir := t.TempDir()
 			mgr := dhcpserver.NewManagerForTesting(
 				filepath.Join(confDir, "kea-dhcp4.conf"), filepath.Join(confDir, "kea-dhcp6.conf"),
@@ -405,16 +413,6 @@ func TestSeedFamiliesApplyIndependently17884(t *testing.T) {
 			}
 			d.spawnDHCPLeaseSeed(d.applyCancelCtx(), gen, 50*time.Millisecond)
 
-			failedWaitStarted := false
-			deadline := time.After(3 * time.Second)
-			for !failedWaitStarted {
-				select {
-				case family := <-d.dhcpLeaseSync.seedWaitStarted:
-					failedWaitStarted = family == tt.failedFamily
-				case <-deadline:
-					t.Fatalf("seed did not wait on failed family %d", tt.failedFamily)
-				}
-			}
 			healthyFamily := 10 - tt.failedFamily
 			waitFor(t, 3*time.Second, "healthy-family seed", func() bool {
 				if healthyFamily == 4 {
@@ -422,6 +420,7 @@ func TestSeedFamiliesApplyIndependently17884(t *testing.T) {
 				}
 				return len(kea6.adds()) == 1
 			})
+			waitForDHCPApplyWaitStack17884(t, 1)
 			failedAdds := kea4.adds()
 			if tt.failedFamily == 6 {
 				failedAdds = kea6.adds()

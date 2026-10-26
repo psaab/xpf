@@ -211,7 +211,6 @@ func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
 			IAID: 80, LeaseType: "IA_NA", SubnetID: 2, Remaining: 3600, State: 0},
 	})
 
-	d.dhcpLeaseSync.seedWaitStarted = make(chan int, 2)
 	d.applyRethServicesForRG(2)
 
 	if len(rec.preSeed4StillMastering) != 1 || !rec.preSeed4StillMastering[0] {
@@ -240,11 +239,7 @@ func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
 	if len(rec.authorityAsyncCfg) != 1 || rec.authorityAsyncCfg[0] == nil {
 		t.Fatalf("transition did not pass the desired config to ApplyAsyncWithLeaseAuthority")
 	}
-	select {
-	case <-d.dhcpLeaseSync.seedWaitStarted:
-	case <-time.After(time.Second):
-		t.Fatal("HA caller did not start the DHCP seed apply wait")
-	}
+	waitForDHCPApplyWaitStack17884(t, 2)
 	seedJoined := make(chan struct{})
 	go func() {
 		d.dhcpLeaseSync.seedWG.Wait()

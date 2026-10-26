@@ -100,10 +100,6 @@ type dhcpLeaseSyncState struct {
 	// and join it: an unapplied generation would otherwise be waited on
 	// forever, and a fixture that exits first strands a live waiter.
 	seedWG sync.WaitGroup
-	// seedWaitStarted receives family ids when a test-owned seed reaches an
-	// unapplied generation barrier. Production leaves it nil; the witness
-	// makes timing-sensitive expiry tests prove they entered with live rows.
-	seedWaitStarted chan int
 }
 
 // dhcpLeaseSyncEnabled reports whether #2239 lease sync is configured for this
@@ -654,19 +650,9 @@ func (d *Daemon) waitForDHCPApplyGen(ctx context.Context, gen uint64, warnAfter 
 	ticker := time.NewTicker(dhcpLeaseSeedPoll)
 	defer ticker.Stop()
 	nextWarning := time.Now().Add(warnAfter)
-	waitReported := false
 	for {
 		if d.dhcpServer.AppliedGeneration(family) >= gen {
 			return true
-		}
-		if !waitReported {
-			if waiters := d.dhcpLeaseSync.seedWaitStarted; waiters != nil {
-				select {
-				case waiters <- family:
-				default:
-				}
-			}
-			waitReported = true
 		}
 		now := time.Now()
 		if !now.Before(nextWarning) {
