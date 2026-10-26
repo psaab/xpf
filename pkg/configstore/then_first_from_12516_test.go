@@ -420,9 +420,10 @@ func TestThenFirstQuotedAndBracketedFrom12516(t *testing.T) {
 				enterCfg(t, s)
 				err := replay.load(s)
 				if replay.name == "LoadSet" || replay.name == "LoadMerge flat" {
-					// The flat-load contract scrubs the underlying #12516
-					// parser diagnostic (#14718); retain the no-mutation
-					// assertion below without expecting input-derived text.
+					// #14718 intentionally scrubs the path-derived #12516
+					// diagnostic on flat LoadSet/LoadMerge ingress. Match that
+					// public envelope here; the no-mutation check below ensures
+					// the broader refusal match cannot accept a partial apply.
 					if err == nil || !strings.Contains(err.Error(), "invalid set/delete/deactivate/activate/annotate command") {
 						t.Fatalf("%s err = %v, want a scrubbed flat-load refusal", replay.name, err)
 					}
@@ -492,6 +493,9 @@ func TestThenFirstFromLineVerbsRefused12516(t *testing.T) {
 		t.Run(verb, func(t *testing.T) {
 			s := loaded(t)
 			_, err := s.LoadSet(verb + " " + line)
+			// LoadSet's #14718 scrub contract hides the specific #12516
+			// reason; preserve the generic envelope check and assert the
+			// candidate remains unchanged below.
 			if err == nil || !strings.Contains(err.Error(), "invalid set/delete/deactivate/activate/annotate command") {
 				t.Fatalf("LoadSet(%s) err = %v, want a scrubbed flat-load refusal", verb, err)
 			}
@@ -536,6 +540,8 @@ func TestThenFirstFromLineVerbsRefused12516(t *testing.T) {
 		}
 		dst := newTestStore(t)
 		enterCfg(t, dst)
+		// Display-set reload uses the same #14718 scrubbed refusal contract;
+		// do not require path-derived #12516 text from LoadSet here.
 		if _, err := dst.LoadSet(strings.Join(lines, "\n")); err == nil || !strings.Contains(err.Error(), "invalid set/delete/deactivate/activate/annotate command") {
 			t.Fatalf("LoadSet(display set) err = %v, want a scrubbed flat-load refusal", err)
 		}

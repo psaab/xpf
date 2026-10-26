@@ -189,6 +189,7 @@ func TestDuckDNSDualStackNameWarns(t *testing.T) {
 		// SINGLE-FAMILY duckdns name → must NOT warn.
 		"set interfaces ge-0-0-2 unit 1 vlan-id 1",
 		"set interfaces ge-0-0-2 unit 1 family inet dynamic-dns provider duck",
+		"set interfaces ge-0-0-2 unit 1 family inet dynamic-dns hostname v4only.duckdns.org",
 		// A dual-stack name on a NON-duckdns backend → must NOT warn (cloudflare
 		// has a real per-family API; only duckdns has the clobber).
 		"set system services dynamic-dns provider cf backend cloudflare",
@@ -196,6 +197,7 @@ func TestDuckDNSDualStackNameWarns(t *testing.T) {
 		"set system services dynamic-dns provider cf zone example.net",
 		"set interfaces ge-0-0-2 unit 2 vlan-id 2",
 		"set interfaces ge-0-0-2 unit 2 family inet dynamic-dns provider cf",
+		"set interfaces ge-0-0-2 unit 2 family inet dynamic-dns hostname dual.example.net",
 		"set interfaces ge-0-0-2 unit 2 family inet6 dynamic-dns provider cf",
 		"set interfaces ge-0-0-2 unit 2 family inet6 dynamic-dns hostname dual.example.net",
 	})
@@ -242,12 +244,14 @@ func TestDyndns2DualStackNameWarns(t *testing.T) {
 		// SINGLE-FAMILY dyndns2 name → must NOT warn.
 		"set interfaces ge-0-0-2 unit 1 vlan-id 1",
 		"set interfaces ge-0-0-2 unit 1 family inet dynamic-dns provider dd2",
+		"set interfaces ge-0-0-2 unit 1 family inet dynamic-dns hostname v4only.example.net",
 		// A dual-stack name on a per-family backend → must NOT warn (cloudflare).
 		"set system services dynamic-dns provider cf backend cloudflare",
 		"set system services dynamic-dns provider cf api-token cf-secret",
 		"set system services dynamic-dns provider cf zone example.net",
 		"set interfaces ge-0-0-2 unit 2 vlan-id 2",
 		"set interfaces ge-0-0-2 unit 2 family inet dynamic-dns provider cf",
+		"set interfaces ge-0-0-2 unit 2 family inet dynamic-dns hostname dual.example.net",
 		"set interfaces ge-0-0-2 unit 2 family inet6 dynamic-dns provider cf",
 		"set interfaces ge-0-0-2 unit 2 family inet6 dynamic-dns hostname dual.example.net",
 	})
