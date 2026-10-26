@@ -214,17 +214,24 @@ editing cmdtree.
   `change-configuration` policy silently fails until it is keyed. Note also that session sync fixes a
   connection's auth state at connect and committing the key does not
   restart cluster comms, so an established stream stays unauthenticated
-  until a daemon restart (#6628); config-sync carries the PSK in the
-  clear over that HMAC-only link, so the key must be provisioned
-  out-of-band (#6629); and rotation has no key overlap, making a
+  until a daemon restart (#6628); config-sync used to carry the PSK in
+  the clear over that HMAC-only link, but since #6629 the config-sync
+  payload is sealed per connection, and on an authenticated connection
+  there is no cleartext fallback at all (#15041) — the key must still be
+  provisioned out-of-band, as bootstrap trust for the first still-unkeyed
+  (active-MITM-open) connection, not because a same-vintage push would
+  expose it in cleartext; against a pre-#6629 peer the push still falls
+  back to cleartext under the latched `Config cleartext` alarm
+  (#6629; rotate the PSK once the mixed-version window closes); and rotation has no key overlap, making a
   mismatch a ~1s dual-master window rather than an auth hiccup (#6630).
   Operator guidance — generation, distribution, rolling rollout with the
   required restart, rotation — is in `pkg/cluster/README.md` →
   "Operating the control-link PSK (#6611)". The stronger residuals —
   removing the remaining identical-request / stream replay horizon (mTLS with
   per-node certs and stream request binding or a nonce challenge) and giving
-  the session-sync stream CONFIDENTIALITY (#6629 — it is HMAC-authenticated
-  today, F23 having landed, but not encrypted, so a config-sync push crosses it
+  the session-sync stream as a whole CONFIDENTIALITY beyond the sealed
+  config-sync payload (it remains HMAC-authenticated but not encrypted,
+  apart from that payload) — remain deferred (see `pkg/cluster/README.md`).
   in cleartext) — remain deferred (see `pkg/cluster/README.md`).
   - **No allowlisted RPC may render a configured secret (#6532).** Being on
     this allowlist means being reachable from the peer chassis over the
