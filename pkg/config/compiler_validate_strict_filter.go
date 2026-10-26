@@ -2440,10 +2440,12 @@ func validateFirewallPolicerThenConflictStrict(cfg *Config) error {
 }
 
 // flexMatchValueMissingWarning returns an operator-visible warning for a
-// value-less flexible-match-range admitted on the tolerant compile path.
-// It names the first such term deterministically; builders refuse the
-// candidate snapshot so prior-good state is retained (#16849).
-func flexMatchValueMissingWarning(cfg *Config) string {
+// value-less flexible-match-range admitted on a compile path. It names the
+// first such term deterministically; builders refuse the candidate snapshot
+// so prior-good state is retained (#16849). On the strict path, only terms
+// exempted from the missing-value rejection are warned; the tolerant path
+// retains its warning for all value-less terms (#17885).
+func flexMatchValueMissingWarning(cfg *Config, strict bool) string {
 	if cfg == nil {
 		return ""
 	}
@@ -2462,9 +2464,13 @@ func flexMatchValueMissingWarning(cfg *Config) string {
 				continue
 			}
 			for _, term := range f.Terms {
-				if term != nil && term.FlexMatch != nil && term.FlexMatch.ValueMissing {
-					return fmt.Sprintf("firewall family %s filter %q term %q: flexible-match-range has no match-value; accepted on this compile path but the dataplane refuses the candidate snapshot (prior-good retained) until a match-value is configured (#15943/#16849)", family.name, name, term.Name)
+				if term == nil || term.FlexMatch == nil || !term.FlexMatch.ValueMissing {
+					continue
 				}
+				if strict && (term.Action == FilterActionDiscard || term.Action == FilterActionReject) {
+					continue
+				}
+				return fmt.Sprintf("firewall family %s filter %q term %q: flexible-match-range has no match-value; accepted on this compile path but the dataplane refuses the candidate snapshot (prior-good retained) until a match-value is configured (#15943/#16849)", family.name, name, term.Name)
 			}
 		}
 	}

@@ -8,7 +8,7 @@ import (
 // #16810: in an active/active RG split both nodes run OSPF under the
 // same router-id (explicit or inherited), so the area keeps only one
 // node's RETH prefixes. The gate rejects at strict commit (warns on
-// tolerant load) a shared OSPF/OSPFv3 router-id or IS-IS NET whose
+// tolerant load) a shared OSPF/OSPFv3 router-id or IS-IS system ID whose
 // interfaces span RETHs of more than one data RG, and excuses the
 // Junos `${node}` groups idiom when each node view is distinct.
 //
@@ -221,6 +221,66 @@ protocols { ospf { area 0.0.0.0 { interface reth0.0; interface reth1.0; } } }
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatal("strict commit accepted identical node0/node1 router-ids spanning RG1+RG2 (#16810)")
 	}
+}
+
+// A NET area is not part of the IS-IS system ID. Different areas with the same
+// system ID must not excuse both node views from the single-participant belt.
+// FAIL-ON-REVERT: comparing complete canonical NETs accepts the shared system
+// ID case below.
+func TestClusterIGPNodeGroupsISISSameSystemIDDifferentAreaRejected17874(t *testing.T) {
+	tree := clusterISISNodeGroupsTree17874(t, "49.0002.0100.0000.0001.00")
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatal("strict commit accepted different-area NETs with one shared IS-IS system ID")
+	}
+}
+
+func TestClusterIGPNodeGroupsISISDistinctSystemIDsAcrossAreasAccepted17874(t *testing.T) {
+	tree := clusterISISNodeGroupsTree17874(t, "49.0002.0100.0000.0002.00")
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("strict commit rejected distinct IS-IS system IDs across areas: %v", err)
+	}
+}
+
+func TestCanonicalISISSystemIDIgnoresArea17874(t *testing.T) {
+	systemID := "010000000001"
+	for _, net := range []string{
+		"49.0001.0100.0000.0001.00",
+		"49.0002.0100.0000.0001.00",
+	} {
+		if got := CanonicalISISSystemID(net); got != systemID {
+			t.Errorf("CanonicalISISSystemID(%q) = %q, want %q", net, got, systemID)
+		}
+	}
+	if got := CanonicalISISSystemID("49.0002.0100.0000.0002.00"); got == systemID {
+		t.Errorf("different system ID canonicalized to shared ID %q", got)
+	}
+	if got := CanonicalISISSystemID("invalid"); got != "" {
+		t.Errorf("invalid NET system ID = %q, want empty", got)
+	}
+}
+
+func clusterISISNodeGroupsTree17874(t *testing.T, node1NET string) *ConfigTree {
+	t.Helper()
+	src := `groups {
+  node0 { protocols { isis { net 49.0001.0100.0000.0001.00; } } }
+  node1 { protocols { isis { net node1NET; } } }
+}
+apply-groups "${node}";
+chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-17874-long; node 0; reth-count 2; no-private-rg-election;
+  redundancy-group 0 { node 0 priority 200; node 1 priority 100; }
+  redundancy-group 1 { node 0 priority 200; node 1 priority 100; }
+  redundancy-group 2 { node 0 priority 100; node 1 priority 200; } } }
+interfaces {
+  ge-0/0/1 { gigether-options { redundant-parent reth0; } }
+  ge-7/0/1 { gigether-options { redundant-parent reth0; } }
+  reth0 { redundant-ether-options { redundancy-group 1; } unit 0 { family inet { address 198.51.100.1/24; } } }
+  ge-0/0/2 { gigether-options { redundant-parent reth1; } }
+  ge-7/0/2 { gigether-options { redundant-parent reth1; } }
+  reth1 { redundant-ether-options { redundancy-group 2; } unit 0 { family inet { address 203.0.113.1/24; } } }
+}
+protocols { isis { interface reth0.0; interface reth1.0; } }
+`
+	return parseHierText(t, strings.ReplaceAll(src, "node1NET", node1NET))
 }
 
 // Tolerant load: warns, still compiles (#1960).

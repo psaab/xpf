@@ -191,6 +191,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			Manager() *dpuserspace.Manager
 		}); ok {
 			if mgr := adapter.Manager(); mgr != nil {
+				dpuserspace.SetRethRecoveryExclusions(mgr, d.lastRethMembers)
 				mgr.SetIngressFoldResolver(buildIngressFoldResolver(cfg))
 				mgr.SetCaptureEpochProvider(func(configGeneration uint64, fibGeneration uint32) (
 					uint64,
@@ -226,6 +227,9 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	d.policyInvalidationPublishLanded = true
 	if rt := d.dataplane(); rt != nil {
 		var err error
+		if manager, ok := rt.(*dataplane.Manager); ok {
+			dataplane.SetRethRecoveryExclusions(manager, d.lastRethMembers)
+		}
 		applyResult, err = rt.ApplyConfig(context.Background(), cfg)
 		var publishedTailErr *dpuserspace.PublishedSnapshotTailError
 		publishedTail := errors.As(err, &publishedTailErr)
@@ -355,7 +359,14 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// persists and the retry debt is destroyed. errors.Join preserves any error
 	// the later networkd.Apply also records.
 	if cfg.Chassis.DeviceMap.Active() {
-		if err := teardownUnmappedManaged(cfg.Chassis.DeviceMap, protectedForConfig(cfg)); err != nil {
+		renamedNames, err := teardownUnmappedManaged(cfg.Chassis.DeviceMap, protectedForConfig(cfg))
+		for former, current := range renamedNames {
+			if _, tracked := d.lastRethMembers[former]; tracked {
+				delete(d.lastRethMembers, former)
+				d.lastRethMembers[current] = struct{}{}
+			}
+		}
+		if err != nil {
 			slog.Warn("device-map teardown failed; retaining durable state, failing commit closed",
 				"err", err)
 			result.Phase.Networkd = errors.Join(result.Phase.Networkd, err)
@@ -434,10 +445,16 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		currentRethMembers[config.LinuxIfName(physName)] = struct{}{}
 	}
 	if d.cluster != nil && cfg.Chassis.Cluster != nil {
+		// #17890: lastRethMembers records actual virtual-MAC owners and
+		// failed-restore obligations, not every desired RETH name. A former
+		// member whose restore fails stays pending, while a missing member
+		// that was never present must not become a permanent restore debt.
 		for _, former := range formerRethMembers(d.lastRethMembers, currentRethMembers) {
 			cycled, keptLease, restoreErr := d.restoreFormerRethMemberMAC(former)
 			if restoreErr != nil {
 				result.Phase.Networkd = errors.Join(result.Phase.Networkd, restoreErr)
+			} else {
+				delete(d.lastRethMembers, former)
 			}
 			if keptLease {
 				rethRollbackKeptLease = true
@@ -446,7 +463,6 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				needLinkCycleRecovery = true
 			}
 		}
-		d.lastRethMembers = currentRethMembers
 	} else {
 		// Advance the record even when this apply is not clustered: a later
 		// clustered apply must not treat members from before a non-clustered
@@ -455,8 +471,12 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	}
 	if d.cluster != nil && cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
+		// #17890: retain prior identities in addition to configured names;
+		// failed former-MAC restores must not be reclaimed for a replacement.
 		rethMemberNames := cfg.ConfiguredLinuxNames()
-
+		for former := range d.lastRethMembers {
+			rethMemberNames[former] = struct{}{}
+		}
 		// #5103: the AF_XDP worker join is handed to programRethMAC as a
 		// beforeCycle hook rather than run after it returns. Whether a cycle
 		// is needed is only knowable by attempting the live MAC set, so the
@@ -481,11 +501,15 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				continue
 			}
 			linuxName := config.LinuxIfName(physName)
+			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, rethIndex, cc.NodeID)
+			legacyMAC := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, 0, cc.NodeID)
+			memberHadVirtualMAC := false
 			// If the interface doesn't exist under its config name, find it by
 			// its indexed MAC, or by the legacy shared MAC when upgrading.
-			if _, err := rethLinkOpsFn.byName(linuxName); err != nil {
-				mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, rethIndex, cc.NodeID)
-				legacyMAC := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, 0, cc.NodeID)
+			if link, err := rethLinkOpsFn.byName(linuxName); err == nil {
+				memberHadVirtualMAC = bytes.Equal(link.Attrs().HardwareAddr, mac) ||
+					bytes.Equal(link.Attrs().HardwareAddr, legacyMAC)
+			} else {
 				var renameRuntime dataplane.RuntimeDataPlane
 				renamePrepared := false
 				renameJoin := func() error {
@@ -501,6 +525,12 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				}
 				oldName, renameCycled, renameErr := renameRethMember(
 					linuxName, mac, legacyMAC, rethMemberNames, renameJoin)
+				// renameRethMember returns the old name only after it changed
+				// the candidate's name; its indexed or legacy virtual-MAC
+				// ownership remains an obligation if programming fails.
+				if oldName != "" {
+					memberHadVirtualMAC = true
+				}
 				if renameErr != nil {
 					slog.Warn("failed to recover RETH member interface",
 						"to", linuxName, "err", renameErr)
@@ -535,13 +565,25 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// programming — the MACAddress= line might reference the wrong one.
 			ensureRethLinkOriginalName(linuxName)
 			setRethIPv6Knobs(linuxName)
-			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, rethIndex, cc.NodeID)
 			var memberMACChanged bool
 			result.Phase.Networkd, needLinkCycleRecovery, rethRollbackKeptLease, memberMACChanged =
 				d.programRethMemberMAC(linuxName, mac, result.Phase.Networkd,
 					needLinkCycleRecovery, rethRollbackKeptLease)
 			if memberMACChanged {
 				macChangedRGs[rethCfg.RedundancyGroup] = true
+			}
+			trackedMember := memberMACChanged || memberHadVirtualMAC
+			if !trackedMember {
+				if link, err := rethLinkOpsFn.byName(linuxName); err == nil {
+					trackedMember = bytes.Equal(link.Attrs().HardwareAddr, mac) ||
+						bytes.Equal(link.Attrs().HardwareAddr, legacyMAC)
+				}
+			}
+			if trackedMember {
+				if d.lastRethMembers == nil {
+					d.lastRethMembers = make(map[string]struct{})
+				}
+				d.lastRethMembers[linuxName] = struct{}{}
 			}
 			if err := d.finishRethMemberLinkTail(linuxName, mac, rethCfg); err != nil {
 				result.Phase.Networkd = errors.Join(result.Phase.Networkd, err)

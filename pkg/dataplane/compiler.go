@@ -219,11 +219,16 @@ type CompileResult struct {
 	// used by the networkd manager to generate .link and .network files.
 	ManagedInterfaces []networkd.InterfaceConfig
 
+	// rethRecoveryExclusions carries the daemon's previous RETH member
+	// identities into compiler recovery so a pending former member cannot be
+	// claimed as a replacement for a missing current member.
+	rethRecoveryExclusions map[string]struct{}
+
 	// ifCache avoids redundant net.InterfaceByName and netlink.LinkByName
 	// syscalls across compile phases. Lazily populated on first access.
 	ifCache    map[string]*net.Interface
 	linkCache  map[string]netlink.Link // by name
-	linkIdxMap map[int]netlink.Link    // by ifindex
+	linkIdxMap map[int]netlink.Link
 
 	// rxTagStripOffCache caches interfaces where both XDP-invisible VLAN RX
 	// strip offloads are confirmed disabled or absent. The checks are shared
@@ -509,6 +514,17 @@ func assignScreenIDs(result *CompileResult, cfg *config.Config) {
 // pre-mutation callback) still return nil: nothing has mutated, so there is
 // nothing to account for. Callers must check err first and only consume the
 // result for accounting on the post-mutation path.
+type rethRecoveryExclusionProvider interface {
+	rethRecoveryExclusionsSnapshot() map[string]struct{}
+}
+
+func rethRecoveryExclusionsFor(dp DataPlane) map[string]struct{} {
+	if provider, ok := dp.(rethRecoveryExclusionProvider); ok {
+		return provider.rethRecoveryExclusionsSnapshot()
+	}
+	return nil
+}
+
 func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMutation ...func(*CompileResult) error) (*CompileResult, error) {
 	if len(beforeMutation) > 1 {
 		return nil, fmt.Errorf("CompileConfig accepts at most one pre-mutation callback")
@@ -520,7 +536,9 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMut
 		return nil, fmt.Errorf("dataplane not loaded")
 	}
 
+	rethRecoveryExclusions := rethRecoveryExclusionsFor(dp)
 	result := newValidationResult()
+	result.rethRecoveryExclusions = rethRecoveryExclusions
 
 	// Phase 1: Assign STABLE zone IDs (#3075).
 	assignZoneIDs(result, cfg)
@@ -539,6 +557,7 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMut
 	// than half-applied. See compiler_validate_4960.go for what is and is not
 	// covered, and why this is additive rather than a reordering.
 	preflightResult := newValidationResult()
+	preflightResult.rethRecoveryExclusions = rethRecoveryExclusions
 	if err := validateBeforeMutateWithResult(discardingDataPlane{}, cfg, preflightResult); err != nil {
 		return nil, err
 	}
@@ -665,7 +684,38 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMut
 	return result, nil
 }
 
-// Compile translates a typed Config into eBPF map entries and attaches programs.
+// SetRethRecoveryExclusions records prior RETH member identities that the
+// compiler must protect from missing-member recovery until permanent-MAC
+// restoration completes.
+func SetRethRecoveryExclusions(m *Manager, names map[string]struct{}) {
+	if m == nil {
+		return
+	}
+	var copied map[string]struct{}
+	if len(names) > 0 {
+		copied = make(map[string]struct{}, len(names))
+		for name := range names {
+			copied[name] = struct{}{}
+		}
+	}
+	m.mu.Lock()
+	m.rethRecoveryExclusions = copied
+	m.mu.Unlock()
+}
+
+func (m *Manager) rethRecoveryExclusionsSnapshot() map[string]struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.rethRecoveryExclusions) == 0 {
+		return nil
+	}
+	copied := make(map[string]struct{}, len(m.rethRecoveryExclusions))
+	for name := range m.rethRecoveryExclusions {
+		copied[name] = struct{}{}
+	}
+	return copied
+}
+
 func (m *Manager) Compile(cfg *config.Config) (*CompileResult, error) {
 	result, err := CompileConfig(m, cfg, m.lastCompile != nil)
 	if err != nil {

@@ -850,8 +850,11 @@ func (m *Manager) generatePolicyOptionsWithRefNodes15158(po *config.PolicyOption
 		}
 		for _, scope := range qnhMetrics.scopes() {
 			if routeMap := scope.policyMaps[name]; routeMap != "" {
-				b.WriteString(m.renderQNHMetricPolicyMapCluster15158(po, routeMap, ps, scope, clusterMode))
-				b.WriteString("!\n")
+				for _, ctx := range qnhMetricPolicyVariants11447(referencedNodes[name]) {
+					variantMap := qnhMetricPolicyVariantRouteMap11447(routeMap, ctx)
+					b.WriteString(m.renderQNHMetricPolicyVariantCluster15158(po, variantMap, ps, scope, ctx, clusterMode))
+					b.WriteString("!\n")
+				}
 			}
 		}
 	}
@@ -1050,6 +1053,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 	var b strings.Builder
 	seq := startSeq
 	for _, term := range ps.Terms {
+		termFallthroughTarget := "on-match next"
 		// The compiler normalizes the quoted-then `next-hop reject` diversion
 		// to Action=reject (#12517); the ordinary action mapping below keeps
 		// tolerant FRR rendering denied rather than flipping it to permit.
@@ -1691,7 +1695,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			if validNextPolicy {
 				fmt.Fprintf(&b, " %s\n", nextPolicySequenceMarker)
 			} else if nonTerminating {
-				b.WriteString(" on-match next\n")
+				fmt.Fprintf(&b, " %s\n", termFallthroughTarget)
 			}
 
 			b.WriteString("exit\n")
@@ -1742,14 +1746,12 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		}
 
 		// #16835 orphan chain (permit-only goto encoding; see
-		// community_chain_16835.go): a term whose only match
-		// dimension is chains — every distinct community alternative
-		// a rendered chain, no sibling dimension — renders per-member
-		// goto slots plus the term body, instead of the Cartesian
-		// variant loop below. Checked before the dangling arms so a
-		// taken chain never lowers to deny-all; its lists are
-		// rendered by construction. Mixed/untaken terms fall through
-		// to the historical dispatch untouched.
+		// community_chain_16835.go): a term whose only match dimension is
+		// chains — every distinct alternative a rendered chain, no sibling
+		// dimension — renders per-member goto slots plus a shared term body.
+		// Single-chain mixed terms use a chain gate before their sibling
+		// variants at the dispatch below. Other mixed shapes retain the
+		// historical community-list match.
 		if communityOrphanTerm16835(po, term) {
 			chainStart := seq
 			alternatives := dedupStringsKeepOrder(term.FromCommunity)
@@ -1759,9 +1761,14 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			}
 			bodySeq := chainStart + totalSlots*10
 			nextSeq := bodySeq + 10
-			for _, alt := range alternatives {
-				communityMemberChainSequences16835(&b, routeMapName, alt, communityChainMembers16835(po, alt), chainStart, bodySeq, nextSeq)
-				chainStart += communityChainSlots16835(po, alt) * 10
+			for i, alt := range alternatives {
+				altSlots := communityChainSlots16835(po, alt)
+				failSeq := nextSeq
+				if i+1 < len(alternatives) {
+					failSeq = chainStart + altSlots*10
+				}
+				communityMemberChainSequences16835(&b, routeMapName, alt, communityChainMembers16835(po, alt), chainStart, bodySeq, failSeq)
+				chainStart += altSlots * 10
 			}
 			// The body is the historical term sequence minus its
 			// `match community` line (already split per member).
@@ -1778,7 +1785,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// (fromPrefixListRefs): a single-family list yields one ref (unchanged
 		// output), a mixed v4+v6 list yields an ip ref and an ipv6 ref so BOTH
 		// families bind a family-correct match line (#2607).
-		emitVariants := func(seqFam string, rfs []indexedRouteFilter, famPL string) {
+		emitVariantsForCommunities := func(seqFam string, rfs []indexedRouteFilter, famPL string, communities []string) {
 			for _, plName := range orElseEmpty(term.PrefixList) {
 				// #14136: never emit a dangling `match ... prefix-list`
 				// (see the term rule above). "" is the no-match sentinel,
@@ -1792,19 +1799,19 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 					if plRef.name != "" && prefixListRefMissingAtRender(po, plRef.name, plRef.matchKW) {
 						continue
 					}
-					for _, comm := range orElseEmpty(term.FromCommunity) {
+					for _, comm := range communities {
 						// #10822: never emit a dangling `match community`
 						// (see the term rule above). "" is the no-match
-						// sentinel, never dangling. Reject terms never
-						// reach here with a dangling ref (deny-all above).
+						// sentinel, never dangling. Reject terms never reach
+						// here with a dangling ref (deny-all above).
 						if danglingCommunity[comm] {
 							continue
 						}
 						for _, asp := range orElseEmpty(term.FromASPath) {
 							// #9881: never emit a dangling `match as-path`
 							// (see the term rule above). "" is the no-match
-							// sentinel, never dangling. Reject terms never
-							// reach here with a dangling ref (deny-all above).
+							// sentinel, never dangling. Reject terms never reach
+							// here with a dangling ref (deny-all above).
 							if danglingAsp[asp] {
 								continue
 							}
@@ -1821,6 +1828,70 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 					}
 				}
 			}
+		}
+		emitVariantsForCommunity := func(seqFam string, rfs []indexedRouteFilter, famPL, comm string) {
+			emitVariantsForCommunities(seqFam, rfs, famPL, []string{comm})
+		}
+		emitVariants := func(seqFam string, rfs []indexedRouteFilter, famPL string) {
+			emitVariantsForCommunities(seqFam, rfs, famPL, orElseEmpty(term.FromCommunity))
+		}
+		// Count the actual mixed-chain body variants before emission so
+		// continuation targets are final when each sequence is written.
+		// This mirrors emitVariantsForCommunities' dangling-ref skips
+		// without allocating its per-prefix-list family-ref slices.
+		mixedChainBodyVariantCount := func() int {
+			prefixListRefs := 0
+			if len(term.PrefixList) == 0 {
+				prefixListRefs = 1
+			} else {
+				for _, plName := range term.PrefixList {
+					if plName == "" {
+						prefixListRefs++
+						continue
+					}
+					if danglingPrefixList[plName] {
+						continue
+					}
+					hasV4, hasV6 := config.PrefixListFamilies(po.PrefixLists[plName])
+					if hasV4 && !prefixListRefMissingAtRender(po, plName, "ip") {
+						prefixListRefs++
+					}
+					if hasV6 && !prefixListRefMissingAtRender(po, plName, "ipv6") {
+						prefixListRefs++
+					}
+				}
+			}
+			asPathRefs := len(term.FromASPath)
+			if asPathRefs == 0 {
+				asPathRefs = 1
+			} else {
+				asPathRefs = 0
+				for _, asp := range term.FromASPath {
+					if !danglingAsp[asp] {
+						asPathRefs++
+					}
+				}
+			}
+			protocolRefs := len(protocols)
+			if protocolRefs == 0 {
+				protocolRefs = 1
+			}
+			familyRefs := 1
+			if mixedFamily {
+				familyRefs = 2
+			}
+			maxInt := int(^uint(0) >> 1)
+			count := 1
+			for _, dimension := range [...]int{prefixListRefs, asPathRefs, protocolRefs, familyRefs} {
+				if dimension == 0 {
+					return 0
+				}
+				if count > maxInt/dimension {
+					return maxInt
+				}
+				count *= dimension
+			}
+			return count
 		}
 		// emitPartialPrefixListDeny14700 renders one bare deny-all per
 		// dropped family of a partially-dangling reject term (#14700).
@@ -1874,7 +1945,45 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			slog.Warn("frr: term route-filter absent from frr.conf; skipping dangling match",
 				"route_map", routeMapName, "term", term.Name)
 		}
-		if mixedFamily {
+		if config.CommunityMixedChainTermCanLower16869(po, term, hasPartialDanglingPrefixList) {
+			// The sole chain alternative gates the shared Cartesian body:
+			// member failure skips the term, while success still requires every
+			// sibling match. A matched nonterminating variant jumps past the
+			// remaining variants so an overlapping OR cannot repeat set actions.
+			publicName := term.FromCommunity[0]
+			chainStart := seq
+			bodySeq := chainStart + communityChainSlots16835(po, publicName)*10
+			if nonTerminating && !validNextPolicy {
+				if variants := mixedChainBodyVariantCount(); variants > 1 {
+					termFallthroughTarget = fmt.Sprintf("on-match goto %d", bodySeq+variants*10)
+				}
+			}
+			seq = bodySeq
+			if mixedFamily {
+				if v4Dangling {
+					emitDanglingGroup()
+				} else {
+					emitVariantsForCommunity("v4", v4rf, inlinePrefixListName(routeMapName, plPrefix, term.Name, "_v4"), "")
+				}
+				if v6Dangling {
+					emitDanglingGroup()
+				} else {
+					emitVariantsForCommunity("v6", v6rf, inlinePrefixListName(routeMapName, plPrefix, term.Name, "_v6"), "")
+				}
+				emitPartialPrefixListDeny14700()
+			} else if singleDangling {
+				emitDanglingGroup()
+			} else {
+				all := make([]indexedRouteFilter, len(term.RouteFilters))
+				for i, rf := range term.RouteFilters {
+					all[i] = indexedRouteFilter{i, rf}
+				}
+				emitVariantsForCommunity("", all, inlinePrefixListName(routeMapName, plPrefix, term.Name, ""), "")
+				emitPartialPrefixListDeny14700()
+			}
+			communityMemberChainSequences16835(&b, routeMapName, publicName,
+				communityChainMembers16835(po, publicName), chainStart, bodySeq, seq)
+		} else if mixedFamily {
 			if v4Dangling {
 				emitDanglingGroup()
 			} else {
