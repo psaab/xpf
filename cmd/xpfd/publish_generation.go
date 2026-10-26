@@ -57,28 +57,13 @@ func runPublishGenerationSubcommand(args []string) {
 		os.Exit(1)
 	}
 	defer func() { _ = h.Release() }()
-	versionOutput, err := exec.Command("dpkg-query", "-W", "-f=${Version}", "xpf").Output()
+	packageVersion, err := queryInstalledPackageVersion()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "publish-generation: read installed Debian package version: %v\n", err)
+		fmt.Fprintf(os.Stderr, "publish-generation: %v\n", err)
 		os.Exit(1)
 	}
-	packageVersion := strings.TrimSpace(string(versionOutput))
-	if err := upgrade.ValidateDebianPackageVersion(packageVersion); err != nil {
-		fmt.Fprintf(os.Stderr, "publish-generation: installed package version is not orderable: %v\n", err)
-		os.Exit(1)
-	}
-
-	// #10848 (B1): the postinst runs the JUST-UNPACKED package's xpfd, so
-	// a replayed pre-floor .deb would otherwise publish and cut with no
-	// floor logic at all. The unpack-time dpkg-query IS this binary's
-	// candidate ordinal: check it against the enrolled floor BEFORE
-	// publishing, from the durable floor file (which lives outside the
-	// package payload). Refusal ("this package is below the floor") vs
-	// silent postinst warning distinguishes attacker replay from a
-	// legitimate older repair only via the named rollback path — the
-	// operator clears/reinstalls deliberately in that case.
-	if ferr := upgrade.CheckBinaryFloorAt(upgrade.DefaultBinaryFloorPath, packageVersion); ferr != nil {
-		fmt.Fprintf(os.Stderr, "publish-generation: %v\n", ferr)
+	if err := gatePublishOnBinaryFloor(upgrade.DefaultBinaryFloorPath, packageVersion); err != nil {
+		fmt.Fprintf(os.Stderr, "publish-generation: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -154,6 +139,34 @@ func parsePublishGenerationArgs(args []string) (publishGenerationFlags, error) {
 		stagedGenDir: *stagedGenDir,
 		journalPath:  *journalPath,
 	}, nil
+}
+
+
+// queryInstalledPackageVersion reads the just-unpacked package's own
+// Debian version from dpkg status. It is the only candidate ordinal
+// the publish path trusts: postinst runs after unpack, so the value
+// describes THIS binary's package, never a caller-supplied identity.
+func queryInstalledPackageVersion() (string, error) {
+	versionOutput, err := exec.Command("dpkg-query", "-W", "-f=${Version}", "xpf").Output()
+	if err != nil {
+		return "", fmt.Errorf("read installed Debian package version: %w", err)
+	}
+	packageVersion := strings.TrimSpace(string(versionOutput))
+	if err := upgrade.ValidateDebianPackageVersion(packageVersion); err != nil {
+		return "", fmt.Errorf("installed package version is not orderable: %w", err)
+	}
+	return packageVersion, nil
+}
+
+// gatePublishOnBinaryFloor is the #10848 B1 pre-publish gate: refuse a
+// replayed below-floor package BEFORE any generation is published or
+// cut. Extracted (and unit-tested) so deleting the call from the verb
+// fails a test — the blind spot that produced B1.
+func gatePublishOnBinaryFloor(floorPath, packageVersion string) error {
+	if err := upgrade.ValidateDebianPackageVersion(packageVersion); err != nil {
+		return fmt.Errorf("installed package version is not orderable: %w", err)
+	}
+	return upgrade.CheckBinaryFloorAt(floorPath, packageVersion)
 }
 
 // gcProtectionForPublish computes the staged-generation GC protection set for
