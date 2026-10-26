@@ -5,8 +5,10 @@
 //! alloc/release (measured p50 391ns @M=1 -> 12,928ns @M=8, ~59%
 //! contended @M=8). The flow map now lives in 16 shards keyed by
 //! FxHash of the flow key; persistent-lease / ownership / GC state
-//! stays in the retained `live` mutex (not on the non-persistent
-//! new-flow hot path).
+//! stays in the retained `live` RwLock. PAT admission also takes the
+//! `live` write guard to make the reverse-identity check and owner
+//! publication atomic with the flow insert: it tries the guard first,
+//! and falls back to the serialized path on contention.
 //!
 //! Cap exactness (fold 2): the shared ADMISSION counter is the
 //! one atomic every new-slot path must win before inserting —
@@ -23,19 +25,19 @@
 //! or rolls back. Never overshoots, never falsely exhausts
 //! once in-flight admits settle (#4676 F4).
 //! Holder-mask mutation stays under the shard write lock.
-//! Lock order: the retained `live` mutex (`RwLock`) is only ever
-//! taken BEFORE a shard, never while holding one, and writers
-//! hold the one shard for their flow across the whole admission
-//! (reuse check, cap check, wire-identity/owner publish, insert)
-//! so a same-flow race cannot slip between check and insert.
-//! std Mutex is not reentrant, so a shard guard must never be
-//! re-acquired for the same flow while one is held, and a helper
-//! that inserts/removes under the shard must be given the held
-//! guard (the `*_in_shard` forms), never let to lock again.
-//! Read-only `live` consumers (notably the non-persistent
-//! new-flow admission check) take the `RwLock` read guard, so
-//! distinct new flows proceed concurrently; only lease/index
-//! writers serialize on the write guard.
+//! Lock order: writers take the retained `live` RwLock write guard
+//! BEFORE a shard, never while holding one. Fast non-persistent
+//! admission uses `try_write` and holds the guard with one flow shard
+//! across the ownership check, cap check, owner publish, and insert;
+//! on live-write contention it releases the unpublished candidate and
+//! falls back to the serialized path. The shard mutex itself can block.
+//! A same-flow race cannot slip between check and insert. `std::Mutex`
+//! is not reentrant, so a shard guard must never be re-acquired for the
+//! same flow while one is held, and a helper that inserts/removes under
+//! the shard must be given the held guard (the `*_in_shard` forms),
+//! never let to lock again. Read-only `live` consumers still use the
+//! RwLock read guard and can run concurrently with one another; PAT
+//! admission is no longer a read-only consumer.
 
 use super::LiveAllocation;
 use crate::nat::SourceNatFlowKey;
@@ -295,5 +297,5 @@ impl LiveFlowMap {
         }
         out
     }
-}
 
+}

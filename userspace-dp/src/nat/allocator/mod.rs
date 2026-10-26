@@ -1,28 +1,29 @@
 // Pool-mode SNAT port allocator + persistent lease state machine.
 //
-// #2852 Phase 1 (lock-free port claim): the port-ownership state is no
-// longer serialized behind the single `RwLock<PortAllocatorLiveState>`.
-// Per-pool-address occupancy is an atomic bitmap (`AddressOccupancy`,
-// `Vec<AtomicU64>` + a keyed fresh-port probe, #16011); a CAS on the bit IS the
-// port-ownership token (a set bit cannot be re-claimed), replacing the
-// pre-#2852 `owner_by_translated` / `addr_index_by_translated` maps and the
-// per-address `next_port_offset_by_addr` cursor. The port CLAIM (the
-// contended hot path in `allocate_translation`) is therefore lock-free: a
-// non-persistent new flow claims its port with zero global-mutex contention
-// and takes the (retained) mutex only for the tiny `live_by_flow`
-// insert/reuse-check/exact-cap-check critical section. The microbench
+// #2852 Phase 1 (lock-free port claim): per-pool-address occupancy is an
+// atomic bitmap (`AddressOccupancy`, `Vec<AtomicU64>` + keyed fresh-port
+// probe, #16011); a CAS on the bit IS the port-ownership token, replacing
+// the pre-#2852 `owner_by_translated` / `addr_index_by_translated` maps and
+// per-address `next_port_offset_by_addr` cursor. Port CLAIM remains outside
+// the retained `live` RwLock, but the non-persistent fast path now attempts
+// `live.try_write()` after claiming a candidate and holds it through the
+// reverse-identity check, flow-shard insert, and PAT-owner publication.
+// If that try-write contends, the unpublished claim is released and the
+// allocation enters the serialized fallback, which may wait. The microbench
 // `benches/snat_allocator.rs` (results in docs/research/2852-portalloc/)
 // proved the pre-Phase-1 single mutex negative-scales (2.87M->0.62M
-// allocs/sec, M=1->8); Phase 1 is 1.4-1.6x at M=6/8.
+// allocs/sec, M=1->8); those historical results do not measure this
+// contention fallback.
 //
-// What stays under `RwLock<PortAllocatorLiveState>`: the persistent-lease
-// lifecycle (`persistent_by_source` + the expiration indexes), the
-// ownership indexes, and `gc_counter`. #15956 Phase 2: the flow map
-// (`live_by_flow`) is sharded in flows.rs (16 shards); the measured
-// residual-mutex contention (59% @M=8) warranted it. Writers take
-// the write guard; the non-persistent new-flow admission check
-// takes only the read guard, so distinct new flows no longer
-// serialize on this lock at all.
+// What stays under `RwLock<PortAllocatorLiveState>`: persistent-lease
+// lifecycle (`persistent_by_source` + expiration indexes), ownership
+// indexes, and `gc_counter`. #15956 Phase 2 sharded `live_by_flow` in
+// flows.rs (16 shards); each new non-persistent PAT flow now briefly
+// takes the write guard too, so the identity check and owner publication
+// cannot diverge. Under contention the try-only fast path gives way to
+// the existing serialized writer path; distinct flows can therefore
+// serialize behind `live` under contention. Read-only consumers still
+// take the shared guard, concurrently when no writer is active.
 //
 // F4 (global tracked-flow cap): kept EXACT with no overshoot. The cap is
 // the sharded map's atomic count — bumped only on actual insert/remove
@@ -2297,12 +2298,11 @@ impl PortAllocator {
         }
     }
 
-    /// #15956 fold: shared (`RwLock` read) access to the retained
-    /// lease/ownership state for read-only admission checks — the
-    /// non-persistent new-flow hot path. Concurrent readers do not
-    /// serialize; only writers (lease/index mutation) exclude.
-    /// Deliberately NOT #4800-counted: a shared acquisition is not
-    /// the serialized critical section the pair measures.
+    /// Shared access to the retained lease/ownership state for read-only
+    /// queries. PAT admission does not use this guard: it needs the write
+    /// guard to make the reverse-identity check and owner publication atomic.
+    /// Deliberately NOT #4800-counted: a shared acquisition is not the
+    /// serialized critical section the pair measures.
     pub(super) fn read_live(&self) -> RwLockReadGuard<'_, PortAllocatorLiveState> {
         self.shared.live.read().unwrap_or_else(|e| e.into_inner())
     }
@@ -3462,6 +3462,15 @@ impl PortAllocator {
         };
         occ.free_recycle_at(port, now_ns)
     }
+    /// Release a newly claimed candidate that never became a live PAT mapping.
+    /// It was never exposed to a remote endpoint, so it must not acquire the
+    /// small-pool quarantine reserved for previously published translations.
+    fn free_unpublished_translated_port(&self, addr_index: usize, port: u16) -> bool {
+        let Some(occ) = self.shared.occupancy.get(addr_index) else {
+            return false;
+        };
+        occ.free_no_recycle(port)
+    }
 
     #[allow(clippy::too_many_arguments)]
     /// #8447: the persistent-NAT admission counter pair lives here, on a thin
@@ -3701,7 +3710,7 @@ impl PortAllocator {
                     );
                     let Some(port) = claim else {
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port_at(abs, rejected_port, now_ns);
+                            self.free_unpublished_translated_port(abs, rejected_port);
                         }
                         break;
                     };
@@ -3718,11 +3727,12 @@ impl PortAllocator {
                     // the lock-free bitmap, so GC here is opportunistic cleanup, not
                     // load-bearing for this allocation).
                     self.gc_expired_chunked(now_ns, ALLOCATION_GC_BUDGET);
-                    // #15956 fold: acquire `live` with try-write before its flow
+                    // #15956 fold: try the `live` write guard before its flow
                     // shard, then hold both in live->shard order across the
                     // ownership check, exact cap, insert, and PAT-owner update.
-                    // A contended try-write releases this claim and falls back to
-                    // the serialized path; the fast path itself never waits.
+                    // A contended try-write releases this claim and falls back
+                    // to the serialized path; the try itself is nonblocking,
+                    // but the shard mutex and serialized fallback may wait.
                     self.shared
                         .live_lock_acquisitions
                         .fetch_add(1, Ordering::Relaxed);
@@ -3733,9 +3743,9 @@ impl PortAllocator {
                             self.shared
                                 .live_lock_contended
                                 .fetch_add(1, Ordering::Relaxed);
-                            self.free_translated_port_at(abs, port, now_ns);
+                            self.free_unpublished_translated_port(abs, port);
                             for rejected_port in rejected_ports.drain(..) {
-                                self.free_translated_port_at(abs, rejected_port, now_ns);
+                                self.free_unpublished_translated_port(abs, rejected_port);
                             }
                             break 'addresses;
                         }
@@ -3749,9 +3759,9 @@ impl PortAllocator {
                         self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                         drop(__shard);
                         drop(live);
-                        self.free_translated_port_at(abs, port, now_ns);
+                        self.free_unpublished_translated_port(abs, port);
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port_at(abs, rejected_port, now_ns);
+                            self.free_unpublished_translated_port(abs, rejected_port);
                         }
                         return Ok(existing);
                     }
@@ -3794,9 +3804,9 @@ impl PortAllocator {
                         self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                         drop(__shard);
                         drop(live);
-                        self.free_translated_port_at(abs, port, now_ns);
+                        self.free_unpublished_translated_port(abs, port);
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port_at(abs, rejected_port, now_ns);
+                            self.free_unpublished_translated_port(abs, rejected_port);
                         }
                         return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
                     }
@@ -3807,7 +3817,7 @@ impl PortAllocator {
                         .allocations_total
                         .fetch_add(1, Ordering::Relaxed);
                     for rejected_port in rejected_ports.drain(..) {
-                        self.free_translated_port_at(abs, rejected_port, now_ns);
+                        self.free_unpublished_translated_port(abs, rejected_port);
                     }
                     return Ok(translated);
                 }
@@ -4030,7 +4040,7 @@ impl PortAllocator {
                 }
                 let Some(port) = port else {
                     for rejected_port in rejected_ports.drain(..) {
-                        self.free_translated_port_at(abs, rejected_port, now_ns);
+                        self.free_unpublished_translated_port(abs, rejected_port);
                     }
                     break;
                 };
@@ -4110,7 +4120,7 @@ impl PortAllocator {
                     .allocations_total
                     .fetch_add(1, Ordering::Relaxed);
                 for rejected_port in rejected_ports.drain(..) {
-                    self.free_translated_port_at(abs, rejected_port, now_ns);
+                    self.free_unpublished_translated_port(abs, rejected_port);
                 }
                 return Ok(translated);
             }
