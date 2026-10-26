@@ -29,8 +29,8 @@ the apply path pays no fsync (the file is regenerated on every apply).
   address. Malformed or incomplete listings are indeterminate.
   If a live listing matches neither complete render, the candidate stays on
   disk and affected SAs are torn down. Do not re-initiate under an unproven
-  config; the prior fingerprints remain so a later successful Apply detects
-  the diff and re-initiates changed connections with eager intent.
+  config; persist deferred eager-initiation debt so a later successful Apply
+  detects the diff and re-initiates under the proven candidate.
   If charon is unreachable or the candidate is proven loaded, the
   candidate stays on disk and its set is promoted for charon's next start
   (#16853, #17882).
@@ -299,11 +299,15 @@ all files stay in `package ipsec`, so the public API is unchanged.
   applies. A later apply lists active SAs, retries stale connections, and clears
   debt silently if an SA disappeared in the meantime. A live-list failure falls
   back to unconditional termination and the next successful listing discharges
-  an ambiguous no-match failure. `Apply`/`Clear` return teardown failures so the
-  operator sees degraded IPsec state instead of a false success.
+  an ambiguous no-match failure. `pendingReinitiate` preserves deferred eager
+  starts for changed tunnels affected by an indeterminate teardown until a
+  candidate is proven, including across daemon restarts. `Apply`/`Clear` return
+  teardown failures so the operator sees degraded IPsec state instead of a
+  false success.
 
-  Covered by `terminate_debt_6542_test.go` and the changed-connection regression
-  in `delete_terminate_3941_test.go`.
+  Covered by `terminate_debt_6542_test.go`, the changed-connection regression
+  in `delete_terminate_3941_test.go`, and the indeterminate deferred-start
+  cases in `charon_down_16853_test.go`.
 
 
 - **The teardown record survives an xpfd restart (#9687/#10878).** The daemon

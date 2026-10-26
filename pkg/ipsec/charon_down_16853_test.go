@@ -3,6 +3,7 @@ package ipsec
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -413,101 +414,143 @@ func TestClearAfterRestartProbeKeepsFileRemoved17882(t *testing.T) {
 // fail-on-revert: advancing the candidate fingerprint for this ambiguous
 // probe is caught by the preserved-hash assertion below.
 func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
-	m := NewWithConfigDir(t.TempDir())
-	oldGeneration := strings.Repeat("a", 64)
-	newGeneration := strings.Repeat("b", 64)
-	oldCfg := vpnCfg("vpn1")
-	oldCfg.VPNs["vpn1"].EstablishTunnels = "immediately"
-	ch := &charonDown16853{}
-	m.swanctl = ch.run
-	if err := m.ApplyGeneration(oldCfg, oldGeneration, ApplyHooks{}); err != nil {
-		t.Fatalf("FIXTURE: initial apply: %v", err)
-	}
-	prior, err := os.ReadFile(m.configPath)
-	if err != nil {
-		t.Fatalf("FIXTURE: read prior: %v", err)
-	}
-	m.mu.Lock()
-	oldHash := m.prevConnHashes["vpn1"]
-	m.mu.Unlock()
-
-	reloadErr := errors.New("candidate reload rejected")
-	termErr := errors.New("stale SA termination refused")
-	priorConns := strings.TrimSuffix(string(listConnsForRendered17882(t, prior)), "list-conns reply {}\n")
-	priorConns += "list-conn event {extra {local_addrs=[%any] remote_addrs=[%any] children {extra {}}}}\n"
-	rec := &reloadRecorder{
-		failLoadAll: true,
-		loadErr:     reloadErr,
-		listPools:   poolsForPrior17882(t, prior),
-		listConns:   []byte(priorConns + "list-conns reply {}\n"),
-		listSAs:     liveSA("vpn1"),
-	}
-	firstTerminate := true
-	m.swanctl = func(args ...string) ([]byte, error) {
-		if firstTerminate && len(args) > 0 && args[0] == "--terminate" {
-			firstTerminate = false
-			rec.calls = append(rec.calls, args)
-			return []byte("terminate failed"), termErr
-		}
-		return rec.run(args...)
-	}
-
-	rotated := vpnCfg("vpn1")
-	rotated.VPNs["vpn1"].EstablishTunnels = "immediately"
-	rotated.VPNs["vpn1"].PSK = config.NewSecret("secret-rotated")
-	if err := m.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); err == nil || !errors.Is(err, reloadErr) {
-		t.Fatalf("ambiguous ApplyGeneration error = %v, want reload error and teardown debt", err)
-	}
-	got, err := os.ReadFile(m.configPath)
-	if err != nil {
-		t.Fatalf("read staged candidate: %v", err)
-	}
-	if string(got) == string(prior) || !strings.Contains(string(got), "secret-rotated") {
-		t.Fatal("ambiguous live set must leave the rotated candidate on disk")
-	}
-	m.mu.Lock()
-	if gotHash := m.prevConnHashes["vpn1"]; gotHash != oldHash {
-		m.mu.Unlock()
-		t.Fatalf("indeterminate reload promoted candidate fingerprint %q; prior hash is %q", gotHash, oldHash)
-	}
-	pendingChanged := m.pendingChanged["vpn1"]
-	m.mu.Unlock()
-	if !pendingChanged {
-		t.Fatal("failed termination must persist changed-connection debt")
-	}
-	if got := rec.terminated(); len(got) != 1 || got[0] != "vpn1" {
-		t.Fatalf("indeterminate reload must attempt stale-SA teardown, got %v", got)
-	}
-	initiates := func() int {
-		n := 0
-		for _, call := range rec.calls {
-			if len(call) > 0 && call[0] == "--initiate" {
-				n++
+	for _, tc := range []struct {
+		name               string
+		failFirstTerminate bool
+	}{
+		{name: "successful teardown leaves no live SA"},
+		{name: "failed teardown retains live SA", failFirstTerminate: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			statePath := filepath.Join(t.TempDir(), "ipsec-conn-state.json")
+			m := NewWithConfigDir(t.TempDir())
+			m.statePath = statePath
+			oldGeneration := strings.Repeat("a", 64)
+			newGeneration := strings.Repeat("b", 64)
+			oldCfg := vpnCfg("vpn1")
+			oldCfg.VPNs["vpn1"].EstablishTunnels = "immediately"
+			ch := &charonDown16853{}
+			m.swanctl = ch.run
+			if err := m.ApplyGeneration(oldCfg, oldGeneration, ApplyHooks{}); err != nil {
+				t.Fatalf("FIXTURE: initial apply: %v", err)
 			}
-		}
-		return n
-	}
-	if got := initiates(); got != 0 {
-		t.Fatalf("indeterminate reload must not re-establish from unproven old config; got %d initiates", got)
-	}
+			prior, err := os.ReadFile(m.configPath)
+			if err != nil {
+				t.Fatalf("FIXTURE: read prior: %v", err)
+			}
+			m.mu.Lock()
+			oldHash := m.prevConnHashes["vpn1"]
+			m.mu.Unlock()
 
-	// The same candidate now loads successfully. Because the prior fingerprint
-	// was preserved, this converging apply must again tear down and re-initiate.
-	rec.failLoadAll = false
-	if err := m.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); err != nil {
-		t.Fatalf("successful convergence apply: %v", err)
-	}
-	if got := rec.terminated(); len(got) != 2 || got[1] != "vpn1" {
-		t.Fatalf("converging apply must retry changed-SA teardown, got %v", got)
-	}
-	if got := initiates(); got != 1 {
-		t.Fatalf("successful candidate load must re-initiate the changed tunnel, got %d initiates", got)
-	}
-	m.mu.Lock()
-	newHash := m.prevConnHashes["vpn1"]
-	m.mu.Unlock()
-	if newHash == oldHash {
-		t.Fatal("successful convergence did not promote the candidate fingerprint")
+			reloadErr := errors.New("candidate reload rejected")
+			termErr := errors.New("stale SA termination refused")
+			priorConns := strings.TrimSuffix(string(listConnsForRendered17882(t, prior)), "list-conns reply {}\n")
+			priorConns += "list-conn event {extra {local_addrs=[%any] remote_addrs=[%any] children {extra {}}}}\n"
+			rec := &reloadRecorder{
+				failLoadAll: true,
+				loadErr:     reloadErr,
+				listPools:   poolsForPrior17882(t, prior),
+				listConns:   []byte(priorConns + "list-conns reply {}\n"),
+				listSAs:     liveSA("vpn1"),
+			}
+			failFirstTerminate := tc.failFirstTerminate
+			m.swanctl = func(args ...string) ([]byte, error) {
+				if failFirstTerminate && len(args) > 0 && args[0] == "--terminate" {
+					failFirstTerminate = false
+					rec.calls = append(rec.calls, args)
+					return []byte("terminate failed"), termErr
+				}
+				out, err := rec.run(args...)
+				if len(args) > 0 && args[0] == "--terminate" && err == nil {
+					rec.listSAs = "list-sas reply {}\n"
+				}
+				return out, err
+			}
+
+			rotated := vpnCfg("vpn1")
+			rotated.VPNs["vpn1"].EstablishTunnels = "immediately"
+			rotated.VPNs["vpn1"].PSK = config.NewSecret("secret-rotated")
+			if err := m.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); err == nil || !errors.Is(err, reloadErr) {
+				t.Fatalf("ambiguous ApplyGeneration error = %v, want reload error and teardown debt", err)
+			}
+			got, err := os.ReadFile(m.configPath)
+			if err != nil {
+				t.Fatalf("read staged candidate: %v", err)
+			}
+			if string(got) == string(prior) || !strings.Contains(string(got), "secret-rotated") {
+				t.Fatal("ambiguous live set must leave the rotated candidate on disk")
+			}
+			m.mu.Lock()
+			if gotHash := m.prevConnHashes["vpn1"]; gotHash != oldHash {
+				m.mu.Unlock()
+				t.Fatalf("indeterminate reload promoted candidate fingerprint %q; prior hash is %q", gotHash, oldHash)
+			}
+			m.mu.Unlock()
+			if got := rec.terminated(); len(got) != 1 || got[0] != "vpn1" {
+				t.Fatalf("indeterminate reload must attempt stale-SA teardown, got %v", got)
+			}
+			initiates := func(rec *reloadRecorder) int {
+				n := 0
+				for _, call := range rec.calls {
+					if len(call) > 0 && call[0] == "--initiate" {
+						n++
+					}
+				}
+				return n
+			}
+			if got := initiates(rec); got != 0 {
+				t.Fatalf("indeterminate reload must not re-establish from unproven config; got %d initiates", got)
+			}
+			state := readState9687(t, statePath)
+			if len(state.PendingReinitiate) != 1 || state.PendingReinitiate[0] != "vpn1" {
+				t.Fatalf("indeterminate teardown must persist deferred re-initiation, got %+v", state.PendingReinitiate)
+			}
+			if tc.failFirstTerminate {
+				if len(state.PendingChanged) != 1 || state.PendingChanged[0] != "vpn1" {
+					t.Fatalf("failed teardown must persist changed-connection debt, got %+v", state.PendingChanged)
+				}
+			} else if len(state.PendingChanged) != 0 {
+				t.Fatalf("successful teardown must not leave changed teardown debt, got %+v", state.PendingChanged)
+			}
+
+			retrySAs := "list-sas reply {}\n"
+			if tc.failFirstTerminate {
+				retrySAs = liveSA("vpn1")
+			}
+			rec2 := &reloadRecorder{listSAs: retrySAs}
+			m2 := NewWithConfigDir(t.TempDir())
+			m2.statePath = statePath
+			m2.swanctl = func(args ...string) ([]byte, error) {
+				out, err := rec2.run(args...)
+				if len(args) > 0 && args[0] == "--terminate" && err == nil {
+					rec2.listSAs = "list-sas reply {}\n"
+				}
+				return out, err
+			}
+			if err := m2.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); err != nil {
+				t.Fatalf("successful candidate retry: %v", err)
+			}
+			wantTerminations := 0
+			if tc.failFirstTerminate {
+				wantTerminations = 1
+			}
+			if got := rec2.terminated(); len(got) != wantTerminations {
+				t.Fatalf("retry teardown count = %v, want %d", got, wantTerminations)
+			}
+			if got := initiates(rec2); got != 1 {
+				t.Fatalf("proven candidate must restore the eager tunnel despite no live SA; got %d initiates", got)
+			}
+			m2.mu.Lock()
+			newHash := m2.prevConnHashes["vpn1"]
+			m2.mu.Unlock()
+			if newHash == oldHash {
+				t.Fatal("successful convergence did not promote the candidate fingerprint")
+			}
+			state = readState9687(t, statePath)
+			if len(state.PendingReinitiate) != 0 || len(state.PendingChanged) != 0 {
+				t.Fatalf("successful retry must clear deferred-initiation and changed-termination debt, got %+v", state)
+			}
+		})
 	}
 }
 

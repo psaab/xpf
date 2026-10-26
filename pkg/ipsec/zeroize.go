@@ -12,7 +12,8 @@ import (
 )
 
 // CheckConnStateEmpty proves the durable connection/deletion-debt store has no
-// remaining work before factory reset erases the credentials it may need.
+// remaining teardown or deferred-start work before factory reset erases the
+// credentials it may need.
 func CheckConnStateEmpty(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -28,14 +29,16 @@ func CheckConnStateEmpty(path string) error {
 	if err != nil {
 		return fmt.Errorf("ipsec: cannot prove connection state %s is empty: %w", path, err)
 	}
-	if len(st.Loaded) != 0 || len(st.Pending) != 0 || len(st.PendingChanged) != 0 || len(st.Fingerprints) != 0 {
-		return fmt.Errorf("ipsec: connection state %s still contains loaded connections or teardown debt", path)
+	if len(st.Loaded) != 0 || len(st.Pending) != 0 || len(st.PendingChanged) != 0 ||
+		len(st.PendingReinitiate) != 0 || len(st.Fingerprints) != 0 {
+		return fmt.Errorf("ipsec: connection state %s still contains loaded connections or pending IPsec work", path)
 	}
 	return nil
 }
 
 // EraseConnStateIfEmpty removes only a trusted-empty state file after its
-// manager has successfully cleared the loaded connections and termination debt.
+// manager has successfully cleared loaded connections and termination or
+// deferred-initiation debt.
 // Crash-leaked fsatomic write temps for the store are removed with it: every
 // durable save stages full state JSON in a .<base>.tmp-* file first, so a
 // temp orphaned by a crash holds tenant connection names a canonical-only

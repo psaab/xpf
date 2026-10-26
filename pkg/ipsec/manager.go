@@ -136,6 +136,10 @@ type Manager struct {
 	// debt, it must still be retried while that name remains loaded.
 	pendingTerminate map[string]bool
 	pendingChanged   map[string]bool
+	// pendingReinitiate defers restoring changed eager tunnels when an
+	// indeterminate probe observes a live SA. It is cleared only after a
+	// candidate is proven and any outstanding teardown succeeds.
+	pendingReinitiate map[string]bool
 
 	// swanctl is the exec seam for shelling out to swanctl. Nil in
 	// production and directly-constructed test Managers; sc() falls back to
@@ -150,10 +154,11 @@ type Manager struct {
 	// output as stdout) or to runSwanctlSplit.
 	swanctlSplit func(args ...string) (stdout, stderr []byte, err error)
 
-	// statePath persists loaded names, rendered fingerprints, and teardown debt
-	// across xpfd restarts (#9687/#10878, conn_state_9687.go). Empty disables
-	// persistence, which is what NewWithConfigDir and directly-constructed
-	// Managers get; New sets DefaultConnStatePath.
+	// statePath persists loaded names, rendered fingerprints, and teardown or
+	// deferred re-initiation debt across xpfd restarts (#9687/#10878/#17882,
+	// conn_state_9687.go). Empty disables persistence, which is what
+	// NewWithConfigDir and directly-constructed Managers get; New sets
+	// DefaultConnStatePath.
 	statePath string
 	// stateSeeded records that the persisted state was folded in, which
 	// happens once, at this Manager's first promotion.
@@ -382,18 +387,20 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			if ire.clear || names == nil {
 				names, hs = map[string]bool{}, map[string]string{}
 			}
-			removed, _ := m.pendingConnDiff(names, hs)
-			_, failed := m.terminateRemovedConns(removed)
+			removed, changed := m.pendingConnDiff(names, hs)
+			terminated, failed := m.terminateRemovedConns(removed)
 			termErr := m.recordTerminateDebtForNames(removed, failed, names)
+			m.rememberDeferredReinitiation(changed, terminated, failed)
 			// Do not re-initiate from a config that this live probe failed
-			// to prove; a later successful candidate load will recompute the
-			// preserved diff and re-establish eager tunnels under that config.
+			// to prove; the durable deferred debt is discharged only after
+			// a later candidate load is proven.
 			return errors.Join(applyErr, termErr)
 		}
 		var cce *committedCandidateError
 		if errors.As(applyErr, &cce) {
-			// #16853 and a candidate-proven restart: candidate stays on
-			// disk, so promote it and tear down stale connections.
+			// Candidate-loaded outcomes promote the committed set. An
+			// unreachable charon keeps it for the next start but does not
+			// prove a config under which deferred starts are safe.
 			names, hs := cce.names, cce.hashes
 			if cce.clear || names == nil {
 				names, hs = map[string]bool{}, map[string]string{}
@@ -402,8 +409,15 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			terminated, failed := m.terminateRemovedConns(removed)
 			termErr := m.recordTerminateDebt(removed, failed)
 			var initiateErr error
-			if !cce.clear && ipsecCfg != nil {
-				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated)
+			if !cce.clear && !cce.candidateProven {
+				m.rememberDeferredReinitiation(changed, terminated, failed)
+			}
+			if !cce.clear && cce.candidateProven && ipsecCfg != nil {
+				deferred := m.pendingReinitiationNames()
+				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, deferred, failed)
+				m.resolvePendingReinitiation(names, failed)
+			} else if cce.clear {
+				m.resolvePendingReinitiation(names, failed)
 			}
 			return errors.Join(applyErr, termErr, initiateErr)
 		}
@@ -436,7 +450,10 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			termErr := m.recordTerminateDebt(removed, failed)
 			var initiateErr error
 			if !pae.clear && ipsecCfg != nil {
-				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated)
+				deferred := m.pendingReinitiationNames()
+				changed = excludingConnNames(changed, deferred)
+				terminated = excludingConnNames(terminated, deferred)
+				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, nil, nil)
 			}
 			return errors.Join(applyErr, termErr, initiateErr)
 		}
@@ -453,7 +470,12 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 	}
 	terminated, failed := m.terminateRemovedConns(removed)
 	terminateErr := m.recordTerminateDebt(removed, failed)
-	initiateErr := m.reinitiateChangedConnections(ipsecCfg, changed, terminated)
+	deferred := m.pendingReinitiationNames()
+	var initiateErr error
+	if ipsecCfg != nil {
+		initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, deferred, failed)
+	}
+	m.resolvePendingReinitiation(loadedNames, failed)
 	return errors.Join(terminateErr, initiateErr)
 }
 
@@ -476,7 +498,9 @@ func (m *Manager) Clear() error {
 			// Promote the empty set, attempt teardown, and return the error.
 			removed, _ := m.promoteConnNames(map[string]bool{}, map[string]string{})
 			_, failed := m.terminateRemovedConns(removed)
-			return errors.Join(err, m.recordTerminateDebt(removed, failed))
+			termErr := m.recordTerminateDebt(removed, failed)
+			m.resolvePendingReinitiation(map[string]bool{}, failed)
+			return errors.Join(err, termErr)
 		}
 		var pae *partialApplyError
 		if errors.As(err, &pae) && pae.clear {
@@ -489,7 +513,9 @@ func (m *Manager) Clear() error {
 	}
 	removed, _ := m.promoteConnNames(nil, nil)
 	_, failed := m.terminateRemovedConns(removed)
-	return m.recordTerminateDebt(removed, failed)
+	termErr := m.recordTerminateDebt(removed, failed)
+	m.resolvePendingReinitiation(nil, failed)
+	return termErr
 }
 
 // applyConfig renders + atomically writes the swanctl snippet and reloads.
@@ -596,7 +622,10 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 		if outcome == probeLiveIndeterminate17882 {
 			return rendered, hashes, &indeterminateReloadError{err: err, names: rendered, hashes: hashes}
 		}
-		return rendered, hashes, &committedCandidateError{err: err, names: rendered, hashes: hashes}
+		return rendered, hashes, &committedCandidateError{
+			err: err, names: rendered, hashes: hashes,
+			candidateProven: outcome == probeCandidateProven17882,
+		}
 	}
 
 	return rendered, hashes, nil
@@ -606,13 +635,16 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 // total reload failure when charon is unreachable or the candidate/empty set
 // is proven loaded. The candidate (or removed clear file) stays on disk, so
 // ApplyGeneration promotes that committed set and attempts stale-SA teardown.
-// Loaded stays unfired and the underlying reload error still propagates.
+// Only candidateProven permits deferred re-initiation; an unreachable charon
+// loads the staged candidate later. Loaded stays unfired and the reload error
+// still propagates.
 // names/hashes describe an apply render and are nil for clear.
 type committedCandidateError struct {
-	err    error
-	names  map[string]bool
-	hashes map[string]string
-	clear  bool
+	err             error
+	names           map[string]bool
+	hashes          map[string]string
+	clear           bool
+	candidateProven bool
 }
 
 func (e *committedCandidateError) Error() string { return e.err.Error() }
@@ -1187,7 +1219,7 @@ func (m *Manager) clearConfig(written func()) error {
 			return &indeterminateReloadError{err: err, clear: true}
 		}
 		slog.Warn("swanctl clear reload failed; keeping cleared config", "err", err)
-		return &committedCandidateError{err: err, clear: true}
+		return &committedCandidateError{err: err, clear: true, candidateProven: outcome == probeCandidateProven17882}
 	}
 	return nil
 }
@@ -1291,6 +1323,80 @@ func (m *Manager) pendingConnDiff(newNames map[string]bool, newHashes map[string
 	defer m.mu.Unlock()
 	m.seedFromStateLocked()
 	return m.connDiffLocked(newNames, newHashes)
+}
+
+// rememberDeferredReinitiation records changed connections that were observed
+// live during an indeterminate reload probe and cannot safely be re-initiated.
+// They may be started only after a later reload proves the candidate config.
+func (m *Manager) rememberDeferredReinitiation(changed, terminated, failed []string) {
+	if len(changed) == 0 || (len(terminated) == 0 && len(failed) == 0) {
+		return
+	}
+	observed := make(map[string]bool, len(terminated)+len(failed))
+	for _, name := range terminated {
+		observed[name] = true
+	}
+	for _, name := range failed {
+		observed[name] = true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, name := range changed {
+		if observed[name] {
+			if m.pendingReinitiate == nil {
+				m.pendingReinitiate = make(map[string]bool)
+			}
+			m.pendingReinitiate[name] = true
+		}
+	}
+	m.persistStateLocked()
+}
+
+func (m *Manager) pendingReinitiationNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return sortedConnNames(m.pendingReinitiate)
+}
+
+func excludingConnNames(names, excluded []string) []string {
+	if len(names) == 0 || len(excluded) == 0 {
+		return names
+	}
+	excludedSet := make(map[string]bool, len(excluded))
+	for _, name := range excluded {
+		excludedSet[name] = true
+	}
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if !excludedSet[name] {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered
+}
+
+// resolvePendingReinitiation settles deferred starts only after a proven
+// candidate load. A teardown failure retains its deferred start for the next
+// apply; names removed from the candidate are no longer startable.
+func (m *Manager) resolvePendingReinitiation(targetNames map[string]bool, failed []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.pendingReinitiate) == 0 {
+		return
+	}
+	failedSet := make(map[string]bool, len(failed))
+	for _, name := range failed {
+		failedSet[name] = true
+	}
+	for name := range m.pendingReinitiate {
+		if !targetNames[name] || !failedSet[name] {
+			delete(m.pendingReinitiate, name)
+		}
+	}
+	if len(m.pendingReinitiate) == 0 {
+		m.pendingReinitiate = nil
+	}
+	m.persistStateLocked()
 }
 
 func (m *Manager) connDiffLocked(newNames map[string]bool, newHashes map[string]string) (removed, changed []string) {
@@ -1473,17 +1579,30 @@ func (m *Manager) terminateRemovedConns(removed []string) (terminated, failed []
 // not leaving the tunnel down by accident: the new config is loaded,
 // the peer (responder-only) or the first matching packet (trap)
 // re-establishes under the new settings, exactly as on a fresh load.
-func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, changed, terminated []string) error {
-	if len(changed) == 0 || len(terminated) == 0 {
+func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, changed, terminated, deferred, failed []string) error {
+	if ipsecCfg == nil || (len(changed) == 0 && len(deferred) == 0) {
 		return nil
 	}
-	changedSet := make(map[string]bool, len(changed))
+	changedSet := make(map[string]bool, len(changed)+len(deferred))
 	for _, name := range changed {
 		changedSet[name] = true
 	}
-	terminatedSet := make(map[string]bool, len(terminated))
+	terminatedSet := make(map[string]bool, len(terminated)+len(deferred))
 	for _, name := range terminated {
 		terminatedSet[name] = true
+	}
+	failedSet := make(map[string]bool, len(failed))
+	for _, name := range failed {
+		failedSet[name] = true
+	}
+	for _, name := range deferred {
+		if !failedSet[name] {
+			changedSet[name] = true
+			terminatedSet[name] = true
+		}
+	}
+	if len(changedSet) == 0 || len(terminatedSet) == 0 {
+		return nil
 	}
 	// Membership is per-VPN (#15989 fold): a VPN the renderer skipped
 	// (e.g. a gateway-less PSK) must never initiate, and must not mark

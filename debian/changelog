@@ -4,10 +4,10 @@ xpf (0.0.0) unstable; urgency=medium
     loaded connection projection (names, children, local/remote addresses) prove
     the prior render. A live mismatch keeps the candidate but does not promote
     its fingerprints; stale SAs are torn down without re-initiation under the
-    unproven config. A later successful candidate load still detects the diff
-    and re-initiates changed eager tunnels. Unreachable or candidate-proven
-    reloads keep and promote the candidate. Empty or malformed listings are not
-    proof.
+    unproven config. Deferred eager-initiation debt is preserved until a later
+    successful candidate load, which can re-initiate the changed tunnel even
+    if its stale SA is no longer live. Unreachable or candidate-proven reloads
+    keep and promote the candidate. Empty or malformed listings are not proof.
     Plain Apply uses a rendered-config fingerprint (#17882).
   * Upgrade: when a rolling rollback completes after a deferred signal,
     still wait for session sync and confirm rejoin before surfacing the
