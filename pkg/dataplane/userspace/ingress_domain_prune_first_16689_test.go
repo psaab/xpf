@@ -201,6 +201,13 @@ func injectClassifierManager16689(t *testing.T, domainCap uint32) (*Manager, *eb
 	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLandScreen, &ebpf.MapSpec{
 		Type: ebpf.Hash, KeySize: 2, ValueSize: 1, MaxEntries: userspaceLandScreenMapCapacity,
 	})
+	// #17849: classifier sync unconditionally syncs the proxy-NDP map
+	// (maps_sync.go syncProxyNDPAddressMapsWithSetsLocked); the fixture
+	// predates that requirement (#17493) and failed with "map not
+	// loaded" on any BPF-capable run.
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceProxyNDPv6, &ebpf.MapSpec{
+		Type: ebpf.Hash, KeySize: uint32(unsafe.Sizeof(userspaceLocalV6Key{})), ValueSize: 1, MaxEntries: 8192,
+	})
 	return m, ctrlMap, domainMap
 }
 
