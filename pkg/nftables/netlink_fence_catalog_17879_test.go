@@ -24,16 +24,24 @@ func TestColdBootFenceRetainsCatalogDropsAndESPAHAdmit17879(t *testing.T) {
 			p := newBuildPlan(t, HostInboundTableName, hostInboundPriority)
 			buildHostInboundFenceNetlink(p, FenceSpec{
 				NoIPv6RejectZeroHopLimit: tc.noZeroHopDrop,
-				Views: []HostInboundZoneView{{
-					Zone: "routing", V4Addrs: []string{"192.0.2.1"}, V6Addrs: []string{"2001:db8::1"},
-					IngressNetdevs: []string{"routing0"},
-				}},
+				Views: []HostInboundZoneView{
+					{
+						Zone: "routing", V4Addrs: []string{"192.0.2.1"}, V6Addrs: []string{"2001:db8::1"},
+						IngressNetdevs: []string{"routing0"},
+					},
+					{
+						Zone: "routing-vrf",
+						IngressVRFScopes: []config.HostInboundVRFIngressScope{{
+							Master: "vrf-routing", Slaves: []string{"ge-0-0-0"},
+						}},
+					},
+				},
 			})
 			if p.err != nil {
 				t.Fatalf("build cold-boot fence: %v", p.err)
 			}
 
-			zeroHopAt, espAHAt := -1, -1
+			zeroHopAt, espAHAt, establishedAt := -1, -1, -1
 			for i, rule := range p.rules {
 				var sawHopLimit, sawFib, sawDrop bool
 				for _, e := range rule {
@@ -58,6 +66,9 @@ func TestColdBootFenceRetainsCatalogDropsAndESPAHAdmit17879(t *testing.T) {
 				if line == "meta(key=16,reg=1) lookup(inv=false,set=[32,33]) verdict(1)" {
 					espAHAt = i
 				}
+				if line == "ct(key=0,reg=1) bitwise(len=4,mask=06000000,xor=00000000) cmp(op=1,reg=1,00000000) verdict(1)" {
+					establishedAt = i
+				}
 			}
 
 			if tc.noZeroHopDrop {
@@ -70,25 +81,43 @@ func TestColdBootFenceRetainsCatalogDropsAndESPAHAdmit17879(t *testing.T) {
 			if espAHAt < 0 {
 				t.Fatal("cold-boot fence is missing the global ESP/AH accept")
 			}
+			if establishedAt < 0 {
+				t.Fatal("cold-boot fence is missing the established/related accept")
+			}
 			if zeroHopAt >= 0 && zeroHopAt >= espAHAt {
 				t.Fatalf("zero-hop drop rule %d must precede ESP/AH accept rule %d", zeroHopAt, espAHAt)
 			}
 
-			ingress := hex.EncodeToString(ifname16("routing0"))
-			for _, family := range []string{"ip", "ip6"} {
-				for _, group := range config.HostInboundMulticastGroupsForFamily(family) {
-					wantAddr := addrHex(t, group)
-					matched := false
-					for i, rule := range p.rules {
-						line := canonRule(p, rule)
-						if i > espAHAt && strings.Contains(line, wantAddr) &&
-							strings.Contains(line, ingress) && strings.Contains(line, "verdict(0)") {
-							matched = true
-							break
+			ingressScopes := []struct {
+				name    string
+				ifnames []string
+			}{
+				{name: "direct", ifnames: []string{"routing0"}},
+				{name: "VRF", ifnames: []string{"vrf-routing", "ge-0-0-0"}},
+			}
+			for _, ingress := range ingressScopes {
+				for _, family := range []string{"ip", "ip6"} {
+					for _, group := range config.HostInboundMulticastGroupsForFamily(family) {
+						wantAddr := addrHex(t, group)
+						matched := false
+						for i, rule := range p.rules {
+							line := canonRule(p, rule)
+							if i <= espAHAt || i >= establishedAt ||
+								!strings.Contains(line, wantAddr) || !strings.Contains(line, "verdict(0)") {
+								continue
+							}
+							scoped := true
+							for _, ifname := range ingress.ifnames {
+								scoped = scoped && strings.Contains(line, hex.EncodeToString(ifname16(ifname)))
+							}
+							if scoped {
+								matched = true
+								break
+							}
 						}
-					}
-					if !matched {
-						t.Errorf("catalog group %s has no ingress-scoped fence drop", group)
+						if !matched {
+							t.Errorf("catalog group %s has no %s-scoped fence drop before established acceptance", group, ingress.name)
+						}
 					}
 				}
 			}
