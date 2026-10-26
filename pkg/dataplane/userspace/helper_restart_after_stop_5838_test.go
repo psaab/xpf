@@ -30,7 +30,7 @@ import (
 )
 
 func TestHelperCrashRestartCancelledByIntentionalStop_5838(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "u5838stop")
+	dir, err := os.MkdirTemp(os.TempDir(), "u5838stop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestHelperCrashRestartCancelledByIntentionalStop_5838(t *testing.T) {
 // A crash with NO intervening stop still arms, and firing the timer still
 // attempts the restart (it spawns the stand-in helper).
 func TestHelperCrashRestartStillRunsWithoutAStop_5838(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "u5838run")
+	dir, err := os.MkdirTemp(os.TempDir(), "u5838run")
 	if err != nil {
 		t.Fatal(err)
 	}

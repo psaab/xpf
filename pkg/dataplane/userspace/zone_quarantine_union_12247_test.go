@@ -244,15 +244,14 @@ security {
 }
 
 // TestPartialRepublishRefusesQuarantineOnlySkew12247 pins the #6480/#5680
-// skew guard (configsContentEqual) to the runtime zone-name set, which is
-// `json:"-"` and so invisible to the guard's marshal comparison. On node1,
-// config A keeps zzq17760 in a group nothing applies and config B renames that
-// group to node0. Both compile to the same JSON (zones, policies and the
-// View-1 warning), yet B quarantines node1's zzq8100 in favour of the peer's zzq17760
-// while A keeps it live. With A applied and B's full apply failed, a partial
-// republish of B would scrub zzq8100's deny while inheriting A's live zzq8100, so
-// zzq8100 traffic would reach the global permit. Both partial-republish paths
-// must refuse B, while a recompile of A stays content-equal.
+// skew guard to Config.ZoneQuarantineNames, which is `json:"-"` and invisible
+// to the marshal comparison. The compiler also emits a zone-collision
+// diagnostic that is serialized; normalize that diagnostic by copying node1's
+// config and taking only the peer-expanded runtime name set from B. The
+// resulting configs have identical snapshot content, while B quarantines
+// node1's zzq8100 in favour of peer-only zzq17760 and A keeps it live.
+// A partial republish of B over applied A would scrub zzq8100's deny while
+// retaining A's live zone, so both partial-republish paths must refuse B.
 func TestPartialRepublishRefusesQuarantineOnlySkew12247(t *testing.T) {
 	hermeticSnapshot12247(t)
 	compileWithGroup := func(group string) *config.Config {
@@ -289,10 +288,14 @@ security {
 }`), 1)
 	}
 	cfgA := compileWithGroup("unused")
-	cfgB := compileWithGroup("node0")
+	compiledB := compileWithGroup("node0")
+	cfgBValue := *cfgA
+	cfgBValue.ZoneQuarantineNames = append([]string(nil), compiledB.ZoneQuarantineNames...)
+	cfgB := &cfgBValue
 
 	// The skew must be invisible to the marshal, or this cell would pass on
-	// the JSON comparison alone.
+	// the JSON comparison alone. ZoneQuarantineNames is deliberately the only
+	// field that differs between these two configs.
 	jsonA, err := json.Marshal(cfgA)
 	if err != nil {
 		t.Fatalf("marshal A: %v", err)
@@ -302,7 +305,7 @@ security {
 		t.Fatalf("marshal B: %v", err)
 	}
 	if string(jsonA) != string(jsonB) {
-		t.Fatal("fixture: renaming the unapplied group to node0 must leave node1's config JSON unchanged")
+		t.Fatal("fixture: runtime-only quarantine metadata changed serialized config")
 	}
 	if reason := config.ZoneQuarantineExcludedReason("zzq8100", cfgA); reason != "" {
 		t.Fatalf("fixture: A must keep zzq8100 live on node1, got %s", reason)

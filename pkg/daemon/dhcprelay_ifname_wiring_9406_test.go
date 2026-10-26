@@ -21,6 +21,7 @@ func relayCfgText9406() string {
 	return `
 interfaces {
     ge-0/0/0 {
+        vlan-tagging;
         unit 80 { vlan-id 180; family inet { address 10.0.80.1/24; } }
     }
 }

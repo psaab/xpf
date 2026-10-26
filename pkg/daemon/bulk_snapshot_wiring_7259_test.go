@@ -109,6 +109,9 @@ func TestStartClusterCommsWiresBulkSnapshotSource7259(t *testing.T) {
 	// fabric-interface/fabric-peer-address and reaches the identical wiring.
 	// TestActiveClusterTransportIsMutexGuarded_6290 avoids the same hazard by
 	// configuring no sync endpoint at all.
+	// The strict private-RG gate requires either a usable control-link pair
+	// or an explicit RETH-VRRP election mode. This wiring-only fixture uses
+	// the latter to keep its fabric-only transport from starting a heartbeat.
 	for _, line := range []string{
 		"chassis cluster cluster-id 1",
 		"chassis cluster node 0",
@@ -117,6 +120,7 @@ func TestStartClusterCommsWiresBulkSnapshotSource7259(t *testing.T) {
 		"chassis cluster redundancy-group 0 node 0 priority 200",
 		"chassis cluster redundancy-group 0 node 1 priority 100",
 		"chassis cluster authentication-key test-cluster-psk-7259",
+		"chassis cluster no-private-rg-election",
 		"security zones security-zone lan",
 		"security zones security-zone wan",
 	} {

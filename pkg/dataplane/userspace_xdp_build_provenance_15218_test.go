@@ -269,7 +269,7 @@ func TestBuildRecipeRecordsProvenance15218(t *testing.T) {
 // TestBuildRecipeScrubsCargoEnv16657 is the stand-in-cargo probe for
 // #16657: run the real recipe with a fake cargo and a fully tainted
 // ambient environment; the environment/argv the build cargo receives
-// must contain none of the listed overrides, a repo-controlled
+// must contain none of the listed overrides, a recipe-owned fresh
 // CARGO_HOME, and the forced --config profile/linker values. The
 // recipe then fails at the verifier gate (fake object / stub gate),
 // which is expected — the probe asserts only what cargo saw.
@@ -334,8 +334,16 @@ func TestBuildRecipeScrubsCargoEnv16657(t *testing.T) {
 			t.Errorf("#16657: tainted %q reached cargo build env:\n%s", bad, buildEnv)
 		}
 	}
-	if !strings.Contains(buildEnv, "CARGO_HOME=/tmp/") || strings.Contains(buildEnv, "CARGO_HOME=/tmp/evil-home") {
-		t.Errorf("#16657: cargo build CARGO_HOME is not repo-controlled:\n%s", buildEnv)
+	var cargoHome string
+	for _, line := range strings.Split(buildEnv, "\n") {
+		if strings.HasPrefix(line, "CARGO_HOME=") {
+			cargoHome = strings.TrimPrefix(line, "CARGO_HOME=")
+			break
+		}
+	}
+	if !strings.HasPrefix(filepath.Base(cargoHome), "xpf-cargo-home.") ||
+		strings.Contains(buildEnv, "CARGO_HOME=/tmp/evil-home") {
+		t.Errorf("#16657: cargo build CARGO_HOME is not a fresh recipe-owned temp dir:\n%s", buildEnv)
 	}
 	if !strings.Contains(buildEnv, "RUSTUP_TOOLCHAIN=nightly-2026-05-23") {
 		t.Errorf("#16657: cargo build missing pinned RUSTUP_TOOLCHAIN:\n%s", buildEnv)

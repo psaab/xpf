@@ -154,6 +154,7 @@ func TestInterfaceSnapshotCarriesTheRoutingDomain7160(t *testing.T) {
 func TestNoRoutingInstanceMembershipLeavesEveryDomainZero7160(t *testing.T) {
 	cfg := routingDomainCfg7160(t,
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/1 vlan-tagging",
 		"set interfaces ge-0/0/1 unit 50 vlan-id 50",
 		"set interfaces ge-0/0/1 unit 50 family inet address 172.16.50.8/24",
 		"set security zones security-zone trust interfaces ge-0/0/0.0",

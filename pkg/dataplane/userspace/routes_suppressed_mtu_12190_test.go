@@ -418,7 +418,23 @@ func TestSuppressedBlackholeMTUDoesNotConstrainConnectedRoute12190(t *testing.T)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	requireSuppressedMTU(t, out, "inet.0", "inet", "198.51.100.0/24", 0)
+	hits := snapshotFor(t, "inet.0", "inet", "198.51.100.0/24", out)
+	var connected *RouteSnapshot
+	for i := range hits {
+		if hits[i].Preference != 0 || hits[i].Discard || hits[i].Reject {
+			continue
+		}
+		if connected != nil {
+			t.Fatalf("multiple connected snapshots for the prefix: %+v", hits)
+		}
+		connected = &hits[i]
+	}
+	if connected == nil {
+		t.Fatalf("no connected snapshot for the prefix: %+v", hits)
+	}
+	if connected.MTU != 0 {
+		t.Fatalf("suppressed blackhole MTU constrained the connected route: %+v", *connected)
+	}
 }
 
 func TestSuppressedLearnedMTUDoesNotStampDiscardSnapshot12190(t *testing.T) {

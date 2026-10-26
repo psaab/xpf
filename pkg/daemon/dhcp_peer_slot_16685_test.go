@@ -27,6 +27,9 @@ func peerSlotDHCPCfg16685(t *testing.T, nodeID int) *config.Config {
 	for _, cmd := range []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-16685",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/0 gigether-options redundant-parent reth0",
@@ -276,6 +279,9 @@ func TestPeerSlotRA16685(t *testing.T) {
 		for _, cmd := range []string{
 			"set chassis cluster cluster-id 1",
 			"set chassis cluster authentication-key test-cluster-psk-16685",
+			"set chassis cluster control-interface em0",
+			"set chassis cluster peer-address 10.99.0.2",
+			"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 			"set chassis cluster redundancy-group 1 node 0 priority 200",
 			"set chassis cluster redundancy-group 1 node 1 priority 100",
 			"set interfaces ge-0/0/0 gigether-options redundant-parent reth0",

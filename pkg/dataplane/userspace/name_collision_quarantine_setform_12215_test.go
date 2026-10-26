@@ -1,21 +1,15 @@
 package userspace
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #12215: the canonical Junos set-form `set security address-book red address
-// shared ...` packs the whole tail as ONE leaf under `address-book` (SetPath:
-// no schema child for the book name, only `global`). The #12049 collision
-// recorder walks only FindChildren("address"/"address-set"), which is empty
-// for the packed leaf — so the token escapes the quarantine and the policy
-// reference silently resolves to the unrelated global row. The set-form shape
-// must quarantine exactly like the braced shape pinned by
-// TestLenientNamedAddressBookDropQuarantinesCollision12049.
-func TestLenientSetFormNamedAddressBookDropQuarantinesCollision12215(t *testing.T) {
+// #12215: `set security address-book red ...` is a supported named-book shape
+// (#15672), not a dropped unknown book. An unattached book is isolated from
+// the global namespace; the same-named global token remains resolvable.
+func TestSetFormNamedAddressBookScopeDoesNotQuarantineGlobalCollision12215(t *testing.T) {
 	pol := "set security policies from-zone trust to-zone untrust policy p1 "
 	base := []string{
 		"set security zones security-zone trust",
@@ -42,6 +36,7 @@ func TestLenientSetFormNamedAddressBookDropQuarantinesCollision12215(t *testing.
 			books: []string{
 				"set security address-book global address m 10.9.9.9/32",
 				"set security address-book global address-set shared address m",
+				"set security address-book red address m 10.9.9.8/32",
 				"set security address-book red address-set shared address m",
 			},
 		},
@@ -59,31 +54,25 @@ func TestLenientSetFormNamedAddressBookDropQuarantinesCollision12215(t *testing.
 					t.Fatalf("setpath %q: %v", l, err)
 				}
 			}
-			cfg, err := config.CompileConfigLenient(tree)
+			if err := config.SchemaValidate(tree); err != nil {
+				t.Fatalf("strict schema rejected supported set-form named book: %v", err)
+			}
+			cfg, err := config.CompileConfig(tree)
 			if err != nil {
-				t.Fatalf("lenient compile: %v", err)
-			}
-			if cfg.Security.AddressBook == nil {
-				t.Fatal("lenient compile produced no global address book")
-			}
-			if _, ok := cfg.Security.AddressBook.CollidingNames["shared"]; !ok {
-				t.Fatalf("set-form named-book entry must quarantine the colliding global token, CollidingNames=%v", cfg.Security.AddressBook.CollidingNames)
-			}
-			if tc.name == "address-set" {
-				if _, ok := cfg.Security.AddressBook.CollidingNames["m"]; ok {
-					t.Fatalf("address-set member reference must not be quarantined as a named-book definition, CollidingNames=%v", cfg.Security.AddressBook.CollidingNames)
-				}
+				t.Fatalf("strict compile rejected supported set-form named book: %v", err)
 			}
 			rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
-			if err != nil || len(rules) != 1 {
-				t.Fatalf("build policy snapshots: rules=%d err=%v", len(rules), err)
+			if err != nil {
+				t.Fatalf("build policy snapshots: %v", err)
 			}
-			if !addressListHasSentinel(rules[0].SourceLiterals) || !addressListHasSentinel(rules[0].SourceAddresses) {
-				t.Fatalf("set-form entry dropped from named address book must not fall through to the same-named global object: literals=%v addresses=%v", rules[0].SourceLiterals, rules[0].SourceAddresses)
-			}
-			reasons := PolicyContentRejectionReasons(cfg, nil)
-			if len(reasons) == 0 || !strings.Contains(strings.Join(reasons, "\n"), "shared") {
-				t.Fatalf("content-rejection mirror must name dropped set-form named-book collision, got %q", reasons)
+			assertUnattachedNamedBookLeavesGlobalReference12049(t, cfg, rules, "shared")
+			red := cfg.Security.NamedAddressBooks["red"]
+			if tc.name == "address" {
+				if got := red.Addresses["shared"].UsableValue(); got != "10.0.0.0/8" {
+					t.Fatalf("named-book address = %q, want 10.0.0.0/8", got)
+				}
+			} else if red.AddressSets["shared"] == nil {
+				t.Fatal("named-book address-set shared was not retained")
 			}
 		})
 	}

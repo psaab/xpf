@@ -124,17 +124,17 @@ func TestJunosHostZoneNetdevsMatchSnapshot(t *testing.T) {
 	}
 }
 
-// secureTunnelParityConfig builds a LAN + route-based-VPN topology whose tunnel
-// unit `st0.0` is in zone `vpn`, with the bind-interface authored exactly as
-// given. The two spellings the caller passes derive the SAME if_id and the SAME
-// unit ref but DIFFERENT kernel device names — that asymmetry is the point.
+// secureTunnelParityConfig builds a LAN plus a bind-only route-based VPN whose
+// tunnel unit `st0.0` is in zone `vpn`, with the bind-interface authored exactly
+// as given. No `interfaces st0` stanza is present: only the device named by
+// bind-interface exists, so the fixture cannot invent a bare `st0` netdev.
+// The two spellings derive the SAME if_id and unit ref but DIFFERENT kernel
+// device names — that asymmetry is the point.
 func secureTunnelParityConfig(bindIface string) *config.Config {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
 		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*config.InterfaceUnit{
 			0: {Number: 0, Addresses: []string{"10.0.1.1/24"}}}},
-		"st0": {Name: "st0", Units: map[int]*config.InterfaceUnit{
-			0: {Number: 0, Addresses: []string{"10.5.5.1/30"}}}},
 	}
 	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
 		"v": {Name: "v", BindInterface: bindIface},

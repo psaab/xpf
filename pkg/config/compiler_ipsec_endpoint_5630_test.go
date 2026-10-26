@@ -10,6 +10,7 @@ import (
 // ParseSetCommand + SetPath path (never NewParser) per CLAUDE.md.
 func buildTree5630(t *testing.T, setCommands []string) *ConfigTree {
 	t.Helper()
+	setCommands = addIPsecFixtureDefaults(t, setCommands)
 	tree := &ConfigTree{}
 	for _, cmd := range setCommands {
 		path, err := ParseSetCommand(cmd)
@@ -143,6 +144,7 @@ func TestValidateIPsecEndpoints_Accept(t *testing.T) {
 			name: "valid FQDN remote address",
 			cmds: []string{
 				"set security ike gateway gw address peer.example.com",
+				"set security ike gateway gw remote-identity hostname peer.example.com",
 				"set security ipsec vpn tun gateway gw",
 				"set security ipsec vpn tun bind-interface st0",
 			},
@@ -178,6 +180,7 @@ func TestValidateIPsecEndpoints_Accept(t *testing.T) {
 			name: "valid absolute FQDN (trailing dot)",
 			cmds: []string{
 				"set security ike gateway gw address peer.example.com.",
+				"set security ike gateway gw remote-identity hostname peer.example.com",
 				"set security ipsec vpn tun gateway gw",
 				"set security ipsec vpn tun bind-interface st0",
 			},

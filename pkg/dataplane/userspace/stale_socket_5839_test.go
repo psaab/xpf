@@ -52,9 +52,10 @@ func listenUnix(t *testing.T, path string) *net.UnixListener {
 // "returned an error" alone would pass even if the unlink had already run.
 func TestRemoveStaleUnixSocketRefusesNonSocketPaths_5839(t *testing.T) {
 	cases := []struct {
-		name    string
-		create  func(t *testing.T, path string)
-		wantSub string
+		name            string
+		shortSocketPath bool
+		create          func(t *testing.T, path string)
+		wantSub         string
 	}{
 		{
 			name: "regular file",
@@ -87,7 +88,8 @@ func TestRemoveStaleUnixSocketRefusesNonSocketPaths_5839(t *testing.T) {
 			// Lstat, not Stat: a symlink is judged on its own inode, so a
 			// symlink POINTING AT a socket is still refused rather than
 			// followed into an unlink of the target.
-			name: "symlink to a socket",
+			name:            "symlink to a socket",
+			shortSocketPath: true,
 			create: func(t *testing.T, path string) {
 				target := filepath.Join(filepath.Dir(path), "real.sock")
 				ln := listenUnix(t, target)
@@ -101,7 +103,10 @@ func TestRemoveStaleUnixSocketRefusesNonSocketPaths_5839(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := shortSocketDir(t)
+			dir := t.TempDir()
+			if tc.shortSocketPath {
+				dir = shortSocketDir(t)
+			}
 			path := filepath.Join(dir, "control.sock")
 			tc.create(t, path)
 
@@ -259,7 +264,7 @@ func TestEnsureProcessLockedRefusesNonSocketControlPath_5839(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
-	dir := shortSocketDir(t)
+	dir := t.TempDir()
 	sock := filepath.Join(dir, "control.sock")
 	const payload = "operator data that must survive bring-up"
 	if err := os.WriteFile(sock, []byte(payload), 0600); err != nil {
@@ -298,7 +303,7 @@ func TestEnsureProcessLockedRefusesNonSocketControlPath_5839(t *testing.T) {
 // node with no dataplane at all. A deterministic path fault must be caught
 // while the previous generation is still running.
 func TestEnsureProcessLockedKeepsRunningHelperOnBadPathSet_5839(t *testing.T) {
-	dir := shortSocketDir(t)
+	dir := t.TempDir()
 	sock := filepath.Join(dir, "control.sock")
 	if err := os.WriteFile(sock, []byte("not a socket"), 0600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -412,7 +417,7 @@ func TestPreflightHelperPathsRejectsAliasedPaths_5839(t *testing.T) {
 }
 
 func TestPreflightHelperPathsRejectsReinjectRegularFile9506(t *testing.T) {
-	dir := shortSocketDir(t)
+	dir := t.TempDir()
 	cfg := config.UserspaceConfig{
 		ControlSocket: filepath.Join(dir, "control.sock"),
 		StateFile:     filepath.Join(dir, "state.json"),

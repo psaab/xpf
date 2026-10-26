@@ -67,9 +67,20 @@ func clusterBootstrapConf(nodeID int, key string) string {
         cluster-id 1;
         node %d;
         reth-count 2;
-%s        redundancy-group 1 {
+%s        control-interface em0;
+        peer-address 10.99.0.2;
+        redundancy-group 1 {
             node 0 priority 200;
             node 1 priority 100;
+        }
+    }
+}
+interfaces {
+    em0 {
+        unit 0 {
+            family inet {
+                address 10.99.0.1/24;
+            }
         }
     }
 }

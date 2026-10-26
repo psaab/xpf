@@ -26,7 +26,10 @@ import (
 
 func buildPackedNATTree14421(t *testing.T, cfgText string) *ConfigTree {
 	t.Helper()
-	cfgText = injectHierNATZones15001(cfgText)
+	cfgText = `interfaces { ge-0/0/1 { unit 0 { family inet { address 192.0.2.1/24; } } } }
+routing-instances { red { instance-type virtual-router; } }
+security { zones { security-zone trust; security-zone untrust; } }
+` + cfgText
 	p := NewParser(cfgText)
 	tree, perrs := p.Parse()
 	if len(perrs) > 0 {

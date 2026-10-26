@@ -108,6 +108,26 @@ func srcRuleDmz(ruleset, rule, pool string) []string {
 	}
 }
 
+// srcRuleV6 references a source pool with a source match in the same address family.
+func srcRuleV6(ruleset, rule, pool string) []string {
+	return []string{
+		"set security nat source rule-set " + ruleset + " from zone trust",
+		"set security nat source rule-set " + ruleset + " to zone untrust",
+		"set security nat source rule-set " + ruleset + " rule " + rule + " match source-address 2001:db8:ffff::/64",
+		"set security nat source rule-set " + ruleset + " rule " + rule + " then source-nat pool " + pool,
+	}
+}
+
+// srcRuleDmzV6 is the IPv6 counterpart of srcRuleDmz.
+func srcRuleDmzV6(ruleset, rule, pool string) []string {
+	return []string{
+		"set security nat source rule-set " + ruleset + " from zone dmz",
+		"set security nat source rule-set " + ruleset + " to zone untrust",
+		"set security nat source rule-set " + ruleset + " rule " + rule + " match source-address 2001:db8:ffff::/64",
+		"set security nat source rule-set " + ruleset + " rule " + rule + " then source-nat pool " + pool,
+	}
+}
+
 // TestNAT5144ExactDuplicateSourcePools: two differently-named source pools with
 // the SAME address, both referenced — the canonical "differently-named
 // overlapping source pools" case.
@@ -207,8 +227,8 @@ func TestNAT5144IPv6Overlap(t *testing.T) {
 		"set security nat source pool A address 2001:db8::5",
 		"set security nat source pool B address 2001:db8::5",
 	}
-	cmds = append(cmds, srcRule("RSA", "r1", "A")...)
-	cmds = append(cmds, srcRuleDmz("RSB", "r1", "B")...)
+	cmds = append(cmds, srcRuleV6("RSA", "r1", "A")...)
+	cmds = append(cmds, srcRuleDmzV6("RSB", "r1", "B")...)
 	assertNATOverlapRejected(t, "independent NAT allocators", cmds...)
 }
 
@@ -249,7 +269,7 @@ func TestNAT5144CrossFamilyNoOverlapAccepted(t *testing.T) {
 		"set security nat source pool B address 2001:db8::5",
 	}
 	cmds = append(cmds, srcRule("RSA", "r1", "A")...)
-	cmds = append(cmds, srcRuleDmz("RSB", "r1", "B")...)
+	cmds = append(cmds, srcRuleDmzV6("RSB", "r1", "B")...)
 	assertNATOverlapAccepted(t, cmds...)
 }
 
@@ -456,8 +476,8 @@ func TestNAT5144IPv6NestingRejected(t *testing.T) {
 		"set security nat source pool A address 2001:db8::/120",
 		"set security nat source pool B address 2001:db8::/124",
 	}
-	cmds = append(cmds, srcRule("RSA", "r1", "A")...)
-	cmds = append(cmds, srcRuleDmz("RSB", "r1", "B")...)
+	cmds = append(cmds, srcRuleV6("RSA", "r1", "A")...)
+	cmds = append(cmds, srcRuleDmzV6("RSB", "r1", "B")...)
 	assertNATOverlapRejected(t, "independent NAT allocators", cmds...)
 }
 
@@ -468,8 +488,8 @@ func TestNAT5144IPv6AdjacentAccepted(t *testing.T) {
 		"set security nat source pool A address 2001:db8::/121",
 		"set security nat source pool B address 2001:db8::80/121",
 	}
-	cmds = append(cmds, srcRule("RSA", "r1", "A")...)
-	cmds = append(cmds, srcRuleDmz("RSB", "r1", "B")...)
+	cmds = append(cmds, srcRuleV6("RSA", "r1", "A")...)
+	cmds = append(cmds, srcRuleDmzV6("RSB", "r1", "B")...)
 	assertNATOverlapAccepted(t, cmds...)
 }
 
@@ -481,8 +501,8 @@ func TestNAT5144IPv6BareVs128DuplicateRejected(t *testing.T) {
 		"set security nat source pool A address 2001:db8::5",
 		"set security nat source pool B address 2001:db8::5/128",
 	}
-	cmds = append(cmds, srcRule("RSA", "r1", "A")...)
-	cmds = append(cmds, srcRuleDmz("RSB", "r1", "B")...)
+	cmds = append(cmds, srcRuleV6("RSA", "r1", "A")...)
+	cmds = append(cmds, srcRuleDmzV6("RSB", "r1", "B")...)
 	assertNATOverlapRejected(t, "independent NAT allocators", cmds...)
 }
 
@@ -647,7 +667,7 @@ func TestStaticVsStaticExternalAccepted14368(t *testing.T) {
 
 func TestStaticV6ExternalInV6PoolRejected14368(t *testing.T) {
 	cmds := []string{"set security nat source pool P6 address 2001:db8::10"}
-	cmds = append(cmds, srcRule("RS1", "R1", "P6")...)
+	cmds = append(cmds, srcRuleV6("RS1", "R1", "P6")...)
 	cmds = append(cmds,
 		"set security nat static rule-set SS from zone untrust",
 		"set security nat static rule-set SS rule S1 match destination-address 2001:db8::10/128",

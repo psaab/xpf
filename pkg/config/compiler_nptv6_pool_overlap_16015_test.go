@@ -63,21 +63,21 @@ func TestPoolMemberInsideNPTv6ExternalRejected16015(t *testing.T) {
 	// V6 pool host inside the /48 external prefix; source rule egresses
 	// to the NPTv6 from-zone (untrust).
 	cmds := []string{"set security nat source pool P6 address 2001:db8:1::10"}
-	cmds = append(cmds, srcRule("RS1", "R1", "P6")...)
+	cmds = append(cmds, srcRuleV6("RS1", "R1", "P6")...)
 	cmds = append(cmds, nptv6Ext16015("untrust")...)
 	assertNPTv6PoolRejected16015(t, `nptv6 external prefix "2001:db8:1::/48"`, cmds...)
 }
 
 func TestPoolCIDRInsideNPTv6ExternalRejected16015(t *testing.T) {
 	cmds := []string{"set security nat source pool P6 address 2001:db8:1:5::/120"}
-	cmds = append(cmds, srcRule("RS1", "R1", "P6")...)
+	cmds = append(cmds, srcRuleV6("RS1", "R1", "P6")...)
 	cmds = append(cmds, nptv6Ext16015("untrust")...)
 	assertNPTv6PoolRejected16015(t, `nptv6 external prefix`, cmds...)
 }
 
 func TestPoolMemberOutsideNPTv6ExternalAccepted16015(t *testing.T) {
 	cmds := []string{"set security nat source pool P6 address 2001:db8:2::10"}
-	cmds = append(cmds, srcRule("RS1", "R1", "P6")...)
+	cmds = append(cmds, srcRuleV6("RS1", "R1", "P6")...)
 	cmds = append(cmds, nptv6Ext16015("untrust")...)
 	assertNATOverlapAccepted(t, cmds...)
 }
@@ -97,7 +97,7 @@ func TestNPTv6DisjointZonePoolAccepted16015(t *testing.T) {
 	cmds = append(cmds,
 		"set security nat source rule-set RSD from zone trust",
 		"set security nat source rule-set RSD to zone dmz",
-		"set security nat source rule-set RSD rule R1 match source-address 10.0.0.0/24",
+		"set security nat source rule-set RSD rule R1 match source-address 2001:db8:ffff::/64",
 		"set security nat source rule-set RSD rule R1 then source-nat pool P6",
 	)
 	cmds = append(cmds, nptv6Ext16015("untrust")...)

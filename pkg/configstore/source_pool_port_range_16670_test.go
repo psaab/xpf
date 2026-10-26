@@ -30,17 +30,17 @@ func TestSourcePoolPortStrictCommit16670(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name, port string
-		low, high  int
-		random     bool
-		preserve   bool
+		name, port, modifier string
+		low, high            int
+		random               bool
+		preserve             bool
 	}{
-		{"junos", "range 1024 to 2048", want.PortLow, want.PortHigh, false, false},
-		{"legacy", "range low 1024 high 2048", want.PortLow, want.PortHigh, false, false},
-		{"single", "3000", 3000, 3000, false, false},
-		{"boundaries", "range 1 to 65535", 1, 65535, false, false},
-		{"modifier", "range 1024 to 2048 random-allocation", 1024, 2048, true, false},
-		{"preserve", "no-translation", 0, 0, false, true},
+		{"junos", "range 1024 to 2048", "", want.PortLow, want.PortHigh, false, false},
+		{"legacy", "range low 1024 high 2048", "", want.PortLow, want.PortHigh, false, false},
+		{"single", "3000", "", 3000, 3000, false, false},
+		{"boundaries", "range 1 to 65535", "", 1, 65535, false, false},
+		{"modifier", "range 1024 to 2048", "random-allocation", 1024, 2048, true, false},
+		{"preserve", "no-translation", "", 0, 0, false, true},
 	} {
 		for _, loadSet := range []bool{false, true} {
 			mode := "set"
@@ -53,6 +53,9 @@ func TestSourcePoolPortStrictCommit16670(t *testing.T) {
 					t.Fatal(err)
 				}
 				text := sourcePoolSet16670 + "set security nat source pool P port " + tc.port + "\n"
+				if tc.modifier != "" {
+					text += "set security nat source pool P port " + tc.modifier + "\n"
+				}
 				if loadSet {
 					if _, err := s.LoadSet(text); err != nil {
 						t.Fatalf("LoadSet: %v", err)

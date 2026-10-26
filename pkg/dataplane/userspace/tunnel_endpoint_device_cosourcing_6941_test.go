@@ -47,8 +47,8 @@ import (
 // them differ, which is what gives this guard its teeth.
 func TestTunnelEndpointDeviceIsCoSourced6941(t *testing.T) {
 	const (
-		priv  = "1111111111111111111111111111111111111111111111111111111111111111"
-		peerX = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		priv  = "00bedd4ed26623ab2f765d16af2dcba4f6dbe17c284a66c6494b48b823f4c654"
+		peerX = "04d9dab116416940a490d8bab5d0dd921094f0a278dee3db867df8fbd2db6e16"
 	)
 	wgBase := []string{
 		"set interfaces wg0 tunnel mode wireguard",

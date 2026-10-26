@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -642,10 +643,55 @@ func compileMayFail5619(lines ...string) (*config.Config, error) {
 	return config.CompileConfig(tree)
 }
 
+// compileForTest5619 compiles a strict fixture. Snapshot-only fixtures may
+// omit IPsec authentication details; a missing PSK gets a fixture key, and a
+// missing gateway gets an addressed fixture gateway so a synthetic PSK has a
+// peer scope under #15989. Authored key/gateway values are retained; only
+// missing fixture details are synthesized here.
 func compileForTest5619(t *testing.T, lines ...string) *config.Config {
 	t.Helper()
+	all := append([]string(nil), lines...)
+	boundVPNs := make([]string, 0)
+	bound := make(map[string]bool)
+	hasKey := make(map[string]bool)
+	hasGateway := make(map[string]bool)
+	for _, line := range all {
+		fields := strings.Fields(line)
+		if len(fields) < 6 || fields[0] != "set" || fields[1] != "security" ||
+			fields[2] != "ipsec" || fields[3] != "vpn" {
+			continue
+		}
+		vpn := fields[4]
+		switch fields[5] {
+		case "bind-interface":
+			if !bound[vpn] {
+				bound[vpn] = true
+				boundVPNs = append(boundVPNs, vpn)
+			}
+		case "pre-shared-key":
+			hasKey[vpn] = true
+		case "gateway":
+			hasGateway[vpn] = true
+		case "ike":
+			if len(fields) >= 8 && fields[6] == "gateway" {
+				hasGateway[vpn] = true
+			}
+		}
+	}
+	for _, vpn := range boundVPNs {
+		if !hasGateway[vpn] {
+			gwName := "fixture-peer-" + vpn
+			all = append(all,
+				"set security ike gateway "+gwName+" address 198.51.100.1",
+				"set security ipsec vpn "+vpn+" ike gateway "+gwName,
+			)
+		}
+		if !hasKey[vpn] {
+			all = append(all, "set security ipsec vpn "+vpn+" pre-shared-key fixture-psk")
+		}
+	}
 	tree := &config.ConfigTree{}
-	for _, line := range lines {
+	for _, line := range all {
 		path, err := config.ParseSetCommand(line)
 		if err != nil {
 			t.Fatalf("ParseSetCommand(%q): %v", line, err)

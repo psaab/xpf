@@ -35,6 +35,7 @@ interfaces {
     }
     reth1 {
         redundant-ether-options { redundancy-group 1; }
+        vlan-tagging;
         unit 0 { family inet { address 10.0.61.1/24; } }
         unit 80 { vlan-id 180; family inet { address 10.0.80.1/24; } }
     }

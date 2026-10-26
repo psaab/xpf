@@ -21,7 +21,8 @@ func TestSurfaceADDNSFlatSetCompiles(t *testing.T) {
 		"set system services dynamic-dns provider corp-2136 tsig-secret c2VjcmV0",
 		"set system services dynamic-dns forced-refresh 24h",
 		"set system services dynamic-dns error-backoff-max 1h",
-		// Per-interface per-family bindings.
+		"set interfaces ge-0-0-2 vlan-tagging",
+		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns provider corp-2136",
 		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns hostname wan.example.net",
 		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns address-source dhcp",
@@ -104,7 +105,9 @@ func TestSurfaceADDNSHierarchicalCompilesIdentically(t *testing.T) {
 }
 interfaces {
   ge-0-0-2 {
+    vlan-tagging;
     unit 50 {
+      vlan-id 50;
       family inet {
         dynamic-dns {
           provider corp-2136;
@@ -164,7 +167,8 @@ func TestSurfaceADDNSAbsentCompilesToNil(t *testing.T) {
 func TestSurfaceADDNSWarnsOnUndefinedProviderAndMissingHostname(t *testing.T) {
 	tree := buildTree(t, []string{
 		// Binding referencing a provider that is not in the catalog, and a
-		// binding missing the hostname.
+		"set interfaces ge-0-0-2 vlan-tagging",
+		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns provider ghost",
 		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns hostname wan.example.net",
 		"set interfaces ge-0-0-3 unit 0 family inet dynamic-dns provider corp-2136",
@@ -197,13 +201,14 @@ func TestSurfaceADDNSWarnsOnUndefinedProviderAndMissingHostname(t *testing.T) {
 // urlless binding is no longer flagged.
 func TestSurfaceADDNSWarnsCheckIPSourceWithoutURL(t *testing.T) {
 	tree := buildTree(t, []string{
-		// Provider WITHOUT a checkip-url; a binding selects address-source checkip.
-		"set system services dynamic-dns provider nourl backend rfc2136",
-		"set system services dynamic-dns provider nourl update-server 192.0.2.53",
+		"set interfaces ge-0-0-2 vlan-tagging",
+		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns provider nourl",
 		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns hostname wan.example.net",
 		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns address-source checkip",
-		// Provider WITH a checkip-url; its checkip binding must NOT be flagged.
+		// Provider WITHOUT a checkip-url; a binding selects address-source checkip.
+		"set system services dynamic-dns provider nourl backend rfc2136",
+		"set system services dynamic-dns provider nourl update-server 192.0.2.53",
 		"set system services dynamic-dns provider withurl backend rfc2136",
 		"set system services dynamic-dns provider withurl update-server 192.0.2.53",
 		"set system services dynamic-dns provider withurl checkip-url https://ip.example.net",
@@ -231,12 +236,13 @@ func TestSurfaceADDNSWarnsCheckIPSourceWithoutURL(t *testing.T) {
 // forgeable. A provider with a complete TSIG tuple must NOT emit that warning.
 func TestSurfaceADDNSWarnsNoTSIG(t *testing.T) {
 	tree := buildTree(t, []string{
+		"set interfaces ge-0-0-2 vlan-tagging",
+		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
+		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns provider nokey",
+		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns hostname wan.example.net",
 		// rfc2136 provider WITH update-server but no tsig-key → unsigned warn.
 		"set system services dynamic-dns provider nokey backend rfc2136",
 		"set system services dynamic-dns provider nokey update-server 192.0.2.53",
-		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns provider nokey",
-		"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns hostname wan.example.net",
-		// rfc2136 provider with a COMPLETE TSIG tuple → no unsigned warn.
 		"set system services dynamic-dns provider withkey backend rfc2136",
 		"set system services dynamic-dns provider withkey update-server 192.0.2.53",
 		"set system services dynamic-dns provider withkey tsig-key k1",

@@ -53,7 +53,7 @@ func TestEventPlantClassPersistsReloadsAndRollback9984(t *testing.T) {
 	if err := s.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure trigger handoff: %v", err)
 	}
-	if err := s.SetFromInputAsPlantClass("", "planter", `event-options policy p events link_down`); err != nil {
+	if err := s.SetFromInputAsPlantClass("", "planter", `event-options policy p events ping_test_completed`); err != nil {
 		t.Fatalf("trigger-only handoff: %v", err)
 	}
 	triggerOnly, err := s.CompileCandidate()
@@ -96,7 +96,7 @@ func TestEventPlantClassPersistsReloadsAndRollback9984(t *testing.T) {
 	}
 	synced := `event-options {
     policy p {
-        events link_down;
+        events ping_test_completed;
         plant-class rollbacker;
         then {
             change-configuration {

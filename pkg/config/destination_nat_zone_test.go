@@ -115,9 +115,17 @@ func TestDestinationNATNonZoneFromScopesNoWarn12245(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ruleSet := "dnat-" + tc.name
-			cmds := []string{
-				"set security nat destination pool P1 address 10.0.30.100",
+			cmds := []string{}
+			if tc.wantInterface != "" {
+				cmds = append(cmds,
+					"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.1/24")
 			}
+			if tc.wantRoutingInstance != "" {
+				cmds = append(cmds,
+					"set routing-instances blue instance-type virtual-router")
+			}
+			cmds = append(cmds,
+				"set security nat destination pool P1 address 10.0.30.100")
 			if tc.from != "" {
 				cmds = append(cmds, "set security nat destination rule-set "+ruleSet+" "+tc.from)
 			}

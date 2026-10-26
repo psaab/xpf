@@ -183,3 +183,9 @@ docs/pr/9916/brief.md
 # cited by: docs/log/9956.md
 # Never committed on any ref; gitignored worktree file.
 docs/pr/9956-session-scope/plan.md
+# #14649 test sentinel — the docsref RED proof deliberately cited this
+# nonexistent plan in docs/log/14649.md; logs 16466 and 16763 record that
+# fixture as an unrelated pre-existing citation. This synthetic plan was
+# never a real proposal and will not land.
+# cited by: docs/log/14649.md, docs/log/16466.md, docs/log/16763.md
+docs/research/z14649-nonexistent-plan.md

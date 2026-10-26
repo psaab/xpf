@@ -1385,7 +1385,7 @@ func TestLoginPathPackedDoesNotOverReach_6706(t *testing.T) {
 		}
 		// NEGATIVE CONTROL for the flag: a correctly nested stanza must not set
 		// it, or every deployment would be forced into the resolver.
-		ok, err := compileLogin6662(t, `system { login { user alice { class ops; } } }`)
+		ok, err := compileLogin6662(t, `system { login { class ops { permissions view; } user alice { class ops; } } }`)
 		if err != nil {
 			t.Fatalf("nested stanza rejected: %v", err)
 		}

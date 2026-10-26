@@ -15,7 +15,7 @@ func TestLo0SpecWithTermsCanRenderZeroRules6529(t *testing.T) {
 	// Junos match-nothing term (lo0AddrScope's empty-positive arm): the rule is
 	// skipped entirely. On the lenient / peer-sync path an unresolved
 	// `from source-prefix-list` resolves exactly this way — constrained, empty.
-	spec := Lo0FilterSpec{V4Terms: []Lo0FilterTerm{
+	spec := Lo0FilterSpec{NoIPv6RejectZeroHopLimit: true, V4Terms: []Lo0FilterTerm{
 		{Name: "unresolved-scope", Action: "discard", SrcConstrained: true},
 	}}
 	if len(spec.V4Terms) == 0 {
@@ -37,7 +37,7 @@ func TestLo0SpecWithTermsCanRenderZeroRules6529(t *testing.T) {
 // spec that does render, so the two cases above and below are distinguishable.
 func TestLo0SpecRuleCountIsReported6529(t *testing.T) {
 	p := newBuildPlan(t, "xpf_lo0", lo0FilterPriority)
-	buildLo0FilterNetlink(p, Lo0FilterSpec{V4Terms: []Lo0FilterTerm{
+	buildLo0FilterNetlink(p, Lo0FilterSpec{NoIPv6RejectZeroHopLimit: true, V4Terms: []Lo0FilterTerm{
 		{Name: "deny-rest", Action: "discard"},
 	}})
 	if p.err != nil {

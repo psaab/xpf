@@ -70,7 +70,26 @@ func TestDNATOffShadowFeedExtendedAddressBookWarns11671(t *testing.T) {
 		"set security nat destination rule-set rs1 rule r-translate match destination-address 192.0.2.20/32",
 		"set security nat destination rule-set rs1 rule r-translate then destination-nat pool p1",
 	)
-	assertDNATOffShadow11352Warning(t, lines, "r-off")
+	if _, err := CompileConfig(buildTree(t, lines)); err == nil ||
+		!strings.Contains(err.Error(), "#15685") || !strings.Contains(err.Error(), "svc-vip") {
+		t.Fatalf("strict compile must reject the dynamic/static address collision (#15685), got: %v", err)
+	}
+	cfg, err := CompileConfigLenient(buildTree(t, lines))
+	if err != nil {
+		t.Fatalf("lenient compile must retain the operator-visible warnings: %v", err)
+	}
+	var collisionWarning, offShadowWarning bool
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "#15685") && strings.Contains(warning, "svc-vip") {
+			collisionWarning = true
+		}
+		if strings.Contains(warning, "#11352") && strings.Contains(warning, "r-off") {
+			offShadowWarning = true
+		}
+	}
+	if !collisionWarning || !offShadowWarning {
+		t.Fatalf("lenient warnings must include #15685 and the #11352 r-off warning; got %v", cfg.Warnings)
+	}
 }
 
 func TestDNATOffShadowApplicationAnyWarns11671(t *testing.T) {

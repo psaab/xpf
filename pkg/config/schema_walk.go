@@ -401,7 +401,6 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		return nil
 	}
 
-
 	// Container / named-instance node. Consume this node's identity tokens
 	// (keyword + args + compoundKey), then validate its BLOCK CHILDREN at the
 	// resolved child schema.

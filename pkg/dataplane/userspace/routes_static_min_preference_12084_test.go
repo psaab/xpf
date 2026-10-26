@@ -33,6 +33,7 @@ func TestRouteSnapshotsKeepActionPreferenceAgainstActionlessAliases12084(t *test
 		destination string
 		preference  int
 		discard     bool
+		reject      bool
 		nextTable   string
 	}{
 		{
@@ -51,7 +52,7 @@ func TestRouteSnapshotsKeepActionPreferenceAgainstActionlessAliases12084(t *test
 			name: "reject",
 			text: `routing-options { static { route 10.11.0.0/16 { reject; preference 250; }
 				route 10.11.0.1/16 { preference 5; } } }`,
-			destination: "10.11.0.0/16", preference: 250, discard: true,
+			destination: "10.11.0.0/16", preference: 250, reject: true,
 		},
 		{
 			name: "next-table",
@@ -82,8 +83,10 @@ func TestRouteSnapshotsKeepActionPreferenceAgainstActionlessAliases12084(t *test
 			if len(rows) != 1 {
 				t.Fatalf("snapshot rows = %+v, want exactly one route", rows)
 			}
-			if rows[0].Preference != tc.preference || rows[0].Discard != tc.discard || rows[0].NextTable != tc.nextTable {
-				t.Fatalf("snapshot = %+v, want pref=%d discard=%v next-table=%q", rows[0], tc.preference, tc.discard, tc.nextTable)
+			if rows[0].Preference != tc.preference || rows[0].Discard != tc.discard ||
+				rows[0].Reject != tc.reject || rows[0].NextTable != tc.nextTable {
+				t.Fatalf("snapshot = %+v, want pref=%d discard=%v reject=%v next-table=%q",
+					rows[0], tc.preference, tc.discard, tc.reject, tc.nextTable)
 			}
 		})
 	}

@@ -143,17 +143,21 @@ func TestColdBootIdleSyncAckCadenceHoldsNeverSeenPeer11682(t *testing.T) {
 		t.Fatal("receive loop did not send a sync heartbeat probe")
 	}
 	ackDeadline := time.After(time.Second)
-	for !ss.peerHeartbeatAckEver.Load() {
+	for {
+		if ss.peerHeartbeatAckEver.Load() {
+			if age, ok := ss.LastPeerReceiveAge(); ok && age <= readDeadline {
+				break
+			}
+		}
 		select {
 		case err := <-peerErr:
 			t.Fatalf("idle peer failed to answer sync probe: %v", err)
 		case <-ackDeadline:
-			t.Fatal("receive loop did not process the idle peer's heartbeat ACK")
+			age, ok := ss.LastPeerReceiveAge()
+			t.Fatalf("received heartbeat ACK did not refresh sync proof before deadline: age=%v received=%v",
+				age, ok)
 		case <-time.After(time.Millisecond):
 		}
-	}
-	if age, ok := ss.LastPeerReceiveAge(); !ok || age > readDeadline {
-		t.Fatalf("received heartbeat ACK did not refresh sync proof: age=%v received=%v", age, ok)
 	}
 
 	ticker := time.NewTicker(readDeadline / 10)

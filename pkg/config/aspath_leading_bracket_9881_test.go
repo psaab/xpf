@@ -356,13 +356,15 @@ func TestBracketFlagFollowsTheWinningSource_9881(t *testing.T) {
 // "unknown", never a stale true refusing a key that was never bracketed.
 func TestCopyRenameClearsBracketProvenance_9881(t *testing.T) {
 	build := func() *ConfigTree {
-		return buildFlat9881(t, `set policy-options as-path AP1 [0-9]+`)
+		// A singleton AS set is valid Junos syntax, and remains valid when a
+		// copied/re-keyed node loses its bracket provenance and reads as AS 65000.
+		return buildFlat9881(t, `set policy-options as-path AP1 [65000]`)
 	}
 	t.Run("copy", func(t *testing.T) {
 		tree := build()
 		if err := tree.CopyPath(
-			[]string{"policy-options", "as-path", "AP1", "0-9", "+"},
-			[]string{"policy-options", "as-path", "AP2", "0-9", "+"}); err != nil {
+			[]string{"policy-options", "as-path", "AP1", "65000"},
+			[]string{"policy-options", "as-path", "AP2", "65000"}); err != nil {
 			t.Fatalf("copy: %v", err)
 		}
 		// Delete the still-bracketed source so the verdict isolates the copy.
@@ -378,8 +380,8 @@ func TestCopyRenameClearsBracketProvenance_9881(t *testing.T) {
 	t.Run("rename", func(t *testing.T) {
 		tree := build()
 		if err := tree.RenamePath(
-			[]string{"policy-options", "as-path", "AP1", "0-9", "+"},
-			[]string{"policy-options", "as-path", "AP2", "0-9", "+"}); err != nil {
+			[]string{"policy-options", "as-path", "AP1", "65000"},
+			[]string{"policy-options", "as-path", "AP2", "65000"}); err != nil {
 			t.Fatalf("rename: %v", err)
 		}
 		if _, err := CompileConfig(tree); err != nil {

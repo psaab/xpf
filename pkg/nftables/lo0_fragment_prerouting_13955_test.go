@@ -13,7 +13,7 @@ import (
 // than install a silently ineffective filter. IPv6 remains representable.
 func TestLo0V4FragmentFailsClosedBeforeDefrag13955(t *testing.T) {
 	p := newBuildPlan(t, "xpf_lo0", lo0FilterPriority)
-	buildLo0FilterNetlink(p, Lo0FilterSpec{V4Terms: []Lo0FilterTerm{
+	buildLo0FilterNetlink(p, Lo0FilterSpec{NoIPv6RejectZeroHopLimit: true, V4Terms: []Lo0FilterTerm{
 		{Name: "drop-frags", IsFragment: true, Action: "discard"},
 	}})
 	if p.err == nil || !strings.Contains(p.err.Error(), "IPv4 is-fragment") {
@@ -28,7 +28,7 @@ func TestLo0V4FragmentFailsClosedBeforeDefrag13955(t *testing.T) {
 // continues to be evaluated at the established lo0 input hook.
 func TestLo0V6FragmentStaysOnInput13955(t *testing.T) {
 	p := newBuildPlan(t, "xpf_lo0", lo0FilterPriority)
-	buildLo0FilterNetlink(p, Lo0FilterSpec{V6Terms: []Lo0FilterTerm{
+	buildLo0FilterNetlink(p, Lo0FilterSpec{NoIPv6RejectZeroHopLimit: true, V6Terms: []Lo0FilterTerm{
 		{Name: "drop-frags6", IsFragment: true, Action: "discard"},
 	}})
 	if p.err != nil {
@@ -50,7 +50,7 @@ func TestLo0V6FragmentStaysOnInput13955(t *testing.T) {
 
 func TestLo0NoFragmentRemainsUnchanged13955(t *testing.T) {
 	p := newBuildPlan(t, "xpf_lo0", lo0FilterPriority)
-	buildLo0FilterNetlink(p, Lo0FilterSpec{V4Terms: []Lo0FilterTerm{
+	buildLo0FilterNetlink(p, Lo0FilterSpec{NoIPv6RejectZeroHopLimit: true, V4Terms: []Lo0FilterTerm{
 		{Name: "ssh", Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Action: "accept"},
 	}})
 	if p.err != nil {

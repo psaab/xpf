@@ -44,6 +44,7 @@ func seedRetainedHelperGeneration8597(t *testing.T, h *partialUpdateHarness6986)
 		Generation: 1, // this incarnation's FIRST snapshot
 		Config:     h.cfg,
 		Zones:      []ZoneSnapshot{{Name: "fresh-incarnation-8597", ID: 91}},
+		Summary:    SnapshotSummary{ZoneCount: 1},
 	}
 	h.m.mu.Lock()
 	h.m.lastSnapshot = fresh

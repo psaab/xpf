@@ -30,25 +30,26 @@ import (
 // reinstated): CompileConfig returns an error.
 func TestSourceNATPersistentNoTranslationAcceptedAtCommit_6041(t *testing.T) {
 	cases := []struct {
-		name string
-		pool []string
+		name        string
+		sourceMatch string
+		pool        []string
 	}{
-		{"permit-any-remote-host", []string{
+		{"permit-any-remote-host", "", []string{
 			"set security nat source pool p1 address 203.0.113.5/32",
 			"set security nat source pool p1 address 203.0.113.6/32",
 			"set security nat source pool p1 port no-translation",
 			"set security nat source pool p1 persistent-nat permit any-remote-host"}},
-		{"permit-target-host", []string{
+		{"permit-target-host", "", []string{
 			"set security nat source pool p1 address 203.0.113.5/32",
 			"set security nat source pool p1 address 203.0.113.6/32",
 			"set security nat source pool p1 port no-translation",
 			"set security nat source pool p1 persistent-nat permit target-host"}},
-		{"inactivity-timeout-only", []string{
+		{"inactivity-timeout-only", "", []string{
 			"set security nat source pool p1 address 203.0.113.5/32",
 			"set security nat source pool p1 address 203.0.113.6/32",
 			"set security nat source pool p1 port no-translation",
 			"set security nat source pool p1 persistent-nat inactivity-timeout 600"}},
-		{"ipv6-pool", []string{
+		{"ipv6-pool", "2001:db8:ffff::/64", []string{
 			"set security nat source pool p1 address 2001:db8::5/128",
 			"set security nat source pool p1 address 2001:db8::6/128",
 			"set security nat source pool p1 port no-translation",
@@ -56,7 +57,11 @@ func TestSourceNATPersistentNoTranslationAcceptedAtCommit_6041(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := snatPoolTree(t, tc.pool...)
+			match := tc.sourceMatch
+			if match == "" {
+				match = "10.0.0.0/24"
+			}
+			tree := snatPoolTreeWithMatch(t, match, tc.pool...)
 			cfg, err := CompileConfig(tree)
 			if err != nil {
 				t.Fatalf("CompileConfig rejected persistent-nat + port no-translation pool (now supported, #6041): %v", err)

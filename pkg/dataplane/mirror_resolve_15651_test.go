@@ -13,6 +13,8 @@ type mirrorDP15651 struct {
 	calls [][3]int // ingress, output, rate
 }
 
+func (*mirrorDP15651) xpfValidationPass() bool { return false }
+
 func (*mirrorDP15651) ClearMirrorConfigs() error { return nil }
 func (m *mirrorDP15651) SetMirrorConfig(ifindex int, mirrorIfindex int, rate uint32) error {
 	m.calls = append(m.calls, [3]int{ifindex, mirrorIfindex, int(rate)})

@@ -32,6 +32,9 @@ func noRethHoldDaemon(t *testing.T) *Daemon {
 	store := testStoreWithSetConfig(t, []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-7162",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 		"set chassis cluster node 0",
 		"set chassis cluster no-reth-vrrp",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",

@@ -382,18 +382,18 @@ func TestPolicyGroupMalformedThenRejected_12537(t *testing.T) {
 	const want = `then reject: unknown modifier "bogus"`
 	for name, text := range map[string]string{
 		"group then vs inline then": routePolicyGroup12537(
-			"term T from route-filter 10.0.0.0/8 orlonger then reject bogus;", "term T then accept;"),
+			"term T from route-filter 10.0.0.0/8 orlonger then reject bogus;", "term T then local-preference 100;"),
 		"group then vs inline from": routePolicyGroup12537(
 			"term T then reject bogus;", "term T from route-filter 10.0.0.0/8 orlonger;"),
 		"tail after an operand": routePolicyGroup12537(
-			"term T from route-filter 10.0.0.0/8 orlonger then local-preference 200 reject bogus;", "term T then accept;"),
+			"term T from route-filter 10.0.0.0/8 orlonger then local-preference 200 reject bogus;", "term T then local-preference 100;"),
 		"direct": routePolicyDirect12537("term T from route-filter 10.0.0.0/8 orlonger then reject bogus;"),
 	} {
 		t.Run(name, func(t *testing.T) { rejectPolicyText12537(t, text, want) })
 	}
 	t.Run("tolerant", func(t *testing.T) {
 		tree, perrs := config.NewParser(routePolicyGroup12537(
-			"term T from route-filter 10.0.0.0/8 orlonger then reject bogus;", "term T then accept;")).Parse()
+			"term T from route-filter 10.0.0.0/8 orlonger then reject bogus;", "term T then local-preference 100;")).Parse()
 		if len(perrs) > 0 {
 			t.Fatal(perrs)
 		}

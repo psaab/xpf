@@ -106,7 +106,7 @@ func TestShowTextSNMPKeepsNonSecretFields(t *testing.T) {
 		"GRPC6532-DESCRIPTION-EDGE-FW", // sysDescr
 		"read-only",                    // community authorization mode
 		"10.9.9.9",                     // trap target (name masked since #16728)
-		"u1", "sha256", "des", // v3 user + auth/priv protocols
+		"u1", "sha256", "des",          // v3 user + auth/priv protocols
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("ShowText{snmp} dropped non-secret field %q — the community mask "+

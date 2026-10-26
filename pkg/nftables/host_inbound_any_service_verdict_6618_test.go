@@ -63,6 +63,7 @@ func buildOneZonePlan(t *testing.T, services []string) *nlPlan {
 	t.Helper()
 	p := newBuildPlan(t, "xpf_6618", hostInboundPriority)
 	buildHostInboundNetlink(p, HostInboundSpec{
+		NoIPv6RejectZeroHopLimit: true,
 		Views: []HostInboundZoneView{{
 			Zone:           anyServiceZoneName,
 			SystemServices: services,

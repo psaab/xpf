@@ -850,7 +850,7 @@ func TestEveryFabricFieldIsClassifiedForTheResample9684(t *testing.T) {
 	plan := map[string]bool{"Name": true, "ParentInterface": true, "ParentLinuxName": true,
 		"ParentIfindex": true, "RXQueues": true, "ParentUnbindable": true}
 	resampled := map[string]bool{"OverlayLinux": true, "OverlayIfindex": true, "PeerAddress": true,
-		"LocalMAC": true, "PeerMAC": true, "Up": true}
+		"LocalMAC": true, "PeerMAC": true, "Up": true, "LinkAuthenticated": true}
 	typ := reflect.TypeOf(FabricSnapshot{})
 	for i := 0; i < typ.NumField(); i++ {
 		if name := typ.Field(i).Name; plan[name] == resampled[name] {
@@ -859,10 +859,11 @@ func TestEveryFabricFieldIsClassifiedForTheResample9684(t *testing.T) {
 		}
 	}
 	published := FabricSnapshot{Name: "fab0", ParentInterface: "a", ParentLinuxName: "a", ParentIfindex: 1,
-		RXQueues: 1, OverlayLinux: "a", OverlayIfindex: 1, PeerAddress: "a", LocalMAC: "a", PeerMAC: "a"}
+		RXQueues: 1, OverlayLinux: "a", OverlayIfindex: 1, PeerAddress: "a", LocalMAC: "a", PeerMAC: "a",
+		LinkAuthenticated: true}
 	fresh := FabricSnapshot{Name: "fab0", ParentInterface: "b", ParentLinuxName: "b", ParentIfindex: 2,
 		RXQueues: 2, ParentUnbindable: true, OverlayLinux: "b", OverlayIfindex: 2, PeerAddress: "b",
-		LocalMAC: "b", PeerMAC: "b", Up: true}
+		LocalMAC: "b", PeerMAC: "b", Up: true, LinkAuthenticated: false}
 	got := reflect.ValueOf(refreshFabricRowsKeepingPlan([]FabricSnapshot{published}, []FabricSnapshot{fresh})[0])
 	pub, frs := reflect.ValueOf(published), reflect.ValueOf(fresh)
 	for i := 0; i < typ.NumField(); i++ {

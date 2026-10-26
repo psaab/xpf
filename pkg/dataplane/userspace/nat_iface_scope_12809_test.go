@@ -98,6 +98,7 @@ var lab12809CatchAllLines = []string{
 }
 
 var lab12809ZoneLines = []string{
+	"set interfaces reth0 vlan-tagging",
 	"set interfaces reth0 unit 80 vlan-id 80 family inet address 172.16.80.8/24",
 	"set interfaces reth1 unit 0 family inet address 10.0.61.1/24",
 	"set security zones security-zone wan interfaces reth0.80",

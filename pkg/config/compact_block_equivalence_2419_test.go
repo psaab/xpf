@@ -182,6 +182,23 @@ func synthPair(n *schemaNode) (string, string, bool) {
 	return "", "", false
 }
 
+// compactCensusPair supplies validator-shaped values for the login SSH-key
+// sites. Their schema validator now requires a complete quoted OpenSSH key;
+// generic identifiers no longer make the census fixture observable.
+func compactCensusPair(site compactSite) (string, string, bool) {
+	if strings.Join(site.container, " ") == "system login user xpfarg authentication" {
+		switch site.leaf {
+		case "ssh-dsa":
+			return `"ssh-dss AAAA"`, `"ssh-dss BBBB"`, true
+		case "ssh-ed25519":
+			return `"ssh-ed25519 AAAA"`, `"ssh-ed25519 BBBB"`, true
+		case "ssh-rsa":
+			return `"ssh-rsa AAAA"`, `"ssh-rsa BBBB"`, true
+		}
+	}
+	return synthPair(site.node)
+}
+
 // enumPairFromValidator recovers an enum leaf's accepted set from the leaf's
 // OWN validator, for the #8690 unruled-fixture sweep.
 //
@@ -1058,7 +1075,7 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 		var v1, v2 string
 		if !s.flag {
 			var ok bool
-			v1, v2, ok = synthPair(s.node)
+			v1, v2, ok = compactCensusPair(s)
 			if !ok {
 				res.skipped["no two distinct synthesizable values"]++
 				res.state[siteKey] = "skipped: no two distinct synthesizable values"

@@ -43,6 +43,7 @@ func TestTolerantDHGroupWarns_9919(t *testing.T) {
 			"set security ike proposal ike-p1 authentication-algorithm sha-256",
 			"set security ike proposal ike-p1 dh-group nonsense",
 			"set security ike policy ike-pol proposals ike-p1",
+			"set security ike policy ike-pol pre-shared-key ascii-text fixture-secret-9919",
 			"set security ike gateway gw1 address 192.0.2.1",
 			"set security ike gateway gw1 ike-policy ike-pol",
 			"set security ipsec vpn tun1 ike gateway gw1",
@@ -67,6 +68,7 @@ func TestTolerantDHGroupWarns_9919(t *testing.T) {
 			"set security ipsec proposal esp-p2 dh-group nonsense",
 			"set security ipsec policy ipsec-pol proposals esp-p2",
 			"set security ipsec vpn tun1 ike gateway 192.0.2.1",
+			"set security ipsec vpn tun1 pre-shared-key ascii-text fixture-secret-9919",
 			"set security ipsec vpn tun1 ike ipsec-policy ipsec-pol",
 		})
 		cfg, err := CompileConfigLenient(tree)
@@ -85,6 +87,7 @@ func TestTolerantDHGroupWarns_9919(t *testing.T) {
 			"set security ike proposal ike-p1 authentication-algorithm sha-256",
 			"set security ike proposal ike-p1 dh-group 99",
 			"set security ike policy ike-pol proposals ike-p1",
+			"set security ike policy ike-pol pre-shared-key ascii-text fixture-secret-9919",
 			"set security ike gateway gw1 address 192.0.2.1",
 			"set security ike gateway gw1 ike-policy ike-pol",
 			"set security ipsec vpn tun1 ike gateway gw1",
@@ -106,6 +109,7 @@ func TestTolerantDHGroupWarns_9919(t *testing.T) {
 			"set security ipsec policy ipsec-pol proposals esp-p2",
 			"set security ipsec policy ipsec-pol perfect-forward-secrecy keys 99",
 			"set security ipsec vpn tun1 ike gateway 192.0.2.1",
+			"set security ipsec vpn tun1 pre-shared-key ascii-text fixture-secret-9919",
 			"set security ipsec vpn tun1 ike ipsec-policy ipsec-pol",
 		})
 		cfg, err := CompileConfigLenient(tree)
@@ -128,6 +132,7 @@ func TestTolerantDHGroupWarns_9919(t *testing.T) {
 				"set security ike proposal ike-p1 authentication-algorithm sha-256",
 				"set security ike proposal ike-p1 dh-group " + v,
 				"set security ike policy ike-pol proposals ike-p1",
+				"set security ike policy ike-pol pre-shared-key ascii-text fixture-secret-9919",
 				"set security ike gateway gw1 address 192.0.2.1",
 				"set security ike gateway gw1 ike-policy ike-pol",
 				"set security ipsec vpn tun1 ike gateway gw1",
@@ -152,6 +157,7 @@ func TestTolerantDHGroupWarns_9919(t *testing.T) {
 			"set security ike proposal ike-p1 authentication-algorithm sha-256",
 			"set security ike proposal ike-p1 dh-group 99",
 			"set security ike policy ike-pol proposals ike-p1",
+			"set security ike policy ike-pol pre-shared-key ascii-text fixture-secret-9919",
 			"set security ike gateway gw1 address 192.0.2.1",
 			"set security ike gateway gw1 ike-policy ike-pol",
 			"set security ipsec vpn tun1 ike gateway gw1",
@@ -178,6 +184,7 @@ func TestStrictDHGroupRejects_9919(t *testing.T) {
 			"set security ike proposal ike-p1 authentication-algorithm sha-256",
 			"set security ike proposal ike-p1 dh-group " + v,
 			"set security ike policy ike-pol proposals ike-p1",
+			"set security ike policy ike-pol pre-shared-key ascii-text fixture-secret-9919",
 			"set security ike gateway gw1 address 192.0.2.1",
 			"set security ike gateway gw1 ike-policy ike-pol",
 			"set security ipsec vpn tun1 ike gateway gw1",
@@ -206,6 +213,7 @@ func TestStrictDHGroupRejects_9919(t *testing.T) {
 			"set security ipsec policy ipsec-pol proposals esp-p2",
 			"set security ipsec policy ipsec-pol perfect-forward-secrecy keys " + v,
 			"set security ipsec vpn tun1 ike gateway 192.0.2.1",
+			"set security ipsec vpn tun1 pre-shared-key ascii-text fixture-secret-9919",
 			"set security ipsec vpn tun1 bind-interface st0",
 			"set security ipsec vpn tun1 ike ipsec-policy ipsec-pol",
 		}
@@ -253,6 +261,7 @@ func TestDHGateIsLenientOnTheTolerantPath_9919(t *testing.T) {
 		"set security ike proposal ike-p1 authentication-algorithm sha-256",
 		"set security ike proposal ike-p1 dh-group 99",
 		"set security ike policy ike-pol proposals ike-p1",
+		"set security ike policy ike-pol pre-shared-key ascii-text fixture-secret-9919",
 		"set security ike gateway gw1 address 192.0.2.1",
 		"set security ike gateway gw1 ike-policy ike-pol",
 		"set security ipsec vpn tun1 ike gateway gw1",
@@ -270,18 +279,30 @@ func TestDHGateIsLenientOnTheTolerantPath_9919(t *testing.T) {
 	}
 }
 
+func validPSKGatewayFixture9919() []string {
+	return []string{
+		"set security ike proposal ike-p1 authentication-method pre-shared-keys",
+		"set security ike proposal ike-p1 encryption-algorithm aes-256-cbc",
+		"set security ike proposal ike-p1 authentication-algorithm sha-256",
+		"set security ike proposal ike-p1 dh-group group14",
+		"set security ike policy ike-pol proposals ike-p1",
+		"set security ike policy ike-pol pre-shared-key ascii-text fixture-secret-9919",
+		"set security ike gateway gw1 address 192.0.2.1",
+		"set security ike gateway gw1 ike-policy ike-pol",
+	}
+}
+
 // TestDanglingVPNPolicyChain_9919 pins the #9919 F-090 config channel: a VPN
 // whose `ipsec-policy` names neither a policy nor a proposal is rejected at
 // strict commit and warns (without bricking) on both tolerant arms. Empty
 // (no policy authored) stays accepted everywhere: it is the intentional
 // default, not a dangling reference.
 func TestDanglingVPNPolicyChain_9919(t *testing.T) {
-	dangling := []string{
-		"set security ike gateway gw1 address 192.0.2.1",
+	dangling := append(validPSKGatewayFixture9919(),
 		"set security ipsec vpn tun1 ike gateway gw1",
 		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy does-not-exist",
-	}
+	)
 	if _, err := CompileConfig(buildTreeFromSet(t, dangling)); err == nil {
 		t.Error("strict commit ACCEPTED a VPN with a dangling ipsec-policy; want rejection naming vpn+policy")
 	} else if !strings.Contains(err.Error(), "tun1") || !strings.Contains(err.Error(), "does-not-exist") {
@@ -307,11 +328,10 @@ func TestDanglingVPNPolicyChain_9919(t *testing.T) {
 
 	// Empty-policy control: no ipsec-policy authored is the legitimate
 	// default and must compile clean on every channel.
-	empty := []string{
-		"set security ike gateway gw1 address 192.0.2.1",
+	empty := append(validPSKGatewayFixture9919(),
 		"set security ipsec vpn tun1 ike gateway gw1",
 		"set security ipsec vpn tun1 bind-interface st0",
-	}
+	)
 	if _, err := CompileConfig(buildTreeFromSet(t, empty)); err != nil {
 		t.Errorf("strict commit rejected a VPN with no ipsec-policy (intentional default): %v", err)
 	}

@@ -136,7 +136,10 @@ func TestCompileCoSTrafficControlProfileDirectUnitKnobWins(t *testing.T) {
 // resolved).
 func TestCompileCoSTrafficControlProfileInterfaceLevel(t *testing.T) {
 	cfg := compileHB167(t, []string{
+		"set interfaces ge-0/0/2 vlan-tagging",
+		"set interfaces ge-0/0/2 unit 50 vlan-id 50",
 		"set interfaces ge-0/0/2 unit 50 family inet address 172.16.50.8/24",
+		"set interfaces ge-0/0/2 unit 80 vlan-id 80",
 		"set interfaces ge-0/0/2 unit 80 family inet address 172.16.80.8/24",
 		"set class-of-service traffic-control-profiles wan-tcp shaping-rate 9g",
 		"set class-of-service interfaces ge-0/0/2 output-traffic-control-profile wan-tcp",

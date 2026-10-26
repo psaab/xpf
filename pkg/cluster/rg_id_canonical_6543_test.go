@@ -68,6 +68,7 @@ func TestTwoSpellingsOfOneRGIDKeepTheConfiguredPriority(t *testing.T) {
 			cc := compileClusterCfg(t, []string{
 				"set chassis cluster cluster-id 1",
 				"set chassis cluster authentication-key test-cluster-psk-6543",
+				"set chassis cluster no-private-rg-election",
 				"set chassis cluster node 0",
 				"set chassis cluster redundancy-group 1 node 0 priority 200",
 				"set chassis cluster redundancy-group 1 node 1 priority 100",
@@ -109,6 +110,7 @@ func TestSpellingOrderDoesNotChangeTheOutcome(t *testing.T) {
 	base := []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6543",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster node 0",
 	}
 	orders := [][]string{
@@ -133,6 +135,7 @@ func TestDistinctRGIDsKeepDistinctPriorities(t *testing.T) {
 	cc := compileClusterCfg(t, []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key test-cluster-psk-6543",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster node 0",
 		"set chassis cluster redundancy-group 0 node 0 priority 200",
 		"set chassis cluster redundancy-group 1 node 0 priority 150",

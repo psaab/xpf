@@ -151,13 +151,15 @@ func TestDisabledInterfaceRuleIsNotAnEgressOwner_6751(t *testing.T) {
 // shippedNATConfigs are repository config files that carry BOTH a source-NAT
 // stanza and are deployed or presented as reference wiring.
 //
-// docs/ha-cluster-userspace.conf is the loss-cluster smoke substrate;
-// test/incus/xpf-cluster-fw{0,1}.conf drive the legacy regression cluster;
-// xpf-test.conf is the standalone test VM's config.
+// docs/ha-cluster*.conf are cluster reference configs; test/incus/xpf-cluster-fw{0,1}.conf
+// drive the legacy regression cluster, and xpf-test.conf is the standalone
+// test VM config.
 var shippedNATConfigs = []string{
 	"../../docs/ha-cluster.conf",
 	"../../docs/ha-cluster-loss.conf",
 	"../../docs/ha-cluster-userspace.conf",
+	"../../docs/ha-cluster-tcp.conf",
+	"../../docs/ha-cluster-udp.conf",
 	"../../test/incus/xpf-cluster-fw0.conf",
 	"../../test/incus/xpf-cluster-fw1.conf",
 	"../../test/incus/xpf-test.conf",

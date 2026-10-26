@@ -184,7 +184,7 @@ func TestCompleteConfig_PredefinedApplicationSets_5763(t *testing.T) {
 			if path.hint == config.ValueHintAppSetName {
 				requireCompletion5763(t, candidates, "junos-ms-rpc", "predefined application-set")
 			} else {
-				requireCompletion5763(t, candidates, "junos-ms-rpc", "configured application shadow")
+				requireCompletion5763(t, candidates, "my-ms-rpc", "configured application shadow")
 			}
 			requireCompletion5763(t, candidates, "junos-sip", "application-set")
 			for _, name := range predefinedApplicationSetNames5763 {

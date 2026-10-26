@@ -23,13 +23,18 @@ import "testing"
 
 func snatPoolTree(t *testing.T, poolCmds ...string) *ConfigTree {
 	t.Helper()
+	return snatPoolTreeWithMatch(t, "10.0.0.0/24", poolCmds...)
+}
+
+func snatPoolTreeWithMatch(t *testing.T, sourceMatch string, poolCmds ...string) *ConfigTree {
+	t.Helper()
 	tree := &ConfigTree{}
 	cmds := append([]string{}, poolCmds...)
 	cmds = append([]string{"set security zones security-zone trust", "set security zones security-zone untrust"}, cmds...)
 	cmds = append(cmds,
 		"set security nat source rule-set RS from zone trust",
 		"set security nat source rule-set RS to zone untrust",
-		"set security nat source rule-set RS rule R1 match source-address 10.0.0.0/24",
+		"set security nat source rule-set RS rule R1 match source-address "+sourceMatch,
 		"set security nat source rule-set RS rule R1 then source-nat pool p1",
 	)
 	for _, cmd := range cmds {

@@ -151,12 +151,13 @@ func TestBareInterfaceZoneRefReachesItsOwnNetdevUnits_6722(t *testing.T) {
 				"ge-0/0/1; nothing else claims ge-0-0-1.100",
 		},
 		{
-			// P2: no VLAN involved — a plain interface with unit 0 AND unit 1.
-			// Unit 0 collapses onto the base netdev, unit 1 does not.
+			// P2: a legal tagged second unit on a plain interface. Unit 0
+			// collapses onto the base netdev; the VLAN unit does not.
 			name: "second-unit-of-a-plain-interface",
 			lines: []string{
+				"set interfaces ge-0/0/1 vlan-tagging",
 				"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
-				"set interfaces ge-0/0/1 unit 1 family inet address 10.0.2.1/24",
+				"set interfaces ge-0/0/1 unit 1 vlan-id 1 family inet address 10.0.2.1/24",
 				"set security zones security-zone lan interfaces ge-0/0/1",
 			},
 			links:   map[string]int{"ge-0-0-1": 24, "ge-0-0-1.1": 25},

@@ -180,6 +180,7 @@ func TestSiblingTunnelUnitsZoneTheBaseRow_6722(t *testing.T) {
 // the shared ifindex are MAC-ful and populate_egress is last-write-wins.
 func TestZonedTrunkEmitsUnzonedUnit0OnTheSharedIfindex_6722(t *testing.T) {
 	_, snaps := buildSnapshotsFromSet6722(t, []string{
+		"set interfaces ge-0/0/9 vlan-tagging",
 		"set firewall family inet filter guard term t1 then accept",
 		"set interfaces ge-0/0/9 unit 0 family inet filter input guard",
 		"set interfaces ge-0/0/9 unit 100 vlan-id 100 family inet address 10.100.9.1/24",

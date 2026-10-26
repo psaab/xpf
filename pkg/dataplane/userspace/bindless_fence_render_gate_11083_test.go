@@ -16,6 +16,7 @@ func TestBindlessFenceSkipsUnrenderedVPN11083(t *testing.T) {
 		"live-vpn": {
 			Name:    "live-vpn",
 			Gateway: "gw1",
+			PSK:     config.NewSecret("fixture-psk"),
 			TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 				"corp": {LocalIP: "10.20.0.0/16", RemoteIP: "198.51.100.0/24"},
 			},
@@ -23,6 +24,7 @@ func TestBindlessFenceSkipsUnrenderedVPN11083(t *testing.T) {
 		"dead-vpn": {
 			Name:    "dead-vpn",
 			Gateway: "no-such-gateway",
+			PSK:     config.NewSecret("fixture-psk"),
 			TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 				"corp": {LocalIP: "10.30.0.0/16", RemoteIP: "203.0.113.0/24"},
 			},

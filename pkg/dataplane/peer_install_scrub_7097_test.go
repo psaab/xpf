@@ -681,26 +681,47 @@ func TestScrubPreservesTheTunnelEndpointIdentity8612(t *testing.T) {
 }
 
 // #8612: carrying the tunnel endpoint id across the cluster is safe ONLY while
-// every reader of FibGen tests the flag that says which of its two meanings it
-// holds. That is true today at exactly two sites, and this cell is what keeps it
-// true: a new reader that tests `FibGen != 0` alone would read a peer's tunnel
-// endpoint id as this node's FIB generation.
-//
-// The claim is a POPULATION claim, so it is measured rather than asserted. The
-// scan reports what it found beside what is expected, and fails on a mismatch in
-// EITHER direction — a new unguarded reader, or the guarded ones disappearing
-// (which would mean the pattern stopped matching and the census had gone blind).
+// every consumer of FibGen tests the flag that says which of its two meanings it
+// holds. Raw field reads are centralized in sessionSyncView.fibGen; every call
+// to that accessor must be gated before it can interpret a tunnel endpoint ID
+// as this node's FIB generation.
 func TestEveryFibGenReaderIsFlagGated8612(t *testing.T) {
 	root := headroomRepoRoot(t)
 	readRe := regexp.MustCompile(`\.FibGen\b`)
 	writeRe := regexp.MustCompile(`\.FibGen\s*=|FibGen:`)
+	callRe := regexp.MustCompile(`\.fibGen\(\)`)
 	gateRe := regexp.MustCompile(`LogFlagUserspaceTunnelEndpoint`)
-	// The wire codec moves the field verbatim in both directions and cannot
-	// interpret it, so it is not a reader in the sense this cell is about.
 	codec := filepath.Join("pkg", "cluster", "sync_protocol.go")
+	accessorRel := filepath.Join("pkg", "dataplane", "userspace", "manager_sessionsync_request.go")
 
-	var guarded, unguarded []string
-	err := filepath.WalkDir(filepath.Join(root, "pkg"), func(path string, d fs.DirEntry, err error) error {
+	raw, err := os.ReadFile(filepath.Join(root, accessorRel))
+	if err != nil {
+		t.Fatalf("read FibGen accessor source %s: %v", accessorRel, err)
+	}
+	accessorSrc := string(raw)
+	const accessorDecl = "func (v *sessionSyncView) fibGen() uint16 {"
+	accessorStart := strings.Index(accessorSrc, accessorDecl)
+	if accessorStart < 0 {
+		t.Fatalf("sessionSyncView.fibGen accessor moved or changed signature in %s; "+
+			"move this census to its new source anchor", accessorRel)
+	}
+	bodyStart := accessorStart + len(accessorDecl) - 1
+	bodyClose := strings.Index(accessorSrc[bodyStart:], "\n}")
+	if bodyClose < 0 {
+		t.Fatalf("sessionSyncView.fibGen body has no closing brace in %s", accessorRel)
+	}
+	accessorEnd := bodyStart + bodyClose + 2
+	accessorBody := accessorSrc[accessorStart:accessorEnd]
+	accessorReads := regexp.MustCompile(`(?s)if v\.val4 != nil \{\s*return v\.val4\.FibGen\s*\}\s*return v\.val6\.FibGen`)
+	if !accessorReads.MatchString(accessorBody) || strings.Count(accessorBody, ".FibGen") != 2 {
+		t.Fatalf("sessionSyncView.fibGen no longer positively covers both SessionValue FibGen " +
+			"reads; update the accessor control with its implementation")
+	}
+	accessorStartLine := strings.Count(accessorSrc[:accessorStart], "\n") + 1
+	accessorEndLine := strings.Count(accessorSrc[:accessorEnd-1], "\n") + 1
+
+	var accessorRawReads, unexpectedRawReads, gatedCalls, ungatedCalls []string
+	err = filepath.WalkDir(filepath.Join(root, "pkg"), func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") ||
 			strings.HasSuffix(path, "_test.go") {
 			return err
@@ -715,24 +736,33 @@ func TestEveryFibGenReaderIsFlagGated8612(t *testing.T) {
 		}
 		lines := strings.Split(string(raw), "\n")
 		for i, line := range lines {
-			if !readRe.MatchString(line) || writeRe.MatchString(line) {
+			code := strings.SplitN(line, "//", 2)[0]
+			where := fmt.Sprintf("%s:%d", rel, i+1)
+			if readRe.MatchString(code) && !writeRe.MatchString(code) {
+				if rel == accessorRel && i+1 >= accessorStartLine && i+1 <= accessorEndLine {
+					accessorRawReads = append(accessorRawReads, where)
+				} else {
+					unexpectedRawReads = append(unexpectedRawReads, where)
+				}
+			}
+			if !callRe.MatchString(code) {
 				continue
 			}
-			if strings.HasPrefix(strings.TrimSpace(line), "//") {
-				continue
-			}
-			// Same line, or the two above it — a gate further away than that is
-			// not this read's gate (the #8241 census learned the same lesson
-			// about inheriting evidence from distant prose).
+			// Same line, or the two above it — a gate further away is not
+			// evidence that this accessor call is guarded.
 			lo := i - 2
 			if lo < 0 {
 				lo = 0
 			}
-			where := fmt.Sprintf("%s:%d", rel, i+1)
-			if gateRe.MatchString(strings.Join(lines[lo:i+1], "\n")) {
-				guarded = append(guarded, where)
+			var window strings.Builder
+			for j := lo; j <= i; j++ {
+				window.WriteString(strings.SplitN(lines[j], "//", 2)[0])
+				window.WriteByte('\n')
+			}
+			if gateRe.MatchString(window.String()) {
+				gatedCalls = append(gatedCalls, where)
 			} else {
-				unguarded = append(unguarded, where)
+				ungatedCalls = append(ungatedCalls, where)
 			}
 		}
 		return nil
@@ -740,25 +770,22 @@ func TestEveryFibGenReaderIsFlagGated8612(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
-
-	// DEGENERACY / POSITIVE CONTROL. A scan that matched nothing looks identical
-	// to a clean tree, and the clean answer is the one we want to be able to
-	// trust. If this fires, the pattern has stopped matching — not the readers.
-	if len(guarded) == 0 {
-		t.Fatalf("the census found NO flag-gated FibGen reader. The two known ones "+
-			"(manager_sessionsync_request.go) must match, or this cell is blind and "+
-			"its silence means nothing (#8612). unguarded=%v", unguarded)
+	// Positive controls: retain the accessor's two raw value reads and at least
+	// one guarded consumer, so a moved or empty census cannot pass vacuously.
+	if len(accessorRawReads) != 2 || len(gatedCalls) == 0 {
+		t.Fatalf("FibGen census lost its positive control: accessor reads=%v, gated calls=%v",
+			accessorRawReads, gatedCalls)
 	}
-	if len(unguarded) > 0 {
-		t.Errorf("FibGen is read WITHOUT testing LogFlagUserspaceTunnelEndpoint at "+
-			"%d site(s): %v.\nSince #8612 the field carries a cluster-stable tunnel "+
-			"endpoint id when that bit is set and a node-local FIB generation when it "+
-			"is not, so a reader that does not test the bit will interpret a peer's "+
-			"tunnel id as this node's generation. Test the flag, or read through a "+
-			"helper that does.", len(unguarded), unguarded)
+	if len(unexpectedRawReads) > 0 {
+		t.Errorf("FibGen field read bypasses sessionSyncView.fibGen at %d site(s): %v",
+			len(unexpectedRawReads), unexpectedRawReads)
 	}
-	t.Logf("#8612 FibGen reader census: %d guarded, %d unguarded — %v",
-		len(guarded), len(unguarded), guarded)
+	if len(ungatedCalls) > 0 {
+		t.Errorf("fibGen accessor called WITHOUT testing LogFlagUserspaceTunnelEndpoint "+
+			"at %d site(s): %v", len(ungatedCalls), ungatedCalls)
+	}
+	t.Logf("#8612 FibGen census: accessor reads=%v, gated consumers=%v, unguarded consumers=%v",
+		accessorRawReads, gatedCalls, ungatedCalls)
 }
 
 // #8612 follow-up: exercise the census machinery itself, against a SYNTHETIC

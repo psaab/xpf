@@ -94,38 +94,31 @@ func TestPolicyExpandedRuleCountTotalLimit65536AndLenientIndependence(t *testing
 		}
 	})
 
-	// Quarantine: sets touching a quarantined zone are excluded from
-	// both the per-set and total accounting (mirroring
-	// walkPolicyRuleSlots), while the same overflow on a surviving
-	// zone stays fail-closed. trust collides with `colliding` (later
-	// sorting, quarantined); its 257-rule set must not reject, and a
-	// surviving 257-rule set must still reject.
+	// Quarantine and survivor each carry 257 rules. Use the fixed, already-pinned
+	// collision `zzq17760` / `zzq8100` rather than searching the 32-bit
+	// StableZoneID space at runtime.
 	t.Run("quarantined set excluded, survivor overflow still rejected", func(t *testing.T) {
-		colliding := ""
-		target := StableZoneID("trust")
-		for i := 0; colliding == ""; i++ {
-			name := fmt.Sprintf("zcollide%d", i)
-			if name > "trust" && StableZoneID(name) == target {
-				colliding = name
-			}
+		const survivor, colliding = "zzq17760", "zzq8100"
+		if StableZoneID(survivor) != StableZoneID(colliding) {
+			t.Fatal("premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 		}
 		build := func(surviving int) []string {
 			cmds := []string{
-				"set security zones security-zone trust",
+				"set security zones security-zone " + survivor,
 				"set security zones security-zone untrust",
 				"set security zones security-zone " + colliding,
 			}
-			// Quarantined pair trust->colliding carries 257 rules.
+			// Quarantined pair survivor->colliding carries 257 rules.
 			for i := range 257 {
 				name := fmt.Sprintf("q%d", i)
-				prefix := fmt.Sprintf("set security policies from-zone trust to-zone %s policy %s", colliding, name)
+				prefix := fmt.Sprintf("set security policies from-zone %s to-zone %s policy %s", survivor, colliding, name)
 				cmds = append(cmds, prefix+" match source-address any", prefix+" match destination-address any", prefix+" match application any", prefix+" then permit")
 			}
-			// Surviving pair trust->untrust carries `surviving` rules.
+			// Surviving pair survivor->untrust carries `surviving` rules.
 			n := surviving
 			for i := range n {
 				name := fmt.Sprintf("p%d", i)
-				prefix := fmt.Sprintf("set security policies from-zone trust to-zone untrust policy %s", name)
+				prefix := fmt.Sprintf("set security policies from-zone %s to-zone untrust policy %s", survivor, name)
 				cmds = append(cmds, prefix+" match source-address any", prefix+" match destination-address any", prefix+" match application any", prefix+" then permit")
 			}
 			return cmds
@@ -154,17 +147,13 @@ func TestPolicyExpandedRuleCountTotalLimit65536AndLenientIndependence(t *testing
 	// Scoped-global: a global rule whose configured scope side is
 	// fully quarantined is dropped by the walker and must not count.
 	t.Run("fully quarantined scoped global excluded", func(t *testing.T) {
-		colliding := ""
-		target := StableZoneID("trust")
-		for i := 0; colliding == ""; i++ {
-			name := fmt.Sprintf("zcollide%d", i)
-			if name > "trust" && StableZoneID(name) == target {
-				colliding = name
-			}
+		const survivor, colliding = "zzq17760", "zzq8100"
+		if StableZoneID(survivor) != StableZoneID(colliding) {
+			t.Fatal("premise broken: zzq17760/zzq8100 no longer collide under the frozen fold")
 		}
 		cfg := &Config{}
-		cfg.Security.Zones = map[string]*ZoneConfig{"trust": {}, "untrust": {}, colliding: {}}
-		cfg.ZoneQuarantineNames = []string{"trust", "untrust", colliding}
+		cfg.Security.Zones = map[string]*ZoneConfig{survivor: {}, "untrust": {}, colliding: {}}
+		cfg.ZoneQuarantineNames = []string{survivor, "untrust", colliding}
 		for i := range 257 {
 			pol := &Policy{Name: fmt.Sprintf("g%d", i)}
 			pol.Match.FromZones = []string{colliding}
@@ -178,8 +167,8 @@ func TestPolicyExpandedRuleCountTotalLimit65536AndLenientIndependence(t *testing
 		}
 		// Control: same rules unscoped count toward the global per-set cap.
 		cfg2 := &Config{}
-		cfg2.Security.Zones = map[string]*ZoneConfig{"trust": {}, "untrust": {}, colliding: {}}
-		cfg2.ZoneQuarantineNames = []string{"trust", "untrust", colliding}
+		cfg2.Security.Zones = map[string]*ZoneConfig{survivor: {}, "untrust": {}, colliding: {}}
+		cfg2.ZoneQuarantineNames = []string{survivor, "untrust", colliding}
 		for i := range 257 {
 			cfg2.Security.GlobalPolicies = append(cfg2.Security.GlobalPolicies, &Policy{Name: fmt.Sprintf("g%d", i)})
 		}

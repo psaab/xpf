@@ -49,7 +49,14 @@ var allowedFunctions = map[string]string{
 	// sysctl writer are the same BestEffortKernelKnob class — sysctl
 	// files where rename(2) is impossible by construction.
 	"daemon::reconcileICMPv6Ratelimit": "sysctl icmpv6 ratelimit restore knob",
-	"daemon::writeRedirectKnobs":      "sysctl send_redirects knobs",
+	"daemon::writeRedirectKnobs":       "sysctl send_redirects knobs",
+	// #16723: restore counterpart of writeRedirectKnobs — writes back the
+	// captured per-path values (ipv4 accept_redirects capped at
+	// !ip_forward) to the same /proc/sys/net/ipv4|ipv6/conf/*/send_redirects
+	// and accept_redirects procfs knobs. Same BestEffortKernelKnob class:
+	// a procfs knob cannot be replaced by rename(2), so the fsatomic
+	// durable/atomic writers cannot be used here.
+	"daemon::restoreRedirectKnobs": "sysctl send_redirects/accept_redirects restore knobs (procfs, rename impossible)",
 	// pkg/dataplane — RPS/RFS/XPS + accept_ra sysfs/procfs knobs.
 	"dataplane::CompileResult.tuneInterfaceBuffers": "sysfs RPS/RFS/XPS knobs",
 	"dataplane::ensureVLANSubInterface":             "procfs accept_ra knob",

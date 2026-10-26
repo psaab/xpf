@@ -18,8 +18,59 @@ import (
 // NewParser (the parser merges newline-separated set lines into one giant
 // node).
 
+func addIPsecFixtureDefaults(t *testing.T, cmds []string) []string {
+	t.Helper()
+	type defaults struct {
+		hasGateway bool
+		hasPSK     bool
+	}
+	order := make([]string, 0)
+	byVPN := make(map[string]defaults)
+	for _, cmd := range cmds {
+		fields := strings.Fields(cmd)
+		for i := 0; i+3 < len(fields); i++ {
+			if fields[i] != "security" || fields[i+1] != "ipsec" || fields[i+2] != "vpn" {
+				continue
+			}
+			name := strings.Trim(fields[i+3], `"`)
+			state, ok := byVPN[name]
+			if !ok {
+				order = append(order, name)
+			}
+			if len(fields) > i+4 {
+				switch fields[i+4] {
+				case "gateway":
+					state.hasGateway = true
+				case "pre-shared-key":
+					state.hasPSK = true
+				case "ike":
+					if len(fields) > i+5 && fields[i+5] == "gateway" {
+						state.hasGateway = true
+					}
+				}
+			}
+			byVPN[name] = state
+		}
+	}
+	out := append([]string(nil), cmds...)
+	for _, name := range order {
+		state := byVPN[name]
+		if !state.hasGateway {
+			out = append(out, "set security ipsec vpn "+name+" gateway 192.0.2.254")
+		}
+		if !state.hasPSK {
+			out = append(out, "set security ipsec vpn "+name+" pre-shared-key ascii-text fixture-secret")
+		}
+	}
+	return out
+}
+
+// The tests using this builder measure bind-interface behavior, so keep the
+// unrelated strict credential and peer-identity gates satisfied by default.
+// Tests specifically covering those gates use their own builders.
 func buildBindIfaceTree(t *testing.T, cmds ...string) *ConfigTree {
 	t.Helper()
+	cmds = addIPsecFixtureDefaults(t, cmds)
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		// ParseSetCommand strips the leading "set" verb and returns the path

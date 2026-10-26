@@ -117,7 +117,7 @@ func rustStructBody(t *testing.T, src, name string) string {
 // which is one of the two ways the spellings can drift apart.
 func rustSerdeRenameOf(t *testing.T, structBody, field string) string {
 	t.Helper()
-	re := regexp.MustCompile(`#\[serde\(rename = "([^"]+)"[^\]]*\)\]\s*pub ` +
+	re := regexp.MustCompile(`#\[serde\(\s*rename = "([^"]+)"[^\]]*\)\]\s*pub ` +
 		regexp.QuoteMeta(field) + `\s*:`)
 	m := re.FindStringSubmatch(structBody)
 	if m == nil {

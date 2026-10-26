@@ -121,6 +121,9 @@ var dhcpConvergerClusterSet = []string{
 	"set chassis cluster cluster-id 1",
 	"set chassis cluster node 0",
 	"set chassis cluster authentication-key test-cluster-psk-6535",
+	"set chassis cluster control-interface em0",
+	"set chassis cluster peer-address 10.99.0.2",
+	"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 	"set chassis cluster redundancy-group 1 node 0 priority 200",
 	"set interfaces reth1 redundant-ether-options redundancy-group 1",
 	"set interfaces reth1 unit 0 family inet address 10.0.61.1/24",
@@ -134,6 +137,9 @@ func newDHCPConvergerDaemon(t *testing.T, km *dhcpserver.Manager) *Daemon {
 	store := testStoreWithSetConfig(t, dhcpConvergerClusterSet)
 	cm := cluster.NewManager(0, 1)
 	cm.UpdateConfig(store.ActiveConfig().Chassis.Cluster)
+	// NewManager starts configured groups secondary until an election runs;
+	// this fixture models the node-0-primary service-apply case directly.
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
 	if !cm.IsLocalPrimary(1) {
 		t.Fatal("fixture: node 0 must be primary for RG1, or the MASTER edge never applies Kea")
 	}

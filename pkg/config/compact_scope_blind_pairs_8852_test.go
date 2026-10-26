@@ -166,7 +166,6 @@ var knownBlindScopePairs8852 = map[string]string{
 	// #12810 admits these schema pairs; the census has no compact site for
 	// a zero-argument container head, so per-pair equivalence is measured by
 	// the sampling-instance and family-only fixtures instead.
-	"instance family":           "plain-container",
 	"instance input":            "plain-container",
 	"inet output":               "plain-container",
 	"inet6 output":              "plain-container",
@@ -208,7 +207,6 @@ var knownBlindScopePairs8852 = map[string]string{
 	"security log":             "plain-container",
 	"chassis device-map":       "plain-container",
 	"protocols ospf":           "plain-container",
-	"security address-book":    "plain-container",
 	"system ntp":               "plain-container",
 	"security ike":             "plain-container",
 	"system syslog":            "plain-container",

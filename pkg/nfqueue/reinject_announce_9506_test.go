@@ -11,7 +11,11 @@ import (
 )
 
 func TestAnnounceReinjectPublishesPersistentAuthorityFrames9506(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "x9506")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	submitPath := filepath.Join(dir, "reinject-submit.sock")
 	listener, err := net.Listen("unix", submitPath)
 	if err != nil {

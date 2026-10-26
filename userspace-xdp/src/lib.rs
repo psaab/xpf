@@ -861,8 +861,9 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // subprogram call — see `land_gate` below. As two inline matches
     // over `land_disposition_for_packet` (here + ctrl-disabled) LLVM
     // duplicated the WG-key construction and both map walks under
-    // every calling state; the tracked object fell to 3.67% headroom
-    // (963340 processed insns) and rejects on the guest kernel.
+    // every calling state; the historical #15854 measurement was 963340
+    // processed insns: 3.67% below the 1,000,000 kernel cap, but 113340
+    // above the 850,000-instruction install floor, so it fails the margin gate.
     if land_gate(&parsed, ingress_ifindex) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_LAND_DROP);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);

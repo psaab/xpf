@@ -31,33 +31,33 @@ func TestBGPChainedUnderValuelessFlagStrict16749(t *testing.T) {
 		wantSub []string
 	}{
 		{
-			name: "group passive hold-time 1",
-			cmds: []string{"set protocols bgp group G passive hold-time 1"},
+			name:    "group passive hold-time 1",
+			cmds:    []string{"set protocols bgp group G passive hold-time 1"},
 			wantSub: []string{"hold-time", "BGP hold-time must be 0 or 3..65535", "FRR rejects 1/2"},
 		},
 		{
-			name: "group passive hold-time 2",
-			cmds: []string{"set protocols bgp group G passive hold-time 2"},
+			name:    "group passive hold-time 2",
+			cmds:    []string{"set protocols bgp group G passive hold-time 2"},
 			wantSub: []string{"hold-time", "BGP hold-time must be 0 or 3..65535"},
 		},
 		{
-			name: "group remove-private hold-time 1",
-			cmds: []string{"set protocols bgp group G remove-private hold-time 1"},
+			name:    "group remove-private hold-time 1",
+			cmds:    []string{"set protocols bgp group G remove-private hold-time 1"},
 			wantSub: []string{"hold-time", "BGP hold-time must be 0 or 3..65535"},
 		},
 		{
-			name: "neighbor passive hold-time 1",
-			cmds: []string{"set protocols bgp group G neighbor 10.0.0.1 passive hold-time 1"},
+			name:    "neighbor passive hold-time 1",
+			cmds:    []string{"set protocols bgp group G neighbor 10.0.0.1 passive hold-time 1"},
 			wantSub: []string{"hold-time", "BGP hold-time must be 0 or 3..65535"},
 		},
 		{
-			name: "group passive authentication-key-chain",
-			cmds: []string{"set protocols bgp group G passive authentication-key-chain kc1"},
+			name:    "group passive authentication-key-chain",
+			cmds:    []string{"set protocols bgp group G passive authentication-key-chain kc1"},
 			wantSub: []string{"authentication-key-chain", "not implemented"},
 		},
 		{
-			name: "top log-updown local-as bad value",
-			cmds: []string{"set protocols bgp log-updown local-as notanumber"},
+			name:    "top log-updown local-as bad value",
+			cmds:    []string{"set protocols bgp log-updown local-as notanumber"},
 			wantSub: []string{"local-as", "not an integer"},
 		},
 	}

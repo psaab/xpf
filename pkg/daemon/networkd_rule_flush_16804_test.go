@@ -48,6 +48,7 @@ func TestMgmtDNSReconcileRunsAfterNetworkdActivation16804(t *testing.T) {
 		t.Fatal("no applyRoutingRules after networkd activation (#16804)")
 	}
 }
+
 // TestApplyOrderMgmtDNSAfterNetworkdFlushDynamic16804 drives the real
 // applyConfigLocked with the #10421 activation seam extended to the DNS
 // bands: afterNetworkdApplyForTest records NETWORKD-RECONFIGURE, and the
@@ -85,7 +86,6 @@ func TestApplyOrderMgmtDNSAfterNetworkdFlushDynamic16804(t *testing.T) {
 		t.Fatalf("no MGMT-DNS-RULES-INSTALL after NETWORKD-RECONFIGURE; events = %v", events)
 	}
 }
-
 
 // TestRoutingTickRestoresAllRuleBandsAfterFlush16804 drives the real
 // reassertRoutingReconcileOnce tick with a simulated networkd restart:

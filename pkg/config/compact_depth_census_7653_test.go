@@ -21,8 +21,8 @@ package config
 // arbitrarily deep spelling".
 //
 // This file extends the SAME walker rather than re-deriving it — same
-// collectCompactSites, synthPair, contextFor, nest, compileText, cfgEqual — so
-// the two censuses cannot drift into disagreeing about what a site is.
+// collectCompactSites, compactCensusPair, contextFor, nest, compileText,
+// cfgEqual — so the two censuses cannot drift into disagreeing about what a site is.
 
 import (
 	"sort"
@@ -102,7 +102,7 @@ func runDepthCensus7653(t *testing.T) (map[int]*depthOutcome, int, map[string]bo
 			v1, v2 = "", ""
 		} else {
 			var ok bool
-			v1, v2, ok = synthPair(s.node)
+			v1, v2, ok = compactCensusPair(s)
 			if !ok {
 				continue
 			}

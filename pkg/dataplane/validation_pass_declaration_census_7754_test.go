@@ -43,6 +43,8 @@ func TestEveryDiscardingDataPlaneEmbedderDeclaresItsPass7754(t *testing.T) {
 		"natWriteTripwireDP":         "either",  // parameterised by a field, both directions used
 		"censusDP6903":               "real",    // #6903 record census needs the real pass
 		"quarantineRecordingDP13164": "real",    // captures actual compile-pass behavior
+		"mirrorDP15651":              "real",    // mirror compiler fixture, never the pre-pass
+		"postPhase2DP":               "real",    // failure fixture reached after the pre-pass
 	}
 
 	files, err := filepath.Glob("*.go")

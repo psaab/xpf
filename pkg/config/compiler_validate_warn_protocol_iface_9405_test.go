@@ -82,7 +82,7 @@ func TestProtocolInterfaceRefWarnings9405(t *testing.T) {
 		},
 		{
 			name: "isis reaches the same advisory",
-			text: ifaces9405 + "protocols { isis { interface ge-0/0/9.0; } }",
+			text: ifaces9405 + "protocols { isis { net 49.0001.0000.0000.0001.00; interface ge-0/0/9.0; } }",
 			want: "isis interface ge-0/0/9.0 names no configured interface",
 		},
 		{

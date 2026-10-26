@@ -35,6 +35,7 @@ func TestDHCPRouteVRFMapKeyShape9135(t *testing.T) {
 		// Subject 2: a TAGGED unit. The lease is keyed `ge-0-0-3.50` (VLAN ID,
 		// not unit number — config.DHCPLeaseIfName), so stripping the unit off
 		// `ge-0/0/3.50` is not enough on its own.
+		"set interfaces ge-0/0/3 vlan-tagging",
 		"set interfaces ge-0/0/3 unit 50 vlan-id 50",
 		"set interfaces ge-0/0/3 unit 50 family inet dhcp",
 		"set routing-instances tenant-b instance-type virtual-router",
@@ -49,6 +50,7 @@ func TestDHCPRouteVRFMapKeyShape9135(t *testing.T) {
 		// Subject 3 (#9063 reading): the member names the WHOLE DEVICE, so it
 		// claims every unit on it. The tagged unit's lease is keyed by VLAN ID,
 		// a spelling the device name alone cannot produce.
+		"set interfaces ge-0/0/5 vlan-tagging",
 		"set interfaces ge-0/0/5 unit 60 vlan-id 60",
 		"set interfaces ge-0/0/5 unit 60 family inet dhcp",
 		"set routing-instances tenant-d instance-type virtual-router",
@@ -56,6 +58,7 @@ func TestDHCPRouteVRFMapKeyShape9135(t *testing.T) {
 		// Subject 4: the `interfaces` stanza and the instance member list are
 		// authored in DIFFERENT spellings — both are legal (#8829) and nothing
 		// makes them agree. The unit (and so the VLAN ID) must still be found.
+		"set interfaces ge-0/0/6 vlan-tagging",
 		"set interfaces ge-0/0/6 unit 70 vlan-id 70",
 		"set interfaces ge-0/0/6 unit 70 family inet dhcp",
 		"set routing-instances tenant-e instance-type virtual-router",

@@ -39,18 +39,23 @@ func Test9880_StrictCommitAcceptsValuedModifiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("strict commit rejected valid Junos NTP modifiers: %v", err)
 	}
-	// Non-vacuous: the committed values must be the authored ones, not a
-	// gate that waves everything through to a dropping compiler. The
-	// SERVER LIST is asserted first, not merely the modifier fields: a
-	// modifier-only statement the gate admits but the compiler reads as
-	// address-less yields zero servers, and modifier-field assertions
-	// alone cannot see that hole.
+	// Non-vacuous: the authored server must survive compilation, not merely
+	// its modifiers; the key ID is stored separately from per-server options.
 	if len(cfg.System.NTPServers) != 1 || cfg.System.NTPServers[0] != "1.1.1.1" {
 		t.Fatalf("committed NTP servers = %v, want [1.1.1.1]", cfg.System.NTPServers)
 	}
+	if len(cfg.System.NTPServerOptions) != 1 {
+		t.Fatalf("committed NTP server options = %v, want exactly the authored server 1.1.1.1", cfg.System.NTPServerOptions)
+	}
 	opt := cfg.System.NTPServerOptions["1.1.1.1"]
-	if opt.Key != 5 || opt.Version != 4 || opt.RoutingInstance != "foo" || !opt.Prefer {
-		t.Fatalf("committed NTP options = %+v, want {Prefer:true Key:5 Version:4 RoutingInstance:foo}", opt)
+	// The key ID is accepted as configuration metadata but removed from
+	// the per-server options because the renderer cannot enforce it;
+	// compileSystem retains the ID in NTPServerKeyIDs instead (#14596).
+	if opt.Key != 0 || opt.Version != 4 || opt.RoutingInstance != "foo" || !opt.Prefer {
+		t.Fatalf("committed NTP options = %+v, want {Prefer:true Key:0 Version:4 RoutingInstance:foo}", opt)
+	}
+	if len(cfg.System.NTPServerKeyIDs) != 1 || cfg.System.NTPServerKeyIDs[0] != 5 {
+		t.Fatalf("committed NTP key IDs = %v, want [5]", cfg.System.NTPServerKeyIDs)
 	}
 	if cfg.System.NTPThreshold != 400 || cfg.System.NTPThresholdAction != "accept" {
 		t.Fatalf("committed threshold = %d/%q, want 400/accept",

@@ -111,7 +111,7 @@ func TestStaleSocketIsStillRemoved_7139(t *testing.T) {
 // guarantee across the move from os.Lstat/os.Remove to fstatat/unlinkat. The
 // file-type wording is operator-facing, so it is asserted, not just the refusal.
 func TestNonSocketIsRefusedThroughTheDirFD_7139(t *testing.T) {
-	dir := shortTempDir7139(t)
+	dir := t.TempDir()
 	for _, tc := range []struct {
 		name, want string
 		create     func(string) error

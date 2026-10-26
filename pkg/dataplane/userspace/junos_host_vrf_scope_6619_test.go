@@ -52,6 +52,7 @@ import (
 var vrfScopeBase = []string{
 	"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
 	"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
+	"set interfaces ge-0/0/1 vlan-tagging",
 	"set interfaces ge-0/0/1 unit 50 vlan-id 50",
 	"set interfaces ge-0/0/1 unit 50 family inet address 10.0.50.1/24",
 	"set interfaces ge-0/0/2 unit 0 family inet address 10.0.2.1/24",
@@ -270,15 +271,15 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 			wantRules:  true,
 		},
 		{
-			// A VLAN subunit is a distinct kernel device with its own master,
-			// so an explicit unit-0 RI member enslaves the parent but not
-			// ge-0-0-1.50. Both the subunit and the parent master are covered.
+			// The VLAN subunit is a distinct device; unit 0 is explicitly in
+			// both zoneB and vrA, so the parent master and .50 stay covered.
 			name:       "explicit parent unit enslaved, subunit is not — both scopes stay enforceable",
 			zone:       "zoneB",
 			policyName: "denyB",
 			cmds: concat(vrfScopeBase,
 				[]string{
 					"set security zones security-zone zoneB interfaces ge-0/0/1.50",
+					"set security zones security-zone zoneB interfaces ge-0/0/1.0",
 					"set routing-instances vrA instance-type virtual-router",
 					"set routing-instances vrA interface ge-0/0/1.0",
 				},
@@ -290,14 +291,15 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 		},
 		{
 			// A bare routing-instance member fans down to every configured unit
-			// in the daemon binder. The subunit therefore shares the master scope
-			// even though the raw interface ref is not itself its device name.
+			// in the daemon binder. Both zoneB units are owned by vrA: explicit
+			// unit 0 and tagged unit 50 share the master scope.
 			name:       "bare parent member fans tagged subunit into master scope",
 			zone:       "zoneB",
 			policyName: "denyB",
 			cmds: concat(vrfScopeBase,
 				[]string{
 					"set security zones security-zone zoneB interfaces ge-0/0/1.50",
+					"set security zones security-zone zoneB interfaces ge-0/0/1.0",
 					"set routing-instances vrA instance-type virtual-router",
 					"set routing-instances vrA interface ge-0/0/1",
 				},

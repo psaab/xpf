@@ -25,6 +25,7 @@ import (
 
 func buildTree8003(t *testing.T, cmds []string) *ConfigTree {
 	t.Helper()
+	cmds = addIPsecFixtureDefaults(t, cmds)
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)

@@ -245,6 +245,7 @@ func TestMixedIngressMonitorLeafUnchanged9838(t *testing.T) {
     cluster-id 1;
     authentication-key test-cluster-psk-6611;
     node 0;
+    no-private-rg-election;
     redundancy-group 1 {
       node 0 { priority 200; }
       ip-monitoring {

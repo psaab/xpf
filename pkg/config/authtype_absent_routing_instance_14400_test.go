@@ -32,28 +32,37 @@ func TestAuthKeyWithoutTypeInRoutingInstanceIsRefused14400(t *testing.T) {
 			"set routing-instances V protocols isis authentication-key secret1"}, false},
 		{"vrf isis interface key, no type", []string{
 			"set routing-instances V protocols isis interface ge-0/0/0 authentication-key secret1"}, false},
-
-		// ACCEPTED: the operator stated their intent, either way.
 		{"vrf rip key + md5", []string{
+			"set routing-instances V instance-type virtual-router",
 			"set routing-instances V protocols rip authentication-key secret1",
 			"set routing-instances V protocols rip authentication-type md5"}, true},
 		{"vrf isis key + md5", []string{
+			"set routing-instances V instance-type virtual-router",
+			"set routing-instances V protocols isis net 49.0001.0000.0000.0001.00",
 			"set routing-instances V protocols isis authentication-key secret1",
 			"set routing-instances V protocols isis authentication-type md5"}, true},
 		{"vrf isis interface key + md5", []string{
+			"set routing-instances V instance-type virtual-router",
+			"set routing-instances V protocols isis net 49.0001.0000.0000.0001.00",
+			"set routing-instances V interface ge-0/0/0",
+			"set interfaces ge-0/0/0 unit 0 family iso address 49.0001.0000.0000.0001.00",
 			"set routing-instances V protocols isis interface ge-0/0/0 authentication-key secret1",
 			"set routing-instances V protocols isis interface ge-0/0/0 authentication-type md5"}, true},
 		// THE ROWS THAT BOUND THE GATE. `simple` is a deliberate plaintext
 		// choice and must stay legal in a VRF exactly as globally.
 		{"vrf rip key + simple (deliberate plaintext)", []string{
+			"set routing-instances V instance-type virtual-router",
 			"set routing-instances V protocols rip authentication-key secret1",
 			"set routing-instances V protocols rip authentication-type simple"}, true},
 		{"vrf isis key + simple (deliberate plaintext)", []string{
+			"set routing-instances V instance-type virtual-router",
+			"set routing-instances V protocols isis net 49.0001.0000.0000.0001.00",
 			"set routing-instances V protocols isis authentication-key secret1",
 			"set routing-instances V protocols isis authentication-type simple"}, true},
-		// No key means nothing to expose.
+		// #14399: configuring an authentication type without a key is also
+		// refused; the key must be present at the same scope.
 		{"vrf isis type only, no key", []string{
-			"set routing-instances V protocols isis authentication-type md5"}, true},
+			"set routing-instances V protocols isis authentication-type md5"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := &ConfigTree{}
@@ -66,6 +75,12 @@ func TestAuthKeyWithoutTypeInRoutingInstanceIsRefused14400(t *testing.T) {
 					t.Fatalf("SetPath: %v", err)
 				}
 			}
+			scope := "routing-instances V"
+			if tc.name == "vrf isis type only, no key" {
+				// #14399 uses a singular quoted scope; #9105 uses the
+				// canonical plural path for the reverse key-without-type gate.
+				scope = `routing-instance "V"`
+			}
 			_, err := CompileConfig(tr)
 			if (err == nil) != tc.wantStrict {
 				t.Fatalf("strict accepted=%v, want %v (err=%v)", err == nil, tc.wantStrict, err)
@@ -74,8 +89,8 @@ func TestAuthKeyWithoutTypeInRoutingInstanceIsRefused14400(t *testing.T) {
 				if !strings.Contains(err.Error(), "authentication-type md5") {
 					t.Errorf("the refusal does not name the remedy: %v", err)
 				}
-				if !strings.Contains(err.Error(), "routing-instances V") {
-					t.Errorf("the refusal does not name the routing-instance scope: %v", err)
+				if !strings.Contains(err.Error(), scope) {
+					t.Errorf("the refusal does not name the routing-instance scope %q: %v", scope, err)
 				}
 			}
 
@@ -88,13 +103,13 @@ func TestAuthKeyWithoutTypeInRoutingInstanceIsRefused14400(t *testing.T) {
 			if !tc.wantStrict {
 				var warned bool
 				for _, w := range lc.Warnings {
-					if strings.Contains(w, "authentication-type") && strings.Contains(w, "routing-instances V") {
+					if strings.Contains(w, "authentication-type") && strings.Contains(w, scope) {
 						warned = true
 					}
 				}
 				if !warned {
-					t.Error("the lenient path accepted a VRF key with no type and said NOTHING " +
-						"naming the instance — silent is the state #9105/#14400 is about")
+					t.Error("the lenient path accepted a VRF authentication setting and said NOTHING " +
+						"naming the instance — silence is the state #9105/#14399 is about")
 				}
 			}
 		})

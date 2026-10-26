@@ -139,7 +139,11 @@ func rethDHCPConfig9349(t *testing.T, cluster bool) *config.Config {
 	t.Helper()
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
-		"reth1":    {Name: "reth1", RedundancyGroup: 1},
+		"reth1": {
+			Name:            "reth1",
+			RedundancyGroup: 1,
+			Units:           map[int]*config.InterfaceUnit{0: {Number: 0}},
+		},
 		"ge-0/0/1": {Name: "ge-0/0/1", RedundantParent: "reth1"},
 	}
 	cfg.System.DHCPServer.DHCPLocalServer = &config.DHCPLocalServerConfig{
@@ -282,8 +286,8 @@ func TestStandaloneApplyReceivesTheResolvedConfig9349(t *testing.T) {
 		t.Fatalf("Kea was handed the AUTHORED RETH name %q. That is not a kernel device, so Kea "+
 			"cannot bind it and DHCP fails on every RETH-backed segment (#9349)", g.Interfaces[0])
 	}
-	if g.Interfaces[0] != "ge-0-0-1.0" {
-		t.Fatalf("Kea was handed %q, want the resolved member name %q", g.Interfaces[0], "ge-0-0-1.0")
+	if g.Interfaces[0] != "ge-0-0-1" {
+		t.Fatalf("Kea was handed %q, want the resolved member name %q", g.Interfaces[0], "ge-0-0-1")
 	}
 
 	// The apply must not have mutated the shared active config on the way

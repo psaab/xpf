@@ -152,7 +152,7 @@ func TestDDNSGenericLiteralUserinfoHTTPSAccepted(t *testing.T) {
 func TestDDNSGenericAtInPathQueryNotMisclassified(t *testing.T) {
 	for _, tmpl := range []string{
 		"http://host.example/p@th?ip=%i", // '@' in the path
-		"http://host.example/upd?x=a@b",  // '@' in the query
+		"http://host.example/upd?x@b",    // '@' in a value-less query flag
 		"http://@host.example/upd?ip=%i", // empty userinfo (bare '@')
 	} {
 		t.Run(tmpl, func(t *testing.T) {
@@ -242,7 +242,9 @@ func TestDDNSPlaintextCheckIPURLRejected(t *testing.T) {
 		name string
 		set  []string
 	}{
-		{"credentialed dyndns2 + Surface A binding (fixture F-DR3-H5-1)", []string{
+		{"credentialed dyndns2", []string{
+			"set interfaces ge-0-0-2 vlan-tagging",
+			"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 			"set system services dynamic-dns provider p backend dyndns2",
 			"set system services dynamic-dns provider p username alice",
 			"set system services dynamic-dns provider p password s3cret",

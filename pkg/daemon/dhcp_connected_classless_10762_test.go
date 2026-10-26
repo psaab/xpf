@@ -70,12 +70,14 @@ func TestCollectDHCPRoutesSuppressesClasslessRoutesInsideConnectedSubnets10762(t
 
 // A DHCP lease key on an untagged device does not include the logical unit
 // number. Do not use it to assign static connected prefixes to an instance:
-// a unit-1 member must not move unit 0's connected subnet out of the default
-// table.
+// a unit-1 VLAN member must not move unit 0's connected subnet out of the
+// default table.
 func TestConnectedPrefixRoutingContextUsesLogicalUnitOwnership10762(t *testing.T) {
 	t.Setenv(dhcpClasslessTrustOverrideEnv, "")
 	store := testStoreWithSetConfig(t, []string{
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/0 unit 1 vlan-id 1",
 		"set interfaces ge-0/0/0 unit 1 family inet address 10.0.2.1/24",
 		"set interfaces ge-0/0/1 unit 0 family inet dhcp",
 		"set routing-instances tenant instance-type virtual-router",

@@ -17,8 +17,9 @@ import (
 //
 // This mirrors the #9497 gRPC test against the LOCAL CLI renderers
 // (showServicesDynamicDNS / showDHCPDynamicDNS), driving both normal and
-// detail mode. Fixtures go through the store (LoadOverride+Commit) so the
-// config value is exactly what ActiveConfig() returns at render time.
+// detail mode. RFC 2136 update-server userinfo is no longer commit-valid
+// (#16440), so the old-config rendering case uses tolerant SyncApply, which
+// preserves the value with a warning for display-only redaction coverage.
 
 const (
 	cliSecret15174 = "s3cr3t"
@@ -38,29 +39,24 @@ func assertDDNSRedacted15174(t *testing.T, surface string, detail bool, out stri
 func TestShowServicesDynamicDNSLocalCLIRedactsUpdateServer15174(t *testing.T) {
 	for _, detail := range []bool{false, true} {
 		store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
-		if err := store.EnterConfigure(); err != nil {
-			t.Fatalf("EnterConfigure: %v", err)
-		}
-		if err := store.LoadOverride(`
+		_, err := store.SyncApply(`
 system {
     services {
         dynamic-dns {
             provider p1 {
                 backend rfc2136;
-                update-server "` + cliCred15174 + `";
+                update-server "`+cliCred15174+`";
                 tsig-key k1;
             }
         }
     }
 }
-`); err != nil {
-			t.Fatalf("LoadOverride: %v", err)
-		}
-		if _, err := store.Commit(); err != nil {
-			t.Fatalf("Commit: %v", err)
+`, nil)
+		if err != nil {
+			t.Fatalf("SyncApply legacy config: %v", err)
 		}
 		if got := store.ActiveConfig().System.Services.DynamicDNS.Providers["p1"].UpdateServer; got != cliCred15174 {
-			t.Fatalf("fixture premise: provider update-server = %q, want %q (config must retain the raw value; redaction is display-only)", got, cliCred15174)
+			t.Fatalf("fixture premise: provider update-server = %q, want %q (tolerant load preserves legacy active value; redaction is display-only)", got, cliCred15174)
 		}
 		c := &CLI{
 			store: store,
@@ -81,10 +77,7 @@ system {
 func TestShowDHCPDynamicDNSLocalCLIRedactsUpdateServer15174(t *testing.T) {
 	for _, detail := range []bool{false, true} {
 		store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
-		if err := store.EnterConfigure(); err != nil {
-			t.Fatalf("EnterConfigure: %v", err)
-		}
-		if err := store.LoadOverride(`
+		_, err := store.SyncApply(`
 system {
     services {
         dhcp-local-server {
@@ -92,20 +85,18 @@ system {
                 enable;
                 domain example.com;
                 backend rfc2136;
-                update-server "` + cliCred15174 + `";
+                update-server "`+cliCred15174+`";
                 tsig-key k1;
             }
         }
     }
 }
-`); err != nil {
-			t.Fatalf("LoadOverride: %v", err)
-		}
-		if _, err := store.Commit(); err != nil {
-			t.Fatalf("Commit: %v", err)
+`, nil)
+		if err != nil {
+			t.Fatalf("SyncApply legacy config: %v", err)
 		}
 		if got := store.ActiveConfig().System.DHCPServer.DynamicDNS.UpdateServer; got != cliCred15174 {
-			t.Fatalf("fixture premise: dhcp ddns update-server = %q, want %q", got, cliCred15174)
+			t.Fatalf("fixture premise: dhcp ddns update-server = %q, want %q (tolerant load preserves legacy active value; redaction is display-only)", got, cliCred15174)
 		}
 		c := &CLI{
 			store:       store,

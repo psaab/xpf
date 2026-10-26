@@ -103,7 +103,10 @@ const fenceStartupClusterSet = "" +
 	"set chassis cluster redundancy-group 0 node 1 priority 100\n" +
 	"set chassis cluster redundancy-group 1 node 0 priority 200\n" +
 	"set chassis cluster redundancy-group 1 node 1 priority 100\n" +
-	"set chassis cluster authentication-key test-cluster-psk-6611\n"
+	"set chassis cluster authentication-key test-cluster-psk-6611\n" +
+	"set chassis cluster control-interface em0\n" +
+	"set chassis cluster peer-address 10.99.0.2\n" +
+	"set interfaces em0 unit 0 family inet address 10.99.0.1/24\n"
 
 // TestFenceAllRedundancyGroups_ReadsCurrentConfig is the #3917 regression
 // guard. A redundancy-group added by a day-2 commit (after startClusterComms

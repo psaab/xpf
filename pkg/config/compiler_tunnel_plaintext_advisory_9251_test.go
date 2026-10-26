@@ -56,6 +56,7 @@ func TestPlaintextAdvisoriesDoNotBorrowEachOthersAccount(t *testing.T) {
 		"set security zones security-zone vpn2 interfaces st0.0",
 		"set security ipsec vpn bare bind-interface st1.0",
 	)
+	lines = addIPsecFixtureDefaults(t, lines)
 	cfg := compileWarn5618(t, lines...)
 
 	wgAdv := plaintextWarnings5618(cfg)

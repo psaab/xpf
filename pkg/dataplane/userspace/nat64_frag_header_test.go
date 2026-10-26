@@ -26,6 +26,7 @@ security {
         nat64 {
             rule-set wkp {
                 prefix 64:ff9b::/96;
+                source-pool nat64-pool;
             }
         }
 `

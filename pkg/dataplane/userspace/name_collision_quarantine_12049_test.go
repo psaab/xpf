@@ -245,7 +245,7 @@ func TestLenientZoneLocalAddressBookNameCollisionQuarantinesReference12049(t *te
 	}
 }
 
-func TestLenientNamedAddressBookDropQuarantinesCollision12049(t *testing.T) {
+func TestNamedAddressBookScopeDoesNotQuarantineGlobalCollision12049(t *testing.T) {
 	books := `address-book { global { address shared 203.0.113.0/24; } red { address shared 10.0.0.0/8; } }`
 	text := `security { zones { security-zone trust; security-zone untrust; } ` + books +
 		` policies { default-policy { deny-all; } from-zone trust to-zone untrust { policy p1 { ` +
@@ -254,16 +254,48 @@ func TestLenientNamedAddressBookDropQuarantinesCollision12049(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("parse: %v", errs)
 	}
-	if err := config.SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), `unknown configuration keyword "red"`) {
-		t.Fatalf("strict schema must continue rejecting the unsupported named address book, got %v", err)
+	if err := config.SchemaValidate(tree); err != nil {
+		t.Fatalf("strict schema rejected a supported named address book: %v", err)
 	}
-	cfg, rules := compileNameCollision12049(t, "", books, "any", "shared")
-	if !addressListHasSentinel(rules[0].SourceLiterals) || !addressListHasSentinel(rules[0].SourceAddresses) {
-		t.Fatalf("entry dropped from named address book must not fall through to the same-named global object: literals=%v addresses=%v", rules[0].SourceLiterals, rules[0].SourceAddresses)
+	cfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile rejected a supported named address book: %v", err)
 	}
-	reasons := PolicyContentRejectionReasons(cfg, nil)
-	if len(reasons) == 0 || !strings.Contains(strings.Join(reasons, "\n"), "shared") {
-		t.Fatalf("content-rejection mirror must name dropped named-book collision, got %q", reasons)
+	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("build policy snapshots: %v", err)
+	}
+	assertUnattachedNamedBookLeavesGlobalReference12049(t, cfg, rules, "shared")
+	if got := cfg.Security.NamedAddressBooks["red"].Addresses["shared"].UsableValue(); got != "10.0.0.0/8" {
+		t.Fatalf("unattached named-book address = %q, want 10.0.0.0/8", got)
+	}
+	if got := cfg.Security.AddressBook.Addresses["shared"].UsableValue(); got != "203.0.113.0/24" {
+		t.Fatalf("global address = %q, want 203.0.113.0/24", got)
+	}
+}
+
+func assertUnattachedNamedBookLeavesGlobalReference12049(t *testing.T, cfg *config.Config, rules []PolicyRuleSnapshot, token string) {
+	t.Helper()
+	if cfg.Security.NamedAddressBooks["red"] == nil {
+		t.Fatal("supported named book red was not retained")
+	}
+	if _, ok := cfg.Security.AddressBook.CollidingNames[token]; ok {
+		t.Fatalf("unattached named-book token %q poisoned global scope: %v", token, cfg.Security.AddressBook.CollidingNames)
+	}
+	if len(rules) != 1 || addressListHasSentinel(rules[0].SourceLiterals) ||
+		addressListHasSentinel(rules[0].SourceAddresses) {
+		t.Fatalf("unattached named book must not poison the global policy reference: %+v", rules)
+	}
+	_, nameToID, err := buildAddressBookTable(cfg)
+	if err != nil {
+		t.Fatalf("build address-book table: %v", err)
+	}
+	id, ok := nameToID[token]
+	if !ok || len(rules[0].SourceBookIDs) != 1 || rules[0].SourceBookIDs[0] != id {
+		t.Fatalf("policy book IDs = %v, want global %q ID %d", rules[0].SourceBookIDs, token, id)
+	}
+	if reasons := PolicyContentRejectionReasons(cfg, nil); len(reasons) != 0 {
+		t.Fatalf("supported unattached named book caused a rejection: %v", reasons)
 	}
 }
 

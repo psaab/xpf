@@ -8,6 +8,7 @@ import (
 
 func compileWarn5619(t *testing.T, lines ...string) *Config {
 	t.Helper()
+	lines = addIPsecFixtureDefaults(t, lines)
 	tree := &ConfigTree{}
 	for _, line := range lines {
 		path, err := ParseSetCommand(line)
@@ -223,10 +224,11 @@ func TestPlaintextWarningFiresOnEveryCompilePath(t *testing.T) {
 	build := func(t *testing.T) *ConfigTree {
 		t.Helper()
 		tree := &ConfigTree{}
-		for _, line := range []string{
+		lines := addIPsecFixtureDefaults(t, []string{
 			"set security ipsec vpn v1 bind-interface st0.0",
 			"set security zones security-zone vpn interfaces st0.0",
-		} {
+		})
+		for _, line := range lines {
 			path, err := ParseSetCommand(line)
 			if err != nil {
 				t.Fatalf("ParseSetCommand(%q): %v", line, err)
