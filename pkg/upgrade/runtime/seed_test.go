@@ -19,12 +19,13 @@ func seedEnv(t *testing.T, ver string) Config {
 		mkfile(t, filepath.Join(staged, b), "bin-"+b+"-"+ver)
 	}
 	return Config{
-		StagedDir:    staged,
-		VersionsDir:  filepath.Join(root, "versions"),
-		StagedGenDir: filepath.Join(root, "staged-gen"),
-		SbinDir:      filepath.Join(root, "sbin"),
-		Logf:         func(format string, a ...any) { t.Logf("LOG "+format, a...) },
-		version:      ver,
+		StagedDir:      staged,
+		VersionsDir:    filepath.Join(root, "versions"),
+		StagedGenDir:   filepath.Join(root, "staged-gen"),
+		SbinDir:        filepath.Join(root, "sbin"),
+		Logf:           func(format string, a ...any) { t.Logf("LOG "+format, a...) },
+		version:        ver,
+		packageVersion: "0.0.420+g0123456789ab",
 	}
 }
 
@@ -106,6 +107,14 @@ func TestSeed_PublishesInitialGeneration(t *testing.T) {
 	}
 	if genid == "" {
 		t.Fatal("seed did not publish an initial generation (current-gen absent)")
+	}
+
+	versionData, err := os.ReadFile(filepath.Join(sg.GenDir(genid), stagedgen.PackageVersionFile))
+	if err != nil {
+		t.Fatalf("read published package-version metadata: %v", err)
+	}
+	if got, want := string(versionData), cfg.packageVersion+"\n"; got != want {
+		t.Fatalf("published package-version metadata = %q, want %q", got, want)
 	}
 	for _, b := range managedBins {
 		data, rerr := os.ReadFile(filepath.Join(sg.GenDir(genid), b))

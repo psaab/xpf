@@ -28,9 +28,9 @@
 #                      Package/Version/Architecture. Other accumulated versions
 #                      are excluded, and explicit mixed/duplicate sets fail
 #                      closed. Unset -> fail closed: pass --debs.
-#   XPF_APT_VALID_DAYS Valid-Until horizon in days (default 365 — long, for a
-#                      manual/air-gap signing cadence; a short window REQUIRES
-#                      an automated re-sign job, §5.6 NIT-1).
+#   XPF_APT_VALID_DAYS Valid-Until horizon in days (default 30). Keep the
+#                      signed metadata fresh by rebuilding/re-signing before
+#                      expiry; operators may override this for their cadence.
 #   XPF_APT_ORIGIN     Origin/Label/Suite text (default "xpf").
 set -eu
 
@@ -41,7 +41,7 @@ SUITE="${XPF_APT_SUITE:-stable}"
 COMPONENT="${XPF_APT_COMPONENT:-main}"
 ARCH="${XPF_APT_ARCH:-amd64}"
 TOOL="${XPF_APT_TOOL:-flat}"
-VALID_DAYS="${XPF_APT_VALID_DAYS:-365}"
+VALID_DAYS="${XPF_APT_VALID_DAYS:-30}"
 ORIGIN="${XPF_APT_ORIGIN:-xpf}"
 DEBS=""
 

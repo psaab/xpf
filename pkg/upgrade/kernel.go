@@ -138,6 +138,12 @@ type KernelJournal struct {
 	// kernel matches this exactly.
 	CandidateVersion string `json:"candidate_version"`
 
+	// CandidatePackageVersion is the Debian version of the
+	// linux-image-<CandidateVersion> package at arm time. It is the
+	// comparable ordinal used by the kernel anti-rollback floor; uname -r
+	// is a runtime identity, not a Debian package version.
+	CandidatePackageVersion string `json:"candidate_package_version,omitempty"`
+
 	// KnownGoodVersion is the `uname -r` of the active (rollback) kernel at
 	// arm time — the slot BootOrder falls back to.
 	KnownGoodVersion string `json:"known_good_version"`
@@ -266,6 +272,16 @@ type KernelSystem interface {
 	// installed kernel's `uname -r` form. It MUST NOT move the permanent
 	// default (the caller re-asserts that afterwards).
 	InstallCandidateKernel(version string) (unameR string, err error)
+	// CandidateKernelPackageVersion returns the Debian package version
+	// apt would install for the requested uname -r. This is queried before
+	// apt mutates the host and supplies the comparable ordinal used by the
+	// kernel anti-rollback floor.
+	CandidateKernelPackageVersion(unameR string) (string, error)
+	// InstalledKernelPackageVersion returns the Debian package version
+	// recorded for an already-installed linux-image-<uname-r>. It supports
+	// promotion recovery of journals written before package identity was
+	// added to KernelJournal.
+	InstalledKernelPackageVersion(unameR string) (string, error)
 	// DefaultBootEntry returns the Boot#### id that is currently the
 	// permanent default (BootOrder front), for the no-move re-assert.
 	DefaultBootEntry() (string, error)
@@ -379,6 +395,9 @@ type KernelConfig struct {
 	// JournalPath is the crash-safe kernel-channel journal (distinct from
 	// the binary-cut journal so the two channels never collide).
 	JournalPath string
+	// KernelFloorPath is the durable anti-rollback high-water mark for the
+	// kernel channel. Defaults to /var/lib/xpf/kernel-floor.
+	KernelFloorPath string
 
 	// StrictWatchdog selects Path Option D: true = D1 (fail-closed if the
 	// watchdog is not verified-persistent), false = D2 (warn-and-proceed —
@@ -408,6 +427,9 @@ type KernelConfig struct {
 func (c *KernelConfig) withDefaults() {
 	if c.JournalPath == "" {
 		c.JournalPath = DefaultKernelJournalPath
+	}
+	if c.KernelFloorPath == "" {
+		c.KernelFloorPath = DefaultKernelFloorPath
 	}
 	if c.BootFreeMargin == 0 {
 		c.BootFreeMargin = 64 << 20 // candidate kernel+initramfs+headroom

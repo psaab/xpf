@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 
 	"github.com/psaab/xpf/pkg/upgrade"
 	"github.com/psaab/xpf/pkg/upgrade/lock"
@@ -55,11 +57,23 @@ func runPublishGenerationSubcommand(args []string) {
 		os.Exit(1)
 	}
 	defer func() { _ = h.Release() }()
+	versionOutput, err := exec.Command("dpkg-query", "-W", "-f=${Version}", "xpf").Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "publish-generation: read installed Debian package version: %v\n", err)
+		os.Exit(1)
+	}
+	packageVersion := strings.TrimSpace(string(versionOutput))
+	if err := upgrade.ValidateDebianPackageVersion(packageVersion); err != nil {
+		fmt.Fprintf(os.Stderr, "publish-generation: installed package version is not orderable: %v\n", err)
+		os.Exit(1)
+	}
+
 
 	cfg := stagedgen.Config{
-		StagedDir: flags.stagedDir,
-		Dir:       flags.stagedGenDir,
-		Logf:      func(format string, a ...any) { fmt.Printf(format+"\n", a...) },
+		StagedDir:      flags.stagedDir,
+		Dir:            flags.stagedGenDir,
+		PackageVersion: packageVersion,
+		Logf:           func(format string, a ...any) { fmt.Printf(format+"\n", a...) },
 	}
 	genid, err := cfg.Publish()
 	if err != nil {

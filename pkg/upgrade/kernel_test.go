@@ -25,6 +25,8 @@ type fakeKernelSystem struct {
 	held        bool
 	installRet  string // uname -r returned by InstallCandidateKernel
 	installErr  error
+	candidatePackageVersion string
+	candidatePackageVersionErr error
 	moveDefault bool // if true, InstallCandidateKernel moves the default
 
 	selectors map[string]string // slot -> uname -r
@@ -111,6 +113,18 @@ func (f *fakeKernelSystem) FreeBytes(p string) (uint64, error) {
 	return 1 << 40, nil
 }
 func (f *fakeKernelSystem) RunningKernel() (string, error) { return f.running, f.runningErr }
+func (f *fakeKernelSystem) CandidateKernelPackageVersion(unameR string) (string, error) {
+	if f.candidatePackageVersionErr != nil {
+		return "", f.candidatePackageVersionErr
+	}
+	if f.candidatePackageVersion != "" {
+		return f.candidatePackageVersion, nil
+	}
+	return unameR, nil
+}
+func (f *fakeKernelSystem) InstalledKernelPackageVersion(unameR string) (string, error) {
+	return f.CandidateKernelPackageVersion(unameR)
+}
 func (f *fakeKernelSystem) KernelHeld() (bool, error)      { return f.held, nil }
 func (f *fakeKernelSystem) InstallCandidateKernel(v string) (string, error) {
 	f.log("install:" + v)
@@ -269,9 +283,10 @@ func newKernelRunner(t *testing.T, f *fakeKernelSystem) *KernelRunner {
 	journal := filepath.Join(t.TempDir(), "kernel-upgrade.state")
 	withBootGateJournal(t, journal)
 	r, err := NewKernelRunner(KernelConfig{
-		JournalPath: journal,
-		Sys:         f,
-		Logf:        func(string, ...any) {},
+		JournalPath:     journal,
+		KernelFloorPath: filepath.Join(t.TempDir(), "kernel-floor"),
+		Sys:             f,
+		Logf:            func(string, ...any) {},
 	})
 	if err != nil {
 		t.Fatalf("NewKernelRunner: %v", err)
@@ -628,9 +643,10 @@ func TestKernelArmStrictWatchdogAborts(t *testing.T) {
 	journal := filepath.Join(t.TempDir(), "k.state")
 	withBootGateJournal(t, journal)
 	r, _ := NewKernelRunner(KernelConfig{
-		JournalPath:    journal,
-		Sys:            f,
-		StrictWatchdog: true,
+		JournalPath:     journal,
+		KernelFloorPath: filepath.Join(t.TempDir(), "kernel-floor"),
+		Sys:             f,
+		StrictWatchdog:  true,
 	})
 	if err := r.Arm("6.18.5-12-generic"); !errors.Is(err, ErrKernelChannelUnavailable) {
 		t.Fatalf("want unavailable under D1 without persistent watchdog, got %v", err)
@@ -978,9 +994,10 @@ func TestKernelArmStrictWatchdogArmFailureAborts(t *testing.T) {
 	journal := filepath.Join(t.TempDir(), "k.state")
 	withBootGateJournal(t, journal)
 	r, _ := NewKernelRunner(KernelConfig{
-		JournalPath:    journal,
-		Sys:            f,
-		StrictWatchdog: true,
+		JournalPath:     journal,
+		KernelFloorPath: filepath.Join(t.TempDir(), "kernel-floor"),
+		Sys:             f,
+		StrictWatchdog:  true,
 	})
 	err := r.Arm("6.18.5-12-generic")
 	if !errors.Is(err, ErrKernelChannelUnavailable) {

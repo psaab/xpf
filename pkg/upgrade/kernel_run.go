@@ -195,6 +195,31 @@ func (r *KernelRunner) Arm(candidateVersion string) error {
 			"(journal state=%s); refusing to resume with a different candidate %s — "+
 			"clear %s to start over", j.CandidateVersion, j.State, candidateVersion, r.cfg.JournalPath)
 	}
+	candidatePackageVersion := j.CandidatePackageVersion
+	if candidatePackageVersion == "" {
+		if j.State.atLeast(KernelStateInstalled) {
+			candidatePackageVersion, err = r.cfg.Sys.InstalledKernelPackageVersion(candidateVersion)
+		} else {
+			candidatePackageVersion, err = r.cfg.Sys.CandidateKernelPackageVersion(candidateVersion)
+		}
+		if err != nil {
+			return fmt.Errorf("kernel-upgrade preflight: read Debian package version for candidate %s: %w",
+				candidateVersion, err)
+		}
+	}
+	if err := ValidateDebianPackageVersion(candidatePackageVersion); err != nil {
+		return fmt.Errorf("kernel-upgrade preflight: candidate %s package version %q is not orderable: %w",
+			candidateVersion, candidatePackageVersion, err)
+	}
+	floor, err := loadHighWaterFloor(r.cfg.KernelFloorPath)
+	if err != nil {
+		return fmt.Errorf("kernel-upgrade preflight: read anti-rollback floor: %w", err)
+	}
+	if err := floor.checkForward("kernel candidate", candidatePackageVersion, "apt"); err != nil {
+		return err
+	}
+	j.CandidatePackageVersion = candidatePackageVersion
+
 
 	// A FRESH arm of the SAME version a prune-owed record names supersedes
 	// that record (#16811): the re-armed trial re-installs and re-tests the
@@ -904,6 +929,10 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 	if err := VerifyPromoteBinaryMatchesRecord(j.PromoteBinary); err != nil {
 		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("arm-record mismatch: %w", err))
 	}
+	if err := r.checkKernelFloor(j); err != nil {
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("anti-rollback floor: %w", err))
+	}
+
 
 	// Gate 3: verify-dataplane (the #1864 kernel verifier) on the candidate.
 	ok, err := sys.VerifyDataplane()
@@ -931,6 +960,9 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 	// restores the known-good BootOrder front + reboots.
 	if err := sys.SetBootOrderFront(candID); err != nil {
 		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("promote: set BootOrder front %s failed: %w", candID, err))
+	}
+	if err := r.advanceKernelFloor(j); err != nil {
+		return KernelRollOutcome{}, r.revert(j, fmt.Errorf("persist anti-rollback floor: %w", err))
 	}
 	if err := sys.DisarmWatchdog(); err != nil {
 		r.logf("kernel-upgrade promote: WARNING disarm watchdog: %v", err)

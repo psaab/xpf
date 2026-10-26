@@ -1259,8 +1259,8 @@ reconcile above (extend it only for maps whose loss is truly safe).
 
 ### APT package-selection boundary (#10848)
 
-APT package selection is not a monotonic floor on the running xpf binaries
-or kernel. A bounded Debian APT 3.3.3 amd64 probe of a private signed
+The managed APT preference is not itself a monotonic floor on the running
+xpf binaries or kernel. A bounded Debian APT 3.3.3 amd64 probe of a private signed
 lower-only `xpf*` package repository used installed version
 `0.0.200+gaaaaaaaaaaaa` and repository version
 `0.0.100+gbbbbbbbbbbbb`. The fixture's Release was freshly signed during
@@ -1282,9 +1282,14 @@ observing newer repository metadata. Under the managed 990/-1 preferences
 These results are limited to that fixture, APT version and commands; they
 do not establish warm-cache, deployed-fleet, or all-release-history
 behavior. They do not test production package scripts or identify the
-active binaries/kernel. See [distribution.md](distribution.md#bounded-apt-selection-evidence-10848)
-for evidence bounds and the 365-day signing-horizon context. This capture
-does not choose or enforce the open Q1–Q4 floor-policy decisions.
+active binaries/kernel. The forward channels now enforce independent,
+per-host Debian-version high-water floors: binary candidates are checked in
+the `Run` INIT phase before STOP; kernel candidates are checked in `Arm`
+before apt mutation. A floor advances only after a healthy binary commit or
+kernel promotion. Named rollback remains available without lowering the
+floor, and purge removes both floor files. The APT `Release`/`InRelease`
+`Valid-Until` default is 30 days; see
+[distribution.md](distribution.md#freshness--anti-rollback) for details.
 
 ## LANE-1 HA kernel roll (#1930 INC-2)
 

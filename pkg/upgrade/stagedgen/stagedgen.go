@@ -87,6 +87,11 @@ const (
 	// stamp). It lives inside the version dir so GC removes it with the dir.
 	SrcGenFile = ".srcgen"
 
+	// PackageVersionFile records the Debian package version carried by
+	// this immutable generation. Binary cutover compares this version,
+	// never the staged binary's git-describe self-report, against the
+	// persisted anti-rollback high-water mark.
+	PackageVersionFile = ".xpf-package-version"
 	// RetainGenerations is N in the staged-gen retention policy: keep the
 	// current generation + 1 prior. Smaller than versions/ N=3 because a
 	// superseded generation is never read again (B-P5 / plan §4.B.5).
@@ -103,6 +108,11 @@ type Config struct {
 	// Dir is the staged-generation root to publish INTO. Defaults to
 	// DefaultDir.
 	Dir string
+	// PackageVersion is the Debian version of the xpf package publishing
+	// the generation. When present, Publish records it inside the
+	// immutable generation so the cut can order this target against its
+	// durable anti-rollback floor.
+	PackageVersion string
 	// Logf is an optional progress sink (defaults to no-op).
 	Logf func(format string, args ...any)
 }
@@ -185,9 +195,9 @@ func (c Config) currentGenPath() string { return filepath.Join(c.Dir, CurrentGen
 //  1. pre-sweep stale staged-gen/*.partial (a crashed prior publish must not
 //     accumulate half-copies that exhaust /var — B-P2b);
 //  2. copy staged/* -> staged-gen/<genid>.partial (durable per-file fsync);
-//  3. fsync the .partial, atomic-rename to staged-gen/<genid>, fsync Dir;
+//  3. record package identity in the .partial, fsync it, atomic-rename to
+//     staged-gen/<genid>, and fsync Dir;
 //  4. repoint current-gen -> <genid> via temp-symlink + rename + dir-fsync.
-//
 // The caller is responsible for holding the host-wide upgrade lock (the
 // postinst path serializes publish against an operator cut so GC cannot
 // delete a generation a cut is reading). Publish does NOT take the lock
@@ -220,7 +230,14 @@ func (c Config) Publish() (genid string, err error) {
 		_ = os.RemoveAll(partial)
 		return "", fmt.Errorf("stagedgen: copy staged -> %s: %w", partial, err)
 	}
-	// 3. Make the .partial contents durable, then atomic-rename it into place.
+	if c.PackageVersion != "" {
+		if err := fsatomic.WriteFileDurable(filepath.Join(partial, PackageVersionFile),
+			[]byte(c.PackageVersion+"\n"), 0o644); err != nil {
+			_ = os.RemoveAll(partial)
+			return "", fmt.Errorf("stagedgen: record package version %s: %w", c.PackageVersion, err)
+		}
+	}
+	// 3. Make the .partial contents durable, then atomically rename it into place.
 	if err := fsatomic.SyncDir(partial); err != nil {
 		_ = os.RemoveAll(partial)
 		return "", fmt.Errorf("stagedgen: fsync partial: %w", err)

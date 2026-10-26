@@ -69,6 +69,8 @@ CURRENT="$VERSIONS/current"
 # removes it. We must remove it on purge (else an orphan dir survives, a Policy
 # violation) and on a pre-B downgrade (the old postrm never learns about it).
 STAGED_GEN=/var/lib/xpf/staged-gen
+BINARY_FLOOR=/var/lib/xpf/binary-floor
+KERNEL_FLOOR=/var/lib/xpf/kernel-floor
 XPF_UPGRADE_STATUS=/var/lib/xpf/upgrade-deferred
 XPF_UPGRADE_STATUS_UNREADABLE=/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable
 DROPIN=/etc/systemd/system/xpfd.service.d/10-xpf-version.conf
@@ -371,11 +373,12 @@ case "$1" in
         remove_install_sh_apt_source
         remove_install_sh_apt_pin
         if [ "$1" = "purge" ]; then
-            # versions/, staged-gen/, and postinst status files are
-            # package-derived runtime artifacts, not operator configuration.
+            # versions/, staged-gen/, channel floors and postinst status files
+            # are package-derived runtime artifacts, not operator configuration.
             # Remove pid temps left by a killed atomic status writer too.
             rm -rf "$VERSIONS"
             rm -rf "$STAGED_GEN"
+            rm -f "$BINARY_FLOOR" "$KERNEL_FLOOR"
             rm -f "$XPF_UPGRADE_STATUS" "$XPF_UPGRADE_STATUS".*
             rm -f "$XPF_UPGRADE_STATUS_UNREADABLE"
             # #14620: the transit ownership record is package-derived
