@@ -379,11 +379,11 @@ pub(crate) const STALE_SYNCED_CEILING_ABS_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000
 /// Per-call statistics for `expire_stale_entries` pop work, used by
 /// the timer-wheel unit tests to assert K-bounds and entry
 /// classification under specific synthetic workloads. Fields are
-/// accumulated over all buckets popped in a single call.
+/// accumulated from ordinary-wheel buckets, including held rechecks.
 #[derive(Default, Debug, Clone, Copy)]
 pub(crate) struct WheelPopStats {
-    /// Total `WheelEntry`s scanned (popped from a bucket and
-    /// classified) during the call.
+    /// Total `WheelEntry`s scanned (popped from a bucket and classified)
+    /// during the call.
     pub(crate) scanned: usize,
     /// Entries dropped because the canonical key is no longer in
     /// `sessions` (already removed by another path).
@@ -1278,11 +1278,21 @@ struct SessionEntry {
     /// clearing `handshake_pending`.
     syn_ack_first: bool,
     /// #10888 carries this marker as the distinct SynAckFirstPending wire state.
-    /// #965: absolute wheel tick at which this session is scheduled to
-    /// be checked for expiration. Updated on every push to the wheel.
+    /// #965: absolute tick in the ordinary expiry wheel. Updated when a
+    /// non-held deadline changes; while held, it is the horizon recheck tick.
     /// A WheelEntry whose `scheduled_tick != entry.wheel_tick` is a
     /// stale duplicate (lazy-delete discriminator).
     wheel_tick: u64,
+    /// #16881: canonical held-recheck tick in the ordinary wheel.
+    /// Zero means no held recheck is pending; otherwise it matches
+    /// `wheel_tick` and is aligned to the current `first_held_ns` anchor.
+    held_wheel_tick: u64,
+    /// #16881: inputs for the pending held recheck. Same-incarnation snapshot
+    /// imports preserve them, while idle-deadline or HOLD-anchor changes
+    /// invalidate the hint.
+    held_wheel_last_seen_ns: u64,
+    held_wheel_expires_after_ns: u64,
+    held_wheel_first_held_ns: u64,
     /// #7212: the `(config generation, logical ingress interface)` this
     /// direction's static input-filter verdict was last derived under, or
     /// [`FilterRevalidationStamp::UNVALIDATED`].

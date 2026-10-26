@@ -1075,13 +1075,15 @@ fn c6_expire_ha_context_covers_hold_and_self_heal_10591() {
         sessions.first_held_ns_for(&forward_key).unwrap_or(0) > 0,
         "HOLD must arm the first-held ceiling clock"
     );
-    // The next real wheel tick observes the activation edge: the same synced
-    // row now forwards and the epoch changed, so SELF-HEAL re-stamps it once.
+    // Promotion is visible on the first pass after the pending 255-second
+    // wheel horizon; the same synced row forwards and the epoch changed, so
+    // SELF-HEAL re-stamps it once.
+    let promotion_at = hold_now + WHEEL_BUCKETS_FOR_TEST as u64 * GC_TICK_NS;
     let healed = production_sweep_for_test(
         &mut sessions,
         std::slice::from_mut(&mut binding),
         &install,
-        hold_now + GC_TICK_NS,
+        promotion_at,
         Some(&self_heal),
     );
     assert!(
@@ -1093,7 +1095,7 @@ fn c6_expire_ha_context_covers_hold_and_self_heal_10591() {
         2,
         "SELF-HEAL must retain both halves"
     );
-    let (idle, _policy_id) = forward_observation_at(&sessions, hold_now + GC_TICK_NS);
+    let (idle, _policy_id) = forward_observation_at(&sessions, promotion_at);
     assert!(
         idle < 2 * GC_TICK_NS,
         "SELF-HEAL must re-stamp last_seen at activation"

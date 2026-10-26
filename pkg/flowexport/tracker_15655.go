@@ -164,8 +164,17 @@ func (t *FlowTracker) Touch(key FlowKey, now time.Time, packets, bytes uint64) {
 			lastPackets: m.basePackets, lastBytes: m.baseBytes,
 			lastRevPackets: m.baseRevPackets, lastRevBytes: m.baseRevBytes,
 			record: m.record}
-		nf.record.Packets = packets
-		nf.record.Bytes = bytes
+		// #17851: keep the per-field maxima (#16750), exactly as the
+		// live-flow branch below does. Assigning the incoming snapshot
+		// directly let a backwards-racing snapshot lower the stored
+		// cumulative below the inactive final's coverage, so the next
+		// export re-counted already-exported traffic.
+		if packets > nf.record.Packets {
+			nf.record.Packets = packets
+		}
+		if bytes > nf.record.Bytes {
+			nf.record.Bytes = bytes
+		}
 		t.flows[key] = nf
 		return
 	}
@@ -215,10 +224,20 @@ func (t *FlowTracker) TouchBidirectional(key FlowKey, now time.Time, fwdPackets,
 			lastPackets: m.basePackets, lastBytes: m.baseBytes,
 			lastRevPackets: m.baseRevPackets, lastRevBytes: m.baseRevBytes,
 			record: m.record}
-		nf.record.Packets = fwdPackets
-		nf.record.Bytes = fwdBytes
-		nf.record.RevPackets = revPackets
-		nf.record.RevBytes = revBytes
+		// #17851: per-field maxima, as in Touch above and the live
+		// branch below.
+		if fwdPackets > nf.record.Packets {
+			nf.record.Packets = fwdPackets
+		}
+		if fwdBytes > nf.record.Bytes {
+			nf.record.Bytes = fwdBytes
+		}
+		if revPackets > nf.record.RevPackets {
+			nf.record.RevPackets = revPackets
+		}
+		if revBytes > nf.record.RevBytes {
+			nf.record.RevBytes = revBytes
+		}
 		t.flows[key] = nf
 		return
 	}

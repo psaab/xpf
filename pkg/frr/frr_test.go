@@ -3767,7 +3767,8 @@ func TestGeneratePolicyOptionsCommunityExpandedVsStandard(t *testing.T) {
 		// the literal token anchor is pipe-free (^|[ ])...([ ]|$)
 		// and the regex factor is per-community confined.
 		"bgp community-list expanded MIXED permit (^|[ ])65000:100([ ][^ ]+)*[ ][^ ]*65001:[^ ]*",
-		"bgp community-list expanded MIXED permit (^|[ ])65001:[^ ]*[^ ]*([ ][^ ]+)*[ ]65000:100([ ]|$)",
+		// #17853: the first unanchored factor also matches mid-token.
+		"bgp community-list expanded MIXED permit (^|[ ])[^ ]*65001:[^ ]*[^ ]*([ ][^ ]+)*[ ]65000:100([ ]|$)",
 		// Brace-bound member must render expanded, not standard.
 		"bgp community-list expanded BOUND permit 65000:1{2,3}",
 	}

@@ -26,6 +26,22 @@ driveable work remains.
   campaign failure.
 - **Zero PRs too**: termination requires zero open PRs as well as zero open
   issues. Drain reviews/merges continuously; an open PR is not delivered work.
+- **Agent concurrency cap (user directive 2026-10-26)**: the box-wide
+  agent concurrency ceiling is `2 × nproc` concurrent agents. The
+  campaign NEVER dispatches into the last 6 slots — they stay free
+  for ad-hoc work that comes up mid-campaign — so at most
+  `2*nproc - 6` campaign agents (engineers + reviewers + scouts
+  combined) may be live at once. The keeper Monitor and the smoke
+  watch are standing lanes outside this count (see "The keeper" and
+  "Continuous smoke watch"). At the cap, queue new lanes instead of
+  dispatching; refill as completions land. On a 16-core box:
+  ceiling 32, campaign cap 26. The cap is parent-counted against
+  the live task registry (`proc://`): every dispatched task job —
+  engineer, reviewer, or scout, whatever its agent type — counts
+  as one live campaign agent until it completes. The keeper board
+  summary line and the parent's appended lane table both carry the
+  live count vs cap (`agents=<n>/<2*nproc-6>`) so a breach is
+  visible at the next keeper tick instead of only in hindsight.
 - **Keep lanes full, parallelism high**: never let engineer or reviewer lanes
   idle while driveable work exists. Reap idle/dead agents and refill from the
   lowest-number queue. Parent does folds/small fixes inline when faster than
@@ -202,7 +218,9 @@ coarse at TB scale, 1% ≈ 40G here, and would read zero while tens
 of GB/hour are consumed; prune the history with the board
 rotation), AND
 prints exactly one summary line per tick to stdout (`keeper:
-prs=<n> issues=<total> oldest-verdict-age=<dur> stale-lanes=<n>`)
+prs=<n> issues=<total> oldest-verdict-age=<dur> stale-lanes=<n>
+agents=<n>/<2*nproc-6>` — the parent supplies the live-agent count
+from its task registry; the keeper prints it verbatim)
 — Monitor wakes the parent on stdout lines; a silent file rewrite
 alerts nobody. The keeper has exactly ONE power: observe and alert.
 It NEVER dispatches, reaps, refills, reviews, or merges — the
@@ -429,7 +447,9 @@ CODE is already shipped.
 
 Fan out wide. For each disjoint issue, dispatch a `general-purpose`
 engineer agent (or `/research` first if the design needs human judgement).
-Run as many concurrently as the box allows.
+Run as many concurrently as the box allows, subject to the agent
+concurrency cap in the standing orders (`2*nproc - 6` live campaign
+agents; queue beyond it).
 
 - **Unique `CARGO_TARGET_DIR=/var/worktrees/.cache/cargo-<issue>` per Rust
   agent** (scratch rule above — never `/dev/shm` or `/tmp`) — 8 concurrent
@@ -442,7 +462,15 @@ Run as many concurrently as the box allows.
   own per-change log, `docs/log/<issue>.md` (or `docs/log/<pr>.md` when
   there is no issue), in the same diff — the log
   lands atomically when the PR lands, as has been the practice; there is
-  no separate log step and no root `_Log.md` append.
+  no separate log step and no root `_Log.md` append. The log carries
+  the `docs/log/README.md` fields (Timestamp / Action / File(s)) under
+  a `# #<issue> — <title>` heading, plus Validation and Risk entries
+  matching the PR body's evidence. **Missing log = incomplete PR**: the
+  Step 3 gate bounces it back to the lane before any code review,
+  exactly like a message-shape violation — the lane adds it (new
+  commit or amend, lane's choice), never the parent. A PR classified
+  `docs/test-only` still carries the log unless the diff IS the log
+  file itself.
 - **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief (including: the PR TITLE MUST use the same `<area>: <summary> (#NNNN)` subject format — it becomes the merge-commit message); parent bounces non-conforming branches before review (`git log` shape check at PR…
   - Subject: `<area>: <imperative summary> (#NNNN)`, ≤72 cols. Area vocabulary: `docs:`, `test:`, `assurance:`, `forwarding:`, `config:`, `daemon:`, `cluster:`, `sessions:`, `audit:`, `show:`, `telemetry:`, `nftables:`, `ha:`, `frr:`, `process:`, `userspace-dp:`, `afxdp:`, `policy:`, `nat:`, `firewall:`, `grpcapi:`, `snmp:`, `ipsec:`, `xdp:`, `shim:`, `ci:`, `build:`, `metrics:` (new areas allowed when none fits, never bare). Summary names the BEHAVIOR change in imperative mood (`gate`, `drop`, `reject`, `refund`, `sync`, `bound`, `fence`), not the file (`update foo.rs`). Parent process commits without an issue cite the ruling (`(user-directive 2026-09-22)`).
   - Body (required, via `git commit -F -` heredoc, wrapped ~72 cols) has four sections:
@@ -491,7 +519,7 @@ manufacture merge conflicts.
 
 For each PR an agent opens:
 
-1. **Message-shape gate (BOUNCE before any code review)** — run `git log origin/master..origin/<branch> --format='%h %s%n%b'` and `gh pr view <n> --json title -q .title`. EVERY branch commit MUST match `<area>: <imperative summary> (#NNNN)` + Why/What/Validation/Risk body (per the commit-message standard); the PR TITLE must match the same subject format (it becomes the merge-commit message). Bounce ANY violation back to the lane (amend + force-push) before reading a line of diff — title-only commits, bare `fix:`, missing refs, and malformed PR titles are all merge-blockers. No exceptions, no parent-side repair (the lane owns its history).
+1. **Message-shape + log gate (BOUNCE before any code review)** — run `git log origin/master..origin/<branch> --format='%h %s%n%b'`, `gh pr view <n> --json title -q .title`, and the diff file list (`gh pr view <n> --json files --jq '.files[].path'`). EVERY branch commit MUST match `<area>: <imperative summary> (#NNNN)` + Why/What/Validation/Risk body (per the commit-message standard); the PR TITLE must match the same subject format (it becomes the merge-commit message). The diff MUST contain the per-change log `docs/log/<issue>.md` (or `docs/log/<pr>.md` when there is no issue) carrying the `docs/log/README.md` fields (Timestamp / Action / File(s)) plus Validation and Risk entries; a missing or stub log (any of those five entries absent) is the same class of violation as a malformed title. Exception, mirroring Step 2: a diff that consists solely of per-change log file(s) is its own log and passes this check. Bounce ANY violation back to the lane (amend + force-push) before reading a line of diff — title-only commits, bare `fix:`, missing refs, missing logs, and malformed PR titles are all merge-blockers. No exceptions, no parent-side repair (the lane owns its history).
 2. **Re-verify the FINAL head** — `gh pr view <n> --json headRefOid`.
    Always review and merge the head you just polled, never the head
    you saw when review started — heads move under folds and rebases.
@@ -750,8 +778,11 @@ Per PR, in order:
    (records headed at older SHAs are history and never count
    toward the three),
    cluster-gate record with numbers (Step 3 item 4) or the parent's
-   recorded `docs/test-only` classification with diff stat, and the
-   Copilot evaluation (Step 3 item 5) with every real finding folded.
+   recorded `docs/test-only` classification with diff stat, the
+   Copilot evaluation (Step 3 item 5) with every real finding folded,
+   and the Step 3 item 1 log check: `docs/log/<issue>.md` (or
+   `docs/log/<pr>.md`) present in the head's diff with Timestamp /
+   Action / File(s) / Validation / Risk content.
    If any item is missing or recorded at a different SHA, do NOT
    merge — return to Step 3.
 1. Re-poll `mergeable` THROUGH `UNKNOWN` (GitHub recomputes after every

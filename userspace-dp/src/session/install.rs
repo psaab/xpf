@@ -697,6 +697,10 @@ impl SessionTable {
                     && has_fin(tcp_flags)
                     && metadata.is_reverse,
                 wheel_tick: 0,
+                held_wheel_tick: 0,
+                held_wheel_last_seen_ns: 0,
+                held_wheel_expires_after_ns: 0,
+                held_wheel_first_held_ns: 0,
                 // #2120: a freshly-installed entry has never been HELD and
                 // has not yet been self-healed. 0 is the never-self-healed
                 // default; the first forwarding pass after any RG activation
@@ -966,7 +970,15 @@ impl SessionTable {
         // (legacy peer / local replica) has no identity to match and keeps
         // the fresh-anchor behavior; a changed id is a new incarnation and
         // also anchors fresh.
-        let (preserved_last_seen_ns, mut preserved_first_held_ns) = if wire_session_id != 0 {
+        let (
+            preserved_last_seen_ns,
+            mut preserved_first_held_ns,
+            preserved_wheel_tick,
+            preserved_held_wheel_tick,
+            preserved_held_wheel_last_seen_ns,
+            preserved_held_wheel_expires_after_ns,
+            preserved_held_wheel_first_held_ns,
+        ) = if wire_session_id != 0 {
             match self.entry_by_key(&key) {
                 Some(existing) => {
                     let same_id = existing.session_id == wire_session_id;
@@ -984,15 +996,29 @@ impl SessionTable {
                         // during HOLD would restart the stale-synced
                         // ceiling and pin a lost-delete entry forever,
                         // defeating the anchor preservation above.
-                        (Some(existing.last_seen_ns), existing.first_held_ns)
+                        //
+                        // #16881: carry pending wheel hints and their input
+                        // snapshots through replacement. The scheduler keeps
+                        // the hint only if its idle deadline, timeout, and
+                        // HOLD anchor still match; otherwise it invalidates
+                        // the old tick and schedules a current check.
+                        (
+                            Some(existing.last_seen_ns),
+                            existing.first_held_ns,
+                            Some(existing.wheel_tick),
+                            Some(existing.held_wheel_tick),
+                            Some(existing.held_wheel_last_seen_ns),
+                            Some(existing.held_wheel_expires_after_ns),
+                            Some(existing.held_wheel_first_held_ns),
+                        )
                     } else {
-                        (None, 0)
+                        (None, 0, None, None, None, None, None)
                     }
                 }
-                None => (None, 0),
+                None => (None, 0, None, None, None, None, None),
             }
         } else {
-            (None, 0)
+            (None, 0, None, None, None, None, None)
         };
         // A primary-liveness frame renews the HOLD ceiling without changing
         // the preserved inactivity anchor above.
@@ -1146,7 +1172,16 @@ impl SessionTable {
                 fin_own: matches!(wire_close, Some(TcpCloseClass::TimeWait))
                     || (matches!(protocol, PROTO_TCP) && has_fin(tcp_flags)),
                 fin_peer: matches!(wire_close, Some(TcpCloseClass::TimeWait)),
-                wheel_tick: 0,
+                // #16881: same-incarnation re-imports preserve both pending
+                // wheel hints, so snapshot resends cannot duplicate ordinary
+                // or held horizon entries.
+                wheel_tick: preserved_wheel_tick.unwrap_or(0),
+                held_wheel_tick: preserved_held_wheel_tick.unwrap_or(0),
+                held_wheel_last_seen_ns:
+                    preserved_held_wheel_last_seen_ns.unwrap_or(0),
+                held_wheel_expires_after_ns:
+                    preserved_held_wheel_expires_after_ns.unwrap_or(0),
+                held_wheel_first_held_ns: preserved_held_wheel_first_held_ns.unwrap_or(0),
                 // #2120: a re-imported synced entry leaves the held world
                 // with a fresh `last_seen_ns`, so it carries no carried-over
                 // hold clock. `seen_rg_epoch` resets to the never-self-healed

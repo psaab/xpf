@@ -2801,6 +2801,448 @@ fn split_rg_live_snapshot_tcp_punt_seeds_and_return_forwards_15742h() {
         "seeded return must forward to the LAN host"
     );
 }
+fn pressure_shed_cache_entry_17012(
+    key: crate::session::SessionKey,
+    ingress_ifindex: i32,
+    metadata: crate::session::SessionMetadata,
+    decision: crate::session::SessionDecision,
+) -> crate::afxdp::flow_cache::FlowCacheEntry {
+    crate::afxdp::flow_cache::FlowCacheEntry {
+        key,
+        ingress_ifindex,
+        logical_ingress_ifindex: ingress_ifindex,
+        descriptor: crate::afxdp::flow_cache::RewriteDescriptor::default(),
+        decision,
+        metadata,
+        stamp: crate::afxdp::flow_cache::FlowCacheStamp {
+            config_generation: 7,
+            fib_generation: 9,
+            owner_rg_id: 1,
+            owner_rg_epoch: 0,
+            owner_rg_lease_until: 0,
+        },
+        policy_deny: None,
+        deny_expires_at_secs: 0,
+        cluster_terminal_source_ifindex: 0,
+        cluster_terminal_stamp_owner_rg: 0,
+        observed_bytes: 0,
+        last_used_epoch: 0,
+        neighbor_mac_epoch: 0,
+        neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
+    }
+}
+
+mod pressure_shed_matrix_17012 {
+    use super::*;
+
+    pub(super) fn run_case(cluster_terminal: bool, contended_lease: bool) {
+        let (forwarding, ha_state, ingress_ifindex, fabric_ifindex, dst_ip, dst_port) =
+            if cluster_terminal {
+                let raw = include_str!("testdata_15742h/snap-split-fw1.json");
+                let value: serde_json::Value = serde_json::from_str(raw).expect("snapshot JSON");
+                let snapshot: crate::ConfigSnapshot =
+                    serde_json::from_value(value["snapshot"].clone()).expect("snapshot");
+                let now_secs = monotonic_nanos() / 1_000_000_000;
+                (
+                    build_forwarding_state(&snapshot),
+                    BTreeMap::from([(1, inactive_rg(now_secs)), (2, active_rg(now_secs))]),
+                    5,
+                    4,
+                    Ipv4Addr::new(172, 16, 80, 200),
+                    443,
+                )
+            } else {
+                let forwarding =
+                    build_forwarding_state(&fabric_snapshot_with_lan_neighbor_7770());
+                let now_secs = monotonic_nanos() / 1_000_000_000;
+                (
+                    forwarding,
+                    BTreeMap::from([(2, active_rg(now_secs))]),
+                    24,
+                    21,
+                    Ipv4Addr::new(8, 8, 8, 8),
+                    443,
+                )
+            };
+        let mut sessions = SessionTable::new();
+        sessions.set_max_sessions_for_test(10);
+        let mut victim_metadata = icmp_err_metadata();
+        victim_metadata.is_reverse = false;
+        victim_metadata.owner_rg_id = 1;
+        victim_metadata.ingress_ifindex = ingress_ifindex;
+        let victim_key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_UDP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 201)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4)),
+            src_port: 31_001,
+            dst_port: 53,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let victim_decision = crate::session::SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: ingress_ifindex as i32,
+                tx_ifindex: ingress_ifindex as i32,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        assert_eq!(
+            victim_decision.nat,
+            NatDecision::default(),
+            "the fabric pressure victim is intentionally SNAT-free"
+        );
+        assert!(sessions.install_with_protocol(
+            victim_key.clone(),
+            victim_decision,
+            victim_metadata.clone(),
+            monotonic_nanos(),
+            PROTO_UDP,
+            0,
+        ));
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let (victim_entry, victim_origin) = sessions
+            .probe_with_origin(&victim_key)
+            .expect("local victim session");
+        shared_sessions.lock().expect("shared sessions").insert(
+            victim_key.clone(),
+            crate::afxdp::SyncedSessionEntry {
+                key: victim_key.clone(),
+                decision: victim_entry.decision,
+                metadata: victim_entry.metadata.clone(),
+                persistent_lease_hold: None,
+                source_nat_static: None,
+                leak_incarnation: 0,
+                origin: victim_origin,
+                protocol: PROTO_UDP,
+                tcp_flags: 0,
+                generation: 0,
+                session_id: sessions.session_id_for(&victim_key),
+                tcp_close_class: 0,
+                tcp_handshake_state: 0,
+                rev_packets: 0,
+                fwd_packets: 0,
+                pptp_call_ids: 0,
+            },
+        );
+        for port in 31_002..31_011 {
+            let mut metadata = victim_metadata.clone();
+            metadata.owner_rg_id = 1;
+            let key = crate::session::SessionKey {
+                protocol: PROTO_TCP,
+                src_port: port,
+                ..victim_key.clone()
+            };
+            assert!(sessions.install_with_protocol(
+                key,
+                victim_decision,
+                metadata,
+                monotonic_nanos(),
+                PROTO_TCP,
+                crate::tcp_flags::TCP_ACK,
+            ));
+        }
+        assert_eq!(sessions.len(), 10, "the trigger must enter at table cap");
+
+        let mut bindings = if cluster_terminal {
+            let mut ingress = BindingWorker::new_for_mirror_test(0, 0, 5, 0);
+            ingress.interface = Arc::<str>::from("ge-7-0-1");
+            let mut sibling = BindingWorker::new_for_mirror_test(1, 1, 5, 0);
+            sibling.interface = Arc::<str>::from("ge-7-0-1");
+            let mut fabric = BindingWorker::new_for_mirror_test(2, 0, 4, 0);
+            fabric.interface = Arc::<str>::from("ge-7-0-0");
+            vec![ingress, sibling, fabric]
+        } else {
+            let ingress = lan_binding_7770();
+            let mut sibling = BindingWorker::new_for_mirror_test(1, 1, 24, 0);
+            sibling.interface = Arc::<str>::from("ge-0-0-1");
+            let mut fabric = BindingWorker::new_for_mirror_test(2, 0, fabric_ifindex, 0);
+            fabric.interface = Arc::<str>::from("ge-0-0-0");
+            vec![ingress, sibling, fabric]
+        };
+        bindings[1].flow.flow_cache.insert(pressure_shed_cache_entry_17012(
+            victim_key.clone(),
+            ingress_ifindex as i32,
+            victim_metadata,
+            victim_decision,
+        ));
+        assert!(bindings[1]
+            .flow
+            .flow_cache
+            .entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.key == victim_key));
+
+        let held_lease = if contended_lease {
+            Some(
+                crate::afxdp::bpf_map::global_tuple_gate()
+                    .acquire_lease([victim_key.clone()])
+                    .expect("victim tuple lease"),
+            )
+        } else {
+            None
+        };
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            dst_ip,
+            31_100,
+            dst_port,
+            TCP_FLAG_SYN,
+            if cluster_terminal {
+                [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03]
+            } else {
+                crate::afxdp::tests_support::TEST_LAN_MAC
+            },
+        );
+        let mut meta = txn_meta_v4(ingress_ifindex, TCP_FLAG_SYN, frame.len() as u16);
+        meta.flow_src_addr[..4].copy_from_slice(&[10, 0, 61, 102]);
+        meta.flow_dst_addr[..4].copy_from_slice(&dst_ip.octets());
+        meta.flow_src_port = 31_100;
+        meta.flow_dst_port = dst_port;
+        let (_batch, dbg, _) = txn_run_multi_binding_with_shared_sessions_17012(
+            &mut bindings,
+            0,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            &shared_sessions,
+        );
+        assert_eq!(dbg.policy_deny, 0, "the fabric punt must remain permitted");
+        let seed_key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: IpAddr::V4(dst_ip),
+            src_port: 31_100,
+            dst_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let seed_origin = sessions
+            .probe_with_origin(&seed_key)
+            .map(|(_, origin)| origin);
+        assert!(
+            sessions.probe_with_origin(&victim_key).is_none(),
+            "pressure selection must remove the local victim before teardown"
+        );
+        let shared_victim_present = shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .contains_key(&victim_key);
+        let sibling_cache_present = bindings[1]
+            .flow
+            .flow_cache
+            .entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.key == victim_key);
+        if contended_lease {
+            assert_eq!(seed_origin, None, "contended cleanup must refuse the seed");
+            assert!(
+                shared_victim_present,
+                "contended cleanup must preserve the shared victim row"
+            );
+            assert!(
+                sibling_cache_present,
+                "contended cleanup must leave sibling cache for deferred retry"
+            );
+            assert_eq!(sessions.admission_refused(), 1);
+        } else {
+            assert_eq!(
+                seed_origin,
+                Some(SessionOrigin::FabricPuntSeed),
+                "the seed must be installed after pressure cleanup"
+            );
+            assert!(!shared_victim_present, "successful teardown removes shared row");
+            assert!(!sibling_cache_present, "successful teardown evicts sibling cache");
+        }
+        drop(held_lease);
+    }
+
+    #[test]
+    fn gc_pressure_shed_retry_evicts_sibling_cache_17012() {
+        let forwarding = build_forwarding_state(&nat_snapshot());
+        let ha_state = txn_ha_state();
+        let mut sessions = SessionTable::new();
+        sessions.set_max_sessions_for_test(2);
+        let victim_key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            src_port: 31_001,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let decision = tunnel_marked_decision(ForwardingDisposition::ForwardCandidate);
+        let mut metadata = icmp_err_metadata();
+        assert_eq!(decision.nat, NatDecision::default(), "GC victim is SNAT-free");
+        metadata.is_reverse = false;
+        metadata.owner_rg_id = 1;
+        metadata.ingress_ifindex = 24;
+        let reverse_key = crate::session::reverse_session_key(&victim_key, decision.nat);
+        let mut reverse_metadata = metadata.clone();
+        reverse_metadata.is_reverse = true;
+        assert!(sessions.install_with_protocol(
+            victim_key.clone(),
+            decision,
+            metadata.clone(),
+            1_000_000_000,
+            PROTO_TCP,
+            TCP_FLAG_SYN,
+        ));
+        assert!(sessions.install_with_protocol(
+            reverse_key,
+            decision,
+            reverse_metadata,
+            1_000_000_000,
+            PROTO_TCP,
+            TCP_FLAG_SYN,
+        ));
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let (victim_entry, victim_origin) = sessions
+            .probe_with_origin(&victim_key)
+            .expect("local opening victim");
+        shared_sessions.lock().expect("shared sessions").insert(
+            victim_key.clone(),
+            crate::afxdp::SyncedSessionEntry {
+                key: victim_key.clone(),
+                decision: victim_entry.decision,
+                metadata: victim_entry.metadata.clone(),
+                persistent_lease_hold: None,
+                source_nat_static: None,
+                leak_incarnation: 0,
+                origin: victim_origin,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_FLAG_SYN,
+                generation: 0,
+                session_id: sessions.session_id_for(&victim_key),
+                tcp_close_class: 0,
+                tcp_handshake_state: 1,
+                rev_packets: 0,
+                fwd_packets: 0,
+                pptp_call_ids: 0,
+            },
+        );
+        let mut ingress = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        ingress.interface = Arc::<str>::from("reth1.0");
+        let mut sibling = BindingWorker::new_for_mirror_test(1, 1, 24, 0);
+        sibling.interface = Arc::<str>::from("reth1.0");
+        sibling.flow.flow_cache.insert(pressure_shed_cache_entry_17012(
+            victim_key.clone(),
+            24,
+            metadata,
+            decision,
+        ));
+        let mut egress = BindingWorker::new_for_mirror_test(2, 0, 12, 0);
+        egress.interface = Arc::<str>::from("reth0.80");
+        let mut bindings = vec![ingress, sibling, egress];
+        let (admission_allowed, shed_sessions) =
+            sessions.can_admit_new_flow(2, PROTO_TCP, TCP_FLAG_SYN);
+        assert!(admission_allowed, "the selected pair frees the required slots");
+        assert_eq!(
+            shed_sessions.iter().count(),
+            2,
+            "the full table must select both victim halves"
+        );
+        sessions.defer_pressure_shed(shed_sessions);
+        assert!(sessions.probe_with_origin(&victim_key).is_none());
+        let held_lease = crate::afxdp::bpf_map::global_tuple_gate()
+            .acquire_lease([victim_key.clone()])
+            .expect("hold the victim tuple lease");
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let retry = |sessions: &mut SessionTable, bindings: &mut [BindingWorker]| {
+            crate::afxdp::worker::retry_deferred_pressure_sheds(
+                sessions,
+                bindings,
+                &forwarding,
+                crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                &crate::afxdp::checksum::DnatTableFds::default(),
+                0,
+                &[],
+                crate::afxdp::empty_worker_commands_by_id(),
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                1_001_000_000,
+            );
+        };
+        retry(&mut sessions, &mut bindings);
+        assert!(
+            shared_sessions
+                .lock()
+                .expect("shared sessions")
+                .contains_key(&victim_key),
+            "a second contended lease must preserve the shared row"
+        );
+        assert!(
+            bindings[1]
+                .flow
+                .flow_cache
+                .entries
+                .iter()
+                .flatten()
+                .any(|entry| entry.key == victim_key),
+            "a second contended lease must preserve the sibling slot"
+        );
+        drop(held_lease);
+        retry(&mut sessions, &mut bindings);
+        assert!(
+            !shared_sessions
+                .lock()
+                .expect("shared sessions")
+                .contains_key(&victim_key),
+            "the deferred GC retry must remove the shared victim row"
+        );
+        assert!(
+            !bindings[1]
+                .flow
+                .flow_cache
+                .entries
+                .iter()
+                .flatten()
+                .any(|entry| entry.key == victim_key),
+            "the deferred GC retry must evict the sibling binding cache slot"
+        );
+    }
+}
+
+#[test]
+fn fabric_redirect_pressure_shed_at_cap_evicts_sibling_cache_17012() {
+    pressure_shed_matrix_17012::run_case(false, false);
+}
+#[test]
+fn cluster_terminal_pressure_shed_at_cap_evicts_sibling_cache_17012() {
+    pressure_shed_matrix_17012::run_case(true, false);
+}
+#[test]
+fn fabric_pressure_shed_contended_lease_refuses_seed_17012() {
+    pressure_shed_matrix_17012::run_case(false, true);
+    pressure_shed_matrix_17012::run_case(true, true);
+}
+
 
 fn inactive_rg(now_secs: u64) -> HAGroupRuntime {
     HAGroupRuntime {

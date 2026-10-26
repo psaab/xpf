@@ -720,14 +720,8 @@ func (m *Manager) SeedUnsignedPosture(cfg *config.DHCPServerConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	seeded := false
-	fams := [2]*config.DHCPDynamicDNSConfig{cfg.DynamicDNS, cfg.DynamicDNSv6}
-	// Mirror ReconcileScoped's single-block inheritance so a v4-only
-	// committed config seeds the v6 cleanup posture too.
-	if fams[0] == nil && fams[1] != nil {
-		fams[0] = fams[1]
-	} else if fams[1] == nil && fams[0] != nil {
-		fams[1] = fams[0]
-	}
+	fam4, fam6, _ := cfg.EffectiveDynamicDNS()
+	fams := [2]*config.DHCPDynamicDNSConfig{fam4, fam6}
 	for i, fam := range fams {
 		if fam == nil {
 			continue
@@ -926,34 +920,13 @@ func (e *reconcileEnv) scopeFor(l Lease) (scope ScopeKey, admit bool) {
 // applies the per-scope HA writer gate (opts.Gate / opts.Resolver). Reconcile
 // is the nil-options (standalone, all-scopes-writable) wrapper.
 func (m *Manager) ReconcileScoped(ctx context.Context, cfg *config.DHCPServerConfig, opts ReconcileOptions) error {
-	var ddns4, ddns6 *config.DHCPDynamicDNSConfig
-	if cfg != nil {
-		ddns4 = cfg.DynamicDNS
-		ddns6 = cfg.DynamicDNSv6
-	}
-	// BACKWARD COMPATIBILITY (#2663 + plan §5.9): a pre-P1b config carried a
-	// SINGLE dynamic-dns block under ONE family that applied to BOTH families
-	// (the reconciler walked both lease sets with one policy). To keep those
-	// committed configs working byte-for-byte, when only ONE family's block is
-	// present the OTHER family INHERITS it. The moment BOTH families set their
-	// own block they are fully INDEPENDENT (the #2663 fix). This preserves the
-	// single-family case AND delivers per-family independence for the two-block
-	// case, with no silent loss of v6 publishing for existing single-block
-	// configs.
-	if ddns4 == nil && ddns6 != nil {
-		ddns4 = ddns6
-	} else if ddns6 == nil && ddns4 != nil {
-		ddns6 = ddns4
-	}
+	ddns4, ddns6, _ := cfg.EffectiveDynamicDNS()
 	pol4 := policyFromConfig(ddns4)
 	pol6 := policyFromConfig(ddns6)
 	// lastPolicy surfaces an aggregate for Stats(): enabled if EITHER family is
 	// enabled; backend is the v4 backend when v4 is configured, else v6's.
 	agg := pol4
 	if !agg.enabled {
-		agg = pol6
-	}
-	if ddns4 == nil && ddns6 != nil {
 		agg = pol6
 	}
 	m.lastPolicy.Store(&agg)

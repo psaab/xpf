@@ -31,21 +31,26 @@ structure.)
   (the per-tick bucket drain / lazy-delete GC pass), the throttled
   `push_to_wheel` scheduler, `wheel_observe`, and the #2120 standby
   retention gate (`expire_stale_entries_ha` + `standby_gate_decision` +
-  `rebucket_alive_entry`).
+  first-HOLD-anchored horizon scheduling).
 - `entry.rs` — the PUBLIC session data types: `SessionDecision`,
   `SessionMetadata`, `SessionLookup`, `ForwardSessionMatch`,
   `SessionOrigin`, `SessionDeltaKind`, `SessionDelta`, and
   `ExpiredSession`. The internal per-entry `SessionEntry` (and its #2120
-  standby-gate fields `seen_rg_epoch` / `first_held_ns`, see "Standby
-  retention" below) stays file-private in `mod.rs`, NOT here.
+  standby-gate fields `seen_rg_epoch` / `first_held_ns` plus the #16881
+  `held_wheel_tick` and its scheduling-input markers, see "Standby retention"
+  below) stays file-private in `mod.rs`, NOT here.
 - `key.rs` — `SessionKey`, `forward_wire_key` (ingress 5-tuple),
   `reverse_canonical_key` (post-NAT lookup), and
   `reply_matches_forward_session` (the predicate used to detect "this
   inbound packet matches an existing outbound flow").
-- `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets). Each
-  worker sweeps its own table once per second from its poll loop
-  (`expire_stale_entries` in `afxdp/worker/loop_body/mod.rs`). Packet
-  lookups enforce the same strict idle deadline and return a miss once
+- `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets). Held
+  entries are rechecked at the far edge of the wheel window (255 s), with
+  the recheck tick anchored to `first_held_ns`; same-ID snapshot imports
+  preserve the pending tick only while its scheduling inputs are unchanged.
+  The worker still sweeps expiry once per second from its poll loop
+  (`expire_stale_entries` in `afxdp/worker/loop_body/mod.rs`). Packet lookups
+  enforce the same strict idle
+  deadline and return a miss once
   `now - last_seen_ns > expires_after_ns`; the stale entry remains for the
   wheel's physical cleanup (including HA HOLD/SELF-HEAL retention). The former
   "lazy-delete on lookup" wording is obsolete: lookups reject idle-crossed
@@ -1100,6 +1105,15 @@ every idle entry ages, exactly as before):
 - **AGE** — normal removal: active-node-owned, standalone, fabric-ingress,
   or a held entry past the ceiling.
 
+Held entries are rechecked on the far edge of the timer-wheel window
+(255 seconds), not on each worker tick. Each next recheck is aligned to
+`first_held_ns` and capped at the original stale-synced deadline. The wheel
+processes that target on the following GC pass, preserving the gate's strict
+`>` ceiling check. Same-ID snapshot imports preserve the pending hint only while
+its scheduling inputs, including `first_held_ns`, are unchanged. Timeout/close
+updates and primary-liveness anchor renewals invalidate the hint and schedule
+an ordinary check before another context-aware HOLD recheck.
+
 The HOLD keys on FORWARDING, not origin, so a still-`ForwardFlow`
 demotion-window entry (the demote flip not yet applied) is held too.
 `owner_rg_id <= 0` (fabric / unresolved-owner reverse) uses the
@@ -1254,14 +1268,28 @@ This rule is independent of the configured flow aging values, which
 remain unwired.
 
 Because the table is single-writer (`&mut`, worker thread; GC and worker
-commands run between poll phases, never mid-descriptor), a passing preflight
-makes the subsequent installs infallible — no reservation or rollback
-machinery is needed. `can_admit` is deliberately conservative: it charges a
-full slot per entry even when the key already exists, matching the install's
+commands run between poll phases, never mid-descriptor), a passing capacity
+preflight makes subsequent installs capacity-infallible — no local-table
+reservation or rollback machinery is needed. When it selected pressure
+victims, admission must also pass the shared teardown's all-key tuple-lease
+gate before installing. `can_admit` is deliberately conservative: it charges
+a full slot per entry even when the key already exists, matching the install's
 own cap check (which also refuses replacements at cap), so the preflight can
 never pass where the install would fail. On refusal the caller drops the
 trigger packet (Junos parity), rolls back the SNAT allocation, and counts via
 `note_admission_refused`.
+
+Pressure victims use one cold teardown helper across packet admission and the
+deferred-GC retry. It acquires one lease for every victim tuple, rechecks
+shared reply evidence under the lease, fences shared-row removal by
+incarnation, and cleans up coordinator/BPF/DNAT/flow-cache/NAT state before
+replicating deletes. A contended lease re-defers the full victim set; admission
+sites refuse the incoming install until a retry can clean it up. Cache
+invalidation covers every worker binding because `SessionKey` omits ingress
+ifindex. On a shared-row decline, preserve the established local-row probe
+before NAT release. MissingNeighbor's copy omitted that probe, but issue
+analysis found that difference behaviorally equivalent because pressure
+shedding removes both local rows.
 
 Counters (all plain worker-owned u64s like `create_drops`, exported
 since #1861 via the worker-runtime status path as

@@ -363,21 +363,22 @@ func renderDHCPDDNSPolicy(buf *strings.Builder, label string, ddns *config.DHCPD
 // the manager pointer directly.
 func (s *Server) showDHCPDynamicDNS(cfg *config.Config, buf *strings.Builder, detail bool) {
 	var ddns, ddns6 *config.DHCPDynamicDNSConfig
+	var inheritedFrom int
 	if cfg != nil {
-		ddns = cfg.System.DHCPServer.DynamicDNS
-		ddns6 = cfg.System.DHCPServer.DynamicDNSv6
+		ddns, ddns6, inheritedFrom = cfg.System.DHCPServer.EffectiveDynamicDNS()
 	}
 	if ddns == nil && ddns6 == nil {
 		buf.WriteString("DHCP dynamic-DNS: not configured\n")
 		return
 	}
-	if ddns != nil && ddns6 != nil {
+	switch inheritedFrom {
+	case 4:
+		renderDHCPDDNSPolicy(buf, "IPv4, applies to IPv6 by inheritance", ddns)
+	case 6:
+		renderDHCPDDNSPolicy(buf, "IPv6, applies to IPv4 by inheritance", ddns6)
+	default:
 		renderDHCPDDNSPolicy(buf, "IPv4", ddns)
 		renderDHCPDDNSPolicy(buf, "IPv6", ddns6)
-	} else if ddns != nil {
-		renderDHCPDDNSPolicy(buf, "IPv4, applies to IPv6 by inheritance", ddns)
-	} else {
-		renderDHCPDDNSPolicy(buf, "IPv6, applies to IPv4 by inheritance", ddns6)
 	}
 
 	if s.ddnsStatsFn == nil {

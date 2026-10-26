@@ -81,7 +81,7 @@ func newDyndns2Backend(p *config.DDNSProvider, client *http.Client) (*dyndns2Bac
 	}
 	// #14386 runtime belt: refuse a credentialed plaintext http:// endpoint
 	// at construction (direct construction bypasses the compiler drop).
-	if dyndns2CarriesCredentials(p) {
+	if config.DDNSCredentialBearing(p) {
 		if err := plaintextEndpointRefusal("dyndns2", p.Name, endpoint); err != nil {
 			return nil, err
 		}
@@ -243,7 +243,7 @@ func (b *dyndns2Backend) update(ctx context.Context, q url.Values) error {
 	// #14386 belt at issuance: never send a credentialed request over
 	// plaintext http:// to a non-loopback host, even if the backend was
 	// constructed without going through newDyndns2Backend.
-	if (b.username != "" || b.password != "" || templateAuthorityUserinfo(b.endpoint)) &&
+	if config.DDNSCredentialBearingFields("dyndns2", b.username, b.password, b.endpoint, "") &&
 		plaintextEndpointRefusal("dyndns2", b.name, b.endpoint) != nil {
 		return fmt.Errorf("ddns dyndns2: provider %q endpoint %q must be an https:// endpoint — refusing to transmit the update credential in cleartext (#14386)",
 			b.name, config.RedactURL(b.endpoint))

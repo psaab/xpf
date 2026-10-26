@@ -8,57 +8,37 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/psaab/xpf/internal/ddnsplaintextvectors"
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// ddns_plaintext_15225_test.go: #15225 A40-03 fail-on-revert proofs.
+// ddns_plaintext_15225_test.go: shared #15225 A40-03 fail-on-revert proofs
+// for both config and runtime (#17005, R4-Q40-03).
 //
-// The http:// credential gate for generic url-templates previously
-// recognised only a fixed credential key-name list, so pass=, key=,
-// api-token=, pwd=, p= and every other literal query value went out in
-// cleartext. The fix refuses ANY non-loopback http:// generic template
-// carrying any literal query value or userinfo (typed credentials and
-// %u/%p were already refused), while loopback http and placeholder-only
-// or value-less http templates still construct.
-//
-// RED-on-revert: restore the fixed key-name list and every probe template
-// below constructs clean — the credential ships in cleartext.
+// The old fixed credential key-name list missed literal query values such
+// as pass=, key=, api-token=, pwd=, and p=. Both packages now consume the
+// same union of their former vectors, so one test table pins the detector
+// verdict and the corresponding compiler/runtime construction decision.
+// Loopback request behavior remains covered below.
 
-func TestDDNS15225GenericRefusesAnyLiteralQueryValuePlaintext(t *testing.T) {
-	probes := []string{
-		"http://host.example/upd?pass=LITERALPW",
-		"http://host.example/upd?key=LITERALKEY",
-		"http://host.example/upd?api-token=LITERALTOK",
-		"http://host.example/upd?pwd=LITERALPW",
-		"http://host.example/upd?p=LITERALP",
-		"http://host.example/upd?foo=LITERALBAR",
-		"http://host.example/upd?hostname=%h&myip=%i&token=LITERALTOKEN",
-		"http://user:pass@host.example/upd?ip=%i",
-	}
-	for _, tmpl := range probes {
+func TestDDNS15225GenericSharedPlaintextVectors(t *testing.T) {
+	for _, vector := range ddnsplaintextvectors.DDNSPlaintextVectors {
+		tmpl := vector.Template
 		p := &config.DDNSProvider{Name: "g", Backend: "generic", URLTemplate: tmpl}
-		if _, err := newGenericBackend(p, nil); err == nil {
-			t.Fatalf("generic http template %q must be refused (literal value/userinfo in cleartext)", tmpl)
-		} else if strings.Contains(err.Error(), "LITERAL") {
-			t.Fatalf("error leaks literal credential for %q: %v", tmpl, err)
+		if got := config.DDNSCredentialBearing(p); got != vector.CredentialBearing {
+			t.Errorf("DDNSCredentialBearing(%q) = %v, want %v", tmpl, got, vector.CredentialBearing)
 		}
-		if !genericCarriesCredentials(p) {
-			t.Fatalf("genericCarriesCredentials(%q) = false, want true", tmpl)
+		if got := config.DDNSTemplateCarriesLiteralToken(tmpl); got != vector.LiteralToken {
+			t.Errorf("DDNSTemplateCarriesLiteralToken(%q) = %v, want %v", tmpl, got, vector.LiteralToken)
 		}
-	}
-	// Controls: loopback http with a literal token still works; https with
-	// a literal token is fine; http with only placeholders / no literal
-	// query value still constructs (no credential to leak).
-	controls := []string{
-		"https://host.example/upd?token=LITERALTOKEN",
-		"http://host.example/upd?ip=%i&hostname=%h",
-		"http://host.example/upd?flag&ip=%i",
-		"http://host.example/update/SECRET",
-	}
-	for _, tmpl := range controls {
-		p := &config.DDNSProvider{Name: "g", Backend: "generic", URLTemplate: tmpl}
-		if _, err := newGenericBackend(p, nil); err != nil {
-			t.Fatalf("control %q must construct: %v", tmpl, err)
+		_, err := newGenericBackend(p, nil)
+		refused := strings.HasPrefix(tmpl, "http://") && vector.CredentialBearing
+		if refused && err == nil {
+			t.Errorf("generic http template %q must be refused", tmpl)
+		} else if !refused && err != nil {
+			t.Errorf("control %q must construct: %v", tmpl, err)
+		} else if err != nil && strings.Contains(err.Error(), "LITERAL") {
+			t.Errorf("error leaks literal credential for %q: %v", tmpl, err)
 		}
 	}
 }

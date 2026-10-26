@@ -2,7 +2,7 @@ package config
 
 import "strings"
 
-// ddnsBackendCarriesCredentials reports whether an HTTP DDNS backend attaches
+// DDNSCredentialBearing reports whether an HTTP DDNS provider attaches
 // credentials to its update requests — Basic auth (dyndns2/generic), a query or
 // bearer token (DuckDNS/Cloudflare), or SigV4 (Route 53). Such a backend must
 // only ever talk to an https:// endpoint (#4861); an rfc2136 backend (DNS, not
@@ -17,25 +17,42 @@ import "strings"
 // backend documents credential channels as userinfo or query only, and no
 // precise detector exists for bare segments without heuristics that would
 // break the pinned non-credentialed http:// acceptance.
-func ddnsBackendCarriesCredentials(p *DDNSProvider) bool {
+func DDNSCredentialBearing(p *DDNSProvider) bool {
+	if p == nil {
+		return false
+	}
+	if DDNSCredentialBearingFields(p.Backend, p.Username, p.Password.Reveal(), p.Server, p.URLTemplate) {
+		return true
+	}
 	switch p.Backend {
-	case "dyndns2":
-		return p.Username != "" || p.Password.Reveal() != "" ||
-			ddnsTemplateAuthorityHasUserinfo(p.Server)
 	case "duckdns", "cloudflare":
 		return p.APIToken.Reveal() != ""
 	case "route53":
 		return p.AWSAccessKeyID != "" || p.AWSSecretAccessKey.Reveal() != ""
-	case "generic":
-		return p.Username != "" || p.Password.Reveal() != "" ||
-			strings.Contains(p.URLTemplate, "%u") || strings.Contains(p.URLTemplate, "%p") ||
-			ddnsTemplateAuthorityHasUserinfo(p.URLTemplate) ||
-			ddnsTemplateCarriesLiteralToken(p.URLTemplate)
 	}
 	return false
 }
 
-// ddnsTemplateCarriesLiteralToken reports whether a generic url-template
+// DDNSCredentialBearingFields reports whether the dyndns2 or generic HTTP
+// fields carried by a live backend attach credentials. The issuance path uses
+// this same predicate after a backend has been built and no longer holds its
+// source DDNSProvider. Other HTTP backend credential kinds (API tokens and
+// SigV4 keys) are covered by DDNSCredentialBearing at construction.
+func DDNSCredentialBearingFields(backend, user, pass, server, urlTemplate string) bool {
+	switch backend {
+	case "dyndns2":
+		return user != "" || pass != "" ||
+			ddnsTemplateAuthorityHasUserinfo(server)
+	case "generic":
+		return user != "" || pass != "" ||
+			strings.Contains(urlTemplate, "%u") || strings.Contains(urlTemplate, "%p") ||
+			ddnsTemplateAuthorityHasUserinfo(urlTemplate) ||
+			DDNSTemplateCarriesLiteralToken(urlTemplate)
+	}
+	return false
+}
+
+// DDNSTemplateCarriesLiteralToken reports whether a generic url-template
 // carries ANY literal query value (#15225 A40-03, widening
 // #14386/#14439): a fixed credential key-name list misses pass=, key=,
 // api-token=, pwd=, p= and every provider-specific spelling, and any
@@ -52,8 +69,8 @@ func ddnsBackendCarriesCredentials(p *DDNSProvider) bool {
 // pinned value-less control and stays unflagged. Bare path segments
 // ("/update/SECRET") are intentionally not flagged, while
 // credential-NAMED path pairs ("/update/token=SECRET", #14439) still
-// are — see ddnsBackendCarriesCredentials and the pinned controls.
-func ddnsTemplateCarriesLiteralToken(tmpl string) bool {
+// are — see DDNSCredentialBearing and the pinned controls.
+func DDNSTemplateCarriesLiteralToken(tmpl string) bool {
 	tmpl = strings.TrimSpace(tmpl)
 	if i := strings.Index(tmpl, "#"); i >= 0 {
 		tmpl = tmpl[:i]
@@ -122,7 +139,6 @@ func ddnsTemplateCarriesLiteralToken(tmpl string) bool {
 // trailing '%' — is transmitted verbatim, hence literal. An unterminated
 // "{{" is transmitted verbatim too, hence literal; a terminated
 // "{{...}}" placeholder (through the first "}}") is not.
-// Mirror: pkg/ddns templateValueHasLiteral — keep in lockstep.
 func ddnsTemplateValueHasLiteral(v string) bool {
 	for i := 0; i < len(v); {
 		if v[i] == '%' && i+1 < len(v) {
@@ -146,7 +162,7 @@ func ddnsTemplateValueHasLiteral(v string) bool {
 // ddnsTemplateAuthorityHasUserinfo reports whether a generic url-template's
 // AUTHORITY carries a nonempty userinfo ("user:pass@" or "user@" before the
 // host) — a LITERAL embedded credential (#5471). The %u/%p specifier form is
-// already handled by ddnsBackendCarriesCredentials; this catches the literal
+// already handled by DDNSCredentialBearingFields; this catches the literal
 // "user:secret@host" case, which has none of those markers.
 //
 // The authority is the network location: it begins after "://" for a scheme'd
@@ -226,7 +242,7 @@ func ddnsPlaintextCredentialEndpoint(p *DDNSProvider) (field, value string, bad 
 	if f, v, b := check("checkip-url", p.CheckIPURL); b {
 		return f, v, true
 	}
-	if !ddnsBackendCarriesCredentials(p) {
+	if !DDNSCredentialBearing(p) {
 		return "", "", false
 	}
 	if f, v, b := check("server", p.Server); b {

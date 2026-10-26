@@ -689,8 +689,71 @@ func (e *Engine) apply(policies []*config.EventPolicy, cfg *config.Config, enfor
 		}
 		nextRev[pol.Name] = rev
 	}
+
+	// #17848: build the successor generation's derived structures BEFORE
+	// publishing anything. Previously apply assigned e.runtime/e.semRev,
+	// dropped e.mu for the #16650 pending purge, and only then rebuilt
+	// e.eventIndex/e.policyOrder/e.regexCache — an evaluation landing in
+	// that window read the predecessor policy out of the old index and
+	// stamped it with the successor revision (evaluate.go stamps
+	// e.semRev[pol.Name]), reopening the old-policy/new-revision pairing
+	// #16645 closed. Building first and assigning every generation field
+	// together under the one e.mu hold makes the pairing unobservable.
+	nextRegexCache := make(map[string]*regexp.Regexp)
+	for _, pol := range policies {
+		if pol == nil {
+			continue
+		}
+		for _, attr := range pol.AttributesMatch {
+			pattern, ok := config.EventAttributesMatchPattern(attr)
+			if !ok {
+				continue
+			}
+			if _, cached := nextRegexCache[pattern]; cached {
+				continue
+			}
+			// Patterns are validated at commit; a compile failure here
+			// should not happen. Log and skip so a single bad pattern
+			// can never wedge the engine.
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				slog.Warn("event-options: skipping uncompilable attributes-match pattern",
+					"policy", pol.Name, "pattern", pattern, "err", err)
+				continue
+			}
+			nextRegexCache[pattern] = re
+		}
+	}
+
+	// Rebuild the event-name -> policies index (#4423 M6) so evaluateEvent
+	// touches only the policies that list the fired event. Dedup per policy so a
+	// policy that (legacy config) lists the same event name twice is still
+	// evaluated once — matching the old eventMatches "return on first match".
+	nextEventIndex := make(map[string][]*config.EventPolicy)
+	nextPolicyOrder := make(map[string]int, len(policies))
+	for order, pol := range policies {
+		if pol == nil {
+			continue
+		}
+		nextPolicyOrder[pol.Name] = order
+		seen := make(map[string]struct{}, len(pol.Events))
+		for _, ev := range pol.Events {
+			if _, dup := seen[ev]; dup {
+				continue
+			}
+			seen[ev] = struct{}{}
+			nextEventIndex[ev] = append(nextEventIndex[ev], pol)
+		}
+	}
+
+	// Publish the whole generation atomically (still under the one e.mu
+	// hold): policies, runtime, revisions, index, order, and regex cache
+	// are never observed mixed across generations.
 	e.runtime = nextRuntime
 	e.semRev = nextRev
+	e.eventIndex = nextEventIndex
+	e.policyOrder = nextPolicyOrder
+	e.regexCache = nextRegexCache
 
 	// #16650: reconcile parked deferred edges against the new live set.
 	// The pending maps are keyed by policy name (cooldown also by event)
@@ -753,52 +816,6 @@ func (e *Engine) apply(policies []*config.EventPolicy, cfg *config.Config, enfor
 	}
 	e.invalidWarnMu.Unlock()
 
-	e.regexCache = make(map[string]*regexp.Regexp)
-	for _, pol := range policies {
-		if pol == nil {
-			continue
-		}
-		for _, attr := range pol.AttributesMatch {
-			pattern, ok := config.EventAttributesMatchPattern(attr)
-			if !ok {
-				continue
-			}
-			if _, cached := e.regexCache[pattern]; cached {
-				continue
-			}
-			// Patterns are validated at commit; a compile failure here
-			// should not happen. Log and skip so a single bad pattern
-			// can never wedge the engine.
-			re, err := regexp.Compile(pattern)
-			if err != nil {
-				slog.Warn("event-options: skipping uncompilable attributes-match pattern",
-					"policy", pol.Name, "pattern", pattern, "err", err)
-				continue
-			}
-			e.regexCache[pattern] = re
-		}
-	}
-
-	// Rebuild the event-name -> policies index (#4423 M6) so evaluateEvent
-	// touches only the policies that list the fired event. Dedup per policy so a
-	// policy that (legacy config) lists the same event name twice is still
-	// evaluated once — matching the old eventMatches "return on first match".
-	e.eventIndex = make(map[string][]*config.EventPolicy)
-	e.policyOrder = make(map[string]int, len(policies))
-	for order, pol := range policies {
-		if pol == nil {
-			continue
-		}
-		e.policyOrder[pol.Name] = order
-		seen := make(map[string]struct{}, len(pol.Events))
-		for _, ev := range pol.Events {
-			if _, dup := seen[ev]; dup {
-				continue
-			}
-			seen[ev] = struct{}{}
-			e.eventIndex[ev] = append(e.eventIndex[ev], pol)
-		}
-	}
 }
 
 // policySemanticRevision is a cheap deterministic hash of the match/action

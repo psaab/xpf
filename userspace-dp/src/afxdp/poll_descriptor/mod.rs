@@ -66,7 +66,7 @@ mod poll_descriptor_structure_13081_tests;
 pub(in crate::afxdp) mod reject_reply;
 mod resolver_enqueue;
 mod rx_telemetry;
-mod session_admission;
+pub(in crate::afxdp) mod session_admission;
 mod session_hit_authority;
 #[cfg(test)]
 #[path = "persistent_inbound_hold_16619_tests.rs"]
@@ -6396,7 +6396,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 } else {
                                     sessions.can_admit(1)
                                 };
-                            let (local_session_capacity_available, mut local_pressure_shed) =
+                            let (local_session_capacity_available, local_pressure_shed) =
                                 if local_reuse_fits {
                                     (true, crate::session::PressureShedSessions::new())
                                 } else {
@@ -6406,143 +6406,50 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         meta.tcp_flags,
                                     )
                                 };
-                            // #16532: release shed victims exactly as the
-                            // transit site does (#10890/#12862/#16019 fold
-                            // 2): one tuple-gate lease over every shed key,
-                            // reply-evidence retention, shared-row removal
-                            // under the incarnation fence, BPF/conntrack/
-                            // DNAT/live-row deletion, and NAT/NAT64 hold
-                            // release — including when the host install is
-                            // later refused. On lease contention the local
-                            // rows are already removed; defer the external
-                            // teardown for the housekeeping retry rather
-                            // than making allocations reusable while stale
-                            // authority remains.
-                            let local_shed_keys: Vec<_> = local_pressure_shed
-                                .iter()
-                                .map(|shed| shed.key.clone())
-                                .collect();
-                            let local_replied_sheds: Vec<bool> = local_pressure_shed
-                                .iter()
-                                .map(|shed| {
-                                    !shed.is_reverse
-                                        && (sessions.session_replied(&shed.key)
-                                            || crate::afxdp::shared_ops::shared_session_replied(
-                                                worker_ctx.shared_sessions,
-                                                &shed.key,
-                                                shed.decision.nat,
-                                            ))
-                                })
-                                .collect();
-                            let local_shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
-                                .acquire_lease(local_shed_keys);
-                            if local_shed_lease.is_ok() {
-                                for (shed_idx, shed) in
-                                    local_pressure_shed.into_iter().enumerate()
-                                {
-                                    if local_replied_sheds[shed_idx] {
-                                        sessions.cancel_pending_close(
-                                            &shed.key,
-                                            shed.session_id,
-                                        );
-                                        continue;
-                                    }
-                                    let shared_removal =
-                                        crate::afxdp::shared_ops::remove_shared_session_if(
-                                            worker_ctx.shared_sessions,
-                                            worker_ctx.shared_nat_sessions,
-                                            worker_ctx.shared_forward_wire_sessions,
-                                            &worker_ctx.shared_owner_rg_indexes,
-                                            &shed.key,
-                                            |current| {
-                                                is_pressure_shed_shared_unreplied(
-                                                    current, &shed,
-                                                )
-                                            },
-                                        );
-                                    if matches!(
-                                        shared_removal,
-                                        crate::afxdp::shared_ops::SharedRemoval::Declined
-                                    ) {
-                                        if sessions.probe_with_origin(&shed.key).is_none() {
-                                            crate::nat::release_source_nat_allocation_for_worker(
-                                                &worker_ctx.forwarding.iface_nat_allocators,
-                                                &worker_ctx.forwarding.source_nat_rules,
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
-                                                now_ns,
-                                                worker_id,
-                                            );
-                                            crate::nat64::release_nat64_allocation_for_worker(
-                                                &worker_ctx.forwarding.nat64,
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
-                                                now_ns,
-                                                worker_id,
-                                            );
+                            // #17012: LocalMiss already sheds victims for
+                            // #16532; share the same teardown, including its
+                            // lease-failure refusal and worker-wide cache fence.
+                            let local_shed_teardown_allowed = if local_pressure_shed.is_empty() {
+                                true
+                            } else {
+                                let session_map = binding.bpf_maps.session_map.handle();
+                                let current_ifindex = binding.ifindex;
+                                let flow_cache = &mut binding.flow.flow_cache;
+                                session_admission::teardown_pressure_shed_victims(
+                                    sessions,
+                                    local_pressure_shed,
+                                    session_admission::ShedTeardownCtx {
+                                        forwarding: worker_ctx.forwarding,
+                                        session_map,
+                                        conntrack_v4_fd,
+                                        conntrack_v6_fd,
+                                        dnat_fds: worker_ctx.dnat_fds,
+                                        worker_id,
+                                        peer_worker_commands: worker_ctx.peer_worker_commands,
+                                        worker_commands_by_id: worker_ctx.worker_commands_by_id,
+                                        shared_sessions: worker_ctx.shared_sessions,
+                                        shared_nat_sessions: worker_ctx.shared_nat_sessions,
+                                        shared_forward_wire_sessions: worker_ctx
+                                            .shared_forward_wire_sessions,
+                                        shared_owner_rg_indexes: worker_ctx
+                                            .shared_owner_rg_indexes,
+                                        now_ns,
+                                    },
+                                    &mut |key| {
+                                        flow_cache.invalidate_slot(key, current_ifindex);
+                                        for other in left.iter_mut().chain(right.iter_mut()) {
+                                            other
+                                                .flow
+                                                .flow_cache
+                                                .invalidate_slot(key, other.ifindex);
                                         }
-                                        continue;
-                                    }
-                                    crate::afxdp::bpf_map::release_coordinator_session_rows(
-                                        binding.bpf_maps.session_map.handle(),
-                                        &shed.key,
-                                    );
-                                    binding
-                                        .flow
-                                        .flow_cache
-                                        .invalidate_slot(&shed.key, binding.ifindex);
-                                    let _ =
-                                        crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
-                                            conntrack_v4_fd,
-                                            conntrack_v6_fd,
-                                            &shed.key,
-                                        );
-                                    if !shed.is_reverse {
-                                        crate::afxdp::checksum::delete_dnat_table_entry(
-                                            &worker_ctx.dnat_fds,
-                                            &shed.key,
-                                            shed.decision.nat,
-                                        );
-                                    }
-                                    crate::afxdp::bpf_map::delete_live_session_entry(
-                                        binding.bpf_maps.session_map.handle(),
-                                        &shed.key,
-                                        shed.decision.nat,
-                                        shed.is_reverse,
-                                    );
-                                    crate::nat::release_source_nat_allocation_for_worker(
-                                        &worker_ctx.forwarding.iface_nat_allocators,
-                                        &worker_ctx.forwarding.source_nat_rules,
-                                        &shed.key,
-                                        shed.decision.nat,
-                                        shed.is_reverse,
-                                        now_ns,
-                                        worker_id,
-                                    );
-                                    crate::nat64::release_nat64_allocation_for_worker(
-                                        &worker_ctx.forwarding.nat64,
-                                        &shed.key,
-                                        shed.decision.nat,
-                                        shed.is_reverse,
-                                        now_ns,
-                                        worker_id,
-                                    );
-                                    crate::afxdp::session_glue::replicate_session_delete_repairing(
-                                        worker_ctx.peer_worker_commands,
-                                        worker_ctx.worker_commands_by_id,
-                                        worker_ctx.forwarding,
-                                        &shed.key,
-                                        shed.decision.nat,
-                                        shed.is_reverse,
-                                        now_ns,
-                                    );
-                                }
-                            } else if !local_pressure_shed.is_empty() {
-                                sessions.defer_pressure_shed(local_pressure_shed);
-                            }
-                            if owner_syn_reuse && local_session_capacity_available {
+                                    },
+                                )
+                            };
+                            if owner_syn_reuse
+                                && local_session_capacity_available
+                                && local_shed_teardown_allowed
+                            {
                                 crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
                                     sessions,
                                     worker_ctx.shared_sessions,
@@ -6568,7 +6475,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // Fail closed — count the refusal and recycle. This
                             // covers both the capacity-refused arm and an
                             // install-helper failure after a passing preflight.
-                            if local_session_capacity_available
+                            if local_session_capacity_available && local_shed_teardown_allowed
                                 && install_helper_local_session_on_miss(
                                     sessions,
                                     binding.bpf_maps.session_map.handle(),
@@ -7355,7 +7262,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // a fitting replacement never kills embryos
                                     // gratuitously. Conservative: the shed check
                                     // does not re-credit the closing pair.
-                                    let (admission_allowed, mut pressure_shed_sessions) =
+                                    let (admission_allowed, pressure_shed_sessions) =
                                         if needed_sessions == 0 || reuse_fits {
                                             (true, crate::session::PressureShedSessions::new())
                                         } else {
@@ -7365,162 +7272,60 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                             )
                                         };
-                                    // #10890: pressure removal is a real session
-                                    // teardown, not just a table deletion. Release
-                                    // this worker's NAT holds exactly as the GC reap
-                                    // does, including when the new SYN is later refused.
-                                    // #12862: ONE lease over every shed key:
-                                    // per-key leases drop between forward and
-                                    // companion, opening a window where a
-                                    // cross-worker pair install completes in
-                                    // between. On contention, retain every
-                                    // NAT hold rather than make allocations
-                                    // reusable while stale authority remains.
-                                    let shed_keys: Vec<_> = pressure_shed_sessions
-                                        .iter()
-                                        .map(|shed| shed.key.clone())
-                                        .collect();
-                                    // #16019 fold 2: node-level reply evidence.
-                                    // Local removal already happened; before tearing
-                                    // down shared/BPF/NAT authority, retain any victim
-                                    // with reply proof (rev counter > 0 on the shared
-                                    // reverse row, or local reverse accounting) and
-                                    // cancel its still-queued Close delta, else the
-                                    // flush would delete shared/BPF and replicate
-                                    // sibling deletes for a live flow.
-                                    let replied_sheds: Vec<bool> = pressure_shed_sessions
-                                        .iter()
-                                        .map(|shed| {
-                                            !shed.is_reverse
-                                                && (sessions.session_replied(&shed.key)
-                                                    || crate::afxdp::shared_ops::shared_session_replied(
-                                                        worker_ctx.shared_sessions,
-                                                        &shed.key,
-                                                        shed.decision.nat,
-                                                    ))
-                                        })
-                                        .collect();
-                                    let shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
-                                        .acquire_lease(shed_keys);
-                                    if shed_lease.is_ok() {
-                                        for (shed_idx, shed) in
-                                            pressure_shed_sessions.into_iter().enumerate()
-                                        {
-                                            if replied_sheds[shed_idx] {
-                                                // Suppress the enqueued Close so its
-                                                // flush cannot delete shared/BPF or
-                                                // replicate sibling deletes (#16019 fold 2).
-                                                sessions.cancel_pending_close(
-                                                    &shed.key,
-                                                    shed.session_id,
-                                                );
-                                                continue;
-                                            }
-                                            // Remove shared authority before this
-                                            // worker processes another descriptor
-                                            // in the batch. The Close delta is
-                                            // flushed only after the batch.
-                                            let shared_removal =
-                                                crate::afxdp::shared_ops::remove_shared_session_if(
-                                                    worker_ctx.shared_sessions,
-                                                    worker_ctx.shared_nat_sessions,
-                                                    worker_ctx.shared_forward_wire_sessions,
-                                                    worker_ctx.shared_owner_rg_indexes,
-                                                    &shed.key,
-                                                    |current| {
-                                                        is_pressure_shed_shared_unreplied(
-                                                            current, &shed,
-                                                        )
-                                                    },
-                                                );
-                                            if matches!(
-                                                shared_removal,
-                                                crate::afxdp::shared_ops::SharedRemoval::Declined
-                                            ) {
-                                                // The local row is gone, but this
-                                                // worker may still own a NAT hold.
-                                                if sessions.probe_with_origin(&shed.key).is_none() {
-                                                    crate::nat::release_source_nat_allocation_for_worker(
-                                                        &worker_ctx.forwarding.iface_nat_allocators,
-                                                        &worker_ctx.forwarding.source_nat_rules,
-                                                        &shed.key,
-                                                        shed.decision.nat,
-                                                        shed.is_reverse,
-                                                        now_ns,
-                                                        worker_id,
-                                                    );
-                                                    crate::nat64::release_nat64_allocation_for_worker(
-                                                        &worker_ctx.forwarding.nat64,
-                                                        &shed.key,
-                                                        shed.decision.nat,
-                                                        shed.is_reverse,
-                                                        now_ns,
-                                                        worker_id,
-                                                    );
-                                                }
-                                                continue;
-                                            }
-                                            crate::afxdp::bpf_map::release_coordinator_session_rows(
-                                                binding.bpf_maps.session_map.handle(),
-                                                &shed.key,
-                                            );
-                                            binding
-                                                .flow
-                                                .flow_cache
-                                                .invalidate_slot(&shed.key, binding.ifindex);
-                                            let _ = crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                                    // #17012: one cold teardown protocol owns
+                                    // the all-key lease, reply recheck, shared
+                                    // incarnation fence, BPF/conntrack/DNAT
+                                    // cleanup, worker-wide cache invalidation,
+                                    // NAT release, and peer replication.
+                                    // A contended lease defers external cleanup
+                                    // and makes every admission caller refuse.
+                                    let shed_teardown_allowed = if pressure_shed_sessions.is_empty() {
+                                        true
+                                    } else {
+                                        let session_map =
+                                            binding.bpf_maps.session_map.handle();
+                                        let current_ifindex = binding.ifindex;
+                                        let flow_cache = &mut binding.flow.flow_cache;
+                                        session_admission::teardown_pressure_shed_victims(
+                                            sessions,
+                                            pressure_shed_sessions,
+                                            session_admission::ShedTeardownCtx {
+                                                forwarding: worker_ctx.forwarding,
+                                                session_map,
                                                 conntrack_v4_fd,
                                                 conntrack_v6_fd,
-                                                &shed.key,
-                                            );
-                                            if !shed.is_reverse {
-                                                crate::afxdp::checksum::delete_dnat_table_entry(
-                                                    &worker_ctx.dnat_fds,
-                                                    &shed.key,
-                                                    shed.decision.nat,
-                                                );
-                                            }
-                                            crate::afxdp::bpf_map::delete_live_session_entry(
-                                                binding.bpf_maps.session_map.handle(),
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
-                                            );
-                                            crate::nat::release_source_nat_allocation_for_worker(
-                                                &worker_ctx.forwarding.iface_nat_allocators,
-                                                &worker_ctx.forwarding.source_nat_rules,
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
-                                                now_ns,
+                                                dnat_fds: worker_ctx.dnat_fds,
                                                 worker_id,
-                                            );
-                                            crate::nat64::release_nat64_allocation_for_worker(
-                                                &worker_ctx.forwarding.nat64,
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
+                                                peer_worker_commands: worker_ctx
+                                                    .peer_worker_commands,
+                                                worker_commands_by_id: worker_ctx
+                                                    .worker_commands_by_id,
+                                                shared_sessions: worker_ctx.shared_sessions,
+                                                shared_nat_sessions: worker_ctx
+                                                    .shared_nat_sessions,
+                                                shared_forward_wire_sessions: worker_ctx
+                                                    .shared_forward_wire_sessions,
+                                                shared_owner_rg_indexes: worker_ctx
+                                                    .shared_owner_rg_indexes,
                                                 now_ns,
-                                                worker_id,
-                                            );
-                                            // Do not make sibling NAT-holder
-                                            // release depend on the bounded local
-                                            // Close-delta ring. Queue order puts a
-                                            // replacement Upsert behind this delete.
-                                            crate::afxdp::session_glue::replicate_session_delete_repairing(
-                                                worker_ctx.peer_worker_commands,
-                                                worker_ctx.worker_commands_by_id,
-                                                worker_ctx.forwarding,
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
-                                                now_ns,
-                                            );
-                                        }
-                                    } else if !pressure_shed_sessions.is_empty() {
-                                        sessions.defer_pressure_shed(pressure_shed_sessions);
-                                    }
-                                    if needed_sessions > 0 && !admission_allowed {
+                                            },
+                                            &mut |key| {
+                                                flow_cache
+                                                    .invalidate_slot(key, current_ifindex);
+                                                for other in
+                                                    left.iter_mut().chain(right.iter_mut())
+                                                {
+                                                    other
+                                                        .flow
+                                                        .flow_cache
+                                                        .invalidate_slot(key, other.ifindex);
+                                                }
+                                            },
+                                        )
+                                    };
+                                    if needed_sessions > 0
+                                        && (!admission_allowed || !shed_teardown_allowed)
+                                    {
                                         sessions.note_admission_refused();
                                         if persistent_inbound_acquired.is_some() {
                                             rollback_persistent_inbound_hold(
@@ -8632,70 +8437,128 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     now_ns,
                                 ) && (owned_packet_frame.is_some() || !l2_group_unicast_ip)
                                 {
-                                    let capacity =
-                                        if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
-                                            sessions.can_admit_after_closing_tcp_pair_for_syn(
-                                                1,
-                                                reuse_key,
-                                                meta.tcp_flags,
-                                            )
-                                        } else {
+                                        let reuse_fits =
+                                            if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
+                                                sessions.can_admit_after_closing_tcp_pair_for_syn(
+                                                    1,
+                                                    reuse_key,
+                                                    meta.tcp_flags,
+                                                )
+                                            } else {
+                                                sessions.can_admit(1)
+                                            };
+                                        let (admission_allowed, pressure_shed_sessions) =
+                                            if reuse_fits {
+                                                (true, crate::session::PressureShedSessions::new())
+                                            } else {
+                                                sessions.can_admit_new_flow(
+                                                    1,
+                                                    meta.protocol,
+                                                    meta.tcp_flags,
+                                                )
+                                            };
+                                        let shed_teardown_allowed = if pressure_shed_sessions
+                                            .is_empty()
+                                        {
                                             true
-                                        };
-                                    if capacity {
-                                        if owner_syn_reuse {
-                                            crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                        } else {
+                                            let session_map = binding.bpf_maps.session_map.handle();
+                                            let current_ifindex = binding.ifindex;
+                                            let flow_cache = &mut binding.flow.flow_cache;
+                                            session_admission::teardown_pressure_shed_victims(
                                                 sessions,
+                                                pressure_shed_sessions,
+                                                session_admission::ShedTeardownCtx {
+                                                    forwarding: worker_ctx.forwarding,
+                                                    session_map,
+                                                    conntrack_v4_fd,
+                                                    conntrack_v6_fd,
+                                                    dnat_fds: worker_ctx.dnat_fds,
+                                                    worker_id,
+                                                    peer_worker_commands: worker_ctx
+                                                        .peer_worker_commands,
+                                                    worker_commands_by_id: worker_ctx
+                                                        .worker_commands_by_id,
+                                                    shared_sessions: worker_ctx.shared_sessions,
+                                                    shared_nat_sessions: worker_ctx
+                                                        .shared_nat_sessions,
+                                                    shared_forward_wire_sessions: worker_ctx
+                                                        .shared_forward_wire_sessions,
+                                                    shared_owner_rg_indexes: worker_ctx
+                                                        .shared_owner_rg_indexes,
+                                                    now_ns,
+                                                },
+                                                &mut |key| {
+                                                    flow_cache
+                                                        .invalidate_slot(key, current_ifindex);
+                                                    for other in
+                                                        left.iter_mut().chain(right.iter_mut())
+                                                    {
+                                                        other
+                                                            .flow
+                                                            .flow_cache
+                                                            .invalidate_slot(key, other.ifindex);
+                                                    }
+                                                },
+                                            )
+                                        };
+                                        if admission_allowed && shed_teardown_allowed {
+                                            if owner_syn_reuse {
+                                                crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                                    sessions,
+                                                    worker_ctx.shared_sessions,
+                                                    worker_ctx.shared_nat_sessions,
+                                                    worker_ctx.shared_forward_wire_sessions,
+                                                    &worker_ctx.shared_owner_rg_indexes,
+                                                    owner_syn_reuse_key
+                                                        .as_ref()
+                                                        .expect(
+                                                            "owner SYN reuse has a closing candidate",
+                                                        ),
+                                                    meta.tcp_flags,
+                                                );
+                                            }
+                                            if install_helper_local_session_on_miss(
+                                                sessions,
+                                                binding.bpf_maps.session_map.handle(),
                                                 worker_ctx.shared_sessions,
                                                 worker_ctx.shared_nat_sessions,
                                                 worker_ctx.shared_forward_wire_sessions,
                                                 &worker_ctx.shared_owner_rg_indexes,
-                                                owner_syn_reuse_key
-                                                    .as_ref()
-                                                    .expect(
-                                                        "owner SYN reuse has a closing candidate",
-                                                    ),
-                                                meta.tcp_flags,
-                                            );
-                                        }
-                                        if install_helper_local_session_on_miss(
-                                            sessions,
-                                            binding.bpf_maps.session_map.handle(),
-                                            worker_ctx.shared_sessions,
-                                            worker_ctx.shared_nat_sessions,
-                                            worker_ctx.shared_forward_wire_sessions,
-                                            &worker_ctx.shared_owner_rg_indexes,
-                                            &flow.forward_key,
-                                            decision,
-                                            seed_metadata,
-                                            SessionOrigin::FabricPuntSeed,
-                                            now_ns,
-                                            meta.protocol,
-                                            meta.tcp_flags,
-                                            worker_ctx.forwarding.has_routing_domains,
-                                            worker_ctx.forwarding.has_multiple_zones,
-                                        ) {
-                                            if let Some((seq, _, _, scale)) =
-                                                crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
-                                            {
-                                                sessions.seed_tcp_window_scale(&flow.forward_key, scale);
-                                                // #16042: seed the trigger ISN.
-                                                sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
-                                            }
-                                            if let Some(hold) = acquire_persistent_inbound_hold(
-                                                worker_ctx.forwarding,
-                                                persistent_lease_hold_outer,
-                                                decision.nat,
+                                                &flow.forward_key,
+                                                decision,
+                                                seed_metadata,
+                                                SessionOrigin::FabricPuntSeed,
                                                 now_ns,
+                                                meta.protocol,
+                                                meta.tcp_flags,
+                                                worker_ctx.forwarding.has_routing_domains,
+                                                worker_ctx.forwarding.has_multiple_zones,
                                             ) {
-                                                sessions.set_persistent_lease_hold(&flow.forward_key, Some(hold));
-                                                persistent_lease_hold_outer = None;
+                                                if let Some((seq, _, _, scale)) =
+                                                    crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
+                                                {
+                                                    sessions.seed_tcp_window_scale(&flow.forward_key, scale);
+                                                    // #16042: seed the trigger ISN.
+                                                    sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
+                                                }
+                                                if let Some(hold) = acquire_persistent_inbound_hold(
+                                                    worker_ctx.forwarding,
+                                                    persistent_lease_hold_outer,
+                                                    decision.nat,
+                                                    now_ns,
+                                                ) {
+                                                    sessions.set_persistent_lease_hold(
+                                                        &flow.forward_key,
+                                                        Some(hold),
+                                                    );
+                                                    persistent_lease_hold_outer = None;
+                                                }
                                             }
+                                        } else {
+                                            sessions.note_admission_refused();
                                         }
-                                    } else {
-                                        sessions.note_admission_refused();
                                     }
-                                }
                             }
                         } else if should_seed_fabric_punt(
                             decision.resolution.disposition,
@@ -8776,7 +8639,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // session for a non-host native delivery; the
                                 // common post-HA gate below recycles it.
                                 if owned_packet_frame.is_some() || !l2_group_unicast_ip {
-                                    let fabric_seed_capacity_available =
+                                    let reuse_fits =
                                         if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
                                             sessions.can_admit_after_closing_tcp_pair_for_syn(
                                                 1,
@@ -8784,9 +8647,64 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                             )
                                         } else {
-                                            true
+                                            sessions.can_admit(1)
                                         };
-                                    if fabric_seed_capacity_available {
+                                    let (admission_allowed, pressure_shed_sessions) = if reuse_fits
+                                    {
+                                        (true, crate::session::PressureShedSessions::new())
+                                    } else {
+                                        sessions.can_admit_new_flow(
+                                            1,
+                                            meta.protocol,
+                                            meta.tcp_flags,
+                                        )
+                                    };
+                                    let shed_teardown_allowed =
+                                        if pressure_shed_sessions.is_empty() {
+                                            true
+                                        } else {
+                                            let session_map =
+                                                binding.bpf_maps.session_map.handle();
+                                            let current_ifindex = binding.ifindex;
+                                            let flow_cache = &mut binding.flow.flow_cache;
+                                            session_admission::teardown_pressure_shed_victims(
+                                                sessions,
+                                                pressure_shed_sessions,
+                                                session_admission::ShedTeardownCtx {
+                                                    forwarding: worker_ctx.forwarding,
+                                                    session_map,
+                                                    conntrack_v4_fd,
+                                                    conntrack_v6_fd,
+                                                    dnat_fds: worker_ctx.dnat_fds,
+                                                    worker_id,
+                                                    peer_worker_commands: worker_ctx
+                                                        .peer_worker_commands,
+                                                    worker_commands_by_id: worker_ctx
+                                                        .worker_commands_by_id,
+                                                    shared_sessions: worker_ctx.shared_sessions,
+                                                    shared_nat_sessions: worker_ctx
+                                                        .shared_nat_sessions,
+                                                    shared_forward_wire_sessions: worker_ctx
+                                                        .shared_forward_wire_sessions,
+                                                    shared_owner_rg_indexes: worker_ctx
+                                                        .shared_owner_rg_indexes,
+                                                    now_ns,
+                                                },
+                                                &mut |key| {
+                                                    flow_cache
+                                                        .invalidate_slot(key, current_ifindex);
+                                                    for other in
+                                                        left.iter_mut().chain(right.iter_mut())
+                                                    {
+                                                        other
+                                                            .flow
+                                                            .flow_cache
+                                                            .invalidate_slot(key, other.ifindex);
+                                                    }
+                                                },
+                                            )
+                                        };
+                                    if admission_allowed && shed_teardown_allowed {
                                         if owner_syn_reuse {
                                             crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
                                                 sessions,
@@ -12880,7 +12798,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         } else {
                                             sessions.can_admit(1)
                                         };
-                                    let (pending_capacity_available, mut pressure_shed_sessions) =
+                                    let (pending_capacity_available, pressure_shed_sessions) =
                                         if reuse_fits {
                                             (true, crate::session::PressureShedSessions::new())
                                         } else {
@@ -12890,135 +12808,45 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                             )
                                         };
-                                    // #14661: capture before the lease
-                                    // branches consume the shed vec.
-                                    let shed_nonempty_14661 = !pressure_shed_sessions.is_empty();
-                                    let shed_keys: Vec<_> = pressure_shed_sessions
-                                        .iter()
-                                        .map(|shed| shed.key.clone())
-                                        .collect();
-                                    // #16019 fold 2: node-level reply evidence (see
-                                    // the ForwardCandidate shed site).
-                                    let replied_sheds: Vec<bool> = pressure_shed_sessions
-                                        .iter()
-                                        .map(|shed| {
-                                            !shed.is_reverse
-                                                && (sessions.session_replied(&shed.key)
-                                                    || crate::afxdp::shared_ops::shared_session_replied(
-                                                        worker_ctx.shared_sessions,
-                                                        &shed.key,
-                                                        shed.decision.nat,
-                                                    ))
-                                        })
-                                        .collect();
-                                    let shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
-                                        .acquire_lease(shed_keys);
-                                    if shed_lease.is_ok() {
-                                        for (shed_idx, shed) in
-                                            pressure_shed_sessions.into_iter().enumerate()
-                                        {
-                                            if replied_sheds[shed_idx] {
-                                                sessions.cancel_pending_close(
-                                                    &shed.key,
-                                                    shed.session_id,
-                                                );
-                                                continue;
-                                            }
-                                            let shared_removal =
-                                                crate::afxdp::shared_ops::remove_shared_session_if(
-                                                    worker_ctx.shared_sessions,
-                                                    worker_ctx.shared_nat_sessions,
-                                                    worker_ctx.shared_forward_wire_sessions,
-                                                    &worker_ctx.shared_owner_rg_indexes,
-                                                    &shed.key,
-                                                    |current| {
-                                                        is_pressure_shed_shared_unreplied(
-                                                            current, &shed,
-                                                        )
-                                                    },
-                                                );
-                                            if matches!(
-                                                shared_removal,
-                                                crate::afxdp::shared_ops::SharedRemoval::Declined
-                                            ) {
-                                                // The local row is gone, but this
-                                                // worker may still own a NAT hold.
-                                                crate::nat::release_source_nat_allocation_for_worker(
-                                                    &worker_ctx.forwarding.iface_nat_allocators,
-                                                    &worker_ctx.forwarding.source_nat_rules,
-                                                    &shed.key,
-                                                    shed.decision.nat,
-                                                    shed.is_reverse,
-                                                    now_ns,
-                                                    worker_id,
-                                                );
-                                                crate::nat64::release_nat64_allocation_for_worker(
-                                                    &worker_ctx.forwarding.nat64,
-                                                    &shed.key,
-                                                    shed.decision.nat,
-                                                    shed.is_reverse,
-                                                    now_ns,
-                                                    worker_id,
-                                                );
-                                                continue;
-                                            }
-                                            crate::afxdp::bpf_map::release_coordinator_session_rows(
-                                                binding.bpf_maps.session_map.handle(),
-                                                &shed.key,
-                                            );
-                                            binding
-                                                .flow
-                                                .flow_cache
-                                                .invalidate_slot(&shed.key, binding.ifindex);
-                                            let _ = crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                                    // #17012: use the same cold victim teardown
+                                    // as ForwardCandidate and the deferred retry.
+                                    let shed_teardown_allowed = if pressure_shed_sessions.is_empty() {
+                                        true
+                                    } else {
+                                        let session_map = binding.bpf_maps.session_map.handle();
+                                        let current_ifindex = binding.ifindex;
+                                        let flow_cache = &mut binding.flow.flow_cache;
+                                        session_admission::teardown_pressure_shed_victims(
+                                            sessions,
+                                            pressure_shed_sessions,
+                                            session_admission::ShedTeardownCtx {
+                                                forwarding: worker_ctx.forwarding,
+                                                session_map,
                                                 conntrack_v4_fd,
                                                 conntrack_v6_fd,
-                                                &shed.key,
-                                            );
-                                            if !shed.is_reverse {
-                                                crate::afxdp::checksum::delete_dnat_table_entry(
-                                                    &worker_ctx.dnat_fds,
-                                                    &shed.key,
-                                                    shed.decision.nat,
-                                                );
-                                            }
-                                            crate::afxdp::bpf_map::delete_live_session_entry(
-                                                binding.bpf_maps.session_map.handle(),
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
-                                            );
-                                            crate::nat::release_source_nat_allocation_for_worker(
-                                                &worker_ctx.forwarding.iface_nat_allocators,
-                                                &worker_ctx.forwarding.source_nat_rules,
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
-                                                now_ns,
+                                                dnat_fds: worker_ctx.dnat_fds,
                                                 worker_id,
-                                            );
-                                            crate::nat64::release_nat64_allocation_for_worker(
-                                                &worker_ctx.forwarding.nat64,
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
+                                                peer_worker_commands: worker_ctx
+                                                    .peer_worker_commands,
+                                                worker_commands_by_id: worker_ctx
+                                                    .worker_commands_by_id,
+                                                shared_sessions: worker_ctx.shared_sessions,
+                                                shared_nat_sessions: worker_ctx.shared_nat_sessions,
+                                                shared_forward_wire_sessions: worker_ctx
+                                                    .shared_forward_wire_sessions,
+                                                shared_owner_rg_indexes: worker_ctx
+                                                    .shared_owner_rg_indexes,
                                                 now_ns,
-                                                worker_id,
-                                            );
-                                            crate::afxdp::session_glue::replicate_session_delete_repairing(
-                                                worker_ctx.peer_worker_commands,
-                                                worker_ctx.worker_commands_by_id,
-                                                worker_ctx.forwarding,
-                                                &shed.key,
-                                                shed.decision.nat,
-                                                shed.is_reverse,
-                                                now_ns,
-                                            );
-                                        }
-                                    } else if !pressure_shed_sessions.is_empty() {
-                                        sessions.defer_pressure_shed(pressure_shed_sessions);
-                                    }
-                                    if owner_syn_reuse && reuse_fits {
+                                            },
+                                            &mut |key| {
+                                                flow_cache.invalidate_slot(key, current_ifindex);
+                                                for other in left.iter_mut().chain(right.iter_mut()) {
+                                                    other.flow.flow_cache.invalidate_slot(key, other.ifindex);
+                                                }
+                                            },
+                                        )
+                                    };
+                                    if owner_syn_reuse && reuse_fits && shed_teardown_allowed {
                                         crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
                                             sessions,
                                             worker_ctx.shared_sessions,
@@ -13031,18 +12859,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.tcp_flags,
                                         );
                                     }
-                                    // #14661: a failed shed lease left the
-                                    // victims' shared/BPF authority live
-                                    // (deferred above); installing now would
-                                    // exceed the shared invariant and could
-                                    // collide on a shed SNAT identity. Refuse
-                                    // the seed (and its probe) instead. The
-                                    // tuple-gate install permit then fences
-                                    // the local install + shared/BPF publish
-                                    // below against a concurrent eviction
-                                    // lease, mirroring ForwardCandidate.
-                                    let seed_gate_refused_14661 =
-                                        shed_lease.is_err() && shed_nonempty_14661;
+                                    // A failed shed lease leaves the victims'
+                                    // external authority live; refuse the seed
+                                    // instead of colliding with a victim tuple.
+                                    let seed_gate_refused_14661 = !shed_teardown_allowed;
                                     let mut seed_install_permit_14661 =
                                         if pending_capacity_available && !seed_gate_refused_14661 {
                                             match crate::afxdp::bpf_map::global_tuple_gate()

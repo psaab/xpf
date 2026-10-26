@@ -1,4 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
+  * DDNS: centralize #2663 DHCP v4/v6 single-block inheritance in
+    DHCPServerConfig.EffectiveDynamicDNS; reconciliation, reset, show, and
+    warning consumers now call the canonical rule without behavior change
+    (#17006).
+
+xpf (0.0.0) unstable; urgency=medium
   * NAT: static, destination and source NAT literals in IPv4-mapped
     (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d) form are now
     rejected at commit (#16875). A mapped/compatible match identity

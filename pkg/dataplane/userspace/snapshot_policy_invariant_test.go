@@ -228,7 +228,7 @@ func TestBuilderFullyQuarantinedConfigPasses(t *testing.T) {
 	if config.StableZoneID("zzq17760") == config.StableZoneID("zzq8100") {
 		// keep the premise explicit; the collision pair is fixed upstream
 	} else {
-		t.Skip("premise: zzq17760/zzq8100 no longer collide")
+		t.Fatal("premise: zzq17760/zzq8100 no longer collide")
 	}
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
