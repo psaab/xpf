@@ -223,6 +223,43 @@ func TestFabricGateReserveSplit16478(t *testing.T) {
 	}
 }
 
+// TestFabricConnGateRejectsInvalidReserve17687 pins the reserve as a
+// required, bounded partition: zero disables peer recovery capacity,
+// negative values over-admit non-peer sources, and values above the total
+// make the non-peer limit negative.
+//
+// FAIL-ON-REVERT: the old constructor accepted every invalid shape below.
+func TestFabricConnGateRejectsInvalidReserve17687(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		limit, reserve int
+	}{
+		{name: "zero", limit: 4, reserve: 0},
+		{name: "negative", limit: 4, reserve: -1},
+		{name: "above-total", limit: 4, reserve: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("newFabricConnGate(%d, %d) did not reject invalid reserve", tc.limit, tc.reserve)
+				}
+			}()
+			_ = newFabricConnGate(tc.limit, tc.reserve, nil)
+		})
+	}
+
+	// A positive reserve within the total remains usable for non-peer traffic.
+	g := newFabricConnGate(2, 1, nil)
+	nonPeer := &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 40000}
+	if !g.tryAcquire(nonPeer) {
+		t.Fatal("valid (2, 1) gate refused its one non-peer slot")
+	}
+	if g.tryAcquire(nonPeer) {
+		t.Fatal("valid (2, 1) gate admitted a non-peer into the reserved slot")
+	}
+	g.release(false)
+}
+
 type fabricStubConn16478 struct{ remote net.Addr }
 
 func (c *fabricStubConn16478) Read([]byte) (int, error)         { return 0, errors.New("stub") }
@@ -243,7 +280,7 @@ func TestFabricBoundedListenerTemporaryRefusal16478(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	defer inner.Close()
-	g := newFabricConnGate(1, 0, nil)
+	g := newFabricConnGate(1, 1, func(net.Addr) bool { return true })
 	bl := &fabricBoundedListener{Listener: inner, gate: g}
 
 	c1, err := net.Dial("tcp", inner.Addr().String())

@@ -115,7 +115,12 @@ type fabricConnGate struct {
 	isPeer func(net.Addr) bool
 }
 
+// newFabricConnGate requires a positive reserve no greater than the total
+// connection limit; zero would disable the peer-recovery partition.
 func newFabricConnGate(limit, reserve int, isPeer func(net.Addr) bool) *fabricConnGate {
+	if reserve <= 0 || reserve > limit {
+		panic("grpcapi: fabric connection gate reserve must be positive and no greater than total limit")
+	}
 	return &fabricConnGate{limit: limit, reserve: reserve, isPeer: isPeer}
 }
 
