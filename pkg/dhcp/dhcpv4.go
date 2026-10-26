@@ -697,20 +697,12 @@ func leaseFromACKv4WithProtected(ifaceName string, ack *dhcpv4.DHCPv4, protected
 
 // overlappingProtectedPrefixV4 returns the first IPv4 protected prefix
 // sharing any address with installed, or the zero Prefix. Host bits are
-// ignored on both sides (masked Contains either way), mirroring
-// overlappingProtectedPrefix for IPv6.
+// ignored on both sides by config.IPv4PrefixesOverlap; return the masked
+// protected prefix to preserve the DHCPv4 refusal message format.
 func overlappingProtectedPrefixV4(installed netip.Prefix, protected []netip.Prefix) netip.Prefix {
-	if !installed.IsValid() {
-		return netip.Prefix{}
-	}
-	masked := installed.Masked()
 	for _, p := range protected {
-		if !p.IsValid() || !p.Addr().Is4() {
-			continue
-		}
-		mp := p.Masked()
-		if masked.Contains(mp.Addr()) || mp.Contains(masked.Addr()) {
-			return mp
+		if config.IPv4PrefixesOverlap(installed, p) {
+			return p.Masked()
 		}
 	}
 	return netip.Prefix{}
