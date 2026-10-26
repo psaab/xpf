@@ -65,8 +65,9 @@ type syslogDropAccumulator struct {
 }
 
 // retire folds a client that is about to be closed/replaced into the
-// accumulator. Must be called BEFORE Close: Close stops the event writer,
-// which counts its discarded queue into DroppedWrites.
+// accumulator, snapshotting its pre-Close counts. The Close-discard
+// remainder is folded separately and exactly once via the owner's
+// retired-pending set (#17855); retire itself stays a pre-Close snapshot.
 func (a *syslogDropAccumulator) retire(sink string, c *SyslogClient) {
 	if c == nil {
 		return
@@ -92,6 +93,49 @@ func (a *syslogDropAccumulator) fold(st SyslogDropStat) {
 	cur.Writes += st.Writes
 	cur.Dials += st.Dials
 	cur.Cooldown += st.Cooldown
+}
+
+// retiredPending tracks, per retired client, the snapshot retire()
+// took, so the post-Close remainder can be folded exactly once at stats
+// time (#17855). Owners guard it with the same mutex as the accumulator.
+type retiredPending map[*SyslogClient]SyslogDropStat
+
+// record remembers a just-retired client's snapshot under its sink.
+func (p *retiredPending) record(sink string, c *SyslogClient) {
+	if c == nil {
+		return
+	}
+	if *p == nil {
+		*p = make(retiredPending)
+	}
+	(*p)[c] = syslogDropsFromClient(sink, c)
+}
+
+// foldInto folds each pending client's post-retire counter growth (its
+// Close discards) into acc and clears the pending set: every drop is
+// counted exactly once, and a second call folds nothing.
+func (p *retiredPending) foldInto(acc *syslogDropAccumulator) {
+	for c, snap := range *p {
+		now := syslogDropsFromClient(snap.Sink, c)
+		sub := func(now, before uint64) uint64 {
+			if now <= before {
+				return 0
+			}
+			return now - before
+		}
+		delta := SyslogDropStat{
+			Sink:       snap.Sink,
+			RemoteAddr: snap.RemoteAddr,
+			Protocol:   snap.Protocol,
+			Writes:     sub(now.Writes, snap.Writes),
+			Dials:      sub(now.Dials, snap.Dials),
+			Cooldown:   sub(now.Cooldown, snap.Cooldown),
+		}
+		if delta.Writes != 0 || delta.Dials != 0 || delta.Cooldown != 0 {
+			acc.fold(delta)
+		}
+		delete(*p, c)
+	}
 }
 
 // merge adds this accumulator's retired totals into out, keyed by
@@ -140,8 +184,10 @@ func (a *syslogDropAccumulator) merge(out []SyslogDropStat) []SyslogDropStat {
 // monotonic counters scraped by Prometheus and is why they are exported as
 // counters rather than as a rate computed here.
 func (er *EventReader) SyslogDropStats() []SyslogDropStat {
-	er.syslogMu.RLock()
-	defer er.syslogMu.RUnlock()
+	er.syslogMu.Lock()
+	defer er.syslogMu.Unlock()
+	// #17855: fold retired clients' Close discards exactly once.
+	er.syslogRetiredPending.foldInto(&er.syslogRetired)
 	out := make([]SyslogDropStat, 0, len(er.syslogClients))
 	for _, c := range er.syslogClients {
 		if c == nil {

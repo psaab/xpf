@@ -259,7 +259,10 @@ type EventReader struct {
 	// syslogRetired folds drop counters of replaced security-log clients
 	// per destination so the exported counters survive rebuilds (#16769).
 	// Guarded by syslogMu.
-	syslogRetired            syslogDropAccumulator
+	syslogRetired syslogDropAccumulator
+	// syslogRetiredPending: Close-discard remainders folded once at
+	// stats time (#17855). Guarded by syslogMu.
+	syslogRetiredPending     retiredPending
 	localMu                  sync.RWMutex
 	localWriters             []*LocalLogWriter
 	callbackMu               sync.RWMutex
@@ -457,6 +460,7 @@ func (er *EventReader) SetSyslogClients(clients []*SyslogClient) {
 		for _, c := range old {
 			if !next[c] {
 				er.syslogRetired.retire("security", c)
+				er.syslogRetiredPending.record("security", c)
 			}
 		}
 	}
@@ -532,6 +536,7 @@ func (er *EventReader) ReplaceSyslogClients(clients []*SyslogClient) {
 		for _, c := range old {
 			if !next[c] {
 				er.syslogRetired.retire("security", c)
+				er.syslogRetiredPending.record("security", c)
 			}
 		}
 	}
