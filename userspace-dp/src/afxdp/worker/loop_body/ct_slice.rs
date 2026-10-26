@@ -12,6 +12,7 @@
 //
 // `use super::*;` chains through loop_body/mod.rs to worker/mod.rs.
 
+use super::slice_pacing::{CT_REFRESH_SLICE_BUDGET, CT_REFRESH_WINDOW_NS, CT_SLICE_INTERVAL_NS};
 use super::*;
 
 /// #16217 (FZDiag28, part b): packet-independent pending-neighbor retry.
@@ -66,8 +67,6 @@ impl PendingNeighTimer {
         self.last_retry_ns = Some(now_ns);
     }
 }
-
-const CT_SLICE_INTERVAL_NS: u64 = 100_000_000;
 
 /// Drive one timer pending-neighbor retry pass over every binding.
 /// Returns true when the cadence fired (the caller may count it as
@@ -157,8 +156,6 @@ pub(super) fn run_ct_slice(
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     established_cursor: &mut usize,
 ) {
-    const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000;
-    const CT_REFRESH_SLICE_BUDGET: usize = 2048;
     // Incrementally refresh last_seen in BPF conntrack entries so Go-side
     // callers of IterateSessions (CLI, gRPC, Prometheus) see accurate
     // session idle times.  Issue #333; budgeted/resumable per #5287.

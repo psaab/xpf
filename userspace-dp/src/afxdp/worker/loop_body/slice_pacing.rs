@@ -1,0 +1,24 @@
+// Shared pacing rationale and limits for the worker loop's extracted slices.
+//
+// #9856 owner-RG CommandExport visits one bounded slice per worker-loop pass,
+// interleaving RX/TX/heartbeat. The scan budget caps slab slots visited; the
+// emit cap limits conversions and sizes `export_echo_scratch`; the deadline
+// bounds the slice's work.
+pub(super) const EXPORT_SLICE_BUDGET: usize = 1024; // max slab slots scanned per slice
+pub(super) const EXPORT_SLICE_EMITS: usize = 256; // max sessions converted per slice
+pub(super) const EXPORT_SLICE_DEADLINE_NS: u64 = 500_000; // 500us slice cap
+// The pre-sized echo scratch must hold every session that one slice can emit.
+const _: () = assert!(EXPORT_SLICE_EMITS <= EXPORT_SLICE_BUDGET);
+
+// #333/#5287: refresh BPF conntrack last_seen values incrementally so session
+// idle-time and volume reads stay current without a per-second syscall per
+// session. A full-table sweep near the 131072-entry cap used to issue tens of
+// thousands of synchronous BPF lookups and updates between RX/TX polls.
+// Bound each slice by CT_REFRESH_SLICE_BUDGET and pace slices by
+// CT_SLICE_INTERVAL_NS; full cycles target CT_REFRESH_WINDOW_NS, preserving the
+// old 10s steady-state cadence. With the default cap, 2048 slots per 100ms
+// complete in about 64 slices (~6.4s <= 10s). If max_sessions rises much higher,
+// freshness degrades gracefully while per-slice cost stays bounded.
+pub(super) const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000; // full-table freshness target
+pub(super) const CT_SLICE_INTERVAL_NS: u64 = 100_000_000; // 100ms between slices
+pub(super) const CT_REFRESH_SLICE_BUDGET: usize = 2048; // max slab slots per slice

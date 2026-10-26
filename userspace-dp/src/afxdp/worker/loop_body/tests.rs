@@ -1819,5 +1819,48 @@ mod gc_reap_nat64_release_tests_7740 {
              gc_teardown split; worker_loop would lose its cold helpers"
             );
         }
+
+        #[test]
+        fn slice_pacing_constants_are_shared_after_extraction_17015() {
+            const CONSTANTS: [&str; 6] = [
+                "EXPORT_SLICE_BUDGET",
+                "EXPORT_SLICE_EMITS",
+                "EXPORT_SLICE_DEADLINE_NS",
+                "CT_REFRESH_WINDOW_NS",
+                "CT_SLICE_INTERVAL_NS",
+                "CT_REFRESH_SLICE_BUDGET",
+            ];
+            let source_dir =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp/worker/loop_body");
+            let slice_pacing = std::fs::read_to_string(source_dir.join("slice_pacing.rs"))
+                .expect("read shared slice_pacing.rs");
+            let loop_body =
+                std::fs::read_to_string(source_dir.join("mod.rs")).expect("read loop_body/mod.rs");
+            let export_slice = std::fs::read_to_string(source_dir.join("export_slice.rs"))
+                .expect("read export_slice.rs");
+            let ct_slice =
+                std::fs::read_to_string(source_dir.join("ct_slice.rs")).expect("read ct_slice.rs");
+            assert!(
+                slice_pacing.contains(
+                    "const _: () = assert!(EXPORT_SLICE_EMITS <= EXPORT_SLICE_BUDGET);"
+                ),
+                "slice pacing must keep the emit cap within the scanned-slot budget"
+            );
+            for name in CONSTANTS {
+                let declaration = format!("const {name}:");
+                assert_eq!(
+                    slice_pacing.matches(&declaration).count(),
+                    1,
+                    "{name} must have one definition in loop_body/slice_pacing.rs"
+                );
+                assert_eq!(
+                    loop_body.matches(&declaration).count()
+                        + export_slice.matches(&declaration).count()
+                        + ct_slice.matches(&declaration).count(),
+                    0,
+                    "{name} must not be copied into worker_loop or its slices"
+                );
+            }
+        }
     }
 }
