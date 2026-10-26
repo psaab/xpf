@@ -1204,7 +1204,7 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                     let remaining =
                         wire_ambiguities.remove_wire_owner(&wire_key, &entry.key);
                     // #16561: trust the roster on its own live state,
-                    // not the alias saturation (see types/mod.rs).
+                    // not the alias saturation (see types/session_index.rs).
                     let roster_trusted = wire_ambiguities.wire_roster_trusted_for_removal()
                         && roster_before > 0
                         && remaining == roster_before - 1;
