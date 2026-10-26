@@ -108,10 +108,25 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 		if termRouteFiltersMixFamily(term) {
 			fam = 2
 		}
-		// Chain-lowered terms replace the community OR set with chain slots
-		// and emit their sibling Cartesian body once, regardless of duplicate refs.
+		// #18018: chain-lowering COLLAPSES the mixed term's community
+		// multiplicity (the chain gates the shared body once) — but the
+		// renderer declines the chain when either family group of a
+		// mixed route-filter set is dangling or a prefix-list dangles
+		// in only one family (policy_render.go chain branch), and the
+		// fallback then emits the original multiplicity through
+		// emitVariants. Collapsing anyway under-counted the fallback:
+		// the 6,553-reference fixture counted 6 while rendering 6,554,
+		// whose guarded maximum 65,550 exceeds the FRR 65,535 ceiling
+		// instead of quarantining. Mirror the renderer's decline
+		// conditions so the collapse happens only on the actual
+		// chain-lowering path; the fallback keeps the full multiplicity.
+		// Orphan terms chain unconditionally (no sibling dimension can
+		// divert them), so they keep collapsing — and keep their chain
+		// weight below.
 		chainSlots := communityChainExtraWeight16869(po, term)
-		chainLowered := chainSlots > 0
+		chainLowered := chainSlots > 0 &&
+			(!communityMixedChainTerm16869(po, term) ||
+				CommunityMixedChainTermCanLower16869(po, term, termHasPartialDanglingPrefixList18018(po, term.PrefixList)))
 		communityRefs := len(term.FromCommunity)
 		if chainLowered {
 			communityRefs = 1
@@ -120,11 +135,11 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 		v = checkedMulU64(v, orOneU64(communityRefs))
 		v = checkedMulU64(v, orOneU64(len(term.FromASPath)))
 		v = checkedMulU64(v, orOneU64(uniqueCanonicalProtocolCount(term.FromProtocols)))
-		// #16835/#16869: terms taking a shared-token chain reserve its
-		// member/guard slots in addition to the body variants. Mirror the
-		// FRR renderer here (this package cannot import pkg/frr) so gate,
-		// belt, and renderer agree.
-		if chainSlots > 0 {
+		// #16835/#16869: the chain's member/guard slots precede the body;
+		// the body variants are already included above.
+		// The renderer mirror above ensures a declined mixed term has
+		// neither collapsed community multiplicity nor chain-slot weight.
+		if chainLowered {
 			v = checkedAddU64(v, uint64(chainSlots))
 		}
 		if total > math.MaxUint64-v {
@@ -245,6 +260,82 @@ func communityMixedChainTerm16869(po *PolicyOptionsConfig, term *PolicyTerm) boo
 		}
 	}
 	return communityChainWidth16869(po, name) > 0
+}
+
+// CommunityMixedChainTermCanLower16869 mirrors the renderer's extra guards
+// before it lowers a mixed chain term (#18018). A dangling route-filter
+// family (or an all-dangling unsplit route-filter group) and a prefix-list
+// with one rendered family and one wholly dangling family both decline
+// lowering; in either case emitVariants retains the full community OR set.
+// The prefix-list-family status is supplied by the caller to avoid scanning
+// the same entries twice in the renderer; admission computes the same status
+// with termHasPartialDanglingPrefixList18018.
+func CommunityMixedChainTermCanLower16869(po *PolicyOptionsConfig, term *PolicyTerm, hasPartialDanglingPrefixList bool) bool {
+	if !communityMixedChainTerm16869(po, term) || hasPartialDanglingPrefixList {
+		return false
+	}
+	if termRouteFiltersMixFamily(term) {
+		return !routeFilterGroupSkipped18018(term, false) && !routeFilterGroupSkipped18018(term, true)
+	}
+	if len(term.RouteFilters) == 0 {
+		return true
+	}
+	for _, rf := range term.RouteFilters {
+		if !RouteFilterEntrySkipped(rf) {
+			return true
+		}
+	}
+	return false
+}
+
+func routeFilterGroupSkipped18018(term *PolicyTerm, ipv6 bool) bool {
+	found := false
+	for _, rf := range term.RouteFilters {
+		isV6 := rf != nil && strings.Contains(rf.Prefix, ":")
+		if isV6 != ipv6 {
+			continue
+		}
+		found = true
+		if !RouteFilterEntrySkipped(rf) {
+			return false
+		}
+	}
+	return found
+}
+
+func termHasPartialDanglingPrefixList18018(po *PolicyOptionsConfig, names []string) bool {
+	if po == nil {
+		return false
+	}
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		pl := po.PrefixLists[name]
+		if pl == nil {
+			continue
+		}
+		var hasV4, hasV6, validV4, validV6 bool
+		for _, prefix := range pl.Prefixes {
+			isV6 := strings.Contains(prefix, ":")
+			if isV6 {
+				hasV6 = true
+			} else {
+				hasV4 = true
+			}
+			if _, ok := NormalizePrefixListEntry(prefix); ok {
+				if isV6 {
+					validV6 = true
+				} else {
+					validV4 = true
+				}
+			}
+		}
+		if hasV4 && hasV6 && (!validV4 || !validV6) {
+			return true
+		}
+	}
+	return false
 }
 
 // ComposedChainSequenceCount returns the FRR route-map sequences before the

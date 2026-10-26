@@ -1809,8 +1809,8 @@ step. Both are required — neither sees the other's case:
   in their #16788 translation) strip each value;
   `communityListCollision` (wired into `ApplyFull`) fails the apply
   closed when two operator names normalize to one FRR name or an
-  Caveat: regex members using backreferences interact with sequencing. The
-  #16788 sequencer shares the single separator between adjacent factors
+  operator name forges a backing. Caveat: regex members using backreferences
+  interact with sequencing. The #16788 sequencer shares the single separator
   (the #16835 adjacent-literal row); one community satisfying two regex
   members (the #16835 shared-token row) is evaluated by the #16835 chain
   (`community_chain_16835.go`): one generated single-factor list per
