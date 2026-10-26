@@ -197,6 +197,65 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     let pptp_call_ids = entry.pptp_call_ids;
     let leak_key = entry.key.clone();
     let previous_persistent_hold_16615 = sessions.persistent_lease_hold_for(&key);
+    let reservation_target_changed = previous_reservation.as_ref().is_some_and(
+        |(prev_decision, prev_metadata, _)| {
+            prev_metadata.is_reverse != metadata.is_reverse
+                || prev_decision.nat != entry_decision.nat
+                || prev_metadata.ingress_zone != metadata.ingress_zone
+                || prev_metadata.egress_zone != metadata.egress_zone
+        },
+    );
+    let worker_will_reserve_persistent_hold = reserving_origin && !metadata.is_reverse;
+    let incoming_recorded_hold = entry.persistent_lease_hold;
+    let selected_persistent_hold = incoming_recorded_hold.or_else(|| {
+        worker_will_reserve_persistent_hold
+            .then(|| {
+                crate::nat::persistent_inbound_hold_owner_for_synced(
+                    &forwarding.source_nat_rules,
+                    &key,
+                    entry_decision.nat,
+                    metadata.is_reverse,
+                    now_ns,
+                )
+            })
+            .flatten()
+    });
+    let preserve_unmatched_incumbent = incoming_recorded_hold.is_none()
+        && worker_will_reserve_persistent_hold
+        && !reservation_target_changed
+        && selected_persistent_hold.is_none();
+    let persistent_hold_for_install = selected_persistent_hold
+        .map(|hold| {
+            previous_persistent_hold_16615
+                .filter(|previous| previous.same_lease(hold))
+                .unwrap_or_else(|| {
+                    hold.with_owner(crate::nat::PersistentLeaseOwner::LocalWorker)
+                })
+        })
+        .or_else(|| {
+            preserve_unmatched_incumbent
+                .then_some(previous_persistent_hold_16615)
+                .flatten()
+        });
+    let mut acquired_persistent_hold = false;
+    if let Some(hold) = persistent_hold_for_install
+        && (reservation_target_changed
+            || !previous_persistent_hold_16615.is_some_and(|previous| previous.same_lease(hold)))
+    {
+        if !crate::nat::acquire_recorded_persistent_inbound_hold(
+            &forwarding.source_nat_rules,
+            hold,
+            crate::nat::TranslatedTuple {
+                ip: key.dst_ip,
+                port: key.dst_port,
+            },
+            now_ns,
+        ) {
+            return;
+        }
+        acquired_persistent_hold = true;
+    }
+    entry.persistent_lease_hold = persistent_hold_for_install;
     if sessions.upsert_synced_with_origin(entry.into_session_install(now_ns), allow_replace_local) {
         if leak_incarnation != 0 {
             sessions.stamp_leak_incarnation(&leak_key, leak_incarnation);
@@ -211,31 +270,45 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // release sweep is keyed on the PREVIOUS translated tuple and
         // no-ops in allocators not holding that exact tuple, so releasing
         // before re-reserving cannot free the new (different-tuple)
-        // reservation; for a same-tuple refresh the translated tuple is
-        // unchanged and this branch is not taken, preserving the holder bit.
+        // reservation.
+        //
+        // #17683: the inbound persistent hold is a separate per-session
+        // reference. Repeated HA refreshes of an unchanged entry must neither
+        // drop it before re-reserving nor acquire a duplicate reference.
         let new_entry_reserves = reserving_origin
             && !metadata.is_reverse
             && entry_decision.nat.rewrite_src.is_some();
-        let reservation_target_changed = previous_reservation.as_ref().is_some_and(
-            |(prev_decision, prev_metadata, _)| {
-                prev_metadata.is_reverse != metadata.is_reverse
-                    || prev_decision.nat != entry_decision.nat
-                    || prev_metadata.ingress_zone != metadata.ingress_zone
-                    || prev_metadata.egress_zone != metadata.egress_zone
-            },
-        );
+        let preserve_previous_persistent_hold = previous_persistent_hold_16615.is_none()
+            || (persistent_hold_for_install
+                .is_some_and(|hold| {
+                    previous_persistent_hold_16615
+                        .is_some_and(|previous| previous.same_lease(hold))
+                })
+                && !acquired_persistent_hold);
         if !new_entry_reserves || reservation_target_changed {
             if let Some((prev_decision, prev_metadata, _)) = previous_reservation {
-                crate::nat::release_source_nat_allocation_for_worker_with_hold(
-                    &forwarding.iface_nat_allocators,
-                    &forwarding.source_nat_rules,
-                    &key,
-                    prev_decision.nat,
-                    prev_metadata.is_reverse,
-                    now_ns,
-                    worker_id,
-                    previous_persistent_hold_16615,
-                );
+                if preserve_previous_persistent_hold {
+                    crate::nat::release_source_nat_allocation_for_worker_preserving_persistent_hold(
+                        &forwarding.iface_nat_allocators,
+                        &forwarding.source_nat_rules,
+                        &key,
+                        prev_decision.nat,
+                        prev_metadata.is_reverse,
+                        now_ns,
+                        worker_id,
+                    );
+                } else {
+                    crate::nat::release_source_nat_allocation_for_worker_with_hold(
+                        &forwarding.iface_nat_allocators,
+                        &forwarding.source_nat_rules,
+                        &key,
+                        prev_decision.nat,
+                        prev_metadata.is_reverse,
+                        now_ns,
+                        worker_id,
+                        previous_persistent_hold_16615,
+                    );
+                }
                 crate::nat64::release_nat64_allocation_for_worker(
                     &forwarding.nat64,
                     &key,
@@ -245,6 +318,18 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
                     worker_id,
                 );
             }
+        }
+        if !reservation_target_changed
+            && new_entry_reserves
+            && let Some(previous_hold) = previous_persistent_hold_16615
+            && !persistent_hold_for_install
+                .is_some_and(|hold| previous_hold.same_lease(hold))
+        {
+            crate::nat::release_recorded_persistent_inbound_hold(
+                &forwarding.source_nat_rules,
+                previous_hold,
+                now_ns,
+            );
         }
         // #4388: reserve the synced session's translated NAT pool port in this
         // node's LOCAL source-NAT allocator. The standby imports the active
@@ -265,32 +350,18 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
                 static_externals: Some(&synced_static_externals),
                 nptv6_external_prefixes: &synced_nptv6_prefixes,
             };
-            let (_reserved_16615, persistent_hold_16615) = crate::nat::reserve_synced_source_nat_allocation_for_worker_with_hold(
+            crate::nat::reserve_synced_source_nat_allocation_for_worker_preserving_persistent_hold(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
                 &key,
                 entry_decision.nat,
                 metadata.is_reverse,
-                // #6211: the active's zone pair, so the reservation lands in
-                // the allocator the active used when two rules share a pool
-                // address. `None` (old peer / unknown zone) keeps the
-                // pre-#6211 first-pool-match.
                 synced_source_nat_zone_pair(forwarding, &metadata),
-                // #6528: the stale-tuple eviction inside `reserve_flow` retires
-                // the incumbent with release semantics; a persistent lease that
-                // falls to zero active flows re-arms its idle expiry off this
-                // clock.
                 now_ns,
-                // #6211 F2: record this worker as a HOLDER. Every worker
-                // reserves the same `(flow, translated)` against ONE shared
-                // allocator; without the holder bit the first worker to reap or
-                // delete-sync frees a port the others still forward through.
                 worker_id,
                 synced_domains,
             );
-            if persistent_hold_16615.is_some() {
-                sessions.set_persistent_lease_hold(&key, persistent_hold_16615);
-            }
+            sessions.set_persistent_lease_hold(&key, persistent_hold_for_install);
             // #4512: same treatment for NAT64. The translated `(pool v4, port)`
             // rides the synced `NatDecision` (`rewrite_src_port`), but the
             // standby never runs `allocate_source`, so without this its NAT64
@@ -348,5 +419,13 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             entry_origin,
             allow_replace_local,
         );
+    } else if acquired_persistent_hold {
+        if let Some(hold) = persistent_hold_for_install {
+            crate::nat::release_recorded_persistent_inbound_hold(
+                &forwarding.source_nat_rules,
+                hold,
+                now_ns,
+            );
+        }
     }
 }

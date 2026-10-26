@@ -182,35 +182,29 @@ pub(crate) fn release_source_nat_allocation_for_worker(
 /// No-op for non-persistent DNAT/static decisions (no lease matches).
 /// #16615: release exactly the recorded lease hold on its granting allocator.
 /// Returns true when a recorded hold was consumed. No re-derivation.
+///
+/// #17683: when the granting allocator is no longer in the rule set, the
+/// recorded hold must NOT be replayed onto every current pool allocator:
+/// `PersistentSourceKey` carries no pool identity, so a distinct pool can
+/// hold a lease under the identical key, and replaying would decrement an
+/// unrelated tenant's reference. The hold is released only where it was
+/// granted; an absent granting allocator means the reference already died
+/// with that allocator, so nothing remains to account.
 pub(crate) fn release_recorded_persistent_inbound(
     rules: &[SourceNatRule],
-    hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    hold: Option<crate::nat::PersistentLeaseHold>,
     now_ns: u64,
 ) -> bool {
-    let Some((lease_key, allocator_id)) = hold else {
+    let Some(hold) = hold else {
         return false;
     };
-    for rule in rules {
-        if rule.pool_mode && rule.pool_allocator.debug_shared_identity() == allocator_id {
-            rule.pool_allocator.release_persistent_inbound(lease_key, now_ns);
-            return true;
-        }
-    }
-    // Granting allocator no longer in rule set (config changed): fall back to
-    // releasing the exact key on every pool allocator. Key is exact, so this
-    // cannot touch another tenant's lease.
-    for rule in rules {
-        if rule.pool_mode {
-            rule.pool_allocator.release_persistent_inbound(lease_key, now_ns);
-        }
-    }
-    true
+    super::release_recorded_persistent_inbound_hold(rules, hold, now_ns)
 }
 
 /// #16615: rollback twin.
 pub(crate) fn rollback_recorded_persistent_inbound(
     rules: &[SourceNatRule],
-    hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    hold: Option<crate::nat::PersistentLeaseHold>,
     now_ns: u64,
 ) -> bool {
     release_recorded_persistent_inbound(rules, hold, now_ns)
@@ -256,7 +250,7 @@ pub(crate) fn release_persistent_inbound_with_hold(
     rules: &[SourceNatRule],
     key: &crate::session::SessionKey,
     nat: NatDecision,
-    hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    hold: Option<crate::nat::PersistentLeaseHold>,
     now_ns: u64,
 ) {
     if hold.is_some() {
@@ -274,11 +268,35 @@ pub(crate) fn release_source_nat_allocation_for_worker_with_hold(
     is_reverse: bool,
     now_ns: u64,
     worker_id: u32,
-    hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    hold: Option<crate::nat::PersistentLeaseHold>,
 ) {
     if !is_reverse {
         release_persistent_inbound_with_hold(rules, key, nat, hold, now_ns);
     }
+    release_source_nat_allocation_with_mode(
+        iface_allocs,
+        rules,
+        key,
+        nat,
+        is_reverse,
+        now_ns,
+        false,
+        NatHolder::Worker(worker_id),
+    );
+}
+
+/// #17683: release only the ordinary source-NAT allocation, keeping an
+/// already-recorded inbound persistent hold anchored to its unchanged
+/// session incarnation.
+pub(crate) fn release_source_nat_allocation_for_worker_preserving_persistent_hold(
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+    worker_id: u32,
+) {
     release_source_nat_allocation_with_mode(
         iface_allocs,
         rules,
@@ -298,11 +316,33 @@ pub(crate) fn release_synced_source_nat_allocation_untracked_with_hold(
     nat: NatDecision,
     is_reverse: bool,
     now_ns: u64,
-    hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    hold: Option<crate::nat::PersistentLeaseHold>,
 ) -> bool {
     if !is_reverse {
         release_persistent_inbound_with_hold(rules, key, nat, hold, now_ns);
     }
+    release_source_nat_allocation_with_mode(
+        iface_allocs,
+        rules,
+        key,
+        nat,
+        is_reverse,
+        now_ns,
+        false,
+        NatHolder::Untracked,
+    )
+}
+
+/// Release only the coordinator's untracked source-NAT reservation, leaving
+/// any existing recorded inbound persistent hold untouched.
+pub(crate) fn release_synced_source_nat_allocation_untracked_preserving_persistent_hold(
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> bool {
     release_source_nat_allocation_with_mode(
         iface_allocs,
         rules,
@@ -323,7 +363,7 @@ pub(crate) fn rollback_source_nat_allocation_for_worker_with_hold(
     is_reverse: bool,
     now_ns: u64,
     worker_id: u32,
-    hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    hold: Option<crate::nat::PersistentLeaseHold>,
 ) {
     if !is_reverse {
         // rollback is same allocator op as release for persistent holds

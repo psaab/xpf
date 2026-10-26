@@ -487,7 +487,7 @@ fn adoption_candidate_for_wire(
         key: canonical.clone(),
         decision,
         metadata,
-        persistent_lease_hold: None,
+        persistent_lease_hold: sessions.persistent_lease_hold_for(&canonical),
         source_nat_static: None,
         leak_incarnation: 0,
         origin,

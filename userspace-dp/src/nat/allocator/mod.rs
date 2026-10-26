@@ -226,6 +226,38 @@ pub(crate) struct PersistentSourceKey {
     pub(crate) remote: Option<(IpAddr, u16)>,
 }
 
+/// Exact ownership of one inbound reference on one persistent lease.
+///
+/// `allocator_id` prevents a hold from crossing pools; `incarnation` prevents
+/// an old hold from decrementing a lease re-minted under the same source key.
+/// `owner` distinguishes the worker's copied publication token from an
+/// independently acquired coordinator-import reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PersistentLeaseOwner {
+    LocalWorker,
+    CoordinatorImported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PersistentLeaseHold {
+    pub(crate) key: PersistentSourceKey,
+    pub(crate) allocator_id: usize,
+    pub(crate) incarnation: u64,
+    pub(crate) owner: PersistentLeaseOwner,
+}
+
+impl PersistentLeaseHold {
+    pub(crate) fn same_lease(self, other: Self) -> bool {
+        self.key == other.key
+            && self.allocator_id == other.allocator_id
+            && self.incarnation == other.incarnation
+    }
+
+    pub(crate) fn with_owner(self, owner: PersistentLeaseOwner) -> Self {
+        Self { owner, ..self }
+    }
+}
+
 /// #14322: egress-zone scope for persistent-NAT inbound PERMISSIONS.
 /// `0` is the unscoped sentinel (NAT64 BIBs, legacy/imported records, direct
 /// allocator calls). Lease identity (`PersistentSourceKey`) intentionally
@@ -1058,6 +1090,9 @@ pub(super) const DETERMINISTIC_NAT64_BIB_TIMEOUT_NS: u64 = 300 * NS_PER_SEC;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PersistentLease {
     pub(super) translated: TranslatedTuple,
+    /// Unique in-process identity for this lease incarnation. Zero is reserved
+    /// for newly constructed records until `insert_persistent_lease` stamps it.
+    pub(super) incarnation: u64,
     pub(super) addr_index: usize,
     pub(super) expires_at_ns: u64,
     pub(super) timeout_ns: u64,
@@ -1156,6 +1191,7 @@ pub(crate) struct SourceNatReservationSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PersistentLeaseDebugState {
     pub(crate) translated: TranslatedTuple,
+    pub(crate) incarnation: u64,
     pub(crate) addr_index: usize,
     pub(crate) expires_at_ns: u64,
     pub(crate) timeout_ns: u64,
@@ -1385,8 +1421,14 @@ impl PortAllocatorLiveState {
     pub(super) fn insert_persistent_lease(
         &mut self,
         key: PersistentSourceKey,
-        lease: PersistentLease,
+        mut lease: PersistentLease,
     ) -> Option<PersistentLease> {
+
+        // A copied lease (e.g. reservation rollback snapshot) retains its
+        // identity. Freshly built/imported records receive a new one here.
+        if lease.incarnation == 0 {
+            lease.incarnation = next_persistent_lease_incarnation();
+        }
         let previous = self.persistent_by_source.insert(key, lease);
         if let Some(previous) = previous {
             self.remove_persistent_address_only_owner(key, previous);
@@ -1930,6 +1972,19 @@ const GC_CHUNK: usize = 8;
 /// from constructions they perform themselves, never absolute values, so
 /// parallel `cargo test` threads cannot flake on the shared sequence (#6819).
 static NEXT_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(1);
+
+/// In-process lease-incarnation identity, never serialized. A stale session
+/// hold must not release a later lease that reused its `PersistentSourceKey`.
+static NEXT_PERSISTENT_LEASE_INCARNATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_persistent_lease_incarnation() -> u64 {
+    let incarnation = NEXT_PERSISTENT_LEASE_INCARNATION.fetch_add(1, Ordering::Relaxed);
+    if incarnation == 0 {
+        NEXT_PERSISTENT_LEASE_INCARNATION.fetch_add(1, Ordering::Relaxed)
+    } else {
+        incarnation
+    }
+}
 
 fn next_allocator_id() -> u64 {
     NEXT_ALLOCATOR_ID.fetch_add(1, Ordering::Relaxed)
@@ -2612,20 +2667,77 @@ impl PortAllocator {
         keys.iter().next().copied()
     }
 
+    /// Return the exact live lease owner and incarnation for a source key.
+    /// The caller still validates the translated tuple before acquiring it.
+    pub(crate) fn persistent_lease_hold(
+        &self,
+        key: PersistentSourceKey,
+    ) -> Option<PersistentLeaseHold> {
+        let incarnation = self.lock_live().persistent_by_source.get(&key)?.incarnation;
+        Some(PersistentLeaseHold {
+            key,
+            allocator_id: self.debug_shared_identity(),
+            owner: PersistentLeaseOwner::LocalWorker,
+            incarnation,
+        })
+    }
+
     /// #15111: take an inbound reference on a persistent lease. Returns
     /// false if the lease is gone/revoked/expired-idle. On the 0->1 inbound
     /// edge with no outbound flows, removes the idle expiry index entry.
     pub(crate) fn acquire_persistent_inbound(&self, key: PersistentSourceKey, now_ns: u64) -> bool {
+        self.acquire_persistent_inbound_checked(key, None, None, now_ns)
+            .is_some()
+    }
+
+    /// Take an inbound reference and return the exact allocator/lease owner.
+    pub(crate) fn acquire_persistent_inbound_with_hold(
+        &self,
+        key: PersistentSourceKey,
+        now_ns: u64,
+    ) -> Option<PersistentLeaseHold> {
+        self.acquire_persistent_inbound_checked(key, None, None, now_ns)
+    }
+
+    /// Acquire from a recorded hold. Both allocator and lease incarnation must
+    /// still match, and the wire tuple must still name this lease.
+    pub(crate) fn acquire_persistent_inbound_for_hold(
+        &self,
+        hold: PersistentLeaseHold,
+        expected_translated: TranslatedTuple,
+        now_ns: u64,
+    ) -> bool {
+        if hold.allocator_id != self.debug_shared_identity() {
+            return false;
+        }
+        self.acquire_persistent_inbound_checked(
+            hold.key,
+            Some(hold.incarnation),
+            Some(expected_translated),
+            now_ns,
+        )
+        .is_some()
+    }
+
+    fn acquire_persistent_inbound_checked(
+        &self,
+        key: PersistentSourceKey,
+        expected_incarnation: Option<u64>,
+        expected_translated: Option<TranslatedTuple>,
+        now_ns: u64,
+    ) -> Option<PersistentLeaseHold> {
         let mut live = self.lock_live();
         let Some(lease) = live.persistent_by_source.get(&key).copied() else {
-            return false;
+            return None;
         };
-        if lease.revoked
+        if expected_incarnation.is_some_and(|incarnation| incarnation != lease.incarnation)
+            || expected_translated.is_some_and(|translated| translated != lease.translated)
+            || lease.revoked
             || (lease.active_flows == 0
                 && lease.inbound_flows == 0
                 && lease.expires_at_ns <= now_ns)
         {
-            return false;
+            return None;
         }
         if lease.inbound_flows == 0 && lease.active_flows == 0 {
             Self::remove_lease_expiration_locked(
@@ -2638,7 +2750,12 @@ impl PortAllocator {
         if let Some(l) = live.persistent_by_source.get_mut(&key) {
             l.inbound_flows = l.inbound_flows.saturating_add(1);
         }
-        true
+        Some(PersistentLeaseHold {
+            key,
+            allocator_id: self.debug_shared_identity(),
+            owner: PersistentLeaseOwner::LocalWorker,
+            incarnation: lease.incarnation,
+        })
     }
     /// #15111: release one inbound reference; on last holder re-arms expiry.
     /// #16652: on last holder of a revoked lease, also downgrade the
@@ -2646,15 +2763,39 @@ impl PortAllocator {
     /// `complete_persistent_lease_locked` / `rollback_flow`), otherwise the
     /// key stays clear-fenced forever and is never pruned.
     pub(crate) fn release_persistent_inbound(&self, key: PersistentSourceKey, now_ns: u64) {
+        let _ = self.release_persistent_inbound_checked(key, None, now_ns);
+    }
+
+    /// Release only if this exact lease incarnation remains installed.
+    pub(crate) fn release_persistent_inbound_for_hold(
+        &self,
+        hold: PersistentLeaseHold,
+        now_ns: u64,
+    ) -> bool {
+        if hold.allocator_id != self.debug_shared_identity() {
+            return false;
+        }
+        self.release_persistent_inbound_checked(hold.key, Some(hold.incarnation), now_ns)
+    }
+
+    fn release_persistent_inbound_checked(
+        &self,
+        key: PersistentSourceKey,
+        expected_incarnation: Option<u64>,
+        now_ns: u64,
+    ) -> bool {
         let mut live = self.lock_live();
+        let Some(current) = live.persistent_by_source.get(&key).copied() else {
+            return false;
+        };
+        if expected_incarnation.is_some_and(|incarnation| incarnation != current.incarnation)
+            || current.inbound_flows == 0
+        {
+            return false;
+        }
         let mut refresh = None;
         let revoked_until_ns = live.revoked_persistent.get(&key).copied();
-        let mut revoked = false;
-        if let Some(lease) = live.persistent_by_source.get_mut(&key) {
-            if lease.inbound_flows == 0 {
-                return;
-            }
-            revoked = lease.revoked;
+        let revoked = if let Some(lease) = live.persistent_by_source.get_mut(&key) {
             lease.inbound_flows = lease.inbound_flows.saturating_sub(1);
             if lease.inbound_flows == 0 && lease.active_flows == 0 {
                 let old = lease.expires_at_ns;
@@ -2666,7 +2807,10 @@ impl PortAllocator {
                 lease.expires_at_ns = new;
                 refresh = Some((lease.addr_index, old, new));
             }
-        }
+            lease.revoked
+        } else {
+            return false;
+        };
         if revoked
             && revoked_until_ns == Some(ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS)
             && refresh.is_some()
@@ -2680,6 +2824,7 @@ impl PortAllocator {
             Self::remove_lease_expiration_locked(&mut live, addr, old, key);
             Self::insert_lease_expiration_locked(&mut live, addr, new, key);
         }
+        true
     }
     /// #15111: rollback an inbound hold for a failed install (same as release).
     pub(crate) fn rollback_persistent_inbound(&self, key: PersistentSourceKey, now_ns: u64) {
@@ -3240,7 +3385,7 @@ impl PortAllocator {
     /// so a white-box test can assert both the reclaim result and the seam
     /// (`debug_gc_lock_acquisitions`).
     #[cfg(test)]
-    pub(super) fn debug_gc_expired_chunked(&self, now_ns: u64, budget: usize) -> usize {
+    pub(crate) fn debug_gc_expired_chunked(&self, now_ns: u64, budget: usize) -> usize {
         self.gc_expired_chunked(now_ns, budget)
     }
 
@@ -4065,6 +4210,7 @@ impl PortAllocator {
                         key,
                         PersistentLease {
                             translated,
+                            incarnation: 0,
                             addr_index: abs,
                             expires_at_ns,
                             timeout_ns,
@@ -4564,6 +4710,7 @@ impl PortAllocator {
         let lease = *live.persistent_by_source.get(&key)?;
         Some(PersistentLeaseDebugState {
             translated: lease.translated,
+            incarnation: lease.incarnation,
             addr_index: lease.addr_index,
             expires_at_ns: lease.expires_at_ns,
             timeout_ns: lease.timeout_ns,
@@ -5491,6 +5638,7 @@ impl PortAllocator {
                 bib_key,
                 PersistentLease {
                     translated,
+                    incarnation: 0,
                     addr_index: ip_idx,
                     expires_at_ns,
                     timeout_ns: DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
@@ -6521,6 +6669,7 @@ impl PortAllocator {
                 persistent_key,
                 PersistentLease {
                     translated,
+                    incarnation: 0,
                     addr_index,
                     expires_at_ns: now_ns.saturating_add(timeout_ns),
                     timeout_ns,
@@ -6850,6 +6999,7 @@ impl PortAllocator {
                         persistent_key,
                         PersistentLease {
                             translated,
+                            incarnation: 0,
                             addr_index,
                             expires_at_ns: now_ns.saturating_add(timeout_ns),
                             timeout_ns,
@@ -7834,6 +7984,7 @@ impl PortAllocator {
                 key,
                 PersistentLease {
                     translated,
+                    incarnation: 0,
                     addr_index,
                     expires_at_ns,
                     timeout_ns,

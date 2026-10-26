@@ -92,12 +92,14 @@ mod match_rules;
 mod nat64_ports;
 mod overlap;
 mod release;
+mod shared_hold;
 mod synced;
 pub(crate) use expand::*;
 pub(crate) use failure::*;
 pub(crate) use match_rules::*;
 pub(crate) use nat64_ports::*;
 pub(crate) use overlap::*;
+pub(crate) use shared_hold::*;
 pub(crate) use release::*;
 pub(crate) use synced::*;
 

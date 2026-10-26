@@ -102,6 +102,28 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
         replica.leak_incarnation =
             leak_incarnation_for_session(forwarding, replica.decision, target).unwrap_or(0);
     }
+    let incumbent_persistent_hold = sessions.persistent_lease_hold_for(&replica.key);
+    // A shared row's hold belongs to its publisher, not this worker. Acquire
+    // one local reference on that exact allocator and lease incarnation
+    // before installing a releasable local hold. The destination tuple check
+    // prevents a stale row from joining a different lease under the same key.
+    let acquired_persistent_hold = if let Some(hold) = replica.persistent_lease_hold {
+        let expected_translated = crate::nat::TranslatedTuple {
+            ip: replica.key.dst_ip,
+            port: replica.key.dst_port,
+        };
+        if !crate::nat::acquire_recorded_persistent_inbound_hold(
+            &forwarding.source_nat_rules,
+            hold,
+            expected_translated,
+            now_ns,
+        ) {
+            return (resolved.lookup.clone(), true);
+        }
+        Some(hold.with_owner(crate::nat::PersistentLeaseOwner::LocalWorker))
+    } else {
+        None
+    };
     let materialized = sessions.upsert_synced_with_origin(
         SessionInstall {
             key: replica.key.clone(),
@@ -120,7 +142,7 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
             // worker that happens to see its next packet.
             tcp_close_class: replica.tcp_close_class,
             tcp_handshake_state: replica.tcp_handshake_state,
-            persistent_lease_hold: replica.persistent_lease_hold,
+            persistent_lease_hold: acquired_persistent_hold,
             // #16217 (run11): a materialized shared hit inherits the
             // shared row's carried service counts, exactly as it
             // inherits the id and close class above.
@@ -130,6 +152,25 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
         },
         fabric_adopted,
     );
+    if materialized {
+        // The install replaced and discarded the incumbent table entry. Its
+        // exact local reference is no longer owned, even when the new entry
+        // selected the same lease (the pre-install acquire made a second one).
+        if let Some(hold) = incumbent_persistent_hold {
+            crate::nat::release_recorded_persistent_inbound_hold(
+                &forwarding.source_nat_rules,
+                hold,
+                now_ns,
+            );
+        }
+    } else if let Some(hold) = acquired_persistent_hold {
+        // A refused materialization did not adopt the local reference.
+        crate::nat::release_recorded_persistent_inbound_hold(
+            &forwarding.source_nat_rules,
+            hold,
+            now_ns,
+        );
+    }
     // A refused shared repair must not mutate the incumbent local row's
     // leak provenance. The stamp is evidence for the materialized replica
     // only; failed clobber attempts return install_failed instead.

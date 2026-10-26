@@ -2949,7 +2949,6 @@ fn persistent_inbound_last_release_downgrades_clear_tombstone_16652() {
 fn persistent_inbound_recorded_hold_releases_cross_domain_lease_16615() {
     let rules = persistent_pool_rules(1, 40000, 40010);
     let alloc = &rules[0].pool_allocator;
-    let alloc_id = alloc.debug_shared_identity();
 
     let mint_scoped = |scope: u32, now_ns: u64| {
         let mut counter = None;
@@ -3008,10 +3007,12 @@ fn persistent_inbound_recorded_hold_releases_cross_domain_lease_16615() {
     }
 
     // Both inbound sessions acquire on their own lease (recorded holds).
-    let hold_a = (lease_for(7), alloc_id);
-    let hold_b = (lease_for(0), alloc_id);
-    assert!(alloc.acquire_persistent_inbound(hold_a.0, 1_500_000_000));
-    assert!(alloc.acquire_persistent_inbound(hold_b.0, 1_500_000_000));
+    let hold_a = alloc
+        .acquire_persistent_inbound_with_hold(lease_for(7), 1_500_000_000)
+        .expect("A lease must grant the inbound hold");
+    let hold_b = alloc
+        .acquire_persistent_inbound_with_hold(lease_for(0), 1_500_000_000)
+        .expect("B lease must grant the inbound hold");
     for (scope, want) in [(7u32, 1u32), (0u32, 1u32)] {
         let lease = alloc
             .debug_persistent_lease_for_flow(&flow_for(scope), PersistentNatPermit::AnyRemoteHost)
@@ -3069,6 +3070,170 @@ fn persistent_inbound_recorded_hold_releases_cross_domain_lease_16615() {
         .debug_persistent_lease_for_flow(&flow_for(0), PersistentNatPermit::AnyRemoteHost)
         .expect("B remains until expiry");
     assert_eq!(b.inbound_flows, 0, "domain-0 recorded release unchanged");
+}
+
+/// #17683: absence of the granting allocator is not permission to release
+/// the same private key from every remaining pool. Different pools can carry
+/// overlapping internal lease keys; only the recorded owner may lose a hold.
+#[test]
+fn recorded_release_with_missing_allocator_preserves_other_pool_17683() {
+    let rules_a = persistent_pool_rules(1, 40000, 40010);
+    let rules_b = persistent_pool_rules(1, 40000, 40010);
+    let allocator_a_id = rules_a[0].pool_allocator.debug_shared_identity();
+    let alloc_b = &rules_b[0].pool_allocator;
+    assert_ne!(allocator_a_id, alloc_b.debug_shared_identity());
+
+    // Mint an idle same-key lease in B. A session whose grant came from A is
+    // later torn down after A has been removed from the current rule set.
+    let mut counter = None;
+    let nat = expect_snat_decision(match_source_nat_result_for_tuple(
+        &InterfaceNatAllocators::default(),
+        &rules_b,
+        &NatScopeCtx {
+            routing_domain: 0,
+            ..NatScopeCtx::default()
+        },
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        Some(6),
+        12345,
+        53,
+        None,
+        None,
+        1_000_000_000,
+        false,
+        false,
+        NatHolder::Untracked,
+        &mut counter,
+    ));
+    let outbound_key = session_key(12345, "8.8.8.8", 53);
+    crate::nat::release_source_nat_allocation(
+        &InterfaceNatAllocators::default(),
+        &rules_b,
+        &outbound_key,
+        nat,
+        false,
+        1_000_000_001,
+    );
+    let lease_key = PersistentSourceKey {
+        protocol: 6,
+        src_ip: "10.0.1.100".parse().unwrap(),
+        src_port: 12345,
+        routing_scope: 0,
+        remote: None,
+    };
+    let hold_b = alloc_b
+        .acquire_persistent_inbound_with_hold(lease_key, 1_500_000_000)
+        .expect("B lease hold");
+    assert_eq!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(1)
+    );
+
+    let missing_owner_released = crate::nat::release_recorded_persistent_inbound(
+        &rules_b,
+        Some(crate::nat::PersistentLeaseHold {
+            key: lease_key,
+            allocator_id: allocator_a_id,
+            incarnation: 1,
+            owner: crate::nat::PersistentLeaseOwner::LocalWorker,
+        }),
+        3_000_000_000,
+    );
+    assert_eq!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(1),
+        "a same-key lease in another pool is not the missing owner's hold"
+    );
+    assert!(
+        !missing_owner_released,
+        "removed granting allocator must be reported as absent"
+    );
+    assert_eq!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(1),
+        "a same-key lease in another pool is not the missing owner's hold"
+    );
+
+    // Owner-present control: B's own recorded allocator identity still
+    // consumes exactly one hold and permits the now-idle lease to GC.
+    assert!(crate::nat::release_recorded_persistent_inbound(
+        &rules_b,
+        Some(hold_b),
+        3_000_000_000,
+    ));
+    assert_eq!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(0),
+        "the correct pool's owner-present control releases the lease"
+    );
+    let _ = alloc_b.debug_gc_expired_chunked(5_000_000_000, 16);
+    assert!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .is_none(),
+        "released owner-present lease must age out after its expiry"
+    );
 }
 
 #[test]
@@ -8024,6 +8189,7 @@ fn install_expired_idle_leases(
                         ip: IpAddr::V4(ip),
                         port,
                     },
+                    incarnation: 0,
                     addr_index,
                     expires_at_ns,
                     timeout_ns: NS_PER_SEC,
@@ -8130,6 +8296,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                     ip: IpAddr::V4(ip),
                     port: 2000,
                 },
+                incarnation: 0,
                 addr_index: 0,
                 expires_at_ns: 500,
                 timeout_ns: NS_PER_SEC,
@@ -8155,6 +8322,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                     ip: IpAddr::V4(ip),
                     port: 2001,
                 },
+                incarnation: 0,
                 addr_index: 0,
                 expires_at_ns: 10_000,
                 timeout_ns: NS_PER_SEC,

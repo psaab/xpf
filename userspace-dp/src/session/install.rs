@@ -412,6 +412,7 @@ impl SessionTable {
                 ingress_ifindex: forward_entry.metadata.ingress_ifindex,
                 ingress_vlan_id: forward_entry.metadata.ingress_vlan_id,
                 owner_rg_id: forward_entry.metadata.owner_rg_id,
+                persistent_lease_hold: forward_entry.persistent_lease_hold,
                 policy_id: forward_entry.metadata.policy_id,
             });
             if companion_is_unreplied == Some(true) {
@@ -430,6 +431,7 @@ impl SessionTable {
                         ingress_ifindex: companion_entry.metadata.ingress_ifindex,
                         ingress_vlan_id: companion_entry.metadata.ingress_vlan_id,
                         owner_rg_id: companion_entry.metadata.owner_rg_id,
+                        persistent_lease_hold: companion_entry.persistent_lease_hold,
                         policy_id: companion_entry.metadata.policy_id,
                     });
                 }

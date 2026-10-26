@@ -739,6 +739,7 @@ impl PortAllocator {
             key,
             PersistentLease {
                 translated,
+                incarnation: 0,
                 addr_index,
                 expires_at_ns,
                 timeout_ns,

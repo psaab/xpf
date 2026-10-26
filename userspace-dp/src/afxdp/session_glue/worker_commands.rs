@@ -1267,13 +1267,15 @@ check: u32,) {
 /// binary, which the globals cannot offer (they are shared across the parallel
 /// test threads, so `before + 1` is a flake waiting for a busy run).
 #[allow(clippy::too_many_arguments)]
-pub(in crate::afxdp) fn replicate_session_delete_repairing(peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
-forwarding: &ForwardingState,
-key: &SessionKey,
-nat: NatDecision,
-is_reverse: bool,
-now_ns: u64,) -> DeleteReplicationOutcome {
+pub(in crate::afxdp) fn replicate_session_delete_repairing(
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    forwarding: &ForwardingState,
+    key: &SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> DeleteReplicationOutcome {
     let mut outcome = DeleteReplicationOutcome::default();
     for commands in peer_worker_commands {
         let mut pending = worker_queue::lock_recover(commands);
@@ -1301,10 +1303,10 @@ now_ns: u64,) -> DeleteReplicationOutcome {
         if let Some(epoch) = SESSION_DELETE_DROP_EPOCH.get(worker_id as usize) {
             epoch.fetch_add(1, Ordering::Relaxed);
         }
-        // Byte-for-byte the two releases `handle_delete_synced` would have run,
-        // with that worker's id as the holder, so the mask empties on the same
-        // last-release rule and the port is returned exactly once.
-        release_source_nat_allocation_for_worker(
+        // Repair only this worker's ordinary NAT reservation holder. The
+        // refused worker's delete-drop sweep owns its local recorded inbound
+        // persistent hold and must consume that reference exactly once.
+        crate::nat::release_source_nat_allocation_for_worker_preserving_persistent_hold(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,
             key,

@@ -699,14 +699,18 @@ pub(super) fn acquire_persistent_inbound_hold(
     hold: Option<crate::nat::PersistentSourceKey>,
     decision_nat: crate::nat::NatDecision,
     now_ns: u64,
-) -> Option<(crate::nat::PersistentSourceKey, usize)> {
+) -> Option<crate::nat::PersistentLeaseHold> {
     let key = hold?;
     if decision_nat.rewrite_dst.is_none() || decision_nat.nat64 || decision_nat.nptv6 {
         return None;
     }
     for rule in &forwarding.source_nat_rules {
-        if rule.pool_mode && rule.pool_allocator.acquire_persistent_inbound(key, now_ns) {
-            return Some((key, rule.pool_allocator.debug_shared_identity()));
+        if rule.pool_mode
+            && let Some(hold) = rule
+                .pool_allocator
+                .acquire_persistent_inbound_with_hold(key, now_ns)
+        {
+            return Some(hold);
         }
     }
     None
@@ -727,6 +731,22 @@ pub(super) fn rollback_persistent_inbound_hold(
             rule.pool_allocator.rollback_persistent_inbound(key, now_ns);
         }
     }
+}
+
+/// Roll back a reference already acquired from a recorded owner.
+pub(super) fn rollback_recorded_persistent_inbound_hold(
+    forwarding: &crate::afxdp::ForwardingState,
+    hold: Option<crate::nat::PersistentLeaseHold>,
+    now_ns: u64,
+) {
+    let Some(hold) = hold else {
+        return;
+    };
+    crate::nat::rollback_recorded_persistent_inbound(
+        &forwarding.source_nat_rules,
+        Some(hold),
+        now_ns,
+    );
 }
 
 pub(super) fn poll_binding_process_descriptor_with_injection(
@@ -7090,9 +7110,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         worker_id,
                                     );
                                     if persistent_inbound_acquired.is_some() {
-                                        rollback_persistent_inbound_hold(
+                                        rollback_recorded_persistent_inbound_hold(
                                             worker_ctx.forwarding,
-                                            persistent_lease_hold,
+                                            persistent_inbound_acquired,
                                             now_ns,
                                         );
                                         persistent_inbound_acquired = None;
@@ -7163,9 +7183,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         worker_id,
                                     );
                                     if persistent_inbound_acquired.is_some() {
-                                        rollback_persistent_inbound_hold(
+                                        rollback_recorded_persistent_inbound_hold(
                                             worker_ctx.forwarding,
-                                            persistent_lease_hold,
+                                            persistent_inbound_acquired,
                                             now_ns,
                                         );
                                         persistent_inbound_acquired = None;
@@ -7196,9 +7216,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         worker_id,
                                     );
                                     if persistent_inbound_acquired.is_some() {
-                                        rollback_persistent_inbound_hold(
+                                        rollback_recorded_persistent_inbound_hold(
                                             worker_ctx.forwarding,
-                                            persistent_lease_hold,
+                                            persistent_inbound_acquired,
                                             now_ns,
                                         );
                                         persistent_inbound_acquired = None;
@@ -7328,9 +7348,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     {
                                         sessions.note_admission_refused();
                                         if persistent_inbound_acquired.is_some() {
-                                            rollback_persistent_inbound_hold(
+                                            rollback_recorded_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
-                                                persistent_lease_hold,
+                                                persistent_inbound_acquired,
                                                 now_ns,
                                             );
                                             persistent_inbound_acquired = None;
@@ -7485,9 +7505,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             Err(_) => {
                                                 sessions.note_admission_refused();
                                                 if persistent_inbound_acquired.is_some() {
-                                                    rollback_persistent_inbound_hold(
+                                                    rollback_recorded_persistent_inbound_hold(
                                                         worker_ctx.forwarding,
-                                                        persistent_lease_hold,
+                                                        persistent_inbound_acquired,
                                                         now_ns,
                                                     );
                                                     persistent_inbound_acquired = None;
@@ -7700,9 +7720,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         );
                                         sessions.note_install_partial();
                                         if persistent_inbound_acquired.is_some() {
-                                            rollback_persistent_inbound_hold(
+                                            rollback_recorded_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
-                                                persistent_lease_hold,
+                                                persistent_inbound_acquired,
                                                 now_ns,
                                             );
                                             persistent_inbound_acquired = None;
@@ -7837,7 +7857,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             .expect("installed forward session info")
                                             .handshake_state_wire, rev_packets: sessions.rev_packets_for(&flow.forward_key), fwd_packets: sessions.fwd_packets_for(&flow.forward_key), pptp_call_ids: sessions
                                         .pptp_call_ids_wire_for(&flow.forward_key),
-    persistent_lease_hold: None,
+                                        persistent_lease_hold: sessions.persistent_lease_hold_for(&flow.forward_key),
 };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
@@ -7980,9 +8000,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // DNS fast-path (its guard requires no
                                         // NAT).
                                         if persistent_inbound_acquired.is_some() {
-                                            rollback_persistent_inbound_hold(
+                                            rollback_recorded_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
-                                                persistent_lease_hold,
+                                                persistent_inbound_acquired,
                                                 now_ns,
                                             );
                                             persistent_inbound_acquired = None;
@@ -13004,7 +13024,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         tcp_close_class: 0, tcp_handshake_state: pending_install_info
                                             .expect("installed neighbor seed info")
                                             .handshake_state_wire, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
-    persistent_lease_hold: None,
+    persistent_lease_hold: sessions.persistent_lease_hold_for(&flow.forward_key),
 };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,

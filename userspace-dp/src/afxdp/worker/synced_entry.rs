@@ -85,8 +85,8 @@ pub(crate) struct SyncedSessionEntry {
     /// this entry's pair is only read when re-exporting a peer-originated
     /// session this node adopted.
     pub(crate) pptp_call_ids: u64,
-    /// #16615: exact persistent lease hold acquired for this synced session, if any.
-    pub(crate) persistent_lease_hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    /// #16615/#17683: exact persistent lease allocator/incarnation hold.
+    pub(crate) persistent_lease_hold: Option<crate::nat::PersistentLeaseHold>,
 }
 
 impl SyncedSessionEntry {
