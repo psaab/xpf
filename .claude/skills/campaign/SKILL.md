@@ -35,7 +35,13 @@ driveable work remains.
   watch are standing lanes outside this count (see "The keeper" and
   "Continuous smoke watch"). At the cap, queue new lanes instead of
   dispatching; refill as completions land. On a 16-core box:
-  ceiling 32, campaign cap 26.
+  ceiling 32, campaign cap 26. The cap is parent-counted against
+  the live task registry (`proc://`): every dispatched task job —
+  engineer, reviewer, or scout, whatever its agent type — counts
+  as one live campaign agent until it completes. The keeper board
+  summary line and the parent's appended lane table both carry the
+  live count vs cap (`agents=<n>/<2*nproc-6>`) so a breach is
+  visible at the next keeper tick instead of only in hindsight.
 - **Keep lanes full, parallelism high**: never let engineer or reviewer lanes
   idle while driveable work exists. Reap idle/dead agents and refill from the
   lowest-number queue. Parent does folds/small fixes inline when faster than
@@ -212,7 +218,9 @@ coarse at TB scale, 1% ≈ 40G here, and would read zero while tens
 of GB/hour are consumed; prune the history with the board
 rotation), AND
 prints exactly one summary line per tick to stdout (`keeper:
-prs=<n> issues=<total> oldest-verdict-age=<dur> stale-lanes=<n>`)
+prs=<n> issues=<total> oldest-verdict-age=<dur> stale-lanes=<n>
+agents=<n>/<2*nproc-6>` — the parent supplies the live-agent count
+from its task registry; the keeper prints it verbatim)
 — Monitor wakes the parent on stdout lines; a silent file rewrite
 alerts nobody. The keeper has exactly ONE power: observe and alert.
 It NEVER dispatches, reaps, refills, reviews, or merges — the
