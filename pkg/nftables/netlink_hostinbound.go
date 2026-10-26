@@ -69,7 +69,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
-		emitHostInboundICMPAcceptsNetlink(p, spec.Views)
+		emitHostInboundICMPAcceptsNetlink(p, spec.Views, spec.Programs)
 		for i, prog := range spec.Programs {
 			emitJunosHostProgramJumpNetlink(p, i, prog)
 		}
@@ -86,7 +86,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
-		emitHostInboundICMPAcceptsNetlink(p, spec.Views)
+		emitHostInboundICMPAcceptsNetlink(p, spec.Views, nil)
 	}
 
 	// #10751/#11577: scoped DHCPv6 server replies pass before the backstop
@@ -305,25 +305,21 @@ func hostInboundAnyNDPDefault(views []HostInboundZoneView) bool {
 	return false
 }
 
-// emitHostInboundNDPAcceptsNetlink emits the ND (133-136) accepts
-// scoped to each retaining view's ingress (#15931), mirroring
-// emitHostInboundNDPAcceptsText rule-for-rule. Per retaining view:
-// (a) an ingress-scoped admit covering BOTH the zone unicast
-// destination union and link-scope multicast (ff02::/16); (b) a
-// destination fallback for views with no ingress scope, even when a
-// sibling has ingress. Any-service retaining views are skipped (the
-// bare full admit already covers ND; #6618 lock). Excluding views
-// emit nothing. The unscoped accept is emitted ONLY when no view
-// carries any scope at all OR no view excludes ndp (Codex F1).
-// counted attaches the aggregate ND counter (steady state); fence
-// callers pass counted=false (no counter objects in fences, #5719).
-// #16861: each VRF scope ALSO emits the ND admit keyed on the member
-// as iifname (NDISC presents member iifname, sdif unset).
-func emitHostInboundNDPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView) {
-	emitHostInboundNDPAcceptsCountedNetlink(p, views, true)
-}
-
-func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneView, counted bool) {
+// emitHostInboundNDPAcceptsCountedNetlink emits the ND (133-136) accepts
+// scoped to each retaining view's ingress (#15931), mirroring the text
+// oracle rule-for-rule. Per retaining view: an ingress-scoped admit covers
+// both the zone unicast destination union and link-scope multicast
+// (ff02::/16); a destination fallback covers views with no ingress scope,
+// even when a sibling has ingress. Any-service views normally skip counted
+// steady-state admits because their later coarse full admit covers ND. When
+// the view's zone has a junos-host program, emit scoped ND before that
+// program's fine terminal drops. Excluding views emit nothing. The unscoped
+// accept is emitted ONLY when no view carries any scope OR no view excludes
+// ndp (Codex F1). Fence callers pass counted=false (no counter objects,
+// #5719); fence mode also emits scoped any-service admits because it has no
+// full-service rule. #16861: VRF scopes ALSO admit the member as iifname
+// (NDISC presents member iifname, sdif unset).
+func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneView, counted bool, programs []JunosHostProgram) {
 	if !hostInboundAnyNDPDefault(views) {
 		return
 	}
@@ -343,8 +339,20 @@ func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneV
 	_, zoneIngressV6 := hostInboundZoneIngressDestinations(views)
 	anyScope := false
 	for _, v := range views {
-		if !hostInboundViewNDPDefault(v) || (hostInboundAllowsAll(v) && counted) {
+		if !hostInboundViewNDPDefault(v) {
 			continue
+		}
+		if hostInboundAllowsAll(v) && counted {
+			hasFineProgram := false
+			for _, prog := range programs {
+				if prog.Zone == v.Zone {
+					hasFineProgram = true
+					break
+				}
+			}
+			if !hasFineProgram {
+				continue
+			}
 		}
 		direct := hostInboundDirectIngressNetdevs(v)
 		scoped := false
@@ -414,11 +422,12 @@ func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneV
 // emitHostInboundICMPAcceptsNetlink mirrors emitHostInboundICMPAccepts: the
 // v4/v6 PMTUD/error accepts plus the ND default accept (#15671 —
 // emitted only when no view excluded ndp), each carrying its named
-// aggregate counter (#4759).
-func emitHostInboundICMPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView) {
+// aggregate counter (#4759). programs identifies zones whose any-service
+// ND must precede a fine terminal drop.
+func emitHostInboundICMPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView, programs []JunosHostProgram) {
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6Error)).emit(verdictAccept()...)
-	emitHostInboundNDPAcceptsNetlink(p, views)
+	emitHostInboundNDPAcceptsCountedNetlink(p, views, true, programs)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP4Error)).emit(verdictAccept()...)
 }

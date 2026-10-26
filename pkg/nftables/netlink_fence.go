@@ -36,7 +36,7 @@ func emitHostInboundFenceL3AdmitsNetlink(p *nlPlan, views []HostInboundZoneView)
 	// #15931: scoped ND admits, one per retaining view's ingress (the
 	// fence has no per-service accepts; a default-retaining view's ND
 	// must survive the fence while an excluding view's stays denied).
-	emitHostInboundNDPAcceptsCountedNetlink(p, views, false)
+	emitHostInboundNDPAcceptsCountedNetlink(p, views, false, nil)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).emit(verdictAccept()...)
 }
 
