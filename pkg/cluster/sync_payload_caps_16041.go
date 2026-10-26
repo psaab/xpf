@@ -104,8 +104,12 @@ func syncPayloadCap(msgType uint8) (int, bool) {
 	case syncMsgFenceAck:
 		return fenceAckPayloadLen, true
 	case syncMsgPeerCapabilities:
-		// sendCapabilities: 5 + bootIncarnationLen + epoch + token.
-		return 5 + bootIncarnationLen + 8 + 8, true
+		// sendCapabilities: 5 + bootIncarnationLen + epoch + token
+		// + flags2 (#16756 appended the flags2 byte after #16041
+		// sized this cap; without it every production frame is
+		// dropped pre-dispatch and peer wire version is never
+		// learned, #18032).
+		return 5 + bootIncarnationLen + 8 + 8 + 1, true
 	case syncMsgClockSync:
 		// One peer-monotonic u64.
 		return 8, true
