@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -95,17 +96,36 @@ func TestDrainReinjectCompletionsPartialFrameTimeoutIsError(t *testing.T) {
 	defer listener.Close()
 
 	serverConn := make(chan net.Conn, 1)
+	serverDone := make(chan struct{})
+	stopServer := make(chan struct{})
 	go func() {
+		defer close(serverDone)
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
+		defer conn.Close()
 		serverConn <- conn
 		// Two bytes of a 4-byte header, then stall. Keep the server
-		// end open (no Close on return) so only the client's Close
-		// — or lack of it — can produce EOF at the read below.
+		// end open until cleanup so only the client's Close — or lack
+		// of it — can produce EOF at the read below.
 		_, _ = conn.Write([]byte{0, 0})
-		select {}
+		<-stopServer
+	}()
+	var stopAndWaitOnce sync.Once
+	stopAndWait := func() {
+		stopAndWaitOnce.Do(func() {
+			close(stopServer)
+			select {
+			case <-serverDone:
+			case <-time.After(time.Second):
+				t.Error("partial-frame fixture goroutine did not exit")
+			}
+		})
+	}
+	defer func() {
+		_ = listener.Close()
+		stopAndWait()
 	}()
 
 	client := &SocketReinjectSubmitter{completePath: completePath, timeout: 5 * time.Millisecond}
@@ -132,7 +152,7 @@ func TestDrainReinjectCompletionsPartialFrameTimeoutIsError(t *testing.T) {
 	} else if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
 		t.Fatal("server observed no EOF within 300ms after partial-frame timeout: client conn abandoned, not closed (#16863)")
 	}
-
+	stopAndWait()
 }
 
 // TestDrainReinjectCompletionsBadLengthClosesConn16863 is the positive
@@ -147,17 +167,36 @@ func TestDrainReinjectCompletionsBadLengthClosesConn16863(t *testing.T) {
 	defer listener.Close()
 
 	serverConn := make(chan net.Conn, 1)
+	serverDone := make(chan struct{})
+	stopServer := make(chan struct{})
 	go func() {
+		defer close(serverDone)
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
+		defer conn.Close()
 		serverConn <- conn
 		// Zero length is an invalid framed-message length. Keep
-		// the server end open so only the client's Close can
-		// produce EOF at the read below.
+		// the server end open until cleanup so only the client's Close
+		// can produce EOF at the read below.
 		_, _ = conn.Write([]byte{0, 0, 0, 0})
-		select {}
+		<-stopServer
+	}()
+	var stopAndWaitOnce sync.Once
+	stopAndWait := func() {
+		stopAndWaitOnce.Do(func() {
+			close(stopServer)
+			select {
+			case <-serverDone:
+			case <-time.After(time.Second):
+				t.Error("bad-length fixture goroutine did not exit")
+			}
+		})
+	}
+	defer func() {
+		_ = listener.Close()
+		stopAndWait()
 	}()
 
 	client := &SocketReinjectSubmitter{completePath: completePath, timeout: time.Second}
@@ -176,6 +215,7 @@ func TestDrainReinjectCompletionsBadLengthClosesConn16863(t *testing.T) {
 	} else if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
 		t.Fatal("server observed no EOF within 300ms after bad-length close (control regression)")
 	}
+	stopAndWait()
 }
 
 // TestDrainReinjectCompletionsPartialHeaderThenCompletionRecovers
