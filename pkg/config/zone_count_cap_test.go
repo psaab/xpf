@@ -122,3 +122,12 @@ func TestZoneCountWithCapAcceptsAtInjectedCap17928(t *testing.T) {
 		t.Fatalf("validateZoneCountWithCap rejected a config at exactly the %d-zone cap: %v", cap, err)
 	}
 }
+
+// #17928 fold: pin that the strict wrapper passes MaxUsableZoneID, not
+// the test seam's cap: a 4-zone config (over the injected test cap of 3)
+// must still pass the strict validator.
+func TestZoneCountStrictUsesProductionCap17928(t *testing.T) {
+	if err := validateZoneCountStrict(zonesConfig(4)); err != nil {
+		t.Fatalf("validateZoneCountStrict rejected 4 zones; production cap must be MaxUsableZoneID, not a test cap: %v", err)
+	}
+}
