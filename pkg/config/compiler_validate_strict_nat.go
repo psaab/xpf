@@ -1949,10 +1949,10 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
 // (PolicyAddressWildcardFamilies: `any` both, `any-ipv4` v4-only,
 // `any6` v6-only); a single-family wildcard KEYWORD counts as narrow
 // (it names exactly one family, deliberately). A rule is in scope
-// only when every decidable authored source value is family F, at
-// least one is, and at least one is narrow. Hence an unconstrained
-// rule (no source-address / source-address-name), a dual-family rule
-// (mixed literals, a mixed book closure, or `any`), a /0-only rule,
+// only when every decidable authored source value is family F and
+// the set is non-empty under the narrowness rules above. Hence an
+// unconstrained rule (no source-address / source-address-name), a
+// dual-family rule (mixed literals, a mixed book closure, or `any`),
 // and a rule whose only source constraint is not statically decidable
 // (a direct dynamic-address feed binding, or a dns-name / tainted /
 // dangling closure) are NOT rejected: they can match family-F traffic
@@ -2038,7 +2038,7 @@ func validateSourceNATPoolFamilyStrict(cfg *Config) error {
 // sourceNATRuleSingleFamily16600 reports whether a source-NAT rule's
 // authored source match is proven single-family, and which family
 // ("v4" or "v6"). See validateSourceNATPoolFamilyStrict for the
-// provenance rules, including the #17408 narrow-prefix scoping: the
+// provenance rules, including the #17408/#17847 scoping: the
 // verdict is single-family when the proven single-family source set
 // is non-empty under the narrowness rules in the #17408/#17847
 // scoping above (literals always narrow; names only via a

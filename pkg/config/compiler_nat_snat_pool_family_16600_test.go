@@ -49,6 +49,8 @@ func TestSourceNATPoolFamilyRejected16600(t *testing.T) {
 		// authored match (the #17408 fixtures use dual-family matches).
 		{"v4 wildcard rule v6-only pool", "source-address 0.0.0.0/0", []string{"2001:db8::5"}},
 		{"v6 wildcard rule v4-only pool", "source-address ::/0", []string{"192.0.2.5"}},
+		{"v4 bare wildcard rule v6-only pool", "source-address 0.0.0.0", []string{"2001:db8::5"}},
+		{"v6 bare wildcard rule v4-only pool", "source-address ::", []string{"192.0.2.5"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(buildTree(t, snatFamilySet16600(tc.src, tc.pool...)))
@@ -113,6 +115,17 @@ func TestSourceNATRuleSingleFamilyWildcard16600(t *testing.T) {
 	rule.Match.SourceAddresses = []string{"any-ipv4", "2001:db8::/64"}
 	if _, ok := sourceNATRuleSingleFamily16600(cfg, rule); ok {
 		t.Fatal("mixed wildcard+literal must be dual-family, not single")
+	}
+}
+
+func TestSourceNATPoolFamilyLenientWarnsWildcard17847(t *testing.T) {
+	cfg, err := CompileConfigLenient(buildTree(t, snatFamilySet16600(
+		"source-address 0.0.0.0/0", "2001:db8::5")))
+	if err != nil {
+		t.Fatalf("lenient compilation must not fail: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "WrongAddressFamily") {
+		t.Fatalf("lenient compilation must warn about the wildcard SNAT family mismatch: %v", cfg.Warnings)
 	}
 }
 
