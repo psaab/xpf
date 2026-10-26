@@ -1845,8 +1845,11 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 	}
 
 	// First vetted apply after boot/restart: adopt any pre-installed
-	// clients so the preserving swap below does not close a healthy
-	// one merely because the cache had not seen it yet.
+	// clients into the cache (see systemSyslogSeedCacheIfEmpty).
+	// Seeded entries carry an empty fingerprint, so they never match
+	// a real fingerprint below and are always re-dialed/superseded
+	// on this apply; seeding records the per-host association only
+	// and does not keep a seeded client alive across the swap.
 	d.systemSyslogSeedCacheIfEmpty(cfg)
 
 	var clients []*logging.SyslogClient
