@@ -878,6 +878,121 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
 }
 
 #[test]
+fn shared_transit_admission_keeps_class_and_policy_tuples_separate_17017() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.policies[0].destination_addresses = vec!["198.51.100.77".into()];
+    let fw = build_forwarding_state(&snapshot);
+    let flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: DMZ as u32,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let resolution = cookie_resolution(ForwardingDisposition::ForwardCandidate);
+    let verdict = |class_dst, policy_dst| {
+        super::session_admission::transit_admission_verdict(
+            &fw,
+            &super::session_admission::AdmissionInput {
+                flow: &flow,
+                meta: meta.into(),
+                resolution,
+                class_dst,
+                translated_dst: None,
+                policy_dst,
+                protocol: meta.protocol,
+                policy_dst_port: flow.forward_key.dst_port,
+                policy_icmp: None,
+                from_zone_id: TEST_DMZ_ZONE_ID,
+                to_zone_id: TEST_WAN_ZONE_ID,
+                fabric_arrival_zone: None,
+                now_ns: 1_000,
+            },
+            None,
+        )
+        .permits()
+    };
+
+    let translated = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77));
+    assert!(
+        verdict(flow.dst_ip, translated),
+        "raw non-martian class tuple does not replace the translated policy tuple"
+    );
+    assert!(
+        !verdict(flow.dst_ip, flow.dst_ip),
+        "policy evaluates its explicit tuple, not the destination-class tuple"
+    );
+    assert!(
+        !verdict(IpAddr::V4(Ipv4Addr::BROADCAST), translated),
+        "the destination-class tuple is evaluated independently of policy"
+    );
+}
+
+#[test]
+fn syn_cookie_matches_session_miss_when_untranslated_17017() {
+    let fw = forwarding(false);
+    let flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: DMZ as u32,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let resolution = cookie_resolution(ForwardingDisposition::ForwardCandidate);
+    let cookie_admitted = super::syn_cookie_final_admission(
+        &fw,
+        &std::collections::BTreeMap::new(),
+        &flow,
+        meta,
+        None,
+        resolution,
+        flow.dst_ip,
+        flow.forward_key.dst_port,
+        1_000,
+        128,
+    );
+    let class = super::session_admission::transit_class_verdict(
+        &fw,
+        &flow,
+        meta.into(),
+        resolution,
+        flow.dst_ip,
+        None,
+        None,
+    );
+    let miss_verdict = super::session_admission::transit_admission_verdict(
+        &fw,
+        &super::session_admission::AdmissionInput {
+            flow: &flow,
+            meta: meta.into(),
+            resolution,
+            class_dst: flow.dst_ip,
+            translated_dst: None,
+            policy_dst: flow.dst_ip,
+            protocol: flow.forward_key.protocol,
+            policy_dst_port: flow.forward_key.dst_port,
+            policy_icmp: None,
+            from_zone_id: TEST_DMZ_ZONE_ID,
+            to_zone_id: TEST_WAN_ZONE_ID,
+            fabric_arrival_zone: None,
+            now_ns: 1_000,
+        },
+        Some(class),
+    );
+    assert_eq!(
+        cookie_admitted,
+        miss_verdict.permits(),
+        "the unchanged untranslated dmz->wan case remains parity-pinned"
+    );
+}
+
+#[test]
 fn syn_cookie_host_admission_three_arm_15947() {
     // Accept: fixture zones carry any-service host-inbound and no lo0
     // reject for TCP/443, so a local service is admissible.
