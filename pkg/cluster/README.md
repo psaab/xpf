@@ -2976,15 +2976,18 @@ wrong one reopens the dual-master window:
 |---|---|
 | `peer is signing <signing-id> — safe to finalize` | the peer has moved; step 5 is safe |
 | `peer is still signing <other-id> — do NOT finalize` | the peer is still on the retired key |
-| `peer key UNKNOWN — no authenticated peer frame seen; unknown, not known safe to finalize` | usually the peer is down; **not** the same as "not safe" |
+| `peer key UNKNOWN — no verified peer signing key observed; unknown, not known safe to finalize` | no signing-key observation is available; the peer may be down or reachable with only a PSK-acceptance proof; **not** the same as "not safe" |
 
-The peer-key observation is fed by every authenticated control surface, not
-only the heartbeat (#16859): heartbeat admission, the session-sync connect
-handshake (the ring key the responder matched, or the initiator's signing
-key), and the #6628 in-place upgrade. In fabric-transport mode there is no
-heartbeat, so session sync is what answers the question — a peer that has
-completed an authenticated session-sync handshake with the current key
-renders `safe to finalize` there too.
+The peer-key observation is fed by heartbeat admission and the session-sync
+responder roles: the connect responder's matched ring key and the #6628
+in-place-upgrade responder's matched candidate identify the peer's signing
+key. A Noise_NNpsk0 initiator proves only that the peer accepts the
+initiator's signing key; because the responder never signs in that pattern,
+the initiator cannot infer which key the peer signs with and stays UNKNOWN
+until it receives a peer-signing observation (#17891). In fabric-transport
+mode there is no heartbeat, so session sync can answer the question when the
+local node is the responder; completing an authenticated handshake as the
+initiator alone does not make finalization safe.
 
 Every open window also renders its age (`open for 3d`), and a window open
 longer than **7 days** carries an `ALARM` on the same line naming the

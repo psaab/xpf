@@ -879,8 +879,9 @@ type Result struct {
 	// session, NAT and policy evaluation
 	// (userspace-dp/src/afxdp/frame/inspect.rs
 	// ipv6_addr_is_v4_mapped_or_compat, gated in poll_descriptor/mod.rs),
-	// for transit AND host-bound traffic alike — the gate precedes the
-	// host/transit disposition split. When set, Matched / DefaultUsed /
+	// Match applies this verdict to transit AND host-bound queries, while
+	// excluding FromZone == JunosHostZone: locally-generated traffic uses
+	// kernel TX and never traverses RX. When set, Matched / DefaultUsed /
 	// HostInboundUnmatched are false and Action is the conservative
 	// PolicyDeny for a raw reader; DisplayAction renders the dedicated
 	// V4MappedCompatIngressDropActionString. Like the
@@ -1570,9 +1571,11 @@ func Match(cfg *config.Config, q Query) (res Result) {
 	// VLAN/zone/session/NAT/policy evaluation
 	// (ipv6_frame_has_v4_mapped_or_compat in poll_descriptor/mod.rs; the
 	// decapsulated/injected path re-checks after decapsulation). The gate
-	// precedes the host/transit disposition split, so it applies to
-	// host-bound (junos-host) queries too — unlike the transit-only
-	// RouteDrop advisory below, which stays exempt for host-bound queries.
+	// precedes the host-bound/transit disposition split, so it applies to
+	// host-bound (junos-host) queries too. Host-originated queries are
+	// exempt: locally-generated traffic egresses via the kernel TX path
+	// (#16805) and never traverses the RX gate, so assigning that verdict
+	// would fabricate a forwarding stage that does not run.
 	// Return the first-class ingress-drop verdict instead of certifying a
 	// policy verdict the runtime never reaches. This runs after the
 	// (V4 src, V6 dst) unsupported-tuple gate: the two are disjoint by
@@ -1587,7 +1590,7 @@ func Match(cfg *config.Config, q Query) (res Result) {
 	// tuple still reads this ingress-drop verdict, which is the correct
 	// policy-stage answer — the underlay datagram itself is never
 	// policy-evaluated either.
-	if queryHasV4MappedOrCompatSide(q) {
+	if q.FromZone != JunosHostZone && queryHasV4MappedOrCompatSide(q) {
 		if cfg != nil {
 			snapshot, _ := querySnapshotFor(cfg, q.FeedOverlay)
 			if len(snapshot.rejectionReasons) > 0 {
