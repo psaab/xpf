@@ -160,10 +160,9 @@ func TestRejectedWhileCharonUpStillRestoresPrior16853(t *testing.T) {
 	}
 }
 
-// A live charon with malformed list-conns output is still answering VICI;
-// the prior generation marker must prevent classifying that parse failure
-// as charon-down and keeping a rejected candidate.
-func TestRejectedWithMalformedListConnsStillRestoresPrior17882(t *testing.T) {
+// A successful VICI response with malformed connection output cannot prove
+// which configuration charon loaded; the candidate must remain on disk.
+func TestMalformedListConnsDoesNotProvePriorGeneration17882(t *testing.T) {
 	m := NewWithConfigDir(t.TempDir())
 	oldGeneration := strings.Repeat("a", 64)
 	newGeneration := strings.Repeat("b", 64)
@@ -196,10 +195,54 @@ func TestRejectedWithMalformedListConnsStillRestoresPrior17882(t *testing.T) {
 	}
 	got, err := os.ReadFile(m.configPath)
 	if err != nil {
-		t.Fatalf("read restored: %v", err)
+		t.Fatalf("read candidate: %v", err)
 	}
-	if string(got) != string(prior) {
-		t.Fatal("a successful VICI response with malformed list-conns must restore the prior file")
+	if string(got) == string(prior) || !strings.Contains(string(got), "vpn-new") {
+		t.Fatal("malformed list-conns output must not restore the prior file")
+	}
+}
+
+// A successful empty list-conns reply cannot prove a revoked prior connection
+// remains loaded, even when the generation pool still names the prior file.
+func TestSuccessfulEmptyLoadedConnsDoesNotRestorePrior17882(t *testing.T) {
+	m := NewWithConfigDir(t.TempDir())
+	oldGeneration := strings.Repeat("a", 64)
+	newGeneration := strings.Repeat("b", 64)
+	ch := &charonDown16853{}
+	m.swanctl = ch.run
+	if err := m.ApplyGeneration(vpnCfg("vpn1"), oldGeneration, ApplyHooks{}); err != nil {
+		t.Fatalf("FIXTURE: initial apply: %v", err)
+	}
+	prior, err := os.ReadFile(m.configPath)
+	if err != nil {
+		t.Fatalf("FIXTURE: read prior: %v", err)
+	}
+	rejectErr := errors.New("candidate rejected")
+	priorMarker := []byte("get-pools reply {xpf-gen-" + oldGeneration + " {base=192.0.2.1 size=1 online=0 offline=0}}\n")
+	m.swanctl = func(args ...string) ([]byte, error) {
+		if len(args) > 0 {
+			switch args[0] {
+			case "--load-all":
+				return []byte("unable to load candidate"), rejectErr
+			case "--list-pools":
+				return priorMarker, nil
+			case "--list-conns":
+				return []byte("list-conns reply {}\n"), nil
+			}
+		}
+		return nil, nil
+	}
+	rotated := vpnCfg("vpn1")
+	rotated.VPNs["vpn1"].PSK = config.NewSecret("secret-rotated")
+	if err := m.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); !errors.Is(err, rejectErr) {
+		t.Fatalf("ApplyGeneration error = %v, want reject error", err)
+	}
+	got, err := os.ReadFile(m.configPath)
+	if err != nil {
+		t.Fatalf("read candidate: %v", err)
+	}
+	if string(got) == string(prior) || !strings.Contains(string(got), "secret-rotated") {
+		t.Fatal("an empty loaded-connection set must not restore the revoked prior PSK")
 	}
 }
 

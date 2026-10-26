@@ -19,14 +19,14 @@ the apply path pays no fsync (the file is regenerated on every apply).
   whether the operator DELETED it (#3941) or it became UNRENDERABLE and was
   omitted from the render (#5494). **The returned error is
   load-bearing (#4433):** a render/write failure leaves the prior file
-  untouched. A total `swanctl --load-all` failure restores the prior file when
-  charon's generation marker and loaded connection-name set match (#10712, #17882);
-  for a pre-marker prior file, an exact loaded-name set is the available fallback.
-  A successful reachability probe alone is not proof: a fresh charon may answer
-  after loading the candidate already on disk. A malformed list-conns response
-  from a successful VICI request is distinct from a transport failure; when the
-  marker confirms the prior generation, a parser error does not classify charon
-  as down.
+  untouched. A total `swanctl --load-all` failure restores the prior file only
+  when charon's generation marker matches and the parsed, non-empty loaded
+  connection-name set exactly matches the prior file (#10712, #17882). For a
+  pre-marker prior file, a non-empty exact loaded-name set is the available
+  fallback. A successful reachability probe alone is not proof: a fresh charon
+  may answer after loading the candidate already on disk. A malformed
+  list-conns response from a successful VICI request is distinct from a
+  transport failure, but cannot prove that the prior connections remain loaded.
   If charon is unreachable or the prior generation is not proven, the
   candidate stays on disk, its set is promoted, the error still propagates,
   and charon's next start loads the committed generation (#16853, #17882).

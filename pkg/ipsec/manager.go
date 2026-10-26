@@ -614,31 +614,32 @@ type unreachableApplyError struct {
 func (e *unreachableApplyError) Error() string { return e.err.Error() }
 func (e *unreachableApplyError) Unwrap() error { return e.err }
 
-// priorGenerationLoaded validates the prior marker and loaded connection names
-// (#17882). A successful reachability probe alone is not proof: after a restart,
-// charon can answer after loading the candidate now on disk. The candidate marker
-// rules out that case even when the prior file predates markers. For an old
-// unmarked file, a matching connection-name set is the available fallback.
+// priorGenerationLoaded verifies a prior marker and its loaded connections
+// before restoring the prior file (#17882). A successful probe alone is not
+// proof: charon may have restarted and loaded the candidate already on disk.
+// The marker is identity, not proof; the parsed connection-name set must also
+// match the non-empty set in the prior file.
 //
-// Parse failure is distinct from a failed VICI request: if charon answered but
-// its connection listing is malformed, a matching prior marker still identifies
-// the answering generation and must not be misclassified as charon-down.
+// A successful VICI request with malformed connection output is not proof
+// either. Without a parsed connection set, the candidate stays on disk.
 func (m *Manager) priorGenerationLoaded(prior []byte, havePrior bool, candidateGeneration string) bool {
 	priorGeneration, hasPriorMarker := generationFromConfigText17882(prior, havePrior)
 	priorNames := make(map[string]bool)
 	for _, name := range connNamesInConfigText14589(string(prior)) {
 		priorNames[name] = true
 	}
+	if havePrior && len(priorNames) == 0 {
+		return false
+	}
 	for attempt := range charonProbeAttempts {
 		if attempt > 0 {
 			time.Sleep(charonProbeInterval)
 		}
 		loadedGeneration, markerErr := m.LoadedGeneration()
-		priorMarkerConfirmed := false
 		if markerErr == nil {
 			switch {
 			case hasPriorMarker && loadedGeneration == priorGeneration:
-				priorMarkerConfirmed = true
+				// The marker identity agrees; require the loaded connections below.
 			case hasPriorMarker:
 				return false
 			case candidateGeneration != "" && loadedGeneration == candidateGeneration:
@@ -653,11 +654,14 @@ func (m *Manager) priorGenerationLoaded(prior []byte, havePrior bool, candidateG
 		}
 		loaded, err := parseListConnsRaw(string(out))
 		if err != nil {
-			return priorMarkerConfirmed
+			continue
 		}
 		loadedNames := make(map[string]bool, len(loaded))
 		for name := range loaded {
 			loadedNames[name] = true
+		}
+		if len(loadedNames) == 0 {
+			return !havePrior
 		}
 		return sameBoolSet14589(loadedNames, priorNames)
 	}

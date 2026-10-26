@@ -1,10 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * IPsec: restore the prior file only when its generation marker and
-    loaded connection names prove it remains active, not on reachability
-    alone. Apply without a config-store generation uses a rendered-config
-    fingerprint; malformed live listings are not treated as charon-down
-    (#17882).
+  * IPsec: restore the prior file only when its generation marker matches
+    and a non-empty loaded connection set exactly matches the prior file,
+    not on reachability alone. Empty or malformed listings are not proof.
+    Plain Apply uses a rendered-config fingerprint (#17882).
 
   * Config authorization: atomically sample the candidate, generation,
     and active tree at the gRPC/REST commit gate (#17676), so the
