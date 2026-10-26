@@ -14,8 +14,8 @@ import (
 // "1666:5 65000:1" satisfies both members under the documented
 // substring-within-token semantics, so neither permutation matched and
 // a matching reject term was skipped. The term deliberately carries a
-// sibling match dimension (`from protocol bgp`) so it takes the live
-// public-list route-map path, not the #16835 continuation chain.
+// sibling match dimension (`from protocol bgp`) to pin that a mixed
+// chain keeps the protocol AND while matching each community member.
 
 func TestFirstUnanchoredCommunityFactor17853(t *testing.T) {
 	for _, members := range [][]string{
@@ -31,14 +31,21 @@ func TestFirstUnanchoredCommunityFactor17853(t *testing.T) {
 				{Name: "t-accept", Action: "accept"},
 			}, "accept")
 		got := New().generatePolicyOptions(po)
-		if !strings.Contains(got, "route-map P deny 10\n") {
-			t.Fatalf("members %v: reject term did not render as deny 10:\n%s", members, got)
+		if !strings.Contains(got, "route-map P permit 10\n") ||
+			!strings.Contains(got, "route-map P deny 50\n") {
+			t.Fatalf("members %v: mixed reject term did not render chain slots before its protocol body:\n%s", members, got)
 		}
-		if !strings.Contains(got, " match community X\n") || !strings.Contains(got, " match source-protocol bgp\n") {
-			t.Fatalf("members %v: reject term lost its public-list/protocol matches:\n%s", members, got)
+		for _, member := range members {
+			if !strings.Contains(got, " match community "+communityChainListName16835("X", member)+"\n") {
+				t.Fatalf("members %v: reject term omitted chain member %q:\n%s", members, member, got)
+			}
 		}
-		if strings.Contains(got, "on-match goto") {
-			t.Fatalf("members %v: sibling-dimension term unexpectedly took the chain path:\n%s", members, got)
+		if !strings.Contains(got, " match source-protocol bgp\n") ||
+			strings.Contains(got, " match community X\n") {
+			t.Fatalf("members %v: mixed chain did not retain source-protocol and replace the public list:\n%s", members, got)
+		}
+		if !strings.Contains(got, "on-match goto") {
+			t.Fatalf("members %v: mixed term has no chain continuation:\n%s", members, got)
 		}
 		patterns := expandedPatterns16788(t, got, "X")
 		if len(patterns) != 2 {

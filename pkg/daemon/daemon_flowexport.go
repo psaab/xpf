@@ -364,7 +364,6 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	}
 	wasRunning := len(d.flowExporters) > 0
 	if len(ecs) == 0 {
-		d.flowBundle.Store(&exporterBundle{})
 		d.teardownV9Locked()
 		d.flowHash, d.flowHashSet = h, true
 		d.flowExportErr = nil
@@ -689,7 +688,6 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 	}
 	wasRunning := len(d.ipfixExporters) > 0
 	if len(ecs) == 0 {
-		d.ipfixBundlePtr.Store(&ipfixBundle{})
 		d.teardownIPFIXLocked()
 		d.ipfixHash, d.ipfixHashSet = h, true
 		d.ipfixExportErr = nil
