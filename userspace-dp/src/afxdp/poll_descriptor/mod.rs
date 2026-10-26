@@ -6756,7 +6756,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             .shared_owner_rg_indexes,
                                         now_ns,
                                     },
-                                    |key| {
+                                    &mut |key| {
                                         flow_cache.invalidate_slot(key, current_ifindex);
                                         for other in left.iter_mut().chain(right.iter_mut()) {
                                             other
@@ -7615,7 +7615,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     .shared_owner_rg_indexes,
                                                 now_ns,
                                             },
-                                            |key| {
+                                            &mut |key| {
                                                 flow_cache
                                                     .invalidate_slot(key, current_ifindex);
                                                 for other in
@@ -8794,7 +8794,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                         .shared_owner_rg_indexes,
                                                     now_ns,
                                                 },
-                                                |key| {
+                                                &mut |key| {
                                                     flow_cache
                                                         .invalidate_slot(key, current_ifindex);
                                                     for other in
@@ -8996,7 +8996,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                         .shared_owner_rg_indexes,
                                                     now_ns,
                                                 },
-                                                |key| {
+                                                &mut |key| {
                                                     flow_cache
                                                         .invalidate_slot(key, current_ifindex);
                                                     for other in
@@ -13144,7 +13144,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     .shared_owner_rg_indexes,
                                                 now_ns,
                                             },
-                                            |key| {
+                                            &mut |key| {
                                                 flow_cache.invalidate_slot(key, current_ifindex);
                                                 for other in left.iter_mut().chain(right.iter_mut()) {
                                                     other.flow.flow_cache.invalidate_slot(key, other.ifindex);

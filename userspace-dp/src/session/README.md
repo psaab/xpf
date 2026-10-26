@@ -1270,9 +1270,10 @@ incarnation, and cleans up coordinator/BPF/DNAT/flow-cache/NAT state before
 replicating deletes. A contended lease re-defers the full victim set; admission
 sites refuse the incoming install until a retry can clean it up. Cache
 invalidation covers every worker binding because `SessionKey` omits ingress
-The shared-row decline path keeps the established local-row probe before NAT
-release. MissingNeighbor's copy omitted the probe, but issue analysis found
-that behaviorally equivalent because shedding removes both local rows.
+ifindex. On a shared-row decline, preserve the established local-row probe
+before NAT release. MissingNeighbor's copy omitted that probe, but issue
+analysis found that difference behaviorally equivalent because pressure
+shedding removes both local rows.
 
 Counters (all plain worker-owned u64s like `create_drops`, exported
 since #1861 via the worker-runtime status path as

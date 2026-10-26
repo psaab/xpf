@@ -218,7 +218,7 @@ pub(in crate::afxdp) fn teardown_pressure_shed_victims(
     sessions: &mut SessionTable,
     sheds: crate::session::PressureShedSessions,
     ctx: ShedTeardownCtx<'_>,
-    mut invalidate: impl FnMut(&SessionKey),
+    invalidate: &mut dyn FnMut(&SessionKey),
 ) -> bool {
     if sheds.is_empty() {
         return true;

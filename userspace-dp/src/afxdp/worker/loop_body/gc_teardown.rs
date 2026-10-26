@@ -430,7 +430,7 @@ pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
             shared_owner_rg_indexes,
             now_ns,
         },
-        |key| {
+        &mut |key| {
             for binding in bindings.iter_mut() {
                 binding
                     .flow
