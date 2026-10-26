@@ -397,10 +397,11 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 		}
 	}
 	m.clearLastStatusLocked()
-	binary, err := findBinary(cfg.Binary)
+	binary, err := openValidatedBinary(cfg.Binary)
 	if err != nil {
 		return err
 	}
+	defer binary.Close()
 	// #9003: create-and-PROVE, not create-and-assume. os.MkdirAll returns nil
 	// for a directory that already exists and never looks at its owner or mode,
 	// so the previous `os.MkdirAll(dir, 0755)` adopted whatever was there —
@@ -458,7 +459,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 			"deleted", deleted)
 	}
 	pollMode := effectivePollMode(cfg)
-	cmd := exec.Command(binary,
+	cmd := helperBinaryCommand(binary,
 		"--control-socket", cfg.ControlSocket,
 		"--state-file", cfg.StateFile,
 		"--workers", fmt.Sprintf("%d", cfg.Workers),
@@ -471,6 +472,9 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 		m.stopEventStreamLocked()
 		return fmt.Errorf("start userspace dataplane helper: %w", err)
 	}
+	// The child inherited the validated descriptor at fd 3. Drop the
+	// parent's copy as soon as Start has handed it to the child.
+	_ = binary.Close()
 	m.cfg = cfg
 	m.proc = cmd
 	// #5838: one waiter per generation, started here and nowhere else. Until
@@ -558,28 +562,16 @@ func tuneSocketBuffers() {
 	}
 }
 
-// findBinary returns the absolute, symlink-resolved path of the exact
-// file it validated, so the file exec.Command runs is the file that was
-// stat-checked — never a bare name the exec layer would re-resolve
-// through PATH or the process CWD at Start time (#16054), and never an
-// unresolved symlink an attacker could flip between validation and
-// exec (#16846).
+// findBinary returns the absolute, symlink-resolved path of the helper that
+// passed validation. Spawn uses openValidatedBinary to retain the validated
+// inode and helperBinaryCommand to execute that descriptor instead of
+// resolving this pathname again at Start time (#17881).
 //
-// When the daemon runs as root, the resolved helper file itself
-// (#16054) and EVERY symlink or containing-directory component on
-// either spelling of its path must be non-replaceable by a
-// less-privileged user: root-owned, with no non-root-group or
-// non-sticky world write. That is what makes the residual check→exec
-// gap unexploitable: an attacker who cannot remove an entry from any
-// directory above the file cannot flip either a symlink or the file
-// itself between validation and Start, so the resolved name still
-// names the validated inode. An fd-based exec (O_PATH + execveat)
-// would close the gap absolutely, but it requires custom exec
-// plumbing (os/exec cannot take an fd) and polling/error-handling
-// duplication; the trusted-directory-chain closes it under the same
-// ownership invariant ensureTrustedRuntimeDir already relies on for
-// the control socket. A non-root daemon gains no privilege, so only
-// symlink resolution applies there and the dev workflow is unchanged.
+// When the daemon runs as root, the resolved helper file and every symlink
+// or containing-directory component on either spelling must be
+// non-replaceable by a less-privileged user. This remains an admission
+// policy; descriptor-based exec independently binds the validation result
+// to the inode executed even if a trusted directory entry changes later.
 func findBinary(explicit string) (string, error) {
 	if explicit != "" {
 		resolved, err := validatedHelperPath(explicit)
@@ -634,6 +626,65 @@ func findBinary(explicit string) (string, error) {
 		return "", fmt.Errorf("%s; skipped candidates: %s", notFound, strings.Join(skipped, "; "))
 	}
 	return "", errors.New(notFound)
+}
+
+// openValidatedBinary opens the selected helper before spawn preparation and
+// verifies that the opened inode is still the one named by the validated
+// path. From then on, helperBinaryCommand passes the descriptor to the child,
+// eliminating pathname re-resolution between validation and exec (#17881).
+func openValidatedBinary(explicit string) (*os.File, error) {
+	resolved, err := findBinary(explicit)
+	if err != nil {
+		return nil, err
+	}
+	fd, err := unix.Open(resolved, unix.O_PATH|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open userspace dataplane helper %s: %w", resolved, err)
+	}
+	binary := os.NewFile(uintptr(fd), resolved)
+	info, err := binary.Stat()
+	if err != nil {
+		binary.Close()
+		return nil, fmt.Errorf("stat opened userspace dataplane helper %s: %w", resolved, err)
+	}
+	if info.IsDir() {
+		binary.Close()
+		return nil, fmt.Errorf("userspace dataplane binary is a directory, not executable: %s", resolved)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		binary.Close()
+		return nil, fmt.Errorf("userspace dataplane binary is not executable: %s (mode %s)", resolved, info.Mode())
+	}
+	if reason := helperBinaryTrustReason(info); reason != "" {
+		binary.Close()
+		return nil, fmt.Errorf("userspace dataplane binary is not trusted: %s (%s)", resolved, reason)
+	}
+	current, err := validatedHelperPath(resolved)
+	if err != nil {
+		binary.Close()
+		return nil, fmt.Errorf("revalidate userspace dataplane helper %s: %w", resolved, err)
+	}
+	currentInfo, err := os.Stat(current)
+	if err != nil {
+		binary.Close()
+		return nil, fmt.Errorf("stat revalidated userspace dataplane helper %s: %w", current, err)
+	}
+	if !os.SameFile(info, currentInfo) {
+		binary.Close()
+		return nil, fmt.Errorf("userspace dataplane helper changed while opening validated binary: %s", resolved)
+	}
+	return binary, nil
+}
+
+// helperBinaryCommand executes the file held open by openValidatedBinary.
+// ExtraFiles maps it to fd 3 in the child; Linux resolves /proc/self/fd/3
+// directly to that inode. Args[0] remains the resolved pathname for the
+// helper's existing argv[0] behavior.
+func helperBinaryCommand(binary *os.File, args ...string) *exec.Cmd {
+	cmd := exec.Command("/proc/self/fd/3", args...)
+	cmd.Args[0] = binary.Name()
+	cmd.ExtraFiles = []*os.File{binary}
+	return cmd
 }
 
 // resolveHelperPath canonicalizes candidate: an absolute path with
@@ -763,10 +814,10 @@ func resolvedPathChainReason(resolved string) string {
 // resolves symlinks, validates the resolved file (executable, plus the
 // root-daemon trust check), and — as root — refuses any replaceable
 // symlink or directory component on either spelling of the path. The
-// returned path names the exact validated inode through a chain no
-// less-privileged user can mutate. A returned error is a human reason,
-// never a verdict on existence: a dangling symlink reports a chain
-// reason, not "not found".
+// returned path is the canonical spelling observed during validation;
+// openValidatedBinary checks that its held descriptor names the same
+// inode before spawn. A returned error is a human reason, never a verdict
+// on existence: a dangling symlink reports a chain reason, not "not found".
 func validatedHelperPath(candidate string) (string, error) {
 	resolved, ok, err := resolveHelperPath(candidate)
 	if err != nil {
@@ -803,7 +854,7 @@ func validatedHelperPath(candidate string) (string, error) {
 	return resolved, nil
 }
 
-// validatedBinaryCandidate returns the resolved path to exec for an
+// validatedBinaryCandidate returns the resolved path of an admitted
 // implicit candidate, or a skip reason. An empty reason means the
 // candidate does not exist.
 func validatedBinaryCandidate(path string) (resolved string, reason string) {
@@ -821,11 +872,10 @@ func validatedBinaryCandidate(path string) (resolved string, reason string) {
 }
 
 // checkExecutableAccess mirrors exec.LookPath's effective-access check
-// (#12196). It probes the RESOLVED path: probing the unresolved spelling
-// would re-open the symlink race this change closes, and membership of
-// the probe subject changes only for a symlink plant, which the chain
-// check either already refused (root) or deliberately admits (non-root
-// dev workflow follows the developer's own symlinks).
+// (#12196). It probes the resolved spelling so admission follows the
+// symlink target findBinary selected. openValidatedBinary later binds the
+// admitted pathname to its opened inode before helperBinaryCommand execs
+// it (#17881).
 func checkExecutableAccess(candidate, resolved string) error {
 	if !strings.Contains(candidate, string(filepath.Separator)) {
 		return nil

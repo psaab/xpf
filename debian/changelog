@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Userspace helper startup: retain and execute the validated helper inode
+    through an inherited file descriptor, closing the pathname re-resolution
+    window between validation and process start (#17881).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Config authorization: atomically sample the candidate, generation,
     and active tree at the gRPC/REST commit gate (#17676), so the
     authorization verdict can only be bound to the candidate it priced.
