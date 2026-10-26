@@ -28,8 +28,8 @@ import (
 // committing the concatenated set atomically — held-set store + high-water
 // advance + callback under ipsecApplyMu, exactly like a legacy frame —
 // only when every chunk has arrived. An unclosed generation never commits
-// (the prior set is retained), and a newer legacy or chunked set
-// supersedes a pending assembly, which is discarded.
+// (the prior set is retained); a newer legacy set supersedes pending
+// assemblies, and at the pending cap only the oldest assembly is evicted.
 //
 // Budget: each chunk holds at most maxIPsecSANames names, so its body is
 // at most maxIPsecSANames*(maxIPsecSANameLen+1) bytes (~1 MiB), far below
