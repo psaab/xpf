@@ -2069,9 +2069,11 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// (lease-add → lease-update on collision). Nudge the push
 			// loop so this node replicates its now-owned set.
 			// #16854: skipped when this edge moves no DHCP scope.
+			// The seed wait uses applyCancelCtx so daemon shutdown can cancel
+			// an unapplied generation instead of leaving a goroutine behind.
 			if takeoverWork {
 				if cc := d.clusterConfig(); cc != nil && cc.DHCPLeaseSync && d.getSessionSync() != nil {
-					go d.seedDHCPLeasesFromPeerGen(context.Background(), applyGen)
+					d.spawnDHCPLeaseSeed(d.applyCancelCtx(), applyGen, dhcpLeaseSeedApplyWaitWarnAfter)
 					d.nudgeDHCPLeaseSync()
 				}
 			}

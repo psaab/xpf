@@ -1809,22 +1809,29 @@ step. Both are required — neither sees the other's case:
   in their #16788 translation) strip each value;
   `communityListCollision` (wired into `ApplyFull`) fails the apply
   closed when two operator names normalize to one FRR name or an
-  operator name forges a backing. Caveat: regex members using
-  backreferences interact with sequencing. The #16788 sequencer
-  shares the single separator between adjacent factors (the
-  #16835 adjacent-literal row); one community satisfying two
-  regex members (the #16835 shared-token row) is evaluated by the
-  #16835 chain (`community_chain_16835.go`): one generated
-  single-factor list per distinct member
-  (`<frrName>-xpf-com-<digest>`), emitted for every rendered
-  multi-member expanded definition and chained with `on-match
-  next`, so each member is matched against the route's communities
-  independently — exactly Junos' per-member evaluation. The public
-  list keeps its permutation render unchanged; chain lists are
-  never a `then community delete` target, and
-  `communityListCollision` refuses an apply where a chain list
-  would fuse with an operator list, a delete backing, or another
-  definition's chain list.
+  Caveat: regex members using backreferences interact with sequencing. The
+  #16788 sequencer shares the single separator between adjacent factors
+  (the #16835 adjacent-literal row); one community satisfying two regex
+  members (the #16835 shared-token row) is evaluated by the #16835 chain
+  (`community_chain_16835.go`): one generated single-factor list per
+  distinct member (`<frrName>-xpf-com-<digest>`) is emitted for every
+  rendered multi-member expanded definition and chained with
+  `on-match goto`, so each member is matched against the route's
+  communities independently — exactly Junos' per-member evaluation. The
+  chain gates community-only terms and mixed terms with one distinct
+  community alternative before their normal sibling-match variants
+  (route-filter, prefix-list, as-path, protocol), preserving the AND.
+  The public list keeps its permutation render unchanged; chain lists
+  are never a `then community delete` target, and `communityListCollision`
+  refuses an apply where a chain list would fuse with an operator list, a
+  delete backing, or another definition's chain list. Mixed terms with
+  multiple distinct community alternatives retain the historical render.
+  Orphan community alternatives remain ORs: a failed chain advances to
+  the next alternative, and only the final miss skips the term. A matched
+  non-terminating mixed-term variant jumps past the remaining sibling
+  variants after running its actions, so overlapping alternatives do not
+  repeat a modification. Sequence accounting counts a chain-lowered
+  community dimension once, even when the same community name is repeated.
 - **Community member regexes match per community (#16788, R3-A11-05).**
   Junos evaluates each member against each community on the route,
   but FRR matches an expanded list against the whole space-joined

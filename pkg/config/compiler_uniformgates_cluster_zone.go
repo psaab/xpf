@@ -660,7 +660,7 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 	// `strict-session-auth` without a key is told what THEY did, rather than
 	// being handed the generic control-channel message and sent to add a key
 	// with no hint that their posture leaf was inert. Same lenient downgrade.
-	if err := validateStrictSessionAuthNeedsKeyStrict(cfg); err != nil {
+	if err := validateStrictSessionAuthNeedsKeyStrict(cfg, opts.currentClusterAccepted16858); err != nil {
 		if opts.lenientClusterAuthKey {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("cluster authentication (downgraded to warning on tolerant path): %v", err))
@@ -676,7 +676,11 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 			return err
 		}
 	}
-	if err := validateClusterAuthKeyStrictWithCurrent(cfg, opts.currentClusterPrimary16025); err != nil {
+	if err := validateClusterAuthKeyStrictWithCurrent(
+		cfg,
+		opts.currentClusterPrimary16025,
+		opts.currentClusterAccepted16858,
+	); err != nil {
 		if opts.lenientClusterAuthKey {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("cluster authentication (downgraded to warning on tolerant path): %v", err))

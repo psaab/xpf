@@ -10,14 +10,14 @@ import (
 
 // TestUserspaceABICheckedPinnedMapsCoversAllRequiredPins is the #5484 core:
 // the live-pin ABI pre-flight inventory (userspaceABICheckedPinnedMaps) must
-// cover EVERY required pin — both the shim-declared PinByName maps
-// (userspacePinnedShimMaps) AND the Go-created/replaced shared maps
-// (userspaceShimSharedMapSpecs) — deduplicated, minus the disposable
-// userspace_fallback_stats counter.
+// cover every required pin — both the shim-declared PinByName maps
+// (userspacePinnedShimMaps) and the Go-created/replaced shared maps
+// (userspaceShimSharedMapSpecs) — minus only maps whose contents are rebuilt
+// before the new dataplane is activated.
 //
-// Before the fix the set was userspacePinnedShimMaps() minus disposable maps
-// only, so the state-bearing shared maps the shim does not declare —
-// sessions_v6, dnat_table_v6, and the HA/per-CPU maps (rg_active, ha_watchdog,
+// Before the fix the set was userspacePinnedShimMaps() minus rebuilt maps only,
+// so the state-bearing shared maps the shim does not declare — sessions_v6,
+// dnat_table_v6, and the HA/per-CPU maps (rg_active, ha_watchdog,
 // session_id_gen, the *_counters) — were never ABI-checked. An incompatible
 // live pin for one of those passed the deploy pre-flight and then failed
 // ErrMapIncompatible in loadUserspaceShimSharedMaps AFTER the old daemon was
@@ -41,16 +41,12 @@ func TestUserspaceABICheckedPinnedMapsCoversAllRequiredPins(t *testing.T) {
 		}
 	}
 
-	// The disposable counter map is deliberately excluded (#4113): ABI-checking
-	// it here would re-brick the very upgrade reconcileDisposableCollectionPin
-	// was written to unblock.
-	if _, ok := set[userspaceFallbackStatsMapName]; ok {
-		t.Fatalf("ABI-checked set must exclude disposable %s", userspaceFallbackStatsMapName)
-	}
-	// #14842: the re-keyed ingress-domain map is likewise reconciled, not
-	// ABI-refused.
-	if _, ok := set[userspaceIngressDomainsMapName]; ok {
-		t.Fatalf("ABI-checked set must exclude disposable %s", userspaceIngressDomainsMapName)
+	// Rebuilt maps are reconciled before collection loading rather than refused
+	// by the read-only live-pin pre-flight.
+	for _, name := range userspaceRebuiltCollectionPinMapNames {
+		if _, ok := set[name]; ok {
+			t.Fatalf("ABI-checked set must exclude rebuilt map %s", name)
+		}
 	}
 
 	// Spot-check the previously-omitted state-bearing shared maps that the #5484
@@ -65,21 +61,21 @@ func TestUserspaceABICheckedPinnedMapsCoversAllRequiredPins(t *testing.T) {
 	}
 
 	// Completeness: the set must equal the union of both required-pin sources
-	// minus the disposable maps — the exact invariant the fix establishes and
-	// that userspaceRequiredShimPins already iterates for existence.
+	// minus maps intentionally rebuilt on load — the exact invariant enforced
+	// by userspaceRequiredShimPins.
 	want := make(map[string]struct{})
 	for _, n := range userspacePinnedShimMaps() {
-		if n != userspaceFallbackStatsMapName && n != userspaceIngressDomainsMapName {
+		if !isUserspaceRebuiltCollectionPinMap(n) {
 			want[n] = struct{}{}
 		}
 	}
 	for _, s := range userspaceShimSharedMapSpecs() {
-		if s.Name != userspaceFallbackStatsMapName && s.Name != userspaceIngressDomainsMapName {
+		if !isUserspaceRebuiltCollectionPinMap(s.Name) {
 			want[s.Name] = struct{}{}
 		}
 	}
 	if len(set) != len(want) {
-		t.Fatalf("ABI-checked set has %d maps, want %d (union of both required-pin sources minus disposable maps)", len(set), len(want))
+		t.Fatalf("ABI-checked set has %d maps, want %d (union of both required-pin sources minus rebuilt maps)", len(set), len(want))
 	}
 	for n := range want {
 		if _, ok := set[n]; !ok {

@@ -110,11 +110,34 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 	return d.assembleFRRConfigWithMgmtRouteInventory(cfg, overlay, current)
 }
 
+// assembleFRRConfigForActiveConfig includes the peer identity view only for
+// render configs derived from the store's currently active tree (including
+// DNS-resolved clones). Generic renders deliberately omit that view so an
+// unrelated compiled config cannot inherit a stale peer exemption.
+func (d *Daemon) assembleFRRConfigForActiveConfig(cfg *config.Config, overlay []config.RouteOverlayEntry) *frr.FullConfig {
+	var peerCfg *config.Config
+	if d != nil {
+		peerCfg, _ = d.peerRAConfig(cfg)
+	}
+	current := mgmtStaticRouteConnectedInventory(managementVRFIfaceSet(cfg))
+	return d.assembleFRRConfigWithPeerIGPAndMgmtRouteInventory(cfg, overlay, current, peerCfg)
+}
+
 func (d *Daemon) assembleFRRConfigWithMgmtRouteInventory(
 	cfg *config.Config,
 	overlay []config.RouteOverlayEntry,
 	mgmtRouteInventory [2][]netlink.Route,
 ) *frr.FullConfig {
+	return d.assembleFRRConfigWithPeerIGPAndMgmtRouteInventory(cfg, overlay, mgmtRouteInventory, nil)
+}
+
+func (d *Daemon) assembleFRRConfigWithPeerIGPAndMgmtRouteInventory(
+	cfg *config.Config,
+	overlay []config.RouteOverlayEntry,
+	mgmtRouteInventory [2][]netlink.Route,
+	peerIGPConfig *config.Config,
+) *frr.FullConfig {
+
 	// #11310: the config gate rejects cross-instance IGP interface references,
 	// and this render belt makes tolerant loads inert rather than activating an
 	// interface in the wrong FRR routing instance. Resolve all operands in one
@@ -148,6 +171,9 @@ func (d *Daemon) assembleFRRConfigWithMgmtRouteInventory(
 	// The helper clones protocol objects so this runtime filter cannot mutate
 	// the committed config used by other reconcilers.
 	haState := newFRRHADemotionState(d, cfg)
+	if haState != nil {
+		haState.peerIGPConfig = peerIGPConfig
+	}
 	globalProtocols = haState.filterProtocols(cfg, globalProtocols, nil)
 
 	// Collect interface bandwidths and point-to-point flags for FRR.
@@ -476,7 +502,7 @@ func (d *Daemon) actuateRouteOverlayLocked(cfg *config.Config) bool {
 	// returns the degraded sentinel verbatim so the commit path can
 	// fail closed on it; the actuator's contract is unchanged and is
 	// therefore branched explicitly here rather than via a nil return.)
-	if err := d.applyFRRConfig(d.assembleFRRConfig(cfg, overlay)); err != nil {
+	if err := d.applyFRRConfig(d.assembleFRRConfigForActiveConfig(cfg, overlay)); err != nil {
 		if !errors.Is(err, frr.ErrFRRReloadDegraded) {
 			slog.Warn("ip-monitoring: FRR reload failed — NOT publishing the userspace snapshot (would split the FIB); staying dirty for retry",
 				"err", err)
