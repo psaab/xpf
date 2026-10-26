@@ -87,7 +87,7 @@ func (s State) Name() string {
 //
 // Deliberately OPTIONAL (absence degrades safely, no record loss):
 //   - fqdn_fwd  — only routes the hostname value into HostName vs ClientFQDN;
-//     absent ⇒ splitLeaseNames defaults to host-name semantics, still named.
+//     absent ⇒ host-name semantics, still named.
 //   - expire    — absent ⇒ no expiry-based tombstoning (state still gates
 //     active-vs-tombstone); over-RETAIN of a stale lease, never a delete.
 //   - subnet_id — pure metadata stored on the owned record; recordsEqual does
@@ -100,49 +100,17 @@ var requiredLeaseColumns = map[int][]string{
 	6: {"address", "state", "hostname", "duid", "iaid"},
 }
 
-// ddnsLease is one active lease as the reconciler needs it: a stable
-// owner identity, the address, the offered name(s), the subnet, and the
-// expiry. In addition to the packed Identity used by the DDNS reconciler,
-// v4 hardware address and client-id are retained separately for the
-// lease-sync memfile fallback. The packed identity is intentionally kept
-// client-id-preferred for DDNS ownership stability; it is not a lossless
-// transport for the two v4 columns.
+// ddnsLease is one active lease in the DDNS consumer's view. The authoritative
+// Kea row and all HA lease-sync fields live in keaLeaseRow instead.
 type ddnsLease struct {
-	Family     int // 4 or 6
-	Address    string
-	Identity   string // v4: client-id||hwaddr ; v6: DUID/IAID
-	HWAddress  string // v4 hardware address, retained for lease sync
-	ClientID   string // v4 client identifier, retained for lease sync
-	SubnetID   string
-	HostName   string // host-name option
-	ClientFQDN string // client-supplied FQDN option (fqdn_fwd implied)
-	Expire     int64  // unix epoch
-
-	// v6 lease kind, recovered from the memfile so the #2239 lease-sync
-	// fallback (readSyncLeasesViaMemfile) preserves IA_PD vs IA_NA instead of
-	// mis-seeding a prefix-delegation lease as an address lease (#2262). These
-	// are NOT used by the DDNS reconciler (it keys on identity+address) — the
-	// fields are inert for v4 and for the DDNS path. lease_type / prefix_len
-	// are OPTIONAL memfile columns (not in requiredLeaseColumns): an old
-	// memfile or a v4 file leaves LeaseType == keaLeaseTypeIANA and
-	// LeaseTypeOK == true, preserving the prior (hardcoded IA_NA) behavior. A
-	// PRESENT but unparseable lease_type sets LeaseTypeOK == false so the sync
-	// path can skip the row rather than silently mis-type it.
-	LeaseType   int  // Kea numeric lease_type: 0=IA_NA, 1=IA_TA, 2=IA_PD
-	LeaseTypeOK bool // false ⇒ lease_type column present but unparseable
-	PrefixLen   int  // v6 IA_PD delegated prefix length (0 when absent)
-
-	// #5073: the v6 memfile carries DISTINCT valid_lifetime and pref_lifetime
-	// columns. The lease-sync memfile fallback (readSyncLeasesViaMemfile) needs
-	// both to recover a clock-skew-safe preferred remaining independent of the
-	// valid remaining, so a DEPRECATED binding (pref_lifetime=0) is not revived
-	// on takeover. Both are OPTIONAL columns (not in requiredLeaseColumns): an
-	// old memfile or a v4 file leaves them 0 with PrefLifetimeOK=false, and the
-	// sync path then defaults preferred==valid. The DDNS reconciler ignores both.
-	ValidLifetime  int  // memfile valid_lifetime column (seconds), 0 if absent
-	PrefLifetime   int  // memfile pref_lifetime column (seconds), 0 if absent
-	PrefLifetimeOK bool // true ⇒ pref_lifetime column present AND parseable
-	State          State
+	Family      int
+	Address     string
+	Identity    string // v4: client-id||hwaddr ; v6: DUID/IAID
+	SubnetID    string
+	HostName    string // host-name option
+	ClientFQDN  string // client-supplied FQDN option (fqdn_fwd implied)
+	LeaseType   int    // v6 Kea lease type; unknown values fail closed in DDNS
+	LeaseTypeOK bool   // false ⇒ lease_type column present but unparseable
 }
 
 // Kea memfile lease_type column values (v6 only).
@@ -151,6 +119,29 @@ const (
 	keaLeaseTypeIATA = 1
 	keaLeaseTypeIAPD = 2
 )
+
+// keaLeaseRowAccum retains the last authoritative row per address across the
+// selected LFC file set. A zero row is a tombstone (inactive/expired); order
+// preserves first appearance for stable output.
+type keaLeaseRowAccum struct {
+	latest  map[string]keaLeaseRow
+	order   []string
+	inOrder map[string]struct{}
+}
+
+func newKeaLeaseRowAccum() *keaLeaseRowAccum {
+	return &keaLeaseRowAccum{
+		latest:  map[string]keaLeaseRow{},
+		inOrder: map[string]struct{}{},
+	}
+}
+
+func (a *keaLeaseRowAccum) note(addr string) {
+	if _, ok := a.inOrder[addr]; !ok {
+		a.inOrder[addr] = struct{}{}
+		a.order = append(a.order, addr)
+	}
+}
 
 // parseActiveLeases4 reads the Kea v4 memfile and returns only active
 // leases (state default, not yet expired). now is the reference time for
@@ -165,52 +156,20 @@ func parseActiveLeases6(path string, now time.Time) ([]ddnsLease, error) {
 	return parseActiveLeases(path, 6, now)
 }
 
-// ddnsLeaseAccum accumulates the append-only, last-row-wins disposition per
-// address ACROSS the Kea LFC file set (#5796). A non-empty ddnsLease.Address is
-// an active lease to publish; a zero value is a tombstone (the last row seen for
-// that address, in chronological file+row order, was inactive/expired). order
-// preserves first-appearance for a stable output.
-type ddnsLeaseAccum struct {
-	latest  map[string]ddnsLease
-	order   []string
-	inOrder map[string]struct{}
-}
-
-func newDDNSLeaseAccum() *ddnsLeaseAccum {
-	return &ddnsLeaseAccum{
-		latest:  map[string]ddnsLease{},
-		inOrder: map[string]struct{}{},
-	}
-}
-
-func (a *ddnsLeaseAccum) note(addr string) {
-	if _, ok := a.inOrder[addr]; !ok {
-		a.inOrder[addr] = struct{}{}
-		a.order = append(a.order, addr)
-	}
-}
-
-// parseActiveLeases reads the Kea memfile lease set for `family` and returns
-// only the active leases. `path` is the CURRENT lease file; #5796: it reads
-// Kea's selected LFC source set (completed,current when `.completed` exists;
-// otherwise previous `.2`, input `.1`, current) via keaLFCLeaseFilePaths in
-// source order and MERGES it with the same append-only, last-row-wins dedup
-// Kea itself uses. A lease that currently lives only in the compacted previous
-// or input file (e.g. right after LFC rotated a fresh header-only current file)
-// is NOT lost and a header-only current file cannot by itself trigger the
-// destructive DDNS trusted-empty path.
+// parseLeaseRowSet reads and merges authoritative rows from the selected Kea
+// LFC file set. `path` is the CURRENT lease file; #5796 selects the completed
+// file when present, otherwise previous `.2`, input `.1`, and current, then
+// merges them with Kea's append-only last-row-wins semantics.
 //
-// The #1387/Codex fail-safe is preserved and EXTENDED across the set: any
-// EXISTING file that is headerless / mangled-header / ragged makes the whole
-// family untrusted (error → Reconcile SKIPS the destructive diff). Trusted-empty
-// (nil, nil) is returned only when every selected existing file validates AND
-// the merged active set is empty — a genuinely-missing generation file simply
-// contributes nothing.
-func parseLeases(path string, family int, now time.Time, includeDeclined bool) ([]ddnsLease, error) {
+// The #1387/Codex fail-safe is preserved across the set: any existing file
+// that is headerless, has a mangled header, or contains a ragged row makes the
+// whole family untrusted. Trusted-empty is returned only when every selected
+// existing file validates and the merged active set is empty.
+func parseLeaseRowSet(path string, family int, now time.Time, includeDeclined bool) (*keaLeaseRowAccum, error) {
 	allPaths := keaLFCLeaseFileSetPaths(path)
 	before := leaseSetIdentity(allPaths)
 	paths := keaLFCLeaseFilePathsFromIdentity(allPaths, before)
-	acc := newDDNSLeaseAccum()
+	acc := newKeaLeaseRowAccum()
 	prevFn := parseLeaseFileFn
 	for _, f := range paths {
 		var err error
@@ -230,13 +189,21 @@ func parseLeases(path string, family int, now time.Time, includeDeclined bool) (
 				"since the last compaction \u2014 refusing to treat it as authoritative "+
 				"(#8597)", path)
 	}
+	return acc, nil
+}
+
+func parseActiveLeases(path string, family int, now time.Time) ([]ddnsLease, error) {
+	acc, err := parseLeaseRowSet(path, family, now, false)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]ddnsLease, 0, len(acc.order))
 	for _, addr := range acc.order {
-		l, ok := acc.latest[addr]
-		if !ok || l.Address == "" {
+		row, ok := acc.latest[addr]
+		if !ok || row.Address == "" {
 			continue
 		}
-		out = append(out, l)
+		out = append(out, row.toDDNS())
 	}
 	if len(out) == 0 {
 		return nil, nil
@@ -244,38 +211,49 @@ func parseLeases(path string, family int, now time.Time, includeDeclined bool) (
 	return out, nil
 }
 
-func parseActiveLeases(path string, family int, now time.Time) ([]ddnsLease, error) {
-	return parseLeases(path, family, now, false)
-}
-
 // parseSyncLeases returns active leases plus declined (state=1) rows with
 // remaining probation for lease sync (#16856). Expired-reclaimed (state=2)
 // rows remain tombstones.
-func parseSyncLeases(path string, family int, now time.Time) ([]ddnsLease, error) {
-	return parseLeases(path, family, now, true)
+func parseSyncLeases(path string, family int, now time.Time) ([]keaLeaseRow, error) {
+	acc, err := parseLeaseRowSet(path, family, now, true)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]keaLeaseRow, 0, len(acc.order))
+	for _, addr := range acc.order {
+		row, ok := acc.latest[addr]
+		if !ok || row.Address == "" {
+			continue
+		}
+		out = append(out, row)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
-func parseSyncLeases4(path string, now time.Time) ([]ddnsLease, error) {
+func parseSyncLeases4(path string, now time.Time) ([]keaLeaseRow, error) {
 	return parseSyncLeases(path, 4, now)
 }
 
-func parseSyncLeases6(path string, now time.Time) ([]ddnsLease, error) {
+func parseSyncLeases6(path string, now time.Time) ([]keaLeaseRow, error) {
 	return parseSyncLeases(path, 6, now)
 }
 
-func parseLeaseFile(path string, family int, now time.Time, acc *ddnsLeaseAccum, includeDeclined bool) error {
+func parseLeaseFile(path string, family int, now time.Time, acc *keaLeaseRowAccum, includeDeclined bool) error {
 	return parseActiveLeasesFileIntoMode(path, family, now, acc, includeDeclined)
 }
 
 // parseActiveLeasesFileInto parses ONE Kea LFC-set file into acc, applying the
 // per-file fail-safe validation. A genuinely-missing file is skipped (nil
-// error). An EXISTING file that is anomalous (headerless / mangled header /
+// error). An EXISTING file that is anomalous (headerless / mangled-header /
 // ragged row) returns an error so the whole family is treated as untrusted.
-func parseActiveLeasesFileInto(path string, family int, now time.Time, acc *ddnsLeaseAccum) error {
+func parseActiveLeasesFileInto(path string, family int, now time.Time, acc *keaLeaseRowAccum) error {
 	return parseActiveLeasesFileIntoMode(path, family, now, acc, false)
 }
 
-func parseActiveLeasesFileIntoMode(path string, family int, now time.Time, acc *ddnsLeaseAccum, includeDeclined bool) error {
+func parseActiveLeasesFileIntoMode(path string, family int, now time.Time, acc *keaLeaseRowAccum, includeDeclined bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -457,7 +435,7 @@ func parseActiveLeasesFileIntoMode(path string, family int, now time.Time, acc *
 			}
 		}
 		if rowState != StateDefault && !(includeDeclined && rowState == StateDeclined) {
-			acc.latest[addr] = ddnsLease{}
+			acc.latest[addr] = keaLeaseRow{}
 			continue
 		}
 		var expire int64
@@ -467,7 +445,7 @@ func parseActiveLeasesFileIntoMode(path string, family int, now time.Time, acc *
 			}
 		}
 		if expire > 0 && now.Unix() >= expire {
-			acc.latest[addr] = ddnsLease{}
+			acc.latest[addr] = keaLeaseRow{}
 			continue
 		}
 		// valid_lifetime is present in both families; recover it for v4 too
@@ -479,52 +457,66 @@ func parseActiveLeasesFileIntoMode(path string, family int, now time.Time, acc *
 				validLifetime = v
 			}
 		}
-		hostName, clientFQDN := splitLeaseNames(get(fields, "hostname"), get(fields, "fqdn_fwd"))
-		l := ddnsLease{
+		row := keaLeaseRow{
 			Family:        family,
 			Address:       addr,
-			SubnetID:      get(fields, "subnet_id"),
-			HostName:      hostName,
-			ClientFQDN:    clientFQDN,
-			Expire:        expire,
-			State:         rowState,
-			ValidLifetime: validLifetime,
-			LeaseType:     keaLeaseTypeIANA,
+			HWAddress:     get(fields, "hwaddr"),
+			ClientID:      get(fields, "client_id"),
+			DUID:          get(fields, "duid"),
+			IAIDRaw:       get(fields, "iaid"),
+			IAIDOK:        true,
+			LeaseType:     "IA_NA",
 			LeaseTypeOK:   true,
+			PrefixLen:     0,
+			SubnetIDRaw:   get(fields, "subnet_id"),
+			Hostname:      get(fields, "hostname"),
+			FQDNFwd:       keaCSVFlag(get(fields, "fqdn_fwd")),
+			FQDNRev:       keaCSVFlag(get(fields, "fqdn_rev")),
+			Expire:        expire,
+			ValidLifetime: validLifetime,
+			State:         rowState,
+		}
+		if row.SubnetIDRaw != "" {
+			if sid, err := strconv.ParseUint(row.SubnetIDRaw, 10, 32); err == nil {
+				row.SubnetID = int(sid)
+			}
+		}
+		if row.IAIDRaw != "" {
+			iaid, err := strconv.ParseUint(row.IAIDRaw, 10, 32)
+			if err == nil {
+				row.IAID = uint32(iaid)
+			} else {
+				row.IAIDOK = false
+			}
 		}
 		if family == 6 {
-			l.Identity = identity6(get(fields, "duid"), get(fields, "iaid"))
-			// Recover the v6 lease kind so the lease-sync memfile fallback can
-			// preserve IA_PD vs IA_NA (#2262). lease_type / prefix_len are
-			// OPTIONAL columns: an absent or empty lease_type leaves the IA_NA
-			// default (matching the prior hardcoded behavior); a PRESENT but
-			// unparseable value flips LeaseTypeOK so the sync path skips the row
-			// instead of mis-typing it. The DDNS reconciler ignores both fields.
+			// lease_type / prefix_len are OPTIONAL columns. Missing lease_type
+			// remains IA_NA for old memfiles; malformed values stay marked so the
+			// HA projection can fail closed and the DDNS view can reject unknowns.
 			if lt := get(fields, "lease_type"); lt != "" {
-				if v, e := strconv.Atoi(strings.TrimSpace(lt)); e == nil {
-					l.LeaseType = v
+				if v, err := strconv.Atoi(strings.TrimSpace(lt)); err == nil {
+					if kind, ok := keaLeaseTypeToString(v); ok {
+						row.LeaseType = kind
+					} else {
+						row.LeaseType = strconv.Itoa(v)
+					}
 				} else {
-					l.LeaseTypeOK = false
+					row.LeaseTypeOK = false
 				}
 			}
 			if pl := get(fields, "prefix_len"); pl != "" {
-				if v, e := strconv.Atoi(strings.TrimSpace(pl)); e == nil {
-					l.PrefixLen = v
+				if v, err := strconv.Atoi(strings.TrimSpace(pl)); err == nil {
+					row.PrefixLen = v
 				}
 			}
-			// valid_lifetime already parsed above for both families.
 			if pf := get(fields, "pref_lifetime"); pf != "" {
-				if v, e := strconv.Atoi(strings.TrimSpace(pf)); e == nil {
-					l.PrefLifetime = v
-					l.PrefLifetimeOK = true
+				if v, err := strconv.Atoi(strings.TrimSpace(pf)); err == nil {
+					row.PrefLifetime = v
+					row.PrefLifetimeOK = true
 				}
 			}
-		} else {
-			l.HWAddress = get(fields, "hwaddr")
-			l.ClientID = get(fields, "client_id")
-			l.Identity = identity4(l.ClientID, l.HWAddress)
 		}
-		acc.latest[addr] = l
+		acc.latest[addr] = row
 	}
 
 	return nil
@@ -542,6 +534,10 @@ func leaseColumnValue(cols map[string]int, fields []string, name string) string 
 	}
 	return ""
 }
+func keaCSVFlag(value string) bool {
+	v, err := strconv.Atoi(value)
+	return err == nil && v != 0
+}
 
 // familyLabel renders a family number for error messages.
 func familyLabel(family int) string {
@@ -549,16 +545,6 @@ func familyLabel(family int) string {
 		return "v6"
 	}
 	return "v4"
-}
-
-func splitLeaseNames(hostname, fqdnFwd string) (hostName, clientFQDN string) {
-	if hostname == "" {
-		return "", ""
-	}
-	if v, err := strconv.Atoi(fqdnFwd); err == nil && v != 0 {
-		return "", hostname
-	}
-	return hostname, ""
 }
 
 // identity4 returns the stable v4 owner identity: client-id when present

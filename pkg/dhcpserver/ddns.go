@@ -44,14 +44,13 @@ type DDNSOwnedRecordView = ddns.OwnedRecordView
 
 // keaLeaseParser adapts the package-local Kea-memfile parser
 // (parseActiveLeases, in ddns_leases.go) to the ddns.LeaseParser seam,
-// converting each full memfile ddnsLease into the reconcile-relevant
-// ddns.Lease view. The prefix-len field the lease-sync fallback needs is not
-// part of the DDNS reconcile contract, so it is dropped at this boundary. The
-// v6 lease_type discriminator IS carried through (#5072): the reconciler must
-// distinguish an IA_PD delegated-prefix base from an address lease so it never
-// publishes an AAAA/PTR for a delegated network base. A present-but-unparseable
-// lease_type (LeaseTypeOK == false) is mapped to ddns.LeaseTypeUnknown so it is
-// rejected fail-closed instead of defaulting to an address type.
+// converting each authoritative keaLeaseRow into the reconcile-relevant
+// ddns.Lease view. HA-only fields never enter ddnsLease; the DDNS contract
+// has no prefix-len field. The v6 lease_type discriminator (#5072) is carried
+// through so the reconciler distinguishes an IA_PD delegated-prefix base
+// from an address lease and never publishes AAAA/PTR for a delegated network
+// base. A present-but-unparseable lease_type maps to ddns.LeaseTypeUnknown
+// and is rejected fail-closed rather than defaulting to an address type.
 func keaLeaseParser(path string, family int, now time.Time) ([]ddns.Lease, error) {
 	leases, err := parseActiveLeases(path, family, now)
 	if err != nil {

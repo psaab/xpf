@@ -506,9 +506,10 @@ check on deploy confirms Kea parses the rendered block.
 > `ddns_state.go`, `ddns_dns.go`, `ddns_hostname.go`) now refer to their
 > `pkg/ddns` homes (`manager.go`, `backend_rfc2136.go`, `state.go`,
 > `backend.go`, `hostname.go`). What STAYS in `pkg/dhcpserver`: the
-> state-aware **Kea-memfile lease parser** (`ddns_leases.go` —
-> `parseActiveLeases4/6`, entangled with the lease-sync fallback), the config
-> compile/merge path, and the thin glue (`ddns.go`) that re-exports the
+> shared authoritative **Kea-memfile row decoder** (`ddns_leases.go` —
+> `keaLeaseRow`), with separate `parseActiveLeases4/6` (DDNS) and
+> `parseSyncLeases4/6` (HA) projections, the config compile/merge path, and the
+> thin glue (`ddns.go`) that re-exports the
 > cross-package type aliases and injects the lease parser into the engine via
 > the `ddns.LeaseParser` seam. `pkg/daemon`'s HA writer gate
 > (`ddnsWriterGateOpen`) is unchanged and unmoved.
@@ -960,24 +961,22 @@ This package owns the KEA side of #2239 cross-chassis DHCP-server lease sync
   pre-#2239 (no socket, no hook). `memfile` stays `persist=true`.
 - `GetSyncLeases{4,6}(ctx, now)` — read the active lease set, preferring the
   control socket (`lease{4,6}-get-all`) and falling back to the
-  destructive-safe memfile parser (`parseActiveLeases`) when the socket is not
-  up. Each `SyncLease` carries REMAINING LIFETIME (`expire - now` on the
-  reader's clock), never an absolute epoch — the clock-skew-immunity invariant.
-  Expired / non-active leases are dropped at read time. The v6 fallback
-  PRESERVES the lease kind: it reads the memfile `lease_type` (0=IA_NA,
-  1=IA_TA, 2=IA_PD) and `prefix_len` columns and maps them to
-  `SyncLease.LeaseType` / `PrefixLen` exactly as the socket path does, so an
-  IA_PD prefix-delegation lease read during the socket-down window is no longer
-  mis-seeded as an IA_NA address lease (#2262). A present-but-unparseable
-  `lease_type` is fail-closed: the row is skipped (logged), never defaulted to
-  IA_NA. An absent/empty column (old memfile, v4) stays IA_NA-equivalent.
-  The v6 owner identity (`splitV6Identity`, `"duid:DUID/IAID"`) is fail-closed
-  the same way (#2379): a present-but-unparseable IAID (non-decimal, empty,
-  oversized) returns an error and the row is skipped (logged), never silently
-  defaulted to IAID 0 — because 0 is a valid IAID, swallowing the parse error
-  would seed the peer's Kea lease DB with the wrong IAID on takeover and a
-  non-zero-IAID client could fail to renew with nothing logged. The legitimate
-  "no IAID present" form (`"duid:DUID"`) stays a clean IAID 0.
+  destructive-safe memfile parser when the socket is not up. Both decoders
+  produce the same authoritative `keaLeaseRow` and share one `SyncLease`
+  projection (#17009), so fallback parity includes every identity, DNS,
+  family-specific, and lifetime field. Each `SyncLease` carries REMAINING
+  LIFETIME (`expire - now` on the reader's clock), never an absolute epoch —
+  the clock-skew-immunity invariant. Expired / non-active leases are dropped at
+  read time. The v6 fallback PRESERVES the lease kind: it reads the memfile
+  `lease_type` (0=IA_NA, 1=IA_TA, 2=IA_PD) and `prefix_len` columns, so an
+  IA_PD lease is not mis-seeded as an IA_NA address lease (#2262). IA_NA/IA_TA
+  `PrefixLen` is normalized to the `SyncLease` contract's 0 (the memfile writer
+  emits /128). A present-but-unparseable `lease_type` is fail-closed: the row
+  is skipped (logged), never defaulted to IA_NA. An absent/empty column (old
+  memfile, v4) stays IA_NA-equivalent. A malformed or oversized v6 IAID is also
+  fail-closed (#2379): the row is skipped (logged), never silently defaulted
+  to IAID 0 — because 0 is a valid IAID and the wrong value could prevent a
+  non-zero-IAID client from renewing after takeover. An absent IAID stays 0.
 - `SeedSyncLeases{4,6}(ctx, leases, now)` — write held peer leases into a
   just-started Kea via `lease{4,6}-add` (→ `lease{4,6}-update` on collision,
   idempotent), re-anchoring `expire = now + remaining` on the LOCAL clock.
@@ -1012,10 +1011,11 @@ This package owns the KEA side of #2239 cross-chassis DHCP-server lease sync
   IA_NA (logged), never silently mis-typed. The v6 pre-seed also emits the
   lease hardware address in the canonical `hwaddr` column (field 13 of
   `keaMemfileHeader6`), matching the v4 writer — `SyncLease.HWAddress` is
-  populated for v6 leases (`keaLeaseToSync` sets it for both families), so a
-  takeover no longer strips the MAC from every IPv6 lease (#2386). DHCPv6 keys
-  on DUID so the lease itself was never lost, but the empty column dropped
-  hwaddr-based logging / reservation matching / operator visibility.
+  populated for v6 leases (`keaLeaseRowFromSocket` carries it for both
+  families), so a takeover no longer strips the MAC from every IPv6 lease
+  (#2386). DHCPv6 keys on DUID so the lease itself was never lost, but the
+  empty column dropped hwaddr-based logging / reservation matching / operator
+  visibility.
 - `PreSeedMemfileMerged{4,6}` — takeover's local+peer union. If Kea is active,
   it issues `dhcp-disable` before reading the live lease set and keeps DHCP
   disabled through the atomic memfile install. The pre-seed invalidates Kea's

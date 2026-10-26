@@ -467,7 +467,7 @@ func TestSeedSyncLeases6_IdentityAndPD(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("captured %d lease6-add", len(got))
 	}
-	if got[0].DUID != "00:01:00:01" || got[0].IAIDVal() != 42 || got[0].Type != "IA_NA" {
+	if got[0].DUID != "00:01:00:01" || got[0].IAID == nil || *got[0].IAID != 42 || got[0].Type != "IA_NA" {
 		t.Errorf("NA lease wrong: %+v", got[0])
 	}
 	if got[1].Type != "IA_PD" || got[1].PrefixLen != 56 {
@@ -571,9 +571,9 @@ func TestPreSeedMemfile4_RoundTrip(t *testing.T) {
 		t.Fatalf("PreSeedMemfile4: %v", err)
 	}
 	// Re-read via the destructive-safe parser → must see the lease.
-	got, err := parseActiveLeases4(memfile, localNow)
+	got, err := parseSyncLeases4(memfile, localNow)
 	if err != nil {
-		t.Fatalf("parseActiveLeases4 on pre-seeded file: %v", err)
+		t.Fatalf("parseSyncLeases4 on pre-seeded file: %v", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("pre-seeded memfile parsed %d leases, want 1", len(got))
@@ -718,7 +718,7 @@ func TestSeedAndPreSeedRejectInvalidSyncLeases10893(t *testing.T) {
 	if err := m.PreSeedMemfile4(v4, now); err != nil {
 		t.Fatalf("PreSeedMemfile4: %v", err)
 	}
-	got4, err := parseActiveLeases4(file4, now)
+	got4, err := parseSyncLeases4(file4, now)
 	if err != nil || len(got4) != 2 || got4[0].Address != "10.0.0.5" ||
 		got4[1].Address != "10.0.0.10" || got4[1].Expire != now.Unix()+int64(maxSyncLeaseLifetime) {
 		t.Fatalf("v4 memfile retained invalid row or uncapped lifetime: %+v (err=%v)", got4, err)
@@ -726,7 +726,7 @@ func TestSeedAndPreSeedRejectInvalidSyncLeases10893(t *testing.T) {
 	if err := m.PreSeedMemfile6(v6, now); err != nil {
 		t.Fatalf("PreSeedMemfile6: %v", err)
 	}
-	got6, err := parseActiveLeases6(file6, now)
+	got6, err := parseSyncLeases6(file6, now)
 	if err != nil || len(got6) != 2 || got6[0].Address != "2001:db8::6" ||
 		got6[1].Address != "2001:db8::10" || got6[1].Expire != now.Unix()+int64(maxSyncLeaseLifetime) {
 		t.Fatalf("v6 memfile retained invalid row or uncapped lifetime: %+v (err=%v)", got6, err)
@@ -1517,7 +1517,7 @@ func TestPreSeedMemfile6_RoundTrip_PreservesIATA(t *testing.T) {
 
 // Test (#2386): the v6 memfile pre-seed must emit the lease hardware address in
 // the canonical Kea `hwaddr` column. SyncLease.HWAddress is populated for v6
-// leases read from the active peer (keaLeaseToSync sets it for both families),
+// leases read from the active peer (keaLeaseRowFromSocket does so for both families),
 // but writeMemfile6 previously hardcoded the hwaddr column empty, so standby
 // takeover stripped the MAC from every IPv6 lease (lost hwaddr-based logging,
 // reservation matching, and operator visibility — DHCPv6 keys on DUID so the
@@ -1799,47 +1799,6 @@ func TestResolveKeaOwner_CachedOnce(t *testing.T) {
 	}
 }
 
-// TestSplitV6Identity verifies the IAID parse contract from #2379: a present
-// but unparseable IAID now surfaces an error (so the takeover-seed loop can
-// log+skip the lease) instead of silently swallowing to iaid=0, while a
-// legitimate decimal IAID parses and the no-slash form stays a clean iaid=0
-// with no error.
-//
-// fail-on-revert: reverting splitV6Identity to the silent err==nil swallow
-// makes the malformed cases below (which require err != nil) go red.
-func TestSplitV6Identity(t *testing.T) {
-	tests := []struct {
-		name     string
-		identity string
-		wantDUID string
-		wantIAID uint32
-		wantErr  bool
-	}{
-		{"valid", "duid:0011223344556677/42", "0011223344556677", 42, false},
-		{"valid zero iaid", "duid:0011223344556677/0", "0011223344556677", 0, false},
-		{"no slash no iaid", "duid:0011223344556677", "0011223344556677", 0, false},
-		{"no prefix no slash", "0011223344556677", "0011223344556677", 0, false},
-		{"malformed iaid", "duid:0011223344556677/notanumber", "0011223344556677", 0, true},
-		{"empty iaid", "duid:0011223344556677/", "0011223344556677", 0, true},
-		{"oversized iaid", "duid:0011223344556677/4294967296", "0011223344556677", 0, true},
-		{"negative iaid", "duid:0011223344556677/-1", "0011223344556677", 0, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			duid, iaid, err := splitV6Identity(tt.identity)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("splitV6Identity(%q) err=%v, wantErr=%v", tt.identity, err, tt.wantErr)
-			}
-			if duid != tt.wantDUID {
-				t.Errorf("splitV6Identity(%q) duid=%q, want %q", tt.identity, duid, tt.wantDUID)
-			}
-			if iaid != tt.wantIAID {
-				t.Errorf("splitV6Identity(%q) iaid=%d, want %d", tt.identity, iaid, tt.wantIAID)
-			}
-		})
-	}
-}
-
 // TestKeaMemfileHeadersMatchKea30xSchema pins the Kea 3.0.x memfile CSV schema
 // (the appliance ships kea-common live-verified at 3.0.3, per dhcpserver.go) as
 // EXTERNAL ground truth and asserts the production keaMemfileHeader{4,6} consts
@@ -1970,9 +1929,9 @@ func TestKeaMemfileHeadersMatchKea30xSchema(t *testing.T) {
 // valid remaining — reading valid revives it on takeover. When Kea omits
 // preferred-lft (nil), default preferred==valid.
 //
-// FAIL-ON-REVERT: drop the preferred-lft handling in keaLeaseToSync and the
-// deprecated case reads PreferredRemaining=Remaining (revival) → RED.
-func TestKeaLeaseToSync_PreferredRemaining(t *testing.T) {
+// FAIL-ON-REVERT: remove preferred-lifetime projection from keaLeaseRow.toSync
+// and the deprecated case reads PreferredRemaining=Remaining (revival) → RED.
+func TestKeaLeaseRowFromSocket_PreferredRemaining(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	intp := func(n int) *int { return &n }
 	// cltt+valid-lft-now = (now-600+3600)-now = 3000 valid remaining.
@@ -1994,7 +1953,7 @@ func TestKeaLeaseToSync_PreferredRemaining(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			kl := base
 			kl.PreferredLft = tc.prefLft
-			l := keaLeaseToSync(kl, 6, now)
+			l := keaLeaseRowFromSocket(kl, 6).toSync(now)
 			if l.Remaining != 3000 {
 				t.Fatalf("Remaining = %d, want 3000", l.Remaining)
 			}

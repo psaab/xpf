@@ -75,7 +75,7 @@ func TestRotationDuringReadIsRefused_8597(t *testing.T) {
 
 	prev := parseLeaseFileFn
 	var seen int
-	parseLeaseFileFn = func(p string, family int, now time.Time, acc *ddnsLeaseAccum) error {
+	parseLeaseFileFn = func(p string, family int, now time.Time, acc *keaLeaseRowAccum) error {
 		err := prev(p, family, now, acc)
 		seen++
 		if seen == 1 {
@@ -129,7 +129,7 @@ func TestCompletedAppearsDuringSelectionIsRefused_10170(t *testing.T) {
 
 	prev := parseLeaseFileFn
 	var seen int
-	parseLeaseFileFn = func(p string, family int, now time.Time, acc *ddnsLeaseAccum) error {
+	parseLeaseFileFn = func(p string, family int, now time.Time, acc *keaLeaseRowAccum) error {
 		err := prev(p, family, now, acc)
 		seen++
 		if seen == 1 {
