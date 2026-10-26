@@ -161,3 +161,57 @@ func TestReplaceSyslogClientsRetiredTotalsIncludeCloseDiscards17855(t *testing.T
 		t.Fatalf("retired security Writes = %d, want %d: Close-discard drops were lost at retirement", st.Writes, backlog)
 	}
 }
+
+// #17855 fold (rev): a stats call between retire and the owner's
+// external Close must not consume the pending entry — the Close
+// discards still land exactly once at the next stats call.
+func TestSetSyslogClientsInterposedStatsStillCountsOnce17855(t *testing.T) {
+	conn := newStalledSyslogEventConn11697()
+	client := NewSyslogClientWithConn(conn, "tcp")
+	er := NewEventReader(nil, nil)
+	er.SetSyslogClients([]*SyslogClient{client})
+
+	const backlog = 8
+	queueBacklog17855(t, client, conn, backlog)
+
+	// Retire (the daemon caller closes externally, after this returns).
+	er.SetSyslogClients(nil)
+	// Interposed scrape: client not yet closed; nothing may be lost.
+	_ = er.SyslogDropStats()
+	// Owner's external Close now discards the backlog.
+	if err := client.Close(); err != nil {
+		t.Fatalf("external Close: %v", err)
+	}
+	if got := client.DroppedWrites(); got != backlog {
+		t.Fatalf("DroppedWrites after Close = %d, want %d", got, backlog)
+	}
+	st := dropStatFor17855(t, er.SyslogDropStats(), "security")
+	if st.Writes != backlog {
+		t.Fatalf("security Writes = %d, want %d after interposed stats", st.Writes, backlog)
+	}
+	// And exactly once: a second scrape must not double-count.
+	st = dropStatFor17855(t, er.SyslogDropStats(), "security")
+	if st.Writes != backlog {
+		t.Fatalf("security Writes = %d on second scrape, want exactly %d", st.Writes, backlog)
+	}
+}
+
+// #17855 fold (rev): re-installing a retired-then-closed client must
+// not resurrect its already-folded counters — no double count.
+func TestReinstalledRetiredClientDoesNotDoubleCount17855(t *testing.T) {
+	client := NewSyslogClientWithConn(newStalledSyslogEventConn11697(), "tcp")
+	er := NewEventReader(nil, nil)
+	er.SetSyslogClients([]*SyslogClient{client})
+	er.ReplaceSyslogClients(nil)
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Simulate a caller reinstalling the same (closed) client object.
+	er.SetSyslogClients([]*SyslogClient{client})
+	st := dropStatFor17855(t, er.SyslogDropStats(), "security")
+	live := client.DroppedWrites()
+	// The row must equal the client's own counters, never a multiple.
+	if st.Writes != live {
+		t.Fatalf("security Writes = %d, want client's own %d (no double count on reinstall)", st.Writes, live)
+	}
+}

@@ -112,8 +112,14 @@ func (p *retiredPending) record(sink string, c *SyslogClient) {
 }
 
 // foldInto folds each pending client's post-retire counter growth (its
-// Close discards) into acc and clears the pending set: every drop is
-// counted exactly once, and a second call folds nothing.
+// Close discards) into acc. A client's pending entry is cleared only
+// once the client is CLOSED: Close counts its queue discards
+// synchronously (writer.stop) before returning, so a closed client's
+// counters are final. A still-open client (retired but not yet closed
+// by its owner, or being drained) folds what it has counted so far and
+// its snapshot ADVANCES by the folded amount, so the remainder folds
+// at a later call: every drop is counted exactly once across any
+// number of interleaved stats calls (#17855).
 func (p *retiredPending) foldInto(acc *syslogDropAccumulator) {
 	for c, snap := range *p {
 		now := syslogDropsFromClient(snap.Sink, c)
@@ -134,7 +140,13 @@ func (p *retiredPending) foldInto(acc *syslogDropAccumulator) {
 		if delta.Writes != 0 || delta.Dials != 0 || delta.Cooldown != 0 {
 			acc.fold(delta)
 		}
-		delete(*p, c)
+		if c.IsClosed() {
+			delete(*p, c)
+		} else {
+			// Not final yet: advance the snapshot so the remainder is
+			// folded later, never twice, never lost.
+			(*p)[c] = now
+		}
 	}
 }
 
@@ -177,9 +189,9 @@ func (a *syslogDropAccumulator) merge(out []SyslogDropStat) []SyslogDropStat {
 // (goroutine-safe), folded with the retired generations' totals so the
 // counters are cumulative per destination across rebuilds (#16769).
 //
-// The returned slice is a copy taken under the same RLock that guards the
-// client set, so a concurrent ReplaceSyslogClients cannot be observed
-// half-applied. The counters themselves are atomics read individually: a
+// The returned slice is a copy taken under the write lock that guards
+// the client set (the lock serializes the retired-pending fold), so a
+// concurrent ReplaceSyslogClients cannot be observed half-applied. The counters themselves are atomics read individually: a
 // snapshot is not a consistent instant across all three, which is correct for
 // monotonic counters scraped by Prometheus and is why they are exported as
 // counters rather than as a rate computed here.

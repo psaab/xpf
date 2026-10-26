@@ -71,14 +71,12 @@ type syslogClientSet struct {
 	// per destination so the exported counters survive rebuilds (#16769).
 	// Guarded by mu.
 	retired syslogDropAccumulator
-	// retiredPending holds clients retired by the last replacement whose
-	// Close has not yet been observed by a SyslogDropStats call (#17855):
-	// retire() snapshots pre-Close counts, but only Close's writer stop
-	// counts the discarded queue. The pending remainder (final counts
-	// minus the retired snapshot) is folded exactly once at stats time,
-	// so concurrency is safe: SetClients* return before Close, and any
-	// later stats call observes the closed client's final counters.
-	// Guarded by mu.
+	// retiredPending holds clients retired by recent replacements
+	// until they are closed (#17855): retire() snapshots pre-Close
+	// counts, but only Close's writer stop counts the discarded queue.
+	// foldInto folds the post-retire growth once per stats call,
+	// advancing the snapshot of not-yet-closed clients so the rest
+	// folds later — exactly once across interleaves. Guarded by mu.
 	retiredPending retiredPending
 }
 

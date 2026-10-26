@@ -2158,6 +2158,11 @@ func (s *SyslogClient) CloseTimeout(timeout time.Duration) error {
 	return s.Close()
 }
 
+// IsClosed reports whether Close has marked this client closed. Close
+// counts the writer-queue discards synchronously before returning, so
+// a closed client's drop counters are final (#17855).
+func (s *SyslogClient) IsClosed() bool { return s.closed.Load() }
+
 // ShutdownDrained reports whether this client's writer goroutine has
 // exited (observability/test seam for the daemon shutdown lifecycle).
 func (s *SyslogClient) ShutdownDrained() bool {
