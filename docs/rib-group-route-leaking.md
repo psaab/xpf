@@ -67,8 +67,8 @@ Since #16614, each admitted config next-table leak installs a target lookup and
 a selector-identical `unreachable` shadow per default-instance ingress
 interface. Independently, the manager installs a destination- and iif-scoped
 slot-0 main lookup for each configured non-next-table static route strictly
-more specific than a matching admitted config next-table prefix that FRR can
-`StaticRouteExcludedReason` excludes cases such as `no-install`, unusable
+more specific than a matching admitted config next-table prefix, provided
+FRR can render the route. `StaticRouteExcludedReason` excludes cases such as `no-install`, unusable
 destinations, family-mismatched gateways, and routes with no forwarding
 disposition; the shared FRR operand predicates additionally require at least
 one renderable ECMP member. Valid discard/reject and
