@@ -331,12 +331,12 @@ func (d *Daemon) systemSyslogForgetCached(keep map[string]bool) {
 // installed clients into the cache on the first vetted apply, keyed by
 // their config host keys with an empty fingerprint. Each installed
 // client is matched by its own remote and source address; foreign
-// destinations are not adopted. Adoption keeps a pre-installed healthy
-// client alive across its first idempotence-vetted apply (e.g. a client
-// planted before the cache existed); the empty fingerprint means the
-// next apply always re-dials it once, so adoption can never pin a stale
-// construction. Only seeds when the cache is empty, so it runs at most
-// once per daemon.
+// destinations are not adopted. Adoption records the per-host
+// association for a pre-installed set (e.g. clients planted before the
+// cache existed) so later cache bookkeeping keys each client to its
+// own host; the empty fingerprint means the next apply always re-dials
+// it once, so adoption can never pin a stale construction. Only seeds
+// when the cache is empty, so it runs at most once per daemon.
 func (d *Daemon) systemSyslogSeedCacheIfEmpty(cfg *config.Config) {
 	d.systemSyslogBuiltMu.Lock()
 	empty := len(d.systemSyslogBuiltByKey) == 0
