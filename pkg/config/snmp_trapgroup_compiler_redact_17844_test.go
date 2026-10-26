@@ -22,8 +22,8 @@ import (
 // (map key + Name, read by pkg/snmp for the wire community) must retain the
 // real value.
 //
-// RED-on-revert: restoring any `tgName` operand in the six format sites
-// re-leaks the canary below into the corresponding error/warning.
+// RED-on-revert: restoring any `tgName` operand in the seven format
+// sites re-leaks the canary below into the corresponding error/warning.
 
 const trapGroupDiagCanary17844 = "CFG-TRAPSECRET-17844"
 
@@ -108,7 +108,7 @@ func trapGroupDiagCases17844() []struct {
 		},
 		{
 			// Valid-but-unemitted category: advisory warning on BOTH paths
-			// (no strict error) — the sixth tgName site.
+			// (no strict error) — the seventh tgName site.
 			name: "unemitted-category-advisory",
 			lines: []string{
 				"set snmp trap-group " + canary + " targets 192.0.2.10",

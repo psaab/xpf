@@ -563,7 +563,7 @@ func (a *Agent) enqueueTrap(job trapJob) {
 		a.mu.Unlock()
 		dropped := a.trapsDropped.Add(1)
 		slog.Warn("SNMP trap dropped: agent stopped",
-			"target", job.target, "group", job.group,
+			"target", job.target, "group", config.SecretDataPlaceholder,
 			"event", job.event, "iface", job.iface, "dropped_total", dropped)
 		return
 	}
@@ -616,7 +616,7 @@ func (a *Agent) enqueueTrap(job trapJob) {
 		a.mu.Unlock()
 		dropped := a.trapsDropped.Add(1)
 		slog.Warn("SNMP trap dropped: per-target queue cap reached",
-			"target", job.target, "group", job.group,
+			"target", job.target, "group", config.SecretDataPlaceholder,
 			"event", job.event, "iface", job.iface, "dropped_total", dropped)
 		return
 	}
@@ -638,7 +638,7 @@ func (a *Agent) enqueueTrap(job trapJob) {
 	}
 	dropped := a.trapsDropped.Add(1)
 	slog.Warn("SNMP trap queue full, dropping trap",
-		"target", job.target, "group", job.group,
+		"target", job.target, "group", config.SecretDataPlaceholder,
 		"event", job.event, "iface", job.iface, "dropped_total", dropped)
 }
 
@@ -699,7 +699,7 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 				// buffered backlog, then exit.
 				dropped := a.trapsDropped.Add(1)
 				slog.Warn("SNMP trap abandoned on stop, dropping trap",
-					"target", job.target, "group", job.group,
+					"target", job.target, "group", config.SecretDataPlaceholder,
 					"event", job.event, "iface", job.iface, "dropped_total", dropped)
 				a.countAbandonedTraps(queue)
 				return
@@ -720,7 +720,7 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 				case <-stop:
 					dropped := a.trapsDropped.Add(1)
 					slog.Warn("SNMP trap abandoned on stop, dropping trap",
-						"target", job.target, "group", job.group,
+						"target", job.target, "group", config.SecretDataPlaceholder,
 						"event", job.event, "iface", job.iface, "dropped_total", dropped)
 					a.countAbandonedTraps(queue)
 					return
@@ -730,13 +730,13 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 			if err := send(job.target, pkt); err != nil {
 				dropped := a.trapsDropped.Add(1)
 				slog.Warn("SNMP trap send failed, counting as dropped",
-					"target", job.target, "group", job.group,
+					"target", job.target, "group", config.SecretDataPlaceholder,
 					"event", job.event, "iface", job.iface,
 					"err", err, "dropped_total", dropped)
 			} else {
 				a.trapsSent.Add(1)
 				slog.Info("SNMP trap sent",
-					"target", job.target, "group", job.group,
+					"target", job.target, "group", config.SecretDataPlaceholder,
 					"event", job.event, "iface", job.iface, "ifindex", job.ifindex)
 			}
 		}
@@ -767,7 +767,7 @@ func (a *Agent) countAbandonedTraps(queue chan trapJob) {
 			a.decTrapPerTarget(normalizeTrapTarget(job.target))
 			dropped := a.trapsDropped.Add(1)
 			slog.Warn("SNMP trap abandoned on stop, dropping trap",
-				"target", job.target, "group", job.group,
+				"target", job.target, "group", config.SecretDataPlaceholder,
 				"event", job.event, "iface", job.iface, "dropped_total", dropped)
 		default:
 			return
