@@ -22,16 +22,16 @@ import (
 // missing argument.
 //
 // The socket backstop is distinct from the memfile pre-seed path: the v4
-// memfile row can carry an empty hwaddr column, while lease4-add requires a
-// value. The converter supplies a parseable all-zero sentinel only for
-// declined rows without a hardware address; state remains 1. ClientID-only
-// declined rows need the same argument because Kea's parser requires
-// hw-address even when client-id is present.
+// memfile row can carry an empty hwaddr column, and Kea's declined lease uses
+// an empty HWAddr internally. `syncLeaseToKea` keeps that empty string, while
+// the lease4-add/update wrapper ensures the required JSON member is present.
+// ClientID-only declined rows need the same argument because Kea's parser
+// requires hw-address even when client-id is present.
 //
-// Fail-on-revert: removing the sentinel substitution makes the in-process
-// Kea parser stub reject identity-free and ClientID-only declined lease4-add
-// commands; the end-to-end seed and argument-shape tests then go RED. The
-// stub mirrors the pinned Kea parser's required-key check, not a live daemon.
+// Fail-on-revert: removing the declined lease4 argument wrapper makes the
+// in-process Kea parser stub reject identity-free and ClientID-only declined
+// lease4-add commands; the end-to-end seed test then goes RED. The stub
+// mirrors the pinned parser's required-key check, not a live daemon.
 
 // keaLease4AddMandatory17892 mirrors Kea 3.0.3 Lease4Parser::parse's
 // mandatory-argument behavior. Raw JSON keys distinguish "absent" from an
@@ -114,8 +114,13 @@ func TestDeclined17892_IdentityFreeSeedCarriesMandatoryHWAddress(t *testing.T) {
 		return hw
 	}
 	for _, addr := range []string{"10.0.61.66", "10.0.61.67"} {
-		if hw := hwOf(addr); hw != "00:00:00:00:00:00" {
-			t.Errorf("declined row %s hw-address = %q, want all-zero sentinel", addr, hw)
+		if hw := hwOf(addr); hw != "" {
+			t.Errorf("declined row %s hw-address = %q, want present empty value", addr, hw)
+		}
+	}
+	for _, addr := range []string{"10.0.61.66", "10.0.61.67"} {
+		if got := string(byAddr[addr]["hw-address"]); got != `""` {
+			t.Errorf("declined row %s hw-address JSON = %s, want an explicit empty string", addr, got)
 		}
 	}
 	if cid := byAddr["10.0.61.67"]["client-id"]; !strings.Contains(string(cid), "01:aa:bb:cc:dd:ee:67") {
@@ -133,30 +138,40 @@ func TestDeclined17892_IdentityFreeSeedCarriesMandatoryHWAddress(t *testing.T) {
 	}
 }
 
-func TestDeclined17892_SyncLeaseToKeaArgumentShape(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	kl := syncLeaseToKea(SyncLease{Family: 4, Address: "10.0.61.66", SubnetID: 1, Remaining: 1800, State: keaStateDeclined}, now)
-	raw, err := json.Marshal(kl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(raw), `"hw-address":"00:00:00:00:00:00"`) {
-		t.Errorf("identity-free declined lease4-add args omit mandatory hw-address: %s", raw)
-	}
-	if !strings.Contains(string(raw), `"state":1`) {
-		t.Errorf("declined state lost: %s", raw)
-	}
-	active := syncLeaseToKea(SyncLease{Family: 4, Address: "10.0.61.70", SubnetID: 1, Remaining: 1800, State: keaStateDefault}, now)
-	rawActive, err := json.Marshal(active)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(rawActive), "hw-address") {
-		t.Errorf("identity-free ACTIVE row must not gain a fabricated hw-address: %s", rawActive)
-	}
-}
-
 func mustJSON17892(args map[string]json.RawMessage) string {
 	b, _ := json.Marshal(args)
 	return string(b)
+}
+
+func TestDeclined17892_SeedV6LeavesHWAddressOptional(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	sock := tmpSocket(t, "k6decl17892.sock")
+	var raw []byte
+	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
+		if cmd.Command != "lease6-add" {
+			return keaResponse{Result: keaResultError, Text: "unexpected command"}
+		}
+		raw, _ = json.Marshal(cmd.Arguments)
+		return keaResponse{Result: keaResultSuccess}
+	}}
+	dial, stop := startStubKea(t, sock, stub)
+	defer stop()
+	m := New()
+	m.SetLeaseSyncSeamsForTesting(dial, "", sock, "", "")
+
+	n, err := m.SeedSyncLeases6(context.Background(), []SyncLease{{
+		Family: 6, Address: "2001:db8::66", SubnetID: 1,
+		DUID: "00:01:00:01:aa:bb:cc:dd:ee:66", IAID: 1, LeaseType: "IA_NA",
+		Remaining: 1800, State: keaStateDeclined,
+	}}, now)
+	if err != nil || n != 1 {
+		t.Fatalf("SeedSyncLeases6: n=%d err=%v", n, err)
+	}
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &args); err != nil {
+		t.Fatalf("decode lease6-add args: %v", err)
+	}
+	if _, ok := args["hw-address"]; ok {
+		t.Errorf("v6 lease6-add unexpectedly has hw-address: %s", raw)
+	}
 }

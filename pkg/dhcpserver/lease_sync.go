@@ -378,6 +378,14 @@ type keaLeaseJSON struct {
 	FQDNRev      bool   `json:"fqdn-rev,omitempty"`
 }
 
+// keaLease4AddArguments preserves an explicitly empty hw-address for declined
+// IPv4 adds. Kea's lease4 parser requires the member, while an empty HWAddr is
+// the representation Kea itself stores for a declined lease.
+type keaLease4AddArguments struct {
+	keaLeaseJSON
+	HWAddress string `json:"hw-address"`
+}
+
 // AppliedGeneration returns the daemon lease-authority generation of the most
 // recent APPLIED authority-bearing apply for family (0 if none). #16855: the
 // post-start lease-add backstop polls this so it only seeds the process that
@@ -781,7 +789,11 @@ func (m *Manager) seedSyncLeases(ctx context.Context, family int, leases []SyncL
 // node's own persisted memfile is harmlessly refreshed (idempotent).
 func (m *Manager) seedOneLease(ctx context.Context, socket string, family int, l SyncLease, now time.Time) error {
 	kl := syncLeaseToKea(l, now)
-	addCmd := keaCommand{Command: fmt.Sprintf("lease%d-add", family), Arguments: kl}
+	var arguments any = kl
+	if family == 4 && l.IsDeclined() && kl.HWAddress == "" {
+		arguments = keaLease4AddArguments{keaLeaseJSON: kl}
+	}
+	addCmd := keaCommand{Command: fmt.Sprintf("lease%d-add", family), Arguments: arguments}
 	resp, err := keaControl(ctx, m.keaDial, socket, addCmd)
 	if err != nil {
 		return err
@@ -792,7 +804,7 @@ func (m *Manager) seedOneLease(ctx context.Context, socket string, family int, l
 	// Conflict / already-exists → update in place (newer of the two wins;
 	// the local persisted lease keeps the in-use binding either way).
 	if resp.Result == keaResultConflict || strings.Contains(strings.ToLower(resp.Text), "exist") {
-		updCmd := keaCommand{Command: fmt.Sprintf("lease%d-update", family), Arguments: kl}
+		updCmd := keaCommand{Command: fmt.Sprintf("lease%d-update", family), Arguments: arguments}
 		uresp, uerr := keaControl(ctx, m.keaDial, socket, updCmd)
 		if uerr != nil {
 			return uerr
@@ -858,12 +870,6 @@ func syncLeaseToKea(l SyncLease, now time.Time) keaLeaseJSON {
 	} else {
 		kl.HWAddress = l.HWAddress
 		kl.ClientID = l.ClientID
-		// Kea 3.0.3 requires hw-address on every lease4-add, including a
-		// declined row. Such a row may have no client identity on the sync
-		// wire; provide a valid sentinel without changing its declined state.
-		if l.IsDeclined() && kl.HWAddress == "" {
-			kl.HWAddress = "00:00:00:00:00:00"
-		}
 	}
 	return kl
 }
