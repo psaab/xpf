@@ -804,7 +804,7 @@ func (c *CLI) handleConsoleInterrupts(sigCh <-chan os.Signal, exitCh chan struct
 	}
 }
 
-// releaseLocalConfigureOnEOF handles Ctrl-D (io.EOF from readline) for
+// handleConsoleEOF handles Ctrl-D (io.EOF from readline) for
 // the in-process console (#16793): it exits configuration mode only
 // when THIS session acquired the lock itself and then only via the
 // session-scoped release, so a foreign holder's candidate and lock survive.
