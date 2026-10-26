@@ -130,11 +130,37 @@ func (s *Store) CandidateGeneration() uint64 {
 // render; the live candidate is never aliased.
 func (s *Store) CandidateTree() *config.ConfigTree {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.candidate == nil {
-		return nil
+	var candidate *config.ConfigTree
+	if s.candidate != nil {
+		candidate = s.candidate.Clone()
 	}
-	return s.candidate.Clone()
+	afterSample := s.afterCandidateGateSampleForTesting
+	s.mu.RUnlock()
+	if afterSample != nil {
+		afterSample()
+	}
+	return candidate
+}
+
+// CandidateGateSample returns a deep copy of the candidate, its generation,
+// and a deep copy of the active tree from one store-lock acquisition
+// (#17676). The generation binds exactly the trees returned here; callers
+// must authorize these snapshots and carry this generation to promotion.
+func (s *Store) CandidateGateSample() (candidate *config.ConfigTree, generation uint64, active *config.ConfigTree) {
+	s.mu.RLock()
+	if s.candidate != nil {
+		candidate = s.candidate.Clone()
+	}
+	if s.active != nil {
+		active = s.active.Clone()
+	}
+	generation = s.candidateGen
+	afterSample := s.afterCandidateGateSampleForTesting
+	s.mu.RUnlock()
+	if afterSample != nil {
+		afterSample()
+	}
+	return candidate, generation, active
 }
 
 // ActiveSnapshot returns the published active generation + compiled config

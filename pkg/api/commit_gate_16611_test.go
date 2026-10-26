@@ -113,3 +113,131 @@ func TestRESTCommitGateTOCTOU16611(t *testing.T) {
 		t.Fatalf("unchanged REST Commit refused: code=%d body=%s", rec2.Code, rec2.Body.String())
 	}
 }
+
+// TestRESTCommitGateSamplesBeforeSameSessionMutation17676 places a
+// same-session apply-groups after the atomic (candidate, generation, active)
+// sample but before adjudication/stamping. The old split reads priced the
+// clean tree and then captured the post-mutation generation, allowing the
+// denied inherited path through the promotion equality fast path.
+func TestRESTCommitGateSamplesBeforeSameSessionMutation17676(t *testing.T) {
+	store := gateStoreREST16611(t)
+	if err := store.EnterConfigureSession(restSession16611); err != nil {
+		t.Fatalf("EnterConfigureSession: %v", err)
+	}
+	srv := &Server{store: store}
+	req := restCommitReq16611()
+	cfg := store.ActiveConfig()
+	sampledMutation := false
+	store.SetAfterCandidateGateSampleForTesting(func() {
+		sampledMutation = true
+		if err := store.SetAs(restSession16611, []string{"apply-groups", "G"}); err != nil {
+			t.Errorf("same-session apply-groups in snapshot/pricing gap: %v", err)
+		}
+	})
+	defer store.SetAfterCandidateGateSampleForTesting(nil)
+
+	pricedReq, err := srv.priceRESTCommitGate16611(req, cfg, authz.Principal{Class: "limited"})
+	if err != nil {
+		t.Fatalf("pre-mutation candidate should pass the gate: %v", err)
+	}
+	if !sampledMutation {
+		t.Fatal("atomic candidate-gate sample hook did not run; the priced tree and generation were not captured together")
+	}
+	srv.commitFn = func(_ context.Context, authority configstore.CommitAuthority, comment string) (*config.Config, error) {
+		_, gen, compileErr := store.CompileCandidateGen()
+		if compileErr != nil {
+			return nil, compileErr
+		}
+		return store.CommitWithDescriptionGenAs(authority, comment, gen)
+	}
+	rec := httptest.NewRecorder()
+	srv.configCommitHandler(rec, pricedReq)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("REST Commit promoted the denied candidate mutated after the atomic sample (#17676); body=%s", rec.Body.String())
+	}
+	if got := store.ShowActiveSet(); strings.Contains(got, "set system domain-name evil16611") {
+		t.Fatalf("denied group content promoted to active:\n%s", got)
+	}
+
+	// Named control: unchanged candidate pricing continues to allow commit.
+	control := gateStoreREST16611(t)
+	if err := control.EnterConfigureSession(restSession16611); err != nil {
+		t.Fatalf("EnterConfigureSession (unchanged control): %v", err)
+	}
+	controlServer := &Server{store: control}
+	controlReq, err := controlServer.priceRESTCommitGate16611(restCommitReq16611(), control.ActiveConfig(), authz.Principal{Class: "limited"})
+	if err != nil {
+		t.Fatalf("unchanged control candidate gate: %v", err)
+	}
+	controlServer.commitFn = func(_ context.Context, authority configstore.CommitAuthority, comment string) (*config.Config, error) {
+		_, gen, compileErr := control.CompileCandidateGen()
+		if compileErr != nil {
+			return nil, compileErr
+		}
+		return control.CommitWithDescriptionGenAs(authority, comment, gen)
+	}
+	controlRec := httptest.NewRecorder()
+	controlServer.configCommitHandler(controlRec, controlReq)
+	if controlRec.Code != http.StatusOK {
+		t.Fatalf("unchanged control candidate refused: code=%d body=%s", controlRec.Code, controlRec.Body.String())
+	}
+
+	// Named gate control: a denied inherited path present before the sample is
+	// refused by the authorization verdict.
+	preDenied := gateStoreREST16611(t)
+	if err := preDenied.EnterConfigureSession(restSession16611); err != nil {
+		t.Fatalf("EnterConfigureSession (pre-denied control): %v", err)
+	}
+	if err := preDenied.SetAs(restSession16611, []string{"apply-groups", "G"}); err != nil {
+		t.Fatalf("apply-groups before gate: %v", err)
+	}
+	if _, err := (&Server{store: preDenied}).priceRESTCommitGate16611(restCommitReq16611(), preDenied.ActiveConfig(), authz.Principal{Class: "limited"}); err == nil {
+		t.Fatal("pre-sample denied candidate control passed the gate")
+	}
+}
+
+func TestRESTCommitConfirmedGateSamplesBeforeSameSessionMutation17676(t *testing.T) {
+	store := gateStoreREST16611(t)
+	if err := store.EnterConfigureSession(restSession16611); err != nil {
+		t.Fatalf("EnterConfigureSession: %v", err)
+	}
+	srv := &Server{store: store}
+	principal := authz.Principal{Class: "limited", Username: "opuser"}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/commit-confirmed", strings.NewReader(`{"minutes":5}`))
+	req.Header.Set(restConfigSessionHeader, restSession16611)
+	req = req.WithContext(context.WithValue(req.Context(), authorizedMutationPrincipalKey{}, principal))
+	sampledMutation := false
+	store.SetAfterCandidateGateSampleForTesting(func() {
+		sampledMutation = true
+		if err := store.SetAs(restSession16611, []string{"apply-groups", "G"}); err != nil {
+			t.Errorf("same-session apply-groups in snapshot/pricing gap: %v", err)
+		}
+	})
+	pricedReq, err := srv.priceRESTCommitGate16611(req, store.ActiveConfig(), principal)
+	store.SetAfterCandidateGateSampleForTesting(nil)
+	if err != nil {
+		t.Fatalf("pre-mutation candidate should pass the CommitConfirmed gate: %v", err)
+	}
+	if !sampledMutation {
+		t.Fatal("atomic candidate-gate sample hook did not run for CommitConfirmed")
+	}
+	srv.commitConfirmedFn = func(_ context.Context, authority configstore.CommitAuthority, minutes int) (*config.Config, error) {
+		_, gen, compileErr := store.CompileCandidateGen()
+		if compileErr != nil {
+			return nil, compileErr
+		}
+		return store.CommitConfirmedGenAs(authority, minutes, gen)
+	}
+	rec := httptest.NewRecorder()
+	srv.configCommitConfirmedHandler(rec, pricedReq)
+	if rec.Code == http.StatusOK {
+		store.CancelConfirmTimerForTesting()
+		t.Fatalf("REST CommitConfirmed promoted the denied candidate mutated after the atomic sample (#17676); body=%s", rec.Body.String())
+	}
+	if store.IsConfirmPending() {
+		t.Fatal("refused gate-bound REST CommitConfirmed armed the confirm timer")
+	}
+	if got := store.ShowActiveSet(); strings.Contains(got, "set system domain-name evil16611") {
+		t.Fatalf("denied group content promoted to active by REST CommitConfirmed:\n%s", got)
+	}
+}

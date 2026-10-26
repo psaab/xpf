@@ -172,3 +172,115 @@ func enterHolderCtx(t *testing.T, s *configstore.Store) context.Context {
 		Source: authz.SourcePeerUID, UID: 1001, Username: "opuser", Class: "ops",
 	})
 }
+
+// TestGRPCCommitGateSamplesBeforeSameHolderMutation17676 places a
+// same-holder apply-groups exactly after the atomic (candidate, generation,
+// active) sample but before adjudication/stamping. The old split reads priced
+// the clean tree and then captured the post-mutation generation, which let the
+// denied inherited path pass verifyGateBindingLocked's equality fast path.
+func TestGRPCCommitGateSamplesBeforeSameHolderMutation17676(t *testing.T) {
+	cfg := gateCfgGRPC16611()
+	store := gateStoreGRPC16611(t)
+	ctx := enterHolder16611(t, store)
+	srv := &Server{store: store}
+	sampledMutation := false
+	store.SetAfterCandidateGateSampleForTesting(func() {
+		sampledMutation = true
+		if err := store.SetAs(connSessionID(ctx), []string{"apply-groups", "G"}); err != nil {
+			t.Errorf("same-holder apply-groups in snapshot/pricing gap: %v", err)
+		}
+	})
+	defer store.SetAfterCandidateGateSampleForTesting(nil)
+
+	var err error
+	ctx, err = srv.authorizeRPCCommitGate16611(ctx, cfg, "ops", method9633("Commit"), &pb.CommitRequest{})
+	if err != nil {
+		t.Fatalf("pre-mutation candidate should pass the gate: %v", err)
+	}
+	if !sampledMutation {
+		t.Fatal("atomic candidate-gate sample hook did not run; the priced tree and generation were not captured together")
+	}
+	srv.commitFn = func(_ context.Context, authority configstore.CommitAuthority, comment string) (*config.Config, error) {
+		_, gen, compileErr := store.CompileCandidateGen()
+		if compileErr != nil {
+			return nil, compileErr
+		}
+		return store.CommitWithDescriptionGenAs(authority, comment, gen)
+	}
+	if _, err := srv.Commit(ctx, &pb.CommitRequest{}); err == nil {
+		t.Fatal("Commit promoted the denied candidate mutated after the atomic sample (#17676)")
+	}
+	if got := store.ShowActiveSet(); strings.Contains(got, "set system domain-name evil16611") {
+		t.Fatalf("denied group content promoted to active:\n%s", got)
+	}
+
+	// Named control: an unchanged candidate priced and promoted by the same
+	// path commits, so the new generation binding is not a blanket refusal.
+	control := gateStoreGRPC16611(t)
+	controlCtx := enterHolder16611(t, control)
+	controlServer := &Server{store: control}
+	controlCtx, err = controlServer.authorizeRPCCommitGate16611(controlCtx, cfg, "ops", method9633("Commit"), &pb.CommitRequest{})
+	if err != nil {
+		t.Fatalf("unchanged control candidate gate: %v", err)
+	}
+	controlServer.commitFn = func(_ context.Context, authority configstore.CommitAuthority, comment string) (*config.Config, error) {
+		_, gen, compileErr := control.CompileCandidateGen()
+		if compileErr != nil {
+			return nil, compileErr
+		}
+		return control.CommitWithDescriptionGenAs(authority, comment, gen)
+	}
+	if _, err := controlServer.Commit(controlCtx, &pb.CommitRequest{}); err != nil {
+		t.Fatalf("unchanged control candidate refused: %v", err)
+	}
+
+	// Named gate control: the same denied inherited path present before the
+	// sample is rejected by the authorization verdict, not by promotion.
+	preDenied := gateStoreGRPC16611(t)
+	preDeniedCtx := enterHolder16611(t, preDenied)
+	if err := preDenied.SetAs(connSessionID(preDeniedCtx), []string{"apply-groups", "G"}); err != nil {
+		t.Fatalf("apply-groups before gate: %v", err)
+	}
+	if _, err := (&Server{store: preDenied}).authorizeRPCCommitGate16611(preDeniedCtx, cfg, "ops", method9633("Commit"), &pb.CommitRequest{}); err == nil {
+		t.Fatal("pre-sample denied candidate control passed the gate")
+	}
+}
+
+func TestGRPCCommitConfirmedGateSamplesBeforeSameHolderMutation17676(t *testing.T) {
+	cfg := gateCfgGRPC16611()
+	store := gateStoreGRPC16611(t)
+	ctx := enterHolder16611(t, store)
+	srv := &Server{store: store}
+	sampledMutation := false
+	store.SetAfterCandidateGateSampleForTesting(func() {
+		sampledMutation = true
+		if err := store.SetAs(connSessionID(ctx), []string{"apply-groups", "G"}); err != nil {
+			t.Errorf("same-holder apply-groups in snapshot/pricing gap: %v", err)
+		}
+	})
+	ctx, err := srv.authorizeRPCCommitGate16611(ctx, cfg, "ops", method9633("CommitConfirmed"), &pb.CommitConfirmedRequest{})
+	store.SetAfterCandidateGateSampleForTesting(nil)
+	if err != nil {
+		t.Fatalf("pre-mutation candidate should pass the CommitConfirmed gate: %v", err)
+	}
+	if !sampledMutation {
+		t.Fatal("atomic candidate-gate sample hook did not run for CommitConfirmed")
+	}
+	srv.commitConfirmedFn = func(_ context.Context, authority configstore.CommitAuthority, minutes int) (*config.Config, error) {
+		_, gen, compileErr := store.CompileCandidateGen()
+		if compileErr != nil {
+			return nil, compileErr
+		}
+		return store.CommitConfirmedGenAs(authority, minutes, gen)
+	}
+	if _, err := srv.CommitConfirmed(ctx, &pb.CommitConfirmedRequest{Minutes: 5}); err == nil {
+		store.CancelConfirmTimerForTesting()
+		t.Fatal("CommitConfirmed promoted the denied candidate mutated after the atomic sample (#17676)")
+	}
+	if store.IsConfirmPending() {
+		t.Fatal("refused gate-bound CommitConfirmed armed the confirm timer")
+	}
+	if got := store.ShowActiveSet(); strings.Contains(got, "set system domain-name evil16611") {
+		t.Fatalf("denied group content promoted to active by CommitConfirmed:\n%s", got)
+	}
+}

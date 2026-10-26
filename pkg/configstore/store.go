@@ -141,6 +141,10 @@ type Store struct {
 	// generation is gone), so the conservative outcome is a conflict/retry.
 	// ALWAYS bumped via bumpCandidateGenLocked under s.mu.Lock.
 	candidateGen uint64
+	// afterCandidateGateSampleForTesting runs after CandidateTree or
+	// CandidateGateSample releases its read lock. It is a deterministic
+	// concurrency seam for commit-gate binding tests only.
+	afterCandidateGateSampleForTesting func()
 
 	// pendingRenameAncestry records candidate Rename operations by the
 	// candidate generation that produced them. The daemon binds only the

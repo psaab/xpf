@@ -59,18 +59,25 @@ func commitGatePriceFrom(ctx context.Context) (commitGatePrice, bool) {
 
 // authorizeRPCCommitGate16611 prices Commit/CommitConfirmed and, on
 // success, returns the context carrying the priced snapshot for the
-// handler's authority binding (#16611). Non-commit methods return ctx
-// unchanged. It reuses authorizeRPCConfigMutation so the verdict is
-// the interceptor's single verdict, never a second pricing.
+// handler's authority binding (#16611/#17676). Non-commit methods
+// return ctx unchanged. For commit methods it samples
+// (candidate, gen, active) as one atomic triple via
+// CandidateGateSample, prices exactly those trees, and stashes the
+// SAME generation — the verdict and the token always name one tree.
 func (s *Server) authorizeRPCCommitGate16611(ctx context.Context, cfg *config.Config, class, fullMethod string, req any) (context.Context, error) {
-	if err := s.authorizeRPCConfigMutation(cfg, class, fullMethod, req); err != nil {
+	_, method, okM := splitFullMethod(fullMethod)
+	isCommit := okM && (method == "Commit" || method == "CommitConfirmed")
+	if !isCommit || s.store == nil || class == "" {
+		// Non-commit path (and nil-store/class-free commit): the verdict
+		// only — no token is stamped, so no atomic sample is taken.
+		if err := s.authorizeRPCConfigMutation(cfg, class, fullMethod, req); err != nil {
+			return ctx, err
+		}
+		return ctx, nil
+	}
+	candidate, gen, active := s.store.CandidateGateSample()
+	if err := config.AuthorizeExpandedCandidate(cfg, class, candidate, active); err != nil {
 		return ctx, err
-	}
-	if _, method, okM := splitFullMethod(fullMethod); !okM || (method != "Commit" && method != "CommitConfirmed") {
-		return ctx, nil
-	}
-	if s.store == nil || class == "" {
-		return ctx, nil
 	}
 	// Only bind classes the expanded gate actually restricts (regex or
 	// credential surcharge); unrestricted classes stay unbound.
@@ -79,11 +86,7 @@ func (s *Server) authorizeRPCCommitGate16611(ctx context.Context, cfg *config.Co
 			return ctx, nil
 		}
 	}
-	price := commitGatePrice{
-		cfg: cfg, class: class,
-		candidateGen: s.store.CandidateGeneration(),
-		active:       s.store.ActiveTree(),
-	}
+	price := commitGatePrice{cfg: cfg, class: class, candidateGen: gen, active: active}
 	return context.WithValue(ctx, commitGatePriceKey{}, price), nil
 }
 func (s *Server) authorizeRPCConfigMutation(cfg *config.Config, class, fullMethod string, req any) error {
@@ -99,7 +102,8 @@ func (s *Server) authorizeRPCConfigMutation(cfg *config.Config, class, fullMetho
 		if s.store == nil {
 			return nil
 		}
-		return config.AuthorizeExpandedCandidate(cfg, class, s.store.CandidateTree(), s.store.ActiveTree())
+		candidate, _, active := s.store.CandidateGateSample()
+		return config.AuthorizeExpandedCandidate(cfg, class, candidate, active)
 	}
 	line, ok := configMutationLineFor(fullMethod, req)
 	if !ok {

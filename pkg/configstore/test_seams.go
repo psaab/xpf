@@ -99,3 +99,14 @@ func (s *Store) SetCompiledForTesting(cfg *config.Config) {
 	s.compiled = cfg
 	s.publishActiveLocked()
 }
+
+// SetAfterCandidateGateSampleForTesting injects an operation after the
+// candidate snapshot has released the store lock. It makes the
+// snapshot-to-pricing race deterministic in gRPC/REST authorization tests,
+// including the former split candidate/generation sampling path. Pass nil
+// to restore normal operation. Not for production callers.
+func (s *Store) SetAfterCandidateGateSampleForTesting(fn func()) {
+	s.mu.Lock()
+	s.afterCandidateGateSampleForTesting = fn
+	s.mu.Unlock()
+}
