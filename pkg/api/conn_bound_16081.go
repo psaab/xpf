@@ -95,7 +95,12 @@ type apiConnGate struct {
 	sources map[string]int
 }
 
+// newAPIConnGate requires a positive per-source limit. Accepting zero here
+// would silently disable the #16622 partition (#17687).
 func newAPIConnGate(limit, perSource int) *apiConnGate {
+	if perSource <= 0 {
+		panic("api: REST connection gate per-source limit must be positive")
+	}
 	return &apiConnGate{limit: limit, perSource: perSource, sources: make(map[string]int)}
 }
 
@@ -112,13 +117,16 @@ func connGateSourceKey(remote net.Addr) string {
 // tryAcquire claims one slot for remote's source. It never blocks: a
 // full gate — globally, or for this source — refuses.
 func (g *apiConnGate) tryAcquire(remote net.Addr) bool {
+	if g.perSource <= 0 {
+		return false
+	}
 	key := connGateSourceKey(remote)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.active.Load() >= int64(g.limit) {
 		return false
 	}
-	if g.perSource > 0 && g.sources[key] >= g.perSource {
+	if g.sources[key] >= g.perSource {
 		return false
 	}
 	g.sources[key]++
