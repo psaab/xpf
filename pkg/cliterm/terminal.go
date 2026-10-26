@@ -194,11 +194,14 @@ func ReadHistorySeed(path string) ([]string, error) {
 // navigation; prefixed top/up commands restore the prior cursor after their
 // inner command.
 func advanceHistorySeedCursor(editPath []string, configMode bool, line string) ([]string, bool) {
-	// dispatch strips only supported, unquoted output pipes before command
-	// handling. Using the same splitter keeps quoted pipes in command data
-	// and lets decorated navigation (for example, `edit snmp | no-more`)
-	// advance the replay cursor as the live CLI did.
-	if command, _, _, ok := SplitPipe(line); ok {
+	// Dispatch recursively strips each supported, unquoted output-pipe stage
+	// before handling its command. Use the same splitter until no stage remains;
+	// quoted pipes stay in the command data.
+	for {
+		command, _, _, ok := SplitPipe(line)
+		if !ok {
+			break
+		}
 		line = command
 	}
 	fields := strings.Fields(line)

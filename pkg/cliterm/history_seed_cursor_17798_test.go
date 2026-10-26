@@ -41,8 +41,14 @@ func TestReadHistorySeedCursorAware17798(t *testing.T) {
 		{"conf abbreviation enters config mode",
 			[]string{"conf", "edit snmp", "set community S3cretConf17798"},
 			[]string{"conf", "edit snmp"}},
+		{"config abbreviation enters config mode",
+			[]string{"config", "edit snmp", "set community S3cretConfig17798"},
+			[]string{"config", "edit snmp"}},
 		{"edit prefix with supported pipe advances cursor even when line is filtered",
 			[]string{"configure", "edit snmp | no-more", "set community S3cretPipe17798"},
+			[]string{"configure"}},
+		{"edit prefix with chained supported pipes advances cursor",
+			[]string{"configure", "edit snmp | no-more | count", "set community S3cretPipeChain17798"},
 			[]string{"configure"}},
 		{"ambiguous operational abbreviation stays out of config mode",
 			[]string{"c", "edit snmp", "set community S3cretAmbiguous17798"},
@@ -110,7 +116,7 @@ func TestReadHistorySeedCursorAware17798(t *testing.T) {
 func TestAdvanceHistorySeedCursorUpExitRestoresOriginalCursor17798(t *testing.T) {
 	for _, verb := range []string{"exit", "quit"} {
 		t.Run(verb, func(t *testing.T) {
-			original := []string{"snmp", "community"}
+			original := []string{"system", "login", "user", "alice"}
 			gotPath, gotMode := advanceHistorySeedCursor(original, true, "up "+verb)
 			if !slices.Equal(gotPath, original) || !gotMode {
 				t.Fatalf("advanceHistorySeedCursor(%v, true, %q) = (%v, %t), want (%v, true) (#17798)",
