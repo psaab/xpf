@@ -10,8 +10,10 @@ import (
 )
 
 // #10848 B1 regression pin (Rev17935Glm fold): the pre-publish gate
-// itself — deleting gatePublishOnBinaryFloor's floor check (or its
-// call in runPublishGenerationSubcommand) fails here.
+// itself: deleting gatePublishOnBinaryFloor's floor check fails
+// here; the verb's call into the seam is inspection-pinned (the
+// verb os.Exits and takes the host-wide lock, so it is not
+// unit-driven).
 func TestGatePublishOnBinaryFloorRefusesReplay10848(t *testing.T) {
 	dir := t.TempDir()
 	floorPath := filepath.Join(dir, "binary-floor")
