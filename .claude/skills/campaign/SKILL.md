@@ -442,14 +442,15 @@ Run as many concurrently as the box allows.
   own per-change log, `docs/log/<issue>.md` (or `docs/log/<pr>.md` when
   there is no issue), in the same diff — the log
   lands atomically when the PR lands, as has been the practice; there is
-  no separate log step and no root `_Log.md` append. The log follows
-  `docs/log/README.md` format (`# #<issue> — <title>`, then Timestamp /
-  Action / File(s), plus Validation and Risk entries matching the PR
-  body's evidence). **Missing log = incomplete PR**: the Step 3 gate
-  bounces it back to the lane before any code review, exactly like a
-  message-shape violation — the lane adds it (new commit or amend,
-  lane's choice), never the parent. A PR classified `docs/test-only`
-  still carries the log unless the diff IS the log file itself.
+  no separate log step and no root `_Log.md` append. The log carries
+  the `docs/log/README.md` fields (Timestamp / Action / File(s)) under
+  a `# #<issue> — <title>` heading, plus Validation and Risk entries
+  matching the PR body's evidence. **Missing log = incomplete PR**: the
+  Step 3 gate bounces it back to the lane before any code review,
+  exactly like a message-shape violation — the lane adds it (new
+  commit or amend, lane's choice), never the parent. A PR classified
+  `docs/test-only` still carries the log unless the diff IS the log
+  file itself.
 - **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief (including: the PR TITLE MUST use the same `<area>: <summary> (#NNNN)` subject format — it becomes the merge-commit message); parent bounces non-conforming branches before review (`git log` shape check at PR…
   - Subject: `<area>: <imperative summary> (#NNNN)`, ≤72 cols. Area vocabulary: `docs:`, `test:`, `assurance:`, `forwarding:`, `config:`, `daemon:`, `cluster:`, `sessions:`, `audit:`, `show:`, `telemetry:`, `nftables:`, `ha:`, `frr:`, `process:`, `userspace-dp:`, `afxdp:`, `policy:`, `nat:`, `firewall:`, `grpcapi:`, `snmp:`, `ipsec:`, `xdp:`, `shim:`, `ci:`, `build:`, `metrics:` (new areas allowed when none fits, never bare). Summary names the BEHAVIOR change in imperative mood (`gate`, `drop`, `reject`, `refund`, `sync`, `bound`, `fence`), not the file (`update foo.rs`). Parent process commits without an issue cite the ruling (`(user-directive 2026-09-22)`).
   - Body (required, via `git commit -F -` heredoc, wrapped ~72 cols) has four sections:
@@ -498,7 +499,7 @@ manufacture merge conflicts.
 
 For each PR an agent opens:
 
-1. **Message-shape + log gate (BOUNCE before any code review)** — run `git log origin/master..origin/<branch> --format='%h %s%n%b'`, `gh pr view <n> --json title -q .title`, and the diff file list (`gh pr view <n> --json files --jq '.files[].path'`). EVERY branch commit MUST match `<area>: <imperative summary> (#NNNN)` + Why/What/Validation/Risk body (per the commit-message standard); the PR TITLE must match the same subject format (it becomes the merge-commit message). The diff MUST contain the per-change log `docs/log/<issue>.md` (or `docs/log/<pr>.md` when there is no issue) per `docs/log/README.md`; a missing or stub log (no Timestamp/Action/File(s)/Validation content) is the same class of violation as a malformed title. Bounce ANY violation back to the lane (amend + force-push) before reading a line of diff — title-only commits, bare `fix:`, missing refs, missing logs, and malformed PR titles are all merge-blockers. No exceptions, no parent-side repair (the lane owns its history).
+1. **Message-shape + log gate (BOUNCE before any code review)** — run `git log origin/master..origin/<branch> --format='%h %s%n%b'`, `gh pr view <n> --json title -q .title`, and the diff file list (`gh pr view <n> --json files --jq '.files[].path'`). EVERY branch commit MUST match `<area>: <imperative summary> (#NNNN)` + Why/What/Validation/Risk body (per the commit-message standard); the PR TITLE must match the same subject format (it becomes the merge-commit message). The diff MUST contain the per-change log `docs/log/<issue>.md` (or `docs/log/<pr>.md` when there is no issue) carrying the `docs/log/README.md` fields (Timestamp / Action / File(s)) plus Validation and Risk entries; a missing or stub log (any of those five entries absent) is the same class of violation as a malformed title. Exception, mirroring Step 2: a diff that consists solely of per-change log file(s) is its own log and passes this check. Bounce ANY violation back to the lane (amend + force-push) before reading a line of diff — title-only commits, bare `fix:`, missing refs, missing logs, and malformed PR titles are all merge-blockers. No exceptions, no parent-side repair (the lane owns its history).
 2. **Re-verify the FINAL head** — `gh pr view <n> --json headRefOid`.
    Always review and merge the head you just polled, never the head
    you saw when review started — heads move under folds and rebases.
@@ -761,7 +762,7 @@ Per PR, in order:
    Copilot evaluation (Step 3 item 5) with every real finding folded,
    and the Step 3 item 1 log check: `docs/log/<issue>.md` (or
    `docs/log/<pr>.md`) present in the head's diff with Timestamp /
-   Action / File(s) / Validation content per `docs/log/README.md`.
+   Action / File(s) / Validation / Risk content.
    If any item is missing or recorded at a different SHA, do NOT
    merge — return to Step 3.
 1. Re-poll `mergeable` THROUGH `UNKNOWN` (GitHub recomputes after every
