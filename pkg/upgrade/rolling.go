@@ -444,8 +444,9 @@ func failbackAfterRefusal(cl RollingCluster, cause error, what string) error {
 func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) {
 	r.resetCommittedCut()
 	var committedDeferred *cutCommittedDeferredError
+	rejoinConfirmed := false
 	defer func() {
-		if err != nil && committedDeferred == nil {
+		if err != nil && !rejoinConfirmed {
 			r.resetCommittedCut()
 		}
 	}()
@@ -661,6 +662,7 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 			"(draining it would leave a redundancy group with no primary on either "+
 			"node): %w", rc.RejoinDeadline, err)
 	}
+	rejoinConfirmed = true
 	logf("rolling: local node rejoined election, confirmed for every configured RG; " +
 		"cut complete for this node")
 	if committedDeferred != nil {
