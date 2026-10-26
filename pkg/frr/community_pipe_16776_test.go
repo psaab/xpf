@@ -23,35 +23,14 @@ import (
 // so every such community-list was silently absent and a reject term
 // over it failed open.
 //
-// Post-#16788 (folded during rebase): community members render via
-// config.TranslateCommunityMemberRegex, which is pipe-free by
-// construction and refuses any "| " member — the grouping-rewrite
-// this file originally implemented is subsumed. What remains
-// #16776-unique: the rewriteFRRPipeSequences belt (unit-pinned
-// below), the neighbor-description gate, and the daemon oracle.
+// Post-#16788, the community translator emits pipe-safe regexes or
+// refuses the member and fails closed. The BGP neighbor-description
+// gate refuses/omits prose carrying "| ". Junos AS-path regexes are
+// translated before render, normalizing grouping whitespace. No
+// standalone pipe-rewrite belt remains.
 //
 // The unit cells pin the pipe-safe render; the live cell at the
 // bottom proves installation on a running bgpd via vtysh -f.
-
-func TestRewriteFRRPipeSequences16776(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{`(^| )65000:1( |$)`, `(^|)65000:1(|$)`}, // helper drops grouping space; conjunction sites spell [ ] instead
-		{`^((56) | (78)):(.*)$`, `^((56)|(78)):(.*)$`},
-		{`65000:[| ]`, `65000:[| ]`}, // bracket literal: untouched
-		{`65000:[ ]`, `65000:[ ]`},   // already pipe-safe
-		{`a\| b`, `a\| b`},           // escaped pipe: not alternation
-		{`no pipe`, `no pipe`},
-		{`65000:.*`, `65000:.*`},
-	}
-	for _, tc := range cases {
-		if got := rewriteFRRPipeSequences(tc.in); got != tc.want {
-			t.Errorf("rewriteFRRPipeSequences(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-		if strings.Contains(rewriteFRRPipeSequences(tc.in), "| ") && tc.in != `65000:[| ]` && tc.in != `a\| b` {
-			t.Errorf("rewrite(%q) still contains \"| \"", tc.in)
-		}
-	}
-}
 
 func TestCommunityPipeRender16776(t *testing.T) {
 	t.Run("BOTH conjunction installs pipe-safe and matches conjunctively", func(t *testing.T) {
