@@ -376,19 +376,21 @@ struct UserspaceIngressDomainKey {
 
 const USERSPACE_INGRESS_DOMAIN_UNTAGGED_VLAN_ID: u16 = u16::MAX;
 
+// Explicit tail bytes keep the u32-aligned key's map encoding deterministic.
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UserspaceWgAdmissionKey {
-    zone_id: u16,
+    zone_id: u32,
     port: u16,
     addr_family: u8,
     pad: [u8; 3],
     addr: [u8; 16],
+    reserved: [u8; 2],
 }
-
 const _: [(); 8] = [(); mem::size_of::<UserspaceWgIngressZoneKey>()];
 const _: [(); 8] = [(); mem::size_of::<UserspaceIngressDomainKey>()];
-const _: [(); 24] = [(); mem::size_of::<UserspaceWgAdmissionKey>()];
+const _: [(); 28] = [(); mem::size_of::<UserspaceWgAdmissionKey>()];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -569,7 +571,7 @@ static USERSPACE_INGRESS_DOMAINS: HashMap<UserspaceIngressDomainKey, u32> =
 // XDP must resolve the physical arrival interface and VLAN to one validated
 // security zone before it claims an outer WireGuard transport record.
 #[map(name = "userspace_wg_ingress_zones")]
-static USERSPACE_WG_INGRESS_ZONES: HashMap<UserspaceWgIngressZoneKey, u16> =
+static USERSPACE_WG_INGRESS_ZONES: HashMap<UserspaceWgIngressZoneKey, u32> =
     HashMap::with_max_entries(65_536, 0);
 
 // #15789: per-ingress-zone LAND screen disposition (see `land`). Keyed by
@@ -578,7 +580,7 @@ static USERSPACE_WG_INGRESS_ZONES: HashMap<UserspaceWgIngressZoneKey, u16> =
 // pre-#15789 control plane (which never publishes this map) keeps the
 // #13953 unconditional-drop behaviour until the new sync runs.
 #[map(name = "userspace_land_screen")]
-static USERSPACE_LAND_SCREEN: HashMap<u16, u8> = HashMap::with_max_entries(65536, 0);
+static USERSPACE_LAND_SCREEN: HashMap<u32, u8> = HashMap::with_max_entries(65536, 0);
 
 // Entries exist only for unique local-address owners and WG ports served by
 // that same zone. Zone 0 and missing keys both fail closed.
@@ -2698,6 +2700,7 @@ fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
         addr_family: pkt.addr_family,
         pad: [0; 3],
         addr: pkt.dst_addr,
+        reserved: [0; 2],
     };
     unsafe { USERSPACE_WG_ZONE_ADMISSION.get(&admission_key) }.is_some()
 }
