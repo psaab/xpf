@@ -331,7 +331,8 @@ func (s *Server) authorizeRESTConfigCommit14981(r *http.Request, cfg *config.Con
 	if !restricted {
 		return nil
 	}
-	return config.AuthorizeExpandedCandidate(cfg, p.Class, s.store.CandidateTree(), s.store.ActiveTree())
+	candidate, _, active := s.store.CandidateGateSample()
+	return config.AuthorizeExpandedCandidate(cfg, p.Class, candidate, active)
 }
 
 // restCommitGatePriceKey carries the #16611 priced snapshot from the
@@ -347,20 +348,30 @@ type restCommitGatePrice struct {
 }
 
 // priceRESTCommitGate16611 runs the commit gate and, on success,
-// returns the request carrying the priced snapshot. The verdict is
-// authorizeRESTConfigCommit14981's single verdict.
+// returns the request carrying the priced snapshot. The candidate,
+// generation and active tree are sampled atomically (#17676), then
+// that exact candidate is adjudicated and its generation is bound.
 func (s *Server) priceRESTCommitGate16611(r *http.Request, cfg *config.Config, p authz.Principal) (*http.Request, error) {
-	if err := s.authorizeRESTConfigCommit14981(r, cfg, p); err != nil {
+	route := r.Method + " " + r.URL.Path
+	isCommit := route == "POST /api/v1/config/commit" || route == "POST /api/v1/config/commit-confirmed"
+	if !isCommit || s.store == nil || p.Class == "" || p.Superuser {
+		if err := s.authorizeRESTConfigCommit14981(r, cfg, p); err != nil {
+			return r, err
+		}
+		return r, nil
+	}
+	restricted, err := restConfigClassRestricted(cfg, p.Class)
+	if err != nil {
 		return r, err
 	}
-	route := r.Method + " " + r.URL.Path
-	if (route != "POST /api/v1/config/commit" && route != "POST /api/v1/config/commit-confirmed") || s.store == nil || p.Class == "" || p.Superuser {
+	if !restricted {
 		return r, nil
 	}
-	if restricted, rerr := restConfigClassRestricted(cfg, p.Class); rerr == nil && !restricted {
-		return r, nil
+	candidate, gen, active := s.store.CandidateGateSample()
+	if err := config.AuthorizeExpandedCandidate(cfg, p.Class, candidate, active); err != nil {
+		return r, err
 	}
-	price := restCommitGatePrice{cfg: cfg, class: p.Class, candidateGen: s.store.CandidateGeneration(), active: s.store.ActiveTree()}
+	price := restCommitGatePrice{cfg: cfg, class: p.Class, candidateGen: gen, active: active}
 	return r.WithContext(context.WithValue(r.Context(), restCommitGatePriceKey{}, price)), nil
 }
 

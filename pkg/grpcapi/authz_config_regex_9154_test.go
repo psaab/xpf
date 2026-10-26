@@ -117,35 +117,32 @@ func TestConfigurationDenyIsEnforcedOverRPC9154(t *testing.T) {
 	})
 }
 
-// TestConfigMutationGateIsWiredIntoTheInterceptor9154 binds the WIRING, not the
-// function.
-//
-// The cells above drive authorizeRPCConfigMutation directly, and a mutation
-// removing its CALL SITE in the interceptor left every one of them green — the
-// gate was correct and unreachable, which is the state the whole issue is about.
-// A gate nothing calls is exactly what #9154 found on this surface.
-//
-// This reads the interceptor's source and requires the call to be present,
-// which is the cheapest check that survives the function being renamed or the
-// call being deleted. It is deliberately not a behavioural test: standing up a
-// full authorized gRPC connection to assert one middleware line would take a
-// fixture larger than the thing under test, and the failure mode being guarded
-// is "someone deleted the line", not "the line behaves subtly differently".
+// TestConfigMutationGateIsWiredIntoTheInterceptor9154 binds the transport
+// wiring and the commit-specific atomic gate. The interceptor now calls the
+// wrapper, which routes ordinary mutations through authorizeRPCConfigMutation
+// and commit methods through CandidateGateSample (#17676).
 func TestConfigMutationGateIsWiredIntoTheInterceptor9154(t *testing.T) {
 	src, err := os.ReadFile("authz.go")
 	if err != nil {
 		t.Fatalf("read authz.go: %v", err)
 	}
-	body := string(src)
-	if !strings.Contains(body, "authorizeRPCConfigMutation(") {
-		t.Fatal("the interceptor does not call authorizeRPCConfigMutation — the " +
-			"`*-configuration` regexes are unreachable on this surface again, which is " +
-			"exactly the #9154 defect")
+	interceptor := string(src)
+	if !strings.Contains(interceptor, "authorizeRPCCommitGate16611(") {
+		t.Fatal("the interceptor does not call authorizeRPCCommitGate16611 — configuration authorization is unreachable on this surface")
 	}
-	// It must sit beside the operational gate, so a reader cannot conclude one
-	// is the whole authorization story.
-	if !strings.Contains(body, "authorizeRPCCommand(") {
+	if !strings.Contains(interceptor, "authorizeRPCCommand(") {
 		t.Fatal("the operational gate call vanished; this cell's premise no longer holds")
+	}
+	gateSrc, err := os.ReadFile("authz_config_regex_9154.go")
+	if err != nil {
+		t.Fatalf("read authz_config_regex_9154.go: %v", err)
+	}
+	gate := string(gateSrc)
+	if !strings.Contains(gate, "authorizeRPCConfigMutation(") {
+		t.Fatal("the wrapper no longer routes non-commit mutations through authorizeRPCConfigMutation")
+	}
+	if !strings.Contains(gate, "CandidateGateSample()") {
+		t.Fatal("the commit gate no longer samples candidate and generation atomically (#17676)")
 	}
 }
 
