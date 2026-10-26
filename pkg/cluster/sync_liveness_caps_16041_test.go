@@ -258,7 +258,7 @@ func TestPerTypePayloadCapRefusedAtHeader16041(t *testing.T) {
 	}{
 		{"heartbeat with payload", syncMsgHeartbeat, 1},
 		{"barrier oversize", syncMsgBarrier, 9},
-		{"capabilities oversize", syncMsgPeerCapabilities, 5 + bootIncarnationLen + 8 + 8 + 1},
+		{"capabilities oversize", syncMsgPeerCapabilities, 5 + bootIncarnationLen + 8 + 8 + 2},
 		{"failover oversize", syncMsgFailover, 10},
 		{"config key exchange oversize", syncMsgConfigKeyExchange, 1 + syncConfigECDHPubSize + 1},
 		{"bulk start oversize", syncMsgBulkStart, 8 + bootIncarnationLen + 1},
