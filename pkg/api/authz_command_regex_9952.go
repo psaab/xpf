@@ -457,7 +457,7 @@ func evaluateRESTForms9952(rules config.CompiledLoginRegexes, class, cmd, route 
 	// (Pass 1, authorizeRESTCommandBare, is the one restricted to
 	// DENY-side verdicts — see #17836.)
 	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
-			if restDistinctRescue16472(rules, forms) {
+		if restDistinctRescue16472(rules, forms) {
 			return nil
 		}
 		return fmt.Errorf("permission denied: login class %q denies %q (%s)", class, cmd, decision.Reason)
