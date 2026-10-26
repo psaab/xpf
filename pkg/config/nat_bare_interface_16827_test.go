@@ -236,7 +236,60 @@ func TestNATBareInterfaceBoundST0SiblingRejected17883(t *testing.T) {
 		t.Fatalf("bound st0 unit-0-plus-sibling control must compile: %v", err)
 	}
 
-	cmds := append(base,
+	strictCases := []struct {
+		name string
+		cmds []string
+		want string
+	}{
+		{
+			name: "source from",
+			cmds: []string{
+				"set security nat source rule-set snat-from-bad from interface st0",
+				"set security nat source rule-set snat-from-bad rule r1 match source-address 10.0.0.0/8",
+				"set security nat source rule-set snat-from-bad rule r1 then source-nat pool pool1",
+			},
+			want: `source-nat rule-set "snat-from-bad": from interface "st0" not defined`,
+		},
+		{
+			name: "source to with valid from zone",
+			cmds: []string{
+				"set security nat source rule-set snat-to-bad from zone trust",
+				"set security nat source rule-set snat-to-bad to interface st0",
+				"set security nat source rule-set snat-to-bad rule r1 match source-address 10.0.0.0/8",
+				"set security nat source rule-set snat-to-bad rule r1 then source-nat pool pool1",
+			},
+			want: `source-nat rule-set "snat-to-bad": to interface "st0" not defined`,
+		},
+		{
+			name: "destination from",
+			cmds: []string{
+				"set security nat destination rule-set dnat-bad from interface st0",
+				"set security nat destination rule-set dnat-bad rule R1 match destination-address 198.51.100.5/32",
+				"set security nat destination rule-set dnat-bad rule R1 then destination-nat pool P1",
+			},
+			want: `destination-nat rule-set "dnat-bad": from interface "st0" not defined`,
+		},
+		{
+			name: "static from",
+			cmds: []string{
+				"set security nat static rule-set stat-bad from interface st0",
+				"set security nat static rule-set stat-bad rule R1 match destination-address 198.51.100.5/32",
+				"set security nat static rule-set stat-bad rule R1 then static-nat prefix 10.0.0.5/32",
+			},
+			want: `static-nat rule-set "stat-bad": from interface "st0" not defined`,
+		},
+	}
+	for _, tc := range strictCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmds := append(append([]string(nil), base...), tc.cmds...)
+			_, err := CompileConfig(buildBindIfaceTree(t, cmds...))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("strict must reject the scope with diagnostic %q, got %v", tc.want, err)
+			}
+		})
+	}
+
+	cmds := append(append([]string(nil), base...),
 		"set security nat source rule-set snat-bad from interface st0",
 		"set security nat source rule-set snat-bad to interface st0",
 		"set security nat source rule-set snat-bad rule r1 match source-address 10.0.0.0/8",
@@ -248,10 +301,6 @@ func TestNATBareInterfaceBoundST0SiblingRejected17883(t *testing.T) {
 		"set security nat static rule-set stat-bad rule R1 match destination-address 198.51.100.5/32",
 		"set security nat static rule-set stat-bad rule R1 then static-nat prefix 10.0.0.5/32",
 	)
-	if _, err := CompileConfig(buildBindIfaceTree(t, cmds...)); err == nil ||
-		!strings.Contains(err.Error(), `source-nat rule-set "snat-bad": from interface "st0" not defined`) {
-		t.Fatalf("strict must reject bound bare st0 with its NAT diagnostic, got %v", err)
-	}
 
 	cfg, err := CompileConfigLenient(buildBindIfaceTree(t, cmds...))
 	if err != nil {
