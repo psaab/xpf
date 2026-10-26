@@ -28,8 +28,8 @@ import (
 // committing the concatenated set atomically — held-set store + high-water
 // advance + callback under ipsecApplyMu, exactly like a legacy frame —
 // only when every chunk has arrived. An unclosed generation never commits
-// (the prior set is retained), and a newer legacy or chunked set
-// supersedes a pending assembly, which is discarded.
+// (the prior set is retained); a newer legacy set supersedes pending
+// assemblies, and at the pending cap only the oldest assembly is evicted.
 //
 // Budget: each chunk holds at most maxIPsecSANames names, so its body is
 // at most maxIPsecSANames*(maxIPsecSANameLen+1) bytes (~1 MiB), far below
@@ -55,6 +55,10 @@ const (
 	// existing per-frame element bound, reused so each chunk body decodes
 	// through decodeIPsecSAPayloadChunk unchanged in spirit.
 	ipsecChunkNamesPerChunk = maxIPsecSANames
+	// ipsecChunkMaxPending bounds simultaneously pending assemblies.
+	// Opening a generation past it evicts only the oldest pending
+	// assembly (#17846), never the whole table.
+	ipsecChunkMaxPending = 5
 )
 
 // ipsecSAChunkGeneration is the assembly identity of one chunked set.
@@ -78,6 +82,9 @@ type ipsecSAChunkAssembly struct {
 // (nil map) is valid.
 type ipsecSAChunkState struct {
 	pending map[ipsecSAChunkGeneration]*ipsecSAChunkAssembly
+	// order stores pending keys oldest first so bounded admission evicts
+	// by insertion order, not map iteration order.
+	order []ipsecSAChunkGeneration
 }
 
 // encodeIPsecSAChunkPayload builds one chunk payload (WITHOUT the full-set
@@ -171,27 +178,31 @@ func (st *ipsecSAChunkState) addChunk(key ipsecSAChunkGeneration, index, total, 
 	if st.pending == nil {
 		st.pending = make(map[ipsecSAChunkGeneration]*ipsecSAChunkAssembly)
 	}
-	if len(st.pending) > 4 {
-		st.pending = make(map[ipsecSAChunkGeneration]*ipsecSAChunkAssembly)
-	}
 	a, ok := st.pending[key]
 	if !ok {
+		// Opening a new generation past the cap evicts only the oldest
+		// assembly. The incoming key is not in pending yet, so it cannot
+		// evict its own just-arrived chunk.
+		if len(st.pending) >= ipsecChunkMaxPending {
+			st.removePending(st.order[0])
+		}
 		a = &ipsecSAChunkAssembly{total: total, totalNames: totalNames, parts: make(map[uint32][]string)}
 		st.pending[key] = a
+		st.order = append(st.order, key)
 	}
 	if a.total != total || a.totalNames != totalNames {
-		delete(st.pending, key)
+		st.removePending(key)
 		return nil, false, false
 	}
 	if _, dup := a.parts[index]; dup {
-		delete(st.pending, key)
+		st.removePending(key)
 		return nil, false, false
 	}
 	a.parts[index] = names
 	a.have++
 	a.received += uint32(len(names))
 	if a.received > a.totalNames {
-		delete(st.pending, key)
+		st.removePending(key)
 		return nil, false, false
 	}
 	if a.have < int(a.total) {
@@ -201,20 +212,37 @@ func (st *ipsecSAChunkState) addChunk(key ipsecSAChunkGeneration, index, total, 
 	for i := uint32(0); i < a.total; i++ {
 		part, ok := a.parts[i]
 		if !ok {
-			delete(st.pending, key)
+			st.removePending(key)
 			return nil, false, false
 		}
 		complete = append(complete, part...)
 	}
-	delete(st.pending, key)
+	st.removePending(key)
 	if uint32(len(complete)) != a.totalNames {
 		return nil, false, false
 	}
 	return complete, true, true
 }
 
+// removePending removes one assembly and its insertion-order entry.
+func (st *ipsecSAChunkState) removePending(key ipsecSAChunkGeneration) {
+	if _, ok := st.pending[key]; !ok {
+		return
+	}
+	delete(st.pending, key)
+	for i, pendingKey := range st.order {
+		if pendingKey == key {
+			copy(st.order[i:], st.order[i+1:])
+			st.order[len(st.order)-1] = ipsecSAChunkGeneration{}
+			st.order = st.order[:len(st.order)-1]
+			return
+		}
+	}
+}
+
 // discardAll drops every pending assembly (a legacy commit supersedes all
 // chunk generations older than it). Caller holds ipsecApplyMu.
 func (st *ipsecSAChunkState) discardAll() {
 	st.pending = nil
+	st.order = nil
 }

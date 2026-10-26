@@ -169,6 +169,79 @@ func TestIPsecSAChunkIncompleteNeverCommits16758(t *testing.T) {
 	}
 }
 
+// TestIPsecSAChunkInterleavedGenerationsSurvive17846 pins #17846: opening
+// more generations than the pending-assembly cap must evict only the
+// oldest assembly. The flush-all budget replaced every pending generation
+// when a 6th generation appeared, so an older generation whose remaining
+// chunks then arrived could never complete and its set was silently lost
+// (the receiver kept the prior set; no stale/partial commit, just liveness
+// loss on interleaved pushes/reconnect replays).
+func TestIPsecSAChunkInterleavedGenerationsSurvive17846(t *testing.T) {
+	recv := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	recv.handleMessage(nil, syncMsgIPsecSA, appendFullSetSeq(encodeIPsecSAPayload([]string{"vpn-prior"}), 1000, 1))
+
+	// Each generation carries two one-name chunks (total=2, totalNames=2).
+	// Generation identity is its first full-set seq; every chunk frame
+	// also carries its own strictly increasing seq.
+	chunk := func(generation, index, seq uint64) []byte {
+		body := encodeIPsecSAPayload([]string{fmt.Sprintf("vpn-g%d-c%d", generation, index)})
+		return appendFullSetSeq(encodeIPsecSAChunkPayload(body, generation, uint32(index), 2, 2), 1000, seq)
+	}
+
+	seq := uint64(1)
+	next := func() uint64 { seq++; return seq }
+
+	// Open generations 101..105 with their first chunk only, filling
+	// the pending cap of five. Opening generation 106 below evicts the
+	// oldest one (101) and leaves the other four plus 106 pending.
+	for g := uint64(101); g <= 105; g++ {
+		if !recv.handleMessage(nil, syncMsgIPsecSAChunk, chunk(g, 0, next())) {
+			t.Fatalf("CONTROL: first chunk of generation %d must be accepted", g)
+		}
+	}
+	// Opening the 6th generation over the cap evicts only the oldest
+	// (101); generations 102..106 must all still be pending.
+	if !recv.handleMessage(nil, syncMsgIPsecSAChunk, chunk(106, 0, next())) {
+		t.Fatal("CONTROL: first chunk of generation 106 must be accepted")
+	}
+	if n := len(recv.ipsecChunkState.pending); n != 5 {
+		t.Fatalf("over-cap opening left %d pending assemblies, want 5 (only generation 101 evicted)", n)
+	}
+	if _, ok := recv.ipsecChunkState.pending[ipsecSAChunkGeneration{incarnation: 1000, generation: 101}]; ok {
+		t.Fatal("oldest generation 101 must be the one evicted")
+	}
+	for g := uint64(102); g <= 106; g++ {
+		if _, ok := recv.ipsecChunkState.pending[ipsecSAChunkGeneration{incarnation: 1000, generation: g}]; !ok {
+			t.Fatalf("generation %d must survive the over-cap opening (flush-all discarded it)", g)
+		}
+	}
+	if held := recv.PeerIPsecSAs(); len(held) != 1 || held[0] != "vpn-prior" {
+		t.Fatalf("no incomplete generation may commit: held %v, want [vpn-prior]", held)
+	}
+
+	// The surviving generation 106 completes and commits atomically.
+	if !recv.handleMessage(nil, syncMsgIPsecSAChunk, chunk(106, 1, next())) {
+		t.Fatal("final chunk of surviving generation 106 must be accepted")
+	}
+	held := recv.PeerIPsecSAs()
+	if len(held) != 2 || held[0] != "vpn-g106-c0" || held[1] != "vpn-g106-c1" {
+		t.Fatalf("completed generation 106 must commit: held %v, want [vpn-g106-c0 vpn-g106-c1]", held)
+	}
+
+	// The evicted generation 101 can never complete: its remaining chunk
+	// starts a fresh assembly that stays incomplete, so the committed set
+	// is undisturbed and no stale/partial set ever commits.
+	if !recv.handleMessage(nil, syncMsgIPsecSAChunk, chunk(101, 1, next())) {
+		t.Fatal("CONTROL: lone chunk of evicted generation 101 is accepted as a fresh incomplete assembly")
+	}
+	if held := recv.PeerIPsecSAs(); len(held) != 2 || held[0] != "vpn-g106-c0" || held[1] != "vpn-g106-c1" {
+		t.Fatalf("evicted generation's lone chunk must not commit: held %v, want generation 106 set", held)
+	}
+	if n := len(recv.ipsecChunkState.pending); n > 5 {
+		t.Fatalf("pending assemblies exceed the cap: %d, want <= 5", n)
+	}
+}
+
 // TestIPsecSAMalformedRefusalCounted16758 pins the receiver counter: a
 // malformed legacy frame and a malformed chunk header each increment
 // IPsecSAMalformedIgnored and retain the held set.
