@@ -1129,8 +1129,9 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
         let pool_after_retry =
             crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
         assert_eq!(
-            pool_after_retry[0].used_ports, 1,
-            "#13643: gate-contended shed cleanup must release the worker SNAT hold on retry"
+            pool_after_retry[0].used_ports,
+            0,
+            "retry releases the victim's non-persistent SNAT allocation; the refused flow has no hold"
         );
         return;
     }
