@@ -220,7 +220,7 @@ func TestBuildUserspaceWGZoneAdmissionRequiresSameUniqueZone11574(t *testing.T) 
 
 func TestSyncUserspaceWGZoneMapsMarshalsRustWidths17996(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
-		t.Skipf("RemoveMemlock: %v", err)
+		skipIfBPFMapUnavailable(t, "remove memlock", err)
 	}
 	if got := binary.Size(userspaceWGIngressZoneKey{}); got != 8 {
 		t.Fatalf("WG ingress key size = %d, want Rust key size 8", got)
