@@ -52,7 +52,7 @@ func TestBareVerdictFinal17836(t *testing.T) {
 		// treat "not final" as a reason to deny an allowed bare).
 		{"bare itself allowed", compile(`^ping`, true, `^ping 10$`, true), "ping", true},
 		// No deny match on the bare charge: nothing vetoed, final.
-		{"no deny on bare", compile(`^ping 10\.98\.1\.1$`, true, `^traceroute$`, true), "ping", true},
+		{"no deny on bare", compile(`^ping 10\.98\.1\.1$`, true, `^traceroute$`, true), "ping", false},
 		// Allow-only class (allowlist miss on bare, DecidedBy=Allow):
 		// an argued form matching the allow is exactly the #17836
 		// allow leg, so not final.

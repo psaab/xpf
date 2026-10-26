@@ -25,8 +25,9 @@ import (
 // These cells drive the real middleware (not authorizeRESTCommand
 // directly, which is how the regression stayed invisible to the #16067
 // tests) and pin both legs: argument-scoped allow reaches the handler,
-// non-matching targets are still denied by pass 2, and argument-free /
-// argument-scoped denies still deny in pass 1 before the body is read.
+// non-matching targets are still denied by pass 2; argument-free denies
+// still deny in pass 1 before the body is read, argument-scoped denies
+// deny in pass 2.
 
 func guardRequest17836(t *testing.T, s *Server, path, body string) (*httptest.ResponseRecorder, *trackingReadCloser13249, *bool) {
 	t.Helper()

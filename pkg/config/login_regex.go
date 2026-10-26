@@ -723,7 +723,10 @@ func (c CompiledLoginRegexes) BareVerdictFinal(bare string) bool {
 	core := coreOf(bare)
 	denyLen := longestMatchLen(c.deny, core)
 	if denyLen < 0 {
-		return true // the deny never reached this charge; nothing vetoed it
+		// The deny never reached this charge, so the denial is an
+		// allowlist miss by construction — an argued form matching
+		// the allow overturns it. Never final.
+		return false
 	}
 	// Exception candidate iff the allow does not already cover the
 	// bare core at the vetoing deny's extent.
