@@ -38,9 +38,30 @@ func TestReadHistorySeedCursorAware17798(t *testing.T) {
 		lines []string
 		want  []string // nil means empty
 	}{
-		{"edit-context secret dropped",
-			[]string{"configure", "edit snmp", "set community S3cretF17798 authorization read-only"},
-			[]string{"configure", "edit snmp"}},
+		{"conf abbreviation enters config mode",
+			[]string{"conf", "edit snmp", "set community S3cretConf17798"},
+			[]string{"conf", "edit snmp"}},
+		{"edit prefix with supported pipe advances cursor even when line is filtered",
+			[]string{"configure", "edit snmp | no-more", "set community S3cretPipe17798"},
+			[]string{"configure"}},
+		{"ambiguous operational abbreviation stays out of config mode",
+			[]string{"c", "edit snmp", "set community S3cretAmbiguous17798"},
+			[]string{"c", "edit snmp", "set community S3cretAmbiguous17798"}},
+		{"configure re-entry starts at root and retains benign GRE key",
+			[]string{
+				"configure",
+				"edit protocols ospf area 0 interface ge-0/0/0 authentication md5 1",
+				"configure",
+				"edit interfaces gr-0/0/0 unit 0 tunnel",
+				"set key 4242",
+			},
+			[]string{
+				"configure",
+				"edit protocols ospf area 0 interface ge-0/0/0 authentication md5 1",
+				"configure",
+				"edit interfaces gr-0/0/0 unit 0 tunnel",
+				"set key 4242",
+			}},
 		{"benign under snmp kept",
 			[]string{"configure", "edit snmp", "set description uplink"},
 			[]string{"configure", "edit snmp", "set description uplink"}},
@@ -62,9 +83,15 @@ func TestReadHistorySeedCursorAware17798(t *testing.T) {
 		{"top prefix preserves cursor",
 			[]string{"configure", "edit snmp", "top set system host-name fw1", "set community S3cretAfterPrefix"},
 			[]string{"configure", "edit snmp", "top set system host-name fw1"}},
-		{"bare top resets cursor",
-			[]string{"configure", "edit snmp", "top", "set community S3cretAfterTop"},
-			[]string{"configure", "edit snmp", "top", "set community S3cretAfterTop"}},
+		{"prefixed up exit at root releases config mode",
+			[]string{"configure", "edit snmp", "up exit", "edit snmp", "set community S3cretUpExitRoot17798"},
+			[]string{"configure", "edit snmp", "up exit", "edit snmp", "set community S3cretUpExitRoot17798"}},
+		{"quoted top exit does not release config mode",
+			[]string{"configure", "edit snmp", `top "exit"`, "set community S3cretQuotedExit17798"},
+			[]string{"configure", "edit snmp", `top "exit"`}},
+		{"prefixed up quit at root releases config mode",
+			[]string{"configure", "edit snmp", "up quit", "edit snmp", "set community S3cretUpQuitRoot17798"},
+			[]string{"configure", "edit snmp", "up quit", "edit snmp", "set community S3cretUpQuitRoot17798"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,6 +102,19 @@ func TestReadHistorySeedCursorAware17798(t *testing.T) {
 			}
 			if !slices.Equal(seed, tc.want) {
 				t.Fatalf("ReadHistorySeed(%v) = %q, want %q (#17798)", tc.lines, seed, tc.want)
+			}
+		})
+	}
+}
+
+func TestAdvanceHistorySeedCursorUpExitRestoresOriginalCursor17798(t *testing.T) {
+	for _, verb := range []string{"exit", "quit"} {
+		t.Run(verb, func(t *testing.T) {
+			original := []string{"snmp", "community"}
+			gotPath, gotMode := advanceHistorySeedCursor(original, true, "up "+verb)
+			if !slices.Equal(gotPath, original) || !gotMode {
+				t.Fatalf("advanceHistorySeedCursor(%v, true, %q) = (%v, %t), want (%v, true) (#17798)",
+					original, "up "+verb, gotPath, gotMode, original)
 			}
 		})
 	}

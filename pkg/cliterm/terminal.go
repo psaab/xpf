@@ -194,47 +194,93 @@ func ReadHistorySeed(path string) ([]string, error) {
 // navigation; prefixed top/up commands restore the prior cursor after their
 // inner command.
 func advanceHistorySeedCursor(editPath []string, configMode bool, line string) ([]string, bool) {
+	// dispatch strips only supported, unquoted output pipes before command
+	// handling. Using the same splitter keeps quoted pipes in command data
+	// and lets decorated navigation (for example, `edit snmp | no-more`)
+	// advance the replay cursor as the live CLI did.
+	if command, _, _, ok := SplitPipe(line); ok {
+		line = command
+	}
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
 		return editPath, configMode
 	}
-	switch fields[0] {
-	case "configure":
-		if !configMode {
+	if !configMode {
+		// Operational dispatch resolves verbs by unique prefix. Mirror
+		// that resolver for configure so accepted spellings such as
+		// "conf" and "config" establish the context for later lines.
+		if verb, ok := resolveHistoryOperationalVerb(fields[0]); ok && verb == "configure" {
 			return nil, true
 		}
+		return editPath, configMode
+	}
+	switch fields[0] {
+	case "configure":
+		// The history may span a restarted CLI session. A new
+		// `configure` enters at the root even if the preceding session
+		// ended while the cursor was nested.
+		return nil, true
 	case "edit":
-		if configMode {
-			fragment, ok := config.ParseEditFragment(line)
-			if ok && len(fragment) > 0 {
-				path := append(config.NormalizeEditPathTokens(editPath), fragment...)
-				return config.NormalizeEditPathTokens(path), true
-			}
+		fragment, ok := config.ParseEditFragment(line)
+		if ok && len(fragment) > 0 {
+			path := append(config.NormalizeEditPathTokens(editPath), fragment...)
+			return config.NormalizeEditPathTokens(path), true
 		}
 	case "top", "up":
-		if configMode {
-			target, inner, _, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(editPath), line)
-			if ok {
-				if len(inner) == 0 {
-					return target, true
-				}
-				// A prefixed top-level exit releases config mode. At a
-				// non-root target exit only pops that temporary cursor;
-				// dispatchTopUp restores the original cursor afterwards.
-				if len(target) == 0 && (inner[0] == "exit" || inner[0] == "quit") {
+		target, inner, innerLine, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(editPath), line)
+		if ok {
+			if len(inner) == 0 {
+				return target, true
+			}
+			// dispatchConfig switches on exact verb tokens: only an
+			// unquoted exit/quit is navigation here. A top-level exit
+			// releases config mode; at a non-root target exit/quit
+			// pops that temporary target once, then dispatchTopUp
+			// restores the original cursor while remaining in config
+			// mode.
+			innerFields := strings.Fields(innerLine)
+			if len(innerFields) > 0 && (innerFields[0] == "exit" || innerFields[0] == "quit") {
+				if len(target) == 0 {
 					return nil, false
 				}
+				return editPath, true
 			}
 		}
 	case "exit", "quit":
-		if configMode {
-			if len(editPath) > 0 {
-				return config.PopEditPathIdentity(config.NormalizeEditPathTokens(editPath)), true
-			}
-			return nil, false
+		if len(editPath) > 0 {
+			return config.PopEditPathIdentity(config.NormalizeEditPathTokens(editPath)), true
 		}
+		return nil, false
 	}
 	return editPath, configMode
+}
+
+// resolveHistoryOperationalVerb uses the same candidate set and unique
+// prefix rule as pkg/cli.dispatchOperational. Config-mode dispatch switches
+// on exact tokens instead, so its edit/top/up/exit/quit verbs intentionally
+// remain exact here too.
+var historyOperationalCommands = [...]string{
+	"configure", "show", "clear", "ping", "test", "traceroute",
+	"monitor", "request", "quit", "exit",
+}
+
+func resolveHistoryOperationalVerb(input string) (string, bool) {
+	if input == "" {
+		return "", false
+	}
+	match := ""
+	for _, command := range historyOperationalCommands {
+		if command == input {
+			return command, true
+		}
+		if strings.HasPrefix(command, input) {
+			if match != "" {
+				return "", false
+			}
+			match = command
+		}
+	}
+	return match, match != ""
 }
 
 // SeedHistory replays persisted history lines into a live readline instance
