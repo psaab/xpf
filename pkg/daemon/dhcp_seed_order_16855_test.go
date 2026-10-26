@@ -38,6 +38,7 @@ type flipKea16855 struct {
 	oldAdds       int
 	newAdds       int
 	newValidLfts  []int
+	newAddresses  []string
 }
 
 func (f *flipKea16855) flip() {
@@ -55,6 +56,12 @@ func (f *flipKea16855) validLifetimes() []int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]int(nil), f.newValidLfts...)
+}
+
+func (f *flipKea16855) newLeaseAddresses() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.newAddresses...)
 }
 
 func startFlipKea16855(t *testing.T, path string, f *flipKea16855) func() {
@@ -85,6 +92,9 @@ func startFlipKea16855(t *testing.T, path string, f *flipKea16855) func() {
 						f.newAdds++
 						if validLft, ok := req.Arguments["valid-lft"].(float64); ok {
 							f.newValidLfts = append(f.newValidLfts, int(validLft))
+						}
+						if address, ok := req.Arguments["ip-address"].(string); ok {
+							f.newAddresses = append(f.newAddresses, address)
 						}
 					} else {
 						f.oldAdds++
@@ -172,14 +182,13 @@ func TestSeedWaitsForTakeoverApply16855(t *testing.T) {
 	}
 }
 
-// TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884 pins both halves of
-// the takeover seed regression. Even after the old fail-open warning deadline,
-// the seed must not touch the still-running Kea; after restart it must re-fetch
-// the peer snapshot so standby residence is subtracted before re-anchoring.
+// TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884 pins restart ordering,
+// lifetime aging, and expiry through the apply wait. The survivor's exact
+// remainder varies with elapsed whole seconds; a two-second lease expires.
 //
 // FAIL-ON-REVERT: make the former 20s deadline short, then hold restart beyond
 // it. Returning or seeding the old process before release fails; seeding the
-// new process with valid-lft 100 instead of the aged 99 also fails.
+// new process with the pre-wait remaining value or the expired lease also fails.
 func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 	oldWait := dhcpLeaseSeedApplyWaitWarn
 	dhcpLeaseSeedApplyWaitWarn = 200 * time.Millisecond
@@ -218,6 +227,8 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 	d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
 		{Family: 4, Address: "10.0.61.151", HWAddress: "aa:bb:cc:dd:ee:97",
 			SubnetID: 1, Remaining: 100, PreferredRemaining: 100, State: 0},
+		{Family: 4, Address: "10.0.61.152", HWAddress: "aa:bb:cc:dd:ee:98",
+			SubnetID: 1, Remaining: 2, PreferredRemaining: 2, State: 0},
 	})
 
 	gen := d.enqueueDHCPApplyWithAuthorityState(
@@ -238,7 +249,7 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 		t.Fatal("takeover restart did not start")
 	}
 
-	time.Sleep(1200 * time.Millisecond)
+	time.Sleep(2200 * time.Millisecond)
 	select {
 	case <-done:
 		oldAdds, newAdds := flip.counts()
@@ -260,8 +271,33 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 	if oldAdds != 0 || newAdds != 1 {
 		t.Fatalf("#17884: seed hit old/new Kea = %d/%d, want 0/1", oldAdds, newAdds)
 	}
-	if got := flip.validLifetimes(); len(got) != 1 || got[0] != 99 {
-		t.Fatalf("#17884: seeded valid-lft values = %v, want [99] after standby aging", got)
+	if got := flip.validLifetimes(); len(got) != 1 || got[0] <= 0 || got[0] >= 100 {
+		t.Fatalf("#17884: seeded valid-lft values = %v, want only the aged surviving lease (0 < valid-lft < 100)", got)
+	}
+	if got := flip.newLeaseAddresses(); len(got) != 1 || got[0] != "10.0.61.151" {
+		t.Fatalf("#17884: seeded addresses = %v, want only 10.0.61.151 (the two-second lease expired)", got)
+	}
+}
+
+func TestSeedApplyWaitStopsOnDaemonShutdown17884(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := &Daemon{
+		dhcpServer:        dhcpserver.New(),
+		applyCancelContext: ctx,
+	}
+	done := make(chan bool, 1)
+	go func() {
+		done <- d.waitForDHCPApplyGen(d.applyCancelCtx(), 1, true, false)
+	}()
+	cancel()
+	select {
+	case ready := <-done:
+		if ready {
+			t.Fatal("wait reported an unapplied generation ready after shutdown cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("takeover apply wait did not stop after daemon shutdown cancellation")
 	}
 }
 
