@@ -1645,6 +1645,16 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 	return nil
 }
 
+// rethRecoveryExcludedNames combines every configured interface name with
+// previous RETH member identities that still carry a virtual MAC.
+func rethRecoveryExcludedNames(cfg *config.Config, previous map[string]struct{}) map[string]struct{} {
+	names := cfg.ConfiguredLinuxNames()
+	for name := range previous {
+		names[name] = struct{}{}
+	}
+	return names
+}
+
 // buildInterfaceNetworkdModels derives the networkd managed-interface model
 // from the configured interfaces (RETH member merge, VLAN parents/children,
 // fabric IPVLAN parents, VRRP link-local base addresses). Entries are appended
@@ -1670,10 +1680,10 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 	}
 	rethToPhys := cfg.RethToPhysical()
 	rethMACIndexes := cfg.RethMACIndexes()
-	// #16860: recovery must exclude every configured interface, not only
-	// current RETH members — a configured standalone port carrying a stale
-	// virtual MAC is not an unnamed device awaiting recovery.
-	rethMemberNames := cfg.ConfiguredLinuxNames()
+	// #16860 excludes every configured name; retain the prior member set too
+	// so an unconfigured former member whose restore is pending cannot be
+	// recovered as a missing replacement.
+	rethMemberNames := rethRecoveryExcludedNames(cfg, result.rethRecoveryExclusions)
 	for ifName, ifCfg := range cfg.Interfaces.Interfaces {
 		if ifCfg == nil {
 			continue
