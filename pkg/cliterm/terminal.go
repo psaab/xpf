@@ -218,11 +218,12 @@ func advanceHistorySeedCursor(editPath []string, configMode bool, line string) (
 		return editPath, configMode
 	}
 	switch fields[0] {
-	case "configure":
-		// The history may span a restarted CLI session. A new
-		// `configure` enters at the root even if the preceding session
-		// ended while the cursor was nested.
-		return nil, true
+	// dispatchConfig accepts only exact config-mode verbs, and configure
+	// is not one of them. Keep the cursor on an in-config configure-like
+	// line: it was rejected live. History has no session markers, so a
+	// later configure after unrecorded EOF can be indistinguishable; this
+	// fail-closed choice may over-filter benign lines, but cannot leak a
+	// secret. Explicit exit/quit above makes a genuine re-entry operational.
 	case "edit":
 		fragment, ok := config.ParseEditFragment(line)
 		if ok && len(fragment) > 0 {
