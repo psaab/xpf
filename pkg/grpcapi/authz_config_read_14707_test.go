@@ -354,8 +354,8 @@ func TestRollbackMissingSlotSlotErrorPrecedence17967(t *testing.T) {
 			t.Errorf("%s: err = %v, want history out-of-range slot error (#17967)", tc.what, err)
 		}
 	}
-	// Command-level authorization runs before this scoped gate. It must
-	// continue to win for display-set requests even if the slot is absent.
+	// The gate's command-only pre-check still runs before it returns the
+	// slot error, so deny-commands display-set restrictions must win.
 	cmdErr := s.authorizeRPC(ctxWithPeerUID(uidDenySet14707), show14707Method("ShowRollback"),
 		&pb.ShowRollbackRequest{N: 40, Format: pb.ConfigFormat_SET})
 	if status.Code(cmdErr) != codes.PermissionDenied || strings.Contains(cmdErr.Error(), "out of range") {

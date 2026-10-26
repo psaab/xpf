@@ -20,14 +20,16 @@ import (
 // shared decision in pkg/config.
 
 const (
-	uid14707REST    = 4250
-	uid14707RESTSet = 4252
+	uid14707REST     = 4250
+	uid14707RESTSet  = 4252
+	uid14707RESTPath = 4253
 )
 
 const passwd14707REST = `root:x:0:0:root:/root:/bin/bash
 showuser:x:4250:4250::/home/showuser:/bin/bash
 openuser:x:4251:4251::/home/openuser:/bin/bash
 setfmtuser:x:4252:4252::/home/setfmtuser:/bin/bash
+pathdenyuser:x:4253:4253::/home/pathdenyuser:/bin/bash
 `
 
 const config14707REST = `
@@ -45,6 +47,10 @@ system {
             permissions [ view configure ];
             deny-commands "display set";
         }
+        class pathdeny-view {
+            permissions [ view configure ];
+            deny-commands "^show configuration security";
+        }
         user showuser {
             class limited-view;
         }
@@ -53,6 +59,9 @@ system {
         }
         user setfmtuser {
             class setfmt-view;
+        }
+        user pathdenyuser {
+            class pathdeny-view;
         }
     }
 }
@@ -218,5 +227,23 @@ func TestRESTRollbackMissingSlotSlotErrorPrecedence17967(t *testing.T) {
 		if code != http.StatusBadRequest || !strings.Contains(body, "out of range") || strings.Contains(body, "permission denied") {
 			t.Errorf("GET %s allowed missing-slot result = %d, %s; want history out-of-range 400", route, code, body)
 		}
+	}
+	// REST configCompareHandler ignores ?path= and renders the full
+	// compare arms. The command-only missing-slot pre-check must match
+	// that handler shape: a path-scoped deny cannot mask the missing
+	// slot error for rollback=40, and an existing-slot compare with the
+	// same ignored ?path= remains admitted.
+	_, basePathDeny := authzServer(t, Config{
+		Addr:         "127.0.0.1:8080",
+		Store:        store,
+		PeerLookupFn: fixedPeerUID(uid14707RESTPath),
+	})
+	code, body = get14707(t, basePathDeny, "/api/v1/config/compare?rollback=40&path=security")
+	if code != http.StatusBadRequest || !strings.Contains(body, "out of range") || strings.Contains(body, "permission denied") {
+		t.Errorf("path-scoped command deny masked missing-slot compare through ignored ?path=: status=%d body=%s", code, body)
+	}
+	code, body = get14707(t, basePathDeny, "/api/v1/config/compare?rollback=1&path=security")
+	if code != http.StatusOK || strings.Contains(body, "out of range") || strings.Contains(body, "permission denied") {
+		t.Errorf("existing-slot compare must ignore ?path= like the handler: status=%d body=%s", code, body)
 	}
 }

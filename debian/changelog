@@ -6,8 +6,9 @@ xpf (0.0.0) unstable; urgency=medium
     gate, so reporting an ingress drop fabricated a forwarding stage
     (#17865).
   * Config authorization: surface captured rollback slot errors before scoped
-    subtree authorization on gRPC and REST reads, while continuing to enforce
-    command restrictions and preserve invalid-argument status (#17967).
+    subtree authorization on gRPC/REST reads. REST compare command pre-checks
+    ignore ?path= as the handler does; command restrictions and invalid-
+    argument statuses remain enforced (#17967).
   * FRR: remove the unused rewriteFRRPipeSequences belt. Community
     regexes, Junos AS-path regexes, and BGP neighbor descriptions
     handle vty pipe-space through their production translator or gate;

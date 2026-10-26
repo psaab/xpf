@@ -170,8 +170,9 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 			snaps.Primary, snaps.Other = slot, candidate
 			snaps.Renders = candidate != nil
 			if slotErr != nil {
-				if err := config.AuthorizeConfigShowCompareCommand(priceCfg, class,
-					strings.Fields(r.URL.Query().Get("path"))); err != nil {
+				// The compare handler ignores ?path=; keep the missing-slot
+				// pre-check aligned with its full-arm render.
+				if err := config.AuthorizeConfigShowCompareCommand(priceCfg, class, nil); err != nil {
 					return snaps, err
 				}
 				return snaps, restConfigReadSlotError{err: slotErr}
