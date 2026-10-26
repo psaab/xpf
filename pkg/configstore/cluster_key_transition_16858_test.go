@@ -3,6 +3,8 @@ package configstore
 import (
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #16858 (R3-B04-02): the candidate-vs-active signing-key interlock at
@@ -189,5 +191,91 @@ func TestStoreSyncApplyMismatchedKeyBoots16858(t *testing.T) {
 	}
 	if cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal() != transitionKeyB16858 {
 		t.Fatal("SyncApply did not install the peer signing key")
+	}
+}
+
+// TestStorePersistedWhitespaceOnlyPrimaryStagedMigration17888 exercises the
+// legacy repair path from the real tolerant disk-load ingress: a raw
+// whitespace-only PSK was persisted and is accepted by the runtime, but a
+// strict commit must not allow a newly authored one. Retire the existing
+// bytes through the staged #6630 rotation only.
+func TestStorePersistedWhitespaceOnlyPrimaryStagedMigration17888(t *testing.T) {
+	const whitespace = "   "
+	const quotedWhitespace = `"   "`
+
+	seed := newTestStore(t)
+	tree, errs := config.NewParser(`chassis { cluster { cluster-id 1; strict-session-auth; authentication-key ` + quotedWhitespace + `; } }`).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse persisted whitespace-only config: %v", errs[0])
+	}
+	if err := seed.db.WriteActiveMarker(tree, true); err != nil {
+		t.Fatalf("persist tolerant-ingress fixture: %v", err)
+	}
+
+	s := newTestStoreAt(t, seed.filePath)
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load rejected the persisted whitespace-only key on tolerant ingress: %v", err)
+	}
+	active := s.ActiveConfig()
+	if got := active.Chassis.Cluster.ControlLinkAuthKey.Reveal(); got != whitespace {
+		t.Fatalf("Load installed primary %q, want raw whitespace PSK %q", got, whitespace)
+	}
+	if !active.Chassis.Cluster.StrictSessionAuth {
+		t.Fatal("Load dropped the persisted strict-session-auth posture")
+	}
+
+	// A direct swap is still refused by both commit boundaries.
+	stageCluster16858(t, s, transitionKeyB16858, "")
+	if _, err := s.CommitCheck(); err == nil {
+		t.Fatal("CommitCheck accepted a direct swap from the persisted whitespace-only primary")
+	}
+	if _, err := s.Commit(); err == nil {
+		t.Fatal("Commit accepted a direct swap from the persisted whitespace-only primary")
+	}
+	s.ExitConfigure()
+	if got := s.ActiveConfig().Chassis.Cluster.ControlLinkAuthKey.Reveal(); got != whitespace {
+		t.Fatalf("rejected direct swap changed active primary to %q", got)
+	}
+
+	// Steps 1/2: keep the byte-identical current primary while staging
+	// a strong additional key; CommitCheck and Commit must both pass.
+	stageCluster16858(t, s, quotedWhitespace, transitionKeyB16858)
+	if _, err := s.CommitCheck(); err != nil {
+		t.Fatalf("CommitCheck rejected staging a strong replacement beside the persisted whitespace-only primary: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit rejected staging a strong replacement beside the persisted whitespace-only primary: %v", err)
+	}
+	s.ExitConfigure()
+
+	// Steps 3/4: sign with the staged key and retain the old raw key
+	// as additional until the peer has swapped too.
+	stageCluster16858(t, s, transitionKeyB16858, quotedWhitespace)
+	if _, err := s.CommitCheck(); err != nil {
+		t.Fatalf("CommitCheck rejected swapping to the staged key: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit rejected swapping to the staged key: %v", err)
+	}
+	s.ExitConfigure()
+
+	// Step 5: finalize by removing the old whitespace-only key.
+	stageCluster16858(t, s, transitionKeyB16858, "")
+	if _, err := s.CommitCheck(); err != nil {
+		t.Fatalf("CommitCheck rejected finalizing the whitespace-key rotation: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit rejected finalizing the whitespace-key rotation: %v", err)
+	}
+	s.ExitConfigure()
+	active = s.ActiveConfig()
+	if got := active.Chassis.Cluster.ControlLinkAuthKey.Reveal(); got != transitionKeyB16858 {
+		t.Fatalf("finalized primary = %q, want replacement key", got)
+	}
+	if got := active.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal(); got != "" {
+		t.Fatalf("finalized additional key = %q, want empty", got)
+	}
+	if !active.Chassis.Cluster.StrictSessionAuth {
+		t.Fatal("rotation dropped the persisted strict-session-auth posture")
 	}
 }

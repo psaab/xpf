@@ -457,9 +457,9 @@ running loop handle a short fill-ring insert identically.
 Since the root cause is kernel-emitted RSTs for SNAT addresses the kernel
 doesn't own, the dataplane installs nftables rules to suppress them.
 
-`install_kernel_rst_suppression()` (`afxdp.rs:6499`) creates an
+`InstallRSTSuppression()` (`pkg/nftables/rst_suppress.go`) creates an
 `inet xpf_dp_rst` table with an output chain that drops outgoing TCP RSTs
-from all interface-NAT (SNAT) addresses, scoped to conntrack-less
+from interface-NAT (SNAT) addresses, scoped to conntrack-invalid
 packets only (#14949):
 
 ```
@@ -467,7 +467,8 @@ table inet xpf_dp_rst {
   chain output {
     type filter hook output priority raw; policy accept;
     ip saddr <snat_v4_addr> ct state invalid socket wildcard 1 tcp flags & rst == rst counter drop
-    ip6 saddr <snat_v6_addr> ct state invalid socket wildcard 1 tcp flags & rst == rst counter drop
+    ip6 saddr <snat_v6_addr> ct state invalid socket wildcard 0 tcp flags & rst == rst return
+    ip6 saddr <snat_v6_addr> ct state invalid tcp flags & rst == rst counter drop
   }
 }
 ```
@@ -486,12 +487,17 @@ INVALID, which is the only conntrack-less signature at OUTPUT.
 INVALID alone is not sufficient (#16839): at raw priority conntrack
 has not run yet, so a live local socket's abortive RST sourced from a
 protected address also reads INVALID there (it becomes ESTABLISHED
-only after the −200 hook) and the INVALID-only rule dropped it. The
-`socket wildcard 1` predicate completes the signature: it matches
-only the wildcard-bound `tcp_rst_sock` control mini-socket behind
-the spurious RST (and BREAKs, i.e. does not match, when there is no
-full socket at all), while a live socket bound to the protected
-address reads wildcard 0 and is spared.
+only after the −200 hook). IPv4's `socket wildcard 1` predicate
+matches the wildcard-bound `tcp_rst_sock` control mini-socket behind
+the spurious RST and spares a live socket bound to the protected
+address (`wildcard 0`).
+
+IPv6 socketless kernel RST skbs have no `skb->sk`; at LOCAL_OUT,
+`nft_socket_eval` BREAKs rather than returning a wildcard value. The
+first IPv6 rule therefore returns live full-socket RSTs
+(`wildcard 0`) before the next rule drops socketless RSTs, which
+continue past the BREAK. This ordering preserves both sides of the
+IPv6 behavior matrix (#17868).
 
 The rules are:
 - Auto-installed when forwarding state is rebuilt from the config snapshot.

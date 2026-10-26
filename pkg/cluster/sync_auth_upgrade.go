@@ -387,7 +387,7 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 		// #16857: the same discipline for a retired-key connection — anchor
 		// at the first reconcile where its key is outside the accepted set,
 		// before beginAuthUpgrade prompts for the rekey it may decline.
-		// A connection back inside the accepted set has any retired anchor
+		// A connection back inside the accepted set has any stale anchor
 		// cleared so a later retirement starts a fresh grace.
 		if ac, ok := c.(*authConn); ok {
 			s.writeMu.Lock()
@@ -395,9 +395,7 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 			case len(ac.authPSK) == 0:
 				s.noteStrictAuthGraceStartLocked(ac)
 			case authPSKAccepted(ac.authPSK, accepted):
-				if ac.strictGraceRetired {
-					s.clearStrictAuthGraceLocked(ac)
-				}
+				s.clearStrictAuthGraceLocked(ac)
 			default:
 				s.noteRetiredKeyGraceStartLocked(ac)
 			}
@@ -726,8 +724,10 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) bool
 	// The verified Noise msg1 proves that the peer holds an accepted PSK,
 	// independently of whether the remainder of this connection upgrade
 	// succeeds.
-	// #16859: matched is the ring key msg1 verified under — the peer's
-	// signing key — so feed it to the rotation observation as well.
+	// #16859/#17891: matched is the ring key msg1 verified under — the
+	// initiator's signing key, because initiators seal msg1 with their own
+	// signing key alone (#14703). Unlike the upgrade initiator's msg2
+	// observation, this identifies the peer's signing choice.
 	s.recordAuthenticatedPeer(matched)
 
 	msg2, csI2R, csR2I, err := hs.WriteMessage(nil, nil)
@@ -816,11 +816,7 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) bool
 			"err", err, "remote", connRemoteAddrString(conn))
 		return false
 	}
-	// The verified Noise msg2 proves that the peer holds the shared PSK.
-	// #16859: this round authenticated under st.forPSK — the initiator's
-	// signing key for this round, which the responder proved it accepts —
-	// so that is the peer's signing key for rotation purposes.
-	s.recordAuthenticatedPeer(st.forPSK)
+	s.recordAuthenticatedPeer()
 
 	st.keys = syncNoiseSplitKeys(true, csI2R, csR2I)
 	st.haveKeys = true
@@ -860,7 +856,8 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) bool
 	// they differ, the connection really is authenticated under a retired key
 	// and the level-triggered reconciler must be able to see that and start a
 	// fresh round; stamping the live key here would make it look current.
-	ac.authPSK = append([]byte(nil), st.forPSK...)
+	accepted := s.authAcceptedKeys()
+	s.recordAuthUpgradeCompleteLocked(ac, st.forPSK, accepted)
 	slog.Info("cluster sync: in-place auth upgrade complete — this connection is now "+
 		"authenticated in both directions (#6628)", "remote", connRemoteAddrString(conn))
 
@@ -928,7 +925,8 @@ func (s *SessionSync) handleAuthUpgradeConfirm(conn net.Conn, payload []byte) bo
 	ac.readKey = st.keys.readKey
 	st.readDone = true
 	if st.writeDone {
-		ac.authPSK = append([]byte(nil), st.forPSK...)
+		accepted := s.authAcceptedKeys()
+		s.recordAuthUpgradeCompleteLocked(ac, st.forPSK, accepted)
 	}
 	slog.Info("cluster sync: in-place auth upgrade complete — this connection is now "+
 		"authenticated in both directions (#6628)", "remote", connRemoteAddrString(conn))
