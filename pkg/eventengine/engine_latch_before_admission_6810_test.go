@@ -21,6 +21,7 @@ package eventengine
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,9 +39,9 @@ func newInertEngine6810(t *testing.T) (*Engine, func(int64)) {
 	t.Cleanup(e.Close)
 	e.startOnce.Do(func() {}) // the worker must never drain the queue
 	base := time.Unix(1_700_000_000, 0)
-	var cur int64
-	e.nowFn = func() time.Time { return base.Add(time.Duration(cur) * time.Second) }
-	return e, func(tick int64) { cur = tick }
+	var cur atomic.Int64
+	e.nowFn = func() time.Time { return base.Add(time.Duration(cur.Load()) * time.Second) }
+	return e, func(tick int64) { cur.Store(tick) }
 }
 
 // edgePolicy6810 is an edge-triggered policy with a real `then` command, so

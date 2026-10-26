@@ -1,6 +1,7 @@
 package eventengine
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,10 +13,10 @@ import (
 func TestDeferredBudgetOnlyEdgeCommitsAfterExpiry15021(t *testing.T) {
 	s := newStore(t)
 	base := time.Unix(1_800_000_000, 0)
-	var cur int64
+	var cur atomic.Int64
 	e := New(s, nil)
 	defer e.Close()
-	e.nowFn = func() time.Time { return base.Add(time.Duration(cur) * time.Second) }
+	e.nowFn = func() time.Time { return base.Add(time.Duration(cur.Load()) * time.Second) }
 	// Fill budget with 4 other policies at t0.
 	var pols []*config.EventPolicy
 	for i := range 4 {
@@ -33,7 +34,7 @@ func TestDeferredBudgetOnlyEdgeCommitsAfterExpiry15021(t *testing.T) {
 	if e.Stats().DroppedGlobalBudget != 0 {
 		// pre-commit drops must be zero; commit-time residual may appear later
 	}
-	cur = 61
+	cur.Store(61)
 	e.drainDeferred()
 	waitFor(t, "victim commits after expiry", func() bool { return e.Stats().Committed >= 5 })
 }
@@ -42,10 +43,10 @@ func TestDeferredBudgetOnlyEdgeCommitsAfterExpiry15021(t *testing.T) {
 func TestDeferredCooldownEdgeReplaysAndDirection15021(t *testing.T) {
 	s := newStore(t)
 	base := time.Unix(1_800_000_000, 0)
-	var cur int64
+	var cur atomic.Int64
 	e := New(s, nil)
 	defer e.Close()
-	e.nowFn = func() time.Time { return base.Add(time.Duration(cur) * time.Second) }
+	e.nowFn = func() time.Time { return base.Add(time.Duration(cur.Load()) * time.Second) }
 	pol := &config.EventPolicy{Name: "p", Events: []string{"ping_test_failed", "ping_test_completed"}, ThenCommands: []string{"set system host-name recovered"}}
 	applyPolicies9984(e, []*config.EventPolicy{pol})
 	e.HandleEvent(eventFor("ping_test_failed"))
@@ -56,14 +57,14 @@ func TestDeferredCooldownEdgeReplaysAndDirection15021(t *testing.T) {
 		rt := e.runtime["p"]
 		return rt != nil && !rt.lastTrigger().IsZero()
 	})
-	cur = 5
+	cur.Store(5)
 	e.HandleEvent(eventFor("ping_test_failed"))
 	if e.Stats().CooldownSuppressed == 0 {
 		t.Fatalf("cooldown suppression not counted")
 	}
 	e.HandleEvent(eventFor("ping_test_completed"))
 	time.Sleep(100 * time.Millisecond)
-	cur = 40
+	cur.Store(40)
 	e.drainDeferred()
 	waitFor(t, "deferred replay commits", func() bool { return e.Stats().Committed >= 2 })
 	_ = rpm.Event{}
