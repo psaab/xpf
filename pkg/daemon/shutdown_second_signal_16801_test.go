@@ -175,7 +175,7 @@ func runSecondSignalChild16801(t *testing.T) {
 
 	sentinel := errSentinel16801
 	done := make(chan error, 1)
-	go func() { done <- d.runShutdownSequence(&wg, stop, sentinel) }()
+	go func() { done <- d.runShutdownSequence(context.Background(), &wg, stop, sentinel) }()
 
 	// The sequence is now blocked in wg.Wait() (gate closed) AFTER
 	// its internal stop(). Deliver the second SIGTERM+SIGINT into

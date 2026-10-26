@@ -846,15 +846,13 @@ type Daemon struct {
 	schedulerCancel context.CancelFunc
 	// schedulerWg tracks every policy-scheduler Run() goroutine generation so
 	// daemon shutdown can join it after cancelling, and schedulerStopped
-	// latches on shutdown so no new generation is started after the join
-	// (#5308). Before this the scheduler goroutine was cancelled only on a
-	// config-replace, so at shutdown a late tick could republish policy
-	// schedule state through an already-torn-down runtime, and it leaked for
-	// library callers where Run() returns. schedulerCancel/schedulerWg/
-	// schedulerStopped are all mutated under applySem (the "Locked" convention
-	// for the scheduler start/reconcile path).
+	// latches shutdown so no new generation is started once stop begins (#5308).
+	// schedulerCancel and schedulerWg are mutated under applySem (the "Locked"
+	// convention for scheduler start/reconcile); the atomic latch is set before
+	// shutdown's bounded acquire so repeated stop calls return without waiting
+	// for that semaphore.
 	schedulerWg               sync.WaitGroup
-	schedulerStopped          bool
+	schedulerStopped          atomic.Bool
 	policySchedulerConfigHash [32]byte
 	policySchedulerEpoch      atomic.Uint64
 	// #3780: scheduler republish-failure observability.

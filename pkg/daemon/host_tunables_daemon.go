@@ -256,23 +256,41 @@ func (d *Daemon) applyStep0TunablesWith(userspaceDP, claimHostTunables bool,
 // Best-effort: never returns an error. Safe to call when no tunable
 // was ever captured (no-op).
 func (d *Daemon) restoreStep0TunablesOnShutdown() {
+	ctx, cancel := newShutdownApplyContext()
+	defer cancel()
+	d.restoreStep0TunablesOnShutdownWithContext(ctx)
+}
+
+func (d *Daemon) restoreStep0TunablesOnShutdownWithContext(ctx context.Context) {
 	// Serialize against an un-drained apply (#4691). applyStep0TunablesWith
 	// mutates the shared priorTunables snapshot's maps (governors, budget,
 	// mlx5Adaptive, neighRetrans) OUTSIDE priorTunablesMu — the mutex only
 	// guards the pointer read/write, while applyCoalescence /
 	// applyHostTunables / applyNeighRetransTime write the maps after the
 	// mutex is dropped. A DHCP lease apply can still be in flight when
-	// shutdown fires; it runs under d.applySem (via applyConfig), so
-	// acquiring applySem here serializes this restore's snapshot handoff +
-	// map iteration against that apply, matching the lock the apply path
-	// already holds. Without it, restore's os.Remove/write of the map entries
-	// races the apply's concurrent writes to the same maps.
+	// shutdown fires; it runs under d.applySem (via applyConfig), so acquiring
+	// applySem here serializes this restore's snapshot handoff + map iteration
+	// against that apply, matching the lock the apply path already holds.
+	//
+	// The acquire uses the shared shutdown deadline. Unlike the drain and
+	// scheduler stop, this path cannot safely proceed without the permit: it
+	// iterates and mutates the apply-owned snapshot maps. If the lock remains
+	// unavailable, preserve the snapshot and skip restore rather than race.
 	if d.applySem != nil {
-		if err := d.applySem.Acquire(context.Background(), 1); err != nil {
-			slog.Warn("shutdown: host tunables restore could not acquire apply lock, "+
-				"proceeding without it", "err", err)
-		} else {
+		waitBudget := time.Duration(0)
+		if deadline, ok := ctx.Deadline(); ok {
+			waitBudget = time.Until(deadline)
+			if waitBudget < 0 {
+				waitBudget = 0
+			}
+		}
+		if acquired, err := d.acquireApplySemForShutdownContext(ctx); acquired {
 			defer d.applySem.Release(1)
+		} else {
+			slog.Warn("shutdown: host tunables restore skipped because the apply lock "+
+				"was unavailable; captured state preserved without an unsafe restore",
+				"err", err, "wait_budget", waitBudget, "issue", "#17014")
+			return
 		}
 	}
 

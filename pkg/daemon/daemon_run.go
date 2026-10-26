@@ -122,6 +122,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// reach the sequence never call stop() while exposed (the
 	// deferred stop above still holds the NotifyContext capture).
 
+	var shutdownApplyCtx context.Context
+	var cancelShutdownApply context.CancelFunc
+	shutdownApplyContext := func() context.Context {
+		if shutdownApplyCtx == nil {
+			shutdownApplyCtx, cancelShutdownApply = newShutdownApplyContext()
+		}
+		return shutdownApplyCtx
+	}
 	// #5308: guarantee the two daemonCtx-bound background loops (policy
 	// scheduler + RPM probe-pin retry) are cancelled + joined even when Run
 	// returns WITHOUT reaching runShutdownSequence — an early-error return
@@ -132,7 +140,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// may be started during initManagers' boot apply below, so registering the
 	// defers here covers every subsequent return.
 	defer d.stopPinRetryLoop()
-	defer d.stopPolicySchedulerLoop()
+	defer func() {
+		shutdownApplyCtx := shutdownApplyContext()
+		defer cancelShutdownApply()
+		d.stopPolicySchedulerLoopWithContext(shutdownApplyCtx)
+	}()
 	// #5523 C179-093: the aggregator flush goroutine and the IPsec DHCP-rebind
 	// retry loop are also started during the boot apply below and are NOT
 	// covered by the run WaitGroup, so guarantee they are cancelled + joined on
@@ -250,7 +262,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}},
 	}
 	eventBuf, startupErr := d.runStartupWithEventBuffer(ctx, phases, func(abortErr error) error {
-		return d.runShutdownSequence(&wg, stop, abortErr)
+		return d.runShutdownSequence(shutdownApplyContext(), &wg, stop, abortErr)
 	})
 	if startupErr != nil {
 		return startupErr
@@ -1089,7 +1101,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	// ===== PHASE 7: Shutdown sequence (extracted to runShutdownSequence, #4662) =====
-	return d.runShutdownSequence(&wg, stop, runErr)
+	return d.runShutdownSequence(shutdownApplyContext(), &wg, stop, runErr)
 }
 
 // daemonSignals is the shutdown-signal set startupSignalContext captures

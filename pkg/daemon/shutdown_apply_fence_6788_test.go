@@ -204,7 +204,7 @@ func runShutdownFenceFor6788(t *testing.T, d *Daemon) {
 	var wg sync.WaitGroup
 	sentinel := context.Canceled
 	done := make(chan error, 1)
-	go func() { done <- d.runShutdownSequence(&wg, func() {}, sentinel) }()
+	go func() { done <- d.runShutdownSequence(context.Background(), &wg, func() {}, sentinel) }()
 	select {
 	case got := <-done:
 		if got != sentinel {

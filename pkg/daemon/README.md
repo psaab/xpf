@@ -2546,40 +2546,45 @@ never lock an operator out of a remote box it manages.
   ERROR alarm and `xpf_routing_instance_member_device_conflicts` remains
   alertable.
 
-- **Every shutdown-path `applySem` acquire is BOUNDED (#8597).**
-  `daemon_run_shutdown.go` states the rule at its own drain — *"bound it
-  defensively anyway so a wedged apply cannot block the whole shutdown past the
-  drain budget"*. A census of `applySem` acquires reachable from the shutdown
-  sequence finds exactly two: that drain, and `stopPolicySchedulerLoop`, which
-  used `context.Background()`.
+- **Shutdown `applySem` acquisitions share one BOUNDED deadline (#8597/#17014).**
+  `Run` lazily creates one `applyCloseoutDrainTimeout` context when shutdown
+  begins and passes it to `runShutdownSequence` and its deferred
+  `stopPolicySchedulerLoop`. The initial drain and
+  `restoreStep0TunablesOnShutdown` also use that same context for their
+  semaphore acquires. The deadline is wall-clock and continues across
+  intervening shutdown work, so each acquire receives only the time remaining
+  in the shared shutdown window. Once it expires, the helper tries only a
+  nonblocking acquire. The drain and scheduler stop continue without the
+  permit; tunable restore skips unsafe map access and preserves the snapshot
+  if the permit is unavailable. The deferred scheduler stop fast-paths its
+  already-stopped latch, so it cannot add another wait.
 
-  With an apply wedged, the unbounded one never returned. The scheduler was
-  never cancelled, shutdown never reached the HA relinquish that follows, and
-  systemd's `TimeoutStopSec` ended the process with SIGKILL — no `rg_active`
-  clear, no priority-0 advert, no RA goodbye. A sub-second handover became a
-  blackout, from a contained degradation (one wedged apply) that the bounded
-  drain right above it was written to survive.
+  Before #8597, the unbounded scheduler acquire never returned with a wedged
+  apply. The scheduler was never cancelled, shutdown never reached the HA
+  relinquish that follows, and systemd's `TimeoutStopSec` ended the process
+  with SIGKILL — no `rg_active` clear, no priority-0 advert, no RA goodbye. A
+  sub-second handover became a blackout, from a contained degradation (one
+  wedged apply) that the bounded drain right above it was written to survive.
 
   Bounding an acquire has a second half: **do not release a permit you did not
-  take.** The original released unconditionally, which was only safe because
-  the acquire could not fail. On a weight-1 semaphore, releasing without
-  acquiring raises the count above capacity and admits a second holder
+  take.** The original scheduler stop released unconditionally, which was only
+  safe because its acquire could not fail. On a weight-1 semaphore, releasing
+  without acquiring raises the count above capacity and admits a second holder
   alongside the wedged apply — from the very path whose purpose is to serialise
   against it. `TestStopPolicySchedulerLoopDoesNotReleaseASemaphoreItNeverTook_8597`
   pins that.
 
-  On timeout the call proceeds to the cancel anyway. Bounding the wait is only
-  worth something if the call still does its job: #5308 orders this BEFORE the
-  dataplane teardown so no late scheduler tick runs against a closed runtime.
+  On timeout `stopPolicySchedulerLoop` still proceeds to the cancel. Bounding
+  its wait is only worth something if the call still does its job: #5308 orders
+  this BEFORE the dataplane teardown so no late scheduler tick runs against a
+  closed runtime.
 
-  **Residual, stated rather than implied:** this does not make the join
-  unconditionally bounded. A tick already parked in `publishPolicyScheduleState`
-  acquires with `d.daemonCtx`, which is the raw parent and is
-  production-uncancelled, so cancelling the scheduler ctx does not release it
-  and `schedulerWg.Wait()` can still block behind the same wedged apply. What
-  the bound removes is the case where the stall happens with no tick in flight
-  at all. Closing the rest needs the scheduler's own ctx to reach its updateFn —
-  a signature/ownership change rather than a bound. Filed as #8660.
+  The join remains ordered: cancel runs before `schedulerWg.Wait`. #8660
+  closed the parked-tick residual by passing the scheduler's cancellable
+  context through to `publishPolicyScheduleState`; cancellation now releases a
+  tick waiting in that function, so the join returns. The bounded stop acquire
+  separately guarantees that a wedged apply cannot prevent the cancel from
+  being reached when no tick is in flight.
 
 - **An unarmed dataplane stops kernel transit forwarding (#5275).** Kernel
   transit forwarding is CONDITIONAL on the dataplane being armed **and on a

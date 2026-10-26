@@ -179,7 +179,7 @@ func runShutdownFor6787(t *testing.T, d *Daemon) {
 	_, stopRun := context.WithCancel(context.Background())
 	sentinel := errors.New("run-error-passthrough")
 	done := make(chan error, 1)
-	go func() { done <- d.runShutdownSequence(&wg, stopRun, sentinel) }()
+	go func() { done <- d.runShutdownSequence(context.Background(), &wg, stopRun, sentinel) }()
 	select {
 	case got := <-done:
 		if !errors.Is(got, sentinel) {
