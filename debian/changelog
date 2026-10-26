@@ -4,6 +4,7 @@ xpf (0.0.0) unstable; urgency=medium
     regexes, Junos AS-path regexes, and BGP neighbor descriptions
     handle vty pipe-space through their production translator or gate;
     the former shared-helper claim overstated its coverage (#17799).
+ -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000
 
 xpf (0.0.0) unstable; urgency=medium
 
