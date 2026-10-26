@@ -109,7 +109,7 @@ func TestRenewalTimers(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t1, t2, ok := renewalTimers(tt.leaseTime)
+			t1, t2, ok := renewalSchedule(tt.leaseTime, nil, 0, 0)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}

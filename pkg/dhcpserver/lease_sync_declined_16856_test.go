@@ -67,7 +67,7 @@ func TestDeclined16856_SocketAndMemfileCarry(t *testing.T) {
 		t.Fatalf("active control missing: %s", raw)
 	}
 	// parseSyncLeases sees declined; parseActiveLeases (DDNS) must not.
-	syncLeases, err := parseSyncLeases4(memfile, now)
+	syncLeases, err := parseSyncLeases(memfile, 4, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestDeclined16856_SocketAndMemfileCarry(t *testing.T) {
 	if !found {
 		t.Fatalf("parseSyncLeases4 missing declined: %+v", syncLeases)
 	}
-	active, err := parseActiveLeases4(memfile, now)
+	active, err := parseActiveLeases(memfile, 4, now)
 	if err != nil {
 		t.Fatal(err)
 	}

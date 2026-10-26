@@ -173,8 +173,8 @@ func TestCollectRouterAdvertisementsSolicitsAndSelects10763(t *testing.T) {
 	if len(conn.groups) != 1 || conn.groups[0] != netip.MustParseAddr("ff02::1") {
 		t.Errorf("joined groups = %v, want all-nodes ff02::1", conn.groups)
 	}
-	if got, want := selectRAObservedRouter(routers), netip.MustParseAddr("fe80::3"); got != want {
-		t.Errorf("selected gateway = %v, want highest-preference eligible router %v", got, want)
+	if best := bestObservedRouter(routers); best < 0 || routers[best].addr != netip.MustParseAddr("fe80::3") {
+		t.Errorf("selected router index = %d, want highest-preference eligible router fe80::3", best)
 	}
 }
 
@@ -191,7 +191,7 @@ func TestCollectRouterAdvertisementsRejectsLifetimeZero10763(t *testing.T) {
 		onRead: cancel,
 	}
 	routers := collectRouterAdvertisements(ctx, ifi, conn)
-	if got := selectRAObservedRouter(routers); got.IsValid() {
-		t.Errorf("selected gateway = %v, want none for lifetime-0 RA", got)
+	if best := bestObservedRouter(routers); best >= 0 {
+		t.Errorf("selected router index = %d, want none for lifetime-0 RA", best)
 	}
 }

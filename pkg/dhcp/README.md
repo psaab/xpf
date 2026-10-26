@@ -139,7 +139,7 @@ the debounced `onAddressChange` callback when content changed.
   DISCOVER/SOLICIT loop. `LeaseTime` itself is unchanged as the
   expiry anchor (IA_NA valid, or shortest PD valid on PD-only /
   address-less leases); only the schedule reads the extra bindings.
-  `renewalTimers(leaseTime)` remains the no-server-timer form.
+  The no-server-timer case is tested through `renewalSchedule(leaseTime, nil, 0, 0)`.
   Pinned by `server_t1t2_16553_test.go` and `commit_test.go`.
 - **DHCPv6 acquisition validation (#10858)**: acquisition and stateless replies
   must match the client DUID and successful message status; IA_NA / IA_PD

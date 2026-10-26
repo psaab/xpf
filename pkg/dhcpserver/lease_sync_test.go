@@ -586,7 +586,7 @@ func TestPreSeedMemfile4_RoundTrip(t *testing.T) {
 		t.Fatalf("PreSeedMemfile4: %v", err)
 	}
 	// Re-read via the destructive-safe parser → must see the lease.
-	got, err := parseSyncLeases4(memfile, localNow)
+	got, err := parseSyncLeases(memfile, 4, localNow)
 	if err != nil {
 		t.Fatalf("parseSyncLeases4 on pre-seeded file: %v", err)
 	}
@@ -660,7 +660,7 @@ func TestSeedAndPreSeed_DropExpiredLeases(t *testing.T) {
 		if err := preSeedPeerForTesting(t, m, 4, in, localNow); err != nil {
 			t.Fatalf("PreSeedMemfile4: %v", err)
 		}
-		got, err := parseActiveLeases4(memfile, localNow)
+		got, err := parseActiveLeases(memfile, 4, localNow)
 		if err != nil {
 			t.Fatalf("parseActiveLeases4: %v", err)
 		}
@@ -733,7 +733,7 @@ func TestSeedAndPreSeedRejectInvalidSyncLeases10893(t *testing.T) {
 	if err := preSeedPeerForTesting(t, m, 4, v4, now); err != nil {
 		t.Fatalf("PreSeedMemfile4: %v", err)
 	}
-	got4, err := parseSyncLeases4(file4, now)
+	got4, err := parseSyncLeases(file4, 4, now)
 	if err != nil || len(got4) != 2 || got4[0].Address != "10.0.0.5" ||
 		got4[1].Address != "10.0.0.10" || got4[1].Expire != now.Unix()+int64(maxSyncLeaseLifetime) {
 		t.Fatalf("v4 memfile retained invalid row or uncapped lifetime: %+v (err=%v)", got4, err)
@@ -741,7 +741,7 @@ func TestSeedAndPreSeedRejectInvalidSyncLeases10893(t *testing.T) {
 	if err := preSeedPeerForTesting(t, m, 6, v6, now); err != nil {
 		t.Fatalf("PreSeedMemfile6: %v", err)
 	}
-	got6, err := parseSyncLeases6(file6, now)
+	got6, err := parseSyncLeases(file6, 6, now)
 	if err != nil || len(got6) != 2 || got6[0].Address != "2001:db8::6" ||
 		got6[1].Address != "2001:db8::10" || got6[1].Expire != now.Unix()+int64(maxSyncLeaseLifetime) {
 		t.Fatalf("v6 memfile retained invalid row or uncapped lifetime: %+v (err=%v)", got6, err)
@@ -791,7 +791,7 @@ func TestPreSeedMemfileMerged4_PreservesLocalLeases(t *testing.T) {
 	if err := m.PreSeedMemfileMerged4WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: peer, Received: true}, localNow, false, LeaseSyncAuthority{}); err != nil {
 		t.Fatalf("PreSeedMemfileMerged4: %v", err)
 	}
-	got, err := parseActiveLeases4(memfile, localNow)
+	got, err := parseActiveLeases(memfile, 4, localNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4 on pre-seeded file: %v", err)
 	}
@@ -843,7 +843,7 @@ func TestPreSeedMemfileMerged6_PreservesLocalLeases(t *testing.T) {
 	if err := m.PreSeedMemfileMerged6WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: peer, Received: true}, localNow, false, LeaseSyncAuthority{}); err != nil {
 		t.Fatalf("PreSeedMemfileMerged6: %v", err)
 	}
-	got, err := parseActiveLeases6(memfile, localNow)
+	got, err := parseActiveLeases(memfile, 6, localNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases6 on pre-seeded file: %v", err)
 	}
@@ -912,7 +912,7 @@ func TestPreSeedMemfileMerged4_QuiescesWindowGrants10895(t *testing.T) {
 		context.Background(), LeaseSyncSnapshot{}, localNow, false, LeaseSyncAuthority{}); err != nil {
 		t.Fatalf("PreSeedMemfileMerged4WithAuthority: %v", err)
 	}
-	got, err := parseActiveLeases4(memfile, localNow)
+	got, err := parseActiveLeases(memfile, 4, localNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4 on pre-seeded file: %v", err)
 	}
@@ -980,7 +980,7 @@ func TestPreSeedMemfileMerged6_QuiescesWindowGrants10895(t *testing.T) {
 		context.Background(), LeaseSyncSnapshot{}, localNow, false, LeaseSyncAuthority{}); err != nil {
 		t.Fatalf("PreSeedMemfileMerged6WithAuthority: %v", err)
 	}
-	got, err := parseActiveLeases6(memfile, localNow)
+	got, err := parseActiveLeases(memfile, 6, localNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases6 on pre-seeded file: %v", err)
 	}
@@ -1200,9 +1200,9 @@ func TestPreSeedMemfileMerged_DropsFallbackMemfileLeases9853(t *testing.T) {
 
 					var got []ddnsLease
 					if tc.family == 4 {
-						got, err = parseActiveLeases4(memfile, now)
+						got, err = parseActiveLeases(memfile, 4, now)
 					} else {
-						got, err = parseActiveLeases6(memfile, now)
+						got, err = parseActiveLeases(memfile, 6, now)
 					}
 					if err != nil {
 						t.Fatalf("read effective pre-seeded set: %v", err)
@@ -1324,9 +1324,9 @@ func TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853(t *tes
 
 			var got []ddnsLease
 			if tc.family == 4 {
-				got, err = parseActiveLeases4(memfile, now)
+				got, err = parseActiveLeases(memfile, 4, now)
 			} else {
-				got, err = parseActiveLeases6(memfile, now)
+				got, err = parseActiveLeases(memfile, 6, now)
 			}
 			if err != nil {
 				t.Fatalf("read effective staggered-failover set: %v", err)
@@ -1771,7 +1771,7 @@ func TestPreSeedMemfile_NoKeaUser_WarnsAndSucceeds(t *testing.T) {
 	}
 
 	// The v4 file was still written (takeover not aborted) and is parseable.
-	got, err := parseActiveLeases4(memfile4, localNow)
+	got, err := parseActiveLeases(memfile4, 4, localNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4 on pre-seeded file: %v", err)
 	}

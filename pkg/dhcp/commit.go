@@ -73,9 +73,6 @@ import (
 // (1e9 ns is divisible by 8, so no rounding divergence). The split is
 // extracted here so both v4/v6 run loops share one definition and tests
 // can pin the schedule.
-func renewalTimers(leaseTime time.Duration) (t1, t2Remaining time.Duration, ok bool) {
-	return renewalSchedule(leaseTime, nil, 0, 0)
-}
 
 // renewalSchedule computes the T1 wait and the additional T1→T2 wait
 // for one renewal cycle, honoring server-supplied T1/T2 (#16553).

@@ -39,20 +39,6 @@ const (
 	StateExpired  State = keaStateExpired
 )
 
-// Name returns the canonical name for a Kea lease state.
-func (s State) Name() string {
-	switch s {
-	case StateDefault:
-		return "default"
-	case StateDeclined:
-		return "declined"
-	case StateExpired:
-		return "expired-reclaimed"
-	default:
-		return "unknown"
-	}
-}
-
 // requiredLeaseColumns lists, per family, the Kea memfile header columns the
 // reconciler MUST be able to read to compute the desired DNS state and run a
 // SAFE destructive diff. The mass-delete / record-loss class is NOT specific
@@ -143,19 +129,6 @@ func (a *keaLeaseRowAccum) note(addr string) {
 	}
 }
 
-// parseActiveLeases4 reads the Kea v4 memfile and returns only active
-// leases (state default, not yet expired). now is the reference time for
-// the expiry check (injected for tests).
-func parseActiveLeases4(path string, now time.Time) ([]ddnsLease, error) {
-	return parseActiveLeases(path, 4, now)
-}
-
-// parseActiveLeases6 reads the Kea v6 memfile and returns only active
-// leases (state default, not yet expired).
-func parseActiveLeases6(path string, now time.Time) ([]ddnsLease, error) {
-	return parseActiveLeases(path, 6, now)
-}
-
 // parseLeaseRowSet reads and merges authoritative rows from the selected Kea
 // LFC file set. `path` is the CURRENT lease file; #5796 selects the completed
 // file when present, otherwise previous `.2`, input `.1`, and current, then
@@ -231,14 +204,6 @@ func parseSyncLeases(path string, family int, now time.Time) ([]keaLeaseRow, err
 		return nil, nil
 	}
 	return out, nil
-}
-
-func parseSyncLeases4(path string, now time.Time) ([]keaLeaseRow, error) {
-	return parseSyncLeases(path, 4, now)
-}
-
-func parseSyncLeases6(path string, now time.Time) ([]keaLeaseRow, error) {
-	return parseSyncLeases(path, 6, now)
 }
 
 func parseLeaseFile(path string, family int, now time.Time, acc *keaLeaseRowAccum, includeDeclined bool) error {

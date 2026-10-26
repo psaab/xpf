@@ -52,7 +52,7 @@ func TestParseActiveLeasesLargeHistoryCorrect_4886(t *testing.T) {
 	const nRows, nAddrs = 20000, 8
 	path := bigHistoryFile(t, nRows, nAddrs)
 
-	leases, err := parseActiveLeases4(path, lfcNow)
+	leases, err := parseActiveLeases(path, 4, lfcNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestParseActiveLeasesStreamingBounded_4886(t *testing.T) {
 	var m1, m2 runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&m1)
-	if _, err := parseActiveLeases4(path, lfcNow); err != nil {
+	if _, err := parseActiveLeases(path, 4, lfcNow); err != nil {
 		t.Fatalf("parseActiveLeases4: %v", err)
 	}
 	runtime.ReadMemStats(&m2)

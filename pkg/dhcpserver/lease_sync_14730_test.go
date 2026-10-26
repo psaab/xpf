@@ -63,9 +63,9 @@ func TestPreSeed14730_StillMasteringDropsTombstonedViaLFC(t *testing.T) {
 		}
 		var got []ddnsLease
 		if fam == 4 {
-			got, err = parseActiveLeases4(memfile, now)
+			got, err = parseActiveLeases(memfile, 4, now)
 		} else {
-			got, err = parseActiveLeases6(memfile, now)
+			got, err = parseActiveLeases(memfile, 6, now)
 		}
 		if err != nil {
 			t.Fatalf("fam%d parse: %v", fam, err)
@@ -131,7 +131,7 @@ func TestPreSeed14730_LiveSocketDropsTombstonedViaLFC(t *testing.T) {
 	if err := m.PreSeedMemfileMerged4WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: peer, Received: true}, now, false, LeaseSyncAuthority{}); err != nil {
 		t.Fatalf("live pre-seed: %v", err)
 	}
-	got, err := parseActiveLeases4(memfile, now)
+	got, err := parseActiveLeases(memfile, 4, now)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestPreSeed14730_CRHostnameRoundTrip(t *testing.T) {
 		t.Fatalf("PreSeed: %v", err)
 	}
 	raw, _ := os.ReadFile(memfile)
-	got, err := parseActiveLeases4(memfile, now)
+	got, err := parseActiveLeases(memfile, 4, now)
 	if err != nil {
 		t.Fatalf("parse with CR hostname failed (DDNS would halt): %v raw=%q", err, string(raw))
 	}

@@ -2777,16 +2777,3 @@ func addOption82(pkt *dhcpv4.DHCPv4, ifaceName string) {
 func stripOption82(pkt *dhcpv4.DHCPv4) {
 	pkt.Options.Del(option82)
 }
-
-// interfaceIPv4 returns the primary non-loopback IPv4 address on the interface
-// using the standard-library address list. It is retained for callers/tests
-// that already hold a *net.Interface; the giaddr resolution path uses
-// defaultIfaceResolver (which prefers a netlink-backed primary selection that
-// honors IFA_F_SECONDARY — see #2849).
-func interfaceIPv4(iface *net.Interface) (net.IP, error) {
-	cands, err := portableIPv4Lister(iface.Name)
-	if err != nil {
-		return nil, err
-	}
-	return selectPrimaryIPv4(iface.Name, cands)
-}

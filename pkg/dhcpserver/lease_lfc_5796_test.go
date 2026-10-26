@@ -51,7 +51,7 @@ func TestLFC5796_UnionAcrossFileSet(t *testing.T) {
 	// CURRENT: freshly rotated header-only append log (no data rows yet).
 	writeCSV(t, cur, lfcV4Header+"\n")
 
-	leases, err := parseActiveLeases4(cur, lfcNow)
+	leases, err := parseActiveLeases(cur, 4, lfcNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestLFC5796_ChronologicalOrderLastRowWins(t *testing.T) {
 		"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,curr-name,0\n"+
 		"10.0.0.40,aa:bb:cc:dd:ee:40,,3600,"+lfcPast+",1,0,1,host-d,0\n")
 
-	leases, err := parseActiveLeases4(cur, lfcNow)
+	leases, err := parseActiveLeases(cur, 4, lfcNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestLFC5796_NoLFCUnchanged(t *testing.T) {
 	writeCSV(t, cur, lfcV4Header+"\n"+
 		"10.0.0.99,aa:bb:cc:dd:ee:99,,3600,"+lfcFuture+",1,0,1,host-z,0\n")
 
-	leases, err := parseActiveLeases4(cur, lfcNow)
+	leases, err := parseActiveLeases(cur, 4, lfcNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestLFC5796_ExistingMangledSiblingFailsClosed(t *testing.T) {
 	// ...but the PREVIOUS file exists and is headerless (0 records) — anomalous.
 	writeCSV(t, cur+".2", "")
 
-	if _, err := parseActiveLeases4(cur, lfcNow); err == nil {
+	if _, err := parseActiveLeases(cur, 4, lfcNow); err == nil {
 		t.Fatal("an existing headerless .2 (previous) must make the family untrusted (error), not partial-trusted")
 	}
 }
