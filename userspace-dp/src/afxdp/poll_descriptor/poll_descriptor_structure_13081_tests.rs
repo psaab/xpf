@@ -35,6 +35,23 @@ fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
         .split("/// Host-bound counterpart")
         .next()
         .expect("final helper ends before host helper");
+    // #17929 review fold: also slice the non-fence wrapper between the
+    // prescreen and the fenced final, so it cannot re-encode either.
+    let final_wrapper = cookie
+        .split("pub(super) fn syn_cookie_final_admission(")
+        .nth(1)
+        .expect("final admission wrapper exists")
+        .split("pub(super) fn syn_cookie_final_admission_with_fence(")
+        .next()
+        .expect("final wrapper ends before fenced final");
+    const REENCODED: [&str; 6] = [
+        "evaluate_policy_result_without_counting_at(",
+        "evaluate_policy_result_with_icmp_at(",
+        "evaluate_policy_query",
+        "transit_destination_class_drop(",
+        "transit_source_class_drop(",
+        "transit_dst_is_martian",
+    ];
     for (name, body) in [
         ("prescreen", prescreen),
         ("final", final_admission),
@@ -43,10 +60,19 @@ fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
             body.contains("transit_admission_verdict("),
             "{name} must consume the shared session-admission verdict"
         );
+        for banned in REENCODED {
+            assert!(
+                !body.contains(banned),
+                "{name} must not re-encode policy or martian admission ({banned})"
+            );
+        }
+    }
+    // The non-fence wrapper delegates to the fenced final; it must not
+    // re-encode admission itself.
+    for banned in REENCODED {
         assert!(
-            !body.contains("evaluate_policy_result_without_counting_at(")
-                && !body.contains("transit_destination_class_drop("),
-            "{name} must not re-encode policy or martian admission"
+            !final_wrapper.contains(banned),
+            "final wrapper must not re-encode policy or martian admission ({banned})"
         );
     }
     for field in [
@@ -90,6 +116,14 @@ fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
         miss_policy.contains("count_policy_evaluation_result("),
         "session-miss applies the effect to the shared pure policy verdict"
     );
+    // The miss policy slice must not ALSO evaluate policy directly
+    // beside the shared verdict (double evaluation / drift).
+    for banned in REENCODED {
+        assert!(
+            !miss_policy.contains(banned),
+            "session-miss must not re-encode policy beside the shared verdict ({banned})"
+        );
+    }
 }
 
 // #13766: behavioral drain coverage for the #13636 TX-pool return.

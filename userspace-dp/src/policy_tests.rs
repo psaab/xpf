@@ -11126,3 +11126,39 @@ fn policy_query_constructors_match_hand_built_16129() {
         }
     );
 }
+
+// #17929 review fold: count_policy_evaluation_result must mirror the
+// counted evaluator's order — the functional-zone Deny returns BEFORE
+// the unzoned gates and counts nothing there. A functional-zone result
+// with the opposite zone unzoned must not bump an UNZONED_* counter.
+#[test]
+fn count_effect_skips_unzoned_counter_for_functional_zone_17929() {
+    let mut state = parse_policy_state(
+        "deny",
+        &[icmp_app_rule("junos-icmp-ping", "icmp", Some(8))],
+        &test_zone_name_to_id(),
+    );
+    state
+        .functional_zone_ids
+        .insert(TEST_LAN_ZONE_ID);
+    let pure_result = evaluate_policy_result_without_counting_at(
+        &state,
+        TEST_LAN_ZONE_ID,
+        0,
+        "10.0.61.100".parse().expect("src"),
+        "172.16.80.200".parse().expect("dst"),
+        PROTO_ICMP,
+        0,
+        0,
+        Some((8, 0)),
+        12_345,
+    );
+    assert_eq!(pure_result.action, PolicyAction::Deny);
+    let before = UNZONED_EGRESS_DENIED.load(Ordering::Relaxed);
+    let _applied = count_policy_evaluation_result(&state, TEST_LAN_ZONE_ID, 0, pure_result, 64);
+    assert_eq!(
+        UNZONED_EGRESS_DENIED.load(Ordering::Relaxed),
+        before,
+        "functional-zone deny must not bump UNZONED_EGRESS_DENIED"
+    );
+}

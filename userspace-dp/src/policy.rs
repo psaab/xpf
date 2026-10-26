@@ -4039,6 +4039,13 @@ pub(crate) fn count_policy_evaluation_result(
     result: PolicyEvaluationResult,
     packet_len: u64,
 ) -> PolicyEvaluationResult {
+    // The counted evaluator returns the functional-zone Deny BEFORE
+    // the unzoned gates and counts nothing there; mirror that order
+    // (#17929 review): a functional-zone deny with the opposite zone
+    // unzoned must not bump an UNZONED_* counter.
+    if state.functional_zone_ids.contains(&from_id) || state.functional_zone_ids.contains(&to_id) {
+        return result;
+    }
     if from_id == 0 {
         UNZONED_INGRESS_DENIED.fetch_add(1, Ordering::Relaxed);
     } else if to_id == 0 {
