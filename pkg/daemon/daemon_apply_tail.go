@@ -545,6 +545,12 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 // BindingChanged (off-key binds, primary-address debt) and any config
 // field, e.g. fab1 removed from config — restarts unconditionally, as
 // before.
+//
+// #17871: restartOwed overrides the keep above. The flag is consumed
+// one-shot by step 20 BEFORE this call, and a teardown that owed it
+// (bootstrap rollback, #7901) STOPPED the epoch — the retained key is
+// not a working epoch. Keeping it here would discard the only
+// recovery request and leave comms down until an unrelated change.
 func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwed bool) {
 	if d.cluster == nil || d.daemonCtx == nil {
 		return
@@ -558,20 +564,22 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 	}
 	fab1Only := active
 	fab1Only.Fab1Debt = false
-	if newTransport == fab1Only && active.Fab1Debt && !fab1UpgradeReady(cfg) {
-		// #16842: fab1-debt epoch, fab1 still unaddressed — keep the
-		// working single-fabric epoch; do not churn it.
+	fab1DebtShape := newTransport == fab1Only && active.Fab1Debt
+	fab1Ready := fab1DebtShape && fab1UpgradeReady(cfg)
+	if fab1DebtShape && !fab1Ready && !restartOwed {
+		// #16842: fab1-debt epoch, fab1 still unaddressed, nothing owed —
+		// keep the working single-fabric epoch; do not churn it.
 		return
 	}
 	if newTransport == active && !restartOwed {
 		return
 	}
-	fab1Upgrade := newTransport == fab1Only && active.Fab1Debt
-	if newTransport != active && !fab1Upgrade {
-		slog.Info("cluster: transport config changed, restarting comms",
-			transportChangeLogArgs(active, newTransport)...)
-	} else if fab1Upgrade {
+	fab1Upgrade := fab1DebtShape && fab1Ready
+	if fab1Upgrade {
 		slog.Info("cluster: fab1 address now available, restarting comms to upgrade to dual fabric (#16842)",
+			transportChangeLogArgs(active, newTransport)...)
+	} else if newTransport != active && !fab1DebtShape {
+		slog.Info("cluster: transport config changed, restarting comms",
 			transportChangeLogArgs(active, newTransport)...)
 	} else {
 		slog.Info("cluster: restarting comms owed by a teardown that did not "+

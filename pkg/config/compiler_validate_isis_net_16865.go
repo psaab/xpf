@@ -46,6 +46,16 @@ func canonicalNET16865(s string) string {
 	return strings.ToLower(strings.ReplaceAll(s, ".", ""))
 }
 
+// CanonicalISISSystemID returns the six-octet IS-IS system ID from a
+// valid NET, ignoring its area and selector. An invalid NET returns "".
+func CanonicalISISSystemID(s string) string {
+	canonical := canonicalNET16865(s)
+	if canonical == "" || len(canonical) < 16 {
+		return ""
+	}
+	return canonical[len(canonical)-14 : len(canonical)-2]
+}
+
 // isoNETSource16865 is one authored ISO NET with its interface ref.
 type isoNETSource16865 struct {
 	value string // authored spelling

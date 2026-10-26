@@ -140,8 +140,8 @@ func TestIGPExportPolicyNamedDirect14369(t *testing.T) {
 }
 
 // Companion (#14369 spec): with a defined policy named `static`, the QNH
-// metric attachment must use the policy arm (policyMaps), not clobber the
-// policy route-map with the bare-protocol staticMap.
+// metric attachment must use its daemon-specific policy map, not clobber
+// it with the bare-protocol staticMap.
 func TestIGPExportPolicyNamedStaticQNHUsesPolicyMap14369(t *testing.T) {
 	m := New()
 	metrics := &qnhMetricScope11447{
@@ -152,8 +152,8 @@ func TestIGPExportPolicyNamedStaticQNHUsesPolicyMap14369(t *testing.T) {
 	if len(entries) != 1 || entries[0].proto != "static" {
 		t.Fatalf("policy named static entries = %+v, want one static entry", entries)
 	}
-	if entries[0].routeMap != "QNH-POLICY-MAP" {
-		t.Errorf("defined policy named static must use the QNH policy map, got %q", entries[0].routeMap)
+	if entries[0].routeMap != "QNH-POLICY-MAP-ospf" {
+		t.Errorf("defined policy named static must use the OSPF QNH policy map, got %q", entries[0].routeMap)
 	}
 	// Bare-token control: no defined policy keeps the staticMap behavior.
 	entries = m.redistributeEntries("static", nil, "ospf", metrics)
