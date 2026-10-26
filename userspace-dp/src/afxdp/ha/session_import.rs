@@ -2660,9 +2660,13 @@ impl crate::afxdp::ha::SessionDomain {
     /// Over-release-safe by construction: an `Untracked` release frees
     /// only a record with `holders == 0` (`drop_holder_locked` keeps any
     /// record a worker has adopted, to be freed by that worker's own
-    /// teardown). Each family is self-gated (SNAT on `rewrite_src`,
-    /// NAT64 on `nat.nat64`), so calling both mirrors the reserve twin
-    /// in `reserve_synced_translation`.
+    /// teardown). The persistent inbound reference is separate: release a
+    /// recorded hold only when its owner is `CoordinatorImported`. A
+    /// `LocalWorker` token is still released by the worker's teardown, so
+    /// its path must use the ordinary-reservation-only variant below.
+    /// Each family is self-gated (SNAT on `rewrite_src`, NAT64 on
+    /// `nat.nat64`), so calling both mirrors the reserve twin in
+    /// `reserve_synced_translation`.
     fn release_unadopted_import_reservation_untracked(
         &self,
         forwarding: &ForwardingState,
@@ -2673,15 +2677,40 @@ impl crate::afxdp::ha::SessionDomain {
             return false;
         }
         let now_ns = crate::afxdp::wg::counters::monotonic_now_ns();
-        let snat_freed = crate::nat::release_synced_source_nat_allocation_untracked_with_hold(
-            &forwarding.iface_nat_allocators,
-            &forwarding.source_nat_rules,
-            key,
-            entry.decision.nat,
-            entry.metadata.is_reverse,
-            now_ns,
-            entry.persistent_lease_hold,
-        );
+        let snat_freed = match entry.persistent_lease_hold {
+            Some(hold)
+                if hold.owner == crate::nat::PersistentLeaseOwner::CoordinatorImported =>
+            {
+                crate::nat::release_synced_source_nat_allocation_untracked_with_hold(
+                    &forwarding.iface_nat_allocators,
+                    &forwarding.source_nat_rules,
+                    key,
+                    entry.decision.nat,
+                    entry.metadata.is_reverse,
+                    now_ns,
+                    Some(hold),
+                )
+            }
+            Some(_) => {
+                crate::nat::release_synced_source_nat_allocation_untracked_preserving_persistent_hold(
+                    &forwarding.iface_nat_allocators,
+                    &forwarding.source_nat_rules,
+                    key,
+                    entry.decision.nat,
+                    entry.metadata.is_reverse,
+                    now_ns,
+                )
+            }
+            None => crate::nat::release_synced_source_nat_allocation_untracked_with_hold(
+                &forwarding.iface_nat_allocators,
+                &forwarding.source_nat_rules,
+                key,
+                entry.decision.nat,
+                entry.metadata.is_reverse,
+                now_ns,
+                None,
+            ),
+        };
         let nat64_freed = crate::nat64::release_synced_nat64_allocation_untracked_for_purge(
             &forwarding.nat64,
             key,
@@ -3631,6 +3660,15 @@ mod rejected_mirror_reservation_10790_tests {
 
     #[test]
     fn local_publication_demotion_and_peer_refresh_own_distinct_holds_17683() {
+        assert_local_publication_demotion_distinct_holds_17683(true);
+    }
+
+    #[test]
+    fn local_publication_demotion_delete_without_refresh_keeps_worker_hold_17683() {
+        assert_local_publication_demotion_distinct_holds_17683(false);
+    }
+
+    fn assert_local_publication_demotion_distinct_holds_17683(peer_refresh: bool) {
         let (coordinator, _commands) =
             worker_registered_coordinator(persistent_snat_forwarding(false));
         let now_ns = monotonic_nanos();
@@ -3751,27 +3789,35 @@ mod rejected_mirror_reservation_10790_tests {
             crate::nat::PersistentLeaseOwner::LocalWorker
         );
 
-        let mut peer_refresh = demoted;
-        peer_refresh.generation = 1;
-        peer_refresh.session_id = 17_685;
-        assert_eq!(
-            coordinator
-                .session_domain
-                .upsert_synced_session(peer_refresh),
-            SyncedImportOutcome::Applied
-        );
-        let imported = lock_shared_recover(&coordinator.session_domain.sessions.synced)
-            .get(&inbound_key)
-            .cloned()
-            .expect("peer refresh remains shared authority");
-        let coordinator_hold = imported
-            .persistent_lease_hold
-            .expect("coordinator acquired its independent reference");
-        assert_eq!(
-            coordinator_hold.owner,
-            crate::nat::PersistentLeaseOwner::CoordinatorImported
-        );
-        assert_eq!(inbound_flows(), Some(3));
+        if peer_refresh {
+            let mut peer_refresh = demoted;
+            peer_refresh.generation = 1;
+            peer_refresh.session_id = 17_685;
+            assert_eq!(
+                coordinator
+                    .session_domain
+                    .upsert_synced_session(peer_refresh),
+                SyncedImportOutcome::Applied
+            );
+            let imported = lock_shared_recover(&coordinator.session_domain.sessions.synced)
+                .get(&inbound_key)
+                .cloned()
+                .expect("peer refresh remains shared authority");
+            let coordinator_hold = imported
+                .persistent_lease_hold
+                .expect("coordinator acquired its independent reference");
+            assert_eq!(
+                coordinator_hold.owner,
+                crate::nat::PersistentLeaseOwner::CoordinatorImported
+            );
+            assert_eq!(inbound_flows(), Some(3));
+        } else {
+            assert_eq!(
+                inbound_flows(),
+                Some(2),
+                "without peer refresh only the worker and unrelated holds exist"
+            );
+        }
 
         coordinator
             .session_domain
@@ -3779,7 +3825,7 @@ mod rejected_mirror_reservation_10790_tests {
         assert_eq!(
             inbound_flows(),
             Some(2),
-            "coordinator delete releases only its independently acquired reference"
+            "coordinator delete must not consume the worker-owned hold"
         );
         assert_eq!(
             worker_sessions.persistent_lease_hold_for(&inbound_key),
