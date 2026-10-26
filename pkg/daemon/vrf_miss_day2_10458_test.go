@@ -119,14 +119,14 @@ func (f *day2StatefulTerm10458) flush(families ...int) {
 }
 
 // day2RuleList10458 exposes the terminator fake's current state through the
-// same shape as the production RuleList priority probe.
-func day2RuleList10458(term *day2StatefulTerm10458) func(int) ([]int, error) {
-	return func(family int) ([]int, error) {
+// same full-rule snapshot shape as the production RuleList probe.
+func day2RuleList10458(term *day2StatefulTerm10458) func(int) ([]netlink.Rule, error) {
+	return func(family int) ([]netlink.Rule, error) {
 		installed, _, _, _ := term.snapshot()
 		if installed[family] {
-			return []int{0, 1000, vrfMissTerminatorPriority16804, 32766}, nil
+			return ruleListAtPriorities18005(family, 0, 1000, vrfMissTerminatorPriority16804, 32766), nil
 		}
-		return []int{0, 1000, 32766}, nil
+		return ruleListAtPriorities18005(family, 0, 1000, 32766), nil
 	}
 }
 
@@ -168,7 +168,9 @@ func TestDay2TailRestoresAsyncDeleteWithNoDebt10458(t *testing.T) {
 		return nil
 	}
 	mgmtDNSRulesReconcileFn = func(*Daemon) error { dnsRuns++; return nil }
-	terminatorFlushRuleListFn = func(int) ([]int, error) { return []int{0, 1000, 32766}, nil }
+	terminatorFlushRuleListFn = func(family int) ([]netlink.Rule, error) {
+		return ruleListAtPriorities18005(family, 0, 1000, 32766), nil
+	}
 
 	// Post-success async delete with zero generic routing debt.
 	_ = term.RuleDel(&netlink.Rule{Family: unix.AF_INET, Priority: 2000})
@@ -283,7 +285,7 @@ func TestRoutingTickPendingRemovalDoesNotReinstall10458(t *testing.T) {
 	}
 	mgmtDNSRulesReconcileFn = func(*Daemon) error { calls++; return nil }
 	listCalls := 0
-	terminatorFlushRuleListFn = func(family int) ([]int, error) {
+	terminatorFlushRuleListFn = func(family int) ([]netlink.Rule, error) {
 		listCalls++
 		return day2RuleList10458(term)(family)
 	}
@@ -441,8 +443,8 @@ func TestDay2TailFailureLatchesRetryDebt10458(t *testing.T) {
 		return nil
 	}
 	mgmtDNSRulesReconcileFn = func(*Daemon) error { return nil }
-	terminatorFlushRuleListFn = func(int) ([]int, error) {
-		return []int{0, 1000, vrfMissTerminatorPriority16804, 32766}, nil
+	terminatorFlushRuleListFn = func(family int) ([]netlink.Rule, error) {
+		return ruleListAtPriorities18005(family, 0, 1000, vrfMissTerminatorPriority16804, 32766), nil
 	}
 
 	injected := errors.New("injected day-2 terminator failure")
@@ -492,7 +494,7 @@ func TestDay2TailSkipsBootstrap10458(t *testing.T) {
 		vrfMissTerminatorReconcileFn, mgmtVRFRouteReconcileFn = prevVRF, prevMgmt
 	})
 	probes, vrfRuns, policyRuns, leakRuns, dnsRuns, mgmtRuns := 0, 0, 0, 0, 0, 0
-	terminatorFlushRuleListFn = func(int) ([]int, error) { probes++; return nil, nil }
+	terminatorFlushRuleListFn = func(int) ([]netlink.Rule, error) { probes++; return nil, nil }
 	vrfMissTerminatorReconcileFn = func(*Daemon) error { vrfRuns++; return nil }
 	routingPolicyReconcileFn = func(*Daemon, *config.Config) error { policyRuns++; return nil }
 	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
@@ -530,7 +532,7 @@ func TestDay2TailRetriesDebtDuringBootstrap10458(t *testing.T) {
 		vrfMissTerminatorReconcileFn, mgmtVRFRouteReconcileFn = prevVRF, prevMgmt
 	})
 	probes, vrfRuns, policyRuns, leakRuns, dnsRuns, mgmtRuns := 0, 0, 0, 0, 0, 0
-	terminatorFlushRuleListFn = func(int) ([]int, error) { probes++; return nil, nil }
+	terminatorFlushRuleListFn = func(int) ([]netlink.Rule, error) { probes++; return nil, nil }
 	vrfMissTerminatorReconcileFn = func(*Daemon) error { vrfRuns++; return nil }
 	routingPolicyReconcileFn = func(*Daemon, *config.Config) error { policyRuns++; return nil }
 	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {

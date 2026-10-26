@@ -360,15 +360,16 @@ shipped drop-in `etc/systemd/networkd.conf.d/xpf.conf`
 `/usr/lib/systemd/networkd.conf.d` and copied into baked images)
 disables that cleanup (#16804). As a belt on hosts without the drop-in,
 the daemon re-runs the mgmt-DNS steering reconcile after networkd
-activation on every apply. On eligible 30 s recovery ticks, the #9693
-owner reads the pref-2000 terminator canary before attempting to restore
-it; a desired-but-missing terminator, or a failed eligible read, triggers
-the full policy-band, route-leak and mgmt-DNS recovery. The terminator
-write still precedes those band and DNS writes. This no-commit canary
-fallback applies only when the daemon desires or retains a VRF miss
-terminator. Configurations with neither a desired VRF nor a managed
-management interface can have policy rules without this canary; the
-separate rule-flush recovery gap is tracked in #18005.
+activation on every apply. On eligible 30 s recovery ticks, the #9693 owner
+compares family/priority counts for desired next-table, rib-group (including
+return), PBR, and filtered lease-derived management-DNS rules against live
+RuleList readback. It separately checks the pref-2000 terminator only when
+the daemon owns it. A missing desired count, owned canary, or eligible
+inventory/RuleList read error triggers policy-band, route-leak and mgmt-DNS
+recovery; terminator repair still precedes those writes. If there are no
+desired rule bands and no owned terminator, the tick does not probe or
+install a canary. The priority-only inventory can be masked by a foreign
+rule at the same family and priority and does not validate DSCP/action fields.
 
 - `50–99`: RPM probe next-hop pins (`fwmark <mark> lookup <table>`,
   #1827). Constants live in `pkg/config` (`ProbeRulePriorityBase`,
