@@ -29,7 +29,7 @@ const localConfigSessionID = "local-cli"
 // flips it. Routing on that flag alone let a read-only console user ride
 // another holder's session into full PermConfig mutation.
 func (c *CLI) configModeEntryAllowed() bool {
-	return c.configOwned || c.UserClass() == ""
+	return c.configOwnedNow() || c.UserClass() == ""
 }
 
 // checkConfigModePerm enforces the coarse PermConfig price of entering
@@ -420,7 +420,7 @@ func (c *CLI) dispatchOperational(line string) error {
 			if err := c.store.EnterConfigureExclusive(localConfigSessionID); err != nil {
 				return err
 			}
-			c.configOwned = true
+			c.setConfigOwned(true)
 			if c.rl != nil {
 				c.rl.SetPrompt(c.configPrompt())
 			}
@@ -430,7 +430,7 @@ func (c *CLI) dispatchOperational(line string) error {
 			if err := c.store.EnterConfigureSession(localConfigSessionID); err != nil {
 				return err
 			}
-			c.configOwned = true
+			c.setConfigOwned(true)
 			if c.rl != nil {
 				c.rl.SetPrompt(c.configPrompt())
 			}
@@ -481,7 +481,7 @@ func (c *CLI) dispatchConfig(line string) error {
 		}
 	}
 	sessionID := ""
-	if c.configOwned {
+	if c.configOwnedNow() {
 		sessionID = localConfigSessionID
 	}
 	// Before the switch, so one gate covers every mutating verb rather than
@@ -685,7 +685,7 @@ func (c *CLI) exitConfigureTop() error {
 		fmt.Println("warning: uncommitted changes will be discarded")
 	}
 	c.store.ExitConfigure()
-	c.configOwned = false
+	c.setConfigOwned(false)
 	if c.rl != nil {
 		c.rl.SetPrompt(c.operationalPrompt())
 	}

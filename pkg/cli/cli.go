@@ -151,7 +151,11 @@ type CLI struct {
 	// localConfigSessionID (#14986). dispatch must not infer ownership
 	// from the store-global InConfigMode flag, which any other surface's
 	// session flips.
-	configOwned bool
+	// Guarded by configOwnedMu because Run's signal goroutine invokes
+	// releaseLocalConfigureOnInterrupt concurrently with dispatch/EOF
+	// updates (#17838). All access must use the accessors below.
+	configOwned   bool
+	configOwnedMu sync.Mutex
 	// pendingPipeSuffix carries the output-pipe suffix that cliterm.SplitPipe
 	// removed, so the #7172 command gate can match the command as the operator
 	// typed it. Junos counts the pipe as part of the command, and a gate that
@@ -482,6 +486,20 @@ func (c *CLI) SetVersion(v string) {
 	c.version = v
 }
 
+// configOwnedNow reports whether this CLI session owns configuration mode.
+func (c *CLI) configOwnedNow() bool {
+	c.configOwnedMu.Lock()
+	defer c.configOwnedMu.Unlock()
+	return c.configOwned
+}
+
+// setConfigOwned records this CLI session's configuration ownership.
+func (c *CLI) setConfigOwned(owned bool) {
+	c.configOwnedMu.Lock()
+	defer c.configOwnedMu.Unlock()
+	c.configOwned = owned
+}
+
 // UserClass returns the current RBAC login class. It is the only
 // sanctioned read of userClass (#16071): the daemon may re-resolve
 // the class on config apply while the console dispatches commands.
@@ -560,6 +578,70 @@ func (c *CLI) SetFactoryResetFn(fn func(ctx context.Context, wipe func() error) 
 func (c *CLI) SetFabricPeer(addrFn func() []string, vrfDeviceFn func() string) {
 	c.fabricPeerAddrFn = addrFn
 	c.fabricVRFDeviceFn = vrfDeviceFn
+}
+
+// nextLine returns the next console input line. It prefers the readLineFn
+// test seam (via c.readLine) when one is installed and otherwise reads from
+// the live readline instance, so Run's loop is drivable in tests without a
+// TTY while production behaviour is unchanged.
+func (c *CLI) nextLine() (string, error) {
+	if c.readLineFn != nil {
+		return c.readLine()
+	}
+	return c.rl.Readline()
+}
+
+// runOneLine executes one iteration of Run's read/dispatch loop and reports
+// whether the console should exit (done). It is the exact per-iteration body
+// Run executes — including the io.EOF arm — extracted so tests can drive it
+// through the readLineFn seam (Run itself constructs its own readline on
+// os.Stdin and cannot be entered in a test).
+func (c *CLI) runOneLine() (done bool, err error) {
+	if c.store.IsConfirmPending() {
+		fmt.Println("[commit confirmed pending - issue 'commit' to confirm]")
+		if alarm := c.store.ConfirmAlarm(); alarm != "" {
+			fmt.Println("[ALARM: " + alarm + "]")
+		}
+	}
+	line, err := c.nextLine()
+	if err != nil {
+		if err == readline.ErrInterrupt {
+			return false, nil
+		}
+		if err == io.EOF {
+			// Ctrl-D: exit own config mode, or exit CLI if
+			// already in operational mode (or config mode is
+			// a foreign holder's — #16793).
+			if c.handleConsoleEOF() {
+				return false, nil
+			}
+			return true, nil
+		}
+		return false, err
+	}
+
+	var editPath []string
+	if c.store != nil {
+		editPath = c.store.GetEditPath()
+	}
+	if recErr := cliterm.RecordHistoryLineAt(editPath, c.historyFile, line); recErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: record history: %v\n", recErr)
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false, nil
+	}
+
+	if err := c.dispatch(line); err != nil {
+		if err == errExit {
+			return true, nil
+		}
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	}
+	// Refresh prompt after every command so cluster role
+	// changes (failover) are reflected immediately.
+	c.refreshPrompt()
+	return false, nil
 }
 
 // Run starts the interactive CLI loop.
@@ -678,12 +760,49 @@ func (c *CLI) Run() error {
 	// Double Ctrl-C within 2s exits the CLI.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
-	defer signal.Stop(sigCh)
 
 	exitCh := make(chan struct{})
-	go func() {
-		var lastInterrupt time.Time
-		for range sigCh {
+	runDone := make(chan struct{})
+	defer func() {
+		signal.Stop(sigCh)
+		close(runDone)
+	}()
+	go c.handleConsoleInterrupts(sigCh, exitCh, runDone)
+
+	for {
+		select {
+		case <-exitCh:
+			return nil
+		default:
+		}
+		done, err := c.runOneLine()
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+	}
+	// The read loop above never falls through — every exit is a `return`
+	// (exitCh, io.EOF at operational level, Readline error, or errExit from
+	// dispatch). A trailing `return nil` here was unreachable and tripped
+	// `go vet` (codex-182 A10-b00-C02); Go accepts the infinite `for {}` as
+	// the function's terminating statement, so no return is needed.
+}
+
+// handleConsoleInterrupts is Run's SIGINT arm. Keeping the signal loop in a
+// method lets tests inject a signal channel without sending process-wide
+// signals; Run calls this exact method for its double-Ctrl-C path.
+func (c *CLI) handleConsoleInterrupts(sigCh <-chan os.Signal, exitCh chan struct{}, runDone <-chan struct{}) {
+	var lastInterrupt time.Time
+	for {
+		select {
+		case <-runDone:
+			return
+		case _, ok := <-sigCh:
+			if !ok {
+				return
+			}
 			// If a commit or an external command is running, cancel
 			// it. commitCancel takes priority because a commit
 			// hanging on the apply semaphore is the only path that
@@ -709,78 +828,19 @@ func (c *CLI) Run() error {
 			}
 			lastInterrupt = now
 		}
-	}()
-
-	for {
-		select {
-		case <-exitCh:
-			return nil
-		default:
-		}
-		if c.store.IsConfirmPending() {
-			fmt.Println("[commit confirmed pending - issue 'commit' to confirm]")
-			if alarm := c.store.ConfirmAlarm(); alarm != "" {
-				fmt.Println("[ALARM: " + alarm + "]")
-			}
-		}
-		line, err := c.rl.Readline()
-		if err != nil {
-			if err == readline.ErrInterrupt {
-				continue
-			}
-			if err == io.EOF {
-				// Ctrl-D: exit own config mode, or exit CLI if
-				// already in operational mode (or config mode is
-				// a foreign holder's — #16793).
-				if c.releaseLocalConfigureOnEOF() {
-					continue
-				}
-				return nil
-			}
-			return err
-		}
-
-		var editPath []string
-		if c.store != nil {
-			editPath = c.store.GetEditPath()
-		}
-		if recErr := cliterm.RecordHistoryLineAt(editPath, c.historyFile, line); recErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: record history: %v\n", recErr)
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		if err := c.dispatch(line); err != nil {
-			if err == errExit {
-				return nil
-			}
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		}
-		// Refresh prompt after every command so cluster role
-		// changes (failover) are reflected immediately.
-		c.refreshPrompt()
 	}
-	// The read loop above never falls through — every exit is a `return`
-	// (exitCh, io.EOF at operational level, Readline error, or errExit from
-	// dispatch). A trailing `return nil` here was unreachable and tripped
-	// `go vet` (codex-182 A10-b00-C02); Go accepts the infinite `for {}` as
-	// the function's terminating statement, so no return is needed.
 }
 
-// releaseLocalConfigureOnEOF handles Ctrl-D (io.EOF from readline) for
+// handleConsoleEOF handles Ctrl-D (io.EOF from readline) for
 // the in-process console (#16793): it exits configuration mode only
-// when THIS session acquired the lock itself (configOwned) and then
-// only via the session-scoped release, so a foreign holder's candidate
-// and lock survive. It reports whether it stayed in the loop (true)
-// or the console should exit (false). A foreign-held global config
-// mode is NOT this session's to leave: EOF is an operational-mode
-// exit there, matching acceptance (holder grpc-peer-1 stays locked).
-func (c *CLI) releaseLocalConfigureOnEOF() bool {
-	if c.configOwned {
+// when THIS session acquired the lock itself and then only via the
+// session-scoped release, so a foreign holder's candidate and lock survive.
+// It reports whether it stayed in the loop (true) or the console should
+// exit (false).
+func (c *CLI) handleConsoleEOF() bool {
+	if c.configOwnedNow() {
 		if c.store.ExitConfigureSession(localConfigSessionID) {
-			c.configOwned = false
+			c.setConfigOwned(false)
 			if c.rl != nil {
 				c.rl.SetPrompt(c.operationalPrompt())
 			}
@@ -789,7 +849,7 @@ func (c *CLI) releaseLocalConfigureOnEOF() bool {
 		}
 		// Stale flag: this session no longer holds the lock (reclaimed
 		// or force-cleared). Clear it and fall through to exit.
-		c.configOwned = false
+		c.setConfigOwned(false)
 	}
 	return false
 }
@@ -799,9 +859,9 @@ func (c *CLI) releaseLocalConfigureOnEOF() bool {
 // foreign holder's candidate and lock MUST survive; the console is
 // ending anyway, which is the strictly stronger action.
 func (c *CLI) releaseLocalConfigureOnInterrupt() {
-	if c.configOwned {
+	if c.configOwnedNow() {
 		c.store.ExitConfigureSession(localConfigSessionID)
-		c.configOwned = false
+		c.setConfigOwned(false)
 	}
 }
 
