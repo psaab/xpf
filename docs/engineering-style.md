@@ -278,11 +278,12 @@ the mechanics, so this section is sequencing only.
    plan-mode scratch file: goal, approach, alternatives rejected, files
    touched, test strategy. No code yet.
 
-3. **Hostile plan review with Codex (`gpt-5.5`).** Spawn via the
-   `codex-rescue` agent; brief it to *critique*, not validate.
-   **Terminal artifact:** Codex returns `PLAN YES` (or equivalent) AND
+3. **Hostile plan review with a declared-pool reviewer.** Dispatch
+   via the internal `task` tool (any pool model other than the
+   planner's); brief it to *critique*, not validate.
+   **Terminal artifact:** the reviewer returns `PLAN YES` (or equivalent) AND
    every raised concern has a written disposition in the plan doc
-   (applied, or rejected with reason). If Codex pushes back twice on
+   (applied, or rejected with reason). If the reviewer pushes back twice on
    the same point, assume it's right until you can show otherwise —
    "Codex stopped objecting" is not agreement. If you and Codex are
    stuck, stop and ask the user.
