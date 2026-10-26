@@ -1809,22 +1809,29 @@ step. Both are required — neither sees the other's case:
   in their #16788 translation) strip each value;
   `communityListCollision` (wired into `ApplyFull`) fails the apply
   closed when two operator names normalize to one FRR name or an
-  operator name forges a backing. Caveat: regex members using
-  backreferences interact with sequencing. The #16788 sequencer
-  shares the single separator between adjacent factors (the
-  #16835 adjacent-literal row); one community satisfying two
-  regex members (the #16835 shared-token row) is evaluated by the
-  #16835 chain (`community_chain_16835.go`): one generated
-  single-factor list per distinct member
-  (`<frrName>-xpf-com-<digest>`), emitted for every rendered
-  multi-member expanded definition and chained with `on-match
-  next`, so each member is matched against the route's communities
-  independently — exactly Junos' per-member evaluation. The public
-  list keeps its permutation render unchanged; chain lists are
-  never a `then community delete` target, and
-  `communityListCollision` refuses an apply where a chain list
-  would fuse with an operator list, a delete backing, or another
-  definition's chain list.
+  operator name forges a backing. Caveat: regex members using backreferences
+  interact with sequencing. The #16788 sequencer shares the single separator
+  (the #16835 adjacent-literal row); one community satisfying two regex
+  members (the #16835 shared-token row) is evaluated by the #16835 chain
+  (`community_chain_16835.go`): one generated single-factor list per
+  distinct member (`<frrName>-xpf-com-<digest>`) is emitted for every
+  rendered multi-member expanded definition and chained with
+  `on-match goto`, so each member is matched against the route's
+  communities independently — exactly Junos' per-member evaluation. The
+  chain gates community-only terms and mixed terms with one distinct
+  community alternative before their normal sibling-match variants
+  (route-filter, prefix-list, as-path, protocol), preserving the AND.
+  The public list keeps its permutation render unchanged; chain lists
+  are never a `then community delete` target, and `communityListCollision`
+  refuses an apply where a chain list would fuse with an operator list, a
+  delete backing, or another definition's chain list. Mixed terms with
+  multiple distinct community alternatives retain the historical render.
+  Orphan community alternatives remain ORs: a failed chain advances to
+  the next alternative, and only the final miss skips the term. A matched
+  non-terminating mixed-term variant jumps past the remaining sibling
+  variants after running its actions, so overlapping alternatives do not
+  repeat a modification. Sequence accounting counts a chain-lowered
+  community dimension once, even when the same community name is repeated.
 - **Community member regexes match per community (#16788, R3-A11-05).**
   Junos evaluates each member against each community on the route,
   but FRR matches an expanded list against the whole space-joined
@@ -1841,15 +1848,19 @@ step. Both are required — neither sees the other's case:
   whole-definition at render, so referencing terms fail closed
   (#10822). Unanchored edges keep Junos substring meaning inside
   one token.
-- **No other rendered line may contain `| ` (#16776).** Beyond the
-  community patterns above (now pipe-free via #16788), a neighbor
-  description carrying `| ` would be refused by FRR's vty pipe hook
-  (`% Unknown action`, `frr-reload.py` still exiting 0) and silently
-  never install. It is rejected at commit
-  (`validateBGPNeighborDescriptionPipeStrict16776`) and omitted at
-  render on tolerant paths; `rewriteFRRPipeSequences` in
-  `render_validate.go` remains the shared pipe belt for rest-of-line
-  operands.
+- **FRR vty pipe safety (#16776, #16788).** Community regexes are
+  translated pipe-free or omitted as a whole definition for the
+  forms the translator validates; negated bracket classes it does
+  not validate (for example `[^| ]`) can still render a literal
+  `| ` and are a known gap (tracked in #17977). Reject references
+  to omitted definitions are lowered fail-closed (#10822); the
+  negated-bracket gap is not covered by that lowering. Neighbor descriptions
+  carrying `| ` are rejected at commit and omitted on tolerant render
+  paths. Junos AS-path regexes are translated before rendering, so
+  grouping whitespace around alternation (for example `65000 | 65001`)
+  is removed by the translator. These paths do not rely on a shared
+  post-render pipe-rewrite helper; the former unused
+  `rewriteFRRPipeSequences` helper was removed (#17799).
 - **Policy community references are validated at commit (#2881).** A
   policy-statement term's `from community <name>` renders `match community
   <name>` and `then community delete <name>` (the strip-by-list operation

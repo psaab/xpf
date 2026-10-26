@@ -236,7 +236,7 @@ func wipeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 	// unless the final component is a link (refuse, leave the link).
 	for _, leg := range []struct{ what, path string }{
 		{"swanctl snippet", swanctlSnippet},
-		{"legacy swanctl snippet", legacySwanctlSnippetPath()},
+		{"legacy swanctl snippet", legacySwanctlSnippetPath(swanctlSnippet)},
 		{"kea4 config", kea4},
 		{"kea6 config", kea6},
 	} {
@@ -1308,15 +1308,8 @@ func readProvisionedMarkerUID(path string) (int, error) {
 var (
 	wipeFRRConf        = frr.DefaultFRRConf
 	wipeSwanctlSnippet = filepath.Join(ipsec.DefaultSwanctlDir, ipsec.BPFRXConfFile)
-	// wipeLegacySwanctlSnippet is the pre-rename conf.d/bpfrx.conf (#16852).
-	// Derived from wipeSwanctlSnippet's directory so the test seams that
-	// relocate wipeSwanctlSnippet relocate the legacy leg with it (every
-	// existing seam assigns wipeSwanctlSnippet under a throwaway tree, so
-	// the legacy file lands beside it — never the real /etc path). The
-	// production default equals
-	// filepath.Join(ipsec.DefaultSwanctlDir, ipsec.LegacyBPFRXConfFile).
-	wipeKea4Conf = dhcpserver.DefaultKea4ConfPath
-	wipeKea6Conf = dhcpserver.DefaultKea6ConfPath
+	wipeKea4Conf       = dhcpserver.DefaultKea4ConfPath
+	wipeKea6Conf       = dhcpserver.DefaultKea6ConfPath
 	// Non-secret best-effort legs — also package vars so the full-wipe primitive
 	// is fully hermetic under test (never touches the real /sys/fs/bpf or
 	// /etc/systemd/network). Production behavior unchanged.
@@ -1324,10 +1317,11 @@ var (
 	wipeNetworkdDir = "/etc/systemd/network"
 )
 
-// legacySwanctlSnippetPath resolves the legacy leg from the CURRENT
-// wipeSwanctlSnippet seam value (see wipeLegacySwanctlSnippet above).
-func legacySwanctlSnippetPath() string {
-	return filepath.Join(filepath.Dir(wipeSwanctlSnippet), ipsec.LegacyBPFRXConfFile)
+// legacySwanctlSnippetPath resolves the legacy leg from the supplied swanctl
+// snippet path. Keeping the derivation argument-scoped ensures callers using
+// a temporary tree never fall back to the production /etc path.
+func legacySwanctlSnippetPath(swanctlSnippet string) string {
+	return filepath.Join(filepath.Dir(swanctlSnippet), ipsec.LegacyBPFRXConfFile)
 }
 
 // wipePendingRecord persists the pre-wipe inputs in both the configured

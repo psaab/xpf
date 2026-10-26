@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -169,11 +170,12 @@ func buildIngressFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) fu
 //
 // The (parent, VLAN) pair is derived from the config, keyed by the
 // logical ifindex each shape carries, mirroring how the snapshot builder
-// assigns it: a unit with a VLAN child netdev keys on that child's kernel
-// ifindex (its Linux name is `<parent>.<vid>`); a bondless RETH VLAN unit
-// keys on the synthetic ifindex `syntheticLogicalIfindex(<reth>.<unit>,
-// vid)`; anything else (an untagged unit, a plain interface) keys on its
-// own ifindex and folds with vlan 0 exactly as before. An ifindex no
+// assigns it: a unit whose resolved Linux netdev exists (a secure-tunnel
+// binding, TunnelNameMap entry, or VLAN child) keys on that netdev's kernel
+// ifindex; a parent-bound RETH VLAN unit with no resolved child device keys
+// on the synthetic ifindex allocated from the same sorted shared used-set as
+// the snapshot builder; anything else (an untagged unit, a plain interface)
+// keys on its own ifindex and folds with vlan 0 as before. An ifindex no
 // derivation names folds to 0 — the unknown sentinel — so the peer keeps
 // the #15176 no-scope keep rather than judging against a guessed parent
 // scope. Captured once per apply (and rebuilt on the link refresh),
@@ -216,27 +218,63 @@ func buildNatScopeFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) f
 			byIfindex[int32(ifc.Index)] = parentVLAN{uint32(ifc.Index), 0}
 		}
 	}
-	for name, iface := range cfg.Interfaces.Interfaces {
+	usedSyntheticIfindexes := make(map[int]struct{})
+	// snapshotLinuxName queries this mapping for each unit; build it once for
+	// this closure rather than allocating a full map in the loop.
+	tunnelNames := cfg.TunnelNameMap()
+	names := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for name := range cfg.Interfaces.Interfaces {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		iface := cfg.Interfaces.Interfaces[name]
 		if iface == nil {
 			continue
 		}
-		for _, unit := range iface.Units {
+		unitNums := make([]int, 0, len(iface.Units))
+		for unitNum := range iface.Units {
+			unitNums = append(unitNums, unitNum)
+		}
+		sort.Ints(unitNums)
+		for _, unitNum := range unitNums {
+			unit := iface.Units[unitNum]
 			if unit == nil || unit.VlanID <= 0 {
 				continue
 			}
-			unitName := name + "." + strconv.Itoa(unit.Number)
 			parentName := cfg.ResolveReth(name)
 			parentLinux := config.LinuxIfName(parentName)
 			parentIdx, ok := indexByLinuxName[parentLinux]
 			if !ok || parentIdx == 0 {
 				continue
 			}
+			// Resolve the unit's kernel netdev exactly as the snapshot
+			// builder does (snapshotLinuxName): a secure-tunnel binding
+			// wins, then a tunnel-device mapping, then the VLAN child
+			// `<parent>.<vid>`. Probing only the VLAN child would mint a
+			// phantom synthetic index for a tunnel-resident unit the
+			// builder emitted at the tunnel device's ifindex.
+			unitRef := name + "." + strconv.Itoa(unit.Number)
 			childLinux := parentLinux + "." + strconv.Itoa(unit.VlanID)
-			if childIdx, ok := indexByLinuxName[childLinux]; ok && childIdx != 0 {
+			if dev, ok := cfg.SecureTunnelUnitNetdev(unitRef); ok {
+				childLinux = dev
+			} else if dev, ok := tunnelNames[unitRef]; ok && dev != "" {
+				childLinux = dev
+			}
+			childIdx, hasChild := indexByLinuxName[childLinux]
+			if hasChild && childIdx != 0 {
 				byIfindex[int32(childIdx)] = parentVLAN{parentIdx, uint16(unit.VlanID)}
 			}
-			if strings.HasPrefix(name, "reth") {
-				if syn := dpuserspace.SyntheticLogicalIfindexForUnit(unitName, unit.VlanID); syn > 0 {
+			if strings.HasPrefix(name, "reth") &&
+				parentLinux != config.LinuxIfName(name) &&
+				!hasChild {
+				// Match buildInterfaceSnapshots' sorted interface/unit order
+				// and mint only when it would emit a logical-only row
+				// (parent present, VLAN child absent). The shared set matters:
+				// independently probing each unit loses the builder's
+				// collision displacement and can name another unit's NAT scope.
+				unitName := name + "." + strconv.Itoa(unitNum)
+				if syn := dpuserspace.SyntheticLogicalIfindexForUnit(unitName, unit.VlanID, usedSyntheticIfindexes); syn > 0 {
 					byIfindex[int32(syn)] = parentVLAN{parentIdx, uint16(unit.VlanID)}
 				}
 			}

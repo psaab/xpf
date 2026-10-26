@@ -245,4 +245,20 @@ func TestReconcileFab1DebtOnlyFiresWhenReady16842(t *testing.T) {
 			t.Fatalf("reconcile restarted %d times after fab1 removal, want 1 (config change)", *starts)
 		}
 	})
+	t.Run("unaddressed restart owed", func(t *testing.T) {
+		d, starts := newDaemon(t, fab1ChurnCfg16842("lo", "xpf-nonexistent-16842", ""))
+		cfg := d.store.ActiveConfig()
+		d.markClusterCommsRestartNeeded()
+		d.reconcileClusterTransportBinding(cfg, d.takeClusterCommsRestartNeeded())
+		if *starts != 1 {
+			t.Fatalf("owed restart recovered comms %d times while fab1 unaddressed, want 1 (#17871)", *starts)
+		}
+		if d.activeTransport().Fab1Debt {
+			t.Fatal("recovery left Fab1Debt set on the replacement epoch")
+		}
+		d.reconcileClusterTransportBinding(cfg, d.takeClusterCommsRestartNeeded())
+		if *starts != 1 {
+			t.Fatalf("unowed follow-up restarted comms %d times, want no additional restart (#16842/#17871)", *starts)
+		}
+	})
 }

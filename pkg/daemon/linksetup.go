@@ -1207,6 +1207,17 @@ UseRoutes=yes`
 	return true, nil
 }
 
+// renamedInterfaceDownError marks an error returned after the interface name
+// changed successfully but the link could not be brought back up. Callers
+// must preserve the new identity even though the operation is not complete.
+type renamedInterfaceDownError struct {
+	err error
+}
+
+func (e *renamedInterfaceDownError) Error() string { return e.err.Error() }
+
+func (e *renamedInterfaceDownError) Unwrap() error { return e.err }
+
 // renameInterface brings the interface down, renames it, and brings it back up.
 //
 // Failure recovery is asymmetric by design:
@@ -1261,12 +1272,12 @@ func renameInterface(oldName, newName string) error {
 		// collisions the device-map collision-break path relies on having
 		// broken.
 		if retryErr := nlLinkSetUp(link); retryErr != nil {
-			return fmt.Errorf(
+			return &renamedInterfaceDownError{err: fmt.Errorf(
 				"renamed %s -> %s but could not bring it up; interface is "+
 					"correctly named but DOWN — if it is managed the next "+
 					"config reconcile will bring it up, otherwise run "+
 					"`ip link set %s up`: %w",
-				oldName, newName, newName, retryErr)
+				oldName, newName, newName, retryErr)}
 		}
 	}
 
