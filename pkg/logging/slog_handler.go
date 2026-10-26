@@ -122,6 +122,11 @@ func (h *SyslogSlogHandler) SetClients(clients []*SyslogClient) {
 	s.mu.Lock()
 	old := s.clients
 	s.clients = append([]*SyslogClient(nil), clients...)
+	for _, c := range clients {
+		// A reinstalled client is read live again: drop its folded
+		// retired contribution (#17855).
+		s.retired.forgetClient(c)
+	}
 	// Fold retired clients BEFORE Close (#16769): Close stops the event
 	// writer, whose discarded queue is counted into DroppedWrites.
 	if len(old) > 0 {
@@ -157,6 +162,11 @@ func (h *SyslogSlogHandler) SetClientsPreserving(clients []*SyslogClient) {
 	s.mu.Lock()
 	old := s.clients
 	s.clients = append([]*SyslogClient(nil), clients...)
+	for _, c := range clients {
+		// A reinstalled client is read live again: drop its folded
+		// retired contribution (#17855).
+		s.retired.forgetClient(c)
+	}
 	// Fold superseded clients BEFORE Close (#16769), as in SetClients.
 	for _, c := range old {
 		if !next[c] {

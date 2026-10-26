@@ -62,6 +62,11 @@ func syslogDropsFromClient(sink string, c *SyslogClient) SyslogDropStat {
 // require the caller to hold the owning mutex; the zero value is ready.
 type syslogDropAccumulator struct {
 	byKey map[syslogDropKey]*SyslogDropStat
+	// foldedByClient tracks each retired client's folded contribution so
+	// a (hypothetical) reinstall of the same pointer can subtract it:
+	// its counters would otherwise be read live AND sit in byKey
+	// (#17855 reinstall double-count). Keyed by client pointer.
+	foldedByClient map[*SyslogClient]SyslogDropStat
 }
 
 // retire folds a client that is about to be closed/replaced into the
@@ -76,7 +81,41 @@ func (a *syslogDropAccumulator) retire(sink string, c *SyslogClient) {
 	if st.Writes == 0 && st.Dials == 0 && st.Cooldown == 0 {
 		return
 	}
+	a.foldFor(c, st)
+}
+
+func (a *syslogDropAccumulator) foldFor(c *SyslogClient, st SyslogDropStat) {
 	a.fold(st)
+	if a.foldedByClient == nil {
+		a.foldedByClient = make(map[*SyslogClient]SyslogDropStat)
+	}
+	cur := a.foldedByClient[c]
+	cur.Sink, cur.RemoteAddr, cur.Protocol = st.Sink, st.RemoteAddr, st.Protocol
+	cur.Writes += st.Writes
+	cur.Dials += st.Dials
+	cur.Cooldown += st.Cooldown
+	a.foldedByClient[c] = cur
+}
+
+// forgetClient subtracts a reinstalled client's folded contribution:
+// the client is live again, so its counters are read from the client
+// itself and must not also remain in the retired totals. No-op when
+// nothing was folded for it. Owners call it when (re)installing.
+func (a *syslogDropAccumulator) forgetClient(c *SyslogClient) {
+	st, ok := a.foldedByClient[c]
+	if !ok {
+		return
+	}
+	k := syslogDropKey{sink: st.Sink, addr: st.RemoteAddr, protocol: st.Protocol}
+	if cur, ok := a.byKey[k]; ok {
+		cur.Writes -= st.Writes
+		cur.Dials -= st.Dials
+		cur.Cooldown -= st.Cooldown
+		if cur.Writes == 0 && cur.Dials == 0 && cur.Cooldown == 0 {
+			delete(a.byKey, k)
+		}
+	}
+	delete(a.foldedByClient, c)
 }
 
 func (a *syslogDropAccumulator) fold(st SyslogDropStat) {
@@ -111,9 +150,15 @@ func (p *retiredPending) record(sink string, c *SyslogClient) {
 	(*p)[c] = syslogDropsFromClient(sink, c)
 }
 
+// recordForget drops c's pending entry: a reinstalled client is live,
+// so nothing about it is retired anymore.
+func (p *retiredPending) recordForget(c *SyslogClient) {
+	delete(*p, c)
+}
+
 // foldInto folds each pending client's post-retire counter growth (its
 // Close discards) into acc. A client's pending entry is cleared only
-// once the client is CLOSED: Close counts its queue discards
+// once its counters are FINAL (Close completed drain+join): Close counts its queue discards
 // synchronously (writer.stop) before returning, so a closed client's
 // counters are final. A still-open client (retired but not yet closed
 // by its owner, or being drained) folds what it has counted so far and
@@ -138,9 +183,9 @@ func (p *retiredPending) foldInto(acc *syslogDropAccumulator) {
 			Cooldown:   sub(now.Cooldown, snap.Cooldown),
 		}
 		if delta.Writes != 0 || delta.Dials != 0 || delta.Cooldown != 0 {
-			acc.fold(delta)
+			acc.foldFor(c, delta)
 		}
-		if c.IsClosed() {
+		if c.CountsFinal() {
 			delete(*p, c)
 		} else {
 			// Not final yet: advance the snapshot so the remainder is

@@ -183,6 +183,7 @@ type SyslogClient struct {
 	// operation that can race Close. The separate connMu lets Close detach and
 	// close a socket without waiting for s.mu, which an in-flight Write holds.
 	closed atomic.Bool
+	countsFinal atomic.Bool // #17855: set by Close after drain+join
 }
 
 // syslogHostnameFn resolves the current device hostname. It is a seam so
@@ -2153,15 +2154,19 @@ func (s *SyslogClient) CloseTimeout(timeout time.Duration) error {
 	if timeout > 0 {
 		if writer := s.eventWriter.Load(); writer != nil {
 			writer.drainAndStop(timeout)
+			// drainAndStop delivered/discarded the queue: counts are
+			// final even before Close's own stop runs (#17855).
+			s.countsFinal.Store(true)
 		}
 	}
 	return s.Close()
 }
 
-// IsClosed reports whether Close has marked this client closed. Close
-// counts the writer-queue discards synchronously before returning, so
-// a closed client's drop counters are final (#17855).
-func (s *SyslogClient) IsClosed() bool { return s.closed.Load() }
+// CountsFinal reports whether this client's drop counters are final:
+// Close has marked it closed AND the writer stop (which counts the
+// queued discards) plus the bounded send-join have completed. IsClosed
+// alone does NOT imply final — Close stores the flag BEFORE counting.
+func (s *SyslogClient) CountsFinal() bool { return s.countsFinal.Load() }
 
 // ShutdownDrained reports whether this client's writer goroutine has
 // exited (observability/test seam for the daemon shutdown lifecycle).
@@ -2201,5 +2206,9 @@ func (s *SyslogClient) Close() error {
 	// Real sockets unblock the in-flight Write promptly. Keep the join bounded
 	// for custom connections whose Close does not interrupt Write.
 	s.joinSendBounded()
+	// Discards are fully counted at this point (writer stopped above,
+	// in-flight sends joined): mark counters final for the retired-
+	// pending fold (#17855). drainAndStop also completes the count.
+	s.countsFinal.Store(true)
 	return err
 }

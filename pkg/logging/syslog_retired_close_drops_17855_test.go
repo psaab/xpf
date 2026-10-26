@@ -199,19 +199,30 @@ func TestSetSyslogClientsInterposedStatsStillCountsOnce17855(t *testing.T) {
 // #17855 fold (rev): re-installing a retired-then-closed client must
 // not resurrect its already-folded counters — no double count.
 func TestReinstalledRetiredClientDoesNotDoubleCount17855(t *testing.T) {
-	client := NewSyslogClientWithConn(newStalledSyslogEventConn11697(), "tcp")
+	conn := newStalledSyslogEventConn11697()
+	client := NewSyslogClientWithConn(conn, "tcp")
 	er := NewEventReader(nil, nil)
 	er.SetSyslogClients([]*SyslogClient{client})
+
+	const backlog = 8
+	queueBacklog17855(t, client, conn, backlog)
 	er.ReplaceSyslogClients(nil)
 	if err := client.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// Simulate a caller reinstalling the same (closed) client object.
-	er.SetSyslogClients([]*SyslogClient{client})
+	if got := client.DroppedWrites(); got != backlog {
+		t.Fatalf("DroppedWrites = %d, want %d", got, backlog)
+	}
+	// Fold the retired totals, then reinstall the SAME pointer: its
+	// counters are read live again, so the exported row must equal the
+	// client's own counters exactly once — never twice.
 	st := dropStatFor17855(t, er.SyslogDropStats(), "security")
-	live := client.DroppedWrites()
-	// The row must equal the client's own counters, never a multiple.
-	if st.Writes != live {
-		t.Fatalf("security Writes = %d, want client's own %d (no double count on reinstall)", st.Writes, live)
+	if st.Writes != backlog {
+		t.Fatalf("pre-reinstall Writes = %d, want %d", st.Writes, backlog)
+	}
+	er.SetSyslogClients([]*SyslogClient{client})
+	st = dropStatFor17855(t, er.SyslogDropStats(), "security")
+	if st.Writes != backlog {
+		t.Fatalf("security Writes after reinstall = %d, want exactly %d (no double count)", st.Writes, backlog)
 	}
 }

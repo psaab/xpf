@@ -452,6 +452,15 @@ func (er *EventReader) SetSyslogClients(clients []*SyslogClient) {
 	er.syslogMu.Lock()
 	old := er.syslogClients
 	er.syslogClients = clients
+	for _, c := range clients {
+		er.syslogRetired.forgetClient(c)
+		er.syslogRetiredPending.recordForget(c)
+	}
+	for _, c := range clients {
+		// Reinstalled: counters read live; drop folded totals (#17855).
+		er.syslogRetired.forgetClient(c)
+		er.syslogRetiredPending.recordForget(c)
+	}
 	if len(old) > 0 {
 		next := make(map[*SyslogClient]bool, len(clients))
 		for _, c := range clients {
@@ -528,6 +537,11 @@ func (er *EventReader) ReplaceSyslogClients(clients []*SyslogClient) {
 	er.syslogMu.Lock()
 	old := er.syslogClients
 	er.syslogClients = clients
+	for _, c := range clients {
+		// Reinstalled: counters read live; drop folded totals (#17855).
+		er.syslogRetired.forgetClient(c)
+		er.syslogRetiredPending.recordForget(c)
+	}
 	if len(old) > 0 {
 		next := make(map[*SyslogClient]bool, len(clients))
 		for _, c := range clients {
