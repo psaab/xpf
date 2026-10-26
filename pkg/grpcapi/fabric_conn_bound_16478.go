@@ -130,6 +130,11 @@ func newFabricConnGate(limit, reserve int, isPeer func(net.Addr) bool) *fabricCo
 // is advisory accounting for FabricConnActive's breakdown — the binding
 // check is the single active count against the source's limit.
 func (g *fabricConnGate) tryAcquire(remote net.Addr) bool {
+	// Keep invalid in-package struct literals fail-closed too; otherwise a
+	// zero/negative reserve can remove the partition or exceed the total.
+	if g.limit <= 0 || g.reserve <= 0 || g.reserve > g.limit {
+		return false
+	}
 	peer := g.isPeer != nil && g.isPeer(remote)
 	limit := int64(g.limit)
 	if !peer {

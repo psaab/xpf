@@ -247,6 +247,26 @@ func TestFabricConnGateRejectsInvalidReserve17687(t *testing.T) {
 			_ = newFabricConnGate(tc.limit, tc.reserve, nil)
 		})
 	}
+	// In-package struct literals can bypass the constructor; a positive
+	// total isolates the reserve check from the global-cap check.
+	for _, tc := range []struct {
+		name           string
+		limit, reserve int
+	}{
+		{name: "zero", limit: 4, reserve: 0},
+		{name: "negative", limit: 4, reserve: -1},
+	} {
+		t.Run("bypass-"+tc.name, func(t *testing.T) {
+			bypass := &fabricConnGate{limit: tc.limit, reserve: tc.reserve}
+			if bypass.tryAcquire(&net.TCPAddr{IP: net.ParseIP("192.0.2.1")}) {
+				t.Fatalf("invalid direct gate (limit=%d reserve=%d) admitted a non-peer", tc.limit, tc.reserve)
+			}
+			if got := bypass.activeCount(); got != 0 {
+				t.Fatalf("active = %d after invalid-gate refusal, want 0", got)
+			}
+		})
+	}
+
 
 	// A positive reserve within the total remains usable for non-peer traffic.
 	g := newFabricConnGate(2, 1, nil)
