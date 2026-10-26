@@ -139,4 +139,22 @@ func TestSystemSyslogSeedCacheControls17797(t *testing.T) {
 			t.Fatalf("duplicate-host seed = %v, want exactly {%q: %p}", byKey, keyA, clientA)
 		}
 	})
+	t.Run("ambiguous installed destinations are not adopted", func(t *testing.T) {
+		d := newSystemSyslogDaemon16767(t)
+		portA, _ := udpSink16767(t)
+		hostA := &config.SyslogHostConfig{Address: "127.0.0.1", Port: portA}
+		clientA := seedPlantClient17797(t, portA, "")
+		clientB := seedPlantClient17797(t, portA, "")
+		if clientA == clientB {
+			t.Fatal("premise: same-destination clients must be distinct pointers")
+		}
+		d.slogHandler.SetClients([]*logging.SyslogClient{clientA, clientB})
+
+		d.systemSyslogSeedCacheIfEmpty(systemSyslogCfg16767(hostA))
+
+		byKey, _ := seedSnapshot17797(d)
+		if len(byKey) != 0 {
+			t.Fatalf("#17797: seed arbitrarily adopted one of two matching clients %v, want no ambiguous entry", byKey)
+		}
+	})
 }

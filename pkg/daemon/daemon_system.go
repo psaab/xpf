@@ -355,12 +355,22 @@ func (d *Daemon) systemSyslogSeedCacheIfEmpty(cfg *config.Config) {
 		}
 		key := systemSyslogHostKey(host)
 		remoteAddr := net.JoinHostPort(host.Address, strconv.Itoa(systemSyslogHostPort(host)))
+		// Multiple distinct clients for one destination are ambiguous; do not
+		// adopt either, while repeated references to one pointer remain safe.
+		var matching *logging.SyslogClient
+		ambiguous := false
 		for _, c := range installed {
 			if c == nil || c.RemoteAddr() != remoteAddr || c.SourceAddr() != host.SourceAddress {
 				continue
 			}
-			byKey[key] = c
-			break
+			if matching != nil && matching != c {
+				ambiguous = true
+				break
+			}
+			matching = c
+		}
+		if matching != nil && !ambiguous {
+			byKey[key] = matching
 		}
 	}
 	d.systemSyslogBuiltMu.Lock()
