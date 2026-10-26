@@ -404,113 +404,33 @@ pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
     if shed_sessions.is_empty() {
         return;
     }
-    let shed_keys: Vec<_> = shed_sessions.iter().map(|shed| shed.key.clone()).collect();
-    let Ok(_lease) = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease(shed_keys) else {
-        sessions.defer_pressure_shed(shed_sessions);
-        return;
-    };
-    for shed in shed_sessions {
-        // #16019 fold 2: recheck the reply predicate at retry time — a
-        // victim retained by later reply evidence (shared reverse row
-        // rev counter, or a locally re-materialized entry that has now
-        // seen a reply) must not be torn down by a stale deferred shed.
-        if !shed.is_reverse
-            && (sessions.session_replied(&shed.key)
-                || crate::afxdp::shared_ops::shared_session_replied(
-                    shared_sessions,
-                    &shed.key,
-                    shed.decision.nat,
-                ))
-        {
-            sessions.cancel_pending_close(&shed.key, shed.session_id);
-            continue;
-        }
-        let shared_removal = crate::afxdp::shared_ops::remove_shared_session_if(
+    let _ = crate::afxdp::poll_descriptor::session_admission::teardown_pressure_shed_victims(
+        sessions,
+        shed_sessions,
+        crate::afxdp::poll_descriptor::session_admission::ShedTeardownCtx {
+            forwarding,
+            session_map,
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            dnat_fds,
+            worker_id,
+            peer_worker_commands,
+            worker_commands_by_id,
             shared_sessions,
             shared_nat_sessions,
             shared_forward_wire_sessions,
             shared_owner_rg_indexes,
-            &shed.key,
-            |current| {
-                crate::afxdp::poll_descriptor::is_pressure_shed_shared_unreplied(current, &shed)
-            },
-        );
-        if matches!(
-            shared_removal,
-            crate::afxdp::shared_ops::SharedRemoval::Declined
-        ) {
-            if sessions.probe_with_origin(&shed.key).is_none() {
-                crate::nat::release_source_nat_allocation_for_worker(
-                    &forwarding.iface_nat_allocators,
-                    &forwarding.source_nat_rules,
-                    &shed.key,
-                    shed.decision.nat,
-                    shed.is_reverse,
-                    now_ns,
-                    worker_id,
-                );
-                crate::nat64::release_nat64_allocation_for_worker(
-                    &forwarding.nat64,
-                    &shed.key,
-                    shed.decision.nat,
-                    shed.is_reverse,
-                    now_ns,
-                    worker_id,
-                );
+            now_ns,
+        },
+        |key| {
+            for binding in bindings.iter_mut() {
+                binding
+                    .flow
+                    .flow_cache
+                    .invalidate_slot(key, binding.ifindex);
             }
-            continue;
-        }
-        let session_map = bindings
-            .first()
-            .map_or(session_map, |binding| binding.bpf_maps.session_map.handle());
-        crate::afxdp::bpf_map::release_coordinator_session_rows(session_map, &shed.key);
-        let _ = crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
-            conntrack_v4_fd,
-            conntrack_v6_fd,
-            &shed.key,
-        );
-        if !shed.is_reverse {
-            crate::afxdp::checksum::delete_dnat_table_entry(dnat_fds, &shed.key, shed.decision.nat);
-        }
-        crate::afxdp::bpf_map::delete_live_session_entry(
-            session_map,
-            &shed.key,
-            shed.decision.nat,
-            shed.is_reverse,
-        );
-        for binding in bindings.iter_mut() {
-            binding
-                .flow
-                .flow_cache
-                .invalidate_slot(&shed.key, binding.ifindex);
-        }
-        crate::nat::release_source_nat_allocation_for_worker(
-            &forwarding.iface_nat_allocators,
-            &forwarding.source_nat_rules,
-            &shed.key,
-            shed.decision.nat,
-            shed.is_reverse,
-            now_ns,
-            worker_id,
-        );
-        crate::nat64::release_nat64_allocation_for_worker(
-            &forwarding.nat64,
-            &shed.key,
-            shed.decision.nat,
-            shed.is_reverse,
-            now_ns,
-            worker_id,
-        );
-        crate::afxdp::session_glue::replicate_session_delete_repairing(
-            peer_worker_commands,
-            worker_commands_by_id,
-            forwarding,
-            &shed.key,
-            shed.decision.nat,
-            shed.is_reverse,
-            now_ns,
-        );
-    }
+        },
+    );
 }
 pub(in crate::afxdp) fn retry_deferred_conntrack_deletes(
     sessions: &mut crate::session::SessionTable,

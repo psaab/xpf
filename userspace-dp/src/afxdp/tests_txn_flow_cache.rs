@@ -1063,9 +1063,24 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
         &shared_sessions,
     );
 
-    assert_eq!(admitted_dbg.tx, 1, "the new SYN must be admitted");
-    assert_eq!(admitted_batch.session_creates, 2);
-    assert_eq!(sessions.len(), 9);
+    assert_eq!(
+        admitted_dbg.tx,
+        if gate_blocks_cleanup { 0 } else { 1 },
+        "a contended all-victim lease must refuse the new SYN"
+    );
+    assert_eq!(
+        admitted_batch.session_creates,
+        if gate_blocks_cleanup { 0 } else { 2 }
+    );
+    assert_eq!(
+        sessions.len(),
+        if gate_blocks_cleanup { 7 } else { 9 },
+        "a contended lease removes local victims but does not install the new pair"
+    );
+    assert_eq!(
+        sessions.admission_refused(),
+        if gate_blocks_cleanup { 1 } else { 0 }
+    );
     assert!(sessions.probe_with_origin(&victim_key).is_none());
     assert_eq!(
         shared_sessions
@@ -1076,8 +1091,12 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
         "the shed shared row is removed only when the tuple gate is acquired"
     );
     if gate_blocks_cleanup {
+        assert!(sessions.probe_with_origin(&admitted_key).is_none());
         let pool_held = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
-        assert_eq!(pool_held[0].used_ports, 2);
+        assert_eq!(
+            pool_held[0].used_ports, 1,
+            "lease refusal must roll back the incoming flow's NAT reservation"
+        );
         drop(_held_lease);
         let session_map = crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1);
         let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -6091,4 +6110,91 @@ fn cross_worker_reply_evidence_retains_victim_16019() {
     );
     meta.is_reverse = false;
     let _ = meta;
+}
+
+/// #17012: ForwardCandidate must refuse a new flow when the all-victim shed
+/// lease is contended. MissingNeighbor already had this policy (#14661),
+/// but transit's copy proceeded to install after a failed shed lease,
+/// potentially colliding with the still-published victim identity.
+#[test]
+fn txn_pressure_shed_lease_failure_refuses_new_syn_17012() {
+    fn key(port: u16) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            src_port: port,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        }
+    }
+
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(2);
+    let victim = key(31_001);
+    let decision = tunnel_marked_decision(ForwardingDisposition::ForwardCandidate);
+    let mut victim_metadata = icmp_err_metadata();
+    victim_metadata.is_reverse = false;
+    let mut reverse_metadata = victim_metadata.clone();
+    reverse_metadata.is_reverse = true;
+    let victim_reverse = crate::session::reverse_session_key(&victim, decision.nat);
+    assert!(sessions.install_with_protocol(
+        victim.clone(),
+        decision,
+        victim_metadata,
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_SYN,
+    ));
+    assert!(sessions.install_with_protocol(
+        victim_reverse,
+        decision,
+        reverse_metadata,
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_SYN,
+    ));
+    assert_eq!(sessions.len(), 2);
+    let _held = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([victim.clone()])
+        .expect("hold the victim tuple lease");
+
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        31_002,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    let deferred_sheds = sessions.take_deferred_pressure_shed();
+    assert_eq!(
+        deferred_sheds.len(),
+        2,
+        "holding one victim tuple must force the all-key lease to defer the pair"
+    );
+    assert_eq!(dbg.tx, 0, "contended shed lease must refuse the new SYN");
+    assert_eq!(batch.session_creates, 0, "refused SYN must not install");
+    assert_eq!(
+        sessions.len(),
+        0,
+        "victim is locally removed; new pair is refused"
+    );
+    assert_eq!(sessions.admission_refused(), 1);
 }
