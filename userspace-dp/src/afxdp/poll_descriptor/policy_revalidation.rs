@@ -2052,6 +2052,32 @@ pub(crate) fn revalidate_zone_policy_canonical_key_for_test(
     packet_fabric_ingress: bool,
 ) -> Option<SessionKey> {
     let ha_state = BTreeMap::new();
+    revalidate_zone_policy_canonical_key_for_test_with_ha_state(
+        forwarding,
+        sessions,
+        session_key,
+        metadata,
+        decision,
+        flow,
+        meta,
+        packet_fabric_ingress,
+        &ha_state,
+    )
+}
+
+/// Test-seam variant for paths whose result depends on peer-owned HA state.
+#[cfg(test)]
+pub(crate) fn revalidate_zone_policy_canonical_key_for_test_with_ha_state(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    session_key: &SessionKey,
+    metadata: &SessionMetadata,
+    decision: SessionDecision,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    packet_fabric_ingress: bool,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+) -> Option<SessionKey> {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     revalidate_zone_policy_on_session_hit(
         forwarding,
@@ -2065,7 +2091,7 @@ pub(crate) fn revalidate_zone_policy_canonical_key_for_test(
         meta,
         packet_fabric_ingress,
         false,
-        &ha_state,
+        ha_state,
         &dynamic_neighbors,
         0,
         0,
@@ -2424,6 +2450,7 @@ fn reverse_hit_zone_policy(
             }
             let forward_companion_fenced = sessions.policy_revalidation_fenced(&fwd_key);
             let forward_route_stale = sessions.forwarding_resolution_is_stale(fwd_generation);
+            let reverse_has_intent = !matches!(reverse_current, PolicyGateCurrent::NonLocal);
             let mut stored_pair_only = false;
             let mut forward_companion_unresolvable = false;
             if forward_route_stale {
@@ -2451,8 +2478,12 @@ fn reverse_hit_zone_policy(
                 } else if current_fwd_resolution.disposition
                     == ForwardingDisposition::FabricRedirect
                 {
-                    // Continue to judge the recorded policy egress below; the
-                    // transport route is not the forward flow's policy zone.
+                    // A peer-owned redirect retains its recorded authorization
+                    // before the sessionless type-unknown ICMP fence, matching
+                    // the materialized reverse-hit path.
+                    if reverse_has_intent {
+                        return None;
+                    }
                     fwd_decision.resolution = current_fwd_resolution;
                 } else {
                     // Judge the stored forward pair when the current route is
@@ -2463,7 +2494,6 @@ fn reverse_hit_zone_policy(
                         current_fwd_resolution.disposition == ForwardingDisposition::NoRoute;
                 }
             }
-            let reverse_has_intent = !matches!(reverse_current, PolicyGateCurrent::NonLocal);
             if forwarding
                 .policy
                 .icmp_verdict_may_depend_on_type(fwd_key.protocol)

@@ -7162,17 +7162,11 @@ fn recorded_icmp_revoked_when_type_armed_after_promotion_10507() {
 /// #10507 Cell 6 (reverse-first, resolvable companion): the forward half
 /// earns a recorded Permit through poll (standby, FabricRedirect,
 /// recorded lan -> wan). HA flips active with NO Refresh applied, and the
-/// first packet is the REVERSE reply (live DMZ arrival, locally
-/// forwarding). The reverse fence must re-resolve the stored forward
-/// companion through the live FIB+HA snapshot (DMZ, not the recorded
-/// WAN), cold-judge lan -> dmz, and revoke BOTH halves on Deny — never
+/// first packet is the REVERSE reply arriving on the recorded WAN zone
+/// (Owner authority) after phase-1 reverse-ingress synchronization. The live
+/// forward lookup has moved to DMZ; the reverse fence must re-resolve the
+/// companion and cold-judge lan -> dmz, revoking BOTH halves on Deny — never
 /// forward the reply on the stored recorded Permit.
-///
-/// Phase 1 revalidation synchronizes the reverse pair's ingress to the
-/// forward entry's recorded WAN egress. The reverse reply arrives in that
-/// recorded WAN zone (Owner authority), while the live forward lookup has
-/// moved to DMZ. The fence re-resolves the forward companion and cold-judges
-/// lan -> dmz, revoking BOTH halves on Deny.
 ///
 /// RED-on-revert: without the fence the reverse coasts on its stale row or
 /// judges the stored WAN and survives (revoked 0, count 2).
@@ -7852,6 +7846,92 @@ fn reverse_sessionless_recorded_icmp_companion_fails_closed_10507() {
         sessions.entry_with_origin(&fwd_key).is_some(),
         "the owner tears down after the seam returns the canonical forward key"
     );
+}
+
+/// #10507: a sessionless reverse ICMP hit retains a fenced peer-owned
+/// companion when its current forwarding resolution is FabricRedirect.
+///
+/// RED-on-revert: judging the recorded fence before redirect retention revokes
+/// a standby pair that the materialized reverse path keeps.
+#[test]
+fn reverse_sessionless_recorded_icmp_fabric_redirect_retains_10507() {
+    let forwarding = forwarding_with_fabric_dmz_armed_10507();
+    let fwd_key = icmp_flow_key_to_10507(DMZ_DST_10507);
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let ha_state = std::collections::BTreeMap::from([(1, inactive_rg_10507(122))]);
+    let fwd_metadata = syncimport_recorded_metadata_10507();
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    assert!(sessions.install_with_protocol_with_origin(
+        fwd_key.clone(),
+        syncimport_wan_decision_10507(),
+        fwd_metadata.clone(),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_ICMP,
+        0,
+    ));
+    sessions.mark_policy_revalidated(
+        &fwd_key,
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+    );
+    sessions.set_forwarding_revalidation_gen(7, 10);
+    assert!(sessions.policy_revalidation_fenced(&fwd_key));
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        crate::session::PolicyRevalidationTarget::NoLocalEntry
+    );
+
+    let local = crate::afxdp::forwarding::lookup_forwarding_resolution(
+        &forwarding,
+        IpAddr::V4(DMZ_DST_10507),
+    );
+    let inactive = crate::afxdp::session_glue::enforce_session_ha_resolution(
+        &forwarding,
+        &ha_state,
+        0,
+        local.resolution,
+        LAN_IFINDEX,
+        0,
+    );
+    let redirected = crate::afxdp::session_glue::redirect_session_via_fabric_if_needed(
+        &forwarding,
+        inactive,
+        false,
+        fwd_metadata.ingress_zone,
+    );
+    assert_eq!(
+        redirected.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "standby fixture must resolve the forward companion to FabricRedirect"
+    );
+
+    let mut reverse_meta = txn_wan_meta_v4(0, 80);
+    reverse_meta.protocol = PROTO_ICMP;
+    reverse_meta.config_generation = 7;
+    reverse_meta.fib_generation = 10;
+    let canonical =
+        super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test_with_ha_state(
+            &forwarding,
+            &mut sessions,
+            &rev_key,
+            &metadata(true),
+            decision(LAN_IFINDEX),
+            Some(&SessionFlow {
+                src_ip: rev_key.src_ip,
+                dst_ip: rev_key.dst_ip,
+                forward_key: rev_key.clone(),
+            }),
+            reverse_meta,
+            false,
+            &ha_state,
+        );
+    assert_eq!(
+        canonical, None,
+        "peer-owned FabricRedirect must retain the recorded forward companion"
+    );
+    assert!(sessions.entry_with_origin(&fwd_key).is_some());
 }
 
 /// #10507: a sessionless reverse hit with a NoRoute forward companion must
