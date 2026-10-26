@@ -102,6 +102,7 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
         replica.leak_incarnation =
             leak_incarnation_for_session(forwarding, replica.decision, target).unwrap_or(0);
     }
+    let incumbent_persistent_hold = sessions.persistent_lease_hold_for(&replica.key);
     // A shared row's hold belongs to its publisher, not this worker. Acquire
     // one local reference on that exact allocator and lease incarnation
     // before installing a releasable local hold. The destination tuple check
@@ -119,7 +120,7 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
         ) {
             return (resolved.lookup.clone(), true);
         }
-        Some(hold)
+        Some(hold.with_owner(crate::nat::PersistentLeaseOwner::LocalWorker))
     } else {
         None
     };
@@ -151,11 +152,19 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
         },
         fabric_adopted,
     );
-    // A refused materialization did not adopt the local reference; return it
-    // immediately so the incumbent remains the only local owner.
-    if !materialized
-        && let Some(hold) = acquired_persistent_hold
-    {
+    if materialized {
+        // The install replaced and discarded the incumbent table entry. Its
+        // exact local reference is no longer owned, even when the new entry
+        // selected the same lease (the pre-install acquire made a second one).
+        if let Some(hold) = incumbent_persistent_hold {
+            crate::nat::release_recorded_persistent_inbound_hold(
+                &forwarding.source_nat_rules,
+                hold,
+                now_ns,
+            );
+        }
+    } else if let Some(hold) = acquired_persistent_hold {
+        // A refused materialization did not adopt the local reference.
         crate::nat::release_recorded_persistent_inbound_hold(
             &forwarding.source_nat_rules,
             hold,

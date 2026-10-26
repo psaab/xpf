@@ -350,7 +350,7 @@ pub(crate) use allocator::allocator_capacity;
 pub(crate) use allocator::{
     DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
     MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentLeaseHold,
-    PersistentSourceKey, PortAllocator, PortAllocatorSnapshot, ReseedOutcome,
+    PersistentLeaseOwner, PersistentSourceKey, PortAllocator, PortAllocatorSnapshot, ReseedOutcome,
     SourceNatReservationSnapshot,
     deterministic_indices_v4, sticky_pool_index,
 };

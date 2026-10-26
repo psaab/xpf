@@ -224,14 +224,23 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         && worker_will_reserve_persistent_hold
         && !reservation_target_changed
         && selected_persistent_hold.is_none();
-    let persistent_hold_for_install = selected_persistent_hold.or_else(|| {
-        preserve_unmatched_incumbent
-            .then_some(previous_persistent_hold_16615)
-            .flatten()
-    });
+    let persistent_hold_for_install = selected_persistent_hold
+        .map(|hold| {
+            previous_persistent_hold_16615
+                .filter(|previous| previous.same_lease(hold))
+                .unwrap_or_else(|| {
+                    hold.with_owner(crate::nat::PersistentLeaseOwner::LocalWorker)
+                })
+        })
+        .or_else(|| {
+            preserve_unmatched_incumbent
+                .then_some(previous_persistent_hold_16615)
+                .flatten()
+        });
     let mut acquired_persistent_hold = false;
     if let Some(hold) = persistent_hold_for_install
-        && (reservation_target_changed || previous_persistent_hold_16615 != Some(hold))
+        && (reservation_target_changed
+            || !previous_persistent_hold_16615.is_some_and(|previous| previous.same_lease(hold)))
     {
         if !crate::nat::acquire_recorded_persistent_inbound_hold(
             &forwarding.source_nat_rules,
@@ -270,7 +279,11 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             && !metadata.is_reverse
             && entry_decision.nat.rewrite_src.is_some();
         let preserve_previous_persistent_hold = previous_persistent_hold_16615.is_none()
-            || (persistent_hold_for_install == previous_persistent_hold_16615
+            || (persistent_hold_for_install
+                .is_some_and(|hold| {
+                    previous_persistent_hold_16615
+                        .is_some_and(|previous| previous.same_lease(hold))
+                })
                 && !acquired_persistent_hold);
         if !new_entry_reserves || reservation_target_changed {
             if let Some((prev_decision, prev_metadata, _)) = previous_reservation {
@@ -309,7 +322,8 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         if !reservation_target_changed
             && new_entry_reserves
             && let Some(previous_hold) = previous_persistent_hold_16615
-            && Some(previous_hold) != persistent_hold_for_install
+            && !persistent_hold_for_install
+                .is_some_and(|hold| previous_hold.same_lease(hold))
         {
             crate::nat::release_recorded_persistent_inbound_hold(
                 &forwarding.source_nat_rules,

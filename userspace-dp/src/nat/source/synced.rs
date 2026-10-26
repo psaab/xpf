@@ -261,9 +261,16 @@ pub(crate) fn acquire_persistent_inbound_for_synced(
     None
 }
 
+/// An inbound selection whose replacement hold is acquired for commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PersistentInboundSelection {
+    pub(crate) hold: Option<crate::nat::PersistentLeaseHold>,
+    pub(crate) displaced_hold: Option<crate::nat::PersistentLeaseHold>,
+}
+
 /// Transfer a recorded hold when the current rule order selects a different
-/// owner. Workers keep an unmatched old hold for exact eventual teardown;
-/// coordinator replacement drops an old hold when the new entry has no lease.
+/// owner. Keep the displaced reference until the caller commits the
+/// replacement, so rollback never has to reacquire a possibly revoked lease.
 fn reserve_persistent_inbound_for_synced_with_existing_hold(
     rules: &[SourceNatRule],
     key: &crate::session::SessionKey,
@@ -272,15 +279,26 @@ fn reserve_persistent_inbound_for_synced_with_existing_hold(
     now_ns: u64,
     existing_hold: Option<crate::nat::PersistentLeaseHold>,
     preserve_existing_on_no_match: bool,
-) -> Option<crate::nat::PersistentLeaseHold> {
+) -> PersistentInboundSelection {
+    use crate::nat::PersistentLeaseOwner::CoordinatorImported;
+
     let expected_translated = crate::nat::TranslatedTuple {
         ip: key.dst_ip,
         port: key.dst_port,
     };
     let mut candidates = persistent_inbound_lease_candidates(rules, key, nat, is_reverse, now_ns);
     let selected = candidates.next();
+    let incumbent_is_coordinator = existing_hold
+        .is_some_and(|hold| hold.owner == CoordinatorImported);
     match (existing_hold, selected) {
-        (Some(existing), Some((_, selected))) if selected == existing => Some(existing),
+        (Some(existing), Some((_, selected)))
+            if incumbent_is_coordinator && selected.same_lease(existing) =>
+        {
+            PersistentInboundSelection {
+                hold: Some(existing),
+                displaced_hold: None,
+            }
+        }
         (Some(existing), Some((_, selected))) => {
             if crate::nat::acquire_recorded_persistent_inbound_hold(
                 rules,
@@ -288,11 +306,13 @@ fn reserve_persistent_inbound_for_synced_with_existing_hold(
                 expected_translated,
                 now_ns,
             ) {
-                crate::nat::release_recorded_persistent_inbound_hold(rules, existing, now_ns);
-                return Some(selected);
+                return PersistentInboundSelection {
+                    hold: Some(selected.with_owner(CoordinatorImported)),
+                    displaced_hold: (incumbent_is_coordinator).then_some(existing),
+                };
             }
             for (_, candidate) in candidates {
-                if candidate != existing
+                if !candidate.same_lease(existing)
                     && crate::nat::acquire_recorded_persistent_inbound_hold(
                         rules,
                         candidate,
@@ -300,21 +320,30 @@ fn reserve_persistent_inbound_for_synced_with_existing_hold(
                         now_ns,
                     )
                 {
-                    crate::nat::release_recorded_persistent_inbound_hold(
-                        rules, existing, now_ns,
-                    );
-                    return Some(candidate);
+                    return PersistentInboundSelection {
+                        hold: Some(candidate.with_owner(CoordinatorImported)),
+                        displaced_hold: (incumbent_is_coordinator).then_some(existing),
+                    };
                 }
             }
             // A stale/revoked candidate must not consume the incumbent's
-            // reference. Keep its exact handle for eventual teardown.
-            Some(existing)
+            // reference. Only a coordinator-owned incumbent may be reused;
+            // a LocalWorker token was copied at publication and is not ours.
+            PersistentInboundSelection {
+                hold: incumbent_is_coordinator.then_some(existing),
+                displaced_hold: None,
+            }
         }
-        (Some(existing), None) if preserve_existing_on_no_match => Some(existing),
-        (Some(existing), None) => {
-            crate::nat::release_recorded_persistent_inbound_hold(rules, existing, now_ns);
-            None
+        (Some(existing), None) if preserve_existing_on_no_match && incumbent_is_coordinator => {
+            PersistentInboundSelection {
+                hold: Some(existing),
+                displaced_hold: None,
+            }
         }
+        (Some(existing), None) => PersistentInboundSelection {
+            hold: None,
+            displaced_hold: (incumbent_is_coordinator).then_some(existing),
+        },
         (None, Some((_, selected))) => {
             if crate::nat::acquire_recorded_persistent_inbound_hold(
                 rules,
@@ -322,21 +351,35 @@ fn reserve_persistent_inbound_for_synced_with_existing_hold(
                 expected_translated,
                 now_ns,
             ) {
-                return Some(selected);
+                return PersistentInboundSelection {
+                    hold: Some(selected.with_owner(CoordinatorImported)),
+                    displaced_hold: None,
+                };
             }
             for (_, candidate) in candidates {
-                if crate::nat::acquire_recorded_persistent_inbound_hold(
-                    rules,
-                    candidate,
-                    expected_translated,
-                    now_ns,
-                ) {
-                    return Some(candidate);
+                if !candidate.same_lease(selected)
+                    && crate::nat::acquire_recorded_persistent_inbound_hold(
+                        rules,
+                        candidate,
+                        expected_translated,
+                        now_ns,
+                    )
+                {
+                    return PersistentInboundSelection {
+                        hold: Some(candidate.with_owner(CoordinatorImported)),
+                        displaced_hold: None,
+                    };
                 }
             }
-            None
+            PersistentInboundSelection {
+                hold: None,
+                displaced_hold: None,
+            }
         }
-        (None, None) => None,
+        (None, None) => PersistentInboundSelection {
+            hold: None,
+            displaced_hold: None,
+        },
     }
 }
 
@@ -1537,7 +1580,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_hold(
     now_ns: u64,
     domains: SyncedSourceNatDomains<'_>,
     existing_hold: Option<crate::nat::PersistentLeaseHold>,
-) -> (bool, Option<crate::nat::PersistentLeaseHold>) {
+) -> (bool, PersistentInboundSelection) {
     let mut previous_holders = None;
     let reserved = reserve_synced_source_nat_allocation_with_holder(
         iface_allocs,
@@ -1552,7 +1595,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_hold(
         &mut previous_holders,
         domains,
     );
-    let hold = if reserved {
+    let selection = if reserved {
         reserve_persistent_inbound_for_synced_with_existing_hold(
             rules,
             key,
@@ -1563,11 +1606,13 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_hold(
             false,
         )
     } else {
-        existing_hold
+        PersistentInboundSelection {
+            hold: existing_hold,
+            displaced_hold: None,
+        }
     };
-    (reserved, hold)
+    (reserved, selection)
 }
-
 pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold(
     iface_allocs: &InterfaceNatAllocators,
     rules: &[SourceNatRule],
@@ -1581,7 +1626,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
 ) -> (
     bool,
     Option<SourceNatReservationSnapshot>,
-    Option<crate::nat::PersistentLeaseHold>,
+    PersistentInboundSelection,
 ) {
     let mut previous_holders = None;
     let reserved = reserve_synced_source_nat_allocation_with_holder(
@@ -1597,7 +1642,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
         &mut previous_holders,
         domains,
     );
-    let hold = if reserved {
+    let selection = if reserved {
         reserve_persistent_inbound_for_synced_with_existing_hold(
             rules,
             key,
@@ -1608,9 +1653,12 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
             false,
         )
     } else {
-        existing_hold
+        PersistentInboundSelection {
+            hold: existing_hold,
+            displaced_hold: None,
+        }
     };
-    (reserved, previous_holders, hold)
+    (reserved, previous_holders, selection)
 }
 #[cfg(test)]
 mod tests {
@@ -1720,8 +1768,8 @@ mod tests {
             false,
             2_000_000_000,
         )
-        .expect("allocator A grants the incumbent inbound hold");
-
+        .expect("allocator A grants the incumbent inbound hold")
+        .with_owner(crate::nat::PersistentLeaseOwner::CoordinatorImported);
         let rules_b = persistent_rules("persistent-b", 1);
         let (outbound_key_b, nat_b) =
             mint_persistent_nat(&rules_b, private_ip, remote_ip, private_port, 2_000_000_000);
@@ -1769,10 +1817,11 @@ mod tests {
             false,
         );
         assert_eq!(
-            migrated,
+            migrated.hold,
             Some(incumbent),
             "a rejected replacement candidate must not discard the incumbent hold"
         );
+        assert_eq!(migrated.displaced_hold, None);
         assert_eq!(
             rules_a[0]
                 .pool_allocator

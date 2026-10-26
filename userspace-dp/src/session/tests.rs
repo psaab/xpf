@@ -7145,6 +7145,7 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
         },
         allocator_id: 0x17683,
         incarnation: 1,
+        owner: crate::nat::PersistentLeaseOwner::LocalWorker,
     };
     let pending_hold = crate::nat::PersistentLeaseHold {
         key: crate::nat::PersistentSourceKey {
@@ -7155,6 +7156,7 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
             remote: None,
         },
         allocator_id: 0x17684,
+        owner: crate::nat::PersistentLeaseOwner::LocalWorker,
         incarnation: 2,
     };
     table.set_persistent_lease_hold(&opening, Some(opening_hold));

@@ -276,6 +276,90 @@ fn shared_hit_then_ha_upsert_keeps_independent_replica_holds_17683() {
 }
 
 #[test]
+fn materialized_shared_wire_alias_releases_replaced_incumbent_hold_17683() {
+    let fixture = lease_fixture(NOW_NS);
+    let owner_hold = acquire_owner_hold(&fixture, NOW_NS + 2);
+    let mut shared = shared_entry_with_owner_hold(&fixture, owner_hold);
+    shared.decision.nat.rewrite_src =
+        Some(IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 2)));
+    shared.decision.nat.rewrite_src_port = Some(50_001);
+    let wire_key = crate::session::forward_wire_key(&shared.key, shared.decision.nat);
+    assert_ne!(wire_key, shared.key, "fixture must exercise a forward wire alias");
+
+    let shared_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_nat_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_forward_wire_sessions =
+        Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let owner_indexes = crate::afxdp::SharedSessionOwnerRgIndexes::default();
+    crate::afxdp::shared_ops::publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &owner_indexes,
+        &shared,
+    );
+    let alias_hit = crate::afxdp::shared_ops::lookup_shared_forward_wire_match(
+        &shared_forward_wire_sessions,
+        &owner_indexes,
+        &wire_key,
+    )
+    .expect("wire alias resolves to the canonical shared entry");
+    assert_eq!(alias_hit.key, shared.key);
+
+    let mut sessions = SessionTable::new();
+    assert!(
+        fixture.forwarding.source_nat_rules[0]
+            .pool_allocator
+            .acquire_persistent_inbound_for_hold(owner_hold, fixture.translated, NOW_NS + 3),
+        "seed an independently-held local incumbent"
+    );
+    let mut incumbent = alias_hit.clone();
+    incumbent.origin = SessionOrigin::ForwardFlow;
+    assert!(sessions.upsert_synced_with_origin(
+        incumbent.into_session_install(NOW_NS + 3),
+        true,
+    ));
+    assert_eq!(inbound_count(&fixture), 2, "publisher and local incumbent own holds");
+
+    let mut resolved = crate::afxdp::session_glue::ResolvedSessionLookup::shared(alias_hit);
+    let (_, install_failed) =
+        super::resolve::materialize_shared_session_hit_adopted(
+            &mut sessions,
+            &mut resolved,
+            &fixture.forwarding,
+            NOW_NS + 4,
+            crate::tcp_flags::TCP_ACK,
+            true,
+        );
+    assert!(!install_failed, "shared materialization replaces the adopted incumbent");
+    assert_eq!(
+        inbound_count(&fixture),
+        2,
+        "replacement must release its incumbent after acquiring the new local hold"
+    );
+
+    let replica_hold = sessions
+        .persistent_lease_hold_for(&shared.key)
+        .expect("materialized entry owns one local reference");
+    sessions.delete(&shared.key);
+    assert!(release_recorded_persistent_inbound_hold(
+        &fixture.forwarding.source_nat_rules,
+        replica_hold,
+        NOW_NS + 5,
+    ));
+    assert!(release_recorded_persistent_inbound_hold(
+        &fixture.forwarding.source_nat_rules,
+        owner_hold,
+        NOW_NS + 6,
+    ));
+    assert_eq!(
+        inbound_count(&fixture),
+        0,
+        "teardown of the replica and publisher leaves no orphaned reference"
+    );
+}
+
+#[test]
 fn expiring_replica_b_releases_only_b_persistent_hold_17683() {
     let fixture = lease_fixture(NOW_NS);
     let owner_hold = acquire_owner_hold(&fixture, NOW_NS + 2);

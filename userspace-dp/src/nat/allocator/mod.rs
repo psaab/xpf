@@ -230,11 +230,32 @@ pub(crate) struct PersistentSourceKey {
 ///
 /// `allocator_id` prevents a hold from crossing pools; `incarnation` prevents
 /// an old hold from decrementing a lease re-minted under the same source key.
+/// `owner` distinguishes the worker's copied publication token from an
+/// independently acquired coordinator-import reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PersistentLeaseOwner {
+    LocalWorker,
+    CoordinatorImported,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PersistentLeaseHold {
     pub(crate) key: PersistentSourceKey,
     pub(crate) allocator_id: usize,
     pub(crate) incarnation: u64,
+    pub(crate) owner: PersistentLeaseOwner,
+}
+
+impl PersistentLeaseHold {
+    pub(crate) fn same_lease(self, other: Self) -> bool {
+        self.key == other.key
+            && self.allocator_id == other.allocator_id
+            && self.incarnation == other.incarnation
+    }
+
+    pub(crate) fn with_owner(self, owner: PersistentLeaseOwner) -> Self {
+        Self { owner, ..self }
+    }
 }
 
 /// #14322: egress-zone scope for persistent-NAT inbound PERMISSIONS.
@@ -2656,6 +2677,7 @@ impl PortAllocator {
         Some(PersistentLeaseHold {
             key,
             allocator_id: self.debug_shared_identity(),
+            owner: PersistentLeaseOwner::LocalWorker,
             incarnation,
         })
     }
@@ -2731,6 +2753,7 @@ impl PortAllocator {
         Some(PersistentLeaseHold {
             key,
             allocator_id: self.debug_shared_identity(),
+            owner: PersistentLeaseOwner::LocalWorker,
             incarnation: lease.incarnation,
         })
     }

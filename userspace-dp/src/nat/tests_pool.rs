@@ -3150,6 +3150,7 @@ fn recorded_release_with_missing_allocator_preserves_other_pool_17683() {
             key: lease_key,
             allocator_id: allocator_a_id,
             incarnation: 1,
+            owner: crate::nat::PersistentLeaseOwner::LocalWorker,
         }),
         3_000_000_000,
     );

@@ -392,7 +392,13 @@ impl crate::afxdp::ha::SessionDomain {
         entry: &mut SyncedSessionEntry,
         capture_holder_snapshot: bool,
         existing_hold: Option<crate::nat::PersistentLeaseHold>,
-    ) -> Result<AllocatorHolderSnapshot, ()> {
+    ) -> Result<
+        (
+            AllocatorHolderSnapshot,
+            Option<crate::nat::PersistentLeaseHold>,
+        ),
+        (),
+    > {
         let now_ns = monotonic_nanos();
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
@@ -433,33 +439,35 @@ impl crate::afxdp::ha::SessionDomain {
                 .synced_import_zone_unresolved
                 .fetch_add(1, Ordering::Relaxed);
         }
-        let (source_nat_reserved, source_nat_holders, persistent_hold_16615) = if capture_holder_snapshot {
-            crate::nat::reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold(
-                &forwarding.iface_nat_allocators,
-                &forwarding.source_nat_rules,
-                &entry.key,
-                entry.decision.nat,
-                entry.metadata.is_reverse,
-                zones,
-                now_ns,
-                domains,
-                existing_hold,
-            )
-        } else {
-            let (reserved, hold) = crate::nat::reserve_synced_source_nat_allocation_untracked_with_hold(
-                &forwarding.iface_nat_allocators,
-                &forwarding.source_nat_rules,
-                &entry.key,
-                entry.decision.nat,
-                entry.metadata.is_reverse,
-                zones,
-                now_ns,
-                domains,
-                existing_hold,
-            );
-            (reserved, None, hold)
-        };
-        entry.persistent_lease_hold = persistent_hold_16615;
+        let (source_nat_reserved, source_nat_holders, persistent_selection) =
+            if capture_holder_snapshot {
+                crate::nat::reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold(
+                    &forwarding.iface_nat_allocators,
+                    &forwarding.source_nat_rules,
+                    &entry.key,
+                    entry.decision.nat,
+                    entry.metadata.is_reverse,
+                    zones,
+                    now_ns,
+                    domains,
+                    existing_hold,
+                )
+            } else {
+                let (reserved, selection) =
+                    crate::nat::reserve_synced_source_nat_allocation_untracked_with_hold(
+                        &forwarding.iface_nat_allocators,
+                        &forwarding.source_nat_rules,
+                        &entry.key,
+                        entry.decision.nat,
+                        entry.metadata.is_reverse,
+                        zones,
+                        now_ns,
+                        domains,
+                        existing_hold,
+                    );
+                (reserved, None, selection)
+            };
+        entry.persistent_lease_hold = persistent_selection.hold;
         if !source_nat_reserved {
             return Err(());
         }
@@ -484,7 +492,7 @@ impl crate::afxdp::ha::SessionDomain {
             )
         };
         if !nat64_reserved {
-            let hold_changed = persistent_hold_16615 != existing_hold;
+            let hold_changed = persistent_selection.hold != existing_hold;
             crate::nat::release_synced_source_nat_allocation_untracked_preserving_persistent_hold(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
@@ -493,32 +501,24 @@ impl crate::afxdp::ha::SessionDomain {
                 entry.metadata.is_reverse,
                 now_ns,
             );
-            if hold_changed {
-                if let Some(candidate_hold) = persistent_hold_16615 {
-                    crate::nat::release_recorded_persistent_inbound_hold(
-                        &forwarding.source_nat_rules,
-                        candidate_hold,
-                        now_ns,
-                    );
-                }
-                if let Some(incumbent_hold) = existing_hold {
-                    crate::nat::acquire_recorded_persistent_inbound_hold(
-                        &forwarding.source_nat_rules,
-                        incumbent_hold,
-                        crate::nat::TranslatedTuple {
-                            ip: entry.key.dst_ip,
-                            port: entry.key.dst_port,
-                        },
-                        now_ns,
-                    );
-                }
+            if hold_changed
+                && let Some(candidate_hold) = persistent_selection.hold
+            {
+                crate::nat::release_recorded_persistent_inbound_hold(
+                    &forwarding.source_nat_rules,
+                    candidate_hold,
+                    now_ns,
+                );
             }
             return Err(());
         }
-        Ok(AllocatorHolderSnapshot {
-            source_nat: source_nat_holders,
-            nat64: nat64_holders,
-        })
+        Ok((
+            AllocatorHolderSnapshot {
+                source_nat: source_nat_holders,
+                nat64: nat64_holders,
+            },
+            persistent_selection.displaced_hold,
+        ))
     }
 
     fn rollback_rejected_mirror_import(
@@ -563,25 +563,17 @@ impl crate::afxdp::ha::SessionDomain {
                 entry.metadata.is_reverse,
                 now_ns,
             );
-        if hold_changed {
-            if let Some(candidate_hold) = candidate_hold {
-                crate::nat::release_recorded_persistent_inbound_hold(
-                    &forwarding.source_nat_rules,
-                    candidate_hold,
-                    now_ns,
-                );
-            }
-            if let (Some(previous), Some(incumbent_hold)) = (previous_entry, incumbent_hold) {
-                crate::nat::acquire_recorded_persistent_inbound_hold(
-                    &forwarding.source_nat_rules,
-                    incumbent_hold,
-                    crate::nat::TranslatedTuple {
-                        ip: previous.key.dst_ip,
-                        port: previous.key.dst_port,
-                    },
-                    now_ns,
-                );
-            }
+        // The incumbent reference remains counted throughout the tentative
+        // replacement. Rollback discards only a newly acquired candidate;
+        // reacquiring the incumbent is invalid after operator clear revokes it.
+        if hold_changed
+            && let Some(candidate_hold) = candidate_hold
+        {
+            crate::nat::release_recorded_persistent_inbound_hold(
+                &forwarding.source_nat_rules,
+                candidate_hold,
+                now_ns,
+            );
         }
         // A same-key replacement can have retired its previous allocator
         // tuple while reserving the import. Restore that reservation when the
@@ -1319,7 +1311,7 @@ impl crate::afxdp::ha::SessionDomain {
         let translation_reserved = entry.origin.is_peer_synced()
             && !entry.metadata.is_reverse
             && !worker_records.is_empty();
-        let holder_snapshot = if translation_reserved {
+        let (holder_snapshot, displaced_persistent_hold) = if translation_reserved {
             match self.reserve_synced_translation(
                 &mut entry,
                 strict_mirror,
@@ -1327,7 +1319,7 @@ impl crate::afxdp::ha::SessionDomain {
                     .as_ref()
                     .and_then(|previous| previous.persistent_lease_hold),
             ) {
-                Ok(snapshot) => snapshot,
+                Ok((snapshot, displaced_hold)) => (snapshot, displaced_hold),
                 Err(()) => {
                     self.sessions
                         .import_reserve_refused
@@ -1336,7 +1328,7 @@ impl crate::afxdp::ha::SessionDomain {
                 }
             }
         } else {
-            AllocatorHolderSnapshot::default()
+            (AllocatorHolderSnapshot::default(), None)
         };
         // Strict mirror imports commit the conntrack mirror before publishing
         // shared authority or steering rows. A refusal can then roll back the
@@ -1425,6 +1417,15 @@ impl crate::afxdp::ha::SessionDomain {
             &self.sessions.owner_rg_indexes,
             &entry,
         );
+        // The shared replacement is now authoritative. Only at this commit
+        // point may a displaced inbound reference be retired.
+        if let Some(displaced_hold) = displaced_persistent_hold {
+            crate::nat::release_recorded_persistent_inbound_hold(
+                &forwarding.source_nat_rules,
+                displaced_hold,
+                monotonic_nanos(),
+            );
+        }
         // #4393: publish the reverse-SNAT `dnat_table` BPF-map entry for a
         // peer-synced forward SNAT session. The active node populates this
         // steering map from the worker poll path when it forwards the first
@@ -3625,6 +3626,303 @@ mod rejected_mirror_reservation_10790_tests {
             inbound_flows(&allocator_b),
             Some(0),
             "final coordinator delete releases the migrated hold once"
+        );
+    }
+
+    #[test]
+    fn local_publication_demotion_and_peer_refresh_own_distinct_holds_17683() {
+        let (coordinator, _commands) =
+            worker_registered_coordinator(persistent_snat_forwarding(false));
+        let now_ns = monotonic_nanos();
+        let private_key = v4_key();
+        let local_nat = reserve_local_with_holder(
+            &coordinator,
+            &private_key,
+            crate::nat::NatHolder::Untracked,
+            now_ns,
+        );
+        let public_ip = local_nat
+            .rewrite_src
+            .expect("fixture allocates a public address");
+        let public_port = local_nat
+            .rewrite_src_port
+            .expect("fixture allocates a public port");
+        crate::nat::release_source_nat_allocation(
+            &coordinator.forwarding.iface_nat_allocators,
+            &coordinator.forwarding.source_nat_rules,
+            &private_key,
+            local_nat,
+            false,
+            now_ns + 1,
+        );
+
+        let inbound_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: private_key.dst_ip,
+            dst_ip: public_ip,
+            src_port: private_key.dst_port,
+            dst_port: public_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let inbound_nat = NatDecision {
+            rewrite_dst: Some(private_key.src_ip),
+            rewrite_dst_port: Some(private_key.src_port),
+            ..NatDecision::default()
+        };
+        let rules = &coordinator.forwarding.source_nat_rules;
+        let worker_hold = crate::nat::acquire_persistent_inbound_for_synced(
+            rules,
+            &inbound_key,
+            inbound_nat,
+            false,
+            now_ns + 2,
+        )
+        .expect("local worker owns the initial inbound reference");
+        let lease_flow = source_nat_flow(&private_key, local_nat);
+        let allocator = &rules[0].pool_allocator;
+        let inbound_flows = || {
+            allocator
+                .debug_persistent_lease_for_flow(
+                    &lease_flow,
+                    crate::nat::PersistentNatPermit::AnyRemoteHost,
+                )
+                .map(|lease| lease.inbound_flows)
+        };
+
+        let mut local_entry = synced_entry(inbound_key.clone(), inbound_nat, 0, 17_683);
+        local_entry.origin = crate::session::SessionOrigin::ForwardFlow;
+        local_entry.persistent_lease_hold = Some(worker_hold);
+        let mut worker_sessions = crate::session::SessionTable::new();
+        assert!(worker_sessions.upsert_synced_with_origin(
+            local_entry.clone().into_session_install(now_ns + 3),
+            true,
+        ));
+        local_entry.persistent_lease_hold =
+            worker_sessions.persistent_lease_hold_for(&inbound_key);
+        assert_eq!(local_entry.persistent_lease_hold, Some(worker_hold));
+
+        let unrelated_hold = crate::nat::acquire_persistent_inbound_for_synced(
+            rules,
+            &inbound_key,
+            inbound_nat,
+            false,
+            now_ns + 4,
+        )
+        .expect("unrelated live session shares the persistent lease");
+        let mut unrelated_key = inbound_key.clone();
+        unrelated_key.src_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 99, 10));
+        unrelated_key.src_port = 54_321;
+        let mut unrelated_entry = synced_entry(unrelated_key.clone(), inbound_nat, 0, 17_684);
+        unrelated_entry.origin = crate::session::SessionOrigin::ForwardFlow;
+        unrelated_entry.persistent_lease_hold = Some(unrelated_hold);
+        let mut unrelated_sessions = crate::session::SessionTable::new();
+        assert!(unrelated_sessions.upsert_synced_with_origin(
+            unrelated_entry.into_session_install(now_ns + 5),
+            true,
+        ));
+        assert_eq!(inbound_flows(), Some(2));
+
+        // Local publication copies the worker's token. RG demotion only
+        // changes shared origin; it must not turn that copied token into a
+        // coordinator-owned reference.
+        publish_seeded_shared_entry(&coordinator, &local_entry);
+        crate::afxdp::shared_ops::demote_shared_owner_rgs(
+            &coordinator.session_domain.sessions.synced,
+            &coordinator.session_domain.sessions.nat,
+            &coordinator.session_domain.sessions.forward_wire,
+            &coordinator.session_domain.sessions.owner_rg_indexes,
+            &coordinator.forwarding,
+            &coordinator.session_domain.dynamic_neighbors,
+            &[1],
+        );
+        let demoted = lock_shared_recover(&coordinator.session_domain.sessions.synced)
+            .get(&inbound_key)
+            .cloned()
+            .expect("demotion preserves shared authority");
+        assert_eq!(demoted.origin, crate::session::SessionOrigin::SyncImport);
+        assert_eq!(demoted.persistent_lease_hold, Some(worker_hold));
+        assert_eq!(
+            demoted
+                .persistent_lease_hold
+                .expect("local hold")
+                .owner,
+            crate::nat::PersistentLeaseOwner::LocalWorker
+        );
+
+        let mut peer_refresh = demoted;
+        peer_refresh.generation = 1;
+        peer_refresh.session_id = 17_685;
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session(peer_refresh),
+            SyncedImportOutcome::Applied
+        );
+        let imported = lock_shared_recover(&coordinator.session_domain.sessions.synced)
+            .get(&inbound_key)
+            .cloned()
+            .expect("peer refresh remains shared authority");
+        let coordinator_hold = imported
+            .persistent_lease_hold
+            .expect("coordinator acquired its independent reference");
+        assert_eq!(
+            coordinator_hold.owner,
+            crate::nat::PersistentLeaseOwner::CoordinatorImported
+        );
+        assert_eq!(inbound_flows(), Some(3));
+
+        coordinator
+            .session_domain
+            .delete_synced_session(inbound_key.clone(), false);
+        assert_eq!(
+            inbound_flows(),
+            Some(2),
+            "coordinator delete releases only its independently acquired reference"
+        );
+        assert_eq!(
+            worker_sessions.persistent_lease_hold_for(&inbound_key),
+            Some(worker_hold),
+            "the worker still owns its published local reference"
+        );
+
+        worker_sessions.delete(&inbound_key);
+        assert!(crate::nat::release_recorded_persistent_inbound_hold(
+            rules,
+            worker_hold,
+            now_ns + 6,
+        ));
+        assert_eq!(
+            inbound_flows(),
+            Some(1),
+            "worker teardown leaves the unrelated live session's reference"
+        );
+        assert_eq!(
+            unrelated_sessions.persistent_lease_hold_for(&unrelated_key),
+            Some(unrelated_hold)
+        );
+        unrelated_sessions.delete(&unrelated_key);
+        assert!(crate::nat::release_recorded_persistent_inbound_hold(
+            rules,
+            unrelated_hold,
+            now_ns + 7,
+        ));
+        assert_eq!(inbound_flows(), Some(0));
+    }
+
+    #[test]
+    fn rejected_replacement_keeps_revoked_incumbent_inbound_hold_17683() {
+        use crate::afxdp::bpf_map::{
+            ConntrackPublishResult, override_conntrack_publish_results_for_test,
+            take_conntrack_publish_guard,
+        };
+
+        let (coordinator, _commands) =
+            worker_registered_coordinator(persistent_snat_forwarding(false));
+        let now_ns = monotonic_nanos();
+        let private_key = v4_key();
+        let local_nat = reserve_local_with_holder(
+            &coordinator,
+            &private_key,
+            crate::nat::NatHolder::Untracked,
+            now_ns,
+        );
+        let public_ip = local_nat
+            .rewrite_src
+            .expect("fixture allocates a public address");
+        let public_port = local_nat
+            .rewrite_src_port
+            .expect("fixture allocates a public port");
+        crate::nat::release_source_nat_allocation(
+            &coordinator.forwarding.iface_nat_allocators,
+            &coordinator.forwarding.source_nat_rules,
+            &private_key,
+            local_nat,
+            false,
+            now_ns + 1,
+        );
+
+        let lease_flow = source_nat_flow(&private_key, local_nat);
+        let allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
+        let inbound_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: private_key.dst_ip,
+            dst_ip: public_ip,
+            src_port: private_key.dst_port,
+            dst_port: public_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let inbound_nat = NatDecision {
+            rewrite_dst: Some(private_key.src_ip),
+            rewrite_dst_port: Some(private_key.src_port),
+            ..NatDecision::default()
+        };
+        let mut incumbent = synced_entry(inbound_key.clone(), inbound_nat, 1, 17_683);
+        incumbent.metadata.ingress_zone = 1;
+        incumbent.metadata.egress_zone = 2;
+        install_test_conntrack_map(&coordinator);
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(incumbent),
+            SyncedImportOutcome::Applied
+        );
+        let inbound_flows = || {
+            allocator
+                .debug_persistent_lease_for_flow(
+                    &lease_flow,
+                    crate::nat::PersistentNatPermit::AnyRemoteHost,
+                )
+                .map(|lease| lease.inbound_flows)
+        };
+        assert_eq!(inbound_flows(), Some(1));
+        let incumbent_hold = lock_shared_recover(&coordinator.session_domain.sessions.synced)
+            .get(&inbound_key)
+            .and_then(|stored| stored.persistent_lease_hold)
+            .expect("import records the incumbent's exact lease hold");
+
+        assert_eq!(allocator.clear_persistent_leases(now_ns + 2), 1);
+        assert_eq!(inbound_flows(), Some(1), "clear retains the active hold");
+
+        let mut replacement =
+            synced_entry(inbound_key.clone(), NatDecision::default(), 2, 17_684);
+        replacement.metadata.ingress_zone = 1;
+        replacement.metadata.egress_zone = 2;
+        {
+            let _record_guard = take_conntrack_publish_guard();
+            let _override_guard = override_conntrack_publish_results_for_test(&[
+                ConntrackPublishResult::Written,
+                ConntrackPublishResult::KernelError,
+            ]);
+            assert_eq!(
+                coordinator
+                    .session_domain
+                    .upsert_synced_session_mirror(replacement),
+                SyncedImportOutcome::RejectedMirrorPublish
+            );
+        }
+        let stored = lock_shared_recover(&coordinator.session_domain.sessions.synced)
+            .get(&inbound_key)
+            .cloned()
+            .expect("rejected replacement leaves the incumbent authoritative");
+        assert_eq!(stored.session_id, 17_683);
+        assert_eq!(stored.persistent_lease_hold, Some(incumbent_hold));
+        assert_eq!(
+            inbound_flows(),
+            Some(1),
+            "rollback must not reacquire the revoked incumbent or lose its reference"
+        );
+
+        coordinator
+            .session_domain
+            .delete_synced_session(inbound_key, false);
+        assert_eq!(
+            inbound_flows(),
+            Some(0),
+            "the authoritative incumbent's teardown consumes its own reference"
         );
     }
 
