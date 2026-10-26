@@ -133,9 +133,9 @@ func (d *Daemon) fab1DebtUpgradeReady(active clusterTransportKey) bool {
 // the name alone (snmpConfigHash / snmpVRFDevice) is unchanged. A periodic
 // reassert tick also calls this after a successful live-index probe, so a
 // re-create by another owner is healed without a commit. A main-table listener
-// or a stopped agent needs no check. The normal reconcileSNMP path adopts an
-// unknown live index without bouncing and leaves a bind failure retryable
-// (#5110 contract).
+// or a stopped agent needs no check. The normal reconcileSNMP path performs a
+// conservative restart/rebind when the recorded index is unknown; a bind
+// failure remains retryable (#5110 contract).
 func (d *Daemon) restartSNMPForVRFRecreate() {
 	d.snmpReconMu.Lock()
 	running := d.snmpAgent != nil && d.snmpVRFDevice == config.ManagementVRFDeviceName
