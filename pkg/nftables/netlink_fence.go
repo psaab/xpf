@@ -190,6 +190,10 @@ func buildHostInboundFenceNetlink(p *nlPlan, spec FenceSpec) {
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyFenceRules(
 		spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts,
 	))
+	// Preserve global ESP/AH and catalog guards. Mandatory L3 admits precede
+	// the non-unicast fence, which in turn must precede established flows.
+	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
+	emitHostInboundMulticastFenceDropsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 	emitHostInboundFenceL3AdmitsNetlink(p, spec.Views)
 	p.rule().daddr(famV6, []string{"ff02::/16"}, false).
 		icmpType(famV6, []uint8{130, 131, 132, 143}).emit(verdictReturn()...)

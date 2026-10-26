@@ -2056,10 +2056,12 @@ type Daemon struct {
 	// apply/retry path; a stream apply that closes the shared client's
 	// writer can observe it through the seam's Close hook (known narrow
 	// race, see docs/log/16767.md). Seeded from
-	// d.slogHandler.Clients() on the first vetted apply, so a
-	// pre-installed set is adopted loss-free (empty-key entries only)
-	// and a host whose client a foreign close already retired re-dials
-	// fresh.
+	// d.slogHandler.Clients() on the first vetted apply as
+	// association bookkeeping only: seeded entries carry empty
+	// fingerprints, never match a real construction fingerprint,
+	// and are always re-dialed and superseded by that same apply
+	// (a failed re-dial closes the seeded client via the preserving
+	// swap; no survival is guaranteed).
 	systemSyslogHash       string
 	systemSyslogHashSet    bool
 	systemSyslogBuiltMu    sync.Mutex
