@@ -395,7 +395,7 @@ func TestConnGatePerSourceKey16622(t *testing.T) {
 // backs off, never exits) and the refused conn is closed without claiming
 // a slot; release happens exactly once across double Close.
 func TestBoundedListenerTemporaryRefusal16081(t *testing.T) {
-	g := newAPIConnGate(1, 0)
+	g := newAPIConnGate(1, 2)
 	clientLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -536,6 +536,44 @@ func TestRESTConnRefusalsMetric16081(t *testing.T) {
 		t.Fatalf("active with one admitted conn = %v, want 1", after["active"])
 	}
 
+}
+
+// TestConnGateZeroPerSourceRefused17687 pins #17687: a gate built with
+// perSource<=0 must not silently drop the #16622 per-source partition.
+// The constructor rejects the unpartitioned shape, and tryAcquire on a
+// gate whose per-source limit is not positive refuses (fail-closed)
+// rather than admitting one source without bound.
+//
+// FAIL-ON-REVERT: restoring `if g.perSource > 0 && ...` without the
+// constructor panic / tryAcquire guard lets one source hold the whole
+// global pool — both assertions below red.
+func TestConnGateZeroPerSourceRefused17687(t *testing.T) {
+	for _, perSource := range []int{0, -1} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("newAPIConnGate(256, %d) did not panic; zero/negative per-source limit silently disables the partition", perSource)
+				}
+			}()
+			_ = newAPIConnGate(256, perSource)
+		}()
+	}
+	// Defence in depth: even a gate that bypasses the constructor (zero
+	// value / struct literal in-package) must fail closed, not admit.
+	bypass := &apiConnGate{limit: 10, perSource: 0, sources: make(map[string]int)}
+	addr := dummyAddr16081{}
+	if bypass.tryAcquire(addr) {
+		t.Fatal("tryAcquire admitted with perSource=0; partition silently disabled")
+	}
+	if got := bypass.activeCount(); got != 0 {
+		t.Fatalf("active = %d after refused acquire, want 0", got)
+	}
+	// Control: a positively-configured gate still admits its first conn.
+	ok := newAPIConnGate(2, 1)
+	if !ok.tryAcquire(addr) {
+		t.Fatal("tryAcquire refused first conn on valid gate (2,1)")
+	}
+	ok.release(addr)
 }
 
 type dummyAddr16081 struct{}
