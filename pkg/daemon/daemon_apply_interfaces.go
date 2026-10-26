@@ -280,6 +280,40 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 	return nil, vrfErr
 }
 
+// chassisClusterFabricInterfaces returns the Linux names of chassis cluster
+// fabric interfaces in the SAME config being applied: `fab*` stanzas with a
+// fabric member (fabric-options member-interfaces or a bond member list), plus
+// matching `fab*` chassis cluster fabric-interface / fabric1-interface leaves.
+// #18034: these devices are created BY this apply (applyFabricIPVLAN runs just
+// before the dataplane core), so a first apply from an empty config DB can
+// reach the post-networkd re-bind while one is still absent — e.g. deferred
+// past XSK bind when the userspace dataplane is active — and the re-bind must
+// not fail on its absence. Only fab* names are added, so a malformed fabric
+// leaf that aliases a non-fabric management interface cannot weaken that
+// interface's existing missing-link error.
+func chassisClusterFabricInterfaces(cfg *config.Config) map[string]bool {
+	out := make(map[string]bool)
+	if cfg == nil {
+		return out
+	}
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil || !strings.HasPrefix(name, "fab") {
+			continue
+		}
+		if ifc.LocalFabricMember != "" || len(ifc.FabricMembers) > 0 {
+			out[config.LinuxIfName(name)] = true
+		}
+	}
+	if cc := cfg.Chassis.Cluster; cc != nil {
+		for _, name := range []string{cc.FabricInterface, cc.Fabric1Interface} {
+			if name != "" && strings.HasPrefix(name, "fab") {
+				out[config.LinuxIfName(name)] = true
+			}
+		}
+	}
+	return out
+}
+
 // rebindManagementVRFIfaces re-binds the published management-VRF interface set
 // to vrf-mgmt after applyNetworkdConfig's `networkctl reconfigure` strips the
 // VRF master binding (it treats the daemon-created vrf-mgmt device as
@@ -288,21 +322,32 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 // join them into commit truth (via networkdErr) instead of swallowing at WARN.
 // Management base devices must exist by this phase. A configured tagged VLAN
 // unit may not have a kernel link when it is unzoned; only a confirmed absence
-// for such a unit is skipped. Other lookup and bind failures remain fatal.
+// for such a unit is skipped. A chassis cluster fabric interface from the SAME
+// config being applied (#18034) may likewise not exist yet when this runs —
+// its creation is itself part of this apply and can be deferred past XSK bind
+// — so only its confirmed absence is skipped. The fabric creation/reassertion
+// paths own binding it once it exists. Other lookup and bind failures remain
+// fatal.
 func (d *Daemon) rebindManagementVRFIfaces(cfg *config.Config) error {
 	mgmtSet := d.mgmtVRFIfaceSet()
 	if d.routing == nil || len(mgmtSet) == 0 {
 		return nil
 	}
 	vlanUnitSet := managementVRFVLANUnitSet(cfg)
+	fabricSet := chassisClusterFabricInterfaces(cfg)
 	var errs []error
 	for ifName := range mgmtSet {
-		if vlanUnitSet[ifName] {
+		if vlanUnitSet[ifName] || fabricSet[ifName] {
 			if _, err := d.fabricLinkByName(ifName); err != nil {
 				var notFound netlink.LinkNotFoundError
 				if errors.As(err, &notFound) {
-					slog.Info("configured management VLAN unit has no kernel link; skipping VRF re-bind",
-						"interface", ifName)
+					if fabricSet[ifName] {
+						slog.Info("chassis cluster fabric interface not created yet; deferring management VRF re-bind until the interface exists",
+							"interface", ifName)
+					} else {
+						slog.Info("configured management VLAN unit has no kernel link; skipping VRF re-bind",
+							"interface", ifName)
+					}
 					continue
 				}
 			}
