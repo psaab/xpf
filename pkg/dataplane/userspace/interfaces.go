@@ -38,14 +38,19 @@ const syntheticIfindexExhausted = -1
 // exhaustion that is unreachable in practice (it needs >1<<20 logical-only
 // VLAN units on one box) but must degrade gracefully instead of panicking
 // and crash-looping the daemon (#5557).
-// SyntheticLogicalIfindexForUnit returns the synthetic logical-only
-// ifindex the snapshot builder assigns to unitName/vlanID (#16826: the
-// daemon's NAT-scope folder must key the same value). Production minting
-// goes through buildInterfaceSnapshots with its shared used-set; this
-// single-unit probe uses a fresh set, matching the builder when no
-// synthetic collision displaced the unit.
-func SyntheticLogicalIfindexForUnit(unitName string, vlanID int) int {
-	return syntheticLogicalIfindex(unitName, vlanID, nil)
+// SyntheticLogicalIfindexForUnit returns the synthetic logical-only ifindex
+// for unitName/vlanID allocated from the caller's shared used-set (#17876).
+// The snapshot builder mints every unit of a build from ONE shared set
+// (sorted interface/unit order), so a unit whose FNV-1a initial slot collides
+// with an earlier unit is displaced to the next free slot. A caller deriving
+// folds must allocate from a shared set in the same order; a fresh-set probe
+// returns the initial (undisplaced) index for every unit, so two colliding
+// units fold onto each other's index — a confidently wrong NAT scope, not the
+// unknown sentinel. Production minting still goes through
+// buildInterfaceSnapshots; this variant exists for the daemon's NAT-scope
+// folder, which must key the builder-assigned values.
+func SyntheticLogicalIfindexForUnit(unitName string, vlanID int, used map[int]struct{}) int {
+	return syntheticLogicalIfindex(unitName, vlanID, used)
 }
 
 func syntheticLogicalIfindex(name string, vlanID int, used map[int]struct{}) int {

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -180,5 +181,182 @@ func TestMixedGenerationIPFIXMirror16752(t *testing.T) {
 	}
 	if !foundB {
 		t.Fatal("retained IPFIX b exporter must remain live (control)")
+	}
+}
+
+func twoFamilyConfig17801(aPort int, bSource string) *config.Config {
+	cfg := twoInstanceConfig15230("127.0.0.1", aPort, bSource)
+	bFamily := cfg.ForwardingOptions.Sampling.Instances["b"].FamilyInet
+	bFamily.FlowServers = append(bFamily.FlowServers, &config.FlowServer{
+		Address: "127.0.0.1", Port: 4739, Version: config.FlowServerVersionIPFIX,
+	})
+	return cfg
+}
+
+func waitV9GroupsDone17801(t *testing.T, groups []v9Group) bool {
+	t.Helper()
+	done := make(chan struct{}, len(groups))
+	for _, g := range groups {
+		if g.wg == nil {
+			return false
+		}
+		go func(g v9Group) {
+			g.wg.Wait()
+			done <- struct{}{}
+		}(g)
+	}
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for range groups {
+		select {
+		case <-done:
+		case <-timer.C:
+			return false
+		}
+	}
+	return true
+}
+
+func waitIPFIXGroupsDone17801(t *testing.T, groups []ipfixGroup) bool {
+	t.Helper()
+	done := make(chan struct{}, len(groups))
+	for _, g := range groups {
+		if g.wg == nil {
+			return false
+		}
+		go func(g ipfixGroup) {
+			g.wg.Wait()
+			done <- struct{}{}
+		}(g)
+	}
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for range groups {
+		select {
+		case <-done:
+		case <-timer.C:
+			return false
+		}
+	}
+	return true
+}
+
+func TestRemoveAllExporterGroupsJoinsEveryWorker17801(t *testing.T) {
+	d := newFlowTestDaemon()
+	t.Cleanup(d.stopFlowExporter)
+	t.Cleanup(d.stopIPFIXExporter)
+	d.stopFlowExportRetryLoop()
+
+	for cycle := range 2 {
+		if !d.reconcileFlowExporters(twoFamilyConfig17801(2055, "127.0.0.1")) {
+			t.Fatalf("cycle %d: adding exporters must report a change", cycle+1)
+		}
+		v9Bundle := d.flowBundle.Load()
+		ipfixBundle := d.ipfixBundlePtr.Load()
+		if v9Bundle == nil || len(v9Bundle.groups) != 2 {
+			t.Fatalf("cycle %d: v9 groups = %v, want 2", cycle+1, v9Bundle)
+		}
+		if ipfixBundle == nil || len(ipfixBundle.groups) != 2 {
+			t.Fatalf("cycle %d: IPFIX groups = %v, want 2", cycle+1, ipfixBundle)
+		}
+		v9Groups := append([]v9Group(nil), v9Bundle.groups...)
+		ipfixGroups := append([]ipfixGroup(nil), ipfixBundle.groups...)
+
+		if !d.reconcileFlowExporters(&config.Config{}) {
+			t.Fatalf("cycle %d: removing all exporters must report a change", cycle+1)
+		}
+		v9Done := waitV9GroupsDone17801(t, v9Groups)
+		ipfixDone := waitIPFIXGroupsDone17801(t, ipfixGroups)
+		if !v9Done || !ipfixDone {
+			t.Fatalf("cycle %d: remove-all worker completion: v9=%t IPFIX=%t, want both true",
+				cycle+1, v9Done, ipfixDone)
+		}
+	}
+}
+
+func assertGroupStillRunning17801(t *testing.T, family string, wg *sync.WaitGroup) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-done:
+		t.Fatalf("%s retained worker exited before remove-all", family)
+	case <-timer.C:
+	}
+}
+
+func TestRemoveAllExporterGroupsJoinsRetainedFailedSiblings17801(t *testing.T) {
+	d := newFlowTestDaemon()
+	t.Cleanup(d.stopFlowExporter)
+	t.Cleanup(d.stopIPFIXExporter)
+	d.stopFlowExportRetryLoop()
+
+	if !d.reconcileFlowExporters(twoFamilyConfig17801(2055, "127.0.0.1")) {
+		t.Fatal("initial healthy reconcile must report a change")
+	}
+	initialV9 := d.flowBundle.Load()
+	initialIPFIX := d.ipfixBundlePtr.Load()
+	if initialV9 == nil || initialIPFIX == nil {
+		t.Fatal("initial healthy reconcile must publish both families")
+	}
+	var retainedV9 *flowexport.Exporter
+	var retainedIPFIX *flowexport.IPFIXExporter
+	var retainedV9Group v9Group
+	var retainedIPFIXGroup ipfixGroup
+	for _, g := range initialV9.groups {
+		if g.ec.InstanceName == "b" {
+			retainedV9 = g.exp
+			retainedV9Group = g
+		}
+	}
+	for _, g := range initialIPFIX.groups {
+		if g.ec.InstanceName == "b" {
+			retainedIPFIX = g.exp
+			retainedIPFIXGroup = g
+		}
+	}
+	if retainedV9 == nil || retainedIPFIX == nil {
+		t.Fatal("initial config must publish both b exporter groups")
+	}
+
+	if !d.reconcileFlowExporters(twoFamilyConfig17801(3199, "192.0.2.250")) {
+		t.Fatal("partial reconcile with failed b siblings must report a change")
+	}
+	v9Bundle := d.flowBundle.Load()
+	ipfixBundle := d.ipfixBundlePtr.Load()
+	if v9Bundle == nil || len(v9Bundle.groups) != 2 {
+		t.Fatalf("partial v9 groups = %v, want replaced a and retained b", v9Bundle)
+	}
+	if ipfixBundle == nil || len(ipfixBundle.groups) != 2 {
+		t.Fatalf("partial IPFIX groups = %v, want replaced a and retained b", ipfixBundle)
+	}
+	foundV9, foundIPFIX := false, false
+	for _, g := range v9Bundle.groups {
+		foundV9 = foundV9 || g.exp == retainedV9
+	}
+	for _, g := range ipfixBundle.groups {
+		foundIPFIX = foundIPFIX || g.exp == retainedIPFIX
+	}
+	if !foundV9 || !foundIPFIX {
+		t.Fatal("failed b siblings must remain published until remove-all")
+	}
+	assertGroupStillRunning17801(t, "v9", retainedV9Group.wg)
+	assertGroupStillRunning17801(t, "IPFIX", retainedIPFIXGroup.wg)
+
+	v9Groups := append([]v9Group(nil), v9Bundle.groups...)
+	ipfixGroups := append([]ipfixGroup(nil), ipfixBundle.groups...)
+	if !d.reconcileFlowExporters(&config.Config{}) {
+		t.Fatal("removing all exporters after partial failure must report a change")
+	}
+	v9Done := waitV9GroupsDone17801(t, v9Groups)
+	ipfixDone := waitIPFIXGroupsDone17801(t, ipfixGroups)
+	if !v9Done || !ipfixDone {
+		t.Fatalf("remove-all after partial failure worker completion: v9=%t IPFIX=%t, want both true",
+			v9Done, ipfixDone)
 	}
 }
