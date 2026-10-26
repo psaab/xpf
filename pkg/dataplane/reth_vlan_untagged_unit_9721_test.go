@@ -80,7 +80,7 @@ func rethVLANUntaggedCfg9721(t *testing.T) *config.Config {
 func models9721(t *testing.T, cfg *config.Config) map[string]networkd.InterfaceConfig {
 	t.Helper()
 	result := &CompileResult{ifCache: map[string]*net.Interface{}}
-	for i, name := range []string{"ge-0-0-2", "ge-0-0-3", "ge-0-0-4"} {
+	for i, name := range []string{"ge-0-0-2", "ge-0-0-3", "ge-0-0-4", "ge-0-0-7"} {
 		result.ifCache[name] = &net.Interface{
 			Index:        70 + i,
 			Name:         name,
@@ -173,5 +173,89 @@ func TestVLANParentSourceIsOnlyForAnAddressedUntaggedUnitOfAVRRPReth_9721(t *tes
 	if sub, ok := models["ge-0-0-4.50"]; !ok || len(sub.Addresses) != 1 || sub.Addresses[0] != src9721 {
 		t.Errorf("ge-0-0-4.50 = %+v (present=%v), want Addresses [%s]; the reth1 control is not VRRP-backed",
 			sub, ok, src9721)
+	}
+}
+
+// The zone identity for a RETH member's effective tagged configuration is the
+// redundant-parent name, not the physical member name used for its model row.
+// This legacy-mode control has no redundancy-group, so the unit address is a
+// real static address rather than a VRRP VIP or advert source.
+func TestNonVRRPRethUntaggedVLANParentUsesEffectiveZoneIdentity_17841(t *testing.T) {
+	tree := &config.ConfigTree{}
+	for _, l := range []string{
+		"set interfaces ge-0/0/7 gigether-options redundant-parent reth9",
+		"set interfaces reth9 vlan-tagging",
+		"set interfaces reth9 unit 0 family inet address 10.9.0.1/24",
+		"set security zones security-zone trust interfaces reth9.0",
+	} {
+		path, err := config.ParseSetCommand(l)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", l, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", l, err)
+		}
+	}
+	cfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile of non-VRRP RETH fixture: %v", err)
+	}
+
+	models := models9721(t, cfg)
+	member, ok := models["ge-0-0-7"]
+	if !ok {
+		t.Fatalf("no model for reth9 member ge-0-0-7; models=%v", modelNames9721(models))
+	}
+	if !member.IsVLANParent {
+		t.Fatalf("ge-0-0-7 is not rendered as a VLAN parent: %+v", member)
+	}
+	if len(member.VLANParentAddresses) != 1 || member.VLANParentAddresses[0] != "10.9.0.1/24" {
+		t.Errorf("ge-0-0-7 VLANParentAddresses=%v, want [10.9.0.1/24]: reth9.0 is zone-referenced and its non-VRRP address belongs on the member parent row",
+			member.VLANParentAddresses)
+	}
+}
+
+// When the only RETH unit zone refs are quarantined, the planner has no
+// device entry. The render fallback must recognize the zone ref by reth name
+// and avoid installing its otherwise-unplanned address.
+func TestQuarantinedNonVRRPRethUntaggedVLANParentDoesNotRender_17841(t *testing.T) {
+	tree := &config.ConfigTree{}
+	for _, l := range []string{
+		"set interfaces ge-0/0/7 gigether-options redundant-parent reth9",
+		"set interfaces reth9 vlan-tagging",
+		"set interfaces reth9 unit 0 family inet address 10.9.0.1/24",
+		"set security zones security-zone trust interfaces reth9.0",
+		"set security zones security-zone untrust interfaces reth9.0",
+	} {
+		path, err := config.ParseSetCommand(l)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", l, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", l, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile of quarantined non-VRRP RETH fixture: %v", err)
+	}
+	if len(config.QuarantinedZoneInterfaceKeys(cfg)) == 0 {
+		t.Fatal("premise: reth9.0 is not quarantined")
+	}
+	if pd := planPhysDesired(cfg)["ge-0-0-7"]; pd != nil {
+		t.Fatalf("premise: quarantined reth9.0 planned device %+v, want no plan entry", pd)
+	}
+
+	models := models9721(t, cfg)
+	member, ok := models["ge-0-0-7"]
+	if !ok {
+		t.Fatalf("no model for reth9 member ge-0-0-7; models=%v", modelNames9721(models))
+	}
+	if !member.IsVLANParent {
+		t.Fatalf("ge-0-0-7 is not rendered as a VLAN parent: %+v", member)
+	}
+	if len(member.VLANParentAddresses) != 0 {
+		t.Errorf("quarantined ge-0-0-7 VLANParentAddresses=%v, want none: an unplanned address must not render",
+			member.VLANParentAddresses)
 	}
 }
