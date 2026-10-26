@@ -304,21 +304,42 @@ func TestCapFlagIsWiredEndToEnd9054(t *testing.T) {
 			"the field would be decoded and then never read")
 	}
 
-	// 3. The arm calls the GATED adjudication.
+	// 3. The NoRoute arm calls the adjudication helper, which in turn calls
+	// the gated policy entry point. The call moved out of poll_descriptor/mod.rs
+	// when the helper was extracted; assert both ends of that delegation.
 	poll := read("userspace-dp/src/afxdp/poll_descriptor/mod.rs")
-	if !strings.Contains(poll, "forwarding::noroute_policy_denial_gated_at(") {
-		t.Error("the NoRoute arm does not call noroute_policy_denial_gated_at; the cap flag is " +
-			"carried across the socket and then ignored at the one decision it exists for")
+	const noRouteArm = "ForwardingDisposition::NoRoute =>"
+	noRouteStart := strings.Index(poll, noRouteArm)
+	if noRouteStart < 0 {
+		t.Fatal("poll_descriptor/mod.rs has no NoRoute arm; the census has no positive control")
+	}
+	armBodyStart := noRouteStart + len(noRouteArm)
+	nextArm := regexp.MustCompile(`(?m)^[\t ]+ForwardingDisposition::[A-Za-z0-9_]+[\t ]*=>`).
+		FindStringIndex(poll[armBodyStart:])
+	if nextArm == nil {
+		t.Fatal("could not find the end of the NoRoute arm in poll_descriptor/mod.rs")
+	}
+	noRouteBody := poll[armBodyStart : armBodyStart+nextArm[0]]
+	if !strings.Contains(noRouteBody, "noroute_policy_adjudication(") {
+		t.Error("the NoRoute arm does not call noroute_policy_adjudication")
+	}
+	adjudication := read("userspace-dp/src/afxdp/poll_descriptor/noroute_adjudication.rs")
+	if !strings.Contains(adjudication, "forwarding::noroute_policy_denial_gated_at(") {
+		t.Error("noroute_policy_adjudication does not call noroute_policy_denial_gated_at; " +
+			"capped and uncapped NoRoute frames would bypass zone policy")
 	}
 
-	// 4. The Go producer sets it on BOTH publish paths. manager_overlay does
-	// `next := *m.lastSnapshot`, so a path that forgets to reassign inherits a
-	// stale value — and the #7437 route listener drives that path on every
-	// kernel route change.
-	if !strings.Contains(read("pkg/dataplane/userspace/manager_overlay.go"),
-		"next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshots(") {
-		t.Error("the route-only republish path does not recompute LearnedRouteImportCapped; " +
-			"it inherits the previous snapshot's value")
+	// 4. The Go producer recomputes the flag on BOTH route-only publish paths.
+	// manager_overlay starts from *m.lastSnapshot, so either path that forgets
+	// to reassign inherits a stale value.
+	managerOverlay := read("pkg/dataplane/userspace/manager_overlay.go")
+	if !strings.Contains(managerOverlay,
+		"next.Routes, next.LearnedRouteImportCapped, routeErr = buildRouteSnapshotsWithRGPrimary(") {
+		t.Error("the staged route-overlay publish path does not recompute LearnedRouteImportCapped")
+	}
+	if !strings.Contains(managerOverlay,
+		"next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(") {
+		t.Error("the route-only republish path does not recompute LearnedRouteImportCapped")
 	}
 	if !strings.Contains(read("pkg/dataplane/userspace/builder.go"),
 		"LearnedRouteImportCapped: learnedRoutesCapped,") {
@@ -326,9 +347,9 @@ func TestCapFlagIsWiredEndToEnd9054(t *testing.T) {
 	}
 
 	// POSITIVE CONTROL: prove the reader reaches real source.
-	if !strings.Contains(poll, "ForwardingDisposition::NoRoute =>") {
-		t.Fatal("the census read poll_descriptor/mod.rs but did not find the NoRoute arm — it " +
-			"is not reading the file it thinks it is")
+	if !strings.Contains(poll, noRouteArm) || !strings.Contains(adjudication,
+		"forwarding::noroute_policy_denial_gated_at(") {
+		t.Fatal("the census did not find the NoRoute arm and its gated decision call")
 	}
 }
 

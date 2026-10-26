@@ -58,7 +58,7 @@ func TestPackedUnsupportedTailStillRejectsWithExplicitUnitPeer12719(t *testing.T
 
 func TestPackedUnsupportedTailSurvivesNonzeroBareUnitPeer12719(t *testing.T) {
 	src := `groups { g { interfaces { ge-0/0/0 unit 7 mac 00:11:22:33:44:55; } } } ` +
-		`apply-groups g; interfaces { ge-0/0/0 { unit 7; } }`
+		`apply-groups g; interfaces { ge-0/0/0 { vlan-tagging; unit 7 { vlan-id 7; } } }`
 	_, err := CompileConfig(hierTree(t, src))
 	if err == nil || !strings.Contains(err.Error(), "#2008 H10") {
 		t.Fatalf("strict compile error = %v; want #2008 H10 rejection", err)

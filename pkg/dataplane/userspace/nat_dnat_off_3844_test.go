@@ -13,6 +13,7 @@ import "testing"
 // snapshot only has the translate rule — the len/Off assertions fail.
 func TestDNATOffEmitsExemptionSnapshot(t *testing.T) {
 	cfg := compileSet(t, []string{
+		"set security zones security-zone untrust",
 		"set security nat destination pool p1 address 10.0.0.5",
 		"set security nat destination rule-set rs1 from zone untrust",
 		"set security nat destination rule-set rs1 rule r-exempt match destination-address 192.0.2.10/32",

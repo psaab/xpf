@@ -51,10 +51,13 @@ func TestFirewallFusedThenRejectedAtStoreBoundary12528(t *testing.T) {
 			return s.LoadMerge(`firewall { family inet { filter F { term T { from is-fragment then discard; } term allow { then accept; } } } }`)
 		}},
 		{name: "LoadOverride flex", want: fusedThenFlex12528, load: func(s *Store) error {
-			return s.LoadOverride(`firewall { family inet { filter F { term T { from { flexible-match-range { range R { byte-offset 9; then discard; } } } } term allow { then accept; } } } }`)
+			return s.LoadOverride(`firewall { family inet { filter F { term T { from { flexible-match-range { range R { byte-offset 9; bit-length 8; match-value 0x11; match-mask 0xff; then discard; } } } } term allow { then accept; } } } }`)
 		}},
 		{name: "LoadSet flex", want: fusedThenFlex12528, load: func(s *Store) error {
 			_, err := s.LoadSet("set firewall family inet filter F term T from flexible-match-range range R byte-offset 9\n" +
+				"set firewall family inet filter F term T from flexible-match-range range R bit-length 8\n" +
+				"set firewall family inet filter F term T from flexible-match-range range R match-value 0x11\n" +
+				"set firewall family inet filter F term T from flexible-match-range range R match-mask 0xff\n" +
 				"set firewall family inet filter F term T from flexible-match-range range R then discard\n")
 			return err
 		}},
@@ -131,11 +134,14 @@ func TestFirewallFusedThenControlsCommitAtStoreBoundary12528(t *testing.T) {
 		}},
 		{"range named then", func(s *Store) error {
 			_, err := s.LoadSet("set firewall family inet filter F term T from flexible-match-range range then byte-offset 9\n" +
+				"set firewall family inet filter F term T from flexible-match-range range then bit-length 8\n" +
+				"set firewall family inet filter F term T from flexible-match-range range then match-value 0x11\n" +
+				"set firewall family inet filter F term T from flexible-match-range range then match-mask 0xff\n" +
 				"set firewall family inet filter F term T then discard\n")
 			return err
 		}},
 		{"then-first flex", func(s *Store) error {
-			return s.LoadOverride(`firewall { family inet { filter F { term T then discard from flexible-match-range range R byte-offset 9; } } }`)
+			return s.LoadOverride(`firewall { family inet { filter F { term T then discard from flexible-match-range range R byte-offset 9 bit-length 8 match-value 0x11 match-mask 0xff; } } }`)
 		}},
 		{"from is-fragment protocol udp", func(s *Store) error {
 			return s.LoadOverride(`firewall { family inet { filter F { term T { from is-fragment protocol udp; then discard; } } } }`)
@@ -194,7 +200,7 @@ func TestFirewallFusedThenTolerantPathsWarn12528(t *testing.T) {
 firewall {
     family inet {
         filter F { term T { from { is-fragment then discard; } } term allow { then accept; } }
-        filter G { term U { from { flexible-match-range { range R { byte-offset 9; then discard; } } } } }
+        filter G { term U { from { flexible-match-range { range R { byte-offset 9; bit-length 8; match-value 0x11; match-mask 0xff; then discard; } } } } }
     }
 }`
 	count := func(warnings []string) (typed, fused int) {

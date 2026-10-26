@@ -546,18 +546,19 @@ func TestBeltEnumerationHasNoPhantomRedist16867(t *testing.T) {
 }
 
 // Gate7 Astra F1+F2 controls (tolerant path, real ApplyFull):
-//  (a) an UNREFERENCED operator policy named exactly as a fixed
-//      generated map (`xpf-emptied-chain-xpf-chain` /
-//      `xpf-default-export-xpf-chain`) beside an ordinary static route,
-//      with NO BGP at all — the generated definitions are never emitted
-//      (their emitters are conditional), so the cross-family belt must
-//      NOT invent them; the config applies cleanly. Pre-fix the belt
-//      added both fixed identities unconditionally and refused this
-//      non-fusing config.
-//  (b) the exact previously untested acceptance shape: entirely
-//      unreferenced no-from P (Gate5 witness name) with the composed
-//      import chain [C B] present — P has no referencing nodes, emits
-//      no per-source map, and the config applies.
+//
+//	(a) an UNREFERENCED operator policy named exactly as a fixed
+//	    generated map (`xpf-emptied-chain-xpf-chain` /
+//	    `xpf-default-export-xpf-chain`) beside an ordinary static route,
+//	    with NO BGP at all — the generated definitions are never emitted
+//	    (their emitters are conditional), so the cross-family belt must
+//	    NOT invent them; the config applies cleanly. Pre-fix the belt
+//	    added both fixed identities unconditionally and refused this
+//	    non-fusing config.
+//	(b) the exact previously untested acceptance shape: entirely
+//	    unreferenced no-from P (Gate5 witness name) with the composed
+//	    import chain [C B] present — P has no referencing nodes, emits
+//	    no per-source map, and the config applies.
 //
 // FAIL-ON-REVERT: restoring unconditional fixed identities reds (a);
 // restoring the ("", "") phantom pass does not red (b) at ApplyFull

@@ -94,10 +94,30 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 			}
 		}
 		ctx := contextFor(parent)
+		pre := ""
+		switch siteKeyEarly {
+		case "forwarding-options port-mirroring instance xpfarg input rate":
+			v1, v2 = "1", "2"
+			ctx = "input { ingress { interface ge-0/0/0.0; } } output { interface ge-0/0/1.0; } "
+		case "system archival configuration archive-sites":
+			v1, v2 = "scp://backup@10.0.0.1:/configs", "scp://backup@10.0.0.2:/configs"
+		case "security dynamic-address address-name xpfarg profile feed-name":
+			pre = `security { dynamic-address { feed-server fixture-feed { url "https://feeds.example.com/list.txt"; feed-name xpfaaa path /a.txt; feed-name xpfbbb path /b.txt; } } } `
+		case "security nat nat64 rule-set xpfarg source-pool":
+			pre = `security { nat { source { pool xpfaaa { address 100.64.0.7/32; } pool xpfbbb { address 100.64.0.8/32; } } } } `
+		}
 		siteKey := strings.Join(s.container, " ") + " " + s.leaf
-		elidedText := nest(parent, ctx+stanza+" "+s.leaf+" "+v1+";")
+		elidedText := pre + nest(parent, ctx+stanza+" "+s.leaf+" "+v1+";")
 		if flagSite {
-			elidedText = nest(parent, ctx+stanza+" "+s.leaf+";")
+			elidedText = pre + nest(parent, ctx+stanza+" "+s.leaf+";")
+		}
+		if siteKeyEarly == "forwarding-options port-mirroring instance" {
+			elidedText = nest(parent,
+				"port-mirroring instance "+v1+" input ingress interface ge-0/0/0.0; "+
+					"port-mirroring instance "+v1+" output interface ge-0/0/1.0;")
+		}
+		if siteKeyEarly == "security nat nat64 rule-set xpfarg source-pool" {
+			elidedText = pre + nest(parent, "rule-set xpfarg prefix 64:ff9b::/96 source-pool "+v1+";")
 		}
 		elidedText = compactBGPProcessASFixture8690(siteKey, elidedText)
 
@@ -125,21 +145,37 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 		if normalizeCompactStanzas(probe) == 0 {
 			continue // production leaves this site alone; not in scope
 		}
-		bracedV1 := nest(parent, ctx+stanza+" { "+s.leaf+" "+v1+"; }")
-		bracedV2 := nest(parent, ctx+stanza+" { "+s.leaf+" "+v2+"; }")
+		bracedV1 := pre + nest(parent, ctx+stanza+" { "+s.leaf+" "+v1+"; }")
+		bracedV2 := pre + nest(parent, ctx+stanza+" { "+s.leaf+" "+v2+"; }")
 		if flagSite {
 			// PRESENCE vs ABSENCE. cb2 is the flag omitted, which is also the
 			// empty skeleton -- so the vacuity guard below reads as "the
 			// presence of this flag is not observable", the same property it
 			// asserts for a valued leaf.
-			bracedV1 = nest(parent, ctx+stanza+" { "+s.leaf+"; }")
-			bracedV2 = nest(parent, ctx+stanza+" { }")
+			bracedV1 = pre + nest(parent, ctx+stanza+" { "+s.leaf+"; }")
+			bracedV2 = pre + nest(parent, ctx+stanza+" { }")
+		}
+		if siteKeyEarly == "forwarding-options port-mirroring instance" {
+			mirror := func(name string) string {
+				return "port-mirroring { instance " + name +
+					" { input { ingress { interface ge-0/0/0.0; } } " +
+					"output { interface ge-0/0/1.0; } } }"
+			}
+			bracedV1 = nest(parent, mirror(v1))
+			bracedV2 = nest(parent, mirror(v2))
+		}
+		if siteKeyEarly == "security nat nat64 rule-set xpfarg source-pool" {
+			bracedV1 = pre + nest(parent, "rule-set xpfarg { prefix 64:ff9b::/96; source-pool "+v1+"; }")
+			bracedV2 = pre + nest(parent, "rule-set xpfarg { prefix 64:ff9b::/96; source-pool "+v2+"; }")
 		}
 		bracedV1 = compactBGPProcessASFixture8690(siteKey, bracedV1)
 		bracedV2 = compactBGPProcessASFixture8690(siteKey, bracedV2)
 		cb1 := compileText(t, bracedV1)
 		cb2 := compileText(t, bracedV2)
-		ceText := compactBGPProcessASFixture8690(siteKey, nest(parent, ctx+stanza+" { }"))
+		ceText := compactBGPProcessASFixture8690(siteKey, pre+nest(parent, ctx+stanza+" { }"))
+		if siteKeyEarly == "security nat nat64 rule-set xpfarg source-pool" {
+			ceText = pre + nest(parent, "rule-set xpfarg { prefix 64:ff9b::/96; }")
+		}
 		ce := compileText(t, ceText)
 		if cb1 == nil || cb2 == nil || ce == nil {
 			// The pass DOES normalize this site (checked above), but a
@@ -569,16 +605,8 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 		// MetricsRequireAuth=true exactly as braced (pinned by
 		// TestCompactSSHAPIAuthFlagsCompile16538). No benign entry is
 		// recorded because no gate moves REJECTED -> accepted here.
-		"snmp trap-group xpfarg targets": "the gate refuses the CONSEQUENCE of the drop, not " +
-			"the spelling. Measured: with the pass disabled the elided " +
-			"`trap-group tg1 targets 10.0.0.1;` loses its targets and snmp rejects with " +
-			"\"no targets configured (a trap group with zero targets sends no " +
-			"notifications)\"; with the pass enabled the target survives and the same gate " +
-			"accepts. The gate is doing its job in both cases — it is the DROP it objects " +
-			"to, and the pass repairs the drop. Normalizing here makes the operator's " +
-			"config mean what they wrote, which is the acceptance being correct rather " +
-			"than the gate being disarmed. Same shape as the #8430 empty-match example " +
-			"in the LIMITATION note above.",
+		"security dynamic-address address-name xpfarg profile feed-name": "the fixture defines both referenced feed names on a reachable HTTPS feed-server. Without normalization the profile feed-name is dropped and #3300 refuses the unresolved binding; with normalization it survives, resolves to the declared feed and commits. The gate still rejects an absent or unknown feed.",
+		"security nat nat64 rule-set xpfarg source-pool":                 "the fixture provides a valid prefix and two defined IPv4 /32 source pools. Without normalization the rule-set's packed source-pool is dropped and #15000 refuses the missing pool; with normalization it survives and resolves. This repairs the value the gate is intended to require.",
 	}
 	var unclassified []string
 	for _, site := range disarmed {

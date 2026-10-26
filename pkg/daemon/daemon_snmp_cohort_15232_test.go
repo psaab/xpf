@@ -238,6 +238,9 @@ func TestDaemonSNMPRethInfosProduction15232(t *testing.T) {
 	}
 	sets := "set chassis cluster cluster-id 1\n" +
 		"set chassis cluster authentication-key test-cluster-psk-15232\n" +
+		"set chassis cluster control-interface em0\n" +
+		"set chassis cluster peer-address 10.99.0.2\n" +
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24\n" +
 		"set chassis cluster reth-count 1\n" +
 		"set chassis cluster redundancy-group 1 node 0 priority 200\n" +
 		"set chassis cluster redundancy-group 1 node 1 priority 100\n" +

@@ -21,6 +21,7 @@ func compileIPMonCluster16667(t *testing.T, rgBody string) *config.ClusterConfig
     cluster {
         authentication-key test-cluster-psk-16667;
         cluster-id 1;
+        no-private-rg-election;
         redundancy-group 1 {
             node 0 priority 200;
 ` + rgBody + `

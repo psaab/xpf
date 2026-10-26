@@ -42,8 +42,8 @@ func wgTunnelLines9521(name, port, key, peer, allowed string) []string {
 }
 
 const (
-	wgKeyA9521 = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-	wgKeyB9521 = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+	wgKeyA9521 = "00bedd4ed26623ab2f765d16af2dcba4f6dbe17c284a66c6494b48b823f4c654"
+	wgKeyB9521 = "04d9dab116416940a490d8bab5d0dd921094f0a278dee3db867df8fbd2db6e16"
 )
 
 // TestSnapshotProgramsTheWarnedWireGuardSet9587 binds the builder wiring:

@@ -63,6 +63,9 @@ func directGateTestDaemon(t *testing.T) *Daemon {
 	if _, err := s.LoadSet(
 		"set chassis cluster cluster-id 1\n" +
 			"set chassis cluster authentication-key test-cluster-psk-6611\n" +
+			"set chassis cluster control-interface em0\n" +
+			"set chassis cluster peer-address 10.99.0.2\n" +
+			"set interfaces em0 unit 0 family inet address 10.99.0.1/24\n" +
 			"set chassis cluster redundancy-group 1 gratuitous-arp-count 10\n" +
 			"set interfaces reth0 redundant-ether-options redundancy-group 1\n" +
 			"set interfaces reth0 unit 0 family inet address 10.0.61.1/24\n",

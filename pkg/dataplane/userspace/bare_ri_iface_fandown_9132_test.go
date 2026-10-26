@@ -221,7 +221,8 @@ func TestAllThreeBindersReachTheSameRowsForABareRef9132(t *testing.T) {
 func TestAUnitRefMustNotDragTheBaseIntoTheVRF9132(t *testing.T) {
 	cfg := routingDomainCfg7160(t,
 		"set interfaces ge-0/0/0 unit 0 family inet address 192.168.10.1/24",
-		"set interfaces ge-0/0/0 unit 1 family inet address 192.168.11.1/24",
+		"set interfaces ge-0/0/0 vlan-tagging",
+		"set interfaces ge-0/0/0 unit 1 vlan-id 1 family inet address 192.168.11.1/24",
 		"set routing-instances tenant-a instance-type virtual-router",
 		"set routing-instances tenant-a interface ge-0/0/0.1",
 	)
@@ -355,7 +356,8 @@ func TestBareRefFanDownIsPurelyAdditive9132(t *testing.T) {
 		{
 			// The #5878 non-canonical spelling, which must keep binding the
 			// canonical unit key and nothing else.
-			"set interfaces ge-0/0/0 unit 1 family inet address 192.168.11.1/24",
+			"set interfaces ge-0/0/0 vlan-tagging",
+			"set interfaces ge-0/0/0 unit 1 vlan-id 1 family inet address 192.168.11.1/24",
 			"set routing-instances tenant-a instance-type virtual-router",
 			"set routing-instances tenant-a interface ge-0/0/0.01",
 		},

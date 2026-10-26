@@ -1,16 +1,16 @@
 package userspace
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #12834's narrow-quarantine caveat: a stray bare-physical override visible
-// in config.ResolveInterfaceHostInbound alone does not prove traffic leaked.
-// Exercise the address-snapshot -> zone host-inbound enforcement view for the
-// bare ge ingress identity and its ge.0 unit, owned by a healthy zone.
+// #12834's narrow-quarantine caveat: a bare zone member claims its physical
+// interface and every configured unit. A bare/unit cross-zone claim therefore
+// quarantines the shared identity, rather than leaving either raw host-inbound
+// override authoritative. Exercise the snapshot consumer with the unzoned
+// result and verify the kernel view fails closed.
 func TestPoisonedZoneOverrideAbsentFromKernelHostInboundView12834(t *testing.T) {
 	lines := []string{
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
@@ -36,50 +36,32 @@ func TestPoisonedZoneOverrideAbsentFromKernelHostInboundView12834(t *testing.T) 
 
 	snaps := []InterfaceSnapshot{
 		{
-			Name: "ge-0/0/0", Zone: "zulu", LinuxName: "ge-0/0/0",
+			Name: "ge-0/0/0", LinuxName: "ge-0/0/0",
 			Addresses: []InterfaceAddressSnapshot{{Family: "inet", Address: "10.0.0.1/24"}},
 		},
 		{
-			Name: "ge-0/0/0.0", Zone: "zulu", LinuxName: "ge-0/0/0", IsUnit: true,
+			Name: "ge-0/0/0.0", LinuxName: "ge-0/0/0", IsUnit: true,
 			Addresses: []InterfaceAddressSnapshot{{Family: "inet", Address: "10.0.0.1/24"}},
 		},
 	}
-	views := BuildZoneHostInboundViewsFromSnapshots(cfg, snaps)
-	var sawUnit bool
-	for _, view := range views {
-		if view.Zone == "alpha" && len(view.Interfaces) != 0 {
-			t.Fatalf("poisoned alpha still owns kernel host-inbound view interfaces %v", view.Interfaces)
-		}
-		if view.Zone != "zulu" {
-			continue
-		}
-		for _, iface := range view.Interfaces {
-			if iface == "ge-0/0/0" {
-				for _, service := range view.SystemServices {
-					if strings.EqualFold(service, "all") {
-						t.Fatalf("poisoned alpha's all override reached bare ingress view: %+v", view)
-					}
-				}
-			}
-			if iface == "ge-0/0/0.0" {
-				sawUnit = true
-				if len(view.SystemServices) != 1 || !strings.EqualFold(view.SystemServices[0], "ssh") {
-					t.Fatalf("healthy zulu unit host-inbound view = %v, want [ssh]", view.SystemServices)
-				}
-			}
-		}
+	conflicts := config.ZoneInterfaceQuarantineExclusions(cfg)
+	if zones, ok := conflicts["ge-0/0/0.0"]; !ok || len(zones) != 2 ||
+		zones[0] != "alpha" || zones[1] != "zulu" {
+		t.Fatalf("bare/unit zone conflict = %v, want [alpha zulu] quarantine", conflicts)
 	}
-	if !sawUnit {
-		t.Fatalf("snapshot produced no healthy ge-0/0/0.0 host-inbound view: %+v", views)
+	views := BuildZoneHostInboundViewsFromSnapshots(cfg, snaps)
+	for _, view := range views {
+		if len(view.Interfaces) != 0 {
+			t.Fatalf("conflicted zone published host-inbound interfaces: %+v", view)
+		}
 	}
 
-	// The bounded classifier control checks both identities as well: arbitrary
-	// tcp/7000 is not admitted by zulu's ssh-only unit policy, nor may alpha's
-	// orphaned bare override turn the physical query into an admit.
+	// The quarantined bare/unit identities are bounded-deny in the classifier,
+	// never inherited admits from either conflicting zone.
 	for _, iface := range []string{"ge-0/0/0", "ge-0/0/0.0"} {
 		got := ClassifyHostInboundForInterface(cfg, "zulu", iface, 6, true, 7000, nil, "inet")
 		if got.Status != HostInboundDenied {
-			t.Errorf("tcp/7000 on %s = %v, want denied by zulu's effective policy", iface, got.Status)
+			t.Errorf("tcp/7000 on %s = %v, want denied after zone-ownership quarantine", iface, got.Status)
 		}
 	}
 }

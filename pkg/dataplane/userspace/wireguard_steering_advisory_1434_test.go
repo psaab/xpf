@@ -36,8 +36,8 @@ var steeredSetRe = regexp.MustCompile(`(\d+) \(([A-Za-z0-9.]+)\)`)
 // promoted the next tunnel's port.
 func TestWireGuardSteeringAdvisoryNamesTheProgrammedSet9587(t *testing.T) {
 	const (
-		keyA = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-		keyB = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+		keyA = "00bedd4ed26623ab2f765d16af2dcba4f6dbe17c284a66c6494b48b823f4c654"
+		keyB = "04d9dab116416940a490d8bab5d0dd921094f0a278dee3db867df8fbd2db6e16"
 	)
 	// wg0 (lowest port) authored first; the emitter walks name order, so the
 	// selected set is wg0..wg7's ports and the overflow is wg8's — a gate

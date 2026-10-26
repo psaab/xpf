@@ -56,7 +56,7 @@ func (r *restartRecorder) snapshot() []time.Duration {
 // reached readiness would leave it: proc set, status healthy, liveness proven.
 func spawnSupervisedChild(t *testing.T) (*Manager, *exec.Cmd, *restartRecorder) {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "u5838")
+	dir, err := os.MkdirTemp(os.TempDir(), "u5838")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestFailedRestartRetainsDebtAndStaysFailClosed5838(t *testing.T) {
 // RED on revert: delete `m.startHelperSupervisorLocked(cmd)` from
 // ensureProcessLocked.
 func TestBringUpDetectsAChildThatDiesBeforeReady5838(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "u5838b")
+	dir, err := os.MkdirTemp(os.TempDir(), "u5838b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +580,7 @@ func TestRestartUsesTheCurrentConfigNotTheDeadGeneration5838(t *testing.T) {
 	// The config is REPLACED while the helper is down — a commit landing during
 	// the outage. A helper binary that exits at once keeps the case fast and
 	// makes bring-up report the socket path it actually tried.
-	dir, err := os.MkdirTemp("/tmp", "u5838r")
+	dir, err := os.MkdirTemp(os.TempDir(), "u5838r")
 	if err != nil {
 		t.Fatal(err)
 	}

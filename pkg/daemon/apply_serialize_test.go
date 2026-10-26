@@ -11,13 +11,13 @@
 //     would see >1 concurrent body invocation).
 //   - Removed Acquire from commitAndApply / commitConfirmedAndApply,
 //     or moved Commit() before Acquire (the held-semaphore test
-//     would not see a context.DeadlineExceeded — instead the call
-//     would panic on the nil store).
+//     would not see context.DeadlineExceeded).
 package daemon
 
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -70,14 +70,15 @@ func TestApplyConfigSerializes(t *testing.T) {
 	}
 }
 
-// commitAndApply must Acquire the semaphore BEFORE calling
-// store.Commit. We hold the semaphore externally and run
-// commitAndApply with a tight deadline; the expected outcome is
-// context.DeadlineExceeded (proves Acquire blocked). If a future
-// refactor moved Commit() before Acquire, the call would either
-// panic on the nil store or succeed without ctx.Err.
+// commitAndApply must Acquire the semaphore BEFORE calling store.Commit.
+// #16719 samples the rollback-discard generation before Acquire, so this
+// fixture supplies a real Store while the externally held semaphore proves
+// neither commit path proceeds to its Commit call before the context expires.
 func TestCommitAndApplyRespectsSemaphore(t *testing.T) {
-	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	d := &Daemon{
+		applySem: semaphore.NewWeighted(1),
+		store:    newConfigStore(t, filepath.Join(t.TempDir(), "config.db")),
+	}
 	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatalf("setup acquire: %v", err)
 	}

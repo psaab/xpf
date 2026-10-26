@@ -103,6 +103,7 @@ func TestValidateNATRuleSetMixedScope(t *testing.T) {
 	t.Run("source from zone + to interface compiles", func(t *testing.T) {
 		tree := buildNATScopeTree(t,
 			"set security nat source rule-set RS from zone trust",
+			"set interfaces ge-0/0/2 unit 0 family inet address 192.0.2.1/24",
 			"set security nat source rule-set RS to interface ge-0/0/2.0",
 			"set security nat source rule-set RS rule R1 then source-nat interface",
 		)

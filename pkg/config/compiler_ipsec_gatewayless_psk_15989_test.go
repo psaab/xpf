@@ -14,10 +14,10 @@ import (
 // id-1 = "%any" secret matching any peer identity, so a holder of any
 // on-box PSK could authenticate into the tunnel. Strict commit must
 // reject it; the tolerant load / peer-sync path downgrades to the same
-// #14591 warning prefix and keeps the VPN (the pkg/ipsec render belt
-// skips it, pinned in pkg/ipsec TestGatewaylessPSK15989). Inline
-// endpoints (usable IP/hostname in the gateway leaf, no gateway object)
-// stay legal: the peer address scopes their secret.
+// #14591 warning prefix and keeps the VPN (the pkg/ipsec render belt skips it,
+// pinned in pkg/ipsec TestGatewaylessPSK15989). #16708 requires an inline
+// hostname to use an IKE gateway object carrying remote-identity; an inline IP
+// literal remains a valid peer scope.
 func TestGatewaylessPSK15989(t *testing.T) {
 	build := func(t *testing.T, commands []string) *ConfigTree {
 		t.Helper()
@@ -65,16 +65,26 @@ func TestGatewaylessPSK15989(t *testing.T) {
 		}
 	})
 
-	t.Run("inline endpoint PSK VPNs still commit", func(t *testing.T) {
-		for _, endpoint := range []string{"192.0.2.1", "peer.example.com"} {
-			cmds := []string{
-				"set security ipsec vpn tun gateway " + endpoint,
-				"set security ipsec vpn tun bind-interface st0.0",
-				"set security ipsec vpn tun pre-shared-key ascii-text inline-secret",
-			}
-			if _, err := CompileConfig(build(t, cmds)); err != nil {
-				t.Fatalf("inline endpoint %s PSK VPN must commit (#15989 control), got: %v", endpoint, err)
-			}
+	t.Run("inline IP endpoint PSK VPN still commits", func(t *testing.T) {
+		cmds := []string{
+			"set security ipsec vpn tun gateway 192.0.2.1",
+			"set security ipsec vpn tun bind-interface st0.0",
+			"set security ipsec vpn tun pre-shared-key ascii-text inline-secret",
+		}
+		if _, err := CompileConfig(build(t, cmds)); err != nil {
+			t.Fatalf("inline IP endpoint PSK VPN must commit (#15989 control), got: %v", err)
+		}
+	})
+
+	t.Run("inline hostname endpoint is refused without a gateway remote identity", func(t *testing.T) {
+		cmds := []string{
+			"set security ipsec vpn tun gateway peer.example.com",
+			"set security ipsec vpn tun bind-interface st0.0",
+			"set security ipsec vpn tun pre-shared-key ascii-text inline-secret",
+		}
+		if _, err := CompileConfig(build(t, cmds)); err == nil ||
+			!strings.Contains(err.Error(), "#16708") {
+			t.Fatalf("inline hostname PSK endpoint must be refused (#16708), got: %v", err)
 		}
 	})
 }

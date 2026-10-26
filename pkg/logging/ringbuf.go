@@ -252,14 +252,14 @@ var screenFlagNames = map[uint32]string{
 
 // EventReader reads events from an EventSource.
 type EventReader struct {
-	source                   EventSource
-	buffer                   *EventBuffer
-	syslogMu                 sync.RWMutex
-	syslogClients            []*SyslogClient
+	source        EventSource
+	buffer        *EventBuffer
+	syslogMu      sync.RWMutex
+	syslogClients []*SyslogClient
 	// syslogRetired folds drop counters of replaced security-log clients
 	// per destination so the exported counters survive rebuilds (#16769).
 	// Guarded by syslogMu.
-	syslogRetired syslogDropAccumulator
+	syslogRetired            syslogDropAccumulator
 	localMu                  sync.RWMutex
 	localWriters             []*LocalLogWriter
 	callbackMu               sync.RWMutex

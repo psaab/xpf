@@ -29,7 +29,10 @@ func TestCompilerStampsImplicitSourceNATScopes12525(t *testing.T) {
 		{
 			name: "explicit scopes on both sides",
 			from: []string{"set security nat source rule-set RS from interface ge-0/0/0.0"},
-			to:   []string{"set security nat source rule-set RS to routing-instance VR1"},
+			to: []string{
+				"set security nat source rule-set RS to routing-instance VR1",
+				"set routing-instances VR1 instance-type virtual-router",
+			},
 		},
 	}
 	for _, tc := range cases {

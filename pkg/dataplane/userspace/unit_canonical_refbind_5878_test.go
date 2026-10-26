@@ -27,8 +27,8 @@ import (
 func canonRefBindCfg5878(t *testing.T) *config.Config {
 	t.Helper()
 	cmds := []string{
-		"set interfaces ge-0/0/0 unit 1 family inet address 10.0.0.1/24",
-		"set routing-instances ri1 instance-type virtual-router",
+		"set interfaces ge-0/0/0 vlan-tagging",
+		"set interfaces ge-0/0/0 unit 1 vlan-id 1 family inet address 10.0.0.1/24",
 		"set routing-instances ri1 interface ge-0/0/0.01",
 		"set security zones security-zone trust interfaces ge-0/0/0.01",
 		"set security zones security-zone trust interfaces ge-0/0/0.01 host-inbound-traffic system-services ssh",

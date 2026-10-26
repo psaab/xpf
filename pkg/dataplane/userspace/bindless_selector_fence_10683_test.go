@@ -14,11 +14,16 @@ func bindlessSelectorConfig10683() *config.Config {
 	cfg := overlayTestConfig()
 	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
 		"policy-vpn": {
-			Name: "policy-vpn",
+			Name:    "policy-vpn",
+			Gateway: "gw1",
+			PSK:     config.NewSecret("fixture-psk"),
 			TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 				"corp": {LocalIP: "10.20.0.0/16", RemoteIP: "198.51.100.10-198.51.100.20"},
 			},
 		},
+	}
+	cfg.Security.IPsec.Gateways = map[string]*config.IPsecGateway{
+		"gw1": {Name: "gw1", Address: "192.0.2.1"},
 	}
 	return cfg
 }

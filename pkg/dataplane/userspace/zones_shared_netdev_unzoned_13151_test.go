@@ -33,8 +33,9 @@ func compile13151(t *testing.T, cmds []string) *config.Config {
 func TestSharedNetdevZonedUnzoned13151(t *testing.T) {
 	t.Run("main table contested not claimed", func(t *testing.T) {
 		cfg := compile13151(t, []string{
+			"set interfaces ge-0/0/0 vlan-tagging",
 			"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
-			"set interfaces ge-0/0/0 unit 1 family inet address 10.0.1.1/24",
+			"set interfaces ge-0/0/0 unit 1 vlan-id 1 family inet address 10.0.1.1/24",
 			"set security zones security-zone trust interfaces ge-0/0/0.0",
 			"set security zones security-zone trust host-inbound-traffic system-services ssh",
 		})
@@ -63,8 +64,9 @@ func TestSharedNetdevZonedUnzoned13151(t *testing.T) {
 
 	t.Run("vrf slave not blanket-dropped", func(t *testing.T) {
 		cfg := compile13151(t, []string{
+			"set interfaces ge-0/0/0 vlan-tagging",
 			"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
-			"set interfaces ge-0/0/0 unit 1 family inet address 10.0.1.1/24",
+			"set interfaces ge-0/0/0 unit 1 vlan-id 1 family inet address 10.0.1.1/24",
 			"set routing-instances blue instance-type vrf",
 			"set routing-instances blue interface ge-0/0/0.0",
 			"set routing-instances blue interface ge-0/0/0.1",

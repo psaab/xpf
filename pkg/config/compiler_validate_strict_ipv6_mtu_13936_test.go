@@ -102,13 +102,15 @@ func TestIPv6UnitMTUHierarchicalRejected13936(t *testing.T) {
 // referenced untagged unit MTU (1000) to that link, so an IPv6-bearing sibling
 // with no family MTU still has an effective link MTU below 1280.
 func TestIPv6UnitMTULowReferencedSiblingRejected13936(t *testing.T) {
-	assertCommitRejects(t, flatTreeFromSets(t,
+	assertCommitRejects(t, buildTree(t, []string{
+		"set interfaces ge-0-0-0 vlan-tagging",
 		"set interfaces ge-0-0-0 unit 0 family inet address 10.0.0.1/24",
 		"set interfaces ge-0-0-0 unit 0 family inet mtu 1000",
+		"set interfaces ge-0-0-0 unit 1 vlan-id 1",
 		"set interfaces ge-0-0-0 unit 1 family inet6 address 2001:db8:1::1/64",
 		"set security zones security-zone trust interfaces ge-0-0-0.0",
 		"set security zones security-zone trust interfaces ge-0-0-0.1",
-	), "interfaces ge-0-0-0 unit 1: effective mtu 1000")
+	}), "interfaces ge-0-0-0 unit 1: effective mtu 1000")
 }
 
 // Controls: the boundary and every non-IPv6 / no-committed-MTU shape

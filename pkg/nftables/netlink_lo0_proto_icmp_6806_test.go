@@ -27,7 +27,7 @@ import (
 func buildLo0Term6806(t *testing.T, term Lo0FilterTerm) *nlPlan {
 	t.Helper()
 	p := newBuildPlan(t, "xpf_lo0", lo0FilterPriority)
-	buildLo0FilterNetlink(p, Lo0FilterSpec{V4Terms: []Lo0FilterTerm{term}})
+	buildLo0FilterNetlink(p, Lo0FilterSpec{NoIPv6RejectZeroHopLimit: true, V4Terms: []Lo0FilterTerm{term}})
 	return p
 }
 

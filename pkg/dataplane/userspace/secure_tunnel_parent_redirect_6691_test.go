@@ -265,6 +265,7 @@ func TestExclusionClassesAgreeAcrossParentAndChild(t *testing.T) {
 			lines: []string{
 				"set interfaces gr-0/0/0 tunnel source 10.0.0.1",
 				"set interfaces gr-0/0/0 tunnel destination 10.0.0.2",
+				"set interfaces gr-0/0/0 vlan-tagging",
 				"set interfaces gr-0/0/0 unit 7 vlan-id 100",
 				"set security zones security-zone trust interfaces gr-0/0/0.7",
 			},
@@ -277,6 +278,7 @@ func TestExclusionClassesAgreeAcrossParentAndChild(t *testing.T) {
 		{
 			class: "fxp name",
 			lines: []string{
+				"set interfaces fxp0 vlan-tagging",
 				"set interfaces fxp0 unit 7 vlan-id 100",
 				"set security zones security-zone trust interfaces fxp0.7",
 			},
@@ -288,6 +290,7 @@ func TestExclusionClassesAgreeAcrossParentAndChild(t *testing.T) {
 		{
 			class: "em name",
 			lines: []string{
+				"set interfaces em0 vlan-tagging",
 				"set interfaces em0 unit 7 vlan-id 100",
 				"set security zones security-zone trust interfaces em0.7",
 			},
@@ -298,6 +301,7 @@ func TestExclusionClassesAgreeAcrossParentAndChild(t *testing.T) {
 		{
 			class: "lo0 name",
 			lines: []string{
+				"set interfaces lo0 vlan-tagging",
 				"set interfaces lo0 unit 7 vlan-id 100",
 				"set security zones security-zone trust interfaces lo0.7",
 			},
@@ -319,6 +323,7 @@ func TestExclusionClassesAgreeAcrossParentAndChild(t *testing.T) {
 				"set chassis cluster reth-count 2",
 				"set chassis cluster authentication-key abcdefghijklmnopqrstuvwxyz012345",
 				"set interfaces fab0 fabric-options member-interfaces ge-0/0/3",
+				"set interfaces fab0 vlan-tagging",
 				"set interfaces fab0 unit 7 vlan-id 100",
 				"set security zones security-zone trust interfaces fab0.7",
 				"set interfaces ge-0/0/3 unit 0 family inet address 10.0.9.1/24",
@@ -332,6 +337,7 @@ func TestExclusionClassesAgreeAcrossParentAndChild(t *testing.T) {
 			class: "SecureTunnel",
 			lines: []string{
 				"set security ipsec vpn V bind-interface st10",
+				"set interfaces st10 vlan-tagging",
 				"set interfaces st10 unit 7 vlan-id 100",
 				"set security zones security-zone trust interfaces st10.7",
 			},
@@ -823,9 +829,9 @@ func TestRefusedNetdevNeedsEveryOwnerToAgree(t *testing.T) {
 				"set interfaces wg1408 unit 0 tunnel mode wireguard",
 				"set interfaces wg1408 unit 0 tunnel wireguard listen-port 51820",
 				"set interfaces wg1408 unit 0 tunnel wireguard private-key " +
-					"0000000000000000000000000000000000000000000000000000000000000001",
+					"00bedd4ed26623ab2f765d16af2dcba4f6dbe17c284a66c6494b48b823f4c654",
 				"set interfaces wg1408 unit 0 tunnel wireguard peer " +
-					"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa " +
+					"04d9dab116416940a490d8bab5d0dd921094f0a278dee3db867df8fbd2db6e16 " +
 					"allowed-ips 10.9.0.0/24",
 				"set security zones security-zone trust interfaces ge-0/0/0.0",
 				"set security zones security-zone trust interfaces wg1408.0",

@@ -66,6 +66,7 @@ var lenientCompletenessAllowlist16166 = map[string]string{
 	"suppressDPDThresholdIKEv2Advisory":  "advisory suppressor (#15025), true in lenientCompileOpts",
 	"suppressFabricStampAdvisory":        "advisory suppressor (#10105), true in lenientCompileOpts",
 	"suppressSSHUnmanagedAdvisory16737":  "advisory suppressor (#16737), true in lenientCompileOpts",
+	"igpIdentityExcused16810":            "compileTree-only exemption for the node-specific IGP identity gate; it is not a lenient downgrade",
 }
 
 // walkBoolFields16166 visits every bool field reachable from v,

@@ -19,6 +19,8 @@ func compileSNATPool(t *testing.T, poolCmds ...string) *config.Config {
 	tree := &config.ConfigTree{}
 	cmds := append([]string{}, poolCmds...)
 	cmds = append(cmds,
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security nat source rule-set RS from zone trust",
 		"set security nat source rule-set RS to zone untrust",
 		"set security nat source rule-set RS rule R1 match source-address 10.0.0.0/24",

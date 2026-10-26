@@ -98,10 +98,11 @@ func TestCLIFlowCollectorSurfacesAnnotateTheSkippedCollector7422(t *testing.T) {
 
 	surfaces := []struct {
 		name   string
+		label  string
 		render func() error
 	}{
-		{"show_security_flow_monitoring", c.showFlowMonitoring},
-		{"show_forwarding-options", c.showForwardingOptions},
+		{"show_security_flow_monitoring", "Collector:", c.showFlowMonitoring},
+		{"show_forwarding-options", "Flow server:", c.showForwardingOptions},
 	}
 
 	for _, s := range surfaces {
@@ -112,7 +113,7 @@ func TestCLIFlowCollectorSurfacesAnnotateTheSkippedCollector7422(t *testing.T) {
 				}
 			})
 
-			dropped := collectorLine7422(t, out, "10.0.0.2")
+			dropped := collectorLine7422(t, out, "10.0.0.2", s.label)
 			if !strings.Contains(dropped, "NOT INSTALLED") {
 				t.Fatalf("%s renders a collector the snapshot builder SKIPS as an "+
 					"active export target — the operator sees a collector that "+
@@ -125,7 +126,7 @@ func TestCLIFlowCollectorSurfacesAnnotateTheSkippedCollector7422(t *testing.T) {
 					"it.\n--- line ---\n%s", s.name, dropped)
 			}
 
-			armed := collectorLine7422(t, out, "10.0.0.1")
+			armed := collectorLine7422(t, out, "10.0.0.1", s.label)
 			if strings.Contains(armed, "NOT INSTALLED") {
 				t.Fatalf("%s annotated a collector the dataplane DOES install — "+
 					"crying wolf on a working export.\n--- line ---\n%s", s.name, armed)
@@ -134,20 +135,14 @@ func TestCLIFlowCollectorSurfacesAnnotateTheSkippedCollector7422(t *testing.T) {
 	}
 }
 
-// collectorLine7422 returns the single render line for one collector, so an
-// assertion cannot be satisfied by an annotation printed against the OTHER
-// collector. Matching "NOT INSTALLED" anywhere in the whole output would pass
-// for a renderer that annotated the healthy one.
-func collectorLine7422(t *testing.T, out, addr string) string {
+// collectorLine7422 returns the single render line for one collector on the
+// selected surface, so an assertion cannot be satisfied by the other
+// renderer's address line when output formats are combined.
+func collectorLine7422(t *testing.T, out, addr, label string) string {
 	t.Helper()
-	// #16723: the two surfaces label the same collector differently
-	// ("Collector:" in showFlowMonitoring, "Flow server:" in
-	// showForwardingOptions), and one surface's block can contain the
-	// other label's address line — matching on the address alone
-	// collected both. Isolate by the surface's own label.
 	var hits []string
 	for _, l := range strings.Split(out, "\n") {
-		if strings.Contains(l, addr) && (strings.Contains(l, "Collector:") || strings.Contains(l, "Flow server:")) {
+		if strings.Contains(l, addr) && strings.Contains(l, label) {
 			hits = append(hits, l)
 		}
 	}

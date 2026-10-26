@@ -116,13 +116,13 @@ var valueSlotBindings = map[string]slotAdjudication{
 	"show security screen statistics zone":                                             {bindFixedPosition, "show_security.go handleShowSecurity screen statistics: args[3]"},
 	"show security zones":                                                              {bindModifierSplit, "show_security.go handleShowSecurity zones: cmdtree.SplitModifiers (#9065)"},
 
-	"test policy from-zone":         {bindSharedParser, "main.go testPolicy: policymatch.ParseSelectorArgs"},
-	"test policy to-zone":           {bindSharedParser, "main.go testPolicy: policymatch.ParseSelectorArgs (#15721)"},
-	"test policy ingress-interface": {bindSharedParser, "main.go testPolicy: policymatch.ParseSelectorArgs (#15721)"},
-	"test routing instance":         {bindKeyword, "main.go testRouting loop"},
+	"test policy from-zone":                  {bindSharedParser, "main.go testPolicy: policymatch.ParseSelectorArgs"},
+	"test policy to-zone":                    {bindSharedParser, "main.go testPolicy: policymatch.ParseSelectorArgs (#15721)"},
+	"test policy ingress-interface":          {bindSharedParser, "main.go testPolicy: policymatch.ParseSelectorArgs (#15721)"},
+	"test routing instance":                  {bindKeyword, "main.go testRouting loop"},
 	"clear dhcp client-identifier interface": {bindFixedPosition, "clear.go handleClearDHCP: req.Interface = args[2] after the `interface` keyword check"},
 
-	"test security-zone interface":  {bindKeyword, "main.go testSecurityZone loop"},
+	"test security-zone interface": {bindKeyword, "main.go testSecurityZone loop"},
 }
 
 // discoverValueSlots walks the operational tree and returns every path whose

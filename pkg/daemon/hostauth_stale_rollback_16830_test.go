@@ -150,7 +150,7 @@ func TestStaleRollbackKeepsNewerMarkerDirect16830(t *testing.T) {
 				return errors.New("premise: first claim must not be pre-existing")
 			}
 			beginHostAuthAuthority14969() // newer authority supersedes
-			claim.rollback()                // compensating withdrawal — must abstain
+			claim.rollback()              // compensating withdrawal — must abstain
 			return nil
 		})
 	}()

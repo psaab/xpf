@@ -32,6 +32,9 @@ func TestPaddedMaskHelperSupportedPublishesCanonical12507(t *testing.T) {
 	cfg := compileLenientSet9523(t, []string{
 		"set routing-options static route 10.0.0.0/08 discard",
 		"set routing-options rib inet6.0 static route 2001:db8::/032 discard",
+		"set security ike gateway gw address 198.51.100.1",
+		"set security ipsec vpn pv ike gateway gw",
+		"set security ipsec vpn pv pre-shared-key fixture-psk",
 		"set security ipsec vpn pv traffic-selector t4 local-ip 10.0.0.0/08",
 		"set security ipsec vpn pv traffic-selector t4 remote-ip 192.0.2.0/24",
 		"set security ipsec vpn pv traffic-selector t6 local-ip 2001:db8:1::/048",
@@ -75,10 +78,14 @@ func TestPaddedMaskHelperRefusedStampParity12507(t *testing.T) {
 		"set routing-options static route 11.0.0.0/008 next-hop 192.0.2.1 no-install",
 		"set routing-instances blue instance-type virtual-router",
 		"set routing-instances blue routing-options static route 10.1.0.0/008 discard",
+		"set security ike gateway gw address 198.51.100.1",
+		"set security ipsec vpn pv ike gateway gw",
+		"set security ipsec vpn pv pre-shared-key fixture-psk",
 		"set security ipsec vpn pv traffic-selector t1 local-ip 10.20.0.0/016",
 		"set security ipsec vpn pv traffic-selector t1 remote-ip 192.0.2.0/24",
 		// Route-based: no fence row, so its selector never reaches the helper.
 		"set security ipsec vpn rb bind-interface st0",
+		"set security ipsec vpn rb pre-shared-key fixture-psk",
 		"set security ipsec vpn rb traffic-selector t1 local-ip 10.30.0.0/016",
 		"set security ipsec vpn rb traffic-selector t1 remote-ip 192.0.2.0/24",
 	})

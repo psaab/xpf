@@ -32,6 +32,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 		tree := buildTree2074(t, []string{
 			"set security ipsec vpn tun gateway nope",
 			"set security ipsec vpn tun bind-interface st0.0",
+			"set security ipsec vpn tun pre-shared-key ascii-text fixture-secret",
 		})
 		_, err := CompileConfig(tree)
 		if err == nil {
@@ -48,6 +49,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 			// and no dynamic hostname.
 			"set security ike gateway bare-gw ike-policy pol1",
 			"set security ipsec vpn tun gateway bare-gw",
+			"set security ipsec vpn tun pre-shared-key ascii-text fixture-secret",
 			"set security ipsec vpn tun bind-interface st0.0",
 		})
 		_, err := CompileConfig(tree)
@@ -64,6 +66,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 		tree := buildTree2074(t, []string{
 			"set security ipsec vpn site-a gateway 10.1.0.1",
 			"set security ipsec vpn site-a bind-interface st0.0",
+			"set security ipsec vpn site-a pre-shared-key ascii-text fixture-secret",
 		})
 		if _, err := CompileConfig(tree); err != nil {
 			t.Fatalf("inline IP gateway should compile, got: %v", err)
@@ -75,6 +78,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 			"set security ike gateway remote-gw address 203.0.113.1",
 			"set security ipsec vpn tun gateway remote-gw",
 			"set security ipsec vpn tun bind-interface st0.0",
+			"set security ipsec vpn tun pre-shared-key ascii-text fixture-secret",
 		})
 		if _, err := CompileConfig(tree); err != nil {
 			t.Fatalf("defined+addressed gateway should compile, got: %v", err)
@@ -86,6 +90,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 			"set security ike gateway dyn-gw dynamic hostname peer.example.com",
 			"set security ipsec vpn tun gateway dyn-gw",
 			"set security ipsec vpn tun bind-interface st0.0",
+			"set security ipsec vpn tun pre-shared-key ascii-text fixture-secret",
 		})
 		if _, err := CompileConfig(tree); err != nil {
 			t.Fatalf("dynamic-hostname gateway should compile, got: %v", err)
@@ -101,6 +106,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 			// VPN (ipsec subtree) authored first ...
 			"set security ipsec vpn tun gateway hub-gw",
 			"set security ipsec vpn tun bind-interface st0.0",
+			"set security ipsec vpn tun pre-shared-key ascii-text fixture-secret",
 			// ... ike gateway authored after.
 			"set security ike gateway hub-gw address 198.51.100.1",
 		})
@@ -115,6 +121,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 	t.Run("lenient load warns but does not fail", func(t *testing.T) {
 		tree := buildTree2074(t, []string{
 			"set security ipsec vpn tun gateway nope",
+			"set security ipsec vpn tun pre-shared-key ascii-text fixture-secret",
 		})
 		// Strict rejects.
 		if _, err := CompileConfig(tree); err == nil {
@@ -140,6 +147,7 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 	t.Run("lenient for-node load warns but does not fail", func(t *testing.T) {
 		tree := buildTree2074(t, []string{
 			"set security ipsec vpn tun gateway nope",
+			"set security ipsec vpn tun pre-shared-key ascii-text fixture-secret",
 		})
 		cfg, err := CompileConfigForNodeLenient(tree, 0)
 		if err != nil {
@@ -159,10 +167,11 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 
 	t.Run("no gateway PSK VPN is rejected (#15989)", func(t *testing.T) {
 		// #15989 (H-4): a gateway-less PSK VPN has no peer address or
-		// identity to scope its secret to — it rendered a lone "%any"
-		// selector matching any peer. Commit must refuse it; the
-		// tolerant path warns (same #14591 prefix) and keeps the VPN
-		// (the render belt skips it). Inline endpoints stay legal.
+		// identity to scope its secret to; it would render a lone "%any"
+		// selector matching any peer. Strict commit refuses it, while the
+		// tolerant path warns and keeps the VPN (the render belt skips it).
+		// This no-gateway case is intentional: inline IP endpoints remain
+		// legal, but inline hostnames are rejected by #16708.
 		cmds := []string{
 			"set security ipsec vpn tun bind-interface st0.0",
 			"set security ipsec vpn tun pre-shared-key ascii-text gwless-secret",
@@ -189,19 +198,24 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 		}
 	})
 
-	t.Run("inline endpoint PSK VPN still compiles (#15989 control)", func(t *testing.T) {
-		// Control: an inline gateway endpoint (no gateway object, but a
-		// usable remote) scopes its secret by the peer address — the
-		// #15193 %any is only a local owner alongside it. Both forms
-		// must keep committing.
+	t.Run("inline IP endpoint PSK VPN still compiles; hostname is rejected (#16708)", func(t *testing.T) {
+		// An inline IP endpoint scopes the PSK to the peer address. Hostnames
+		// must instead use an IKE gateway with an explicit remote identity.
 		for _, endpoint := range []string{"192.0.2.1", "peer.example.com"} {
 			tree := buildTree2074(t, []string{
 				"set security ipsec vpn tun gateway " + endpoint,
 				"set security ipsec vpn tun bind-interface st0.0",
 				"set security ipsec vpn tun pre-shared-key ascii-text inline-secret",
 			})
-			if _, err := CompileConfig(tree); err != nil {
-				t.Fatalf("inline endpoint %s PSK VPN must compile (#15989), got: %v", endpoint, err)
+			_, err := CompileConfig(tree)
+			if endpoint == "peer.example.com" {
+				if err == nil || !strings.Contains(err.Error(), "#16708") {
+					t.Fatalf("inline hostname endpoint must be refused (#16708), got: %v", err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("inline IP endpoint %s PSK VPN must compile (#15989), got: %v", endpoint, err)
 			}
 		}
 	})

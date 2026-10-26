@@ -129,6 +129,7 @@ func TestTrunkWithNoUnitZeroPutsNoUnitRowOnTheParentIfindex_7509(t *testing.T) {
 
 	// TAGGED-ONLY: no unit 0 in the config at all.
 	_, taggedOnly := buildSnapshotsFromSet6722(t, []string{
+		"set interfaces ge-0/0/9 vlan-tagging",
 		"set interfaces ge-0/0/9 unit 100 vlan-id 100 family inet address 10.100.9.1/24",
 		"set security zones security-zone lan interfaces ge-0/0/9.100",
 	}, ifindexes, macs)
@@ -154,6 +155,7 @@ func TestTrunkWithNoUnitZeroPutsNoUnitRowOnTheParentIfindex_7509(t *testing.T) {
 	_, withUnit0 := buildSnapshotsFromSet6722(t, []string{
 		"set firewall family inet filter guard term t1 then accept",
 		"set interfaces ge-0/0/9 unit 0 family inet filter input guard",
+		"set interfaces ge-0/0/9 vlan-tagging",
 		"set interfaces ge-0/0/9 unit 100 vlan-id 100 family inet address 10.100.9.1/24",
 		"set security zones security-zone lan interfaces ge-0/0/9.100",
 	}, ifindexes, macs)

@@ -276,7 +276,7 @@ func TestSNMPClientListResolvesRegardlessOfOrder9416(t *testing.T) {
 // community that references it.
 func TestSNMPNamedClientListHonoursRestrict9416(t *testing.T) {
 	comm := snmpCommunity9416(t, snmpText9416(
-		`    client-list trusted { 10.0.0.0/8; 10.1.0.0/16 restrict; }
+		`    client-list trusted { 10.0.0.0/8; 10.1.0.0/16; restrict; }
     community public { authorization read-only; client-list-name trusted; }`))
 	if !allows9416(t, comm, "10.2.3.4") {
 		t.Error("10.2.3.4 is inside 10.0.0.0/8 and outside the restricted /16 — it must be admitted")

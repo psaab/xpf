@@ -47,26 +47,23 @@ import (
 //
 // So the dependency stays, and this test is what stops it being silent.
 //
-// ── WHY IT CHECKS CONTROL FLOW AND NOT LINE ORDER ────────────────────────
+// ── WHY IT CHECKS REACHABILITY, NOT SAME-FUNCTION ORDER ────────────────
 //
-// "the gate's line number is lower than the lookup's" is NOT the property.
-// A second function that reads USERSPACE_BINDINGS with no helper call and
-// ADJUDICATED-bit early return would satisfy a file-wide line-order check, and
-// that is precisely the "adds a path that reaches USERSPACE_BINDINGS without
-// passing the ingress test" case #7588 names. So this locates EVERY read,
-// resolves each to its enclosing function, and requires both steps earlier
-// IN THAT SAME FUNCTION.
+// The raw USERSPACE_BINDINGS read now lives in the outlined helper
+// binding_ready_slot (#15854). The invariant is checked at every boundary
+// that can reach the read: each helper call must follow ingress metadata and
+// an ADJUDICATED-bit branch whose own block returns in that caller. A direct
+// read outside binding_ready_slot, or a call lacking that per-caller gate,
+// fails this census rather than being treated as live routing state.
 const shimSourcePath7588 = "../../../userspace-xdp/src/lib.rs"
 
-// The statements whose ORDER is the invariant. The gate is matched as the
-// helper CALL plus the ADJUDICATED-bit test on the flags it returns: #12055
-// moved the lookup into `userspace_ingress_metadata`, so the call marks the
-// consultation and the bit test marks the early return, and either one
-// drifting past a binding read is the reorder this guards against. Matched on
-// names rather than whole lines, so reformatting does not red this while a
-// reorder still does.
+// The statements whose ORDER is the invariant. Each helper CALL is matched to
+// the ADJUDICATED-bit test on the flags fetched by the caller. That branch must
+// return before the helper call can reach its raw map read.
 var (
 	bindingReadRe7588        = regexp.MustCompile(`USERSPACE_BINDINGS\s*\.\s*get\s*\(`)
+	bindingHelperDefRe7588   = regexp.MustCompile(`(?m)^fn\s+binding_ready_slot\s*\(`)
+	bindingHelperCallRe7588  = regexp.MustCompile(`\bbinding_ready_slot\s*\(`)
 	ingressGateRe7588        = regexp.MustCompile(`userspace_ingress_metadata\s*\(\s*ctx\s*\)`)
 	ingressAdjudicatedRe7588 = regexp.MustCompile(`if\s+ingress_iface_flags\s*&\s*USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED\s*==\s*0`)
 	rustFnRe7588             = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?(?:unsafe\s+)?fn\s+([A-Za-z0-9_]+)`)
@@ -81,12 +78,8 @@ func TestEveryBindingReadIsGatedByTheIngressMap_7588(t *testing.T) {
 
 	reads := bindingReadRe7588.FindAllStringIndex(src, -1)
 	if len(reads) == 0 {
-		t.Fatal("no USERSPACE_BINDINGS read found in the shim — the enumeration source " +
-			"moved and a pass here would certify nothing about gating")
+		t.Fatal("found no USERSPACE_BINDINGS reads; the census has no positive control")
 	}
-	// The count is deliberately NOT pinned to 1: a second gated read is a
-	// legitimate change, and pinning the number would make this test a
-	// nuisance that gets loosened. What is pinned is that EVERY read is gated.
 	fns := rustFnRe7588.FindAllStringSubmatchIndex(src, -1)
 	if len(fns) < 5 {
 		t.Fatalf("only %d fn declarations parsed out of the shim; the scan is broken and "+
@@ -94,27 +87,63 @@ func TestEveryBindingReadIsGatedByTheIngressMap_7588(t *testing.T) {
 	}
 
 	for _, read := range reads {
-		name, start := enclosingFn7588(src, fns, read[0])
-		if name == "" {
-			t.Errorf("a USERSPACE_BINDINGS read at offset %d is outside any fn the scan "+
-				"recognised — the scan cannot vouch for it, which is the same as no "+
-				"guard", read[0])
+		readName, _ := enclosingFn7588(src, fns, read[0])
+		if readName != "binding_ready_slot" {
+			t.Errorf("USERSPACE_BINDINGS read is in fn %q, want binding_ready_slot; "+
+				"move this census to the new outlined reader", readName)
+		}
+	}
+	defs := bindingHelperDefRe7588.FindAllStringIndex(src, -1)
+	if len(defs) != 1 {
+		t.Fatalf("found %d binding_ready_slot definitions, want exactly one", len(defs))
+	}
+	calls := bindingHelperCallRe7588.FindAllStringIndex(src, -1)
+	// The regex also matches the definition; retain only call expressions.
+	var callOffsets []int
+	for _, call := range calls {
+		if call[0] == defs[0][0]+len("fn ") {
 			continue
 		}
-		body := src[start:read[0]]
-		call := ingressGateRe7588.FindStringIndex(body)
-		adjudicated := ingressAdjudicatedRe7588.FindStringIndex(body)
-		if call == nil || adjudicated == nil || call[0] >= adjudicated[0] {
-			t.Errorf("fn %s reads USERSPACE_BINDINGS without calling "+
+		callOffsets = append(callOffsets, call[0])
+	}
+	if len(callOffsets) == 0 {
+		t.Fatal("found no binding_ready_slot call sites; the census has no positive control")
+	}
+	for _, callOffset := range callOffsets {
+		callName, callFnStart := enclosingFn7588(src, fns, callOffset)
+		if callName == "" || callName == "binding_ready_slot" {
+			t.Errorf("binding_ready_slot call is attributed to fn %q; the scan cannot "+
+				"identify its gated caller", callName)
+			continue
+		}
+		callerPrefix := src[callFnStart:callOffset]
+		gateCalls := ingressGateRe7588.FindAllStringIndex(callerPrefix, -1)
+		adjudicatedChecks := ingressAdjudicatedRe7588.FindAllStringIndex(callerPrefix, -1)
+		if len(gateCalls) == 0 || len(adjudicatedChecks) == 0 {
+			t.Errorf("fn %s calls binding_ready_slot without calling "+
 				"userspace_ingress_metadata(ctx) and testing its ADJUDICATED bit "+
-				"first.\n\n"+
-				"The bootstrap clear does NOT zero stale binding rows on a fresh "+
-				"Manager (m.lastBindingIndices is nil), and the array is PinByName-"+
-				"pinned, so rows from a previous xpfd survive a restart. They are "+
-				"harmless ONLY because the helper call is followed by the ingress "+
-				"gate's early return before this lookup is reached. A read that "+
-				"skips that gate turns inherited rows into live routing state for "+
-				"interfaces the config no longer has (#7588).", name)
+				"before the call.", callName)
+			continue
+		}
+		for _, check := range adjudicatedChecks {
+			hasPriorGateCall := false
+			for _, gateCall := range gateCalls {
+				if gateCall[1] <= check[0] {
+					hasPriorGateCall = true
+					break
+				}
+			}
+			if !hasPriorGateCall {
+				t.Errorf("fn %s tests the ADJUDICATED bit before calling "+
+					"userspace_ingress_metadata(ctx)", callName)
+				continue
+			}
+			block, ok := ifBlockAfter7588(src, callFnStart+check[1])
+			if !ok || !strings.Contains(block, "return") {
+				t.Errorf("fn %s has an ADJUDICATED-bit gate before binding_ready_slot "+
+					"whose own branch does not return; inherited pinned rows can "+
+					"reach the binding lookup (#7588)", callName)
+			}
 		}
 	}
 }

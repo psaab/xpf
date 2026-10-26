@@ -155,8 +155,9 @@ func assertEgressZone6722(t *testing.T, snaps []InterfaceSnapshot, ifindex int, 
 func TestAuthoredUnitZoneBeatsTheDerivedBaseZone_6722(t *testing.T) {
 	// A1.
 	zoneMap, snaps := buildSnapshotsFromSet6722(t, []string{
+		"set interfaces ge-0/0/1 vlan-tagging",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.61.1/24",
-		"set interfaces ge-0/0/1 unit 1 family inet address 10.0.62.1/24",
+		"set interfaces ge-0/0/1 unit 1 vlan-id 1 family inet address 10.0.62.1/24",
 		"set security zones security-zone lan interfaces ge-0/0/1.0",
 		"set security zones security-zone dmz interfaces ge-0/0/1.1",
 	}, map[string]int{"ge-0-0-1": 10, "ge-0-0-1.1": 11},
@@ -185,13 +186,14 @@ func TestAuthoredUnitZoneBeatsTheDerivedBaseZone_6722(t *testing.T) {
 			"regression (master answers lan); answering dmz would make the "+
 			"adjudicated to-zone a function of zone NAMING")
 	assertEgressZone6722(t, snaps, 11, "dmz",
-		"unit 1 is alone on its own VLAN-less netdev and keeps its authored zone")
+		"unit 1 is alone on its own VLAN-tagged netdev and keeps its authored zone")
 
 	// A2 — the alphabetical control. Rename dmz to "aaa" so the derived base
 	// zone flips; the answer must not.
 	zoneMapA, snapsA := buildSnapshotsFromSet6722(t, []string{
+		"set interfaces ge-0/0/1 vlan-tagging",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.61.1/24",
-		"set interfaces ge-0/0/1 unit 1 family inet address 10.0.62.1/24",
+		"set interfaces ge-0/0/1 unit 1 vlan-id 1 family inet address 10.0.62.1/24",
 		"set security zones security-zone lan interfaces ge-0/0/1.0",
 		"set security zones security-zone aaa interfaces ge-0/0/1.1",
 	}, map[string]int{"ge-0-0-1": 10, "ge-0-0-1.1": 11},
@@ -1353,8 +1355,9 @@ func zoneMapCorpus6722() []struct {
 			"set security zones security-zone lan interfaces reth1",
 		}, false},
 		{"two-units-two-zones", []string{
+			"set interfaces ge-0/0/1 vlan-tagging",
 			"set interfaces ge-0/0/1 unit 0 family inet address 10.0.61.1/24",
-			"set interfaces ge-0/0/1 unit 1 family inet address 10.0.62.1/24",
+			"set interfaces ge-0/0/1 unit 1 vlan-id 1 family inet address 10.0.62.1/24",
 			"set security zones security-zone lan interfaces ge-0/0/1.0",
 			"set security zones security-zone dmz interfaces ge-0/0/1.1",
 		}, false},
@@ -1371,8 +1374,9 @@ func zoneMapCorpus6722() []struct {
 			"set security zones security-zone wan interfaces ge-0/0/1.80",
 		}, false},
 		{"bare-ref-fans-down-onto-units", []string{
+			"set interfaces ge-0/0/1 vlan-tagging",
 			"set interfaces ge-0/0/1 unit 0 family inet address 10.0.61.1/24",
-			"set interfaces ge-0/0/1 unit 1 family inet address 10.0.62.1/24",
+			"set interfaces ge-0/0/1 unit 1 vlan-id 1 family inet address 10.0.62.1/24",
 			"set security zones security-zone lan interfaces ge-0/0/1",
 		}, false},
 		// Duplicate bare claims are quarantined on the tolerant path; the
@@ -1814,6 +1818,9 @@ func TestNilUnitSlotCastsNoTrunkZoneVote_6722(t *testing.T) {
 func TestBarePortOfADifferentRethDoesNotDeferToThisOne_6722(t *testing.T) {
 	links := map[string]int{"ge-0-0-0": 30, "ge-0-0-1": 31, "ge-0-0-1.100": 32}
 	macs := map[string]string{"ge-0-0-1": "02:bf:72:01:00:01"}
+	// Keep reth2's own netdev on an earlier, distinct member. Otherwise
+	// ResolveReth selects the foreign dotted member below, adding reth2 as a
+	// third identity on ifindex 32 instead of exercising two-identity deference.
 	base := []string{
 		"set interfaces ge-0/0/0 gigether-options redundant-parent reth2",
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
@@ -1837,10 +1844,10 @@ func TestBarePortOfADifferentRethDoesNotDeferToThisOne_6722(t *testing.T) {
 			"there is no deference question to answer",
 			dotted.Ifindex, rethUnit.Ifindex)
 	}
-	if got := snapByName6722(t, snaps, "reth2").Ifindex; got == 32 {
-		t.Fatalf("precondition: reth2 resolved onto ifindex 32 as well, making " +
-			"THREE identities there; this cell must exercise the two-identity " +
-			"deference test, not the >2 refusal")
+	if got := snapByName6722(t, snaps, "reth2").Ifindex; got != 30 {
+		t.Fatalf("precondition: reth2 resolved onto ifindex %d, want its distinct member at 30; "+
+			"if it shares ifindex 32 the foreign port, reth1.100, and reth2 form three "+
+			"identities and this no longer exercises the two-identity deference test", got)
 	}
 	if ifc := cfg.Interfaces.Interfaces["ge-0/0/1.100"]; ifc == nil || ifc.RedundantParent != "reth2" {
 		t.Fatalf("precondition: ge-0/0/1.100 redundant-parent is not `reth2`; the " +

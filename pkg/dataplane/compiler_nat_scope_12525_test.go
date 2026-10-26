@@ -13,6 +13,9 @@ import (
 func sourceNATTree12525(t *testing.T, action string, scopeCommands ...string) *config.ConfigTree {
 	t.Helper()
 	commands := []string{
+		"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.1/24",
+		"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.2/24",
+		"set routing-instances VR1 instance-type virtual-router",
 		"set security nat source pool pool1 address 192.0.2.10",
 	}
 	commands = append(commands, scopeCommands...)
@@ -347,6 +350,9 @@ func TestCompileNATFailsClosedWhenToStampIsLost12525(t *testing.T) {
 func TestCompileNATAssignsInterfaceModeCountersWithoutToZone12525(t *testing.T) {
 	tree := &config.ConfigTree{}
 	for _, command := range []string{
+		"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.1/24",
+		"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.2/24",
+		"set routing-instances VR1 instance-type virtual-router",
 		"set security nat source rule-set RS-iface to interface ge-0/0/1.0",
 		"set security nat source rule-set RS-iface rule r1 match source-address 10.0.0.0/8",
 		"set security nat source rule-set RS-iface rule r1 then source-nat interface",

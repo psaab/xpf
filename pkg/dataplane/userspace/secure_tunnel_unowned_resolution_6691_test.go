@@ -51,8 +51,8 @@ func TestUnownedSecureTunnelUnitResolvesToItsRealDevice(t *testing.T) {
 		ref  string
 		// snapshot is the netdev the dataplane snapshot must name for `ref`.
 		snapshot string
-		// junosHost is the full per-zone iifname scope for zone trust,
-		// which includes the base row as well as the unit row.
+		// junosHost is the full per-zone iifname scope for zone trust. Some
+		// logical units (such as GRE) have no separate base netdev.
 		junosHost []string
 		// resolveKernel is ResolveKernelIfName's answer. It deliberately
 		// KEEPS the verbatim ref for an unowned unit — that is what it
@@ -79,6 +79,7 @@ func TestUnownedSecureTunnelUnitResolvesToItsRealDevice(t *testing.T) {
 			// number. Round 5 resolved it to `st5.3`, which is neither.
 			name: "802.1Q unit — the device is parent.vlanid",
 			set: []string{
+				"set interfaces st5 vlan-tagging",
 				"set interfaces st5 unit 3 vlan-id 80 family inet address 192.0.2.1/24",
 				"set security zones security-zone trust interfaces st5.3",
 			},
@@ -102,7 +103,7 @@ func TestUnownedSecureTunnelUnitResolvesToItsRealDevice(t *testing.T) {
 			},
 			ref:           "st0.1",
 			snapshot:      "st0u1",
-			junosHost:     []string{"st0", "st0u1"},
+			junosHost:     []string{"st0u1"},
 			resolveKernel: "st0.1",
 		},
 	} {
@@ -369,6 +370,7 @@ func TestResolveKernelIfNameUsesTheAuthoredBindInterface(t *testing.T) {
 // netdevs for one config ref.
 func TestSecureTunnelOwnershipPrecedesVlanID(t *testing.T) {
 	cfg := unownedStConfig(t,
+		"set interfaces st5 vlan-tagging",
 		"set interfaces st5 unit 3 vlan-id 80",
 		"set interfaces st5 unit 3 family inet address 10.9.9.1/24",
 		"set security ipsec vpn v bind-interface st5.3",

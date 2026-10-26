@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -443,7 +444,11 @@ func TestReinjectSocketAdmissionDeadline9506(t *testing.T) {
 }
 
 func TestReinjectSocketCompletionTimeoutResetsPartialFrame9506(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "x9506")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	path := filepath.Join(dir, "complete.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {

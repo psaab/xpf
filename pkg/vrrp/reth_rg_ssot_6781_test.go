@@ -51,7 +51,7 @@ func TestRethOwnershipCollectorsUseTheSharedPredicate(t *testing.T) {
 		file string
 	}{
 		{"CollectRethInstances", body, "vrrp.go"},
-		{"RethVIPsForRG", cfgBody, "../config/reth_vips.go"},
+		{"(c *Config) RethVIPsForRG", cfgBody, "../config/reth_vips.go"},
 	}
 	for _, col := range collectors {
 		fn := col.fn

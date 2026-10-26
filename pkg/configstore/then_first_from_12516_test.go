@@ -419,7 +419,14 @@ func TestThenFirstQuotedAndBracketedFrom12516(t *testing.T) {
 				s := newTestStore(t)
 				enterCfg(t, s)
 				err := replay.load(s)
-				if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "#12516") {
+				if replay.name == "LoadSet" || replay.name == "LoadMerge flat" {
+					// The flat-load contract scrubs the underlying #12516
+					// parser diagnostic (#14718); retain the no-mutation
+					// assertion below without expecting input-derived text.
+					if err == nil || !strings.Contains(err.Error(), "invalid set/delete/deactivate/activate/annotate command") {
+						t.Fatalf("%s err = %v, want a scrubbed flat-load refusal", replay.name, err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "#12516") {
 					t.Fatalf("%s err = %v, want the #12516 refusal naming %q", replay.name, err, tc.want)
 				}
 				if view := s.ShowCandidateSet(); strings.Contains(view, "policy-statement P") {
@@ -485,8 +492,8 @@ func TestThenFirstFromLineVerbsRefused12516(t *testing.T) {
 		t.Run(verb, func(t *testing.T) {
 			s := loaded(t)
 			_, err := s.LoadSet(verb + " " + line)
-			if err == nil || !strings.Contains(err.Error(), verb+" "+line+": a then-first") || !strings.Contains(err.Error(), "#12516") {
-				t.Fatalf("LoadSet(%s) err = %v, want the explicit #12516 refusal", verb, err)
+			if err == nil || !strings.Contains(err.Error(), "invalid set/delete/deactivate/activate/annotate command") {
+				t.Fatalf("LoadSet(%s) err = %v, want a scrubbed flat-load refusal", verb, err)
 			}
 			unchanged(t, s)
 		})
@@ -529,8 +536,8 @@ func TestThenFirstFromLineVerbsRefused12516(t *testing.T) {
 		}
 		dst := newTestStore(t)
 		enterCfg(t, dst)
-		if _, err := dst.LoadSet(strings.Join(lines, "\n")); err == nil || !strings.Contains(err.Error(), "deactivate") || !strings.Contains(err.Error(), "#12516") {
-			t.Fatalf("LoadSet(display set) err = %v, want the explicit #12516 deactivate refusal", err)
+		if _, err := dst.LoadSet(strings.Join(lines, "\n")); err == nil || !strings.Contains(err.Error(), "invalid set/delete/deactivate/activate/annotate command") {
+			t.Fatalf("LoadSet(display set) err = %v, want a scrubbed flat-load refusal", err)
 		}
 	})
 }

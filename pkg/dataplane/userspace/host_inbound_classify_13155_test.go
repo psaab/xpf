@@ -73,6 +73,8 @@ func Test13155_QuarantinedConflictInterfaceDenied(t *testing.T) {
 
 func Test13155_ShapeBBareSt0Rejected(t *testing.T) {
 	cfg := compile13155(t, []string{
+		"set security ipsec vpn v1 gateway 198.51.100.1",
+		"set security ipsec vpn v1 pre-shared-key fixture-psk",
 		"set security ipsec vpn v1 bind-interface st0.0",
 		"set security zones security-zone vpn host-inbound-traffic system-services all",
 		"set security zones security-zone vpn interfaces st0.0",

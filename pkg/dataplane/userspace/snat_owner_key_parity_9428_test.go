@@ -48,10 +48,11 @@ import (
 // artifact that agrees with itself -- #8901's lesson):
 //
 //	Rust key field  <- allocator_key_for literal (`self.X` / positional param)
-//	param           <- EVERY allocator_key_for call site's argument
-//	                   (`self.X`, `rule.X`, or `pending.Y` -> EVERY
-//	                   PendingPoolAllocator construction)
-//	rule field / local <- the snapshot parse loop (`X: snap.W`,
+//	param           <- allocator_key_for call sites (`self.X`, `rule.X`, a
+//	                   bound PendingPoolAllocator field, or the no-translation
+//	                   `0/0` alias which creates no bitmap)
+//	pending field   <- PendingPoolAllocator construction
+//	rule field/local <- snapshot parse loop (`X: snap.W`,
 //	                   `expand_pool_address(.., &mut rule.X, ..)` inside
 //	                   `for .. in &snap.W`, `rule.X = L` with
 //	                   `let L = if snap.W > 0`)
@@ -59,9 +60,11 @@ import (
 //	Go field        -> the builder's composite literal value (go/ast), and
 //	                   every assignment to that local in the builder
 //
-// The call sites are a POPULATION: allocator_key_for has four, two passing
-// `self.pool_port_*` and two passing `pending.port_*`. A resolver written
-// against the two I noticed first would have been blind to the apply path.
+// Every `allocator_key_for` call is inventoried. The three `0/0` calls are
+// no-translation allocation/retention aliases (#16840), not a distinct pool
+// owner; all non-alias calls must trace to the pool's configured port range.
+// Pending fields are traced from their parse-loop construction, including the
+// local binding used by the grouped pending pass.
 //
 // LIMITS, stated so they are not rediscovered as surprises:
 //   - Parsing is bounded to the syntactic forms listed above. A form the
@@ -131,19 +134,20 @@ func (r parityReport9428) table() string {
 }
 
 var (
-	rustKeyStructRe9428  = regexp.MustCompile(`struct\s+SourceNatPoolAllocatorKey\s*\{`)
-	rustFieldRe9428      = regexp.MustCompile(`^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:`)
-	rustKeyForDefRe9428  = regexp.MustCompile(`fn\s+allocator_key_for\s*\(\s*&self\s*,([^)]*)\)`)
-	rustKeyForCallRe9428 = regexp.MustCompile(`allocator_key_for\(\s*([A-Za-z_][\w.]*)\s*,\s*([A-Za-z_][\w.]*)\s*\)`)
-	rustPendingLitRe9428 = regexp.MustCompile(`(struct\s+|impl\s+)?PendingPoolAllocator\s*\{`)
-	rustRuleLitRe9428    = regexp.MustCompile(`let\s+mut\s+rule\s*=\s*SourceNatRule\s*\{`)
-	rustSnapFieldRe9428  = regexp.MustCompile(`(?m)^\s*([a-z_][a-z0-9_]*)\s*:\s*snap\.([a-z_][a-z0-9_]*)\s*(?:\.clone\(\))?\s*,`)
-	rustForSnapRe9428    = regexp.MustCompile(`for\s+(\w+)\s+in\s+&snap\.(\w+)\s*\{`)
-	rustExpandRe9428     = regexp.MustCompile(`expand_pool_address\(\s*(\w+)\s*,\s*&mut\s+rule\.(\w+)\s*,\s*&mut\s+rule\.(\w+)(?:\s*,\s*[^)]*)?\s*\)`)
-	rustRuleAssignRe9428 = regexp.MustCompile(`rule\.(\w+)\s*=\s*(\w+)\s*;`)
-	rustLetIfSnapRe9428  = regexp.MustCompile(`let\s+(\w+)\s*=\s*if\s+snap\.(\w+)\s*>\s*0`)
-	rustSelfOrRuleRe9428 = regexp.MustCompile(`^(?:self|rule)\.(\w+)(?:\.clone\(\))?$`)
-	rustIdentRe9428      = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+	rustKeyStructRe9428   = regexp.MustCompile(`struct\s+SourceNatPoolAllocatorKey\s*\{`)
+	rustFieldRe9428       = regexp.MustCompile(`^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:`)
+	rustKeyForDefRe9428   = regexp.MustCompile(`fn\s+allocator_key_for\s*\(\s*&self\s*,([^)]*)\)`)
+	rustKeyForCallRe9428  = regexp.MustCompile(`allocator_key_for\(\s*((?:[A-Za-z_][\w.]*)|[0-9]+)\s*,\s*((?:[A-Za-z_][\w.]*)|[0-9]+)\s*\)`)
+	rustPendingLitRe9428  = regexp.MustCompile(`(struct\s+|impl\s+)?PendingPoolAllocator\s*\{`)
+	rustPendingBindRe9428 = regexp.MustCompile(`let\s+Some\((\w+)\)\s*=\s*pending\b`)
+	rustRuleLitRe9428     = regexp.MustCompile(`let\s+mut\s+rule\s*=\s*SourceNatRule\s*\{`)
+	rustSnapFieldRe9428   = regexp.MustCompile(`(?m)^\s*([a-z_][a-z0-9_]*)\s*:\s*snap\.([a-z_][a-z0-9_]*)\s*(?:\.clone\(\))?\s*,`)
+	rustForSnapRe9428     = regexp.MustCompile(`for\s+(\w+)\s+in\s+&snap\.(\w+)\s*\{`)
+	rustExpandRe9428      = regexp.MustCompile(`expand_pool_address\(\s*(\w+)\s*,\s*&mut\s+rule\.(\w+)\s*,\s*&mut\s+rule\.(\w+)(?:\s*,\s*[^)]*)?\s*\)`)
+	rustRuleAssignRe9428  = regexp.MustCompile(`rule\.(\w+)\s*=\s*(\w+)\s*;`)
+	rustLetIfSnapRe9428   = regexp.MustCompile(`let\s+(\w+)\s*=\s*if\s+snap\.(\w+)\s*>\s*0`)
+	rustSelfOrRuleRe9428  = regexp.MustCompile(`^(?:self|rule)\.(\w+)(?:\.clone\(\))?$`)
+	rustIdentRe9428       = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 )
 
 // braceBody9428 returns the text between the `{` at open and its matching `}`,
@@ -259,6 +263,10 @@ func rustKeyWire9428(rust string) (fields []string, wire map[string]string, live
 	// PendingPoolAllocator constructions: pending field -> origins.
 	type origin struct{ kind, name string } // kind: rule | local | unresolved
 	pendingOrigins := map[string][]origin{}
+	pendingVars := map[string]bool{}
+	for _, m := range rustPendingBindRe9428.FindAllStringSubmatch(rust, -1) {
+		pendingVars[m[1]] = true
+	}
 	for _, loc := range rustPendingLitRe9428.FindAllStringSubmatchIndex(rust, -1) {
 		if loc[2] >= 0 { // `struct PendingPoolAllocator {` / `impl PendingPoolAllocator {`
 			continue
@@ -349,11 +357,10 @@ func rustKeyWire9428(rust string) (fields []string, wire map[string]string, live
 	}
 
 	// Every call site. The population is counted INDEPENDENTLY of the parse:
-	// the argument regex only understands simple paths, so a call written any
-	// other way (`pending.port_low + 0`) would simply not match it and drop out
-	// of the population -- an inventory built by running the pass is blind to
-	// what the pass does not recognise. Every `allocator_key_for(` other than
-	// the definition must therefore be parsed, or the guard reports LIVENESS.
+	// the argument regex only understands simple paths and numeric aliases, so
+	// any other form would drop out of the inventory. Every
+	// `allocator_key_for(` other than the definition must be parsed, or the
+	// guard reports LIVENESS.
 	calls := rustKeyForCallRe9428.FindAllStringSubmatchIndex(rust, -1)
 	if len(calls) == 0 {
 		return fields, wire, []string{"LIVENESS: allocator_key_for has no call site"}, nil
@@ -382,6 +389,16 @@ func rustKeyWire9428(rust string) (fields []string, wire map[string]string, live
 					"it is part of the population, so it cannot be skipped", lineOf9428(rust, at), rust[at:at+end+1]))
 		}
 	}
+	zeroAliasCalls := 0
+	for _, c := range calls {
+		if rust[c[2]:c[3]] == "0" && rust[c[4]:c[5]] == "0" {
+			zeroAliasCalls++
+		}
+	}
+	if zeroAliasCalls != 3 {
+		liveness = append(liveness, fmt.Sprintf(
+			"LIVENESS: expected the three #16840 no-translation 0/0 aliases, found %d", zeroAliasCalls))
+	}
 
 	for _, f := range fields {
 		if rf, ok := keyRule[f]; ok {
@@ -401,16 +418,23 @@ func rustKeyWire9428(rust string) (fields []string, wire map[string]string, live
 		}
 		seen := map[string][]string{} // wire -> provenance
 		for _, c := range calls {
+			firstArg, secondArg := rust[c[2]:c[3]], rust[c[4]:c[5]]
+			if firstArg == "0" && secondArg == "0" {
+				continue // no-translation aliases do not create a distinct pool owner
+			}
 			arg := rust[c[2+2*pi]:c[3+2*pi]]
 			line := lineOf9428(rust, c[0])
 			var origins []origin
 			switch {
-			case strings.HasPrefix(arg, "pending."):
-				origins = pendingOrigins[strings.TrimPrefix(arg, "pending.")]
+			case strings.Contains(arg, ".") && pendingVars[strings.SplitN(arg, ".", 2)[0]]:
+				_, field, _ := strings.Cut(arg, ".")
+				origins = pendingOrigins[field]
 				if len(origins) == 0 {
 					liveness = append(liveness, fmt.Sprintf(
 						"LIVENESS: call at line %d passes `%s`, and no PendingPoolAllocator construction sets it", line, arg))
 				}
+			case strings.HasPrefix(arg, "self.") && len(pendingOrigins[strings.TrimPrefix(arg, "self.")]) > 0:
+				origins = pendingOrigins[strings.TrimPrefix(arg, "self.")]
 			case rustSelfOrRuleRe9428.MatchString(arg):
 				origins = []origin{{"rule", rustSelfOrRuleRe9428.FindStringSubmatch(arg)[1]}}
 			case rustIdentRe9428.MatchString(arg):
@@ -629,7 +653,7 @@ func checkOwnerKeyParity9428(src ownerKeyParitySources9428) (rep parityReport942
 	var ownerIndexes []ast.Expr
 	for _, d := range vf.Decls {
 		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Name.Name != "validateNATPoolExternalTupleOverlapStrict" {
+		if !ok || fd.Name.Name != "natPoolOverlapOwners" {
 			continue
 		}
 		ast.Inspect(fd.Body, func(n ast.Node) bool {
@@ -650,7 +674,7 @@ func checkOwnerKeyParity9428(src ownerKeyParitySources9428) (rep parityReport942
 	if len(ownerIndexes) != 1 {
 		return rep, append(liveness, fmt.Sprintf(
 			"LIVENESS: expected exactly one `srcSeen[...] = ...` owner dedupe in "+
-				"validateNATPoolExternalTupleOverlapStrict, found %d", len(ownerIndexes))), violations
+				"natPoolOverlapOwners, found %d", len(ownerIndexes))), violations
 	}
 	rep.ownerDims = exprLeaves9428(ownerIndexes[0])
 	if len(rep.ownerDims) == 0 {

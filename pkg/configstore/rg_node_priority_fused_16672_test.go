@@ -15,6 +15,7 @@ const rgFused16672Store = `chassis {
         cluster-id 1;
         node 0;
         authentication-key test-cluster-psk-16672;
+        no-private-rg-election;
         redundancy-group 1 {
             %s
         }

@@ -411,6 +411,8 @@ var arityAdjudicated8807 = map[string]arityVerdict8807{
 		"`use-ocsp` is a bare mode flag under `security pki ca-profile revocation-check` (args:0 by " +
 		"design); the compiler reads the MODE from the parent node's Keys/children, never a value " +
 		"under a use-ocsp leaf. No argument is dropped."},
+	"application-identification": {"false-pairing", "compiler_services.go:1312 reads Keys[1] only to label an accepted-only child and emit the #16079 advisory; the schema's `services application-identification` node is a zero-argument flag (`schema_system.go:1005`), so this is a child name in the packed spelling, not a value argument consumed by the flag."},
+	"ssh":                        {"false-pairing", "group_root_login_14447.go:37-52 reads Keys[1] to recognize the `root-login` child keyword in packed `system services ssh root-login <value>` forms; the schema SSH node is a zero-argument container, and the matched token is the child name, not an SSH value argument."},
 }
 
 // arityGenuineFloor8807 is a RATCHET, not an equality. It fails in BOTH

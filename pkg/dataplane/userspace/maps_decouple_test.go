@@ -10,12 +10,11 @@
 //     comments) because those are not .Map() call arguments.
 //
 //  2. TestRegistryParityWithLegacyLoader — consistency canary that
-//     pins the registry constants against the literal map names
-//     used by the retained Rust AF_XDP shim loader at
-//     pkg/dataplane/loader_userspace_shim.go. The function name
-//     keeps "WithLegacyLoader" suffix only for git-blame continuity
-//     with the pre-#1476 era when the canary targeted the (now
-//     deleted) loader_ebpf.go.
+//     matches each registry constant against its owner: Go loader
+//     literals for loader-managed maps and Rust `#[map(name = ...)]`
+//     declarations for maps owned by the embedded AF_XDP ELF. The
+//     historical function name remains for git-blame continuity with
+//     the pre-#1476 era when the canary targeted loader_ebpf.go.
 package userspace
 
 import (
@@ -26,6 +25,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1297,20 +1297,15 @@ func equalStringSets(a, b []string) bool {
 	return true
 }
 
-// TestRegistryParityWithLegacyLoader asserts that every userspace
-// map-name constant matches a literal string still present in the
-// retained Rust AF_XDP shim loader at
-// pkg/dataplane/loader_userspace_shim.go. The two sides duplicate
-// the names; this canary keeps them in lockstep so a rename in
-// either file is caught at test time, not at helper bringup.
+// TestRegistryParityWithLegacyLoader matches each map-name constant with its
+// owning source declaration: loader-managed names must occur as quoted literals
+// in loader_userspace_shim.go; ELF-owned maps must have a `#[map(name = ...)]`
+// declaration in userspace-xdp/src/lib.rs. The latter are retrieved through
+// Collection.Maps and need not be duplicated in the Go loader. This catches
+// registry drift without requiring that duplication.
 //
-// History (#1476): pre-mechanical-removal this canary pointed at
-// pkg/dataplane/loader_ebpf.go, which held both the deleted legacy
-// XDP/TC graph AND the retained shim loader. After #1476 the
-// retained graph lives in loader_userspace_shim.go and the legacy
-// graph is gone; the parity check now policess only the retained
-// side. The function name keeps "WithLegacyLoader" suffix only for
-// git-blame continuity; rename in a separate PR.
+// The historical function name keeps "WithLegacyLoader" for git-blame
+// continuity with the pre-#1476 canary.
 func TestRegistryParityWithLegacyLoader(t *testing.T) {
 	t.Parallel()
 
@@ -1318,6 +1313,16 @@ func TestRegistryParityWithLegacyLoader(t *testing.T) {
 	body, err := os.ReadFile(loaderPath)
 	if err != nil {
 		t.Fatalf("read retained shim loader %s: %v", loaderPath, err)
+	}
+	rustPath := filepath.Join("..", "..", "..", "userspace-xdp", "src", "lib.rs")
+	rustSource, err := os.ReadFile(rustPath)
+	if err != nil {
+		t.Fatalf("read Rust shim source %s: %v", rustPath, err)
+	}
+	rustMapDecl := regexp.MustCompile(`(?s)#\[map\(name\s*=\s*"([^"]+)"\)\]\s*(?:pub\s+)?static\s+[A-Za-z_][A-Za-z0-9_]*\s*:`)
+	rustMaps := make(map[string]struct{})
+	for _, match := range rustMapDecl.FindAllSubmatch(rustSource, -1) {
+		rustMaps[string(match[1])] = struct{}{}
 	}
 
 	// Dynamically discover every `mapName...` constant defined in
@@ -1333,12 +1338,16 @@ func TestRegistryParityWithLegacyLoader(t *testing.T) {
 	}
 	for _, e := range entries {
 		quoted := []byte(`"` + e.value + `"`)
-		if !bytes.Contains(body, quoted) {
-			t.Errorf(
-				"%s = %q not found as a quoted literal in %s — "+
-					"parity broken: rename both sides together or update this canary",
-				e.name, e.value, loaderPath)
+		if bytes.Contains(body, quoted) {
+			continue
 		}
+		if _, ok := rustMaps[e.value]; ok {
+			continue
+		}
+		t.Errorf(
+			"%s = %q is absent from both %s as a quoted loader literal and %s "+
+				"as a Rust ELF map declaration — registry parity broken",
+			e.name, e.value, loaderPath, rustPath)
 	}
 }
 

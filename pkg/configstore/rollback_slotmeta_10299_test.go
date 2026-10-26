@@ -84,11 +84,12 @@ func TestRollbackSlotCommentSurvivesRestart_10299(t *testing.T) {
 	if err := s.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
-	// Include pipe/quote/unicode/newline-adjacent shapes so a naive
-	// line-oriented sidecar encoding fails and only a safe encoding passes.
+	// Include punctuation, quotes, and unicode so a naive line-oriented
+	// sidecar encoding fails while the current commit-description contract
+	// continues to reject control characters.
 	comments := []string{
 		"op deploy #42 | reason: \"hotfix\" \u2713",
-		"second change; semicolons, commas, and \ttab",
+		"second change; semicolons, commas, and spaced words",
 		"third: unicode \u2014 dash and \u00e9",
 		"fourth comment",
 	}

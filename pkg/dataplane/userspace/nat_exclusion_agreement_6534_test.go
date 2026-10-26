@@ -254,7 +254,10 @@ func natExclusionCases() []natExclusionCase {
 func TestNATExclusionBuilderRendererAgree_6534(t *testing.T) {
 	for _, c := range natExclusionCases() {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := compileSetLenient5717(t, c.cmds)
+			cfg := compileSetLenient5717(t, append([]string{
+				"set security zones security-zone trust",
+				"set security zones security-zone untrust",
+			}, c.cmds...))
 
 			gotBuilder := builderExcluded(t, c, cfg)
 			gotRenderer := rendererExcluded(t, cfg)
@@ -295,7 +298,10 @@ func TestNATExclusionAnnotationCarriesAReason_6534(t *testing.T) {
 			continue
 		}
 		t.Run(c.name, func(t *testing.T) {
-			cfg := compileSetLenient5717(t, c.cmds)
+			cfg := compileSetLenient5717(t, append([]string{
+				"set security zones security-zone trust",
+				"set security zones security-zone untrust",
+			}, c.cmds...))
 			var buf bytes.Buffer
 			natshow.RenderSourceRuleDetail(context.Background(), &buf, cfg, nil, nil)
 			natshow.RenderDestRuleDetail(context.Background(), &buf, cfg, nil, nil)
@@ -327,6 +333,8 @@ func TestNATExclusionAnnotationCarriesAReason_6534(t *testing.T) {
 // wholly healthy NAT config must render with no #6534 annotation anywhere.
 func TestNATHealthyConfigRendersUnannotated_6534(t *testing.T) {
 	cfg := compileSetLenient5717(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
 		"set security nat source pool p1 address 203.0.113.10/32",
 		"set security nat source rule-set rs1 from zone trust",
 		"set security nat source rule-set rs1 to zone untrust",

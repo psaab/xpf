@@ -17,7 +17,8 @@ func dhcpClusterTestConfig(groupIface string, vlanID int) *config.Config {
 				"reth1": {
 					Name:            "reth1",
 					RedundancyGroup: 1,
-					Units:           map[int]*config.InterfaceUnit{0: {VlanID: vlanID}},
+					VlanTagging:     vlanID > 0,
+					Units:           map[int]*config.InterfaceUnit{vlanID: {Number: vlanID, VlanID: vlanID}},
 				},
 				"ge-0/0/1": {
 					Name:            "ge-0/0/1",

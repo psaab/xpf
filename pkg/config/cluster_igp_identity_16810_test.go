@@ -20,7 +20,7 @@ import (
 
 func clusterSplitLines16810(extra ...string) []string {
 	lines := []string{
-		"set chassis cluster cluster-id 1",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster authentication-key test-cluster-psk-16810-long",
 		"set chassis cluster node 0",
 		"set chassis cluster reth-count 2",
@@ -166,10 +166,10 @@ func TestClusterIGPNodeGroupsDistinct16810(t *testing.T) {
   node1 { protocols { ospf { router-id 10.0.0.2; } } }
 }
 apply-groups "${node}";
-chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16810-long; node 0; reth-count 2;
-  redundancy-group 0 { node 0 priority 200; node 1 priority 100; }
-  redundancy-group 1 { node 0 priority 200; node 1 priority 100; }
-  redundancy-group 2 { node 0 priority 100; node 1 priority 200; } } }
+	chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16810-long; node 0; reth-count 2; no-private-rg-election;
+	  redundancy-group 0 { node 0 priority 200; node 1 priority 100; }
+	  redundancy-group 1 { node 0 priority 200; node 1 priority 100; }
+	  redundancy-group 2 { node 0 priority 100; node 1 priority 200; } } }
 interfaces {
   ge-0/0/1 { gigether-options { redundant-parent reth0; } }
   ge-7/0/1 { gigether-options { redundant-parent reth0; } }
@@ -203,10 +203,10 @@ func TestClusterIGPNodeGroupsSameRejected16810(t *testing.T) {
   node1 { protocols { ospf { router-id 10.0.0.1; } } }
 }
 apply-groups "${node}";
-chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16810-long; node 0; reth-count 2;
-  redundancy-group 0 { node 0 priority 200; node 1 priority 100; }
-  redundancy-group 1 { node 0 priority 200; node 1 priority 100; }
-  redundancy-group 2 { node 0 priority 100; node 1 priority 200; } } }
+	chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-16810-long; node 0; reth-count 2; no-private-rg-election;
+	  redundancy-group 0 { node 0 priority 200; node 1 priority 100; }
+	  redundancy-group 1 { node 0 priority 200; node 1 priority 100; }
+	  redundancy-group 2 { node 0 priority 100; node 1 priority 200; } } }
 interfaces {
   ge-0/0/1 { gigether-options { redundant-parent reth0; } }
   ge-7/0/1 { gigether-options { redundant-parent reth0; } }

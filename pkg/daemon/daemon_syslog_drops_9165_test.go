@@ -56,7 +56,7 @@ type failingSyslogConn16769 struct{ net.Conn }
 func (failingSyslogConn16769) Write([]byte) (int, error) {
 	return 0, errors.New("connection refused")
 }
-func (failingSyslogConn16769) Close() error                  { return nil }
+func (failingSyslogConn16769) Close() error                     { return nil }
 func (failingSyslogConn16769) SetWriteDeadline(time.Time) error { return nil }
 
 // #16769: the system-host case. A `system syslog host` client installed

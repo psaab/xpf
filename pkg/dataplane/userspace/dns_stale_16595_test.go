@@ -167,13 +167,15 @@ func mustJSON16595(v any) string {
 }
 
 func TestJunosHostProgramSurvivesDNSFailure16595(t *testing.T) {
-	// Static deny + dns-name deny to junos-host from untrust. After SERVFAIL
-	// (flag set, no addresses) the program must still render the static rule.
+	// Compile a valid address-book entry, then replace its value with resolver
+	// state. This models a previously accepted DNS name as the cache changes.
 	cfg := residualCfg(t, residualBase, []string{
-		"set security address-book global address bad-dns dns-name bad.example.com",
+		"set security address-book global address bad-dns 10.0.0.9/32",
 	}, policy("deny-bad", "bad-host", "any", "any", "deny"), policy("deny-dns", "bad-dns", "any", "any", "deny"))
-	// Simulate SERVFAIL with no prior answer.
 	a := cfg.Security.AddressBook.Addresses["bad-dns"]
+	a.Value = ""
+	a.DNSName = "bad.example.com"
+	// Simulate SERVFAIL with no current answer.
 	a.DNSAddresses = nil
 	a.DNSLookupFailed = true
 	if got := residualRuleCount(cfg); got != 1 {

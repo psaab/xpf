@@ -64,7 +64,7 @@ func TestFlexMatchUnrepresentableStartMatchesNothing14394(t *testing.T) {
 		}
 		// The lo0 plan must emit no rule for the term at all.
 		p := newBuildPlan(t, "xpf_lo0", lo0FilterPriority)
-		buildLo0FilterNetlink(p, Lo0FilterSpec{V4Terms: []Lo0FilterTerm{
+		buildLo0FilterNetlink(p, Lo0FilterSpec{NoIPv6RejectZeroHopLimit: true, V4Terms: []Lo0FilterTerm{
 			{Name: "bad-start", Protocols: []string{"tcp"}, FlexMatch: &fm, Action: "accept"},
 			{Name: "deny-rest", Action: "discard"},
 		}})

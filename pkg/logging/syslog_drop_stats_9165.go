@@ -155,4 +155,3 @@ func (er *EventReader) SyslogDropStats() []SyslogDropStat {
 	}
 	return out
 }
-

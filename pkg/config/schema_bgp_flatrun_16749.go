@@ -40,9 +40,9 @@ import (
 // identity covers both.
 func bgpFlatRunContainers16749() map[*schemaNode]bool {
 	return map[*schemaNode]bool{
-		bgpLeafSchema8939():      true,
-		bgpGroupSchema9181():     true,
-		bgpNeighborSchema9792():  true,
+		bgpLeafSchema8939():     true,
+		bgpGroupSchema9181():    true,
+		bgpNeighborSchema9792(): true,
 	}
 }
 

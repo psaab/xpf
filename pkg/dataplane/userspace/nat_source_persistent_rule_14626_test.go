@@ -15,7 +15,11 @@ import (
 func compileRulePNAT14626(t *testing.T, extraRuleCmds []string, poolCmds ...string) *config.Config {
 	t.Helper()
 	tree := &config.ConfigTree{}
-	cmds := []string{"set security nat source pool p1 address 203.0.113.5/32"}
+	cmds := []string{
+		"set security nat source pool p1 address 203.0.113.5/32",
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+	}
 	cmds = append(cmds, poolCmds...)
 	cmds = append(cmds,
 		"set security nat source rule-set RS from zone trust",
