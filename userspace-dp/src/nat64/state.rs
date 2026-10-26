@@ -518,7 +518,8 @@ impl Nat64ScopeKey {
         // folds the singular into the plural), so read them back.
         Self {
             from_zones: prefix.from_zones.clone(),
-            // #16604: fold literal to wire token so key equality is spelling-blind.
+            // #16604/#17677: preserve the explicit-master token separately
+            // from a named routing-instance literally called `default`.
             from_routing_instances: prefix
                 .from_routing_instances
                 .iter()
@@ -580,7 +581,7 @@ pub(super) fn nat64_snapshot_scope(snap: &NAT64RuleSnapshot) -> Nat64ScopeKey {
     if !source_constrained {
         source_prefixes.clear();
     }
-    // #16604: fold literal to wire token (mirrors Nat64ScopeKey::of_prefix).
+    // #16604/#17677: preserve named `default` separately from the master token.
     let from_routing_instances: Vec<String> = from_routing_instances
         .iter()
         .map(|ri| crate::nat::nat_ri_key(ri).to_string())
@@ -1610,8 +1611,8 @@ impl Nat64State {
             return false;
         }
         // #16049: routing-instance list is a union — any authored RI admits.
-        // #16604: each member matches via nat_ri_matches, so the explicit-
-        // master token / literal admits only main-instance ("") traffic.
+        // #16604/#17677: the explicit-master token matches main only; the
+        // literal `default` matches only the declared named instance.
         if !prefix.from_routing_instances.is_empty() {
             if !prefix
                 .from_routing_instances

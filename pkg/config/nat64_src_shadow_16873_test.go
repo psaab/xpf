@@ -418,14 +418,14 @@ func TestNAT64CommaZoneOwnerKeyNoCollision16873(t *testing.T) {
 		t.Fatalf("zone x,y does not cover zones {x,y}; must not warn; got %q", w)
 	}
 	// Unit pin: the scoped keys themselves must differ.
-	ka, _ := nat64PrefixOwnerKeyScoped(&NAT64RuleSet{Prefix: "64:ff9b::/96", FromZones: []string{"x,y"}})
-	kb, _ := nat64PrefixOwnerKeyScoped(&NAT64RuleSet{Prefix: "64:ff9b::/96", FromZones: []string{"x", "y"}})
+	ka, _ := nat64PrefixOwnerKeyScoped(nil, &NAT64RuleSet{Prefix: "64:ff9b::/96", FromZones: []string{"x,y"}})
+	kb, _ := nat64PrefixOwnerKeyScoped(nil, &NAT64RuleSet{Prefix: "64:ff9b::/96", FromZones: []string{"x", "y"}})
 	if ka == kb {
 		t.Fatalf("scoped keys must differ for zone \"x,y\" vs {x,y}: %q", ka)
 	}
 	// RI twin: instance "r,s" vs {r, s}.
-	kr1, _ := nat64PrefixOwnerKeyScoped(&NAT64RuleSet{Prefix: "64:ff9b::/96", FromRoutingInstances: []string{"r,s"}})
-	kr2, _ := nat64PrefixOwnerKeyScoped(&NAT64RuleSet{Prefix: "64:ff9b::/96", FromRoutingInstances: []string{"r", "s"}})
+	kr1, _ := nat64PrefixOwnerKeyScoped(nil, &NAT64RuleSet{Prefix: "64:ff9b::/96", FromRoutingInstances: []string{"r,s"}})
+	kr2, _ := nat64PrefixOwnerKeyScoped(nil, &NAT64RuleSet{Prefix: "64:ff9b::/96", FromRoutingInstances: []string{"r", "s"}})
 	if kr1 == kr2 {
 		t.Fatalf("scoped keys must differ for RI \"r,s\" vs {r,s}: %q", kr1)
 	}

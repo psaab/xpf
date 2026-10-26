@@ -10516,17 +10516,28 @@ fn nat64_15956_into_builders_byte_identical_with_poisoned_dst() {
     }
 }
 
-// #16604: NAT64 `from routing-instance default` (wire token) admits only
-// main-instance ("") ingress, never a named VRF.
+// #16604/#17677: NAT64 routes the master alias through the wire token, while
+// the literal `default` names a declared routing-instance.
 #[test]
-fn nat64_default_routing_instance_matches_only_main_16604() {
-    let mut snap = scoped_snap("", crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE, vec![]);
-    snap.from_routing_instances = vec![crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE.to_string()];
-    let state = Nat64State::from_snapshots(&[snap]);
+fn nat64_default_routing_instance_distinguishes_named_and_master_17677() {
     let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
-    assert!(matches!(state.classify_ipv6_packet_scoped(src, dst, "", ""), Nat64Match::MatchReady { .. }),
-        "nat64 rule=default ingress=main must match");
-    assert_eq!(state.classify_ipv6_packet_scoped(src, dst, "", "VR1"), Nat64Match::NoPrefixMatch,
-        "nat64 rule=default ingress=VR1 must NOT match");
+    for (routing_instance, main_matches, named_matches) in [
+        (crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE, true, false),
+        ("default", false, true),
+    ] {
+        let mut snap = scoped_snap("", routing_instance, vec![]);
+        snap.from_routing_instances = vec![routing_instance.to_string()];
+        let state = Nat64State::from_snapshots(&[snap]);
+        assert_eq!(
+            matches!(state.classify_ipv6_packet_scoped(src, dst, "", ""), Nat64Match::MatchReady { .. }),
+            main_matches,
+            "NAT64 routing-instance={routing_instance:?} main scope"
+        );
+        assert_eq!(
+            matches!(state.classify_ipv6_packet_scoped(src, dst, "", "default"), Nat64Match::MatchReady { .. }),
+            named_matches,
+            "NAT64 routing-instance={routing_instance:?} named-default scope"
+        );
+    }
 }

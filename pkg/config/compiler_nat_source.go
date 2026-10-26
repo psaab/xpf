@@ -448,15 +448,12 @@ func compileNAT64(node *Node, sec *SecurityConfig) error {
 		for _, s := range fromScopes {
 			switch s.kind {
 			case "routing-instance":
-				// #16604: `routing-instance default` (undeclared) is
-				// the master alias: list member "" + provenance flag.
-				v, isDefault := lowerNATRoutingInstanceScope16604(s.value)
-				if isDefault {
-					rs.FromRoutingInstanceDefault = true
-				}
-				if !seenRI[v] {
-					seenRI[v] = true
-					rs.FromRoutingInstances = append(rs.FromRoutingInstances, v)
+				// Keep the authored value until all routing-instances have compiled;
+				// the post-section #16604 pass can then distinguish a declaration
+				// named `default` from the master-instance alias.
+				if !seenRI[s.value] {
+					seenRI[s.value] = true
+					rs.FromRoutingInstances = append(rs.FromRoutingInstances, s.value)
 				}
 			default: // "zone"
 				if s.value != "" && !seenZone[s.value] {

@@ -2474,14 +2474,11 @@ func buildNATTranslatedLocalAddressExclusions(snapshot *ConfigSnapshot) (map[use
 		if !nat.InterfaceMode || nat.Off {
 			continue
 		}
-		// #16604: normalize literal to the token key.
-		natRI := nat.ToRoutingInstance
-		if natRI == "default" {
-			natRI = config.NATDefaultRoutingInstanceWire
-		}
+		// #17677: Snapshot builders lower the undeclared alias to the
+		// explicit-master token, so literal `default` stays named here.
 		scope := registrationScope{
 			toInterface:       nat.ToInterface,
-			toRoutingInstance: natRI,
+			toRoutingInstance: nat.ToRoutingInstance,
 			toZone:            nat.ToZone,
 		}
 		if _, seen := seenScopes[scope]; seen {

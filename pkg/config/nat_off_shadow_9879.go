@@ -174,7 +174,7 @@ func DNATOffShadowPotentialReason(cfg *Config, rs *NATRuleSet, rule *NATRule) st
 	}
 
 	for _, candidateRS := range dnat.RuleSets {
-		if candidateRS == nil || (candidateRS != rs && !dnatOffRuleSetScopesMayOverlap(rs, candidateRS)) {
+		if candidateRS == nil || (candidateRS != rs && !dnatOffRuleSetScopesMayOverlap(cfg, rs, candidateRS)) {
 			continue
 		}
 		for i, translate := range candidateRS.Rules {
@@ -340,14 +340,11 @@ func dnatOffHasApplication(rule *NATRule) bool {
 	return false
 }
 
-func dnatOffRuleSetScopesMayOverlap(a, b *NATRuleSet) bool {
-	// #16604: compare routing-instance scopes in wire space, where an
-	// explicit master scope is the wire token — two lowered "" scopes
-	// with different provenance (explicit-master vs unscoped) must not
-	// read as the same axis value here: unscoped overlaps everything,
-	// explicit-master overlaps only explicit-master and unscoped.
-	aRI := NATRoutingInstanceScopeWire(nil, a.FromRoutingInstance, a.FromRoutingInstanceDefault)
-	bRI := NATRoutingInstanceScopeWire(nil, b.FromRoutingInstance, b.FromRoutingInstanceDefault)
+func dnatOffRuleSetScopesMayOverlap(cfg *Config, a, b *NATRuleSet) bool {
+	// #16604/#17677: compare routing-instance scopes in wire space, where
+	// explicit master and a declared instance named `default` stay distinct.
+	aRI := NATRoutingInstanceScopeWire(cfg, a.FromRoutingInstance, a.FromRoutingInstanceDefault)
+	bRI := NATRoutingInstanceScopeWire(cfg, b.FromRoutingInstance, b.FromRoutingInstanceDefault)
 	return dnatOffScopeAxisMayOverlap(a.FromZone, b.FromZone) &&
 		dnatOffScopeAxisMayOverlap(a.FromInterface, b.FromInterface) &&
 		dnatOffScopeAxisMayOverlap(aRI, bRI)

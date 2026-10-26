@@ -1312,14 +1312,19 @@ fn static_nat_ambiguous_block_winner_selection_precedes_suppression_16045() {
     );
 }
 
-// #16604: `routing-instance default` (wire token or literal) is an explicit
-// master scope: matches main-instance ("") traffic only, never a named VRF.
-// Unscoped ("") still matches both. Fail-on-revert: dropping the token arm
-// in nat_ri_matches makes the VR1 assertion match (literal) or the main
-// assertion fail (token).
+// #16604/#17677: the master alias uses the wire token, while a literal
+// `default` is the declared routing-instance name. Unscoped stays a wildcard.
+// Fail-on-revert: making the literal another spelling of the master alias
+// reverses the named-default assertions; dropping the token arm breaks main.
 #[test]
-fn nat_default_routing_instance_matches_only_main_16604() {
-    for spelling in [crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE, "default"] {
+fn nat_default_routing_instance_distinguishes_named_and_master_16604() {
+    let src: IpAddr = "10.0.61.102".parse().unwrap();
+    let dst: IpAddr = "172.16.80.200".parse().unwrap();
+    let egress_v4 = Some("172.16.80.8".parse().unwrap());
+    for (spelling, main_matches, named_matches) in [
+        (crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE, true, false),
+        ("default", false, true),
+    ] {
         let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
             name: "snat".to_string(),
             to_routing_instance: spelling.to_string(),
@@ -1327,27 +1332,212 @@ fn nat_default_routing_instance_matches_only_main_16604() {
             interface_mode: true,
             ..SourceNATRuleSnapshot::default()
         }]);
-        let src: IpAddr = "10.0.61.102".parse().unwrap();
-        let dst: IpAddr = "172.16.80.200".parse().unwrap();
-        let egress_v4 = Some("172.16.80.8".parse().unwrap());
-        let main = NatScopeCtx { egress_routing_instance: "", ..NatScopeCtx::default() };
-        assert!(match_source_nat(&InterfaceNatAllocators::default(), &rules, &main, "", "", src, dst, egress_v4, None).is_some(),
-            "rule=default ({spelling}) egress=main must match");
-        let vr1 = NatScopeCtx { egress_routing_instance: "VR1", ..NatScopeCtx::default() };
-        assert!(match_source_nat(&InterfaceNatAllocators::default(), &rules, &vr1, "", "", src, dst, egress_v4, None).is_none(),
-            "rule=default ({spelling}) egress=VR1 must NOT match");
+        let main = NatScopeCtx {
+            egress_routing_instance: "",
+            ..NatScopeCtx::default()
+        };
+        assert_eq!(
+            match_source_nat(
+                &InterfaceNatAllocators::default(),
+                &rules,
+                &main,
+                "",
+                "",
+                src,
+                dst,
+                egress_v4,
+                None,
+            )
+            .is_some(),
+            main_matches,
+            "rule={spelling:?} must match main={main_matches}"
+        );
+        let named_default = NatScopeCtx {
+            egress_routing_instance: "default",
+            ..NatScopeCtx::default()
+        };
+        assert_eq!(
+            match_source_nat(
+                &InterfaceNatAllocators::default(),
+                &rules,
+                &named_default,
+                "",
+                "",
+                src,
+                dst,
+                egress_v4,
+                None,
+            )
+            .is_some(),
+            named_matches,
+            "rule={spelling:?} must match named default={named_matches}"
+        );
+        let from_rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+            name: "snat-from".to_string(),
+            from_routing_instance: spelling.to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            interface_mode: true,
+            ..SourceNATRuleSnapshot::default()
+        }]);
+        let main_ingress = NatScopeCtx {
+            ingress_routing_instance: "",
+            ..NatScopeCtx::default()
+        };
+        assert_eq!(
+            match_source_nat(
+                &InterfaceNatAllocators::default(),
+                &from_rules,
+                &main_ingress,
+                "",
+                "",
+                src,
+                dst,
+                egress_v4,
+                None,
+            )
+            .is_some(),
+            main_matches,
+            "from rule={spelling:?} must match main={main_matches}"
+        );
+        let named_default_ingress = NatScopeCtx {
+            ingress_routing_instance: "default",
+            ..NatScopeCtx::default()
+        };
+        assert_eq!(
+            match_source_nat(
+                &InterfaceNatAllocators::default(),
+                &from_rules,
+                &named_default_ingress,
+                "",
+                "",
+                src,
+                dst,
+                egress_v4,
+                None,
+            )
+            .is_some(),
+            named_matches,
+            "from rule={spelling:?} must match named default={named_matches}"
+        );
     }
-    // Zone control + unscoped control unchanged.
-    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+    let unscoped = parse_source_nat_rules(&[SourceNATRuleSnapshot {
         name: "snat".to_string(),
         source_addresses: vec!["0.0.0.0/0".to_string()],
         interface_mode: true,
         ..SourceNATRuleSnapshot::default()
     }]);
-    let src: IpAddr = "10.0.61.102".parse().unwrap();
-    let dst: IpAddr = "172.16.80.200".parse().unwrap();
-    let egress_v4 = Some("172.16.80.8".parse().unwrap());
-    let vr1 = NatScopeCtx { egress_routing_instance: "VR1", ..NatScopeCtx::default() };
-    assert!(match_source_nat(&InterfaceNatAllocators::default(), &rules, &vr1, "", "", src, dst, egress_v4, None).is_some(),
-        "unscoped SNAT must still match VR1 egress");
+    let named_default = NatScopeCtx {
+        egress_routing_instance: "default",
+        ..NatScopeCtx::default()
+    };
+    assert!(
+        match_source_nat(
+            &InterfaceNatAllocators::default(),
+            &unscoped,
+            &named_default,
+            "",
+            "",
+            src,
+            dst,
+            egress_v4,
+            None,
+        )
+        .is_some(),
+        "unscoped SNAT must still match named default"
+    );
+    assert_ne!(
+        crate::nat::nat_ri_key("default"),
+        crate::nat::nat_ri_key(crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE),
+        "declared `default` and the explicit-master scope need distinct keys"
+    );
+}
+
+#[test]
+fn destination_and_static_nat_default_scope_matches_declared_name_17677() {
+    let src: IpAddr = "198.51.100.1".parse().unwrap();
+    let dst: IpAddr = "203.0.113.10".parse().unwrap();
+    for (spelling, main_matches, named_matches) in [
+        (crate::nat::NAT_DEFAULT_ROUTING_INSTANCE_WIRE, true, false),
+        ("default", false, true),
+    ] {
+        let counters = NatCounterStore::default();
+        let dnat = DnatTable::from_snapshots(
+            &[DestinationNATRuleSnapshot {
+                name: "dnat".to_string(),
+                from_routing_instance: spelling.to_string(),
+                destination_address: "203.0.113.10".to_string(),
+                pool_address: "10.0.0.5".to_string(),
+                ..DestinationNATRuleSnapshot::default()
+            }],
+            &counters,
+        );
+        assert_eq!(
+            dnat.lookup_with_counter_scoped(PROTO_TCP, src, dst, 0, 443, "", "", "", None)
+                .is_some(),
+            main_matches,
+            "DNAT rule={spelling:?} main scope"
+        );
+        assert_eq!(
+            dnat.lookup_with_counter_scoped(
+                PROTO_TCP,
+                src,
+                dst,
+                0,
+                443,
+                "",
+                "",
+                "default",
+                None,
+            )
+            .is_some(),
+            named_matches,
+            "DNAT rule={spelling:?} named-default scope"
+        );
+
+        let external: IpAddr = "203.0.113.10".parse().unwrap();
+        let stat = StaticNatTable::from_snapshots(
+            &[StaticNATRuleSnapshot {
+                name: "static".to_string(),
+                from_routing_instance: spelling.to_string(),
+                external_ip: "203.0.113.10".to_string(),
+                internal_ip: "10.0.0.5".to_string(),
+                ..StaticNATRuleSnapshot::default()
+            }],
+            &counters,
+        );
+        assert_eq!(
+            stat.match_dnat_with_counter_scoped(external, 0, None, "", "", "")
+                .is_some(),
+            main_matches,
+            "static NAT rule={spelling:?} main scope"
+        );
+        assert_eq!(
+            stat.match_dnat_with_counter_scoped(external, 0, None, "", "", "default")
+                .is_some(),
+            named_matches,
+            "static NAT rule={spelling:?} named-default scope"
+        );
+
+        let internal: IpAddr = "10.0.0.5".parse().unwrap();
+        assert_eq!(
+            stat.match_snat_with_counter_scoped(internal, 0, None, None, "", "", "")
+                .is_some(),
+            main_matches,
+            "reverse static NAT rule={spelling:?} main scope"
+        );
+        assert_eq!(
+            stat.match_snat_with_counter_scoped(
+                internal,
+                0,
+                None,
+                None,
+                "",
+                "",
+                "default",
+            )
+            .is_some(),
+            named_matches,
+            "reverse static NAT rule={spelling:?} named-default scope"
+        );
+    }
 }
