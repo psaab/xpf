@@ -128,7 +128,12 @@ func TestDrainReinjectCompletionsPartialFrameTimeoutIsError(t *testing.T) {
 		stopAndWait()
 	}()
 
-	client := &SocketReinjectSubmitter{completePath: completePath, timeout: 5 * time.Millisecond}
+	// 250ms (not the production-like 5ms): the deadline is per Read, so
+	// a server write landing after the first idle window would take the
+	// zero-byte (nil, nil) path instead of the partial-frame error path.
+	// The server stalls forever after its 2-byte write, so the widened
+	// window still exercises exactly the mid-frame timeout.
+	client := &SocketReinjectSubmitter{completePath: completePath, timeout: 250 * time.Millisecond}
 	defer client.Close()
 	completions, err := client.DrainReinjectCompletions(4)
 	if err == nil {
