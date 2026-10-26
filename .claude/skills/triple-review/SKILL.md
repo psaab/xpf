@@ -1,20 +1,20 @@
 ---
 name: triple-review
-description: Drive a refactor through the full triple-review methodology — plan with Codex + Gemini (round-1 PLAN-KILL is acceptable), implement, smoke-test on loss userspace cluster, PR, wait for Copilot, dispatch Codex + Gemini hostile code review, merge only once all three agree.
+description: Drive a refactor through the full triple-review methodology — plan with two declared-pool reviewers (round-1 PLAN-KILL is acceptable), implement, smoke-test on loss userspace cluster, PR, dispatch two more pool hostile code reviews, merge only once all three agree. Declared pool only (Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro); Copilot is not part of any gate (2026-10-26).
 user_invocable: true
 ---
 
 # Triple-Review Refactor Skill
 
 Drive a refactor end-to-end through the project's engineering
-practice: **plan with Codex + Gemini in parallel before any code
-touches, ship pure code-motion when possible, smoke-test every
-batch on the loss userspace cluster, get all three of Codex,
-Gemini, and Copilot to agree before merging.**
+practice: **plan with two declared-pool reviewers in parallel
+before any code touches, ship pure code-motion when possible,
+smoke-test every batch on the loss userspace cluster, get all
+three pool reviewers to agree before merging.**
 
 This skill encodes lessons from #946 Phase 1 (shipped after 3
 plan-review rounds, all PLAN-NEEDS-MAJOR), #946 Phase 2
-(plan-killed by both Codex and Gemini independently), #964
+(plan-killed by both plan reviewers independently), #964
 slab refactor, and earlier Phase 1-11 of #959 BindingWorker
 decomposition.
 
@@ -33,9 +33,9 @@ increment.
 ## Standing rules (apply at every step)
 
 - **Plan first, code never first.** Never edit code before the
-  plan has cleared at least one round of Codex + Gemini.
-- **Both reviewers must agree.** If Codex says PLAN-READY and
-  Gemini says PLAN-NEEDS-MAJOR, iterate. If both say PLAN-KILL,
+  plan has cleared at least one round of two pool reviewers.
+- **Both reviewers must agree.** If pool reviewer 1 says PLAN-READY and
+  pool reviewer 2 says PLAN-NEEDS-MAJOR, iterate. If both say PLAN-KILL,
   stop and report — do NOT push through.
 - **Smoke v4 AND v6.** Every test cycle hits both
   172.16.80.200 and 2001:559:8585:80::200. v4-only smoke masks
@@ -60,8 +60,8 @@ increment.
   test failed, prove it passes locally (named test 5x + full
   suite + Go suite) BEFORE merging. "Sandbox-only flake"
   handwave is not allowed.
-- **Wait for Copilot.** After `gh pr create`, poll until
-  Copilot review lands. Address every comment.
+- **Wait for both pool reviewers.** After `gh pr create`, dispatch
+  the two code reviewers; address every finding they return.
 - **Refactor: <Pattern>" issues that don't fit the codebase
   reality SHOULD be killed at plan time.** #946 Phase 2,
   #961 PacketContext both died this way. Don't push through
@@ -145,18 +145,24 @@ git commit -m "<title> plan v1 (DRAFT)" -m "<body explaining scope and risk>"
 git push -u origin refactor/${ISSUE}-${SCOPE_SLUG}
 ```
 
-## Step 3: Dispatch Codex + Gemini in parallel
+## Step 3: Dispatch two declared-pool plan reviewers in parallel
 
-Use the **Agent** tool for Codex (subagent_type:
-`codex:codex-rescue`) and the **Bash** tool to dispatch Gemini
-directly. Both run in the background.
+Dispatch two background reviewers via the internal `task` tool,
+each requesting a DISTINCT model from the declared pool (Muse
+Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro). NEVER
+external CLI model tools. Both run in the background.
 
-### Codex prompt template
+### Plan-reviewer prompt template
 
 ```
-node "/home/ps/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" task --background "Adversarial PLAN review for #<ISSUE> Step 1 ... Plan doc at docs/pr/<ISSUE>-<SLUG>/plan.md (commit <SHA> on branch refactor/<ISSUE>-<SLUG>).
+Adversarial PLAN review for #<ISSUE> Step 1 ... Plan doc at
+docs/pr/<ISSUE>-<SLUG>/plan.md (commit <SHA> on branch
+refactor/<ISSUE>-<SLUG>). Repo: <worktree>.
 
-Repo: /var/tmp/worktrees/<ISSUE>-<SLUG>
+Prime context: you are an expert in HPC networking, OS, data
+structures, JIT, CPU design, networking protocols. The codebase
+is xpf, an eBPF-based firewall with a userspace AF_XDP dataplane
+in Rust.
 
 This is a PLAN review, NOT a code review. No code has been written.
 
@@ -172,49 +178,18 @@ What to verify (be hostile — fail the plan if architecture is wrong):
 6. <Project-specific risks: HA sync, GC, kernel state>
 7. Architectural mismatch vs #961 / #946 Phase 2
 
-Verdict: PLAN-READY / PLAN-NEEDS-MINOR / PLAN-NEEDS-MAJOR / PLAN-KILL. PLAN-KILL is appropriate if the architectural premise is wrong. Be hostile."
+Verdict: PLAN-READY / PLAN-NEEDS-MINOR / PLAN-NEEDS-MAJOR / PLAN-KILL.
+PLAN-KILL is appropriate if the architectural premise is wrong. Be hostile.
 ```
 
-### Gemini prompt template
-
-**Always pass `--model pro-3` (gemini-3-pro-preview).** The companion's
-default is `gemini-2.5-flash`. On the refactor stream this project has
-been driving (#946, #964, #959, #925), Flash repeatedly produced
-verdicts that contradicted itself round-over-round, hallucinated
-files/symbols that did not exist in the diff, or rubber-stamped
-plans that Codex flagged as architecturally wrong. Pro 3 is the
-right tier for adversarial plan + code review here; the Flash latency
-saving is not worth the signal degradation when the methodology
-hinges on whether one reviewer catches what the other misses.
-
-```bash
-node "/home/ps/.claude/plugins/cache/abiswas97-gemini/gemini/1.0.1/scripts/gemini-companion.mjs" task --background --model pro-3 "$(cat <<'PROMPT'
-Adversarial PLAN review for #<ISSUE> Step 1 ...
-
-Prime context: you are an expert in HPC networking, OS, data structures, JIT, CPU design, networking protocols. The codebase is xpf, an eBPF-based firewall with a userspace AF_XDP dataplane in Rust.
-
-Plan doc to review: /var/tmp/worktrees/<ISSUE>-<SLUG>/docs/pr/<ISSUE>-<SLUG>/plan.md (commit <SHA>).
-
-[Same questions as Codex — request both reviewers verify independently.]
-
-Verdict: PLAN-READY / PLAN-NEEDS-MINOR / PLAN-NEEDS-MAJOR / PLAN-KILL. PLAN-KILL is the right call if the perf gain is too small to justify the churn.
-PROMPT
-)"
-```
-
-After dispatch, **ScheduleWakeup with delaySeconds=300** and
-return control. When you wake, fetch both verdicts.
+Send the same questions to both reviewers independently. After
+dispatch, wait for both verdicts (they auto-deliver).
 
 ## Step 4: Iterate plan-review until both reviewers agree
 
 For each reviewer round:
 
-```bash
-# Codex
-node /home/ps/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs result <task-id>
-# Gemini
-node /home/ps/.claude/plugins/cache/abiswas97-gemini/gemini/1.0.1/scripts/gemini-companion.mjs result <task-id>
-```
+Collect both pool reviewers' task results when they complete.
 
 Outcomes:
 
@@ -451,8 +426,8 @@ gh pr create --title "<#ISSUE Step N: title>" --body "$(cat <<'EOF'
 
 Plan doc: docs/pr/<ISSUE>-<SLUG>/plan.md
 
-- Codex round-N: PLAN-READY (task ID <X>)
-- Gemini round-N: PLAN-READY (task ID <Y>)
+- Pool reviewer 1 round-N: PLAN-READY (task ID <X>)
+- Pool reviewer 2 round-N: PLAN-READY (task ID <Y>)
 
 ## Test plan
 
@@ -476,30 +451,20 @@ Plan doc: docs/pr/<ISSUE>-<SLUG>/plan.md
 EOF
 )"
 
-gh pr edit <PR> --add-reviewer Copilot
 ```
 
 After PR creation, post a comment with the per-class CoS smoke
 table.
 
-## Step 8: Wait for Copilot, dispatch Codex + Gemini code review
+## Step 8: Dispatch two declared-pool hostile code reviews
 
-Poll until Copilot's review lands:
-
-```bash
-gh pr view <PR> --json reviews
-gh api repos/psaab/xpf/pulls/<PR>/comments
-```
-
-ScheduleWakeup with 300s and check on next wake.
-
-In parallel, dispatch Codex hostile code review and Gemini
-adversarial code review on the PR commit.
+Dispatch two background reviewers via the internal `task` tool,
+each requesting a DISTINCT declared-pool model, READ-ONLY and
+worktree-scoped at the PR head, with the hostile brief:
 
 ```
-# Codex hostile review
 Hostile code review of PR #<PR> (#<ISSUE> Step N: <title>).
-Repo: /var/tmp/worktrees/<ISSUE>-<SLUG>
+Repo: <worktree>
 Branch: refactor/<ISSUE>-<SLUG>
 Base: master (commit <BASE>)
 Head: commit <HEAD>
@@ -521,17 +486,23 @@ Verdict format: MERGE-READY / MERGE-NEEDS-MINOR / MERGE-NEEDS-MAJOR.
 
 Required before merge:
 
-- **Copilot** has posted a review (COMMENTED is fine; ensure
-  every inline comment is addressed in a follow-up commit).
-- **Codex** has returned MERGE-READY or MERGE-NEEDS-MINOR with
-  every minor finding addressed.
-- **Gemini** has returned MERGE-READY or MERGE-NEEDS-MINOR with
-  every minor finding addressed.
+- **Pool reviewer 1** has returned MERGE-READY or MERGE-NEEDS-MINOR
+  with every minor finding addressed.
+- **Pool reviewer 2** has returned MERGE-READY or MERGE-NEEDS-MINOR
+  with every minor finding addressed.
+- **The third verdict is recorded**: the orchestrating Claude
+  (in-conversation, a declared-pool model distinct from the two
+  dispatched models) reviews the final head itself and records
+  its verdict on the PR (same MERGE-READY / MERGE-NEEDS-MINOR /
+  MERGE-NEEDS-MAJOR vocabulary, with findings). The implementer
+  never counts as this reviewer: if the orchestrator implemented
+  the change, dispatch a third distinct pool reviewer via the
+  task tool instead and record that verdict. All three verdicts
+  must be at the same final head.
 
 If any of the three returns NEEDS-MAJOR, address the findings,
-push a fix commit, re-dispatch reviewers (and re-request
-Copilot via `gh pr edit --add-reviewer Copilot`), wait for
-re-review, then re-merge-check.
+push a fix commit, re-dispatch reviewers, wait for re-review,
+then re-merge-check.
 
 **Merge with `--merge` (a true merge commit), NOT `--squash`.** Squash
 collapses the branch's logical commits — which Step 5 deliberately kept
@@ -560,8 +531,8 @@ came up:
   as a real outcome that ends the work.
 - **Best-effort-only smoke.** Per-class CoS smoke catches
   classifier/policer regressions that port 5201 misses.
-- **Skipping Copilot.** Step 8 requires waiting; Step 9
-  requires Copilot in the agreement set.
+- **Skipping pool review.** Step 8 requires dispatching; Step 9
+  requires all three pool verdicts in the agreement set.
 - **Dismissing test failures as flakes.** Step 6's 5x flake
   check is non-negotiable.
 - **Monolithic commits.** Step 5 commits in logical increments;
@@ -577,8 +548,8 @@ came up:
 - **Pure documentation fixes** — no code change, no need for
   reviewer agreement. Just push and merge.
 - **Single-line bug fixes** with obvious correctness — open a
-  PR, request Copilot, merge after Copilot review. The full
-  Codex+Gemini plan-review cycle is overkill.
+  PR, run one pool review, merge after it. The full
+  three-reviewer plan-review cycle is overkill.
 - **Hot fixes during outage** — speed > rigor. Use a different
   process.
 

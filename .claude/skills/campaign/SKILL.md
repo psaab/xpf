@@ -335,13 +335,8 @@ CANNOT dispatch their own sub-reviewers. Therefore:
   worktree-scoped, primed as a hostile domain expert, ending with a
   verdict at the FINAL head. All three must clear before merge; any
   real finding from any one blocks. See `/review-pr` for the
-  hostile-review shape; Copilot (below) is a supplement, never a
-  substitute for one of the three.
-- **PARENT reads + EVALUATES Copilot inline on the FINAL head BEFORE
-  every merge** — grep each cited line, decide real/stale, fold real
-  findings. Printing Copilot is not evaluating it. (This rule exists
-  because #2285 shipped a HIGH re-entrant deadlock that was
-  printed-not-evaluated.)
+  hostile-review shape. Only the declared model pool reviews —
+  Copilot is not part of any gate (user directive 2026-10-26).
 - **PARENT merges**, never the spawned agent. Agents implement + test +
   open the PR and STOP.
 
@@ -749,24 +744,22 @@ For each PR an agent opens:
    "Smoke passed" without numbers is not a gate. Any
    behavior-changing fold re-runs BOTH this gate and the triple
    review at the new head (counts toward the fold-loop cap).
-5. **Read + evaluate Copilot inline on the final head** as a SEPARATE step
-   before merge (supplement to, never a substitute for, the triple
-   review). Fold real findings. If the latest Copilot response is
-   the quota message — or no review lands after one `@copilot
-   review` request plus one keeper tick — record `Copilot:
-   unavailable (quota)` on the PR; that SATISFIES this item and the
-   Step 4 checklist (load-bearing assurance is then the parent
-   RED-on-revert + triple review). Never wait indefinitely for
-   Copilot and never waive the item silently.
+5. **Parent firsthand verification on the final head** as a SEPARATE
+   step before merge (supplement to, never a substitute for, the
+   triple review): spot-check at least one load-bearing claim
+   firsthand (re-run the RED/GREEN pair or a focused test, or
+   re-derive the cited invariant), for salvage lanes verify build +
+   full affected suite, and record the result on the PR. Reviews use
+   only the declared model pool — Copilot is not requested, waited
+   for, or evaluated (user directive 2026-10-26).
 6. **Fold review findings** by resuming the engineer agent
    (`SendMessage({to: "<agentId>", ...})` — resumes a COMPLETED agent with
    its context intact) OR inline if the agent's worktree is at a stale
    pre-rebase head that would overwrite your rebase.
 
-Copilot routinely catches substantive incompleteness the hostile reviewers
-pass (e.g. a fail-closed bound by slice length instead of the
-IP-declared length; a cmsg underflow). Every gate must clear: all three
-hostile verdicts, the cluster gate, and the Copilot evaluation.
+Every gate must clear: all three hostile verdicts at the final
+head, the cluster gate (or docs/test-only classification), and the
+parent firsthand verification.
 
 ## Step 4: Merge (PARENT)
 
@@ -779,7 +772,7 @@ Per PR, in order:
    toward the three),
    cluster-gate record with numbers (Step 3 item 4) or the parent's
    recorded `docs/test-only` classification with diff stat, the
-   Copilot evaluation (Step 3 item 5) with every real finding folded,
+   parent firsthand verification (Step 3 item 5),
    and the Step 3 item 1 log check: `docs/log/<issue>.md` (or
    `docs/log/<pr>.md`) present in the head's diff with Timestamp /
    Action / File(s) / Validation / Risk content.
@@ -926,11 +919,10 @@ is clean:
   current wave. Freeing idle agents for a "small workflow" is fine —
   refill stamped reviewers from the model pool, not from implementers.
 
-- **Copilot is often quota-blocked for a whole window** ("reached their
-  quota limit"). That does NOT waive the gate — it makes the Copilot-eval a
-  no-op, so the load-bearing gate is the parent firsthand RED-on-revert PLUS
-  the triple hostile review (Step 3). Still read the Copilot review on
-  the final head every merge; it is frequently just the quota message.
+- **Declared pool only (2026-10-26).** Copilot was removed from every
+  review gate by user directive; do not request, wait for, or evaluate
+  it. The load-bearing assurance is the triple hostile review PLUS the
+  parent firsthand RED-on-revert / focused re-run (Step 3 item 5).
 
 - **A design fork surfaced mid-`/engineer` → STOP engineering and start
   `/research` now.** If scoping reveals a real design decision (a data-model
@@ -943,7 +935,7 @@ is clean:
 
 ## Anti-patterns this skill prevents
 
-- Merging with unevaluated Copilot findings (the #2285 HIGH-deadlock class).
+- Merging on reviewer verdicts alone without a parent firsthand check of at least one load-bearing claim (the #2285 printed-not-evaluated class).
 - Building an integration branch on a stale PR head, then merging it and
   silently reverting the author's later review-fold.
 - N-way merge conflicts from running coupled issues on the parallel route.

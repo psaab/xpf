@@ -2,7 +2,7 @@
 
 Use for requested substantial solution plans, after investigating the problem.
 Keep the established Codex + AGY + Claude subject-matter-review (SMR) gate. This
-is plan review, not implementation review; Copilot joins later on actual code
+is plan review, not implementation review; the declared-pool triple later reviews actual code
 through `/engineer`. Do not open a draft PR just to obtain a fourth plan verdict.
 
 Finding/conclusion validation has its own
@@ -97,7 +97,7 @@ Otherwise include those comments as drafts in the local research result.
 
 STOP at PLAN-READY, PLAN-KILLED, or BLOCKED; do not implement, open a PR, deploy, or
 merge. PLAN-READY ends with: "Awaiting manual approval — type `/engineer <issue>`
-to proceed to implementation; Copilot joins on the implementation PR." With no
+to proceed to implementation; the declared-pool triple joins on the implementation PR." With no
 issue, request an explicit implementation instruction instead of creating one.
 
 PLAN-KILL rejects this proposed approach, not the existence of the problem.
