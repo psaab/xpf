@@ -4,7 +4,6 @@ import (
 	"log/slog"
 	"net/netip"
 	"sort"
-	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -212,11 +211,11 @@ func (s *frrHADemotionState) hasDistinctPeerIGPIdentity17874(
 		return false
 	}
 	if protocol == "isis" {
-		if !config.ValidISISNET(localIdentity) || !config.ValidISISNET(peerIdentity) {
+		localIdentity = config.CanonicalISISSystemID(localIdentity)
+		peerIdentity = config.CanonicalISISSystemID(peerIdentity)
+		if localIdentity == "" || peerIdentity == "" {
 			return false
 		}
-		localIdentity = strings.ToLower(strings.ReplaceAll(localIdentity, ".", ""))
-		peerIdentity = strings.ToLower(strings.ReplaceAll(peerIdentity, ".", ""))
 	}
 	return localIdentity != peerIdentity
 }

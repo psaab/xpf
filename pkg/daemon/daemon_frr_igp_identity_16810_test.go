@@ -160,12 +160,62 @@ func TestSplitUnrelatedRenderConfigCannotUsePeerIGPIdentity17874(t *testing.T) {
 }
 
 func igpSplitStores17874(t *testing.T, distinct bool) ([]*configstore.Store, []*config.Config) {
-	t.Helper()
 	source := splitNodeIGPConfig17874()
 	if !distinct {
 		source = strings.ReplaceAll(source, "10.0.0.2", "10.0.0.1")
 		source = strings.ReplaceAll(source, "49.0001.0100.0000.0002.00", "49.0001.0100.0000.0001.00")
 	}
+	return igpSplitStoresFromSource17874(t, source, func(nodeID int, compileErr error) {
+		if distinct && compileErr != nil {
+			t.Fatalf("node%d strict compile rejected distinct identities: %v", nodeID, compileErr)
+		}
+		if !distinct && compileErr == nil {
+			t.Fatalf("node%d strict compile accepted shared identities; want rejection", nodeID)
+		}
+	})
+}
+
+// NETs in different areas that share one IS-IS system ID are NOT
+// distinct node identities: the area is not part of the L2 system
+// identity, so the single-participant belt must still withhold
+// node1's IS-IS even though its full NET differs from node0's. The
+// distinct OSPF/OSPFv3 router-ids in the same fixture keep both
+// owners, isolating the IS-IS system-ID comparison.
+//
+// FAIL-ON-REVERT: comparing full canonical NETs instead of system
+// IDs makes node1 keep reth1.0 under the shared system ID.
+func TestSplitSameISISSystemIDDifferentArea17874(t *testing.T) {
+	source := strings.ReplaceAll(splitNodeIGPConfig17874(),
+		"49.0001.0100.0000.0002.00", "49.0002.0100.0000.0001.00")
+	stores, configs := igpSplitStoresFromSource17874(t, source, nil)
+	for nodeID, want := range map[int]struct {
+		igp, isis string
+	}{0: {"reth0.0", "reth0.0"}, 1: {"reth1.0", ""}} {
+		d := igpSplitDaemon17874(nodeID, configs[nodeID], stores[nodeID])
+		fc := d.assembleFRRConfigForActiveConfig(configs[nodeID], nil)
+		if got := ospfIfaceNames17874(fc.OSPF); len(got) != 1 || got[0] != want.igp {
+			t.Errorf("node%d OSPF interfaces = %v, want [%s]", nodeID, got, want.igp)
+		}
+		if got := ospf3IfaceNames17874(fc.OSPFv3); len(got) != 1 || got[0] != want.igp {
+			t.Errorf("node%d OSPFv3 interfaces = %v, want [%s]", nodeID, got, want.igp)
+		}
+		gotISIS := isisIfaceNames17874(fc.ISIS)
+		if want.isis == "" {
+			if len(gotISIS) != 0 {
+				t.Errorf("node%d IS-IS interfaces = %v, want withheld (shared system ID, different area)", nodeID, gotISIS)
+			}
+		} else if len(gotISIS) != 1 || gotISIS[0] != want.isis {
+			t.Errorf("node%d IS-IS interfaces = %v, want [%s]", nodeID, gotISIS, want.isis)
+		}
+	}
+}
+
+func igpSplitStoresFromSource17874(
+	t *testing.T,
+	source string,
+	strictCheck func(nodeID int, compileErr error),
+) ([]*configstore.Store, []*config.Config) {
+	t.Helper()
 	stores := make([]*configstore.Store, 2)
 	configs := make([]*config.Config, 2)
 	for nodeID := range 2 {
@@ -182,11 +232,8 @@ func igpSplitStores17874(t *testing.T, distinct bool) ([]*configstore.Store, []*
 			t.Fatalf("node%d compile: Cluster=%+v", nodeID, cfg.Chassis.Cluster)
 		}
 		_, compileErr := config.CompileConfigForNode(store.ActiveTree(), nodeID)
-		if distinct && compileErr != nil {
-			t.Fatalf("node%d strict compile rejected distinct identities: %v", nodeID, compileErr)
-		}
-		if !distinct && compileErr == nil {
-			t.Fatalf("node%d strict compile accepted shared identities; want rejection", nodeID)
+		if strictCheck != nil {
+			strictCheck(nodeID, compileErr)
 		}
 		stores[nodeID], configs[nodeID] = store, cfg
 	}
