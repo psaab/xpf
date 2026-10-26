@@ -1,13 +1,19 @@
 package grpcapi
 
 import (
+	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/psaab/xpf/pkg/authz"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -341,8 +347,8 @@ func TestRollbackMissingSlotSlotErrorPrecedence17967(t *testing.T) {
 			t.Errorf("%s: got nil, want history out-of-range slot error (#17967)", tc.what)
 			continue
 		}
-		if status.Code(err) != codes.PermissionDenied {
-			t.Errorf("%s: error code = %s, want PermissionDenied envelope (err=%v)", tc.what, status.Code(err), err)
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("%s: error code = %s, want InvalidArgument for rollback slot error (err=%v)", tc.what, status.Code(err), err)
 		}
 		if !strings.Contains(err.Error(), "out of range") {
 			t.Errorf("%s: err = %v, want history out-of-range slot error (#17967)", tc.what, err)
@@ -362,4 +368,59 @@ func TestRollbackMissingSlotSlotErrorPrecedence17967(t *testing.T) {
 		s.authorizeRPC(ctx, show14707Method("ShowRollback"), &pb.ShowRollbackRequest{N: 1, Path: []string{"security"}}))
 	wantDenied14707(t, "ShowCompare rollback=1 (control)",
 		s.authorizeRPC(ctx, show14707Method("ShowCompare"), &pb.ShowCompareRequest{RollbackN: 1}))
+}
+
+func TestRollbackMissingSlotTransportStatus17967(t *testing.T) {
+	s := showRead14707Server(t)
+	s.peerLookupFn = func(net.Addr, net.Addr) authz.PeerIdentity {
+		return authz.PeerIdentity{UID: uidLimited14707, OK: true, Local: true}
+	}
+	lis := bufconn.Listen(1 << 20)
+	server := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(s.principalUnaryInterceptor),
+		grpc.StatsHandler(&peerAuthStatsHandler{s: s}),
+	)
+	pb.RegisterBpfrxServiceServer(server, s)
+	go func() { _ = server.Serve(lis) }()
+	t.Cleanup(server.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := pb.NewBpfrxServiceClient(conn)
+
+	cells := []struct {
+		name string
+		call func(context.Context) error
+	}{
+		{
+			name: "ShowRollback",
+			call: func(ctx context.Context) error {
+				_, err := client.ShowRollback(ctx, &pb.ShowRollbackRequest{N: 40, Path: []string{"security"}})
+				return err
+			},
+		},
+		{
+			name: "ShowCompare",
+			call: func(ctx context.Context) error {
+				_, err := client.ShowCompare(ctx, &pb.ShowCompareRequest{RollbackN: 40, Path: []string{"security"}})
+				return err
+			},
+		},
+	}
+	for _, tc := range cells {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := tc.call(ctx)
+		cancel()
+		if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "out of range") {
+			t.Errorf("%s transport error = %v, want InvalidArgument containing slot error", tc.name, err)
+		}
+	}
 }

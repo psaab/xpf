@@ -30,6 +30,12 @@ type configReadSnapshots struct {
 	Present bool
 }
 
+type grpcConfigReadSlotError struct {
+	err error
+}
+
+func (e grpcConfigReadSlotError) Error() string { return e.err.Error() }
+
 func configReadSnapshotsFrom(ctx context.Context) (configReadSnapshots, bool) {
 	s, ok := ctx.Value(configReadSnapshotsKey{}).(configReadSnapshots)
 	return s, ok
@@ -167,7 +173,7 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 					if err := config.AuthorizeConfigShowCompareCommand(priceCfg, class, nil); err != nil {
 						return snaps, err
 					}
-					return snaps, slotErr
+					return snaps, grpcConfigReadSlotError{err: slotErr}
 				}
 				return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, slot, other)
 			}
@@ -191,7 +197,7 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 					if err := config.AuthorizeConfigShowCompareCommand(priceCfg, class, r.GetPath()); err != nil {
 						return snaps, err
 					}
-					return snaps, slotErr
+					return snaps, grpcConfigReadSlotError{err: slotErr}
 				}
 			} else {
 				scfg, active, candidate, _ := s.store.CompareSnapshot()
@@ -242,7 +248,7 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 				config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat()))); err != nil {
 				return snaps, err
 			}
-			return snaps, slotErr
+			return snaps, grpcConfigReadSlotError{err: slotErr}
 		}
 		if r.GetFormat() == pb.ConfigFormat_INHERITANCE {
 			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(priceCfg, class, r.GetPath(),

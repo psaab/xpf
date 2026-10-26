@@ -165,8 +165,8 @@ func TestRESTRollbackMissingSlotSlotErrorPrecedence17967(t *testing.T) {
 		"/api/v1/config/compare?rollback=40",
 	} {
 		code, body := get14707(t, base, route)
-		if code != http.StatusForbidden {
-			t.Errorf("GET %s returned %d, want authorization-gate response 403: %s", route, code, body)
+		if code != http.StatusBadRequest {
+			t.Errorf("GET %s returned %d, want slot-error status 400: %s", route, code, body)
 		}
 		if !strings.Contains(body, "out of range") {
 			t.Errorf("GET %s error = %s, want history out-of-range slot error (#17967)", route, body)
@@ -208,6 +208,15 @@ func TestRESTRollbackMissingSlotSlotErrorPrecedence17967(t *testing.T) {
 		code, body := get14707(t, baseOpen, route)
 		if code != http.StatusOK || strings.Contains(body, "out of range") {
 			t.Errorf("GET %s allowed-path control returned %d, %s", route, code, body)
+		}
+	}
+	for _, route := range []string{
+		"/api/v1/config/show-rollback?n=40&path=system",
+		"/api/v1/config/compare?rollback=40&path=system",
+	} {
+		code, body := get14707(t, baseOpen, route)
+		if code != http.StatusBadRequest || !strings.Contains(body, "out of range") || strings.Contains(body, "permission denied") {
+			t.Errorf("GET %s allowed missing-slot result = %d, %s; want history out-of-range 400", route, code, body)
 		}
 	}
 }

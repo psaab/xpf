@@ -28,6 +28,12 @@ type restConfigReadSnapshots struct {
 	Renders bool
 }
 
+type restConfigReadSlotError struct {
+	err error
+}
+
+func (e restConfigReadSlotError) Error() string { return e.err.Error() }
+
 func restConfigReadSnapshotsFrom(r *http.Request) (restConfigReadSnapshots, bool) {
 	s, ok := r.Context().Value(restConfigReadSnapshotsKey{}).(restConfigReadSnapshots)
 	return s, ok
@@ -168,7 +174,7 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 					strings.Fields(r.URL.Query().Get("path"))); err != nil {
 					return snaps, err
 				}
-				return snaps, slotErr
+				return snaps, restConfigReadSlotError{err: slotErr}
 			}
 			return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, slot, candidate)
 		}
@@ -213,7 +219,7 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 				config.ConfigShowDisplaySuffix(restShowFormat(format))); err != nil {
 				return snaps, err
 			}
-			return snaps, slotErr
+			return snaps, restConfigReadSlotError{err: slotErr}
 		}
 		if restShowFormat(format) == "inheritance" {
 			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(priceCfg, class,
