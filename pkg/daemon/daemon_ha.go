@@ -2073,7 +2073,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// an unapplied generation instead of leaving a goroutine behind.
 			if takeoverWork {
 				if cc := d.clusterConfig(); cc != nil && cc.DHCPLeaseSync && d.getSessionSync() != nil {
-					go d.seedDHCPLeasesFromPeerGen(d.applyCancelCtx(), applyGen)
+					d.spawnDHCPLeaseSeed(d.applyCancelCtx(), applyGen, dhcpLeaseSeedApplyWaitWarnAfter)
 					d.nudgeDHCPLeaseSync()
 				}
 			}

@@ -49,6 +49,7 @@ type recordingDHCPApplier9349 struct {
 	preSeed6StillMastering []bool
 	preSeed4Authority      []dhcpserver.LeaseSyncAuthority
 	preSeed6Authority      []dhcpserver.LeaseSyncAuthority
+	appliedGeneration      uint64
 }
 
 func (r *recordingDHCPApplier9349) Apply(cfg *config.DHCPServerConfig) error {
@@ -93,9 +94,18 @@ func (r *recordingDHCPApplier9349) Shutdown() error                { return nil 
 func (r *recordingDHCPApplier9349) LeaseAuthorityResult(int) (uint64, []dhcpserver.LeaseScopeAuthority, bool) {
 	return 0, nil, false
 }
-func (r *recordingDHCPApplier9349) AppliedGeneration(int) uint64 { return 0 }
-func (r *recordingDHCPApplier9349) IsRunning() bool              { return false }
-func (r *recordingDHCPApplier9349) ApplyFailedForTesting() bool  { return false }
+func (r *recordingDHCPApplier9349) AppliedGeneration(int) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.appliedGeneration
+}
+func (r *recordingDHCPApplier9349) IsRunning() bool { return false }
+func (r *recordingDHCPApplier9349) markAppliedGenerationForTest(gen uint64) {
+	r.mu.Lock()
+	r.appliedGeneration = gen
+	r.mu.Unlock()
+}
+func (r *recordingDHCPApplier9349) ApplyFailedForTesting() bool { return false }
 func (r *recordingDHCPApplier9349) GetLeasesWithSource4() ([]dhcpserver.Lease, dhcpserver.LeaseSource) {
 	return nil, dhcpserver.LeaseSource{}
 }
@@ -201,6 +211,7 @@ func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
 			IAID: 80, LeaseType: "IA_NA", SubnetID: 2, Remaining: 3600, State: 0},
 	})
 
+	d.dhcpLeaseSync.seedWaitStarted = make(chan int, 2)
 	d.applyRethServicesForRG(2)
 
 	if len(rec.preSeed4StillMastering) != 1 || !rec.preSeed4StillMastering[0] {
@@ -228,6 +239,35 @@ func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
 	}
 	if len(rec.authorityAsyncCfg) != 1 || rec.authorityAsyncCfg[0] == nil {
 		t.Fatalf("transition did not pass the desired config to ApplyAsyncWithLeaseAuthority")
+	}
+	select {
+	case <-d.dhcpLeaseSync.seedWaitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("HA caller did not start the DHCP seed apply wait")
+	}
+	seedJoined := make(chan struct{})
+	go func() {
+		d.dhcpLeaseSync.seedWG.Wait()
+		close(seedJoined)
+	}()
+	select {
+	case <-seedJoined:
+		t.Fatal("HA caller's DHCP seed returned before apply completion or cancellation")
+	case <-time.After(25 * time.Millisecond):
+	}
+	d.applyCancel()
+	select {
+	case <-seedJoined:
+	case <-time.After(time.Second):
+		// Let the broken callsite regression finish cleanly after recording
+		// the assertion failure, rather than leaking a background waiter.
+		rec.markAppliedGenerationForTest(rec.authorityAsync[0].Generation)
+		select {
+		case <-seedJoined:
+		case <-time.After(time.Second):
+			t.Fatal("DHCP seed did not join after releasing the failed callsite wait")
+		}
+		t.Fatal("HA caller's DHCP seed wait ignored applyCancelCtx cancellation")
 	}
 }
 

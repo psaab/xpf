@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -33,12 +34,12 @@ import (
 // flips only when that apply body finishes the restart.
 
 type flipKea16855 struct {
-	mu            sync.Mutex
-	isNew         bool
-	oldAdds       int
-	newAdds       int
-	newValidLfts  []int
-	newAddresses  []string
+	mu           sync.Mutex
+	isNew        bool
+	oldAdds      int
+	newAdds      int
+	newValidLfts []int
+	newAddresses []string
 }
 
 func (f *flipKea16855) flip() {
@@ -112,6 +113,28 @@ func startFlipKea16855(t *testing.T, path string, f *flipKea16855) func() {
 	return func() { _ = ln.Close() }
 }
 
+func startDHCPLeaseSeedForTesting(t *testing.T, d *Daemon, gen uint64, warnAfter time.Duration) <-chan struct{} {
+	t.Helper()
+	done := make(chan struct{})
+	d.dhcpLeaseSync.seedWG.Add(1)
+	go func() {
+		defer d.dhcpLeaseSync.seedWG.Done()
+		d.seedDHCPLeasesFromPeerGenWithWait(d.applyCancelCtx(), gen, warnAfter)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		if d.applyCancel != nil {
+			d.applyCancel()
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("test-owned DHCP lease seed did not exit after fixture cancellation")
+		}
+	})
+	return done
+}
+
 func TestSeedWaitsForTakeoverApply16855(t *testing.T) {
 	sock4 := shortTmpSocket(t, "k4.sock")
 	sock6 := shortTmpSocket(t, "k6.sock")
@@ -163,11 +186,7 @@ func TestSeedWaitsForTakeoverApply16855(t *testing.T) {
 		releaseOnce.Do(func() { close(release) })
 	}()
 
-	done := make(chan struct{})
-	go func() {
-		d.seedDHCPLeasesFromPeerGen(context.Background(), gen)
-		close(done)
-	}()
+	done := startDHCPLeaseSeedForTesting(t, d, gen, dhcpLeaseSeedApplyWaitWarnAfter)
 	select {
 	case <-done:
 	case <-time.After(15 * time.Second):
@@ -183,22 +202,23 @@ func TestSeedWaitsForTakeoverApply16855(t *testing.T) {
 }
 
 // TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884 pins restart ordering,
-// lifetime aging, and expiry through the apply wait. The survivor's exact
-// remainder varies with elapsed whole seconds; a two-second lease expires.
+// lifetime aging, and expiry through the apply wait for both address families.
+// The seed-wait channel proves each short lease was captured while still live;
+// the survivor's exact remainder varies with elapsed whole seconds.
 //
-// FAIL-ON-REVERT: make the former 20s deadline short, then hold restart beyond
-// it. Returning or seeding the old process before release fails; seeding the
-// new process with the pre-wait remaining value or the expired lease also fails.
+// FAIL-ON-REVERT: while both family applies are blocked, returning at the
+// former 20s deadline reaches the old Kea. Seeding from the pre-wait snapshots
+// also revives the two-second lease and gives each survivor its original
+// valid-lft.
 func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
-	oldWait := dhcpLeaseSeedApplyWaitWarn
-	dhcpLeaseSeedApplyWaitWarn = 200 * time.Millisecond
-	t.Cleanup(func() { dhcpLeaseSeedApplyWaitWarn = oldWait })
-
 	sock4 := shortTmpSocket(t, "k4.sock")
 	sock6 := shortTmpSocket(t, "k6.sock")
 	flip := &flipKea16855{}
 	defer startFlipKea16855(t, sock4, flip)()
+	v6Kea := &stubKeaServer{}
+	defer v6Kea.start(t, sock6)()
 	d := leaseSyncTestDaemon(t, sock4, sock6, true)
+	d.dhcpLeaseSync.seedWaitStarted = make(chan int, 2)
 
 	restarting := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -224,12 +244,6 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 	var releaseOnce sync.Once
 	releaseRestart := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(releaseRestart)
-	d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
-		{Family: 4, Address: "10.0.61.151", HWAddress: "aa:bb:cc:dd:ee:97",
-			SubnetID: 1, Remaining: 100, PreferredRemaining: 100, State: 0},
-		{Family: 4, Address: "10.0.61.152", HWAddress: "aa:bb:cc:dd:ee:98",
-			SubnetID: 1, Remaining: 2, PreferredRemaining: 2, State: 0},
-	})
 
 	gen := d.enqueueDHCPApplyWithAuthorityState(
 		d.desiredClusterDHCPConfigWithMasters(d.store.ActiveConfig(), map[int]bool{1: true}),
@@ -237,11 +251,6 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 	if gen == 0 {
 		t.Fatal("enqueue returned generation 0")
 	}
-	done := make(chan struct{})
-	go func() {
-		d.seedDHCPLeasesFromPeerGen(context.Background(), gen)
-		close(done)
-	}()
 	select {
 	case <-restarting:
 	case <-time.After(5 * time.Second):
@@ -249,15 +258,49 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 		t.Fatal("takeover restart did not start")
 	}
 
+	// Store both rows only after the v4 restart is blocked, then require a
+	// per-family wait witness within one second. This proves the seed captured
+	// each two-second lease while it was still live, not after it had aged out.
+	d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
+		{Family: 4, Address: "10.0.61.151", HWAddress: "aa:bb:cc:dd:ee:97",
+			SubnetID: 1, Remaining: 100, PreferredRemaining: 100, State: 0},
+		{Family: 4, Address: "10.0.61.152", HWAddress: "aa:bb:cc:dd:ee:98",
+			SubnetID: 1, Remaining: 2, PreferredRemaining: 2, State: 0},
+	})
+	d.sessionSync.SetPeerDHCPLeasesForTesting(6, []dhcpserver.SyncLease{
+		{Family: 6, Address: "2001:db8:61::151", DUID: "00:01:00:01:aa:bb:cc:dd:ee:97",
+			IAID: 97, LeaseType: "IA_NA", SubnetID: 1, Remaining: 100, PreferredRemaining: 100, State: 0},
+		{Family: 6, Address: "2001:db8:61::152", DUID: "00:01:00:01:aa:bb:cc:dd:ee:98",
+			IAID: 98, LeaseType: "IA_NA", SubnetID: 1, Remaining: 2, PreferredRemaining: 2, State: 0},
+	})
+	snapshotsAt := time.Now()
+	done := startDHCPLeaseSeedForTesting(t, d, gen, 200*time.Millisecond)
+
+	waiting := map[int]bool{}
+	deadline := time.After(time.Second)
+	for !waiting[4] || !waiting[6] {
+		select {
+		case family := <-d.dhcpLeaseSync.seedWaitStarted:
+			waiting[family] = true
+			if time.Since(snapshotsAt) >= 2*time.Second {
+				t.Fatalf("#17884: family %d entered its wait only after the two-second lease expired", family)
+			}
+		case <-deadline:
+			t.Fatalf("#17884: seed did not enter both family waits before lease expiry; observed=%v", waiting)
+		}
+	}
+
 	time.Sleep(2200 * time.Millisecond)
 	select {
 	case <-done:
-		oldAdds, newAdds := flip.counts()
-		t.Fatalf("#17884: seed returned before restart completed (old/new adds %d/%d)", oldAdds, newAdds)
+		t.Fatal("#17884: seed returned while takeover restart was still blocked")
 	default:
 	}
 	if oldAdds, newAdds := flip.counts(); oldAdds != 0 || newAdds != 0 {
-		t.Fatalf("#17884: lease seed reached old/new Kea during restart = %d/%d, want 0/0", oldAdds, newAdds)
+		t.Fatalf("#17884: v4 seed reached old/new Kea during restart = %d/%d, want 0/0", oldAdds, newAdds)
+	}
+	if adds := v6Kea.adds(); len(adds) != 0 {
+		t.Fatalf("#17884: v6 seed reached Kea during restart: %+v", adds)
 	}
 
 	flip.flip()
@@ -265,17 +308,27 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(15 * time.Second):
-		t.Fatal("seed did not complete after takeover restart")
+		t.Fatal("seed did not complete after both takeover applies")
 	}
 	oldAdds, newAdds := flip.counts()
 	if oldAdds != 0 || newAdds != 1 {
-		t.Fatalf("#17884: seed hit old/new Kea = %d/%d, want 0/1", oldAdds, newAdds)
+		t.Fatalf("#17884: v4 seed hit old/new Kea = %d/%d, want 0/1", oldAdds, newAdds)
 	}
 	if got := flip.validLifetimes(); len(got) != 1 || got[0] <= 0 || got[0] >= 100 {
-		t.Fatalf("#17884: seeded valid-lft values = %v, want only the aged surviving lease (0 < valid-lft < 100)", got)
+		t.Fatalf("#17884: v4 valid-lft values = %v, want only the aged surviving lease (0 < valid-lft < 100)", got)
 	}
 	if got := flip.newLeaseAddresses(); len(got) != 1 || got[0] != "10.0.61.151" {
-		t.Fatalf("#17884: seeded addresses = %v, want only 10.0.61.151 (the two-second lease expired)", got)
+		t.Fatalf("#17884: v4 addresses = %v, want only 10.0.61.151 (the two-second lease expired)", got)
+	}
+	v6Adds := v6Kea.adds()
+	if len(v6Adds) != 1 || v6Adds[0]["ip-address"] != "2001:db8:61::151" {
+		t.Fatalf("#17884: v6 lease-adds = %+v, want only the surviving address 2001:db8:61::151", v6Adds)
+	}
+	if validLft, ok := v6Adds[0]["valid-lft"].(float64); !ok || validLft <= 0 || validLft >= 100 {
+		t.Fatalf("#17884: v6 valid-lft = %v, want an aged value between 1 and 99", v6Adds[0]["valid-lft"])
+	}
+	if got := d.sessionSync.Stats().DHCPLeasesSeeded; got != 2 {
+		t.Fatalf("#17884: DHCPLeasesSeeded = %d, want 2 surviving leases", got)
 	}
 }
 
@@ -283,12 +336,12 @@ func TestSeedApplyWaitStopsOnDaemonShutdown17884(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := &Daemon{
-		dhcpServer:        dhcpserver.New(),
+		dhcpServer:         dhcpserver.New(),
 		applyCancelContext: ctx,
 	}
 	done := make(chan bool, 1)
 	go func() {
-		done <- d.waitForDHCPApplyGen(d.applyCancelCtx(), 1, true, false)
+		done <- d.waitForDHCPApplyGen(d.applyCancelCtx(), 1, 20*time.Millisecond, 4)
 	}()
 	cancel()
 	select {
@@ -301,6 +354,101 @@ func TestSeedApplyWaitStopsOnDaemonShutdown17884(t *testing.T) {
 	}
 }
 
+// A failed family must not hold the healthy family behind a shared wait.
+// Cancellation still joins the seed worker while the failed family remains
+// unapplied.
+func TestSeedFamiliesApplyIndependently17884(t *testing.T) {
+	tests := []struct {
+		name         string
+		failedFamily int
+		failedUnit   string
+	}{
+		{name: "v4 blocked, v6 seeds", failedFamily: 4, failedUnit: "kea-dhcp4-server"},
+		{name: "v6 blocked, v4 seeds", failedFamily: 6, failedUnit: "kea-dhcp6-server"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sock4 := shortTmpSocket(t, "k4.sock")
+			sock6 := shortTmpSocket(t, "k6.sock")
+			kea4 := &stubKeaServer{}
+			kea6 := &stubKeaServer{}
+			defer kea4.start(t, sock4)()
+			defer kea6.start(t, sock6)()
+			d := leaseSyncTestDaemon(t, sock4, sock6, true)
+			d.dhcpLeaseSync.seedWaitStarted = make(chan int, 2)
+			confDir := t.TempDir()
+			mgr := dhcpserver.NewManagerForTesting(
+				filepath.Join(confDir, "kea-dhcp4.conf"), filepath.Join(confDir, "kea-dhcp6.conf"),
+				func(args ...string) error {
+					if len(args) >= 2 && args[0] == "restart" && args[1] == tt.failedUnit {
+						return errors.New("injected family restart failure")
+					}
+					return nil
+				},
+				func(string) bool { return true },
+			)
+			mgr.SetLeaseSyncSeamsForTesting(unixDialer(), sock4, sock6, "", "")
+			d.dhcpServer = mgr
+			d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
+				{Family: 4, Address: "10.0.62.151", HWAddress: "aa:bb:cc:dd:ee:97",
+					SubnetID: 1, Remaining: 3600, PreferredRemaining: 3600, State: 0},
+			})
+			d.sessionSync.SetPeerDHCPLeasesForTesting(6, []dhcpserver.SyncLease{
+				{Family: 6, Address: "2001:db8:62::151", DUID: "00:01:00:01:aa:bb:cc:dd:ee:97",
+					IAID: 97, LeaseType: "IA_NA", SubnetID: 1, Remaining: 3600, PreferredRemaining: 3600, State: 0},
+			})
+			gen := d.enqueueDHCPApplyWithAuthorityState(
+				d.desiredClusterDHCPConfigWithMasters(d.store.ActiveConfig(), map[int]bool{1: true}),
+				"vrrp MASTER rg-test", d.store.ActiveConfig(), nil)
+			if gen == 0 {
+				t.Fatal("enqueue returned generation 0")
+			}
+			d.spawnDHCPLeaseSeed(d.applyCancelCtx(), gen, 50*time.Millisecond)
+
+			failedWaitStarted := false
+			deadline := time.After(3 * time.Second)
+			for !failedWaitStarted {
+				select {
+				case family := <-d.dhcpLeaseSync.seedWaitStarted:
+					failedWaitStarted = family == tt.failedFamily
+				case <-deadline:
+					t.Fatalf("seed did not wait on failed family %d", tt.failedFamily)
+				}
+			}
+			healthyFamily := 10 - tt.failedFamily
+			waitFor(t, 3*time.Second, "healthy-family seed", func() bool {
+				if healthyFamily == 4 {
+					return len(kea4.adds()) == 1
+				}
+				return len(kea6.adds()) == 1
+			})
+			failedAdds := kea4.adds()
+			if tt.failedFamily == 6 {
+				failedAdds = kea6.adds()
+			}
+			if len(failedAdds) != 0 {
+				t.Fatalf("failed family %d received lease-add commands: %+v", tt.failedFamily, failedAdds)
+			}
+
+			seedDone := make(chan struct{})
+			go func() {
+				d.dhcpLeaseSync.seedWG.Wait()
+				close(seedDone)
+			}()
+			select {
+			case <-seedDone:
+				t.Fatal("seed worker returned while one family remained unapplied")
+			case <-time.After(75 * time.Millisecond):
+			}
+			d.applyCancel()
+			select {
+			case <-seedDone:
+			case <-time.After(time.Second):
+				t.Fatal("seed worker did not join after apply-context cancellation")
+			}
+		})
+	}
+}
 
 // IAID-0 must survive the seed wire form (#16855 alongside): keaLeaseJSON with
 // omitempty dropped "iaid" for IAID 0; the pointer form must emit "iaid":0.
