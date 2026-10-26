@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * DHCP: retain restart-before-seed ordering beyond the old 20-second
+    fail-open deadline and re-age peer lease lifetimes before seeding
+    (#17884).
   * Config: preserve distinct same-named IPsec traffic-selector fragments;
     normalize identical direct/chained selector bodies including block-valued
     local-ip and remote-ip leaves (#17802).
