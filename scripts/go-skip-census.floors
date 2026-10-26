@@ -70,16 +70,84 @@
 # exercisable; none was un-skipped here because the gating condition
 # is real on the hosts that lack it -- banking with these reasons is
 # the #16474 acceptance path, and CI now ratchets any NEXT skip.
-total        = 557
+# #17921 recount at 7bf41933cf against the #16474 measurement: master added
+# 57 skip calls and removed 6 by file+message multiset (+51 net: +17
+# priv-absent and +34 other). Issue #17921 un-skips the stale guard added by
+# PR #17623 (issue #16557), leaving 56 additions to bank
+# and 6 retired sites (-1 net from that guard's removal): +50 total, +17
+# priv-absent, and +33 other. Priv-present and unparsed are unchanged.
+# Retained additions are measured, not guessed:
+# PR #17633 (issue #16832) +2 other in
+# pkg/api/tls_certificate_16832_test.go (OpenSSL binary absence and a build
+# that cannot emit the requested CA:TRUE fixture);
+# PR #17369 (issue #16562) +2 other in
+# pkg/cli/cli_show_interfaces_physical_zone_16562_test.go (no dash-named host
+# interface);
+# PR #17623 (issue #16557) +2 other in
+# pkg/config/zone_count_cap_test.go (the u32 cap cannot be materialised as a
+# multi-billion-entry test map);
+# PR #17639 (issue #16842) +3 other in
+# pkg/daemon/fab1_debt_churn_16842_test.go (usable loopback IPv4 address
+# unavailable);
+# PR #17557 (issue #16733) +5 other in
+# pkg/daemon/ssh_faillock_16733_test.go (gcc, PAM modules or library, and a
+# usable passwd user unavailable);
+# PR #17552 (issue #16709) +1 priv-absent and +1 other in
+# pkg/daemon/webmgmt_vrf_bind_16709_test.go (netns creation and required tools
+# unavailable);
+# PR #17653 (issue #16846) +1 priv-absent and +1 other in
+# pkg/dataplane/userspace/findbinary_16846_test.go (root control and true-binary
+# fixture);
+# PR #17493 (issue #16660) +2 other in
+# pkg/dataplane/userspace/proxy_ndp_shim_16660_test.go (memlock/BPF map setup
+# unavailable);
+# PR #17463 (issue #16657) +1 other in
+# pkg/dataplane/userspace_xdp_build_provenance_15218_test.go (bpf-linker
+# absent);
+# PR #17597 (issue #16776) +2 priv-absent and +4 other in
+# pkg/frr/community_pipe_16776_test.go;
+# PR #17630 (issue #16835) +2 priv-absent and +4 other in
+# pkg/frr/community_shared_token_16835_test.go (root/netns plus FRR tools, user,
+# and group unavailable);
+# PR #17583 (issue #16723) +1 other in
+# pkg/frr/vtysh_oracle_16723_test.go (FRR bgpd absent);
+# PR #17430 (issue #16617) +2 other in
+# pkg/grpcapi/server_cluster_monitor_status_4480_test.go
+# (ge-0/0/0 cannot be resolved live or is down);
+# PR #17473 (issue #16669) +3 priv-absent and +2 other in
+# pkg/lldp/stop_wakeup_16669_test.go (netns/unshare and veth setup unavailable);
+# PR #17611 (issue #16797) +1 priv-absent and +2 other in
+# pkg/networkd/networkd_parity_16797_test.go (root/netns, tools, or systemd
+# binaries unavailable);
+# PR #17455 (issue #16614) +1 other in pkg/routing/next_table_kernel_16614_test.go
+# (netlink handle unavailable);
+# PR #17600 (issue #16781) +7 priv-absent and +2 other in
+# pkg/snmp/agent_inband_16781_linux_test.go (netns/VRF/veth setup unavailable);
+# PR #17608 (issue #16812) +1 other in pkg/upgrade/kernel_held_16812_test.go
+# (required tool absent); PR #17604 (issue #16807) +1 other in
+# pkg/upgrade/kernel_pkgheld_16807_test.go (dpkg-query absent). Each retained
+# gate remains conditional on a real execution-environment, tool, fixture, or
+# scale boundary.
+# Disposition of PR #17623 (issue #16557)'s snapshot addition: its `t.Skip` branch says the
+# zzq17760/zzq8100 collision pair no longer collides, but that pair still
+# folds to the same u32 ID (1679679597), pinned in pkg/config/zoneid_test.go.
+# Replace the unreachable-currently `t.Skip` with `t.Fatal`; the cell runs
+# against the same fixture, and future premise drift fails instead of hiding.
+# The six retired other sites are: the former PR #17623 (issue #16557)
+# z174/z214 snapshot premise; three FRR-bgpd-absence guards replaced by PR
+# #17583's vtysh oracle; and two loopback monitor gates replaced by PR #17430.
+# This is the file+message recount and each remaining PR's disposition is
+# listed explicitly in this PR body.
+total        = 607
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 103
+priv-absent  = 120
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 435
+other        = 468
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket
