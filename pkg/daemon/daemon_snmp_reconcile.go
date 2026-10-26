@@ -748,12 +748,13 @@ func (d *Daemon) reconcileSNMP(cfg *config.Config) bool {
 	vrfIndexChanged := false
 	if vrfDevice != "" && d.snmpVRFDevice == vrfDevice {
 		live, err := d.fabricLinkByName(vrfDevice)
+		liveIndex, liveIsVRF := snmpVRFIdentityIndex(live)
 		if d.snmpVRFIndex == 0 {
-			vrfIndexChanged = err == nil && live != nil && live.Attrs() != nil
+			vrfIndexChanged = err == nil && liveIsVRF && liveIndex != 0
 		} else if err != nil {
 			vrfIndexChanged = isSNMPVRFLinkNotFound(err)
-		} else if live != nil && live.Attrs() != nil {
-			vrfIndexChanged = live.Attrs().Index != d.snmpVRFIndex
+		} else if liveIsVRF && liveIndex != 0 {
+			vrfIndexChanged = liveIndex != d.snmpVRFIndex
 		}
 	}
 
@@ -822,6 +823,17 @@ func isSNMPVRFLinkNotFound(err error) bool {
 	return errors.As(err, &notFound)
 }
 
+// snmpVRFIdentityIndex recognizes only actual VRF links as authoritative
+// management-VRF identities. Same-name links of another type are foreign
+// occupants and must never steer SNMP rebinding.
+func snmpVRFIdentityIndex(link netlink.Link) (int, bool) {
+	vrf, ok := link.(*netlink.Vrf)
+	if !ok || vrf == nil || vrf.Attrs() == nil {
+		return 0, false
+	}
+	return vrf.Attrs().Index, true
+}
+
 // snmpVRFNeedsIndexReconcile reports whether a running management-VRF-bound
 // listener's recorded ifindex needs a live check/reconciliation. Transient
 // link-lookup failures are not evidence of device recreation.
@@ -835,24 +847,34 @@ func (d *Daemon) snmpVRFNeedsIndexReconcile() bool {
 	if err != nil {
 		return d.snmpVRFIndex != 0 && isSNMPVRFLinkNotFound(err)
 	}
-	if live == nil || live.Attrs() == nil {
-		return false
-	}
-	return d.snmpVRFIndex == 0 || d.snmpVRFIndex != live.Attrs().Index
+	liveIndex, liveIsVRF := snmpVRFIdentityIndex(live)
+	return liveIsVRF && liveIndex != 0 &&
+		(d.snmpVRFIndex == 0 || d.snmpVRFIndex != liveIndex)
 }
 
 func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
+	// A management VRF is created only when management interfaces are
+	// configured. Keep SNMP on the main routing context otherwise. When the
+	// management VRF is expected, refuse a known same-name foreign occupant;
+	// its ifindex is not a safe SO_BINDTODEVICE target.
+	vrfDevice := snmpVRFDeviceForConfig(cfg)
+	if vrfDevice != "" {
+		link, err := d.fabricLinkByName(vrfDevice)
+		if err != nil && !isSNMPVRFLinkNotFound(err) {
+			return fmt.Errorf("snmp: verify management VRF %q before binding: %w", vrfDevice, err)
+		}
+		if err == nil {
+			if _, ok := snmpVRFIdentityIndex(link); !ok {
+				return fmt.Errorf("snmp: management device %q is not a VRF link", vrfDevice)
+			}
+		}
+	}
 	ctx, cancel := context.WithCancel(d.daemonCtx)
 	agent := snmp.NewAgentWithPaths(cfg.System.SNMP, d.snmpBootsPath, d.snmpEngineIDPath)
-	// A management VRF is created only when management interfaces are
-	// configured. Keep SNMP on the main routing context otherwise, rather than
-	// failing to bind a socket to a nonexistent device.
-	vrfDevice := snmpVRFDeviceForConfig(cfg)
 	if vrfDevice == "" {
 		slog.Warn("SNMP management VRF is not configured; serving from main routing table")
 	}
 	agent.SetVRFDevice(vrfDevice)
-	// #15232 A48-04: install the reth source so buildSNMPIfData can
 	// synthesize bondless reth rows from this daemon's active config.
 	snmpRethSourceMu.Lock()
 	snmpRethSource = func() ([]snmpRethInfo, []snmp.IfData) {
@@ -909,20 +931,35 @@ func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
 		return bindErr
 	}
 
+	// After the listener reports bind success, confirm that the name still
+	// resolves to an actual VRF. A foreign same-name replacement during bind
+	// invalidates the start; an unresolved index remains unknown and will be
+	// reconciled once a live VRF can be observed.
+	liveVRFIndex := 0
+	if vrfDevice != "" {
+		link, err := d.fabricLinkByName(vrfDevice)
+		if err != nil && !isSNMPVRFLinkNotFound(err) {
+			d.teardownSNMPLocked()
+			return fmt.Errorf("snmp: verify management VRF %q after binding: %w", vrfDevice, err)
+		}
+		if err == nil {
+			var isVRF bool
+			liveVRFIndex, isVRF = snmpVRFIdentityIndex(link)
+			if !isVRF {
+				d.teardownSNMPLocked()
+				return fmt.Errorf("snmp: management device %q changed to a non-VRF link while binding", vrfDevice)
+			}
+		}
+	}
+
 	if len(cfg.System.SNMP.TrapGroups) > 0 {
 		d.startSNMPMonitorLocked()
 	}
 	d.snmpVRFDevice = vrfDevice
-	// #16626: record the VRF ifindex the socket just bound to, so a later
-	// delete+re-create (new ifindex, same name) is detectable. Best-effort:
-	// a lookup failure leaves 0 (unknown) and the ifindex check is skipped
-	// rather than bouncing the listener on a transient netlink error.
-	d.snmpVRFIndex = 0
-	if vrfDevice != "" {
-		if link, err := d.fabricLinkByName(vrfDevice); err == nil && link != nil && link.Attrs() != nil {
-			d.snmpVRFIndex = link.Attrs().Index
-		}
-	}
+	// #16626: record only a VRF identity confirmed after bind. A missing link
+	// or unknown index leaves 0 so the first later successful VRF check forces
+	// a conservative restart/rebind before adopting that index.
+	d.snmpVRFIndex = liveVRFIndex
 	slog.Info("SNMP agent started",
 		"communities", len(cfg.System.SNMP.Communities),
 		"v3_users", len(cfg.System.SNMP.V3Users),

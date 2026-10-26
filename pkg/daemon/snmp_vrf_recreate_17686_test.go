@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -57,6 +58,96 @@ func TestReconcileSNMPTransientLookupErrorDoesNotBounce17686(t *testing.T) {
 	if got := f.rec.count(); got != 2 {
 		t.Fatalf("SNMP starts after confirmed absence = %d, want 2", got)
 	}
+}
+
+func TestReconcileSNMPWrappedLinkNotFoundRestarts17686(t *testing.T) {
+	f := newSNMPVRFRecreateFixture16626(t)
+	cfg := f.d.store.ActiveConfig()
+	orig := f.d.linkByNameFn
+	f.d.linkByNameFn = func(name string) (netlink.Link, error) {
+		if name == config.ManagementVRFDeviceName {
+			return nil, fmt.Errorf("fabric lookup: %w", netlink.LinkNotFoundError{})
+		}
+		return orig(name)
+	}
+
+	if !f.d.reconcileSNMP(cfg) {
+		t.Fatal("wrapped LinkNotFoundError did not restart the SNMP listener")
+	}
+	if got := f.rec.count(); got != 2 {
+		t.Fatalf("SNMP starts after wrapped LinkNotFoundError = %d, want 2", got)
+	}
+}
+
+// TestSNMPDoesNotAdoptForeignManagementLink17686 protects #17686 against a
+// same-name non-VRF replacement. Its ifindex is not a valid management-VRF
+// identity: do not restart a healthy listener onto it, nor start a new
+// listener pinned to it.
+func TestSNMPDoesNotAdoptForeignManagementLink17686(t *testing.T) {
+	t.Run("running listener", func(t *testing.T) {
+		f := newSNMPVRFRecreateFixture16626(t)
+		cfg := f.d.store.ActiveConfig()
+		first := f.d.snmpAgent
+
+		f.ops.links[config.ManagementVRFDeviceName] = &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{
+			Name: config.ManagementVRFDeviceName, Index: 99,
+		}}
+		f.recreateAt(99)
+		f.ops.links["fxp0"].Attrs().MasterIndex = 0
+
+		if f.d.reconcileSNMP(cfg) {
+			t.Fatal("same-name non-VRF link caused SNMP reconcile to restart")
+		}
+		if f.d.snmpVRFNeedsIndexReconcile() {
+			t.Fatal("same-name non-VRF link was treated as an authoritative VRF index")
+		}
+
+		prevRoute := mgmtVRFRouteReconcileFn
+		mgmtVRFRouteReconcileFn = func(*Daemon) error { return nil }
+		t.Cleanup(func() { mgmtVRFRouteReconcileFn = prevRoute })
+		f.d.reassertMgmtVRFOnce(context.Background())
+
+		if got := f.rec.count(); got != 1 || f.d.snmpAgent != first {
+			t.Fatalf("foreign occupant restarted SNMP: starts=%d sameAgent=%v, want 1/true",
+				got, f.d.snmpAgent == first)
+		}
+		if f.d.snmpVRFIndex != 77 {
+			t.Fatalf("foreign occupant replaced recorded VRF index with %d, want 77", f.d.snmpVRFIndex)
+		}
+		if len(f.ops.binds) != 0 {
+			t.Fatalf("management interfaces were bound to foreign occupant: %v", f.ops.binds)
+		}
+	})
+
+	t.Run("initial start", func(t *testing.T) {
+		f := newSNMPVRFRecreateFixture16626(t)
+		cfg := f.d.store.ActiveConfig()
+		f.d.teardownSNMP()
+		f.ops.links[config.ManagementVRFDeviceName] = &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{
+			Name: config.ManagementVRFDeviceName, Index: 99,
+		}}
+		f.recreateAt(99)
+
+		if f.d.reconcileSNMP(cfg) {
+			t.Fatal("SNMP started while vrf-mgmt was occupied by a non-VRF link")
+		}
+		if f.rec.count() != 1 || f.d.snmpAgent != nil {
+			t.Fatalf("SNMP served through foreign occupant: starts=%d agentPresent=%v, want 1/false",
+				f.rec.count(), f.d.snmpAgent != nil)
+		}
+
+		f.ops.links[config.ManagementVRFDeviceName] = &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{
+			Name: config.ManagementVRFDeviceName, Index: 100,
+		}}
+		f.recreateAt(100)
+		if !f.d.reconcileSNMP(cfg) {
+			t.Fatal("SNMP did not start after a real management VRF appeared")
+		}
+		if f.rec.count() != 2 || f.d.snmpVRFIndex != 100 {
+			t.Fatalf("SNMP after real VRF appeared: starts=%d ifindex=%d, want 2/100",
+				f.rec.count(), f.d.snmpVRFIndex)
+		}
+	})
 }
 
 // TestReconcileSNMPUnknownIndexRebindsOnFirstSuccessfulLookup17686 covers
