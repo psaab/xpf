@@ -2569,6 +2569,7 @@ fn synced_inbound_hold_with_snat_16619() {
         53,
         1_000_000_000,
     ));
+    let public_port = first.rewrite_src_port.expect("minted SNAT public port");
     crate::nat::release_source_nat_allocation(
         &InterfaceNatAllocators::default(),
         &rules,
@@ -2603,7 +2604,7 @@ fn synced_inbound_hold_with_snat_16619() {
         src_ip: "8.8.8.8".parse().unwrap(),
         dst_ip: "203.0.113.10".parse().unwrap(),
         src_port: 53,
-        dst_port: first.rewrite_src_port.expect("minted SNAT public port"),
+        dst_port: public_port,
         discriminator: Default::default(),
         routing_domain: 0,
     };
@@ -2644,7 +2645,7 @@ fn synced_inbound_hold_with_snat_16619() {
     let outbound_key = session_key(12345, "8.8.8.8", 53);
     let outbound_nat = NatDecision {
         rewrite_src: Some("203.0.113.10".parse().unwrap()),
-        rewrite_src_port: Some(40000),
+        rewrite_src_port: Some(public_port),
         rewrite_dst: Some("8.8.8.8".parse().unwrap()),
         rewrite_dst_port: Some(53),
         ..NatDecision::default()
