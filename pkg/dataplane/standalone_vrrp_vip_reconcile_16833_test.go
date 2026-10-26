@@ -192,9 +192,9 @@ func TestStandaloneVRRPVIPSurvivesReconcile16833(t *testing.T) {
 // networkd keep arms) had the same missed leg: a disabled parent's
 // tagged unit still collected its VIPs / still set KeepAddresses.
 //
-// FAIL-ON-REVERT: drop the ifCfg.Disable gates and the disabled rows
-// below keep the VIPs again (planner keepAddrs non-empty, VLAN keep
-// non-empty, KeepAddresses/KeepForeignStatic true).
+// FAIL-ON-REVERT: remove the parent-disable gates; the planner keeps
+// the untagged VIP and a second programZoneMaps apply keeps the tagged
+// VIP too. The networkd rows also resume advertising the foreign keep.
 func TestStandaloneVRRPVIPNotKeptOnDisabledInterface17866(t *testing.T) {
 	mkCfg := func(ifDisable bool, vlan bool) *config.Config {
 		cfg := &config.Config{}
@@ -226,23 +226,29 @@ func TestStandaloneVRRPVIPNotKeptOnDisabledInterface17866(t *testing.T) {
 		return cfg
 	}
 
+	cfgOff := mkCfg(true, true)
+
 	// Untagged arm: disabled interface -> no keep, so a stale VIP still
 	// present on the netdev is planned for deletion, not preserved.
-	pdOff := planPhysDesired(mkCfg(true, true))["ge-0-0-1"]
-	if pdOff != nil && len(pdOff.keepAddrs) != 0 {
+	pdOff := planPhysDesired(cfgOff)["ge-0-0-1"]
+	if pdOff == nil {
+		t.Fatal("disabled interface: no physDesired plan, want reconcile to delete stale VIP")
+	}
+	if pdOff.skipAddrs {
+		t.Fatal("disabled interface: skipAddrs=true, want address reconcile to delete stale VIP")
+	}
+	if len(pdOff.keepAddrs) != 0 {
 		t.Fatalf("disabled interface keepAddrs=%v, want none (stale VIP must converge to deleted)", pdOff.keepAddrs)
 	}
-	if pdOff != nil {
-		existing := []netlink.Addr{mkAddr16833(t, "10.0.1.10/24"), mkAddr16833(t, "10.0.1.1/24")}
-		del, add, _ := planAddressReconcile(existing, pdOff.addrs, pdOff.keepAddrs, "ge-0-0-1")
-		if !delKeys16833(del)["10.0.1.1/24"] || len(add) != 0 {
-			t.Fatalf("disabled interface reconcile: del=%v add=%v, want stale VIP 10.0.1.1/24 deleted", delKeys16833(del), addKeys16833(add))
-		}
+	existing := []netlink.Addr{mkAddr16833(t, "10.0.1.10/24"), mkAddr16833(t, "10.0.1.1/24")}
+	del, add, _ := planAddressReconcile(existing, pdOff.addrs, pdOff.keepAddrs, "ge-0-0-1")
+	if !delKeys16833(del)["10.0.1.1/24"] || len(add) != 0 {
+		t.Fatalf("disabled interface reconcile: del=%v add=%v, want stale VIP 10.0.1.1/24 deleted", delKeys16833(del), addKeys16833(add))
 	}
 
 	// Tagged-unit reconcile arm uses the same parent+unit scope as the
 	// untagged planner.
-	cfgOff := mkCfg(true, true)
+
 	ifCfgOff := cfgOff.Interfaces.Interfaces["ge-0-0-1"]
 	unit100 := ifCfgOff.Units[100]
 	if keepVLAN := interfaceUnitStandaloneVRRPVIPs(ifCfgOff, unit100); len(keepVLAN) != 0 {
@@ -309,6 +315,38 @@ func TestStandaloneVRRPVIPNotKeptOnDisabledInterface17866(t *testing.T) {
 	}
 	if row, ok := rowsOn["ge-0-0-1"]; !ok || !row.keepForeignStatic {
 		t.Fatalf("enabled interface parent model keep=%+v present=%t, want foreign-static keep", row, ok)
+	}
+
+	// Exercise the real VLAN and physical reconcile callers, not just
+	// the helper predicate. A second compile must delete the stale VIPs
+	// on a disabled interface and preserve them on the enabled control.
+	for _, tc := range []struct {
+		name    string
+		cfg     *config.Config
+		wantVIP bool
+	}{
+		{name: "disabled-interface", cfg: cfgOff, wantVIP: false},
+		{name: "enabled-interface", cfg: cfgOn, wantVIP: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const parent = "ge-0-0-1"
+			const child = parent + ".100"
+			host, _, _ := applyWithKernelMTU9845(t, tc.cfg, map[string]int{
+				parent: 1500,
+				child:  1500,
+			})
+			host.addrs[parent]["10.0.1.1/24"] = true
+			host.addrs[child]["10.0.100.1/24"] = true
+
+			applyWithKernelMTU9845Reuse(t, tc.cfg, host)
+
+			if got := host.addrs[parent]["10.0.1.1/24"]; got != tc.wantVIP {
+				t.Errorf("untagged VIP present=%t, want %t", got, tc.wantVIP)
+			}
+			if got := host.addrs[child]["10.0.100.1/24"]; got != tc.wantVIP {
+				t.Errorf("VLAN VIP present=%t, want %t", got, tc.wantVIP)
+			}
+		})
 	}
 }
 
