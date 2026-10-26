@@ -72,7 +72,7 @@ the apply path pays no fsync (the file is regenerated on every apply).
   remaining reconcile steps still run, so the operator sees a degraded-state
   error instead of a false success. **The empty-clear branch is symmetric
   (#4898/#10712):** deleting the last VPN routes `Apply(nil)` → `clearConfig`, which
-  now RETURNS the `swanctl --load-all` error (it previously did `_ = m.reload()` and
+  now RETURNS the `swanctl --load-all` error instead of discarding it.
   `prevConnNames`, rendered-content fingerprints, and stale-SA teardown are gated on
   reload SUCCESS — when the marker (if present) and the complete loaded projection
   prove the prior generation remains effective, the applied state is preserved and
@@ -94,10 +94,9 @@ the apply path pays no fsync (the file is regenerated on every apply).
   (#4898/#10712); an unreachable or candidate-proven clear keeps the removed file,
   promotes the empty set, attempts teardown, and returns the error. A live
   indeterminate listing keeps the file removed and attempts teardown without
-  advancing prior fingerprints; a partial clear (#14589) restores and re-loads
-  the prior file when charon still holds prior connections (or promotes the empty
-  set when it holds none),
-  promotes that recovered set, and still returns the error. The commit path
+  advancing prior fingerprints. A partial clear (#14589) restores and reloads
+  the prior file when charon still holds prior connections, or promotes the empty
+  set when charon holds none; the error still propagates. The commit path
   reaches the same clear via `ApplyGeneration` with an empty config, which
   promotes the same recovered set (#15128): promoting the empty set there
   forgot VPNs the rollback left running in charon, so their SAs were
