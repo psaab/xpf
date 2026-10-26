@@ -128,3 +128,29 @@ func TestNatScopeFoldUsesBuilderCollisionAssignments_17876(t *testing.T) {
 		t.Errorf("parent ifindex %d stamped fold %d, want parent control fold %d", parent.Index, got, want)
 	}
 }
+
+// TestNatScopeFoldDoesNotMintUnboundRethVLAN_17876 matches the snapshot
+// builder's resolved-parent guard: a reth-prefixed interface that resolves to
+// itself is not a parent-bound logical-only VLAN. FAIL-ON-REVERT: without the
+// guard the folder claims a synthetic index the builder never assigns, rather
+// than preserving the unknown-scope fallback. The named parent control still
+// folds as reth1.
+func TestNatScopeFoldDoesNotMintUnboundRethVLAN_17876(t *testing.T) {
+	cfg := &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+		"reth1": {Name: "reth1", Units: map[int]*config.InterfaceUnit{
+			80: {Number: 80, VlanID: 80},
+		}},
+	}}}
+	ifaces := []net.Interface{{Index: 40, Name: "reth1"}}
+	fold := buildNatScopeFoldFnWithIfaces(cfg, ifaces)
+	if fold == nil {
+		t.Fatal("NAT scope folder is nil for tagged RETH config")
+	}
+	synthetic := dpuserspace.SyntheticLogicalIfindexForUnit("reth1.80", 80, make(map[int]struct{}))
+	if got := fold(int32(synthetic)); got != 0 {
+		t.Fatalf("unbound reth1.80 synthetic index %d stamped fold %d, want unknown 0", synthetic, got)
+	}
+	if got, want := fold(40), config.StableIfaceID("reth1"); got != want {
+		t.Fatalf("unbound reth1 parent control fold = %d, want %d", got, want)
+	}
+}

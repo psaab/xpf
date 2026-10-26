@@ -249,7 +249,9 @@ func buildNatScopeFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) f
 			if hasChild && childIdx != 0 {
 				byIfindex[int32(childIdx)] = parentVLAN{parentIdx, uint16(unit.VlanID)}
 			}
-			if strings.HasPrefix(name, "reth") && !hasChild {
+			if strings.HasPrefix(name, "reth") &&
+				parentLinux != config.LinuxIfName(name) &&
+				!hasChild {
 				// Match buildInterfaceSnapshots' sorted interface/unit order
 				// and mint only when it would emit a logical-only row
 				// (parent present, VLAN child absent). The shared set matters:
