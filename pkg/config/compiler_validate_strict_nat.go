@@ -2087,7 +2087,12 @@ func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 			// owns it; it proves no family.
 			continue
 		}
-		if !merge(f, !natPrefixIsFamilyWildcard(raw)) {
+		// #17847: narrow=true for every authored literal, wildcards
+		// included: 0.0.0.0/0 is still IPv4-only, and an explicitly
+		// authored single-family match is the proven mismatch #16600
+		// targets. The #17408 exemption covers rules whose match is
+		// not authored single-family at all (missing/dual matches).
+		if !merge(f, true) {
 			return "", false
 		}
 	}
@@ -2202,6 +2207,11 @@ func addressBookNameFamily16600(ab *AddressBook, name string) (family string, na
 			narrow = true
 		}
 	}
+	// A named closure's narrowness follows the same #17408 scoping as
+	// literals before #17847: only a proper-subset member makes the
+	// name narrow. The #17847 fix deliberately covers authored
+	// literal matches and wildcard keywords, not name closures (a
+	// name resolving to a family wildcard is the #17408 scaffold).
 	return family, narrow, true
 }
 
