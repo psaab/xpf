@@ -20,8 +20,8 @@ package eventengine
 // incapable of seeing it.
 
 import (
-	"sync/atomic"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 

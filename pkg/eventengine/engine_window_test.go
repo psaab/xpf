@@ -1,8 +1,8 @@
 package eventengine
 
 import (
-	"sync/atomic"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
