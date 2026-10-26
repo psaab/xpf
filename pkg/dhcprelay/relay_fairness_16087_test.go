@@ -334,9 +334,10 @@ func TestDHCPV6RelayForwardGatedByLimiter(t *testing.T) {
 	}
 }
 
-// TestFairSenderKeyV6FromWire pins standard DUIDs against the parsed
-// pending key's identity and the malformed arms: no Client ID, truncated
-// TLV, and over-limit DUID all report not-ok for wire classification.
+// TestFairSenderKeyV6FromWire pins standard DUIDs to the parsed pending key
+// where representable, plus malformed arms: no Client ID and truncated TLV.
+// Over-limit DUIDs pin the asymmetry: the wire fairness key truncates to 128
+// bytes, but the parsed pending-key path refuses the identity.
 func TestFairSenderKeyV6FromWire(t *testing.T) {
 	duids := []dhcpv6.DUID{
 		&dhcpv6.DUIDUUID{UUID: [16]byte{0x10, 0x21, 0x32}},

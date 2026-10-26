@@ -364,7 +364,7 @@ func (m *Manager) v6Exchange(ctx context.Context, ifaceName string, mode dhcpExc
 
 // after returns the renewal-wait channel, routed through the test seam
 // when set so tests can fire T1/T2 instantly (the real waits are the RFC
-// 50% T1 / 87.5% T2 schedule with no fixed floor, see renewalTimers).
+// 50% T1 / 87.5% T2 schedule with no fixed floor, see renewalSchedule).
 func (m *Manager) after(d time.Duration) <-chan time.Time {
 	if m.afterForTest != nil {
 		return m.afterForTest(d)

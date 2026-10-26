@@ -521,7 +521,7 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   offending IAPREFIX is **skipped**, not the whole reply: an IA_PD is a
   multi-element container, matching the option-121 classless-route loop
   below (which likewise skips an entry whose mask reports `bits != 32`),
-  whereas `Manager.leaseFromACKv4` refuses the whole v4 message because the
+  whereas `leaseFromACKv4WithProtected` refuses the whole v4 message because the
   ACK carries exactly one address and mask, with no sibling to salvage.
   A skipped entry enters neither the live nor the withdrawn set, so a
   hostile server gains nothing by pairing a malformed prefix with a
@@ -581,7 +581,7 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   EGRESSES malformed to the upstream server. Either way the guard was
   incidental: it depended on a downstream check noticing rather than on
   the value being rejected where the operator typed it.
-- **Classless routes from DHCPv4 and IPv6 RIO (#4118, #11425).** `Manager.leaseFromACKv4`
+- **Classless routes from DHCPv4 and IPv6 RIO (#4118, #11425).** `leaseFromACKv4WithProtected`
   parses option 121 (the standard `ClasslessStaticRoute` accessor) and falls
   back to the legacy Microsoft option 249 (raw `GenericOptionCode(249)`) using
   the `{mask-length, significant-prefix-octets, gateway}` encoding. Per RFC
@@ -652,7 +652,7 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   `applyConfig` (Reconcile) or following re-acquire (Renew), so the terminal
   cleanup recompile remains limited to a lease record that still existed.
 - **Degenerate subnet mask is refused (#4101, untrusted input).**
-  `Manager.leaseFromACKv4` validates option 1 after `net.IPMask.Size()`: a zero
+  `leaseFromACKv4WithProtected` validates option 1 after `net.IPMask.Size()`: a zero
   mask (`0.0.0.0` → `Size()` returns `ones=0`) or a non-contiguous mask
   (`255.255.0.255` → `(0,0)`) is rejected with an error instead of
   producing a `YourIP/0` lease. Without the guard the kernel would install
@@ -665,7 +665,7 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   only a *present-but-degenerate* mask is refused. Valid prefixes including
   `/31` and `/32` (point-to-point / host leases) are accepted.
 - **Over-broad mask / martian yiaddr is refused (#14183, untrusted input).**
-  Extending #4101: `Manager.leaseFromACKv4` also refuses a contiguous mask broader
+  Extending #4101: `leaseFromACKv4WithProtected` also refuses a contiguous mask broader
   than `/8` (`/1`–`/7`) and a martian `yiaddr` in the non-forwardable ranges
   refused for classless destinations/gateways (`0/8`, `127/8`, `169.254/16`,
   `224/4`, `240/4`, including `255.255.255.255`). Otherwise `AddrReplace`
@@ -683,7 +683,8 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   a connected prefix overlapping statically configured IPv4 interface
   prefixes (`config.ConfiguredIPv4Prefixes`, installed via
   `Manager.SetProtectedIPv4Prefixes` on every daemon apply — the v4 analogue
-  of the #10856/#14185 v6 protected set). Production `doDHCPv4` calls the
-  manager method so acquire/renew/rebind all re-validate; focused parser tests
-  call `leaseFromACKv4WithProtected` with `nil` when no protected prefixes are
-  relevant. No trust-override for the leased address (same as #14183).
+  of the #10856/#14185 v6 protected set). `doDHCPv4` calls
+  `leaseFromACKv4WithProtected` with the manager's configured protected
+  prefixes, so acquire/renew/rebind all re-validate. Focused parser tests
+  pass `nil` when no protected prefixes are relevant. No trust-override for
+  the leased address (same as #14183).
