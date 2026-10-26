@@ -1,6 +1,6 @@
 # #17864 — routing reconcile flush detection
 
-Status: DRAFT v3 — pending adversarial plan review
+Status: DRAFT v4 — pending adversarial plan review
 
 ## Issue framing
 
@@ -22,7 +22,7 @@ This is recovery correctness, not a performance change: without a commit, a kern
 
 Within `Daemon.reassertRoutingReconcileOnce`, after `applySem` acquisition and active-config read, retain both existing `!d.inBootstrap()` gates. On eligible ticks, call `terminatorFlushed16804` before `vrfMissTerminatorReconcileFn`, retaining its result. If the probe returns an error, log it and classify the tick as recovery-required; still call the terminator reconcile exactly once and reuse its captured `vrfErr` in the full recovery set. Run policy, route-leak, terminator-result accounting, and management-DNS recovery when generic debt was already owed, the canary was missing, or the eligible probe errored. Feed reconcile errors through existing `noteRoutingReconcileResult`. A successful full recovery need not retain the probe error as debt; each persistent probe error causes full recovery on every eligible 30-second tick.
 
-The RuleList fake will read the same state mutated by the real `routing.Manager` terminator callback. Use the existing stateful terminator fake (`day2StatefulTerm10458`); clear its installed-family set to simulate a flush, and assert both families are present inside the management-DNS callback. Include healthy-present and each single-family partial-flush controls, probe-error recovery across two consecutive failing reads (full recovery runs twice, terminator repair runs once per tick, no probe-only debt when repairs succeed), and recovery-failure-then-healthy-probe retry through generic debt. The bootstrap tick must assert that probe and all recovery callbacks are skipped. Add an active no-desired-VRF tick with pending terminator removal; require deletion without reinstall, successful debt discharge, and a following quiet tick. Exercise generic routing and management-route debt independently when both are owed: successful generic recovery cannot discharge management-route debt, and successful management-route recovery cannot discharge failed generic debt. Update the #10458 async-delete expectation because a truthful missing-canary read now escalates to the full recovery set.
+The RuleList fake will read the same state mutated by the real `routing.Manager` terminator callback. Use the existing stateful terminator fake (`day2StatefulTerm10458`); clear its installed-family set to simulate a flush, and assert both families are present inside the management-DNS callback. Include healthy-present and each single-family partial-flush controls, probe-error recovery across two consecutive failing reads (full recovery runs twice, terminator repair runs once per tick, no probe-only debt when repairs succeed), and recovery-failure-then-healthy-probe retry through generic debt. The debt-free bootstrap negative control must assert that probe, terminator, and all recovery callbacks are skipped; existing debt-gated recovery in bootstrap must remain unchanged, so do not add a blanket bootstrap early return. Add an active no-desired-VRF tick with pending terminator removal; require deletion without reinstall, successful debt discharge, and a following quiet tick. Exercise generic routing and management-route debt independently when both are owed: successful generic recovery cannot discharge management-route debt, and successful management-route recovery cannot discharge failed generic debt. Update the #10458 async-delete expectation because a truthful missing-canary read now escalates to the full recovery set.
 
 No routing API change is planned: the observation/repair race with an external kernel writer remains possible, but the deterministic in-function ordering defect is addressed without changing all routing-manager callers.
 
@@ -40,6 +40,7 @@ No public function signatures or wire/protocol APIs change. The callback seams r
 - An external writer can flush between the probe and repair; the repair can hide that later flush. This is outside the deterministic ordering fix.
 - The priority-only probe can miss selective loss of other bands or a foreign rule occupying priority 2000. A true no-VRF/no-management-stanza config with other policy rules also has no pref-2000 canary; this distinct residual is not solved here and must not be claimed solved.
 - Lane B's management-DNS-only premise is refuted for configured management interfaces, which contribute to desired management-VRF state. Before opening the implementation PR, transfer the distinct no-VRF/no-management policy-band blind spot into a separate actionable follow-up issue and link it in the PR. Only then may the PR close #17864; otherwise use `Refs #17864`. Do not add a second DNS-specific canary or duplicate the existing post-FRR reconcile.
+- Update `pkg/routing/README.md` and the affected recovery source comments to document probe-before-repair ordering, conservative recovery on eligible probe errors, and the boundary that only configs desiring the VRF terminator receive this canary; a separate follow-up covers no-VRF/no-management policy bands.
 
 ## Risk assessment
 
@@ -56,7 +57,7 @@ No public function signatures or wire/protocol APIs change. The callback seams r
 - Demonstrate RED-on-revert using the production file only.
 - Test both one-family missing cases, healthy-present quiet behavior, and two consecutive persistent probe errors; each error tick must run all recovery callbacks, restore terminator once, and latch no probe-only debt when recovery succeeds.
 - Test that a failure in the first full recovery leaves generic debt and that a later healthy-canary tick retries and discharges it; test pending removal and both directions of generic-vs-management route debt independence.
-- The bootstrap negative control must prove the probe and recovery callbacks are not invoked. Review all direct `reassertRoutingReconcileOnce` tests for assumptions about an absent live pref-2000 canary and update their fixtures/contracts intentionally.
+- The bootstrap negative control must be debt-free and prove the probe, terminator, and full-recovery callbacks are not invoked. Debt-gated retries remain unchanged during bootstrap; no new blanket early return is allowed. Review all direct `reassertRoutingReconcileOnce` tests for assumptions about an absent live pref-2000 canary and update their fixtures/contracts intentionally.
 - Run daemon tests focused on `16804`, `10421`, `10458`, `9693`, and `11450`, plus `go build ./pkg/daemon/...`, with campaign Go cache paths.
 - No userspace dataplane behavior or throughput changes are expected; cluster throughput gating is not applicable to this daemon-only recovery correction.
 
