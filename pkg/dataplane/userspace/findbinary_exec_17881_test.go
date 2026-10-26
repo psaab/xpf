@@ -3,13 +3,11 @@ package userspace
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
-	"golang.org/x/sys/unix"
 )
 
 const helperScript17881 = `#!/usr/bin/python3
@@ -155,13 +153,6 @@ func TestEnsureProcessDoesNotExecuteReplacedHelper17881(t *testing.T) {
 }
 
 func TestHelperExecUsesValidatedOpenInode17881(t *testing.T) {
-	source, err := os.ReadFile("process.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sourceText := string(source)
-	pathnameExec := strings.Contains(sourceText, "cmd := exec.Command(binary.Name(), args...)")
-
 	dir := tempDir17881(t)
 	validatedPath := filepath.Join(dir, "helper")
 	replacementPath := filepath.Join(dir, "replacement")
@@ -171,38 +162,12 @@ func TestHelperExecUsesValidatedOpenInode17881(t *testing.T) {
 	if err := os.WriteFile(replacementPath, []byte("#!/bin/sh\nprintf 'REPLACEMENT\\n'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := findBinary(validatedPath)
+	binary, err := openValidatedBinary(validatedPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fd, err := unix.Open(resolved, unix.O_PATH|unix.O_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binary := os.NewFile(uintptr(fd), resolved)
 	defer binary.Close()
-	openedInfo, err := binary.Stat()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pathInfo, err := os.Stat(resolved)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(openedInfo, pathInfo) {
-		t.Fatal("opened helper descriptor does not name the validated path inode")
-	}
-
-	// Match helperBinaryCommand: fd 3 names the opened inode while argv[0]
-	// keeps the selected helper spelling. Replacing the directory entry after
-	// open must not change which helper the kernel executes.
-	execPath := "/proc/self/fd/3"
-	if pathnameExec {
-		execPath = resolved
-	}
-	cmd := exec.Command(execPath)
-	cmd.Args[0] = resolved
-	cmd.ExtraFiles = []*os.File{binary}
+	cmd := helperBinaryCommand(binary)
 	if err := os.Rename(replacementPath, validatedPath); err != nil {
 		t.Fatal(err)
 	}
@@ -212,17 +177,5 @@ func TestHelperExecUsesValidatedOpenInode17881(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(output)); got != "VALIDATED" {
 		t.Fatalf("executed helper marker = %q after pathname replacement, want VALIDATED", got)
-	}
-
-	for _, fragment := range []string{
-		"binary, err := openValidatedBinary(cfg.Binary)",
-		"cmd := helperBinaryCommand(binary,",
-		`cmd := exec.Command("/proc/self/fd/3", args...)`,
-		"cmd.Args[0] = binary.Name()",
-		"cmd.ExtraFiles = []*os.File{binary}",
-	} {
-		if !strings.Contains(sourceText, fragment) {
-			t.Fatalf("process.go lacks fd-exec wiring %q", fragment)
-		}
 	}
 }
