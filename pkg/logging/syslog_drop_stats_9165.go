@@ -158,13 +158,10 @@ func (p *retiredPending) recordForget(c *SyslogClient) {
 
 // foldInto folds each pending client's post-retire counter growth (its
 // Close discards) into acc. A client's pending entry is cleared only
-// once its counters are FINAL and STABLE: the client reports closed,
-// and two consecutive stats calls observe identical counters. (Close
-// stores its flags before the writer goroutine's last drop can land
-// for non-interrupting custom conns, so closed-alone is not proof of
-// finality; stability across calls is.) Close counts its queue discards
-// synchronously (writer.stop) before returning, so a closed client's
-// counters are final. A still-open client (retired but not yet closed
+// once its counters are FINAL (CountsFinal: writer goroutine exited
+// after Close, so no drop can land later) and STABLE (no movement
+// since the previous stats call). The finality flag is read BEFORE
+// the counters so a completing Close cannot straddle the read. A still-open client (retired but not yet closed
 // by its owner, or being drained) folds what it has counted so far and
 // its snapshot ADVANCES by the folded amount, so the remainder folds
 // at a later call: every drop is counted exactly once across any

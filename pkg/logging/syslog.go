@@ -183,7 +183,7 @@ type SyslogClient struct {
 	// operation that can race Close. The separate connMu lets Close detach and
 	// close a socket without waiting for s.mu, which an in-flight Write holds.
 	closed atomic.Bool
-	countsFinal atomic.Bool // #17855: set by Close after drain+join
+	countsFinal atomic.Bool // #17855: set when the writer goroutine exits after Close
 }
 
 // syslogHostnameFn resolves the current device hostname. It is a seam so
