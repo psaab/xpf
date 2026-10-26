@@ -1,8 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * Config: preserve all distinct same-named IPsec traffic-selector
-    fragments instead of discarding bodies by selector name and header
-    keys (#17802).
+  * Config: preserve distinct same-named IPsec traffic-selector fragments and
+    deduplicate identical braced/chained bodies independent of AST wrapper
+    spelling (#17802).
 
 xpf (0.0.0) unstable; urgency=medium
 

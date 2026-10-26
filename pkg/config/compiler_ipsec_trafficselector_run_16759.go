@@ -97,21 +97,37 @@ func trafficSelectorInstances16759(vpn *Node) []struct {
 	return out
 }
 
-// trafficSelectorBodyEqual16759 compares the selector content used by
-// compilation and strict validation. Source positions and annotations do not
-// change that content, so repeated set commands and their expanded segments
-// compare equal even when represented by different AST nodes.
+// trafficSelectorBodyEqual16759 compares a selector fragment's body, ignoring
+// the AST wrapper that differs between a named property node and a reconstructed
+// chained selector. All body keys, values, leaf multiplicity, and child order
+// remain significant so invalid tokens and repeated leaves are not hidden.
 func trafficSelectorBodyEqual16759(a, b *Node) bool {
-	if a == nil || b == nil || a.IsLeaf != b.IsLeaf || len(a.Keys) != len(b.Keys) || len(a.Children) != len(b.Children) {
+	return trafficSelectorNodesEqual16759(a, b, true)
+}
+
+func trafficSelectorNodesEqual16759(a, b *Node, selectorRoot bool) bool {
+	if a == nil || b == nil {
 		return a == b
 	}
-	for i := range a.Keys {
-		if a.Keys[i] != b.Keys[i] {
+	aKeys, bKeys := a.Keys, b.Keys
+	if selectorRoot {
+		if len(aKeys) >= 2 && aKeys[0] == "traffic-selector" {
+			aKeys = aKeys[1:]
+		}
+		if len(bKeys) >= 2 && bKeys[0] == "traffic-selector" {
+			bKeys = bKeys[1:]
+		}
+	}
+	if a.IsLeaf != b.IsLeaf || len(aKeys) != len(bKeys) || len(a.Children) != len(b.Children) {
+		return false
+	}
+	for i := range aKeys {
+		if aKeys[i] != bKeys[i] {
 			return false
 		}
 	}
 	for i := range a.Children {
-		if !trafficSelectorBodyEqual16759(a.Children[i], b.Children[i]) {
+		if !trafficSelectorNodesEqual16759(a.Children[i], b.Children[i], false) {
 			return false
 		}
 	}

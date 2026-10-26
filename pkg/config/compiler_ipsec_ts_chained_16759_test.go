@@ -194,6 +194,75 @@ func TestIPsecChainedTrafficSelectorCompiles16759(t *testing.T) {
 			t.Fatalf("chained+direct TrafficSelectors=%v, want merged ts1 (#17802)", sel)
 		}
 	})
+
+	// #17802: a direct braced selector and an identical selector chained
+	// after bind-interface are one body even though their AST wrappers differ.
+	for _, tc := range []struct {
+		name       string
+		chainFirst bool
+	}{
+		{name: "braced direct before bind-interface chain"},
+		{name: "bind-interface chain before braced direct", chainFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := []string{
+				"set security ipsec vpn v1 gateway gw1 ipsec-policy epol1",
+			}
+			if tc.chainFirst {
+				base = append(base,
+					"set security ipsec vpn v1 bind-interface st0.0 traffic-selector ts1 local-ip 10.1.0.0/24 remote-ip 10.2.0.0/24",
+				)
+			}
+			tree := buildTree14684(t, base...)
+			appendBracedTrafficSelector16759(t, tree)
+			if !tc.chainFirst {
+				path, err := ParseSetCommand("set security ipsec vpn v1 bind-interface st0.0 traffic-selector ts1 local-ip 10.1.0.0/24 remote-ip 10.2.0.0/24")
+				if err != nil {
+					t.Fatalf("ParseSetCommand: %v", err)
+				}
+				if err := tree.SetPath(path); err != nil {
+					t.Fatalf("SetPath chained selector: %v", err)
+				}
+			}
+
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("CompileConfig identical braced/chained body: %v", err)
+			}
+			sel := selectors16759(t, cfg)
+			if len(sel) != 1 || sel["ts1"] == nil ||
+				sel["ts1"].LocalIP != "10.1.0.0/24" ||
+				sel["ts1"].RemoteIP != "10.2.0.0/24" {
+				t.Fatalf("braced/chained TrafficSelectors=%v, want one ts1 with one local and remote prefix", sel)
+			}
+		})
+	}
+}
+
+func appendBracedTrafficSelector16759(t *testing.T, tree *ConfigTree) {
+	t.Helper()
+	direct := parseHierText(t, `security {
+  ipsec {
+    vpn v1 {
+      traffic-selector {
+        ts1 {
+          local-ip 10.1.0.0/24;
+          remote-ip 10.2.0.0/24;
+        }
+      }
+    }
+  }
+}`)
+	sourceVPN := direct.FindChild("security").FindChild("ipsec").FindChild("vpn")
+	targetVPN := tree.FindChild("security").FindChild("ipsec").FindChild("vpn")
+	if sourceVPN == nil || targetVPN == nil {
+		t.Fatal("traffic-selector fixture missing vpn v1")
+	}
+	wrapper := sourceVPN.FindChild("traffic-selector")
+	if wrapper == nil {
+		t.Fatal("braced fixture missing traffic-selector wrapper")
+	}
+	targetVPN.Children = append(targetVPN.Children, wrapper)
 }
 
 func TestIPsecChainedTrafficSelectorValidated16759(t *testing.T) {
