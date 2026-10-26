@@ -170,3 +170,63 @@ func TestNATBareInterfaceInertShapes16827(t *testing.T) {
 		t.Fatalf("multi-unit bare ref must stay bare, got %q", got)
 	}
 }
+
+// #17883: a unit-0-plus-tagged-sibling interface is valid, but its bare
+// name does not identify one logical unit and must be rejected as a NAT
+// scope (rather than accepted as the still-bare, inert name). The
+// untagged unit-0-only control remains canonicalizable to .0.
+func TestNATBareInterfaceUnitZeroTaggedSiblingRejected17883(t *testing.T) {
+	base := append(bareNATBase16827(),
+		"set interfaces ge-0/0/7 vlan-tagging",
+		"set interfaces ge-0/0/7 unit 0 family inet address 10.0.7.1/24",
+		"set interfaces ge-0/0/7 unit 1 vlan-id 10 family inet address 10.0.8.1/24",
+	)
+	// The interface shape is independently valid; a subsequent error must
+	// come from the NAT scope, not the unrelated VLAN consistency gate.
+	if _, err := CompileConfig(buildTree(t, base)); err != nil {
+		t.Fatalf("tagged unit-0-plus-sibling control must compile: %v", err)
+	}
+	cmds := append(base,
+		"set security nat source rule-set snat-bad from interface ge-0/0/7",
+		"set security nat source rule-set snat-bad rule r1 match source-address 10.0.0.0/8",
+		"set security nat source rule-set snat-bad rule r1 then source-nat pool pool1",
+	)
+	if _, err := CompileConfig(buildTree(t, cmds)); err == nil ||
+		!strings.Contains(err.Error(), `source-nat rule-set "snat-bad": from interface "ge-0/0/7" not defined`) {
+		t.Fatalf("strict must reject the unresolved bare NAT scope with its NAT diagnostic, got %v", err)
+	}
+	cfg, err := CompileConfigLenient(buildTree(t, cmds))
+	if err != nil {
+		t.Fatalf("lenient must not hard-fail: %v", err)
+	}
+	if got := cfg.Security.NAT.Source[0].FromInterface; got != "ge-0/0/7" {
+		t.Fatalf("unresolved bare scope must stay bare, got %q", got)
+	}
+	if !cfg.LenientNATUndefinedScopeRuleSets["source\x00snat-bad"] {
+		t.Fatalf("lenient must record snat-bad in undefined-scope set, got %v", cfg.LenientNATUndefinedScopeRuleSets)
+	}
+	foundWarning := false
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "snat-bad") && strings.Contains(warning, "ge-0/0/7") {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("lenient must warn naming snat-bad/ge-0/0/7, warnings=%v", cfg.Warnings)
+	}
+
+	// A plain unit-0-only interface still folds its bare NAT scope.
+	control := append(bareNATBase16827(),
+		"set interfaces ge-0/0/8 unit 0 family inet address 10.0.8.1/24",
+		"set security nat source rule-set snat-control from interface ge-0/0/8",
+		"set security nat source rule-set snat-control rule r1 match source-address 10.0.0.0/8",
+		"set security nat source rule-set snat-control rule r1 then source-nat pool pool1",
+	)
+	controlCfg, err := CompileConfig(buildTree(t, control))
+	if err != nil {
+		t.Fatalf("bare unit-0-only control must compile: %v", err)
+	}
+	if got := controlCfg.Security.NAT.Source[0].FromInterface; got != "ge-0/0/8.0" {
+		t.Fatalf("bare unit-0-only control scope = %q, want ge-0/0/8.0", got)
+	}
+}

@@ -202,7 +202,16 @@ func natInterfaceDefined15278(cfg *Config, ref string) bool {
 			// #16827: unit 0 must exist for a bare ref to be matchable;
 			// a stanza with no unit (or only non-zero units) leaves the
 			// bare ref naming no unit traffic reaches it on.
+			// #17883: unit 0 plus any non-nil sibling unit still names
+			// no single unit — CanonicalNATInterfaceScopeRef leaves
+			// such a ref bare, and the dataplane compares exact
+			// logical-unit names, so it must not pass as unit 0.
 			if u := ifc.Units[0]; u != nil {
+				for unitNum, sibling := range ifc.Units {
+					if sibling != nil && unitNum != 0 {
+						return false
+					}
+				}
 				return true
 			}
 			if ifc.Tunnel != nil && !ifc.AuthoredUnits {
