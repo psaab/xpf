@@ -120,7 +120,7 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 		if activeFabricOverlays[name] {
 			continue
 		}
-		if link, err := netlink.LinkByName(name); err == nil {
+		if link, err := d.fabricLinkByName(name); err == nil {
 			if _, ok := link.(*netlink.IPVlan); ok {
 				netlink.LinkDel(link)
 				slog.Info("removed stale fabric IPVLAN", "name", name)

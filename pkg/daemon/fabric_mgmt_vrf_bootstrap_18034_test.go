@@ -39,15 +39,21 @@ func canonicalStandbyConfig18034(t *testing.T) *config.Config {
 	return cfg
 }
 
-// TestEmptyDatabaseStandbyFabricInterfacesConverge18034 drives the bootstrap
-// ordering that deadlocked an empty-DB standby: fab0/fab1 are in the canonical
-// chassis config, but the local fabric overlay is absent when the authoritative
-// post-networkd management-VRF rebind runs. The rebind must succeed, then the
-// deferred fabric creation path must create and bind the local overlay.
+// TestEmptyDatabaseStandbyFabricInterfacesConverge18034 drives the actual
+// apply ordering that deadlocked an empty-DB standby: applyFabricIPVLAN creates
+// this node's fab1 before the authoritative post-networkd management-VRF
+// rebind, while the remote fab0 remains absent. Apply must not fail on that
+// chassis fabric member, and the local fab1 must be bound to vrf-mgmt.
 func TestEmptyDatabaseStandbyFabricInterfacesConverge18034(t *testing.T) {
 	cfg := canonicalStandbyConfig18034(t)
 	if cfg.Chassis.Cluster == nil || cfg.Interfaces.Interfaces["fab0"] == nil || cfg.Interfaces.Interfaces["fab1"] == nil {
 		t.Fatalf("canonical standby config does not contain the chassis and fab0/fab1 stanzas")
+	}
+	if cfg.Interfaces.Interfaces["fab0"].LocalFabricMember != "" {
+		t.Fatalf("standby fab0 unexpectedly has local member %q", cfg.Interfaces.Interfaces["fab0"].LocalFabricMember)
+	}
+	if cfg.Interfaces.Interfaces["fab1"].LocalFabricMember == "" {
+		t.Fatal("standby fab1 has no local member to create")
 	}
 	fabricSet := chassisClusterFabricInterfaces(cfg)
 	if len(fabricSet) == 0 {
@@ -76,42 +82,15 @@ func TestEmptyDatabaseStandbyFabricInterfacesConverge18034(t *testing.T) {
 	}
 	d.publishMgmtVRFIfaces(mgmtSet)
 
-	// Empty DB means no fabric overlay exists at the first rebind boundary.
 	for name := range fabricSet {
 		if _, exists := ops.links[name]; exists {
-			t.Fatalf("fixture unexpectedly created %s before the first rebind", name)
+			t.Fatalf("empty-DB fixture unexpectedly created %s before apply", name)
 		}
 	}
-	if err := d.rebindManagementVRFIfaces(cfg); err != nil {
-		t.Fatalf("standby bootstrap rebind failed on a not-yet-created fabric interface: %v", err)
-	}
-	for _, bind := range ops.binds {
-		if strings.HasPrefix(bind, "fab") {
-			t.Fatalf("absent fabric interface was bound before creation: %v", ops.binds)
-		}
-	}
-
-	var overlays []deferredIPVLAN
-	for name, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil || !strings.HasPrefix(name, "fab") || ifc.LocalFabricMember == "" {
-			continue
-		}
-		var addrs []string
-		if unit := ifc.Units[0]; unit != nil {
-			addrs = unit.Addresses
-		}
-		overlays = append(overlays, deferredIPVLAN{
-			parent: config.LinuxIfName(ifc.LocalFabricMember),
-			name:   config.LinuxIfName(name),
-			addrs:  addrs,
-			mtu:    ifc.MTU,
-		})
-	}
-	if len(overlays) == 0 {
-		t.Fatal("canonical standby config has no local fabric overlay to create")
-	}
+	var created []string
 	prevEnsure := fabricEnsureFn
 	fabricEnsureFn = func(_, name string, _ []string, _ int) error {
+		created = append(created, name)
 		ops.links[name] = &netlink.IPVlan{LinkAttrs: netlink.LinkAttrs{
 			Name: name, Index: 100 + len(ops.links), Flags: net.FlagUp,
 		}}
@@ -119,26 +98,36 @@ func TestEmptyDatabaseStandbyFabricInterfacesConverge18034(t *testing.T) {
 	}
 	t.Cleanup(func() { fabricEnsureFn = prevEnsure })
 
-	// This is the deferred OnXSKBound creation owner: it creates the overlay
-	// after the apply's rebind point and binds it immediately to vrf-mgmt.
-	d.createDeferredFabricOverlays(overlays)
-	for _, overlay := range overlays {
-		link, exists := ops.links[overlay.name]
-		if !exists {
-			t.Fatalf("deferred apply did not create %s", overlay.name)
-		}
-		if got := link.Attrs().MasterIndex; got != 77 {
-			t.Errorf("deferred fabric %s MasterIndex = %d, want vrf-mgmt index 77", overlay.name, got)
-		}
+	if err := d.applyFabricIPVLAN(cfg); err != nil {
+		t.Fatalf("applyFabricIPVLAN: %v", err)
+	}
+	if len(created) != 1 || created[0] != "fab1" {
+		t.Fatalf("standby fabric creation = %v, want only local fab1", created)
+	}
+	if _, exists := ops.links["fab0"]; exists {
+		t.Fatal("apply fabricated the remote fab0 instead of leaving it absent")
+	}
+	if _, exists := ops.links["fab1"]; !exists {
+		t.Fatal("apply did not create local fab1 before the management-VRF rebind")
+	}
+
+	if err := d.rebindManagementVRFIfaces(cfg); err != nil {
+		t.Fatalf("standby bootstrap rebind failed with remote fab0 absent: %v", err)
+	}
+	if got := ops.links["fab1"].Attrs().MasterIndex; got != 77 {
+		t.Fatalf("local fab1 MasterIndex = %d, want vrf-mgmt index 77", got)
 	}
 	fabricBinds := 0
 	for _, bind := range ops.binds {
 		if strings.HasPrefix(bind, "fab") {
 			fabricBinds++
+			if bind != "fab1->vrf-mgmt" {
+				t.Errorf("unexpected fabric bind %q, want local fab1 only", bind)
+			}
 		}
 	}
-	if fabricBinds != len(overlays) {
-		t.Fatalf("deferred fabric creation made %d fabric binds, want %d: %v", fabricBinds, len(overlays), ops.binds)
+	if fabricBinds != 1 {
+		t.Fatalf("management-VRF rebind made %d fabric binds, want one for fab1: %v", fabricBinds, ops.binds)
 	}
 }
 
