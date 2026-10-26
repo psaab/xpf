@@ -66,15 +66,21 @@ import (
 // the whole point of Secret (compiler_system.go) is that it never reaches a log
 // or a CLI render.
 func validateClusterAuthKeyStrict(cfg *Config) error {
-	return validateClusterAuthKeyStrictWithCurrent(cfg, nil)
+	return validateClusterAuthKeyStrictWithCurrent(cfg, nil, nil)
 }
 
 // validateClusterAuthKeyStrictWithCurrent is validateClusterAuthKeyStrict
-// with the persisted/current signing primary supplied by the candidate
-// pipeline (#16025 fold 2). currentPrimary is the trimmed primary of the
-// config active immediately before the candidate, or nil when there is
-// no such state (fresh candidate, day-0 check, direct CompileConfig).
-func validateClusterAuthKeyStrictWithCurrent(cfg *Config, currentPrimary *string) error {
+// with the persisted/current signing primary and accepted-key state supplied
+// by the candidate pipeline (#16025/#17888). currentPrimary is the trimmed
+// primary of the config active immediately before the candidate, or nil when
+// there is no such state (fresh candidate, day-0 check, direct CompileConfig).
+// currentAccepted carries those same active keys byte-for-byte for the narrow
+// legacy whitespace-primary migration.
+func validateClusterAuthKeyStrictWithCurrent(
+	cfg *Config,
+	currentPrimary *string,
+	currentAccepted *clusterAcceptedKeys16858,
+) error {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
@@ -130,7 +136,23 @@ func validateClusterAuthKeyStrictWithCurrent(cfg *Config, currentPrimary *string
 			"then rotate it into `authentication-key` using the #6630 overlap",
 			len(key), MinAdvisedControlLinkKeyLen)
 	}
-	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()) != "" {
+
+	// #17888: a previously persisted whitespace-only primary is a raw PSK
+	// to the runtime but appears empty to this strict strength gate. Permit
+	// it only while staging a strong, byte-distinct replacement beside the
+	// exact same current primary. currentAccepted is supplied only from the
+	// active config in the candidate pipeline, so this does not admit a
+	// newly authored whitespace-only primary.
+	rawPrimary := cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()
+	altRaw := cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()
+	if rawPrimary != "" && strings.TrimSpace(rawPrimary) == "" &&
+		currentAccepted != nil && currentAccepted.primary == rawPrimary {
+		alt := strings.TrimSpace(altRaw)
+		if len(alt) >= MinAdvisedControlLinkKeyLen && altRaw != rawPrimary {
+			return nil
+		}
+	}
+	if strings.TrimSpace(altRaw) != "" {
 		// #6630: the additional key is ACCEPTED, never SIGNED with, so a
 		// cluster carrying only it signs nothing and is exactly as fail-open
 		// as an unkeyed one. Say so specifically rather than letting the

@@ -676,7 +676,11 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 			return err
 		}
 	}
-	if err := validateClusterAuthKeyStrictWithCurrent(cfg, opts.currentClusterPrimary16025); err != nil {
+	if err := validateClusterAuthKeyStrictWithCurrent(
+		cfg,
+		opts.currentClusterPrimary16025,
+		opts.currentClusterAccepted16858,
+	); err != nil {
 		if opts.lenientClusterAuthKey {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("cluster authentication (downgraded to warning on tolerant path): %v", err))
