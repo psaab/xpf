@@ -187,6 +187,65 @@ func TestNeighborDescriptionPipe16776(t *testing.T) {
 	_ = regexp.MustCompile // keep regexp import if helpers change
 }
 
+// TestNeighborDescriptionPipeRenderedForm17839 pins #17839: the gate
+// must judge the string that will actually be rendered
+// (sanitizeFRRValue turns control bytes into spaces), not the raw
+// stored description. "uplink |\tprimary" contains no "| " raw, so a
+// raw-string gate passes it, but sanitization renders
+// "uplink | primary" — which the vty pipe hook refuses while
+// frr-reload.py exits 0, silently dropping the description.
+func TestNeighborDescriptionPipeRenderedForm17839(t *testing.T) {
+	bgp := &config.BGPConfig{
+		LocalAS:  65001,
+		RouterID: "1.1.1.1",
+		Neighbors: []*config.BGPNeighbor{
+			// Raw-safe, rendered-unsafe: must be omitted.
+			{Address: "10.0.2.1", PeerAS: 65002, Description: "uplink |\tprimary"},
+			{Address: "10.0.4.1", PeerAS: 65004, Description: "uplink |\x7fprimary"},
+			// Inverse: raw-unsafe, rendered-unsafe too (already covered
+			// by TestNeighborDescriptionPipe16776, kept as a control
+			// here so this test discriminates both directions).
+			{Address: "10.0.8.1", PeerAS: 65008, Description: "uplink | primary"},
+			// Inverse-kept: control byte alone sanitizes to a space but
+			// creates no "| " — must still render (sanitized).
+			{Address: "10.0.5.1", PeerAS: 65005, Description: "uplink\tprimary"},
+			// Inverse-kept: pipe not followed by a space stays rendered.
+			{Address: "10.0.6.1", PeerAS: 65006, Description: "uplink |primary"},
+			{Address: "10.0.7.1", PeerAS: 65007, Description: "plain peer"},
+		},
+	}
+	got := New().generateProtocols(nil, nil, bgp, nil, nil, "", 0, nil, nil)
+	if strings.Contains(got, "| ") {
+		t.Errorf("rendered protocols contain \"| \" (vty pipe hook would refuse the line):\n%s", got)
+	}
+	for _, addr := range []string{"10.0.2.1", "10.0.4.1", "10.0.8.1"} {
+		if strings.Contains(got, "neighbor "+addr+" description") {
+			t.Errorf("neighbor %s description should have been omitted (rendered form is pipe-unsafe):\n%s", addr, got)
+		}
+		if !strings.Contains(got, "neighbor "+addr+" remote-as") {
+			t.Errorf("neighbor %s itself lost (only its description may be omitted):\n%s", addr, got)
+		}
+	}
+	// Kept controls render with the sanitized text.
+	for addr, want := range map[string]string{
+		"10.0.5.1": "neighbor 10.0.5.1 description uplink primary\n",
+		"10.0.6.1": "neighbor 10.0.6.1 description uplink |primary\n",
+		"10.0.7.1": "neighbor 10.0.7.1 description plain peer\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("neighbor %s: want rendered line %q in:\n%s", addr, want, got)
+		}
+	}
+	// Fixture sanity: the discriminating input is raw-safe but
+	// rendered-unsafe — otherwise this test proves nothing.
+	if strings.Contains("uplink |\tprimary", "| ") {
+		t.Fatal("fixture broken: raw input already contains \"| \"")
+	}
+	if !strings.Contains(sanitizeFRRValue("uplink |\tprimary"), "| ") {
+		t.Fatal("fixture broken: sanitized input does not contain \"| \"")
+	}
+}
+
 // TestCommunityListPipeLiveBgpd16776 is the daemon-path oracle: a real
 // bgpd + zebra in a private netns/pathspace, loaded via vtysh -f (the
 // same transport frr-reload.py drives). It asserts the BOTH list is
