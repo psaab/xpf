@@ -1592,3 +1592,77 @@ fn mixed_notrans_and_pat_share_port_bearing_allocator_16840() {
     );
     assert_eq!(rules[0].pool_allocator.debug_occupancy_words(), 8);
 }
+/// #17877 RED-on-revert: a failed custom-range pool's empty placeholder must
+/// not be reused when that pool recovers at the default PAT range.
+#[test]
+fn failed_custom_range_placeholder_does_not_block_default_pat_restore_17877() {
+    let budget = SourceNatAggregateBudget {
+        max_pools: 1024,
+        max_addresses: 1_048_576,
+        max_port_capacity: 8 * 64_512,
+    };
+    let failed_custom_range = SourceNATRuleSnapshot {
+        pool_unusable: true,
+        pool_unusable_reason: "aggregate_over_budget".to_string(),
+        ..pool_snap("r0", "p0", SMALL_POOL, SMALL_LOW, SMALL_HIGH)
+    };
+    let failed = parse_source_nat_rules_with_budget(
+        &[failed_custom_range],
+        None,
+        &NatCounterStore::default(),
+        &budget,
+    );
+    assert_eq!(
+        failed[0].pool_failure,
+        Some(SourceNatFailureReason::OverBudget)
+    );
+    assert_eq!(
+        failed[0].pool_allocator.snapshot().max_tracked_flows,
+        0,
+        "setup: a pool rejected before construction carries only the empty placeholder"
+    );
+
+    // Recovery changes the custom range back to the default 1024-65535 PAT
+    // range. The failed generation's placeholder must not match this key.
+    let restored = parse_source_nat_rules_with_budget(
+        &[pool_snap("r0", "p0", SMALL_POOL, 0, 0)],
+        Some(&failed),
+        &NatCounterStore::default(),
+        &budget,
+    );
+    let rule = &restored[0];
+    assert_eq!(rule.pool_failure, None);
+    assert_ne!(
+        rule.pool_allocator.debug_shared_identity(),
+        failed[0].pool_allocator.debug_shared_identity(),
+        "a never-built placeholder is not allocator state to reuse"
+    );
+    assert!(
+        rule.pool_allocator.debug_occupancy_words() > 0,
+        "recovery must build the default-range occupancy bitmap"
+    );
+
+    let flow = SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "192.0.2.1".parse().expect("src"),
+        dst_ip: "198.51.100.1".parse().expect("dst"),
+        src_port: 12345,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    rule.pool_allocator
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(&rule.pool_addresses_v4),
+            0,
+            false,
+            false,
+            PersistentNatPermit::TargetHostPort,
+            0,
+            0,
+            1,
+            NatHolder::Untracked,
+            0,
+        )
+        .expect("recovered default-range PAT pool must mint");
+}
