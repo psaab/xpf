@@ -1651,6 +1651,8 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 // to result.ManagedInterfaces and names recorded in seen for dedup / the
 // unmanaged strip.
 func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, seen map[string]bool) {
+	physPlans := planPhysDesired(cfg)
+
 	// Collect managed interface info for networkd config generation.
 	// Iterate over configured interfaces (not zones) to get a clean
 	// per-interface view including VLAN parent and sub-interface entries.
@@ -1925,7 +1927,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 			// addresses of untagged units (#16795, untaggedUnitAddresses),
 			// which planPhysDesired installs on this device.
 			parentAddrs := vlanParentVRRPSource(effectiveCfg, isVRRPReth, clusterNodeID)
-			if own := untaggedUnitAddresses(effectiveCfg, isVRRPReth); len(own) > 0 {
+			if own := untaggedUnitAddressesFor(cfg, ifName, linuxName, effectiveCfg, isVRRPReth, physPlans, zonedUntaggedUnits(cfg, ifName, effectiveCfg)); len(own) > 0 {
 				parentAddrs = append(parentAddrs, own...)
 			}
 			if !seen[linuxName] {
