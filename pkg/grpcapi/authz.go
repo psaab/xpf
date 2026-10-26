@@ -304,6 +304,9 @@ func (s *Server) authorizeRPCContext(ctx context.Context, fullMethod string, req
 		// the authorized generation, not a re-resolved store tree.
 		snaps, err := s.authorizeRPCConfigRead(cfg, p.Class, fullMethod, req)
 		if err != nil {
+			if slotErr, ok := err.(grpcConfigReadSlotError); ok {
+				return nil, status.Error(codes.InvalidArgument, slotErr.Error())
+			}
 			return nil, denyRPC(fullMethod, required, p, err)
 		}
 		ctx = context.WithValue(ctx, configReadSnapshotsKey{}, snaps)
