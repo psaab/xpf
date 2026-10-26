@@ -1845,8 +1845,9 @@ step. Both are required — neither sees the other's case:
   translated pipe-free or omitted as a whole definition for the
   forms the translator validates; negated bracket classes it does
   not validate (for example `[^| ]`) can still render a literal
-  `| ` and are a known gap (tracked separately). Reject references
-  are lowered fail-closed (#10822). Neighbor descriptions
+  `| ` and are a known gap (tracked in #17977). Reject references
+  to omitted definitions are lowered fail-closed (#10822); the
+  negated-bracket gap is not covered by that lowering. Neighbor descriptions
   carrying `| ` are rejected at commit and omitted on tolerant render
   paths. Junos AS-path regexes are translated before rendering, so
   grouping whitespace around alternation (for example `65000 | 65001`)
