@@ -653,7 +653,8 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// legitimately name an interface that is genuinely absent on this chassis,
 	// and failing the commit on that would reject configs that are correct for
 	// the fleet. Management base interfaces must exist by this phase; only a
-	// confirmed absence of an unzoned configured VLAN child is tolerated there.
+	// confirmed absence of an unzoned configured VLAN child or a chassis
+	// fabric interface (#18034) is tolerated there.
 	d.rebindRoutingInstanceMembers(cfg)
 
 	if mgmtSet := d.mgmtVRFIfaceSet(); d.routing != nil && len(mgmtSet) > 0 {
