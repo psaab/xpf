@@ -171,6 +171,12 @@ func (p *retiredPending) recordForget(c *SyslogClient) {
 // number of interleaved stats calls (#17855).
 func (p *retiredPending) foldInto(acc *syslogDropAccumulator) {
 	for c, snap := range *p {
+		// Read finality BEFORE the counters (#17855 fold 4): CountsFinal
+		// is stored only after Close's counting completes, so observing
+		// it first makes every pre-Store increment visible to the read
+		// below. Reading counters first and the flag second could
+		// straddle a completing Close and delete the entry mid-drain.
+		finalClaimed := c.CountsFinal()
 		now := syslogDropsFromClient(snap.Sink, c)
 		sub := func(now, before uint64) uint64 {
 			if now <= before {
@@ -195,7 +201,7 @@ func (p *retiredPending) foldInto(acc *syslogDropAccumulator) {
 		// can be counted for non-interrupting conns, so flag-alone
 		// would still race one in-flight record (#17855 fold 3).
 		stable := delta.Writes == 0 && delta.Dials == 0 && delta.Cooldown == 0
-		if c.CountsFinal() && stable {
+		if finalClaimed && stable {
 			delete(*p, c)
 		} else {
 			// Not final yet: advance the snapshot so the remainder is

@@ -453,10 +453,6 @@ func (er *EventReader) SetSyslogClients(clients []*SyslogClient) {
 	old := er.syslogClients
 	er.syslogClients = clients
 	for _, c := range clients {
-		er.syslogRetired.forgetClient(c)
-		er.syslogRetiredPending.recordForget(c)
-	}
-	for _, c := range clients {
 		// Reinstalled: counters read live; drop folded totals (#17855).
 		er.syslogRetired.forgetClient(c)
 		er.syslogRetiredPending.recordForget(c)
