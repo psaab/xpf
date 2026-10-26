@@ -218,8 +218,8 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
-	// #16628 (R3-A12-04): an OSPF MD5 key over 16 characters or a
-	// simple-password over 8 is silently truncated by ospfd, so every
+	// #16628/#17680: an OSPF MD5 key over 16 bytes or a
+	// simple-password over 8 bytes is silently truncated by ospfd, so every
 	// frr-reload deletes and re-adds it (perpetual diff) and the
 	// effective key diverges from `show configuration`. Appended
 	// beside the #14397 gate so a new error cannot steal established

@@ -10,7 +10,7 @@ import (
 )
 
 // #16628 (R3-A12-04): render belt. An OSPF MD5 key longer than 16
-// characters or a simple-password longer than 8 arriving on the
+// bytes or a simple-password longer than 8 bytes arriving on the
 // tolerant path must not be emitted: ospfd truncates it, so the
 // rendered line churns on every frr-reload (delete-and-add) and the
 // effective key diverges from the configuration. The renderer must
@@ -43,8 +43,21 @@ func TestOSPFOverlongMD5KeyWithheld16628(t *testing.T) {
 	if strings.Contains(logs.String(), "12345678901234567") {
 		t.Errorf("warning leaks the key value; logs=%q", logs.String())
 	}
+	// 16 multi-byte runes are 32 bytes and must be withheld, even though
+	// their rune count is still at ospfd's 16-byte boundary.
+	logs.Reset()
+	md5Over := strings.Repeat("é", 16)
+	ospf.Areas[0].Interfaces[0].AuthKey = config.NewSecret(md5Over)
+	ospf.Areas[0].Interfaces[0].AuthMD5Keys[0].Key = config.NewSecret(md5Over)
+	got = m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
+	if strings.Contains(got, "interface ge-0/0/1.0") || strings.Contains(got, "ip ospf area") || strings.Contains(got, "message-digest-key") {
+		t.Fatalf("16-rune/32-byte MD5 key activated the interface / rendered a truncating line:\n%s", got)
+	}
+	if !strings.Contains(logs.String(), "16628") || strings.Contains(logs.String(), md5Over) {
+		t.Errorf("multi-byte MD5 warning missing issue or leaks key: logs=%q", logs.String())
+	}
 
-	// Control: exactly 16 characters renders byte-identically.
+	// Control: exactly 16 bytes renders byte-identically.
 	logs.Reset()
 	ospf.Areas[0].Interfaces[0].AuthKey = config.NewSecret("1234567890123456")
 	ospf.Areas[0].Interfaces[0].AuthMD5Keys[0].Key = config.NewSecret("1234567890123456")
@@ -53,6 +66,15 @@ func TestOSPFOverlongMD5KeyWithheld16628(t *testing.T) {
 		if !strings.Contains(got, w) {
 			t.Errorf("16-char MD5 key lost %q:\n%s", w, got)
 		}
+	}
+	// Control: the exact byte limit remains accepted with UTF-8 input.
+	logs.Reset()
+	md5AtByteLimit := strings.Repeat("é", 8)
+	ospf.Areas[0].Interfaces[0].AuthKey = config.NewSecret(md5AtByteLimit)
+	ospf.Areas[0].Interfaces[0].AuthMD5Keys[0].Key = config.NewSecret(md5AtByteLimit)
+	got = m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
+	if !strings.Contains(got, " ip ospf message-digest-key 1 md5 "+md5AtByteLimit+"\n") {
+		t.Errorf("16-byte multi-byte MD5 key lost:\n%s", got)
 	}
 }
 
@@ -72,8 +94,19 @@ func TestOSPFOverlongSimplePasswordWithheld16628(t *testing.T) {
 	if strings.Contains(logs.String(), "123456789") {
 		t.Errorf("warning leaks the key value; logs=%q", logs.String())
 	}
+	// 8 multi-byte runes are 16 bytes and must be withheld.
+	logs.Reset()
+	simpleOver := strings.Repeat("é", 8)
+	ospf.Areas[0].Interfaces[0].AuthKey = config.NewSecret(simpleOver)
+	got = m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
+	if strings.Contains(got, "interface ge-0/0/1.0") || strings.Contains(got, "ip ospf area") || strings.Contains(got, "authentication-key") {
+		t.Fatalf("8-rune/16-byte simple-password activated the interface / rendered a truncating line:\n%s", got)
+	}
+	if !strings.Contains(logs.String(), "16628") || strings.Contains(logs.String(), simpleOver) {
+		t.Errorf("multi-byte simple-password warning missing issue or leaks key: logs=%q", logs.String())
+	}
 
-	// Control: exactly 8 characters renders byte-identically.
+	// Control: exactly 8 bytes renders byte-identically.
 	logs.Reset()
 	ospf.Areas[0].Interfaces[0].AuthKey = config.NewSecret("12345678")
 	got = m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
@@ -81,6 +114,14 @@ func TestOSPFOverlongSimplePasswordWithheld16628(t *testing.T) {
 		if !strings.Contains(got, w) {
 			t.Errorf("8-char simple-password lost %q:\n%s", w, got)
 		}
+	}
+	// Control: exactly 8 bytes is allowed with multi-byte input.
+	logs.Reset()
+	simpleAtByteLimit := strings.Repeat("é", 4)
+	ospf.Areas[0].Interfaces[0].AuthKey = config.NewSecret(simpleAtByteLimit)
+	got = m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
+	if !strings.Contains(got, " ip ospf authentication-key "+simpleAtByteLimit+"\n") {
+		t.Errorf("8-byte multi-byte simple-password lost:\n%s", got)
 	}
 
 	// Control: no auth at all still activates plain OSPF.

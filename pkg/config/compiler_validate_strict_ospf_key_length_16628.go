@@ -5,16 +5,16 @@ import (
 	"log/slog"
 )
 
-// #16628 (R3-A12-04): OSPF MD5 keys longer than 16 characters and
-// simple-passwords longer than 8 commit strict-clean; ospfd silently
+// #16628 (R3-A12-04): OSPF MD5 keys longer than 16 bytes and
+// simple-passwords longer than 8 bytes commit strict-clean; ospfd silently
 // truncates them, and every reload deletes and re-adds the key
 // (perpetual diff).
 //
-// RFC 2328 Appendix D.2: the simple password is "a 64-bit field"
-// (8 characters). D.4.3 step (6)(a): "The 16 byte MD5 key is appended
-// to the OSPF packet" (16 characters). FRR ospfd truncates a longer
-// key to that width in running-config, so the rendered managed frr.conf
-// line never matches what ospfd holds: every frr-reload sees a
+// RFC 2328 Appendix D.2: the simple password is a "64-bit field"
+// (8 bytes). D.4.3 step (6)(a): "The 16 byte MD5 key is appended to the
+// OSPF packet". FRR ospfd truncates a longer key to that width in
+// running-config, so the rendered managed frr.conf line never matches
+// what ospfd holds: every frr-reload sees a
 // delete-and-add pair for the key, and the #15203 reload-diff
 // certification can never pass for that box. The effective key also
 // diverges silently from `show configuration`.
@@ -24,7 +24,7 @@ import (
 //
 //   - Strict (commit / commit-check): the schema leaves carry
 //     ValidateOSPFMD5KeyLength / ValidateOSPFSimplePasswordLength
-//     (1..16 / 1..8 characters), and validateOSPFKeyLengthStrict below
+//     (1..16 / 1..8 bytes), and validateOSPFKeyLengthStrict below
 //     enforces the same bounds on the compiled *Config — globally and
 //     per routing instance (the routing-instance schema shares the
 //     global ospf subtree via schemaProtocols).
@@ -40,8 +40,8 @@ import (
 //     and if no MD5 key survives the whole interface is omitted
 //     (the #14388 rule).
 //
-// The bound counts characters (runes), matching the operator-visible
-// length FRR counts — same as #15013.
+// The bound counts bytes, not runes (#17680): FRR stores keys in fixed-
+// width byte arrays, so overlong UTF-8 values are truncated by bytes.
 //
 // The Junos `$9$` case: decodeJunos9AtCompile (#15051) runs FIRST in
 // runUniformGatesLogFeedRouting and replaces a `$9$` blob with its
@@ -50,32 +50,51 @@ import (
 // never to the authored blob. A `$9$` blob whose plaintext exceeds the
 // bound is therefore rejected on strict commit for the same reason a
 // plain over-long key is: ospfd would truncate the plaintext.
+
+// The schema walker validates the authored AST before compilation, so
+// its typed-leaf check must measure a valid `$9$` token's decoded value
+// too. Otherwise even a legal ten-byte MD5 plaintext is rejected just
+// because its encoded blob is longer than 16 bytes. Malformed tokens
+// remain subject to the #15051 strict decode rejection.
+
 const (
 	// MaxOSPFMD5KeyLen is the maximum OSPF MD5 key length in
-	// characters (RFC 2328 D.4.3: the 16 byte MD5 key).
+	// bytes (RFC 2328 D.4.3: the 16 byte MD5 key).
 	MaxOSPFMD5KeyLen = 16
 	// MaxOSPFSimplePasswordLen is the maximum OSPF simple-password
-	// length in characters (RFC 2328 D.2: a 64-bit field).
+	// length in bytes (RFC 2328 D.2: a 64-bit field).
 	MaxOSPFSimplePasswordLen = 8
 )
+
+// ospfKeyByteLength measures the effective key at the schema boundary:
+// plaintext bytes directly, or decoded plaintext bytes for a valid
+// Junos `$9$` value. A malformed encoded token falls back to its authored
+// byte length and remains subject to the #15051 compile-gate rejection.
+func ospfKeyByteLength(raw string) int {
+	decoded, err := DecodeJunos9Secret(raw)
+	if err != nil {
+		return len(raw)
+	}
+	return len(decoded)
+}
 
 // ValidateOSPFMD5KeyLength is the setSchema typed-leaf validator for
 // `protocols ospf area <a> interface <i> authentication md5 <id> key`
 // (shared by the global and routing-instance copies via
 // schemaProtocols). It rejects an empty value and any key longer than
-// MaxOSPFMD5KeyLen characters. The compiled gate
+// MaxOSPFMD5KeyLen bytes. The compiled gate
 // validateOSPFKeyLengthStrict below is the backstop for values that
 // bypass SchemaValidate (programmatic trees, tolerant loads downgraded
 // to warnings, group-expanded values).
 func ValidateOSPFMD5KeyLength(raw string) error {
 	if raw == "" {
-		return fmt.Errorf("missing OSPF MD5 key (expected 1..%d characters)", MaxOSPFMD5KeyLen)
+		return fmt.Errorf("missing OSPF MD5 key (expected 1..%d bytes)", MaxOSPFMD5KeyLen)
 	}
-	if n := len([]rune(raw)); n > MaxOSPFMD5KeyLen {
-		return fmt.Errorf("OSPF MD5 key is %d characters, exceeding the %d-character maximum "+
+	if n := ospfKeyByteLength(raw); n > MaxOSPFMD5KeyLen {
+		return fmt.Errorf("OSPF MD5 key is %d bytes, exceeding the %d-byte maximum "+
 			"accepted by FRR ospfd (ip ospf message-digest-key); ospfd truncates a longer key, "+
 			"so the effective key differs from the configuration and every frr-reload deletes "+
-			"and re-adds it — shorten the key to at most %d characters (#16628)",
+			"and re-adds it — shorten the key to at most %d bytes (#16628)",
 			n, MaxOSPFMD5KeyLen, MaxOSPFMD5KeyLen)
 	}
 	return nil
@@ -85,30 +104,30 @@ func ValidateOSPFMD5KeyLength(raw string) error {
 // validator for `protocols ospf area <a> interface <i> authentication
 // simple-password` (shared by the global and routing-instance copies
 // via schemaProtocols). It rejects an empty value and any password
-// longer than MaxOSPFSimplePasswordLen characters. The compiled gate
+// longer than MaxOSPFSimplePasswordLen bytes. The compiled gate
 // validateOSPFKeyLengthStrict below is the backstop for values that
 // bypass SchemaValidate.
 func ValidateOSPFSimplePasswordLength(raw string) error {
 	if raw == "" {
-		return fmt.Errorf("missing OSPF simple-password (expected 1..%d characters)", MaxOSPFSimplePasswordLen)
+		return fmt.Errorf("missing OSPF simple-password (expected 1..%d bytes)", MaxOSPFSimplePasswordLen)
 	}
-	if n := len([]rune(raw)); n > MaxOSPFSimplePasswordLen {
-		return fmt.Errorf("OSPF simple-password is %d characters, exceeding the %d-character maximum "+
+	if n := ospfKeyByteLength(raw); n > MaxOSPFSimplePasswordLen {
+		return fmt.Errorf("OSPF simple-password is %d bytes, exceeding the %d-byte maximum "+
 			"accepted by FRR ospfd (ip ospf authentication-key); ospfd truncates a longer password, "+
 			"so the effective password differs from the configuration and every frr-reload deletes "+
-			"and re-adds it — shorten the password to at most %d characters (#16628)",
+			"and re-adds it — shorten the password to at most %d bytes (#16628)",
 			n, MaxOSPFSimplePasswordLen, MaxOSPFSimplePasswordLen)
 	}
 	return nil
 }
 
 // validateOSPFKeyLengthStrict rejects a compiled OSPF key longer than
-// its bound: every AuthMD5Keys entry (and the legacy AuthKey view when
-// AuthType is md5) over MaxOSPFMD5KeyLen, and a simple AuthKey over
-// MaxOSPFSimplePasswordLen — globally and per routing instance. Strict
-// returns an error; lenient appends a warning and logs (never the key
-// itself — only its length) so a persisted config still boots while
-// pkg/frr withholds the over-long key fail-closed.
+// its byte bound (#17680): every AuthMD5Keys entry (and the legacy
+// AuthKey view when AuthType is md5) over MaxOSPFMD5KeyLen, and a simple
+// AuthKey over MaxOSPFSimplePasswordLen — globally and per routing
+// instance. Strict returns an error; lenient appends a warning and logs
+// (never the key itself — only its length) so a persisted config still
+// boots while pkg/frr withholds the over-long key fail-closed.
 func validateOSPFKeyLengthStrict(cfg *Config, lenient bool) ([]string, error) {
 	if cfg == nil {
 		return nil, nil
@@ -117,16 +136,16 @@ func validateOSPFKeyLengthStrict(cfg *Config, lenient bool) ([]string, error) {
 	report := func(scope, areaID string, iface *OSPFInterface, kind string, keyID, n, max int) error {
 		var msg string
 		if kind == "md5" {
-			msg = fmt.Sprintf("%sprotocols ospf area %s interface %s authentication md5 %d key is %d characters, "+
-				"exceeding the %d-character maximum accepted by FRR ospfd (ip ospf message-digest-key); "+
+			msg = fmt.Sprintf("%sprotocols ospf area %s interface %s authentication md5 %d key is %d bytes, "+
+				"exceeding the %d-byte maximum accepted by FRR ospfd (ip ospf message-digest-key); "+
 				"ospfd truncates the key, so the effective key differs from the configuration and every "+
-				"frr-reload deletes and re-adds it. Shorten the key to at most %d characters (#16628)",
+				"frr-reload deletes and re-adds it. Shorten the key to at most %d bytes (#16628)",
 				scope, areaID, iface.Name, keyID, n, max, max)
 		} else {
-			msg = fmt.Sprintf("%sprotocols ospf area %s interface %s authentication simple-password is %d characters, "+
-				"exceeding the %d-character maximum accepted by FRR ospfd (ip ospf authentication-key); "+
+			msg = fmt.Sprintf("%sprotocols ospf area %s interface %s authentication simple-password is %d bytes, "+
+				"exceeding the %d-byte maximum accepted by FRR ospfd (ip ospf authentication-key); "+
 				"ospfd truncates the password, so the effective password differs from the configuration and every "+
-				"frr-reload deletes and re-adds it. Shorten the password to at most %d characters (#16628)",
+				"frr-reload deletes and re-adds it. Shorten the password to at most %d bytes (#16628)",
 				scope, areaID, iface.Name, n, max, max)
 		}
 		if lenient {
@@ -155,13 +174,13 @@ func validateOSPFKeyLengthStrict(cfg *Config, lenient bool) ([]string, error) {
 				case "md5":
 					if len(iface.AuthMD5Keys) > 0 {
 						for _, key := range iface.AuthMD5Keys {
-							if n := len([]rune(key.Key.Reveal())); n > MaxOSPFMD5KeyLen {
+							if n := len(key.Key.Reveal()); n > MaxOSPFMD5KeyLen {
 								if err := report(scope, area.ID, iface, "md5", key.ID, n, MaxOSPFMD5KeyLen); err != nil {
 									return err
 								}
 							}
 						}
-					} else if n := len([]rune(iface.AuthKey.Reveal())); n > MaxOSPFMD5KeyLen {
+					} else if n := len(iface.AuthKey.Reveal()); n > MaxOSPFMD5KeyLen {
 						// Legacy single-key view (directly
 						// constructed configs with no
 						// AuthMD5Keys): AuthKeyID is the
@@ -171,7 +190,7 @@ func validateOSPFKeyLengthStrict(cfg *Config, lenient bool) ([]string, error) {
 						}
 					}
 				case "simple":
-					if n := len([]rune(iface.AuthKey.Reveal())); n > MaxOSPFSimplePasswordLen {
+					if n := len(iface.AuthKey.Reveal()); n > MaxOSPFSimplePasswordLen {
 						if err := report(scope, area.ID, iface, "simple", 0, n, MaxOSPFSimplePasswordLen); err != nil {
 							return err
 						}
