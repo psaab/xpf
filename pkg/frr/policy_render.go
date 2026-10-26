@@ -850,8 +850,11 @@ func (m *Manager) generatePolicyOptionsWithRefNodes15158(po *config.PolicyOption
 		}
 		for _, scope := range qnhMetrics.scopes() {
 			if routeMap := scope.policyMaps[name]; routeMap != "" {
-				b.WriteString(m.renderQNHMetricPolicyMapCluster15158(po, routeMap, ps, scope, clusterMode))
-				b.WriteString("!\n")
+				for _, ctx := range qnhMetricPolicyVariants11447(referencedNodes[name]) {
+					variantMap := qnhMetricPolicyVariantRouteMap11447(routeMap, ctx)
+					b.WriteString(m.renderQNHMetricPolicyVariantCluster15158(po, variantMap, ps, scope, ctx, clusterMode))
+					b.WriteString("!\n")
+				}
 			}
 		}
 	}
