@@ -254,9 +254,9 @@ pub(in crate::afxdp) fn teardown_pressure_shed_victims(
             shared_removal,
             crate::afxdp::shared_ops::SharedRemoval::Declined
         ) {
-            // A declined incarnation fence may leave a same-key local
-            // replacement. MissingNeighbor's former copy skipped this probe
-            // and could release the replacement's NAT/NAT64 reservation.
+            // Keep the established guard before releasing NAT state. The old
+            // MissingNeighbor copy omitted it, but analysis found that difference
+            // behaviorally equivalent because shedding removes both local rows.
             if sessions.probe_with_origin(&shed.key).is_none() {
                 crate::nat::release_source_nat_allocation_for_worker(
                     &ctx.forwarding.iface_nat_allocators,

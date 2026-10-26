@@ -404,6 +404,11 @@ pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
     if shed_sessions.is_empty() {
         return;
     }
+    // Preserve the original retry authority: when a binding exists, clean up
+    // coordinator/live rows through its session map; otherwise use the worker map.
+    let session_map = bindings
+        .first()
+        .map_or(session_map, |binding| binding.bpf_maps.session_map.handle());
     let _ = crate::afxdp::poll_descriptor::session_admission::teardown_pressure_shed_victims(
         sessions,
         shed_sessions,
