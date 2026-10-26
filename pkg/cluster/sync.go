@@ -1365,6 +1365,7 @@ type SessionSync struct {
 	// sweepWakeScanIntervalSeconds coalesces the shortest queued-row scan
 	// request until the timer fires.
 	sweepWakeScanIntervalSeconds atomic.Uint64
+	syncBackfillNeeded           atomic.Bool
 	// rebootAwaiting names the half of the CURRENT incarnation's reboot
 	// evidence that has not arrived yet; it is live only while
 	// rebootAwaitingInc equals peerIncarnation (#9636). Guarded by mu.
@@ -2183,6 +2184,7 @@ func NewSessionSync(localAddr, peerAddr string, rt clusterRuntime) *SessionSync 
 		localAddr:                  localAddr,
 		peerAddr:                   peerAddr,
 		sendCh:                     make(chan []byte, 4096),
+		sweepWakeCh:                make(chan struct{}, 1),
 		deleteJournalCap:           deleteJournalDefaultCap,
 		failoverWaiters:            make(map[int]failoverWaiter),
 		failoverCommitWaiters:      make(map[int]failoverWaiter),

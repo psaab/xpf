@@ -966,7 +966,7 @@ func TestQueuedPrimaryLivenessFrameRechecksPeerAfterDowngrade16880(t *testing.T)
 	ss.conn0 = localConn
 	ss.mu.Unlock()
 	ss.stats.Connected.Store(true)
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness | capFlag2PersistentNatLeaseProvenance))
 
 	key := dataplane.SessionKey{SrcPort: 12345, DstPort: 443, Protocol: 6}
 	value := dataplane.SessionValue{PrimaryLiveness: true}
@@ -975,10 +975,10 @@ func TestQueuedPrimaryLivenessFrameRechecksPeerAfterDowngrade16880(t *testing.T)
 	if !ok || !queuedValue.PrimaryLiveness {
 		t.Fatal("fixture did not queue a liveness-marked frame for the capable peer")
 	}
-	// The frame was encoded for the old capable peer, then the reconnect
-	// advertises an older peer before the queued bytes are written.
+	// The frame was encoded for a peer advertising both capabilities; the
+	// reconnect then advertises provenance alone before queued bytes are written.
 	ss.testBeforeQueuedWrite = func() {
-		ss.peerCapabilityFlags2.Store(0)
+		ss.peerCapabilityFlags2.Store(uint32(capFlag2PersistentNatLeaseProvenance))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -997,7 +997,7 @@ func TestQueuedPrimaryLivenessFrameRechecksPeerAfterDowngrade16880(t *testing.T)
 		t.Fatal("reconnected peer received a malformed session frame")
 	}
 	if got.PrimaryLiveness {
-		t.Fatal("reconnected incapable peer received the stale liveness marker")
+		t.Fatal("peer advertising only provenance received the stale liveness marker")
 	}
 	cancel()
 	<-done
