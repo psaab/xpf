@@ -748,14 +748,17 @@ ambiguous candidate too. Fail-on-revert: `surface_a_ambiguous_15225_test.go`,
 newest value on the wire).
 
 **Generic http:// credential gate (#15225 A40-03).** The #14386 fixed
-credential key-name list missed `pass=`/`key=`/`api-token=`/`pwd=`/`p=`; both
-mirrored detectors (config `ddnsTemplateCarriesLiteralToken`, runtime
-`templateCarriesLiteralToken`) now treat ANY literal query value as
-credential-carrying. Credential-named path pairs remain flagged; bare path
-segments and placeholder-only/value-less templates remain unflagged; loopback
-http still works. Fail-on-revert: `ddns_plaintext_15225_test.go` (both packages).
+credential key-name list missed `pass=`/`key=`/`api-token=`/`pwd=`/`p=`. The
+credential detector now lives in `pkg/config` and is called by both the
+compiler and runtime construction/issuance gates; the shared test-vector table
+in `internal/ddnsplaintextvectors` is consumed by both packages
+(`ddns_plaintext_15225_test.go`). Literal query values and credential-named
+path pairs remain flagged; bare path segments and placeholder-only/value-less
+templates remain unflagged; loopback http remains available to test harnesses.
+Production compiler validation rejects credentialed plaintext providers before
+runtime construction.
 
-**Percent-escaped literals are literals (#16573).** The detectors' old
+**Percent-escaped literals are literals (#16573).** The shared predicate's old
 `%`-free test also exempted percent-escaped values (`%2B`/`%2F`/`%3D`):
 only `%h`/`%i`/`%u`/`%p`/`%%` count as specifiers, any other `%x` (and a
 trailing `%`) is transmitted verbatim by `renderGenericURL` and therefore
