@@ -1301,10 +1301,10 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 					addrs = unit.Addresses
 					subPrimaryV4 = unit.PrimaryAddressForFamily(false)
 					subPrimaryV6 = unit.PrimaryAddressForFamily(true)
-					// #16833: standalone vrrp-group VIPs on this unit are
-					// foreign (pkg/vrrp-owned); keep, never add/delete.
-					keepAddrs = unitStandaloneVRRPVIPs(unit)
 				}
+				// #16833/#17866: only an enabled unit on an enabled
+				// interface can own standalone VRRP VIPs.
+				keepAddrs = interfaceUnitStandaloneVRRPVIPs(ifCfg, unit)
 				isDHCPSub = unit.DHCP || unitHasDHCPv6(unit)
 			}
 			if ifCfg.RedundancyGroup > 0 {
@@ -2010,8 +2010,8 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 							Disable:            unitDisabled,
 							MTU:                unit.MTU,
 							Description:        unit.Description,
-							KeepAddresses:      (isVRRPReth || unitCarriesStandaloneVRRP(unit)) && !unitDisabled,
-							KeepForeignStatic:  unitCarriesStandaloneVRRP(unit) && !unitDisabled,
+							KeepAddresses:      (isVRRPReth || (unitCarriesStandaloneVRRP(unit) && !effectiveCfg.Disable)) && !unitDisabled,
+							KeepForeignStatic:  unitCarriesStandaloneVRRP(unit) && !unitDisabled && !effectiveCfg.Disable,
 							VRFName:            mgmtVRFName,
 						})
 					}
