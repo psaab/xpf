@@ -15,6 +15,7 @@ const LAN_A: i32 = 24;
 const WAN: i32 = 12;
 const LAN_B: i32 = 25;
 const DMZ: i32 = 26;
+const TUNNEL_INGRESS: i32 = 586;
 /// A physical trunk whose two units sit in DIFFERENT zones.
 const TRUNK: i32 = 40;
 const TRUNK_LAN_UNIT: i32 = 41;
@@ -818,6 +819,9 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
         &flow,
         meta,
         None,
+        false,
+        false,
+        0,
         cookie_resolution(ForwardingDisposition::ForwardCandidate),
         flow.dst_ip,
         443,
@@ -838,6 +842,9 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
         &flow,
         meta_dmz,
         None,
+        false,
+        false,
+        0,
         cookie_resolution(ForwardingDisposition::ForwardCandidate),
         flow.dst_ip,
         443,
@@ -852,6 +859,9 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
         &flow,
         meta,
         None,
+        false,
+        false,
+        0,
         cookie_resolution(ForwardingDisposition::LocalDelivery),
         flow.dst_ip,
         443,
@@ -871,6 +881,9 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
             &flow,
             meta_dmz,
             None,
+            false,
+            false,
+            0,
             cookie_resolution(disposition),
             flow.dst_ip,
             443,
@@ -989,6 +1002,9 @@ fn syn_cookie_prescreen_defers_policy_until_effective_destination_17920() {
         &flow,
         meta,
         None,
+        false,
+        false,
+        0,
         resolution,
         effective_dst,
         flow.forward_key.dst_port,
@@ -998,8 +1014,7 @@ fn syn_cookie_prescreen_defers_policy_until_effective_destination_17920() {
     ));
 }
 
-#[test]
-fn admission_zone_pair_follows_finalized_ha_resolution_17920() {
+fn fabric_cookie_forwarding_state(with_tunnel_ingress: bool) -> ForwardingState {
     let mut snapshot = nat_snapshot_with_fabric();
     snapshot.zones.push(ZoneSnapshot {
         name: "dmz".into(),
@@ -1015,6 +1030,15 @@ fn admission_zone_pair_follows_finalized_ha_resolution_17920() {
         hardware_addr: "02:bf:72:02:00:02".into(),
         ..Default::default()
     });
+    if with_tunnel_ingress {
+        snapshot.interfaces.push(InterfaceSnapshot {
+            name: "tun-17920".into(),
+            zone: "dmz".into(),
+            egress_zone: "dmz".into(),
+            ifindex: TUNNEL_INGRESS,
+            ..Default::default()
+        });
+    }
     snapshot.policies.clear();
     snapshot.policies.push(PolicyRuleSnapshot {
         from_zone: "dmz".into(),
@@ -1026,7 +1050,18 @@ fn admission_zone_pair_follows_finalized_ha_resolution_17920() {
         name: "permit-real-route-zone".into(),
         ..PolicyRuleSnapshot::default()
     });
-    let fw = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    if with_tunnel_ingress {
+        forwarding
+            .tunnel_endpoint_by_ifindex
+            .insert(TUNNEL_INGRESS, 1);
+    }
+    forwarding
+}
+
+#[test]
+fn admission_zone_pair_follows_finalized_ha_resolution_17920() {
+    let fw = fabric_cookie_forwarding_state(false);
     let flow = cookie_flow();
     let meta = UserspaceDpMeta {
         ingress_ifindex: DMZ as u32,
@@ -1109,24 +1144,147 @@ fn admission_zone_pair_follows_finalized_ha_resolution_17920() {
         },
         None,
     );
+    // The shared MISS verdict still delegates FabricRedirect policy to
+    // the peer: no local policy result, class-only permission to punt.
     assert!(
         admission.policy_result.is_none(),
         "the ordinary miss path delegates policy for a FabricRedirect"
     );
     assert!(admission.permits());
-    assert!(super::syn_cookie_final_admission(
-        &fw,
-        &ha,
-        &flow,
-        meta,
-        None,
-        routed,
-        flow.dst_ip,
-        flow.forward_key.dst_port,
-        None,
-        now_ns,
-        now_secs,
-    ));
+    // A locally emitted cookie reply is different: it is consumed here,
+    // so it needs authorization on the FINALIZED pair. The fabric
+    // parent's egress zone is 0, so the dmz->wan permit does not cover
+    // (dmz, 0) and the default policy denies the reply.
+    assert!(
+        !super::syn_cookie_final_admission(
+            &fw,
+            &ha,
+            &flow,
+            meta,
+            None,
+            false,
+            false,
+            0,
+            routed,
+            flow.dst_ip,
+            flow.forward_key.dst_port,
+            None,
+            now_ns,
+            now_secs,
+        ),
+        "a FabricRedirect cookie reply must not be emitted without a finalized-pair permit"
+    );
+}
+
+#[test]
+fn syn_cookie_ha_finalizer_receives_fabric_ingress_context_17920() {
+    let fw = fabric_cookie_forwarding_state(false);
+    let flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: 21,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let now_secs = 128;
+    let now_ns = 1_000;
+    let ha = std::collections::BTreeMap::from([(
+        1,
+        crate::afxdp::HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 0,
+            lease: crate::afxdp::HAForwardingLease::Inactive,
+        },
+    )]);
+    let ingress_zone_override = Some(TEST_DMZ_ZONE_ID);
+    let routed = crate::afxdp::forwarding::lookup_forwarding_resolution(&fw, flow.dst_ip).resolution;
+    assert!(
+        super::syn_cookie_final_admission(
+            &fw,
+            &ha,
+            &flow,
+            meta,
+            ingress_zone_override,
+            true,
+            true,
+            0,
+            routed,
+            flow.dst_ip,
+            flow.forward_key.dst_port,
+            None,
+            now_ns,
+            now_secs,
+        ),
+        "the fabric-ingress ACK's locally authorized dmz->wan reply remains admissible"
+    );
+}
+
+#[test]
+fn syn_cookie_ha_finalizer_preserves_tunnel_startup_grace_17920() {
+    let fw = fabric_cookie_forwarding_state(true);
+    let flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: TUNNEL_INGRESS as u32,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let now_secs = 128;
+    let now_ns = 1_000;
+    let grace_until_secs = 200;
+    let ha = std::collections::BTreeMap::from([(
+        1,
+        crate::afxdp::HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 0,
+            lease: crate::afxdp::HAForwardingLease::Inactive,
+        },
+    )]);
+    let routed = crate::afxdp::forwarding::lookup_forwarding_resolution(&fw, flow.dst_ip).resolution;
+    assert!(
+        super::syn_cookie_final_admission(
+            &fw,
+            &ha,
+            &flow,
+            meta,
+            None,
+            false,
+            false,
+            grace_until_secs,
+            routed,
+            flow.dst_ip,
+            flow.forward_key.dst_port,
+            None,
+            now_ns,
+            now_secs,
+        ),
+        "the cookie helper must retain the session-miss startup-grace decision"
+    );
+    assert!(
+        !super::syn_cookie_final_admission(
+            &fw,
+            &ha,
+            &flow,
+            meta,
+            None,
+            false,
+            false,
+            0,
+            routed,
+            flow.dst_ip,
+            flow.forward_key.dst_port,
+            None,
+            now_ns,
+            now_secs,
+        ),
+        "without startup grace the locally consumed cookie reply needs a permit for (dmz, 0)"
+    );
 }
 
 #[test]
@@ -1184,6 +1342,9 @@ fn syn_cookie_missing_neighbor_preserves_local_policy_gate_17920() {
         &flow,
         meta,
         None,
+        false,
+        false,
+        0,
         resolution,
         flow.dst_ip,
         flow.forward_key.dst_port,
@@ -1214,6 +1375,9 @@ fn syn_cookie_matches_session_miss_when_untranslated_17017() {
         &flow,
         meta,
         None,
+        false,
+        false,
+        0,
         resolution,
         flow.dst_ip,
         flow.forward_key.dst_port,
@@ -1330,6 +1494,7 @@ fn syn_cookie_final_admission_fence_suppresses_challenge_15947() {
     // Control: same tuple without the fence admits (dmz->wan permit).
     assert!(super::syn_cookie_final_admission_with_fence(
         &fw, &ha, &flow, meta, None,
+        false, false, 0,
         cookie_resolution(ForwardingDisposition::ForwardCandidate),
         flow.dst_ip,
         443,
@@ -1340,6 +1505,7 @@ fn syn_cookie_final_admission_fence_suppresses_challenge_15947() {
     ));
     assert!(!super::syn_cookie_final_admission_with_fence(
         &fw, &ha, &flow, meta, None,
+        false, false, 0,
         cookie_resolution(ForwardingDisposition::ForwardCandidate),
         flow.dst_ip,
         443,

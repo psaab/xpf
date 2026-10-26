@@ -424,9 +424,9 @@ pub(super) fn transit_class_verdict(
 
 /// A complete, side-effect-free transit-admission result. The miss path
 /// applies its class counters and policy hit count separately; SYN-cookie
-/// paths consume only `permits()`. `FabricRedirect` policy is delegated to
-/// the HA peer, while `MissingNeighbor` has its own local cold-path policy
-/// evaluation; cookie admission preserves both disposition-specific paths.
+/// paths consume only `permits()`. A normal miss delegates `FabricRedirect`
+/// policy to the peer that owns the packet, while a cookie reply is consumed
+/// locally and must be authorized against the finalized pair.
 pub(super) struct AdmissionVerdict {
     pub(super) class: TransitClassVerdict,
     pub(super) policy_result: Option<crate::policy::PolicyEvaluationResult>,
@@ -442,16 +442,38 @@ impl AdmissionVerdict {
     }
 }
 
-/// Single pure martian + policy chain shared by the session-miss effects
-/// path and SYN-cookie admission. `class_verdict` lets the miss path reuse
-/// the class check it ran at its original ordering point, then apply the
-/// counted policy effect when its later policy stage is reached. Both
-/// `ForwardCandidate` and `MissingNeighbor` are locally policy-adjudicated;
-/// `FabricRedirect` delegates its policy to the peer that owns the packet.
+/// Pure miss-path verdict. `class_verdict` lets the miss path reuse the class
+/// check it ran at its original ordering point, then apply the counted policy
+/// effect when its later policy stage is reached. `FabricRedirect` remains
+/// peer-adjudicated because the packet itself is punted to that peer.
 pub(super) fn transit_admission_verdict(
     forwarding: &ForwardingState,
     input: &AdmissionInput<'_>,
     class_verdict: Option<TransitClassVerdict>,
+) -> AdmissionVerdict {
+    transit_admission_verdict_with_cookie_redirect_policy(
+        forwarding,
+        input,
+        class_verdict,
+        false,
+    )
+}
+
+/// A cookie reply is emitted and its ACK is consumed locally even when the
+/// finalized disposition is `FabricRedirect`. Unlike a normal punt, it must
+/// therefore receive a local policy verdict for the finalized zone pair.
+pub(super) fn cookie_reply_admission_verdict(
+    forwarding: &ForwardingState,
+    input: &AdmissionInput<'_>,
+) -> AdmissionVerdict {
+    transit_admission_verdict_with_cookie_redirect_policy(forwarding, input, None, true)
+}
+
+fn transit_admission_verdict_with_cookie_redirect_policy(
+    forwarding: &ForwardingState,
+    input: &AdmissionInput<'_>,
+    class_verdict: Option<TransitClassVerdict>,
+    authorize_fabric_redirect: bool,
 ) -> AdmissionVerdict {
     let class = class_verdict.unwrap_or_else(|| {
         transit_class_verdict(
@@ -467,7 +489,8 @@ pub(super) fn transit_admission_verdict(
     let local_policy_disposition = matches!(
         input.resolution.disposition,
         ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
-    );
+    ) || (authorize_fabric_redirect
+        && input.resolution.disposition == ForwardingDisposition::FabricRedirect);
     let policy_result = if local_policy_disposition
         && class.transit_disposition
         && class.drop.is_none()

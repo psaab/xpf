@@ -11,7 +11,7 @@
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::screen::SynCookieChallenge;
-use super::session_admission::{AdmissionInput, transit_admission_verdict};
+use super::session_admission::{AdmissionInput, cookie_reply_admission_verdict};
 
 /// A SYN-cookie challenge has no effective route, translated tuple, or
 /// finalized HA disposition yet. It may pass this point only when it is a
@@ -32,15 +32,22 @@ pub(super) fn syn_cookie_challenge_is_session_miss(
 /// (after DNAT/NPTv6/NAT64 and any PBR table selection). Transit
 /// classification receives the wire destination plus the pre-policy
 /// translation; policy receives `effective_dst`. HA finalization precedes
-/// zone-pair derivation. LocalDelivery host admission remains caller-owned
+/// zone-pair derivation. Locally emitted cookie replies authorize the
+/// finalized pair even when HA classifies the transit disposition as
+/// `FabricRedirect`: consuming the ACK here would otherwise bypass policy
+/// evaluation on the peer. LocalDelivery host admission remains caller-owned
 /// and is handled by `syn_cookie_host_admission`. Returning false suppresses
 /// only the synthesized ACK-RST.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn syn_cookie_final_admission(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u32>,
+    packet_fabric_ingress: bool,
+    fabric_link_ingress: bool,
+    ha_startup_grace_until_secs: u64,
     resolution: ForwardingResolution,
     effective_dst: IpAddr,
     effective_dst_port: u16,
@@ -54,6 +61,9 @@ pub(super) fn syn_cookie_final_admission(
         flow,
         meta,
         ingress_zone_override,
+        packet_fabric_ingress,
+        fabric_link_ingress,
+        ha_startup_grace_until_secs,
         resolution,
         effective_dst,
         effective_dst_port,
@@ -77,6 +87,9 @@ pub(super) fn syn_cookie_final_admission_with_fence(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u32>,
+    packet_fabric_ingress: bool,
+    fabric_link_ingress: bool,
+    ha_startup_grace_until_secs: u64,
     resolution: ForwardingResolution,
     effective_dst: IpAddr,
     effective_dst_port: u16,
@@ -101,17 +114,18 @@ pub(super) fn syn_cookie_final_admission_with_fence(
         resolution.egress_ifindex,
     );
     // Match the miss path: HA fabric resolution receives the resolved
-    // ingress zone, not a missing override encoded as zone zero.
+    // ingress zone and the original packet's fabric/grace context, not
+    // a missing override encoded as zone zero or hard-coded false values.
     let resolution = crate::afxdp::forwarding::finalize_new_flow_ha_resolution(
         forwarding,
         ha_state,
         now_secs,
         resolution,
-        false,
-        false,
+        packet_fabric_ingress,
+        fabric_link_ingress,
         meta.ingress_ifindex as i32,
         from_zone_id,
-        0,
+        ha_startup_grace_until_secs,
     );
     if resolution.disposition == ForwardingDisposition::LocalDelivery {
         return true;
@@ -122,7 +136,7 @@ pub(super) fn syn_cookie_final_admission_with_fence(
         ingress_zone_override,
         resolution,
     );
-    transit_admission_verdict(
+    cookie_reply_admission_verdict(
         forwarding,
         &AdmissionInput {
             flow,
@@ -139,7 +153,6 @@ pub(super) fn syn_cookie_final_admission_with_fence(
             fabric_arrival_zone: ingress_zone_override,
             now_ns,
         },
-        None,
     )
     .permits()
 }

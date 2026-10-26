@@ -55,7 +55,7 @@ fn syn_cookie_admission_uses_effective_tuple_and_finalized_zone_pair_17920() {
         "transit_source_class_drop(",
         "transit_dst_is_martian",
     ];
-    assert!(final_admission.contains("transit_admission_verdict("));
+    assert!(final_admission.contains("cookie_reply_admission_verdict("));
     for banned in REENCODED {
         assert!(
             !final_admission.contains(banned),
@@ -74,9 +74,9 @@ fn syn_cookie_admission_uses_effective_tuple_and_finalized_zone_pair_17920() {
     );
     assert!(
         final_admission.contains(
-            "meta.ingress_ifindex as i32,\n        from_zone_id,\n        0,"
+            "packet_fabric_ingress,\n        fabric_link_ingress,\n        meta.ingress_ifindex as i32,\n        from_zone_id,\n        ha_startup_grace_until_secs,"
         ),
-        "cookie HA finalization uses the resolved logical ingress zone"
+        "cookie HA finalization receives the packet's fabric and startup-grace context"
     );
     assert!(
         final_admission.contains("session_miss_zone_pair_ids("),
@@ -95,12 +95,16 @@ fn syn_cookie_admission_uses_effective_tuple_and_finalized_zone_pair_17920() {
         );
     }
     assert!(admission.contains("pub(super) fn transit_admission_verdict("));
+    assert!(admission.contains("pub(super) fn cookie_reply_admission_verdict("));
     assert!(
         admission.contains("let local_policy_disposition = matches!(")
             && admission.contains(
                 "ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor"
+            )
+            && admission.contains(
+                "authorize_fabric_redirect\n        && input.resolution.disposition == ForwardingDisposition::FabricRedirect"
             ),
-        "shared policy evaluation matches the local miss-path dispositions"
+        "ordinary punts delegate policy while locally consumed cookie replies evaluate finalized redirects"
     );
     assert!(
         poll.contains("let route_from_zone_id = from_zone_id;")
@@ -134,6 +138,34 @@ fn syn_cookie_admission_uses_effective_tuple_and_finalized_zone_pair_17920() {
             && finalized_zone_pair.contains("session_miss_zone_pair_ids("),
         "the miss path recomputes its policy zone pair after HA finalization"
     );
+    assert!(
+        finalized_zone_pair
+            .contains("admission_to_zone = if final_resolution.disposition")
+            && finalized_zone_pair.contains("route_to_zone_id"),
+        "FabricRedirect accounting retains the routed admission zone"
+    );
+    let cookie_challenge_call = poll
+        .split("syn_cookie_final_admission_with_fence(")
+        .nth(1)
+        .expect("cookie challenge admission call exists")
+        .split(");")
+        .next()
+        .expect("cookie challenge admission call is terminated");
+    let cookie_ack_call = poll
+        .split("syn_cookie_final_admission(")
+        .nth(1)
+        .expect("cookie ACK admission call exists")
+        .split(");")
+        .next()
+        .expect("cookie ACK admission call is terminated");
+    for call in [cookie_challenge_call, cookie_ack_call] {
+        assert!(
+            call.contains("packet_fabric_ingress")
+                && call.contains("fabric_link_ingress")
+                && call.contains("ha_startup_grace_until_secs"),
+            "each production cookie finalizer receives the miss-path HA context"
+        );
+    }
     let miss_policy = poll
         .split("let admission_verdict = transit_admission_verdict(")
         .nth(1)

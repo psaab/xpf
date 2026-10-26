@@ -5577,7 +5577,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ingress_zone_override,
                                 final_resolution,
                             );
-                            admission_to_zone = to_zone_id;
+                            // #12865: accounting follows the routed egress
+                            // zone, not the fabric transport parent's zone.
+                            admission_to_zone = if final_resolution.disposition
+                                == ForwardingDisposition::FabricRedirect
+                            {
+                                route_to_zone_id
+                            } else {
+                                to_zone_id
+                            };
                             from_zone = worker_ctx
                                 .forwarding
                                 .zone_id_to_name
@@ -5803,6 +5811,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         flow,
                                         meta,
                                         ingress_zone_override,
+                                        packet_fabric_ingress,
+                                        fabric_link_ingress,
+                                        ha_startup_grace_until_secs,
                                         decision.resolution,
                                         effective_resolution_target,
                                         policy_dst_port,
@@ -5850,6 +5861,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     flow,
                                     meta,
                                     ingress_zone_override,
+                                    packet_fabric_ingress,
+                                    fabric_link_ingress,
+                                    ha_startup_grace_until_secs,
                                     decision.resolution,
                                     effective_resolution_target,
                                     policy_dst_port,
