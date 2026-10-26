@@ -12,24 +12,37 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// applyCloseoutDrainTimeout bounds how long runShutdownSequence waits for an
-// in-flight, just-cancelled apply to finish its bounded nft/login host-
-// authorization closeout (#5643 / M35) before proceeding to teardown. It must be
-// comfortably under the systemd unit's TimeoutStopSec (20s) so a wedged apply
-// can never stall the whole stop past the drain budget.
+// applyCloseoutDrainTimeout bounds the shared apply-semaphore acquisition
+// deadline for the shutdown sequence. The initial drain also needs enough time
+// for its bounded nft/login host-authorization closeout (#5643 / M35).
 const applyCloseoutDrainTimeout = 5 * time.Second
 
-// acquireApplySemForShutdown applies the common shutdown bound to every
-// applySem acquisition in the teardown sequence. Callers handle timeout based
-// on whether they can safely continue without the permit; release follows
-// only a successful acquisition.
+func newShutdownApplyContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), applyCloseoutDrainTimeout)
+}
+
+// acquireApplySemForShutdown provides a one-shot bounded acquire for callers
+// outside the ordered shutdown sequence.
 func (d *Daemon) acquireApplySemForShutdown() (bool, error) {
+	ctx, cancel := newShutdownApplyContext()
+	defer cancel()
+	return d.acquireApplySemForShutdownContext(ctx)
+}
+
+// acquireApplySemForShutdownContext uses the same shutdown deadline at every
+// ordered call site. After it expires, only a nonblocking acquire is attempted
+// so a later teardown step can still proceed if the permit has become free.
+func (d *Daemon) acquireApplySemForShutdownContext(ctx context.Context) (bool, error) {
 	if d.applySem == nil {
 		return false, nil
 	}
-	acqCtx, cancelAcq := context.WithTimeout(context.Background(), applyCloseoutDrainTimeout)
-	err := d.applySem.Acquire(acqCtx, 1)
-	cancelAcq()
+	if err := ctx.Err(); err != nil {
+		if d.applySem.TryAcquire(1) {
+			return true, nil
+		}
+		return false, err
+	}
+	err := d.applySem.Acquire(ctx, 1)
 	return err == nil, err
 }
 
@@ -71,7 +84,12 @@ type controlShutdownBounder interface{ BeginControlShutdown() }
 // The ordering is load-bearing (see the per-step comments). Extracted from Run()
 // so the 1690-LOC lifecycle stays reviewable (#4662 Increment 1). Returns runErr
 // unchanged.
-func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr error) error {
+func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.WaitGroup, stop func(), runErr error) error {
+	if _, ok := shutdownApplyCtx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		shutdownApplyCtx, cancel = context.WithTimeout(shutdownApplyCtx, applyCloseoutDrainTimeout)
+		defer cancel()
+	}
 	// #16801: absorb any second SIGTERM/SIGINT for the WHOLE sequence.
 	// stop() below calls signal.Stop on the NotifyContext, restoring
 	// the default kill disposition; without this guard a second stop
@@ -169,9 +187,9 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 		// (now including its closeout) to release. The closeout is bounded (two
 		// atomic nft loads + local credential reconciles, no FRR/netlink reload),
 		// so this cannot hang on unbounded work; bound it defensively anyway so a
-		// wedged apply cannot block the whole shutdown past the drain budget.
+		// wedged apply cannot keep shutdown blocked beyond its shared deadline.
 		if d.applySem != nil {
-			if acquired, err := d.acquireApplySemForShutdown(); acquired {
+			if acquired, err := d.acquireApplySemForShutdownContext(shutdownApplyCtx); acquired {
 				d.applySem.Release(1)
 			} else {
 				slog.Warn("shutdown: timed out draining in-flight apply before teardown; "+
@@ -355,7 +373,7 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 	// no late pin-retry tick runs a syscall after routing is gone. Both helpers
 	// are idempotent / nil-safe (a never-started loop joins cleanly), so this is
 	// also the safety-net for the Run()-returns path via the defers in Run.
-	d.stopPolicySchedulerLoop()
+	d.stopPolicySchedulerLoopWithContext(shutdownApplyCtx)
 	d.stopPinRetryLoop()
 	// #9166: the flow-export build retry runs reconciles that dial the
 	// configured collectors and swap exporter generations, so a late tick must
@@ -516,7 +534,7 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 	// pre-xpfd values. No-op if `claim-host-tunables` was never set.
 	// Runs on every shutdown (hitless + fail-closed) so stopping xpfd
 	// leaves the host as xpfd found it.
-	d.restoreStep0TunablesOnShutdown()
+	d.restoreStep0TunablesOnShutdownWithContext(shutdownApplyCtx)
 
 	slog.Info("shutdown complete")
 	// #16083 fold: drain queued system-syslog records last. This must be

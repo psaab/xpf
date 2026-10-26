@@ -14,10 +14,8 @@ import (
 // #8597 (muse-004 K23) — stopPolicySchedulerLoop acquired applySem with
 // context.Background(), so a wedged apply stalled the whole orderly shutdown.
 //
-// daemon_run_shutdown.go states the rule at its own drain: "bound it
-// defensively anyway so a wedged apply cannot block the whole shutdown past the
-// drain budget." The shutdown drain, this scheduler stop, and the final
-// host-tunable restore now share acquireApplySemForShutdown; the timing and
+// The initial drain, scheduler stop, and final host-tunable restore share
+// Run's shutdown context and its single deadline. The timing and
 // never-release-untaken-permit assertions below pin this site's contract.
 // stopPinRetryLoop, the sibling cleanup called on the next line, does not
 // touch applySem at all.
@@ -147,7 +145,7 @@ func TestStopPolicySchedulerLoopStillTakesTheSemaphoreWhenFree_8597(t *testing.T
 			"blocks on it")
 	}
 	d.applySem.Release(1)
-	if !d.schedulerStopped {
+	if !d.schedulerStopped.Load() {
 		t.Error("schedulerStopped must latch regardless of the semaphore outcome")
 	}
 }

@@ -2539,14 +2539,18 @@ never lock an operator out of a remote box it manages.
   ERROR alarm and `xpf_routing_instance_member_device_conflicts` remains
   alertable.
 
-- **Every shutdown-path `applySem` acquire is BOUNDED (#8597/#17014).**
-  `acquireApplySemForShutdown` in `daemon_run_shutdown.go` applies the
-  `applyCloseoutDrainTimeout` bound consistently to the shutdown drain,
-  `stopPolicySchedulerLoop`, and `restoreStep0TunablesOnShutdown`. The drain
-  and scheduler stop proceed without the permit on timeout and release only
-  after successful acquisition. Host-tunable restore is different: it reads
-  and mutates maps an in-flight apply also owns, so timeout logs and retains
-  the snapshot without attempting an unlocked restore.
+- **Shutdown `applySem` acquisitions share one BOUNDED deadline (#8597/#17014).**
+  `Run` lazily creates one `applyCloseoutDrainTimeout` context when shutdown
+  begins and passes it to `runShutdownSequence` and its deferred
+  `stopPolicySchedulerLoop`. The initial drain and
+  `restoreStep0TunablesOnShutdown` also use that same context for their
+  semaphore acquires. The deadline is wall-clock and continues across
+  intervening shutdown work, so each acquire receives only the time remaining
+  in the shared shutdown window. Once it expires, the helper tries only a
+  nonblocking acquire. The drain and scheduler stop continue without the
+  permit; tunable restore skips unsafe map access and preserves the snapshot
+  if the permit is unavailable. The deferred scheduler stop fast-paths its
+  already-stopped latch, so it cannot add another wait.
 
   Before #8597, the unbounded scheduler acquire never returned with a wedged
   apply. The scheduler was never cancelled, shutdown never reached the HA

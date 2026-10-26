@@ -110,7 +110,7 @@ func TestRunShutdownSequenceBoundsControlIOBeforeJoiningTheScheduler8526(t *test
 	sentinel := errors.New("run-error-passthrough")
 
 	done := make(chan error, 1)
-	go func() { done <- d.runShutdownSequence(&wg, stopRun, sentinel) }()
+	go func() { done <- d.runShutdownSequence(context.Background(), &wg, stopRun, sentinel) }()
 
 	const bound = 4 * time.Second
 	var runErr error

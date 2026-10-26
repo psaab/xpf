@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"strings"
 	"sync"
@@ -17,10 +20,12 @@ import (
 // was dead. #8597 bounded the scheduler acquire, but its documentation
 // omitted this already-existing restore acquire in three places.
 //
-// Before this fix, a wedged holder let the shutdown drain and
-// stopPolicySchedulerLoop time out, then blocked forever in the restore
-// until systemd SIGKILLed the process. That lost the #801 B2 host-tunable
-// restore and the #16083 final syslog drain (both after the restore).
+// A wedged holder previously received a fresh five-second wait at the drain,
+// scheduler stop, restore, and Run's deferred scheduler stop. The sequence
+// now shares one deadline across those paths, and the scheduler's stopped
+// latch makes the deferred call an immediate no-op after ordered shutdown.
+// Restore still skips unsafe map access and preserves its snapshot when the
+// semaphore remains held at expiry.
 //
 // TestRestoreStep0TunablesIsBoundedByAWedgedApply_17014 is the RED-on-revert
 // core, mirroring the reporter's probe: applySem held by an in-flight apply,
@@ -202,6 +207,142 @@ func TestShutdownApplySemAcquiresSerializeConcurrentWork_17014(t *testing.T) {
 	d.applySem.Release(1)
 }
 
+func TestShutdownApplySemAcquisitionsShareWaitDeadline_17014(t *testing.T) {
+	const (
+		totalWaitBudget = 400 * time.Millisecond
+		initialHold     = 150 * time.Millisecond
+	)
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	ctx, cancel := context.WithTimeout(context.Background(), totalWaitBudget)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("precondition acquire: %v", err)
+	}
+	released := make(chan struct{})
+	time.AfterFunc(initialHold, func() {
+		d.applySem.Release(1)
+		close(released)
+	})
+
+	acquired, err := d.acquireApplySemForShutdownContext(ctx)
+	if err != nil || !acquired {
+		t.Fatalf("first acquire = (%v, %v), want success", acquired, err)
+	}
+	<-released
+	d.applySem.Release(1)
+
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("second precondition acquire: %v", err)
+	}
+	remainingAtStart := time.Until(deadline)
+	started := time.Now()
+	acquired, err = d.acquireApplySemForShutdownContext(ctx)
+	secondWait := time.Since(started)
+	if acquired {
+		d.applySem.Release(1)
+		t.Fatal("second acquire unexpectedly took a held permit")
+	}
+	if err == nil {
+		t.Fatal("second acquire should exhaust the shared deadline")
+	}
+	if secondWait > remainingAtStart+100*time.Millisecond {
+		t.Errorf("second acquire waited %v with only %v left; acquisitions did not "+
+			"share one deadline", secondWait, remainingAtStart)
+	}
+	if d.applySem.TryAcquire(1) {
+		t.Fatal("timed-out acquire released a permit it never took")
+	}
+	d.applySem.Release(1)
+
+	// An expired shared deadline still permits immediate progress when the
+	// permit is already free.
+	acquired, err = d.acquireApplySemForShutdownContext(ctx)
+	if err != nil || !acquired {
+		t.Fatalf("nonblocking acquire after deadline = (%v, %v), want success", acquired, err)
+	}
+	d.applySem.Release(1)
+}
+
+func TestStopPolicySchedulerLoopDoesNotWaitAgainAfterShutdown_17014(t *testing.T) {
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("precondition acquire: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		d.stopPolicySchedulerLoopWithContext(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("first scheduler stop did not return after its deadline")
+	}
+	if !d.schedulerStopped.Load() {
+		t.Fatal("scheduler stop latch was not set")
+	}
+
+	started := time.Now()
+	d.stopPolicySchedulerLoopWithContext(ctx)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Errorf("deferred scheduler stop waited again after the ordered stop: %v", elapsed)
+	}
+	if d.applySem.TryAcquire(1) {
+		t.Fatal("timed-out scheduler stop released a permit it never took")
+	}
+	d.applySem.Release(1)
+}
+
+func TestRunShutdownChainAndDeferredSchedulerStopShareDeadline_17014(t *testing.T) {
+	d, _ := fenceTestDaemon(t)
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("precondition acquire: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	var wg sync.WaitGroup
+	done := make(chan error, 1)
+	go func() {
+		err := d.runShutdownSequence(ctx, &wg, func() {}, nil)
+		// Run's deferred scheduler stop receives the same lazily-created
+		// shutdown context used by the sequence above.
+		d.stopPolicySchedulerLoopWithContext(ctx)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runShutdownSequence returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		d.applySem.Release(1)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("shutdown sequence plus Run's deferred scheduler stop exceeded 2s " +
+			"with a wedged apply holder; shutdown acquires must share one deadline")
+	}
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Errorf("shutdown sequence plus deferred scheduler stop took %v; want well "+
+			"under TimeoutStopSec", elapsed)
+	}
+	if !d.schedulerStopped.Load() {
+		t.Error("shutdown sequence did not latch the scheduler as stopped")
+	}
+	if d.applySem.TryAcquire(1) {
+		d.applySem.Release(1)
+		t.Error("shutdown released a permit still owned by the wedged apply")
+	} else {
+		d.applySem.Release(1)
+	}
+}
+
 func shutdownFunctionSource(t *testing.T, file, signature string) string {
 	t.Helper()
 	src, err := os.ReadFile(file)
@@ -219,33 +360,129 @@ func shutdownFunctionSource(t *testing.T, file, signature string) string {
 	return body
 }
 
-// TestShutdownApplySemAcquiresUseOneBoundedHelper_17014 pins all three
-// shutdown acquire sites. A context.Background() acquire or a hand-written
-// fourth site must fail this scan, not silently reopen the incomplete census
-// that prompted #17014.
-func TestShutdownApplySemAcquiresUseOneBoundedHelper_17014(t *testing.T) {
-	helper := shutdownFunctionSource(t, "daemon_run_shutdown.go",
-		"func (d *Daemon) acquireApplySemForShutdown(")
-	if got := strings.Count(helper, "d.applySem.Acquire("); got != 1 {
-		t.Errorf("shared helper has %d direct applySem.Acquire calls, want 1", got)
+func shutdownApplySemAcquireCounts(t *testing.T, files ...string) map[string]int {
+	t.Helper()
+	counts := make(map[string]int)
+	for _, file := range files {
+		fset := token.NewFileSet()
+		parsed, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				method, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || method.Sel.Name != "Acquire" {
+					return true
+				}
+				sem, ok := method.X.(*ast.SelectorExpr)
+				if ok && sem.Sel.Name == "applySem" {
+					counts[fn.Name.Name]++
+				}
+				return true
+			})
+		}
 	}
-	if !strings.Contains(helper, "context.WithTimeout(context.Background(), applyCloseoutDrainTimeout)") {
-		t.Error("shared shutdown acquire is not bounded by applyCloseoutDrainTimeout")
+	return counts
+}
+
+// TestShutdownApplySemAcquisitionsUseSharedContext_17014 scans the shutdown
+// call graph's entry points so a new raw applySem.Acquire cannot hide outside
+// the bounded context helper.
+func TestShutdownApplySemAcquisitionsUseSharedContext_17014(t *testing.T) {
+	helperSignature := "func (d *Daemon) acquireApplySemForShutdownContext("
+	helper := shutdownFunctionSource(t, "daemon_run_shutdown.go", helperSignature)
+	if got := strings.Count(helper, "d.applySem.Acquire("); got != 1 {
+		t.Errorf("shared context helper has %d direct applySem.Acquire calls, want 1", got)
+	}
+	if !strings.Contains(helper, "ctx.Err()") ||
+		!strings.Contains(helper, "d.applySem.TryAcquire(1)") ||
+		!strings.Contains(helper, "d.applySem.Acquire(ctx, 1)") {
+		t.Error("shared helper must use the context deadline and nonblocking fallback")
+	}
+	deadline := shutdownFunctionSource(t, "daemon_run_shutdown.go",
+		"func newShutdownApplyContext(")
+	if !strings.Contains(deadline,
+		"context.WithTimeout(context.Background(), applyCloseoutDrainTimeout)") {
+		t.Error("shutdown context does not establish the shared closeout deadline")
 	}
 
+	sequence := shutdownFunctionSource(t, "daemon_run_shutdown.go",
+		"func (d *Daemon) runShutdownSequence(")
+	for _, call := range []string{
+		"d.acquireApplySemForShutdownContext(shutdownApplyCtx)",
+		"d.stopPolicySchedulerLoopWithContext(shutdownApplyCtx)",
+		"d.restoreStep0TunablesOnShutdownWithContext(shutdownApplyCtx)",
+	} {
+		if !strings.Contains(sequence, call) {
+			t.Errorf("runShutdownSequence does not share its shutdown context with %s", call)
+		}
+	}
+
+	run := shutdownFunctionSource(t, "daemon_run.go", "func (d *Daemon) Run(")
+	if strings.Count(run, "shutdownApplyContext()") < 3 ||
+		!strings.Contains(run, "d.stopPolicySchedulerLoopWithContext(shutdownApplyCtx)") {
+		t.Error("Run does not pass one lazily-created context to both shutdown paths and its deferred scheduler stop")
+	}
+
+	stop := shutdownFunctionSource(t, "daemon_scheduler.go",
+		"func (d *Daemon) stopPolicySchedulerLoopWithContext(")
+	latch := strings.Index(stop, "d.schedulerStopped.Load()")
+	acquire := strings.Index(stop, "d.acquireApplySemForShutdownContext(ctx)")
+	if latch < 0 || acquire < 0 || latch > acquire {
+		t.Error("scheduler stop must fast-path its stopped latch before acquiring applySem")
+	}
+
+	// Include Run and every shutdown wrapper/implementation, rather than only
+	// the three sites present when the earlier census was written.
 	for _, site := range []struct {
 		file, signature string
+		wantAcquire     int
 	}{
-		{"daemon_run_shutdown.go", "func (d *Daemon) runShutdownSequence("},
-		{"daemon_scheduler.go", "func (d *Daemon) stopPolicySchedulerLoop("},
-		{"host_tunables_daemon.go", "func (d *Daemon) restoreStep0TunablesOnShutdown("},
+		{"daemon_run_shutdown.go", helperSignature, 1},
+		{"daemon_run_shutdown.go", "func (d *Daemon) acquireApplySemForShutdown(", 0},
+		{"daemon_run_shutdown.go", "func (d *Daemon) runShutdownSequence(", 0},
+		{"daemon_scheduler.go", "func (d *Daemon) stopPolicySchedulerLoop(", 0},
+		{"daemon_scheduler.go", "func (d *Daemon) stopPolicySchedulerLoopWithContext(", 0},
+		{"host_tunables_daemon.go", "func (d *Daemon) restoreStep0TunablesOnShutdown(", 0},
+		{"host_tunables_daemon.go", "func (d *Daemon) restoreStep0TunablesOnShutdownWithContext(", 0},
+		{"daemon_run.go", "func (d *Daemon) Run(", 0},
 	} {
 		body := shutdownFunctionSource(t, site.file, site.signature)
-		if !strings.Contains(body, "d.acquireApplySemForShutdown()") {
-			t.Errorf("%s does not use the shared bounded shutdown acquire", site.signature)
+		if got := strings.Count(body, "d.applySem.Acquire("); got != site.wantAcquire {
+			t.Errorf("%s has %d direct applySem.Acquire calls, want %d (only the bounded helper may acquire)",
+				site.signature, got, site.wantAcquire)
 		}
-		if strings.Contains(body, "d.applySem.Acquire(") {
-			t.Errorf("%s has a hand-written applySem acquire outside the helper", site.signature)
+	}
+
+	// Scan every relevant source file, not only the currently known three
+	// shutdown methods. The two direct acquisitions in scheduler tick callbacks
+	// are live-runtime operations, not shutdown acquisitions; every other direct
+	// applySem.Acquire in these files must be the bounded shutdown helper.
+	acquireCounts := shutdownApplySemAcquireCounts(t,
+		"daemon_run_shutdown.go", "daemon_scheduler.go", "host_tunables_daemon.go", "daemon_run.go")
+	allowedAcquires := map[string]int{
+		"acquireApplySemForShutdownContext":   1,
+		"publishPolicyScheduleStateWithLatch": 1,
+		"heartbeatPolicySchedule":             1,
+	}
+	for name, count := range acquireCounts {
+		if want := allowedAcquires[name]; count != want {
+			t.Errorf("%s has %d direct applySem.Acquire calls in the shutdown source files, want %d",
+				name, count, want)
+		}
+	}
+	for name, want := range allowedAcquires {
+		if got := acquireCounts[name]; got != want {
+			t.Errorf("%s has %d direct applySem.Acquire calls, want %d", name, got, want)
 		}
 	}
 
@@ -253,17 +490,17 @@ func TestShutdownApplySemAcquiresUseOneBoundedHelper_17014(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read README.md: %v", err)
 	}
-	start := strings.Index(string(readme), "- **Every shutdown-path `applySem` acquire")
+	start := strings.Index(string(readme), "- **Shutdown `applySem` acquisitions share one BOUNDED deadline")
 	if start < 0 {
-		t.Fatal("README.md does not document the shutdown acquire bound")
+		t.Fatal("README.md does not document the shared shutdown acquire deadline")
 	}
 	section := string(readme)[start:]
 	if end := strings.Index(section[1:], "\n- **"); end >= 0 {
 		section = section[:end+1]
 	}
-	for _, stale := range []string{"exactly two", "exactly three"} {
+	for _, stale := range []string{"exactly two", "exactly three", "for retry"} {
 		if strings.Contains(section, stale) {
-			t.Errorf("README shutdown section has a stale acquire census: %q", stale)
+			t.Errorf("README shutdown section has stale wording: %q", stale)
 		}
 	}
 	for _, name := range []string{

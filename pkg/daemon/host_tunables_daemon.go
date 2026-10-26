@@ -43,6 +43,7 @@
 package daemon
 
 import (
+	"context"
 	"log/slog"
 	"sort"
 	"time"
@@ -255,6 +256,12 @@ func (d *Daemon) applyStep0TunablesWith(userspaceDP, claimHostTunables bool,
 // Best-effort: never returns an error. Safe to call when no tunable
 // was ever captured (no-op).
 func (d *Daemon) restoreStep0TunablesOnShutdown() {
+	ctx, cancel := newShutdownApplyContext()
+	defer cancel()
+	d.restoreStep0TunablesOnShutdownWithContext(ctx)
+}
+
+func (d *Daemon) restoreStep0TunablesOnShutdownWithContext(ctx context.Context) {
 	// Serialize against an un-drained apply (#4691). applyStep0TunablesWith
 	// mutates the shared priorTunables snapshot's maps (governors, budget,
 	// mlx5Adaptive, neighRetrans) OUTSIDE priorTunablesMu — the mutex only
@@ -265,17 +272,24 @@ func (d *Daemon) restoreStep0TunablesOnShutdown() {
 	// applySem here serializes this restore's snapshot handoff + map iteration
 	// against that apply, matching the lock the apply path already holds.
 	//
-	// The acquire uses the shared shutdown bound, but unlike the drain and
-	// scheduler stop this path cannot safely proceed without the permit: it
-	// iterates and mutates the apply-owned snapshot maps. On timeout, retain the
-	// snapshot and skip the restore rather than race an in-flight apply.
+	// The acquire uses the shared shutdown deadline. Unlike the drain and
+	// scheduler stop, this path cannot safely proceed without the permit: it
+	// iterates and mutates the apply-owned snapshot maps. If the lock remains
+	// unavailable, preserve the snapshot and skip restore rather than race.
 	if d.applySem != nil {
-		if acquired, err := d.acquireApplySemForShutdown(); acquired {
+		waitBudget := time.Duration(0)
+		if deadline, ok := ctx.Deadline(); ok {
+			waitBudget = time.Until(deadline)
+			if waitBudget < 0 {
+				waitBudget = 0
+			}
+		}
+		if acquired, err := d.acquireApplySemForShutdownContext(ctx); acquired {
 			defer d.applySem.Release(1)
 		} else {
 			slog.Warn("shutdown: host tunables restore skipped because the apply lock "+
-				"was unavailable; captures retained for retry", "err", err,
-				"timeout", applyCloseoutDrainTimeout, "issue", "#17014")
+				"was unavailable; captured state preserved without an unsafe restore",
+				"err", err, "wait_budget", waitBudget, "issue", "#17014")
 			return
 		}
 	}
