@@ -57,6 +57,12 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 						}
 						trees = []*config.ConfigTree{slot, other}
 						c.setRenderSnapshots16613(slotErr, slot, other)
+						if slotErr != nil {
+							if err := config.AuthorizeConfigShowCompareCommand(priceCfg, c.UserClass(), comparePath); err != nil {
+								return err
+							}
+							return slotErr
+						}
 					}
 				} else {
 					scfg, active, candidate, _ := c.store.CompareSnapshot()
@@ -226,6 +232,9 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 						trees = []*config.ConfigTree{tree}
 					}
 					c.setRenderSnapshots16613(slotErr, tree, nil)
+					if slotErr != nil {
+						return slotErr
+					}
 				}
 				if format == displayPipeInheritance {
 					return config.AuthorizeExpandedConfigShowPathRendered(priceCfg, c.UserClass(), rbPath, suffix, nodeID, trees...)
@@ -260,6 +269,9 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 					}
 					trees = []*config.ConfigTree{slot, other}
 					c.setRenderSnapshots16613(slotErr, slot, other)
+					if slotErr != nil {
+						return slotErr
+					}
 				}
 				return config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, c.UserClass(), rbPath, "", trees...)
 			}
@@ -298,6 +310,9 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 					trees = []*config.ConfigTree{tree}
 				}
 				c.setRenderSnapshots16613(slotErr, tree, nil)
+				if slotErr != nil {
+					return slotErr
+				}
 			}
 			return config.AuthorizeConfigShowPathRendered(priceCfg, c.UserClass(), rbPath, "", trees...)
 		}
