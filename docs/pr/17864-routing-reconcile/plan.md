@@ -48,8 +48,8 @@ The new routing inventory helper is an exported Go API; no wire or protocol APIs
 |---|---|---|
 | Behavioral regression | LOW | Stateful RED test; healthy, partial-flush, failure, bootstrap, and #10458 controls |
 | Lifetime / borrow-checker | N/A | Go callback orchestration only; no ownership/lifetime change |
-| Performance regression | LOW | One additional ordering change, no extra probe count; persistent probe errors intentionally cause full recovery every 30 s |
-| Architectural mismatch | LOW | No new abstraction or cross-package API; existing debt owner remains the recovery path |
+| Performance regression | LOW | Desired-inventory derivation plus conditional main-route dumps per tick (implemented #18005); persistent probe errors intentionally cause full recovery every 30 s |
+| Architectural mismatch | LOW | Adds exported DesiredPolicyRulePriorityCounts (pkg/routing) consumed by the daemon tick; existing debt owner remains the recovery path |
 
 ## Test plan
 
