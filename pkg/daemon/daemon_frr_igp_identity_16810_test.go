@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // #16810 render belt: a leniently loaded cluster config with ONE
@@ -116,4 +118,157 @@ func TestSingleRGSharedOSPFUnaffected16810(t *testing.T) {
 	if got := ospfIfaceNames16810(cfg, d); len(got) != 1 || got[0] != "reth1.0" {
 		t.Errorf("single-RG OSPF interfaces = %v, want [reth1.0] on its owner", got)
 	}
+}
+
+// TestSplitDistinctNodeIGPIdentitiesKeepBothRGOwners17874 proves the
+// strict-commit remedy also survives the daemon belt: each peer's own
+// distinct OSPF/OSPFv3/IS-IS identity keeps its owned RETH interface.
+//
+// FAIL-ON-REVERT: removing the peer-identity exemption makes node1
+// withhold each multi-RG IGP despite strict per-node compilation passing.
+func TestSplitDistinctNodeIGPIdentitiesKeepBothRGOwners17874(t *testing.T) {
+	const source = `groups {
+  node0 {
+    chassis { cluster { node 0; } }
+    protocols {
+      ospf { router-id 10.0.0.1; }
+      ospf3 { router-id 10.0.0.1; }
+      isis { net 49.0001.0100.0000.0001.00; }
+    }
+  }
+  node1 {
+    chassis { cluster { node 1; } }
+    protocols {
+      ospf { router-id 10.0.0.2; }
+      ospf3 { router-id 10.0.0.2; }
+      isis { net 49.0001.0100.0000.0002.00; }
+    }
+  }
+}
+
+apply-groups "${node}";
+chassis {
+  cluster {
+    cluster-id 1;
+    authentication-key test-cluster-psk-17874-long;
+    reth-count 2;
+    no-private-rg-election;
+    redundancy-group 0 { node 0 priority 200; node 1 priority 100; }
+    redundancy-group 1 { node 0 priority 200; node 1 priority 100; }
+    redundancy-group 2 { node 0 priority 100; node 1 priority 200; }
+  }
+}
+interfaces {
+  ge-0/0/1 { gigether-options { redundant-parent reth0; } }
+  ge-7/0/1 { gigether-options { redundant-parent reth0; } }
+  reth0 {
+    redundant-ether-options { redundancy-group 1; }
+    unit 0 { family inet { address 198.51.100.1/24; } }
+  }
+  ge-0/0/2 { gigether-options { redundant-parent reth1; } }
+  ge-7/0/2 { gigether-options { redundant-parent reth1; } }
+  reth1 {
+    redundant-ether-options { redundancy-group 2; }
+    unit 0 { family inet { address 203.0.113.1/24; } }
+  }
+}
+protocols {
+  ospf { area 0.0.0.0 { interface reth0.0; interface reth1.0; } }
+  ospf3 { area 0.0.0.0 { interface reth0.0; interface reth1.0; } }
+  isis { interface reth0.0; interface reth1.0; }
+}
+`
+	stores := make([]*configstore.Store, 2)
+	configs := make([]*config.Config, 2)
+	for nodeID := range 2 {
+		store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+		if err != nil {
+			t.Fatalf("node%d configstore.New: %v", nodeID, err)
+		}
+		store.SetNodeID(nodeID)
+		cfg, err := store.SyncApply(source, nil)
+		if err != nil {
+			t.Fatalf("node%d SyncApply: %v", nodeID, err)
+		}
+		if _, err := config.CompileConfigForNode(store.ActiveTree(), nodeID); err != nil {
+			t.Fatalf("node%d strict compile rejected distinct identities: %v", nodeID, err)
+		}
+		stores[nodeID], configs[nodeID] = store, cfg
+	}
+
+	for nodeID, want := range map[int]string{0: "reth0.0", 1: "reth1.0"} {
+		rg1, rg2 := cluster.StateSecondary, cluster.StatePrimary
+		if nodeID == 0 {
+			rg1, rg2 = cluster.StatePrimary, cluster.StateSecondary
+		}
+		manager := cluster.NewManager(nodeID, 1)
+		manager.UpdateConfig(configs[nodeID].Chassis.Cluster)
+		manager.SetGroupStateForTesting(0, cluster.StatePrimary)
+		manager.SetGroupStateForTesting(1, rg1)
+		manager.SetGroupStateForTesting(2, rg2)
+		d := &Daemon{cluster: manager, store: stores[nodeID]}
+		fc := d.assembleFRRConfig(configs[nodeID], nil)
+
+		ospfNames := ospfIfaceNames17874(fc.OSPF)
+		if len(ospfNames) != 1 || ospfNames[0] != want {
+			t.Errorf("node%d OSPF interfaces = %v, want [%s]", nodeID, ospfNames, want)
+		}
+		ospf3Names := ospf3IfaceNames17874(fc.OSPFv3)
+		if len(ospf3Names) != 1 || ospf3Names[0] != want {
+			t.Errorf("node%d OSPFv3 interfaces = %v, want [%s]", nodeID, ospf3Names, want)
+		}
+		isisNames := isisIfaceNames17874(fc.ISIS)
+		if len(isisNames) != 1 || isisNames[0] != want {
+			t.Errorf("node%d IS-IS interfaces = %v, want [%s]", nodeID, isisNames, want)
+		}
+	}
+}
+
+func ospfIfaceNames17874(ospf *config.OSPFConfig) []string {
+	if ospf == nil {
+		return nil
+	}
+	var names []string
+	for _, area := range ospf.Areas {
+		if area == nil {
+			continue
+		}
+		for _, iface := range area.Interfaces {
+			if iface != nil {
+				names = append(names, iface.Name)
+			}
+		}
+	}
+	return names
+}
+
+func ospf3IfaceNames17874(ospf *config.OSPFv3Config) []string {
+	if ospf == nil {
+		return nil
+	}
+	var names []string
+	for _, area := range ospf.Areas {
+		if area == nil {
+			continue
+		}
+		for _, iface := range area.Interfaces {
+			if iface != nil {
+				names = append(names, iface.Name)
+			}
+		}
+	}
+	return names
+}
+
+func isisIfaceNames17874(isis *config.ISISConfig) []string {
+	if isis == nil {
+		return nil
+	}
+	var names []string
+	for _, iface := range isis.Interfaces {
+		if iface != nil {
+			names = append(names, iface.Name)
+		}
+	}
+	return names
 }
