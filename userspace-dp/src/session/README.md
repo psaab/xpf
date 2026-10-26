@@ -46,9 +46,10 @@ structure.)
 - `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets). Held
   entries are rechecked at the far edge of the wheel window (255 s), with
   the recheck tick anchored to `first_held_ns`; same-ID snapshot imports
-  preserve the pending tick. The worker still sweeps expiry once per second
-  from its poll loop (`expire_stale_entries` in
-  `afxdp/worker/loop_body/mod.rs`). Packet lookups enforce the same strict idle
+  preserve the pending tick only while its scheduling inputs are unchanged.
+  The worker still sweeps expiry once per second from its poll loop
+  (`expire_stale_entries` in `afxdp/worker/loop_body/mod.rs`). Packet lookups
+  enforce the same strict idle
   deadline and return a miss once
   `now - last_seen_ns > expires_after_ns`; the stale entry remains for the
   wheel's physical cleanup (including HA HOLD/SELF-HEAL retention). The former
@@ -1108,9 +1109,10 @@ Held entries are rechecked on the far edge of the timer-wheel window
 (255 seconds), not on each worker tick. Each next recheck is aligned to
 `first_held_ns` and capped at the original stale-synced deadline. The wheel
 processes that target on the following GC pass, preserving the gate's strict
-`>` ceiling check. Same-ID imports preserve the first-HOLD anchor and pending
-tick only while the idle-deadline inputs are unchanged; timeout/close updates
-schedule the new idle deadline before another context-aware HOLD check.
+`>` ceiling check. Same-ID snapshot imports preserve the pending hint only while
+its scheduling inputs, including `first_held_ns`, are unchanged. Timeout/close
+updates and primary-liveness anchor renewals invalidate the hint and schedule
+an ordinary check before another context-aware HOLD recheck.
 
 The HOLD keys on FORWARDING, not origin, so a still-`ForwardFlow`
 demotion-window entry (the demote flip not yet applied) is held too.

@@ -700,6 +700,7 @@ impl SessionTable {
                 held_wheel_tick: 0,
                 held_wheel_last_seen_ns: 0,
                 held_wheel_expires_after_ns: 0,
+                held_wheel_first_held_ns: 0,
                 // #2120: a freshly-installed entry has never been HELD and
                 // has not yet been self-healed. 0 is the never-self-healed
                 // default; the first forwarding pass after any RG activation
@@ -976,6 +977,7 @@ impl SessionTable {
             preserved_held_wheel_tick,
             preserved_held_wheel_last_seen_ns,
             preserved_held_wheel_expires_after_ns,
+            preserved_held_wheel_first_held_ns,
         ) = if wire_session_id != 0 {
             match self.entry_by_key(&key) {
                 Some(existing) => {
@@ -995,11 +997,11 @@ impl SessionTable {
                         // ceiling and pin a lost-delete entry forever,
                         // defeating the anchor preservation above.
                         //
-                        // #16881: preserve pending wheel hints as well.
-                        // The session is replaced below, but the old entries
-                        // still name the same incarnation. Keeping their
-                        // canonical ticks prevents duplicate hints on every
-                        // same-id snapshot resend.
+                        // #16881: carry pending wheel hints and their input
+                        // snapshots through replacement. The scheduler keeps
+                        // the hint only if its idle deadline, timeout, and
+                        // HOLD anchor still match; otherwise it invalidates
+                        // the old tick and schedules a current check.
                         (
                             Some(existing.last_seen_ns),
                             existing.first_held_ns,
@@ -1007,15 +1009,16 @@ impl SessionTable {
                             Some(existing.held_wheel_tick),
                             Some(existing.held_wheel_last_seen_ns),
                             Some(existing.held_wheel_expires_after_ns),
+                            Some(existing.held_wheel_first_held_ns),
                         )
                     } else {
-                        (None, 0, None, None, None, None)
+                        (None, 0, None, None, None, None, None)
                     }
                 }
-                None => (None, 0, None, None, None, None),
+                None => (None, 0, None, None, None, None, None),
             }
         } else {
-            (None, 0, None, None, None, None)
+            (None, 0, None, None, None, None, None)
         };
         // A primary-liveness frame renews the HOLD ceiling without changing
         // the preserved inactivity anchor above.
@@ -1178,6 +1181,7 @@ impl SessionTable {
                     preserved_held_wheel_last_seen_ns.unwrap_or(0),
                 held_wheel_expires_after_ns:
                     preserved_held_wheel_expires_after_ns.unwrap_or(0),
+                held_wheel_first_held_ns: preserved_held_wheel_first_held_ns.unwrap_or(0),
                 // #2120: a re-imported synced entry leaves the held world
                 // with a fresh `last_seen_ns`, so it carries no carried-over
                 // hold clock. `seen_rg_epoch` resets to the never-self-healed

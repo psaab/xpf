@@ -2614,6 +2614,12 @@ impl SessionTable {
         self.entry_by_key(key).map(|entry| entry.first_held_ns)
     }
 
+    /// #16881: test-only read of a pending HOLD recheck tick.
+    #[cfg(test)]
+    pub(crate) fn held_wheel_tick_for(&self, key: &SessionKey) -> Option<u64> {
+        self.entry_by_key(key).map(|entry| entry.held_wheel_tick)
+    }
+
     /// #2442: every owner-RG id that currently indexes at least one session in
     /// this worker's table. Used by the loss-of-sync resync path to export ALL
     /// owned forward sessions (the same RG set

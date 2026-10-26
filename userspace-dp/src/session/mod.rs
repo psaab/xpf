@@ -1285,12 +1285,14 @@ struct SessionEntry {
     wheel_tick: u64,
     /// #16881: canonical held-recheck tick in the ordinary wheel.
     /// Zero means no held recheck is pending; otherwise it matches
-    /// `wheel_tick` and is anchored to the first HOLD observation.
+    /// `wheel_tick` and is aligned to the current `first_held_ns` anchor.
     held_wheel_tick: u64,
     /// #16881: inputs for the pending held recheck. Same-incarnation snapshot
-    /// imports preserve them, while timeout/close changes invalidate the hint.
+    /// imports preserve them, while idle-deadline or HOLD-anchor changes
+    /// invalidate the hint.
     held_wheel_last_seen_ns: u64,
     held_wheel_expires_after_ns: u64,
+    held_wheel_first_held_ns: u64,
     /// #7212: the `(config generation, logical ingress interface)` this
     /// direction's static input-filter verdict was last derived under, or
     /// [`FilterRevalidationStamp::UNVALIDATED`].

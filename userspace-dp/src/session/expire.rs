@@ -66,9 +66,9 @@ impl SessionTable {
     /// the same tick produce zero new wheel entries.
     ///
     /// A held row preserves its pending horizon recheck across same-id
-    /// snapshot imports only while its idle-deadline inputs are unchanged.
-    /// Timeout/close changes enqueue the new idle deadline; the next HA HOLD
-    /// pass re-arms against that context's stale ceiling.
+    /// snapshot imports only while its schedule inputs are unchanged.
+    /// Timeout/close changes and liveness anchor renewals enqueue the new idle
+    /// deadline; the next HA HOLD pass re-arms against that context's ceiling.
     ///
     /// MUST be called only AFTER `last_seen_ns` / `expires_after_ns`
     /// have been written and the `&mut` borrow on `self.entries` has
@@ -83,19 +83,22 @@ impl SessionTable {
                 if entry.first_held_ns != 0 && entry.held_wheel_tick != 0 {
                     let schedule_inputs_unchanged = entry.held_wheel_last_seen_ns
                         == entry.last_seen_ns
-                        && entry.held_wheel_expires_after_ns == entry.expires_after_ns;
+                        && entry.held_wheel_expires_after_ns == entry.expires_after_ns
+                        && entry.held_wheel_first_held_ns == entry.first_held_ns;
                     if schedule_inputs_unchanged && entry.wheel_tick >= cursor_tick {
                         None
                     } else {
                         // A same-id snapshot preserves the pending held hint
-                        // only while its idle deadline and timeout are
-                        // unchanged. A timeout/close update invalidates the
-                        // horizon entry and gets an ordinary check at its new
-                        // idle deadline; that pass re-arms HOLD with the
-                        // current HA ceiling context.
+                        // only while its idle deadline, timeout, and HOLD
+                        // anchor are unchanged. A timeout/close update or
+                        // primary-liveness renewal invalidates the horizon
+                        // entry and gets an ordinary check at its new idle
+                        // deadline; that pass re-arms HOLD with the current
+                        // HA ceiling context.
                         entry.held_wheel_tick = 0;
                         entry.held_wheel_last_seen_ns = 0;
                         entry.held_wheel_expires_after_ns = 0;
+                        entry.held_wheel_first_held_ns = 0;
                         let expiration_ns =
                             entry.last_seen_ns.saturating_add(entry.expires_after_ns);
                         let tick = target_tick_for(now_ns, expiration_ns);
@@ -106,6 +109,7 @@ impl SessionTable {
                     entry.held_wheel_tick = 0;
                     entry.held_wheel_last_seen_ns = 0;
                     entry.held_wheel_expires_after_ns = 0;
+                    entry.held_wheel_first_held_ns = 0;
                     let expiration_ns =
                         entry.last_seen_ns.saturating_add(entry.expires_after_ns);
                     let tick = target_tick_for(now_ns, expiration_ns);
@@ -570,6 +574,7 @@ impl SessionTable {
                     entry_mut.held_wheel_tick = 0;
                     entry_mut.held_wheel_last_seen_ns = 0;
                     entry_mut.held_wheel_expires_after_ns = 0;
+                    entry_mut.held_wheel_first_held_ns = 0;
                     self.wheel.buckets[new_bucket].push_back(WheelEntry {
                         key,
                         scheduled_tick: new_target_tick,
@@ -609,6 +614,7 @@ impl SessionTable {
         entry_mut.held_wheel_tick = 0;
         entry_mut.held_wheel_last_seen_ns = 0;
         entry_mut.held_wheel_expires_after_ns = 0;
+        entry_mut.held_wheel_first_held_ns = 0;
         self.wheel.buckets[new_bucket].push_back(WheelEntry {
             key: key.clone(),
             scheduled_tick: new_target_tick,
@@ -631,6 +637,7 @@ impl SessionTable {
         entry_mut.held_wheel_tick = scheduled_tick;
         entry_mut.held_wheel_last_seen_ns = entry_mut.last_seen_ns;
         entry_mut.held_wheel_expires_after_ns = entry_mut.expires_after_ns;
+        entry_mut.held_wheel_first_held_ns = first_held_ns;
         let bucket = bucket_for_tick(scheduled_tick);
         self.wheel.buckets[bucket].push_back(WheelEntry {
             key: key.clone(),
