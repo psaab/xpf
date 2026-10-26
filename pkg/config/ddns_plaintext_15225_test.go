@@ -1,61 +1,45 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/psaab/xpf/internal/ddnsplaintextvectors"
+)
 
 // ddns_plaintext_15225_test.go: #15225 A40-03 config-side fail-on-revert
-// proofs. The generic http:// gate previously recognised only a fixed
-// credential key-name list; pass=/key=/api-token=/pwd=/p= (and any other
-// literal query value) compiled clean and shipped in cleartext. The fix
-// makes ANY literal query value (or userinfo) on a generic template count
-// as credential-carrying, so strict commit rejects and lenient load drops
-// every probe below, while placeholder-only / value-less / https and
-// loopback-shaped templates are untouched by the detector itself.
-//
-// RED-on-revert: restore the fixed key-name list and the strict compiles
-// below succeed.
+// proofs. The shared table is consumed here and by pkg/ddns, so construction
+// and compiler decisions are pinned to the same vectors (#17005, R4-Q40-03).
+func TestDDNS15225SharedPlaintextVectors(t *testing.T) {
+	for _, vector := range ddnsplaintextvectors.DDNSPlaintextVectors {
+		tmpl := vector.Template
+		p := &DDNSProvider{Backend: "generic", URLTemplate: tmpl}
+		if got := DDNSCredentialBearing(p); got != vector.CredentialBearing {
+			t.Errorf("DDNSCredentialBearing(%q) = %v, want %v", tmpl, got, vector.CredentialBearing)
+		}
+		if got := DDNSTemplateCarriesLiteralToken(tmpl); got != vector.LiteralToken {
+			t.Errorf("DDNSTemplateCarriesLiteralToken(%q) = %v, want %v", tmpl, got, vector.LiteralToken)
+		}
 
-func TestDDNS15225StrictRejectsAnyLiteralQueryValue(t *testing.T) {
-	probes := []string{
-		"http://host.example/upd?pass=LITERALPW",
-		"http://host.example/upd?key=LITERALKEY",
-		"http://host.example/upd?api-token=LITERALTOK",
-		"http://host.example/upd?pwd=LITERALPW",
-		"http://host.example/upd?p=LITERALP",
-		"http://host.example/upd?foo=LITERALBAR",
-	}
-	for _, tmpl := range probes {
 		tree := buildTree(t, []string{
 			"set system services dynamic-dns provider p backend generic",
 			`set system services dynamic-dns provider p url-template "` + tmpl + `"`,
 		})
-		if _, err := CompileConfig(tree); err == nil {
-			t.Fatalf("strict must reject generic http template %q (literal query value in cleartext)", tmpl)
+		plainCredential := strings.HasPrefix(tmpl, "http://") && vector.CredentialBearing
+		if _, err := CompileConfig(tree); plainCredential && err == nil {
+			t.Errorf("strict must reject generic http template %q", tmpl)
+		} else if !plainCredential && err != nil {
+			t.Errorf("strict must accept control template %q: %v", tmpl, err)
 		}
-		cfg, err := CompileConfigLenient(tree)
-		if err != nil {
-			t.Fatalf("lenient %q: %v", tmpl, err)
-		}
-		if cfg.System.Services != nil && cfg.System.Services.DynamicDNS != nil {
-			if _, ok := cfg.System.Services.DynamicDNS.Providers["p"]; ok {
-				t.Fatalf("lenient must DROP generic http provider %q", tmpl)
+		if plainCredential {
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Errorf("lenient %q: %v", tmpl, err)
+			} else if cfg.System.Services != nil && cfg.System.Services.DynamicDNS != nil {
+				if _, ok := cfg.System.Services.DynamicDNS.Providers["p"]; ok {
+					t.Errorf("lenient must drop generic http provider %q", tmpl)
+				}
 			}
-		}
-		p := &DDNSProvider{Backend: "generic", URLTemplate: tmpl}
-		if !ddnsBackendCarriesCredentials(p) {
-			t.Fatalf("ddnsBackendCarriesCredentials(%q) = false, want true", tmpl)
-		}
-	}
-	// Controls: placeholder-only, value-less flag, bare path segment, https.
-	for _, tmpl := range []string{
-		"http://host.example/upd?ip=%i&hostname=%h",
-		"http://host.example/upd?flag&ip=%i",
-		"http://host.example/update/SECRET",
-		"https://host.example/upd?token=LITERALTOKEN",
-	} {
-		p := &DDNSProvider{Backend: "generic", URLTemplate: tmpl}
-		want := tmpl == "https://host.example/upd?token=LITERALTOKEN"
-		if got := ddnsBackendCarriesCredentials(p); got != want {
-			t.Fatalf("ddnsBackendCarriesCredentials(%q) = %v, want %v", tmpl, got, want)
 		}
 	}
 }

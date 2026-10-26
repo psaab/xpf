@@ -15,16 +15,14 @@ import (
 // compiler) must not issue a cleartext request carrying a credential either.
 // Refusal happens at construction so the manager degrades to the no-op
 // backend and no request is ever issued.
+// Credential classification at construction and issuance delegates to
+// config.DDNSCredentialBearing and config.DDNSCredentialBearingFields.
 //
-// Loopback endpoints (127.0.0.0/8, ::1, "localhost") are exempt: the
-// credential never leaves the host, and the httptest harness (and local
-// provider emulators) depend on http://127.0.0.1. Non-loopback http://
-// endpoints carrying any credential form are refused.
-//
-// Credential detection mirrors pkg/config's widened detector: typed
-// username/password, %u/%p specifiers, authority userinfo, and literal
-// credential-named key=value tokens in the query/path. Bare path segments
-// are intentionally not flagged (documented gap, same as config).
+// Loopback endpoints (127.0.0.0/8, ::1, "localhost") are exempt for test
+// harnesses such as httptest, which can only serve its local HTTP listener.
+// Production configuration rejects credentialed plaintext providers during
+// compilation (or drops them on lenient load) before any backend is built.
+// Non-loopback http:// endpoints carrying any credential form are refused.
 
 // plaintextEndpointRefusal returns a refusal error when rawURL is an
 // explicit non-https URL to a non-loopback host. The error never echoes the
@@ -52,123 +50,4 @@ func isLoopbackHost(host string) bool {
 		return addr.IsLoopback()
 	}
 	return false
-}
-
-// templateAuthorityUserinfo reports whether a URL string's authority carries
-// a nonempty userinfo (mirrors config.ddnsTemplateAuthorityHasUserinfo).
-func templateAuthorityUserinfo(s string) bool {
-	s = strings.TrimSpace(s)
-	authStart := 0
-	if i := strings.Index(s, "://"); i >= 0 {
-		authStart = i + len("://")
-	}
-	authEnd := len(s)
-	for j := authStart; j < len(s); j++ {
-		if c := s[j]; c == '/' || c == '?' || c == '#' {
-			authEnd = j
-			break
-		}
-	}
-	return strings.LastIndex(s[authStart:authEnd], "@") > 0
-}
-
-// templateCarriesLiteralToken mirrors config.ddnsTemplateCarriesLiteralToken:
-// ANY literal query value (#15225 A40-03, #16573 for percent-escaped
-// values and percent-escaped keyless components), or a credential-named
-// key=literal pair in the path (#14439).
-func templateCarriesLiteralToken(tmpl string) bool {
-	tmpl = strings.TrimSpace(tmpl)
-	if i := strings.Index(tmpl, "#"); i >= 0 {
-		tmpl = tmpl[:i]
-	}
-	authStart := 0
-	if i := strings.Index(tmpl, "://"); i >= 0 {
-		authStart = i + len("://")
-	}
-	authEnd := len(tmpl)
-	for j := authStart; j < len(tmpl); j++ {
-		if c := tmpl[j]; c == '/' || c == '?' {
-			authEnd = j
-			break
-		}
-	}
-	rest := tmpl[authEnd:]
-	path, query := rest, ""
-	if i := strings.Index(rest, "?"); i >= 0 {
-		path, query = rest[:i], rest[i+1:]
-	}
-	isLiteral := func(v string) bool {
-		return templateValueHasLiteral(v)
-	}
-	isCredKey := func(k string) bool {
-		switch strings.ToLower(k) {
-		case "token", "access-token", "access_token", "accesstoken",
-			"api-key", "api_key", "apikey", "auth", "auth-key", "authkey",
-			"password", "passwd", "secret", "session-key", "sessionkey":
-			return true
-		}
-		return false
-	}
-	for _, seg := range strings.Split(path, "/") {
-		if i := strings.Index(seg, "="); i > 0 && isCredKey(seg[:i]) && isLiteral(seg[i+1:]) {
-			return true
-		}
-	}
-	for _, pair := range strings.Split(query, "&") {
-		if pair == "" {
-			continue
-		}
-		if i := strings.Index(pair, "="); i >= 0 {
-			if i > 0 {
-				if isLiteral(pair[i+1:]) {
-					return true
-				}
-			} else if v := pair[i+1:]; v != "" && strings.Contains(v, "%") && isLiteral(v) {
-				return true
-			}
-		} else if strings.Contains(pair, "%") && isLiteral(pair) {
-			return true
-		}
-	}
-	return false
-}
-
-// templateValueHasLiteral mirrors config.ddnsTemplateValueHasLiteral:
-// a value carries a literal byte when, after removing recognised
-// specifiers (%h/%i/%u/%p/%%) and terminated {{...}} placeholders, any
-// byte remains. Any other %x (percent-escapes such as %2B/%2F/%3D, a
-// trailing '%') is transmitted verbatim by renderGenericURL, hence
-// literal; an unterminated "{{" is likewise verbatim.
-func templateValueHasLiteral(v string) bool {
-	for i := 0; i < len(v); {
-		if v[i] == '%' && i+1 < len(v) {
-			switch v[i+1] {
-			case 'h', 'i', 'u', 'p', '%':
-				i += 2
-				continue
-			}
-		}
-		if v[i] == '{' && i+1 < len(v) && v[i+1] == '{' {
-			if end := strings.Index(v[i+2:], "}}"); end >= 0 {
-				i += 2 + end + 2
-				continue
-			}
-		}
-		return true
-	}
-	return false
-}
-
-// dyndns2CarriesCredentials mirrors the dyndns2 arm of the config detector.
-func dyndns2CarriesCredentials(p *config.DDNSProvider) bool {
-	return p.Username != "" || p.Password.Reveal() != "" ||
-		templateAuthorityUserinfo(p.Server)
-}
-
-// genericCarriesCredentials mirrors the generic arm of the config detector.
-func genericCarriesCredentials(p *config.DDNSProvider) bool {
-	return p.Username != "" || p.Password.Reveal() != "" ||
-		strings.Contains(p.URLTemplate, "%u") || strings.Contains(p.URLTemplate, "%p") ||
-		templateAuthorityUserinfo(p.URLTemplate) ||
-		templateCarriesLiteralToken(p.URLTemplate)
 }

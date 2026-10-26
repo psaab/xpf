@@ -72,7 +72,7 @@ func newGenericBackend(p *config.DDNSProvider, client *http.Client) (*genericBac
 	}
 	// #14386 runtime belt: refuse a credentialed plaintext http:// template
 	// at construction (direct construction bypasses the compiler drop).
-	if genericCarriesCredentials(p) {
+	if config.DDNSCredentialBearing(p) {
 		if err := plaintextEndpointRefusal("generic", p.Name, tmpl); err != nil {
 			return nil, err
 		}
@@ -223,9 +223,7 @@ func (b *genericBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord) er
 	// #14386 belt at issuance: the rendered URL may carry a credential
 	// (%u/%p expansion, typed Basic auth, userinfo, or a literal token);
 	// never send it over plaintext http:// to a non-loopback host.
-	if (b.username != "" || b.password != "" ||
-		strings.Contains(b.urlTemplate, "%u") || strings.Contains(b.urlTemplate, "%p") ||
-		templateAuthorityUserinfo(b.urlTemplate) || templateCarriesLiteralToken(b.urlTemplate)) &&
+	if config.DDNSCredentialBearingFields("generic", b.username, b.password, "", b.urlTemplate) &&
 		plaintextEndpointRefusal("generic", b.name, rawURL) != nil {
 		return fmt.Errorf("ddns generic: %s: endpoint must be an https:// endpoint — refusing to transmit the update credential in cleartext (#14386)", b.name)
 	}
