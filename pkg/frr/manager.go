@@ -646,14 +646,15 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 			}
 		}
 		// expanded node-fitting set; guard those names too.
-		for _, nodes := range redistReferencedNodes14380(fc) {
+		referencedNodes := redistReferencedNodes14380(fc)
+		for _, nodes := range referencedNodes {
 			for _, nd := range nodes {
 				if err := redistProtocolMapCollisionForNodes(fc.PolicyOptions, nd[0], nd[1]); err != nil {
 					return err
 				}
 			}
 		}
-		if err := qualifiedNextHopMetricCollision11447(fc.PolicyOptions, buildQNHMetricSet11447(fc, fc.PolicyOptions)); err != nil {
+		if err := qualifiedNextHopMetricCollision11447(fc.PolicyOptions, buildQNHMetricSet11447(fc, fc.PolicyOptions), referencedNodes); err != nil {
 			return err
 		}
 		// #5277 render-side belt: refuse to render when a composed BGP

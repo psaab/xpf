@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Upgrade: when a rolling rollback completes after a deferred signal,
+    still wait for session sync and confirm rejoin before surfacing the
+    signal status. Do not classify the committed rollback as destructive
+    and leave the node ForceSecondary-drained (#17957).
+  * DHCP: retain restart-before-seed ordering beyond the old 20-second
+    fail-open deadline and re-age peer lease lifetimes before seeding
+    (#17884).
+  * Config: preserve distinct same-named IPsec traffic-selector fragments;
+    normalize identical direct/chained selector bodies including block-valued
+    local-ip and remote-ip leaves (#17802).
   * Userspace helper startup: retain and execute the validated helper inode
     through an inherited file descriptor, closing the pathname re-resolution
     window between validation and process start (#17881).
@@ -8,10 +18,18 @@ xpf (0.0.0) unstable; urgency=medium
     traffic egresses via the kernel TX path and never traverses the RX
     gate, so reporting an ingress drop fabricated a forwarding stage
     (#17865).
+  * Config authorization: surface captured rollback slot errors before scoped
+    subtree authorization on gRPC/REST reads. REST compare command pre-checks
+    ignore ?path= as the handler does; command restrictions and invalid-
+    argument statuses remain enforced (#17967).
   * FRR: remove the unused rewriteFRRPipeSequences belt. Community
     regexes, Junos AS-path regexes, and BGP neighbor descriptions
     handle vty pipe-space through their production translator or gate;
     the former shared-helper claim overstated its coverage (#17799).
+  * NAT: allocate synthetic logical RETH VLAN ifindexes from the same
+    sorted shared collision set in the session-scope folder as in the
+    interface snapshot builder, preserving imported NAT scope identity
+    when synthetic hash slots collide (#17876).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000
 
 xpf (0.0.0) unstable; urgency=medium

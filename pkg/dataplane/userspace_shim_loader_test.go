@@ -389,7 +389,7 @@ func TestValidateUserspaceShimSpecLivePinABI(t *testing.T) {
 
 // TestValidateUserspaceShimSpecSkipsDisposableFallbackStatsPin guards the
 // #4113 interaction: the disposable counter map (userspace_fallback_stats) is
-// reset on an intended shape change by reconcileDisposableCollectionPin, so the
+// reset on an intended shape change by reconcileRebuiltCollectionPin, so the
 // #5307 ABI pre-flight must NOT reject a shape-changed pin for it — doing so
 // would re-brick the very upgrade the reconcile unblocks.
 func TestValidateUserspaceShimSpecSkipsDisposableFallbackStatsPin(t *testing.T) {
@@ -402,7 +402,7 @@ func TestValidateUserspaceShimSpecSkipsDisposableFallbackStatsPin(t *testing.T) 
 		userspaceFallbackStatsMapName: {Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 16},
 	})
 	if err := validateUserspaceShimSpecWith(base, reader); err != nil {
-		t.Fatalf("live-pin ABI check must skip disposable %s (reconciled separately), got: %v",
+		t.Fatalf("live-pin ABI check must skip rebuilt %s (reconciled separately), got: %v",
 			userspaceFallbackStatsMapName, err)
 	}
 }
@@ -421,6 +421,33 @@ func TestValidateUserspaceShimSpecSkipsDisposableBranchStatsPin16241(t *testing.
 	if err := validateUserspaceShimSpecWith(base, reader); err != nil {
 		t.Fatalf("live-pin ABI check must skip disposable %s (reconciled separately), got: %v",
 			userspaceBranchStatsMapName, err)
+	}
+}
+
+// TestValidateUserspaceShimSpecSkipsRebuiltWGClassifierPins17996 proves the
+// old u16 pin shapes are allowed through the read-only pre-flight because the
+// loader reconciles these configuration-derived maps before collection load.
+func TestValidateUserspaceShimSpecSkipsRebuiltWGClassifierPins17996(t *testing.T) {
+	t.Parallel()
+
+	base := validABIBaseSpec()
+	const maxEntries = 1024
+	base.Maps[userspaceWGIngressZonesMapName] = &ebpf.MapSpec{
+		Type: ebpf.Hash, KeySize: 8, ValueSize: 4, MaxEntries: maxEntries,
+	}
+	base.Maps[userspaceWGAdmissionMapName] = &ebpf.MapSpec{
+		Type: ebpf.Hash, KeySize: 28, ValueSize: 1, MaxEntries: maxEntries,
+	}
+	base.Maps[userspaceLandScreenMapName] = &ebpf.MapSpec{
+		Type: ebpf.Hash, KeySize: 4, ValueSize: 1, MaxEntries: maxEntries,
+	}
+	reader := pinReaderWithOverride(base, map[string]userspaceMapABI{
+		userspaceWGIngressZonesMapName: {Type: ebpf.Hash, KeySize: 8, ValueSize: 2, MaxEntries: maxEntries},
+		userspaceWGAdmissionMapName:    {Type: ebpf.Hash, KeySize: 24, ValueSize: 1, MaxEntries: maxEntries},
+		userspaceLandScreenMapName:     {Type: ebpf.Hash, KeySize: 2, ValueSize: 1, MaxEntries: maxEntries},
+	})
+	if err := validateUserspaceShimSpecWith(base, reader); err != nil {
+		t.Fatalf("read-only pre-flight must allow old WG map pins to reach migration, got: %v", err)
 	}
 }
 
@@ -564,7 +591,7 @@ func TestLoadOrCreatePinnedShimMapRefusesIncompatiblePinnedMap(t *testing.T) {
 	}
 }
 
-func TestDisposablePinShapeMatches(t *testing.T) {
+func TestRebuiltPinShapeMatches(t *testing.T) {
 	t.Parallel()
 
 	// The #4113 target spec: userspace_fallback_stats is a PerCpuArray<u64>
@@ -576,33 +603,35 @@ func TestDisposablePinShapeMatches(t *testing.T) {
 		keySize    uint32
 		valueSize  uint32
 		maxEntries uint32
+		flags      uint32
 		match      bool
 	}{
-		{"stale-array-from-old-daemon", ebpf.Array, 4, 8, 16, false},
-		{"already-migrated-percpu", ebpf.PerCPUArray, 4, 8, 16, true},
-		{"value-size-drift", ebpf.PerCPUArray, 4, 16, 16, false},
-		{"max-entries-drift", ebpf.PerCPUArray, 4, 8, 32, false},
-		{"key-size-drift", ebpf.PerCPUArray, 8, 8, 16, false},
+		{"stale-array-from-old-daemon", ebpf.Array, 4, 8, 16, 0, false},
+		{"already-migrated-percpu", ebpf.PerCPUArray, 4, 8, 16, 0, true},
+		{"value-size-drift", ebpf.PerCPUArray, 4, 16, 16, 0, false},
+		{"max-entries-drift", ebpf.PerCPUArray, 4, 8, 32, 0, false},
+		{"key-size-drift", ebpf.PerCPUArray, 8, 8, 16, 0, false},
+		{"flags-drift", ebpf.PerCPUArray, 4, 8, 16, unix.BPF_F_NO_PREALLOC, false},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := disposablePinShapeMatches(tt.pinType, tt.keySize, tt.valueSize, tt.maxEntries, want)
+			got := rebuiltPinShapeMatches(tt.pinType, tt.keySize, tt.valueSize, tt.maxEntries, tt.flags, want)
 			if got != tt.match {
-				t.Fatalf("disposablePinShapeMatches(%v, k=%d v=%d n=%d) = %v, want %v",
-					tt.pinType, tt.keySize, tt.valueSize, tt.maxEntries, got, tt.match)
+				t.Fatalf("rebuiltPinShapeMatches(%v, k=%d v=%d n=%d flags=%#x) = %v, want %v",
+					tt.pinType, tt.keySize, tt.valueSize, tt.maxEntries, tt.flags, got, tt.match)
 			}
 		})
 	}
 }
 
-// TestReconcileDisposableCollectionPinMigratesArrayToPerCPUArray reproduces the
+// TestReconcileRebuiltCollectionPinMigratesArrayToPerCPUArray reproduces the
 // #4113 upgrade-brick: an old daemon left an Array pin for
 // userspace_fallback_stats; the new daemon's PerCpuArray spec is incompatible,
 // so the PinByName load fails with ErrMapIncompatible. The reconcile must drop
 // the stale pin so the load recreates it fresh. Requires root + bpffs.
-func TestReconcileDisposableCollectionPinMigratesArrayToPerCPUArray(t *testing.T) {
+func TestReconcileRebuiltCollectionPinMigratesArrayToPerCPUArray(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("RemoveMemlock (needs root): %v", err)
 	}
@@ -654,9 +683,9 @@ func TestReconcileDisposableCollectionPinMigratesArrayToPerCPUArray(t *testing.T
 		t.Fatalf("PinByName load err = %v, want ErrMapIncompatible", err)
 	}
 
-	// The reconcile drops the incompatible disposable pin.
-	if err := reconcileDisposableCollectionPin(pinPath, newSpec); err != nil {
-		t.Fatalf("reconcileDisposableCollectionPin: %v", err)
+	// The reconcile drops the incompatible disposable counter pin.
+	if err := reconcileRebuiltCollectionPin(pinPath, newSpec); err != nil {
+		t.Fatalf("reconcileRebuiltCollectionPin: %v", err)
 	}
 	if _, statErr := os.Stat(pinPath); !os.IsNotExist(statErr) {
 		t.Fatalf("stale pin still present after reconcile: statErr=%v", statErr)
@@ -677,7 +706,7 @@ func TestReconcileDisposableCollectionPinMigratesArrayToPerCPUArray(t *testing.T
 
 	// Idempotent: a second reconcile against the now-compatible pin is a no-op
 	// (accumulated counters survive an ordinary restart).
-	if err := reconcileDisposableCollectionPin(pinPath, newSpec); err != nil {
+	if err := reconcileRebuiltCollectionPin(pinPath, newSpec); err != nil {
 		t.Fatalf("reconcile on compatible pin: %v", err)
 	}
 	if _, statErr := os.Stat(pinPath); statErr != nil {
@@ -685,13 +714,13 @@ func TestReconcileDisposableCollectionPinMigratesArrayToPerCPUArray(t *testing.T
 	}
 }
 
-// TestReconcileDisposableCollectionPinNoOpOnRealEmbeddedSpec guards against a
+// TestReconcileRebuiltCollectionPinNoOpOnRealEmbeddedSpec guards against a
 // silent regression where the reconcile resets the counter on EVERY restart
 // (losing accumulated counts) because the embedded PerCpuArray spec's reported
 // shape does not match what a freshly created+pinned map of that spec reads
 // back. It uses the REAL embedded userspace_fallback_stats spec, not a
 // hand-built one. Requires root + bpffs.
-func TestReconcileDisposableCollectionPinNoOpOnRealEmbeddedSpec(t *testing.T) {
+func TestReconcileRebuiltCollectionPinNoOpOnRealEmbeddedSpec(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("RemoveMemlock (needs root): %v", err)
 	}
@@ -727,7 +756,7 @@ func TestReconcileDisposableCollectionPinNoOpOnRealEmbeddedSpec(t *testing.T) {
 
 	// The reconcile must treat a pin created from the real embedded spec as
 	// compatible (no reset), so counters survive an ordinary restart.
-	if err := reconcileDisposableCollectionPin(pinPath, spec); err != nil {
+	if err := reconcileRebuiltCollectionPin(pinPath, spec); err != nil {
 		t.Fatalf("reconcile on real-spec pin: %v", err)
 	}
 	if _, statErr := os.Stat(pinPath); statErr != nil {

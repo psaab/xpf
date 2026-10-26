@@ -16,6 +16,7 @@ type frrHADemotionState struct {
 	active         map[int]bool
 	rethInterfaces map[int]map[string]struct{}
 	globalActive   bool
+	peerIGPConfig  *config.Config
 }
 
 func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
@@ -66,18 +67,15 @@ func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
 // data RG, only the owner of the lowest-numbered spanning data RG
 // keeps the protocol; the other node drops the whole protocol (empty
 // areas/interfaces, identity retained on the copy is inert because no
-// interface remains to originate from). A strictly committed config
-// never reaches this belt with a shared identity: per-node identities
-// are distinct, so each node's identity is its own and both
-// participate. Deciding "shared" needs the peer's identity, which the
-// daemon cannot see from one node's compiled config — so the belt
-// conservatively treats every multi-RG-spanning IGP on a cluster node
-// as potentially shared. That costs a strictly-committed multi-RG
-// IGP with a (distinct-per-node) identity its second participant
-// until the operator confines it or the peer view is plumbed; the
-// alternative (both nodes originating under one ID) corrupts the
-// whole IGP area, which is worse. Single-RG and non-cluster renders
-// are untouched.
+// interface remains to originate from). #17874: when the active tree's
+// per-node compiles establish different identities for the same
+// protocol scope, both nodes may participate; each retains its own
+// per-RG-pruned interfaces so both RGs' prefixes remain originated by
+// their owner. If the peer view is unavailable or identities match,
+// the belt conservatively treats the spanning IGP as potentially shared:
+// both nodes originating under one ID corrupts the whole IGP area,
+// which is worse than losing the second participant. Single-RG and
+// non-cluster renders are untouched.
 func (s *frrHADemotionState) filterProtocols(cfg *config.Config, protocols config.ProtocolsConfig, instanceInterfaces []string) config.ProtocolsConfig {
 	if s == nil {
 		return protocols
@@ -96,10 +94,11 @@ func (s *frrHADemotionState) filterProtocols(cfg *config.Config, protocols confi
 
 // enforceSingleIGPParticipant16810 drops a multi-RG-spanning OSPF,
 // OSPFv3 or IS-IS protocol on this node when this node does not own
-// the lowest-numbered data RG the UNFILTERED protocol spans (#16810).
-// The surviving node keeps its per-RG-pruned interfaces, so both
-// nodes' prefixes still reach the area — via the one participating
-// node — instead of flapping under a duplicate identity.
+// the lowest-numbered data RG the UNFILTERED protocol spans (#16810),
+// unless that scope has a distinct per-node identity (#17874). Under a
+// shared identity the withheld node's sole-owned prefixes can be lost:
+// avoiding duplicate router identities takes precedence over preserving
+// both sets of prefixes.
 //
 // NOT applied to BGP: BGP router-id duplication across nodes does
 // not corrupt a link-state area (each session is independent), and
@@ -117,6 +116,7 @@ func (s *frrHADemotionState) enforceSingleIGPParticipant16810(cfg *config.Config
 	var srcOSPF *config.OSPFConfig
 	var srcOSPFv3 *config.OSPFv3Config
 	var srcISIS *config.ISISConfig
+	scopeName := ""
 	if len(instanceInterfaces) == 0 {
 		srcOSPF, srcOSPFv3, srcISIS = cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.ISIS
 	} else {
@@ -124,6 +124,7 @@ func (s *frrHADemotionState) enforceSingleIGPParticipant16810(cfg *config.Config
 			if ri == nil || !stringSlicesEqual16810(ri.Interfaces, instanceInterfaces) {
 				continue
 			}
+			scopeName = ri.Name
 			srcOSPF, srcOSPFv3, srcISIS = ri.OSPF, ri.OSPFv3, ri.ISIS
 			break
 		}
@@ -132,6 +133,7 @@ func (s *frrHADemotionState) enforceSingleIGPParticipant16810(cfg *config.Config
 		}
 	}
 	if protocols.OSPF != nil && ospfSpansMultipleDataRGs16810(cfg, srcOSPF, protocols.OSPF) &&
+		!s.hasDistinctPeerIGPIdentity17874(scopeName, "ospf", srcOSPF.RouterID) &&
 		!s.ownsLowestSpanningRG16810(cfg, srcOSPF, nil, nil) {
 		if len(protocols.OSPF.Areas) != 0 {
 			slog.Warn("frr: withholding OSPF on this node — shared IGP identity spans multiple data RGs and this node is not the lowest-RG participant (#16810)")
@@ -141,6 +143,7 @@ func (s *frrHADemotionState) enforceSingleIGPParticipant16810(cfg *config.Config
 		protocols.OSPF = &dropped
 	}
 	if protocols.OSPFv3 != nil && ospfv3SpansMultipleDataRGs16810(cfg, srcOSPFv3, protocols.OSPFv3) &&
+		!s.hasDistinctPeerIGPIdentity17874(scopeName, "ospf3", srcOSPFv3.RouterID) &&
 		!s.ownsLowestSpanningRG16810(cfg, nil, srcOSPFv3, nil) {
 		if len(protocols.OSPFv3.Areas) != 0 {
 			slog.Warn("frr: withholding OSPFv3 on this node — shared IGP identity spans multiple data RGs and this node is not the lowest-RG participant (#16810)")
@@ -150,6 +153,7 @@ func (s *frrHADemotionState) enforceSingleIGPParticipant16810(cfg *config.Config
 		protocols.OSPFv3 = &dropped
 	}
 	if protocols.ISIS != nil && isisSpansMultipleDataRGs16810(cfg, srcISIS, protocols.ISIS) &&
+		!s.hasDistinctPeerIGPIdentity17874(scopeName, "isis", srcISIS.NET) &&
 		!s.ownsLowestSpanningRG16810(cfg, nil, nil, srcISIS) {
 		if len(protocols.ISIS.Interfaces) != 0 {
 			slog.Warn("frr: withholding IS-IS on this node — shared IGP identity spans multiple data RGs and this node is not the lowest-RG participant (#16810)")
@@ -158,6 +162,62 @@ func (s *frrHADemotionState) enforceSingleIGPParticipant16810(cfg *config.Config
 		dropped.Interfaces = nil
 		protocols.ISIS = &dropped
 	}
+}
+
+// hasDistinctPeerIGPIdentity17874 reports whether the render's explicitly
+// supplied peer view has a different, non-empty identity for the same scope.
+// Generic renders pass no peer view and retain the conservative belt; only
+// callers rendering a config from the active store may supply one.
+func (s *frrHADemotionState) hasDistinctPeerIGPIdentity17874(
+	scopeName, protocol, localIdentity string,
+) bool {
+	if s == nil || localIdentity == "" || s.peerIGPConfig == nil {
+		return false
+	}
+	var peerIdentity string
+	peerProtocols := s.peerIGPConfig.Protocols
+	if scopeName != "" {
+		var found bool
+		for _, ri := range s.peerIGPConfig.RoutingInstances {
+			if ri != nil && ri.Name == scopeName {
+				peerProtocols = config.ProtocolsConfig{
+					OSPF: ri.OSPF, OSPFv3: ri.OSPFv3, ISIS: ri.ISIS,
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	switch protocol {
+	case "ospf":
+		if peerProtocols.OSPF != nil {
+			peerIdentity = peerProtocols.OSPF.RouterID
+		}
+	case "ospf3":
+		if peerProtocols.OSPFv3 != nil {
+			peerIdentity = peerProtocols.OSPFv3.RouterID
+		}
+	case "isis":
+		if peerProtocols.ISIS != nil {
+			peerIdentity = peerProtocols.ISIS.NET
+		}
+	default:
+		return false
+	}
+	if peerIdentity == "" {
+		return false
+	}
+	if protocol == "isis" {
+		localIdentity = config.CanonicalISISSystemID(localIdentity)
+		peerIdentity = config.CanonicalISISSystemID(peerIdentity)
+		if localIdentity == "" || peerIdentity == "" {
+			return false
+		}
+	}
+	return localIdentity != peerIdentity
 }
 
 func stringSlicesEqual16810(a, b []string) bool {
@@ -796,7 +856,7 @@ func (d *Daemon) scheduleFRRHAReconcile(reason string) {
 		if cfg == nil {
 			return
 		}
-		err := d.applyFRRConfig(d.assembleFRRConfig(cfg, d.commitOverlayForConfig(cfg)))
+		err := d.applyFRRConfig(d.assembleFRRConfigForActiveConfig(cfg, d.commitOverlayForConfig(cfg)))
 		if err != nil {
 			slog.Warn("HA routing reconcile did not fully converge; FRR retry remains armed",
 				"reason", reason, "err", err)

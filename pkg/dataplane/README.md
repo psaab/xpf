@@ -304,36 +304,35 @@ Guard layers (`build-userspace-xdp.sh`):
    REJECT refuses the deploy with the old dataplane still forwarding.
 
    The shared `validateUserspaceShimSpec` gate this runs also performs
-   an **ABI compatibility check** (#5307): for every required pinned map
-   it compares the embedded shim's `Type`, `KeySize`, `ValueSize`,
-   `MaxEntries`, and `Flags` — the exact fields cilium/ebpf's
-   `MapSpec.Compatible` flags with `ErrMapIncompatible` at load —
-   against BOTH the Go-side expected shape (dnat_table and dnat_table_v6,
-   from `userspaceShimSharedMapSpecs`) AND the RUNNING daemon's **live
-   pinned maps** (read-only via `ebpf.LoadPinnedMap` + shape
-   accessors). The ABI-checked inventory (`userspaceABICheckedPinnedMaps`)
-   is the UNION of the shim-declared PinByName maps
-   (`userspacePinnedShimMaps`) AND the Go-created/replaced shared maps
-   (`userspaceShimSharedMapSpecs`) — deduplicated — matching the
-   required-pins set (`userspaceRequiredShimPins`). Before #5484 it
-   covered only the PinByName group, so state-bearing shared maps the
-   shim does NOT declare — `sessions_v6`, `dnat_table_v6`, and the HA /
-   per-CPU maps (`rg_active`, `ha_watchdog`, `session_id_gen`, the
-   `*_counters`) — were never pre-flighted: an incompatible live pin for
-   one of them passed a green pre-flight and then failed
-   `ErrMapIncompatible` in `loadUserspaceShimSharedMaps` AFTER the old
-   daemon was stopped, stranding the node. Because this runs while the
-   old daemon is still up (its pins live), an ABI-incompatible map is
-   now caught HERE and the deploy is refused — instead of the pre-#5307
-   behavior where a green pre-flight let the deploy proceed, the old
-   daemon was stopped, and the new daemon's `NewCollectionWithOptions`
-   (or the shared-map load) then failed `ErrMapIncompatible`, stranding
-   the node fail-closed (config-only). A map with no pin yet (fresh
-   node / first load) skips the live-pin arm — only the expected-value
-   checks apply, so a clean node never false-fails. The disposable
-   counter map `userspace_fallback_stats` is intentionally excluded:
-   `reconcileDisposableCollectionPin` resets it on an intended shape
-   change (#4113), so ABI-checking it here would re-brick that upgrade.
+   an **ABI compatibility check** (#5307): it compares the embedded shim's
+   `Type`, `KeySize`, `ValueSize`, `MaxEntries`, and `Flags` — the exact
+   fields cilium/ebpf's `MapSpec.Compatible` flags with `ErrMapIncompatible`
+   at load — against the Go-side expected shape for `dnat_table` and
+   `dnat_table_v6`, and against the RUNNING daemon's live pins (read-only via
+   `ebpf.LoadPinnedMap` + shape accessors). The live-pin inventory
+   (`userspaceABICheckedPinnedMaps`) is the union of the shim-declared
+   PinByName maps (`userspacePinnedShimMaps`) and Go-created/replaced shared
+   maps (`userspaceShimSharedMapSpecs`), minus only maps rebuilt before the
+   new dataplane is activated. Before #5484 it covered only the PinByName
+   group, so state-bearing shared maps the shim does NOT declare —
+   `sessions_v6`, `dnat_table_v6`, and the HA / per-CPU maps (`rg_active`,
+   `ha_watchdog`, `session_id_gen`, the `*_counters`) — were never
+   pre-flighted; an incompatible live pin passed a green pre-flight and then
+   failed `ErrMapIncompatible` in `loadUserspaceShimSharedMaps` AFTER the old
+   daemon was stopped, stranding the node.
+
+   The excluded maps contain only disposable counters or configuration-derived
+   classifier rows. Their live ABI is deliberately skipped in pre-flight; the
+   loader reconciles incompatible pins after the old daemon stops and before
+   collection load.
+   This includes the `userspace_ingress_domains_vlan` map (#14842) and, for
+   #17996, `userspace_wg_ingress_zones`, `userspace_wg_zone_admission`, and
+   `userspace_land_screen`: the Rust ABI
+   widens ingress values and admission zone IDs from u16 to u32, and widens the
+   land-screen key from u16 to u32. These rows are rebuilt from the current
+   snapshot. State-bearing maps remain ABI-checked and are never reset. A map
+   with no pin yet (fresh node / first load) skips the live-pin arm; only the
+   expected-value checks apply, so a clean node never false-fails.
 
    **Remediation message split (#5363):** the two ABI arms print
    *different* operator guidance because they diagnose different faults.
