@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: preserve all distinct same-named IPsec traffic-selector
+    fragments instead of discarding bodies by selector name and header
+    keys (#17802).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Config authorization: atomically sample the candidate, generation,
     and active tree at the gRPC/REST commit gate (#17676), so the
     authorization verdict can only be bound to the candidate it priced.
