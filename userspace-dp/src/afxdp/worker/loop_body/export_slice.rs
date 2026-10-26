@@ -19,6 +19,7 @@
 //
 // `use super::*;` chains through loop_body/mod.rs to worker/mod.rs.
 
+use super::slice_pacing::{EXPORT_SLICE_BUDGET, EXPORT_SLICE_DEADLINE_NS, EXPORT_SLICE_EMITS};
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
@@ -54,10 +55,7 @@ pub(super) fn run_export_slice(
     worker_lossless_wedged: &mut bool,
 ) -> (bool, bool) {
     let mut did_work = false;
-    // #9856 slice pacing (moved verbatim from worker_loop's declarations).
-    const EXPORT_SLICE_BUDGET: usize = 1024; // max slab slots scanned per slice
-    const EXPORT_SLICE_EMITS: usize = 256; // max sessions converted per slice
-    const EXPORT_SLICE_DEADLINE_NS: u64 = 500_000; // 500us slice cap
+    // Pacing limits are imported from the shared slice_pacing module.
     if !export_window_sequences.is_empty() || worker_export.is_some() {
         // Adopt: a timeout-then-rekick overwrites with purge-foreign (a
         // superseded window's leftovers must not poison the new one).

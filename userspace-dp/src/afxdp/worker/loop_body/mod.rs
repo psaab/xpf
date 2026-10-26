@@ -109,6 +109,9 @@ use housekeeping::run_session_housekeeping;
 mod export_slice;
 use export_slice::run_export_slice;
 
+// Shared by the monolithic worker loop and its extracted slice helpers.
+mod slice_pacing;
+
 // #13075 (D4-12): delta-loss resync + stale-session sweeps extracted
 // from `worker_loop` (delta_recovery.rs). Loop-local.
 mod delta_recovery;
@@ -470,9 +473,6 @@ pub(crate) fn worker_loop(
     // idle. Adopted from the tick's dispatch results when Export commands
     // arrive; cleared on completion (after acking). Paced like the sweeps
     // above: one budgeted slice per pass, RX/TX/heartbeat between slices.
-    const EXPORT_SLICE_BUDGET: usize = 1024; // max slab slots scanned per slice
-    const EXPORT_SLICE_EMITS: usize = 256; // max sessions converted per slice
-    const EXPORT_SLICE_DEADLINE_NS: u64 = 500_000; // 500us slice cap
     let mut worker_export: Option<WorkerExportState> = None;
     // #9856: echo-batch scratch, reused across slices. The walk borrows
     // `sessions` shared, so the echo emits — which need `&mut` — run after
@@ -482,7 +482,7 @@ pub(crate) fn worker_loop(
         crate::session::SessionDecision,
         crate::session::SessionMetadata,
         crate::session::SessionOrigin,
-    )> = Vec::with_capacity(EXPORT_SLICE_EMITS);
+    )> = Vec::with_capacity(slice_pacing::EXPORT_SLICE_EMITS);
     let mut dbg_last_report_ns = monotonic_nanos();
     // #1776: the per-interval cfg(debug-log) dbg_* counters are
     // consolidated into debug_report::DbgCounters (single-line
@@ -518,9 +518,6 @@ pub(crate) fn worker_loop(
     // default a cycle stretches past the window (freshness degrades gracefully),
     // but the per-slice cost stays hard-bounded at CT_REFRESH_SLICE_BUDGET — no
     // single tick ever stalls the core again.
-    const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000; // full-table freshness target
-    const CT_SLICE_INTERVAL_NS: u64 = 100_000_000; // 100ms between slices
-    const CT_REFRESH_SLICE_BUDGET: usize = 2048; // max slab slots per slice
     let mut last_ct_slice_ns: u64 = 0;
     let mut ct_cycle_start_ns: u64 = 0;
     // Persistent slab-index cursor: 0 means "between cycles / at the top".
