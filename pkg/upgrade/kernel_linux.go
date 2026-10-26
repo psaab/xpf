@@ -281,6 +281,54 @@ func (s *realKernelSystem) RunningKernel() (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+func (s *realKernelSystem) CandidateKernelPackageVersion(unameR string) (string, error) {
+	if err := ValidateKernelSegment("kernel candidate version", unameR); err != nil {
+		return "", err
+	}
+	out, err := captureCmd("apt-cache", "policy", "linux-image-"+unameR)
+	if err != nil {
+		return "", fmt.Errorf("query apt candidate for linux-image-%s: %w", unameR, err)
+	}
+	version, err := parseAptCandidatePackageVersion(out)
+	if err != nil {
+		return "", fmt.Errorf("query apt candidate for linux-image-%s: %w", unameR, err)
+	}
+	if err := ValidateDebianPackageVersion(version); err != nil {
+		return "", fmt.Errorf("apt candidate version for linux-image-%s is not orderable: %w", unameR, err)
+	}
+	return version, nil
+}
+
+func (s *realKernelSystem) InstalledKernelPackageVersion(unameR string) (string, error) {
+	if err := ValidateKernelSegment("kernel candidate version", unameR); err != nil {
+		return "", err
+	}
+	out, err := captureCmd("dpkg-query", "-W", "-f=${Version}", "linux-image-"+unameR)
+	if err != nil {
+		return "", fmt.Errorf("query installed version for linux-image-%s: %w", unameR, err)
+	}
+	version := strings.TrimSpace(out)
+	if err := ValidateDebianPackageVersion(version); err != nil {
+		return "", fmt.Errorf("installed version for linux-image-%s is not orderable: %w", unameR, err)
+	}
+	return version, nil
+}
+
+func parseAptCandidatePackageVersion(output string) (string, error) {
+	for _, line := range strings.Split(output, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok || key != "Candidate" {
+			continue
+		}
+		version := strings.TrimSpace(value)
+		if version == "" || version == "(none)" {
+			return "", fmt.Errorf("no installable candidate")
+		}
+		return version, nil
+	}
+	return "", fmt.Errorf("apt-cache policy output omitted Candidate")
+}
+
 // KernelHeld reports whether EVERY currently-installed linux-* package is held
 // (r1 Codex High: a "any linux- is held" check false-passes a PARTIAL rehold).
 func (s *realKernelSystem) KernelHeld() (bool, error) {

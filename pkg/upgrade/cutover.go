@@ -442,6 +442,9 @@ func (r *Runner) Run(opts Options) (err error) {
 			} else {
 				// The stale cut reached a verified healthy start; persist its
 				// predecessor before GC and journal cleanup.
+				if err := r.advanceBinaryFloor(j); err != nil {
+					return fmt.Errorf("commit stale version %s: %w", j.TargetVersion, err)
+				}
 				if err := r.stampCommittedVersion(j); err != nil {
 					return fmt.Errorf("commit stale version %s: %w", j.TargetVersion, err)
 				}
@@ -485,6 +488,9 @@ func (r *Runner) Run(opts Options) (err error) {
 			}
 			r.logf("upgrade: committing health-confirmed stale cut to %s before the new %s cut",
 				j.TargetVersion, stagedVer)
+			if err := r.advanceBinaryFloor(j); err != nil {
+				return fmt.Errorf("commit stale version %s: %w", j.TargetVersion, err)
+			}
 			if err := r.stampCommittedVersion(j); err != nil {
 				return fmt.Errorf("commit stale version %s: %w", j.TargetVersion, err)
 			}
@@ -582,6 +588,22 @@ func (r *Runner) Run(opts Options) (err error) {
 	}
 
 	// Initialize a fresh journal entry.
+	if j.State == StateInit {
+		floor, ferr := loadHighWaterFloor(r.cfg.BinaryFloorPath)
+		if ferr != nil {
+			return fmt.Errorf("read binary anti-rollback floor: %w", ferr)
+		}
+		packageVersion, perr := readStagedPackageVersion(srcDir)
+		if perr != nil {
+			return fmt.Errorf("read staged Debian package version: %w", perr)
+		}
+		if ferr := floor.checkForward("binary upgrade target", packageVersion, "STOP"); ferr != nil {
+			if cerr := r.clearJournal(); cerr != nil {
+				return fmt.Errorf("%w; failed to clear INIT journal: %v", ferr, cerr)
+			}
+			return ferr
+		}
+	}
 	if j.State == StateInit {
 		prev, perr := r.readCurrentVersion()
 		if perr != nil {
@@ -771,6 +793,9 @@ func (r *Runner) Run(opts Options) (err error) {
 	// commit record too, covering a crash from a pre-record COMMITTED journal.
 	if j.State == StateCommitted {
 		r.logf("upgrade: version %s already committed; nothing to do", j.TargetVersion)
+		if err := r.advanceBinaryFloor(j); err != nil {
+			return fmt.Errorf("persist anti-rollback floor for resumed version %s: %w", j.TargetVersion, err)
+		}
 		if err := r.stampCommittedVersion(j); err != nil {
 			return fmt.Errorf("persist commit record for resumed version %s: %w", j.TargetVersion, err)
 		}
@@ -1244,6 +1269,9 @@ func (r *Runner) Run(opts Options) (err error) {
 	// ---- COMMIT ----
 	// Persist the commit/predecessor record before GC so retention ranks
 	// versions by committed history rather than mutable directory mtimes.
+	if err := r.advanceBinaryFloor(j); err != nil {
+		return fmt.Errorf("commit version %s: %w", j.TargetVersion, err)
+	}
 	if err := r.stampCommittedVersion(j); err != nil {
 		return fmt.Errorf("commit version %s: %w", j.TargetVersion, err)
 	}

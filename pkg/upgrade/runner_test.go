@@ -266,13 +266,14 @@ func testEnv(t *testing.T, fs *fakeSystem) (*Runner, Config) {
 	mkfile(t, filepath.Join(cfgdb, "active.json"), "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{}")
 
 	cfg := Config{
-		StagedDir:    staged,
-		VersionsDir:  filepath.Join(root, "versions"),
-		StagedGenDir: filepath.Join(root, "staged-gen"),
-		SbinDir:      filepath.Join(root, "sbin"),
-		ConfigDBDir:  cfgdb,
-		JournalPath:  filepath.Join(root, "versions", "upgrade.state"),
-		Unit:         "xpfd",
+		StagedDir:       staged,
+		VersionsDir:     filepath.Join(root, "versions"),
+		StagedGenDir:    filepath.Join(root, "staged-gen"),
+		SbinDir:         filepath.Join(root, "sbin"),
+		ConfigDBDir:     cfgdb,
+		JournalPath:     filepath.Join(root, "versions", "upgrade.state"),
+		BinaryFloorPath: filepath.Join(root, "binary-floor"),
+		Unit:            "xpfd",
 		// #5284: point the cluster-identity marker at a hermetic tempdir path
 		// that does NOT exist, so every test defaults to STANDALONE (no
 		// dependency on the build host's real /etc/xpf/node-id). A clustered

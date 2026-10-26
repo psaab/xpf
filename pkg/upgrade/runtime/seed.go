@@ -79,6 +79,9 @@ type Config struct {
 	// version, when non-empty, overrides the version read from
 	// `staged/xpfd version` (tests). Production leaves it empty.
 	version string
+	// packageVersion, when non-empty, overrides the installed Debian package
+	// version used to identify the immutable staged generation (tests).
+	packageVersion string
 }
 
 func (c *Config) withDefaults() {
@@ -125,6 +128,18 @@ func Seed(cfg Config) (err error) {
 	}
 	if verr := upgrade.ValidateVersionSegment(ver); verr != nil {
 		return fmt.Errorf("seed: staged version is not a safe path segment: %w", verr)
+	}
+
+	packageVersion := cfg.packageVersion
+	if packageVersion == "" {
+		output, err := exec.Command("dpkg-query", "-W", "-f=${Version}", "xpf").Output()
+		if err != nil {
+			return fmt.Errorf("seed: read installed Debian package version: %w", err)
+		}
+		packageVersion = strings.TrimSpace(string(output))
+	}
+	if err := upgrade.ValidateDebianPackageVersion(packageVersion); err != nil {
+		return fmt.Errorf("seed: installed Debian package version is not orderable: %w", err)
 	}
 
 	if err := fsatomic.MkdirAllDurable(cfg.VersionsDir, 0o755); err != nil {
@@ -212,9 +227,10 @@ func Seed(cfg Config) (err error) {
 	//    direct-staged links): a later cut then refuses safely with no source
 	//    rather than reading torn staged/.
 	sgCfg := stagedgen.Config{
-		StagedDir: cfg.StagedDir,
-		Dir:       cfg.StagedGenDir,
-		Logf:      cfg.Logf,
+		StagedDir:      cfg.StagedDir,
+		Dir:            cfg.StagedGenDir,
+		PackageVersion: packageVersion,
+		Logf:           cfg.Logf,
 	}
 	if _, perr := sgCfg.Publish(); perr != nil {
 		return fmt.Errorf("seed: publish initial staged generation: %w", perr)

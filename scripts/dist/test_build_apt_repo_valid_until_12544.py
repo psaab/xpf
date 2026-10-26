@@ -58,7 +58,7 @@ _APT_SHIM = """\
 # Fake apt-ftparchive for #12544: `packages` emits nothing; `release`
 # emits a synthetic Release. Date is the pinned builder Date (fixed
 # epoch); Valid-Until is derived per XPF_TEST_VU_MODE from that Date
-# plus the ValidTime knob the builder passed via -o (default 365d):
+# plus the ValidTime knob the builder passed via -o (default 30d):
 #   boundary-vu  Date+ValidTime+1   (the observed +1s wall-clock race)
 #   plus-two-vu  Date+ValidTime+2   (must exceed the narrow allowance)
 #   early-vu     Date+ValidTime-1
@@ -141,10 +141,11 @@ class ShimFlatValidUntilTests(unittest.TestCase):
                     "XPF_APT_VALID_DAYS", "XPF_TEST_VU_MODE"):
             env.pop(var, None)
         env.update({
-            "XPF_APT_VALID_DAYS": days,
             "XPF_TEST_VU_MODE": mode,
             "PATH": self.bindir + os.pathsep + env.get("PATH", ""),
         })
+        if days is not None:
+            env["XPF_APT_VALID_DAYS"] = days
         p = subprocess.run(
             ["sh", str(_BUILDER), "--out", outdir, "--suite", "stable",
              "--debs", self.deb],
@@ -171,6 +172,19 @@ class ShimFlatValidUntilTests(unittest.TestCase):
             date_line[len("Date:"):].strip()).timestamp()
         # The fixture's emission is exactly the race: horizon + 1s.
         self.assertEqual(vu_epoch, date_epoch + 7 * 86400 + 1)
+
+    def test_default_valid_until_is_30_days(self):
+        outdir, rc, out = self._run("boundary-vu", days=None)
+        self.assertEqual(rc, 0, out[-800:])
+        text = self._release(outdir)
+        lines = [ln for ln in text.splitlines() if ln.startswith("Valid-Until:")]
+        self.assertEqual(len(lines), 1)
+        date_line = next(ln for ln in text.splitlines() if ln.startswith("Date:"))
+        vu_epoch = email.utils.parsedate_to_datetime(
+            lines[0][len("Valid-Until:"):].strip()).timestamp()
+        date_epoch = email.utils.parsedate_to_datetime(
+            date_line[len("Date:"):].strip()).timestamp()
+        self.assertEqual(vu_epoch, date_epoch + 30 * 86400 + 1)
 
     def test_missing_valid_until_refused(self):
         _o, rc, out = self._run("missing-vu")

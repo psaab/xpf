@@ -33,6 +33,26 @@ func newConfig(t *testing.T, staged string) Config {
 	}
 }
 
+func TestPublishRecordsPackageVersion(t *testing.T) {
+	root := t.TempDir()
+	staged := filepath.Join(root, "staged")
+	writeStaged(t, staged, "v1")
+	c := newConfig(t, staged)
+	c.PackageVersion = "0.0.420+g0123456789ab"
+
+	genid, err := c.Publish()
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(c.GenDir(genid), PackageVersionFile))
+	if err != nil {
+		t.Fatalf("read package-version metadata: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != c.PackageVersion {
+		t.Fatalf("package-version metadata = %q, want %q", got, c.PackageVersion)
+	}
+}
+
 func TestPublishAndResolve(t *testing.T) {
 	root := t.TempDir()
 	staged := filepath.Join(root, "staged")

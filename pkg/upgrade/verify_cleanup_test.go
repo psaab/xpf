@@ -224,14 +224,15 @@ func TestVerifyFailCleanup_SaveJournalFailureKeepsSnapshot(t *testing.T) {
 	}
 	fs := newFakeSystem(t, "2.0.0")
 	r, err := NewRunner(Config{
-		StagedDir:   filepath.Join(root, "staged"),
-		VersionsDir: versionsDir,
-		SbinDir:     filepath.Join(root, "sbin"),
-		ConfigDBDir: filepath.Join(root, "cfgdb"),
-		JournalPath: filepath.Join(journalDir, "upgrade.state"),
-		Unit:        "xpfd",
-		Sys:         fs,
-		Logf:        func(format string, a ...any) { t.Logf("LOG "+format, a...) },
+		StagedDir:       filepath.Join(root, "staged"),
+		VersionsDir:     versionsDir,
+		SbinDir:         filepath.Join(root, "sbin"),
+		ConfigDBDir:     filepath.Join(root, "cfgdb"),
+		JournalPath:     filepath.Join(journalDir, "upgrade.state"),
+		BinaryFloorPath: filepath.Join(root, "binary-floor"),
+		Unit:            "xpfd",
+		Sys:             fs,
+		Logf:            func(format string, a ...any) { t.Logf("LOG "+format, a...) },
 	})
 	if err != nil {
 		t.Fatal(err)

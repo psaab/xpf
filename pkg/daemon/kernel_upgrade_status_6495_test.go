@@ -221,6 +221,16 @@ func (f kernelStatusFakeSys) RestoreInactiveSlotSelector(string, string) error {
 func (f kernelStatusFakeSys) PruneInactiveSlot(string, string, string) error {
 	return nil
 }
+
+// #10848: the anti-rollback floor widens KernelSystem with the two
+// package-version queries; the status/hold paths never reach them.
+func (f kernelStatusFakeSys) CandidateKernelPackageVersion(string) (string, error) {
+	return "", nil
+}
+func (f kernelStatusFakeSys) InstalledKernelPackageVersion(string) (string, error) {
+	return "", nil
+}
+
 func (f kernelStatusFakeSys) Now() time.Time { return time.Unix(1755792000, 0) }
 
 var _ upgrade.KernelSystem = kernelStatusFakeSys{}

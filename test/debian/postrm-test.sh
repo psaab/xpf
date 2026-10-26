@@ -28,6 +28,8 @@ patched_postrm() {
       -e "s#^VERSIONS=.*#VERSIONS=$ROOT/var/lib/xpf/versions#" \
       -e "s#^CURRENT=.*#CURRENT=\"\$VERSIONS/current\"#" \
       -e "s#^STAGED_GEN=.*#STAGED_GEN=$ROOT/var/lib/xpf/staged-gen#" \
+      -e "s#^BINARY_FLOOR=.*#BINARY_FLOOR=$ROOT/var/lib/xpf/binary-floor#" \
+      -e "s#^KERNEL_FLOOR=.*#KERNEL_FLOOR=$ROOT/var/lib/xpf/kernel-floor#" \
       -e "s#^XPF_UPGRADE_STATUS=.*#XPF_UPGRADE_STATUS=$ROOT/var/lib/xpf/upgrade-deferred#" \
       -e "s#^XPF_UPGRADE_STATUS_UNREADABLE=.*#XPF_UPGRADE_STATUS_UNREADABLE=$ROOT/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable#" \
       -e "s#^DROPIN=.*#DROPIN=$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf#" \
@@ -67,6 +69,8 @@ run_scenario() {
     VERSIONS="$ROOT/var/lib/xpf/versions"
     CURRENT="$VERSIONS/current"
     STAGED_GEN="$ROOT/var/lib/xpf/staged-gen"
+    BINARY_FLOOR="$ROOT/var/lib/xpf/binary-floor"
+    KERNEL_FLOOR="$ROOT/var/lib/xpf/kernel-floor"
     DROPIN="$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf"
     XPF_UPGRADE_STATUS="$ROOT/var/lib/xpf/upgrade-deferred"
     XPF_UPGRADE_STATUS_UNREADABLE="$ROOT/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable"
@@ -306,6 +310,8 @@ scenario_purge_removes_versions() {
     printf 'durable\n' > "$XPF_UPGRADE_STATUS"
     printf 'orphan\n' > "$XPF_UPGRADE_STATUS".1234
     printf 'unreadable\n' > "$XPF_UPGRADE_STATUS_UNREADABLE"
+    printf '0.0.500\n' > "$BINARY_FLOOR"
+    printf '6.8.0-1\n' > "$KERNEL_FLOOR"
     "$ROOT/postrm" purge
     for b in $BINS; do
         [ -L "$SBIN/$b" ] && { echo "FAIL: sbin $b not removed"; exit 1; } || true
@@ -316,6 +322,8 @@ scenario_purge_removes_versions() {
     [ -e "$XPF_UPGRADE_STATUS" ] && { echo "FAIL: durable upgrade-deferred record survived purge"; exit 1; } || true
     [ -e "$XPF_UPGRADE_STATUS".1234 ] && { echo "FAIL: pid orphan survived purge"; exit 1; } || true
     [ -e "$XPF_UPGRADE_STATUS_UNREADABLE" ] && { echo "FAIL: durable unreadable marker survived purge"; exit 1; } || true
+    [ -e "$BINARY_FLOOR" ] && { echo "FAIL: binary anti-rollback floor survived purge"; exit 1; } || true
+    [ -e "$KERNEL_FLOOR" ] && { echo "FAIL: kernel anti-rollback floor survived purge"; exit 1; } || true
 }
 
 # #1981 B-P6: a downgrade to a package BELOW the staged-gen floor (0.0.4200) —

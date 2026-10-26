@@ -140,11 +140,12 @@ and pin.
 
 ### Freshness / anti-rollback
 
-- Apt `Release`/`InRelease` carries `Valid-Until` (default 1 year,
-  `XPF_APT_VALID_DAYS`). A SHORT window with manual/air-gap signing would
-  expire the repo between releases — keep it long for a manual cadence, or run
-  an automated re-sign job. At publish time `publish.py gate_apt` also refuses
-  EVERY suite in the tree (target and non-target, flat and reprepro) whose
+- APT `Release`/`InRelease` carries `Valid-Until` (default 30 days,
+  `XPF_APT_VALID_DAYS`). The default bounds repository-metadata replay; the
+  publisher must rebuild/re-sign before expiry. `XPF_APT_VALID_DAYS` remains
+  available for a deliberate signing cadence. At publish time
+  `publish.py gate_apt` refuses EVERY suite in the tree (target and
+  non-target, flat and reprepro) whose
   signed `Valid-Until` has passed or falls within the freshness margin
   (default 7 days; override with `XPF_APT_FRESHNESS_MARGIN_SECONDS`, a
   non-negative integer number of seconds, `0` disables only the margin and
@@ -157,6 +158,17 @@ and pin.
   served from (absent refuses) — a mis-synced pointer or suite verifies
   perfectly under the shared signing key, so without this the gate would
   report PASSED and publish bytes every client then refuses (#16542).
+- Binary and kernel forward channels now keep independent high-water files at
+  `/var/lib/xpf/binary-floor` and `/var/lib/xpf/kernel-floor`. The binary
+  floor is the Debian package version recorded in immutable staged-generation
+  metadata; the kernel floor is the candidate `linux-image` package version.
+  Each forward path checks its candidate before binary STOP or kernel apt
+  mutation, using Debian version ordering. An enrolled floor fails closed on
+  corrupt state, an unorderable candidate, or a candidate without package
+  identity. An absent floor enrolls on the first verified commit/promotion;
+  stage/arm alone does not advance it. Named `xpfd upgrade --rollback`
+  remains available and never lowers the floor. `xpf.postrm purge` removes
+  both floors, so purge/reinstall is the clean-slate reset.
 - Images: `latest.json` (signed) names the current version per channel, and
   `xpf-deploy.py fetch` **consumes** it: with no `--version` it fetches
   `<channel>/latest.json`, minisign-verifies it against any configured image
@@ -267,11 +279,11 @@ Evidence IDs below refer to the #10848 research report
 These are bounded observations of that fixture, APT version, package and
 commands—not deployed Ubuntu, production package-script, all-release-history,
 or fleet results. P7 covers fresh acquisition only: no warm-cache, clock-skew,
-or fleet conclusion is made. The repo builder still defaults
-`XPF_APT_VALID_DAYS` to 365 days for manual/air-gap signing; shortening it
-requires an automated re-sign job (`build-apt-repo.sh:31–33,44`). This
-evidence neither implements an anti-rollback floor nor settles the
-Q1–Q4 policy decisions.
+or fleet conclusion is made. Separately, the repo builder now defaults
+`XPF_APT_VALID_DAYS` to 30 days, and the binary/kernel forward paths enforce
+per-channel Debian-version high-water floors after enrollment (see the
+Freshness / anti-rollback policy above). These project controls do not expand
+the bounded APT observations into a deployed-fleet result.
 
 ### Key rotation
 

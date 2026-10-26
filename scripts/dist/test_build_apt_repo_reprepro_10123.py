@@ -64,7 +64,7 @@ _SHIM = """\
 # by writing a synthetic dists/$SUITE/Release. XPF_TEST_RELEASE_MODE picks
 # the emission: good | dup-vu | missing-vu | skewed-vu | offbyone-vu |
 # dup-date | missing-date | missing-file. XPF_TEST_VALID_DAYS mirrors the
-# builder's VALID_DAYS (default 365 both sides).
+# builder's VALID_DAYS (default 30 both sides, #10848).
 set -eu
 base=""; suite=""
 while [ $# -gt 0 ]; do
@@ -76,7 +76,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$base" ] && [ -n "$suite" ] || { echo "shim: bad argv" >&2; exit 9; }
 mode="${XPF_TEST_RELEASE_MODE:-good}"
-days="${XPF_TEST_VALID_DAYS:-365}"
+days="${XPF_TEST_VALID_DAYS:-30}"
 [ "$mode" = "missing-file" ] && exit 0
 rel="$base/dists/$suite/Release"
 mkdir -p "$(dirname "$rel")"
@@ -177,7 +177,7 @@ class ShimRepreproTests(unittest.TestCase):
         self.assertEqual(vu_epoch, date_epoch + 7 * 86400)
 
     def test_default_horizon_good_emission_accepted(self):
-        # Neither knob set: builder defaults to 365d, shim mirrors it.
+        # Neither knob set: builder defaults to 30d (#10848), shim mirrors it.
         outdir = os.path.join(self.dir, "out-default")
         os.makedirs(outdir, exist_ok=True)
         rc, out = _build(outdir, self.fakedeb, {

@@ -128,14 +128,16 @@ type Config struct {
 	StagedDir   string
 	VersionsDir string
 	// StagedGenDir is the staged-generation root (#1981 Option B). The cut
-	// copies from staged-gen/<SourceGeneration>/ here, NEVER from live
+	// copies from staged-gen/<SourceGeneration> here, NEVER from live
 	// StagedDir, closing the dpkg-unpack torn-read window.
 	StagedGenDir string
 	SbinDir      string
 	ConfigDBDir  string
 	JournalPath  string
-	Unit         string
-
+	// BinaryFloorPath is the durable anti-rollback high-water mark for the
+	// binary channel. Defaults to /var/lib/xpf/binary-floor.
+	BinaryFloorPath string
+	Unit            string
 	// NodeIDPath is the cluster-identity marker file (#5284). Its PRESENCE
 	// gates the uncoordinated standalone cut: a clustered node must be
 	// upgraded via RunRolling, so Runner.Run refuses the standalone
@@ -177,6 +179,9 @@ func (c *Config) withDefaults() {
 	}
 	if c.JournalPath == "" {
 		c.JournalPath = DefaultJournalPath
+	}
+	if c.BinaryFloorPath == "" {
+		c.BinaryFloorPath = DefaultBinaryFloorPath
 	}
 	if c.Unit == "" {
 		c.Unit = DefaultUnit

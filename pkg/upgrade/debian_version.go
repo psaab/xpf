@@ -27,6 +27,14 @@ func compareDebianVersions(a, b string) (int, error) {
 	return compareDebianPart(aRevision, bRevision), nil
 }
 
+// ValidateDebianPackageVersion reports whether version is a safe, orderable
+// Debian package version. Callers that persist an ordinal use this before
+// writing it so a malformed value cannot poison the durable high-water mark.
+func ValidateDebianPackageVersion(version string) error {
+	_, err := compareDebianVersions(version, version)
+	return err
+}
+
 func splitDebianVersion(version string) (epoch, upstream, revision string, err error) {
 	if err := ValidateVersionSegment(version); err != nil {
 		return "", "", "", err
