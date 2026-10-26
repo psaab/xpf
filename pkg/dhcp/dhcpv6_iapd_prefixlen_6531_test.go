@@ -6,7 +6,7 @@ package dhcp
 //
 // The insomniacslk/dhcp decoder builds the prefix as
 // net.CIDRMask(int(length), 128); net.CIDRMask returns a NIL mask when
-// ones > bits, and net.IPMask(nil).Size() is (0, 0). extractDelegatedPrefixes
+// ones > bits, and net.IPMask(nil).Size() is (0, 0). extractDelegatedPrefixesPinned
 // read only `ones` and discarded `bits`, so a crafted length of 129..255
 // became /0.
 //
@@ -21,7 +21,7 @@ package dhcp
 // round-trip through it can never produce the hostile input.
 //
 // RED-on-revert: restore `ones, _ := prefix.Prefix.Mask.Size()` and drop the
-// `bits != 128 || ones == 0` guard in extractDelegatedPrefixes.
+// `bits != 128 || ones == 0` guard in extractDelegatedPrefixesPinned.
 // TestIAPDPrefixLen6531_WireBoundaryTable fails on the 129/130/255 rows (each
 // yields a live /0), and TestIAPDPrefixLen6531_BadSiblingDoesNotRideAlong,
 // TestIAPDPrefixLen6531_BadWithdrawalIsDropped and
@@ -132,7 +132,7 @@ func decodeReplyWire(t *testing.T, wantPrefixes int, opts ...[]byte) *dhcpv6.Mes
 	if got != wantPrefixes {
 		t.Fatalf("decoder kept %d IAPREFIX sub-options, want %d — "+
 			"the library rejected the option before xpf's guard ran, so this "+
-			"test no longer exercises extractDelegatedPrefixes", got, wantPrefixes)
+			"test no longer exercises extractDelegatedPrefixesPinned", got, wantPrefixes)
 	}
 	return msg
 }
@@ -233,7 +233,7 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 			msg := decodeReplyWire(t, 1,
 				iaPDWire(iaPrefixWire(tc.prefLen, "2606:4700:1000::", 3600, 7200)))
 
-			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
+			live, withdrawn, _ := extractDelegatedPrefixesPinned(msg, "wan0", now, nil, nil)
 
 			if tc.want == "" {
 				if len(live) != 0 {
@@ -284,7 +284,7 @@ func TestIAPDPrefixLen6531_BadSiblingDoesNotRideAlong(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			msg := decodeReplyWire(t, 2, iaPDWire(tc.order...))
 
-			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
+			live, withdrawn, _ := extractDelegatedPrefixesPinned(msg, "wan0", now, nil, nil)
 
 			if len(live) != 1 {
 				t.Fatalf("got %d live prefixes %v, want exactly the good /56", len(live), live)
@@ -315,7 +315,7 @@ func TestIAPDPrefixLen6531_BadWithdrawalIsDropped(t *testing.T) {
 	msg := decodeReplyWire(t, 1,
 		iaPDWire(iaPrefixWire(129, "2606:4700:bad::", 0, 0)))
 
-	live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
+	live, withdrawn, _ := extractDelegatedPrefixesPinned(msg, "wan0", time.Now(), nil, nil)
 
 	if len(live) != 0 {
 		t.Errorf("live = %v, want empty", live)
@@ -329,7 +329,7 @@ func TestIAPDPrefixLen6531_BadWithdrawalIsDropped(t *testing.T) {
 // mixed ia-na + ia-pd client (#6581 review).
 //
 // The original fix documented this as "the reply is treated as unusable and
-// retried", which is only true for a PD-ONLY client. parseV6Reply's rejection
+// retried", which is only true for a PD-ONLY client. parseV6ReplyChecked's rejection
 // requires BOTH no IA_NA address AND no live PD, so a valid IA_NA lets parsing
 // SUCCEED even when every IAPREFIX was skipped. This test pins the real
 // behavior end-to-end through the production parser, and pins that the real
@@ -354,14 +354,14 @@ func TestIAPDPrefixLen6531_MixedIANAReplyStaysUsable(t *testing.T) {
 		iaPDWire(iaPrefixWire(200, "2606:4700:bad::", 3600, 7200)))
 
 	m := NewManagerForTesting(nil)
-	res, err := m.parseV6Reply(context.Background(), "wan0", msg,
-		&DHCPv6Options{IATypes: []string{"ia-na", "ia-pd"}})
+	res, err := m.parseV6ReplyChecked(context.Background(), "wan0", msg,
+		&DHCPv6Options{IATypes: []string{"ia-na", "ia-pd"}}, nil, nil, nil)
 
 	// 1. The reply is USABLE — not "unusable and retried".
 	if err != nil {
-		t.Fatalf("parseV6Reply returned %v; a reply whose IA_NA address is valid "+
+		t.Fatalf("parseV6ReplyChecked returned %v; a reply whose IA_NA address is valid "+
 			"must still parse when every IAPREFIX was skipped — the rejection at "+
-			"parseV6Reply requires BOTH no address and no live PD", err)
+			"parseV6ReplyChecked requires BOTH no address and no live PD", err)
 	}
 	if got, want := res.lease.Address, netip.MustParsePrefix("2606:4700:a::5/128"); got != want {
 		t.Errorf("lease address = %s, want %s — the IA_NA must survive a "+
@@ -400,7 +400,7 @@ func TestIAPDPrefixLen6531_MixedIANAReplyStaysUsable(t *testing.T) {
 }
 
 // Over-reach guard for the FIRST LEG of the PD → RA chain: wire bytes →
-// extractDelegatedPrefixes → DeriveSubPrefix. That is where this leg stops.
+// extractDelegatedPrefixesPinned → DeriveSubPrefix. That is where this leg stops.
 //
 // It deliberately does NOT claim end-to-end RA coverage (#6581 review): it
 // never calls Daemon.buildRAConfigs, never calls ra.buildRA, and never
@@ -429,7 +429,7 @@ func TestIAPDPrefixLen6531_NormalDelegationSurvivesSubPrefixDerivation(t *testin
 			msg := decodeReplyWire(t, 1,
 				iaPDWire(iaPrefixWire(tc.prefLen, "2606:4700:900d::", 3600, 7200)))
 
-			live, _, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
+			live, _, _ := extractDelegatedPrefixesPinned(msg, "wan0", now, nil, nil)
 			if len(live) != 1 {
 				t.Fatalf("a /%d delegation must decode, got %d live prefixes",
 					tc.prefLen, len(live))

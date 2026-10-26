@@ -199,9 +199,9 @@ func TestParseV6ReplyNoServerT1T2Control_16553(t *testing.T) {
 		IPv6Addr:          mustIP(t, "2606:4700::5"),
 		PreferredLifetime: 100 * time.Second, ValidLifetime: 500 * time.Second,
 	})
-	res, err := m.parseV6Reply(context.Background(), "wan0", msg, nil)
+	res, err := m.parseV6ReplyChecked(context.Background(), "wan0", msg, nil, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply: %v", err)
+		t.Fatalf("parseV6ReplyChecked: %v", err)
 	}
 	if res.lease.RenewAt != 0 || res.lease.RebindAt != 0 {
 		t.Fatalf("lease timers = (%v,%v), want zero (server supplied none)", res.lease.RenewAt, res.lease.RebindAt)
@@ -219,7 +219,7 @@ func TestLeaseFromACKv4ServerT1T2_16553(t *testing.T) {
 		dhcpv4.OptRenewTimeValue(60*time.Second),
 		dhcpv4.OptRebindingTimeValue(120*time.Second),
 	)
-	lease, err := leaseFromACKv4("wan0", ack)
+	lease, err := leaseFromACKv4WithProtected("wan0", ack, nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestLeaseFromACKv4ServerT1T2_16553(t *testing.T) {
 		t.Fatalf("v4 schedule = (t1 %v, t2Abs %v, ok %v), want (60s,120s,true)", t1, t1+t2Rem, ok)
 	}
 
-	bare, err := leaseFromACKv4("wan0", classlessACK(t, dhcpv4.OptIPAddressLeaseTime(3600*time.Second)))
+	bare, err := leaseFromACKv4WithProtected("wan0", classlessACK(t, dhcpv4.OptIPAddressLeaseTime(3600*time.Second)), nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4 bare: %v", err)
 	}

@@ -927,66 +927,9 @@ func (m *Manager) controlSocket(family int) string {
 	return keaControlSocket4
 }
 
-// PreSeedMemfile4 writes the held peer v4 leases into the Kea v4 memfile CSV
-// BEFORE Kea is (re)started on takeover (#2239 Q3). A starting Kea loads its
-// memfile at boot, so pre-seeding the in-use bindings means it can NEVER answer
-// a DISCOVER with an in-use address even in the window before the post-start
-// lease-add seed runs — this fully closes the duplicate-allocation window. The
-// Remaining lifetime is re-anchored to fresh absolute time on the LOCAL clock
-// (now + Remaining) so peer wall-clock skew never enters the seeded expiry.
-//
-// The file is written atomically (fsatomic) with Kea's canonical v4 memfile
-// header so Kea parses it cleanly. It OVERWRITES any existing memfile and
-// removes stale LFC generations (#14730): on takeover the held peer set is
-// the authoritative serving state, and a retained generation could replay
-// a tombstoned lease the active-only snapshot erased.
-func (m *Manager) PreSeedMemfile4(leases []SyncLease, now time.Time) error {
-	return m.writeMemfile4ReplacingLFC(m.leaseFile(4), leases, now)
-}
-
-// PreSeedMemfile6 writes the held peer v6 leases into the Kea v6 memfile CSV
-// before Kea start (#2239 Q3). See PreSeedMemfile4.
-func (m *Manager) PreSeedMemfile6(leases []SyncLease, now time.Time) error {
-	return m.writeMemfile6ReplacingLFC(m.leaseFile(6), leases, now)
-}
-
-// PreSeedMemfileMerged4 pre-seeds the Kea v4 memfile with the UNION of this
-// node's CURRENT local active leases and the held peer leases (#5040), instead
-// of overwriting it with the peer-only set.
-//
-// A live Kea server is disabled before its lease snapshot and remains disabled
-// until the takeover's queued restart. This makes the snapshot and atomic
-// replacement one quiesced operation: no grant can land between them or be
-// appended to the old memfile after replacement. The manager lock also keeps a
-// concurrent apply/restart from reopening Kea during that operation.
-func (m *Manager) PreSeedMemfileMerged4(ctx context.Context, peer []SyncLease, now time.Time, stillMastering bool) error {
-	return m.withQuiescedPreSeed(ctx, 4, now, func(local []SyncLease, live bool) error {
-		if !live && !stillMastering {
-			return m.writeMemfile4ReplacingLFC(
-				m.leaseFile(4), mergeLeasesByIdentity(nil, peer, 4), now)
-		}
-		// #14730/#16856: merged write replaces file with active+declined
-		// snapshot; stale generations could resurrect state=2 rows, so
-		// always remove them. Declined (state=1) rows in the snapshot are
-		// preserved with state=1.
-		return m.writeMemfile4ReplacingLFC(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
-	})
-}
-
-// PreSeedMemfileMerged6 is the v6 counterpart of PreSeedMemfileMerged4 (#9853).
-func (m *Manager) PreSeedMemfileMerged6(ctx context.Context, peer []SyncLease, now time.Time, stillMastering bool) error {
-	return m.withQuiescedPreSeed(ctx, 6, now, func(local []SyncLease, live bool) error {
-		if !live && !stillMastering {
-			return m.writeMemfile6ReplacingLFC(
-				m.leaseFile(6), mergeLeasesByIdentity(nil, peer, 6), now)
-		}
-		return m.writeMemfile6ReplacingLFC(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
-	})
-}
-
-// PreSeedMemfileMerged4WithAuthority is the v4 authority-aware pre-seed used by
-// daemon takeover and authority-aware merge tests. The legacy pair remains on
-// Manager only for pkg/dhcpserver's tests.
+// PreSeedMemfileMerged4WithAuthority is the v4 authority-aware takeover
+// pre-seed. The daemon supplies the peer snapshot and local lease authority so
+// the installed set cannot include rows from an unproven peer scope.
 func (m *Manager) PreSeedMemfileMerged4WithAuthority(ctx context.Context, peer LeaseSyncSnapshot, now time.Time, stillMastering bool, authority LeaseSyncAuthority) error {
 	return m.withQuiescedPreSeed(ctx, 4, now, func(local []SyncLease, live bool) error {
 		if !live && !stillMastering {

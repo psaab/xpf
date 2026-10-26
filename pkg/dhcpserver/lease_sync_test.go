@@ -109,6 +109,21 @@ func leaseGetAllResponse(leases []keaLeaseJSON) keaResponse {
 	return keaResponse{Result: keaResultSuccess, Text: "ok", Arguments: args}
 }
 
+// preSeedPeerForTesting routes fixtures and writer regressions through the
+// authority-aware takeover entry point. These tests use a stopped Kea instance;
+// the peer snapshot is therefore the only serving lease authority.
+func preSeedPeerForTesting(t *testing.T, m *Manager, family int, leases []SyncLease, now time.Time) error {
+	t.Helper()
+	m.unitActive = func(string) (bool, error) { return false, nil }
+	snapshot := LeaseSyncSnapshot{Leases: leases, Received: true}
+	if family == 4 {
+		return m.PreSeedMemfileMerged4WithAuthority(
+			context.Background(), snapshot, now, false, LeaseSyncAuthority{})
+	}
+	return m.PreSeedMemfileMerged6WithAuthority(
+		context.Background(), snapshot, now, false, LeaseSyncAuthority{})
+}
+
 // Test (a): read leases via the control socket (lease4-get-all).
 func TestGetSyncLeases4_ViaSocket(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
@@ -567,7 +582,7 @@ func TestPreSeedMemfile4_RoundTrip(t *testing.T) {
 			ClientID: "01:aa:bb:cc:dd:ee:42", SubnetID: 3, Remaining: 900,
 			Hostname: "pre-seeded", State: keaStateDefault},
 	}
-	if err := m.PreSeedMemfile4(in, localNow); err != nil {
+	if err := preSeedPeerForTesting(t, m, 4, in, localNow); err != nil {
 		t.Fatalf("PreSeedMemfile4: %v", err)
 	}
 	// Re-read via the destructive-safe parser → must see the lease.
@@ -642,7 +657,7 @@ func TestSeedAndPreSeed_DropExpiredLeases(t *testing.T) {
 			{Family: 4, Address: "10.0.0.5", HWAddress: "aa", SubnetID: 1, Remaining: 600, State: keaStateDefault},
 			{Family: 4, Address: "10.0.0.6", HWAddress: "bb", SubnetID: 1, Remaining: 0, State: keaStateDefault},
 		}
-		if err := m.PreSeedMemfile4(in, localNow); err != nil {
+		if err := preSeedPeerForTesting(t, m, 4, in, localNow); err != nil {
 			t.Fatalf("PreSeedMemfile4: %v", err)
 		}
 		got, err := parseActiveLeases4(memfile, localNow)
@@ -715,7 +730,7 @@ func TestSeedAndPreSeedRejectInvalidSyncLeases10893(t *testing.T) {
 		t.Fatalf("v6 seed admitted invalid data or failed to cap lifetime: %+v", added6)
 	}
 
-	if err := m.PreSeedMemfile4(v4, now); err != nil {
+	if err := preSeedPeerForTesting(t, m, 4, v4, now); err != nil {
 		t.Fatalf("PreSeedMemfile4: %v", err)
 	}
 	got4, err := parseSyncLeases4(file4, now)
@@ -723,7 +738,7 @@ func TestSeedAndPreSeedRejectInvalidSyncLeases10893(t *testing.T) {
 		got4[1].Address != "10.0.0.10" || got4[1].Expire != now.Unix()+int64(maxSyncLeaseLifetime) {
 		t.Fatalf("v4 memfile retained invalid row or uncapped lifetime: %+v (err=%v)", got4, err)
 	}
-	if err := m.PreSeedMemfile6(v6, now); err != nil {
+	if err := preSeedPeerForTesting(t, m, 6, v6, now); err != nil {
 		t.Fatalf("PreSeedMemfile6: %v", err)
 	}
 	got6, err := parseSyncLeases6(file6, now)
@@ -773,7 +788,7 @@ func TestPreSeedMemfileMerged4_PreservesLocalLeases(t *testing.T) {
 		Family: 4, Address: "10.0.2.80", HWAddress: "bb:bb:bb:bb:bb:bb",
 		SubnetID: 2, ValidLife: 3600, Remaining: 1800, State: keaStateDefault,
 	}}
-	if err := m.PreSeedMemfileMerged4(context.Background(), peer, localNow, false); err != nil {
+	if err := m.PreSeedMemfileMerged4WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: peer, Received: true}, localNow, false, LeaseSyncAuthority{}); err != nil {
 		t.Fatalf("PreSeedMemfileMerged4: %v", err)
 	}
 	got, err := parseActiveLeases4(memfile, localNow)
@@ -825,7 +840,7 @@ func TestPreSeedMemfileMerged6_PreservesLocalLeases(t *testing.T) {
 		IAID: 80, LeaseType: "IA_NA", SubnetID: 2, ValidLife: 3600,
 		Remaining: 1800, PreferredRemaining: 1800, State: keaStateDefault,
 	}}
-	if err := m.PreSeedMemfileMerged6(context.Background(), peer, localNow, false); err != nil {
+	if err := m.PreSeedMemfileMerged6WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: peer, Received: true}, localNow, false, LeaseSyncAuthority{}); err != nil {
 		t.Fatalf("PreSeedMemfileMerged6: %v", err)
 	}
 	got, err := parseActiveLeases6(memfile, localNow)
@@ -1158,11 +1173,11 @@ func TestPreSeedMemfileMerged_DropsFallbackMemfileLeases9853(t *testing.T) {
 						return os.Getuid(), os.Getgid(), true
 					})
 					if tc.family == 4 {
-						if err := m.PreSeedMemfile4([]SyncLease{tc.stale}, now); err != nil {
+						if err := preSeedPeerForTesting(t, m, 4, []SyncLease{tc.stale}, now); err != nil {
 							t.Fatalf("write stale v4 fixture: %v", err)
 						}
 					} else {
-						if err := m.PreSeedMemfile6([]SyncLease{tc.stale}, now); err != nil {
+						if err := preSeedPeerForTesting(t, m, 6, []SyncLease{tc.stale}, now); err != nil {
 							t.Fatalf("write stale v6 fixture: %v", err)
 						}
 					}
@@ -1175,9 +1190,9 @@ func TestPreSeedMemfileMerged_DropsFallbackMemfileLeases9853(t *testing.T) {
 
 					var err error
 					if tc.family == 4 {
-						err = m.PreSeedMemfileMerged4(context.Background(), []SyncLease{tc.peer}, now, false)
+						err = m.PreSeedMemfileMerged4WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: []SyncLease{tc.peer}, Received: true}, now, false, LeaseSyncAuthority{})
 					} else {
-						err = m.PreSeedMemfileMerged6(context.Background(), []SyncLease{tc.peer}, now, false)
+						err = m.PreSeedMemfileMerged6WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: []SyncLease{tc.peer}, Received: true}, now, false, LeaseSyncAuthority{})
 					}
 					if err != nil {
 						t.Fatalf("merged pre-seed: %v", err)
@@ -1281,11 +1296,11 @@ func TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853(t *tes
 				return os.Getuid(), os.Getgid(), true
 			})
 			if tc.family == 4 {
-				if err := m.PreSeedMemfile4([]SyncLease{tc.local}, now); err != nil {
+				if err := preSeedPeerForTesting(t, m, 4, []SyncLease{tc.local}, now); err != nil {
 					t.Fatalf("write local v4 fixture: %v", err)
 				}
 			} else {
-				if err := m.PreSeedMemfile6([]SyncLease{tc.local}, now); err != nil {
+				if err := preSeedPeerForTesting(t, m, 6, []SyncLease{tc.local}, now); err != nil {
 					t.Fatalf("write local v6 fixture: %v", err)
 				}
 			}
@@ -1299,9 +1314,9 @@ func TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853(t *tes
 
 			var err error
 			if tc.family == 4 {
-				err = m.PreSeedMemfileMerged4(context.Background(), []SyncLease{tc.peer}, now, true)
+				err = m.PreSeedMemfileMerged4WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: []SyncLease{tc.peer}, Received: true}, now, true, LeaseSyncAuthority{})
 			} else {
-				err = m.PreSeedMemfileMerged6(context.Background(), []SyncLease{tc.peer}, now, true)
+				err = m.PreSeedMemfileMerged6WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: []SyncLease{tc.peer}, Received: true}, now, true, LeaseSyncAuthority{})
 			}
 			if err != nil {
 				t.Fatalf("staggered-failover pre-seed: %v", err)
@@ -1406,7 +1421,7 @@ func TestPreSeedMemfileMerged4_FailsClosedOnUntrustedLocal(t *testing.T) {
 		Family: 4, Address: "10.0.2.80", HWAddress: "bb", SubnetID: 2,
 		Remaining: 1800, State: keaStateDefault,
 	}}
-	if err := m.PreSeedMemfileMerged4(context.Background(), peer, localNow, false); err == nil {
+	if err := m.PreSeedMemfileMerged4WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: peer, Received: true}, localNow, false, LeaseSyncAuthority{}); err == nil {
 		t.Fatalf("expected fail-closed error on untrusted local source, got nil")
 	}
 	after, rerr := os.ReadFile(memfile)
@@ -1444,7 +1459,7 @@ func TestPreSeedMemfile6_RoundTrip_PreservesIATA(t *testing.T) {
 		{Family: 6, Address: "2001:db8:abcd::", DUID: "00:01:00:03", IAID: 30,
 			LeaseType: "IA_PD", PrefixLen: 56, SubnetID: 1, Remaining: 2400, State: keaStateDefault},
 	}
-	if err := m.PreSeedMemfile6(in, localNow); err != nil {
+	if err := preSeedPeerForTesting(t, m, 6, in, localNow); err != nil {
 		t.Fatalf("PreSeedMemfile6: %v", err)
 	}
 
@@ -1543,7 +1558,7 @@ func TestPreSeedMemfile6_EmitsHWAddress(t *testing.T) {
 			LeaseType: "IA_NA", HWAddress: wantHW, SubnetID: 1, Remaining: 1200,
 			State: keaStateDefault},
 	}
-	if err := m.PreSeedMemfile6(in, localNow); err != nil {
+	if err := preSeedPeerForTesting(t, m, 6, in, localNow); err != nil {
 		t.Fatalf("PreSeedMemfile6: %v", err)
 	}
 
@@ -1680,13 +1695,13 @@ func TestPreSeedMemfile_ChownsToKeaUser(t *testing.T) {
 	m.SetLeaseSyncSeamsForTesting(nil, "", "", memfile4, memfile6)
 	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) { return wantUID, wantGID, true })
 
-	if err := m.PreSeedMemfile4([]SyncLease{
+	if err := preSeedPeerForTesting(t, m, 4, []SyncLease{
 		{Family: 4, Address: "10.0.61.42", HWAddress: "aa:bb:cc:dd:ee:42",
 			SubnetID: 3, Remaining: 900, State: keaStateDefault},
 	}, localNow); err != nil {
 		t.Fatalf("PreSeedMemfile4: %v", err)
 	}
-	if err := m.PreSeedMemfile6([]SyncLease{
+	if err := preSeedPeerForTesting(t, m, 6, []SyncLease{
 		{Family: 6, Address: "2001:db8::1", DUID: "00:01", IAID: 7,
 			LeaseType: "IA_NA", SubnetID: 1, Remaining: 1200, State: keaStateDefault},
 	}, localNow); err != nil {
@@ -1742,13 +1757,13 @@ func TestPreSeedMemfile_NoKeaUser_WarnsAndSucceeds(t *testing.T) {
 	m.SetWarnForTesting(func(msg string, _ ...any) { warnings = append(warnings, msg) })
 	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) { return 0, 0, false })
 
-	if err := m.PreSeedMemfile4([]SyncLease{
+	if err := preSeedPeerForTesting(t, m, 4, []SyncLease{
 		{Family: 4, Address: "10.0.61.7", HWAddress: "aa:bb:cc:dd:ee:07",
 			SubnetID: 3, Remaining: 600, State: keaStateDefault},
 	}, localNow); err != nil {
 		t.Fatalf("PreSeedMemfile4 must not abort when Kea user absent: %v", err)
 	}
-	if err := m.PreSeedMemfile6([]SyncLease{
+	if err := preSeedPeerForTesting(t, m, 6, []SyncLease{
 		{Family: 6, Address: "2001:db8::7", DUID: "00:09", IAID: 9,
 			LeaseType: "IA_NA", SubnetID: 1, Remaining: 600, State: keaStateDefault},
 	}, localNow); err != nil {
@@ -1874,14 +1889,14 @@ func TestKeaMemfileHeadersMatchKea30xSchema(t *testing.T) {
 	m := New()
 	m.SetLeaseSyncSeamsForTesting(nil, "", "", memfile4, memfile6)
 
-	if err := m.PreSeedMemfile4([]SyncLease{
+	if err := preSeedPeerForTesting(t, m, 4, []SyncLease{
 		{Family: 4, Address: "10.0.61.42", HWAddress: "aa:bb:cc:dd:ee:42",
 			ClientID: "01:aa:bb:cc:dd:ee:42", SubnetID: 3, Remaining: 900,
 			Hostname: "golden4", State: keaStateDefault},
 	}, localNow); err != nil {
 		t.Fatalf("PreSeedMemfile4: %v", err)
 	}
-	if err := m.PreSeedMemfile6([]SyncLease{
+	if err := preSeedPeerForTesting(t, m, 6, []SyncLease{
 		{Family: 6, Address: "2001:db8::42", DUID: "00:01:00:0a", IAID: 7,
 			LeaseType: "IA_NA", HWAddress: "aa:bb:cc:dd:ee:f6", SubnetID: 1,
 			Remaining: 1200, State: keaStateDefault},
@@ -2065,7 +2080,7 @@ func TestPreSeedMemfile6_PreferredLifetime(t *testing.T) {
 	m := New()
 	m.SetLeaseSyncSeamsForTesting(nil, "", "", "", memfile6)
 
-	if err := m.PreSeedMemfile6([]SyncLease{
+	if err := preSeedPeerForTesting(t, m, 6, []SyncLease{
 		{Family: 6, Address: "2001:db8::d", DUID: "00:01:00:01", IAID: 1,
 			LeaseType: "IA_NA", SubnetID: 1, Remaining: 1800, PreferredRemaining: 0,
 			State: keaStateDefault}, // deprecated

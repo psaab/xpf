@@ -459,11 +459,9 @@ func (c *CLI) showDHCPServer(detail bool) error {
 	// Read the Kea lease set through the SOURCE-AWARE path (#5967): prefer the
 	// live lease_cmds DB and surface the #5938 degraded-source banner, matching
 	// the authoritative gRPC `show dhcp server` handler that the remote `cli`
-	// drives. The in-process interactive shell previously called GetLeases4/6
-	// (memfile only, no live-socket preference, no banner), so a degraded read
-	// on THIS surface alone looked like a healthy empty set — a divergence from
-	// the remote path. GetLeasesWithSource4/6 skips an unreadable Kea LFC sibling
-	// and records it in the LeaseSource banner detail instead of aborting, so the
+	// drives. Previously this in-process shell read only the memfile, without
+	// live-socket preference or a degraded banner, so a failure on this surface
+	// looked like a healthy empty set despite the degraded source. The shared
 	// #4908 "a degraded read is never rendered as a clean empty table" invariant
 	// is preserved by the banner rather than the old per-family read warnings.
 	server := c.newDHCPServer()
@@ -507,8 +505,8 @@ func (c *CLI) showDHCPServer(detail bool) error {
 	if len(leases6) > 0 {
 		fmt.Printf("DHCPv6 Leases (%d active):\n", len(leases6))
 		// #4908 (C175-HC-080): label the column "HWAddress", not "DUID". Kea's
-		// GetLeases6 populates Lease.HWAddress (the link-layer address), not the
-		// client DUID/IAID, so a "DUID" header mislabeled the printed value.
+		// GetLeasesWithSource6 populates Lease.HWAddress (the link-layer
+		// address), not the client DUID/IAID, so a "DUID" header mislabeled the
 		if detail {
 			fmt.Printf("  %-40s %-20s %-15s %-10s %-12s %s\n", "Address", "HWAddress", "Hostname", "Subnet", "Lifetime", "Expires")
 			for _, l := range leases6 {

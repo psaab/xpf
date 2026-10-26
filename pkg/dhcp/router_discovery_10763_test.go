@@ -14,7 +14,7 @@ import (
 )
 
 // TestParseV6ReplyUsesSolicitedRouterAdvertisements10763 is a RED-on-revert
-// guard: parseV6Reply must solicit and choose an advertised default router by
+// guard: parseV6ReplyChecked must solicit and choose an advertised default router by
 // RFC 4191 preference, ignoring router-lifetime-0 advertisers. The former
 // neighbor-table scan did not invoke the RA exchange and left Gateway empty
 // for this test Manager (or could select the lifetime-0 neighbour in service).
@@ -38,10 +38,14 @@ func TestParseV6ReplyUsesSolicitedRouterAdvertisements10763(t *testing.T) {
 		PreferredLifetime: time.Hour,
 		ValidLifetime:     2 * time.Hour,
 	})
-	res, err := m.parseV6Reply(context.Background(), "wan0", adv, nil)
+	ctx := context.Background()
+	res, err := m.parseV6ReplyChecked(ctx, "wan0", adv, nil, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply: %v", err)
+		t.Fatalf("parseV6ReplyChecked: %v", err)
 	}
+	res.routers = m.observedRouterAdvertisements(ctx, "wan0")
+	res.raSampled = true
+	res.lease = applyIPv6RouterAdvertisements(nil, res.lease, res.routers, time.Now())
 	if !called {
 		t.Fatal("DHCPv6 reply did not trigger Router Solicitation/RA discovery")
 	}
@@ -61,10 +65,14 @@ func TestParseV6ReplyDoesNotUseLifetimeZeroRouter10763(t *testing.T) {
 		PreferredLifetime: time.Hour,
 		ValidLifetime:     2 * time.Hour,
 	})
-	res, err := m.parseV6Reply(context.Background(), "wan0", adv, nil)
+	ctx := context.Background()
+	res, err := m.parseV6ReplyChecked(ctx, "wan0", adv, nil, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply: %v", err)
+		t.Fatalf("parseV6ReplyChecked: %v", err)
 	}
+	res.routers = m.observedRouterAdvertisements(ctx, "wan0")
+	res.raSampled = true
+	res.lease = applyIPv6RouterAdvertisements(nil, res.lease, res.routers, time.Now())
 	if res.lease.Gateway.IsValid() {
 		t.Errorf("lease gateway = %v, want none: lifetime-0 RA is not a default router", res.lease.Gateway)
 	}

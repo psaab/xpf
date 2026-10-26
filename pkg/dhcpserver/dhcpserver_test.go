@@ -268,9 +268,9 @@ func TestParseLeaseCSV(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	leases, err := parseLeaseCSV(path, leaseTestNow)
-	if err != nil {
-		t.Fatal(err)
+	leases, skipped := parseLeaseCSVDegradable(path, leaseTestNow)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	if len(leases) != 2 {
 		t.Fatalf("got %d leases, want 2", len(leases))
@@ -295,12 +295,12 @@ func TestParseLeaseCSV(t *testing.T) {
 }
 
 func TestParseLeaseCSV_NoFile(t *testing.T) {
-	leases, err := parseLeaseCSV("/nonexistent/path", leaseTestNow)
-	if err != nil {
-		t.Fatal(err)
+	leases, skipped := parseLeaseCSVDegradable("/nonexistent/path", leaseTestNow)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
-	if leases != nil {
-		t.Errorf("expected nil for nonexistent file, got %v", leases)
+	if len(leases) != 0 {
+		t.Errorf("expected no leases for nonexistent file, got %v", leases)
 	}
 }
 
@@ -311,9 +311,9 @@ func TestParseLeaseCSV_Empty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	leases, err := parseLeaseCSV(path, leaseTestNow)
-	if err != nil {
-		t.Fatal(err)
+	leases, skipped := parseLeaseCSVDegradable(path, leaseTestNow)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	if len(leases) != 0 {
 		t.Errorf("expected no leases, got %d", len(leases))
@@ -332,9 +332,9 @@ func TestParseLeaseCSV_QuotedHostname(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	leases, err := parseLeaseCSV(path, leaseTestNow)
-	if err != nil {
-		t.Fatal(err)
+	leases, skipped := parseLeaseCSVDegradable(path, leaseTestNow)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	if len(leases) != 1 {
 		t.Fatalf("got %d leases, want 1", len(leases))
@@ -384,9 +384,9 @@ func TestParseLeaseCSV_ExpiredAndDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	leases, err := parseLeaseCSV(path, now)
-	if err != nil {
-		t.Fatal(err)
+	leases, skipped := parseLeaseCSVDegradable(path, now)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	if len(leases) != 2 {
 		t.Fatalf("got %d leases, want 2 (deduped + non-expired); pre-#2085 returned 4", len(leases))
@@ -440,9 +440,9 @@ func TestParseLeaseCSV_StateFiltered(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	leases, err := parseLeaseCSV(path, now)
-	if err != nil {
-		t.Fatal(err)
+	leases, skipped := parseLeaseCSVDegradable(path, now)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	byAddr := indexLeasesByAddr(leases)
 	if _, ok := byAddr["10.0.1.10"]; ok {
@@ -483,9 +483,9 @@ func TestParseLeaseCSV_Lenient(t *testing.T) {
 	if err := os.WriteFile(path, []byte(csv), 0644); err != nil {
 		t.Fatal(err)
 	}
-	leases, err := parseLeaseCSV(path, now)
-	if err != nil {
-		t.Fatal(err)
+	leases, skipped := parseLeaseCSVDegradable(path, now)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	if len(leases) != 2 {
 		t.Errorf("lenient: garbage/blank state+expire must keep rows; got %d, want 2 (%+v)", len(leases), leases)
@@ -500,9 +500,9 @@ func TestParseLeaseCSV_Lenient(t *testing.T) {
 	if err := os.WriteFile(path2, []byte(csv2), 0644); err != nil {
 		t.Fatal(err)
 	}
-	leases2, err := parseLeaseCSV(path2, now)
-	if err != nil {
-		t.Fatal(err)
+	leases2, skipped := parseLeaseCSVDegradable(path2, now)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	if len(leases2) != 2 {
 		t.Errorf("lenient: missing state/expire columns must keep rows; got %d, want 2 (%+v)", len(leases2), leases2)
@@ -551,9 +551,9 @@ func TestParseLeaseCSV_SkipsMalformedLine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	leases, err := parseLeaseCSV(path, now)
-	if err != nil {
-		t.Fatalf("malformed line must not abort the whole read; got err %v", err)
+	leases, skipped := parseLeaseCSVDegradable(path, now)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v; malformed rows should be skipped", skipped)
 	}
 	byAddr := indexLeasesByAddr(leases)
 
@@ -593,9 +593,9 @@ func TestParseLeaseCSV_SkipsMalformedLine(t *testing.T) {
 	if err := os.WriteFile(path2, []byte(csv2), 0644); err != nil {
 		t.Fatal(err)
 	}
-	leases2, err := parseLeaseCSV(path2, now)
-	if err != nil {
-		t.Fatalf("torn last line must not abort the read; got err %v", err)
+	leases2, skipped := parseLeaseCSVDegradable(path2, now)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v; torn tail should not skip the whole file", skipped)
 	}
 	by2 := indexLeasesByAddr(leases2)
 	if _, ok := by2["10.0.5.10"]; !ok {
@@ -617,9 +617,9 @@ func TestParseLeaseCSV_SkipsMalformedLine(t *testing.T) {
 	if err := os.WriteFile(path3, []byte(csv3), 0644); err != nil {
 		t.Fatal(err)
 	}
-	leases3, err := parseLeaseCSV(path3, now)
-	if err != nil {
-		t.Fatalf("short line must not abort the read; got err %v", err)
+	leases3, skipped := parseLeaseCSVDegradable(path3, now)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v; short rows should not skip the whole file", skipped)
 	}
 	by3 := indexLeasesByAddr(leases3)
 	if _, ok := by3["10.0.6.10"]; !ok {

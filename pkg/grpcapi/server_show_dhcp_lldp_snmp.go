@@ -160,8 +160,8 @@ func (s *Server) showDHCPServer(buf *strings.Builder) {
 	if len(leases6) > 0 {
 		buf.WriteString("DHCPv6 Leases:\n")
 		// #5328 (A8-b2-F6): label the column "HWAddress", not "DUID". Kea's
-		// GetLeases6 populates Lease.HWAddress (the link-layer address), not the
-		// client DUID/IAID, so a "DUID" header mislabeled the rendered value.
+		// GetLeasesWithSource6 populates Lease.HWAddress (the link-layer
+		// address), not the client DUID/IAID, so a "DUID" header mislabeled the
 		// This mirrors the pkg/cli fix (#4908) that the remote gRPC renderer,
 		// reached by `cmd/cli`, previously missed.
 		fmt.Fprintf(buf, "  %-40s %-20s %-15s %-12s %s\n", "Address", "HWAddress", "Hostname", "Lifetime", "Expires")

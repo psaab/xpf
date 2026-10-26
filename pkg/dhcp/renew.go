@@ -63,7 +63,7 @@ func v4RenewMatcher(m *Manager, req *dhcpv4.DHCPv4, prev *Lease, rebind bool) nc
 // acceptance predicate testable. During RENEW the Reply must identify the
 // granting server DUID; during REBIND any server may answer (RFC 8415
 // §18.2.5), so a present server DUID suffices for an extending Reply and
-// parseV6Reply stores it as the new binding.
+// parseV6ReplyChecked stores it as the new binding.
 //
 // #14997 (D40-03): a non-granting REBIND responder may extend the held
 // bindings but must not tear them down. Before this gate, any host that

@@ -65,8 +65,8 @@ func TestSelectIANAAddressRefusesInvalidClasses14185(t *testing.T) {
 				t.Errorf("solo refused-class address %s selected as %v, want invalid", tc.addr, addr)
 			}
 			m := &Manager{}
-			if _, err := m.parseV6Reply(context.Background(), "wan0", solo, nil); err == nil {
-				t.Errorf("parseV6Reply accepted solo refused-class IA_NA %s", tc.addr)
+			if _, err := m.parseV6ReplyChecked(context.Background(), "wan0", solo, nil, nil, nil, nil); err == nil {
+				t.Errorf("parseV6ReplyChecked accepted solo refused-class IA_NA %s", tc.addr)
 			}
 		})
 	}
@@ -152,12 +152,12 @@ func TestSelectIANAAddressRefusesProtectedOverlap14185(t *testing.T) {
 				PreferredLifetime: 100 * time.Second,
 				ValidLifetime:     500 * time.Second,
 			})
-			if _, err := m.parseV6Reply(context.Background(), "wan0", solo, nil); err == nil {
-				t.Errorf("parseV6Reply accepted IA_NA %s overlapping protected %v", tc.addr, protected)
+			if _, err := m.parseV6ReplyChecked(context.Background(), "wan0", solo, nil, nil, nil, nil); err == nil {
+				t.Errorf("parseV6ReplyChecked accepted IA_NA %s overlapping protected %v", tc.addr, protected)
 			}
-			res, err := m.parseV6Reply(context.Background(), "wan0", adv, nil)
+			res, err := m.parseV6ReplyChecked(context.Background(), "wan0", adv, nil, nil, nil, nil)
 			if err != nil {
-				t.Fatalf("parseV6Reply with salvaged sibling: %v", err)
+				t.Fatalf("parseV6ReplyChecked with salvaged sibling: %v", err)
 			}
 			if got := res.lease.Address.Addr(); got != netip.MustParseAddr(good) {
 				t.Errorf("lease address = %v, want salvaged %s", got, good)

@@ -57,7 +57,7 @@ func TestLeaseFromACKv4ClasslessRoutesSupersedeOption3(t *testing.T) {
 	router := dhcpv4.OptRouter(net.ParseIP("198.51.100.99"))
 
 	ack := classlessACK(t, router, classless)
-	lease, err := leaseFromACKv4("wan0", ack)
+	lease, err := leaseFromACKv4WithProtected("wan0", ack, nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestLeaseFromACKv4ClasslessOnlySpecificNoDefault(t *testing.T) {
 	router := dhcpv4.OptRouter(net.ParseIP("198.51.100.99"))
 
 	ack := classlessACK(t, router, classless)
-	lease, err := leaseFromACKv4("wan0", ack)
+	lease, err := leaseFromACKv4WithProtected("wan0", ack, nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestLeaseFromACKv4ClasslessOnlySpecificNoDefault(t *testing.T) {
 func TestLeaseFromACKv4Option3OnlyUnchanged(t *testing.T) {
 	router := dhcpv4.OptRouter(net.ParseIP("192.0.2.1"))
 	ack := classlessACK(t, router)
-	lease, err := leaseFromACKv4("wan0", ack)
+	lease, err := leaseFromACKv4WithProtected("wan0", ack, nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestLeaseFromACKv4LegacyOption249(t *testing.T) {
 	router := dhcpv4.OptRouter(net.ParseIP("198.51.100.99"))
 
 	ack := classlessACK(t, router, opt249)
-	lease, err := leaseFromACKv4("wan0", ack)
+	lease, err := leaseFromACKv4WithProtected("wan0", ack, nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4: %v", err)
 	}

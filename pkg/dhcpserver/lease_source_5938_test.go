@@ -130,7 +130,7 @@ func TestDisplayLeases_NoHookNotDegraded_5938(t *testing.T) {
 // display with a banner rather than blanking the show.
 //
 // FAIL-ON-REVERT: revert parseLeaseCSVDegradable to abort on the first file error
-// (the parseLeaseCSV behavior) → the show is blanked / errored instead of a
+// (strict whole-file abort) → the show is blanked / errored instead of a
 // partial+banner; or drop the Degraded flag → banner empty. Either goes RED.
 func TestDisplayLeases_UnreadableSiblingDegraded_5938(t *testing.T) {
 	if os.Geteuid() == 0 {
@@ -185,9 +185,9 @@ func TestKeaLFCOutputIgnoredCompletedAuthoritative_5938(t *testing.T) {
 	writeCSV(t, cur, lfcV4Header+"\n") // CURRENT: fresh header-only append log
 
 	// Baseline: resolve WITHOUT any intermediates present.
-	base, err := parseLeaseCSV(cur, now)
-	if err != nil {
-		t.Fatalf("parseLeaseCSV baseline: %v", err)
+	base, skipped := parseLeaseCSVDegradable(cur, now)
+	if len(skipped) != 0 {
+		t.Fatalf("baseline unreadable files = %v, want none", skipped)
 	}
 	baseSet := addrSet(base)
 	if !baseSet["10.0.0.10"] || !baseSet["10.0.0.11"] {
@@ -206,9 +206,9 @@ func TestKeaLFCOutputIgnoredCompletedAuthoritative_5938(t *testing.T) {
 	writeCSV(t, cur+".completed", lfcV4Header+"\n"+
 		"10.0.0.11,aa:bb:cc:dd:ee:11,,3600,"+lfcFuture+",1,0,1,host-b,0\n"+
 		"10.0.0.88,aa:bb:cc:dd:ee:88,,3600,"+lfcFuture+",1,0,1,ONLY-in-completed,0\n")
-	after, err := parseLeaseCSV(cur, now)
-	if err != nil {
-		t.Fatalf("parseLeaseCSV with intermediates: %v", err)
+	after, skipped := parseLeaseCSVDegradable(cur, now)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files with intermediates = %v, want none", skipped)
 	}
 	afterSet := addrSet(after)
 

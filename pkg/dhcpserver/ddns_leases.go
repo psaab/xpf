@@ -12,7 +12,7 @@ import (
 
 // ddns_leases.go: a STATE-AWARE Kea memfile lease parser for the #1387
 // DDNS reconciler (plan §5 invariant 3). It stays SEPARATE from the
-// display-only parseLeaseCSV not because that parser is unfiltered —
+// display-only parseLeaseCSVDegradable not because that parser is unfiltered —
 // since #2085 it also filters non-active state + expired rows and dedups
 // per address — but because the two have opposite failure postures: this
 // DDNS parser is DESTRUCTIVE (its empty result authorizes deleting owned

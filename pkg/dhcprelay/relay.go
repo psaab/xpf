@@ -519,25 +519,11 @@ func (f *fairLimiter[K]) evictIdle(now time.Time) bool {
 	return true
 }
 
-// fairSenderKeyV4 derives the v4 fairness key: the chaddr (clamped like
-// pendingKeyFor) WITHOUT the xid — fairness is per client identity, not
-// per transaction, so retransmissions and renewals from one client share
-// one sub-bucket. The hlen participates so different-length addresses do
-// not collide.
+// fairSenderKeyV4 stores a validated DHCPv4 BOOTP chaddr identity. The
+// hlen participates so different-length addresses do not collide.
 type fairSenderKeyV4 struct {
 	hlen   uint8
 	chaddr [16]byte
-}
-
-func fairSenderKeyForV4(pkt *dhcpv4.DHCPv4) fairSenderKeyV4 {
-	k := fairSenderKeyV4{}
-	n := len(pkt.ClientHWAddr)
-	if n > len(k.chaddr) {
-		n = len(k.chaddr)
-	}
-	copy(k.chaddr[:], pkt.ClientHWAddr[:n])
-	k.hlen = uint8(n)
-	return k
 }
 
 // v4HlenOff is the byte offset of hlen in a BOOTP/DHCPv4 wire packet

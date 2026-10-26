@@ -91,9 +91,9 @@ func TestParseLeaseCSVRecoversOrphanedCompleted10170(t *testing.T) {
 		"10.0.0.50,aa:bb:cc:dd:ee:50,,3600,"+lfcFuture+",1,0,1,host-orphan,0\n")
 	writeCSV(t, cur, lfcV4Header+"\n")
 
-	leases, err := parseLeaseCSV(cur, lfcNow)
-	if err != nil {
-		t.Fatalf("parseLeaseCSV with orphaned .completed: %v", err)
+	leases, skipped := parseLeaseCSVDegradable(cur, lfcNow)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	if len(leases) != 1 || leases[0].Address != "10.0.0.50" {
 		t.Fatalf("display lost the orphaned .completed lease: got %+v", leases)

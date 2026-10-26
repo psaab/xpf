@@ -189,14 +189,6 @@ type fairSenderKeyV6 struct {
 // requests carrying no usable Client ID.
 var fairUnknownSenderV6 = fairSenderKeyV6{duidLen: 0xFF}
 
-func fairSenderKeyForV6(packet dhcpv6.DHCPv6) (fairSenderKeyV6, bool) {
-	k, ok := pending6KeyFor(packet)
-	if !ok || k.duidLen == 0 {
-		return fairSenderKeyV6{}, false
-	}
-	return fairSenderKeyV6{duid: k.duid, duidLen: k.duidLen}, true
-}
-
 // v6MsgHeaderLen is the DHCPv6 client-message header (type 1 + xid 3,
 // RFC 8415 §8); options follow as code/len/value TLVs.
 const v6MsgHeaderLen = 4
@@ -205,18 +197,14 @@ const v6MsgHeaderLen = 4
 // BEFORE dhcpv6.FromBytes (fold 2 on #16322, mirroring the v4 BOOTP
 // peek), walking at most the first Client-ID option (code 1, RFC 8415
 // §21.2). It never allocates: the DUID bytes are copied into the fixed
-// key array, truncated at pending6MaxDUIDSize exactly as the parsed key
-// clamps. Malformed framing (truncated TLV, length overrunning the
-// datagram, missing Client ID) reports ok=false and the caller lumps
-// the packet into fairUnknownSenderV6 — no lumped class gets more than
-// the unknown sender's own fairness share, so junk cannot buy identity.
-//
-// NOTE on key-space consistency: pending6KeyFor builds the same bytes
-// via copyPending6DUID's typed encoding (type(2) + fields), whereas
-// this peek copies the raw wire DUID. The two encodings agree for the
-// wire form the library parses (verified by
-// TestFairSenderKeyV6FromWire). Relay messages report ok=false here;
-// the caller routes them ahead of the fairness gate.
+// key array. Missing, malformed, or over-limit DUIDs report ok=false
+// and the caller lumps them into fairUnknownSenderV6; this keeps
+// fairness classification consistent with pending6KeyFor, which refuses
+// DUIDs it cannot represent in the pending key.
+// For representable DUIDs the peek copies the raw wire bytes. The parsed
+// pending key serializes the typed DUID (type + fields); those encodings
+// agree for the wire forms accepted by the library. Relay messages report
+// ok=false here; the caller routes them ahead of the fairness gate.
 func fairSenderKeyV6FromWire(buf []byte) (fairSenderKeyV6, bool) {
 	if len(buf) <= v6MsgHeaderLen {
 		return fairSenderKeyV6{}, false
@@ -229,16 +217,11 @@ func fairSenderKeyV6FromWire(buf []byte) (fairSenderKeyV6, bool) {
 			return fairSenderKeyV6{}, false // TLV runs past the datagram
 		}
 		if code == int(dhcpv6.OptionClientID) {
-			if l == 0 {
+			if l == 0 || l > pending6MaxDUIDSize {
 				return fairSenderKeyV6{}, false
 			}
-			k := fairSenderKeyV6{}
-			n := l
-			if n > pending6MaxDUIDSize {
-				n = pending6MaxDUIDSize
-			}
-			copy(k.duid[:], opts[4:4+n])
-			k.duidLen = uint8(n)
+			k := fairSenderKeyV6{duidLen: uint8(l)}
+			copy(k.duid[:], opts[4:4+l])
 			return k, true
 		}
 		opts = opts[4+l:]

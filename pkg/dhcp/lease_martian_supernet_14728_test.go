@@ -36,7 +36,7 @@ func TestLeaseFromACKv4RejectsMartianCoveringSupernet14728(t *testing.T) {
 			if !ClasslessRouteIsMartian(netip.PrefixFrom(addr, ones)) {
 				t.Fatalf("test oracle wrong: %s/%d not martian per ClasslessRouteIsMartian", tc.yiaddr, ones)
 			}
-			lease, err := leaseFromACKv4("wan0", mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask))
+			lease, err := leaseFromACKv4WithProtected("wan0", mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask), nil)
 			if err == nil {
 				t.Fatalf("leaseFromACKv4 accepted martian-covering %s; got lease %v, want error", tc.name, lease.Address)
 			}
@@ -61,7 +61,7 @@ func TestLeaseFromACKv4RejectsMartianCoveringSupernet14728(t *testing.T) {
 		{"adjacent /8 accepted", "168.0.0.5", net.CIDRMask(8, 32), "168.0.0.5/8"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			lease, err := leaseFromACKv4("wan0", mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask))
+			lease, err := leaseFromACKv4WithProtected("wan0", mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask), nil)
 			if err != nil {
 				t.Fatalf("leaseFromACKv4 rejected legitimate lease: %v", err)
 			}
@@ -135,7 +135,7 @@ func TestLeaseFromACKv4RefusesProtectedOverlap14728(t *testing.T) {
 	}
 
 	// Free-function callers (existing tests) keep working with no protected set.
-	lease, err = leaseFromACKv4("wan0", mustV4ACK(t, net.ParseIP("10.0.1.2"), net.CIDRMask(25, 32)))
+	lease, err = leaseFromACKv4WithProtected("wan0", mustV4ACK(t, net.ParseIP("10.0.1.2"), net.CIDRMask(25, 32)), nil)
 	if err != nil {
 		t.Fatalf("free leaseFromACKv4 rejected: %v", err)
 	}

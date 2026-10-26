@@ -832,85 +832,20 @@ type Lease struct {
 	SubnetID   string
 }
 
-// GetLeases4 reads Kea DHCPv4 lease file and returns active leases.
-func (m *Manager) GetLeases4() ([]Lease, error) {
-	return parseLeaseCSV(m.leaseFile(4), time.Now())
-}
-
-// GetLeases6 reads Kea DHCPv6 lease file and returns active leases.
-func (m *Manager) GetLeases6() ([]Lease, error) {
-	return parseLeaseCSV(m.leaseFile(6), time.Now())
-}
-
-// parseLeaseCSV parses Kea's append-only memfile CSV set and returns the
-// CURRENT, ACTIVE leases for display (`show dhcp server leases`). #5796: it
-// reads the FULL Kea LFC file set (previous `.2`, input `.1`, current) and
-// merges them, so the display never omits the compacted active leases that live
-// in the previous/input files right after an LFC rotation.
-//
-// Kea never rewrites the memfile in place between lease-file-cleanup
-// (LFC) compactions: every renewal, re-allocation, release, decline,
-// and expiry-reclaim is APPENDED as a new row, so the same address
-// appears multiple times and superseded/stale rows linger until the
-// next LFC. A naive "emit every row with a non-empty address" therefore
-// shows duplicate and stale leases (#2085). This parser collapses the
-// append log to one row per address (the LAST, i.e. newest, row wins —
-// rows are chronological) and drops rows that are not currently active:
-//
-//   - state != 0 (declined / expired-reclaimed): Kea writes a
-//     non-default state but often a FUTURE expire epoch on
-//     release/decline, so an expire-only filter would still show it.
-//   - expire <= now: a genuinely lapsed lease.
-//
-// It is LENIENT by design (this is a non-destructive display path,
-// unlike the destructive DDNS reconciler's parseActiveLeases, which
-// hard-errors on a mangled header): an absent or unparseable state /
-// expire column degrades to "treat the row as active", preserving the
-// pre-#2085 behaviour for older Kea or exotic headers rather than
-// blanking the whole `show` on one odd row. now is injected so the
-// expiry comparison is deterministic in tests.
 // leaseCSVAccum accumulates the lenient last-row-wins display disposition per
-// address ACROSS the Kea LFC file set (#5796). A zero Lease (empty Address) is a
-// TOMBSTONE meaning the last row seen for that address (in chronological
-// file+row order) was inactive/expired. order keeps first-appearance order so
-// the display is stable and deterministic.
+// address across the Kea LFC file set (#5796). An empty Lease is a tombstone
+// meaning the latest row for that address was inactive or expired. order keeps
+// first-appearance order so the display is stable and deterministic.
 type leaseCSVAccum struct {
 	latest map[string]Lease
 	order  []string
 	seen   map[string]struct{}
 }
 
-func parseLeaseCSV(path string, now time.Time) ([]Lease, error) {
-	acc := &leaseCSVAccum{
-		latest: make(map[string]Lease),
-		seen:   make(map[string]struct{}),
-	}
-	// #5796: read the whole Kea LFC file set (previous .2 → input .1 → current)
-	// in chronological order and merge, so `show dhcp server leases` does not
-	// omit the compacted active set that lives in the previous/input files right
-	// after an LFC rotation. A missing .1/.2 (the common no-LFC case) collapses
-	// the set to exactly the current file, byte-identical to the pre-#5796 read.
-	for _, f := range keaLFCLeaseFilePaths(path) {
-		if err := parseLeaseCSVFileInto(f, now, acc); err != nil {
-			return nil, err
-		}
-	}
-
-	leases := make([]Lease, 0, len(acc.order))
-	for _, addr := range acc.order {
-		if l := acc.latest[addr]; l.Address != "" {
-			leases = append(leases, l)
-		}
-	}
-	if len(leases) == 0 {
-		return nil, nil
-	}
-	return leases, nil
-}
-
-// parseLeaseCSVFileInto reads ONE Kea LFC-set file into acc using the lenient
-// display semantics. A genuinely-missing file is skipped (nil); a
-// non-IsNotExist open error is returned so the display surfaces it.
+// parseLeaseCSVFileInto reads one Kea LFC-set file into acc using the display
+// semantics. A genuinely missing file is skipped (nil); other read errors are
+// returned to the source-aware display caller, which records degradation and
+// continues with the readable files.
 func parseLeaseCSVFileInto(path string, now time.Time, acc *leaseCSVAccum) error {
 	f, err := os.Open(path)
 	if err != nil {

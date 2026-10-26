@@ -268,7 +268,7 @@ func TestRenderUnresolvedThenPreSeed_WarnsExactlyOnce(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	lease := []SyncLease{{Family: 4, Address: "10.0.61.7", HWAddress: "aa:bb:cc:dd:ee:07",
 		SubnetID: 3, Remaining: 600, State: keaStateDefault}}
-	if err := m.PreSeedMemfile4(lease, now); err != nil {
+	if err := preSeedPeerForTesting(t, m, 4, lease, now); err != nil {
 		t.Fatalf("PreSeedMemfile4: %v", err)
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "_kea") {
@@ -276,7 +276,7 @@ func TestRenderUnresolvedThenPreSeed_WarnsExactlyOnce(t *testing.T) {
 	}
 
 	// 3. Repeated pre-seed: still exactly one warning total.
-	if err := m.PreSeedMemfile4(lease, now); err != nil {
+	if err := preSeedPeerForTesting(t, m, 4, lease, now); err != nil {
 		t.Fatalf("second PreSeedMemfile4: %v", err)
 	}
 	if len(warnings) != 1 {

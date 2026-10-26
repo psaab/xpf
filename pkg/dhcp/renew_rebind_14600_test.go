@@ -57,7 +57,7 @@ func TestRebindAcceptsAnyServer14600(t *testing.T) {
 		t.Errorf("v4 rejects after renew partner = %d, want 2", got)
 	}
 	// Accepted partner ACK stores partner as new server-id.
-	lease, err := leaseFromACKv4("wan0", partnerACK)
+	lease, err := leaseFromACKv4WithProtected("wan0", partnerACK, nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4(partner ACK): %v", err)
 	}

@@ -36,7 +36,7 @@ func TestExtractDelegatedPrefixesRejectsRefusedClasses10856(t *testing.T) {
 				pdPrefixOpt(t, tc.cidr, time.Hour, 2*time.Hour),
 				pdPrefixOpt(t, good.String(), time.Hour, 2*time.Hour),
 			)
-			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
+			live, withdrawn, _ := extractDelegatedPrefixesPinned(msg, "wan0", time.Now(), nil, nil)
 			if len(live) != 1 || live[0].Prefix != good {
 				t.Errorf("live = %v, want only valid sibling %s (refused %s must be skipped)", live, good, tc.cidr)
 			}
@@ -56,7 +56,7 @@ func TestExtractDelegatedPrefixesRefusedClassIsNotWithdrawn10856(t *testing.T) {
 		pdPrefixOpt(t, "2001:db8:dead::/56", time.Hour, 0),
 		pdPrefixOpt(t, "fd00:dead::/56", time.Hour, 0),
 	)
-	live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
+	live, withdrawn, _ := extractDelegatedPrefixesPinned(msg, "wan0", time.Now(), nil, nil)
 	if len(live) != 0 || len(withdrawn) != 0 {
 		t.Fatalf("live = %v withdrawn = %v, want both empty (refusal must not synthesize a withdrawal)", live, withdrawn)
 	}
@@ -76,7 +76,7 @@ func TestExtractDelegatedPrefixesKeepsGlobalUnicast10856(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			want := netip.MustParsePrefix(tc.cidr)
 			msg := iaPDReply(t, pdPrefixOpt(t, tc.cidr, time.Hour, 2*time.Hour))
-			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
+			live, withdrawn, _ := extractDelegatedPrefixesPinned(msg, "wan0", time.Now(), nil, nil)
 			if len(live) != 1 || live[0].Prefix != want {
 				t.Fatalf("live = %v, want %s", live, want)
 			}
@@ -113,7 +113,7 @@ func TestExtractDelegatedPrefixesRefusesConfiguredOverlap10856(t *testing.T) {
 				pdPrefixOpt(t, tc.cidr, time.Hour, 2*time.Hour),
 				pdPrefixOpt(t, inside.String(), time.Hour, 2*time.Hour),
 			)
-			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), protected)
+			live, withdrawn, _ := extractDelegatedPrefixesPinned(msg, "wan0", time.Now(), protected, nil)
 			if len(live) != 1 || live[0].Prefix != inside {
 				t.Fatalf("live = %v, want only non-overlapping sibling %s (overlapping %s must be skipped)", live, inside, tc.cidr)
 			}
@@ -125,7 +125,7 @@ func TestExtractDelegatedPrefixesRefusesConfiguredOverlap10856(t *testing.T) {
 }
 
 // The overlap set flows from the Manager (daemon-installed). A reply decoded
-// through parseV6Reply must lose an overlapping delegation AND, when nothing
+// through parseV6ReplyChecked must lose an overlapping delegation AND, when nothing
 // usable survives, fail the reply outright — the acquire/renew loop retries
 // instead of settling an empty lease. This cell compiles and runs against the
 // pre-#10856-phase-2 base (no new API in the arrange), where it is RED: the
@@ -137,9 +137,9 @@ func TestParseV6ReplyRefusesOverlappingPDViaManagerState10856(t *testing.T) {
 		pdPrefixOpt(t, "2606:4700:1111::2/64", time.Hour, 2*time.Hour),
 		pdPrefixOpt(t, "2606:4700:9999::/48", time.Hour, 2*time.Hour),
 	)
-	res, err := m.parseV6Reply(context.Background(), "wan0", msg, &DHCPv6Options{IATypes: []string{"ia-pd"}})
+	res, err := m.parseV6ReplyChecked(context.Background(), "wan0", msg, &DHCPv6Options{IATypes: []string{"ia-pd"}}, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply: %v", err)
+		t.Fatalf("parseV6ReplyChecked: %v", err)
 	}
 	if len(res.prefixes) != 1 || res.prefixes[0].Prefix != netip.MustParsePrefix("2606:4700:9999::/48") {
 		t.Fatalf("prefixes = %v, want only the non-overlapping 2606:4700:9999::/48", res.prefixes)
@@ -148,8 +148,8 @@ func TestParseV6ReplyRefusesOverlappingPDViaManagerState10856(t *testing.T) {
 	// All delegations overlapping: the reply must fail, not return empty.
 	m2 := NewManagerForTesting(nil)
 	m2.SetProtectedIPv6Prefixes([]netip.Prefix{netip.MustParsePrefix("2606:4700::/32")})
-	res2, err := m2.parseV6Reply(context.Background(), "wan0", iaPDReply(t,
-		pdPrefixOpt(t, "2606:4700:1::/48", time.Hour, 2*time.Hour)), &DHCPv6Options{IATypes: []string{"ia-pd"}})
+	res2, err := m2.parseV6ReplyChecked(context.Background(), "wan0", iaPDReply(t,
+		pdPrefixOpt(t, "2606:4700:1::/48", time.Hour, 2*time.Hour)), &DHCPv6Options{IATypes: []string{"ia-pd"}}, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("reply with only an overlapping PD accepted: prefixes = %v", res2.prefixes)
 	}
@@ -161,9 +161,9 @@ func TestParseV6ReplyRefusesOverlappingPDViaManagerState10856(t *testing.T) {
 // base, where the delegation is accepted and no error is returned).
 func TestParseV6ReplyRefusesDocumentationPD10856(t *testing.T) {
 	m := NewManagerForTesting(nil)
-	_, err := m.parseV6Reply(context.Background(), "wan0",
+	_, err := m.parseV6ReplyChecked(context.Background(), "wan0",
 		iaPDReply(t, pdPrefixOpt(t, "2001:db8:f00d::/48", time.Hour, 2*time.Hour)),
-		&DHCPv6Options{IATypes: []string{"ia-pd"}})
+		&DHCPv6Options{IATypes: []string{"ia-pd"}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("documentation-space IA_PD reply accepted; want no usable PD error")
 	}

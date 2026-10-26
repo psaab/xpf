@@ -1086,7 +1086,7 @@ func v6Acquire(ctx context.Context, client *nclient6.Client, modifiers []dhcpv6.
 //   - ties are broken by first-seen (option order).
 //
 // Each refused IAADDR is skipped independently, so a usable sibling is
-// salvaged — the same per-element policy extractDelegatedPrefixes
+// salvaged — the same per-element policy extractDelegatedPrefixesPinned
 // applies to IAPREFIX options. A refused address is NOT a withdrawal:
 // it never sets sawZeroLifetime, so it cannot deconfigure a held
 // address; when every candidate is refused the caller sees the generic
@@ -1177,19 +1177,6 @@ func selectIANAAddress(adv *dhcpv6.Message, expectedIAID *[4]byte, protected []n
 		}
 	}
 	return best, bestValid, sawZero
-}
-
-// parseV6Reply extracts DHCPv6 options for unit callers that do not have an
-// interface IAID. Production exchanges use parseV6ReplyChecked below.
-func (m *Manager) parseV6Reply(ctx context.Context, ifaceName string, adv *dhcpv6.Message, v6opts *DHCPv6Options) (*dhcpv6Result, error) {
-	result, err := m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, nil, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	result.routers = m.observedRouterAdvertisements(ctx, ifaceName)
-	result.raSampled = true
-	result.lease = applyIPv6RouterAdvertisements(nil, result.lease, result.routers, time.Now())
-	return result, nil
 }
 
 // parseV6ReplyChecked parses a Reply. prev is the held lease on a
@@ -1378,7 +1365,7 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 	// wantPD=false), the only shape that reaches here with LeaseTime 0: a
 	// selected IA_NA address and a live IA_PD prefix both carry a positive
 	// lifetime (selectIANAAddress skips valid-lifetime-0 IAADDRs, #4383;
-	// extractDelegatedPrefixes routes valid-lifetime-0 prefixes to
+	// extractDelegatedPrefixesPinned routes valid-lifetime-0 prefixes to
 	// withdrawnPDs). This is NOT the explicit-0 invalidation path — that is
 	// handled upstream at the "no usable IA_NA / live IA_PD" guard, which
 	// returns errV6AddrInvalidated so the renew/rebind loop deconfigures the
@@ -1552,7 +1539,7 @@ func (m *Manager) buildDHCPv6Modifiers(ifaceName string, opts *DHCPv6Options) []
 	return mods
 }
 
-// extractDelegatedPrefixes parses IA_PD options from a DHCPv6 reply,
+// extractDelegatedPrefixesPinned parses IA_PD options from a DHCPv6 reply,
 // partitioning the prefixes into live (valid-lifetime > 0) and explicitly
 // withdrawn (valid-lifetime 0) sets. A zero valid-lifetime IA_PD is an RFC
 // 8415 §12.1 withdrawal: it must never be stored or re-advertised — this
@@ -1590,9 +1577,6 @@ func (m *Manager) buildDHCPv6Modifiers(ifaceName string, opts *DHCPv6Options) []
 // nothing usable left, the reply fails and the held set is cleared
 // through the pdRefused path; a still-covered sibling keeps the reply
 // usable and reconcile retains only what the reply re-grants.
-func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Time, protected []netip.Prefix, expectedIAID ...*[4]byte) (live, withdrawn []DelegatedPrefix, pdRefused bool) {
-	return extractDelegatedPrefixesPinned(msg, ifaceName, now, protected, nil, expectedIAID...)
-}
 
 func extractDelegatedPrefixesPinned(msg *dhcpv6.Message, ifaceName string, now time.Time, protected, pins []netip.Prefix, expectedIAID ...*[4]byte) (live, withdrawn []DelegatedPrefix, pdRefused bool) {
 	for _, opt := range msg.Options.Options {
@@ -1650,7 +1634,7 @@ func extractDelegatedPrefixesPinned(msg *dhcpv6.Message, ifaceName string, now t
 			// else the reply carried. Neither branch can yield a /0, but they
 			// are NOT the same branch (#6581 review):
 			//
-			//   - No IA_NA address either: parseV6Reply's "no usable IA_NA
+			//   - No IA_NA address either: parseV6ReplyChecked's "no usable IA_NA
 			//     address or live IA_PD prefix" guard rejects the reply and
 			//     the acquire/renew loop retries.
 			//   - A valid IA_NA address: parsing SUCCEEDS — that guard fires
