@@ -6,16 +6,17 @@ sampling. Wired off `pkg/logging.EventReader` SESSION_OPEN and
 SESSION_CLOSE events in `pkg/daemon/daemon_flowexport.go`, not the
 conntrack GC delete callback. No per-packet sampling path.
 
-**The sampling decision is made once at open, not at close (#15946 /
-#16303).** The single SESSION_OPEN fanout callback
-(`flowExportOpenCallback`) evaluates `SampledForOpen` — one sampling decision at SESSION_OPEN per
-instance — and a sampled flow is remembered by its exporter (a tracker
-entry when active/inactive timeouts are configured, otherwise the
-close-only sampled set). The SESSION_CLOSE callbacks make no second 1-in-N decision at close:
-`CloseFlow` recalls and forgets the open decision, and only a flow
-recorded as sampled at open exports its close. See "Open-time sampling,
-tracker, and live feed" below for the full contract, including
-absent-open and inactive-expiry behaviour.
+**Open-time decisions and orphan-close fallback (#15946/#16303/#16742).**
+The single SESSION_OPEN fanout callback (`flowExportOpenCallback`)
+evaluates `SampledForOpen` once per instance. Selected and rejected
+outcomes are remembered: selected state is held in the tracker or
+close-only sampled set, while rejected state has its own bounded set.
+A close with retained state consumes that decision without a second
+sampling slot; selected flows export their close remainder and rejected
+flows do not export. If open-time state is absent, the #16742 close-time
+fallback makes one fresh decision and exports only if selected. See
+"Open-time sampling, tracker, and live feed" below for the full contract,
+including absent-open and inactive-expiry behavior.
 
 Flow record *assembly* is **entirely control-plane**: the userspace
 dataplane does NOT build/format NetFlow/IPFIX records — close records
@@ -589,20 +590,23 @@ close-only export. With a tracker:
   direction) are absent/zero on interims (tracked separately).
 - *Inactive*: when `now - lastActivity >= FlowInactiveTimeout` (checked
   first, so an idle flow gets one final record, not an interim plus a
-  final), the tracker emits a final delta record and forgets the flow:
-  inactive expiry. Counter *progress* — any field advancing against the
-  stored cumulative, not a backward snapshot — is what refreshes
-  `lastActivity`; a flow whose counters keep advancing is never
-  idle-removed. Because the entry is gone, a later resumption of the
-  same 5-tuple is not re-polled and its real close reports not sampled
-  (R3-A46-03) and exports nothing.
-- *Real close*: `CloseFlow` atomically forgets the flow and returns the
-  last-export baselines; `ExportSessionCloseRemainder` queues only the
-  unexported remainder (lifetime counters minus baselines, saturated at
-  zero), so interim + final + close sum to the session total
-  (#16303 fold 2, per-exporter baselines — same-instance template
-  groups may hold different baselines). A close after inactive expiry
-  finds nothing and produces no duplicate final.
+  final), the tracker emits a final delta record, saves its cumulative
+  baselines in a bounded sampled-idle marker, and removes the live entry.
+  `Keys()`/`Has()` retain the marker for live polling; counter progress
+  re-arms the flow with the marker's baselines. While the marker remains,
+  the eventual close still consumes the selected open decision and does
+  not sample again. If marker eviction clears it at the 8192-key cap, the
+  eventual close instead follows the #16742 orphan-close fallback with no
+  inactive-final baselines; if selected, it may export counters already
+  covered by the inactive final again.
+- *Real close*: `CloseFlow` atomically forgets a tracked flow or retained
+  idle marker and returns its last-export baselines; `ExportSessionCloseRemainder`
+  queues only the unexported remainder (lifetime counters minus baselines,
+  saturated at zero), so a flow with retained state does not re-export
+  interim/final coverage (#16303 fold 2, per-exporter baselines). A close
+  after inactive expiry with its marker retained does not re-decide. If
+  the marker was evicted at the cap, the close has no baselines and may be
+  selected by #16742, potentially re-exporting inactive-final counters.
 - Re-opening an existing key resets its window and template.
 
 Timeouts come from the referenced template (`flow-active-timeout` /
@@ -1428,8 +1432,11 @@ not a resumed poll landed first, so `ExportSessionCloseRemainder`
 exports exactly the post-expiry remainder (lifetime minus final
 baselines, saturating to zero when nothing resumed) exactly once.
 Markers are created only for flows that were tracked at expiry (never
-for unsampled or never-opened flows), are dropped on re-open or close,
-and are the only post-expiry state: no second sampling decision is made.
+for unsampled or never-opened flows), and are dropped on re-open or close.
+While retained, the marker is the post-expiry state and a real close makes
+no second sampling decision. If the cap clear evicts a marker, that key has
+no state or baselines at close and follows the #16742 fallback, which may
+re-export counters already covered by the inactive final if selected.
 
 
 ## Gotchas

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"runtime"
 	"sync"
 	"testing"
@@ -148,5 +149,21 @@ func syncOpen17815(srcPort uint16, trust, untrust uint32) dpuserspace.SessionDel
 		SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: srcPort, DstPort: 443,
 		IngressZoneID: uint16(trust), EgressZoneID: uint16(untrust),
 		IngressIfindex: 11, EgressIfindex: 12,
+	}
+}
+
+func TestStopIPFIXExporterClearsOnlyIPFIXError17815(t *testing.T) {
+	d := newFlowTestDaemon()
+	v9Err := errors.New("v9 build error")
+	ipfixErr := errors.New("IPFIX build error")
+	d.flowExportErr = v9Err
+	d.ipfixExportErr = ipfixErr
+
+	d.stopIPFIXExporter()
+	if got := d.IPFIXExportError(); got != nil {
+		t.Fatalf("IPFIX error after stop = %v, want nil", got)
+	}
+	if got := d.FlowExportError(); got != v9Err {
+		t.Fatalf("NetFlow v9 error after IPFIX stop = %v, want original error", got)
 	}
 }

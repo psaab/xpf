@@ -1023,7 +1023,7 @@ func (d *Daemon) stopIPFIXExporter() {
 	d.ipfixBundlePtr.Store(&ipfixBundle{})
 	d.flowStateMu.Unlock()
 	d.teardownIPFIXGroupsLocked(liveGroupsIPFIX(live))
-	d.flowExportErr = nil
+	d.ipfixExportErr = nil
 }
 
 // parseAddrPair parses "ip:port" or "[ip]:port" into net.IPs and IPv6 flag.
