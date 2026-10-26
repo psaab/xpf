@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -46,6 +47,8 @@ type recordingDHCPApplier9349 struct {
 	authorityAsyncCfg      []*config.DHCPServerConfig
 	preSeed4StillMastering []bool
 	preSeed6StillMastering []bool
+	preSeed4Authority      []dhcpserver.LeaseSyncAuthority
+	preSeed6Authority      []dhcpserver.LeaseSyncAuthority
 }
 
 func (r *recordingDHCPApplier9349) Apply(cfg *config.DHCPServerConfig) error {
@@ -66,16 +69,6 @@ func (r *recordingDHCPApplier9349) ApplyWithLeaseAuthority(cfg *config.DHCPServe
 	return nil
 }
 
-func (r *recordingDHCPApplier9349) ApplyClusterCommit(cfg *config.DHCPServerConfig) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if cfg == nil {
-		r.clusterNil++
-		return nil
-	}
-	r.clusterApply = append(r.clusterApply, *cfg)
-	return nil
-}
 func (r *recordingDHCPApplier9349) ApplyClusterCommitWithLeaseAuthority(cfg *config.DHCPServerConfig, authority dhcpserver.LeaseApplyAuthority) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -88,7 +81,6 @@ func (r *recordingDHCPApplier9349) ApplyClusterCommitWithLeaseAuthority(cfg *con
 	return nil
 }
 
-func (r *recordingDHCPApplier9349) ApplyAsync(*config.DHCPServerConfig, string) {}
 func (r *recordingDHCPApplier9349) ApplyAsyncWithLeaseAuthority(cfg *config.DHCPServerConfig, _ string, authority dhcpserver.LeaseApplyAuthority) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -110,12 +102,6 @@ func (r *recordingDHCPApplier9349) GetLeasesWithSource4() ([]dhcpserver.Lease, d
 func (r *recordingDHCPApplier9349) GetLeasesWithSource6() ([]dhcpserver.Lease, dhcpserver.LeaseSource) {
 	return nil, dhcpserver.LeaseSource{}
 }
-func (r *recordingDHCPApplier9349) GetSyncLeases4(context.Context, time.Time) ([]dhcpserver.SyncLease, error) {
-	return nil, nil
-}
-func (r *recordingDHCPApplier9349) GetSyncLeases6(context.Context, time.Time) ([]dhcpserver.SyncLease, error) {
-	return nil, nil
-}
 func (r *recordingDHCPApplier9349) GetSyncLeases4WithSource(context.Context, time.Time) ([]dhcpserver.SyncLease, bool, error) {
 	return nil, false, nil
 }
@@ -128,28 +114,18 @@ func (r *recordingDHCPApplier9349) SeedSyncLeases4(context.Context, []dhcpserver
 func (r *recordingDHCPApplier9349) SeedSyncLeases6(context.Context, []dhcpserver.SyncLease, time.Time) (int, error) {
 	return 0, nil
 }
-func (r *recordingDHCPApplier9349) PreSeedMemfileMerged4(_ context.Context, _ []dhcpserver.SyncLease, _ time.Time, stillMastering bool) error {
+func (r *recordingDHCPApplier9349) PreSeedMemfileMerged4WithAuthority(_ context.Context, _ dhcpserver.LeaseSyncSnapshot, _ time.Time, stillMastering bool, authority dhcpserver.LeaseSyncAuthority) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.preSeed4StillMastering = append(r.preSeed4StillMastering, stillMastering)
+	r.preSeed4Authority = append(r.preSeed4Authority, authority)
 	return nil
 }
-func (r *recordingDHCPApplier9349) PreSeedMemfileMerged6(_ context.Context, _ []dhcpserver.SyncLease, _ time.Time, stillMastering bool) error {
+func (r *recordingDHCPApplier9349) PreSeedMemfileMerged6WithAuthority(_ context.Context, _ dhcpserver.LeaseSyncSnapshot, _ time.Time, stillMastering bool, authority dhcpserver.LeaseSyncAuthority) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.preSeed6StillMastering = append(r.preSeed6StillMastering, stillMastering)
-	return nil
-}
-func (r *recordingDHCPApplier9349) PreSeedMemfileMerged4WithAuthority(_ context.Context, _ dhcpserver.LeaseSyncSnapshot, _ time.Time, stillMastering bool, _ dhcpserver.LeaseSyncAuthority) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.preSeed4StillMastering = append(r.preSeed4StillMastering, stillMastering)
-	return nil
-}
-func (r *recordingDHCPApplier9349) PreSeedMemfileMerged6WithAuthority(_ context.Context, _ dhcpserver.LeaseSyncSnapshot, _ time.Time, stillMastering bool, _ dhcpserver.LeaseSyncAuthority) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.preSeed6StillMastering = append(r.preSeed6StillMastering, stillMastering)
+	r.preSeed6Authority = append(r.preSeed6Authority, authority)
 	return nil
 }
 func (r *recordingDHCPApplier9349) WaitControlSocket4(context.Context, time.Duration) bool {
@@ -190,6 +166,28 @@ func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
 	d.dhcpServer = rec
 	d.getOrCreateRGState(1).SetCluster(true)
 	d.getOrCreateRGState(2).SetCluster(true)
+	if _, err := d.store.LoadSet(
+		"set chassis cluster no-private-rg-election\n" +
+			"set chassis cluster reth-count 2\n" +
+			"set chassis cluster redundancy-group 2 node 0 priority 100\n" +
+			"set interfaces ge-0/0/1 gigether-options redundant-parent reth1\n" +
+			"set interfaces reth1 redundant-ether-options redundancy-group 2\n" +
+			"set interfaces reth1 unit 0 family inet address 10.0.72.1/24\n" +
+			"set interfaces reth1 unit 0 family inet6 address 2001:db8:72::1/64\n" +
+			"delete system services dhcp-local-server group g1\n" +
+			"delete system services dhcpv6-local-server group g6\n" +
+			"set system services dhcp-local-server group authority4 interface reth1.0\n" +
+			"set system services dhcp-local-server group authority4 pool p4 subnet 10.0.72.0/24\n" +
+			"set system services dhcp-local-server group authority4 pool p4 address-range low 10.0.72.100 high 10.0.72.199\n" +
+			"set system services dhcpv6-local-server group authority6 interface reth1.0\n" +
+			"set system services dhcpv6-local-server group authority6 pool p6 subnet 2001:db8:72::/64\n" +
+			"set system services dhcpv6-local-server group authority6 pool p6 address-range low 2001:db8:72::100 high 2001:db8:72::199",
+	); err != nil {
+		t.Fatalf("LoadSet authority scopes: %v", err)
+	}
+	if _, err := d.store.Commit(); err != nil {
+		t.Fatalf("Commit authority scopes: %v", err)
+	}
 	d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
 		{Family: 4, Address: "10.0.72.80", HWAddress: "02:00:00:00:72:80",
 			SubnetID: 2, Remaining: 3600, State: 0},
@@ -206,6 +204,20 @@ func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
 	}
 	if len(rec.preSeed6StillMastering) != 1 || !rec.preSeed6StillMastering[0] {
 		t.Fatalf("v6 pre-seed did not receive stillMastering=true: %v", rec.preSeed6StillMastering)
+	}
+	wantAuthority4 := d.dhcpLeaseAuthority(d.store.ActiveConfig(), 4)
+	if got := wantAuthority4.Scopes; len(got) != 1 || got[0].Family != 4 || got[0].RGID != 2 || got[0].CIDR != "10.0.72.0/24" || !got[0].Served {
+		t.Fatalf("v4 test authority scope = %+v, want family=4 RG=2 CIDR=10.0.72.0/24 served", got)
+	}
+	if len(rec.preSeed4Authority) != 1 || !reflect.DeepEqual(rec.preSeed4Authority[0], wantAuthority4) {
+		t.Fatalf("v4 pre-seed did not receive lease authority %+v: %v", wantAuthority4, rec.preSeed4Authority)
+	}
+	wantAuthority6 := d.dhcpLeaseAuthority(d.store.ActiveConfig(), 6)
+	if got := wantAuthority6.Scopes; len(got) != 1 || got[0].Family != 6 || got[0].RGID != 2 || got[0].CIDR != "2001:db8:72::/64" || !got[0].Served {
+		t.Fatalf("v6 test authority scope = %+v, want family=6 RG=2 CIDR=2001:db8:72::/64 served", got)
+	}
+	if len(rec.preSeed6Authority) != 1 || !reflect.DeepEqual(rec.preSeed6Authority[0], wantAuthority6) {
+		t.Fatalf("v6 pre-seed did not receive lease authority %+v: %v", wantAuthority6, rec.preSeed6Authority)
 	}
 	if len(rec.authorityAsync) != 1 || rec.authorityAsync[0].Generation == 0 {
 		t.Fatalf("transition did not pass lease authority to ApplyAsyncWithLeaseAuthority: %+v", rec.authorityAsync)

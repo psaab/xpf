@@ -1409,9 +1409,16 @@ the filter, #9141 on the resolver, #6535 on the converger). What had no cell was
 the WIRING between the apply and the applier — and a cell for a function is blind
 to its caller not calling it. `dhcp_apply_wiring_9349_test.go` drives
 `applyServicesReconcile` with a RECORDING applier and asserts on the config that
-actually reaches `Apply` / `ApplyClusterCommit`; the recorder deliberately
-re-implements nothing, because a fake that supplied the derivation could not
-observe production failing to.
+actually reaches the authority-bearing `ApplyWithLeaseAuthority` /
+`ApplyClusterCommitWithLeaseAuthority`; the recorder deliberately re-implements
+nothing, because a fake that supplied the derivation could not observe
+production failing to.
+
+The takeover pre-seed is also a required part of `dhcpApplier`: it directly calls
+`PreSeedMemfileMerged{4,6}WithAuthority` with the peer snapshot,
+still-mastering state and per-family authority. There is no optional capability
+assertion or legacy fallback. The two #9853 transition cells exercise both
+still-mastering states; their recording applier captures the passed authority.
 
 `pkg/grpcapi`'s `Config.DHCPServer` became a three-method `DHCPServerStatus`
 interface in the same change: leaving it concrete would have forced a type

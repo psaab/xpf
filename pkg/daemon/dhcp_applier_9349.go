@@ -37,9 +37,7 @@ import (
 type dhcpApplier interface {
 	Apply(cfg *config.DHCPServerConfig) error
 	ApplyWithLeaseAuthority(cfg *config.DHCPServerConfig, authority dhcpserver.LeaseApplyAuthority) error
-	ApplyClusterCommit(cfg *config.DHCPServerConfig) error
 	ApplyClusterCommitWithLeaseAuthority(cfg *config.DHCPServerConfig, authority dhcpserver.LeaseApplyAuthority) error
-	ApplyAsync(cfg *config.DHCPServerConfig, reason string)
 	ApplyAsyncWithLeaseAuthority(cfg *config.DHCPServerConfig, reason string, authority dhcpserver.LeaseApplyAuthority)
 	ClaimApplyRetry(now time.Time) bool
 	SetLeaseSyncEnabled(enabled bool)
@@ -47,14 +45,12 @@ type dhcpApplier interface {
 	LeaseAuthorityResult(family int) (uint64, []dhcpserver.LeaseScopeAuthority, bool)
 	AppliedGeneration(family int) uint64
 
-	GetSyncLeases4(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, error)
-	GetSyncLeases6(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, error)
 	GetSyncLeases4WithSource(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, bool, error)
 	GetSyncLeases6WithSource(ctx context.Context, now time.Time) ([]dhcpserver.SyncLease, bool, error)
 	SeedSyncLeases4(ctx context.Context, leases []dhcpserver.SyncLease, now time.Time) (int, error)
 	SeedSyncLeases6(ctx context.Context, leases []dhcpserver.SyncLease, now time.Time) (int, error)
-	PreSeedMemfileMerged4(ctx context.Context, peer []dhcpserver.SyncLease, now time.Time, stillMastering bool) error
-	PreSeedMemfileMerged6(ctx context.Context, peer []dhcpserver.SyncLease, now time.Time, stillMastering bool) error
+	PreSeedMemfileMerged4WithAuthority(ctx context.Context, peer dhcpserver.LeaseSyncSnapshot, now time.Time, stillMastering bool, authority dhcpserver.LeaseSyncAuthority) error
+	PreSeedMemfileMerged6WithAuthority(ctx context.Context, peer dhcpserver.LeaseSyncSnapshot, now time.Time, stillMastering bool, authority dhcpserver.LeaseSyncAuthority) error
 	WaitControlSocket4(ctx context.Context, within time.Duration) bool
 	WaitControlSocket6(ctx context.Context, within time.Duration) bool
 

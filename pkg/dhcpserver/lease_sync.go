@@ -984,9 +984,9 @@ func (m *Manager) PreSeedMemfileMerged6(ctx context.Context, peer []SyncLease, n
 	})
 }
 
-// PreSeedMemfileMerged4WithAuthority is the #10170 authority-aware v4
-// counterpart. It is additive so older callers retain the conservative
-// whole-union contract.
+// PreSeedMemfileMerged4WithAuthority is the v4 authority-aware pre-seed used by
+// daemon takeover and authority-aware merge tests. The legacy pair remains on
+// Manager only for pkg/dhcpserver's tests.
 func (m *Manager) PreSeedMemfileMerged4WithAuthority(ctx context.Context, peer LeaseSyncSnapshot, now time.Time, stillMastering bool, authority LeaseSyncAuthority) error {
 	return m.withQuiescedPreSeed(ctx, 4, now, func(local []SyncLease, live bool) error {
 		if !live && !stillMastering {

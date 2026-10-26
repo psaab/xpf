@@ -1016,7 +1016,10 @@ This package owns the KEA side of #2239 cross-chassis DHCP-server lease sync
   (#2386). DHCPv6 keys on DUID so the lease itself was never lost, but the
   empty column dropped hwaddr-based logging / reservation matching / operator
   visibility.
-- `PreSeedMemfileMerged{4,6}` — takeover's local+peer union. If Kea is active,
+- `PreSeedMemfileMerged{4,6}WithAuthority` — takeover's local+peer union. The
+  daemon calls only the authority-aware pair (with the peer snapshot and the
+  per-family lease authority); the legacy `PreSeedMemfileMerged{4,6}` remain on
+  the Manager for dhcpserver-level tests. If Kea is active,
   it issues `dhcp-disable` before reading the live lease set and keeps DHCP
   disabled through the atomic memfile install. The pre-seed invalidates Kea's
   cached loaded-config proof, so the queued takeover apply restarts Kea even if
