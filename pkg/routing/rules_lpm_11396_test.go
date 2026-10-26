@@ -20,9 +20,9 @@ func bestLeakRule11396(ops *fakeRuleOps, destination, ingress string) (netlink.R
 		if rule.Dst == nil || !rule.Dst.Contains(ip) {
 			continue
 		}
-		if isNextTableMainProbeShape(*rule) {
-			// This helper compares leak lookups only; it does not model a
-			// successful more-specific lookup in main before the target rule.
+		if isNextTableMainCarveoutShape(*rule) {
+			// This helper compares leak lookups only; static main-table
+			// exceptions occupy slot 0 and are tested separately.
 			continue
 		}
 		if rule.IifName != "" && rule.IifName != ingress {

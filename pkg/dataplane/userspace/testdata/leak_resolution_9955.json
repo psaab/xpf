@@ -164,7 +164,7 @@
       }
     ],
     "destination": "2001:db8:1::5",
-    "want_ifindex": 12
+    "want_ifindex": 14
   },
   {
     "name": "leak_versus_ordinary_inet_9955",
@@ -197,7 +197,7 @@
       }
     ],
     "destination": "10.1.2.5",
-    "want_ifindex": 12
+    "want_ifindex": 14
   },
   {
     "name": "nested_rib_group_overlap_vr_a_first_11396",

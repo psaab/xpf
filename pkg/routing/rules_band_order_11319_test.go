@@ -116,8 +116,10 @@ func TestKernelBandOrderAppliesInBothFamilies11319(t *testing.T) {
 			prefixLength, addressBits := rule.Dst.Mask.Size()
 			want := config.RouteLeakNextTableLookupPriority(prefixLength, addressBits)
 			switch {
-			case isNextTableMainProbeShape(rule):
-				want = config.RouteLeakNextTableProbePriority(prefixLength, addressBits)
+			case isNextTableMainCarveoutShape(rule):
+				want = config.RouteLeakNextTableCarveoutPriority(prefixLength, addressBits)
+			case isNextTableLegacyMainProbeShape(rule):
+				t.Errorf("new apply emitted a legacy suppress-prefixlen probe: %+v", rule)
 			case isNextTableMissTerminatorShape(rule):
 				want = config.RouteLeakNextTableShadowPriority(prefixLength, addressBits)
 			}

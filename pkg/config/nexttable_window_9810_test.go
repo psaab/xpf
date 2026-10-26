@@ -8,8 +8,10 @@ import (
 
 // STEP-0 RED cells for #9810 (SYN-WIN-01 counting unit + N==0 agreement).
 // Each route/ingress pair consumes one admission slot; the applier expands it
-// into three physical ip-rules. The strict gate and StaticRouteExclusions use
-// the same route/ingress accounting. With N=4 and L=30, only 25 routes fit.
+// into a target lookup and unreachable shadow. Separate static main-table
+// exceptions do not consume admission slots. The strict gate and
+// StaticRouteExclusions use the same route/ingress accounting. With N=4 and
+// L=30, only 25 routes fit.
 
 // mk9810LeakCfg builds a config with n unclaimed default-instance ingress
 // units (ge-0/0/0..n-1 unit 0) and L global next-table leaks at DISTINCT

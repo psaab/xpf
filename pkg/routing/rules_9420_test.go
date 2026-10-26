@@ -38,8 +38,8 @@ func TestNextTableRulesIngressScope_9420(t *testing.T) {
 
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		got := ops.rules[family]
-		if len(got) != 3*len(iifs) {
-			t.Fatalf("family %d: expected probe+lookup+shadow per ingress interface (%d), got %d: %v",
+		if len(got) != 2*len(iifs) {
+			t.Fatalf("family %d: expected lookup+shadow per ingress interface (%d), got %d: %v",
 				family, len(iifs), len(got), got)
 		}
 		seen := map[string]bool{}
@@ -51,9 +51,11 @@ func TestNextTableRulesIngressScope_9420(t *testing.T) {
 					"into table %d (#9420)", family, r, r.Priority, r.Table)
 			}
 			switch {
-			case isNextTableMainProbeShape(r):
-				if r.Table != mainTableID {
-					t.Errorf("family %d: main-table probe targets table %d, want %d", family, r.Table, mainTableID)
+			case isNextTableLegacyMainProbeShape(r):
+				t.Errorf("family %d: unexpected legacy main-table probe: %+v", family, r)
+			case isNextTableMainCarveoutShape(r):
+				if r.Table != mainTableID || r.SuppressPrefixlen != -1 {
+					t.Errorf("family %d: malformed main-table carve-out: %+v", family, r)
 				}
 			case isNextTableMissTerminatorShape(r):
 				if r.Type != nl.FR_ACT_UNREACHABLE {
@@ -124,7 +126,7 @@ func TestNextTableWindowIsLeakAtomic_9420(t *testing.T) {
 
 	instances := []*config.RoutingInstanceConfig{{Name: "dmz-vr", TableID: 101}}
 	// 3 interfaces × 34 leaks = 102 > the 100-entry cap, so the 34th leak
-	// must not install at all (33 × 3 interfaces × 3 rules = 297 rules).
+	// must not install at all (33 × 3 interfaces × 2 rules = 198 rules).
 	iifs := []string{"ge-0-0-0", "ge-0-0-1", "ge-0-0-2"}
 	var routes []*config.StaticRoute
 	for i := 0; i < 34; i++ {
@@ -146,8 +148,8 @@ func TestNextTableWindowIsLeakAtomic_9420(t *testing.T) {
 		t.Fatalf("truncation split a leak across interfaces: %d rules is not a "+
 			"multiple of %d", got, len(iifs))
 	}
-	if got != 297 {
-		t.Fatalf("expected 33 whole leaks (297 rules including probes and shadows), got %d", got)
+	if got != 198 {
+		t.Fatalf("expected 33 whole leaks (198 lookup and shadow rules), got %d", got)
 	}
 }
 

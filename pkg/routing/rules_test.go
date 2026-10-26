@@ -15,8 +15,8 @@ import (
 
 // testNextTableIifs is the #9420 ingress-scoping set used by next-table rule
 // tests: one default-instance ingress interface, so each route consumes one
-// admission slot and expands to a probe, lookup, and shadow.
-var testNextTableIifs = []string{"ge-0-0-0"}
+// admission slot and expands to a target lookup and shadow.
+var testNextTableIifs = []string{"ge-0-0-0.0"}
 
 // fakeRuleOps is an in-memory ip-rule table implementing ruleOps. It
 // records every RuleAdd/RuleDel so tests can assert exactly which
@@ -548,11 +548,11 @@ func TestNextTableRulesApply_Fake(t *testing.T) {
 	if !ops.hasTable(unix.AF_INET6, 101) {
 		t.Errorf("expected IPv6 next-table rule for table 101, rules=%v", ops.rules[unix.AF_INET6])
 	}
-	if got := ops.count(unix.AF_INET); got != 3 {
-		t.Errorf("expected 3 IPv4 rules (probe+lookup+shadow, unknown-vr skipped), got %d", got)
+	if got := ops.count(unix.AF_INET); got != 2 {
+		t.Errorf("expected 2 IPv4 rules (lookup+shadow, unknown-vr skipped), got %d", got)
 	}
-	if got := ops.count(unix.AF_INET6); got != 3 {
-		t.Errorf("expected 3 IPv6 rules (probe+lookup+shadow), got %d", got)
+	if got := ops.count(unix.AF_INET6); got != 2 {
+		t.Errorf("expected 2 IPv6 rules (lookup+shadow), got %d", got)
 	}
 }
 
@@ -597,7 +597,7 @@ func TestNextTableApplyAggregatesAddErrors(t *testing.T) {
 	if ops2.count(unix.AF_INET) != 0 {
 		t.Errorf("failed v4 rule must not be recorded, got %d", ops2.count(unix.AF_INET))
 	}
-	if ops2.count(unix.AF_INET6) != 3 {
+	if ops2.count(unix.AF_INET6) != 2 {
 		t.Errorf("sibling v6 sequence must still install (forward progress), got %d", ops2.count(unix.AF_INET6))
 	}
 }
@@ -620,14 +620,14 @@ func TestNextTableApplyIdempotentReapply(t *testing.T) {
 	if err := nt.Apply(routes, instances, testNextTableIifs); err != nil {
 		t.Fatalf("clean Apply must return nil, got %v", err)
 	}
-	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 6 {
-		t.Fatalf("expected 6 rules after clean apply (probe+lookup+shadow per family), got %d", got)
+	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 4 {
+		t.Fatalf("expected 4 rules after clean apply (lookup+shadow per family), got %d", got)
 	}
 	if err := nt.Apply(routes, instances, testNextTableIifs); err != nil {
 		t.Fatalf("idempotent re-apply must return nil, got %v", err)
 	}
-	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 6 {
-		t.Fatalf("re-apply must keep a stable rule set, got %d", got)
+	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 4 {
+		t.Fatalf("re-apply must keep a stable 4-rule set, got %d", got)
 	}
 }
 
@@ -658,8 +658,8 @@ func TestNextTableAdmissionCap(t *testing.T) {
 			t.Fatalf("Apply: %v", err)
 		}
 		total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6)
-		if total != 3*config.NextTableRuleWindow {
-			t.Fatalf("expected all %d routes programmed at the limit (probe+lookup+shadow), got %d", config.NextTableRuleWindow, total)
+		if total != 2*config.NextTableRuleWindow {
+			t.Fatalf("expected all %d routes programmed at the limit (lookup+shadow), got %d", config.NextTableRuleWindow, total)
 		}
 		assertNextTableLookupsInRange16614(t, ops)
 	})
@@ -675,8 +675,8 @@ func TestNextTableAdmissionCap(t *testing.T) {
 			t.Fatal("over-limit Apply must return a degraded error naming the cap (#6467)")
 		}
 		total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6)
-		if total != 3*config.NextTableRuleWindow {
-			t.Fatalf("expected cap to hold at %d programmed rules (probe+lookup+shadow), got %d", config.NextTableRuleWindow, total)
+		if total != 2*config.NextTableRuleWindow {
+			t.Fatalf("expected cap to hold at %d programmed rules (lookup+shadow), got %d", config.NextTableRuleWindow, total)
 		}
 
 		// Re-apply must leave no residue: every programmed rule is inside
@@ -687,8 +687,8 @@ func TestNextTableAdmissionCap(t *testing.T) {
 			t.Fatal("re-apply over-limit must still surface the degraded error (#6467)")
 		}
 		total = ops.count(unix.AF_INET) + ops.count(unix.AF_INET6)
-		if total != 3*config.NextTableRuleWindow {
-			t.Fatalf("re-apply leaked rules: expected %d, got %d", 3*config.NextTableRuleWindow, total)
+		if total != 2*config.NextTableRuleWindow {
+			t.Fatalf("re-apply leaked rules: expected %d, got %d", 2*config.NextTableRuleWindow, total)
 		}
 	})
 }
@@ -823,8 +823,9 @@ func assertAllRulesInRange(t *testing.T, ops *fakeRuleOps, lo, hi int) {
 }
 
 // assertNextTableLookupsInRange16614 verifies every admitted prefix has
-// exactly one main-table probe, target lookup, and unreachable shadow per
-// ingress interface, all inside clear()'s owned priority range.
+// exactly one target lookup and unreachable shadow per ingress interface. No
+// blanket main-table probe may be emitted; configured carve-outs are separate
+// slot-0 rules.
 func assertNextTableLookupsInRange16614(t *testing.T, ops *fakeRuleOps) {
 	t.Helper()
 	type ruleKey struct {
@@ -833,7 +834,6 @@ func assertNextTableLookupsInRange16614(t *testing.T, ops *fakeRuleOps) {
 		iif         string
 	}
 	lookups := make(map[ruleKey]netlink.Rule)
-	probes := make(map[ruleKey]netlink.Rule)
 	shadows := make(map[ruleKey]netlink.Rule)
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		for _, rule := range ops.rules[family] {
@@ -847,11 +847,13 @@ func assertNextTableLookupsInRange16614(t *testing.T, ops *fakeRuleOps) {
 			}
 			key := ruleKey{family: family, destination: rule.Dst.String(), iif: rule.IifName}
 			switch {
-			case isNextTableMainProbeShape(rule):
-				if _, exists := probes[key]; exists {
-					t.Errorf("duplicate main-table probe for %+v", key)
+			case isNextTableLegacyMainProbeShape(rule):
+				t.Errorf("new apply emitted a legacy suppress-prefixlen probe: %+v", rule)
+			case isNextTableMainCarveoutShape(rule):
+				prefixLength, addressBits := rule.Dst.Mask.Size()
+				if rule.Priority != config.RouteLeakNextTableCarveoutPriority(prefixLength, addressBits) {
+					t.Errorf("main carve-out priority %d does not match its prefix: %+v", rule.Priority, rule)
 				}
-				probes[key] = rule
 			case isNextTableMissTerminatorShape(rule):
 				if rule.Type != nl.FR_ACT_UNREACHABLE {
 					t.Errorf("shadow action %d, want unreachable: %+v", rule.Type, rule)
@@ -876,13 +878,6 @@ func assertNextTableLookupsInRange16614(t *testing.T, ops *fakeRuleOps) {
 		if lookup.Priority != config.RouteLeakNextTableLookupPriority(prefixLength, addressBits) {
 			t.Errorf("target lookup priority %d for %+v does not match its prefix", lookup.Priority, key)
 		}
-		probe, ok := probes[key]
-		if !ok {
-			t.Errorf("target lookup has no main-table probe: %+v", key)
-		} else if probe.Priority != config.RouteLeakNextTableProbePriority(prefixLength, addressBits) ||
-			probe.SuppressPrefixlen != prefixLength {
-			t.Errorf("main-table probe %+v does not match target lookup %+v", probe, lookup)
-		}
 		shadow, ok := shadows[key]
 		if !ok {
 			t.Errorf("target lookup has no unreachable shadow: %+v", key)
@@ -890,9 +885,8 @@ func assertNextTableLookupsInRange16614(t *testing.T, ops *fakeRuleOps) {
 			t.Errorf("miss shadow %+v does not match target lookup %+v", shadow, lookup)
 		}
 	}
-	if len(probes) != len(lookups) || len(shadows) != len(lookups) {
-		t.Errorf("triplet counts probes=%d lookups=%d shadows=%d differ",
-			len(probes), len(lookups), len(shadows))
+	if len(shadows) != len(lookups) {
+		t.Errorf("lookup/shadow counts %d/%d differ", len(lookups), len(shadows))
 	}
 }
 

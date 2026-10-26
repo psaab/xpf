@@ -492,19 +492,23 @@ var oracleIfindexes9955 = map[string]int{
 }
 
 // kernelStageOracle9955 is an expectation-only kernel model for corpus rows.
-// It is intentionally separate from buildRouteSnapshots and from the Rust
-// resolver under test: stage 1 scans matching NextTable rules by ascending
-// RulePriority and retries after a target-table miss; stage 2 performs ordinary
-// longest-prefix-match in main. This oracle supplies expected egress only.
+// Configured static main-table routes strictly more specific than a matching
+// next-table prefix get slot-0 carve-outs; target lookups and the ordinary main
+// lookup otherwise follow their installed prefix-derived priorities.
 func kernelStageOracle9955(routes []RouteSnapshot, destination string) int {
 	ip := net.ParseIP(destination)
 	if ip == nil {
 		return 0
 	}
 	family := "inet"
+	mainTable := "inet.0"
+	addressBits := 32
 	if strings.Contains(destination, ":") {
 		family = "inet6"
+		mainTable = "inet6.0"
+		addressBits = 128
 	}
+	mainIfindex, mainPrefix, mainHit := kernelTableChoice9955(routes, mainTable, family, ip)
 	leaks := make([]RouteSnapshot, 0)
 	for _, route := range routes {
 		if route.NextTable == "" || route.Family != family {
@@ -518,19 +522,33 @@ func kernelStageOracle9955(routes []RouteSnapshot, destination string) int {
 	sort.SliceStable(leaks, func(i, j int) bool {
 		return leaks[i].RulePriority < leaks[j].RulePriority
 	})
+	exceptionPriority := -1
+	if mainHit {
+		for _, leak := range leaks {
+			_, network, err := net.ParseCIDR(leak.Destination)
+			if err != nil || network == nil {
+				continue
+			}
+			leakPrefix, _ := network.Mask.Size()
+			if mainPrefix > leakPrefix {
+				exceptionPriority = config.RouteLeakNextTableCarveoutPriority(mainPrefix, addressBits)
+				break
+			}
+		}
+	}
 	for _, leak := range leaks {
+		if exceptionPriority >= 0 && exceptionPriority < int(leak.RulePriority) {
+			return mainIfindex
+		}
 		table := canonicalLeakTable9955(leak.NextTable, family)
-		if ifindex, hit := kernelTableChoice9955(routes, table, family, ip); hit {
+		if ifindex, _, hit := kernelTableChoice9955(routes, table, family, ip); hit {
 			return ifindex
 		}
 	}
-	if ifindex, hit := kernelTableChoice9955(routes, map[string]string{"inet": "inet.0", "inet6": "inet6.0"}[family], family, ip); hit {
-		return ifindex
-	}
-	return 0
+	return mainIfindex
 }
 
-func kernelTableChoice9955(routes []RouteSnapshot, table, family string, ip net.IP) (int, bool) {
+func kernelTableChoice9955(routes []RouteSnapshot, table, family string, ip net.IP) (int, int, bool) {
 	best := -1
 	bestPrefix := -1
 	bestPreference := 0
@@ -550,20 +568,20 @@ func kernelTableChoice9955(routes []RouteSnapshot, table, family string, ip net.
 		}
 	}
 	if best < 0 {
-		return 0, false
+		return 0, 0, false
 	}
 	if routes[best].Discard || len(routes[best].NextHops) == 0 {
-		return 0, true
+		return 0, bestPrefix, true
 	}
 	for _, nextHop := range routes[best].NextHops {
 		at := strings.LastIndexByte(nextHop, '@')
 		if at >= 0 {
 			if ifindex, ok := oracleIfindexes9955[nextHop[at+1:]]; ok {
-				return ifindex, true
+				return ifindex, bestPrefix, true
 			}
 		}
 	}
-	return 0, true
+	return 0, bestPrefix, true
 }
 
 func addTargetRoutesForShape9955(cfg *config.Config, family string, red, blue bool) {
@@ -655,8 +673,8 @@ func corpusControlShapes9955(t *testing.T) []leakCorpusShape9955 {
 			})
 		}
 
-		// A leak rule precedes the ordinary route in the kernel even when its
-		// prefix is broader, so stage 1 must choose red.
+		// A more-specific configured main route gets a slot-0 exception ahead
+		// of the broader target lookup, so stage 1 must choose main.
 		cfg = baseLeakConfig9955()
 		addTargetRoutesForShape9955(cfg, family, true, false)
 		if family == "inet6" {

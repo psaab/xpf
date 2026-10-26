@@ -11,7 +11,7 @@ import (
 
 // TestNextTableKernelProbe16614 uses the real RPDB in a private netns. A
 // narrower target-table miss must stop before a broad next-table rule, while
-// a still-more-specific main-table carve-out remains reachable.
+// the configured /24 main-table exception remains reachable.
 // Run: unshare -rn go test ./pkg/routing/ -run 16614 -v
 func TestNextTableKernelProbe16614(t *testing.T) {
 	ns := enterPrivateNetns7796(t)
@@ -25,6 +25,7 @@ func TestNextTableKernelProbe16614(t *testing.T) {
 	routes := []*config.StaticRoute{
 		{Destination: "10.0.0.0/8", NextTable: "red"},
 		{Destination: "10.99.0.0/16", NextTable: "black"},
+		{Destination: "10.99.0.0/24"},
 	}
 	instances := []*config.RoutingInstanceConfig{
 		{Name: "red", TableID: 100},
@@ -88,4 +89,138 @@ func TestNextTableKernelProbe16614(t *testing.T) {
 	if got := get("172.16.5.9"); !strings.Contains(got, "203.0.113.253") {
 		t.Errorf("172.16.5.9 = %q, want via 203.0.113.253", got)
 	}
+}
+
+func TestNextTableTerminalDefaultsAndCarveouts17970(t *testing.T) {
+	for _, family := range []string{"ipv4", "ipv6"} {
+		for _, terminal := range []string{"blackhole", "unreachable"} {
+			t.Run(family+"/"+terminal, func(t *testing.T) {
+				runNextTableTerminalDefaultCell17970(t, family == "ipv6", terminal)
+			})
+		}
+	}
+}
+
+func runNextTableTerminalDefaultCell17970(t *testing.T, ipv6 bool, terminal string) {
+	t.Helper()
+	_ = enterPrivateNetns7796(t)
+	h, err := netlink.NewHandle()
+	if err != nil {
+		t.Skipf("netlink handle: %v", err)
+	}
+	defer h.Close()
+
+	var routes []*config.StaticRoute
+	var leakPrefix, carveoutPrefix, controlPrefix, target, controlDst, source string
+	if ipv6 {
+		leakPrefix = "2001:db8:16::/48"
+		carveoutPrefix = "2001:db8:16::/64"
+		controlPrefix = "2001:db8:172::/48"
+		target = "2001:db8:16::/48"
+		controlDst = "2001:db8:172::5"
+		source = "2001:db8:ffff::99"
+		routes = []*config.StaticRoute{
+			{Destination: leakPrefix, NextTable: "red"},
+			{Destination: carveoutPrefix},
+			{Destination: "::/0", Reject: terminal == "unreachable", Discard: terminal == "blackhole"},
+			{Destination: controlPrefix},
+		}
+	} else {
+		leakPrefix = "198.18.0.0/16"
+		carveoutPrefix = "198.18.0.0/24"
+		controlPrefix = "172.16.0.0/16"
+		target = "198.18.0.0/16"
+		controlDst = "172.16.5.9"
+		source = "203.0.113.99"
+		routes = []*config.StaticRoute{
+			{Destination: leakPrefix, NextTable: "red"},
+			{Destination: carveoutPrefix},
+			{Destination: "0.0.0.0/0", Reject: terminal == "unreachable", Discard: terminal == "blackhole"},
+			{Destination: controlPrefix},
+		}
+	}
+	mgr := &nextTableManager{ops: dscpRuleOps{h}}
+	if err := mgr.Apply(routes, []*config.RoutingInstanceConfig{{Name: "red", TableID: 100}}, []string{"xwan"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	run := func(args ...string) (string, error) {
+		out, err := exec.Command("ip", args...).CombinedOutput()
+		return string(out), err
+	}
+	runFamily := func(args ...string) (string, error) {
+		if ipv6 {
+			args = append([]string{"-6"}, args...)
+		}
+		return run(args...)
+	}
+	for _, cmd := range [][]string{
+		{"link", "add", "xwan", "type", "dummy"},
+		{"link", "add", "xred", "type", "dummy"},
+		{"link", "set", "xwan", "up"},
+		{"link", "set", "xred", "up"},
+	} {
+		if out, err := run(cmd...); err != nil {
+			t.Fatalf("ip %v: %s: %v", cmd, out, err)
+		}
+	}
+	address := "203.0.113.1/24"
+	if ipv6 {
+		address = "2001:db8:ffff::1/64"
+	}
+	if out, err := runFamily("addr", "add", address, "dev", "xwan"); err != nil {
+		t.Fatalf("ip addr add %s: %s: %v", address, out, err)
+	}
+	if out, err := runFamily("route", "add", terminal, "default"); err != nil {
+		t.Fatalf("ip route add %s default: %s: %v", terminal, out, err)
+	}
+	for _, cmd := range [][]string{
+		{"route", "add", target, "dev", "xred", "table", "100"},
+		{"route", "add", carveoutPrefix, "dev", "xwan"},
+		{"route", "add", controlPrefix, "dev", "xwan"},
+	} {
+		if out, err := runFamily(cmd...); err != nil {
+			t.Fatalf("ip %v: %s: %v", cmd, out, err)
+		}
+	}
+
+	get := func(destination string) string {
+		args := []string{"route", "get", destination, "from", source, "iif", "xwan"}
+		out, _ := runFamily(args...)
+		return out
+	}
+	// Broad blackhole/unreachable defaults must not shadow a more-specific
+	// target-table hit. The destination is inside the leak but outside its /24
+	// main-table exception.
+	targetHit := "198.18.1.1"
+	carveoutHit := "198.18.0.1"
+	if ipv6 {
+		targetHit = "2001:db8:16:1::1"
+		carveoutHit = "2001:db8:16::1"
+	}
+	if got := get(targetHit); !strings.Contains(got, "dev xred") {
+		t.Errorf("%s broad-terminal target hit = %q, want target table via xred", familyName17970(ipv6), got)
+	}
+	if got := get(carveoutHit); !strings.Contains(got, "dev xwan") {
+		t.Errorf("%s carve-out with target hit = %q, want main route via xwan", familyName17970(ipv6), got)
+	}
+	if out, err := runFamily("route", "del", target, "dev", "xred", "table", "100"); err != nil {
+		t.Fatalf("remove target route: %s: %v", out, err)
+	}
+	if got := get(carveoutHit); !strings.Contains(got, "dev xwan") {
+		t.Errorf("%s carve-out with target miss = %q, want main route via xwan", familyName17970(ipv6), got)
+	}
+	if got := strings.ToLower(get(targetHit)); !strings.Contains(got, "unreachable") {
+		t.Errorf("%s target miss without carve-out = %q, want terminal unreachable shadow", familyName17970(ipv6), got)
+	}
+	if got := get(controlDst); !strings.Contains(got, "dev xwan") {
+		t.Errorf("%s no-leak control = %q, want main route via xwan", familyName17970(ipv6), got)
+	}
+}
+
+func familyName17970(ipv6 bool) string {
+	if ipv6 {
+		return "IPv6"
+	}
+	return "IPv4"
 }

@@ -102,9 +102,8 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
-	// #5854: next-table / interface-routes rib-group admission-cap gate. The
 	// runtime applier has separate caps (100 next-table route/ingress pairs,
-	// each expanded to a three-rule sequence; 1000 rib-group connected-prefix
+	// each expanded to a lookup and shadow; 1000 rib-group connected-prefix
 	// rules) and skips routes beyond them. A config exceeding a cap therefore
 	// used to commit green while the reconciler stopped at the limit and returned
 	// success — the committed generation CLAIMED routes the kernel never

@@ -1129,7 +1129,12 @@ fn lookup_forwarding_resolution_v4_inner(
             {
                 if config_next_table
                     .as_ref()
-                    .is_some_and(|(priority, _)| *priority <= leak.rule_priority)
+                    .is_some_and(|(priority, winner)| match winner {
+                        JunosNextTable::SourceTable { prefix_len } => {
+                            *prefix_len > leak.prefix.prefix_len()
+                        }
+                        _ => *priority <= leak.rule_priority,
+                    })
                 {
                     let (_, winner) = config_next_table
                         .take()
@@ -1138,6 +1143,7 @@ fn lookup_forwarding_resolution_v4_inner(
                         state,
                         dynamic_neighbors,
                         ip,
+                        table,
                         winner,
                         depth,
                         allow_tunnels,
@@ -1179,6 +1185,7 @@ fn lookup_forwarding_resolution_v4_inner(
                 state,
                 dynamic_neighbors,
                 ip,
+                table,
                 winner,
                 depth,
                 allow_tunnels,
@@ -1552,7 +1559,12 @@ fn lookup_forwarding_resolution_v6_inner(
             {
                 if config_next_table
                     .as_ref()
-                    .is_some_and(|(priority, _)| *priority <= leak.rule_priority)
+                    .is_some_and(|(priority, winner)| match winner {
+                        JunosNextTable::SourceTable { prefix_len } => {
+                            *prefix_len > leak.prefix.prefix_len()
+                        }
+                        _ => *priority <= leak.rule_priority,
+                    })
                 {
                     let (_, winner) = config_next_table
                         .take()
@@ -1561,6 +1573,7 @@ fn lookup_forwarding_resolution_v6_inner(
                         state,
                         dynamic_neighbors,
                         ip,
+                        table,
                         winner,
                         depth,
                         allow_tunnels,
@@ -1600,6 +1613,7 @@ fn lookup_forwarding_resolution_v6_inner(
                 state,
                 dynamic_neighbors,
                 ip,
+                table,
                 winner,
                 depth,
                 allow_tunnels,
@@ -1859,40 +1873,41 @@ enum JunosNextTable {
     /// The selected route is itself a next-table route whose target is
     /// unusable (empty): terminal, never a fall-through.
     Terminal,
+    /// The main-table LPM selected a configured ordinary/terminal route
+    /// more specific than this next-table candidate. Keep its prefix so it
+    /// can compete with more-specific kernel leaks before source lookup.
+    SourceTable { prefix_len: u8 },
 }
 
-/// #16614: if the LPM winner in `table` is a config next-table route,
-/// return its shared RPDB priority and hand-off. Ordinary and kernel-model
-/// rows return None. Connected wins at >= prefix length suppresses the
-/// hand-off, mirroring connected-beats-static in one Junos table.
+/// #17684: merge configured next-table rules with the main-table LPM result.
+/// A more-specific ordinary/discard/reject row suppresses a broader config
+/// hand-off or kernel leak, but a broad main route does not: slot-0 main
+/// exceptions are scoped to the source route's own prefix, while broad
+/// terminal defaults remain behind the target lookup. Go's RPDB exception
+/// rules enumerate only configured static routes; dynamic/connected/learned
+/// route parity remains the design follow-up in #17971, while this model keeps
+/// Junos LPM semantics for all source-table routes.
 fn junos_next_table_winner_v4(
     state: &ForwardingState,
     ip: Ipv4Addr,
     table: &str,
 ) -> Option<(u32, JunosNextTable)> {
     let routes = state.routes_v4.get(table)?;
-    // routes_v4 is sorted longest-prefix first, then preference
-    // (sort_routes); the first containing next-table-route row at the
-    // winning length/preference is the Junos winner. A longer ordinary
-    // route wins outright, so stop at the first containing row whose
-    // length is the maximum containing length.
     let mut best_len: Option<u8> = None;
     for route in routes {
-        if !route.prefix.contains(ip) {
+        if !route.prefix.contains(ip) || (!route.next_table_route && !route.next_table.is_empty()) {
             continue;
         }
         let len = route.prefix.prefix_len();
-        if best_len.is_some_and(|b| len < b) {
+        if best_len.is_some_and(|best| len < best) {
             break;
         }
         if best_len.is_none() {
-            // First containing row fixes the winning length; a connected
-            // prefix at >= this length wins inside select_v4_route.
-            if state
-                .connected_v4
-                .iter()
-                .any(|c| c.table == table && c.prefix.contains(ip) && c.prefix.prefix_len() >= len)
-            {
+            if state.connected_v4.iter().any(|connected| {
+                connected.table == table
+                    && connected.prefix.contains(ip)
+                    && connected.prefix.prefix_len() >= len
+            }) {
                 return None;
             }
             best_len = Some(len);
@@ -1906,13 +1921,21 @@ fn junos_next_table_winner_v4(
                 JunosNextTable::HandOff(route.next_table.clone()),
             ));
         }
-        // An ordinary/discard/reject row at the winning length with a
-        // better-or-equal preference sorting first wins; but rows are
-        // preference-sorted only within equal length, and the first
-        // containing row is already the best preference at this length.
-        // Any later next-table row at the same length has worse
-        // preference, so the ordinary winner stands.
-        return None;
+        let more_specific_than_leak = routes.iter().any(|candidate| {
+            candidate.next_table_route
+                && candidate.prefix.contains(ip)
+                && candidate.prefix.prefix_len() < len
+        }) || state.leak_rules_v4.get(table).is_some_and(|leaks| {
+            leaks.iter().any(|leak| {
+                !leak.post_table && leak.prefix.contains(ip) && leak.prefix.prefix_len() < len
+            })
+        });
+        if more_specific_than_leak {
+            return Some((
+                route.rule_priority,
+                JunosNextTable::SourceTable { prefix_len: len },
+            ));
+        }
     }
     None
 }
@@ -1925,19 +1948,19 @@ fn junos_next_table_winner_v6(
     let routes = state.routes_v6.get(table)?;
     let mut best_len: Option<u8> = None;
     for route in routes {
-        if !route.prefix.contains(ip) {
+        if !route.prefix.contains(ip) || (!route.next_table_route && !route.next_table.is_empty()) {
             continue;
         }
         let len = route.prefix.prefix_len();
-        if best_len.is_some_and(|b| len < b) {
+        if best_len.is_some_and(|best| len < best) {
             break;
         }
         if best_len.is_none() {
-            if state
-                .connected_v6
-                .iter()
-                .any(|c| c.table == table && c.prefix.contains(ip) && c.prefix.prefix_len() >= len)
-            {
+            if state.connected_v6.iter().any(|connected| {
+                connected.table == table
+                    && connected.prefix.contains(ip)
+                    && connected.prefix.prefix_len() >= len
+            }) {
                 return None;
             }
             best_len = Some(len);
@@ -1951,7 +1974,21 @@ fn junos_next_table_winner_v6(
                 JunosNextTable::HandOff(route.next_table.clone()),
             ));
         }
-        return None;
+        let more_specific_than_leak = routes.iter().any(|candidate| {
+            candidate.next_table_route
+                && candidate.prefix.contains(ip)
+                && candidate.prefix.prefix_len() < len
+        }) || state.leak_rules_v6.get(table).is_some_and(|leaks| {
+            leaks.iter().any(|leak| {
+                !leak.post_table && leak.prefix.contains(ip) && leak.prefix.prefix_len() < len
+            })
+        });
+        if more_specific_than_leak {
+            return Some((
+                route.rule_priority,
+                JunosNextTable::SourceTable { prefix_len: len },
+            ));
+        }
     }
     None
 }
@@ -1960,6 +1997,7 @@ fn resolve_junos_next_table_v4(
     state: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
     ip: Ipv4Addr,
+    table: &str,
     winner: JunosNextTable,
     depth: usize,
     allow_tunnels: bool,
@@ -1986,6 +2024,17 @@ fn resolve_junos_next_table_v4(
                 resolved
             }
         }
+        JunosNextTable::SourceTable { .. } => lookup_forwarding_resolution_v4_inner(
+            state,
+            dynamic_neighbors,
+            ip,
+            table,
+            depth,
+            false,
+            allow_tunnels,
+            ecmp_flow_hash,
+            suppress_nat_local,
+        ),
     }
 }
 
@@ -1993,6 +2042,7 @@ fn resolve_junos_next_table_v6(
     state: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
     ip: Ipv6Addr,
+    table: &str,
     winner: JunosNextTable,
     depth: usize,
     allow_tunnels: bool,
@@ -2019,6 +2069,17 @@ fn resolve_junos_next_table_v6(
                 resolved
             }
         }
+        JunosNextTable::SourceTable { .. } => lookup_forwarding_resolution_v6_inner(
+            state,
+            dynamic_neighbors,
+            ip,
+            table,
+            depth,
+            false,
+            allow_tunnels,
+            ecmp_flow_hash,
+            suppress_nat_local,
+        ),
     }
 }
 

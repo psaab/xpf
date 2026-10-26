@@ -33,8 +33,9 @@ type ruleOps interface {
 }
 
 // nextTableRulePriority is the shared base for destination-scoped next-table
-// and rib-group leak rules. Next-table reserves a main-table probe, target
-// lookup, and unreachable shadow before rib-group's equal-prefix slot.
+// and rib-group leak rules. Next-table reserves a target lookup and
+// unreachable shadow before rib-group's equal-prefix slot; configured static
+// main-table carve-outs use the next-table slot at their own prefix length.
 const nextTableRulePriority = config.NextTableRulePriorityBase
 
 // previousNextTableRulePriority is the post-#11319 next-table band retained
@@ -45,8 +46,8 @@ const previousNextTableRulePriority = 32000
 const legacyNextTableRulePriority = 100
 
 // maxNextTableRules caps admitted route/ingress pairs, not physical rule count.
-// Each pair installs a main-table probe, target lookup, and unreachable shadow;
-// the cap is shared with config validation and the userspace FIB mirror.
+// Each pair installs a target lookup and unreachable shadow; the cap is shared
+// with config validation and the userspace FIB mirror.
 const maxNextTableRules = config.NextTableRuleWindow
 
 // ribGroupRulePriority is the LEGACY base priority for the pre-#3876
@@ -177,6 +178,38 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		return errors.Join(errs...)
 	}
 
+	// The target lookup must run before any broad main-table terminal default.
+	// Preserve only the bounded config-owned carve-outs: for each configured
+	// non-next-table static route (ordinary or terminal) strictly more specific
+	// than a matching next-table prefix, install a main lookup at that route's
+	// prefix-derived slot 0, scoped to the same ingress interfaces.
+	// Dynamic, connected, and learned main routes remain the follow-up
+	// design in #17971.
+	var carveoutErrs []error
+	var addedCarveouts []*netlink.Rule
+	for _, rule := range nextTableMainCarveoutRules(routes, tableIDs, ingressIfaces) {
+		if err := n.ops.RuleAdd(rule); err != nil {
+			if !isRuleAlreadyPresent(err) {
+				carveoutErrs = append(carveoutErrs, fmt.Errorf(
+					"add next-table static main-table carve-out destination %s iif %s: %w",
+					rule.Dst, rule.IifName, err))
+			}
+		} else {
+			addedCarveouts = append(addedCarveouts, rule)
+		}
+	}
+	if len(carveoutErrs) != 0 {
+		for _, rule := range addedCarveouts {
+			if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
+				carveoutErrs = append(carveoutErrs, fmt.Errorf(
+					"roll back next-table static main-table carve-out destination %s iif %s: %w",
+					rule.Dst, rule.IifName, err))
+			}
+		}
+		errs = append(errs, carveoutErrs...)
+		return errors.Join(errs...)
+	}
+
 	// Admission counts rule slots reserved by each eligible leak. It is
 	// independent of rule priority and install/rollback outcome.
 	admitted := 0
@@ -202,7 +235,6 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		if dst.IP.To4() == nil {
 			family = unix.AF_INET6
 		}
-		probePriority := config.RouteLeakNextTableProbePriority(prefixLength, addressBits)
 		priority := config.RouteLeakNextTableLookupPriority(prefixLength, addressBits)
 		shadowPriority := config.RouteLeakNextTableShadowPriority(prefixLength, addressBits)
 
@@ -235,7 +267,7 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 			errs = append(errs, fmt.Errorf(
 				"next-table rule limit (%d admission slots) reached; %d next-table route(s) beyond "+
 					"the limit are not leaked — each leak costs one slot per default-instance "+
-					"ingress interface (%d here) and installs a three-rule sequence, so reduce "+
+					"ingress interface (%d here) and installs a two-rule sequence, so reduce "+
 					"the number of next-table routes",
 				maxNextTableRules, dropped, len(ingressIfaces)))
 			break
@@ -244,35 +276,15 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		// later fault/rollback cannot admit a further leak past it (GPT-1).
 		admitted += len(ingressIfaces)
 
-		// One priority-ordered rule sequence per ingress interface preserves
-		// main-table more-specific carve-outs while keeping misses fail-closed:
-		// main-table probe, target lookup, then unreachable shadow. Install the
-		// shadow and target lookup first so the probe cannot expose a miss to
-		// main before its fallback terminator exists.
+		// Keep misses fail-closed with the target lookup followed by an
+		// unreachable shadow. More-specific configured static main routes have
+		// separate slot-0, iif-scoped exceptions installed before these leak
+		// rules; dynamic main-table routes remain outside this bounded mechanism
+		// (#17971).
 		leakFailed := false
-		var probeRules []*netlink.Rule
 		var leakRules []*netlink.Rule
 		var shadowRules []*netlink.Rule
 		for _, iif := range ingressIfaces {
-			shadow := netlink.NewRule()
-			shadow.Dst = dst
-			shadow.Table = -1
-			shadow.Type = nl.FR_ACT_UNREACHABLE
-			shadow.Priority = shadowPriority
-			shadow.Family = family
-			shadow.IifName = iif
-			if err := n.ops.RuleAdd(shadow); err != nil {
-				if !isRuleAlreadyPresent(err) {
-					errs = append(errs, fmt.Errorf(
-						"add next-table miss terminator destination %s instance %s iif %s: %w",
-						sr.Destination, sr.NextTable, iif, err))
-					leakFailed = true
-					break
-				}
-			} else {
-				shadowRules = append(shadowRules, shadow)
-			}
-
 			rule := netlink.NewRule()
 			rule.Dst = dst
 			rule.Table = tableID
@@ -291,33 +303,26 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 				leakRules = append(leakRules, rule)
 			}
 
-			probe := netlink.NewRule()
-			probe.Dst = dst
-			probe.Table = mainTableID
-			probe.SuppressPrefixlen = prefixLength
-			probe.Priority = probePriority
-			probe.Family = family
-			probe.IifName = iif
-			if err := n.ops.RuleAdd(probe); err != nil {
+			shadow := netlink.NewRule()
+			shadow.Dst = dst
+			shadow.Table = -1
+			shadow.Type = nl.FR_ACT_UNREACHABLE
+			shadow.Priority = shadowPriority
+			shadow.Family = family
+			shadow.IifName = iif
+			if err := n.ops.RuleAdd(shadow); err != nil {
 				if !isRuleAlreadyPresent(err) {
 					errs = append(errs, fmt.Errorf(
-						"add next-table main-table probe destination %s instance %s iif %s: %w",
+						"add next-table miss terminator destination %s instance %s iif %s: %w",
 						sr.Destination, sr.NextTable, iif, err))
 					leakFailed = true
 					break
 				}
 			} else {
-				probeRules = append(probeRules, probe)
+				shadowRules = append(shadowRules, shadow)
 			}
 		}
 		if leakFailed {
-			for _, rule := range probeRules {
-				if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
-					errs = append(errs, fmt.Errorf(
-						"roll back next-table main-table probe destination %s instance %s iif %s: %w",
-						sr.Destination, sr.NextTable, rule.IifName, err))
-				}
-			}
 			for _, rule := range leakRules {
 				if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
 					errs = append(errs, fmt.Errorf(
@@ -397,12 +402,96 @@ func hasEligibleNextTableRoute(routes []*config.StaticRoute, tableIDs map[string
 // reintroduce the cross-VRF hijack for every VRF-bound daemon (FRR peering,
 // DHCP relay, syslog, RPM probes, IPsec). The narrowing is recorded in
 // docs/rib-group-route-leaking.md and pkg/routing/README.md.
+
 func DefaultInstanceIngressIfaces(cfg *config.Config) []string {
 	// #9810: the single shared implementation lives in pkg/config so the
 	// strict commit gate and the FIB/show verdict count the same set the
 	// applier installs per. This wrapper keeps the established call sites
 	// (daemon apply, tests) stable.
 	return config.DefaultInstanceIngressIfaces(cfg)
+}
+
+// nextTableMainCarveoutRules returns one iif-scoped main-table lookup for each
+// configured non-next-table static prefix strictly more specific than a
+// matching, eligible configured next-table prefix. This intentionally does
+// not inspect the live main table: dynamic, connected, and learned routes
+// require the follow-up mechanism tracked in #17971.
+func nextTableMainCarveoutRules(
+	routes []*config.StaticRoute,
+	tableIDs map[string]int,
+	ingressIfaces []string,
+) []*netlink.Rule {
+	type prefix struct {
+		dst       *net.IPNet
+		family    int
+		prefixLen int
+	}
+	var leakPrefixes []prefix
+	for _, route := range routes {
+		if route == nil || route.NoInstall || route.NextTable == "" {
+			continue
+		}
+		if _, ok := tableIDs[route.NextTable]; !ok {
+			continue
+		}
+		_, dst, err := net.ParseCIDR(route.Destination)
+		if err != nil {
+			continue
+		}
+		prefixLen, _ := dst.Mask.Size()
+		family := unix.AF_INET
+		if dst.IP.To4() == nil {
+			family = unix.AF_INET6
+		}
+		leakPrefixes = append(leakPrefixes, prefix{dst: dst, family: family, prefixLen: prefixLen})
+	}
+
+	var rules []*netlink.Rule
+	type carveoutKey struct {
+		family int
+		prefix string
+		ifname string
+	}
+	seen := make(map[carveoutKey]struct{})
+	for _, route := range routes {
+		if route == nil || route.NoInstall || route.NextTable != "" {
+			continue
+		}
+		_, dst, err := net.ParseCIDR(route.Destination)
+		if err != nil {
+			continue
+		}
+		prefixLen, addressBits := dst.Mask.Size()
+		family := unix.AF_INET
+		if dst.IP.To4() == nil {
+			family = unix.AF_INET6
+		}
+		matchesLeak := false
+		for _, leak := range leakPrefixes {
+			if leak.family == family && prefixLen > leak.prefixLen && leak.dst.Contains(dst.IP) {
+				matchesLeak = true
+				break
+			}
+		}
+		if !matchesLeak {
+			continue
+		}
+		for _, iif := range ingressIfaces {
+			key := carveoutKey{family: family, prefix: dst.String(), ifname: iif}
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			rule := netlink.NewRule()
+			rule.Dst = dst
+			rule.Table = mainTableID
+			rule.Priority = config.RouteLeakNextTableCarveoutPriority(prefixLen, addressBits)
+			rule.Family = family
+			rule.IifName = iif
+			rules = append(rules, rule)
+		}
+	}
+	return rules
 }
 
 // nextTableFamilyOrdered returns routes stably partitioned IPv4-first, so the
@@ -452,7 +541,7 @@ func hasNoAdditionalRuleSelectors(r netlink.Rule) bool {
 }
 
 // hasNoAdditionalRuleSelectorsExceptPrefixlen accepts only the selectors
-// emitted by xpf rules other than a main-table probe's suppression value.
+// emitted by xpf rules other than the legacy main-table probe's suppression.
 func hasNoAdditionalRuleSelectorsExceptPrefixlen(r netlink.Rule) bool {
 	return r.Mark == 0 && r.Mask == nil && r.Tos == 0 && r.TunID == 0 &&
 		r.Goto == -1 && r.Flow == -1 && r.SuppressIfgroup == -1 &&
@@ -500,7 +589,8 @@ func (n *nextTableManager) clear() error {
 			r.Priority < nextTableRulePriority+config.RouteLeakRulePriorityWindow &&
 			r.Dst != nil && r.IifName != ""
 		inCurrent := inCurrentWindow && leakShape
-		inCurrentProbe := inCurrentWindow && isNextTableMainProbeShape(r)
+		inCurrentProbe := inCurrentWindow && isNextTableLegacyMainProbeShape(r)
+		inCurrentCarveout := inCurrentWindow && isNextTableMainCarveoutShape(r)
 		inCurrentShadow := inCurrentWindow && isNextTableMissTerminatorShape(r)
 		inPrevious := r.Priority >= previousNextTableRulePriority &&
 			r.Priority < previousNextTableRulePriority+maxNextTableRules &&
@@ -511,7 +601,7 @@ func (n *nextTableManager) clear() error {
 		inLegacy := r.Priority >= legacyNextTableRulePriority &&
 			r.Priority < legacyNextTableRulePriority+maxNextTableRules &&
 			r.Dst != nil && leakShape
-		return inCurrent || inCurrentProbe || inCurrentShadow ||
+		return inCurrent || inCurrentProbe || inCurrentCarveout || inCurrentShadow ||
 			inPrevious || inLegacy || isNextTableMissTerminatorShape(r)
 	}
 	var errs []error
@@ -527,7 +617,7 @@ func (n *nextTableManager) clear() error {
 			}
 			// RuleList does not decode the fib-rule action, so a shadow
 			// delete must be attempted under the unreachable action; a
-			// lookup/probe delete under RTN_UNICAST.
+			// lookup/carve-out delete under RTN_UNICAST.
 			firstAction, secondAction := uint8(unix.RTN_UNICAST), uint8(nl.FR_ACT_UNREACHABLE)
 			if isNextTableMissTerminatorShape(r) {
 				firstAction, secondAction = secondAction, firstAction
@@ -550,18 +640,33 @@ func (n *nextTableManager) clear() error {
 	return errors.Join(errs...)
 }
 
-// isNextTableMainProbeShape recognizes the scoped main-table lookup that
-// admits routes more-specific than the config next-table prefix.
-func isNextTableMainProbeShape(r netlink.Rule) bool {
+// isNextTableLegacyMainProbeShape recognizes the old scoped main-table
+// suppress-prefixlen lookup so clear() can remove it during upgrade cleanup.
+func isNextTableLegacyMainProbeShape(r netlink.Rule) bool {
 	if r.Dst == nil || r.IifName == "" || r.Src != nil || r.OifName != "" ||
 		r.Table != mainTableID {
 		return false
 	}
 	prefixLength, addressBits := r.Dst.Mask.Size()
 	return prefixLength >= 0 && addressBits > 0 &&
-		r.Priority == config.RouteLeakNextTableProbePriority(prefixLength, addressBits) &&
+		r.Priority == config.RouteLeakNextTableCarveoutPriority(prefixLength, addressBits) &&
 		r.SuppressPrefixlen == prefixLength &&
 		hasNoAdditionalRuleSelectorsExceptPrefixlen(r)
+}
+
+// isNextTableMainCarveoutShape recognizes the iif-scoped, slot-0 main lookup
+// derived from a configured non-next-table static route. A selector-free
+// priority check distinguishes it from target lookups; old suppressed probes
+// are recognized separately for upgrade cleanup.
+func isNextTableMainCarveoutShape(r netlink.Rule) bool {
+	if r.Dst == nil || r.IifName == "" || r.Src != nil || r.OifName != "" ||
+		r.Table != mainTableID {
+		return false
+	}
+	prefixLength, addressBits := r.Dst.Mask.Size()
+	return prefixLength >= 0 && addressBits > 0 &&
+		r.Priority == config.RouteLeakNextTableCarveoutPriority(prefixLength, addressBits) &&
+		hasNoAdditionalRuleSelectors(r)
 }
 
 // isNextTableMissTerminatorShape reports a listed legacy or current shadow.
@@ -997,6 +1102,11 @@ func splitConnectedPrefixesByFamily(prefixes []string) (v4, v6 []string) {
 // than swallowed; see the rationale on nextTableManager.clear (#2273).
 func (rg *ribGroupManager) clear() error {
 	return clearMatchingRules(rg.ops, "rib-group", func(r netlink.Rule) bool {
+		// Slot-0 main-table exceptions are owned by nextTableManager. Keep
+		// them even if future rib-group ownership matching broadens.
+		if isNextTableMainCarveoutShape(r) {
+			return false
+		}
 		inCurrent := r.Priority >= ribGroupLeakRulePriority &&
 			r.Priority < ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow &&
 			r.Dst != nil && r.IifName == "" && r.OifName == "" &&

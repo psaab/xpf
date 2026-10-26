@@ -35,12 +35,12 @@ func TestManagementInterfacesDoNotGetNextTableIngressRules_12061(t *testing.T) {
 		}
 	}
 	want := map[string]bool{"ge-0-0-1": true, "ge-0-0-2": true}
-	if count != 3*len(want) || len(got) != len(want) {
-		t.Fatalf("installed %d rules for ingress ifnames %v; want 3 each for only %v", count, got, want)
+	if count != 2*len(want) || len(got) != len(want) {
+		t.Fatalf("installed %d rules for ingress ifnames %v; want 2 each for only %v", count, got, want)
 	}
 	for iif := range want {
-		if got[iif] != 3 {
-			t.Errorf("ordinary ingress %q received %d rules, want probe+lookup+shadow", iif, got[iif])
+		if got[iif] != 2 {
+			t.Errorf("ordinary ingress %q received %d rules, want lookup+shadow", iif, got[iif])
 		}
 	}
 	for iif := range got {

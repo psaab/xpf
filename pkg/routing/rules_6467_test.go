@@ -60,11 +60,11 @@ func TestNextTableApplyCapAggregatesDegradedError(t *testing.T) {
 	if !strings.Contains(err.Error(), fmt.Sprintf("; %d next-table route(s) beyond ", over)) {
 		t.Errorf("degraded error must name the %d dropped leaks, got %v", over, err)
 	}
-	// The cap still holds: exactly NextTableRuleWindow rules install. Their
-	// prefix-derived priorities remain in the shared destination-leak range.
-	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 3*config.NextTableRuleWindow {
+	// The cap still holds: exactly NextTableRuleWindow leaks install two rules
+	// each. Their prefix-derived priorities remain in the shared leak range.
+	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 2*config.NextTableRuleWindow {
 		t.Errorf("expected the cap to hold at %d installed rules, got %d",
-			3*config.NextTableRuleWindow, total)
+			2*config.NextTableRuleWindow, total)
 	}
 	assertNextTableLookupsInRange16614(t, ops)
 }
@@ -91,7 +91,7 @@ func TestNextTableApplyUnderCapNoError(t *testing.T) {
 		t.Fatalf("exactly %d next-table routes must apply without a degraded error, got %v",
 			config.NextTableRuleWindow, err)
 	}
-	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 3*config.NextTableRuleWindow {
+	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 2*config.NextTableRuleWindow {
 		t.Fatalf("expected all %d routes programmed at the limit, got %d",
 			config.NextTableRuleWindow, total)
 	}
@@ -151,9 +151,9 @@ func TestNextTableApplyDroppedCountCountsOnlyEligible(t *testing.T) {
 	if strings.Contains(err.Error(), "; 80 next-table route(s) beyond ") {
 		t.Errorf("drop count must NOT include the 30 dangling routes that never install, got %v", err)
 	}
-	// Only the window's worth of valid rules installed.
-	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 3*config.NextTableRuleWindow {
-		t.Errorf("expected the cap to hold at %d installed rules, got %d", 3*config.NextTableRuleWindow, total)
+	// Only the window's worth of valid lookup/shadow pairs installed.
+	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 2*config.NextTableRuleWindow {
+		t.Errorf("expected the cap to hold at %d installed rules, got %d", 2*config.NextTableRuleWindow, total)
 	}
 }
 
@@ -207,9 +207,8 @@ func TestNextTableApplyDroppedCountExcludesMalformedCIDR(t *testing.T) {
 	if strings.Contains(err.Error(), "; 51 next-table route(s) beyond ") {
 		t.Errorf("drop count must NOT count the malformed-CIDR route that never installs, got %v", err)
 	}
-	// The malformed route must not be installed, and the cap holds at the window.
-	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 3*config.NextTableRuleWindow {
-		t.Errorf("expected the cap to hold at %d installed rules, got %d", 3*config.NextTableRuleWindow, total)
+	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != 2*config.NextTableRuleWindow {
+		t.Errorf("expected the cap to hold at %d installed rules, got %d", 2*config.NextTableRuleWindow, total)
 	}
 }
 
@@ -276,19 +275,19 @@ func TestNextTableDrawsDownV4FirstRegardlessOfCallerOrder6583(t *testing.T) {
 	_ = nt.Apply(routes, instances, testNextTableIifs)
 
 	gotV4, gotV6 := ops.count(unix.AF_INET), ops.count(unix.AF_INET6)
-	if total := gotV4 + gotV6; total != 3*config.NextTableRuleWindow {
+	if total := gotV4 + gotV6; total != 2*config.NextTableRuleWindow {
 		t.Fatalf("installed %d rules (v4=%d v6=%d), want the cap %d — fixture is not "+
 			"over-subscribing the window, so the draw-down order is not observable",
-			total, gotV4, gotV6, 3*config.NextTableRuleWindow)
+			total, gotV4, gotV6, 2*config.NextTableRuleWindow)
 	}
-	if gotV4 != 3*perFamily {
-		t.Errorf("v4 installed %d of %d offered (x3 with probes, lookups, and shadows). IPv4 must draw the window down FIRST "+
+	if gotV4 != 2*perFamily {
+		t.Errorf("v4 installed %d of %d offered (x2 with lookups and shadows). IPv4 must draw the window down FIRST "+
 			"so the kernel agrees with the userspace FIB, which programs inet.0 before "+
 			"inet6.0. The caller offered v6 first and the window followed it (#6583).",
 			gotV4, perFamily)
 	}
-	if want := 3 * (config.NextTableRuleWindow - perFamily); gotV6 != want {
-		t.Errorf("v6 installed %d, want %d (the remainder after v4 draws down first, x3 with helper rules)", gotV6, want)
+	if want := 2 * (config.NextTableRuleWindow - perFamily); gotV6 != want {
+		t.Errorf("v6 installed %d, want %d (the remainder after v4 draws down first, x2 with helper rules)", gotV6, want)
 	}
 
 	// The families must not interleave in the window either: every v4 rule
@@ -296,7 +295,7 @@ func TestNextTableDrawsDownV4FirstRegardlessOfCallerOrder6583(t *testing.T) {
 	// pass on an alternating layout that still splits differently from the FIB.
 	maxV4, minV6 := -1, 1<<30
 	for _, r := range ops.rules[unix.AF_INET] {
-		if isNextTableMainProbeShape(r) || isNextTableMissTerminatorShape(r) {
+		if isNextTableLegacyMainProbeShape(r) || isNextTableMainCarveoutShape(r) || isNextTableMissTerminatorShape(r) {
 			continue
 		}
 		if r.Priority > maxV4 {
@@ -304,7 +303,7 @@ func TestNextTableDrawsDownV4FirstRegardlessOfCallerOrder6583(t *testing.T) {
 		}
 	}
 	for _, r := range ops.rules[unix.AF_INET6] {
-		if isNextTableMainProbeShape(r) || isNextTableMissTerminatorShape(r) {
+		if isNextTableLegacyMainProbeShape(r) || isNextTableMainCarveoutShape(r) || isNextTableMissTerminatorShape(r) {
 			continue
 		}
 		if r.Priority < minV6 {
@@ -322,9 +321,9 @@ func TestNextTableDrawsDownV4FirstRegardlessOfCallerOrder6583(t *testing.T) {
 	// order, and the FIB's per-family pass walks the config slice in order. A
 	// partition that grouped correctly but shuffled inside the group would
 	// match on COUNTS and still install a different SET than the FIB.
-	byPrio := make([]netlink.Rule, 0, len(ops.rules[unix.AF_INET])/3)
+	byPrio := make([]netlink.Rule, 0, len(ops.rules[unix.AF_INET])/2)
 	for _, r := range ops.rules[unix.AF_INET] {
-		if !isNextTableMainProbeShape(r) && !isNextTableMissTerminatorShape(r) {
+		if !isNextTableLegacyMainProbeShape(r) && !isNextTableMainCarveoutShape(r) && !isNextTableMissTerminatorShape(r) {
 			byPrio = append(byPrio, r)
 		}
 	}
@@ -378,9 +377,9 @@ func TestNextTableCapHoldsOnMixedFamilyFixture6583(t *testing.T) {
 		t.Errorf("degraded error must name the %d dropped leaks on a mixed-family set, got %v", over, err)
 	}
 	gotV4, gotV6 := ops.count(unix.AF_INET), ops.count(unix.AF_INET6)
-	if gotV4+gotV6 != 3*config.NextTableRuleWindow {
+	if gotV4+gotV6 != 2*config.NextTableRuleWindow {
 		t.Errorf("mixed-family cap: installed v4=%d v6=%d (total %d), want %d",
-			gotV4, gotV6, gotV4+gotV6, 3*config.NextTableRuleWindow)
+			gotV4, gotV6, gotV4+gotV6, 2*config.NextTableRuleWindow)
 	}
 	if gotV6 == 0 {
 		t.Error("the mixed-family fixture installed ZERO v6 rules — the v6 term is still " +

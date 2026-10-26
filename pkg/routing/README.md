@@ -384,14 +384,20 @@ external networkd restart is healed without a commit.
   nexthops still fail verification.
 - `30000–30999`: the shared destination-leak priority range for next-table
   inter-VRF leaks and rib-group per-prefix interface-route leaks.
-  `config.RouteLeakRulePriority` assigns a four-priority sequence per prefix:
-  next-table main-table probe, target lookup, unreachable miss shadow, then
-  rib-group lookup. More-specific prefixes receive lower (earlier) priorities,
-  independent of leak source. This lets a more-specific main-table route
-  carve out a destination before a less-specific next-table handoff.
-  See [`docs/rib-group-route-leaking.md`](../../docs/rib-group-route-leaking.md)
-  for the supported Junos interface-route leak configuration and kernel/helper
-  precedence details.
+  `config.RouteLeakRulePriority` reserves four ordered slots per prefix:
+  configured main-table exception (slot 0), next-table target lookup,
+  unreachable miss shadow, and rib-group lookup. More-specific prefixes receive
+  lower (earlier) priorities, independent of leak source.
+
+  The kernel does not install a blanket main-table probe: a broad blackhole or
+  unreachable default is terminal even when `SuppressPrefixlen` is set, so it
+  can prevent a more-specific next-table target lookup from running. Target
+  lookup therefore precedes broad main routes. To retain Junos carve-outs,
+  the manager adds slot-0 main lookups for configured non-next-table static
+  routes strictly inside matching next-table prefixes, scoped to the same
+  default-instance ingress interfaces. The exception set is bounded by the
+  static configuration; dynamic, connected, and learned main routes remain
+  the follow-up design tracked in #17971.
 
   The `maxNextTableRules` admission cap remains separate from priority
   assignment. Its eligible routes are drawn down IPv4-first (#6583), with
@@ -399,8 +405,9 @@ external networkd restart is healed without a commit.
   The userspace FIB mirrors this cap and family order
   (`pkg/dataplane/userspace/routes.go`: `addRoutes("inet.0", …)` then
   `addRoutes("inet6.0", …)`), so kernel and FIB admit the same route set.
-  Each admitted next-table route expands to a scoped probe, lookup, and shadow
-  per default-instance ingress interface; rib-group lookups use the fourth
+  Each admitted next-table route expands to a scoped target lookup and
+  unreachable shadow per default-instance ingress interface; slot-0 static
+  exceptions do not consume admission slots. Rib-group lookups use the fourth
   priority slot.
 
   Rib-group admission is bounded independently for IPv4 and IPv6 (#11442):
@@ -440,11 +447,11 @@ external networkd restart is healed without a commit.
   default instance is the authoring instance. Consequences:
 
   - **One admission slot per leak and default-instance ingress interface**
-    expands to a three-rule sequence (main-table probe, target lookup, and
-    unreachable shadow). The 100-entry admission cap is drawn down
-    **leak-atomically** — a leak whose full expansion does not fit is dropped
-    whole rather than installed on a subset of its interfaces. The overflow
-    error names the multiplier.
+    expands to a two-rule sequence (target lookup and unreachable shadow).
+    Configured static main-table exceptions are separately derived at slot 0.
+    The 100-entry admission cap is drawn down **leak-atomically** — a leak
+    whose full expansion does not fit is dropped whole rather than installed
+    on a subset of its interfaces. The overflow error names the multiplier.
   - **Fail-closed**, matching `BuildPBRRules`: with no resolvable ingress
     interface, nothing is installed and the apply reports degraded. The
     fail-safe direction is an under-steer, never a cross-VRF over-steer.
@@ -648,8 +655,10 @@ external networkd restart is healed without a commit.
   inside the shared `30000–30999` band; `nextTableManager.clear()` still
   recognizes the old selector-identical shadow for in-place upgrades.
   In the AF_XDP FIB, config statics remain Junos routes (LPM + terminal target
-  miss, protocol v73). Kernel main-table carve-outs are rescued by the
-  suppress-prefixlen probe before the next-table target lookup.
+  miss, protocol v73). The kernel's target lookup runs before broad main-table
+  terminal defaults; configured static main routes more specific than a matching
+  next-table leak are represented by iif-scoped slot-0 exceptions. Dynamic,
+  connected, and learned route parity remains tracked in #17971.
 - `32000–32099`: legacy next-table leak priorities, cleared only to remove
   stale rules left by an in-place upgrade.
 - `33000–33099`: legacy pre-#3876 blanket rib-group rules. New rules are

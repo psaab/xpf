@@ -471,8 +471,8 @@ func TestNextTableRollbackDeleteFailureSurfaced_9810(t *testing.T) {
 		t.Errorf("two rollback deletes failed, so the partial first leak should remain twice; got %d",
 			byDestination["10.21.0.0/16"])
 	}
-	if byDestination["10.22.0.0/16"] != 3*len(iifs) {
-		t.Errorf("the later leak should install its probe, lookup, and shadow on all interfaces; got %d copies",
+	if byDestination["10.22.0.0/16"] != 2*len(iifs) {
+		t.Errorf("the later leak should install its lookup and shadow on all interfaces; got %d copies",
 			byDestination["10.22.0.0/16"])
 	}
 }

@@ -11,28 +11,28 @@ const (
 	RouteLeakRibGroup
 )
 
-// RouteLeakNextTableProbePriority returns the main-table LPM probe that allows
-// more-specific main-table routes to carve out destinations from a leak.
-func RouteLeakNextTableProbePriority(prefixLength, addressBits int) int {
+// RouteLeakNextTableCarveoutPriority returns the slot-0 priority used by
+// configured main-table exceptions to next-table leaks.
+func RouteLeakNextTableCarveoutPriority(prefixLength, addressBits int) int {
 	return RouteLeakRulePriority(prefixLength, addressBits, RouteLeakNextTable)
 }
 
 // RouteLeakNextTableLookupPriority returns the target-table lookup priority.
 func RouteLeakNextTableLookupPriority(prefixLength, addressBits int) int {
-	return RouteLeakNextTableProbePriority(prefixLength, addressBits) + 1
+	return RouteLeakNextTableCarveoutPriority(prefixLength, addressBits) + 1
 }
 
 // RouteLeakNextTableShadowPriority returns the fail-closed miss priority.
 func RouteLeakNextTableShadowPriority(prefixLength, addressBits int) int {
-	return RouteLeakNextTableProbePriority(prefixLength, addressBits) + 2
+	return RouteLeakNextTableCarveoutPriority(prefixLength, addressBits) + 2
 }
 
 // RouteLeakRulePriority returns the first of four priorities reserved for a
-// leak. The sequence is [main-probe, target lookup, unreachable shadow,
-// rib-group], so assigning priorities as (addressBits-prefixLength)*4+kind
-// keeps every longer prefix's complete sequence before every shorter prefix.
-// Next-table rows use slot 0; kernel-model rib-group rows use slot 3. Callers
-// pass the parsed prefix and address bit lengths.
+// leak prefix. The slots are [configured main carve-out, target lookup,
+// unreachable shadow, rib-group], so assigning priorities as
+// (addressBits-prefixLength)*4+kind keeps every longer prefix's complete
+// sequence before every shorter prefix. Next-table rows use slot 0; kernel-
+// model rib-group rows use slot 3. Callers pass parsed prefix and address bits.
 func RouteLeakRulePriority(prefixLength, addressBits int, kind RouteLeakRuleKind) int {
 	return NextTableRulePriorityBase + RouteLeakRulePriorityStride*(addressBits-prefixLength) + int(kind)*3
 }

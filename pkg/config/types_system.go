@@ -1213,8 +1213,8 @@ const (
 	// PBRRulePriorityBase.
 	LegacyPBRRulePriorityBase = 31000
 	// NextTableRulePriorityBase is the start of the shared destination-leak
-	// priority range. Each prefix reserves four ordered slots: next-table
-	// main-table probe, next-table target lookup, next-table unreachable
+	// priority range. Each prefix reserves four ordered slots: configured
+	// main-table exception, next-table target lookup, next-table unreachable
 	// shadow, and rib-group lookup. Prefix-derived offsets keep every more
 	// specific prefix's slots ahead of every broader prefix's slots; the range
 	// remains after PBR and before the kernel main rule.
@@ -1231,8 +1231,8 @@ const (
 	NextTableMissTerminatorPriority = 32765
 	// NextTableRuleWindow caps admission units, not physical kernel rules.
 	// Each admitted leak consumes one unit per default-instance ingress
-	// interface (#9810) and expands to a three-rule sequence.
-	// The applier, commit-time gate, and userspace FIB mirror share this cap.
+	// interface (#9810) and expands to a target lookup and shadow. The applier,
+	// commit-time gate, and userspace FIB mirror share this cap.
 	NextTableRuleWindow = 100
 )
 
