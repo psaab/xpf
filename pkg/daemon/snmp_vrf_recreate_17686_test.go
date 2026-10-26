@@ -59,44 +59,63 @@ func TestReconcileSNMPTransientLookupErrorDoesNotBounce17686(t *testing.T) {
 	}
 }
 
-// TestReconcileSNMPAdoptsLiveIndexWhenRecordedUnknown17686 pins #17686
-// (Astra lane): when the recorded index is 0 (post-bind lookup failed at
-// start), a later reconcile must adopt the live index without bouncing, so
-// a subsequent re-create becomes detectable.
+// TestReconcileSNMPUnknownIndexRebindsOnFirstSuccessfulLookup17686 covers
+// #17686's start-time lookup failure. With no recorded ifindex, a later live
+// index cannot prove which device the existing socket bound to: vrf-mgmt may
+// have been re-created before this first successful check. Rebinding once
+// establishes a trustworthy index; subsequent re-creates remain detectable.
 //
-// Mutation check: remove the adoption assignment and the final re-create
-// arm fails — the index stays 0 and no restart happens.
-func TestReconcileSNMPAdoptsLiveIndexWhenRecordedUnknown17686(t *testing.T) {
-	f := newSNMPVRFRecreateFixture16626(t)
-	cfg := f.d.store.ActiveConfig()
-	first := f.d.snmpAgent
+// Mutation check: adopt the live index without restarting, and the
+// recreate-before-first-success arm leaves the listener pinned to index 77
+// while recording index 99.
+func TestReconcileSNMPUnknownIndexRebindsOnFirstSuccessfulLookup17686(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		liveIndex int
+	}{
+		{name: "unchanged device", liveIndex: 77},
+		{name: "recreated before first successful lookup", liveIndex: 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSNMPVRFRecreateFixture16626(t)
+			cfg := f.d.store.ActiveConfig()
+			first := f.d.snmpAgent
 
-	// Simulate the start-time lookup failure the Astra lane names.
-	f.d.snmpReconMu.Lock()
-	f.d.snmpVRFIndex = 0
-	f.d.snmpReconMu.Unlock()
+			// Simulate an unavailable post-bind lookup, followed optionally
+			// by a same-name VRF re-create before the next successful lookup.
+			f.d.snmpReconMu.Lock()
+			f.d.snmpVRFIndex = 0
+			f.d.snmpReconMu.Unlock()
+			f.recreateAt(tc.liveIndex)
 
-	if f.d.reconcileSNMP(cfg) {
-		t.Fatal("adoption reconcile reported a change (listener bounced)")
-	}
-	if got := f.rec.count(); got != 1 || f.d.snmpAgent != first {
-		t.Fatalf("adoption reconcile bounced SNMP: starts=%d sameAgent=%v, want 1/true",
-			got, f.d.snmpAgent == first)
-	}
-	if f.d.snmpVRFIndex != 77 {
-		t.Fatalf("recorded index after adoption = %d, want 77 (adopted live index)", f.d.snmpVRFIndex)
-	}
+			if !f.d.reconcileSNMP(cfg) {
+				t.Fatal("first successful lookup with unknown bound index did not rebind SNMP")
+			}
+			if got := f.rec.count(); got != 2 {
+				t.Fatalf("SNMP starts after unknown-index lookup = %d, want 2", got)
+			}
+			if f.d.snmpAgent == first || f.d.snmpAgent == nil {
+				t.Fatal("unknown-index listener kept the agent bound before the successful lookup")
+			}
+			if f.d.snmpVRFIndex != tc.liveIndex {
+				t.Fatalf("recorded SNMP VRF ifindex = %d, want %d", f.d.snmpVRFIndex, tc.liveIndex)
+			}
 
-	// After adoption, a re-create at a new index must be detected.
-	f.recreateAt(99)
-	if !f.d.reconcileSNMP(cfg) {
-		t.Fatal("reconcile after adopted-index VRF re-create did not restart")
-	}
-	if got := f.rec.count(); got != 2 {
-		t.Fatalf("SNMP starts after adopted-index re-create = %d, want 2", got)
-	}
-	if f.d.snmpVRFIndex != 99 {
-		t.Fatalf("recorded index after restart = %d, want 99", f.d.snmpVRFIndex)
+			// The new listener has an authoritative index now, so a later
+			// same-name re-create must still be detected.
+			nextIndex := tc.liveIndex + 1
+			f.recreateAt(nextIndex)
+			if !f.d.reconcileSNMP(cfg) {
+				t.Fatal("re-create after unknown-index rebind did not restart SNMP")
+			}
+			if got := f.rec.count(); got != 3 {
+				t.Fatalf("SNMP starts after later re-create = %d, want 3", got)
+			}
+			if f.d.snmpVRFIndex != nextIndex {
+				t.Fatalf("recorded SNMP VRF ifindex after later re-create = %d, want %d",
+					f.d.snmpVRFIndex, nextIndex)
+			}
+		})
 	}
 }
 

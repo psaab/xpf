@@ -409,10 +409,11 @@ monitor to the committed config:
   so the old socket stays bound to a dead index and polls go unanswered. The
   daemon records the VRF ifindex at start (`snmpVRFIndex`); `reconcileSNMP`
   restarts on a changed index or a confirmed `LinkNotFoundError`, but ignores
-  transient link-lookup errors and adopts a live index if the initial lookup
-  failed. The periodic management reassert tick also checks for an ifindex
-  mismatch, so it heals a recreation performed by another reassert owner
-  without a commit or daemon restart.
+  transient link-lookup errors. If the initial index lookup failed, a successful
+  live lookup restarts/rebinds once because it cannot prove whether the device
+  was re-created before that first success. The periodic management reassert
+  tick also checks for an ifindex mismatch, so it heals a recreation performed
+  by another reassert owner without a commit or daemon restart.
 
 `snmpEnabled` is the single predicate both the boot start (`daemon_run.go`) and
 `reconcileSNMP` use, so boot and day-2 can never disagree on what "SNMP is on"

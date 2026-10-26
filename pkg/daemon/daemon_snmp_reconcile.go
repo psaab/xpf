@@ -742,16 +742,14 @@ func (d *Daemon) reconcileSNMP(cfg *config.Config) bool {
 	// #16626: SO_BINDTODEVICE resolves the VRF name to an ifindex when the
 	// socket binds. Only a confirmed not-found lookup proves the device is
 	// absent and forces a restart. Other netlink errors are transient/unknown,
-	// so retain the healthy listener and its last known index. A zero recorded
-	// index means the post-bind lookup was unavailable; adopt a live index
-	// without bouncing so later same-name re-creates remain detectable.
+	// so retain the healthy listener and last known index. A zero recorded
+	// index cannot prove which ifindex the existing socket bound to; the first
+	// successful lookup forces a restart/rebind before recording the live index.
 	vrfIndexChanged := false
 	if vrfDevice != "" && d.snmpVRFDevice == vrfDevice {
 		live, err := d.fabricLinkByName(vrfDevice)
 		if d.snmpVRFIndex == 0 {
-			if err == nil && live != nil && live.Attrs() != nil {
-				d.snmpVRFIndex = live.Attrs().Index
-			}
+			vrfIndexChanged = err == nil && live != nil && live.Attrs() != nil
 		} else if err != nil {
 			vrfIndexChanged = isSNMPVRFLinkNotFound(err)
 		} else if live != nil && live.Attrs() != nil {
