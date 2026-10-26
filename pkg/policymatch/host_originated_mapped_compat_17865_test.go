@@ -72,7 +72,6 @@ func TestHostOriginatedV4MappedCompatExempt17865(t *testing.T) {
 		})
 	}
 
-
 	// Controls: the #16803 ingress drop is unchanged when the query is NOT
 	// host-originated — transit and host-BOUND (to-zone junos-host) rows
 	// still report the ingress drop.
