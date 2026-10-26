@@ -199,7 +199,7 @@ func injectClassifierManager16689(t *testing.T, domainCap uint32) (*Manager, *eb
 	})
 	injectUserspaceWGZoneMaps(t, m)
 	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLandScreen, &ebpf.MapSpec{
-		Type: ebpf.Hash, KeySize: 2, ValueSize: 1, MaxEntries: userspaceLandScreenMapCapacity,
+		Type: ebpf.Hash, KeySize: 4, ValueSize: 1, MaxEntries: userspaceLandScreenMapCapacity,
 	})
 	// #17849: classifier sync unconditionally syncs the proxy-NDP map
 	// (maps_sync.go syncProxyNDPAddressMapsWithSetsLocked); the fixture

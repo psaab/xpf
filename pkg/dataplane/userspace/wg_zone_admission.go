@@ -16,7 +16,9 @@ const (
 )
 
 // These key layouts mirror UserspaceWgIngressZoneKey and
-// UserspaceWgAdmissionKey in userspace-xdp/src/lib.rs.
+// UserspaceWgAdmissionKey in userspace-xdp/src/lib.rs. cilium/ebpf serializes
+// Go fields without repr(C) tail padding, so the admission key carries two
+// explicit trailing bytes for the Rust key's 4-byte alignment.
 type userspaceWGIngressZoneKey struct {
 	Ifindex  uint32
 	VLANID   uint16
@@ -29,7 +31,9 @@ type userspaceWGAdmissionKey struct {
 	AddrFamily uint8
 	Pad        [3]byte
 	Addr       [16]byte
+	Reserved   [2]byte
 }
+
 type userspaceWGAddressKey struct {
 	AddrFamily uint8
 	Pad        [3]byte
@@ -225,7 +229,7 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 		for port := range portsByZone[owner.zoneID] {
 			key := userspaceWGAdmissionKey{
 				ZoneID: owner.zoneID, Port: port, AddrFamily: address.AddrFamily,
-				Pad: address.Pad, Addr: address.Addr,
+				Pad: address.Pad, Addr: address.Addr, Reserved: [2]byte{},
 			}
 			plan.admission[key] = 1
 		}

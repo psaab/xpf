@@ -209,7 +209,6 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 		// session sync on a cluster that never asked for authentication.
 		return 0
 	}
-	accepted := s.authAcceptedKeys()
 	now := MonotonicNanos()
 	s.mu.Lock()
 	conns := []net.Conn{s.conn0, s.conn1}
@@ -218,6 +217,16 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 	var doomed []net.Conn
 	var doomedRetired []bool
 	s.writeMu.Lock()
+	// #18016: snapshot accepted keys only after acquiring writeMu. A
+	// snapshot taken before the lock can go stale while this pass waits:
+	// a concurrent retirement reconcile anchors a fresh grace under the
+	// new accepted set, and a stale-set pass could then clear that new
+	// anchor (authPSK accepted under the stale set), leaving the anchor
+	// zero so every later pass skips the connection and eviction never
+	// fires. authAcceptedKeys only reads the atomic provider and, for
+	// *Manager, takes m.mu.RLock; production does not call back into
+	// SessionSync while that manager lock is held.
+	accepted := s.authAcceptedKeys()
 	for _, c := range conns {
 		ac, ok := c.(*authConn)
 		if !ok || ac == nil {

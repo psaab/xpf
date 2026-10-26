@@ -372,9 +372,11 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 	// RollbackTo re-runs the envelope gate AFTER the drain above (the target
 	// binary's --capability-check executes inside validateRollbackPlan), so
 	// a transient exec failure refuses here on a healthy drained daemon.
-	// Fail FRESH-PLAN refusals back (sentinel); anything else — a STOP was
-	// attempted, or the journal is a ROLLINGBACK resume the forward driver
-	// would equally keep passive — stays passive for inspection (MINOR-3).
+	// Fail FRESH-PLAN refusals back (sentinel); genuine failures after STOP
+	// or during a ROLLINGBACK resume stay passive for inspection (MINOR-3).
+	// A committed-then-deferred signal is the exception: RollbackTo proved
+	// the target is running, so complete sync/rejoin before surfacing it.
+	var committedDeferred *rollbackCommittedDeferredError
 	if err := r.RollbackTo(plan.toVersion, RollbackOptions{
 		ClusterCoordinated: true,
 		LockAlreadyHeld:    true,
@@ -384,7 +386,11 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 			r.logf("rolling rollback: refused before STOP; resetting failover and aborting")
 			return failbackAfterRollbackRefusal(cl, err)
 		}
-		return fmt.Errorf("rolling rollback: single-node rollback failed (inspect the drained node): %w", err)
+		if errors.As(err, &committedDeferred) {
+			r.logf("rolling rollback: single-node rollback committed before deferred signal; completing rejoin before honouring it")
+		} else {
+			return fmt.Errorf("rolling rollback: single-node rollback failed (inspect the drained node): %w", err)
+		}
 	}
 
 	if err := waitPredicate(RollingConfig{
@@ -398,6 +404,9 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 		return fmt.Errorf("rolling rollback: local node did not rejoin election after rollback within %s: %w", rc.RejoinDeadline, err)
 	}
 	r.logf("rolling: local node rejoined election, confirmed for every configured RG; rollback complete for this node")
+	if committedDeferred != nil {
+		return committedDeferred
+	}
 	return nil
 }
 

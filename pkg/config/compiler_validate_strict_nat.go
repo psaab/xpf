@@ -184,6 +184,25 @@ func natInterfaceDefined15278(cfg *Config, ref string) bool {
 		if base == "lo0" {
 			return true
 		}
+		// #17883: reject the ambiguous unit-0-plus-sibling shape before
+		// SecureTunnelNetdevForRef(ref+".0") can make the bare ref look
+		// defined. The tunnel's exact logical-unit match cannot consume
+		// the unresolved bare spelling.
+		// #18024: unit 0 may be supplied only by its secure-tunnel binding
+		// (no authored `interfaces st0 unit 0` stanza) while a sibling is
+		// authored; the materialized .0 counts exactly like an authored
+		// unit 0 for ambiguity.
+		if ifc := cfg.Interfaces.Interfaces[base]; ifc != nil {
+			_, unit0Bound := cfg.SecureTunnelNetdevForRef(ref + ".0")
+			if ifc.Units[0] != nil || unit0Bound {
+				for unitNum, sibling := range ifc.Units {
+					if sibling != nil && unitNum != 0 {
+						return false
+					}
+				}
+			}
+		}
+
 		// Materialized st0: a bare ref that resolves only through its
 		// unit-0 binding means that unit, not the bare device.
 		if _, bound := cfg.SecureTunnelNetdevForRef(ref + ".0"); bound {

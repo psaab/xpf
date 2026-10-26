@@ -1098,6 +1098,10 @@ func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Han
 	}
 	r, p, err := s.authorizeRESTReadSnapshots(r, required)
 	if err != nil {
+		if slotErr, ok := err.(restConfigReadSlotError); ok {
+			writeError(w, http.StatusBadRequest, slotErr.Error())
+			return
+		}
 		logRESTLoginDenial(r, p, authz.PermissionName(required), "read-policy")
 		writeError(w, http.StatusForbidden, err.Error())
 		return
