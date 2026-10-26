@@ -183,3 +183,34 @@ func TestMemfileFallbackSnapshotIsEmptyWithServedFalse16854(t *testing.T) {
 	// topology drift in the helper above.
 	var _ *config.Config = cfg
 }
+
+// #17886: an attributable served group must not hide a second group whose
+// pool-to-RG attribution is mixed. The mixed group is filtered to a non-empty
+// member set when RG2 is mastered, but is omitted from the proof's scope sets.
+func TestDHCPTakeoverWorkNeededWithMixedGroup17886(t *testing.T) {
+	d := twoRGCanonicalDaemon16854(t)
+	cfg := d.store.ActiveConfig()
+	if cfg == nil {
+		t.Fatal("no active config")
+	}
+	// Add an RG3 member so the mixed group spans RG2 and RG3.
+	cfg.Interfaces.Interfaces["reth2"] = &config.InterfaceConfig{
+		Name: "reth2", RedundancyGroup: 3,
+	}
+	cfg.Interfaces.Interfaces["ge-0/0/2"] = &config.InterfaceConfig{
+		Name: "ge-0/0/2", RedundantParent: "reth2",
+	}
+	groups := cfg.System.DHCPServer.DHCPLocalServer.Groups
+	mixed := groups["lan-pool"]
+	mixed.Interfaces = []string{"reth1.0", "reth2.0"}
+	rg1 := *mixed
+	rg1.Interfaces = []string{"reth0.50"}
+	cfg.System.DHCPServer.DHCPLocalServer.Groups = map[string]*config.DHCPServerGroup{
+		"rg1-pool":      &rg1,
+		"mixed-rg2-rg3": mixed,
+	}
+	masters := map[int]bool{1: true, 2: true, 3: false}
+	if !dhcpTakeoverWorkNeeded(cfg, 2, masters) {
+		t.Fatal("RG2 takeover must retain legacy work when a mixed group cannot be attributed")
+	}
+}

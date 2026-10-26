@@ -695,18 +695,29 @@ func (m *Manager) getSyncLeases(ctx context.Context, family int, now time.Time) 
 }
 
 // getSyncLeasesWithSource reads one family's active leases and reports whether
-// the result came from Kea's live control socket. The memfile is a necessary
-// fallback for ordinary lease-sync pushes while Kea is starting, but a
-// takeover pre-seed must not treat that persisted fallback as current local
-// authority: on a pure backup it is the last lease set this node served and
-// may contain rows the primary has since released (#9853).
+// the result came from Kea's live control socket. A memfile fallback is safe
+// only when systemd definitively reports Kea inactive; an active unit whose
+// socket read failed may still be serving, so publishing its stale memfile
+// would erase the peer's last good snapshot (#17886).
 func (m *Manager) getSyncLeasesWithSource(ctx context.Context, family int, now time.Time) ([]SyncLease, bool, error) {
 	socket := m.controlSocket(family)
 	leases, socketErr := readSyncLeasesViaSocket(ctx, m.keaDial, socket, family, now)
 	if socketErr == nil {
 		return leases, true, nil
 	}
-	// Fallback: read the memfile (socket not up yet, or hook unavailable).
+	unit := kea4Svc
+	if family == 6 {
+		unit = kea6Svc
+	}
+	active, stateErr := m.unitActive(unit)
+	if stateErr != nil {
+		return nil, false, fmt.Errorf("kea v%d lease read: socket=%v; query %s state: %w", family, socketErr, unit, stateErr)
+	}
+	if active {
+		return nil, false, fmt.Errorf("kea v%d lease read: socket=%v; %s is active, refusing memfile fallback", family, socketErr, unit)
+	}
+	// A definitively stopped Kea cannot serve the persisted rows; retain the
+	// memfile fallback only for this non-serving case.
 	memfile := m.leaseFile(family)
 	mem, memErr := readSyncLeasesViaMemfile(memfile, family, now)
 	if memErr != nil {
@@ -1140,7 +1151,8 @@ func PeerLeasesForAuthority(peer LeaseSyncSnapshot, family int, authority LeaseS
 	if len(matched) == 0 {
 		return excludePeerRowsInNegativeScopes(familyRows(peer.Leases), negativeScopes, localScopes)
 	}
-	return peerLeasesForScopes(peer, family, matched, eligible)
+	return excludePeerRowsInNegativeScopes(
+		peerLeasesForScopes(peer, family, matched, eligible), negativeScopes, localScopes)
 }
 func partitionPeerScopes(peerScopes, localScopes []LeaseScopeAuthority) (matched, eligible []LeaseScopeAuthority) {
 	for _, peerScope := range peerScopes {
@@ -1229,7 +1241,8 @@ func mergeLeasesByAuthority(local []SyncLease, peer LeaseSyncSnapshot, family in
 		}
 	}
 	return mergeLeasesByIdentity(filteredLocal,
-		peerLeasesForScopes(peer, family, matchedPeerScopes, eligiblePeerScopes), family)
+		excludePeerRowsInNegativeScopes(
+			peerLeasesForScopes(peer, family, matchedPeerScopes, eligiblePeerScopes), negativeScopes, localScopes), family)
 }
 
 func localLeaseState(address string, scopes []LeaseScopeAuthority) (served, known bool) {

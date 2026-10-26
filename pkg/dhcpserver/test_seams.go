@@ -51,12 +51,15 @@ func (m *Manager) SetUnitActiveForTesting(fn func(unit string) (bool, error)) {
 // SetLeaseSyncSeamsForTesting injects the #2239 lease-sync test seams: a
 // fake control-socket dialer (a stub Kea server can implement the lease_cmds
 // wire), per-family control-socket paths, and per-family memfile paths. Any
-// zero argument leaves the production default. Used by lease_sync tests in this
-// package and by cross-package tests (e.g. pkg/daemon).
+// zero argument leaves the production default. A manager configured through
+// this seam defaults to a definitively stopped Kea unit; call
+// SetUnitActiveForTesting after this method when a test needs another state.
+// Used by lease_sync tests in this package and cross-package tests.
 func (m *Manager) SetLeaseSyncSeamsForTesting(
 	dial keaSocketDialer,
 	ctrlSocket4, ctrlSocket6, leaseFile4, leaseFile6 string,
 ) {
+	m.unitActive = func(string) (bool, error) { return false, nil }
 	m.keaDial = dial
 	m.ctrlSocket4 = ctrlSocket4
 	m.ctrlSocket6 = ctrlSocket6
