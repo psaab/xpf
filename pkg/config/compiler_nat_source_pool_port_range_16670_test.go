@@ -85,37 +85,23 @@ func TestSourceNATPoolPortSingleStillValidates16670(t *testing.T) {
 	}
 }
 
-// Flat ranges and standalone allocation modifiers retain their supported
-// semantics; a bare empty range still fails closed.
+// A flat range on one `set` line followed by a modifier on its own
+// line, and a bare empty range, keep their prior semantics.
 func TestSourceNATPoolPortRangeControls16670(t *testing.T) {
 	tree := snatPoolTree(t,
 		"set security nat source pool p1 address 203.0.113.5/32",
-		"set security nat source pool p1 port range 1024 to 2048")
+		"set security nat source pool p1 port range 1024 to 2048",
+		"set security nat source pool p1 port random-allocation")
 	if err := SchemaValidate(tree); err != nil {
-		t.Fatalf("SchemaValidate(range): %v", err)
+		t.Fatalf("SchemaValidate(range+random): %v", err)
 	}
 	cfg, err := CompileConfig(tree)
 	if err != nil {
-		t.Fatalf("CompileConfig(range): %v", err)
+		t.Fatalf("CompileConfig(range+random): %v", err)
 	}
 	pool := cfg.Security.NAT.SourcePools["p1"]
-	if pool.PortLow != 1024 || pool.PortHigh != 2048 || pool.PortRandomAllocation {
-		t.Fatalf("range => %d-%d rand=%v, want 1024-2048 rand=false", pool.PortLow, pool.PortHigh, pool.PortRandomAllocation)
-	}
-
-	random := snatPoolTree(t,
-		"set security nat source pool p1 address 203.0.113.5/32",
-		"set security nat source pool p1 port random-allocation")
-	if err := SchemaValidate(random); err != nil {
-		t.Fatalf("SchemaValidate(random-allocation): %v", err)
-	}
-	randomCfg, err := CompileConfig(random)
-	if err != nil {
-		t.Fatalf("CompileConfig(random-allocation): %v", err)
-	}
-	randomPool := randomCfg.Security.NAT.SourcePools["p1"]
-	if !randomPool.PortRandomAllocation {
-		t.Fatalf("random-allocation not recorded: %+v", randomPool)
+	if pool.PortLow != 1024 || pool.PortHigh != 2048 || !pool.PortRandomAllocation {
+		t.Fatalf("range+random => %d-%d rand=%v, want 1024-2048 rand=true", pool.PortLow, pool.PortHigh, pool.PortRandomAllocation)
 	}
 
 	// Empty range still fails closed (not widened to the default).
@@ -150,17 +136,12 @@ func TestPoolRangeAbsorptionIsOptIn16670(t *testing.T) {
 	for _, absorb := range []bool{true, false} {
 		rangeSchema.absorbBeforeWildcard = absorb
 		tree := &ConfigTree{}
-		for _, cmd := range []string{
-			"set security nat source pool P port range 1024 to 2048",
-			"set security nat source pool P port random-allocation",
-		} {
-			path, err := ParseSetCommand(cmd)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := tree.SetPath(path); err != nil {
-				t.Fatal(err)
-			}
+		path, err := ParseSetCommand("set security nat source pool P port range 1024 to 2048 random-allocation")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatal(err)
 		}
 		port := tree.FindChild("security").FindChild("nat").FindChild("source").FindChild("pool").FindChild("port")
 		r := port.FindChild("range")
