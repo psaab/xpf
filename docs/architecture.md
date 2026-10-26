@@ -216,7 +216,7 @@ editing cmdtree.
   restart cluster comms, so an established stream stays unauthenticated
   until a daemon restart (#6628); config-sync used to carry the PSK in
   the clear over that HMAC-only link, but since #6629 the config-sync
-  payload is sealed per connection, and on an authenticated connection
+  payload is sealed per connection (against a passive observer), and on an authenticated connection
   there is no cleartext fallback at all (#15041) — the key must still be
   provisioned out-of-band, as bootstrap trust for the first still-unkeyed
   (active-MITM-open) connection, not because a same-vintage push would
@@ -232,7 +232,6 @@ editing cmdtree.
   the session-sync stream as a whole CONFIDENTIALITY beyond the sealed
   config-sync payload (it remains HMAC-authenticated but not encrypted,
   apart from that payload) — remain deferred (see `pkg/cluster/README.md`).
-  in cleartext) — remain deferred (see `pkg/cluster/README.md`).
   - **No allowlisted RPC may render a configured secret (#6532).** Being on
     this allowlist means being reachable from the peer chassis over the
     fabric IP, so the usual "loopback only" mitigation does not apply to
