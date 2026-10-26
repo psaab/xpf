@@ -2130,7 +2130,8 @@ func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 // wildcard (#17941 supersedes the name-closure exemption in #17408).
 // decidable is false when the closure is empty, mixed-family,
 // tainted, dangling, or otherwise not statically resolvable
-// (dns-name without a snapshot, wildcard members) — the same
+// (dns-name without a snapshot, dual-family `any` members or
+// unparseable keyword values) — the same
 // conservative posture as nat64NameClosureNoIPv6 (#16550), using
 // the colon-strict natAddrFamily so a `::ffff:` member is v6.
 func addressBookNameFamily16600(ab *AddressBook, name string) (family string, narrow bool, decidable bool) {
