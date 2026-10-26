@@ -858,6 +858,12 @@ func syncLeaseToKea(l SyncLease, now time.Time) keaLeaseJSON {
 	} else {
 		kl.HWAddress = l.HWAddress
 		kl.ClientID = l.ClientID
+		// Kea 3.0.3 requires hw-address on every lease4-add, including a
+		// declined row. Such a row may have no client identity on the sync
+		// wire; provide a valid sentinel without changing its declined state.
+		if l.IsDeclined() && kl.HWAddress == "" {
+			kl.HWAddress = "00:00:00:00:00:00"
+		}
 	}
 	return kl
 }
