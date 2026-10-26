@@ -224,6 +224,60 @@ func TestNatScopeFoldUsesTunnelMappedRethUnit_17876(t *testing.T) {
 	}
 }
 
+// TestNatScopeFoldDoesNotMintForTunnelMappedRethUnit_17876 pins the
+// child-present case to a real snapshot-builder row. FAIL-ON-REVERT: probing
+// only parent.VLAN fails to recognize the mapped device and either leaves its
+// ifindex unknown or claims the synthetic candidate as this unit.
+func TestNatScopeFoldDoesNotMintForTunnelMappedRethUnit_17876(t *testing.T) {
+	parent, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skipf("loopback interface unavailable: %v", err)
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skipf("cannot enumerate interfaces: %v", err)
+	}
+	var tunnel net.Interface
+	for _, ifc := range ifaces {
+		if ifc.Index > 0 && ifc.Name != "" && ifc.Index != parent.Index {
+			tunnel = ifc
+			break
+		}
+	}
+	if tunnel.Index == 0 {
+		t.Skip("need a second live interface for the tunnel-mapped unit")
+	}
+	cfg := &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+		"lo": {Name: "lo", RedundantParent: "reth0"},
+		"reth0": {Name: "reth0", Units: map[int]*config.InterfaceUnit{
+			205: {Number: 205, VlanID: 205, Tunnel: &config.TunnelConfig{Name: tunnel.Name}},
+		}},
+	}}}
+	rows := dpuserspace.BuildInterfaceSnapshots(cfg)
+	var child *dpuserspace.InterfaceSnapshot
+	for i := range rows {
+		if rows[i].Name == "reth0.205" {
+			child = &rows[i]
+			break
+		}
+	}
+	if child == nil || child.LogicalOnly || child.Ifindex != tunnel.Index || child.ParentIfindex != parent.Index {
+		t.Fatalf("builder child row = %+v, want non-logical reth0.205 at ifindex %d with parent %d",
+			child, tunnel.Index, parent.Index)
+	}
+	fold := buildNatScopeFoldFnWithIfaces(cfg, ifaces)
+	if got, want := fold(int32(child.Ifindex)), config.StableIfaceID("reth0.205"); got != want {
+		t.Errorf("tunnel-mapped child ifindex %d fold = %d, want reth0.205 fold %d", child.Ifindex, got, want)
+	}
+	synthetic := dpuserspace.SyntheticLogicalIfindexForUnit("reth0.205", 205, make(map[int]struct{}))
+	if got := fold(int32(synthetic)); got != 0 {
+		t.Errorf("tunnel-mapped unit synthetic candidate %d stamped fold %d, want unknown 0", synthetic, got)
+	}
+	if got, want := fold(int32(parent.Index)), config.StableIfaceID("reth0"); got != want {
+		t.Errorf("parent ifindex %d fold = %d, want control %d", parent.Index, got, want)
+	}
+}
+
 // TestNatScopeFoldUsesKernelVlanChildAndDoesNotMint_17876 supplies the
 // injected parent/VLAN child netdev shape. FAIL-ON-REVERT: if the folder
 // allocates synthetic indices despite an existing child, the synthetic
