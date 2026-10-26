@@ -3862,6 +3862,29 @@ pub(super) fn txn_run_multi_binding_15958(
     frame: &[u8],
     meta: UserspaceDpMeta,
 ) -> (BatchCounters, DebugPollCounters, Option<Vec<u8>>) {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_multi_binding_with_shared_sessions_17012(
+        bindings,
+        ingress_index,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &shared_sessions,
+    )
+}
+
+pub(super) fn txn_run_multi_binding_with_shared_sessions_17012(
+    bindings: &mut Vec<BindingWorker>,
+    ingress_index: usize,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+) -> (BatchCounters, DebugPollCounters, Option<Vec<u8>>) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128usize;
     let meta_offset = frame_offset - meta_len;
@@ -3902,7 +3925,6 @@ pub(super) fn txn_run_multi_binding_15958(
         }
         Arc::new(map)
     };
-    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();

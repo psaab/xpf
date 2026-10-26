@@ -1254,14 +1254,28 @@ This rule is independent of the configured flow aging values, which
 remain unwired.
 
 Because the table is single-writer (`&mut`, worker thread; GC and worker
-commands run between poll phases, never mid-descriptor), a passing preflight
-makes the subsequent installs infallible — no reservation or rollback
-machinery is needed. `can_admit` is deliberately conservative: it charges a
-full slot per entry even when the key already exists, matching the install's
+commands run between poll phases, never mid-descriptor), a passing capacity
+preflight makes subsequent installs capacity-infallible — no local-table
+reservation or rollback machinery is needed. When it selected pressure
+victims, admission must also pass the shared teardown's all-key tuple-lease
+gate before installing. `can_admit` is deliberately conservative: it charges
+a full slot per entry even when the key already exists, matching the install's
 own cap check (which also refuses replacements at cap), so the preflight can
 never pass where the install would fail. On refusal the caller drops the
 trigger packet (Junos parity), rolls back the SNAT allocation, and counts via
 `note_admission_refused`.
+
+Pressure victims use one cold teardown helper across packet admission and the
+deferred-GC retry. It acquires one lease for every victim tuple, rechecks
+shared reply evidence under the lease, fences shared-row removal by
+incarnation, and cleans up coordinator/BPF/DNAT/flow-cache/NAT state before
+replicating deletes. A contended lease re-defers the full victim set; admission
+sites refuse the incoming install until a retry can clean it up. Cache
+invalidation covers every worker binding because `SessionKey` omits ingress
+ifindex. On a shared-row decline, preserve the established local-row probe
+before NAT release. MissingNeighbor's copy omitted that probe, but issue
+analysis found that difference behaviorally equivalent because pressure
+shedding removes both local rows.
 
 Counters (all plain worker-owned u64s like `create_drops`, exported
 since #1861 via the worker-runtime status path as

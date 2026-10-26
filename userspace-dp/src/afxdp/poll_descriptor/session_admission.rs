@@ -182,6 +182,154 @@ pub(super) fn strict_syn_check_drops_pre_handshake_data(
     !established || handshake_pending || syn_ack_first
 }
 
+/// Resources needed by the cold pressure-shed teardown protocol. Keeping the
+/// side effects here gives packet admission and the deferred-GC retry one
+/// ordering for shared rows, BPF state, NAT holds, and peer replication.
+pub(in crate::afxdp) struct ShedTeardownCtx<'a> {
+    pub(in crate::afxdp) forwarding: &'a ForwardingState,
+    pub(in crate::afxdp) session_map: SteeringMap<'a>,
+    pub(in crate::afxdp) conntrack_v4_fd: c_int,
+    pub(in crate::afxdp) conntrack_v6_fd: c_int,
+    pub(in crate::afxdp) dnat_fds: &'a crate::afxdp::checksum::DnatTableFds,
+    pub(in crate::afxdp) worker_id: u32,
+    pub(in crate::afxdp) peer_worker_commands: &'a [Arc<Mutex<VecDeque<WorkerCommand>>>],
+    pub(in crate::afxdp) worker_commands_by_id: &'a crate::afxdp::types::WorkerCommandQueues,
+    pub(in crate::afxdp) shared_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    pub(in crate::afxdp) shared_nat_sessions:
+        &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    pub(in crate::afxdp) shared_forward_wire_sessions:
+        &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    pub(in crate::afxdp) shared_owner_rg_indexes: &'a SharedSessionOwnerRgIndexes,
+    pub(in crate::afxdp) now_ns: u64,
+}
+
+/// Complete the external teardown for pressure victims already removed from
+/// the local table. A failed all-key lease preserves the intents for retry and
+/// returns `false`, so every admission caller refuses the incoming flow. This
+/// applies #14661's refusal policy to ForwardCandidate; that copy was wrong to
+/// continue installing after the shed lease failed.
+///
+/// Shared reply evidence is rechecked only after the tuple lease is acquired:
+/// the lease drains publishers and prevents a stale pre-lease snapshot from
+/// deleting a flow that acquired reply evidence while this path waited.
+#[cold]
+#[inline(never)]
+pub(in crate::afxdp) fn teardown_pressure_shed_victims(
+    sessions: &mut SessionTable,
+    sheds: crate::session::PressureShedSessions,
+    ctx: ShedTeardownCtx<'_>,
+    invalidate: &mut dyn FnMut(&SessionKey),
+) -> bool {
+    if sheds.is_empty() {
+        return true;
+    }
+    let shed_keys: Vec<_> = sheds.iter().map(|shed| shed.key.clone()).collect();
+    let Ok(_lease) = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease(shed_keys) else {
+        sessions.defer_pressure_shed(sheds);
+        return false;
+    };
+    for shed in sheds {
+        if !shed.is_reverse
+            && (sessions.session_replied(&shed.key)
+                || crate::afxdp::shared_ops::shared_session_replied(
+                    ctx.shared_sessions,
+                    &shed.key,
+                    shed.decision.nat,
+                ))
+        {
+            sessions.cancel_pending_close(&shed.key, shed.session_id);
+            continue;
+        }
+        let shared_removal = crate::afxdp::shared_ops::remove_shared_session_if(
+            ctx.shared_sessions,
+            ctx.shared_nat_sessions,
+            ctx.shared_forward_wire_sessions,
+            ctx.shared_owner_rg_indexes,
+            &shed.key,
+            |current| {
+                crate::afxdp::poll_descriptor::is_pressure_shed_shared_unreplied(current, &shed)
+            },
+        );
+        if matches!(
+            shared_removal,
+            crate::afxdp::shared_ops::SharedRemoval::Declined
+        ) {
+            // Keep the established guard before releasing NAT state. The old
+            // MissingNeighbor copy omitted it, but analysis found that difference
+            // behaviorally equivalent because shedding removes both local rows.
+            if sessions.probe_with_origin(&shed.key).is_none() {
+                crate::nat::release_source_nat_allocation_for_worker(
+                    &ctx.forwarding.iface_nat_allocators,
+                    &ctx.forwarding.source_nat_rules,
+                    &shed.key,
+                    shed.decision.nat,
+                    shed.is_reverse,
+                    ctx.now_ns,
+                    ctx.worker_id,
+                );
+                crate::nat64::release_nat64_allocation_for_worker(
+                    &ctx.forwarding.nat64,
+                    &shed.key,
+                    shed.decision.nat,
+                    shed.is_reverse,
+                    ctx.now_ns,
+                    ctx.worker_id,
+                );
+            }
+            continue;
+        }
+        crate::afxdp::bpf_map::release_coordinator_session_rows(ctx.session_map, &shed.key);
+        let _ = crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+            ctx.conntrack_v4_fd,
+            ctx.conntrack_v6_fd,
+            &shed.key,
+        );
+        if !shed.is_reverse {
+            crate::afxdp::checksum::delete_dnat_table_entry(
+                ctx.dnat_fds,
+                &shed.key,
+                shed.decision.nat,
+            );
+        }
+        crate::afxdp::bpf_map::delete_live_session_entry(
+            ctx.session_map,
+            &shed.key,
+            shed.decision.nat,
+            shed.is_reverse,
+        );
+        // SessionKey omits ingress ifindex; invalidate every binding's slot
+        // through the caller closure, not only the binding that saw this packet.
+        invalidate(&shed.key);
+        crate::nat::release_source_nat_allocation_for_worker(
+            &ctx.forwarding.iface_nat_allocators,
+            &ctx.forwarding.source_nat_rules,
+            &shed.key,
+            shed.decision.nat,
+            shed.is_reverse,
+            ctx.now_ns,
+            ctx.worker_id,
+        );
+        crate::nat64::release_nat64_allocation_for_worker(
+            &ctx.forwarding.nat64,
+            &shed.key,
+            shed.decision.nat,
+            shed.is_reverse,
+            ctx.now_ns,
+            ctx.worker_id,
+        );
+        crate::afxdp::session_glue::replicate_session_delete_repairing(
+            ctx.peer_worker_commands,
+            ctx.worker_commands_by_id,
+            ctx.forwarding,
+            &shed.key,
+            shed.decision.nat,
+            shed.is_reverse,
+            ctx.now_ns,
+        );
+    }
+    true
+}
+
 #[cfg(test)]
 #[path = "session_admission_tests.rs"]
 mod tests;
