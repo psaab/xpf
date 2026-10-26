@@ -65,8 +65,8 @@ security {
 // policymatch.matchedResult also flips scheduler_name/scheduler_active red.
 func TestMatchPoliciesResponseCarriesDescriptionAndScheduler(t *testing.T) {
 	s := &Server{store: descSchedGRPCStore(t)}
-	// Provider present + scheduler ACTIVE so the scheduled permit matches (the
-	// simulator threads a fail-closed PolicyInactiveFn otherwise).
+	// The compatibility fake exposes active state only; the test uses the
+	// active scheduler as a positive control for the name-only fallback.
 	s.dp = &schedulerStateDP{Manager: dataplane.New(), active: map[string]bool{"workhours": true}}
 
 	resp, err := s.MatchPolicies(context.Background(), &pb.MatchPoliciesRequest{

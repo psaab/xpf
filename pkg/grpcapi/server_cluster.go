@@ -400,11 +400,10 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 		// mirroring the inventory and local CLI result over the same
 		// policymatch.Result.
 		Description: res.Description,
-		// #3685 M06: name the scheduler time-gate and confirm it is currently
-		// admitting the rule. A positive match here is by construction active
-		// (policyInactiveFn already skipped a scheduler-inactive rule, #3414), so
-		// SchedulerActive is true only for a scheduled policy and omitted for an
-		// always-on one.
+		// #3685 M06: name the scheduler time-gate. A matched policy is eligible
+		// in the helper-accepted snapshot; under the fail-closed latch a
+		// scheduled DENY/REJECT may remain eligible with an inactive scheduler
+		// map entry (#17837). SchedulerActive is true only for a scheduled policy.
 		SchedulerName:   res.SchedulerName,
 		SchedulerActive: res.SchedulerName != "",
 		Action:          res.DisplayAction(),

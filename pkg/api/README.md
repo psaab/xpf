@@ -3295,17 +3295,19 @@ the drop fails loudly instead of going quietly vacuous.
   (`FeedOverlayFn`). The pre-#3042 hand-written matcher scanned only
   zone-pair policies, hard-coded `deny (default)`, and missed predefined
   apps / literal CIDRs — so the diagnostic could report the OPPOSITE of what
-  the dataplane enforces. #3104: the handler also threads live per-scheduler
-  active-state (`PolicySchedulerActiveStateFn`, wired from the daemon-local
-  `Manager.PolicySchedulerActiveState`) into `policymatch.Query.PolicyInactiveFn`,
-  so a scheduler-inactive policy is SKIPPED exactly like the runtime
-  (`policy.rs try_match_rule`) and the verdict falls through to the next active
-  rule / default-policy. #3414: when live state is unavailable (no dataplane /
-  early boot) the handler binds the predicate to a nil state map, which
-  `PolicyInactiveFn` treats as fail-closed — scheduled policies are simulated
-  as INACTIVE, matching the snapshot builder (nil scheduler state => dropped)
-  rather than certifying an as-if-active verdict the dataplane is skipping. A
-  non-scheduled policy is unaffected either way. On a MATCH the response
+  the dataplane enforces. #3104: policy inventory details use the live
+  per-scheduler active state (`PolicySchedulerActiveStateFn`, wired from the
+  daemon-local `Manager.PolicySchedulerActiveState`) to report runtime policy
+  activity. Match simulation instead uses the applied state + fail-closed latch
+  (`PolicySchedulerAppliedStateAndFailClosedFn`, #17837) in
+  `PolicyInactiveForFn`: failed snapshot publications cannot make REST simulate
+  a staged scheduler transition, and a latched scheduled DENY/REJECT remains
+  eligible rather than falling through to a later permit. #3414: when applied
+  state is unavailable (no dataplane / early boot), the action-aware predicate
+  is still bound to a nil map, which treats scheduled policies as INACTIVE
+  unless the latch's per-action disposition keeps a deny eligible. A
+  non-scheduled policy is unaffected.
+  On a MATCH the response
   carries the matched policy's runtime `policy_id` (#3331 scope/id
   disambiguation). #3623: this field is a `*uint32` — set (present, even at
   0) ONLY on a match, omitted otherwise. The first zone-pair set's first
@@ -3339,20 +3341,17 @@ the drop fails loudly instead of going quietly vacuous.
   `MatchPoliciesResponse.source_address_excluded`/`destination_address_excluded`
   (fields 15/16) and `rule_id` (field 17) mirror this. #3685 M05/M06: on a MATCH
   the response also carries the policy `description` and the scheduler binding.
-  `description` (M05) is the matched policy's `description` text — the same field
-  the inventory (`GetPolicies`) and the local `show security match-policies`
-  result carry over the SAME `policymatch.Result`; descriptions often hold
-  ticket / change-control context, so a match verdict without it was weaker than
-  the inventory / CLI answer. `scheduler_name`/`scheduler_active` (M06) name the
-  time-gate: `scheduler_name` is the policy's `scheduler-name` binding
-  (mirroring the inventory `PolicyRule` field, #3624), and `scheduler_active` is
-  the explicit effective-active flag. A positive match is by construction
-  currently active — the handler always threads a fail-closed
-  `PolicyInactiveFn` (#3414) that SKIPS a scheduler-inactive rule before it can
-  match — so a matched scheduled policy always reports `scheduler_active=true`;
-  it names the gate admitting the rule right now, not a rule that is gated off.
-  All three are additive and set only on a positive match; both scheduler fields
-  are omitted for a non-scheduled (always-on) policy. The gRPC
+  `description` (M05) is the matched policy's `description` text — the same
+  field the inventory (`GetPolicies`) and local `show security match-policies`
+  carry over the SAME `policymatch.Result`; it often holds ticket / change-
+  control context. `scheduler_name`/`scheduler_active` (M06) name the time-gate:
+  `scheduler_name` is the policy's `scheduler-name` binding (mirroring the
+  inventory `PolicyRule` field, #3624), and `scheduler_active` indicates that
+  the scheduler-gated policy was eligible in the helper-accepted snapshot.
+  Under the fail-closed latch a scheduled DENY/REJECT may remain eligible even
+  when its scheduler map entry is inactive (#17837). All three fields are
+  additive and set only on a positive match; both scheduler fields are omitted
+  for a non-scheduled (always-on) policy. The gRPC
   `MatchPoliciesResponse.description` (field 18), `scheduler_name` (field 19),
   and `scheduler_active` (field 20) mirror these.
 - #12246: when inbound destination NAT is configured, the policy-only simulator

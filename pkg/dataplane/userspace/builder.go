@@ -206,9 +206,9 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 			GeneratedAt:             time.Now().UTC(),
 			Capabilities:            deriveUserspaceCapabilities(nil),
 			MapPins:                 userspaceMapPins(),
-			Userspace:               ucfg,
 			schedulerActiveState:    copyPolicySchedulerActiveState(activeState),
 			schedulerActiveStateSet: true,
+			schedulerFailClosed:     failClosed,
 			builtRouteOverlay:       cloneRouteOverlay(routeOverlay),
 		}, nil
 	}
@@ -265,9 +265,9 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 		BindlessSelectorRows:         bindlessSelectorRows,
 		Capabilities:                 caps,
 		MapPins:                      userspaceMapPins(),
-		Userspace:                    ucfg,
 		schedulerActiveState:         copyPolicySchedulerActiveState(activeState),
 		schedulerActiveStateSet:      true,
+		schedulerFailClosed:          failClosed,
 		// #6311: the chassis-cluster node id becomes the high bit of every
 		// worker's session-id namespace on the helper. Read from the compiled
 		// config's cluster stanza; absent/standalone leaves it 0, which is the

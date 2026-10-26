@@ -806,16 +806,15 @@ contract.
   feed overlay via `FeedOverlayFn`). The pre-#3042 hand-written matcher
   scanned only zone-pair policies and hard-coded `deny (default)`, so the
   diagnostic could report the OPPOSITE of what the dataplane enforces. The
-  request gained a `source_port` field so source-port-constrained app terms
-  are simulated. #3104: `MatchPolicies` and the `test policy` ShowText surface
-  thread live per-scheduler active-state (`s.policyInactiveFn()` →
-  `policymatch.Query.PolicyInactiveFn`, sourced from the same
-  `Manager.PolicySchedulerActiveState` the #3062 policy-detail display uses) so
-  a scheduler-inactive policy is skipped like the runtime. #3414: `policyInactiveFn()`
-  is now ALWAYS non-nil — with no live state (no provider / early boot) it binds
-  a nil state map, which fails closed so scheduled policies are simulated as
-  INACTIVE (matching the dataplane's nil-state => dropped) rather than certified
-  as-if-active.
+  request gained a `source_port` field for source-port-constrained app terms.
+  `MatchPolicies` and `test policy` use the applied per-scheduler state + latch
+  (`s.policyInactiveForFn()` → `policymatch.Query.PolicyInactiveForFn`) from
+  the last helper-accepted snapshot (#17837), so a failed publication cannot
+  make simulation claim the staged transition. A fail-closed-latched scheduled
+  DENY/REJECT remains eligible instead of falling through to a later permit.
+  When applied state is unavailable, the non-nil predicate preserves the
+  builder's unavailable-state disposition rather than certifying a scheduled
+  policy as active.
 - #12246: the policy-only simulator does not perform inbound destination NAT.
   When configured, `MatchPoliciesResponse.post_nat_input_note` (field 31) tells
   callers that destination IP/port must already be post-translation and that
@@ -879,14 +878,13 @@ contract.
   the SAME `policymatch.Result`; a match verdict without it was weaker than the
   inventory / CLI answer (descriptions often hold ticket / change-control
   context). `scheduler_name` (M06) mirrors the inventory `PolicyRule` scheduler
-  binding (#3624); `scheduler_active` is the explicit effective-active flag. A
-  positive match is by construction currently active — `s.policyInactiveFn()` is
-  fail-closed (#3414) and SKIPS a scheduler-inactive rule before it can match —
-  so a matched scheduled policy always reports `scheduler_active=true`; it names
-  the gate admitting the rule right now. All three are additive, set only on a
-  positive match, and both scheduler fields are omitted for a non-scheduled
-  policy. The REST `MatchPoliciesResult` carries the same
-  `description`/`scheduler_name`/`scheduler_active` JSON fields.
+  binding (#3624); `scheduler_active` indicates the matched scheduler-gated
+  policy was eligible in the helper-accepted snapshot. A fail-closed-latched
+  scheduled DENY/REJECT may remain eligible with an inactive scheduler-map entry
+  (#17837). All three fields are additive and set only on a positive match; both
+  scheduler fields are omitted for a non-scheduled policy. The REST
+  `MatchPoliciesResult` carries the same `description`/`scheduler_name`/
+  `scheduler_active` JSON fields.
 - #3627 B1a: a `to-zone junos-host` query also carries the structured
   `host_inbound` message (proto field 21, `HostInboundAdmission`) — WHICH
   host-inbound-traffic system-service / protocol token admits the host-bound

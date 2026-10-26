@@ -17,10 +17,9 @@ func scheduled(p *config.Policy, schedName string) *config.Policy {
 	return p
 }
 
-// inactiveFnFor builds the production Query.PolicyInactiveFn from a live
-// per-scheduler active-state map, using the SAME SSOT predicate the dataplane
-// snapshot builder and the #3062 display surfaces use. This is exactly what the
-// REST/gRPC/CLI surfaces thread when live scheduler state is available.
+// inactiveFnFor builds the name-only predicate used by these ordinary
+// scheduler-inactive cases. Live match-policies surfaces use the
+// action-aware predicate from the applied state/latch pair.
 func inactiveFnFor(active map[string]bool) func(string) bool {
 	return dpuserspace.PolicyInactiveFn(active)
 }

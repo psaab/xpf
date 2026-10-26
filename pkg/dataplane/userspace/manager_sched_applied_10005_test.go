@@ -15,16 +15,16 @@ import (
 )
 
 // TestConfigSnapshot10005_SchedulerStampIsLocalOnly proves the deferred
-// scheduler-state stamp is not part of either representation sent to the
-// helper. Unexported fields are omitted by encoding/json (the same mechanism
-// used by the existing zoneIDCollisions and partialUpdateEpoch fields), and
-// snapshotContentHash hashes that JSON encoding; this pins both contracts.
+// scheduler-state stamp and fail-closed latch are not part of either
+// representation sent to the helper. Unexported fields are omitted by
+// encoding/json, and snapshotContentHash hashes that JSON encoding.
 func TestConfigSnapshot10005_SchedulerStampIsLocalOnly(t *testing.T) {
 	snap := &ConfigSnapshot{
 		Version:                 ProtocolVersion,
 		Generation:              7,
 		schedulerActiveState:    map[string]bool{"workhours": true},
 		schedulerActiveStateSet: true,
+		schedulerFailClosed:     false,
 	}
 	beforeHash, ok := snapshotContentHash(snap)
 	if !ok {
@@ -35,6 +35,7 @@ func TestConfigSnapshot10005_SchedulerStampIsLocalOnly(t *testing.T) {
 		t.Fatalf("marshal baseline snapshot: %v", err)
 	}
 	snap.schedulerActiveState = map[string]bool{"workhours": false}
+	snap.schedulerFailClosed = true
 	afterHash, ok := snapshotContentHash(snap)
 	if !ok {
 		t.Fatal("snapshotContentHash rejected stamped snapshot")
@@ -50,8 +51,10 @@ func TestConfigSnapshot10005_SchedulerStampIsLocalOnly(t *testing.T) {
 		t.Fatalf("scheduler stamp changed wire JSON:\nbefore=%s\nafter=%s", beforeWire, afterWire)
 	}
 	if strings.Contains(string(afterWire), "schedulerActiveState") ||
-		strings.Contains(string(afterWire), "scheduler_active_state") {
-		t.Fatalf("scheduler stamp leaked onto the wire: %s", afterWire)
+		strings.Contains(string(afterWire), "scheduler_active_state") ||
+		strings.Contains(string(afterWire), "schedulerFailClosed") ||
+		strings.Contains(string(afterWire), "scheduler_fail_closed") {
+		t.Fatalf("scheduler metadata leaked onto the wire: %s", afterWire)
 	}
 }
 

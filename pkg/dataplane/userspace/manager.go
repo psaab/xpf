@@ -359,6 +359,10 @@ type Manager struct {
 	// been accepted by the helper; a failed/deferred publication leaves it at
 	// the state the helper is still enforcing.
 	policySchedulerActive map[string]bool
+	// policySchedulerAppliedFailClosed is carried by the last helper-accepted
+	// snapshot and advances with policySchedulerActive at the same commit
+	// boundary (#17837).
+	policySchedulerAppliedFailClosed bool
 	// policySchedulerDesired is the scheduler state staged by the daemon before
 	// a full apply or partial republish. It is build input, not an applied/show
 	// view, so a failed publication may leave it ahead of policySchedulerActive.

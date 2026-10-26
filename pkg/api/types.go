@@ -813,15 +813,12 @@ type MatchPoliciesResult struct {
 	Description string `json:"description,omitempty"`
 	// SchedulerName / SchedulerActive expose the matched policy's time-gate
 	// (#3685 M06). SchedulerName is the `scheduler-name` binding (mirroring the
-	// inventory PolicyRule field, #3624); SchedulerActive is the explicit
-	// effective-active flag — true when the matched policy is scheduler-gated
-	// AND currently active. A positive match is by construction currently active
-	// (the REST handler always threads a fail-closed PolicyInactiveFn that skips
-	// a scheduler-inactive rule before it can match, #3104/#3414), so a matched
-	// scheduled policy always reports SchedulerActive true; it names the gate
-	// admitting the rule right now. Both empty/false (omitted) for a
-	// non-scheduled (always-on) policy and for the unmatched / host-inbound /
-	// default cases.
+	// inventory PolicyRule field, #3624); SchedulerActive indicates that the
+	// scheduler-gated policy was eligible in the helper-accepted snapshot.
+	// Under the fail-closed latch a scheduled DENY/REJECT may remain eligible
+	// even when its scheduler map entry is inactive (#17837). Both fields are
+	// empty/false (omitted) for a non-scheduled policy and for unmatched /
+	// host-inbound / default cases.
 	SchedulerName   string   `json:"scheduler_name,omitempty"`
 	SchedulerActive bool     `json:"scheduler_active,omitempty"`
 	Action          string   `json:"action"`

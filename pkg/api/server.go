@@ -628,17 +628,14 @@ type Config struct {
 	// token resolves to its live feed prefixes. Optional; if nil the
 	// simulator resolves feed-backed names to their static content only.
 	FeedOverlayFn func() map[string][]string
-	// PolicySchedulerActiveStateFn returns the live daemon-local per-scheduler
-	// active-state map (the same view Manager.PolicySchedulerActiveState
-	// exposes to the CLI/gRPC show surfaces) plus whether it could be queried
-	// (#3104). The `match-policies` simulator consults it so a scheduler-inactive
-	// policy is skipped exactly like the runtime (policy.rs try_match_rule),
-	// instead of reporting a definitive verdict the dataplane disagrees with.
-	// Optional; if nil or it returns ok=false the simulator fails closed and
-	// treats scheduled policies as inactive (#3414) — matching the snapshot
-	// builder (nil scheduler state => dropped) rather than certifying an
-	// as-if-active verdict the dataplane is skipping.
+	// PolicySchedulerActiveStateFn returns the live per-scheduler map for
+	// policy inventory details. Match simulation uses the applied state and
+	// latch below so it reflects only a helper-accepted snapshot (#17837).
 	PolicySchedulerActiveStateFn func() (map[string]bool, bool)
+	// PolicySchedulerAppliedStateAndFailClosedFn returns the scheduler map and
+	// latch carried by the last helper-accepted snapshot. Nil/unavailable state
+	// remains fail-closed for scheduled permits.
+	PolicySchedulerAppliedStateAndFailClosedFn func() (map[string]bool, bool)
 	// HAActiveFn reports whether THIS node is the active cluster member for
 	// the default resource group, surfaced as the session ha_active field
 	// (#3419 M6), mirroring the gRPC contract (server_sessions.go
@@ -863,6 +860,7 @@ type Server struct {
 	flowExportLiveFeedMissesFn           func() uint64
 	feedOverlayFn                        func() map[string][]string
 	policySchedActiveFn                  func() (map[string]bool, bool)
+	policySchedAppliedFn                 func() (map[string]bool, bool)
 	haActiveFn                           func() bool
 	haActiveRGFn                         func(rg int) (bool, bool)
 	nodeIDFn                             func() int
@@ -1003,6 +1001,7 @@ func NewServer(cfg Config) *Server {
 		flowExportLiveFeedMissesFn:           cfg.FlowExportLiveFeedMissesFn,
 		feedOverlayFn:                        cfg.FeedOverlayFn,
 		policySchedActiveFn:                  cfg.PolicySchedulerActiveStateFn,
+		policySchedAppliedFn:                 cfg.PolicySchedulerAppliedStateAndFailClosedFn,
 		haActiveFn:                           cfg.HAActiveFn,
 		haActiveRGFn:                         cfg.HAActiveRGFn,
 		nodeIDFn:                             cfg.NodeIDFn,
