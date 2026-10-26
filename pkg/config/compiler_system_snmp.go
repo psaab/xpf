@@ -731,11 +731,11 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 						// config still boots — the runtime ignores the unknown
 						// key, so it is inert (#1960 fail-closed-on-load).
 						if !lenient {
-							return fmt.Errorf("snmp trap-group %q: unknown statement %q (valid: targets, version, categories)", tgName, prop.Name())
+							return fmt.Errorf("snmp trap-group %q: unknown statement %q (valid: targets, version, categories)", SecretDataPlaceholder, prop.Name())
 						}
 						if cfg != nil {
 							cfg.Warnings = append(cfg.Warnings,
-								fmt.Sprintf("snmp trap-group %q: unknown statement %q (downgraded to warning on tolerant path; ignored at runtime)", tgName, prop.Name()))
+								fmt.Sprintf("snmp trap-group %q: unknown statement %q (downgraded to warning on tolerant path; ignored at runtime)", SecretDataPlaceholder, prop.Name()))
 						}
 					}
 				}
@@ -759,10 +759,10 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 				lc := strings.ToLower(strings.TrimSpace(cat))
 				if !validTrapCategory15256(lc) {
 					if !lenient {
-						return fmt.Errorf("snmp trap-group %q: invalid trap category %q (valid Junos categories: authentication, chassis, chassis-cluster, configuration, link, otn-alarms, remote-operations, rmon-alarm, routing, services, sonet-alarms, startup, timing-events, vrrp-events)", tgName, cat)
+						return fmt.Errorf("snmp trap-group %q: invalid trap category %q (valid Junos categories: authentication, chassis, chassis-cluster, configuration, link, otn-alarms, remote-operations, rmon-alarm, routing, services, sonet-alarms, startup, timing-events, vrrp-events)", SecretDataPlaceholder, cat)
 					}
 					if cfg != nil {
-						cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: invalid trap category %q (downgraded to warning on tolerant path; ignored at runtime)", tgName, cat))
+						cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: invalid trap category %q (downgraded to warning on tolerant path; ignored at runtime)", SecretDataPlaceholder, cat))
 					}
 				}
 				if lc == "link" {
@@ -770,16 +770,16 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 				}
 			}
 			if !hasEmitted && cfg != nil {
-				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: categories %v include no category xpf emits (only \"link\" is emitted today), so this group will receive no traps — add \"link\" or remove the categories scope if traps are expected (#15256)", tgName, tg.Categories))
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: categories %v include no category xpf emits (only \"link\" is emitted today), so this group will receive no traps — add \"link\" or remove the categories scope if traps are expected (#15256)", SecretDataPlaceholder, tg.Categories))
 			}
 		}
 		if len(tg.Targets) == 0 {
 			if !lenient {
-				return fmt.Errorf("snmp trap-group %q: no targets configured (a trap group with zero targets sends no notifications)", tgName)
+				return fmt.Errorf("snmp trap-group %q: no targets configured (a trap group with zero targets sends no notifications)", SecretDataPlaceholder)
 			}
 			if cfg != nil {
 				cfg.Warnings = append(cfg.Warnings,
-					fmt.Sprintf("snmp trap-group %q: no targets configured (downgraded to warning on tolerant path; sends no notifications)", tgName))
+					fmt.Sprintf("snmp trap-group %q: no targets configured (downgraded to warning on tolerant path; sends no notifications)", SecretDataPlaceholder))
 			}
 		}
 	}

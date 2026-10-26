@@ -92,3 +92,35 @@ func TestV2cSetDeniedLogDoesNotLeakSecret(t *testing.T) {
 		t.Fatalf("SET-denied log should record the source IP; got: %q", out)
 	}
 }
+
+// The trap-group name IS the v1/v2c trap community (#15052/#16728), so trap
+// lifecycle logs must not emit it. RED-on-revert: restoring job.group to the
+// slog "group" field leaks the configured community in this stopped-drop path.
+func TestTrapGroupNameNotLoggedOnStoppedDrop(t *testing.T) {
+	const secret = "s3cr3t-trap-group"
+	a := &Agent{
+		cfg: &config.SNMPConfig{
+			TrapGroups: map[string]*config.SNMPTrapGroup{
+				secret: {Name: secret, Targets: []string{"192.0.2.9:162"}, Version: "v1"},
+			},
+		},
+		stopped: true,
+	}
+
+	out := captureDebugLog(t, func() {
+		a.NotifyLinkDown(3, "ge-0-0-1", true)
+	})
+
+	if !strings.Contains(out, "SNMP trap dropped: agent stopped") {
+		t.Fatalf("expected stopped-drop warning to fire; got: %q", out)
+	}
+	if strings.Contains(out, secret) {
+		t.Fatalf("trap log LEAKED trap-group community %q: %q", secret, out)
+	}
+	if !strings.Contains(out, config.SecretDataPlaceholder) {
+		t.Fatalf("trap log should retain a redacted group field; got: %q", out)
+	}
+	if !strings.Contains(out, "192.0.2.9:162") {
+		t.Fatalf("trap log should retain target; got: %q", out)
+	}
+}
