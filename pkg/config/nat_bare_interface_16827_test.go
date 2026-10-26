@@ -134,14 +134,16 @@ func TestNATBareInterfaceInertShapes16827(t *testing.T) {
 		t.Fatalf("lenient must record snat-bad in undefined-scope set, got %v", cfg.LenientNATUndefinedScopeRuleSets)
 	}
 
-	// Non-zero-unit-only interface: a bare ref must not widen to unit 0.
+	// A valid non-zero-unit-only interface must not widen a bare ref to .0.
 	cmds = append(bareNATBase16827(),
+		"set interfaces ge-0/0/6 vlan-tagging",
 		"set interfaces ge-0/0/6 unit 1 vlan-id 10 family inet address 10.0.6.1/24",
 		"set security nat source rule-set snat-bad from interface ge-0/0/6",
 		"set security nat source rule-set snat-bad rule r1 match source-address 10.0.0.0/8",
 		"set security nat source rule-set snat-bad rule r1 then source-nat pool pool1")
-	if _, err := CompileConfig(buildTree(t, cmds)); err == nil {
-		t.Fatal("strict must reject bare ref to a non-zero-unit-only interface")
+	if _, err := CompileConfig(buildTree(t, cmds)); err == nil ||
+		!strings.Contains(err.Error(), `source-nat rule-set "snat-bad": from interface "ge-0/0/6" not defined`) {
+		t.Fatalf("strict must reject the unresolved non-zero-unit-only scope with its NAT diagnostic, got %v", err)
 	}
 	cfg, err = CompileConfigLenient(buildTree(t, cmds))
 	if err != nil {
@@ -151,24 +153,6 @@ func TestNATBareInterfaceInertShapes16827(t *testing.T) {
 		t.Fatalf("multi-unit bare ref must stay bare (no unit-0 widening), got %q", got)
 	}
 
-	// Unit-0-plus-VLAN-units interface: the bare ref names no single
-	// unit, so it stays bare and strict-rejects rather than picking .0.
-	cmds = append(bareNATBase16827(),
-		"set interfaces ge-0/0/7 unit 0 family inet address 10.0.7.1/24",
-		"set interfaces ge-0/0/7 unit 1 vlan-id 10 family inet address 10.0.7.2/24",
-		"set security nat source rule-set snat-bad from interface ge-0/0/7",
-		"set security nat source rule-set snat-bad rule r1 match source-address 10.0.0.0/8",
-		"set security nat source rule-set snat-bad rule r1 then source-nat pool pool1")
-	if _, err := CompileConfig(buildTree(t, cmds)); err == nil {
-		t.Fatal("strict must reject bare ref to a multi-unit interface")
-	}
-	cfg, err = CompileConfigLenient(buildTree(t, cmds))
-	if err != nil {
-		t.Fatalf("lenient must not hard-fail: %v", err)
-	}
-	if got := cfg.Security.NAT.Source[0].FromInterface; got != "ge-0/0/7" {
-		t.Fatalf("multi-unit bare ref must stay bare, got %q", got)
-	}
 }
 
 // #17883: a unit-0-plus-tagged-sibling interface is valid, but its bare
