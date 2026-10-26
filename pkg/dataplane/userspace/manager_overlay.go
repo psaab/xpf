@@ -228,6 +228,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 			}
 			next.schedulerActiveState = copyPolicySchedulerActiveState(schedulerCopy)
 			next.schedulerActiveStateSet = true
+			next.schedulerFailClosed = failClosed
 		}
 		m.recordPolicyContentRejectionLocked(next.Capabilities.PolicyContentRejected)
 		m.refreshCaptureAuthorityLocked(&next)
@@ -350,6 +351,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		}
 		next.schedulerActiveState = copyPolicySchedulerActiveState(schedulerCopy)
 		next.schedulerActiveStateSet = true
+		next.schedulerFailClosed = failClosed
 	}
 	// #10500: scheduler-aware overlay rebuilds recompute the diagnostic;
 	// route-only republishes inherit the current caps. Record before the

@@ -38,13 +38,13 @@ type policySchedulerStateProvider interface {
 }
 
 // policySchedulerLatchProvider is the optional capability carrying the
-// DESIRED scheduler state + fail-closed latch (#16723). When present,
-// the simulator predicate is built with the builder's action-aware
-// dispositions; otherwise it falls back to the name-only predicate
-// (whose #3414 unavailable-state direction is unchanged, and stricter
-// for denies than the latch — fail-closed, never fail-open).
+// APPLIED scheduler state + fail-closed latch (#17837). When present,
+// the simulator predicate reproduces the action-aware disposition in
+// the snapshot the dataplane accepted; otherwise it falls back to the
+// name-only predicate for compatibility with providers that expose only
+// the active-state map.
 type policySchedulerLatchProvider interface {
-	PolicySchedulerDesiredStateAndFailClosed() (map[string]bool, bool)
+	PolicySchedulerAppliedStateAndFailClosed() (map[string]bool, bool)
 }
 
 // policySchedulerActiveState returns the live scheduler active-state map
@@ -78,17 +78,15 @@ func (c *CLI) policyInactiveFn() func(string) bool {
 }
 
 // policyInactiveForFn is the action-aware simulator predicate (#16723):
-// when the dataplane carries the desired scheduler state + fail-closed
-// latch, the predicate reproduces the snapshot builder's per-action
-// disposition (latched/Unresolvable scheduled DENY/REJECT stays
-// eligible); otherwise it adapts the name-only predicate, which is
-// stricter for denies (fail-closed) and therefore never certifies a
-// permit the runtime would deny. cfg supplies the #16010 Unresolvable
-// marks; it may be nil.
+// when the dataplane exposes its applied scheduler state + fail-closed
+// latch, the predicate reproduces the accepted snapshot's per-action
+// disposition (latched/Unresolvable scheduled DENY/REJECT stays eligible);
+// otherwise it adapts the name-only predicate. cfg supplies the #16010
+// Unresolvable marks; it may be nil.
 func (c *CLI) policyInactiveForFn(cfg *config.Config) func(*config.Policy) bool {
 	if c != nil && c.dp != nil {
 		if lp, ok := c.dpProbe().(policySchedulerLatchProvider); ok {
-			state, failClosed := lp.PolicySchedulerDesiredStateAndFailClosed()
+			state, failClosed := lp.PolicySchedulerAppliedStateAndFailClosed()
 			return dpuserspace.PolicyInactiveFnWithLatch(cfg, state, failClosed)
 		}
 	}

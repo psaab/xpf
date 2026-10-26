@@ -148,3 +148,45 @@ func TestGRPCMatchPoliciesScheduledPolicyFailsClosedWhenStateUnavailable(t *test
 		}
 	})
 }
+
+type schedulerAppliedPairDP17837 struct {
+	*schedulerStateDP
+	appliedState map[string]bool
+	appliedLatch bool
+	desiredState map[string]bool
+	desiredLatch bool
+}
+
+func (d *schedulerAppliedPairDP17837) PolicySchedulerAppliedStateAndFailClosed() (map[string]bool, bool) {
+	return d.appliedState, d.appliedLatch
+}
+
+func (d *schedulerAppliedPairDP17837) PolicySchedulerDesiredStateAndFailClosed() (map[string]bool, bool) {
+	return d.desiredState, d.desiredLatch
+}
+
+// TestGRPCMatchPoliciesUsesAppliedSchedulerState17837 verifies MatchPolicies
+// does not make a staged desired transition visible before helper acceptance.
+func TestGRPCMatchPoliciesUsesAppliedSchedulerState17837(t *testing.T) {
+	s := &Server{
+		store: schedOnlyMatchStore(t),
+		dp: &schedulerAppliedPairDP17837{
+			schedulerStateDP: &schedulerStateDP{Manager: dataplane.New(), active: map[string]bool{"after-hours": false}},
+			appliedState:     map[string]bool{"after-hours": true},
+			desiredState:     map[string]bool{"after-hours": false},
+			desiredLatch:     true,
+		},
+	}
+	resp, err := s.MatchPolicies(context.Background(), &pb.MatchPoliciesRequest{
+		FromZone:        "trust",
+		ToZone:          "untrust",
+		Protocol:        "tcp",
+		DestinationPort: 80,
+	})
+	if err != nil {
+		t.Fatalf("MatchPolicies() error = %v", err)
+	}
+	if !resp.Matched || resp.Action != "permit" || resp.DefaultUsed {
+		t.Fatalf("MatchPolicies() = %+v, want applied scheduled permit", resp)
+	}
+}

@@ -499,14 +499,14 @@ EOF or an over-cap suffix is never reported as a successful empty FIB.
   `any-ipv4`/`any-ipv6`, and source/destination exclusion — so the
   diagnostic could report the OPPOSITE of what the dataplane enforces.
   `policymatch.Match` now honors the configured `default-policy` and reports
-  whether a global policy matched. #3104: `show security match-policies` and
-  `test policy` thread live per-scheduler active-state
-  (`c.policyInactiveFn()` → `policymatch.Query.PolicyInactiveFn`) so a
-  scheduler-inactive policy is skipped like the runtime. #3414: `policyInactiveFn()`
-  is now ALWAYS non-nil — with no live state (no provider / early boot) it binds
-  a nil state map, which fails closed so scheduled policies are simulated as
-  INACTIVE (matching the dataplane's nil-state => dropped) rather than certified
-  as-if-active. #3628: the usage/help text these commands print when
+  `test policy` use the applied per-scheduler state + fail-closed latch
+  (`c.policyInactiveForFn()` → `policymatch.Query.PolicyInactiveForFn`) so the
+  simulator matches the helper-accepted snapshot, not staged desired state.
+  A latched scheduled DENY/REJECT remains eligible to prevent falling through
+  to a later permit (#17837). #3414: without an applied scheduler state the
+  bound predicate treats scheduled policies as inactive (unless the latch's
+  per-action deny disposition applies), rather than certifying them as active.
+  #3628: the usage/help text these commands print when
   from-zone/to-zone are missing is the shared SSOT constant
   `policymatch.MatchPoliciesUsage` / `TestPolicyUsage`, so the four surfaces
   (local + remote CLI, show + test) advertise the SAME selectors the parsers

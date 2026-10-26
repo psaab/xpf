@@ -8145,15 +8145,12 @@ type MatchPoliciesResponse struct {
 	Description string `protobuf:"bytes,18,opt,name=description,proto3" json:"description,omitempty"`
 	// #3685 M06: scheduler_name / scheduler_active expose the matched policy's
 	// time-gate. scheduler_name is the `scheduler-name` binding (mirroring the
-	// inventory PolicyRule field, #3624); scheduler_active is the explicit
-	// effective-active flag — true when the matched policy is scheduler-gated AND
-	// currently active. A positive match is by construction currently active (the
-	// live simulator threads a fail-closed PolicyInactiveFn that skips a
-	// scheduler-inactive rule before it can match, #3104/#3414), so a matched
-	// scheduled policy always reports scheduler_active=true; it names the gate
-	// that is admitting the rule right now. Additive; both empty/false (omitted)
-	// for a non-scheduled (always-on) policy and for the unmatched / host-inbound
-	// / default cases. Set only when matched is true.
+	// inventory PolicyRule field, #3624); scheduler_active indicates that the
+	// scheduler-gated policy was eligible in the helper-accepted snapshot.
+	// Under the fail-closed latch a scheduled DENY/REJECT may remain eligible
+	// even when its scheduler map entry is inactive (#17837). Both fields are
+	// empty/false (omitted) for non-scheduled policies and unmatched /
+	// host-inbound / default cases. Set only when matched is true.
 	SchedulerName   string `protobuf:"bytes,19,opt,name=scheduler_name,json=schedulerName,proto3" json:"scheduler_name,omitempty"`
 	SchedulerActive bool   `protobuf:"varint,20,opt,name=scheduler_active,json=schedulerActive,proto3" json:"scheduler_active,omitempty"`
 	// #3627 B1a: host_inbound is the structured host-inbound-traffic admission

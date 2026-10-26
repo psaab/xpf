@@ -221,13 +221,19 @@ func (m *Manager) policySchedulerActiveStateSnapshot() map[string]bool {
 	return copyPolicySchedulerActiveState(m.policySchedulerActive)
 }
 
+func (m *Manager) policySchedulerAppliedStateAndFailClosedSnapshot() (map[string]bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return copyPolicySchedulerActiveState(m.policySchedulerActive), m.policySchedulerAppliedFailClosed
+}
+
 func (m *Manager) policySchedulerDesiredStateAndFailClosedSnapshot() (map[string]bool, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.policySchedulerDesiredSet {
 		// Preserve direct-Compile behavior for callers without the daemon's
-		// pre-apply staging step.
-		return copyPolicySchedulerActiveState(m.policySchedulerActive), false
+		// pre-apply staging step by reusing the last helper-accepted pair.
+		return copyPolicySchedulerActiveState(m.policySchedulerActive), m.policySchedulerAppliedFailClosed
 	}
 	return copyPolicySchedulerActiveState(m.policySchedulerDesired), m.policySchedulerDesiredFailClosed
 }
@@ -237,15 +243,23 @@ func (m *Manager) policySchedulerDesiredStateAndFailClosedSnapshot() (map[string
 // Callers hold m.mu. Keeping this separate from the desired/build cache is
 // what prevents a failed publication from making show surfaces claim a state
 // the dataplane never accepted.
-func (m *Manager) commitPolicySchedulerActiveStateLocked(activeState map[string]bool) {
+func (m *Manager) commitPolicySchedulerActiveStateLocked(activeState map[string]bool, failClosed bool) {
 	m.policySchedulerActive = copyPolicySchedulerActiveState(activeState)
+	m.policySchedulerAppliedFailClosed = failClosed
 }
 
 func (m *Manager) commitPolicySchedulerActiveStateFromSnapshotLocked(snap *ConfigSnapshot) {
 	if snap == nil || !snap.schedulerActiveStateSet {
 		return
 	}
-	m.commitPolicySchedulerActiveStateLocked(snap.schedulerActiveState)
+	m.commitPolicySchedulerActiveStateLocked(snap.schedulerActiveState, snap.schedulerFailClosed)
+}
+
+// PolicySchedulerAppliedStateAndFailClosed returns a copy of the last
+// helper-accepted scheduler map and its fail-closed latch (#17837). Both
+// values advance together only when the snapshot carrying them is accepted.
+func (m *Manager) PolicySchedulerAppliedStateAndFailClosed() (map[string]bool, bool) {
+	return m.policySchedulerAppliedStateAndFailClosedSnapshot()
 }
 
 // PolicySchedulerActiveState returns a copy of the daemon-maintained
@@ -256,16 +270,6 @@ func (m *Manager) commitPolicySchedulerActiveStateFromSnapshotLocked(snap *Confi
 // scheduler-state snapshot has been applied yet.
 func (m *Manager) PolicySchedulerActiveState() map[string]bool {
 	return m.policySchedulerActiveStateSnapshot()
-}
-
-// PolicySchedulerDesiredStateAndFailClosed returns the DESIRED
-// (staged, not yet necessarily applied) scheduler inputs the next
-// snapshot build will use, including the fail-closed latch (#16723).
-// Simulator surfaces that must agree with the builder's per-action
-// disposition read this pair rather than the applied-state view
-// (PolicySchedulerActiveState), which carries no latch.
-func (m *Manager) PolicySchedulerDesiredStateAndFailClosed() (map[string]bool, bool) {
-	return m.policySchedulerDesiredStateAndFailClosedSnapshot()
 }
 
 // SetPolicySchedulerActiveState stages the active-state map for the next
@@ -1299,6 +1303,7 @@ func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeS
 		next.Config = cfg
 		next.schedulerActiveState = copyPolicySchedulerActiveState(activeCopy)
 		next.schedulerActiveStateSet = true
+		next.schedulerFailClosed = failClosed
 		resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 		if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, activeCopy, failClosed); err != nil {
 			slog.Warn("userspace: retaining prior snapshot; scheduler transition could not be folded in while helper is down", "err", err)
@@ -1340,6 +1345,7 @@ func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeS
 	next.Config = cfg
 	next.schedulerActiveState = copyPolicySchedulerActiveState(activeCopy)
 	next.schedulerActiveStateSet = true
+	next.schedulerFailClosed = failClosed
 	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 	// #6480: rebuild the schedule-affected policy + address-book sections
 	// (threading the cached feed overlay, #2049) and re-apply the StableZoneID

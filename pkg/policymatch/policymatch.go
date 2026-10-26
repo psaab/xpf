@@ -31,26 +31,18 @@
 // Go snapshot builder (pkg/dataplane/userspace/policies.go). Where the runtime
 // and the old per-surface matchers disagreed, the runtime wins.
 //
-// Note on scheduler state (#3104): the runtime honors a policy's
+// Note on scheduler state (#3104/#17837): the runtime honors a policy's
 // scheduler-driven `inactive` flag — policy.rs try_match_rule returns None for
-// an inactive rule BEFORE app/address matching, and the snapshot builder
-// (pkg/dataplane/userspace/policies.go) stamps that Inactive flag and fails
-// closed on missing scheduler state. This simulator is schedule-aware when the
-// caller threads live per-scheduler active-state into Query.PolicyInactiveFn:
-// it then SKIPS a scheduler-inactive policy exactly like the runtime, falling
-// through to the next active rule / configured default-policy. The live
+// an inactive rule BEFORE app/address matching, and the snapshot builder stamps
+// that flag from the applied scheduler state plus the fail-closed latch. Live
 // daemon-local surfaces (REST/gRPC/CLI match-policies) ALWAYS thread a non-nil
-// PolicyInactiveFn — even before scheduler state is published — because
-// dataplane/userspace.PolicyInactiveFn fails closed on a nil state map (#3414),
-// so the simulator treats a scheduled policy as inactive exactly as the
-// dataplane does rather than certifying it as-if-active. When PolicyInactiveFn
-// is nil the simulator falls back to evaluating the configured policy set
-// as-if-active; that is reserved for a purely offline, dataplane-less config
-// simulator that has no runtime verdict to agree with. A
-// NON-scheduled policy is unaffected in either case: PolicyInactiveFn is only
-// ever consulted with a policy's scheduler name, and the SSOT predicate
-// (dataplane/userspace.PolicyInactive) reports an empty scheduler name as
-// always active.
+// action-aware predicate from `PolicyInactiveFnWithLatch`, using the last
+// helper-accepted state/latch pair. It skips an ordinary inactive policy but
+// keeps a fail-closed-latched scheduled DENY/REJECT eligible, preventing a
+// false permit from a later rule. When that state is unavailable, the nil map
+// preserves the builder's unavailable-state behavior. A nil predicate is
+// reserved for a purely offline simulator without a runtime verdict to agree
+// with; a NON-scheduled policy is unaffected either way.
 package policymatch
 
 import (
@@ -480,32 +472,25 @@ type Query struct {
 	// this returns true is SKIPPED, so the simulator falls through to the next
 	// active rule / configured default-policy — agreeing with the dataplane.
 	//
-	// Callers build this from the live daemon-local per-scheduler active-state
-	// map via dataplane/userspace.PolicyInactiveFn, which wraps the SSOT
-	// PolicyInactive predicate shared with the snapshot builder and the #3062
-	// display surfaces. An empty scheduler name reports active, so a
-	// NON-scheduled policy is never skipped.
+	// Callers may build this name-only predicate from the live daemon-local
+	// active-state map via dataplane/userspace.PolicyInactiveFn. It cannot
+	// express the fail-closed latch's action-aware disposition; live
+	// match-policies surfaces use PolicyInactiveForFn below. An empty scheduler
+	// name reports active, so a NON-scheduled policy is never skipped.
 	//
 	// nil is valid and means "scheduler-unaware": the simulator evaluates
 	// scheduled policies as-if-active. This is reserved for a purely offline,
 	// dataplane-less config simulator that has no runtime verdict to agree with.
-	// The live daemon-local surfaces (REST/gRPC/CLI match-policies) ALWAYS
-	// supply a non-nil predicate via dataplane/userspace.PolicyInactiveFn — even
-	// when scheduler state is not yet published — because that predicate fails
-	// closed on a nil state map (#3414), so a scheduled policy is treated as
-	// inactive exactly as the dataplane treats it rather than certified active.
 	PolicyInactiveFn func(schedulerName string) bool
 
 	// PolicyInactiveForFn, when non-nil, is the action-aware scheduler
-	// predicate (#16723): it receives the whole policy, so the
-	// fail-closed latch and #16010 Unresolvable dispositions (a
-	// scheduled DENY/REJECT stays eligible while permits fail closed)
-	// are reproduced exactly as the snapshot builder computes them.
-	// It takes precedence over PolicyInactiveFn, which cannot express
-	// those dispositions (it sees only the scheduler name). Live
-	// surfaces build it via
-	// dataplane/userspace.PolicyInactiveFnWithLatch from the desired
-	// scheduler state + latch.
+	// predicate (#16723): it receives the whole policy, so the fail-closed
+	// latch and #16010 Unresolvable dispositions (a scheduled DENY/REJECT
+	// stays eligible while permits fail closed) match snapshot lowering.
+	// It takes precedence over PolicyInactiveFn, which sees only the scheduler
+	// name and cannot express those dispositions. Live surfaces build it via
+	// dataplane/userspace.PolicyInactiveFnWithLatch from the applied scheduler
+	// state + latch, so failed publications do not expose staged state.
 	PolicyInactiveForFn func(pol *config.Policy) bool
 
 	// SrcFamily / DstFamily carry the COLON-STRICT address family ("v4"/"v6"/"")
@@ -765,8 +750,9 @@ func ParseSelectorArgs(args []string) (SelectorArgs, error) {
 	return s, nil
 }
 
-// Query builds a policymatch.Query from parsed selectors. The caller-supplied
-// FeedOverlay and PolicyInactiveFn are left nil for the caller to populate.
+// Query builds a policymatch.Query from parsed selectors. FeedOverlay,
+// PolicyInactiveFn, and PolicyInactiveForFn are left nil for the caller to
+// populate.
 // An empty SrcIP/DstIP maps to a nil net.IP (the match-any wildcard); a
 // non-empty value is already net.ParseIP-validated by ParseSelectorArgs.
 //
@@ -959,17 +945,13 @@ type Result struct {
 
 	// SchedulerName is the `scheduler-name` binding of the matched policy
 	// (#3685 M06), the same value the inventory (REST/gRPC GetPolicies,
-	// #3624) carries. A matched policy is by construction currently ACTIVE —
-	// the live simulator surfaces always thread a non-nil
-	// Query.PolicyInactiveFn (dataplane/userspace.PolicyInactiveFn) that
-	// SKIPS a scheduler-inactive rule before it can match (#3104/#3414) — so a
-	// non-empty SchedulerName on a matched verdict names the time-gate that is
-	// controlling the rule right now, not a rule that is currently gated off.
-	// Empty for a non-scheduled (always-on) policy and for the
-	// default-policy / host-inbound verdicts. Populated from pol.SchedulerName
-	// in matchedResult; the offline (nil PolicyInactiveFn) simulator may report
-	// a scheduler name for a rule that is not runtime-active, but no live
-	// transport uses that mode.
+	// #3624) carries. A matched policy is eligible in the helper-accepted
+	// snapshot: the live action-aware scheduler predicate may keep a scheduled
+	// DENY/REJECT eligible under the fail-closed latch even when its scheduler
+	// map entry is inactive (#17837). Empty for a non-scheduled (always-on)
+	// policy and for default-policy / host-inbound verdicts. Populated from
+	// pol.SchedulerName in matchedResult; an offline simulator with no predicate
+	// may report a scheduler-bound policy that is not currently eligible.
 	SchedulerName string
 
 	// RuleID is the stable "<from>-><to>/<name>" rule identity the inventory
@@ -2372,11 +2354,11 @@ func (q Query) policyInactive(pol *config.Policy) bool {
 func ruleMatchesWithMemo(cfg *config.Config, q Query, pol *config.Policy, addressMemo *addressExpansionMemo) bool {
 	// #3104: scheduler gate, FIRST — mirror policy.rs try_match_rule, which
 	// returns None for a scheduler-inactive rule before any app/address
-	// matching. Skipping here lets Match fall through to the next active rule
-	// or the default-policy, exactly as the runtime does. PolicyInactiveFn is
-	// nil when the caller has no live scheduler state (simulate as-if-active),
-	// and reports an empty scheduler name as active, so a non-scheduled policy
-	// is never skipped.
+	// matching. Skipping here lets Match fall through to the next eligible rule
+	// or the default-policy, exactly as the runtime does. PolicyInactiveForFn
+	// takes precedence over the name-only PolicyInactiveFn; when both are nil
+	// the caller intentionally runs scheduler-unaware (offline), and an empty
+	// scheduler name is always active.
 	if q.policyInactive(pol) {
 		return false
 	}

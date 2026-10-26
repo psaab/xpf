@@ -1017,16 +1017,11 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		FeedOverlayFn: func() map[string][]string {
 			return d.feedSnapshotsForConfig(d.store.ActiveConfig())
 		},
-		// #3104: live per-scheduler active-state so the REST
-		// match-policies simulator skips a scheduler-inactive policy
-		// exactly like the runtime, instead of returning a verdict the
-		// dataplane disagrees with. Sourced from the same daemon-local
-		// accessor the CLI/gRPC show surfaces use
+		// #3104: live per-scheduler active-state for REST policy inventory
+		// details, sourced from the daemon-local applied cache
 		// (Manager.PolicySchedulerActiveState via the dataplane adapter).
-		// ok=false when the dataplane is absent (NoDataplane); the simulator
-		// then fails closed and treats scheduled policies as inactive (#3414),
-		// matching the dataplane's nil-state behavior rather than certifying
-		// an as-if-active verdict it is skipping.
+		// Match simulation separately reads the applied state + latch below.
+		// ok=false when the dataplane is absent (NoDataplane).
 		PolicySchedulerActiveStateFn: func() (map[string]bool, bool) {
 			// #2114: one dataplane snapshot per request (plan §5.3
 			// rule 7).
@@ -1041,6 +1036,24 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				return nil, false
 			}
 			return p.PolicySchedulerActiveState(), true
+		},
+		// #17837: REST policy simulation uses the accepted state/latch pair,
+		// not the desired scheduler state that may be ahead after a failed
+		// apply_snapshot publication.
+		PolicySchedulerAppliedStateAndFailClosedFn: func() (map[string]bool, bool) {
+			// #2114: one dataplane snapshot per request (plan §5.3
+			// rule 7).
+			rt := d.dataplane()
+			if rt == nil {
+				return nil, false
+			}
+			p, ok := rt.(interface {
+				PolicySchedulerAppliedStateAndFailClosed() (map[string]bool, bool)
+			})
+			if !ok {
+				return nil, false
+			}
+			return p.PolicySchedulerAppliedStateAndFailClosed()
 		},
 		// #1387 inc-2: DHCP dynamic-DNS counters for the
 		// xpf_dhcp_ddns_* metric family. Returns nil when the

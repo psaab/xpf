@@ -1251,6 +1251,10 @@ type ConfigSnapshot struct {
 	// hashes the JSON encoding) therefore excludes it as well.
 	schedulerActiveState    map[string]bool
 	schedulerActiveStateSet bool
+	// schedulerFailClosed is the fail-closed latch used to derive the policy
+	// sections in this snapshot. It is manager-local commit metadata, like
+	// schedulerActiveState, and never appears on the wire or content hash.
+	schedulerFailClosed bool
 	// xfrmDumpFailed records that this snapshot's single xfrm-device dump
 	// failed. It is local derivation metadata: the apply path retains the
 	// documented configuration-ownership fallback, while the RSS allowlist

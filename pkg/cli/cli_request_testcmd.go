@@ -116,9 +116,9 @@ func (c *CLI) testPolicy(args []string) error {
 		IngressInterface:    sel.IngressInterface,
 		FeedOverlay:         c.feedOverlay(),
 		FeedPublicationDebt: c.feedPublicationDebt(),
-		// #3104: skip scheduler-inactive policies like the runtime does, so the
-		// simulator falls through to the next active rule / default-policy.
-		PolicyInactiveFn: c.policyInactiveFn(),
+		// #17837: use the helper-accepted scheduler state + latch so a failed
+		// publication cannot make `test policy` simulate staged desired state.
+		PolicyInactiveForFn: c.policyInactiveForFn(cfg),
 	})
 	if res.PostNATInputNote != "" {
 		fmt.Printf("NOTE: %s\n", res.PostNATInputNote)

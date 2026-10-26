@@ -957,31 +957,29 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// #3104: thread live per-scheduler active-state so the simulator skips a
-	// scheduler-inactive policy exactly like the runtime (policy.rs
-	// try_match_rule), falling through to the next active rule / default-policy.
+	// #3104/#17837: bind the action-aware predicate to the applied scheduler
+	// state + latch so simulation follows the helper-accepted snapshot. In
+	// particular, fail-closed-latched scheduled DENY/REJECT rules stay eligible
+	// rather than falling through to a later permit.
 	//
-	// #3414: always bind a non-nil predicate so the unavailable-state path
-	// fails the SAME direction as the dataplane. When the accessor is not
-	// wired or returns ok=false (early boot / NoDataplane), schedState is nil,
-	// and PolicyInactiveFn(nil) treats every scheduler-bound policy as inactive
-	// — exactly as the snapshot builder does (policyRuleInactive: nil map =>
-	// dropped) until live state arrives. Previously the closure stayed nil and
-	// scheduled policies were simulated as-if-active, so the REST diagnostic
-	// could certify a permit/deny the dataplane actually skips (#3414). A
-	// NON-scheduled policy (empty scheduler name) is unaffected: PolicyInactiveFn
-	// returns false for it regardless of the (possibly nil) state map.
+	// #3414: always bind a non-nil predicate for unavailable-state fail-closed
+	// behavior. Without the applied accessor (early boot / NoDataplane), the nil
+	// scheduler map treats scheduled policies as inactive, matching the snapshot
+	// builder; a non-scheduled policy remains unaffected.
 	var schedState map[string]bool
-	if s.policySchedActiveFn != nil {
+	var failClosed bool
+	if s.policySchedAppliedFn != nil {
+		schedState, failClosed = s.policySchedAppliedFn()
+	} else if s.policySchedActiveFn != nil {
+		// Compatibility for callers wired before the latch-aware accessor:
+		// this state is the applied view, with the normal (unlatched)
+		// disposition.
 		schedState, _ = s.policySchedActiveFn()
 	}
-	// #16723: PolicyInactiveFn (name-only) stays the predicate here —
-	// pkg/api has no latch plumbing (policySchedActiveFn carries no
-	// fail-closed latch), and the name-only predicate is STRICTER for
-	// scheduled denies than the builder's latch disposition: it never
-	// certifies a permit past a deny the runtime might still enforce.
-	// Surfaces with latch access (CLI, gRPC) use PolicyInactiveForFn.
-	inactiveFn := dpuserspace.PolicyInactiveFn(schedState)
+	// #17837: use the snapshot-builder's action-aware disposition. In
+	// particular, a fail-closed-latched scheduled DENY/REJECT remains eligible
+	// and must not be skipped in favor of a later permit.
+	inactiveForFn := dpuserspace.PolicyInactiveFnWithLatch(cfg, schedState, failClosed)
 	res := policymatch.Match(cfg, policymatch.Query{
 		FromZone: fromZone,
 		ToZone:   toZone,
@@ -1004,7 +1002,7 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 		IngressInterface:    ingressIface,
 		FeedOverlay:         overlay,
 		FeedPublicationDebt: publicationDebt,
-		PolicyInactiveFn:    inactiveFn,
+		PolicyInactiveForFn: inactiveForFn,
 	})
 	// #3285: a `to-zone junos-host` query that matched no host-bound policy is
 	// not a transit default — the dataplane host gate returns None (local
@@ -1111,12 +1109,10 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 		// context) so the match verdict is not weaker than the inventory /
 		// local CLI answers over the same policymatch.Result.
 		Description: res.Description,
-		// #3685 M06: name the scheduler time-gate and confirm it is currently
-		// admitting the rule. A positive match here is by construction active
-		// (inactiveFn above already skipped a scheduler-inactive rule, #3414),
-		// so SchedulerActive tracks whether the matched rule is scheduler-gated
-		// at all — true only for a scheduled policy, omitted for an always-on
-		// one.
+		// #3685 M06: name the scheduler time-gate. A matched policy is eligible
+		// in the helper-accepted snapshot; under the fail-closed latch a
+		// scheduled DENY/REJECT can remain eligible with an inactive scheduler
+		// map entry (#17837). SchedulerActive is true only for a scheduled policy.
 		SchedulerName:              res.SchedulerName,
 		SchedulerActive:            res.SchedulerName != "",
 		Action:                     res.DisplayAction(),
