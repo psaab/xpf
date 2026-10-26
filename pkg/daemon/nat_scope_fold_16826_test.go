@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"net"
+	"strconv"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // nat_scope_fold_16826_test.go — #16826 two-node cell: a reth0.80
@@ -56,5 +58,73 @@ func TestNatScopeFoldTwoNodeRethVlan_16826(t *testing.T) {
 	}}}
 	if fn := buildNatScopeFoldFnWithIfaces(plain, devs0); fn != nil {
 		t.Fatal("non-RETH-VLAN config must keep the legacy vlan-0 fold (nil pair folder)")
+	}
+}
+
+// TestNatScopeFoldUsesBuilderCollisionAssignments_17876 pins the sender fold
+// to the synthetic ifindexes the snapshot builder actually assigned. The two
+// valid RETH units have the same initial FNV slot, so the builder displaces
+// the second one through its shared used-set. FAIL-ON-REVERT: independently
+// recomputing each unit with a fresh set points both names at one ifindex;
+// the folder then stamps one builder row with its sibling's VLAN and leaves
+// the displaced row unknown, which can revoke an otherwise valid imported
+// session. The parent fold is the named control.
+func TestNatScopeFoldUsesBuilderCollisionAssignments_17876(t *testing.T) {
+	parent, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skipf("loopback interface unavailable: %v", err)
+	}
+	for _, vlan := range []int{205, 680} {
+		if _, err := net.InterfaceByName("lo." + strconv.Itoa(vlan)); err == nil {
+			t.Skipf("loopback VLAN lo.%d exists; fixture is not logical-only", vlan)
+		}
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skipf("cannot enumerate interfaces: %v", err)
+	}
+	cfg := &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+		"lo": {Name: "lo", RedundantParent: "reth0"},
+		"reth0": {Name: "reth0", Units: map[int]*config.InterfaceUnit{
+			205: {Number: 205, VlanID: 205},
+			680: {Number: 680, VlanID: 680},
+		}},
+	}}}
+	snapshots := dpuserspace.BuildInterfaceSnapshots(cfg)
+	rows := make(map[string]dpuserspace.InterfaceSnapshot, 2)
+	for _, row := range snapshots {
+		if row.Name == "reth0.205" || row.Name == "reth0.680" {
+			rows[row.Name] = row
+		}
+	}
+	first, okFirst := rows["reth0.205"]
+	second, okSecond := rows["reth0.680"]
+	if !okFirst || !okSecond || !first.LogicalOnly || !second.LogicalOnly {
+		t.Fatalf("builder rows = (%+v,%v), (%+v,%v), want both logical-only RETH units", first, okFirst, second, okSecond)
+	}
+	if first.Ifindex != 1073948161 || second.Ifindex != first.Ifindex+1 {
+		t.Fatalf("builder collision assignments = (%d,%d), want (1073948161,1073948162)", first.Ifindex, second.Ifindex)
+	}
+	fold := buildNatScopeFoldFnWithIfaces(cfg, ifaces)
+	if fold == nil {
+		t.Fatal("NAT scope folder is nil for tagged RETH config")
+	}
+	sender := cluster.NewSessionSync(":0", ":0", nil)
+	sender.SetNatScopeFoldFn(fold)
+	for _, tc := range []struct {
+		name string
+		row  dpuserspace.InterfaceSnapshot
+		want string
+	}{
+		{name: "reth0.205", row: first, want: "reth0.205"},
+		{name: "reth0.680", row: second, want: "reth0.680"},
+	} {
+		if got, want := sender.StampNatScopeFoldForTesting(int32(tc.row.Ifindex)), config.StableIfaceID(tc.want); got != want {
+			t.Errorf("%s synthetic ifindex %d stamped fold %d, want fold(%s)=%d",
+				tc.name, tc.row.Ifindex, got, tc.want, want)
+		}
+	}
+	if got, want := sender.StampNatScopeFoldForTesting(int32(parent.Index)), config.StableIfaceID("reth0"); got != want {
+		t.Errorf("parent ifindex %d stamped fold %d, want parent control fold %d", parent.Index, got, want)
 	}
 }
