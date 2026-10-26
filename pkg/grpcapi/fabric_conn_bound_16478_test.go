@@ -267,7 +267,6 @@ func TestFabricConnGateRejectsInvalidReserve17687(t *testing.T) {
 		})
 	}
 
-
 	// A positive reserve within the total remains usable for non-peer traffic.
 	g := newFabricConnGate(2, 1, nil)
 	nonPeer := &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 40000}
