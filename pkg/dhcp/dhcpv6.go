@@ -1577,7 +1577,6 @@ func (m *Manager) buildDHCPv6Modifiers(ifaceName string, opts *DHCPv6Options) []
 // nothing usable left, the reply fails and the held set is cleared
 // through the pdRefused path; a still-covered sibling keeps the reply
 // usable and reconcile retains only what the reply re-grants.
-
 func extractDelegatedPrefixesPinned(msg *dhcpv6.Message, ifaceName string, now time.Time, protected, pins []netip.Prefix, expectedIAID ...*[4]byte) (live, withdrawn []DelegatedPrefix, pdRefused bool) {
 	for _, opt := range msg.Options.Options {
 		iapdOpt, ok := opt.(*dhcpv6.OptIAPD)
