@@ -1,4 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Upgrade: after a rolling cut commits despite a deferred signal, still
+    wait for session sync and confirm rejoin before surfacing the signal
+    status. Do not confuse a committed cut with a destructive cut failure
+    and leave the node ForceSecondary-drained (#17840).
+
+xpf (0.0.0) unstable; urgency=medium
   * DDNS: centralize #2663 DHCP v4/v6 single-block inheritance in
     DHCPServerConfig.EffectiveDynamicDNS; reconciliation, reset, show, and
     warning consumers now call the canonical rule without behavior change
