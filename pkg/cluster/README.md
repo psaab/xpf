@@ -2811,9 +2811,13 @@ the eviction and the #9717 listing keyed only on `len(authPSK)==0`, so a holder
 of the retired key kept verifying frames under retired-key-derived connection
 keys for as long as it declined the #6628 rekey, and nothing surfaced it. The
 grace anchors set-once (monotonic) at the reconcile where the key leaves the
-accepted set, the connection is listed during the grace, and it is evicted at
-expiry. A cooperating peer that rekeys within the grace, or whose key is
-re-accepted as the additional key, clears the anchor and is never evicted.
+accepted set; a later reconcile cannot re-arm it. If a round already in flight
+at retirement completes successfully under that now-retired key, its
+authenticated completion starts a fresh grace for the immediately-triggered
+current-key rekey.
+A cooperating peer that rekeys within the grace, or whose key is re-accepted as
+the additional key, clears the anchor and is never evicted. Failed, incomplete,
+malformed, and duplicate completions do not renew the deadline.
 While a rotation window is still open (the old key still in the accepted set),
 an old-key connection is not part of this population.
 
