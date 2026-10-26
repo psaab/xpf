@@ -1,28 +1,29 @@
 // Pool-mode SNAT port allocator + persistent lease state machine.
 //
-// #2852 Phase 1 (lock-free port claim): the port-ownership state is no
-// longer serialized behind the single `RwLock<PortAllocatorLiveState>`.
-// Per-pool-address occupancy is an atomic bitmap (`AddressOccupancy`,
-// `Vec<AtomicU64>` + a keyed fresh-port probe, #16011); a CAS on the bit IS the
-// port-ownership token (a set bit cannot be re-claimed), replacing the
-// pre-#2852 `owner_by_translated` / `addr_index_by_translated` maps and the
-// per-address `next_port_offset_by_addr` cursor. The port CLAIM (the
-// contended hot path in `allocate_translation`) is therefore lock-free: a
-// non-persistent new flow claims its port with zero global-mutex contention
-// and takes the (retained) mutex only for the tiny `live_by_flow`
-// insert/reuse-check/exact-cap-check critical section. The microbench
+// #2852 Phase 1 (lock-free port claim): per-pool-address occupancy is an
+// atomic bitmap (`AddressOccupancy`, `Vec<AtomicU64>` + keyed fresh-port
+// probe, #16011); a CAS on the bit IS the port-ownership token, replacing
+// the pre-#2852 `owner_by_translated` / `addr_index_by_translated` maps and
+// per-address `next_port_offset_by_addr` cursor. Port CLAIM remains outside
+// the retained `live` RwLock, but the non-persistent fast path now attempts
+// `live.try_write()` after claiming a candidate and holds it through the
+// reverse-identity check, flow-shard insert, and PAT-owner publication.
+// If that try-write contends, the unpublished claim is released and the
+// allocation enters the serialized fallback, which may wait. The microbench
 // `benches/snat_allocator.rs` (results in docs/research/2852-portalloc/)
 // proved the pre-Phase-1 single mutex negative-scales (2.87M->0.62M
-// allocs/sec, M=1->8); Phase 1 is 1.4-1.6x at M=6/8.
+// allocs/sec, M=1->8); those historical results do not measure this
+// contention fallback.
 //
-// What stays under `RwLock<PortAllocatorLiveState>`: the persistent-lease
-// lifecycle (`persistent_by_source` + the expiration indexes), the
-// ownership indexes, and `gc_counter`. #15956 Phase 2: the flow map
-// (`live_by_flow`) is sharded in flows.rs (16 shards); the measured
-// residual-mutex contention (59% @M=8) warranted it. Writers take
-// the write guard; the non-persistent new-flow admission check
-// takes only the read guard, so distinct new flows no longer
-// serialize on this lock at all.
+// What stays under `RwLock<PortAllocatorLiveState>`: persistent-lease
+// lifecycle (`persistent_by_source` + expiration indexes), ownership
+// indexes, and `gc_counter`. #15956 Phase 2 sharded `live_by_flow` in
+// flows.rs (16 shards); each new non-persistent PAT flow now briefly
+// takes the write guard too, so the identity check and owner publication
+// cannot diverge. Under contention the try-only fast path gives way to
+// the existing serialized writer path; distinct flows can therefore
+// serialize behind `live` under contention. Read-only consumers still
+// take the shared guard, concurrently when no writer is active.
 //
 // F4 (global tracked-flow cap): kept EXACT with no overshoot. The cap is
 // the sharded map's atomic count — bumped only on actual insert/remove
@@ -968,6 +969,91 @@ impl PatReverseKey {
     }
 }
 
+/// Owns the PAT reverse-identity map and its broad-scope count indexes.
+/// Keeping these maps behind one mutation seam prevents an exact owner from
+/// being published without also updating the prefix indexes used by imports.
+#[derive(Debug, Default)]
+struct ReverseIdentityIndex {
+    pat_owners: FxHashMap<PatReverseKey, u32>,
+    pat_owners_by_base: FxHashMap<ReverseIdentityBaseKey, u32>,
+    pat_owners_by_host: FxHashMap<ReverseIdentityHostKey, u32>,
+}
+
+impl ReverseIdentityIndex {
+    fn publish_pat(&mut self, flow: &SourceNatFlowKey, translated: TranslatedTuple) {
+        let key = PatReverseKey::for_flow(flow, translated);
+        let count = self.pat_owners.entry(key).or_insert(0);
+        *count = count.saturating_add(1);
+
+        let base = ReverseIdentityBaseKey {
+            protocol: key.protocol,
+            translated_ip: key.translated_ip,
+            translated_port: key.translated_port,
+        };
+        let host = ReverseIdentityHostKey {
+            base,
+            dst_ip: key.dst_ip,
+        };
+        let count = self.pat_owners_by_base.entry(base).or_insert(0);
+        *count = count.saturating_add(1);
+        let count = self.pat_owners_by_host.entry(host).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+
+    fn retract_pat(&mut self, flow: &SourceNatFlowKey, translated: TranslatedTuple) {
+        let key = PatReverseKey::for_flow(flow, translated);
+        let Some(count) = self.pat_owners.get_mut(&key) else {
+            return;
+        };
+        if *count <= 1 {
+            self.pat_owners.remove(&key);
+        } else {
+            *count -= 1;
+        }
+
+        let base = ReverseIdentityBaseKey {
+            protocol: key.protocol,
+            translated_ip: key.translated_ip,
+            translated_port: key.translated_port,
+        };
+        let host = ReverseIdentityHostKey {
+            base,
+            dst_ip: key.dst_ip,
+        };
+        if let Some(count) = self.pat_owners_by_base.get_mut(&base) {
+            if *count <= 1 {
+                self.pat_owners_by_base.remove(&base);
+            } else {
+                *count -= 1;
+            }
+        }
+        if let Some(count) = self.pat_owners_by_host.get_mut(&host) {
+            if *count <= 1 {
+                self.pat_owners_by_host.remove(&host);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+
+    fn owns_wire_identity(&self, flow: &SourceNatFlowKey, translated: TranslatedTuple) -> bool {
+        self.pat_owners
+            .contains_key(&PatReverseKey::for_flow(flow, translated))
+    }
+
+    fn owns_exact(&self, key: &PatReverseKey) -> bool {
+        self.pat_owners.contains_key(key)
+    }
+
+    fn owns_host(&self, key: &ReverseIdentityHostKey) -> bool {
+        self.pat_owners_by_host.contains_key(key)
+    }
+
+    fn owns_base(&self, key: &ReverseIdentityBaseKey) -> bool {
+        self.pat_owners_by_base.contains_key(key)
+    }
+}
+
 pub(super) const DETERMINISTIC_NAT64_BIB_TIMEOUT_NS: u64 = 300 * NS_PER_SEC;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PersistentLease {
@@ -1120,17 +1206,14 @@ pub(super) struct PortAllocatorLiveState {
     // `rollback_flow` for an `address_only` `LiveAllocation`. Distinct from the
     // per-address occupancy bitmap, which tracks PAT port ownership.
     address_only_owners: FxHashMap<AddressOnlyReverseKey, SourceNatFlowKey>,
-    // #10190: exact PAT reverse identities for same-allocator address-only
-    // admission. A count is required because persistent-NAT flows can share
-    // one translated tuple while holding separate `live_by_flow` records.
-    pat_owners: FxHashMap<PatReverseKey, u32>,
-    // #11475: prefix indexes for broad remote scopes. Keeping each ownership
-    // domain separate lets PAT imports preserve port-busy precedence while
-    // address-only imports consult both domains, all without owner-map scans.
+    // #10190 / #11475: exact PAT reverse identities and their broad-scope
+    // counts are one typed owner so publication and retraction cannot update
+    // only part of the index.
+    reverse_identities: ReverseIdentityIndex,
+    // #11475: address-only prefix indexes support broad remote scopes without
+    // scanning the exact owner map.
     address_only_owner_counts_by_base: FxHashMap<ReverseIdentityBaseKey, u32>,
     address_only_owner_counts_by_host: FxHashMap<ReverseIdentityHostKey, u32>,
-    pat_owner_counts_by_base: FxHashMap<ReverseIdentityBaseKey, u32>,
-    pat_owner_counts_by_host: FxHashMap<ReverseIdentityHostKey, u32>,
     /// #11496: idle address-only leases remain reverse-identity owners between
     /// flow releases and expiry, so peer import checks need their own index.
     persistent_address_only_owner_counts: FxHashMap<PersistentAddressOnlyOwnerKey, u32>,
@@ -1574,7 +1657,7 @@ impl PortAllocatorLiveState {
                         .persistent_address_only_owner_counts
                         .contains_key(&PersistentAddressOnlyOwnerKey::AnyWildcard(base))
                     || (check_pat_owners
-                        && self.pat_owners.contains_key(&PatReverseKey {
+                        && self.reverse_identities.owns_exact(&PatReverseKey {
                             protocol,
                             translated_ip: translated.ip,
                             translated_port: translated.port,
@@ -1591,14 +1674,14 @@ impl PortAllocatorLiveState {
                     || self
                         .persistent_address_only_owner_counts
                         .contains_key(&PersistentAddressOnlyOwnerKey::AnyWildcard(base))
-                    || (check_pat_owners && self.pat_owner_counts_by_host.contains_key(&host))
+                    || (check_pat_owners && self.reverse_identities.owns_host(&host))
             }
             None => {
                 self.address_only_owner_counts_by_base.contains_key(&base)
                     || self
                         .persistent_address_only_owner_counts
                         .contains_key(&PersistentAddressOnlyOwnerKey::Any(base))
-                    || (check_pat_owners && self.pat_owner_counts_by_base.contains_key(&base))
+                    || (check_pat_owners && self.reverse_identities.owns_base(&base))
             }
         }
     }
@@ -1632,7 +1715,7 @@ impl PortAllocatorLiveState {
             translated_port: translated.port,
         };
         if self.address_only_owner_counts_by_base.contains_key(&base)
-            || self.pat_owner_counts_by_base.contains_key(&base)
+            || self.reverse_identities.owns_base(&base)
         {
             return true;
         }
@@ -1730,13 +1813,12 @@ impl PortAllocatorLiveState {
         })
     }
 
-    fn add_live_reverse_owner_count(
+    fn add_address_only_owner_count(
         &mut self,
         protocol: u8,
         translated_ip: IpAddr,
         translated_port: u16,
         dst_ip: IpAddr,
-        address_only: bool,
     ) {
         let base = ReverseIdentityBaseKey {
             protocol,
@@ -1744,32 +1826,24 @@ impl PortAllocatorLiveState {
             translated_port,
         };
         let host = ReverseIdentityHostKey { base, dst_ip };
-        if address_only {
-            let count = self
-                .address_only_owner_counts_by_base
-                .entry(base)
-                .or_insert(0);
-            *count = count.saturating_add(1);
-            let count = self
-                .address_only_owner_counts_by_host
-                .entry(host)
-                .or_insert(0);
-            *count = count.saturating_add(1);
-        } else {
-            let count = self.pat_owner_counts_by_base.entry(base).or_insert(0);
-            *count = count.saturating_add(1);
-            let count = self.pat_owner_counts_by_host.entry(host).or_insert(0);
-            *count = count.saturating_add(1);
-        }
+        let count = self
+            .address_only_owner_counts_by_base
+            .entry(base)
+            .or_insert(0);
+        *count = count.saturating_add(1);
+        let count = self
+            .address_only_owner_counts_by_host
+            .entry(host)
+            .or_insert(0);
+        *count = count.saturating_add(1);
     }
 
-    fn remove_live_reverse_owner_count(
+    fn remove_address_only_owner_count(
         &mut self,
         protocol: u8,
         translated_ip: IpAddr,
         translated_port: u16,
         dst_ip: IpAddr,
-        address_only: bool,
     ) {
         let base = ReverseIdentityBaseKey {
             protocol,
@@ -1777,105 +1851,57 @@ impl PortAllocatorLiveState {
             translated_port,
         };
         let host = ReverseIdentityHostKey { base, dst_ip };
-        if address_only {
-            if let Some(count) = self.address_only_owner_counts_by_base.get_mut(&base) {
-                if *count <= 1 {
-                    self.address_only_owner_counts_by_base.remove(&base);
-                } else {
-                    *count -= 1;
-                }
+        if let Some(count) = self.address_only_owner_counts_by_base.get_mut(&base) {
+            if *count <= 1 {
+                self.address_only_owner_counts_by_base.remove(&base);
+            } else {
+                *count -= 1;
             }
-            if let Some(count) = self.address_only_owner_counts_by_host.get_mut(&host) {
-                if *count <= 1 {
-                    self.address_only_owner_counts_by_host.remove(&host);
-                } else {
-                    *count -= 1;
-                }
-            }
-        } else {
-            if let Some(count) = self.pat_owner_counts_by_base.get_mut(&base) {
-                if *count <= 1 {
-                    self.pat_owner_counts_by_base.remove(&base);
-                } else {
-                    *count -= 1;
-                }
-            }
-            if let Some(count) = self.pat_owner_counts_by_host.get_mut(&host) {
-                if *count <= 1 {
-                    self.pat_owner_counts_by_host.remove(&host);
-                } else {
-                    *count -= 1;
-                }
+        }
+        if let Some(count) = self.address_only_owner_counts_by_host.get_mut(&host) {
+            if *count <= 1 {
+                self.address_only_owner_counts_by_host.remove(&host);
+            } else {
+                *count -= 1;
             }
         }
     }
 
     fn insert_address_only_owner(&mut self, key: AddressOnlyReverseKey, flow: SourceNatFlowKey) {
         if self.address_only_owners.insert(key, flow).is_none() {
-            self.add_live_reverse_owner_count(
+            self.add_address_only_owner_count(
                 key.protocol,
                 key.translated_ip,
                 key.translated_port,
                 key.dst_ip,
-                true,
             );
         }
     }
 
     fn remove_address_only_owner(&mut self, key: &AddressOnlyReverseKey) {
         if self.address_only_owners.remove(key).is_some() {
-            self.remove_live_reverse_owner_count(
+            self.remove_address_only_owner_count(
                 key.protocol,
                 key.translated_ip,
                 key.translated_port,
                 key.dst_ip,
-                true,
             );
         }
     }
 
-    /// Record one live PAT owner of an exact reverse identity. Persistent NAT
-    /// can place multiple forward flows on one translated tuple, so this is a
-    /// count rather than a single owner flow.
     fn record_pat_owner(&mut self, flow: &SourceNatFlowKey, translated: TranslatedTuple) {
-        let key = PatReverseKey::for_flow(flow, translated);
-        let count = self.pat_owners.entry(key).or_insert(0);
-        *count = count.saturating_add(1);
-        self.add_live_reverse_owner_count(
-            key.protocol,
-            key.translated_ip,
-            key.translated_port,
-            key.dst_ip,
-            false,
-        );
+        self.reverse_identities.publish_pat(flow, translated);
     }
 
-    /// Remove one live PAT owner from the exact reverse-identity count.
     fn remove_pat_owner(&mut self, flow: &SourceNatFlowKey, translated: TranslatedTuple) {
-        let key = PatReverseKey::for_flow(flow, translated);
-        let Some(count) = self.pat_owners.get_mut(&key) else {
-            return;
-        };
-        if *count <= 1 {
-            self.pat_owners.remove(&key);
-        } else {
-            *count -= 1;
-        }
-        self.remove_live_reverse_owner_count(
-            key.protocol,
-            key.translated_ip,
-            key.translated_port,
-            key.dst_ip,
-            false,
-        );
+        self.reverse_identities.retract_pat(flow, translated);
     }
 
     /// #10190: O(1) lookup for a PAT owner of the exact reverse wire
     /// identity an address-only flow would preserve. The destination endpoint
     /// remains part of the key, so another remote is admissible.
     fn pat_owns_wire_identity(&self, flow: &SourceNatFlowKey, translated: TranslatedTuple) -> bool {
-        self.pat_owners
-            .contains_key(&PatReverseKey::for_flow(flow, translated))
+        self.reverse_identities.owns_wire_identity(flow, translated)
     }
 }
 
@@ -2187,28 +2213,21 @@ impl PortAllocator {
         }
     }
 
-    /// #4800: acquire the residual `live` map mutex, counting acquisitions
-    /// and the subset that had to block.
+    /// #4800: acquire the `live` state write guard for serialized operations,
+    /// counting attempts and those whose initial `try_write` found contention.
+    /// The non-persistent fast path uses the same counters for its no-wait
+    /// `try_write`, then abandons that path on contention and falls back here.
+    /// Flow-shard write acquisitions also contribute to this counter pair.
     ///
-    /// `try_lock()` first: on an uncontended mutex that is a single CAS —
-    /// exactly what `lock()` was already doing — so the LOCK ITSELF costs what
-    /// it always did. The acquisition counter is bumped UNCONDITIONALLY, so an
-    /// uncontended acquisition is 2 relaxed atomic read-modify-writes where it
-    /// used to be 1; "unchanged" would be false, though both are relaxed,
-    /// untimed and allocation-free. Only when the CAS fails (another worker
-    /// holds the map mutex) do we bump `live_lock_contended` and fall through
-    /// to the blocking `lock()`, which was going to happen regardless.
+    /// Poison policy is preserved from the existing call sites:
+    /// `unwrap_or_else(|e| e.into_inner())` lets later allocations continue
+    /// after a worker panics mid-mutation. A poisoned try-write supplies the
+    /// guard directly; on `WouldBlock`, this serialized path records contention
+    /// and proceeds to the blocking write.
     ///
-    /// Poison policy is preserved verbatim from the call sites this
-    /// replaces (`unwrap_or_else(|e| e.into_inner())`): a worker that
-    /// panicked mid-mutation must not strand every subsequent allocation.
-    /// `try_lock` reports poison only when the mutex is FREE, so the
-    /// blocking arm still has to handle it.
-    ///
-    /// Every production allocate / reserve / release / rollback / GC site
-    /// goes through here. `snapshot()` deliberately does NOT — it is the
-    /// ~1s status poll that reads these very counters, and counting it
-    /// would inject the observer into the observation.
+    /// `snapshot()` deliberately does NOT count as an acquisition — it is the
+    /// ~1s status poll that reads these counters, and counting it would inject
+    /// the observer into the observation.
     pub(super) fn lock_live(&self) -> RwLockWriteGuard<'_, PortAllocatorLiveState> {
         self.shared
             .live_lock_acquisitions
@@ -2280,28 +2299,40 @@ impl PortAllocator {
         }
     }
 
-    /// #15956 fold: shared (`RwLock` read) access to the retained
-    /// lease/ownership state for read-only admission checks — the
-    /// non-persistent new-flow hot path. Concurrent readers do not
-    /// serialize; only writers (lease/index mutation) exclude.
-    /// Deliberately NOT #4800-counted: a shared acquisition is not
-    /// the serialized critical section the pair measures.
+    /// Shared access to the retained lease/ownership state for read-only
+    /// queries. PAT admission does not use this guard: it needs the write
+    /// guard to make the reverse-identity check and owner publication atomic.
+    /// Deliberately NOT #4800-counted: a shared acquisition is not the
+    /// serialized critical section the pair measures.
     pub(super) fn read_live(&self) -> RwLockReadGuard<'_, PortAllocatorLiveState> {
         self.shared.live.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Test seam: hold the `live` WRITE guard so a test can prove a
-    /// new-flow admission does (writers) or does not (readers
-    /// only) block behind it.
+    /// Test seam: hold the `live` WRITE guard so a test can exercise
+    /// allocation's serialized fallback behind a live writer.
     #[cfg(test)]
     pub(super) fn debug_hold_live_write(&self) -> RwLockWriteGuard<'_, PortAllocatorLiveState> {
         self.lock_live()
     }
-    /// Test seam: hold the `live` READ guard (shared) so a test can
-    /// prove new-flow admission proceeds concurrently with readers.
+    /// Test seam: hold the `live` READ guard to force the fast
+    /// `try_write` to refuse and exercise its claim-release fallback.
     #[cfg(test)]
     pub(super) fn debug_hold_live_read(&self) -> RwLockReadGuard<'_, PortAllocatorLiveState> {
         self.read_live()
+    }
+
+    #[cfg(test)]
+    pub(super) fn debug_live_lock_contended_total(&self) -> u64 {
+        self.shared.live_lock_contended.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(super) fn debug_pat_owns_wire_identity(
+        &self,
+        flow: &SourceNatFlowKey,
+        translated: TranslatedTuple,
+    ) -> bool {
+        self.read_live().pat_owns_wire_identity(flow, translated)
     }
 
     // the #4800 acquisition/contention pair comparable.
@@ -3432,6 +3463,12 @@ impl PortAllocator {
         };
         occ.free_recycle_at(port, now_ns)
     }
+    /// Release a newly claimed candidate that never became a live PAT mapping.
+    /// Use an unstamped recycle token: it bypasses the small-pool quarantine
+    /// while keeping concurrent bitmap/recycle claims exact.
+    fn free_unpublished_translated_port(&self, addr_index: usize, port: u16) -> bool {
+        self.free_translated_port_at(addr_index, port, 0)
+    }
 
     #[allow(clippy::too_many_arguments)]
     /// #8447: the persistent-NAT admission counter pair lives here, on a thin
@@ -3671,7 +3708,7 @@ impl PortAllocator {
                     );
                     let Some(port) = claim else {
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port_at(abs, rejected_port, now_ns);
+                            self.free_unpublished_translated_port(abs, rejected_port);
                         }
                         break;
                     };
@@ -3688,73 +3725,48 @@ impl PortAllocator {
                     // the lock-free bitmap, so GC here is opportunistic cleanup, not
                     // load-bearing for this allocation).
                     self.gc_expired_chunked(now_ns, ALLOCATION_GC_BUDGET);
-                    // #15956 fold: shard-first admission. The flow's
-                    // shard is held across reuse-check, cap-check and
-                    // insert, so a same-flow race cannot slip between
-                    // them; the retained `live` state is consulted
-                    // under its RwLock READ guard (wire-identity
-                    // check) and the PAT-owner publish runs after the
-                    // insert under the write guard. Distinct flows on
-                    // distinct shards therefore never touch the `live`
-                    // write lock on this path — they only share the
-                    // counted shard (#4800) and the read guard.
-                    let mut __shard = self.lock_flow_shard_counted(&flow);
-                    if let Some(slot) = __shard.map.get_mut(&flow) {
-                        // Idempotent re-entry for an already-allocated flow (a second
-                        // packet racing session install). Give back the port we just
-                        // claimed and return the existing translation.
-                        // #9145: record this worker as a HOLDER on the idempotent-reuse
-                        // return. `reserve_flow_maybe_persistent` and
-                        // `reserve_address_only_maybe_persistent` already do it here
-                        // and say why (#6211 F2): this early return is where workers
-                        // 2..N land, so it is exactly where a new holder must be
-                        // recorded. Without it a worker-0 `release_flow` clears the
-                        // occupancy bit for a translation worker 1 still holds —
-                        // the NAT source collision the mask exists to prevent.
-                        //
-                        // OR is idempotent, so a refresh cannot inflate the mask;
-                        // that is why this is a bitmask and not a counter. The
-                        // direction is the safe one `drop_holder_locked`'s own doc
-                        // prefers: this can only ever cause an UNDER-release, never
-                        // an over-release.
-                        slot.holders |= holder.bit();
-                        let existing = slot.translated;
-                        self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
-                        drop(__shard);
-                        self.free_translated_port_at(abs, port, now_ns);
-                        for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port_at(abs, rejected_port, now_ns);
-                        }
-                        return Ok(existing);
-                    }
-                    // #10190: address-only owns a reverse token rather than a
-                    // bitmap bit. The same allocator is intentionally skipped by
-                    // the peer guard, so close this second ownership domain here,
-                    // after claiming the PAT bit and before publishing the flow.
-                    // The exact remote endpoint remains part of the identity:
-                    // another remote is a distinct reverse tuple.
-                    // Writer active: the check cannot be answered
-                    // now, and probing further ports would burn the
-                    // whole range against the same writer. Free the
-                    // claimed bit and fall through to the locked
-                    // path, whose shard-first re-check answers a
-                    // racing insert and whose lease section performs
-                    // this check under the write guard — the flow
-                    // still completes without waiting on THIS
-                    // candidate, and no port is leaked.
-                    let wire_owned = match self.shared.live.try_read() {
-                        Ok(live) => live.address_only_owns_wire_identity(&flow, translated),
-                        Err(_) => {
-                            drop(__shard);
-                            self.free_translated_port_at(abs, port, now_ns);
+                    // #15956 fold: try the `live` write guard before its flow
+                    // shard, then hold both in live->shard order across the
+                    // ownership check, exact cap, insert, and PAT-owner update.
+                    // A contended try-write releases this claim and falls back
+                    // to the serialized path; the try itself is nonblocking,
+                    // but the shard mutex and serialized fallback may wait.
+                    self.shared
+                        .live_lock_acquisitions
+                        .fetch_add(1, Ordering::Relaxed);
+                    let mut live = match self.shared.live.try_write() {
+                        Ok(live) => live,
+                        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                        Err(TryLockError::WouldBlock) => {
+                            self.shared
+                                .live_lock_contended
+                                .fetch_add(1, Ordering::Relaxed);
+                            self.free_unpublished_translated_port(abs, port);
                             for rejected_port in rejected_ports.drain(..) {
-                                self.free_translated_port_at(abs, rejected_port, now_ns);
+                                self.free_unpublished_translated_port(abs, rejected_port);
                             }
                             break 'addresses;
                         }
                     };
-                    if wire_owned {
+                    let mut __shard = self.lock_flow_shard_counted(&flow);
+                    if let Some(slot) = __shard.map.get_mut(&flow) {
+                        // #9145: same-flow re-entry must record this worker as
+                        // a holder before giving back the candidate it claimed.
+                        slot.holders |= holder.bit();
+                        let existing = slot.translated;
+                        self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                         drop(__shard);
+                        drop(live);
+                        self.free_unpublished_translated_port(abs, port);
+                        for rejected_port in rejected_ports.drain(..) {
+                            self.free_unpublished_translated_port(abs, rejected_port);
+                        }
+                        return Ok(existing);
+                    }
+                    // Exact remote endpoint remains part of the reverse identity.
+                    if live.address_only_owns_wire_identity(&flow, translated) {
+                        drop(__shard);
+                        drop(live);
                         // The colliding port is unavailable to this reverse
                         // identity, but another PAT port on the same address may
                         // still be free. Keep it claimed while probing so the
@@ -3789,27 +3801,21 @@ impl PortAllocator {
                     ) {
                         self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                         drop(__shard);
-                        self.free_translated_port_at(abs, port, now_ns);
+                        drop(live);
+                        self.free_unpublished_translated_port(abs, port);
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port_at(abs, rejected_port, now_ns);
+                            self.free_unpublished_translated_port(abs, rejected_port);
                         }
                         return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
                     }
+                    live.record_pat_owner(&flow, translated);
                     drop(__shard);
-                    // PAT-owner publish: try the write guard once.
-                    // The flow record is already published and its
-                    // occupancy bit held, so a contended writer must
-                    // not stall the new flow; skipping the hint is
-                    // safe because the occupancy bit already blocks
-                    // PAT-vs-PAT reuse of this tuple.
-                    if let Ok(mut live) = self.shared.live.try_write() {
-                        live.record_pat_owner(&flow, translated);
-                    }
+                    drop(live);
                     self.shared
                         .allocations_total
                         .fetch_add(1, Ordering::Relaxed);
                     for rejected_port in rejected_ports.drain(..) {
-                        self.free_translated_port_at(abs, rejected_port, now_ns);
+                        self.free_unpublished_translated_port(abs, rejected_port);
                     }
                     return Ok(translated);
                 }
@@ -4032,7 +4038,7 @@ impl PortAllocator {
                 }
                 let Some(port) = port else {
                     for rejected_port in rejected_ports.drain(..) {
-                        self.free_translated_port_at(abs, rejected_port, now_ns);
+                        self.free_unpublished_translated_port(abs, rejected_port);
                     }
                     break;
                 };
@@ -4112,7 +4118,7 @@ impl PortAllocator {
                     .allocations_total
                     .fetch_add(1, Ordering::Relaxed);
                 for rejected_port in rejected_ports.drain(..) {
-                    self.free_translated_port_at(abs, rejected_port, now_ns);
+                    self.free_unpublished_translated_port(abs, rejected_port);
                 }
                 return Ok(translated);
             }

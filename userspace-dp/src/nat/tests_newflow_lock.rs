@@ -411,29 +411,30 @@ fn retire_worker_completes_persistent_lease_15956() {
     );
 }
 
-/// #15956 fold (narrowed claim): the non-persistent admission
-/// fast path is shard + SHARED `live` read — it must complete
-/// while another thread holds the `live` READ guard (readers are
-/// concurrent under the RwLock), which the pre-fold Mutex design
-/// could not do. The write guard is still taken, briefly and
-/// only, by lease-coupled/pressure paths and the try-only PAT
-/// publish; an allocation that falls into those may wait for a
-/// writer, bounded by that writer's critical section.
+/// #15956 fold: a non-persistent admission uses the sharded flow map, but it
+/// must fall back to the locked path if the PAT reverse-owner index cannot be
+/// published while a reader holds `live`. That fallback is allowed to wait;
+/// the important part is that the eventual PAT admission is visible to an
+/// address-only mint.
 #[test]
-fn new_flow_allocation_completes_under_held_live_read_15956() {
+fn new_flow_allocation_falls_back_and_publishes_pat_owner_under_held_live_read_15956() {
     let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
     let addrs = [pool_ip];
-    let alloc = Arc::new(PortAllocator::new(1, 1024, 65535));
+    let alloc = Arc::new(PortAllocator::new(1, 20_000, 20_001));
     let guard = alloc.debug_hold_live_read();
     let done = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicBool::new(false));
+    let contended_before = alloc.debug_live_lock_contended_total();
     let worker = {
         let alloc = Arc::clone(&alloc);
         let done = Arc::clone(&done);
+        let started = Arc::clone(&started);
         std::thread::spawn(move || {
             let addrs2 = [pool_ip];
+            started.store(true, Ordering::SeqCst);
             alloc
                 .allocate_translation(
-                    pool_flow(42000),
+                    pool_flow(42_000),
                     PoolAddressFamily::V4(&addrs2),
                     0,
                     false,
@@ -445,21 +446,191 @@ fn new_flow_allocation_completes_under_held_live_read_15956() {
                     crate::nat::NatHolder::Untracked,
                     0,
                 )
-                .expect("new-flow allocation must succeed under held live read guard");
+                .expect("new-flow allocation must succeed");
             done.store(true, Ordering::SeqCst);
         })
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+    while !started.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     assert!(
-        done.load(Ordering::SeqCst),
-        "new-flow allocation blocked while the live READ lock was held — admission still serializes on the retained state lock (#15956 fold)"
+        started.load(Ordering::SeqCst),
+        "worker must start allocation"
     );
+    while !done.load(Ordering::SeqCst)
+        && alloc.debug_live_lock_contended_total() == contended_before
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let observed_contention = alloc.debug_live_lock_contended_total() > contended_before;
+    let completed_under_read = done.load(Ordering::SeqCst);
     drop(guard);
     worker.join().expect("worker must not panic");
+    assert!(
+        observed_contention || completed_under_read,
+        "worker must attempt the contended live write or finish before the deadline"
+    );
     assert_eq!(alloc.live_flow_count(), 1);
+
+    let pat = alloc
+        .debug_live_flow_translated(&pool_flow(42_000))
+        .expect("PAT flow must remain live");
+    assert!(
+        alloc.debug_pat_owns_wire_identity(&pool_flow(42_000), pat),
+        "PAT owner must be present after the contended fallback completes"
+    );
+
+    assert!(
+        alloc
+            .reserve_address_only(
+                pool_flow(pat.port),
+                IpAddr::V4(pool_ip),
+                0,
+                crate::nat::NatHolder::Untracked,
+            )
+            .is_err(),
+        "address-only admission must see the PAT reverse owner published under contention"
+    );
+}
+
+/// #17024 gate: with ONE free port, a contended fast-path claim must not be
+/// quarantined on release — the fallback must be able to reclaim it.
+#[test]
+fn single_free_port_survives_contended_fast_path_claim_17024() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let alloc = Arc::new(PortAllocator::new(1, 20_000, 20_000));
+    let guard = alloc.debug_hold_live_read();
+    let started = Arc::new(AtomicBool::new(false));
+    let contended_before = alloc.debug_live_lock_contended_total();
+    let worker = {
+        let alloc = Arc::clone(&alloc);
+        let started = Arc::clone(&started);
+        std::thread::spawn(move || {
+            let addrs = [pool_ip];
+            started.store(true, Ordering::SeqCst);
+            alloc
+                .allocate_translation(
+                    pool_flow(42_000),
+                    PoolAddressFamily::V4(&addrs),
+                    0,
+                    false,
+                    false,
+                    PersistentNatPermit::TargetHostPort,
+                    0,
+                    0,
+                    2_000,
+                    crate::nat::NatHolder::Untracked,
+                    0,
+                )
+                .expect("fallback must reclaim the only port after contention")
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !started.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        started.load(Ordering::SeqCst),
+        "worker must start allocation"
+    );
+    while alloc.debug_live_lock_contended_total() == contended_before
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        alloc.debug_live_lock_contended_total() > contended_before,
+        "worker must hit the contended fast-path try_write"
+    );
+    drop(guard);
+    let pat = worker.join().expect("worker must not panic");
+    assert_eq!(pat.port, 20_000);
+    assert!(
+        alloc.debug_pat_owns_wire_identity(&pool_flow(42_000), pat),
+        "PAT owner must be published by the fallback"
+    );
+    assert!(alloc.debug_is_port_occupied(0, 20_000));
+    assert_eq!(alloc.live_flow_count(), 1);
+}
+
+/// #17024 gate: remaining capacity must survive contention — a 2-port pool
+/// with one port already occupied must still admit via the fallback.
+#[test]
+fn remaining_capacity_survives_contended_fast_path_claim_17024() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = Arc::new(PortAllocator::new(1, 20_000, 20_001));
+    let first = alloc
+        .allocate_translation(
+            pool_flow(41_000),
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            false,
+            PersistentNatPermit::TargetHostPort,
+            0,
+            0,
+            1_000,
+            crate::nat::NatHolder::Untracked,
+            0,
+        )
+        .expect("first allocation must succeed");
+    assert!(alloc.debug_is_port_occupied(0, first.port));
+
+    let guard = alloc.debug_hold_live_read();
+    let started = Arc::new(AtomicBool::new(false));
+    let contended_before = alloc.debug_live_lock_contended_total();
+    let worker = {
+        let alloc = Arc::clone(&alloc);
+        let started = Arc::clone(&started);
+        std::thread::spawn(move || {
+            let addrs2 = [pool_ip];
+            started.store(true, Ordering::SeqCst);
+            alloc
+                .allocate_translation(
+                    pool_flow(42_000),
+                    PoolAddressFamily::V4(&addrs2),
+                    0,
+                    false,
+                    false,
+                    PersistentNatPermit::TargetHostPort,
+                    0,
+                    0,
+                    2_000,
+                    crate::nat::NatHolder::Untracked,
+                    0,
+                )
+                .expect("fallback must reclaim the last free port")
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !started.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        started.load(Ordering::SeqCst),
+        "worker must start allocation"
+    );
+    while alloc.debug_live_lock_contended_total() == contended_before
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        alloc.debug_live_lock_contended_total() > contended_before,
+        "worker must hit the contended fast-path try_write"
+    );
+    drop(guard);
+    let second = worker.join().expect("worker must not panic");
+    assert_ne!(second.port, first.port);
+    assert!(alloc.debug_is_port_occupied(0, second.port));
+    assert!(
+        alloc.debug_pat_owns_wire_identity(&pool_flow(42_000), second),
+        "PAT owner must be published by the fallback"
+    );
+    assert_eq!(alloc.live_flow_count(), 2);
 }
 
 /// #15956 fold 2: exact-cap race across shards. At cap-1, a
