@@ -157,9 +157,9 @@ func CompileConfigForNodeWithCurrentClusterPrimary(tree *ConfigTree, nodeID int,
 
 // currentClusterOpts builds the compileOpts carrying the active config's
 // cluster-key state: the trimmed signing primary for the #16025 fold-2
-// exception and the accepted set {primary, additional} for the #16858
-// transition interlock. Both are derived from the same current config so
-// the two gates can never be fed different views of "active". Keys are
+// exception and the exact-byte accepted set {primary, additional} for the
+// #16858 transition interlock. Both are derived from the same current config
+// so the two gates can never be fed different views of "active". Keys are
 // held only for equality checks and never logged or rendered.
 func currentClusterOpts(cfg *Config) compileOpts {
 	var opts compileOpts
@@ -169,8 +169,8 @@ func currentClusterOpts(cfg *Config) compileOpts {
 	k := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal())
 	opts.currentClusterPrimary16025 = &k
 	accepted := &clusterAcceptedKeys16858{
-		primary:    k,
-		additional: strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()),
+		primary:    cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal(),
+		additional: cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal(),
 	}
 	if accepted.primary != "" || accepted.additional != "" {
 		opts.currentClusterAccepted16858 = accepted

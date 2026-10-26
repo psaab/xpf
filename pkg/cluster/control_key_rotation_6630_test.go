@@ -320,10 +320,10 @@ func TestPSKRotationOverlapMustBeARealOverlap6630(t *testing.T) {
 		t.Fatalf("the refusal must not echo the key: %v", err)
 	}
 
-	// Whitespace-only difference is the same key to anything that matters, so
-	// a trim-equal pair is an overlap that isn't and must be refused too.
-	// BOTH sides are checked: padding on only one of them would leave the
-	// other side's TrimSpace unbound, and the two are separate calls.
+	// Boundary whitespace inside a quoted PSK is key material, so
+	// trim-equal pairs with different raw bytes form a real overlap.
+	// Padding is tested on either and both sides because the runtime
+	// installs each Secret verbatim.
 	for _, tc := range []struct {
 		name, signing, additional string
 	}{
@@ -336,9 +336,8 @@ func TestPSKRotationOverlapMustBeARealOverlap6630(t *testing.T) {
 			ControlLinkAuthKey:    config.NewSecret(tc.signing),
 			ControlLinkAuthKeyAlt: config.NewSecret(tc.additional),
 		}
-		if config.ValidateClusterAuthKeyOverlapForTest(padded) == nil {
-			t.Fatalf("%s: a key differing only in surrounding whitespace is the same key; "+
-				"a trim-equal pair is an overlap that isn't", tc.name)
+		if err := config.ValidateClusterAuthKeyOverlapForTest(padded); err != nil {
+			t.Fatalf("%s: byte-distinct PSKs must be accepted as a real overlap: %v", tc.name, err)
 		}
 	}
 
