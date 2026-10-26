@@ -88,15 +88,26 @@ func TestRestartAfterADeferredRemovalStillTearsDown9687(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ipsec-conn-state.json")
 	rec := &swanctlRecorder{}
 	failLoad := false
+	var priorConfig []byte
 	run := func(args ...string) ([]byte, error) {
 		if failLoad && len(args) > 0 && args[0] == "--load-all" {
 			return []byte("load failed"), errors.New("charon vici socket refused")
+		}
+		if len(args) > 0 && args[0] == "--list-pools" {
+			return poolsForPrior17882(t, priorConfig), nil
+		}
+		if len(args) > 0 && args[0] == "--list-conns" {
+			return listConns4898("site-a", "site-b"), nil
 		}
 		return rec.run(args...)
 	}
 	m1 := persistentManager9687(t, run, path)
 	if err := m1.Apply(vpnCfg("site-a", "site-b")); err != nil {
 		t.Fatalf("initial Apply: %v", err)
+	}
+	priorConfig, err := os.ReadFile(m1.configPath)
+	if err != nil {
+		t.Fatalf("FIXTURE: read prior config: %v", err)
 	}
 	failLoad = true
 	if err := m1.Apply(vpnCfg("site-b")); err == nil {

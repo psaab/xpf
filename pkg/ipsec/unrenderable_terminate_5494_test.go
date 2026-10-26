@@ -2,6 +2,7 @@ package ipsec
 
 import (
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -233,6 +234,12 @@ func TestUnrenderableWithFailedReloadDoesNotTerminate_5494(t *testing.T) {
 	if err := m.Apply(renderableTwoVPN()); err != nil {
 		t.Fatalf("baseline Apply: %v", err)
 	}
+	priorConfig, readErr := os.ReadFile(m.configPath)
+	if readErr != nil {
+		t.Fatalf("FIXTURE: read prior config: %v", readErr)
+	}
+	rec.listPools = poolsForPrior17882(t, priorConfig)
+	rec.listConns = listConns4898("gw-target", "gw-sibling")
 	rec.listSAs = liveSA("gw-target", "gw-sibling")
 
 	// target becomes unrenderable, but the reload fails.

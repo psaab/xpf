@@ -2,6 +2,8 @@ package ipsec
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +26,8 @@ import (
 type reloadRecorder struct {
 	calls       [][]string
 	listSAs     string
+	listConns   []byte
+	listPools   []byte
 	failLoadAll bool
 	loadErr     error
 }
@@ -35,8 +39,21 @@ func (r *reloadRecorder) run(args ...string) ([]byte, error) {
 		return []byte("unable to load config"), r.loadErr
 	case len(args) > 0 && args[0] == "--list-sas":
 		return []byte(r.listSAs), nil
+	case len(args) > 0 && args[0] == "--list-conns":
+		return r.listConns, nil
+	case len(args) > 0 && args[0] == "--list-pools":
+		return r.listPools, nil
 	}
 	return nil, nil
+}
+
+func listConns4898(names ...string) []byte {
+	var b strings.Builder
+	for _, name := range names {
+		b.WriteString("list-conn event {" + name + " {children {" + name + " {}}}}\n")
+	}
+	b.WriteString("list-conns reply {}\n")
+	return []byte(b.String())
 }
 
 func (r *reloadRecorder) terminated() []string {
@@ -71,6 +88,12 @@ func TestClearReloadFailurePropagatesAndPreservesState(t *testing.T) {
 	if err := m.Apply(vpnCfg("site-a")); err != nil {
 		t.Fatalf("initial Apply: %v", err)
 	}
+	priorConfig, readErr := os.ReadFile(m.configPath)
+	if readErr != nil {
+		t.Fatalf("FIXTURE: read prior config: %v", readErr)
+	}
+	rec.listPools = poolsForPrior17882(t, priorConfig)
+	rec.listConns = listConns4898("site-a")
 
 	// Reload now fails; delete the only VPN.
 	rec.failLoadAll = true
@@ -119,6 +142,12 @@ func TestReplaceReloadFailurePreservesRemovedConn(t *testing.T) {
 	if err := m.Apply(vpnCfg("site-a")); err != nil {
 		t.Fatalf("initial Apply: %v", err)
 	}
+	priorConfig, readErr := os.ReadFile(m.configPath)
+	if readErr != nil {
+		t.Fatalf("FIXTURE: read prior config: %v", readErr)
+	}
+	rec.listPools = poolsForPrior17882(t, priorConfig)
+	rec.listConns = listConns4898("site-a")
 	rec.listSAs = liveSA("site-a")
 
 	// Replace site-a with site-b, but the reload fails.

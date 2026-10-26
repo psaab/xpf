@@ -32,9 +32,9 @@ import (
 // (pkg/frr/manager.go reloadTimeout). #1794/#1800.
 const swanctlTimeout = 15 * time.Second
 
-// charonProbeAttempts/Interval bound the liveness probe after a
-// total --load-all failure (#16853): charon is treated as not
-// running only when ListLoadedConns fails on every attempt.
+// charonProbeAttempts/Interval bound the post-failure generation probe
+// (#17882): prior configuration is restored only when charon proves it
+// still has the prior generation loaded.
 const (
 	charonProbeAttempts = 3
 	charonProbeInterval = 200 * time.Millisecond
@@ -330,7 +330,7 @@ type ApplyHooks struct {
 	Loaded func()
 }
 
-// ApplyWithHooks is ApplyGeneration naming no generation (UnknownGeneration).
+// ApplyWithHooks is ApplyGeneration without a config-store generation digest.
 func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks) error {
 	return m.ApplyGeneration(ipsecCfg, UnknownGeneration, hooks)
 }
@@ -338,17 +338,18 @@ func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks)
 // ApplyGeneration is Apply with the ApplyHooks callbacks, and the file it writes names
 // generation inside charon through the inert marker pool (#9641, generation.go).
 // generation is a config digest the caller can look up later (the daemon passes the
-// configstore digest of the active config it applies); anything else is written as
-// UnknownGeneration. Only a rendered config carries the marker: the empty-config clear
-// path removes the file, so charon then lists no marker at all.
+// configstore digest of the active config it applies); otherwise the rendered IPsec
+// config's digest identifies the marker, without claiming to be a config-store
+// generation. Only a rendered config carries the marker: the empty-config clear path
+// removes the file, so charon then lists no marker at all.
 // A successful apply runs Written, then Loaded. A write followed by a total reload
-// failure with charon answering runs only Written, and the prior file is restored
-// (#10712); with charon unreachable it runs only Written, the candidate stays on
-// disk and its set is promoted (#16853); a partial load runs only Written and is
-// reconciled to charon's loaded set (#14589, changed immediately survivors
-// re-initiated per #15129), so the disk again matches the generation charon still
-// runs (or will load on its next start) in every case. A render or write failure
-// runs neither.
+// failure runs only Written: when charon proves the prior generation remains loaded,
+// the prior file is restored (#10712); otherwise the candidate stays on disk and its
+// set is promoted, so a charon restart loads the committed generation (#16853,
+// #17882); a partial load runs only Written and is reconciled to charon's loaded set
+// (#14589, changed immediately survivors re-initiated per #15129), so the disk again
+// matches the generation charon still runs (or will load on its next start) in every
+// case. A render or write failure runs neither.
 // Both run on the caller's goroutine with no Manager lock held.
 func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation string, hooks ApplyHooks) error {
 	// loadedNames and loadedHashes describe the connections swanctl actually
@@ -363,25 +364,24 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 		loadedNames, loadedHashes, applyErr = m.applyConfig(ipsecCfg, generation, hooks.Written)
 	}
 
-	// #4898: state promotion and SA teardown are gated on reload SUCCESS. On a
-	// total reload failure strongSwan keeps the PREVIOUS config loaded and
-	// effective, so prevConnNames and prevConnHashes must NOT advance and stale
-	// connections' live SAs must NOT be terminated — they may still be the
-	// effective policy. Leaving this state unchanged lets the next successful
-	// Apply/Clear recompute the diff and retry the teardown. The #14589
-	// partial exception (recovered set promoted below) is the one case where
-	// charon demonstrably no longer runs the previous set.
+	// #4898: state promotion and SA teardown are gated on reload SUCCESS. When
+	// charon proves the prior generation remains loaded, a total reload failure
+	// preserves prevConnNames and prevConnHashes and skips termination: those
+	// connections may still be the effective policy, and a later Apply/Clear
+	// recomputes the diff. If charon cannot prove the prior generation, the
+	// #16853/#17882 exception promotes the candidate because it is the committed
+	// generation to keep on disk for the next charon start. The #14589 partial
+	// exception promotes the recovered set that charon demonstrably runs.
 	if applyErr != nil {
 		var uae *unreachableApplyError
 		if errors.As(applyErr, &uae) {
-			// #16853: charon was unreachable, so it runs nothing and
-			// the candidate on disk is what its next start loads.
-			// Promote the candidate set so a later successful apply
-			// still diffs against the committed generation (a
-			// deleted VPN stays in the diff and is never
-			// resurrected), do NOT fire Loaded (nothing loaded),
-			// attempt teardown of departed/changed SAs, and still
-			// return the reload error.
+			// #16853/#17882: charon could not prove it still runs the
+			// prior generation. The candidate on disk is the committed
+			// generation to use on the next start; promote it so a later
+			// apply diffs against the committed configuration, do NOT
+			// fire Loaded (the full candidate reload did not succeed),
+			// attempt teardown of departed/changed SAs, and still return
+			// the reload error.
 			names, hs := uae.names, uae.hashes
 			if uae.clear || names == nil {
 				names, hs = map[string]bool{}, map[string]string{}
@@ -465,9 +465,9 @@ func (m *Manager) Clear() error {
 	if err := m.clearConfig(nil); err != nil {
 		var uae *unreachableApplyError
 		if errors.As(err, &uae) && uae.clear {
-			// #16853: charon down — nothing runs, the removed file
-			// stays removed. Promote the empty set, attempt
-			// teardown, and still return the reload error.
+			// #16853/#17882: the prior generation was not proven loaded,
+			// so the removed file stays removed. Promote the empty set,
+			// attempt teardown, and still return the reload error.
 			removed, _ := m.promoteConnNames(map[string]bool{}, map[string]string{})
 			_, failed := m.terminateRemovedConns(removed)
 			return errors.Join(err, m.recordTerminateDebt(removed, failed))
@@ -478,9 +478,9 @@ func (m *Manager) Clear() error {
 			_, failed := m.terminateRemovedConns(removed)
 			return errors.Join(err, m.recordTerminateDebt(removed, failed))
 		}
-		// #4898: the reload failed — the old config is still the effective
-		// loaded config. Preserve the loaded names and hashes and skip termination
-		// so a later Clear retries the teardown rather than reporting false success.
+		// #4898: the prior generation is proven loaded — the reload failed
+		// without applying the candidate. Preserve loaded names and hashes
+		// and skip termination so a later Clear retries the teardown.
 		return err
 	}
 	removed, _ := m.promoteConnNames(nil, nil)
@@ -507,7 +507,8 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 	if err != nil {
 		return nil, nil, err
 	}
-	cfg += "\n" + renderGenerationMarker(generation)
+	markerGeneration := generationMarkerToken(generation, cfg)
+	cfg += "\n" + renderGenerationMarker(markerGeneration)
 
 	if err := os.MkdirAll(m.configDir, 0755); err != nil {
 		return nil, nil, fmt.Errorf("create config dir: %w", err)
@@ -575,15 +576,17 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 			// partialApplyError for ApplyGeneration to promote.
 			return loadedNames, loadedHashes, &partialApplyError{err: err, names: loadedNames, hashes: loadedHashes}
 		}
-		// #16853: a total failure while charon cannot be asked means
-		// charon runs nothing, not the prior generation. Keep the
-		// candidate on disk so charon's next start loads the
-		// committed generation; still report the reload error.
-		if m.charonUnreachable() {
-			slog.Warn("swanctl reload failed; charon unreachable, keeping candidate config", "err", err)
+		// #17882: only restore the prior file if charon proves that
+		// exact generation is still loaded. A successful VICI probe
+		// can reach a fresh charon that loaded the candidate from disk;
+		// restoring the old file in that case would resurrect revoked
+		// configuration on its next start.
+		if m.priorGenerationLoaded(prior, havePrior, markerGeneration) {
+			slog.Warn("swanctl reload failed; prior generation remains loaded, restoring prior config", "err", err)
+		} else {
+			slog.Warn("swanctl reload failed; prior generation not proven loaded, keeping candidate config", "err", err)
 			return rendered, hashes, &unreachableApplyError{err: err, names: rendered, hashes: hashes}
 		}
-		slog.Warn("swanctl reload failed", "err", err)
 		if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {
 			return nil, nil, errors.Join(err, restoreErr)
 		}
@@ -594,13 +597,13 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 }
 
 // unreachableApplyError is returned by applyConfig (and clearConfig)
-// when a total --load-all failure happened because charon could not be
-// asked at all (#16853): the candidate (or the clear's removed file)
-// stays on disk so charon's next start loads the committed
-// generation, and ApplyGeneration promotes the candidate set.
-// Loaded stays unfired and the underlying reload error still
-// propagates. names/hashes describe the candidate set for the render
-// path and are nil for a clear (the empty set).
+// when a total --load-all failure happened and charon could not prove
+// it still runs the prior generation (#16853, #17882): the candidate
+// (or the clear's removed file) stays on disk so charon's next start
+// loads the committed generation, and ApplyGeneration promotes the
+// candidate set. Loaded stays unfired and the underlying reload error
+// still propagates. names/hashes describe the candidate set for the
+// render path and are nil for a clear (the empty set).
 type unreachableApplyError struct {
 	err    error
 	names  map[string]bool
@@ -611,22 +614,74 @@ type unreachableApplyError struct {
 func (e *unreachableApplyError) Error() string { return e.err.Error() }
 func (e *unreachableApplyError) Unwrap() error { return e.err }
 
-// charonUnreachable reports whether charon can be asked at all
-// (#16853). It retries ListLoadedConns a small bounded number of
-// times so a probe racing a charon restart window does not answer
-// "down" while charon is coming up. Only a probe that succeeds on
-// every retry window proves charon down for the whole span; any
-// success means charon answered and still runs its prior set.
-func (m *Manager) charonUnreachable() bool {
+// priorGenerationLoaded validates the prior marker and loaded connection names
+// (#17882). A successful reachability probe alone is not proof: after a restart,
+// charon can answer after loading the candidate now on disk. The candidate marker
+// rules out that case even when the prior file predates markers. For an old
+// unmarked file, a matching connection-name set is the available fallback.
+//
+// Parse failure is distinct from a failed VICI request: if charon answered but
+// its connection listing is malformed, a matching prior marker still identifies
+// the answering generation and must not be misclassified as charon-down.
+func (m *Manager) priorGenerationLoaded(prior []byte, havePrior bool, candidateGeneration string) bool {
+	priorGeneration, hasPriorMarker := generationFromConfigText17882(prior, havePrior)
+	priorNames := make(map[string]bool)
+	for _, name := range connNamesInConfigText14589(string(prior)) {
+		priorNames[name] = true
+	}
 	for attempt := range charonProbeAttempts {
 		if attempt > 0 {
 			time.Sleep(charonProbeInterval)
 		}
-		if _, err := m.ListLoadedConns(); err == nil {
-			return false
+		loadedGeneration, markerErr := m.LoadedGeneration()
+		priorMarkerConfirmed := false
+		if markerErr == nil {
+			switch {
+			case hasPriorMarker && loadedGeneration == priorGeneration:
+				priorMarkerConfirmed = true
+			case hasPriorMarker:
+				return false
+			case candidateGeneration != "" && loadedGeneration == candidateGeneration:
+				return false
+			}
+		} else if hasPriorMarker || (candidateGeneration != "" && !errors.Is(markerErr, ErrNoGenerationMarker)) {
+			continue
 		}
+		out, _, err := m.scSplit("--list-conns", "--raw")
+		if err != nil {
+			continue
+		}
+		loaded, err := parseListConnsRaw(string(out))
+		if err != nil {
+			return priorMarkerConfirmed
+		}
+		loadedNames := make(map[string]bool, len(loaded))
+		for name := range loaded {
+			loadedNames[name] = true
+		}
+		return sameBoolSet14589(loadedNames, priorNames)
 	}
-	return true
+	return false
+}
+
+// generationFromConfigText17882 returns the unique digest or legacy
+// UnknownGeneration marker from the prior rendered file.
+func generationFromConfigText17882(prior []byte, havePrior bool) (string, bool) {
+	if !havePrior {
+		return "", false
+	}
+	var generation string
+	for _, field := range strings.Fields(string(prior)) {
+		raw, ok := strings.CutPrefix(field, generationMarkerPrefix)
+		if !ok {
+			continue
+		}
+		if generation != "" || (raw != UnknownGeneration && !generationDigest.MatchString(raw)) {
+			return "", false
+		}
+		generation = raw
+	}
+	return generation, generation != ""
 }
 
 // partialApplyError is returned by applyConfig (and clearConfig) when a
@@ -865,7 +920,7 @@ func (m *Manager) renderSubsetFile14589(ipsecCfg *config.IPsecConfig, generation
 	if err != nil {
 		return "", nil, err
 	}
-	text += "\n" + renderGenerationMarker(generation)
+	text += "\n" + renderGenerationMarker(generationMarkerToken(generation, text))
 	return text, hs, nil
 }
 
@@ -957,11 +1012,10 @@ func (m *Manager) clearConfig(written func()) error {
 		return err
 	}
 	// #10712: snapshot the prior file BEFORE removing it, mirroring applyConfig:
-	// if the reload below fails with charon answering, charon still runs
-	// the OLD config, so the removed file must be restored — otherwise
-	// charon's own next start or reload would load NO xpf config while
-	// charon runs the old one. With charon unreachable (#16853) the
-	// removed file stays removed.
+	// if the reload fails and charon's marker still proves the prior generation
+	// loaded, restore the old file — otherwise charon's own next start or reload
+	// could load no xpf config while the old VPN remains active. If the prior
+	// generation cannot be proven (#16853, #17882), the removed file stays removed.
 	prior, priorErr := os.ReadFile(m.configPath)
 	havePrior := true
 	if priorErr != nil {
@@ -1003,10 +1057,12 @@ func (m *Manager) clearConfig(written func()) error {
 			names, hs := m.priorSet14589(prior, havePrior)
 			return &partialApplyError{err: err, names: names, hashes: hs, clear: true}
 		}
-		// #16853: charon down — the removed file stays removed so
-		// the next charon start loads no revoked VPN.
-		if m.charonUnreachable() {
-			slog.Warn("swanctl clear reload failed; charon unreachable, keeping cleared config", "err", err)
+		// #17882: keep the clear in place unless the answering charon
+		// proves it still has the exact prior generation loaded. A
+		// successful probe of a restarted charon is not evidence that
+		// the revoked generation remains active.
+		if !m.priorGenerationLoaded(prior, havePrior, "") {
+			slog.Warn("swanctl clear reload failed; prior generation not proven loaded, keeping cleared config", "err", err)
 			return &unreachableApplyError{err: err, clear: true}
 		}
 		if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {

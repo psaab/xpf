@@ -137,6 +137,12 @@ func TestNonPartialReloadFailureStillRestoresPrior14589(t *testing.T) {
 		if len(args) > 0 && args[0] == "--load-all" {
 			return []byte("connecting failed"), reloadErr
 		}
+		if len(args) > 0 && args[0] == "--list-pools" {
+			return poolsForPrior17882(t, prior), nil
+		}
+		if len(args) > 0 && args[0] == "--list-conns" {
+			return listConns4898("a", "b"), nil
+		}
 		return nil, nil
 	}
 	if err := m.Apply(vpnCfg("a", "c")); !errors.Is(err, reloadErr) {
