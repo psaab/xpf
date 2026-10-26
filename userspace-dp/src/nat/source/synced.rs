@@ -1383,6 +1383,9 @@ fn reserve_synced_on_first_pool_owner<'a>(
 
 /// #16615: worker reserve that returns the recorded persistent hold so the
 /// caller can stamp it on the installed session.
+/// #17683: an unchanged HA refresh may pass the hold already anchored by the
+/// existing local entry. Preserve it rather than incrementing the allocator's
+/// inbound reference count for a session we already own.
 pub(crate) fn reserve_synced_source_nat_allocation_for_worker_with_hold(
     iface_allocs: &InterfaceNatAllocators,
     rules: &[SourceNatRule],
@@ -1393,6 +1396,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker_with_hold(
     now_ns: u64,
     worker_id: u32,
     domains: SyncedSourceNatDomains<'_>,
+    existing_hold: Option<(crate::nat::PersistentSourceKey, usize)>,
 ) -> (bool, Option<(crate::nat::PersistentSourceKey, usize)>) {
     let mut previous_holders = None;
     let reserved = reserve_synced_source_nat_allocation_with_holder(
@@ -1408,11 +1412,11 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker_with_hold(
         &mut previous_holders,
         domains,
     );
-    let hold = if reserved {
-        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns)
-    } else {
-        None
-    };
+    let hold = existing_hold.or_else(|| {
+        reserved
+            .then(|| acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns))
+            .flatten()
+    });
     (reserved, hold)
 }
 

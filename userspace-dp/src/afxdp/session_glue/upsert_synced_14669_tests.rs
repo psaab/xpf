@@ -450,3 +450,177 @@ fn upsert_synced_same_tuple_refresh_keeps_reservation_14669() {
         "same-tuple refresh must keep exactly one reservation"
     );
 }
+
+/// #17683: a same-decision HA refresh of the composed inbound-DNAT plus
+/// remote-SNAT shape must not acquire a second reference to the internal
+/// host's persistent lease.
+#[test]
+fn upsert_synced_repeated_refresh_keeps_one_persistent_inbound_hold_17683() {
+    let mut forwarding = split_rg_forwarding();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_name_to_id.insert("lan".to_string(), 1);
+    forwarding.zone_name_to_id.insert("wan".to_string(), 2);
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+            name: "persistent-pool".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "persistent-pool".to_string(),
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 20000,
+            port_high: 20010,
+            persistent_nat: true,
+            persistent_nat_permit_any_remote_host: true,
+            persistent_nat_inactivity_timeout: 1,
+            ..crate::SourceNATRuleSnapshot::default()
+        }]);
+
+    let private_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let remote_ip = Ipv4Addr::new(8, 8, 8, 8);
+    let private_port = 55068;
+    let mut counter = None;
+    let outbound_nat = match crate::nat::match_source_nat_result_for_tuple(
+        &forwarding.iface_nat_allocators,
+        &forwarding.source_nat_rules,
+        &crate::nat::NatScopeCtx {
+            routing_domain: 0,
+            ..crate::nat::NatScopeCtx::default()
+        },
+        "lan",
+        "wan",
+        IpAddr::V4(private_ip),
+        IpAddr::V4(remote_ip),
+        Some(PROTO_TCP),
+        private_port,
+        443,
+        None,
+        None,
+        NOW_NS,
+        false,
+        false,
+        crate::nat::NatHolder::Untracked,
+        &mut counter,
+    ) {
+        crate::nat::SourceNatLookup::Matched(nat) => nat,
+        other => panic!("persistent outbound fixture must mint a pool lease: {other:?}"),
+    };
+    let outbound_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(private_ip),
+        dst_ip: IpAddr::V4(remote_ip),
+        src_port: private_port,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    crate::nat::release_source_nat_allocation(
+        &forwarding.iface_nat_allocators,
+        &forwarding.source_nat_rules,
+        &outbound_key,
+        outbound_nat,
+        false,
+        NOW_NS + 1,
+    );
+    let public_ip = match outbound_nat.rewrite_src {
+        Some(IpAddr::V4(ip)) => ip,
+        other => panic!("fixture must allocate a public v4 address: {other:?}"),
+    };
+    let public_port = outbound_nat
+        .rewrite_src_port
+        .expect("fixture must allocate a public port");
+
+    let mut inbound_key = key_for(public_ip);
+    inbound_key.src_ip = IpAddr::V4(remote_ip);
+    inbound_key.src_port = 443;
+    inbound_key.dst_port = public_port;
+    let snat_port = (20000..=20010)
+        .find(|port| *port != public_port)
+        .expect("fixture has a second port for remote SNAT");
+    let inbound_nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(public_ip)),
+        rewrite_src_port: Some(snat_port),
+        rewrite_dst: Some(IpAddr::V4(private_ip)),
+        rewrite_dst_port: Some(private_port),
+        ..NatDecision::default()
+    };
+    let lease_flow = crate::nat::SourceNatFlowKey {
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(private_ip),
+        dst_ip: IpAddr::V4(remote_ip),
+        src_port: private_port,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    let allocator = &forwarding.source_nat_rules[0].pool_allocator;
+    assert_eq!(
+        allocator
+            .debug_persistent_lease_for_flow(
+                &lease_flow,
+                crate::nat::PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(0),
+        "fixture: the target lease is idle before inbound HA import"
+    );
+
+    let ha = split_ha();
+    let mut sessions = SessionTable::new();
+    let mut entry = synced_entry(inbound_key.clone(), 1, peer_resolution(), inbound_nat);
+    entry.metadata.ingress_zone = 1;
+    entry.metadata.egress_zone = 2;
+    apply_upsert(&mut sessions, &forwarding, &ha, entry.clone());
+    let recorded_hold = sessions
+        .persistent_lease_hold_for(&inbound_key)
+        .expect("first import records the exact granting allocator");
+    assert_eq!(
+        allocator
+            .debug_persistent_lease_for_flow(
+                &lease_flow,
+                crate::nat::PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(1),
+        "first import takes one inbound reference"
+    );
+
+    apply_upsert(&mut sessions, &forwarding, &ha, entry);
+    assert_eq!(
+        sessions.persistent_lease_hold_for(&inbound_key),
+        Some(recorded_hold),
+        "refresh preserves the original lease owner/key pair"
+    );
+    assert_eq!(
+        allocator
+            .debug_persistent_lease_for_flow(
+                &lease_flow,
+                crate::nat::PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(1),
+        "same-tuple HA refresh must not increment inbound_flows again"
+    );
+
+    crate::nat::release_source_nat_allocation_for_worker_with_hold(
+        &forwarding.iface_nat_allocators,
+        &forwarding.source_nat_rules,
+        &inbound_key,
+        inbound_nat,
+        false,
+        3_000_000_000,
+        0,
+        Some(recorded_hold),
+    );
+    assert_eq!(
+        allocator
+            .debug_persistent_lease_for_flow(
+                &lease_flow,
+                crate::nat::PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(0),
+        "one teardown releases the one recorded reference"
+    );
+}

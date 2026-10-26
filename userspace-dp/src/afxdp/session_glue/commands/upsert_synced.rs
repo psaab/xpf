@@ -211,8 +211,11 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // release sweep is keyed on the PREVIOUS translated tuple and
         // no-ops in allocators not holding that exact tuple, so releasing
         // before re-reserving cannot free the new (different-tuple)
-        // reservation; for a same-tuple refresh the translated tuple is
-        // unchanged and this branch is not taken, preserving the holder bit.
+        // reservation.
+        //
+        // #17683: the inbound persistent hold is a separate per-session
+        // reference. Repeated HA refreshes of an unchanged entry must neither
+        // drop it before re-reserving nor acquire a duplicate reference.
         let new_entry_reserves = reserving_origin
             && !metadata.is_reverse
             && entry_decision.nat.rewrite_src.is_some();
@@ -224,18 +227,32 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
                     || prev_metadata.egress_zone != metadata.egress_zone
             },
         );
+        let preserved_persistent_hold_17683 =
+            (!reservation_target_changed).then_some(previous_persistent_hold_16615).flatten();
         if !new_entry_reserves || reservation_target_changed {
             if let Some((prev_decision, prev_metadata, _)) = previous_reservation {
-                crate::nat::release_source_nat_allocation_for_worker_with_hold(
-                    &forwarding.iface_nat_allocators,
-                    &forwarding.source_nat_rules,
-                    &key,
-                    prev_decision.nat,
-                    prev_metadata.is_reverse,
-                    now_ns,
-                    worker_id,
-                    previous_persistent_hold_16615,
-                );
+                if reservation_target_changed {
+                    crate::nat::release_source_nat_allocation_for_worker_with_hold(
+                        &forwarding.iface_nat_allocators,
+                        &forwarding.source_nat_rules,
+                        &key,
+                        prev_decision.nat,
+                        prev_metadata.is_reverse,
+                        now_ns,
+                        worker_id,
+                        previous_persistent_hold_16615,
+                    );
+                } else {
+                    crate::nat::release_source_nat_allocation_for_worker_preserving_persistent_hold(
+                        &forwarding.iface_nat_allocators,
+                        &forwarding.source_nat_rules,
+                        &key,
+                        prev_decision.nat,
+                        prev_metadata.is_reverse,
+                        now_ns,
+                        worker_id,
+                    );
+                }
                 crate::nat64::release_nat64_allocation_for_worker(
                     &forwarding.nat64,
                     &key,
@@ -287,6 +304,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
                 // delete-sync frees a port the others still forward through.
                 worker_id,
                 synced_domains,
+                preserved_persistent_hold_17683,
             );
             if persistent_hold_16615.is_some() {
                 sessions.set_persistent_lease_hold(&key, persistent_hold_16615);

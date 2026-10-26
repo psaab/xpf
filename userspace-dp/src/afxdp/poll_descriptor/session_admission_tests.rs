@@ -906,3 +906,334 @@ mod strict_syn_16479_tests {
     }
 }
 
+#[cfg(test)]
+mod persistent_pressure_shed_17683_tests {
+    use super::*;
+    use crate::nat::PersistentNatPermit;
+    use crate::session::{SessionDecision, SessionKey, SessionMetadata};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn forwarding_with_idle_persistent_leases() -> (ForwardingState, crate::nat::NatDecision) {
+        let mut forwarding = ForwardingState::default();
+        forwarding.source_nat_rules =
+            crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+                name: "persistent-snat".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_name: "persistent-pool".to_string(),
+                pool_addresses: vec!["203.0.113.10".to_string()],
+                port_low: 40000,
+                port_high: 40010,
+                persistent_nat: true,
+                persistent_nat_permit_any_remote_host: true,
+                persistent_nat_permit: "any-remote-host".to_string(),
+                persistent_nat_inactivity_timeout: 1,
+                ..crate::SourceNATRuleSnapshot::default()
+            }]);
+
+        let mut mint_scoped = |scope: u32, now_ns: u64| {
+            let mut counter = None;
+            let decision = match crate::nat::match_source_nat_result_for_tuple(
+                &crate::nat::InterfaceNatAllocators::default(),
+                &forwarding.source_nat_rules,
+                &crate::nat::NatScopeCtx {
+                    routing_domain: scope,
+                    ..crate::nat::NatScopeCtx::default()
+                },
+                "lan",
+                "wan",
+                "10.0.1.100".parse().unwrap(),
+                "8.8.8.8".parse().unwrap(),
+                Some(crate::ip_proto::PROTO_TCP),
+                12345,
+                53,
+                None,
+                None,
+                now_ns,
+                false,
+                false,
+                crate::nat::NatHolder::Untracked,
+                &mut counter,
+            ) {
+                crate::nat::SourceNatLookup::Matched(decision) => decision,
+                other => panic!("fixture: outbound mint must match, got {other:?}"),
+            };
+            let outbound_key = SessionKey {
+                addr_family: libc::AF_INET as u8,
+                protocol: crate::ip_proto::PROTO_TCP,
+                src_ip: "10.0.1.100".parse().unwrap(),
+                dst_ip: "8.8.8.8".parse().unwrap(),
+                src_port: 12345,
+                dst_port: 53,
+                discriminator: Default::default(),
+                routing_domain: scope,
+            };
+            crate::nat::release_source_nat_allocation(
+                &crate::nat::InterfaceNatAllocators::default(),
+                &forwarding.source_nat_rules,
+                &outbound_key,
+                decision,
+                false,
+                now_ns + 1,
+            );
+            decision
+        };
+        let tenant_a = mint_scoped(7, 1_000_000_000);
+        mint_scoped(0, 1_000_000_000);
+        (forwarding, tenant_a)
+    }
+
+    fn inbound_flows(forwarding: &ForwardingState, scope: u32) -> Option<u32> {
+        forwarding.source_nat_rules[0]
+            .pool_allocator
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: crate::ip_proto::PROTO_TCP,
+                    src_ip: "10.0.1.100".parse().unwrap(),
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: 12345,
+                    dst_port: 53,
+                    routing_scope: scope,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows)
+    }
+
+    fn session_metadata() -> SessionMetadata {
+        SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        }
+    }
+
+    #[test]
+    fn queue_full_delete_leaves_peer_inbound_hold_for_drop_sweep_17683() {
+        let (forwarding, tenant_a_nat) = forwarding_with_idle_persistent_leases();
+        let allocator = &forwarding.source_nat_rules[0].pool_allocator;
+        let hold = (
+            crate::nat::PersistentSourceKey {
+                protocol: crate::ip_proto::PROTO_TCP,
+                src_ip: "10.0.1.100".parse().unwrap(),
+                src_port: 12345,
+                routing_scope: 7,
+                remote: None,
+            },
+            allocator.debug_shared_identity(),
+        );
+        assert!(allocator.acquire_persistent_inbound(hold.0, 1_500_000_000));
+        assert!(allocator.acquire_persistent_inbound(hold.0, 1_500_000_000));
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: "8.8.8.8".parse().unwrap(),
+            dst_ip: tenant_a_nat.rewrite_src.expect("fixture has public address"),
+            src_port: 53,
+            dst_port: tenant_a_nat
+                .rewrite_src_port
+                .expect("fixture has public port"),
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        {
+            let mut pending = queue.lock().unwrap();
+            for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+                pending.push_back(crate::afxdp::WorkerCommand::DeleteSynced(key.clone()));
+            }
+        }
+        let peers = vec![queue.clone()];
+        let mut worker_commands_by_id = std::collections::BTreeMap::new();
+        worker_commands_by_id.insert(42, queue.clone());
+
+        let _outcome = crate::afxdp::session_glue::replicate_session_delete_repairing(
+            &peers,
+            &worker_commands_by_id,
+            &forwarding,
+            &key,
+            tenant_a_nat,
+            false,
+            2_000_000_000,
+        );
+        assert_eq!(
+            queue.lock().unwrap().len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            "the queue-full fixture must refuse the delete"
+        );
+        assert_eq!(
+            inbound_flows(&forwarding, 7),
+            Some(2),
+            "queue-full repair must leave both recorded inbound references for the peer sweep"
+        );
+
+        crate::nat::release_source_nat_allocation_for_worker_with_hold(
+            &forwarding.iface_nat_allocators,
+            &forwarding.source_nat_rules,
+            &key,
+            tenant_a_nat,
+            false,
+            2_000_000_001,
+            42,
+            Some(hold),
+        );
+        assert_eq!(
+            inbound_flows(&forwarding, 7),
+            Some(1),
+            "the peer's delete-drop sweep releases only its recorded reference"
+        );
+    }
+
+    #[test]
+    fn pressure_shed_releases_recorded_cross_domain_hold_once_17683() {
+        let (forwarding, tenant_a_nat) = forwarding_with_idle_persistent_leases();
+        let allocator = &forwarding.source_nat_rules[0].pool_allocator;
+        let allocator_id = allocator.debug_shared_identity();
+        let hold_a = (
+            crate::nat::PersistentSourceKey {
+                protocol: crate::ip_proto::PROTO_TCP,
+                src_ip: "10.0.1.100".parse().unwrap(),
+                src_port: 12345,
+                routing_scope: 7,
+                remote: None,
+            },
+            allocator_id,
+        );
+        let hold_b = crate::nat::PersistentSourceKey {
+            routing_scope: 0,
+            ..hold_a.0
+        };
+
+        // Two sessions share A's lease, while an overlapping tenant owns B's
+        // same internal tuple in the arrival domain. Shedding one A session
+        // must release exactly its recorded hold and leave both controls.
+        assert!(allocator.acquire_persistent_inbound(hold_a.0, 1_500_000_000));
+        assert!(allocator.acquire_persistent_inbound(hold_a.0, 1_500_000_000));
+        assert!(allocator.acquire_persistent_inbound(hold_b, 1_500_000_000));
+        assert_eq!(inbound_flows(&forwarding, 7), Some(2));
+        assert_eq!(inbound_flows(&forwarding, 0), Some(1));
+
+        let nat = crate::nat::NatDecision {
+            rewrite_dst: Some("10.0.1.100".parse().unwrap()),
+            rewrite_dst_port: Some(12345),
+            ..crate::nat::NatDecision::default()
+        };
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            dst_ip: tenant_a_nat.rewrite_src.expect("fixture has public address"),
+            src_port: 53,
+            dst_port: tenant_a_nat
+                .rewrite_src_port
+                .expect("fixture has public port"),
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let decision = SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: None,
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let now_ns = 2_000_000_000;
+        let mut sessions = SessionTable::new();
+        sessions.set_max_sessions_for_test(1);
+        assert!(sessions.install_with_protocol(
+            key.clone(),
+            decision,
+            session_metadata(),
+            now_ns,
+            crate::ip_proto::PROTO_TCP,
+            crate::tcp_flags::TCP_SYN,
+        ));
+        sessions.set_persistent_lease_hold(&key, Some(hold_a));
+        let (admitted, sheds) = sessions.can_admit_new_flow(
+            1,
+            crate::ip_proto::PROTO_TCP,
+            crate::tcp_flags::TCP_SYN,
+        );
+        assert!(admitted);
+        assert_eq!(sheds.len(), 1);
+        let recorded_shed_hold = sheds
+            .iter()
+            .next()
+            .and_then(|shed| shed.persistent_lease_hold);
+
+        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+        let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let shared_nat_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions =
+            std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let peer_worker_commands = Vec::new();
+        let worker_commands_by_id = crate::afxdp::types::empty_worker_commands_by_id();
+        assert!(teardown_pressure_shed_victims(
+            &mut sessions,
+            sheds,
+            ShedTeardownCtx {
+                forwarding: &forwarding,
+                session_map: SteeringMap::unshared_for_test(-1),
+                conntrack_v4_fd: -1,
+                conntrack_v6_fd: -1,
+                dnat_fds: &dnat_fds,
+                worker_id: 0,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id,
+                shared_sessions: &shared_sessions,
+                shared_nat_sessions: &shared_nat_sessions,
+                shared_forward_wire_sessions: &shared_forward_wire_sessions,
+                shared_owner_rg_indexes: &shared_owner_rg_indexes,
+                now_ns,
+            },
+            &mut |_| {},
+        ));
+
+        assert_eq!(
+            (inbound_flows(&forwarding, 7), inbound_flows(&forwarding, 0)),
+            (Some(1), Some(1)),
+            "teardown releases exactly one scope-7 hold and leaves the overlapping arrival-domain tenant untouched"
+        );
+        assert_eq!(
+            recorded_shed_hold,
+            Some(hold_a),
+            "pressure-shed intent retains the exact allocator and persistent key"
+        );
+        crate::nat::release_recorded_persistent_inbound(
+            &forwarding.source_nat_rules,
+            Some(hold_a),
+            2_000_000_001,
+        );
+        assert_eq!(inbound_flows(&forwarding, 7), Some(0));
+        assert_eq!(inbound_flows(&forwarding, 0), Some(1));
+    }
+}

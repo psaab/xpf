@@ -7131,6 +7131,34 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
         PROTO_TCP,
         TCP_ACK,
     ));
+    // #17683: both opening candidates carry exact holds. Whichever pair is
+    // pressure-shed must preserve the forward half's recorded allocator key
+    // through the detached teardown intent (arrival-domain re-derivation is
+    // not equivalent for a cross-domain persistent lease).
+    let opening_hold = (
+        crate::nat::PersistentSourceKey {
+            protocol: PROTO_TCP,
+            src_ip: "10.0.1.10".parse().unwrap(),
+            src_port: 12345,
+            routing_scope: 7,
+            remote: None,
+        },
+        0x17683,
+    );
+    let pending_hold = (
+        crate::nat::PersistentSourceKey {
+            protocol: PROTO_TCP,
+            src_ip: "10.0.1.20".parse().unwrap(),
+            src_port: 12346,
+            routing_scope: 8,
+            remote: None,
+        },
+        0x17684,
+    );
+    table.set_persistent_lease_hold(&opening, Some(opening_hold));
+    table.set_persistent_lease_hold(&pending, Some(pending_hold));
+    assert_eq!(table.len(), 9);
+    assert_eq!(table.pressure_shed_unreplied.len(), 2);
     let _ = table.drain_deltas(16);
     assert_eq!(table.len(), 9);
     assert_eq!(table.pressure_shed_unreplied.len(), 2);
@@ -7154,6 +7182,28 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
         "a legitimate initial SYN at 90% pressure should free an opening pair"
     );
     assert_eq!(shed_sessions.len(), 2, "return both removed session halves");
+    let shed_forward = shed_sessions
+        .iter()
+        .find(|shed| !shed.is_reverse)
+        .expect("the victim pair includes its forward half");
+    let expected_hold = if shed_forward.key == opening {
+        opening_hold
+    } else {
+        assert_eq!(shed_forward.key, pending);
+        pending_hold
+    };
+    assert_eq!(
+        shed_forward.persistent_lease_hold,
+        Some(expected_hold),
+        "pressure-shed snapshot must carry the granting allocator identity and lease key"
+    );
+    assert!(
+        shed_sessions
+            .iter()
+            .filter(|shed| shed.is_reverse)
+            .all(|shed| shed.persistent_lease_hold.is_none()),
+        "reverse companions carry no inbound lease hold"
+    );
     assert_eq!(table.len(), 7, "one opening pair supplies the two slots");
     assert_eq!(table.pressure_shed_unreplied.len(), 1);
     let opening_pair_removed = table.entry_by_key(&opening).is_none();

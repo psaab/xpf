@@ -1815,6 +1815,9 @@ pub(crate) struct PressureShedSession {
     pub(crate) ingress_ifindex: u32,
     pub(crate) ingress_vlan_id: u16,
     pub(crate) owner_rg_id: i32,
+
+    /// #17683: pressure teardown must retain the exact granted lease hold.
+    pub(crate) persistent_lease_hold: Option<(crate::nat::PersistentSourceKey, usize)>,
     pub(crate) policy_id: u32,
 }
 

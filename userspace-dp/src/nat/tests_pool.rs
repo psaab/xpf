@@ -3071,6 +3071,163 @@ fn persistent_inbound_recorded_hold_releases_cross_domain_lease_16615() {
     assert_eq!(b.inbound_flows, 0, "domain-0 recorded release unchanged");
 }
 
+/// #17683: absence of the granting allocator is not permission to release
+/// the same private key from every remaining pool. Different pools can carry
+/// overlapping internal lease keys; only the recorded owner may lose a hold.
+#[test]
+fn recorded_release_with_missing_allocator_preserves_other_pool_17683() {
+    let rules_a = persistent_pool_rules(1, 40000, 40010);
+    let rules_b = persistent_pool_rules(1, 40000, 40010);
+    let allocator_a_id = rules_a[0].pool_allocator.debug_shared_identity();
+    let alloc_b = &rules_b[0].pool_allocator;
+    assert_ne!(allocator_a_id, alloc_b.debug_shared_identity());
+
+    // Mint an idle same-key lease in B. A session whose grant came from A is
+    // later torn down after A has been removed from the current rule set.
+    let mut counter = None;
+    let nat = expect_snat_decision(match_source_nat_result_for_tuple(
+        &InterfaceNatAllocators::default(),
+        &rules_b,
+        &NatScopeCtx {
+            routing_domain: 0,
+            ..NatScopeCtx::default()
+        },
+        "lan",
+        "wan",
+        "10.0.1.100".parse().unwrap(),
+        "8.8.8.8".parse().unwrap(),
+        Some(6),
+        12345,
+        53,
+        None,
+        None,
+        1_000_000_000,
+        false,
+        false,
+        NatHolder::Untracked,
+        &mut counter,
+    ));
+    let outbound_key = session_key(12345, "8.8.8.8", 53);
+    crate::nat::release_source_nat_allocation(
+        &InterfaceNatAllocators::default(),
+        &rules_b,
+        &outbound_key,
+        nat,
+        false,
+        1_000_000_001,
+    );
+    let lease_key = PersistentSourceKey {
+        protocol: 6,
+        src_ip: "10.0.1.100".parse().unwrap(),
+        src_port: 12345,
+        routing_scope: 0,
+        remote: None,
+    };
+    assert!(alloc_b.acquire_persistent_inbound(lease_key, 1_500_000_000));
+    assert_eq!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(1)
+    );
+
+    let missing_owner_released = crate::nat::release_recorded_persistent_inbound(
+        &rules_b,
+        Some((lease_key, allocator_a_id)),
+        3_000_000_000,
+    );
+    assert_eq!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(1),
+        "a same-key lease in another pool is not the missing owner's hold"
+    );
+    assert!(
+        !missing_owner_released,
+        "removed granting allocator must be reported as absent"
+    );
+    assert_eq!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(1),
+        "a same-key lease in another pool is not the missing owner's hold"
+    );
+
+    // Owner-present control: B's own recorded allocator identity still
+    // consumes exactly one hold and permits the now-idle lease to GC.
+    assert!(crate::nat::release_recorded_persistent_inbound(
+        &rules_b,
+        Some((lease_key, alloc_b.debug_shared_identity())),
+        3_000_000_000,
+    ));
+    assert_eq!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .map(|lease| lease.inbound_flows),
+        Some(0),
+        "the correct pool's owner-present control releases the lease"
+    );
+    let _ = alloc_b.debug_gc_expired_chunked(5_000_000_000, 16);
+    assert!(
+        alloc_b
+            .debug_persistent_lease_for_flow(
+                &crate::nat::SourceNatFlowKey {
+                    protocol: 6,
+                    src_ip: lease_key.src_ip,
+                    dst_ip: "8.8.8.8".parse().unwrap(),
+                    src_port: lease_key.src_port,
+                    dst_port: 53,
+                    routing_scope: 0,
+                },
+                PersistentNatPermit::AnyRemoteHost,
+            )
+            .is_none(),
+        "released owner-present lease must age out after its expiry"
+    );
+}
+
 #[test]
 fn persistent_address_only_inbound_permission_is_checked() {
     let rules = notrans_persistent_rules(vec!["203.0.113.10/32"], "target-host-port", 300, false);

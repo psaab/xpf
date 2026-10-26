@@ -391,6 +391,7 @@ pub(crate) use source::{
     release_persistent_inbound_for_session, release_persistent_inbound_with_hold,
     release_recorded_persistent_inbound,
     release_source_nat_allocation_for_worker, release_source_nat_allocation_for_worker_with_hold,
+    release_source_nat_allocation_for_worker_preserving_persistent_hold,
     release_synced_source_nat_allocation_untracked_with_hold,
     rollback_recorded_persistent_inbound, rollback_source_nat_allocation_for_worker_with_hold,
     release_synced_source_nat_allocation_untracked,

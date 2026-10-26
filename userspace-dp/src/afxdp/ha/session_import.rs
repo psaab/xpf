@@ -2546,17 +2546,15 @@ impl crate::afxdp::ha::SessionDomain {
             SyncedDeleteOutcome::Applied
         }
     }
-    /// #14961 (D26-05): byte-for-byte the calls the worker makes when it
-    /// processes the command, with that worker's id as the holder — so the
-    /// holder mask empties on the same last-release rule and the port is
-    /// returned exactly once. Both allocator families are released: before
-    /// this fix only the source-NAT leg ran, so a dropped `DeleteSynced`
+    /// #14961 (D26-05): repair the worker-specific ordinary reservation
+    /// holders with that worker's id. Both allocator families are released:
+    /// before this fix only the source-NAT leg ran, so a dropped `DeleteSynced`
     /// for a NAT64 session stranded its translated `(pool v4, port)` (and
     /// its local SNAT port, when the decision also carried one) for the
     /// life of the allocator — the worker is ALIVE, so neither the
     /// dead-worker sweep nor generation teardown can see its bit.
-    /// Holder-aware release is idempotent, so a worker that later drains
-    /// a queued copy or is swept by the delete-drop reconcile no-ops.
+    /// Do not consume `entry.persistent_lease_hold` here: the worker's
+    /// delete-drop sweep owns and releases that recorded inbound reference.
     fn release_dropped_delete_for_worker(
         &self,
         entry: &SyncedSessionEntry,
@@ -2573,7 +2571,7 @@ impl crate::afxdp::ha::SessionDomain {
             .delete_dropped_released
             .fetch_add(1, Ordering::Relaxed);
         let now_ns = crate::afxdp::wg::counters::monotonic_now_ns();
-        crate::nat::release_source_nat_allocation_for_worker(
+        crate::nat::release_source_nat_allocation_for_worker_preserving_persistent_hold(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,
             key,

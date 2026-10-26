@@ -627,6 +627,7 @@ fn delete_terminal_half(
     metadata: &SessionMetadata,
     origin: SessionOrigin,
 ) {
+    let persistent_hold = sessions.take_persistent_lease_hold(key);
     crate::nat::release_source_nat_allocation_for_worker_with_hold(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
@@ -635,7 +636,7 @@ fn delete_terminal_half(
         metadata.is_reverse,
         shared.tick.ns,
         worker_id,
-        sessions.take_persistent_lease_hold(key),
+        persistent_hold,
     );
     crate::nat64::release_nat64_allocation_for_worker(
         &forwarding.nat64,

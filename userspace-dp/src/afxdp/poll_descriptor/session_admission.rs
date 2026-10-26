@@ -81,7 +81,7 @@ pub(in crate::afxdp) fn teardown_pressure_shed_victims(
             // MissingNeighbor copy omitted it, but analysis found that difference
             // behaviorally equivalent because shedding removes both local rows.
             if sessions.probe_with_origin(&shed.key).is_none() {
-                crate::nat::release_source_nat_allocation_for_worker(
+                crate::nat::release_source_nat_allocation_for_worker_with_hold(
                     &ctx.forwarding.iface_nat_allocators,
                     &ctx.forwarding.source_nat_rules,
                     &shed.key,
@@ -89,6 +89,7 @@ pub(in crate::afxdp) fn teardown_pressure_shed_victims(
                     shed.is_reverse,
                     ctx.now_ns,
                     ctx.worker_id,
+                    shed.persistent_lease_hold,
                 );
                 crate::nat64::release_nat64_allocation_for_worker(
                     &ctx.forwarding.nat64,
@@ -123,7 +124,7 @@ pub(in crate::afxdp) fn teardown_pressure_shed_victims(
         // SessionKey omits ingress ifindex; invalidate every binding's slot
         // through the caller closure, not only the binding that saw this packet.
         invalidate(&shed.key);
-        crate::nat::release_source_nat_allocation_for_worker(
+        crate::nat::release_source_nat_allocation_for_worker_with_hold(
             &ctx.forwarding.iface_nat_allocators,
             &ctx.forwarding.source_nat_rules,
             &shed.key,
@@ -131,6 +132,7 @@ pub(in crate::afxdp) fn teardown_pressure_shed_victims(
             shed.is_reverse,
             ctx.now_ns,
             ctx.worker_id,
+            shed.persistent_lease_hold,
         );
         crate::nat64::release_nat64_allocation_for_worker(
             &ctx.forwarding.nat64,
@@ -140,7 +142,7 @@ pub(in crate::afxdp) fn teardown_pressure_shed_victims(
             ctx.now_ns,
             ctx.worker_id,
         );
-        crate::afxdp::session_glue::replicate_session_delete_repairing(
+        super::session_glue::replicate_session_delete_repairing(
             ctx.peer_worker_commands,
             ctx.worker_commands_by_id,
             ctx.forwarding,

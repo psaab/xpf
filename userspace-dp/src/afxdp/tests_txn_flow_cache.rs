@@ -588,6 +588,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         ingress_ifindex: established_replacement.metadata.ingress_ifindex,
         ingress_vlan_id: established_replacement.metadata.ingress_vlan_id,
         owner_rg_id: established_replacement.metadata.owner_rg_id,
+        persistent_lease_hold: established_replacement.persistent_lease_hold,
         policy_id: established_replacement.metadata.policy_id,
     };
     assert!(
@@ -613,6 +614,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         ingress_ifindex: replacement_shed.ingress_ifindex,
         ingress_vlan_id: replacement_shed.ingress_vlan_id,
         owner_rg_id: replacement_shed.owner_rg_id,
+        persistent_lease_hold: replacement_shed.persistent_lease_hold,
         policy_id: replacement_shed.policy_id,
         session_id: opening_replacement.session_id.wrapping_add(1),
     };
@@ -648,6 +650,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         egress_zone_check: udp_shared.metadata.egress_zone_check,
         ingress_ifindex: udp_shared.metadata.ingress_ifindex,
         ingress_vlan_id: udp_shared.metadata.ingress_vlan_id,
+        persistent_lease_hold: udp_shared.persistent_lease_hold,
         owner_rg_id: udp_shared.metadata.owner_rg_id,
         policy_id: udp_shared.metadata.policy_id,
     };
