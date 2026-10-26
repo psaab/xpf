@@ -95,3 +95,30 @@ func TestZoneCountNormalConfigUnaffected(t *testing.T) {
 		t.Fatalf("strict commit rejected an ordinary 3-zone config: %v", err)
 	}
 }
+
+// #17928: the over-cap and at-cap branches at CI scale, via the injected
+// cap. These run unconditionally — the production cap cannot be
+// materialised as a zone map, which is exactly why the two cells above
+// skip.
+func TestZoneCountWithCapRejectsOverInjectedCap17928(t *testing.T) {
+	const cap = int64(3)
+	err := validateZoneCountWithCap(zonesConfig(int(cap + 1)), cap)
+	if err == nil {
+		t.Fatalf("validateZoneCountWithCap accepted %d zones (cap %d)", cap+1, cap)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("%d security zones", cap+1),
+		fmt.Sprintf("at most %d", cap),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestZoneCountWithCapAcceptsAtInjectedCap17928(t *testing.T) {
+	const cap = int64(3)
+	if err := validateZoneCountWithCap(zonesConfig(int(cap)), cap); err != nil {
+		t.Fatalf("validateZoneCountWithCap rejected a config at exactly the %d-zone cap: %v", cap, err)
+	}
+}

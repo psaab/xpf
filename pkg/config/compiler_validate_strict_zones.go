@@ -174,14 +174,23 @@ const MaxUsableZoneID = int64(ZoneIDReservedMin) - 1 // 4294967293
 // an already-persisted or peer-synced config that an older binary accepted still
 // BOOTS (#1960 fail-closed-on-load doctrine).
 func validateZoneCountStrict(cfg *Config) error {
+	return validateZoneCountWithCap(cfg, MaxUsableZoneID)
+}
+
+// validateZoneCountWithCap is validateZoneCountStrict with the cap taken as
+// a parameter (#17928) so tests can exercise the over-cap branch with a
+// CI-scale cap instead of materialising MaxUsableZoneID+1 zones. Production
+// always validates against MaxUsableZoneID via validateZoneCountStrict;
+// the error message names the cap passed in.
+func validateZoneCountWithCap(cfg *Config, cap int64) error {
 	if cfg == nil {
 		return nil
 	}
 	n := int64(len(cfg.Security.Zones))
-	if n > MaxUsableZoneID {
+	if n > cap {
 		return fmt.Errorf(
 			"configuration defines %d security zones, but the dataplane can address at most %d distinct zones (zone ids are a stable name-hash in a u32 space, top two ids reserved); reduce the zone count to %d or fewer",
-			n, MaxUsableZoneID, MaxUsableZoneID)
+			n, cap, cap)
 	}
 	return nil
 }
