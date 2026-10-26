@@ -1837,9 +1837,9 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	}
 
 	// #1706 / #5854: the next-table and rib-group ip-rule reconcilers have
-	// independent admission caps (100 next-table rules including ingress
-	// expansion, 1000 rib-group connected-prefix rules), so excess routes used
-	// to be silently truncated at apply time (routes claimed but not programmed).
+	// independent admission caps (100 next-table route/ingress pairs, each
+	// expanded to three rules; 1000 rib-group connected-prefix rules), so excess
+	// routes used to be silently truncated at apply time (claimed but unprogrammed).
 	// This is now a STRICT COMMIT REJECTION
 	// (validateRoutingRuleWindowsStrict, runUniformGates) rather than a warning:
 	// the strict commit / commit-check path hard-rejects it, and tolerant

@@ -1213,29 +1213,26 @@ const (
 	// PBRRulePriorityBase.
 	LegacyPBRRulePriorityBase = 31000
 	// NextTableRulePriorityBase is the start of the shared destination-leak
-	// priority range. RouteLeakRulePriority maps prefix length to a priority
-	// in that range, so a longer prefix always sorts before a shorter prefix
-	// across both next-table and rib-group rules. Equal-length prefixes use a
-	// kind tie-break (next-table before rib-group). The range remains after PBR
-	// and before the kernel main rule.
+	// priority range. Each prefix reserves four ordered slots: configured
+	// main-table exception, next-table target lookup, next-table unreachable
+	// shadow, and rib-group lookup. Prefix-derived offsets keep every more
+	// specific prefix's slots ahead of every broader prefix's slots; the range
+	// remains after PBR and before the kernel main rule.
 	NextTableRulePriorityBase = 30000
 	// RouteLeakRulePriorityWindow is the shared next-table/rib-group priority
-	// range [NextTableRulePriorityBase, +1000). It accommodates every IPv6
-	// prefix length plus the leak-kind tie-break and is independent of each
+	// range [NextTableRulePriorityBase, +1000). It accommodates all IPv6
+	// prefix lengths and the four per-prefix slots and is independent of each
 	// manager's admission cap.
 	RouteLeakRulePriorityWindow = 1000
-	// NextTableMissTerminatorPriority is the priority of the per-prefix
-	// unreachable shadow (#16614) installed immediately before the kernel
-	// main rule (32766) for every admitted config next-table leak prefix:
-	// `to P iif <if> unreachable pref 32765`. It sits after every leak
-	// rule (30000-30999), so a leak target-table miss ends here with
-	// ENETUNREACH instead of falling through to main's default (usually
-	// the WAN). It carries Dst=P and the leak's iif scope, so it never
-	// matches traffic outside the leaked prefix. See docs/log/16614.md.
+	// NextTableMissTerminatorPriority is the legacy fixed priority for
+	// #16614 unreachable shadows installed by older binaries immediately
+	// before the kernel main rule. Current shadows are prefix-derived inside
+	// the shared leak-priority range. This remains for stale-rule cleanup.
 	NextTableMissTerminatorPriority = 32765
-	// NextTableRuleWindow caps the number of next-table ip-rule entries. One
-	// leak costs one entry per default-instance ingress interface (#9810), so
-	// the applier, commit-time gate, and userspace FIB mirror share this cap.
+	// NextTableRuleWindow caps admission units, not physical kernel rules.
+	// Each admitted leak consumes one unit per default-instance ingress
+	// interface (#9810) and expands to a target lookup and shadow. The applier,
+	// commit-time gate, and userspace FIB mirror share this cap.
 	NextTableRuleWindow = 100
 )
 

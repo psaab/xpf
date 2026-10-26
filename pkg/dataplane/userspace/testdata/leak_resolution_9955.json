@@ -17,7 +17,7 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "blue",
-        "rule_priority": 30160,
+        "rule_priority": 30321,
         "next_table_route": true
       },
       {
@@ -26,7 +26,7 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "red",
-        "rule_priority": 30160,
+        "rule_priority": 30321,
         "next_table_route": true
       },
       {
@@ -60,7 +60,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "red",
-        "rule_priority": 30016,
+        "rule_priority": 30033,
         "next_table_route": true
       },
       {
@@ -69,7 +69,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "blue",
-        "rule_priority": 30016,
+        "rule_priority": 30033,
         "next_table_route": true
       },
       {
@@ -94,7 +94,7 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30160
+        "rule_priority": 30321
       },
       {
         "table": "inet6.0",
@@ -127,7 +127,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30016
+        "rule_priority": 30033
       }
     ],
     "destination": "10.1.2.5",
@@ -151,7 +151,7 @@
         "destination": "2001:db8::/32",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30192
+        "rule_priority": 30385
       },
       {
         "table": "red.inet6.0",
@@ -175,7 +175,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30048
+        "rule_priority": 30097
       },
       {
         "table": "inet.0",
@@ -208,7 +208,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "vr-a.inet.0",
-        "rule_priority": 30049
+        "rule_priority": 30099
       },
       {
         "table": "inet.0",
@@ -216,7 +216,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "vr-b.inet.0",
-        "rule_priority": 30017
+        "rule_priority": 30035
       },
       {
         "table": "vr-a.inet.0",
@@ -249,7 +249,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "vr-a.inet.0",
-        "rule_priority": 30049
+        "rule_priority": 30099
       },
       {
         "table": "inet.0",
@@ -257,7 +257,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "vr-b.inet.0",
-        "rule_priority": 30017
+        "rule_priority": 30035
       },
       {
         "table": "vr-a.inet.0",
@@ -299,7 +299,7 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30160
+        "rule_priority": 30321
       },
       {
         "table": "inet6.0",
@@ -307,7 +307,7 @@
         "destination": "2001:db8::/32",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30192
+        "rule_priority": 30385
       }
     ],
     "destination": "2001:db8:1::5",
@@ -331,7 +331,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30048
+        "rule_priority": 30097
       },
       {
         "table": "inet.0",
@@ -339,7 +339,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30016
+        "rule_priority": 30033
       }
     ],
     "destination": "10.1.2.5",
@@ -363,7 +363,7 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30161
+        "rule_priority": 30323
       },
       {
         "table": "inet6.0",
@@ -371,7 +371,7 @@
         "destination": "2001:db8::/32",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30192
+        "rule_priority": 30384
       },
       {
         "table": "red.inet6.0",
@@ -404,7 +404,7 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30160
+        "rule_priority": 30320
       },
       {
         "table": "inet6.0",
@@ -412,7 +412,7 @@
         "destination": "2001:db8::/32",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30193
+        "rule_priority": 30387
       },
       {
         "table": "red.inet6.0",
@@ -445,7 +445,7 @@
         "destination": "2001:db8:1::/64",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30129
+        "rule_priority": 30259
       },
       {
         "table": "inet6.0",
@@ -453,7 +453,7 @@
         "destination": "2001:db8::/32",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30192
+        "rule_priority": 30384
       },
       {
         "table": "red.inet6.0",
@@ -486,7 +486,7 @@
         "destination": "2001:db8:1::/64",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30128
+        "rule_priority": 30256
       },
       {
         "table": "inet6.0",
@@ -494,7 +494,7 @@
         "destination": "2001:db8::/32",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30193
+        "rule_priority": 30387
       },
       {
         "table": "red.inet6.0",
@@ -527,7 +527,7 @@
         "destination": "2001:db8:1::/96",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30065
+        "rule_priority": 30131
       },
       {
         "table": "inet6.0",
@@ -535,7 +535,7 @@
         "destination": "2001:db8::/32",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30192
+        "rule_priority": 30384
       },
       {
         "table": "red.inet6.0",
@@ -568,7 +568,7 @@
         "destination": "2001:db8:1::/96",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30064
+        "rule_priority": 30128
       },
       {
         "table": "inet6.0",
@@ -576,7 +576,7 @@
         "destination": "2001:db8::/32",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30193
+        "rule_priority": 30387
       },
       {
         "table": "red.inet6.0",
@@ -609,7 +609,7 @@
         "destination": "2001:db8:1::/80",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30097
+        "rule_priority": 30195
       },
       {
         "table": "inet6.0",
@@ -617,7 +617,7 @@
         "destination": "2001:db8::/40",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30176
+        "rule_priority": 30352
       },
       {
         "table": "red.inet6.0",
@@ -650,7 +650,7 @@
         "destination": "2001:db8:1::/80",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30096
+        "rule_priority": 30192
       },
       {
         "table": "inet6.0",
@@ -658,7 +658,7 @@
         "destination": "2001:db8::/40",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30177
+        "rule_priority": 30355
       },
       {
         "table": "red.inet6.0",
@@ -691,7 +691,7 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30160
+        "rule_priority": 30320
       },
       {
         "table": "inet6.0",
@@ -699,7 +699,7 @@
         "destination": "2001:db8:1::/64",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30129
+        "rule_priority": 30259
       },
       {
         "table": "red.inet6.0",
@@ -732,7 +732,7 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30161
+        "rule_priority": 30323
       },
       {
         "table": "inet6.0",
@@ -740,7 +740,7 @@
         "destination": "2001:db8:1::/64",
         "discard": false,
         "next_table": "blue.inet6.0",
-        "rule_priority": 30128
+        "rule_priority": 30256
       },
       {
         "table": "red.inet6.0",
@@ -773,7 +773,7 @@
         "destination": "10.0.0.0/12",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30040
+        "rule_priority": 30080
       },
       {
         "table": "inet.0",
@@ -781,7 +781,7 @@
         "destination": "10.1.2.0/28",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30009
+        "rule_priority": 30019
       },
       {
         "table": "red.inet.0",
@@ -814,7 +814,7 @@
         "destination": "10.0.0.0/12",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30041
+        "rule_priority": 30083
       },
       {
         "table": "inet.0",
@@ -822,7 +822,7 @@
         "destination": "10.1.2.0/28",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30008
+        "rule_priority": 30016
       },
       {
         "table": "red.inet.0",
@@ -855,7 +855,7 @@
         "destination": "10.1.0.0/16",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30032
+        "rule_priority": 30064
       },
       {
         "table": "inet.0",
@@ -863,7 +863,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30017
+        "rule_priority": 30035
       },
       {
         "table": "red.inet.0",
@@ -896,7 +896,7 @@
         "destination": "10.1.0.0/16",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30033
+        "rule_priority": 30067
       },
       {
         "table": "inet.0",
@@ -904,7 +904,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30016
+        "rule_priority": 30032
       },
       {
         "table": "red.inet.0",
@@ -937,7 +937,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30048
+        "rule_priority": 30096
       },
       {
         "table": "inet.0",
@@ -945,7 +945,7 @@
         "destination": "10.1.0.0/16",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30033
+        "rule_priority": 30067
       },
       {
         "table": "red.inet.0",
@@ -978,7 +978,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30049
+        "rule_priority": 30099
       },
       {
         "table": "inet.0",
@@ -986,7 +986,7 @@
         "destination": "10.1.0.0/16",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30032
+        "rule_priority": 30064
       },
       {
         "table": "red.inet.0",
@@ -1019,7 +1019,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30048
+        "rule_priority": 30096
       },
       {
         "table": "inet.0",
@@ -1027,7 +1027,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30017
+        "rule_priority": 30035
       },
       {
         "table": "red.inet.0",
@@ -1060,7 +1060,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30049
+        "rule_priority": 30099
       },
       {
         "table": "inet.0",
@@ -1068,7 +1068,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30016
+        "rule_priority": 30032
       },
       {
         "table": "red.inet.0",
@@ -1101,7 +1101,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30048
+        "rule_priority": 30096
       },
       {
         "table": "inet.0",
@@ -1109,7 +1109,7 @@
         "destination": "10.1.2.5/32",
         "discard": false,
         "next_table": "blue.inet.0",
-        "rule_priority": 30001
+        "rule_priority": 30003
       },
       {
         "table": "red.inet.0",
@@ -1142,7 +1142,7 @@
         "destination": "10.0.0.0/8",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30049
+        "rule_priority": 30099
       },
       {
         "table": "inet.0",
@@ -1166,6 +1166,72 @@
     "want_ifindex": 13
   },
   {
+    "name": "rib_group_only_versus_ordinary_inet6_9955",
+    "routes": [
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/64",
+        "next_hops": [
+          "2001:db8:52::1@ge-0/0/14.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 30387
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "rib_group_only_versus_ordinary_inet_9955",
+    "routes": [
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 30099
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "next_hops": [
+          "172.16.52.1@ge-0/0/14.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 12
+  },
+  {
     "name": "single_leak_inet6_9955",
     "routes": [
       {
@@ -1174,7 +1240,7 @@
         "destination": "2001:db8:1::/48",
         "discard": false,
         "next_table": "red.inet6.0",
-        "rule_priority": 30160
+        "rule_priority": 30321
       },
       {
         "table": "red.inet6.0",
@@ -1198,7 +1264,7 @@
         "destination": "10.1.2.0/24",
         "discard": false,
         "next_table": "red.inet.0",
-        "rule_priority": 30016
+        "rule_priority": 30033
       },
       {
         "table": "red.inet.0",

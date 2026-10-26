@@ -102,18 +102,17 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
-	// #5854: next-table / interface-routes rib-group admission-cap gate. The
-	// runtime applier has separate caps (100 next-table entries including
-	// ingress-interface expansion, 1000 rib-group connected-prefix rules) and
-	// silently skips rules beyond them. A config exceeding a cap therefore used
-	// to commit green while the reconciler stopped at the limit and returned
+	// runtime applier has separate caps (100 next-table route/ingress pairs,
+	// each expanded to a lookup and shadow; 1000 rib-group connected-prefix
+	// rules) and skips routes beyond them. A config exceeding a cap therefore
+	// used to commit green while the reconciler stopped at the limit and returned
 	// success — the committed generation CLAIMED routes the kernel never
 	// programs (blackhole / asymmetric routing / silent inter-VRF leak loss).
 	// This was previously WARN-only (ValidateConfig). Strict on commit /
-	// commit-check (hard reject so the over-subscription is operator-visible
-	// before it truncates); lenient on load / peer-sync (warn — #1960; the
-	// applier's admission caps keep the excess inert, so an already-committed or
-	// peer-synced over-limit generation still boots).
+	// commit-check (hard reject so over-subscription is operator-visible before
+	// truncation); lenient on load / peer-sync (warn — #1960; the applier's
+	// admission caps keep excess routes inert, so already-committed or
+	// peer-synced over-limit generations still boot).
 	// Mirrors validateNextTableTargetReferencesStrict.
 	if err := validateRoutingRuleWindowsStrict(cfg); err != nil {
 		if opts.lenientRoutingRuleWindows {

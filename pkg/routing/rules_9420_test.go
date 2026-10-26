@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
@@ -49,8 +50,20 @@ func TestNextTableRulesIngressScope_9420(t *testing.T) {
 					"iif-less rule steers traffic from every other routing instance "+
 					"into table %d (#9420)", family, r, r.Priority, r.Table)
 			}
-			if r.Priority != 32765 && r.Table != 101 {
-				t.Errorf("family %d: rule %v targets table %d, want 101", family, r, r.Table)
+			switch {
+			case isNextTableLegacyMainProbeShape(r):
+				t.Errorf("family %d: unexpected legacy main-table probe: %+v", family, r)
+			case isNextTableMainCarveoutShape(r):
+				prefixLength, _ := r.Dst.Mask.Size()
+				if r.Table != mainTableID || r.SuppressPrefixlen != prefixLength-1 {
+					t.Errorf("family %d: malformed guarded main-table carve-out: %+v", family, r)
+				}
+			case isNextTableMissTerminatorShape(r):
+				if r.Type != nl.FR_ACT_UNREACHABLE {
+					t.Errorf("family %d: shadow action %d, want unreachable", family, r.Type)
+				}
+			case r.Table != 101:
+				t.Errorf("family %d: target lookup %v targets table %d, want 101", family, r, r.Table)
 			}
 			seen[r.IifName] = true
 		}
@@ -114,7 +127,7 @@ func TestNextTableWindowIsLeakAtomic_9420(t *testing.T) {
 
 	instances := []*config.RoutingInstanceConfig{{Name: "dmz-vr", TableID: 101}}
 	// 3 interfaces × 34 leaks = 102 > the 100-entry cap, so the 34th leak
-	// must not install at all (33 × 3 = 99 leaks, 198 rules with shadows).
+	// must not install at all (33 × 3 interfaces × 2 rules = 198 rules).
 	iifs := []string{"ge-0-0-0", "ge-0-0-1", "ge-0-0-2"}
 	var routes []*config.StaticRoute
 	for i := 0; i < 34; i++ {
@@ -137,7 +150,7 @@ func TestNextTableWindowIsLeakAtomic_9420(t *testing.T) {
 			"multiple of %d", got, len(iifs))
 	}
 	if got != 198 {
-		t.Fatalf("expected 33 whole leaks (198 rules x2 with shadows), got %d", got)
+		t.Fatalf("expected 33 whole leaks (198 lookup and shadow rules), got %d", got)
 	}
 }
 

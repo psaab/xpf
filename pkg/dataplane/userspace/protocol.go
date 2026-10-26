@@ -517,7 +517,12 @@ const (
 	// v74 -> v75 (#16877): idle lease control records preserve
 	// PersistentPermissionScope.mint_from_zone. A v74 helper drops that
 	// provenance and would lose non-zone inbound permission admission.
-	ProtocolVersion = 75
+	// v75 -> v76 (#17684): config next-table RouteSnapshot priorities move
+	// to the target-lookup slot of a four-priority per-prefix sequence and
+	// compete with kernel-model leaks in one priority walk. A v75 helper
+	// uses the old priority semantics and may select a broader leak, so the
+	// pairing must refuse rather than degrade.
+	ProtocolVersion = 76
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

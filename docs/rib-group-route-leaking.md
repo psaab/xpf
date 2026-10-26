@@ -33,42 +33,64 @@ connected prefix** of that instance:
 ip rule to <connected-prefix> lookup <sourceTable> pref <derived-priority>
 ```
 
-The priority is `30000 + 2*(address-bits - prefix-length) + kind-offset`,
-where next-table leaks use offset 0 and rib-group leaks use offset 1. All such
-rules share **30000-30999**, after PBR (29000-29999) and before the main
-table's rule (32766). More-specific prefixes get lower (earlier) priorities,
-so a lookup for the leaked prefix consults its most-specific source table
-before a broader leak; everything else falls through to main. A main-table
-default route therefore no longer shadows a leaked connected prefix.
+The shared priority mapping reserves four slots per prefix:
+`30000 + 4*(address-bits - prefix-length) + slot`. Static main-table
+exceptions use slot 0, next-table leaks use slots 1-2 (target lookup and
+unreachable miss shadow), and rib-group lookups use slot 3. All such rules
+share **30000-30999**, after PBR (29000-29999) and before the main table's rule
+(32766). More-specific prefixes get lower (earlier) priorities, so a static
+exception or leak pair for the most-specific prefix controls a destination
+before any broader leak; otherwise, the unmatched destination falls through
+to main. A main-table default route therefore no longer shadows a leaked
+connected prefix.
 
 ### Kernel/helper precedence parity (#11319, #11396)
 
 Kernel PBR rules use 29000-29999. Next-table and rib-group per-prefix leaks
-share the following 30000-30999 priority range and use the same
-prefix-derived ordering. More-specific prefixes precede less-specific ones
-regardless of leak kind or source table; for an equal prefix, next-table
-precedes rib-group. This makes kernel first-match routing honor longest-prefix
-matching across overlapping leaks, as the userspace FIB does. The nested
-`10.0.0.0/8` and `10.1.2.0/24` regression covers both declaration orders and
-both leak kinds (#11396).
+share the following 30000-30999 priority range and use four slots per prefix.
+More-specific prefixes precede less-specific ones regardless of leak kind or
+source table. At a shared leak prefix, the next-table target lookup precedes
+its unreachable shadow, and both precede the rib-group lookup. A static
+main-table exception uses slot 0 at its own, strictly more-specific prefix.
+This makes kernel first-match routing honor longest-prefix ordering across
+overlapping leaks, as the userspace FIB does.
+The nested `10.0.0.0/8` and `10.1.2.0/24` regression covers both declaration
+orders and both leak kinds (#11396).
 
-PBR therefore selects its target table before either kernel leak rule can
+PBR therefore selects its target table before either kernel leak sequence can
 match, the same order the helper applies an explicit `then routing-instance`
 override before looking up destination routes. Before #11319, the kernel's
 next-table (100-199) and rib-group (30000-30999) bands both sorted ahead of PBR
 (31000-31999), so a leak could select a different table for the same packet.
 
-Since #16614, every admitted config next-table leak also installs a
-selector-identical `unreachable` shadow at priority 32765 (immediately
-before main): `to P iif <if> unreachable`. A target-table miss therefore
-ends ENETUNREACH on the kernel path instead of falling through to main's
-default (usually the WAN). In the AF_XDP FIB the same static is a Junos
-route in inet.0 (`next_table_route`, protocol v73): it competes by LPM
-(prefix, then preference), a more-specific inet.0 route beats it, and a
-target miss is terminal RejectRoute. Measured kernel limitation: the
-RPDB cannot express that LPM rescue, so on the kernel path only, an
-inet.0 carve-out inside a leaked prefix is blackholed rather than
-rescued (fail-closed, never leaked). Rib-group leaks are unchanged.
+Since #16614, each admitted config next-table leak installs a target lookup and
+a selector-identical `unreachable` shadow per default-instance ingress
+interface. Independently, the manager installs a destination- and iif-scoped
+slot-0 main lookup for each configured non-next-table static route strictly
+more specific than a matching admitted config next-table prefix, provided
+FRR can render the route. `StaticRouteExcludedReason` excludes cases such as `no-install`, unusable
+destinations, family-mismatched gateways, and routes with no forwarding
+disposition; the shared FRR operand predicates additionally require at least
+one renderable ECMP member. Valid discard/reject and
+qualified-next-hop statics remain eligible.
+Each exception is installed only after the leak's unreachable-shadow/target-
+lookup pairs and uses `suppress_prefixlen = route_prefix_length - 1`, so an
+absent configured route does not expose a broader ordinary main route.
+Linux does not suppress terminal blackhole/unreachable results: if FRR or an
+operator removes the main static route outside xpf's apply path, the exception
+follows the current main-table terminal answer and fails closed instead of
+rescuing that destination through the target. A target-table miss still ends
+`ENETUNREACH` rather than falling through to main's default (usually the WAN).
+In the AF_XDP FIB, a more-specific source-table route participates only when a
+configured next-table route covers the destination; a rib-group-only leak keeps
+lookup-first behavior in both models.
+
+Exceptions deliberately enumerate only `Apply`'s configured static routes.
+Dynamic, connected, and learned main routes are not discoverable from this
+static set; their full carve-out parity is the design follow-up filed as
+#17971. Until then, the Rust FIB retains Junos LPM semantics for these route
+classes when a config next-table route covers the destination, so this remains
+a documented kernel-model limitation.
 
 The old next-table and PBR bands are retained only for upgrade cleanup:
 `nextTableManager.clear()` removes stale rules at 32000-32099 and 100-199, and
@@ -331,10 +353,11 @@ silently no-op — for the cases Phase 1 cannot fully realize:
 
 ### Strict rejection — route-leak admission-cap over-subscription (#5854)
 
-The applier assigns next-table and interface-routes rib-group leaks
+The applier assigns next-table and interface-route rib-group leaks
 prefix-derived priorities in the shared `[30000, 31000)` range, while
-independent admission caps limit installed rules: 100 next-table entries
-(`pkg/routing/rules.go`, one per default-instance ingress interface) and
+independent admission caps bound installed entries: 100 next-table
+route/ingress pairs (each expands to a two-rule target-lookup/unreachable-shadow
+pair, with independently eligible static exceptions) and
 `config.MaxRibGroupLeakRules` (1000 connected-prefix rules). These caps are not
 priority slots or separate per-kind priority bands. A config that exceeds a
 cap used to commit green with only a **warning**
@@ -396,7 +419,7 @@ The shared priority base and range size are defined in `pkg/config`
 (`NextTableRulePriorityBase`, `RouteLeakRulePriorityWindow`) so the kernel
 managers, strict config validation, and userspace FIB use the same formula.
 `NextTableRuleWindow` is the separate 100-entry next-table admission cap
-(including per-ingress expansion); the rib-group admission cap remains 1000.
+(counted once per route/ingress pair); the rib-group admission cap remains 1000.
 The rib-group admission cap `config.MaxRibGroupLeakRules` and the exact-suffix
 rib-name matcher `config.RibInstanceFromName` are defined once in `pkg/config`
 (`rib_instance.go`); `pkg/routing` imports them, so the commit-time gate and the

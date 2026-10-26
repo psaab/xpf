@@ -63,3 +63,47 @@ func FRRAddrIsMapped(s string) bool {
 	}
 	return false
 }
+
+// FRRNextHopAddressOperand reports whether a next-hop address is renderable
+// as a single FRR gateway operand (#6795; exported spelling of the
+// pkg/frr render belt's validFRRNextHopAddress so pkg/routing exception
+// eligibility and pkg/frr rendering consume the SAME predicate instead of
+// maintaining a second parser). Bare address only: FRR's
+// `ip route <p> <gw>` takes an address, and a prefix there is a grammar error
+// that fails the frr-reload. Zoned literals (`fe80::1%eth0`) parse under
+// netip but are rejected too: the commit gate (net.ParseIP) refuses them
+// and FRR's gateway slot has no zone syntax, so emitting one would fail the
+// reload (#9820 GLM-F2 — belt and gate must agree).
+func FRRNextHopAddressOperand(s string) bool {
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return false
+	}
+	return a.Zone() == ""
+}
+
+// FRRInterfaceOperand reports whether an interface name is renderable as a
+// single FRR token (#6795; exported spelling of the pkg/frr render belt's
+// validFRRInterfaceOperand).
+//
+// Kernel interface names cannot contain whitespace or '/', but the value
+// reaching the renderer is not always a kernel name: it is assembled from
+// config, RETH resolution and a `.vlan` suffix, and on the tolerant load /
+// peer-sync path it is whatever the config carried. A name with an embedded
+// space would split `ip route <p> <gw> <ifname>` into an extra operand and
+// change what FRR installs — or, with a newline, add a statement outright.
+//
+// Deliberately a token test rather than a name-charset test: over-restricting
+// interface names would drop working routes on any naming scheme this tree
+// has not seen, and the defect is about token COUNT.
+func FRRInterfaceOperand(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range s {
+		if s[i] <= 0x20 || s[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}

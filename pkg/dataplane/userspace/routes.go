@@ -71,13 +71,12 @@ func nonDefaultRouteWeights(weights []uint32) []uint32 {
 	return nil
 }
 
-// routeSnapshotLeakIdentity canonicalizes only the target-table spelling and
-// CIDR masking used to compare the config-static mirror with a live ip-rule
-// mirror. Config stores a global next-table target as a bare routing-instance
-// name, while a live rule is emitted with its family-qualified table. They
-// are the same kernel rule identity and the live row must replace the config
-// mirror if their priorities differ. This helper does not participate in
-// dedupe: two live rows with distinct priorities remain distinct candidates.
+// routeSnapshotLeakIdentity canonicalizes target-table spelling and CIDR
+// masking when a current next-table lookup matches its config static. That
+// lookup replaces the config row while preserving its Junos LPM semantics;
+// other live leaks remain distinct even when the identity matches. This helper
+// does not participate in dedupe: rows with distinct priorities remain
+// distinct candidates.
 func routeSnapshotLeakIdentity(snap RouteSnapshot) string {
 	if snap.NextTable == "" {
 		return ""
@@ -99,6 +98,15 @@ func routeSnapshotLeakIdentity(snap RouteSnapshot) string {
 		destination = canonical
 	}
 	return fmt.Sprintf("%s|%s|%s|%s", snap.Table, snap.Family, destination, target)
+}
+
+// isNextTableLookupPriority identifies the target-lookup slot in the current
+// four-priority sequence for each prefix.
+func isNextTableLookupPriority(priority uint32) bool {
+	base := uint32(config.NextTableRulePriorityBase)
+	windowEnd := base + uint32(config.RouteLeakRulePriorityWindow)
+	return priority >= base && priority < windowEnd &&
+		(priority-base)%uint32(config.RouteLeakRulePriorityStride) == 1
 }
 
 // configNextTableRulePriorities mirrors the kernel's next-table admission
@@ -149,8 +157,9 @@ func configNextTableRulePriorities(cfg *config.Config, exclusions map[*config.St
 			break
 		}
 		prefixLength, addressBits := dst.Mask.Size()
-		out[route] = uint32(config.RouteLeakRulePriority(
-			prefixLength, addressBits, config.RouteLeakNextTable))
+
+		out[route] = uint32(config.RouteLeakNextTableLookupPriority(
+			prefixLength, addressBits))
 		admitted += ingress
 	}
 	return out
@@ -280,16 +289,22 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 		}
 		addSnapshot(snap)
 	}
-	removeConfigLeak := func(snap RouteSnapshot) {
+	removeConfigLeak := func(snap RouteSnapshot) (bool, int) {
 		identity := routeSnapshotLeakIdentity(snap)
 		if identity == "" {
-			return
+			return false, 0
 		}
 		kept := out[:0]
+		hasConfigNextTable := false
+		preference := 0
 		for _, existing := range out {
 			key := routeSnapshotDedupeKey(existing)
 			_, isConfigLeak := configLeakSnapshotKeys[key]
 			if isConfigLeak && routeSnapshotLeakIdentity(existing) == identity {
+				if existing.NextTableRoute && (!hasConfigNextTable || existing.Preference < preference) {
+					hasConfigNextTable = true
+					preference = existing.Preference
+				}
 				delete(seen, key)
 				delete(configLeakSnapshotKeys, key)
 				continue
@@ -297,19 +312,27 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 			kept = append(kept, existing)
 		}
 		out = kept
+		return hasConfigNextTable, preference
 	}
 	addLiveSnapshot := func(snap RouteSnapshot) {
-		// A netlink rule is authoritative for the same leak identity. This
-		// matters when a synthetic/config fixture and a live dump disagree:
-		// retaining the config row at an invented lower priority would make
-		// the Rust stage-1 index select it before the actual kernel rule.
-		removeConfigLeak(snap)
+		// Only a current next-table target lookup mirrors a config-authored
+		// next-table route. Keep other kernel-model leaks as separate
+		// priority-walk candidates, even when their identity matches.
+		if isNextTableLookupPriority(snap.RulePriority) {
+			hasConfigNextTable, preference := removeConfigLeak(snap)
+			if hasConfigNextTable {
+				// The live rule supplies the authoritative priority; the
+				// config row supplies the Junos route semantics and preference.
+				snap.NextTableRoute = true
+				snap.Preference = preference
+			}
+		}
 		addSnapshot(snap)
 	}
 	// #7357: the shared drop verdict for every static route in this config,
 	// computed once. See config.StaticRouteExclusions — it owns the
-	// order-dependent #6467 next-table ip-rule window as well as the seven
-	// per-route causes, and the show surfaces consult the same function.
+	// order-dependent #6467 next-table admission cap and the seven
+	// per-route causes, and the show surfaces consult that same function.
 	staticRouteExclusions := config.StaticRouteExclusions(cfg)
 	nextTableRulePriorities := configNextTableRulePriorities(cfg, staticRouteExclusions)
 	connectedNetworks := make(map[routeSnapshotTableFamily][]*net.IPNet)

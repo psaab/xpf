@@ -9,12 +9,14 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
 // testNextTableIifs is the #9420 ingress-scoping set used by next-table rule
-// tests: one default-instance ingress interface, so each leak costs one rule.
-var testNextTableIifs = []string{"ge-0-0-0"}
+// tests: one default-instance ingress interface, so each route consumes one
+// admission slot and expands to a target lookup and shadow.
+var testNextTableIifs = []string{"ge-0-0-0.0"}
 
 // fakeRuleOps is an in-memory ip-rule table implementing ruleOps. It
 // records every RuleAdd/RuleDel so tests can assert exactly which
@@ -584,8 +586,8 @@ func TestNextTableApplyAggregatesAddErrors(t *testing.T) {
 	}
 
 	// Single-family failure: forward progress preserved — the v4 add fails
-	// (error aggregated) while the sibling v6 rule still installs, and Apply
-	// still returns the aggregated error rather than swallowing it.
+	// (error aggregated) while the sibling v6 sequence still installs, and
+	// Apply still returns the aggregated error rather than swallowing it.
 	ops2 := newFakeRuleOps()
 	ops2.failAdd(unix.AF_INET, errors.New("netlink EPERM on v4"))
 	nt2 := &nextTableManager{ops: ops2}
@@ -596,7 +598,7 @@ func TestNextTableApplyAggregatesAddErrors(t *testing.T) {
 		t.Errorf("failed v4 rule must not be recorded, got %d", ops2.count(unix.AF_INET))
 	}
 	if ops2.count(unix.AF_INET6) != 2 {
-		t.Errorf("sibling v6 rules must still install (forward progress), got %d", ops2.count(unix.AF_INET6))
+		t.Errorf("sibling v6 sequence must still install (forward progress), got %d", ops2.count(unix.AF_INET6))
 	}
 }
 
@@ -625,7 +627,7 @@ func TestNextTableApplyIdempotentReapply(t *testing.T) {
 		t.Fatalf("idempotent re-apply must return nil, got %v", err)
 	}
 	if got := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); got != 4 {
-		t.Fatalf("re-apply must keep a stable rule set, got %d", got)
+		t.Fatalf("re-apply must keep a stable 4-rule set, got %d", got)
 	}
 }
 
@@ -820,20 +822,71 @@ func assertAllRulesInRange(t *testing.T, ops *fakeRuleOps, lo, hi int) {
 	}
 }
 
-// assertNextTableLookupsInRange16614 checks every next-table lookup stays
-// in the shared leak window and every shadow sits at the terminator
-// priority — both are inside clear()'s ownership, so neither leaks.
+// assertNextTableLookupsInRange16614 verifies every admitted prefix has
+// exactly one target lookup and unreachable shadow per ingress interface. No
+// blanket main-table probe may be emitted; configured carve-outs are separate
+// slot-0 rules.
 func assertNextTableLookupsInRange16614(t *testing.T, ops *fakeRuleOps) {
 	t.Helper()
+	type ruleKey struct {
+		family      int
+		destination string
+		iif         string
+	}
+	lookups := make(map[ruleKey]netlink.Rule)
+	shadows := make(map[ruleKey]netlink.Rule)
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		for _, r := range ops.rules[family] {
-			if r.Priority == config.NextTableMissTerminatorPriority {
+		for _, rule := range ops.rules[family] {
+			if rule.Priority < nextTableRulePriority ||
+				rule.Priority >= nextTableRulePriority+config.RouteLeakRulePriorityWindow {
+				t.Errorf("next-table rule priority %d outside cleared window", rule.Priority)
+			}
+			if rule.Dst == nil || rule.IifName == "" {
+				t.Errorf("next-table rule lacks destination or ingress scope: %+v", rule)
 				continue
 			}
-			if r.Priority < nextTableRulePriority || r.Priority >= nextTableRulePriority+config.RouteLeakRulePriorityWindow {
-				t.Errorf("lookup priority %d outside cleared window", r.Priority)
+			key := ruleKey{family: family, destination: rule.Dst.String(), iif: rule.IifName}
+			switch {
+			case isNextTableLegacyMainProbeShape(rule):
+				t.Errorf("new apply emitted a legacy suppress-prefixlen probe: %+v", rule)
+			case isNextTableMainCarveoutShape(rule):
+				prefixLength, addressBits := rule.Dst.Mask.Size()
+				if rule.Priority != config.RouteLeakNextTableCarveoutPriority(prefixLength, addressBits) {
+					t.Errorf("main carve-out priority %d does not match its prefix: %+v", rule.Priority, rule)
+				}
+			case isNextTableMissTerminatorShape(rule):
+				if rule.Type != nl.FR_ACT_UNREACHABLE {
+					t.Errorf("shadow action %d, want unreachable: %+v", rule.Type, rule)
+				}
+				if _, exists := shadows[key]; exists {
+					t.Errorf("duplicate miss shadow for %+v", key)
+				}
+				shadows[key] = rule
+			default:
+				if rule.Table == mainTableID || rule.SuppressPrefixlen != -1 {
+					t.Errorf("unexpected next-table helper rule shape: %+v", rule)
+				}
+				if _, exists := lookups[key]; exists {
+					t.Errorf("duplicate target lookup for %+v", key)
+				}
+				lookups[key] = rule
 			}
 		}
+	}
+	for key, lookup := range lookups {
+		prefixLength, addressBits := lookup.Dst.Mask.Size()
+		if lookup.Priority != config.RouteLeakNextTableLookupPriority(prefixLength, addressBits) {
+			t.Errorf("target lookup priority %d for %+v does not match its prefix", lookup.Priority, key)
+		}
+		shadow, ok := shadows[key]
+		if !ok {
+			t.Errorf("target lookup has no unreachable shadow: %+v", key)
+		} else if shadow.Priority != config.RouteLeakNextTableShadowPriority(prefixLength, addressBits) {
+			t.Errorf("miss shadow %+v does not match target lookup %+v", shadow, lookup)
+		}
+	}
+	if len(shadows) != len(lookups) {
+		t.Errorf("lookup/shadow counts %d/%d differ", len(lookups), len(shadows))
 	}
 }
 

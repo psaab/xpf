@@ -157,6 +157,34 @@ func staticRouteHasDisposition(sr *StaticRoute) bool {
 	return sr.NextTable != "" || sr.Discard || sr.Reject
 }
 
+// StaticRouteHasFRRRenderableNextHop reports whether at least one ECMP member
+// survives the static-route renderer's address and interface operand belts.
+// It mirrors the renderer's default `.0` unit collapse so an interface-only
+// `.0` is not mistaken for a forwarding target. Malformed members are dropped
+// individually while healthy ECMP siblings remain; route-leak exceptions must
+// use the same decision or they can preserve a route FRR omitted.
+func StaticRouteHasFRRRenderableNextHop(sr *StaticRoute) bool {
+	if sr == nil {
+		return false
+	}
+	for _, nh := range sr.NextHops {
+		if nh.Address != "" && !FRRNextHopAddressOperand(nh.Address) {
+			continue
+		}
+		ifName := nh.Interface
+		if strings.HasSuffix(ifName, ".0") {
+			ifName = strings.TrimSuffix(ifName, ".0")
+		}
+		if ifName != "" && !FRRInterfaceOperand(ifName) {
+			continue
+		}
+		if nh.Address != "" || ifName != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // staticRouteDestinationUsable mirrors the destination acceptance in
 // userspace.routeDestinationForWire without creating a package dependency
 // cycle. A bare host is usable because the builder adds its host prefix before
@@ -171,13 +199,14 @@ func staticRouteDestinationUsable(destination string) bool {
 // StaticRouteExclusions returns the exclusion reason for every static route in
 // `cfg` that buildRouteSnapshots drops, keyed by the route pointer.
 //
-// It exists for the ORDER-DEPENDENT eighth reason. The kernel programs global
-// next-table leaks as ip rules capped at NextTableRuleWindow entries — one
-// slot per default-instance ingress interface per leak since #9420 (#9810) —
-// and the applier advances that counter only for an ELIGIBLE route, drawn down
-// leak-atomically in parsed-CIDR v4-first order. So whether a given route falls
-// outside the window depends on how many eligible ones came before it, in the
-// applier's own order, times the shared ingress count.
+// It exists for the ORDER-DEPENDENT eighth reason. The kernel admits global
+// next-table leaks under NextTableRuleWindow route/ingress slots — one slot per
+// default-instance ingress interface per leak since #9420 (#9810) — and expands
+// each admitted pair into a target lookup and unreachable shadow. The applier
+// advances that counter only for an ELIGIBLE route, drawn down leak-atomically
+// in parsed-CIDR v4-first order. So whether a given route falls outside the window depends on
+// how many eligible ones came before it, in the applier's own order, times the
+// shared ingress count.
 //
 // That order is reproduced exactly and it is narrower than it looks: the window
 // counter advances ONLY on the global path (`perInstance == false`), so
@@ -224,9 +253,9 @@ func StaticRouteExclusions(cfg *Config) map[*StaticRoute]string {
 		}
 		if window+ingress > NextTableRuleWindow {
 			out[sr] = fmt.Sprintf(
-				"beyond the %d-entry next-table ip-rule window with %d default-instance "+
-					"ingress interfaces (each leak costs one rule per ingress interface) "+
-					"— the kernel installs no rule for it",
+				"beyond the next-table ip-rule window (%d admission slots): with %d default-instance "+
+					"ingress interface(s), each admitted route consumes one cap entry per ingress "+
+					"interface and installs a lookup and shadow; the kernel installs no rule sequence",
 				NextTableRuleWindow, ingress)
 			continue
 		}

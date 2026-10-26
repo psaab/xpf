@@ -20,6 +20,11 @@ func bestLeakRule11396(ops *fakeRuleOps, destination, ingress string) (netlink.R
 		if rule.Dst == nil || !rule.Dst.Contains(ip) {
 			continue
 		}
+		if isNextTableMainCarveoutShape(*rule) {
+			// This helper compares leak lookups only; static main-table
+			// exceptions occupy slot 0 and are tested separately.
+			continue
+		}
 		if rule.IifName != "" && rule.IifName != ingress {
 			continue
 		}
@@ -178,7 +183,7 @@ func TestSharedLeakClearPreservesOtherRuleKind11396(t *testing.T) {
 				nextTableRule.Dst = dst
 				nextTableRule.Table = 502
 				nextTableRule.IifName = testNextTableIifs[0]
-				nextTableRule.Priority = config.RouteLeakRulePriority(prefixLength, test.bits, config.RouteLeakNextTable)
+				nextTableRule.Priority = config.RouteLeakNextTableLookupPriority(prefixLength, test.bits)
 				ops.rules[test.family] = append(ops.rules[test.family], *ribGroupRule, *nextTableRule)
 			}
 

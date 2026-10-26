@@ -22,6 +22,8 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // sanitizeFRRValue strips ASCII control characters — the C0 set
@@ -223,11 +225,7 @@ func validFRRRoutePrefix(s string) bool {
 // gateway slot has no zone syntax, so emitting one would fail the reload
 // (#9820 GLM-F2 — belt and gate must agree).
 func validFRRNextHopAddress(s string) bool {
-	a, err := netip.ParseAddr(s)
-	if err != nil {
-		return false
-	}
-	return a.Zone() == ""
+	return config.FRRNextHopAddressOperand(s)
 }
 
 // validFRRInterfaceOperand reports whether an interface name is renderable as a
@@ -244,15 +242,7 @@ func validFRRNextHopAddress(s string) bool {
 // interface names would drop working routes on any naming scheme this tree has
 // not seen, and the defect is about token COUNT.
 func validFRRInterfaceOperand(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] <= 0x20 || s[i] == 0x7f {
-			return false
-		}
-	}
-	return true
+	return config.FRRInterfaceOperand(s)
 }
 
 // validBGPNeighborAddress reports whether a BGP neighbor identity is a bare

@@ -100,7 +100,11 @@ pub(in crate::afxdp) fn canonical_route_table(table: &str, is_ipv6: bool) -> Cow
 /// names. Canonicalize those targets once during FIB construction; live
 /// ip-rule snapshots already carry the qualified spelling.
 pub(in crate::afxdp) fn canonical_next_table(table: &str, is_ipv6: bool) -> Cow<'_, str> {
-    if table == DEFAULT_V4_TABLE || table == DEFAULT_V6_TABLE || table.ends_with(".inet.0") || table.ends_with(".inet6.0") {
+    if table == DEFAULT_V4_TABLE
+        || table == DEFAULT_V6_TABLE
+        || table.ends_with(".inet.0")
+        || table.ends_with(".inet6.0")
+    {
         return canonical_route_table(table, is_ipv6);
     }
     if table.is_empty() {
@@ -675,6 +679,7 @@ fn lookup_forwarding_resolution_v4_suppressing(
         table,
         depth,
         true,
+        false,
         allow_tunnels,
         ecmp_flow_hash,
         suppress_nat_local,
@@ -851,6 +856,7 @@ fn try_deferred_leaks_v4(
             next_table_name.as_ref(),
             depth + 1,
             false,
+            true,
             allow_tunnels,
             ecmp_flow_hash,
             suppress_nat_local,
@@ -896,6 +902,7 @@ fn try_deferred_leaks_v6(
             next_table_name.as_ref(),
             depth + 1,
             false,
+            true,
             allow_tunnels,
             ecmp_flow_hash,
             suppress_nat_local,
@@ -1032,9 +1039,18 @@ fn local_delivery_resolution_v6_suppressing(
             // Anycast network address on a peer-owned prefix: accept only
             // when ip is exactly that prefix's network address.
             for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
-                let instance = state.ifindex_to_routing_instance.get(ifindex).map(String::as_str).unwrap_or("");
-                if !instance_owns_table_v6(instance, table) { continue; }
-                if prefixes.iter().any(|p| (1..127).contains(&p.prefix_len()) && p.addr() == ip) {
+                let instance = state
+                    .ifindex_to_routing_instance
+                    .get(ifindex)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if !instance_owns_table_v6(instance, table) {
+                    continue;
+                }
+                if prefixes
+                    .iter()
+                    .any(|p| (1..127).contains(&p.prefix_len()) && p.addr() == ip)
+                {
                     found = Some(*ifindex);
                     break;
                 }
@@ -1068,19 +1084,20 @@ fn lookup_forwarding_resolution_v4_inner(
     table: &str,
     depth: usize,
     evaluate_leaks: bool,
+    include_interface_nat_owner: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
     suppress_nat_local: Option<IpAddr>,
 ) -> ForwardingLookupResult {
     // Per-table local entries retain their existing priority. Interface-NAT
-    // ownership is admitted only for leak-target walks (`!evaluate_leaks`);
-    // the ordinary source-table lookup leaves it to the session-miss gate.
+    // ownership is admitted only for leak-target walks; it is independent of
+    // whether this invocation evaluates the leak-rule stage.
     // Both outcomes precede the depth guard.
     if let Some(resolution) = local_delivery_resolution_v4_suppressing(
         state,
         ip,
         table,
-        !evaluate_leaks,
+        include_interface_nat_owner,
         suppress_nat_local,
     ) {
         return selected_route_lookup_result(state, table, resolution);
@@ -1102,21 +1119,42 @@ fn lookup_forwarding_resolution_v4_inner(
         });
     }
     if evaluate_leaks {
-        // #9955: stage one is the kernel's priority-ordered ip-rule walk. A
-        // matching leak whose target table has no route is a miss, not a
-        // terminal NoRoute; continue to the next leak and then to this
-        // table's LPM stage. The target call disables this stage: an ip-rule
-        // action performs LPM in its selected table and does not restart the
-        // rule list.
-        // #16799: deferred (post_table) rib-group returns are skipped here;
-        // in the kernel they sit at (1000, 2000), AFTER the l3mdev lookup
-        // of the source VRF table at 1000, so they run only on a source
-        // miss (see the tail of this function).
+        // #9955: kernel-model leaks and config-authored next-table routes
+        // share the prefix-derived priority sequence. A kernel-model target
+        // miss continues to the next rule; a winning config next-table miss
+        // is terminal (Junos default reject).
+        // #16799: deferred (post_table) rib-group returns remain after the
+        // source-table lookup and run only on a source miss.
+        let mut config_next_table = junos_next_table_winner_v4(state, ip, table);
         if let Some(leaks) = state.leak_rules_v4.get(table) {
             for leak in leaks
                 .iter()
                 .filter(|leak| !leak.post_table && leak.prefix.contains(ip))
             {
+                if config_next_table
+                    .as_ref()
+                    .is_some_and(|(priority, winner)| match winner {
+                        JunosNextTable::SourceTable { prefix_len } => {
+                            *prefix_len >= leak.prefix.prefix_len()
+                        }
+                        _ => *priority <= leak.rule_priority,
+                    })
+                {
+                    let (_, winner) = config_next_table
+                        .take()
+                        .expect("the next-table candidate was checked above");
+                    return resolve_junos_next_table_v4(
+                        state,
+                        dynamic_neighbors,
+                        ip,
+                        table,
+                        winner,
+                        depth,
+                        allow_tunnels,
+                        ecmp_flow_hash,
+                        suppress_nat_local,
+                    );
+                }
                 let next_table_name = canonical_next_table(&leak.next_table, false);
                 if !table_has_v4_route_suppressing(
                     state,
@@ -1127,11 +1165,8 @@ fn lookup_forwarding_resolution_v4_inner(
                 ) {
                     continue;
                 }
-                // #14319: a precheck-admitted target can still resolve to
-                // NoRoute (e.g. its only route is a tunnel route the caller
-                // forbade, filtered inside the target LPM). That is the
-                // same miss as a precheck failure — continue to the next
-                // leak and then to this table's LPM, never terminal.
+                // #14319: a recursive NoRoute is a miss, so continue to the
+                // next leak and then to the next priority-ordered candidate.
                 let resolved = lookup_forwarding_resolution_v4_inner(
                     state,
                     dynamic_neighbors,
@@ -1139,6 +1174,7 @@ fn lookup_forwarding_resolution_v4_inner(
                     next_table_name.as_ref(),
                     depth + 1,
                     false,
+                    true,
                     allow_tunnels,
                     ecmp_flow_hash,
                     suppress_nat_local,
@@ -1149,37 +1185,18 @@ fn lookup_forwarding_resolution_v4_inner(
                 return resolved;
             }
         }
-    }
-    // #16614: a config next-table route that wins this table's LPM hands
-    // the lookup to its target table. Unlike the kernel-model stage
-    // above, a target miss is TERMINAL (RejectRoute, the Junos default
-    // reject at the end of the target forwarding table): it must not
-    // fall through to a less-specific route in this table (typically
-    // the WAN default). Only the source-table entry lookup
-    // (evaluate_leaks) competes this way; a leak-target walk
-    // (!evaluate_leaks) performs plain LPM in the selected table.
-    if evaluate_leaks {
-        if let Some(winner) = junos_next_table_winner_v4(state, ip, table) {
-            match winner {
-                JunosNextTable::Terminal => return reject_route_lookup_result(),
-                JunosNextTable::HandOff(next_table) => {
-                    let resolved = lookup_forwarding_resolution_v4_inner(
-                        state,
-                        dynamic_neighbors,
-                        ip,
-                        next_table.as_ref(),
-                        depth + 1,
-                        false,
-                        allow_tunnels,
-                        ecmp_flow_hash,
-                        suppress_nat_local,
-                    );
-                    if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
-                        return reject_route_lookup_result();
-                    }
-                    return resolved;
-                }
-            }
+        if let Some((_, winner)) = config_next_table {
+            return resolve_junos_next_table_v4(
+                state,
+                dynamic_neighbors,
+                ip,
+                table,
+                winner,
+                depth,
+                allow_tunnels,
+                ecmp_flow_hash,
+                suppress_nat_local,
+            );
         }
     }
     // #16799: capture whether the source table owns `ip` BEFORE consuming
@@ -1187,8 +1204,8 @@ fn lookup_forwarding_resolution_v4_inner(
     // returns while any source-owned outcome (forward, discard/reject,
     // MissingNeighbor via a selected member) stays authoritative — as
     // the kernel's l3mdev lookup result is before the return rules.
-    let source_owns_v4 = evaluate_leaks
-        && source_table_owns_v4(state, ip, table, allow_tunnels, suppress_nat_local);
+    let source_owns_v4 =
+        evaluate_leaks && source_table_owns_v4(state, ip, table, allow_tunnels, suppress_nat_local);
     let result = match select_v4_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV4::Connected {
             ifindex,
@@ -1429,6 +1446,7 @@ fn lookup_forwarding_resolution_v6_suppressing(
         table,
         depth,
         true,
+        false,
         allow_tunnels,
         ecmp_flow_hash,
         suppress_nat_local,
@@ -1504,6 +1522,7 @@ fn lookup_forwarding_resolution_v6_inner(
     table: &str,
     depth: usize,
     evaluate_leaks: bool,
+    include_interface_nat_owner: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
     suppress_nat_local: Option<IpAddr>,
@@ -1512,7 +1531,7 @@ fn lookup_forwarding_resolution_v6_inner(
         state,
         ip,
         table,
-        !evaluate_leaks,
+        include_interface_nat_owner,
         suppress_nat_local,
     ) {
         return selected_route_lookup_result(state, table, resolution);
@@ -1534,16 +1553,41 @@ fn lookup_forwarding_resolution_v6_inner(
         });
     }
     if evaluate_leaks {
-        // #9955: perform the rule stage once. The target lookup disables
-        // `evaluate_leaks`, so a target-table miss resumes this same rule
-        // list rather than restarting it from the selected table.
-        // #16799: deferred (post_table) returns are skipped here and run
-        // only on a source miss (see the tail; v4 twin).
+        // #9955: merge kernel-model rules and config-authored next-table
+        // routes by their shared priority. Kernel-model target misses
+        // continue; a winning config next-table target miss is terminal.
+        // #16799: deferred (post_table) returns remain after the source
+        // lookup and run only on a source miss.
+        let mut config_next_table = junos_next_table_winner_v6(state, ip, table);
         if let Some(leaks) = state.leak_rules_v6.get(table) {
             for leak in leaks
                 .iter()
                 .filter(|leak| !leak.post_table && leak.prefix.contains(ip))
             {
+                if config_next_table
+                    .as_ref()
+                    .is_some_and(|(priority, winner)| match winner {
+                        JunosNextTable::SourceTable { prefix_len } => {
+                            *prefix_len >= leak.prefix.prefix_len()
+                        }
+                        _ => *priority <= leak.rule_priority,
+                    })
+                {
+                    let (_, winner) = config_next_table
+                        .take()
+                        .expect("the next-table candidate was checked above");
+                    return resolve_junos_next_table_v6(
+                        state,
+                        dynamic_neighbors,
+                        ip,
+                        table,
+                        winner,
+                        depth,
+                        allow_tunnels,
+                        ecmp_flow_hash,
+                        suppress_nat_local,
+                    );
+                }
                 let next_table_name = canonical_next_table(&leak.next_table, true);
                 if !table_has_v6_route_suppressing(
                     state,
@@ -1554,8 +1598,6 @@ fn lookup_forwarding_resolution_v6_inner(
                 ) {
                     continue;
                 }
-                // #14319: see the v4 twin — a recursive NoRoute is a miss,
-                // not a terminal result.
                 let resolved = lookup_forwarding_resolution_v6_inner(
                     state,
                     dynamic_neighbors,
@@ -1563,6 +1605,7 @@ fn lookup_forwarding_resolution_v6_inner(
                     next_table_name.as_ref(),
                     depth + 1,
                     false,
+                    true,
                     allow_tunnels,
                     ecmp_flow_hash,
                     suppress_nat_local,
@@ -1573,36 +1616,23 @@ fn lookup_forwarding_resolution_v6_inner(
                 return resolved;
             }
         }
-    }
-    // #16614: v4 twin — a winning config next-table route hands off
-    // terminally; a target miss is RejectRoute, never a fall-through.
-    if evaluate_leaks {
-        if let Some(winner) = junos_next_table_winner_v6(state, ip, table) {
-            match winner {
-                JunosNextTable::Terminal => return reject_route_lookup_result(),
-                JunosNextTable::HandOff(next_table) => {
-                    let resolved = lookup_forwarding_resolution_v6_inner(
-                        state,
-                        dynamic_neighbors,
-                        ip,
-                        next_table.as_ref(),
-                        depth + 1,
-                        false,
-                        allow_tunnels,
-                        ecmp_flow_hash,
-                        suppress_nat_local,
-                    );
-                    if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
-                        return reject_route_lookup_result();
-                    }
-                    return resolved;
-                }
-            }
+        if let Some((_, winner)) = config_next_table {
+            return resolve_junos_next_table_v6(
+                state,
+                dynamic_neighbors,
+                ip,
+                table,
+                winner,
+                depth,
+                allow_tunnels,
+                ecmp_flow_hash,
+                suppress_nat_local,
+            );
         }
     }
     // #16799: v4 twin — source ownership gates the deferred tail.
-    let source_owns_v6 = evaluate_leaks
-        && source_table_owns_v6(state, ip, table, allow_tunnels, suppress_nat_local);
+    let source_owns_v6 =
+        evaluate_leaks && source_table_owns_v6(state, ip, table, allow_tunnels, suppress_nat_local);
     let result = match select_v6_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV6::Connected {
             ifindex,
@@ -1851,58 +1881,63 @@ enum JunosNextTable {
     /// The selected route is itself a next-table route whose target is
     /// unusable (empty): terminal, never a fall-through.
     Terminal,
+    /// The main-table LPM selected a configured ordinary/terminal route
+    /// more specific than this next-table candidate. Keep its prefix so it
+    /// can compete with more-specific kernel leaks before source lookup.
+    SourceTable { prefix_len: u8 },
 }
 
-/// #16614: if the LPM winner in `table` is a config next-table route,
-/// return its hand-off. Ordinary and kernel-model rows return None and
-/// keep their existing selection path bit-identically. Connected wins
-/// inside `select_*_route` at >= prefix length suppress the hand-off,
-/// mirroring connected-beats-static in one Junos table.
+/// #17684: merge configured next-table rules with the main-table LPM result.
+/// A more-specific ordinary/discard/reject main row participates only when a
+/// matching configured next-table route is broader—the same condition under
+/// which Go emits its slot-0 static exception. Kernel-model rib-group-only
+/// rules retain lookup-first behavior; their main-route parity is outside this
+/// bounded exception mechanism.
 fn junos_next_table_winner_v4(
     state: &ForwardingState,
     ip: Ipv4Addr,
     table: &str,
-) -> Option<JunosNextTable> {
+) -> Option<(u32, JunosNextTable)> {
     let routes = state.routes_v4.get(table)?;
-    // routes_v4 is sorted longest-prefix first, then preference
-    // (sort_routes); the first containing next-table-route row at the
-    // winning length/preference is the Junos winner. A longer ordinary
-    // route wins outright, so stop at the first containing row whose
-    // length is the maximum containing length.
     let mut best_len: Option<u8> = None;
     for route in routes {
-        if !route.prefix.contains(ip) {
+        if !route.prefix.contains(ip) || (!route.next_table_route && !route.next_table.is_empty()) {
             continue;
         }
         let len = route.prefix.prefix_len();
-        if best_len.is_some_and(|b| len < b) {
+        if best_len.is_some_and(|best| len < best) {
             break;
         }
         if best_len.is_none() {
-            // First containing row fixes the winning length; a connected
-            // prefix at >= this length wins inside select_v4_route.
-            if state
-                .connected_v4
-                .iter()
-                .any(|c| c.table == table && c.prefix.contains(ip) && c.prefix.prefix_len() >= len)
-            {
+            if state.connected_v4.iter().any(|connected| {
+                connected.table == table
+                    && connected.prefix.contains(ip)
+                    && connected.prefix.prefix_len() >= len
+            }) {
                 return None;
             }
             best_len = Some(len);
         }
         if route.next_table_route {
             if route.next_table.is_empty() {
-                return Some(JunosNextTable::Terminal);
+                return Some((route.rule_priority, JunosNextTable::Terminal));
             }
-            return Some(JunosNextTable::HandOff(route.next_table.clone()));
+            return Some((
+                route.rule_priority,
+                JunosNextTable::HandOff(route.next_table.clone()),
+            ));
         }
-        // An ordinary/discard/reject row at the winning length with a
-        // better-or-equal preference sorting first wins; but rows are
-        // preference-sorted only within equal length, and the first
-        // containing row is already the best preference at this length.
-        // Any later next-table row at the same length has worse
-        // preference, so the ordinary winner stands.
-        return None;
+        let more_specific_than_config = routes.iter().any(|candidate| {
+            candidate.next_table_route
+                && candidate.prefix.contains(ip)
+                && candidate.prefix.prefix_len() < len
+        });
+        if more_specific_than_config {
+            return Some((
+                route.rule_priority,
+                JunosNextTable::SourceTable { prefix_len: len },
+            ));
+        }
     }
     None
 }
@@ -1911,36 +1946,143 @@ fn junos_next_table_winner_v6(
     state: &ForwardingState,
     ip: Ipv6Addr,
     table: &str,
-) -> Option<JunosNextTable> {
+) -> Option<(u32, JunosNextTable)> {
     let routes = state.routes_v6.get(table)?;
     let mut best_len: Option<u8> = None;
     for route in routes {
-        if !route.prefix.contains(ip) {
+        if !route.prefix.contains(ip) || (!route.next_table_route && !route.next_table.is_empty()) {
             continue;
         }
         let len = route.prefix.prefix_len();
-        if best_len.is_some_and(|b| len < b) {
+        if best_len.is_some_and(|best| len < best) {
             break;
         }
         if best_len.is_none() {
-            if state
-                .connected_v6
-                .iter()
-                .any(|c| c.table == table && c.prefix.contains(ip) && c.prefix.prefix_len() >= len)
-            {
+            if state.connected_v6.iter().any(|connected| {
+                connected.table == table
+                    && connected.prefix.contains(ip)
+                    && connected.prefix.prefix_len() >= len
+            }) {
                 return None;
             }
             best_len = Some(len);
         }
         if route.next_table_route {
             if route.next_table.is_empty() {
-                return Some(JunosNextTable::Terminal);
+                return Some((route.rule_priority, JunosNextTable::Terminal));
             }
-            return Some(JunosNextTable::HandOff(route.next_table.clone()));
+            return Some((
+                route.rule_priority,
+                JunosNextTable::HandOff(route.next_table.clone()),
+            ));
         }
-        return None;
+        let more_specific_than_config = routes.iter().any(|candidate| {
+            candidate.next_table_route
+                && candidate.prefix.contains(ip)
+                && candidate.prefix.prefix_len() < len
+        });
+        if more_specific_than_config {
+            return Some((
+                route.rule_priority,
+                JunosNextTable::SourceTable { prefix_len: len },
+            ));
+        }
     }
     None
+}
+
+fn resolve_junos_next_table_v4(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    ip: Ipv4Addr,
+    table: &str,
+    winner: JunosNextTable,
+    depth: usize,
+    allow_tunnels: bool,
+    ecmp_flow_hash: Option<u64>,
+    suppress_nat_local: Option<IpAddr>,
+) -> ForwardingLookupResult {
+    match winner {
+        JunosNextTable::Terminal => reject_route_lookup_result(),
+        JunosNextTable::HandOff(next_table) => {
+            let resolved = lookup_forwarding_resolution_v4_inner(
+                state,
+                dynamic_neighbors,
+                ip,
+                next_table.as_ref(),
+                depth + 1,
+                false,
+                true,
+                allow_tunnels,
+                ecmp_flow_hash,
+                suppress_nat_local,
+            );
+            if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+                reject_route_lookup_result()
+            } else {
+                resolved
+            }
+        }
+        JunosNextTable::SourceTable { .. } => lookup_forwarding_resolution_v4_inner(
+            state,
+            dynamic_neighbors,
+            ip,
+            table,
+            depth,
+            false,
+            false,
+            allow_tunnels,
+            ecmp_flow_hash,
+            suppress_nat_local,
+        ),
+    }
+}
+
+fn resolve_junos_next_table_v6(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    ip: Ipv6Addr,
+    table: &str,
+    winner: JunosNextTable,
+    depth: usize,
+    allow_tunnels: bool,
+    ecmp_flow_hash: Option<u64>,
+    suppress_nat_local: Option<IpAddr>,
+) -> ForwardingLookupResult {
+    match winner {
+        JunosNextTable::Terminal => reject_route_lookup_result(),
+        JunosNextTable::HandOff(next_table) => {
+            let resolved = lookup_forwarding_resolution_v6_inner(
+                state,
+                dynamic_neighbors,
+                ip,
+                next_table.as_ref(),
+                depth + 1,
+                false,
+                true,
+                allow_tunnels,
+                ecmp_flow_hash,
+                suppress_nat_local,
+            );
+            if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+                reject_route_lookup_result()
+            } else {
+                resolved
+            }
+        }
+        JunosNextTable::SourceTable { .. } => lookup_forwarding_resolution_v6_inner(
+            state,
+            dynamic_neighbors,
+            ip,
+            table,
+            depth,
+            false,
+            false,
+            allow_tunnels,
+            ecmp_flow_hash,
+            suppress_nat_local,
+        ),
+    }
 }
 
 fn reject_route_lookup_result() -> ForwardingLookupResult {
@@ -2422,33 +2564,27 @@ fn table_has_cluster_terminal_v6(state: &ForwardingState, table: &str) -> bool {
 /// discard whenever some UNRELATED prefix in the table was owed.
 /// "Same prefix" is exact (prefix + ifindex + table): a transit row
 /// for the identical prefix proves that prefix was republished.
-fn connected_win_republication_owed_v4(
-    state: &ForwardingState,
-    table: &str,
-    ip: Ipv4Addr,
-) -> bool {
+fn connected_win_republication_owed_v4(state: &ForwardingState, table: &str, ip: Ipv4Addr) -> bool {
     let ifindex = connected_lpm_ifindex_v4(state, ip, table);
     if ifindex <= 0 {
         return false;
     }
-    !state.connected_v4.iter().any(|entry| {
-        entry.table == table && entry.ifindex == ifindex && entry.prefix.contains(ip)
-    })
+    !state
+        .connected_v4
+        .iter()
+        .any(|entry| entry.table == table && entry.ifindex == ifindex && entry.prefix.contains(ip))
 }
 
 /// #16217 (fold B3): v6 twin of `connected_win_republication_owed_v4`.
-fn connected_win_republication_owed_v6(
-    state: &ForwardingState,
-    table: &str,
-    ip: Ipv6Addr,
-) -> bool {
+fn connected_win_republication_owed_v6(state: &ForwardingState, table: &str, ip: Ipv6Addr) -> bool {
     let ifindex = connected_lpm_ifindex_v6(state, ip, table);
     if ifindex <= 0 {
         return false;
     }
-    !state.connected_v6.iter().any(|entry| {
-        entry.table == table && entry.ifindex == ifindex && entry.prefix.contains(ip)
-    })
+    !state
+        .connected_v6
+        .iter()
+        .any(|entry| entry.table == table && entry.ifindex == ifindex && entry.prefix.contains(ip))
 }
 
 fn select_v6_route<'a>(
@@ -2633,9 +2769,7 @@ fn ecmp_candidate_id_v6(candidate: &RouteNextHopV6) -> u64 {
             let identity = ecmp_hash_bytes(identity ^ 0x4e48_0000_0000_0001);
             let identity =
                 ecmp_hash_bytes(identity ^ ecmp_hash_bytes(bits as u64 ^ 0x4c4f_0000_0000_0004));
-            ecmp_hash_bytes(
-                identity ^ ecmp_hash_bytes((bits >> 64) as u64 ^ 0x4849_0000_0000_0005),
-            )
+            ecmp_hash_bytes(identity ^ ecmp_hash_bytes((bits >> 64) as u64 ^ 0x4849_0000_0000_0005))
         }
         None => ecmp_hash_bytes(identity ^ 0x4e48_0000_0000_0000),
     };

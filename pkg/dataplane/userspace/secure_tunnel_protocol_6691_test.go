@@ -41,7 +41,7 @@ const preSecureTunnelProtocolVersion = 4
 // the Go and Rust helpers. It moves with every incompatible protocol change;
 // the secure-tunnel feature's immutable compatibility floor is independently
 // recorded as MinProtocolSecureTunnelRefusal.
-const secureTunnelSnapshotProtocolVersion = 75 // #16877 adds provenance-bearing persistent-lease sync frames
+const secureTunnelSnapshotProtocolVersion = 76 // #17684 changes next-table RulePriority semantics
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

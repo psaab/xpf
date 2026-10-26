@@ -92,7 +92,7 @@ func TestBuildRouteSnapshotsIngestsRouteLeakBandRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPriority := config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable)
+	wantPriority := config.RouteLeakNextTableLookupPriority(24, 32)
 	ruleListFn = func(family int) ([]netlink.Rule, error) {
 		if family == syscall.AF_INET {
 			// Next-table leak rule: pure per-prefix Dst, no selectors.

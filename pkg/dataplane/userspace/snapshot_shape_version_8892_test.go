@@ -640,7 +640,8 @@ const (
 	// v73 (#16614) and v74 (#16841) change helper-visible semantics
 	// without adding snapshot fields. v75 (#16877) changes the idle-lease
 	// control wire but not the snapshot shape; the protocol pin still moves.
-	snapshotShapeVersion8892 = 75
+	// v76 (#17684) changes RulePriority semantics only; the shape is stable.
+	snapshotShapeVersion8892 = 76
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
