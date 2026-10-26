@@ -591,7 +591,21 @@ For each PR an agent opens:
    tool, each explicitly requesting a distinct model from the pool
    (Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro),
    worktree-scoped, READ-ONLY (reviewers never write to the PR; they
-   return their verdict to the parent). Brief template (fill per
+   return their verdict to the parent). **Pool rotation (user
+   directive 2026-10-26): the named pool models have dedicated
+   reviewer agent types (res-camp-astra, res-camp-glm,
+   res-camp-opus); Kimi K3.1 Pro has none, so request it explicitly
+   via the task model field (`model: "kimi-k3.1-pro"` or the
+   runner's closest Kimi id) and record the ACTUAL runtime model
+   the result reports. Every PR's triple MUST include Kimi in
+   rotation: across any 3 consecutive PR triples, each pool model
+   serves at least once and no model serves all three triples.
+   Generic `task` agents that silently run the parent's default
+   model (muse-wonder) do NOT count as a named pool model — label
+   them Muse Wonder in the stamp. If Kimi is quota-blocked or
+   unreachable, swap in the next pool model the same tick and note
+   the swap on the PR (never silently relabel, never waive).
+   Brief template (fill per
    PR): "You are a hostile domain-expert reviewer (HPC networking /
    OS / CPU / protocols; xpf is an eBPF firewall with a userspace
    AF_XDP Rust dataplane). Review PR #<n> at head <SHA> in
