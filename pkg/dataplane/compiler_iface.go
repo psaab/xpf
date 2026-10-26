@@ -1768,8 +1768,11 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 		// For physical members with a RedundantParent, merge the parent
 		// reth's config (addresses, VLANs, redundancy group).
 		effectiveCfg := ifCfg
+		effectiveIfName := ifName
 		isVRRPReth := false
 		if ifCfg.RedundantParent != "" {
+			// Zone refs to VLAN units use the redundant-parent name.
+			effectiveIfName = ifCfg.RedundantParent
 			if rethCfg, ok := cfg.Interfaces.Interfaces[ifCfg.RedundantParent]; ok && rethCfg != nil {
 				effectiveCfg = rethCfg
 				isVRRPReth = rethCfg.RedundancyGroup > 0 && clusterNodeID >= 0
@@ -1927,7 +1930,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 			// addresses of untagged units (#16795, untaggedUnitAddresses),
 			// which planPhysDesired installs on this device.
 			parentAddrs := vlanParentVRRPSource(effectiveCfg, isVRRPReth, clusterNodeID)
-			if own := untaggedUnitAddressesFor(cfg, ifName, linuxName, effectiveCfg, isVRRPReth, physPlans, zonedUntaggedUnits(cfg, ifName, effectiveCfg)); len(own) > 0 {
+			if own := untaggedUnitAddressesFor(cfg, effectiveIfName, linuxName, effectiveCfg, isVRRPReth, physPlans, zonedUntaggedUnits(cfg, effectiveIfName, effectiveCfg)); len(own) > 0 {
 				parentAddrs = append(parentAddrs, own...)
 			}
 			if !seen[linuxName] {
