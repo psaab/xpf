@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/frr"
 )
 
 // #16810 render belt: a leniently loaded cluster config with ONE
@@ -127,7 +129,72 @@ func TestSingleRGSharedOSPFUnaffected16810(t *testing.T) {
 // FAIL-ON-REVERT: removing the peer-identity exemption makes node1
 // withhold each multi-RG IGP despite strict per-node compilation passing.
 func TestSplitDistinctNodeIGPIdentitiesKeepBothRGOwners17874(t *testing.T) {
-	const source = `groups {
+	stores, configs := igpSplitStores17874(t, true)
+	for nodeID, want := range map[int]string{0: "reth0.0", 1: "reth1.0"} {
+		d := igpSplitDaemon17874(nodeID, configs[nodeID], stores[nodeID])
+		fc := d.assembleFRRConfigForActiveConfig(configs[nodeID], nil)
+		assertSplitIGP17874(t, nodeID, fc, want)
+	}
+}
+
+// Same active-tree identity on both peers keeps the existing one-participant
+// behavior: only the lowest spanning RG owner runs each IGP.
+func TestSplitSharedActiveNodeIGPIdentitiesKeepOnlyLowestRG17874(t *testing.T) {
+	stores, configs := igpSplitStores17874(t, false)
+	for nodeID, want := range map[int]string{0: "reth0.0", 1: ""} {
+		d := igpSplitDaemon17874(nodeID, configs[nodeID], stores[nodeID])
+		fc := d.assembleFRRConfigForActiveConfig(configs[nodeID], nil)
+		assertSplitIGP17874(t, nodeID, fc, want)
+	}
+}
+
+// An arbitrary render config must not borrow a distinct peer identity from a
+// different active tree: callers without active-tree provenance stay
+// conservative.
+func TestSplitUnrelatedRenderConfigCannotUsePeerIGPIdentity17874(t *testing.T) {
+	distinctStores, _ := igpSplitStores17874(t, true)
+	_, sharedConfigs := igpSplitStores17874(t, false)
+	d := igpSplitDaemon17874(1, sharedConfigs[1], distinctStores[1])
+	fc := d.assembleFRRConfig(sharedConfigs[1], nil)
+	assertSplitIGP17874(t, 1, fc, "")
+}
+
+func igpSplitStores17874(t *testing.T, distinct bool) ([]*configstore.Store, []*config.Config) {
+	t.Helper()
+	source := splitNodeIGPConfig17874()
+	if !distinct {
+		source = strings.ReplaceAll(source, "10.0.0.2", "10.0.0.1")
+		source = strings.ReplaceAll(source, "49.0001.0100.0000.0002.00", "49.0001.0100.0000.0001.00")
+	}
+	stores := make([]*configstore.Store, 2)
+	configs := make([]*config.Config, 2)
+	for nodeID := range 2 {
+		store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+		if err != nil {
+			t.Fatalf("node%d configstore.New: %v", nodeID, err)
+		}
+		store.SetNodeID(nodeID)
+		cfg, err := store.SyncApply(source, nil)
+		if err != nil {
+			t.Fatalf("node%d SyncApply: %v", nodeID, err)
+		}
+		if cfg.Chassis.Cluster == nil || cfg.Chassis.Cluster.NodeID != nodeID {
+			t.Fatalf("node%d compile: Cluster=%+v", nodeID, cfg.Chassis.Cluster)
+		}
+		_, compileErr := config.CompileConfigForNode(store.ActiveTree(), nodeID)
+		if distinct && compileErr != nil {
+			t.Fatalf("node%d strict compile rejected distinct identities: %v", nodeID, compileErr)
+		}
+		if !distinct && compileErr == nil {
+			t.Fatalf("node%d strict compile accepted shared identities; want rejection", nodeID)
+		}
+		stores[nodeID], configs[nodeID] = store, cfg
+	}
+	return stores, configs
+}
+
+func splitNodeIGPConfig17874() string {
+	return `groups {
   node0 {
     chassis { cluster { node 0; } }
     protocols {
@@ -178,50 +245,41 @@ protocols {
   isis { interface reth0.0; interface reth1.0; }
 }
 `
-	stores := make([]*configstore.Store, 2)
-	configs := make([]*config.Config, 2)
-	for nodeID := range 2 {
-		store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
-		if err != nil {
-			t.Fatalf("node%d configstore.New: %v", nodeID, err)
-		}
-		store.SetNodeID(nodeID)
-		cfg, err := store.SyncApply(source, nil)
-		if err != nil {
-			t.Fatalf("node%d SyncApply: %v", nodeID, err)
-		}
-		if _, err := config.CompileConfigForNode(store.ActiveTree(), nodeID); err != nil {
-			t.Fatalf("node%d strict compile rejected distinct identities: %v", nodeID, err)
-		}
-		stores[nodeID], configs[nodeID] = store, cfg
+}
+
+func igpSplitDaemon17874(nodeID int, cfg *config.Config, store *configstore.Store) *Daemon {
+	rg1, rg2 := cluster.StateSecondary, cluster.StatePrimary
+	if nodeID == 0 {
+		rg1, rg2 = cluster.StatePrimary, cluster.StateSecondary
 	}
+	manager := cluster.NewManager(nodeID, 1)
+	manager.UpdateConfig(cfg.Chassis.Cluster)
+	manager.SetGroupStateForTesting(0, cluster.StatePrimary)
+	manager.SetGroupStateForTesting(1, rg1)
+	manager.SetGroupStateForTesting(2, rg2)
+	return &Daemon{cluster: manager, store: store}
+}
 
-	for nodeID, want := range map[int]string{0: "reth0.0", 1: "reth1.0"} {
-		rg1, rg2 := cluster.StateSecondary, cluster.StatePrimary
-		if nodeID == 0 {
-			rg1, rg2 = cluster.StatePrimary, cluster.StateSecondary
+func assertSplitIGP17874(t *testing.T, nodeID int, fc *frr.FullConfig, want string) {
+	t.Helper()
+	if fc == nil {
+		t.Fatalf("node%d FRR config is nil", nodeID)
+	}
+	check := func(protocol string, got []string) {
+		t.Helper()
+		if want == "" {
+			if len(got) != 0 {
+				t.Errorf("node%d %s interfaces = %v, want withheld", nodeID, protocol, got)
+			}
+			return
 		}
-		manager := cluster.NewManager(nodeID, 1)
-		manager.UpdateConfig(configs[nodeID].Chassis.Cluster)
-		manager.SetGroupStateForTesting(0, cluster.StatePrimary)
-		manager.SetGroupStateForTesting(1, rg1)
-		manager.SetGroupStateForTesting(2, rg2)
-		d := &Daemon{cluster: manager, store: stores[nodeID]}
-		fc := d.assembleFRRConfig(configs[nodeID], nil)
-
-		ospfNames := ospfIfaceNames17874(fc.OSPF)
-		if len(ospfNames) != 1 || ospfNames[0] != want {
-			t.Errorf("node%d OSPF interfaces = %v, want [%s]", nodeID, ospfNames, want)
-		}
-		ospf3Names := ospf3IfaceNames17874(fc.OSPFv3)
-		if len(ospf3Names) != 1 || ospf3Names[0] != want {
-			t.Errorf("node%d OSPFv3 interfaces = %v, want [%s]", nodeID, ospf3Names, want)
-		}
-		isisNames := isisIfaceNames17874(fc.ISIS)
-		if len(isisNames) != 1 || isisNames[0] != want {
-			t.Errorf("node%d IS-IS interfaces = %v, want [%s]", nodeID, isisNames, want)
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("node%d %s interfaces = %v, want [%s]", nodeID, protocol, got, want)
 		}
 	}
+	check("OSPF", ospfIfaceNames17874(fc.OSPF))
+	check("OSPFv3", ospf3IfaceNames17874(fc.OSPFv3))
+	check("IS-IS", isisIfaceNames17874(fc.ISIS))
 }
 
 func ospfIfaceNames17874(ospf *config.OSPFConfig) []string {
