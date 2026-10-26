@@ -42,16 +42,32 @@ driveable work remains.
   summary line and the parent's appended lane table both carry the
   live count vs cap (`agents=<n>/<2*nproc-6>`) so a breach is
   visible at the next keeper tick instead of only in hindsight.
-- **Keep lanes full, parallelism high**: never let engineer or reviewer lanes
-  idle while driveable work exists. Reap idle/dead agents and refill from the
-  lowest-number queue. Parent does folds/small fixes inline when faster than
-  dispatching. A dedicated **keeper/monitor agent** (see "The keeper"
-  below) watches issue parallelism AND PR parallelism separately and
-  alerts the parent; the PARENT alone reaps and refills lanes (single
-  dispatch authority — keeper never dispatches). Always keep reserve
-  capacity for (a) landing PRs and (b) researching new issues/findings
-  from other LLMs — a review verdict or a new finding must never wait
-  for a free lane.
+- **Keep lanes full, parallelism high (measurable, enforced)**:
+  never let engineer or reviewer lanes idle while driveable work
+  exists. The invariant is a NUMBER, checked at every parent action
+  and every keeper tick: `live campaign agents == min(cap,
+  driveable work)` where cap is `2*nproc - 6` above. If
+  live < that number while either queue has unassigned driveable
+  work, the campaign is UNDER-FILLED — a campaign failure on the
+  same level as an unactioned verdict, recorded in one
+  `agents=<live>/<cap> driveable=<n>` line on the tracking task.
+  Refill SLA: when a task completes (or is confirmed dead), the
+  parent dispatches its replacement in the SAME turn the
+  completion is processed — never at the next keeper tick, never
+  after a summary. Mix at full fill, PR work first: (1) stamped
+  triple reviewers for every PR at a reviewable head, (2) gate
+  runners for gated PRs (see the three-cluster cadence below),
+  (3) engineers/researchers on the lowest-numbered driveable
+  issues in band order. Reserve capacity is not idle capacity:
+  the 6 reserved slots are the reserve; inside the cap, all
+  lanes work. Reap idle/dead agents (liveness = commit-time +
+  live procs, never output-mtime) and refill from the
+  lowest-number queue in the same turn. Parent does folds/small
+  fixes inline when faster than dispatching. A dedicated
+  **keeper/monitor agent** (see "The keeper" below) watches issue
+  parallelism AND PR parallelism separately and alerts the parent
+  with the `agents=` line; the PARENT alone reaps and refills
+  lanes (single dispatch authority — keeper never dispatches).
 - **Internal task runners only**: agents via the internal `task` tool only.
   NEVER external CLI model tools (codex/agy/claude CLIs) to run other models.
 - **Full engineer + triple hostile reviews**: every PR that changes
@@ -269,7 +285,11 @@ Every tick the keeper:
    so the PARENT appends its own lane table to the board each time
    it acts.
 3. Flags (does not act on) refill/rebalance/disk needs: disk-guard
-   tier (≥70% flag, ≥85% reap-now), idle capacity
+   tier (≥70% flag, ≥85% reap-now), UNDER-FILLED lanes
+   (`agents=<live>/<cap>` below `min(cap, driveable)` while either
+   queue has unassigned driveable work — flagged every tick until
+   the parent refills), cluster-cadence staleness (watch/baseline
+   ages per "Three-cluster regular testing"), idle capacity
    while either queue has driveable work (queued PRs/issues with no
    linked lane), a gate queued on one cluster while another lock is
    free, a reviewer out of credits, a lane that looks dead
@@ -320,6 +340,46 @@ and DOES gate merges). Never cite a green watch as a passed gate:
 - Perf mistakes ride the same loop: when a perf-relevant merge lands,
   note the tip in the log; a connectivity or throughput datapoint that
   regresses against the prior tip gets an issue + forward-fix, in band.
+
+## Three-cluster regular testing (standing cadence, enforced)
+
+Per-PR gates (Step 3 item 4) prove the PR; this cadence proves the
+CLUSTERS and current master continuously, independent of which PR
+is in flight. Both duties are mandatory — a campaign that only
+gates PRs discovers a dead `tcp`/`udp` cluster weeks later.
+
+- **Continuous watch, all three clusters**: the smoke watch (above)
+  covers `loss` every ~15 min. Add the same loop for `tcp` and
+  `udp`: every ~30 min (offset so the three never collide),
+  `test-connectivity.sh cluster` against that cluster's env +
+  canonical lock tuple, appending
+  `epoch cluster=<C> master=<SHA> result=<pass/fail counts>` to
+  `/var/worktrees/.cache/smoke-watch/smoke-watch-<C>.log`.
+  Watch lanes never gate merges and never deploy (connectivity
+  probes only, under the cluster lock discipline).
+- **Merge-wave gate, all three clusters**: after every merge wave
+  (and at least hourly while merges are landing), deploy current
+  `origin/master` and run the full Step 3 item 4 measurement
+  (connectivity + single-stream + 5x multi-stream per family) on
+  EACH of `loss`, `tcp`, `udp` — three gate-runner lanes in
+  parallel, one per cluster, each inside its own lock cell.
+  Results append to that cluster's baseline INDEX as the fresh
+  master baseline (Step 3 item 4 validity window). A wave is not
+  "landed" until all three cluster records exist at the new
+  master SHA or an env failure is recorded per cluster.
+- **Keeper enforcement**: every keeper tick reads the last line
+  of each `smoke-watch-<C>.log` and each cluster's newest baseline
+  INDEX row, and prints staleness in the summary line
+  (`watch: loss=<age> tcp=<age> udp=<age> base=<ages>`). Loss
+  watch older than 30 min, tcp/udp watch older than 45 min, or a
+  baseline older than the validity window while gated PRs wait =
+  STALE flag; the parent relaunches the watch / dispatches gate
+  runners the same tick. A NEW failure (not the known external
+  Internet-IPv6 one) on any cluster files an issue immediately
+  and enters the normal queue — it never holds the landing queue.
+  Downstream skills (`security-matrix`, `failover-test`,
+  `perf-test`, `userspace-ha-validation`) run their own topology
+  when a PR needs them; this cadence is the floor, not the ceiling.
 
 ## The cardinal rule
 
@@ -531,7 +591,21 @@ For each PR an agent opens:
    tool, each explicitly requesting a distinct model from the pool
    (Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro),
    worktree-scoped, READ-ONLY (reviewers never write to the PR; they
-   return their verdict to the parent). Brief template (fill per
+   **Pool rotation (user directive 2026-10-26): dedicated
+   reviewer agent types exist for Astra (`res-camp-astra`), GLM
+   (`res-camp-glm`), Opus (`res-camp-opus`), and Kimi
+   (`res-camp-kimi`, model `kimi-code/k3.1-pro`). Kimi was
+   historically never used: dispatches defaulted to the three
+   older dedicated types or generic `task` agents (which silently
+   run the parent default, muse-wonder) and nobody named Kimi.
+   Every PR's triple MUST rotate: across any 3 consecutive PR
+   triples, each pool model serves at least once and no model
+   serves all three triples. A generic `task` reviewer counts
+   ONLY as Muse Wonder — never relabel it as another pool model;
+   the stamp records the ACTUAL runtime model the result reports.
+   If a pool model is quota-blocked/unreachable, swap in the next
+   pool model the same tick and note the swap on the PR.
+   Brief template (fill per
    PR): "You are a hostile domain-expert reviewer (HPC networking /
    OS / CPU / protocols; xpf is an eBPF firewall with a userspace
    AF_XDP Rust dataplane). Review PR #<n> at head <SHA> in
