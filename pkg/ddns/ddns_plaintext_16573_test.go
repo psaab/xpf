@@ -13,11 +13,11 @@ import (
 
 // ddns_plaintext_16573_test.go: #16573 fail-on-revert proofs (runtime side).
 //
-// Mirrors pkg/config: percent-escaped literal values (%2B/%2F/%3D etc.)
-// and percent-escaped keyless query components must refuse a
-// non-loopback http:// generic template at construction AND at
-// issuance, while specifier-only, placeholder-only, https and loopback
-// http templates still work.
+// config.DDNSTemplateCarriesLiteralToken is the one detector:
+// percent-escaped literal values (%2B/%2F/%3D etc.) and percent-escaped
+// keyless query components must refuse a non-loopback http:// generic
+// template at construction AND issuance, while specifier-only,
+// placeholder-only, https and loopback http templates still work.
 //
 // RED-on-revert: restore the '%'-free isLiteral predicate (and the
 // '='-only query scan) and every probe below constructs clean.
@@ -40,11 +40,11 @@ func TestDDNS16573GenericRefusesPercentEscapedLiteralPlaintext(t *testing.T) {
 		} else if strings.Contains(err.Error(), "abc") {
 			t.Fatalf("error leaks literal credential for %q: %v", tmpl, err)
 		}
-		if !genericCarriesCredentials(p) {
-			t.Fatalf("genericCarriesCredentials(%q) = false, want true", tmpl)
+		if !config.DDNSCredentialBearing(p) {
+			t.Fatalf("DDNSCredentialBearing(%q) = false, want true", tmpl)
 		}
-		if !templateCarriesLiteralToken(tmpl) {
-			t.Fatalf("templateCarriesLiteralToken(%q) = false, want true", tmpl)
+		if !config.DDNSTemplateCarriesLiteralToken(tmpl) {
+			t.Fatalf("DDNSTemplateCarriesLiteralToken(%q) = false, want true", tmpl)
 		}
 	}
 	// Credential-named path pair with an escaped value: refused at
@@ -54,8 +54,8 @@ func TestDDNS16573GenericRefusesPercentEscapedLiteralPlaintext(t *testing.T) {
 	if _, err := newGenericBackend(&config.DDNSProvider{Name: "g", Backend: "generic", URLTemplate: pathProbe}, nil); err == nil {
 		t.Fatalf("generic http template %q must be refused (escaped path-pair literal in cleartext)", pathProbe)
 	}
-	if !templateCarriesLiteralToken(pathProbe) {
-		t.Fatalf("templateCarriesLiteralToken(%q) = false, want true", pathProbe)
+	if !config.DDNSTemplateCarriesLiteralToken(pathProbe) {
+		t.Fatalf("DDNSTemplateCarriesLiteralToken(%q) = false, want true", pathProbe)
 	}
 }
 

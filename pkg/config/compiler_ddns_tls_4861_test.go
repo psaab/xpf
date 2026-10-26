@@ -105,9 +105,8 @@ func TestDDNSNonCredentialedPlaintextAccepted(t *testing.T) {
 // userinfo in the authority (no typed username/password, no %u/%p specifier)
 // carries the credential just as surely as the %u/%p form. It must classify as
 // credentialed so the http-vs-https gate rejects a plaintext http:// template.
-// RED-on-revert: dropping the ddnsTemplateAuthorityHasUserinfo clause from
-// ddnsBackendCarriesCredentials makes this compile clean — the leak passes
-// commit.
+// RED-on-revert: dropping the authority-userinfo clause from
+// DDNSCredentialBearing makes this compile clean — the leak passes commit.
 func TestDDNSGenericLiteralUserinfoPlaintextRejected(t *testing.T) {
 	for _, tmpl := range []string{
 		"http://user:secret@host.example/upd?ip=%i", // user:pass literal

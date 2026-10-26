@@ -4,7 +4,7 @@ import "testing"
 
 // ddns_plaintext_16573_test.go: #16573 fail-on-revert proofs (config side).
 //
-// The '%' specifier exclusion in ddnsTemplateCarriesLiteralToken also
+// The '%' specifier exclusion in DDNSTemplateCarriesLiteralToken also
 // exempted percent-escaped literal values: a provider token containing
 // + / = (escaped %2B/%2F/%3D) contains '%', so it was classified as a
 // specifier-only value and the http:// template compiled clean, sending
@@ -48,8 +48,8 @@ func TestDDNS16573StrictRejectsPercentEscapedLiteral(t *testing.T) {
 			}
 		}
 		p := &DDNSProvider{Backend: "generic", URLTemplate: tmpl}
-		if !ddnsBackendCarriesCredentials(p) {
-			t.Fatalf("ddnsBackendCarriesCredentials(%q) = false, want true", tmpl)
+		if !DDNSCredentialBearing(p) {
+			t.Fatalf("DDNSCredentialBearing(%q) = false, want true", tmpl)
 		}
 	}
 }
@@ -71,8 +71,8 @@ func TestDDNS16573SpecifierOnlyControlsAccepted(t *testing.T) {
 	}
 	for _, tmpl := range controls {
 		p := &DDNSProvider{Backend: "generic", URLTemplate: tmpl}
-		if got := ddnsBackendCarriesCredentials(p); got {
-			t.Fatalf("ddnsBackendCarriesCredentials(%q) = %v, want false", tmpl, got)
+		if got := DDNSCredentialBearing(p); got {
+			t.Fatalf("DDNSCredentialBearing(%q) = %v, want false", tmpl, got)
 		}
 	}
 	// %u/%p templates ARE credential-carrying via the specifier arm
@@ -84,8 +84,8 @@ func TestDDNS16573SpecifierOnlyControlsAccepted(t *testing.T) {
 		"https://host.example/upd?token=abc%2Fdef",
 	} {
 		p := &DDNSProvider{Backend: "generic", URLTemplate: tmpl}
-		if got := ddnsBackendCarriesCredentials(p); !got {
-			t.Fatalf("ddnsBackendCarriesCredentials(%q) = %v, want true", tmpl, got)
+		if got := DDNSCredentialBearing(p); !got {
+			t.Fatalf("DDNSCredentialBearing(%q) = %v, want true", tmpl, got)
 		}
 	}
 	// The pinned acceptance cell: specifier-only http compiles clean.
