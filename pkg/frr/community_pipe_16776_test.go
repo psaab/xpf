@@ -23,35 +23,17 @@ import (
 // so every such community-list was silently absent and a reject term
 // over it failed open.
 //
-// Post-#16788 (folded during rebase): community members render via
-// config.TranslateCommunityMemberRegex, which is pipe-free by
-// construction and refuses any "| " member — the grouping-rewrite
-// this file originally implemented is subsumed. What remains
-// #16776-unique: the rewriteFRRPipeSequences belt (unit-pinned
-// below), the neighbor-description gate, and the daemon oracle.
+// Post-#16788, on the ordinary pipe-check path the community
+// translator emits pipe-safe regexes or refuses the member and fails
+// closed. Exception (#17977): negated bracket classes the translator
+// does not confine (e.g. `65000:[^| ]`) are accepted verbatim and can
+// still render a literal `| `. The BGP neighbor-description gate
+// refuses/omits prose carrying "| ". Junos AS-path regexes are
+// translated before render, normalizing grouping whitespace. No
+// standalone pipe-rewrite belt remains.
 //
 // The unit cells pin the pipe-safe render; the live cell at the
 // bottom proves installation on a running bgpd via vtysh -f.
-
-func TestRewriteFRRPipeSequences16776(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{`(^| )65000:1( |$)`, `(^|)65000:1(|$)`}, // helper drops grouping space; conjunction sites spell [ ] instead
-		{`^((56) | (78)):(.*)$`, `^((56)|(78)):(.*)$`},
-		{`65000:[| ]`, `65000:[| ]`}, // bracket literal: untouched
-		{`65000:[ ]`, `65000:[ ]`},   // already pipe-safe
-		{`a\| b`, `a\| b`},           // escaped pipe: not alternation
-		{`no pipe`, `no pipe`},
-		{`65000:.*`, `65000:.*`},
-	}
-	for _, tc := range cases {
-		if got := rewriteFRRPipeSequences(tc.in); got != tc.want {
-			t.Errorf("rewriteFRRPipeSequences(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-		if strings.Contains(rewriteFRRPipeSequences(tc.in), "| ") && tc.in != `65000:[| ]` && tc.in != `a\| b` {
-			t.Errorf("rewrite(%q) still contains \"| \"", tc.in)
-		}
-	}
-}
 
 func TestCommunityPipeRender16776(t *testing.T) {
 	t.Run("BOTH conjunction installs pipe-safe and matches conjunctively", func(t *testing.T) {
@@ -76,10 +58,11 @@ func TestCommunityPipeRender16776(t *testing.T) {
 	})
 
 	t.Run("grouped operator regex with pipe-space is unrenderable post-16788", func(t *testing.T) {
-		// The original #16776 grouping rewrite was superseded by
-		// #16788's stricter refusal: translateCommunityCore rejects
-		// any "| " so the definition is omitted and fails closed
-		// (operator rewrites it as "^((56)|(78)):(.*)$").
+		// #16788's stricter refusal rejects this grouped operator regex's
+		// literal "| ", so the definition is omitted and fails closed.
+		// The #17977 negated-bracket exception (e.g. `[^| ]`) remains
+		// accepted verbatim; this test exercises the ordinary pipe-check
+		// path.
 		member := "^((56) | (78)):(.*)$"
 		po := communityPolicyPO(
 			map[string]*config.CommunityDef{"OP": {Name: "OP", Members: []string{member}}},

@@ -47,10 +47,10 @@ import (
 // no IGP (BGP-only or unreferenced) renders only the unsuffixed map,
 // exactly as before.
 //
-// QNH metric maps (xpf-qnh-*) are NOT split: they attach only as
-// `redistribute static` replacements and their metric sequences are
-// already daemon-scoped by qnhMetricScopeForDaemon11447; splitting
-// them is a residual (docs/log/16864.md).
+// QNH metric match sequences still use their shared xpf-qnh-* scope map,
+// but a QNH policy tail is emitted into a daemon/AF-specific map variant.
+// Its match-capability gate and metric overlay remain in
+// qnhMetricScopeForDaemon11447.
 
 // redistVariantContext16864 is one consuming context. The empty
 // variant is the daemon-agnostic (BGP / direct-caller) context.
@@ -182,6 +182,9 @@ func redistProtoFitsVariant16864(proto string, ctx redistVariantContext16864) bo
 // Rules (Junos: a term matches only if ALL its from conditions
 // match; an IPv4 filter never matches an IPv6 route):
 //
+//   - A known-impossible route-filter or prefix-list family is tested
+//     first and omits the term for every action, even when another
+//     conjunct is unsupported by the consuming daemon.
 //   - community/as-path on a non-BGP source can never match (only
 //     BGP routes carry those attributes): omit for every action.
 //   - community/as-path on a BGP source cannot be evaluated by any
@@ -190,10 +193,6 @@ func redistProtoFitsVariant16864(proto string, ctx redistVariantContext16864) bo
 //     reject or a `next policy` term becomes a bare deny — its match
 //     set is unknowable here, and the deny superset is the only
 //     sound fail-closed render (the #9881/#10822 dangling rule).
-//   - Route-filters / prefix-list refs exclusively of the other
-//     family can never match a local route: omit for every action.
-//     A reject here governs no local route, so a bare deny would
-//     wrongly withdraw the other family's routes (the s1 mirror).
 //   - A dangling (undefined/empty) prefix-list with no same-family
 //     defined ref is unknowable, not off-family: reject becomes a
 //     bare deny, accept/modify are omitted (the #14136 rule).
@@ -215,16 +214,10 @@ func redistVariantTerm16864(po *config.PolicyOptionsConfig, term *config.PolicyT
 	actionDeny := (term.Action == "reject" && !term.NextPolicy) || (term.NextPolicy && term.Action != "") ||
 		(term.NextTerm && term.Action != "") || (term.NextTerm && term.NextPolicy)
 
-	if len(term.FromCommunity) > 0 || len(term.FromASPath) > 0 {
-		if proto != "bgp" {
-			return nil, true, false
-		}
-		if actionDeny || term.NextPolicy {
-			return &config.PolicyTerm{Name: term.Name, Action: "reject"}, true, true
-		}
-		return nil, true, false
-	}
-
+	// A known impossible family conjunct makes the whole Junos term
+	// impossible, even if another conjunct (such as a BGP-only community)
+	// cannot be evaluated by this daemon. Classify these before applying
+	// the fail-closed unsupported-attribute fallback below.
 	v4rf, v6rf := partitionRouteFiltersByFamily(term.RouteFilters)
 	if len(term.RouteFilters) > 0 {
 		local := v4rf
@@ -266,12 +259,23 @@ func redistVariantTerm16864(po *config.PolicyOptionsConfig, term *config.PolicyT
 			keptLists = append(keptLists, name)
 		}
 	}
-	if len(term.PrefixList) > 0 && !plSame {
-		if plDangling {
-			if actionDeny || term.NextPolicy {
-				return &config.PolicyTerm{Name: term.Name, Action: "reject"}, true, true
-			}
+	if len(term.PrefixList) > 0 && !plSame && !plDangling {
+		return nil, true, false
+	}
+
+	if len(term.FromCommunity) > 0 || len(term.FromASPath) > 0 {
+		if proto != "bgp" {
 			return nil, true, false
+		}
+		if actionDeny || term.NextPolicy {
+			return &config.PolicyTerm{Name: term.Name, Action: "reject"}, true, true
+		}
+		return nil, true, false
+	}
+
+	if len(term.PrefixList) > 0 && !plSame {
+		if actionDeny || term.NextPolicy {
+			return &config.PolicyTerm{Name: term.Name, Action: "reject"}, true, true
 		}
 		return nil, true, false
 	}
