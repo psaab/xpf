@@ -369,22 +369,23 @@ type authConn struct {
 	// retired-key population). Zero until then, which is why an unkeyed node
 	// evicts nothing.
 	//
-	// SET ONCE per stale episode, so later commits cannot extend the
-	// connection's lifetime. Cleared when the connection (re)authenticates
-	// under an accepted key, so a later retirement anchors a fresh grace.
-	// Monotonic time prevents wall-clock steps from extending the grace.
+	// Reconciles cannot move the anchor, so later commits cannot extend an
+	// unanswered connection's lifetime. A round already in flight when its
+	// key leaves the accepted set may complete under that now-retired key;
+	// that authenticated completion starts a fresh grace for the follow-up
+	// current-key rekey. Failed/incomplete rounds do not move the deadline.
+	// Cleared when the connection (re)authenticates under an accepted key, so
+	// a later retirement anchors a fresh grace. Monotonic time prevents
+	// wall-clock steps from extending the grace.
 	//
 	// Written and read under SessionSync.writeMu, like authPSK above.
 	strictGraceStart int64
 
-	// strictGraceRetired records whether strictGraceStart was anchored for
-	// the retired-key population (#16857) rather than the never-authenticated
-	// one. The distinction matters only when the accepted set widens again
-	// (a retired key is re-accepted as the additional key): a retired-key
-	// anchor must then be cleared so the connection is no longer considered
-	// stale, whereas a never-authenticated anchor must survive (the
-	// connection still has never authenticated). Written and read under
-	// SessionSync.writeMu.
+	// strictGraceRetired distinguishes a grace for a connection authenticated
+	// under a retired key (#16857) from one for a never-authenticated
+	// connection (#10717). It selects the eviction log arm; both kinds clear
+	// when the connection authenticates under an accepted key. Written and
+	// read under SessionSync.writeMu.
 	strictGraceRetired bool
 
 	sendSeq atomic.Uint64 // monotonic per-connection send counter
