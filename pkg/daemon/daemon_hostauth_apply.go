@@ -845,6 +845,7 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 			// survives; only a genuine non-stale failure withdraws.
 			pwClaim.rollback()
 			acctClaim.rollback()
+			fail(fmt.Errorf("set password for %s: %w", user.Name, chpasswdErr))
 		} else if actual, ok := currentShadowHash(user.Name); !ok {
 			slog.Error("could not verify user password after chpasswd",
 				"user", user.Name)

@@ -83,10 +83,11 @@ func TestReconcileCompletedSupersededChpasswdRejectsUnverifiedHash17872(t *testi
 	}
 }
 
-// TestReconcileFailedCompletedSupersededChpasswdRollsBackClaims17872 keeps
-// the child-failure control: the completed marker wrapped around an actual
-// chpasswd error must not be mistaken for a successful child.
-func TestReconcileFailedCompletedSupersededChpasswdRollsBackClaims17872(t *testing.T) {
+// TestReconcileSupersededChpasswdChildFailureReportsErrorAndKeepsClaims17872
+// proves an actual child error remains a failed apply even when wrapped by
+// the completed marker, and that a stale owner's fenced rollback preserves
+// the claims after authority advances.
+func TestReconcileSupersededChpasswdChildFailureReportsErrorAndKeepsClaims17872(t *testing.T) {
 	stageLoginTree15539(t)
 	oldHash := "$6$old$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	if err := os.WriteFile(shadowPath, []byte("root:!:19000:0:99999:7:::\nalice:"+oldHash+":19000:0:99999:7:::\n"), 0o600); err != nil {
@@ -95,19 +96,27 @@ func TestReconcileFailedCompletedSupersededChpasswdRollsBackClaims17872(t *testi
 	origRun := runCommandStdinTimeout
 	childErr := errors.New("chpasswd failed")
 	runCommandStdinTimeout = func(io.Reader, string, ...string) ([]byte, error) {
+		beginHostAuthAuthority14969()
 		return []byte("failed"), fmt.Errorf("%w: %w", errHostAuthExecCompletedSuperseded16830, childErr)
 	}
 	t.Cleanup(func() { runCommandStdinTimeout = origRun })
 
-	if err := (&Daemon{}).reconcileUserPassword(loginUser17872()); err != nil {
-		t.Fatalf("existing command-failure disposition unexpectedly changed: %v", err)
+	gen := beginHostAuthAuthority14969()
+	err := runWithHostAuthGeneration14969(gen, func() error {
+		return (&Daemon{}).reconcileUserPassword(loginUser17872())
+	})
+	if !errors.Is(err, childErr) || !errors.Is(err, errHostAuthExecCompletedSuperseded16830) {
+		t.Fatalf("reconcile wrapped chpasswd failure = %v, want child error and completed marker", err)
+	}
+	if errors.Is(err, errHostAuthStaleOwner14969) {
+		t.Fatalf("real chpasswd child failure was replaced by stale-owner error: %v", err)
 	}
 	if got, ok := currentShadowHash("alice"); !ok || got != oldHash {
 		t.Fatalf("failed chpasswd changed shadow hash to %q,%v", got, ok)
 	}
 	for _, dir := range []string{provisionedPasswordsDir(), provisionedUsersDir} {
-		if markerExists16830(dir, "alice") {
-			t.Errorf("failed chpasswd retained newly claimed ownership marker in %s", dir)
+		if !markerExists16830(dir, "alice") {
+			t.Errorf("stale rollback withdrew marker that newer authority may rely on in %s", dir)
 		}
 	}
 }
