@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Upgrade: when a rolling rollback completes after a deferred signal,
+    still wait for session sync and confirm rejoin before surfacing the
+    signal status. Do not classify the committed rollback as destructive
+    and leave the node ForceSecondary-drained (#17957).
   * Policy simulation: exempt from-zone junos-host queries from the
     v4-mapped/compatible IPv6 ingress-drop verdict. Locally-generated
     traffic egresses via the kernel TX path and never traverses the RX
