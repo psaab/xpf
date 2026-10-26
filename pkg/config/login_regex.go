@@ -678,6 +678,61 @@ func (c CompiledLoginRegexes) isCoreException(full, truncated string) bool {
 	return true
 }
 
+// BareVerdictFinal reports whether the verdict on a single
+// argument-free form ("bare", the only spelling a pre-buffer judge
+// can see — #17836) cannot be overturned by any argument-bearing
+// extension of it. It is the one-sided projection of isCoreException
+// onto a charge whose full form is not yet known:
+//
+//   - a bare form that is not denied is trivially final — there is
+//     no veto for an extension to escape;
+//   - a deny-only class has no allow leaf, so no exception geometry
+//     can exist and a bare denial is final (the #13249 pre-buffer
+//     deny);
+//   - with both leaves, the bare denial escapes finality exactly
+//     when an extension could carry the exception: the allow does
+//     not cover the bare core at the vetoing deny's extent (the
+//     last clause of isCoreException, with the full core unknown).
+//     An allow that already covers the bare charge at >= the deny
+//     extent (`^ping.*` beside `^ping$`, or `^ping` tying `^ping$`)
+//     is not an exception written for a longer command, and
+//     EvaluateForms keeps its veto on argued forms too — final.
+//   - an allow-only class denied on the bare charge is an
+//     allowlist miss, never final: the argued form may match the
+//     allow (the #17836 allow leg).
+//
+// Callers that judge a bare charge before its arguments exist MUST
+// defer a non-final verdict to the full-form judge; denying it
+// pre-buffer refuses grants the full form would carry. Deferral is
+// always fail-safe: the full-form judge still denies every argued
+// form the exception does not name.
+func (c CompiledLoginRegexes) BareVerdictFinal(bare string) bool {
+	verdict := c.evaluateForm(bare)
+	if verdict.Allowed {
+		return true
+	}
+	if !c.allowSet {
+		// Deny-driven denial with no allow leaf (or no leaves at
+		// all): no exception can be written against it.
+		return true
+	}
+	if !c.denySet {
+		// Allowlist miss only: an argued form may match the allow.
+		return false
+	}
+	core := coreOf(bare)
+	denyLen := longestMatchLen(c.deny, core)
+	if denyLen < 0 {
+		// The deny never reached this charge, so the denial is an
+		// allowlist miss by construction — an argued form matching
+		// the allow overturns it. Never final.
+		return false
+	}
+	// Exception candidate iff the allow does not already cover the
+	// bare core at the vetoing deny's extent.
+	return longestMatchLen(c.allow, core) >= denyLen
+}
+
 // evaluateForm decides a SINGLE form under the ordinary tiers. It is
 // Evaluate's original body with both sides measured against the same
 // string, so a length comparison can never borrow extent from a longer

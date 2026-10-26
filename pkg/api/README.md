@@ -826,8 +826,10 @@ supply {"action":"reboot"}
 So the body is drained **inside the gate**, between two adjudications:
 
 Before the drain, pass 1 also checks operational command regexes for mutations
-whose canonical command does not depend on the request body. A matching denial
-therefore cannot make the gate buffer input first. Request-decoded commands
+whose canonical command does not depend on the request body. A FINAL bare
+denial therefore cannot make the gate buffer input first; an argument-scoped
+exception candidate deliberately defers and is judged on the buffered body
+by pass 2 (#17836). Request-decoded commands
 such as `POST /api/v1/system/action` remain in pass 2 and are checked against
 the buffered bytes the handler receives.
 
