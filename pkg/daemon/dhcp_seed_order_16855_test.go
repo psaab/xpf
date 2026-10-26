@@ -33,10 +33,11 @@ import (
 // flips only when that apply body finishes the restart.
 
 type flipKea16855 struct {
-	mu      sync.Mutex
-	isNew   bool
-	oldAdds int
-	newAdds int
+	mu            sync.Mutex
+	isNew         bool
+	oldAdds       int
+	newAdds       int
+	newValidLfts  []int
 }
 
 func (f *flipKea16855) flip() {
@@ -48,6 +49,12 @@ func (f *flipKea16855) counts() (int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.oldAdds, f.newAdds
+}
+
+func (f *flipKea16855) validLifetimes() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.newValidLfts...)
 }
 
 func startFlipKea16855(t *testing.T, path string, f *flipKea16855) func() {
@@ -76,6 +83,9 @@ func startFlipKea16855(t *testing.T, path string, f *flipKea16855) func() {
 				if req.Command == "lease4-add" {
 					if isNew {
 						f.newAdds++
+						if validLft, ok := req.Arguments["valid-lft"].(float64); ok {
+							f.newValidLfts = append(f.newValidLfts, int(validLft))
+						}
 					} else {
 						f.oldAdds++
 					}
@@ -161,6 +171,100 @@ func TestSeedWaitsForTakeoverApply16855(t *testing.T) {
 		t.Fatalf("DHCPLeasesSeeded = %d, want 1", got)
 	}
 }
+
+// TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884 pins both halves of
+// the takeover seed regression. Even after the old fail-open warning deadline,
+// the seed must not touch the still-running Kea; after restart it must re-fetch
+// the peer snapshot so standby residence is subtracted before re-anchoring.
+//
+// FAIL-ON-REVERT: make the former 20s deadline short, then hold restart beyond
+// it. Returning or seeding the old process before release fails; seeding the
+// new process with valid-lft 100 instead of the aged 99 also fails.
+func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
+	oldWait := dhcpLeaseSeedApplyWaitWarn
+	dhcpLeaseSeedApplyWaitWarn = 200 * time.Millisecond
+	t.Cleanup(func() { dhcpLeaseSeedApplyWaitWarn = oldWait })
+
+	sock4 := shortTmpSocket(t, "k4.sock")
+	sock6 := shortTmpSocket(t, "k6.sock")
+	flip := &flipKea16855{}
+	defer startFlipKea16855(t, sock4, flip)()
+	d := leaseSyncTestDaemon(t, sock4, sock6, true)
+
+	restarting := make(chan struct{}, 1)
+	release := make(chan struct{})
+	confDir, err := os.MkdirTemp("", "kea-conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(confDir) })
+	mgr := dhcpserver.NewManagerForTesting(
+		filepath.Join(confDir, "kea-dhcp4.conf"), filepath.Join(t.TempDir(), "kea-dhcp6.conf"),
+		func(args ...string) error {
+			select {
+			case restarting <- struct{}{}:
+			default:
+			}
+			<-release
+			return nil
+		},
+		func(string) bool { return true },
+	)
+	mgr.SetLeaseSyncSeamsForTesting(unixDialer(), sock4, sock6, "", "")
+	d.dhcpServer = mgr
+	var releaseOnce sync.Once
+	releaseRestart := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseRestart)
+	d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
+		{Family: 4, Address: "10.0.61.151", HWAddress: "aa:bb:cc:dd:ee:97",
+			SubnetID: 1, Remaining: 100, PreferredRemaining: 100, State: 0},
+	})
+
+	gen := d.enqueueDHCPApplyWithAuthorityState(
+		d.desiredClusterDHCPConfigWithMasters(d.store.ActiveConfig(), map[int]bool{1: true}),
+		"vrrp MASTER rg-test", d.store.ActiveConfig(), nil)
+	if gen == 0 {
+		t.Fatal("enqueue returned generation 0")
+	}
+	done := make(chan struct{})
+	go func() {
+		d.seedDHCPLeasesFromPeerGen(context.Background(), gen)
+		close(done)
+	}()
+	select {
+	case <-restarting:
+	case <-time.After(5 * time.Second):
+		releaseRestart()
+		t.Fatal("takeover restart did not start")
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+	select {
+	case <-done:
+		oldAdds, newAdds := flip.counts()
+		t.Fatalf("#17884: seed returned before restart completed (old/new adds %d/%d)", oldAdds, newAdds)
+	default:
+	}
+	if oldAdds, newAdds := flip.counts(); oldAdds != 0 || newAdds != 0 {
+		t.Fatalf("#17884: lease seed reached old/new Kea during restart = %d/%d, want 0/0", oldAdds, newAdds)
+	}
+
+	flip.flip()
+	releaseRestart()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("seed did not complete after takeover restart")
+	}
+	oldAdds, newAdds := flip.counts()
+	if oldAdds != 0 || newAdds != 1 {
+		t.Fatalf("#17884: seed hit old/new Kea = %d/%d, want 0/1", oldAdds, newAdds)
+	}
+	if got := flip.validLifetimes(); len(got) != 1 || got[0] != 99 {
+		t.Fatalf("#17884: seeded valid-lft values = %v, want [99] after standby aging", got)
+	}
+}
+
 
 // IAID-0 must survive the seed wire form (#16855 alongside): keaLeaseJSON with
 // omitempty dropped "iaid" for IAID 0; the pointer form must emit "iaid":0.

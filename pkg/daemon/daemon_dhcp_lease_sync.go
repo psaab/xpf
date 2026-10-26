@@ -55,13 +55,13 @@ const (
 	// dhcpLeaseSeedSocketWait bounds the post-start control-socket-ready wait
 	// before seeding on takeover.
 	dhcpLeaseSeedSocketWait = 10 * time.Second
-	// dhcpLeaseSeedApplyWait bounds the #16855 wait for the takeover apply's
-	// authority generation to be marked applied before the backstop seeds.
-	// The async apply (systemctl restart, 15s bound) usually lands in <1s;
-	// 20s covers it without wedging the seed goroutine forever.
-	dhcpLeaseSeedApplyWait = 20 * time.Second
 	dhcpLeaseSeedPoll      = 50 * time.Millisecond
 )
+// dhcpLeaseSeedApplyWaitWarn is the old fail-open deadline, retained as a
+// diagnostic cadence only. A pending takeover apply never authorizes seeding
+// before restart; the sole seed goroutine waits until apply or cancellation.
+// This is a variable so the wait behavior can be exercised quickly in tests.
+var dhcpLeaseSeedApplyWaitWarn = 20 * time.Second
 
 // dhcpLeaseSyncState groups the #2239 HA DHCP-server lease-sync (PATH C)
 // runtime state that used to live as flat dhcpLease* fields on Daemon
@@ -501,11 +501,12 @@ func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
 // seedDHCPLeasesFromPeerGen is seedDHCPLeasesFromPeer ordered after the
 // takeover ApplyAsync (#16855): gen is that apply's lease-authority
 // generation (0 = unknown/legacy, seed immediately). When gen != 0 the seed
-// first waits (bounded, fail-open on timeout) for the manager to mark that
-// generation applied, THEN waits for the control socket — otherwise, on an
-// active/active takeover, the still-running pre-restart Kea answers the
-// socket wait, rejects lease-add with "Invalid subnet-id" for the newly
-// taken RG, and the backstop never runs. Re-anchoring uses the post-wait clock.
+// waits for the manager to mark that generation applied before touching the
+// control socket. The former 20-second fail-open deadline is diagnostic only:
+// this is the sole post-start backstop, and seeding the still-running
+// pre-restart Kea can reject the adds and permanently lose it. Fresh peer
+// snapshots are re-fetched after the apply/socket waits so standby residence
+// continues aging through both waits before lease lifetimes are re-anchored.
 func (d *Daemon) seedDHCPLeasesFromPeerGen(ctx context.Context, gen uint64) {
 	if d.isResetting() {
 		return
@@ -519,6 +520,9 @@ func (d *Daemon) seedDHCPLeasesFromPeerGen(ctx context.Context, gen uint64) {
 		return
 	}
 	cfg := d.store.ActiveConfig()
+	// These initial snapshots establish whether a family has anything to do.
+	// Their lease values are discarded; each family is aged again immediately
+	// before seeding below.
 	snap4 := ss.PeerDHCPLeaseSnapshot4()
 	snap6 := ss.PeerDHCPLeaseSnapshot6()
 	leases4 := dhcpserver.PeerLeasesForAuthority(snap4, 4, d.dhcpLeaseAuthority(cfg, 4))
@@ -528,10 +532,9 @@ func (d *Daemon) seedDHCPLeasesFromPeerGen(ctx context.Context, gen uint64) {
 	}
 	want4 := cfg != nil && cfg.System.DHCPServer.DHCPLocalServer != nil && len(leases4) > 0
 	want6 := cfg != nil && cfg.System.DHCPServer.DHCPv6LocalServer != nil && len(leases6) > 0
-	if gen != 0 {
-		d.waitForDHCPApplyGen(ctx, gen, want4, want6)
+	if gen != 0 && !d.waitForDHCPApplyGen(ctx, gen, want4, want6) {
+		return
 	}
-	now := time.Now()
 
 	if want4 && !d.isResetting() {
 		// No ddnsResetMu here (unlike the memfile pre-seed): this writer only
@@ -540,12 +543,21 @@ func (d *Daemon) seedDHCPLeasesFromPeerGen(ctx context.Context, gen uint64) {
 		// wait would wedge factoryReset's wipe-hold on a socket that never
 		// appears. The per-family generation recheck is the fence.
 		if d.dhcpServer.WaitControlSocket4(ctx, dhcpLeaseSeedSocketWait) {
-			n, err := d.dhcpServer.SeedSyncLeases4(ctx, leases4, now)
-			ss.RecordDHCPLeasesSeeded(n)
-			if err != nil {
-				slog.Warn("cluster: DHCP v4 lease seed had errors (fail-open)", "seeded", n, "err", err)
+			if gen != 0 && !d.waitForDHCPApplyGen(ctx, gen, true, false) {
+				return
+			}
+			fresh := dhcpserver.PeerLeasesForAuthority(
+				ss.PeerDHCPLeaseSnapshot4(), 4, d.dhcpLeaseAuthority(cfg, 4))
+			if len(fresh) == 0 {
+				slog.Info("cluster: DHCP v4 leases aged out during takeover apply wait; nothing to seed")
 			} else {
-				slog.Info("cluster: DHCP v4 leases seeded into Kea on takeover", "count", n)
+				n, err := d.dhcpServer.SeedSyncLeases4(ctx, fresh, time.Now())
+				ss.RecordDHCPLeasesSeeded(n)
+				if err != nil {
+					slog.Warn("cluster: DHCP v4 lease seed had errors (fail-open)", "seeded", n, "err", err)
+				} else {
+					slog.Info("cluster: DHCP v4 leases seeded into Kea on takeover", "count", n)
+				}
 			}
 		} else {
 			slog.Warn("cluster: DHCP v4 control socket not ready; relying on memfile pre-seed")
@@ -553,12 +565,21 @@ func (d *Daemon) seedDHCPLeasesFromPeerGen(ctx context.Context, gen uint64) {
 	}
 	if want6 && !d.isResetting() {
 		if d.dhcpServer.WaitControlSocket6(ctx, dhcpLeaseSeedSocketWait) {
-			n, err := d.dhcpServer.SeedSyncLeases6(ctx, leases6, now)
-			ss.RecordDHCPLeasesSeeded(n)
-			if err != nil {
-				slog.Warn("cluster: DHCP v6 lease seed had errors (fail-open)", "seeded", n, "err", err)
+			if gen != 0 && !d.waitForDHCPApplyGen(ctx, gen, false, true) {
+				return
+			}
+			fresh := dhcpserver.PeerLeasesForAuthority(
+				ss.PeerDHCPLeaseSnapshot6(), 6, d.dhcpLeaseAuthority(cfg, 6))
+			if len(fresh) == 0 {
+				slog.Info("cluster: DHCP v6 leases aged out during takeover apply wait; nothing to seed")
 			} else {
-				slog.Info("cluster: DHCP v6 leases seeded into Kea on takeover", "count", n)
+				n, err := d.dhcpServer.SeedSyncLeases6(ctx, fresh, time.Now())
+				ss.RecordDHCPLeasesSeeded(n)
+				if err != nil {
+					slog.Warn("cluster: DHCP v6 lease seed had errors (fail-open)", "seeded", n, "err", err)
+				} else {
+					slog.Info("cluster: DHCP v6 leases seeded into Kea on takeover", "count", n)
+				}
 			}
 		} else {
 			slog.Warn("cluster: DHCP v6 control socket not ready; relying on memfile pre-seed")
@@ -566,12 +587,17 @@ func (d *Daemon) seedDHCPLeasesFromPeerGen(ctx context.Context, gen uint64) {
 	}
 }
 
-// waitForDHCPApplyGen blocks (bounded by dhcpLeaseSeedApplyWait / ctx) until
-// every wanted family's applied generation reaches gen. 0 means no
-// authority-bearing apply has completed yet, so it keeps waiting; the bounded
-// timeout proceeds anyway (fail-open) if the apply never lands.
-func (d *Daemon) waitForDHCPApplyGen(ctx context.Context, gen uint64, want4, want6 bool) {
-	deadline := time.Now().Add(dhcpLeaseSeedApplyWait)
+// waitForDHCPApplyGen waits until every wanted family's applied generation
+// reaches gen. A timeout is only a warning interval, not permission to seed:
+// the sole seed goroutine must keep waiting to preserve restart-before-seed
+// ordering. Context cancellation (e.g. daemon shutdown) ends the wait.
+func (d *Daemon) waitForDHCPApplyGen(ctx context.Context, gen uint64, want4, want6 bool) bool {
+	if gen == 0 {
+		return true
+	}
+	ticker := time.NewTicker(dhcpLeaseSeedPoll)
+	defer ticker.Stop()
+	nextWarning := time.Now().Add(dhcpLeaseSeedApplyWaitWarn)
 	for {
 		ready := true
 		if want4 && d.dhcpServer.AppliedGeneration(4) < gen {
@@ -581,16 +607,17 @@ func (d *Daemon) waitForDHCPApplyGen(ctx context.Context, gen uint64, want4, wan
 			ready = false
 		}
 		if ready {
-			return
+			return true
 		}
-		if time.Now().After(deadline) {
-			slog.Warn("cluster: DHCP lease seed proceeding before takeover apply completed (fail-open)", "gen", gen)
-			return
+		now := time.Now()
+		if !now.Before(nextWarning) {
+			slog.Warn("cluster: DHCP lease seed still waiting for takeover apply", "gen", gen)
+			nextWarning = now.Add(dhcpLeaseSeedApplyWaitWarn)
 		}
 		select {
 		case <-ctx.Done():
-			return
-		case <-time.After(dhcpLeaseSeedPoll):
+			return false
+		case <-ticker.C:
 		}
 	}
 }
