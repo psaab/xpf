@@ -182,6 +182,156 @@ pub(super) fn strict_syn_check_drops_pre_handshake_data(
     !established || handshake_pending || syn_ack_first
 }
 
+/// Shared inputs for the pure transit-admission verdict. Callers retain
+/// their existing HA-finalization and zone-pair ordering, so this extraction
+/// does not select a winner for the #17920 destination/zone drift.
+pub(super) struct AdmissionInput<'a> {
+    pub(super) flow: &'a SessionFlow,
+    pub(super) meta: ForwardPacketMeta,
+    pub(super) resolution: ForwardingResolution,
+    /// Destination class checks use the tuple chosen by each path.
+    pub(super) class_dst: IpAddr,
+    pub(super) translated_dst: Option<IpAddr>,
+    /// Policy uses a separate tuple; #17920 owns any choice to align it
+    /// with the destination-class tuple.
+    pub(super) policy_dst: IpAddr,
+    pub(super) protocol: u8,
+    pub(super) policy_dst_port: u16,
+    pub(super) policy_icmp: Option<(u8, u8)>,
+    pub(super) from_zone_id: u32,
+    pub(super) to_zone_id: u32,
+    pub(super) fabric_arrival_zone: Option<u32>,
+    pub(super) now_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TransitClassDrop {
+    Destination,
+    Source,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TransitClassVerdict {
+    pub(super) transit_disposition: bool,
+    pub(super) drop: Option<TransitClassDrop>,
+}
+
+/// Pure martian-class part of the miss admission chain. The ordinary path
+/// maps each drop to its existing counter; cookies only need the verdict.
+pub(super) fn transit_class_verdict(
+    forwarding: &ForwardingState,
+    flow: &SessionFlow,
+    meta: ForwardPacketMeta,
+    resolution: ForwardingResolution,
+    class_dst: IpAddr,
+    translated_dst: Option<IpAddr>,
+    fabric_arrival_zone: Option<u32>,
+) -> TransitClassVerdict {
+    let transit_disposition = matches!(
+        resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+            | ForwardingDisposition::MissingNeighbor
+            | ForwardingDisposition::FabricRedirect
+    );
+    if !transit_disposition {
+        return TransitClassVerdict {
+            transit_disposition,
+            drop: None,
+        };
+    }
+    if super::transit_destination_class_drop(
+        forwarding,
+        resolution.disposition,
+        class_dst,
+        translated_dst,
+        flow.forward_key.routing_domain,
+        meta,
+        fabric_arrival_zone,
+    ) {
+        return TransitClassVerdict {
+            transit_disposition,
+            drop: Some(TransitClassDrop::Destination),
+        };
+    }
+    if super::transit_source_class_drop(
+        forwarding,
+        resolution.disposition,
+        flow.src_ip,
+        flow.forward_key.routing_domain,
+        meta,
+        fabric_arrival_zone,
+    ) {
+        return TransitClassVerdict {
+            transit_disposition,
+            drop: Some(TransitClassDrop::Source),
+        };
+    }
+    TransitClassVerdict {
+        transit_disposition,
+        drop: None,
+    }
+}
+
+/// A complete, side-effect-free transit-admission result. The miss path
+/// applies its class counters and policy hit count separately; SYN-cookie
+/// paths consume only `permits()`.
+pub(super) struct AdmissionVerdict {
+    pub(super) class: TransitClassVerdict,
+    pub(super) policy_result: Option<crate::policy::PolicyEvaluationResult>,
+}
+
+impl AdmissionVerdict {
+    pub(super) fn permits(&self) -> bool {
+        self.class.transit_disposition
+            && self.class.drop.is_none()
+            && self
+                .policy_result
+                .is_some_and(|result| result.action == crate::policy::PolicyAction::Permit)
+    }
+}
+
+/// Single pure martian + policy chain shared by the session-miss effects
+/// path and SYN-cookie admission. `class_verdict` lets the miss path reuse
+/// the class check it ran at its original ordering point, then apply the
+/// counted policy effect when its later policy stage is reached.
+pub(super) fn transit_admission_verdict(
+    forwarding: &ForwardingState,
+    input: &AdmissionInput<'_>,
+    class_verdict: Option<TransitClassVerdict>,
+) -> AdmissionVerdict {
+    let class = class_verdict.unwrap_or_else(|| {
+        transit_class_verdict(
+            forwarding,
+            input.flow,
+            input.meta,
+            input.resolution,
+            input.class_dst,
+            input.translated_dst,
+            input.fabric_arrival_zone,
+        )
+    });
+    let policy_result = if class.transit_disposition && class.drop.is_none() {
+        Some(crate::policy::evaluate_policy_result_without_counting_at(
+            &forwarding.policy,
+            input.from_zone_id,
+            input.to_zone_id,
+            input.flow.src_ip,
+            input.policy_dst,
+            input.protocol,
+            input.flow.forward_key.src_port,
+            input.policy_dst_port,
+            input.policy_icmp,
+            input.now_ns,
+        ))
+    } else {
+        None
+    };
+    AdmissionVerdict {
+        class,
+        policy_result,
+    }
+}
+
 #[cfg(test)]
 #[path = "session_admission_tests.rs"]
 mod tests;

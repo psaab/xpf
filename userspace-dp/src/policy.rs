@@ -4028,6 +4028,29 @@ pub(crate) fn evaluate_policy_result_without_counting_at(
     )
 }
 
+/// Apply the ordinary first-packet hit-count effect to a verdict that was
+/// already evaluated with `PolicyHitCount::Never`. The result carries the
+/// same counter handle as the counted query, so the session-miss path can
+/// share its pure policy verdict without evaluating the rules twice.
+pub(crate) fn count_policy_evaluation_result(
+    state: &PolicyState,
+    from_id: u32,
+    to_id: u32,
+    result: PolicyEvaluationResult,
+    packet_len: u64,
+) -> PolicyEvaluationResult {
+    if from_id == 0 {
+        UNZONED_INGRESS_DENIED.fetch_add(1, Ordering::Relaxed);
+    } else if to_id == 0 {
+        UNZONED_EGRESS_DENIED.fetch_add(1, Ordering::Relaxed);
+    } else if result.policy_counter_idx == DEFAULT_POLICY_COUNTER_IDX {
+        state.default_counter.add(packet_len);
+    } else if let Some(counter) = state.hit_counter_by_idx(result.policy_counter_idx) {
+        counter.add(packet_len);
+    }
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 fn evaluate_policy_result_counted(
     state: &PolicyState,

@@ -16,6 +16,82 @@ fn pmech_replay_drain_is_a_sibling_stage_13081() {
     );
 }
 
+#[test]
+fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
+    let cookie = include_str!("cookie_reply.rs");
+    let admission = include_str!("session_admission.rs");
+    let poll = include_str!("mod.rs");
+    let prescreen = cookie
+        .split("pub(super) fn syn_cookie_reply_admitted(")
+        .nth(1)
+        .expect("prescreen admission helper exists")
+        .split("/// Final admission check")
+        .next()
+        .expect("prescreen helper ends before final helper");
+    let final_admission = cookie
+        .split("pub(super) fn syn_cookie_final_admission_with_fence(")
+        .nth(1)
+        .expect("final admission helper exists")
+        .split("/// Host-bound counterpart")
+        .next()
+        .expect("final helper ends before host helper");
+    for (name, body) in [
+        ("prescreen", prescreen),
+        ("final", final_admission),
+    ] {
+        assert!(
+            body.contains("transit_admission_verdict("),
+            "{name} must consume the shared session-admission verdict"
+        );
+        assert!(
+            !body.contains("evaluate_policy_result_without_counting_at(")
+                && !body.contains("transit_destination_class_drop("),
+            "{name} must not re-encode policy or martian admission"
+        );
+    }
+    for field in [
+        "class_dst",
+        "translated_dst",
+        "policy_dst",
+        "from_zone_id",
+        "to_zone_id",
+    ] {
+        assert!(
+            admission.contains(&format!("pub(super) {field}:")),
+            "the shared chain must carry {field} explicitly"
+        );
+    }
+    assert!(admission.contains("pub(super) fn transit_admission_verdict("));
+    let miss_class = poll
+        .split("// #11413/#10689: share the pure destination/source")
+        .nth(1)
+        .expect("session-miss class gate exists")
+        .split("// #10597 G5: apply the local-only fence")
+        .next()
+        .expect("session-miss class gate ends before the local-only fence");
+    assert!(
+        miss_class.contains("transit_class_verdict(")
+            && miss_class.contains("record_martian_drop()")
+            && miss_class.contains("record_transit_source_martian_drop()"),
+        "the session-miss effects preserve both class-drop counters"
+    );
+    let miss_policy = poll
+        .split("let admission_verdict = transit_admission_verdict(")
+        .nth(1)
+        .expect("session-miss shared policy site exists")
+        .split("// #1620: cold-path latency histogram post-eval record")
+        .next()
+        .expect("session-miss policy verdict precedes histogram accounting");
+    assert!(
+        miss_policy.contains("policy_icmp: policy_packet_icmp(packet_frame, meta)"),
+        "session-miss passes the packet ICMP tuple into the shared verdict"
+    );
+    assert!(
+        miss_policy.contains("count_policy_evaluation_result("),
+        "session-miss applies the effect to the shared pure policy verdict"
+    );
+}
+
 // #13766: behavioral drain coverage for the #13636 TX-pool return.
 //
 // Drive the real `drain_pending_pmech_replays` with fresh directories (never

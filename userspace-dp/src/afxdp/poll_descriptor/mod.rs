@@ -102,8 +102,9 @@ use nat64_icmp_error::try_translate_nat64_icmp_error;
 use noroute_adjudication::{noroute_policy_adjudication, noroute_policy_protocol};
 use rx_telemetry::record_rx_descriptor_telemetry;
 use session_admission::{
-    new_flow_session_limit_drop, strict_syn_check_drops_new_flow_tunnel_with_payload,
-    strict_syn_check_drops_pre_handshake_data,
+    AdmissionInput, TransitClassDrop, new_flow_session_limit_drop,
+    strict_syn_check_drops_new_flow_tunnel_with_payload, strict_syn_check_drops_pre_handshake_data,
+    transit_admission_verdict, transit_class_verdict,
 };
 use session_hit_authority::{
     ForeignHitVerdict, HitAuthority, HitPolicyDeny, OwnerHitIcmpVerdict, foreign_hit_verdict,
@@ -362,324 +363,6 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
         })
 }
 
-/// #15947 (H28-01): may a SYN-cookie reply (SYN-ACK challenge or
-/// validated-ACK RST) be emitted for this packet's destination?
-///
-/// The screen stages run before session/FIB/HA/policy admission, so
-/// without this gate a screened SYN above threshold elicits a SYN-ACK
-/// (and a validated cookie ACK an ACK-RST) for destinations the
-/// firewall would deny, cannot route, classifies martian, or does not
-/// own (HA-inactive) — an oracle / split-brain response, and a fresh
-/// cookie ISN hijacking an Opening session's retransmitted SYN.
-/// This helper is a necessary-but-not-sufficient challenge prescreen:
-/// it suppresses disproven replies, but a positive result is NOT final
-/// admission. The challenge caller therefore records a deferred
-/// challenge and lets the actual miss path re-derive DNAT/NPTv6/
-/// NAT64/PBR, select the route, and run the disposition-specific
-/// final/host admission before a SYN-ACK is emitted. It retains two
-/// useful early signals: an existing session suppresses a fresh
-/// cookie, and an unzoned/raw-disproven packet cannot earn a reply.
-/// "Plausible" here remains deliberately raw-tuple for transit; final
-/// admission's translated tuple is authoritative.
-pub(super) fn syn_cookie_reply_admitted(
-    forwarding: &ForwardingState,
-    ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
-    sessions: &SessionTable,
-    flow: Option<&SessionFlow>,
-    packet_frame: &[u8],
-    meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u32>,
-    now_ns: u64,
-    now_secs: u64,
-) -> bool {
-    let Some(flow) = flow else {
-        return false;
-    };
-    // An existing live session (incl. an Opening handshake's
-    // retransmit) follows its session — never a fresh cookie ISN.
-    if sessions.has_session_hit_at(&flow.forward_key, now_ns) {
-        return false;
-    }
-    let resolution = crate::afxdp::forwarding::enforce_ha_resolution_snapshot(
-        forwarding,
-        ha_state,
-        now_secs,
-        crate::afxdp::forwarding::lookup_forwarding_resolution(forwarding, flow.dst_ip)
-            .resolution,
-    );
-    if resolution.disposition == ForwardingDisposition::LocalDelivery {
-        // Round-3/narrow fold: the challenge SYN-ACK itself must pass
-        // the same host gates as the validated ACK. The raw destination
-        // is the only tuple available on this pre-translation arm, so
-        // this checks host-inbound/lo0 + junos-host on it; translated
-        // host destinations are governed again at final admission.
-        return syn_cookie_host_admission(
-            forwarding,
-            flow,
-            packet_frame,
-            meta,
-            ingress_zone_override,
-            flow.dst_ip,
-            flow.forward_key.dst_port,
-            now_ns,
-        );
-    }
-    if !matches!(
-        resolution.disposition,
-        ForwardingDisposition::ForwardCandidate
-            | ForwardingDisposition::MissingNeighbor
-            | ForwardingDisposition::FabricRedirect
-    ) {
-        return false;
-    }
-    let fmeta: ForwardPacketMeta = meta.into();
-    if transit_destination_class_drop(
-        forwarding,
-        resolution.disposition,
-        flow.dst_ip,
-        None,
-        flow.forward_key.routing_domain,
-        fmeta,
-        ingress_zone_override,
-    ) || transit_source_class_drop(
-        forwarding,
-        resolution.disposition,
-        flow.src_ip,
-        flow.forward_key.routing_domain,
-        fmeta,
-        ingress_zone_override,
-    ) {
-        return false;
-    }
-    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
-    let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
-        forwarding,
-        ingress_logical,
-        ingress_zone_override,
-        resolution.egress_ifindex,
-    );
-    if from_zone_id == 0 || to_zone_id == 0 {
-        return false;
-    }
-    let result = crate::policy::evaluate_policy_result_without_counting_at(
-        &forwarding.policy,
-        from_zone_id,
-        to_zone_id,
-        flow.src_ip,
-        flow.dst_ip,
-        meta.protocol,
-        flow.forward_key.src_port,
-        flow.forward_key.dst_port,
-        None,
-        now_ns,
-    );
-    matches!(result.action, crate::policy::PolicyAction::Permit)
-}
-
-/// Final admission check for a validated SYN-cookie ACK, evaluated on
-/// the actual session-miss context rather than the raw ingress tuple.
-///
-/// `resolution` must already be the route selected for the translated
-/// destination (after DNAT/NPTv6/NAT64 and any PBR table selection);
-/// `effective_dst`/`effective_dst_port` are that translated policy
-/// tuple. This mirrors the miss path's final order: HA finalization,
-/// martian destination/source classes, then the zone-policy verdict.
-/// Host-bound (`LocalDelivery`) destinations still require the normal
-/// host admission decision, but it is not duplicated here: the validated
-/// ACK caller is inside the miss path before its actual LocalDelivery
-/// host-inbound/lo0/junos-host blocks, and this helper returns the
-/// host-specific result through `syn_cookie_host_admission` below.
-/// Returning false suppresses only the synthesized ACK-RST.
-pub(super) fn syn_cookie_final_admission(
-    forwarding: &ForwardingState,
-    ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
-    flow: &SessionFlow,
-    meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u32>,
-    resolution: ForwardingResolution,
-    effective_dst: IpAddr,
-    effective_dst_port: u16,
-    now_ns: u64,
-    now_secs: u64,
-) -> bool {
-    syn_cookie_final_admission_with_fence(forwarding, ha_state, flow, meta, ingress_zone_override, resolution, effective_dst, effective_dst_port, false, now_ns, now_secs)
-}
-
-/// Final admission with the unconditional miss-path drop gates folded
-/// in (confirmation fold): L2 group-unicast delivery and the bindless
-/// IPsec selector fence drop Permit packets on the ordinary miss path
-/// after policy, so a challenged SYN must not earn a SYN-ACK when any
-/// of them matches. `fence_dropped` is the caller's evaluation of
-/// those gates on the packet's composed decision.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn syn_cookie_final_admission_with_fence(
-    forwarding: &ForwardingState,
-    ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
-    flow: &SessionFlow,
-    meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u32>,
-    resolution: ForwardingResolution,
-    effective_dst: IpAddr,
-    effective_dst_port: u16,
-    fence_dropped: bool,
-    now_ns: u64,
-    now_secs: u64,
-) -> bool {
-    if fence_dropped {
-        return false;
-    }
-    let resolution = crate::afxdp::forwarding::finalize_new_flow_ha_resolution(
-        forwarding,
-        ha_state,
-        now_secs,
-        resolution,
-        false,
-        false,
-        meta.ingress_ifindex as i32,
-        ingress_zone_override.unwrap_or(0),
-        0,
-    );
-    if resolution.disposition == ForwardingDisposition::LocalDelivery {
-        return true;
-    }
-    if !matches!(
-        resolution.disposition,
-        ForwardingDisposition::ForwardCandidate
-            | ForwardingDisposition::MissingNeighbor
-            | ForwardingDisposition::FabricRedirect
-    ) {
-        return false;
-    }
-    let fmeta: ForwardPacketMeta = meta.into();
-    if transit_destination_class_drop(
-        forwarding,
-        resolution.disposition,
-        effective_dst,
-        None,
-        flow.forward_key.routing_domain,
-        fmeta,
-        ingress_zone_override,
-    ) || transit_source_class_drop(
-        forwarding,
-        resolution.disposition,
-        flow.src_ip,
-        flow.forward_key.routing_domain,
-        fmeta,
-        ingress_zone_override,
-    ) {
-        return false;
-    }
-    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
-    let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
-        forwarding,
-        ingress_logical,
-        ingress_zone_override,
-        resolution.egress_ifindex,
-    );
-    if from_zone_id == 0 || to_zone_id == 0 {
-        return false;
-    }
-    let result = crate::policy::evaluate_policy_result_without_counting_at(
-        &forwarding.policy,
-        from_zone_id,
-        to_zone_id,
-        flow.src_ip,
-        effective_dst,
-        meta.protocol,
-        flow.forward_key.src_port,
-        effective_dst_port,
-        None,
-        now_ns,
-    );
-    matches!(result.action, crate::policy::PolicyAction::Permit)
-}
-
-/// Host-bound counterpart to [`syn_cookie_final_admission`].
-///
-/// A validated cookie ACK destined to a LocalDelivery service must not
-/// earn an ACK-RST merely because its transit/FIB tuple resolves. Run
-/// the same first host gates the ordinary LocalDelivery miss path runs:
-/// host-inbound + lo0 must admit, and a matching junos-host deny/reject
-/// suppresses the reply. This helper is side-effect-light: it evaluates
-/// junos-host without counting/reply/event side effects and asks the
-/// host-inbound/lo0 helper for its verdict. It does not install a
-/// session or forward the ACK; the caller only uses the boolean to gate
-/// the synthesized ACK-RST and then recycles the descriptor.
-pub(super) fn syn_cookie_host_admission(
-    forwarding: &ForwardingState,
-    flow: &SessionFlow,
-    packet_frame: &[u8],
-    meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u32>,
-    effective_dst: IpAddr,
-    effective_dst_port: u16,
-    now_ns: u64,
-) -> bool {
-    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
-    let (from_zone_id, _) = zone_pair_ids_for_flow_with_override(
-        forwarding,
-        ingress_logical,
-        ingress_zone_override,
-        meta.ingress_ifindex as i32,
-    );
-    if from_zone_id == 0 {
-        return false;
-    }
-    let Some((lo0_action, _)) = host_inbound_gated_lo0_action(
-        forwarding,
-        ingress_logical,
-        from_zone_id,
-        effective_dst,
-        effective_dst_port,
-        effective_dst.is_ipv6(),
-        packet_frame
-            .get(meta.l4_offset as usize)
-            .copied()
-            .unwrap_or(0),
-        crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta),
-        flow,
-        meta,
-        ingress_zone_override,
-        now_ns,
-    ) else {
-        return false;
-    };
-    if lo0_action != crate::filter::FilterAction::Accept {
-        return false;
-    }
-    !matches!(
-        junos_host_policy_eval(
-            forwarding,
-            flow,
-            (effective_dst, effective_dst_port),
-            from_zone_id,
-            0,
-            true,
-            policy_packet_icmp(packet_frame, meta),
-            now_ns,
-            true,
-        ),
-        Some(result) if matches!(
-            result.action,
-            crate::policy::PolicyAction::Deny | crate::policy::PolicyAction::Reject
-        )
-    )
-}
 #[inline]
 pub(super) fn stage11_raw_protocol_requires_drop(protocol: u8) -> bool {
     protocol == crate::ip_proto::PROTO_ESP || protocol == crate::ip_proto::PROTO_AH
@@ -817,7 +500,11 @@ fn record_ipsec_sa_miss_sample(
     }
 }
 
-use cookie_reply::{SynCookieReply, enqueue_syn_cookie_reply};
+use cookie_reply::{
+    SynCookieReply, enqueue_syn_cookie_reply, syn_cookie_final_admission,
+    syn_cookie_final_admission_with_fence, syn_cookie_host_admission,
+    syn_cookie_reply_admitted,
+};
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
 use prerouting_scope::{
     PreroutingIngressScope, prerouting_ingress_scope, prerouting_ingress_scope_ambiguous,
@@ -6140,35 +5827,27 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        // #11413: reject special destinations before transit
-                        // policy, session creation or neighbor side effects.
-                        if transit_destination_class_drop(
+                        // #11413/#10689: share the pure destination/source
+                        // class verdict with SYN-cookie admission while keeping
+                        // each miss-path counter and drop order here.
+                        let miss_class_verdict = transit_class_verdict(
                             worker_ctx.forwarding,
-                            decision.resolution.disposition,
+                            flow,
+                            ForwardPacketMeta::from(meta),
+                            decision.resolution,
                             flow.dst_ip,
                             decision.nat.rewrite_dst,
-                            flow.forward_key.routing_domain,
-                            ForwardPacketMeta::from(meta),
                             fabric_arrival_zone,
-                        ) {
-                            telemetry.counters.record_martian_drop();
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                        // #10689: source-class rejection is transit-only and
-                        // precedes policy/session installation. LocalDelivery
-                        // remains exempt for DHCP, NDP and DAD packets; both
-                        // ForwardCandidate and MissingNeighbor are transit
-                        // decisions (the latter must not seed/buffer a session).
-                        if transit_source_class_drop(
-                            worker_ctx.forwarding,
-                            decision.resolution.disposition,
-                            flow.src_ip,
-                            flow.forward_key.routing_domain,
-                            ForwardPacketMeta::from(meta),
-                            fabric_arrival_zone,
-                        ) {
-                            telemetry.counters.record_transit_source_martian_drop();
+                        );
+                        if let Some(drop) = miss_class_verdict.drop {
+                            match drop {
+                                TransitClassDrop::Destination => {
+                                    telemetry.counters.record_martian_drop();
+                                }
+                                TransitClassDrop::Source => {
+                                    telemetry.counters.record_transit_source_martian_drop();
+                                }
+                            }
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -7071,20 +6750,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // non-ICMP flows and for ICMP frames whose L4 header
                             // is not safely readable (truncated / non-first
                             // fragment), so such terms fail closed.
-                            let policy_icmp = policy_packet_icmp(packet_frame, meta);
-                            let policy_result = evaluate_policy_result_with_icmp_at(
-                                &worker_ctx.forwarding.policy,
-                                from_zone_id,
-                                to_zone_id,
-                                flow.src_ip,
-                                policy_dst_ip,
-                                flow.forward_key.protocol,
-                                flow.forward_key.src_port,
-                                policy_dst_port,
-                                policy_icmp,
-                                meta.pkt_len as u64,
-                                now_ns,
+                            let admission_verdict = transit_admission_verdict(
+                                worker_ctx.forwarding,
+                                &AdmissionInput {
+                                    flow,
+                                    meta: ForwardPacketMeta::from(meta),
+                                    resolution: decision.resolution,
+                                    class_dst: flow.dst_ip,
+                                    translated_dst: decision.nat.rewrite_dst,
+                                    policy_dst: policy_dst_ip,
+                                    protocol: flow.forward_key.protocol,
+                                    policy_dst_port,
+                                    policy_icmp: policy_packet_icmp(packet_frame, meta),
+                                    from_zone_id,
+                                    to_zone_id,
+                                    fabric_arrival_zone,
+                                    now_ns,
+                                },
+                                Some(miss_class_verdict),
                             );
+                            let policy_result =
+                                crate::policy::count_policy_evaluation_result(
+                                    &worker_ctx.forwarding.policy,
+                                    from_zone_id,
+                                    to_zone_id,
+                                    admission_verdict
+                                        .policy_result
+                                        .expect("class-admitted ForwardCandidate has policy result"),
+                                    meta.pkt_len as u64,
+                                );
                             // #1620: cold-path latency histogram post-eval record.
                             // q32-skip + wrapper_underflow_count per plan v4 §4.4.
                             if cp_sample_tag {

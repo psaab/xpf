@@ -11026,6 +11026,64 @@ fn policy_wrapper_query_equivalence_16129() {
     }
 }
 
+#[test]
+fn side_effect_free_policy_verdict_applies_count_once_with_icmp_17017() {
+    let state = || {
+        parse_policy_state(
+            "deny",
+            &[icmp_app_rule("junos-icmp-ping", "icmp", Some(8))],
+            &test_zone_name_to_id(),
+        )
+    };
+    let src: IpAddr = "10.0.61.100".parse().expect("src");
+    let dst: IpAddr = "172.16.80.200".parse().expect("dst");
+    let now_ns = 12_345;
+    let packet_len = 64;
+    let counted = state();
+    let effects = state();
+
+    let counted_result = evaluate_policy_result_with_icmp_at(
+        &counted,
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+        src,
+        dst,
+        PROTO_ICMP,
+        0,
+        0,
+        Some((8, 0)),
+        packet_len,
+        now_ns,
+    );
+    let pure_result = evaluate_policy_result_without_counting_at(
+        &effects,
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+        src,
+        dst,
+        PROTO_ICMP,
+        0,
+        0,
+        Some((8, 0)),
+        now_ns,
+    );
+    assert_eq!(pure_result.action, PolicyAction::Permit);
+    assert_eq!(effects.rules[0].hit_counter.test_packet_count(), 0);
+
+    let applied = count_policy_evaluation_result(
+        &effects,
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+        pure_result,
+        packet_len,
+    );
+    assert_eq!(applied, counted_result);
+    for state in [&counted, &effects] {
+        assert_eq!(state.rules[0].hit_counter.test_packet_count(), 1);
+        assert_eq!(state.rules[0].hit_counter.test_byte_count(), packet_len);
+    }
+}
+
 // #16129: the named constructors must produce exactly the hand-built queries
 // above — this pins the constructor field mapping independently of the
 // wrappers (which delegate to the constructors, so wrapper-vs-constructor
