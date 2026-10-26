@@ -31,21 +31,26 @@ structure.)
   (the per-tick bucket drain / lazy-delete GC pass), the throttled
   `push_to_wheel` scheduler, `wheel_observe`, and the #2120 standby
   retention gate (`expire_stale_entries_ha` + `standby_gate_decision` +
-  `rebucket_alive_entry`).
+  first-HOLD-anchored horizon scheduling).
 - `entry.rs` — the PUBLIC session data types: `SessionDecision`,
   `SessionMetadata`, `SessionLookup`, `ForwardSessionMatch`,
   `SessionOrigin`, `SessionDeltaKind`, `SessionDelta`, and
   `ExpiredSession`. The internal per-entry `SessionEntry` (and its #2120
-  standby-gate fields `seen_rg_epoch` / `first_held_ns`, see "Standby
-  retention" below) stays file-private in `mod.rs`, NOT here.
+  standby-gate fields `seen_rg_epoch` / `first_held_ns` plus the #16881
+  `held_wheel_tick` and its scheduling-input markers, see "Standby retention"
+  below) stays file-private in `mod.rs`, NOT here.
 - `key.rs` — `SessionKey`, `forward_wire_key` (ingress 5-tuple),
   `reverse_canonical_key` (post-NAT lookup), and
   `reply_matches_forward_session` (the predicate used to detect "this
   inbound packet matches an existing outbound flow").
-- `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets). Each
-  worker sweeps its own table once per second from its poll loop
-  (`expire_stale_entries` in `afxdp/worker/loop_body/mod.rs`). Packet
-  lookups enforce the same strict idle deadline and return a miss once
+- `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets). Held
+  entries are rechecked at the far edge of the wheel window (255 s), with
+  the recheck tick anchored to `first_held_ns`; same-ID snapshot imports
+  preserve the pending tick only while its scheduling inputs are unchanged.
+  The worker still sweeps expiry once per second from its poll loop
+  (`expire_stale_entries` in `afxdp/worker/loop_body/mod.rs`). Packet lookups
+  enforce the same strict idle
+  deadline and return a miss once
   `now - last_seen_ns > expires_after_ns`; the stale entry remains for the
   wheel's physical cleanup (including HA HOLD/SELF-HEAL retention). The former
   "lazy-delete on lookup" wording is obsolete: lookups reject idle-crossed
@@ -1099,6 +1104,15 @@ every idle entry ages, exactly as before):
   standalone node). Held unless held past the stale-synced ceiling.
 - **AGE** — normal removal: active-node-owned, standalone, fabric-ingress,
   or a held entry past the ceiling.
+
+Held entries are rechecked on the far edge of the timer-wheel window
+(255 seconds), not on each worker tick. Each next recheck is aligned to
+`first_held_ns` and capped at the original stale-synced deadline. The wheel
+processes that target on the following GC pass, preserving the gate's strict
+`>` ceiling check. Same-ID snapshot imports preserve the pending hint only while
+its scheduling inputs, including `first_held_ns`, are unchanged. Timeout/close
+updates and primary-liveness anchor renewals invalidate the hint and schedule
+an ordinary check before another context-aware HOLD recheck.
 
 The HOLD keys on FORWARDING, not origin, so a still-`ForwardFlow`
 demotion-window entry (the demote flip not yet applied) is held too.

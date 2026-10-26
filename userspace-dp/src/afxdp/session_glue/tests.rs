@@ -9879,17 +9879,41 @@ fn sync_liveness_refresh_renews_both_session_halves_until_refreshes_stop_16880()
             Some(last_liveness_at),
             "reverse HOLD anchor must renew at refresh {step}"
         );
+        for key in [&forward_key, &reverse_key] {
+            assert_eq!(
+                table.held_wheel_tick_for(key),
+                Some(0),
+                "liveness refresh {step} must invalidate the old held hint"
+            );
+        }
 
-        let expired = expire_as_standby(
-            &mut table,
-            last_liveness_at + crate::session::WHEEL_TICK_NS_FOR_TEST + 1,
-        );
-        assert!(
-            !expired
-                .iter()
-                .any(|entry| entry.key == forward_key || entry.key == reverse_key),
-            "both halves must remain held during refresh {step}"
-        );
+        // Exercise the wheel's ordinary one-second cadence between
+        // liveness frames, including the horizon immediately before the
+        // final renewal. Leave that last renewal's hint pending for the
+        // no-more-liveness portion below.
+        if step < 10 {
+            let mut check_at = last_liveness_at + SECOND + 1;
+            let expired = expire_as_standby(&mut table, check_at);
+            assert!(
+                !expired
+                    .iter()
+                    .any(|entry| entry.key == forward_key || entry.key == reverse_key),
+                "both halves must remain held during refresh {step}"
+            );
+            check_at += SECOND;
+            let next_liveness_at = last_liveness_at + timeout;
+            while check_at < next_liveness_at {
+                let expired = expire_as_standby(&mut table, check_at);
+                assert!(
+                    !expired
+                        .iter()
+                        .any(|entry| entry.key == forward_key || entry.key == reverse_key),
+                    "both halves must remain held before refresh {}",
+                    step + 1
+                );
+                check_at += SECOND;
+            }
+        }
     }
 
     let hold_ceiling_ns = crate::session::STALE_SYNCED_CEILING_MULT
@@ -9902,18 +9926,32 @@ fn sync_liveness_refresh_renews_both_session_halves_until_refreshes_stop_16880()
     assert_ne!(table.session_id_for(&forward_key), 0);
     assert_ne!(table.session_id_for(&reverse_key), 0);
 
-    // Once the primary stops refreshing, neither half may outlive the
-    // existing stale-synced bound (plus one GC wheel tick).
-    let reap_at = last_liveness_at + hold_ceiling_ns + crate::session::WHEEL_TICK_NS_FOR_TEST + 1;
-    let expired = expire_as_standby(&mut table, reap_at);
+    // After the primary stops refreshing, visit every second so a stale
+    // pre-renewal horizon cannot hide either reaper until its old due tick.
+    let stale_deadline_ns = last_liveness_at + hold_ceiling_ns;
+    let latest_reap_ns = stale_deadline_ns + SECOND + 1;
+    let mut now_ns = last_liveness_at + SECOND + 1;
+    let mut forward_reaped = false;
+    let mut reverse_reaped = false;
+    while now_ns <= latest_reap_ns && !(forward_reaped && reverse_reaped) {
+        let expired = expire_as_standby(&mut table, now_ns);
+        let forward_reaped_now = expired.iter().any(|entry| entry.key == forward_key);
+        let reverse_reaped_now = expired.iter().any(|entry| entry.key == reverse_key);
+        if now_ns <= stale_deadline_ns {
+            assert!(
+                !forward_reaped_now && !reverse_reaped_now,
+                "neither half may reap before last liveness plus the stale ceiling"
+            );
+        }
+        forward_reaped |= forward_reaped_now;
+        reverse_reaped |= reverse_reaped_now;
+        now_ns += SECOND;
+    }
     assert!(
-        expired.iter().any(|entry| entry.key == forward_key),
-        "forward half must expire after primary liveness stops"
+        forward_reaped && reverse_reaped,
+        "both halves must reap by one tick after last liveness plus the stale ceiling"
     );
-    assert!(
-        expired.iter().any(|entry| entry.key == reverse_key),
-        "reverse half must expire after primary liveness stops"
-    );
+    assert!(now_ns - SECOND <= latest_reap_ns);
     assert_eq!(table.session_id_for(&forward_key), 0);
     assert_eq!(table.session_id_for(&reverse_key), 0);
 }
