@@ -394,16 +394,39 @@ impl SourceNatRule {
     /// the state that releases them, which is the stranding the merged config
     /// gate names as the reason the quarantine could not ship alone.
     ///
-    /// This is a strict WIDENING of `allocator_key`: for a healthy pool the two
-    /// return the same key, so retention is unchanged there. It must also
-    /// survive REPEATED quarantined snapshots — every rebuild while the overlap
-    /// persists re-derives the previous generation through this key, and a
-    /// key that dropped on the second one would strand exactly the flows the
-    /// first one preserved.
+    /// #17877: Port-bearing pools keep the configured-range key; pure
+    /// no-translation pools intentionally use their built 0/0 range.
+    /// A subsequent PAT rule cannot reuse that zero-range allocator. The
+    /// previous generation is separately indexed by its actual range.
     fn drain_allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
         let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
+        let (port_low, port_high) = if self.no_translation {
+            (0, 0)
+        } else {
+            (self.pool_port_low, self.pool_port_high)
+        };
         (self.pool_mode && total_pool > 0)
+            .then(|| self.allocator_key_for(port_low, port_high))
+    }
+
+    /// A pre-#16840 no-translation allocator may still be port-bearing.
+    /// Quarantine retention can fall back to its configured-range key after
+    /// first trying the current no-translation 0/0 key.
+    fn legacy_drain_allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
+        let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
+        (self.no_translation && self.pool_mode && total_pool > 0)
             .then(|| self.allocator_key_for(self.pool_port_low, self.pool_port_high))
+    }
+
+    /// Index the previous generation by its actual allocator range. Newly
+    /// parsed draining rules still hold the empty default allocator, so they
+    /// must use `drain_allocator_key` instead.
+    fn previous_drain_allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
+        let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
+        (self.pool_mode && total_pool > 0)
+            .then(|| {
+                self.allocator_key_for(self.pool_allocator.port_low, self.pool_allocator.port_high)
+            })
     }
 
     /// #7717: is this rule a quarantined pool whose allocator is DRAINING —
@@ -979,25 +1002,33 @@ fn resolve_pool_allocators(
         let Some(key) = rule.drain_allocator_key() else {
             continue;
         };
-        if !previous_allocators.contains_key(&key) || reserved.contains_key(&key) {
+        let previous_key = if previous_allocators.contains_key(&key) {
+            key.clone()
+        } else if let Some(legacy_key) = rule.legacy_drain_allocator_key() {
+            if !previous_allocators.contains_key(&legacy_key) {
+                continue;
+            }
+            legacy_key
+        } else {
+            continue;
+        };
+        if reserved.contains_key(&key) || reserved.contains_key(&previous_key) {
             continue;
         }
-        // Charged through the SAME `PendingPoolAllocator::charge` formula the
-        // healthy rules use, rather than a second copy of the arithmetic — a
-        // draining pool occupies exactly what it occupied before it was
-        // quarantined.
+        // Charge the retained allocator's actual range; a legacy no-translation
+        // allocator can still own a port bitmap.
+        let existing = &previous_allocators[&previous_key];
         used = used.saturating_with(
             PendingPoolAllocator {
-                port_low: rule.pool_port_low,
-                port_high: rule.pool_port_high,
+                port_low: existing.port_low,
+                port_high: existing.port_high,
                 total_pool: rule.pool_addresses_v4.len() + rule.pool_addresses_v6.len(),
-                // #16840: a draining no-translation pool materialised no
-                // bitmap, so it charges 0 port slots like a healthy one.
-                no_translation: rule.no_translation,
+                no_translation: existing.port_low == 0 && existing.port_high == 0,
             }
             .charge(),
         );
         reserved.insert(key, ());
+        reserved.insert(previous_key, ());
     }
 
     // PHASE 1c (#7717): hand the retained allocator to the draining rule. It
@@ -1012,7 +1043,17 @@ fn resolve_pool_allocators(
         let Some(key) = rule.drain_allocator_key() else {
             continue;
         };
-        if let Some(existing) = previous_allocators.get(&key) {
+        let previous_key = if previous_allocators.contains_key(&key) {
+            key
+        } else if let Some(legacy_key) = rule.legacy_drain_allocator_key() {
+            if !previous_allocators.contains_key(&legacy_key) {
+                continue;
+            }
+            legacy_key
+        } else {
+            continue;
+        };
+        if let Some(existing) = previous_allocators.get(&previous_key) {
             rule.pool_allocator = existing.clone();
         }
     }
@@ -1991,11 +2032,9 @@ fn parse_source_nat_rules_inner(
             if prev.lenient_match_dropped && !prev.is_draining_pool() {
                 continue;
             }
-            // #7717: keyed on `drain_allocator_key`, which ignores
-            // `pool_failure`. A QUARANTINED pool's allocator must survive into
-            // the next generation or its live flows lose the state that
-            // releases them. Widening only: a healthy pool keys identically.
-            if let Some(key) = prev.drain_allocator_key() {
+            // #7717: retain the previous allocator under its actual range;
+            // no-translation's built 0/0 range differs from its rule config.
+            if let Some(key) = prev.previous_drain_allocator_key() {
                 previous_allocators
                     .entry(key)
                     .or_insert_with(|| prev.pool_allocator.clone());
