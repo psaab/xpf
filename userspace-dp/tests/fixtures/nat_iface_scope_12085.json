@@ -102,6 +102,17 @@
         { "family": "inet", "address": "10.255.192.42/32" },
         { "family": "inet6", "address": "2001:db8:4::42/128" }
       ]
+    },
+    {
+      "name": "ge-0/0/3.0",
+      "zone": "vrf",
+      "egress_zone": "vrf",
+      "routing_instance": "default",
+      "ifindex": 22,
+      "addresses": [
+        { "family": "inet", "address": "203.0.113.3/24" },
+        { "family": "inet6", "address": "2001:db8:3::3/64" }
+      ]
     }
   ],
   "zones": [
@@ -136,7 +147,8 @@
         "198.51.100.2", "2001:db8::2",
         "192.0.2.2", "2001:db8:1::2",
         "198.18.1.9",
-        "10.255.192.42", "2001:db8:4::42"
+        "10.255.192.42", "2001:db8:4::42",
+        "203.0.113.3", "2001:db8:3::3"
       ]
     },
     {
@@ -155,13 +167,9 @@
       "want": []
     },
     {
-      "name": "to-routing-instance-default",
+      "name": "to-routing-instance-default-named",
       "rule": { "name": "snat-default", "to_routing_instance": "default", "interface_mode": true },
-      "want": [
-        "198.51.100.2", "2001:db8::2",
-        "198.18.1.9",
-        "10.255.192.42", "2001:db8:4::42"
-      ]
+      "want": [ "203.0.113.3", "2001:db8:3::3" ]
     },
     {
       "name": "to-routing-instance-default-wire",

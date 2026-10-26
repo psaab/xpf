@@ -158,8 +158,8 @@ func TestNAT64ScopedShadowing15678(t *testing.T) {
 		t.Fatal("same-zone rule-set c must be shadowed by a")
 	}
 	a, b := cfg.Security.NAT.NAT64[0], cfg.Security.NAT.NAT64[1]
-	ka, _ := nat64PrefixOwnerKeyScoped(a)
-	kb, _ := nat64PrefixOwnerKeyScoped(b)
+	ka, _ := nat64PrefixOwnerKeyScoped(cfg, a)
+	kb, _ := nat64PrefixOwnerKeyScoped(cfg, b)
 	if ka == kb {
 		t.Fatalf("scoped owner keys must differ by zone: %q == %q", ka, kb)
 	}

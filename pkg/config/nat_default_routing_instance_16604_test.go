@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// #16604: `routing-instance default` in a NAT scope is the master-instance
-// alias. The compiler lowers it to "" + provenance flag, the tier ranks it
-// as a routing-instance scope, and a declared instance named `default`
-// keeps its literal meaning.
+// #16604: when no instance named `default` is declared, that literal in a NAT
+// scope is the master-instance alias and the compiler lowers it to "" plus a
+// provenance flag. #17677: a declared instance named `default` keeps its
+// literal meaning.
 
 func TestNATDefaultRoutingInstanceLowers16604(t *testing.T) {
 	cfg, err := CompileConfig(buildTree(t, append(natScopeBase15278(),
@@ -36,9 +36,15 @@ func TestNATDefaultRoutingInstanceLowers16604(t *testing.T) {
 	}
 }
 
+// #17677: a routing-instance actually NAMED `default` keeps its literal
+// meaning through COMPILATION (typed fields), not only through the raw-string
+// normalizer — the #16604 declared-instance leg. Compile a declared-default
+// source rule-set and require the typed scope stays "default"/false and the
+// wire value stays the literal (named-instance match), never the master token.
 func TestNATDefaultDeclaredInstanceKeepsLiteral16604(t *testing.T) {
 	cfg, err := CompileConfig(buildTree(t, append(natScopeBase15278(),
 		"set routing-instances default instance-type virtual-router",
+		"set security nat source rule-set snat-ok from routing-instance default",
 		"set security nat source rule-set snat-ok to routing-instance default",
 		"set security nat source rule-set snat-ok rule r1 match source-address 10.0.0.0/8",
 		"set security nat source rule-set snat-ok rule r1 then source-nat pool pool1",
@@ -46,8 +52,18 @@ func TestNATDefaultDeclaredInstanceKeepsLiteral16604(t *testing.T) {
 	if err != nil {
 		t.Fatalf("strict compile with declared default: %v", err)
 	}
-	if wire := NormalizeNATRoutingInstanceScope16604(cfg, "default"); wire != "default" {
+	rs := cfg.Security.NAT.Source[0]
+	if rs.FromRoutingInstance != "default" || rs.FromRoutingInstanceDefault {
+		t.Fatalf("from scope = %q default=%v, want default/false (declared instance)", rs.FromRoutingInstance, rs.FromRoutingInstanceDefault)
+	}
+	if rs.ToRoutingInstance != "default" || rs.ToRoutingInstanceDefault {
+		t.Fatalf("to scope = %q default=%v, want default/false (declared instance)", rs.ToRoutingInstance, rs.ToRoutingInstanceDefault)
+	}
+	if wire := NATRoutingInstanceScopeWire(cfg, rs.ToRoutingInstance, rs.ToRoutingInstanceDefault); wire != "default" {
 		t.Fatalf("declared default wire = %q, want literal default", wire)
+	}
+	if wire := NormalizeNATRoutingInstanceScope16604(cfg, "default"); wire != "default" {
+		t.Fatalf("declared default normalize = %q, want literal default", wire)
 	}
 }
 
@@ -76,16 +92,41 @@ func TestNATDefaultStaticAndNAT64Lower16604(t *testing.T) {
 		t.Fatalf("nat64 default flag not set: %+v", nrs)
 	}
 	found := false
-	for _, ri := range nat64EffectiveRoutingInstances(nrs) {
+	for _, ri := range nat64EffectiveRoutingInstances(ncfg, nrs) {
 		if ri == NATDefaultRoutingInstanceWire {
 			found = true
 		}
 		if ri == "" {
-			t.Fatalf("effective RI still carries lowered empty: %v", nat64EffectiveRoutingInstances(nrs))
+			t.Fatalf("effective RI still carries lowered empty: %v", nat64EffectiveRoutingInstances(ncfg, nrs))
 		}
 	}
 	if !found {
-		t.Fatalf("effective RI = %v, want wire token", nat64EffectiveRoutingInstances(nrs))
+		t.Fatalf("effective RI = %v, want wire token", nat64EffectiveRoutingInstances(ncfg, nrs))
+	}
+}
+func TestNATDefaultDeclaredNAT64ScopeKeepsNamedInstance17677(t *testing.T) {
+	cfg, err := compileNAT64Scope(t, nat64ScopeLines(
+		"set routing-instances default instance-type virtual-router",
+		"set security nat nat64 rule-set rs1 from routing-instance default",
+	))
+	if err != nil {
+		t.Fatalf("NAT64 compile with declared default: %v", err)
+	}
+	rs := cfg.Security.NAT.NAT64[0]
+	if rs.FromRoutingInstance != "default" || rs.FromRoutingInstanceDefault ||
+		len(rs.FromRoutingInstances) != 1 || rs.FromRoutingInstances[0] != "default" {
+		t.Fatalf("NAT64 scope = %+v, want literal default in singular/list without alias flag", rs)
+	}
+	effective := nat64EffectiveRoutingInstances(cfg, rs)
+	if len(effective) != 1 || effective[0] != "default" {
+		t.Fatalf("effective NAT64 scopes = %v, want [default]", effective)
+	}
+	namedKey, _ := nat64PrefixOwnerKeyScoped(cfg, rs)
+	masterKey, _ := nat64PrefixOwnerKeyScoped(cfg, &NAT64RuleSet{
+		Prefix: rs.Prefix, FromRoutingInstanceDefault: true,
+	})
+	if namedKey == masterKey {
+		t.Fatal("NAT64 named-default owner key collides with explicit-master key")
 	}
 }
 
@@ -107,6 +148,15 @@ func TestNATDefaultInterfaceEgressScope16604(t *testing.T) {
 	// Hand-built raw literal (no flag) must behave identically.
 	if overlapsIfaceEgress(t, mk("default", false)) {
 		t.Fatal("raw default egress must not claim the vrf-a interface address")
+	}
+	// A declared `default` is a named VRF, so its interface address remains
+	// eligible for a rule scoped to that instance.
+	declaredDefault := mk("default", false)
+	declaredDefault.RoutingInstances = []*RoutingInstanceConfig{{
+		Name: "default", Interfaces: []string{"ge-0/0/3.50"},
+	}}
+	if !overlapsIfaceEgress(t, declaredDefault) {
+		t.Fatal("declared-default egress must claim the interface address in that named instance")
 	}
 	if !overlapsIfaceEgress(t, mk("vrf-a", false)) {
 		t.Fatal("vrf-a egress control must claim the vrf-a interface address")

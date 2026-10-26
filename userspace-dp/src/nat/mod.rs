@@ -269,48 +269,40 @@ const NAT_SCOPE_TIER_ZONE: u8 = 1;
 const NAT_SCOPE_TIER_ROUTING_INSTANCE: u8 = 2;
 const NAT_SCOPE_TIER_UNSCOPED: u8 = 3;
 
-/// #16604: wire token for an explicit `routing-instance default`
-/// (master-instance) NAT scope, stamped by the Go snapshot builders
-/// (config.NATDefaultRoutingInstanceWire). Distinct from "" (unscoped)
-/// and from any instance name: it matches ONLY a packet whose resolved
-/// routing-instance is "" (main instance), never a named VRF. A rule
-/// carrying the literal "default" (pre-#16604 helper / hand-built
-/// snapshot) is treated the same way, so both spellings converge.
+/// #16604/#17677: wire token for an explicit `routing-instance default`
+/// master-instance scope, stamped by the Go snapshot builders only when no
+/// routing-instance named `default` is declared.
 pub(crate) const NAT_DEFAULT_ROUTING_INSTANCE_WIRE: &str = "\0xpf-default-routing-instance";
 
-/// #16604: does a rule's routing-instance scope field match the
+/// #16604/#17677: does a rule's routing-instance scope field match the
 /// packet's resolved instance? "" = unscoped (matches any); the wire
-/// token or the literal "default" = explicit master (matches only "");
-/// any other value matches only itself. Allocation-free.
+/// token = explicit master (matches only ""). Every other value, including
+/// a literal "default", matches only that named instance. Go stamps the wire
+/// token only when no instance named `default` is declared.
 #[inline]
 pub(crate) fn nat_ri_matches(rule_ri: &str, packet_ri: &str) -> bool {
     if rule_ri.is_empty() {
         return true;
     }
-    if rule_ri == NAT_DEFAULT_ROUTING_INSTANCE_WIRE || rule_ri == "default" {
+    if rule_ri == NAT_DEFAULT_ROUTING_INSTANCE_WIRE {
         return packet_ri.is_empty();
     }
     rule_ri == packet_ri
 }
 
 /// #16604: is this scope field constrained at all (non-empty, counting
-/// the explicit-master token / literal)?
+/// the explicit-master token)?
 #[inline]
 pub(crate) fn nat_ri_constrained(rule_ri: &str) -> bool {
     !rule_ri.is_empty()
 }
 
-/// #16604: normalize a rule's routing-instance scope for scope-KEY
-/// purposes (allocator keys, off-supersets, identity): the literal
-/// "default" folds to the wire token so the two spellings share one
-/// key; every other value is itself.
+/// #16604/#17677: normalize a rule's routing-instance scope for scope-KEY
+/// purposes (allocator keys, off-supersets, identity). The explicit-master
+/// token remains distinct from every named instance, including "default".
 #[inline]
 pub(crate) fn nat_ri_key(rule_ri: &str) -> &str {
-    if rule_ri == "default" {
-        NAT_DEFAULT_ROUTING_INSTANCE_WIRE
-    } else {
-        rule_ri
-    }
+    rule_ri
 }
 
 /// Junos NAT context precedence: interface > zone > routing-instance >

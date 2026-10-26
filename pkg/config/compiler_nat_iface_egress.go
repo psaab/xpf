@@ -83,7 +83,7 @@ func interfaceSNATEgressAddresses(cfg *Config) map[string]string {
 					continue
 				}
 				logical := fmt.Sprintf("%s.%d", ifName, un)
-				if !interfaceInEgressScope(rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback) {
+				if !interfaceInEgressScope(cfg, rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback) {
 					continue
 				}
 				for _, a := range unit.Addresses {
@@ -123,7 +123,7 @@ func ruleSetHasInterfaceModeSNAT(rs *NATRuleSet) bool {
 // each configured to-side scope must agree, and a scope that is not configured
 // does not constrain. When NO to-side scope is configured the rule-set is a
 // wildcard and every interface is a candidate.
-func interfaceInEgressScope(rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string, noBareRIFallback map[string]struct{}) bool {
+func interfaceInEgressScope(cfg *Config, rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string, noBareRIFallback map[string]struct{}) bool {
 	// #16827: a unit-less ToInterface authored before canonicalization
 	// (hand-built configs reach this mirror without a compile) still
 	// names the physical interface; a canonical "ge-0/0/2.0" no longer
@@ -131,12 +131,11 @@ func interfaceInEgressScope(rs *NATRuleSet, ifName, logical string, zoneByIface,
 	if rs.ToInterface != "" && rs.ToInterface != logical {
 		return false
 	}
-	// #16604: an explicit master scope (`to routing-instance default`,
-	// lowered to "" + flag, or a raw literal on a hand-built config)
-	// admits only interfaces in NO named instance.
+	// #16604/#17677: a raw literal is the master alias only when this config
+	// does not declare a routing-instance named `default`.
 	wantRI := rs.ToRoutingInstance
 	explicitDefault := rs.ToRoutingInstanceDefault
-	if !explicitDefault && wantRI == FBFDefaultRoutingInstance {
+	if !explicitDefault && natRoutingInstanceIsDefaultAlias16604(cfg, wantRI) {
 		wantRI, explicitDefault = "", true
 	}
 	if wantRI != "" || explicitDefault {

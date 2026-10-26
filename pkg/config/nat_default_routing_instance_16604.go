@@ -16,22 +16,19 @@ package config
 // registration keyed by the same literal never selected a
 // main-instance egress.
 //
-// The lowering is an EXPLICIT master constraint, not a synonym for an
-// absent scope: authoring `routing-instance default` must match
-// main-instance traffic only, never a named VRF. The typed config
-// therefore carries "" plus a per-side provenance flag (see
+// The literal is declaration-sensitive: without a routing-instance named
+// `default`, it is an explicit master constraint, not an absent scope. The
+// typed config therefore carries "" plus a per-side provenance flag (see
 // NATRuleSet / StaticNATRuleSet / NAT64RuleSet `*RoutingInstanceDefault`
 // fields). Snapshot builders stamp the wire token
-// NATDefaultRoutingInstanceWire, and the Rust matchers compare it
-// against the packet's "" — so `rule=default egress=main` matches and
-// `rule=default egress=VR1` does not, while an unscoped (empty) rule
-// still matches both. A routing-instance actually NAMED `default`
-// under `routing-instances` keeps selecting that named instance: the
-// literal is only the master alias when no such instance is declared
-// (the FBF #11308 posture — there, strict rejects the ambiguous
-// combination outright; NAT keeps the declaration winning because
-// NAT scope matching by name predates the alias and operators may
-// already rely on it; see natRoutingInstanceIsDefaultAlias16604).
+// NATDefaultRoutingInstanceWire, and Rust matches it against the packet's
+// empty routing-instance only.
+//
+// If a routing-instance named `default` IS declared, the authored literal
+// keeps its meaning as that named instance: NAT scope matching by name
+// predates the alias and operators may already rely on it. This follows the
+// FBF #11308 posture — there, strict rejects the ambiguous combination
+// outright; NAT keeps the declaration winning.
 
 // NATDefaultRoutingInstanceWire is the snapshot/wire token for an
 // explicit `routing-instance default` (master-instance) NAT scope.
@@ -97,4 +94,59 @@ func NATRoutingInstanceScopeWire(cfg *Config, value string, explicitDefault bool
 		return NATDefaultRoutingInstanceWire
 	}
 	return NormalizeNATRoutingInstanceScope16604(cfg, value)
+}
+
+// lowerNATDefaultRoutingInstanceAliases16604 runs after every top-level
+// section has compiled, when cfg can distinguish the master alias from an
+// instance actually named `default`. Only an undeclared literal is lowered;
+// declared-name scopes remain literal for the snapshot builders and matcher.
+func lowerNATDefaultRoutingInstanceAliases16604(cfg *Config) {
+	if cfg == nil || !natRoutingInstanceIsDefaultAlias16604(cfg, FBFDefaultRoutingInstance) {
+		return
+	}
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		if value, isDefault := lowerNATRoutingInstanceScope16604(rs.FromRoutingInstance); isDefault {
+			rs.FromRoutingInstance, rs.FromRoutingInstanceDefault = value, true
+		}
+		if value, isDefault := lowerNATRoutingInstanceScope16604(rs.ToRoutingInstance); isDefault {
+			rs.ToRoutingInstance, rs.ToRoutingInstanceDefault = value, true
+		}
+	}
+	if dnat := cfg.Security.NAT.Destination; dnat != nil {
+		for _, rs := range dnat.RuleSets {
+			if rs == nil {
+				continue
+			}
+			if value, isDefault := lowerNATRoutingInstanceScope16604(rs.FromRoutingInstance); isDefault {
+				rs.FromRoutingInstance, rs.FromRoutingInstanceDefault = value, true
+			}
+			if value, isDefault := lowerNATRoutingInstanceScope16604(rs.ToRoutingInstance); isDefault {
+				rs.ToRoutingInstance, rs.ToRoutingInstanceDefault = value, true
+			}
+		}
+	}
+	for _, rs := range cfg.Security.NAT.Static {
+		if rs == nil {
+			continue
+		}
+		if value, isDefault := lowerNATRoutingInstanceScope16604(rs.FromRoutingInstance); isDefault {
+			rs.FromRoutingInstance, rs.FromRoutingInstanceDefault = value, true
+		}
+	}
+	for _, rs := range cfg.Security.NAT.NAT64 {
+		if rs == nil {
+			continue
+		}
+		if value, isDefault := lowerNATRoutingInstanceScope16604(rs.FromRoutingInstance); isDefault {
+			rs.FromRoutingInstance, rs.FromRoutingInstanceDefault = value, true
+		}
+		for i, ri := range rs.FromRoutingInstances {
+			if value, isDefault := lowerNATRoutingInstanceScope16604(ri); isDefault {
+				rs.FromRoutingInstances[i], rs.FromRoutingInstanceDefault = value, true
+			}
+		}
+	}
 }

@@ -1160,11 +1160,11 @@ type NAT64RuleSet struct {
 	// stamps the whole list here; validators check every member.
 	// #16049 (the RI sibling of #15932's zone union).
 	FromRoutingInstances []string
-	// FromRoutingInstanceDefault (#16604) records that the authored
-	// `from routing-instance default` was the master-instance alias
-	// (lowered to "" above), not an absent scope. Snapshot builders
-	// stamp NATDefaultRoutingInstanceWire so the dataplane matches
-	// main-instance traffic only.
+	// FromRoutingInstanceDefault (#16604/#17677) records that the authored
+	// `from routing-instance default` was the master-instance alias because
+	// no instance named `default` is declared (lowered to "" above), not an
+	// absent scope or a named-instance scope. Snapshot builders stamp
+	// NATDefaultRoutingInstanceWire so the dataplane matches main traffic only.
 	FromRoutingInstanceDefault bool
 	// SourceAddresses is the full `match source-address` list (CIDRs or bare
 	// IPv6 hosts). Empty = match any source. #15678.
@@ -1195,9 +1195,9 @@ type StaticNATRuleSet struct {
 	// FromRoutingInstance scopes the rule-set to traffic in this routing
 	// instance / VRF. "" = the default instance / unscoped. #3096.
 	FromRoutingInstance string
-	// FromRoutingInstanceDefault (#16604): the authored
-	// `from routing-instance default` master alias, lowered to "".
-	// See NAT64RuleSet.FromRoutingInstanceDefault.
+	// FromRoutingInstanceDefault (#16604/#17677): the authored
+	// `from routing-instance default` master alias when no instance named
+	// `default` is declared, lowered to "". See NAT64RuleSet field.
 	FromRoutingInstanceDefault bool
 	Rules                      []*StaticNATRule
 }
@@ -1229,9 +1229,10 @@ type NATRuleSet struct {
 	// instance / unscoped. #3096.
 	FromRoutingInstance string
 	ToRoutingInstance   string
-	// FromRoutingInstanceDefault / ToRoutingInstanceDefault (#16604):
-	// the authored `routing-instance default` master alias on that
-	// side, lowered to "". See NAT64RuleSet.FromRoutingInstanceDefault.
+	// FromRoutingInstanceDefault / ToRoutingInstanceDefault (#16604/#17677):
+	// the authored `routing-instance default` master alias on that side
+	// when no instance named `default` is declared, lowered to "".
+	// See NAT64RuleSet.FromRoutingInstanceDefault.
 	FromRoutingInstanceDefault bool
 	ToRoutingInstanceDefault   bool
 	Rules                      []*NATRule

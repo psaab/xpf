@@ -138,11 +138,11 @@ func interfaceSNATRegistrationLifeline(name string) bool {
 	return IsManagementIfName(base) || base == "lo0"
 }
 
-func interfaceInSNATRegistrationScope(rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string, noBareRIFallback map[string]struct{}) bool {
+func interfaceInSNATRegistrationScope(cfg *Config, rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string, noBareRIFallback map[string]struct{}) bool {
 	if rs.ToInterface != "" && rs.ToInterface != logical {
 		return false
 	}
-	return interfaceInEgressScope(rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback)
+	return interfaceInEgressScope(cfg, rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback)
 }
 
 // interfaceModeSNATExcludedAddresses mirrors the userspace-dp dataplane's
@@ -221,7 +221,7 @@ func interfaceModeSNATExcludedAddresses(cfg *Config) map[string]bool {
 			}
 			inScope := false
 			for _, rs := range scoped {
-				if interfaceInSNATRegistrationScope(rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback) {
+				if interfaceInSNATRegistrationScope(cfg, rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback) {
 					inScope = true
 					break
 				}

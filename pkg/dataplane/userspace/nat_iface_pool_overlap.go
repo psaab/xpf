@@ -132,16 +132,14 @@ func interfaceInSnapshotEgressScope(rule SourceNATRuleSnapshot, ifc InterfaceSna
 	if rule.ToInterface != "" && !snapshotInterfaceNameMatches(rule.ToInterface, ifc.Name) {
 		return false
 	}
-	// #16604: wire-space match — explicit-master token/literal admits
-	// only a main-instance ("") interface; "" is unscoped.
-	if rule.ToRoutingInstance != "" {
-		if config.IsNATDefaultRoutingInstanceWire(rule.ToRoutingInstance) || rule.ToRoutingInstance == "default" {
-			if ifc.RoutingInstance != "" {
-				return false
-			}
-		} else if rule.ToRoutingInstance != ifc.RoutingInstance {
+	// #16604/#17677: the wire token is the explicit master alias. A literal
+	// `default` names that routing-instance, exactly like any other name.
+	if config.IsNATDefaultRoutingInstanceWire(rule.ToRoutingInstance) {
+		if ifc.RoutingInstance != "" {
 			return false
 		}
+	} else if rule.ToRoutingInstance != "" && rule.ToRoutingInstance != ifc.RoutingInstance {
+		return false
 	}
 	if rule.ToZone != "" && rule.ToZone != ifc.Zone {
 		return false

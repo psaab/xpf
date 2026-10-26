@@ -1062,6 +1062,10 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if err := compileSections(tree, cfg, opts); err != nil {
 		return nil, err
 	}
+	// #16604/#17677: routing-instance `default` is declaration-sensitive.
+	// Resolve the authored literals only after all top-level sections have
+	// compiled, because routing-instances may follow security in source order.
+	lowerNATDefaultRoutingInstanceAliases16604(cfg)
 	if opts.lenientBridgeDomainKernelName && len(cfg.BridgeDomains) > 0 {
 		cfg.BridgeDomains = quarantineInvalidBridgeDomains16792(cfg)
 	}

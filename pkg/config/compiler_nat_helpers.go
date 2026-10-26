@@ -542,18 +542,10 @@ func collectNATScopes(rsNode *Node, wantTo bool, natKind ...string) (fromScopes,
 	return dedupeNATScopes(fromScopes), dedupeNATScopes(toScopes)
 }
 
-// #16604: an authored `routing-instance default` with no instance of
-// that name declared is the master-instance alias. The typed field
-// carries "" (the dataplane's master value) and the per-side
-// *RoutingInstanceDefault flag records that the master scope was
-// authored explicitly, so snapshot builders can stamp the wire token
-// and the dataplane matches main-instance traffic only. A declared
-// instance named `default` is NOT lowered — cfg is unavailable at
-// this AST stage, so the lowering checks only the literal here and
-// the snapshot builders re-check declaration via
-// NormalizeNATRoutingInstanceScope16604; the flag is set only when
-// the value is lowered here, and builders also lower a raw literal
-// that reaches them (hand-built configs), so both paths converge.
+// #16604: an authored `routing-instance default` is kept literal while the
+// security section compiles because the routing-instances section may occur
+// later in source order. lowerNATDefaultRoutingInstanceAliases16604 resolves
+// the master alias after every section is available.
 func lowerNATRoutingInstanceScope16604(value string) (string, bool) {
 	if value == FBFDefaultRoutingInstance {
 		return "", true
@@ -567,7 +559,7 @@ func applyNATFromScope(rs *NATRuleSet, s natMatchScope) {
 	case "interface":
 		rs.FromInterface = s.value
 	case "routing-instance":
-		rs.FromRoutingInstance, rs.FromRoutingInstanceDefault = lowerNATRoutingInstanceScope16604(s.value)
+		rs.FromRoutingInstance = s.value
 	default: // "zone"
 		rs.FromZone = s.value
 		if s.value == "" {
@@ -582,7 +574,7 @@ func applyNATToScope(rs *NATRuleSet, s natMatchScope) {
 	case "interface":
 		rs.ToInterface = s.value
 	case "routing-instance":
-		rs.ToRoutingInstance, rs.ToRoutingInstanceDefault = lowerNATRoutingInstanceScope16604(s.value)
+		rs.ToRoutingInstance = s.value
 	default: // "zone"
 		rs.ToZone = s.value
 		if s.value == "" {

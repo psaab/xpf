@@ -6004,7 +6004,7 @@ func natPoolOverlapOwners(cfg *Config) []natAllocOwner {
 		// unprovable source set has no equivalence key: the rule-set
 		// is retained as an owner under its own identity and never
 		// deduped into a sibling (over-refusal, never under-refusal).
-		prefixKey, ok := nat64PrefixOwnerKeyScoped(rs)
+		prefixKey, ok := nat64PrefixOwnerKeyScoped(cfg, rs)
 		if !ok {
 			continue
 		}
@@ -6300,10 +6300,10 @@ func nat64EffectiveZones(rs *NAT64RuleSet) []string {
 // nat64EffectiveRoutingInstances (#16049) is the routing-instance set
 // a NAT64 rule-set admits: the authored FromRoutingInstances list when
 // present, else the singular FromRoutingInstance. #16604: an explicit
-// master scope (list member "" + flag, or the raw literal on a
-// hand-built config) keys as the wire token so it neither collides
-// with the unscoped key nor with a named instance.
-func nat64EffectiveRoutingInstances(rs *NAT64RuleSet) []string {
+// master scope (list member "" + flag) keys as the wire token so it neither
+// collides with the unscoped key nor with a named instance. A raw literal
+// `default` is normalized using cfg's declaration, as snapshot emission is.
+func nat64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
 	if rs == nil {
 		return nil
 	}
@@ -6324,11 +6324,31 @@ func nat64EffectiveRoutingInstances(rs *NAT64RuleSet) []string {
 		}
 	}
 	for i, ri := range out {
-		if ri == FBFDefaultRoutingInstance {
-			out[i] = NATDefaultRoutingInstanceWire
-		}
+		out[i] = NormalizeNATRoutingInstanceScope16604(cfg, ri)
 	}
 	return out
+}
+
+// nat64PrefixOwnerKeyScoped is the shadow key (#9555/#15678): same
+// prefix + same effective scope = the later rule-set can never be
+// selected. Name/pool are deliberately absent — different owners under
+// one scope still shadow. Zone/RI sets are length-prefixed
+// (encodeKeyElements), never comma-joined: a comma is a legal ident
+// character (lexer.go isIdentChar), so a zone literally named "x,y"
+// must not collide with the set {x, y} in the #5144 owner dedup.
+func nat64PrefixOwnerKeyScoped(cfg *Config, rs *NAT64RuleSet) (string, bool) {
+	if rs == nil {
+		return "", false
+	}
+	prefixKey, ok := nat64PrefixOwnerKey(rs.Prefix)
+	if !ok {
+		return "", false
+	}
+	zones := append([]string(nil), nat64EffectiveZones(rs)...)
+	sort.Strings(zones)
+	ris := append([]string(nil), nat64EffectiveRoutingInstances(cfg, rs)...)
+	sort.Strings(ris)
+	return prefixKey + "\x00" + encodeKeyElements(zones) + "\x00" + encodeKeyElements(ris), true
 }
 
 // encodeKeyElements length-prefixes each element ("<len>:<bytes>;"),
@@ -6343,28 +6363,6 @@ func encodeKeyElements(elems []string) string {
 		fmt.Fprintf(&b, "%d:%s;", len(e), e)
 	}
 	return b.String()
-}
-
-// nat64PrefixOwnerKeyScoped is the SHADOW key (#9555/#15678): same
-// prefix + same effective scope = the later rule-set can never be
-// selected. Name/pool are deliberately absent — different owners under
-// one scope still shadow. Zone/RI sets are length-prefixed
-// (encodeKeyElements), never comma-joined: a comma is a legal ident
-// character (lexer.go isIdentChar), so a zone literally named "x,y"
-// must not collide with the set {x, y} in the #5144 owner dedup.
-func nat64PrefixOwnerKeyScoped(rs *NAT64RuleSet) (string, bool) {
-	if rs == nil {
-		return "", false
-	}
-	prefixKey, ok := nat64PrefixOwnerKey(rs.Prefix)
-	if !ok {
-		return "", false
-	}
-	zones := append([]string(nil), nat64EffectiveZones(rs)...)
-	sort.Strings(zones)
-	ris := append([]string(nil), nat64EffectiveRoutingInstances(rs)...)
-	sort.Strings(ris)
-	return prefixKey + "\x00" + encodeKeyElements(zones) + "\x00" + encodeKeyElements(ris), true
 }
 
 // nat64ShadowedRuleSets maps every NAT64 rule-set the dataplane can NEVER select
@@ -6669,7 +6667,7 @@ func nat64SourceCover(earlierPrefixes []netip.Prefix, earlierKnown bool, laterPr
 // an earlier rule-set scoped on one axis never covers a later one scoped
 // only on the other, because its scoped axis excludes packets whose
 // zone/RI is empty/unknown.)
-func nat64ScopeCover(earlier, later *NAT64RuleSet) bool {
+func nat64ScopeCover(cfg *Config, earlier, later *NAT64RuleSet) bool {
 	ez, lz := nat64EffectiveZones(earlier), nat64EffectiveZones(later)
 	if len(ez) > 0 {
 		if len(lz) == 0 {
@@ -6685,7 +6683,7 @@ func nat64ScopeCover(earlier, later *NAT64RuleSet) bool {
 			}
 		}
 	}
-	er, lr := nat64EffectiveRoutingInstances(earlier), nat64EffectiveRoutingInstances(later)
+	er, lr := nat64EffectiveRoutingInstances(cfg, earlier), nat64EffectiveRoutingInstances(cfg, later)
 	if len(er) > 0 {
 		if len(lr) == 0 {
 			return false
@@ -6743,7 +6741,7 @@ func nat64ShadowedRuleSets(cfg *Config) map[*NAT64RuleSet]*NAT64RuleSet {
 			if epk != prefixKey {
 				continue
 			}
-			if !nat64ScopeCover(e.rs, rs) {
+			if !nat64ScopeCover(cfg, e.rs, rs) {
 				continue
 			}
 			covered := e.srcUnconstrained || nat64SourceCover(e.srcPrefixes, e.srcKnown, srcPrefixes, srcKnown && !srcUnconstrained)
