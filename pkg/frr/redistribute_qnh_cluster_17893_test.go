@@ -128,3 +128,32 @@ func TestOffFamilyCommunityRejectOmitted17893(t *testing.T) {
 		t.Errorf("same-family BGP-only reject control must retain its bare deny:\n%s", sameFamilySeqs)
 	}
 }
+func TestISISClusterComposedStaticPreservesAFVariant17893(t *testing.T) {
+	fc := &FullConfig{
+		ClusterMode:   true,
+		PolicyOptions: chainPO15156(),
+		ISIS: &config.ISISConfig{
+			NET:    "49.0001.0100.0100.1001.00",
+			Level:  "level-2",
+			Export: []string{"NO-RFC1918", "STATICS"},
+		},
+	}
+	got := New().buildManagedSection(fc)
+	base := composedISIS15156()
+	for _, family := range []struct {
+		name   string
+		suffix string
+	}{
+		{name: "ipv4", suffix: "-isis-v4"},
+		{name: "ipv6", suffix: "-isis-v6"},
+	} {
+		attached := base + family.suffix
+		if !strings.Contains(got, "redistribute "+family.name+" static level-2 route-map "+attached+"\n") {
+			t.Errorf("cluster IS-IS composed %s static line must attach %q:\n%s", family.name, attached, got)
+		}
+		redistSeqs16864(t, got, attached)
+	}
+	if strings.Contains(got, "route-map "+base+"\n") {
+		t.Errorf("cluster IS-IS must not attach the unsuffixed composed map %q:\n%s", base, got)
+	}
+}
