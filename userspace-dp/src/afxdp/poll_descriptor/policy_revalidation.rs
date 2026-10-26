@@ -2419,14 +2419,13 @@ fn reverse_hit_zone_policy(
             }
             if fwd_decision.resolution.disposition == super::ForwardingDisposition::LocalDelivery
                 || tun_origin_forward(&fwd_decision, &fwd_metadata, fwd_origin)
-                || forwarding
-                    .policy
-                    .icmp_verdict_may_depend_on_type(fwd_key.protocol)
             {
                 return None;
             }
+            let forward_companion_fenced = sessions.policy_revalidation_fenced(&fwd_key);
             let forward_route_stale = sessions.forwarding_resolution_is_stale(fwd_generation);
             let mut stored_pair_only = false;
+            let mut forward_companion_unresolvable = false;
             if forward_route_stale {
                 let current_fwd_resolution = resolve_current_forward_companion(
                     forwarding,
@@ -2457,12 +2456,24 @@ fn reverse_hit_zone_policy(
                     fwd_decision.resolution = current_fwd_resolution;
                 } else {
                     // Judge the stored forward pair when the current route is
-                    // non-forwarding. Permit/Decline keep the pair without
-                    // persisting this stale resolution; a non-permit revokes.
-                    // This also restores parent behavior for NoLocalEntry
-                    // non-Live companions (#12074 N2).
+                    // non-forwarding. Permit keeps it without persisting this
+                    // stale resolution; a non-permit revokes.
                     stored_pair_only = true;
+                    forward_companion_unresolvable =
+                        current_fwd_resolution.disposition == ForwardingDisposition::NoRoute;
                 }
+            }
+            let reverse_has_intent = !matches!(reverse_current, PolicyGateCurrent::NonLocal);
+            if forwarding
+                .policy
+                .icmp_verdict_may_depend_on_type(fwd_key.protocol)
+            {
+                return if rev_fail_closed_icmp || (reverse_has_intent && forward_companion_fenced)
+                {
+                    revocation_for_hit(sessions, &fwd_key)
+                } else {
+                    None
+                };
             }
             let from_source = reverse_companion_from_source(sessions, fwd_origin, &fwd_metadata)?;
             let fwd_flow = SessionFlow {
@@ -2536,6 +2547,11 @@ fn reverse_hit_zone_policy(
                     }
                     None
                 }
+                ZonePolicyJudgment::Decline
+                    if forward_companion_unresolvable && reverse_has_intent =>
+                {
+                    revocation_for_hit(sessions, &fwd_key)
+                }
                 ZonePolicyJudgment::Decline => None,
                 ZonePolicyJudgment::Revoke => Some(PolicyRevocation {
                     canonical_key: Some(fwd_key),
@@ -2600,8 +2616,8 @@ fn reverse_hit_zone_policy(
     // locally forward and its own row needs cold, or the companion itself
     // demands live. A FIB-stale LiveEgress companion with a non-forwarding
     // current route instead judges the STORED pair without persisting that
-    // route or stamping either row: deny/reject revokes; Permit or unfenced
-    // Decline keeps.
+    // route or stamping either row: deny/reject revokes; Permit keeps. A
+    // NoRoute companion is the explicit fail-closed exception to soft Decline.
     let reverse_inconsistent_fail_closed =
         (reverse_has_intent && reverse_row_needs_cold) || companion_needs_live;
     // Do not skip a fresh reverse policy entry while its forward AppID label
@@ -2654,6 +2670,7 @@ fn reverse_hit_zone_policy(
         && matches!(stored_fwd_kind, PolicyRevalidationKind::LiveEgress)
         && fwd_decision.resolution.disposition != ForwardingDisposition::FabricRedirect;
     let mut stored_pair_only = false;
+    let mut companion_unresolvable = false;
     if reverse_has_intent
         && (fwd_decision.resolution.disposition == ForwardingDisposition::FabricRedirect
             || !matches!(stored_fwd_kind, PolicyRevalidationKind::LiveEgress)
@@ -2683,6 +2700,8 @@ fn reverse_hit_zone_policy(
         } else if companion_fib_stale_live {
             // Judge the STORED forward pair, without persisting this
             // non-forwarding resolution or stamping the reverse row.
+            companion_unresolvable =
+                current_fwd_resolution.disposition == ForwardingDisposition::NoRoute;
             stored_pair_only = true;
         } else {
             // FabricRedirect and non-Live provenance retain the pre-existing
@@ -2796,7 +2815,9 @@ fn reverse_hit_zone_policy(
             }
             None
         }
-        ZonePolicyJudgment::Decline if rev_fail_closed_decline || companion_needs_live => {
+        ZonePolicyJudgment::Decline
+            if rev_fail_closed_decline || companion_needs_live || companion_unresolvable =>
+        {
             revocation_for_hit(sessions, session_key)
         }
         ZonePolicyJudgment::Decline => None,

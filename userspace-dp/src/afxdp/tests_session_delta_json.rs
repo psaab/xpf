@@ -305,14 +305,19 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
     // The fixed close/install/ICMP/ingress tail precedes the length-prefixed
-    // rule ID. #10888 appends handshake state and #12187 appends provenance
-    // after the ID, so locate its prefix immediately before both trailer bytes.
+    // rule ID. After the ID the encoder appends handshake (1), provenance (1),
+    // the PPTP pair (8), the #15176 NAT-scope ifindex (4) and the #16217
+    // packet counters (8+8) — 30 trailer bytes in total (#16215 extended the
+    // #14839 reservation; the stale `- 6` here predates it and read the
+    // provenance byte as the length prefix). The sibling codec tests
+    // (`session_open_rule_id_at_capacity_boundary_14839`) pin the same 30.
+    const RULE_ID_TRAILER_BYTES: usize = 30;
     let expected_rule_id = delta
         .metadata
         .policy_counter
         .as_ref()
         .map_or("", |counter| counter.rule_id());
-    let rule_id_end = payload.len() - 6; // handshake, provenance, PPTP pair and #15176 scope trail the rule ID
+    let rule_id_end = payload.len() - RULE_ID_TRAILER_BYTES;
     let id_start = rule_id_end - expected_rule_id.len();
     let rule_id_prefix = id_start - 2;
     let encoded_len = u16::from_le_bytes(

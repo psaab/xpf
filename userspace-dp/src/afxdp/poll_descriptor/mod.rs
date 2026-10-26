@@ -3573,29 +3573,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         let reverse_icmp_denied =
                             matches!(owner_icmp_verdict, Some(OwnerHitIcmpVerdict::Drop(_)))
                                 && resolved.metadata.is_reverse;
-                        if session_hit_revocation.is_none()
-                            && !reverse_icmp_denied
-                            && let Some(OwnerHitIcmpVerdict::Drop(deny)) = owner_icmp_verdict
-                        {
-                            emit_session_hit_policy_deny_event(
-                                worker_ctx.forwarding,
-                                worker_ctx.event_stream,
-                                &mut binding.tx_pipeline,
-                                binding.ifindex,
-                                packet_frame,
-                                telemetry.counters,
-                                resolved.decision,
-                                flow,
-                                meta,
-                                resolved.metadata.ingress_zone,
-                                resolved.metadata.egress_zone,
-                                deny,
-                                now_ns,
-                            );
-                            telemetry.dbg.policy_deny += 1;
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
                         if session_hit_revocation.is_none() {
                             session_hit_revocation = match foreign_arrival_zone {
                                 None => {
@@ -3760,6 +3737,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     .snat_revoked_sessions
                                     .fetch_add(1, Ordering::Relaxed);
                             }
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        // #10507: run policy revalidation before enforcing the
+                        // owner ICMP verdict. A packet-specific type denial
+                        // drops this packet, but a stale RecordedEgress session
+                        // also owes a pair teardown; dropping first would leave
+                        // the recorded authorization alive until session expiry.
+                        // Reverse denials were already deferred for this reason.
+                        if session_hit_revocation.is_none()
+                            && !reverse_icmp_denied
+                            && let Some(OwnerHitIcmpVerdict::Drop(deny)) = owner_icmp_verdict
+                        {
+                            emit_session_hit_policy_deny_event(
+                                worker_ctx.forwarding,
+                                worker_ctx.event_stream,
+                                &mut binding.tx_pipeline,
+                                binding.ifindex,
+                                packet_frame,
+                                telemetry.counters,
+                                resolved.decision,
+                                flow,
+                                meta,
+                                resolved.metadata.ingress_zone,
+                                resolved.metadata.egress_zone,
+                                deny,
+                                now_ns,
+                            );
+                            telemetry.dbg.policy_deny += 1;
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
