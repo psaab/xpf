@@ -68,10 +68,10 @@ a selector-identical `unreachable` shadow per default-instance ingress
 interface. Independently, the manager installs a destination- and iif-scoped
 slot-0 main lookup for each configured non-next-table static route strictly
 more specific than a matching admitted config next-table prefix that FRR can
-render. `StaticRouteExcludedReason` filters statics FRR will not install
-(including `no-install`, unusable destinations, family-mismatched gateways,
-and routes with no forwarding disposition); the shared FRR operand predicates
-also require at least one renderable ECMP member. Valid discard/reject and
+`StaticRouteExcludedReason` excludes cases such as `no-install`, unusable
+destinations, family-mismatched gateways, and routes with no forwarding
+disposition; the shared FRR operand predicates additionally require at least
+one renderable ECMP member. Valid discard/reject and
 qualified-next-hop statics remain eligible.
 Each exception is installed only after the leak's unreachable-shadow/target-
 lookup pairs and uses `suppress_prefixlen = route_prefix_length - 1`, so an

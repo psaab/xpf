@@ -103,6 +103,7 @@ func TestNextTableStaticMainCarveouts17970(t *testing.T) {
 			{Address: "192.0.2.999"},
 			{Address: "192.0.2.8"},
 		}},
+		{Destination: "10.9.0.0/16", NextHops: []config.NextHopEntry{{Interface: ".0"}}},
 		{Destination: "0.0.0.0/0", Discard: true},
 		{Destination: "2001:db8::/32", NextTable: "red"},
 		{Destination: "2001:db8:1::/48", Reject: true},

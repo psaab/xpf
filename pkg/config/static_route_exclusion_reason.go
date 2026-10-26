@@ -159,9 +159,10 @@ func staticRouteHasDisposition(sr *StaticRoute) bool {
 
 // StaticRouteHasFRRRenderableNextHop reports whether at least one ECMP member
 // survives the static-route renderer's address and interface operand belts.
-// The renderer drops an individual malformed member and retains healthy
-// siblings; route-leak exceptions must use the same member-level decision or
-// they can preserve a route FRR omitted.
+// It mirrors the renderer's default `.0` unit collapse so an interface-only
+// `.0` is not mistaken for a forwarding target. Malformed members are dropped
+// individually while healthy ECMP siblings remain; route-leak exceptions must
+// use the same decision or they can preserve a route FRR omitted.
 func StaticRouteHasFRRRenderableNextHop(sr *StaticRoute) bool {
 	if sr == nil {
 		return false
@@ -170,10 +171,14 @@ func StaticRouteHasFRRRenderableNextHop(sr *StaticRoute) bool {
 		if nh.Address != "" && !FRRNextHopAddressOperand(nh.Address) {
 			continue
 		}
-		if nh.Interface != "" && !FRRInterfaceOperand(nh.Interface) {
+		ifName := nh.Interface
+		if strings.HasSuffix(ifName, ".0") {
+			ifName = strings.TrimSuffix(ifName, ".0")
+		}
+		if ifName != "" && !FRRInterfaceOperand(ifName) {
 			continue
 		}
-		if nh.Address != "" || nh.Interface != "" {
+		if nh.Address != "" || ifName != "" {
 			return true
 		}
 	}
