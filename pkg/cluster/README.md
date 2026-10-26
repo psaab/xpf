@@ -3110,7 +3110,9 @@ existing short non-empty primary may remain while the replacement is staged
 only when the active config already signs with that same short primary. A
 previously persisted whitespace-only primary may also remain temporarily, but
 the candidate must preserve its exact raw bytes from the active config while
-staging the strong replacement. Neither exception can be opened by a fresh
+staging the strong replacement. The same exact-current exception passes the
+earlier ordered `strict-session-auth` gate, so operators can retain that
+posture throughout the repair. Neither exception can be opened by a fresh
 candidate authoring the same shape. Stage the replacement on both nodes first
 (rotation steps 1–2), then swap it into `authentication-key` and move the old
 primary to the additional slot (steps 3–4), and finalize by deleting the

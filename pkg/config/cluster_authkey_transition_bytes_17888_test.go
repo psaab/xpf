@@ -69,18 +69,38 @@ func TestQuotedPaddedSigningKeyIsDistinctTransition17888(t *testing.T) {
 	}
 }
 
+func strictSessionClusterTree17888(t *testing.T, primary, additional string) *ConfigTree {
+	t.Helper()
+	lines := []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster strict-session-auth",
+	}
+	if primary != "" {
+		lines = append(lines, "set chassis cluster authentication-key "+primary)
+	}
+	if additional != "" {
+		lines = append(lines, "set chassis cluster additional-authentication-key "+additional)
+	}
+	return buildTree(t, lines)
+}
+
 // TestPersistedWhitespaceOnlyPrimaryStagedMigration17888 pins the repair
 // path for a tolerantly persisted whitespace-only PSK (#17888 fold): the
 // runtime installs `authentication-key "   "` raw, so it is a real active
 // key, but the strict strength gate treats it as unset. The operator must
 // be able to retire it through the #6630 overlap — stage a strong
 // replacement beside the byte-identical old primary, swap, finalize —
-// while a freshly authored whitespace-only key stays refused.
+// while a freshly authored whitespace-only key stays refused. Retaining
+// strict-session-auth ensures its earlier ordered gate also admits this
+// same narrowly bounded repair path.
 func TestPersistedWhitespaceOnlyPrimaryStagedMigration17888(t *testing.T) {
 	const ws = "   "
 	quotedWS := `"` + ws + `"`
 
-	currentWS := currentConfig16858(t, quotedWS, "")
+	currentWS, err := CompileConfigLenient(strictSessionClusterTree17888(t, quotedWS, ""))
+	if err != nil {
+		t.Fatalf("tolerant strict-session fixture: %v", err)
+	}
 	if got := currentWS.Chassis.Cluster.ControlLinkAuthKey.Reveal(); got != ws {
 		t.Fatalf("persisted whitespace fixture compiled to %q, want byte-exact %q", got, ws)
 	}
@@ -88,42 +108,51 @@ func TestPersistedWhitespaceOnlyPrimaryStagedMigration17888(t *testing.T) {
 	// Staging (step 1/2): keep signing with the persisted whitespace
 	// primary while staging a strong replacement. Must commit.
 	if _, err := CompileConfigWithCurrentClusterPrimary(
-		clusterTree16858(t, quotedWS, keyB16858), currentWS); err != nil {
+		strictSessionClusterTree17888(t, quotedWS, keyB16858), currentWS); err != nil {
 		t.Fatalf("staging a replacement beside the persisted whitespace-only primary rejected: %v", err)
 	}
 	// Direct swap without staging: the active set {"   "} does not
 	// accept the strong key, so the transition interlock refuses.
 	if _, err := CompileConfigWithCurrentClusterPrimary(
-		clusterTree16858(t, keyB16858, ""), currentWS); err == nil {
+		strictSessionClusterTree17888(t, keyB16858, ""), currentWS); err == nil {
 		t.Fatal("direct swap from the persisted whitespace-only primary committed without staging (#17888)")
 	}
 	// Step 3/4: sign the staged strong key, keep the whitespace key
 	// accept-only until the peer catches up.
-	currentStaged := currentConfig16858(t, quotedWS, keyB16858)
+	currentStaged, err := CompileConfigLenient(strictSessionClusterTree17888(t, quotedWS, keyB16858))
+	if err != nil {
+		t.Fatalf("tolerant staged-key fixture: %v", err)
+	}
 	if _, err := CompileConfigWithCurrentClusterPrimary(
-		clusterTree16858(t, keyB16858, quotedWS), currentStaged); err != nil {
+		strictSessionClusterTree17888(t, keyB16858, quotedWS), currentStaged); err != nil {
 		t.Fatalf("swap to the staged key rejected: %v", err)
 	}
 	// Step 5 finalize: drop the whitespace additional key.
-	currentSwapped := currentConfig16858(t, keyB16858, quotedWS)
+	currentSwapped, err := CompileConfigLenient(strictSessionClusterTree17888(t, keyB16858, quotedWS))
+	if err != nil {
+		t.Fatalf("tolerant swapped-key fixture: %v", err)
+	}
 	if _, err := CompileConfigWithCurrentClusterPrimary(
-		clusterTree16858(t, keyB16858, ""), currentSwapped); err != nil {
+		strictSessionClusterTree17888(t, keyB16858, ""), currentSwapped); err != nil {
 		t.Fatalf("finalize after the whitespace-key rotation rejected: %v", err)
 	}
 	// A different whitespace spelling is not the persisted key.
-	currentOtherWS := currentConfig16858(t, `"  "`, "")
+	currentOtherWS, err := CompileConfigLenient(strictSessionClusterTree17888(t, `"  "`, ""))
+	if err != nil {
+		t.Fatalf("tolerant alternate-whitespace fixture: %v", err)
+	}
 	if _, err := CompileConfigWithCurrentClusterPrimary(
-		clusterTree16858(t, quotedWS, keyB16858), currentOtherWS); err == nil {
+		strictSessionClusterTree17888(t, quotedWS, keyB16858), currentOtherWS); err == nil {
 		t.Fatal("staging beside a different whitespace spelling committed; the exception must require the byte-identical persisted primary")
 	}
 	// Freshly authored whitespace-only keys stay refused even with a
 	// strong additional key staged beside them.
-	if _, err := CompileConfig(clusterTree16858(t, quotedWS, keyB16858)); err == nil {
+	if _, err := CompileConfig(strictSessionClusterTree17888(t, quotedWS, keyB16858)); err == nil {
 		t.Fatal("freshly authored whitespace-only primary with a strong additional key committed")
 	}
 	// A weak additional key does not open the migration path.
 	if _, err := CompileConfigWithCurrentClusterPrimary(
-		clusterTree16858(t, quotedWS, "tiny"), currentWS); err == nil {
+		strictSessionClusterTree17888(t, quotedWS, "tiny"), currentWS); err == nil {
 		t.Fatal("staging a weak additional key beside the persisted whitespace-only primary committed")
 	}
 }

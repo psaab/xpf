@@ -204,7 +204,7 @@ func TestStorePersistedWhitespaceOnlyPrimaryStagedMigration17888(t *testing.T) {
 	const quotedWhitespace = `"   "`
 
 	seed := newTestStore(t)
-	tree, errs := config.NewParser(`chassis { cluster { cluster-id 1; authentication-key ` + quotedWhitespace + `; } }`).Parse()
+	tree, errs := config.NewParser(`chassis { cluster { cluster-id 1; strict-session-auth; authentication-key ` + quotedWhitespace + `; } }`).Parse()
 	if len(errs) != 0 {
 		t.Fatalf("parse persisted whitespace-only config: %v", errs[0])
 	}
@@ -216,8 +216,12 @@ func TestStorePersistedWhitespaceOnlyPrimaryStagedMigration17888(t *testing.T) {
 	if err := s.Load(); err != nil {
 		t.Fatalf("Load rejected the persisted whitespace-only key on tolerant ingress: %v", err)
 	}
-	if got := s.ActiveConfig().Chassis.Cluster.ControlLinkAuthKey.Reveal(); got != whitespace {
+	active := s.ActiveConfig()
+	if got := active.Chassis.Cluster.ControlLinkAuthKey.Reveal(); got != whitespace {
 		t.Fatalf("Load installed primary %q, want raw whitespace PSK %q", got, whitespace)
+	}
+	if !active.Chassis.Cluster.StrictSessionAuth {
+		t.Fatal("Load dropped the persisted strict-session-auth posture")
 	}
 
 	// A direct swap is still refused by both commit boundaries.
@@ -264,10 +268,14 @@ func TestStorePersistedWhitespaceOnlyPrimaryStagedMigration17888(t *testing.T) {
 		t.Fatalf("Commit rejected finalizing the whitespace-key rotation: %v", err)
 	}
 	s.ExitConfigure()
-	if got := s.ActiveConfig().Chassis.Cluster.ControlLinkAuthKey.Reveal(); got != transitionKeyB16858 {
+	active = s.ActiveConfig()
+	if got := active.Chassis.Cluster.ControlLinkAuthKey.Reveal(); got != transitionKeyB16858 {
 		t.Fatalf("finalized primary = %q, want replacement key", got)
 	}
-	if got := s.ActiveConfig().Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal(); got != "" {
+	if got := active.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal(); got != "" {
 		t.Fatalf("finalized additional key = %q, want empty", got)
+	}
+	if !active.Chassis.Cluster.StrictSessionAuth {
+		t.Fatal("rotation dropped the persisted strict-session-auth posture")
 	}
 }

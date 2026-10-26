@@ -137,21 +137,13 @@ func validateClusterAuthKeyStrictWithCurrent(
 			len(key), MinAdvisedControlLinkKeyLen)
 	}
 
-	// #17888: a previously persisted whitespace-only primary is a raw PSK
-	// to the runtime but appears empty to this strict strength gate. Permit
-	// it only while staging a strong, byte-distinct replacement beside the
-	// exact same current primary. currentAccepted is supplied only from the
-	// active config in the candidate pipeline, so this does not admit a
-	// newly authored whitespace-only primary.
-	rawPrimary := cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()
-	altRaw := cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()
-	if rawPrimary != "" && strings.TrimSpace(rawPrimary) == "" &&
-		currentAccepted != nil && currentAccepted.primary == rawPrimary {
-		alt := strings.TrimSpace(altRaw)
-		if len(alt) >= MinAdvisedControlLinkKeyLen && altRaw != rawPrimary {
-			return nil
-		}
+	// #17888: the exact same current-state proof is also used by the earlier
+	// strict-session-auth gate, so this posture cannot close the legacy repair
+	// path before the normal key-strength check reaches it.
+	if canStageCurrentWhitespacePrimary17888(cfg, currentAccepted) {
+		return nil
 	}
+	altRaw := cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()
 	if strings.TrimSpace(altRaw) != "" {
 		// #6630: the additional key is ACCEPTED, never SIGNED with, so a
 		// cluster carrying only it signs nothing and is exactly as fail-open
@@ -192,14 +184,20 @@ func validateClusterAuthKeyStrictWithCurrent(
 // config already on disk, or pushed from a peer, must still boot: an inert
 // posture leaf is no more dangerous at runtime than not setting it, so
 // refusing to load one would brick a node over a no-op.
-func validateStrictSessionAuthNeedsKeyStrict(cfg *Config) error {
+func validateStrictSessionAuthNeedsKeyStrict(
+	cfg *Config,
+	currentAccepted *clusterAcceptedKeys16858,
+) error {
 	if cfg == nil || cfg.Chassis.Cluster == nil || !cfg.Chassis.Cluster.StrictSessionAuth {
 		return nil
 	}
+	// #17888's legacy migration is the only whitespace-only exception here:
+	// preserve the exact active primary while staging a strong distinct key.
 	// TrimSpace for the same reason validateClusterAuthKeyStrict trims: a
 	// whitespace-only key is "configured" to the runtime's len(key) > 0 test
 	// but is not a key. Deliberately stricter than the runtime here.
-	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()) != "" {
+	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()) != "" ||
+		canStageCurrentWhitespacePrimary17888(cfg, currentAccepted) {
 		return nil
 	}
 	return fmt.Errorf("chassis cluster: `strict-session-auth` is set but " +
@@ -208,6 +206,27 @@ func validateStrictSessionAuthNeedsKeyStrict(cfg *Config) error {
 		"nothing at all and the #6628 residual it is meant to close stays open; set " +
 		"`chassis cluster authentication-key <key>` (the SAME value on both nodes), " +
 		"or remove `strict-session-auth`")
+}
+
+// canStageCurrentWhitespacePrimary17888 admits a whitespace-only primary
+// only when its raw bytes exactly match the current accepted primary and the
+// candidate stages a distinct additional key meeting the strength floor.
+// Both the session-auth posture gate and the key-strength gate use this
+// predicate, keeping the narrowly proven legacy repair path consistent.
+func canStageCurrentWhitespacePrimary17888(
+	cfg *Config,
+	currentAccepted *clusterAcceptedKeys16858,
+) bool {
+	if cfg == nil || cfg.Chassis.Cluster == nil || currentAccepted == nil {
+		return false
+	}
+	primary := cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()
+	if primary == "" || strings.TrimSpace(primary) != "" || currentAccepted.primary != primary {
+		return false
+	}
+	additional := cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()
+	return additional != primary &&
+		len(strings.TrimSpace(additional)) >= MinAdvisedControlLinkKeyLen
 }
 
 // validateClusterAuthKeyOverlapStrict rejects a rotation overlap that is not
