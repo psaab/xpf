@@ -158,7 +158,11 @@ func (p *retiredPending) recordForget(c *SyslogClient) {
 
 // foldInto folds each pending client's post-retire counter growth (its
 // Close discards) into acc. A client's pending entry is cleared only
-// once its counters are FINAL (Close completed drain+join): Close counts its queue discards
+// once its counters are FINAL and STABLE: the client reports closed,
+// and two consecutive stats calls observe identical counters. (Close
+// stores its flags before the writer goroutine's last drop can land
+// for non-interrupting custom conns, so closed-alone is not proof of
+// finality; stability across calls is.) Close counts its queue discards
 // synchronously (writer.stop) before returning, so a closed client's
 // counters are final. A still-open client (retired but not yet closed
 // by its owner, or being drained) folds what it has counted so far and
@@ -185,7 +189,13 @@ func (p *retiredPending) foldInto(acc *syslogDropAccumulator) {
 		if delta.Writes != 0 || delta.Dials != 0 || delta.Cooldown != 0 {
 			acc.foldFor(c, delta)
 		}
-		if c.CountsFinal() {
+		// Delete only when Close claims finality AND the counters did
+		// not move since the previous snapshot (delta zero): Close
+		// raises its flag before the bounded-join writer's last drop
+		// can be counted for non-interrupting conns, so flag-alone
+		// would still race one in-flight record (#17855 fold 3).
+		stable := delta.Writes == 0 && delta.Dials == 0 && delta.Cooldown == 0
+		if c.CountsFinal() && stable {
 			delete(*p, c)
 		} else {
 			// Not final yet: advance the snapshot so the remainder is

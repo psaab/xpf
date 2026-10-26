@@ -2162,10 +2162,12 @@ func (s *SyslogClient) CloseTimeout(timeout time.Duration) error {
 	return s.Close()
 }
 
-// CountsFinal reports whether this client's drop counters are final:
-// Close has marked it closed AND the writer stop (which counts the
-// queued discards) plus the bounded send-join have completed. IsClosed
-// alone does NOT imply final — Close stores the flag BEFORE counting.
+// CountsFinal reports that Close has completed its drain+join. It is
+// a CLAIM of finality, not proof: for conns whose Close does not
+// interrupt an in-flight Write, the writer can count one last drop
+// after the bounded join expires. The retired-pending fold therefore
+// additionally requires counter stability across scrapes before
+// deleting a pending entry (#17855).
 func (s *SyslogClient) CountsFinal() bool { return s.countsFinal.Load() }
 
 // ShutdownDrained reports whether this client's writer goroutine has

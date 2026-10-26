@@ -226,3 +226,22 @@ func TestReinstalledRetiredClientDoesNotDoubleCount17855(t *testing.T) {
 		t.Fatalf("security Writes after reinstall = %d, want exactly %d (no double count)", st.Writes, backlog)
 	}
 }
+
+// #17855 fold 3 (handler twin): retire+Close with NO intervening
+// scrape, then reinstall the same pointer — pending must be forgotten
+// too, or the reinstall's live row plus the pending fold double-count.
+func TestHandlerReinstallAfterRetireNoStatsNoDoubleCount17855(t *testing.T) {
+	conn := newStalledSyslogEventConn11697()
+	client := NewSyslogClientWithConn(conn, "tcp")
+	handler := NewSyslogSlogHandler(slog.NewTextHandler(io.Discard, nil))
+	handler.SetClients([]*SyslogClient{client})
+
+	const backlog = 8
+	queueBacklog17855(t, client, conn, backlog)
+	handler.SetClients(nil) // retire + Close, no stats call
+	handler.SetClients([]*SyslogClient{client})
+	st := dropStatFor17855(t, handler.SyslogDropStats(), "system")
+	if st.Writes != backlog {
+		t.Fatalf("system Writes after handler reinstall = %d, want exactly %d", st.Writes, backlog)
+	}
+}
