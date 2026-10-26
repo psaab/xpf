@@ -242,7 +242,7 @@ func (d *Daemon) applyFRRFull(cfg *config.Config, commitOverlay []config.RouteOv
 	if d.frr == nil {
 		return nil
 	}
-	err := d.applyFRRConfig(d.assembleFRRConfig(cfg, commitOverlay))
+	err := d.applyFRRConfig(d.assembleFRRConfigForActiveConfig(cfg, commitOverlay))
 	if err == nil {
 		return nil
 	}

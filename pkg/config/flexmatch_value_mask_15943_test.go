@@ -10,13 +10,15 @@ import (
 // not be overwritten by the full-width default, and a value/mask carrying
 // bits outside bit-length must not be silently truncated. Strict commit
 // rejects a value-less discard/reject term and every out-of-width term; a
-// value-less accept/next-term term stays strict-accepted (packed/fused
-// controls) and is refused at the dataplane. The tolerant path warns and
-// builders refuse the candidate via FlexMatchValid.
+// value-less accept/next-term term stays strict-accepted with its warning
+// preserved (packed/fused controls) and is refused at the dataplane. The
+// tolerant path warns and builders refuse the candidate via FlexMatchValid.
 //
 // RED-on-revert: drop ValueSet/MaskSet tracking and the zero-mask term
 // gets Mask=0xFF again; drop the FlexMatchValid strict check and the
 // missing-value discard / out-of-width terms commit clean with a live match.
+// Restore the old lenient-only warning guard and the accepted accept/next-term
+// warning controls below fail (#17885).
 
 func flexTerm15943(t *testing.T, cmds ...string) (*Config, error) {
 	t.Helper()
@@ -40,23 +42,32 @@ func TestFlexMatchMissingValueRejected_15943(t *testing.T) {
 			t.Errorf("value-less %s rejection must name flexible-match-range, got: %v", action, err)
 		}
 	}
-	// Accept control: a value-less accept term stays strict-accepted
-	// (packed/fused controls) with ValueMissing recorded, and is refused
-	// at the dataplane rather than widened.
-	cfg, err := flexTerm15943(t,
-		"set firewall family inet filter f1 term missing-val from flexible-match-range range r1 bit-length 8",
-		"set firewall family inet filter f1 term missing-val from flexible-match-range range r1 byte-offset 12",
-		"set firewall family inet filter f1 term missing-val then accept",
-	)
-	if err != nil {
-		t.Fatalf("value-less accept term must keep compiling: %v", err)
-	}
-	term := firstInetTerm(t, cfg, "f1")
-	if FlexMatchValid(term.FlexMatch) {
-		t.Errorf("value-less term is FlexMatchValid — builders would emit a live 0x0 match: %+v", term.FlexMatch)
-	}
-	if !term.FlexMatch.ValueMissing {
-		t.Errorf("compiler did not record the missing value: %+v", term.FlexMatch)
+	// Strictly accepted controls: value-less accept and next-term terms remain
+	// unrepresentable at the dataplane, but must retain their operator warning.
+	for _, action := range []string{"accept", "next term"} {
+		t.Run(action, func(t *testing.T) {
+			cfg, err := flexTerm15943(t,
+				"set firewall family inet filter f1 term missing-val from flexible-match-range range r1 bit-length 8",
+				"set firewall family inet filter f1 term missing-val from flexible-match-range range r1 byte-offset 12",
+				"set firewall family inet filter f1 term missing-val then "+action,
+			)
+			if err != nil {
+				t.Fatalf("value-less %s term must keep compiling: %v", action, err)
+			}
+			if !strings.Contains(strings.Join(cfg.Warnings, "\n"), "no match-value") {
+				t.Errorf("strict value-less %s term accepted without warning: %v", action, cfg.Warnings)
+			}
+			term := firstInetTerm(t, cfg, "f1")
+			if FlexMatchValid(term.FlexMatch) {
+				t.Errorf("value-less term is FlexMatchValid — builders would emit a live 0x0 match: %+v", term.FlexMatch)
+			}
+			if !term.FlexMatch.ValueMissing {
+				t.Errorf("compiler did not record the missing value: %+v", term.FlexMatch)
+			}
+			if action == "next term" && !term.NextTerm {
+				t.Errorf("strict next-term control lost its fall-through action: %+v", term)
+			}
+		})
 	}
 	// Tolerant control: lenient compile still boots with a warning.
 	tree := buildTree(t, []string{
