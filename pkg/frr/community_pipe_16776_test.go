@@ -23,9 +23,12 @@ import (
 // so every such community-list was silently absent and a reject term
 // over it failed open.
 //
-// Post-#16788, the community translator emits pipe-safe regexes or
-// refuses the member and fails closed. The BGP neighbor-description
-// gate refuses/omits prose carrying "| ". Junos AS-path regexes are
+// Post-#16788, on the ordinary pipe-check path the community
+// translator emits pipe-safe regexes or refuses the member and fails
+// closed. Exception (#17977): negated bracket classes the translator
+// does not confine (e.g. `65000:[^| ]`) are accepted verbatim and can
+// still render a literal `| `. The BGP neighbor-description gate
+// refuses/omits prose carrying "| ". Junos AS-path regexes are
 // translated before render, normalizing grouping whitespace. No
 // standalone pipe-rewrite belt remains.
 //
@@ -55,10 +58,11 @@ func TestCommunityPipeRender16776(t *testing.T) {
 	})
 
 	t.Run("grouped operator regex with pipe-space is unrenderable post-16788", func(t *testing.T) {
-		// The original #16776 grouping rewrite was superseded by
-		// #16788's stricter refusal: translateCommunityCore rejects
-		// any "| " so the definition is omitted and fails closed
-		// (operator rewrites it as "^((56)|(78)):(.*)$").
+		// #16788's stricter refusal rejects this grouped operator regex's
+		// literal "| ", so the definition is omitted and fails closed.
+		// The #17977 negated-bracket exception (e.g. `[^| ]`) remains
+		// accepted verbatim; this test exercises the ordinary pipe-check
+		// path.
 		member := "^((56) | (78)):(.*)$"
 		po := communityPolicyPO(
 			map[string]*config.CommunityDef{"OP": {Name: "OP", Members: []string{member}}},

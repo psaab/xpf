@@ -11,8 +11,10 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// TestNoDeadPipeRewrite17799 pins #17799's cleanup: the community
-// translator already emits pipe-safe regexes, the AS-path translator
+// TestNoDeadPipeRewrite17799 pins #17799's cleanup: on the ordinary
+// pipe-check path the community translator already emits pipe-safe
+// regexes (the #17977 negated-bracket exception, e.g. `65000:[^| ]`
+// accepted verbatim, is out of scope here), the AS-path translator
 // removes grouping whitespace around alternation, and neighbor
 // descriptions are refused/omitted. A second unused render belt must
 // not be kept as if it covered those paths.
@@ -42,9 +44,10 @@ func TestNoDeadPipeRewrite17799(t *testing.T) {
 
 // TestPipeOperands17799 exercises the actual free-text rendering
 // paths: AS-path regexes are translated before render, community
-// regexes are pipe-safe/refused, and neighbor descriptions are
-// refused/omitted. Controls pin regular regex rendering and the
-// existing pipe gates.
+// regexes are pipe-safe/refused on the ordinary pipe-check path
+// (negated bracket classes such as `[^| ]` remain accepted verbatim
+// per #17977), and neighbor descriptions are refused/omitted.
+// Controls pin regular regex rendering and the existing pipe gates.
 func TestPipeOperands17799(t *testing.T) {
 	// AS-path alternation with grouping whitespace is normalized by
 	// TranslateJunosASPathRegex before reaching the renderer.
