@@ -150,8 +150,8 @@ func ConfigureReadlineHistory(cfg *readline.Config) *readline.Config {
 // ReadHistorySeed returns the persisted history lines from path in file order
 // (oldest first), skipping blank lines exactly as readline's own loader does.
 // A missing file is an empty seed, not an error: first-run has no history.
-// The lines were filtered by RecordHistoryLine when written, so no sensitive
-// line is ever seeded back.
+// The seed filter replays config-mode navigation so legacy lines are judged
+// with the edit cursor that was active when submitted.
 func ReadHistorySeed(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -168,19 +168,73 @@ func ReadHistorySeed(path string) ([]string, error) {
 		}
 		lines = append(lines, line)
 	}
-	// Defense in depth: a history file written before the #15284 filter (or
-	// hand-edited) may contain a credential line the old always-on autosave
-	// persisted. Never seed those back into a live session's recall, where a
-	// later Rewrite-free session would re-expose them; RecordHistoryLine will
-	// also keep them off disk going forward because seeding never writes.
+	// Defense in depth: files written before cursor-aware history filtering
+	// (or hand-edited) may contain credentials. Judge each line against the
+	// cursor at submission time, then advance navigation even when the line
+	// itself is filtered, so later lines retain their original context.
+	var editPath []string
+	configMode := false
 	filtered := lines[:0]
 	for _, line := range lines {
-		if IsSensitiveHistoryLine(line) {
-			continue
+		cursor := editPath
+		if !configMode {
+			cursor = nil
 		}
-		filtered = append(filtered, line)
+		if !IsSensitiveHistoryLineAt(cursor, line) {
+			filtered = append(filtered, line)
+		}
+		editPath, configMode = advanceHistorySeedCursor(editPath, configMode, line)
 	}
 	return filtered, nil
+}
+
+// advanceHistorySeedCursor mirrors the local and remote CLI's navigation
+// transitions for history replay. History starts in operational mode, and
+// the edit cursor changes only for commands that dispatch can execute as
+// navigation; prefixed top/up commands restore the prior cursor after their
+// inner command.
+func advanceHistorySeedCursor(editPath []string, configMode bool, line string) ([]string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return editPath, configMode
+	}
+	switch fields[0] {
+	case "configure":
+		if !configMode {
+			return nil, true
+		}
+	case "edit":
+		if configMode {
+			fragment, ok := config.ParseEditFragment(line)
+			if ok && len(fragment) > 0 {
+				path := append(config.NormalizeEditPathTokens(editPath), fragment...)
+				return config.NormalizeEditPathTokens(path), true
+			}
+		}
+	case "top", "up":
+		if configMode {
+			target, inner, _, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(editPath), line)
+			if ok {
+				if len(inner) == 0 {
+					return target, true
+				}
+				// A prefixed top-level exit releases config mode. At a
+				// non-root target exit only pops that temporary cursor;
+				// dispatchTopUp restores the original cursor afterwards.
+				if len(target) == 0 && (inner[0] == "exit" || inner[0] == "quit") {
+					return nil, false
+				}
+			}
+		}
+	case "exit", "quit":
+		if configMode {
+			if len(editPath) > 0 {
+				return config.PopEditPathIdentity(config.NormalizeEditPathTokens(editPath)), true
+			}
+			return nil, false
+		}
+	}
+	return editPath, configMode
 }
 
 // SeedHistory replays persisted history lines into a live readline instance
