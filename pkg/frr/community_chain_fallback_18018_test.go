@@ -281,3 +281,28 @@ func TestMixedChainMultiVariantContinuation18018(t *testing.T) {
 		t.Fatalf("emitted %d modifying body variants, want 2\n%s", bodyVariants, body)
 	}
 }
+
+func TestMixedCommunityChainBothInvalidPrefixListStillLowers18018(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		Communities: map[string]*config.CommunityDef{
+			"SH": {Name: "SH", Members: []string{"65000:.*", ".*:100"}},
+		},
+		PrefixLists: map[string]*config.PrefixList{
+			"PL": {Name: "PL", Prefixes: []string{"192.0.2.0/not-a-mask", "2001:db8::/not-a-mask"}},
+		},
+	}
+	term := &config.PolicyTerm{Name: "all-dangling", FromCommunity: []string{"SH"}, PrefixList: []string{"PL"}}
+	ps := &config.PolicyStatement{Name: "P", Terms: []*config.PolicyTerm{term}}
+	definitions, body, _ := New().renderPolicyTermSequencesWithDefinitions(po, "P", "P", ps, 10)
+	seqs, _ := parseRouteMap17867(t, definitions+body)
+	count := config.RouteMapSequenceCount(po, ps)
+	if count != 6 {
+		t.Fatalf("both-invalid list count = %d, emitted=%d, want 6 (two family refs plus four chain slots)", count, len(seqs))
+	}
+	if len(seqs) != 4 || uint64(len(seqs)) > count {
+		t.Fatalf("both-invalid list emitted %d sequences, count=%d; want four chain slots covered by count\n%s", len(seqs), count, body)
+	}
+	if !strings.Contains(body, "-xpf-com-") {
+		t.Fatalf("both-invalid family list should not decline the chain:\n%s", body)
+	}
+}

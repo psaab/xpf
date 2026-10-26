@@ -331,7 +331,7 @@ func termHasPartialDanglingPrefixList18018(po *PolicyOptionsConfig, names []stri
 				}
 			}
 		}
-		if hasV4 && hasV6 && (!validV4 || !validV6) {
+		if hasV4 && hasV6 && validV4 != validV6 {
 			return true
 		}
 	}
