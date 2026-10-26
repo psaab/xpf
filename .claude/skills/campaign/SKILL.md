@@ -221,9 +221,9 @@ Every tick the keeper:
 2. Publishes ONLY what `gh`/`git`/lock/disk state can prove:
    `/var/worktrees` volume usage (`df` percent/free every tick; the
    `.cache` `du` breakdown only at the ≥70% tier, with the disk-guard
-   tier from the standing orders), open PR
-   count by merge state including draft (`isDraft` is requested in
-   Step 0), open issue TOTAL (search `total_count`, authoritative)
+   tier from the standing orders), open PR count by merge state
+   including draft (from the complete paginated Step 0 scan), open
+   issue TOTAL (search `total_count`, authoritative)
    plus per-band counts *where labels support it* and an `unbanded`
    remainder (60-char titles cannot classify semantics — report the
    remainder, never invent bands), per-cluster lock holder (from
@@ -234,10 +234,11 @@ Every tick the keeper:
    action (a reviewer record newer than the last parent action),
    using per-PR timestamps cached in
    `/var/worktrees/.cache/keeper/verdict-ages.tsv` (bootstrap: one
-   full scan at keeper start seeds it; each tick evicts rows whose
-   PR is no longer open) and re-scanning
-   only PRs whose `updatedAt` changed — never an O(open-PRs)
-   comment scan of the whole queue every tick, which rate-limits
+   full queue scan at keeper start seeds one row per open PR; each tick
+   evicts rows only after a successful complete PR scan confirms they are no
+   longer open; scans uncached PRs and re-scans only cached PRs whose
+   `updatedAt` changed) — never an
+   O(open-PRs) comment scan of the whole queue every tick, which rate-limits
    the keeper exactly when the backlog peaks. Read the paginated PR
    conversation-comment endpoint
    `gh api --paginate repos/$(gh repo view --json nameWithOwner
@@ -338,9 +339,8 @@ gh issue list --state open --limit 1000 --json number,title,labels \
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 gh api "search/issues?q=repo:${REPO}+state:open+type:issue" \
   --jq '.total_count'
-gh pr list --state open --limit 200 \
-  --json number,title,headRefName,mergeable,isDraft,updatedAt \
-  --jq '.[] | "#\(.number) [\(.mergeable)] draft=\(.isDraft) \(.headRefName)"'
+gh api --paginate "repos/${REPO}/pulls?state=open&per_page=100" \
+  --jq '.[] | "#\(.number) [\((if .mergeable == null then "unknown" else (.mergeable | tostring) end))] draft=\(.draft) \(.head.ref) updatedAt=\(.updated_at)"'
 ```
 
 The search `total_count` is authoritative for backlog size. If the
@@ -348,6 +348,12 @@ listed issue count != `total_count`, the board is incomplete: say
 so on the board and page (`--limit 1000` with label/number filters)
 until they reconcile — never report a capped count as the backlog
 size.
+
+The PR `--paginate` command follows every linked API page for the open PR
+queue. Treat the queue as complete only after that command exits successfully;
+derive open-PR counts and cache evictions only from a complete scan. If any
+page fails, mark the queue incomplete and preserve all cached PR rows until a
+complete scan confirms which PRs are closed.
 
 Then `TaskList` to read the tracking task (the campaign's state-of-record),
 and wedge-check any running agents. **Liveness = branch/PR commit-time AND
@@ -432,7 +438,11 @@ Run as many concurrently as the box allows.
 - Each agent: fresh worktree off CURRENT master
   (`git worktree add -b fix/<n>-campaign-pub /var/worktrees/campaign-pub/wt-<n> origin/master`),
   implement + fail-on-revert tests + build green + open PR ("Closes #<n>")
-  + STOP (do not merge, do not dispatch reviewers).
+  + STOP (do not merge, do not dispatch reviewers). Every PR carries its
+  own per-change log, `docs/log/<issue>.md` (or `docs/log/<pr>.md` when
+  there is no issue), in the same diff — the log
+  lands atomically when the PR lands, as has been the practice; there is
+  no separate log step and no root `_Log.md` append.
 - **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief (including: the PR TITLE MUST use the same `<area>: <summary> (#NNNN)` subject format — it becomes the merge-commit message); parent bounces non-conforming branches before review (`git log` shape check at PR…
   - Subject: `<area>: <imperative summary> (#NNNN)`, ≤72 cols. Area vocabulary: `docs:`, `test:`, `assurance:`, `forwarding:`, `config:`, `daemon:`, `cluster:`, `sessions:`, `audit:`, `show:`, `telemetry:`, `nftables:`, `ha:`, `frr:`, `process:`, `userspace-dp:`, `afxdp:`, `policy:`, `nat:`, `firewall:`, `grpcapi:`, `snmp:`, `ipsec:`, `xdp:`, `shim:`, `ci:`, `build:`, `metrics:` (new areas allowed when none fits, never bare). Summary names the BEHAVIOR change in imperative mood (`gate`, `drop`, `reject`, `refund`, `sync`, `bound`, `fence`), not the file (`update foo.rs`). Parent process commits without an issue cite the ruling (`(user-directive 2026-09-22)`).
   - Body (required, via `git commit -F -` heredoc, wrapped ~72 cols) has four sections:
@@ -456,11 +466,13 @@ records at each PR's own head (Step 4 item 0). Record the integration
 result on each PR in the batch in addition to its own-head evidence,
 then merge them individually. Spread concurrent batches across
 `loss`, `tcp`, and `udp` — never queue every batch behind one
-cluster. Code in disjoint regions auto-merges; only `_Log.md` needs
-a union and a shared file touched by two PRs needs an additive merge
-(keep both — e.g. gre.rs `outer_ecn_bits` ‖ `inner_dst_ip`). This
-amortizes the shared cluster lock without serializing the campaign
-on a single gate system.
+cluster. Code in disjoint regions auto-merges; a shared file touched
+by two PRs needs an additive merge (keep both — e.g. gre.rs
+`outer_ecn_bits` ‖ `inner_dst_ip`). (Per-issue logs are separate
+`docs/log/<issue>.md` files and do not conflict; the root `_Log.md`
+is closed — never union-resolve it, see CLAUDE.md Logging Rules.)
+This amortizes the shared cluster lock without serializing the
+campaign on a single gate system.
 
 ### Serial route (coupled issues)
 
@@ -468,7 +480,7 @@ When issues share files or one depends on another's merge, chain them: each
 agent bases off the PRIOR merge, not stale master. Use this for:
 
 - A multi-increment refactor (each commit/PR builds on the last).
-- Issues that touch the same hot file (avoid N-way `_Log`/code conflicts).
+- Issues that touch the same hot file (avoid N-way code conflicts).
 - A feature whose pieces have an ordering dependency.
 
 Drive one to MERGED, fetch master, then start the next off the new master.
@@ -630,6 +642,7 @@ For each PR an agent opens:
    # (multi-stream + CoS cells per pass/fail rules below, same cell)
    CELL
    ./test/incus/with-cluster.sh "gate PR #<n> on $C" -- bash /var/worktrees/.cache/gate-<n>-<C>.sh
+```
    Deploy from the PR worktree's prebuilt, path-pinned package and run
    `test-connectivity` plus every required measurement in the same cell;
    if deployed-SHA != PR-head-SHA, the gate has not run — record that
@@ -661,9 +674,11 @@ For each PR an agent opens:
    the epoch before writing the uniquely named record, then append its
    index row only after the complete record exists:
    ```bash
+   MASTER_SHA=$(git -C "$MASTER_WT" rev-parse HEAD)
    CAPTURE_EPOCH=$(date +%s)
+   mkdir -p /var/worktrees/.cache/gate-baselines
    BASELINE_FILE="/var/worktrees/.cache/gate-baselines/${C}-${MASTER_SHA}-${CAPTURE_EPOCH}.md"
-   # Write the measured baseline record (master SHA and every cell's data) to $BASELINE_FILE.
+   # Save the complete measured baseline (SHA and every cell's data) to $BASELINE_FILE.
    printf '%s %s %s %s\n' "$C" "$MASTER_SHA" "$CAPTURE_EPOCH" "$(basename "$BASELINE_FILE")" \
      >> /var/worktrees/.cache/gate-baselines/INDEX
    ```
@@ -741,15 +756,18 @@ Per PR, in order:
    merge — return to Step 3.
 1. Re-poll `mergeable` THROUGH `UNKNOWN` (GitHub recomputes after every
    push) until `MERGEABLE`/`CLEAN` or `CONFLICTING`.
-2. If `CONFLICTING` (almost always `_Log.md` after master advanced): in a
-   FRESH worktree off the PR branch, `git merge origin/master`, **union the
-   `_Log.md`** conflict (keep both blocks, drop the markers), build-check if
-   a behavior-relevant file conflicted, push the rebased branch via
-   `git -C`. NEVER resolve in the main checkout.
+2. If `CONFLICTING`: in a FRESH worktree off the PR branch,
+   `git merge origin/master`, resolve conflicts keeping both sides'
+   intent (per-issue `docs/log/<issue>.md` files are separate files
+   and should not conflict; the root `_Log.md` is closed — if it
+   appears in a conflict, the branch is stale against the logging
+   migration, so drop the branch's `_Log.md` change, never union it),
+   build-check if a behavior-relevant file conflicted, push the
+   rebased branch via `git -C`. NEVER resolve in the main checkout.
 3. Set the PR title + body first: `gh pr edit <n> --title "<area>: <summary> (#NNNN)" --body-file /var/worktrees/.cache/pr<n>_body.md` (body with Why/What/Validation + gate evidence). Then merge with an explicit pair: `gh pr merge <n> --merge -t "<area>: <summary> (#NNNN)" -F - <<<"<same body>" --delete-branch`. Both flags REQUIRED together: `-t` alone yields a title-only merge whose body echoes the subject, and bare merge yields GitHub's `Merge pull request #N` template — both are log pollution (ruled 2026-09-22). `git fetch origin` first if the ref may be stale, then verify with `git log --format=%B -1 origin/master` after merging.
 4. Verify the issue auto-closed (`Closes #<n>` in the body). If not,
    `gh issue close <n>` with a comment citing the merge SHA + smoke result.
-5. Fetch master; the NEXT PR now needs its own `_Log` rebase vs the new
+5. Fetch master; the NEXT PR now needs its own rebase vs the new
    master — repeat.
 **Control-cleanliness gate (2026-09-22 incident: 24 lane-leaked files sat in the control tree and silently wedged every `merge --ff-only`, leaving control 15 merges behind; 2026-09-24: scratch trees moved out of the repo to `/var/worktrees/` so no in-repo wipe can take them):** before EVERY merge-prep, run `git status --short` in control — it MUST show nothing at all: zero M/A/D/R lines AND zero `??` lines (worktrees no longer live under the repo, so any untracked entry is unexpected). If dirty: STOP; `git stash push -m control-rescue-<date>` (tracked only, NEVER `-u`); confirm with `git stash list` BEFORE resetting; `git fetch origin` then `git reset --hard origin/master`; triage the stash per-file (duplicate-of-branch → drop after lane confirms; unique → rescue to the owning lane); triage unexpected `??` paths individually — `mv` each aside under
 `/var/worktrees/.cache/control-rescue-<date>/` (never `rm`), confirm

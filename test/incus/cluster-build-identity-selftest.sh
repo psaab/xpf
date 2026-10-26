@@ -2,7 +2,8 @@
 #
 # Hermetic self-test for the shared-cluster BUILD IDENTITY check.
 # Mocks `incus` and `cluster-env.sh`; never touches a cluster, never
-# touches the real /tmp/xpf-cluster.lock. Safe to run anywhere.
+# touches the real loss-default `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`.
+# Safe to run anywhere.
 #
 #   ./test/incus/cluster-build-identity-selftest.sh
 #

@@ -58,10 +58,6 @@ for pr in $PRS; do
       git fetch origin $BRANCH 2>/dev/null
       git checkout $BRANCH 2>/dev/null
       if git merge origin/master --no-edit 2>/dev/null; then
-        # Check for _Log.md conflicts only
-        if git diff --name-only --diff-filter=U 2>/dev/null | grep -q '_Log.md'; then
-          git checkout --theirs _Log.md && git add _Log.md && git commit --no-edit 2>/dev/null
-        fi
         git push 2>/dev/null
         git checkout master 2>/dev/null
         sleep 3
@@ -76,6 +72,8 @@ for pr in $PRS; do
           FAILED="$FAILED $pr"
         fi
       else
+        # Conflicts, including stale root `_Log.md` edits, take the abort path;
+        # that log is closed and must never be forced with `--theirs` or union.
         git merge --abort 2>/dev/null
         git checkout master 2>/dev/null
         FAILED="$FAILED $pr"

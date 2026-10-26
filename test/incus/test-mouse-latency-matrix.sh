@@ -142,7 +142,7 @@ start_t=$(date +%s)
 # single-port /dev/tcp check, so a matrix aborted on the first class it
 # happened to reach and said nothing about the other twenty-three. A sweep
 # that fixed that one port then failed on the next. Worse, the abort arrived
-# after a build, a deploy and the shared /tmp/xpf-cluster.lock had all been
+# after a build, a deploy and the shared loss-default lock had all been
 # spent — this check is cheap and answers first.
 #
 # Scoped to the ports this run needs, not all 24: an unrelated class being

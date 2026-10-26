@@ -1521,15 +1521,19 @@ they repeatedly bite:
   claims, and only the second rules out a test that was passing because the
   real dependency happened to return real data.
 
-- **Smoke tests run ONLY on the loss userspace cluster.** The smoke
-  target is `loss:xpf-userspace-fw0` / `loss:xpf-userspace-fw1`,
-  driven by `INCUS_REMOTE=loss` + `test/incus/loss-userspace-cluster.env`.
-  Invocation: `BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env
-  ./test/incus/cluster-setup.sh deploy all`. Do NOT smoke on the
-  local `bpfrx-fw0/1` (legacy eBPF cluster, regression-only) or
-  `bpfrx-fw` (standalone eBPF reference). `make cluster-deploy`
-  without `BPFRX_CLUSTER_ENV` targets the legacy local cluster —
-  that is the wrong path for any userspace-dp validation.
+- **Smoke and campaign gate clusters.** The always-on smoke-feedback
+  watcher is loss-only; it is not a per-PR gate. Campaign gate assignment
+  follows `.claude/skills/campaign/SKILL.md`: dataplane/forwarding/throughput
+  changes gate on the loss userspace cluster; other gated PRs use the
+  least-busy of loss/tcp/udp. The userspace cluster envs are
+  `test/incus/loss-userspace-cluster.env`,
+  `test/incus/tcp-userspace-cluster.env`, and
+  `test/incus/udp-userspace-cluster.env`; tcp/udp run a bridge-fabric
+  fallback, so compare each only with master measured on that same cluster.
+  Do NOT use the local `bpfrx-fw0/1` (legacy eBPF cluster, regression-only)
+  or `bpfrx-fw` (standalone eBPF reference) for userspace validation.
+  `make cluster-deploy` without `BPFRX_CLUSTER_ENV` targets the loss
+  userspace cluster by default.
 - **Deploy wipes CoS config.** After `cluster-setup.sh deploy`, re-run
   `./test/incus/apply-cos-config.sh <target>` before running iperf3
   for any #706 / #707 / #708 / #709 / #718 validation.
@@ -1951,9 +1955,19 @@ they repeatedly bite:
   true, because a harness that stashes would expose every lane to it silently.
 
 - **Shared-cluster lock protocol (#1875).** The loss userspace cluster
-  is shared by concurrent agents; ownership is serialized by the
-  advisory flock on `/tmp/xpf-cluster.lock` with holder metadata in
-  `/tmp/xpf-cluster.owner`. Who locks what:
+  is shared by concurrent agents; `test/incus/cluster-lock.sh` defaults
+  to the canonical lock `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`,
+  owner `/var/worktrees/.cache/tmpdir/xpf-cluster.owner`, and epoch
+  `/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch`. Who locks what:
+  The `tcp` and `udp` userspace clusters each have their own canonical
+  suffixed tuple (`xpf-cluster-tcp.lock` / `.owner` and
+  `xpf-cluster-state/epoch-tcp`; `xpf-cluster-udp.lock` / `.owner` and
+  `xpf-cluster-state/epoch-udp`). Every gate AND ordinary command targeting
+  tcp/udp MUST export its matching `XPF_CLUSTER_LOCK`,
+  `XPF_CLUSTER_OWNER`, and `XPF_CLUSTER_EPOCH` before calling any
+  self-locking command; otherwise it silently uses the loss defaults.
+  Never give a gate and ordinary command for one physical cluster different
+  tuples. See the campaign skill and CLAUDE.md for the full path table.
   | Actor | Protocol |
   |---|---|
   | `cluster-setup.sh` deploy/start/stop/restart/create/destroy/init | self-locks (re-execs through `with-cluster.sh`; the build stays outside the lock) |
@@ -1961,10 +1975,10 @@ they repeatedly bite:
   | Destructive HA smoke (`test-failover`, `test-ha-crash`, `test-double-failover`, `test-stress-failover`, `test-chained-crash`, `test-active-active`, `test-restart-connectivity`, `test-private-rg`) | self-locks the same way via the `cluster-cell.sh` preamble (#4020) — a reboot / force-stop / failover QUEUES behind a held lock instead of colliding with a concurrent deploy/smoke. Read-only `test-connectivity.sh` stays lock-free |
   | Multi-command measurement cells (deploy → apply-cos → measure) | wrap the WHOLE cell: `./test/incus/with-cluster.sh "purpose" -- cmd...` |
   | `wg-interop.sh` | self-locks per command standalone; runs lock-free inside a cell (marker-aware) |
-  | Ad-hoc one-liners around commands that do NOT self-lock | `flock /tmp/xpf-cluster.lock sg incus-admin -c "..."` still valid |
+  | Ad-hoc one-liners around commands that do NOT self-lock | `flock /var/worktrees/.cache/tmpdir/xpf-cluster.lock sg incus-admin -c "..."` is valid for loss; for tcp/udp use that cluster's canonical lock path |
   Rules that keep the mutex sound:
   - **Never wrap a self-locking script in a raw outer
-    `flock /tmp/xpf-cluster.lock`** — it deadlocks (the inner acquire
+    `flock` on that cluster's canonical lock path — it deadlocks (the inner acquire
     cannot see a raw caller's lock). Use `with-cluster.sh`, whose
     `XPF_CLUSTER_LOCK_HELD=<lockpath>:<pid>` marker (validated by
     path + pid liveness + ancestry) makes nesting safe.
@@ -2039,8 +2053,8 @@ they repeatedly bite:
     any such loop. A mock `incus` that ignores stdin cannot see this, so
     the deploy-lib and build-identity self-test mocks drain stdin unless
     `-n` is given, like the real client.
-  - Queue diagnosis: `cat /tmp/xpf-cluster.owner` +
-    `fuser -v /tmp/xpf-cluster.lock`. A dead recorded pid with the
+  - Queue diagnosis for loss: `cat /var/worktrees/.cache/tmpdir/xpf-cluster.owner` +
+    `fuser -v /var/worktrees/.cache/tmpdir/xpf-cluster.lock`. For tcp/udp, use the corresponding suffixed paths. A dead recorded pid with the
     lock still held means a child inherited the fd (pre-#1875 raw
     holders only; `with-cluster.sh` runs cells with the lock fd
     closed, so killing a cell's tree releases instantly).

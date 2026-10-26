@@ -107,7 +107,7 @@ of the plan (inventory, build sequence, validation, risks) is written so only
 | Legacy env (loss, eBPF/xdp ref) | `test/incus/loss-cluster.env` | `bpfrx-fw0/1` + `cluster-lan-host`, VLAN 3666, cluster-id 2. |
 | Cluster lifecycle script | `test/incus/cluster-setup.sh` (1135 lines) | `init/create/destroy/deploy/ssh/status/logs/start/stop/restart`; `require_cluster_cell` lock gate (§1.7). |
 | Shared env resolver | `test/incus/cluster-env.sh` | Derives `FW0/FW1/CLUSTER_LAN_HOST` refs from `BPFRX_CLUSTER_ENV`. |
-| Cluster lock protocol | `test/incus/cluster-lock.sh`, `test/incus/with-cluster.sh` | Advisory `flock` on `/tmp/xpf-cluster.lock` (see §6-R7: this is workstation-local). |
+| Cluster lock protocol | `test/incus/cluster-lock.sh`, `test/incus/with-cluster.sh` | Default loss tuple is the workstation-local `flock` `/var/worktrees/.cache/tmpdir/xpf-cluster.lock` (with matching owner/epoch; see §6-R7). |
 | Deploy helpers | `test/incus/deploy-lib.sh` (54 KB), `scripts/image/bake.py` | Verified deb cutover, sha-verified raw push, preflight shim-verify. |
 | Unified FW config (userspace) | `docs/ha-cluster-userspace.conf` (397 lines, cluster-id **22**) | Single config for both nodes; node split via `groups { node0/node1 }` + `apply-groups "${node}"`; node id from `/etc/xpf/node-id`. |
 | Unified FW config (legacy loss) | `docs/ha-cluster-loss.conf` (339 lines, cluster-id **2**) | Same shape, `dataplane-type` absent (legacy), LAN `10.0.89.1` / `2001:559:8585:df01::1`. |
@@ -429,15 +429,19 @@ Additional observed facts:
 ### 1.7 Locking / shared-state hazard in the existing machinery
 
 `cluster-setup.sh` mutating verbs re-exec through `with-cluster.sh`, which
-flocks **`/tmp/xpf-cluster.lock` on the workstation running the script**
-(`cluster-lock.sh:44`), regardless of `INCUS_REMOTE`. Running a `tcp` deploy
-and a `loss` deploy from this workstation therefore **serialise against each
-other** even though they touch different Incus servers — safe (never
-corrupting) but a throughput/coordination fact for §5: parallel bring-up of
-tcp+udp from one workstation needs distinct `XPF_CLUSTER_LOCK` values per
-cluster (the var is overridable, `cluster-lock.sh:44-53`) or strictly
-sequential cells. [INFERENCE] This is also why "just run both makes at once"
-will appear to hang; §5-S0 sets per-cluster lock paths.
+uses the `cluster-lock.sh` default loss tuple
+(`/var/worktrees/.cache/tmpdir/xpf-cluster.lock`, matching owner and epoch)
+on the workstation running the script, regardless of `INCUS_REMOTE`.
+With no per-cluster overrides, tcp/loss commands therefore serialize. For
+parallel tcp+udp bring-up, and for every ordinary tcp/udp command, export
+all three canonical `XPF_CLUSTER_LOCK` / `XPF_CLUSTER_OWNER` /
+`XPF_CLUSTER_EPOCH` values from CLAUDE.md or the campaign skill before
+invoking any self-locking command. Changing only the lock path is unsafe:
+owner and epoch must use the same cluster-specific tuple. Loss commands
+continue to use the exact default tuple; gates and ordinary commands must
+never use different tuples for the same physical cluster. Without those
+tcp/udp overrides, keep cells strictly sequential rather than implying they
+can overlap.
 
 ---
 
@@ -1060,7 +1064,10 @@ Incus/host state. Listed so the approver sees the footprint:
    `VM0/VM1/LAN_HOST`, `PROFILE=xpf-cluster-tcp|udp` — fresh names, no legacy
    `bpfrx-` prefix; `VF_LAN_VLAN`, `NET_*`, `CLUSTER_CONF`, `LAN_*`, `IPERF_*`,
    plus new `TARGET_*` vars for the dedicated target containers and
-   `XPF_CLUSTER_LOCK=/tmp/xpf-cluster-<stack>.lock` per §1.7). **VF contract
+   `XPF_CLUSTER_LOCK`, `XPF_CLUSTER_OWNER`, and `XPF_CLUSTER_EPOCH` per §1.7
+   (`/var/worktrees/.cache/tmpdir/xpf-cluster-<stack>.lock`,
+   `/var/worktrees/.cache/tmpdir/xpf-cluster-<stack>.owner`, and
+   `/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch-<stack>`). **VF contract
    in each env (normative, §2.8.2): `SRIOV_PARENT=mlx0` (verified as PCI
    `0000:02:00.0` at S0), `SRIOV_LAN_PARENT=mlx1` (PCI `0000:02:00.1`);
    no `VF_WAN_PCI`/`VF_LAN_PCI` pinning (Incus allocates free VFs);
@@ -1216,7 +1223,13 @@ practice; follow it or use the ticket, approver's call).
 ### S3 — Create networks + profile + instances (per cluster)
 
 ```bash
-export XPF_CLUSTER_LOCK=/tmp/xpf-cluster-tcp.lock        # §1.7; udp shell uses its own
+export XPF_CLUSTER_LOCK=/var/worktrees/.cache/tmpdir/xpf-cluster-tcp.lock
+export XPF_CLUSTER_OWNER=/var/worktrees/.cache/tmpdir/xpf-cluster-tcp.owner
+export XPF_CLUSTER_EPOCH=/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch-tcp
+# UDP shell instead exports:
+#   XPF_CLUSTER_LOCK=/var/worktrees/.cache/tmpdir/xpf-cluster-udp.lock
+#   XPF_CLUSTER_OWNER=/var/worktrees/.cache/tmpdir/xpf-cluster-udp.owner
+#   XPF_CLUSTER_EPOCH=/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch-udp
 make CLUSTER_ENV=test/incus/tcp-userspace-cluster.env cluster-init     # bpu-tcp-hb0 bridge + SR-IOV fabric profile (§4 item 6; NO bpu-tcp-fab0), profile xpf-cluster-tcp
 make CLUSTER_ENV=test/incus/tcp-userspace-cluster.env cluster-create   # fw0/fw1 VMs (SR-IOV wan+lan+fabric VFs) + cluster-tcp-host
 incus list tcp:                                          # expect fw0, fw1, cluster-tcp-host

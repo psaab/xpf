@@ -967,7 +967,7 @@ target. Read-only status (`xpfd upgrade kernel status`) stays lock-free.
   `Options{LockAlreadyHeld: true}` so it does NOT re-flock the same file
   (a second flock on a fresh fd of the same path returns `EWOULDBLOCK`
   and would abort the rolling upgrade).
-- **Lock ordering vs the `/tmp/xpf-cluster.lock` deploy lock (#1875):**
+- **Lock ordering vs the `/var/worktrees/.cache/tmpdir/xpf-cluster.lock` loss-default deploy lock (#1875):**
   the cluster/deploy lock is taken OUTSIDE, the host upgrade lock INSIDE.
   No deadlock — the two never nest in the opposite order.
 - **dpkg-vs-operator staged-source race — CLOSED by immutable versioned

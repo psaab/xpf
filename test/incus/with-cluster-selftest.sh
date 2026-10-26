@@ -3,7 +3,7 @@
 # #1875 — dry-run contention matrix for the shared-cluster lock cell
 # (plan §9.2). Exercises with-cluster.sh + cluster-lock.sh against a
 # PRIVATE lock path under /tmp — never touches the real
-# /tmp/xpf-cluster.lock, no cluster access, safe to run anywhere.
+# `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`, no cluster access, safe to run anywhere.
 #
 #   ./test/incus/with-cluster-selftest.sh
 #

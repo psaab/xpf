@@ -21,8 +21,9 @@
 #
 # Phase order (plan §5.2 + #9587 P8): P0 P1 P2 P4a P3 P4b P5 P6 P7 P8 teardown.
 #
-# Shared-cluster discipline: EVERY incus command runs under
-# flock /tmp/xpf-cluster.lock + sg incus-admin. Long-running traffic is
+# Shared-cluster discipline: EVERY incus command runs under the
+# canonical `XPF_CLUSTER_*` tuple (loss defaults to
+# `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`) + sg incus-admin.
 # detached INSIDE the instances so the lock is never held across a
 # multi-minute phase. The xpf config change is additive (a node0-scoped
 # `groups node0 interfaces wg0` stanza PLUS a node0-scoped

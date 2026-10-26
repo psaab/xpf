@@ -30,7 +30,7 @@ set -euo pipefail
 # over a node on the SHARED loss cluster. Re-exec under the
 # incus-admin group if needed, then serialize as a #1875 lock cell
 # so a concurrent deploy/smoke can't collide with our reboot (it
-# queues behind a held /tmp/xpf-cluster.lock instead of colliding).
+# queues behind the canonical cluster lock instead of colliding).
 _CELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="$_CELL_DIR"
 if [[ "${1:-}" == "--selftest" ]]; then

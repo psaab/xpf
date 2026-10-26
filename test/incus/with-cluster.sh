@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# #1875 — run a command as an exclusive "lock cell" on the shared
-# loss userspace cluster.
+# #1875 — run a command in an exclusive `XPF_CLUSTER_*` lock cell,
+# defaulting to the shared loss userspace cluster.
 #
 #   ./test/incus/with-cluster.sh "<purpose>" -- <cmd> [args...]
 #
@@ -11,8 +11,10 @@
 #       ./test/incus/apply-cos-config.sh loss:xpf-userspace-fw0 &&
 #       WG_PEER_TYPE=container ./test/incus/wg-interop.sh all'
 #
-# This is the ONLY process that holds /tmp/xpf-cluster.lock across
-# commands (protocol header in cluster-lock.sh). Properties:
+# This is the supported process-tree lock cell and honors the canonical
+# `XPF_CLUSTER_*` tuple. Default loss path:
+# `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`.
+# Properties:
 #   - Blocks until the lock is free, printing a named-holder report
 #     every 30s (who, since when, what for). Set
 #     XPF_CLUSTER_LOCK_TIMEOUT=<seconds> to abort loudly instead of
