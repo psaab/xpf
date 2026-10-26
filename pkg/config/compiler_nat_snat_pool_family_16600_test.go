@@ -243,3 +243,78 @@ func TestSourceNATPoolFamilyWildcardSource17847(t *testing.T) {
 		}
 	})
 }
+
+// #17941: a name whose whole closure is its family's wildcard
+// (0.0.0.0/0, ::/0, bare 0.0.0.0/::) matches exactly the same
+// single-family traffic as the identical authored literal, which
+// #17847 already rejects against an opposite-family pool. The
+// #17408 "scaffold" exemption does not apply: the scaffold is a
+// dual-family [v4 v6] pair, which stays dual and admitted. A
+// wildcard-only name closure is therefore narrow/single-family.
+func TestSourceNATPoolFamilyWildcardName17941(t *testing.T) {
+	book := []string{
+		"set security address-book global address v4-wild 0.0.0.0/0",
+		"set security address-book global address v6-wild ::/0",
+		"set security address-book global address v4-bare-wild 0.0.0.0",
+		"set security address-book global address-set v4-wild-only address v4-wild",
+		"set security address-book global address-set dual-wild address v4-wild",
+		"set security address-book global address-set dual-wild address v6-wild",
+	}
+	mk := func(name string, pool string) []string {
+		lines := []string{
+			"set security zones security-zone trust",
+			"set security zones security-zone untrust",
+		}
+		lines = append(lines, book...)
+		lines = append(lines,
+			"set security nat source pool P address "+pool,
+			"set security nat source rule-set rs1 from zone trust",
+			"set security nat source rule-set rs1 to zone untrust",
+			"set security nat source rule-set rs1 rule r1 match source-address-name "+name,
+			"set security nat source rule-set rs1 rule r1 then source-nat pool P")
+		return lines
+	}
+	reject := func(name, pool string) func(t *testing.T) {
+		return func(t *testing.T) {
+			_, err := CompileConfig(buildTree(t, mk(name, pool)))
+			if err == nil || !strings.Contains(err.Error(), "WrongAddressFamily") {
+				t.Fatalf("wildcard-only name %q with opposite-family pool %q must be rejected (#17941), got: %v", name, pool, err)
+			}
+		}
+	}
+	admit := func(name, pool string) func(t *testing.T) {
+		return func(t *testing.T) {
+			if _, err := CompileConfig(buildTree(t, mk(name, pool))); err != nil {
+				t.Fatalf("name %q with pool %q must commit (#17941), got: %v", name, pool, err)
+			}
+		}
+	}
+	t.Run("v4 wildcard name v6-only pool rejected", reject("v4-wild", "2001:db8::5"))
+	t.Run("v6 wildcard name v4-only pool rejected", reject("v6-wild", "192.0.2.5"))
+	t.Run("v4 wildcard name v4 pool admitted", admit("v4-wild", "192.0.2.5"))
+	t.Run("v6 wildcard name v6 pool admitted", admit("v6-wild", "2001:db8::5"))
+	t.Run("wildcard-only address-set v6 pool rejected", reject("v4-wild-only", "2001:db8::5"))
+	t.Run("dual wildcard closure v6 pool admitted", admit("dual-wild", "2001:db8::5"))
+	t.Run("dual wildcard closure v4 pool admitted", admit("dual-wild", "192.0.2.5"))
+	t.Run("bare v4 wildcard name v6 pool rejected", reject("v4-bare-wild", "2001:db8::5"))
+}
+
+func TestSourceNATPoolFamilyWildcardNameLenientWarns17941(t *testing.T) {
+	lines := []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security address-book global address v4-wild 0.0.0.0/0",
+		"set security nat source pool P address 2001:db8::5",
+		"set security nat source rule-set rs1 from zone trust",
+		"set security nat source rule-set rs1 to zone untrust",
+		"set security nat source rule-set rs1 rule r1 match source-address-name v4-wild",
+		"set security nat source rule-set rs1 rule r1 then source-nat pool P",
+	}
+	cfg, err := CompileConfigLenient(buildTree(t, lines))
+	if err != nil {
+		t.Fatalf("lenient compilation must not fail: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "WrongAddressFamily") {
+		t.Fatalf("lenient compilation must warn about the wildcard-name SNAT family mismatch (#17941): %v", cfg.Warnings)
+	}
+}
