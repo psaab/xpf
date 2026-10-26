@@ -81,6 +81,25 @@ thread_local! {
             Option<Box<dyn FnOnce(&crate::afxdp::ha::SessionDomain, &SessionKey)>>,
         > = std::cell::RefCell::new(None);
 }
+// Test-only seam for #17682: report the next clear deletion outcome
+// without mutating shared state, exercising count-based progress handling
+// without an unbounded test loop.
+#[cfg(test)]
+thread_local! {
+    static SYNCED_DELETE_OUTCOME_OVERRIDE_ONCE:
+        std::cell::Cell<Option<crate::afxdp::ha::SyncedDeleteOutcome>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct SyncedDeleteOutcomeOverrideGuard;
+
+#[cfg(test)]
+impl Drop for SyncedDeleteOutcomeOverrideGuard {
+    fn drop(&mut self) {
+        SYNCED_DELETE_OUTCOME_OVERRIDE_ONCE.with(|slot| slot.set(None));
+    }
+}
 /// Test-only seam for the #13709 race. The hook fires after the candidate
 /// previous-entry snapshot, before the tuple lease is acquired. A test can
 /// publish an intervening replacement deterministically instead of relying on
@@ -281,6 +300,14 @@ impl crate::afxdp::ha::SessionDomain {
         if let Some(hook) = hook {
             hook(self, key);
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn override_next_synced_delete_for_test(
+        &self,
+        outcome: crate::afxdp::ha::SyncedDeleteOutcome,
+    ) -> SyncedDeleteOutcomeOverrideGuard {
+        SYNCED_DELETE_OUTCOME_OVERRIDE_ONCE.with(|slot| slot.set(Some(outcome)));
+        SyncedDeleteOutcomeOverrideGuard
     }
     #[cfg(test)]
     pub(crate) fn set_synced_upsert_after_snapshot_hook_for_test<F>(&self, hook: F)
@@ -838,12 +865,12 @@ impl crate::afxdp::ha::SessionDomain {
     /// Fail-closed ordering per round is preserved: the BPF sweep
     /// runs FIRST and only once (before the first batch); if it
     /// fails, no authority is touched and the caller may retry.
-    /// After the sweep, per-key deletes are unconditional
-    /// (`delete_gen=0, expected_id=0`), so a batch cannot decline:
-    /// every enumerated key in a round is deleted in that round,
-    /// the next round enumerates only what remains, and the loop
-    /// terminates when a round finds the table empty. Rows deleted
-    /// concurrently by another path simply shrink later rounds.
+    /// After the sweep, per-key deletes are normally unconditional
+    /// (`delete_gen=0, expected_id=0`), but a decline or concurrent
+    /// re-publish must not let the loop repeat without shrinking the
+    /// shared table. Each round captures the synced-row count with its
+    /// key batch and requires the count to strictly decrease; otherwise
+    /// it returns `clear-no-progress` and releases the fence for retry.
     ///
     /// `batch == 0` is refused (`clear-batch-zero`) without touching
     /// anything and without sweeping BPF: a zero batch would loop
@@ -868,11 +895,11 @@ impl crate::afxdp::ha::SessionDomain {
         let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
         let counts = crate::afxdp::bpf_map::clear_bpf_conntrack_maps(v4_fd, v6_fd)?;
         loop {
-            let keys: Vec<SessionKey> = lock_shared_recover(&self.sessions.synced)
-                .keys()
-                .take(batch)
-                .cloned()
-                .collect();
+            let (keys, round_start_size): (Vec<SessionKey>, usize) = {
+                let synced = lock_shared_recover(&self.sessions.synced);
+                let keys = synced.keys().take(batch).cloned().collect();
+                (keys, synced.len())
+            };
             if keys.is_empty() {
                 break;
             }
@@ -888,6 +915,10 @@ impl crate::afxdp::ha::SessionDomain {
                     None,
                     None,
                 );
+            }
+            let round_end_size = lock_shared_recover(&self.sessions.synced).len();
+            if round_end_size >= round_start_size {
+                return Err("clear-no-progress");
             }
         }
         self.sessions.owner_rg_indexes.clear(&self.sessions.synced);
@@ -2031,6 +2062,14 @@ impl crate::afxdp::ha::SessionDomain {
         // a bounded lease during stale-companion cleanup.
         external_lease: Option<&crate::afxdp::bpf_map::GateLease>,
     ) -> SyncedDeleteOutcome {
+        #[cfg(test)]
+        if clear_fence.is_some() {
+            if let Some(outcome) =
+                SYNCED_DELETE_OUTCOME_OVERRIDE_ONCE.with(|slot| slot.take())
+            {
+                return outcome;
+            }
+        }
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
         // session's zones against one generation and its NAT against another —

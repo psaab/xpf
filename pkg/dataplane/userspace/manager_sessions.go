@@ -1130,9 +1130,13 @@ func (m *Manager) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6) (int, err
 // contract belonged to the Go-driven chunked design and does not
 // apply: under single-shot there is no Go-cleared portion to report.
 // The #5881 security property (helper failure surfaced, never
-// reported as success) is preserved — strictly: failure now means
-// nothing was revoked anywhere, not "mirror revoked, authority
-// unconfirmed".
+// reported as success) is preserved — strictly: (0,0) means no
+// deletions were CONFIRMED, not that nothing changed helper-side.
+// The helper may have swept BPF and deleted earlier paging rounds
+// before a later round stalls (#17682 clear-no-progress): partial
+// deletion already happened, remaining authority is retained, and
+// the correct recovery is a fresh retry, not an assumption of an
+// intact mirror.
 //
 // Terminal: complete-with-empty is the only success. Incomplete,
 // complete-with-continuation (contradictory), or any continuation

@@ -180,7 +180,10 @@ func TestClearAllSessionsSurfacesHelperDeleteError5881(t *testing.T) {
 		// so (0,0) — the old "mirror cleared + partial counts" belonged
 		// to the Go-driven chunked design, where Go swept the mirror
 		// itself. Under single-shot Go sweeps nothing (the mirror is
-		// the helper's read model); a failed clear leaves it intact.
+		// the helper's read model); a failed clear confirms no counts
+		// even though the helper may already have deleted earlier
+		// paging rounds before stalling (#17682) — retry, don't assume
+		// the helper-side state is intact.
 		if v4 != 0 || v6 != 0 {
 			t.Errorf("counts = (%d, %d), want (0, 0) (nothing confirmed)", v4, v6)
 		}

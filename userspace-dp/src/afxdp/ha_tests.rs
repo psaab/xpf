@@ -11664,6 +11664,63 @@ fn clear_mirror_zero_batch_refused_untouched_16649() {
         "zero-batch refusal must touch nothing"
     );
 }
+/// #17682: a paged clear must stop when a round does not shrink the
+/// shared synced map, returning an error instead of re-enumerating rows
+/// while holding the global tuple fence forever.
+///
+/// FAIL-ON-REVERT: the one-shot override reports `Applied` without
+/// shrinking the map, modeling a same-key HA re-publish after deletion.
+/// Without the count check, the old loop retries, removes the row on its
+/// next round, and returns success instead of the expected error.
+#[test]
+fn clear_mirror_refuses_no_progress_batch_17682() {
+    let coordinator = Coordinator::new();
+    let key = test_key();
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0xC1EA9,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        persistent_lease_hold: None,
+        source_nat_static: None,
+    };
+    crate::afxdp::shared_ops::publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+
+    let domain = coordinator.session_domain();
+    let _outcome_override_guard = domain.override_next_synced_delete_for_test(
+        super::session_import::SyncedDeleteOutcome::Applied,
+    );
+    let err = domain
+        .clear_mirror_with_batch(1)
+        .expect_err("a no-progress batch must not be retried indefinitely");
+    assert_eq!(err, "clear-no-progress");
+    assert!(
+        coordinator.sessions.synced.lock().expect("synced").contains_key(&key),
+        "declined row must remain authoritative for retry"
+    );
+    assert!(
+        crate::afxdp::bpf_map::global_tuple_gate()
+            .with_publish(&key, || ())
+            .is_ok(),
+        "clear must release the tuple fence on its error path"
+    );
+}
 
 /// #10612: the HA import ingress refuses a stale post-purge replay before
 /// shared publication or worker fan-out, while a current-zone import applies.
