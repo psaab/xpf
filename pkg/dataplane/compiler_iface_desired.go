@@ -290,7 +290,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				seenAddr[physName][a] = true
 				pd.addrs = append(pd.addrs, a)
 			}
-			for _, vip := range unitStandaloneVRRPVIPs(unit) {
+			for _, vip := range interfaceUnitStandaloneVRRPVIPs(ifCfg, unit) {
 				if seenKeep[physName][vip] {
 					continue
 				}

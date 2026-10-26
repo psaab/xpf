@@ -211,8 +211,9 @@ func TestPSKRotationKeyIDIsNotTheKey6630(t *testing.T) {
 // consequence. The line must distinguish three states, because an operator
 // acting on the wrong one reopens the dual-master window:
 //
-//	peer unknown       -> unknown, not known safe (README: not the same as
-//	                      "not safe" — usually the peer is down; #16859)
+//	peer unknown       -> unknown, not known safe (no verified peer signing key
+//	                      observed; peer may be down or reachable with only a
+//	                      PSK-acceptance proof; #16859/#17891)
 //	peer on the old key -> do NOT finalize
 //	peer on the new key -> safe
 //
@@ -234,8 +235,8 @@ func TestPSKRotationStatusAnswersIsItSafeToFinalize6630(t *testing.T) {
 	// Window open, peer silent.
 	n.commit(rotKeyB, rotKeyA)
 	line := n.m.controlLinkRotationStatus()
-	if !strings.Contains(line, "UNKNOWN") || !strings.Contains(line, "not known safe to finalize") || strings.Contains(line, "do NOT finalize") {
-		t.Fatalf("with no authenticated peer frame the answer is UNKNOWN — not known safe, "+
+	if !strings.Contains(line, "UNKNOWN") || !strings.Contains(line, "no verified peer signing key observed") || !strings.Contains(line, "not known safe to finalize") || strings.Contains(line, "do NOT finalize") {
+		t.Fatalf("with no verified peer signing key observed the answer is UNKNOWN — not known safe, "+
 			"not a flat do-NOT-finalize (#16859/README); got %q", line)
 	}
 	if n.m.ControlLinkRotationSafeToFinalize() {
@@ -319,10 +320,10 @@ func TestPSKRotationOverlapMustBeARealOverlap6630(t *testing.T) {
 		t.Fatalf("the refusal must not echo the key: %v", err)
 	}
 
-	// Whitespace-only difference is the same key to anything that matters, so
-	// a trim-equal pair is an overlap that isn't and must be refused too.
-	// BOTH sides are checked: padding on only one of them would leave the
-	// other side's TrimSpace unbound, and the two are separate calls.
+	// Boundary whitespace inside a quoted PSK is key material, so
+	// trim-equal pairs with different raw bytes form a real overlap.
+	// Padding is tested on either and both sides because the runtime
+	// installs each Secret verbatim.
 	for _, tc := range []struct {
 		name, signing, additional string
 	}{
@@ -335,9 +336,8 @@ func TestPSKRotationOverlapMustBeARealOverlap6630(t *testing.T) {
 			ControlLinkAuthKey:    config.NewSecret(tc.signing),
 			ControlLinkAuthKeyAlt: config.NewSecret(tc.additional),
 		}
-		if config.ValidateClusterAuthKeyOverlapForTest(padded) == nil {
-			t.Fatalf("%s: a key differing only in surrounding whitespace is the same key; "+
-				"a trim-equal pair is an overlap that isn't", tc.name)
+		if err := config.ValidateClusterAuthKeyOverlapForTest(padded); err != nil {
+			t.Fatalf("%s: byte-distinct PSKs must be accepted as a real overlap: %v", tc.name, err)
 		}
 	}
 

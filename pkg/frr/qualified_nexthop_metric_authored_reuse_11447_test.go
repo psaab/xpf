@@ -160,7 +160,7 @@ func TestQNHMetricAuthoredMetricSurvivesQNHRemoval11447(t *testing.T) {
 	}
 	oldSection, oldOverlays := qnhMetricRenderAndOverlays11447(t, commands(true)...)
 	newSection, newOverlays := qnhMetricRenderAndOverlays11447(t, commands(false)...)
-	const routeMap = "xpf-qnh-policy-54f103d2d65f8a5a-xpf-redist"
+	const routeMap = "xpf-qnh-policy-54f103d2d65f8a5a-xpf-redist-ospf"
 	if !strings.Contains(oldSection, "route-map "+routeMap+" permit 30\n set metric 100") ||
 		!strings.Contains(newSection, "route-map "+routeMap+" permit 20\n set metric 100") {
 		t.Fatalf("probe render did not place the authored metric at old seq 30 then new seq 20\nold:\n%s\nnew:\n%s", oldSection, newSection)

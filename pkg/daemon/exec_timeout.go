@@ -127,7 +127,9 @@ func runWithHostAuthExec15539(body func(context.Context) ([]byte, error)) ([]byt
 
 // runCommandStdinTimeout is runCommandTimeout with an optional stdin
 // (used by `chpasswd -e`, which reads the user:hash pair from stdin).
-func runCommandStdinTimeout(stdin io.Reader, name string, args ...string) ([]byte, error) {
+// The package var lets focused tests simulate completed-but-superseded
+// commands without a timing-sensitive subprocess interleaving.
+var runCommandStdinTimeout = func(stdin io.Reader, name string, args ...string) ([]byte, error) {
 	// #14969/#15539: a superseded closeout owner must not spawn — or
 	// leave in flight — a credential mutation (chpasswd/useradd/
 	// usermod/id/chown/visudo/systemctl) after a newer host-auth

@@ -127,10 +127,10 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// already-persisted or peer-synced config still boots — #1960 no-brick).
 	// Runs on the fully-compiled *Config so the typed term list (with
 	// UnknownFlexMatch populated by compileFilterFrom) is available.
-	if opts.lenientFlexMatch {
-		if msg := flexMatchValueMissingWarning(cfg); msg != "" {
-			cfg.Warnings = append(cfg.Warnings, msg)
-		}
+	// Keep the warning for tolerant loads and strict-accepted value-less
+	// accept/next-term terms; discard/reject remain strict errors.
+	if msg := flexMatchValueMissingWarning(cfg, !opts.lenientFlexMatch); msg != "" {
+		cfg.Warnings = append(cfg.Warnings, msg)
 	}
 	if err := validateFilterFlexMatchStrictOpts(cfg, opts.lenientFlexMatch); err != nil {
 		if opts.lenientFlexMatch {
