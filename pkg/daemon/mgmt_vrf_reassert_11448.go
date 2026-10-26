@@ -48,7 +48,8 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 	if d.routing != nil && !missing {
 		drifted = d.mgmtVRFInterfacesOutsideVRF()
 	}
-	if !missing && len(drifted) == 0 && !bindingChanged && !fab1Ready {
+	snmpNeedsIndexReconcile := d.snmpVRFNeedsIndexReconcile()
+	if !missing && len(drifted) == 0 && !bindingChanged && !fab1Ready && !snmpNeedsIndexReconcile {
 		return
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
@@ -74,8 +75,9 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 	if d.routing != nil {
 		drifted = d.mgmtVRFInterfacesOutsideVRF()
 	}
+	snmpNeedsIndexReconcile = d.snmpVRFNeedsIndexReconcile()
 	if len(drifted) == 0 && !bindingChanged && !fab1Ready {
-		if recreated {
+		if recreated || snmpNeedsIndexReconcile {
 			d.restartSNMPForVRFRecreate()
 		}
 		return
@@ -105,7 +107,7 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 		routeErr := mgmtVRFRouteReconcileFn(d)
 		d.noteMgmtRouteReconcileResult(routeErr)
 	}
-	if recreated {
+	if recreated || snmpNeedsIndexReconcile {
 		d.restartSNMPForVRFRecreate()
 	}
 }
@@ -125,15 +127,15 @@ func (d *Daemon) fab1DebtUpgradeReady(active clusterTransportKey) bool {
 	return fab1UpgradeReady(cfg)
 }
 
-// restartSNMPForVRFRecreate rebinds the SNMP listener after vrf-mgmt was
-// re-created (#16626). The old socket's SO_BINDTODEVICE resolved to the
-// dead ifindex; the name alone (snmpConfigHash / snmpVRFDevice) is
-// unchanged, so reconcileSNMP would no-op on the next commit. Restart
-// only when a listener is actually pinned to vrf-mgmt; a main-table
-// listener or a stopped agent needs no bounce. The restart goes through
-// reconcileSNMP, whose ifindex check performs the teardown+start and,
-// on a bind failure, leaves the hash unrecorded so the next commit
-// retries (#5110 contract).
+// restartSNMPForVRFRecreate reconciles a running listener pinned to vrf-mgmt
+// after a confirmed device re-create or an ifindex check detects a mismatch.
+// The old socket's SO_BINDTODEVICE resolved the name to the dead ifindex;
+// the name alone (snmpConfigHash / snmpVRFDevice) is unchanged. A periodic
+// reassert tick also calls this after a successful live-index probe, so a
+// re-create by another owner is healed without a commit. A main-table listener
+// or a stopped agent needs no check. The normal reconcileSNMP path adopts an
+// unknown live index without bouncing and leaves a bind failure retryable
+// (#5110 contract).
 func (d *Daemon) restartSNMPForVRFRecreate() {
 	d.snmpReconMu.Lock()
 	running := d.snmpAgent != nil && d.snmpVRFDevice == config.ManagementVRFDeviceName

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"github.com/mdlayher/genetlink"
 	nl "github.com/mdlayher/netlink"
@@ -738,20 +739,23 @@ func (d *Daemon) reconcileSNMP(cfg *config.Config) bool {
 		return true
 	}
 
-	// #16626: the socket is bound to the VRF *device* (SO_BINDTODEVICE by
-	// name resolves to the ifindex at bind time). If vrf-mgmt was deleted
-	// and re-created out of band, the name is unchanged but the ifindex
-	// differs, so the running socket is pinned to a dead index and deaf.
-	// Compare the live ifindex against the one recorded at start; a
-	// mismatch (including the device being absent) forces the same
-	// restart as a name change. An unknown recorded index (0, e.g. an
-	// agent started before this tracking existed in a test) adopts the
-	// live index without bouncing.
+	// #16626: SO_BINDTODEVICE resolves the VRF name to an ifindex when the
+	// socket binds. Only a confirmed not-found lookup proves the device is
+	// absent and forces a restart. Other netlink errors are transient/unknown,
+	// so retain the healthy listener and its last known index. A zero recorded
+	// index means the post-bind lookup was unavailable; adopt a live index
+	// without bouncing so later same-name re-creates remain detectable.
 	vrfIndexChanged := false
-	if vrfDevice != "" && d.snmpVRFDevice == vrfDevice && d.snmpVRFIndex != 0 {
+	if vrfDevice != "" && d.snmpVRFDevice == vrfDevice {
 		live, err := d.fabricLinkByName(vrfDevice)
-		if err != nil || live == nil || live.Attrs() == nil || live.Attrs().Index != d.snmpVRFIndex {
-			vrfIndexChanged = true
+		if d.snmpVRFIndex == 0 {
+			if err == nil && live != nil && live.Attrs() != nil {
+				d.snmpVRFIndex = live.Attrs().Index
+			}
+		} else if err != nil {
+			vrfIndexChanged = isSNMPVRFLinkNotFound(err)
+		} else if live != nil && live.Attrs() != nil {
+			vrfIndexChanged = live.Attrs().Index != d.snmpVRFIndex
 		}
 	}
 
@@ -813,6 +817,30 @@ func snmpVRFDeviceForConfig(cfg *config.Config) string {
 		return ""
 	}
 	return config.ManagementVRFDeviceName
+}
+
+func isSNMPVRFLinkNotFound(err error) bool {
+	var notFound netlink.LinkNotFoundError
+	return errors.As(err, &notFound)
+}
+
+// snmpVRFNeedsIndexReconcile reports whether a running management-VRF-bound
+// listener's recorded ifindex needs a live check/reconciliation. Transient
+// link-lookup failures are not evidence of device recreation.
+func (d *Daemon) snmpVRFNeedsIndexReconcile() bool {
+	d.snmpReconMu.Lock()
+	defer d.snmpReconMu.Unlock()
+	if d.snmpAgent == nil || d.snmpVRFDevice != config.ManagementVRFDeviceName {
+		return false
+	}
+	live, err := d.fabricLinkByName(d.snmpVRFDevice)
+	if err != nil {
+		return d.snmpVRFIndex != 0 && isSNMPVRFLinkNotFound(err)
+	}
+	if live == nil || live.Attrs() == nil {
+		return false
+	}
+	return d.snmpVRFIndex == 0 || d.snmpVRFIndex != live.Attrs().Index
 }
 
 func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
