@@ -382,14 +382,13 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			if ire.clear || names == nil {
 				names, hs = map[string]bool{}, map[string]string{}
 			}
-			removed, changed := m.pendingConnDiff(names, hs)
-			terminated, failed := m.terminateRemovedConns(removed)
+			removed, _ := m.pendingConnDiff(names, hs)
+			_, failed := m.terminateRemovedConns(removed)
 			termErr := m.recordTerminateDebtForNames(removed, failed, names)
-			var initiateErr error
-			if !ire.clear && ipsecCfg != nil {
-				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated)
-			}
-			return errors.Join(applyErr, termErr, initiateErr)
+			// Do not re-initiate from a config that this live probe failed
+			// to prove; a later successful candidate load will recompute the
+			// preserved diff and re-establish eager tunnels under that config.
+			return errors.Join(applyErr, termErr)
 		}
 		var cce *committedCandidateError
 		if errors.As(applyErr, &cce) {

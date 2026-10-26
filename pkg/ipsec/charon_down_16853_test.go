@@ -406,11 +406,12 @@ func TestClearAfterRestartProbeKeepsFileRemoved17882(t *testing.T) {
 }
 
 // A live superset is neither the prior nor candidate render. The candidate
-// remains staged, but its fingerprints must not be promoted: a later successful
-// apply still needs to tear down and re-establish the changed SA.
+// remains staged, but its fingerprints must not be promoted. Changed SAs are
+// torn down without re-initiation from the unproven config; a later successful
+// apply must still detect and converge the change.
 //
-// fail-on-revert: promoting the candidate on the first ambiguous probe makes
-// the later same-candidate apply skip teardown and re-initiation.
+// fail-on-revert: advancing the candidate fingerprint for this ambiguous
+// probe is caught by the preserved-hash assertion below.
 func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
 	m := NewWithConfigDir(t.TempDir())
 	oldGeneration := strings.Repeat("a", 64)
@@ -431,6 +432,7 @@ func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
 	m.mu.Unlock()
 
 	reloadErr := errors.New("candidate reload rejected")
+	termErr := errors.New("stale SA termination refused")
 	priorConns := strings.TrimSuffix(string(listConnsForRendered17882(t, prior)), "list-conns reply {}\n")
 	priorConns += "list-conn event {extra {local_addrs=[%any] remote_addrs=[%any] children {extra {}}}}\n"
 	rec := &reloadRecorder{
@@ -440,12 +442,21 @@ func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
 		listConns:   []byte(priorConns + "list-conns reply {}\n"),
 		listSAs:     liveSA("vpn1"),
 	}
-	m.swanctl = rec.run
+	firstTerminate := true
+	m.swanctl = func(args ...string) ([]byte, error) {
+		if firstTerminate && len(args) > 0 && args[0] == "--terminate" {
+			firstTerminate = false
+			rec.calls = append(rec.calls, args)
+			return []byte("terminate failed"), termErr
+		}
+		return rec.run(args...)
+	}
+
 	rotated := vpnCfg("vpn1")
 	rotated.VPNs["vpn1"].EstablishTunnels = "immediately"
 	rotated.VPNs["vpn1"].PSK = config.NewSecret("secret-rotated")
-	if err := m.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); !errors.Is(err, reloadErr) {
-		t.Fatalf("ambiguous ApplyGeneration error = %v, want reload error", err)
+	if err := m.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); err == nil || !errors.Is(err, reloadErr) {
+		t.Fatalf("ambiguous ApplyGeneration error = %v, want reload error and teardown debt", err)
 	}
 	got, err := os.ReadFile(m.configPath)
 	if err != nil {
@@ -459,9 +470,13 @@ func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
 		m.mu.Unlock()
 		t.Fatalf("indeterminate reload promoted candidate fingerprint %q; prior hash is %q", gotHash, oldHash)
 	}
+	pendingChanged := m.pendingChanged["vpn1"]
 	m.mu.Unlock()
+	if !pendingChanged {
+		t.Fatal("failed termination must persist changed-connection debt")
+	}
 	if got := rec.terminated(); len(got) != 1 || got[0] != "vpn1" {
-		t.Fatalf("indeterminate reload must tear down the stale vpn1 SA, got %v", got)
+		t.Fatalf("indeterminate reload must attempt stale-SA teardown, got %v", got)
 	}
 	initiates := func() int {
 		n := 0
@@ -472,8 +487,8 @@ func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
 		}
 		return n
 	}
-	if got := initiates(); got != 1 {
-		t.Fatalf("indeterminate reload must re-establish vpn1 under charon's still-loaded config, got %d initiates", got)
+	if got := initiates(); got != 0 {
+		t.Fatalf("indeterminate reload must not re-establish from unproven old config; got %d initiates", got)
 	}
 
 	// The same candidate now loads successfully. Because the prior fingerprint
@@ -485,8 +500,8 @@ func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
 	if got := rec.terminated(); len(got) != 2 || got[1] != "vpn1" {
 		t.Fatalf("converging apply must retry changed-SA teardown, got %v", got)
 	}
-	if got := initiates(); got != 2 {
-		t.Fatalf("converging apply must re-initiate the changed tunnel, got %d initiates", got)
+	if got := initiates(); got != 1 {
+		t.Fatalf("successful candidate load must re-initiate the changed tunnel, got %d initiates", got)
 	}
 	m.mu.Lock()
 	newHash := m.prevConnHashes["vpn1"]

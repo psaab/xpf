@@ -28,9 +28,9 @@ the apply path pays no fsync (the file is regenerated on every apply).
   disk, and the same config-store digest may accompany a DHCP-rebound local
   address. Malformed or incomplete listings are indeterminate.
   If a live listing matches neither complete render, the candidate stays on
-  disk and affected SAs are torn down; changed connections with eager intent
-  are re-initiated without advancing the prior fingerprints. A later successful
-  Apply still detects and converges the change.
+  disk and affected SAs are torn down. Do not re-initiate under an unproven
+  config; the prior fingerprints remain so a later successful Apply detects
+  the diff and re-initiates changed connections with eager intent.
   If charon is unreachable or the candidate is proven loaded, the
   candidate stays on disk and its set is promoted for charon's next start
   (#16853, #17882).
