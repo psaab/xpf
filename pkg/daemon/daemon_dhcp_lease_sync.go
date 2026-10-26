@@ -484,7 +484,8 @@ func (d *Daemon) preSeedDHCPLeaseMemfile(stillMastering bool) {
 		if err != nil {
 			slog.Warn("cluster: DHCP lease memfile pre-seed failed (post-start lease-add is backstop)", "family", family, "err", err)
 		} else {
-			slog.Info("cluster: DHCP leases pre-seeded into memfile before Kea start", "family", family)
+			peerCount := len(dhcpserver.PeerLeasesForAuthority(snapshot, family, authority))
+			slog.Info("cluster: DHCP leases pre-seeded into memfile before Kea start", "family", family, "count", peerCount)
 		}
 	}
 }
