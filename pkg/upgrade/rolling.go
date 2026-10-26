@@ -443,8 +443,10 @@ func failbackAfterRefusal(cl RollingCluster, cause error, what string) error {
 // LockAlreadyHeld so it does not re-flock (#1965).
 func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) {
 	r.resetCommittedCut()
+	var committedDeferred *cutCommittedDeferredError
+	rejoinConfirmed := false
 	defer func() {
-		if err != nil {
+		if err != nil && !rejoinConfirmed {
 			r.resetCommittedCut()
 		}
 	}()
@@ -600,13 +602,17 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 	//    node — it bypasses the #5284 pre-STOP cluster gate that refuses a
 	//    BARE standalone cut on a member with /etc/xpf/node-id present.
 	if cutErr := r.Run(Options{SkipStartHealthRollback: true, LockAlreadyHeld: true, ClusterCoordinated: true, SignalGuard: rc.SignalGuard}); cutErr != nil {
-		var beforeStop *cutBeforeStopError
-		if errors.As(cutErr, &beforeStop) {
-			logf("rolling: single-node cut refused before STOP; resetting failover and aborting")
-			return failbackAfterPreStopRefusal(cl, cutErr)
+		if errors.As(cutErr, &committedDeferred) {
+			logf("rolling: single-node cut committed before deferred signal; completing rejoin before honouring it")
+		} else {
+			var beforeStop *cutBeforeStopError
+			if errors.As(cutErr, &beforeStop) {
+				logf("rolling: single-node cut refused before STOP; resetting failover and aborting")
+				return failbackAfterPreStopRefusal(cl, cutErr)
+			}
+			return fmt.Errorf("rolling: single-node cut failed (HA rollback is "+
+				"operator-driven — inspect the node): %w", cutErr)
 		}
-		return fmt.Errorf("rolling: single-node cut failed (HA rollback is "+
-			"operator-driven — inspect the node): %w", cutErr)
 	}
 
 	// 6. Wait for sync to re-establish on the upgraded node. The cut just
@@ -656,8 +662,12 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 			"(draining it would leave a redundancy group with no primary on either "+
 			"node): %w", rc.RejoinDeadline, err)
 	}
+	rejoinConfirmed = true
 	logf("rolling: local node rejoined election, confirmed for every configured RG; " +
 		"cut complete for this node")
+	if committedDeferred != nil {
+		return committedDeferred
+	}
 	return nil
 }
 

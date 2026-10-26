@@ -27,6 +27,22 @@ type cutBeforeStopError struct {
 func (e *cutBeforeStopError) Error() string { return e.err.Error() }
 func (e *cutBeforeStopError) Unwrap() error { return e.err }
 
+// cutCommittedDeferredError marks a Run failure that is not a cut
+// failure at all: the cut reached COMMIT (target live and
+// health-confirmed, journal cleared, committed-cut evidence recorded)
+// and only then honoured a signal that #16796 deferred in the STOP
+// window. The rolling driver must still run its post-cut rejoin
+// (steps 6-7) before surfacing this error; treating it like a
+// destructive cut failure would leave the node ForceSecondary-drained
+// on a version that is already running (#17840).
+type cutCommittedDeferredError struct {
+	err error
+}
+
+func (e *cutCommittedDeferredError) Error() string { return e.err.Error() }
+func (e *cutCommittedDeferredError) Unwrap() error { return e.err }
+
+
 // Options modify a single Run.
 //
 // SignalGuard, when set, is the #16796 interrupt capture consulted at
@@ -1291,7 +1307,7 @@ func (r *Runner) Run(opts Options) (err error) {
 	r.discardPredecessorBackup(predecessorBackup)
 	if sig, pending := opts.SignalGuard.Pending(); pending {
 		r.logf("upgrade: cut committed; deferred %s now honoured — exiting so the operator interrupt takes effect with the daemon running (#16796)", sig)
-		return fmt.Errorf("upgrade: cut to %s committed, then honoured deferred %s (#16796)", j.TargetVersion, sig)
+		return &cutCommittedDeferredError{err: fmt.Errorf("upgrade: cut to %s committed, then honoured deferred %s (#16796)", j.TargetVersion, sig)}
 	}
 	return nil
 }
