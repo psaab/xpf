@@ -168,6 +168,7 @@ func TestIPsecSAChunkIncompleteNeverCommits16758(t *testing.T) {
 		t.Fatalf("incomplete generation left %d pending assemblies, want 1", n)
 	}
 }
+
 // TestIPsecSAChunkInterleavedGenerationsSurvive17846 pins #17846: opening
 // more generations than the pending-assembly cap must evict only the
 // oldest assembly. The flush-all budget replaced every pending generation
