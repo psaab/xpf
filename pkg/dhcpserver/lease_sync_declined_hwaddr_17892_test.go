@@ -30,8 +30,8 @@ import (
 //
 // Fail-on-revert: removing the declined lease4 argument wrapper makes the
 // in-process Kea parser stub reject identity-free and ClientID-only declined
-// lease4-add commands; the end-to-end seed test then goes RED. The stub
-// mirrors the pinned parser's required-key check, not a live daemon.
+// lease4-add/update commands; both the seed and conflict-update tests go RED.
+// The stub mirrors the pinned parser's required-key check, not a live daemon.
 
 // keaLease4AddMandatory17892 mirrors Kea 3.0.3 Lease4Parser::parse's
 // mandatory-argument behavior. Raw JSON keys distinguish "absent" from an
@@ -135,6 +135,62 @@ func TestDeclined17892_IdentityFreeSeedCarriesMandatoryHWAddress(t *testing.T) {
 	var st int
 	if err := json.Unmarshal(byAddr["10.0.61.66"]["state"], &st); err != nil || st != keaStateDeclined {
 		t.Errorf("identity-free row state = %d (err %v), want %d", st, err, keaStateDeclined)
+	}
+}
+
+// Conflict-then-update leg (#17892 fold): lease4-add reports already-exists,
+// so seedOneLease retries lease4-update. The update must carry the SAME
+// explicitly-empty hw-address as the add — reverting the update command to
+// the unwrapped keaLeaseJSON (lease_sync.go Arguments: kl) drops the key and
+// this test goes RED: the parser stub rejects the update.
+func TestDeclined17892_ConflictThenUpdateCarriesEmptyHWAddress(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	sock := tmpSocket(t, "k4declupd17892.sock")
+	var seen []keaCommand
+	var seenArgs []map[string]json.RawMessage
+	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
+		args, resp, isLeaseCmd := keaLease4AddMandatory17892(cmd)
+		if !isLeaseCmd {
+			return resp
+		}
+		if resp.Result != keaResultSuccess {
+			return resp // parser rejects malformed args before any add/update logic
+		}
+		seen = append(seen, cmd)
+		seenArgs = append(seenArgs, args)
+		if cmd.Command == "lease4-add" {
+			return keaResponse{Result: keaResultConflict, Text: "lease already exists"}
+		}
+		return keaResponse{Result: keaResultSuccess}
+	}}
+	dial, stop := startStubKea(t, sock, stub)
+	defer stop()
+	m := New()
+	m.SetLeaseSyncSeamsForTesting(dial, sock, "", "", "")
+	n, err := m.SeedSyncLeases4(context.Background(), []SyncLease{
+		{Family: 4, Address: "10.0.61.66", SubnetID: 1, Remaining: 1800, State: keaStateDeclined},
+	}, now)
+	if err != nil {
+		t.Fatalf("SeedSyncLeases4 conflict-then-update: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("seeded n=%d, want 1 via update", n)
+	}
+	if len(seen) != 2 || seen[0].Command != "lease4-add" || seen[1].Command != "lease4-update" {
+		t.Fatalf("commands = %v, want [lease4-add lease4-update]", seen)
+	}
+	for i, args := range seenArgs {
+		if got := string(args["hw-address"]); got != `""` {
+			t.Errorf("%s hw-address JSON = %s, want explicit empty string", seen[i].Command, got)
+		}
+		var ip string
+		if err := json.Unmarshal(args["ip-address"], &ip); err != nil || ip != "10.0.61.66" {
+			t.Errorf("%s ip-address = %q (err %v), want 10.0.61.66", seen[i].Command, ip, err)
+		}
+		var st int
+		if err := json.Unmarshal(args["state"], &st); err != nil || st != keaStateDeclined {
+			t.Errorf("%s state = %d (err %v), want %d", seen[i].Command, st, err, keaStateDeclined)
+		}
 	}
 }
 
