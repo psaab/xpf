@@ -111,7 +111,7 @@ func TestUserspaceXDPLandSessionMissDropped13953(t *testing.T) {
 // rows RED (they return XDP_DROP instead of reaching the kernel).
 func TestUserspaceXDPLandProfileGated15789(t *testing.T) {
 	local6 := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
-	const zoneID = uint16(4242)
+	const zoneID = uint32(4242)
 
 	seedZone := func(t *testing.T, coll *ebpf.Collection, disposition uint8, publish bool) {
 		t.Helper()
