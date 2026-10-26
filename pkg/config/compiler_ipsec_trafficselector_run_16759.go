@@ -98,9 +98,10 @@ func trafficSelectorInstances16759(vpn *Node) []struct {
 }
 
 // trafficSelectorBodyEqual16759 compares a selector fragment's body, ignoring
-// the AST wrapper that differs between a named property node and a reconstructed
-// chained selector. All body keys, values, leaf multiplicity, and child order
-// remain significant so invalid tokens and repeated leaves are not hidden.
+// AST wrappers that differ between named properties and reconstructed chained
+// selectors. A block-valued local-ip / remote-ip leaf is normalized to the same
+// key/value shape as its scalar spelling at any selector-body depth. All other
+// body keys, values, leaf multiplicity, and child order remain significant.
 func trafficSelectorBodyEqual16759(a, b *Node) bool {
 	return trafficSelectorNodesEqual16759(a, b, true)
 }
@@ -109,29 +110,80 @@ func trafficSelectorNodesEqual16759(a, b *Node, selectorRoot bool) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	aKeys, bKeys := a.Keys, b.Keys
+	aStart, bStart := 0, 0
 	if selectorRoot {
-		if len(aKeys) >= 2 && aKeys[0] == "traffic-selector" {
-			aKeys = aKeys[1:]
+		if len(a.Keys) >= 2 && a.Keys[0] == "traffic-selector" {
+			aStart = 1
 		}
-		if len(bKeys) >= 2 && bKeys[0] == "traffic-selector" {
-			bKeys = bKeys[1:]
+		if len(b.Keys) >= 2 && b.Keys[0] == "traffic-selector" {
+			bStart = 1
 		}
 	}
-	if a.IsLeaf != b.IsLeaf || len(aKeys) != len(bKeys) || len(a.Children) != len(b.Children) {
+	aBlockValue := !selectorRoot && trafficSelectorBlockValue16759(a)
+	bBlockValue := !selectorRoot && trafficSelectorBlockValue16759(b)
+	aKeyCount := len(a.Keys) - aStart
+	bKeyCount := len(b.Keys) - bStart
+	if aBlockValue {
+		aKeyCount++
+	}
+	if bBlockValue {
+		bKeyCount++
+	}
+	aChildCount, bChildCount := len(a.Children), len(b.Children)
+	if aBlockValue {
+		aChildCount--
+	}
+	if bBlockValue {
+		bChildCount--
+	}
+	aLeaf, bLeaf := a.IsLeaf || aBlockValue, b.IsLeaf || bBlockValue
+	if aLeaf != bLeaf || aKeyCount != bKeyCount || aChildCount != bChildCount {
 		return false
 	}
-	for i := range aKeys {
-		if aKeys[i] != bKeys[i] {
+	for i := range aKeyCount {
+		aKey := ""
+		if i < len(a.Keys)-aStart {
+			aKey = a.Keys[aStart+i]
+		} else {
+			aKey = a.Children[0].Keys[0]
+		}
+		bKey := ""
+		if i < len(b.Keys)-bStart {
+			bKey = b.Keys[bStart+i]
+		} else {
+			bKey = b.Children[0].Keys[0]
+		}
+		if aKey != bKey {
 			return false
 		}
 	}
-	for i := range a.Children {
-		if !trafficSelectorNodesEqual16759(a.Children[i], b.Children[i], false) {
+	ai, bi := 0, 0
+	if aBlockValue {
+		ai++
+	}
+	if bBlockValue {
+		bi++
+	}
+	for ai < len(a.Children) {
+		if !trafficSelectorNodesEqual16759(a.Children[ai], b.Children[bi], false) {
 			return false
 		}
+		ai++
+		bi++
 	}
 	return true
+}
+
+// trafficSelectorBlockValue16759 reports the only block-value property nodes
+// in the selector grammar, represented as a one-key leaf with one bare
+// single-key value child. Other child-bearing / malformed forms stay distinct.
+func trafficSelectorBlockValue16759(n *Node) bool {
+	if n == nil || len(n.Keys) != 1 || len(n.Children) != 1 ||
+		(n.Keys[0] != "local-ip" && n.Keys[0] != "remote-ip") {
+		return false
+	}
+	value := n.Children[0]
+	return value != nil && value.IsLeaf && len(value.Keys) == 1 && len(value.Children) == 0
 }
 
 // trafficSelectorFromRunSegment16759 reconstructs a traffic-selector
