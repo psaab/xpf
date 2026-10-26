@@ -58,6 +58,9 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 						trees = []*config.ConfigTree{slot, other}
 						c.setRenderSnapshots16613(slotErr, slot, other)
 						if slotErr != nil {
+							if err := config.AuthorizeConfigShowCompareCommand(priceCfg, c.UserClass(), comparePath); err != nil {
+								return err
+							}
 							return slotErr
 						}
 					}

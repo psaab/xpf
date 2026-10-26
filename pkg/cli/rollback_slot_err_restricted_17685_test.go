@@ -32,6 +32,10 @@ system {
             permissions [ view configure ];
             deny-configuration "^security";
         }
+        class deny-show-cmd {
+            permissions [ view configure ];
+            deny-commands "^show";
+        }
         class allow-interfaces {
             permissions [ view configure ];
             allow-configuration "^interfaces";
@@ -176,6 +180,57 @@ func TestCLIRollbackMissingSlotRestrictedScopedReads17685(t *testing.T) {
 		}
 		if strings.Contains(out, "SECRET-TRUST-17685") {
 			t.Errorf("slot-1 denied-path disclosed the denied security subtree: %q", out)
+		}
+	})
+	t.Run("config-mode-deny-show-command-precedes-missing-slot", func(t *testing.T) {
+		c := &CLI{store: store, userClass: "deny-show-cmd"}
+		if err := store.EnterConfigure(); err != nil {
+			t.Fatalf("EnterConfigure: %v", err)
+		}
+		defer store.ExitConfigure()
+		var err error
+		out := captureStdout(t, func() { err = c.dispatchConfig("show security zones | compare rollback 40") })
+		if err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("deny-commands ^show with a missing slot error = %v, want the command permission denial", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "out of range") {
+			t.Errorf("deny-commands ^show leaked missing-slot error before command denial: %v", err)
+		}
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("denied missing-slot compare rendered output: %q", out)
+		}
+	})
+	t.Run("config-mode-deny-show-command-with-existing-slot", func(t *testing.T) {
+		c := &CLI{store: store, userClass: "deny-show-cmd"}
+		if err := store.EnterConfigure(); err != nil {
+			t.Fatalf("EnterConfigure: %v", err)
+		}
+		defer store.ExitConfigure()
+		var err error
+		out := captureStdout(t, func() { err = c.dispatchConfig("show security zones | compare rollback 1") })
+		if err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("deny-commands ^show with an existing slot error = %v, want the command permission denial", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "out of range") {
+			t.Errorf("deny-commands ^show with an existing slot returned slot error: %v", err)
+		}
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("denied existing-slot compare rendered output: %q", out)
+		}
+	})
+	t.Run("config-mode-configuration-denial-still-precedes-subtree-on-missing-slot", func(t *testing.T) {
+		c := &CLI{store: store, userClass: "limited-view"}
+		if err := store.EnterConfigure(); err != nil {
+			t.Fatalf("EnterConfigure: %v", err)
+		}
+		defer store.ExitConfigure()
+		var err error
+		out := captureStdout(t, func() { err = c.dispatchConfig("show security zones | compare rollback 40") })
+		if err == nil || !strings.Contains(err.Error(), "out of range") {
+			t.Errorf("configuration-restricted compare with missing slot error = %v, want history out-of-range before subtree denial", err)
+		}
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("missing-slot compare rendered output before returning slot error: %q", out)
 		}
 	})
 	// Unclassed control: the missing-slot display-pipe read already

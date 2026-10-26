@@ -98,11 +98,18 @@ func AuthorizeConfigShowPath(cfg *Config, class string, path []string, displaySu
 		if err := authorizeConfigReadPath(cfg, class, joined); err != nil {
 			return err
 		}
-		if err := authorizeShowCommand(cfg, class, "show configuration "+joined, displaySuffix); err != nil {
+		if err := authorizeShowCommandReadSpelling(cfg, class, spelling, displaySuffix); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func authorizeShowCommandReadSpelling(cfg *Config, class string, spelling []string, displaySuffix string) error {
+	if len(spelling) == 0 {
+		return nil
+	}
+	return authorizeShowCommand(cfg, class, "show configuration "+strings.Join(spelling, " "), displaySuffix)
 }
 
 // AuthorizeConfigShowPathRendered adjudicates an explicit subtree read
@@ -210,6 +217,25 @@ func AuthorizeConfigShowCompareAtPathRendered(cfg *Config, class string, path []
 		return AuthorizeConfigShowCompare(cfg, class)
 	}
 	return AuthorizeConfigShowPathRendered(cfg, class, path, "", trees...)
+}
+
+// AuthorizeConfigShowCompareCommand adjudicates only the operational
+// command pair for a candidate compare, without charging configuration
+// paths or rendered descendants. It mirrors the command spellings used
+// by AuthorizeConfigShowCompareAtPathRendered.
+func AuthorizeConfigShowCompareCommand(cfg *Config, class string, path []string) error {
+	if class == "" {
+		return nil
+	}
+	if len(path) == 0 {
+		return authorizeShowCommand(cfg, class, "show configuration", "")
+	}
+	for _, spelling := range readSpellings15994(path) {
+		if err := authorizeShowCommandReadSpelling(cfg, class, spelling, ""); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AuthorizeConfigShowRollbackAtPathRendered is
@@ -638,7 +664,7 @@ func AuthorizeConfigShowCompare(cfg *Config, class string) error {
 	if err := authorizeConfigWhole(cfg, class, "show configuration"); err != nil {
 		return err
 	}
-	return authorizeShowCommand(cfg, class, "show configuration", "")
+	return AuthorizeConfigShowCompareCommand(cfg, class, nil)
 }
 
 // AuthorizeConfigShowCompareAtPath adjudicates a candidate diff filtered
