@@ -2691,7 +2691,7 @@ impl crate::afxdp::ha::SessionDomain {
                     Some(hold),
                 )
             }
-            Some(_) => {
+            _ => {
                 crate::nat::release_synced_source_nat_allocation_untracked_preserving_persistent_hold(
                     &forwarding.iface_nat_allocators,
                     &forwarding.source_nat_rules,
@@ -2701,15 +2701,6 @@ impl crate::afxdp::ha::SessionDomain {
                     now_ns,
                 )
             }
-            None => crate::nat::release_synced_source_nat_allocation_untracked_with_hold(
-                &forwarding.iface_nat_allocators,
-                &forwarding.source_nat_rules,
-                key,
-                entry.decision.nat,
-                entry.metadata.is_reverse,
-                now_ns,
-                None,
-            ),
         };
         let nat64_freed = crate::nat64::release_synced_nat64_allocation_untracked_for_purge(
             &forwarding.nat64,
