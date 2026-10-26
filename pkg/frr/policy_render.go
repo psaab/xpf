@@ -1052,13 +1052,8 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 	var definitions strings.Builder
 	var b strings.Builder
 	seq := startSeq
-	type continuationRewrite struct {
-		marker string
-		target string
-	}
-	var continuationRewrites []continuationRewrite
 	for _, term := range ps.Terms {
-		termFallthroughMarker := ""
+		termFallthroughTarget := "on-match next"
 		// The compiler normalizes the quoted-then `next-hop reject` diversion
 		// to Action=reject (#12517); the ordinary action mapping below keeps
 		// tolerant FRR rendering denied rather than flipping it to permit.
@@ -1700,11 +1695,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			if validNextPolicy {
 				fmt.Fprintf(&b, " %s\n", nextPolicySequenceMarker)
 			} else if nonTerminating {
-				if termFallthroughMarker != "" {
-					fmt.Fprintf(&b, " %s\n", termFallthroughMarker)
-				} else {
-					b.WriteString(" on-match next\n")
-				}
+				fmt.Fprintf(&b, " %s\n", termFallthroughTarget)
 			}
 
 			b.WriteString("exit\n")
@@ -1844,6 +1835,64 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		emitVariants := func(seqFam string, rfs []indexedRouteFilter, famPL string) {
 			emitVariantsForCommunities(seqFam, rfs, famPL, orElseEmpty(term.FromCommunity))
 		}
+		// Count the actual mixed-chain body variants before emission so
+		// continuation targets are final when each sequence is written.
+		// This mirrors emitVariantsForCommunities' dangling-ref skips
+		// without allocating its per-prefix-list family-ref slices.
+		mixedChainBodyVariantCount := func() int {
+			prefixListRefs := 0
+			if len(term.PrefixList) == 0 {
+				prefixListRefs = 1
+			} else {
+				for _, plName := range term.PrefixList {
+					if plName == "" {
+						prefixListRefs++
+						continue
+					}
+					if danglingPrefixList[plName] {
+						continue
+					}
+					hasV4, hasV6 := config.PrefixListFamilies(po.PrefixLists[plName])
+					if hasV4 && !prefixListRefMissingAtRender(po, plName, "ip") {
+						prefixListRefs++
+					}
+					if hasV6 && !prefixListRefMissingAtRender(po, plName, "ipv6") {
+						prefixListRefs++
+					}
+				}
+			}
+			asPathRefs := len(term.FromASPath)
+			if asPathRefs == 0 {
+				asPathRefs = 1
+			} else {
+				asPathRefs = 0
+				for _, asp := range term.FromASPath {
+					if !danglingAsp[asp] {
+						asPathRefs++
+					}
+				}
+			}
+			protocolRefs := len(protocols)
+			if protocolRefs == 0 {
+				protocolRefs = 1
+			}
+			familyRefs := 1
+			if mixedFamily {
+				familyRefs = 2
+			}
+			maxInt := int(^uint(0) >> 1)
+			count := 1
+			for _, dimension := range [...]int{prefixListRefs, asPathRefs, protocolRefs, familyRefs} {
+				if dimension == 0 {
+					return 0
+				}
+				if count > maxInt/dimension {
+					return maxInt
+				}
+				count *= dimension
+			}
+			return count
+		}
 		// emitPartialPrefixListDeny14700 renders one bare deny-all per
 		// dropped family of a partially-dangling reject term (#14700).
 		// The fine families' deny sequences have already been emitted by
@@ -1896,8 +1945,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			slog.Warn("frr: term route-filter absent from frr.conf; skipping dangling match",
 				"route_map", routeMapName, "term", term.Name)
 		}
-		if communityMixedChainTerm16835(po, term) &&
-			!singleDangling && !v4Dangling && !v6Dangling && !hasPartialDanglingPrefixList {
+		if config.CommunityMixedChainTermCanLower16869(po, term, hasPartialDanglingPrefixList) {
 			// The sole chain alternative gates the shared Cartesian body:
 			// member failure skips the term, while success still requires every
 			// sibling match. A matched nonterminating variant jumps past the
@@ -1906,8 +1954,9 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			chainStart := seq
 			bodySeq := chainStart + communityChainSlots16835(po, publicName)*10
 			if nonTerminating && !validNextPolicy {
-				// The delimiter prevents sequence 10's marker matching 100's.
-				termFallthroughMarker = fmt.Sprintf("on-match goto XPF_TERM_END_%d_END", chainStart)
+				if variants := mixedChainBodyVariantCount(); variants > 1 {
+					termFallthroughTarget = fmt.Sprintf("on-match goto %d", bodySeq+variants*10)
+				}
 			}
 			seq = bodySeq
 			if mixedFamily {
@@ -1931,16 +1980,6 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				}
 				emitVariantsForCommunity("", all, inlinePrefixListName(routeMapName, plPrefix, term.Name, ""), "")
 				emitPartialPrefixListDeny14700()
-			}
-			if termFallthroughMarker != "" {
-				continuation := "on-match next"
-				if seq > bodySeq+10 {
-					continuation = fmt.Sprintf("on-match goto %d", seq)
-				}
-				continuationRewrites = append(continuationRewrites, continuationRewrite{
-					marker: termFallthroughMarker,
-					target: continuation,
-				})
 			}
 			communityMemberChainSequences16835(&b, routeMapName, publicName,
 				communityChainMembers16835(po, publicName), chainStart, bodySeq, seq)
@@ -1969,11 +2008,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		}
 	}
 
-	body := b.String()
-	for _, rewrite := range continuationRewrites {
-		body = strings.ReplaceAll(body, rewrite.marker, rewrite.target)
-	}
-	return definitions.String(), body, seq
+	return definitions.String(), b.String(), seq
 }
 
 // renderRouteMapForPolicy renders ONE FRR route-map for policy-statement ps
