@@ -82,7 +82,9 @@ func TestHostInboundAnyServiceNDBeforeJunosJump17894(t *testing.T) {
 	// Locate the fine junos-host jump for untrust (same detection as
 	// the #16862 order test: a bare verdict(-3) with no payload pred).
 	jumpAt := -1
-	ndAt := map[string]int{} // ifname-hex scope -> first counted ND accept index
+	ndAt := make(map[string]int) // interface scope -> first counted ND accept rule
+	unicastNDAt := -1
+	targetAddr := addrHex(t, "2001:db8:2::10")
 	for i, r := range p.rules {
 		line := canonRule(p, r)
 		if jumpAt < 0 && strings.HasSuffix(line, "verdict(-3)") && !strings.Contains(line, "payload(base=1") {
@@ -102,16 +104,18 @@ func TestHostInboundAnyServiceNDBeforeJunosJump17894(t *testing.T) {
 				}
 			}
 		}
+		if strings.Contains(line, nd17894IfnameHex("ge-0-0-1")) && strings.Contains(line, targetAddr) && unicastNDAt < 0 {
+			unicastNDAt = i
+		}
 	}
 	if jumpAt < 0 {
 		t.Fatalf("junos-host jump not found:\n%s", rules)
 	}
-	// The discriminating assertion: an ND accept scoped to the
-	// any-service view's own ingress must precede the fine jump. A later
+	// The discriminating assertion is the ND accept for untrust's unicast
+	// address, not merely its separate ff02::/16 multicast ND accept. A later
 	// scoped zone accept cannot help after the terminal subchain drop.
-	anyND, ok := ndAt["ge-0-0-1"]
-	if !ok || anyND >= jumpAt {
-		t.Fatalf("any-service ND accept must precede the junos-host jump; accept rule=%d jump=%d:\n%s", anyND, jumpAt, rules)
+	if unicastNDAt < 0 || unicastNDAt >= jumpAt {
+		t.Fatalf("any-service unicast ND accept must precede the junos-host jump; accept rule=%d jump=%d:\n%s", unicastNDAt, jumpAt, rules)
 	}
 	// Control: the ssh retaining view also gets an early scoped ND accept.
 	if trustND, ok := ndAt["ge-0-0-0"]; !ok || trustND >= jumpAt {

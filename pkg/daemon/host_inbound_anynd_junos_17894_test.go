@@ -41,7 +41,7 @@ func TestHostInboundAnyServiceNDBeforeJunosJumpText17894(t *testing.T) {
 		}
 		at := strings.Index(payload, line)
 		switch {
-		case strings.Contains(line, `"ge-0-0-1"`):
+		case strings.Contains(line, `"ge-0-0-1"`) && strings.Contains(line, "2001:db8:2::10"):
 			if anyNDAt < 0 {
 				anyNDAt = at
 			}

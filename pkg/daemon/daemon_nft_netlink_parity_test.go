@@ -1024,9 +1024,9 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		{Zone: "shared-trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.91.1"}, V6Addrs: []string{"fe80::91"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"trust-slave"}}}, IngressDenyNetdevs: []string{"shared-parent"}},
 		{Zone: "shared-untrust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.92.1"}, V6Addrs: []string{"2001:db8:92::1"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"untrust-slave"}}}},
 		{Zone: "shared-trust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.91.2"}, V6Addrs: []string{"fe80::92"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"trust-slave-2"}}}},
-		// #15931 Codex3: exact mixed ND config — an any-service RETAINING view
-		// beside an ND-EXCEPT sibling — so scoped/fence ND emission (incl.
-		// fence-mode any-service admits) is parity-proven, not just unit-asserted.
+		// #15931/#17894: an any-service retaining view beside an ND-except
+		// sibling, with a matching fine-program zone to pin early any-service
+		// ND admits as well as the counterless fence behavior.
 		{Zone: "ndany", SystemServices: []string{"any-service"}, V4Addrs: []string{"10.0.17.1"}, V6Addrs: []string{"2001:db8:17::1"}, IngressNetdevs: []string{"ge-0-0-17"}},
 		{Zone: "ndexcept", SystemServices: []string{"ssh"}, Protocols: []string{"ospf"}, ProtocolsExcept: []string{"ndp"}, V4Addrs: []string{"10.0.18.1"}, V6Addrs: []string{"2001:db8:18::1"}, IngressNetdevs: []string{"ge-0-0-18"}},
 		// #16861: VRF-member ND — member-iifname admit must parity-match
@@ -1091,6 +1091,13 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 					L4: []config.JunosHostDenyL4{{Proto: config.HostInboundProtoTCP, Ports: []config.PortRange{{Lo: 179, Hi: 179}}}}},
 				{Family: "ip6", SrcAny: true, Dst: []string{"2001:db8:5::1/128"},
 					L4: []config.JunosHostDenyL4{{Proto: config.HostInboundProtoTCP, Ports: []config.PortRange{{Lo: 22, Hi: 22}}}}},
+			},
+		},
+		{
+			Zone:           "ndany",
+			IngressIfnames: []string{"ge-0-0-17"},
+			RulesV6: []config.JunosHostDenyRule{
+				{Family: "ip6", SrcAny: true, DstAny: true, Verdict: config.JunosHostDrop},
 			},
 		},
 	}
