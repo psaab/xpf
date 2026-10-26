@@ -495,15 +495,23 @@ func TestNATBareInterfaceBindingOnlyUnitZeroSiblingRejected18024(t *testing.T) {
 		if !cfg.LenientNATUndefinedScopeRuleSets[key] {
 			t.Errorf("lenient must record %s, got %v", name, cfg.LenientNATUndefinedScopeRuleSets)
 		}
+	}
+	wantWarnings := []string{
+		`source-nat rule-set "snat-bad": from interface "st0" not defined`,
+		`source-nat rule-set "snat-bad": to interface "st0" not defined`,
+		`destination-nat rule-set "dnat-bad": from interface "st0" not defined`,
+		`static-nat rule-set "stat-bad": from interface "st0" not defined`,
+	}
+	for _, want := range wantWarnings {
 		found := false
 		for _, warning := range cfg.Warnings {
-			if strings.Contains(warning, name) && strings.Contains(warning, "st0") {
+			if strings.Contains(warning, want) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("lenient must warn naming %s/st0, warnings=%v", name, cfg.Warnings)
+			t.Errorf("lenient must warn with %q, warnings=%v", want, cfg.Warnings)
 		}
 	}
 }
