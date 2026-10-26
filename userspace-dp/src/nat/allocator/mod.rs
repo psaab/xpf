@@ -3463,13 +3463,10 @@ impl PortAllocator {
         occ.free_recycle_at(port, now_ns)
     }
     /// Release a newly claimed candidate that never became a live PAT mapping.
-    /// It was never exposed to a remote endpoint, so it must not acquire the
-    /// small-pool quarantine reserved for previously published translations.
+    /// Use an unstamped recycle token: it bypasses the small-pool quarantine
+    /// while keeping concurrent bitmap/recycle claims exact.
     fn free_unpublished_translated_port(&self, addr_index: usize, port: u16) -> bool {
-        let Some(occ) = self.shared.occupancy.get(addr_index) else {
-            return false;
-        };
-        occ.free_no_recycle(port)
+        self.free_translated_port_at(addr_index, port, 0)
     }
 
     #[allow(clippy::too_many_arguments)]
