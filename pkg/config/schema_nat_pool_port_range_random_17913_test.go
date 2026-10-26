@@ -18,12 +18,12 @@ import (
 // `port range "1024 to 2048 random-allocation" is invalid`.
 func TestSourceNATPoolPortRangeRandomCombined17913(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		cmd      string
-		wantRand bool
+		name       string
+		cmd        string
+		wantRand   bool
 		wantNoRand bool
-		wantLo   int
-		wantHi   int
+		wantLo     int
+		wantHi     int
 	}{
 		{"junos-random", "set security nat source pool p1 port range 1024 to 2048 random-allocation", true, false, 1024, 2048},
 		{"junos-no-random", "set security nat source pool p1 port range 1024 to 2048 no-random-allocation", false, true, 1024, 2048},
