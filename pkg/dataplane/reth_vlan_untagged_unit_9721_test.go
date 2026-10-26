@@ -214,3 +214,48 @@ func TestNonVRRPRethUntaggedVLANParentUsesEffectiveZoneIdentity_17841(t *testing
 			member.VLANParentAddresses)
 	}
 }
+
+// When the only RETH unit zone refs are quarantined, the planner has no
+// device entry. The render fallback must recognize the zone ref by reth name
+// and avoid installing its otherwise-unplanned address.
+func TestQuarantinedNonVRRPRethUntaggedVLANParentDoesNotRender_17841(t *testing.T) {
+	tree := &config.ConfigTree{}
+	for _, l := range []string{
+		"set interfaces ge-0/0/7 gigether-options redundant-parent reth9",
+		"set interfaces reth9 vlan-tagging",
+		"set interfaces reth9 unit 0 family inet address 10.9.0.1/24",
+		"set security zones security-zone trust interfaces reth9.0",
+		"set security zones security-zone untrust interfaces reth9.0",
+	} {
+		path, err := config.ParseSetCommand(l)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", l, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", l, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile of quarantined non-VRRP RETH fixture: %v", err)
+	}
+	if len(config.QuarantinedZoneInterfaceKeys(cfg)) == 0 {
+		t.Fatal("premise: reth9.0 is not quarantined")
+	}
+	if pd := planPhysDesired(cfg)["ge-0-0-7"]; pd != nil {
+		t.Fatalf("premise: quarantined reth9.0 planned device %+v, want no plan entry", pd)
+	}
+
+	models := models9721(t, cfg)
+	member, ok := models["ge-0-0-7"]
+	if !ok {
+		t.Fatalf("no model for reth9 member ge-0-0-7; models=%v", modelNames9721(models))
+	}
+	if !member.IsVLANParent {
+		t.Fatalf("ge-0-0-7 is not rendered as a VLAN parent: %+v", member)
+	}
+	if len(member.VLANParentAddresses) != 0 {
+		t.Errorf("quarantined ge-0-0-7 VLANParentAddresses=%v, want none: an unplanned address must not render",
+			member.VLANParentAddresses)
+	}
+}
