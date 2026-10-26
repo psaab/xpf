@@ -493,6 +493,21 @@ test_cluster_helper_raw_deploy_uses_root_ownership() {
 		bad "cluster helper ownership wiring: push must pin uid/gid 0 and verify both sha and uid"
 	fi
 }
+test_standalone_helper_raw_deploy_uses_root_ownership() {
+	local f="$SCRIPT_DIR/setup.sh" body
+	body=$(awk '/^cmd_deploy\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$f")
+	if [[ -z "$body" ]]; then
+		bad "standalone helper ownership wiring: could not extract cmd_deploy"
+		return
+	fi
+	if grep -Fq 'incus file push "$PROJECT_ROOT/xpf-userspace-dp" "$INSTANCE_NAME/usr/local/sbin/xpf-userspace-dp" --uid 0 --gid 0 --mode 0755' <<<"$body" &&
+		grep -Fq 'deploy_verify_pushed_sha "$INSTANCE_NAME" "$PROJECT_ROOT/xpf-userspace-dp" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp' <<<"$body" &&
+		grep -Fq 'deploy_verify_pushed_uid "$INSTANCE_NAME" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp' <<<"$body"; then
+		ok "standalone helper ownership wiring: root-owned push keeps sha and uid verification"
+	else
+		bad "standalone helper ownership wiring: push must pin uid/gid 0 and verify both sha and uid"
+	fi
+}
 
 # #10026 regression: two installs of the same local filename must not reuse a
 # fixed remote /tmp/<basename> destination. The fake Incus rejects overwrite,
@@ -2799,6 +2814,7 @@ test_verify_pushed_uid_nonroot_hardfails
 test_verify_pushed_uid_follows_symlink_hardfails
 test_verify_pushed_uid_empty_hardfails
 test_cluster_helper_raw_deploy_uses_root_ownership
+test_standalone_helper_raw_deploy_uses_root_ownership
 test_deb_repush_uses_distinct_remote_slots
 test_deb_repush_wiring
 test_manifest_node_index_maps_configured_instances
