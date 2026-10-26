@@ -51,7 +51,7 @@ func TestBareVerdictFinal17836(t *testing.T) {
 		// the caller only asks on denied verdicts, and must not
 		// treat "not final" as a reason to deny an allowed bare).
 		{"bare itself allowed", compile(`^ping`, true, `^ping 10$`, true), "ping", true},
-		// No deny match on the bare charge: nothing vetoed, final.
+		// No deny match on the bare charge: the denial is an allowlist miss, never final.
 		{"no deny on bare", compile(`^ping 10\.98\.1\.1$`, true, `^traceroute$`, true), "ping", false},
 		// Allow-only class (allowlist miss on bare, DecidedBy=Allow):
 		// an argued form matching the allow is exactly the #17836
