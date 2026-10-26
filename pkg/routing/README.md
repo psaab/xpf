@@ -359,12 +359,16 @@ shipped drop-in `etc/systemd/networkd.conf.d/xpf.conf`
 (`ManageForeignRoutingPolicyRules=no`, staged by the .deb under
 `/usr/lib/systemd/networkd.conf.d` and copied into baked images)
 disables that cleanup (#16804). As a belt on hosts without the drop-in,
-the daemon re-runs the mgmt-DNS steering reconcile after the networkd
-activation on every apply, and the #9693 routing owner uses the
-pref-2000 terminator as a readback canary on its 30 s tick: a desired
-but missing terminator escalates the tick to a full re-assert of the
-policy bands, the route-leak snapshot and the mgmt-DNS pairs, so an
-external networkd restart is healed without a commit.
+the daemon re-runs the mgmt-DNS steering reconcile after networkd
+activation on every apply. On eligible 30 s recovery ticks, the #9693
+owner reads the pref-2000 terminator canary before attempting to restore
+it; a desired-but-missing terminator, or a failed eligible read, triggers
+the full policy-band, route-leak and mgmt-DNS recovery. The terminator
+write still precedes those band and DNS writes. This no-commit canary
+fallback applies only when the daemon desires or retains a VRF miss
+terminator. Configurations with neither a desired VRF nor a managed
+management interface can have policy rules without this canary; the
+separate rule-flush recovery gap is tracked in #18005.
 
 - `50–99`: RPM probe next-hop pins (`fwmark <mark> lookup <table>`,
   #1827). Constants live in `pkg/config` (`ProbeRulePriorityBase`,

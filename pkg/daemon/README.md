@@ -3673,12 +3673,14 @@ never lock an operator out of a remote box it manages.
   errors, while this owner retries the idempotent reconciles. #16804
   extends the owner with the networkd flush arm: the shipped
   `ManageForeignRoutingPolicyRules=no` drop-in stops networkd deleting
-  xpf's bands, and on a host without it the tick compares the desired
-  terminator against a RuleList readback — a desired-but-missing
-  pref-2000 rule escalates the tick to re-run the policy bands, the
-  route-leak republish and `applyMgmtDNSRules`, so an external networkd
-  restart heals without a commit (tests:
-  `networkd_rule_flush_16804_test.go`). Configured
+  xpf's bands. On eligible 30 s ticks without the drop-in, the owner
+  reads the desired pref-2000 terminator before attempting to restore it;
+  a missing canary or failed eligible read triggers policy-band,
+  route-leak and `applyMgmtDNSRules` recovery. The terminator write still
+  precedes the band and DNS writes. This fallback covers configurations
+  where the daemon desires or retains a VRF miss terminator; no-VRF,
+  no-management configurations with policy rules need a separate canary
+  (tracked in #18005) and are not covered by this path. Configured
   management-scoped statics and the system backup-router are installed in
   table 999 by `applyMgmtVRFStaticRoutesTo`, independently of FRR and DHCP:
   every management static (single-path and ECMP) and the backup-router as

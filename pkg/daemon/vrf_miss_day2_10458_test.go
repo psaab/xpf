@@ -62,6 +62,7 @@ type day2StatefulTerm10458 struct {
 	addCalls  int // attempts, including EEXIST duplicates
 	installs  int // absent -> present transitions
 	delCalls  int
+	delErr    error
 	invalid   int
 }
 
@@ -71,6 +72,9 @@ func (f *day2StatefulTerm10458) RuleDel(rule *netlink.Rule) error {
 	f.delCalls++
 	if f.installed == nil {
 		f.installed = map[int]bool{}
+	}
+	if f.delErr != nil {
+		return f.delErr
 	}
 	if rule != nil && (rule.Family == unix.AF_INET || rule.Family == unix.AF_INET6) {
 		delete(f.installed, rule.Family)
@@ -106,6 +110,25 @@ func (f *day2StatefulTerm10458) snapshot() (installed map[int]bool, addCalls, in
 	}
 	return installed, f.addCalls, f.installs, f.invalid
 }
+func (f *day2StatefulTerm10458) flush(families ...int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, family := range families {
+		delete(f.installed, family)
+	}
+}
+
+// day2RuleList10458 exposes the terminator fake's current state through the
+// same shape as the production RuleList priority probe.
+func day2RuleList10458(term *day2StatefulTerm10458) func(int) ([]int, error) {
+	return func(family int) ([]int, error) {
+		installed, _, _, _ := term.snapshot()
+		if installed[family] {
+			return []int{0, 1000, vrfMissTerminatorPriority16804, 32766}, nil
+		}
+		return []int{0, 1000, 32766}, nil
+	}
+}
 
 func day2AssertExactlyOnePerFamily10458(t *testing.T, term *day2StatefulTerm10458, what string) {
 	t.Helper()
@@ -118,14 +141,9 @@ func day2AssertExactlyOnePerFamily10458(t *testing.T, term *day2StatefulTerm1045
 	}
 }
 
-// TestDay2TailRestoresAsyncDeleteWithNoDebt10458 is the cell the defect fails:
-// a green reassert with zero error debt, followed by a post-success async
-// delete, must be restored by the next tick — not silently lost. The no-debt
-// tick stays VRF-only: policy and route-leak reconciles must not run.
-//
-// RED-on-revert: the pre-#10458 tick returns early when nothing is owed, so
-// the event sequence stops after del-4/del-6 and the exact-family assertion
-// fails.
+// TestDay2TailRestoresAsyncDeleteWithNoDebt10458 exercises a no-debt tick
+// after an asynchronous canary deletion. The truthful canary read now
+// escalates to the same policy/leak/DNS repair as a networkd flush.
 func TestDay2TailRestoresAsyncDeleteWithNoDebt10458(t *testing.T) {
 	d, term, _ := startupApplyDaemon10421(t)
 	spec := []routing.VRFSpec{{Name: "sfmix", TableID: 488570}}
@@ -138,15 +156,21 @@ func TestDay2TailRestoresAsyncDeleteWithNoDebt10458(t *testing.T) {
 	term.events = nil
 
 	prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
-	t.Cleanup(func() { routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak })
-	policyRuns, leakRuns := 0, 0
+	prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
+	t.Cleanup(func() {
+		routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
+		mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
+	})
+	policyRuns, leakRuns, dnsRuns := 0, 0, 0
 	routingPolicyReconcileFn = func(*Daemon, *config.Config) error { policyRuns++; return nil }
 	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
 		leakRuns++
 		return nil
 	}
+	mgmtDNSRulesReconcileFn = func(*Daemon) error { dnsRuns++; return nil }
+	terminatorFlushRuleListFn = func(int) ([]int, error) { return []int{0, 1000, 32766}, nil }
 
-	// Post-success async delete with zero error debt: the #10458 window.
+	// Post-success async delete with zero generic routing debt.
 	_ = term.RuleDel(&netlink.Rule{Family: unix.AF_INET, Priority: 2000})
 	_ = term.RuleDel(&netlink.Rule{Family: unix.AF_INET6, Priority: 2000})
 
@@ -156,21 +180,19 @@ func TestDay2TailRestoresAsyncDeleteWithNoDebt10458(t *testing.T) {
 	if !slices.Equal(term.events, want) {
 		t.Fatalf("day-2 tail event sequence = %v, want %v", term.events, want)
 	}
-	if policyRuns != 0 || leakRuns != 0 {
-		t.Fatalf("no-debt tick ran debt-gated reconciles: policy=%d leak=%d", policyRuns, leakRuns)
+	if policyRuns != 1 || leakRuns != 1 || dnsRuns != 1 {
+		t.Fatalf("missing-canary tick runs = policy %d, leak %d, DNS %d; want one each",
+			policyRuns, leakRuns, dnsRuns)
 	}
 	if owed, _, _ := d.RoutingReconcileDebt(); owed {
 		t.Fatal("successful day-2 tail latched routing debt")
 	}
 }
 
-// TestDay2TailNoDuplicateRulesAcrossTicks10458 proves repeated ticks and
-// delete/recover cycles converge on exactly one rule per family — the
-// unconditional reassert never accumulates duplicates (production dedups via
-// the kernel's EEXIST, modeled by the stateful fake).
-//
-// RED-on-revert: the pre-#10458 tick never restores, so the first
-// delete/recover cycle ends with zero installed families.
+// TestDay2TailNoDuplicateRulesAcrossTicks10458 proves repeated healthy ticks
+// and asynchronous deletions converge on exactly one rule per family. The
+// stateful RuleList probe keeps healthy ticks quiet and lets the recovery tick
+// distinguish a real missing canary from an idempotent existing rule.
 func TestDay2TailNoDuplicateRulesAcrossTicks10458(t *testing.T) {
 	term := &day2StatefulTerm10458{}
 	d := day2Daemon10458(t, term, day2SfmixConfig10458)
@@ -180,26 +202,204 @@ func TestDay2TailNoDuplicateRulesAcrossTicks10458(t *testing.T) {
 	}
 	day2AssertExactlyOnePerFamily10458(t, term, "after initial reconcile")
 
+	prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
+	prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
+	t.Cleanup(func() {
+		routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
+		mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
+	})
+	policyRuns, leakRuns, dnsRuns := 0, 0, 0
+	routingPolicyReconcileFn = func(*Daemon, *config.Config) error { policyRuns++; return nil }
+	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
+		leakRuns++
+		return nil
+	}
+	mgmtDNSRulesReconcileFn = func(*Daemon) error { dnsRuns++; return nil }
+	terminatorFlushRuleListFn = day2RuleList10458(term)
+
 	ctx := context.Background()
-	for i := 0; i < 3; i++ {
-		d.reassertRoutingReconcileOnce(ctx) // idle tick: must stay exactly one/family
+	for range 3 {
+		d.reassertRoutingReconcileOnce(ctx) // healthy tick stays quiet
 		day2AssertExactlyOnePerFamily10458(t, term, "after idle tick")
-		_ = term.RuleDel(&netlink.Rule{Family: unix.AF_INET, Priority: 2000})
-		_ = term.RuleDel(&netlink.Rule{Family: unix.AF_INET6, Priority: 2000})
-		if installed, _, _, _ := term.snapshot(); len(installed) != 0 {
-			t.Fatalf("precondition: async delete left %v installed", installed)
-		}
-		d.reassertRoutingReconcileOnce(ctx) // recovery tick: must restore exactly one/family
+		term.flush(unix.AF_INET, unix.AF_INET6)
+		d.reassertRoutingReconcileOnce(ctx) // missing-canary tick restores all bands
 		day2AssertExactlyOnePerFamily10458(t, term, "after recovery tick")
 	}
 	if owed, _, _ := d.RoutingReconcileDebt(); owed {
-		t.Fatal("idle day-2 ticks latched routing debt")
+		t.Fatal("successful day-2 ticks latched routing debt")
+	}
+	if policyRuns != 3 || leakRuns != 3 || dnsRuns != 3 {
+		t.Fatalf("recovery callbacks = policy %d, leak %d, DNS %d; want 3 each",
+			policyRuns, leakRuns, dnsRuns)
 	}
 	_, _, installs, _ := term.snapshot()
-	// Initial converge (2) plus one restore per cycle (3*2). Idle ticks hit
-	// EEXIST and install nothing.
+	// Initial converge (2) plus one restore per cycle (3*2). Healthy ticks
+	// hit EEXIST and install nothing.
 	if installs != 8 {
 		t.Fatalf("absent->present installs = %d, want 8 (initial 2 + 3 restores)", installs)
+	}
+}
+
+// TestRoutingTickPendingRemovalDoesNotReinstall10458 covers the manager's
+// remove-pending ownership state after the rule has disappeared. The
+// conservative no-canary escalation may run bands once, but must not install
+// a terminator or retain debt after removal converges.
+func TestRoutingTickPendingRemovalDoesNotReinstall10458(t *testing.T) {
+	term := &day2StatefulTerm10458{}
+	d := day2Daemon10458(t, term, day2SfmixConfig10458)
+	spec := []routing.VRFSpec{{Name: "sfmix", TableID: 488570}}
+	if err := d.routing.ReconcileVRFs(spec); err != nil {
+		t.Fatalf("initial VRF reconcile: %v", err)
+	}
+	if _, err := d.store.SyncApply("system {\n    host-name no-vrf-10458;\n}\n", nil); err != nil {
+		t.Fatalf("SyncApply no-VRF config: %v", err)
+	}
+	injected := errors.New("injected terminator removal failure")
+	term.mu.Lock()
+	term.delErr = injected
+	term.mu.Unlock()
+	if err := d.routing.ReconcileVRFs(nil); !errors.Is(err, injected) {
+		t.Fatalf("initial remove-pending setup error = %v, want %v", err, injected)
+	}
+	if !d.routing.VRFMissTerminatorNeedsReconcile() {
+		t.Fatal("precondition: failed terminator removal did not retain pending ownership")
+	}
+	term.flush(unix.AF_INET, unix.AF_INET6)
+	term.mu.Lock()
+	term.delErr = nil
+	term.mu.Unlock()
+
+	prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
+	prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
+	t.Cleanup(func() {
+		routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
+		mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
+	})
+	calls := 0
+	routingPolicyReconcileFn = func(*Daemon, *config.Config) error { calls++; return nil }
+	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
+		calls++
+		return nil
+	}
+	mgmtDNSRulesReconcileFn = func(*Daemon) error { calls++; return nil }
+	listCalls := 0
+	terminatorFlushRuleListFn = func(family int) ([]int, error) {
+		listCalls++
+		return day2RuleList10458(term)(family)
+	}
+
+	d.reassertRoutingReconcileOnce(context.Background())
+	if calls != 3 {
+		t.Fatalf("pending-removal flush tick recovery callbacks = %d, want 3", calls)
+	}
+	if d.routing.VRFMissTerminatorNeedsReconcile() {
+		t.Fatal("successful tick did not discharge pending terminator removal")
+	}
+	if owed, _, last := d.RoutingReconcileDebt(); owed {
+		t.Fatalf("successful pending removal retained routing debt: %q", last)
+	}
+	installed, addCalls, installs, invalid := term.snapshot()
+	if len(installed) != 0 || addCalls != 2 || installs != 2 || invalid != 0 {
+		t.Fatalf("pending removal reinstalled or corrupted canary: installed=%v adds=%d installs=%d invalid=%d",
+			installed, addCalls, installs, invalid)
+	}
+
+	d.reassertRoutingReconcileOnce(context.Background())
+	if calls != 3 || listCalls != 1 {
+		t.Fatalf("converged no-VRF tick was not quiet: recovery=%d RuleList=%d", calls, listCalls)
+	}
+}
+
+// TestRoutingTickKeepsGenericAndMgmtRouteDebtIndependent10458 proves each
+// recovery domain keeps its own retry bit even when a canary flush forces
+// both domains to run in the same tick.
+func TestRoutingTickKeepsGenericAndMgmtRouteDebtIndependent10458(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		flush bool
+	}{
+		{name: "generic success leaves management debt", flush: true},
+		{name: "management success leaves generic debt", flush: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			term := &day2StatefulTerm10458{}
+			d := day2Daemon10458(t, term, day2SfmixConfig10458)
+			spec := []routing.VRFSpec{{Name: "sfmix", TableID: 488570}}
+			if err := d.routing.ReconcileVRFs(spec); err != nil {
+				t.Fatalf("initial VRF reconcile: %v", err)
+			}
+			if tc.flush {
+				term.flush(unix.AF_INET, unix.AF_INET6)
+			}
+
+			prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
+			prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
+			prevMgmt := mgmtVRFRouteReconcileFn
+			t.Cleanup(func() {
+				routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
+				mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
+				mgmtVRFRouteReconcileFn = prevMgmt
+			})
+			genericErr := errors.New("injected generic recovery failure")
+			mgmtErr := errors.New("injected management-route recovery failure")
+			policyRuns, leakRuns, dnsRuns, mgmtRuns := 0, 0, 0, 0
+			routingPolicyReconcileFn = func(*Daemon, *config.Config) error {
+				policyRuns++
+				if !tc.flush && policyRuns == 1 {
+					return genericErr
+				}
+				return nil
+			}
+			routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
+				leakRuns++
+				return nil
+			}
+			mgmtDNSRulesReconcileFn = func(*Daemon) error { dnsRuns++; return nil }
+			terminatorFlushRuleListFn = day2RuleList10458(term)
+			mgmtVRFRouteReconcileFn = func(*Daemon) error {
+				mgmtRuns++
+				if tc.flush && mgmtRuns == 1 {
+					return mgmtErr
+				}
+				return nil
+			}
+
+			assertDebt := func(wantGeneric, wantMgmt bool) {
+				t.Helper()
+				d.routingDebt.mu.Lock()
+				gotGeneric, gotMgmt := d.routingDebt.owed, d.routingDebt.mgmtRoutesOwed
+				d.routingDebt.mu.Unlock()
+				if gotGeneric != wantGeneric || gotMgmt != wantMgmt {
+					t.Fatalf("generic/mgmt debt = %v/%v, want %v/%v",
+						gotGeneric, gotMgmt, wantGeneric, wantMgmt)
+				}
+			}
+			if tc.flush {
+				d.noteMgmtRouteReconcileResult(mgmtErr)
+			} else {
+				d.noteRoutingReconcileResult(genericErr)
+				d.noteMgmtRouteReconcileResult(mgmtErr)
+			}
+
+			d.reassertRoutingReconcileOnce(context.Background())
+			if tc.flush {
+				assertDebt(false, true)
+				d.reassertRoutingReconcileOnce(context.Background())
+				assertDebt(false, false)
+				if policyRuns != 1 || leakRuns != 1 || dnsRuns != 1 || mgmtRuns != 2 {
+					t.Fatalf("flush recovery runs = policy %d, leak %d, DNS %d, mgmt %d; want 1/1/1/2",
+						policyRuns, leakRuns, dnsRuns, mgmtRuns)
+				}
+			} else {
+				assertDebt(true, false)
+				d.reassertRoutingReconcileOnce(context.Background())
+				assertDebt(false, false)
+				if policyRuns != 2 || leakRuns != 2 || dnsRuns != 2 || mgmtRuns != 1 {
+					t.Fatalf("owed recovery runs = policy %d, leak %d, DNS %d, mgmt %d; want 2/2/2/1",
+						policyRuns, leakRuns, dnsRuns, mgmtRuns)
+				}
+			}
+		})
 	}
 }
 
@@ -219,11 +419,7 @@ func TestDay2TailNoDesiredVRFIsNoOp10458(t *testing.T) {
 }
 
 // TestDay2TailFailureLatchesRetryDebt10458 proves a day-2 tail failure joins
-// the #9693 retry debt (like every other terminator failure) instead of being
-// dropped, and the next owed tick runs the full reconcile and discharges.
-//
-// RED-on-revert: the pre-#10458 tick does nothing with no debt, so no debt is
-// ever latched.
+// the #9693 retry debt and the next owed tick retries the full reconcile.
 func TestDay2TailFailureLatchesRetryDebt10458(t *testing.T) {
 	d, term, _ := startupApplyDaemon10421(t)
 	spec := []routing.VRFSpec{{Name: "sfmix", TableID: 488570}}
@@ -233,12 +429,20 @@ func TestDay2TailFailureLatchesRetryDebt10458(t *testing.T) {
 	term.events = nil
 
 	prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
-	t.Cleanup(func() { routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak })
+	prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
+	t.Cleanup(func() {
+		routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
+		mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
+	})
 	policyRuns, leakRuns := 0, 0
 	routingPolicyReconcileFn = func(*Daemon, *config.Config) error { policyRuns++; return nil }
 	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
 		leakRuns++
 		return nil
+	}
+	mgmtDNSRulesReconcileFn = func(*Daemon) error { return nil }
+	terminatorFlushRuleListFn = func(int) ([]int, error) {
+		return []int{0, 1000, vrfMissTerminatorPriority16804, 32766}, nil
 	}
 
 	injected := errors.New("injected day-2 terminator failure")
@@ -260,7 +464,7 @@ func TestDay2TailFailureLatchesRetryDebt10458(t *testing.T) {
 		t.Fatalf("owed retry did not discharge debt: owed=%v last=%q", owed, last)
 	}
 	if policyRuns != 1 || leakRuns != 1 {
-		t.Fatalf("owed retry runs = policy %d leak %d, want 1 each", policyRuns, leakRuns)
+		t.Fatalf("owed retry runs = policy %d, leak %d, want 1 each", policyRuns, leakRuns)
 	}
 	want := []string{"add-4", "add-6", "add-4", "add-6"}
 	if !slices.Equal(term.events, want) {
@@ -268,12 +472,8 @@ func TestDay2TailFailureLatchesRetryDebt10458(t *testing.T) {
 	}
 }
 
-// TestDay2TailSkipsBootstrap10458 protects the startup takeover boundary:
-// bootstrap has a committed VRF in the store, but the periodic owner must not
-// mutate global policy rules until the authorized bootstrap exit.
-//
-// RED-on-revert: removing the bootstrap gate lets this tick install both
-// pref-2000 rules after bootstrap setup returns.
+// TestDay2TailSkipsBootstrap10458 is the debt-free bootstrap negative control:
+// the probe, terminator, and all recovery callbacks stay suppressed.
 func TestDay2TailSkipsBootstrap10458(t *testing.T) {
 	d, term := startupDaemon10421(t, false)
 	spec := []routing.VRFSpec{{Name: "sfmix", TableID: 488570}}
@@ -282,9 +482,76 @@ func TestDay2TailSkipsBootstrap10458(t *testing.T) {
 	}
 	term.events = nil
 	d.bootstrapMode.Store(true)
+
+	prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
+	prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
+	prevVRF, prevMgmt := vrfMissTerminatorReconcileFn, mgmtVRFRouteReconcileFn
+	t.Cleanup(func() {
+		routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
+		mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
+		vrfMissTerminatorReconcileFn, mgmtVRFRouteReconcileFn = prevVRF, prevMgmt
+	})
+	probes, vrfRuns, policyRuns, leakRuns, dnsRuns, mgmtRuns := 0, 0, 0, 0, 0, 0
+	terminatorFlushRuleListFn = func(int) ([]int, error) { probes++; return nil, nil }
+	vrfMissTerminatorReconcileFn = func(*Daemon) error { vrfRuns++; return nil }
+	routingPolicyReconcileFn = func(*Daemon, *config.Config) error { policyRuns++; return nil }
+	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
+		leakRuns++
+		return nil
+	}
+	mgmtDNSRulesReconcileFn = func(*Daemon) error { dnsRuns++; return nil }
+	mgmtVRFRouteReconcileFn = func(*Daemon) error { mgmtRuns++; return nil }
+
 	d.reassertRoutingReconcileOnce(context.Background())
-	if len(term.events) != 0 {
-		t.Fatalf("bootstrap day-2 tick mutated global rules: %v", term.events)
+	if len(term.events) != 0 || probes+vrfRuns+policyRuns+leakRuns+dnsRuns+mgmtRuns != 0 {
+		t.Fatalf("debt-free bootstrap tick performed work: term=%v probe=%d VRF=%d policy=%d leak=%d DNS=%d mgmt=%d",
+			term.events, probes, vrfRuns, policyRuns, leakRuns, dnsRuns, mgmtRuns)
+	}
+}
+
+// TestDay2TailRetriesDebtDuringBootstrap10458 preserves the existing debt
+// retry contract: bootstrap suppresses the canary and terminator takeover, not
+// generic or management-route recovery that was already owed.
+func TestDay2TailRetriesDebtDuringBootstrap10458(t *testing.T) {
+	d, term := startupDaemon10421(t, false)
+	spec := []routing.VRFSpec{{Name: "sfmix", TableID: 488570}}
+	if err := d.routing.ReconcileVRFs(spec); err != nil {
+		t.Fatalf("bootstrap VRF reconcile setup: %v", err)
+	}
+	term.events = nil
+	d.bootstrapMode.Store(true)
+
+	prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
+	prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
+	prevVRF, prevMgmt := vrfMissTerminatorReconcileFn, mgmtVRFRouteReconcileFn
+	t.Cleanup(func() {
+		routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
+		mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
+		vrfMissTerminatorReconcileFn, mgmtVRFRouteReconcileFn = prevVRF, prevMgmt
+	})
+	probes, vrfRuns, policyRuns, leakRuns, dnsRuns, mgmtRuns := 0, 0, 0, 0, 0, 0
+	terminatorFlushRuleListFn = func(int) ([]int, error) { probes++; return nil, nil }
+	vrfMissTerminatorReconcileFn = func(*Daemon) error { vrfRuns++; return nil }
+	routingPolicyReconcileFn = func(*Daemon, *config.Config) error { policyRuns++; return nil }
+	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
+		leakRuns++
+		return nil
+	}
+	mgmtDNSRulesReconcileFn = func(*Daemon) error { dnsRuns++; return nil }
+	mgmtVRFRouteReconcileFn = func(*Daemon) error { mgmtRuns++; return nil }
+	d.noteRoutingReconcileResult(errors.New("injected generic routing debt"))
+	d.noteMgmtRouteReconcileResult(errors.New("injected management-route debt"))
+
+	d.reassertRoutingReconcileOnce(context.Background())
+	if probes != 0 || vrfRuns != 0 || len(term.events) != 0 {
+		t.Fatalf("bootstrap debt retry touched the canary: probes=%d VRF=%d term=%v", probes, vrfRuns, term.events)
+	}
+	if policyRuns != 1 || leakRuns != 1 || dnsRuns != 1 || mgmtRuns != 1 {
+		t.Fatalf("bootstrap debt retries = policy %d, leak %d, DNS %d, mgmt %d; want one each",
+			policyRuns, leakRuns, dnsRuns, mgmtRuns)
+	}
+	if owed, _, last := d.RoutingReconcileDebt(); owed {
+		t.Fatalf("successful bootstrap debt retries did not discharge: last=%q", last)
 	}
 }
 

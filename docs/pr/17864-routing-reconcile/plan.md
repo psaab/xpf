@@ -1,6 +1,6 @@
 # #17864 — routing reconcile flush detection
 
-Status: DRAFT v4 — pending adversarial plan review
+Status: IMPLEMENTED — v4 plan followed after parent-directed process fold-ins
 
 ## Issue framing
 
@@ -39,8 +39,8 @@ No public function signatures or wire/protocol APIs change. The callback seams r
 - v4 or v6 missing independently triggers recovery. `mgmtRoutesOwed` remains independent and is not folded into generic routing debt; add a combined-state test for independent discharge in both directions.
 - An external writer can flush between the probe and repair; the repair can hide that later flush. This is outside the deterministic ordering fix.
 - The priority-only probe can miss selective loss of other bands or a foreign rule occupying priority 2000. A true no-VRF/no-management-stanza config with other policy rules also has no pref-2000 canary; this distinct residual is not solved here and must not be claimed solved.
-- Lane B's management-DNS-only premise is refuted for configured management interfaces, which contribute to desired management-VRF state. Before opening the implementation PR, transfer the distinct no-VRF/no-management policy-band blind spot into a separate actionable follow-up issue and link it in the PR. Only then may the PR close #17864; otherwise use `Refs #17864`. Do not add a second DNS-specific canary or duplicate the existing post-FRR reconcile.
-- Update `pkg/routing/README.md` and the affected recovery source comments to document probe-before-repair ordering, conservative recovery on eligible probe errors, and the boundary that only configs desiring the VRF terminator receive this canary; a separate follow-up covers no-VRF/no-management policy bands.
+- Lane B's management-DNS-only premise is refuted for configured management interfaces, which contribute to desired management-VRF state. Transfer the distinct no-VRF/no-management policy-band blind spot to actionable follow-up #18005 and link it in the implementation PR. Only then may the PR close #17864; otherwise use `Refs #17864`. Do not add a second DNS-specific canary or duplicate the existing post-FRR reconcile.
+- Update `pkg/routing/README.md` and the affected recovery source comments to document probe-before-repair ordering, conservative recovery on eligible probe errors, and the boundary that only configs desiring the VRF terminator receive this canary; link #18005 as the separate no-VRF/no-management policy-band residual.
 
 ## Risk assessment
 
@@ -63,14 +63,14 @@ No public function signatures or wire/protocol APIs change. The callback seams r
 
 ## Out of scope
 
-- A lease-aware management-DNS-only canary for configs with no managed VRF.
+- A separate management-DNS-only canary; configured management interfaces desire the managed VRF, while any dynamic DNS rule check must remain lease-aware.
 - A generic all-band flush detector or replacement canary.
 - Changing routing.Manager's `ReassertVRFMissTerminator` result contract.
 - Reworking the #16804 post-FRR DNS reconcile.
 
-## Open questions for adversarial review
+## Plan review outcomes
 
-1. Does the stateful fake share every RuleList-visible mutation with the real manager callback, including deletes and partial-family state?
-2. Are the explicit bootstrap, pending-removal, probe-error, and two-domain debt-transition assertions sufficient to pin the changed behavior?
-3. Is the documented boundary clear that configured management interfaces do desire the managed VRF, while truly no-VRF/no-management policy bands require a separately linked follow-up?
-4. Is classifying every eligible probe error as recovery-required the right fail-safe behavior despite repeated 30-second writes while RuleList remains unavailable?
+1. The RuleList fake reads the same `day2StatefulTerm10458` state mutated by the real routing manager; the flush regression also observes both families inside the DNS callback.
+2. The test set pins debt-free and debt-positive bootstrap, pending removal without reinstall, both partial-family flushes, persistent probe errors, and independent generic/management-route debt transitions.
+3. Configured management interfaces do desire the management VRF. The separate no-VRF/no-management policy-band gap is tracked in #18005; #17864's PR must link that issue before closing #17864.
+4. Eligible probe errors trigger conservative full recovery. Successful recovery does not retain probe-only debt; persistent errors deliberately cause repeated idempotent full recovery at the 30-second cadence.

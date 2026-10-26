@@ -9,6 +9,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
+	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -17,9 +18,9 @@ import (
 // deletes every xpf ip rule on `networkctl reconfigure` and on networkd
 // restart. These cells pin the Go-side owners: the mgmt-DNS steering
 // reconcile re-runs after the networkd activation (and after FRR), and
-// the 30 s #9693 routing owner detects a between-commits flush via the
-// terminator canary readback and restores the policy bands, the
-// route-leak snapshot and the mgmt-DNS pairs without a commit.
+// 30 s #9693 routing owner samples the pref-2000 canary before attempting
+// terminator restoration, then restores the policy bands, route-leak
+// snapshot and mgmt-DNS pairs without a commit when a flush is detected.
 
 // TestMgmtDNSReconcileRunsAfterNetworkdActivation16804 is the source-order
 // pin for the acceptance "MGMT-DNS-RULES-INSTALL after
@@ -88,56 +89,80 @@ func TestApplyOrderMgmtDNSAfterNetworkdFlushDynamic16804(t *testing.T) {
 }
 
 // TestRoutingTickRestoresAllRuleBandsAfterFlush16804 drives the real
-// reassertRoutingReconcileOnce tick with a simulated networkd restart:
-// the terminator is missing on readback while no routing debt is owed,
-// so the tick must escalate to re-run the policy bands, the route-leak
-// republish and the mgmt-DNS reconcile — without any commit — and latch
-// no debt once they succeed. FAIL-ON-REVERT: reverting the tick to
-// debt-gated-only leaves calls empty and this cell goes red (the
-// restart arm had no owner until the next commit).
+// reassertRoutingReconcileOnce tick against a stateful terminator shared by
+// the real routing.Manager repair and the RuleList readback. A flush must be
+// sampled before the terminator write restores its evidence.
+// FAIL-ON-REVERT: with the old write-before-read ordering, the manager adds
+// both canaries before the RuleList fake reads them, so the full band
+// reconciles do not run.
 func TestRoutingTickRestoresAllRuleBandsAfterFlush16804(t *testing.T) {
-	d, term, cfg := startupApplyDaemon10421(t)
-	if err := d.applyConfigLocked(context.Background(), cfg); err != nil {
-		t.Fatalf("applyConfigLocked: %v", err)
-	}
-	term.events = nil
+	for _, tc := range []struct {
+		name             string
+		alreadyInstalled map[int]bool
+	}{
+		{name: "both families flushed", alreadyInstalled: map[int]bool{}},
+		{name: "IPv4 missing", alreadyInstalled: map[int]bool{unix.AF_INET6: true}},
+		{name: "IPv6 missing", alreadyInstalled: map[int]bool{unix.AF_INET: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			term := &day2StatefulTerm10458{}
+			d := day2Daemon10458(t, term, day2SfmixConfig10458)
+			spec := []routing.VRFSpec{{Name: "sfmix", TableID: 488570}}
+			if err := d.routing.ReconcileVRFs(spec); err != nil {
+				t.Fatalf("initial VRF reconcile: %v", err)
+			}
+			term.mu.Lock()
+			term.installed = make(map[int]bool, len(tc.alreadyInstalled))
+			for family := range tc.alreadyInstalled {
+				term.installed[family] = true
+			}
+			term.mu.Unlock()
 
-	var calls []string
-	prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
-	prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
-	t.Cleanup(func() {
-		routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
-		mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
-	})
-	routingPolicyReconcileFn = func(*Daemon, *config.Config) error {
-		calls = append(calls, "policy")
-		return nil
-	}
-	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
-		calls = append(calls, "leak")
-		return nil
-	}
-	mgmtDNSRulesReconcileFn = func(*Daemon) error {
-		calls = append(calls, "mgmtdns")
-		return nil
-	}
-	// Simulate the restart flush: terminator absent from both families.
-	terminatorFlushRuleListFn = func(family int) ([]int, error) {
-		return []int{0, 1000, 32766}, nil
-	}
+			var calls []string
+			prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
+			prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
+			t.Cleanup(func() {
+				routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
+				mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
+			})
+			routingPolicyReconcileFn = func(*Daemon, *config.Config) error {
+				calls = append(calls, "policy")
+				return nil
+			}
+			routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
+				calls = append(calls, "leak")
+				return nil
+			}
+			dnsSawCanaries := false
+			mgmtDNSRulesReconcileFn = func(*Daemon) error {
+				calls = append(calls, "mgmtdns")
+				installed, _, _, _ := term.snapshot()
+				dnsSawCanaries = installed[unix.AF_INET] && installed[unix.AF_INET6]
+				return nil
+			}
+			terminatorFlushRuleListFn = day2RuleList10458(term)
+			_, addsBefore, _, _ := term.snapshot()
 
-	d.reassertRoutingReconcileOnce(context.Background())
+			d.reassertRoutingReconcileOnce(context.Background())
 
-	want := []string{"policy", "leak", "mgmtdns"}
-	if !slices.Equal(calls, want) {
-		t.Fatalf("flush tick calls = %v, want %v", calls, want)
-	}
-	if owed, _, last := d.RoutingReconcileDebt(); owed {
-		t.Fatalf("successful flush restore must not latch debt: owed=%v last=%q", owed, last)
-	}
-	// The terminator itself was re-asserted first (existing always-on arm).
-	if !slices.Contains(term.events, "add-4") || !slices.Contains(term.events, "add-6") {
-		t.Fatalf("terminator re-assert missing on flush tick: %v", term.events)
+			want := []string{"policy", "leak", "mgmtdns"}
+			if !slices.Equal(calls, want) {
+				t.Fatalf("flush tick calls = %v, want %v", calls, want)
+			}
+			if !dnsSawCanaries {
+				t.Fatal("management-DNS reconcile ran before both pref-2000 canaries were restored")
+			}
+			installed, addCalls, _, invalid := term.snapshot()
+			if invalid != 0 || !installed[unix.AF_INET] || !installed[unix.AF_INET6] {
+				t.Fatalf("terminator state after flush recovery = %v (invalid=%d), want both families", installed, invalid)
+			}
+			if addCalls != addsBefore+2 {
+				t.Fatalf("terminator add attempts on one tick = %d, want exactly 2", addCalls-addsBefore)
+			}
+			if owed, _, last := d.RoutingReconcileDebt(); owed {
+				t.Fatalf("successful flush restore must not latch debt: owed=%v last=%q", owed, last)
+			}
+		})
 	}
 }
 
@@ -174,6 +199,71 @@ func TestRoutingTickNoFlushIsQuiet16804(t *testing.T) {
 	}
 	if owed, _, _ := d.RoutingReconcileDebt(); owed {
 		t.Fatal("healthy tick latched routing debt")
+	}
+}
+
+// TestRoutingTickProbeFailureConservativelyRecovers16804 pins the fail-safe
+// probe-error policy: a failed read is not evidence that the bands survived.
+func TestRoutingTickProbeFailureConservativelyRecovers16804(t *testing.T) {
+	term := &day2StatefulTerm10458{}
+	d := day2Daemon10458(t, term, day2SfmixConfig10458)
+	if err := d.routing.ReconcileVRFs([]routing.VRFSpec{{Name: "sfmix", TableID: 488570}}); err != nil {
+		t.Fatalf("initial VRF reconcile: %v", err)
+	}
+	term.flush(unix.AF_INET, unix.AF_INET6)
+
+	prevPolicy, prevLeak := routingPolicyReconcileFn, routeLeakReconcileFn
+	prevDNS, prevList := mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn
+	t.Cleanup(func() {
+		routingPolicyReconcileFn, routeLeakReconcileFn = prevPolicy, prevLeak
+		mgmtDNSRulesReconcileFn, terminatorFlushRuleListFn = prevDNS, prevList
+	})
+	var calls []string
+	routingPolicyReconcileFn = func(*Daemon, *config.Config) error {
+		calls = append(calls, "policy")
+		return nil
+	}
+	routeLeakReconcileFn = func(*Daemon, *config.Config, []config.RouteOverlayEntry) error {
+		calls = append(calls, "leak")
+		return nil
+	}
+	dnsSawCanaries := true
+	mgmtDNSRulesReconcileFn = func(*Daemon) error {
+		calls = append(calls, "mgmtdns")
+		installed, _, _, _ := term.snapshot()
+		dnsSawCanaries = dnsSawCanaries && installed[unix.AF_INET] && installed[unix.AF_INET6]
+		return nil
+	}
+	probeErr := errors.New("injected RuleList failure")
+	probes := 0
+	terminatorFlushRuleListFn = func(int) ([]int, error) {
+		probes++
+		return nil, probeErr
+	}
+
+	for range 2 {
+		d.reassertRoutingReconcileOnce(context.Background())
+		if owed, _, last := d.RoutingReconcileDebt(); owed {
+			t.Fatalf("successful recovery retained probe-only debt: %q", last)
+		}
+	}
+	want := []string{"policy", "leak", "mgmtdns", "policy", "leak", "mgmtdns"}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("probe-error recovery calls = %v, want %v", calls, want)
+	}
+	if !dnsSawCanaries {
+		t.Fatal("management-DNS reconcile ran before the terminator repair")
+	}
+	if probes != 2 {
+		t.Fatalf("probe calls = %d, want 2 (one per tick)", probes)
+	}
+	installed, addCalls, installs, invalid := term.snapshot()
+	if invalid != 0 || !installed[unix.AF_INET] || !installed[unix.AF_INET6] {
+		t.Fatalf("terminator state after probe-error recovery = %v (invalid=%d), want both families", installed, invalid)
+	}
+	if addCalls != 6 || installs != 4 {
+		t.Fatalf("terminator adds/installs = %d/%d, want 6/4 (initial 2, then one repair per tick)",
+			addCalls, installs)
 	}
 }
 
