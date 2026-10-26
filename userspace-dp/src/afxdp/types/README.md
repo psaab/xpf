@@ -5,15 +5,15 @@ struct that crosses module boundaries lives here so siblings can
 import them without circular module dependencies.
 
 The type tree combines shared data definitions with behavior-bearing
-coordination code. `mod.rs` implements the HA shared-session indexes
-(`SharedNatAmbiguityIndex`, `SharedSessionBareTupleIndex`, and
-`SharedSessionOwnerRgIndexes`) as well as top-level type and re-export
-wiring. `shared_cos_lease/` also owns the hot-path lease acquisition /
-release / epoch-rotation algorithm (tag-checked CAS,
-two-CAS-with-rollback) for the shared CoS lease. Visibility is
-deliberately narrower there: its items are re-exported with `pub(super)`
-(afxdp-internal only), while the cos / forwarding / tx / runtime
-sub-modules use `pub(in crate::afxdp)` globs.
+coordination code. `session_index.rs` implements the HA shared-session
+indexes (`SharedNatAmbiguityIndex`, `SharedSessionBareTupleIndex`, and
+`SharedSessionOwnerRgIndexes`) and their ambiguity/owner-scope operations.
+`mod.rs` provides top-level type and re-export wiring. `shared_cos_lease/`
+also owns the hot-path lease acquisition / release / epoch-rotation
+algorithm (tag-checked CAS, two-CAS-with-rollback) for the shared CoS
+lease. Visibility is deliberately narrower there: its items are
+re-exported with `pub(super)` (afxdp-internal only), while the cos /
+forwarding / tx / runtime sub-modules use `pub(in crate::afxdp)` globs.
 
 ## Files
 
@@ -29,9 +29,10 @@ sub-modules use `pub(in crate::afxdp)` globs.
 | `forwarding/state.rs` | `ForwardingState` definition and implementation, paired-insert tests, `SynCookieMasterKey`, `InstallTables`, `FabricNatScopeIdentity`. |
 | `forwarding/tunnels.rs` | `TunnelEndpoint`, `WgRuntimePeer`. |
 | `forwarding/zones.rs` | `ZoneHostInbound`, `is_host_inbound_multicast_group`. |
-| `mod.rs` | HA shared-session index types and implementations (`SharedNatAmbiguityIndex`, `SharedSessionBareTupleIndex`, `SharedSessionOwnerRgIndexes`), plus top-level type wiring, packet metadata/session types, and re-exports. |
+| `mod.rs` | Top-level type wiring, packet metadata/session types, and re-exports. |
 | `runtime.rs` | Per-worker runtime atomics and shared status types. |
 | `runtime_view.rs` | `RuntimeView` — atomically-published paired validation and forwarding state (#6592). |
+| `session_index.rs` | HA shared-session index types and implementations (`SharedNatAmbiguityIndex`, `SharedSessionBareTupleIndex`, `SharedSessionOwnerRgIndexes`), moved from `mod.rs`. |
 | `shared_cos_lease/backlog.rs` | Interface-global exact-backlog visibility and residual-surplus token bucket. |
 | `shared_cos_lease/epoch.rs` | V8 lease-rotation epoch state, grant packing, and related enums/constants. |
 | `shared_cos_lease/lease.rs` | Shared CoS queue/root leases, token-bucket state, and v8 fair-share acquisition. |
@@ -58,9 +59,10 @@ sub-modules use `pub(in crate::afxdp)` globs.
   `pub(in crate::afxdp) use cos::*;`,
   `pub(in crate::afxdp) use forwarding::*;`,
   `pub(in crate::afxdp) use tx::*;`,
-  `pub(in crate::afxdp) use runtime::*;`. Plus a narrower
-  `pub(super) use shared_cos_lease::{...}`, a `pub(crate) use
-  forwarding::{ForwardingDisposition, ForwardingResolution}` for
+  `pub(in crate::afxdp) use runtime::*;`. It also re-exports the HA
+  indexes from `session_index.rs` and keeps the narrower
+  `pub(super) use shared_cos_lease::{...}`. A
+  `pub(crate) use forwarding::{ForwardingDisposition, ForwardingResolution}` for
   callers in `crate::*` outside `afxdp/`, and the widest one,
   `pub use forwarding::NeighborEntry`, used by `server/handlers/neighbors.rs`
   to construct `afxdp::NeighborEntry` from outside the module.
