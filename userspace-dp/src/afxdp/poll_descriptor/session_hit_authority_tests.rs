@@ -5,7 +5,7 @@
 use super::*;
 use crate::InterfaceSnapshot;
 use crate::afxdp::forwarding_build::build_forwarding_state;
-use crate::afxdp::test_fixtures::policy_deny_snapshot;
+use crate::afxdp::test_fixtures::{nat_snapshot_with_fabric, policy_deny_snapshot};
 use crate::ip_proto::PROTO_ICMP;
 use crate::test_zone_ids::*;
 
@@ -821,6 +821,7 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
         cookie_resolution(ForwardingDisposition::ForwardCandidate),
         flow.dst_ip,
         443,
+        None,
         1_000,
         128,
     ));
@@ -840,6 +841,7 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
         cookie_resolution(ForwardingDisposition::ForwardCandidate),
         flow.dst_ip,
         443,
+        None,
         1_000,
         128,
     ));
@@ -853,6 +855,7 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
         cookie_resolution(ForwardingDisposition::LocalDelivery),
         flow.dst_ip,
         443,
+        None,
         1_000,
         128,
     ));
@@ -871,6 +874,7 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
             cookie_resolution(disposition),
             flow.dst_ip,
             443,
+            None,
             1_000,
             128,
         ));
@@ -932,6 +936,265 @@ fn shared_transit_admission_keeps_class_and_policy_tuples_separate_17017() {
 }
 
 #[test]
+fn syn_cookie_prescreen_defers_policy_until_effective_destination_17920() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".into(),
+        zone: "dmz".into(),
+        linux_name: "ge-0-0-2".into(),
+        ifindex: DMZ,
+        ..Default::default()
+    });
+    snapshot.policies[0].destination_addresses = vec!["198.51.100.77/32".into()];
+    let fw = build_forwarding_state(&snapshot);
+    let flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: DMZ as u32,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let sessions = SessionTable::new();
+    assert!(
+        super::syn_cookie_challenge_is_session_miss(&sessions, Some(&flow), 1_000),
+        "the pre-translation prescreen must defer policy until admission knows the effective destination"
+    );
+    // The raw tuple ends in .20. The NAT rewrite destination is .88, while
+    // the resolution's effective policy destination is .77 (the only address
+    // permitted by the rule); ordinary miss policy evaluates the latter.
+    let effective_dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77));
+    let rewrite_dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 88));
+    let resolution = cookie_resolution(ForwardingDisposition::ForwardCandidate);
+    let (from_zone_id, to_zone_id) =
+        super::session_miss_zone_pair_ids(&fw, DMZ, None, resolution);
+    let miss_policy = crate::policy::evaluate_policy_result_without_counting_at(
+        &fw.policy,
+        from_zone_id,
+        to_zone_id,
+        flow.src_ip,
+        effective_dst,
+        flow.forward_key.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        None,
+        1_000,
+    );
+    assert_eq!(miss_policy.action, crate::policy::PolicyAction::Permit);
+    assert!(super::syn_cookie_final_admission(
+        &fw,
+        &std::collections::BTreeMap::new(),
+        &flow,
+        meta,
+        None,
+        resolution,
+        effective_dst,
+        flow.forward_key.dst_port,
+        Some(rewrite_dst),
+        1_000,
+        128,
+    ));
+}
+
+#[test]
+fn admission_zone_pair_follows_finalized_ha_resolution_17920() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.zones.push(ZoneSnapshot {
+        name: "dmz".into(),
+        id: TEST_DMZ_ZONE_ID,
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".into(),
+        zone: "dmz".into(),
+        egress_zone: "dmz".into(),
+        linux_name: "ge-0-0-2".into(),
+        ifindex: DMZ,
+        hardware_addr: "02:bf:72:02:00:02".into(),
+        ..Default::default()
+    });
+    snapshot.policies.clear();
+    snapshot.policies.push(PolicyRuleSnapshot {
+        from_zone: "dmz".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        action: "permit".into(),
+        name: "permit-real-route-zone".into(),
+        ..PolicyRuleSnapshot::default()
+    });
+    let fw = build_forwarding_state(&snapshot);
+    let flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: DMZ as u32,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let now_secs = 128;
+    let now_ns = 1_000;
+    let ha = std::collections::BTreeMap::from([(
+        1,
+        crate::afxdp::HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: now_secs,
+            lease: crate::afxdp::HAForwardingLease::Inactive,
+        },
+    )]);
+    let routed = crate::afxdp::forwarding::lookup_forwarding_resolution(&fw, flow.dst_ip).resolution;
+    assert_eq!(routed.disposition, ForwardingDisposition::ForwardCandidate);
+    let (pre_from, pre_to) =
+        zone_pair_ids_for_flow_with_override(&fw, DMZ, None, routed.egress_ifindex);
+    assert_eq!((pre_from, pre_to), (TEST_DMZ_ZONE_ID, TEST_WAN_ZONE_ID));
+    let pre_policy = crate::policy::evaluate_policy_result_without_counting_at(
+        &fw.policy,
+        pre_from,
+        pre_to,
+        flow.src_ip,
+        flow.dst_ip,
+        flow.forward_key.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        None,
+        now_ns,
+    );
+    assert_eq!(pre_policy.action, crate::policy::PolicyAction::Permit);
+
+    let finalized = crate::afxdp::forwarding::finalize_new_flow_ha_resolution(
+        &fw,
+        &ha,
+        now_secs,
+        routed,
+        false,
+        false,
+        DMZ,
+        pre_from,
+        0,
+    );
+    assert_eq!(
+        finalized.disposition,
+        ForwardingDisposition::FabricRedirect
+    );
+    assert_eq!(finalized.egress_ifindex, 21);
+    assert_eq!(fw.egress_zone_id(finalized.egress_ifindex), 0);
+    let (from_zone_id, to_zone_id) =
+        super::session_miss_zone_pair_ids(&fw, DMZ, None, finalized);
+    assert_eq!(
+        (from_zone_id, to_zone_id),
+        (TEST_DMZ_ZONE_ID, 0),
+        "HA redirect uses the real fabric parent egress zone"
+    );
+    let admission = super::session_admission::transit_admission_verdict(
+        &fw,
+        &super::session_admission::AdmissionInput {
+            flow: &flow,
+            meta: meta.into(),
+            resolution: finalized,
+            class_dst: flow.dst_ip,
+            translated_dst: None,
+            policy_dst: flow.dst_ip,
+            protocol: flow.forward_key.protocol,
+            policy_dst_port: flow.forward_key.dst_port,
+            policy_icmp: None,
+            from_zone_id,
+            to_zone_id,
+            fabric_arrival_zone: None,
+            now_ns,
+        },
+        None,
+    );
+    assert!(
+        admission.policy_result.is_none(),
+        "the ordinary miss path delegates policy for a FabricRedirect"
+    );
+    assert!(admission.permits());
+    assert!(super::syn_cookie_final_admission(
+        &fw,
+        &ha,
+        &flow,
+        meta,
+        None,
+        routed,
+        flow.dst_ip,
+        flow.forward_key.dst_port,
+        None,
+        now_ns,
+        now_secs,
+    ));
+}
+
+#[test]
+fn syn_cookie_missing_neighbor_preserves_local_policy_gate_17920() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".into(),
+        zone: "dmz".into(),
+        linux_name: "ge-0-0-2".into(),
+        ifindex: DMZ,
+        ..Default::default()
+    });
+    snapshot.policies[0].action = "deny".into();
+    let fw = build_forwarding_state(&snapshot);
+    let flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: DMZ as u32,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let resolution = cookie_resolution(ForwardingDisposition::MissingNeighbor);
+    let (from_zone_id, to_zone_id) =
+        super::session_miss_zone_pair_ids(&fw, DMZ, None, resolution);
+    let verdict = super::session_admission::transit_admission_verdict(
+        &fw,
+        &super::session_admission::AdmissionInput {
+            flow: &flow,
+            meta: meta.into(),
+            resolution,
+            class_dst: flow.dst_ip,
+            translated_dst: None,
+            policy_dst: flow.dst_ip,
+            protocol: flow.forward_key.protocol,
+            policy_dst_port: flow.forward_key.dst_port,
+            policy_icmp: None,
+            from_zone_id,
+            to_zone_id,
+            fabric_arrival_zone: None,
+            now_ns: 1_000,
+        },
+        None,
+    );
+    assert_eq!(
+        verdict.policy_result.expect("MissingNeighbor evaluates policy").action,
+        crate::policy::PolicyAction::Deny
+    );
+    assert!(!verdict.permits());
+    assert!(!super::syn_cookie_final_admission(
+        &fw,
+        &std::collections::BTreeMap::new(),
+        &flow,
+        meta,
+        None,
+        resolution,
+        flow.dst_ip,
+        flow.forward_key.dst_port,
+        None,
+        1_000,
+        128,
+    ));
+}
+
+
+#[test]
 fn syn_cookie_matches_session_miss_when_untranslated_17017() {
     let fw = forwarding(false);
     let flow = cookie_flow();
@@ -954,6 +1217,7 @@ fn syn_cookie_matches_session_miss_when_untranslated_17017() {
         resolution,
         flow.dst_ip,
         flow.forward_key.dst_port,
+        None,
         1_000,
         128,
     );
@@ -1067,11 +1331,21 @@ fn syn_cookie_final_admission_fence_suppresses_challenge_15947() {
     assert!(super::syn_cookie_final_admission_with_fence(
         &fw, &ha, &flow, meta, None,
         cookie_resolution(ForwardingDisposition::ForwardCandidate),
-        flow.dst_ip, 443, false, 1_000, 128,
+        flow.dst_ip,
+        443,
+        None,
+        false,
+        1_000,
+        128,
     ));
     assert!(!super::syn_cookie_final_admission_with_fence(
         &fw, &ha, &flow, meta, None,
         cookie_resolution(ForwardingDisposition::ForwardCandidate),
-        flow.dst_ip, 443, true, 1_000, 128,
+        flow.dst_ip,
+        443,
+        None,
+        true,
+        1_000,
+        128,
     ), "fence-matching Permit must suppress the challenge reply");
 }

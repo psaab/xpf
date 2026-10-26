@@ -4,122 +4,37 @@
 //
 // `enqueue_syn_cookie_reply` is on the challenge path only and remains
 // `#[cold] #[inline(never)]`; `syn_cookie_reply_budget_available` is
-// called only by that cold enqueue body. The prescreen and final
-// admission helpers consume the shared pure verdict in
-// `session_admission.rs`, while host admission stays caller-owned.
+// called only by that cold enqueue body. Final transit admission consumes
+// the shared pure verdict in `session_admission.rs`, while host admission
+// stays caller-owned.
 
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::screen::SynCookieChallenge;
 use super::session_admission::{AdmissionInput, transit_admission_verdict};
 
-/// #15947 (H28-01): may a SYN-cookie reply (SYN-ACK challenge or
-/// validated-ACK RST) be emitted for this packet's destination?
-///
-/// The screen stages run before session/FIB/HA/policy admission, so
-/// without this gate a screened SYN above threshold elicits a SYN-ACK
-/// (and a validated cookie ACK an ACK-RST) for destinations the
-/// firewall would deny, cannot route, classifies martian, or does not
-/// own (HA-inactive) — an oracle / split-brain response, and a fresh
-/// cookie ISN hijacking an Opening session's retransmitted SYN.
-/// This helper is a necessary-but-not-sufficient challenge prescreen:
-/// it suppresses disproven replies, but a positive result is NOT final
-/// admission. The challenge caller therefore records a deferred
-/// challenge and lets the actual miss path re-derive DNAT/NPTv6/
-/// NAT64/PBR, select the route, and run the disposition-specific
-/// final/host admission before a SYN-ACK is emitted. It retains two
-/// useful early signals: an existing session suppresses a fresh
-/// cookie, and an unzoned/raw-disproven packet cannot earn a reply.
-/// "Plausible" here remains deliberately raw-tuple for transit; final
-/// admission's translated tuple is authoritative.
-pub(super) fn syn_cookie_reply_admitted(
-    forwarding: &ForwardingState,
-    ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
+/// A SYN-cookie challenge has no effective route, translated tuple, or
+/// finalized HA disposition yet. It may pass this point only when it is a
+/// genuine session miss; final miss admission performs authoritative
+/// martian, policy, host, and disposition checks before any reply.
+pub(super) fn syn_cookie_challenge_is_session_miss(
     sessions: &SessionTable,
     flow: Option<&SessionFlow>,
-    packet_frame: &[u8],
-    meta: UserspaceDpMeta,
-    ingress_zone_override: Option<u32>,
     now_ns: u64,
-    now_secs: u64,
 ) -> bool {
-    let Some(flow) = flow else {
-        return false;
-    };
-    // An existing live session (incl. an Opening handshake's
-    // retransmit) follows its session — never a fresh cookie ISN.
-    if sessions.has_session_hit_at(&flow.forward_key, now_ns) {
-        return false;
-    }
-    let resolution = crate::afxdp::forwarding::enforce_ha_resolution_snapshot(
-        forwarding,
-        ha_state,
-        now_secs,
-        crate::afxdp::forwarding::lookup_forwarding_resolution(forwarding, flow.dst_ip)
-            .resolution,
-    );
-    if resolution.disposition == ForwardingDisposition::LocalDelivery {
-        // Round-3/narrow fold: the challenge SYN-ACK itself must pass
-        // the same host gates as the validated ACK. The raw destination
-        // is the only tuple available on this pre-translation arm, so
-        // this checks host-inbound/lo0 + junos-host on it; translated
-        // host destinations are governed again at final admission.
-        return syn_cookie_host_admission(
-            forwarding,
-            flow,
-            packet_frame,
-            meta,
-            ingress_zone_override,
-            flow.dst_ip,
-            flow.forward_key.dst_port,
-            now_ns,
-        );
-    }
-    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
-    let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
-        forwarding,
-        ingress_logical,
-        ingress_zone_override,
-        resolution.egress_ifindex,
-    );
-    transit_admission_verdict(
-        forwarding,
-        &AdmissionInput {
-            flow,
-            meta: meta.into(),
-            resolution,
-            class_dst: flow.dst_ip,
-            translated_dst: None,
-            policy_dst: flow.dst_ip,
-            protocol: meta.protocol,
-            policy_dst_port: flow.forward_key.dst_port,
-            policy_icmp: None,
-            from_zone_id,
-            to_zone_id,
-            fabric_arrival_zone: ingress_zone_override,
-            now_ns,
-        },
-        None,
-    )
-    .permits()
+    flow.is_some_and(|flow| !sessions.has_session_hit_at(&flow.forward_key, now_ns))
 }
 
-/// Final admission check for a validated SYN-cookie ACK, evaluated on
-/// the actual session-miss context rather than the raw ingress tuple.
+/// Final transit admission for a validated cookie ACK or a deferred SYN
+/// challenge, evaluated on the effective session-miss tuple.
 ///
-/// `resolution` must already be the route selected for the translated
-/// destination (after DNAT/NPTv6/NAT64 and any PBR table selection).
-/// This path intentionally retains its current zone pair (computed after
-/// its own HA finalization) and passes `effective_dst` as both the
-/// destination-class and policy tuple; #17920 owns any behavior change.
-/// LocalDelivery host admission is caller-owned and is handled separately
-/// by `syn_cookie_host_admission`. Returning false suppresses only the
-/// synthesized ACK-RST.
+/// `resolution` is the route selected for the translated destination
+/// (after DNAT/NPTv6/NAT64 and any PBR table selection). Transit
+/// classification receives the wire destination plus the pre-policy
+/// translation; policy receives `effective_dst`. HA finalization precedes
+/// zone-pair derivation. LocalDelivery host admission remains caller-owned
+/// and is handled by `syn_cookie_host_admission`. Returning false suppresses
+/// only the synthesized ACK-RST.
 pub(super) fn syn_cookie_final_admission(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
@@ -129,10 +44,24 @@ pub(super) fn syn_cookie_final_admission(
     resolution: ForwardingResolution,
     effective_dst: IpAddr,
     effective_dst_port: u16,
+    translated_dst: Option<IpAddr>,
     now_ns: u64,
     now_secs: u64,
 ) -> bool {
-    syn_cookie_final_admission_with_fence(forwarding, ha_state, flow, meta, ingress_zone_override, resolution, effective_dst, effective_dst_port, false, now_ns, now_secs)
+    syn_cookie_final_admission_with_fence(
+        forwarding,
+        ha_state,
+        flow,
+        meta,
+        ingress_zone_override,
+        resolution,
+        effective_dst,
+        effective_dst_port,
+        translated_dst,
+        false,
+        now_ns,
+        now_secs,
+    )
 }
 
 /// Final admission with the unconditional miss-path drop gates folded
@@ -151,6 +80,7 @@ pub(super) fn syn_cookie_final_admission_with_fence(
     resolution: ForwardingResolution,
     effective_dst: IpAddr,
     effective_dst_port: u16,
+    translated_dst: Option<IpAddr>,
     fence_dropped: bool,
     now_ns: u64,
     now_secs: u64,
@@ -158,6 +88,20 @@ pub(super) fn syn_cookie_final_admission_with_fence(
     if fence_dropped {
         return false;
     }
+    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let (from_zone_id, _) = zone_pair_ids_for_flow_with_override(
+        forwarding,
+        ingress_logical,
+        ingress_zone_override,
+        resolution.egress_ifindex,
+    );
+    // Match the miss path: HA fabric resolution receives the resolved
+    // ingress zone, not a missing override encoded as zone zero.
     let resolution = crate::afxdp::forwarding::finalize_new_flow_ha_resolution(
         forwarding,
         ha_state,
@@ -166,23 +110,17 @@ pub(super) fn syn_cookie_final_admission_with_fence(
         false,
         false,
         meta.ingress_ifindex as i32,
-        ingress_zone_override.unwrap_or(0),
+        from_zone_id,
         0,
     );
     if resolution.disposition == ForwardingDisposition::LocalDelivery {
         return true;
     }
-    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
-    let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
+    let (from_zone_id, to_zone_id) = super::session_miss_zone_pair_ids(
         forwarding,
         ingress_logical,
         ingress_zone_override,
-        resolution.egress_ifindex,
+        resolution,
     );
     transit_admission_verdict(
         forwarding,
@@ -190,8 +128,8 @@ pub(super) fn syn_cookie_final_admission_with_fence(
             flow,
             meta: meta.into(),
             resolution,
-            class_dst: effective_dst,
-            translated_dst: None,
+            class_dst: flow.dst_ip,
+            translated_dst,
             policy_dst: effective_dst,
             protocol: meta.protocol,
             policy_dst_port: effective_dst_port,

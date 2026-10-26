@@ -332,18 +332,18 @@ pub(super) fn strict_syn_check_drops_pre_handshake_data(
     !established || handshake_pending || syn_ack_first
 }
 
-/// Shared inputs for the pure transit-admission verdict. Callers retain
-/// their existing HA-finalization and zone-pair ordering, so this extraction
-/// does not select a winner for the #17920 destination/zone drift.
+/// Shared inputs for the pure transit-admission verdict. Callers supply
+/// the finalized resolution/zone pair and keep destination classification
+/// separate from the effective post-translation policy tuple.
 pub(super) struct AdmissionInput<'a> {
     pub(super) flow: &'a SessionFlow,
     pub(super) meta: ForwardPacketMeta,
     pub(super) resolution: ForwardingResolution,
-    /// Destination class checks use the tuple chosen by each path.
+    /// Wire destination used for martian classification.
     pub(super) class_dst: IpAddr,
+    /// Any pre-policy translation also checked for martian classification.
     pub(super) translated_dst: Option<IpAddr>,
-    /// Policy uses a separate tuple; #17920 owns any choice to align it
-    /// with the destination-class tuple.
+    /// Effective post-translation destination used by security policy.
     pub(super) policy_dst: IpAddr,
     pub(super) protocol: u8,
     pub(super) policy_dst_port: u16,
@@ -424,7 +424,9 @@ pub(super) fn transit_class_verdict(
 
 /// A complete, side-effect-free transit-admission result. The miss path
 /// applies its class counters and policy hit count separately; SYN-cookie
-/// paths consume only `permits()`.
+/// paths consume only `permits()`. `FabricRedirect` policy is delegated to
+/// the HA peer, while `MissingNeighbor` has its own local cold-path policy
+/// evaluation; cookie admission preserves both disposition-specific paths.
 pub(super) struct AdmissionVerdict {
     pub(super) class: TransitClassVerdict,
     pub(super) policy_result: Option<crate::policy::PolicyEvaluationResult>,
@@ -434,16 +436,18 @@ impl AdmissionVerdict {
     pub(super) fn permits(&self) -> bool {
         self.class.transit_disposition
             && self.class.drop.is_none()
-            && self
-                .policy_result
-                .is_some_and(|result| result.action == crate::policy::PolicyAction::Permit)
+            && self.policy_result.map_or(true, |result| {
+                result.action == crate::policy::PolicyAction::Permit
+            })
     }
 }
 
 /// Single pure martian + policy chain shared by the session-miss effects
 /// path and SYN-cookie admission. `class_verdict` lets the miss path reuse
 /// the class check it ran at its original ordering point, then apply the
-/// counted policy effect when its later policy stage is reached.
+/// counted policy effect when its later policy stage is reached. Both
+/// `ForwardCandidate` and `MissingNeighbor` are locally policy-adjudicated;
+/// `FabricRedirect` delegates its policy to the peer that owns the packet.
 pub(super) fn transit_admission_verdict(
     forwarding: &ForwardingState,
     input: &AdmissionInput<'_>,
@@ -460,7 +464,14 @@ pub(super) fn transit_admission_verdict(
             input.fabric_arrival_zone,
         )
     });
-    let policy_result = if class.transit_disposition && class.drop.is_none() {
+    let local_policy_disposition = matches!(
+        input.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    );
+    let policy_result = if local_policy_disposition
+        && class.transit_disposition
+        && class.drop.is_none()
+    {
         Some(crate::policy::evaluate_policy_result_without_counting_at(
             &forwarding.policy,
             input.from_zone_id,
