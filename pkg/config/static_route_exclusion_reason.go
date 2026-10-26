@@ -157,6 +157,29 @@ func staticRouteHasDisposition(sr *StaticRoute) bool {
 	return sr.NextTable != "" || sr.Discard || sr.Reject
 }
 
+// StaticRouteHasFRRRenderableNextHop reports whether at least one ECMP member
+// survives the static-route renderer's address and interface operand belts.
+// The renderer drops an individual malformed member and retains healthy
+// siblings; route-leak exceptions must use the same member-level decision or
+// they can preserve a route FRR omitted.
+func StaticRouteHasFRRRenderableNextHop(sr *StaticRoute) bool {
+	if sr == nil {
+		return false
+	}
+	for _, nh := range sr.NextHops {
+		if nh.Address != "" && !FRRNextHopAddressOperand(nh.Address) {
+			continue
+		}
+		if nh.Interface != "" && !FRRInterfaceOperand(nh.Interface) {
+			continue
+		}
+		if nh.Address != "" || nh.Interface != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // staticRouteDestinationUsable mirrors the destination acceptance in
 // userspace.routeDestinationForWire without creating a package dependency
 // cycle. A bare host is usable because the builder adds its host prefix before

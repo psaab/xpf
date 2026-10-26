@@ -239,7 +239,7 @@ func familyName17970(ipv6 bool) string {
 	return "IPv4"
 }
 
-func TestNextTableExcludedStaticDoesNotCreateCarveout17970(t *testing.T) {
+func TestNextTableFRROmittedStaticDoesNotCreateCarveout17970(t *testing.T) {
 	for _, ipv6 := range []bool{false, true} {
 		t.Run(familyName17970(ipv6), func(t *testing.T) {
 			runNextTableExcludedStaticCell17970(t, ipv6)
@@ -256,21 +256,28 @@ func runNextTableExcludedStaticCell17970(t *testing.T, ipv6 bool) {
 	}
 	defer h.Close()
 
-	leakPrefix, excludedPrefix, source, destination, address := "198.20.0.0/16", "198.20.1.0/24", "203.0.113.99", "198.20.1.5", "203.0.113.1/24"
+	leakPrefix, malformedPrefix, validPrefix := "198.20.0.0/16", "198.20.1.0/24", "198.20.2.0/24"
+	source, malformedDestination, validDestination, address := "203.0.113.99", "198.20.1.5", "198.20.2.5", "203.0.113.1/24"
+	malformedGateway, validGateway := "192.0.2.999", "203.0.113.2"
 	family := unix.AF_INET
 	if ipv6 {
-		leakPrefix, excludedPrefix = "2001:db8:20::/48", "2001:db8:20:1::/64"
-		source, destination, address = "2001:db8:ffff::99", "2001:db8:20:1::5", "2001:db8:ffff::1/64"
+		leakPrefix, malformedPrefix, validPrefix = "2001:db8:20::/48", "2001:db8:20:1::/64", "2001:db8:20:2::/64"
+		source, malformedDestination, validDestination, address = "2001:db8:ffff::99", "2001:db8:20:1::5", "2001:db8:20:2::5", "2001:db8:ffff::1/64"
+		malformedGateway, validGateway = "2001:db8::gg", "2001:db8:ffff::2"
 		family = unix.AF_INET6
 	}
 	mgr := &nextTableManager{ops: dscpRuleOps{h}}
 	routes := []*config.StaticRoute{
 		{Destination: leakPrefix, NextTable: "red"},
-		{Destination: excludedPrefix}, // no disposition: StaticRouteExcludedReason excludes it
+		{Destination: malformedPrefix, NextHops: []config.NextHopEntry{{Address: malformedGateway}}},
+		{Destination: validPrefix, NextHops: []config.NextHopEntry{
+			{Address: malformedGateway},
+			{Address: validGateway},
+		}},
 		{Destination: "0.0.0.0/0", Discard: true},
 	}
 	if ipv6 {
-		routes[2] = &config.StaticRoute{Destination: "::/0", Discard: true}
+		routes[3] = &config.StaticRoute{Destination: "::/0", Discard: true}
 	}
 	if err := mgr.Apply(routes, []*config.RoutingInstanceConfig{{Name: "red", TableID: 100}}, []string{"xwan"}); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -279,10 +286,23 @@ func runNextTableExcludedStaticCell17970(t *testing.T, ipv6 bool) {
 	if err != nil {
 		t.Fatalf("list rules: %v", err)
 	}
+	malformedException, validECMPException := false, false
 	for _, rule := range rules {
-		if isNextTableMainCarveoutShape(rule) && rule.Dst.String() == excludedPrefix {
-			t.Fatalf("FRR-excluded static route created a main exception: %+v", rule)
+		if !isNextTableMainCarveoutShape(rule) {
+			continue
 		}
+		switch rule.Dst.String() {
+		case malformedPrefix:
+			malformedException = true
+		case validPrefix:
+			validECMPException = true
+		}
+	}
+	if malformedException {
+		t.Fatalf("FRR-omitted static %s created a main exception", malformedPrefix)
+	}
+	if !validECMPException {
+		t.Fatalf("valid ECMP member did not keep main exception for %s", validPrefix)
 	}
 
 	run := func(args ...string) (string, error) {
@@ -311,17 +331,23 @@ func runNextTableExcludedStaticCell17970(t *testing.T, ipv6 bool) {
 	if out, err := run("route", "add", leakPrefix, "dev", "xred", "table", "100"); err != nil {
 		t.Fatalf("add target-table route: %s: %v", out, err)
 	}
-	get := func() string {
+	if out, err := run("route", "add", validPrefix, "via", validGateway, "dev", "xwan"); err != nil {
+		t.Fatalf("add valid ECMP main route: %s: %v", out, err)
+	}
+	get := func(destination string) string {
 		out, _ := run("route", "get", destination, "from", source, "iif", "xwan")
 		return out
 	}
-	if got := get(); !strings.Contains(got, "dev xred") {
-		t.Errorf("excluded static with target hit = %q, want target table via xred", got)
+	if got := get(malformedDestination); !strings.Contains(got, "dev xred") {
+		t.Errorf("FRR-omitted static with target hit = %q, want target table via xred", got)
+	}
+	if got := get(validDestination); !strings.Contains(got, "dev xwan") {
+		t.Errorf("valid ECMP static with target hit = %q, want main route via xwan", got)
 	}
 	if out, err := run("route", "del", leakPrefix, "dev", "xred", "table", "100"); err != nil {
 		t.Fatalf("remove target-table route: %s: %v", out, err)
 	}
-	if got := strings.ToLower(get()); !strings.Contains(got, "unreachable") {
-		t.Errorf("excluded static with target miss = %q, want the next-table unreachable shadow", got)
+	if got := strings.ToLower(get(malformedDestination)); !strings.Contains(got, "unreachable") {
+		t.Errorf("FRR-omitted static with target miss = %q, want the next-table unreachable shadow", got)
 	}
 }

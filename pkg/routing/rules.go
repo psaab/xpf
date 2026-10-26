@@ -490,7 +490,8 @@ func nextTableMainCarveoutRules(
 	seen := make(map[carveoutKey]struct{})
 	for _, route := range routes {
 		if route == nil || route.NextTable != "" ||
-			config.StaticRouteExcludedReason(route, false, definedInstances) != "" {
+			config.StaticRouteExcludedReason(route, false, definedInstances) != "" ||
+			(!route.Discard && !route.Reject && !config.StaticRouteHasFRRRenderableNextHop(route)) {
 			continue
 		}
 		dst, ok := staticRouteDestinationPrefix(route.Destination)

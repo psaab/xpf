@@ -34,14 +34,15 @@ ip rule to <connected-prefix> lookup <sourceTable> pref <derived-priority>
 ```
 
 The shared priority mapping reserves four slots per prefix:
-`30000 + 4*(address-bits - prefix-length) + slot`. Next-table rows use slots
-0-2 (main-table probe, target lookup, unreachable miss shadow); rib-group
-lookups use slot 3. All such rules share **30000-30999**, after PBR
-(29000-29999) and before the main table's rule (32766). More-specific prefixes
-get lower (earlier) three-rule sequences, so the most-specific main-table
-carve-out or leak controls a destination before any broader leak; otherwise,
-the unmatched destination falls through to main. A main-table default route
-therefore no longer shadows a leaked connected prefix.
+`30000 + 4*(address-bits - prefix-length) + slot`. Static main-table
+exceptions use slot 0, next-table leaks use slots 1-2 (target lookup and
+unreachable miss shadow), and rib-group lookups use slot 3. All such rules
+share **30000-30999**, after PBR (29000-29999) and before the main table's rule
+(32766). More-specific prefixes get lower (earlier) priorities, so a static
+exception or leak pair for the most-specific prefix controls a destination
+before any broader leak; otherwise, the unmatched destination falls through
+to main. A main-table default route therefore no longer shadows a leaked
+connected prefix.
 
 ### Kernel/helper precedence parity (#11319, #11396)
 
@@ -62,16 +63,16 @@ override before looking up destination routes. Before #11319, the kernel's
 next-table (100-199) and rib-group (30000-30999) bands both sorted ahead of PBR
 (31000-31999), so a leak could select a different table for the same packet.
 
-Since #16614, each admitted config next-table leak installs two scoped rules
-per default-instance ingress interface: the target lookup and a
-selector-identical `unreachable` shadow. To retain the bounded Junos carve-out
-semantics without a blanket main-table probe, the manager also installs a
-destination- and iif-scoped slot-0 main lookup for each configured, FRR-emitted
-non-next-table static route strictly more specific than a matching admitted
-config next-table prefix. `StaticRouteExcludedReason` filters statics FRR will
-not install (including `no-install`, unusable destinations, family-mismatched
-gateways, and routes with no forwarding disposition); valid discard/reject
-and qualified-next-hop statics remain eligible.
+Since #16614, each admitted config next-table leak installs a target lookup and
+a selector-identical `unreachable` shadow per default-instance ingress
+interface. Independently, the manager installs a destination- and iif-scoped
+slot-0 main lookup for each configured non-next-table static route strictly
+more specific than a matching admitted config next-table prefix that FRR can
+render. `StaticRouteExcludedReason` filters statics FRR will not install
+(including `no-install`, unusable destinations, family-mismatched gateways,
+and routes with no forwarding disposition); the shared FRR operand predicates
+also require at least one renderable ECMP member. Valid discard/reject and
+qualified-next-hop statics remain eligible.
 Each exception is installed only after the leak's unreachable-shadow/target-
 lookup pairs and uses `suppress_prefixlen = route_prefix_length - 1`, so an
 absent configured route does not expose a broader ordinary main route.
@@ -355,7 +356,8 @@ silently no-op — for the cases Phase 1 cannot fully realize:
 The applier assigns next-table and interface-route rib-group leaks
 prefix-derived priorities in the shared `[30000, 31000)` range, while
 independent admission caps bound installed entries: 100 next-table
-route/ingress pairs (each expands to a three-rule sequence) and
+route/ingress pairs (each expands to a two-rule target-lookup/unreachable-shadow
+pair, with independently eligible static exceptions) and
 `config.MaxRibGroupLeakRules` (1000 connected-prefix rules). These caps are not
 priority slots or separate per-kind priority bands. A config that exceeds a
 cap used to commit green with only a **warning**

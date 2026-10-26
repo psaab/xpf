@@ -98,6 +98,11 @@ func TestNextTableStaticMainCarveouts17970(t *testing.T) {
 		{Destination: "10.4.0.0/16", NextHops: []config.NextHopEntry{{Address: "2001:db8::1"}}},
 		{Destination: "10.5.0.0/16", NextHops: []config.NextHopEntry{{Address: "192.0.2.1", Preference: 200, HasPreference: true}}},
 		{Destination: "10.6.0.1", NextHops: []config.NextHopEntry{{Address: "192.0.2.2"}}},
+		{Destination: "10.7.0.0/16", NextHops: []config.NextHopEntry{{Address: "192.0.2.999"}}},
+		{Destination: "10.8.0.0/16", NextHops: []config.NextHopEntry{
+			{Address: "192.0.2.999"},
+			{Address: "192.0.2.8"},
+		}},
 		{Destination: "0.0.0.0/0", Discard: true},
 		{Destination: "2001:db8::/32", NextTable: "red"},
 		{Destination: "2001:db8:1::/48", Reject: true},
@@ -105,6 +110,11 @@ func TestNextTableStaticMainCarveouts17970(t *testing.T) {
 		{Destination: "2001:db8:3::/48", NextHops: []config.NextHopEntry{{Address: "192.0.2.1"}}},
 		{Destination: "2001:db8:4::/48", NextHops: []config.NextHopEntry{{Address: "2001:db8::1", Preference: 200, HasPreference: true}}},
 		{Destination: "2001:db8:5::1", NextHops: []config.NextHopEntry{{Address: "2001:db8::2"}}},
+		{Destination: "2001:db8:6::/48", NextHops: []config.NextHopEntry{{Address: "2001:db8::gg"}}},
+		{Destination: "2001:db8:7::/48", NextHops: []config.NextHopEntry{
+			{Address: "2001:db8::gg"},
+			{Address: "2001:db8::7"},
+		}},
 		{Destination: "::/0", Reject: true},
 		{Destination: "192.0.2.0/24", NextTable: "unknown"},
 	}
@@ -121,6 +131,10 @@ func TestNextTableStaticMainCarveouts17970(t *testing.T) {
 		"10.1.0.0/16|xwan2":       config.RouteLeakNextTableCarveoutPriority(16, 32),
 		"10.5.0.0/16|xwan":        config.RouteLeakNextTableCarveoutPriority(16, 32),
 		"10.5.0.0/16|xwan2":       config.RouteLeakNextTableCarveoutPriority(16, 32),
+		"10.8.0.0/16|xwan":        config.RouteLeakNextTableCarveoutPriority(16, 32),
+		"10.8.0.0/16|xwan2":       config.RouteLeakNextTableCarveoutPriority(16, 32),
+		"2001:db8:7::/48|xwan":    config.RouteLeakNextTableCarveoutPriority(48, 128),
+		"2001:db8:7::/48|xwan2":   config.RouteLeakNextTableCarveoutPriority(48, 128),
 		"10.6.0.1/32|xwan":        config.RouteLeakNextTableCarveoutPriority(32, 32),
 		"10.6.0.1/32|xwan2":       config.RouteLeakNextTableCarveoutPriority(32, 32),
 		"2001:db8:1::/48|xwan":    config.RouteLeakNextTableCarveoutPriority(48, 128),
@@ -169,8 +183,8 @@ func TestNextTableStaticMainCarveouts17970(t *testing.T) {
 			}
 		}
 	}
-	if carveouts != 12 {
-		t.Fatalf("rib-group clear removed or changed scoped carve-outs: got %d, want 12", carveouts)
+	if carveouts != 16 {
+		t.Fatalf("rib-group clear removed or changed scoped carve-outs: got %d, want 16", carveouts)
 	}
 
 	// Stale pre-fix probes remain identifiable for upgrade cleanup, and clear
