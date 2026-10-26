@@ -236,6 +236,13 @@ func (vi *vrrpInstance) becomeBackup(masterDownTimer, advertTimer *time.Timer) e
 	vi.mu.Lock()
 	vi.skipNextPreemptHold = false
 	vi.mu.Unlock()
+	// #17842: the just-ended MASTER tenure invalidates any queued
+	// one-shot preempt kick (and ForceRGMaster one-shot), exactly as
+	// MASTER entry does: a token raced in during that tenure must
+	// not fire in the first stepBackup of the tenure peer-demotion
+	// just started (force would bypass the priority gate against the
+	// very master that demoted us).
+	vi.discardPendingPreemptNow()
 	vi.emitEvent()
 	// #6177 item 1: a waiter observes the completed VIP removal, not merely
 	// "resignation signalled + priority 0".
