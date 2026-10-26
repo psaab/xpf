@@ -122,8 +122,8 @@ the debounced `onAddressChange` callback when content changed.
   of the **shortest held valid lifetime** (T1 50%, T2 87.5%;
   `t2Remaining` is the additional T1→T2 wait), so a delegated prefix
   can never be scheduled to expire before its Renew fires. Before
-  #16553 the client never read any server T1/T2: `renewalTimers` was
-  always 50%/87.5% of the single IA_NA `LeaseTime`, so a PD with
+  #16553 the client never read any server T1/T2: `renewalSchedule` used the
+  single IA_NA `LeaseTime` at 50%/87.5%, so a PD with
   valid < IA_NA T1 was pruned/withdrawn from LAN RA and only
   re-requested at the IA_NA T1, every cycle. Server timers are
   clamped so `0 < T1 < T2 < shortest-valid` for finite lifetimes (a
@@ -139,7 +139,7 @@ the debounced `onAddressChange` callback when content changed.
   DISCOVER/SOLICIT loop. `LeaseTime` itself is unchanged as the
   expiry anchor (IA_NA valid, or shortest PD valid on PD-only /
   address-less leases); only the schedule reads the extra bindings.
-  `renewalTimers(leaseTime)` remains the no-server-timer form.
+  The no-server-timer case is tested through `renewalSchedule(leaseTime, nil, 0, 0)`.
   Pinned by `server_t1t2_16553_test.go` and `commit_test.go`.
 - **DHCPv6 acquisition validation (#10858)**: acquisition and stateless replies
   must match the client DUID and successful message status; IA_NA / IA_PD
@@ -152,14 +152,14 @@ the debounced `onAddressChange` callback when content changed.
   #5927)**: a Reply that carries an IA_NA whose IAADDR(s) are **all
   valid-lifetime 0** is the server's directive to STOP using the held
   address. `selectIANAAddress` skips 0-lifetime IAADDRs (#4383) and
-  `parseV6Reply` reports this distinctly via the `errV6AddrInvalidated`
+  `parseV6ReplyChecked` reports this distinctly via the `errV6AddrInvalidated`
   sentinel (present-but-0), separate from the generic "no usable IA_NA /
   live IA_PD" error (an **absent / transient** reply). On the sentinel
   during RENEW/REBIND the run loop **deconfigures** the held address and
   re-acquires — the IA_NA analog of the IA_PD withdrawal reconcile — while
   a merely absent/transient reply **keeps** the address and retries
   (T1→T2→solicit, the #4874/#1844 anti-outage path). NOTE: the
-  `LeaseTime == 0 → 3600s` default in `parseV6Reply` is NOT this path — it
+  `LeaseTime == 0 → 3600s` default in `parseV6ReplyChecked` is NOT this path — it
   only applies to a degenerate no-IA config; the explicit-0 invalidation
   is handled before it.
 - **Co-held IA_NA invalidation (#14998)**: when a RENEW/REBIND Reply carries
@@ -320,7 +320,7 @@ the debounced `onAddressChange` callback when content changed.
   (`(prior \ withdrawn) ∪ live`, never a blunt clear-all) so it is neither
   stored nor re-advertised, and fires the recompile so the RA sender drops it
   (#4874 B). See the zero-lifetime IA_PD note under Gotchas.
-- The decision logic is concentrated in `commitLease` / `renewalTimers`
+- The decision logic is concentrated in `commitLease` / `renewalSchedule`
   / `leaseContentChanged` / `delegatedPrefixesChanged` and pinned by
   `commit_test.go`. The run-loop state machine itself (the
   acquire→renew→rebind→re-acquire transitions and lease preservation)
@@ -446,7 +446,7 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   `dhcpv6_iana_validation_14185_test.go`.
 - **DHCPv6 zero-valid-lifetime IA_PD is a withdrawal, not a lease** (#4874
   B, RFC 8415 §12.1). Symmetric to the IA_NA skip above:
-  `extractDelegatedPrefixes` partitions a reply's prefixes into *live*
+  `extractDelegatedPrefixesPinned` partitions a reply's prefixes into *live*
   (valid-lifetime > 0) and *withdrawn* (valid-lifetime 0); the withdrawn
   ones are never stored or re-advertised. Before the fix a server that
   revoked an IA_PD by returning it with valid-lifetime 0 (while renewing
@@ -463,8 +463,8 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   1h lease — counted regardless of `wantNA` so a PD-only client cannot
   fall through. Pinned by `dhcp_lease_expiry_4874_test.go`.
 - **DHCPv6 IA_PD preferred lifetime 0 is deprecated, not unset** (#14606,
-  RFC 8415 §21.22, RFC 9096 L-15): `extractDelegatedPrefixes` stores the
-  IAPREFIX preferred lifetime verbatim (only valid 0 withdraws), and
+  RFC 9096 L-15): `extractDelegatedPrefixesPinned` stores the IAPREFIX's
+  preferred lifetime verbatim (only valid 0 withdraws), and
   `buildRAConfigs` stamps it as `RAPrefix.PreferredLife` with
   `PreferredLifeSet=true` — always, on the PD path. `pkg/ra` honors an
   explicitly-set preferred 0 on the wire instead of substituting the
@@ -507,7 +507,7 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   wire prefix-length is a single byte, and insomniacslk/dhcp decodes it
   as `net.CIDRMask(int(length), 128)` — which returns a **nil** mask for
   any length > 128. `net.IPMask(nil).Size()` is `(0, 0)`, so
-  `extractDelegatedPrefixes` reading only `ones` and discarding `bits`
+  `extractDelegatedPrefixesPinned` reading only `ones` and discarding `bits`
   turned a crafted length of 129..255 into a `<ip>/0`. That `/0` survived
   `IsValid()` and `DeriveSubPrefix` and reached `pkg/ra`, which applies
   no sanity floor of its own and advertised `PrefixInformation{PrefixLength:
@@ -521,8 +521,8 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   offending IAPREFIX is **skipped**, not the whole reply: an IA_PD is a
   multi-element container, matching the option-121 classless-route loop
   below (which likewise skips an entry whose mask reports `bits != 32`),
-  whereas `leaseFromACKv4` refuses the entire v4 message only because an
-  ACK carries exactly one address+mask and there is nothing to salvage.
+  whereas `leaseFromACKv4WithProtected` refuses the whole v4 message because the
+  ACK carries exactly one address and mask, with no sibling to salvage.
   A skipped entry enters neither the live nor the withdrawn set, so a
   hostile server gains nothing by pairing a malformed prefix with a
   well-formed one. When the skip empties BOTH sets the outcome depends
@@ -581,7 +581,7 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   EGRESSES malformed to the upstream server. Either way the guard was
   incidental: it depended on a downstream check noticing rather than on
   the value being rejected where the operator typed it.
-- **Classless routes from DHCPv4 and IPv6 RIO (#4118, #11425).** `leaseFromACKv4`
+- **Classless routes from DHCPv4 and IPv6 RIO (#4118, #11425).** `leaseFromACKv4WithProtected`
   parses option 121 (the standard `ClasslessStaticRoute` accessor) and falls
   back to the legacy Microsoft option 249 (raw `GenericOptionCode(249)`) using
   the `{mask-length, significant-prefix-octets, gateway}` encoding. Per RFC
@@ -652,7 +652,7 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   `applyConfig` (Reconcile) or following re-acquire (Renew), so the terminal
   cleanup recompile remains limited to a lease record that still existed.
 - **Degenerate subnet mask is refused (#4101, untrusted input).**
-  `leaseFromACKv4` validates option 1 after `net.IPMask.Size()`: a zero
+  `leaseFromACKv4WithProtected` validates option 1 after `net.IPMask.Size()`: a zero
   mask (`0.0.0.0` → `Size()` returns `ones=0`) or a non-contiguous mask
   (`255.255.0.255` → `(0,0)`) is rejected with an error instead of
   producing a `YourIP/0` lease. Without the guard the kernel would install
@@ -665,7 +665,7 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   only a *present-but-degenerate* mask is refused. Valid prefixes including
   `/31` and `/32` (point-to-point / host leases) are accepted.
 - **Over-broad mask / martian yiaddr is refused (#14183, untrusted input).**
-  Extending #4101: `leaseFromACKv4` also refuses a contiguous mask broader
+  Extending #4101: `leaseFromACKv4WithProtected` also refuses a contiguous mask broader
   than `/8` (`/1`–`/7`) and a martian `yiaddr` in the non-forwardable ranges
   refused for classless destinations/gateways (`0/8`, `127/8`, `169.254/16`,
   `224/4`, `240/4`, including `255.255.255.255`). Otherwise `AddrReplace`
@@ -679,11 +679,12 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   Extending #14183: the martian check runs on the masked installed
   prefix `PrefixFrom(addr, ones)`, not the `/32` yiaddr — a `/8`–`/15`
   prefix covering a martian range (e.g. `169.255.0.1/15` covering
-  `169.254.0.0/16`) is refused. `leaseFromACKv4WithProtected` also
-  refuses a connected prefix overlapping statically configured IPv4
-  interface prefixes (`config.ConfiguredIPv4Prefixes`, installed via
-  `Manager.SetProtectedIPv4Prefixes` on every daemon apply — the v4
-  analogue of the #10856/#14185 v6 protected set). The free
-  `leaseFromACKv4` keeps a nil protected set; `doDHCPv4` goes through
-  the manager method so acquire/renew/rebind all re-validate. No
-  trust-override for the leased address (same as #14183).
+  `169.254.0.0/16`) is refused. `leaseFromACKv4WithProtected` also refuses
+  a connected prefix overlapping statically configured IPv4 interface
+  prefixes (`config.ConfiguredIPv4Prefixes`, installed via
+  `Manager.SetProtectedIPv4Prefixes` on every daemon apply — the v4 analogue
+  of the #10856/#14185 v6 protected set). `doDHCPv4` calls
+  `leaseFromACKv4WithProtected` with the manager's configured protected
+  prefixes, so acquire/renew/rebind all re-validate. Focused parser tests
+  pass `nil` when no protected prefixes are relevant. No trust-override for
+  the leased address (same as #14183).

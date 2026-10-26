@@ -29,7 +29,7 @@ func TestLeaseFromACKv4RejectsBroadMaskAndMartianYiaddr14183(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ack := mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask)
-			lease, err := leaseFromACKv4("wan0", ack)
+			lease, err := leaseFromACKv4WithProtected("wan0", ack, nil)
 			if err == nil {
 				t.Fatalf("leaseFromACKv4 accepted %s; got lease %v, want error", tc.name, lease.Address)
 			}
@@ -55,7 +55,7 @@ func TestLeaseFromACKv4RejectsBroadMaskAndMartianYiaddr14183(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ack := mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask)
-			lease, err := leaseFromACKv4("wan0", ack)
+			lease, err := leaseFromACKv4WithProtected("wan0", ack, nil)
 			if err != nil {
 				t.Fatalf("leaseFromACKv4 rejected legitimate lease: %v", err)
 			}

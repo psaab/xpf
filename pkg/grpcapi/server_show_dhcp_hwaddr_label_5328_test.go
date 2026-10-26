@@ -10,9 +10,9 @@ import (
 	"github.com/psaab/xpf/pkg/dhcpserver"
 )
 
-// writeV6LeaseManager builds a dhcpserver.Manager whose GetLeases6 returns one
-// active v6 lease carrying hwaddr, with IsRunning() forced true. Shared by the
-// non-detail and detail HWAddress-label guards below.
+// writeV6LeaseManager builds a dhcpserver.Manager whose source-aware getter
+// returns one active v6 memfile lease carrying hwaddr, with IsRunning() true.
+// Shared by the non-detail and detail HWAddress-label guards below.
 func writeV6LeaseManager(t *testing.T, hwaddr string) *dhcpserver.Manager {
 	t.Helper()
 	dir := t.TempDir()
@@ -34,7 +34,7 @@ func writeV6LeaseManager(t *testing.T, hwaddr string) *dhcpserver.Manager {
 
 // TestShowDHCPServer_V6ColumnLabeledHWAddress_5328 is the #5328 (A8-b2-F6)
 // RED-on-revert guard for the gRPC DHCP-server renderer reached by the remote
-// `cmd/cli`. Kea's GetLeases6 populates Lease.HWAddress (the link-layer
+// `cmd/cli`. The source-aware getter returns Lease.HWAddress (the link-layer
 // address), NOT the client DUID/IAID, so the DHCPv6 lease table's second column
 // must be labeled "HWAddress". The pre-fix header said "DUID" while rendering
 // l.HWAddress — the exact mislabel #4908 fixed in pkg/cli but which this remote

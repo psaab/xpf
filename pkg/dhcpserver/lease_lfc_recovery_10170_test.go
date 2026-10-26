@@ -29,7 +29,7 @@ func TestParseActiveLeasesRecoversOrphanedCompleted10170(t *testing.T) {
 			"10.0.0.50,aa:bb:cc:dd:ee:50,,3600,"+lfcFuture+",1,0,1,host-orphan,0\n")
 		writeCSV(t, cur, lfcV4Header+"\n") // fresh header-only append log
 
-		leases, err := parseActiveLeases4(cur, lfcNow)
+		leases, err := parseActiveLeases(cur, 4, lfcNow)
 		if err != nil {
 			t.Fatalf("parseActiveLeases4 with orphaned .completed: %v", err)
 		}
@@ -45,7 +45,7 @@ func TestParseActiveLeasesRecoversOrphanedCompleted10170(t *testing.T) {
 			"2001:db8::50,00:01:00:01:de:ad,3600,"+lfcFuture+",1,1800,0,7,128,1,1,host-orphan,aa:bb,0\n")
 		writeCSV(t, cur, lfcV6Header10170+"\n")
 
-		leases, err := parseActiveLeases6(cur, lfcNow)
+		leases, err := parseActiveLeases(cur, 6, lfcNow)
 		if err != nil {
 			t.Fatalf("parseActiveLeases6 with orphaned .completed: %v", err)
 		}
@@ -65,7 +65,7 @@ func TestParseActiveLeasesRecoversOrphanedCompleted10170(t *testing.T) {
 			"10.0.0.12,aa:bb:cc:dd:ee:12,,3600,"+lfcFuture+",1,0,1,stale-generation,0\n")
 		writeCSV(t, cur, lfcV4Header+"\n")
 
-		leases, err := parseActiveLeases4(cur, lfcNow)
+		leases, err := parseActiveLeases(cur, 4, lfcNow)
 		if err != nil {
 			t.Fatalf("parseActiveLeases4 with completed precedence: %v", err)
 		}
@@ -91,9 +91,9 @@ func TestParseLeaseCSVRecoversOrphanedCompleted10170(t *testing.T) {
 		"10.0.0.50,aa:bb:cc:dd:ee:50,,3600,"+lfcFuture+",1,0,1,host-orphan,0\n")
 	writeCSV(t, cur, lfcV4Header+"\n")
 
-	leases, err := parseLeaseCSV(cur, lfcNow)
-	if err != nil {
-		t.Fatalf("parseLeaseCSV with orphaned .completed: %v", err)
+	leases, skipped := parseLeaseCSVDegradable(cur, lfcNow)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	if len(leases) != 1 || leases[0].Address != "10.0.0.50" {
 		t.Fatalf("display lost the orphaned .completed lease: got %+v", leases)
@@ -114,7 +114,7 @@ func TestCompletedNeverOverridesNewerCanonical10170(t *testing.T) {
 		writeCSV(t, cur, lfcV4Header+"\n"+
 			"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,host-new,0\n")
 
-		leases, err := parseActiveLeases4(cur, lfcNow)
+		leases, err := parseActiveLeases(cur, 4, lfcNow)
 		if err != nil {
 			t.Fatalf("parseActiveLeases4: %v", err)
 		}
@@ -133,7 +133,7 @@ func TestCompletedNeverOverridesNewerCanonical10170(t *testing.T) {
 			"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,host-a,2\n")
 		writeCSV(t, cur, lfcV4Header+"\n")
 
-		leases, err := parseActiveLeases4(cur, lfcNow)
+		leases, err := parseActiveLeases(cur, 4, lfcNow)
 		if err != nil {
 			t.Fatalf("parseActiveLeases4: %v", err)
 		}
@@ -149,7 +149,7 @@ func TestCompletedNeverOverridesNewerCanonical10170(t *testing.T) {
 		writeCSV(t, cur, lfcV4Header+"\n"+
 			"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,host-a,2\n")
 
-		leases, err := parseActiveLeases4(cur, lfcNow)
+		leases, err := parseActiveLeases(cur, 4, lfcNow)
 		if err != nil {
 			t.Fatalf("parseActiveLeases4: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestOrphanedCompletedAnomalyFailsClosed10170(t *testing.T) {
 	writeCSV(t, cur+".completed", "") // exists, no header: anomalous
 	writeCSV(t, cur, lfcV4Header+"\n")
 
-	if _, err := parseActiveLeases4(cur, lfcNow); err == nil {
+	if _, err := parseActiveLeases(cur, 4, lfcNow); err == nil {
 		t.Fatal("headerless orphaned .completed read as trusted-empty; " +
 			"the destructive diff would reap every record on a corrupt file")
 	}

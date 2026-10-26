@@ -66,9 +66,9 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 			},
 		)
 
-		res, err := m.parseV6Reply(context.Background(), "test0", adv, nil)
+		res, err := m.parseV6ReplyChecked(context.Background(), "test0", adv, nil, nil, nil, nil)
 		if err != nil {
-			t.Fatalf("parseV6Reply: %v", err)
+			t.Fatalf("parseV6ReplyChecked: %v", err)
 		}
 		wantAddr := netip.MustParseAddr("2606:4700::b")
 		if got := res.lease.Address.Addr(); got != wantAddr {
@@ -85,9 +85,9 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 			PreferredLifetime: 100 * time.Second,
 			ValidLifetime:     500 * time.Second,
 		})
-		res, err := m.parseV6Reply(context.Background(), "test0", adv, nil)
+		res, err := m.parseV6ReplyChecked(context.Background(), "test0", adv, nil, nil, nil, nil)
 		if err != nil {
-			t.Fatalf("parseV6Reply: %v", err)
+			t.Fatalf("parseV6ReplyChecked: %v", err)
 		}
 		if got := res.lease.Address.Addr(); got != netip.MustParseAddr("2606:4700::5") {
 			t.Errorf("address = %v, want 2606:4700::5", got)
@@ -114,9 +114,9 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 				ValidLifetime:     0,
 			},
 		)
-		res, err := m.parseV6Reply(context.Background(), "test0", adv, nil)
+		res, err := m.parseV6ReplyChecked(context.Background(), "test0", adv, nil, nil, nil, nil)
 		if err != nil {
-			t.Fatalf("parseV6Reply: %v", err)
+			t.Fatalf("parseV6ReplyChecked: %v", err)
 		}
 		if got := res.lease.Address.Addr(); got != netip.MustParseAddr("2606:4700::a") {
 			t.Errorf("address = %v, want 2606:4700::a (valid-lifetime-0 must be skipped)", got)
@@ -132,7 +132,7 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 			PreferredLifetime: 100 * time.Second,
 			ValidLifetime:     0,
 		})
-		if _, err := m.parseV6Reply(context.Background(), "test0", adv, nil); err == nil {
+		if _, err := m.parseV6ReplyChecked(context.Background(), "test0", adv, nil, nil, nil, nil); err == nil {
 			t.Error("expected error when the only IA_NA address has valid-lifetime 0")
 		}
 	})

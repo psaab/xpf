@@ -45,7 +45,7 @@ func TestDHCPOption3FirstAcceptableWins11084(t *testing.T) {
 			for _, r := range tc.routers {
 				ips = append(ips, net.ParseIP(r))
 			}
-			lease, err := leaseFromACKv4("wan0", classlessACK(t, dhcpv4.OptRouter(ips...)))
+			lease, err := leaseFromACKv4WithProtected("wan0", classlessACK(t, dhcpv4.OptRouter(ips...)), nil)
 			if err != nil {
 				t.Fatalf("leaseFromACKv4: %v", err)
 			}

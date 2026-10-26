@@ -175,11 +175,12 @@ func pending6IALessKey(key pending6Key) pending6Key {
 }
 
 // fairSenderKeyV6 is the DHCPv6 fairness identity (#16087): the Client-ID
-// DUID bytes alone — no xid, no IAID — so every transaction from one
-// client shares one sub-bucket. A message with no Client ID (or an
-// unrepresentable DUID) reports ok=false; the caller (#16087 fold) lumps
-// those into fairUnknownSenderV6 so the fairness gate covers every
-// request, while identified clients keep distinct identities.
+// DUID bytes alone — no xid, no IAID — so transactions from one client share
+// one sub-bucket. The wire peek truncates over-limit DUIDs to the fixed key
+// width, while the parsed pending-key path refuses those DUIDs, so they can
+// consume fairness budget but cannot arm a pending binding. Missing or
+// malformed Client IDs report ok=false and use fairUnknownSenderV6; usable
+// Client IDs keep distinct fairness identities.
 type fairSenderKeyV6 struct {
 	duid    [pending6MaxDUIDSize]byte
 	duidLen uint8
@@ -189,14 +190,6 @@ type fairSenderKeyV6 struct {
 // requests carrying no usable Client ID.
 var fairUnknownSenderV6 = fairSenderKeyV6{duidLen: 0xFF}
 
-func fairSenderKeyForV6(packet dhcpv6.DHCPv6) (fairSenderKeyV6, bool) {
-	k, ok := pending6KeyFor(packet)
-	if !ok || k.duidLen == 0 {
-		return fairSenderKeyV6{}, false
-	}
-	return fairSenderKeyV6{duid: k.duid, duidLen: k.duidLen}, true
-}
-
 // v6MsgHeaderLen is the DHCPv6 client-message header (type 1 + xid 3,
 // RFC 8415 §8); options follow as code/len/value TLVs.
 const v6MsgHeaderLen = 4
@@ -205,18 +198,15 @@ const v6MsgHeaderLen = 4
 // BEFORE dhcpv6.FromBytes (fold 2 on #16322, mirroring the v4 BOOTP
 // peek), walking at most the first Client-ID option (code 1, RFC 8415
 // §21.2). It never allocates: the DUID bytes are copied into the fixed
-// key array, truncated at pending6MaxDUIDSize exactly as the parsed key
-// clamps. Malformed framing (truncated TLV, length overrunning the
-// datagram, missing Client ID) reports ok=false and the caller lumps
-// the packet into fairUnknownSenderV6 — no lumped class gets more than
-// the unknown sender's own fairness share, so junk cannot buy identity.
+// key array. Missing or malformed DUIDs report ok=false. An over-limit DUID is
+// truncated in this fairness key; the pending-key path separately refuses it
+// and cannot create a pending binding. Such a request can consume fairness
+// budget before the pending-key path drops it.
 //
-// NOTE on key-space consistency: pending6KeyFor builds the same bytes
-// via copyPending6DUID's typed encoding (type(2) + fields), whereas
-// this peek copies the raw wire DUID. The two encodings agree for the
-// wire form the library parses (verified by
-// TestFairSenderKeyV6FromWire). Relay messages report ok=false here;
-// the caller routes them ahead of the fairness gate.
+// For DUIDs no longer than the bound, the peek copies raw wire bytes. The
+// pending key serializes the typed DUID (type + fields); these encodings agree
+// for accepted wire forms. Relay messages report ok=false; callers route them
+// ahead of the fairness gate.
 func fairSenderKeyV6FromWire(buf []byte) (fairSenderKeyV6, bool) {
 	if len(buf) <= v6MsgHeaderLen {
 		return fairSenderKeyV6{}, false
@@ -232,13 +222,12 @@ func fairSenderKeyV6FromWire(buf []byte) (fairSenderKeyV6, bool) {
 			if l == 0 {
 				return fairSenderKeyV6{}, false
 			}
-			k := fairSenderKeyV6{}
 			n := l
 			if n > pending6MaxDUIDSize {
 				n = pending6MaxDUIDSize
 			}
+			k := fairSenderKeyV6{duidLen: uint8(n)}
 			copy(k.duid[:], opts[4:4+n])
-			k.duidLen = uint8(n)
 			return k, true
 		}
 		opts = opts[4+l:]

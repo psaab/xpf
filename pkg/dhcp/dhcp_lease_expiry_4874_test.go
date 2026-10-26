@@ -608,7 +608,7 @@ func TestExtractDelegatedPrefixesPartition(t *testing.T) {
 		pdPrefixOpt(t, "2606:4700:1000::/48", 3600*time.Second, 7200*time.Second),
 		pdPrefixOpt(t, "2606:4700:dead::/56", 0, 0), // withdrawn
 	)
-	live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
+	live, withdrawn, _ := extractDelegatedPrefixesPinned(msg, "wan0", now, nil, nil)
 	if len(live) != 1 || live[0].Prefix != netip.MustParsePrefix("2606:4700:1000::/48") {
 		t.Fatalf("live = %+v, want the single /48", live)
 	}
@@ -671,7 +671,7 @@ func TestReconcileDelegatedPDs(t *testing.T) {
 	}
 }
 
-// TestParseV6ReplyWithdrawnPD: parseV6Reply routes a valid-lifetime-0 IA_PD
+// TestParseV6ReplyWithdrawnPD: parseV6ReplyChecked routes a valid-lifetime-0 IA_PD
 // into withdrawnPDs (not prefixes), and a PD-only reply whose ONLY prefix
 // is withdrawn is an acquisition failure — the guard counts LIVE prefixes
 // regardless of wantNA so a PD-only client (wantNA=false) cannot fall
@@ -690,9 +690,9 @@ func TestParseV6ReplyWithdrawnPD(t *testing.T) {
 			Options: dhcpv6.PDOptions{Options: dhcpv6.Options{
 				pdPrefixOpt(t, "2606:4700:1000::/48", 0, 0)}}})
 
-		res, err := m.parseV6Reply(context.Background(), "wan0", adv, opts)
+		res, err := m.parseV6ReplyChecked(context.Background(), "wan0", adv, opts, nil, nil, nil)
 		if err != nil {
-			t.Fatalf("parseV6Reply: %v", err)
+			t.Fatalf("parseV6ReplyChecked: %v", err)
 		}
 		if len(res.prefixes) != 0 {
 			t.Errorf("live prefixes = %+v, want none (the PD was withdrawn)", res.prefixes)
@@ -708,7 +708,7 @@ func TestParseV6ReplyWithdrawnPD(t *testing.T) {
 	t.Run("PD-only, only-withdrawn PD => acquisition failure", func(t *testing.T) {
 		opts := &DHCPv6Options{IATypes: []string{"ia-pd"}} // wantNA=false
 		adv := iaPDReply(t, pdPrefixOpt(t, "2606:4700:1000::/48", 0, 0))
-		if _, err := m.parseV6Reply(context.Background(), "wan0", adv, opts); err == nil {
+		if _, err := m.parseV6ReplyChecked(context.Background(), "wan0", adv, opts, nil, nil, nil); err == nil {
 			t.Fatal("PD-only reply whose only IA_PD is withdrawn must fail acquisition, not settle an empty lease")
 		}
 	})

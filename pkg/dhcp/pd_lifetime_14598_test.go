@@ -126,9 +126,9 @@ func TestParseV6ReplyNoPrefixAvailWithdraws14598(t *testing.T) {
 	iapd.Options.Add(&dhcpv6.OptStatusCode{StatusCode: iana.StatusNoPrefixAvail, StatusMessage: "no prefixes"})
 	msg.AddOption(iapd)
 
-	res, err := m.parseV6Reply(context.Background(), "wan0", msg, m.v6opts["wan0"])
+	res, err := m.parseV6ReplyChecked(context.Background(), "wan0", msg, m.v6opts["wan0"], nil, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply(NoPrefixAvail): %v", err)
+		t.Fatalf("parseV6ReplyChecked(NoPrefixAvail): %v", err)
 	}
 	if !res.pdRefused {
 		t.Fatal("pdRefused = false, want true for NoPrefixAvail IA_PD")

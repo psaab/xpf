@@ -564,11 +564,10 @@ func (t *pendingTableOf[K, V]) popHeadLocked() bool {
 // on first match would drop every reply after the first and silently break
 // multi-server redundancy.
 //
-// A nil receiver returns false (fail-closed). Production wires the table where
-// the relay struct is built (interfaceRelay / dhcpV6Relay), so nil means a
-// caller was mis-wired; failing closed makes that a loud, counted, immediately
-// visible outage rather than a silent loss of the binding this file exists to
-// enforce — the same posture as the #4163 empty-allow-set rule.
+// A nil receiver returns false, keeping this probe fail-closed.
+//
+// Test-only probe: package binding tests use it to inspect the live-key
+// predicate without consuming an entry.
 func (t *pendingTableOf[K, V]) matches(k K) bool {
 	if t == nil {
 		return false

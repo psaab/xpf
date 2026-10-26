@@ -136,8 +136,8 @@ func TestCollectRouterAdvertisementsInstallsAndWithdrawsRIO11425(t *testing.T) {
 	if len(observed) != 2 {
 		t.Fatalf("observed routers = %+v, want both high-default and RIO advertiser", observed)
 	}
-	if got := selectRAObservedRouter(observed); got != netip.MustParseAddr("fe80::1") {
-		t.Fatalf("default router = %v, want highest-preference fe80::1", got)
+	if best := bestObservedRouter(observed); best < 0 || observed[best].addr != netip.MustParseAddr("fe80::1") {
+		t.Fatalf("default router index = %d, want highest-preference fe80::1", best)
 	}
 	var rioRouter *observedRouter
 	for i := range observed {
@@ -190,7 +190,7 @@ func TestIPv6RouterStateExpiresAtMinimumLifetime11425(t *testing.T) {
 			{destination: routeOutlivesLease, lifetime: 10 * time.Second, observed: now},
 		},
 	}}, now)
-	if delay := nextIPv6RARefreshDelay(state, now); delay != time.Second {
+	if delay := nextIPv6WakeDelay(state, now, nil); delay != time.Second {
 		t.Fatalf("next RA refresh delay = %v, want earliest RIO lifetime 1s", delay)
 	}
 	expireIPv6RouterState(state, now.Add(time.Second))

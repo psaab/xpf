@@ -69,7 +69,7 @@ func TestClasslessOptionPresenceSuppressesRouter6756(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			lease, err := leaseFromACKv4("wan0", presenceACK6756(t, tc.opts...))
+			lease, err := leaseFromACKv4WithProtected("wan0", presenceACK6756(t, tc.opts...), nil)
 			if err != nil {
 				t.Fatalf("leaseFromACKv4: %v", err)
 			}
@@ -101,7 +101,7 @@ func TestWellFormedClasslessStillSupersedes6756(t *testing.T) {
 		&dhcpv4.Route{Dest: mustCIDR(t, "0.0.0.0/0"), Router: net.ParseIP("192.0.2.1")},
 		&dhcpv4.Route{Dest: mustCIDR(t, "10.20.0.0/16"), Router: net.ParseIP("192.0.2.9")},
 	)
-	lease, err := leaseFromACKv4("wan0", presenceACK6756(t, classless))
+	lease, err := leaseFromACKv4WithProtected("wan0", presenceACK6756(t, classless), nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4: %v", err)
 	}

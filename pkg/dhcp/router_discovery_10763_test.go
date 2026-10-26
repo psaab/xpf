@@ -13,12 +13,12 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-// TestParseV6ReplyUsesSolicitedRouterAdvertisements10763 is a RED-on-revert
-// guard: parseV6Reply must solicit and choose an advertised default router by
-// RFC 4191 preference, ignoring router-lifetime-0 advertisers. The former
-// neighbor-table scan did not invoke the RA exchange and left Gateway empty
-// for this test Manager (or could select the lifetime-0 neighbour in service).
-func TestParseV6ReplyUsesSolicitedRouterAdvertisements10763(t *testing.T) {
+// TestV6ExchangeUsesSolicitedRouterAdvertisements10763 is a RED-on-revert
+// guard: after a successful DHCPv6 reply, v6Exchange must solicit and choose
+// an advertised default router by RFC 4191 preference, ignoring
+// router-lifetime-0 advertisers. The direct parse helper alone does not run
+// this RA-discovery orchestration.
+func TestV6ExchangeUsesSolicitedRouterAdvertisements10763(t *testing.T) {
 	called := false
 	m := &Manager{
 		routerAdvertisementsForTest: func(_ context.Context, iface string) []observedRouter {
@@ -38,9 +38,13 @@ func TestParseV6ReplyUsesSolicitedRouterAdvertisements10763(t *testing.T) {
 		PreferredLifetime: time.Hour,
 		ValidLifetime:     2 * time.Hour,
 	})
-	res, err := m.parseV6Reply(context.Background(), "wan0", adv, nil)
+	ctx := context.Background()
+	m.doV6ExchangeForTest = func(exchangeCtx context.Context, ifaceName string, _ dhcpExchangeMode, prev *Lease, _ []DelegatedPrefix) (*dhcpv6Result, error) {
+		return m.parseV6ReplyChecked(exchangeCtx, ifaceName, adv, nil, nil, nil, prev)
+	}
+	res, err := m.v6Exchange(ctx, "wan0", exchangeAcquire, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply: %v", err)
+		t.Fatalf("v6Exchange: %v", err)
 	}
 	if !called {
 		t.Fatal("DHCPv6 reply did not trigger Router Solicitation/RA discovery")
@@ -50,7 +54,7 @@ func TestParseV6ReplyUsesSolicitedRouterAdvertisements10763(t *testing.T) {
 	}
 }
 
-func TestParseV6ReplyDoesNotUseLifetimeZeroRouter10763(t *testing.T) {
+func TestV6ExchangeDoesNotUseLifetimeZeroRouter10763(t *testing.T) {
 	m := &Manager{
 		routerAdvertisementsForTest: func(context.Context, string) []observedRouter {
 			return []observedRouter{{addr: netip.MustParseAddr("fe80::1"), lifetime: 0, pref: raPrefHigh}}
@@ -61,9 +65,13 @@ func TestParseV6ReplyDoesNotUseLifetimeZeroRouter10763(t *testing.T) {
 		PreferredLifetime: time.Hour,
 		ValidLifetime:     2 * time.Hour,
 	})
-	res, err := m.parseV6Reply(context.Background(), "wan0", adv, nil)
+	ctx := context.Background()
+	m.doV6ExchangeForTest = func(exchangeCtx context.Context, ifaceName string, _ dhcpExchangeMode, prev *Lease, _ []DelegatedPrefix) (*dhcpv6Result, error) {
+		return m.parseV6ReplyChecked(exchangeCtx, ifaceName, adv, nil, nil, nil, prev)
+	}
+	res, err := m.v6Exchange(ctx, "wan0", exchangeAcquire, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply: %v", err)
+		t.Fatalf("v6Exchange: %v", err)
 	}
 	if res.lease.Gateway.IsValid() {
 		t.Errorf("lease gateway = %v, want none: lifetime-0 RA is not a default router", res.lease.Gateway)
@@ -165,8 +173,8 @@ func TestCollectRouterAdvertisementsSolicitsAndSelects10763(t *testing.T) {
 	if len(conn.groups) != 1 || conn.groups[0] != netip.MustParseAddr("ff02::1") {
 		t.Errorf("joined groups = %v, want all-nodes ff02::1", conn.groups)
 	}
-	if got, want := selectRAObservedRouter(routers), netip.MustParseAddr("fe80::3"); got != want {
-		t.Errorf("selected gateway = %v, want highest-preference eligible router %v", got, want)
+	if best := bestObservedRouter(routers); best < 0 || routers[best].addr != netip.MustParseAddr("fe80::3") {
+		t.Errorf("selected router index = %d, want highest-preference eligible router fe80::3", best)
 	}
 }
 
@@ -183,7 +191,7 @@ func TestCollectRouterAdvertisementsRejectsLifetimeZero10763(t *testing.T) {
 		onRead: cancel,
 	}
 	routers := collectRouterAdvertisements(ctx, ifi, conn)
-	if got := selectRAObservedRouter(routers); got.IsValid() {
-		t.Errorf("selected gateway = %v, want none for lifetime-0 RA", got)
+	if best := bestObservedRouter(routers); best >= 0 {
+		t.Errorf("selected router index = %d, want none for lifetime-0 RA", best)
 	}
 }

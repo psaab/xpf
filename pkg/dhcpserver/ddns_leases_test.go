@@ -36,7 +36,7 @@ func TestParseActiveLeases4FiltersStateAndExpiry(t *testing.T) {
 10.0.0.13,aa:bb:cc:dd:ee:04,,3600,1600000000,1,0,1,host-d,0
 `)
 	now := time.Unix(1_700_000_000, 0)
-	leases, err := parseActiveLeases4(path, now)
+	leases, err := parseActiveLeases(path, 4, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestParseActiveLeases4ClientIDPreferred(t *testing.T) {
 	writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state
 10.0.0.10,aa:bb:cc:dd:ee:01,01aabbcc,3600,1900000000,1,host-a,0
 `)
-	leases, err := parseActiveLeases4(path, time.Unix(1_700_000_000, 0))
+	leases, err := parseActiveLeases(path, 4, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestParseActiveLeases4FQDNForwardFlagSplitsNameSource(t *testing.T) {
 10.0.0.10,aa:bb:cc:dd:ee:01,,3600,1900000000,1,0,host-a,0
 10.0.0.11,aa:bb:cc:dd:ee:02,,3600,1900000000,1,1,client.example.com,0
 `)
-	leases, err := parseActiveLeases4(path, time.Unix(1_700_000_000, 0))
+	leases, err := parseActiveLeases(path, 4, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestParseActiveLeases6DUIDIAID(t *testing.T) {
 2001:db8::5,00:01:00:01:de:ad,3600,1900000000,1,1800,0,7,128,1,1,host-6,aa:bb,0
 2001:db8::6,00:01:00:01:be:ef,3600,1900000000,1,1800,0,8,128,1,1,host-7,aa:cc,2
 `)
-	leases, err := parseActiveLeases6(path, time.Unix(1_700_000_000, 0))
+	leases, err := parseActiveLeases(path, 6, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestParseActiveLeasesLastRowWins(t *testing.T) {
 10.0.0.20,bb,,3600,1900000000,1,host-x,0
 10.0.0.20,bb,,3600,1900000000,1,host-x,1
 `)
-	leases, err := parseActiveLeases4(path, time.Unix(1_700_000_000, 0))
+	leases, err := parseActiveLeases(path, 4, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestParseActiveLeasesInactiveThenActiveReclaim(t *testing.T) {
 10.0.0.10,aa,,3600,1900000000,1,old-decl,1
 10.0.0.10,bb,,3600,1900000000,1,new-active,0
 `)
-		leases, err := parseActiveLeases4(path, now)
+		leases, err := parseActiveLeases(path, 4, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -173,7 +173,7 @@ func TestParseActiveLeasesInactiveThenActiveReclaim(t *testing.T) {
 10.0.0.20,aa,,3600,1900000000,1,gone,2
 10.0.0.20,cc,,3600,1900000000,1,final,0
 `)
-		leases, err := parseActiveLeases4(path, now)
+		leases, err := parseActiveLeases(path, 4, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -192,7 +192,7 @@ func TestParseActiveLeasesInactiveThenActiveReclaim(t *testing.T) {
 10.0.0.30,aa,,3600,1900000000,1,was-active,0
 10.0.0.30,aa,,3600,1900000000,1,now-declined,1
 `)
-		leases, err := parseActiveLeases4(path, now)
+		leases, err := parseActiveLeases(path, 4, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -225,7 +225,7 @@ func TestParseActiveLeasesMangledHeaderErrors(t *testing.T) {
 		writeCSV(t, path, `hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state
 aa:bb:cc:dd:ee:01,,3600,1900000000,1,host-a,0
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("missing 'address' column must produce a parse error")
 		}
 	})
@@ -236,7 +236,7 @@ aa:bb:cc:dd:ee:01,,3600,1900000000,1,host-a,0
 		writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname
 10.0.0.10,aa:bb:cc:dd:ee:01,,3600,1900000000,1,host-a
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("missing 'state' column must produce a parse error")
 		}
 	})
@@ -301,7 +301,7 @@ func TestParseActiveLeasesCaseInsensitiveHeader(t *testing.T) {
 10.0.0.10,aa:bb:cc:dd:ee:01,,3600,1900000000,1,host-a,0
 10.0.0.11,aa:bb:cc:dd:ee:02,,3600,1900000000,1,host-b,1
 `)
-	leases, err := parseActiveLeases4(path, time.Unix(1_700_000_000, 0))
+	leases, err := parseActiveLeases(path, 4, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatalf("mixed-case header should parse, got error: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestParseActiveLeasesNamingColumnRequired(t *testing.T) {
 		writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,state
 10.0.0.10,aa,,3600,1900000000,1,0
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("v4 header missing 'hostname' must error")
 		}
 	})
@@ -427,7 +427,7 @@ func TestParseActiveLeasesNamingColumnRequired(t *testing.T) {
 		writeCSV(t, path, `address,duid,valid_lifetime,expire,subnet_id,iaid,state
 2001:db8::5,00:01,3600,1900000000,1,7,0
 `)
-		if _, err := parseActiveLeases6(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 6, now); err == nil {
 			t.Fatal("v6 header missing 'hostname' must error")
 		}
 	})
@@ -459,7 +459,7 @@ func TestParseActiveLeasesIdentityColumnRequired(t *testing.T) {
 		writeCSV(t, path, `address,valid_lifetime,expire,subnet_id,hostname,state
 10.0.0.10,3600,1900000000,1,host-a,0
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("v4 header missing identity columns must error")
 		}
 	})
@@ -469,7 +469,7 @@ func TestParseActiveLeasesIdentityColumnRequired(t *testing.T) {
 		writeCSV(t, path, `address,valid_lifetime,expire,subnet_id,hostname,state
 2001:db8::5,3600,1900000000,1,host-6,0
 `)
-		if _, err := parseActiveLeases6(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 6, now); err == nil {
 			t.Fatal("v6 header missing identity columns must error")
 		}
 	})
@@ -506,7 +506,7 @@ func TestParseActiveLeasesOptionalColumnsDegradeSafely(t *testing.T) {
 	writeCSV(t, path, `address,hwaddr,client_id,hostname,state
 10.0.0.10,aa,,host-a,0
 `)
-	leases, err := parseActiveLeases4(path, time.Unix(1_700_000_000, 0))
+	leases, err := parseActiveLeases(path, 4, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatalf("optional columns absent should still parse, got error: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestParseActiveLeasesHeaderOnlyValidatesBeforeEmptyReturn(t *testing.T) {
 		path := filepath.Join(dir, "l4.csv")
 		// Header line only (no data rows), missing the required "hostname".
 		writeCSV(t, path, "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,state\n")
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("header-only file with a mangled header must error (not trusted-empty)")
 		}
 	})
@@ -568,7 +568,7 @@ func TestParseActiveLeasesHeaderOnlyValidatesBeforeEmptyReturn(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "l4.csv")
 		writeCSV(t, path, "address,valid_lifetime,expire,subnet_id,hostname,state\n")
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("header-only file missing identity columns must error")
 		}
 	})
@@ -576,7 +576,7 @@ func TestParseActiveLeasesHeaderOnlyValidatesBeforeEmptyReturn(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "l6.csv")
 		writeCSV(t, path, "address,valid_lifetime,expire,subnet_id,hostname,state\n")
-		if _, err := parseActiveLeases6(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 6, now); err == nil {
 			t.Fatal("v6 header-only file missing identity columns must error")
 		}
 	})
@@ -606,7 +606,7 @@ func TestParseActiveLeasesHeaderOnlyValidGoodIsTrustedEmpty(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "l4.csv")
 		writeCSV(t, path, "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state\n")
-		leases, err := parseActiveLeases4(path, now)
+		leases, err := parseActiveLeases(path, 4, now)
 		if err != nil {
 			t.Fatalf("valid header-only file must be trusted-empty, got error: %v", err)
 		}
@@ -655,7 +655,7 @@ func TestParseActiveLeasesEmptyFileIsUntrusted(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "l4.csv")
 		writeCSV(t, path, "") // exists, zero records
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("a 0-record existing lease file must error (fail-safe untrusted), not trusted-empty")
 		}
 	})
@@ -663,7 +663,7 @@ func TestParseActiveLeasesEmptyFileIsUntrusted(t *testing.T) {
 	t.Run("missing file stays trusted-empty", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "does-not-exist.csv")
-		leases, err := parseActiveLeases4(path, now)
+		leases, err := parseActiveLeases(path, 4, now)
 		if err != nil {
 			t.Fatalf("a genuinely missing file must be trusted-empty, got error: %v", err)
 		}
@@ -692,7 +692,7 @@ func TestParseActiveLeasesDuplicateColumnErrors(t *testing.T) {
 		writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state,address
 10.0.0.10,aa,,3600,1900000000,1,host-a,0,
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("duplicate 'address' column must error (ambiguous header)")
 		}
 	})
@@ -703,7 +703,7 @@ func TestParseActiveLeasesDuplicateColumnErrors(t *testing.T) {
 		writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state,state
 10.0.0.10,aa,,3600,1900000000,1,host-a,0,2
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("duplicate 'state' column must error (ambiguous header)")
 		}
 	})
@@ -714,7 +714,7 @@ func TestParseActiveLeasesDuplicateColumnErrors(t *testing.T) {
 		writeCSV(t, path, `Address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state,ADDRESS
 10.0.0.10,aa,,3600,1900000000,1,host-a,0,
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("case-insensitive duplicate 'address' columns must error")
 		}
 	})
@@ -727,7 +727,7 @@ func TestParseActiveLeasesDuplicateColumnErrors(t *testing.T) {
 		writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state,subnet_id
 10.0.0.10,aa,,3600,1900000000,1,host-a,0,2
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("duplicate optional column must error (any duplicate => ambiguous)")
 		}
 	})
@@ -738,7 +738,7 @@ func TestParseActiveLeasesDuplicateColumnErrors(t *testing.T) {
 		writeCSV(t, path, `address,duid,valid_lifetime,expire,subnet_id,iaid,hostname,state,duid
 2001:db8::5,00:01,3600,1900000000,1,7,host-6,0,bad
 `)
-		if _, err := parseActiveLeases6(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 6, now); err == nil {
 			t.Fatal("v6 duplicate 'duid' column must error")
 		}
 	})
@@ -769,7 +769,7 @@ func TestParseActiveLeasesExtraAndReorderedColumnsTolerated(t *testing.T) {
 		writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state,user_context,pool_id
 10.0.0.10,aa,,3600,1900000000,1,host-a,0,{},5
 `)
-		leases, err := parseActiveLeases4(path, now)
+		leases, err := parseActiveLeases(path, 4, now)
 		if err != nil {
 			t.Fatalf("extra columns should be tolerated, got error: %v", err)
 		}
@@ -785,7 +785,7 @@ func TestParseActiveLeasesExtraAndReorderedColumnsTolerated(t *testing.T) {
 		writeCSV(t, path, `state,hostname,address,client_id,hwaddr,expire,subnet_id
 0,host-a,10.0.0.10,01cafe,aa,1900000000,1
 `)
-		leases, err := parseActiveLeases4(path, now)
+		leases, err := parseActiveLeases(path, 4, now)
 		if err != nil {
 			t.Fatalf("reordered columns should be tolerated, got error: %v", err)
 		}
@@ -816,7 +816,7 @@ func TestParseActiveLeasesRaggedRowUntrusted(t *testing.T) {
 		writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state
 10.0.0.10,aa,,3600
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("a ragged v4 row (too short for required columns) must error (untrusted)")
 		}
 	})
@@ -829,7 +829,7 @@ func TestParseActiveLeasesRaggedRowUntrusted(t *testing.T) {
 		writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state
 10.0.0.10,aa,,3600,1900000000,1,host-a
 `)
-		if _, err := parseActiveLeases4(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 4, now); err == nil {
 			t.Fatal("a row missing the trailing required 'state' column must error")
 		}
 	})
@@ -840,7 +840,7 @@ func TestParseActiveLeasesRaggedRowUntrusted(t *testing.T) {
 		writeCSV(t, path, `address,duid,valid_lifetime,expire,subnet_id,iaid,hostname,state
 2001:db8::5,00:01,3600
 `)
-		if _, err := parseActiveLeases6(path, now); err == nil {
+		if _, err := parseActiveLeases(path, 6, now); err == nil {
 			t.Fatal("a ragged v6 row must error (untrusted)")
 		}
 	})
@@ -867,7 +867,7 @@ func TestParseActiveLeasesExtraFieldRowTolerated(t *testing.T) {
 	writeCSV(t, path, `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,hostname,state
 10.0.0.10,aa,,3600,1900000000,1,host-a,0,extra1,extra2
 `)
-	leases, err := parseActiveLeases4(path, time.Unix(1_700_000_000, 0))
+	leases, err := parseActiveLeases(path, 4, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatalf("a row with extra trailing fields should be tolerated, got error: %v", err)
 	}

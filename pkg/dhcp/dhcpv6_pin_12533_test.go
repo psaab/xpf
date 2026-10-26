@@ -84,10 +84,10 @@ func TestParseV6ReplyPinnedViaOptions12533(t *testing.T) {
 	m := NewManagerForTesting(nil)
 	m.SetProtectedIPv6Prefixes([]netip.Prefix{netip.MustParsePrefix("2606:4700:1111::/64")})
 	opts := &DHCPv6Options{IATypes: []string{"ia-pd"}, PinnedPrefixes: []string{"fd00:1234::/48", "2606:4700::/32"}}
-	res, err := m.parseV6Reply(context.Background(), "wan0", iaPDReply(t,
+	res, err := m.parseV6ReplyChecked(context.Background(), "wan0", iaPDReply(t,
 		pdPrefixOpt(t, "fd00:1234::/56", time.Hour, 2*time.Hour),
 		pdPrefixOpt(t, "2606:4700:1111::/64", time.Hour, 2*time.Hour),
-	), opts)
+	), opts, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("parse pinned: %v", err)
 	}
@@ -97,8 +97,8 @@ func TestParseV6ReplyPinnedViaOptions12533(t *testing.T) {
 	// Without pins same reply: ULA refused, overlap refused -> fails.
 	m2 := NewManagerForTesting(nil)
 	m2.SetProtectedIPv6Prefixes([]netip.Prefix{netip.MustParsePrefix("2606:4700:1111::/64")})
-	_, err = m2.parseV6Reply(context.Background(), "wan0", iaPDReply(t,
-		pdPrefixOpt(t, "fd00:1234::/56", time.Hour, 2*time.Hour)), &DHCPv6Options{IATypes: []string{"ia-pd"}})
+	_, err = m2.parseV6ReplyChecked(context.Background(), "wan0", iaPDReply(t,
+		pdPrefixOpt(t, "fd00:1234::/56", time.Hour, 2*time.Hour)), &DHCPv6Options{IATypes: []string{"ia-pd"}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("unpinned ULA reply accepted, want error")
 	}

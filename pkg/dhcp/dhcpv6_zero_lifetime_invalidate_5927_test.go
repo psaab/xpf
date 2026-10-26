@@ -5,12 +5,12 @@ package dhcp
 // address: deconfigure + re-acquire, not keep it in service. The floor at
 // dhcp.go (`if lease.LeaseTime == 0 { 3600 }`) was a RED HERRING for this —
 // selectIANAAddress (#4383) already skips valid-lifetime-0 IAADDRs, so the
-// address is never selected and parseV6Reply errors before the floor. The real
+// address is never selected and parseV6ReplyChecked errors before the floor. The real
 // residual was the RENEW/REBIND loop treating that error as a TRANSIENT failure
 // (keep-and-wait-T2) instead of an explicit invalidation.
 //
 // The fix threads a present-0-vs-absent signal through selectIANAAddress /
-// parseV6Reply (the errV6AddrInvalidated sentinel) so the loop can DECONFIGURE
+// parseV6ReplyChecked (the errV6AddrInvalidated sentinel) so the loop can DECONFIGURE
 // on an explicit invalidation (b) while KEEPING the address on a merely absent /
 // transient reply (d) — the correct #4874/#1844 anti-outage behavior.
 //
@@ -42,7 +42,7 @@ func TestParseV6ReplyZeroLifetimeDistinction_5927(t *testing.T) {
 		PreferredLifetime: 100 * time.Second,
 		ValidLifetime:     0,
 	})
-	if _, err := m.parseV6Reply(context.Background(), "wan0", advZero, nil); !errors.Is(err, errV6AddrInvalidated) {
+	if _, err := m.parseV6ReplyChecked(context.Background(), "wan0", advZero, nil, nil, nil, nil); !errors.Is(err, errV6AddrInvalidated) {
 		t.Fatalf("explicit valid-lifetime-0 IA_NA: err=%v, want errV6AddrInvalidated (present-0 invalidation)", err)
 	}
 
@@ -53,7 +53,7 @@ func TestParseV6ReplyZeroLifetimeDistinction_5927(t *testing.T) {
 		t.Fatalf("NewMessage: %v", err)
 	}
 	advAbsent.MessageType = dhcpv6.MessageTypeReply
-	_, err = m.parseV6Reply(context.Background(), "wan0", advAbsent, nil)
+	_, err = m.parseV6ReplyChecked(context.Background(), "wan0", advAbsent, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("absent IA_NA: want an error")
 	}
@@ -67,7 +67,7 @@ func TestParseV6ReplyZeroLifetimeDistinction_5927(t *testing.T) {
 		PreferredLifetime: 50 * time.Second,
 		ValidLifetime:     100 * time.Second,
 	})
-	res, err := m.parseV6Reply(context.Background(), "wan0", advPos, nil)
+	res, err := m.parseV6ReplyChecked(context.Background(), "wan0", advPos, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("positive lifetime: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestParseV6ReplyZeroLifetimeDistinction_5927(t *testing.T) {
 		PreferredLifetime: 0xFFFFFFFF * time.Second,
 		ValidLifetime:     0xFFFFFFFF * time.Second,
 	})
-	res, err = m.parseV6Reply(context.Background(), "wan0", advInf, nil)
+	res, err = m.parseV6ReplyChecked(context.Background(), "wan0", advInf, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("infinite lifetime: %v", err)
 	}

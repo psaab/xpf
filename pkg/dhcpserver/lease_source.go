@@ -17,12 +17,9 @@ import (
 // crash-interrupted-cleanup safety argument (Invariant 3) is documented at
 // keaLFCLeaseFilePaths (lease_lfc.go) and pinned by a test.
 //
-// This is the DISPLAY sibling of the HA-sync getSyncLeases path (lease_sync.go),
-// which already prefers the socket and falls back to the memfile. GetLeases4/6
-// are deliberately left untouched (they keep the #4908 file-read-error surface
-// the interactive CLI relies on); the socket-first + degraded-source path is
-// exposed through GetLeasesWithSource4/6, consumed by the authoritative gRPC
-// `show dhcp server` handler.
+// This is the DHCP server's display read path. GetLeasesWithSource4/6 prefer
+// the live lease DB when available and fall back to the memfile while carrying
+// source degradation through to the `show dhcp server` handlers.
 
 // Lease-source origin labels (human-readable, shown in logs / the degraded
 // banner detail).
@@ -166,7 +163,7 @@ func (m *Manager) readDisplayLeasesViaSocket(ctx context.Context, family int, no
 	out := make([]Lease, 0, len(args.Leases))
 	for _, kl := range args.Leases {
 		if kl.State != keaStateDefault {
-			continue // only active leases (mirrors parseLeaseCSV's state filter)
+			continue // only active leases (mirrors the display memfile filter)
 		}
 		// Kea get-all returns cltt + valid-lft; the absolute expiry is their sum
 		// (matching the memfile's `expire` column). Drop a lapsed lease.
@@ -189,8 +186,8 @@ func (m *Manager) readDisplayLeasesViaSocket(ctx context.Context, family int, no
 	return out, nil
 }
 
-// parseLeaseCSVDegradable reads the full Kea LFC file set like parseLeaseCSV but
-// is DEGRADE-tolerant for the display (#5938 Invariant 8): instead of ABORTING
+// parseLeaseCSVDegradable reads the full Kea LFC file set using the display
+// semantics. It is DEGRADE-tolerant (#5938 Invariant 8): instead of ABORTING
 // the whole read when one sibling file cannot be opened (a non-IsNotExist error
 // — a mangled / permission-broken .2 / .1 / current), it SKIPS that file,
 // records its path, and continues, so a single unreadable sibling shows the

@@ -132,7 +132,7 @@ func TestParseV6ReplyPDOnlyNoPrefixAvailTypedRefusal15224(t *testing.T) {
 	m := &Manager{}
 	opts := &DHCPv6Options{IATypes: []string{"ia-pd"}}
 
-	res, err := m.parseV6Reply(context.Background(), "wan0", pdOnlyRefusalMessage(t), opts)
+	res, err := m.parseV6ReplyChecked(context.Background(), "wan0", pdOnlyRefusalMessage(t), opts, nil, nil, nil)
 	if !errors.Is(err, errV6PDRefused) {
 		t.Fatalf("PD-only NoPrefixAvail: err=%v res=%+v, want errV6PDRefused", err, res)
 	}
@@ -147,7 +147,7 @@ func TestParseV6ReplyPDOnlyNoPrefixAvailTypedRefusal15224(t *testing.T) {
 		t.Fatal(err)
 	}
 	silent.MessageType = dhcpv6.MessageTypeReply
-	_, err = m.parseV6Reply(context.Background(), "wan0", silent, opts)
+	_, err = m.parseV6ReplyChecked(context.Background(), "wan0", silent, opts, nil, nil, nil)
 	if err == nil {
 		t.Fatal("PD-only silent reply: want generic error")
 	}
@@ -157,7 +157,7 @@ func TestParseV6ReplyPDOnlyNoPrefixAvailTypedRefusal15224(t *testing.T) {
 
 	// Control: PD-only live grant still succeeds.
 	live := iaPDReply(t, pdPrefixOpt(t, "2606:4700:1000::/48", time.Hour, 2*time.Hour))
-	res, err = m.parseV6Reply(context.Background(), "wan0", live, opts)
+	res, err = m.parseV6ReplyChecked(context.Background(), "wan0", live, opts, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("PD-only live grant: %v (control)", err)
 	}

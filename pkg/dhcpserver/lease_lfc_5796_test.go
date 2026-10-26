@@ -19,7 +19,7 @@ import (
 // read order (oldest → newest, last-row-wins) is therefore .2 → .1 → current.
 //
 // FAIL-ON-REVERT: restore the single-current-file read in parseActiveLeases /
-// parseLeaseCSV (drop the keaLFCLeaseFilePaths loop, open only `path`) → the
+// parseLeaseCSVDegradable (drop the keaLFCLeaseFilePaths loop, open only `path`) → the
 // leases that live in .2/.1 vanish → TestLFC5796_* below go RED (union tests
 // return 0 leases; the order test resurrects a released lease; the display test
 // shows nothing).
@@ -51,7 +51,7 @@ func TestLFC5796_UnionAcrossFileSet(t *testing.T) {
 	// CURRENT: freshly rotated header-only append log (no data rows yet).
 	writeCSV(t, cur, lfcV4Header+"\n")
 
-	leases, err := parseActiveLeases4(cur, lfcNow)
+	leases, err := parseActiveLeases(cur, 4, lfcNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestLFC5796_ChronologicalOrderLastRowWins(t *testing.T) {
 		"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,curr-name,0\n"+
 		"10.0.0.40,aa:bb:cc:dd:ee:40,,3600,"+lfcPast+",1,0,1,host-d,0\n")
 
-	leases, err := parseActiveLeases4(cur, lfcNow)
+	leases, err := parseActiveLeases(cur, 4, lfcNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestLFC5796_NoLFCUnchanged(t *testing.T) {
 	writeCSV(t, cur, lfcV4Header+"\n"+
 		"10.0.0.99,aa:bb:cc:dd:ee:99,,3600,"+lfcFuture+",1,0,1,host-z,0\n")
 
-	leases, err := parseActiveLeases4(cur, lfcNow)
+	leases, err := parseActiveLeases(cur, 4, lfcNow)
 	if err != nil {
 		t.Fatalf("parseActiveLeases4: %v", err)
 	}
@@ -135,13 +135,13 @@ func TestLFC5796_ExistingMangledSiblingFailsClosed(t *testing.T) {
 	// ...but the PREVIOUS file exists and is headerless (0 records) — anomalous.
 	writeCSV(t, cur+".2", "")
 
-	if _, err := parseActiveLeases4(cur, lfcNow); err == nil {
+	if _, err := parseActiveLeases(cur, 4, lfcNow); err == nil {
 		t.Fatal("an existing headerless .2 (previous) must make the family untrusted (error), not partial-trusted")
 	}
 }
 
 // TestLFC5796_DisplayUnionAcrossFileSet: the lenient display parser
-// (parseLeaseCSV) must ALSO union the LFC set so `show dhcp server leases` does
+// (parseLeaseCSVDegradable) must ALSO union the LFC set so `show dhcp server leases` does
 // not omit the compacted active set right after an LFC rotation.
 func TestLFC5796_DisplayUnionAcrossFileSet(t *testing.T) {
 	dir := t.TempDir()
@@ -150,9 +150,9 @@ func TestLFC5796_DisplayUnionAcrossFileSet(t *testing.T) {
 		"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,host-a,0\n")
 	writeCSV(t, cur, lfcV4Header+"\n") // header-only current
 
-	leases, err := parseLeaseCSV(cur, lfcNow)
-	if err != nil {
-		t.Fatalf("parseLeaseCSV: %v", err)
+	leases, skipped := parseLeaseCSVDegradable(cur, lfcNow)
+	if len(skipped) != 0 {
+		t.Fatalf("unreadable files = %v, want none", skipped)
 	}
 	if len(leases) != 1 || leases[0].Address != "10.0.0.10" {
 		t.Fatalf("display omitted the compacted previous-file lease (single-file read regression): %+v", leases)

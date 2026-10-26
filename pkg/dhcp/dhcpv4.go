@@ -535,19 +535,12 @@ func (m *Manager) doDHCPv4(ctx context.Context, ifaceName string, mode dhcpExcha
 		ack = dhcpLease.ACK
 	}
 
-	return m.leaseFromACKv4(ifaceName, ack)
+	return leaseFromACKv4WithProtected(ifaceName, ack, m.protectedIPv4Prefixes())
 }
 
-// leaseFromACKv4 parses a DHCPv4 ACK into a Lease, capturing the
-// server-identifier needed to unicast a later RENEW (#2994). Shared by
-// the acquire, renew, and rebind paths. It carries no protected-prefix
-// set (nil), so standalone callers keep prior overlap behavior.
-func leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
-	return leaseFromACKv4WithProtected(ifaceName, ack, nil)
-}
-
-// leaseFromACKv4WithProtected is leaseFromACKv4 plus the #14728
-// protected-prefix overlap gate (Manager method below).
+// leaseFromACKv4WithProtected parses a DHCPv4 ACK into a Lease and rejects
+// a lease prefix that overlaps the manager's protected IPv4 set (#14728).
+// Tests without configured protected prefixes pass nil explicitly.
 func leaseFromACKv4WithProtected(ifaceName string, ack *dhcpv4.DHCPv4, protected []netip.Prefix) (*Lease, error) {
 	yourIP := ack.YourIPAddr
 	if yourIP == nil || yourIP.IsUnspecified() {
@@ -614,7 +607,7 @@ func leaseFromACKv4WithProtected(ifaceName string, ack *dhcpv4.DHCPv4, protected
 
 	// #14728 leg A: refuse a connected prefix overlapping statically
 	// configured IPv4 space (v6 analogue: selectIANAAddress /
-	// extractDelegatedPrefixes vs protectedIPv6Prefixes, #10856/#14185).
+	// extractDelegatedPrefixesPinned vs protectedIPv6Prefixes, #10856/#14185).
 	// A rogue server offering e.g. 10.0.1.2/25 would otherwise install a
 	// more-specific connected route over a configured LAN /24. The
 	// comparison is masked-prefix overlap (either contains the other's
@@ -706,12 +699,6 @@ func overlappingProtectedPrefixV4(installed netip.Prefix, protected []netip.Pref
 		}
 	}
 	return netip.Prefix{}
-}
-
-// leaseFromACKv4 validates an ACK against the manager's protected IPv4
-// set (#14728). doDHCPv4 uses this so acquire/renew/rebind all re-validate.
-func (m *Manager) leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
-	return leaseFromACKv4WithProtected(ifaceName, ack, m.protectedIPv4Prefixes())
 }
 
 // classlessStaticRoutes parses RFC 3442 classless static routes from a

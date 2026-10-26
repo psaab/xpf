@@ -10,7 +10,7 @@ import (
 // doDHCPv4/doDHCPv6 open real AF_PACKET/UDP sockets via nclient4/
 // nclient6, and the T1 wait is clamped to a 30s minimum with no
 // injectable clock. The #1777 fix therefore concentrates the decision
-// logic in commitLease + renewalTimers + the changed-content helpers,
+// logic in commitLease + renewalSchedule + the changed-content helpers,
 // which these tests pin: a committed renewal stores the lease, fires
 // the (debounced) onAddressChange only on content change, and handles
 // an address move as remove-old/apply-new. Loop control flow (renew
@@ -56,7 +56,7 @@ func v4Lease(addr string, opts ...func(*Lease)) *Lease {
 	return l
 }
 
-// TestRenewalTimers pins the RFC 2131 §4.4.5 / RFC 8415 §18.2.4 renewal
+// TestRenewalSchedule pins the RFC 2131 §4.4.5 / RFC 8415 §18.2.4 renewal
 // schedule: T1 at 50% of the lease, T2 at 87.5% (t2Remaining = 37.5%),
 // with NO fixed floor. The pre-#5795 code clamped T1 to a 30s minimum and
 // t2Remaining to 1s; for any finite lease under 60s that pushed T1 past
@@ -70,8 +70,8 @@ func v4Lease(addr string, opts ...func(*Lease)) *Lease {
 // short-lease rows go RED (40s wants T1=20s not 30s; 2s wants T1=1s not
 // 30s and t2Remaining=750ms not 1s; 30s/59s likewise). The zero/negative
 // rows assert ok=false, which the old unconditional 30s/1s plan also
-// failed. Proven by neutralizing renewalTimers via -overlay.
-func TestRenewalTimers(t *testing.T) {
+// failed. Proven by neutralizing renewalSchedule via -overlay.
+func TestRenewalSchedule(t *testing.T) {
 	tests := []struct {
 		name          string
 		leaseTime     time.Duration
@@ -109,7 +109,7 @@ func TestRenewalTimers(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t1, t2, ok := renewalTimers(tt.leaseTime)
+			t1, t2, ok := renewalSchedule(tt.leaseTime, nil, 0, 0)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}

@@ -34,17 +34,6 @@ type observedRouteInformation struct {
 	observed    time.Time
 }
 
-// selectRAObservedRouter accepts only link-local default routers (positive
-// Router Lifetime, RFC 4861 §4.2) and chooses the highest RFC 4191 preference.
-// Equal-preference routers retain first-seen order.
-func selectRAObservedRouter(routers []observedRouter) netip.Addr {
-	best := bestObservedRouter(routers)
-	if best < 0 {
-		return netip.Addr{}
-	}
-	return routers[best].addr
-}
-
 func raPreferenceRank(pref ndp.Preference) int {
 	switch pref {
 	case ndp.High:

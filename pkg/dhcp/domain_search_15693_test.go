@@ -46,10 +46,10 @@ func TestParseV6ReplyRetainsDomainSearchList15693(t *testing.T) {
 	m := &Manager{}
 	want := []string{"example.com", "corp.example.com"}
 
-	res, err := m.parseV6Reply(context.Background(), "wan0",
-		domainSearchReply15693(t, want...), nil)
+	res, err := m.parseV6ReplyChecked(context.Background(), "wan0",
+		domainSearchReply15693(t, want...), nil, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply: %v", err)
+		t.Fatalf("parseV6ReplyChecked: %v", err)
 	}
 	if !reflect.DeepEqual(res.lease.DomainSearch, want) {
 		t.Fatalf("lease.DomainSearch = %v, want %v (Option 24 requested but discarded pre-fix)", res.lease.DomainSearch, want)
@@ -57,10 +57,10 @@ func TestParseV6ReplyRetainsDomainSearchList15693(t *testing.T) {
 
 	// Control: a reply without Option 24 leaves DomainSearch empty, and a
 	// stateful reply's other fields are unchanged.
-	res2, err := m.parseV6Reply(context.Background(), "wan0",
-		domainSearchReply15693(t), nil)
+	res2, err := m.parseV6ReplyChecked(context.Background(), "wan0",
+		domainSearchReply15693(t), nil, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply (no option 24): %v", err)
+		t.Fatalf("parseV6ReplyChecked (no option 24): %v", err)
 	}
 	if len(res2.lease.DomainSearch) != 0 {
 		t.Fatalf("lease.DomainSearch = %v, want empty when Option 24 absent", res2.lease.DomainSearch)

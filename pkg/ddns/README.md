@@ -872,7 +872,6 @@ no change in those packages:
 | `LeaseDNSRecord` | `LeaseDNSRecord` |
 | `Stats` | `DDNSStats` |
 | `OwnedRecordView` | `DDNSOwnedRecordView` |
-| `NewManager(parser, updater, nodeID)` | `NewDDNSManager(updater, nodeID)` (wires `keaLeaseParser`) |
 | `NewProductionManager(parser, nodeID)` | `NewProductionDDNSManager(nodeID)` (wires `keaLeaseParser`) |
 | `NewManagerForTesting(...)` | `NewDDNSManagerForTesting(...)` (wires `keaLeaseParser`) |
 

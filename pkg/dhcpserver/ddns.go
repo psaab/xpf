@@ -82,13 +82,6 @@ func keaLeaseParser(path string, family int, now time.Time) ([]ddns.Lease, error
 	return out, nil
 }
 
-// NewDDNSManager constructs a DDNS manager with the given updater backend and
-// node id, wiring the package-local Kea-memfile lease parser. The ownership
-// store is loaded from the default state path; a corrupt store fails open.
-func NewDDNSManager(updater DNSUpdater, nodeID string) *DDNSManager {
-	return ddns.NewManager(keaLeaseParser, updater, nodeID)
-}
-
 // NewProductionDDNSManager constructs the always-on production manager
 // (#1387 increment 2), wiring the package-local Kea-memfile lease parser.
 func NewProductionDDNSManager(nodeID string) *DDNSManager {

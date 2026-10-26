@@ -12,16 +12,16 @@ import (
 )
 
 // #16553: the client never read server T1/T2 (IA_NA / IA_PD T1/T2,
-// DHCPv4 options 58/59). renewalTimers was always 50%/87.5% of the
+// DHCPv4 options 58/59). The prior default schedule was always 50%/87.5% of the
 // single IA_NA LeaseTime, so a PD whose valid lifetime ended before
 // that T1 was pruned and withdrawn from LAN RA, only re-requested at
 // the IA_NA T1, every cycle. RFC 8415 §18.2.4 requires Renew/Rebind
 // not later than the earliest T1/T2 of ANY held binding; RFC 2131
 // §4.4.5 makes 0.5/0.875 only defaults when options 58/59 are absent.
 //
-// RED-on-revert: drop the RenewAt/RebindAt plumbing (lease/PD fields
-// stay zero, run loops call renewalTimers) and every server-timer
-// row below fails — the schedule collapses to 50%/87.5% of LeaseTime.
+// RED-on-revert: drop the RenewAt/RebindAt plumbing (lease/PD fields stay zero)
+// and every server-timer row fails because the schedule collapses to 50%/87.5%
+// of LeaseTime.
 
 func TestRenewalScheduleServerT1T2_16553(t *testing.T) {
 	hour := time.Hour
@@ -199,9 +199,9 @@ func TestParseV6ReplyNoServerT1T2Control_16553(t *testing.T) {
 		IPv6Addr:          mustIP(t, "2606:4700::5"),
 		PreferredLifetime: 100 * time.Second, ValidLifetime: 500 * time.Second,
 	})
-	res, err := m.parseV6Reply(context.Background(), "wan0", msg, nil)
+	res, err := m.parseV6ReplyChecked(context.Background(), "wan0", msg, nil, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("parseV6Reply: %v", err)
+		t.Fatalf("parseV6ReplyChecked: %v", err)
 	}
 	if res.lease.RenewAt != 0 || res.lease.RebindAt != 0 {
 		t.Fatalf("lease timers = (%v,%v), want zero (server supplied none)", res.lease.RenewAt, res.lease.RebindAt)
@@ -219,7 +219,7 @@ func TestLeaseFromACKv4ServerT1T2_16553(t *testing.T) {
 		dhcpv4.OptRenewTimeValue(60*time.Second),
 		dhcpv4.OptRebindingTimeValue(120*time.Second),
 	)
-	lease, err := leaseFromACKv4("wan0", ack)
+	lease, err := leaseFromACKv4WithProtected("wan0", ack, nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestLeaseFromACKv4ServerT1T2_16553(t *testing.T) {
 		t.Fatalf("v4 schedule = (t1 %v, t2Abs %v, ok %v), want (60s,120s,true)", t1, t1+t2Rem, ok)
 	}
 
-	bare, err := leaseFromACKv4("wan0", classlessACK(t, dhcpv4.OptIPAddressLeaseTime(3600*time.Second)))
+	bare, err := leaseFromACKv4WithProtected("wan0", classlessACK(t, dhcpv4.OptIPAddressLeaseTime(3600*time.Second)), nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4 bare: %v", err)
 	}

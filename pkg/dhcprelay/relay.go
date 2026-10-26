@@ -519,25 +519,11 @@ func (f *fairLimiter[K]) evictIdle(now time.Time) bool {
 	return true
 }
 
-// fairSenderKeyV4 derives the v4 fairness key: the chaddr (clamped like
-// pendingKeyFor) WITHOUT the xid — fairness is per client identity, not
-// per transaction, so retransmissions and renewals from one client share
-// one sub-bucket. The hlen participates so different-length addresses do
-// not collide.
+// fairSenderKeyV4 stores a validated DHCPv4 BOOTP chaddr identity. The
+// hlen participates so different-length addresses do not collide.
 type fairSenderKeyV4 struct {
 	hlen   uint8
 	chaddr [16]byte
-}
-
-func fairSenderKeyForV4(pkt *dhcpv4.DHCPv4) fairSenderKeyV4 {
-	k := fairSenderKeyV4{}
-	n := len(pkt.ClientHWAddr)
-	if n > len(k.chaddr) {
-		n = len(k.chaddr)
-	}
-	copy(k.chaddr[:], pkt.ClientHWAddr[:n])
-	k.hlen = uint8(n)
-	return k
 }
 
 // v4HlenOff is the byte offset of hlen in a BOOTP/DHCPv4 wire packet
@@ -2790,17 +2776,4 @@ func addOption82(pkt *dhcpv4.DHCPv4, ifaceName string) {
 // stripOption82 removes the Relay Agent Information option (82) from the packet.
 func stripOption82(pkt *dhcpv4.DHCPv4) {
 	pkt.Options.Del(option82)
-}
-
-// interfaceIPv4 returns the primary non-loopback IPv4 address on the interface
-// using the standard-library address list. It is retained for callers/tests
-// that already hold a *net.Interface; the giaddr resolution path uses
-// defaultIfaceResolver (which prefers a netlink-backed primary selection that
-// honors IFA_F_SECONDARY — see #2849).
-func interfaceIPv4(iface *net.Interface) (net.IP, error) {
-	cands, err := portableIPv4Lister(iface.Name)
-	if err != nil {
-		return nil, err
-	}
-	return selectPrimaryIPv4(iface.Name, cands)
 }

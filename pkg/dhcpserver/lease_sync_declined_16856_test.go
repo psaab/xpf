@@ -56,7 +56,7 @@ func TestDeclined16856_SocketAndMemfileCarry(t *testing.T) {
 	}
 
 	// Live pre-seed: local snapshot (socket) contains declined; peer empty.
-	if err := m.PreSeedMemfileMerged4(context.Background(), nil, now, false); err != nil {
+	if err := m.PreSeedMemfileMerged4WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: nil, Received: true}, now, false, LeaseSyncAuthority{}); err != nil {
 		t.Fatalf("PreSeedMemfileMerged4: %v", err)
 	}
 	raw, _ := os.ReadFile(memfile)
@@ -67,7 +67,7 @@ func TestDeclined16856_SocketAndMemfileCarry(t *testing.T) {
 		t.Fatalf("active control missing: %s", raw)
 	}
 	// parseSyncLeases sees declined; parseActiveLeases (DDNS) must not.
-	syncLeases, err := parseSyncLeases4(memfile, now)
+	syncLeases, err := parseSyncLeases(memfile, 4, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestDeclined16856_SocketAndMemfileCarry(t *testing.T) {
 	if !found {
 		t.Fatalf("parseSyncLeases4 missing declined: %+v", syncLeases)
 	}
-	active, err := parseActiveLeases4(memfile, now)
+	active, err := parseActiveLeases(memfile, 4, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestDeclined16856_MemfileFallbackAndPreSeed(t *testing.T) {
 	out := filepath.Join(dir, "out.csv")
 	m2.SetLeaseSyncSeamsForTesting(nil, "", "", out, "")
 	peer := []SyncLease{{Family: 4, Address: "10.0.61.66", SubnetID: 1, Remaining: 1800, ValidLife: 3600, State: keaStateDeclined}}
-	if err := m2.PreSeedMemfile4(peer, now); err != nil {
+	if err := preSeedPeerForTesting(t, m2, 4, peer, now); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(out)

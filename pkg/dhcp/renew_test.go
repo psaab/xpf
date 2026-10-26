@@ -659,7 +659,7 @@ func TestLeaseFromACKv4RejectsDegenerateMask(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ack := mustV4ACK(t, yourIP, tc.mask)
-			lease, err := leaseFromACKv4("wan0", ack)
+			lease, err := leaseFromACKv4WithProtected("wan0", ack, nil)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("leaseFromACKv4 accepted degenerate mask; got lease %v, want error (no YourIP/0)",

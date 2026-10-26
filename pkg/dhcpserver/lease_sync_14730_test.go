@@ -54,18 +54,18 @@ func TestPreSeed14730_StillMasteringDropsTombstonedViaLFC(t *testing.T) {
 
 		var err error
 		if fam == 4 {
-			err = m.PreSeedMemfileMerged4(context.Background(), peer, now, true)
+			err = m.PreSeedMemfileMerged4WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: peer, Received: true}, now, true, LeaseSyncAuthority{})
 		} else {
-			err = m.PreSeedMemfileMerged6(context.Background(), peer, now, true)
+			err = m.PreSeedMemfileMerged6WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: peer, Received: true}, now, true, LeaseSyncAuthority{})
 		}
 		if err != nil {
 			t.Fatalf("fam%d pre-seed: %v", fam, err)
 		}
 		var got []ddnsLease
 		if fam == 4 {
-			got, err = parseActiveLeases4(memfile, now)
+			got, err = parseActiveLeases(memfile, 4, now)
 		} else {
-			got, err = parseActiveLeases6(memfile, now)
+			got, err = parseActiveLeases(memfile, 6, now)
 		}
 		if err != nil {
 			t.Fatalf("fam%d parse: %v", fam, err)
@@ -128,10 +128,10 @@ func TestPreSeed14730_LiveSocketDropsTombstonedViaLFC(t *testing.T) {
 	writeRawMemfile14730(t, memfile+".1", keaMemfileHeader4, activeRow)
 	writeRawMemfile14730(t, memfile, keaMemfileHeader4, tombRow)
 	peer := []SyncLease{{Family: 4, Address: "10.0.147.99", HWAddress: "aa:bb:cc:dd:ee:99", SubnetID: 1, Remaining: 3600, State: keaStateDefault}}
-	if err := m.PreSeedMemfileMerged4(context.Background(), peer, now, false); err != nil {
+	if err := m.PreSeedMemfileMerged4WithAuthority(context.Background(), LeaseSyncSnapshot{Leases: peer, Received: true}, now, false, LeaseSyncAuthority{}); err != nil {
 		t.Fatalf("live pre-seed: %v", err)
 	}
-	got, err := parseActiveLeases4(memfile, now)
+	got, err := parseActiveLeases(memfile, 4, now)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -163,11 +163,11 @@ func TestPreSeed14730_CRHostnameRoundTrip(t *testing.T) {
 	m.SetLeaseSyncSeamsForTesting(nil, filepath.Join(dir, "no.sock"), "", memfile, "")
 	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) { return os.Getuid(), os.Getgid(), true })
 	leases := []SyncLease{{Family: 4, Address: "10.0.147.20", HWAddress: "aa:bb:cc:dd:ee:20", SubnetID: 1, Remaining: 3600, Hostname: "host\rname", State: keaStateDefault}}
-	if err := m.PreSeedMemfile4(leases, now); err != nil {
+	if err := preSeedPeerForTesting(t, m, 4, leases, now); err != nil {
 		t.Fatalf("PreSeed: %v", err)
 	}
 	raw, _ := os.ReadFile(memfile)
-	got, err := parseActiveLeases4(memfile, now)
+	got, err := parseActiveLeases(memfile, 4, now)
 	if err != nil {
 		t.Fatalf("parse with CR hostname failed (DDNS would halt): %v raw=%q", err, string(raw))
 	}

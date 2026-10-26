@@ -80,12 +80,12 @@ func TestAddOption82_Replaces(t *testing.T) {
 	}
 }
 
-func TestInterfaceIPv4_Loopback(t *testing.T) {
+func TestDefaultIfaceResolverLoopback(t *testing.T) {
 	lo, err := net.InterfaceByName("lo")
 	if err != nil {
 		t.Skip("no loopback interface")
 	}
-	ip, err := interfaceIPv4(lo)
+	ip, err := defaultIfaceResolver(lo.Name)
 	if err == nil {
 		t.Errorf("expected error for loopback, got IP %s", ip)
 	}

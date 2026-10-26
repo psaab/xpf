@@ -538,7 +538,7 @@ What increment 1 ships (the fully unit-testable, lab-free slice):
   honors Kea's `state` column (default/declined/expired-reclaimed), the
   `expire` epoch, and the `fqdn_fwd` split between host-name and
   client-supplied FQDN, and extracts the v6 DUID/IAID identity. SEPARATE
-  from the display-only `parseLeaseCSV` — NOT because the display parser
+  from the display-only `parseLeaseCSVDegradable` — NOT because the display parser
   is unfiltered (since #2085 it also filters non-active state + expired
   rows and dedups per address), but because the two have opposite
   failure postures: the DDNS parser is **destructive** (its empty result
@@ -630,15 +630,15 @@ What increment 1 ships (the fully unit-testable, lab-free slice):
   current file wrongly read as a trusted-empty set would authorize the DDNS
   reconciler to MASS-DELETE every
   owned A/AAAA/PTR (fail-open). BOTH the destructive `parseActiveLeases4/6` and
-  the display `parseLeaseCSV` read the whole set through the shared
+  the display `parseLeaseCSVDegradable` read the whole set through the shared
   `keaLFCLeaseFilePaths` (`lease_lfc.go`) and replay rows through the SAME
   append-only, last-row-wins dedup. A missing `.1`/`.2` (the common no-LFC
   steady state) collapses the set to exactly the current file.
   For destructive `parseActiveLeases4/6`, the reader snapshots the complete
   `{.completed,.2,.1,current}` identity universe before source selection and
   after parsing; a rotation during selection or reading fails closed.
-  `parseLeaseCSV` shares the file paths and replay rules for display, but does
-  not apply this destructive-path rotation guard.
+  `parseLeaseCSVDegradable` shares the file paths and replay rules for display,
+  but does not apply this destructive-path rotation guard.
   The fail-safe posture is preserved and EXTENDED across the set: any EXISTING
   sibling that is headerless / mangled / ragged makes the WHOLE family
   untrusted (error → destructive diff skipped), and the trusted-empty result
@@ -981,10 +981,16 @@ This package owns the KEA side of #2239 cross-chassis DHCP-server lease sync
   just-started Kea via `lease{4,6}-add` (→ `lease{4,6}-update` on collision,
   idempotent), re-anchoring `expire = now + remaining` on the LOCAL clock.
   Faithful v6 identity (DUID/IAID/`type`/`prefix-len`, so IA_PD is synced).
-- `PreSeedMemfile{4,6}(leases, now)` — write the held leases into the Kea
-  memfile CSV (canonical header) BEFORE Kea start so it loads the in-use
-  bindings at boot and can never hand an in-use address to a different client
-  even in the pre-`lease-add` window (the duplicate-allocation-window closer).
+- `PreSeedMemfileMerged{4,6}WithAuthority(ctx, peer, now, stillMastering, authority)` — the daemon's takeover path. It quiesces Kea, then installs
+  the peer/local lease union. Matching current-generation apply proof filters
+  peer rows to eligible scopes and removes stale local rows only where
+  authority is known; absent or mismatched proof retains the conservative
+  union, except peer rows excluded by explicit negative scope authority.
+  The atomic write replaces stale LFC generations (#14730); if active Kea
+  cannot be quiesced, it fails closed without replacing the memfile (#10895).
+  The pre-seed invalidates Kea's cached loaded-config proof so the queued
+  takeover apply restarts Kea even when config is unchanged (#10896). A
+  300-second `max-period` restores service if restart never arrives.
   Durable (`fsatomic.WriteFileDurable`). **Chowned to the Kea runtime user
   (#2450):** xpfd runs as root but distro Kea runs unprivileged (`_kea` on
   Debian/Ubuntu, `kea` on RHEL-family) and opens its memfile lease DB for
@@ -1016,16 +1022,6 @@ This package owns the KEA side of #2239 cross-chassis DHCP-server lease sync
   (#2386). DHCPv6 keys on DUID so the lease itself was never lost, but the
   empty column dropped hwaddr-based logging / reservation matching / operator
   visibility.
-- `PreSeedMemfileMerged{4,6}WithAuthority` — takeover's local+peer union. The
-  daemon calls only the authority-aware pair (with the peer snapshot and the
-  per-family lease authority); the legacy `PreSeedMemfileMerged{4,6}` remain on
-  the Manager for dhcpserver-level tests. If Kea is active,
-  it issues `dhcp-disable` before reading the live lease set and keeps DHCP
-  disabled through the atomic memfile install. The pre-seed invalidates Kea's
-  cached loaded-config proof, so the queued takeover apply restarts Kea even if
-  the rendered configuration is unchanged (#10896). A 300-second `max-period`
-  restores service if that restart never arrives. If active Kea cannot be
-  quiesced, the pre-seed fails closed without replacing the memfile (#10895).
 
 - `WaitControlSocket{4,6}(ctx, within)` — bounded readiness wait before the
   post-start seed. #16855: socket readiness alone does not prove the new
@@ -1233,19 +1229,21 @@ adds `github.com/miekg/dns` (DNS UPDATE construction + TSIG signing).
   The desired state every driver applies is single-sourced in
   `pkg/daemon` as `desiredClusterDHCPConfig` — a converger that
   disagreed with the edge would fight it every tick.
-- Lease queries read Kea's CSV lease backends directly:
-  `/var/lib/kea/kea-leases4.csv` and `kea-leases6.csv`. No control
-  channel / socket call. Missing files yield an empty list, not an
-  error. Parsing uses `encoding/csv` (#1778) so quoted fields with
-  embedded commas don't shift columns. Kea's memfile is **append-only**
+- Lease display uses `GetLeasesWithSource{4,6}`. When the `lease_cmds` hook
+  is expected, the live DB is primary; otherwise the memfile is the normal
+  source. A failed socket query falls back to the memfile with a degraded
+  signal, and unreadable LFC siblings are skipped with a banner. Missing
+  files in the normal memfile path yield an empty list. Parsing uses
+  `encoding/csv` (#1778) so quoted fields with embedded commas don't shift
+  columns. Kea's memfile is **append-only**
   between lease-file-cleanup (LFC) compactions — every renewal,
   re-allocation, release, decline, and expiry-reclaim is a new row — so
-  `parseLeaseCSV` (#2085) collapses the append log to one row per
+  `parseLeaseCSVDegradable` (#2085) collapses the append log to one row per
   address (the last/newest row wins), drops non-active rows
   (`state != 0` — declined / expired-reclaimed, which can still carry a
   future `expire`, so state is filtered before expire) and lapsed rows
   (`expire <= now`), and emits in first-appearance order. The clock is
-  injected (`parseLeaseCSV(path, now)`) for deterministic tests. The
+  injected (`parseLeaseCSVDegradable(path, now)`) for deterministic tests. The
   filter is lenient: an absent or unparseable `state` / `expire` column
   degrades to "treat the row as active", preserving the pre-#2085
   behaviour for older Kea or exotic headers.

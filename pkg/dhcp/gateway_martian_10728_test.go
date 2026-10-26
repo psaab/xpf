@@ -32,7 +32,7 @@ func TestDHCPGatewayMartianRefused10728(t *testing.T) {
 			if tc.router != "" {
 				opts = append(opts, dhcpv4.OptRouter(net.ParseIP(tc.router)))
 			}
-			lease, err := leaseFromACKv4("wan0", classlessACK(t, opts...))
+			lease, err := leaseFromACKv4WithProtected("wan0", classlessACK(t, opts...), nil)
 			if err != nil {
 				t.Fatalf("leaseFromACKv4: %v", err)
 			}
@@ -67,7 +67,7 @@ func TestDHCPClasslessGatewayMartianRefused10728(t *testing.T) {
 		{"martian classless gateway refused", "127.0.0.2", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			lease, err := leaseFromACKv4("wan0", classlessACK(t, mkclassless(tc.gw)))
+			lease, err := leaseFromACKv4WithProtected("wan0", classlessACK(t, mkclassless(tc.gw)), nil)
 			if err != nil {
 				t.Fatalf("leaseFromACKv4: %v", err)
 			}
@@ -88,7 +88,7 @@ func TestDHCPClasslessGatewayMartianRefused10728(t *testing.T) {
 		&dhcpv4.Route{Dest: mustCIDR(t, "10.20.0.0/16"), Router: net.ParseIP("127.0.0.9")},
 		&dhcpv4.Route{Dest: mustCIDR(t, "10.30.0.0/16"), Router: net.ParseIP("192.0.2.9")},
 	)
-	lease, err := leaseFromACKv4("wan0", classlessACK(t, classless))
+	lease, err := leaseFromACKv4WithProtected("wan0", classlessACK(t, classless), nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4: %v", err)
 	}
@@ -104,8 +104,8 @@ func TestDHCPClasslessGatewayMartianRefused10728(t *testing.T) {
 // XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1 a martian gateway installs anyway.
 func TestDHCPGatewayMartianOverrideHonored10728(t *testing.T) {
 	t.Setenv("XPF_DHCP_TRUST_CLASSLESS_OVERRIDE", "1")
-	lease, err := leaseFromACKv4("wan0", classlessACK(t,
-		dhcpv4.OptRouter(net.ParseIP("127.0.0.1"))))
+	lease, err := leaseFromACKv4WithProtected("wan0", classlessACK(t,
+		dhcpv4.OptRouter(net.ParseIP("127.0.0.1"))), nil)
 	if err != nil {
 		t.Fatalf("leaseFromACKv4: %v", err)
 	}

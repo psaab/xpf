@@ -228,10 +228,6 @@ func expireIPv6RouterState(lease *Lease, now time.Time) {
 	}
 }
 
-func nextIPv6RARefreshDelay(lease *Lease, now time.Time) time.Duration {
-	return nextIPv6WakeDelay(lease, now, nil)
-}
-
 // nextIPv6WakeDelay is the earliest of the RA refresh interval, RA
 // expiries, and the earliest delegated-prefix expiry (#14598). The PD
 // term makes the renewal-loop wait wake at the PD's own valid-lifetime

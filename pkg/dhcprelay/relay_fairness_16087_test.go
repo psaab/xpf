@@ -334,11 +334,10 @@ func TestDHCPV6RelayForwardGatedByLimiter(t *testing.T) {
 	}
 }
 
-// TestFairSenderKeyV6FromWire pins the wire DUID peek against the parsed
-// key for the standard DUID forms (verified to agree byte-for-byte with
-// copyPending6DUID's typed encoding), plus the malformed arms: no
-// Client ID, truncated TLV, and an over-long option must all report
-// not-ok so the caller lumps them into the unknown sender.
+// TestFairSenderKeyV6FromWire pins standard DUIDs to the parsed pending key
+// where representable, plus malformed arms: no Client ID and truncated TLV.
+// Over-limit DUIDs pin the asymmetry: the wire fairness key truncates to 128
+// bytes, but the parsed pending-key path refuses the identity.
 func TestFairSenderKeyV6FromWire(t *testing.T) {
 	duids := []dhcpv6.DUID{
 		&dhcpv6.DUIDUUID{UUID: [16]byte{0x10, 0x21, 0x32}},
@@ -354,9 +353,10 @@ func TestFairSenderKeyV6FromWire(t *testing.T) {
 		if !ok {
 			t.Fatalf("duid %d: wire peek rejected a valid message", i)
 		}
-		want, wok := fairSenderKeyForV6(m)
-		if !wok || got != want {
-			t.Fatalf("duid %d: wire key %+v, want parsed %+v (ok=%v)", i, got, want, wok)
+		parsed, pok := pending6KeyFor(m)
+		want := fairSenderKeyV6{duid: parsed.duid, duidLen: parsed.duidLen}
+		if !pok || got != want {
+			t.Fatalf("duid %d: wire key %+v, want pending-key identity %+v (ok=%v)", i, got, want, pok)
 		}
 	}
 	// No Client ID at all.
@@ -371,6 +371,17 @@ func TestFairSenderKeyV6FromWire(t *testing.T) {
 	trunc := []byte{1, 0, 0, 0, 0, 1, 0, 100, 0xAA}
 	if _, ok := fairSenderKeyV6FromWire(trunc); ok {
 		t.Error("wire peek accepted a truncated Client-ID option")
+	}
+	// The wire fairness key truncates a valid over-limit DUID to its fixed
+	// identity width; the pending-key path separately refuses that identity.
+	overlong := make([]byte, 4+4+pending6MaxDUIDSize+1)
+	overlong[0] = byte(dhcpv6.MessageTypeSolicit)
+	overlong[5] = byte(dhcpv6.OptionClientID)
+	overlong[7] = pending6MaxDUIDSize + 1
+	key, ok := fairSenderKeyV6FromWire(overlong)
+	if !ok || int(key.duidLen) != pending6MaxDUIDSize {
+		t.Fatalf("over-limit wire DUID key = %+v ok=%v, want truncated %d-byte key",
+			key, ok, pending6MaxDUIDSize)
 	}
 	// Too short for any option.
 	if _, ok := fairSenderKeyV6FromWire([]byte{1, 0}); ok {
@@ -472,7 +483,7 @@ func TestFairLimiter_TinyRateFloorCompletesDORA(t *testing.T) {
 }
 
 // TestFairSenderKeyFromWire pins the RFC 951 header peek against the
-// parsed key for a real wire packet, plus the truncated/odd-hlen arms.
+// parsed packet fields directly, plus the truncated/odd-hlen arms.
 func TestFairSenderKeyFromWire(t *testing.T) {
 	wire := discoverWire(t, 0x5A)
 	pkt, err := dhcpv4.FromBytes(wire)
@@ -483,8 +494,10 @@ func TestFairSenderKeyFromWire(t *testing.T) {
 	if !ok {
 		t.Fatal("wire peek rejected a valid DISCOVER")
 	}
-	if want := fairSenderKeyForV4(pkt); got != want {
-		t.Fatalf("wire key = %+v, want parsed key %+v", got, want)
+	want := fairSenderKeyV4{hlen: uint8(len(pkt.ClientHWAddr))}
+	copy(want.chaddr[:], pkt.ClientHWAddr)
+	if got != want {
+		t.Fatalf("wire key = %+v, want parsed chaddr key %+v", got, want)
 	}
 	if _, ok := fairSenderKeyFromWire(wire[:20]); ok {
 		t.Fatal("wire peek accepted a truncated datagram")
