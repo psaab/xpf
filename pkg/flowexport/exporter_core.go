@@ -74,13 +74,13 @@ type exporterCore struct {
 	// close-only export.
 	tracker *FlowTracker
 	// sampledFlows remembers flows selected at SESSION_OPEN when this
-	// exporter has no active/inactive tracker (tracker == nil). Without
-	// it, a close-only exporter could not distinguish "open was sampled"
-	// from "open was not sampled" without consuming a second 1-in-N slot
-	// at close. Keys are deleted on close, so the set is bounded by live
-	// sampled sessions for this exporter.
-	sampledMu    sync.Mutex
-	sampledFlows map[FlowKey]struct{}
+	// exporter has no active/inactive tracker; rejectedFlows remembers
+	// the complementary decision, including interface/zone rejection.
+	// Together they distinguish both decided outcomes from a genuinely
+	// orphan close, which alone may consume a close-time fallback slot.
+	sampledMu     sync.Mutex
+	sampledFlows  map[FlowKey]struct{}
+	rejectedFlows map[FlowKey]struct{}
 
 	batch flowBatch
 	conns *collectorConns
@@ -316,19 +316,19 @@ func (c *exporterCore) CollectorHealth() []CollectorHealth {
 // Close shuts down all collector connections.
 func (c *exporterCore) Close() { c.conns.close() }
 
-// HasFlowState reports whether this exporter holds any open state for
-// key (tracker entry or close-only sampled set) without consuming it.
-// The daemon uses it before CloseFlow to decide whether *any* group of
-// an instance recorded the open; only when none did may a close-time
-// fallback decision run (#16742).
+// HasFlowState reports whether this exporter holds an open-time sampling
+// decision or tracker entry for key without consuming it. A rejected
+// decision is state too: the daemon must not reinterpret its close as an
+// orphan and give it another sampling opportunity (#17815).
 func (c *exporterCore) HasFlowState(key FlowKey) bool {
 	if c.tracker != nil && c.tracker.Has(key) {
 		return true
 	}
 	c.sampledMu.Lock()
-	_, ok := c.sampledFlows[key]
+	_, sampled := c.sampledFlows[key]
+	_, rejected := c.rejectedFlows[key]
 	c.sampledMu.Unlock()
-	return ok
+	return sampled || rejected
 }
 
 // CloseFlow forgets a flow on real session close (#15655) and reports
@@ -346,9 +346,8 @@ func (c *exporterCore) CloseFlow(key FlowKey) (sampled bool, basePkts, baseBytes
 	}
 	c.sampledMu.Lock()
 	_, inSampledSet := c.sampledFlows[key]
-	if inSampledSet {
-		delete(c.sampledFlows, key)
-	}
+	delete(c.sampledFlows, key)
+	delete(c.rejectedFlows, key)
 	c.sampledMu.Unlock()
 	return tracked || inSampledSet, basePkts, baseBytes, baseRevPkts, baseRevBytes
 }
@@ -375,11 +374,9 @@ func (c *exporterCore) CloseFlowOrSample(key FlowKey, decide func() bool) (sampl
 
 // TransferFlowStateTo carries this exporter's open state for key to
 // dst (the replacement exporter for the same group key, #16742):
-// the tracker entry (with its interim baselines) when dst has a
-// tracker, otherwise the close-only sampled mark. State already
-// present in dst wins. The source keeps its copy; the caller retires
-// the source, whose Run flush never re-emits tracker state, so the
-// close is exported exactly once by the replacement.
+// tracker entries with their interim baselines, positive close-only
+// marks, and rejected open decisions. State already present in dst
+// wins. The source keeps its copy; the caller retires the source.
 func (c *exporterCore) TransferFlowStateTo(dst *exporterCore, key FlowKey) {
 	if dst == nil || dst == c {
 		return
@@ -391,24 +388,25 @@ func (c *exporterCore) TransferFlowStateTo(dst *exporterCore, key FlowKey) {
 		}
 	}
 	c.sampledMu.Lock()
-	_, ok := c.sampledFlows[key]
+	_, sampled := c.sampledFlows[key]
+	_, rejected := c.rejectedFlows[key]
 	c.sampledMu.Unlock()
-	if ok {
+	if sampled {
 		if dst.tracker != nil && c.tracker == nil {
-			// Close-only source to tracker destination: register
-			// tracking (MarkFlowSampledAtOpen is a no-op there) so
-			// the replacement's tracker-driven close sees the flow.
-			// The start is unknown to the source; carry the zero
-			// start — the close path uses the close event's own
-			// stamps, not the tracker template start.
+			// Close-only source to tracker destination: register tracking
+			// so the replacement's tracker-driven close sees the flow.
 			dst.TrackFlowOpen(key, time.Time{})
 		} else {
 			dst.MarkFlowSampledAtOpen(key)
 		}
 		return
 	}
-	// Tracker source to close-only destination: selection was
-	// implicit in tracking; preserve it as a sampled mark.
+	if rejected {
+		dst.MarkFlowRejectedAtOpen(key)
+		return
+	}
+	// Tracker source to close-only destination: selection was implicit
+	// in tracking; preserve it as a sampled mark.
 	if c.tracker != nil && dst.tracker == nil && c.tracker.Has(key) {
 		dst.MarkFlowSampledAtOpen(key)
 	}
@@ -428,10 +426,23 @@ func (c *exporterCore) SampledKeys() []FlowKey {
 	return keys
 }
 
+// RejectedKeys snapshots the open-time rejection set (nil when empty).
+func (c *exporterCore) RejectedKeys() []FlowKey {
+	c.sampledMu.Lock()
+	defer c.sampledMu.Unlock()
+	if len(c.rejectedFlows) == 0 {
+		return nil
+	}
+	keys := make([]FlowKey, 0, len(c.rejectedFlows))
+	for k := range c.rejectedFlows {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // AbsorbSampledInto transfers every open-state key this exporter holds
-// (tracker keys plus close-only sampled marks) into dst via
-// TransferFlowStateTo. Used when dst replaces this exporter for the
-// same group key (#16742).
+// (tracker keys plus close-only sampled and rejected marks) into dst via
+// TransferFlowStateTo. Used when dst replaces this exporter (#16742).
 func (c *exporterCore) AbsorbSampledInto(dst *exporterCore) {
 	if dst == nil || dst == c {
 		return
@@ -442,28 +453,49 @@ func (c *exporterCore) AbsorbSampledInto(dst *exporterCore) {
 	for _, key := range c.SampledKeys() {
 		c.TransferFlowStateTo(dst, key)
 	}
+	for _, key := range c.RejectedKeys() {
+		c.TransferFlowStateTo(dst, key)
+	}
 }
 
 // MarkFlowSampledAtOpen records that the instance's single sampling
 // decision selected this flow at SESSION_OPEN. Tracked flows already
 // carry that fact in the tracker; close-only exporters use this set.
 func (c *exporterCore) MarkFlowSampledAtOpen(key FlowKey) {
-	if c.tracker != nil {
-		return
-	}
 	c.sampledMu.Lock()
-	if c.sampledFlows == nil {
-		c.sampledFlows = make(map[FlowKey]struct{})
+	delete(c.rejectedFlows, key)
+	if c.tracker == nil {
+		if c.sampledFlows == nil {
+			c.sampledFlows = make(map[FlowKey]struct{})
+		}
+		c.sampledFlows[key] = struct{}{}
 	}
-	c.sampledFlows[key] = struct{}{}
 	c.sampledMu.Unlock()
 }
 
-// ForgetFlowSampledAtOpen drops an open-side selection without treating
+// MarkFlowRejectedAtOpen remembers that an observed open was not selected
+// by this instance. Its close is decided already and must not consume a
+// close-fallback slot (#17815).
+func (c *exporterCore) MarkFlowRejectedAtOpen(key FlowKey) {
+	if c.tracker != nil && c.tracker.Has(key) {
+		return
+	}
+	c.sampledMu.Lock()
+	if _, sampled := c.sampledFlows[key]; !sampled {
+		if c.rejectedFlows == nil {
+			c.rejectedFlows = make(map[FlowKey]struct{})
+		}
+		c.rejectedFlows[key] = struct{}{}
+	}
+	c.sampledMu.Unlock()
+}
+
+// ForgetFlowSampledAtOpen drops an open-side decision without treating
 // it as a close export decision (used when an exporter is retired).
 func (c *exporterCore) ForgetFlowSampledAtOpen(key FlowKey) {
 	c.sampledMu.Lock()
 	delete(c.sampledFlows, key)
+	delete(c.rejectedFlows, key)
 	c.sampledMu.Unlock()
 }
 

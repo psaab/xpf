@@ -1128,13 +1128,11 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 	}
 }
 
-// trackFlowOpen is the shared SESSION_OPEN tracker feed (#15946
-// H14-03/H42-03, single-decision fold #16303). It is invoked only by
-// flowExportOpenCallback, so each published instance evaluates an open
-// exactly once regardless of how many protocol callbacks EventReader
-// also invokes. SampledForOpen consumes that one slot; the exporter
-// remembers the selection (tracker entry, or the close-only sampled
-// set) so the matching close exports without a second decision.
+// trackFlowOpen is the shared SESSION_OPEN tracker feed (#15946,
+// #16303). For each protocol and instance it makes one sampling
+// decision. The exporter records either selected state or a rejected
+// decision so duplicate local/sync opens and the matching close cannot
+// consume another slot or reset tracker baselines (#17815).
 //
 // #16742 promote arm: a peer->local promote after an RG failover gets
 // no SESSION_CREATE from the helper (#15126: only fresh admissions
@@ -1178,11 +1176,26 @@ func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
 			for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
 				j++
 			}
-			if lead.ServesFamily(isV6) && lead.SampledForOpen(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface) {
+			if lead.ServesFamily(isV6) {
+				decided := false
 				for k := i; k < j; k++ {
-					if b.groups[k].ec.GroupIsV6 == isV6 {
-						b.groups[k].exp.MarkFlowSampledAtOpen(key)
-						b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
+					if b.groups[k].ec.GroupIsV6 == isV6 && b.groups[k].exp.HasFlowState(key) {
+						decided = true
+						break
+					}
+				}
+				if !decided {
+					selected := lead.SampledForOpen(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface)
+					for k := i; k < j; k++ {
+						if b.groups[k].ec.GroupIsV6 != isV6 {
+							continue
+						}
+						if selected {
+							b.groups[k].exp.MarkFlowSampledAtOpen(key)
+							b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
+						} else {
+							b.groups[k].exp.MarkFlowRejectedAtOpen(key)
+						}
 					}
 				}
 			}
@@ -1197,11 +1210,26 @@ func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
 			for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
 				j++
 			}
-			if lead.ServesFamily(isV6) && lead.SampledForOpen(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface) {
+			if lead.ServesFamily(isV6) {
+				decided := false
 				for k := i; k < j; k++ {
-					if b.groups[k].ec.GroupIsV6 == isV6 {
-						b.groups[k].exp.MarkFlowSampledAtOpen(key)
-						b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
+					if b.groups[k].ec.GroupIsV6 == isV6 && b.groups[k].exp.HasFlowState(key) {
+						decided = true
+						break
+					}
+				}
+				if !decided {
+					selected := lead.SampledForOpen(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface)
+					for k := i; k < j; k++ {
+						if b.groups[k].ec.GroupIsV6 != isV6 {
+							continue
+						}
+						if selected {
+							b.groups[k].exp.MarkFlowSampledAtOpen(key)
+							b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
+						} else {
+							b.groups[k].exp.MarkFlowRejectedAtOpen(key)
+						}
 					}
 				}
 			}
@@ -1221,9 +1249,9 @@ func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
 // is the promote signal; this hook converts the delta into the same
 // SESSION_OPEN record trackFlowOpen consumes, WITHOUT any syslog
 // CREATE (no EventRecord is logged; only the exporter sampling /
-// tracker state is registered). Interface names are left empty: the
-// daemon sampling path falls back to zone semantics for nameless
-// records (#15946 scoping), and zone IDs come from the delta.
+// tracker state is registered). Interface names use EventReader's
+// existing ifindex map so per-interface sampling remains authoritative
+// for resolved identities; unknown names retain daemon zone fallback.
 func (d *Daemon) trackFlowOpenFromSync(delta dpuserspace.SessionDeltaInfo) {
 	if d == nil {
 		return
@@ -1241,6 +1269,10 @@ func (d *Daemon) trackFlowOpenFromSync(delta dpuserspace.SessionDeltaInfo) {
 		OutZone:        delta.EgressZoneID,
 		IngressIfindex: uint32(delta.IngressIfindex),
 		EgressIfindex:  uint32(delta.EgressIfindex),
+	}
+	if d.eventReader != nil {
+		rec.IngressIface = d.eventReader.InterfaceName(rec.IngressIfindex)
+		rec.EgressIface = d.eventReader.InterfaceName(rec.EgressIfindex)
 	}
 	if delta.NATSrcIP != "" {
 		rec.NATSrcAddr = net.JoinHostPort(delta.NATSrcIP, strconv.Itoa(int(delta.NATSrcPort)))
