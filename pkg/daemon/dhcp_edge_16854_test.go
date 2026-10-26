@@ -205,6 +205,11 @@ func TestDHCPTakeoverWorkNeededWithMixedGroup17886(t *testing.T) {
 	mixed.Interfaces = []string{"reth1.0", "reth2.0"}
 	rg1 := *mixed
 	rg1.Interfaces = []string{"reth0.50"}
+	rg1Pool := *mixed.Pools[0]
+	rg1Pool.Subnet = "10.0.60.0/24"
+	rg1Pool.RangeLow = "10.0.60.100"
+	rg1Pool.RangeHigh = "10.0.60.199"
+	rg1.Pools = []*config.DHCPPool{&rg1Pool}
 	cfg.System.DHCPServer.DHCPLocalServer.Groups = map[string]*config.DHCPServerGroup{
 		"rg1-pool":      &rg1,
 		"mixed-rg2-rg3": mixed,
