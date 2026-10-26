@@ -2976,7 +2976,7 @@ wrong one reopens the dual-master window:
 |---|---|
 | `peer is signing <signing-id> — safe to finalize` | the peer has moved; step 5 is safe |
 | `peer is still signing <other-id> — do NOT finalize` | the peer is still on the retired key |
-| `peer key UNKNOWN — no authenticated peer frame seen; unknown, not known safe to finalize` | usually the peer is down; **not** the same as "not safe" |
+| `peer key UNKNOWN — no verified peer signing key observed; unknown, not known safe to finalize` | no signing-key observation is available; the peer may be down or reachable with only a PSK-acceptance proof; **not** the same as "not safe" |
 
 The peer-key observation is fed by heartbeat admission and the session-sync
 responder roles: the connect responder's matched ring key and the #6628
