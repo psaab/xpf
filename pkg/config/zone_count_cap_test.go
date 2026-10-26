@@ -44,7 +44,8 @@ func TestZoneCountStrictRejectsOverCap(t *testing.T) {
 		// #16557: the u32 cap (4,294,967,293) cannot be materialised as a
 		// real zone map in a test. The O(1) comparison itself is exercised
 		// by TestZoneCountCapValue + the small-config tests; the over-cap
-		// branch is unreachable at test scale.
+		// branch is covered at CI scale via the injected cap (#17928) —
+		// this cell only materialises against the real pinned cap.
 		t.Skip("u32 zone cap too large to materialise an over-cap config")
 	}
 	err := validateZoneCountStrict(zonesConfig(int(MaxUsableZoneID + 1)))
