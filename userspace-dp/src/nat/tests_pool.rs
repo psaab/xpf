@@ -2949,7 +2949,6 @@ fn persistent_inbound_last_release_downgrades_clear_tombstone_16652() {
 fn persistent_inbound_recorded_hold_releases_cross_domain_lease_16615() {
     let rules = persistent_pool_rules(1, 40000, 40010);
     let alloc = &rules[0].pool_allocator;
-    let alloc_id = alloc.debug_shared_identity();
 
     let mint_scoped = |scope: u32, now_ns: u64| {
         let mut counter = None;
@@ -3008,10 +3007,12 @@ fn persistent_inbound_recorded_hold_releases_cross_domain_lease_16615() {
     }
 
     // Both inbound sessions acquire on their own lease (recorded holds).
-    let hold_a = (lease_for(7), alloc_id);
-    let hold_b = (lease_for(0), alloc_id);
-    assert!(alloc.acquire_persistent_inbound(hold_a.0, 1_500_000_000));
-    assert!(alloc.acquire_persistent_inbound(hold_b.0, 1_500_000_000));
+    let hold_a = alloc
+        .acquire_persistent_inbound_with_hold(lease_for(7), 1_500_000_000)
+        .expect("A lease must grant the inbound hold");
+    let hold_b = alloc
+        .acquire_persistent_inbound_with_hold(lease_for(0), 1_500_000_000)
+        .expect("B lease must grant the inbound hold");
     for (scope, want) in [(7u32, 1u32), (0u32, 1u32)] {
         let lease = alloc
             .debug_persistent_lease_for_flow(&flow_for(scope), PersistentNatPermit::AnyRemoteHost)
@@ -3123,7 +3124,9 @@ fn recorded_release_with_missing_allocator_preserves_other_pool_17683() {
         routing_scope: 0,
         remote: None,
     };
-    assert!(alloc_b.acquire_persistent_inbound(lease_key, 1_500_000_000));
+    let hold_b = alloc_b
+        .acquire_persistent_inbound_with_hold(lease_key, 1_500_000_000)
+        .expect("B lease hold");
     assert_eq!(
         alloc_b
             .debug_persistent_lease_for_flow(
@@ -3143,7 +3146,11 @@ fn recorded_release_with_missing_allocator_preserves_other_pool_17683() {
 
     let missing_owner_released = crate::nat::release_recorded_persistent_inbound(
         &rules_b,
-        Some((lease_key, allocator_a_id)),
+        Some(crate::nat::PersistentLeaseHold {
+            key: lease_key,
+            allocator_id: allocator_a_id,
+            incarnation: 1,
+        }),
         3_000_000_000,
     );
     assert_eq!(
@@ -3189,7 +3196,7 @@ fn recorded_release_with_missing_allocator_preserves_other_pool_17683() {
     // consumes exactly one hold and permits the now-idle lease to GC.
     assert!(crate::nat::release_recorded_persistent_inbound(
         &rules_b,
-        Some((lease_key, alloc_b.debug_shared_identity())),
+        Some(hold_b),
         3_000_000_000,
     ));
     assert_eq!(
@@ -8181,6 +8188,7 @@ fn install_expired_idle_leases(
                         ip: IpAddr::V4(ip),
                         port,
                     },
+                    incarnation: 0,
                     addr_index,
                     expires_at_ns,
                     timeout_ns: NS_PER_SEC,
@@ -8287,6 +8295,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                     ip: IpAddr::V4(ip),
                     port: 2000,
                 },
+                incarnation: 0,
                 addr_index: 0,
                 expires_at_ns: 500,
                 timeout_ns: NS_PER_SEC,
@@ -8312,6 +8321,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                     ip: IpAddr::V4(ip),
                     port: 2001,
                 },
+                incarnation: 0,
                 addr_index: 0,
                 expires_at_ns: 10_000,
                 timeout_ns: NS_PER_SEC,

@@ -349,8 +349,9 @@ pub(crate) use allocator::PersistentLeaseDebugState;
 pub(crate) use allocator::allocator_capacity;
 pub(crate) use allocator::{
     DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
-    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentSourceKey,
-    PortAllocator, PortAllocatorSnapshot, ReseedOutcome, SourceNatReservationSnapshot,
+    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentLeaseHold,
+    PersistentSourceKey, PortAllocator, PortAllocatorSnapshot, ReseedOutcome,
+    SourceNatReservationSnapshot,
     deterministic_indices_v4, sticky_pool_index,
 };
 pub(crate) use destination::{DnatKey, DnatLookup, DnatTable, DnatValue};
@@ -388,23 +389,29 @@ pub(crate) use source::{
     parse_source_nat_rules_with_previous,
     peer_owns_identity_in,
     release_nat64_pool_port,
+    acquire_recorded_persistent_inbound_hold, release_recorded_persistent_inbound_hold,
     release_persistent_inbound_for_session, release_persistent_inbound_with_hold,
     release_recorded_persistent_inbound,
     release_source_nat_allocation_for_worker, release_source_nat_allocation_for_worker_with_hold,
     release_source_nat_allocation_for_worker_preserving_persistent_hold,
     release_synced_source_nat_allocation_untracked_with_hold,
+    release_synced_source_nat_allocation_untracked_preserving_persistent_hold,
     rollback_recorded_persistent_inbound, rollback_source_nat_allocation_for_worker_with_hold,
     release_synced_source_nat_allocation_untracked,
     reserve_nat64_pool_port,
     reserve_nat64_pool_port_capture_and_replace,
-    reserve_synced_source_nat_allocation_for_worker, reserve_synced_source_nat_allocation_for_worker_with_hold,
-    reserve_synced_source_nat_allocation_untracked_with_hold, reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold,
+    reserve_synced_source_nat_allocation_for_worker,
+    reserve_synced_source_nat_allocation_for_worker_preserving_persistent_hold,
+    reserve_synced_source_nat_allocation_untracked_preserving_persistent_hold,
+    reserve_synced_source_nat_allocation_untracked_with_hold,
+    reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold,
     // #6600: the coordinator's pre-publish reservation and its rollback. NOT
     // test-only, unlike the untracked entry points below — these are the
     // production import path.
     reserve_synced_source_nat_allocation_untracked,
     reserve_synced_source_nat_allocation_untracked_with_holder_snapshot,
     acquire_persistent_inbound_for_synced,
+    persistent_inbound_hold_owner_for_synced,
     retained_pool_index_map,
     retained_pool_index_map_v4,
     rollback_persistent_inbound_for_session,

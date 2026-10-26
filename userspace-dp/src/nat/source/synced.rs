@@ -193,68 +193,151 @@ pub(crate) fn reserve_synced_source_nat_allocation(
     );
 }
 
-/// #15111/#16619: acquire the inbound persistent hold for a synced inbound session.
-/// Mirrors `release_persistent_inbound_for_session`. Per-worker fan-out and the
-/// coordinator untracked reserve each take one reference, matching the
-/// per-worker inbound release on teardown. No-op when no lease matches.
-///
-/// #16619: a synced decision carrying a source rewrite must NOT skip the
-/// hold. The reserve body joins the lease keyed by the session's source —
-/// for an inbound session that source is the *remote*, so its SNAT
-/// reservation joins (or mints) the remote's lease, never the internal
-/// host's lease derived from `rewrite_dst` below. An ordinary outbound
-/// synced decision is still excluded: in that direction the internal host
-/// IS the session source (`key.src_ip`), so the reserve body's persistent
-/// join already covers the lease this function would derive, and taking a
-/// second (inbound) hold would double-count it. The inbound arm is
-/// therefore distinguished structurally: the internal endpoint comes from
-/// `rewrite_dst` and differs from the session source.
+/// Iterate the persistent inbound holds selected by a translated public tuple.
+/// The session's arrival routing domain is not the lease's routing scope.
+fn persistent_inbound_lease_candidates<'a>(
+    rules: &'a [SourceNatRule],
+    key: &'a crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> impl Iterator<Item = (&'a SourceNatRule, crate::nat::PersistentLeaseHold)> + 'a {
+    let inbound = !is_reverse
+        && !nat.nat64
+        && !nat.nptv6
+        && nat.rewrite_dst.is_some_and(|internal_ip| {
+            let internal_port = nat.rewrite_dst_port.unwrap_or(key.dst_port);
+            internal_ip != key.src_ip || internal_port != key.src_port
+        });
+    rules.iter().filter_map(move |rule| {
+        if !inbound || !rule.pool_mode {
+            return None;
+        }
+        let lease_key = rule.pool_allocator.persistent_lease_key_for_translated(
+            key.protocol,
+            key.dst_ip,
+            key.dst_port,
+            now_ns,
+        )?;
+        let hold = rule.pool_allocator.persistent_lease_hold(lease_key)?;
+        Some((rule, hold))
+    })
+}
+
+/// Return the selected hold without incrementing its inbound reference.
+pub(crate) fn persistent_inbound_hold_owner_for_synced(
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> Option<crate::nat::PersistentLeaseHold> {
+    persistent_inbound_lease_candidates(rules, key, nat, is_reverse, now_ns)
+        .next()
+        .map(|(_, hold)| hold)
+}
+
+/// Acquire one reference on the first selected inbound lease that is still
+/// live, returning its exact allocator/key/incarnation hold.
 pub(crate) fn acquire_persistent_inbound_for_synced(
     rules: &[SourceNatRule],
     key: &crate::session::SessionKey,
     nat: NatDecision,
     is_reverse: bool,
     now_ns: u64,
-) -> Option<(crate::nat::PersistentSourceKey, usize)> {
-    if is_reverse {
-        return None;
-    }
-    let Some(internal_ip) = nat.rewrite_dst else {
-        return None;
+) -> Option<crate::nat::PersistentLeaseHold> {
+    let expected_translated = crate::nat::TranslatedTuple {
+        ip: key.dst_ip,
+        port: key.dst_port,
     };
-    if nat.nat64 || nat.nptv6 {
-        return None;
-    }
-    // Outbound discriminator (see doc comment): the internal host is the
-    // session source and rewrite_dst is merely its post-DNAT destination;
-    // the reserve body's persistent join already holds that lease.
-    let internal_port = nat.rewrite_dst_port.unwrap_or(key.dst_port);
-    if internal_ip == key.src_ip && internal_port == key.src_port {
-        return None;
-    }
-    // #16615: discover the lease by its translated tuple (the synced key's
-    // destination), never by re-deriving routing_scope from arrival domain.
-    // The lease's own key (with its minting scope) is what we record.
-    for rule in rules {
-        if !rule.pool_mode {
-            continue;
-        }
-        let Some(lease_key) = rule.pool_allocator.persistent_lease_key_for_translated(
-            key.protocol,
-            key.dst_ip,
-            key.dst_port,
-            now_ns,
-        ) else {
-            continue;
-        };
+    for (rule, hold) in persistent_inbound_lease_candidates(rules, key, nat, is_reverse, now_ns) {
         if rule
             .pool_allocator
-            .acquire_persistent_inbound(lease_key, now_ns)
+            .acquire_persistent_inbound_for_hold(hold, expected_translated, now_ns)
         {
-            return Some((lease_key, rule.pool_allocator.debug_shared_identity()));
+            return Some(hold);
         }
     }
     None
+}
+
+/// Transfer a recorded hold when the current rule order selects a different
+/// owner. Workers keep an unmatched old hold for exact eventual teardown;
+/// coordinator replacement drops an old hold when the new entry has no lease.
+fn reserve_persistent_inbound_for_synced_with_existing_hold(
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+    existing_hold: Option<crate::nat::PersistentLeaseHold>,
+    preserve_existing_on_no_match: bool,
+) -> Option<crate::nat::PersistentLeaseHold> {
+    let expected_translated = crate::nat::TranslatedTuple {
+        ip: key.dst_ip,
+        port: key.dst_port,
+    };
+    let mut candidates = persistent_inbound_lease_candidates(rules, key, nat, is_reverse, now_ns);
+    let selected = candidates.next();
+    match (existing_hold, selected) {
+        (Some(existing), Some((_, selected))) if selected == existing => Some(existing),
+        (Some(existing), Some((_, selected))) => {
+            if crate::nat::acquire_recorded_persistent_inbound_hold(
+                rules,
+                selected,
+                expected_translated,
+                now_ns,
+            ) {
+                crate::nat::release_recorded_persistent_inbound_hold(rules, existing, now_ns);
+                return Some(selected);
+            }
+            for (_, candidate) in candidates {
+                if candidate != existing
+                    && crate::nat::acquire_recorded_persistent_inbound_hold(
+                        rules,
+                        candidate,
+                        expected_translated,
+                        now_ns,
+                    )
+                {
+                    crate::nat::release_recorded_persistent_inbound_hold(
+                        rules, existing, now_ns,
+                    );
+                    return Some(candidate);
+                }
+            }
+            // A stale/revoked candidate must not consume the incumbent's
+            // reference. Keep its exact handle for eventual teardown.
+            Some(existing)
+        }
+        (Some(existing), None) if preserve_existing_on_no_match => Some(existing),
+        (Some(existing), None) => {
+            crate::nat::release_recorded_persistent_inbound_hold(rules, existing, now_ns);
+            None
+        }
+        (None, Some((_, selected))) => {
+            if crate::nat::acquire_recorded_persistent_inbound_hold(
+                rules,
+                selected,
+                expected_translated,
+                now_ns,
+            ) {
+                return Some(selected);
+            }
+            for (_, candidate) in candidates {
+                if crate::nat::acquire_recorded_persistent_inbound_hold(
+                    rules,
+                    candidate,
+                    expected_translated,
+                    now_ns,
+                ) {
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+        (None, None) => None,
+    }
 }
 
 /// #6211 F2: reserve a synced translation and record `worker_id` as a HOLDER.
@@ -300,6 +383,37 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker(
     }
     reserved
 }
+/// Reserve one worker's ordinary source-NAT holder without acquiring or
+/// reconciling a persistent inbound hold.
+///
+/// Strict-mirror rollback uses this to restore incumbent worker holders while
+/// preserving the exact recorded inbound reference separately.
+pub(crate) fn reserve_synced_source_nat_allocation_for_worker_preserving_persistent_hold(
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    synced_zones: SyncedNatZones<'_>,
+    now_ns: u64,
+    worker_id: u32,
+    domains: SyncedSourceNatDomains<'_>,
+) -> bool {
+    let mut previous_holders = None;
+    reserve_synced_source_nat_allocation_with_holder(
+        iface_allocs,
+        rules,
+        key,
+        nat,
+        is_reverse,
+        synced_zones,
+        now_ns,
+        NatHolder::Worker(worker_id),
+        false,
+        &mut previous_holders,
+        domains,
+    )
+}
 
 /// #6600: the COORDINATOR-side reservation, taken BEFORE the shared session
 /// entry is published.
@@ -339,6 +453,37 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
         let _ = acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
     }
     reserved
+}
+/// Reserve a coordinator's ordinary untracked source-NAT allocation without
+/// acquiring or reconciling a persistent inbound hold.
+///
+/// Strict-mirror rollback uses this to restore the incumbent allocator tuple;
+/// its recorded persistent hold is restored separately and must not be
+/// incremented by the ordinary reservation repair.
+pub(crate) fn reserve_synced_source_nat_allocation_untracked_preserving_persistent_hold(
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    synced_zones: SyncedNatZones<'_>,
+    now_ns: u64,
+    domains: SyncedSourceNatDomains<'_>,
+) -> bool {
+    let mut previous_holders = None;
+    reserve_synced_source_nat_allocation_with_holder(
+        iface_allocs,
+        rules,
+        key,
+        nat,
+        is_reverse,
+        synced_zones,
+        now_ns,
+        NatHolder::Untracked,
+        false,
+        &mut previous_holders,
+        domains,
+    )
 }
 /// Coordinator twin that also captures the incumbent reservation state before
 /// a same-flow translated-tuple replacement can retire it.
@@ -1381,44 +1526,6 @@ fn reserve_synced_on_first_pool_owner<'a>(
     }
 }
 
-/// #16615: worker reserve that returns the recorded persistent hold so the
-/// caller can stamp it on the installed session.
-/// #17683: an unchanged HA refresh may pass the hold already anchored by the
-/// existing local entry. Preserve it rather than incrementing the allocator's
-/// inbound reference count for a session we already own.
-pub(crate) fn reserve_synced_source_nat_allocation_for_worker_with_hold(
-    iface_allocs: &InterfaceNatAllocators,
-    rules: &[SourceNatRule],
-    key: &crate::session::SessionKey,
-    nat: NatDecision,
-    is_reverse: bool,
-    synced_zones: SyncedNatZones<'_>,
-    now_ns: u64,
-    worker_id: u32,
-    domains: SyncedSourceNatDomains<'_>,
-    existing_hold: Option<(crate::nat::PersistentSourceKey, usize)>,
-) -> (bool, Option<(crate::nat::PersistentSourceKey, usize)>) {
-    let mut previous_holders = None;
-    let reserved = reserve_synced_source_nat_allocation_with_holder(
-        iface_allocs,
-        rules,
-        key,
-        nat,
-        is_reverse,
-        synced_zones,
-        now_ns,
-        NatHolder::Worker(worker_id),
-        false,
-        &mut previous_holders,
-        domains,
-    );
-    let hold = existing_hold.or_else(|| {
-        reserved
-            .then(|| acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns))
-            .flatten()
-    });
-    (reserved, hold)
-}
 
 pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_hold(
     iface_allocs: &InterfaceNatAllocators,
@@ -1429,7 +1536,8 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_hold(
     synced_zones: SyncedNatZones<'_>,
     now_ns: u64,
     domains: SyncedSourceNatDomains<'_>,
-) -> (bool, Option<(crate::nat::PersistentSourceKey, usize)>) {
+    existing_hold: Option<crate::nat::PersistentLeaseHold>,
+) -> (bool, Option<crate::nat::PersistentLeaseHold>) {
     let mut previous_holders = None;
     let reserved = reserve_synced_source_nat_allocation_with_holder(
         iface_allocs,
@@ -1445,9 +1553,17 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_hold(
         domains,
     );
     let hold = if reserved {
-        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns)
+        reserve_persistent_inbound_for_synced_with_existing_hold(
+            rules,
+            key,
+            nat,
+            is_reverse,
+            now_ns,
+            existing_hold,
+            false,
+        )
     } else {
-        None
+        existing_hold
     };
     (reserved, hold)
 }
@@ -1461,7 +1577,12 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
     synced_zones: SyncedNatZones<'_>,
     now_ns: u64,
     domains: SyncedSourceNatDomains<'_>,
-) -> (bool, Option<SourceNatReservationSnapshot>, Option<(crate::nat::PersistentSourceKey, usize)>) {
+    existing_hold: Option<crate::nat::PersistentLeaseHold>,
+) -> (
+    bool,
+    Option<SourceNatReservationSnapshot>,
+    Option<crate::nat::PersistentLeaseHold>,
+) {
     let mut previous_holders = None;
     let reserved = reserve_synced_source_nat_allocation_with_holder(
         iface_allocs,
@@ -1477,9 +1598,214 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
         domains,
     );
     let hold = if reserved {
-        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns)
+        reserve_persistent_inbound_for_synced_with_existing_hold(
+            rules,
+            key,
+            nat,
+            is_reverse,
+            now_ns,
+            existing_hold,
+            false,
+        )
     } else {
-        None
+        existing_hold
     };
     (reserved, previous_holders, hold)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn persistent_rules(name: &str, timeout_secs: i64) -> Vec<SourceNatRule> {
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+            name: name.to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: name.to_string(),
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 40_000,
+            port_high: 40_000,
+            persistent_nat: true,
+            persistent_nat_permit_any_remote_host: true,
+            persistent_nat_inactivity_timeout: timeout_secs,
+            ..crate::SourceNATRuleSnapshot::default()
+        }])
+    }
+
+    fn mint_persistent_nat(
+        rules: &[SourceNatRule],
+        private_ip: IpAddr,
+        remote_ip: IpAddr,
+        private_port: u16,
+        now_ns: u64,
+    ) -> (crate::session::SessionKey, NatDecision) {
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: private_ip,
+            dst_ip: remote_ip,
+            src_port: private_port,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let mut counter = None;
+        let nat = match crate::nat::match_source_nat_result_for_tuple(
+            &crate::nat::InterfaceNatAllocators::default(),
+            rules,
+            &crate::nat::NatScopeCtx::default(),
+            "lan",
+            "wan",
+            private_ip,
+            remote_ip,
+            Some(crate::ip_proto::PROTO_TCP),
+            private_port,
+            443,
+            None,
+            None,
+            now_ns,
+            false,
+            false,
+            crate::nat::NatHolder::Untracked,
+            &mut counter,
+        ) {
+            crate::nat::SourceNatLookup::Matched(nat) => nat,
+            other => panic!("persistent pool must mint the fixture tuple: {other:?}"),
+        };
+        (key, nat)
+    }
+
+    #[test]
+    fn failed_owner_transfer_keeps_incumbent_hold_17683() {
+        let private_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let remote_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let public_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+        let private_port = 12_345;
+        let public_port = 40_000;
+        let rules_a = persistent_rules("persistent-a", 300);
+        let (outbound_key_a, nat_a) =
+            mint_persistent_nat(&rules_a, private_ip, remote_ip, private_port, 1_000_000_000);
+        assert_eq!(nat_a.rewrite_src, Some(public_ip));
+        assert_eq!(nat_a.rewrite_src_port, Some(public_port));
+        crate::nat::release_source_nat_allocation(
+            &crate::nat::InterfaceNatAllocators::default(),
+            &rules_a,
+            &outbound_key_a,
+            nat_a,
+            false,
+            1_000_000_001,
+        );
+
+        let inbound_key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: remote_ip,
+            dst_ip: public_ip,
+            src_port: 443,
+            dst_port: public_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let inbound_nat = NatDecision {
+            rewrite_dst: Some(private_ip),
+            rewrite_dst_port: Some(private_port),
+            ..NatDecision::default()
+        };
+        let incumbent = crate::nat::acquire_persistent_inbound_for_synced(
+            &rules_a,
+            &inbound_key,
+            inbound_nat,
+            false,
+            2_000_000_000,
+        )
+        .expect("allocator A grants the incumbent inbound hold");
+
+        let rules_b = persistent_rules("persistent-b", 1);
+        let (outbound_key_b, nat_b) =
+            mint_persistent_nat(&rules_b, private_ip, remote_ip, private_port, 2_000_000_000);
+        assert_eq!(nat_b.rewrite_src, Some(public_ip));
+        assert_eq!(nat_b.rewrite_src_port, Some(public_port));
+        crate::nat::release_source_nat_allocation(
+            &crate::nat::InterfaceNatAllocators::default(),
+            &rules_b,
+            &outbound_key_b,
+            nat_b,
+            false,
+            2_000_000_001,
+        );
+
+        let now_ns = 4_000_000_000;
+        let stale_candidate = persistent_inbound_hold_owner_for_synced(
+            &rules_b,
+            &inbound_key,
+            inbound_nat,
+            false,
+            now_ns,
+        )
+        .expect("translated-tuple fallback finds the expired lease record");
+        assert!(
+            !rules_b[0]
+                .pool_allocator
+                .acquire_persistent_inbound_for_hold(
+                    stale_candidate,
+                    crate::nat::TranslatedTuple {
+                        ip: public_ip,
+                        port: public_port,
+                    },
+                    now_ns,
+                ),
+            "expired candidate cannot accept a new inbound reference"
+        );
+
+        let migrated = reserve_persistent_inbound_for_synced_with_existing_hold(
+            &rules_b,
+            &inbound_key,
+            inbound_nat,
+            false,
+            now_ns,
+            Some(incumbent),
+            false,
+        );
+        assert_eq!(
+            migrated,
+            Some(incumbent),
+            "a rejected replacement candidate must not discard the incumbent hold"
+        );
+        assert_eq!(
+            rules_a[0]
+                .pool_allocator
+                .debug_persistent_lease_for_flow(
+                    &crate::nat::SourceNatFlowKey {
+                        protocol: crate::ip_proto::PROTO_TCP,
+                        src_ip: private_ip,
+                        dst_ip: remote_ip,
+                        src_port: private_port,
+                        dst_port: 443,
+                        routing_scope: 0,
+                    },
+                    crate::nat::PersistentNatPermit::AnyRemoteHost,
+                )
+                .map(|lease| lease.inbound_flows),
+            Some(1)
+        );
+        assert_eq!(
+            rules_b[0]
+                .pool_allocator
+                .debug_persistent_lease_for_flow(
+                    &crate::nat::SourceNatFlowKey {
+                        protocol: crate::ip_proto::PROTO_TCP,
+                        src_ip: private_ip,
+                        dst_ip: remote_ip,
+                        src_port: private_port,
+                        dst_port: 443,
+                        routing_scope: 0,
+                    },
+                    crate::nat::PersistentNatPermit::AnyRemoteHost,
+                )
+                .map(|lease| lease.inbound_flows),
+            Some(0)
+        );
+    }
 }

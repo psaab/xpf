@@ -120,6 +120,9 @@ mod steering_row_owners_9560_tests;
 #[cfg(test)]
 #[path = "upsert_synced_14669_tests.rs"]
 mod upsert_synced_14669_tests;
+#[cfg(test)]
+#[path = "shared_replica_hold_17683_tests.rs"]
+mod shared_replica_hold_17683_tests;
 
 // #6600: the coordinator's pre-publish NAT reservation resolves the synced zone
 // pair through the SAME helper the worker-side upsert uses, so the two cannot

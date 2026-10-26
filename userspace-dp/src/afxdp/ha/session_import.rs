@@ -391,6 +391,7 @@ impl crate::afxdp::ha::SessionDomain {
         &self,
         entry: &mut SyncedSessionEntry,
         capture_holder_snapshot: bool,
+        existing_hold: Option<crate::nat::PersistentLeaseHold>,
     ) -> Result<AllocatorHolderSnapshot, ()> {
         let now_ns = monotonic_nanos();
         // #7209: ONE load of the published view, bound for the whole call. Two
@@ -442,6 +443,7 @@ impl crate::afxdp::ha::SessionDomain {
                 zones,
                 now_ns,
                 domains,
+                existing_hold,
             )
         } else {
             let (reserved, hold) = crate::nat::reserve_synced_source_nat_allocation_untracked_with_hold(
@@ -453,12 +455,11 @@ impl crate::afxdp::ha::SessionDomain {
                 zones,
                 now_ns,
                 domains,
+                existing_hold,
             );
             (reserved, None, hold)
         };
-        if persistent_hold_16615.is_some() {
-            entry.persistent_lease_hold = persistent_hold_16615;
-        }
+        entry.persistent_lease_hold = persistent_hold_16615;
         if !source_nat_reserved {
             return Err(());
         }
@@ -483,15 +484,35 @@ impl crate::afxdp::ha::SessionDomain {
             )
         };
         if !nat64_reserved {
-            crate::nat::release_synced_source_nat_allocation_untracked_with_hold(
+            let hold_changed = persistent_hold_16615 != existing_hold;
+            crate::nat::release_synced_source_nat_allocation_untracked_preserving_persistent_hold(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
                 &entry.key,
                 entry.decision.nat,
                 entry.metadata.is_reverse,
                 now_ns,
-                persistent_hold_16615,
             );
+            if hold_changed {
+                if let Some(candidate_hold) = persistent_hold_16615 {
+                    crate::nat::release_recorded_persistent_inbound_hold(
+                        &forwarding.source_nat_rules,
+                        candidate_hold,
+                        now_ns,
+                    );
+                }
+                if let Some(incumbent_hold) = existing_hold {
+                    crate::nat::acquire_recorded_persistent_inbound_hold(
+                        &forwarding.source_nat_rules,
+                        incumbent_hold,
+                        crate::nat::TranslatedTuple {
+                            ip: entry.key.dst_ip,
+                            port: entry.key.dst_port,
+                        },
+                        now_ns,
+                    );
+                }
+            }
             return Err(());
         }
         Ok(AllocatorHolderSnapshot {
@@ -530,15 +551,38 @@ impl crate::afxdp::ha::SessionDomain {
             entry.metadata.is_reverse,
             now_ns,
         );
-        let current_snat_released = crate::nat::release_synced_source_nat_allocation_untracked_with_hold(
-            &forwarding.iface_nat_allocators,
-            &forwarding.source_nat_rules,
-            &entry.key,
-            entry.decision.nat,
-            entry.metadata.is_reverse,
-            now_ns,
-            entry.persistent_lease_hold,
-        );
+        let incumbent_hold = previous_entry.and_then(|previous| previous.persistent_lease_hold);
+        let candidate_hold = entry.persistent_lease_hold;
+        let hold_changed = incumbent_hold != candidate_hold;
+        let current_snat_released =
+            crate::nat::release_synced_source_nat_allocation_untracked_preserving_persistent_hold(
+                &forwarding.iface_nat_allocators,
+                &forwarding.source_nat_rules,
+                &entry.key,
+                entry.decision.nat,
+                entry.metadata.is_reverse,
+                now_ns,
+            );
+        if hold_changed {
+            if let Some(candidate_hold) = candidate_hold {
+                crate::nat::release_recorded_persistent_inbound_hold(
+                    &forwarding.source_nat_rules,
+                    candidate_hold,
+                    now_ns,
+                );
+            }
+            if let (Some(previous), Some(incumbent_hold)) = (previous_entry, incumbent_hold) {
+                crate::nat::acquire_recorded_persistent_inbound_hold(
+                    &forwarding.source_nat_rules,
+                    incumbent_hold,
+                    crate::nat::TranslatedTuple {
+                        ip: previous.key.dst_ip,
+                        port: previous.key.dst_port,
+                    },
+                    now_ns,
+                );
+            }
+        }
         // A same-key replacement can have retired its previous allocator
         // tuple while reserving the import. Restore that reservation when the
         // mirror refuses, so the unaccepted replacement does not displace the
@@ -561,22 +605,23 @@ impl crate::afxdp::ha::SessionDomain {
                 static_externals: Some(&prev_static_externals),
                 nptv6_external_prefixes: &prev_nptv6_prefixes,
             };
-            let mut snat_restored = crate::nat::reserve_synced_source_nat_allocation_untracked(
-                &forwarding.iface_nat_allocators,
-                &forwarding.source_nat_rules,
-                &previous.key,
-                previous.decision.nat,
-                false,
-                zones,
-                now_ns,
-                prev_domains,
-            );
+            let mut snat_restored =
+                crate::nat::reserve_synced_source_nat_allocation_untracked_preserving_persistent_hold(
+                    &forwarding.iface_nat_allocators,
+                    &forwarding.source_nat_rules,
+                    &previous.key,
+                    previous.decision.nat,
+                    false,
+                    zones,
+                    now_ns,
+                    prev_domains,
+                );
             if snat_restored {
                 if let Some(snapshot) = holder_snapshot.source_nat.as_ref() {
                     let mask = snapshot.holder_mask();
                     for worker_id in 0u32..128 {
                         if mask & (1u128 << worker_id) != 0
-                            && !crate::nat::reserve_synced_source_nat_allocation_for_worker(
+                            && !crate::nat::reserve_synced_source_nat_allocation_for_worker_preserving_persistent_hold(
                                 &forwarding.iface_nat_allocators,
                                 &forwarding.source_nat_rules,
                                 &previous.key,
@@ -1275,7 +1320,13 @@ impl crate::afxdp::ha::SessionDomain {
             && !entry.metadata.is_reverse
             && !worker_records.is_empty();
         let holder_snapshot = if translation_reserved {
-            match self.reserve_synced_translation(&mut entry, strict_mirror) {
+            match self.reserve_synced_translation(
+                &mut entry,
+                strict_mirror,
+                previous_entry
+                    .as_ref()
+                    .and_then(|previous| previous.persistent_lease_hold),
+            ) {
                 Ok(snapshot) => snapshot,
                 Err(()) => {
                     self.sessions
@@ -3286,6 +3337,295 @@ mod rejected_mirror_reservation_10790_tests {
             dst_port: nat.rewrite_dst_port.unwrap_or(key.dst_port),
             routing_scope: key.routing_domain,
         }
+    }
+
+    #[test]
+    fn coordinator_refresh_reuses_and_migrates_recorded_inbound_hold_17683() {
+        use crate::afxdp::bpf_map::{
+            ConntrackPublishResult, override_conntrack_publish_results_for_test,
+            take_conntrack_publish_guard,
+        };
+
+        let (mut coordinator, _commands) =
+            worker_registered_coordinator(persistent_snat_forwarding(false));
+        coordinator
+            .forwarding
+            .source_nat_rules
+            .extend(crate::nat::parse_source_nat_rules(&[
+                crate::SourceNATRuleSnapshot {
+                    name: "remote-snat".to_string(),
+                    from_zone: "lan".to_string(),
+                    to_zone: "wan".to_string(),
+                    source_addresses: vec!["0.0.0.0/0".to_string()],
+                    pool_name: "remote-snat".to_string(),
+                    pool_addresses: vec!["198.51.100.1/32".to_string()],
+                    port_low: 50_000,
+                    port_high: 50_000,
+                    ..crate::SourceNATRuleSnapshot::default()
+                },
+            ]));
+
+        let now_ns = monotonic_nanos();
+        let private_key = v4_key();
+        let local_nat = reserve_local_with_holder(
+            &coordinator,
+            &private_key,
+            crate::nat::NatHolder::Untracked,
+            now_ns,
+        );
+        let public_ip = local_nat
+            .rewrite_src
+            .expect("fixture allocates a public address");
+        let public_port = local_nat
+            .rewrite_src_port
+            .expect("fixture allocates a public port");
+        crate::nat::release_source_nat_allocation(
+            &coordinator.forwarding.iface_nat_allocators,
+            &coordinator.forwarding.source_nat_rules,
+            &private_key,
+            local_nat,
+            false,
+            now_ns + 1,
+        );
+        let lease_flow = crate::nat::SourceNatFlowKey {
+            protocol: private_key.protocol,
+            src_ip: private_key.src_ip,
+            dst_ip: private_key.dst_ip,
+            src_port: private_key.src_port,
+            dst_port: private_key.dst_port,
+            routing_scope: private_key.routing_domain,
+        };
+        let allocator_a = coordinator.forwarding.source_nat_rules[0]
+            .pool_allocator
+            .clone();
+        let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
+        assert_eq!(
+            allocator_a
+                .debug_persistent_lease_for_flow(&lease_flow, permit)
+                .map(|lease| lease.inbound_flows),
+            Some(0),
+            "fixture starts with an idle internal-host lease"
+        );
+
+        let secondary_rules =
+            crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+                name: "persistent-snat-b".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_name: "persistent-snat-b".to_string(),
+                pool_addresses: vec![format!("{public_ip}/32")],
+                port_low: public_port,
+                port_high: public_port,
+                persistent_nat: true,
+                persistent_nat_permit_any_remote_host: true,
+                persistent_nat_inactivity_timeout: 300,
+                ..crate::SourceNATRuleSnapshot::default()
+            }]);
+        let mut secondary_counter = None;
+        let secondary_nat = match crate::nat::match_source_nat_result_for_tuple(
+            &coordinator.forwarding.iface_nat_allocators,
+            &secondary_rules,
+            &crate::nat::NatScopeCtx::default(),
+            "lan",
+            "wan",
+            private_key.src_ip,
+            private_key.dst_ip,
+            Some(private_key.protocol),
+            private_key.src_port,
+            private_key.dst_port,
+            None,
+            None,
+            now_ns + 2,
+            false,
+            false,
+            crate::nat::NatHolder::Untracked,
+            &mut secondary_counter,
+        ) {
+            crate::nat::SourceNatLookup::Matched(nat) => nat,
+            other => panic!("second allocator must mint the same lease: {other:?}"),
+        };
+        assert_eq!(secondary_nat.rewrite_src, Some(public_ip));
+        assert_eq!(secondary_nat.rewrite_src_port, Some(public_port));
+        crate::nat::release_source_nat_allocation(
+            &coordinator.forwarding.iface_nat_allocators,
+            &secondary_rules,
+            &private_key,
+            secondary_nat,
+            false,
+            now_ns + 3,
+        );
+        let allocator_b = secondary_rules[0].pool_allocator.clone();
+        assert_ne!(
+            allocator_a.debug_shared_identity(),
+            allocator_b.debug_shared_identity()
+        );
+        coordinator
+            .forwarding
+            .source_nat_rules
+            .push(secondary_rules[0].clone());
+        coordinator.forwarding.source_nat_rules.extend(crate::nat::parse_source_nat_rules(&[
+            crate::SourceNATRuleSnapshot {
+                name: "remote-snat-reply".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_name: "remote-snat-reply".to_string(),
+                pool_addresses: vec!["198.51.100.2/32".to_string()],
+                port_low: 50_001,
+                port_high: 50_257,
+                ..crate::SourceNATRuleSnapshot::default()
+            },
+        ]));
+        coordinator.publish_runtime_view();
+
+        let inbound_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            dst_ip: public_ip,
+            src_port: 443,
+            dst_port: public_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let inbound_nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2))),
+            rewrite_src_port: Some(50_001),
+            rewrite_dst: Some(private_key.src_ip),
+            rewrite_dst_port: Some(private_key.src_port),
+            ..NatDecision::default()
+        };
+        let mut entry = synced_entry(inbound_key.clone(), inbound_nat, 1, 701);
+        entry.metadata.ingress_zone = 1;
+        entry.metadata.egress_zone = 2;
+        install_test_conntrack_map(&coordinator);
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(entry.clone()),
+            SyncedImportOutcome::Applied
+        );
+        let stored_hold = |coordinator: &Coordinator| {
+            lock_shared_recover(&coordinator.session_domain.sessions.synced)
+                .get(&inbound_key)
+                .and_then(|stored| stored.persistent_lease_hold)
+        };
+        let hold_a = stored_hold(&coordinator)
+            .expect("first coordinator import records allocator A's hold");
+        let inbound_flows = |allocator: &crate::nat::PortAllocator| {
+            allocator
+                .debug_persistent_lease_for_flow(&lease_flow, permit)
+                .map(|lease| lease.inbound_flows)
+        };
+        assert_eq!(inbound_flows(&allocator_a), Some(1));
+        assert_eq!(inbound_flows(&allocator_b), Some(0));
+
+        entry.generation = 2;
+        entry.session_id = 702;
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(entry.clone()),
+            SyncedImportOutcome::Applied
+        );
+        assert_eq!(stored_hold(&coordinator), Some(hold_a));
+        assert_eq!(
+            inbound_flows(&allocator_a),
+            Some(1),
+            "same-owner coordinator refresh keeps one inbound reference"
+        );
+
+        {
+            let _record_guard = take_conntrack_publish_guard();
+            let _override_guard = override_conntrack_publish_results_for_test(&[
+                ConntrackPublishResult::Written,
+                ConntrackPublishResult::KernelError,
+            ]);
+            entry.generation = 3;
+            entry.session_id = 703;
+            assert_eq!(
+                coordinator
+                    .session_domain
+                    .upsert_synced_session_mirror(entry.clone()),
+                SyncedImportOutcome::RejectedMirrorPublish
+            );
+        }
+        assert_eq!(stored_hold(&coordinator), Some(hold_a));
+        assert_eq!(
+            inbound_flows(&allocator_a),
+            Some(1),
+            "strict-mirror rollback must preserve the incumbent hold"
+        );
+        let secondary_rule_index = coordinator
+            .forwarding
+            .source_nat_rules
+            .iter()
+            .position(|rule| {
+                rule.pool_allocator.debug_shared_identity() == allocator_b.debug_shared_identity()
+            })
+            .expect("secondary pool rule remains present");
+        coordinator
+            .forwarding
+            .source_nat_rules
+            .swap(0, secondary_rule_index);
+        coordinator.publish_runtime_view();
+        {
+            let _record_guard = take_conntrack_publish_guard();
+            let _override_guard = override_conntrack_publish_results_for_test(&[
+                ConntrackPublishResult::Written,
+                ConntrackPublishResult::KernelError,
+            ]);
+            assert_eq!(
+                coordinator
+                    .session_domain
+                    .upsert_synced_session_mirror(entry.clone()),
+                SyncedImportOutcome::RejectedMirrorPublish
+            );
+        }
+        assert_eq!(
+            stored_hold(&coordinator),
+            Some(hold_a),
+            "failed owner migration keeps the incumbent owner"
+        );
+        assert_eq!(inbound_flows(&allocator_a), Some(1));
+        assert_eq!(inbound_flows(&allocator_b), Some(0));
+
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(entry.clone()),
+            SyncedImportOutcome::Applied
+        );
+        let hold_b = stored_hold(&coordinator)
+            .expect("successful owner migration records allocator B's hold");
+        assert_ne!(hold_a, hold_b);
+        assert_eq!(inbound_flows(&allocator_a), Some(0));
+        assert_eq!(inbound_flows(&allocator_b), Some(1));
+
+        entry.generation = 4;
+        entry.session_id = 704;
+        assert_eq!(
+            coordinator
+                .session_domain
+                .upsert_synced_session_mirror(entry),
+            SyncedImportOutcome::Applied
+        );
+        assert_eq!(stored_hold(&coordinator), Some(hold_b));
+        assert_eq!(
+            inbound_flows(&allocator_b),
+            Some(1),
+            "same-owner refresh after migration stays balanced"
+        );
+
+        coordinator
+            .session_domain
+            .delete_synced_session(inbound_key, false);
+        assert_eq!(
+            inbound_flows(&allocator_b),
+            Some(0),
+            "final coordinator delete releases the migrated hold once"
+        );
     }
 
     fn assert_strict_mirror_replay_restores_imported_lease(address_only: bool) {

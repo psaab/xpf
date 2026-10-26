@@ -1028,18 +1028,33 @@ mod persistent_pressure_shed_17683_tests {
     fn queue_full_delete_leaves_peer_inbound_hold_for_drop_sweep_17683() {
         let (forwarding, tenant_a_nat) = forwarding_with_idle_persistent_leases();
         let allocator = &forwarding.source_nat_rules[0].pool_allocator;
-        let hold = (
-            crate::nat::PersistentSourceKey {
-                protocol: crate::ip_proto::PROTO_TCP,
-                src_ip: "10.0.1.100".parse().unwrap(),
-                src_port: 12345,
-                routing_scope: 7,
-                remote: None,
-            },
-            allocator.debug_shared_identity(),
-        );
-        assert!(allocator.acquire_persistent_inbound(hold.0, 1_500_000_000));
-        assert!(allocator.acquire_persistent_inbound(hold.0, 1_500_000_000));
+        let lease_key_a = crate::nat::PersistentSourceKey {
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: "10.0.1.100".parse().unwrap(),
+            src_port: 12345,
+            routing_scope: 7,
+            remote: None,
+        };
+        let hold_a = allocator
+            .acquire_persistent_inbound_with_hold(lease_key_a, 1_500_000_000)
+            .expect("fixture must acquire its exact scope-7 lease hold");
+        let hold_b = crate::nat::PersistentSourceKey {
+            routing_scope: 0,
+            ..hold_a.key
+        };
+        assert!(allocator.acquire_persistent_inbound(hold_a.key, 1_500_000_000));
+        assert!(allocator.acquire_persistent_inbound(hold_b, 1_500_000_000));
+
+        // This is an inbound DNAT+SNAT session: the packet arrived for the
+        // scope-7 public lease in arrival domain 0, and rewrite_dst identifies
+        // the private host that owns that lease.
+        let inbound_nat = crate::nat::NatDecision {
+            rewrite_src: Some("198.51.100.1".parse().unwrap()),
+            rewrite_src_port: Some(50_000),
+            rewrite_dst: Some("10.0.1.100".parse().unwrap()),
+            rewrite_dst_port: Some(12_345),
+            ..crate::nat::NatDecision::default()
+        };
         let key = SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol: crate::ip_proto::PROTO_TCP,
@@ -1052,6 +1067,46 @@ mod persistent_pressure_shed_17683_tests {
             discriminator: Default::default(),
             routing_domain: 0,
         };
+        let decision = SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: None,
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: inbound_nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let mut worker_sessions = SessionTable::new();
+        assert!(worker_sessions.upsert_synced_with_origin(
+            crate::session::SessionInstall {
+                key: key.clone(),
+                decision,
+                metadata: session_metadata(),
+                source_nat_static: None,
+                origin: crate::session::SessionOrigin::SyncImport,
+                now_ns: 2_000_000_000,
+                protocol: crate::ip_proto::PROTO_TCP,
+                tcp_flags: crate::tcp_flags::TCP_ACK,
+                session_id: 0,
+                tcp_close_class: 0,
+                tcp_handshake_state: 0,
+                persistent_lease_hold: Some(hold_a),
+                fwd_packets: 0,
+                rev_packets: 0,
+            },
+            false,
+        ));
+
         let queue = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         {
             let mut pending = queue.lock().unwrap();
@@ -1068,7 +1123,7 @@ mod persistent_pressure_shed_17683_tests {
             &worker_commands_by_id,
             &forwarding,
             &key,
-            tenant_a_nat,
+            inbound_nat,
             false,
             2_000_000_000,
         );
@@ -1078,25 +1133,36 @@ mod persistent_pressure_shed_17683_tests {
             "the queue-full fixture must refuse the delete"
         );
         assert_eq!(
-            inbound_flows(&forwarding, 7),
-            Some(2),
-            "queue-full repair must leave both recorded inbound references for the peer sweep"
+            (inbound_flows(&forwarding, 7), inbound_flows(&forwarding, 0)),
+            (Some(2), Some(1)),
+            "queue-full repair must leave the worker's recorded scope-7 hold and the scope-0 control untouched"
         );
 
-        crate::nat::release_source_nat_allocation_for_worker_with_hold(
-            &forwarding.iface_nat_allocators,
-            &forwarding.source_nat_rules,
-            &key,
-            tenant_a_nat,
-            false,
-            2_000_000_001,
-            42,
-            Some(hold),
-        );
+        // The epoch-driven production sweep removes the actual peer-synced
+        // worker-table entry and releases that entry's recorded hold once.
+        let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let mut sweep = crate::afxdp::session_glue::DeleteDropSweep::default();
+        sweep.arm();
+        let mut evicted = Vec::new();
         assert_eq!(
-            inbound_flows(&forwarding, 7),
-            Some(1),
-            "the peer's delete-drop sweep releases only its recorded reference"
+            sweep.step_with_nat(
+                &mut worker_sessions,
+                &shared_sessions,
+                SteeringMap::unshared_for_test(-1),
+                &forwarding,
+                2_000_000_001,
+                42,
+                &mut evicted,
+            ),
+            1,
+            "delete-drop sweep must remove the stale peer entry"
+        );
+        assert_eq!(evicted, vec![key.clone()]);
+        assert!(worker_sessions.probe_with_origin(&key).is_none());
+        assert_eq!(
+            (inbound_flows(&forwarding, 7), inbound_flows(&forwarding, 0)),
+            (Some(1), Some(1)),
+            "the actual worker sweep releases one scope-7 reference and leaves both other controls"
         );
     }
 
@@ -1104,27 +1170,25 @@ mod persistent_pressure_shed_17683_tests {
     fn pressure_shed_releases_recorded_cross_domain_hold_once_17683() {
         let (forwarding, tenant_a_nat) = forwarding_with_idle_persistent_leases();
         let allocator = &forwarding.source_nat_rules[0].pool_allocator;
-        let allocator_id = allocator.debug_shared_identity();
-        let hold_a = (
-            crate::nat::PersistentSourceKey {
-                protocol: crate::ip_proto::PROTO_TCP,
-                src_ip: "10.0.1.100".parse().unwrap(),
-                src_port: 12345,
-                routing_scope: 7,
-                remote: None,
-            },
-            allocator_id,
-        );
+        let lease_key_a = crate::nat::PersistentSourceKey {
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: "10.0.1.100".parse().unwrap(),
+            src_port: 12345,
+            routing_scope: 7,
+            remote: None,
+        };
+        let hold_a = allocator
+            .acquire_persistent_inbound_with_hold(lease_key_a, 1_500_000_000)
+            .expect("fixture must acquire its exact scope-7 lease hold");
         let hold_b = crate::nat::PersistentSourceKey {
             routing_scope: 0,
-            ..hold_a.0
+            ..hold_a.key
         };
 
         // Two sessions share A's lease, while an overlapping tenant owns B's
         // same internal tuple in the arrival domain. Shedding one A session
         // must release exactly its recorded hold and leave both controls.
-        assert!(allocator.acquire_persistent_inbound(hold_a.0, 1_500_000_000));
-        assert!(allocator.acquire_persistent_inbound(hold_a.0, 1_500_000_000));
+        assert!(allocator.acquire_persistent_inbound(hold_a.key, 1_500_000_000));
         assert!(allocator.acquire_persistent_inbound(hold_b, 1_500_000_000));
         assert_eq!(inbound_flows(&forwarding, 7), Some(2));
         assert_eq!(inbound_flows(&forwarding, 0), Some(1));

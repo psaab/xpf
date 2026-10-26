@@ -1551,11 +1551,9 @@ struct SessionEntry {
     /// row's stored decision) — once the egress RG departs again the claim
     /// lapses and the flow converts toward the fabric again (failback).
     fabric_established: bool,
-    /// #16615: exact persistent-NAT lease key this session acquired an inbound
-    /// hold on, with granting allocator shared identity. None = no hold.
-    /// Release consumes exactly this pair exactly once, never re-derives from
-    /// arrival routing_domain (ingress property, not lease routing_scope).
-    persistent_lease_hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    /// #16615/#17683: exact persistent lease incarnation held by this session.
+    /// Release validates both allocator and incarnation before decrementing.
+    persistent_lease_hold: Option<crate::nat::PersistentLeaseHold>,
 }
 
 /// Snapshot of one live half after a policy rebind. The worker uses this
@@ -1817,7 +1815,7 @@ pub(crate) struct PressureShedSession {
     pub(crate) owner_rg_id: i32,
 
     /// #17683: pressure teardown must retain the exact granted lease hold.
-    pub(crate) persistent_lease_hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+    pub(crate) persistent_lease_hold: Option<crate::nat::PersistentLeaseHold>,
     pub(crate) policy_id: u32,
 }
 
@@ -2978,7 +2976,7 @@ impl SessionTable {
     pub(crate) fn set_persistent_lease_hold(
         &mut self,
         key: &SessionKey,
-        hold: Option<(crate::nat::PersistentSourceKey, usize)>,
+        hold: Option<crate::nat::PersistentLeaseHold>,
     ) {
         if let Some(entry) = self.entry_by_key_mut(key) {
             entry.persistent_lease_hold = hold;
@@ -2989,7 +2987,7 @@ impl SessionTable {
     pub(crate) fn persistent_lease_hold_for(
         &self,
         key: &SessionKey,
-    ) -> Option<(crate::nat::PersistentSourceKey, usize)> {
+    ) -> Option<crate::nat::PersistentLeaseHold> {
         self.entry_by_key(key)
             .and_then(|entry| entry.persistent_lease_hold)
     }
@@ -2998,7 +2996,7 @@ impl SessionTable {
     pub(crate) fn take_persistent_lease_hold(
         &mut self,
         key: &SessionKey,
-    ) -> Option<(crate::nat::PersistentSourceKey, usize)> {
+    ) -> Option<crate::nat::PersistentLeaseHold> {
         self.entry_by_key_mut(key)
             .and_then(|entry| entry.persistent_lease_hold.take())
     }

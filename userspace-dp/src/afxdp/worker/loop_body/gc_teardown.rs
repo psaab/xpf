@@ -115,10 +115,11 @@ pub(super) fn reap_expired_sessions(
         // and the unconditional flow-cache invalidation would evict
         // the serving descriptor. When the shared synced map still
         // holds a promoted (Established) serving entry for this tuple
-        // under the same session_id, skip ALL map/cache/NAT teardown
-        // for the replica — only its per-table row (already removed
-        // by the expire pass) goes away. A replica with no promoted
-        // serving entry keeps the full teardown.
+        // under the same session_id, skip all serving map/cache/ordinary-NAT
+        // teardown for the replica. It still owns one independent persistent
+        // lease reference (#17683), which must be released by its exact handle;
+        // the serving entry's reference remains held.
+        // A replica with no promoted serving entry keeps the full teardown.
         let replica_fenced = expired_entry.origin == SessionOrigin::WorkerLocalImport
             && shared_sessions
                 .lock()
@@ -139,6 +140,13 @@ pub(super) fn reap_expired_sessions(
                 })
                 .unwrap_or(false);
         if replica_fenced {
+            if let Some(hold) = expired_entry.persistent_lease_hold {
+                crate::nat::release_recorded_persistent_inbound_hold(
+                    &forwarding.source_nat_rules,
+                    hold,
+                    now_ns,
+                );
+            }
             continue;
         }
         crate::nat::release_source_nat_allocation_for_worker_with_hold(

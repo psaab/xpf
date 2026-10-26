@@ -237,16 +237,119 @@ mod flow_cache_invalidation_tests {
         tcp_close_class: 0, tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(), rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, }
     }
 
-    // #16223 B4: a WorkerLocalImport replica's expiry must NOT evict
-    // the serving pair's flow-cache descriptor (nor run its map/NAT
-    // teardown) while the shared map still holds the promoted serving
-    // entry under the same session_id. Control: with no serving entry,
-    // the same replica expiry DOES evict (full teardown preserved).
+    // #16223/#17683: a WorkerLocalImport replica's expiry must NOT evict
+    // the serving pair's cache or release its NAT state. Its own exact
+    // persistent lease reference is still released while the serving entry's
+    // reference remains counted. Control: with no serving entry, full teardown
+    // is preserved.
     #[test]
     fn replica_expiry_does_not_evict_serving_cache_16223() {
         let rg_epochs = reap_rg_epochs();
-        let forwarding = ForwardingState::default();
-        let key = reap_key(41001);
+        let mut forwarding = ForwardingState::default();
+        let nat_now_ns = 1_000_000_000;
+        let internal_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+        let remote_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        forwarding.source_nat_rules =
+            crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+                name: "reap-persistent-lease-16223".into(),
+                from_zone: "lan".into(),
+                to_zone: "wan".into(),
+                source_addresses: vec!["0.0.0.0/0".into()],
+                pool_name: "reap-persistent-lease-16223".into(),
+                pool_addresses: vec!["203.0.113.10/32".into()],
+                port_low: 40_000,
+                port_high: 40_000,
+                persistent_nat: true,
+                persistent_nat_permit_any_remote_host: true,
+                persistent_nat_inactivity_timeout: 1,
+                ..crate::SourceNATRuleSnapshot::default()
+            }]);
+        let mut counter = None;
+        let outbound_nat = match crate::nat::match_source_nat_result_for_tuple(
+            &forwarding.iface_nat_allocators,
+            &forwarding.source_nat_rules,
+            &crate::nat::NatScopeCtx::default(),
+            "lan",
+            "wan",
+            internal_ip,
+            remote_ip,
+            Some(crate::ip_proto::PROTO_TCP),
+            41_001,
+            443,
+            None,
+            None,
+            nat_now_ns,
+            false,
+            false,
+            crate::nat::NatHolder::Untracked,
+            &mut counter,
+        ) {
+            crate::nat::SourceNatLookup::Matched(nat) => nat,
+            other => panic!("persistent source NAT allocation failed: {other:?}"),
+        };
+        let translated_ip = outbound_nat.rewrite_src.expect("translated pool address");
+        let translated_port = outbound_nat.rewrite_src_port.expect("translated pool port");
+        let outbound_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: internal_ip,
+            dst_ip: remote_ip,
+            src_port: 41_001,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        crate::nat::release_source_nat_allocation(
+            &forwarding.iface_nat_allocators,
+            &forwarding.source_nat_rules,
+            &outbound_key,
+            outbound_nat,
+            false,
+            nat_now_ns + 1,
+        );
+        let source_key = crate::nat::PersistentSourceKey {
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: internal_ip,
+            src_port: 41_001,
+            routing_scope: 0,
+            remote: None,
+        };
+        let flow = crate::nat::SourceNatFlowKey {
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: internal_ip,
+            dst_ip: remote_ip,
+            src_port: 41_001,
+            dst_port: 443,
+            routing_scope: 0,
+        };
+        let allocator = &forwarding.source_nat_rules[0].pool_allocator;
+        let serving_hold = allocator
+            .acquire_persistent_inbound_with_hold(source_key, nat_now_ns + 2)
+            .expect("serving session owns one lease reference");
+        let replica_hold = allocator
+            .acquire_persistent_inbound_with_hold(source_key, nat_now_ns + 2)
+            .expect("local replica owns a separate lease reference");
+        let inbound_flows = || {
+            allocator
+                .debug_persistent_lease_for_flow(
+                    &flow,
+                    crate::nat::PersistentNatPermit::AnyRemoteHost,
+                )
+                .map(|lease| lease.inbound_flows)
+        };
+        assert_eq!(inbound_flows(), Some(2), "owner and replica holds start counted");
+
+        // This inbound tuple targets the persistent lease's translated endpoint.
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: remote_ip,
+            dst_ip: translated_ip,
+            src_port: 443,
+            dst_port: translated_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
 
         // Fenced case: serving entry present in the shared map.
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
@@ -254,23 +357,32 @@ mod flow_cache_invalidation_tests {
         assert!(cache_hits(&mut binding, &key, &rg_epochs));
         let shared = std::sync::Arc::new(std::sync::Mutex::new({
             let mut map = FastMap::default();
-            map.insert(key.clone(), serving_shared_entry(&key, 4242));
+            let mut serving = serving_shared_entry(&key, 4242);
+            serving.persistent_lease_hold = Some(serving_hold);
+            map.insert(key.clone(), serving);
             map
         }));
+        let mut expired = expired_replica(key.clone(), 4242);
+        expired.persistent_lease_hold = Some(replica_hold);
         reap_expired_sessions(
             std::slice::from_mut(&mut binding),
-            &[expired_replica(key.clone(), 4242)],
+            &[expired],
             &forwarding,
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            1_000_000_000,
+            nat_now_ns + 3,
             0,
             &shared,
         );
         assert!(
             cache_hits(&mut binding, &key, &rg_epochs),
             "#16223 B4: replica expiry must not evict the serving descriptor"
+        );
+        assert_eq!(
+            inbound_flows(),
+            Some(1),
+            "#17683: fenced expiry releases only the local replica's exact reference"
         );
 
         // Control: no serving entry -> replica expiry tears down fully.
@@ -284,7 +396,7 @@ mod flow_cache_invalidation_tests {
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            1_000_000_000,
+            nat_now_ns + 3,
             0,
             &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
         );

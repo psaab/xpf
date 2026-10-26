@@ -7135,26 +7135,28 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
     // pressure-shed must preserve the forward half's recorded allocator key
     // through the detached teardown intent (arrival-domain re-derivation is
     // not equivalent for a cross-domain persistent lease).
-    let opening_hold = (
-        crate::nat::PersistentSourceKey {
+    let opening_hold = crate::nat::PersistentLeaseHold {
+        key: crate::nat::PersistentSourceKey {
             protocol: PROTO_TCP,
             src_ip: "10.0.1.10".parse().unwrap(),
             src_port: 12345,
             routing_scope: 7,
             remote: None,
         },
-        0x17683,
-    );
-    let pending_hold = (
-        crate::nat::PersistentSourceKey {
+        allocator_id: 0x17683,
+        incarnation: 1,
+    };
+    let pending_hold = crate::nat::PersistentLeaseHold {
+        key: crate::nat::PersistentSourceKey {
             protocol: PROTO_TCP,
             src_ip: "10.0.1.20".parse().unwrap(),
             src_port: 12346,
             routing_scope: 8,
             remote: None,
         },
-        0x17684,
-    );
+        allocator_id: 0x17684,
+        incarnation: 2,
+    };
     table.set_persistent_lease_hold(&opening, Some(opening_hold));
     table.set_persistent_lease_hold(&pending, Some(pending_hold));
     assert_eq!(table.len(), 9);
