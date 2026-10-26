@@ -170,15 +170,16 @@ func buildIngressFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) fu
 //
 // The (parent, VLAN) pair is derived from the config, keyed by the
 // logical ifindex each shape carries, mirroring how the snapshot builder
-// assigns it: a unit with a VLAN child netdev keys on that child's kernel
-// ifindex (its Linux name is `<parent>.<vid>`); a bondless RETH VLAN unit
-// without that child keys on the synthetic ifindex allocated from the same
-// sorted shared used-set as the snapshot builder; anything else (an untagged
-// unit, a plain interface) keys on its own ifindex and folds with vlan 0 as
-// before. An ifindex no derivation names folds to 0 — the unknown sentinel —
-// so the peer keeps the #15176 no-scope keep rather than judging against a
-// guessed parent scope. Captured once per apply (and rebuilt on the link
-// refresh), matching buildIngressFoldFn's snapshot discipline.
+// assigns it: a unit whose resolved Linux netdev exists (a secure-tunnel
+// binding, TunnelNameMap entry, or VLAN child) keys on that netdev's kernel
+// ifindex; a parent-bound RETH VLAN unit with no resolved child device keys
+// on the synthetic ifindex allocated from the same sorted shared used-set as
+// the snapshot builder; anything else (an untagged unit, a plain interface)
+// keys on its own ifindex and folds with vlan 0 as before. An ifindex no
+// derivation names folds to 0 — the unknown sentinel — so the peer keeps
+// the #15176 no-scope keep rather than judging against a guessed parent
+// scope. Captured once per apply (and rebuilt on the link refresh),
+// matching buildIngressFoldFn's snapshot discipline.
 func buildNatScopeFoldFn(cfg *config.Config) func(ifindex int32) uint32 {
 	if cfg == nil {
 		return nil
@@ -218,6 +219,9 @@ func buildNatScopeFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) f
 		}
 	}
 	usedSyntheticIfindexes := make(map[int]struct{})
+	// snapshotLinuxName queries this mapping for each unit; build it once for
+	// this closure rather than allocating a full map in the loop.
+	tunnelNames := cfg.TunnelNameMap()
 	names := make([]string, 0, len(cfg.Interfaces.Interfaces))
 	for name := range cfg.Interfaces.Interfaces {
 		names = append(names, name)
@@ -244,7 +248,19 @@ func buildNatScopeFoldFnWithIfaces(cfg *config.Config, ifaces []net.Interface) f
 			if !ok || parentIdx == 0 {
 				continue
 			}
+			// Resolve the unit's kernel netdev exactly as the snapshot
+			// builder does (snapshotLinuxName): a secure-tunnel binding
+			// wins, then a tunnel-device mapping, then the VLAN child
+			// `<parent>.<vid>`. Probing only the VLAN child would mint a
+			// phantom synthetic index for a tunnel-resident unit the
+			// builder emitted at the tunnel device's ifindex.
+			unitRef := name + "." + strconv.Itoa(unit.Number)
 			childLinux := parentLinux + "." + strconv.Itoa(unit.VlanID)
+			if dev, ok := cfg.SecureTunnelUnitNetdev(unitRef); ok {
+				childLinux = dev
+			} else if dev, ok := tunnelNames[unitRef]; ok && dev != "" {
+				childLinux = dev
+			}
 			childIdx, hasChild := indexByLinuxName[childLinux]
 			if hasChild && childIdx != 0 {
 				byIfindex[int32(childIdx)] = parentVLAN{parentIdx, uint16(unit.VlanID)}
