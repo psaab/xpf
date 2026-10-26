@@ -308,3 +308,58 @@ func TestShowConfigHandlerDoesNotRenderDeniedSubtree14707(t *testing.T) {
 		}
 	} // gate denial also satisfies the assertion
 }
+
+// #17967 (residual of #17685/#17965): the rollback captures in this gate
+// discard slotErr behind scoped authorization, so a configuration-
+// restricted class gets PermissionDenied for a missing slot instead of
+// the slot error the unclassed surfaces report. CLI mirrors order:
+// slot error before *-configuration/-commands scoped verdicts (but after
+// coarse bits and command-level verdicts charged earlier in
+// authorizeRPCContext). Slot 1 is the positive control: an existing slot
+// on a denied path must still get the authorization verdict.
+func TestRollbackMissingSlotSlotErrorPrecedence17967(t *testing.T) {
+	s := showRead14707Server(t)
+	ctx := ctxWithPeerUID(uidLimited14707)
+
+	cells := []struct {
+		what string
+		m    string
+		req  any
+	}{
+		{"ShowRollback n=40 (scoped)", "ShowRollback", &pb.ShowRollbackRequest{N: 40, Path: []string{"security"}}},
+		{"ShowRollback n=40 (unscoped)", "ShowRollback", &pb.ShowRollbackRequest{N: 40}},
+		{"ShowRollback n=40 display set", "ShowRollback", &pb.ShowRollbackRequest{N: 40, Format: pb.ConfigFormat_SET}},
+		{"ShowRollback n=40 inheritance", "ShowRollback", &pb.ShowRollbackRequest{N: 40, Format: pb.ConfigFormat_INHERITANCE}},
+		{"ShowCompare rollback=40 (unscoped)", "ShowCompare", &pb.ShowCompareRequest{RollbackN: 40}},
+		{"ShowCompare rollback=40 (scoped)", "ShowCompare", &pb.ShowCompareRequest{RollbackN: 40, Path: []string{"security"}}},
+		{"ShowCompare rollback=40 active-baseline", "ShowCompare", &pb.ShowCompareRequest{RollbackN: 40, ActiveBaseline: true}},
+		{"ShowCompare rollback=40 active-baseline scoped", "ShowCompare", &pb.ShowCompareRequest{RollbackN: 40, ActiveBaseline: true, Path: []string{"security"}}},
+	}
+	for _, tc := range cells {
+		err := s.authorizeRPC(ctx, show14707Method(tc.m), tc.req)
+		if err == nil {
+			t.Errorf("%s: got nil, want history out-of-range slot error (#17967)", tc.what)
+			continue
+		}
+		if status.Code(err) != codes.PermissionDenied {
+			t.Errorf("%s: error code = %s, want PermissionDenied envelope (err=%v)", tc.what, status.Code(err), err)
+		}
+		if !strings.Contains(err.Error(), "out of range") {
+			t.Errorf("%s: err = %v, want history out-of-range slot error (#17967)", tc.what, err)
+		}
+	}
+	// Command-level authorization runs before this scoped gate. It must
+	// continue to win for display-set requests even if the slot is absent.
+	cmdErr := s.authorizeRPC(ctxWithPeerUID(uidDenySet14707), show14707Method("ShowRollback"),
+		&pb.ShowRollbackRequest{N: 40, Format: pb.ConfigFormat_SET})
+	if status.Code(cmdErr) != codes.PermissionDenied || strings.Contains(cmdErr.Error(), "out of range") {
+		t.Errorf("deny-commands display set must still win before slot lookup: %v", cmdErr)
+	}
+
+	// Existing-slot control: slot 1 on the denied path still yields the
+	// authorization verdict (slotErr is nil, so authorization decides).
+	wantDenied14707(t, "ShowRollback 1 [security] with existing slot (control)",
+		s.authorizeRPC(ctx, show14707Method("ShowRollback"), &pb.ShowRollbackRequest{N: 1, Path: []string{"security"}}))
+	wantDenied14707(t, "ShowCompare rollback=1 (control)",
+		s.authorizeRPC(ctx, show14707Method("ShowCompare"), &pb.ShowCompareRequest{RollbackN: 1}))
+}

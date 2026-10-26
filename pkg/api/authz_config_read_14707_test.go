@@ -19,11 +19,15 @@ import (
 // listener so the wiring in authorizeRESTRead is bound, not just the
 // shared decision in pkg/config.
 
-const uid14707REST = 4250
+const (
+	uid14707REST    = 4250
+	uid14707RESTSet = 4252
+)
 
 const passwd14707REST = `root:x:0:0:root:/root:/bin/bash
 showuser:x:4250:4250::/home/showuser:/bin/bash
 openuser:x:4251:4251::/home/openuser:/bin/bash
+setfmtuser:x:4252:4252::/home/setfmtuser:/bin/bash
 `
 
 const config14707REST = `
@@ -37,11 +41,18 @@ system {
         class open-view {
             permissions [ view configure ];
         }
+        class setfmt-view {
+            permissions [ view configure ];
+            deny-commands "display set";
+        }
         user showuser {
             class limited-view;
         }
         user openuser {
             class open-view;
+        }
+        user setfmtuser {
+            class setfmt-view;
         }
     }
 }
@@ -114,5 +125,89 @@ func TestRESTShowConfigDenyConfigurationConceals14707(t *testing.T) {
 	}
 	if !strings.Contains(body, "security-zone") {
 		t.Errorf("control: unrestricted show lost the security subtree: %s", body)
+	}
+}
+
+// #17967 (residual of #17685/#17965): rollback snapshots discarded their
+// slot error behind scoped authorization, so a restricted class got 403
+// for a missing slot instead of the history error. Existing slot 1 is a
+// control: its denied subtree must still be refused.
+func TestRESTRollbackMissingSlotSlotErrorPrecedence17967(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd14707REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+
+	store := authzStore(t, config14707REST)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure second commit: %v", err)
+	}
+	if err := store.LoadOverride(strings.Replace(config14707REST, "show-read-14707-rest", "show-read-14707-rest-b", 1)); err != nil {
+		t.Fatalf("LoadOverride second commit: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("second Commit: %v", err)
+	}
+	store.ExitConfigure()
+
+	_, base := authzServer(t, Config{
+		Addr:         "127.0.0.1:8080",
+		Store:        store,
+		PeerLookupFn: fixedPeerUID(uid14707REST),
+	})
+	for _, route := range []string{
+		"/api/v1/config/show-rollback?n=40&path=security",
+		"/api/v1/config/show-rollback?n=40",
+		"/api/v1/config/show-rollback?n=40&path=security&format=set",
+		"/api/v1/config/show-rollback?n=40&path=security&format=inheritance",
+		"/api/v1/config/compare?rollback=40&path=security",
+		"/api/v1/config/compare?rollback=40",
+	} {
+		code, body := get14707(t, base, route)
+		if code != http.StatusForbidden {
+			t.Errorf("GET %s returned %d, want authorization-gate response 403: %s", route, code, body)
+		}
+		if !strings.Contains(body, "out of range") {
+			t.Errorf("GET %s error = %s, want history out-of-range slot error (#17967)", route, body)
+		}
+		if strings.Contains(body, "permission denied") {
+			t.Errorf("GET %s masked the slot error with scoped authorization: %s", route, body)
+		}
+	}
+	for _, route := range []string{
+		"/api/v1/config/show-rollback?n=1&path=security",
+		"/api/v1/config/compare?rollback=1&path=security",
+	} {
+		code, body := get14707(t, base, route)
+		if code != http.StatusForbidden || !strings.Contains(body, "permission denied") {
+			t.Errorf("GET %s existing-slot control returned %d, %s; want scoped authorization 403", route, code, body)
+		}
+		if strings.Contains(body, "out of range") {
+			t.Errorf("GET %s existing-slot control returned spurious slot error: %s", route, body)
+		}
+	}
+	_, baseSet := authzServer(t, Config{
+		Addr:         "127.0.0.1:8080",
+		Store:        store,
+		PeerLookupFn: fixedPeerUID(uid14707RESTSet),
+	})
+	code, body := get14707(t, baseSet, "/api/v1/config/show-rollback?n=40&path=security&format=set")
+	if code != http.StatusForbidden || !strings.Contains(body, "denies") || strings.Contains(body, "out of range") {
+		t.Errorf("deny-commands display set must remain ahead of slot error: status=%d body=%s", code, body)
+	}
+	_, baseOpen := authzServer(t, Config{
+		Addr:         "127.0.0.1:8080",
+		Store:        store,
+		PeerLookupFn: fixedPeerUID(4251),
+	})
+	for _, route := range []string{
+		"/api/v1/config/show-rollback?n=1&path=system",
+		"/api/v1/config/compare?rollback=1&path=system",
+	} {
+		code, body := get14707(t, baseOpen, route)
+		if code != http.StatusOK || strings.Contains(body, "out of range") {
+			t.Errorf("GET %s allowed-path control returned %d, %s", route, code, body)
+		}
 	}
 }

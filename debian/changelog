@@ -5,6 +5,9 @@ xpf (0.0.0) unstable; urgency=medium
     traffic egresses via the kernel TX path and never traverses the RX
     gate, so reporting an ingress drop fabricated a forwarding stage
     (#17865).
+  * Config authorization: surface captured rollback slot errors before scoped
+    subtree authorization on gRPC and REST reads, while continuing to enforce
+    display-command restrictions (#17967).
   * FRR: remove the unused rewriteFRRPipeSequences belt. Community
     regexes, Junos AS-path regexes, and BGP neighbor descriptions
     handle vty pipe-space through their production translator or gate;
