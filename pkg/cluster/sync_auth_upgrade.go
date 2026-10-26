@@ -726,8 +726,10 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) bool
 	// The verified Noise msg1 proves that the peer holds an accepted PSK,
 	// independently of whether the remainder of this connection upgrade
 	// succeeds.
-	// #16859: matched is the ring key msg1 verified under — the peer's
-	// signing key — so feed it to the rotation observation as well.
+	// #16859/#17891: matched is the ring key msg1 verified under — the
+	// initiator's signing key, because initiators seal msg1 with their own
+	// signing key alone (#14703). Unlike the upgrade initiator's msg2
+	// observation, this identifies the peer's signing choice.
 	s.recordAuthenticatedPeer(matched)
 
 	msg2, csI2R, csR2I, err := hs.WriteMessage(nil, nil)
@@ -816,11 +818,7 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) bool
 			"err", err, "remote", connRemoteAddrString(conn))
 		return false
 	}
-	// The verified Noise msg2 proves that the peer holds the shared PSK.
-	// #16859: this round authenticated under st.forPSK — the initiator's
-	// signing key for this round, which the responder proved it accepts —
-	// so that is the peer's signing key for rotation purposes.
-	s.recordAuthenticatedPeer(st.forPSK)
+	s.recordAuthenticatedPeer()
 
 	st.keys = syncNoiseSplitKeys(true, csI2R, csR2I)
 	st.haveKeys = true

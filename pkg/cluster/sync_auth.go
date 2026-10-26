@@ -160,21 +160,23 @@ type SyncAuthProvider interface {
 // syncPeerAuthRecorder is an optional capability for auth providers that retain
 // the process-lifetime proof that the peer holds the shared key. The Manager
 // uses the same sticky signal for the fabric gRPC downgrade guard when a keyed
-// fabric-transport cluster has no heartbeat. matchedPSK is the raw PSK the
-// handshake actually verified under (#16859); the Manager derives the
-// rotation key ID from it and never stores or logs the key itself.
+// fabric-transport cluster has no heartbeat. matchedPSK is the raw PSK under
+// which the peer proved its signing choice (#16859); the Manager derives the
+// rotation key ID from it and never stores or logs the key itself. Initiators
+// pass no key: a completed initiator handshake proves only that the peer
+// accepts (possesses) the initiator's signing key, not that the peer signs
+// with it (#17891).
 type syncPeerAuthRecorder interface {
 	noteSyncPeerAuthenticated(matchedPSK ...[]byte)
 }
 
 // recordAuthenticatedPeer records a completed authenticated handshake.
-// matchedPSK is the key that handshake matched: on the connect initiator it
-// is this node's signing key, on the connect responder the ring key it opened
-// msg1 under, and on the #6628 upgrade both sides know the round's key
-// (Hello's matched candidate at the responder, forPSK at the initiator).
-// Callers that authenticated under this node's own signing key pass that key;
-// it equals the peer's signing key by Noise construction, so deriving its ID
-// answers "which key is the peer signing with".
+// matchedPSK, when present, must be a key the peer proved it SIGNS with: on
+// the connect responder the ring key msg1 verified under, and on the #6628
+// upgrade responder the ring candidate msg1 verified under. Callers on the
+// initiator side pass NO key — their local signing key is merely a key the
+// peer proved it ACCEPTS; accepting a PSK does not establish the peer's
+// signing choice, because the responder never signs in Noise_NNpsk0 (#17891).
 func (s *SessionSync) recordAuthenticatedPeer(matchedPSK ...[]byte) {
 	if box := s.authProvider.Load(); box != nil && box.p != nil {
 		if recorder, ok := box.p.(syncPeerAuthRecorder); ok {
@@ -585,13 +587,23 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 	// ephemeral. This also arms the fabric gRPC downgrade guard when
 	// the selected transport is fabric and no control-link heartbeat
 	// is running.
-	// #16859: feed the matched key so the rotation line can answer in
-	// fabric-transport mode (no heartbeat). result.matchedPSK is, on the
-	// initiator, its signing key — which by Noise construction is the key
-	// the responder proved it accepts and the peer signs with; on the
-	// responder, the ring key msg1 verified under, i.e. the peer's signing
-	// key. Either way it is the peer's current signing key.
-	s.recordAuthenticatedPeer(result.matchedPSK)
+	// #16859/#17891: feed the matched key so the rotation line can answer
+	// in fabric-transport mode (no heartbeat), but only when the handshake
+	// identified the PEER's signing key. On the responder,
+	// result.matchedPSK is the ring key msg1 verified under — the peer's
+	// signing key, because the initiator seals msg1 under its signing key
+	// alone (#14703). On the initiator it is this node's OWN signing key,
+	// which the responder proved only that it accepts (possesses); the
+	// responder never signs in Noise_NNpsk0, so it says nothing about which
+	// key the peer signs with. Recording it would invent safe-to-finalize
+	// guidance: a peer still signing the retired key can accept under this
+	// node's signing key, and retiring the additional key on that basis
+	// would reject the peer's subsequent old-key-signed traffic.
+	if initiator {
+		s.recordAuthenticatedPeer()
+	} else {
+		s.recordAuthenticatedPeer(result.matchedPSK)
+	}
 	return syncAuthAuthenticated, result, nil
 }
 
