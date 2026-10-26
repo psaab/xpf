@@ -471,6 +471,9 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	// publishing, so the swap does not drop every live flow's close.
 	d.flowStateMu.Lock()
 	d.carryFlowStateV9Locked(published)
+	if d.flowStateCarryTestHook != nil {
+		d.flowStateCarryTestHook()
+	}
 	d.flowBundle.Store(&exporterBundle{groups: published})
 	d.flowStateMu.Unlock()
 	publishedExp := make(map[*flowexport.Exporter]bool)

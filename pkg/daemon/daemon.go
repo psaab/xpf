@@ -603,6 +603,9 @@ type Daemon struct {
 	// state carry plus bundle publication during reconciliation.
 	flowStateMu sync.Mutex
 	flowReconMu sync.Mutex
+	// flowStateCarryTestHook pauses V9 reconciliation between decision-state
+	// carry and bundle publication. Tests use it to exercise close overlap.
+	flowStateCarryTestHook func()
 	// #3742: last NetFlow v9 exporter build error. Set (under flowReconMu)
 	// when a reconcile's NewExporter build failed and the OLD exporters were
 	// kept running so export stayed up; cleared on the next successful

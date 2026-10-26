@@ -54,52 +54,74 @@ func TestCloseWaitsForStateCarryAndPublication17815(t *testing.T) {
 	if oldBundle == nil || len(oldBundle.groups) == 0 {
 		t.Fatal("initial v9 exporter bundle missing")
 	}
+	oldGroup := oldBundle.groups[0]
+	if oldGroup.cancel == nil || oldGroup.wg == nil {
+		t.Fatal("initial v9 generation is missing lifecycle handles")
+	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: srcPort, DstPort: 443, Protocol: 6}
-	if !oldBundle.groups[0].exp.HasFlowState(key) {
+	if !oldGroup.exp.HasFlowState(key) {
 		t.Fatal("initial rejected open decision missing")
 	}
 
 	collector, port := listenUDP(t)
 	t.Cleanup(func() { collector.Close() })
-	configs := d.buildFlowExportConfigs(openSamplingConfig16303(t, port, port, "1"))
-	newGroups := make([]v9Group, 0, len(configs))
-	var replacement *flowexport.Exporter
-	var replacementConfig *flowexport.ExportConfig
-	for _, ec := range configs {
-		exp, err := flowexport.NewExporter(ec)
-		if err != nil {
-			t.Fatalf("NewExporter replacement: %v", err)
+	replacementConfig := openSamplingConfig16303(t, port, port, "1")
+	copied := make(chan *flowexport.Exporter, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseCarry := func() { releaseOnce.Do(func() { close(release) }) }
+	d.flowStateCarryTestHook = func() {
+		var replacement *flowexport.Exporter
+		for _, exp := range d.flowExporters {
+			if exp != oldGroup.exp && exp.HasFlowState(key) {
+				replacement = exp
+				break
+			}
 		}
-		t.Cleanup(exp.Close)
-		group := v9Group{exp: exp, ec: ec}
-		newGroups = append(newGroups, group)
-		if flowGroupKey(ec) == flowGroupKey(oldBundle.groups[0].ec) {
-			replacement, replacementConfig = exp, ec
-		}
-	}
-	if replacement == nil {
-		t.Fatal("replacement for original flow group missing")
+		copied <- replacement
+		<-release
 	}
 
-	// This is the same critical section used by reconcile: copy first,
-	// then publish. The concurrent close must wait for publication, so it
-	// consumes the copied decision on the new bundle instead of deleting
-	// only the old copy and resurrecting stale state.
-	d.flowReconMu.Lock()
-	d.flowStateMu.Lock()
-	d.carryFlowStateV9Locked(newGroups)
-	if !replacement.HasFlowState(key) {
-		d.flowStateMu.Unlock()
-		d.flowReconMu.Unlock()
+	reconcileDone := make(chan struct{})
+	var reconcileOK bool
+	var closeDone chan struct{}
+	go func() {
+		reconcileOK = d.reconcileV9Exporter(replacementConfig)
+		close(reconcileDone)
+	}()
+	t.Cleanup(func() {
+		releaseCarry()
+		<-reconcileDone
+		if closeDone != nil {
+			<-closeDone
+		}
+		d.flowStateCarryTestHook = nil
+		// Also retire the captured original explicitly: cleanup remains
+		// complete even if the test exits while reconciliation is paused.
+		retireV9Groups(map[string]v9Group{flowGroupKey(oldGroup.ec): oldGroup}, nil)
+	})
+
+	var replacement *flowexport.Exporter
+	select {
+	case replacement = <-copied:
+	case <-reconcileDone:
+		t.Fatal("reconcile returned without carrying the rejected decision")
+	}
+	if replacement == nil {
 		t.Fatal("replacement did not inherit the rejected decision")
 	}
+	if d.flowStateMu.TryLock() {
+		d.flowStateMu.Unlock()
+		t.Fatal("reconcile must hold the state lock through carry and publication")
+	}
+
 	closeRec := logging.EventRecord{
 		Time: time.Now(), Type: "SESSION_CLOSE",
 		SrcAddr: "10.0.0.102:24042", DstAddr: "192.0.2.200:443", ProtocolNum: 6,
 		InZone: uint16(trust), OutZone: uint16(untrust),
 	}
+	closeDone = make(chan struct{})
 	closeStarted := make(chan struct{})
-	closeDone := make(chan struct{})
 	go func() {
 		close(closeStarted)
 		d.flowExportCallback(closeRec, nil)
@@ -109,18 +131,35 @@ func TestCloseWaitsForStateCarryAndPublication17815(t *testing.T) {
 	runtime.Gosched()
 	select {
 	case <-closeDone:
-		d.flowStateMu.Unlock()
-		d.flowReconMu.Unlock()
 		t.Fatal("close passed the state-transfer lock before bundle publication")
 	case <-time.After(25 * time.Millisecond):
 	}
-	d.flowBundle.Store(&exporterBundle{groups: newGroups})
-	d.flowStateMu.Unlock()
-	d.flowReconMu.Unlock()
+	releaseCarry()
+	<-reconcileDone
+	if !reconcileOK {
+		t.Fatal("v9 reconciliation failed")
+	}
 	select {
 	case <-closeDone:
 	case <-time.After(time.Second):
 		t.Fatal("close did not resume after bundle publication")
+	}
+
+	published := d.flowBundle.Load()
+	if published == nil {
+		t.Fatal("replacement bundle was not published")
+	}
+	var replacementConfigForGroup *flowexport.ExportConfig
+	foundReplacement := false
+	for _, group := range published.groups {
+		if group.exp == replacement {
+			replacementConfigForGroup = group.ec
+			foundReplacement = true
+			break
+		}
+	}
+	if !foundReplacement {
+		t.Fatal("carried exporter is not in the published bundle")
 	}
 	if replacement.HasFlowState(key) {
 		t.Fatal("close must consume the replacement's copied rejection")
@@ -135,7 +174,7 @@ func TestCloseWaitsForStateCarryAndPublication17815(t *testing.T) {
 		IngressIface: "ge-0/0/0.0", EgressIface: "ge-0/0/2.0",
 	}
 	d.trackFlowOpen(openRec)
-	if evaluated, selected, _ := replacementConfig.SamplingStats(); evaluated != 1 || selected != 1 {
+	if evaluated, selected, _ := replacementConfigForGroup.SamplingStats(); evaluated != 1 || selected != 1 {
 		t.Fatalf("same-tuple replacement decision = %d/%d, want 1/1", evaluated, selected)
 	}
 	if !replacement.Tracked(key) {
