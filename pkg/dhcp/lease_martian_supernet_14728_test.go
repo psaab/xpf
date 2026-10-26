@@ -93,7 +93,7 @@ func TestLeaseFromACKv4RefusesProtectedOverlap14728(t *testing.T) {
 		{"straddling protected", "10.0.1.128", net.CIDRMask(23, 32)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			lease, err := m.leaseFromACKv4("wan0", mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask))
+			lease, err := leaseFromACKv4WithProtected("wan0", mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask), m.protectedIPv4Prefixes())
 			if err == nil {
 				t.Fatalf("leaseFromACKv4 accepted protected-overlapping %s; got %v, want error", tc.name, lease.Address)
 			}
@@ -113,7 +113,7 @@ func TestLeaseFromACKv4RefusesProtectedOverlap14728(t *testing.T) {
 		{"adjacent accepted", "10.0.0.5", net.CIDRMask(25, 32), "10.0.0.5/25"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			lease, err := m.leaseFromACKv4("wan0", mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask))
+			lease, err := leaseFromACKv4WithProtected("wan0", mustV4ACK(t, net.ParseIP(tc.yiaddr), tc.mask), m.protectedIPv4Prefixes())
 			if err != nil {
 				t.Fatalf("leaseFromACKv4 rejected disjoint lease: %v", err)
 			}
@@ -123,10 +123,9 @@ func TestLeaseFromACKv4RefusesProtectedOverlap14728(t *testing.T) {
 		})
 	}
 
-	// Nil protected set (standalone manager / no v4 config) refuses nothing
-	// on overlap — prior behavior preserved.
-	m2 := NewManagerForTesting(nil)
-	lease, err := m2.leaseFromACKv4("wan0", mustV4ACK(t, net.ParseIP("10.0.1.2"), net.CIDRMask(25, 32)))
+	// A nil protected set (no configured v4 protected prefixes) preserves the
+	// prior no-rejection behavior.
+	lease, err := leaseFromACKv4WithProtected("wan0", mustV4ACK(t, net.ParseIP("10.0.1.2"), net.CIDRMask(25, 32)), nil)
 	if err != nil {
 		t.Fatalf("nil protected set must not refuse: %v", err)
 	}
@@ -134,10 +133,4 @@ func TestLeaseFromACKv4RefusesProtectedOverlap14728(t *testing.T) {
 		t.Errorf("lease.Address = %s, want 10.0.1.2/25", got)
 	}
 
-	// Free-function callers (existing tests) keep working with no protected set.
-	lease, err = leaseFromACKv4WithProtected("wan0", mustV4ACK(t, net.ParseIP("10.0.1.2"), net.CIDRMask(25, 32)), nil)
-	if err != nil {
-		t.Fatalf("free leaseFromACKv4 rejected: %v", err)
-	}
-	_ = lease
 }

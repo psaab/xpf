@@ -535,7 +535,7 @@ func (m *Manager) doDHCPv4(ctx context.Context, ifaceName string, mode dhcpExcha
 		ack = dhcpLease.ACK
 	}
 
-	return m.leaseFromACKv4(ifaceName, ack)
+	return leaseFromACKv4WithProtected(ifaceName, ack, m.protectedIPv4Prefixes())
 }
 
 // leaseFromACKv4WithProtected parses a DHCPv4 ACK into a Lease and rejects
@@ -707,12 +707,6 @@ func overlappingProtectedPrefixV4(installed netip.Prefix, protected []netip.Pref
 		}
 	}
 	return netip.Prefix{}
-}
-
-// leaseFromACKv4 validates an ACK against the manager's protected IPv4
-// set (#14728). doDHCPv4 uses this so acquire/renew/rebind all re-validate.
-func (m *Manager) leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
-	return leaseFromACKv4WithProtected(ifaceName, ack, m.protectedIPv4Prefixes())
 }
 
 // classlessStaticRoutes parses RFC 3442 classless static routes from a

@@ -197,14 +197,15 @@ const v6MsgHeaderLen = 4
 // BEFORE dhcpv6.FromBytes (fold 2 on #16322, mirroring the v4 BOOTP
 // peek), walking at most the first Client-ID option (code 1, RFC 8415
 // §21.2). It never allocates: the DUID bytes are copied into the fixed
-// key array. Missing, malformed, or over-limit DUIDs report ok=false
-// and the caller lumps them into fairUnknownSenderV6; this keeps
-// fairness classification consistent with pending6KeyFor, which refuses
-// DUIDs it cannot represent in the pending key.
-// For representable DUIDs the peek copies the raw wire bytes. The parsed
-// pending key serializes the typed DUID (type + fields); those encodings
-// agree for the wire forms accepted by the library. Relay messages report
-// ok=false here; the caller routes them ahead of the fairness gate.
+// key array. Missing or malformed DUIDs report ok=false. An over-limit DUID is
+// truncated in this fairness key; the pending-key path separately refuses it
+// and cannot create a pending binding. Such a request can consume fairness
+// budget before the pending-key path drops it.
+//
+// For DUIDs no longer than the bound, the peek copies raw wire bytes. The
+// pending key serializes the typed DUID (type + fields); these encodings agree
+// for accepted wire forms. Relay messages report ok=false; callers route them
+// ahead of the fairness gate.
 func fairSenderKeyV6FromWire(buf []byte) (fairSenderKeyV6, bool) {
 	if len(buf) <= v6MsgHeaderLen {
 		return fairSenderKeyV6{}, false
@@ -217,11 +218,15 @@ func fairSenderKeyV6FromWire(buf []byte) (fairSenderKeyV6, bool) {
 			return fairSenderKeyV6{}, false // TLV runs past the datagram
 		}
 		if code == int(dhcpv6.OptionClientID) {
-			if l == 0 || l > pending6MaxDUIDSize {
+			if l == 0 {
 				return fairSenderKeyV6{}, false
 			}
-			k := fairSenderKeyV6{duidLen: uint8(l)}
-			copy(k.duid[:], opts[4:4+l])
+			n := l
+			if n > pending6MaxDUIDSize {
+				n = pending6MaxDUIDSize
+			}
+			k := fairSenderKeyV6{duidLen: uint8(n)}
+			copy(k.duid[:], opts[4:4+n])
 			return k, true
 		}
 		opts = opts[4+l:]

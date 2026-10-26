@@ -371,13 +371,16 @@ func TestFairSenderKeyV6FromWire(t *testing.T) {
 	if _, ok := fairSenderKeyV6FromWire(trunc); ok {
 		t.Error("wire peek accepted a truncated Client-ID option")
 	}
-	// A well-framed but unrepresentable DUID is also not a fairness identity.
+	// The wire fairness key truncates a valid over-limit DUID to its fixed
+	// identity width; the pending-key path separately refuses that identity.
 	overlong := make([]byte, 4+4+pending6MaxDUIDSize+1)
 	overlong[0] = byte(dhcpv6.MessageTypeSolicit)
 	overlong[5] = byte(dhcpv6.OptionClientID)
 	overlong[7] = pending6MaxDUIDSize + 1
-	if _, ok := fairSenderKeyV6FromWire(overlong); ok {
-		t.Error("wire peek accepted an over-limit Client-ID DUID")
+	key, ok := fairSenderKeyV6FromWire(overlong)
+	if !ok || int(key.duidLen) != pending6MaxDUIDSize {
+		t.Fatalf("over-limit wire DUID key = %+v ok=%v, want truncated %d-byte key",
+			key, ok, pending6MaxDUIDSize)
 	}
 	// Too short for any option.
 	if _, ok := fairSenderKeyV6FromWire([]byte{1, 0}); ok {

@@ -59,7 +59,7 @@ func TestRebindAcceptsAnyServer14600(t *testing.T) {
 	// Accepted partner ACK stores partner as new server-id.
 	lease, err := leaseFromACKv4WithProtected("wan0", partnerACK, nil)
 	if err != nil {
-		t.Fatalf("leaseFromACKv4(partner ACK): %v", err)
+		t.Fatalf("leaseFromACKv4WithProtected(partner ACK): %v", err)
 	}
 	if lease.serverID != netip.MustParseAddr("198.51.100.1") {
 		t.Errorf("stored serverID = %v, want partner 198.51.100.1", lease.serverID)

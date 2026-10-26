@@ -928,8 +928,10 @@ func (m *Manager) controlSocket(family int) string {
 }
 
 // PreSeedMemfileMerged4WithAuthority is the v4 authority-aware takeover
-// pre-seed. The daemon supplies the peer snapshot and local lease authority so
-// the installed set cannot include rows from an unproven peer scope.
+// pre-seed. Matching current-generation apply proof filters peer rows to
+// eligible scopes and removes stale local rows only where authority is known.
+// Missing or mismatched proof retains a conservative union, except peer rows
+// excluded by explicit negative scope authority.
 func (m *Manager) PreSeedMemfileMerged4WithAuthority(ctx context.Context, peer LeaseSyncSnapshot, now time.Time, stillMastering bool, authority LeaseSyncAuthority) error {
 	return m.withQuiescedPreSeed(ctx, 4, now, func(local []SyncLease, live bool) error {
 		if !live && !stillMastering {

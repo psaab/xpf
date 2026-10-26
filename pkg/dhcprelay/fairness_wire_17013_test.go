@@ -9,12 +9,11 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 )
 
-// #17013: the production fairness gate peeks the sender key from the WIRE
-// (fairSenderKeyFromWire / fairSenderKeyV6FromWire). Parsed-key twins were
-// production-dead and hid the wire edges behind an oracle that disagreed
-// with the peek: a 200-byte DUID was truncated by the peek but refused by
-// pending6KeyFor. The wire peek now rejects that unrepresentable identity,
-// matching the pending-key path. These cells pin the wire peeks directly.
+// #17013: production fairness gates peek sender keys from the WIRE. The wire
+// peeks differ from the deleted parsed-key oracles at their boundaries: v4
+// rejects hlen 0/17, while a >128-byte DUID is truncated for fairness even
+// though pending6KeyFor refuses to create a binding for that DUID. These
+// cells pin the wire behavior directly without adding parsed-key helpers.
 
 // TestFairSenderKeyWireEdges17013 pins the v4 BOOTP peek edge table:
 // hlen 0 and hlen > 16 have no usable client identity (ok=false, so the
@@ -67,11 +66,10 @@ func TestFairSenderKeyWireEdges17013(t *testing.T) {
 	}
 }
 
-// TestFairSenderKeyV6WireOverlongDUID17013 pins the v6 wire peek at the
-// DUID-length edge: a Client-ID DUID longer than pending6MaxDUIDSize has
-// no representable fairness identity and reports ok=false, matching the
-// parsed pending-key refusal. A DUID exactly pending6MaxDUIDSize remains
-// representable in both paths.
+// TestFairSenderKeyV6WireOverlongDUID17013 pins the documented asymmetry:
+// a >128-byte Client-ID produces a 128-byte wire fairness key, while the
+// parsed pending key refuses the unrepresentable identity. Exact-size DUIDs
+// remain representable in both paths.
 func TestFairSenderKeyV6WireOverlongDUID17013(t *testing.T) {
 	// Client-ID option (code 1) carrying a 200-byte opaque DUID
 	// (type 0 + 198 payload bytes), framed as a DHCPv6 client message.
@@ -89,8 +87,11 @@ func TestFairSenderKeyV6WireOverlongDUID17013(t *testing.T) {
 	buf.WriteByte(byte(len(duid)))
 	buf.Write(duid)
 
-	if _, ok := fairSenderKeyV6FromWire(buf.Bytes()); ok {
-		t.Fatal("wire peek accepted a >128-byte DUID; want no fairness identity")
+	k, ok := fairSenderKeyV6FromWire(buf.Bytes())
+	if !ok || int(k.duidLen) != pending6MaxDUIDSize ||
+		!bytes.Equal(k.duid[:], duid[:pending6MaxDUIDSize]) {
+		t.Fatalf("wire key = %+v ok=%v, want first %d DUID bytes",
+			k, ok, pending6MaxDUIDSize)
 	}
 
 	// The parsed pending key also refuses the same DUID: the message parses,

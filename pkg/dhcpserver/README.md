@@ -982,10 +982,12 @@ This package owns the KEA side of #2239 cross-chassis DHCP-server lease sync
   idempotent), re-anchoring `expire = now + remaining` on the LOCAL clock.
   Faithful v6 identity (DUID/IAID/`type`/`prefix-len`, so IA_PD is synced).
 - `PreSeedMemfileMerged{4,6}WithAuthority(ctx, peer, now, stillMastering, authority)` — the daemon's takeover path. It quiesces Kea, then installs
-  the authority-filtered union of peer snapshot and local serving leases
-  (#5040, #9853, #10170). Unproven peer scopes are excluded. The atomic
-  write replaces stale LFC generations (#14730); if active Kea cannot be
-  quiesced, it fails closed without replacing the memfile (#10895).
+  the peer/local lease union. Matching current-generation apply proof filters
+  peer rows to eligible scopes and removes stale local rows only where
+  authority is known; absent or mismatched proof retains the conservative
+  union, except peer rows excluded by explicit negative scope authority.
+  The atomic write replaces stale LFC generations (#14730); if active Kea
+  cannot be quiesced, it fails closed without replacing the memfile (#10895).
   The pre-seed invalidates Kea's cached loaded-config proof so the queued
   takeover apply restarts Kea even when config is unchanged (#10896). A
   300-second `max-period` restores service if restart never arrives.
