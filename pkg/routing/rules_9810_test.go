@@ -407,10 +407,9 @@ func TestNextTableOverflowAfterAddFailure_9810(t *testing.T) {
 	}
 }
 
-// TestNextTableOverflowAfterFailedRollback_9810 pins that the GPT-1 admission
-// fix also holds when rollback itself fails: the orphan stays, its route's
-// reservation remains consumed, and the verdict-excluded tail still does not
-// install.
+// TestNextTableOverflowAfterFailedRollback_9810 pins that a failed target
+// lookup add cannot leave an unguarded forwarding lookup behind: when shadow
+// cleanup itself fails, the sole residue is the unreachable shadow.
 func TestNextTableOverflowAfterFailedRollback_9810(t *testing.T) {
 	inner := newFakeRuleOps()
 	inner.delErr = errors.New("netlink: transient EBUSY on delete")
@@ -431,16 +430,20 @@ func TestNextTableOverflowAfterFailedRollback_9810(t *testing.T) {
 		t.Errorf("the failed rollback must surface, got %q", err)
 	}
 	seen := map[string]int{}
+	var orphan []netlink.Rule
 	for _, r := range inner.rules[unix.AF_INET] {
 		if r.Dst != nil {
 			seen[r.Dst.String()]++
+			if r.Dst.String() == "10.0.0.0/16" {
+				orphan = append(orphan, r)
+			}
 		}
 	}
 	if seen["10.50.0.0/16"] != 0 {
 		t.Fatal("verdict-excluded tail leak installed despite failed rollback (GPT-1)")
 	}
-	if seen["10.0.0.0/16"] != 1 {
-		t.Fatalf("the un-rolled-back orphan must remain exactly once, got %d", seen["10.0.0.0/16"])
+	if len(orphan) != 1 || !isNextTableMissTerminatorShape(orphan[0]) {
+		t.Fatalf("failed rollback must leave exactly one fail-closed shadow, got %+v", orphan)
 	}
 }
 
@@ -462,14 +465,31 @@ func TestNextTableRollbackDeleteFailureSurfaced_9810(t *testing.T) {
 		t.Fatalf("the failed rollback del must surface, got %v", err)
 	}
 	byDestination := map[string]int{}
+	var partialFirst []netlink.Rule
 	for _, rule := range inner.rules[unix.AF_INET] {
 		if rule.Dst != nil {
 			byDestination[rule.Dst.String()]++
+			if rule.Dst.String() == "10.21.0.0/16" {
+				partialFirst = append(partialFirst, rule)
+			}
 		}
 	}
 	if byDestination["10.21.0.0/16"] != 2 {
-		t.Errorf("two rollback deletes failed, so the partial first leak should remain twice; got %d",
+		t.Errorf("lookup rollback failed; its paired shadow must remain, got %d rules",
 			byDestination["10.21.0.0/16"])
+	}
+	var lookupIif, shadowIif string
+	for _, rule := range partialFirst {
+		if rule.Table == 101 && rule.Type == unix.RTN_UNICAST {
+			lookupIif = rule.IifName
+		}
+		if isNextTableMissTerminatorShape(rule) {
+			shadowIif = rule.IifName
+		}
+	}
+	if lookupIif == "" || lookupIif != shadowIif {
+		t.Errorf("failed lookup deletion must retain its paired shadow: lookup iif=%q shadow iif=%q rules=%+v",
+			lookupIif, shadowIif, partialFirst)
 	}
 	if byDestination["10.22.0.0/16"] != 2*len(iifs) {
 		t.Errorf("the later leak should install its lookup and shadow on all interfaces; got %d copies",

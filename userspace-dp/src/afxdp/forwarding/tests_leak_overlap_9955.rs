@@ -1546,12 +1546,17 @@ fn main_carveout_precedes_config_and_rib_group_leaks_ipv4_17684() {
         egress_ifindex: 13,
         subnet: 51,
     };
+    let equal_rib = Leak {
+        prefix_len: 24,
+        rule_priority: leak_priority(24, 32, LeakKind::RibGroup),
+        ..broad_rib
+    };
     for (discard, reject, want) in [
         (false, false, ForwardingDisposition::ForwardCandidate),
         (true, false, ForwardingDisposition::DiscardRoute),
         (false, true, ForwardingDisposition::RejectRoute),
     ] {
-        let mut snapshot = snapshot_for(&[broad_rib, narrow_config]);
+        let mut snapshot = snapshot_for(&[broad_rib, equal_rib, narrow_config]);
         mark_config_next_table(&mut snapshot, "10.1.0.0/16");
         snapshot.routes.push(RouteSnapshot {
             table: "inet.0".to_string(),
@@ -1567,7 +1572,12 @@ fn main_carveout_precedes_config_and_rib_group_leaks_ipv4_17684() {
             ..Default::default()
         });
         add_v4_main_egress14(&mut snapshot);
-        let state = build_forwarding_state(&snapshot);
+        let mut state = build_forwarding_state(&snapshot);
+        state
+            .interface_nat_tables_v4
+            .entry("10.1.2.5".parse().expect("IPv4 interface-NAT address"))
+            .or_default()
+            .insert("inet.0".to_string());
 
         let main = lookup_forwarding_resolution(
             &state,
@@ -1598,6 +1608,41 @@ fn main_carveout_precedes_config_and_rib_group_leaks_ipv4_17684() {
         assert_eq!(rib.disposition, ForwardingDisposition::ForwardCandidate);
         assert_eq!(rib.egress_ifindex, 12);
     }
+}
+#[test]
+fn rib_group_only_main_specific_route_keeps_lookup_first_ipv4_17684() {
+    let broad_rib = Leak {
+        prefix_len: 8,
+        rule_priority: leak_priority(8, 32, LeakKind::RibGroup),
+        target: "red",
+        egress_ifindex: 12,
+        subnet: 50,
+    };
+    let equal_rib = Leak {
+        prefix_len: 24,
+        rule_priority: leak_priority(24, 32, LeakKind::RibGroup),
+        ..broad_rib
+    };
+    let mut snapshot = snapshot_for(&[broad_rib, equal_rib]);
+    snapshot.routes.push(RouteSnapshot {
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "10.1.2.0/24".to_string(),
+        next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
+        ..Default::default()
+    });
+    add_v4_main_egress14(&mut snapshot);
+    let state = build_forwarding_state(&snapshot);
+    let result = lookup_forwarding_resolution(
+        &state,
+        IpAddr::V4("10.1.2.5".parse().expect("IPv4 destination")),
+    )
+    .resolution;
+    assert_eq!(result.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(
+        result.egress_ifindex, 12,
+        "a rib-group-only leak has no config-owned slot-0 exception"
+    );
 }
 
 #[test]
@@ -1675,6 +1720,14 @@ fn main_carveout_precedes_config_and_rib_group_leaks_ipv6_17684() {
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2001:db8:1:2::/64".to_string(),
+                next_table: "red.inet6.0".to_string(),
+                rule_priority: leak_priority(64, 128, LeakKind::RibGroup),
+                ..Default::default()
+            },
+            RouteSnapshot {
+                table: "inet6.0".to_string(),
+                family: "inet6".to_string(),
+                destination: "2001:db8:1:2::/64".to_string(),
                 next_hops: vec!["2001:db8:52::1@ge-0/0/14.50".to_string()],
                 ..Default::default()
             },
@@ -1736,7 +1789,12 @@ fn main_carveout_precedes_config_and_rib_group_leaks_ipv6_17684() {
         let carveout = case
             .routes
             .iter_mut()
-            .find(|route| route.table == "inet6.0" && route.destination == "2001:db8:1:2::/64")
+            .find(|route| {
+                route.table == "inet6.0"
+                    && route.destination == "2001:db8:1:2::/64"
+                    && route.next_table.is_empty()
+                    && !route.next_table_route
+            })
             .expect("the IPv6 main carve-out route");
         carveout.discard = discard;
         carveout.reject = reject;
@@ -1745,7 +1803,16 @@ fn main_carveout_precedes_config_and_rib_group_leaks_ipv6_17684() {
         } else {
             vec!["2001:db8:52::1@ge-0/0/14.50".to_string()]
         };
-        let state = build_forwarding_state(&case);
+        let mut state = build_forwarding_state(&case);
+        state
+            .interface_nat_tables_v6
+            .entry(
+                "2001:db8:1:2::5"
+                    .parse()
+                    .expect("IPv6 interface-NAT address"),
+            )
+            .or_default()
+            .insert("inet6.0".to_string());
         let main = lookup_forwarding_resolution(
             &state,
             IpAddr::V6("2001:db8:1:2::5".parse().expect("IPv6 destination")),

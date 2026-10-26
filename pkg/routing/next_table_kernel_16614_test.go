@@ -7,6 +7,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // TestNextTableKernelProbe16614 uses the real RPDB in a private netns. A
@@ -25,7 +26,7 @@ func TestNextTableKernelProbe16614(t *testing.T) {
 	routes := []*config.StaticRoute{
 		{Destination: "10.0.0.0/8", NextTable: "red"},
 		{Destination: "10.99.0.0/16", NextTable: "black"},
-		{Destination: "10.99.0.0/24"},
+		{Destination: "10.99.0.0/24", NextHops: []config.NextHopEntry{{Interface: "xwan"}}},
 	}
 	instances := []*config.RoutingInstanceConfig{
 		{Name: "red", TableID: 100},
@@ -121,7 +122,7 @@ func runNextTableTerminalDefaultCell17970(t *testing.T, ipv6 bool, terminal stri
 		source = "2001:db8:ffff::99"
 		routes = []*config.StaticRoute{
 			{Destination: leakPrefix, NextTable: "red"},
-			{Destination: carveoutPrefix},
+			{Destination: carveoutPrefix, NextHops: []config.NextHopEntry{{Interface: "xwan"}}},
 			{Destination: "::/0", Reject: terminal == "unreachable", Discard: terminal == "blackhole"},
 			{Destination: controlPrefix},
 		}
@@ -134,7 +135,7 @@ func runNextTableTerminalDefaultCell17970(t *testing.T, ipv6 bool, terminal stri
 		source = "203.0.113.99"
 		routes = []*config.StaticRoute{
 			{Destination: leakPrefix, NextTable: "red"},
-			{Destination: carveoutPrefix},
+			{Destination: carveoutPrefix, NextHops: []config.NextHopEntry{{Interface: "xwan"}}},
 			{Destination: "0.0.0.0/0", Reject: terminal == "unreachable", Discard: terminal == "blackhole"},
 			{Destination: controlPrefix},
 		}
@@ -204,6 +205,19 @@ func runNextTableTerminalDefaultCell17970(t *testing.T, ipv6 bool, terminal stri
 	if got := get(carveoutHit); !strings.Contains(got, "dev xwan") {
 		t.Errorf("%s carve-out with target hit = %q, want main route via xwan", familyName17970(ipv6), got)
 	}
+	if out, err := runFamily("route", "del", carveoutPrefix, "dev", "xwan"); err != nil {
+		t.Fatalf("withdraw main carve-out route: %s: %v", out, err)
+	}
+	// The config exception remains while an external runtime withdrawal
+	// removes its main route. The main lookup then returns the broad terminal
+	// default; fail closed instead of letting the leak resurrect that dst.
+	if got := get(carveoutHit); !strings.Contains(got, "RTNETLINK answers:") || strings.Contains(got, "dev xred") {
+		t.Errorf("%s withdrawn main carve-out = %q, want the main-table terminal error (no target rescue)",
+			familyName17970(ipv6), got)
+	}
+	if out, err := runFamily("route", "add", carveoutPrefix, "dev", "xwan"); err != nil {
+		t.Fatalf("restore main carve-out route: %s: %v", out, err)
+	}
 	if out, err := runFamily("route", "del", target, "dev", "xred", "table", "100"); err != nil {
 		t.Fatalf("remove target route: %s: %v", out, err)
 	}
@@ -223,4 +237,91 @@ func familyName17970(ipv6 bool) string {
 		return "IPv6"
 	}
 	return "IPv4"
+}
+
+func TestNextTableExcludedStaticDoesNotCreateCarveout17970(t *testing.T) {
+	for _, ipv6 := range []bool{false, true} {
+		t.Run(familyName17970(ipv6), func(t *testing.T) {
+			runNextTableExcludedStaticCell17970(t, ipv6)
+		})
+	}
+}
+
+func runNextTableExcludedStaticCell17970(t *testing.T, ipv6 bool) {
+	t.Helper()
+	_ = enterPrivateNetns7796(t)
+	h, err := netlink.NewHandle()
+	if err != nil {
+		t.Skipf("netlink handle: %v", err)
+	}
+	defer h.Close()
+
+	leakPrefix, excludedPrefix, source, destination, address := "198.20.0.0/16", "198.20.1.0/24", "203.0.113.99", "198.20.1.5", "203.0.113.1/24"
+	family := unix.AF_INET
+	if ipv6 {
+		leakPrefix, excludedPrefix = "2001:db8:20::/48", "2001:db8:20:1::/64"
+		source, destination, address = "2001:db8:ffff::99", "2001:db8:20:1::5", "2001:db8:ffff::1/64"
+		family = unix.AF_INET6
+	}
+	mgr := &nextTableManager{ops: dscpRuleOps{h}}
+	routes := []*config.StaticRoute{
+		{Destination: leakPrefix, NextTable: "red"},
+		{Destination: excludedPrefix}, // no disposition: StaticRouteExcludedReason excludes it
+		{Destination: "0.0.0.0/0", Discard: true},
+	}
+	if ipv6 {
+		routes[2] = &config.StaticRoute{Destination: "::/0", Discard: true}
+	}
+	if err := mgr.Apply(routes, []*config.RoutingInstanceConfig{{Name: "red", TableID: 100}}, []string{"xwan"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	rules, err := h.RuleList(family)
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	for _, rule := range rules {
+		if isNextTableMainCarveoutShape(rule) && rule.Dst.String() == excludedPrefix {
+			t.Fatalf("FRR-excluded static route created a main exception: %+v", rule)
+		}
+	}
+
+	run := func(args ...string) (string, error) {
+		if ipv6 {
+			args = append([]string{"-6"}, args...)
+		}
+		out, err := exec.Command("ip", args...).CombinedOutput()
+		return string(out), err
+	}
+	for _, cmd := range [][]string{
+		{"link", "add", "xwan", "type", "dummy"},
+		{"link", "add", "xred", "type", "dummy"},
+		{"link", "set", "xwan", "up"},
+		{"link", "set", "xred", "up"},
+	} {
+		if out, err := run(cmd...); err != nil {
+			t.Fatalf("ip %v: %s: %v", cmd, out, err)
+		}
+	}
+	if out, err := run("addr", "add", address, "dev", "xwan"); err != nil {
+		t.Fatalf("add source address: %s: %v", out, err)
+	}
+	if out, err := run("route", "add", "blackhole", "default"); err != nil {
+		t.Fatalf("add broad blackhole default: %s: %v", out, err)
+	}
+	if out, err := run("route", "add", leakPrefix, "dev", "xred", "table", "100"); err != nil {
+		t.Fatalf("add target-table route: %s: %v", out, err)
+	}
+	get := func() string {
+		out, _ := run("route", "get", destination, "from", source, "iif", "xwan")
+		return out
+	}
+	if got := get(); !strings.Contains(got, "dev xred") {
+		t.Errorf("excluded static with target hit = %q, want target table via xred", got)
+	}
+	if out, err := run("route", "del", leakPrefix, "dev", "xred", "table", "100"); err != nil {
+		t.Fatalf("remove target-table route: %s: %v", out, err)
+	}
+	if got := strings.ToLower(get()); !strings.Contains(got, "unreachable") {
+		t.Errorf("excluded static with target miss = %q, want the next-table unreachable shadow", got)
+	}
 }

@@ -48,10 +48,11 @@ therefore no longer shadows a leaked connected prefix.
 Kernel PBR rules use 29000-29999. Next-table and rib-group per-prefix leaks
 share the following 30000-30999 priority range and use four slots per prefix.
 More-specific prefixes precede less-specific ones regardless of leak kind or
-source table; for an equal prefix, the main-table probe precedes the
-next-table target lookup, which precedes its unreachable shadow, and all three
-precede rib-group lookup. This makes kernel first-match routing honor
-longest-prefix ordering across overlapping leaks, as the userspace FIB does.
+source table. At a shared leak prefix, the next-table target lookup precedes
+its unreachable shadow, and both precede the rib-group lookup. A static
+main-table exception uses slot 0 at its own, strictly more-specific prefix.
+This makes kernel first-match routing honor longest-prefix ordering across
+overlapping leaks, as the userspace FIB does.
 The nested `10.0.0.0/8` and `10.1.2.0/24` regression covers both declaration
 orders and both leak kinds (#11396).
 
@@ -61,17 +62,34 @@ override before looking up destination routes. Before #11319, the kernel's
 next-table (100-199) and rib-group (30000-30999) bands both sorted ahead of PBR
 (31000-31999), so a leak could select a different table for the same packet.
 
-Since #16614, each admitted config next-table leak installs three scoped rules
-per default-instance ingress interface: a main-table probe with
-`suppress_prefixlen` equal to the route prefix length, the target lookup, and a
-selector-identical `unreachable` shadow. Their adjacent priorities are derived
-from the same prefix sequence, so a more-specific main-table route can satisfy
-the probe before a broader next-table leak is considered. If the main probe
-misses, a target-table miss ends ENETUNREACH rather than falling through to
-main's default (usually the WAN). In the AF_XDP FIB the same static is a Junos
-route in inet.0 (`next_table_route`, protocol v73): it competes by LPM
-(prefix, then preference), and a target miss is terminal RejectRoute. Rib-group
-leaks retain their kernel-model fall-through behavior.
+Since #16614, each admitted config next-table leak installs two scoped rules
+per default-instance ingress interface: the target lookup and a
+selector-identical `unreachable` shadow. To retain the bounded Junos carve-out
+semantics without a blanket main-table probe, the manager also installs a
+destination- and iif-scoped slot-0 main lookup for each configured, FRR-emitted
+non-next-table static route strictly more specific than a matching admitted
+config next-table prefix. `StaticRouteExcludedReason` filters statics FRR will
+not install (including `no-install`, unusable destinations, family-mismatched
+gateways, and routes with no forwarding disposition); valid discard/reject
+and qualified-next-hop statics remain eligible.
+Each exception is installed only after the leak's unreachable-shadow/target-
+lookup pairs and uses `suppress_prefixlen = route_prefix_length - 1`, so an
+absent configured route does not expose a broader ordinary main route.
+Linux does not suppress terminal blackhole/unreachable results: if FRR or an
+operator removes the main static route outside xpf's apply path, the exception
+follows the current main-table terminal answer and fails closed instead of
+rescuing that destination through the target. A target-table miss still ends
+`ENETUNREACH` rather than falling through to main's default (usually the WAN).
+In the AF_XDP FIB, a more-specific source-table route participates only when a
+configured next-table route covers the destination; a rib-group-only leak keeps
+lookup-first behavior in both models.
+
+Exceptions deliberately enumerate only `Apply`'s configured static routes.
+Dynamic, connected, and learned main routes are not discoverable from this
+static set; their full carve-out parity is the design follow-up filed as
+#17971. Until then, the Rust FIB retains Junos LPM semantics for these route
+classes when a config next-table route covers the destination, so this remains
+a documented kernel-model limitation.
 
 The old next-table and PBR bands are retained only for upgrade cleanup:
 `nextTableManager.clear()` removes stale rules at 32000-32099 and 100-199, and

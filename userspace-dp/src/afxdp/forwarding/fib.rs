@@ -679,6 +679,7 @@ fn lookup_forwarding_resolution_v4_suppressing(
         table,
         depth,
         true,
+        false,
         allow_tunnels,
         ecmp_flow_hash,
         suppress_nat_local,
@@ -855,6 +856,7 @@ fn try_deferred_leaks_v4(
             next_table_name.as_ref(),
             depth + 1,
             false,
+            true,
             allow_tunnels,
             ecmp_flow_hash,
             suppress_nat_local,
@@ -900,6 +902,7 @@ fn try_deferred_leaks_v6(
             next_table_name.as_ref(),
             depth + 1,
             false,
+            true,
             allow_tunnels,
             ecmp_flow_hash,
             suppress_nat_local,
@@ -1081,19 +1084,20 @@ fn lookup_forwarding_resolution_v4_inner(
     table: &str,
     depth: usize,
     evaluate_leaks: bool,
+    include_interface_nat_owner: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
     suppress_nat_local: Option<IpAddr>,
 ) -> ForwardingLookupResult {
     // Per-table local entries retain their existing priority. Interface-NAT
-    // ownership is admitted only for leak-target walks (`!evaluate_leaks`);
-    // the ordinary source-table lookup leaves it to the session-miss gate.
+    // ownership is admitted only for leak-target walks; it is independent of
+    // whether this invocation evaluates the leak-rule stage.
     // Both outcomes precede the depth guard.
     if let Some(resolution) = local_delivery_resolution_v4_suppressing(
         state,
         ip,
         table,
-        !evaluate_leaks,
+        include_interface_nat_owner,
         suppress_nat_local,
     ) {
         return selected_route_lookup_result(state, table, resolution);
@@ -1131,7 +1135,7 @@ fn lookup_forwarding_resolution_v4_inner(
                     .as_ref()
                     .is_some_and(|(priority, winner)| match winner {
                         JunosNextTable::SourceTable { prefix_len } => {
-                            *prefix_len > leak.prefix.prefix_len()
+                            *prefix_len >= leak.prefix.prefix_len()
                         }
                         _ => *priority <= leak.rule_priority,
                     })
@@ -1170,6 +1174,7 @@ fn lookup_forwarding_resolution_v4_inner(
                     next_table_name.as_ref(),
                     depth + 1,
                     false,
+                    true,
                     allow_tunnels,
                     ecmp_flow_hash,
                     suppress_nat_local,
@@ -1441,6 +1446,7 @@ fn lookup_forwarding_resolution_v6_suppressing(
         table,
         depth,
         true,
+        false,
         allow_tunnels,
         ecmp_flow_hash,
         suppress_nat_local,
@@ -1516,6 +1522,7 @@ fn lookup_forwarding_resolution_v6_inner(
     table: &str,
     depth: usize,
     evaluate_leaks: bool,
+    include_interface_nat_owner: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
     suppress_nat_local: Option<IpAddr>,
@@ -1524,7 +1531,7 @@ fn lookup_forwarding_resolution_v6_inner(
         state,
         ip,
         table,
-        !evaluate_leaks,
+        include_interface_nat_owner,
         suppress_nat_local,
     ) {
         return selected_route_lookup_result(state, table, resolution);
@@ -1561,7 +1568,7 @@ fn lookup_forwarding_resolution_v6_inner(
                     .as_ref()
                     .is_some_and(|(priority, winner)| match winner {
                         JunosNextTable::SourceTable { prefix_len } => {
-                            *prefix_len > leak.prefix.prefix_len()
+                            *prefix_len >= leak.prefix.prefix_len()
                         }
                         _ => *priority <= leak.rule_priority,
                     })
@@ -1598,6 +1605,7 @@ fn lookup_forwarding_resolution_v6_inner(
                     next_table_name.as_ref(),
                     depth + 1,
                     false,
+                    true,
                     allow_tunnels,
                     ecmp_flow_hash,
                     suppress_nat_local,
@@ -1880,13 +1888,11 @@ enum JunosNextTable {
 }
 
 /// #17684: merge configured next-table rules with the main-table LPM result.
-/// A more-specific ordinary/discard/reject row suppresses a broader config
-/// hand-off or kernel leak, but a broad main route does not: slot-0 main
-/// exceptions are scoped to the source route's own prefix, while broad
-/// terminal defaults remain behind the target lookup. Go's RPDB exception
-/// rules enumerate only configured static routes; dynamic/connected/learned
-/// route parity remains the design follow-up in #17971, while this model keeps
-/// Junos LPM semantics for all source-table routes.
+/// A more-specific ordinary/discard/reject main row participates only when a
+/// matching configured next-table route is broader—the same condition under
+/// which Go emits its slot-0 static exception. Kernel-model rib-group-only
+/// rules retain lookup-first behavior; their main-route parity is outside this
+/// bounded exception mechanism.
 fn junos_next_table_winner_v4(
     state: &ForwardingState,
     ip: Ipv4Addr,
@@ -1921,16 +1927,12 @@ fn junos_next_table_winner_v4(
                 JunosNextTable::HandOff(route.next_table.clone()),
             ));
         }
-        let more_specific_than_leak = routes.iter().any(|candidate| {
+        let more_specific_than_config = routes.iter().any(|candidate| {
             candidate.next_table_route
                 && candidate.prefix.contains(ip)
                 && candidate.prefix.prefix_len() < len
-        }) || state.leak_rules_v4.get(table).is_some_and(|leaks| {
-            leaks.iter().any(|leak| {
-                !leak.post_table && leak.prefix.contains(ip) && leak.prefix.prefix_len() < len
-            })
         });
-        if more_specific_than_leak {
+        if more_specific_than_config {
             return Some((
                 route.rule_priority,
                 JunosNextTable::SourceTable { prefix_len: len },
@@ -1974,16 +1976,12 @@ fn junos_next_table_winner_v6(
                 JunosNextTable::HandOff(route.next_table.clone()),
             ));
         }
-        let more_specific_than_leak = routes.iter().any(|candidate| {
+        let more_specific_than_config = routes.iter().any(|candidate| {
             candidate.next_table_route
                 && candidate.prefix.contains(ip)
                 && candidate.prefix.prefix_len() < len
-        }) || state.leak_rules_v6.get(table).is_some_and(|leaks| {
-            leaks.iter().any(|leak| {
-                !leak.post_table && leak.prefix.contains(ip) && leak.prefix.prefix_len() < len
-            })
         });
-        if more_specific_than_leak {
+        if more_specific_than_config {
             return Some((
                 route.rule_priority,
                 JunosNextTable::SourceTable { prefix_len: len },
@@ -2014,6 +2012,7 @@ fn resolve_junos_next_table_v4(
                 next_table.as_ref(),
                 depth + 1,
                 false,
+                true,
                 allow_tunnels,
                 ecmp_flow_hash,
                 suppress_nat_local,
@@ -2030,6 +2029,7 @@ fn resolve_junos_next_table_v4(
             ip,
             table,
             depth,
+            false,
             false,
             allow_tunnels,
             ecmp_flow_hash,
@@ -2059,6 +2059,7 @@ fn resolve_junos_next_table_v6(
                 next_table.as_ref(),
                 depth + 1,
                 false,
+                true,
                 allow_tunnels,
                 ecmp_flow_hash,
                 suppress_nat_local,
@@ -2075,6 +2076,7 @@ fn resolve_junos_next_table_v6(
             ip,
             table,
             depth,
+            false,
             false,
             allow_tunnels,
             ecmp_flow_hash,

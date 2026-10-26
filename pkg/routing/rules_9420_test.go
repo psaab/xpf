@@ -54,8 +54,9 @@ func TestNextTableRulesIngressScope_9420(t *testing.T) {
 			case isNextTableLegacyMainProbeShape(r):
 				t.Errorf("family %d: unexpected legacy main-table probe: %+v", family, r)
 			case isNextTableMainCarveoutShape(r):
-				if r.Table != mainTableID || r.SuppressPrefixlen != -1 {
-					t.Errorf("family %d: malformed main-table carve-out: %+v", family, r)
+				prefixLength, _ := r.Dst.Mask.Size()
+				if r.Table != mainTableID || r.SuppressPrefixlen != prefixLength-1 {
+					t.Errorf("family %d: malformed guarded main-table carve-out: %+v", family, r)
 				}
 			case isNextTableMissTerminatorShape(r):
 				if r.Type != nl.FR_ACT_UNREACHABLE {

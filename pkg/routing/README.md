@@ -393,11 +393,22 @@ external networkd restart is healed without a commit.
   unreachable default is terminal even when `SuppressPrefixlen` is set, so it
   can prevent a more-specific next-table target lookup from running. Target
   lookup therefore precedes broad main routes. To retain Junos carve-outs,
-  the manager adds slot-0 main lookups for configured non-next-table static
-  routes strictly inside matching next-table prefixes, scoped to the same
-  default-instance ingress interfaces. The exception set is bounded by the
-  static configuration; dynamic, connected, and learned main routes remain
-  the follow-up design tracked in #17971.
+  the manager adds slot-0 main lookups only for configured, FRR-emitted
+  non-next-table statics more specific than admitted config next-table
+  prefixes. Each exception matches only its static destination prefix and
+  ingress interface. `config.StaticRouteExcludedReason` is the shared emission
+  predicate; iif-scoping keeps the exceptions inside the default-instance
+  ingress set. Exceptions are installed after target lookups and their
+  prefix length, excluding broader ordinary fallbacks when the configured
+  route is absent. Linux still treats blackhole/unreachable results as
+  terminal despite suppression: if the main static route is withdrawn outside
+  xpf's apply path, the exception follows the current main-table terminal
+  answer and fails closed rather than rescuing the destination through the leak.
+
+  The AF_XDP FIB applies source-table LPM precedence only when a configured
+  next-table route covers the destination. Rib-group-only leaks keep
+  lookup-first behavior. Exceptions are limited to static config routes;
+  dynamic, connected, and learned main routes remain the #17971 follow-up.
 
   The `maxNextTableRules` admission cap remains separate from priority
   assignment. Its eligible routes are drawn down IPv4-first (#6583), with

@@ -492,10 +492,11 @@ var oracleIfindexes9955 = map[string]int{
 }
 
 // kernelStageOracle9955 is an expectation-only kernel model for corpus rows.
-// Configured static main-table routes strictly more specific than a matching
-// next-table prefix get slot-0 carve-outs; target lookups and the ordinary main
-// lookup otherwise follow their installed prefix-derived priorities.
+// Only config-authored NextTableRoute rows authorize a slot-0 static main
+// exception; injected kernel-model leak rows do not. Target lookups and the
+// ordinary main lookup otherwise follow their installed prefix-derived priorities.
 func kernelStageOracle9955(routes []RouteSnapshot, destination string) int {
+
 	ip := net.ParseIP(destination)
 	if ip == nil {
 		return 0
@@ -525,6 +526,9 @@ func kernelStageOracle9955(routes []RouteSnapshot, destination string) int {
 	exceptionPriority := -1
 	if mainHit {
 		for _, leak := range leaks {
+			if !leak.NextTableRoute {
+				continue
+			}
 			_, network, err := net.ParseCIDR(leak.Destination)
 			if err != nil || network == nil {
 				continue
@@ -673,8 +677,9 @@ func corpusControlShapes9955(t *testing.T) []leakCorpusShape9955 {
 			})
 		}
 
-		// A more-specific configured main route gets a slot-0 exception ahead
-		// of the broader target lookup, so stage 1 must choose main.
+		// These corpus rows carry ordinary main routes plus an injected live
+		// lookup, not a config-authored NextTableRoute; no exception exists, so
+		// the target hit wins.
 		cfg = baseLeakConfig9955()
 		addTargetRoutesForShape9955(cfg, family, true, false)
 		if family == "inet6" {
@@ -688,6 +693,24 @@ func corpusControlShapes9955(t *testing.T) []leakCorpusShape9955 {
 			shapes = append(shapes, leakCorpusShape9955{
 				name: "leak_versus_ordinary_inet_9955", destination: leakProbeV4_9955, cfg: cfg,
 				rulesV4: []netlink.Rule{{Dst: mustCIDR9955(t, "10.0.0.0/8"), Table: 501, Priority: config.RouteLeakNextTableLookupPriority(8, 32)}},
+			})
+		}
+
+		// Rib-group-only lookups also have no config-owned slot-0 exception:
+		// a more-specific static main route must not preempt their target hit.
+		cfg = baseLeakConfig9955()
+		addTargetRoutesForShape9955(cfg, family, true, false)
+		if family == "inet6" {
+			cfg.RoutingOptions.Inet6StaticRoutes = []*config.StaticRoute{targetRoute9955("2001:db8:1::/64", "2001:db8:52::1@ge-0/0/14.50")}
+			shapes = append(shapes, leakCorpusShape9955{
+				name: "rib_group_only_versus_ordinary_inet6_9955", destination: leakProbeV6_9955, cfg: cfg,
+				rulesV6: []netlink.Rule{{Dst: mustCIDR9955(t, "2001:db8::/32"), Table: 501, Priority: config.RouteLeakRulePriority(32, 128, config.RouteLeakRibGroup)}},
+			})
+		} else {
+			cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{targetRoute9955("10.1.2.0/24", "172.16.52.1@ge-0/0/14.50")}
+			shapes = append(shapes, leakCorpusShape9955{
+				name: "rib_group_only_versus_ordinary_inet_9955", destination: leakProbeV4_9955, cfg: cfg,
+				rulesV4: []netlink.Rule{{Dst: mustCIDR9955(t, "10.0.0.0/8"), Table: 501, Priority: config.RouteLeakRulePriority(8, 32, config.RouteLeakRibGroup)}},
 			})
 		}
 

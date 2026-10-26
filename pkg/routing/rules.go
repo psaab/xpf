@@ -178,41 +178,10 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		return errors.Join(errs...)
 	}
 
-	// The target lookup must run before any broad main-table terminal default.
-	// Preserve only the bounded config-owned carve-outs: for each configured
-	// non-next-table static route (ordinary or terminal) strictly more specific
-	// than a matching next-table prefix, install a main lookup at that route's
-	// prefix-derived slot 0, scoped to the same ingress interfaces.
-	// Dynamic, connected, and learned main routes remain the follow-up
-	// design in #17971.
-	var carveoutErrs []error
-	var addedCarveouts []*netlink.Rule
-	for _, rule := range nextTableMainCarveoutRules(routes, tableIDs, ingressIfaces) {
-		if err := n.ops.RuleAdd(rule); err != nil {
-			if !isRuleAlreadyPresent(err) {
-				carveoutErrs = append(carveoutErrs, fmt.Errorf(
-					"add next-table static main-table carve-out destination %s iif %s: %w",
-					rule.Dst, rule.IifName, err))
-			}
-		} else {
-			addedCarveouts = append(addedCarveouts, rule)
-		}
-	}
-	if len(carveoutErrs) != 0 {
-		for _, rule := range addedCarveouts {
-			if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
-				carveoutErrs = append(carveoutErrs, fmt.Errorf(
-					"roll back next-table static main-table carve-out destination %s iif %s: %w",
-					rule.Dst, rule.IifName, err))
-			}
-		}
-		errs = append(errs, carveoutErrs...)
-		return errors.Join(errs...)
-	}
-
 	// Admission counts rule slots reserved by each eligible leak. It is
 	// independent of rule priority and install/rollback outcome.
 	admitted := 0
+	var installedLeakRoutes []*config.StaticRoute
 	for i, sr := range routes {
 		if sr == nil || sr.NoInstall || sr.NextTable == "" {
 			continue
@@ -276,33 +245,13 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		// later fault/rollback cannot admit a further leak past it (GPT-1).
 		admitted += len(ingressIfaces)
 
-		// Keep misses fail-closed with the target lookup followed by an
-		// unreachable shadow. More-specific configured static main routes have
-		// separate slot-0, iif-scoped exceptions installed before these leak
-		// rules; dynamic main-table routes remain outside this bounded mechanism
-		// (#17971).
+		// Install the unreachable shadow before the lookup. If a target-table
+		// miss occurs during reconciliation, the shadow already fails closed
+		// instead of briefly falling through to main.
 		leakFailed := false
 		var leakRules []*netlink.Rule
 		var shadowRules []*netlink.Rule
 		for _, iif := range ingressIfaces {
-			rule := netlink.NewRule()
-			rule.Dst = dst
-			rule.Table = tableID
-			rule.Priority = priority
-			rule.Family = family
-			rule.IifName = iif
-			if err := n.ops.RuleAdd(rule); err != nil {
-				if !isRuleAlreadyPresent(err) {
-					errs = append(errs, fmt.Errorf(
-						"add next-table rule destination %s instance %s table %d iif %s: %w",
-						sr.Destination, sr.NextTable, tableID, iif, err))
-					leakFailed = true
-					break
-				}
-			} else {
-				leakRules = append(leakRules, rule)
-			}
-
 			shadow := netlink.NewRule()
 			shadow.Dst = dst
 			shadow.Table = -1
@@ -321,21 +270,42 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 			} else {
 				shadowRules = append(shadowRules, shadow)
 			}
+
+			rule := netlink.NewRule()
+			rule.Dst = dst
+			rule.Table = tableID
+			rule.Priority = priority
+			rule.Family = family
+			rule.IifName = iif
+			if err := n.ops.RuleAdd(rule); err != nil {
+				if !isRuleAlreadyPresent(err) {
+					errs = append(errs, fmt.Errorf(
+						"add next-table rule destination %s instance %s table %d iif %s: %w",
+						sr.Destination, sr.NextTable, tableID, iif, err))
+					leakFailed = true
+					break
+				}
+			} else {
+				leakRules = append(leakRules, rule)
+			}
 		}
 		if leakFailed {
+			failedLookupIifs := make(map[string]struct{})
 			for _, rule := range leakRules {
 				if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
+					failedLookupIifs[rule.IifName] = struct{}{}
 					errs = append(errs, fmt.Errorf(
 						"roll back next-table rule destination %s instance %s table %d iif %s: %w",
 						sr.Destination, sr.NextTable, tableID, rule.IifName, err))
 				}
 			}
-			// A shadow whose lookup rolled back must not linger: it
-			// would blackhole the prefix with no leak behind it. A
-			// failed shadow delete is aggregated like any rollback
-			// failure; the residue is still fail-closed, never a leak
-			// into main.
+			// Retain the paired unreachable shadow whenever its target lookup
+			// could not be removed. Otherwise remove shadows for lookups that
+			// rolled back cleanly; an orphan shadow is fail-closed.
 			for _, shadow := range shadowRules {
+				if _, lookupRemains := failedLookupIifs[shadow.IifName]; lookupRemains {
+					continue
+				}
 				if err := n.ops.RuleDel(shadow); err != nil && !isRuleAlreadyGone(err) {
 					errs = append(errs, fmt.Errorf(
 						"roll back next-table miss terminator destination %s instance %s iif %s: %w",
@@ -344,11 +314,45 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 			}
 			continue
 		}
+		installedLeakRoutes = append(installedLeakRoutes, sr)
 		slog.Info("next-table rule added",
 			"destination", sr.Destination, "instance", sr.NextTable, "table", tableID,
 			"ingress_interfaces", len(ingressIfaces))
 	}
 	// Desired rules are re-added; surface any clear/add/return failure.
+	// Install static main-table exceptions only after every successfully
+	// installed unreachable-shadow/target-lookup pair. A failed shadow add
+	// therefore cannot leave an earlier target or exception lookup unguarded.
+	definedInstances := make(map[string]struct{}, len(tableIDs))
+	for name := range tableIDs {
+		definedInstances[name] = struct{}{}
+	}
+	admittedLeakRoutes := nextTableAdmittedRoutes(installedLeakRoutes, tableIDs, len(ingressIfaces))
+	var carveoutErrs []error
+	var addedCarveouts []*netlink.Rule
+	for _, rule := range nextTableMainCarveoutRules(routes, admittedLeakRoutes, definedInstances, ingressIfaces) {
+		if err := n.ops.RuleAdd(rule); err != nil {
+			if !isRuleAlreadyPresent(err) {
+				carveoutErrs = append(carveoutErrs, fmt.Errorf(
+					"add next-table static main-table carve-out destination %s iif %s: %w",
+					rule.Dst, rule.IifName, err))
+			}
+		} else {
+			addedCarveouts = append(addedCarveouts, rule)
+		}
+	}
+	if len(carveoutErrs) != 0 {
+		for _, rule := range addedCarveouts {
+			if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
+				carveoutErrs = append(carveoutErrs, fmt.Errorf(
+					"roll back next-table static main-table carve-out destination %s iif %s: %w",
+					rule.Dst, rule.IifName, err))
+			}
+		}
+		errs = append(errs, carveoutErrs...)
+		return errors.Join(errs...)
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -411,14 +415,48 @@ func DefaultInstanceIngressIfaces(cfg *config.Config) []string {
 	return config.DefaultInstanceIngressIfaces(cfg)
 }
 
-// nextTableMainCarveoutRules returns one iif-scoped main-table lookup for each
-// configured non-next-table static prefix strictly more specific than a
-// matching, eligible configured next-table prefix. This intentionally does
-// not inspect the live main table: dynamic, connected, and learned routes
-// require the follow-up mechanism tracked in #17971.
-func nextTableMainCarveoutRules(
+// nextTableAdmittedRoutes mirrors Apply's eligibility and IPv4-first cap
+// accounting so main exceptions are derived only from leak prefixes that fit
+// the same admission window.
+func nextTableAdmittedRoutes(
 	routes []*config.StaticRoute,
 	tableIDs map[string]int,
+	ingressCount int,
+) []*config.StaticRoute {
+	if ingressCount <= 0 {
+		return nil
+	}
+	admitted := 0
+	var out []*config.StaticRoute
+	for _, route := range routes {
+		if route == nil || route.NoInstall || route.NextTable == "" {
+			continue
+		}
+		if _, ok := tableIDs[route.NextTable]; !ok {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(route.Destination); err != nil {
+			continue
+		}
+		if admitted+ingressCount > maxNextTableRules {
+			break
+		}
+		admitted += ingressCount
+		out = append(out, route)
+	}
+	return out
+}
+
+// nextTableMainCarveoutRules derives destination- and iif-scoped main lookups
+// for configured non-next-table static routes which FRR actually installs and
+// which are more specific than an admitted next-table leak prefix. If FRR or
+// an operator withdraws a route outside Apply, a broad main-table terminal
+// answer remains fail-closed within that destination prefix. Dynamic,
+// connected, and learned main routes require the follow-up mechanism tracked
+// in #17971.
+func nextTableMainCarveoutRules(
+	routes, admittedLeakRoutes []*config.StaticRoute,
+	definedInstances map[string]struct{},
 	ingressIfaces []string,
 ) []*netlink.Rule {
 	type prefix struct {
@@ -427,11 +465,8 @@ func nextTableMainCarveoutRules(
 		prefixLen int
 	}
 	var leakPrefixes []prefix
-	for _, route := range routes {
+	for _, route := range admittedLeakRoutes {
 		if route == nil || route.NoInstall || route.NextTable == "" {
-			continue
-		}
-		if _, ok := tableIDs[route.NextTable]; !ok {
 			continue
 		}
 		_, dst, err := net.ParseCIDR(route.Destination)
@@ -454,11 +489,12 @@ func nextTableMainCarveoutRules(
 	}
 	seen := make(map[carveoutKey]struct{})
 	for _, route := range routes {
-		if route == nil || route.NoInstall || route.NextTable != "" {
+		if route == nil || route.NextTable != "" ||
+			config.StaticRouteExcludedReason(route, false, definedInstances) != "" {
 			continue
 		}
-		_, dst, err := net.ParseCIDR(route.Destination)
-		if err != nil {
+		dst, ok := staticRouteDestinationPrefix(route.Destination)
+		if !ok {
 			continue
 		}
 		prefixLen, addressBits := dst.Mask.Size()
@@ -488,10 +524,29 @@ func nextTableMainCarveoutRules(
 			rule.Priority = config.RouteLeakNextTableCarveoutPriority(prefixLen, addressBits)
 			rule.Family = family
 			rule.IifName = iif
+			rule.SuppressPrefixlen = prefixLen - 1
 			rules = append(rules, rule)
 		}
 	}
 	return rules
+}
+
+// staticRouteDestinationPrefix mirrors StaticRouteExcludedReason's accepted
+// destination forms for configured statics: CIDR prefixes and bare host IPs.
+func staticRouteDestinationPrefix(destination string) (*net.IPNet, bool) {
+	if _, dst, err := net.ParseCIDR(destination); err == nil {
+		return dst, true
+	}
+	ip := net.ParseIP(destination)
+	if ip == nil {
+		return nil, false
+	}
+	bits := 128
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+		bits = 32
+	}
+	return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, true
 }
 
 // nextTableFamilyOrdered returns routes stably partitioned IPv4-first, so the
@@ -655,18 +710,23 @@ func isNextTableLegacyMainProbeShape(r netlink.Rule) bool {
 }
 
 // isNextTableMainCarveoutShape recognizes the iif-scoped, slot-0 main lookup
-// derived from a configured non-next-table static route. A selector-free
-// priority check distinguishes it from target lookups; old suppressed probes
-// are recognized separately for upgrade cleanup.
+// derived from a configured non-next-table static route. The suppression
+// boundary excludes broader ordinary main routes, while Linux terminal
+// blackhole/unreachable results still abort RPDB evaluation. If the configured
+// main route is withdrawn outside xpf's apply path, the exception follows that
+// current main-table terminal result and fails closed. An unsuppressed shape
+// is also recognized so clear() removes the immediately preceding form.
 func isNextTableMainCarveoutShape(r netlink.Rule) bool {
 	if r.Dst == nil || r.IifName == "" || r.Src != nil || r.OifName != "" ||
 		r.Table != mainTableID {
 		return false
 	}
 	prefixLength, addressBits := r.Dst.Mask.Size()
-	return prefixLength >= 0 && addressBits > 0 &&
+	suppressed := r.SuppressPrefixlen == prefixLength-1
+	legacy := r.SuppressPrefixlen == -1
+	return prefixLength > 0 && addressBits > 0 &&
 		r.Priority == config.RouteLeakNextTableCarveoutPriority(prefixLength, addressBits) &&
-		hasNoAdditionalRuleSelectors(r)
+		(suppressed || legacy) && hasNoAdditionalRuleSelectorsExceptPrefixlen(r)
 }
 
 // isNextTableMissTerminatorShape reports a listed legacy or current shadow.
