@@ -166,6 +166,28 @@ func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
 	d.dhcpServer = rec
 	d.getOrCreateRGState(1).SetCluster(true)
 	d.getOrCreateRGState(2).SetCluster(true)
+	if _, err := d.store.LoadSet(
+		"set chassis cluster no-private-rg-election\n" +
+			"set chassis cluster reth-count 2\n" +
+			"set chassis cluster redundancy-group 2 node 0 priority 100\n" +
+			"set interfaces ge-0/0/1 gigether-options redundant-parent reth1\n" +
+			"set interfaces reth1 redundant-ether-options redundancy-group 2\n" +
+			"set interfaces reth1 unit 0 family inet address 10.0.72.1/24\n" +
+			"set interfaces reth1 unit 0 family inet6 address 2001:db8:72::1/64\n" +
+			"delete system services dhcp-local-server group g1\n" +
+			"delete system services dhcpv6-local-server group g6\n" +
+			"set system services dhcp-local-server group authority4 interface reth1.0\n" +
+			"set system services dhcp-local-server group authority4 pool p4 subnet 10.0.72.0/24\n" +
+			"set system services dhcp-local-server group authority4 pool p4 address-range low 10.0.72.100 high 10.0.72.199\n" +
+			"set system services dhcpv6-local-server group authority6 interface reth1.0\n" +
+			"set system services dhcpv6-local-server group authority6 pool p6 subnet 2001:db8:72::/64\n" +
+			"set system services dhcpv6-local-server group authority6 pool p6 address-range low 2001:db8:72::100 high 2001:db8:72::199",
+	); err != nil {
+		t.Fatalf("LoadSet authority scopes: %v", err)
+	}
+	if _, err := d.store.Commit(); err != nil {
+		t.Fatalf("Commit authority scopes: %v", err)
+	}
 	d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
 		{Family: 4, Address: "10.0.72.80", HWAddress: "02:00:00:00:72:80",
 			SubnetID: 2, Remaining: 3600, State: 0},
@@ -184,10 +206,16 @@ func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
 		t.Fatalf("v6 pre-seed did not receive stillMastering=true: %v", rec.preSeed6StillMastering)
 	}
 	wantAuthority4 := d.dhcpLeaseAuthority(d.store.ActiveConfig(), 4)
+	if got := wantAuthority4.Scopes; len(got) != 1 || got[0].Family != 4 || got[0].RGID != 2 || got[0].CIDR != "10.0.72.0/24" || !got[0].Served {
+		t.Fatalf("v4 test authority scope = %+v, want family=4 RG=2 CIDR=10.0.72.0/24 served", got)
+	}
 	if len(rec.preSeed4Authority) != 1 || !reflect.DeepEqual(rec.preSeed4Authority[0], wantAuthority4) {
 		t.Fatalf("v4 pre-seed did not receive lease authority %+v: %v", wantAuthority4, rec.preSeed4Authority)
 	}
 	wantAuthority6 := d.dhcpLeaseAuthority(d.store.ActiveConfig(), 6)
+	if got := wantAuthority6.Scopes; len(got) != 1 || got[0].Family != 6 || got[0].RGID != 2 || got[0].CIDR != "2001:db8:72::/64" || !got[0].Served {
+		t.Fatalf("v6 test authority scope = %+v, want family=6 RG=2 CIDR=2001:db8:72::/64 served", got)
+	}
 	if len(rec.preSeed6Authority) != 1 || !reflect.DeepEqual(rec.preSeed6Authority[0], wantAuthority6) {
 		t.Fatalf("v6 pre-seed did not receive lease authority %+v: %v", wantAuthority6, rec.preSeed6Authority)
 	}
