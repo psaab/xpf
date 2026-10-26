@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chzyer/readline"
-
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
@@ -23,11 +21,11 @@ import (
 // #14986 gated dispatch on configOwned; these exit paths now share
 // session-scoped cleanup.
 //
-// TestConsoleEOFArmPreservesForeignHolder17838 calls handleConsoleEOF, the
-// exact method Run invokes for io.EOF. A TTY-less Run probe did not reliably
-// reach EOF on a pipe; the readLineFn seam reaches the arm but `-race` reports
-// an existing race between readline's terminal-width goroutine and Close.
-// The test pins the EOF arm at its Run-called method, per #17838.
+// TestConsoleEOFArmPreservesForeignHolder17838 and the own-session control
+// drive runOneLine, the exact per-iteration body Run executes, through its
+// readLineFn seam. Run itself creates readline on os.Stdin, so it cannot be
+// entered in a test without TTY/history side effects. The fixture keeps rl nil
+// because all tested EOF paths are nil-safe and do not need readline.
 //
 // Run's double-interrupt loop is extracted into handleConsoleInterrupts,
 // the exact method started by Run. TestConsoleDoubleInterruptArm17838 feeds
@@ -63,15 +61,13 @@ func consoleStore16793(t *testing.T, holder string) *configstore.Store {
 
 func consoleCLI16793(t *testing.T, store *configstore.Store, owned bool) *CLI {
 	t.Helper()
-	rl, err := readline.NewEx(&readline.Config{Stdin: io.NopCloser(strings.NewReader("")), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatalf("readline.NewEx: %v", err)
+	c := &CLI{
+		store: store,
+		readLineFn: func() (string, error) {
+			return "", io.EOF
+		},
 	}
-	c := &CLI{store: store, rl: rl}
 	c.setConfigOwned(owned)
-	if owned {
-		c.rl.SetPrompt(c.configPrompt())
-	}
 	return c
 }
 
@@ -98,9 +94,6 @@ func TestConsoleEOFPreservesForeignHolder16793(t *testing.T) {
 	if got := store.ShowCandidateSet(); !strings.Contains(got, "staged-peer") {
 		t.Fatalf("peer candidate discarded by console EOF: %q (#16793)", got)
 	}
-	// The exit path returns nil from Run (treats EOF as op-mode exit).
-	// The helper contract is the stay==false branch.
-	_ = io.EOF
 }
 
 func TestConsoleEOFExitsOwnConfigMode16793(t *testing.T) {
@@ -121,9 +114,13 @@ func TestConsoleEOFExitsOwnConfigMode16793(t *testing.T) {
 	}
 	c := consoleCLI16793(t, store, true)
 
-	stay := false
-	out := captureStdout(t, func() { stay = c.handleConsoleEOF() })
-	if !stay {
+	done := true
+	var err error
+	out := captureStdout(t, func() { done, err = c.runOneLine() })
+	if err != nil {
+		t.Fatalf("runOneLine own-session EOF: %v", err)
+	}
+	if done {
 		t.Fatalf("EOF in own config mode exited console; want stay in loop (#16793 control)")
 	}
 	if !strings.Contains(out, "Exiting configuration mode") {
@@ -185,23 +182,28 @@ func TestConsoleEOFStaleOwnedForeignHolder16793(t *testing.T) {
 		t.Fatalf("stale-owned EOF freed foreign lock: %q/%v (#16793)", holder, locked)
 	}
 }
+
 func TestConsoleEOFArmPreservesForeignHolder17838(t *testing.T) {
 	store := consoleStore16793(t, "grpc-peer-1")
 	c := consoleCLI16793(t, store, false)
 
-	stay := false
-	out := captureStdout(t, func() { stay = c.handleConsoleEOF() })
-	if stay {
-		t.Fatalf("EOF arm with foreign holder stayed in loop; want exit (#17838)")
-	}
-	if strings.Contains(out, "Exiting configuration mode") {
-		t.Fatalf("EOF arm printed false exit banner for foreign holder: %q (#17838)", out)
+	done := false
+	var err error
+	out := captureStdout(t, func() { done, err = c.runOneLine() })
+	if err != nil {
+		t.Fatalf("runOneLine foreign-holder EOF: %v", err)
 	}
 	if holder, locked := store.ConfigHolder(); !locked || holder != "grpc-peer-1" {
 		t.Fatalf("EOF arm ConfigHolder = %q/%v, want grpc-peer-1/true (#17838 RED)", holder, locked)
 	}
 	if got := store.ShowCandidateSet(); !strings.Contains(got, "staged-peer") {
 		t.Fatalf("EOF arm discarded peer candidate: %q (#17838)", got)
+	}
+	if !done {
+		t.Fatalf("EOF arm with foreign holder stayed in loop; want exit (#17838)")
+	}
+	if strings.Contains(out, "Exiting configuration mode") {
+		t.Fatalf("EOF arm printed false exit banner for foreign holder: %q (#17838)", out)
 	}
 }
 

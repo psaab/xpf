@@ -580,6 +580,70 @@ func (c *CLI) SetFabricPeer(addrFn func() []string, vrfDeviceFn func() string) {
 	c.fabricVRFDeviceFn = vrfDeviceFn
 }
 
+// nextLine returns the next console input line. It prefers the readLineFn
+// test seam (via c.readLine) when one is installed and otherwise reads from
+// the live readline instance, so Run's loop is drivable in tests without a
+// TTY while production behaviour is unchanged.
+func (c *CLI) nextLine() (string, error) {
+	if c.readLineFn != nil {
+		return c.readLine()
+	}
+	return c.rl.Readline()
+}
+
+// runOneLine executes one iteration of Run's read/dispatch loop and reports
+// whether the console should exit (done). It is the exact per-iteration body
+// Run executes — including the io.EOF arm — extracted so tests can drive it
+// through the readLineFn seam (Run itself constructs its own readline on
+// os.Stdin and cannot be entered in a test).
+func (c *CLI) runOneLine() (done bool, err error) {
+	if c.store.IsConfirmPending() {
+		fmt.Println("[commit confirmed pending - issue 'commit' to confirm]")
+		if alarm := c.store.ConfirmAlarm(); alarm != "" {
+			fmt.Println("[ALARM: " + alarm + "]")
+		}
+	}
+	line, err := c.nextLine()
+	if err != nil {
+		if err == readline.ErrInterrupt {
+			return false, nil
+		}
+		if err == io.EOF {
+			// Ctrl-D: exit own config mode, or exit CLI if
+			// already in operational mode (or config mode is
+			// a foreign holder's — #16793).
+			if c.handleConsoleEOF() {
+				return false, nil
+			}
+			return true, nil
+		}
+		return false, err
+	}
+
+	var editPath []string
+	if c.store != nil {
+		editPath = c.store.GetEditPath()
+	}
+	if recErr := cliterm.RecordHistoryLineAt(editPath, c.historyFile, line); recErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: record history: %v\n", recErr)
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false, nil
+	}
+
+	if err := c.dispatch(line); err != nil {
+		if err == errExit {
+			return true, nil
+		}
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	}
+	// Refresh prompt after every command so cluster role
+	// changes (failover) are reflected immediately.
+	c.refreshPrompt()
+	return false, nil
+}
+
 // Run starts the interactive CLI loop.
 func (c *CLI) Run() error {
 	var err error
@@ -711,50 +775,13 @@ func (c *CLI) Run() error {
 			return nil
 		default:
 		}
-		if c.store.IsConfirmPending() {
-			fmt.Println("[commit confirmed pending - issue 'commit' to confirm]")
-			if alarm := c.store.ConfirmAlarm(); alarm != "" {
-				fmt.Println("[ALARM: " + alarm + "]")
-			}
-		}
-		line, err := c.rl.Readline()
+		done, err := c.runOneLine()
 		if err != nil {
-			if err == readline.ErrInterrupt {
-				continue
-			}
-			if err == io.EOF {
-				// Ctrl-D: exit own config mode, or exit CLI if
-				// already in operational mode (or config mode is
-				// a foreign holder's — #16793).
-				if c.handleConsoleEOF() {
-					continue
-				}
-				return nil
-			}
 			return err
 		}
-
-		var editPath []string
-		if c.store != nil {
-			editPath = c.store.GetEditPath()
+		if done {
+			return nil
 		}
-		if recErr := cliterm.RecordHistoryLineAt(editPath, c.historyFile, line); recErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: record history: %v\n", recErr)
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		if err := c.dispatch(line); err != nil {
-			if err == errExit {
-				return nil
-			}
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		}
-		// Refresh prompt after every command so cluster role
-		// changes (failover) are reflected immediately.
-		c.refreshPrompt()
 	}
 	// The read loop above never falls through — every exit is a `return`
 	// (exitCh, io.EOF at operational level, Readline error, or errExit from
