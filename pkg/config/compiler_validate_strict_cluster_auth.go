@@ -201,19 +201,17 @@ func validateStrictSessionAuthNeedsKeyStrict(cfg *Config) error {
 // commit believing they were protected, which is precisely the dual-master
 // window the leaf exists to close.
 //
-// Whitespace-normalised on both sides for the same reason the emptiness gate
-// is: a key differing only in surrounding whitespace is the same key to
-// anything that matters, and the runtime compares raw bytes, so a
-// trim-equal pair is an overlap that isn't.
+// Compare exact bytes: boundary whitespace inside a quoted PSK is part of the
+// authentication key, so trim-equal values still provide a real overlap.
 func validateClusterAuthKeyOverlapStrict(cfg *Config) error {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
-	alt := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal())
+	alt := cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()
 	if alt == "" {
 		return nil
 	}
-	if alt != strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()) {
+	if alt != cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal() {
 		return nil
 	}
 	// Neither key is echoed — the whole point of Secret.
@@ -292,11 +290,11 @@ func validateClusterAuthKeyOverlapStrict(cfg *Config) error {
 // Neither key is echoed — the whole point of Secret. The message names
 // the five-step procedure so the operator is sent to the overlap rather
 // than to a re-typed key.
-// clusterAcceptedKeys16858 is the active config's accepted key set: the
-// signing primary plus the accept-only additional key (#6630), trimmed.
-// It is the smallest state the #16858 interlock needs, carried in
-// compileOpts so the gate never holds the whole active *Config. Held
-// only for equality checks and never logged or rendered.
+// clusterAcceptedKeys16858 is the active config's exact-byte accepted key set:
+// the signing primary plus the accept-only additional key (#6630). It is the
+// smallest state the #16858 interlock needs, carried in compileOpts so the
+// gate never holds the whole active *Config. Held only for equality checks
+// and never logged or rendered.
 type clusterAcceptedKeys16858 struct {
 	primary    string
 	additional string
@@ -306,7 +304,7 @@ func validateClusterAuthKeyTransitionStrict(cfg *Config, active *clusterAccepted
 	if cfg == nil || cfg.Chassis.Cluster == nil || active == nil {
 		return nil
 	}
-	candidateSigning := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal())
+	candidateSigning := cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()
 	if candidateSigning == "" {
 		return nil
 	}
