@@ -1821,7 +1821,7 @@ mod gc_reap_nat64_release_tests_7740 {
         }
 
         #[test]
-        fn slice_pacing_constants_are_shared_after_extraction_13075() {
+        fn slice_pacing_constants_are_shared_after_extraction_17015() {
             const CONSTANTS: [&str; 6] = [
                 "EXPORT_SLICE_BUDGET",
                 "EXPORT_SLICE_EMITS",
@@ -1840,6 +1840,12 @@ mod gc_reap_nat64_release_tests_7740 {
                 .expect("read export_slice.rs");
             let ct_slice =
                 std::fs::read_to_string(source_dir.join("ct_slice.rs")).expect("read ct_slice.rs");
+            assert!(
+                slice_pacing.contains(
+                    "const _: () = assert!(EXPORT_SLICE_EMITS <= EXPORT_SLICE_BUDGET);"
+                ),
+                "slice pacing must keep the emit cap within the scanned-slot budget"
+            );
             for name in CONSTANTS {
                 let declaration = format!("const {name}:");
                 assert_eq!(

@@ -469,10 +469,8 @@ pub(crate) fn worker_loop(
     let mut last_session_import_repair_epoch =
         crate::afxdp::worker_queue::session_import_repair_epoch(worker_id);
     let mut session_import_repair_pending = false;
-    // #9856: resumable owner-RG CommandExport (multi-pass cursor). `None` =
-    // idle. Adopted from the tick's dispatch results when Export commands
-    // arrive; cleared on completion (after acking). Paced like the sweeps
-    // above: one budgeted slice per pass, RX/TX/heartbeat between slices.
+    // #9856: resumable owner-RG CommandExport cursor. `None` = idle,
+    // adopted from tick dispatch and cleared once the export is complete.
     let mut worker_export: Option<WorkerExportState> = None;
     // #9856: echo-batch scratch, reused across slices. The walk borrows
     // `sessions` shared, so the echo emits — which need `&mut` — run after
@@ -498,26 +496,8 @@ pub(crate) fn worker_loop(
     #[cfg(feature = "debug-log")]
     let mut stall_reported = false;
     const DBG_REPORT_INTERVAL_NS: u64 = 1_000_000_000; // 1 second
-    // BPF conntrack last_seen refresh (#333, made incremental in #5287).
-    // Keeps `show security flow session` idle times / volume accurate without
-    // per-second syscall overhead per session.
-    //
-    // #5287: the refresh is now a budgeted, resumable slice instead of one
-    // full-table pass. Near the 131072-entry cap the old single pass did a BPF
-    // lookup + update per forward entry (tens of thousands of synchronous
-    // kernel crossings) between two RX/TX polls — a deterministic per-interval
-    // latency spike on this low-latency core. Now each slice refreshes at most
-    // CT_REFRESH_SLICE_BUDGET slab slots from a persistent cursor
-    // (`ct_refresh_cursor`) and resumes on the next slice, at CT_SLICE_INTERVAL_NS
-    // cadence, with RX/TX/heartbeat interleaved between slices. Successive
-    // full-table CYCLES are paced to CT_REFRESH_WINDOW_NS so a small or idle
-    // table is not over-refreshed (steady-state syscall rate is unchanged from
-    // the old 10s full-table cadence). Freshness/latency tradeoff: at the
-    // 131072 default cap and 100ms cadence a full cycle spans ~64 slices
-    // (~6.4s <= the 10s window); if `max_sessions` is raised far above the
-    // default a cycle stretches past the window (freshness degrades gracefully),
-    // but the per-slice cost stays hard-bounded at CT_REFRESH_SLICE_BUDGET — no
-    // single tick ever stalls the core again.
+    // Worker-local cursor and cadence state for the #5287 conntrack refresh;
+    // shared pacing limits and their rationale live in slice_pacing.rs.
     let mut last_ct_slice_ns: u64 = 0;
     let mut ct_cycle_start_ns: u64 = 0;
     // Persistent slab-index cursor: 0 means "between cycles / at the top".
