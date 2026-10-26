@@ -3674,15 +3674,15 @@ never lock an operator out of a remote box it manages.
   #18005 extend the owner with the networkd flush recovery: the shipped
   `ManageForeignRoutingPolicyRules=no` drop-in stops networkd deleting
   xpf's bands. On eligible 30 s ticks without the drop-in, the owner
-  compares family/priority counts for desired next-table, rib-group, PBR,
-  and filtered lease-derived management-DNS rules against RuleList, and
-  separately checks the pref-2000 terminator only when it is owned. A
-  missing desired count, canary, or eligible read triggers policy-band,
-  route-leak and `applyMgmtDNSRules` recovery. The terminator write still
-  precedes band and DNS writes. With no desired managed rule bands and no
-  owned terminator, the tick does not probe or install a canary. The inventory is
-  priority-based and can be masked by a foreign rule at the same family and
-  priority.
+  compares family/priority counts of distinct desired next-table, rib-group,
+  PBR, and filtered lease-derived management-DNS rules against RuleList; exact
+  duplicate next-table shapes count once because RuleAdd treats EEXIST as
+  installed, while distinct same-priority shapes remain separate counts. It
+  separately checks the pref-2000 terminator only when it is owned. A missing
+  desired count, canary, or eligible read triggers policy-band, route-leak and
+  `applyMgmtDNSRules` recovery. The terminator write still precedes band and DNS
+  writes. With no desired managed rule bands and no owned terminator, the tick
+  does not probe or install a canary. Foreign same-slot rules can mask loss.
   Configured management-scoped statics and the system backup-router are installed in
   table 999 by `applyMgmtVRFStaticRoutesTo`, independently of FRR and DHCP:
   every management static (single-path and ECMP) and the backup-router as

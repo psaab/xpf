@@ -361,15 +361,17 @@ shipped drop-in `etc/systemd/networkd.conf.d/xpf.conf`
 disables that cleanup (#16804). As a belt on hosts without the drop-in,
 the daemon re-runs the mgmt-DNS steering reconcile after networkd
 activation on every apply. On eligible 30 s recovery ticks, the #9693 owner
-compares family/priority counts for desired next-table, rib-group (including
-return), PBR, and filtered lease-derived management-DNS rules against live
-RuleList readback. It separately checks the pref-2000 terminator only when
-the daemon owns it. A missing desired count, owned canary, or eligible
+compares family/priority counts of distinct desired next-table, rib-group
+(including return), PBR, and filtered lease-derived management-DNS rules
+against live RuleList readback. Exact duplicate next-table shapes count once,
+matching RuleAdd's EEXIST-as-installed behavior; distinct same-priority shapes
+remain separate counts. It separately checks the pref-2000 terminator only
+when the daemon owns it. A missing desired count, owned canary, or eligible
 inventory/RuleList read error triggers policy-band, route-leak and mgmt-DNS
-recovery; terminator repair still precedes those writes. If there are no
-desired rule bands and no owned terminator, the tick does not probe or
-install a canary. The priority-only inventory can be masked by a foreign
-rule at the same family and priority and does not validate DSCP/action fields.
+recovery; terminator repair still precedes those writes. With no desired rule
+bands and no owned terminator, the tick does not probe or install a canary.
+The priority-multiplicity inventory can be masked by a foreign rule at the
+same family and priority and does not validate DSCP/action fields.
 
 - `50–99`: RPM probe next-hop pins (`fwmark <mark> lookup <table>`,
   #1827). Constants live in `pkg/config` (`ProbeRulePriorityBase`,

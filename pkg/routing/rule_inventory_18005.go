@@ -9,9 +9,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// PolicyRulePriorityCount is the number of desired xpf policy rules at one
-// family-specific priority. The daemon compares this inventory with RuleList
-// to detect a flushed policy band without claiming ownership of foreign rules.
+// PolicyRulePriorityCount is the number of distinct desired xpf policy rules
+// at one family-specific priority. The daemon compares this inventory with
+// RuleList to detect a flushed policy band without claiming ownership of foreign rules.
 type PolicyRulePriorityCount struct {
 	Family   int
 	Priority int
@@ -21,6 +21,15 @@ type PolicyRulePriorityCount struct {
 type policyRulePriorityKey struct {
 	family   int
 	priority int
+}
+
+type nextTableRuleShape18005 struct {
+	family   int
+	priority int
+	table    int
+	dst      string
+	iif      string
+	shadow   bool
 }
 
 type ribGroupLeakCandidate struct {
@@ -43,6 +52,19 @@ func DesiredPolicyRulePriorityCounts(cfg *config.Config) []PolicyRulePriorityCou
 		if count > 0 {
 			counts[policyRulePriorityKey{family: family, priority: priority}] += count
 		}
+	}
+	// RuleAdd treats EEXIST as already installed; count identical emitted
+	// next-table shapes once, but retain distinct same-priority targets.
+	var seenNextTable map[nextTableRuleShape18005]struct{}
+	addNextTable := func(shape nextTableRuleShape18005) {
+		if _, exists := seenNextTable[shape]; exists {
+			return
+		}
+		if seenNextTable == nil {
+			seenNextTable = make(map[nextTableRuleShape18005]struct{})
+		}
+		seenNextTable[shape] = struct{}{}
+		add(shape.family, shape.priority, 1)
 	}
 
 	// Match daemon.applyPolicyRoutingRules' combined default-instance static
@@ -75,8 +97,18 @@ func DesiredPolicyRulePriorityCounts(cfg *config.Config) []PolicyRulePriorityCou
 				if dst.IP.To4() == nil {
 					family = unix.AF_INET6
 				}
-				add(family, config.RouteLeakNextTableLookupPriority(prefixLength, addressBits), len(ingressIfaces))
-				add(family, config.RouteLeakNextTableShadowPriority(prefixLength, addressBits), len(ingressIfaces))
+				lookupPriority := config.RouteLeakNextTableLookupPriority(prefixLength, addressBits)
+				shadowPriority := config.RouteLeakNextTableShadowPriority(prefixLength, addressBits)
+				for _, iif := range ingressIfaces {
+					addNextTable(nextTableRuleShape18005{
+						family: family, priority: lookupPriority, table: tableIDs[route.NextTable],
+						dst: dst.String(), iif: iif,
+					})
+					addNextTable(nextTableRuleShape18005{
+						family: family, priority: shadowPriority, table: -1,
+						dst: dst.String(), iif: iif, shadow: true,
+					})
+				}
 			}
 			for _, rule := range nextTableMainCarveoutRules(orderedRoutes, admitted, definedInstances, ingressIfaces) {
 				add(rule.Family, rule.Priority, 1)

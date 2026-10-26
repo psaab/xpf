@@ -24,7 +24,7 @@ Within `Daemon.reassertRoutingReconcileOnce`, after `applySem` acquisition and a
 
 The original canary tests retain their stateful terminator fake. The #18005 regression uses a shared RuleList fake mutated by the routing policy writers and terminator writer, and covers a no-VRF PBR-only flush, selective PBR loss with the canary still present, healthy state, and an empty policy inventory. These cells prove the PBR-only case recovers without installing pref-2000; existing tests continue to pin canary ordering, bootstrap suppression, pending removal, debt ownership, and DNS write order.
 
-The routing package exposes a sorted family/priority multiplicity inventory derived from the same next-table, rib-group, and PBR builders/admission logic used by its writers. The observation/repair race with an external kernel writer remains possible, and RuleList cannot expose all rule selectors (notably DSCP).
+The routing package exposes a sorted family/priority multiplicity inventory derived from the same next-table, rib-group, and PBR builders/admission logic used by its writers. Exact duplicate next-table shapes count once because RuleAdd treats EEXIST as installed; distinct same-priority shapes remain separate multiplicities. The observation/repair race with an external kernel writer remains possible, and RuleList cannot expose all rule selectors (notably DSCP).
 
 ## API surface
 
@@ -38,7 +38,7 @@ The new routing inventory helper is an exported Go API; no wire or protocol APIs
 - `termRemovePending` is also included in `shouldReassertVRFMissTerminator`. A pending removal with no rule may cause one conservative full reconciliation; the real tick test must prove it does not reinstall the terminator and that successful removal clears debt before the next quiet tick.
 - v4 or v6 missing independently triggers recovery. `mgmtRoutesOwed` remains independent and is not folded into generic routing debt; add a combined-state test for independent discharge in both directions.
 - An external writer can flush between the probe and repair; the repair can hide that later flush. This is outside the deterministic ordering fix.
-- The detector compares family/priority multiplicities rather than full selectors, so it cannot validate actions or DSCP and a foreign rule at a matching slot can mask a missing xpf rule.
+- The detector compares family/priority multiplicities rather than full selectors; distinct rules at a shared priority are counted separately, but the inventory cannot validate actions or DSCP and a foreign rule at a matching slot can mask a missing xpf rule.
 - Management-DNS eligibility is lease-derived and passes through the same filtered desired-pair builder as reconciliation; it does not infer DNS rules from config shape.
 - #18005's no-VRF/no-management policy-band gap is addressed in this change without widening `shouldReassertVRFMissTerminator`; the global pref-2000 rule remains absent unless a VRF terminator is desired or retained. Do not add a second DNS-specific canary or duplicate the existing post-FRR reconcile.
 
