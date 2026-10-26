@@ -966,8 +966,12 @@ all files stay in `package ipsec`, so the public API is unchanged.
   remote identity on fixed-address PSK gateways with no
   `remote-identity`/`local-identity` configured:
   `remote { id = "<sole IP-literal gateway address>" }` (per-address
-  PSK selectors still cover the whole multi-address list). Before
-  #15193, a default-shape (no identities) fixed-address VPN rendered
+  PSK selectors still cover the whole multi-address list).
+  Since #17875, a fixed-address PSK gateway with an ID_ANY
+  `remote-identity` is treated as having no discriminating identity:
+  peer-address selectors scope the secret, and a sole address supplies
+  the default `remote.id`; multi-address gateways still omit it.
+  Before #15193, a default-shape (no identities) fixed-address VPN rendered
   neither, charon-as-initiator found no matching secret, and aborted
   IKE_AUTH — every xpf-initiated path failed and two default-shape xpf
   boxes never established the tunnel. #15193 fixed that by ALSO adding
@@ -999,14 +1003,15 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `config.IsAnyIPsecRemoteIdentity` / `config.HasDiscriminatingIPsecAddress`
   predicates: an ID_ANY spelling (`""`, `%any`, `%any6`, `*`, `0.0.0.0`,
   `::`, `0::0`, any unspecified IP) as gateway address, inline endpoint,
-  or `inet`/`inet6` `remote-identity` discriminates no peer, so strict
-  commit refuses it and the render belts skip it exactly like the
-  empty-selector shapes above; a mixed `0.0.0.0,<real-ip>` list renders
-  scoped by the real address only. Since #15989 (H-4) the same rule covers
-  a gateway-less PSK VPN (no `ike gateway` leaf): it renders with no
-  `remote_addrs` and no peer selector — commit rejects it and the
-  render belt skips it. Inline IP endpoints (a usable IP literal in
-  the gateway leaf, no gateway object) are unaffected: the peer
+  or `inet`/`inet6` `remote-identity` is not a peer selector. Strict
+  commit refuses it (and render skips it) when no other peer selector
+  exists; a real gateway address can rescue an ID_ANY `remote-identity`
+  (#17875), which is ignored for `remote.id`. A mixed
+  `0.0.0.0,<real-ip>` list renders scoped by the real address only. Since
+  #15989 (H-4) the same rule covers a gateway-less PSK VPN (no `ike
+  gateway` leaf): it renders with no `remote_addrs` and no peer selector —
+  commit rejects it and the render belt skips it. Inline IP endpoints (a
+  usable IP literal in the gateway leaf, no gateway object) are unaffected:
   address scopes their secret; inline hostname endpoints are refused
   like hostname gateways (#16708). A cert/EAP VPN has no PSK, so it
   emits no secret block and is unaffected. The selector values reuse

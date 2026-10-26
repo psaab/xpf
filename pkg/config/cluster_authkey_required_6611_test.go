@@ -602,12 +602,6 @@ func TestRotationProcedureStepsAccepted16858(t *testing.T) {
 	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, keyA16858, ""), activeA); err != nil {
 		t.Fatalf("routine same-key commit rejected: %v", err)
 	}
-	// Whitespace-trimmed equality: the runtime compares raw bytes but
-	// the existing gates trim; a padded spelling of the active key is
-	// the same transition as the unpadded one.
-	if _, err := CompileConfigWithCurrentClusterPrimary(clusterTree16858(t, " "+keyA16858+" ", ""), activeA); err != nil {
-		t.Fatalf("padded same-key commit rejected: %v", err)
-	}
 }
 
 func TestTransitionGateTolerantAndStandalone16858(t *testing.T) {

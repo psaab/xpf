@@ -3885,15 +3885,14 @@ type compileOpts struct {
 	// exception closed. The string is the trimmed persisted primary, held
 	// only for an equality/length check and never logged or rendered.
 	currentClusterPrimary16025 *string
-	// currentClusterAccepted16858 is the active config's accepted key set
-	// {primary, additional} for the #16858 transition interlock: a strict
-	// candidate may only sign with a key the active config already
-	// accepts. Supplied only by configstore's candidate-commit pipeline
-	// from s.compiled, alongside currentClusterPrimary16025. Nil
-	// (fresh/day-0/check-config/direct CompileConfig, and every tolerant
-	// compile, whose lenientCompileOpts never sets it) keeps the
-	// interlock closed — there is no active accepted set to violate.
-	// Held only for equality checks and never logged or rendered.
+	// currentClusterAccepted16858 is the active config's exact-byte accepted
+	// key set {primary, additional} for the #16858 transition interlock: a strict
+	// candidate may only sign with a key the active config already accepts.
+	// Its raw primary also proves the #17888 exception when retiring an
+	// existing whitespace-only key. Supplied only by configstore's strict
+	// candidate-commit pipeline from s.compiled. Nil (fresh/day-0/check-config/
+	// direct CompileConfig and every tolerant compile) keeps both protections
+	// closed. Held only for equality checks and never logged or rendered.
 	currentClusterAccepted16858 *clusterAcceptedKeys16858
 }
 

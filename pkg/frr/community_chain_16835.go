@@ -29,10 +29,10 @@
 //     never matched the term either).
 //
 // The expressible encoding is therefore in-map, permit-only, and uses
-// on-match goto. For a term whose ONLY match dimension is #16835
-// chains (communityOrphanTerm16835) the renderer replaces the single
-// `match community <public>` sequence with, per distinct chain
-// alternative in authored order, alternating member/guard slots:
+// on-match goto. For an orphan term (communityOrphanTerm16835), the
+// renderer replaces the public community match with per-member chain
+// slots. A mixed term with one distinct chain community uses the same
+// gate before the ordinary sibling-dimension variants:
 //
 //	S:        permit, match <chain list of member 1>, goto S+20
 //	S+10:     permit (match-all guard), goto NEXT
@@ -41,27 +41,27 @@
 //	...
 //	B-20:     permit, match <chain list of member k>, goto B
 //	B-10:     permit (guard), goto NEXT
-//	B:        BODY — the original term sequence verbatim (own verb,
-//	          sets, continuation), at bodySeq
-//	NEXT=B+10: whatever followed the term anyway.
+//	B:        body sequence (or the first mixed sibling variant)
+//	NEXT:     first sequence after the complete term body
 //
-// Control flow: a route satisfying every member walks member slot ->
-// next member slot -> ... -> BODY (each match gotos over its guard)
-// and the term fires exactly once, sets exactly once. A route failing
-// member i falls to the guard after it and gotos NEXT; the term never
-// fires — fail-closed for reject, accept, and modify terms alike.
-// Chains render only when EVERY distinct from-community alternative
-// resolves to a chain; mixed terms and terms with sibling dimensions
-// (route-filters, prefix-list, as-path, protocol) keep the historical
-// render, because a goto cannot re-enter the Cartesian variant loop
-// mid-term. Their public lists still under-match the shared row — the
-// documented residual in docs/log/16835.md.
+// A route satisfying every member walks member slot -> next member
+// slot -> ... -> BODY (each member match skips its guard). A mixed term
+// still requires all sibling match dimensions to pass. A failed member
+// falls through to its guard: the sole mixed alternative and final orphan
+// alternative skip the term; earlier orphan alternatives continue at the
+// next alternative.
 //
-// Sequence accounting: one alternative with k distinct members
-// occupies 2k slots, body +1: communityChainSlots16835 /
-// communityExtraTermSeqWeight16835. pkg/config.RouteMapSequenceCount
-// mirrors that weight for orphan terms so the strict ceiling gate and
-// the renderer agree. Numbering gaps are legal FRR.
+// Orphan terms chain every distinct from-community alternative in
+// authored order. Mixed terms are chain-lowered only when they have one
+// distinct community alternative; multi-alternative mixed terms retain
+// the historical Cartesian render. Their public lists still under-match
+// the shared row, outside #17867's single-alternative scope.
+//
+// Sequence accounting: each chain alternative occupies 2k slots before
+// its body: communityChainSlots16835 / communityExtraTermSeqWeight16835.
+// pkg/config.RouteMapSequenceCount mirrors the reserve for orphan and
+// supported mixed terms so the strict ceiling gate and renderer agree.
+// Numbering gaps are legal FRR.
 package frr
 
 import (
@@ -138,18 +138,16 @@ func communityChainWidth16835(po *config.PolicyOptionsConfig, name string) int {
 // communityChainSlots16835 returns route-map slots one chain
 // alternative occupies BEFORE the body slot: two per member (member
 // slot + its guard). This is the slot invariant; the renderer
-// allocates exactly this and pkg/config's orphan weight mirrors it.
+// allocates exactly this and pkg/config mirrors it for chain terms.
 func communityChainSlots16835(po *config.PolicyOptionsConfig, name string) int {
 	return 2 * communityChainWidth16835(po, name)
 }
 
-// communityExtraTermSeqWeight16835 returns the sequence weight a term
-// needs BEYOND the historical 1 the count allowed for its single
-// community variant: sum of chain slots over distinct alternatives
-// (the orphan body itself keeps the historical 1). Zero for
-// non-orphan terms. Renderer and count share this definition.
+// communityExtraTermSeqWeight16835 returns the chain slots rendered before
+// the body for an eligible community-only term or a single-chain mixed term.
+// The body slots remain covered by the historical Cartesian count.
 func communityExtraTermSeqWeight16835(po *config.PolicyOptionsConfig, term *config.PolicyTerm) int {
-	if term == nil || !communityOrphanTerm16835(po, term) {
+	if term == nil || (!communityOrphanTerm16835(po, term) && !communityMixedChainTerm16835(po, term)) {
 		return 0
 	}
 	total := 0
@@ -164,11 +162,9 @@ func communityExtraTermSeqWeight16835(po *config.PolicyOptionsConfig, term *conf
 	return total
 }
 
-// communityOrphanTerm16835 reports whether a term takes the chain
-// render: at least one from-community alternative, EVERY distinct
-// alternative resolves to a rendered chain, and no sibling match
-// dimension (route-filters, prefix-list, as-path, protocol). LEXICAL
-// only — never route data — so renderer, count, and tests agree.
+// communityOrphanTerm16835 reports whether a term takes the original chain
+// render: at least one from-community alternative, EVERY distinct alternative
+// resolves to a rendered chain, and no sibling match dimension.
 func communityOrphanTerm16835(po *config.PolicyOptionsConfig, term *config.PolicyTerm) bool {
 	if term == nil || len(term.FromCommunity) == 0 {
 		return false
@@ -189,14 +185,32 @@ func communityOrphanTerm16835(po *config.PolicyOptionsConfig, term *config.Polic
 	return true
 }
 
+// communityMixedChainTerm16835 reports the mixed shape the shared-token
+// chain can safely lower without changing the existing multi-alternative
+// dispatch: exactly one distinct chain community plus sibling dimensions.
+func communityMixedChainTerm16835(po *config.PolicyOptionsConfig, term *config.PolicyTerm) bool {
+	if term == nil || len(term.FromCommunity) == 0 {
+		return false
+	}
+	if len(term.RouteFilters)+len(term.PrefixList)+len(term.FromASPath)+len(term.FromProtocols) == 0 {
+		return false
+	}
+	name := term.FromCommunity[0]
+	for _, alternative := range term.FromCommunity[1:] {
+		if alternative != name {
+			return false
+		}
+	}
+	return communityChainWidth16835(po, name) > 0
+}
+
 // communityMemberChainSequences16835 renders the pre-body chain slots
 // for one alternative whose first member slot is at seq, interleaving
 // a match-all guard after every member slot. Member slot i (0-based)
-// gotos member slot i+1, the last gotos bodySeq; every guard gotos
-// nextSeq (the slot after the body). See the file header for why one
-// guard per member is required (a member failure falls to the very
-// next slot, which must leave without testing further members).
-func communityMemberChainSequences16835(b *strings.Builder, routeMapName, publicName string, members []string, seq, bodySeq, nextSeq int) {
+// gotos member slot i+1; the last goes to bodySeq. Each guard goes to
+// failSeq: next alternative start, or first sequence after the term body
+// (one orphan body sequence or all sibling variants of a mixed term).
+func communityMemberChainSequences16835(b *strings.Builder, routeMapName, publicName string, members []string, seq, bodySeq, failSeq int) {
 	for i, member := range members {
 		at := seq + i*2*communityChainReserve16835
 		next := at + 2*communityChainReserve16835
@@ -208,7 +222,7 @@ func communityMemberChainSequences16835(b *strings.Builder, routeMapName, public
 		b.WriteString(" on-match goto " + strconv.Itoa(next) + "\n")
 		b.WriteString("exit\n")
 		b.WriteString("route-map " + frrName(routeMapName) + " permit " + strconv.Itoa(at+communityChainReserve16835) + "\n")
-		b.WriteString(" on-match goto " + strconv.Itoa(nextSeq) + "\n")
+		b.WriteString(" on-match goto " + strconv.Itoa(failSeq) + "\n")
 		b.WriteString("exit\n")
 	}
 }

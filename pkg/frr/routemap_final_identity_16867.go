@@ -152,12 +152,17 @@ func beltRouteMapIdentities16867(fc *FullConfig) []beltRouteMapIdentity16867 {
 		add("narrowed chain alias", narrowedAliasName10129(site.Kept))
 	}
 
-	// QNH metric maps (static + per-policy), when a metric set exists.
+	// QNH metric maps (static + per-policy variants), when a metric set exists.
 	if set := buildQNHMetricSet11447(fc, po); set != nil {
+		referencedNodes := redistReferencedNodes14380(fc)
 		var qnhNames []string
 		for _, scope := range set.scopes() {
 			qnhNames = append(qnhNames, scope.staticMap)
-			qnhNames = append(qnhNames, mapValues11447(scope.policyMaps)...)
+			for policy, base := range scope.policyMaps {
+				for _, ctx := range qnhMetricPolicyVariants11447(referencedNodes[policy]) {
+					qnhNames = append(qnhNames, qnhMetricPolicyVariantRouteMap11447(base, ctx))
+				}
+			}
 		}
 		sort.Strings(qnhNames)
 		for _, name := range qnhNames {

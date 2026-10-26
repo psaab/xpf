@@ -66,15 +66,21 @@ import (
 // the whole point of Secret (compiler_system.go) is that it never reaches a log
 // or a CLI render.
 func validateClusterAuthKeyStrict(cfg *Config) error {
-	return validateClusterAuthKeyStrictWithCurrent(cfg, nil)
+	return validateClusterAuthKeyStrictWithCurrent(cfg, nil, nil)
 }
 
 // validateClusterAuthKeyStrictWithCurrent is validateClusterAuthKeyStrict
-// with the persisted/current signing primary supplied by the candidate
-// pipeline (#16025 fold 2). currentPrimary is the trimmed primary of the
-// config active immediately before the candidate, or nil when there is
-// no such state (fresh candidate, day-0 check, direct CompileConfig).
-func validateClusterAuthKeyStrictWithCurrent(cfg *Config, currentPrimary *string) error {
+// with the persisted/current signing primary and accepted-key state supplied
+// by the candidate pipeline (#16025/#17888). currentPrimary is the trimmed
+// primary of the config active immediately before the candidate, or nil when
+// there is no such state (fresh candidate, day-0 check, direct CompileConfig).
+// currentAccepted carries those same active keys byte-for-byte for the narrow
+// legacy whitespace-primary migration.
+func validateClusterAuthKeyStrictWithCurrent(
+	cfg *Config,
+	currentPrimary *string,
+	currentAccepted *clusterAcceptedKeys16858,
+) error {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
@@ -130,7 +136,15 @@ func validateClusterAuthKeyStrictWithCurrent(cfg *Config, currentPrimary *string
 			"then rotate it into `authentication-key` using the #6630 overlap",
 			len(key), MinAdvisedControlLinkKeyLen)
 	}
-	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()) != "" {
+
+	// #17888: the exact same current-state proof is also used by the earlier
+	// strict-session-auth gate, so this posture cannot close the legacy repair
+	// path before the normal key-strength check reaches it.
+	if canStageCurrentWhitespacePrimary17888(cfg, currentAccepted) {
+		return nil
+	}
+	altRaw := cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()
+	if strings.TrimSpace(altRaw) != "" {
 		// #6630: the additional key is ACCEPTED, never SIGNED with, so a
 		// cluster carrying only it signs nothing and is exactly as fail-open
 		// as an unkeyed one. Say so specifically rather than letting the
@@ -170,14 +184,20 @@ func validateClusterAuthKeyStrictWithCurrent(cfg *Config, currentPrimary *string
 // config already on disk, or pushed from a peer, must still boot: an inert
 // posture leaf is no more dangerous at runtime than not setting it, so
 // refusing to load one would brick a node over a no-op.
-func validateStrictSessionAuthNeedsKeyStrict(cfg *Config) error {
+func validateStrictSessionAuthNeedsKeyStrict(
+	cfg *Config,
+	currentAccepted *clusterAcceptedKeys16858,
+) error {
 	if cfg == nil || cfg.Chassis.Cluster == nil || !cfg.Chassis.Cluster.StrictSessionAuth {
 		return nil
 	}
+	// #17888's legacy migration is the only whitespace-only exception here:
+	// preserve the exact active primary while staging a strong distinct key.
 	// TrimSpace for the same reason validateClusterAuthKeyStrict trims: a
 	// whitespace-only key is "configured" to the runtime's len(key) > 0 test
 	// but is not a key. Deliberately stricter than the runtime here.
-	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()) != "" {
+	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()) != "" ||
+		canStageCurrentWhitespacePrimary17888(cfg, currentAccepted) {
 		return nil
 	}
 	return fmt.Errorf("chassis cluster: `strict-session-auth` is set but " +
@@ -186,6 +206,27 @@ func validateStrictSessionAuthNeedsKeyStrict(cfg *Config) error {
 		"nothing at all and the #6628 residual it is meant to close stays open; set " +
 		"`chassis cluster authentication-key <key>` (the SAME value on both nodes), " +
 		"or remove `strict-session-auth`")
+}
+
+// canStageCurrentWhitespacePrimary17888 admits a whitespace-only primary
+// only when its raw bytes exactly match the current accepted primary and the
+// candidate stages a distinct additional key meeting the strength floor.
+// Both the session-auth posture gate and the key-strength gate use this
+// predicate, keeping the narrowly proven legacy repair path consistent.
+func canStageCurrentWhitespacePrimary17888(
+	cfg *Config,
+	currentAccepted *clusterAcceptedKeys16858,
+) bool {
+	if cfg == nil || cfg.Chassis.Cluster == nil || currentAccepted == nil {
+		return false
+	}
+	primary := cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()
+	if primary == "" || strings.TrimSpace(primary) != "" || currentAccepted.primary != primary {
+		return false
+	}
+	additional := cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()
+	return additional != primary &&
+		len(strings.TrimSpace(additional)) >= MinAdvisedControlLinkKeyLen
 }
 
 // validateClusterAuthKeyOverlapStrict rejects a rotation overlap that is not
@@ -201,19 +242,17 @@ func validateStrictSessionAuthNeedsKeyStrict(cfg *Config) error {
 // commit believing they were protected, which is precisely the dual-master
 // window the leaf exists to close.
 //
-// Whitespace-normalised on both sides for the same reason the emptiness gate
-// is: a key differing only in surrounding whitespace is the same key to
-// anything that matters, and the runtime compares raw bytes, so a
-// trim-equal pair is an overlap that isn't.
+// Compare exact bytes: boundary whitespace inside a quoted PSK is part of the
+// authentication key, so trim-equal values still provide a real overlap.
 func validateClusterAuthKeyOverlapStrict(cfg *Config) error {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
-	alt := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal())
+	alt := cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal()
 	if alt == "" {
 		return nil
 	}
-	if alt != strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()) {
+	if alt != cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal() {
 		return nil
 	}
 	// Neither key is echoed — the whole point of Secret.
@@ -292,11 +331,11 @@ func validateClusterAuthKeyOverlapStrict(cfg *Config) error {
 // Neither key is echoed — the whole point of Secret. The message names
 // the five-step procedure so the operator is sent to the overlap rather
 // than to a re-typed key.
-// clusterAcceptedKeys16858 is the active config's accepted key set: the
-// signing primary plus the accept-only additional key (#6630), trimmed.
-// It is the smallest state the #16858 interlock needs, carried in
-// compileOpts so the gate never holds the whole active *Config. Held
-// only for equality checks and never logged or rendered.
+// clusterAcceptedKeys16858 is the active config's exact-byte accepted key set:
+// the signing primary plus the accept-only additional key (#6630). It is the
+// smallest state the #16858 interlock needs, carried in compileOpts so the
+// gate never holds the whole active *Config. Held only for equality checks
+// and never logged or rendered.
 type clusterAcceptedKeys16858 struct {
 	primary    string
 	additional string
@@ -306,7 +345,7 @@ func validateClusterAuthKeyTransitionStrict(cfg *Config, active *clusterAccepted
 	if cfg == nil || cfg.Chassis.Cluster == nil || active == nil {
 		return nil
 	}
-	candidateSigning := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal())
+	candidateSigning := cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()
 	if candidateSigning == "" {
 		return nil
 	}

@@ -121,15 +121,22 @@ func leaseSyncTestDaemon(t *testing.T, sock4, sock6 string, withKnob bool) *Daem
 	mgr.SetLeaseSyncSeamsForTesting(unixDialer(), sock4, sock6, "", "")
 	ss := cluster.NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
 
+	applyCtx, applyCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		store:         s,
-		applySem:      semaphore.NewWeighted(1),
-		rgStates:      make(map[int]*rgStateMachine),
-		cluster:       cluster.NewManager(0, 1),
-		dhcpServer:    mgr,
-		sessionSync:   ss,
-		dhcpLeaseSync: dhcpLeaseSyncState{nowCh: make(chan struct{}, 1)},
+		store:              s,
+		applySem:           semaphore.NewWeighted(1),
+		rgStates:           make(map[int]*rgStateMachine),
+		cluster:            cluster.NewManager(0, 1),
+		dhcpServer:         mgr,
+		sessionSync:        ss,
+		dhcpLeaseSync:      dhcpLeaseSyncState{nowCh: make(chan struct{}, 1)},
+		applyCancelContext: applyCtx,
+		applyCancel:        applyCancel,
 	}
+	t.Cleanup(func() {
+		applyCancel()
+		d.dhcpLeaseSync.seedWG.Wait()
+	})
 	return d
 }
 
