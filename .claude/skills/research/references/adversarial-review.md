@@ -4,7 +4,7 @@ Use for research conclusions and every supplied claim, not only solution plans.
 The three actual reviewers are **Codex + AGY + Claude subject-matter review
 (SMR)**. The coordinator synthesizes their evidence; it is not one of the three
 independent passes. Three personas in one agent or three copies of its conclusion
-do not satisfy this gate. Copilot joins only on implementation through `/engineer`.
+do not satisfy this gate. Implementation review later runs the declared-pool triple gate through `/engineer`.
 
 ## Assign the question and expertise
 

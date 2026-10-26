@@ -1,6 +1,6 @@
 ---
 name: engineer
-description: Alias for /triple-review — drive a refactor through the full quad-review methodology (Codex + Antigravity + Claude SMR + Copilot) with plan-review, smoke, and 4-of-4 merge gate.
+description: Alias for /triple-review — drive a refactor through the full triple-review methodology (three declared-pool reviewers: Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro) with plan-review, smoke, and 3-of-3 merge gate.
 user_invocable: true
 ---
 
@@ -8,7 +8,7 @@ user_invocable: true
 
 `/engineer <issue-number> <one-line scope>` is identical to
 `/triple-review <issue-number> <one-line scope>`. Both invocations
-run the same quad-review methodology codified in
+run the same triple-review methodology codified in
 `.claude/skills/triple-review/SKILL.md`.
 
 When invoked, immediately invoke the `triple-review` skill via

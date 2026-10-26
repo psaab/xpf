@@ -24,7 +24,7 @@
 - No sycophantic openers or closing fluff.
 - Keep solutions simple and direct.
 - When working with many teams, don't let the context windows get too large.
-- Reviewer findings (any model, including Copilot) are claims, not facts:
+- Reviewer findings (any declared-pool model: Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro) are claims, not facts:
   grep/read the cited line at the reviewed SHA before folding a finding.
   Adversarial reviewers have hallucinated showstopper bugs in this repo
   before; verify, then fold — never print-and-propagate.
