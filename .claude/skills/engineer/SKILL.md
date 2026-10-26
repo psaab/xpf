@@ -20,7 +20,7 @@ Skill({skill: "triple-review", args: "<verbatim args>"})
 
 Do not duplicate the methodology here. The single source of
 truth is `.claude/skills/triple-review/SKILL.md` — any change
-to the methodology (e.g. the Claude SMR gates at Step 3.5 /
-Step 8.5, the marker-post protocol, the smoke-runner handoff)
+to the methodology (e.g. the plan-review gate at Step 3, the code-review gate at Step 8,
+the marker-post protocol, the smoke-runner handoff)
 applies to `/engineer` automatically because this skill is a
 thin forwarder.

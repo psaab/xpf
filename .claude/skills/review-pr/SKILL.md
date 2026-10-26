@@ -397,7 +397,7 @@ self-correction notes that the user wants to see in real time).
 
 If the user has multiple PRs in flight at once and explicitly
 asks to "do everything in background", also delegate the
-synthesis to a background agent — pass the agent the 4 reviewer
+synthesis to a background agent — pass the agent the 3 reviewer
 outputs (Claude PR comment URL and both pool result texts) and have it cross-check
 each finding against actual source and post the synthesis
 comment itself, returning only the comment URL.

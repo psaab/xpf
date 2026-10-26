@@ -34,8 +34,8 @@ increment.
 
 - **Plan first, code never first.** Never edit code before the
   plan has cleared at least one round of two pool reviewers.
-- **Both reviewers must agree.** If Codex says PLAN-READY and
-  reviewer 2 says PLAN-NEEDS-MAJOR, iterate. If both say PLAN-KILL,
+- **Both reviewers must agree.** If pool reviewer 1 says PLAN-READY and
+  pool reviewer 2 says PLAN-NEEDS-MAJOR, iterate. If both say PLAN-KILL,
   stop and report — do NOT push through.
 - **Smoke v4 AND v6.** Every test cycle hits both
   172.16.80.200 and 2001:559:8585:80::200. v4-only smoke masks
@@ -426,7 +426,7 @@ gh pr create --title "<#ISSUE Step N: title>" --body "$(cat <<'EOF'
 
 Plan doc: docs/pr/<ISSUE>-<SLUG>/plan.md
 
-- Codex round-N: PLAN-READY (task ID <X>)
+- Pool reviewer 1 round-N: PLAN-READY (task ID <X>)
 - Pool reviewer 2 round-N: PLAN-READY (task ID <Y>)
 
 ## Test plan
@@ -490,7 +490,15 @@ Required before merge:
   with every minor finding addressed.
 - **Pool reviewer 2** has returned MERGE-READY or MERGE-NEEDS-MINOR
   with every minor finding addressed.
-- The in-conversation Claude review agrees (all three verdicts).
+- **The third verdict is recorded**: the orchestrating Claude
+  (in-conversation, a declared-pool model distinct from the two
+  dispatched models) reviews the final head itself and records
+  its verdict on the PR (same MERGE-READY / MERGE-NEEDS-MINOR /
+  MERGE-NEEDS-MAJOR vocabulary, with findings). The implementer
+  never counts as this reviewer: if the orchestrator implemented
+  the change, dispatch a third distinct pool reviewer via the
+  task tool instead and record that verdict. All three verdicts
+  must be at the same final head.
 
 If any of the three returns NEEDS-MAJOR, address the findings,
 push a fix commit, re-dispatch reviewers, wait for re-review,

@@ -451,38 +451,24 @@ the mechanics, so this section is sequencing only.
    A counter that stays flat is not a failure of the technique; it is the
    answer, and it belongs in the PR body next to the ones that moved.
 
-9. **PR open + Copilot review + Codex re-review + merge** — see
+9. **PR open + declared-pool triple review + merge** — see
    "PR discipline" and "Merging" below for the body template and
-   mechanics. Two distinct review surfaces:
+   mechanics. Reviews use only the declared model pool (Muse
+   Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro);
+   Copilot is not part of any review gate (user directive
+   2026-10-26) — never request, wait for, or evaluate it.
 
-   - **GitHub Copilot** auto-posts an inline review on every push to
-     a PR (~30s after `git push`). It catches a different class of
-     issues than Codex: stale comments, unwired fields, accidentally-
-     ignored errors, missing tests. **Always fetch and triage Copilot
-     comments before requesting human review** — pretend they're
-     from a thoughtful but pedantic colleague. Real ones get fixed
-     in the same branch; non-issues get a short reply explaining
-     why.
+   Three independent hostile reviewers from the pool review the
+   final head (see `.claude/skills/campaign/SKILL.md` Step 3 and
+   `.claude/skills/review-pr/SKILL.md`). Each verifies findings
+   against the code at that head; real findings get fixed in the
+   same branch, non-issues get a short written disposition.
 
-     Standard fetch:
-     ```
-     gh api repos/<owner>/<repo>/pulls/<N>/comments | \
-       jq -r '.[] | select(.user.login | startswith("copilot")) |
-              "\(.path):\(.line // .original_line) — \(.body)"'
-     ```
-
-   - **Codex hostile code review** runs separately via the
-     `codex-rescue` agent. Same terminal rule as the plan review:
-     Codex returns `MERGE YES` AND every finding has a written
-     disposition. Codex sees the diff with eyes that have not seen
-     Copilot's findings — keep the two reviews independent so they
-     can disagree productively.
-
-   Iterate until BOTH reviewers are clean (or have explicit-with-
-   reason dispositions), then merge once the findings are resolved AND
-   the gates below are green. If the diff grows in response to review,
-   push and request a re-review — both Copilot and Codex re-fire on the
-   new HEAD.
+   Iterate until all three reviewers are clean (or have explicit-
+   with-reason dispositions), then merge once the findings are
+   resolved AND the gates below are green. If the diff grows in
+   response to review, push and re-dispatch — reviewers re-review
+   the new HEAD.
 
    **CI exists but is advisory and does not run the Rust test suite** (see
    [`ci-gate-contract.md`](ci-gate-contract.md); the table below remains the
@@ -1298,13 +1284,13 @@ that change's rationale is rewritten.
   you are about to debug is probably not yours. This cost two separate
   hours in one day, the second time while applying the per-file
   workaround that this bullet's Go half recommends.
-- **Two independent review surfaces.** Codex (hostile, design-level)
-  and Copilot (inline, mechanical-detail) catch different classes of
-  bugs. Treat them as separate passes; do not skip either. Codex
-  often misses the unwired-field or stale-comment bug that Copilot
-  spots; Copilot often misses the architectural concern that Codex
-  flags. The combined coverage is the point — losing one halves
-  the review.
+- **Three independent review surfaces.** Three distinct
+  declared-pool reviewers (hostile, design-level and mechanical
+  lenses) catch different classes of bugs. Treat them as separate
+  passes; do not skip any. One reviewer often misses the unwired
+  field or stale comment another spots, and another often misses
+  the architectural concern the first flags. The combined
+  coverage is the point — losing one weakens the review.
 
 ### Responding to review (as author)
 
