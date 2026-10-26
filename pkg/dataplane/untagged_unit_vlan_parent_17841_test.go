@@ -18,8 +18,8 @@ import (
 // as a static Address= + KeepConfiguration=static by networkd and then
 // deleted as stale by every later compile's reconcileInterfaceAddresses
 // — the #16795 commit-cadence flap in the partially-zoned shape. A zoned
-// DHCP unit's co-configured static addresses rendered the same way while
-// the planner never installed them.
+// DHCP unit's same-family co-configured static address rendered while the
+// planner never installed it; opposite-family statics must remain rendered.
 //
 // FAIL-ON-REVERT: without the zone-ref/skipAddrs gating in
 // buildInterfaceNetworkdModels' VLAN-parent arm (it must consume
@@ -42,9 +42,9 @@ func untaggedVLANParentCfg17841(t *testing.T) *config.Config {
 		"set interfaces ge-0/0/1 unit 50 family inet address 10.0.50.1/24",
 		"set security zones security-zone trust interfaces ge-0/0/1.2",
 		"set security zones security-zone trust interfaces ge-0/0/1.50",
-		// ge-0/0/2 (vlan-tagging): unit 0 zoned and carries BOTH a static
-		// address and dhcp — the planner folds its addresses but marks
-		// the netdev skipAddrs, so the reconciler never installs them.
+		// ge-0/0/2 (vlan-tagging): unit 0 zoned and carries a same-family
+		// v4 static address and DHCPv4 — the planner marks the netdev
+		// skipAddrs and the renderer suppresses the DHCP-owned v4 family.
 		"set interfaces ge-0/0/2 vlan-tagging",
 		"set interfaces ge-0/0/2 unit 0 family inet address 10.1.0.1/24",
 		"set interfaces ge-0/0/2 unit 0 family inet dhcp",
@@ -120,13 +120,15 @@ func TestPartiallyZonedUntaggedUnitsDoNotRender17841(t *testing.T) {
 	// planned on each parent; ge-0/0/2's netdev is skipAddrs because
 	// its zoned untagged unit is DHCP-managed; ge-0/0/4 is unplanned.
 	plan := planPhysDesired(cfg)
-	// ge-0/0/1's zone refs are tagged-only, so the plan entry exists
-	// (interface MTU) but folds NO parent addresses.
+	// ge-0/0/1's zone refs are tagged-only: the plan entry is MTU-only
+	// and folds NO parent addresses, so the parent is never address-
+	// reconciled. Unit 0 is unzoned, so the reconciler owns nothing —
+	// the flap's deleting writer does not exist in this shape.
 	if pd := plan["ge-0-0-1"]; pd == nil || pd.skipAddrs || len(pd.addrs) != 0 {
-		t.Fatalf("premise: plan[ge-0-0-1]=%+v, want device planned with no parent addrs (tagged refs only)", pd)
+		t.Fatalf("premise: plan[ge-0-0-1]=%+v, want MTU-only entry, no parent addrs (tagged refs only)", pd)
 	}
 	if pd := plan["ge-0-0-9"]; pd == nil || pd.skipAddrs || len(pd.addrs) != 0 {
-		t.Fatalf("premise: plan[ge-0-0-9]=%+v, want device planned with no parent addrs (tagged ref only)", pd)
+		t.Fatalf("premise: plan[ge-0-0-9]=%+v, want MTU-only entry, no parent addrs (tagged ref only)", pd)
 	}
 	if pd := plan["ge-0-0-2"]; pd == nil || !pd.skipAddrs {
 		t.Fatalf("premise: plan[ge-0-0-2]=%+v, want skipAddrs=true (zoned unit 0 is DHCP)", pd)
@@ -154,22 +156,17 @@ func TestPartiallyZonedUntaggedUnitsDoNotRender17841(t *testing.T) {
 	if !m1.IsVLANParent {
 		t.Fatalf("ge-0-0-1 is not rendered as a VLAN parent: %+v", m1)
 	}
-	for _, a := range m1.VLANParentAddresses {
-		if a == "10.0.0.1/24" {
-			t.Errorf("ge-0-0-1 renders unzoned unit 0 address 10.0.0.1/24 as static on the parent, " +
-				"but planPhysDesired never plans it (unit 0 is in no zone): networkd installs it and " +
-				"every later compile's reconcile deletes it as stale — the #16795/#17841 flap")
-		}
+	// Tagged-only refs: the parent is never address-reconciled
+	// (reconcile runs only for vlanID==0 refs), so unit 0's address
+	// renders exactly as #16795 requires — no deleting writer exists.
+	if len(m1.VLANParentAddresses) != 1 || m1.VLANParentAddresses[0] != "10.0.0.1/24" {
+		t.Errorf("ge-0-0-1 VLANParentAddresses=%v, want [10.0.0.1/24] (#16795: parent never address-reconciled in tagged-only shape)", m1.VLANParentAddresses)
 	}
-	if len(m1.VLANParentAddresses) != 0 {
-		t.Errorf("ge-0-0-1 VLANParentAddresses=%v, want none: no untagged unit of this parent "+
-			"resolves to the parent device in the plan (unit 2 owns ge-0-0-1.2)", m1.VLANParentAddresses)
-	}
-	// Same ghost shape on ge-0/0/9 (tagged-only zone ref).
+	// Same tagged-only shape on ge-0/0/9.
 	if m9, ok := models["ge-0-0-9"]; !ok {
 		t.Fatalf("no model for ge-0-0-9")
-	} else if len(m9.VLANParentAddresses) != 0 {
-		t.Errorf("ge-0-0-9 VLANParentAddresses=%v, want none: unit 0 is in no zone but the device is planned via tagged unit 50", m9.VLANParentAddresses)
+	} else if len(m9.VLANParentAddresses) != 1 || m9.VLANParentAddresses[0] != "10.9.0.1/24" {
+		t.Errorf("ge-0-0-9 VLANParentAddresses=%v, want [10.9.0.1/24] (#16795 tagged-only shape)", m9.VLANParentAddresses)
 	}
 
 	// Non-vacuity: the zoned untagged sibling really is addressed, on
@@ -178,9 +175,9 @@ func TestPartiallyZonedUntaggedUnitsDoNotRender17841(t *testing.T) {
 		t.Errorf("ge-0-0-1.2 = %+v (present=%v), want Addresses [10.0.2.1/24]", sub, ok)
 	}
 
-	// RED cell (DHCP): the zoned DHCP unit's co-configured static
-	// address must not render as static — the planner marks the
-	// netdev skipAddrs and the reconciler never installs it.
+	// RED cell (DHCPv4): the zoned DHCP unit's same-family static v4
+	// address must not render. The family filter suppresses v4 while
+	// still allowing any planner-owned static v6 address to render.
 	m2, ok := models["ge-0-0-2"]
 	if !ok {
 		t.Fatalf("no model for ge-0-0-2")
@@ -225,6 +222,99 @@ func TestPartiallyZonedUntaggedUnitsDoNotRender17841(t *testing.T) {
 	if !m5.KeepAddresses || !m5.KeepForeignStatic {
 		t.Errorf("ge-0-0-5 KeepAddresses=%v KeepForeignStatic=%v, want both true (#15061)",
 			m5.KeepAddresses, m5.KeepForeignStatic)
+	}
+}
+
+func TestDHCPFamilySkipsOnlyStaticAddressesInManagedFamilies17841(t *testing.T) {
+	tests := []struct {
+		name         string
+		ifName       string
+		unitCommands []string
+		plannedCount int
+		want         []string
+	}{
+		{
+			name:   "DHCPv4 keeps static IPv6",
+			ifName: "ge-0/0/6",
+			unitCommands: []string{
+				"family inet dhcp",
+				"family inet6 address 2001:db8:6::1/64",
+			},
+			plannedCount: 1,
+			want:         []string{"2001:db8:6::1/64"},
+		},
+		{
+			name:   "DHCPv6 keeps static IPv4",
+			ifName: "ge-0/0/7",
+			unitCommands: []string{
+				"family inet6 dhcpv6",
+				"family inet address 10.7.0.1/24",
+			},
+			plannedCount: 1,
+			want:         []string{"10.7.0.1/24"},
+		},
+		{
+			name:   "both DHCP families suppress all statics",
+			ifName: "ge-0/0/8",
+			unitCommands: []string{
+				"family inet dhcp",
+				"family inet address 10.8.0.1/24",
+				"family inet6 dhcpv6",
+				"family inet6 address 2001:db8:8::1/64",
+			},
+			plannedCount: 2,
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := &config.ConfigTree{}
+			commands := []string{"set interfaces " + tc.ifName + " vlan-tagging"}
+			for _, unitCommand := range tc.unitCommands {
+				commands = append(commands,
+					"set interfaces "+tc.ifName+" unit 0 "+unitCommand)
+			}
+			commands = append(commands,
+				"set security zones security-zone trust interfaces "+tc.ifName+".0")
+			for _, command := range commands {
+				path, err := config.ParseSetCommand(command)
+				if err != nil {
+					t.Fatalf("ParseSetCommand(%q): %v", command, err)
+				}
+				if err := tree.SetPath(path); err != nil {
+					t.Fatalf("SetPath(%q): %v", command, err)
+				}
+			}
+			cfg, err := config.CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("strict compile of DHCP-family fixture: %v", err)
+			}
+			linuxName := config.LinuxIfName(tc.ifName)
+			pd := planPhysDesired(cfg)[linuxName]
+			if pd == nil || !pd.skipAddrs || len(pd.addrs) != tc.plannedCount {
+				t.Fatalf("plan[%s]=%+v, want skipAddrs=true and %d planned static address(es)",
+					linuxName, pd, tc.plannedCount)
+			}
+
+			result := &CompileResult{ifCache: map[string]*net.Interface{
+				linuxName: {
+					Index:        106 + i,
+					Name:         linuxName,
+					HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x17, byte(i)},
+				},
+			}}
+			buildInterfaceNetworkdModels(cfg, result, map[string]bool{})
+			for _, model := range result.ManagedInterfaces {
+				if model.Name == linuxName {
+					if !reflect.DeepEqual(model.VLANParentAddresses, tc.want) {
+						t.Errorf("%s VLANParentAddresses=%v, want %v",
+							linuxName, model.VLANParentAddresses, tc.want)
+					}
+					return
+				}
+			}
+			t.Fatalf("no model for %s; models=%v", linuxName, result.ManagedInterfaces)
+		})
 	}
 }
 

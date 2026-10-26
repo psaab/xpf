@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -30,10 +31,11 @@ import (
 // the unzoned unit's address as static and every later compile's
 // reconcileInterfaceAddresses deleted it as stale. The caller passes
 // the same planPhysDesired(cfg) map the reconciler consumes; when the
-// plan says skipAddrs the parent renders nothing; when the device is
-// absent from the plan the render falls back to the #16795 unzoned
-// shape UNLESS zone refs for untagged units exist but were all
-// quarantined (then the planner deliberately owns nothing). The
+// plan says skipAddrs, the parent renders only static addresses in
+// families not DHCP-managed by contributing units;
+// when the device is absent from the plan, the render falls back to the
+// #16795 unzoned shape UNLESS zone refs for untagged units exist but were
+// all quarantined (then the planner deliberately owns nothing). The
 // standalone-VRRP exclusion stays as a local guard because the planner
 // includes such a unit's real address in pd.addrs while the render
 // must keep it VIP-foreign (#15061).
@@ -41,6 +43,13 @@ import (
 // a missing plan entry means the planner owns nothing on it.
 func untaggedUnitAddressesFor(cfg *config.Config, ifName, linuxName string, ifCfg *config.InterfaceConfig, isVRRPReth bool, physPlans map[string]*physDesired, zoned map[int]bool) []string {
 	pd := physPlans[linuxName]
+	if pd != nil && len(pd.addrs) == 0 && !pd.skipAddrs {
+		// MTU-only entry (tagged refs only): the parent is never
+		// address-reconciled, so this is the #16795 unzoned shape,
+		// not a planned-address device. Fall through to the absent
+		// branch by treating the plan as absent for addresses.
+		pd = nil
+	}
 	if pd == nil {
 		if len(zoned) == 0 && anyZoneRefForUntagged(cfg, ifName, ifCfg) {
 			// #17841 quarantine leg: zone refs exist for untagged
@@ -153,8 +162,21 @@ func splitZoneRefForParent(cfg *config.Config, ref, ifName string) (base string,
 }
 
 func untaggedUnitAddresses(ifCfg *config.InterfaceConfig, isVRRPReth bool, planned []string, skipAddrs bool, zoned map[int]bool) []string {
-	if isVRRPReth || ifCfg == nil || skipAddrs {
+	if isVRRPReth || ifCfg == nil {
 		return nil
+	}
+	dhcpV4, dhcpV6 := false, false
+	if skipAddrs {
+		for _, unit := range ifCfg.Units {
+			if unit == nil || unit.Disable || unit.VlanID > 0 {
+				continue
+			}
+			dhcpV4 = dhcpV4 || unit.DHCP
+			dhcpV6 = dhcpV6 || unitHasDHCPv6(unit)
+		}
+		if dhcpV4 && dhcpV6 {
+			return nil
+		}
 	}
 	// The set the planner folded onto THIS device. When the planner
 	// planned this device at all, only addresses in this set may
@@ -178,19 +200,17 @@ func untaggedUnitAddresses(ifCfg *config.InterfaceConfig, isVRRPReth bool, plann
 		if unit == nil || unit.Disable || unit.VlanID > 0 || unitCarriesStandaloneVRRP(unit) {
 			continue
 		}
-		if plannedOnDevice {
-			// #17841: on a device the planner addressed via one zoned
-			// untagged unit, ghost unit-0 addresses from a second,
-			// unzoned-but-planned sibling must not render. The planner
-			// marks the device planned (pd != nil) exactly when some
-			// unit resolved to it; an untagged unit that is not
-			// zone-referenced is not planner-owned here.
-			if !zoned[n] {
+		for _, a := range unit.Addresses {
+			if plannedOnDevice && !want[a] {
 				continue
 			}
-		}
-		for _, a := range unit.Addresses {
-			if (plannedOnDevice && !want[a]) || seen[a] {
+			if skipAddrs {
+				isV6 := strings.Contains(a, ":")
+				if (isV6 && dhcpV6) || (!isV6 && dhcpV4) {
+					continue
+				}
+			}
+			if seen[a] {
 				continue
 			}
 			seen[a] = true
