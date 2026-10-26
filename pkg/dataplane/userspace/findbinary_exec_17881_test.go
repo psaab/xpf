@@ -115,7 +115,7 @@ func TestEnsureProcessDoesNotExecuteReplacedHelper17881(t *testing.T) {
 		if os.SameFile(info, originalInfo) {
 			return 0, true
 		}
-		return oldOwnerUID(info)
+		return 1, true
 	}
 	dirChecks := 0
 	dirCount := 0
