@@ -95,8 +95,14 @@ func zonedUntaggedUnits(cfg *config.Config, ifName string, ifCfg *config.Interfa
 		return out
 	}
 	quarantined := config.QuarantinedZoneInterfaceKeys(cfg)
-	for _, zone := range cfg.Security.Zones {
+	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+	for zoneName, zone := range cfg.Security.Zones {
 		if zone == nil {
+			continue
+		}
+		// Mirror planPhysDesired: an excluded zone (ID-collision
+		// loser / reserved / poisoned) contributes nothing.
+		if _, excluded := excludedZones[zoneName]; excluded {
 			continue
 		}
 		for _, ref := range zone.Interfaces {
