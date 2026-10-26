@@ -181,6 +181,137 @@ func TestStandaloneVRRPVIPSurvivesReconcile16833(t *testing.T) {
 	}
 }
 
+// #17866: the whole-interface-disabled leg the unit leg already mirrors.
+// planPhysDesired checked unit.Disable but never ifCfg.Disable, so a
+// whole-interface-disabled interface's enabled units still contributed
+// their standalone VIPs to keepAddrs. #16834's CollectInstances skips
+// such interfaces entirely (the instance is instance-less — nothing
+// owns the VIP), yet the keep-set exemption in planAddressReconcile
+// preserved a stale on-netdev VIP forever instead of deleting it.
+// The VLAN reconcile arm and interfaceCarriesStandaloneVRRP (the
+// networkd keep arms) had the same missed leg: a disabled parent's
+// tagged unit still collected its VIPs / still set KeepAddresses.
+//
+// FAIL-ON-REVERT: drop the ifCfg.Disable gates and the disabled rows
+// below keep the VIPs again (planner keepAddrs non-empty, VLAN keep
+// non-empty, KeepAddresses/KeepForeignStatic true).
+func TestStandaloneVRRPVIPNotKeptOnDisabledInterface17866(t *testing.T) {
+	mkCfg := func(ifDisable bool, vlan bool) *config.Config {
+		cfg := &config.Config{}
+		cfg.Security.Zones = map[string]*config.ZoneConfig{
+			"trust": {Name: "trust", Interfaces: []string{"ge-0-0-1.0", "ge-0-0-1.100"}},
+		}
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"ge-0-0-1": {
+				Name: "ge-0-0-1", Disable: ifDisable, VlanTagging: vlan,
+				Units: map[int]*config.InterfaceUnit{
+					0: {
+						Number:    0,
+						Addresses: []string{"10.0.1.10/24"},
+						VRRPGroups: map[string]*config.VRRPGroup{
+							"10.0.1.10/24_grp1": {ID: 1, VirtualAddresses: []string{"10.0.1.1/24"}},
+						},
+					},
+					100: {
+						Number:    100,
+						VlanID:    100,
+						Addresses: []string{"10.0.100.10/24"},
+						VRRPGroups: map[string]*config.VRRPGroup{
+							"10.0.100.10/24_grp1": {ID: 1, VirtualAddresses: []string{"10.0.100.1/24"}},
+						},
+					},
+				},
+			},
+		}
+		return cfg
+	}
+
+	// Untagged arm: disabled interface -> no keep, so a stale VIP still
+	// present on the netdev is planned for deletion, not preserved.
+	pdOff := planPhysDesired(mkCfg(true, true))["ge-0-0-1"]
+	if pdOff != nil && len(pdOff.keepAddrs) != 0 {
+		t.Fatalf("disabled interface keepAddrs=%v, want none (stale VIP must converge to deleted)", pdOff.keepAddrs)
+	}
+	if pdOff != nil {
+		existing := []netlink.Addr{mkAddr16833(t, "10.0.1.10/24"), mkAddr16833(t, "10.0.1.1/24")}
+		del, add, _ := planAddressReconcile(existing, pdOff.addrs, pdOff.keepAddrs, "ge-0-0-1")
+		if !delKeys16833(del)["10.0.1.1/24"] || len(add) != 0 {
+			t.Fatalf("disabled interface reconcile: del=%v add=%v, want stale VIP 10.0.1.1/24 deleted", delKeys16833(del), addKeys16833(add))
+		}
+	}
+
+	// Tagged-unit reconcile arm uses the same parent+unit scope as the
+	// untagged planner.
+	cfgOff := mkCfg(true, true)
+	ifCfgOff := cfgOff.Interfaces.Interfaces["ge-0-0-1"]
+	unit100 := ifCfgOff.Units[100]
+	if keepVLAN := interfaceUnitStandaloneVRRPVIPs(ifCfgOff, unit100); len(keepVLAN) != 0 {
+		t.Fatalf("disabled interface VLAN keep=%v, want none", keepVLAN)
+	}
+	cfgOn := mkCfg(false, true)
+	if keepVLAN := interfaceUnitStandaloneVRRPVIPs(
+		cfgOn.Interfaces.Interfaces["ge-0-0-1"], cfgOn.Interfaces.Interfaces["ge-0-0-1"].Units[100],
+	); len(keepVLAN) != 1 || keepVLAN[0] != "10.0.100.1/24" {
+		t.Fatalf("enabled interface VLAN control keep=%v, want [10.0.100.1/24]", keepVLAN)
+	}
+
+	// Enabled untagged control: keep present exactly as before.
+	pdOn := planPhysDesired(cfgOn)["ge-0-0-1"]
+	if pdOn == nil || len(pdOn.keepAddrs) != 1 || pdOn.keepAddrs[0] != "10.0.1.1/24" {
+		t.Fatalf("enabled control keepAddrs=%v, want [10.0.1.1/24]", pdOn)
+	}
+
+	// interfaceCarriesStandaloneVRRP is the networkd-keep predicate:
+	// a whole-interface-disabled interface carries no standalone VRRP.
+	if interfaceCarriesStandaloneVRRP(cfgOff.Interfaces.Interfaces["ge-0-0-1"]) {
+		t.Fatal("disabled interface: interfaceCarriesStandaloneVRRP=true, want false (networkd must not keep a VIP nothing owns)")
+	}
+	if !interfaceCarriesStandaloneVRRP(cfgOn.Interfaces.Interfaces["ge-0-0-1"]) {
+		t.Fatal("enabled control: interfaceCarriesStandaloneVRRP=false, want true")
+	}
+
+	// Networkd's tagged-child rows have a separate keep arm; ensure they
+	// follow the same enabled-interface rule.
+	modelsFor := func(cfg *config.Config) map[string]struct {
+		keepAddresses     bool
+		keepForeignStatic bool
+	} {
+		result := &CompileResult{ifCache: map[string]*net.Interface{
+			"ge-0-0-1": {
+				Index:        1,
+				Name:         "ge-0-0-1",
+				HardwareAddr: net.HardwareAddr{0x02, 0, 0, 0, 0, 1},
+			},
+		}}
+		buildInterfaceNetworkdModels(cfg, result, map[string]bool{})
+		rows := map[string]struct {
+			keepAddresses     bool
+			keepForeignStatic bool
+		}{}
+		for _, row := range result.ManagedInterfaces {
+			rows[row.Name] = struct {
+				keepAddresses     bool
+				keepForeignStatic bool
+			}{row.KeepAddresses, row.KeepForeignStatic}
+		}
+		return rows
+	}
+	rowsOff := modelsFor(cfgOff)
+	if row, ok := rowsOff["ge-0-0-1.100"]; !ok || row.keepAddresses || row.keepForeignStatic {
+		t.Fatalf("disabled interface VLAN model keep=%+v present=%t, want neither keep", row, ok)
+	}
+	rowsOn := modelsFor(cfgOn)
+	if row, ok := rowsOn["ge-0-0-1.100"]; !ok || !row.keepAddresses || !row.keepForeignStatic {
+		t.Fatalf("enabled interface VLAN model keep=%+v present=%t, want both keeps", row, ok)
+	}
+	if row, ok := rowsOff["ge-0-0-1"]; !ok || row.keepForeignStatic {
+		t.Fatalf("disabled interface parent model keep=%+v present=%t, want no foreign-static keep", row, ok)
+	}
+	if row, ok := rowsOn["ge-0-0-1"]; !ok || !row.keepForeignStatic {
+		t.Fatalf("enabled interface parent model keep=%+v present=%t, want foreign-static keep", row, ok)
+	}
+}
+
 // Actuation level: drive the real compile (programZoneMaps) over the
 // fake host for both arms, exactly as a commit would.
 func TestStandaloneVRRPVIPSurvivesApply16833(t *testing.T) {
