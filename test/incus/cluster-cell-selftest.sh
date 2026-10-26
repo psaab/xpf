@@ -4,7 +4,7 @@
 # (test/incus/cluster-cell.sh, helper xpf_enter_destructive_cluster_cell).
 #
 # Two halves, both runnable ANYWHERE — no incus, no cluster, no network,
-# and NEVER touching the real /tmp/xpf-cluster.lock (a PRIVATE lock path
+# and NEVER touching the real loss-default `/var/worktrees/.cache/tmpdir/xpf-cluster.lock` (a PRIVATE lock path
 # under a temp dir is used throughout):
 #
 #   STATIC   — every DESTRUCTIVE HA smoke script routes through the

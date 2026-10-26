@@ -14,12 +14,15 @@
 # concurrent test-failover measuring loss while another reboots ->
 # garbage results). #4020.
 #
-# This preamble serializes the destructive smoke under the SAME
-# advisory flock on /tmp/xpf-cluster.lock that cluster-setup.sh
-# mutating verbs and apply-cos-config.sh already self-lock, so a
-# test-failover QUEUES behind (or blocks on) a held lock instead of
-# colliding. It never weakens the deploy/apply-cos lock — it is the
-# identical re-exec-through-with-cluster.sh mechanism.
+# This preamble serializes the destructive smoke under the canonical
+# `XPF_CLUSTER_*` tuple. The default loss lock path is
+# `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`.
+# TCP/UDP-specific callers must export their matching tuple to both
+# this wrapper and any `cluster-setup.sh` command. Mutating verbs and
+# apply-cos-config.sh already self-lock, so a test-failover QUEUES behind
+# (or blocks on) a held lock instead of colliding. It never weakens the
+# deploy/apply-cos lock — it is the identical re-exec-through-with-cluster.sh
+# mechanism.
 #
 # Usage — source AFTER `set -euo pipefail`, BEFORE any incus/cluster
 # work, passing the script's own path + args:
@@ -44,13 +47,12 @@
 #      which blocks with a named-holder report until the cluster is
 #      ours and re-runs the script with the marker set.
 #
-# The unconditional lock matches the deploy path: cluster-setup.sh's
-# init/create/destroy/start/stop/restart take the lock for EVERY
-# cluster env (including the legacy local xpf-fw0/1), not just the
-# shared loss cluster. /tmp/xpf-cluster.lock is a single dev-box mutex;
-# taking it for the rarely-used legacy local cluster is the safe
-# direction (serialize, never collide) and needs no shared-vs-local
-# detection.
+# The lock matches the deploy path: cluster-setup.sh's init/create/
+# destroy/start/stop/restart use the canonical `XPF_CLUSTER_*` tuple for
+# every cluster env, including legacy local xpf-fw0/1. Loss defaults to
+# `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`. TCP/UDP gates and ordinary
+# commands must export the same suffixed tuple before both cluster-setup.sh
+# and with-cluster.sh; default loss commands need no override.
 #
 # On return the caller holds (transitively) the cluster lock for the
 # rest of its run; the kernel releases the flock when the cell's

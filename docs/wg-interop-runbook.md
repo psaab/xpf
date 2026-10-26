@@ -45,16 +45,26 @@ WG outer transport: UDP 51820 over the VLAN-3667 LAN. Inner subnets:
 ```
 
 Evidence lands in `/tmp/wg-interop-<timestamp>/` (override with
-`WG_EVIDENCE_DIR`). Standalone, every cluster command runs under
-`flock /tmp/xpf-cluster.lock sg incus-admin`; long traffic runs detached
-inside the instances so the lock is never held across a phase. Inside a
-`test/incus/with-cluster.sh` lock cell (#1875) the per-command flock is
-skipped — the cell already owns the cluster for the whole run. Do NOT
-wrap this script in a raw outer `flock /tmp/xpf-cluster.lock` — that
-deadlocks; use `with-cluster.sh`:
+`WG_EVIDENCE_DIR`).
 
-```
-./test/incus/with-cluster.sh "1736 wg-interop" -- \
+`test/incus/wg-interop.env` pins this harness to the shared loss userspace
+cluster (`WG_REMOTE=loss`,
+`WG_CLUSTER_LOCK=/var/worktrees/.cache/tmpdir/xpf-cluster.lock`); it does
+not select tcp/udp clusters and must not be used as a tcp/udp gate.
+Standalone, each `inc()` invocation uses raw per-command
+`flock "${WG_CLUSTER_LOCK}" sg incus-admin -c "$q"` around one `incus`
+command; this does not publish `with-cluster.sh` owner/epoch metadata. Long
+traffic runs detach inside the instances, so the per-command lock is not held
+across a phase. Inside `test/incus/with-cluster.sh` lock cell (#1875), the
+marker-aware `xpf_cluster_lock_held` check skips per-command `flock`; the
+outer cell owns the loss lock for the whole run. Do NOT wrap this script in a
+raw `flock` on that lock path — this deadlocks. Clear inherited tcp/udp
+`XPF_CLUSTER_*` overrides before starting the outer cell so it also owns the
+loss tuple; then use `with-cluster.sh`:
+
+```bash
+env -u XPF_CLUSTER_LOCK -u XPF_CLUSTER_OWNER -u XPF_CLUSTER_EPOCH \
+    ./test/incus/with-cluster.sh "1736 wg-interop" -- \
     env WG_PEER_TYPE=container ./test/incus/wg-interop.sh all
 ```
 

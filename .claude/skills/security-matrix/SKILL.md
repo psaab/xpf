@@ -167,7 +167,10 @@ then `rollback` to restore. This proves the ALLOW is policy-driven.
 Write `docs/smoke/security-matrix-<YYYY-MM-DD>.md` with the deployed master sha,
 the env/isolation actions, and the **actual evidence** for each case (iperf
 `[SUM]` lines + retrans; tcpdump lines; session-table rows; counter deltas; TTL
-values; the RST observed for the reject case). Log a one-line entry in `_Log.md`.
+values; the RST observed for the reject case). For campaign PRs, record the
+result in `docs/log/<issue>.md` (or `docs/log/<pr>.md` when there is no linked
+issue); standalone runs are fully recorded in the dated report above. Never
+append to the closed repository-root `_Log.md`.
 Report PASS/FAIL per case. If any case is inconclusive (e.g. capture env limit),
 say so explicitly and track it as a follow-up — never paper over it.
 

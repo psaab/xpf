@@ -14,7 +14,8 @@
 # None of those harnesses could create a listener, none of them checked more
 # than the ONE port it was about to use, and nothing in the tree said the
 # dependency existed. So the first harness to run rediscovered it, having
-# already spent a build, a deploy, and the shared /tmp/xpf-cluster.lock.
+# already spent a build, a deploy, and the shared loss-default
+# `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`.
 #
 #   ./test/incus/target-services.sh status         # the whole grid, one table
 #   ./test/incus/target-services.sh check           # exit 1 if ANY of the 24 is down

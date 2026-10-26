@@ -24,6 +24,14 @@
 - No sycophantic openers or closing fluff.
 - Keep solutions simple and direct.
 - When working with many teams, don't let the context windows get too large.
+- Reviewer findings (any model, including Copilot) are claims, not facts:
+  grep/read the cited line at the reviewed SHA before folding a finding.
+  Adversarial reviewers have hallucinated showstopper bugs in this repo
+  before; verify, then fold — never print-and-propagate.
+- The shared `GOCACHE` (`/var/worktrees/.cache/go-build`) is box-wide
+  infrastructure on a multi-session host: `go clean -cache` against it
+  cold-rebuilds every other session too. Treat it as a deliberate,
+  logged, last-resort action, never a routine cleanup step.
 
 **Read `docs/engineering-style.md` before writing non-trivial code or
 reviewing a PR.** It encodes the coding and review discipline this
@@ -42,6 +50,7 @@ whether the code is correct.
 | `docs/engineering-style.md` | before ANY non-trivial code or PR review | hot-path allocation rules, review severity, compile-time invariants, PR discipline, shared-cluster protocol, the project gotchas that repeatedly bite (deploy wipes CoS, iperf3 target, etc.) |
 | `~/.claude/RTK.md` | before running shell commands in bulk | the `rtk` token-optimizing CLI proxy. A hook transparently rewrites most commands (`git status` → `rtk git status`), but the meta commands (`rtk gain`, `rtk discover`, `rtk proxy <cmd>`) must be invoked directly. Use `rtk proxy <cmd>` when you need UNFILTERED output for debugging — filtered output has dropped the line you are looking for more than once. |
 | `AGENTS.md` | before splitting work across agents | orchestrator / architect / implementor role boundaries, worktree assignment, overlap prevention, and the rule that agents keep working until they hit a real stopping point |
+| `.claude/skills/campaign/SKILL.md` | before driving an issue/PR backlog to zero | THE single campaign skill: research firehose triage, keeper/monitor, triple hostile review, three-cluster gates, merge discipline, disk guard. Do not invent a parallel PR-closing process alongside it |
 | `COMMITAGENT.md` | before driving a stacked branch series | stack ownership, narrow helper roles, and the commit/stack discipline |
 | `README.md` | when touching a public-facing surface | what the product claims to do; a behaviour change that contradicts it is a docs bug too |
 | `docs/config-schema.md` | before adding a config-mode leaf | `setSchema` typed leaves, multi-value leaves, bracketed-list collapse (#2419 class) |
@@ -65,6 +74,10 @@ that assumes the agent already did is not.
   - A `merge=union` driver is NOT the fix and must not be added for this file:
     it fuses two same-minute entries into one malformed entry and exits 0. See
     `docs/log/README.md` for the measurement.
+  - Skills or docs that still instruct union-resolving the root `_Log.md`
+    on merge are stale (per-issue `docs/log/<issue>.md` files do not share
+    a trailing region and should not conflict); report them instead of
+    following them.
 - Use YAML or Markdown bullet points for structure:
     - **Timestamp**: [Time]
     - **Action**: [Brief Description]
@@ -242,19 +255,47 @@ not a runtime `IMAGE_VM` override (the scripts now use Ubuntu package names + a
 
 ## Cluster Test Environment (Two-VM HA)
 
-**Smoke tests run ONLY on the loss userspace cluster** (`loss:xpf-userspace-fw0/fw1`).
-The Makefile `cluster-*` targets now default to that userspace cluster via
-`test/incus/loss-userspace-cluster.env`. Use `loss-cluster-*` only for the
-older loss cluster, and set `CLUSTER_ENV=` only when intentionally exercising
-the original local `xpf-fw0/xpf-fw1` regression environment.
+**Smoke tests default to the loss userspace cluster** (`loss:xpf-userspace-fw0/fw1`).
+The Makefile `cluster-*` targets default to that userspace cluster via
+`test/incus/loss-userspace-cluster.env`. Loss is the default, not the only
+option. Per-PR campaign gate assignment is canonical in
+`.claude/skills/campaign/SKILL.md`: dataplane/forwarding/throughput changes
+gate on `loss`; other gated PRs use the least-busy of `loss`, `tcp`, and
+`udp`. The always-on smoke-feedback watcher is loss-only and does not replace
+per-PR gates.
 
-**Cluster ownership (#1875):** the loss cluster is SHARED. Deploys,
-`apply-cos-config.sh`, AND the destructive HA smoke targets
+**Three HA gate clusters and their locks:** besides loss, `tcp` and `udp`
+userspace clusters support parallel validation
+(`BPFRX_CLUSTER_ENV=test/incus/tcp-userspace-cluster.env` /
+`test/incus/udp-userspace-cluster.env`). There is ONE canonical lock tuple
+per physical cluster, and ordinary deploy/failover/smoke commands MUST use
+the same tuple as campaign gates:
+
+| Cluster | Lock | Owner | Epoch |
+|---|---|---|---|
+| `loss` | `/var/worktrees/.cache/tmpdir/xpf-cluster.lock` | `/var/worktrees/.cache/tmpdir/xpf-cluster.owner` | `/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch` |
+| `tcp` | `/var/worktrees/.cache/tmpdir/xpf-cluster-tcp.lock` | `/var/worktrees/.cache/tmpdir/xpf-cluster-tcp.owner` | `/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch-tcp` |
+| `udp` | `/var/worktrees/.cache/tmpdir/xpf-cluster-udp.lock` | `/var/worktrees/.cache/tmpdir/xpf-cluster-udp.owner` | `/var/worktrees/.cache/tmpdir/xpf-cluster-state/epoch-udp` |
+
+Loss uses the exact `test/incus/cluster-lock.sh` defaults. For every `tcp` or
+`udp` command, including an ordinary `make cluster-deploy`, failover, or
+smoke, export all three matching `XPF_CLUSTER_LOCK`, `XPF_CLUSTER_OWNER`, and
+`XPF_CLUSTER_EPOCH` values before invoking any self-locking command. Without
+those exports the scripts fall back to the loss default, so a gate and an
+ordinary command could use different mutexes on the same physical cluster.
+Baselines are per-cluster: tcp/udp run a bridge-fabric fallback and must never
+be judged against loss throughput numbers (~23 Gbit/s). Do not use
+`loss-cluster-*` except for the older loss cluster, and set `CLUSTER_ENV=`
+only when intentionally exercising the original local `xpf-fw0/xpf-fw1`
+regression environment.
+
+**Cluster ownership (#1875):** loss is shared. Deploys,
+`apply-cos-config.sh`, and destructive HA smoke targets
 (`test-failover` / `test-ha-crash` / `test-double-failover` /
 `test-stress-failover` / `test-chained-crash` / `test-active-active` /
 `test-restart-connectivity` / `test-private-rg` — they reboot /
-force-stop / fail over a node) self-lock `/tmp/xpf-cluster.lock` via the
-`cluster-cell.sh` preamble (#4020), so a reboot QUEUES behind another
+force-stop / fail over a node) self-lock `/var/worktrees/.cache/tmpdir/xpf-cluster.lock`
+via the `cluster-cell.sh` preamble (#4020), so a reboot QUEUES behind another
 agent's deploy/smoke instead of colliding — wait, NEVER kill another
 holder, NEVER `rm` the lock file. Wrap multi-command work in a lock
 cell: `./test/incus/with-cluster.sh "purpose" -- cmd...`. NEVER

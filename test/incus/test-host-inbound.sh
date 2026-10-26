@@ -30,7 +30,7 @@ esac
 # #1875/#4020: with --with-failover this smoke MOVES REDUNDANCY GROUPS on the
 # SHARED loss cluster. Re-exec under the incus-admin group if needed, then
 # serialize as a #1875 lock cell so a concurrent deploy/smoke cannot collide
-# with our failover (it queues behind a held /tmp/xpf-cluster.lock). Taken
+# with our failover (it queues behind the canonical cluster lock). Taken
 # unconditionally rather than only for the failover leg: the matrix run pushes
 # a file into the LAN prober and reads cluster state, and a lock cell that is
 # sometimes taken is a lock cell nobody can reason about.
