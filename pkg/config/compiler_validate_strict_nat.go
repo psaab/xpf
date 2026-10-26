@@ -1924,31 +1924,22 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
 // allocation-failure counters. This is the SNAT twin of the #13922
 // DNAT/static cross-family strict reject.
 //
-// #17408 SCOPING. As first merged, this gate also rejected the
-// pre-existing valid grammar shapes asserted by #5627/#5875: a
-// v6-only (or unscoped-v6) pool referenced by a rule whose source
-// match is the whole-family wildcard `10.0.0.0/24`-style fixture —
-// in those fixtures `10.0.0.0/24` is merely the scaffold that makes
-// the rule pool-mode so the POOL grammar is exercised; the pool
-// itself is the subject, and v6-only pools are valid pool grammar
-// that must compile regardless of the scaffold's source prefix.
-// More generally, a source prefix that covers its ENTIRE family
-// (prefix length 0, e.g. `0.0.0.0/0`, or any prefix whose address
-// is the family wildcard) does not prove the operator intended
-// family-F-only translation in the #16600 sense: the authored
-// intent a strict gate may act on is a NARROW single-family match
-// (a proper subset of the family — a /24, a /64, a host) paired
-// with a pool that can never serve it. Accordingly this gate fires
-// only when the proven single-family source set contains at least
-// one NARROW prefix (prefix length > 0); a rule whose every source
-// prefix is its family's /0 wildcard is out of scope. That scoping
-// keeps every #16600 DEFECT row (narrow /24 or /64 source, `any-ipv4`
-// wildcard keyword, v4-only book name) rejecting, and restores the
-// #5627/#5875 v6-only and unscoped-v6 pools under the wildcard-
-// equivalent scaffold to compiling clean. A collateral benefit:
-// `source-address 0.0.0.0/0` (explicit catch-all) with a v6-only
-// pool is a deliberate dual-stack migration shape the runtime
-// already fails closed per-flow, not a proven authoring error.
+// #17408 SCOPING (narrowed again by #17847). As first merged, this
+// gate also rejected the pre-existing valid grammar shapes asserted
+// by #5627/#5875: v6-only (or unscoped-v6) pools referenced by
+// rules whose source match is the DUAL-family scaffold
+// `[ 10.0.0.0/24 2001:db8:9::/64 ]` — the scaffold is not a
+// single-family match at all, and those shapes stay compiling.
+// The #17411 scoping additionally exempted an authored /0 literal
+// (a deliberate dual-stack migration shape, it argued); #17847
+// removed that exemption: `0.0.0.0/0` matches only IPv4 sources,
+// so against a v6-only pool it is exactly the proven single-family
+// mismatch this gate exists to reject. Authored literals — proper
+// subsets AND whole-family wildcards — count as narrow. The one
+// remaining narrow-only arm is named address-book closures: a name
+// resolving solely to a family wildcard is the scaffold shape, so
+// only a proper-subset member makes a name narrow (see
+// addressBookNameFamily16600).
 //
 // Single-family determination considers BOTH authored source axes:
 // literal `match source-address` values and `match source-address-name`
@@ -1958,10 +1949,10 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config) error {
 // (PolicyAddressWildcardFamilies: `any` both, `any-ipv4` v4-only,
 // `any6` v6-only); a single-family wildcard KEYWORD counts as narrow
 // (it names exactly one family, deliberately). A rule is in scope
-// only when every decidable authored source value is family F, at
-// least one is, and at least one is narrow. Hence an unconstrained
-// rule (no source-address / source-address-name), a dual-family rule
-// (mixed literals, a mixed book closure, or `any`), a /0-only rule,
+// only when every decidable authored source value is family F and
+// the set is non-empty under the narrowness rules above. Hence an
+// unconstrained rule (no source-address / source-address-name), a
+// dual-family rule (mixed literals, a mixed book closure, or `any`),
 // and a rule whose only source constraint is not statically decidable
 // (a direct dynamic-address feed binding, or a dns-name / tainted /
 // dangling closure) are NOT rejected: they can match family-F traffic
@@ -2047,9 +2038,11 @@ func validateSourceNATPoolFamilyStrict(cfg *Config) error {
 // sourceNATRuleSingleFamily16600 reports whether a source-NAT rule's
 // authored source match is proven single-family, and which family
 // ("v4" or "v6"). See validateSourceNATPoolFamilyStrict for the
-// provenance rules, including the #17408 narrow-prefix scoping: the
-// verdict is single-family only when at least one proven source value
-// is narrow (a proper subset of its family). A direct feed binding or
+// provenance rules, including the #17408/#17847 scoping: the
+// verdict is single-family when the proven single-family source set
+// is non-empty under the narrowness rules in the #17408/#17847
+// scoping above (literals always narrow; names only via a
+// proper-subset member). A direct feed binding or
 // an undecidable name closure makes the whole rule undecidable (not
 // single-family), because such a rule may match either family at
 // runtime.
@@ -2087,7 +2080,12 @@ func sourceNATRuleSingleFamily16600(cfg *Config, rule *NATRule) (string, bool) {
 			// owns it; it proves no family.
 			continue
 		}
-		if !merge(f, !natPrefixIsFamilyWildcard(raw)) {
+		// #17847: narrow=true for every authored literal, wildcards
+		// included: 0.0.0.0/0 is still IPv4-only, and an explicitly
+		// authored single-family match is the proven mismatch #16600
+		// targets. The #17408 exemption covers rules whose match is
+		// not authored single-family at all (missing/dual matches).
+		if !merge(f, true) {
 			return "", false
 		}
 	}
@@ -2202,6 +2200,11 @@ func addressBookNameFamily16600(ab *AddressBook, name string) (family string, na
 			narrow = true
 		}
 	}
+	// A named closure's narrowness follows the same #17408 scoping as
+	// literals before #17847: only a proper-subset member makes the
+	// name narrow. The #17847 fix deliberately covers authored
+	// literal matches and wildcard keywords, not name closures (a
+	// name resolving to a family wildcard is the #17408 scaffold).
 	return family, narrow, true
 }
 

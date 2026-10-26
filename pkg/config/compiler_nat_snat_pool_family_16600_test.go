@@ -42,6 +42,15 @@ func TestSourceNATPoolFamilyRejected16600(t *testing.T) {
 		{"v4 rule v6-only pool", "source-address 10.0.0.0/24", []string{"2001:db8::5"}},
 		{"v4 rule v4-mapped pool", "source-address 10.0.0.0/24", []string{"::ffff:192.0.2.1"}},
 		{"v6 rule v4-only pool", "source-address 2001:db8:1::/64", []string{"192.0.2.5"}},
+		// #17847: a whole-family wildcard literal is still single-family:
+		// 0.0.0.0/0 matches only IPv4 sources, so a v6-only pool can never
+		// serve it. The #17408 scaffold exemption applied to rules with NO
+		// authored single-family match; an explicitly authored /0 IS the
+		// authored match (the #17408 fixtures use dual-family matches).
+		{"v4 wildcard rule v6-only pool", "source-address 0.0.0.0/0", []string{"2001:db8::5"}},
+		{"v6 wildcard rule v4-only pool", "source-address ::/0", []string{"192.0.2.5"}},
+		{"v4 bare wildcard rule v6-only pool", "source-address 0.0.0.0", []string{"2001:db8::5"}},
+		{"v6 bare wildcard rule v4-only pool", "source-address ::", []string{"192.0.2.5"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(buildTree(t, snatFamilySet16600(tc.src, tc.pool...)))
@@ -109,6 +118,17 @@ func TestSourceNATRuleSingleFamilyWildcard16600(t *testing.T) {
 	}
 }
 
+func TestSourceNATPoolFamilyLenientWarnsWildcard17847(t *testing.T) {
+	cfg, err := CompileConfigLenient(buildTree(t, snatFamilySet16600(
+		"source-address 0.0.0.0/0", "2001:db8::5")))
+	if err != nil {
+		t.Fatalf("lenient compilation must not fail: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "WrongAddressFamily") {
+		t.Fatalf("lenient compilation must warn about the wildcard SNAT family mismatch: %v", cfg.Warnings)
+	}
+}
+
 func TestSourceNATPoolFamilyLenientWarns16600(t *testing.T) {
 	cfg, err := CompileConfigLenient(buildTree(t, snatFamilySet16600(
 		"source-address 10.0.0.0/24", "2001:db8::5")))
@@ -171,38 +191,55 @@ func TestSourceNATPoolFamilyFeedNameAdmitted16600(t *testing.T) {
 	}
 }
 
-// #17408: the #16600 gate must be scoped to proven (narrow)
-// mismatches. A whole-family /0 source match with an opposite-family
-// pool is the pre-existing #5627/#5875 valid-grammar shape (the
-// source prefix is scaffold; the v6-only pool is the subject) and
-// must compile clean again, while a narrow single-family match with
-// an opposite-family pool still rejects.
-func TestSourceNATPoolFamilyWildcardSourceAdmitted17408(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		src  string
-		pool string
-	}{
-		{"v4-slash0 v6 pool", "source-address 0.0.0.0/0", "2001:db8::5"},
-		{"v6-slash0 v4 pool", "source-address ::/0", "192.0.2.5"},
-		{"v4-bare-wildcard v6 pool", "source-address 0.0.0.0", "2001:db8::5"},
-		{"v6-slash112 scaffold shape", "source-address 10.0.0.0/24", "2001:db8::/112"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// The /24 scaffold shape is narrow, so only the /0 and
-			// bare-wildcard rows are admitted by scoping; the /24 row
-			// is asserted separately below to still reject.
-			if tc.name == "v6-slash112 scaffold shape" {
-				return
-			}
-			if _, err := CompileConfig(buildTree(t, snatFamilySet16600(tc.src, tc.pool))); err != nil {
-				t.Fatalf("whole-family source match must commit (#17408), got: %v", err)
-			}
-		})
-	}
-	// Narrow mismatch still rejects (the #16600 defect, unchanged).
-	if _, err := CompileConfig(buildTree(t, snatFamilySet16600(
-		"source-address 10.0.0.0/24", "2001:db8::/112"))); err == nil {
-		t.Fatal("narrow v4 source with v6-only /112 pool must still reject (#16600)")
-	}
+// #17408 scoped the #16600 gate to proven mismatches; #17847 then
+// closed the remaining whole-family literal-wildcard exemption: a
+// literal `0.0.0.0/0` covers every IPv4 source and no IPv6 source, so
+// it is an IPv4-single-family authored match that translates ONLY IPv4
+// traffic. Paired with a v6-only pool every matching flow is refused
+// WrongAddressFamily — exactly the #16600 defect. Scoping to the
+// proven mismatch is narrow, and the literal wildcard's parsed family
+// is the comparable proved family: `0.0.0.0/0` is IPv4-only, `::/0` is
+// IPv6-only. The prior #17408 admission of these literal shapes is
+// superseded by #17847. Same-family wildcards, dual-wildcard pairs, an
+// unconstrained rule, and a narrow cross-family mismatch retain their
+// prior gate outcomes.
+func TestSourceNATPoolFamilyWildcardSource17847(t *testing.T) {
+	t.Run("v4-slash0 v6-only pool rejected", func(t *testing.T) {
+		_, err := CompileConfig(buildTree(t, snatFamilySet16600(
+			"source-address 0.0.0.0/0", "2001:db8::5")))
+		if err == nil || !strings.Contains(err.Error(), "WrongAddressFamily") {
+			t.Fatalf("0.0.0.0/0 is IPv4-only; v6-only pool must be rejected (#17847), got: %v", err)
+		}
+	})
+	t.Run("v6-slash0 v4-only pool rejected", func(t *testing.T) {
+		_, err := CompileConfig(buildTree(t, snatFamilySet16600(
+			"source-address ::/0", "192.0.2.5")))
+		if err == nil || !strings.Contains(err.Error(), "WrongAddressFamily") {
+			t.Fatalf("::/0 is IPv6-only; v4-only pool must be rejected (#17847), got: %v", err)
+		}
+	})
+	t.Run("v4-slash0 v4 pool admitted", func(t *testing.T) {
+		if _, err := CompileConfig(buildTree(t, snatFamilySet16600(
+			"source-address 0.0.0.0/0", "192.0.2.5"))); err != nil {
+			t.Fatalf("0.0.0.0/0 with a v4 pool must commit (#17847), got: %v", err)
+		}
+	})
+	t.Run("v6-slash0 v6 pool admitted", func(t *testing.T) {
+		if _, err := CompileConfig(buildTree(t, snatFamilySet16600(
+			"source-address ::/0", "2001:db8::5"))); err != nil {
+			t.Fatalf("::/0 with a v6 pool must commit (#17847), got: %v", err)
+		}
+	})
+	t.Run("dual wildcard match v6 pool admitted", func(t *testing.T) {
+		if _, err := CompileConfig(buildTree(t, snatFamilySet16600(
+			"source-address [ 0.0.0.0/0 ::/0 ]", "2001:db8::5"))); err != nil {
+			t.Fatalf("dual-family source match with a v6 pool must commit (#17847), got: %v", err)
+		}
+	})
+	t.Run("narrow mismatch still rejects", func(t *testing.T) {
+		if _, err := CompileConfig(buildTree(t, snatFamilySet16600(
+			"source-address 10.0.0.0/24", "2001:db8::/112"))); err == nil {
+			t.Fatal("narrow v4 source with v6-only /112 pool must still reject (#16600)")
+		}
+	})
 }
