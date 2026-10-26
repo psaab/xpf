@@ -462,6 +462,15 @@ func TestSeparateNativeUnitZeroDoesNotTriggerSharedAdvisory7509(t *testing.T) {
 func TestSecureTunnelUnitDevicePrecedesTunnelMap7509(t *testing.T) {
 	tree := &ConfigTree{}
 	for _, cmd := range []string{
+		"set security ike proposal ike-p1 authentication-method pre-shared-keys",
+		"set security ike proposal ike-p1 encryption-algorithm aes-256-cbc",
+		"set security ike proposal ike-p1 authentication-algorithm sha-256",
+		"set security ike proposal ike-p1 dh-group group14",
+		"set security ike policy ike-pol proposals ike-p1",
+		"set security ike policy ike-pol pre-shared-key ascii-text fixture-secret-7509",
+		"set security ike gateway gw1 address 192.0.2.1",
+		"set security ike gateway gw1 ike-policy ike-pol",
+		"set security ipsec vpn v ike gateway gw1",
 		"set security ipsec vpn v bind-interface st0.1",
 		"set interfaces st0 unit 1 tunnel mode gre",
 		"set interfaces st0 unit 1 tunnel source 10.0.0.1",

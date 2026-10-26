@@ -62,13 +62,12 @@ func TestCompletionMatchesCompiler8807(t *testing.T) {
 	}
 
 	// ---- half 2: the CONTROL, which is what makes half 1 a measurement ----
-	// A completer that matched everything would satisfy half 1 and fail here
-	// only if this path's count is checked exactly.
-	if got := comp(t, "firewall", "family", "inet", "filter", "f1", "term", "t1", "then", ""); len(got) != 12 {
-		t.Errorf("control: `term <t> then <TAB>` offered %d completions, want 12. This path "+
-			"was already correct and is untouched by this change; if it moved, the "+
-			"completer changed rather than the two declarations, and half 1 above is "+
-			"measuring the completer instead of the schema", len(got))
+	// Count the current top-level actions exactly. `next term` is the thirteenth
+	// action (#16533); reject's optional message-type children are nested and do
+	// not contribute at this completion path.
+	if got := comp(t, "firewall", "family", "inet", "filter", "f1", "term", "t1", "then", ""); len(got) != 13 {
+		t.Errorf("control: `term <t> then <TAB>` offered %d completions, want 13 "+
+			"(including `next term` from #16533)", len(got))
 	}
 
 	// ---- and the compiled result, unchanged in every spelling ----

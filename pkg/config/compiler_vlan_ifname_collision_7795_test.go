@@ -212,6 +212,7 @@ func TestRethUnitCollapseStillCompiles7795(t *testing.T) {
 func TestRethVlanAliasOfAuthoredNameStillCompiles7795(t *testing.T) {
 	if err := compileSet7795(t,
 		"set interfaces reth0 redundant-ether-options redundancy-group 1",
+		"set interfaces reth0 vlan-tagging",
 		"set interfaces reth0 unit 50 vlan-id 50",
 		"set interfaces reth0 unit 50 family inet address 172.16.50.8/24",
 		"set chassis cluster reth-count 2",

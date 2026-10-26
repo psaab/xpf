@@ -137,6 +137,9 @@ func newDHCPConvergerDaemon(t *testing.T, km *dhcpserver.Manager) *Daemon {
 	store := testStoreWithSetConfig(t, dhcpConvergerClusterSet)
 	cm := cluster.NewManager(0, 1)
 	cm.UpdateConfig(store.ActiveConfig().Chassis.Cluster)
+	// NewManager starts configured groups secondary until an election runs;
+	// this fixture models the node-0-primary service-apply case directly.
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
 	if !cm.IsLocalPrimary(1) {
 		t.Fatal("fixture: node 0 must be primary for RG1, or the MASTER edge never applies Kea")
 	}

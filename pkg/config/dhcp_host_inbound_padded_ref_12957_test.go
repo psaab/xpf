@@ -96,6 +96,8 @@ func TestPaddedDHCPGroupRefResolvesOverridePolicy12957(t *testing.T) {
 // zone lookup and effective policy).
 func TestPaddedDHCPGroupRefCompiledAdvisory12957(t *testing.T) {
 	base := []string{
+		"set interfaces ge-0/0/1 vlan-tagging",
+		"set interfaces ge-0/0/1 unit 1 vlan-id 1",
 		"set interfaces ge-0/0/1 unit 1 family inet address 10.0.1.1/24",
 		"set security zones security-zone trust interfaces ge-0/0/1.1",
 		"set system services dhcp-local-server group g1 interface ge-0/0/1.01",
