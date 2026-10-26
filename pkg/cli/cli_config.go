@@ -38,7 +38,7 @@ import (
 // path. A named holder lets ensureHolderLocked refuse mutation of a
 // candidate owned by another session instead of the empty-session bypass.
 func (c *CLI) cliConfigSessionID() string {
-	if c.configOwned {
+	if c.configOwnedNow() {
 		return localConfigSessionID
 	}
 	return ""
@@ -307,7 +307,7 @@ func (c *CLI) handleCommit(args []string) error {
 	if err := c.checkPermission([]string{"configure"}); err != nil {
 		return err
 	}
-	if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID && (c.configOwned || c.UserClass() != "") {
+	if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID && (c.configOwnedNow() || c.UserClass() != "") {
 		return fmt.Errorf("permission denied: configuration is locked by another session")
 	}
 	// #14981: commit promotes group-expanded paths never adjudicated as

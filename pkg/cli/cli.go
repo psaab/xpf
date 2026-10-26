@@ -151,7 +151,11 @@ type CLI struct {
 	// localConfigSessionID (#14986). dispatch must not infer ownership
 	// from the store-global InConfigMode flag, which any other surface's
 	// session flips.
-	configOwned bool
+	// Guarded by configOwnedMu because Run's signal goroutine invokes
+	// releaseLocalConfigureOnInterrupt concurrently with dispatch/EOF
+	// updates (#17838). All access must use the accessors below.
+	configOwned   bool
+	configOwnedMu sync.Mutex
 	// pendingPipeSuffix carries the output-pipe suffix that cliterm.SplitPipe
 	// removed, so the #7172 command gate can match the command as the operator
 	// typed it. Junos counts the pipe as part of the command, and a gate that
@@ -482,6 +486,20 @@ func (c *CLI) SetVersion(v string) {
 	c.version = v
 }
 
+// configOwnedNow reports whether this CLI session owns configuration mode.
+func (c *CLI) configOwnedNow() bool {
+	c.configOwnedMu.Lock()
+	defer c.configOwnedMu.Unlock()
+	return c.configOwned
+}
+
+// setConfigOwned records this CLI session's configuration ownership.
+func (c *CLI) setConfigOwned(owned bool) {
+	c.configOwnedMu.Lock()
+	defer c.configOwnedMu.Unlock()
+	c.configOwned = owned
+}
+
 // UserClass returns the current RBAC login class. It is the only
 // sanctioned read of userClass (#16071): the daemon may re-resolve
 // the class on config apply while the console dispatches commands.
@@ -678,38 +696,14 @@ func (c *CLI) Run() error {
 	// Double Ctrl-C within 2s exits the CLI.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
-	defer signal.Stop(sigCh)
 
 	exitCh := make(chan struct{})
-	go func() {
-		var lastInterrupt time.Time
-		for range sigCh {
-			// If a commit or an external command is running, cancel
-			// it. commitCancel takes priority because a commit
-			// hanging on the apply semaphore is the only path that
-			// actually needs ctx-aware cancellation; external
-			// commands fall back if no commit is in flight.
-			c.cmdMu.Lock()
-			commitCancel := c.commitCancel
-			cmdCancel := c.cmdCancel
-			c.cmdMu.Unlock()
-			if commitCancel != nil {
-				commitCancel()
-				continue
-			}
-			if cmdCancel != nil {
-				cmdCancel()
-				continue
-			}
-			now := time.Now()
-			if now.Sub(lastInterrupt) < 2*time.Second {
-				c.releaseLocalConfigureOnInterrupt()
-				close(exitCh)
-				return
-			}
-			lastInterrupt = now
-		}
+	runDone := make(chan struct{})
+	defer func() {
+		signal.Stop(sigCh)
+		close(runDone)
 	}()
+	go c.handleConsoleInterrupts(sigCh, exitCh, runDone)
 
 	for {
 		select {
@@ -732,7 +726,7 @@ func (c *CLI) Run() error {
 				// Ctrl-D: exit own config mode, or exit CLI if
 				// already in operational mode (or config mode is
 				// a foreign holder's — #16793).
-				if c.releaseLocalConfigureOnEOF() {
+				if c.handleConsoleEOF() {
 					continue
 				}
 				return nil
@@ -769,18 +763,57 @@ func (c *CLI) Run() error {
 	// the function's terminating statement, so no return is needed.
 }
 
+// handleConsoleInterrupts is Run's SIGINT arm. Keeping the signal loop in a
+// method lets tests inject a signal channel without sending process-wide
+// signals; Run calls this exact method for its double-Ctrl-C path.
+func (c *CLI) handleConsoleInterrupts(sigCh <-chan os.Signal, exitCh chan struct{}, runDone <-chan struct{}) {
+	var lastInterrupt time.Time
+	for {
+		select {
+		case <-runDone:
+			return
+		case _, ok := <-sigCh:
+			if !ok {
+				return
+			}
+			// If a commit or an external command is running, cancel
+			// it. commitCancel takes priority because a commit
+			// hanging on the apply semaphore is the only path that
+			// actually needs ctx-aware cancellation; external
+			// commands fall back if no commit is in flight.
+			c.cmdMu.Lock()
+			commitCancel := c.commitCancel
+			cmdCancel := c.cmdCancel
+			c.cmdMu.Unlock()
+			if commitCancel != nil {
+				commitCancel()
+				continue
+			}
+			if cmdCancel != nil {
+				cmdCancel()
+				continue
+			}
+			now := time.Now()
+			if now.Sub(lastInterrupt) < 2*time.Second {
+				c.releaseLocalConfigureOnInterrupt()
+				close(exitCh)
+				return
+			}
+			lastInterrupt = now
+		}
+	}
+}
+
 // releaseLocalConfigureOnEOF handles Ctrl-D (io.EOF from readline) for
 // the in-process console (#16793): it exits configuration mode only
-// when THIS session acquired the lock itself (configOwned) and then
-// only via the session-scoped release, so a foreign holder's candidate
-// and lock survive. It reports whether it stayed in the loop (true)
-// or the console should exit (false). A foreign-held global config
-// mode is NOT this session's to leave: EOF is an operational-mode
-// exit there, matching acceptance (holder grpc-peer-1 stays locked).
-func (c *CLI) releaseLocalConfigureOnEOF() bool {
-	if c.configOwned {
+// when THIS session acquired the lock itself and then only via the
+// session-scoped release, so a foreign holder's candidate and lock survive.
+// It reports whether it stayed in the loop (true) or the console should
+// exit (false).
+func (c *CLI) handleConsoleEOF() bool {
+	if c.configOwnedNow() {
 		if c.store.ExitConfigureSession(localConfigSessionID) {
-			c.configOwned = false
+			c.setConfigOwned(false)
 			if c.rl != nil {
 				c.rl.SetPrompt(c.operationalPrompt())
 			}
@@ -789,7 +822,7 @@ func (c *CLI) releaseLocalConfigureOnEOF() bool {
 		}
 		// Stale flag: this session no longer holds the lock (reclaimed
 		// or force-cleared). Clear it and fall through to exit.
-		c.configOwned = false
+		c.setConfigOwned(false)
 	}
 	return false
 }
@@ -799,9 +832,9 @@ func (c *CLI) releaseLocalConfigureOnEOF() bool {
 // foreign holder's candidate and lock MUST survive; the console is
 // ending anyway, which is the strictly stronger action.
 func (c *CLI) releaseLocalConfigureOnInterrupt() {
-	if c.configOwned {
+	if c.configOwnedNow() {
 		c.store.ExitConfigureSession(localConfigSessionID)
-		c.configOwned = false
+		c.setConfigOwned(false)
 	}
 }
 

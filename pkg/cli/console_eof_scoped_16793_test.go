@@ -2,9 +2,12 @@ package cli
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/chzyer/readline"
 
@@ -17,15 +20,18 @@ import (
 // is shared by every surface, so a console Ctrl-D while a gRPC peer
 // (grpc-peer-1) held the config lock discarded that peer's candidate,
 // freed its lock, printed a false "Exiting configuration mode", and
-// only the double-Ctrl-C daemon-exit masked the second site.
-// #14986 gated dispatch on configOwned; these exit paths never got
-// the same scoping.
+// #14986 gated dispatch on configOwned; these exit paths now share
+// session-scoped cleanup.
 //
-// FAIL-ON-REVERT: restoring `if c.store.InConfigMode() {
-// c.store.ExitConfigure(); ... }` in Run's EOF arm (or the double
-// Ctrl-C arm) turns the foreign-holder cells RED — the helper called
-// here IS the code Run calls, so reverting the helper body (or the
-// call site) fails these tests.
+// TestConsoleEOFArmPreservesForeignHolder17838 calls handleConsoleEOF, the
+// exact method Run invokes for io.EOF. A TTY-less Run probe did not reliably
+// reach EOF on a pipe; the readLineFn seam reaches the arm but `-race` reports
+// an existing race between readline's terminal-width goroutine and Close.
+// The test pins the EOF arm at its Run-called method, per #17838.
+//
+// Run's double-interrupt loop is extracted into handleConsoleInterrupts,
+// the exact method started by Run. TestConsoleDoubleInterruptArm17838 feeds
+// that method synthetic SIGINTs rather than sending process-wide signals.
 
 func consoleStore16793(t *testing.T, holder string) *configstore.Store {
 	t.Helper()
@@ -61,8 +67,8 @@ func consoleCLI16793(t *testing.T, store *configstore.Store, owned bool) *CLI {
 	if err != nil {
 		t.Fatalf("readline.NewEx: %v", err)
 	}
-	t.Cleanup(func() { rl.Close() })
-	c := &CLI{store: store, rl: rl, configOwned: owned}
+	c := &CLI{store: store, rl: rl}
+	c.setConfigOwned(owned)
 	if owned {
 		c.rl.SetPrompt(c.configPrompt())
 	}
@@ -75,7 +81,7 @@ func TestConsoleEOFPreservesForeignHolder16793(t *testing.T) {
 	c := consoleCLI16793(t, store, false)
 
 	stay := false
-	out := captureStdout(t, func() { stay = c.releaseLocalConfigureOnEOF() })
+	out := captureStdout(t, func() { stay = c.handleConsoleEOF() })
 	if stay {
 		t.Fatalf("EOF with foreign holder stayed in loop; want console exit (#16793)")
 	}
@@ -116,7 +122,7 @@ func TestConsoleEOFExitsOwnConfigMode16793(t *testing.T) {
 	c := consoleCLI16793(t, store, true)
 
 	stay := false
-	out := captureStdout(t, func() { stay = c.releaseLocalConfigureOnEOF() })
+	out := captureStdout(t, func() { stay = c.handleConsoleEOF() })
 	if !stay {
 		t.Fatalf("EOF in own config mode exited console; want stay in loop (#16793 control)")
 	}
@@ -126,7 +132,7 @@ func TestConsoleEOFExitsOwnConfigMode16793(t *testing.T) {
 	if store.InConfigMode() {
 		t.Fatalf("own EOF left store in config mode (#16793 control)")
 	}
-	if c.configOwned {
+	if c.configOwnedNow() {
 		t.Fatalf("configOwned still set after own EOF release (#16793)")
 	}
 	if holder, locked := store.ConfigHolder(); locked {
@@ -157,7 +163,7 @@ func TestConsoleDoubleCtrlCReleasesOwnLock16793(t *testing.T) {
 	if store.InConfigMode() {
 		t.Fatalf("double Ctrl-C left own config mode held (#16793 control)")
 	}
-	if c.configOwned {
+	if c.configOwnedNow() {
 		t.Fatalf("configOwned still set after double Ctrl-C (#16793)")
 	}
 }
@@ -168,14 +174,93 @@ func TestConsoleDoubleCtrlCReleasesOwnLock16793(t *testing.T) {
 func TestConsoleEOFStaleOwnedForeignHolder16793(t *testing.T) {
 	store := consoleStore16793(t, "grpc-peer-1")
 	c := consoleCLI16793(t, store, true)
-	stay := c.releaseLocalConfigureOnEOF()
+	stay := c.handleConsoleEOF()
 	if stay {
 		t.Fatalf("stale-owned EOF stayed; want exit (#16793)")
 	}
-	if c.configOwned {
+	if c.configOwnedNow() {
 		t.Fatalf("stale configOwned not cleared (#16793)")
 	}
 	if holder, locked := store.ConfigHolder(); !locked || holder != "grpc-peer-1" {
 		t.Fatalf("stale-owned EOF freed foreign lock: %q/%v (#16793)", holder, locked)
 	}
+}
+func TestConsoleEOFArmPreservesForeignHolder17838(t *testing.T) {
+	store := consoleStore16793(t, "grpc-peer-1")
+	c := consoleCLI16793(t, store, false)
+
+	stay := false
+	out := captureStdout(t, func() { stay = c.handleConsoleEOF() })
+	if stay {
+		t.Fatalf("EOF arm with foreign holder stayed in loop; want exit (#17838)")
+	}
+	if strings.Contains(out, "Exiting configuration mode") {
+		t.Fatalf("EOF arm printed false exit banner for foreign holder: %q (#17838)", out)
+	}
+	if holder, locked := store.ConfigHolder(); !locked || holder != "grpc-peer-1" {
+		t.Fatalf("EOF arm ConfigHolder = %q/%v, want grpc-peer-1/true (#17838 RED)", holder, locked)
+	}
+	if got := store.ShowCandidateSet(); !strings.Contains(got, "staged-peer") {
+		t.Fatalf("EOF arm discarded peer candidate: %q (#17838)", got)
+	}
+}
+
+func TestConsoleDoubleInterruptArm17838(t *testing.T) {
+	store := consoleStore16793(t, "grpc-peer-1")
+	c := &CLI{store: store}
+	sigCh := make(chan os.Signal, 2)
+	exitCh := make(chan struct{})
+	runDone := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		c.handleConsoleInterrupts(sigCh, exitCh, runDone)
+		close(done)
+	}()
+
+	sigCh <- os.Interrupt
+	sigCh <- os.Interrupt
+	close(sigCh)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		close(runDone)
+		t.Fatal("handleConsoleInterrupts did not finish after two SIGINTs (#17838)")
+	}
+	select {
+	case <-exitCh:
+	default:
+		t.Fatal("double SIGINT did not arm CLI exit (#17838)")
+	}
+	if holder, locked := store.ConfigHolder(); !locked || holder != "grpc-peer-1" {
+		t.Fatalf("double SIGINT arm ConfigHolder = %q/%v, want grpc-peer-1/true (#17838)", holder, locked)
+	}
+	if got := store.ShowCandidateSet(); !strings.Contains(got, "staged-peer") {
+		t.Fatalf("double SIGINT arm discarded peer candidate: %q (#17838)", got)
+	}
+}
+
+func TestConsoleConfigOwnershipAccessRace17838(t *testing.T) {
+	c := &CLI{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 10000 {
+				c.setConfigOwned(true)
+				c.setConfigOwned(false)
+			}
+		}()
+	}
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 10000 {
+				c.releaseLocalConfigureOnInterrupt()
+			}
+		}()
+	}
+	wg.Wait()
 }
