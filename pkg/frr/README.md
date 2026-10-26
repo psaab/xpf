@@ -1826,6 +1826,12 @@ step. Both are required — neither sees the other's case:
   refuses an apply where a chain list would fuse with an operator list, a
   delete backing, or another definition's chain list. Mixed terms with
   multiple distinct community alternatives retain the historical render.
+  Orphan community alternatives remain ORs: a failed chain advances to
+  the next alternative, and only the final miss skips the term. A matched
+  non-terminating mixed-term variant jumps past the remaining sibling
+  variants after running its actions, so overlapping alternatives do not
+  repeat a modification. Sequence accounting counts a chain-lowered
+  community dimension once, even when the same community name is repeated.
 - **Community member regexes match per community (#16788, R3-A11-05).**
   Junos evaluates each member against each community on the route,
   but FRR matches an expanded list against the whole space-joined

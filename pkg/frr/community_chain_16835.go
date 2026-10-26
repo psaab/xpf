@@ -45,10 +45,11 @@
 //	NEXT:     first sequence after the complete term body
 //
 // A route satisfying every member walks member slot -> next member
-// slot -> ... -> BODY (each match gotos over its guard), where the
-// original sibling match dimensions are still ANDed with the community
-// chain. A route failing member i falls to its guard and skips the term;
-// the shared-token chain never bypasses a sibling dimension.
+// slot -> ... -> BODY (each member match skips its guard). A mixed term
+// still requires all sibling match dimensions to pass. A failed member
+// falls through to its guard: the sole mixed alternative and final orphan
+// alternative skip the term; earlier orphan alternatives continue at the
+// next alternative.
 //
 // Orphan terms chain every distinct from-community alternative in
 // authored order. Mixed terms are chain-lowered only when they have one
@@ -206,10 +207,10 @@ func communityMixedChainTerm16835(po *config.PolicyOptionsConfig, term *config.P
 // communityMemberChainSequences16835 renders the pre-body chain slots
 // for one alternative whose first member slot is at seq, interleaving
 // a match-all guard after every member slot. Member slot i (0-based)
-// gotos member slot i+1, the last gotos bodySeq; every guard gotos
-// nextSeq after all mixed-term body variants. Member failure must leave
-// the chain rather than fall into the next member.
-func communityMemberChainSequences16835(b *strings.Builder, routeMapName, publicName string, members []string, seq, bodySeq, nextSeq int) {
+// gotos member slot i+1; the last goes to bodySeq. Each guard goes to
+// failSeq: next alternative start, or first sequence after the term body
+// (one orphan body sequence or all sibling variants of a mixed term).
+func communityMemberChainSequences16835(b *strings.Builder, routeMapName, publicName string, members []string, seq, bodySeq, failSeq int) {
 	for i, member := range members {
 		at := seq + i*2*communityChainReserve16835
 		next := at + 2*communityChainReserve16835
@@ -221,7 +222,7 @@ func communityMemberChainSequences16835(b *strings.Builder, routeMapName, public
 		b.WriteString(" on-match goto " + strconv.Itoa(next) + "\n")
 		b.WriteString("exit\n")
 		b.WriteString("route-map " + frrName(routeMapName) + " permit " + strconv.Itoa(at+communityChainReserve16835) + "\n")
-		b.WriteString(" on-match goto " + strconv.Itoa(nextSeq) + "\n")
+		b.WriteString(" on-match goto " + strconv.Itoa(failSeq) + "\n")
 		b.WriteString("exit\n")
 	}
 }

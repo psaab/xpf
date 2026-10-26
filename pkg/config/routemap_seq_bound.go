@@ -108,16 +108,24 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 		if termRouteFiltersMixFamily(term) {
 			fam = 2
 		}
+		// Chain-lowered terms replace the community OR set with chain slots
+		// and emit their sibling Cartesian body once, regardless of duplicate refs.
+		chainSlots := communityChainExtraWeight16869(po, term)
+		chainLowered := chainSlots > 0
+		communityRefs := len(term.FromCommunity)
+		if chainLowered {
+			communityRefs = 1
+		}
 		v := checkedMulU64(fam, TermPrefixListRefCount(po, term.PrefixList))
-		v = checkedMulU64(v, orOneU64(len(term.FromCommunity)))
+		v = checkedMulU64(v, orOneU64(communityRefs))
 		v = checkedMulU64(v, orOneU64(len(term.FromASPath)))
 		v = checkedMulU64(v, orOneU64(uniqueCanonicalProtocolCount(term.FromProtocols)))
 		// #16835/#16869: terms taking a shared-token chain reserve its
 		// member/guard slots in addition to the body variants. Mirror the
 		// FRR renderer here (this package cannot import pkg/frr) so gate,
 		// belt, and renderer agree.
-		if w := communityChainExtraWeight16869(po, term); w > 0 {
-			v = checkedAddU64(v, uint64(w))
+		if chainSlots > 0 {
+			v = checkedAddU64(v, uint64(chainSlots))
 		}
 		if total > math.MaxUint64-v {
 			return math.MaxUint64

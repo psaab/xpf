@@ -1049,7 +1049,13 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 	var definitions strings.Builder
 	var b strings.Builder
 	seq := startSeq
+	type continuationRewrite struct {
+		marker string
+		target string
+	}
+	var continuationRewrites []continuationRewrite
 	for _, term := range ps.Terms {
+		termFallthroughMarker := ""
 		// The compiler normalizes the quoted-then `next-hop reject` diversion
 		// to Action=reject (#12517); the ordinary action mapping below keeps
 		// tolerant FRR rendering denied rather than flipping it to permit.
@@ -1691,7 +1697,11 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			if validNextPolicy {
 				fmt.Fprintf(&b, " %s\n", nextPolicySequenceMarker)
 			} else if nonTerminating {
-				b.WriteString(" on-match next\n")
+				if termFallthroughMarker != "" {
+					fmt.Fprintf(&b, " %s\n", termFallthroughMarker)
+				} else {
+					b.WriteString(" on-match next\n")
+				}
 			}
 
 			b.WriteString("exit\n")
@@ -1757,9 +1767,14 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			}
 			bodySeq := chainStart + totalSlots*10
 			nextSeq := bodySeq + 10
-			for _, alt := range alternatives {
-				communityMemberChainSequences16835(&b, routeMapName, alt, communityChainMembers16835(po, alt), chainStart, bodySeq, nextSeq)
-				chainStart += communityChainSlots16835(po, alt) * 10
+			for i, alt := range alternatives {
+				altSlots := communityChainSlots16835(po, alt)
+				failSeq := nextSeq
+				if i+1 < len(alternatives) {
+					failSeq = chainStart + altSlots*10
+				}
+				communityMemberChainSequences16835(&b, routeMapName, alt, communityChainMembers16835(po, alt), chainStart, bodySeq, failSeq)
+				chainStart += altSlots * 10
 			}
 			// The body is the historical term sequence minus its
 			// `match community` line (already split per member).
@@ -1881,11 +1896,16 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		if communityMixedChainTerm16835(po, term) &&
 			!singleDangling && !v4Dangling && !v6Dangling && !hasPartialDanglingPrefixList {
 			// The sole chain alternative gates the shared Cartesian body:
-			// member failure skips the whole term, while a successful
-			// conjunction still has to satisfy every sibling match dimension.
+			// member failure skips the term, while success still requires every
+			// sibling match. A matched nonterminating variant jumps past the
+			// remaining variants so an overlapping OR cannot repeat set actions.
 			publicName := term.FromCommunity[0]
 			chainStart := seq
 			bodySeq := chainStart + communityChainSlots16835(po, publicName)*10
+			if nonTerminating && !validNextPolicy {
+				// The delimiter prevents sequence 10's marker matching 100's.
+				termFallthroughMarker = fmt.Sprintf("on-match goto XPF_TERM_END_%d_END", chainStart)
+			}
 			seq = bodySeq
 			if mixedFamily {
 				if v4Dangling {
@@ -1908,6 +1928,16 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				}
 				emitVariantsForCommunity("", all, inlinePrefixListName(routeMapName, plPrefix, term.Name, ""), "")
 				emitPartialPrefixListDeny14700()
+			}
+			if termFallthroughMarker != "" {
+				continuation := "on-match next"
+				if seq > bodySeq+10 {
+					continuation = fmt.Sprintf("on-match goto %d", seq)
+				}
+				continuationRewrites = append(continuationRewrites, continuationRewrite{
+					marker: termFallthroughMarker,
+					target: continuation,
+				})
 			}
 			communityMemberChainSequences16835(&b, routeMapName, publicName,
 				communityChainMembers16835(po, publicName), chainStart, bodySeq, seq)
@@ -1936,7 +1966,11 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		}
 	}
 
-	return definitions.String(), b.String(), seq
+	body := b.String()
+	for _, rewrite := range continuationRewrites {
+		body = strings.ReplaceAll(body, rewrite.marker, rewrite.target)
+	}
+	return definitions.String(), body, seq
 }
 
 // renderRouteMapForPolicy renders ONE FRR route-map for policy-statement ps

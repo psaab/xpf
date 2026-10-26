@@ -14,6 +14,7 @@ type routeMapSequence17867 struct {
 	seq     int
 	action  string
 	matches []string
+	sets    []string
 	gotoSeq int
 	next    bool
 }
@@ -64,6 +65,8 @@ func parseRouteMap17867(t *testing.T, rendered string) ([]routeMapSequence17867,
 			current = nil
 		case strings.HasPrefix(line, "match "):
 			current.matches = append(current.matches, line)
+		case strings.HasPrefix(line, "set "):
+			current.sets = append(current.sets, line)
 		case strings.HasPrefix(line, "on-match goto "):
 			n, err := strconv.Atoi(strings.TrimPrefix(line, "on-match goto "))
 			if err != nil {
@@ -107,14 +110,15 @@ type routeInput17867 struct {
 	otherMatches map[string]bool
 }
 
-func evaluateRouteMap17867(seqs []routeMapSequence17867, lists map[string]communityList17867, route routeInput17867) string {
+func evaluateRouteMapActions17867(seqs []routeMapSequence17867, lists map[string]communityList17867, route routeInput17867) (string, []string) {
 	positions := make(map[int]int, len(seqs))
 	for i, seq := range seqs {
 		positions[seq.seq] = i
 	}
+	var applied []string
 	for i, steps := 0, 0; i < len(seqs); steps++ {
 		if steps > len(seqs)*3+3 {
-			return "loop"
+			return "loop", applied
 		}
 		seq := seqs[i]
 		matched := true
@@ -134,30 +138,38 @@ func evaluateRouteMap17867(seqs []routeMapSequence17867, lists map[string]commun
 			i++
 			continue
 		}
+		applied = append(applied, seq.sets...)
 		if seq.gotoSeq >= 0 {
 			if next, ok := positions[seq.gotoSeq]; ok {
 				i = next
 				continue
 			}
-			return "fallthrough"
+			return "fallthrough", applied
 		}
 		if seq.next {
 			i++
 			continue
 		}
-		return seq.action
+		return seq.action, applied
 	}
-	return "fallthrough"
+	return "fallthrough", applied
+}
+
+func evaluateRouteMap17867(seqs []routeMapSequence17867, lists map[string]communityList17867, route routeInput17867) string {
+	action, _ := evaluateRouteMapActions17867(seqs, lists, route)
+	return action
 }
 
 func renderPolicy17867(t *testing.T, terms []*config.PolicyTerm) (string, []routeMapSequence17867, map[string]communityList17867) {
 	t.Helper()
 	po := &config.PolicyOptionsConfig{
 		Communities: map[string]*config.CommunityDef{
-			"SH": {Name: "SH", Members: []string{"65000:.*", ".*:100"}},
+			"SH":  {Name: "SH", Members: []string{"65000:.*", ".*:100"}},
+			"SH2": {Name: "SH2", Members: []string{".*:.*", "1:2"}},
 		},
 		PrefixLists: map[string]*config.PrefixList{
-			"PL": {Name: "PL", Prefixes: []string{"10.0.0.0/8"}},
+			"PL":  {Name: "PL", Prefixes: []string{"10.0.0.0/8"}},
+			"PL2": {Name: "PL2", Prefixes: []string{"10.0.0.0/8"}},
 		},
 		ASPaths: map[string]*config.ASPathDef{
 			"AP": {Name: "AP", Regex: "65000"},
@@ -212,5 +224,139 @@ func TestCommunityChainMixedTerms17867(t *testing.T) {
 				t.Fatalf("route missing a community member = %s, want permit\n%s", result, got)
 			}
 		})
+	}
+}
+
+func TestCommunityChainRepeatedRefsSequenceCountMatchesEmission17867(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		Communities: map[string]*config.CommunityDef{
+			"SH": {Name: "SH", Members: []string{"65000:.*", ".*:100"}},
+		},
+		PrefixLists: map[string]*config.PrefixList{
+			"PL": {Name: "PL", Prefixes: []string{"10.0.0.0/8"}},
+		},
+	}
+	for _, tc := range []struct {
+		name string
+		term *config.PolicyTerm
+	}{
+		{name: "orphan", term: &config.PolicyTerm{FromCommunity: []string{"SH", "SH"}}},
+		{name: "mixed", term: &config.PolicyTerm{FromCommunity: []string{"SH", "SH"}, PrefixList: []string{"PL"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := &config.PolicyStatement{Terms: []*config.PolicyTerm{tc.term}}
+			definitions, body, nextSeq := New().renderPolicyTermSequencesWithDefinitions(po, "P", "P", ps, 10)
+			seqs, _ := parseRouteMap17867(t, definitions+body)
+			want := config.RouteMapSequenceCount(po, ps)
+			if got := uint64(len(seqs)); got != want {
+				t.Fatalf("rendered %d sequences, RouteMapSequenceCount = %d\n%s", got, want, body)
+			}
+			if wantNext := 10 + len(seqs)*10; nextSeq != wantNext {
+				t.Fatalf("next sequence = %d, want %d", nextSeq, wantNext)
+			}
+		})
+	}
+}
+
+func TestCommunityChainMixedOverlappingVariantsApplyActionOnce17867(t *testing.T) {
+	term := &config.PolicyTerm{
+		Name:          "mixed-modify",
+		FromCommunity: []string{"SH"},
+		PrefixList:    []string{"PL", "PL2"},
+		ASPathPrepend: []string{"65001"},
+	}
+	got, seqs, lists := renderPolicy17867(t, []*config.PolicyTerm{
+		term,
+		{Name: "later-accept", Action: "accept"},
+	})
+	route := routeInput17867{communities: "65000:100", otherMatches: allOtherMatches17867(seqs, true)}
+	result, applied := evaluateRouteMapActions17867(seqs, lists, route)
+	prepends := 0
+	for _, action := range applied {
+		if strings.HasPrefix(action, "set as-path prepend ") {
+			prepends++
+		}
+	}
+	if result != "permit" || prepends != 1 {
+		t.Fatalf("overlapping sibling variants returned %s after %d prepends, want permit after exactly one\n%s", result, prepends, got)
+	}
+
+	secondOnly := allOtherMatches17867(seqs, false)
+	secondOnly["match ip address prefix-list PL2"] = true
+	result, applied = evaluateRouteMapActions17867(seqs, lists, routeInput17867{
+		communities:  "65000:100",
+		otherMatches: secondOnly,
+	})
+	prepends = 0
+	for _, action := range applied {
+		if strings.HasPrefix(action, "set as-path prepend ") {
+			prepends++
+		}
+	}
+	if result != "permit" || prepends != 1 {
+		t.Fatalf("second-only sibling variant returned %s after %d prepends, want permit after exactly one\n%s", result, prepends, got)
+	}
+}
+
+func TestCommunityChainOrphanAlternativeTraversal17867(t *testing.T) {
+	got, seqs, lists := renderPolicy17867(t, []*config.PolicyTerm{
+		{Name: "or-chain", FromCommunity: []string{"SH", "SH2"}, Action: "reject"},
+		{Name: "later-accept", Action: "accept"},
+	})
+	for _, tc := range []struct {
+		name        string
+		communities string
+		want        string
+	}{
+		{name: "second alternative only", communities: "1:2", want: "deny"},
+		{name: "first alternative only", communities: "65000:100", want: "deny"},
+		{name: "neither alternative", communities: "65000:7", want: "permit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			route := routeInput17867{communities: tc.communities}
+			if result := evaluateRouteMap17867(seqs, lists, route); result != tc.want {
+				t.Fatalf("communities %q returned %s, want %s\n%s", tc.communities, result, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestCommunityChainMixedTermContinuationMarkersAreDelimited17867(t *testing.T) {
+	terms := []*config.PolicyTerm{
+		{
+			Name:          "first",
+			FromCommunity: []string{"SH"},
+			PrefixList:    []string{"PL", "PL", "PL", "PL", "PL"},
+			ASPathPrepend: []string{"65001"},
+		},
+		{
+			Name:          "second",
+			FromCommunity: []string{"SH"},
+			PrefixList:    []string{"PL", "PL2"},
+			ASPathPrepend: []string{"65002"},
+		},
+		{Name: "later-accept", Action: "accept"},
+	}
+	got, seqs, lists := renderPolicy17867(t, terms)
+	sequenceNumbers := make(map[int]bool, len(seqs))
+	for _, seq := range seqs {
+		sequenceNumbers[seq.seq] = true
+	}
+	if !sequenceNumbers[10] || !sequenceNumbers[100] {
+		t.Fatalf("test setup: expected chain terms at sequence starts 10 and 100\n%s", got)
+	}
+	route := routeInput17867{communities: "65000:100", otherMatches: allOtherMatches17867(seqs, true)}
+	result, applied := evaluateRouteMapActions17867(seqs, lists, route)
+	counts := make(map[string]int)
+	for _, action := range applied {
+		counts[action]++
+	}
+	for _, action := range []string{"set as-path prepend 65001", "set as-path prepend 65002"} {
+		if counts[action] != 1 {
+			t.Fatalf("action %q executed %d times, want exactly once; result=%s\n%s", action, counts[action], result, got)
+		}
+	}
+	if result != "permit" {
+		t.Fatalf("two mixed terms returned %s, want permit\n%s", result, got)
 	}
 }
