@@ -131,3 +131,18 @@ func TestALGSubstatementAdvisoryUnion16814(t *testing.T) {
 		})
 	}
 }
+
+// Packed tails may contain additional inert statement heads after the first.
+func TestALGPackedSubstatementAdvisoryUnion17870(t *testing.T) {
+	cfg, err := CheckText("security { alg dns disable doctoring none maximum-message-length 8192; }", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Security.ALG.DNSDisable {
+		t.Fatal("lost class-level disable")
+	}
+	want := "dns doctoring, dns maximum-message-length"
+	if got := strings.Join(cfg.Security.ALG.InertSubstatements, ", "); got != want {
+		t.Fatalf("inert statements = %q; want %q", got, want)
+	}
+}
