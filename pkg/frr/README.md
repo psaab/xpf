@@ -1841,15 +1841,19 @@ step. Both are required — neither sees the other's case:
   whole-definition at render, so referencing terms fail closed
   (#10822). Unanchored edges keep Junos substring meaning inside
   one token.
-- **No other rendered line may contain `| ` (#16776).** Beyond the
-  community patterns above (now pipe-free via #16788), a neighbor
-  description carrying `| ` would be refused by FRR's vty pipe hook
-  (`% Unknown action`, `frr-reload.py` still exiting 0) and silently
-  never install. It is rejected at commit
-  (`validateBGPNeighborDescriptionPipeStrict16776`) and omitted at
-  render on tolerant paths; `rewriteFRRPipeSequences` in
-  `render_validate.go` remains the shared pipe belt for rest-of-line
-  operands.
+- **FRR vty pipe safety (#16776, #16788).** Community regexes are
+  translated pipe-free or omitted as a whole definition for the
+  forms the translator validates; negated bracket classes it does
+  not validate (for example `[^| ]`) can still render a literal
+  `| ` and are a known gap (tracked in #17977). Reject references
+  to omitted definitions are lowered fail-closed (#10822); the
+  negated-bracket gap is not covered by that lowering. Neighbor descriptions
+  carrying `| ` are rejected at commit and omitted on tolerant render
+  paths. Junos AS-path regexes are translated before rendering, so
+  grouping whitespace around alternation (for example `65000 | 65001`)
+  is removed by the translator. These paths do not rely on a shared
+  post-render pipe-rewrite helper; the former unused
+  `rewriteFRRPipeSequences` helper was removed (#17799).
 - **Policy community references are validated at commit (#2881).** A
   policy-statement term's `from community <name>` renders `match community
   <name>` and `then community delete <name>` (the strip-by-list operation
