@@ -85,10 +85,11 @@
 # interface);
 # PR #17623 (issue #16557) +2 other in
 # pkg/config/zone_count_cap_test.go (the u32 cap cannot be materialised as a
-# multi-billion-entry test map). NOTE: these two cells skip unconditionally
-# while MaxUsableZoneID stays the pinned 4294967293 constant, so the
-# validateZoneCountStrict over-cap branch is permanently uncovered;
-# follow-up #17928 (injectable cap) owns un-skipping them;
+# multi-billion-entry test map). NOTE: these two legacy cells still skip
+# against the pinned 4294967293 cap, but since #17928 the over-cap branch
+# is covered unconditionally via the injected-cap seam
+# (validateZoneCountWithCap at cap=3), and the strict wrapper's use of
+# MaxUsableZoneID is pinned by TestZoneCountStrictUsesProductionCap17928;
 # PR #17639 (issue #16842) +3 other in
 # pkg/daemon/fab1_debt_churn_16842_test.go (usable loopback IPv4 address
 # unavailable);
