@@ -1258,10 +1258,14 @@ type FlowRecord struct {
 	TOS       uint8
 	TCPFlags  uint8
 	Direction uint8
-	InIf      uint32
-	OutIf     uint32
-	Packets   uint64
-	Bytes     uint64
+	// DirectionSet records that Direction was caller-set (incl. the
+	// ingress value 0): the drain must not re-derive it (#17845). Never
+	// encoded on the wire.
+	DirectionSet bool
+	InIf         uint32
+	OutIf        uint32
+	Packets      uint64
+	Bytes        uint64
 	// #3746: RFC 5103 biflow reverse (server→client) volume. Encoded ONLY by
 	// the IPFIX exporter as the reverse Information Elements
 	// reversePacketDeltaCount / reverseOctetDeltaCount under PEN 29305; NetFlow

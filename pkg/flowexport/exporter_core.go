@@ -237,7 +237,9 @@ func (c *exporterCore) collectDueExports(now time.Time) []FlowRecord {
 	}
 	due := c.tracker.CollectDueExports(now)
 	for i := range due {
-		if c.cfg != nil && due[i].Direction == 0 {
+		// #17845: an explicitly-set Direction (incl. ingress 0) is kept;
+		// only an unset template derives from the sampling config.
+		if c.cfg != nil && !due[i].DirectionSet {
 			due[i].Direction = c.cfg.FlowDirectionIface(due[i].InZone, due[i].OutZone, due[i].IsIPv6, due[i].InIface, due[i].OutIface)
 		}
 		srcMask, dstMask, misses := resolveMasks(c.MaskResolver, due[i].SrcIP, due[i].DstIP, due[i].InIf, due[i].OutIf)
@@ -479,6 +481,9 @@ func (c *exporterCore) TrackFlowOpen(key FlowKey, start time.Time) {
 // so no call site needs a dummy template; collectDueExports derives
 // Direction from cfg for records whose template left it unset.
 func (c *exporterCore) TrackFlowOpenWithMeta(key FlowKey, start time.Time, template FlowRecord) {
+	// WithMeta templates carry a caller-chosen Direction (#16754); the
+	// preset counts as set even when it is the ingress value 0 (#17845).
+	template.DirectionSet = true
 	c.TrackFlowOpenRecord(key, start, template)
 }
 
