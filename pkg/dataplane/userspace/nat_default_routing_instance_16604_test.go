@@ -67,6 +67,7 @@ func TestNATDefaultWireStamping16604(t *testing.T) {
 		t.Fatalf("nat64 wire = %+v, want [token]", ns)
 	}
 }
+
 // #17677: compile one config that declares a routing-instance named `default`,
 // then exercise each production snapshot builder. The literal must survive as
 // a named scope in SNAT, pool DNAT, static NAT, and NAT64; it must not become

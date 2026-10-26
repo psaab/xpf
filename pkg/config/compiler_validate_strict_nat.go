@@ -6365,7 +6365,6 @@ func encodeKeyElements(elems []string) string {
 	return b.String()
 }
 
-
 // nat64ShadowedRuleSets maps every NAT64 rule-set the dataplane can NEVER select
 // to the earlier rule-set that shadows it (#9555).
 //
