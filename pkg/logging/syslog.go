@@ -2154,20 +2154,17 @@ func (s *SyslogClient) CloseTimeout(timeout time.Duration) error {
 	if timeout > 0 {
 		if writer := s.eventWriter.Load(); writer != nil {
 			writer.drainAndStop(timeout)
-			// drainAndStop delivered/discarded the queue: counts are
-			// final even before Close's own stop runs (#17855).
-			s.countsFinal.Store(true)
+			// Finality is armed in Close (CloseTimeout calls Close
+			// next, which waits on the same doneCh).
 		}
 	}
 	return s.Close()
 }
 
-// CountsFinal reports that Close has completed its drain+join. It is
-// a CLAIM of finality, not proof: for conns whose Close does not
-// interrupt an in-flight Write, the writer can count one last drop
-// after the bounded join expires. The retired-pending fold therefore
-// additionally requires counter stability across scrapes before
-// deleting a pending entry (#17855).
+// CountsFinal reports that the client's writer goroutine has EXITED
+// after Close stopped it (doneCh closed): no drop can be counted
+// after this point, by construction. The retired-pending fold also
+// requires counter stability across scrapes as a belt (#17855).
 func (s *SyslogClient) CountsFinal() bool { return s.countsFinal.Load() }
 
 // ShutdownDrained reports whether this client's writer goroutine has
@@ -2208,9 +2205,20 @@ func (s *SyslogClient) Close() error {
 	// Real sockets unblock the in-flight Write promptly. Keep the join bounded
 	// for custom connections whose Close does not interrupt Write.
 	s.joinSendBounded()
-	// Discards are fully counted at this point (writer stopped above,
-	// in-flight sends joined): mark counters final for the retired-
-	// pending fold (#17855). drainAndStop also completes the count.
-	s.countsFinal.Store(true)
+	// The writer stop above counted the queued discards synchronously,
+	// but an in-flight SendAt whose Write is parked on a
+	// non-interrupting conn can still count its drop AFTER Close
+	// returns. Pending retirement must therefore wait for the writer
+	// goroutine to EXIT (doneCh closes when run returns; no Add can
+	// land after that). Close stays non-blocking: arm the flag from a
+	// notifier rather than joining here (#17855 fold 5).
+	if writer := s.eventWriter.Load(); writer != nil {
+		go func() {
+			<-writer.doneCh
+			s.countsFinal.Store(true)
+		}()
+	} else {
+		s.countsFinal.Store(true)
+	}
 	return err
 }
