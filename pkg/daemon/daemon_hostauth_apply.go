@@ -822,9 +822,20 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 			}
 		}
 		stdin := strings.NewReader(user.Name + ":" + desired + "\n")
-		if out, err := runCommandStdinTimeout(stdin, "chpasswd", "-e"); err != nil {
+		out, chpasswdErr := runCommandStdinTimeout(stdin, "chpasswd", "-e")
+		// #17872: completed-but-superseded success carries this exact
+		// marker as a non-nil error. It means the child completed and
+		// may have mutated shadow, so preserve the ownership claims and
+		// verify the actual hash before reporting convergence. A marker
+		// wrapping a child error remains a failure.
+		if chpasswdErr == errHostAuthExecCompletedSuperseded16830 {
+			slog.Info("chpasswd completed before this owner was superseded; verifying shadow hash before reporting convergence",
+				"user", user.Name)
+			chpasswdErr = nil
+		}
+		if chpasswdErr != nil {
 			slog.Warn("failed to set user password",
-				"user", user.Name, "err", err, "output", strings.TrimSpace(string(out)))
+				"user", user.Name, "err", chpasswdErr, "output", strings.TrimSpace(string(out)))
 			// #6797: the shadow password did NOT change, so withdraw the
 			// ownership this pass claimed for it. A claim an EARLIER apply
 			// legitimately made is preserved — rollback is a no-op for it.
