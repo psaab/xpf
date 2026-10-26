@@ -875,6 +875,7 @@ func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
 		slog.Warn("SNMP management VRF is not configured; serving from main routing table")
 	}
 	agent.SetVRFDevice(vrfDevice)
+	// #15232 A48-04: install the reth source so buildSNMPIfData can
 	// synthesize bondless reth rows from this daemon's active config.
 	snmpRethSourceMu.Lock()
 	snmpRethSource = func() ([]snmpRethInfo, []snmp.IfData) {

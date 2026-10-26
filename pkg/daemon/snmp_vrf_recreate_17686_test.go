@@ -150,6 +150,58 @@ func TestSNMPDoesNotAdoptForeignManagementLink17686(t *testing.T) {
 	})
 }
 
+// TestSNMPStartRejectsForeignLinkAppearingDuringBind17686 covers the
+// post-bind identity check: if vrf-mgmt is replaced after preflight but before
+// the listener is accepted, the partial start is torn down and a later apply
+// can recover after the real VRF returns.
+//
+// Mutation check: removing the post-bind non-VRF guard leaves the partial
+// agent running, so this test fails its rejected-start assertion.
+func TestSNMPStartRejectsForeignLinkAppearingDuringBind17686(t *testing.T) {
+	f := newSNMPVRFRecreateFixture16626(t)
+	cfg := f.d.store.ActiveConfig()
+	f.d.teardownSNMP()
+
+	orig := f.d.linkByNameFn
+	lookup := 0
+	f.d.linkByNameFn = func(name string) (netlink.Link, error) {
+		if name == config.ManagementVRFDeviceName {
+			lookup++
+			if lookup == 1 {
+				return &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{
+					Name: config.ManagementVRFDeviceName, Index: 77,
+				}}, nil
+			}
+			if lookup == 2 {
+				return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{
+					Name: config.ManagementVRFDeviceName, Index: 99,
+				}}, nil
+			}
+		}
+		return orig(name)
+	}
+
+	if f.d.reconcileSNMP(cfg) {
+		t.Fatal("SNMP accepted a same-name non-VRF link appearing during bind")
+	}
+	if lookup != 2 {
+		t.Fatalf("VRF lookups during rejected start = %d, want pre-bind and post-bind checks", lookup)
+	}
+	if f.d.snmpAgent != nil || f.d.snmpVRFIndex != 0 {
+		t.Fatalf("rejected start left agent=%v ifindex=%d; want nil/0",
+			f.d.snmpAgent != nil, f.d.snmpVRFIndex)
+	}
+
+	f.d.linkByNameFn = orig
+	if !f.d.reconcileSNMP(cfg) {
+		t.Fatal("SNMP did not recover after the real management VRF returned")
+	}
+	if f.d.snmpAgent == nil || f.d.snmpVRFIndex != 77 {
+		t.Fatalf("recovered SNMP agent=%v ifindex=%d, want non-nil/77",
+			f.d.snmpAgent != nil, f.d.snmpVRFIndex)
+	}
+}
+
 // TestReconcileSNMPUnknownIndexRebindsOnFirstSuccessfulLookup17686 covers
 // #17686's start-time lookup failure. With no recorded ifindex, a later live
 // index cannot prove which device the existing socket bound to: vrf-mgmt may
