@@ -118,7 +118,7 @@ func TestConfigurationDenyIsEnforcedOverRPC9154(t *testing.T) {
 }
 
 // TestConfigMutationGateIsWiredIntoTheInterceptor9154 binds the transport
-// wiring and the commit-specific atomic gate. The interceptor now calls the
+// wiring and the commit-specific atomic gate. The interceptor calls the
 // wrapper, which routes ordinary mutations through authorizeRPCConfigMutation
 // and commit methods through CandidateGateSample (#17676).
 func TestConfigMutationGateIsWiredIntoTheInterceptor9154(t *testing.T) {
@@ -138,10 +138,19 @@ func TestConfigMutationGateIsWiredIntoTheInterceptor9154(t *testing.T) {
 		t.Fatalf("read authz_config_regex_9154.go: %v", err)
 	}
 	gate := string(gateSrc)
-	if !strings.Contains(gate, "authorizeRPCConfigMutation(") {
-		t.Fatal("the wrapper no longer routes non-commit mutations through authorizeRPCConfigMutation")
+	wrapperStart := strings.Index(gate, "func (s *Server) authorizeRPCCommitGate16611(")
+	if wrapperStart < 0 {
+		t.Fatal("authorizeRPCCommitGate16611 definition is missing")
 	}
-	if !strings.Contains(gate, "CandidateGateSample()") {
+	wrapperEnd := strings.Index(gate[wrapperStart:], "\nfunc (s *Server) authorizeRPCConfigMutation(")
+	if wrapperEnd < 0 {
+		t.Fatal("cannot delimit authorizeRPCCommitGate16611 body")
+	}
+	wrapper := gate[wrapperStart : wrapperStart+wrapperEnd]
+	if !strings.Contains(wrapper, "s.authorizeRPCConfigMutation(cfg, class, fullMethod, req)") {
+		t.Fatal("the interceptor wrapper no longer routes non-commit mutations through authorizeRPCConfigMutation")
+	}
+	if !strings.Contains(wrapper, "s.store.CandidateGateSample()") {
 		t.Fatal("the commit gate no longer samples candidate and generation atomically (#17676)")
 	}
 }
