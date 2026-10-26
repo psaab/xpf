@@ -152,14 +152,18 @@ func TestBGPAndNATCanonicalCommandsAreKeywordPrefixes15076(t *testing.T) {
 		if !cmdtree.EveryWordIsAKeyword(cmdtree.OperationalTree, strings.Fields(cmd)) {
 			t.Errorf("%s: charged %q is not a pure keyword path", tc.name, cmd)
 		}
-		// #15721 made the route keywords children of the <ip> slot, so
-		// the argument-free charge "neighbor advertised-routes" is a
-		// keyword prefix, not a standalone canonical command; it cannot
-		// canonicalize to itself without the dropped neighbor IP.
-		if !strings.HasSuffix(cmd, " advertised-routes") && !strings.HasSuffix(cmd, " received-routes") {
-			if canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, strings.Fields(cmd)); res != cmdtree.CanonicalOK || strings.Join(canon, " ") != cmd {
-				t.Errorf("%s: charged %q does not canonicalize to itself (%v)", tc.name, cmd, res)
+		// The advertised/received charge drops the neighbor IP, but its
+		// real command must canonicalize with the IP in its <ip> slot.
+		if strings.HasSuffix(tc.line, " advertised-routes") || strings.HasSuffix(tc.line, " received-routes") {
+			producible := tc.line
+			if canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, strings.Fields(producible)); res != cmdtree.CanonicalOK || strings.Join(canon, " ") != producible {
+				t.Errorf("%s: producible command %q does not canonicalize to itself (%v)", tc.name, producible, res)
 			}
+			if form := canonicalForm(producible); form != cmd {
+				t.Errorf("%s: charge %q does not match producible command %q with neighbor IP dropped", tc.name, cmd, producible)
+			}
+		} else if canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, strings.Fields(cmd)); res != cmdtree.CanonicalOK || strings.Join(canon, " ") != cmd {
+			t.Errorf("%s: charged %q does not canonicalize to itself (%v)", tc.name, cmd, res)
 		}
 		form := canonicalForm(tc.line)
 		cmdWords := strings.Fields(cmd)
