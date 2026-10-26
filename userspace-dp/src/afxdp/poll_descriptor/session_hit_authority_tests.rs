@@ -1030,6 +1030,12 @@ fn fabric_cookie_forwarding_state(with_tunnel_ingress: bool) -> ForwardingState 
         hardware_addr: "02:bf:72:02:00:02".into(),
         ..Default::default()
     });
+    let fabric_parent = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 21)
+        .expect("fabric parent exists in fixture");
+    fabric_parent.zone = "dmz".into();
     if with_tunnel_ingress {
         snapshot.interfaces.push(InterfaceSnapshot {
             name: "tun-17920".into(),
@@ -1199,8 +1205,29 @@ fn syn_cookie_ha_finalizer_receives_fabric_ingress_context_17920() {
             lease: crate::afxdp::HAForwardingLease::Inactive,
         },
     )]);
-    let ingress_zone_override = Some(TEST_DMZ_ZONE_ID);
     let routed = crate::afxdp::forwarding::lookup_forwarding_resolution(&fw, flow.dst_ip).resolution;
+    assert_eq!(
+        crate::afxdp::forwarding::gate_fabric_zone_override_on_owner_rg(
+            &fw,
+            &ha,
+            now_secs,
+            Some(TEST_DMZ_ZONE_ID),
+            routed,
+        ),
+        None,
+        "the inactive owner gates the encoded zone; the configured fabric zone governs"
+    );
+    let ingress_zone_override = None;
+    assert_eq!(
+        zone_pair_ids_for_flow_with_override(
+            &fw,
+            meta.ingress_ifindex as i32,
+            ingress_zone_override,
+            routed.egress_ifindex,
+        ),
+        (TEST_DMZ_ZONE_ID, TEST_WAN_ZONE_ID),
+        "the test admission pair comes from the fabric parent’s configured zone"
+    );
     assert!(
         super::syn_cookie_final_admission(
             &fw,
