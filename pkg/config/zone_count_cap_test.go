@@ -44,7 +44,8 @@ func TestZoneCountStrictRejectsOverCap(t *testing.T) {
 		// #16557: the u32 cap (4,294,967,293) cannot be materialised as a
 		// real zone map in a test. The O(1) comparison itself is exercised
 		// by TestZoneCountCapValue + the small-config tests; the over-cap
-		// branch is unreachable at test scale.
+		// branch is covered at CI scale via the injected cap (#17928) —
+		// this cell only materialises against the real pinned cap.
 		t.Skip("u32 zone cap too large to materialise an over-cap config")
 	}
 	err := validateZoneCountStrict(zonesConfig(int(MaxUsableZoneID + 1)))
@@ -93,5 +94,41 @@ func TestZoneCountNormalConfigUnaffected(t *testing.T) {
 	})
 	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("strict commit rejected an ordinary 3-zone config: %v", err)
+	}
+}
+
+// #17928: the over-cap and at-cap branches at CI scale, via the injected
+// cap. These run unconditionally — the production cap cannot be
+// materialised as a zone map, which is exactly why the two cells above
+// skip.
+func TestZoneCountWithCapRejectsOverInjectedCap17928(t *testing.T) {
+	const cap = int64(3)
+	err := validateZoneCountWithCap(zonesConfig(int(cap + 1)), cap)
+	if err == nil {
+		t.Fatalf("validateZoneCountWithCap accepted %d zones (cap %d)", cap+1, cap)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("%d security zones", cap+1),
+		fmt.Sprintf("at most %d", cap),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestZoneCountWithCapAcceptsAtInjectedCap17928(t *testing.T) {
+	const cap = int64(3)
+	if err := validateZoneCountWithCap(zonesConfig(int(cap)), cap); err != nil {
+		t.Fatalf("validateZoneCountWithCap rejected a config at exactly the %d-zone cap: %v", cap, err)
+	}
+}
+
+// #17928 fold: pin that the strict wrapper passes MaxUsableZoneID, not
+// the test seam's cap: a 4-zone config (over the injected test cap of 3)
+// must still pass the strict validator.
+func TestZoneCountStrictUsesProductionCap17928(t *testing.T) {
+	if err := validateZoneCountStrict(zonesConfig(4)); err != nil {
+		t.Fatalf("validateZoneCountStrict rejected 4 zones; production cap must be MaxUsableZoneID, not a test cap: %v", err)
 	}
 }
