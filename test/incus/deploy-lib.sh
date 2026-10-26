@@ -132,6 +132,26 @@ deploy_verify_pushed_sha() {
 	fi
 	info "Verified $label sha256 on $rinst ($local_sum)."
 }
+# deploy_verify_pushed_uid <rinst> <remote_path> <label>
+#
+# Assert the on-VM binary is root-owned. xpfd's validated-binary trust
+# check (#17881) refuses to execute a helper owned by a non-root uid,
+# and a raw `incus file push` preserves the workstation owner's uid
+# unless the push pins --uid 0 --gid 0 (#18029): the pushed file lands
+# uid-1000-owned and the helper can never start. HARD FAIL on a
+# non-root uid or an empty readback, same as deploy_verify_pushed_sha.
+deploy_verify_pushed_uid() {
+	local rinst="$1" remote_path="$2" label="$3"
+	local vm_uid
+	vm_uid=$(incus exec "$rinst" -- stat -c %u "$remote_path" 2>/dev/null || true)
+	if [[ -z "$vm_uid" ]]; then
+		die "$label not present on $rinst after push (uid readback empty: $remote_path)"
+	fi
+	if [[ "$vm_uid" != "0" ]]; then
+		die "$label owned by uid $vm_uid on $rinst after push, not root (0) — xpfd refuses a non-root-owned helper (#17881/#18029); push with --uid 0 --gid 0"
+	fi
+	info "Verified $label uid 0 (root) on $rinst."
+}
 
 # deploy_running_xpfd_sha256 <rinst> [tries]
 #
