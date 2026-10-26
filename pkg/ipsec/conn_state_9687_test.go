@@ -97,7 +97,7 @@ func TestRestartAfterADeferredRemovalStillTearsDown9687(t *testing.T) {
 			return poolsForPrior17882(t, priorConfig), nil
 		}
 		if len(args) > 0 && args[0] == "--list-conns" {
-			return listConns4898("site-a", "site-b"), nil
+			return listConnsForRendered17882(t, priorConfig), nil
 		}
 		return rec.run(args...)
 	}

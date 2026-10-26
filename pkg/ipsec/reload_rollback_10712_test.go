@@ -44,7 +44,7 @@ func TestFailedReloadRestoresPriorConfigForRestart10712(t *testing.T) {
 			return poolsForPrior17882(t, prior), nil
 		}
 		if len(args) > 0 && args[0] == "--list-conns" {
-			return listConns4898("vpn-old"), nil
+			return listConnsForRendered17882(t, prior), nil
 		}
 		return nil, nil
 	}
@@ -94,7 +94,7 @@ func TestFailedClearRestoresPriorConfigForRestart10712(t *testing.T) {
 			return poolsForPrior17882(t, prior), nil
 		}
 		if len(args) > 0 && args[0] == "--list-conns" {
-			return listConns4898("vpn-old"), nil
+			return listConnsForRendered17882(t, prior), nil
 		}
 		return nil, nil
 	}

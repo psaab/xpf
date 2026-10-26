@@ -20,16 +20,20 @@ the apply path pays no fsync (the file is regenerated on every apply).
   omitted from the render (#5494). **The returned error is
   load-bearing (#4433):** a render/write failure leaves the prior file
   untouched. A total `swanctl --load-all` failure restores the prior file only
-  when charon's generation marker matches and the parsed, non-empty loaded
-  connection-name set exactly matches the prior file (#10712, #17882). For a
-  pre-marker prior file, a non-empty exact loaded-name set is the available
-  fallback. A successful reachability probe alone is not proof: a fresh charon
-  may answer after loading the candidate already on disk. A malformed
-  list-conns response from a successful VICI request is distinct from a
-  transport failure, but cannot prove that the prior connections remain loaded.
-  If charon is unreachable or the prior generation is not proven, the
-  candidate stays on disk, its set is promoted, the error still propagates,
-  and charon's next start loads the committed generation (#16853, #17882).
+  when the prior marker (if present) and the complete loaded projection prove
+  the prior render: connection names, child names, and local/remote addresses
+  must match exactly (#10712, #17882). A pre-marker prior can be proven only
+  by that exact projection. A reachability probe or generation marker alone is
+  not proof: a fresh charon may answer after loading the candidate already on
+  disk, and the same config-store digest may accompany a DHCP-rebound local
+  address. Malformed or incomplete listings are indeterminate.
+  If a live listing matches neither complete render, the candidate stays on
+  disk and affected SAs are torn down; changed connections with eager intent
+  are re-initiated without advancing the prior fingerprints. A later successful
+  Apply still detects and converges the change.
+  If charon is unreachable or the candidate is proven loaded, the
+  candidate stays on disk and its set is promoted for charon's next start
+  (#16853, #17882).
   A **partial** load — a parseable `loaded N of M ..., F failed to load`
   summary for connections, pools, or authorities, with any exit code including
   0 — is different (#14589):
@@ -70,24 +74,29 @@ the apply path pays no fsync (the file is regenerated on every apply).
   (#4898/#10712):** deleting the last VPN routes `Apply(nil)` → `clearConfig`, which
   now RETURNS the `swanctl --load-all` error (it previously did `_ = m.reload()` and
   `prevConnNames`, rendered-content fingerprints, and stale-SA teardown are gated on
-  reload SUCCESS — when charon's marker and loaded connection names prove the prior
-  generation remains effective, the applied state is preserved and no SA is torn down;
-  the next successful Apply/Clear retries the diff + teardown. If the prior generation
-  is not proven (#16853/#17882), the candidate stays on disk, its set is promoted,
-  teardown is attempted, and the error still propagates. (A partial load is the #14589
-  exception above: the recovered set charon actually runs is promoted and its departed SAs
-  torn down, while the error still propagates.) **A FAILED terminate is also load-bearing (#6542/#10878):**
+  reload SUCCESS — when the marker (if present) and the complete loaded projection
+  prove the prior generation remains effective, the applied state is preserved and
+  no SA is torn down; the next successful Apply/Clear retries the diff + teardown.
+  A live indeterminate set instead triggers teardown without advancing the prior
+  fingerprints, preserving the diff for the next successful apply. If charon is
+  unreachable or a candidate/empty clear set is proven (#16853/#17882), the
+  committed set is promoted, teardown is attempted, and the error still propagates.
+  (A partial load is the #14589 exception above: the recovered set charon actually runs
+  is promoted and its departed SAs are torn down, while the error still propagates.)
+  **A FAILED terminate is also load-bearing (#6542/#10878):**
   failed removals become `pendingTerminate` debt, while failed same-name changes
   become `pendingChanged` debt. Apply RETURNS a failed termination or reinitiation
   error instead of reporting success over a stale SA or an un-reestablished tunnel.
 - `Clear() error` — `manager.go`. Remove the xpf snippet, reload, and
   terminate every previously-applied connection's live SAs (#3941). Like Apply,
-  a total reload failure with the prior generation proven still loaded restores the
-  prior file and skips promotion/termination (#4898/#10712); if the prior generation
-  is not proven (#16853/#17882), the removed file stays removed, the empty set is
-  promoted, teardown is attempted, and the error is still returned; a partial
-  clear (#14589) restores and re-loads the prior file when charon still
-  holds prior connections (or promotes the empty set when it holds none),
+  a total reload failure with the prior generation proven by marker (if present)
+  and exact loaded projection restores the prior file and skips promotion/termination
+  (#4898/#10712); an unreachable or candidate-proven clear keeps the removed file,
+  promotes the empty set, attempts teardown, and returns the error. A live
+  indeterminate listing keeps the file removed and attempts teardown without
+  advancing prior fingerprints; a partial clear (#14589) restores and re-loads
+  the prior file when charon still holds prior connections (or promotes the empty
+  set when it holds none),
   promotes that recovered set, and still returns the error. The commit path
   reaches the same clear via `ApplyGeneration` with an empty config, which
   promotes the same recovered set (#15128): promoting the empty set there

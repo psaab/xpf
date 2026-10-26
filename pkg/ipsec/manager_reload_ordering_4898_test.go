@@ -93,7 +93,7 @@ func TestClearReloadFailurePropagatesAndPreservesState(t *testing.T) {
 		t.Fatalf("FIXTURE: read prior config: %v", readErr)
 	}
 	rec.listPools = poolsForPrior17882(t, priorConfig)
-	rec.listConns = listConns4898("site-a")
+	rec.listConns = listConnsForRendered17882(t, priorConfig)
 
 	// Reload now fails; delete the only VPN.
 	rec.failLoadAll = true
@@ -147,7 +147,7 @@ func TestReplaceReloadFailurePreservesRemovedConn(t *testing.T) {
 		t.Fatalf("FIXTURE: read prior config: %v", readErr)
 	}
 	rec.listPools = poolsForPrior17882(t, priorConfig)
-	rec.listConns = listConns4898("site-a")
+	rec.listConns = listConnsForRendered17882(t, priorConfig)
 	rec.listSAs = liveSA("site-a")
 
 	// Replace site-a with site-b, but the reload fails.

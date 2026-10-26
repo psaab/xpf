@@ -141,7 +141,7 @@ func TestNonPartialReloadFailureStillRestoresPrior14589(t *testing.T) {
 			return poolsForPrior17882(t, prior), nil
 		}
 		if len(args) > 0 && args[0] == "--list-conns" {
-			return listConns4898("a", "b"), nil
+			return listConnsForRendered17882(t, prior), nil
 		}
 		return nil, nil
 	}

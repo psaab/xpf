@@ -239,7 +239,7 @@ func TestUnrenderableWithFailedReloadDoesNotTerminate_5494(t *testing.T) {
 		t.Fatalf("FIXTURE: read prior config: %v", readErr)
 	}
 	rec.listPools = poolsForPrior17882(t, priorConfig)
-	rec.listConns = listConns4898("gw-target", "gw-sibling")
+	rec.listConns = listConnsForRendered17882(t, priorConfig)
 	rec.listSAs = liveSA("gw-target", "gw-sibling")
 
 	// target becomes unrenderable, but the reload fails.

@@ -36,6 +36,30 @@ func poolsForPrior17882(t *testing.T, prior []byte) []byte {
 	return []byte("get-pools reply {xpf-gen-" + generation + " {base=192.0.2.1 size=1 online=0 offline=0}}\n")
 }
 
+func listConnsForRendered17882(t *testing.T, rendered []byte) []byte {
+	t.Helper()
+	root := parseSwanctlDoc(t, string(rendered))
+	connections := root.at(t, "connections")
+	var b strings.Builder
+	for _, name := range connections.childNames() {
+		conn := connections.at(t, name)
+		addresses := func(key string) string {
+			if values := conn.settings[key]; len(values) != 0 {
+				return strings.Join(values, ",")
+			}
+			return "%any"
+		}
+		b.WriteString("list-conn event {" + name + " {local_addrs=[" + addresses("local_addrs") +
+			"] remote_addrs=[" + addresses("remote_addrs") + "] children {")
+		for _, child := range conn.at(t, "children").childNames() {
+			b.WriteString(child + " {}")
+		}
+		b.WriteString("}}}\n")
+	}
+	b.WriteString("list-conns reply {}\n")
+	return []byte(b.String())
+}
+
 // del-down (acceptance): deleting the last VPN while charon is down
 // leaves no xpf.conf, so the peer cannot re-establish after charon
 // restarts. Pre-fix the prior file is restored -> RED.
@@ -140,7 +164,7 @@ func TestRejectedWhileCharonUpStillRestoresPrior16853(t *testing.T) {
 				return priorMarker, nil
 			}
 		}
-		return []byte("list-conn event {vpn-old {children {vpn-old {}}}}\nlist-conns reply {}\n"), nil
+		return listConnsForRendered17882(t, prior), nil
 	}
 	if err := m.ApplyGeneration(vpnCfg("vpn-new"), newGeneration, ApplyHooks{}); !errors.Is(err, rejectErr) {
 		t.Fatalf("ApplyGeneration error = %v, want reject error", err)
@@ -276,7 +300,7 @@ func TestCharonReturningDuringProbeRestoresPrior16853(t *testing.T) {
 				return nil, errors.New("connecting to 'unix:///var/run/charon.vici' failed")
 			}
 		}
-		return []byte("list-conn event {vpn-old {children {vpn-old {}}}}\nlist-conns reply {}\n"), nil
+		return listConnsForRendered17882(t, prior), nil
 	}
 	if err := m.ApplyGeneration(vpnCfg("vpn-new"), newGeneration, ApplyHooks{}); err == nil {
 		t.Fatal("ApplyGeneration must return the reload error")
@@ -378,5 +402,161 @@ func TestClearAfterRestartProbeKeepsFileRemoved17882(t *testing.T) {
 	}
 	if m.tracks("vpn1") {
 		t.Fatal("the empty clear set must be promoted when the prior generation is absent")
+	}
+}
+
+// A live superset is neither the prior nor candidate render. The candidate
+// remains staged, but its fingerprints must not be promoted: a later successful
+// apply still needs to tear down and re-establish the changed SA.
+//
+// fail-on-revert: promoting the candidate on the first ambiguous probe makes
+// the later same-candidate apply skip teardown and re-initiation.
+func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
+	m := NewWithConfigDir(t.TempDir())
+	oldGeneration := strings.Repeat("a", 64)
+	newGeneration := strings.Repeat("b", 64)
+	oldCfg := vpnCfg("vpn1")
+	oldCfg.VPNs["vpn1"].EstablishTunnels = "immediately"
+	ch := &charonDown16853{}
+	m.swanctl = ch.run
+	if err := m.ApplyGeneration(oldCfg, oldGeneration, ApplyHooks{}); err != nil {
+		t.Fatalf("FIXTURE: initial apply: %v", err)
+	}
+	prior, err := os.ReadFile(m.configPath)
+	if err != nil {
+		t.Fatalf("FIXTURE: read prior: %v", err)
+	}
+	m.mu.Lock()
+	oldHash := m.prevConnHashes["vpn1"]
+	m.mu.Unlock()
+
+	reloadErr := errors.New("candidate reload rejected")
+	priorConns := strings.TrimSuffix(string(listConnsForRendered17882(t, prior)), "list-conns reply {}\n")
+	priorConns += "list-conn event {extra {local_addrs=[%any] remote_addrs=[%any] children {extra {}}}}\n"
+	rec := &reloadRecorder{
+		failLoadAll: true,
+		loadErr:     reloadErr,
+		listPools:   poolsForPrior17882(t, prior),
+		listConns:   []byte(priorConns + "list-conns reply {}\n"),
+		listSAs:     liveSA("vpn1"),
+	}
+	m.swanctl = rec.run
+	rotated := vpnCfg("vpn1")
+	rotated.VPNs["vpn1"].EstablishTunnels = "immediately"
+	rotated.VPNs["vpn1"].PSK = config.NewSecret("secret-rotated")
+	if err := m.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); !errors.Is(err, reloadErr) {
+		t.Fatalf("ambiguous ApplyGeneration error = %v, want reload error", err)
+	}
+	got, err := os.ReadFile(m.configPath)
+	if err != nil {
+		t.Fatalf("read staged candidate: %v", err)
+	}
+	if string(got) == string(prior) || !strings.Contains(string(got), "secret-rotated") {
+		t.Fatal("ambiguous live set must leave the rotated candidate on disk")
+	}
+	m.mu.Lock()
+	if gotHash := m.prevConnHashes["vpn1"]; gotHash != oldHash {
+		m.mu.Unlock()
+		t.Fatalf("indeterminate reload promoted candidate fingerprint %q; prior hash is %q", gotHash, oldHash)
+	}
+	m.mu.Unlock()
+	if got := rec.terminated(); len(got) != 1 || got[0] != "vpn1" {
+		t.Fatalf("indeterminate reload must tear down the stale vpn1 SA, got %v", got)
+	}
+	initiates := func() int {
+		n := 0
+		for _, call := range rec.calls {
+			if len(call) > 0 && call[0] == "--initiate" {
+				n++
+			}
+		}
+		return n
+	}
+	if got := initiates(); got != 1 {
+		t.Fatalf("indeterminate reload must re-establish vpn1 under charon's still-loaded config, got %d initiates", got)
+	}
+
+	// The same candidate now loads successfully. Because the prior fingerprint
+	// was preserved, this converging apply must again tear down and re-initiate.
+	rec.failLoadAll = false
+	if err := m.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); err != nil {
+		t.Fatalf("successful convergence apply: %v", err)
+	}
+	if got := rec.terminated(); len(got) != 2 || got[1] != "vpn1" {
+		t.Fatalf("converging apply must retry changed-SA teardown, got %v", got)
+	}
+	if got := initiates(); got != 2 {
+		t.Fatalf("converging apply must re-initiate the changed tunnel, got %d initiates", got)
+	}
+	m.mu.Lock()
+	newHash := m.prevConnHashes["vpn1"]
+	m.mu.Unlock()
+	if newHash == oldHash {
+		t.Fatal("successful convergence did not promote the candidate fingerprint")
+	}
+}
+
+// A stable config-store digest may accompany different rendered local_addrs
+// after a DHCP rebind. The connection listing, not the marker alone, separates
+// the still-loaded old endpoint from a restarted charon that loaded the new one.
+func TestSameDigestDifferentRenderedLocalAddressProbe17882(t *testing.T) {
+	generation := strings.Repeat("c", 64)
+	for _, tc := range []struct {
+		name        string
+		liveNewAddr bool
+		wantPrior   bool
+	}{
+		{name: "old address remains loaded", wantPrior: true},
+		{name: "restarted charon loaded new address", liveNewAddr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewWithConfigDir(t.TempDir())
+			priorCfg := vpnCfg("vpn1")
+			ch := &charonDown16853{}
+			m.swanctl = ch.run
+			if err := m.ApplyGeneration(priorCfg, generation, ApplyHooks{}); err != nil {
+				t.Fatalf("FIXTURE: initial apply: %v", err)
+			}
+			prior, err := os.ReadFile(m.configPath)
+			if err != nil {
+				t.Fatalf("FIXTURE: read prior: %v", err)
+			}
+			candidateCfg := vpnCfg("vpn1")
+			candidateCfg.VPNs["vpn1"].LocalAddr = "10.0.1.2"
+			liveConfig := prior
+			if tc.liveNewAddr {
+				liveConfig = []byte(m.generateConfig(candidateCfg))
+			}
+			reloadErr := errors.New("reload failed during DHCP rebind")
+			m.swanctl = func(args ...string) ([]byte, error) {
+				if len(args) > 0 {
+					switch args[0] {
+					case "--load-all":
+						return nil, reloadErr
+					case "--list-pools":
+						return poolsForPrior17882(t, prior), nil
+					case "--list-conns":
+						return listConnsForRendered17882(t, liveConfig), nil
+					}
+				}
+				return nil, nil
+			}
+			if err := m.ApplyGeneration(candidateCfg, generation, ApplyHooks{}); !errors.Is(err, reloadErr) {
+				t.Fatalf("ApplyGeneration error = %v, want reload error", err)
+			}
+			got, err := os.ReadFile(m.configPath)
+			if err != nil {
+				t.Fatalf("read post-probe config: %v", err)
+			}
+			if tc.wantPrior {
+				if string(got) != string(prior) {
+					t.Fatal("old-address control must restore the prior config")
+				}
+				return
+			}
+			if string(got) == string(prior) || !strings.Contains(string(got), "local_addrs = 10.0.1.2") {
+				t.Fatal("same-digest new-address probe must keep the candidate config")
+			}
+		})
 	}
 }
