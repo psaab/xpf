@@ -193,3 +193,96 @@ func TestStraddlingPreKeyUpgradeGetsFreshRetiredGrace17889(t *testing.T) {
 		t.Fatal("connection closed at the expired pre-key deadline after a successful straddling round")
 	}
 }
+
+// TestStraddlingResponderUpgradeGetsFreshRetiredGrace17889 is the responder
+// mirror of the straddle above: b answered the A Hello (Proof sent, Confirm
+// outstanding) while holding a pre-key anchor; A is retired to C and the
+// pre-key deadline expires before the Confirm lands. Completing the Confirm
+// under retired A must refresh b's grace for the follow-up C rekey, a
+// replayed Confirm must not refresh it again, and if the rekey then goes
+// unanswered the refreshed grace still evicts at its own expiry.
+func TestStraddlingResponderUpgradeGetsFreshRetiredGrace17889(t *testing.T) {
+	a := newUpgEnd(t, retiredKeyA16857, 0)
+	b := newUpgEnd(t, retiredKeyA16857, 1)
+
+	// Establish b's pre-key anchor; the reconcile emits a Request, drained
+	// here so the exchange below starts from a's Hello.
+	b.s.ReconcileConnectionAuth("keyed")
+	b.s.writeMu.Lock()
+	preStart := b.ac.strictGraceStart
+	preRetired := b.ac.strictGraceRetired
+	b.s.writeMu.Unlock()
+	if preStart == 0 || preRetired {
+		t.Fatalf("responder pre-key anchor not established: start=%d retired=%v, want nonzero/false", preStart, preRetired)
+	}
+	if typ, _ := readUpgradeFrame(t, b, false); typ != syncMsgAuthUpgradeRequest {
+		t.Fatalf("responder reconcile frame type %d, want Request %d", typ, syncMsgAuthUpgradeRequest)
+	}
+
+	// Drive Hello and Proof; a completes under A and its Confirm stays
+	// outstanding on the wire.
+	a.s.ReconcileConnectionAuth("keyed")
+	if typ := pump(t, a, b); typ != syncMsgAuthUpgradeHello {
+		t.Fatalf("first frame type %d, want Hello", typ)
+	}
+	if typ := pump(t, b, a); typ != syncMsgAuthUpgradeProof {
+		t.Fatalf("second frame type %d, want Proof", typ)
+	}
+	typ, confirm := readUpgradeFrame(t, a, false)
+	if typ != syncMsgAuthUpgradeConfirm {
+		t.Fatalf("third frame type %d, want Confirm", typ)
+	}
+
+	// Retire A to C on b while its Confirm is outstanding, then let the
+	// original pre-key deadline expire.
+	b.s.SetAuthProvider(&fakeSyncAuthProvider{key: []byte(retiredKeyC17889), node: 1, cluster: upgClusterID})
+	b.s.ReconcileConnectionAuth("finalize")
+	b.s.writeMu.Lock()
+	b.ac.strictGraceStart = MonotonicNanos() - strictSessionAuthGrace.Nanoseconds() - int64(time.Second)
+	b.s.writeMu.Unlock()
+
+	// The Confirm completes the round under retired A: fresh retired grace.
+	b.s.handleMessage(b.ac, typ, confirm)
+	if !bytes.Equal(b.ac.authPSK, []byte(retiredKeyA16857)) {
+		t.Fatalf("responder authPSK = %q after straddling Confirm, want A", b.ac.authPSK)
+	}
+	b.s.writeMu.Lock()
+	anchor := b.ac.strictGraceStart
+	retired := b.ac.strictGraceRetired
+	b.s.writeMu.Unlock()
+	if anchor == 0 || !retired || MonotonicNanos()-anchor >= strictSessionAuthGrace.Nanoseconds() {
+		t.Fatalf("responder stale-key completion did not establish a fresh retired grace: start=%d retired=%v", anchor, retired)
+	}
+	if n := b.s.enforceStrictSessionAuth(); n != 0 {
+		t.Fatalf("evicted %d cooperating responder connections after straddling completion, want 0", n)
+	}
+	if !connStillInstalled(b) {
+		t.Fatal("responder closed at the expired pre-key deadline after a successful straddling round")
+	}
+
+	// Duplicate-Confirm control: replaying the same Confirm must not
+	// refresh the grace a second time.
+	b.s.writeMu.Lock()
+	b.ac.strictGraceStart = anchor - strictSessionAuthGrace.Nanoseconds()/2
+	aged := b.ac.strictGraceStart
+	b.s.writeMu.Unlock()
+	if !b.s.handleAuthUpgradeConfirm(b.ac, confirm) {
+		t.Fatal("duplicate Confirm was not accepted as an already-completed round")
+	}
+	b.s.writeMu.Lock()
+	afterDup := b.ac.strictGraceStart
+	b.s.writeMu.Unlock()
+	if afterDup != aged {
+		t.Fatalf("duplicate Confirm refreshed the grace: %d -> %d; replayed completions must not renew", aged, afterDup)
+	}
+
+	// The follow-up rekey is never answered: the refreshed grace evicts at
+	// its own expiry.
+	backdateGrace16857(b)
+	if n := b.s.enforceStrictSessionAuth(); n != 1 {
+		t.Fatalf("evicted %d responder connections after the refreshed grace expired unanswered, want 1", n)
+	}
+	if connStillInstalled(b) {
+		t.Fatal("responder survived past the refreshed grace expiry")
+	}
+}
