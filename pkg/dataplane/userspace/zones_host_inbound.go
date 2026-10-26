@@ -467,6 +467,29 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	sort.Strings(zoneNamesSorted)
 	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
 	quarantinedInterfaces := config.ZoneInterfaceQuarantineExclusions(cfg)
+	type quarantinedUnitZeroParent struct {
+		base     string
+		linuxDev string
+	}
+	var quarantinedUnitZeroParents map[quarantinedUnitZeroParent]struct{}
+	if len(quarantinedInterfaces) > 0 {
+		for _, snap := range ifaceSnaps {
+			if !snap.IsUnit || snap.AdminDisabled || hostInboundLifelineInterface(snap.Name, lifelines) {
+				continue
+			}
+			if _, excluded := quarantinedInterfaces[snap.Name]; !excluded {
+				continue
+			}
+			split := cfg.SplitInterfaceUnitRef(snap.Name)
+			if !split.HasUnit || split.UnitTok != "0" || split.Base == "" {
+				continue
+			}
+			if quarantinedUnitZeroParents == nil {
+				quarantinedUnitZeroParents = make(map[quarantinedUnitZeroParent]struct{})
+			}
+			quarantinedUnitZeroParents[quarantinedUnitZeroParent{base: split.Base, linuxDev: snap.LinuxName}] = struct{}{}
+		}
+	}
 	var zoneHasSurvivingIdentity map[string]bool
 	if len(quarantinedInterfaces) > 0 {
 		zoneHasSurvivingIdentity = make(map[string]bool, len(cfg.Security.Zones))
@@ -566,6 +589,14 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 				if snap.IsUnit || nativeUnit.name != "" {
 					claimNetdev(snap.LinuxName, "")
 				}
+				continue
+			}
+		}
+		// The physical parent snapshot can duplicate a collapsed unit-0's
+		// addresses. When that unit identity is quarantined, do not let the
+		// parent row republish its data through a surviving zone view.
+		if !snap.IsUnit && len(quarantinedUnitZeroParents) > 0 {
+			if _, excluded := quarantinedUnitZeroParents[quarantinedUnitZeroParent{base: snap.Name, linuxDev: snap.LinuxName}]; excluded {
 				continue
 			}
 		}
@@ -694,6 +725,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			if hostInboundLifelineInterface(unitName, lifelines) {
 				continue
 			}
+			if _, excluded := quarantinedInterfaces[unitName]; excluded {
+				continue
+			}
 			zoneName := zoneByIface[unitName]
 			if zoneName == "" {
 				continue
@@ -734,6 +768,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	// target unit's effective token group, just like the VIP walk above.
 	for _, target := range stableRethLinkLocalTargets(cfg) {
 		if hostInboundLifelineInterface(target.iface, lifelines) {
+			continue
+		}
+		if _, excluded := quarantinedInterfaces[target.iface]; excluded {
 			continue
 		}
 		zoneName := zoneByIface[target.iface]
