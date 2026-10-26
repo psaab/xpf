@@ -3074,6 +3074,159 @@ mod pressure_shed_matrix_17012 {
         }
         drop(held_lease);
     }
+
+    #[test]
+    fn gc_pressure_shed_retry_evicts_sibling_cache_17012() {
+        let forwarding = build_forwarding_state(&nat_snapshot());
+        let ha_state = txn_ha_state();
+        let mut sessions = SessionTable::new();
+        sessions.set_max_sessions_for_test(2);
+        let victim_key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            src_port: 31_001,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let decision = tunnel_marked_decision(ForwardingDisposition::ForwardCandidate);
+        let mut metadata = icmp_err_metadata();
+        assert_eq!(decision.nat, NatDecision::default(), "GC victim is SNAT-free");
+        metadata.is_reverse = false;
+        metadata.owner_rg_id = 1;
+        metadata.ingress_ifindex = 24;
+        let reverse_key = crate::session::reverse_session_key(&victim_key, decision.nat);
+        let mut reverse_metadata = metadata.clone();
+        reverse_metadata.is_reverse = true;
+        assert!(sessions.install_with_protocol(
+            victim_key.clone(),
+            decision,
+            metadata.clone(),
+            1_000_000_000,
+            PROTO_TCP,
+            TCP_FLAG_SYN,
+        ));
+        assert!(sessions.install_with_protocol(
+            reverse_key,
+            decision,
+            reverse_metadata,
+            1_000_000_000,
+            PROTO_TCP,
+            TCP_FLAG_SYN,
+        ));
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let (victim_entry, victim_origin) = sessions
+            .probe_with_origin(&victim_key)
+            .expect("local opening victim");
+        shared_sessions.lock().expect("shared sessions").insert(
+            victim_key.clone(),
+            crate::afxdp::SyncedSessionEntry {
+                key: victim_key.clone(),
+                decision: victim_entry.decision,
+                metadata: victim_entry.metadata.clone(),
+                persistent_lease_hold: None,
+                source_nat_static: None,
+                leak_incarnation: 0,
+                origin: victim_origin,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_FLAG_SYN,
+                generation: 0,
+                session_id: sessions.session_id_for(&victim_key),
+                tcp_close_class: 0,
+                tcp_handshake_state: 1,
+                rev_packets: 0,
+                fwd_packets: 0,
+                pptp_call_ids: 0,
+            },
+        );
+        let mut ingress = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        ingress.interface = Arc::<str>::from("reth1.0");
+        let mut sibling = BindingWorker::new_for_mirror_test(1, 1, 24, 0);
+        sibling.interface = Arc::<str>::from("reth1.0");
+        sibling.flow.flow_cache.insert(pressure_shed_cache_entry_17012(
+            victim_key.clone(),
+            24,
+            metadata,
+            decision,
+        ));
+        let mut egress = BindingWorker::new_for_mirror_test(2, 0, 12, 0);
+        egress.interface = Arc::<str>::from("reth0.80");
+        let mut bindings = vec![ingress, sibling, egress];
+        let (admission_allowed, shed_sessions) =
+            sessions.can_admit_new_flow(2, PROTO_TCP, TCP_FLAG_SYN);
+        assert!(admission_allowed, "the selected pair frees the required slots");
+        assert_eq!(
+            shed_sessions.iter().count(),
+            2,
+            "the full table must select both victim halves"
+        );
+        sessions.defer_pressure_shed(shed_sessions);
+        assert!(sessions.probe_with_origin(&victim_key).is_none());
+        let held_lease = crate::afxdp::bpf_map::global_tuple_gate()
+            .acquire_lease([victim_key.clone()])
+            .expect("hold the victim tuple lease");
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let retry = |sessions: &mut SessionTable, bindings: &mut [BindingWorker]| {
+            crate::afxdp::worker::retry_deferred_pressure_sheds(
+                sessions,
+                bindings,
+                &forwarding,
+                crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                &crate::afxdp::checksum::DnatTableFds::default(),
+                0,
+                &[],
+                crate::afxdp::empty_worker_commands_by_id(),
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                1_001_000_000,
+            );
+        };
+        retry(&mut sessions, &mut bindings);
+        assert!(
+            shared_sessions
+                .lock()
+                .expect("shared sessions")
+                .contains_key(&victim_key),
+            "a second contended lease must preserve the shared row"
+        );
+        assert!(
+            bindings[1]
+                .flow
+                .flow_cache
+                .entries
+                .iter()
+                .flatten()
+                .any(|entry| entry.key == victim_key),
+            "a second contended lease must preserve the sibling slot"
+        );
+        drop(held_lease);
+        retry(&mut sessions, &mut bindings);
+        assert!(
+            !shared_sessions
+                .lock()
+                .expect("shared sessions")
+                .contains_key(&victim_key),
+            "the deferred GC retry must remove the shared victim row"
+        );
+        assert!(
+            !bindings[1]
+                .flow
+                .flow_cache
+                .entries
+                .iter()
+                .flatten()
+                .any(|entry| entry.key == victim_key),
+            "the deferred GC retry must evict the sibling binding cache slot"
+        );
+    }
 }
 
 #[test]
