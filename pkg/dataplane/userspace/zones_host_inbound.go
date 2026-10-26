@@ -292,14 +292,17 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 }
 
 // buildZoneHostInboundViewsFromSnaps is the shared zone-view core: one
-// ZoneHostInboundView per configured security zone (#3070; #3405 default-deny
-// parity — every zone enforces, see below), resolving each zone's
-// firewall-local host addresses via the caller-supplied interface snapshot
-// PLUS each zone's RETH VRRP virtual addresses (#3172, resolved from config
-// so they scope the deny on the backup node too, where the VIP is not yet
-// live on the kernel interface), and the deterministic stable RETH router
-// link-local (#10303), with configured management/cluster-control lifeline
-// interfaces excluded from the address set. excludeScopeLink drops
+// ZoneHostInboundView per configured security zone with a surviving interface
+// identity, plus zones with no interface references (#3070; #3405 default-deny
+// parity — every eligible zone enforces, see below). Interface-quarantined-only
+// zones publish no view.
+// The builder resolves each zone's firewall-local host addresses via the
+// caller-supplied interface snapshot PLUS each zone's RETH VRRP virtual
+// addresses (#3172, resolved from config so they scope the deny on the backup
+// node too, where the VIP is not yet live on the kernel interface), and the
+// deterministic stable RETH router link-local (#10303), with configured
+// management/cluster-control lifeline interfaces excluded from the address set.
+// excludeScopeLink drops
 // kernel scope-link rows from the snapshot walk (pending-intent scoping,
 // #10751 R4-1); installed views pass false so link-locals stay denied.
 //
@@ -453,17 +456,44 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	}
 
 	// Seed a zone-default group (zone-level effective tokens, no override) for
-	// every configured zone so each configured zone yields at least one view —
-	// even when its only interface is a lifeline (no address contributed). Non-
-	// overridden interfaces accumulate addresses into this same group. Fully
-	// overridden or addressless zones retain empty address views; eligible
-	// addressless ingress still receives catalog-group policy.
+	// every configured zone with at least one surviving interface identity, so
+	// an addressless or lifeline-only zone still gets its view. A zone whose
+	// every authored identity is quarantined must not publish an empty view.
+	// Zones with no interface references retain the existing default-deny view.
 	zoneNamesSorted := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNamesSorted = append(zoneNamesSorted, name)
 	}
 	sort.Strings(zoneNamesSorted)
 	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
+	quarantinedInterfaces := config.ZoneInterfaceQuarantineExclusions(cfg)
+	type quarantinedUnitZeroParent struct {
+		base     string
+		linuxDev string
+	}
+	var quarantinedUnitZeroParents map[quarantinedUnitZeroParent]struct{}
+	if len(quarantinedInterfaces) > 0 {
+		for _, snap := range ifaceSnaps {
+			if !snap.IsUnit || snap.AdminDisabled || hostInboundLifelineInterface(snap.Name, lifelines) {
+				continue
+			}
+			if _, excluded := quarantinedInterfaces[snap.Name]; !excluded {
+				continue
+			}
+			split := cfg.SplitInterfaceUnitRef(snap.Name)
+			if !split.HasUnit || split.UnitTok != "0" || split.Base == "" {
+				continue
+			}
+			if quarantinedUnitZeroParents == nil {
+				quarantinedUnitZeroParents = make(map[quarantinedUnitZeroParent]struct{})
+			}
+			quarantinedUnitZeroParents[quarantinedUnitZeroParent{base: split.Base, linuxDev: snap.LinuxName}] = struct{}{}
+		}
+	}
+	var zoneHasSurvivingIdentity map[string]bool
+	if len(quarantinedInterfaces) > 0 {
+		zoneHasSurvivingIdentity = make(map[string]bool, len(cfg.Security.Zones))
+	}
 	for _, name := range zoneNamesSorted {
 		if _, drop := quarantined[name]; drop {
 			continue
@@ -471,6 +501,42 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		zone := cfg.Security.Zones[name]
 		if !configured(zone) {
 			continue
+		}
+		hasSurvivingIdentity := true
+		if len(quarantinedInterfaces) > 0 && len(zone.Interfaces) > 0 {
+			hasSurvivingIdentity = false
+			hasAuthoredReference := false
+			for _, ref := range zone.Interfaces {
+				if ref == "" {
+					continue
+				}
+				hasAuthoredReference = true
+				keys := config.InterfaceUnitRefKeys(cfg, ref)
+				if len(keys) == 0 {
+					// An unresolved reference is not proven quarantined. Preserve
+					// the existing empty zone view rather than silently narrowing it.
+					hasSurvivingIdentity = true
+					break
+				}
+				for _, key := range keys {
+					if _, drop := quarantinedInterfaces[key]; !drop {
+						hasSurvivingIdentity = true
+						break
+					}
+				}
+				if hasSurvivingIdentity {
+					break
+				}
+			}
+			if !hasAuthoredReference {
+				hasSurvivingIdentity = true
+			}
+		}
+		if !hasSurvivingIdentity {
+			continue
+		}
+		if zoneHasSurvivingIdentity != nil {
+			zoneHasSurvivingIdentity[name] = true
 		}
 		svc, proto := effectiveHostInboundTokens(zone, "", nil)
 		getGroup(name, svc, proto, "", effectiveHostInboundExcept(zone, nil))
@@ -516,6 +582,24 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 				viewZone = nativeUnit.zone
 			}
 		}
+		if len(quarantinedInterfaces) > 0 {
+			_, snapshotQuarantined := quarantinedInterfaces[snap.Name]
+			_, policyQuarantined := quarantinedInterfaces[policyIface]
+			if snapshotQuarantined || policyQuarantined {
+				if snap.IsUnit || nativeUnit.name != "" {
+					claimNetdev(snap.LinuxName, "")
+				}
+				continue
+			}
+		}
+		// The physical parent snapshot can duplicate a collapsed unit-0's
+		// addresses. When that unit identity is quarantined, do not let the
+		// parent row republish its data through a surviving zone view.
+		if !snap.IsUnit && len(quarantinedUnitZeroParents) > 0 {
+			if _, excluded := quarantinedUnitZeroParents[quarantinedUnitZeroParent{base: snap.Name, linuxDev: snap.LinuxName}]; excluded {
+				continue
+			}
+		}
 		if viewZone == "" {
 			// An unzoned unit still participates in netdev ambiguity: nft only
 			// sees iifname/sdifname, so a zoned sibling cannot safely own it.
@@ -526,6 +610,12 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		}
 		if _, drop := quarantined[viewZone]; drop {
 			if snap.IsUnit {
+				claimNetdev(snap.LinuxName, "")
+			}
+			continue
+		}
+		if zoneHasSurvivingIdentity != nil && !zoneHasSurvivingIdentity[viewZone] {
+			if snap.IsUnit || nativeUnit.name != "" {
 				claimNetdev(snap.LinuxName, "")
 			}
 			continue
@@ -635,6 +725,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			if hostInboundLifelineInterface(unitName, lifelines) {
 				continue
 			}
+			if _, excluded := quarantinedInterfaces[unitName]; excluded {
+				continue
+			}
 			zoneName := zoneByIface[unitName]
 			if zoneName == "" {
 				continue
@@ -675,6 +768,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	// target unit's effective token group, just like the VIP walk above.
 	for _, target := range stableRethLinkLocalTargets(cfg) {
 		if hostInboundLifelineInterface(target.iface, lifelines) {
+			continue
+		}
+		if _, excluded := quarantinedInterfaces[target.iface]; excluded {
 			continue
 		}
 		zoneName := zoneByIface[target.iface]
@@ -986,11 +1082,15 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 	lifelines := hostInboundLifelineSet(cfg)
 	lifelineShared := hostInboundLifelineSharedAddrsFromSnaps(cfg, snaps)
 	quarantined := quarantinedZoneNames(cfg)
+	quarantinedInterfaces := config.ZoneInterfaceQuarantineExclusions(cfg)
 	unzonedFanUpBaseRows := hostInboundUnzonedFanUpBaseRows(cfg, snaps)
+	nativeVLANUnits := nativeVLANUnitRefs(cfg, snaps)
 	// Addresses already covered by a zone deny — exclude so the unzoned catch-all
 	// never duplicates or conflicts with a zone rule for the same daddr.
 	zoned := map[string]bool{}
+	zoneHasView := map[string]bool{}
 	for _, view := range buildZoneHostInboundViewsFromSnaps(cfg, snaps, false) {
+		zoneHasView[view.Zone] = true
 		for _, a := range view.V4Addrs {
 			zoned[a] = true
 		}
@@ -1021,10 +1121,22 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 		if snap.AdminDisabled {
 			continue
 		}
-		if snap.Zone != "" && !unzonedFanUpBaseRows[snap.Name] {
-			if _, drop := quarantined[snap.Zone]; !drop {
-				continue
+		policyIface, viewZone := snap.Name, snap.Zone
+		if !snap.IsUnit {
+			if nativeUnit := nativeVLANUnits[snap.Name]; nativeUnit.name != "" {
+				policyIface = nativeUnit.name
+				viewZone = nativeUnit.zone
 			}
+		}
+		_, snapshotQuarantined := quarantinedInterfaces[snap.Name]
+		_, policyQuarantined := quarantinedInterfaces[policyIface]
+		_, zoneQuarantined := quarantined[viewZone]
+		// A quarantined identity or stale zone label has no surviving view to
+		// deny its address. Keep it in the real-table unzoned catch-all rather
+		// than letting the policy-accept default expose the host address.
+		if viewZone != "" && !unzonedFanUpBaseRows[snap.Name] &&
+			!snapshotQuarantined && !policyQuarantined && !zoneQuarantined && zoneHasView[viewZone] {
+			continue
 		}
 		for _, a := range snap.Addresses {
 			addUnzoned(hostIPFromCIDR(a.Address))

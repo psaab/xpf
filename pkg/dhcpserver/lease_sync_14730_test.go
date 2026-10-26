@@ -120,8 +120,8 @@ func TestPreSeed14730_LiveSocketDropsTombstonedViaLFC(t *testing.T) {
 	dial, stop := startStubKea(t, sock, stub)
 	defer stop()
 	m := New()
-	m.unitActive = func(string) (bool, error) { return true, nil }
 	m.SetLeaseSyncSeamsForTesting(dial, sock, "", memfile, "")
+	m.unitActive = func(string) (bool, error) { return true, nil }
 	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) { return os.Getuid(), os.Getgid(), true })
 	activeRow := "10.0.147.10,aa:bb:cc:dd:ee:10,01:aa:bb:cc:dd:ee:10,3600," + itoa14730(expire) + ",1,0,0,old-host,0,,0\n"
 	tombRow := "10.0.147.10,aa:bb:cc:dd:ee:10,01:aa:bb:cc:dd:ee:10,3600," + itoa14730(expire) + ",1,0,0,old-host,1,,0\n"

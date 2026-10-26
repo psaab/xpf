@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -150,8 +151,8 @@ func ConfigureReadlineHistory(cfg *readline.Config) *readline.Config {
 // ReadHistorySeed returns the persisted history lines from path in file order
 // (oldest first), skipping blank lines exactly as readline's own loader does.
 // A missing file is an empty seed, not an error: first-run has no history.
-// The lines were filtered by RecordHistoryLine when written, so no sensitive
-// line is ever seeded back.
+// The seed filter replays config-mode navigation and retains all cursor
+// interpretations made possible by an unrecorded EOF before re-entry.
 func ReadHistorySeed(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -168,19 +169,172 @@ func ReadHistorySeed(path string) ([]string, error) {
 		}
 		lines = append(lines, line)
 	}
-	// Defense in depth: a history file written before the #15284 filter (or
-	// hand-edited) may contain a credential line the old always-on autosave
-	// persisted. Never seed those back into a live session's recall, where a
-	// later Rewrite-free session would re-expose them; RecordHistoryLine will
-	// also keep them off disk going forward because seeding never writes.
+	// Defense in depth: files written before cursor-aware history filtering
+	// (or hand-edited) may contain credentials. Track every cursor state
+	// consistent with history, judge each line under all of them, then
+	// advance navigation even when the line itself is filtered.
+	states := make([]historySeedCursor, 1, 2)
+	scratch := make([]historySeedCursor, 0, 2)
 	filtered := lines[:0]
 	for _, line := range lines {
-		if IsSensitiveHistoryLine(line) {
-			continue
+		configureReentry := isHistorySeedConfigureReentry(line)
+		sensitive := false
+		for _, state := range states {
+			cursor := state.editPath
+			if !state.configMode {
+				cursor = nil
+			}
+			if IsSensitiveHistoryLineAt(cursor, line) {
+				sensitive = true
+				break
+			}
 		}
-		filtered = append(filtered, line)
+		if !sensitive {
+			filtered = append(filtered, line)
+		}
+
+		next := scratch[:0]
+		for _, state := range states {
+			path, mode := advanceHistorySeedCursor(state.editPath, state.configMode, line)
+			next = appendHistorySeedCursor(next, historySeedCursor{editPath: path, configMode: mode})
+			// History cannot distinguish a rejected in-config configure
+			// from a real operational re-entry after an unrecorded EOF.
+			// Retain both possible cursor interpretations.
+			if state.configMode && configureReentry {
+				next = appendHistorySeedCursor(next, historySeedCursor{configMode: true})
+			}
+		}
+		states, scratch = next, states[:0]
 	}
 	return filtered, nil
+}
+
+type historySeedCursor struct {
+	editPath   []string
+	configMode bool
+}
+
+func appendHistorySeedCursor(states []historySeedCursor, candidate historySeedCursor) []historySeedCursor {
+	for _, state := range states {
+		if state.configMode == candidate.configMode && slices.Equal(state.editPath, candidate.editPath) {
+			return states
+		}
+	}
+	return append(states, candidate)
+}
+
+func isHistorySeedConfigureReentry(line string) bool {
+	for {
+		command, _, _, ok := SplitPipe(line)
+		if !ok {
+			break
+		}
+		line = command
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	verb, ok := resolveHistoryOperationalVerb(fields[0])
+	return ok && verb == "configure"
+}
+
+// advanceHistorySeedCursor mirrors the local and remote CLI's navigation
+// transitions for history replay. History starts in operational mode, and
+// the edit cursor changes only for commands that dispatch can execute as
+// navigation; prefixed top/up commands restore the prior cursor after their
+// inner command.
+func advanceHistorySeedCursor(editPath []string, configMode bool, line string) ([]string, bool) {
+	// Dispatch recursively strips each supported, unquoted output-pipe stage
+	// before handling its command. Use the same splitter until no stage remains;
+	// quoted pipes stay in the command data.
+	for {
+		command, _, _, ok := SplitPipe(line)
+		if !ok {
+			break
+		}
+		line = command
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return editPath, configMode
+	}
+	if !configMode {
+		// Operational dispatch resolves verbs by unique prefix. Mirror
+		// that resolver for configure so accepted spellings such as
+		// "conf" and "config" establish the context for later lines.
+		if verb, ok := resolveHistoryOperationalVerb(fields[0]); ok && verb == "configure" {
+			return nil, true
+		}
+		return editPath, configMode
+	}
+	switch fields[0] {
+	// dispatchConfig accepts only exact config-mode verbs, and configure
+	// is not one of them. Preserve the rejected in-config interpretation
+	// here; ReadHistorySeed also tracks the possible root re-entry after an
+	// unrecorded EOF and filters a line if either cursor flags it sensitive.
+	case "edit":
+		fragment, ok := config.ParseEditFragment(line)
+		if ok && len(fragment) > 0 {
+			path := append(config.NormalizeEditPathTokens(editPath), fragment...)
+			return config.NormalizeEditPathTokens(path), true
+		}
+	case "top", "up":
+		target, inner, innerLine, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(editPath), line)
+		if ok {
+			if len(inner) == 0 {
+				return target, true
+			}
+			// dispatchConfig switches on exact verb tokens: only an
+			// unquoted exit/quit is navigation here. A top-level exit
+			// releases config mode; at a non-root target exit/quit
+			// pops that temporary target once, then dispatchTopUp
+			// restores the original cursor while remaining in config
+			// mode.
+			innerFields := strings.Fields(innerLine)
+			if len(innerFields) > 0 && (innerFields[0] == "exit" || innerFields[0] == "quit") {
+				if len(target) == 0 {
+					return nil, false
+				}
+				return editPath, true
+			}
+		}
+	case "exit", "quit":
+		if len(editPath) > 0 {
+			return config.PopEditPathIdentity(config.NormalizeEditPathTokens(editPath)), true
+		}
+		return nil, false
+	}
+	return editPath, configMode
+}
+
+// resolveHistoryOperationalVerb uses the same candidate set and unique
+// prefix rule as pkg/cli.dispatchOperational. Config-mode dispatch switches
+// on exact tokens instead, so its edit/top/up/exit/quit verbs intentionally
+// remain exact here too.
+
+var historyOperationalCommands = [...]string{
+	"configure", "show", "clear", "ping", "test", "traceroute",
+	"monitor", "request", "quit", "exit",
+}
+
+func resolveHistoryOperationalVerb(input string) (string, bool) {
+	if input == "" {
+		return "", false
+	}
+	match := ""
+	for _, command := range historyOperationalCommands {
+		if command == input {
+			return command, true
+		}
+		if strings.HasPrefix(command, input) {
+			if match != "" {
+				return "", false
+			}
+			match = command
+		}
+	}
+	return match, match != ""
 }
 
 // SeedHistory replays persisted history lines into a live readline instance

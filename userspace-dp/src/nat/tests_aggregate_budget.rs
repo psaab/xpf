@@ -61,12 +61,13 @@
 #![allow(unused_imports)]
 
 use super::allocator::{
-    TranslatedTuple, port_allocator_build_count, reset_port_allocator_build_count,
+    PoolAddressFamily, TranslatedTuple, port_allocator_build_count,
+    reset_port_allocator_build_count,
 };
 use super::source::{
-    SOURCE_NAT_AGGREGATE_BUDGET, SourceNatAggregateBudget, SourceNatAggregateUse,
-    SourceNatFailureReason, expand_pool_address_member, parse_source_nat_rules_with_budget,
-    parse_source_nat_rules_with_previous,
+    PersistentNatPermit, SOURCE_NAT_AGGREGATE_BUDGET, SourceNatAggregateBudget,
+    SourceNatAggregateUse, SourceNatFailureReason, SourceNatFlowKey, expand_pool_address_member,
+    parse_source_nat_rules_with_budget, parse_source_nat_rules_with_previous,
 };
 use super::*;
 use crate::SourceNATRuleSnapshot;
@@ -1512,6 +1513,70 @@ fn no_translation_reapply_reuses_zero_range_allocator_16840() {
 }
 
 #[test]
+fn switching_no_translation_pool_to_pat_builds_port_allocator_17877() {
+    // One full 8-address /29 PAT pool exactly fits the budget, leaving the
+    // defaulted 1024-65535 range intact in this transition test.
+    let budget = SourceNatAggregateBudget {
+        max_pools: 1024,
+        max_addresses: 1_048_576,
+        max_port_capacity: 8 * 64_512,
+    };
+    let no_translation = vec![notrans_snap("r0", "p0", SMALL_POOL)];
+    let gen1 = parse_source_nat_rules_with_budget(
+        &no_translation,
+        None,
+        &NatCounterStore::default(),
+        &budget,
+    );
+    assert_eq!(gen1[0].pool_failure, None);
+    assert_eq!(gen1[0].pool_allocator.debug_occupancy_words(), 0);
+
+    // The rule retains the snapshot-defaulted PAT range, but its actual
+    // no-translation allocator is 0/0. Reapplying this pool as PAT must not
+    // find and reuse that zero-range allocator under the configured-range key.
+    let pat = vec![pool_snap("r0", "p0", SMALL_POOL, 0, 0)];
+    let gen2 = parse_source_nat_rules_with_budget(
+        &pat,
+        Some(&gen1),
+        &NatCounterStore::default(),
+        &budget,
+    );
+    let rule = &gen2[0];
+    assert_eq!(rule.pool_failure, None);
+
+    let flow = SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "192.0.2.1".parse().unwrap(),
+        dst_ip: "198.51.100.1".parse().unwrap(),
+        src_port: 12345,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    rule.pool_allocator
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(&rule.pool_addresses_v4),
+            0,
+            false,
+            false,
+            PersistentNatPermit::TargetHostPort,
+            0,
+            0,
+            1,
+            NatHolder::Untracked,
+            0,
+        )
+        .expect("PAT pool must mint a translation after no-translation -> PAT");
+
+    assert_ne!(
+        rule.pool_allocator.debug_shared_identity(),
+        gen1[0].pool_allocator.debug_shared_identity(),
+        "PAT must build a port-bearing allocator instead of reusing no-translation's 0/0 allocator"
+    );
+    assert!(rule.pool_allocator.debug_occupancy_words() > 0);
+}
+
+#[test]
 fn mixed_notrans_and_pat_share_port_bearing_allocator_16840() {
     let mut notrans = notrans_snap("r0", "shared", SMALL_POOL);
     notrans.port_low = 20000;
@@ -1526,4 +1591,78 @@ fn mixed_notrans_and_pat_share_port_bearing_allocator_16840() {
         "mixed pool must keep one shared allocator (#10190)"
     );
     assert_eq!(rules[0].pool_allocator.debug_occupancy_words(), 8);
+}
+/// #17877 RED-on-revert: a failed custom-range pool's empty placeholder must
+/// not be reused when that pool recovers at the default PAT range.
+#[test]
+fn failed_custom_range_placeholder_does_not_block_default_pat_restore_17877() {
+    let budget = SourceNatAggregateBudget {
+        max_pools: 1024,
+        max_addresses: 1_048_576,
+        max_port_capacity: 8 * 64_512,
+    };
+    let failed_custom_range = SourceNATRuleSnapshot {
+        pool_unusable: true,
+        pool_unusable_reason: "aggregate_over_budget".to_string(),
+        ..pool_snap("r0", "p0", SMALL_POOL, SMALL_LOW, SMALL_HIGH)
+    };
+    let failed = parse_source_nat_rules_with_budget(
+        &[failed_custom_range],
+        None,
+        &NatCounterStore::default(),
+        &budget,
+    );
+    assert_eq!(
+        failed[0].pool_failure,
+        Some(SourceNatFailureReason::OverBudget)
+    );
+    assert_eq!(
+        failed[0].pool_allocator.snapshot().max_tracked_flows,
+        0,
+        "setup: a pool rejected before construction carries only the empty placeholder"
+    );
+
+    // Recovery changes the custom range back to the default 1024-65535 PAT
+    // range. The failed generation's placeholder must not match this key.
+    let restored = parse_source_nat_rules_with_budget(
+        &[pool_snap("r0", "p0", SMALL_POOL, 0, 0)],
+        Some(&failed),
+        &NatCounterStore::default(),
+        &budget,
+    );
+    let rule = &restored[0];
+    assert_eq!(rule.pool_failure, None);
+    assert_ne!(
+        rule.pool_allocator.debug_shared_identity(),
+        failed[0].pool_allocator.debug_shared_identity(),
+        "a never-built placeholder is not allocator state to reuse"
+    );
+    assert!(
+        rule.pool_allocator.debug_occupancy_words() > 0,
+        "recovery must build the default-range occupancy bitmap"
+    );
+
+    let flow = SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "192.0.2.1".parse().expect("src"),
+        dst_ip: "198.51.100.1".parse().expect("dst"),
+        src_port: 12345,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    rule.pool_allocator
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(&rule.pool_addresses_v4),
+            0,
+            false,
+            false,
+            PersistentNatPermit::TargetHostPort,
+            0,
+            0,
+            1,
+            NatHolder::Untracked,
+            0,
+        )
+        .expect("recovered default-range PAT pool must mint");
 }

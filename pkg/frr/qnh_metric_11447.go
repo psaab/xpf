@@ -97,6 +97,27 @@ func qnhMetricScopeForDaemon11447(scope *qnhMetricScope11447, daemon string) *qn
 	return scope
 }
 
+func qnhMetricPolicyVariantRouteMap11447(routeMap string, ctx redistVariantContext16864) string {
+	if ctx.variant == "" {
+		return routeMap
+	}
+	return routeMap + "-" + ctx.variant
+}
+
+func qnhMetricPolicyVariants11447(nodes [][2]string) []redistVariantContext16864 {
+	contexts := redistVariantsForNodes16864(nodes)
+	if len(contexts) == 0 {
+		return []redistVariantContext16864{redistVariantBGP16864}
+	}
+	out := contexts[:0]
+	for _, ctx := range contexts {
+		if redistProtoFitsVariant16864("static", ctx) {
+			out = append(out, ctx)
+		}
+	}
+	return out
+}
+
 func qnhMetricName11447(kind, identity string) string {
 	sum := sha256.Sum256([]byte(kind + "\x00" + identity))
 	return "xpf-qnh-" + kind + "-" + hex.EncodeToString(sum[:])[:16] + config.ReservedRedistSuffix
@@ -337,7 +358,7 @@ func renderQNHMetricTerms11447(scope *qnhMetricScope11447, routeMap string, star
 	return b.String(), seq
 }
 
-func qualifiedNextHopMetricCollision11447(po *config.PolicyOptionsConfig, set *qnhMetricSet11447) error {
+func qualifiedNextHopMetricCollision11447(po *config.PolicyOptionsConfig, set *qnhMetricSet11447, referencedNodes map[string][][2]string) error {
 	if set == nil {
 		return nil
 	}
@@ -354,7 +375,13 @@ func qualifiedNextHopMetricCollision11447(po *config.PolicyOptionsConfig, set *q
 	generatedMaps := make(map[string]string)
 	generatedLists := make(map[string]string)
 	for _, scope := range set.scopes() {
-		for _, mapName := range append([]string{scope.staticMap}, mapValues11447(scope.policyMaps)...) {
+		mapNames := []string{scope.staticMap}
+		for policy, base := range scope.policyMaps {
+			for _, ctx := range qnhMetricPolicyVariants11447(referencedNodes[policy]) {
+				mapNames = append(mapNames, qnhMetricPolicyVariantRouteMap11447(base, ctx))
+			}
+		}
+		for _, mapName := range mapNames {
 			final := frrName(mapName)
 			if operator, ok := policyNames[final]; ok {
 				return fmt.Errorf("qualified-next-hop metric route-map %q collides with policy-statement %q after FRR name normalization", mapName, operator)
@@ -391,15 +418,30 @@ func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, 
 // only to `redistribute static`) leads with the tag deny at sequence 5,
 // below the metric rules that start at 10.
 func (m *Manager) renderQNHMetricPolicyMapCluster15158(po *config.PolicyOptionsConfig, routeMap string, ps *config.PolicyStatement, scope *qnhMetricScope11447, clusterMode bool) string {
+	return m.renderQNHMetricPolicyVariantCluster15158(po, routeMap, ps, scope, redistVariantBGP16864, clusterMode)
+}
+
+// renderQNHMetricPolicyVariantCluster15158 renders the policy tail in the
+// same consuming-daemon/AF context as the redistribution attachment. The
+// metric match sequences stay first and are followed by only policy terms
+// the attached daemon can evaluate.
+func (m *Manager) renderQNHMetricPolicyVariantCluster15158(po *config.PolicyOptionsConfig, routeMap string, ps *config.PolicyStatement, scope *qnhMetricScope11447, ctx redistVariantContext16864, clusterMode bool) string {
 	policy := redistPolicyForProtocol(ps, "static")
-	if uint64(len(scope.routes))+config.RouteMapSequenceCount(po, policy) > config.MaxRouteMapSequences {
+	variantPO := po
+	if ctx.variant != "" {
+		variantPO = redistVariantPO16864(po, ctx)
+		filtered, dropped, denyAlls := redistPolicyForVariant16864(po, policy, "static", ctx)
+		logRedistVariantDrop16864(ps.Name, "static", ctx, dropped, denyAlls)
+		policy = filtered
+	}
+	if uint64(len(scope.routes))+config.RouteMapSequenceCount(variantPO, policy) > config.MaxRouteMapSequences {
 		slog.Warn("frr: qualified-next-hop metric and policy route-map exceed FRR sequence limit; rendering a deny map",
 			"route_map", routeMap, "metric_rules", len(scope.routes), "policy", ps.Name)
 		m.noteQuarantined(routeMap)
 		return renderQuarantineDenyRouteMap(routeMap)
 	}
 	rules, next := renderQNHMetricTerms11447(scope, routeMap, 10)
-	definitions, body, seq := m.renderPolicyTermSequencesWithDefinitions(po, routeMap, routeMap, policy, next)
+	definitions, body, seq := m.renderPolicyTermSequencesWithDefinitions(variantPO, routeMap, routeMap, policy, next)
 	hasNextPolicy := policyHasNextPolicyTerm(policy)
 	if hasNextPolicy {
 		nextPolicySequence := seq
@@ -639,12 +681,20 @@ func (m *Manager) qnhMetricDaemonOverlays11447(fc *FullConfig, set *qnhMetricSet
 					b.WriteString(renderQNHMetricSetOverlay11447(scope, routeMap))
 				}
 			case fc.PolicyOptions != nil:
+				ctx := redistVariantOSPF16864
+				if daemon == "ripd" {
+					ctx = redistVariantRIP16864
+				}
 				for name, policyMap := range scope.policyMaps {
-					if policyMap != routeMap {
+					if qnhMetricPolicyVariantRouteMap11447(policyMap, ctx) != routeMap {
 						continue
 					}
 					policy := redistPolicyForProtocol(fc.PolicyOptions.PolicyStatements[name], "static")
-					if uint64(len(scope.routes))+config.RouteMapSequenceCount(fc.PolicyOptions, policy) <= config.MaxRouteMapSequences {
+					variantPO := redistVariantPO16864(fc.PolicyOptions, ctx)
+					if ctx.variant != "" {
+						policy, _, _ = redistPolicyForVariant16864(fc.PolicyOptions, policy, "static", ctx)
+					}
+					if uint64(len(scope.routes))+config.RouteMapSequenceCount(variantPO, policy) <= config.MaxRouteMapSequences {
 						b.WriteString(renderQNHMetricSetOverlay11447(scope, routeMap))
 					}
 					break

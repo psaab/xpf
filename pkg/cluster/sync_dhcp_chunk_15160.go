@@ -34,7 +34,8 @@ import (
 // dhcpApplyMu, exactly like a legacy frame — only when every chunk has
 // arrived. An unclosed generation never commits (the #7175 posture: the
 // prior set is retained), and a newer legacy or chunked set supersedes a
-// pending assembly, which is discarded.
+// pending assembly, which is discarded. At the pending cap only the
+// oldest assembly is evicted (#17956, mirroring #17846).
 //
 // Budget: each chunk's wire payload (chunk header + body + optional
 // authority trailer + full-set trailer) must stay <= maxSyncPayload. The
@@ -43,6 +44,10 @@ import (
 // per-frame size check in queueDHCPLeaseSnapshot is defense in depth.
 // A single lease whose record cannot fit any frame is dropped and
 // counted by the caller — never emitted over-cap.
+
+// dhcpChunkMaxPending bounds simultaneously pending assemblies. Opening a
+// generation over the cap evicts only the oldest pending assembly (#17956).
+const dhcpChunkMaxPending = 5
 
 // dhcpChunkMaxTotalLeases is the sender+receiver cap on chunked-set lease
 // count (#16036 fold): decodeDHCPLeaseChunkHeader refuses totalLeases
@@ -86,6 +91,9 @@ type dhcpChunkAssembly struct {
 // (nil map) is valid.
 type dhcpChunkState struct {
 	pending map[dhcpChunkGeneration]*dhcpChunkAssembly
+	// order stores pending keys oldest first so bounded admission evicts
+	// by insertion order, not map iteration order.
+	order []dhcpChunkGeneration
 }
 
 // encodeDHCPLeaseChunkPayload builds one chunk payload (WITHOUT the
@@ -186,26 +194,25 @@ func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalL
 	if st.pending == nil {
 		st.pending = make(map[dhcpChunkGeneration]*dhcpChunkAssembly)
 	}
-	// A new set supersedes any older pending assembly for other
-	// generations is NOT done here: generations are keyed exactly, and a
-	// stale generation is refused by the caller before admission. Only
-	// bound the table: at most a few generations can be in flight (the
-	// sender writes one set at a time under writeMu), so evict
-	// everything if a forged stream inflates it.
-	if len(st.pending) > 4 {
-		st.pending = make(map[dhcpChunkGeneration]*dhcpChunkAssembly)
-	}
 	a, ok := st.pending[key]
 	if !ok {
+		// Opening a new generation past the cap evicts only the oldest
+		// assembly. The incoming key is not in pending yet, so it cannot
+		// evict its own just-arrived chunk. Generations are keyed exactly,
+		// and a stale generation is refused by the caller before admission.
+		if len(st.pending) >= dhcpChunkMaxPending {
+			st.removePending(st.order[0])
+		}
 		a = &dhcpChunkAssembly{total: total, totalLeases: totalLeases, parts: make(map[uint32][]dhcpserver.SyncLease)}
 		st.pending[key] = a
+		st.order = append(st.order, key)
 	}
 	if a.total != total || a.totalLeases != totalLeases {
-		delete(st.pending, key)
+		st.removePending(key)
 		return nil, false, false
 	}
 	if _, dup := a.parts[index]; dup {
-		delete(st.pending, key)
+		st.removePending(key)
 		return nil, false, false
 	}
 	a.parts[index] = leases
@@ -214,7 +221,7 @@ func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalL
 	if a.received > a.totalLeases {
 		// More leases arrived than the generation announced: refuse
 		// before any completion work (#16036).
-		delete(st.pending, key)
+		st.removePending(key)
 		return nil, false, false
 	}
 	if a.have < int(a.total) {
@@ -228,26 +235,43 @@ func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalL
 	for i := uint32(0); i < a.total; i++ {
 		part, ok := a.parts[i]
 		if !ok {
-			delete(st.pending, key)
+			st.removePending(key)
 			return nil, false, false
 		}
 		complete = append(complete, part...)
 	}
-	delete(st.pending, key)
+	st.removePending(key)
 	if uint32(len(complete)) != a.totalLeases {
 		return nil, false, false
 	}
 	return complete, true, true
 }
 
+// removePending removes one assembly and its insertion-order entry.
+func (st *dhcpChunkState) removePending(key dhcpChunkGeneration) {
+	if _, ok := st.pending[key]; !ok {
+		return
+	}
+	delete(st.pending, key)
+	for i, pendingKey := range st.order {
+		if pendingKey == key {
+			copy(st.order[i:], st.order[i+1:])
+			st.order[len(st.order)-1] = dhcpChunkGeneration{}
+			st.order = st.order[:len(st.order)-1]
+			return
+		}
+	}
+}
+
 // discard removes any pending assembly (a newer committed set supersedes
 // in-flight chunks). Caller holds dhcpApplyMu.
 func (st *dhcpChunkState) discard(key dhcpChunkGeneration) {
-	delete(st.pending, key)
+	st.removePending(key)
 }
 
 // discardAll drops every pending assembly (legacy commit supersedes all
 // chunk generations older than it). Caller holds dhcpApplyMu.
 func (st *dhcpChunkState) discardAll() {
 	st.pending = nil
+	st.order = nil
 }

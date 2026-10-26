@@ -72,7 +72,7 @@ func unitStandaloneVRRPVIPs(unit *config.InterfaceUnit) []string {
 // whose model merges every unit (the non-VLAN arm) and for VLAN parents,
 // whose untagged units bind their instance to the parent device.
 func interfaceCarriesStandaloneVRRP(ifCfg *config.InterfaceConfig) bool {
-	if ifCfg == nil {
+	if ifCfg == nil || ifCfg.Disable {
 		return false
 	}
 	for _, unit := range ifCfg.Units {
@@ -81,4 +81,14 @@ func interfaceCarriesStandaloneVRRP(ifCfg *config.InterfaceConfig) bool {
 		}
 	}
 	return false
+}
+
+// interfaceUnitStandaloneVRRPVIPs returns the VIPs owned by an enabled unit
+// on an enabled interface. VRRP collects no instance for either disabled
+// scope, so a VIP present on the netdev is stale rather than foreign-owned.
+func interfaceUnitStandaloneVRRPVIPs(ifCfg *config.InterfaceConfig, unit *config.InterfaceUnit) []string {
+	if ifCfg == nil || ifCfg.Disable || unit == nil || unit.Disable {
+		return nil
+	}
+	return unitStandaloneVRRPVIPs(unit)
 }

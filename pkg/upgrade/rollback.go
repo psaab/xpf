@@ -18,6 +18,19 @@ import (
 // with %w (never %v) so errors.Is survives the "upgrade --rollback" prefix.
 var errRollbackRefusedBeforeStop = errors.New("refused before STOP")
 
+// rollbackCommittedDeferredError marks a RollbackTo failure that is not a
+// rollback failure: the destination is live and health-confirmed, the
+// rollback journal is cleared, and only then was a #16796 deferred signal
+// honoured. The rolling driver must complete sync and rejoin before
+// surfacing this outcome, or the committed rollback leaves the node
+// ForceSecondary-drained (#17957).
+type rollbackCommittedDeferredError struct {
+	err error
+}
+
+func (e *rollbackCommittedDeferredError) Error() string { return e.err.Error() }
+func (e *rollbackCommittedDeferredError) Unwrap() error { return e.err }
+
 // RollbackOptions controls a single operator rollback. ClusterCoordinated is
 // set only by the rolling driver after it has drained this node to its peer;
 // LockAlreadyHeld is set by that driver while it holds the host-wide lock.
@@ -355,7 +368,7 @@ func (r *Runner) executeRollback(plan rollbackPlan, j *Journal, opts RollbackOpt
 	_ = j // j documents the persisted invariant; execute uses the immutable plan.
 	if sig, pending := opts.SignalGuard.Pending(); pending {
 		r.logf("upgrade: rollback to %s complete; deferred %s now honoured with the daemon running (#16796)", plan.toVersion, sig)
-		return fmt.Errorf("upgrade --rollback: rolled back to %s, then honoured deferred %s (#16796)", plan.toVersion, sig)
+		return &rollbackCommittedDeferredError{err: fmt.Errorf("upgrade --rollback: rolled back to %s, then honoured deferred %s (#16796)", plan.toVersion, sig)}
 	}
 	return nil
 }

@@ -314,3 +314,61 @@ func TestDHCPLeaseChunkFramingGuards15160(t *testing.T) {
 		t.Fatalf("inconsistent chunk generation committed over the held set: %v", held)
 	}
 }
+
+// TestDHCPLeaseChunkInterleavedGenerationsSurvive17956 pins #17956: opening
+// a sixth pending generation evicts only the oldest, so an interleaved
+// generation that still has a chunk in flight can complete and commit.
+func TestDHCPLeaseChunkInterleavedGenerationsSurvive17956(t *testing.T) {
+	recv := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	prior := []dhcpserver.SyncLease{dhcpChunkLease15160(999)}
+	if !recv.handleMessage(nil, syncMsgDHCPLeaseV4, appendFullSetSeq(encodeDHCPLeasePayload(prior), 1000, 1)) {
+		t.Fatal("CONTROL: prior legacy set must commit")
+	}
+
+	chunk := func(generation uint64, index int, seq uint64) []byte {
+		lease := dhcpChunkLease15160(int(generation*10) + index)
+		body := encodeDHCPLeasePayload([]dhcpserver.SyncLease{lease})
+		base := encodeDHCPLeaseChunkPayload(body, generation, uint32(index), 2, 2)
+		return appendFullSetSeq(base, 1000, seq)
+	}
+	seq := uint64(1)
+	nextSeq := func() uint64 {
+		seq++
+		return seq
+	}
+
+	// Open generations 101..105 with their first chunk, filling the cap.
+	for generation := uint64(101); generation <= 105; generation++ {
+		if !recv.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunk(generation, 0, nextSeq())) {
+			t.Fatalf("CONTROL: first chunk of generation %d must be accepted", generation)
+		}
+	}
+	// Opening generation 106 evicts only oldest generation 101.
+	if !recv.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunk(106, 0, nextSeq())) {
+		t.Fatal("CONTROL: first chunk of generation 106 must be accepted")
+	}
+	if n := len(recv.dhcpChunkState4.pending); n != 5 {
+		t.Fatalf("opening generation 106 left %d pending assemblies, want 5", n)
+	}
+	if _, ok := recv.dhcpChunkState4.pending[dhcpChunkGeneration{incarnation: 1000, generation: 101}]; ok {
+		t.Fatal("oldest generation 101 must be evicted")
+	}
+	for generation := uint64(102); generation <= 106; generation++ {
+		if _, ok := recv.dhcpChunkState4.pending[dhcpChunkGeneration{incarnation: 1000, generation: generation}]; !ok {
+			t.Fatalf("generation %d must survive opening generation 106", generation)
+		}
+	}
+	if held := recv.PeerDHCPLeases4(); len(held) != 1 || held[0].Address != prior[0].Address {
+		t.Fatalf("no incomplete generation may commit: held %v, want prior set", held)
+	}
+
+	// Generation 102 predates the sixth arrival but survives and completes.
+	if !recv.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunk(102, 1, nextSeq())) {
+		t.Fatal("final chunk of surviving generation 102 must be accepted")
+	}
+	held := recv.PeerDHCPLeases4()
+	want := []dhcpserver.SyncLease{dhcpChunkLease15160(1020), dhcpChunkLease15160(1021)}
+	if len(held) != len(want) || held[0].Address != want[0].Address || held[1].Address != want[1].Address {
+		t.Fatalf("completed generation 102 must commit: held %v, want %v", held, want)
+	}
+}
