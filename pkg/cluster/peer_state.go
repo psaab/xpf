@@ -7,6 +7,15 @@ func (m *Manager) PeerAlive() bool {
 	return m.peerAlive
 }
 
+// ClearPeerHeartbeatLiveness invalidates the peer-alive bit when an accepted
+// comms epoch has no heartbeat path. Peer history and advertised group state
+// remain unchanged; a later accepted heartbeat sets liveness again.
+func (m *Manager) ClearPeerHeartbeatLiveness() {
+	m.mu.Lock()
+	m.peerAlive = false
+	m.mu.Unlock()
+}
+
 // peerHeartbeatFreshLocked reports whether a peer heartbeat is currently within
 // the timeout window (NOT stale). It is the truth source for
 // handlePeerTimeout's post-guard re-check. Must be called with m.mu held (it
