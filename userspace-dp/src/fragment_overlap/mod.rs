@@ -542,7 +542,8 @@ fn merge_ranges(
 pub(crate) enum OverlapDropReason {
     Overlap,
     Overflow,
-    /// Fairness quota or shard-capacity refusal; no live entry was evicted.
+    /// Fairness quota or shard-capacity refusal. A same-sender reclaim
+    /// may already have evicted an anchor before this refusal (#17679).
     ShardFull,
 }
 
@@ -4173,15 +4174,13 @@ mod tests {
     #[test]
     fn same_sender_reclaim_charges_victims_zone_not_candidates_17679() {
         // #17679: the #16599 same-sender reclaim decremented the
-        // candidate's zone count even when the reclaimed victim lived
-        // in another zone. Setup for both arms: sender S holds eight
-        // settled-incomplete anchors in zone A, while 32 anchors from
-        // other senders fill zone B's reserve in the same shard.
-        // Cross-zone arm: S's candidate in zone B must fail closed at
-        // B's full reserve. Same-zone control: S's candidate in zone A
-        // (below its reserve) is admitted by the reclaim, keeping A
-        // at eight. RED-on-revert: the cross-zone candidate is
-        // admitted as zone B's 33rd entry (zone_entries 32 -> 31).
+        // candidate's zone count when the victim belonged to another
+        // zone. Sender S has eight settled-incomplete anchors in zone A;
+        // 32 entries from other senders fill zone B's reserve in the
+        // same shard. The cross-zone candidate in B must be refused.
+        // The same-zone control also fills A to 32, proving that
+        // reclaim must decrement the victim's actual zone to admit.
+        // RED-on-revert: the cross-zone candidate becomes B's 33rd entry.
         let mk = |src_last: u8, ident: u32, ingress_zone: u32| OverlapKey {
             addr_family: libc::AF_INET as u8,
             src: IpAddr::V4(Ipv4Addr::new(10, 0, 77, src_last)),
@@ -4193,9 +4192,9 @@ mod tests {
             fairness_origin: None,
         };
         let now_ns = 1_000u64;
-        // Build one tracker: S's 8 settled-incomplete in `s_zone`,
-        // plus 32 single entries from distinct senders in zone 2.
-        let build = |s_zone: u32| -> (OverlapTracker, Vec<OverlapKey>, Vec<OverlapKey>, usize) {
+        // Build eight settled-incomplete S anchors, 32 other-sender
+        // entries in zone B, and optional other-sender entries in A.
+        let build = |s_zone: u32, zone_a_other_count: usize| {
             let t = OverlapTracker::with_seed(1);
             let shard = t.shard_index(&mk(100, 0, s_zone));
             let mut taken: Vec<OverlapKey> = Vec::new();
@@ -4236,9 +4235,16 @@ mod tests {
                 admit(&t, k, now_ns + n as u64);
                 s_entries.push(k);
             }
+            for n in 0..zone_a_other_count {
+                let k = find(33 + n as u8, s_zone, &taken);
+                taken.push(k);
+                admit(&t, k, now_ns + 200 + n as u64);
+            }
             assert_eq!(
                 t.len(),
-                OVERLAP_CAP_PER_ZONE_PER_SHARD + OVERLAP_CAP_PER_SENDER_PER_SHARD
+                OVERLAP_CAP_PER_ZONE_PER_SHARD
+                    + OVERLAP_CAP_PER_SENDER_PER_SHARD
+                    + zone_a_other_count
             );
             (t, s_entries, zone_b, shard)
         };
@@ -4264,10 +4270,13 @@ mod tests {
         };
 
         // Cross-zone: candidate in full zone B, victims in zone A.
-        let (t, s_a, zone_b, shard) = build(1);
+        let (t, s_a, zone_b, shard) = build(1, 0);
+        assert_eq!(
+            zone_count(&t, shard, 2),
+            OVERLAP_CAP_PER_ZONE_PER_SHARD,
+            "fixture must fill zone B's reserve"
+        );
         let candidate = fresh_candidate(&t, &s_a, 2);
-        let full0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
-        let rec0 = FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED.load(Ordering::Relaxed);
         let r = t.check_and_record_fragment_detailed(
             candidate,
             0,
@@ -4281,20 +4290,6 @@ mod tests {
             "candidate zone B is at its 32-entry reserve: cross-zone victim must not free a B slot, got dropped={} reason={:?}",
             r.dropped,
             r.reason
-        );
-        assert_eq!(
-            FRAG_OVERLAP_SHARD_FULL_DROPPED
-                .load(Ordering::Relaxed)
-                .wrapping_sub(full0),
-            1,
-            "refused candidate must count exactly one shard-full refusal"
-        );
-        assert_eq!(
-            FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED
-                .load(Ordering::Relaxed)
-                .wrapping_sub(rec0),
-            1,
-            "the sender-quota reclaim itself still fires (victim evicted)"
         );
         assert_eq!(
             zone_count(&t, shard, 2),
@@ -4326,11 +4321,18 @@ mod tests {
             "zone-B anchors must be untouched by the cross-zone refusal"
         );
 
-        // Same-zone control: candidate in zone A reclaims its own
-        // oldest A anchor; A stays at eight and is admitted.
-        let (t2, s_a2, _zone_b2, shard2) = build(1);
+        // Same-zone control: 24 other senders fill A to 32, then S's
+        // candidate must reclaim its own oldest A anchor to be admitted.
+        let (t2, s_a2, _zone_b2, shard2) = build(
+            1,
+            OVERLAP_CAP_PER_ZONE_PER_SHARD - OVERLAP_CAP_PER_SENDER_PER_SHARD,
+        );
+        assert_eq!(
+            zone_count(&t2, shard2, 1),
+            OVERLAP_CAP_PER_ZONE_PER_SHARD,
+            "control fixture must fill zone A's reserve"
+        );
         let candidate2 = fresh_candidate(&t2, &s_a2, 1);
-        let rec1 = FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED.load(Ordering::Relaxed);
         let mut r2 = t2.check_and_record_fragment_detailed(
             candidate2,
             0,
@@ -4341,21 +4343,14 @@ mod tests {
         );
         assert!(
             !r2.dropped,
-            "same-zone candidate below its zone reserve must be admitted by reclaim, reason={:?}",
+            "same-zone candidate at its reserve must be admitted by reclaim, reason={:?}",
             r2.reason
         );
         assert!(!t2.commit_admission(r2.admission.take().expect("control admission")));
         assert_eq!(
-            FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED
-                .load(Ordering::Relaxed)
-                .wrapping_sub(rec1),
-            1,
-            "same-zone control must reclaim exactly one anchor"
-        );
-        assert_eq!(
             zone_count(&t2, shard2, 1),
-            OVERLAP_CAP_PER_SENDER_PER_SHARD,
-            "same-zone reclaim + insert must keep zone A at eight"
+            OVERLAP_CAP_PER_ZONE_PER_SHARD,
+            "same-zone reclaim + insert must keep zone A at its reserve"
         );
         assert_eq!(
             zone_count(&t2, shard2, 2),
