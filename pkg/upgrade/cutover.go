@@ -26,6 +26,7 @@ type cutBeforeStopError struct {
 
 func (e *cutBeforeStopError) Error() string { return e.err.Error() }
 func (e *cutBeforeStopError) Unwrap() error { return e.err }
+
 // cutCommittedDeferredError marks a Run failure that is not a cut
 // failure at all: the cut reached COMMIT (target live and
 // health-confirmed, journal cleared, committed-cut evidence recorded)

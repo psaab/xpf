@@ -133,3 +133,43 @@ func TestRollingFailedCutStillLeavesNodeSecondary17840(t *testing.T) {
 		t.Errorf("SyncEstablished polled %d times, want 1 (precondition only; step 6 must not run after a failed cut)", cl.syncPolls)
 	}
 }
+
+// Fold regression cell (PR #17954 review): committed-deferred cut whose
+// step-7 rejoin never confirms. The cc051e48bb gate retains
+// LastCommittedCut only after RejoinAndConfirm succeeds; when rejoin
+// fails, the rejoin error must surface (not the deferred error), the
+// rejoin must have been attempted, and the proof must be CLEARED.
+// RED pre-fold: gate on committedDeferred==nil retains the proof.
+func TestRollingCommittedDeferredRejoinFailureClearsProof17840(t *testing.T) {
+	fs := newFakeSystem(t, "2.0.0")
+	r, cfg := testEnv(t, fs)
+	seedInitialCurrent(t, r, cfg, "1.0.0")
+	cl := healthyRollingCluster()
+	cl.rejoinIncomplete = true // configured RG never leaves the drain
+
+	g, stop := InstallSignalGuard(nil)
+	defer stop()
+	fs.stopHook = func() { g.DeliverForTest(syscall.SIGINT) }
+
+	rc := rejoinRC()
+	rc.SignalGuard = g
+	err := runRollingWith(r, cl, rc)
+	if err == nil || !strings.Contains(err.Error(), "did not rejoin") {
+		t.Fatalf("rolling with committed-deferred cut + incomplete rejoin: err = %v, want the rejoin error to surface", err)
+	}
+	if strings.Contains(err.Error(), "deferred") {
+		t.Fatalf("rejoin failure masked by the deferred error: %v", err)
+	}
+	if got := currentTarget(t, cfg); got != "2.0.0" {
+		t.Fatalf("current = %q, want 2.0.0 (cut committed despite rejoin failure)", got)
+	}
+	if proof := r.LastCommittedCut(); proof.healthConfirmed {
+		t.Fatalf("LastCommittedCut retained after failed rejoin: %+v, want cleared proof", proof)
+	}
+	if !cl.resetCalled {
+		t.Error("ResetFailover not called — rejoin was not attempted")
+	}
+	if cl.rejoinChecks == 0 {
+		t.Error("LocalRejoinComplete never consulted — rejoin confirmation not attempted")
+	}
+}
