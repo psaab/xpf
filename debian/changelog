@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: preserve distinct same-named IPsec traffic-selector fragments;
+    normalize identical direct/chained selector bodies including block-valued
+    local-ip and remote-ip leaves (#17802).
   * Userspace helper startup: retain and execute the validated helper inode
     through an inherited file descriptor, closing the pathname re-resolution
     window between validation and process start (#17881).
