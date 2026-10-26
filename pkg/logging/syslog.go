@@ -183,6 +183,7 @@ type SyslogClient struct {
 	// operation that can race Close. The separate connMu lets Close detach and
 	// close a socket without waiting for s.mu, which an in-flight Write holds.
 	closed atomic.Bool
+	countsFinal atomic.Bool // #17855: set when the writer goroutine exits after Close
 }
 
 // syslogHostnameFn resolves the current device hostname. It is a seam so
@@ -2153,10 +2154,18 @@ func (s *SyslogClient) CloseTimeout(timeout time.Duration) error {
 	if timeout > 0 {
 		if writer := s.eventWriter.Load(); writer != nil {
 			writer.drainAndStop(timeout)
+			// Finality is armed in Close (CloseTimeout calls Close
+			// next, which waits on the same doneCh).
 		}
 	}
 	return s.Close()
 }
+
+// CountsFinal reports that the client's writer goroutine has EXITED
+// after Close stopped it (doneCh closed): no drop can be counted
+// after this point, by construction. The retired-pending fold also
+// requires counter stability across scrapes as a belt (#17855).
+func (s *SyslogClient) CountsFinal() bool { return s.countsFinal.Load() }
 
 // ShutdownDrained reports whether this client's writer goroutine has
 // exited (observability/test seam for the daemon shutdown lifecycle).
@@ -2196,5 +2205,20 @@ func (s *SyslogClient) Close() error {
 	// Real sockets unblock the in-flight Write promptly. Keep the join bounded
 	// for custom connections whose Close does not interrupt Write.
 	s.joinSendBounded()
+	// The writer stop above counted the queued discards synchronously,
+	// but an in-flight SendAt whose Write is parked on a
+	// non-interrupting conn can still count its drop AFTER Close
+	// returns. Pending retirement must therefore wait for the writer
+	// goroutine to EXIT (doneCh closes when run returns; no Add can
+	// land after that). Close stays non-blocking: arm the flag from a
+	// notifier rather than joining here (#17855 fold 5).
+	if writer := s.eventWriter.Load(); writer != nil {
+		go func() {
+			<-writer.doneCh
+			s.countsFinal.Store(true)
+		}()
+	} else {
+		s.countsFinal.Store(true)
+	}
 	return err
 }

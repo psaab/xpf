@@ -71,6 +71,13 @@ type syslogClientSet struct {
 	// per destination so the exported counters survive rebuilds (#16769).
 	// Guarded by mu.
 	retired syslogDropAccumulator
+	// retiredPending holds clients retired by recent replacements
+	// until they are closed (#17855): retire() snapshots pre-Close
+	// counts, but only Close's writer stop counts the discarded queue.
+	// foldInto folds the post-retire growth once per stats call,
+	// advancing the snapshot of not-yet-closed clients so the rest
+	// folds later — exactly once across interleaves. Guarded by mu.
+	retiredPending retiredPending
 }
 
 // NewSyslogSlogHandler wraps a base slog.Handler with syslog forwarding.
@@ -115,6 +122,12 @@ func (h *SyslogSlogHandler) SetClients(clients []*SyslogClient) {
 	s.mu.Lock()
 	old := s.clients
 	s.clients = append([]*SyslogClient(nil), clients...)
+	for _, c := range clients {
+		// A reinstalled client is read live again: drop its folded
+		// retired contribution AND its pending entry (#17855).
+		s.retired.forgetClient(c)
+		s.retiredPending.recordForget(c)
+	}
 	// Fold retired clients BEFORE Close (#16769): Close stops the event
 	// writer, whose discarded queue is counted into DroppedWrites.
 	if len(old) > 0 {
@@ -125,6 +138,7 @@ func (h *SyslogSlogHandler) SetClients(clients []*SyslogClient) {
 		for _, c := range old {
 			if !next[c] {
 				s.retired.retire("system", c)
+				s.retiredPending.record("system", c)
 			}
 		}
 	}
@@ -149,10 +163,17 @@ func (h *SyslogSlogHandler) SetClientsPreserving(clients []*SyslogClient) {
 	s.mu.Lock()
 	old := s.clients
 	s.clients = append([]*SyslogClient(nil), clients...)
+	for _, c := range clients {
+		// A reinstalled client is read live again: drop its folded
+		// retired contribution AND its pending entry (#17855).
+		s.retired.forgetClient(c)
+		s.retiredPending.recordForget(c)
+	}
 	// Fold superseded clients BEFORE Close (#16769), as in SetClients.
 	for _, c := range old {
 		if !next[c] {
 			s.retired.retire("system", c)
+			s.retiredPending.record("system", c)
 		}
 	}
 	s.mu.Unlock()
@@ -192,8 +213,11 @@ func (h *SyslogSlogHandler) SyslogDropStats() []SyslogDropStat {
 	if s == nil {
 		return nil
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// #17855: fold retired clients' Close discards before composing the
+	// snapshot; each pending client folds exactly once (see fold docs).
+	s.retiredPending.foldInto(&s.retired)
 	out := make([]SyslogDropStat, 0, len(s.clients))
 	for _, c := range s.clients {
 		if c == nil {
@@ -221,6 +245,7 @@ func (h *SyslogSlogHandler) Close() {
 	s.clients = nil
 	for _, c := range clients {
 		s.retired.retire("system", c)
+		s.retiredPending.record("system", c)
 	}
 	s.mu.Unlock()
 
@@ -252,6 +277,7 @@ func (h *SyslogSlogHandler) ShutdownTimeout(timeout time.Duration) {
 	s.clients = nil
 	for _, c := range clients {
 		s.retired.retire("system", c)
+		s.retiredPending.record("system", c)
 	}
 	s.mu.Unlock()
 
