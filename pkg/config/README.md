@@ -1474,6 +1474,21 @@ deliberately unchanged: it is only the over-approximating #7717
 detection matcher, and the snapshots it reads now carry the canonical
 unit name.
 
+**Binding-derived siblings veto the bare fold (#18030/#18031):** a
+secure-tunnel base carries units even with NO `interfaces` stanza — every
+VPN `bind-interface` string IS a unit declaration to the xfrmi reconciler.
+`secureTunnelBindingSiblingUnit` (`pkg/config/xfrmi.go`) counts those
+binding-derived units by XFRM if_id family, and both
+`CanonicalNATInterfaceScopeRef` (no fold to `.0` — previously the fold ran
+before the gate could judge, silently selecting unit 0) and the #15278 gate
+(strict reject / lenient warn+record) consult it: a bare `st0` scope with
+bindings for `st0.0` AND `st0.1` — stanza-less, authored-unit-0-only,
+unitless-tunnel-stanza, or bare-`bind-interface st0` spelling — identifies
+no single logical unit. A stanza carrying no unit of its own plus a single
+bound unit 0 still folds to `.0` (#18024 doctrine), and two VPNs sharing
+the SAME unit are not siblings, so legitimate multi-VPN sharing keeps
+folding.
+
 **Unsupported security-policy `match` leaves are rejected at commit (#3113,
 interim):** Junos SRX security policies match traffic with a rich `match`
 criteria set. Beyond the L3/L4 leaves xpf enforces, vSRX accepts unified-policy /

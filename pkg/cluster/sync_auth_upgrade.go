@@ -358,9 +358,13 @@ func (s *SessionSync) fabricIndexOf(conn net.Conn) (int, bool) {
 //
 // A keyed node also anchors the bounded pre-key eviction grace on each
 // never-authenticated connection, and the #16857 retired-key grace on each
-// connection whose authPSK has left the accepted set. This call enforces an
-// already-expired grace immediately; the periodic enforcement loop handles a
-// grace that expires between config applies.
+// connection whose authPSK has left the accepted set. The accepted set is
+// read under the same writeMu section as the anchor/clear decisions, once
+// per call for the whole connection batch (#18028), so a concurrent ring
+// change cannot fall between the snapshot and a decision and wedge an
+// anchor against a stale set. This call enforces an already-expired grace
+// immediately; the periodic enforcement loop handles a grace that expires
+// between config applies.
 func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 	key := s.authKey()
 	if len(key) == 0 {
@@ -371,35 +375,58 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 		// the next connection.
 		return
 	}
-	accepted := s.authAcceptedKeys()
 	s.mu.Lock()
 	conns := []net.Conn{s.conn0, s.conn1}
 	s.mu.Unlock()
-	for idx, c := range conns {
+
+	// Grace pass: ONE writeMu section for the whole connection batch, with
+	// the accepted set snapshotted INSIDE it (#18028), the same rule
+	// enforceStrictSessionAuth adopted for #18016. A snapshot taken before
+	// the lock can go stale while this pass waits for the section: a
+	// concurrent finalize reconcile under the NEW set anchors a fresh
+	// retired-key grace, and this pass — still evaluating under the OLD
+	// set, where the connection's PSK looks accepted — would clear that
+	// anchor, leaving it zero so no later pass ever evicts. Under the lock
+	// no ring change can fall between the snapshot and the anchor
+	// decision, and one section evaluates the whole batch against a single
+	// consistent set. Calling authAcceptedKeys here is safe for the same
+	// reason it is safe in enforceStrictSessionAuth: it only reads the
+	// atomic provider and, for *Manager, takes m.mu.RLock.
+	//
+	// Anchor the default #10717 eviction grace BEFORE attempting the
+	// upgrade, and for BOTH roles — the initiator emits a Hello in the pass
+	// below, the responder a Request, and a peer that cannot upgrade
+	// answers neither. Anchoring at key arrival bounds the connection
+	// after keying, while set-once prevents later commits from extending
+	// its lifetime. #16857: the same discipline for a retired-key
+	// connection — anchor at the first reconcile where its key is outside
+	// the accepted set, before beginAuthUpgrade prompts for the rekey it
+	// may decline. A connection back inside the accepted set has any stale
+	// anchor cleared so a later retirement starts a fresh grace.
+	s.writeMu.Lock()
+	accepted := s.authAcceptedKeys()
+	for _, c := range conns {
 		if c == nil {
 			continue
 		}
-		// Anchor the default #10717 eviction grace BEFORE attempting the
-		// upgrade, and for BOTH roles — the initiator emits a Hello here, the
-		// responder a Request, and a peer that cannot upgrade answers neither.
-		// Anchoring at key arrival bounds the connection after keying, while
-		// set-once prevents later commits from extending its lifetime.
-		// #16857: the same discipline for a retired-key connection — anchor
-		// at the first reconcile where its key is outside the accepted set,
-		// before beginAuthUpgrade prompts for the rekey it may decline.
-		// A connection back inside the accepted set has any stale anchor
-		// cleared so a later retirement starts a fresh grace.
-		if ac, ok := c.(*authConn); ok {
-			s.writeMu.Lock()
-			switch {
-			case len(ac.authPSK) == 0:
-				s.noteStrictAuthGraceStartLocked(ac)
-			case authPSKAccepted(ac.authPSK, accepted):
-				s.clearStrictAuthGraceLocked(ac)
-			default:
-				s.noteRetiredKeyGraceStartLocked(ac)
-			}
-			s.writeMu.Unlock()
+		ac, ok := c.(*authConn)
+		if !ok {
+			continue
+		}
+		switch {
+		case len(ac.authPSK) == 0:
+			s.noteStrictAuthGraceStartLocked(ac)
+		case authPSKAccepted(ac.authPSK, accepted):
+			s.clearStrictAuthGraceLocked(ac)
+		default:
+			s.noteRetiredKeyGraceStartLocked(ac)
+		}
+	}
+	s.writeMu.Unlock()
+
+	for idx, c := range conns {
+		if c == nil {
+			continue
 		}
 		err := s.beginAuthUpgrade(c, idx, key, reason)
 		if err != nil && !errors.Is(err, errUpgradeNotApplicable) {

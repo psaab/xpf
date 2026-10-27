@@ -7,6 +7,8 @@ package daemon
 // fixture configs, never derived by the code under test.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -281,18 +283,20 @@ func TestCharonsGenerationIsResolvedOncePerWave9641(t *testing.T) {
 	}
 }
 
-// The apply names the generation with the store's digest only for the store's ACTIVE
-// config. Any other config, even one with identical content, is written as unknown.
+// The active config uses its config-store digest. Any other config, even one
+// with identical content, uses the rendered IPsec digest, which must not be
+// attributed to a retained config-store generation.
 func TestApplyIPsecTrackedStampsOnlyTheActiveGeneration9641(t *testing.T) {
-	store := storeWith9511(t, blueOnRG1_9511...)
-	other := storeWith9511(t, blueOnRG1_9511...)
+	nonPrivateElection := append([]string{"set chassis cluster no-private-rg-election"}, blueOnRG1_9511...)
+	store := storeWith9511(t, nonPrivateElection...)
+	other := storeWith9511(t, nonPrivateElection...)
 	for _, tc := range []struct {
-		name string
-		cfg  *config.Config
-		want string
+		name   string
+		cfg    *config.Config
+		active bool
 	}{
-		{"the active config", store.ActiveConfig(), store.ActiveDigest()},
-		{"an identical config that is not the active one", other.ActiveConfig(), ipsec.UnknownGeneration},
+		{"the active config", store.ActiveConfig(), true},
+		{"an identical config that is not the active one", other.ActiveConfig(), false},
 	} {
 		ch := &charon9641{dir: t.TempDir()}
 		m := ipsec.NewWithConfigDir(ch.dir)
@@ -302,8 +306,27 @@ func TestApplyIPsecTrackedStampsOnlyTheActiveGeneration9641(t *testing.T) {
 			t.Fatalf("%s: FIXTURE: apply: %v", tc.name, err)
 		}
 		ch.loadFile(t)
-		if ch.marker != tc.want {
-			t.Errorf("%s: the written marker names %q, want %q", tc.name, ch.marker, tc.want)
+		want := store.ActiveDigest()
+		if !tc.active {
+			written, err := os.ReadFile(filepath.Join(ch.dir, ipsec.BPFRXConfFile))
+			if err != nil {
+				t.Fatalf("%s: read written config: %v", tc.name, err)
+			}
+			markerStart := strings.LastIndex(string(written), "\npools {\n  xpf-gen-")
+			if markerStart < 0 {
+				t.Fatalf("%s: generation marker section not found in written config", tc.name)
+			}
+			sum := sha256.Sum256(written[:markerStart])
+			want = hex.EncodeToString(sum[:])
+		}
+		if ch.marker != want {
+			t.Errorf("%s: the written marker names %q, want %q", tc.name, ch.marker, want)
+		}
+		if !tc.active {
+			if _, ok := store.RetainedGeneration(ch.marker); ok {
+				t.Errorf("%s: rendered marker %q was incorrectly attributed to a retained config-store generation",
+					tc.name, ch.marker)
+			}
 		}
 	}
 }

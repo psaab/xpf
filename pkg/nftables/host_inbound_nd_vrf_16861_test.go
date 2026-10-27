@@ -24,7 +24,7 @@ func TestNDVRFMemberIIFNameNetlink16861(t *testing.T) {
 			IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-red", Slaves: []string{"ge-0-0-2"}}}},
 	}
 	p := newBuildPlan(t, "xpf_16861", hostInboundPriority)
-	emitHostInboundNDPAcceptsCountedNetlink(p, views, true)
+	emitHostInboundNDPAcceptsCountedNetlink(p, views, true, nil)
 	if p.err != nil {
 		t.Fatalf("ND emission: %v", p.err)
 	}
