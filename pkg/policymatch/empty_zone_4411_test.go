@@ -62,7 +62,7 @@ func TestMatchEmptyZoneFallsToDefault(t *testing.T) {
 	fromUnknown := func(from string) bool { return from == "" }
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			res := Match(cfg, Query{FromZone: c.from, ToZone: c.to, Protocol: "tcp", DstPort: 80})
+			res := Match(cfg, Query{FromZone: c.from, ToZone: c.to, Protocol: "tcp", DstPort: PortPtr(80)})
 			if res.Matched {
 				t.Fatalf("empty-zone query matched a both-any rule (#4411 A6); res = %+v", res)
 			}
@@ -83,7 +83,7 @@ func TestMatchEmptyZoneFallsToDefault(t *testing.T) {
 
 	// Positive control: a fully-defined zone pair still matches the both-any
 	// permit, so the guard rejects ONLY the empty-selector class, not real zones.
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("defined zone pair over-blocked by the empty-zone guard; res = %+v", res)
 	}

@@ -44,7 +44,7 @@ func TestObjectNamedAMatchAllCIDRDoesNotCaptureTheKeywordVerdict9574(t *testing.
 			if err != nil {
 				t.Fatalf("fixture must commit: %v", err)
 			}
-			res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP(tc.probe), DstIP: net.ParseIP(tc.dst), Protocol: "tcp", SrcPort: 40000, DstPort: 80})
+			res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP(tc.probe), DstIP: net.ParseIP(tc.dst), Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(80)})
 			if res.ContentRejected {
 				t.Fatalf("unexpected ContentRejected: %v", res.ContentRejectionReasons)
 			}

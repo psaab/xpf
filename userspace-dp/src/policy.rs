@@ -511,7 +511,7 @@ fn effective_match_zones<'a>(plural: &'a [String], singular: &'a str) -> Cow<'a,
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct PolicyRule {
     pub(crate) rule_id: String,
     pub(crate) policy_id: u32,
@@ -571,6 +571,10 @@ pub(crate) struct PolicyRule {
     /// per-policy RT_FLOW SYSLOG records gate on the admitting policy.
     pub(crate) log_session_init: bool,
     pub(crate) log_session_close: bool,
+    /// Clones share the counter (#3322 carry-forward): a cloned rule
+    /// keeps counting into the same `Arc<PolicyRuleCounter>` as the
+    /// original, so an in-flight session bound to the handle keeps
+    /// attributing hits to the admitting rule across snapshot rebuilds.
     pub(crate) hit_counter: Arc<PolicyRuleCounter>,
 }
 
@@ -610,43 +614,6 @@ impl Default for PolicyRule {
             log_session_init: false,
             log_session_close: false,
             hit_counter: Arc::new(PolicyRuleCounter::default()),
-        }
-    }
-}
-
-impl Clone for PolicyRule {
-    fn clone(&self) -> Self {
-        Self {
-            rule_id: self.rule_id.clone(),
-            policy_id: self.policy_id,
-            from_zone: self.from_zone.clone(),
-            to_zone: self.to_zone.clone(),
-            global_from_zone: self.global_from_zone.clone(),
-            global_to_zone: self.global_to_zone.clone(),
-            scheduler_name: self.scheduler_name.clone(),
-            inactive: self.inactive,
-            source_literal_v4: self.source_literal_v4.clone(),
-            source_literal_v6: self.source_literal_v6.clone(),
-            destination_literal_v4: self.destination_literal_v4.clone(),
-            destination_literal_v6: self.destination_literal_v6.clone(),
-            source_book_idxs: self.source_book_idxs.clone(),
-            destination_book_idxs: self.destination_book_idxs.clone(),
-            source_v4_match_any: self.source_v4_match_any,
-            source_v6_match_any: self.source_v6_match_any,
-            destination_v4_match_any: self.destination_v4_match_any,
-            destination_v6_match_any: self.destination_v6_match_any,
-            source_excluded: self.source_excluded,
-            destination_excluded: self.destination_excluded,
-            source_v4_empty: self.source_v4_empty,
-            source_v6_empty: self.source_v6_empty,
-            destination_v4_empty: self.destination_v4_empty,
-            destination_v6_empty: self.destination_v6_empty,
-            applications: self.applications.clone(),
-            compiled_apps: self.compiled_apps.clone(),
-            action: self.action,
-            log_session_init: self.log_session_init,
-            log_session_close: self.log_session_close,
-            hit_counter: self.hit_counter.clone(),
         }
     }
 }
@@ -3326,72 +3293,92 @@ pub(crate) fn parse_policy_state_with_counters_and_functional(
     Ok(state)
 }
 
-/// #2008 H11: parse the legacy (non-v3-shaped) `source_addresses` /
-/// `destination_addresses` field with family-safe wildcard handling.
+/// #17114: single classification for every policy address token, mirroring
+/// the Go single source `PolicyAddressWildcardFamilies`
+/// (`pkg/config/policy_address_keyword_literal_9574.go`): `any` covers both
+/// families, `any-ipv4`/`any4` IPv4 only, `any-ipv6`/`any6` IPv6 only. Every
+/// Rust surface (legacy set, v3 literal set, address-book prefix) MUST ask
+/// this classifier so a keyword cannot be recognised on one surface and not
+/// another. The shapes differ only in empty-set semantics and, for the book,
+/// in the declared-family check — parameters of the set builder / caller,
+/// not of token classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddrToken {
+    Any,
+    AnyV4,
+    AnyV6,
+    Prefix(IpNet),
+    Malformed,
+}
+
+/// Classify one address token. `""` and any non-keyword token that is
+/// neither an IP/CIDR nor a bare IP are `Malformed`; callers fail the
+/// snapshot closed on it (#3367/#3711/#13702).
+fn classify_addr_token(tok: &str) -> AddrToken {
+    match tok {
+        "any" => AddrToken::Any,
+        "any4" | "any-ipv4" => AddrToken::AnyV4,
+        "any6" | "any-ipv6" => AddrToken::AnyV6,
+        "" => AddrToken::Malformed,
+        s => match s.parse::<IpNet>() {
+            Ok(net) => AddrToken::Prefix(net),
+            Err(_) => {
+                if let Ok(ip) = s.parse::<Ipv4Addr>() {
+                    AddrToken::Prefix(IpNet::V4(
+                        ipnet::Ipv4Net::new(ip, 32).expect("v4 /32"),
+                    ))
+                } else if let Ok(ip) = s.parse::<Ipv6Addr>() {
+                    AddrToken::Prefix(IpNet::V6(
+                        ipnet::Ipv6Net::new(ip, 128).expect("v6 /128"),
+                    ))
+                } else {
+                    AddrToken::Malformed
+                }
+            }
+        },
+    }
+}
+
+/// #17114: what an empty (no-prefix, no-wildcard) token list collapses to.
+/// Legacy sides keep "empty = no constraint = MatchAny"; v3 sides use
+/// "empty = MatchNone" (#1606).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyMeans {
+    MatchAny,
+    MatchNone,
+}
+
+/// #17114: build one literal side from its tokens via `classify_addr_token`.
+/// Returns the per-family sets plus the FIRST malformed token (`Some("")`
+/// for an empty element), on which the caller fails the snapshot closed.
 ///
-/// The legacy convention is "empty input = no address constraint =
-/// MatchAny" (preserved via `PrefixSetV4::from_prefixes`). But a
-/// FAMILY-SCOPED wildcard (`any-ipv4` / `any-ipv6`) is a constraint:
-/// it must match all of ITS family and NONE of the opposite family.
-/// The naive `from_prefixes(v4), from_prefixes(v6)` pair leaks
-/// cross-family, because once `any-ipv4` populates v4 the v6 Vec is
-/// still empty and `from_prefixes(empty)` returns MatchAny — so the
-/// rule would still match v6 (and the reverse for `any-ipv6`).
-///
-/// Fix: track per-family wildcards exactly like `parse_v3_literal_set`.
-/// If a family-scoped wildcard is present anywhere in the token list,
-/// the OPPOSITE family that received no prefixes is MatchNone (the
-/// family is explicitly excluded), NOT MatchAny. Only when NO
-/// family-scoped wildcard appears does the legacy "empty = MatchAny"
-/// convention apply (via `from_prefixes`), preserving back-compat for
-/// the unconstrained / all-malformed cases.
-///
-/// #3947: a bare `any` token now sets BOTH per-family any-flags
-/// (mirroring `parse_v3_literal_set`) instead of being a no-op that
-/// relied on the empty→MatchAny convention. The old no-op arm only
-/// yielded MatchAny when the list was otherwise empty; a list mixing
-/// `any` with a literal (`[ any 10.0.0.0/8 ]`) dropped the `any` and
-/// NARROWED to the literal — a fail-OPEN for a deny term. An `any`
-/// anywhere in the list is match-all for both families regardless of
-/// any accompanying literals or family-scoped wildcards.
-///
-/// #3367/#13702: the returned `Option<String>` carries the FIRST token that
-/// was empty, non-`any`, non-family-wildcard and unparseable as an IP/CIDR.
-/// The caller fails the whole snapshot closed when this is `Some`.
-fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
+/// A bare `any` is match-all for both families regardless of accompanying
+/// literals (#3947). A family-scoped wildcard (`any4`/`any-ipv4`,
+/// `any6`/`any-ipv6`) is match-all for its family and, under
+/// `EmptyMeans::MatchAny`, MatchNone for the unnamed opposite family
+/// (#2008 H11) instead of leaking via the legacy empty->MatchAny rule.
+fn build_literal_side(
+    tokens: &[String],
+    empty: EmptyMeans,
+) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
     let mut any_v4 = false;
     let mut any_v6 = false;
     let mut v4: Vec<PrefixV4> = Vec::new();
     let mut v6: Vec<PrefixV6> = Vec::new();
     let mut malformed: Option<String> = None;
-    for tok in addresses {
-        match tok.as_str() {
-            // #3947: a bare `any` is the both-families match-all wildcard.
-            // Mirror `parse_v3_literal_set` EXACTLY — set BOTH per-family
-            // any-flags. The pre-fix no-op arm leaned on the legacy
-            // empty→MatchAny convention below, which only holds when the list
-            // is otherwise EMPTY: a list MIXING `any` with a literal (e.g.
-            // `[ any 10.0.0.0/8 ]`) then DROPPED the `any` and NARROWED the
-            // match to just the literal — a fail-OPEN for a deny term (the
-            // deny that should match every source matched only the listed
-            // one). Setting the flags here keeps the set match-all regardless
-            // of any accompanying literals.
-            "any" => {
+    for tok in tokens {
+        match classify_addr_token(tok) {
+            AddrToken::Any => {
                 any_v4 = true;
                 any_v6 = true;
             }
-            // Empty elements are not a supported wildcard or literal. The
-            // producer strips them; treat one as corrupt snapshot input.
-            "" => {
+            AddrToken::AnyV4 => any_v4 = true,
+            AddrToken::AnyV6 => any_v6 = true,
+            AddrToken::Prefix(IpNet::V4(net)) => v4.push(PrefixV4::from_net(net)),
+            AddrToken::Prefix(IpNet::V6(net)) => v6.push(PrefixV6::from_net(net)),
+            AddrToken::Malformed => {
                 if malformed.is_none() {
-                    malformed = Some(String::new());
-                }
-            }
-            "any-ipv4" => any_v4 = true,
-            "any-ipv6" => any_v6 = true,
-            s => {
-                if !parse_address(s, &mut v4, &mut v6) && malformed.is_none() {
-                    malformed = Some(s.to_string());
+                    malformed = Some(tok.clone());
                 }
             }
         }
@@ -3399,19 +3386,14 @@ fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, 
     let any_family_scoped = any_v4 || any_v6;
     let v4_set = if any_v4 {
         PrefixSetV4::MatchAny
-    } else if any_family_scoped {
-        // A same-family-only wildcard excludes this family. An empty
-        // v4 here means "v4 was deliberately not named" → MatchNone,
-        // NOT the legacy empty→MatchAny.
+    } else if any_family_scoped || empty == EmptyMeans::MatchNone {
         PrefixSetV4::from_v3_literals(v4)
     } else {
-        // No family-scoped wildcard anywhere → legacy convention:
-        // empty = no constraint = MatchAny.
         PrefixSetV4::from_prefixes(v4)
     };
     let v6_set = if any_v6 {
         PrefixSetV6::MatchAny
-    } else if any_family_scoped {
+    } else if any_family_scoped || empty == EmptyMeans::MatchNone {
         PrefixSetV6::from_v3_literals(v6)
     } else {
         PrefixSetV6::from_prefixes(v6)
@@ -3419,142 +3401,60 @@ fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, 
     (v4_set, v6_set, malformed)
 }
 
-/// #1606: parse the v3 `source_literals` / `destination_literals`
-/// field. "any" token forces MatchAny on BOTH families (Codex r5
-/// F-r5-1 fix); empty input or no-any → MatchNone (via
-/// `from_v3_literals`).
-///
-/// #3711/#13702: the returned `Option<String>` carries the FIRST token that
-/// was empty, non-`any`/`any4`/`any6`/`any-ipv4`/`any-ipv6`, or unparseable
-/// as an IP/CIDR. Without this reporting, an all-dropped side collapsed to
-/// MatchNone and a deny could fall through to default-permit. The caller fails
-/// the whole snapshot closed when this is `Some`. Mirrors the legacy path,
-/// reusing `parse_address` for valid non-empty tokens. The
-/// `__unsupported_address__` sentinel is caught earlier.
+/// #2008 H11: parse the legacy (non-v3-shaped) `source_addresses` /
+/// `destination_addresses` field. Empty input = MatchAny; a family-scoped
+/// wildcard excludes the unnamed opposite family. #3367/#3947/#13702:
+/// malformed tokens are reported so the caller fails the snapshot closed.
+fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
+    build_literal_side(addresses, EmptyMeans::MatchAny)
+}
+
+/// #1606: parse the v3 `source_literals` / `destination_literals` field.
+/// Empty input = MatchNone. #3711/#13702: malformed tokens are reported so
+/// the caller fails the snapshot closed. The `__unsupported_address__`
+/// sentinel is caught earlier.
 fn parse_v3_literal_set(literals: &[String]) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
-    let mut any_v4 = false;
-    let mut any_v6 = false;
-    let mut v4: Vec<PrefixV4> = Vec::new();
-    let mut v6: Vec<PrefixV6> = Vec::new();
-    let mut malformed: Option<String> = None;
-    for tok in literals {
-        match tok.as_str() {
-            "any" => {
-                any_v4 = true;
-                any_v6 = true;
-            }
-            // `any4`/`any6` are the internal short forms; `any-ipv4`/
-            // `any-ipv6` are the Junos config keywords. The Go
-            // compiler normalizes the latter to `0.0.0.0/0`/`::/0`,
-            // but accept them here too so any path that bypasses that
-            // normalization still matches (#2008 H11).
-            "any4" | "any-ipv4" => any_v4 = true,
-            "any6" | "any-ipv6" => any_v6 = true,
-            "" => {
-                if malformed.is_none() {
-                    malformed = Some(String::new());
-                }
-            }
-            s => {
-                if !parse_address(s, &mut v4, &mut v6) && malformed.is_none() {
-                    malformed = Some(s.to_string());
-                }
-            }
-        }
-    }
-    let v4_set = if any_v4 {
-        PrefixSetV4::MatchAny
-    } else {
-        PrefixSetV4::from_v3_literals(v4)
-    };
-    let v6_set = if any_v6 {
-        PrefixSetV6::MatchAny
-    } else {
-        PrefixSetV6::from_v3_literals(v6)
-    };
-    (v4_set, v6_set, malformed)
+    build_literal_side(literals, EmptyMeans::MatchNone)
 }
 
 /// #3711: parse an address-book prefix token that MUST belong to the declared
 /// family (`expect_v4` selects the `prefixes_v4` vs `prefixes_v6` array).
-/// Returns `true` if the token parsed into the EXPECTED family or is a
-/// same-family wildcard; `false` if it is empty, malformed, family-ambiguous,
-/// OR belongs to the WRONG family (M02: an IPv6 token in `prefixes_v4` is
-/// rejected, not silently routed into the v6 set — and vice versa). This is
-/// the reporting, family-enforcing replacement for the pre-fix
-/// family-agnostic parser: the book builder fails the whole snapshot CLOSED
-/// on `false` rather than dropping the token (which collapsed a book-backed
-/// deny to match-none — a fail-OPEN). The Go side emits only concrete
-/// family-split CIDRs, so an empty token or bare `any` is a wire-contract
-/// violation.
+/// Returns `true` iff the token is a same-family wildcard or a prefix of the
+/// EXPECTED family; `false` if it is empty, malformed, family-ambiguous
+/// (bare `any`), a wrong-family wildcard, OR belongs to the WRONG family
+/// (M02). The book builder fails the whole snapshot CLOSED on `false`. The
+/// Go side emits only concrete family-split CIDRs, so an empty token or bare
+/// `any` is a wire-contract violation.
 fn parse_book_prefix_into(
     prefix: &str,
     expect_v4: bool,
     out_v4: &mut Vec<PrefixV4>,
     out_v6: &mut Vec<PrefixV6>,
 ) -> bool {
-    // The Go side emits concrete family-split CIDRs and never empty strings
-    // or a family-ambiguous bare `any` in these arrays.
-    if prefix.is_empty() || prefix == "any" {
-        return false;
-    }
-    // #2008 H11: the Junos family-scoped wildcards expand to the concrete
-    // all-addresses prefix of their family. Only the wildcard MATCHING the
-    // declared array is accepted (family enforcement — M02).
-    if prefix == "any-ipv4" {
-        if !expect_v4 {
-            return false;
+    match classify_addr_token(prefix) {
+        // #2008 H11: family-scoped wildcards expand to the concrete
+        // all-addresses prefix of their family, only in the matching array.
+        AddrToken::AnyV4 if expect_v4 => {
+            out_v4.push(PrefixV4::from_net(
+                ipnet::Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("v4 /0"),
+            ));
+            true
         }
-        out_v4.push(PrefixV4::from_net(
-            ipnet::Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("v4 /0"),
-        ));
-        return true;
-    }
-    if prefix == "any-ipv6" {
-        if expect_v4 {
-            return false;
+        AddrToken::AnyV6 if !expect_v4 => {
+            out_v6.push(PrefixV6::from_net(
+                ipnet::Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).expect("v6 /0"),
+            ));
+            true
         }
-        out_v6.push(PrefixV6::from_net(
-            ipnet::Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).expect("v6 /0"),
-        ));
-        return true;
-    }
-    match prefix.parse::<IpNet>() {
-        Ok(IpNet::V4(net)) => {
-            if !expect_v4 {
-                return false;
-            }
+        AddrToken::Prefix(IpNet::V4(net)) if expect_v4 => {
             out_v4.push(PrefixV4::from_net(net));
             true
         }
-        Ok(IpNet::V6(net)) => {
-            if expect_v4 {
-                return false;
-            }
+        AddrToken::Prefix(IpNet::V6(net)) if !expect_v4 => {
             out_v6.push(PrefixV6::from_net(net));
             true
         }
-        Err(_) => {
-            if let Ok(ip) = prefix.parse::<Ipv4Addr>() {
-                if !expect_v4 {
-                    return false;
-                }
-                out_v4.push(PrefixV4::from_net(
-                    ipnet::Ipv4Net::new(ip, 32).expect("v4 /32"),
-                ));
-                true
-            } else if let Ok(ip) = prefix.parse::<Ipv6Addr>() {
-                if expect_v4 {
-                    return false;
-                }
-                out_v6.push(PrefixV6::from_net(
-                    ipnet::Ipv6Net::new(ip, 128).expect("v6 /128"),
-                ));
-                true
-            } else {
-                false
-            }
-        }
+        _ => false,
     }
 }
 
@@ -5328,58 +5228,6 @@ fn parse_action(action: &str) -> Option<PolicyAction> {
     }
 }
 
-/// Parse one legacy address literal into the per-family prefix vectors. Returns
-/// `true` when the token was represented (a placeholder `any`/empty, a
-/// family-scoped wildcard, or a successfully-parsed IP/CIDR literal) and `false`
-/// when a NON-placeholder token failed to parse as an IP or CIDR. #3367: the
-/// caller (`parse_legacy_address_set`) propagates a `false` up so the policy
-/// builder can fail the snapshot closed rather than silently dropping the token
-/// (which on the empty->match-any legacy path widens a deny rule to match-any).
-fn parse_address(prefix: &str, out_v4: &mut Vec<PrefixV4>, out_v6: &mut Vec<PrefixV6>) -> bool {
-    if prefix.is_empty() || prefix == "any" {
-        return true;
-    }
-    // #2008 H11: family-scoped wildcards (see parse_book_prefix_into).
-    if prefix == "any-ipv4" {
-        out_v4.push(PrefixV4::from_net(
-            ipnet::Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("v4 /0"),
-        ));
-        return true;
-    }
-    if prefix == "any-ipv6" {
-        out_v6.push(PrefixV6::from_net(
-            ipnet::Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).expect("v6 /0"),
-        ));
-        return true;
-    }
-    match prefix.parse::<IpNet>() {
-        Ok(IpNet::V4(net)) => {
-            out_v4.push(PrefixV4::from_net(net));
-            true
-        }
-        Ok(IpNet::V6(net)) => {
-            out_v6.push(PrefixV6::from_net(net));
-            true
-        }
-        Err(_) => {
-            if let Ok(ip) = prefix.parse::<Ipv4Addr>() {
-                out_v4.push(PrefixV4::from_net(
-                    ipnet::Ipv4Net::new(ip, 32).expect("v4 /32"),
-                ));
-                true
-            } else if let Ok(ip) = prefix.parse::<Ipv6Addr>() {
-                out_v6.push(PrefixV6::from_net(
-                    ipnet::Ipv6Net::new(ip, 128).expect("v6 /128"),
-                ));
-                true
-            } else {
-                // #3367: a non-empty, non-placeholder token that is neither an IP
-                // nor a CIDR. Signal the malformed literal to the caller.
-                false
-            }
-        }
-    }
-}
 
 /// #2124: outcome of parsing a rule's application terms. `dropped_any` records
 /// whether at least one configured term failed to parse (unparseable protocol

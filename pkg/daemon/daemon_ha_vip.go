@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"sort"
 	"syscall"
 	"time"
 
@@ -276,23 +275,17 @@ func (d *Daemon) directRemoveVIPs(rgID int) int {
 	return removed
 }
 
-// stableRethUnitNetdev returns the kernel netdev carrying unit's addresses:
-// the VLAN sub-interface when the unit is tagged (VlanID > 0), otherwise the
-// bare member. This is the RethVIPsForRG/ResolveKernelIfName rule (#16686);
-// keying on unitNum > 0 instead puts a tagged unit 0 on the bare member,
-// where its RA sender never binds.
-func stableRethUnitNetdev(linuxName string, unit *config.InterfaceUnit) string {
-	if unit != nil && unit.VlanID > 0 {
-		return fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
-	}
-	return linuxName
-}
-
 // addStableRethLinkLocal adds the stable router link-local address to all
 // RETH interfaces for the given RG. This address is shared across cluster
 // nodes (no nodeID component) so hosts see the same IPv6 router identity
 // regardless of which node is primary. Managed like a VIP: only present
 // on the MASTER node.
+//
+// Placement is the single definition in pkg/config
+// (Config.StableRethLinkLocalPlacements, #17049): per-unit (#15684,
+// #16686), a configured link-local on one unit replaces the stable LL on
+// THAT unit only, and the netdev is selected by unit.VlanID > 0 — a tagged
+// unit 0 lives on <member>.<vlan-id>, not the bare member.
 func (d *Daemon) addStableRethLinkLocal(rgID int) {
 	if d.store == nil {
 		return
@@ -301,57 +294,8 @@ func (d *Daemon) addStableRethLinkLocal(rgID int) {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return
 	}
-	clusterID := cfg.Chassis.Cluster.ClusterID
-	stableLL := cluster.StableRethLinkLocal(clusterID, rgID)
-	rethToPhys := cfg.RethToPhysical()
-
-	rgOwners := cfg.RethRGOwners() // #6781
-	for ifName, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
-			continue
-		}
-		// #6781: RG ownership from the shared predicate. The name test this
-		// replaces excluded a structurally valid redundant pair not spelled
-		// reth*, so its group got VIPs from both ownership modes but no stable
-		// link-local — VRRP mastering an interface nothing else manages.
-		if owns, ok := rgOwners[ifName]; !ok || owns != rgID {
-			continue
-		}
-		// Per-unit (#15684, #16686): a configured link-local on one unit
-		// replaces the stable LL on THAT unit only, and the netdev is
-		// selected by unit.VlanID > 0 — a tagged unit 0 lives on
-		// <member>.<vlan-id>, not the bare member. An untagged unit 0 is
-		// the only unit installed on the parent, and only when it has IPv6.
-		physName := ifc.Name
-		if phys, ok := rethToPhys[ifc.Name]; ok {
-			physName = phys
-		}
-		linuxName := config.LinuxIfName(physName)
-		unitNums := make([]int, 0, len(ifc.Units))
-		for unitNum := range ifc.Units {
-			unitNums = append(unitNums, unitNum)
-		}
-		sort.Ints(unitNums)
-		seen := make(map[string]bool)
-		for _, unitNum := range unitNums {
-			unit := ifc.Units[unitNum]
-			if unit == nil { // #6780
-				continue
-			}
-			if !rethUnitHasIPv6(ifc, unitNum) {
-				continue
-			}
-			if rethUnitHasConfiguredLinkLocal(ifc, unitNum) {
-				slog.Debug("skipping stable LL on unit (explicit LL configured)", "iface", ifName, "unit", unitNum)
-				continue
-			}
-			netdev := stableRethUnitNetdev(linuxName, unit)
-			if seen[netdev] {
-				continue
-			}
-			seen[netdev] = true
-			addStableLLToInterfaceFn(netdev, stableLL)
-		}
+	for _, p := range cfg.StableRethLinkLocalPlacements(rgID) {
+		addStableLLToInterfaceFn(p.Netdev, p.Addr)
 	}
 }
 
@@ -375,6 +319,9 @@ func addStableLLToInterface(ifName string, ll net.IP) {
 
 // removeStableRethLinkLocal removes the stable router link-local address
 // from all RETH interfaces for the given RG. Called on BACKUP transition.
+// The sweep set is Config.RemoveNetdevs (#17049): every unit's
+// VlanID-selected netdev plus the bare member, with no placement predicate,
+// so an address installed by an older rule is still found.
 func (d *Daemon) removeStableRethLinkLocal(rgID int) {
 	if d.store == nil {
 		return
@@ -383,45 +330,9 @@ func (d *Daemon) removeStableRethLinkLocal(rgID int) {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return
 	}
-	clusterID := cfg.Chassis.Cluster.ClusterID
-	stableLL := cluster.StableRethLinkLocal(clusterID, rgID)
-	rethToPhys := cfg.RethToPhysical()
-
-	rgOwners := cfg.RethRGOwners() // #6781
-	for ifName, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
-			continue
-		}
-		// #6781: RG ownership from the shared predicate. The name test this
-		// replaces excluded a structurally valid redundant pair not spelled
-		// reth*, so its group got VIPs from both ownership modes but no stable
-		// link-local — VRRP mastering an interface nothing else manages.
-		if owns, ok := rgOwners[ifName]; !ok || owns != rgID {
-			continue
-		}
-		physName := ifc.Name
-		if phys, ok := rethToPhys[ifc.Name]; ok {
-			physName = phys
-		}
-		linuxName := config.LinuxIfName(physName)
-		// #16686: mirror add — remove from every unit's VlanID-selected
-		// netdev, plus the bare member so a stable LL installed by the
-		// pre-fix code on the parent of a tagged unit 0 is cleaned up.
-		targets := map[string]bool{linuxName: true}
-		for _, unit := range ifc.Units {
-			if unit == nil { // #6780
-				continue
-			}
-			targets[stableRethUnitNetdev(linuxName, unit)] = true
-		}
-		sorted := make([]string, 0, len(targets))
-		for t := range targets {
-			sorted = append(sorted, t)
-		}
-		sort.Strings(sorted)
-		for _, t := range sorted {
-			removeStableLLFromInterfaceFn(t, stableLL)
-		}
+	stableLL := config.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID)
+	for _, netdev := range cfg.RemoveNetdevs(rgID) {
+		removeStableLLFromInterfaceFn(netdev, stableLL)
 	}
 }
 
@@ -665,58 +576,15 @@ func (d *Daemon) directSendGARPs(rgID int) {
 		}
 	}
 
-	// Per-unit router link-local NA (#15684, #16686): each unit announces
-	// its own configured link-local if present, otherwise the stable LL,
-	// on the netdev selected by unit.VlanID > 0 — a tagged unit 0
-	// announces on <member>.<vlan-id>, not the bare member. A unit with
-	// no IPv6 gets no NA at all; the pre-fix code announced unit 0's LL
-	// on every VLAN sub-interface, including IPv4-only units.
-	if cfg.Chassis.Cluster != nil {
-		stableLL := cluster.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID)
-		rethToPhys := cfg.RethToPhysical()
-		seen := make(map[string]bool)
-		rgOwners := cfg.RethRGOwners() // #6781
-		for ifName, ifc := range cfg.Interfaces.Interfaces {
-			if ifc == nil {
-				continue
-			}
-			if owns, ok := rgOwners[ifName]; !ok || owns != rgID { // #6781
-				continue
-			}
-			physName := ifc.Name
-			if phys, ok := rethToPhys[ifc.Name]; ok {
-				physName = phys
-			}
-			linuxName := config.LinuxIfName(physName)
-			sendRouterNA := func(iface string, unitNum int, unit *config.InterfaceUnit) {
-				if unit == nil || seen[iface] {
-					return
-				}
-				if !rethUnitHasIPv6(ifc, unitNum) {
-					return
-				}
-				seen[iface] = true
-				routerLL := stableLL
-				if ll := unitConfiguredLinkLocal(unit); ll != "" {
-					routerLL = net.ParseIP(ll)
-				}
-				if err := directNABurstFn(iface, routerLL, garpCount, stillValid); err != nil {
-					slog.Warn("directSendGARPs: router link-local NA failed",
-						"iface", iface, "ip", routerLL, "err", err)
-				}
-			}
-			unitNums := make([]int, 0, len(ifc.Units))
-			for n := range ifc.Units {
-				unitNums = append(unitNums, n)
-			}
-			sort.Ints(unitNums)
-			for _, unitNum := range unitNums {
-				unit := ifc.Units[unitNum]
-				if unit == nil { // #6780
-					continue
-				}
-				sendRouterNA(stableRethUnitNetdev(linuxName, unit), unitNum, unit)
-			}
+	// Per-unit router link-local NA (#15684, #16686, #17049): each unit
+	// announces its own configured link-local if present, otherwise the
+	// stable LL, on the netdev selected by unit.VlanID > 0. The set is the
+	// single placement definition in pkg/config
+	// (Config.RouterLinkLocalPlacements).
+	for _, p := range cfg.RouterLinkLocalPlacements(rgID) {
+		if err := directNABurstFn(p.Netdev, p.Addr, garpCount, stillValid); err != nil {
+			slog.Warn("directSendGARPs: router link-local NA failed",
+				"iface", p.Netdev, "ip", p.Addr, "err", err)
 		}
 	}
 

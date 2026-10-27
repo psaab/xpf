@@ -83,7 +83,7 @@ func TestUnknownDirectTokenDoesNotArmAPermit(t *testing.T) {
 			res := Match(cfg, Query{
 				FromZone: "trust", ToZone: "untrust",
 				SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
-				Protocol: "tcp", SrcPort: 40000, DstPort: 22,
+				Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(22),
 			})
 			if res.Matched && res.Action == config.PolicyPermit {
 				t.Fatalf("tcp/22 was PERMITTED by an application whose body contains "+
@@ -139,7 +139,7 @@ func TestStrayStatementDoesNotDisarmSiblingLeaves(t *testing.T) {
 		return Match(cfg, Query{
 			FromZone: "trust", ToZone: "untrust",
 			SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
-			Protocol: "tcp", SrcPort: 40000, DstPort: port,
+			Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(uint16(port)),
 		})
 	}
 	if res := q(8080); !res.Matched || res.Action != config.PolicyPermit {
