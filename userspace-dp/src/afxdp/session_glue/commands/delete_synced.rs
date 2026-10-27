@@ -158,7 +158,7 @@ pub(in crate::afxdp::session_glue) fn handle_probe_policy_tuples(
     }
     let wanted: std::collections::HashSet<&SessionKey> = bares.iter().collect();
     let mut hits: Vec<(usize, SyncedSessionEntry)> = Vec::new();
-    sessions.iter_with_origin(|key, decision, metadata, origin| {
+    sessions.iter_with_origin(|key, _decision, _metadata, _origin| {
         let mut key_bare = key.clone();
         key_bare.routing_domain = 0;
         key_bare.discriminator = Default::default();
@@ -171,21 +171,10 @@ pub(in crate::afxdp::session_glue) fn handle_probe_policy_tuples(
         if hits.iter().any(|(filled, _)| *filled == index) {
             return;
         }
-        hits.push((
-            index,
-            SyncedSessionEntry { key: key.clone(),
-            decision,
-            metadata: metadata.clone(),
-            leak_incarnation: 0,
-            origin,
-            protocol: key.protocol,
-            tcp_flags: 0,
-            generation: 0,
-            session_id: sessions.session_id_for(key),
-            tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
-            persistent_lease_hold: None,
-            source_nat_static: None, },
-        ));
+        let Some(entry) = sessions.synced_entry_for(key) else {
+            return;
+        };
+        hits.push((index, entry));
     });
     if !hits.is_empty() {
         let mut slots = found

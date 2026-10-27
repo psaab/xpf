@@ -124,32 +124,26 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
     } else {
         None
     };
+    // #17058: build the install via the one shared mapping
+    // (`into_session_install`), then apply the materialize overrides:
+    // the shared-hit origin and the packet's tcp_flags, and the locally
+    // acquired persistent hold (the shared row's hold belongs to its
+    // publisher). Every other field (id, close/handshake state,
+    // counters, SNAT provenance) is the replica's carried value.
+    // Snapshot the post-install reads first: `into_session_install`
+    // consumes the replica, and the lookup/stamp below still need them.
+    let replica_key = replica.key.clone();
+    let replica_decision = replica.decision;
+    let replica_metadata = replica.metadata.clone();
+    let replica_session_id = replica.session_id;
+    let replica_source_nat_static = replica.source_nat_static;
+    let replica_leak_incarnation = replica.leak_incarnation;
+    let mut install = replica.into_session_install(now_ns);
+    install.origin = shared.origin.materialized_shared_hit_origin();
+    install.tcp_flags = tcp_flags;
+    install.persistent_lease_hold = acquired_persistent_hold;
     let materialized = sessions.upsert_synced_with_origin(
-        SessionInstall {
-            key: replica.key.clone(),
-            decision: replica.decision,
-            metadata: replica.metadata.clone(),
-            origin: shared.origin.materialized_shared_hit_origin(),
-            now_ns,
-            protocol: replica.protocol,
-            tcp_flags,
-            // #5212: a reactive materialize of a shared-map hit inherits the
-            // shared entry's id — the peer's id for a synced session (so the
-            // eventual close correlates), 0 for a local entry (fresh alloc).
-            session_id: replica.session_id,
-            // #9412: a materialized shared hit keeps the synced close class, so
-            // a closing peer copy is not reset to the established window by the
-            // worker that happens to see its next packet.
-            tcp_close_class: replica.tcp_close_class,
-            tcp_handshake_state: replica.tcp_handshake_state,
-            persistent_lease_hold: acquired_persistent_hold,
-            // #16217 (run11): a materialized shared hit inherits the
-            // shared row's carried service counts, exactly as it
-            // inherits the id and close class above.
-            fwd_packets: replica.fwd_packets,
-            rev_packets: replica.rev_packets,
-            source_nat_static: replica.source_nat_static,
-        },
+        install,
         fabric_adopted,
     );
     if materialized {
@@ -176,19 +170,19 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
     // only; failed clobber attempts return install_failed instead.
     if materialized
         && let Some(incarnation) =
-            (replica.leak_incarnation != 0).then_some(replica.leak_incarnation)
+            (replica_leak_incarnation != 0).then_some(replica_leak_incarnation)
     {
-        sessions.stamp_leak_incarnation(&replica.key, incarnation);
+        sessions.stamp_leak_incarnation(&replica_key, incarnation);
     }
     return (
         SessionLookup {
-            decision: replica.decision,
-            metadata: replica.metadata,
+            decision: replica_decision,
+            metadata: replica_metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux {
-                session_id: replica.session_id,
-                source_nat_static: replica.source_nat_static,
-                leak_incarnation: replica.leak_incarnation,
+                session_id: replica_session_id,
+                source_nat_static: replica_source_nat_static,
+                leak_incarnation: replica_leak_incarnation,
             },
         },
         !materialized,

@@ -90,6 +90,14 @@ pub(crate) struct SyncedSessionEntry {
 }
 
 impl SyncedSessionEntry {
+    /// #17058: the reverse construction — `SessionTable::synced_entry_for`
+    /// builds one of these from a live table row in one lookup. Callers
+    /// that hold a live row (policy-delete probe, shared promote) MUST
+    /// route through it rather than hand-building a literal: a literal
+    /// compiles only because every new field gets a default, and
+    /// silently turns "unknown" into a value (the #12187
+    /// `source_nat_static: None` divergence).
+    ///
     /// #9412: THE mapping from a synced entry to an install request, used by the
     /// two installers that take a synced entry as-is and by the #9412
     /// acceptance fixture. A field dropped here (such as the close class this

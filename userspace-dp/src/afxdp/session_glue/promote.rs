@@ -267,25 +267,20 @@ fn promote_synced_session_with_conntrack(
             crate::afxdp::bpf_map::SESSION_PUBLISH_ERRORS_SHARED
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let promoted_entry = SyncedSessionEntry { key: key.clone(),
-        decision,
-        metadata: promoted.clone(),
-        leak_incarnation: sessions.leak_incarnation(key).unwrap_or(0),
-        origin: SessionOrigin::SharedPromote,
-        protocol,
-        tcp_flags,
-        // Local shared-promote: no peer install generation (#2170).
-        generation: 0,
-        // #9582: carry the promoted session's stable id (preserved on the live
-        // entry, #5212), so replicas and shared-map materializations ADOPT it.
-        // With 0 each re-import minted its own id, and a replica could not
-        // announce a close under the id the peer and the #9412 memo know.
-        session_id: sessions.session_id_for(key),
-        // #9412: republish the promoted session with its LIVE close class, so
-        // a worker materializing it from the shared maps keeps the close state.
-        tcp_close_class: sessions.close_class_wire_for(key), tcp_handshake_state: sessions.handshake_state_wire_for(key), rev_packets: sessions.rev_packets_for(key), fwd_packets: sessions.fwd_packets_for(key), pptp_call_ids: sessions.pptp_call_ids_wire_for(key),
-        persistent_lease_hold: sessions.persistent_lease_hold_for(key),
-        source_nat_static: sessions.source_nat_static_for(key), };
+        // #17058: build from the live row via the one shared construction,
+        // then apply the promote overrides (origin, promoted metadata,
+        // decision, protocol and the packet's tcp_flags). Every other
+        // wire field (session_id, close/handshake state, counters,
+        // PPTP pair, lease hold, SNAT provenance, leak incarnation) is
+        // the live value `synced_entry_for` read in one lookup.
+        let Some(mut promoted_entry) = sessions.synced_entry_for(key) else {
+            return promoted;
+        };
+        promoted_entry.decision = decision;
+        promoted_entry.metadata = promoted.clone();
+        promoted_entry.origin = SessionOrigin::SharedPromote;
+        promoted_entry.protocol = protocol;
+        promoted_entry.tcp_flags = tcp_flags;
         publish_shared_session(
             shared.sessions,
             shared.nat_sessions,
