@@ -751,13 +751,6 @@ func rethParentLinkLocalRepair(linuxName string, rethCfg *config.InterfaceConfig
 	}
 }
 
-// rethUnitHasConfiguredLinkLocal checks whether the RETH config has an
-// explicitly configured link-local IPv6 address (fe80::/10) on the given unit.
-// Delegates to the single definition in pkg/config (#17049).
-func rethUnitHasConfiguredLinkLocal(rethCfg *config.InterfaceConfig, unitNum int) bool {
-	unit, ok := config.LookupUnit(rethCfg, unitNum)
-	return ok && config.UnitHasConfiguredLinkLocal(unit)
-}
 
 // rethUnitHasIPv6 checks whether the RETH config has IPv6 addresses on the
 // given logical unit number. Unit 0 is the native/untagged interface. The

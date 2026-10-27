@@ -282,8 +282,8 @@ func stableRethLinkLocalForRA(cfg *config.Config, raInterface string, ifc *confi
 	wantUnit := -1
 	if hasUnit && unitTok != "" {
 		n, err := strconv.Atoi(unitTok)
-		if err != nil {
-			return ""
+		if err != nil || n < 0 {
+			return "" // malformed/negative unit: fail-safe, sender auto-selects
 		}
 		wantUnit = n
 	}
