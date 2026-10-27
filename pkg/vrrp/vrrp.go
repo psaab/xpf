@@ -185,7 +185,6 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
 		return nil
 	}
-	rethToPhys := cfg.RethToPhysical()
 
 	// Read cluster-level settings for RETH VRRP instances.
 	advertInterval := 30 // 30ms default for sub-100ms failover
@@ -210,34 +209,27 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 		}
 	}
 
-	// Sort interface names for deterministic output.
-	names := make([]string, 0, len(cfg.Interfaces.Interfaces))
-	for name := range cfg.Interfaces.Interfaces {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	// #17140: the ONE RETH VIP walk lives in pkg/config (RethVIPsByRG).
+	// This collector only wraps each (RG, sub-interface, VIPs) entry in an
+	// Instance with the per-RG scalars. RG 0, out-of-range VRIDs and empty
+	// VIP sets are skipped here, at the caller, because the direct
+	// collector is legitimately queried for group 0 (see RethRGOwners).
+	byRG := cfg.RethVIPsByRG()
 
-	// #6781: RG ownership comes from the shared structural predicate, not from
-	// a bare RedundancyGroup > 0. Built once for the whole walk.
-	rgOwners := cfg.RethRGOwners()
+	// Pin deterministic order: RG ascending, then sub-interface name.
+	// updateVIPs is order-sensitive (vipsEqual), so instance order must
+	// not depend on map iteration.
+	rgIDs := make([]int, 0, len(byRG))
+	for rgID := range byRG {
+		if rgID <= 0 {
+			continue
+		}
+		rgIDs = append(rgIDs, rgID)
+	}
+	sort.Ints(rgIDs)
 
 	var instances []*Instance
-	for _, name := range names {
-		ifc := cfg.Interfaces.Interfaces[name]
-		// #6780: skip a present-but-nil interface, matching CollectInstances
-		// above and every RETH-ownership walk in pkg/daemon.
-		if ifc == nil || ifc.Disable {
-			continue
-		}
-		rgID, owns := rgOwners[name]
-		// RG 0 is the control-plane group; no RETH VRRP instance is
-		// synthesized for it, and an unset redundancy-group also reads as 0.
-		// The `> 0` term lives here rather than in the shared predicate
-		// because the direct collector below is legitimately queried for
-		// group 0 (see Config.RethRGOwners).
-		if !owns || rgID <= 0 {
-			continue
-		}
+	for _, rgID := range rgIDs {
 		vrid, validVRID := rethVRID(rgID)
 		if !validVRID {
 			slog.Warn("vrrp: skipping RETH instance with out-of-range VRID",
@@ -258,67 +250,26 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 
 		gc := garpCounts[rgID] // 0 = use default (3)
 
-		// Resolve reth → physical member (no bond device)
-		physName := ifc.Name
-		if phys, ok := rethToPhys[ifc.Name]; ok {
-			physName = phys
+		perIface := byRG[rgID]
+		subIfaces := make([]string, 0, len(perIface))
+		for subIface := range perIface {
+			subIfaces = append(subIfaces, subIface)
 		}
-		linuxName := config.LinuxIfName(physName)
-
-		// For VLAN-tagged interfaces, create one VRRP instance per
-		// sub-interface (e.g. reth0.50) since the parent has no
-		// IPv4 and VRRP requires one for advertisements.
-		// For non-VLAN interfaces, use the base interface.
-		unitNums := make([]int, 0, len(ifc.Units))
-		for n := range ifc.Units {
-			unitNums = append(unitNums, n)
-		}
-		sort.Ints(unitNums)
-
-		if ifc.TaggingEnabled() {
-			for _, n := range unitNums {
-				unit := ifc.Units[n]
-				// #16590 (#14575 residual): a disabled unit owns no VIP.
-				if unit == nil || unit.Disable || len(unit.Addresses) == 0 {
-					continue
-				}
-				subIface := linuxName
-				if unit.VlanID > 0 {
-					subIface = fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
-				}
-				instances = append(instances, &Instance{
-					Interface:         subIface,
-					GroupID:           vrid,
-					Priority:          pri,
-					Preempt:           preemptMap[rgID],
-					AcceptData:        true,
-					AdvertiseInterval: advertInterval,
-					GARPCount:         gc,
-					VirtualAddresses:  dedupeVIPs(unit.Addresses),
-				})
-			}
-		} else {
-			var vips []string
-			for _, n := range unitNums {
-				unit := ifc.Units[n]
-				if unit == nil || unit.Disable { // #6780 / #16590
-					continue
-				}
-				vips = append(vips, unit.Addresses...)
-			}
-			vips = dedupeVIPs(vips)
+		sort.Strings(subIfaces)
+		for _, subIface := range subIfaces {
+			vips := perIface[subIface]
 			if len(vips) == 0 {
 				continue
 			}
 			instances = append(instances, &Instance{
-				Interface:         linuxName,
+				Interface:         subIface,
 				GroupID:           vrid,
 				Priority:          pri,
 				Preempt:           preemptMap[rgID],
 				AcceptData:        true,
 				AdvertiseInterval: advertInterval,
 				GARPCount:         gc,
-				VirtualAddresses:  vips,
+				VirtualAddresses:  append([]string(nil), vips...),
 			})
 		}
 	}
