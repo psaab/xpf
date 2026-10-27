@@ -31,11 +31,11 @@ func TestVIPParseAgreement17150(t *testing.T) {
 		{"FE80::AB/64", true, false, "inet6"},      // uppercase v6 CIDR
 		{"2001:0DB8::10/64", true, false, "inet6"}, // expanded uppercase v6
 		{"not-an-address", false, false, ""},
-		{"::ffff:10.0.0.1", true, true, "inet"},      // bare mapped == v4 host
-		{"::ffff:10.0.0.1/120", true, true, "inet"},  // mapped CIDR /120 == v4 /24
-		{"::ffff:10.0.0.1/128", true, true, "inet"},  // mapped /128 == v4 /32
-		{"::ffff:10.0.0.1/96", true, true, "inet"},   // mapped /96 == v4 /0
-		{"::ffff:10.0.0.1/95", true, false, "inet6"}, // sub-96 mapped: kept mapped
+		{"::ffff:10.0.0.1", true, true, "inet"},     // bare mapped == v4 host
+		{"::ffff:10.0.0.1/120", true, true, "inet"}, // mapped CIDR /120 == v4 /24
+		{"::ffff:10.0.0.1/128", true, true, "inet"}, // mapped /128 == v4 /32
+		{"::ffff:10.0.0.1/96", true, true, "inet"},  // mapped /96 == v4 /0
+		{"::ffff:10.0.0.1/95", true, true, "inet"},  // sub-96 mapped: v4 host identity (/32), no v4 prefix exists
 	}
 	for _, c := range cases {
 		p, ok := config.ParseVRRPVIP(c.vip)
@@ -81,13 +81,11 @@ func TestVIPParseAgreement17150(t *testing.T) {
 		// lookup form. A mapped VIP must key as "10.0.0.1" (the form
 		// resolveLocalIPv4's ip4.String() produces), never as
 		// "::ffff:10.0.0.1", or the VIP leaks into source selection.
+		// This holds for the sub-96 row too: its parse is now the v4
+		// host identity, so canon, claim host, and lookup agree.
 		if c.wantOK && (c.vip == "::ffff:10.0.0.1" || c.vip == "::ffff:10.0.0.1/120" || c.vip == "::ffff:10.0.0.1/128" || c.vip == "::ffff:10.0.0.1/96" || c.vip == "::ffff:10.0.0.1/95") {
-			wantCanon := "::ffff:10.0.0.1"
-			if c.vip != "::ffff:10.0.0.1/95" {
-				wantCanon = "10.0.0.1"
-			}
-			if got := canonAddr(c.vip); got != wantCanon {
-				t.Errorf("canonAddr(%q) = %q, want %q (net.IP lookup form)", c.vip, got, wantCanon)
+			if got := canonAddr(c.vip); got != "10.0.0.1" {
+				t.Errorf("canonAddr(%q) = %q, want %q (net.IP lookup form)", c.vip, got, "10.0.0.1")
 			}
 			if pok && host != canonAddr(c.vip) {
 				t.Errorf("parseVIPIdentity(%q) host %q != canonAddr %q: claim and exclusion keys must agree", c.vip, host, canonAddr(c.vip))

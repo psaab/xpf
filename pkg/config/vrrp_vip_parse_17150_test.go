@@ -27,7 +27,7 @@ func TestParseVRRPVIPAgreement17150(t *testing.T) {
 		{"::ffff:10.0.0.1/120", true, true},
 		{"::ffff:10.0.0.1/128", true, true},
 		{"::ffff:10.0.0.1/96", true, true},
-		{"::ffff:10.0.0.1/95", true, false},
+		{"::ffff:10.0.0.1/95", true, true},
 	}
 	for _, c := range cases {
 		p, ok := ParseVRRPVIP(c.vip)
@@ -54,10 +54,22 @@ func TestParseVRRPVIPAgreement17150(t *testing.T) {
 		}
 		// Mapped spellings agree with the IPv4 host they denote:
 		// vrrpVIPHostIP (net.IP form) must be the "10.0.0.1" the
-		// vrrp-side lookups key on, never a mapped form.
+		// vrrp-side lookups key on, never a mapped form. For the
+		// sub-96 row this additionally pins the family: To4() must be
+		// non-nil and the string must be the v4 host — the gates branch
+		// on exactly that, so a kept-mapped parse would split commit
+		// (inet) from runtime (inet6).
 		if c.wantOK && (c.vip == "::ffff:10.0.0.1" || c.vip == "::ffff:10.0.0.1/120" || c.vip == "::ffff:10.0.0.1/128" || c.vip == "::ffff:10.0.0.1/96" || c.vip == "::ffff:10.0.0.1/95") {
-			if got := vrrpVIPHostIP(c.vip); got == nil || got.String() != "10.0.0.1" {
-				t.Errorf("vrrpVIPHostIP(%q) = %v, want 10.0.0.1", c.vip, got)
+			if got := vrrpVIPHostIP(c.vip); got == nil || got.String() != "10.0.0.1" || got.To4() == nil {
+				t.Errorf("vrrpVIPHostIP(%q) = %v (To4=%v), want IPv4 host 10.0.0.1", c.vip, got, got.To4())
+			}
+		}
+		if c.vip == "::ffff:10.0.0.1/95" {
+			if got := VRRPVIPIdentity(c.vip); got != "10.0.0.1/32" {
+				t.Errorf("VRRPVIPIdentity(sub-96 mapped) = %q, want v4 host identity 10.0.0.1/32", got)
+			}
+			if p.Addr().String() != "10.0.0.1" || p.Bits() != 32 {
+				t.Errorf("ParseVRRPVIP(sub-96 mapped) = %v, want 10.0.0.1/32 host prefix", p)
 			}
 		}
 	}
@@ -102,8 +114,11 @@ func TestParseVRRPVIPAgreement17150(t *testing.T) {
 	if VRRPVIPIdentity("::ffff:10.0.0.1/120") != "10.0.0.1/24" {
 		t.Errorf("VRRPVIPIdentity(mapped /120) = %q, want 10.0.0.1/24", VRRPVIPIdentity("::ffff:10.0.0.1/120"))
 	}
-	if VRRPVIPIdentity("::ffff:10.0.0.1/95") != "::ffff:10.0.0.1/95" {
-		t.Errorf("VRRPVIPIdentity(sub-96 mapped) = %q, want kept-mapped ::ffff:10.0.0.1/95", VRRPVIPIdentity("::ffff:10.0.0.1/95"))
+	if VRRPVIPIdentity("::ffff:10.0.0.1/95") != "10.0.0.1/32" {
+		t.Errorf("VRRPVIPIdentity(sub-96 mapped) = %q, want v4 host identity 10.0.0.1/32", VRRPVIPIdentity("::ffff:10.0.0.1/95"))
+	}
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1/95", "10.0.0.1", "::ffff:10.0.0.1/95"})) != 1 {
+		t.Error("DedupeVRRPVIPs(sub-96 mapped, bare v4) must keep 1 entry (same v4 host identity)")
 	}
 	if len(DedupeVRRPVIPs([]string{"2001:db8::10/64", "2001:0DB8:0:0:0:0:0:10/64"})) != 1 {
 		t.Error("DedupeVRRPVIPs(uppercase expanded alias) must keep 1 entry")

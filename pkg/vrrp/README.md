@@ -1012,7 +1012,8 @@ the claim check, and the commit-time counter alike. IPv4-mapped spellings
 (`::ffff:10.0.0.1/120`) are IPv4 on every one of those paths (unmapped
 with the /96-offset bit translation in `ParseVRRPVIP`), so `canonAddr`'s
 exclusion key is the `net.IP` lookup form `10.0.0.1` (#2516); a mapped
-prefix below /96 is kept mapped.
+prefix below /96 has no v4 prefix equivalent and parses as the same v4
+host identity (`10.0.0.1/32`), so actuation and GARP agree it is IPv4.
 
 **Why an oversized set was more than a malformed packet.** `sendAdvert`
 discards a `Marshal` failure at `slog.Debug`, and `becomeMaster` claimed the

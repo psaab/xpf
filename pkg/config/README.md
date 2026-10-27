@@ -1220,8 +1220,11 @@ repo-wide, consumed by `pkg/vrrp` — so every VIP helper gives one verdict
 per string, including skipping a malformed `10.0.0.1/33` everywhere.
 IPv4-mapped spellings are IPv4 everywhere: a mapped CIDR is unmapped
 with the /96-offset bit translation (`::ffff:10.0.0.1/120` ==
-`10.0.0.1/24`); a mapped prefix below /96 has no v4 equivalent and is
-kept mapped (IPv6 to every consumer) — see `vrrp_vip_parse.go`.
+`10.0.0.1/24`); a mapped prefix below /96 has no v4 prefix equivalent
+and parses as the v4 host identity (`::ffff:10.0.0.1/95` ==
+`10.0.0.1/32`) — every consumer (gates, `canonAddr`, netlink, GARP)
+already treated its host as IPv4, and silently-skipping consumers
+make rejection unsafe — see `vrrp_vip_parse.go`.
 
 **Same VIP must not be claimed by two elections on one interface (#14407):**
 each `vrrp-group` (and each RETH-derived instance, VRID `100+RG`) is an
