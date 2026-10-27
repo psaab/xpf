@@ -90,9 +90,7 @@ func ValidateDeviceMapLogicalName(raw string) error {
 	if name == "" {
 		return fmt.Errorf("missing logical interface name (e.g. ge-0/0/3 or fxp0)")
 	}
-	if name != raw {
-		return fmt.Errorf("logical interface name %q must not have leading/trailing whitespace", raw)
-	}
+	// #17177: edge-whitespace refusal is owned centrally by validateKeySlot.
 	if strings.ContainsAny(name, " \t") {
 		return fmt.Errorf("logical interface name %q must not contain whitespace", raw)
 	}

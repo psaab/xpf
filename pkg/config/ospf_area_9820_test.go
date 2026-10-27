@@ -78,7 +78,7 @@ protocols {
 		t.Fatalf("parse errors: %v", perrs)
 	}
 	err := SchemaValidate(tree)
-	if err == nil || !strings.Contains(err.Error(), "whitespace is not allowed") {
+	if err == nil || !strings.Contains(err.Error(), "must not have leading or trailing whitespace") {
 		t.Fatalf("padded area id must be refused with the padding reason, got: %v", err)
 	}
 }
@@ -86,8 +86,12 @@ protocols {
 // Direct validator cells for spellings no `set` line can carry
 // (newlines) plus the boundary set.
 func TestValidateOSPFAreaBoundary_9820(t *testing.T) {
+	// Padding refusal is central (#17177): the bare validator retains
+	// trimmed leniency (including newline padding, which the #1798
+	// prewalk rejects on the strict path before this validator runs),
+	// so padded spellings are pinned at the commit gate by
+	// TestOSPFAreaPaddedRefused_9820, not here.
 	for _, bad := range []string{
-		"\n0.0.0.0", "0.0.0.0\n", " 0.0.0.0 ", "\t0.0.0.0\t",
 		"0 1", "not-an-area", "2001:db8::1",
 	} {
 		if err := ValidateOSPFArea(bad); err == nil {

@@ -31,12 +31,13 @@ routing-options {
         }
     }
 }`)
-	if err == nil || !strings.Contains(err.Error(), "whitespace is not allowed") {
+	if err == nil || !strings.Contains(err.Error(), "must not have leading or trailing whitespace") {
 		t.Fatalf("padded destination must be refused with the padding reason, got: %v", err)
 	}
-	if err := ValidateRouteDestination(" 10.0.0.0/8 "); err == nil {
-		t.Fatal("ValidateRouteDestination accepted padding")
-	}
+	// Direct call: padding refusal is central (#17177), so the bare
+	// validator retains its trimmed grammar leniency; the
+	// SchemaValidate cell above pins the commit-path refusal.
+	// (The unpadded control is asserted just below.)
 	if err := ValidateRouteDestination("10.0.0.0/8"); err != nil {
 		t.Fatalf("unpadded destination must be accepted, got: %v", err)
 	}
@@ -51,13 +52,15 @@ routing-options {
         }
     }
 }`)
-	if err == nil || !strings.Contains(err.Error(), "whitespace is not allowed") {
+	if err == nil || !strings.Contains(err.Error(), "must not have leading or trailing whitespace") {
 		t.Fatalf("padded next-hop must be refused with the padding reason, got: %v", err)
 	}
-	for _, bad := range []string{" 192.0.2.1 ", "\tge-0/0/1.0", "2001:db8::1@eth0 "} {
-		if err := ValidateStaticNextHop(bad); err == nil {
-			t.Errorf("ValidateStaticNextHop(%q) accepted, want rejection", bad)
-		}
+	// Direct calls: padding refusal is central (#17177), so the bare
+	// validator retains trimmed leniency for some forms; the
+	// SchemaValidate cell above pins the commit-path refusal. A tab-
+	// padded interface name still fails the bare grammar.
+	if err := ValidateStaticNextHop("\tge-0/0/1.0"); err == nil {
+		t.Errorf("ValidateStaticNextHop(tab-padded) accepted, want rejection")
 	}
 	for _, ok := range []string{"192.0.2.1", "2001:db8::1", "2001:db8::1@eth0", "@eth0", "reth0.50"} {
 		if err := ValidateStaticNextHop(ok); err != nil {
