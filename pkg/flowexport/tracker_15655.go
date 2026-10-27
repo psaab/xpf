@@ -400,6 +400,40 @@ func (t *FlowTracker) Adopt(f *trackedFlow) bool {
 	return true
 }
 
+// CloneIdleMarker copies the sampled-idle marker for key (#17834), so a
+// replacement exporter can carry the re-admission and close-remainder
+// state across a rebuild the way Clone carries live flows. ok is false
+// when key holds no marker (live entry or forgotten).
+func (t *FlowTracker) CloneIdleMarker(key FlowKey) (idleMarker, bool) {
+	if !t.enabled() {
+		return idleMarker{}, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	m, ok := t.idle[key]
+	return m, ok
+}
+
+// AdoptIdleMarker installs a previously cloned marker unless the key
+// already holds state (live entry or marker): state already present in
+// the destination wins, mirroring Adopt. The same idleMarkerMax bound
+// as ordinary marker storage applies.
+func (t *FlowTracker) AdoptIdleMarker(key FlowKey, m idleMarker) bool {
+	if !t.enabled() {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, live := t.flows[key]; live {
+		return false
+	}
+	if _, exists := t.idle[key]; exists {
+		return false
+	}
+	t.storeIdleMarkerLocked(key, m)
+	return true
+}
+
 // Keys returns a snapshot of the currently tracked flow keys, so the
 // daemon's live-counter poll can address session lookups to exactly the
 // flows this tracker cares about instead of enumerating every session.

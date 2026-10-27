@@ -386,6 +386,16 @@ func (c *exporterCore) TransferFlowStateTo(dst *exporterCore, key FlowKey) {
 			dst.tracker.Adopt(f)
 			return
 		}
+		// #17834: an idle-expired flow's marker is open state too.
+		// Dropping it on rebuild silenced the key's polling and its
+		// close baselines: resumed traffic was never re-armed (the
+		// #16747 defect again), and the close fell to the #16742
+		// fallback, re-exporting the full lifetime the inactive final
+		// had already emitted.
+		if m, ok := c.tracker.CloneIdleMarker(key); ok {
+			dst.tracker.AdoptIdleMarker(key, m)
+			return
+		}
 	}
 	c.sampledMu.Lock()
 	_, sampled := c.sampledFlows[key]
