@@ -144,8 +144,8 @@ func promoteParsedC012686(t *testing.T, r *convergenceRun12072, text string, rul
 			r.dp.ruleBySession[row.ExpectedRTFlowSessionID] = key
 			row.PolicyID = policyIDs[key]
 		}
-		row.IngressZoneID = uint16(config.StableZoneID("trust"))
-		row.EgressZoneID = uint16(config.StableZoneID("untrust"))
+		row.IngressZoneID = config.StableZoneID("trust")
+		row.EgressZoneID = config.StableZoneID("untrust")
 		if key := ruleKeys[row.ExpectedRTFlowSessionID]; key != "" {
 			row.Tuple.DstPort = variantDestinationPort12686(key)
 		}
@@ -163,8 +163,8 @@ func addSession12686(r *convergenceRun12072, id uint64, ruleKey string, cfg *con
 		},
 		PolicyID:                dpuserspace.PolicyIDsByStableKey(cfg)[ruleKey],
 		ExpectedRTFlowSessionID: id,
-		IngressZoneID:           uint16(config.StableZoneID("trust")),
-		EgressZoneID:            uint16(config.StableZoneID("untrust")),
+		IngressZoneID:           config.StableZoneID("trust"),
+		EgressZoneID:            config.StableZoneID("untrust"),
 	})
 	r.dp.ruleBySession[id] = ruleKey
 }
@@ -179,8 +179,8 @@ func addConcreteZoneMismatchSession12686(r *convergenceRun12072, id uint64, cfg 
 		},
 		PolicyID:                dpuserspace.PolicyIDsByStableKey(cfg)[ruleKey],
 		ExpectedRTFlowSessionID: id,
-		IngressZoneID:           uint16(config.StableZoneID("other")),
-		EgressZoneID:            uint16(config.StableZoneID("untrust")),
+		IngressZoneID:           config.StableZoneID("other"),
+		EgressZoneID:            config.StableZoneID("untrust"),
 	})
 	r.dp.ruleBySession[id] = ruleKey
 }

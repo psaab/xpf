@@ -37,7 +37,7 @@ func key9714() dataplane.SessionKey {
 func journalLen9714(s *SessionSync) int {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	return len(s.deleteJournal)
+	return len(s.deleteJournal.entries)
 }
 
 // THE ACCEPTANCE CRITERION: a peer that did not advertise capFlagPeerDeleteOwnership

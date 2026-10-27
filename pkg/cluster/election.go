@@ -108,7 +108,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// promotion, including via weight-zero or dual-resign recovery.
 	if peerGroup != nil && peerGroup.State == StateSecondaryHold &&
 		m.failoverInProgress[rg.GroupID] != 0 {
-		if _, acknowledged := m.peerTransferOutOverride[rg.GroupID]; !acknowledged {
+		if _, acknowledged := m.transferOverrides[rg.GroupID]; !acknowledged {
 			return electNoChange, ""
 		}
 	}
