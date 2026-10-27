@@ -66,12 +66,28 @@ func TestWhitespaceAuthSecretIsNotEmitted9050(t *testing.T) {
 // admits a character the gate rejects is a seam, and this file exists because
 // there was one — the belt covered < 0x20 and 0x7f, the gate also covered ' '
 // and '\t', and the gap was exactly the whitespace case.
+//
+// #17035 (R4-Q42-06): the belt now delegates to config.FRRSingleToken, so
+// this is an EXHAUSTIVE parity check over all 256 bytes against that SSOT
+// rather than a frozen 7-byte list that cannot see the next gate change.
+// MUTATION CELLS: (a) re-inlining the old copy in frrAuthTokenUnsafe
+// reds here on the empty string (the copy admitted "", the SSOT does
+// not); (b) adding a byte to frrTokenUnsafeIndex's unsafe set alone
+// flips FRRSingleToken, and the delegating belt tracks it (this test
+// stays green) where the old frozen list + copy would have stayed
+// green while admitting the byte — the seam this test now closes.
 func TestAuthTokenSetMatchesTheCommitGate9050(t *testing.T) {
-	for _, c := range []byte{' ', '\t', '\n', '\r', 0x00, 0x1f, 0x7f} {
-		if !frrAuthTokenUnsafe(string([]byte{'a', c, 'b'})) {
-			t.Errorf("byte %#x is admitted by the render belt; the commit gate "+
-				"rejects it, and the lenient path has only the belt", c)
+	for b := range 256 {
+		s := string([]byte{'a', byte(b), 'b'})
+		if got, want := frrAuthTokenUnsafe(s), !config.FRRSingleToken(s); got != want {
+			t.Errorf("byte %#x: frrAuthTokenUnsafe(%q) = %v, want %v (!config.FRRSingleToken); "+
+				"the render belt and the commit gate disagree", b, s, got, want)
 		}
+	}
+	// Empty: not a single token (the sole caller never reaches the belt
+	// with "", but the parity must hold there too).
+	if got, want := frrAuthTokenUnsafe(""), !config.FRRSingleToken(""); got != want {
+		t.Errorf("frrAuthTokenUnsafe(\"\") = %v, want %v (!config.FRRSingleToken)", got, want)
 	}
 	// And it must not over-reject: an ordinary printable secret is fine, or the
 	// gate becomes an outage of its own.

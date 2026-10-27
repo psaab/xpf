@@ -782,13 +782,16 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// #8965: and refuse a LIVE control-endpoint move, which would restart
 	// comms on the new address before the peer can be told about it.
 	if eerr := clusterControlEndpointCommitPreflight(d.cluster, compiled); eerr != nil {
-		slog.Error("cluster: refusing to apply a peer-synced node-id/cluster-id "+
-			"identity change live; a restart is required to re-key the HA manager",
+		slog.Error("cluster: refusing to apply a peer-synced control-endpoint "+
+			"move live; applying it would restart cluster comms on the control-link "+
+			"peer address before the config can be pushed to the peer — configure "+
+			"the new control-link peer address on BOTH nodes and restart xpfd on "+
+			"both, or take the cluster down before the move",
 			"err", eerr)
 		// #6720: same reasoning as the topology backstop above — the promoted
-		// config's authorization is live policy regardless of the HA re-key
+		// config's authorization is live policy regardless of the control-endpoint
 		// constraint that stops the apply.
-		d.reconcileManagementAfterPromotion(compiled, "peer-synced identity change refused")
+		d.reconcileManagementAfterPromotion(compiled, "peer-synced control-endpoint move refused")
 		return nil, eerr
 	}
 

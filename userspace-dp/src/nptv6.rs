@@ -54,7 +54,7 @@
 //!   (`pkg/config/compiler_nat.go`, #2240/#2380), consistent with the
 //!   #2124/#2142/#2173/#2212 fail-closed family.
 //! * **Reject overlapping prefixes — deterministic translation (#2241).**
-//!   `translate_inbound`/`translate_outbound` resolve a match by FIRST hit in
+//!   `translate_inbound_result`/`translate_outbound_result` resolve a match by FIRST hit in
 //!   insertion order with no longest-prefix-match. Two rules whose prefixes
 //!   overlap in the same direction (e.g. a /48 and a nested /64) would make the
 //!   translation identity depend purely on rule order. `try_from_snapshots`
@@ -70,8 +70,8 @@
 //!   A static-NAT rule-set is scoped by `from zone` (Go `rs.FromZone`, carried
 //!   on [`Nptv6Rule::from_zone`]). An NPTv6 rule matches a packet ONLY when its
 //!   `from_zone` is empty (wildcard) OR equals the packet's relevant security
-//!   zone — the INGRESS zone for [`Nptv6State::translate_inbound`] and the
-//!   EGRESS zone for [`Nptv6State::translate_outbound`]. Before #5176 both
+//!   zone — the INGRESS zone for [`Nptv6State::translate_inbound_result`] and the
+//!   EGRESS zone for [`Nptv6State::translate_outbound_result`]. Before #5176 both
 //!   lookups selected purely by prefix, so a rule scoped `from zone untrust`
 //!   translated (and thus routed) NPTv6 traffic sourced from EVERY zone — a
 //!   security-domain crossing — and the overlap gate wrongly rejected
@@ -487,18 +487,6 @@ impl Nptv6State {
             .expect("test snapshot must not produce an NPTv6 integrity error")
     }
 
-    /// Translate an inbound packet's destination address.
-    ///
-    /// This compatibility wrapper preserves the historical boolean API for
-    /// helper callers that only need to know whether a rule translated. Packet
-    /// paths that must distinguish a prefix miss from a scoped untranslatable
-    /// outcome use [`Self::translate_inbound_result`].
-    #[inline]
-    pub(crate) fn translate_inbound(&self, dst: &mut Ipv6Addr, ingress_zone: &str) -> bool {
-        self.translate_inbound_result(dst, ingress_zone)
-            .is_translated()
-    }
-
     /// Translate an inbound packet and expose scoped untranslatable
     /// addresses as a distinct outcome.
     ///
@@ -579,15 +567,6 @@ impl Nptv6State {
         self.translate_inbound_result(dst, ingress_zone)
     }
 
-    /// Translate an outbound packet's source address.
-    ///
-    /// This compatibility wrapper preserves the historical boolean API.
-    #[inline]
-    pub(crate) fn translate_outbound(&self, src: &mut Ipv6Addr, egress_zone: &str) -> bool {
-        self.translate_outbound_result(src, egress_zone)
-            .is_translated()
-    }
-
     /// Translate an outbound packet and expose scoped untranslatable
     /// addresses as a distinct outcome.
     ///
@@ -646,13 +625,11 @@ impl Nptv6State {
     }
 
     /// Returns true if there are any NPTv6 rules configured.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_empty(&self) -> bool {
         self.inbound.is_empty()
     }
 
     /// Returns all external prefixes as (prefix_addr, prefix_len) pairs.
-    #[allow(dead_code)]
     pub(crate) fn external_prefixes(&self) -> Vec<(Ipv6Addr, u8)> {
         self.inbound
             .iter()

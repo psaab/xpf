@@ -162,7 +162,7 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 	// at all falls back to zone semantics (#15946 scoping): trust input
 	// is sampled, rate 1 here, so the close exports and consumes
 	// exactly one fallback slot. The strict unit-level fail-closed
-	// contract (ShouldExportIface) itself stays pinned in pkg/flowexport.
+	// contract itself stays pinned in pkg/flowexport (strictEligible).
 	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(99, uint16(trust), uint16(untrust))) {
 		t.Fatal("ProcessRawEvent rejected nameless close")
 	}

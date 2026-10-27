@@ -63,17 +63,15 @@ import (
 // unprocessed renderer input takes the belt's decode fallback.
 
 // frrAuthTokenUnsafe reports whether s cannot be emitted as a single vtysh
-// token. It mirrors config.frrTokenUnsafeIndex's character set deliberately: a
-// render belt that admits a character the commit gate rejects is a seam, and
-// this file exists because there was one.
+// token. It delegates to config.FRRSingleToken (#17035, R4-Q42-06): the
+// SSOT was exported so pkg/frr and the commit gate agree, and a belt that
+// retypes its character set admits a byte the gate rejects the moment the
+// gate's set gains one — the #9050 seam. The empty case is moot at the
+// sole caller: authTokenOrOmit resolves a non-empty secret first
+// (resolvedAuthSecret returns ok=false for ""), and FRRSingleToken("")
+// is false either way.
 func frrAuthTokenUnsafe(s string) bool {
-	for i := range s {
-		c := s[i]
-		if c == ' ' || c == '\t' || c < 0x20 || c == 0x7f {
-			return true
-		}
-	}
-	return false
+	return !config.FRRSingleToken(s)
 }
 
 // resolvedAuthSecret applies the single-decode provenance contract to

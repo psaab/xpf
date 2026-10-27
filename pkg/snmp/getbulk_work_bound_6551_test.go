@@ -508,6 +508,14 @@ func repeatOID(oid []int, n int) [][]int {
 // every large GETBULK response. The expected value is read back off a real
 // encoded response rather than recomputed, so this fails if the two encodings
 // ever drift apart.
+//
+// #17055: every case runs through BOTH buildResponse (v2c) and
+// buildV3Response (noAuthNoPriv, so the scopedPDU is on the wire in the
+// clear). Before consolidation the v3 copy was a separate loop the old
+// v2c-only pin could not see: a stray-element mutant inside every v3
+// varbind SEQUENCE passed the whole package. The v3 leg extracts the
+// varbind the same TLV-walking way and additionally decodes it with the
+// tightened decodeVarbindsFull, which requires exactly two elements.
 func TestVarbindEncodedLenMatchesEncoder_6551(t *testing.T) {
 	a := bulkTestAgent(1)
 	long := make([]byte, 300) // forces a multi-byte BER length header
@@ -536,7 +544,30 @@ func TestVarbindEncodedLenMatchesEncoder_6551(t *testing.T) {
 			resp := a.buildResponse([]byte("public"), 1, errNoError, 0, []varbind{tc.vb})
 			want := onlyVarbindEncodedLen(t, resp)
 			if got := varbindEncodedLen(tc.vb); got != want {
-				t.Fatalf("varbindEncodedLen = %d, encoder emitted %d bytes", got, want)
+				t.Fatalf("v2c: varbindEncodedLen = %d, encoder emitted %d bytes", got, want)
+			}
+		})
+		t.Run("v3/"+tc.name, func(t *testing.T) {
+			vbList := v3OnlyVarbindList17055(t, tc.vb)
+			_, listBody, err := berDecodeHeader(vbList)
+			if err != nil {
+				t.Fatalf("v3: varbind list header: %v", err)
+			}
+			if got, want := varbindEncodedLen(tc.vb), berEncodedLen(listBody); got != want {
+				t.Fatalf("v3: varbindEncodedLen = %d, encoder emitted %d bytes", got, want)
+			}
+			// Exactly-two-elements decode (kills the stray-element mutant).
+			// Degenerate OIDs (fewer than two components encode to an empty
+			// OID body) cannot be OID-decoded; those are covered by the
+			// length check above, as in onlyVarbindEncodedLen.
+			if len(tc.vb.oid) >= 2 {
+				vbs := decodeVarbindsFull(t, vbList)
+				if len(vbs) != 1 {
+					t.Fatalf("v3: decoded %d varbinds, want 1", len(vbs))
+				}
+				if vbs[0].valTag != tc.vb.tag {
+					t.Fatalf("v3: value tag = 0x%02x, want 0x%02x", vbs[0].valTag, tc.vb.tag)
+				}
 			}
 		})
 	}
@@ -548,6 +579,75 @@ func TestVarbindEncodedLenMatchesEncoder_6551(t *testing.T) {
 			t.Fatalf("%s: varbindEncodedLen = %d < floor %d", tc.name, n, minVarbindEncodedBytes)
 		}
 	}
+}
+
+// v3OnlyVarbindList17055 builds a noAuthNoPriv SNMPv3 GetResponse carrying
+// exactly vb and returns its varbind-list TLV bytes, walking the v3 envelope
+// (version / headerData / securityParameters / scopedPDU) by TLV headers.
+func v3OnlyVarbindList17055(t *testing.T, vb varbind) []byte {
+	t.Helper()
+	a := &Agent{
+		engineID:    []byte{0x80, 0x00, 0x1f, 0x88, 0x80, 0x17, 0x05, 0x05},
+		engineBoots: 1,
+		v3Users:     map[string]*usmUser{},
+	}
+	user := &usmUser{name: "nobody"}
+	resp := a.buildV3Response(7, 0, user, nil, 1, errNoError, 0, []varbind{vb})
+	if resp == nil {
+		t.Fatal("v3: buildV3Response returned nil")
+	}
+	_, body, err := berDecodeHeader(resp)
+	if err != nil {
+		t.Fatalf("v3: outer SEQUENCE: %v", err)
+	}
+	_, rest, err := berDecodeInteger(body) // version
+	if err != nil {
+		t.Fatalf("v3: version: %v", err)
+	}
+	// headerData SEQUENCE, then securityParameters OCTET STRING.
+	for i := range 2 {
+		n := berEncodedLen(rest)
+		if n <= 0 || n > len(rest) {
+			t.Fatalf("v3: envelope field %d length %d", i, n)
+		}
+		rest = rest[n:]
+	}
+	_, scopedBody, err := berDecodeHeader(rest) // scopedPDU SEQUENCE
+	if err != nil {
+		t.Fatalf("v3: scopedPDU: %v", err)
+	}
+	for i := range 2 { // contextEngineID, contextName OCTET STRINGs
+		n := berEncodedLen(scopedBody)
+		if n <= 0 || n > len(scopedBody) {
+			t.Fatalf("v3: scoped field %d length %d", i, n)
+		}
+		scopedBody = scopedBody[n:]
+	}
+	pduTag, pduBody, err := berDecodeHeader(scopedBody)
+	if err != nil || pduTag != pduGetResponse {
+		t.Fatalf("v3: PDU tag=0x%02x err=%v", pduTag, err)
+	}
+	_, pduRest, err := berDecodeInteger(pduBody) // request-id
+	if err != nil {
+		t.Fatalf("v3: request-id: %v", err)
+	}
+	_, pduRest, err = berDecodeInteger(pduRest) // error-status
+	if err != nil {
+		t.Fatalf("v3: error-status: %v", err)
+	}
+	_, pduRest, err = berDecodeInteger(pduRest) // error-index
+	if err != nil {
+		t.Fatalf("v3: error-index: %v", err)
+	}
+	tag, _, err := berDecodeHeader(pduRest)
+	if err != nil || tag != tagSequence {
+		t.Fatalf("v3: varbind list tag=0x%02x err=%v", tag, err)
+	}
+	n := berEncodedLen(pduRest)
+	if n <= 0 || n > len(pduRest) {
+		t.Fatalf("v3: varbind list length %d", n)
+	}
+	return pduRest[:n]
 }
 
 // onlyVarbindEncodedLen returns the encoded byte length of the single varbind in

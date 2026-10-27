@@ -3,10 +3,16 @@
 //! allocate / release / reserve for NAT64 pool ports. Zero private dependencies
 //! in either direction; every item is already `pub(crate)`.
 //!
-//! #6988 PURE CODE MOTION: every line below was moved verbatim from
-//! `nat/source.rs` lines 2354-2493. The only edits are the visibility
-//! widenings enumerated in `source/mod.rs`; no logic, no ordering and no
-//! signature changed.
+//! #6988: moved verbatim from `nat/source.rs` lines 2354-2493 at the
+//! split commit (d85c20ffdf, 2026-08-28; merged as 22b9cb22d0), with
+//! only the visibility widenings enumerated in `source/mod.rs`; no
+//! logic, ordering or signature changed in that move. That claim
+//! covers only the split: `allocate_nat64_pool_port_excluding`
+//! below (added by 96f18976de, #16011, 2026-10-23) is new code with
+//! a new signature, and this file has been edited repeatedly since.
+//! The split itself was verified by
+//! scripts/verify-nat-source-split-6988.py (pinned refs; it checks
+//! the split merge, not the current tree).
 
 use super::*;
 

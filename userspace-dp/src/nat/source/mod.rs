@@ -59,9 +59,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 // #6988: source.rs crossed the 2000-line REFACTOR tier and reached 3315.
-// Six clusters moved out as PURE CODE MOTION. Each was chosen for its
+// Six clusters moved out as pure code motion at the #7860 merge
+// (22b9cb22d0, 2026-08-28; split commit d85c20ffdf). Each was chosen for its
 // dependency cost, not its name: the ratio of lines moved to visibility
-// widenings required. The whole split needs exactly TWO widenings, both in
+// widenings required. The whole split needed exactly TWO widenings, both in
 // `failure.rs`:
 //
 //   SourceNatFailure::for_rule                -> pub(super)  (19 callers in match_rules)
