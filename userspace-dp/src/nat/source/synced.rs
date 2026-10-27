@@ -121,9 +121,11 @@ pub(crate) struct SyncedSourceNatDomains<'a> {
     /// The local static table's external identities, when the caller
     /// could resolve them. Consulted only for unknown provenance.
     pub static_externals: Option<&'a crate::nat::StaticExternalIdentities>,
-    /// The local NPTv6 external prefixes `(addr, len)`. A translated
-    /// source inside one is an NPTv6 rewrite, never interface SNAT.
-    pub nptv6_external_prefixes: &'a [(std::net::Ipv6Addr, u8)],
+    /// #17067: the local NPTv6 external prefixes, borrowed from the
+    /// SAME forwarding generation's `Nptv6State`. A translated source
+    /// inside one is an NPTv6 rewrite, never interface SNAT. Synced
+    /// callers are zone-blind (`owns_external(.., None)`).
+    pub nptv6_externals: Option<&'a [crate::nptv6::Nptv6External]>,
 }
 
 impl SyncedSourceNatDomains<'_> {
@@ -136,11 +138,10 @@ impl SyncedSourceNatDomains<'_> {
         if nat.nptv6 {
             return true;
         }
-        if let std::net::IpAddr::V6(v6) = rewrite_src
+        if let std::net::IpAddr::V6(_) = rewrite_src
             && self
-                .nptv6_external_prefixes
-                .iter()
-                .any(|(base, len)| ipv6_prefix_contains(*base, *len, v6))
+                .nptv6_externals
+                .is_some_and(|exts| exts.iter().any(|e| e.contains(rewrite_src, None)))
         {
             return true;
         }
@@ -152,18 +153,6 @@ impl SyncedSourceNatDomains<'_> {
                 .static_externals
                 .is_some_and(|s| s.covers_address(rewrite_src))
     }
-}
-
-/// True when `addr` falls inside the IPv6 prefix `base/len`.
-fn ipv6_prefix_contains(base: std::net::Ipv6Addr, len: u8, addr: std::net::Ipv6Addr) -> bool {
-    if len == 0 {
-        return true;
-    }
-    if len >= 128 {
-        return base == addr;
-    }
-    let host = u128::MAX >> len;
-    (u128::from(addr) & !host) == (u128::from(base) & !host)
 }
 
 #[cfg(test)]

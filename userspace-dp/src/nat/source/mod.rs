@@ -315,12 +315,13 @@ pub(crate) struct SourceNatRule {
     /// table, so the mint path never rescans the whole table. `None`
     /// when the static table is empty.
     pub(crate) iface_static_externals: Option<Arc<crate::nat::InterfaceStaticView>>,
-    /// #16015: installed NPTv6 zoned external prefixes covering this
+    /// #16015: installed NPTv6 external prefixes covering this
     /// rule's v6 pool (see `wire_nptv6_overlap_peers`). NPTv6 publishes
     /// statelessly with the port unchanged, so a mint inside the prefix
     /// can duplicate its wire tuple at the SAME port. `None` when no
     /// prefix covers this rule's pool — every strict-accepted config.
-    pub(crate) nptv6_externals: Option<Arc<Vec<(std::net::Ipv6Addr, u8, String)>>>,
+    /// #17067: carries the single shared `Nptv6State` externals view.
+    pub(crate) nptv6_externals: Option<Arc<[crate::nptv6::Nptv6External]>>,
 }
 
 /// One source-NAT allocator identity: two rules sharing this key share one
