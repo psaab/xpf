@@ -92,8 +92,16 @@ func TestRunShutdownSequenceStopsAggregatorAndIPsecRebind(t *testing.T) {
 		t.Fatal("precondition: enabling reporting must arm + publish the aggregator")
 	}
 
-	// Arm the IPsec DHCP-rebind retry loop via a failing lease-change rebind.
-	d.reapplyIPsecForLeaseChange(dhcpBoundIPsecConfig())
+	// Arm the IPsec DHCP-rebind retry loop via a failing lease-change
+	// rebind, driven under a test-held applySem as
+	// managementOnlyLeaseRefresh does in production (#17071).
+	func() {
+		if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+			t.Fatalf("acquire applySem: %v", err)
+		}
+		defer d.applySem.Release(1)
+		d.reapplyIPsecLocked(dhcpBoundIPsecConfig())
+	}()
 	d.ipsecRebindMu.Lock()
 	active := d.ipsecRebindRetryActive
 	d.ipsecRebindMu.Unlock()
