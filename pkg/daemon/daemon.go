@@ -22,7 +22,6 @@ import (
 	"github.com/psaab/xpf/pkg/coalesce"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcprelay"
@@ -988,7 +987,6 @@ type Daemon struct {
 	aggWg      sync.WaitGroup
 	aggStopped bool
 	vrrpMgr    *vrrp.Manager
-	gc         *conntrack.GC
 	startTime  time.Time // daemon start time; used to suppress stale config sync
 
 	// #846: applySem (capacity 1) serializes applyConfig + the

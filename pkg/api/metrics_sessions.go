@@ -38,40 +38,6 @@ type sessionGaugeSnapshot struct {
 	dnat        int
 }
 
-func (c *xpfCollector) collectConntrackGCMetrics(ch chan<- prometheus.Metric) {
-	if c.deps.gc == nil {
-		return
-	}
-	stats := c.deps.gc.Stats()
-	c.emitConstMetric(ch, c.gcSweepDuration, prometheus.GaugeValue,
-		stats.LastSweepDuration.Seconds())
-	lastSweepTimestamp := 0.0
-	if !stats.LastSweepTime.IsZero() {
-		lastSweepTimestamp = float64(stats.LastSweepTime.Unix())
-	}
-	c.emitConstMetric(ch, c.gcSweepTimestamp, prometheus.GaugeValue,
-		lastSweepTimestamp)
-	c.emitConstMetric(ch, c.gcSweepsTotal, prometheus.CounterValue,
-		float64(stats.SweepsTotal))
-	c.emitConstMetric(ch, c.gcExpiredDeletedTotal, prometheus.CounterValue,
-		float64(stats.ExpiredDeletedTotal))
-	c.emitConstMetric(ch, c.gcDeadlinesSaturatedTotal, prometheus.CounterValue,
-		float64(stats.DeadlinesSaturatedTotal))
-	c.emitConstMetric(ch, c.gcPersistentNATExpiredTotal, prometheus.CounterValue,
-		float64(stats.PersistentNATExpiredTotal))
-	c.emitConstMetric(ch, c.gcErrorsTotal, prometheus.CounterValue,
-		float64(stats.SweepIterErrorsTotal), "iterate")
-	c.emitConstMetric(ch, c.gcErrorsTotal, prometheus.CounterValue,
-		float64(stats.SweepDeleteErrorsTotal), "delete")
-	c.emitConstMetric(ch, c.gcErrorsTotal, prometheus.CounterValue,
-		float64(stats.SessionCountSyncErrorsTotal), "session_count_sync")
-	active := 0.0
-	if c.deps.gc.IsAggressiveAging() {
-		active = 1
-	}
-	c.emitConstMetric(ch, c.gcAggressiveAging, prometheus.GaugeValue, active)
-}
-
 func (c *xpfCollector) collectSessionGauges(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
 	c.collectSessionGaugesContext(context.Background(), ch, dp)
 }

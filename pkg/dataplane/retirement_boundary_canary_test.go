@@ -77,7 +77,6 @@ var legacyDataplaneImportAllowlist = map[string]string{
 	"pkg/cluster/sync_protocol.go":                   "wire protocol still carries legacy session records",
 	"pkg/cluster/sync_zone_rg.go":                    "#11012 per-session owner predicates and bulk-start snapshot consume legacy dataplane SessionValue/V6 wire types; no new DataPlane surface",
 	"pkg/cluster/test_seams.go":                      "#9631 test-only seam file in the production package (external HA cells drive it without internal-export tricks, peer of pkg/dhcp/test_seams.go); the generation/journal observers name the same legacy dataplane.SessionKey the sync_conn_gen.go guards already name — no new dataplane surface",
-	"pkg/conntrack/gc.go":                            "GC still uses root session-domain types until those move out of pkg/dataplane",
 	"pkg/daemon/daemon.go":                           "daemon owns dataplane.RuntimeDataPlane; legacyDP() accessor was deleted in #1519 — only the RuntimeDataPlane field + LastApplyResultOf adapter remain",
 	"pkg/daemon/daemon_apply_dataplane.go":           "#5661 pure-motion split of daemon_apply.go: dataplane+HA core apply still adapts legacy compile/apply metadata",
 	"pkg/daemon/daemon_apply_tail.go":                "#5661 pure-motion split of daemon_apply.go: tail reconcile still names legacy dataplane types",
@@ -2622,44 +2621,6 @@ func userspaceXDPEntryProgramConstantDrift(t *testing.T, roots []string) ([]stri
 	sort.Strings(found)
 	sort.Strings(violations)
 	return found, violations
-}
-
-func TestConntrackGCConstructorDoesNotAcceptLegacyDataPlane(t *testing.T) {
-	t.Parallel()
-
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join("..", "conntrack", "gc.go"), nil, 0)
-	if err != nil {
-		t.Fatalf("parse conntrack/gc.go: %v", err)
-	}
-
-	var foundNewGC bool
-	var legacyRefs []string
-	ast.Inspect(file, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && canaryExprString(sel) == "dataplane.DataPlane" {
-			legacyRefs = append(legacyRefs, fset.Position(sel.Pos()).String())
-		}
-
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "NewGC" {
-			return true
-		}
-		foundNewGC = true
-		if fn.Type.Params == nil || len(fn.Type.Params.List) == 0 {
-			t.Fatal("conntrack.NewGC has no provider parameter")
-		}
-		if got := canaryExprString(fn.Type.Params.List[0].Type); got != "RuntimeDomainProvider" {
-			t.Fatalf("conntrack.NewGC provider = %s, want RuntimeDomainProvider", got)
-		}
-		return true
-	})
-
-	if !foundNewGC {
-		t.Fatal("conntrack.NewGC not found")
-	}
-	if len(legacyRefs) > 0 {
-		t.Fatalf("conntrack GC must not reference dataplane.DataPlane: %v", legacyRefs)
-	}
 }
 
 func compilerDataplaneCalls(t *testing.T) map[string]bool {
