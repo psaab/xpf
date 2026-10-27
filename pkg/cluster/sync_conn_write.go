@@ -863,7 +863,7 @@ func (s *SessionSync) rejournalScopedTail(tail [][]byte) {
 // this node is still alive is sync traffic — and the sync-level heartbeat is
 // normally emitted only on the 10s read-timeout cadence, far coarser than
 // the 2s recency window of the peer's heartbeat-timeout suppression guard
-// (shouldSuppressPeerHeartbeatTimeout). Best-effort: a no-op when no peer
+// (syncSuppressesPeerTimeoutLocked, #17056). Best-effort: a no-op when no peer
 // connection exists; a write error follows the standard sender pattern and
 // triggers reconnect via handleDisconnect.
 func (s *SessionSync) SendLivenessKeepalive() {

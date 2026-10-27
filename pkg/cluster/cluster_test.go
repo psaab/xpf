@@ -2129,7 +2129,7 @@ func TestHandlePeerTimeout_FencingDisabled(t *testing.T) {
 	}
 }
 
-func TestHandlePeerTimeout_SuppressedByGuard(t *testing.T) {
+func TestHandlePeerTimeout_SuppressedBySyncSource17056(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(
 		makeRG(0, false, map[int]int{0: 200, 1: 100}),
@@ -2145,17 +2145,12 @@ func TestHandlePeerTimeout_SuppressedByGuard(t *testing.T) {
 	}
 	m.mu.Unlock()
 
-	called := false
-	m.SetPeerTimeoutGuard(func() (bool, string) {
-		called = true
-		return true, "recent control-link sync activity"
-	})
+	// #17056: suppression is decided inside the Manager from the published
+	// sync source (fresh peer sync traffic), with no external guard.
+	m.SetFakePeerSyncSourceForTesting(true, 100*time.Millisecond, true, true)
 
 	m.handlePeerTimeout()
 
-	if !called {
-		t.Fatal("peer timeout guard was not called")
-	}
 	if !m.PeerAlive() {
 		t.Fatal("peer should remain alive when timeout is suppressed")
 	}

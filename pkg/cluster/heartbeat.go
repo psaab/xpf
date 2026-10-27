@@ -48,7 +48,7 @@ const (
 	// grace matches that window. A live peer whose heartbeats are briefly
 	// lost past it is still covered by the sync-recency guard
 	// handlePeerTimeout consults (the daemon's
-	// shouldSuppressPeerHeartbeatTimeout, #1792). The never-seen arm keeps the
+	// syncSuppressesPeerTimeoutLocked, #1792/#17056). The never-seen arm keeps the
 	// cold-boot floor: a replacement for a receiver that never saw the peer is
 	// not armed, so it IS a cold start.
 	heartbeatRestartGrace = 5 * time.Second

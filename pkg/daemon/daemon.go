@@ -863,7 +863,6 @@ type Daemon struct {
 	// sockets and capture probed destinations without touching the network
 	// (#5451).
 	neighborWarmDialer neighborWarmDialer
-	hbSuppressStart    atomic.Int64 // CLOCK_MONOTONIC nanos of first heartbeat suppression; 0 = inactive (#1792)
 	syncPrimeRetryGen  atomic.Uint64
 	// syncPrimeRetryBeforeSleepForTest blocks the retry loop at the
 	// sleep boundary for the 10387 drain-window cell. Nil in production.

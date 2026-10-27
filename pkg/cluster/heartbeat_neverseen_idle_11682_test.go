@@ -47,9 +47,7 @@ func TestColdBootIdleSyncAliveNeverConfirmedAbsent11682(t *testing.T) {
 		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
 		ss.stats.Connected.Store(true)
 		ss.lastPeerRxMono.Store(MonotonicNanos() - age.Nanoseconds())
-		m.SetPeerNeverSeenSyncFreshFunc(func() bool {
-			return ss.IsConnected() && ss.PeerRecentlyActiveWithinSilenceWindow()
-		})
+		m.SetPeerSyncSource(ss)
 
 		r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
 		r.startedAt = time.Now().Add(-(heartbeatStartupGrace + time.Second))
@@ -88,9 +86,7 @@ func TestColdBootIdleSyncAckCadenceHoldsNeverSeenPeer11682(t *testing.T) {
 	// receive loop can re-establish the proof used below.
 	ss.lastPeerRxMono.Store(MonotonicNanos() - time.Second.Nanoseconds())
 
-	m.SetPeerNeverSeenSyncFreshFunc(func() bool {
-		return ss.IsConnected() && ss.PeerRecentlyActiveWithinSilenceWindow()
-	})
+	m.SetPeerSyncSource(ss)
 	r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
 	r.startedAt = time.Now().Add(-(heartbeatStartupGrace + time.Second))
 
@@ -225,9 +221,7 @@ func TestColdBootTrulySilentSyncStillPromotes11682(t *testing.T) {
 			if tc.everRx {
 				ss.lastPeerRxMono.Store(MonotonicNanos() - tc.age.Nanoseconds())
 			}
-			m.SetPeerNeverSeenSyncFreshFunc(func() bool {
-				return ss.IsConnected() && ss.PeerRecentlyActiveWithinSilenceWindow()
-			})
+			m.SetPeerSyncSource(ss)
 
 			r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
 			r.startedAt = time.Now().Add(-(heartbeatStartupGrace + time.Second))
