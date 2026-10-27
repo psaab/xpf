@@ -211,6 +211,12 @@ const (
 	// marker appended to session frames. Senders omit it until this bit is
 	// advertised, preserving the legacy frame shape for older peers.
 	capFlag2PrimaryLiveness uint8 = 1 << 2
+	// capFlag2PersistentNatLeaseTypedPool (#17099): the peer decodes
+	// persistent-NAT lease types 52/53, which carry the typed pool
+	// identity (pool_kind + nat64_prefix). Absent or unlearned peers
+	// receive the legacy 41/43/50/51 layouts with the typed fields
+	// stripped, so their helper decode-fallback still applies.
+	capFlag2PersistentNatLeaseTypedPool uint8 = 1 << 3
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
@@ -223,7 +229,7 @@ const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capF
 // capability byte (#16756, extended by #16877 and #16880), appended after the
 // wire-version field in syncMsgPeerCapabilities. Compile-time for the same
 // reason as localCapabilityFlags: a property of the binary, not runtime state.
-const localCapabilityFlags2 = capFlag2ConfigApplyAck | capFlag2PersistentNatLeaseProvenance | capFlag2PrimaryLiveness
+const localCapabilityFlags2 = capFlag2ConfigApplyAck | capFlag2PersistentNatLeaseProvenance | capFlag2PrimaryLiveness | capFlag2PersistentNatLeaseTypedPool
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -460,6 +466,17 @@ func (s *SessionSync) PersistentNatLeaseProvenanceCapable() bool {
 		return false
 	}
 	return uint8(s.peerCapabilityFlags2.Load())&capFlag2PersistentNatLeaseProvenance != 0
+}
+
+// PersistentNatLeaseTypedPoolCapable reports whether the peer advertised
+// support for typed-pool persistent-NAT lease frames (types 52/53,
+// #17099). Senders must also require peerCapabilitiesLearned and fall
+// back to legacy frames while discovery is pending.
+func (s *SessionSync) PersistentNatLeaseTypedPoolCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags2.Load())&capFlag2PersistentNatLeaseTypedPool != 0
 }
 
 // PrimaryLivenessCapable reports whether the current peer advertised support

@@ -253,7 +253,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgPersistentNatLeaseScoped:
 		return s.handlePersistentNatLeaseScoped(conn, payload)
 	case syncMsgPersistentNatLeaseGeneration, syncMsgPersistentNatLeaseDeterministic,
-		syncMsgPersistentNatLeaseProvenance, syncMsgPersistentNatLeaseDeterministicProvenance:
+		syncMsgPersistentNatLeaseProvenance, syncMsgPersistentNatLeaseDeterministicProvenance,
+		syncMsgPersistentNatLeaseTypedPool, syncMsgPersistentNatLeaseDeterministicTypedPool:
 		return s.handlePersistentNatLeaseGeneration(conn, msgType, payload)
 	case syncMsgDHCPLeaseV4:
 		return s.handleDHCPLeaseV4(conn, payload)

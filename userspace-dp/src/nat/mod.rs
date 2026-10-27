@@ -354,7 +354,7 @@ pub(crate) use allocator::{
     DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
     MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentLeaseHold,
     PersistentLeaseOwner, PersistentSourceKey, PortAllocator, PortAllocatorSnapshot, ReseedOutcome,
-    SourceNatReservationSnapshot,
+    SourceNatReservationSnapshot, DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
     deterministic_indices_v4, sticky_pool_index,
 };
 pub(crate) use destination::{DnatKey, DnatLookup, DnatTable, DnatValue};

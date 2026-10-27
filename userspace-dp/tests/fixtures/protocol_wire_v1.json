@@ -890,6 +890,7 @@
           }
         ],
         "pool": "p16132",
+        "pool_kind": 1,
         "protocol": 6,
         "remaining_ns": 123,
         "remote_ip": "8.8.8.8",
@@ -1025,6 +1026,7 @@
           }
         ],
         "pool": "p16132",
+        "pool_kind": 1,
         "protocol": 6,
         "remaining_ns": 123,
         "remote_ip": "8.8.8.8",
@@ -1111,6 +1113,7 @@
         "src_ip": "",
         "src_mac": "",
         "src_port": 0,
+        "stream_seq": 0,
         "tcp_close_class": 0,
         "tcp_handshake_state": 0,
         "timestamp": "1970-01-01T00:00:00Z",
@@ -1753,6 +1756,7 @@
     "deterministic_host_prefix_len": 32,
     "deterministic_mode": 2,
     "egress_scope": 11,
+    "nat64_prefix": "64:ff9b::",
     "permit_any_remote": true,
     "permitted_remotes": [
       {
@@ -1761,6 +1765,7 @@
       }
     ],
     "pool": "p1",
+    "pool_kind": 2,
     "protocol": 6,
     "remaining_ns": 123,
     "remote_ip": "8.8.8.8",
@@ -2125,6 +2130,7 @@
     "deterministic_mode": 2,
     "egress_scope": 11,
     "mint_from_zone": "trust",
+    "nat64_prefix": "64:ff9b::",
     "permit_any_remote": true,
     "permitted_remotes": [
       {
@@ -2133,6 +2139,7 @@
       }
     ],
     "pool": "p1",
+    "pool_kind": 2,
     "protocol": 6,
     "remaining_ns": 123,
     "remote_ip": "8.8.8.8",
@@ -4344,6 +4351,7 @@
     "src_ip": "",
     "src_mac": "",
     "src_port": 0,
+    "stream_seq": 0,
     "tcp_close_class": 0,
     "tcp_handshake_state": 0,
     "timestamp": "1970-01-01T00:00:00Z",
@@ -4555,8 +4563,8 @@
       }
     ],
     "policy_rule_id": "",
-    "primary_liveness": true,
     "pptp_call_ids": 0,
+    "primary_liveness": true,
     "protocol": 0,
     "purge_tunnel_variants": false,
     "rev_packets": 0,
@@ -4607,10 +4615,14 @@
     "allocations_total": 0,
     "allocator_id": 0,
     "exhaustion_total": 0,
+    "flow_shard_lock_acquisitions_total": 0,
+    "flow_shard_lock_contended_total": 0,
     "idle_lease_import_capacity_total": 0,
     "live_flows": 0,
     "live_lock_acquisitions_total": 0,
     "live_lock_contended_total": 0,
+    "live_write_lock_acquisitions_total": 0,
+    "live_write_lock_contended_total": 0,
     "max_tracked_flows": 0,
     "persistent_admitted_total": 0,
     "persistent_declined_total": 0,
@@ -5009,6 +5021,7 @@
     "zone_id": 0
   },
   "zone_snapshot": {
+    "functional": false,
     "host_inbound_configured": false,
     "host_inbound_protocols": [],
     "host_inbound_protocols_except": [],

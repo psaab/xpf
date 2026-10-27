@@ -538,3 +538,62 @@ func TestPersistentNatLeaseMalformedSetDoesNotAdvanceSequence11486(t *testing.T)
 		t.Fatalf("valid lower-sequence set was suppressed after malformed high-sequence input; sets=%d", sets)
 	}
 }
+
+// TestPersistentNatLeaseTypedPoolRoundTrip17099 pins the #17099 typed-pool
+// successor layouts (types 52/53): PoolKind/Nat64Prefix survive the binary
+// cluster codec, legacy layouts decode them as absent (kind 0), and the
+// capability gate selects typed frames only for a typed-capable peer.
+func TestPersistentNatLeaseTypedPoolRoundTrip17099(t *testing.T) {
+	lease := sampleIdleLease()
+	lease.Pool = "nat64-deterministic-0"
+	lease.PoolKind = 1
+	batch := sampleIdleLeaseBatch11486(lease)
+	frames, dropped, err := encodePersistentNatLeaseBatchFramesCountedLayoutCoreTyped(batch, false, true, true)
+	if err != nil || dropped != 0 || len(frames) != 1 {
+		t.Fatalf("typed encode: frames=%d dropped=%d err=%v", len(frames), dropped, err)
+	}
+	if !frames[0].typedPool {
+		t.Fatal("frame must be marked typedPool")
+	}
+	got, ok := decodePersistentNatLeaseBatchPayloadTypedPool(framesPayload(t, frames[0]), false)
+	if !ok {
+		t.Fatal("typed batch failed to decode")
+	}
+	if len(got.Leases) != 1 || got.Leases[0].PoolKind != 1 || got.Leases[0].Pool != "nat64-deterministic-0" {
+		t.Fatalf("typed round trip = %+v", got.Leases)
+	}
+	// Legacy encode strips the typed identity (decode fallback).
+	legacyFrames, _, err := encodePersistentNatLeaseBatchFramesCountedLayoutCoreTyped(batch, false, false, false)
+	if err != nil || len(legacyFrames) != 1 {
+		t.Fatalf("legacy encode: err=%v frames=%d", err, len(legacyFrames))
+	}
+	legacyGot, ok := decodePersistentNatLeaseBatchPayload(framesPayload(t, legacyFrames[0]))
+	if !ok || len(legacyGot.Leases) != 1 || legacyGot.Leases[0].PoolKind != 0 {
+		t.Fatalf("legacy round trip = %+v ok=%v", legacyGot.Leases, ok)
+	}
+	// NAT64 typed record carries its stable prefix.
+	nat64Lease := sampleIdleLease()
+	nat64Lease.Pool = "nat64-0"
+	nat64Lease.PoolKind = 3
+	nat64Lease.Nat64Prefix = "64:ff9b::"
+	nat64Batch := sampleIdleLeaseBatch11486(nat64Lease)
+	nat64Frames, _, err := encodePersistentNatLeaseBatchFramesCountedLayoutCoreTyped(nat64Batch, false, true, true)
+	if err != nil || len(nat64Frames) != 1 {
+		t.Fatalf("nat64 typed encode: err=%v", err)
+	}
+	nat64Got, ok := decodePersistentNatLeaseBatchPayloadTypedPool(framesPayload(t, nat64Frames[0]), false)
+	if !ok || len(nat64Got.Leases) != 1 || nat64Got.Leases[0].PoolKind != 3 ||
+		nat64Got.Leases[0].Nat64Prefix != "64:ff9b::" {
+		t.Fatalf("nat64 typed round trip = %+v ok=%v", nat64Got.Leases, ok)
+	}
+	if localCapabilityFlags2&capFlag2PersistentNatLeaseTypedPool == 0 {
+		t.Fatal("local build must advertise typed-pool capability")
+	}
+}
+
+func framesPayload(t *testing.T, frame persistentNatLeaseFrame) []byte {
+	t.Helper()
+	// Frame payload already carries envelope+leases; strip the full-set
+	// trailer is not present here, so it decodes directly.
+	return frame.payload
+}

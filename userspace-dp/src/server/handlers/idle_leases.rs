@@ -11,7 +11,9 @@
 
 use super::super::ServerState;
 use crate::ControlResponse;
-use crate::afxdp::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
+use crate::afxdp::{
+    IdleLeaseImportCounts, LeasePoolId, LeasePoolMode, PoolDisplayLease, PoolIdleLease,
+};
 use crate::nat::{
     IdleLeaseRecord, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS, MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS,
 };
@@ -68,6 +70,8 @@ fn to_wire(rec: &PoolIdleLease) -> IdleLeaseWire {
     };
     IdleLeaseWire {
         pool_name: rec.pool_name.clone(),
+        pool_kind: rec.pool.wire_kind(),
+        nat64_prefix: rec.pool.nat64_prefix_text(),
         protocol: rec.lease.protocol,
         src_ip: rec.lease.src_ip.to_string(),
         src_port: rec.lease.src_port,
@@ -204,7 +208,30 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
         .iter()
         .map(|remote| Some((remote.ip.parse::<IpAddr>().ok()?, remote.port)))
         .collect::<Option<Vec<_>>>()?;
+    // #17099: typed identity wins. Kind 0/absent is the one-release legacy
+    // fallback: keep the string as a source identity and let the
+    // coordinator's legacy NAT64 parse handle it only when no source pool
+    // of that name exists. Unknown kinds / missing NAT64 prefix refuse.
+    let pool = match w.pool_kind {
+        0 | 1 => LeasePoolId::Source(w.pool_name.clone()),
+        2 | 3 => {
+            let parsed: std::net::Ipv6Addr = w.nat64_prefix.parse().ok()?;
+            let octets = parsed.octets();
+            let mut prefix = [0u8; 12];
+            prefix.copy_from_slice(&octets[..12]);
+            LeasePoolId::Nat64 {
+                prefix,
+                mode: if w.pool_kind == 2 {
+                    LeasePoolMode::Deterministic
+                } else {
+                    LeasePoolMode::RoundRobin
+                },
+            }
+        }
+        _ => return None,
+    };
     Some(PoolIdleLease {
+        pool,
         pool_name: w.pool_name.clone(),
         lease: IdleLeaseRecord {
             protocol: w.protocol,
@@ -396,6 +423,8 @@ mod tests {
     fn wire() -> IdleLeaseWire {
         IdleLeaseWire {
             pool_name: "P".to_string(),
+            pool_kind: 1,
+            nat64_prefix: String::new(),
             protocol: 6,
             routing_scope: Some(0),
             egress_scope: Some(0),
@@ -798,6 +827,8 @@ fn to_display_wire(rec: &PoolDisplayLease) -> DisplayLeaseWire {
     };
     DisplayLeaseWire {
         pool_name: rec.pool_name.clone(),
+        pool_kind: rec.pool.wire_kind(),
+        nat64_prefix: rec.pool.nat64_prefix_text(),
         protocol: rec.lease.protocol,
         src_ip: rec.lease.src_ip.to_string(),
         src_port: rec.lease.src_port,

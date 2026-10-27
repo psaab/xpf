@@ -342,7 +342,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // the target-lookup slot of a four-priority per-prefix sequence and compete
 // with kernel-model leaks by shared priority. A v75 helper uses the old
 // ordering and may select a broader leak, so exact snapshot equality refuses.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 76;
+// v76 -> v77 (#17099): idle/display lease records carry the typed pool
+// identity (pool_kind + nat64_prefix). A v76 helper drops both and falls
+// back to the in-band string parse, misrouting a same-named source pool.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 77;
 
 /// #16589: hard cap on lease rows in ONE paged lease-export response.
 /// Sized so even a worst-case row (many permitted remotes) stays far
@@ -1677,6 +1680,22 @@ fn is_empty_permitted_remotes(v: &Vec<PermittedRemoteWire>) -> bool {
 pub(crate) struct IdleLeaseWire {
     #[serde(rename = "pool", default)]
     pub pool_name: String,
+    /// #17099: typed pool identity. 0/absent = legacy string-only record
+    /// (decode fallback: infer from the legacy `pool` string). 1 = source
+    /// pool (identity is `pool_name`); 2 = NAT64 deterministic (identity is
+    /// `nat64_prefix`); 3 = NAT64 round-robin (identity is `nat64_prefix`).
+    /// A Junos source pool can be named `nat64-deterministic-0`, so the
+    /// legacy string alone must never route a record into the NAT64 arms.
+    #[serde(rename = "pool_kind", default, skip_serializing_if = "is_zero_u8")]
+    pub pool_kind: u8,
+    /// #17099: stable NAT64 prefix identity (`prefix_bytes` as dotted IPv6
+    /// text, e.g. `64:ff9b::`). Present iff `pool_kind` is 2 or 3.
+    #[serde(
+        rename = "nat64_prefix",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub nat64_prefix: String,
     #[serde(default)]
     pub protocol: u8,
     #[serde(rename = "src_ip", default)]
@@ -1778,6 +1797,16 @@ pub(crate) struct IdleLeaseWire {
 pub(crate) struct DisplayLeaseWire {
     #[serde(rename = "pool", default)]
     pub pool_name: String,
+    /// #17099: see `IdleLeaseWire::pool_kind`.
+    #[serde(rename = "pool_kind", default, skip_serializing_if = "is_zero_u8")]
+    pub pool_kind: u8,
+    /// #17099: see `IdleLeaseWire::nat64_prefix`.
+    #[serde(
+        rename = "nat64_prefix",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub nat64_prefix: String,
     #[serde(default)]
     pub protocol: u8,
     #[serde(rename = "src_ip", default)]
