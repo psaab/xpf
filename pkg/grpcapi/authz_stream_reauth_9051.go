@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -54,6 +55,77 @@ type reauthServerStream struct {
 
 func (s reauthServerStream) Context() context.Context { return s.ctx }
 
+// authzRecvStream defers the request-dependent half of stream
+// authorization to the first RecvMsg (#17175).
+//
+// The generated server-streaming wrapper decodes the request by calling
+// RecvMsg on the stream the interceptor handed it, BEFORE invoking the
+// handler body. Wrapping that stream lets the interceptor run the full
+// authorizeRPCContext with the decoded message at exactly that point —
+// before any handler logic, before any Send — and retain the message so
+// the #9051 tick re-prices the same arguments instead of nil.
+//
+// retained/authCtx are written by the handler goroutine (first RecvMsg)
+// and read by the watcher goroutine (tick); mu guards both. Context()
+// returns the authorized context once the first message is admitted, so
+// the handler sees the exactly-admitted principal as the unary path
+// does; before that it returns baseCtx, whose parent chain still
+// carries the open-time authorized principal.
+type authzRecvStream struct {
+	grpc.ServerStream
+	s          *Server
+	fullMethod string
+	baseCtx    context.Context
+
+	mu       sync.Mutex
+	decided  bool
+	retained any
+	authCtx  context.Context
+}
+
+func (w *authzRecvStream) Context() context.Context {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.authCtx != nil {
+		return w.authCtx
+	}
+	return w.baseCtx
+}
+
+// RecvMsg runs the deferred full authorization on the first message.
+// A denied first message returns the PermissionDenied verdict from
+// RecvMsg, which the generated wrapper propagates before the handler
+// body runs — the client sees the denial, never stream output.
+func (w *authzRecvStream) RecvMsg(m any) error {
+	if err := w.ServerStream.RecvMsg(m); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	already := w.decided
+	w.decided = true
+	w.retained = m
+	w.mu.Unlock()
+	if already {
+		return nil
+	}
+	authorizedCtx, err := w.s.authorizeRPCContext(w.baseCtx, w.fullMethod, m)
+	if err != nil {
+		return err
+	}
+	w.mu.Lock()
+	w.authCtx = authorizedCtx
+	w.mu.Unlock()
+	return nil
+}
+
+// retainedRequest returns the decoded first message (nil before it
+// arrives) and whether the deferred decision has run.
+func (w *authzRecvStream) retainedRequest() (any, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.retained, w.decided
+}
+
 // authorizeStreamContinuously runs handler with a context that is cancelled as
 // soon as the principal stops being authorized for fullMethod.
 //
@@ -69,6 +141,7 @@ func (s *Server) authorizeStreamContinuously(
 	ss grpc.ServerStream,
 	fullMethod string,
 	handler grpc.StreamHandler,
+	authorizedCtx context.Context,
 ) error {
 	ctx, cancel := context.WithCancel(ss.Context())
 	defer cancel()
@@ -87,6 +160,26 @@ func (s *Server) authorizeStreamContinuously(
 	// the restore across sequential runs. All var reads are now sequenced
 	// in the interceptor body.
 	interval := streamReauthInterval9051
+
+	// #17175: for a request-dependent stream, wrap so the first RecvMsg
+	// runs the request-dependent gates and retains the message. The
+	// watcher below re-prices THAT message on each tick — never nil.
+	// For a request-independent stream the open verdict was already the
+	// full verdict, and the tick re-prices with the retained (typed
+	// empty) message the wrapper captured, which decides identically.
+	recv := &authzRecvStream{
+		ServerStream: ss,
+		s:            s,
+		fullMethod:   fullMethod,
+		baseCtx:      ctx,
+	}
+	needsReq := streamNeedsRequest17175(fullMethod)
+	if !needsReq {
+		// Already fully authorized at open; RecvMsg only retains.
+		recv.decided = true
+		recv.authCtx = authorizedCtx
+	}
+
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -97,11 +190,30 @@ func (s *Server) authorizeStreamContinuously(
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if err := s.authorizeRPC(ctx, fullMethod, nil); err != nil {
+				var tickErr error
+				if req, decided := recv.retainedRequest(); decided {
+					// Re-price the retained decoded message — never
+					// nil (#17175).
+					_, tickErr = s.authorizeRPCContext(ctx, fullMethod, req)
+				} else if needsReq {
+					// No message yet: nothing has been served, but
+					// the class may have been revoked wholesale
+					// (#9051). Re-check the coarse floor; the full
+					// request-dependent verdict runs on the first
+					// RecvMsg against the then-current config, so
+					// a principal revoked before its first message
+					// is still denied before any output.
+					_, tickErr = s.authorizeStreamOpenContext(ctx, fullMethod)
+				} else if req := emptyStreamRequest17175(fullMethod); req != nil {
+					_, tickErr = s.authorizeRPCContext(ctx, fullMethod, req)
+				} else {
+					_, tickErr = s.authorizeStreamOpenContext(ctx, fullMethod)
+				}
+				if tickErr != nil {
 					slog.Warn("gRPC stream terminated: the principal is no longer "+
 						"authorized for this method (#9051)",
-						"method", fullMethod, "reason", err.Error())
-					revoked <- err
+						"method", fullMethod, "reason", tickErr.Error())
+					revoked <- tickErr
 					cancel()
 					return
 				}
@@ -109,7 +221,7 @@ func (s *Server) authorizeStreamContinuously(
 		}
 	}()
 
-	herr := handler(srv, reauthServerStream{ServerStream: ss, ctx: ctx})
+	herr := handler(srv, recv)
 	// #9903 F-128: consult the revocation BEFORE the handler error. The
 	// watcher sends to revoked (buffered) BEFORE cancelling, so when the
 	// handler returns *because of* the revocation, revoked is already
