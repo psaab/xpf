@@ -8,17 +8,17 @@ fn policy_defaults_to_cross_nic_auto() {
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
     assert_eq!(policy.mode, SharedUmemMode::CrossNic);
     assert!(policy.interfaces.is_empty());
-    assert!(policy.phase0_audit.is_none());
 }
 
 #[test]
 fn explicit_off_disables_shared_umem() {
     let snapshot = ConfigSnapshot {
-        userspace: json!({
+        userspace: serde_json::from_value(json!({
             "shared_umem": {
                 "mode": "off"
             }
-        }),
+        }))
+        .unwrap(),
         ..ConfigSnapshot::default()
     };
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
@@ -28,12 +28,13 @@ fn explicit_off_disables_shared_umem() {
 #[test]
 fn explicit_interfaces_limit_policy_candidates() {
     let snapshot = ConfigSnapshot {
-        userspace: json!({
+        userspace: serde_json::from_value(json!({
             "shared_umem": {
                 "mode": "cross-nic",
                 "interfaces": ["lan0", "wan0"]
             }
-        }),
+        }))
+        .unwrap(),
         ..ConfigSnapshot::default()
     };
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
@@ -46,44 +47,23 @@ fn explicit_interfaces_limit_policy_candidates() {
 }
 
 #[test]
-fn artifact_interfaces_do_not_gate_or_select_runtime_policy() {
+fn unknown_shared_umem_keys_are_ignored() {
+    // #17134: unknown keys in the typed subtree (e.g. a future Go
+    // `SharedUMEMConfig` field, or a retired artifact object
+    // an older daemon might still emit) must be tolerated, not rejected:
+    // no `deny_unknown_fields`, rolling-upgrade safe.
+    let userspace: crate::protocol::UserspaceSnapshot = serde_json::from_value(json!({
+        "workers": 2,
+        "shared_umem": {
+            "mode": "cross-nic",
+            "interfaces": ["lan0", "wan0"],
+            "legacy_artifact": {"passed": false, "selected_interfaces": ["dmz0"]},
+            "future_field": 1
+        }
+    }))
+    .expect("unknown shared_umem keys tolerated");
     let snapshot = ConfigSnapshot {
-        userspace: json!({
-            "shared_umem": {
-                "mode": "cross-nic",
-                "phase0_artifact": {
-                    "passed": true,
-                    "selected_interfaces": ["lan0", "wan0"]
-                }
-            }
-        }),
-        ..ConfigSnapshot::default()
-    };
-    let policy = SharedUmemPolicy::from_snapshot(&snapshot);
-    assert!(policy.interfaces.is_empty());
-    assert!(policy.selects_interface("dmz0"));
-    assert_eq!(
-        policy
-            .phase0_audit
-            .as_ref()
-            .and_then(|audit| audit.reason.as_deref()),
-        Some("Phase 0 artifact missing kernel_release")
-    );
-}
-
-#[test]
-fn explicit_config_filter_is_not_blocked_by_stale_artifact() {
-    let snapshot = ConfigSnapshot {
-        userspace: json!({
-            "shared_umem": {
-                "mode": "cross-nic",
-                "interfaces": ["lan0", "wan0"],
-                "phase0_artifact": {
-                    "passed": false,
-                    "selected_interfaces": ["dmz0"]
-                }
-            }
-        }),
+        userspace,
         ..ConfigSnapshot::default()
     };
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
@@ -91,23 +71,35 @@ fn explicit_config_filter_is_not_blocked_by_stale_artifact() {
         policy.interfaces,
         BTreeSet::from(["lan0".to_string(), "wan0".to_string()])
     );
-    assert_eq!(
-        policy
-            .phase0_audit
-            .as_ref()
-            .and_then(|audit| audit.reason.as_deref()),
-        Some("Phase 0 artifact did not pass")
-    );
+    assert!(policy.selects_interface("lan0"));
+    assert!(!policy.selects_interface("dmz0"));
+}
+
+#[test]
+fn null_userspace_decodes_as_default() {
+    // #17134: the #16132 `config_snapshot` specimen carries
+    // `"userspace": null`; the typed field must decode it as default
+    // rather than rejecting the whole snapshot.
+    // Decode through ConfigSnapshot so the field's null-tolerant
+    // deserializer (not the struct's derived one) is what runs.
+    let mut raw = serde_json::to_value(ConfigSnapshot::default()).expect("default serializes");
+    raw["userspace"] = serde_json::Value::Null;
+    let snapshot: ConfigSnapshot =
+        serde_json::from_value(raw).expect("null userspace decodes");
+    let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+    assert_eq!(policy.mode, SharedUmemMode::CrossNic);
+    assert!(policy.interfaces.is_empty());
 }
 
 #[test]
 fn same_device_debug_auto_selects_all_interfaces() {
     let snapshot = ConfigSnapshot {
-        userspace: json!({
+        userspace: serde_json::from_value(json!({
             "shared_umem": {
                 "mode": "same-device-debug"
             }
-        }),
+        }))
+        .unwrap(),
         ..ConfigSnapshot::default()
     };
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
@@ -147,11 +139,12 @@ fn off_policy_clears_stale_shared_status() {
     };
     let mut workers = BTreeMap::from([(0, vec![plan])]);
     let snapshot = ConfigSnapshot {
-        userspace: json!({
+        userspace: serde_json::from_value(json!({
             "shared_umem": {
                 "mode": "off"
             }
-        }),
+        }))
+        .unwrap(),
         ..ConfigSnapshot::default()
     };
     apply_shared_umem_policy_to_workers(&snapshot, &mut workers);

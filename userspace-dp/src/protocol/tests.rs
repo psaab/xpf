@@ -1607,13 +1607,19 @@ fn tx_batch_hist_binding_status_wire_roundtrip_and_projection() {
     assert_eq!(back.tx_batch_descriptors, status.tx_batch_descriptors);
     assert_eq!(back.tx_kick_batch_hist, status.tx_kick_batch_hist);
     assert_eq!(back.tx_kick_batch_kicks, status.tx_kick_batch_kicks);
-    assert_eq!(back.tx_kick_batch_descriptors, status.tx_kick_batch_descriptors);
+    assert_eq!(
+        back.tx_kick_batch_descriptors,
+        status.tx_kick_batch_descriptors
+    );
 
     let snap: BindingCountersSnapshot = (&status).into();
     assert_eq!(snap.tx_batch_hist, status.tx_batch_hist);
     assert_eq!(snap.tx_batch_commits, status.tx_batch_commits);
     assert_eq!(snap.tx_kick_batch_hist, status.tx_kick_batch_hist);
-    assert_eq!(snap.tx_kick_batch_descriptors, status.tx_kick_batch_descriptors);
+    assert_eq!(
+        snap.tx_kick_batch_descriptors,
+        status.tx_kick_batch_descriptors
+    );
 }
 
 #[test]
@@ -3109,7 +3115,42 @@ fn wire_invariant_default_specimens() {
             clear_policies: true,
             cold_path_sample_mask: Some(22),
             content_digest: "16132-digest".into(),
+            // #17134: populated typed userspace subtree so the
+            // shared_umem wire keys are pinned by this fixture and the
+            // Go #16132 cell (previously `userspace` was `null` here,
+            // which is how the #5300 rename drifted unseen).
+            userspace: UserspaceSnapshot {
+                workers: 23,
+                ring_entries: 24,
+                shared_umem: Some(SharedUmemSnapshot {
+                    mode: "cross-nic".into(),
+                    interfaces: vec!["ge-0-0-1".into(), "ge-0-0-2".into()],
+                    phase0_artifact_file: "/run/xpf/shared-umem-phase0.json".into(),
+                }),
+            },
             ..Default::default()
+        }),
+    );
+    // #17134: standalone specimens for the typed userspace subtree, so
+    // the Rust census gate requires these types (not just ConfigSnapshot).
+    s.insert(
+        "userspace_snapshot".into(),
+        dump(&UserspaceSnapshot {
+            workers: 23,
+            ring_entries: 24,
+            shared_umem: Some(SharedUmemSnapshot {
+                mode: "cross-nic".into(),
+                interfaces: vec!["ge-0-0-1".into(), "ge-0-0-2".into()],
+                phase0_artifact_file: "/run/xpf/shared-umem-phase0.json".into(),
+            }),
+        }),
+    );
+    s.insert(
+        "shared_umem_snapshot".into(),
+        dump(&SharedUmemSnapshot {
+            mode: "cross-nic".into(),
+            interfaces: vec!["ge-0-0-1".into(), "ge-0-0-2".into()],
+            phase0_artifact_file: "/run/xpf/shared-umem-phase0.json".into(),
         }),
     );
     s.insert(
@@ -3444,6 +3485,11 @@ fn wire_invariant_default_specimens() {
         "route_snapshot_populated".into(),
         dump(&RouteSnapshot {
             mtu: 1500,
+            // #17134 drive-by (witness of the class this issue fixes):
+            // `next_table_route` (#16614) is `skip_serializing_if` false,
+            // so no specimen carried it and the Go #16132 cell was red
+            // on master. Pin it true here.
+            next_table_route: true,
             ..Default::default()
         }),
     );
@@ -4484,7 +4530,10 @@ fn session_sync_request_primary_liveness_roundtrip_16880() {
     );
     let back: SessionSyncRequest =
         serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
-    assert!(back.primary_liveness, "primary-liveness marker must round-trip");
+    assert!(
+        back.primary_liveness,
+        "primary-liveness marker must round-trip"
+    );
 
     let legacy: SessionSyncRequest =
         serde_json::from_str(r#"{"operation":"upsert"}"#).expect("legacy request decodes");
@@ -5378,7 +5427,9 @@ fn wire_fixture_completeness_16132() {
                     {
                         assert!(
                             pending_attrs.contains("null_tolerant_vec")
-                                || pending_attrs.contains("deserialize_present_key_ring"),
+                                || pending_attrs.contains("null_tolerant_u64")
+                                || pending_attrs.contains("deserialize_present_key_ring")
+                                || pending_attrs.contains("deserialize_userspace_snapshot"),
                             "wire census: field {name}.{field_name} uses an unmodelled custom (de)serializer — extend the census deliberately"
                         );
                     }

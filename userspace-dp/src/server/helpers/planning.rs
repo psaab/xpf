@@ -22,11 +22,10 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) fn same_plan_apply_needs_binding_reconcile(
     state: &ServerState,
@@ -61,9 +60,7 @@ pub(crate) fn same_plan_apply_needs_binding_reconcile(
     let live_bindings = state.afxdp.live_count();
     (planned_bindings < runnable_bindings || live_bindings < runnable_bindings)
         && state.status.bindings.iter().any(|binding| {
-            binding.registered
-                && binding.ifindex > 0
-                && (!binding.bound || !binding.xsk_registered)
+            binding.registered && binding.ifindex > 0 && (!binding.bound || !binding.xsk_registered)
         })
 }
 
@@ -136,21 +133,24 @@ pub(crate) fn snapshot_binding_plan_key(snapshot: &ConfigSnapshot) -> String {
 }
 
 fn update_snapshot_binding_plan_key(hasher: &mut Sha256, snapshot: &ConfigSnapshot) {
-    let workers = snapshot
-        .userspace
-        .get("workers")
-        .and_then(|v| v.as_u64())
-        .unwrap_or_default();
-    let ring_entries = snapshot
-        .userspace
-        .get("ring_entries")
-        .and_then(|v| v.as_u64())
-        .unwrap_or_default();
+    // #17134: `userspace` is typed; hash the binding-relevant fields in a
+    // canonical order (interfaces sorted, so JSON set order cannot change
+    // the key) instead of canonicalising an untyped JSON subtree.
+    let workers = snapshot.userspace.workers;
+    let ring_entries = snapshot.userspace.ring_entries;
     hash_update(hasher, &format!("workers={workers};ring={ring_entries};"));
-    if let Some(shared_umem) = snapshot.userspace.get("shared_umem") {
-        hash_update(hasher, "shared_umem=");
-        update_canonical_json_hash(hasher, shared_umem);
-        hash_update(hasher, ";");
+    if let Some(shared_umem) = &snapshot.userspace.shared_umem {
+        let mut interfaces: Vec<&str> = shared_umem.interfaces.iter().map(String::as_str).collect();
+        interfaces.sort_unstable();
+        hash_update(
+            hasher,
+            &format!(
+                "shared_umem={};interfaces={};phase0_artifact_file={};",
+                shared_umem.mode,
+                interfaces.join(","),
+                shared_umem.phase0_artifact_file
+            ),
+        );
     }
     for iface in snapshot
         .interfaces
@@ -242,94 +242,6 @@ fn update_snapshot_binding_plan_key(hasher: &mut Sha256, snapshot: &ConfigSnapsh
 
 fn hash_update(hasher: &mut Sha256, input: &str) {
     hasher.update(input.as_bytes());
-}
-
-struct Sha256Writer<'a>(&'a mut Sha256);
-
-impl Write for Sha256Writer<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.update(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn update_json_encoded<T: serde::Serialize + ?Sized>(hasher: &mut Sha256, value: &T) {
-    serde_json::to_writer(Sha256Writer(hasher), value)
-        .expect("canonical JSON hashing uses an infallible writer");
-}
-
-fn update_canonical_json_hash(hasher: &mut Sha256, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            hash_update(hasher, "[");
-            let mut items = values.iter().map(canonical_json_key).collect::<Vec<_>>();
-            items.sort();
-            for (idx, item) in items.iter().enumerate() {
-                if idx > 0 {
-                    hash_update(hasher, ",");
-                }
-                hash_update(hasher, item);
-            }
-            hash_update(hasher, "]");
-        }
-        serde_json::Value::Object(values) => {
-            hash_update(hasher, "{");
-            let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-            for (idx, (key, value)) in entries.into_iter().enumerate() {
-                if idx > 0 {
-                    hash_update(hasher, ",");
-                }
-                update_json_encoded(hasher, key);
-                hash_update(hasher, ":");
-                update_canonical_json_hash(hasher, value);
-            }
-            hash_update(hasher, "}");
-        }
-        _ => update_json_encoded(hasher, value),
-    }
-}
-
-fn canonical_json_key(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    write_canonical_json(value, &mut out);
-    out
-}
-
-fn write_canonical_json(value: &serde_json::Value, out: &mut String) {
-    match value {
-        serde_json::Value::Array(values) => {
-            out.push('[');
-            let mut items = values.iter().map(canonical_json_key).collect::<Vec<_>>();
-            items.sort();
-            for (idx, item) in items.iter().enumerate() {
-                if idx > 0 {
-                    out.push(',');
-                }
-                out.push_str(item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(values) => {
-            out.push('{');
-            let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-            for (idx, (key, value)) in entries.into_iter().enumerate() {
-                if idx > 0 {
-                    out.push(',');
-                }
-                out.push_str(&serde_json::to_string(key).unwrap_or_default());
-                out.push(':');
-                write_canonical_json(value, out);
-            }
-            out.push('}');
-        }
-        _ => out.push_str(&serde_json::to_string(value).unwrap_or_default()),
-    }
 }
 
 /// The NETDEV-INTRINSIC half of the binding refusal: "whatever row asks, an
@@ -802,7 +714,13 @@ pub(crate) fn replan_queues(
             candidates.push((fabric.parent_linux_name.clone(), rx_queues));
         }
     }
-    replan_bindings_from_candidates(workers, existing, candidates, ifindex_by_name, forwarding_armed)
+    replan_bindings_from_candidates(
+        workers,
+        existing,
+        candidates,
+        ifindex_by_name,
+        forwarding_armed,
+    )
 }
 
 /// Capacity of the two shim maps keyed by `BindingStatus::slot` —

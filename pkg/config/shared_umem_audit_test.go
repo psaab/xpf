@@ -73,6 +73,7 @@ func compileWithinTimeout(t *testing.T, tree *ConfigTree, d time.Duration) (*Con
 // an audit file which does NOT exist on this node must still COMPILE. RED on a
 // revert to the blocking/gating read (which returns the os.Open error directly).
 func TestSharedUMEMAuditMissingFileIsNonGating(t *testing.T) {
+	defer stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())()
 	missing := filepath.Join(t.TempDir(), "does-not-exist.json")
 	tree := buildSharedUMEMTree(t, missing)
 
@@ -101,6 +102,7 @@ func TestSharedUMEMAuditMissingFileIsNonGating(t *testing.T) {
 // revert that embeds the parsed file content into the typed config (present vs
 // absent then differ) or that gates the compile on a missing file.
 func TestSharedUMEMAuditDeterministic(t *testing.T) {
+	defer stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())()
 	// Same declared path string across all three compiles.
 	artifact := filepath.Join(t.TempDir(), "phase0.json")
 
@@ -151,6 +153,7 @@ func TestSharedUMEMAuditDeterministic(t *testing.T) {
 // it, so the compile succeeds quickly with a warning. Bounded by a timeout so a
 // regression cannot hang the suite.
 func TestSharedUMEMAuditNonRegularDirectoryIsNonBlocking(t *testing.T) {
+	defer stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())()
 	dir := t.TempDir() // a directory is not a regular file
 	tree := buildSharedUMEMTree(t, dir)
 
@@ -169,6 +172,7 @@ func TestSharedUMEMAuditNonRegularDirectoryIsNonBlocking(t *testing.T) {
 // to the old blocking open: the compile goroutine blocks forever and the
 // timeout guard fails the test.
 func TestSharedUMEMAuditFIFOIsNonBlocking(t *testing.T) {
+	defer stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())()
 	fifo := filepath.Join(t.TempDir(), "phase0.fifo")
 	if err := syscall.Mkfifo(fifo, 0644); err != nil {
 		t.Skipf("mkfifo unsupported here: %v", err)
@@ -181,5 +185,61 @@ func TestSharedUMEMAuditFIFOIsNonBlocking(t *testing.T) {
 	}
 	if !hasWarningContaining(cfg.Warnings, "not a regular file") {
 		t.Fatalf("expected non-regular-file audit warning for a FIFO, got %#v", cfg.Warnings)
+	}
+}
+
+// #17134: the Go audit now owns the environment comparison the Rust
+// helper used to run (kernel / PCI / driver / MTU / queue topology).
+// A kernel mismatch and an MTU mismatch must each surface as a
+// non-gating commit warning; matching artifacts stay silent.
+
+func TestSharedUMEMAuditKernelMismatchWarns17134(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	body := `{"passed":true,"kernel_release":"stale-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"],"selected_nic_pci_ids":["0000:08:00.0","0000:09:00.0"],"selected_device_set":["0000:08:00.0","0000:09:00.0"],"driver":"mlx5_core","mtu":1500,"queue_topology":4}`
+	if err := os.WriteFile(artifact, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	restore := stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())
+	defer restore()
+	cfg, err := compileWithinTimeout(t, buildSharedUMEMTree(t, artifact), 10*time.Second)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "kernel_release stale-kernel != current test-kernel") {
+		t.Fatalf("expected kernel mismatch warning, got %#v", cfg.Warnings)
+	}
+}
+
+func TestSharedUMEMAuditMTUMismatchWarns17134(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	body := `{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"],"selected_nic_pci_ids":["0000:08:00.0","0000:09:00.0"],"selected_device_set":["0000:08:00.0","0000:09:00.0"],"driver":"mlx5_core","mtu":9000,"queue_topology":4}`
+	if err := os.WriteFile(artifact, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	restore := stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())
+	defer restore()
+	cfg, err := compileWithinTimeout(t, buildSharedUMEMTree(t, artifact), 10*time.Second)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "MTU") {
+		t.Fatalf("expected MTU mismatch warning, got %#v", cfg.Warnings)
+	}
+}
+
+func TestSharedUMEMAuditMatchingArtifactSilent17134(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	body := `{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"],"selected_nic_pci_ids":["0000:08:00.0","0000:09:00.0"],"selected_device_set":["0000:08:00.0","0000:09:00.0"],"driver":"mlx5_core","mtu":1500,"queue_topology":4}`
+	if err := os.WriteFile(artifact, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	restore := stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())
+	defer restore()
+	cfg, err := compileWithinTimeout(t, buildSharedUMEMTree(t, artifact), 10*time.Second)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	if hasWarningContaining(cfg.Warnings, "shared-umem phase0-artifact-file") {
+		t.Fatalf("matching artifact must not warn, got %#v", cfg.Warnings)
 	}
 }

@@ -3437,9 +3437,35 @@ func TestUserspaceDataplaneConfig(t *testing.T) {
 	}
 }
 
+// goodSharedUMEMLiveEnv17134 matches the artifact in
+// TestUserspaceDataplaneSharedUMEMConfig / the mismatch cells in
+// shared_umem_audit_test.go: kernel test-kernel, ge-0-0-1/ge-0-0-2 on
+// mlx5_core at MTU 1500 (PCI ids / queues are only checked by the cells
+// that stub them explicitly).
+func goodSharedUMEMLiveEnv17134() *sharedUMEMLiveEnv {
+	return &sharedUMEMLiveEnv{
+		kernelRelease: "test-kernel",
+		pciIDs:        map[string]struct{}{"0000:08:00.0": {}, "0000:09:00.0": {}},
+		drivers:       map[string]string{"ge-0-0-1": "mlx5_core", "ge-0-0-2": "mlx5_core"},
+		mtus:          map[string]int{"ge-0-0-1": 1500, "ge-0-0-2": 1500},
+		rxQueues:      map[string]int{"ge-0-0-1": 4, "ge-0-0-2": 4},
+	}
+}
+
+func stubSharedUMEMLiveEnv17134(t *testing.T, env *sharedUMEMLiveEnv) func() {
+	t.Helper()
+	prev := sharedUMEMLiveEnvFn
+	sharedUMEMLiveEnvFn = func([]string) (*sharedUMEMLiveEnv, error) { return env, nil }
+	return func() { sharedUMEMLiveEnvFn = prev }
+}
+
 func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
+	// #17134: stub the live environment BEFORE compiling — the compile
+	// itself runs the environment audit, so the no-warning assertion
+	// below is hermetic. The stub matches every artifact field.
+	defer stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())()
 	artifact := t.TempDir() + "/phase0.json"
-	if err := os.WriteFile(artifact, []byte(`{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"],"driver_name":{"ge-0/0/1":"mlx5_core","ge-0/0/2":"mlx5_core"},"mtu":{"ge-0/0/1":1500,"ge-0/0/2":1500}}`), 0644); err != nil {
+	if err := os.WriteFile(artifact, []byte(`{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/1","ge-0/0/2"],"selected_nic_pci_ids":["0000:08:00.0","0000:09:00.0"],"selected_device_set":["0000:08:00.0","0000:09:00.0"],"driver_name":{"ge-0/0/1":"mlx5_core","ge-0/0/2":"mlx5_core"},"mtu":{"ge-0/0/1":1500,"ge-0/0/2":1500},"queue_topology":4}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	lines := []string{
@@ -3482,31 +3508,18 @@ func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
 	if hasWarningContaining(cfg.Warnings, "shared-umem phase0-artifact-file") {
 		t.Fatalf("well-formed passed=true artifact must not warn, got %#v", cfg.Warnings)
 	}
-	// The audit read (warning path) still parses + Linux-normalizes the file so
-	// the operator audit signal keeps its value; assert that content here.
+	// The audit read still parses the file; with a matching live
+	// environment stubbed in, a well-formed passed artifact warns about
+	// nothing.
 	parsed, err := readSharedUMEMPhase0ArtifactForAudit(artifact)
 	if err != nil {
 		t.Fatalf("readSharedUMEMPhase0ArtifactForAudit: %v", err)
 	}
-	if passed, ok := parsed["passed"].(bool); !ok || !passed {
-		t.Fatalf("audit artifact[passed] = %#v", parsed["passed"])
+	if !sharedUMEMArtifactPassed(parsed) {
+		t.Fatalf("audit artifact must pass: %#v", parsed)
 	}
-	if got := strings.Join(sharedUMEMArtifactStringArray(t, parsed, "selected_interfaces"), ","); got != "ge-0-0-1,ge-0-0-2" {
-		t.Fatalf("audit artifact[selected_interfaces] = %q", got)
-	}
-	mtu, ok := parsed["mtu"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("audit artifact[mtu] = %#v", parsed["mtu"])
-	}
-	if _, ok := mtu["ge-0-0-1"]; !ok {
-		t.Fatalf("audit artifact[mtu] was not Linux-name normalized: %#v", mtu)
-	}
-	driverName, ok := parsed["driver_name"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("audit artifact[driver_name] = %#v", parsed["driver_name"])
-	}
-	if _, ok := driverName["ge-0-0-1"]; !ok {
-		t.Fatalf("audit artifact[driver_name] was not Linux-name normalized: %#v", driverName)
+	if reason := sharedUMEMArtifactEnvironmentMismatch(parsed); reason != "" {
+		t.Fatalf("matching artifact must not mismatch: %s", reason)
 	}
 }
 
@@ -3515,6 +3528,7 @@ func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
 // still rejects it, but the commit must SUCCEED with the failure surfaced as a
 // warning rather than propagated as a compile error.
 func TestUserspaceDataplaneSharedUMEMNullArtifactIsNonGating(t *testing.T) {
+	defer stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())()
 	artifact := t.TempDir() + "/phase0.json"
 	if err := os.WriteFile(artifact, []byte(`null`), 0644); err != nil {
 		t.Fatal(err)
@@ -3574,29 +3588,28 @@ func TestUserspaceDataplaneSharedUMEMRejectsOversizedArtifact(t *testing.T) {
 	}
 }
 
-func TestUserspaceDataplaneSharedUMEMRejectsArtifactKeyCollision(t *testing.T) {
+// #17134: the LinuxIfName duplicate-after-normalisation check lived in
+// the deleted `normalizeSharedUMEMArtifactInterfaces*` helpers, whose
+// only remaining effect was that duplicate error. The ported
+// environment audit normalises map keys silently (last wins, as Go map
+// decode does), so a colliding artifact now reads cleanly and is judged
+// by the environment comparison instead.
+func TestUserspaceDataplaneSharedUMEMArtifactKeyCollisionIsNonGating17134(t *testing.T) {
 	artifact := t.TempDir() + "/phase0.json"
 	if err := os.WriteFile(artifact, []byte(`{"passed":true,"driver_name":{"ge-0/0/1":"mlx5_core","ge-0-0-1":"mlx5_core"}}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := readSharedUMEMPhase0ArtifactForAudit(artifact)
-	if err == nil || !strings.Contains(err.Error(), "duplicate driver_name key after Linux interface-name normalization: ge-0-0-1") {
-		t.Fatalf("readSharedUMEMPhase0ArtifactForAudit error = %v, want normalized-key collision", err)
+	parsed, err := readSharedUMEMPhase0ArtifactForAudit(artifact)
+	if err != nil {
+		t.Fatalf("readSharedUMEMPhase0ArtifactForAudit: %v", err)
 	}
-}
-
-func TestUserspaceDataplaneSharedUMEMRejectsArtifactArrayCollision(t *testing.T) {
-	artifact := t.TempDir() + "/phase0.json"
-	if err := os.WriteFile(artifact, []byte(`{"passed":true,"selected_interfaces":["ge-0/0/1","ge-0-0-1"]}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := readSharedUMEMPhase0ArtifactForAudit(artifact)
-	if err == nil || !strings.Contains(err.Error(), "duplicate selected_interfaces entry after Linux interface-name normalization: ge-0-0-1") {
-		t.Fatalf("readSharedUMEMPhase0ArtifactForAudit error = %v, want normalized-array collision", err)
+	if !sharedUMEMArtifactPassed(parsed) {
+		t.Fatalf("colliding artifact must still parse as passed: %#v", parsed)
 	}
 }
 
 func TestUserspaceDataplaneSharedUMEMGroupMergesWithBaseDataplane(t *testing.T) {
+	defer stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())()
 	artifact := t.TempDir() + "/phase0.json"
 	if err := os.WriteFile(artifact, []byte(`{"passed":true}`), 0644); err != nil {
 		t.Fatal(err)
@@ -3639,27 +3652,6 @@ func TestUserspaceDataplaneSharedUMEMGroupMergesWithBaseDataplane(t *testing.T) 
 	}
 }
 
-func sharedUMEMArtifactStringArray(t *testing.T, artifact map[string]interface{}, key string) []string {
-	t.Helper()
-	values, ok := artifact[key].([]interface{})
-	if !ok {
-		t.Fatalf("SharedUMEM.Phase0Artifact[%s] = %#v", key, artifact[key])
-	}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		s, ok := value.(string)
-		if !ok {
-			t.Fatalf("SharedUMEM.Phase0Artifact[%s] contains non-string %#v", key, value)
-		}
-		out = append(out, s)
-	}
-	return out
-}
-
-// #797 HIGH/MEDIUM: operator must be able to toggle D3 RSS indirection
-// via a first-class config knob. Setting `rss-indirection disable`
-// must compile to RSSIndirectionDisabled=true; `enable` (or anything
-// other than "disable") must leave it false.
 func TestUserspaceDataplaneRSSIndirectionDisable(t *testing.T) {
 	cases := []struct {
 		name    string
