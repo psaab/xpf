@@ -343,8 +343,9 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // with kernel-model leaks by shared priority. A v75 helper uses the old
 // ordering and may select a broader leak, so exact snapshot equality refuses.
 // v76 -> v77 (#17099): idle/display lease records carry the typed pool
-// identity (pool_kind + nat64_prefix). A v76 helper drops both and falls
-// back to the in-band string parse, misrouting a same-named source pool.
+// identity (pool_kind + nat64_prefix + nat64_scope). A v76 helper drops
+// them and falls back to the in-band string parse, misrouting a
+// same-named source pool and collapsing scoped same-/96 NAT64 tenants.
 pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 77;
 
 /// #16589: hard cap on lease rows in ONE paged lease-export response.
@@ -1696,6 +1697,15 @@ pub(crate) struct IdleLeaseWire {
         skip_serializing_if = "String::is_empty"
     )]
     pub nat64_prefix: String,
+    /// #17099 fold: NAT64 scope identity (rule-set name + normalized
+    /// zone/RI/source scope, `Nat64ScopeKey::scope_text`). Distinguishes
+    /// scoped rule-sets sharing one /96. Present iff kind 2 or 3.
+    #[serde(
+        rename = "nat64_scope",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub nat64_scope: String,
     #[serde(default)]
     pub protocol: u8,
     #[serde(rename = "src_ip", default)]
@@ -1807,6 +1817,13 @@ pub(crate) struct DisplayLeaseWire {
         skip_serializing_if = "String::is_empty"
     )]
     pub nat64_prefix: String,
+    /// #17099 fold: see `IdleLeaseWire::nat64_scope`.
+    #[serde(
+        rename = "nat64_scope",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub nat64_scope: String,
     #[serde(default)]
     pub protocol: u8,
     #[serde(rename = "src_ip", default)]

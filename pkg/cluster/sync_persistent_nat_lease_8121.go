@@ -229,6 +229,9 @@ func encodeOnePersistentNatLeaseLayoutTyped(
 		if b, err = putLeaseString(b, l.Nat64Prefix); err != nil {
 			return nil, fmt.Errorf("encode idle lease Nat64Prefix: %w", err)
 		}
+		if b, err = putLeaseString(b, l.Nat64Scope); err != nil {
+			return nil, fmt.Errorf("encode idle lease Nat64Scope: %w", err)
+		}
 	}
 	return b, nil
 }
@@ -512,6 +515,7 @@ func encodePersistentNatLeaseLayoutFrames(
 			// would (#17099 one-release decode fallback).
 			l.PoolKind = 0
 			l.Nat64Prefix = ""
+			l.Nat64Scope = ""
 		}
 		rec, err := encodeOnePersistentNatLeaseLayoutTyped(l, deterministic, provenance, typedPool)
 		if err != nil {
@@ -801,10 +805,13 @@ func decodeOnePersistentNatLeaseLayoutTyped(
 		if l.Nat64Prefix, off, ok = getLeaseString(buf, off); !ok {
 			return l, false
 		}
-		if (l.PoolKind == 2 || l.PoolKind == 3) && l.Nat64Prefix == "" {
+		if l.Nat64Scope, off, ok = getLeaseString(buf, off); !ok {
 			return l, false
 		}
-		if l.PoolKind < 2 && l.Nat64Prefix != "" {
+		if (l.PoolKind == 2 || l.PoolKind == 3) && (l.Nat64Prefix == "" || l.Nat64Scope == "") {
+			return l, false
+		}
+		if l.PoolKind < 2 && (l.Nat64Prefix != "" || l.Nat64Scope != "") {
 			return l, false
 		}
 	}

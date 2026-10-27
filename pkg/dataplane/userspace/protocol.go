@@ -610,8 +610,11 @@ const (
 	// reader refuses past 64 MiB — the export delivers nothing.
 	MinProtocolPersistentNatLeasePaging = 71
 	// MinProtocolPersistentNatLeaseTypedPool is the first protocol version
-	// whose lease records carry the typed pool identity (#17099).
-	// Immutable wire feature floor.
+	// whose lease records carry the typed pool identity (#17099: pool_kind +
+	// nat64_prefix + nat64_scope). Lease export/import/display gates require
+	// it so a v76 helper (which would drop the typed identity and fall back
+	// to the positional string parse, collapsing scoped same-/96 tenants)
+	// is refused rather than silently degraded. Immutable wire floor.
 	MinProtocolPersistentNatLeaseTypedPool = 77
 
 	// MinProtocolSecureTunnelRefusal: the device-level AF_XDP binding refusal
@@ -677,6 +680,7 @@ type IdleLeaseWire struct {
 	// stable prefix text iff PoolKind is 2 or 3.
 	PoolKind                   uint8                 `json:"pool_kind,omitempty"`
 	Nat64Prefix                string                `json:"nat64_prefix,omitempty"`
+	Nat64Scope                 string                `json:"nat64_scope,omitempty"`
 	Protocol                   uint8                 `json:"protocol"`
 	SrcIP                      string                `json:"src_ip"`
 	SrcPort                    uint16                `json:"src_port"`
@@ -716,6 +720,7 @@ type DisplayLeaseWire struct {
 	// PoolKind / Nat64Prefix: see IdleLeaseWire (#17099).
 	PoolKind                   uint8                 `json:"pool_kind,omitempty"`
 	Nat64Prefix                string                `json:"nat64_prefix,omitempty"`
+	Nat64Scope                 string                `json:"nat64_scope,omitempty"`
 	Protocol                   uint8                 `json:"protocol"`
 	SrcIP                      string                `json:"src_ip"`
 	SrcPort                    uint16                `json:"src_port"`

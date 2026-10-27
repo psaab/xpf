@@ -35,18 +35,28 @@ use std::net::{IpAddr, Ipv6Addr};
 
 /// #17099: stable identity of one persistent-lease allocator population.
 ///
-/// Carried as typed fields on the control wire (`pool_kind` / `nat64_prefix`)
-/// so a Junos source pool literally named `nat64-deterministic-0` can never be
-/// routed into the NAT64 import arms. The string form is kept only as a
-/// decode fallback for one release (legacy records without the typed field).
+/// Carried as typed fields on the control wire (`pool_kind` / `nat64_prefix`
+/// / `nat64_scope`) so a Junos source pool literally named
+/// `nat64-deterministic-0` can never be routed into the NAT64 import arms,
+/// and two scoped NAT64 rule-sets sharing one /96 never collapse into one
+/// pool. `scope` is the canonical Nat64ScopeKey text (rule-set name plus
+/// normalized zone/RI/source scope; see `Nat64ScopeKey::scope_text`).
+/// The string form is kept only as a decode fallback for one release
+/// (legacy records without the typed field).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum LeasePoolId {
     /// Pool-mode source-NAT allocator, keyed by its Junos pool name.
+    /// Explicit (wire kind 1) — never falls through to NAT64.
     Source(String),
-    /// NAT64 allocator, keyed by its stable /96 prefix bytes (the first
-    /// 96 bits of the translated IPv6 prefix), never by list position.
+    /// Legacy string-only record (wire kind 0): the string may be a source
+    /// pool name or a positional NAT64 label; resolved Source-first, then
+    /// NAT64, at import. Only this variant may use the legacy parse.
+    Legacy(String),
+    /// NAT64 allocator, keyed by its stable /96 prefix bytes plus its
+    /// scope identity, never by list position.
     Nat64 {
         prefix: [u8; 12],
+        scope: String,
         mode: LeasePoolMode,
     },
 }
@@ -62,6 +72,7 @@ impl LeasePoolId {
     pub(crate) fn wire_kind(&self) -> u8 {
         match self {
             LeasePoolId::Source(_) => 1,
+            LeasePoolId::Legacy(_) => 0,
             LeasePoolId::Nat64 { mode, .. } => match mode {
                 LeasePoolMode::Deterministic => 2,
                 LeasePoolMode::RoundRobin => 3,
@@ -69,15 +80,23 @@ impl LeasePoolId {
         }
     }
 
-    /// Stable NAT64 prefix text for the wire (`64:ff9b::`), `""` for source.
+    /// Stable NAT64 prefix text for the wire (`64:ff9b::`), `""` otherwise.
     pub(crate) fn nat64_prefix_text(&self) -> String {
         match self {
-            LeasePoolId::Source(_) => String::new(),
+            LeasePoolId::Source(_) | LeasePoolId::Legacy(_) => String::new(),
             LeasePoolId::Nat64 { prefix, .. } => {
                 let mut octets = [0u8; 16];
                 octets[..12].copy_from_slice(prefix);
                 Ipv6Addr::from(octets).to_string()
             }
+        }
+    }
+
+    /// NAT64 scope text for the wire, `""` otherwise.
+    pub(crate) fn nat64_scope_text(&self) -> String {
+        match self {
+            LeasePoolId::Source(_) | LeasePoolId::Legacy(_) => String::new(),
+            LeasePoolId::Nat64 { scope, .. } => scope.clone(),
         }
     }
 }
@@ -104,7 +123,7 @@ impl<'a> LeasePool<'a> {
     /// Legacy/display label for this population.
     pub(crate) fn display_name(&self) -> String {
         match &self.id {
-            LeasePoolId::Source(name) => name.clone(),
+            LeasePoolId::Source(name) | LeasePoolId::Legacy(name) => name.clone(),
             LeasePoolId::Nat64 { mode, .. } => legacy_nat64_label(*mode, self.nat64_index),
         }
     }
@@ -140,14 +159,12 @@ impl PoolIdleLease {
         }
     }
 
-    /// Construct from a legacy string identity (decode fallback / tests).
+    /// Construct from a legacy string identity (wire kind 0 decode fallback).
     /// A real source pool of that name wins over the NAT64 parse (resolved
-    /// at import time, not here); this constructor only records the string
-    /// as a source identity, leaving the legacy NAT64 parse to the import
-    /// fallback path via `legacy_nat64_pool`.
+    /// at import time, not here).
     pub(crate) fn from_legacy_pool_name(pool_name: String, lease: IdleLeaseRecord) -> Self {
         Self {
-            pool: LeasePoolId::Source(pool_name.clone()),
+            pool: LeasePoolId::Legacy(pool_name.clone()),
             pool_name,
             lease,
         }
@@ -237,9 +254,12 @@ impl Coordinator {
             } else {
                 LeasePoolMode::RoundRobin
             };
+            let scope = crate::nat64::Nat64ScopeKey::of_prefix(prefix)
+                .scope_text(&prefix.name);
             pools.push(LeasePool {
                 id: LeasePoolId::Nat64 {
                     prefix: prefix.prefix_bytes,
+                    scope,
                     mode,
                 },
                 allocator: &prefix.port_allocator,
@@ -255,21 +275,31 @@ impl Coordinator {
 
     /// #17099: resolve a typed identity to its population, for import.
     /// `None` = no allocator on this node owns that identity (import counts
-    /// it `skipped_unknown_pool`).
+    /// it `skipped_unknown_pool`). A `Legacy` identity is first tried as a
+    /// source pool name, then as a positional NAT64 label; an explicit
+    /// `Source` identity never reaches the NAT64 parse.
     pub(crate) fn lease_pool(&self, id: &LeasePoolId) -> Option<LeasePool<'_>> {
-        // Rebuild through the single enumeration so resolution can never
-        // disagree with export about which populations exist. Populations
-        // are small (pool + prefix count), so the linear scan is the
-        // boring correct choice.
-        self.persistent_lease_pools()
-            .into_iter()
-            .find(|pool| &pool.id == id)
+        match id {
+            LeasePoolId::Legacy(name) => {
+                if let Some(pool) = self
+                    .persistent_lease_pools()
+                    .into_iter()
+                    .find(|pool| pool.id == LeasePoolId::Source(name.clone()))
+                {
+                    return Some(pool);
+                }
+                self.legacy_nat64_pool(name)
+            }
+            _ => self
+                .persistent_lease_pools()
+                .into_iter()
+                .find(|pool| &pool.id == id),
+        }
     }
 
     /// Legacy decode fallback: resolve an in-band `nat64-…-{idx}` string to
-    /// a NAT64 population. Used ONLY for records that carry no typed field
-    /// (one-release wire compatibility). A real source pool of the same
-    /// name is resolved as `Source` first and never reaches here.
+    /// a NAT64 population. Used ONLY for `Legacy` records (one-release wire
+    /// compatibility).
     fn legacy_nat64_pool(&self, pool_name: &str) -> Option<LeasePool<'_>> {
         let (idx, mode) = if let Some(s) = pool_name.strip_prefix("nat64-deterministic-") {
             (s.parse::<usize>().ok()?, LeasePoolMode::Deterministic)
@@ -407,20 +437,11 @@ impl Coordinator {
         let mut counts = IdleLeaseImportCounts::default();
         let mut imported_to_promote: Vec<(&PortAllocator, &IdleLeaseRecord)> = Vec::new();
         for rec in records {
-            // #17099: route on the typed identity. A source pool literally
-            // named `nat64-deterministic-0` resolves as Source here and its
-            // leases sync; only records with NO matching source pool fall
-            // through to the legacy NAT64 string parse (one-release decode
-            // fallback for pre-#17099 peers).
-            let resolved: Option<LeasePool<'_>> = match &rec.pool {
-                LeasePoolId::Source(name) => {
-                    match self.lease_pool(&LeasePoolId::Source(name.clone())) {
-                        Some(pool) => Some(pool),
-                        None => self.legacy_nat64_pool(name),
-                    }
-                }
-                LeasePoolId::Nat64 { .. } => self.lease_pool(&rec.pool),
-            };
+            // #17099: route on the typed identity. Explicit Source (kind 1)
+            // resolves source-or-unknown and NEVER falls through to NAT64;
+            // only Legacy (kind 0) records may use the Source-first then
+            // positional NAT64 fallback. Nat64 resolves by prefix+scope+mode.
+            let resolved: Option<LeasePool<'_>> = self.lease_pool(&rec.pool);
             let Some(pool) = resolved else {
                 // Deterministic-shaped records under unknown pools keep the
                 // #14638 identity-busy posture handled below only when a
@@ -619,7 +640,7 @@ impl Coordinator {
                     }
                     continue;
                 }
-                LeasePoolId::Source(_) => {
+                LeasePoolId::Source(_) | LeasePoolId::Legacy(_) => {
                     // #14638 remaining validation: a deterministic-shaped lease must
                     // never install through the generic source-NAT path as a dynamic
                     // lease. Only the NAT64 deterministic arm above may install

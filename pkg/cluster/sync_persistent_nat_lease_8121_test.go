@@ -576,6 +576,7 @@ func TestPersistentNatLeaseTypedPoolRoundTrip17099(t *testing.T) {
 	nat64Lease.Pool = "nat64-0"
 	nat64Lease.PoolKind = 3
 	nat64Lease.Nat64Prefix = "64:ff9b::"
+	nat64Lease.Nat64Scope = "tenant-b|zones=trust-b|ris=|src=|constrained=0"
 	nat64Batch := sampleIdleLeaseBatch11486(nat64Lease)
 	nat64Frames, _, err := encodePersistentNatLeaseBatchFramesCountedLayoutCoreTyped(nat64Batch, false, true, true)
 	if err != nil || len(nat64Frames) != 1 {
@@ -583,7 +584,7 @@ func TestPersistentNatLeaseTypedPoolRoundTrip17099(t *testing.T) {
 	}
 	nat64Got, ok := decodePersistentNatLeaseBatchPayloadTypedPool(framesPayload(t, nat64Frames[0]), false)
 	if !ok || len(nat64Got.Leases) != 1 || nat64Got.Leases[0].PoolKind != 3 ||
-		nat64Got.Leases[0].Nat64Prefix != "64:ff9b::" {
+		nat64Got.Leases[0].Nat64Prefix != "64:ff9b::" || nat64Got.Leases[0].Nat64Scope != nat64Lease.Nat64Scope {
 		t.Fatalf("nat64 typed round trip = %+v ok=%v", nat64Got.Leases, ok)
 	}
 	if localCapabilityFlags2&capFlag2PersistentNatLeaseTypedPool == 0 {

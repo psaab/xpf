@@ -72,6 +72,7 @@ fn to_wire(rec: &PoolIdleLease) -> IdleLeaseWire {
         pool_name: rec.pool_name.clone(),
         pool_kind: rec.pool.wire_kind(),
         nat64_prefix: rec.pool.nat64_prefix_text(),
+        nat64_scope: rec.pool.nat64_scope_text(),
         protocol: rec.lease.protocol,
         src_ip: rec.lease.src_ip.to_string(),
         src_port: rec.lease.src_port,
@@ -208,19 +209,24 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
         .iter()
         .map(|remote| Some((remote.ip.parse::<IpAddr>().ok()?, remote.port)))
         .collect::<Option<Vec<_>>>()?;
-    // #17099: typed identity wins. Kind 0/absent is the one-release legacy
-    // fallback: keep the string as a source identity and let the
-    // coordinator's legacy NAT64 parse handle it only when no source pool
-    // of that name exists. Unknown kinds / missing NAT64 prefix refuse.
+    // #17099: typed identity wins. Kind 1 is explicit Source and resolves
+    // source-or-unknown (never NAT64). Kind 0/absent is the one-release
+    // legacy fallback. Kinds 2/3 require prefix+scope. Unknown kinds refuse.
     let pool = match w.pool_kind {
-        0 | 1 => LeasePoolId::Source(w.pool_name.clone()),
+        0 => LeasePoolId::Legacy(w.pool_name.clone()),
+        1 => LeasePoolId::Source(w.pool_name.clone()),
         2 | 3 => {
+            if w.nat64_scope.is_empty() {
+                return None;
+            }
+            crate::nat64::Nat64ScopeKey::parse_scope_text(&w.nat64_scope)?;
             let parsed: std::net::Ipv6Addr = w.nat64_prefix.parse().ok()?;
             let octets = parsed.octets();
             let mut prefix = [0u8; 12];
             prefix.copy_from_slice(&octets[..12]);
             LeasePoolId::Nat64 {
                 prefix,
+                scope: w.nat64_scope.clone(),
                 mode: if w.pool_kind == 2 {
                     LeasePoolMode::Deterministic
                 } else {
@@ -425,6 +431,7 @@ mod tests {
             pool_name: "P".to_string(),
             pool_kind: 1,
             nat64_prefix: String::new(),
+            nat64_scope: String::new(),
             protocol: 6,
             routing_scope: Some(0),
             egress_scope: Some(0),
@@ -573,6 +580,26 @@ mod tests {
         w.mint_from_zone = Some("trust".to_string());
         let rec = from_wire(&w).expect("control: the well-formed record must parse");
         assert_eq!(to_wire(&rec), w);
+    }
+
+    /// #17099 fold B2: kind 1 decodes to explicit Source, kind 0 to Legacy.
+    #[test]
+    fn explicit_kind1_decodes_source_not_legacy_17099() {
+        let mut w = wire();
+        w.pool_name = "nat64-0".to_string();
+        w.pool_kind = 1;
+        let rec = from_wire(&w).expect("kind1 parses");
+        assert_eq!(rec.pool, LeasePoolId::Source("nat64-0".to_string()));
+        w.pool_kind = 0;
+        let rec0 = from_wire(&w).expect("kind0 parses");
+        assert_eq!(rec0.pool, LeasePoolId::Legacy("nat64-0".to_string()));
+        w.pool_kind = 3;
+        w.nat64_prefix = "64:ff9b::".to_string();
+        assert!(from_wire(&w).is_none(), "nat64 without scope must refuse");
+        w.nat64_scope = "tenant-b|zones=trust-b|ris=|src=|constrained=0".to_string();
+        let rec64 = from_wire(&w).expect("scoped nat64 parses");
+        assert!(matches!(&rec64.pool, LeasePoolId::Nat64 { scope, .. } if scope.contains("tenant-b")));
+        assert_eq!(to_wire(&rec64).nat64_scope, w.nat64_scope);
     }
 
     /// `permit-any-remote-host` is an EMPTY remote, and it must survive as
@@ -829,6 +856,7 @@ fn to_display_wire(rec: &PoolDisplayLease) -> DisplayLeaseWire {
         pool_name: rec.pool_name.clone(),
         pool_kind: rec.pool.wire_kind(),
         nat64_prefix: rec.pool.nat64_prefix_text(),
+        nat64_scope: rec.pool.nat64_scope_text(),
         protocol: rec.lease.protocol,
         src_ip: rec.lease.src_ip.to_string(),
         src_port: rec.lease.src_port,

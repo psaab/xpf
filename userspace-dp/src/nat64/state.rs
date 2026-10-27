@@ -573,30 +573,100 @@ pub(super) enum Nat64RuleSkip {
 /// constraints are part of the identity too: two same-/96 rule-sets
 /// admitted from the same zone/RI but disjoint source prefixes are
 /// distinct rules for ownership purposes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Nat64ScopeKey {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Nat64ScopeKey {
     from_zones: Vec<String>,
     from_routing_instances: Vec<String>,
-    source_prefixes: Vec<PrefixV6>,
+    source_prefixes: Vec<String>,
     source_constrained: bool,
 }
 
 impl Nat64ScopeKey {
-    fn of_prefix(prefix: &Nat64Prefix) -> Self {
-        // The prefix already stores normalized unions (build loop
-        // folds the singular into the plural), so read them back.
+    pub(crate) fn of_prefix(prefix: &Nat64Prefix) -> Self {
         Self {
-            from_zones: prefix.from_zones.clone(),
-            // #16604/#17677: preserve the explicit-master token separately
-            // from a named routing-instance literally called `default`.
-            from_routing_instances: prefix
-                .from_routing_instances
+            from_zones: {
+                let mut v = prefix.from_zones.clone();
+                if v.is_empty() && !prefix.from_zone.is_empty() {
+                    v.push(prefix.from_zone.clone());
+                }
+                v
+            },
+            from_routing_instances: {
+                let mut raw = prefix.from_routing_instances.clone();
+                if raw.is_empty() && !prefix.from_routing_instance.is_empty() {
+                    raw.push(prefix.from_routing_instance.clone());
+                }
+                raw.iter()
+                    .map(|ri| crate::nat::nat_ri_key(ri).to_string())
+                    .collect()
+            },
+            source_prefixes: prefix
+                .source_prefixes
                 .iter()
-                .map(|ri| crate::nat::nat_ri_key(ri).to_string())
+                .map(|p| format!("{}/{}", p.addr(), p.prefix_len()))
                 .collect(),
-            source_prefixes: prefix.source_prefixes.clone(),
             source_constrained: prefix.source_constrained,
         }
+    }
+
+
+    /// Canonical scope text for the lease wire. The rule-set name is the
+    /// primary key; the normalized scope is carried alongside it (after
+    /// a `|`) so a name-less (test-built) prefix still distinguishes
+    /// scoped siblings, and a renamed rule-set does not silently alias
+    /// the old scope. Format: `<name>|zones=<csv>|ris=<csv>|src=<csv>|constrained=<0|1>`.
+    pub(crate) fn scope_text(&self, name: &str) -> String {
+        format!(
+            "{}|zones={}|ris={}|src={}|constrained={}",
+            name,
+            self.from_zones.join(","),
+            self.from_routing_instances.join(","),
+            self.source_prefixes.join(","),
+            if self.source_constrained { 1 } else { 0 },
+        )
+    }
+
+    pub(crate) fn parse_scope_text(text: &str) -> Option<Self> {
+        let mut parts = text.splitn(2, '|');
+        let _name = parts.next()?;
+        let rest = parts.next()?;
+        let mut zones = Vec::new();
+        let mut ris = Vec::new();
+        let mut srcs = Vec::new();
+        let mut constrained = false;
+        for field in rest.split('|') {
+            if let Some(v) = field.strip_prefix("zones=") {
+                zones = if v.is_empty() { Vec::new() } else { v.split(',').map(str::to_string).collect() };
+            } else if let Some(v) = field.strip_prefix("ris=") {
+                ris = if v.is_empty() { Vec::new() } else { v.split(',').map(str::to_string).collect() };
+            } else if let Some(v) = field.strip_prefix("src=") {
+                srcs = if v.is_empty() { Vec::new() } else { v.split(',').map(str::to_string).collect() };
+            } else if let Some(v) = field.strip_prefix("constrained=") {
+                constrained = v == "1";
+            } else {
+                return None;
+            }
+        }
+        Some(Self {
+            from_zones: zones,
+            from_routing_instances: ris,
+            source_prefixes: srcs,
+            source_constrained: constrained,
+        })
+    }
+
+    /// Name portion of a `scope_text` value.
+    pub(crate) fn scope_name(text: &str) -> &str {
+        text.split('|').next().unwrap_or("")
+    }
+
+    /// Equality against a live prefix: a non-empty name is authoritative
+    /// (matching `find_previous_prefix`); otherwise full scope equality.
+    pub(crate) fn matches_prefix(&self, wire_name: &str, prefix: &Nat64Prefix) -> bool {
+        if !wire_name.is_empty() || !prefix.name.is_empty() {
+            return prefix.name == wire_name;
+        }
+        *self == Self::of_prefix(prefix)
     }
 }
 
@@ -658,7 +728,10 @@ pub(super) fn nat64_snapshot_scope(snap: &NAT64RuleSnapshot) -> Nat64ScopeKey {
     Nat64ScopeKey {
         from_zones,
         from_routing_instances,
-        source_prefixes,
+        source_prefixes: source_prefixes
+            .iter()
+            .map(|p| format!("{}/{}", p.addr(), p.prefix_len()))
+            .collect(),
         source_constrained,
     }
 }
@@ -1272,7 +1345,14 @@ impl Nat64State {
             // #16484: installed scope is the normalized key computed
             // above, so a later reload compares like with like.
             let source_constrained = scope_key.source_constrained;
-            let source_prefixes = scope_key.source_prefixes.clone();
+            let source_prefixes: Vec<PrefixV6> = scope_key
+                .source_prefixes
+                .iter()
+                .filter_map(|s| {
+                    let (addr, len) = s.rsplit_once('/')?;
+                    Some(PrefixV6::from_addr_len(addr.parse().ok()?, len.parse().ok()?))
+                })
+                .collect();
             let pool_index_v4 = nat64_pool_index(&pool_v4);
             prefixes.push(Nat64Prefix {
                 name: snap.name.clone(),

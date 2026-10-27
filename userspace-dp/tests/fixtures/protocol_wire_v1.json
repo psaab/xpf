@@ -1757,6 +1757,7 @@
     "deterministic_mode": 2,
     "egress_scope": 11,
     "nat64_prefix": "64:ff9b::",
+    "nat64_scope": "tenant-a|zones=trust|ris=|src=|constrained=0",
     "permit_any_remote": true,
     "permitted_remotes": [
       {
@@ -2131,6 +2132,7 @@
     "egress_scope": 11,
     "mint_from_zone": "trust",
     "nat64_prefix": "64:ff9b::",
+    "nat64_scope": "tenant-a|zones=trust|ris=|src=|constrained=0",
     "permit_any_remote": true,
     "permitted_remotes": [
       {

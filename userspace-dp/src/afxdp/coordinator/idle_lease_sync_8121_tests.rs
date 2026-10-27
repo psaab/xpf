@@ -1257,3 +1257,73 @@ fn persistent_lease_population_is_single_sourced_17099() {
         "deterministic identity must survive prefix reorder"
     );
 }
+
+/// #17099 fold (Rev18147 B1): two scoped rule-sets sharing one /96 must
+/// enumerate as DISTINCT pools and a lease exported for tenant-b must
+/// import into tenant-b's allocator only, never tenant-a's.
+#[test]
+fn scoped_same_prefix_nat64_tenants_have_distinct_pools_17099() {
+    let snap = |name: &str, zone: &str, pool: &str| crate::NAT64RuleSnapshot {
+        name: name.into(),
+        prefix: "64:ff9b::/96".into(),
+        from_zone: zone.into(),
+        pool_addresses: vec![pool.into()],
+        ..Default::default()
+    };
+    let mut coord = Coordinator::new();
+    coord.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[
+        snap("tenant-a", "trust-a", "198.51.100.1"),
+        snap("tenant-b", "trust-b", "203.0.113.1"),
+    ]);
+    let pools = coord.persistent_lease_pools();
+    assert_eq!(pools.len(), 2, "two scoped tenants = two pools");
+    assert_ne!(pools[0].id, pools[1].id, "same /96 tenants must not collapse: {:?} vs {:?}", pools[0].id, pools[1].id);
+    for pool in &pools {
+        let resolved = coord.lease_pool(&pool.id).expect("each pool resolves");
+        assert!(std::ptr::eq(resolved.allocator, pool.allocator), "resolved allocator must be the enumerated one for {:?}", pool.id);
+    }
+    let tenant_b = pools[1].id.clone();
+    let rec = PoolIdleLease {
+        pool: tenant_b,
+        pool_name: "nat64-1".into(),
+        lease: crate::nat::IdleLeaseRecord {
+            protocol: 6,
+            src_ip: "2001:db8:b::1".parse().unwrap(),
+            src_port: 40000,
+            routing_scope: 0,
+            egress_scope: 0,
+            mint_from_zone: None,
+            remote: None,
+            permit_any_remote: true,
+            permitted_remotes: vec![],
+            translated_ip: "203.0.113.1".parse().unwrap(),
+            translated_port: 20000,
+            address_only: false,
+            deterministic: false,
+            deterministic_identity: None,
+            remaining_ns: TIMEOUT_NS,
+            timeout_ns: TIMEOUT_NS,
+        },
+    };
+    let counts = coord.import_idle_persistent_leases(&[rec], 10_000);
+    assert_eq!(counts.installed, 1, "tenant-b lease must install into tenant-b: {counts:?}");
+}
+
+/// #17099 fold (Rev18147 B2): an explicit kind-1 (Source) record whose source
+/// pool is missing must count unknown-pool, never fall through to NAT64.
+#[test]
+fn explicit_source_record_missing_pool_never_routes_nat64_17099() {
+    let rr_snap = crate::NAT64RuleSnapshot {
+        name: "napt64-rr".into(),
+        prefix: "64:ff9b:1::/96".into(),
+        pool_addresses: vec!["203.0.113.2".into()],
+        ..Default::default()
+    };
+    let mut coord = Coordinator::new();
+    coord.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[rr_snap]);
+    let mut rec = record("nat64-0", "2001:db8::1", "203.0.113.2", 20000);
+    rec.lease.permit_any_remote = true;
+    rec.lease.src_ip = "2001:db8::1".parse().unwrap();
+    let counts = coord.import_idle_persistent_leases(&[rec], 10_000);
+    assert_eq!((counts.installed, counts.skipped_unknown_pool), (0, 1), "kind-1 missing source must be unknown-pool, not NAT64: {counts:?}");
+}
