@@ -84,9 +84,11 @@ func snmpVRFPktinfoSocketControl(device string) func(string, string, syscall.Raw
 
 // pktinfo is the per-datagram ingress identity captured from the ancillary
 // data of one received request: the interface the datagram arrived on and
-// the local address it was addressed to. Serve echoes both in the reply's
-// control message so the response leaves on the same interface from the
-// same source the manager polled (#16781).
+// the local address it was addressed to. Serve echoes the destination in
+// every reply's control message so the response is sourced from the exact
+// address the manager polled (#16781); the ifindex is echoed as reply
+// egress unless the request ingressed a userspace reinjection TUN
+// (see oob, #17832).
 type pktinfo struct {
 	ifindex int
 	dst     net.IP // local (destination) address of the request; nil if unknown
@@ -127,34 +129,70 @@ func parsePktinfo(oob []byte) pktinfo {
 	return pktinfo{}
 }
 
-// oob returns the reply control message pinning egress to this ingress:
-// IP_PKTINFO for an IPv4 destination, IPV6_PKTINFO for IPv6. The Spec_dst /
-// Addr is the request's local destination, so the reply is sourced from the
-// exact address the manager polled (fxp0 address for management polls, the
-// trust/reth address for in-band polls). It returns nil when no ingress was
-// captured, leaving source/oif selection to the socket (bound device or
-// routing table).
-func (p pktinfo) oob() []byte {
-	if p.ifindex == 0 && p.dst == nil {
+// The userspace dataplane's host-inbound reinjection TUNs: the AF_XDP slow
+// path writes LocalDelivery traffic into xpf-usp0 and adjudicated transit
+// into xpf-usp1 (userspace-dp/src/slowpath.rs). From the kernel's side they
+// are write-only taps — nothing reads the far end for replies — so a reply
+// whose egress is pinned to one of these ifindexes can never reach its
+// manager (#17832).
+const (
+	reinjectTUNUSP0 = "xpf-usp0"
+	reinjectTUNUSP1 = "xpf-usp1"
+)
+
+// isUserspaceReinjectTUN reports whether ifindex currently belongs to one of
+// the userspace reinjection TUNs above. A vanished device reports false (the
+// reply then leaves egress unpinned rather than pinned to a dead index).
+func isUserspaceReinjectTUN(ifindex int) bool {
+	if ifindex == 0 {
+		return false
+	}
+	iface, err := net.InterfaceByIndex(ifindex)
+	if err != nil {
+		return false
+	}
+	return iface.Name == reinjectTUNUSP0 || iface.Name == reinjectTUNUSP1
+}
+
+// oob returns the reply control message for one request:
+//
+//   - The reply SOURCE is always pinned to the request's local destination
+//     (Spec_dst / Addr), so the response leaves from the exact address the
+//     manager polled — the fxp0 address for management polls, the trust/reth
+//     address for in-band polls (#16781).
+//
+//   - pinEgress controls whether the received ifindex is echoed as the
+//     reply's egress interface. serveOne passes false only when the request
+//     ingressed one of the userspace reinjection TUNs
+//     (isUserspaceReinjectTUN): echoing that ifindex pinned the reply onto
+//     the write-only TUN, so the manager never received an answer, and with
+//     ifindex 0 the kernel routes the reply normally (#17832). Every other
+//     ingress keeps the pin: the explicit oif is what makes a VRF-domain
+//     route lookup reach the VRF's routing table — with ifindex 0 the lookup
+//     misses it and sendmsg fails ENETUNREACH, verified live for both the
+//     vrf-mgmt-bound socket and a VRF-domain datagram served by the
+//     main-table listener under udp_l3mdev_accept (#16781 cell, #17832
+//     regression run).
+//
+// It returns nil when no local destination was captured, leaving
+// source/oif selection to the socket (bound device or routing table).
+func (p pktinfo) oob(pinEgress bool) []byte {
+	if p.dst == nil {
 		return nil
 	}
 	if ip4 := p.dst.To4(); ip4 != nil {
 		var info unix.Inet4Pktinfo
-		info.Ifindex = int32(p.ifindex)
+		if pinEgress {
+			info.Ifindex = int32(p.ifindex)
+		}
 		copy(info.Spec_dst[:], ip4)
 		copy(info.Addr[:], ip4)
 		return unix.PktInfo4(&info)
 	}
-	if p.dst != nil {
-		var info unix.Inet6Pktinfo
+	var info unix.Inet6Pktinfo
+	if pinEgress {
 		info.Ifindex = uint32(p.ifindex)
-		copy(info.Addr[:], p.dst.To16())
-		return unix.PktInfo6(&info)
 	}
-	// No destination captured but an ifindex was: pin only the oif. IPv6
-	// carries the ifindex without an address; there is no v4 equivalent
-	// with a zero Spec_dst that would not also claim 0.0.0.0 as source, so
-	// fall back to unpinned for that (unreachable in practice: the kernel
-	// always supplies Addr alongside Ifindex).
-	return nil
+	copy(info.Addr[:], p.dst.To16())
+	return unix.PktInfo6(&info)
 }
