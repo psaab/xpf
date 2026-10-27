@@ -67,8 +67,8 @@ type trackedFlow struct {
 // realistic idle-then-resumed working set, yet a hard ceiling so a
 // flood of distinct idle-expired flows cannot grow tracker state
 // without bound. At the cap the whole marker set is cleared (see
-// storeIdleMarkerLocked); the affected flows fall back to the pre-fix
-// close-dropped behaviour rather than leaking memory.
+// storeIdleMarkerLocked); affected closes fall back to #16742's close-time
+// sampling decision and may re-export inactive-final counters if selected.
 const idleMarkerMax = 8192
 
 // idleMarker remembers a flow whose inactive expiry already emitted its
