@@ -3881,6 +3881,33 @@ type compileOpts struct {
 	currentClusterAccepted16858 *clusterAcceptedKeys16858
 }
 
+// strictCompileOpts returns the compileOpts for the strict commit /
+// commit-check path. It is the single source of truth for strict mode,
+// beside lenientCompileOpts (#17148): every production strict entry
+// (CompileConfig, CompileConfigForNode, and the current-cluster-primary
+// variants via currentClusterOpts) and every test helper that claims to
+// measure the strict commit path MUST start from this constructor and
+// then apply its per-call overrides, never from a hand-copied
+// compileOpts{...} literal or the bare zero value.
+//
+// Strict is currently the zero value: no lenient*/sanitize* downgrade is
+// enabled, so a strict compile hard-rejects every gated misconfiguration
+// the tolerant path would warn on. That equality is intentional today,
+// not a licence to spell strict as compileOpts{} at call sites — the
+// #16296/#16849 history shows an always-on strict fold hand-edited into
+// each strict literal and silently absent from every zero-value test
+// compile. If a future fold needs a non-zero strict field, it lands
+// HERE once (under a non-lenient* name if it is not a tolerant-only
+// downgrade, per #16166) and production and strict-named tests move
+// together; TestStrictCompileOptsSingleSource17148 pins that the
+// production entries and strictCompileOpts stay identical, and the AST
+// census in the same test rejects any new bare compileOpts{...} literal
+// outside this file (the tunnelid/reth side compiles excepted, see
+// there).
+func strictCompileOpts() compileOpts {
+	return compileOpts{}
+}
+
 // lenientCompileOpts returns a compileOpts with every tolerant-path
 // severity downgrade enabled. It is the single source of truth for the
 // lenient flag set that CompileConfigLenient and
