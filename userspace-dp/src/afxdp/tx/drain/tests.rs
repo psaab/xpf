@@ -390,3 +390,349 @@ fn ingest_cos_pending_tx_step1_refusal_falls_through_to_step2_10310() {
         "a Step 2-accepted request must not linger in pending"
     );
 }
+
+// #17151 test helpers -----------------------------------------------
+
+fn noop_count_17151(binding: &BindingWorker) -> u64 {
+    binding
+        .live
+        .owner_profile_owner
+        .drain_noop_invocations
+        .load(Ordering::Relaxed)
+}
+
+fn shaped_serviced_counts_17151(binding: &BindingWorker, root_ifindex: i32) -> (usize, u64) {
+    let root = binding
+        .cos
+        .cos_interfaces
+        .get(&root_ifindex)
+        .expect("cos root");
+    let queue = &root.queues[0];
+    let lat: u64 = queue
+        .telemetry
+        .owner_profile
+        .drain_latency_hist
+        .iter()
+        .map(|b| b.load(Ordering::Relaxed))
+        .sum();
+    let inv = queue
+        .telemetry
+        .owner_profile
+        .drain_invocations
+        .load(Ordering::Relaxed);
+    assert_eq!(lat, inv, "hist buckets must sum to drain_invocations");
+    (queue.hot.items.len(), inv)
+}
+
+fn token_starved_binding_17151() -> BindingWorker {
+    let mut root = test_cos_interface_runtime(0);
+    root.tokens = 0;
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.last_refill_ns = u64::MAX - 1_500;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+    let fast_path = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    )
+    .remove(&42)
+    .expect("fast path");
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    binding.tx_pipeline.pending_tx_local.push_back(TxRequest {
+        bytes: vec![0u8; 64].into(),
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 42,
+        cos_queue_id: Some(0),
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: 0,
+    });
+    binding
+}
+
+fn forwarding_with_cos_17151() -> ForwardingState {
+    let mut forwarding = ForwardingState::default();
+    forwarding.cos.interfaces.insert(
+        42,
+        crate::afxdp::types::CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
+            shaping_rate_bytes: 1_000_000,
+            burst_bytes: 64 * 1024,
+            default_queue: 0,
+            dscp_classifier: String::new(),
+            ieee8021_classifier: String::new(),
+            dscp_queue_by_dscp: [u8::MAX; 64],
+            ieee8021_queue_by_pcp: [u8::MAX; 8],
+            queue_by_forwarding_class: crate::afxdp::FastMap::default(),
+            queues: vec![crate::afxdp::types::CoSQueueConfig {
+                queue_id: 0,
+                forwarding_class: "best-effort".into(),
+                priority: 5,
+                transmit_rate_bytes: 1_000_000,
+                guarantee_enabled: true,
+                exact: false,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+                equal_flow_target_policy:
+                    crate::afxdp::types::EqualFlowTargetPolicy::Slowest,
+                surplus_weight: 1,
+                buffer_bytes: 64 * 1024,
+                dscp_rewrite: None,
+                codel_target_ns: 0,
+            }],
+            oversubscription_policy:
+                crate::afxdp::types::CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
+        },
+    );
+    forwarding
+}
+
+/// #17151: the shared shaped step counts its terminating noop once,
+/// and does NOT count when the entry guard admits no drain at all.
+/// Removing the helper's noop arm makes the first assertion red;
+/// removing the guard makes the second red.
+#[test]
+fn drain_pending_tx_counts_initial_noop_and_idle_guard_17151() {
+    let mut binding = token_starved_binding_17151();
+    let forwarding = forwarding_with_cos_17151();
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
+        BTreeMap::new();
+    let mut shared = Vec::new();
+    assert!(drain_pending_tx(
+        &mut binding,
+        1_000_000_000,
+        &mut shared,
+        &forwarding,
+        0,
+        &worker_commands_by_id,
+    ));
+    assert_eq!(
+        noop_count_17151(&binding),
+        1,
+        "initial pass: exactly its terminating None must count once (#17151)"
+    );
+    assert_eq!(
+        shaped_serviced_counts_17151(&binding, 42),
+        (2, 0),
+        "token-starved queue must stay queued; the noop serviced nothing \
+         (1 seeded item + the ingested pending item)"
+    );
+    assert!(
+        binding.tx_pipeline.pending_tx_local.is_empty(),
+        "the initial ingest must consume the pending item into the queue"
+    );
+
+    // Guard half: fabricate a drain_pending_tx-style context (via the
+    // production DrainCtx shape) and drive the shared helper directly
+    // on an idle binding — no drain call happens, so no noop counts.
+    let root = test_cos_interface_runtime(0);
+    let fast_path = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    )
+    .remove(&42)
+    .expect("fast path");
+    let mut idle = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    idle.cos.cos_nonempty_interfaces = 0;
+    let ctx = DrainCtx {
+        forwarding: &forwarding,
+        worker_id: 0,
+        worker_commands_by_id: &worker_commands_by_id,
+        now_ns: 1_000_000_000,
+    };
+    let mut did_work = false;
+    let mut shared2 = Vec::new();
+    assert!(!service_shaped_until_noop(
+        &mut idle,
+        &ctx,
+        &mut shared2,
+        &mut did_work
+    ));
+    assert!(!did_work);
+    assert_eq!(
+        noop_count_17151(&idle),
+        0,
+        "idle binding: entry guard admits no drain, so no noop may count (#1318/#17151)"
+    );
+}
+
+/// #17151: the shared step applies its ONE noop policy on every
+/// pass. A pass that drains its queue dry exits via the entry
+/// guard — its terminating condition is "no queued work", not a
+/// `None` drain — so it counts nothing extra; each serviced drain
+/// is attributed exactly once.
+#[test]
+fn service_shaped_until_noop_counts_terminating_noop_once_17151() {
+    let mut root = test_cos_interface_runtime(0);
+    root.tokens = 100_000;
+    root.queues[0].hot.tokens = 1500;
+    root.queues[0].hot.last_refill_ns = 1;
+    root.queues[0].hot.items.push_back(test_cos_item(1500));
+    root.queues[0].hot.queued_bytes = 1500;
+    root.queues[0].hot.runnable = true;
+    root.nonempty_queues = 1;
+    root.runnable_queues = 1;
+    let fast_path = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    )
+    .remove(&42)
+    .expect("fast path");
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    let forwarding = forwarding_with_cos_17151();
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
+        BTreeMap::new();
+    let ctx = DrainCtx {
+        forwarding: &forwarding,
+        worker_id: 0,
+        worker_commands_by_id: &worker_commands_by_id,
+        now_ns: 1_000_000_000,
+    };
+    let mut shared = Vec::new();
+
+    // Pass 1: drains the queued item dry.
+    let mut did_work = false;
+    assert!(service_shaped_until_noop(
+        &mut binding,
+        &ctx,
+        &mut shared,
+        &mut did_work
+    ));
+    assert!(did_work, "the queued item must be serviced");
+    assert_eq!(
+        shaped_serviced_counts_17151(&binding, 42),
+        (0, 1),
+        "one item drained, attributed exactly once"
+    );
+    assert_eq!(
+        noop_count_17151(&binding),
+        0,
+        "a pass that drains dry exits via the guard, not a None drain"
+    );
+
+    // Re-arm the queue (as a re-ingest would) and drain again.
+    {
+        let root = binding.cos.cos_interfaces.get_mut(&42).expect("cos root");
+        root.tokens = 100_000;
+        root.queues[0].hot.tokens = 1500;
+        root.queues[0].hot.last_refill_ns = 1;
+        root.queues[0].hot.items.push_back(test_cos_item(1500));
+        root.queues[0].hot.queued_bytes = 1500;
+        root.queues[0].hot.runnable = true;
+        root.nonempty_queues = 1;
+        root.runnable_queues = 1;
+    }
+    binding.cos.cos_nonempty_interfaces = 1;
+    let mut did_work2 = false;
+    assert!(service_shaped_until_noop(
+        &mut binding,
+        &ctx,
+        &mut shared,
+        &mut did_work2
+    ));
+    assert!(did_work2);
+    assert_eq!(
+        shaped_serviced_counts_17151(&binding, 42),
+        (0, 2),
+        "the re-armed queue drains again"
+    );
+    assert_eq!(noop_count_17151(&binding), 0, "still no None drain occurred");
+
+    // Pass 3 over the drained queue: the guard admits no drain.
+    let mut did_work3 = false;
+    assert!(!service_shaped_until_noop(
+        &mut binding,
+        &ctx,
+        &mut shared,
+        &mut did_work3
+    ));
+    assert!(!did_work3);
+    assert_eq!(
+        noop_count_17151(&binding),
+        0,
+        "idle pass adds no noop (#1318/#17151)"
+    );
+}
+/// #17151: the re-ingest pass counts its terminating noop too.
+///
+/// PRODUCTION PATH: `drain_pending_tx` is the ONLY caller of the
+/// re-ingest budget, so this drives it directly. One pending item
+/// sits in the redirect inbox (so the re-ingest budget admits an
+/// iteration) and fails ingest, while the token-starved queue makes
+/// every drain return `None`. Removing the re-ingest call, or the
+/// helper's noop arm, drops the count from 2 to 1 -> RED.
+#[test]
+fn drain_pending_tx_counts_reingest_noop_17151() {
+    // Same starved setup as the initial-pass test: the first
+    // drain_pending_tx counts ONE noop (initial terminating None).
+    let mut binding = token_starved_binding_17151();
+    let forwarding = forwarding_with_cos_17151();
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
+        BTreeMap::new();
+    let mut shared = Vec::new();
+    assert!(drain_pending_tx(
+        &mut binding,
+        1_000_000_000,
+        &mut shared,
+        &forwarding,
+        0,
+        &worker_commands_by_id,
+    ));
+    assert_eq!(noop_count_17151(&binding), 1, "first drain_pending_tx");
+
+    // A late peer arrival lands in the redirect inbox; the queue is
+    // still token-starved, so the second drain_pending_tx runs the
+    // re-ingest budget and counts a SECOND terminating None.
+    binding
+        .live
+        .enqueue_tx_owned(TxRequest {
+            bytes: vec![3u8; 64].into(),
+            expected_ports: None,
+            expected_addr_family: libc::AF_INET as u8,
+            expected_protocol: PROTO_TCP,
+            flow_key: None,
+            egress_ifindex: 99,
+            cos_queue_id: Some(7),
+            dscp_rewrite: None,
+            mirror_clone: false,
+            overlap_admissions: None,
+            enqueue_ns: 0,
+        })
+        .expect("fresh inbox accepts the late peer arrival");
+    assert!(drain_pending_tx(
+        &mut binding,
+        1_000_000_000,
+        &mut shared,
+        &forwarding,
+        0,
+        &worker_commands_by_id,
+    ));
+    assert_eq!(
+        noop_count_17151(&binding),
+        2,
+        "initial pass + re-ingest pass must EACH count their terminating None (#17151)"
+    );
+}

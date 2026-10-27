@@ -24,23 +24,32 @@ pub(super) fn drain_phase_drain_cos(
     shaped_reingest_budget(binding, ctx, shared_recycles, did_work);
 }
 
-/// Original #751 drain loop: service shaped queues until noop.
-/// Each shaped drain attributes latency + invocations to the
-/// specific queue via `drain_shaped_tx`'s returned queue ref.
+/// Single source of truth for the timed shaped-drain step (#17151):
+/// service shaped queues until `drain_shaped_tx` reports noop
+/// (`None`), attributing latency + invocations to each serviced
+/// queue via its returned queue ref.
 ///
-/// #1318: skip the whole shaped-drain call path when this binding
-/// has no queued CoS work. `drain_shaped_tx` has its own defensive
-/// bail, but the caller would still pay `monotonic_nanos()`, one
-/// no-op call, and noop telemetry on every idle worker tick.
+/// Noop policy (ONE, for every caller): the terminating `None` drain
+/// bumps `binding.live.owner_profile_owner.drain_noop_invocations`
+/// exactly once per call. This matches the counter's written
+/// contracts — `worker/cos/mod.rs`: "counts drain calls that made no
+/// progress on *any* queue" and `binding_state/mod.rs`: "a subset
+/// counter (drains that returned `false`)" — because that terminating
+/// drain made no progress on any queue, whether or not earlier
+/// iterations of this same call serviced work. The initial pass and
+/// every re-ingest pass therefore count identically; callers MUST
+/// NOT add their own noop arm.
 ///
-/// Mirrors `drain.rs:109-137` (original).
+/// Sets `*did_work` when any queue was serviced and returns whether
+/// any queue was serviced (`serviced_any`).
 #[inline]
-fn shaped_initial_drain(
+pub(crate) fn service_shaped_until_noop(
     binding: &mut BindingWorker,
     ctx: &DrainCtx<'_>,
     shared_recycles: &mut Vec<(u32, u64)>,
     did_work: &mut bool,
-) {
+) -> bool {
+    let mut serviced_any = false;
     while should_enter_shaped_drain(binding) {
         let start_ns = monotonic_nanos();
         let serviced = drain_shaped_tx(binding, ctx.now_ns, shared_recycles);
@@ -61,6 +70,7 @@ fn shaped_initial_drain(
                 }
             }
             *did_work = true;
+            serviced_any = true;
         } else {
             binding
                 .live
@@ -70,6 +80,27 @@ fn shaped_initial_drain(
             break;
         }
     }
+    serviced_any
+}
+
+/// Original #751 drain loop: service shaped queues until noop via
+/// `service_shaped_until_noop` (the shared step; see its noop policy).
+///
+/// #1318: skip the whole shaped-drain call path when this binding
+/// has no queued CoS work. `drain_shaped_tx` has its own defensive
+/// bail, but the caller would still pay `monotonic_nanos()`, one
+/// no-op call, and noop telemetry on every idle worker tick. The
+/// helper preserves this: it only reaches the terminating `None`
+/// (and its noop count) after `should_enter_shaped_drain` admitted
+/// the loop, so an idle binding counts nothing.
+#[inline]
+fn shaped_initial_drain(
+    binding: &mut BindingWorker,
+    ctx: &DrainCtx<'_>,
+    shared_recycles: &mut Vec<(u32, u64)>,
+    did_work: &mut bool,
+) {
+    let _ = service_shaped_until_noop(binding, ctx, shared_recycles, did_work);
 }
 
 /// #760: bounded re-ingest → drain_shaped_tx loop, but ONLY
@@ -118,33 +149,11 @@ fn shaped_reingest_budget(
             false,
             shared_recycles,
         );
-        let mut serviced_in_inner = false;
-        while should_enter_shaped_drain(binding) {
-            let start_ns = monotonic_nanos();
-            let serviced = drain_shaped_tx(binding, ctx.now_ns, shared_recycles);
-            if let Some(serviced) = serviced.as_ref() {
-                let delta = monotonic_nanos().saturating_sub(start_ns);
-                let bucket = bucket_index_for_ns(delta);
-                if let Some(root) = binding.cos.cos_interfaces.get(&serviced.root_ifindex) {
-                    if let Some(queue) = root.queues.get(serviced.queue_idx) {
-                        if queue.queue_id() == serviced.queue_id {
-                            queue.telemetry.owner_profile.drain_latency_hist[bucket]
-                                .fetch_add(1, Ordering::Relaxed);
-                            queue
-                                .telemetry
-                                .owner_profile
-                                .drain_invocations
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                }
-                *did_work = true;
-                serviced_in_inner = true;
-            } else {
-                break;
-            }
-        }
-        if !serviced_in_inner {
+        // #17151: the shared step applies the ONE noop policy; the
+        // wrapper keeps only its budget, inbox guard, and the
+        // `!serviced_any -> break` quiesce rule.
+        let serviced_any = service_shaped_until_noop(binding, ctx, shared_recycles, did_work);
+        if !serviced_any {
             break;
         }
     }
