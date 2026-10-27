@@ -514,6 +514,10 @@ func (m *Manager) FormatInformation() string {
 			fmt.Fprintf(&b, "  Installs suppressed (peer lacks install-table support): %d\n",
 				syncStats.InstallsSuppressedNoPeerInstallTable)
 		}
+		if syncStats.InstallsSuppressedIpsecDiscriminator > 0 {
+			fmt.Fprintf(&b, "  Installs suppressed (peer lacks IPsec discriminator support): %d\n",
+				syncStats.InstallsSuppressedIpsecDiscriminator)
+		}
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}
@@ -911,6 +915,10 @@ func (m *Manager) FormatStatistics() string {
 		if syncStats.InstallsSuppressedNoPeerInstallTable > 0 {
 			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Installs suppressed (no peer install table)",
 				syncStats.InstallsSuppressedNoPeerInstallTable, "")
+		}
+		if syncStats.InstallsSuppressedIpsecDiscriminator > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Installs suppressed (no peer IPsec discriminator)",
+				syncStats.InstallsSuppressedIpsecDiscriminator, "")
 		}
 		if syncStats.LastFenceSeq > 0 {
 			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Install fence seq",

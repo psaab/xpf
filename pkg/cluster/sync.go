@@ -595,6 +595,15 @@ type SyncStats struct {
 	// lie. Unstamped installs are never withheld. Same operational meaning
 	// as the delete suppressors: counted, visible gap over silent corruption.
 	InstallsSuppressedNoPeerInstallTable atomic.Uint64
+	// InstallsSuppressedIpsecDiscriminator counts outgoing IPsec
+	// (S9.4 class-3 discriminator) session installs WITHHELD because
+	// the peer did not advertise capFlagIpsecTunnelDiscriminator or
+	// its capabilities are not yet learned (#17113). Such a peer
+	// cannot preserve the IPsec if_id discriminator, so sending the
+	// install would alias it onto another tunnel's key. Same
+	// operational meaning as the other install suppressor: counted,
+	// visible gap over silent corruption.
+	InstallsSuppressedIpsecDiscriminator atomic.Uint64
 	// DeletesStaleIgnored counts deletes refused by the #2170 install-
 	// generation guard: a journaled/deferred delete whose generation was
 	// strictly older than the currently-installed same-key entry. A nonzero
@@ -741,6 +750,7 @@ type SyncStatsSnapshot struct {
 	DeletesSuppressedPurgeRetirement     uint64
 	DeletesSuppressedScopedPolicy        uint64
 	InstallsSuppressedNoPeerInstallTable uint64
+	InstallsSuppressedIpsecDiscriminator uint64
 	DeletesStaleIgnored                  uint64
 	InstallsStaleIgnored                 uint64
 	SessionsStaleConfigIgnored           uint64
@@ -1479,21 +1489,8 @@ type SessionSync struct {
 	deleteJournal       boundedFrameJournal
 	scopedDeleteJournal boundedFrameJournal
 	lastPeerRxMono      atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
-	// peerHeartbeatAckEver latches when the CURRENTLY connected peer proves it
-	// understands syncMsgHeartbeat by replying syncMsgHeartbeatAck. It gates
-	// the two enforcement paths that would otherwise punish a legacy peer that
-	// simply never acks: the receiveLoop missed-heartbeat teardown
-	// (sync_conn_read.go) and PeerHealthy's silence window (below).
-	//
-	// #5718 C01a: this is peer-INCARNATION scoped, NOT SessionSync-lifetime.
-	// handleDisconnect clears it on full disconnect (alongside clockSynced) so
-	// a peer downgrade — new build acks, then rolls back to a build that never
-	// acks — cannot leave the flag latched and turn a healthy old peer into
-	// permanent connection churn plus a failover-readiness block. Do not
-	// promote this back to a set-once flag.
-	peerHeartbeatAckEver atomic.Bool
-	readDeadline         time.Duration
-	peerSilenceLimit     time.Duration
+	readDeadline        time.Duration
+	peerSilenceLimit    time.Duration
 	// bulkStartMu serializes queued incremental writes with the
 	// table-truth snapshot -> BulkStart boundary (#10283). A bulk holds it
 	// while reading BulkSnapshotSource and until BulkStart is written under
@@ -2028,6 +2025,12 @@ func decodeFailoverBatchRequestPayload(payload []byte) ([]int, uint64, error) {
 	return ids, binary.LittleEndian.Uint64(payload[1+count : 1+count+8]), nil
 }
 func encodeFailoverBatchAckPayload(rgIDs []int, status uint8, reqID uint64, detail string) []byte {
+	// #17093: clamp the free-form detail so the payload never exceeds
+	// the FailoverBatchAck per-type cap; an over-cap ack would make a
+	// #16041-or-later peer drop the connection.
+	if maxDetail := (1 + maxFailoverBatchRGCount + 1 + 8 + 4096) - (1 + len(rgIDs) + 1 + 8); len(detail) > maxDetail {
+		detail = detail[:maxDetail]
+	}
 	payload := make([]byte, 1+len(rgIDs)+1+8+len(detail))
 	payload[0] = byte(len(rgIDs))
 	for i, rgID := range rgIDs {
@@ -2450,6 +2453,7 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		DeletesSuppressedPurgeRetirement:     s.stats.DeletesSuppressedPurgeRetirement.Load(),
 		DeletesSuppressedScopedPolicy:        s.stats.DeletesSuppressedScopedPolicy.Load(),
 		InstallsSuppressedNoPeerInstallTable: s.stats.InstallsSuppressedNoPeerInstallTable.Load(),
+		InstallsSuppressedIpsecDiscriminator: s.stats.InstallsSuppressedIpsecDiscriminator.Load(),
 		DeletesStaleIgnored:                  s.stats.DeletesStaleIgnored.Load(),
 		InstallsStaleIgnored:                 s.stats.InstallsStaleIgnored.Load(),
 		SessionsStaleConfigIgnored:           s.stats.SessionsStaleConfigIgnored.Load(),
