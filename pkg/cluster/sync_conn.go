@@ -1619,6 +1619,8 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		s.scopedPolicySuppressionWarned.Store(false)
 		// #9752 round 3: same incarnation scoping for the stamped-install latch.
 		s.installTableSuppressionWarned.Store(false)
+		// #17113: same incarnation scoping for the IPsec discriminator latch.
+		s.ipsecDiscriminatorSuppressionWarned.Store(false)
 		// #9752 round 4: same for the bulk-refusal latch.
 		s.bulkFencedForPeer.Store(false)
 		// #9506: the discriminator refusal latch is separate from the

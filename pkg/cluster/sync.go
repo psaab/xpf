@@ -595,6 +595,15 @@ type SyncStats struct {
 	// lie. Unstamped installs are never withheld. Same operational meaning
 	// as the delete suppressors: counted, visible gap over silent corruption.
 	InstallsSuppressedNoPeerInstallTable atomic.Uint64
+	// InstallsSuppressedIpsecDiscriminator counts outgoing IPsec
+	// (S9.4 class-3 discriminator) session installs WITHHELD because
+	// the peer did not advertise capFlagIpsecTunnelDiscriminator or
+	// its capabilities are not yet learned (#17113). Such a peer
+	// cannot preserve the IPsec if_id discriminator, so sending the
+	// install would alias it onto another tunnel's key. Same
+	// operational meaning as the other install suppressor: counted,
+	// visible gap over silent corruption.
+	InstallsSuppressedIpsecDiscriminator atomic.Uint64
 	// DeletesStaleIgnored counts deletes refused by the #2170 install-
 	// generation guard: a journaled/deferred delete whose generation was
 	// strictly older than the currently-installed same-key entry. A nonzero
@@ -741,6 +750,7 @@ type SyncStatsSnapshot struct {
 	DeletesSuppressedPurgeRetirement     uint64
 	DeletesSuppressedScopedPolicy        uint64
 	InstallsSuppressedNoPeerInstallTable uint64
+	InstallsSuppressedIpsecDiscriminator uint64
 	DeletesStaleIgnored                  uint64
 	InstallsStaleIgnored                 uint64
 	SessionsStaleConfigIgnored           uint64
@@ -1409,6 +1419,11 @@ type SessionSync struct {
 	// suppression warning, same incarnation scoping (reset alongside on
 	// full disconnect).
 	installTableSuppressionWarned atomic.Bool
+	// ipsecDiscriminatorSuppressionWarned latches the S9.4 IPsec
+	// discriminator suppression warning (#17113), same incarnation
+	// scoping as installTableSuppressionWarned (reset alongside it
+	// on full disconnect).
+	ipsecDiscriminatorSuppressionWarned atomic.Bool
 	// bulkFencedForPeer latches a #9752 round 4 bulk refusal for the peer
 	// incarnation: once a window aborts on the install fence, retries skip
 	// quietly instead of burning full-table walks that all abort the same
@@ -2538,6 +2553,7 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		DeletesSuppressedPurgeRetirement:     s.stats.DeletesSuppressedPurgeRetirement.Load(),
 		DeletesSuppressedScopedPolicy:        s.stats.DeletesSuppressedScopedPolicy.Load(),
 		InstallsSuppressedNoPeerInstallTable: s.stats.InstallsSuppressedNoPeerInstallTable.Load(),
+		InstallsSuppressedIpsecDiscriminator: s.stats.InstallsSuppressedIpsecDiscriminator.Load(),
 		DeletesStaleIgnored:                  s.stats.DeletesStaleIgnored.Load(),
 		InstallsStaleIgnored:                 s.stats.InstallsStaleIgnored.Load(),
 		SessionsStaleConfigIgnored:           s.stats.SessionsStaleConfigIgnored.Load(),

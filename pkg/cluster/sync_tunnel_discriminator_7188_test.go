@@ -319,7 +319,7 @@ func TestIpsecBulkFenceRevalidatesOnlyItsCapability9506(t *testing.T) {
 			}
 			err := ss.BulkSync()
 			if tt.staysFenced {
-				if err != errBulkFencedForPeer {
+				if err != errBulkFencedForIpsecPeer {
 					t.Fatalf("install-table-only peer must not retry an IPsec-fenced bulk: err=%v", err)
 				}
 			} else if err == nil || err.Error() != "no peer connection" {
