@@ -1977,13 +1977,11 @@ func loginClassPermName(p LoginClassPermission) string {
 // loginClassAdvisoryWarnings emits one accept-with-advisory warning per custom
 // `system login class <name>` (#4304 S-2). The class is RECOGNIZED (a valid
 // vSRX RBAC config commits instead of being hard-rejected), but xpf's coarse
-// permission model cannot faithfully represent every Junos permission or the
-// per-command ADDITIVE regexes (allow-commands / allow-configuration), so the
-// advisory states exactly what maps and what is recognized-but-not-enforced.
-// It says nothing about the RESTRICTIVE regexes: #5831 moved deny-commands /
-// deny-configuration out of advisory territory entirely — strict rejects the
-// commit, and the tolerant path folds the class and emits its own warning
-// (compiler_login_deny.go). Deterministic order for stable output.
+// permission model cannot faithfully represent every Junos permission, so the
+// advisory states exactly what maps. It says nothing about the regex leaves:
+// #7172 enforces allow-*/deny-* as allowlists/blacklists on both dispatch
+// surfaces (compiler_login_deny.go), and #7172 cut 6 retired the former #5831
+// reject-and-fold gate. Deterministic order for stable output.
 func loginClassAdvisoryWarnings(cfg *Config) []string {
 	if cfg == nil || cfg.System.Login == nil || len(cfg.System.Login.Classes) == 0 {
 		return nil
@@ -2002,11 +2000,10 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 		}
 		_, widened := mapJunosPermissions(lc.Permissions)
 		// Report the EFFECTIVE set (lc.MappedPermissions), not a fresh
-		// mapJunosPermissions call (#5831). The two are identical for every
-		// class the tolerant #5831 fold did not touch, so this changes no
-		// existing output; for a folded class the fresh call would report the
-		// pre-fold buckets and tell the operator the class still holds
-		// permissions it no longer has.
+		// mapJunosPermissions call (#5831). Since #7172 cut 6 retired the
+		// fold, MappedPermissions is exactly the authored mapping on every
+		// path; reporting the effective set keeps this advisory truthful if
+		// a future transform ever adjusts it.
 		names := make([]string, 0, len(lc.MappedPermissions))
 		for _, p := range lc.MappedPermissions {
 			names = append(names, loginClassPermName(p))
@@ -2061,27 +2058,17 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 		if len(inert) > 0 {
 			msg += fmt.Sprintf("; %s accepted but NOT enforced by xpf's coarse RBAC", strings.Join(inert, "/"))
 		}
-		// SECURITY: deny-commands / deny-configuration are BLACKLISTS, and the
-		// #4304 "accepted but MORE PERMISSIVE" advisory that used to be
-		// appended here is GONE (#5831) rather than reworded. Two reasons it
-		// could not stay:
-		//
-		//  1. It is no longer reachable on the strict path at all —
-		//     validateLoginClassDenyStrict rejects the commit outright.
-		//  2. On the tolerant path it would now be misleading. That path folds
-		//     the class to the repair floor before this runs, dropping every
-		//     operational-verb bucket, so the class is MORE restrictive than
-		//     the Junos config on the half deny-commands targets; repeating
-		//     the old text would tell the operator the opposite of what
-		//     happened. (Configuration is the one half where the restriction
-		//     genuinely does not bind — the fold keeps `configure` so the
-		//     statement can be deleted — and the fold's own warning says so
-		//     precisely, which a blanket "MORE PERMISSIVE" cannot.)
-		//
-		// foldLoginClassDenyToRepairableFloor emits the accurate per-class
-		// warning on that path, so this advisory stays out of the
-		// restrictive-regex business entirely and describes only the
-		// permission mapping.
+		// SECURITY (history): deny-commands / deny-configuration are
+		// BLACKLISTS, and the #4304 "accepted but MORE PERMISSIVE" advisory
+		// that used to be appended here is GONE (#5831) rather than reworded.
+		// Between #5831/#6838 and #7172 the strict path hard-rejected such a
+		// class and the tolerant path folded it to a repair floor, because
+		// the regexes were unenforced; #7172 implemented enforcement and
+		// cut 6 retired both the rejection and the fold. The regexes are
+		// now enforced on both dispatch surfaces, so this advisory stays
+		// out of the regex business entirely and describes only the
+		// permission mapping; the per-surface deny advisory below covers
+		// whether a deny pattern can ever fire.
 		warnings = append(warnings, msg)
 		// #8189: and, as a SEPARATE advisory, whether the class's deny pattern
 		// can ever fire on a registered dispatch surface. Separate rather than

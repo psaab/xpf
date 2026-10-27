@@ -54,6 +54,8 @@ security {
 	return store
 }
 
+func int32Ptr17081(v int32) *int32 { return &v }
+
 func TestMatchPoliciesRejectsInvalidSourceIP(t *testing.T) {
 	s := &Server{store: matchPoliciesTestStore(t)}
 
@@ -230,12 +232,12 @@ func TestMatchPoliciesRejectsInvalidPort(t *testing.T) {
 		req     *pb.MatchPoliciesRequest
 		wantErr bool
 	}{
-		{"dst negative", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", DestinationPort: -1}, true},
-		{"dst out of range", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", DestinationPort: 70000}, true},
-		{"src negative", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", SourcePort: -1}, true},
-		{"src out of range", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", SourcePort: 65536}, true},
-		{"dst valid", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", DestinationPort: 443}, false},
-		{"dst zero wildcard", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", DestinationPort: 0}, false},
+		{"dst negative", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", DestinationPort: int32Ptr17081(-1)}, true},
+		{"dst out of range", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", DestinationPort: int32Ptr17081(70000)}, true},
+		{"src negative", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", SourcePort: int32Ptr17081(-1)}, true},
+		{"src out of range", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", SourcePort: int32Ptr17081(65536)}, true},
+		{"dst valid", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", DestinationPort: int32Ptr17081(443)}, false},
+		{"dst zero literal", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", DestinationPort: int32Ptr17081(0)}, false},
 		{"ports absent", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust"}, false},
 	}
 	for _, tc := range cases {

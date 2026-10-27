@@ -157,11 +157,8 @@ func TestInterfaceMonitor_CarrierState(t *testing.T) {
 // #8073: a transient LinkByName failure must not silently drop a monitored
 // interface from cluster status.
 //
-// These statuses are not display-only: the config-apply tail feeds each one
-// into cluster.Manager.SetMonitorWeight. An interface dropped here is absent
-// from the slice, so SetMonitorWeight is never CALLED for it and its recorded
-// weight persists stale — meaning a link that went down during the transient
-// error keeps its last-known Up weight and the RG does not demote.
+// (#17132: display only — the election reads the dampened pkg/cluster
+// Monitor. A dropped row is a missing `show` entry, not stale debt.)
 //
 // The three passes are the test. Pass 2 alone would pass with the fix deleted
 // if the fake's absent-case error were unrecognised by isLinkNotFound (it was,

@@ -3581,7 +3581,12 @@ takeover gate, and the marker clears when a peer heartbeat returns.
   operator's transfer-out must survive. A takeover that proceeds
   (confirmed, or fail-open with no heartbeat) keeps the clears.
   `TestFenceAbortRestoresOperatorIntent15211` (both preempt values) pins
-  the restore; the confirmed/fail-open controls pin the clears.
+  the restore; the confirmed/fail-open controls pin the clears. The
+  snapshot/restore is the shared `operatorHoldSnapshot` pair in
+  `failover.go` (#17117): an operator `ResetFailover` landing in the
+  unlocked fence wait bumps `failoverGen` and the restore abandons, so
+  the reset is honoured instead of silently undone.
+  `TestFenceAbortResetDuringFenceWaitIsHonoured17117` pins that cell.
 - **A never-seen takeover is marked DEGRADED (#15211 A22-02).**
   `handlePeerNeverSeen` cannot fence a peer that was never seen under any
   policy, so it marks the single-node takeover
@@ -3811,10 +3816,9 @@ administrative `IFF_UP` flag. xpfd admin-ups every managed interface, so
 suppress failover (#2070). The rule is: `OperUp` → up; `OperUnknown` →
 fall back to the admin flag (virtual devices and 802.1Q VLAN
 sub-interfaces that report no independent carrier state); `OperDown` /
-`OperLowerLayerDown` / anything else → down. This mirrors
-`pkg/vrrp.linkAttrsUp`, the canonical link-state read used by VRRP
-track-interface detection. `pkg/routing/monitor.go` (the display-side
-`InterfaceMonitorStatus` path) carries its own identical copy.
+`OperLowerLayerDown` / anything else → down. The single definition now lives in `pkg/linkstate.Up` (#17132);
+`LinkAttrsUp` here, `pkg/routing`'s and `pkg/vrrp`'s helpers are aliases
+of it. `pkg/routing/monitor.go` is display-only since #17132.
 
 **Missing local link = down (#5080).** A `LinkByName` failure for a
 monitor on the LOCAL FPC slot means the configured member link is absent

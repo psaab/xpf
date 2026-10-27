@@ -12,7 +12,7 @@ func TestDuplicateRuleIdentitySimulatorReportsTheRefusal9584(t *testing.T) {
 	const anyM = `match { source-address any; destination-address any; application any; }`
 	const z = `zones { security-zone trust; security-zone untrust; }`
 	pol := func(n, a string) string { return `policy ` + n + ` { ` + anyM + ` then { ` + a + `; } }` }
-	q := Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), Protocol: "tcp", SrcPort: 40000, DstPort: 80}
+	q := Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(80)}
 	for _, tc := range []struct {
 		name     string
 		text     string

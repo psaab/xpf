@@ -56,7 +56,7 @@ func query9410() Query {
 	return Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
-		Protocol: "tcp", SrcPort: 1234, DstPort: 80,
+		Protocol: "tcp", SrcPort: PortPtr(1234), DstPort: PortPtr(80),
 	}
 }
 

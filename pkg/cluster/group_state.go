@@ -15,6 +15,15 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	if cfg == nil {
 		return
 	}
+	// #17132: after releasing m.mu below, run one immediate dampened poll
+	// so the new monitor set is reflected within this apply. PollNow must
+	// not run under m.mu: poll -> SetMonitorWeight takes m.mu (lock order
+	// m.mu -> mon.mu, #4828/#6550).
+	defer func() {
+		if mon := m.Monitor(); mon != nil {
+			mon.PollNow()
+		}
+	}()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

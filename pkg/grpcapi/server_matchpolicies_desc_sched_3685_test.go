@@ -73,7 +73,7 @@ func TestMatchPoliciesResponseCarriesDescriptionAndScheduler(t *testing.T) {
 		FromZone:        "trust",
 		ToZone:          "untrust",
 		Protocol:        "tcp",
-		DestinationPort: 80,
+		DestinationPort: int32Ptr17081(80),
 	})
 	if err != nil {
 		t.Fatalf("MatchPolicies error = %v", err)
