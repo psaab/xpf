@@ -221,7 +221,7 @@ use std::sync::atomic::AtomicU32;
 // scripts/verify-nat64-split-16188.py, which reconstructs the
 // pre-split file byte-for-byte after un-applying them):
 //   state.rs:    NAT64_PORT_LOW, NAT64_PORT_HIGH, parse_pool_v4,
-//                nat64_rule_identity, build_deterministic_v6,
+//                parse_nat64_rule (#17059, was nat64_rule_identity), build_deterministic_v6,
 //                (prev_prefix_is_deterministic removed by #16481),
 //                Nat64State::embedded_v4_is_non_global (associated fn)
 //                private -> pub(super)

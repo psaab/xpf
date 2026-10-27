@@ -392,10 +392,11 @@ fn nat64_14624_duplicate_member_unique_tuples() {
     // The phase-1 reuse key must dedupe IDENTICALLY, or it would never
     // match the built pool (allocator wrongly not reused / wrongly
     // reused, and the #6982 charge would count the duplicate).
-    let (_, identity_pool, _) =
-        nat64_rule_identity(&dup_snap).expect("a valid rule must have an identity");
+    // #17059: one parser serves both, so this pins the parser's own
+    // dedupe against the installed prefix.
+    let identity = parse_nat64_rule(&dup_snap).expect("a valid rule must parse");
     assert_eq!(
-        identity_pool, state.prefixes[0].pool_v4,
+        identity.pool_v4, state.prefixes[0].pool_v4,
         "the reuse-key identity pool must equal the built pool (#14624)"
     );
 
@@ -8094,56 +8095,139 @@ fn nat64_6982_noop_reapply_refuses_nothing_at_the_cap() {
     assert!(again.prefixes.iter().all(|p| p.pool_v4.len() == 1));
 }
 
-/// #6982: the silent phase-1 identity parser must accept exactly the rules the
-/// build loop accepts.
+/// #17059: the `pool_unusable` divergence, pinned as a budget invariant.
 ///
-/// The two parses are separate code (the loop's logs loudly and skips
-/// all-or-nothing per #3888; phase 1 must not double-log). If phase 1 were
-/// STRICTER, a rule the loop installs would be invisible to the budget and its
-/// reuse uncharged — reopening the ordering hole. If it were LOOSER, a skipped
-/// rule would consume budget that nothing uses.
+/// Pre-fix there were TWO parses. Phase 1 (`nat64_rule_identity`)
+/// returned `None` for `pool_unusable`, so the installed empty prefix
+/// was invisible to the budget; the build loop installed it anyway and
+/// on the next apply `reuse_allocator` matched its empty allocator,
+/// which phase 2 accepts "unconditionally (it was charged in phase 1)"
+/// — false. The same snapshots therefore flipped a refusal into an
+/// admission on re-apply and the live set grew past `max_prefixes`.
+///
+/// This cell is the issue's P1B probe inverted into a pass condition:
+/// [1 unusable + `budget_snaps(1024)`] applied three times through
+/// `from_snapshots_with_previous` must produce the IDENTICAL
+/// admitted set on every apply and the ADMITTED-with-pool count must
+/// never exceed the cap. ORDER: the healthy cap
+/// set is built first and the unusable rule is APPENDED, so its charges interact with the cap edge: on apply 1 its wire charge (1/1/64512) does not fit alongside the 1024 healthy charges, so it is refused and installs empty, exactly as its unusable install would be. On applies 2-3 every charge is a reuse charge, so nothing is refused and no healthy prefix is admitted that apply 1 refused. The STABLE observable is the admitted set (with-pool vs installed-empty per prefix), asserted below. `prefixes.len()` itself is cap+1 BY DESIGN on every apply —
+/// refused and unusable prefixes INSTALL empty (#6982/#14962) rather
+/// than being dropped, so the raw installed count is checked for
+/// stability, not against the cap. The unusable snapshot also carries
+/// a garbage pool member (`"not-an-ip"`): unified parsing must NOT
+/// skip the rule for it (the parser never parses members of an
+/// unusable pool), whereas a usable rule with the same member is
+/// skipped all-or-nothing.
+///
+/// Fail-on-revert: restore phase 1's `pool_unusable -> None` (or make
+/// the loop accept an unusable reuse without a phase-1 charge) and
+/// apply 2 admits one more healthy prefix: `over_budget` sets differ
+/// across applies and `with_pool` exceeds the cap.
 #[test]
-fn nat64_6982_identity_parser_matches_the_build_loop() {
-    let cases = vec![
-        // accepted
-        NAT64RuleSnapshot {
-            name: "ok".into(),
-            prefix: "64:ff9b::/96".into(),
-            pool_addresses: vec!["198.51.100.1".into(), "198.51.100.2/32".into()],
-            ..Default::default()
-        },
-        NAT64RuleSnapshot {
-            name: "ok-empty-pool".into(),
-            prefix: "64:ff9b::/96".into(),
-            pool_addresses: vec![],
-            ..Default::default()
-        },
-        // skipped by the loop
-        NAT64RuleSnapshot { name: "empty-prefix".into(), prefix: String::new(), ..Default::default() },
-        NAT64RuleSnapshot { name: "no-mask".into(), prefix: "64:ff9b::".into(), ..Default::default() },
-        NAT64RuleSnapshot { name: "bad-mask".into(), prefix: "64:ff9b::/64".into(), ..Default::default() },
-        NAT64RuleSnapshot { name: "extra-slash".into(), prefix: "64:ff9b::/96/x".into(), ..Default::default() },
-        NAT64RuleSnapshot { name: "bad-addr".into(), prefix: "zzz/96".into(), ..Default::default() },
-        NAT64RuleSnapshot {
-            name: "bad-pool".into(),
-            prefix: "64:ff9b::/96".into(),
-            pool_addresses: vec!["198.51.100.0/24".into()],
-            ..Default::default()
-        },
-    ];
-    for snap in &cases {
-        // The loop's verdict: does a single-rule snapshot install a prefix?
-        let installed = !Nat64State::from_snapshots(std::slice::from_ref(snap))
-            .prefixes
-            .is_empty();
-        let identified = nat64_rule_identity(snap).is_some();
+fn nat64_17059_unusable_reapply_does_not_grow_past_the_prefix_cap() {
+    let cap = NAT64_AGGREGATE_BUDGET.max_prefixes as usize;
+    let unusable = NAT64RuleSnapshot {
+        name: "unusable-17059".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string(), "not-an-ip".to_string()],
+        pool_unusable: true,
+        pool_unusable_reason: "invalid_pool".to_string(),
+        ..Default::default()
+    };
+    // Parser-level pin of the divergent input: the SAME parse the loop
+    // consumes says this rule installs (empty), it does not skip.
+    let identity = parse_nat64_rule(&unusable)
+        .expect("#17059: a pool_unusable rule must parse — the loop installs it empty");
+    assert!(identity.unusable, "#17059: parser must report the unusable stamp");
+    assert!(
+        identity.pool_v4.is_empty(),
+        "#17059: an unusable rule's installed pool must be empty (never mint)"
+    );
+    assert_eq!(
+        identity.wire_pool_v4,
+        vec![Ipv4Addr::new(198, 51, 100, 1)],
+        "#17059: the wire pool (leniently parsed, bad member dropped) sizes the first-install charge"
+    );
+    assert!(
+        identity.deterministic_v6.is_none(),
+        "#17059: an unusable rule carries no deterministic identity"
+    );
+    // Control: the identical member list WITHOUT the stamp is a skip —
+    // proving the empty pool above comes from the stamp, not from
+    // lenient member parsing.
+    let usable_twin = NAT64RuleSnapshot {
+        pool_unusable: false,
+        pool_unusable_reason: String::new(),
+        ..unusable.clone()
+    };
+    assert!(
+        parse_nat64_rule(&usable_twin).is_err(),
+        "#17059 control: a usable rule with an unparseable member must skip"
+    );
+
+    let mut snaps = budget_snaps(cap);
+    snaps.push(unusable);
+    // Every snapshot installs (refusals install empty too), so the
+    // installed count is cap+1 on every apply; the budget invariant is
+    // on ADMITTED (non-refused, with-pool) prefixes, not installed.
+    let mut prev: Option<Nat64State> = None;
+    let mut first_admitted: Option<Vec<(String, bool)>> = None;
+    for apply in 1..=3 {
+        let state = Nat64State::from_snapshots_with_previous(&snaps, prev.as_ref(), 0, apply);
         assert_eq!(
-            identified, installed,
-            "rule {:?}: phase-1 identity parser says {identified}, the build loop says \
-             {installed}. They must agree, or a rule's reuse is either uncharged (budget \
-             hole) or charged while nothing uses it (#6982)",
-            snap.name
+            state.prefixes.len(),
+            cap + 1,
+            "apply {apply}: every rule must install (refused/unusable install empty, #6982/#14962)"
         );
+        let over: Vec<String> = state
+            .prefixes
+            .iter()
+            .filter(|p| p.over_budget)
+            .map(|p| p.name.clone())
+            .collect();
+        let admitted: Vec<(String, bool)> = state
+            .prefixes
+            .iter()
+            .map(|p| (p.name.clone(), !p.pool_v4.is_empty()))
+            .collect();
+        let with_pool = state.prefixes.iter().filter(|p| !p.pool_v4.is_empty()).count();
+        assert!(
+            with_pool <= cap,
+            "apply {apply}: {with_pool} prefixes hold pools against a {cap} cap — \
+             a re-apply admitted a prefix the first apply refused (#17059)"
+        );
+        // The cap bounds ADMITTED-with-pool prefixes (`with_pool`
+        // above): an installed-but-refused prefix holds no pool and
+        // is not admitted, and the raw installed count is cap+1 by
+        // design because refusals install empty (#6982).
+        // The unusable prefix itself: installed, empty, reason carried.
+        let unusable_prefix = state
+            .prefixes
+            .iter()
+            .find(|p| p.name == "unusable-17059")
+            .expect("the unusable rule must install on every apply");
+        assert!(
+            unusable_prefix.pool_v4.is_empty(),
+            "apply {apply}: the unusable prefix must never hold a mintable pool"
+        );
+        assert_eq!(
+            unusable_prefix.pool_unusable_reason, "invalid_pool",
+            "apply {apply}: the unusable reason must survive every apply"
+        );
+        match &first_admitted {
+            None => first_admitted = Some(admitted),
+            Some(first) => assert_eq!(
+                &admitted, first,
+                "apply {apply}: admitted set changed across re-applies of the SAME \
+                 snapshots ({first:?} -> {over:?}); the budget verdict must be \
+                 apply-count-invariant (#17059)"
+            ),
+        }
+        assert!(
+            over.iter().all(|n| n == "unusable-17059"),
+            "apply {apply}: a healthy prefix was refused ({over:?}) (#17059)"
+        );
+        prev = Some(state);
     }
 }
 
