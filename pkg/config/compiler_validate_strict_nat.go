@@ -6311,13 +6311,32 @@ func nat64PrefixOwnerKey(prefix string) (string, bool) {
 // NAT64EffectiveZones (#15932, #17139) is the zone set a NAT64 rule-set
 // admits: the deduped union of the authored FromZones list and the
 // singular FromZone, order-preserved (list order first, singular appended
-// when not already present). It is the single normaliser for the strict
-// gate, the scoped owner key, and the snapshot builder.
+// when not already present). Intra-list duplicates collapse (first
+// occurrence wins), matching the post-lowering dedup in
+// NAT64EffectiveRoutingInstances. It is the single normaliser for the
+// strict gate, the scoped owner key, and the snapshot builder.
 func NAT64EffectiveZones(rs *NAT64RuleSet) []string {
 	if rs == nil {
 		return nil
 	}
 	out := append([]string(nil), rs.FromZones...)
+	// Collapse intra-list duplicates, first occurrence wins. `out`
+	// is freshly built above, so filtering in place cannot alias
+	// authored state.
+	deduped := out[:0]
+	for _, z := range out {
+		found := false
+		for _, kept := range deduped {
+			if kept == z {
+				found = true
+				break
+			}
+		}
+		if !found {
+			deduped = append(deduped, z)
+		}
+	}
+	out = deduped
 	if rs.FromZone != "" {
 		found := false
 		for _, z := range out {

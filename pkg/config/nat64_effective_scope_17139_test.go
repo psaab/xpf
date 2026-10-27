@@ -31,6 +31,24 @@ func TestNAT64EffectiveScopeUnion17139(t *testing.T) {
 	if got := NAT64EffectiveZones(dup); !reflect.DeepEqual(got, []string{"b"}) {
 		t.Fatalf("NAT64EffectiveZones(dup) = %v, want [b]", got)
 	}
+	// Intra-list duplicates: FromZones ["b","b"] collapses to one
+	// token (first occurrence wins), and the owner key is the
+	// canonical single-token key for ["b"].
+	dupList := &NAT64RuleSet{Prefix: "64:ff9b::/96", FromZones: []string{"b", "b"}}
+	if got := NAT64EffectiveZones(dupList); !reflect.DeepEqual(got, []string{"b"}) {
+		t.Fatalf("NAT64EffectiveZones(dupList) = %v, want [b]", got)
+	}
+	keyDupList, ok := nat64PrefixOwnerKeyScoped(nil, dupList)
+	if !ok {
+		t.Fatal("nat64PrefixOwnerKeyScoped(dupList) not ok")
+	}
+	keySingleZone, ok := nat64PrefixOwnerKeyScoped(nil, &NAT64RuleSet{Prefix: "64:ff9b::/96", FromZones: []string{"b"}})
+	if !ok {
+		t.Fatal("nat64PrefixOwnerKeyScoped(single [b]) not ok")
+	}
+	if keyDupList != keySingleZone {
+		t.Fatalf("owner key for FromZones [b b] = %q, want canonical [b] key %q", keyDupList, keySingleZone)
+	}
 	// "default" singular + "" list member + explicit-master flag: both
 	// members lower to the same wire token, so the effective set is ONE
 	// token (dedup after lowering), and the owner key is the canonical
