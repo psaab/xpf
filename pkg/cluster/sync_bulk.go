@@ -19,6 +19,16 @@ import (
 // disconnect or capable discovery.
 var errBulkFencedForPeer = errors.New("bulk sync refused: peer lacks install-table identity")
 
+// errBulkFencedForIpsecPeer marks a bulk refused by the S9.4 IPsec
+// discriminator fence (#17113): the peer has not advertised the S9.4
+// IPsec tunnel discriminator capability, so no authoritative window
+// carrying an IPsec-tagged session may complete to it. It is distinct
+// from errBulkFencedForPeer so callers and operators can tell which
+// capability is missing; errors.Is matches only this sentinel. Sweep
+// callers treat either fence as a quiet skip (each fence already
+// counted and warned once), so they check both.
+var errBulkFencedForIpsecPeer = errors.New("bulk sync refused: peer lacks S9.4 IPsec tunnel discriminator capability")
+
 // doBulkSync delivers the cold-start / survivor-fabric re-drive bulk session
 // snapshot to the peer.
 //
@@ -342,7 +352,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		if s.peerCapabilitiesLearned() && s.IpsecTunnelDiscriminatorCapable() {
 			s.peerIncarnationState().bulkFencedForIpsecPeer.Store(false)
 		} else {
-			return errBulkFencedForPeer
+			return errBulkFencedForIpsecPeer
 		}
 	}
 
@@ -436,7 +446,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 			fenced = true
 			return false
 		}
-		if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+		if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "bulk_v4") {
 			fenced = true
 			fencedByIpsec = true
 			return false
@@ -472,6 +482,8 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	if fenced {
 		if fencedByIpsec {
 			s.peerIncarnationState().bulkFencedForIpsecPeer.Store(true)
+			s.clearPendingBulkAck()
+			return fmt.Errorf("bulk sync v4: %w", errBulkFencedForIpsecPeer)
 		} else {
 			s.peerIncarnationState().bulkFencedForPeer.Store(true)
 		}
@@ -502,7 +514,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 			fenced = true
 			return false
 		}
-		if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+		if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "bulk_v6") {
 			fenced = true
 			fencedByIpsec = true
 			return false
@@ -531,6 +543,8 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	if fenced {
 		if fencedByIpsec {
 			s.peerIncarnationState().bulkFencedForIpsecPeer.Store(true)
+			s.clearPendingBulkAck()
+			return fmt.Errorf("bulk sync v6: %w", errBulkFencedForIpsecPeer)
 		} else {
 			s.peerIncarnationState().bulkFencedForPeer.Store(true)
 		}
