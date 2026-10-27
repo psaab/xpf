@@ -138,34 +138,28 @@ func TestPeerCapabilitiesMessageTypeIsUnique6650(t *testing.T) {
 // TestPeerCapabilitiesPayloadIsLengthGated6650 pins the decode contract: a
 // short frame must be ignored (leaving the 0 = incapable default) rather than
 // partially decoded, and a longer one from a newer peer must still decode its
-// leading field (#2170 trailing-field discipline).
+// leading field (#2170 trailing-field discipline). #17093: this now drives
+// the real handlePeerCapabilities instead of the former tautology (a local
+// buffer round-trip plus source greps that could not fail).
 func TestPeerCapabilitiesPayloadIsLengthGated6650(t *testing.T) {
 	t.Parallel()
-	long := make([]byte, 8)
-	binary.LittleEndian.PutUint16(long[:2], 4)
-	if got := binary.LittleEndian.Uint16(long[:2]); got != 4 {
-		t.Fatalf("a longer payload must still decode its leading u16: got %d", got)
+	// Short frame: ignored, nothing learned.
+	short := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	if short.handleMessage(nil, syncMsgPeerCapabilities, []byte{0x04}) {
+		t.Fatal("a 1-byte capabilities frame must be rejected, not partially decoded")
 	}
-
-	// #16168: the case body now lives in the extracted delegate
-	// handlePeerCapabilities (sync_failover_recv.go); the assertion
-	// follows it there at the same strength — the guard and the store
-	// must both be present in the delegate body.
-	src := readClusterSource(t, "sync_failover_recv.go")
-	if !sourceContainsFlat(src, "func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool {") {
-		t.Error("handlePeerCapabilities is missing from sync_failover_recv.go — " +
-			"the syncMsgPeerCapabilities arm no longer delegates to it")
+	if short.peerCapabilitiesLearned() {
+		t.Fatal("a 1-byte capabilities frame must leave the peer unlearned (0 = incapable)")
 	}
-	if !sourceContainsFlat(src, "if len(payload) < 2 {") {
-		t.Error("the handlePeerCapabilities delegate has no length gate — a 1-byte frame " +
-			"would slice out of range or decode garbage into the peer capability")
+	// Longer frame: the leading u16 (snapshot protocol) still decodes.
+	long := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	payload := make([]byte, 8)
+	binary.LittleEndian.PutUint16(payload[:2], 4)
+	if !long.handleMessage(nil, syncMsgPeerCapabilities, payload) {
+		t.Fatal("a longer capabilities frame from a newer peer must be accepted")
 	}
-	// Either spelling stores the decoded version; Swap additionally reports
-	// whether the advertisement changed, which gates the capabilities-changed
-	// callback so steady-state re-advertisements do not re-fire it (#10511).
-	if !sourceContainsFlat(src, "s.peerSnaps.peerSnapshotProtocol.Store(uint32(peerProto))") &&
-		!sourceContainsFlat(src, "s.peerSnaps.peerSnapshotProtocol.Swap(uint32(peerProto))") {
-		t.Error("the handlePeerCapabilities delegate does not store the decoded version")
+	if got := long.PeerSnapshotProtocolVersion(); got != 4 {
+		t.Fatalf("a longer payload must still decode its leading u16: got %d, want 4", got)
 	}
 }
 

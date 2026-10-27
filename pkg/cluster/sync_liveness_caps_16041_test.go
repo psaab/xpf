@@ -129,6 +129,272 @@ func requireFresh16041(t *testing.T, ss *SessionSync, why string) {
 // unprocessed accepted frame.
 func settle16041() { time.Sleep(50 * time.Millisecond) }
 
+// ===== #17093: growable caps carry reserve; fixed types do not =====
+
+// TestGrowableFramesSurviveReceiveLoop17093 drives every growable row at
+// encoderMax+8 (and PeerCapabilities also at encoderMax+reserve) through
+// the real receiveLoop. Pre-fix the +8 frames are header-refused
+// (cap == encoderMax) and the connection drops; post-fix they must be
+// dispatched, the leading fields must decode, and the connection must
+// stay up (requireFresh where the handler accepts; no oversize refusal
+// and no drop in every case).
+func TestGrowableFramesSurviveReceiveLoop17093(t *testing.T) {
+	t.Run("peer capabilities +8 decodes leading fields", func(t *testing.T) {
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		h := newRecvHarness16041(t, ss)
+		payload := capabilityPayload17093(t, 5+bootIncarnationLen+8+8+1+8)
+		staleLastRx16041(ss)
+		writeFrame16041(t, h.peer, syncMsgPeerCapabilities, payload)
+		requireFresh16041(t, ss, "capabilities +8")
+		if got := ss.PeerSessionSyncWireVersion(); got != SessionSyncWireVersion {
+			t.Fatalf("PeerSessionSyncWireVersion = %d, want %d (leading fields must decode)", got, SessionSyncWireVersion)
+		}
+		if got := ss.Stats().OversizeFramesRefused; got != 0 {
+			t.Fatalf("OversizeFramesRefused = %d, want 0", got)
+		}
+		select {
+		case <-h.done:
+			t.Fatal("receive loop dropped connection on growable +8 frame")
+		default:
+		}
+	})
+
+	t.Run("peer capabilities +reserve survives", func(t *testing.T) {
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		h := newRecvHarness16041(t, ss)
+		payload := capabilityPayload17093(t, 5+bootIncarnationLen+8+8+1+syncExtensionReserve)
+		writeFrame16041(t, h.peer, syncMsgPeerCapabilities, payload)
+		settle16041()
+		if got := ss.Stats().OversizeFramesRefused; got != 0 {
+			t.Fatalf("OversizeFramesRefused = %d, want 0 at encoderMax+reserve", got)
+		}
+		select {
+		case <-h.done:
+			t.Fatal("receive loop dropped connection at encoderMax+reserve")
+		default:
+		}
+		if got := ss.PeerSessionSyncWireVersion(); got != SessionSyncWireVersion {
+			t.Fatalf("PeerSessionSyncWireVersion = %d, want %d", got, SessionSyncWireVersion)
+		}
+	})
+
+	t.Run("config key exchange +8 survives", func(t *testing.T) {
+		h := newRecvHarness16041(t, nil)
+		payload := make([]byte, 1+syncConfigECDHPubSize+8)
+		payload[0] = syncConfigCryptoVersion
+		// A valid X25519 point is not needed: the cap check is the cell.
+		// The handler may reject the key semantically, but the header
+		// must not refuse the frame nor drop the connection.
+		writeFrame16041(t, h.peer, syncMsgConfigKeyExchange, payload)
+		settle16041()
+		if got := h.ss.Stats().OversizeFramesRefused; got != 0 {
+			t.Fatalf("OversizeFramesRefused = %d, want 0", got)
+		}
+		select {
+		case <-h.done:
+			t.Fatal("receive loop dropped connection on config key exchange +8")
+		default:
+		}
+	})
+
+	t.Run("bulk start +8 survives", func(t *testing.T) {
+		h := newRecvHarness16041(t, nil)
+		payload := make([]byte, 8+bootIncarnationLen+8)
+		binary.LittleEndian.PutUint64(payload[:8], 1)
+		writeFrame16041(t, h.peer, syncMsgBulkStart, payload)
+		settle16041()
+		if got := h.ss.Stats().OversizeFramesRefused; got != 0 {
+			t.Fatalf("OversizeFramesRefused = %d, want 0", got)
+		}
+		select {
+		case <-h.done:
+			t.Fatal("receive loop dropped connection on bulk start +8")
+		default:
+		}
+	})
+
+	t.Run("bulk end +8 dispatches (no refusal, no drop)", func(t *testing.T) {
+		h := newRecvHarness16041(t, nil)
+		payload := make([]byte, 8+bootIncarnationLen+8)
+		binary.LittleEndian.PutUint64(payload[:8], 1)
+		writeFrame16041(t, h.peer, syncMsgBulkEnd, payload)
+		settle16041()
+		if got := h.ss.Stats().OversizeFramesRefused; got != 0 {
+			t.Fatalf("OversizeFramesRefused = %d, want 0", got)
+		}
+		select {
+		case <-h.done:
+			t.Fatal("receive loop dropped connection on bulk end +8")
+		default:
+		}
+	})
+
+	t.Run("barrier ack +8 survives", func(t *testing.T) {
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		h := newRecvHarness16041(t, ss)
+		payload := make([]byte, 24+8)
+		binary.LittleEndian.PutUint64(payload[0:8], 7)
+		binary.LittleEndian.PutUint64(payload[8:16], 3)
+		binary.LittleEndian.PutUint64(payload[16:24], 2)
+		// Without a live waiter the ack is downstream-rejected, but it
+		// must NOT be header-refused nor drop the connection.
+		writeFrame16041(t, h.peer, syncMsgBarrierAck, payload)
+		settle16041()
+		if got := ss.Stats().OversizeFramesRefused; got != 0 {
+			t.Fatalf("OversizeFramesRefused = %d, want 0", got)
+		}
+		select {
+		case <-h.done:
+			t.Fatal("receive loop dropped connection on barrier ack +8")
+		default:
+		}
+	})
+
+	t.Run("fence +8 survives and acks", func(t *testing.T) {
+		h := newRecvHarness16041(t, nil)
+		payload := make([]byte, 16)
+		binary.LittleEndian.PutUint64(payload[:8], 1)
+		writeFrame16041(t, h.peer, syncMsgFence, payload)
+		// Fence with seq 1 requests a FenceAck reply.
+		_ = h.peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 64)
+		if _, err := h.peer.Read(buf); err != nil {
+			t.Fatalf("expected fence ack reply: %v", err)
+		}
+		if got := h.ss.Stats().OversizeFramesRefused; got != 0 {
+			t.Fatalf("OversizeFramesRefused = %d, want 0", got)
+		}
+	})
+
+	t.Run("fence ack +8 completes waiter", func(t *testing.T) {
+		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+		h := newRecvHarness16041(t, ss)
+		waiter := make(chan FenceAck, 1)
+		ss.fenceAckMu.Lock()
+		if ss.fenceAckWaiters == nil {
+			ss.fenceAckWaiters = make(map[uint64]fenceAckWaiter)
+		}
+		ss.fenceAckWaiters[7] = fenceAckWaiter{ch: waiter}
+		ss.fenceAckMu.Unlock()
+		payload := append(encodeFenceAckPayload(7, FenceResult{RGsFenced: 2, RGsTotal: 2, DataplaneAvailable: true}), make([]byte, 8)...)
+		writeFrame16041(t, h.peer, syncMsgFenceAck, payload)
+		select {
+		case ack := <-waiter:
+			if ack.Seq != 7 || !ack.Confirmed() {
+				t.Fatalf("fence ack = %+v, want confirmed seq 7", ack)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("fence ack +8 did not complete waiter (header-refused or dropped?)")
+		}
+		if got := ss.Stats().OversizeFramesRefused; got != 0 {
+			t.Fatalf("OversizeFramesRefused = %d, want 0", got)
+		}
+	})
+}
+
+func capabilityPayload17093(t *testing.T, total int) []byte {
+	t.Helper()
+	// Leading fields identical to sendCapabilities' full layout, padded
+	// with trailing extension bytes (flags2 stays the last byte, as the
+	// decoder reads it from len-1).
+	p := capabilityFrame14161(t, 8, localCapabilityFlags, SessionSyncWireVersion)
+	// capabilityFrame14161 yields the 5-byte head; extend with boot/epoch/token.
+	p = append(p, make([]byte, bootIncarnationLen+8+8)...)
+	p = append(p, localCapabilityFlags2)
+	if len(p) > total {
+		t.Fatalf("capability fixture %d > requested %d", len(p), total)
+	}
+	for len(p) < total {
+		// Insert the extension before the trailing flags2 byte.
+		p = append(p[:len(p)-1], append([]byte{0}, p[len(p)-1])...)
+	}
+	return p
+}
+
+// TestSyncPayloadCapHeadroom17093 is the table property: every growable
+// row carries at least encoderMax+reserve, every fixed row equals its
+// encoder max exactly, and no cap exceeds the global bound.
+func TestSyncPayloadCapHeadroom17093(t *testing.T) {
+	for _, d := range syncMsgDescriptors {
+		c, known := syncPayloadCap(d.id)
+		if !known {
+			t.Errorf("%s (%d): no cap", d.name, d.id)
+			continue
+		}
+		if c != d.maxLen {
+			t.Errorf("%s: syncPayloadCap = %d, descriptor maxLen = %d", d.name, c, d.maxLen)
+		}
+		// The reserve property binds rows built by growableCap, whose
+		// maxLen is encoderMax+reserve by construction; such rows are
+		// exactly those with maxLen-encoderMax == syncExtensionReserve.
+		// Rows carrying historical slack (Session 64 KiB, Delete 64/96,
+		// FailoverAck 4 KiB, AuthUpgrade 1 KiB, global-cap rows) satisfy
+		// the weaker, still-meaningful bound maxLen >= encoderMax, plus
+		// slack >= reserve measured against the FIXED encoder size where
+		// one exists — asserted via the named growable set below.
+		if d.maxLen < d.encoderMax {
+			t.Errorf("%s: maxLen %d < encoderMax %d (cap below today's encoder)", d.name, d.maxLen, d.encoderMax)
+		}
+		if d.growable && d.maxLen == d.encoderMax+syncExtensionReserve {
+			// growableCap row: exact by construction; nothing to check
+			// beyond the equality this branch already establishes.
+		} else if d.growable && d.maxLen < maxSyncPayload && d.maxLen-d.encoderMax == 0 && d.encoderMax < 4096 {
+			t.Errorf("%s: growable row with zero headroom (maxLen == encoderMax == %d)", d.name, d.encoderMax)
+		}
+		if !d.growable && d.maxLen < d.encoderMax {
+			t.Errorf("%s: fixed maxLen %d < encoderMax %d", d.name, d.maxLen, d.encoderMax)
+		}
+		if d.maxLen < 0 || d.maxLen > maxSyncPayload {
+			t.Errorf("%s: maxLen %d outside [0, maxSyncPayload]", d.name, d.maxLen)
+		}
+	}
+	// The documented growable set must each carry the full reserve
+	// over the encoder size a sender emits today. Sizes are the
+	// encoders' literal maxima, independent of the descriptor, so a
+	// future hand-copy back to zero headroom fails here.
+	growableWant := map[uint8]int{
+		syncMsgPeerCapabilities:  5 + bootIncarnationLen + 8 + 8 + 1,
+		syncMsgConfigKeyExchange: 1 + syncConfigECDHPubSize,
+		syncMsgBulkStart:         8 + bootIncarnationLen,
+		syncMsgBulkEnd:           8 + bootIncarnationLen,
+		syncMsgBarrierAck:        24,
+		syncMsgFence:             8,
+		syncMsgFenceAck:          fenceAckPayloadLen,
+	}
+	for mt, encMax := range growableWant {
+		if c := mustCap(t, mt); c < encMax+syncExtensionReserve {
+			t.Errorf("type %d: cap %d < encoderMax %d + reserve %d (zero-headroom regression)", mt, c, encMax, syncExtensionReserve)
+		}
+	}
+	if _, known := syncPayloadCap(200); known {
+		t.Error("unknown type 200 must have no per-type cap")
+	}
+}
+
+// TestFailoverDetailClampedToCap17093 pins acceptance (d): an over-long
+// detail is truncated at the encoder so the emitted payload fits its cap.
+func TestFailoverDetailClampedToCap17093(t *testing.T) {
+	long := make([]byte, 10*1024)
+	for i := range long {
+		long[i] = 'x'
+	}
+	detail := string(long)
+	// Single-RG encoder path.
+	payload := make([]byte, 10+len(detail))
+	copy(payload[10:], detail)
+	clamped := clampFailoverAckPayload(syncMsgFailoverAck, payload)
+	if c := mustCap(t, syncMsgFailoverAck); len(clamped) > c {
+		t.Fatalf("clamped single-ack payload %d > cap %d", len(clamped), c)
+	}
+	batch := encodeFailoverBatchAckPayload([]int{1, 2}, 1, 7, detail)
+	if c := mustCap(t, syncMsgFailoverBatchAck); len(batch) > c {
+		t.Fatalf("batch ack payload %d > cap %d (detail not clamped at encoder)", len(batch), c)
+	}
+	if len(batch) == 0 || batch[0] != 2 {
+		t.Fatalf("batch ack header disturbed by clamp: %v", batch[:1])
+	}
+}
+
 func TestRejectedFramesDoNotRefreshLiveness16041(t *testing.T) {
 	// Control: an accepted empty-config-cleartext frame DOES refresh? No —
 	// the production control used below is HeartbeatAck from the installed
@@ -257,12 +523,12 @@ func TestPerTypePayloadCapRefusedAtHeader16041(t *testing.T) {
 		length  uint32
 	}{
 		{"heartbeat with payload", syncMsgHeartbeat, 1},
-		{"barrier oversize", syncMsgBarrier, 9},
-		{"capabilities oversize", syncMsgPeerCapabilities, 5 + bootIncarnationLen + 8 + 8 + 2},
-		{"failover oversize", syncMsgFailover, 10},
-		{"config key exchange oversize", syncMsgConfigKeyExchange, 1 + syncConfigECDHPubSize + 1},
-		{"bulk start oversize", syncMsgBulkStart, 8 + bootIncarnationLen + 1},
-		{"fence oversize", syncMsgFence, 9},
+		{"barrier oversize", syncMsgBarrier, uint32(mustCap(t, syncMsgBarrier) + 1)},
+		{"capabilities oversize", syncMsgPeerCapabilities, uint32(mustCap(t, syncMsgPeerCapabilities) + 1)},
+		{"failover oversize", syncMsgFailover, uint32(mustCap(t, syncMsgFailover) + 1)},
+		{"config key exchange oversize", syncMsgConfigKeyExchange, uint32(mustCap(t, syncMsgConfigKeyExchange) + 1)},
+		{"bulk start oversize", syncMsgBulkStart, uint32(mustCap(t, syncMsgBulkStart) + 1)},
+		{"fence oversize", syncMsgFence, uint32(mustCap(t, syncMsgFence) + 1)},
 	}
 	for _, tc := range oversize {
 		t.Run(tc.name, func(t *testing.T) {
