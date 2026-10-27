@@ -25,12 +25,31 @@ func withBound17854(t *testing.T, fake *fakeNftInstaller, bound time.Duration) {
 	earlyInputPendingHandoffBound = bound
 }
 
+// clock17854 is a mutex-guarded test clock: reader goroutines in the
+// concurrent cell call Now while the driver advances time (Rev18060Opus).
+type clock17854 struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *clock17854) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *clock17854) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = t
+}
+
 // withClock17854 pins the daemon's barrier wall clock to a mutable instant.
-func withClock17854(t *testing.T, d *Daemon) *time.Time {
+func withClock17854(t *testing.T, d *Daemon) *clock17854 {
 	t.Helper()
-	now := time.Unix(1700000000, 0)
-	d.earlyInputBarrierRetainedNowFn = func() time.Time { return now }
-	return &now
+	c := &clock17854{now: time.Unix(1700000000, 0)}
+	d.earlyInputBarrierRetainedNowFn = c.Now
+	return c
 }
 
 // lo0OnlyTeardownConfig17885: an lo0 filter with no zoned host-inbound scope,
@@ -74,7 +93,7 @@ func TestEarlyInputLo0HoldOutlivesPendingBound17854(t *testing.T) {
 	}
 
 	// Far past the pending bound: the lo0 hold must STILL retain the barrier.
-	*now = now.Add(10 * time.Minute)
+	now.Set(now.Now().Add(10 * time.Minute))
 	if err := d.applyHostInboundFilter(cfg); err != nil {
 		t.Fatalf("past-bound apply with failed lo0: %v", err)
 	}
@@ -132,7 +151,7 @@ func TestEarlyInputMixedPendingLo0HoldOutlivesBound17854(t *testing.T) {
 
 	// Past bound: the pending hold expired, but lo0 still fails — the
 	// barrier must stay.
-	*now = now.Add(10 * time.Minute)
+	now.Set(now.Now().Add(10 * time.Minute))
 	if err := d.applyHostInboundFilter(cfg); err != nil {
 		t.Fatalf("past-bound mixed apply: %v", err)
 	}
@@ -208,7 +227,7 @@ func TestEarlyInputChangedHoldOutlivesPendingBound17854(t *testing.T) {
 
 	// Past the pending bound: still a coverage gap — retain and retry, never
 	// a silent handoff.
-	*now = now.Add(10 * time.Minute)
+	now.Set(now.Now().Add(10 * time.Minute))
 	err := d.applyHostInboundFilter(cfg)
 	if err == nil {
 		t.Fatal("past-bound apply must keep failing the commit over an uncovered destination")
@@ -247,7 +266,7 @@ func TestEarlyInputTeardownLo0HoldOutlivesBound17854(t *testing.T) {
 		t.Fatalf("barrier calls = %v, want no remove within the bound", fake.earlyInputBarrierCalls)
 	}
 
-	*now = now.Add(10 * time.Minute)
+	now.Set(now.Now().Add(10 * time.Minute))
 	if err := d.applyHostInboundFilter(cfg); err != nil {
 		t.Fatalf("past-bound teardown with failed lo0: %v", err)
 	}
@@ -290,7 +309,7 @@ func TestEarlyInputFencedFallbackLo0HoldOutlivesBound17854(t *testing.T) {
 		t.Fatalf("barrier calls = %v, want no remove within the bound", fake.earlyInputBarrierCalls)
 	}
 
-	*now = now.Add(10 * time.Minute)
+	now.Set(now.Now().Add(10 * time.Minute))
 	if err := d.applyHostInboundFilter(cfg); !errors.Is(err, installErr) {
 		t.Fatalf("past-bound fallback error = %v, want real install error only", err)
 	}
@@ -333,7 +352,7 @@ func TestEarlyInputPendingStateConcurrentReads17854(t *testing.T) {
 		}()
 	}
 	for i := range 50 {
-		*now = now.Add(time.Duration(i) * time.Second)
+		now.Set(now.Now().Add(time.Duration(i) * time.Second))
 		if err := d.applyHostInboundFilter(cfg); err != nil {
 			t.Errorf("apply %d: %v", i, err)
 			break
