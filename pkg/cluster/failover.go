@@ -450,12 +450,19 @@ func (m *Manager) FenceStatus() (action string, events []HistoryEvent) {
 	return
 }
 
-// manualFailoverHoldSnapshot records the operator hold that a peer-transfer
-// request temporarily clears. A reset that wins while the request is outside
-// m.mu increments failoverGen; the generation check prevents a stale abort
-// from resurrecting that newer operator decision. The abort also leaves any
-// newer hold already installed by another operator path untouched.
-type manualFailoverHoldSnapshot struct {
+// operatorHoldSnapshot records the operator intent that a peer-transfer
+// request or the peer-loss clears temporarily clear: the local manual hold,
+// the peer transfer-out override pair, and the aborted-request marker. A
+// reset that wins while the caller is outside m.mu increments failoverGen;
+// the generation check prevents a stale restore from resurrecting that
+// newer operator decision (#5246). The restore also leaves any newer hold
+// already installed by another operator path untouched.
+//
+// This is the single snapshot/restore pair for that intent: both the
+// peer-transfer abort arms (abortRequestedPeerFailover{,Batch}) and the
+// #15211 fence-abort restore in handlePeerTimeout go through it, so a
+// guard added here cannot be lost in a hand copy elsewhere (#17117).
+type operatorHoldSnapshot struct {
 	rg            *RedundancyGroupState
 	armed         bool
 	at            time.Time
@@ -465,15 +472,110 @@ type manualFailoverHoldSnapshot struct {
 	// forcedSecondary records whether the snapshotted hold was an ISSU
 	// drain pin (#16743), so the abort restores the pin with the hold.
 	forcedSecondary bool
+	overrideReqID   uint64
+	hasOverride     bool
+	previous        peerGroupSnapshot
+	hasPrevious     bool
+	abortedReqID    uint64
+	hasAborted      bool
 	generation      uint64
 }
 
-func (m *Manager) restoreManualFailoverHoldLocked(rgID int, snapshot manualFailoverHoldSnapshot) {
-	if !snapshot.armed || m.failoverGen[rgID] != snapshot.generation {
+// snapshotOperatorHoldLocked captures the operator intent for rgID. The
+// hold fields are armed only when ManualFailover is set (mirroring the
+// peer-transfer snapshot sites); the override pair and aborted marker are
+// captured independently, so an RG removed from m.groups can still have
+// its override pair restored by the fence-abort path. Caller holds m.mu.
+func (m *Manager) snapshotOperatorHoldLocked(rgID int) operatorHoldSnapshot {
+	snap := operatorHoldSnapshot{generation: m.failoverGen[rgID]}
+	if rg, ok := m.groups[rgID]; ok {
+		snap.rg = rg
+		if rg.ManualFailover {
+			snap.armed = true
+			snap.at = rg.ManualFailoverAt
+			snap.state = rg.State
+			snap.weight = rg.Weight
+			snap.forcedSecondary = rg.forcedSecondary
+			// #10245/#16743: capture restoreWeight BEFORE the caller
+			// clears the pin — debtDerivedWeightLocked honours
+			// forcedSecondary (returns 0), so computing it after the
+			// clear would compare 0 against the real debt weight and
+			// mark a pinned hold as monitor-derived.
+			snap.restoreWeight = rg.Weight != m.debtDerivedWeightLocked(rg)
+		}
+	}
+	if reqID, ok := m.peerTransferOutOverride[rgID]; ok {
+		snap.overrideReqID, snap.hasOverride = reqID, true
+	}
+	if prev, ok := m.peerTransferOutPrevious[rgID]; ok {
+		snap.previous, snap.hasPrevious = prev, true
+	}
+	if reqID, ok := m.abortedPeerTransferReqID[rgID]; ok {
+		snap.abortedReqID, snap.hasAborted = reqID, true
+	}
+	return snap
+}
+
+// restoreOperatorHoldLocked restores a snapshot taken by
+// snapshotOperatorHoldLocked unless a ResetFailover (or an in-flight
+// ForceSecondary supersede) bumped failoverGen after the snapshot — the
+// newer operator decision wins and nothing is resurrected (#17117).
+//
+// Every arm is also gated on the RG incarnation (#18148/#17117-fold):
+// the generation check alone cannot see a remove+re-add in the fence
+// window, because UpdateConfig's removal purge DELETES the failoverGen
+// entry (group_state.go) and the re-add seeds it back at 0. A snapshot
+// taken at gen 0 then compares 0==0 on a FRESH incarnation and the
+// override/aborted arms (which carry no RG pointer check) would
+// resurrect the removed incarnation's no-expiry override onto the new
+// RG — the #8435 self-promote/dual-primary class. So a non-nil snapshot
+// pointer must still be the live group, and a nil-pointer snapshot
+// restores nothing.
+//
+// The no-capture sites (empty operatorHoldSnapshot{} on the failed-send
+// arm, or a hold entry for a peer-transfer caller whose RG still exists)
+// preserve their historical behaviour: snapshot capture fills rg, and a
+// wholly empty snapshot has no pointer and no arms, so it stays a no-op.
+//
+// Three cases:
+//   - snapshot.rg == nil (no RG captured, e.g. the rg==nil fence entries
+//     snapshotted before the peer-loss clears): restore nothing. The old
+//     rg==nil override restore is REMOVED: with the purge deleting the
+//     gen entry, "no RG at snapshot time" is indistinguishable from
+//     "RG removed and re-added in the window", so restoring an override
+//     for an absent id could install the removed incarnation's override
+//     on a fresh RG.
+//   - snapshot.rg != nil && m.groups[rgID] == snapshot.rg: same
+//     incarnation; restore the armed hold (unless a newer hold stands)
+//     plus the override/aborted arms exactly as before.
+//   - snapshot.rg != nil && m.groups[rgID] != snapshot.rg (removed or
+//     replaced): restore NOTHING — every arm is suppressed.
+//
+// Caller holds m.mu.
+func (m *Manager) restoreOperatorHoldLocked(rgID int, snapshot operatorHoldSnapshot, eventReason string) {
+	if m.failoverGen[rgID] != snapshot.generation {
+		return
+	}
+	// Same-incarnation gate for ALL arms (#18148/#17117-fold): a
+	// snapshot with no RG pointer carries no proven incarnation, and a
+	// snapshot whose pointer is no longer the live group is stale.
+	if snapshot.rg == nil {
 		return
 	}
 	rg, ok := m.groups[rgID]
 	if !ok || rg != snapshot.rg {
+		return
+	}
+	if snapshot.hasOverride {
+		m.applyPeerTransferOutOverrideLocked(rgID, snapshot.overrideReqID)
+		if snapshot.hasPrevious {
+			m.peerTransferOutPrevious[rgID] = snapshot.previous
+		}
+	}
+	if snapshot.hasAborted {
+		m.abortedPeerTransferReqID[rgID] = snapshot.abortedReqID
+	}
+	if !snapshot.armed {
 		return
 	}
 	if rg.ManualFailover {
@@ -490,7 +592,7 @@ func (m *Manager) restoreManualFailoverHoldLocked(rgID int, snapshot manualFailo
 	rg.ManualFailoverAt = snapshot.at
 	rg.State = snapshot.state
 	if oldState != rg.State {
-		m.sendEvent(rg.GroupID, oldState, rg.State, "Manual failover restored after failed peer transfer")
+		m.sendEvent(rg.GroupID, oldState, rg.State, eventReason)
 	}
 }
 
@@ -573,11 +675,11 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		// fence. Retain the abort marker before releasing our reservation
 		// and send the bound abort. The local manual hold is unchanged.
 		if reqID != 0 {
-			m.abortRequestedPeerFailover(rgID, reqID, manualFailoverHoldSnapshot{}, abortFn)
+			m.abortRequestedPeerFailover(rgID, reqID, operatorHoldSnapshot{}, abortFn)
 		}
 		return err
 	}
-	var hold manualFailoverHoldSnapshot
+	var hold operatorHoldSnapshot
 	m.mu.Lock()
 	rg, ok = m.groups[rgID]
 	if !ok {
@@ -588,20 +690,14 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	// acknowledged the transfer-out request. Preflight rejection or request-send
 	// failure must not silently release the existing transfer-out state.
 	if rg.ManualFailover {
-		hold = manualFailoverHoldSnapshot{
-			rg:              rg,
-			armed:           true,
-			at:              rg.ManualFailoverAt,
-			state:           rg.State,
-			weight:          rg.Weight,
-			forcedSecondary: rg.forcedSecondary,
-			generation:      m.failoverGen[rgID],
-		}
-		// #10245/#16743: capture restoreWeight BEFORE clearing the pin —
-		// debtDerivedWeightLocked honours forcedSecondary (returns 0), so
-		// computing it after the clear would compare 0 against the real
-		// debt weight and mark a pinned hold as monitor-derived.
-		hold.restoreWeight = rg.Weight != m.debtDerivedWeightLocked(rg)
+		hold = m.snapshotOperatorHoldLocked(rgID)
+		// The peer-transfer abort rolls the override back through its own
+		// reqID-matched restorePeerTransferOutOverrideLocked; the hold
+		// snapshot's override/aborted arms belong to the fence-abort
+		// caller and must not replay here.
+		hold.overrideReqID, hold.hasOverride = 0, false
+		hold.previous, hold.hasPrevious = peerGroupSnapshot{}, false
+		hold.abortedReqID, hold.hasAborted = 0, false
 		rg.ManualFailover = false
 		rg.forcedSecondary = false
 		rg.ManualFailoverAt = time.Time{}
@@ -671,7 +767,7 @@ func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold manualFailoverHoldSnapshot, abortFn func(rgID int, reqID uint64) error) {
+func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold operatorHoldSnapshot, abortFn func(rgID int, reqID uint64) error) {
 	// #15164: record the aborted reqID BEFORE any election can re-run, so a
 	// heartbeat that still advertises the owner's secondary-hold under this
 	// request cannot re-promote us via "Peer transfer out". Then notify the
@@ -696,7 +792,7 @@ func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold manual
 	if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
 		delete(m.peerTransferCommitGraceUntil, rgID)
 	}
-	m.restoreManualFailoverHoldLocked(rgID, hold)
+	m.restoreOperatorHoldLocked(rgID, hold, "Manual failover restored after failed peer transfer")
 	m.runElection()
 	m.mu.Unlock()
 	if abortFn != nil {
@@ -1257,23 +1353,18 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 		return err
 	}
 
-	holdSnapshots := make(map[int]manualFailoverHoldSnapshot, len(ids))
+	holdSnapshots := make(map[int]operatorHoldSnapshot, len(ids))
 	m.mu.Lock()
 	for _, rgID := range ids {
 		rg := m.groups[rgID]
 		if rg != nil && rg.ManualFailover {
-			// restoreWeight must be captured before the pin is cleared
-			// (see the single-RG twin, #10245/#16743).
-			snap := manualFailoverHoldSnapshot{
-				rg:              rg,
-				armed:           true,
-				at:              rg.ManualFailoverAt,
-				state:           rg.State,
-				weight:          rg.Weight,
-				forcedSecondary: rg.forcedSecondary,
-				generation:      m.failoverGen[rgID],
-			}
-			snap.restoreWeight = rg.Weight != m.debtDerivedWeightLocked(rg)
+			snap := m.snapshotOperatorHoldLocked(rgID)
+			// As in the single-RG twin: the batch abort rolls the override
+			// back through its own reqID-matched restore; the fence-abort
+			// override/aborted arms must not replay here.
+			snap.overrideReqID, snap.hasOverride = 0, false
+			snap.previous, snap.hasPrevious = peerGroupSnapshot{}, false
+			snap.abortedReqID, snap.hasAborted = 0, false
 			holdSnapshots[rgID] = snap
 			rg.ManualFailover = false
 			rg.forcedSecondary = false
@@ -1352,7 +1443,7 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]manualFailoverHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error) {
+func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]operatorHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error) {
 	// #16818: batch form of abortRequestedPeerFailover — the election must
 	// run unconditionally so the aborted-marker arm demotes every RG the
 	// batch commit promoted, whatever snapshot the override restore left.
@@ -1364,7 +1455,7 @@ func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, hol
 		}
 	}
 	for _, rgID := range rgIDs {
-		m.restoreManualFailoverHoldLocked(rgID, holds[rgID])
+		m.restoreOperatorHoldLocked(rgID, holds[rgID], "Manual failover restored after failed peer transfer")
 	}
 	m.runElection()
 	m.mu.Unlock()
@@ -1463,6 +1554,11 @@ func (m *Manager) applyPeerTransferOutOverrideLocked(rgID int, reqID uint64) {
 	peerGroup := previous
 	peerGroup.GroupID = rgID
 	peerGroup.State = StateSecondaryHold
+	// #7367: mark the substitution so `show chassis cluster status` can
+	// distinguish this from a peer that actually reported secondary-hold.
+	// The State value and every election consequence are unchanged.
+	peerGroup.StateOverriddenLocally = true
+	peerGroup.OverrideReason = "transfer-out override"
 	m.peerGroups[rgID] = peerGroup
 	if rg := m.groups[rgID]; rg != nil {
 		rg.PeerPriority = peerGroup.Priority
