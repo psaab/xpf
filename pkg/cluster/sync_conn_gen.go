@@ -984,7 +984,7 @@ func stampInstallGen[K comparable, SK comparable](
 		stampInstallTableLocked(*installTableSent, key, sessionID, itDomain, itCheck, s.sentCap())
 	}
 	if *itDomain != 0 || *itCheck != 0 {
-		s.pbrAnnouncedForFence.Store(true)
+		s.peerIncarnationState().pbrAnnouncedForFence.Store(true)
 	}
 	// #9752 round 3 item 5: still (0,0)? Restore from the receive record
 	// (read-only). genSentMu nests recvGenMu here; recvGenMu never
@@ -1832,7 +1832,7 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		restoreInstallTableLocked(s.genState.installTableRecvV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.recvCap())
 	}
 	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
-		s.pbrAnnouncedForFence.Store(true)
+		s.peerIncarnationState().pbrAnnouncedForFence.Store(true)
 	}
 	if s.genState.sourceNatICMPRecvV4 == nil {
 		s.genState.sourceNatICMPRecvV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
@@ -1900,7 +1900,7 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		restoreInstallTableLocked(s.genState.installTableRecvV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.recvCap())
 	}
 	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
-		s.pbrAnnouncedForFence.Store(true)
+		s.peerIncarnationState().pbrAnnouncedForFence.Store(true)
 	}
 	if s.genState.sourceNatICMPRecvV6 == nil {
 		s.genState.sourceNatICMPRecvV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)

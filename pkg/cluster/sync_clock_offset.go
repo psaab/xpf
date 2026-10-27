@@ -23,7 +23,7 @@ func (s *SessionSync) clockOffsetFor(conn net.Conn) int64 {
 	if ac, ok := conn.(*authConn); ok && ac.clockSynced.Load() {
 		return ac.clockOffset.Load()
 	}
-	return s.peerClockOffset.Load()
+	return s.peerIncarnationState().peerClockOffset.Load()
 }
 
 // clockSyncLocalMono returns the local monotonic-seconds reading the ClockSync
@@ -48,7 +48,7 @@ func (s *SessionSync) publishClockSyncIfCurrent(conn net.Conn, offset int64) boo
 	if conn == nil {
 		// Test drivers bypass the registry; there is nothing to retire
 		// against, so publish to the global fallback directly.
-		s.peerClockOffset.Store(offset)
+		s.peerIncarnationState().peerClockOffset.Store(offset)
 		s.clockSynced.Store(true)
 		return true
 	}
@@ -65,7 +65,7 @@ func (s *SessionSync) publishClockSyncIfCurrent(conn net.Conn, offset int64) boo
 		ac.clockOffset.Store(offset)
 		ac.clockSynced.Store(true)
 	}
-	s.peerClockOffset.Store(offset)
+	s.peerIncarnationState().peerClockOffset.Store(offset)
 	s.clockSynced.Store(true)
 	if s.testClockPublishAfterStore != nil {
 		s.testClockPublishAfterStore()

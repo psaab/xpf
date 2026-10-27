@@ -75,18 +75,25 @@ func TestPeerCapabilityIsScopedToThePeerIncarnation6650(t *testing.T) {
 }
 
 // TestDisconnectClearsPeerCapability6650 binds the clear to the real
-// handleDisconnect, beside the clockSynced clear it copies. The test above
-// asserts the SEMANTICS on a hand-driven store; this asserts production
-// actually performs it — without this, deleting the line from
-// handleDisconnect leaves every test above green.
+// retirement helper (#17097), which handleDisconnect's full-disconnect arm
+// calls. The test above asserts the SEMANTICS on a hand-driven store; this
+// asserts production actually performs it — without this, deleting the call
+// from handleDisconnect leaves every test above green. The clear itself
+// lives in retirePeerIncarnationLocked (sync_peer_incarnation.go), the one
+// reset all three retirement sites share.
 func TestDisconnectClearsPeerCapability6650(t *testing.T) {
 	t.Parallel()
 	src := readClusterSource(t, "sync_conn.go")
-	if !sourceContainsFlat(src, "s.peerSnaps.peerSnapshotProtocol.Store(0)") {
-		t.Fatal("sync_conn.go's full-disconnect path does not clear peerSnapshotProtocol. " +
+	if !sourceContainsFlat(src, "s.retirePeerIncarnationLocked(nil)") {
+		t.Fatal("sync_conn.go's full-disconnect path does not retire the peer incarnation. " +
 			"The peer capability would then outlive the incarnation that proved it, so a " +
 			"reconnecting OLDER peer inherits the previous peer's capability and the gate " +
 			"authorises a push it cannot represent (#6650).")
+	}
+	helper := readClusterSource(t, "sync_peer_incarnation.go")
+	if !sourceContainsFlat(helper, "s.peerSnaps.peerSnapshotProtocol.Store(snapshotProtocol)") {
+		t.Fatal("retirePeerIncarnationLocked does not clear peerSnapshotProtocol; re-verify " +
+			"that the clear is still on the shared retirement path")
 	}
 	if !sourceContainsFlat(src, "s.clockSynced.Store(false)") {
 		t.Fatal("the clockSynced clear this one is anchored beside has moved; re-verify " +
