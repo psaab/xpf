@@ -104,8 +104,6 @@ type attachedXDPFenceLease interface {
 // owned, unmanaged, and lookalike devices without changing kernel state.
 var transitFenceLinkList = netlink.LinkList
 
-const armedTransitReinjectIfname = "xpf-usp1"
-
 // armedTransitFenceSpec resolves the only ingress pinholes permitted while
 // armed:
 //   - tracked runtime XDP links whose kernel names still resolve;
@@ -152,13 +150,13 @@ func (d *Daemon) armedTransitFenceSpecForIfindexes(ifindexes []int) (xnft.Forwar
 		}
 		attrs := link.Attrs()
 		if _, ok := tracked[attrs.Index]; ok {
-			if attrs.Name != armedTransitReinjectIfname {
+			if attrs.Name != xnft.HostInboundDelegatedIfname {
 				names = append(names, attrs.Name)
 			}
 			delete(tracked, attrs.Index)
 			resolvedTracked = true
 		}
-		if attrs.Name != armedTransitReinjectIfname {
+		if attrs.Name != xnft.HostInboundDelegatedIfname {
 			continue
 		}
 		tun, ok := link.(*netlink.Tuntap)

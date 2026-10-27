@@ -69,8 +69,8 @@ func TestStrictCompileOptsSingleSource17148(t *testing.T) {
 	if strict.skipCompactNormalize {
 		t.Error("strictCompileOpts().skipCompactNormalize is true: production must run the compact normalizer (#8690 seam is test-only)")
 	}
-	if strict.nodeAware {
-		t.Error("strictCompileOpts().nodeAware is true: node identity is stamped per call by the node-aware entry (#4329)")
+	if strict.nodeID != nil {
+		t.Error("strictCompileOpts().nodeID is non-nil: node identity is stamped per call by compileTree's node-aware entry (#4329/#17157)")
 	}
 	// The tolerant constructor must genuinely differ, or the arm above
 	// is vacuous (e.g. a walk that visits nothing).

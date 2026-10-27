@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
 )
 
@@ -96,7 +97,7 @@ func (d *Daemon) ipsecTopologyLinkEventRelevant(update netlink.LinkUpdate) bool 
 	if attrs == nil {
 		return true
 	}
-	if attrs.Name == armedTransitReinjectIfname {
+	if attrs.Name == xnft.HostInboundDelegatedIfname {
 		return true
 	}
 	snapshot := d.ipsecS4.watch.Load()
@@ -244,7 +245,7 @@ func classifyIpsecTopologyLinks(links []netlink.Link, ready ipsecReadyResult) ([
 			ready = ipsecReadyUnknown
 			continue
 		}
-		if attrs.Name == armedTransitReinjectIfname {
+		if attrs.Name == xnft.HostInboundDelegatedIfname {
 			outletFound = true
 			tuples = append(tuples, ipsecTopologyTuple{
 				Kind:        "outlet",
