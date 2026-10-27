@@ -2181,7 +2181,7 @@ impl SessionTable {
     /// the reverse-translated (NAT alias) index — the exact two paths whose
     /// `SessionLookup` return is now counter-stripped. The `forward_wire` finder
     /// path is not mirrored: it returns a `ForwardSessionMatch` that still
-    /// carries the `Arc`, so `resolve_flow_session_decision` already threads the
+    /// carries the `Arc`, so the production resolver already threads the
     /// bound handle for that (rarer, interface-mode-SNAT) case and never falls
     /// back to this accessor. Returns `None` for a miss or an entry with no
     /// bound counter (idx-0 / peer-synced entries carrying only the wire idx),

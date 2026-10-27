@@ -196,27 +196,85 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
 }
 (resolved.lookup.clone(), false) }
 
-// Test and non-worker callers retain the no-conntrack transition behavior.
-// The production poll path uses the `_with_conntrack` variant so helper
-// promote/demote transitions can invalidate only the origin bit in the mirror.
-pub(in crate::afxdp) fn resolve_flow_session_decision(sessions: &mut SessionTable,
-session_map: SteeringMap<'_>,
-shared: SharedSessionRefs<'_>,
-forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-flow: &SessionFlow,
-protocol: u8,
-tcp_flags: u8,
-ingress_ifindex: i32,
-ingress_vlan_id: u16,
-fabric_ingress: bool,
-ha_startup_grace_until_secs: u64,
-worker_id: u32,
-verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
-    // #14937: test/non-worker caller — no packet frame, payload honestly 0.
-    // The production poll loop uses `_with_conntrack_and_payload`.
-    let mut resolved = resolve_flow_session_decision_with_conntrack_inner(
+/// #17063: persist a deferred forwarding revalidation — the single
+/// source of truth for the #12265 Owner-persist step. The production
+/// poll path calls this after its #9519 Owner verdict
+/// (`foreign_arrival_zone.is_none()`); the `#[cfg(test)]` wrapper
+/// below calls it after its caller-supplied Owner verdict. Tests
+/// therefore exercise the same persist production runs, never a
+/// re-spelled copy.
+pub(in crate::afxdp) fn apply_deferred_forwarding_revalidation(
+    sessions: &mut SessionTable,
+    resolved: &mut ResolvedFlowSessionDecision,
+) {
+    let Some(revalidation) = resolved.deferred_forwarding_revalidation.take() else {
+        return;
+    };
+    if revalidation.invalidate_policy_revalidation {
+        sessions.invalidate_policy_revalidation(&resolved.key);
+    }
+    // #14941: `new_egress_zone` is direction-relative (the hit
+    // packet's egress leg). Map it to the forward flow's egress
+    // before persisting: a reverse hit's resolved zone is the
+    // forward ingress and must not overwrite forward `egress_zone`
+    // / reverse `ingress_zone`.
+    let forward_zone = crate::afxdp::shared_ops::forward_egress_zone_for_hit(
+        resolved.metadata.is_reverse,
+        revalidation.new_egress_zone,
+        resolved.metadata.ingress_zone,
+    )
+    .as_option();
+    sessions.revalidate_forwarding_resolution_with_egress_zone(
+        &resolved.key,
+        revalidation.resolution,
+        revalidation.owner_rg_id,
+        forward_zone,
+    );
+    if let Some(owner_rg_id) = revalidation.owner_rg_id {
+        resolved.metadata.owner_rg_id = owner_rg_id;
+    }
+    if let Some(zone) = forward_zone {
+        if resolved.metadata.is_reverse {
+            resolved.metadata.ingress_zone = zone;
+        } else {
+            resolved.metadata.egress_zone = zone;
+        }
+    }
+}
+
+/// #17063: test-only convenience over the production
+/// `resolve_flow_session_decision_with_conntrack_and_payload_and_ack`
+/// entry point. It carries no packet frame (payload honestly 0, ack
+/// honestly `None`), no conntrack fds (`-1, -1` via the caller's
+/// bundle), applies the deferred promotion under the caller-supplied
+/// verdict exactly as the poll Owner site does, and — only for an
+/// Owner verdict — persists the deferred forwarding revalidation
+/// through [`apply_deferred_forwarding_revalidation`], the same
+/// helper the poll path calls. `fabric_ingress` and
+/// `fabric_link_ingress` are separate arguments so a cell can drive
+/// `fabric_ingress=true, fabric_link_ingress=false` (a logical fabric
+/// arrival that did not arrive on the fabric link).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn resolve_flow_session_decision(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    shared: SharedSessionRefs<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    protocol: u8,
+    tcp_flags: u8,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    fabric_ingress: bool,
+    fabric_link_ingress: bool,
+    ha_startup_grace_until_secs: u64,
+    worker_id: u32,
+    verdict: SessionHitVerdict,
+) -> Option<ResolvedFlowSessionDecision> {
+    let mut resolved = resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
         sessions,
         session_map,
         shared,
@@ -230,7 +288,7 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
         ingress_ifindex,
         ingress_vlan_id,
         fabric_ingress,
-        fabric_ingress,
+        fabric_link_ingress,
         ha_startup_grace_until_secs,
         worker_id,
         None,
@@ -250,88 +308,18 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
         &mut resolved,
         &mut purged_keys,
     );
-    if verdict == SessionHitVerdict::Owner
-        && let Some(revalidation) = resolved.deferred_forwarding_revalidation.take()
-    {
-        if revalidation.invalidate_policy_revalidation {
-            sessions.invalidate_policy_revalidation(&resolved.key);
-        }
-        // #14941: `new_egress_zone` is direction-relative (the hit
-        // packet's egress leg). Map it to the forward flow's egress
-        // before persisting: a reverse hit's resolved zone is the
-        // forward ingress and must not overwrite forward `egress_zone`
-        // / reverse `ingress_zone`.
-        let forward_zone = crate::afxdp::shared_ops::forward_egress_zone_for_hit(
-            resolved.metadata.is_reverse,
-            revalidation.new_egress_zone,
-            resolved.metadata.ingress_zone,
-        )
-        .as_option();
-        sessions.revalidate_forwarding_resolution_with_egress_zone(
-            &resolved.key,
-            revalidation.resolution,
-            revalidation.owner_rg_id,
-            forward_zone,
-        );
-        if let Some(owner_rg_id) = revalidation.owner_rg_id {
-            resolved.metadata.owner_rg_id = owner_rg_id;
-        }
-        if let Some(zone) = forward_zone {
-            if resolved.metadata.is_reverse {
-                resolved.metadata.ingress_zone = zone;
-            } else {
-                resolved.metadata.egress_zone = zone;
-            }
-        }
+    if verdict == SessionHitVerdict::Owner {
+        apply_deferred_forwarding_revalidation(sessions, &mut resolved);
     }
 
     Some(resolved)
 }
 
-/// #14935: production poll-path variant carrying TCP payload progress.
-#[allow(clippy::too_many_arguments)]
-pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload(
-    sessions: &mut SessionTable,
-    session_map: SteeringMap<'_>,
-    shared: SharedSessionRefs<'_>,
-    forwarding: &ForwardingState,
-    ha_state: &BTreeMap<i32, HAGroupRuntime>,
-    dynamic_neighbors: &Arc<ShardedNeighborMap>,
-    flow: &SessionFlow,
-    protocol: u8,
-    tcp_flags: u8,
-    payload_len: u32,
-    ingress_ifindex: i32,
-    ingress_vlan_id: u16,
-    fabric_ingress: bool,
-    fabric_link_ingress: bool,
-    ha_startup_grace_until_secs: u64,
-    worker_id: u32,
-    prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
-    // #16217: set ONLY by the poll fabric-adoption callsite, where the
-    // gate (`fabric_adoption_gate_for_wire`) has already proven
-    // this packet's tuple belongs to an Established session and this
-    // node is the RG owner post-takeover. When set, the HA-enforced
-    // resolution below bypasses the ha_inactive terminal for the
-    // adopted flow (see `fabric_adopted_resolution`); every other
-    // caller passes false and keeps the fail-closed enforcement.
-    fabric_adopted: bool,
-    // #16217 (Opus final4): the gate-proved recovery context. The
-    // poll callsites build it from the SAME gate call that set
-    // `fabric_adopted` (gate candidate decision + proved egress RG);
-    // `None` whenever the gate did not qualify the tuple, in which
-    // case the adopted recovery refuses every restore.
-    adopted_recovery: Option<AdoptedRecovery>,
-) -> Option<ResolvedFlowSessionDecision> {
-    resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
-        sessions, session_map, shared, forwarding, ha_state, dynamic_neighbors, flow, protocol,
-        tcp_flags, payload_len, ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
-        ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match, None,
-        fabric_adopted, adopted_recovery,
-    )
-}
 
-/// #16042: production variant carrying the parsed segment ack.
+/// #16042: production variant carrying TCP payload progress and the
+/// parsed segment ack. This is the entry point the production poll
+/// session-hit path calls; the poll fabric-adoption miss site calls
+/// it with `ack = None`, since no segment ack is parsed there.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
     sessions: &mut SessionTable,

@@ -708,7 +708,7 @@ fn resolve_with_unique_reply_proof_12257(
         dst_ip: forward_key.dst_ip,
         forward_key,
     };
-    crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack_and_payload(
+    crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
         sessions,
         crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
         SharedSessionRefs {
@@ -735,6 +735,7 @@ fn resolve_with_unique_reply_proof_12257(
         0,
         0,
         Some(proof),
+        None,
         false,
         None,
     )

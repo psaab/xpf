@@ -1158,7 +1158,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         dst_ip: wire_key.dst_ip,
         forward_key: wire_key,
     };
-    let mut resolved = resolve_flow_session_decision_with_conntrack_and_payload(
+    let mut resolved = resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
         SharedSessionRefs {
@@ -1185,6 +1185,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         true,
         0,
         0,
+        None,
         None,
         false,
         None,
@@ -1359,10 +1360,10 @@ fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
             21,
             0,
             true,
+            true,
             0,
             0,
-            crate::afxdp::session_glue::SessionHitVerdict::Owner,
-        );
+            crate::afxdp::session_glue::SessionHitVerdict::Owner);
         assert_eq!(
             resolved.is_some(),
             expect_some,
@@ -1511,10 +1512,10 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
         6,
         0,
         false,
+        false,
         0,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner,
-    );
+        crate::afxdp::session_glue::SessionHitVerdict::Owner);
     assert!(
         resolved.is_none(),
         "an idle-crossed local NAT candidate must not fall through to its shared clone"
@@ -1812,10 +1813,10 @@ fn resolve_flow_syn_on_closing_tuple_preserves_pair_before_authority_10886() {
         6,
         0,
         false,
+        false,
         0,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner,
-    );
+        crate::afxdp::session_glue::SessionHitVerdict::Owner);
     assert!(
         resolved.is_some(),
         "the low-level resolver must preserve the closing hit before authority"
@@ -4354,6 +4355,7 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
         0,
         // #9383: arrival VLAN (untagged in this fixture)
         false,
+        false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -4457,9 +4459,11 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         0,
         // #9383: arrival VLAN (untagged in this fixture)
         true,
+        true,
         0,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner,)
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("translated shared hit should resolve");
 
     assert_eq!(
@@ -4643,6 +4647,7 @@ fn fabric_ingress_adopts_established_synced_wire_session_16217() {
         0x18,
         21,
         0,
+        true,
         true,
         0,
         0,
@@ -4990,7 +4995,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         forward_key: translated_key.clone(),
     };
     let resolve_as = |sessions: &mut SessionTable, adopted: bool| {
-        resolve_flow_session_decision_with_conntrack_and_payload(
+        resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
             sessions,
             SteeringMap::unshared_for_test(-1),
             SharedSessionRefs {
@@ -5016,6 +5021,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
             true,
             0,
             0,
+            None,
             None,
             adopted,
             adopted.then(|| AdoptedRecovery {
@@ -5177,7 +5183,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
     );
 
     // (b) End-to-end through the production session-HIT resolver
-    // (`resolve_flow_session_decision_with_conntrack_and_payload`,
+    // (`resolve_flow_session_decision_with_conntrack_and_payload_and_ack`,
     // fabric_adopted = true exactly as the poll session-hit site runs
     // it when `session_hit_fabric_adopted` holds): an Established
     // synced wire session whose FIB answer is MissingNeighbor under
@@ -5256,7 +5262,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
         forward_key: translated_key.clone(),
     };
     let resolve_as = |sessions: &mut SessionTable, adopted: bool| {
-        resolve_flow_session_decision_with_conntrack_and_payload(
+        resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
             sessions,
             SteeringMap::unshared_for_test(-1),
             SharedSessionRefs {
@@ -5282,6 +5288,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
             true,
             0,
             0,
+            None,
             None,
             adopted,
             adopted.then(|| AdoptedRecovery {
@@ -5506,7 +5513,7 @@ fn adopted_cluster_terminal_recomputes_from_fib_16217() {
             dst_ip: translated_key.dst_ip,
             forward_key: translated_key.clone(),
         };
-        resolve_flow_session_decision_with_conntrack_and_payload(
+        resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
             &mut sessions,
             SteeringMap::unshared_for_test(-1),
             SharedSessionRefs {
@@ -5532,6 +5539,7 @@ fn adopted_cluster_terminal_recomputes_from_fib_16217() {
             true,
             0,
             0,
+            None,
             None,
             adopted,
             adopted.then(|| AdoptedRecovery {
@@ -5879,7 +5887,7 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
             dst_ip: translated_key.dst_ip,
             forward_key: translated_key.clone(),
         };
-        resolve_flow_session_decision_with_conntrack_and_payload(
+        resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
             &mut sessions,
             SteeringMap::unshared_for_test(-1),
             SharedSessionRefs {
@@ -5905,6 +5913,7 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
             true,
             0,
             0,
+            None,
             None,
             adopted,
             adopted.then(|| AdoptedRecovery {
@@ -6527,6 +6536,7 @@ fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_
         0,
         // #9383: arrival VLAN (untagged in this fixture)
         true,
+        true,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -6633,6 +6643,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         21,
         0,
         // #9383: arrival VLAN (untagged in this fixture)
+        true,
         true,
         0,
         0,
@@ -6753,6 +6764,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         0,
         // #9383: arrival VLAN (untagged in this fixture)
         false,
+                false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -6885,6 +6897,7 @@ fn resolve_flow_session_decision_keeps_local_synced_translated_hit_transient_on_
         0,
         // #9383: arrival VLAN (untagged in this fixture)
         false,
+                false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -7447,6 +7460,7 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
         0,
         // #9383: arrival VLAN (untagged in this fixture)
         false,
+                false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -11123,6 +11137,7 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
         0,
         // #9383: arrival VLAN (untagged in this fixture)
         false,
+                false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -11250,6 +11265,7 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
             0,
             // #9383: arrival VLAN (untagged in this fixture)
             false,
+                        false,
             0,
             0,
             crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -12154,6 +12170,7 @@ fn capped_shared_hit_fixture_10582(
         24,
         0,
         false,
+        false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -12566,6 +12583,7 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
         24,
         0,
         false,
+        false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -12822,6 +12840,7 @@ fn resolve_shared_hit_no_incumbent_fixture_10613()
         TCP_FLAG_ACK,
         24,
         0,
+        false,
         false,
         0,
         0,
@@ -16022,8 +16041,9 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
         crate::afxdp::WorkerCommandQueues::new(m)
     };
     let by_id_ref = &by_id;
-    // resolve_flow_session_decision uses empty by_id, so call with_conntrack directly then promote.
-    let resolved_opt = resolve_flow_session_decision_with_conntrack_and_payload(
+    // resolve_flow_session_decision uses empty by_id, so call the production
+    // `_and_ack` entry directly then promote.
+    let resolved_opt = resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
         SharedSessionRefs {
@@ -16049,6 +16069,7 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
         false,
         0,
         0,
+        None,
         None,
         false,
         None,
@@ -16158,7 +16179,7 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
         m.insert(9u32, peer_queue.clone());
         crate::afxdp::WorkerCommandQueues::new(m)
     };
-    let mut resolved = resolve_flow_session_decision_with_conntrack_and_payload(
+    let mut resolved = resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
         SharedSessionRefs {
@@ -16184,6 +16205,7 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
         false,
         0,
         0,
+        None,
         None,
         false,
         None,
@@ -17333,7 +17355,9 @@ fn a_synthesized_reverse_records_no_ingress_ifindex_7169() {
 /// The cells above drive `lookup_forward_nat_across_scopes` directly with an
 /// explicit `ReverseIngress`, so they bind the revalidation FUNCTION. They
 /// cannot see the thing that actually protects the dataplane: that
-/// `resolve_flow_session_decision` — the one caller that INSTALLS a reverse
+/// the production resolver
+/// (`resolve_flow_session_decision_with_conntrack_and_payload_and_ack`) — the
+/// one caller that INSTALLS a reverse
 /// session from the match — passes a real zone rather than `Unconstrained`.
 /// Changing that one argument to `Unconstrained` reopens the hole completely
 /// and leaves every cell above green.
@@ -20275,10 +20299,10 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
         TRUNK_PARENT_IFINDEX,
         arrival_vlan,
         false,
+        false,
         0,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner,
-    );
+        crate::afxdp::session_glue::SessionHitVerdict::Owner);
     (resolved.is_some(), sessions.len())
 }
 
@@ -23115,6 +23139,7 @@ fn session_hit_reresolves_after_manager_replace_removes_snapshot_neighbor_12255(
         24,
         0,
         false,
+        false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -23226,6 +23251,7 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
         12,
         0,
         false,
+        false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -23277,6 +23303,7 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
         TCP_FLAG_ACK,
         12,
         0,
+        false,
         false,
         0,
         0,
@@ -23373,6 +23400,7 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
         12,
         0,
         false,
+        false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -23461,6 +23489,7 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
         TCP_FLAG_ACK,
         12,
         0,
+        false,
         false,
         0,
         0,
@@ -24464,7 +24493,7 @@ fn resolved_flow_callers_reuse_snapshots_without_reprobing_13079() {
     let glue = include_str!("resolve.rs");
     let resolver = function_body(
         glue,
-        "fn resolve_flow_session_decision_with_conntrack_and_payload(",
+        "fn resolve_flow_session_decision_with_conntrack_and_payload_and_ack(",
     );
     let poll = include_str!("../poll_descriptor/mod.rs");
     let descriptor = function_body(poll, "fn poll_binding_process_descriptor_with_injection(");
@@ -24499,6 +24528,215 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
         .split_once("\n}\n")
         .map(|(body, _)| body)
         .expect("function body closer")
+}
+
+/// #17063: the deferred forwarding-revalidation persist has exactly
+/// one implementation. The production poll site and the
+/// `#[cfg(test)]` wrapper both call
+/// `apply_deferred_forwarding_revalidation`; neither re-spells the
+/// #14941 direction-relative persist, and the deleted
+/// `_with_conntrack_and_payload` pass-through stays deleted.
+/// Fail-on-revert: restoring an inline persist copy in either caller
+/// (or the pass-through) trips a count/string assertion here.
+#[test]
+fn deferred_forwarding_revalidation_persist_is_single_sourced_17063() {
+    let resolve = include_str!("resolve.rs");
+    let poll = include_str!("../poll_descriptor/mod.rs");
+    assert_eq!(
+        resolve.matches("fn apply_deferred_forwarding_revalidation(").count()
+            + poll.matches("fn apply_deferred_forwarding_revalidation(").count(),
+        1,
+        "#17063: exactly one deferred-revalidation persist implementation"
+    );
+    assert!(
+        resolve.contains("apply_deferred_forwarding_revalidation(sessions, &mut resolved)"),
+        "#17063: the cfg(test) wrapper must persist through the shared helper"
+    );
+    assert!(
+        poll.contains("apply_deferred_forwarding_revalidation("),
+        "#17063: the poll Owner site must persist through the shared helper"
+    );
+    assert!(
+        resolve.contains("resolve_flow_session_decision_with_conntrack_and_payload_and_ack(")
+            && poll.contains("resolve_flow_session_decision_with_conntrack_and_payload_and_ack("),
+        "#17063: both files name the single production entry point"
+    );
+    for source in [resolve, poll] {
+        assert_eq!(
+            source.matches("forward_egress_zone_for_hit(").count(),
+            usize::from(std::ptr::eq(source, resolve)),
+            "#17063: forward_egress_zone_for_hit lives only inside the helper (resolve.rs)"
+        );
+        assert!(
+            !source.contains("fn resolve_flow_session_decision_with_conntrack_and_payload("),
+            "#17063: the deleted _with_conntrack_and_payload pass-through must not return"
+        );
+    }
+    assert_eq!(
+        resolve.matches("fn resolve_flow_session_decision").count(),
+        3,
+        "#17063: resolve.rs keeps inner + production _and_ack + cfg(test) wrapper only"
+    );
+    assert!(
+        resolve.contains("#[cfg(test)]")
+            && resolve.contains("pub(in crate::afxdp) fn resolve_flow_session_decision("),
+        "#17063: the plain wrapper is test-only"
+    );
+}
+
+/// #17063: the cfg(test) wrapper can drive
+/// `fabric_ingress=true, fabric_link_ingress=false` — a logical
+/// fabric arrival that did NOT arrive on the fabric link. The old
+/// wrapper passed `fabric_ingress` for both flags, so this shape was
+/// inexpressible. With a stored FabricRedirect, the non-link leg
+/// retains the redirect (the anti-loop fabric-link leg is the
+/// inexpressible-before control: it would re-resolve locally).
+/// Both legs go through the production `_and_ack` resolver; only the
+/// link flag differs.
+#[test]
+fn wrapper_drives_fabric_ingress_without_fabric_link_17063() {
+    let mut forwarding = test_forwarding_state_split_rgs();
+    // LAN egress 6 carries RG2 in the split fixture; move it to RG1
+    // so the reply destination's connected owner IS the departed RG
+    // (mirrors reverse_conversion_judges_destination_owner_not_stamp_16217).
+    forwarding.egress.get_mut(&6).expect("LAN egress row").redundancy_group = 1;
+    let dest = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    assert_eq!(
+        crate::afxdp::connected_owner_rg_for_target_in_table(&forwarding, dest, None),
+        1,
+        "fixture: reply destination's connected owner must be RG1"
+    );
+    let mut ha_departed = BTreeMap::new();
+    ha_departed.insert(1, inactive_ha_runtime(1));
+    ha_departed.insert(2, active_ha_runtime(1));
+    // fabric_link_ingress=false: the departed-destination conversion
+    // may fire and cross the fabric to the new owner.
+    let off_link = crate::afxdp::session_glue::reverse_hit_departed_destination_redirect(
+        &forwarding,
+        &ha_departed,
+        1,
+        false,
+        true,
+        dest,
+        None,
+        TEST_LAN_ZONE_ID,
+        ForwardingDisposition::ForwardCandidate,
+    );
+    assert_eq!(
+        off_link.map(|redirect| redirect.disposition),
+        Some(ForwardingDisposition::FabricRedirect),
+        "#17063: fabric_ingress=true, fabric_link_ingress=false must be \
+         expressible through the wrapper's production resolver leg and \
+         retain/convert to FabricRedirect for a departed destination"
+    );
+    // Control: fabric_link_ingress=true — anti-loop, never converts.
+    // The pre-#17063 wrapper passed fabric_ingress for both flags, so
+    // the (true,false) shape above collapsed into this leg.
+    let on_link = crate::afxdp::session_glue::reverse_hit_departed_destination_redirect(
+        &forwarding,
+        &ha_departed,
+        1,
+        true,
+        true,
+        dest,
+        None,
+        TEST_LAN_ZONE_ID,
+        ForwardingDisposition::ForwardCandidate,
+    );
+    assert_eq!(
+        on_link, None,
+        "#17063: control — a fabric-LINK arrival never re-redirects (anti-loop)"
+    );
+    // The wrapper itself must accept the split flags end-to-end
+    // through the production `_and_ack` resolver (a stored
+    // FabricRedirect hit, as in the 16217 fixtures). Disposition is
+    // not asserted here — HA/materialize legs legitimately re-resolve
+    // it — the pin is that the (true,false) call shape resolves
+    // through production, which the old double-pass could not express.
+    let key = test_key();
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let translated_key = forward_wire_key(&key, decision.nat);
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        translated_key.clone(),
+        decision,
+        SessionMetadata {
+            forward_ingress_vlan_id: None,
+            ..test_metadata()
+        },
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    let mut forwarding2 = test_forwarding_state_with_fabric();
+    forwarding2.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding2.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00],
+        },
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    let flow = SessionFlow {
+        src_ip: translated_key.src_ip,
+        dst_ip: translated_key.dst_ip,
+        forward_key: translated_key.clone(),
+    };
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: empty_worker_commands_by_id(),
+            conntrack: ConntrackFds { v4: -1, v6: -1 },
+            tick: Tick { ns: 1_000_000, secs: 1 },
+        },
+        &forwarding2,
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::new()),
+        &flow,
+        PROTO_TCP,
+        0x18,
+        21,
+        0,
+        true,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    );
+    assert!(
+        resolved.is_some(),
+        "#17063: the (fabric_ingress=true, fabric_link_ingress=false) \
+         wrapper shape must resolve through the production entry point"
+    );
 }
 
 /// #13972: control-plane removals must emit exactly one harvested Close.
