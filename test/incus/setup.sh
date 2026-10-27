@@ -643,12 +643,13 @@ cmd_deploy() {
 	deploy_verify_pushed_sha "$INSTANCE_NAME" "$PROJECT_ROOT/cli" /usr/local/sbin/cli cli
 
 	# Push the Rust AF_XDP helper next to xpfd (see the findBinary search path
-	# above), then verify the on-VM sha256 matches the local binary. Without it
+	# above), then verify the on-VM sha256 and root UID. Without it,
 	# the standalone VM comes up with no dataplane (#1962).
 	if [[ -f "$PROJECT_ROOT/xpf-userspace-dp" ]]; then
 		info "Pushing xpf-userspace-dp to $INSTANCE_NAME..."
-		incus file push "$PROJECT_ROOT/xpf-userspace-dp" "$INSTANCE_NAME/usr/local/sbin/xpf-userspace-dp" --mode 0755
+		incus file push "$PROJECT_ROOT/xpf-userspace-dp" "$INSTANCE_NAME/usr/local/sbin/xpf-userspace-dp" --uid 0 --gid 0 --mode 0755
 		deploy_verify_pushed_sha "$INSTANCE_NAME" "$PROJECT_ROOT/xpf-userspace-dp" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp
+		deploy_verify_pushed_uid "$INSTANCE_NAME" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp
 	else
 		warn "xpf-userspace-dp not found locally ($PROJECT_ROOT/xpf-userspace-dp); helper not pushed — xpfd will have no dataplane"
 	fi
