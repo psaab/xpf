@@ -3475,7 +3475,9 @@ This document has been corrected through multiple passes:
   explicit demotion-prep sequence, userspace delta filtering details.
 - v3: Corrected delta filtering field names (`FabricRedirect` +
   `FabricIngress`, not a combined field). Clarified that `PauseIncrementalSync`
-  only pauses the sweep — GC delete callbacks are never suppressed. Added
+  only paused the sweep — at the time, GC delete callbacks were never
+  suppressed (the Go conntrack GC was later deleted in #17155; delete
+  queueing is now via helper session-delta closes). Added
   manual failover retry admission logic, depth-counted pause mechanism,
   readiness generation guard, barrier ordering via sendCh.
 - v4 (current, #2930): Corrected demotion-path doc drift. The live graceful
