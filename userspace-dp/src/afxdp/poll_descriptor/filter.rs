@@ -32,14 +32,15 @@
 //     rare/exception bodies: #[cold] #[inline(never)] for .text.unlikely
 //     placement away from the hot loop's cache lines.
 //
-// Bodies are behavior-identical to their previous location in mod.rs.
-// The only deltas are: the inline attributes (#[inline] ->
-// #[cold] #[inline(never)] on the cold leaves), pub(super) visibility,
-// the emit_cached_output_filter_log tail split, and rustfmt
-// re-collapsing the now-shorter emit_input_filter_log_match call in
-// emit_cached_input_filter_log onto one line (the call previously sat
-// in a wider context that forced a multiline layout). No logic,
-// side-effect ordering, counter increments, or allocation sites change.
+// Provenance: extracted from mod.rs at ca46016ffd (2026-05-30,
+// #1697). At that commit the bodies matched their previous
+// location in mod.rs; the only deltas were the inline
+// attributes (#[inline] -> #[cold] #[inline(never)] on the cold
+// leaves), pub(super) visibility, the
+// emit_cached_output_filter_log tail split, and a rustfmt
+// re-collapse. That is a split-time record, not a claim about
+// the current tree: this file has been edited since (behaviour-
+// specific changes live here and are covered by its tests).
 
 use super::reject_reply::enqueue_filter_reject_reply;
 use super::worker::WorkerTxPipeline;
