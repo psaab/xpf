@@ -1954,26 +1954,6 @@ func syslogArchiveKnobs(n *Node) []string {
 	return knobs
 }
 
-// loginClassPermName renders a coarse xpf permission for the advisory.
-func loginClassPermName(p LoginClassPermission) string {
-	switch p {
-	case PermView:
-		return "view"
-	case PermClear:
-		return "clear"
-	case PermControl:
-		return "control"
-	case PermConfig:
-		return "configure"
-	case PermMaint:
-		return "maintenance"
-	case PermAll:
-		return "super-user"
-	default:
-		return "unknown"
-	}
-}
-
 // loginClassAdvisoryWarnings emits one accept-with-advisory warning per custom
 // `system login class <name>` (#4304 S-2). The class is RECOGNIZED (a valid
 // vSRX RBAC config commits instead of being hard-rejected), but xpf's coarse
@@ -2009,7 +1989,7 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 		// permissions it no longer has.
 		names := make([]string, 0, len(lc.MappedPermissions))
 		for _, p := range lc.MappedPermissions {
-			names = append(names, loginClassPermName(p))
+			names = append(names, p.String())
 		}
 		mappedStr := "none"
 		if len(names) > 0 {
