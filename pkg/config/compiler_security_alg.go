@@ -112,11 +112,16 @@ func compileALGProto16814(proto string, tail []string, children []*Node, alg *AL
 			alg.InertSubstatements = append(alg.InertSubstatements, proto+" "+keyword)
 		}
 	}
+	packedStatement := false
 	for _, token := range tail {
-		if token != "disable" {
-			record(token)
-			return // Children belong to this packed statement, not the class.
+		if token == "disable" {
+			continue
 		}
+		packedStatement = true
+		record(token)
+	}
+	if packedStatement {
+		return // Children belong to the packed statement, not the class.
 	}
 	for _, child := range children {
 		record(child.Name())

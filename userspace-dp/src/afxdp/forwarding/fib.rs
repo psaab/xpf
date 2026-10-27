@@ -493,18 +493,23 @@ pub(in crate::afxdp) fn leak_incarnation_for_resolution(
             // would let a later return removal kill a session the
             // source route legitimately carries — fail-closed but
             // wrong). Immediate leaks keep stage-1 ownership.
-            let source_owns = source_table_owns_v4(state, ip, table.as_ref(), true, None);
-            state.leak_rules_v4.get(table.as_ref()).and_then(|rules| {
-                rules
-                    .iter()
-                    .filter(|leak| leak.prefix.contains(ip))
-                    .filter(|leak| !leak.post_table || !source_owns)
-                    .find_map(|leak| {
-                        let next_table = canonical_next_table(&leak.next_table, false);
-                        table_has_v4_route(state, ip, next_table.as_ref(), true)
-                            .then_some(leak.incarnation)
-                    })
-            })
+            // #17852: ownership is only consulted by deferred rows, so
+            // the scan runs only when one covering `ip` exists — a
+            // table without deferred returns does no ownership walk.
+            let Some(rules) = state.leak_rules_v4.get(table.as_ref()) else {
+                return None;
+            };
+            let source_owns = table_has_deferred_leak_v4(state, table.as_ref(), ip)
+                && source_table_owns_v4(state, ip, table.as_ref(), true, None);
+            rules
+                .iter()
+                .filter(|leak| leak.prefix.contains(ip))
+                .filter(|leak| !leak.post_table || !source_owns)
+                .find_map(|leak| {
+                    let next_table = canonical_next_table(&leak.next_table, false);
+                    table_has_v4_route(state, ip, next_table.as_ref(), true)
+                        .then_some(leak.incarnation)
+                })
         }
         IpAddr::V6(ip) => {
             let table = source_table
@@ -513,18 +518,23 @@ pub(in crate::afxdp) fn leak_incarnation_for_resolution(
             if local_v6_owned_by_table(state, ip, table.as_ref()) {
                 return None;
             }
-            let source_owns = source_table_owns_v6(state, ip, table.as_ref(), true, None);
-            state.leak_rules_v6.get(table.as_ref()).and_then(|rules| {
-                rules
-                    .iter()
-                    .filter(|leak| leak.prefix.contains(ip))
-                    .filter(|leak| !leak.post_table || !source_owns)
-                    .find_map(|leak| {
-                        let next_table = canonical_next_table(&leak.next_table, true);
-                        table_has_v6_route(state, ip, next_table.as_ref(), true)
-                            .then_some(leak.incarnation)
-                    })
-            })
+            // #17852 (v6 twin): the ownership scan runs only when a
+            // deferred return covering `ip` exists; stage-1 leaks never
+            // consult it.
+            let Some(rules) = state.leak_rules_v6.get(table.as_ref()) else {
+                return None;
+            };
+            let source_owns = table_has_deferred_leak_v6(state, table.as_ref(), ip)
+                && source_table_owns_v6(state, ip, table.as_ref(), true, None);
+            rules
+                .iter()
+                .filter(|leak| leak.prefix.contains(ip))
+                .filter(|leak| !leak.post_table || !source_owns)
+                .find_map(|leak| {
+                    let next_table = canonical_next_table(&leak.next_table, true);
+                    table_has_v6_route(state, ip, next_table.as_ref(), true)
+                        .then_some(leak.incarnation)
+                })
         }
     }
 }
@@ -804,6 +814,8 @@ fn source_table_owns_v4(
     allow_tunnels: bool,
     suppress_nat_local: Option<IpAddr>,
 ) -> bool {
+    #[cfg(test)]
+    record_source_ownership_scan_for_test();
     table_has_v4_route_suppressing(state, ip, table, allow_tunnels, suppress_nat_local)
 }
 
@@ -815,7 +827,57 @@ fn source_table_owns_v6(
     allow_tunnels: bool,
     suppress_nat_local: Option<IpAddr>,
 ) -> bool {
+    #[cfg(test)]
+    record_source_ownership_scan_for_test();
     table_has_v6_route_suppressing(state, ip, table, allow_tunnels, suppress_nat_local)
+}
+
+/// #17852: true when `table` holds at least one deferred (`post_table`)
+/// return row covering `ip` — the exact rule set `try_deferred_leaks_v4`
+/// walks. False means the deferred pass would find nothing, so the
+/// #16799 source-ownership scan above can be skipped with no observable
+/// difference: every consumer of that scan acts only on deferred rows.
+#[inline]
+fn table_has_deferred_leak_v4(state: &ForwardingState, table: &str, ip: Ipv4Addr) -> bool {
+    state.leak_rules_v4.get(table).is_some_and(|leaks| {
+        leaks
+            .iter()
+            .any(|leak| leak.post_table && leak.prefix.contains(ip))
+    })
+}
+
+/// #17852: v6 twin of `table_has_deferred_leak_v4`.
+#[inline]
+fn table_has_deferred_leak_v6(state: &ForwardingState, table: &str, ip: Ipv6Addr) -> bool {
+    state.leak_rules_v6.get(table).is_some_and(|leaks| {
+        leaks
+            .iter()
+            .any(|leak| leak.post_table && leak.prefix.contains(ip))
+    })
+}
+
+/// #17852: test-only, thread-local count of source-ownership scans, so
+/// regression cells can prove lookups and incarnation checks in tables
+/// without deferred returns do no ownership walk. Zero cost in
+/// non-test builds (no counter exists there).
+#[cfg(test)]
+thread_local! {
+    static SOURCE_OWNERSHIP_SCANS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn record_source_ownership_scan_for_test() {
+    SOURCE_OWNERSHIP_SCANS.with(|scans| scans.set(scans.get() + 1));
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn source_ownership_scans_for_test() -> usize {
+    SOURCE_OWNERSHIP_SCANS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn reset_source_ownership_scans_for_test() {
+    SOURCE_OWNERSHIP_SCANS.with(|scans| scans.set(0));
 }
 
 /// #16799: try the deferred (`post_table`) leaks of `table` in priority
@@ -1199,13 +1261,15 @@ fn lookup_forwarding_resolution_v4_inner(
             );
         }
     }
-    // #16799: capture whether the source table owns `ip` BEFORE consuming
-    // the LPM result, so a source miss can fall through to deferred
-    // returns while any source-owned outcome (forward, discard/reject,
+    // #16799: deferred rib-group returns run only on a genuine source
+    // miss, so any source-owned outcome (forward, discard/reject,
     // MissingNeighbor via a selected member) stays authoritative — as
     // the kernel's l3mdev lookup result is before the return rules.
-    let source_owns_v4 =
-        evaluate_leaks && source_table_owns_v4(state, ip, table, allow_tunnels, suppress_nat_local);
+    // #17852: the source-ownership scan is deferred to the miss tail
+    // below and runs only when a deferred return covering `ip` exists,
+    // so ordinary lookups in tables without deferred returns do no
+    // ownership walk (the scan is a pure function of immutable state,
+    // so evaluating it after the LPM cannot change any outcome).
     let result = match select_v4_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV4::Connected {
             ifindex,
@@ -1388,9 +1452,13 @@ fn lookup_forwarding_resolution_v4_inner(
     // miss: the LPM produced NoRoute AND the source table owns nothing
     // for `ip`. A source-owned outcome — including MissingNeighbor from
     // a selected-but-unresolved member — is returned bit-identically.
+    // #17852: the ownership scan runs only when a deferred return
+    // covering `ip` exists (otherwise the deferred pass below would
+    // find nothing to try).
     if evaluate_leaks
-        && !source_owns_v4
         && result.resolution.disposition == ForwardingDisposition::NoRoute
+        && table_has_deferred_leak_v4(state, table, ip)
+        && !source_table_owns_v4(state, ip, table, allow_tunnels, suppress_nat_local)
     {
         if let Some(deferred) = try_deferred_leaks_v4(
             state,
@@ -1630,9 +1698,9 @@ fn lookup_forwarding_resolution_v6_inner(
             );
         }
     }
-    // #16799: v4 twin — source ownership gates the deferred tail.
-    let source_owns_v6 =
-        evaluate_leaks && source_table_owns_v6(state, ip, table, allow_tunnels, suppress_nat_local);
+    // #16799/#17852 v6 twin: ownership gates only the deferred miss
+    // tail below, and its scan runs only when a deferred return
+    // covering `ip` exists.
     let result = match select_v6_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV6::Connected {
             ifindex,
@@ -1795,9 +1863,13 @@ fn lookup_forwarding_resolution_v6_inner(
         None => no_route_lookup_result(no_route_resolution(None)),
     };
     // #16799: v4 twin — deferred returns only on a genuine source miss.
+    // #17852: the ownership scan runs only when a deferred return
+    // covering `ip` exists (otherwise the deferred pass below would
+    // find nothing to try).
     if evaluate_leaks
-        && !source_owns_v6
         && result.resolution.disposition == ForwardingDisposition::NoRoute
+        && table_has_deferred_leak_v6(state, table, ip)
+        && !source_table_owns_v6(state, ip, table, allow_tunnels, suppress_nat_local)
     {
         if let Some(deferred) = try_deferred_leaks_v6(
             state,

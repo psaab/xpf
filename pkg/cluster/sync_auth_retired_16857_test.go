@@ -333,17 +333,14 @@ func TestRetirementGraceSurvivesConcurrentEnforcementSnapshot18016(t *testing.T)
 	}()
 
 	if tickHoldsWriteMu {
-		// The reconcile can take its new snapshot, but it cannot anchor
-		// until this enforcement pass releases writeMu.
-		select {
-		case <-provider.secondSnapshot:
-		case <-time.After(3 * time.Second):
-			close(provider.firstRelease)
-			t.Fatal("retirement reconcile did not snapshot the new accepted ring")
-		}
+		// #18028: the reconcile snapshots the accepted set UNDER writeMu,
+		// so while this enforcement pass is gated inside its own section the
+		// reconcile parks on the lock before it can snapshot anything. There
+		// is nothing to observe yet — the gate has to open first.
 	} else {
-		// On the old ordering, the reconcile completes and anchors its
-		// fresh retired-key grace before the paused tick acquires writeMu.
+		// On the old enforcement ordering, the reconcile completes and
+		// anchors its fresh retired-key grace before the paused tick
+		// acquires writeMu.
 		select {
 		case <-reconcileDone:
 		case <-time.After(3 * time.Second):
@@ -352,6 +349,19 @@ func TestRetirementGraceSurvivesConcurrentEnforcementSnapshot18016(t *testing.T)
 		}
 	}
 	close(provider.firstRelease)
+
+	if tickHoldsWriteMu {
+		// The gate is open, so this enforcement pass finishes its stale-set
+		// evaluation and releases writeMu; only then does the reconcile take
+		// ITS snapshot. secondSnapshot firing here proves the reconcile read
+		// the FLIPPED ring under the lock — never the pre-flip set the
+		// enforcement pass just used.
+		select {
+		case <-provider.secondSnapshot:
+		case <-time.After(3 * time.Second):
+			t.Fatal("retirement reconcile did not snapshot the new accepted ring")
+		}
+	}
 
 	select {
 	case <-reconcileDone:
