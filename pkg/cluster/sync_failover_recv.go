@@ -183,7 +183,7 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 	if len(payload) >= 3 {
 		peerFlags = payload[2]
 	}
-	oldFlags := s.peerCapabilityFlags.Load()
+	oldFlags := s.peerIncarnationState().peerCapabilityFlags.Load()
 	// #7990: the peer's session-sync WIRE version rides as a trailing u16
 	// under the same discipline — a payload shorter than 5 bytes is a
 	// pre-#7990 peer and leaves 0 = UNKNOWN, which callers must handle
@@ -192,7 +192,7 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 	if len(payload) >= 5 {
 		peerWire = binary.LittleEndian.Uint16(payload[3:5])
 	}
-	oldWire := s.peerSessionSyncWire.Load()
+	oldWire := s.peerIncarnationState().peerSessionSyncWire.Load()
 	// #9818: the sender's process identity rides after the existing
 	// capabilities fields. Old peers ignore this trailing extension; a
 	// short frame leaves the connection unattributed and therefore on the
@@ -219,7 +219,7 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 	if len(payload) > 5+bootIncarnationLen+8+8 {
 		peerFlags2 = payload[len(payload)-1]
 	}
-	oldFlags2 := s.peerCapabilityFlags2.Load()
+	oldFlags2 := s.peerIncarnationState().peerCapabilityFlags2.Load()
 	capabilityChanged := oldProto != uint32(peerProto) ||
 		oldFlags != uint32(peerFlags) || oldWire != uint32(peerWire) ||
 		oldFlags2 != uint32(peerFlags2)
@@ -254,9 +254,9 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 	}
 	s.peerSnaps.peerSnapshotProtocol.Store(uint32(peerProto))
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
-	s.peerCapabilityFlags.Store(uint32(peerFlags))
+	s.peerIncarnationState().peerCapabilityFlags.Store(uint32(peerFlags))
 	s.storePeerCapabilityFlags2(uint32(peerFlags2))
-	s.peerSessionSyncWire.Store(uint32(peerWire))
+	s.peerIncarnationState().peerSessionSyncWire.Store(uint32(peerWire))
 	s.mu.Unlock()
 	// #10512 learn-trigger: learning completed (capable or not) —
 	// flush unconditionally and let the flush retain (unlearned),
@@ -273,7 +273,7 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 	// aborted during the discovery race must not stay latched once the
 	// peer proves capable — the next redrive completes it.
 	if s.InstallTableIdentityCapable() {
-		s.bulkFencedForPeer.Store(false)
+		s.peerIncarnationState().bulkFencedForPeer.Store(false)
 		// #9752 round 5 item 5: suppressed installs are never retried
 		// by the sweep (its Created>=threshold window advances past
 		// them), so transfer the suppress debt into a cold-prime
@@ -283,10 +283,10 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 		// or armed here; future suppressions re-set it. Both checked
 		// under s.mu with the arm so a concurrent ack discharge
 		// cannot interleave a redundant bulk.
-		if s.installTableSuppressDebt.Load() {
+		if s.peerIncarnationState().installTableSuppressDebt.Load() {
 			s.mu.Lock()
-			if s.installTableSuppressDebt.Load() {
-				s.installTableSuppressDebt.Store(false)
+			if s.peerIncarnationState().installTableSuppressDebt.Load() {
+				s.peerIncarnationState().installTableSuppressDebt.Store(false)
 				if !s.needColdPrime.Load() {
 					s.armColdPrimeLocked()
 					slog.Info("cluster sync: re-arming cold prime after capable discovery with withheld installs")
@@ -296,12 +296,12 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 		}
 	}
 	if s.IpsecTunnelDiscriminatorCapable() {
-		s.bulkFencedForIpsecPeer.Store(false)
+		s.peerIncarnationState().bulkFencedForIpsecPeer.Store(false)
 	}
-	if s.IpsecTunnelDiscriminatorCapable() && s.ipsecDiscriminatorSuppressDebt.Load() {
+	if s.IpsecTunnelDiscriminatorCapable() && s.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Load() {
 		s.mu.Lock()
-		if s.ipsecDiscriminatorSuppressDebt.Load() {
-			s.ipsecDiscriminatorSuppressDebt.Store(false)
+		if s.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Load() {
+			s.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Store(false)
 			if !s.needColdPrime.Load() {
 				s.armColdPrimeLocked()
 				slog.Info("cluster sync: re-arming cold prime after capable IPsec discriminator discovery")
