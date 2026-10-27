@@ -99,7 +99,7 @@ func requireStale16041(t *testing.T, ss *SessionSync, why string) {
 		if age, ok := ss.LastPeerReceiveAge(); ok && age > syncPeerSilenceTimeout {
 			if ss.PeerHealthy() {
 				// Healthy requires the ack latch; arm it for the check.
-				if ss.peerHeartbeatAckEver.Load() {
+				if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 					t.Fatalf("%s: PeerHealthy still true with stale lastPeerRxMono", why)
 				}
 			}
@@ -495,7 +495,7 @@ func TestRejectedFramesDoNotRefreshLiveness16041(t *testing.T) {
 			h := newRecvHarness16041(t, ss)
 			// Arm enforcement so PeerHealthy is also meaningful, and make
 			// the last-receive stamp provably stale before the junk frame.
-			h.ss.peerHeartbeatAckEver.Store(true)
+			h.ss.peerIncarnationState().peerHeartbeatAckEver.Store(true)
 			staleLastRx16041(h.ss)
 			payload := tc.payload
 			if tc.name == "stale DHCP full-set" {
@@ -849,7 +849,7 @@ func TestDownstreamRejectedFramesDoNotRefreshLiveness16041(t *testing.T) {
 			t.Fatal("FIXTURE: landing install must be accepted")
 		}
 		h := newRecvHarness16041(t, ss)
-		h.ss.peerHeartbeatAckEver.Store(true)
+		h.ss.peerIncarnationState().peerHeartbeatAckEver.Store(true)
 		staleVal := val
 		staleVal.Generation = 1
 		frames := []struct {
@@ -884,7 +884,7 @@ func TestRejectedTrafficDoesNotRestartReadDeadline16041(t *testing.T) {
 	t.Run("junk stream still times out and disconnects", func(t *testing.T) {
 		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
 		h := newRecvHarnessDeadline16041(t, ss, window)
-		h.ss.peerHeartbeatAckEver.Store(true)
+		h.ss.peerIncarnationState().peerHeartbeatAckEver.Store(true)
 		stop := make(chan struct{})
 		defer close(stop)
 		go func() {
@@ -954,7 +954,7 @@ func TestRejectedTrafficDoesNotRestartReadDeadline16041(t *testing.T) {
 		}()
 		defer func() { _ = h.peer.Close(); <-peerDone }()
 		deadline := time.After(2 * time.Second)
-		for !h.ss.peerHeartbeatAckEver.Load() {
+		for !h.ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 			select {
 			case <-deadline:
 				t.Fatal("CONTROL: peer acks never latched the heartbeat-ack capability")

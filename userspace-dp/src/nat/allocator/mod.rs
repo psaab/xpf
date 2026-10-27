@@ -2252,6 +2252,20 @@ enum LeaseReuse {
     WireIdentityConflict,
 }
 
+/// #17033: whether an idempotent re-entry bumps `reuses_total`.
+///
+/// A future path that must not count refreshes passes `Uncounted` here,
+/// at the call site, rather than quietly omitting the bump — the
+/// pre-fix synced-PAT copy did exactly that (see #17033).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReuseCount {
+    /// Count the re-entry (the ordinary idempotent-reuse return).
+    Counted,
+    /// Record the holder only, without bumping `reuses_total`.
+    #[allow(dead_code)]
+    Uncounted,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PersistentInbound {
     Miss,
@@ -3672,6 +3686,41 @@ impl PortAllocator {
         self.free_translated_port_at(addr_index, port, 0)
     }
 
+    /// #17033 (#9145/#6211 F2): the single-sourced idempotent-reuse return.
+    ///
+    /// Records `holder` on the existing record and returns its translated
+    /// tuple. This early return is where workers 2..N land — a synced
+    /// entry is fanned out to every worker against the ONE shared
+    /// allocator — and where an already-holding worker lands on every
+    /// refresh. Without the holder bit a worker-0 `release_flow` clears
+    /// the occupancy bit for a translation another worker still holds:
+    /// the NAT source collision the mask exists to prevent.
+    ///
+    /// OR is idempotent, so a refresh cannot inflate the mask; that is
+    /// why this is a bitmask and not a counter. The direction is the
+    /// safe one `drop_holder_locked` prefers: this can only ever cause
+    /// an UNDER-release, never an over-release.
+    ///
+    /// `count` decides whether the re-entry bumps `reuses_total`, which
+    /// is exported as `xpf_userspace_source_nat_pool_reuses_total` and
+    /// used as a test discriminator for the idempotent path. Callers
+    /// keep their own give-back of any candidate they claimed before
+    /// discovering the incumbent (recycling free, unpublished free, or
+    /// nothing) — that difference stays at the call site, after this
+    /// returns.
+    fn reenter_existing_locked(
+        &self,
+        slot: &mut LiveAllocation,
+        holder: NatHolder,
+        count: ReuseCount,
+    ) -> TranslatedTuple {
+        slot.holders |= holder.bit();
+        if count == ReuseCount::Counted {
+            self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+        }
+        slot.translated
+    }
+
     /// #17046: single entry point for every pool allocation. The
     /// `AllocRequest` bundles the dozen positional arguments the three
     /// former `allocate_translation*` wrappers threaded separately, and
@@ -3917,11 +3966,10 @@ impl PortAllocator {
                     };
                     let mut __shard = self.lock_flow_shard_counted(&flow);
                     if let Some(slot) = __shard.map.get_mut(&flow) {
-                        // #9145: same-flow re-entry must record this worker as
-                        // a holder before giving back the candidate it claimed.
-                        slot.holders |= holder.bit();
-                        let existing = slot.translated;
-                        self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                        // Record this worker as a holder before giving back
+                        // the candidate it claimed (#17033 helper).
+                        let existing =
+                            self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
                         drop(__shard);
                         drop(live);
                         self.free_unpublished_translated_port(abs, port);
@@ -4044,9 +4092,7 @@ impl PortAllocator {
         {
             let mut __shard = self.shared.flows.get_mut_shard(&flow);
             if let Some(slot) = __shard.map.get_mut(&flow) {
-                slot.holders |= holder.bit();
-                let existing = slot.translated;
-                self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                let existing = self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
                 return Ok(existing);
             }
             if !persistent_nat && self.shared.flows.len() >= self.shared.max_tracked_flows {
@@ -4059,9 +4105,7 @@ impl PortAllocator {
 
         let mut __shard = self.shared.flows.get_mut_shard(&flow);
         if let Some(slot) = __shard.map.get_mut(&flow) {
-            slot.holders |= holder.bit();
-            let existing = slot.translated;
-            self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+            let existing = self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
             return Ok(existing);
         }
         // Fold 2: the len() check is NOT the admission — two
@@ -5080,23 +5124,7 @@ impl PortAllocator {
                 let mut live = self.lock_live();
                 let mut __shard = self.shared.flows.get_mut_shard(&flow);
                 if let Some(slot) = __shard.map.get_mut(&flow) {
-                    // #9145: record this worker as a HOLDER on the idempotent-reuse
-                    // return. `reserve_flow_maybe_persistent` and
-                    // `reserve_address_only_maybe_persistent` already do it here
-                    // and say why (#6211 F2): this early return is where workers
-                    // 2..N land, so it is exactly where a new holder must be
-                    // recorded. Without it a worker-0 `release_flow` clears the
-                    // occupancy bit for a translation worker 1 still holds --
-                    // the NAT source collision the mask exists to prevent.
-                    //
-                    // OR is idempotent, so a refresh cannot inflate the mask;
-                    // that is why this is a bitmask and not a counter. The
-                    // direction is the safe one `drop_holder_locked`'s own doc
-                    // prefers: this can only ever cause an UNDER-release, never
-                    // an over-release.
-                    slot.holders |= holder.bit();
-                    let existing = slot.translated;
-                    self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                    let existing = self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
                     return Ok(existing);
                 }
                 self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
@@ -5112,25 +5140,11 @@ impl PortAllocator {
             let mut live = self.lock_live();
             let mut __shard = self.shared.flows.get_mut_shard(&flow);
             if let Some(slot) = __shard.map.get_mut(&flow) {
-                // Give back the port we just claimed WITHOUT recycling: a
-                // deterministic port is reusable via its occupancy bit alone.
-                // #9145: record this worker as a HOLDER on the idempotent-reuse
-                // return. `reserve_flow_maybe_persistent` and
-                // `reserve_address_only_maybe_persistent` already do it here
-                // and say why (#6211 F2): this early return is where workers
-                // 2..N land, so it is exactly where a new holder must be
-                // recorded. Without it a worker-0 `release_flow` clears the
-                // occupancy bit for a translation worker 1 still holds --
-                // the NAT source collision the mask exists to prevent.
-                //
-                // OR is idempotent, so a refresh cannot inflate the mask;
-                // that is why this is a bitmask and not a counter. The
-                // direction is the safe one `drop_holder_locked`'s own doc
-                // prefers: this can only ever cause an UNDER-release, never
-                // an over-release.
-                slot.holders |= holder.bit();
-                let existing = slot.translated;
-                self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                // Give back the port we just claimed through the normal
+                // recycling free (#14625, as on the v6 twin: the ring is
+                // bounded and `claim_in_block` ignores it; a later PAT
+                // phase on this allocator needs it).
+                let existing = self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
                 drop(live);
                 self.free_translated_port(ip_idx, port);
                 return Ok(existing);
@@ -5318,23 +5332,7 @@ impl PortAllocator {
                 let mut live = self.lock_live();
                 let mut __shard = self.shared.flows.get_mut_shard(&flow);
                 if let Some(slot) = __shard.map.get_mut(&flow) {
-                    // #9145: record this worker as a HOLDER on the idempotent-reuse
-                    // return. `reserve_flow_maybe_persistent` and
-                    // `reserve_address_only_maybe_persistent` already do it here
-                    // and say why (#6211 F2): this early return is where workers
-                    // 2..N land, so it is exactly where a new holder must be
-                    // recorded. Without it a worker-0 `release_flow` clears the
-                    // occupancy bit for a translation worker 1 still holds --
-                    // the NAT source collision the mask exists to prevent.
-                    //
-                    // OR is idempotent, so a refresh cannot inflate the mask;
-                    // that is why this is a bitmask and not a counter. The
-                    // direction is the safe one `drop_holder_locked`'s own doc
-                    // prefers: this can only ever cause an UNDER-release, never
-                    // an over-release.
-                    slot.holders |= holder.bit();
-                    let existing = slot.translated;
-                    self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                    let existing = self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
                     return Ok(existing);
                 }
                 // #14670: a block full of expired idle BIBs under OTHER
@@ -5478,23 +5476,7 @@ impl PortAllocator {
                 // probe ran. Give the port back through the normal recycling
                 // free (#14625: the ring is bounded and `claim_in_block`
                 // ignores it; a later PAT phase on this allocator needs it).
-                // #9145: record this worker as a HOLDER on the idempotent-reuse
-                // return. `reserve_flow_maybe_persistent` and
-                // `reserve_address_only_maybe_persistent` already do it here
-                // and say why (#6211 F2): this early return is where workers
-                // 2..N land, so it is exactly where a new holder must be
-                // recorded. Without it a worker-0 `release_flow` clears the
-                // occupancy bit for a translation worker 1 still holds --
-                // the NAT source collision the mask exists to prevent.
-                //
-                // OR is idempotent, so a refresh cannot inflate the mask;
-                // that is why this is a bitmask and not a counter. The
-                // direction is the safe one `drop_holder_locked`'s own doc
-                // prefers: this can only ever cause an UNDER-release, never
-                // an over-release.
-                slot.holders |= holder.bit();
-                let existing = slot.translated;
-                self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                let existing = self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
                 drop(live);
                 self.free_translated_port(ip_idx, port);
                 return Ok(existing);
@@ -6353,16 +6335,11 @@ impl PortAllocator {
         let existing = self.shared.flows.get_in_shard(&live.shard, &flow);
         if let Some(existing) = existing {
             if existing.translated == translated {
-                // #6211 F2: this early return is where workers 2..N land — the
-                // synced entry is fanned out to every worker and each calls
-                // through to here against the ONE shared allocator, so this is
-                // exactly where a new holder must be recorded. It is ALSO the
-                // path an already-holding worker takes on every refresh (HA
-                // session-sync reconnect, periodic re-upsert); OR is idempotent
-                // so a refresh cannot inflate the mask, which is precisely why
-                // this is a bitmask and not a counter.
+                // #17033: count a synced PAT refresh as a reuse, like the
+                // synced address-only twin below; the pre-fix copy here was
+                // the only one of the 13 that skipped `reuses_total`.
                 if let Some(slot) = live.shard.map.get_mut(&flow) {
-                    slot.holders |= holder.bit();
+                    self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
                 }
                 *previous_snapshot = live.previous_snapshot();
                 return true;
@@ -6810,9 +6787,8 @@ impl PortAllocator {
         if let Some(existing) = existing {
             if existing.translated == translated {
                 if let Some(slot) = live.shard.map.get_mut(&flow) {
-                    slot.holders |= holder.bit();
+                    self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
                 }
-                self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                 *previous_snapshot = live.previous_snapshot();
                 return Ok(existing.translated);
             }
@@ -7275,9 +7251,8 @@ impl PortAllocator {
                 && existing.translated.port == translated_port
             {
                 if let Some(slot) = live.shard.map.get_mut(&flow) {
-                    slot.holders |= holder.bit();
+                    self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
                 }
-                self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                 *previous_snapshot = live.previous_snapshot();
                 return InterfaceDomainReserve::Owned;
             }
@@ -7333,9 +7308,7 @@ impl PortAllocator {
         preserved: u16,
     ) -> Option<InterfaceIdentity> {
         let existing = shard.map.get_mut(flow)?;
-        existing.holders |= holder.bit();
-        let translated = existing.translated;
-        self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+        let translated = self.reenter_existing_locked(existing, holder, ReuseCount::Counted);
         Some(InterfaceIdentity {
             port: translated.port,
             patted: translated.port != preserved,
@@ -7465,23 +7438,7 @@ impl PortAllocator {
         // install) reuses its first decision rather than re-keying.
         let mut __shard = self.shared.flows.get_mut_shard(&flow);
         if let Some(slot) = __shard.map.get_mut(&flow) {
-            // #9145: record this worker as a HOLDER on the idempotent-reuse
-            // return. `reserve_flow_maybe_persistent` and
-            // `reserve_address_only_maybe_persistent` already do it here
-            // and say why (#6211 F2): this early return is where workers
-            // 2..N land, so it is exactly where a new holder must be
-            // recorded. Without it a worker-0 `release_flow` clears the
-            // occupancy bit for a translation worker 1 still holds --
-            // the NAT source collision the mask exists to prevent.
-            //
-            // OR is idempotent, so a refresh cannot inflate the mask;
-            // that is why this is a bitmask and not a counter. The
-            // direction is the safe one `drop_holder_locked`'s own doc
-            // prefers: this can only ever cause an UNDER-release, never
-            // an over-release.
-            slot.holders |= holder.bit();
-            let existing = slot.translated;
-            self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+            let existing = self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
             return Ok(existing);
         }
         // Global flow-table cap (the address-only token lives in `live_by_flow`);
@@ -7663,23 +7620,7 @@ impl PortAllocator {
         // decision rather than re-keying / double-counting the lease refcount.
         let mut __shard = self.shared.flows.get_mut_shard(&flow);
         if let Some(slot) = __shard.map.get_mut(&flow) {
-            // #9145: record this worker as a HOLDER on the idempotent-reuse
-            // return. `reserve_flow_maybe_persistent` and
-            // `reserve_address_only_maybe_persistent` already do it here
-            // and say why (#6211 F2): this early return is where workers
-            // 2..N land, so it is exactly where a new holder must be
-            // recorded. Without it a worker-0 `release_flow` clears the
-            // occupancy bit for a translation worker 1 still holds --
-            // the NAT source collision the mask exists to prevent.
-            //
-            // OR is idempotent, so a refresh cannot inflate the mask;
-            // that is why this is a bitmask and not a counter. The
-            // direction is the safe one `drop_holder_locked`'s own doc
-            // prefers: this can only ever cause an UNDER-release, never
-            // an over-release.
-            slot.holders |= holder.bit();
-            let existing = slot.translated;
-            self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+            let existing = self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
             return Ok(existing);
         }
         drop(__shard);

@@ -576,7 +576,7 @@ func TestQueueConfigWithAncestryWireReceiveApplyChain10511(t *testing.T) {
 		peer.Close()
 	})
 	sender.installConn(0, local)
-	sender.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
+	sender.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
 	sender.peerSnaps.peerSnapshotProtocol.Store(1)
 
 	const (
@@ -643,7 +643,7 @@ func TestConfigAncestryCapabilityStateAndLegacyGate10511(t *testing.T) {
 	if s.ConfigAncestryCapable() {
 		t.Fatal("discovery without the ancestry bit must stay on the legacy payload")
 	}
-	s.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
+	s.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
 	if !s.ConfigAncestryCapable() {
 		t.Fatal("the config-ancestry capability bit was not recognized")
 	}
@@ -719,7 +719,7 @@ func TestQueueConfigWithAncestryWrapperUsesNegotiatedSidecar10511(t *testing.T) 
 	})
 	s.installConn(0, local)
 	s.peerSnaps.peerSnapshotProtocol.Store(1)
-	s.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
+	s.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
 	want := []configstore.RenameDescriptor{{
 		SourcePath:      []string{"security", "policies", "old"},
 		DestinationPath: []string{"security", "policies", "new"},
@@ -920,7 +920,7 @@ func TestReservedConfigGenerationIsHonoredNotRedrawn10511(t *testing.T) {
 	})
 	s.installConn(0, local)
 	s.peerSnaps.peerSnapshotProtocol.Store(1)
-	s.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
+	s.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
 	g1 := s.ReserveConfigGen()
 	g2 := s.ReserveConfigGen()
 	if !(g1 < g2) {
