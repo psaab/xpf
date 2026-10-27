@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * HA: answer interface-ref → redundancy-group ownership from one
+    SSOT (config.InterfaceRefRG / RefRG / RefRGIndex over
+    RethRGOwners). RPM no longer name-tests `reth*`, so a structural
+    bond0 RETH gates its ip-monitoring test on its own RG; the DHCP
+    relay per-packet gate uses a cached RefRGIndex; proxy-ARP, IPsec,
+    DDNS, DHCP lease, zone, RA, SNMP and RETH-MAC readers all share
+    the answer, and a stray group on a non-RETH owns nothing (#17086).
+  * HA: a declared dotted interface (#9821) with a set redundancy-group
+    owns that group even with no members, so its zone RG resolves
+    instead of dropping to group 0; undotted strays and non-numeric
+    dotted names still own nothing (#17086).
   * Flow export: delete the production-dead ExportConfig sampling gates
     (ShouldExport, ShouldExportIface, ShouldExportIfaceDaemon,
     FlowDirection); SampledForOpen/SampledForClose are the single
