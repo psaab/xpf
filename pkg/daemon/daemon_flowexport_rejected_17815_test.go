@@ -155,7 +155,7 @@ func TestSyncDuplicateOfRejectedOpenDoesNotResample17815(t *testing.T) {
 	d.trackFlowOpenFromSync(dpuserspace.SessionDeltaInfo{
 		Event: "open", AddrFamily: dataplane.AFInet, Protocol: 6,
 		SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24021, DstPort: 443,
-		IngressZoneID: uint16(trust), EgressZoneID: uint16(untrust),
+		IngressZoneID: trust, EgressZoneID: untrust,
 		IngressIfindex: 11, EgressIfindex: 12,
 	})
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24021, DstPort: 443, Protocol: 6}
@@ -189,7 +189,7 @@ func TestSyncOpenRegistersOnceWhenUndecided17815(t *testing.T) {
 	delta := dpuserspace.SessionDeltaInfo{
 		Event: "open", AddrFamily: dataplane.AFInet, Protocol: 6,
 		SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24031, DstPort: 443,
-		IngressZoneID: uint16(trust), EgressZoneID: uint16(untrust),
+		IngressZoneID: trust, EgressZoneID: untrust,
 		IngressIfindex: 11, EgressIfindex: 12,
 	}
 	d.trackFlowOpenFromSync(delta)
@@ -276,7 +276,7 @@ services {
 	d.trackFlowOpenFromSync(dpuserspace.SessionDeltaInfo{
 		Event: "open", AddrFamily: dataplane.AFInet, Protocol: 6,
 		SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24041, DstPort: 443,
-		IngressZoneID: uint16(trust), EgressZoneID: uint16(untrust),
+		IngressZoneID: trust, EgressZoneID: untrust,
 		IngressIfindex: 11, EgressIfindex: 14,
 	})
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24041, DstPort: 443, Protocol: 6}

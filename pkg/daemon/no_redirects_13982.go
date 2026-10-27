@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -48,11 +49,7 @@ func redirectKnobPaths() []string {
 
 func writeRedirectKnobs(value string) {
 	for _, path := range redirectKnobPaths() {
-		current, _ := os.ReadFile(path)
-		if strings.TrimSpace(string(current)) == value {
-			continue
-		}
-		if err := os.WriteFile(path, []byte(value+"\n"), 0644); err != nil {
+		if _, err := fsatomic.WriteKernelKnob(path, value); err != nil {
 			slog.Warn("failed to set ICMP redirects", "path", path, "value", value, "err", err)
 		}
 	}
@@ -135,11 +132,7 @@ func restoreRedirectKnobs() {
 		} else if forwarding && isIPv4AcceptRedirects(path) && value == "1" {
 			value = "0"
 		}
-		current, _ := os.ReadFile(path)
-		if strings.TrimSpace(string(current)) == value {
-			continue
-		}
-		if err := os.WriteFile(path, []byte(value+"\n"), 0644); err != nil {
+		if _, err := fsatomic.WriteKernelKnob(path, value); err != nil {
 			slog.Warn("failed to restore ICMP redirects", "path", path, "value", value, "err", err)
 		}
 	}

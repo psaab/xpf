@@ -1156,13 +1156,16 @@ func (d *Daemon) trackFlowOpenFromSync(delta dpuserspace.SessionDeltaInfo) {
 		return
 	}
 	rec := logging.EventRecord{
-		Type:           "SESSION_OPEN",
-		Time:           delta.Timestamp,
-		SrcAddr:        net.JoinHostPort(delta.SrcIP, strconv.Itoa(int(delta.SrcPort))),
-		DstAddr:        net.JoinHostPort(delta.DstIP, strconv.Itoa(int(delta.DstPort))),
-		ProtocolNum:    delta.Protocol,
-		InZone:         delta.IngressZoneID,
-		OutZone:        delta.EgressZoneID,
+		Type:        "SESSION_OPEN",
+		Time:        delta.Timestamp,
+		SrcAddr:     net.JoinHostPort(delta.SrcIP, strconv.Itoa(int(delta.SrcPort))),
+		DstAddr:     net.JoinHostPort(delta.DstIP, strconv.Itoa(int(delta.DstPort))),
+		ProtocolNum: delta.Protocol,
+		// #18148: EventRecord.InZone/OutZone stay u16 — they share the
+		// frozen BPF/RT_FLOW u16 zone ABI; a full u32 delta id is stored
+		// truncated here exactly as on the SessionValue.
+		InZone:         uint16(delta.IngressZoneID),
+		OutZone:        uint16(delta.EgressZoneID),
 		IngressIfindex: uint32(delta.IngressIfindex),
 		EgressIfindex:  uint32(delta.EgressIfindex),
 	}
