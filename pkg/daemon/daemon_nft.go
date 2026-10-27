@@ -1783,12 +1783,12 @@ func ndpTextExcluded(except []string) bool {
 // multicast ND is admitted for every retaining view (empty-token
 // included) exactly as unicast; (b) a destination fallback for views
 // with no ingress scope, even when a sibling view has ingress.
-// A retaining view with any-service is skipped in the steady chain:
-// its bare full admit already covers ND (no duplicate rule, #6618
-// lock). In fence mode (counted=false) there is no full-service
-// admit, so any-service retaining views DO get scoped ND admits. Excluding views
-// emit nothing: their ingress/destination catch-alls deny ND. Unzoned
-// and ambiguous ingress emit nothing (fail-closed).
+// Any-service retaining views skip counted steady-state admits unless their
+// zone has a junos-host program; those scopes need ND before the program's
+// fine terminal drops. Fence mode (counted=false) emits scoped any-service
+// ND because it has no full-service admit. Excluding views emit nothing:
+// their ingress/destination catch-alls deny ND. Unzoned and ambiguous ingress
+// emit nothing (fail-closed).
 // The unscoped accept is emitted ONLY when no view carries any scope
 // at all (no views / no retaining ingress or address anywhere; e.g.
 // the config-less fence) OR no view excludes ndp. When at least one
@@ -1798,8 +1798,7 @@ func ndpTextExcluded(except []string) bool {
 // counted attaches the aggregate counter name
 // "xpfhia_icmp6_nd" to every emitted ND accept (steady state; fence
 // callers pass false — fence tables declare no counter objects, #5719).
-func emitHostInboundNDPAcceptsText(rules *[]string, views []dpuserspace.ZoneHostInboundView, counted bool) {
-	fenceMode := !counted
+func emitHostInboundNDPAcceptsText(rules *[]string, views []dpuserspace.ZoneHostInboundView, counted bool, programs []dpuserspace.JunosHostProgram) {
 	if !hostInboundAnyNDPDefaultText(views) {
 		return
 	}
@@ -1818,8 +1817,20 @@ func emitHostInboundNDPAcceptsText(rules *[]string, views []dpuserspace.ZoneHost
 	ndRule += " accept"
 	anyScope := false
 	for _, v := range views {
-		if !hostInboundViewNDPDefaultText(v) || (hostInboundAllowsAll(v) && !fenceMode) {
+		if !hostInboundViewNDPDefaultText(v) {
 			continue
+		}
+		if hostInboundAllowsAll(v) && counted {
+			hasFineProgram := false
+			for _, program := range programs {
+				if program.Zone == v.Zone {
+					hasFineProgram = true
+					break
+				}
+			}
+			if !hasFineProgram {
+				continue
+			}
 		}
 		direct := hostInboundDirectIngressNetdevs(v)
 		scoped := false
@@ -1902,7 +1913,7 @@ func hostInboundFenceMandatoryAdmitsViews(views []dpuserspace.ZoneHostInboundVie
 		"    meta l4proto { 50, 51 } accept",
 		"    icmpv6 type { 1, 2, 3, 4 } accept",
 	}
-	emitHostInboundNDPAcceptsText(&out, views, false)
+	emitHostInboundNDPAcceptsText(&out, views, false, nil)
 	out = append(out,
 		"    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept")
 	return out
@@ -2734,7 +2745,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		)...)
 		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts)
 		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts)
-		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodReplyDirection)
 		emitJunosHostMulticastProgramJumps(&rules, programs)
 		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// (2) Firewall-ORIGINATED reply traffic (host-OUTBOUND flow return).
@@ -2743,14 +2754,15 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		// original-direction established inbound falls through to the DROP below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
 		// (3) #16862: mandatory L3 admits before the fine jumps (see above).
-		emitHostInboundICMPAccepts(&rules, views)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodOriginalICMP)
+		emitHostInboundICMPAccepts(&rules, views, programs)
 		// (4) Fine junos-host programs: per ingress zone, the retained ident-RST
 		// shield and an iifname-scoped jump to the zone's first-match subchain
 		// (#9504).
 		for i, p := range programs {
 			emitJunosHostProgramJump(&rules, i, p)
 		}
-		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodOriginalNonICMP)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2772,15 +2784,15 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		)...)
 		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts)
 		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts)
-		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodReplyDirection)
 		emitJunosHostMulticastProgramJumps(&rules, programs)
 		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// Firewall-ORIGINATED reply traffic is accepted before ingress
 		// adjudication; original-direction established traffic reaches the
 		// residual accept only after the ingress-zone rules below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
-		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
-		emitHostInboundICMPAccepts(&rules, views)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, xnft.HostInboundScreenFloodOriginal)
+		emitHostInboundICMPAccepts(&rules, views, nil)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2876,10 +2888,10 @@ func zeroHopLimitLocalDropText(admit bool) string {
 	return "    ip6 hoplimit 0 fib daddr type { local, anycast } drop"
 }
 
-func emitHostInboundICMPAccepts(rules *[]string, views []dpuserspace.ZoneHostInboundView) {
+func emitHostInboundICMPAccepts(rules *[]string, views []dpuserspace.ZoneHostInboundView, programs []dpuserspace.JunosHostProgram) {
 	*rules = append(*rules, "    icmpv6 type { 1, 2, 3, 4 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6Error)+"\" accept")
 	// #15931: ND default accept, scoped to each retaining view's ingress.
-	emitHostInboundNDPAcceptsText(rules, views, true)
+	emitHostInboundNDPAcceptsText(rules, views, true, programs)
 	*rules = append(*rules, "    icmp type { destination-unreachable, time-exceeded, parameter-problem } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP4Error)+"\" accept")
 }
 
@@ -3098,13 +3110,20 @@ func appendHostInboundScreenFloodSet(rules *[]string, name, keyType string, size
 	)
 }
 
-// emitHostInboundScreenFloodText places reply-direction backstop rules before
-// the established-reply accept and original-direction rules after fine
-// junos-host policy, matching the kernel renderer.
-func emitHostInboundScreenFloodText(rules *[]string, screens []xnft.HostInboundScreenFloodRule, repliesOnly bool) {
+// emitHostInboundScreenFloodText mirrors the netlink screen phases: reply
+// screens precede the reply accept, original ICMP screens precede mandatory
+// ICMP accepts, and other original screens remain after fine junos-host policy.
+func emitHostInboundScreenFloodText(rules *[]string, screens []xnft.HostInboundScreenFloodRule, phase xnft.HostInboundScreenFloodPhase) {
 	for _, screen := range screens {
+		isICMP := screen.Protocol == "icmp" || screen.Protocol == "icmpv6"
+		if phase == xnft.HostInboundScreenFloodOriginalICMP && !isICMP {
+			continue
+		}
+		if phase == xnft.HostInboundScreenFloodOriginalNonICMP && isICMP {
+			continue
+		}
 		prefix := ""
-		if repliesOnly {
+		if phase == xnft.HostInboundScreenFloodReplyDirection {
 			prefix = "ct state established,related ct direction reply "
 		}
 		emit := func(base string) {
