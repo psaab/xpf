@@ -97,8 +97,8 @@ func TestStopIPsecRebindLoopCancelsJoinsNoLateApply(t *testing.T) {
 	})
 	t.Cleanup(cancel)
 
-	// Arm the loop via a failed lease-change rebind.
-	d.reapplyIPsecForLeaseChange(dhcpBoundIPsecConfig())
+	// Arm the loop via a failed lease-change rebind on the live path.
+	d.managementOnlyLeaseRefresh()
 	d.ipsecRebindMu.Lock()
 	active := d.ipsecRebindRetryActive
 	d.ipsecRebindMu.Unlock()

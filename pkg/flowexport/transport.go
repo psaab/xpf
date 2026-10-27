@@ -225,13 +225,8 @@ type collectorConns struct {
 // goroutines. resolveUDPAddrContext performs bounded lookup;
 // dialUDPResolvedContext handles an explicit source/destination pair; and
 // dialUDPContext handles the original destination for no-source collectors,
-// preserving the standard resolver's candidate-list fallback. The legacy
-// dialUDP and resolveUDPAddr seams remain for existing teardown tests.
+// preserving the standard resolver's candidate-list fallback.
 var (
-	dialUDP = func(network string, laddr, raddr *net.UDPAddr) (net.Conn, error) {
-		return net.DialUDP(network, laddr, raddr)
-	}
-	resolveUDPAddr         = net.ResolveUDPAddr
 	dialUDPContext         = dialUDPWithContext
 	dialUDPResolvedContext = dialUDPResolvedWithContext
 	resolveUDPAddrContext  = resolveUDPAddrWithContext
