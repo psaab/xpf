@@ -1162,7 +1162,12 @@ normalizes a bare VIP to its same-family enclosing unit prefix
 (`normalizeBareVRRPVIPs` in `compiler_validate_strict_vrrp_vipprefix.go`,
 run before the uniform gates and again in the tail gates), and the Juniper
 example commits to the same `VRRPGroup` as the CIDR form. The schema leaf
-accepts bare-or-CIDR (`ValidateIPv4CIDROrBare`/`ValidateIPv6CIDROrBare`);
+accepts bare-or-CIDR on packed Keys (`ValidateIPv4CIDROrBare`/
+`ValidateIPv6CIDROrBare`); hierarchical block-list children keep the
+#1319 CIDR requirement via `blockChildValidator`
+(`ValidateIPv4CIDR`/`ValidateIPv6CIDR`), so
+`virtual-address { 10.0.1.1; }` rejects with the missing-/prefix-length
+diagnostic while `virtual-address { 10.0.1.1/24; }` validates (#18049);
 garbage and wrong-family literals still reject there. A bare VIP with NO
 same-family enclosing prefix is strict-rejected by
 `validateVRRPVIPPrefixStrict` (inventing a host prefix would install it
