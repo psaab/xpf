@@ -48,17 +48,16 @@ func RethMAC(clusterID, rgID, rethIndex, nodeID int) net.HardwareAddr {
 // Format: fe80::bf72:CC:RR (clusterID, rgID — no nodeID component).
 // This address sorts lower than EUI-64 link-locals derived from per-node
 // RethMAC, so ndp.Listen and resolveIPv6LinkLocal will prefer it.
+//
+// It delegates to config.StableRethLinkLocal, the single definition in the
+// leaf package that pkg/dataplane/userspace can also reach (#17049).
 func StableRethLinkLocal(clusterID, rgID int) net.IP {
-	return net.IP{0xfe, 0x80, 0, 0, 0, 0, 0, 0,
-		0, 0, 0xbf, 0x72, 0, byte(clusterID), 0, byte(rgID)}
+	return config.StableRethLinkLocal(clusterID, rgID)
 }
 
 // IsStableRethLinkLocal returns true if the address matches the stable RETH
-// link-local pattern (fe80::00:00:bf:72:...).
+// link-local pattern (fe80::00:00:bf:72:...). Delegates to
+// config.IsStableRethLinkLocal (#17049).
 func IsStableRethLinkLocal(ip net.IP) bool {
-	ip = ip.To16()
-	return len(ip) == 16 &&
-		ip[0] == 0xfe && ip[1] == 0x80 &&
-		ip[8] == 0 && ip[9] == 0 &&
-		ip[10] == 0xbf && ip[11] == 0x72
+	return config.IsStableRethLinkLocal(ip)
 }

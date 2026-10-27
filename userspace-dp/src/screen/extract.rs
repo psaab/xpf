@@ -4,8 +4,8 @@
 
 use std::net::IpAddr;
 
-use crate::afxdp::frame::{IPV6_GENERIC_EXT_HEADERS, ipv6_ext_header_is_traversable};
 use super::packet::{PROTO_TCP, ScreenPacketInfo, ScreenParseError};
+use crate::afxdp::frame::{ExtChainOutcome, walk_ipv6_ext_chain};
 
 /// Extract screen-relevant fields from raw packet bytes and metadata.
 /// This avoids full packet parsing — just reads the fields needed for checks.
@@ -40,16 +40,15 @@ use super::packet::{PROTO_TCP, ScreenPacketInfo, ScreenParseError};
 /// #4167's fail-closed contract for the option region and matches vSRX,
 /// which drops malformed IP options / source-route regardless of order.
 ///
-/// #3120: the IPv6 walk now CONTINUES past the Fragment header for a
+/// #3120: the IPv6 walk CONTINUES past the Fragment header for a
 /// FIRST fragment (fragment offset == 0) instead of stopping at it, so a
 /// `Fragment → Destination-Options → TCP` chain (RFC 8200 permits an
 /// extension header after the fragment header) still reaches the real L4
 /// header and exposes the TCP seq/ack/flags/MSS to the TCP-flag screens
 /// and the SYN-cookie flood challenge. A NON-FIRST fragment (offset > 0)
-/// genuinely carries no L4 header in this packet, so the walk still stops
-/// there (the #2344/#3064 flowless handling). The continuation stays
-/// bounded by the `for _ in 0..8` extension-header cap and the
-/// top-of-loop `offset > frame.len()` fail-closed check (#2361).
+/// genuinely carries no L4 header in this packet, so the walk stops
+/// there (the #2344/#3064 flowless handling). The continuation is the
+/// shared walker's, bounded by `MAX_IPV6_EXT_HEADERS` (#17106).
 /// The protocol value the SHIM substitutes for a non-first fragment, which has
 /// no L4 header to read a real protocol from (#9114).
 ///
@@ -72,19 +71,9 @@ pub(crate) fn extract_screen_info(
     dst_port: u16,
     l3_offset: usize,
 ) -> Result<ScreenPacketInfo, ScreenParseError> {
-    // #10729 X2-F6: a v6 chain sighting AH screens as AH (proto 51, no L4),
-    // symmetric with v4 where AH is terminal. Without this the inner TCP
-    // tuple/flags/seq would feed port/scan/flood screens exactly like
-    // cleartext — the same alias the session/policy path just closed.
-    let (protocol, tcp_flags, src_port, dst_port) = if crate::afxdp::frame::ipv6_ah_sighted(
-        frame,
-        addr_family,
-        l3_offset,
-    ) {
-        (crate::ip_proto::PROTO_AH, 0, 0, 0)
-    } else {
-        (protocol, tcp_flags, src_port, dst_port)
-    };
+    // #10729 X2-F6 / #17106: a v6 chain sighting AH screens as AH (proto
+    // 51, no L4), symmetric with v4 where AH is terminal. Applied below
+    // from the single shared walk's `ah_present`, not a second walk.
     let mut info = ScreenPacketInfo {
         addr_family,
         protocol,
@@ -309,43 +298,16 @@ pub(crate) fn extract_screen_info(
         }
         tcp_offset = Some(l3_offset + ihl_bytes);
     } else if addr_family == libc::AF_INET6 as u8 {
-        // IPv6: walk the extension header chain looking for
-        // NEXTHDR_FRAGMENT (44). Fixed IPv6 base header is 40 bytes.
+        // IPv6: ONE shared walk (#17106). Fixed IPv6 base header is 40 bytes.
         //
-        // #6885: the bound below is `0..8` ITERATIONS, and one iteration is
-        // spent on the terminal (the arm that sets `tcp_offset` and breaks),
-        // so this walk resolves chains of **0..=7 extension headers** and
-        // refuses 8 or more. Measured, not asserted:
+        // #6885: the shared walk resolves chains of 0..=7 extension headers
+        // and reports `OverLimit` at 8 or more. Measured, not asserted:
         // `screen_ext_header_depth_agrees_with_the_forwarding_walker_6885`
         // drives chains of 0..=10 headers through this extractor AND through
         // `walk_ipv6_ext_chain` and requires the two to agree at every length.
-        //
-        // That depth is shared by all three IPv6 ext-header walkers in the
-        // tree, which reach it by DIFFERENT mechanisms and therefore carry
-        // three different numbers — which is why the number alone was never
-        // safe to state here:
-        //
-        //   this extractor            `0..8` iterations, terminal costs one
-        //   `walk_ipv6_ext_chain`     MAX_IPV6_EXT_HEADERS = 8, ditto, and
-        //                             folds exhaustion into `OverLimit`
-        //   the AF_XDP shim           MAX_EXT_HDRS = 7, exits by EXHAUSTION
-        //                             carrying the next-header, so it needs
-        //                             no terminal iteration
-        //
         // The shim's parity condition is stated once, authoritatively, at
         // `userspace-xdp/src/ipv6_ext_walk.rs` (`MAX_EXT_HDRS ==
         // MAX_IPV6_EXT_HEADERS - 1`); #4555 moved it from 6 to 7 to reach it.
-        // #9901 (F-072): the DEPTH still differs by mechanism, but the
-        // TRAVERSED SET no longer does — the generic arm below guards on the
-        // shared `IPV6_GENERIC_EXT_HEADERS` const, the same source the
-        // forwarding verdict delegates to.
-        //
-        // The comment this replaces read "We bound the walk to
-        // MAX_EXT_HDRS=8 like the BPF parser", and both halves were false: no
-        // constant named `MAX_EXT_HDRS` has ever been 8 (it is 7 in the live
-        // shim and 6 in the retired BPF header), and the BPF parser bounded
-        // at 6 — so it was never in parity with this walk at all. The parity
-        // is real; the number and the peer named for it were not.
         //
         // FAIL-CLOSED (#2146): every place the walk runs out of bytes
         // (the base header is short, or an extension header's declared
@@ -356,6 +318,16 @@ pub(crate) fn extract_screen_info(
         // screen. The legacy BPF `parse_ipv6hdr` returned -1 (drop)
         // on the same condition; with the BPF screen path retired
         // (#1373/#1476) the extractor is the only enforcement point.
+        //
+        // OverLimit decision (#17106, explicit): the old private walk fell
+        // out of its `0..8` loop and returned `Ok` with `tcp_offset = None`
+        // on an 8+ chain. The shared walk reports `OverLimit` for the same
+        // chain, and the forwarding path already fails closed on it
+        // (`frame_l4_offset` -> None, `ipv6_ext_chain_over_limit` -> drop).
+        // The screen now maps `OverLimit` to `Err(TruncatedIpv6ExtChain)`
+        // ("ip-malformed") as well: an uninspectable chain must not pass
+        // unscreened merely because it is long rather than short. The
+        // #6885 depth cell is updated to pin this Err explicitly.
         if l3_offset + 40 > frame.len() {
             return Err(ScreenParseError::TruncatedIpv6ExtChain);
         }
@@ -365,238 +337,72 @@ pub(crate) fn extract_screen_info(
         // it with `frag_data_off` to size a fragment's contribution to
         // the reassembled datagram.
         info.ip_payload_len = u16::from_be_bytes([frame[l3_offset + 4], frame[l3_offset + 5]]);
-        const NEXTHDR_HOP: u8 = 0;
-        const NEXTHDR_ROUTING: u8 = 43;
-        const NEXTHDR_FRAGMENT: u8 = 44;
-        const NEXTHDR_DEST: u8 = 60;
-        const NEXTHDR_AUTH: u8 = 51;
-        // #4517: the remaining IANA-assigned IPv6 extension headers that
-        // share the generic length-prefixed layout (byte 0 = next header,
-        // byte 1 = HdrExtLen in 8-octet units excluding the first 8) —
-        // Mobility (135, RFC 6275 §6.1), HIP (139, RFC 7401 §5.1), Shim6
-        // (140, RFC 5533 §5.1), and the two experimental/testing values
-        // (253/254, RFC 3692 / RFC 4727). Before #4517 these fell to the
-        // terminal `_ => break` arm, so a chain such as
-        // `HOP → MOBILITY → FRAGMENT → TCP(SYN)` STOPPED at the Mobility
-        // header: `is_fragment`/`is_first_fragment` stayed false and the
-        // SYN was never reached, so the `syn-frag`/teardrop/ping-of-death
-        // fragment screens could not fire — an ext-header IDS evasion. ESP
-        // (50) is deliberately NOT walked: its payload is encrypted and the
-        // inner next-header is unreadable, so stopping there is correct.
-        const NEXTHDR_MOBILITY: u8 = 135;
-        const NEXTHDR_HIP: u8 = 139;
-        const NEXTHDR_SHIM6: u8 = 140;
-        const NEXTHDR_EXP1: u8 = 253;
-        const NEXTHDR_EXP2: u8 = 254;
-        let mut nexthdr = frame[l3_offset + 6];
-        let mut offset = l3_offset + 40;
-        for _ in 0..8 {
-            // FAIL-CLOSED (#2146/#2189): an intermediate extension header
-            // can advance `offset` past the captured frame using its own
-            // DECLARED length (HOP/ROUTING/DEST `hdr_ext_len`, AUTH
-            // `payload_len`). The terminal arms below (`NEXTHDR_FRAGMENT`,
-            // `PROTO_TCP`, `_`) read or trust `offset`, so re-validate it
-            // at the TOP of every iteration before any arm runs. Without
-            // this, a base NextHdr=HOP-BY-HOP with HdrExtLen=200 jumps
-            // `offset` far past `frame.len()`, then an inner NextHdr=TCP
-            // hits `PROTO_TCP`, sets `tcp_offset=Some(offset)` and breaks
-            // with `Ok{is_first_fragment:false}` — a SYN bypasses the
-            // `syn-frag` screen (the IDS evasion #2146 set out to close).
-            if offset > frame.len() {
+        let walk = walk_ipv6_ext_chain(frame, l3_offset);
+        // Outcome mapping first: Truncated and OverLimit fail closed
+        // before any sighting is folded, so a truncated second Fragment
+        // header reports Truncated (not Multiple), matching #14325's
+        // "checked after the truncation guard" ordering.
+        match walk.outcome {
+            ExtChainOutcome::Truncated | ExtChainOutcome::OverLimit => {
                 return Err(ScreenParseError::TruncatedIpv6ExtChain);
             }
-            // #9901 (F-072): the local arm decision must agree with the SHARED
-            // traversed-set verdict on every iteration. The generic arm below
-            // guards on the shared const directly; this assert pins the FULL
-            // local set (routing + generic + AH + Fragment, terminally
-            // excluding 59/ESP like the predicate) to it, so editing either
-            // side without the other reds every extractor test in debug builds.
-            // Debug-only by design (compiled out in release — zero release
-            // cost): release correctness rests on the generic arm's direct
-            // guard below, which needs no assert; this pins the REMAINING
-            // literal arms (ROUTING/AH/Fragment) against drift where tests run.
-            debug_assert_eq!(
-                matches!(
-                    nexthdr,
-                    NEXTHDR_ROUTING
-                        | NEXTHDR_HOP
-                        | NEXTHDR_DEST
-                        | NEXTHDR_MOBILITY
-                        | NEXTHDR_HIP
-                        | NEXTHDR_SHIM6
-                        | NEXTHDR_EXP1
-                        | NEXTHDR_EXP2
-                        | NEXTHDR_AUTH
-                        | NEXTHDR_FRAGMENT
-                ),
-                ipv6_ext_header_is_traversable(nexthdr),
-                "#9901: screen extractor arm set drifted from the shared IPv6 \
-                 ext-header verdict",
-            );
-            match nexthdr {
-                NEXTHDR_ROUTING => {
-                    // #2973: an IPv6 Routing Header. Byte at offset+2 is
-                    // the routing type. Type 0 (RH0, the deprecated
-                    // source-route routing header, RFC 5095) and the
-                    // legacy/experimental type 1 are source routing;
-                    // type 2 (Mobile IPv6) and other types are not. We
-                    // need offset+4 to safely read the type byte (the
-                    // generic HOP/DEST arm only needs offset+2). Mirror
-                    // the IPv4 LSRR/SSRR `source-route` screen for parity.
-                    if offset + 4 > frame.len() {
-                        return Err(ScreenParseError::TruncatedIpv6ExtChain);
-                    }
-                    let routing_type = frame[offset + 2];
-                    if routing_type == 0 || routing_type == 1 {
-                        info.saw_ipv6_routing_header = true;
-                    }
-                    nexthdr = frame[offset];
-                    offset += (frame[offset + 1] as usize + 1) * 8;
-                }
-                // #9901 (F-072): the generic length-prefixed set is the SHARED
-                // `IPV6_GENERIC_EXT_HEADERS` const — the same source the
-                // forwarding walker's `ipv6_ext_header_is_traversable` verdict
-                // delegates to — not a second hand-mirrored arm list. ROUTING
-                // (43) is a member of that set but keeps its own arm above
-                // (it additionally checks the routing type for the
-                // `source-route` screen); arm order keeps it there. AH (51)
-                // and Fragment (44) keep their literal arms (distinct advance
-                // math, single values, covered by the debug_assert above).
-                n if IPV6_GENERIC_EXT_HEADERS.contains(&n) => {
-                    if offset + 2 > frame.len() {
-                        return Err(ScreenParseError::TruncatedIpv6ExtChain);
-                    }
-                    nexthdr = frame[offset];
-                    offset += (frame[offset + 1] as usize + 1) * 8;
-                }
-                NEXTHDR_AUTH => {
-                    if offset + 2 > frame.len() {
-                        return Err(ScreenParseError::TruncatedIpv6ExtChain);
-                    }
-                    nexthdr = frame[offset];
-                    offset += (frame[offset + 1] as usize + 2) * 4;
-                }
-                NEXTHDR_FRAGMENT => {
-                    if offset + 8 > frame.len() {
-                        return Err(ScreenParseError::TruncatedIpv6ExtChain);
-                    }
-                    // IPv6 frag_off layout (big-endian u16 at offset+2):
-                    //   offset (13 bits, top) | reserved (2 bits) | M (1 bit, lowest)
-                    // Mirrors BPF #866: MF=0x1, offset=0xFFF8.
-                    let frag_off = u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]);
-                    // #14129: STICKY fragment status across a repeated
-                    // Fragment header chain. Canonical rule mirrors the
-                    // forwarding/tracker doctrines (#10661): a chain
-                    // containing ANY non-ATOMIC Fragment header is a
-                    // fragment, and the FIRST non-ATOMIC sighting governs
-                    // ip_frag_off/frag_data_off. An ATOMIC header (offset 0,
-                    // M 0) is a no-op (RFC 8200 4.5) and must never clear a
-                    // real fragment observed earlier, nor become the
-                    // governing header when a real one follows. Previously
-                    // the second sighting OVERWROTE
-                    // is_fragment/is_first_fragment/ip_frag_off/
-                    // frag_data_off, so [real-first][ATOMIC] reported
-                    // non-fragment and suppressed syn-frag / icmp-fragment
-                    // (and ping-of-death / teardrop sizing) even though a
-                    // real first fragment and terminal L4 bytes were
-                    // present. Keep the first non-ATOMIC sighting's fields;
-                    // ignore ATOMIC sightings entirely when one exists.
-                    //
-                    // #14325: a SECOND non-ATOMIC Fragment header is
-                    // rejected outright instead of downgrading
-                    // is_first_fragment alone. RFC 8200 allows each
-                    // extension-header type at most once, and the #14129
-                    // downgrade left is_first_fragment == false while
-                    // ip_frag_off still reported the first header's
-                    // offset 0, splitting the TCP-flag screens (which
-                    // skip on !is_first_fragment) from the sizing
-                    // screens (which require (ip_frag_off & 0xFFF8) > 0):
-                    // a [Frag(off=0,M=1), Frag(off>0)] packet evaded
-                    // BOTH families. There is no defined screening
-                    // meaning to choose between two non-ATOMIC headers
-                    // -- receivers key reassembly on the first and treat
-                    // the second as payload -- so the chain is malformed
-                    // and fails closed like a truncated chain. Fires on
-                    // the second (or later) non-ATOMIC sighting whatever
-                    // its offset/M: a duplicated first fragment
-                    // ([first][first]) is as RFC-nonconformant and as
-                    // unsized as [first][non-first]. Pure-ATOMIC second
-                    // sightings stay ignored (see above); a lone ATOMIC
-                    // first sighting followed by a real header is still
-                    // governed by the real header (#10661). Checked
-                    // after the truncation guard above, so a truncated
-                    // second header reports TruncatedIpv6ExtChain.
-                    let is_atomic = (frag_off & 0xFFF8) == 0 && (frag_off & 0x1) == 0;
-                    if !is_atomic {
-                        if !info.is_fragment {
-                            info.ip_frag_off = frag_off;
-                            info.is_fragment = true;
-                            info.is_first_fragment =
-                                (frag_off & 0x1) != 0 && (frag_off & 0xFFF8) == 0;
-                            // #2293: payload-region bytes that precede THIS
-                            // (governing) fragment's data.
-                            info.frag_data_off =
-                                ((offset + 8).saturating_sub(l3_offset + 40)) as u16;
-                        } else {
-                            return Err(ScreenParseError::MultipleIpv6FragmentHeaders);
-                        }
-                    }
-                    // #3120: a NON-FIRST fragment (fragment offset > 0)
-                    // genuinely carries no L4 header in THIS packet — the
-                    // TCP header lives in the first fragment — so stopping
-                    // the walk is correct (the downstream gate
-                    // `(!is_fragment || is_first_fragment)` then keeps any
-                    // `tcp_offset` unused for it; see #2344/#3064). But for
-                    // the FIRST fragment (offset == 0) the real L4 header
-                    // DOES follow the extension-header chain, and RFC 8200
-                    // permits another extension header (e.g.
-                    // destination-options) AFTER the fragment header. The
-                    // pre-fix code only checked whether the IMMEDIATELY
-                    // following header was TCP and then unconditionally
-                    // `break`d, so a `frag → dest-opts → TCP` chain left
-                    // `tcp_offset = None` and hid the TCP seq/ack/flags/MSS
-                    // from the TCP-flag screens and the SYN-cookie flood
-                    // challenge — an extension-chain IDS evasion. CONTINUE
-                    // the walk past this fixed 8-byte fragment header (set
-                    // `nexthdr` from the fragment header's own NextHdr field
-                    // and advance `offset` by 8) so the trailing ext-header
-                    // chain is traversed to the real L4 header. The walk
-                    // stays bounded by the enclosing `for _ in 0..8` cap and
-                    // the top-of-loop `offset > frame.len()` fail-closed
-                    // check (#2146/#2189/#2361), so a malicious chain can
-                    // neither loop forever nor over-read.
-                    if (frag_off & 0xFFF8) != 0 {
-                        // Non-first fragment: no L4 header is present here.
-                        //
-                        // #9114: recover the real upper-layer protocol before
-                        // giving up on the walk. The FRAGMENT HEADER's own
-                        // NextHdr field (its byte 0, at `offset`) names the
-                        // protocol this datagram carries, and it is present on
-                        // EVERY fragment including this one — that is the whole
-                        // point of the field. Without this the screens see the
-                        // shim's `PROTO_FRAGMENT_NO_L4` sentinel and
-                        // `check_icmp_fragment` / `icmp-flood` / `udp-flood`,
-                        // all keyed on the real protocol, never fire on the
-                        // packets they exist to police.
-                        //
-                        // `offset + 2` and `offset + 3` were just read for
-                        // `frag_off`, so `offset` is in bounds. Gated on the
-                        // sentinel so a caller that already knew the protocol
-                        // keeps it.
-                        if info.protocol == SHIM_PROTO_FRAGMENT_NO_L4 {
-                            info.protocol = frame[offset];
-                        }
-                        break;
-                    }
-                    nexthdr = frame[offset];
-                    offset += 8;
-                }
-                PROTO_TCP => {
-                    tcp_offset = Some(offset);
-                    break;
-                }
-                _ => break,
+            ExtChainOutcome::L4(off, 6) => {
+                tcp_offset = Some(off);
             }
+            ExtChainOutcome::L4(_, _)
+            | ExtChainOutcome::NoNextHeader
+            | ExtChainOutcome::NonFirstFragment => {}
+        }
+        // #14325: a SECOND readable non-ATOMIC Fragment header is rejected
+        // outright. RFC 8200 allows each extension-header type at most
+        // once, and there is no defined screening meaning to choose
+        // between two non-ATOMIC headers — receivers key reassembly on
+        // the first and treat the second as payload. Pure-ATOMIC repeats
+        // stay ignored; a lone ATOMIC followed by a real header is still
+        // governed by the real header (#10661).
+        if walk.second_non_atomic_seen {
+            return Err(ScreenParseError::MultipleIpv6FragmentHeaders);
+        }
+        info.saw_ipv6_routing_header = walk.rh_source_route_seen;
+        // #14129/#10661: the FIRST readable non-ATOMIC sighting governs.
+        // An ATOMIC header (offset 0, M 0) is a no-op (RFC 8200 4.5) and
+        // never sets these fields, nor clears a real sighting.
+        if let Some(frag) = walk.first_non_atomic_fragment {
+            // Readable by construction (`first_non_atomic_fragment` only
+            // records readable headers); the fallback keeps this total.
+            let frag_off = frag
+                .bytes
+                .map(|b| u16::from_be_bytes([b[2], b[3]]))
+                .unwrap_or(0);
+            info.ip_frag_off = frag_off;
+            info.is_fragment = true;
+            info.is_first_fragment = (frag_off & 0x1) != 0 && (frag_off & 0xFFF8) == 0;
+            // #2293: payload-region bytes that precede THIS (governing)
+            // fragment's data.
+            info.frag_data_off = ((frag.header_offset + 8).saturating_sub(l3_offset + 40)) as u16;
+            // #9114: a NON-FIRST fragment carries no L4 header here, so
+            // recover the real protocol from the governing Fragment
+            // header's own NextHdr byte (present on every fragment).
+            // Gated on the sentinel so a caller that already knew the
+            // protocol keeps it. Only the governing (first non-ATOMIC)
+            // header names it — for [ATOMIC][real-non-first] that is the
+            // real header, exactly as the old walk's break did.
+            if (frag_off & 0xFFF8) != 0 && info.protocol == SHIM_PROTO_FRAGMENT_NO_L4 {
+                if let Some(b) = frag.bytes {
+                    info.protocol = b[0];
+                }
+            }
+        }
+        // #10729 X2-F6: AH sighted anywhere readable screens as AH
+        // (proto 51, no L4) — applied after the fragment protocol
+        // recovery above so AH wins exactly as the old pre-walk did
+        // (it rewrote protocol/flags/ports before any fragment logic).
+        if walk.ah_present {
+            info.protocol = crate::ip_proto::PROTO_AH;
+            info.tcp_flags = 0;
+            info.src_port = 0;
+            info.dst_port = 0;
+            tcp_offset = None;
         }
     }
 

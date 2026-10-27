@@ -472,8 +472,8 @@ func TestThisBuildAdvertisesFenceAckCapability7147(t *testing.T) {
 func TestDisconnectClearsFenceAckCapability7147(t *testing.T) {
 	t.Parallel()
 	src := readClusterSource(t, "sync_conn.go")
-	if !sourceContainsFlat(src, "s.peerCapabilityFlags.Store(0)") {
-		t.Error("the full-disconnect path does not clear peerCapabilityFlags. A " +
+	if !sourceContainsFlat(src, "s.retirePeerIncarnationLocked(nil)") {
+		t.Error("the full-disconnect path does not retire the peer incarnation. A " +
 			"downgraded peer that reconnects would inherit the previous incarnation's " +
 			"fence-ack bit, and every takeover against it would wait out the full " +
 			"timeout for an ack it can never send.")
@@ -483,9 +483,10 @@ func TestDisconnectClearsFenceAckCapability7147(t *testing.T) {
 	// TestFenceSurvivesIdleFabricFlap_9915 /
 	// TestFenceAbortsWhenItsOwnFabricDrops_9915 (source grep cannot tell a
 	// scoped release from abort-all).
-	if !sourceContainsFlat(src, "s.peerSnaps.peerSnapshotProtocol.Store(0)") {
+	helper := readClusterSource(t, "sync_peer_incarnation.go")
+	if !sourceContainsFlat(helper, "s.peerSnaps.peerSnapshotProtocol.Store(snapshotProtocol)") {
 		t.Error("the #6650 clear these are anchored beside has moved; re-verify both " +
-			"#7147 clears are still on the FULL-disconnect path")
+			"#7147 clears are still on the shared retirement path (#17097)")
 	}
 }
 

@@ -2,16 +2,11 @@ package daemon
 
 import (
 	"errors"
-	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
-	"github.com/psaab/xpf/pkg/fsatomic"
+	"github.com/psaab/xpf/pkg/factoryreset"
 )
 
 // sweepHelperStateVerified removes the helper state file at path plus
@@ -36,76 +31,22 @@ import (
 // Symlinked or hardlinked canonicals fail closed before unlinking
 // (FactoryResetHardlinkError with the inode scan), retry-persistent.
 func sweepHelperStateVerified(path string) error {
-	// Reserved alias FIRST: a smuggled config named a gate or identity
-	// file. The missing-parent fast path below must not report clean
-	// over it — the daemon post-verify flips the handoff clean on a
-	// nil sweep alone, so the reserved failure surfaces here even
-	// when there is no directory to sweep beside it. Never unlink the
-	// reserved file; the exact-shape temps beside it are still swept
-	// below when the parent exists.
-	skipCanonical := config.HelperStatePathTouchesReserved(path)
-	if skipCanonical {
-		slog.Warn("reset handoff: helper path aliases reserved state; skipping canonical removal, sweeping temps only", "path", path)
-	}
-	var errs []error
-	if skipCanonical {
-		errs = append(errs, fmt.Errorf("reset handoff: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, restart xpfd, author a clean non-reserved system dataplane state-file via commit-confirmed, and rerun the reset", path))
-	}
-	// A missing state directory means no helper state was ever written
-	// here: nothing to remove, verify, or sync. A reserved alias still
-	// fails via the error above (joined, not nil).
-	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
-		return errors.Join(errs...)
-	}
-	var canonicalErr error
-	if !skipCanonical {
-		info, lerr := os.Lstat(path)
-		switch {
-		case lerr == nil && info.Mode()&os.ModeSymlink != 0:
-			canonicalErr = fmt.Errorf("refusing to sweep symlinked helper state %s: link target is out of erase scope", path)
-		case lerr != nil && !os.IsNotExist(lerr):
-			canonicalErr = fmt.Errorf("inspect helper state %s: %w", path, lerr)
-		case lerr == nil:
-			hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
-			switch {
-			case herr != nil:
-				canonicalErr = fmt.Errorf("inspect hard links for helper state %s: %w", path, herr)
-			case len(hardlinks) != 0:
-				canonicalErr = fmt.Errorf("refusing to erase hard-linked helper state %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
-			default:
-				if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
-					canonicalErr = fmt.Errorf("remove helper state file %s: %w", path, rerr)
-				}
-			}
-		}
-		if canonicalErr != nil {
-			errs = append(errs, canonicalErr)
-		}
-	}
-	live, serr := dpuserspace.SweepStaleStateTempsIncludingLegacy(path)
-	if serr != nil {
-		errs = append(errs, serr)
-	}
-	if len(live) != 0 {
-		errs = append(errs, fmt.Errorf("live helper writer temps present for %s: %v", path, live))
-	}
-	if err := fsatomic.SyncDir(filepath.Dir(path)); err != nil {
-		errs = append(errs, fmt.Errorf("sync helper state directory %s: %w", filepath.Dir(path), err))
-	}
-	if !skipCanonical && canonicalErr == nil {
-		if _, err := os.Lstat(path); err == nil {
-			errs = append(errs, fmt.Errorf("helper state %s still present after sweep", path))
-		} else if !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("inspect helper state %s: %w", path, err))
-		}
-	}
-	if dead, live, verr := dpuserspace.ListStaleStateTempsIncludingLegacy(path); verr != nil {
-		errs = append(errs, verr)
-	} else if len(dead) != 0 || len(live) != 0 {
-		errs = append(errs, fmt.Errorf("helper state temps remain for %s: dead=%v live=%v", path, dead, live))
-	}
-	return errors.Join(errs...)
+	return factoryreset.SweepHelperState(path, factoryreset.SweepOpts{
+		ErrPrefix:        "reset handoff: ",
+		ReservedRecovery: daemonReservedRecovery,
+	})
 }
+
+// daemonReservedRecovery is the daemon-handoff reserved-alias recovery
+// sentence shared by the sweep and verify spellings (#17087): no commit
+// on the still-running daemon can converge (in-band paths are refused
+// while dirty; the wipe removed .configdb and the stale Store cannot
+// persist), so the operator verifies the reserved file, deletes the
+// flag, restarts xpfd (fresh Store/DB), authors a clean non-reserved
+// state-file via commit-confirmed (plain commit refuses in bootstrap),
+// and reruns the reset (the rerun records the fixed path); then reboot
+// as the clean flag requires.
+const daemonReservedRecovery = "verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, restart xpfd, author a clean non-reserved system dataplane state-file via commit-confirmed, and rerun the reset"
 
 // legacyHelperPathRecovery tells the operator how to recover from a
 // pathless handoff flag. Every NORMAL-path writer records a path (the
@@ -131,40 +72,44 @@ const legacyHelperPathRecovery = "reset handoff flag records no helper path (nor
 // via commit-confirmed, and reruns the reset. Temp siblings are
 // still checked and joined below.
 func verifyHelperStateErased(path string) error {
-	var errs []error
-	if config.HelperStatePathTouchesReserved(path) {
-		errs = append(errs, fmt.Errorf("helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, restart xpfd, author a clean non-reserved system dataplane state-file via commit-confirmed, and rerun the reset", path))
-	} else if _, err := os.Lstat(path); err == nil {
-		errs = append(errs, fmt.Errorf("helper state %s present", path))
-	} else if !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("inspect helper state %s: %w", path, err))
+	return factoryreset.VerifyHelperStateErased(path, factoryreset.SweepOpts{
+		ReservedRecovery: daemonReservedRecovery,
+	})
+}
+
+var resetPersistentNatGenerationStatePath = func() string {
+	for _, p := range factoryreset.ResetStatePaths("") {
+		return p
 	}
-	if dead, live, verr := dpuserspace.ListStaleStateTempsIncludingLegacy(path); verr != nil {
-		errs = append(errs, verr)
-	} else if len(dead) != 0 || len(live) != 0 {
-		errs = append(errs, fmt.Errorf("helper state temps present for %s: dead=%v live=%v", path, dead, live))
+	return ""
+}
+
+func verifyResetHelperStateErased(path string) error {
+	var errs []error
+	for _, p := range resetStatePathsFor(path) {
+		errs = append(errs, verifyHelperStateErased(p))
 	}
 	return errors.Join(errs...)
 }
 
-var resetPersistentNatGenerationStatePath = dpuserspace.PersistentNatLeaseGenerationStatePath
-
-func verifyResetHelperStateErased(path string) error {
-	err := verifyHelperStateErased(path)
-	generationPath := resetPersistentNatGenerationStatePath()
-	if generationPath != "" && generationPath != path {
-		err = errors.Join(err, verifyHelperStateErased(generationPath))
+func sweepResetHelperStateVerified(path string) error {
+	var errs []error
+	for _, p := range resetStatePathsFor(path) {
+		errs = append(errs, sweepHelperStateVerified(p))
 	}
-	return err
+	return errors.Join(errs...)
 }
 
-func sweepResetHelperStateVerified(path string) error {
-	err := sweepHelperStateVerified(path)
-	generationPath := resetPersistentNatGenerationStatePath()
-	if generationPath != "" && generationPath != path {
-		err = errors.Join(err, sweepHelperStateVerified(generationPath))
+// resetStatePathsFor is factoryreset.ResetStatePaths with the daemon's
+// generation-path seam substituted: TestMain and the generation test
+// redirect resetPersistentNatGenerationStatePath, while the shared
+// helper reads the factoryreset seam.
+func resetStatePathsFor(helperPath string) []string {
+	paths := []string{helperPath}
+	if generationPath := resetPersistentNatGenerationStatePath(); generationPath != "" && generationPath != helperPath {
+		paths = append(paths, generationPath)
 	}
-	return err
+	return paths
 }
 
 // handoffRepairClasses maps a dirty reason to the residue classes it

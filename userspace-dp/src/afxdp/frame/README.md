@@ -367,15 +367,16 @@ inspect or rewrite a packet sitting in a UMEM frame.
   (`icmp_embed/parse.rs::parse_embedded_v6_l4`, #1838) FOLD that one walk,
   so the #4517 ext-header set, the AH `(len + 2) * 4` arithmetic, and the
   fail-closed-at-the-bound posture (#2292/#4435/#4533) can never drift
-  between copies again. Two walkers deliberately keep their own loops:
-  `screen/extract.rs` (#2189 — it extracts screen-specific state into its
-  parse struct and fails with a screen-specific `Err`, a different
-  contract than L4 resolution) and `nat64.rs::nat64_v6_translation_ineligible`
-  (#5625 — per-type translation-eligibility verdicts incl. the Routing
-  Segments-Left read, not an L4-resolution walk). All of them share the
-  `MAX_IPV6_EXT_HEADERS` (8) bound AND fail CLOSED when the chain declares a
-  traversable 8th header: the shared walk yields `OverLimit` (its wrappers
-  return `None`/`false`), and `screen/extract.rs` returns `Err` (drop, #2189).
+  between copies again. One walker deliberately keeps its own loop:
+  `nat64.rs::nat64_v6_translation_ineligible` (#5625 — per-type
+  translation-eligibility verdicts incl. the Routing Segments-Left read,
+  not an L4-resolution walk). Since #17106 `screen/extract.rs` folds the
+  shared walk too (recording `rh_source_route_seen` /
+  `second_non_atomic_seen`), keeping only its screen-specific `Err`
+  mapping. All of them share the `MAX_IPV6_EXT_HEADERS` (8) bound AND
+  fail CLOSED when the chain declares a traversable 8th header: the
+  shared walk yields `OverLimit` (its wrappers return `None`/`false`),
+  and `screen/extract.rs` maps it to `Err` (drop, #17106).
   #10665 makes that over-limit verdict take precedence when the 8th header's
   bytes are themselves truncated; truncation before that declaration remains
   `Truncated`. The CANONICAL CONTRACT they MUST agree on:
@@ -419,9 +420,10 @@ inspect or rewrite a packet sitting in a UMEM frame.
     the SYN and forwarding never saw the flow (an ext-header IDS evasion).
     Since #6435 the forwarding/fragment/NAT64/embedded-ICMP walkers share the
     ONE `walk_ipv6_ext_chain` loop, so they recognize the same set by
-    construction; the two deliberate keep-outs (`screen/extract.rs`,
-    `nat64_v6_translation_ineligible`) MUST keep the SAME set or the screen,
-    meta, forwarding, and NAT64 paths disagree on the same packet.
+    construction; since #17106 the screen folds the same walk too. The one
+    deliberate keep-out (`nat64_v6_translation_ineligible`) MUST keep the
+    SAME set or the meta, forwarding, and NAT64 paths disagree on the same
+    packet.
     **Repeated Fragment-header status (#10661, #14116):** the XDP shim judges every
     sighting before its non-first stop, so the shared walk carries `non_first_fragment_offset_seen`;
     forwarding and NAT64 non-first guards use that verdict. Since #14116 the
@@ -432,11 +434,10 @@ inspect or rewrite a packet sitting in a UMEM frame.
     The overlap tracker keys range data to `first_non_atomic_fragment`, ignoring
     leading ATOMIC headers and returning Unreadable if any declared Fragment
     header is truncated. NAT64 retains first-declared data for an all-ATOMIC
-    chain but uses the first non-ATOMIC header when one exists. Screens keep
-    their own ordered extraction: `[real-first][ATOMIC]` may report
-    non-fragment while the tracker records a range and L4 parsing remains safe.
-    The #10661 cells pin this deliberate residual instead of claiming every
-    consumer has identical wire-state behavior.
+    chain but uses the first non-ATOMIC header when one exists. Since #17106
+    the screens fold the same sightings: `[real-first][ATOMIC]` reports the
+    real first fragment (sticky first non-ATOMIC), and a second non-ATOMIC
+    sighting (`second_non_atomic_seen`) rejects as `ip-malformed` (#14325).
 
   PR-1 of #2150 fixed the three parsers that DISAGREED on a single 0x88a8
   tag / ext-headered NDP (`parse_eth_offsets` treated 0x88a8 as the inner

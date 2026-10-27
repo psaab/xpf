@@ -102,6 +102,53 @@ func normalizeAdvertIntervalMS9914(ms int) int {
 	return (ms / 10) * 10
 }
 
+// effectivePriority is the single source of truth for the RFC 5798
+// track-demoted effective priority (#17145, R4-Q36-02; docs/engineering-style.md
+// first principle 3). Priority 0 (resignation sentinel) and
+// addressOwnerPriority (255) pass through unchanged; otherwise, while the
+// tracked interface is down, cost is subtracted and the result clamped to
+// [1,254] so tracking can never fabricate the priority-0 sentinel. Pure:
+// lock-held callers pass fields read under vi.mu, RLock-snapshot callers
+// pass their locals; nobody re-types this arithmetic (#6230).
+func effectivePriority(prio, cost int, trackDown bool, trackIface string) int {
+	if prio == 0 || prio == addressOwnerPriority {
+		return prio
+	}
+	if trackDown && trackIface != "" {
+		prio -= cost
+		if prio < 1 {
+			prio = 1
+		} else if prio > 254 {
+			prio = 254
+		}
+	}
+	return prio
+}
+
+// skewFor is RFC 5798 §6.1 Skew_Time for an effective priority:
+// 256-minus-priority over 256 of Master_Adver_Interval. Single source
+// of truth for the skew term (#17145).
+func skewFor(advert time.Duration, effPrio int) time.Duration {
+	return time.Duration(256-effPrio) * advert / 256
+}
+
+// masterDownFor is RFC 5798 §6.1 Master_Down_Interval for an effective
+// advertisement interval and effective priority:
+// (3 * Master_Adver_Interval) + Skew_Time. Single source of truth (#17145).
+func masterDownFor(advert time.Duration, effPrio int) time.Duration {
+	return 3*advert + skewFor(advert, effPrio)
+}
+
+// masterDownLocked returns Master_Down_Interval from cfg/tracking fields.
+// Caller MUST hold vi.mu (read or write); it never takes the lock itself
+// (#6230). Master_Adver_Interval is the interval advertised by the current
+// master (learned, §6.4.2), falling back to the local interval before any
+// advert has been heard.
+func (vi *vrrpInstance) masterDownLocked() time.Duration {
+	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
+	return masterDownFor(advert, vi.effectivePriorityLocked())
+}
+
 // effectiveAdvertInterval picks the advertisement interval that drives the
 // Master_Down_Interval / Skew_Time computation. Per RFC 5798 §6.1/§6.4.2 a
 // BACKUP times the master out on the interval the MASTER advertises
@@ -137,7 +184,7 @@ func effectiveAdvertInterval(localMS int, learned time.Duration) time.Duration {
 // services resignCh (normally the next iteration; the stepBackup
 // resign arm applies priority 0, instance.go stepBackup arm) and
 // the MASTER path applies it in becomeBackup. Note the direction:
-// skew is (256-priority)/256 of an advert interval, so applying 0
+// skew is 256-minus-priority over 256 of an advert interval, so applying 0
 // would MAXIMIZE this backup's master-down delay (least
 // competitive — the surrender-consistent posture); the retained
 // pre-resign skew is the aggressive residue, bounded only by
@@ -150,30 +197,18 @@ func (vi *vrrpInstance) masterDownInterval() time.Duration {
 	learned := vi.masterAdverInterval
 	vi.mu.RUnlock()
 	advert := effectiveAdvertInterval(localMS, learned)
-	skew := time.Duration(256-vi.getPriority()) * advert / 256
-	return 3*advert + skew
+	return masterDownFor(advert, vi.getPriority())
 }
 
-// skewTime returns RFC 5798 §6.1 Skew_Time for the local effective
-// priority and the effective (learned-or-local) advertisement interval:
-// Skew_Time = ((256 - priority) * Master_Adver_Interval) / 256. Caller
-// MUST hold vi.mu (read or write); it never takes the lock itself. The
-// effective priority is computed exactly as armMasterDownTimer does
-// (0/255 pass through; track-down subtracts TrackPriorityCost clamped
-// to [1,254]) so the priority-0 resign arm in handleBackupRx agrees
-// with masterDownInterval's skew leg.
+// skewTimeLocked returns RFC 5798 §6.1 Skew_Time for the local effective
+// priority and the effective (learned-or-local) advertisement interval.
+// Caller MUST hold vi.mu (read or write); it never takes the lock itself.
+// The effective priority comes from effectivePriorityLocked (#17145), so
+// the priority-0 resign arm in handleBackupRx agrees with
+// masterDownInterval's skew leg.
 func (vi *vrrpInstance) skewTimeLocked() time.Duration {
 	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
-	p := vi.cfg.Priority
-	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
-		p -= vi.cfg.TrackPriorityCost
-		if p < 1 {
-			p = 1
-		} else if p > 254 {
-			p = 254
-		}
-	}
-	return time.Duration(256-p) * advert / 256
+	return skewFor(advert, vi.effectivePriorityLocked())
 }
 
 // stopAndDrainTimer stops t and drains a pending fire from its channel so a

@@ -82,7 +82,7 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 				// here (before the heartbeat-ack teardown, so the tick
 				// that closes the connection still expires exactly once).
 				s.expireBulkWindowIfStale()
-				if s.peerHeartbeatAckEver.Load() {
+				if s.peerIncarnationState().peerHeartbeatAckEver.Load() {
 					missedHeartbeats++
 				}
 				if missedHeartbeats >= 2 {
@@ -253,7 +253,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgPersistentNatLeaseScoped:
 		return s.handlePersistentNatLeaseScoped(conn, payload)
 	case syncMsgPersistentNatLeaseGeneration, syncMsgPersistentNatLeaseDeterministic,
-		syncMsgPersistentNatLeaseProvenance, syncMsgPersistentNatLeaseDeterministicProvenance:
+		syncMsgPersistentNatLeaseProvenance, syncMsgPersistentNatLeaseDeterministicProvenance,
+		syncMsgPersistentNatLeaseTypedPool, syncMsgPersistentNatLeaseDeterministicTypedPool:
 		return s.handlePersistentNatLeaseGeneration(conn, msgType, payload)
 	case syncMsgDHCPLeaseV4:
 		return s.handleDHCPLeaseV4(conn, payload)

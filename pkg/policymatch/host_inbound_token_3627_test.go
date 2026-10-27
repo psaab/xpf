@@ -40,17 +40,17 @@ func TestMatchReportsHostInboundAdmittingToken(t *testing.T) {
 	}{
 		{
 			name:     "ssh admits -> names the ssh system-service",
-			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstPort: 22, DstIP: net.ParseIP("192.0.2.1")},
+			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstPort: PortPtr(22), DstIP: net.ParseIP("192.0.2.1")},
 			wantStat: dpuserspace.HostInboundTokenAdmit, wantTok: "ssh", wantKind: "system-services",
 		},
 		{
 			name:     "bgp admits -> names the bgp protocol",
-			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstPort: 179, DstIP: net.ParseIP("192.0.2.1")},
+			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstPort: PortPtr(179), DstIP: net.ParseIP("192.0.2.1")},
 			wantStat: dpuserspace.HostInboundTokenAdmit, wantTok: "bgp", wantKind: "protocols",
 		},
 		{
 			name:     "telnet denied -> host-inbound default-deny",
-			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstPort: 23, DstIP: net.ParseIP("192.0.2.1")},
+			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstPort: PortPtr(23), DstIP: net.ParseIP("192.0.2.1")},
 			wantStat: dpuserspace.HostInboundDenied,
 		},
 		{
@@ -61,6 +61,18 @@ func TestMatchReportsHostInboundAdmittingToken(t *testing.T) {
 		{
 			name:     "no protocol -> indeterminate",
 			q:        Query{FromZone: "edge", ToZone: "junos-host", DstIP: net.ParseIP("192.0.2.1")},
+			wantStat: dpuserspace.HostInboundIndeterminate,
+		},
+		{
+			// #17081: a PRESENT literal dst port 0 is decided, not
+			// indeterminate - no host-inbound token admits port 0.
+			name:     "literal dst port 0 -> denied, not indeterminate",
+			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstPort: PortPtr(0), DstIP: net.ParseIP("192.0.2.1")},
+			wantStat: dpuserspace.HostInboundDenied,
+		},
+		{
+			name:     "omitted dst port -> indeterminate (control)",
+			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstIP: net.ParseIP("192.0.2.1")},
 			wantStat: dpuserspace.HostInboundIndeterminate,
 		},
 	}
@@ -96,7 +108,7 @@ func TestMatchHostInboundOnlyOnHostPath(t *testing.T) {
 	// Add a second zone so a transit pair exists.
 	cfg.Security.Zones["core"] = &config.ZoneConfig{Name: "core"}
 
-	res := Match(cfg, Query{FromZone: "edge", ToZone: "core", Protocol: "tcp", DstPort: 22})
+	res := Match(cfg, Query{FromZone: "edge", ToZone: "core", Protocol: "tcp", DstPort: PortPtr(22)})
 	if res.HostInbound != nil {
 		t.Errorf("transit query carried a HostInbound admission (%+v); it must be host-path only", *res.HostInbound)
 	}

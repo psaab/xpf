@@ -390,7 +390,8 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 	// commits) and seed it with current probe results.
 	d.reconcileIPMon(cfg)
 
-	// 18. Update chassis cluster interface monitors
+	// 18. Refresh the DISPLAY sample of interface-monitor link state
+	// (#17132: display only; election debt is owned by pkg/cluster.Monitor).
 	if d.routing != nil && cfg.Chassis.Cluster != nil &&
 		len(cfg.Chassis.Cluster.RedundancyGroups) > 0 {
 		d.routing.ApplyInterfaceMonitors(cfg.Chassis.Cluster.RedundancyGroups)
@@ -418,15 +419,13 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 		// it. The call is a no-op when the timing is unchanged or no heartbeat
 		// is running, so an ordinary commit costs one lock and two comparisons.
 		d.cluster.ApplyCommittedHeartbeatTiming()
-		// Feed interface monitor statuses into cluster weight calculation
-		if d.routing != nil {
-			monStatuses := d.routing.InterfaceMonitorStatuses()
-			for rgID, statuses := range monStatuses {
-				for _, st := range statuses {
-					d.cluster.SetMonitorWeight(rgID, st.Interface, !st.Up, st.Weight)
-				}
-			}
-		}
+		// #17132: NO interface-monitor feed here. pkg/cluster.Monitor is the
+		// only producer of interface-monitor debt; UpdateConfig above runs
+		// one immediate interface-only dampened poll (Monitor.PollNow —
+		// no ICMP sweep on the commit path) so this commit is reflected
+		// without a raw per-apply sample that could strand or clear
+		// dampened debt. d.routing.ApplyInterfaceMonitors (step 18)
+		// remains display-only for `show chassis cluster interfaces`.
 
 		// RETH GARP is handled by native VRRP (VRRP-backed RETH).
 		// No manual GARP registration needed.

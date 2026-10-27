@@ -190,6 +190,10 @@ func (s *SessionSync) handlePersistentNatLeaseGeneration(conn net.Conn, msgType 
 		batch, ok = decodePersistentNatLeaseBatchPayloadProvenance(base, true)
 	case syncMsgPersistentNatLeaseDeterministic:
 		batch, ok = decodePersistentNatLeaseBatchPayloadDeterministic(base)
+	case syncMsgPersistentNatLeaseTypedPool:
+		batch, ok = decodePersistentNatLeaseBatchPayloadTypedPool(base, false)
+	case syncMsgPersistentNatLeaseDeterministicTypedPool:
+		batch, ok = decodePersistentNatLeaseBatchPayloadTypedPool(base, true)
 	default:
 		batch, ok = decodePersistentNatLeaseBatchPayload(base)
 	}

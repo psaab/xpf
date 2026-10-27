@@ -77,7 +77,10 @@ func TestUpdateConfigUnsetRevertsHeartbeatControlGARP15669(t *testing.T) {
 	m.UpdateConfig(changed)
 	drainEvents(m, 4)
 	installReceiverWithTiming(m, DefaultHeartbeatInterval, DefaultHeartbeatThreshold)
-	if !m.heartbeatTimingDivergedLocked() {
+	m.mu.RLock()
+	diverged := m.heartbeatTimingDivergedLocked()
+	m.mu.RUnlock()
+	if !diverged {
 		t.Error("changed nonzero timing (300ms/3) vs live (default) must diverge so the heartbeat restarts")
 	}
 
@@ -85,12 +88,18 @@ func TestUpdateConfigUnsetRevertsHeartbeatControlGARP15669(t *testing.T) {
 	drainEvents(m, 4)
 	// The fake receiver still runs the defaults; the deletion reverted
 	// the committed values to those same defaults, so now they agree.
-	if m.heartbeatTimingDivergedLocked() {
+	m.mu.RLock()
+	diverged = m.heartbeatTimingDivergedLocked()
+	m.mu.RUnlock()
+	if diverged {
 		t.Error("after deletion revert, committed defaults vs live defaults must not diverge")
 	}
 	// Point the live receiver at the pre-deletion timing: the reverted
 	installReceiverWithTiming(m, 300*time.Millisecond, 3)
-	if !m.heartbeatTimingDivergedLocked() {
+	m.mu.RLock()
+	diverged = m.heartbeatTimingDivergedLocked()
+	m.mu.RUnlock()
+	if !diverged {
 		t.Error("deleted timing reverted to defaults vs live 300ms/3 must diverge so the restart reaches the wire")
 	}
 
