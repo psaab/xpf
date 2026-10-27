@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config compiler: strict mode now has a single constructor,
+    strictCompileOpts() beside lenientCompileOpts(); the production
+    strict entries and strict-named test compiles start from it
+    instead of hand-copied compileOpts literals, so a future
+    always-on strict fold cannot diverge from the tests that claim
+    to measure the commit path (#17148).
   * HA: answer interface-ref → redundancy-group ownership from one
     SSOT (config.InterfaceRefRG / RefRG / RefRGIndex over
     RethRGOwners). RPM no longer name-tests `reth*`, so a structural

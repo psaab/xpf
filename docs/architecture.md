@@ -448,7 +448,7 @@ editing cmdtree.
 
 | Path | Description |
 |------|-------------|
-| `bpf/headers/*.h` | Shared C structs/constants consumed by the retained Rust AF_XDP shim build and userspace-dp parity tests. The legacy `bpf/xdp/*.c` and `bpf/tc/*.c` source were deleted in #1476 |
+| `bpf/headers/*.h` | Retained C ABI mirror (common/conntrack/maps only; helpers/nat/trace deleted in #17146) read by the shim build (`MAX_INTERFACES`) and Go/Rust parity tests; not compiled. The legacy `bpf/xdp/*.c` and `bpf/tc/*.c` source were deleted in #1476 |
 | `pkg/config/` | Junos parser, AST, typed config, compiler |
 | `pkg/cmdtree/` | Single source of truth for the operational CLI command tree |
 | `pkg/configstore/` | Candidate/active/commit/rollback, atomic DB persistence, JSONL audit journal |
