@@ -4,10 +4,10 @@
 // (#17101). It runs only via `go generate ./pkg/upgrade/manifest/` and
 // is never built into any binary. It deliberately duplicates the
 // managed list: a generator in package manifest cannot import itself,
-// so this copy is pinned to manifest.Names by
-// TestManagedBinaryDriftCanary, which compares bins.txt against the
-// package — a divergence here reds the canary instead of silently
-// regenerating a stale file.
+// so this copy is pinned directly to manifest.Names() by
+// TestManagedBinaryDriftCanary, which extracts the literal below and
+// compares it against Names() in order — a divergence here reds the
+// canary at introduction, without regenerating bins.txt.
 package main
 
 import (
