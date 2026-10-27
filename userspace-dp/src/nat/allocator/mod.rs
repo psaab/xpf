@@ -2032,25 +2032,35 @@ struct PortAllocatorShared {
     // `declined` is only informative next to a non-zero on `admitted`.
     persistent_admitted_total: AtomicU64,
     persistent_declined_total: AtomicU64,
-    /// #4800: production acquisitions of the `live` mutex (allocate /
-    /// reserve / release / rollback / GC), and the subset of those that
-    /// found the mutex already held. Together they give the contention
-    /// RATIO for the residual Phase-1 (#2852) map mutex, which is the only
-    /// form in which "is the NAT allocator the new-flow bottleneck?" has an
-    /// answer: a raw acquisition rate says nothing without the denominator.
+    /// #4800/#17036: production lock acquisitions, split by lock domain
+    /// since #15956. `flow_shard_lock_*` counts counted flow-shard mutex
+    /// acquisitions (`lock_flow_shard_counted`); `live_write_lock_*`
+    /// counts `RwLock<PortAllocatorLiveState>` write acquisitions
+    /// (`lock_live()` plus the non-persistent fast path's counted
+    /// `try_write`, including a contended try that falls back). Together
+    /// they give per-domain contention RATIOS: a raw acquisition rate
+    /// says nothing without its denominator, and mixing the 16-way
+    /// sharded mutex with the global write guard made the ratio
+    /// uninterpretable. Read guards and uncounted `get_mut_shard` sites
+    /// are deliberately NOT counted, so neither split pair is a total
+    /// of every lock acquisition.
     ///
-    /// Counted by `lock_live()`, which try-locks first — the LOCK on the
-    /// uncontended path costs exactly one CAS, the same as `lock()` did. It is
-    /// not free, though: the acquisition counter is bumped unconditionally, so
-    /// an uncontended acquisition is 2 relaxed atomic RMWs where it used to be
-    /// 1. The contended path pays one further relaxed increment on top of a
-    /// block that was already going to happen.
+    /// Counted helpers try-lock first — the LOCK on the uncontended
+    /// path costs exactly one CAS, the same as `lock()` did. It is not
+    /// free, though: the acquisition counter is bumped unconditionally,
+    /// so an uncontended acquisition is 2 relaxed atomic RMWs where it
+    /// used to be 1. The contended path pays one further relaxed
+    /// increment on top of a block that was already going to happen.
     ///
     /// Deliberately NOT counted: `snapshot()` (the ~1s status poll that
     /// READS these counters — the observer must not appear in its own
     /// observation) and the `debug_*` test/diagnostic accessors.
-    live_lock_acquisitions: AtomicU64,
-    live_lock_contended: AtomicU64,
+    /// The legacy `live_lock_*` snapshot totals are the documented sum
+    /// of these two domains, kept for one release (#17036).
+    flow_shard_lock_acquisitions: AtomicU64,
+    flow_shard_lock_contended: AtomicU64,
+    live_write_lock_acquisitions: AtomicU64,
+    live_write_lock_contended: AtomicU64,
     /// #16017: current permit epoch for this allocator (starts at 1; 0 = legacy/no-rule epoch).
     persistent_permit_epoch: AtomicU64,
     max_tracked_flows: usize,
@@ -2129,8 +2139,10 @@ impl Default for PortAllocator {
                 idle_lease_import_capacity_total: AtomicU64::new(0),
                 persistent_admitted_total: AtomicU64::new(0),
                 persistent_declined_total: AtomicU64::new(0),
-                live_lock_acquisitions: AtomicU64::new(0),
-                live_lock_contended: AtomicU64::new(0),
+                flow_shard_lock_acquisitions: AtomicU64::new(0),
+                flow_shard_lock_contended: AtomicU64::new(0),
+                live_write_lock_acquisitions: AtomicU64::new(0),
+                live_write_lock_contended: AtomicU64::new(0),
                 persistent_permit_epoch: AtomicU64::new(1),
                 max_tracked_flows: 0,
                 #[cfg(test)]
@@ -2256,8 +2268,10 @@ impl PortAllocator {
                 idle_lease_import_capacity_total: AtomicU64::new(0),
                 persistent_admitted_total: AtomicU64::new(0),
                 persistent_declined_total: AtomicU64::new(0),
-                live_lock_acquisitions: AtomicU64::new(0),
-                live_lock_contended: AtomicU64::new(0),
+                flow_shard_lock_acquisitions: AtomicU64::new(0),
+                flow_shard_lock_contended: AtomicU64::new(0),
+                live_write_lock_acquisitions: AtomicU64::new(0),
+                live_write_lock_contended: AtomicU64::new(0),
                 persistent_permit_epoch: AtomicU64::new(1),
                 max_tracked_flows,
                 #[cfg(test)]
@@ -2268,11 +2282,13 @@ impl PortAllocator {
         }
     }
 
-    /// #4800: acquire the `live` state write guard for serialized operations,
-    /// counting attempts and those whose initial `try_write` found contention.
-    /// The non-persistent fast path uses the same counters for its no-wait
-    /// `try_write`, then abandons that path on contention and falls back here.
-    /// Flow-shard write acquisitions also contribute to this counter pair.
+    /// #4800/#17036: acquire the `live` RwLock write guard for serialized
+    /// operations, counting attempts in the live-write domain and those
+    /// whose initial `try_write` found contention. The non-persistent
+    /// fast path counts its no-wait `try_write` in the same domain, then
+    /// abandons that path on contention and falls back here (counted
+    /// again as the serialized acquisition it is). Flow-shard write
+    /// acquisitions count separately (`lock_flow_shard_counted`).
     ///
     /// Poison policy is preserved from the existing call sites:
     /// `unwrap_or_else(|e| e.into_inner())` lets later allocations continue
@@ -2285,7 +2301,7 @@ impl PortAllocator {
     /// the observer into the observation.
     pub(super) fn lock_live(&self) -> RwLockWriteGuard<'_, PortAllocatorLiveState> {
         self.shared
-            .live_lock_acquisitions
+            .live_write_lock_acquisitions
             .fetch_add(1, Ordering::Relaxed);
         match self.shared.live.try_write() {
             Ok(guard) => return guard,
@@ -2293,7 +2309,7 @@ impl PortAllocator {
             Err(TryLockError::WouldBlock) => {}
         }
         self.shared
-            .live_lock_contended
+            .live_write_lock_contended
             .fetch_add(1, Ordering::Relaxed);
         self.shared.live.write().unwrap_or_else(|e| e.into_inner())
     }
@@ -2378,7 +2394,10 @@ impl PortAllocator {
 
     #[cfg(test)]
     pub(super) fn debug_live_lock_contended_total(&self) -> u64 {
-        self.shared.live_lock_contended.load(Ordering::Relaxed)
+        // Legacy test seam: the summed contended total across both
+        // counted domains (flow-shard + live-write).
+        self.shared.flow_shard_lock_contended.load(Ordering::Relaxed)
+            + self.shared.live_write_lock_contended.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -2390,15 +2409,18 @@ impl PortAllocator {
         self.read_live().pat_owns_wire_identity(flow, translated)
     }
 
-    // the #4800 acquisition/contention pair comparable.
+    /// Counted flow-shard write guard (#4800/#17036): counted in the
+    /// flow-shard domain so shard acquisitions stay comparable as a
+    /// pair (acquisitions vs contended) without mixing in live-write
+    /// acquisitions.
     pub(super) fn lock_flow_shard_counted(
         &self,
         flow: &SourceNatFlowKey,
     ) -> MutexGuard<'_, flows::LiveFlowShard> {
         self.shared.flows.write_shard_counted(
             flow,
-            &self.shared.live_lock_acquisitions,
-            &self.shared.live_lock_contended,
+            &self.shared.flow_shard_lock_acquisitions,
+            &self.shared.flow_shard_lock_contended,
         )
     }
     pub(super) fn flows_len(&self) -> usize {
@@ -3877,14 +3899,14 @@ impl PortAllocator {
                     // to the serialized path; the try itself is nonblocking,
                     // but the shard mutex and serialized fallback may wait.
                     self.shared
-                        .live_lock_acquisitions
+                        .live_write_lock_acquisitions
                         .fetch_add(1, Ordering::Relaxed);
                     let mut live = match self.shared.live.try_write() {
                         Ok(live) => live,
                         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                         Err(TryLockError::WouldBlock) => {
                             self.shared
-                                .live_lock_contended
+                                .live_write_lock_contended
                                 .fetch_add(1, Ordering::Relaxed);
                             self.free_unpublished_translated_port(abs, port);
                             for rejected_port in rejected_ports.drain(..) {
@@ -6362,6 +6384,8 @@ impl PortAllocator {
         let mut live = self.capture_and_replace(&flow, capture_previous_holders);
         // A refresh of the same synced flow: if it already holds this exact
         // translated tuple, it is reserved — nothing to do. A changed tuple is
+        // fully admitted below before the stale reservation is retired, so a
+        // refused re-decision preserves the incumbent.
         let existing = self.shared.flows.get_in_shard(&live.shard, &flow);
         if let Some(existing) = existing {
             if existing.translated == translated {
@@ -8141,11 +8165,39 @@ impl PortAllocator {
                 .shared
                 .persistent_declined_total
                 .load(Ordering::Relaxed),
+            flow_shard_lock_acquisitions_total: self
+                .shared
+                .flow_shard_lock_acquisitions
+                .load(Ordering::Relaxed),
+            flow_shard_lock_contended_total: self
+                .shared
+                .flow_shard_lock_contended
+                .load(Ordering::Relaxed),
+            live_write_lock_acquisitions_total: self
+                .shared
+                .live_write_lock_acquisitions
+                .load(Ordering::Relaxed),
+            live_write_lock_contended_total: self
+                .shared
+                .live_write_lock_contended
+                .load(Ordering::Relaxed),
+            // #17036: legacy summed totals, kept for one release.
             live_lock_acquisitions_total: self
                 .shared
-                .live_lock_acquisitions
-                .load(Ordering::Relaxed),
-            live_lock_contended_total: self.shared.live_lock_contended.load(Ordering::Relaxed),
+                .flow_shard_lock_acquisitions
+                .load(Ordering::Relaxed)
+                + self
+                    .shared
+                    .live_write_lock_acquisitions
+                    .load(Ordering::Relaxed),
+            live_lock_contended_total: self
+                .shared
+                .flow_shard_lock_contended
+                .load(Ordering::Relaxed)
+                + self
+                    .shared
+                    .live_write_lock_contended
+                    .load(Ordering::Relaxed),
             // #9392: the recycled-phase walk cost, summed over the pool's
             // addresses. A POOL-level pair rather than per-address: the
             // operator surface is per pool, and the reachability question
@@ -8698,13 +8750,18 @@ pub(crate) struct PortAllocatorSnapshot {
     pub(crate) persistent_admitted_total: u64,
     /// #8447: persistent-NAT admissions that returned a failure instead.
     pub(crate) persistent_declined_total: u64,
-    /// #4800: `live` map-mutex acquisitions on the production
-    /// allocate/reserve/release/rollback/GC paths, and the subset that
-    /// blocked. Read as a ratio: `contended / acquisitions` is the NAT
-    /// allocator's share of new-flow-install serialization, and the pair
-    /// is what lets a connection-rate run say "the residual Phase-1
-    /// (#2852) mutex saturated" instead of guessing from a flat
-    /// allocations/sec curve. See `PortAllocator::lock_live`.
+    /// #4800/#17036: counted lock acquisitions split by domain since
+    /// #15956. `flow_shard_lock_*` is the counted flow-shard mutex pair;
+    /// `live_write_lock_*` is the `live` RwLock write pair. Read each as
+    /// a ratio (`contended / acquisitions`) for its own domain. See
+    /// `PortAllocator::lock_live` and `lock_flow_shard_counted`.
+    pub(crate) flow_shard_lock_acquisitions_total: u64,
+    pub(crate) flow_shard_lock_contended_total: u64,
+    pub(crate) live_write_lock_acquisitions_total: u64,
+    pub(crate) live_write_lock_contended_total: u64,
+    /// Legacy summed totals (flow-shard + live-write), kept for one
+    /// release (#17036). Do not use for the #15956 perf-gate ratio:
+    /// the population mixes two lock domains.
     pub(crate) live_lock_acquisitions_total: u64,
     pub(crate) live_lock_contended_total: u64,
     /// #9392: tokens popped by the recycled phase of `claim`, and the number of

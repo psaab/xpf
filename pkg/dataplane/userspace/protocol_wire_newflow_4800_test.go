@@ -50,6 +50,10 @@ func TestNewFlowContentionWireDecodesFromHelperJSON_4800(t *testing.T) {
 	  ],
 	  "source_nat_pools": [
 	    {
+	      "flow_shard_lock_acquisitions_total": 1073,
+	      "flow_shard_lock_contended_total": 1079,
+	      "live_write_lock_acquisitions_total": 1087,
+	      "live_write_lock_contended_total": 1091,
 	      "live_lock_acquisitions_total": 1063,
 	      "live_lock_contended_total": 1069
 	    }
@@ -93,9 +97,21 @@ func TestNewFlowContentionWireDecodesFromHelperJSON_4800(t *testing.T) {
 		}
 	}
 
-	// Per-pool allocator lock pair.
+	// Per-pool allocator lock pairs (#17036 split + legacy sum).
 	if len(got.SourceNATPools) != 1 {
 		t.Fatalf("source_nat_pools decoded %d entries, want 1", len(got.SourceNATPools))
+	}
+	if v := got.SourceNATPools[0].FlowShardLockAcquisitionsTotal; v != 1073 {
+		t.Errorf("flow_shard_lock_acquisitions_total decoded as %d, want 1073", v)
+	}
+	if v := got.SourceNATPools[0].FlowShardLockContendedTotal; v != 1079 {
+		t.Errorf("flow_shard_lock_contended_total decoded as %d, want 1079", v)
+	}
+	if v := got.SourceNATPools[0].LiveWriteLockAcquisitionsTotal; v != 1087 {
+		t.Errorf("live_write_lock_acquisitions_total decoded as %d, want 1087", v)
+	}
+	if v := got.SourceNATPools[0].LiveWriteLockContendedTotal; v != 1091 {
+		t.Errorf("live_write_lock_contended_total decoded as %d, want 1091", v)
 	}
 	if v := got.SourceNATPools[0].LiveLockAcquisitionsTotal; v != 1063 {
 		t.Errorf("live_lock_acquisitions_total decoded as %d, want 1063", v)

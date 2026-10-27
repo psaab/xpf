@@ -136,10 +136,19 @@ class SnapshotError(ValueError):
 #: is the DENOMINATOR; a site whose denominator is missing cannot be
 #: attributed and is reported as such rather than silently scored 0.
 LOCK_SITES = (
+    # #17036: since #15956 the allocator has two counted lock domains.
+    # Each is its own site with its own denominator; the legacy summed
+    # live_lock pair is scraped for monotonicity/continuity only and
+    # must never vote as a culprit (it mixes the two domains).
     (
-        "nat_allocator_live_mutex",
-        "pool.live_lock_contended_total",
-        "pool.live_lock_acquisitions_total",
+        "nat_allocator_flow_shard",
+        "pool.flow_shard_lock_contended_total",
+        "pool.flow_shard_lock_acquisitions_total",
+    ),
+    (
+        "nat_allocator_live_write",
+        "pool.live_write_lock_contended_total",
+        "pool.live_write_lock_acquisitions_total",
     ),
     (
         "publish_shared_session",
@@ -171,6 +180,10 @@ LOCK_SITES = (
 MONOTONIC_FIELDS = (
     "pool.allocations_total",
     "pool.exhaustion_total",
+    "pool.flow_shard_lock_acquisitions_total",
+    "pool.flow_shard_lock_contended_total",
+    "pool.live_write_lock_acquisitions_total",
+    "pool.live_write_lock_contended_total",
     "pool.live_lock_acquisitions_total",
     "pool.live_lock_contended_total",
     "publish.publishes_total",
@@ -646,6 +659,18 @@ def parse_prometheus_text(
             ),
             "exhaustion_total": pool_metric(
                 "xpf_userspace_source_nat_pool_exhaustions_total"
+            ),
+            "flow_shard_lock_acquisitions_total": pool_metric(
+                "xpf_userspace_source_nat_pool_flow_shard_lock_acquisitions_total"
+            ),
+            "flow_shard_lock_contended_total": pool_metric(
+                "xpf_userspace_source_nat_pool_flow_shard_lock_contended_total"
+            ),
+            "live_write_lock_acquisitions_total": pool_metric(
+                "xpf_userspace_source_nat_pool_live_write_lock_acquisitions_total"
+            ),
+            "live_write_lock_contended_total": pool_metric(
+                "xpf_userspace_source_nat_pool_live_write_lock_contended_total"
             ),
             "live_lock_acquisitions_total": pool_metric(
                 "xpf_userspace_source_nat_pool_live_lock_acquisitions_total"

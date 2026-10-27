@@ -39,14 +39,19 @@ type SourceNATPoolStatus struct {
 	// counters. JSON tags MUST match the Rust serde names.
 	PersistentAdmittedTotal uint64 `json:"persistent_admitted_total,omitempty"`
 	PersistentDeclinedTotal uint64 `json:"persistent_declined_total,omitempty"`
-	// #4800: acquisitions of this pool's residual live-state mutex on the
-	// helper's production allocate/reserve/release/rollback/GC paths, and
-	// the subset that found it already held by another worker. The
-	// connection-rate harness reads the PAIR: a contended count without
-	// its denominator cannot tell "the allocator mutex saturated" from
-	// "the allocator ran hot but never blocked". Zero from an older helper
-	// that predates the counters. JSON tags MUST match the Rust serde
+	// #4800/#17036: counted lock acquisitions split by domain since
+	// #15956, and the subsets that found the lock already held. The
+	// connection-rate harness reads each PAIR for its own domain: a
+	// contended count without its denominator cannot tell "saturated"
+	// from "ran hot but never blocked". Zero from an older helper that
+	// predates the counters. JSON tags MUST match the Rust serde
 	// rename(...) exactly (protocol/nat.rs).
+	FlowShardLockAcquisitionsTotal  uint64 `json:"flow_shard_lock_acquisitions_total,omitempty"`
+	FlowShardLockContendedTotal     uint64 `json:"flow_shard_lock_contended_total,omitempty"`
+	LiveWriteLockAcquisitionsTotal  uint64 `json:"live_write_lock_acquisitions_total,omitempty"`
+	LiveWriteLockContendedTotal     uint64 `json:"live_write_lock_contended_total,omitempty"`
+	// Legacy summed totals (flow-shard + live-write), kept for one
+	// release (#17036). Do not use for the #15956 perf-gate ratio.
 	LiveLockAcquisitionsTotal uint64 `json:"live_lock_acquisitions_total,omitempty"`
 	LiveLockContendedTotal    uint64 `json:"live_lock_contended_total,omitempty"`
 	// #9392: the recycled-phase walk cost of the helper's port allocator,

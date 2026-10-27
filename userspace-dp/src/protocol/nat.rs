@@ -517,13 +517,24 @@ pub(crate) struct SourceNatPoolStatus {
     /// #8447: persistent-NAT admissions that returned a failure instead.
     #[serde(rename = "persistent_declined_total", default)]
     pub persistent_declined_total: u64,
-    /// #4800: acquisitions of this pool's residual `live` map mutex on the
-    /// production allocate/reserve/release/rollback/GC paths, and the
-    /// subset of those that found it already held. The connection-rate
-    /// harness scrapes the PAIR — a contended count without its
-    /// denominator cannot distinguish "the allocator mutex saturated" from
-    /// "the allocator ran hot but never blocked". `default` so an older
-    /// helper that predates the counters decodes as 0.
+    /// #4800/#17036: counted lock acquisitions split by domain since
+    /// #15956 — `flow_shard_lock_*` for the counted flow-shard mutex
+    /// acquisitions and `live_write_lock_*` for `live` RwLock write
+    /// acquisitions, each with its contended subset. The connection-rate
+    /// harness reads each PAIR for its own domain — a contended count
+    /// without its denominator cannot distinguish "saturated" from
+    /// "ran hot but never blocked". `default` so an older helper that
+    /// predates the counters decodes as 0.
+    #[serde(rename = "flow_shard_lock_acquisitions_total", default)]
+    pub flow_shard_lock_acquisitions_total: u64,
+    #[serde(rename = "flow_shard_lock_contended_total", default)]
+    pub flow_shard_lock_contended_total: u64,
+    #[serde(rename = "live_write_lock_acquisitions_total", default)]
+    pub live_write_lock_acquisitions_total: u64,
+    #[serde(rename = "live_write_lock_contended_total", default)]
+    pub live_write_lock_contended_total: u64,
+    /// Legacy summed totals (flow-shard + live-write), kept for one
+    /// release (#17036). Do not use for the #15956 perf-gate ratio.
     #[serde(rename = "live_lock_acquisitions_total", default)]
     pub live_lock_acquisitions_total: u64,
     #[serde(rename = "live_lock_contended_total", default)]
