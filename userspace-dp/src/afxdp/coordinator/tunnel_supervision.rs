@@ -787,27 +787,6 @@ impl super::Coordinator {
             );
         }
     }
-    /// #1866 pass 2 helper: stop + join + REMOVE one entry (live thread
-    /// or tombstone). The only place entries leave the map besides
-    /// `stop_inner` and the defer-branch snapshot prune. Single-entry
-    /// callers only; multi-entry paths use the bulk signal-then-join
-    /// helper above.
-    fn stop_remove_wg_control_entry(&mut self, id: u16, reason: &str) {
-        self.publish_local_tunnel_deliveries_excluding(&[id]);
-        if let Some(mut entry) = self.wg_control_threads.remove(&id) {
-            if let Some(mut handle) = entry.handle.take() {
-                handle.request_stop();
-                if let Some(join) = handle.join.take() {
-                    let _ = join.join();
-                }
-            }
-            eprintln!(
-                "xpf-userspace-dp: stopped WG control thread endpoint={id} tun={} reason={reason}",
-                entry.spawned_tunnel_name()
-            );
-        }
-    }
-
     /// #9587: may endpoint `id`'s control thread write kernel-path transport
     /// plaintext to its wgN TUN? ONE decision per endpoint, read at spawn and
     /// by the stale prune, so a snapshot that re-steers WireGuard restarts

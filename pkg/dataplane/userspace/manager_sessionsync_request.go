@@ -50,6 +50,14 @@ func (v *sessionSyncView) egressZone() uint16 {
 	return v.val6.EgressZone
 }
 
+// #18148: the JSON wire field is u32 (Rust u32). The BPF session value
+// carries only the low 16 bits (#16557 frozen ABI), so the widening here
+// is a zero-extension of that truncated value — no new information, but
+// the field must accept full u32 values from the helper on the JSON leg.
+func (v *sessionSyncView) ingressZoneID32() uint32 { return uint32(v.ingressZone()) }
+
+func (v *sessionSyncView) egressZoneID32() uint32 { return uint32(v.egressZone()) }
+
 func (v *sessionSyncView) ingressIfaceFold() uint32 {
 	if v.val4 != nil {
 		return v.val4.IngressIfaceFold
@@ -295,9 +303,10 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 	// the twins' original order (NAT64 is the one V6-only insertion).
 	req.IngressZone = m.zoneNameByID(view.ingressZone())
 	req.EgressZone = m.zoneNameByID(view.egressZone())
-	// #919/#922: forward the raw u16 IDs alongside the legacy
-	// strings; the Rust daemon prefers IDs when nonzero.
-	req.IngressZoneID = view.ingressZone()
+	// #919/#922/#18148: forward the raw zone IDs alongside the legacy
+	// strings; the Rust daemon prefers IDs when nonzero. The BPF value
+	// is u16 (low bits of the u32 StableZoneID), widened losslessly here.
+	req.IngressZoneID = view.ingressZoneID32()
 	// #7095: resolve the peer's cluster-stable ingress fold to THIS node's
 	// ifindex. The sender could not ship its own ifindex — it is node-local
 	// — so it shipped a fold of the reth-relative name both nodes agree on,
@@ -328,7 +337,7 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 	// A carried domain cannot drift that way; 0 means the default instance,
 	// which is what a peer predating the field sends.
 	req.RoutingDomain = view.routingDomain()
-	req.EgressZoneID = view.egressZone()
+	req.EgressZoneID = view.egressZoneID32()
 	var peerEgress bool
 	req.EgressIfindex, req.TXIfindex, req.OwnerRGID, req.TXVLANID, peerEgress =
 		m.sessionSyncEgressIdentityLocked(view.fibIfindex(), view.fibVlanID(), view.egressIfaceFold(), req.EgressZone)

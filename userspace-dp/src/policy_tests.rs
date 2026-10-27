@@ -11162,3 +11162,22 @@ fn count_effect_skips_unzoned_counter_for_functional_zone_17929() {
         "functional-zone deny must not bump UNZONED_EGRESS_DENIED"
     );
 }
+
+// #17118: PolicyRule's Clone is derived; the sharing contract that matters
+// is on hit_counter — clones must keep counting into the SAME
+// Arc<PolicyRuleCounter> (#3322 carry-forward), not a snapshot copy.
+#[test]
+fn policy_rule_clone_shares_hit_counter_17118() {
+    let rule = PolicyRule {
+        rule_id: "lan->wan/clone-share".to_string(),
+        ..Default::default()
+    };
+    let cloned = rule.clone();
+    assert!(
+        Arc::ptr_eq(&rule.hit_counter, &cloned.hit_counter),
+        "cloned PolicyRule must share the admitting rule's hit counter"
+    );
+    cloned.hit_counter.add(64);
+    assert_eq!(rule.hit_counter.test_packet_count(), 1);
+    assert_eq!(rule.hit_counter.test_byte_count(), 64);
+}

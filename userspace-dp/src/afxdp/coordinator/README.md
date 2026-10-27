@@ -57,7 +57,12 @@ Differences that matter (#1881):
   posture (#9521), peer config (#14675), resolver endpoint hosts /
   preferred family), the entry stores it as `spawned`, and the stale
   prune restarts the thread when a fresh capture differs — there is
-  no per-capture prune ladder to forget an arm of. GRE threads restart ONLY
+  no per-capture prune ladder to forget an arm of. Every WG peer commit
+  rebuilds the engine (#15950: `wg_peers_eq` compares `endpoint_host`),
+  so peer adds/removes and endpoint/hostname changes restart via
+  `engine_changed` in practice (#17094 retired the dead #14675
+  same-engine guard; `peer_config` stays in the capture per #17089).
+  GRE threads restart ONLY
   on attachment drift — endpoint
   content (destination/source/key, routes, CoS) reaches the live GRE
   loop through the shared `ha.runtime` ArcSwap (one

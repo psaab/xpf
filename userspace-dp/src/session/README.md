@@ -9,6 +9,52 @@ structure.)
 
 ## Files
 
+Production modules (every non-test `.rs` in this directory; test files
+are covered by the last bullet):
+
+- `ctx.rs` — context structs for `SessionTable`'s upsert/update/expire
+  calls (#1357): `SessionInstall` (owned key, fresh insert / peer-synced
+  upsert), `SessionUpdate` (borrowed key, in-place refresh / promote),
+  `ExpireHaContext` (per-call HA expiry predicates), `CtSliceEmitMark`,
+  and `NodeServedEvidence` (#16223 node-level served-handshake proof).
+- `discriminator.rs` — the session-identity discriminator (#7188):
+  `TunnelDiscriminator` (`None` / `Unkeyed` / `Keyed` / `Pptp(handle)` /
+  `Ipsec(if_id)` / `Unparseable`, disjoint by design) carried in
+  `SessionKey`, plus its `WireDiscriminator` HA-wire encoding. The GRE
+  extractor that parses a discriminator off a frame stays in
+  `afxdp/gre_discriminator.rs`.
+- `entry.rs` — the PUBLIC session data types: `SessionDecision`,
+  `SessionMetadata`, `SessionLookup`, `ForwardSessionMatch`,
+  `SessionOrigin`, `SessionDeltaKind`, `SessionDelta`, and
+  `ExpiredSession`. The internal per-entry `SessionEntry` (and its #2120
+  standby-gate fields `seen_rg_epoch` / `first_held_ns` plus the #16881
+  `held_wheel_tick` and its scheduling-input markers, see "Standby retention"
+  below) stays file-private in `mod.rs`, NOT here.
+- `expire.rs` — timer-wheel sweeps + eviction: `expire_stale_entries`
+  (the per-tick bucket drain / lazy-delete GC pass), the throttled
+  `push_to_wheel` scheduler, `wheel_observe`, and the #2120 standby
+  retention gate (`expire_stale_entries_ha` + `standby_gate_decision` +
+  first-HOLD-anchored horizon scheduling).
+- `install.rs` — session-creation path: the #1861 capacity preflight
+  (`can_admit` + counters), the new-flow installs
+  (`install_with_protocol*` / `upsert_synced*`), and the delta-emit /
+  `delete` / owner-RG demotion helpers. These build fresh records; the
+  in-place-refresh path stays in `mod.rs`.
+- `key.rs` — `SessionKey` and the six key builders below (mirroring the
+  domain-policy split at `key.rs`'s `routing_domain` doc), plus
+  `reply_matches_forward_session` (the predicate used to detect "this
+  inbound packet matches an existing outbound flow"):
+  - `forward_wire_key` — same (forward) direction; NAT applied (post-NAT forward tuple, incl. NAT64 family/proto translation); routing domain PRESERVED.
+  - `translated_session_key` — same direction, no tuple swap; NAT applied (rewritten addresses/ports or ICMP id, no NAT64 family flip); routing domain PRESERVED.
+  - `reverse_wire_key` — reverse direction (tuple swapped); NAT applied (post-NAT wire tuple, incl. NAT64 family/proto translation); routing domain ZEROED (reverse-match index).
+  - `reverse_canonical_key` — reverse direction (tuple swapped); NAT ignored (`_nat`, canonical pre-NAT tuple); routing domain ZEROED (reverse-match index).
+  - `reverse_session_key` — reverse direction (tuple swapped, callable in either direction with that direction's decision); NAT applied (incl. NAT64 family/proto translation); routing domain PRESERVED.
+  - `reverse_match_key` — no direction change and no NAT; probe normalization only — routing domain ZEROED so an arriving reply can probe a reverse-match index.
+- `lookup.rs` — forward/reverse tuple match read path: the `lookup`
+  family (primary + NAT-translated-reverse alias), the NAT/wire reverse
+  finders (`find_forward_nat_match` / `find_forward_wire_match`), the
+  single-entry / owner-RG / iteration read accessors, and
+  `take_synced_local`.
 - `mod.rs` — `SessionTable` coordinator: the slab + `FxHashMap`
   secondary indices (canonical / forward / reverse key), the delta
   queue, and the #1752/#1855 in-place-refresh contract
@@ -17,32 +63,30 @@ structure.)
   Slab + integer-handle layout shipped in #964 Step 1; the impl is
   split across `lookup.rs` / `install.rs` / `expire.rs` (#2005,
   pure code-motion — all submodules attach `impl SessionTable` blocks).
-- `lookup.rs` — forward/reverse tuple match read path: the `lookup`
-  family (primary + NAT-translated-reverse alias), the NAT/wire reverse
-  finders (`find_forward_nat_match` / `find_forward_wire_match`), the
-  single-entry / owner-RG / iteration read accessors, and
-  `take_synced_local`.
-- `install.rs` — session-creation path: the #1861 capacity preflight
-  (`can_admit` + counters), the new-flow installs
-  (`install_with_protocol*` / `upsert_synced*`), and the delta-emit /
-  `delete` / owner-RG demotion helpers. These build fresh records; the
-  in-place-refresh path stays in `mod.rs`.
-- `expire.rs` — timer-wheel sweeps + eviction: `expire_stale_entries`
-  (the per-tick bucket drain / lazy-delete GC pass), the throttled
-  `push_to_wheel` scheduler, `wheel_observe`, and the #2120 standby
-  retention gate (`expire_stale_entries_ha` + `standby_gate_decision` +
-  first-HOLD-anchored horizon scheduling).
-- `entry.rs` — the PUBLIC session data types: `SessionDecision`,
-  `SessionMetadata`, `SessionLookup`, `ForwardSessionMatch`,
-  `SessionOrigin`, `SessionDeltaKind`, `SessionDelta`, and
-  `ExpiredSession`. The internal per-entry `SessionEntry` (and its #2120
-  standby-gate fields `seen_rg_epoch` / `first_held_ns` plus the #16881
-  `held_wheel_tick` and its scheduling-input markers, see "Standby retention"
-  below) stays file-private in `mod.rs`, NOT here.
-- `key.rs` — `SessionKey`, `forward_wire_key` (ingress 5-tuple),
-  `reverse_canonical_key` (post-NAT lookup), and
-  `reply_matches_forward_session` (the predicate used to detect "this
-  inbound packet matches an existing outbound flow").
+- `pmech_directory.rs` — the V3 sharded PMech session-owner directory
+  (#9506): transaction-owned forward/reverse/NAT wire/canonical alias
+  claims plus normalized plain-reply aliases, sharded by seeded key hash
+  so packet probes take at most one shard read lock (and none at all
+  when `active_claim_count` is 0).
+- `pptp.rs` — RFC 2637 PPTP call associations (#7699 stage 1):
+  `PptpCall`, the canonically-ordered learned `(call-id A, call-id B)`
+  pair from which both directions derive the same
+  `TunnelDiscriminator::Pptp` handle, scoped by routing domain and
+  bound to its `ControlChannelId`.
+- `pptp_control.rs` — RFC 2637 PPTP control-channel parsing (#7699
+  stage 2, #11601 per-call teardown): the off-hot-path
+  `PptpControlInbox` of copied TCP/1723 segments; parses a whole
+  Outgoing-Call-Reply / Call-Disconnect-Notify contained in one segment
+  (no TCP reassembly — a truncated message learns no association).
+- `routing_domain_wire.rs` — the HA-wire encoding of a session's
+  routing domain (#7239): `WIRE_ABSENT` (peer stated nothing) vs
+  `WIRE_DEFAULT_INSTANCE` vs the named-instance band vs the quarantine
+  sentinel, decoded as the three-state `WireRoutingDomain` so absence
+  is never silently read as the default instance.
+- `sync_attribution.rs` — the HA-carried policy attribution of a
+  session, derived ONCE (#6949): `SessionSyncAttribution::from_session`,
+  destructured exhaustively by both the binary event-stream and the
+  JSON RPC-fallback producers so the two wires cannot diverge.
 - `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets). Held
   entries are rechecked at the far edge of the wheel window (255 s), with
   the recheck tick anchored to `first_held_ns`; same-ID snapshot imports
@@ -55,7 +99,7 @@ structure.)
   wheel's physical cleanup (including HA HOLD/SELF-HEAL retention). The former
   "lazy-delete on lookup" wording is obsolete: lookups reject idle-crossed
   entries but do not refresh or physically delete them.
-- `tests.rs` — co-located unit tests.
+- `tests.rs` and `*_tests.rs` — co-located unit tests.
 
 ## Timeouts
 
