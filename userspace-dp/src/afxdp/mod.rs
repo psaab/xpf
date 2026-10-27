@@ -876,7 +876,7 @@ pub(crate) use self::coordinator::{MandatoryPin, ReconcileStage, WorkerBindShort
 pub(in crate::afxdp) use self::coordinator::WorkerRuntimeRecord;
 // #2962: the lock-free owner-RG export wait handle. The control-socket
 // dispatcher (server/handlers) names this as the return type of
-// kick_owner_rg_export so it can run the blocking ack-wait off the
+// kick_owner_rg_export_unpaged so it can run the blocking ack-wait off the
 // global ServerState lock.
 pub(crate) use self::ha::OwnerRgExportWait;
 // #4054: re-export the two-phase all-sessions bulk export handle so the

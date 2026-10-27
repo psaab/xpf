@@ -983,8 +983,8 @@ type PolicySessionRebind struct {
 	RoutingDomain       uint32 `json:"routing_domain,omitempty"`
 	PolicyID            uint32 `json:"policy_id"`
 	RuleID              string `json:"rule_id"`
-	IngressZone         uint16 `json:"ingress_zone"`
-	EgressZone          uint16 `json:"egress_zone"`
+	IngressZone         uint32 `json:"ingress_zone"`
+	EgressZone          uint32 `json:"egress_zone"`
 	TunnelDiscriminator uint64 `json:"tunnel_discriminator,omitempty"`
 }
 

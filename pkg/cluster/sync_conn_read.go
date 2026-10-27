@@ -82,7 +82,7 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 				// here (before the heartbeat-ack teardown, so the tick
 				// that closes the connection still expires exactly once).
 				s.expireBulkWindowIfStale()
-				if s.peerHeartbeatAckEver.Load() {
+				if s.peerIncarnationState().peerHeartbeatAckEver.Load() {
 					missedHeartbeats++
 				}
 				if missedHeartbeats >= 2 {

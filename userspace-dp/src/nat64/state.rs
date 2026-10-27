@@ -2021,17 +2021,25 @@ impl Nat64State {
         // production callers — every caller is a test — so the runtime drain
         // quarantine is threaded through `allocate_source_for_worker`, which
         // the poll path actually uses.
-        self.allocate_source_with_holder(
-            prefix_idx,
+        // #17072: synthesise the SessionKey the production path passes, so
+        // the test entry point keys the BIB through the same builder.
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET6 as u8,
             protocol,
-            src_v6,
-            dst_v4,
+            src_ip: IpAddr::V6(src_v6),
+            dst_ip: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             src_port,
             dst_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        self.allocate_source_with_holder(
+            prefix_idx,
+            &key,
+            dst_v4,
             now_ns,
             crate::nat::NatHolder::Untracked,
             &[],
-            0,
             None,
         )
     }
@@ -2046,33 +2054,22 @@ impl Nat64State {
     pub(crate) fn allocate_source_for_worker(
         &self,
         prefix_idx: usize,
-        protocol: u8,
-        src_v6: Ipv6Addr,
+        key: &crate::session::SessionKey,
         dst_v4: Ipv4Addr,
-        src_port: u16,
-        dst_port: u16,
         now_ns: u64,
         worker_id: u32,
         // #7799: the live source-NAT rules, so a NAT64 mint can refuse an
         // address a DRAINING pool still holds allocations on.
         draining_rules: &[crate::nat::SourceNatRule],
-        // #9680: the flow's routing domain (`SessionKey.routing_domain`). It keys
-        // the BIB, so identical IPv6 5-tuples in two routing instances get two
-        // translated bindings instead of sharing one.
-        routing_scope: u32,
         iface_allocs: Option<&crate::nat::InterfaceNatAllocators>,
     ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
         self.allocate_source_with_holder(
             prefix_idx,
-            protocol,
-            src_v6,
+            key,
             dst_v4,
-            src_port,
-            dst_port,
             now_ns,
             crate::nat::NatHolder::Worker(worker_id),
             draining_rules,
-            routing_scope,
             iface_allocs,
         )
     }
@@ -2082,7 +2079,7 @@ impl Nat64State {
     /// (RFC 6146 BIB). Called at the Permit branch — after the flow is admitted
     /// — so a denied flow never consumes a pool port.
     ///
-    /// `protocol` / `src_port` / `dst_port` are the ORIGINAL IPv6 forward-flow
+    /// The `key`'s protocol / ports are the ORIGINAL IPv6 forward-flow
     /// L4 tuple (for ICMP echo, `src_port` is the query identifier and
     /// `dst_port` is 0, per `parse_flow_ports`); `dst_v4` is the extracted IPv4
     /// destination. The returned `(snat_v4, translated)` becomes the forward
@@ -2092,15 +2089,15 @@ impl Nat64State {
     ///
     /// #6522: `holder` is the WORKER taking the allocation — see
     /// [`Nat64State::allocate_source_for_worker`].
+    /// #17072: the BIB key is built by [`nat64_bib_flow_key`] from `key`;
+    /// `key.routing_domain` (#9680) keys the BIB, so there is no loose
+    /// scope integer to swap with `worker_id`.
     #[allow(clippy::too_many_arguments)]
     fn allocate_source_with_holder(
         &self,
         prefix_idx: usize,
-        protocol: u8,
-        src_v6: Ipv6Addr,
+        key: &crate::session::SessionKey,
         dst_v4: Ipv4Addr,
-        src_port: u16,
-        dst_port: u16,
         now_ns: u64,
         // #6522: the allocating worker. A locally-born NAT64 session is
         // replicated to every SIBLING worker, each of which reserves against
@@ -2110,7 +2107,6 @@ impl Nat64State {
         holder: crate::nat::NatHolder,
         // #7799: see `Nat64OverlapDraining`.
         draining_rules: &[crate::nat::SourceNatRule],
-        routing_scope: u32,
         iface_allocs: Option<&crate::nat::InterfaceNatAllocators>,
     ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
         let prefix = self
@@ -2134,17 +2130,14 @@ impl Nat64State {
         {
             return Err(SourceNatFailureReason::Nat64OverlapDraining);
         }
-        let flow = SourceNatFlowKey {
-            protocol,
-            src_ip: IpAddr::V6(src_v6),
-            dst_ip: IpAddr::V4(dst_v4),
-            src_port,
-            dst_port,
-            // #9680: the routing domain keys the BIB. #9062 scoped the v4
-            // source-NAT allocator and deferred NAT64; release and the synced
-            // reserve read the same field off the session key, so all three
-            // sites agree and a release never misses its allocation.
-            routing_scope,
+        // #17072: ONE builder for the BIB key — release and the synced
+        // reserve build the same key from the same SessionKey, so a
+        // release never misses its allocation.
+        let flow = nat64_bib_flow_key(key, IpAddr::V4(dst_v4));
+        // The deterministic arm keys on the IPv6 subscriber.
+        let src_v6 = match key.src_ip {
+            IpAddr::V6(v6) => v6,
+            _ => Ipv6Addr::UNSPECIFIED,
         };
         // #4559: a deterministic NAPT64 pool maps the IPv6 subscriber to a fixed
         // external IPv4 + port block (reversible without per-flow state) instead
@@ -2225,6 +2218,29 @@ impl Nat64State {
             nat64: true,
             nptv6: false,
         }
+    }
+}
+/// #17072: the ONE builder for the NAT64 BIB flow key.
+///
+/// `key` is the forward `SessionKey` (its `dst_ip` is the synthetic
+/// IPv6 destination); `translated_dst` is the IPv4 destination the
+/// packet is translated to (`IpAddr::V4(dst_v4)` at allocate,
+/// `nat.rewrite_dst` at release / synced reserve), so the key names
+/// the translated tuple the allocator reserved. `routing_scope` is
+/// copied from `key.routing_domain` (#9680) — there is no second
+/// notion of scope and no loose `u32` to swap with `worker_id`.
+pub(crate) fn nat64_bib_flow_key(
+    key: &crate::session::SessionKey,
+    translated_dst: IpAddr,
+) -> SourceNatFlowKey {
+    SourceNatFlowKey {
+        protocol: key.protocol,
+        src_ip: key.src_ip,
+        dst_ip: translated_dst,
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        // #9680: the routing domain keys the BIB (see SourceNatFlowKey).
+        routing_scope: key.routing_domain,
     }
 }
 

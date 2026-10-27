@@ -136,7 +136,7 @@ func TestScopedWriteGateSeesHookFlipBeforeWrite10512(t *testing.T) {
 	// Adversarial flip at the last pre-write instant: unlearn the peer.
 	ss.testBeforeQueuedWrite = func() {
 		ss.peerSnaps.peerSnapshotProtocol.Store(0)
-		ss.peerCapabilityFlags.Store(0)
+		ss.peerIncarnationState().peerCapabilityFlags.Store(0)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -170,7 +170,7 @@ func TestSupersessionClearsLearnedCapabilities10512(t *testing.T) {
 	if !ss.peerCapabilitiesLearned() || !ss.ScopedPolicyDeleteCapable() {
 		t.Fatal("FIXTURE: learning from the current conn must land")
 	}
-	if got := ss.peerSessionSyncWire.Load(); got == 0 {
+	if got := ss.peerIncarnationState().peerSessionSyncWire.Load(); got == 0 {
 		t.Fatal("FIXTURE: wire version must land for a non-vacuous clear assert")
 	}
 	connB := pipeConn(t)
@@ -178,10 +178,10 @@ func TestSupersessionClearsLearnedCapabilities10512(t *testing.T) {
 	if ss.peerCapabilitiesLearned() {
 		t.Fatal("supersession must clear learned state (snapshot protocol)")
 	}
-	if got := ss.peerCapabilityFlags.Load(); got != 0 {
+	if got := ss.peerIncarnationState().peerCapabilityFlags.Load(); got != 0 {
 		t.Fatalf("supersession must clear capability flags, got %d", got)
 	}
-	if got := ss.peerSessionSyncWire.Load(); got != 0 {
+	if got := ss.peerIncarnationState().peerSessionSyncWire.Load(); got != 0 {
 		t.Fatalf("supersession must clear session-sync wire version, got %d", got)
 	}
 }

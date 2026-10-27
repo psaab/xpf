@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane/mgmtview"
-	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/fwdstatus"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"google.golang.org/grpc/metadata"
@@ -86,19 +85,21 @@ func (c *CLI) buildLocalForwarding() (string, error) {
 	return fwdstatus.Format(fs), nil
 }
 
-type forwardingStatusCLIDataPlane struct {
-	cli *CLI
+// cliMapStatsSource adapts the CLI's stored provider to the
+// package-local MapStats shape fwdstatus.NewAccessor needs (#17128).
+// IsLoaded/GetMapStats forward to c.dp (the live indirection forwards
+// both to the published backend).
+type cliMapStatsSource struct{ cli *CLI }
+
+func (s cliMapStatsSource) IsLoaded() bool {
+	return s.cli != nil && s.cli.dp != nil && s.cli.dp.IsLoaded()
 }
 
-func (a forwardingStatusCLIDataPlane) IsLoaded() bool {
-	return a.cli != nil && a.cli.dp != nil && a.cli.dp.IsLoaded()
-}
-
-func (a forwardingStatusCLIDataPlane) GetMapStats() []fwdstatus.MapStats {
-	if a.cli == nil || a.cli.dp == nil {
+func (s cliMapStatsSource) GetMapStats() []fwdstatus.MapStats {
+	if s.cli == nil || s.cli.dp == nil {
 		return nil
 	}
-	stats := a.cli.dp.GetMapStats()
+	stats := s.cli.dp.GetMapStats()
 	out := make([]fwdstatus.MapStats, 0, len(stats))
 	for _, ms := range stats {
 		out = append(out, fwdstatus.MapStats{
@@ -108,40 +109,6 @@ func (a forwardingStatusCLIDataPlane) GetMapStats() []fwdstatus.MapStats {
 		})
 	}
 	return out
-}
-
-type forwardingStatusCLIUserspaceDataPlane struct {
-	forwardingStatusCLIDataPlane
-}
-
-func (a forwardingStatusCLIUserspaceDataPlane) Status() (dpuserspace.ProcessStatus, error) {
-	return a.cli.userspaceDataplaneStatus()
-}
-
-// HelperCrashState feeds fwdstatus's #7250 crash block.
-//
-// It resolves the backend directly rather than going through
-// `userspaceDataplaneStatus()`, because that helper returns a ProcessStatus and
-// the crash record is Manager-owned state that is NOT part of it — a crash
-// clears the cached status, so routing this through the status path would make
-// the block blank in the one case it exists for.
-func (a forwardingStatusCLIUserspaceDataPlane) HelperCrashState() (dpuserspace.HelperCrashRecord, bool) {
-	provider, ok := a.cli.dpProbe().(cliUserspaceCrashProvider)
-	if !ok {
-		return dpuserspace.HelperCrashRecord{}, false
-	}
-	return provider.HelperCrashState()
-}
-
-// HelperCrashHistory feeds fwdstatus's #8397 completed-episode summary.
-// Resolve the backend directly: completed history remains available after the
-// live episode closes at its quiet-window or Compile boundary.
-func (a forwardingStatusCLIUserspaceDataPlane) HelperCrashHistory() ([]dpuserspace.HelperCrashEpisode, int) {
-	provider, ok := a.cli.dpProbe().(cliUserspaceCrashHistoryProvider)
-	if !ok {
-		return nil, 0
-	}
-	return provider.HelperCrashHistory()
 }
 
 func (c *CLI) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
@@ -155,15 +122,11 @@ func (c *CLI) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
 	// wrapper and fwdstatus.Build reported "Buffer utilization 0 percent"
 	// with BufferKnown=TRUE — a zero that every downstream consumer is
 	// told to trust — where the nil-dp control says "unknown (see #878)".
+	// #17128: the shared fwdstatus.NewAccessor owns the adapter; this
+	// surface supplies its three inputs (map source, resolved backend,
+	// status func) and NewAccessor returns nil on an empty cell.
 	backend := mgmtview.Probe(c.dp)
-	if backend == nil {
-		return nil
-	}
-	base := forwardingStatusCLIDataPlane{cli: c}
-	if _, ok := backend.(cliUserspaceStatusProvider); ok {
-		return forwardingStatusCLIUserspaceDataPlane{forwardingStatusCLIDataPlane: base}
-	}
-	return base
+	return fwdstatus.NewAccessor(cliMapStatsSource{cli: c}, backend, c.userspaceDataplaneStatus)
 }
 
 // dialAndShowForwarding queries the cluster peer for its single-node

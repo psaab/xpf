@@ -208,13 +208,13 @@ func TestMatchPoliciesRESTHostInboundOffHostOmitted(t *testing.T) {
 // selectors, so a test can recompute the shared policymatch.Result the CLI
 // renders and compare fields.
 func restQuery(q url.Values) policymatch.Query {
-	dstPort := 0
+	var dstPort *uint16
 	if v := q.Get("dst_port"); v != "" {
 		if p, err := policymatch.ParsePort(v); err == nil {
 			dstPort = p
 		}
 	}
-	srcPort := 0
+	var srcPort *uint16
 	if v := q.Get("source_port"); v != "" {
 		if p, err := policymatch.ParsePort(v); err == nil {
 			srcPort = p
