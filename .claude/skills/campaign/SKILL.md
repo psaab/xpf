@@ -54,7 +54,41 @@ driveable work remains.
   Refill SLA: when a task completes (or is confirmed dead), the
   parent dispatches its replacement in the SAME turn the
   completion is processed — never at the next keeper tick, never
-  after a summary. Mix at full fill, PR work first: (1) stamped
+  after a summary.
+- **MAXIMUM PARALLELISM — the parent's own turns are the throttle
+  (user directive 2026-10-27, repeated)**: the refill SLA above is
+  violated most often not by missing work but by the PARENT doing
+  serial inline work (folds, rebases, merges, probes) while lanes
+  sit empty. Binding rules:
+  1. **Fill first, every turn.** Before ANY inline parent work
+     beyond a one-command probe, count live agents (`proc://`) and
+     dispatch until `live == min(cap, driveable work)`. A parent
+     turn that ends with dispatchable work unassigned and
+     `live < cap` is a campaign failure — same class as an
+     unactioned verdict.
+  2. **Batch-dispatch, never drip.** Refills go out as ONE
+     `task` call with many `tasks[]` (engineers + reviewers
+     mixed), sized to the cap. Serial one-lane-at-a-time dispatch
+     across multiple parent turns is the failure mode this rule
+     exists to kill.
+  3. **Inline work is capped.** Parent inline work is folds and
+     merges ONLY, and only while lanes are full or no driveable
+     work remains. If a fold/probe will take more than ~2 tool
+     calls, it becomes a lane (engineer task with the exact
+     worktree + findings), not parent serial work. While waiting
+     on verdicts, the parent refills and merges — it never just
+     waits with empty lanes.
+  4. **Completions are refill triggers, not rest points.** Every
+     completion notification (engineer, reviewer, gate) is
+     processed as: stamp/merge what it unblocks, THEN immediately
+     dispatch the next lowest driveable item into the freed slot,
+     in the same response. Summaries and status reports never
+     substitute for a dispatch.
+  5. **Report the number.** Every parent status surface (tracking
+     task line, keeper board read, wave summary) carries
+     `agents=<live>/<cap> driveable=<n>`; if `<live> < min(cap,
+     driveable)` the same message MUST contain the dispatches that
+     fix it.
   triple reviewers for every PR at a reviewable head, (2) gate
   runners for gated PRs (see the three-cluster cadence below),
   (3) engineers/researchers on the lowest-numbered driveable
@@ -151,6 +185,47 @@ driveable work remains.
   `<phys>v[0-9]+`, fwmark 52xx/table-220 rules, `/var/lib/xpf`,
   active frr/strongswan/xpfd host units): alert, never
   auto-clean — residue may be operator state.
+- **Running tests MUST NOT touch host interfaces (2026-10-27,
+  user directive — the rules above failed in practice)**: declaring
+  classes did not stop lanes from running broad suites unprivileged
+  on the workstation and mutating host state anyway (residue above:
+  32 `eno5v*` links, fwmark 52xx, table 220 — present NOW). The
+  failure mechanism: "unprivileged" is not isolation — any test
+  that creates links/rules/routes via netlink, execs `ip`/`nft`,
+  or binds host interfaces acts on the HOST netns unless it first
+  enters a private one, and a suite run inherits whatever reach
+  its cells have. Binding execution rules for EVERY lane (parent
+  included — no exceptions for "just checking"):
+  1. **Default workstation invocation is hermetic-only.** On the
+     workstation a lane runs ONLY: named tests (`-run <Exact>` /
+     `-- --exact`), or packages proven hermetic (no netlink, no
+     `ip`/`nft` exec, no interface mutation anywhere in the
+     package's test closure). Broad `go test ./pkg/...`,
+     `cargo test` (workspace), and full-package runs of
+     network-reachable packages (daemon, routing, nftables,
+     networkd, vrrp, ipsec, snmp, userspace-dp, dataplane) are
+     PROHIBITED on the workstation — they run in the VM leg or
+     not at all; record NOT-EXAMINED with the VM target.
+  2. **Kernel-reachable cells run namespaced or not at all.** Any
+     cell that can reach the kernel MUST execute under
+     `unshare -Urn` (or the repo self-re-exec parity pattern), or
+     be guarded by `internal/testisolation` (namespace identity
+     vs PID 1, never euid, never an env var alone): host-netns
+     reach = hard FAIL in-test, never a skip, never silent
+     execution. Before running an unfamiliar cell, the lane
+     greps it for `LinkAdd|RuleAdd|AddrAdd|nft|exec.Command("ip"`
+     and classifies FIRST.
+  3. **Prove no residue.** After any workstation test run that
+     touched namespaces, the lane diffs host state before/after
+     (`ip -brief link`, `ip rule`, `nft list ruleset` line
+     counts) and reports it; new host links/rules = the run was
+     a violation — stop, file an issue against the cell, and do
+     not re-run it outside a namespace.
+  4. **Reviewers enforce execution, not just declarations.** A
+     PR whose validation section claims broad-suite runs on the
+     workstation, or whose new kernel-reachable cell lacks the
+     namespace guard, is MERGE-NEEDS-CHANGES regardless of test
+     results. "It passed" is not evidence it was safe to run.
 - **Disk guard — `/var/worktrees` must never fill up**: unbounded lanes
   plus Go/Rust caches will fill the volume mid-campaign if nobody owns
   it, so the keeper checks it every tick and the parent reaps. Measure

@@ -45,6 +45,16 @@ declare their class in the same change; reviewers reject
 undeclared host-reachable tests. `XPF_SACRIFICIAL_HOST=1` is
 wrapper-set VM intent only, never set by hand on the workstation.
 
+**Execution (2026-10-27): classification alone failed.** On the
+workstation, run ONLY named tests or proven-hermetic packages;
+broad suites of network-reachable packages (daemon, routing,
+nftables, networkd, vrrp, ipsec, snmp, dataplane) are prohibited
+outside a VM leg. Kernel-reachable cells execute under
+`unshare -Urn` (or self-re-exec parity) or behind
+`internal/testisolation` (namespace identity vs PID 1; host
+reach = hard FAIL). Verify a lane's claimed runs obey this;
+"it passed" on the workstation is not proof it was safe.
+
 ## Standing rules (apply at every step)
 
 - **Plan first, code never first.** Never edit code before the
