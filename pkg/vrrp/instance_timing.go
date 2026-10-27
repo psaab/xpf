@@ -128,6 +128,18 @@ func effectiveAdvertInterval(localMS int, learned time.Duration) time.Duration {
 // own configured AdvertiseInterval. Before any advert has been heard
 // (masterAdverInterval == 0) the local interval is the fallback. The local
 // priority is used for Skew_Time (RFC 5798 §6.1).
+//
+// Pending-resign window (#18045): while a forced resignation is
+// pending (resignPending set, becomeBackup not yet run), getPriority
+// deliberately reports the PRE-resign priority so routine MASTER
+// adverts do not leak the stashed 0. A resigned BACKUP therefore
+// keeps its pre-resign skew — and election competitiveness — until
+// its run loop services resignCh and applies priority 0. The
+// window is bounded by design: one run-loop iteration, and the
+// posture reconcile re-sends the restored priority after a 10s
+// mismatch. Making skew read the pending state instead would let
+// a resigning backup win master-down races it has already
+// surrendered; the retained skew is the conservative direction.
 func (vi *vrrpInstance) masterDownInterval() time.Duration {
 	vi.mu.RLock()
 	localMS := vi.cfg.AdvertiseInterval
