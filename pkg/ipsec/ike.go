@@ -1035,8 +1035,11 @@ func (m *Manager) TerminateConnection(name string) error {
 // and with it the epoch bump that strictly precedes it — down to this
 // guard read), so this terminate still precedes, and can only hit, the OLD
 // SA; if the failback already began, guard reads the bumped epoch and
-// aborts. aborted reports the guard declining; the caller should stop the
-// whole sweep, not merely skip this name.
+// aborted reports the guard declining; the caller should stop the
+// whole sweep, not merely skip this name. The guard runs under opMu:
+// it must not call InitiateConnection or TerminateConnectionGuarded
+// (self-deadlock); the current epoch/primary guard only reads brief
+// locks and is safe.
 func (m *Manager) TerminateConnectionGuarded(name string, guard func() bool) (aborted bool, err error) {
 	if name == "" {
 		return false, nil
