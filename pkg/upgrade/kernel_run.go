@@ -568,28 +568,64 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) (bool, error) {
 	// the known-good default and no trial ever happens — a FALSE-ARMED journal.
 	// Arm then refuses-forever (>= ARMED), and self-recovery treats it as a
 	// genuine in-flight trial and suppresses expired-lease failback INDEFINITELY,
-	// so a drained node never rejoins. The two orders are not symmetric — neither
-	// single write is atomic with the NVRAM mutation — so make ARMED authoritative
-	// via a positive readback instead:
+	// so a drained node never rejoins. The orders are not symmetric — no
+	// single write is atomic with the NVRAM mutation — so make ARMED
+	// authoritative via a positive readback instead:
 	//
 	//   1. record ARMING (prepared intent) BEFORE the NVRAM mutation, with a
 	//      fresh per-attempt nonce;
-	//   2. SetBootNext(inactiveID);
-	//   3. POSITIVELY read BootNext back == inactiveID (a firmware that dropped
+	//   2. durably write the arm record (#17862) — see recordPromoteBinary
+	//      below;
+	//   3. SetBootNext(inactiveID);
+	//   4. POSITIVELY read BootNext back == inactiveID (a firmware that dropped
 	//      or partial-wrote the variable must not yield a false-ARMED journal);
-	//   4. only THEN durably transition ARMING -> ARMED, recording the confirmed
+	//   5. only THEN durably transition ARMING -> ARMED, recording the confirmed
 	//      boot id.
 	//
-	// A journal stuck at ARMING is NOT a genuine trial (BootNext unconfirmed):
-	// Arm re-arms from it (ARMING < ARMED, so the >= ARMED refusal does not fire),
-	// and self-recovery does not suppress failback (IsArmed reports true only for
-	// the verified ARMED). armCandidate is idempotent, so a re-arm from ARMING
-	// re-runs cleanly.
+	// A journal stuck at ARMING means different things to different readers,
+	// and the split is deliberate (#5847 + #16809 + #17862):
+	//
+	//   * ARMING alone is PREPARED INTENT — Arm re-arms from it (ARMING <
+	//     ARMED, so the >= ARMED refusal does not fire; armCandidate is
+	//     idempotent), and IsArmed reports true only for the verified ARMED,
+	//     so offline reads and the re-arm refusal keep their meaning.
+	//   * ARMING + boot evidence (BootCurrent == inactive slot AND the running
+	//     kernel IS the candidate) is an UNCONFIRMED TRIAL (#16809): Promote
+	//     gates it exactly like ARMED, and the daemon hold/self-recovery
+	//     classify on TrialInFlight so it holds SECONDARY rather than
+	//     rejoining on an untested kernel.
+	//   * ARMING + the arm record absent used to be indistinguishable from
+	//     "the one-shot was never queued" — a claim the pre-#17862 write order
+	//     could not support, because the record was written only AFTER the
+	//     readback, so death in the two-efibootmgr-exec window left a QUEUED
+	//     one-shot with no record and the boot gate folded the journal to
+	//     not-armed. With the record now written BEFORE SetBootNext, a
+	//     recordless ARMING journal from a current build proves the arm died
+	//     before any NVRAM mutation; the residual shapes (a journal written by
+	//     a pre-#17862 build, an out-of-band sidecar loss) are reported loudly
+	//     by the boot gate instead of laundered as an ordinary boot.
 	j.ArmAttempts++
 	j.ArmNonce = r.newArmNonce(j)
 	j.BootID = ""
 	if err := r.ktransition(j, KernelStateArming); err != nil {
 		return false, disarmWatchdogAfterArmFailure(sys, err)
+	}
+
+	// #17862: record WHICH xpfd must verify this candidate BEFORE the NVRAM
+	// mutation. The boot gate executes the binary named by this record and
+	// never infers one (#6601 r6), so the invariant that closes the crash
+	// window is ordering, not existence-at-ARMED: any boot the one-shot can
+	// produce must already find the record durable. Writing it after the
+	// readback left death-anywhere-in-the-window booting the candidate with
+	// the journal at ARMING and NO record — the shell gate folds recordless
+	// ARMING away and exits quietly, so verify-dataplane, the beacon and the
+	// explicit revert never run. Failing here still refuses the arm rather
+	// than producing an armed candidate nothing is designated to verify; no
+	// NVRAM write has happened yet, so the cleanup is the watchdog disarm
+	// alone (clearing an absent BootNext would also succeed, but there is
+	// nothing to clear and the message would lie about a queued one-shot).
+	if err := r.recordPromoteBinary(j); err != nil {
+		return false, disarmWatchdogAfterArmFailure(sys, fmt.Errorf("kernel-upgrade arm: %w", err))
 	}
 
 	if err := sys.SetBootNext(inactiveID); err != nil {
@@ -612,6 +648,9 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) (bool, error) {
 	// verified-ARMED journal. If the readback disagrees (firmware silently
 	// dropped / partial-wrote the variable), do NOT advance to ARMED — stay
 	// ARMING and surface the error so no false-ARMED journal is persisted.
+	// The arm record written above is already correct for this state: the
+	// boot gate sees ARMING + a record, runs the recorded binary, and the Go
+	// half convicts or no-ops on boot evidence (#16809).
 	got, err = sys.GetBootNext()
 	if err != nil {
 		return false, disarmAfterArmFailure(sys, fmt.Errorf(
@@ -627,13 +666,6 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) (bool, error) {
 	// Verified: the firmware WILL boot the candidate next. Record the confirmed
 	// boot id and transition to the genuine (trial-in-flight) ARMED state.
 	j.BootID = inactiveID
-	// Record WHICH xpfd must verify this candidate, before the journal says
-	// ARMED. The gate reads this instead of inferring a binary from ambient
-	// state; failing here refuses the arm rather than producing an armed
-	// candidate nothing is designated to verify (#6601 r6).
-	if err := r.recordPromoteBinary(j); err != nil {
-		return false, disarmAfterArmFailure(sys, fmt.Errorf("kernel-upgrade arm: %w", err))
-	}
 	if err := r.ktransition(j, KernelStateArmed); err != nil {
 		if !isPostRenameJournalError(err) {
 			return false, disarmAfterArmFailure(sys, err)
@@ -692,23 +724,20 @@ func disarmStrictWatchdogAfterArmFailure(sys KernelSystem, armErr error) error {
 // drained node could rejoin with an untested candidate kernel queued for its
 // next boot.
 //
-// The `recordPromoteBinary` path is the sharpest: the readback had already
-// CONFIRMED the one-shot, so the candidate was genuinely queued while no xpfd
-// was designated to verify it — an armed candidate with nothing to run the
-// promotion gate, which #6601 added that record specifically to prevent.
-//
-// SINGLE-SOURCED for armCandidate's failure paths at or after the SetBootNext
+// SINGLE-SOURCED for armCandidate's failure paths AT OR AFTER the SetBootNext
 // call (#16809: including SetBootNext's own error, whose write may have
 // landed before the exec reported failure); a failed Reboot uses the same
-// clear step and disarms only after it succeeds.
+// clear step and disarms only after it succeeds. The one failure BEFORE that
+// call — the #17862 arm-record write — uses the plain watchdog disarm: no
+// NVRAM mutation has happened yet, so there is no one-shot to clear.
 // Clearing an absent BootNext is not an error, so this is safe on the
 // readback-mismatch path where the firmware may have dropped the variable.
 //
 // If the clear itself FAILS, armCandidate still attempts watchdog disarm and
 // reports both cleanup errors. The failed-Reboot path instead keeps the
 // watchdog running until it can restore the verified ARMED journal. This helper
-// does not mutate the journal: armCandidate cannot manufacture ARMED because the
-// promote binary may be missing on its recordPromoteBinary path.
+// does not mutate the journal: armCandidate cannot manufacture ARMED because a
+// failed arm never reaches the ARMED transition.
 func disarmAfterArmFailure(sys KernelSystem, cause error) error {
 	_, cause = clearBootNextAfterArmFailure(sys, cause)
 	return disarmWatchdogAfterArmFailure(sys, cause)
