@@ -170,6 +170,67 @@ func (t *tunnelManager) bumpLinkGenLocked(name string) {
 	t.linkGenForLocked(name).Add(1)
 }
 
+// drainForRecreateLocked cancels+drains any keepalive runner for name
+// and bumps its link generation (#1918 §6 Axis D F7). Both apply paths
+// call it BEFORE a delete+recreate so no stale runner tick can
+// LinkSet* a recreated device that reused the ifindex; linkGen is the
+// lock-free defense-in-depth backstop. Caller MUST hold mu.
+func (t *tunnelManager) drainForRecreateLocked(name string) {
+	t.stopKeepaliveLocked(name)
+	t.bumpLinkGenLocked(name)
+}
+
+// keepaliveTransportInstance is the single encoding of the
+// transport-instance rule (#17039): an AnchorOnly tunnel's probes ride
+// its configured routing instance, a legacy kernel tunnel's probes use
+// the main FIB (empty) because buildKernelTunnelLink leaves the
+// device's lower-link selector unset, so its outer route lookup is the
+// main table regardless of the interface's VRF binding.
+func keepaliveTransportInstance(tc *config.TunnelConfig) string {
+	if tc.AnchorOnly {
+		return tc.RoutingInstance
+	}
+	return ""
+}
+
+// reconcileKeepaliveLocked is the shared keepalive tail of
+// applyAnchorLocked and applyKernelTunnelLocked (#17039, formerly two
+// hand-kept copies that drifted in #4071/#4076): retain an
+// identity-unchanged runner so probe state survives commits, restart
+// it on identity change or (re)create, and stop it when keepalive is
+// removed. It runs finishTunnelLocked itself because the retained-
+// and-DOWN case must SKIP the LinkSetUp: keepaliveLoop's
+// down-transition is gated on state.Up==true, so re-upping the link
+// here would strand it admin UP forever while probes keep failing.
+// kind is the finishTunnelLocked log label ("tunnel anchor" /
+// "tunnel"). Returns finishTunnelLocked's error (#5355 fail-closed).
+// Caller MUST hold mu.
+func (t *tunnelManager) reconcileKeepaliveLocked(tc *config.TunnelConfig, link netlink.Link, created bool, kind string) error {
+	runner, hasRunner := t.keepalives[tc.Name]
+	restartKA := tc.Keepalive > 0 && (!hasRunner || created || !runner.matches(tc))
+	skipUp := false
+	if tc.Keepalive > 0 && hasRunner && !restartKA {
+		runner.state.mu.Lock()
+		skipUp = !runner.state.Up
+		runner.state.mu.Unlock()
+	}
+
+	finishErr := t.finishTunnelLocked(tc, link, skipUp, kind)
+
+	if tc.Keepalive > 0 {
+		if restartKA {
+			// startKeepalive stops+drains any predecessor itself;
+			// runs AFTER a recreate so the fresh runner probes the
+			// new device. tc.Source is the probe bind endpoint
+			// (#1918 §5c).
+			t.startKeepalive(tc.Name, keepaliveTransportInstance(tc), tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
+		}
+	} else if hasRunner {
+		t.stopKeepaliveLocked(tc.Name)
+	}
+	return finishErr
+}
+
 func (t *tunnelManager) setLivenessChangeCallback(callback func(tunnelName string, up bool)) {
 	if callback == nil {
 		t.livenessChange.Store(nil)
@@ -558,8 +619,15 @@ func (t *tunnelManager) applyAnchorLocked(tc *config.TunnelConfig, adopting bool
 		willRecreate = true
 	}
 	if willRecreate {
-		t.stopKeepaliveLocked(tc.Name)
-		t.bumpLinkGenLocked(tc.Name)
+		// No keepalive restart on the failed-replace early return
+		// below (deliberate, #17039): the surviving link is a
+		// non-TUN device the config is replacing, not the anchor the
+		// probes target, so restarting probes against it would probe
+		// the wrong device. The apply fails closed and the next apply
+		// restarts keepalive against the recreated anchor (contrast
+		// applyKernelTunnelLocked, whose surviving link IS the wanted
+		// kind and is restarted there).
+		t.drainForRecreateLocked(tc.Name)
 	}
 
 	var link netlink.Link
@@ -645,36 +713,10 @@ func (t *tunnelManager) applyAnchorLocked(tc *config.TunnelConfig, adopting bool
 		t.reconcileAnchorMTULocked(tc, link, adopting)
 	}
 
-	// Keepalive reconcile (#4071, mirroring applyKernelTunnelLocked's
-	// #1884 A.7 identity reconcile). Retain an identity-unchanged runner
-	// so probe state survives commits; the retained-and-DOWN case must
-	// SKIP the LinkSetUp in finishTunnelLocked so the reconcile does not
-	// fight a keepalive-down state — keepaliveLoop's down-transition is
-	// gated on state.Up==true, so re-upping the link here would strand it
-	// admin UP forever while probes keep failing. When willRecreate drained
-	// the runner above, hasRunner is false → restartKA starts a fresh one.
-	runner, hasRunner := t.keepalives[tc.Name]
-	restartKA := tc.Keepalive > 0 && (!hasRunner || created || !runner.matches(tc))
-	skipUp := false
-	if tc.Keepalive > 0 && hasRunner && !restartKA {
-		runner.state.mu.Lock()
-		skipUp = !runner.state.Up
-		runner.state.mu.Unlock()
-	}
-
-	finishErr := t.finishTunnelLocked(tc, link, skipUp, "tunnel anchor")
-
-	if tc.Keepalive > 0 {
-		if restartKA {
-			// startKeepalive stops+drains any predecessor itself; runs
-			// AFTER a recreate so the fresh runner probes the new device.
-			// tc.Source is the probe bind endpoint (#1918 §5c).
-			t.startKeepalive(tc.Name, tc.RoutingInstance, tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
-		}
-	} else if hasRunner {
-		t.stopKeepaliveLocked(tc.Name)
-	}
-	return finishErr
+	// Keepalive reconcile: shared tail in reconcileKeepaliveLocked
+	// (#4071 identity reconcile, unified in #17039). When willRecreate
+	// drained the runner above, hasRunner is false → a fresh one starts.
+	return t.reconcileKeepaliveLocked(tc, link, created, "tunnel anchor")
 }
 
 // greAnchorOverheadV4/V6 is the per-packet outer encapsulation overhead
@@ -897,8 +939,9 @@ func legacyTunnelMatches(existing, desired netlink.Link) bool {
 // The legacy kernel GRE/IPIP device's lower-link selector is unset
 // (`buildKernelTunnelLink` leaves `Link` zero), so its outer route
 // lookup uses the main FIB. `tc.RoutingInstance` only VRF-binds the
-// tunnel interface; keepalive probes on this path pass an empty
-// transport instance to match the kernel's outer lookup.
+// tunnel interface; keepalive probes on this path use the empty
+// transport instance keepaliveTransportInstance yields for non-anchor
+// tunnels, matching the kernel's outer lookup.
 //
 // #5355: returns a non-nil error on a GENUINE reconcile failure (the
 // replace LinkDel, the create LinkAdd, or the finishTunnelLocked
@@ -960,8 +1003,7 @@ func (t *tunnelManager) applyKernelTunnelLocked(tc *config.TunnelConfig) error {
 	if willRecreate {
 		// Drain the stale runner first; bump the generation so any runner
 		// that somehow survives (future code paths) drops its netlink op.
-		t.stopKeepaliveLocked(tc.Name)
-		t.bumpLinkGenLocked(tc.Name)
+		t.drainForRecreateLocked(tc.Name)
 	}
 
 	var link netlink.Link
@@ -983,7 +1025,7 @@ func (t *tunnelManager) applyKernelTunnelLocked(tc *config.TunnelConfig) error {
 				// recreated — the restarted runner captures the just-bumped
 				// generation and probes the same device.
 				if tc.Keepalive > 0 {
-					t.startKeepalive(tc.Name, "", tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
+					t.startKeepalive(tc.Name, keepaliveTransportInstance(tc), tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
 				}
 				return fmt.Errorf("replace tunnel %s: %w", tc.Name, delErr)
 			}
@@ -1040,35 +1082,9 @@ func (t *tunnelManager) applyKernelTunnelLocked(tc *config.TunnelConfig) error {
 		}
 	}
 
-	// Keepalive reconcile (#1884 A.7, LEGACY BRANCH ONLY — anchors
-	// never run probes). Identity-unchanged runners are retained so
-	// probe state survives commits; the retained-and-DOWN case must
-	// skip LinkSetUp below: keepaliveLoop's down-transition is gated
-	// on state.Up==true, so re-upping the link here would strand it
-	// admin UP forever while probes keep failing (r1 Codex F1 + AGY
-	// converged trace).
-	runner, hasRunner := t.keepalives[tc.Name]
-	restartKA := tc.Keepalive > 0 && (!hasRunner || created || !runner.matches(tc))
-	skipUp := false
-	if tc.Keepalive > 0 && hasRunner && !restartKA {
-		runner.state.mu.Lock()
-		skipUp = !runner.state.Up
-		runner.state.mu.Unlock()
-	}
-
-	finishErr := t.finishTunnelLocked(tc, link, skipUp, "tunnel")
-
-	if tc.Keepalive > 0 {
-		if restartKA {
-			// startKeepalive stops+drains any predecessor itself;
-			// runs AFTER a recreate so the fresh runner probes the
-			// new device. tc.Source is the bind endpoint (#1918 §5c).
-			t.startKeepalive(tc.Name, "", tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
-		}
-	} else if hasRunner {
-		t.stopKeepaliveLocked(tc.Name)
-	}
-	return finishErr
+	// Keepalive reconcile: shared tail in reconcileKeepaliveLocked
+	// (#1884 A.7 identity reconcile, unified in #17039).
+	return t.reconcileKeepaliveLocked(tc, link, created, "tunnel")
 }
 
 // finishTunnelLocked is the shared apply tail: admin-up (unless a
