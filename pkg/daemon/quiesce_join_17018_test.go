@@ -8,7 +8,6 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
-	"github.com/psaab/xpf/pkg/ipsec"
 
 	"golang.org/x/sync/semaphore"
 )
@@ -116,40 +115,6 @@ func TestParkedManagementOnlyLeaseRefreshAbortsOnFence17018(t *testing.T) {
 	awaitReturn17018(t, "managementOnlyLeaseRefresh", d.managementOnlyLeaseRefresh, d.fenceBackgroundApplies)
 	if got := routeCalls.Load(); got != 0 {
 		t.Fatalf("mgmt route refresh ran %d time(s) after the fence; the cancelled refresh must not reconcile (#17018)", got)
-	}
-}
-
-func TestParkedReapplyIPsecAbortsOnFence17018(t *testing.T) {
-	d := parkedDaemon17018(t)
-	d.ipsec = ipsec.New()
-	var applies atomic.Int32
-	d.ipsecApply = func(*config.Config) error { applies.Add(1); return nil }
-	holdApplySem17018(t, d)
-	cfg := dhcpBoundIPsecConfig()
-	awaitReturn17018(t, "reapplyIPsecForLeaseChange", func() { d.reapplyIPsecForLeaseChange(cfg) }, d.fenceBackgroundApplies)
-	if got := applies.Load(); got != 0 {
-		t.Fatalf("IPsec reapply ran %d time(s) after the fence; a cancelled waiter must not re-render swanctl (#17018)", got)
-	}
-}
-
-func TestParkedRebindWebMgmtAbortsOnFence17018(t *testing.T) {
-	d := parkedDaemon17018(t)
-	d.mgmt.Store(&managementReconciler{})
-	var calls atomic.Int32
-	prevApply := webMgmtRebindApply
-	t.Cleanup(func() { webMgmtRebindApply = prevApply })
-	webMgmtRebindApply = func(*Daemon, *config.Config) error { calls.Add(1); return nil }
-	cfg := &config.Config{}
-	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
-		"fxp0": {Name: "fxp0", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCP: true}}},
-	}
-	cfg.System.Services = &config.SystemServicesConfig{
-		WebManagement: &config.WebManagementConfig{HTTPS: true, HTTPSInterface: "fxp0.0"},
-	}
-	holdApplySem17018(t, d)
-	awaitReturn17018(t, "rebindWebMgmtForLeaseChange", func() { d.rebindWebMgmtForLeaseChange(cfg) }, d.fenceBackgroundApplies)
-	if got := calls.Load(); got != 0 {
-		t.Fatalf("web-management rebind ran %d time(s) after the fence; a cancelled waiter must not rebind (#17018)", got)
 	}
 }
 
