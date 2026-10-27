@@ -81,40 +81,13 @@ func TestDHCPLeaseSurvivesReconfigureNetns14594(t *testing.T) {
 		}
 	}
 
-	script := `#!/bin/bash
-set -u
-mount -t tmpfs tmpfs /run
-mount -t tmpfs tmpfs /etc/systemd/network
-mkdir -p /run/systemd/network
-cp /probe-nets/*.network /etc/systemd/network/
-/lib/systemd/systemd-udevd > /probe-nets/udevd.log 2>&1 &
-/lib/systemd/systemd-networkd > /probe-nets/networkd.log 2>&1 &
-NPID=$!
-for i in $(seq 1 30); do [ -S /run/systemd/netif/io.systemd.Network ] && break; sleep 0.5; done
-sleep 2
-for d in dum0 dum1 dum2 dum3; do ip link add $d type dummy; ip link set $d up; done
-sleep 4
-for d in dum0 dum1 dum2 dum3; do
-  ip addr add 192.0.2.10/24 valid_lft 3600 preferred_lft 3600 dev $d
-  ip addr add 2001:db8::10/64 valid_lft 3600 preferred_lft 3600 dev $d
-done
-ip addr del 192.0.2.10/24 dev dum1; ip addr del 2001:db8::10/64 dev dum1
-ip addr add 192.0.2.10/24 dev dum1; ip addr add 2001:db8::10/64 dev dum1
-ip addr add 192.0.2.11/24 dev dum0
-networkctl --no-pager reconfigure -- dum0 dum1 dum2 dum3 || exit 2
-sleep 3
-fail=0
-check() { d=$1; want=$2; got=$(ip -o addr show dev $d | grep -v fe80 | grep -c inet || true); echo "$d non-LL=$got want=$want"; [ "$got" = "$want" ] || fail=1; }
-check dum0 3; check dum1 2; check dum2 2; check dum3 0
-kill $NPID 2>/dev/null; pkill systemd-udevd 2>/dev/null; wait 2>/dev/null
-exit $fail
-`
+	script := dhcpSurvivalProbeScript14594()
 	scriptPath := filepath.Join(dir, "probe.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	inner := "mkdir -p /probe-nets; mount --bind " + dir + " /probe-nets; exec /probe-nets/probe.sh"
-	cmd := exec.Command("unshare", "-n", "-m", "--propagation", "private", "bash", "-c", inner)
+	cmd := netnsProbeCommand17857(inner)
 	out, err := cmd.CombinedOutput()
 	t.Logf("netns probe output:\n%s", out)
 	if err != nil {

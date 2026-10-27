@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
@@ -15,7 +18,9 @@ import (
 // The low-rate kernel-truth recheck must mark it stale (and Warn once).
 
 func hostDriftDaemon15264() *Daemon {
-	d := &Daemon{}
+	// #17861: the recheck serializes its observe+clear pass with applies
+	// via applySem, so every daemon handed to it needs a live semaphore.
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 	d.hostInboundEnforced.Store(true)
 	d.noteHostInboundApplySucceeded()
 	d.lo0Enforced.Store(true)
@@ -107,7 +112,7 @@ func TestKernelTruthProgramOnlyStaysCurrent15264(t *testing.T) {
 func TestKernelTruthLo0DriftOnly15264(t *testing.T) {
 	orig := nftInstaller
 	t.Cleanup(func() { nftInstaller = orig })
-	d := &Daemon{}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)} // #17861: recheck takes applySem
 	d.lo0Enforced.Store(true)
 	nftInstaller = &fakeNftInstaller{
 		tableDropsInput: func(string) (bool, error) { return false, nil },
@@ -125,7 +130,7 @@ func TestKernelTruthLo0DriftOnly15264(t *testing.T) {
 func TestKernelTruthNotEstablishedIsNoop15264(t *testing.T) {
 	orig := nftInstaller
 	t.Cleanup(func() { nftInstaller = orig })
-	d := &Daemon{} // nothing established, nothing configured
+	d := &Daemon{applySem: semaphore.NewWeighted(1)} // nothing established, nothing configured
 	calls := 0
 	nftInstaller = &fakeNftInstaller{
 		tableDropsInput: func(string) (bool, error) { calls++; return false, nil },
@@ -169,7 +174,7 @@ func TestKernelTruthFlushThenFailedReapplyInstallsColdBootFence16823(t *testing.
 
 	// Step 1: real install succeeds → covered={172.16.50.8, 2001:db8:50::8}.
 	nftInstaller = &fakeNftInstaller{}
-	d := &Daemon{}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)} // #17861: recheck takes applySem
 	if err := d.applyHostInboundFilter(cfg); err != nil {
 		t.Fatalf("step 1 (install): %v", err)
 	}
@@ -249,7 +254,7 @@ func TestKernelTruthFlushThenSuccessfulReapplyConverges16823(t *testing.T) {
 	cfg := hostInboundTestConfig()
 
 	nftInstaller = &fakeNftInstaller{}
-	d := &Daemon{}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)} // #17861: recheck takes applySem
 	if err := d.applyHostInboundFilter(cfg); err != nil {
 		t.Fatalf("step 1 (install): %v", err)
 	}
@@ -389,5 +394,119 @@ func TestKernelTruthDriftWarnRearmsAfterHeal16823(t *testing.T) {
 	d.recheckHostKernelTruth15264(time.Now())
 	if got := strings.Count(buf.String(), "marking applied state stale"); got != 2 {
 		t.Fatalf("second flush must warn again (total 2), got %d:\n%s", got, buf.String())
+	}
+}
+
+// #17861 DEFECT cell: the drift probe and its retention clears must be ONE
+// critical section relative to applies. Pre-fix the recheck observed the
+// kernel and cleared apply-owned state (hostInboundEnforced, the covered /
+// DHCP-retained sets, the gap + pre-activation fence pointers, lo0Enforced)
+// WITHOUT applySem: a probe that had already observed the flushed table
+// could be preempted before its clears while a concurrent apply installed
+// and published a fresh real generation; resuming, the stale observation
+// wiped the FRESH generation's retention state, so the next failed apply
+// replaced the valid retained table and its service accepts with the
+// cold-boot deny-only fence and lost the retained fence bookkeeping. This
+// cell parks the recheck between its kernel reads and the clears, then
+// publishes a fresh generation under applySem exactly as a successful
+// apply does: RED pre-fix (fresh state wiped by the resumed probe), GREEN
+// post-fix (the probe holds applySem across its whole pass, so the clears
+// complete before the publication, which supersedes them).
+func TestKernelTruthDriftClearSparesConcurrentFreshApply17861(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	d := hostDriftDaemon15264()
+	// Retention state of the FLUSHED generation — what the recheck may clear.
+	d.hostInboundCoveredAddrs = map[string]struct{}{hostInboundDropAddrKey('4', "198.51.100.7"): {}}
+	d.hostInboundDHCPRetainedAddrs = map[string]struct{}{hostInboundDropAddrKey('4', "198.51.100.7"): {}}
+	d.hostInboundGapFenceActive.Store(true)
+	d.hostInboundGapFenceSpec = &xnft.GapFenceSpec{UncoveredV4: []string{"198.51.100.7"}}
+	d.hostInboundPreActivationFence = &xnft.GapFenceSpec{PreActivation: true, UncoveredV4: []string{"198.51.100.8"}}
+
+	// Park point: TableEnforcing(xpf_hostinbound) is the LAST kernel read
+	// before the clears, so parking inside it puts the recheck exactly in
+	// the issue's window — observation complete, clears not yet run.
+	inProbe := make(chan struct{})
+	resume := make(chan struct{})
+	nftInstaller = &fakeNftInstaller{
+		tableDropsInput: func(string) (bool, error) { return false, nil },
+		tableEnforcing: func(name string) (bool, error) {
+			if name == xnft.HostInboundTableName {
+				close(inProbe)
+				<-resume
+			}
+			return false, nil
+		},
+	}
+	recheckDone := make(chan struct{})
+	go func() {
+		d.recheckHostKernelTruth15264(time.Now())
+		close(recheckDone)
+	}()
+	<-inProbe
+
+	// Concurrent successful apply, modeled on the production success sites
+	// (applyHostInboundFilter real-load success with retained fences at
+	// daemon_nft.go, applyLo0Filter success): the whole publication happens
+	// under applySem, like every real apply.
+	acquired := make(chan struct{})
+	applied := make(chan struct{})
+	freshGap := &xnft.GapFenceSpec{UncoveredV4: []string{"203.0.113.10"}}
+	freshPre := &xnft.GapFenceSpec{PreActivation: true, UncoveredV4: []string{"203.0.113.11"}}
+	go func() {
+		defer close(applied)
+		if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+			return
+		}
+		defer d.applySem.Release(1)
+		close(acquired)
+		d.hostInboundEnforced.Store(true)
+		d.noteHostInboundApplySucceeded()
+		d.hostInboundGapFenceActive.Store(true) // fresh generation retained its fences
+		d.hostInboundGapFenceSpec = freshGap
+		d.hostInboundPreActivationFence = freshPre
+		d.hostInboundCoveredAddrs = map[string]struct{}{hostInboundDropAddrKey('4', "203.0.113.10"): {}}
+		d.hostInboundDHCPRetainedAddrs = map[string]struct{}{hostInboundDropAddrKey('4', "203.0.113.10"): {}}
+		d.lo0Enforced.Store(true)
+	}()
+
+	// Pre-fix the recheck holds no semaphore, so the apply acquires
+	// immediately and its publication lands INSIDE the stale probe's
+	// window: wait for it, then resume the probe straight into the bug.
+	// Post-fix the probe holds applySem for its whole observe+clear pass,
+	// so the apply stays parked on the acquire: time out, resume the
+	// probe, and let its clears complete before the publication lands.
+	select {
+	case <-acquired:
+		<-applied
+	case <-time.After(2 * time.Second):
+	}
+	close(resume)
+	<-recheckDone
+	<-applied
+
+	// The fresh generation's retention state must survive the drift clear.
+	if !d.hostInboundEnforced.Load() {
+		t.Fatal("#17861: the stale drift clear wiped the fresh generation's hostInboundEnforced latch; " +
+			"the next failed apply would fence over the valid retained table and its service accepts")
+	}
+	if _, ok := d.hostInboundCoveredAddrs[hostInboundDropAddrKey('4', "203.0.113.10")]; !ok {
+		t.Fatalf("#17861: the stale drift clear wiped the fresh covered set, got %v", d.hostInboundCoveredAddrs)
+	}
+	if _, ok := d.hostInboundDHCPRetainedAddrs[hostInboundDropAddrKey('4', "203.0.113.10")]; !ok {
+		t.Fatalf("#17861: the stale drift clear wiped the fresh DHCP-retained set, got %v", d.hostInboundDHCPRetainedAddrs)
+	}
+	if d.hostInboundGapFenceSpec != freshGap || d.hostInboundPreActivationFence != freshPre {
+		t.Fatalf("#17861: the stale drift clear wiped the fresh fence bookkeeping, gap=%v pre=%v",
+			d.hostInboundGapFenceSpec, d.hostInboundPreActivationFence)
+	}
+	if !d.hostInboundGapFenceActive.Load() {
+		t.Fatal("#17861: the stale drift clear wiped the fresh gap-fence marker")
+	}
+	if !d.lo0Enforced.Load() {
+		t.Fatal("#17861: the stale drift clear wiped the fresh lo0Enforced latch")
+	}
+	if st := d.HostInboundApplied(); !st.Current() {
+		t.Fatalf("#17861: the fresh generation must read Current after superseding the drift clear, got %+v", st)
 	}
 }

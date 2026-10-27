@@ -58,10 +58,11 @@ func TestApplyGenerationWritesAnInertMarkerPool9641(t *testing.T) {
 	}
 }
 
-// A plain Apply, and any generation that is not a lowercase hex digest, write the UNKNOWN
-// marker. The token is an unquoted section name, so a tampered generation must never
-// reach the file.
-func TestApplyGenerationWritesUnknownForAnythingButADigest9641(t *testing.T) {
+// A plain Apply, and any generation that is not a lowercase hex digest, use
+// the rendered-config fingerprint as their marker. That distinguishes such a
+// prior file from a changed candidate without treating untrusted input as a
+// section name.
+func TestApplyGenerationWritesRenderedIdentityWithoutConfigDigest9641(t *testing.T) {
 	cfg := proofConfig9641()
 	for _, tc := range []struct {
 		name  string
@@ -76,8 +77,9 @@ func TestApplyGenerationWritesUnknownForAnythingButADigest9641(t *testing.T) {
 		}},
 	} {
 		doc := parseSwanctlDoc(t, applyAndRead9641(t, tc.apply))
-		if got := doc.at(t, "pools").childNames(); len(got) != 1 || got[0] != "xpf-gen-unknown" {
-			t.Errorf("%s: pools = %v, want [xpf-gen-unknown]", tc.name, got)
+		want := "xpf-gen-" + generationMarkerToken("", (&Manager{}).generateConfig(cfg))
+		if got := doc.at(t, "pools").childNames(); len(got) != 1 || got[0] != want {
+			t.Errorf("%s: pools = %v, want [%s]", tc.name, got, want)
 		}
 	}
 }

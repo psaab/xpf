@@ -1848,13 +1848,13 @@ step. Both are required — neither sees the other's case:
   whole-definition at render, so referencing terms fail closed
   (#10822). Unanchored edges keep Junos substring meaning inside
   one token.
-- **FRR vty pipe safety (#16776, #16788).** Community regexes are
+- **FRR vty pipe safety (#16776, #16788, #17977).** Community regexes are
   translated pipe-free or omitted as a whole definition for the
-  forms the translator validates; negated bracket classes it does
-  not validate (for example `[^| ]`) can still render a literal
-  `| ` and are a known gap (tracked in #17977). Reject references
-  to omitted definitions are lowered fail-closed (#10822); the
-  negated-bracket gap is not covered by that lowering. Neighbor descriptions
+  forms the translator validates — including, since #17977, bracket
+  classes whose verbatim spelling carries `| ` (for example `[^| ]`),
+  which previously rendered the literal pipe-space the vty hook
+  refuses. Reject references to omitted definitions are lowered
+  fail-closed (#10822). Neighbor descriptions
   carrying `| ` are rejected at commit and omitted on tolerant render
   paths. Junos AS-path regexes are translated before rendering, so
   grouping whitespace around alternation (for example `65000 | 65001`)
