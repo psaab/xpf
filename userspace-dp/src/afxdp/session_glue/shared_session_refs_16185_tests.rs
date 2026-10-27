@@ -410,10 +410,12 @@ fn tick_from_ns_derives_secs_17069() {
 }
 
 /// #17069 structure guard: no `Tick { .. }` literal and no
-/// `Tick::default()` anywhere under `userspace-dp/src` — every
-/// bundle (production and test) must go through `from_ns` (or the
-/// cfg(test) `from_parts` for decoupled HA-lease cells), so a
-/// zero-filled `secs` cannot be reintroduced at a new site.
+/// `Tick::default()` in the six production files listed below
+/// (the sites that construct Tick bundles today) — new sites in
+/// OTHER files escape this guard; extending the list is part of
+/// adding one. Every policed bundle goes through `from_ns` (or
+/// the cfg(test) `from_parts` for decoupled HA-lease cells), so
+/// a zero-filled `secs` cannot return at a policed site.
 #[test]
 fn tick_no_literal_construction_17069() {
     let prod_files: &[(&str, &str)] = &[
