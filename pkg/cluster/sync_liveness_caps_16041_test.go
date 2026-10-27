@@ -421,7 +421,7 @@ func TestDownstreamRejectedFramesDoNotRefreshLiveness16041(t *testing.T) {
 			t.Fatal("failover ack matching no waiter must be rejected")
 		}
 		ch := make(chan failoverAck, 1)
-		ss.failoverWaiters[3] = failoverWaiter{reqID: 99, ch: ch}
+		ss.registerFailoverWaitForTest(failoverWaitRequest, []int{3}, 99, ch)
 		if !ss.handleMessage(nil, syncMsgFailoverAck, failoverAckPayload16041(3, failoverAckApplied, 99)) {
 			t.Fatal("CONTROL: failover ack matching its waiter must be accepted")
 		}
@@ -430,18 +430,17 @@ func TestDownstreamRejectedFramesDoNotRefreshLiveness16041(t *testing.T) {
 		default:
 			t.Fatal("CONTROL: matched failover ack must still be delivered to the waiter")
 		}
-		ss.failoverWaiters[3] = failoverWaiter{reqID: 100, ch: ch}
+		ss.registerFailoverWaitForTest(failoverWaitRequest, []int{3}, 100, ch)
 		if ss.handleMessage(nil, syncMsgFailoverAck, failoverAckPayload16041(3, failoverAckApplied, 99)) {
 			t.Fatal("failover ack with a foreign reqID must be rejected")
 		}
 		rgIDs := []int{1, 2}
-		key := failoverBatchKey(rgIDs)
 		batchAck := encodeFailoverBatchAckPayload(rgIDs, failoverAckApplied, 7, "")
 		if ss.handleMessage(nil, syncMsgFailoverBatchAck, batchAck) {
 			t.Fatal("batch ack matching no waiter must be rejected")
 		}
 		bch := make(chan failoverAck, 1)
-		ss.failoverBatchWaiters[key] = failoverWaiter{reqID: 7, ch: bch, rgIDs: rgIDs}
+		ss.registerFailoverWaitForTest(failoverWaitRequest, rgIDs, 7, bch)
 		if !ss.handleMessage(nil, syncMsgFailoverBatchAck, batchAck) {
 			t.Fatal("CONTROL: batch ack matching its waiter must be accepted")
 		}

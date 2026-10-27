@@ -34,7 +34,8 @@ func (s *SessionSync) handleFailoverAck(conn net.Conn, payload []byte) bool {
 	reqID := binary.LittleEndian.Uint64(payload[2:10])
 	detail := string(payload[10:])
 	slog.Info("cluster sync: failover ack received", "rg", rgID, "req_id", reqID, "status", status, "detail", detail)
-	return s.completeFailoverWait(rgID, reqID, failoverAck{status: status, detail: detail})
+	key, _ := failoverWaiterFor(failoverWaitRequest, []int{rgID}, reqID, nil, true)
+	return s.completeFailoverWait(key, reqID, failoverAck{status: status, detail: detail})
 }
 
 func (s *SessionSync) handleFailoverCommitFrame(conn net.Conn, payload []byte) bool {
@@ -59,7 +60,8 @@ func (s *SessionSync) handleFailoverCommitAck(conn net.Conn, payload []byte) boo
 	reqID := binary.LittleEndian.Uint64(payload[2:10])
 	detail := string(payload[10:])
 	slog.Info("cluster sync: failover commit ack received", "rg", rgID, "req_id", reqID, "status", status, "detail", detail)
-	return s.completeFailoverCommitWait(rgID, reqID, failoverAck{status: status, detail: detail})
+	key, _ := failoverWaiterFor(failoverWaitCommit, []int{rgID}, reqID, nil, true)
+	return s.completeFailoverWait(key, reqID, failoverAck{status: status, detail: detail})
 }
 
 func (s *SessionSync) handleFailoverBatchFrame(conn net.Conn, payload []byte) bool {
@@ -80,7 +82,8 @@ func (s *SessionSync) handleFailoverBatchAck(conn net.Conn, payload []byte) bool
 		return false
 	}
 	slog.Info("cluster sync: batch failover ack received", "rgs", rgIDs, "req_id", reqID, "status", status, "detail", detail)
-	return s.completeFailoverBatchWait(failoverBatchKey(rgIDs), reqID, failoverAck{status: status, detail: detail})
+	key, _ := failoverWaiterFor(failoverWaitRequest, rgIDs, reqID, nil, false)
+	return s.completeFailoverWait(key, reqID, failoverAck{status: status, detail: detail})
 }
 
 func (s *SessionSync) handleFailoverBatchCommitFrame(conn net.Conn, payload []byte) bool {
@@ -101,7 +104,8 @@ func (s *SessionSync) handleFailoverBatchCommitAck(conn net.Conn, payload []byte
 		return false
 	}
 	slog.Info("cluster sync: batch failover commit ack received", "rgs", rgIDs, "req_id", reqID, "status", status, "detail", detail)
-	return s.completeFailoverBatchCommitWait(failoverBatchKey(rgIDs), reqID, failoverAck{status: status, detail: detail})
+	key, _ := failoverWaiterFor(failoverWaitCommit, rgIDs, reqID, nil, false)
+	return s.completeFailoverWait(key, reqID, failoverAck{status: status, detail: detail})
 }
 
 func (s *SessionSync) handleFailoverAbortFrame(conn net.Conn, payload []byte) bool {

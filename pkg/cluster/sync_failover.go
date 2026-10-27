@@ -44,26 +44,215 @@ func validateFailoverProtocolRGIDs(rgIDs []int) error {
 	}
 	return nil
 }
+
+// failoverWaitPartition separates the request and commit phases so an
+// acknowledged request never completes a commit waiter (or vice versa).
+type failoverWaitPartition int
+
+const (
+	failoverWaitRequest failoverWaitPartition = iota
+	failoverWaitCommit
+)
+
+// failoverWaitKey is the canonical registry key: a phase plus the sorted
+// normalised RG set, rendered like failoverBatchKey for readability. The
+// single flag records whether the registration came from a single-RG call so
+// handleDisconnect can keep its per-shape cleared counts.
+type failoverWaitKey struct {
+	partition failoverWaitPartition
+	key       string
+	single    bool
+}
+
+// failoverWaiterRegistry is the single waiter map (#17102). One
+// declaration replaces the four hand-copied maps (single/batch x
+// request/commit); every entry records its RG set so overlapping
+// registrations are refused across phases and shapes.
+type failoverWaiterRegistry map[failoverWaitKey]failoverWaiter
+
+func newFailoverWaiterRegistry() failoverWaiterRegistry {
+	return make(failoverWaiterRegistry)
+}
+
+func (s *SessionSync) ensureFailoverRegistryLocked() {
+	if s.failoverWaiters == nil {
+		s.failoverWaiters = newFailoverWaiterRegistry()
+	}
+}
+
+// failoverWaiterFor builds the canonical key + waiter entry for an RG set.
+// single is true only for single-RG calls (payload shape [rg]), false for
+// batch calls that carry the batch-normalised set.
+func failoverWaiterFor(partition failoverWaitPartition, rgIDs []int, reqID uint64, ch chan failoverAck, single bool) (failoverWaitKey, failoverWaiter) {
+	copied := append([]int(nil), rgIDs...)
+	return failoverWaitKey{partition: partition, key: failoverBatchKey(rgIDs), single: single},
+		failoverWaiter{reqID: reqID, ch: ch, rgIDs: copied}
+}
+
+func (s *SessionSync) completeFailoverWait(key failoverWaitKey, reqID uint64, ack failoverAck) bool {
+	s.failoverWaitMu.Lock()
+	s.ensureFailoverRegistryLocked()
+	waiter, ok := s.failoverWaiters[key]
+	if ok && waiter.reqID == reqID {
+		delete(s.failoverWaiters, key)
+	}
+	s.failoverWaitMu.Unlock()
+	if !ok || waiter.ch == nil || waiter.reqID != reqID {
+		return false
+	}
+	select {
+	case waiter.ch <- ack:
+	default:
+	}
+	return true
+}
+
+// registerFailoverWaitForTest inserts a waiter directly (test fixture only).
+func (s *SessionSync) registerFailoverWaitForTest(partition failoverWaitPartition, rgIDs []int, reqID uint64, ch chan failoverAck) {
+	single := partition == failoverWaitRequest && len(rgIDs) == 1
+	key, _ := failoverWaiterFor(partition, rgIDs, reqID, ch, single)
+	s.failoverWaitMu.Lock()
+	defer s.failoverWaitMu.Unlock()
+	s.ensureFailoverRegistryLocked()
+	s.failoverWaiters[key] = failoverWaiter{reqID: reqID, ch: ch, rgIDs: append([]int(nil), rgIDs...)}
+}
+
+func (s *SessionSync) removeFailoverWait(key failoverWaitKey, reqID uint64, ch chan failoverAck) {
+	s.failoverWaitMu.Lock()
+	defer s.failoverWaitMu.Unlock()
+	s.ensureFailoverRegistryLocked()
+	if current, ok := s.failoverWaiters[key]; ok && current.reqID == reqID && current.ch == ch {
+		delete(s.failoverWaiters, key)
+	}
+}
+
+// drainAllFailoverWaits swaps out every waiter and returns them for
+// disconnect delivery. Delivery (send + close) stays with the caller.
+func (s *SessionSync) drainAllFailoverWaits() (map[failoverWaitKey]failoverWaiter, [4]int) {
+	s.failoverWaitMu.Lock()
+	defer s.failoverWaitMu.Unlock()
+	s.ensureFailoverRegistryLocked()
+	drained := s.failoverWaiters
+	counts := [4]int{}
+	for key := range drained {
+		switch key.partition {
+		case failoverWaitRequest:
+			if key.single {
+				counts[0]++
+			} else {
+				counts[2]++
+			}
+		case failoverWaitCommit:
+			if key.single {
+				counts[1]++
+			} else {
+				counts[3]++
+			}
+		}
+	}
+	s.failoverWaiters = newFailoverWaiterRegistry()
+	return drained, counts
+}
+
 func (s *SessionSync) failoverRGInUseLocked(rgIDs []int) bool {
-	for _, rgID := range rgIDs {
-		if _, exists := s.failoverWaiters[rgID]; exists {
-			return true
-		}
-		if _, exists := s.failoverCommitWaiters[rgID]; exists {
-			return true
-		}
-	}
-	for _, waiter := range s.failoverBatchWaiters {
-		if rgSetOverlap(waiter.rgIDs, rgIDs) {
-			return true
-		}
-	}
-	for _, waiter := range s.failoverBatchCommitWaiters {
+	for _, waiter := range s.failoverWaiters {
 		if rgSetOverlap(waiter.rgIDs, rgIDs) {
 			return true
 		}
 	}
 	return false
+}
+
+// failoverTripOutcome names the three terminal shapes of failoverRoundTrip
+// so callers never have to string-match an error (#17102).
+type failoverTripOutcome int
+
+const (
+	failoverTripAcked failoverTripOutcome = iota
+	failoverTripRejected
+	failoverTripSendFailed
+	failoverTripTimedOut
+)
+
+// failoverRoundTrip is the single failover request/commit skeleton (#17102):
+// register one waiter, write one frame, drain the ack or the timeout, and
+// mirror the send-error arm. Payload encoding and ack interpretation stay
+// with the caller, so nothing here knows the single/batch wire shapes.
+//
+// The returned reqID mirrors SendFailover's contract (#16592): non-zero
+// whenever the request was sent (including ack failure/timeout), zero on
+// local rejection or failed send. Commit callers discard it.
+func (s *SessionSync) failoverRoundTrip(msgType uint8, rgIDs []int, single bool, reqID uint64, genReqID bool, payload []byte, payloadFor func(reqID uint64) []byte) (failoverAck, uint64, failoverTripOutcome, error) {
+	conn := s.getActiveConn()
+	if conn == nil {
+		return failoverAck{}, 0, failoverTripRejected, fmt.Errorf("peer not connected")
+	}
+	if genReqID {
+		reqID = s.failoverSeq.Add(1)
+	}
+	partition := failoverWaitRequest
+	if msgType == syncMsgFailoverCommit || msgType == syncMsgFailoverBatchCommit {
+		partition = failoverWaitCommit
+	}
+	waitCh := make(chan failoverAck, 1)
+	key, _ := failoverWaiterFor(partition, rgIDs, reqID, waitCh, single)
+	s.failoverWaitMu.Lock()
+	s.ensureFailoverRegistryLocked()
+	if _, exists := s.failoverWaiters[key]; exists || s.failoverRGInUseLocked(rgIDs) {
+		s.failoverWaitMu.Unlock()
+		if partition == failoverWaitCommit {
+			return failoverAck{}, 0, failoverTripRejected, fmt.Errorf("failover commit already in flight for %s", failoverRGLabel(rgIDs))
+		}
+		return failoverAck{}, 0, failoverTripRejected, fmt.Errorf("failover request already in flight for %s", failoverRGLabel(rgIDs))
+	}
+	s.failoverWaiters[key] = failoverWaiter{reqID: reqID, ch: waitCh, rgIDs: append([]int(nil), rgIDs...)}
+	s.failoverWaitMu.Unlock()
+	if payloadFor != nil {
+		payload = payloadFor(reqID)
+	}
+	s.writeMu.Lock()
+	err := writeMsg(conn, msgType, payload)
+	s.writeMu.Unlock()
+	if err != nil {
+		s.completeFailoverWait(key, reqID, failoverAck{status: failoverAckDisconnected, detail: "send failed"})
+		return failoverAck{}, 0, failoverTripSendFailed, err
+	}
+	timer := time.NewTimer(failoverAckTimeout)
+	defer timer.Stop()
+	select {
+	case ack := <-waitCh:
+		return ack, reqID, failoverTripAcked, nil
+	case <-timer.C:
+		select {
+		case ack := <-waitCh:
+			return ack, reqID, failoverTripAcked, nil
+		default:
+		}
+		s.removeFailoverWait(key, reqID, waitCh)
+		return failoverAck{}, reqID, failoverTripTimedOut, errFailoverTimeoutFor(msgType, rgIDs)
+	}
+}
+
+// errFailoverTimeoutFor builds the legacy timeout string: request vs commit.
+func errFailoverTimeoutFor(msgType uint8, rgIDs []int) error {
+	if msgType == syncMsgFailoverCommit || msgType == syncMsgFailoverBatchCommit {
+		return fmt.Errorf("timed out waiting for peer failover commit ack for %s", failoverRGLabel(rgIDs))
+	}
+	return fmt.Errorf("timed out waiting for peer failover ack for %s", failoverRGLabel(rgIDs))
+}
+
+func failoverRGLabel(rgIDs []int) string {
+	if len(rgIDs) == 1 {
+		return fmt.Sprintf("redundancy group %d", rgIDs[0])
+	}
+	return fmt.Sprintf("redundancy groups %v", rgIDs)
+}
+
+func encodeFailoverSingleReqPayload(rgID int, reqID uint64) []byte {
+	payload := make([]byte, 9)
+	payload[0] = byte(rgID)
+	binary.LittleEndian.PutUint64(payload[1:9], reqID)
+	return payload
 }
 
 // SendFailover sends a remote failover request to the peer and waits for an
@@ -79,50 +268,22 @@ func (s *SessionSync) SendFailover(rgID int) (uint64, error) {
 	if conn == nil {
 		return 0, fmt.Errorf("peer not connected")
 	}
-	waitCh := make(chan failoverAck, 1)
-	reqID := s.failoverSeq.Add(1)
-	s.failoverWaitMu.Lock()
-	if _, exists := s.failoverWaiters[rgID]; exists {
-		s.failoverWaitMu.Unlock()
-		return 0, fmt.Errorf("failover request already in flight for redundancy group %d", rgID)
-	}
-	if s.failoverRGInUseLocked([]int{rgID}) {
-		s.failoverWaitMu.Unlock()
-		return 0, fmt.Errorf("failover request already in flight for redundancy group %d", rgID)
-	}
-	s.failoverWaiters[rgID] = failoverWaiter{reqID: reqID, ch: waitCh, rgIDs: []int{rgID}}
-	s.failoverWaitMu.Unlock()
-	payload := make([]byte, 9)
-	payload[0] = byte(rgID)
-	binary.LittleEndian.PutUint64(payload[1:9], reqID)
-	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgFailover, payload)
-	s.writeMu.Unlock()
-	if err != nil {
-		s.completeFailoverWait(rgID, reqID, failoverAck{status: failoverAckDisconnected, detail: "send failed"})
+	ack, reqID, outcome, err := s.failoverRoundTrip(syncMsgFailover, []int{rgID}, true, 0, true, nil,
+		func(reqID uint64) []byte { return encodeFailoverSingleReqPayload(rgID, reqID) })
+	switch outcome {
+	case failoverTripAcked:
+		slog.Info("cluster sync: failover request sent to peer", "rg", rgID)
+		return reqID, failoverAckError([]int{rgID}, ack)
+	case failoverTripSendFailed:
 		slog.Warn("cluster sync: failover send error", "err", err, "rg", rgID)
 		s.stats.Errors.Add(1)
 		s.handleDisconnect(conn)
 		return 0, fmt.Errorf("failed to send failover request: %w", err)
-	}
-	slog.Info("cluster sync: failover request sent to peer", "rg", rgID)
-	timer := time.NewTimer(failoverAckTimeout)
-	defer timer.Stop()
-	select {
-	case ack := <-waitCh:
-		return reqID, failoverAckError([]int{rgID}, ack)
-	case <-timer.C:
-		select {
-		case ack := <-waitCh:
-			return reqID, failoverAckError([]int{rgID}, ack)
-		default:
-		}
-		s.failoverWaitMu.Lock()
-		if current, ok := s.failoverWaiters[rgID]; ok && current.reqID == reqID && current.ch == waitCh {
-			delete(s.failoverWaiters, rgID)
-		}
-		s.failoverWaitMu.Unlock()
-		return reqID, fmt.Errorf("timed out waiting for peer failover ack for redundancy group %d", rgID)
+	case failoverTripTimedOut:
+		slog.Info("cluster sync: failover request sent to peer", "rg", rgID)
+		return reqID, err
+	default:
+		return 0, err
 	}
 }
 
@@ -146,51 +307,22 @@ func (s *SessionSync) SendFailoverBatch(rgIDs []int) (uint64, error) {
 	if conn == nil {
 		return 0, fmt.Errorf("peer not connected")
 	}
-	waitCh := make(chan failoverAck, 1)
-	reqID := s.failoverSeq.Add(1)
-	key := failoverBatchKey(ids)
-	s.failoverWaitMu.Lock()
-	if _, exists := s.failoverBatchWaiters[key]; exists || s.failoverRGInUseLocked(ids) {
-		s.failoverWaitMu.Unlock()
-		return 0, fmt.Errorf("failover request already in flight for redundancy groups %v", ids)
-	}
-	s.failoverBatchWaiters[key] = failoverWaiter{reqID: reqID, ch: waitCh, rgIDs: append([]int(nil), ids...)}
-	s.failoverWaitMu.Unlock()
-	payload := encodeFailoverBatchRequestPayload(ids, reqID)
-	s.writeMu.Lock()
-	err = writeMsg(conn, syncMsgFailoverBatch, payload)
-	s.writeMu.Unlock()
-	if err != nil {
-		s.completeFailoverBatchWait(key, reqID, failoverAck{status: failoverAckDisconnected, detail: "send failed"})
+	ack, reqID, outcome, err := s.failoverRoundTrip(syncMsgFailoverBatch, ids, false, 0, true, nil,
+		func(reqID uint64) []byte { return encodeFailoverBatchRequestPayload(ids, reqID) })
+	switch outcome {
+	case failoverTripAcked:
+		slog.Info("cluster sync: batch failover request sent to peer", "rgs", ids)
+		return reqID, failoverAckError(ids, ack)
+	case failoverTripSendFailed:
 		slog.Warn("cluster sync: batch failover send error", "err", err, "rgs", ids)
 		s.stats.Errors.Add(1)
 		s.handleDisconnect(conn)
 		return 0, fmt.Errorf("failed to send batch failover request: %w", err)
-	}
-	slog.Info("cluster sync: batch failover request sent to peer", "rgs", ids)
-	timer := time.NewTimer(failoverAckTimeout)
-	defer timer.Stop()
-	select {
-	case ack := <-waitCh:
-		if err := failoverAckError(ids, ack); err != nil {
-			return reqID, err
-		}
-		return reqID, nil
-	case <-timer.C:
-		select {
-		case ack := <-waitCh:
-			if err := failoverAckError(ids, ack); err != nil {
-				return reqID, err
-			}
-			return reqID, nil
-		default:
-		}
-		s.failoverWaitMu.Lock()
-		if current, ok := s.failoverBatchWaiters[key]; ok && current.reqID == reqID && current.ch == waitCh {
-			delete(s.failoverBatchWaiters, key)
-		}
-		s.failoverWaitMu.Unlock()
-		return reqID, fmt.Errorf("timed out waiting for peer failover ack for redundancy groups %v", ids)
+	case failoverTripTimedOut:
+		slog.Info("cluster sync: batch failover request sent to peer", "rgs", ids)
+		return reqID, err
+	default:
+		return 0, err
 	}
 }
 func failoverAckError(rgIDs []int, ack failoverAck) error {
@@ -229,49 +361,22 @@ func (s *SessionSync) SendFailoverCommit(rgID int, reqID uint64) error {
 	if conn == nil {
 		return fmt.Errorf("peer not connected")
 	}
-	waitCh := make(chan failoverAck, 1)
-	s.failoverWaitMu.Lock()
-	if _, exists := s.failoverCommitWaiters[rgID]; exists {
-		s.failoverWaitMu.Unlock()
-		return fmt.Errorf("failover commit already in flight for redundancy group %d", rgID)
-	}
-	if s.failoverRGInUseLocked([]int{rgID}) {
-		s.failoverWaitMu.Unlock()
-		return fmt.Errorf("failover commit already in flight for redundancy group %d", rgID)
-	}
-	s.failoverCommitWaiters[rgID] = failoverWaiter{reqID: reqID, ch: waitCh, rgIDs: []int{rgID}}
-	s.failoverWaitMu.Unlock()
-	payload := make([]byte, 9)
-	payload[0] = byte(rgID)
-	binary.LittleEndian.PutUint64(payload[1:9], reqID)
-	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgFailoverCommit, payload)
-	s.writeMu.Unlock()
-	if err != nil {
-		s.completeFailoverCommitWait(rgID, reqID, failoverAck{status: failoverAckDisconnected, detail: "send failed"})
+	payload := encodeFailoverSingleReqPayload(rgID, reqID)
+	ack, _, outcome, err := s.failoverRoundTrip(syncMsgFailoverCommit, []int{rgID}, true, reqID, false, payload, nil)
+	switch outcome {
+	case failoverTripAcked:
+		slog.Info("cluster sync: failover commit sent to peer", "rg", rgID, "req_id", reqID)
+		return failoverCommitAckError(rgID, ack)
+	case failoverTripSendFailed:
 		slog.Warn("cluster sync: failover commit send error", "err", err, "rg", rgID, "req_id", reqID)
 		s.stats.Errors.Add(1)
 		s.handleDisconnect(conn)
 		return fmt.Errorf("failed to send failover commit: %w", err)
-	}
-	slog.Info("cluster sync: failover commit sent to peer", "rg", rgID, "req_id", reqID)
-	timer := time.NewTimer(failoverAckTimeout)
-	defer timer.Stop()
-	select {
-	case ack := <-waitCh:
-		return failoverCommitAckError(rgID, ack)
-	case <-timer.C:
-		select {
-		case ack := <-waitCh:
-			return failoverCommitAckError(rgID, ack)
-		default:
-		}
-		s.failoverWaitMu.Lock()
-		if current, ok := s.failoverCommitWaiters[rgID]; ok && current.reqID == reqID && current.ch == waitCh {
-			delete(s.failoverCommitWaiters, rgID)
-		}
-		s.failoverWaitMu.Unlock()
-		return fmt.Errorf("timed out waiting for peer failover commit ack for redundancy group %d", rgID)
+	case failoverTripTimedOut:
+		slog.Info("cluster sync: failover commit sent to peer", "rg", rgID, "req_id", reqID)
+		return err
+	default:
+		return err
 	}
 }
 
@@ -295,44 +400,22 @@ func (s *SessionSync) SendFailoverCommitBatch(rgIDs []int, reqID uint64) error {
 	if conn == nil {
 		return fmt.Errorf("peer not connected")
 	}
-	waitCh := make(chan failoverAck, 1)
-	key := failoverBatchKey(ids)
-	s.failoverWaitMu.Lock()
-	if _, exists := s.failoverBatchCommitWaiters[key]; exists || s.failoverRGInUseLocked(ids) {
-		s.failoverWaitMu.Unlock()
-		return fmt.Errorf("failover commit already in flight for redundancy groups %v", ids)
-	}
-	s.failoverBatchCommitWaiters[key] = failoverWaiter{reqID: reqID, ch: waitCh, rgIDs: append([]int(nil), ids...)}
-	s.failoverWaitMu.Unlock()
 	payload := encodeFailoverBatchRequestPayload(ids, reqID)
-	s.writeMu.Lock()
-	err = writeMsg(conn, syncMsgFailoverBatchCommit, payload)
-	s.writeMu.Unlock()
-	if err != nil {
-		s.completeFailoverBatchCommitWait(key, reqID, failoverAck{status: failoverAckDisconnected, detail: "send failed"})
+	ack, _, outcome, err := s.failoverRoundTrip(syncMsgFailoverBatchCommit, ids, false, reqID, false, payload, nil)
+	switch outcome {
+	case failoverTripAcked:
+		slog.Info("cluster sync: batch failover commit sent to peer", "rgs", ids, "req_id", reqID)
+		return failoverCommitAckBatchError(ids, ack)
+	case failoverTripSendFailed:
 		slog.Warn("cluster sync: batch failover commit send error", "err", err, "rgs", ids, "req_id", reqID)
 		s.stats.Errors.Add(1)
 		s.handleDisconnect(conn)
 		return fmt.Errorf("failed to send batch failover commit: %w", err)
-	}
-	slog.Info("cluster sync: batch failover commit sent to peer", "rgs", ids, "req_id", reqID)
-	timer := time.NewTimer(failoverAckTimeout)
-	defer timer.Stop()
-	select {
-	case ack := <-waitCh:
-		return failoverCommitAckBatchError(ids, ack)
-	case <-timer.C:
-		select {
-		case ack := <-waitCh:
-			return failoverCommitAckBatchError(ids, ack)
-		default:
-		}
-		s.failoverWaitMu.Lock()
-		if current, ok := s.failoverBatchCommitWaiters[key]; ok && current.reqID == reqID && current.ch == waitCh {
-			delete(s.failoverBatchCommitWaiters, key)
-		}
-		s.failoverWaitMu.Unlock()
-		return fmt.Errorf("timed out waiting for peer failover commit ack for redundancy groups %v", ids)
+	case failoverTripTimedOut:
+		slog.Info("cluster sync: batch failover commit sent to peer", "rgs", ids, "req_id", reqID)
+		return err
+	default:
+		return err
 	}
 }
 func failoverCommitAckBatchError(rgIDs []int, ack failoverAck) error {
@@ -402,7 +485,7 @@ func (s *SessionSync) SendFence() error {
 
 func (s *SessionSync) handleRemoteFailover(conn net.Conn, rgID int, reqID uint64) {
 	if s.OnRemoteFailover == nil {
-		s.sendFailoverResult(conn, syncMsgFailoverAck, rgID, reqID, failoverAckFailed, "no remote failover handler")
+		s.sendFailoverAckFrame(conn, syncMsgFailoverAck, []int{rgID}, reqID, failoverAckFailed, "no remote failover handler")
 		return
 	}
 	if err := s.OnRemoteFailover(rgID, reqID); err != nil {
@@ -410,7 +493,7 @@ func (s *SessionSync) handleRemoteFailover(conn net.Conn, rgID int, reqID uint64
 		if errors.Is(err, ErrRemoteFailoverRejected) {
 			status = failoverAckRejected
 		}
-		s.sendFailoverResult(conn, syncMsgFailoverAck, rgID, reqID, status, err.Error())
+		s.sendFailoverAckFrame(conn, syncMsgFailoverAck, []int{rgID}, reqID, status, err.Error())
 		return
 	}
 	// #5640: OnRemoteFailover only ENQUEUES the async demotion event; the old
@@ -431,15 +514,15 @@ func (s *SessionSync) handleRemoteFailover(conn net.Conn, rgID int, reqID uint64
 					slog.Warn("cluster sync: restore after failed fence failed; lease remains as fallback", "rg", rgID, "req_id", reqID, "err", aerr)
 				}
 			}
-			s.sendFailoverResult(conn, syncMsgFailoverAck, rgID, reqID, failoverAckFailed, err.Error())
+			s.sendFailoverAckFrame(conn, syncMsgFailoverAck, []int{rgID}, reqID, failoverAckFailed, err.Error())
 			return
 		}
 	}
-	s.sendFailoverResult(conn, syncMsgFailoverAck, rgID, reqID, failoverAckApplied, "")
+	s.sendFailoverAckFrame(conn, syncMsgFailoverAck, []int{rgID}, reqID, failoverAckApplied, "")
 }
 func (s *SessionSync) handleRemoteFailoverBatch(conn net.Conn, rgIDs []int, reqID uint64) {
 	if s.OnRemoteFailoverBatch == nil {
-		s.sendFailoverBatchResult(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckFailed, "no remote batch failover handler")
+		s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckFailed, "no remote batch failover handler")
 		return
 	}
 	if err := s.OnRemoteFailoverBatch(rgIDs, reqID); err != nil {
@@ -447,7 +530,7 @@ func (s *SessionSync) handleRemoteFailoverBatch(conn net.Conn, rgIDs []int, reqI
 		if errors.Is(err, ErrRemoteFailoverRejected) {
 			status = failoverAckRejected
 		}
-		s.sendFailoverBatchResult(conn, syncMsgFailoverBatchAck, rgIDs, reqID, status, err.Error())
+		s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, status, err.Error())
 		return
 	}
 	// #5640: gate the batch applied-ack on every RG being fenced. See
@@ -461,15 +544,15 @@ func (s *SessionSync) handleRemoteFailoverBatch(conn net.Conn, rgIDs []int, reqI
 					slog.Warn("cluster sync: batch restore after failed fence failed; lease remains as fallback", "rgs", rgIDs, "req_id", reqID, "err", aerr)
 				}
 			}
-			s.sendFailoverBatchResult(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckFailed, err.Error())
+			s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckFailed, err.Error())
 			return
 		}
 	}
-	s.sendFailoverBatchResult(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckApplied, "")
+	s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckApplied, "")
 }
 func (s *SessionSync) handleRemoteFailoverCommit(conn net.Conn, rgID int, reqID uint64) {
 	if s.OnRemoteFailoverCommit == nil {
-		s.sendFailoverResult(conn, syncMsgFailoverCommitAck, rgID, reqID, failoverAckFailed, "no remote failover commit handler")
+		s.sendFailoverAckFrame(conn, syncMsgFailoverCommitAck, []int{rgID}, reqID, failoverAckFailed, "no remote failover commit handler")
 		return
 	}
 	if err := s.OnRemoteFailoverCommit(rgID, reqID); err != nil {
@@ -477,14 +560,14 @@ func (s *SessionSync) handleRemoteFailoverCommit(conn net.Conn, rgID int, reqID 
 		if errors.Is(err, ErrRemoteFailoverRejected) {
 			status = failoverAckRejected
 		}
-		s.sendFailoverResult(conn, syncMsgFailoverCommitAck, rgID, reqID, status, err.Error())
+		s.sendFailoverAckFrame(conn, syncMsgFailoverCommitAck, []int{rgID}, reqID, status, err.Error())
 		return
 	}
-	s.sendFailoverResult(conn, syncMsgFailoverCommitAck, rgID, reqID, failoverAckApplied, "")
+	s.sendFailoverAckFrame(conn, syncMsgFailoverCommitAck, []int{rgID}, reqID, failoverAckApplied, "")
 }
 func (s *SessionSync) handleRemoteFailoverCommitBatch(conn net.Conn, rgIDs []int, reqID uint64) {
 	if s.OnRemoteFailoverCommitBatch == nil {
-		s.sendFailoverBatchResult(conn, syncMsgFailoverBatchCommitAck, rgIDs, reqID, failoverAckFailed, "no remote batch failover commit handler")
+		s.sendFailoverAckFrame(conn, syncMsgFailoverBatchCommitAck, rgIDs, reqID, failoverAckFailed, "no remote batch failover commit handler")
 		return
 	}
 	if err := s.OnRemoteFailoverCommitBatch(rgIDs, reqID); err != nil {
@@ -492,10 +575,10 @@ func (s *SessionSync) handleRemoteFailoverCommitBatch(conn net.Conn, rgIDs []int
 		if errors.Is(err, ErrRemoteFailoverRejected) {
 			status = failoverAckRejected
 		}
-		s.sendFailoverBatchResult(conn, syncMsgFailoverBatchCommitAck, rgIDs, reqID, status, err.Error())
+		s.sendFailoverAckFrame(conn, syncMsgFailoverBatchCommitAck, rgIDs, reqID, status, err.Error())
 		return
 	}
-	s.sendFailoverBatchResult(conn, syncMsgFailoverBatchCommitAck, rgIDs, reqID, failoverAckApplied, "")
+	s.sendFailoverAckFrame(conn, syncMsgFailoverBatchCommitAck, rgIDs, reqID, failoverAckApplied, "")
 }
 
 // SendFailoverAbort notifies the owner that a requested transfer-out is
@@ -509,9 +592,7 @@ func (s *SessionSync) SendFailoverAbort(rgID int, reqID uint64) error {
 	if conn == nil {
 		return fmt.Errorf("peer not connected")
 	}
-	payload := make([]byte, 9)
-	payload[0] = byte(rgID)
-	binary.LittleEndian.PutUint64(payload[1:9], reqID)
+	payload := encodeFailoverSingleReqPayload(rgID, reqID)
 	s.writeMu.Lock()
 	err := writeMsg(conn, syncMsgFailoverAbort, payload)
 	s.writeMu.Unlock()
@@ -575,131 +656,62 @@ func (s *SessionSync) handleRemoteFailoverAbortBatch(rgIDs []int, reqID uint64) 
 		slog.Warn("cluster sync: remote batch failover abort failed", "rgs", rgIDs, "req_id", reqID, "err", err)
 	}
 }
-func (s *SessionSync) sendFailoverResult(conn net.Conn, msgType uint8, rgID int, reqID uint64, status uint8, detail string) {
-	ackConn := s.getActiveConn()
-	if ackConn == nil {
-		ackConn = conn
-	}
-	if ackConn == nil {
-		return
-	}
-	payload := make([]byte, 10+len(detail))
-	payload[0] = byte(rgID)
-	payload[1] = status
-	binary.LittleEndian.PutUint64(payload[2:10], reqID)
-	copy(payload[10:], detail)
-	s.writeMu.Lock()
-	err := writeMsg(ackConn, msgType, payload)
-	firstErr := err
-	if err != nil && conn != nil && ackConn != conn {
-		err = writeMsg(conn, msgType, payload)
-	}
-	s.writeMu.Unlock()
-	if firstErr != nil && ackConn != nil && ackConn != conn {
-		s.handleDisconnect(ackConn)
-	}
-	if err != nil {
-		slog.Warn("cluster sync: failover result send error", "err", err, "msg_type", msgType, "rg", rgID, "req_id", reqID, "status", status)
-		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
-		return
-	}
-	slog.Info("cluster sync: failover result sent", "msg_type", msgType, "rg", rgID, "req_id", reqID, "status", status, "detail", detail)
-}
-func (s *SessionSync) completeFailoverWait(rgID int, reqID uint64, ack failoverAck) bool {
-	s.failoverWaitMu.Lock()
-	waiter := s.failoverWaiters[rgID]
-	if waiter.reqID == reqID {
-		delete(s.failoverWaiters, rgID)
-	}
-	s.failoverWaitMu.Unlock()
-	if waiter.ch == nil || waiter.reqID != reqID {
-		return false
-	}
-	select {
-	case waiter.ch <- ack:
-	default:
-	}
-	return true
-}
-func (s *SessionSync) completeFailoverBatchWait(key string, reqID uint64, ack failoverAck) bool {
-	s.failoverWaitMu.Lock()
-	waiter, ok := s.failoverBatchWaiters[key]
-	if ok && waiter.reqID == reqID {
-		delete(s.failoverBatchWaiters, key)
-	}
-	s.failoverWaitMu.Unlock()
-	if !ok || waiter.ch == nil || waiter.reqID != reqID {
-		return false
-	}
-	select {
-	case waiter.ch <- ack:
-	default:
-	}
-	return true
-}
-func (s *SessionSync) sendFailoverBatchResult(conn net.Conn, msgType uint8, rgIDs []int, reqID uint64, status uint8, detail string) {
-	if err := validateFailoverBatchRGCount(rgIDs); err != nil {
-		slog.Warn("cluster sync: refusing to send oversized batch failover result", "err", err, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
-		return
-	}
-	ackConn := s.getActiveConn()
-	if ackConn == nil {
-		ackConn = conn
-	}
-	if ackConn == nil {
-		return
-	}
-	payload := encodeFailoverBatchAckPayload(rgIDs, status, reqID, detail)
-	s.writeMu.Lock()
-	err := writeMsg(ackConn, msgType, payload)
-	firstErr := err
-	if err != nil && conn != nil && ackConn != conn {
-		err = writeMsg(conn, msgType, payload)
-	}
-	s.writeMu.Unlock()
-	if firstErr != nil && ackConn != nil && ackConn != conn {
-		s.handleDisconnect(ackConn)
-	}
-	if err != nil {
-		if firstErr != nil && conn != nil && ackConn != conn {
-			slog.Warn("cluster sync: batch failover result send error on active conn", "err", firstErr, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
+
+// sendFailoverAckFrame is the single result sender (#17102): it builds the
+// single or batch ack payload for rgIDs and owns the #14160 two-conn write
+// protocol — a broken active conn is disconnected even when the fallback
+// delivers, and on dual failure both conns are disconnected with one error
+// counted. The single path's success Info log is preserved only for single
+// frames; the batch path never logged success.
+func (s *SessionSync) sendFailoverAckFrame(conn net.Conn, msgType uint8, rgIDs []int, reqID uint64, status uint8, detail string) {
+	single := len(rgIDs) == 1
+	if !single {
+		if err := validateFailoverBatchRGCount(rgIDs); err != nil {
+			slog.Warn("cluster sync: refusing to send oversized batch failover result", "err", err, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
+			return
 		}
-		slog.Warn("cluster sync: batch failover result send error", "err", err, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
+	}
+	ackConn := s.getActiveConn()
+	if ackConn == nil {
+		ackConn = conn
+	}
+	if ackConn == nil {
+		return
+	}
+	var payload []byte
+	if single {
+		payload = make([]byte, 10+len(detail))
+		payload[0] = byte(rgIDs[0])
+		payload[1] = status
+		binary.LittleEndian.PutUint64(payload[2:10], reqID)
+		copy(payload[10:], detail)
+	} else {
+		payload = encodeFailoverBatchAckPayload(rgIDs, status, reqID, detail)
+	}
+	s.writeMu.Lock()
+	err := writeMsg(ackConn, msgType, payload)
+	firstErr := err
+	if err != nil && conn != nil && ackConn != conn {
+		err = writeMsg(conn, msgType, payload)
+	}
+	s.writeMu.Unlock()
+	if firstErr != nil && ackConn != nil && ackConn != conn {
+		s.handleDisconnect(ackConn)
+	}
+	if err != nil {
+		if single {
+			slog.Warn("cluster sync: failover result send error", "err", err, "msg_type", msgType, "rg", rgIDs[0], "req_id", reqID, "status", status)
+		} else {
+			if firstErr != nil && conn != nil && ackConn != conn {
+				slog.Warn("cluster sync: batch failover result send error on active conn", "err", firstErr, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
+			}
+			slog.Warn("cluster sync: batch failover result send error", "err", err, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
+		}
 		s.stats.Errors.Add(1)
 		s.handleDisconnect(conn)
 		return
 	}
-}
-func (s *SessionSync) completeFailoverCommitWait(rgID int, reqID uint64, ack failoverAck) bool {
-	s.failoverWaitMu.Lock()
-	waiter := s.failoverCommitWaiters[rgID]
-	if waiter.reqID == reqID {
-		delete(s.failoverCommitWaiters, rgID)
+	if single {
+		slog.Info("cluster sync: failover result sent", "msg_type", msgType, "rg", rgIDs[0], "req_id", reqID, "status", status, "detail", detail)
 	}
-	s.failoverWaitMu.Unlock()
-	if waiter.ch == nil || waiter.reqID != reqID {
-		return false
-	}
-	select {
-	case waiter.ch <- ack:
-	default:
-	}
-	return true
-}
-func (s *SessionSync) completeFailoverBatchCommitWait(key string, reqID uint64, ack failoverAck) bool {
-	s.failoverWaitMu.Lock()
-	waiter, ok := s.failoverBatchCommitWaiters[key]
-	if ok && waiter.reqID == reqID {
-		delete(s.failoverBatchCommitWaiters, key)
-	}
-	s.failoverWaitMu.Unlock()
-	if !ok || waiter.ch == nil || waiter.reqID != reqID {
-		return false
-	}
-	select {
-	case waiter.ch <- ack:
-	default:
-	}
-	return true
 }

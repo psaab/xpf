@@ -1547,42 +1547,12 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		for _, w := range staleWaiters {
 			close(w.ch)
 		}
-		s.failoverWaitMu.Lock()
-		failoverWaiters := s.failoverWaiters
-		failoverCommitWaiters := s.failoverCommitWaiters
-		failoverBatchWaiters := s.failoverBatchWaiters
-		failoverBatchCommitWaiters := s.failoverBatchCommitWaiters
-		clearedFailoverWaiters := len(failoverWaiters)
-		clearedFailoverCommitWaiters := len(failoverCommitWaiters)
-		clearedFailoverBatchWaiters := len(failoverBatchWaiters)
-		clearedFailoverBatchCommitWaiters := len(failoverBatchCommitWaiters)
-		s.failoverWaiters = make(map[int]failoverWaiter)
-		s.failoverCommitWaiters = make(map[int]failoverWaiter)
-		s.failoverBatchWaiters = make(map[string]failoverWaiter)
-		s.failoverBatchCommitWaiters = make(map[string]failoverWaiter)
-		s.failoverWaitMu.Unlock()
-		for _, waiter := range failoverWaiters {
-			select {
-			case waiter.ch <- failoverAck{status: failoverAckDisconnected, detail: "peer disconnected"}:
-			default:
-			}
-			close(waiter.ch)
-		}
-		for _, waiter := range failoverCommitWaiters {
-			select {
-			case waiter.ch <- failoverAck{status: failoverAckDisconnected, detail: "peer disconnected"}:
-			default:
-			}
-			close(waiter.ch)
-		}
-		for _, waiter := range failoverBatchWaiters {
-			select {
-			case waiter.ch <- failoverAck{status: failoverAckDisconnected, detail: "peer disconnected"}:
-			default:
-			}
-			close(waiter.ch)
-		}
-		for _, waiter := range failoverBatchCommitWaiters {
+		failoverDrained, counts := s.drainAllFailoverWaits()
+		clearedFailoverWaiters := counts[0]
+		clearedFailoverCommitWaiters := counts[1]
+		clearedFailoverBatchWaiters := counts[2]
+		clearedFailoverBatchCommitWaiters := counts[3]
+		for _, waiter := range failoverDrained {
 			select {
 			case waiter.ch <- failoverAck{status: failoverAckDisconnected, detail: "peer disconnected"}:
 			default:

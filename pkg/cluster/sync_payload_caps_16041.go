@@ -92,7 +92,7 @@ func syncPayloadCap(msgType uint8) (int, bool) {
 		return 9, true
 	case syncMsgFailoverAck, syncMsgFailoverCommitAck:
 		// rgID + status + reqID + free-form detail from the handler's error
-		// string (sendFailoverResult). The detail is peer-visible text, not
+		// string (sendFailoverAckFrame). The detail is peer-visible text, not
 		// bulk data; 4 KiB bounds it without truncating real errors.
 		return 4096, true
 	case syncMsgFailoverBatch, syncMsgFailoverBatchCommit, syncMsgFailoverBatchAbort:
