@@ -103,10 +103,16 @@ the apply path pays no fsync (the file is regenerated on every apply).
   never terminated; and a failed terminate is carried as debt and
   returned (#6542).
 - `SAStatus`, `TerminateAllSAs`, `InitiateConnection`, `TerminateConnection`,
-  `GetSAStatus`, `ActiveConnectionNames` — `ike.go`. `TerminateConnection`
-  (#15194) resolves the IKE connection owning a named SA from the live list
-  and issues `swanctl --terminate --ike <conn> --force`; no matching live SA
-  is a no-op and a failed list is returned rather than guessed.
+  `TerminateConnectionGuarded`, `GetSAStatus`, `ActiveConnectionNames` —
+  `ike.go`. `TerminateConnection` (#15194) resolves the IKE connection owning
+  a named SA from the live list and issues `swanctl --terminate --ike <conn>
+  --force`; no matching live SA is a no-op and a failed list is returned
+  rather than guessed. `TerminateConnectionGuarded` (#17858) is the demotion
+  sweep's form: a caller-supplied ownership guard runs after that live-list
+  read, immediately before the terminate exec, under the same mutex
+  (`opMu`) that `InitiateConnection` holds across its exec — so a sweep that
+  read a pre-failback epoch cannot terminate after the failback's initiate.
+  `TerminateConnection` is the guard-less form (belt, operator paths).
   `TerminateAllSAs` (#15279) attempts every live IKE SA, counts the
   successful terminates, and returns a joined error naming each connection
   whose terminate failed (it never reports success over a failed kill);

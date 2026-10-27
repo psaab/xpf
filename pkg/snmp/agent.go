@@ -997,8 +997,11 @@ func listenSNMP(ctx context.Context, addr *net.UDPAddr, control func(string, str
 // other, but handlePacketFrom itself is serialized by handleMu — the
 // lastPacket auth pattern is per-Agent state, so cross-socket handling
 // must not interleave. Each reply is written on the socket that received
-// its request, with the request's pktinfo oob pinning egress interface
-// and source (#16781).
+// its request, with the request's pktinfo oob pinning the reply source to
+// the polled local address (#16781) and reply egress to the request's
+// ingress interface — except when that ingress is a userspace reinjection
+// TUN, where egress stays a route lookup so the reply is not stranded in
+// the write-only xpf-usp0/xpf-usp1 taps (#17832).
 func (a *Agent) Serve() {
 	a.mu.Lock()
 	conn := a.conn
@@ -1063,7 +1066,15 @@ func (a *Agent) serveOne(conn *net.UDPConn) {
 		// serial loop forever without depleting.
 		a.serveBudget.account(srcIP, a.serveBudget.clock().Sub(start))
 		if resp != nil {
-			if _, _, err := conn.WriteMsgUDP(resp, ingress.oob(), remoteAddr); err != nil {
+			// Reply egress follows the request's ingress interface — the
+			// explicit oif is required for VRF-domain route lookups (#17832
+			// regression run) — except on the userspace reinjection TUNs,
+			// whose write-only ifindex would strand the reply (#17832).
+			// Resolved only for an admitted request that produced a reply:
+			// the lookup costs a full link dump, so shed datagrams must not
+			// pay it ahead of the #9917 budget that exists to shed them.
+			pinEgress := !isUserspaceReinjectTUN(ingress.ifindex)
+			if _, _, err := conn.WriteMsgUDP(resp, ingress.oob(pinEgress), remoteAddr); err != nil {
 				slog.Error("SNMP write error", "err", err, "remote", remoteAddr)
 			}
 		}
