@@ -15,32 +15,6 @@ import (
 // config, redundancy-group active state, the HA liveness watchdog, the FIB
 // generation counter, and the eBPF no-op lifecycle hooks.
 
-// UpdateFabricFwd writes the fabric cross-chassis forwarding config.
-// Pass a zero FabricFwdInfo (Ifindex=0) to disable fabric redirect.
-func (m *Manager) UpdateFabricFwd(info FabricFwdInfo) error {
-	zm, present, st := m.lookupMapLocked("fabric_fwd")
-	if st == registryFresh {
-		return fmt.Errorf("%w: fabric_fwd", ErrDataplaneNotArmed)
-	}
-	if !present {
-		return fmt.Errorf("fabric_fwd map not found")
-	}
-	return zm.Update(uint32(0), info, ebpf.UpdateAny)
-}
-
-// UpdateFabricFwd1 writes the secondary fabric cross-chassis forwarding config (key=1).
-// Pass a zero FabricFwdInfo (Ifindex=0) to disable fabric1 redirect.
-func (m *Manager) UpdateFabricFwd1(info FabricFwdInfo) error {
-	zm, present, st := m.lookupMapLocked("fabric_fwd")
-	if st == registryFresh {
-		return fmt.Errorf("%w: fabric_fwd", ErrDataplaneNotArmed)
-	}
-	if !present {
-		return fmt.Errorf("fabric_fwd map not found")
-	}
-	return zm.Update(uint32(1), info, ebpf.UpdateAny)
-}
-
 // UpdateRGActive sets the active state of a redundancy group in BPF.
 // active=true means this node is primary for the RG; false means secondary.
 func (m *Manager) UpdateRGActive(rgID int, active bool) error {
@@ -133,7 +107,7 @@ func (m *Manager) StartFIBSync(_ context.Context) {}
 
 func (m *Manager) NotifyLinkCycle() {} // no-op: eBPF programs survive link cycles
 
-func (m *Manager) SyncFabricState() {} // no-op: eBPF uses fabric_fwd BPF map directly
+func (m *Manager) SyncFabricState() {} // no-op: fabric peer MAC is resolved by pkg/dataplane/userspace
 
 func (m *Manager) BumpFIBGeneration() (uint32, error) {
 	zm, present, st := m.lookupMapLocked("fib_gen_map")

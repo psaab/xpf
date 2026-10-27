@@ -75,6 +75,16 @@ func (a *LegacyDataPlaneAdapter) Manager() *Manager {
 	return a.manager
 }
 
+// ResolveFabricPeer forwards to the Manager's live resolver (#17044) so
+// the daemon reaches it through the published RuntimeDataPlane directly.
+func (a *LegacyDataPlaneAdapter) ResolveFabricPeer(slot int, overlayIfindex, parentIfindex int, peer string, localMAC net.HardwareAddr) FabricPeerResolution {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return FabricPeerResolution{LocalMAC: localMAC, Ifindex: parentIfindex, Reason: "nil userspace dataplane"}
+	}
+	return m.ResolveFabricPeer(slot, overlayIfindex, parentIfindex, peer, localMAC)
+}
+
 // SetPolicyRenameAncestry forwards daemon pre-publication provenance through
 // the compatibility adapter to the Manager snapshot builder.
 func (a *LegacyDataPlaneAdapter) SetPolicyRenameAncestry(
@@ -593,22 +603,6 @@ func (a *LegacyDataPlaneAdapter) UpdateHAWatchdog(rgID int, timestamp uint64) er
 		return err
 	}
 	return m.UpdateHAWatchdog(rgID, timestamp)
-}
-
-func (a *LegacyDataPlaneAdapter) UpdateFabricFwd(info dataplane.FabricFwdInfo) error {
-	m, err := a.managerOrErr()
-	if err != nil {
-		return err
-	}
-	return m.bpfShim.UpdateFabricFwd(info)
-}
-
-func (a *LegacyDataPlaneAdapter) UpdateFabricFwd1(info dataplane.FabricFwdInfo) error {
-	m, err := a.managerOrErr()
-	if err != nil {
-		return err
-	}
-	return m.bpfShim.UpdateFabricFwd1(info)
 }
 
 func (a *LegacyDataPlaneAdapter) SetSessionV4(key dataplane.SessionKey, val dataplane.SessionValue) error {
