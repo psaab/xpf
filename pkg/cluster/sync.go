@@ -1467,21 +1467,33 @@ type SessionSync struct {
 	// injector derives the pair from its snapshot rows, so the wire fold
 	// names `reth0.80`, not the `reth0` the child device name truncated to.
 	// Nil keeps the legacy vlan-0 fold.
-	natScopeFoldFn   func(ifindex int32) uint32
-	deleteJournalMu  sync.Mutex
-	deleteJournal    [][]byte
-	deleteJournalCap int
-	// scopedDeleteJournal is the #10512 deferred scoped-delete debt: scoped
-	// frames that could not be queued (disconnected/full) wait here — never
-	// in the bare journal — and flush only after the current peer
-	// positively advertises the scoped bit (learn-triggered), so no
+	natScopeFoldFn  func(ifindex int32) uint32
+	deleteJournalMu sync.Mutex
+	// deleteJournal is the bare deferred-delete ring; scopedDeleteJournal
+	// is the #10512 deferred scoped-delete debt: scoped frames that could
+	// not be queued (disconnected/full) wait there — never in the bare
+	// journal — and flush only after the current peer positively
+	// advertises the scoped bit (learn-triggered), so no
 	// cross-incarnation raw replay can downgrade them. Same mutex, cap
-	// discipline, and overflow resync-arming as the bare journal.
-	scopedDeleteJournal    [][]byte
-	scopedDeleteJournalCap int
-	lastPeerRxMono         atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
-	readDeadline           time.Duration
-	peerSilenceLimit       time.Duration
+	// discipline, and overflow resync-arming for both (boundedFrameJournal).
+	deleteJournal       boundedFrameJournal
+	scopedDeleteJournal boundedFrameJournal
+	lastPeerRxMono      atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
+	// peerHeartbeatAckEver latches when the CURRENTLY connected peer proves it
+	// understands syncMsgHeartbeat by replying syncMsgHeartbeatAck. It gates
+	// the two enforcement paths that would otherwise punish a legacy peer that
+	// simply never acks: the receiveLoop missed-heartbeat teardown
+	// (sync_conn_read.go) and PeerHealthy's silence window (below).
+	//
+	// #5718 C01a: this is peer-INCARNATION scoped, NOT SessionSync-lifetime.
+	// handleDisconnect clears it on full disconnect (alongside clockSynced) so
+	// a peer downgrade — new build acks, then rolls back to a build that never
+	// acks — cannot leave the flag latched and turn a healthy old peer into
+	// permanent connection churn plus a failover-readiness block. Do not
+	// promote this back to a set-once flag.
+	peerHeartbeatAckEver atomic.Bool
+	readDeadline         time.Duration
+	peerSilenceLimit     time.Duration
 	// bulkStartMu serializes queued incremental writes with the
 	// table-truth snapshot -> BulkStart boundary (#10283). A bulk holds it
 	// while reading BulkSnapshotSource and until BulkStart is written under
@@ -1934,6 +1946,11 @@ type SessionSync struct {
 	// itself (testBeforeQueuedWrite shape). Test-only; pins the
 	// caps-store-vs-append race deterministically.
 	testBeforeScopedJournalTake func()
+	// testBeforeJournalTake runs in flushDeleteJournal before the journal
+	// take, then nils itself. Test-only twin of
+	// testBeforeScopedJournalTake for the bare flush (#17110 warn-parity
+	// cell drives a concurrent append during the flush).
+	testBeforeJournalTake func()
 	// testDHCPPreCommit, when non-nil, runs after DHCP decode+filter and
 	// before the commit, with NO locks held (so the test may drive reset
 	// + replacement paths from the hook rendezvous). Test-only hook for
@@ -2078,7 +2095,8 @@ func NewSessionSync(localAddr, peerAddr string, rt clusterRuntime) *SessionSync 
 		peerAddr:                   peerAddr,
 		sendCh:                     make(chan []byte, 4096),
 		sweepWakeCh:                make(chan struct{}, 1),
-		deleteJournalCap:           deleteJournalDefaultCap,
+		deleteJournal:              boundedFrameJournal{cap: deleteJournalDefaultCap},
+		scopedDeleteJournal:        boundedFrameJournal{cap: deleteJournalDefaultCap},
 		failoverWaiters:            make(map[int]failoverWaiter),
 		failoverCommitWaiters:      make(map[int]failoverWaiter),
 		failoverBatchWaiters:       make(map[string]failoverWaiter),
@@ -2188,7 +2206,8 @@ func NewDualSessionSync(local, peer, local1, peer1 string, rt clusterRuntime) *S
 		peerAddr1:                  peer1,
 		sendCh:                     make(chan []byte, 4096),
 		sweepWakeCh:                make(chan struct{}, 1),
-		deleteJournalCap:           deleteJournalDefaultCap,
+		deleteJournal:              boundedFrameJournal{cap: deleteJournalDefaultCap},
+		scopedDeleteJournal:        boundedFrameJournal{cap: deleteJournalDefaultCap},
 		failoverWaiters:            make(map[int]failoverWaiter),
 		failoverCommitWaiters:      make(map[int]failoverWaiter),
 		failoverBatchWaiters:       make(map[string]failoverWaiter),
