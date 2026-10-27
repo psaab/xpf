@@ -1089,3 +1089,233 @@ fn forward_commit_single_source_structure_17021() {
         "the hand-copied seed builder must stay deleted"
     );
 }
+
+/// #17021 fold F1 (builder fallback): a fabric arrival through the
+/// shared builder stamps NO ingress identity `(0,0)` (#7096) AND
+/// passes the gated peer scope through verbatim. The pre-fold fabric
+/// cell passed `ingress_nat_scope_ifindex: None`, so a ternary that
+/// dropped the fabric scope (or a stamp that kept the local fabric
+/// member 11/50) stayed green. RED on either revert.
+#[test]
+fn forward_session_metadata_fabric_scope_passthrough_17021() {
+    let forwarding = build_forwarding_state(&ingress_identity_snapshot());
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            ..crate::afxdp::testfx::test_resolution()
+        },
+        nat: crate::nat::NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let peer_scope = 24;
+    let metadata = crate::afxdp::session_glue::forward_session_metadata(
+        crate::afxdp::session_glue::ForwardMetaInput {
+            forwarding: &forwarding,
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_ifindex: INGRESS_PARENT_IFINDEX as u32,
+            ingress_vlan_id: INGRESS_VLAN_ID,
+            ingress_nat_scope_ifindex: Some(peer_scope),
+            fabric_ingress: true,
+            decision,
+            policy_result: None,
+            nat64_reverse: None,
+            owner_rg_id: None,
+        },
+    );
+    assert!(metadata.fabric_ingress);
+    assert_eq!(
+        (metadata.ingress_ifindex, metadata.ingress_vlan_id),
+        (0, 0),
+        "fabric arrival must stamp (0,0) ingress identity, not the local fabric member (#7096)"
+    );
+    assert_eq!(
+        metadata.nat_scope_ifindex,
+        Some(peer_scope),
+        "fabric arrival must pass the gated peer NAT scope through, not resolve the local logical unit"
+    );
+}
+
+/// #17021 fold F1 (poll wiring): a fabric punt whose WAN gateway is
+/// unresolved must seed through `txn_run_descriptor` with the poll
+/// wiring's `fabric_ingress: packet_fabric_ingress` and gated scope.
+/// Fixture: `nat_snapshot_with_fabric` (fab0 parent 21, LAN reth1.0
+/// RG2, WAN reth0.80 RG1) with the WAN neighbors dropped, a V2 stamp
+/// claiming `lan` via reth1.0, split placement (RG1 local, RG2 peer).
+/// The local resolution for 8.8.8.8 is MissingNeighbor; the stamp is
+/// a proved peer punt, owner-gated to the locally-owned WAN egress.
+/// Asserts the seed's `(0,0)` identity and gated scope passthrough.
+/// Reverting the poll call-site to `fabric_ingress: false` (or the
+/// raw local identity/scope) reds this cell while the builder cell
+/// stays green.
+#[test]
+fn missing_neighbor_seed_fabric_arrival_poll_wiring_17021() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.neighbors.retain(|n| n.ip == "10.99.13.2");
+    let mut forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: now_secs,
+            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+        },
+    )]);
+    let redirect = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        &mut forwarding,
+        Some(TEST_LAN_ZONE_ID),
+        Some(24),
+    )
+    .expect("V2 producer must mint a scoped stamp for the LAN ingress");
+    let src_mac = redirect.src_mac.expect("V2 source stamp");
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    );
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&src_mac);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    assert!(
+        matches!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                &frame,
+                meta,
+                &forwarding,
+                &ha_state,
+                now_secs,
+            ),
+            ZoneEncodedFabricStamp::ValidScoped {
+                zone_id: TEST_LAN_ZONE_ID,
+                ifindex: 24
+            }
+        ),
+        "precondition: split-placement V2 stamp must validate scoped (lan, 24)"
+    );
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let mut sessions = SessionTable::new();
+    let (_batch, _dbg, published) = txn_run_descriptor_capturing_shared(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    let mut seeds = Vec::new();
+    sessions.iter_with_origin(|_key, _decision, metadata, origin| {
+        if origin == SessionOrigin::MissingNeighborSeed {
+            seeds.push(metadata.clone());
+        }
+    });
+    assert_eq!(
+        seeds.len(),
+        1,
+        "fabric punt with unresolved WAN gateway must install exactly one MissingNeighbor seed"
+    );
+    let seed = &seeds[0];
+    assert!(seed.fabric_ingress, "seed must record the fabric arrival");
+    assert_eq!(
+        (seed.ingress_ifindex, seed.ingress_vlan_id),
+        (0, 0),
+        "fabric-arrival seed must stamp (0,0), not the local fabric member (#7096)"
+    );
+    assert_eq!(
+        seed.nat_scope_ifindex,
+        Some(24),
+        "fabric-arrival seed must carry the gated peer scope (reth1.0), not the local logical resolution"
+    );
+    let shared: Vec<_> = published
+        .iter()
+        .filter(|e| e.origin == SessionOrigin::MissingNeighborSeed)
+        .collect();
+    assert_eq!(
+        shared.len(),
+        1,
+        "seed must publish exactly one shared entry"
+    );
+    assert_eq!(shared[0].metadata, *seed);
+}
+
+/// #17021 fold F2: `forward_synced_entry` must carry the LIVE PPTP
+/// wire call-id pair for a `Pptp(handle)` key whose call pair is
+/// registered in the table — not the seed's former hardcoded 0.
+/// RED on reverting `forward_synced_entry` to `pptp_call_ids: 0`.
+#[test]
+fn forward_synced_entry_carries_live_pptp_call_ids_17021() {
+    let src = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    let dst = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+    let call = crate::session::pptp::PptpCall::new(src, 0x1111, dst, 0x2222);
+    let expected = call.to_wire_call_ids();
+    assert_ne!(expected, 0, "fixture call pair must encode non-zero");
+    let mut sessions = SessionTable::new();
+    let handle = sessions
+        .pptp_mut()
+        .install_synced_association(call, 1_000)
+        .expect("register the PPTP call pair");
+    assert_eq!(handle, call.handle());
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_GRE,
+        src_ip: src,
+        dst_ip: dst,
+        src_port: 0,
+        dst_port: 0,
+        discriminator: crate::session::TunnelDiscriminator::Pptp(handle),
+        routing_domain: 0,
+    };
+    let decision = SessionDecision {
+        resolution: crate::afxdp::testfx::test_resolution(),
+        nat: crate::nat::NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let entry = crate::afxdp::session_glue::forward_synced_entry(
+        &sessions,
+        key,
+        decision,
+        crate::afxdp::testfx::test_metadata(),
+        None,
+        None,
+        SessionOrigin::MissingNeighborSeed,
+        crate::ip_proto::PROTO_GRE,
+        0,
+        42,
+        0,
+    );
+    assert_eq!(
+        entry.pptp_call_ids, expected,
+        "forward_synced_entry must read the live registered PPTP pair, not 0"
+    );
+    assert_ne!(entry.pptp_call_ids, 0);
+}
+
+/// #17021 fold F3: pin the single-source counts the acceptance
+/// criteria name — exactly one `SyncedSessionEntry {` literal in the
+/// poll body (the reverse companion), and both forward arms routing
+/// through the shared builders.
+#[test]
+fn forward_commit_structure_counts_17021() {
+    let poll = include_str!("poll_descriptor/mod.rs");
+    assert_eq!(
+        poll.matches("SyncedSessionEntry {").count(),
+        1,
+        "poll body must contain exactly one SyncedSessionEntry literal (the reverse companion)"
+    );
+    assert_eq!(
+        poll.matches("forward_synced_entry(").count(),
+        2,
+        "both forward arms (transit + MissingNeighbor seed) must route through forward_synced_entry"
+    );
+    assert_eq!(
+        poll.matches("forward_session_metadata(").count(),
+        2,
+        "both forward arms must route through forward_session_metadata"
+    );
+}
