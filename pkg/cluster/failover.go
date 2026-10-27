@@ -484,8 +484,9 @@ type operatorHoldSnapshot struct {
 // snapshotOperatorHoldLocked captures the operator intent for rgID. The
 // hold fields are armed only when ManualFailover is set (mirroring the
 // peer-transfer snapshot sites); the override pair and aborted marker are
-// captured independently, so an RG removed from m.groups can still have
-// its override pair restored by the fence-abort path. Caller holds m.mu.
+// captured independently. An RG removed from m.groups restores NOTHING:
+// the restore requires the same RG incarnation for every arm (#17117
+// fold; a removed+re-added RG must not inherit the old override). Caller holds m.mu.
 func (m *Manager) snapshotOperatorHoldLocked(rgID int) operatorHoldSnapshot {
 	snap := operatorHoldSnapshot{generation: m.failoverGen[rgID]}
 	if rg, ok := m.groups[rgID]; ok {
