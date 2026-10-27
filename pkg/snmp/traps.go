@@ -132,49 +132,19 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 	// ifAdminStatus, ifOperStatus } are copied in order after
 	// sysUpTime.0/snmpTrapOID.0 (RFC 3416 §4.2.6); ifDescr follows only
 	// as a trailing additional varbind (#16778).
-	// 1. sysUpTime.0 — TimeTicks
-	vb1OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(oidSysUpTime))
-	vb1Val := berEncodeTLV(tagTimeTicks, berEncodeTimeTicks(uptime))
-	vb1 := berEncodeTLV(tagSequence, append(vb1OID, vb1Val...))
-
-	// 2. snmpTrapOID.0 — OID of the trap type
-	vb2OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(oidSnmpTrapOID))
-	vb2Val := berEncodeTLV(tagObjectIdentifier, berEncodeOID(trapOID))
-	vb2 := berEncodeTLV(tagSequence, append(vb2OID, vb2Val...))
-
-	// 3. ifIndex.<ifindex> — Integer
 	ifIndexOID := append(append([]int{}, oidIfIndex...), ifindex)
-	vb3OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifIndexOID))
-	vb3Val := berEncodeIntegerTLV(ifindex)
-	vb3 := berEncodeTLV(tagSequence, append(vb3OID, vb3Val...))
-
-	// 4. ifAdminStatus.<ifindex> — Integer (1=up, 2=down)
 	ifAdminOID := append(append([]int{}, oidIfAdminStatus...), ifindex)
-	vb4OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifAdminOID))
-	vb4Val := berEncodeIntegerTLV(adminStatus)
-	vb4 := berEncodeTLV(tagSequence, append(vb4OID, vb4Val...))
-
-	// 5. ifOperStatus.<ifindex> — Integer (1=up, 2=down)
 	ifOperOID := append(append([]int{}, oidIfOperStatus...), ifindex)
-	vb5OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifOperOID))
-	vb5Val := berEncodeIntegerTLV(operStatus)
-	vb5 := berEncodeTLV(tagSequence, append(vb5OID, vb5Val...))
-
-	// 6. ifDescr.<ifindex> — OctetString (trailing additional varbind)
 	ifDescrOID := append(append([]int{}, oidIfDescr...), ifindex)
-	vb6OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifDescrOID))
-	vb6Val := berEncodeTLV(tagOctetString, []byte(ifname))
-	vb6 := berEncodeTLV(tagSequence, append(vb6OID, vb6Val...))
-
-	// Varbind list
-	var vbList []byte
-	vbList = append(vbList, vb1...)
-	vbList = append(vbList, vb2...)
-	vbList = append(vbList, vb3...)
-	vbList = append(vbList, vb4...)
-	vbList = append(vbList, vb5...)
-	vbList = append(vbList, vb6...)
-	vbListEncoded := berEncodeTLV(tagSequence, vbList)
+	vbs := []varbind{
+		{oid: oidSysUpTime, tag: tagTimeTicks, value: berEncodeTimeTicks(uptime)},
+		{oid: oidSnmpTrapOID, tag: tagObjectIdentifier, value: berEncodeOID(trapOID)},
+		{oid: ifIndexOID, tag: tagInteger, value: berEncodeIntegerValue(ifindex)},
+		{oid: ifAdminOID, tag: tagInteger, value: berEncodeIntegerValue(adminStatus)},
+		{oid: ifOperOID, tag: tagInteger, value: berEncodeIntegerValue(operStatus)},
+		{oid: ifDescrOID, tag: tagOctetString, value: []byte(ifname)},
+	}
+	vbListEncoded := encodeVarbindList(vbs)
 
 	// PDU body: request-id, error-status(0), error-index(0), varbinds
 	requestID := trapRequestID()
@@ -249,31 +219,16 @@ func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool,
 	// they map to the time-stamp field and the generic-trap/enterprise
 	// fields respectively.
 	ifIndexOID := append(append([]int{}, oidIfIndex...), ifindex)
-	vb1OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifIndexOID))
-	vb1Val := berEncodeIntegerTLV(ifindex)
-	vb1 := berEncodeTLV(tagSequence, append(vb1OID, vb1Val...))
-
 	ifAdminOID := append(append([]int{}, oidIfAdminStatus...), ifindex)
-	vb2OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifAdminOID))
-	vb2Val := berEncodeIntegerTLV(adminStatus)
-	vb2 := berEncodeTLV(tagSequence, append(vb2OID, vb2Val...))
-
 	ifOperOID := append(append([]int{}, oidIfOperStatus...), ifindex)
-	vb3OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifOperOID))
-	vb3Val := berEncodeIntegerTLV(operStatus)
-	vb3 := berEncodeTLV(tagSequence, append(vb3OID, vb3Val...))
-
 	ifDescrOID := append(append([]int{}, oidIfDescr...), ifindex)
-	vb4OID := berEncodeTLV(tagObjectIdentifier, berEncodeOID(ifDescrOID))
-	vb4Val := berEncodeTLV(tagOctetString, []byte(ifname))
-	vb4 := berEncodeTLV(tagSequence, append(vb4OID, vb4Val...))
-
-	var vbList []byte
-	vbList = append(vbList, vb1...)
-	vbList = append(vbList, vb2...)
-	vbList = append(vbList, vb3...)
-	vbList = append(vbList, vb4...)
-	vbListEncoded := berEncodeTLV(tagSequence, vbList)
+	vbs := []varbind{
+		{oid: ifIndexOID, tag: tagInteger, value: berEncodeIntegerValue(ifindex)},
+		{oid: ifAdminOID, tag: tagInteger, value: berEncodeIntegerValue(adminStatus)},
+		{oid: ifOperOID, tag: tagInteger, value: berEncodeIntegerValue(operStatus)},
+		{oid: ifDescrOID, tag: tagOctetString, value: []byte(ifname)},
+	}
+	vbListEncoded := encodeVarbindList(vbs)
 
 	// Trap-PDU body: enterprise, agent-addr, generic-trap, specific-trap,
 	// time-stamp, variable-bindings.
