@@ -1,7 +1,12 @@
 package config
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"unsafe"
@@ -22,9 +27,13 @@ import (
 // lenient bools a shallow NumField walk over compileOpts would miss,
 // and any future pointer-embedded struct, traversed under the
 // nil/cycle policy in walkBoolFields16166) and asserts every
-// lenient*/sanitize* bool is true in lenientCompileOpts(). It does NOT
-// enforce links 3-4 (gate call-site reads the right flag; warning/show
-// surface) — that is the separately gated registry work, not PR-0.
+// lenient*/sanitize* bool is true in lenientCompileOpts(). The reverse
+// arm (TestLenientCompileOptsHaveReaders17143) enforces link 3 for the
+// lenient*/sanitize*/suppress* population: such a field with no selector
+// read outside compiler_opts.go is dead — its gate was retired (or never
+// wired) and the field must be deleted with it, not certified by the
+// links 1-2 arm. It does NOT enforce link 4 (warning/show surface) —
+// that is the separately gated registry work, not PR-0.
 //
 // Scope is deliberately the name prefix, not "every bool": compileOpts
 // also carries non-downgrade bools whose lenient value is not uniformly
@@ -278,6 +287,95 @@ func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 	if opts.nodeAware {
 		t.Error("nodeAware is true in lenientCompileOpts(): node identity must come only " +
 			"from the node-aware entry's per-call stamp (#4329)")
+	}
+}
+
+// TestLenientCompileOptsHaveReaders17143 is the reverse arm (#17143):
+// every lenient*/sanitize*/suppress* bool reachable from compileOpts
+// must have at least one selector read (X.<field>) in a non-test
+// pkg/config/*.go file other than compiler_opts.go (which only declares
+// the field and sets it in lenientCompileOpts()). A field with zero
+// such readers is dead: its gate was retired or never wired, and the
+// links 1-2 arm above would otherwise certify it forever merely for
+// being present and true — exactly how lenientLoginClassDeny survived
+// the #7172 cut-6 retirement of its gate.
+//
+// Method follows issue #17143 step 4: collect the field population by
+// reflecting over lenientCompileOpts() (so embedded
+// protocolScopeOpts members are included under their leaf names), then
+// use go/parser over the production sources to collect every
+// SelectorExpr whose Sel is one of those names. Selector collection is
+// deliberately name-based, not type-based: a same-named selector on an
+// unrelated type would mask a dead field, but no such collision exists
+// in this package for this population, and the census floors below
+// fail loudly if the parse stops reaching the sources. Composite-
+// literal keys in compiler_opts.go (field: true) are KeyValueExpr
+// idents, not selectors, so excluding that one file removes both the
+// declaration and the registration from the reader set.
+func TestLenientCompileOptsHaveReaders17143(t *testing.T) {
+	opts := lenientCompileOpts()
+	fields := map[string]bool{}
+	walkBoolFields16166(reflect.ValueOf(opts), "", func(path string, fv reflect.Value) {
+		leaf := path[strings.LastIndex(path, ".")+1:]
+		if strings.HasPrefix(leaf, "lenient") || strings.HasPrefix(leaf, "sanitize") ||
+			strings.HasPrefix(leaf, "suppress") {
+			fields[leaf] = true
+		}
+	})
+	// Census floor: the population must be the ~330 downgrade/advisory
+	// bools this arm claims to police. A collapsed walk green here
+	// would be worse than no arm.
+	if len(fields) < 250 {
+		t.Fatalf("census: only %d lenient*/sanitize*/suppress* bools reached; "+
+			"the walk is not reaching the compileOpts population", len(fields))
+	}
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("ReadDir(.): %v", err)
+	}
+	fset := token.NewFileSet()
+	readers := map[string]int{}
+	files := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") ||
+			name == "compiler_opts.go" {
+			continue
+		}
+		f, perr := parser.ParseFile(fset, name, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", name, perr)
+		}
+		files++
+		ast.Inspect(f, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && fields[sel.Sel.Name] {
+				readers[sel.Sel.Name]++
+			}
+			return true
+		})
+	}
+	if files < 100 {
+		t.Fatalf("parsed only %d production files; the reader census is not reaching pkg/config", files)
+	}
+	if len(readers) < 250 {
+		t.Fatalf("only %d of %d lenient*/sanitize*/suppress* fields have any selector read; "+
+			"the selector census is mis-parsing the package source", len(readers), len(fields))
+	}
+
+	var dead []string
+	for name := range fields {
+		if readers[name] == 0 {
+			dead = append(dead, name)
+		}
+	}
+	if len(dead) > 0 {
+		sort.Strings(dead)
+		t.Errorf("%d lenient*/sanitize*/suppress* compileOpts field(s) have no reader "+
+			"outside compiler_opts.go — the field is dead (its gate was retired or "+
+			"never wired) and must be deleted with its lenientCompileOpts() entry, "+
+			"not left certified by the links 1-2 arm: %s",
+			len(dead), strings.Join(dead, ", "))
 	}
 }
 

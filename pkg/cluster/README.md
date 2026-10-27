@@ -3816,10 +3816,9 @@ administrative `IFF_UP` flag. xpfd admin-ups every managed interface, so
 suppress failover (#2070). The rule is: `OperUp` → up; `OperUnknown` →
 fall back to the admin flag (virtual devices and 802.1Q VLAN
 sub-interfaces that report no independent carrier state); `OperDown` /
-`OperLowerLayerDown` / anything else → down. This mirrors
-`pkg/vrrp.linkAttrsUp`, the canonical link-state read used by VRRP
-track-interface detection. `pkg/routing/monitor.go` (the display-side
-`InterfaceMonitorStatus` path) carries its own identical copy.
+`OperLowerLayerDown` / anything else → down. The single definition now lives in `pkg/linkstate.Up` (#17132);
+`LinkAttrsUp` here, `pkg/routing`'s and `pkg/vrrp`'s helpers are aliases
+of it. `pkg/routing/monitor.go` is display-only since #17132.
 
 **Missing local link = down (#5080).** A `LinkByName` failure for a
 monitor on the LOCAL FPC slot means the configured member link is absent

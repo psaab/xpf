@@ -3740,21 +3740,6 @@ type compileOpts struct {
 	// case, so warning rather than refusing to start strictly improves it.
 	lenientFabricMemberDefined bool
 
-	// lenientLoginClassDeny (#5831) downgrades the custom-login-class
-	// restrictive-regex gate (deny-commands / deny-configuration, which xpf's
-	// coarse RBAC does not enforce) from a hard compile error to a
-	// cfg.Warnings entry PLUS a restrictive fold of the affected class's mapped
-	// permissions. Set ONLY on the tolerant load / peer-sync paths so a config
-	// persisted before this gate existed — or synced from a peer running older
-	// code — still BOOTS (#1960 no-brick). Unlike most lenient flags this one
-	// is not warn-and-continue-unchanged: leaving the permission set intact
-	// would preserve exactly the fail-open the strict gate rejects, so the
-	// tolerant path resolves the un-enforceable restriction in the RESTRICTIVE
-	// direction instead — bounded by a repair floor, because a class the
-	// console operator is bound to must keep the access that deletes the
-	// statement. See foldLoginClassDenyToRepairableFloor.
-	lenientLoginClassDeny bool
-
 	// lenientBridgeDomainVlanID (#6687) downgrades the bridge-domain
 	// `vlan-id-list` parse / range gate from a hard compile error to a
 	// cfg.Warnings entry plus a dropped value. The strict commit /
@@ -4261,7 +4246,6 @@ func lenientCompileOpts() compileOpts {
 		lenientCoSNumericCodePoint:               true,
 		lenientNonNumericUnit:                    true,
 		lenientInterfaceUnitRef:                  true,
-		lenientLoginClassDeny:                    true,
 		lenientInterfaceRangeBudget:              true,
 		lenientFabricMemberDefined:               true,
 		lenientInterfaceAddressList:              true,
