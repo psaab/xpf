@@ -533,18 +533,18 @@ unit_exec_start() {
 # candidate IN TRIAL? — and echoes exactly one of:
 #
 #   absent        : no journal at all. Nothing was ever armed here.
-#   not-armed     : a journal exists but is not at a trial state
-#                   (PREFLIGHT/INSTALLED mid-run, or a terminal
-#                   PROMOTED/REVERTED that has not been cleared yet), OR it
-#                   is ARMING *with no arm record present* — prepared intent
-#                   whose one-shot was never shown to be queued (#16809).
-#   arming        : ARMING *with the arm record present*: the record is
-#                   written before the ARMED transition, so a one-shot may
-#                   have been queued without a verified ARMED record
-#                   (#16809). Only returned when the record exists; with the
-#                   record absent ARMING folds into not-armed, because there
-#                   is no designated binary to gate with either way. The Go
-#                   half convicts on BootCurrent + uname -r.
+#     not-armed     : a journal exists but is not at a trial state
+#                     (PREFLIGHT/INSTALLED mid-run, or a terminal
+#                     PROMOTED/REVERTED that has not been cleared yet).
+#     arming        : ARMING *with the arm record present*: the record is
+#                     written before the ARMED transition, so a one-shot may
+#                     have been queued without a verified ARMED record
+#                     (#16809). The Go half convicts on BootCurrent +
+#                     uname -r.
+#     arming-unrecorded : ARMING *with no arm record present* (#17862):
+#                     no designated binary exists to gate with, and the
+#                     state must never fold into the quiet not-armed
+#                     exit — the caller warns loudly and records durably.
 #   armed         : a candidate kernel IS in a verified trial right now.
 #   indeterminate : a journal exists but cannot be read as one. Absence of
 #                   evidence is not evidence of absence, so this is NOT folded
