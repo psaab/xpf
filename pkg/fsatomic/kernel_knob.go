@@ -28,10 +28,6 @@ type KnobRestorePolicy int
 const (
 	// RestorePrior restores the value captured on the first Assert.
 	RestorePrior KnobRestorePolicy = iota
-	// KeepOnDisable leaves the asserted value in place on Release; the
-	// capture is dropped without a write. For deliberately
-	// daemon-lifetime posture (e.g. host forwarding posture).
-	KeepOnDisable
 )
 
 // knobFS is the filesystem seam so tests (and the daemon's fake-FS tests)
@@ -107,6 +103,10 @@ type knobCapture struct {
 	prior  string
 	owner  string
 	policy KnobRestorePolicy
+	// gen counts Assert calls for this capture. It lets Release tell a
+	// capture the caller re-asserted during the restore write apart from
+	// the one the snapshot was taken from (see releaseOne).
+	gen uint64
 }
 
 // KernelKnobs is the daemon owner registry for BestEffortKernelKnob
@@ -116,88 +116,108 @@ type knobCapture struct {
 // Invariants:
 //   - The first Assert of a path captures its prior value; later asserts
 //     by the same owner never overwrite the capture (first-assert wins,
-//     mirroring priorHostTunables).
+//     mirroring priorHostTunables). A first assert whose capture read
+//     fails registers nothing and writes nothing: there is no safe
+//     prior to restore later, so the assert must fail rather than
+//     poison the capture with an empty string.
 //   - A second, different owner asserting an already-owned path is an
 //     error — two owners of one knob is exactly the nf_conntrack_tcp_loose
 //     divergence this primitive exists to prevent. The failed assert
 //     writes nothing and captures nothing.
-//   - Release(owner) restores every RestorePrior capture that owner
-//     holds. A failed restore write is retained as retry debt: the
-//     capture stays, so the next Release retries it. KeepOnDisable
-//     captures are dropped without a write.
+//   - A same-owner re-assert with a different policy is an error: the
+//     policy is fixed at capture time and a later policy must never
+//     silently rewrite what Release will do with a live capture.
+//   - The per-path write (assert or restore) and the capture bookkeeping
+//     are serialized per path (see pathMu), so a same-owner re-assert
+//     landing during a Release restore can neither be deleted by that
+//     release nor land after it leaving an asserted knob with no capture.
+//   - Release(owner) restores every capture that owner holds. A failed
+//     restore write is retained as retry debt: the capture stays, so
+//     the next Release retries it.
 //   - Assert never restores; Release never asserts.
+//
+// Restart scope: the registry is per-process and in-memory only. A
+// daemon restart loses every capture, so a later first assert captures
+// whatever value the previous process left in the knob. The daemon
+// layers its restart contract on top of this (see
+// Daemon.reconcileFibMultipathHashPolicy): this type makes no claim
+// that a capture survives a restart.
 type KernelKnobs struct {
 	mu       sync.Mutex
 	fs       knobFS
 	captures map[string]knobCapture // path -> capture
+	// locks serializes the write+bookkeeping critical section per path.
+	// Entries are never removed: the map is bounded by the number of
+	// distinct knob paths ever asserted, which for a daemon is a small
+	// fixed set.
+	locks map[string]*sync.Mutex
 }
 
 // NewKernelKnobs returns a registry backed by real procfs writes.
 func NewKernelKnobs() *KernelKnobs { return newKernelKnobsFS(realKnobFS{}) }
 
 func newKernelKnobsFS(fs knobFS) *KernelKnobs {
-	return &KernelKnobs{fs: fs, captures: make(map[string]knobCapture)}
+	return &KernelKnobs{fs: fs, captures: make(map[string]knobCapture), locks: make(map[string]*sync.Mutex)}
+}
+
+// pathMu returns the mutex serializing writes to path. Callers hold it
+// across the write and the capture update/delete so the knob value and
+// the registry entry can never disagree about which operation landed
+// last. Lock ordering: pathMu is always taken before mu, never after.
+func (k *KernelKnobs) pathMu(path string) *sync.Mutex {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	m, ok := k.locks[path]
+	if !ok {
+		m = &sync.Mutex{}
+		k.locks[path] = m
+	}
+	return m
 }
 
 // Assert drives path to want on behalf of owner. On the first assert of
-// path the current value is captured for later restore. If another owner
-// already holds path, Assert returns an error and writes nothing.
-// A write failure returns an error and retains the capture (if this call
-// created it) so a later Release can still restore the prior.
+// path the current value is captured for later restore; if that capture
+// read fails, Assert returns the error, registers no capture, and writes
+// nothing. If another owner already holds path, Assert returns an error
+// and writes nothing. A write failure returns an error and retains the
+// capture (if this call created it) so a later Release can still restore
+// the prior.
 func (k *KernelKnobs) Assert(path, want, owner string, policy KnobRestorePolicy) error {
 	want = NormalizeKnobValue(want)
+	pm := k.pathMu(path)
+	pm.Lock()
+	defer pm.Unlock()
+
 	k.mu.Lock()
 	cap0, owned := k.captures[path]
 	if owned && cap0.owner != owner {
 		k.mu.Unlock()
 		return fmt.Errorf("kernel knob %s already owned by %q (asserted by %q)", path, cap0.owner, owner)
 	}
-	if !owned {
-		prior := ""
-		if b, err := k.fs.ReadFile(path); err == nil {
-			prior = NormalizeKnobValue(string(b))
-		}
-		cap0 = knobCapture{prior: prior, owner: owner, policy: policy}
-		k.captures[path] = cap0
-	} else if cap0.policy != policy {
-		cap0.policy = policy
-		k.captures[path] = cap0
+	if owned && cap0.policy != policy {
+		k.mu.Unlock()
+		return fmt.Errorf("kernel knob %s already asserted by %q with a different restore policy", path, owner)
 	}
+	if !owned {
+		b, err := k.fs.ReadFile(path)
+		if err != nil {
+			k.mu.Unlock()
+			return fmt.Errorf("capture prior of kernel knob %s: %w", path, err)
+		}
+		cap0 = knobCapture{prior: NormalizeKnobValue(string(b)), owner: owner, policy: policy}
+	}
+	cap0.gen++
+	k.captures[path] = cap0
 	k.mu.Unlock()
+
 	_, err := writeKernelKnobFS(k.fs, path, want, false)
 	return err
 }
 
-// AssertVerified is Assert plus a read-back verify of the written value.
-func (k *KernelKnobs) AssertVerified(path, want, owner string, policy KnobRestorePolicy) error {
-	want = NormalizeKnobValue(want)
-	k.mu.Lock()
-	cap0, owned := k.captures[path]
-	if owned && cap0.owner != owner {
-		k.mu.Unlock()
-		return fmt.Errorf("kernel knob %s already owned by %q (asserted by %q)", path, cap0.owner, owner)
-	}
-	if !owned {
-		prior := ""
-		if b, err := k.fs.ReadFile(path); err == nil {
-			prior = NormalizeKnobValue(string(b))
-		}
-		cap0 = knobCapture{prior: prior, owner: owner, policy: policy}
-		k.captures[path] = cap0
-	} else if cap0.policy != policy {
-		cap0.policy = policy
-		k.captures[path] = cap0
-	}
-	k.mu.Unlock()
-	_, err := writeKernelKnobFS(k.fs, path, want, true)
-	return err
-}
-
 // Release restores every knob held by owner and drops the captures that
-// restored successfully (or were KeepOnDisable). It returns the sorted
-// list of paths whose restore write failed; those captures are retained
-// as retry debt for the next Release. Releasing an unknown owner is a
-// no-op.
+// restored successfully. It returns the sorted list of paths whose
+// restore write failed; those captures are retained as retry debt for
+// the next Release. Releasing an unknown owner is a no-op.
 func (k *KernelKnobs) Release(owner string) (failed []string) {
 	k.mu.Lock()
 	var paths []string
@@ -206,39 +226,60 @@ func (k *KernelKnobs) Release(owner string) (failed []string) {
 			paths = append(paths, path)
 		}
 	}
-	sort.Strings(paths)
-	type job struct {
-		path  string
-		prior string
-		keep  bool
-	}
-	jobs := make([]job, 0, len(paths))
-	for _, path := range paths {
-		c := k.captures[path]
-		jobs = append(jobs, job{path: path, prior: c.prior, keep: c.policy == KeepOnDisable})
-	}
 	k.mu.Unlock()
-
-	for _, j := range jobs {
-		if j.keep {
-			k.mu.Lock()
-			if c, ok := k.captures[j.path]; ok && c.owner == owner {
-				delete(k.captures, j.path)
-			}
-			k.mu.Unlock()
-			continue
+	sort.Strings(paths)
+	for _, path := range paths {
+		if !k.releaseOne(owner, path) {
+			failed = append(failed, path)
 		}
-		if _, err := writeKernelKnobFS(k.fs, j.path, j.prior, false); err != nil {
-			failed = append(failed, j.path)
-			continue
-		}
-		k.mu.Lock()
-		if c, ok := k.captures[j.path]; ok && c.owner == owner {
-			delete(k.captures, j.path)
-		}
-		k.mu.Unlock()
 	}
 	return failed
+}
+
+// releaseOne restores the capture owner holds for path and drops it once
+// the restore write succeeds. It reports false when the restore failed
+// (the capture is retained as retry debt). A capture the owner
+// re-asserted while the restore was in flight is not this release's to
+// drop: it is restored again so the knob ends at the captured prior and
+// the live re-assert keeps its capture. A path the owner no longer holds
+// at all is a quiet success (nothing to restore).
+func (k *KernelKnobs) releaseOne(owner, path string) (restored bool) {
+	pm := k.pathMu(path)
+	pm.Lock()
+	defer pm.Unlock()
+	for {
+		k.mu.Lock()
+		c, ok := k.captures[path]
+		if !ok || c.owner != owner {
+			k.mu.Unlock()
+			return true
+		}
+		gen := c.gen
+		prior := c.prior
+		k.mu.Unlock()
+
+		if _, err := writeKernelKnobFS(k.fs, path, prior, false); err != nil {
+			return false
+		}
+
+		k.mu.Lock()
+		c, ok = k.captures[path]
+		if !ok || c.owner != owner {
+			// The capture is gone (a concurrent Release dropped it after
+			// restoring the same prior): nothing left to do.
+			k.mu.Unlock()
+			return true
+		}
+		if c.gen == gen {
+			delete(k.captures, path)
+			k.mu.Unlock()
+			return true
+		}
+		k.mu.Unlock()
+		// A same-owner Assert landed during the restore write and bumped
+		// the generation: loop and restore the re-asserted knob too
+		// rather than deleting the live capture.
+	}
 }
 
 // Owner returns the current owner of path, if any.
@@ -252,29 +293,29 @@ func (k *KernelKnobs) Owner(path string) (string, bool) {
 	return c.owner, true
 }
 
-// CapturedPrior returns the prior value captured for path, if any.
-func (k *KernelKnobs) CapturedPrior(path string) (string, bool) {
+// SeedPrior registers prior as the restore target for path under owner
+// without writing the knob. It is the restart seam: a caller that knows
+// the value currently in the knob is its own previous assert (not an
+// operator prior) seeds the operator value so a later Release restores
+// that instead of capturing the asserted value. Seeding is refused when
+// a different owner already holds path; a same-owner seed overwrites the
+// restore target (the caller is re-stating what Release should write)
+// but never the owner. It reports whether the seed was registered.
+func (k *KernelKnobs) SeedPrior(path, prior, owner string) bool {
+	prior = NormalizeKnobValue(prior)
+	pm := k.pathMu(path)
+	pm.Lock()
+	defer pm.Unlock()
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	c, ok := k.captures[path]
-	if !ok {
-		return "", false
+	if c, ok := k.captures[path]; ok {
+		if c.owner != owner {
+			return false
+		}
+		c.prior = prior
+		k.captures[path] = c
+		return true
 	}
-	return c.prior, true
-}
-
-// ReleaseAll releases every owner; it is the shutdown counterpart of
-// Release and returns all failed restore paths (retained as debt).
-func (k *KernelKnobs) ReleaseAll() (failed []string) {
-	k.mu.Lock()
-	owners := make(map[string]bool)
-	for _, c := range k.captures {
-		owners[c.owner] = true
-	}
-	k.mu.Unlock()
-	for owner := range owners {
-		failed = append(failed, k.Release(owner)...)
-	}
-	sort.Strings(failed)
-	return failed
+	k.captures[path] = knobCapture{prior: prior, owner: owner, policy: RestorePrior}
+	return true
 }

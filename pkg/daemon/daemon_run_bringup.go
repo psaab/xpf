@@ -892,11 +892,14 @@ var hostForwardingPostureSysctls = map[string]string{
 
 // applyHostForwardingPosture asserts the daemon-lifetime host posture.
 // It deliberately does NOT register these knobs with the #17068
-// lifecycle registry: the posture is not tied to a config stanza whose
+// lifecycle registry: daemon-lifetime posture is expressed by asserting
+// through WriteKernelKnob WITHOUT registering (the registry has no
+// keep-forever policy — registering would promise a restore that must
+// never happen). The posture is not tied to a config stanza whose
 // removal should restore a prior (it is re-asserted at boot/naming and
 // nf_conntrack_tcp_loose is separately re-asserted+verified by
 // reassertTCPloosePosture, the knob's single lifecycle owner). Writes
-// still go through fsatomic.WriteKernelKnob so the error policy and
+// go through fsatomic.WriteKernelKnob so the error policy and
 // read-compare are the shared ones, not a fifth hand-rolled convention.
 func applyHostForwardingPosture() {
 	for path, val := range hostForwardingPostureSysctls {

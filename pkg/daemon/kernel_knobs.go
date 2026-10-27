@@ -16,11 +16,7 @@ func (d *Daemon) knobs() *fsatomic.KernelKnobs {
 	return d.kernelKnobs
 }
 
-// knobOwners are the registry owner names for daemon knob lifecycles.
-const (
-	knobOwnerFib       = "fib-consistent-hash"
-	knobOwnerRedirects = "no-redirects"
-	knobOwnerPosture   = "host-posture"
-	knobOwnerTransit   = "transit-gate"
-	knobOwnerCleanup   = "transit-cleanup"
-)
+// knobOwnerFib is the registry owner name for the fib_multipath_hash_policy
+// lifecycle (the only knob the daemon asserts through the registry; every
+// other procfs writer is daemon-lifetime posture through WriteKernelKnob).
+const knobOwnerFib = "fib-consistent-hash"

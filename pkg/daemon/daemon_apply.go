@@ -19,8 +19,10 @@ import (
 // explicitly). BestEffortKernelKnob writes go through
 // fsatomic.WriteKernelKnob (#17068): read-compare-write with the error
 // surfaced as a warning instead of silently discarded. Deliberately
-// daemon-lifetime posture (no registry capture): the interface is
-// daemon-created and its knobs are re-asserted on every apply.
+// daemon-lifetime posture: expressed by writing through WriteKernelKnob
+// WITHOUT registering with the KernelKnobs registry (which has no
+// keep-forever policy), because the interface is daemon-created and its
+// knobs are re-asserted on every apply.
 func setRethIPv6Knobs(iface string) {
 	dadPath := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/accept_dad", iface)
 	if _, err := fsatomic.WriteKernelKnob(dadPath, "0"); err != nil {
