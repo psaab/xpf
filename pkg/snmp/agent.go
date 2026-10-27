@@ -1822,20 +1822,13 @@ func (b *bulkBudget) add(vb varbind) bool {
 }
 
 // varbindEncodedLen returns the exact number of bytes vb contributes to the
-// varbind list of an encoded response. It MUST stay in step with the per-varbind
-// encoding in buildResponseVersion / buildV3Response — an overestimate would
-// stop a GETBULK grid short of varbinds that would have fit and shrink the
-// response. TestVarbindEncodedLenMatchesEncoder_6551 pins the two together.
+// varbind list of an encoded response. It MUST stay in step with
+// encodeVarbind in agent_ber.go — an overestimate would stop a GETBULK grid
+// short of varbinds that would have fit and shrink the response.
+// TestVarbindEncodedLenMatchesEncoder_6551 pins the two together through
+// both buildResponse and buildV3Response.
 func varbindEncodedLen(vb varbind) int {
-	oidBytes := berEncodeTLV(tagObjectIdentifier, berEncodeOID(vb.oid))
-	var valBytes []byte
-	if vb.tag == tagNoSuchObject || vb.tag == tagNoSuchInstance || vb.tag == tagEndOfMibView {
-		valBytes = berEncodeTLV(vb.tag, nil)
-	} else {
-		valBytes = berEncodeValue(vb.tag, vb.value)
-	}
-	body := len(oidBytes) + len(valBytes)
-	return 1 + len(berEncodeLength(body)) + body
+	return len(encodeVarbind(nil, vb))
 }
 
 // getCommunity returns the configured community matching the given string, or
@@ -2198,28 +2191,7 @@ func (a *Agent) buildResponse(community []byte, requestID int, errorStatus int, 
 // noSuchInstance / endOfMibView), so those v2-only markers never reach the wire
 // on a v1 response.
 func (a *Agent) buildResponseVersion(version int, community []byte, requestID int, errorStatus int, errorIndex int, varbinds []varbind) []byte {
-	// Encode varbind list.
-	var vbListBytes []byte
-	for _, vb := range varbinds {
-		oidBytes := berEncodeTLV(tagObjectIdentifier, berEncodeOID(vb.oid))
-		var valBytes []byte
-		if vb.tag == tagNoSuchObject || vb.tag == tagNoSuchInstance || vb.tag == tagEndOfMibView {
-			valBytes = berEncodeTLV(vb.tag, nil)
-		} else {
-			valBytes = berEncodeValue(vb.tag, vb.value)
-		}
-		pair := append(oidBytes, valBytes...)
-		vbListBytes = append(vbListBytes, berEncodeTLV(tagSequence, pair)...)
-	}
-	vbListEncoded := berEncodeTLV(tagSequence, vbListBytes)
-
-	// Encode PDU body: request-id, error-status, error-index, varbind-list.
-	pduBody := berEncodeIntegerTLV(requestID)
-	pduBody = append(pduBody, berEncodeIntegerTLV(errorStatus)...)
-	pduBody = append(pduBody, berEncodeIntegerTLV(errorIndex)...)
-	pduBody = append(pduBody, vbListEncoded...)
-
-	pduEncoded := berEncodeTLV(pduGetResponse, pduBody)
+	pduEncoded := encodePDU(pduGetResponse, requestID, errorStatus, errorIndex, encodeVarbindList(varbinds))
 
 	// Encode message: version, community, PDU.
 	msgBody := berEncodeIntegerTLV(version)
