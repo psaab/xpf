@@ -48,9 +48,33 @@ import "strings"
 
 // RethRGOwners returns interface name -> redundancy-group id for every
 // interface that is a REDUNDANT-ETHERNET INTERFACE — either STRUCTURALLY (some
-// port names it as its `gigether-options redundant-parent`) or NOMINALLY (it is
-// spelled `reth*`) — mapped to the redundancy group it carries.
+// port names it as its `gigether-options redundant-parent`), NOMINALLY (it is
+// spelled `reth*`), or by DECLARED REDUNDANCY GROUP (#18122: a declared dotted
+// interface such as `p.0` with a set `redundancy-group` and no members owns
+// that group) — mapped to the redundancy group it carries.
 //
+// declaresDeclaredDottedRG reports whether a declared dotted interface name
+// (#9821) with a non-zero redundancy group owns that group without members
+// (#18122). The dotted declared name is the #9821 shape, where the declared
+// name `p.0` outranks any parse. Membership is the ONLY added test: an
+// undotted stray (`ge-0/0/5`, raw RG set but not dotted-declared, no members,
+// non-reth) still owns nothing, and so does a dotted non-numeric name.
+func declaresDeclaredDottedRG(name string, rg int) bool {
+	if rg == 0 {
+		return false
+	}
+	i := strings.LastIndex(name, ".")
+	if i < 0 || i == len(name)-1 {
+		return false
+	}
+	for _, c := range name[i+1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // It deliberately does NOT filter on `RedundancyGroup > 0`. That term belongs
 // to the CALLER, because the two ownership modes need different things from it:
 // the VRRP-backed collector synthesizes instances only for groups above 0,
@@ -87,12 +111,16 @@ func (c *Config) RethRGOwners() map[string]int {
 			continue
 		}
 		_, hasMembers := rethToPhys[name]
-		if !hasMembers && !strings.HasPrefix(name, "reth") {
+		if !hasMembers && !strings.HasPrefix(name, "reth") && !declaresDeclaredDottedRG(name, ifc.RedundancyGroup) {
 			// Neither structurally nor nominally a redundant-ethernet
-			// interface: no port names it as their redundant-parent AND it is
-			// not spelled `reth*`. It owns no group. Commit rejects this shape
-			// (validateRethRedundancyGroupStrict); a tolerantly-loaded config
-			// that still carries it is excluded here rather than half-applied.
+			// interface: no port names it as their redundant-parent, it is
+			// not spelled `reth*` (#9821 declared-dotted interface names
+			// declared with a redundancy-group are owned via
+			// declaresDeclaredDottedRG above), and it carries no
+			// declared-dotted redundancy group. It owns no group. Commit
+			// rejects this shape (validateRethRedundancyGroupStrict); a
+			// tolerantly-loaded config that still carries it is excluded
+			// here rather than half-applied.
 			continue
 		}
 		owners[name] = ifc.RedundancyGroup

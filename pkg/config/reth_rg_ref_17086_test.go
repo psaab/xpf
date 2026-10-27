@@ -33,6 +33,10 @@ func refRGTestConfig() *Config {
 		"ge-0/0/9": mk("ge-0/0/9", 0, "ge-0/0/8"),
 		"reth9":    mk("reth9", 0, ""), // nominal RETH carrying group 0
 		"lo0":      mk("lo0", 0, ""),
+		"p.0":      mk("p.0", 1, ""), // #18122 declared dotted owner (RG set, no members)
+		"q.0":      mk("q.0", 2, ""), // #18122 declared dotted owner (RG set, no members)
+		"a.b":      mk("a.b", 3, ""), // dotted non-numeric: NOT a declared owner
+		"p0":       mk("p0", 2, ""),  // undotted stray: NOT owned
 	}}}
 }
 
@@ -61,6 +65,14 @@ func TestInterfaceRefRG17086(t *testing.T) {
 		{"reth9.0", 0, true, 0, "a RETH carrying group 0 is owned at group 0; the >0 term is the caller's (RefRG reports 0)"},
 		{"lo0", 0, false, 0, "plain interface owns nothing"},
 		{"nonexistent.0", 0, false, 0, "unknown ref owns nothing"},
+		{"p.0.1", 1, true, 1, "declared dotted owner unit resolves"},
+		{"p.0", 1, true, 1, "bare declared dotted owner"},
+		{"q.0", 2, true, 2, "second declared dotted owner"},
+		{"q.0.1", 2, true, 2, "second declared dotted unit"},
+		{"a.b", 0, false, 0, "dotted non-numeric non-owner owns nothing"},
+		{"a.b.1", 0, false, 0, "dotted non-numeric unit owns nothing"},
+		{"p0", 0, false, 0, "undotted stray (same RG as dotted) still owns nothing"},
+		{"p0.0", 0, false, 0, "undotted stray unit form still owns nothing"},
 		{"", 0, false, 0, "empty ref owns nothing"},
 	} {
 		t.Run(tc.ref, func(t *testing.T) {
