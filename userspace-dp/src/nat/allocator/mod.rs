@@ -99,11 +99,14 @@
 //   occupancy.rs: AddressOccupancy + RecycleRing — 25 widenings, all
 //     private -> pub(in crate::nat::allocator), enumerated in that
 //     file's header. Nothing outside nat::allocator can name them.
-// Pure code motion only: allocator.rs:1-43 invariants above, every
-// atomic ordering and the global -> recycle lock order are untouched.
-// Machine-checked by scripts/verify-nat-allocator-split-16135.py,
-// which reconstructs the pre-split allocator.rs byte-for-byte after
-// un-applying exactly the enumerated widenings.
+// At the split commit (b0ff071c29, 2026-10-22) this was pure code
+// motion only: the allocator.rs:1-43 invariants above, every atomic
+// ordering and the global -> recycle lock order were untouched.
+// Verified at that commit by
+// scripts/verify-nat-allocator-split-16135.py, which reconstructs
+// the pre-split allocator.rs byte-for-byte after un-applying
+// exactly the enumerated widenings; re-run it there (pinned
+// --base/--split refs) — it checks the split commit, not this tree.
 //
 // Accounting against the issue's "124-item visibility bill" (the
 // pre-split population, measured on the base file, not a count of
@@ -119,16 +122,17 @@
 //     all were already pub(crate), see that file's header), and
 //     0 moved into occupancy.rs (AddressOccupancy/RecycleRing and
 //     their members were all fully private, never pub(super)).
-//   - 119 stay in this file at the same module depth
+//   - 119 stayed in this file at the same module depth
 //     (nat::allocator is still a direct child of nat::), so their
-//     pub(super) spelling keeps its exact pre-split meaning
-//     (visible in nat::) and needs no widening. This file still
-//     carries all 124 occurrences (119 code + 5 comment).
-// The cost actually paid by this move is therefore NOT the 124:
-// it is 25 private -> pub(in crate::nat::allocator) widenings in
+//     pub(super) spelling kept its exact pre-split meaning
+//     (visible in nat::) and needed no widening. At the split this
+//     file still carried all 124 occurrences (119 code + 5 comment);
+//     that was a split-time count, not a current-tree invariant —
+//     the file has been edited since (e.g. #15956 added flows.rs).
+// The cost actually paid by this move was therefore NOT the 124:
+// it was 25 private -> pub(in crate::nat::allocator) widenings in
 // occupancy.rs (plus 0 in deterministic.rs), enumerated there and
-// machine-checked by the verifier above.
-// un-applying exactly the enumerated widenings.
+// verified at the split commit by the verifier above.
 
 mod deterministic;
 mod flows;

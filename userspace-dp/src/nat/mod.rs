@@ -19,12 +19,14 @@
 // #6988: `source` is itself a directory now. It reached 3315 LOC —
 // the [REFACTOR] tier is 2000 — so six clusters moved into
 // `source/{failure,expand,release,synced,nat64_ports,match_rules}.rs`
-// as PURE CODE MOTION, leaving `source/mod.rs` at 1367. The clusters
-// were chosen by dependency COST, not by name: the whole split needs
-// two visibility widenings and one respelling, all enumerated in
-// `source/mod.rs` and machine-checked by
+// as pure code motion at the #7860 merge (22b9cb22d0, 2026-08-28),
+// leaving `source/mod.rs` at 1367. The clusters were chosen by
+// dependency COST, not by name: the whole split needed two
+// visibility widenings and one respelling, all enumerated in
+// `source/mod.rs` and verified at that merge by
 // `scripts/verify-nat-source-split-6988.py`, which reconstructs the
-// pre-split file byte-for-byte.
+// pre-split file byte-for-byte (pinned --base/--split refs; it
+// checks the split merge, not the current tree).
 //
 // A CAUTION this split paid for: `pub(super)` means something
 // different at each depth. `expand_pool_address` was `pub(super)` in
