@@ -1018,7 +1018,16 @@ holds too (#16780): a deny that matches only pipe or format text
 piped command even when the class's allow matches the pipe-less core
 (`allow-commands "^show"`) — the pipe is matched as typed, so that
 denial is not the pipe-inflated reading of a core deny and no core
-allow saves it. The one escape from
+allow saves it. That rule judges the deny per alternative (#17856):
+`deny-commands "^sh|display set"` still vetoes
+`show configuration | display set` under `allow-commands "^show"`,
+because the `^sh` branch loses on the core (2 characters against 4)
+and cannot recast the winning `display set` denial — which lives
+entirely in pipe text — as a core deny an exception allow might
+out-measure. A branch that both wins on the piped spelling and covers
+core text (the public-vrf shape, even with a `display set` sibling
+added) keeps the denial core-explained, so the exception saves
+survive. The one escape from
 a truncated-spelling veto is the deny-with-exceptions geometry itself:
 the vetoing deny matches only the truncated spelling and the allow that
 carries the full spelling matches only there (`^show log 100$` beside

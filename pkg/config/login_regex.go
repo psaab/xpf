@@ -619,15 +619,49 @@ func coreOf(form string) string {
 	return form
 }
 
-// pipeOnlyDeny reports whether form is tier-denied only because the
-// deny reaches into its pipe text: the deny hits the full (piped) form
-// but never the pipe-less core, and the pipe-less core itself is
-// allowed (#16780 — `display set` / `| match` / an anchored
-// `… \| display set` spelling under `allow ^show`). Such a denial is
-// not the pipe-inflated reading of a core deny, so the pipe-boundary
-// saves must not overturn it; a genuine core denial (the
-// deny-with-exceptions save's premise, verdicts tier-denied on the
-// core) still may be saved.
+// denyAlternatives splits the deny pattern into the alternative branches
+// whose union matches exactly what the whole pattern matches — the #9340
+// splitter, parsing in the same POSIX dialect CompileLoginRegexes compiles
+// in. A pattern that cannot be split (it does not re-parse, expands past
+// the #9340 cap, or a branch does not recompile) resolves to the whole
+// pattern as its single alternative: no alternative structure, no
+// per-alternative judgment to make — the pre-#17856 whole-pattern
+// reading.
+func (c CompiledLoginRegexes) denyAlternatives() []denyAlternative9340 {
+	if !c.denySet {
+		return nil
+	}
+	alts, ok := denyPatternAlternatives9340(c.denySrc)
+	if !ok || len(alts) == 0 {
+		return []denyAlternative9340{{re: c.deny}}
+	}
+	return alts
+}
+
+// pipeOnlyDeny reports whether form's tier denial is driven only by deny
+// text that lives in the pipe: the deny hits the full (piped) form, the
+// pipe-less core itself is allowed, and EVERY deny alternative realizing
+// the deny's winning extent on the full form matches no core text
+// (#16780 — `display set` / `| match` / an anchored `… \| display set`
+// spelling under `allow ^show`; #17856 — the same shapes inside an
+// alternation). Such a denial is not the pipe-inflated reading of a core
+// deny, so the pipe-boundary saves must not overturn it; a denial whose
+// winning alternative also covers the core (the deny-with-exceptions
+// save's premise, verdicts tier-denied on the core) still may be saved.
+//
+// #17856: this used to require that the WHOLE deny never match the core,
+// so one losing alternative that merely touched the core (`^sh` in
+// `^sh|display set`, 2 characters against allow `^show`'s 4) disabled
+// the guard while a different, WINNING alternative (`display set`,
+// 11 > 4 on the full form) matched only pipe text — the exact residual
+// #16780 exists to close, reachable through every pipe-boundary save.
+// The winning extent on the full form is what the tiers actually
+// compared, so only the alternatives realizing it decide whether the
+// denial is pipe text: a non-winning sibling's core touch is already
+// priced into the core verdict (the core is allowed), while a winning
+// alternative that covers core text keeps the denial core-explained and
+// the exception saves available (public-vrf with a pipe alternative
+// added still allows).
 func (c CompiledLoginRegexes) pipeOnlyDeny(form string) bool {
 	if !c.denySet {
 		return false
@@ -636,7 +670,22 @@ func (c CompiledLoginRegexes) pipeOnlyDeny(form string) bool {
 	if core == form {
 		return false // no pipe text for the deny to live in
 	}
-	return longestMatchLen(c.deny, core) < 0 && longestMatchLen(c.deny, form) >= 0 && c.evaluateForm(core).Allowed
+	winLen := longestMatchLen(c.deny, form)
+	if winLen < 0 {
+		return false
+	}
+	if !c.evaluateForm(core).Allowed {
+		return false
+	}
+	for _, alt := range c.denyAlternatives() {
+		if longestMatchLen(alt.re, form) != winLen {
+			continue // does not realize the deny's winning extent
+		}
+		if longestMatchLen(alt.re, core) >= 0 {
+			return false // a winning alternative covers core text
+		}
+	}
+	return true
 }
 
 // isCoreException reports the deny-with-exceptions geometry between the
