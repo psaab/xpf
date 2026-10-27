@@ -38,8 +38,10 @@ import (
 // Scope is deliberately the name prefix, not "every bool": compileOpts
 // also carries non-downgrade bools whose lenient value is not uniformly
 // true (skipCompactNormalize is a test seam that must stay false so the
-// normalizer runs on the tolerant path; nodeAware is stamped per call
-// by the node-aware entry, overwriting whatever the literal held).
+// normalizer runs on the tolerant path).
+// (#17157: the #4329 node identity used to ride a parallel nodeAware
+// bool that needed its own allowlist entry; it now derives from
+// opts.nodeID != nil, so no such bool remains.)
 // A future non-downgrade bool must not be named lenient*/sanitize*, and
 // a future downgrade bool must — the prefix is the contract this test
 // polices. The suppress* advisory bools are the one deliberate
@@ -62,10 +64,9 @@ var lenientCompletenessAllowlist16166 = map[string]string{
 	// #8690 test seam: production and the tolerant path must run the
 	// compact normalizer; only measurement tests set this.
 	"skipCompactNormalize": "test seam (#8690); tolerant path must normalize",
-	// #4329 runtime identity: compileConfigForNodeWithOpts stamps
-	// nodeAware/stampNodeID per call after lenientCompileOpts() returns,
-	// so the literal's value is never operative.
-	"nodeAware": "stamped per call by the node-aware entry (#4329)",
+	// (no "nodeAware" entry, #17157: node identity derives from
+	// opts.nodeID != nil; a parallel bool must never re-enter the
+	// allowlist — TestCompileOptsShape17157 fails if one does.)
 	// Advisory suppressors: not severity downgrades (the checks warn on
 	// every path), but they ARE set true in lenientCompileOpts() today.
 	// Listed so the prefix census classifies them deliberately; the
@@ -280,9 +281,9 @@ func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 		t.Error("skipCompactNormalize is true in lenientCompileOpts(): the tolerant path " +
 			"must run the compact normalizer (#8690 seam is test-only)")
 	}
-	if opts.nodeAware {
-		t.Error("nodeAware is true in lenientCompileOpts(): node identity must come only " +
-			"from the node-aware entry's per-call stamp (#4329)")
+	if opts.nodeID != nil {
+		t.Error("nodeID is non-nil in lenientCompileOpts(): node identity must come only " +
+			"from compileTree's per-call stamp (#4329/#17157)")
 	}
 }
 
@@ -551,5 +552,49 @@ func TestLenientCompletenessAllowlistFullPath16166(t *testing.T) {
 	// wherever it nests (leaf detection through the same func).
 	if got := classifyLenientBool16166("plantedNested.lenientPlanted16166"); got != lenientClassDowngrade16166 {
 		t.Errorf("classifyLenientBool16166(%q) = %s, want downgrade", "plantedNested.lenientPlanted16166", got)
+	}
+}
+
+// TestCompileOptsShape17157 is the #17157 acceptance guard: compileOpts
+// must carry NO pointer-to-map fields (the pre-#17157
+// *map[string]struct{} out-parameters that runPreWalkGates wrote
+// through while also returning values), and the #16166 allowlist must
+// not carry a nodeAware entry (node identity derives from
+// opts.nodeID != nil, compileTree's own selector).
+//
+// FAIL-ON-REVERT: re-adding `applicationNameCollisions
+// *map[string]struct{}` (or any *map[...] field) to compileOpts turns
+// this RED, as does re-adding a "nodeAware" key to
+// lenientCompletenessAllowlist16166.
+func TestCompileOptsShape17157(t *testing.T) {
+	ct := reflect.TypeOf(compileOpts{})
+	var offenders []string
+	for i := range ct.NumField() {
+		ft := ct.Field(i).Type
+		if ft.Kind() == reflect.Pointer && ft.Elem().Kind() == reflect.Map {
+			offenders = append(offenders, ct.Field(i).Name+" "+ft.String())
+		}
+	}
+	if len(offenders) > 0 {
+		t.Errorf("compileOpts has pointer-to-map field(s) %s: phase results must return "+
+			"as ordinary return values (preWalkResult), never through pointer "+
+			"out-parameters on compileOpts (#17157)", strings.Join(offenders, ", "))
+	}
+	if _, ok := lenientCompletenessAllowlist16166["nodeAware"]; ok {
+		t.Error("lenientCompletenessAllowlist16166 still carries \"nodeAware\": node identity " +
+			"derives from opts.nodeID != nil (#4329/#17157); the parallel bool must not " +
+			"re-enter the allowlist")
+	}
+	if _, ok := reflect.TypeOf(compileOpts{}).FieldByName("nodeAware"); ok {
+		t.Error("compileOpts still has a nodeAware field: node identity derives from " +
+			"opts.nodeID != nil (#17157)")
+	}
+	if _, ok := reflect.TypeOf(compileOpts{}).FieldByName("stampNodeID"); ok {
+		t.Error("compileOpts still has a stampNodeID field: node identity derives from " +
+			"opts.nodeID != nil (#17157)")
+	}
+	if _, ok := reflect.TypeOf(compileOpts{}).FieldByName("nodeID"); !ok {
+		t.Error("compileOpts has no nodeID field: compileTree must thread its *int " +
+			"selector through compileOpts.nodeID (#17157)")
 	}
 }
