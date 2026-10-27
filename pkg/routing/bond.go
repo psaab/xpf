@@ -700,43 +700,21 @@ func (b *bondManager) clearLocked() error {
 }
 
 // deleteLocked removes a single tracked bond by name and drops it from
-// tracking. Caller must hold mu. A link already gone from the kernel is
-// treated as success (the entry is still untracked). It returns a non-nil
-// error when the netlink LinkDel fails, in which case the name is RETAINED
-// in tracking (#4901) so the next reconcile retries instead of orphaning
-// the bond (and its enslaved members).
+// tracking. Caller must hold mu. The lookup/classify/delete skeleton
+// is the shared releaseOwnedLink (#17020): ownership is released ONLY
+// on a genuine not-found or a successful LinkDel; a transient lookup
+// error (#7529) or a failed LinkDel (#4901) retains the name so the
+// next reconcile retries instead of orphaning the bond (and its
+// enslaved members), and surfaces the error. bond passes alwaysOurs:
+// its removal path has always deleted whatever wears the tracked
+// name (#17020 recorded policy; foreign-type refusal is VRF-only).
 func (b *bondManager) deleteLocked(name string) error {
-	link, err := b.ops.LinkByName(name)
+	released, err := releaseOwnedLink(b.ops, "bond", name, alwaysOurs)
 	if err != nil {
-		// #7529: only a POSITIVE not-found answer releases ownership. This
-		// treated EVERY LinkByName failure as "already gone" — it dropped the
-		// name from tracking AND returned nil, so a transient netlink error
-		// (a busy or truncated socket, ENOBUFS under load, EINTR) made xpf
-		// report a successful delete for a bond that is still in the kernel,
-		// still enslaving its members, and no longer tracked. Nothing retries
-		// it, because the reconcile diff keys off b.bonds.
-		//
-		// That is the exact failure #4901 fixed for the LinkDel leg below, one
-		// call earlier: a failed delete retains the name so the next reconcile
-		// retries. The lookup leg kept the old behaviour and undid it, since a
-		// lookup that fails transiently discards the entry before LinkDel is
-		// ever reached.
-		//
-		// isLinkNotFound (vrf.go) is the same predicate the sibling VRF and
-		// XFRM paths already use — the fix shape was in-tree.
-		if isLinkNotFound(err) {
-			delete(b.bonds, name)
-			return nil // genuinely gone
-		}
-		slog.Warn("bond delete: link lookup failed, retaining ownership for retry",
-			"name", name, "err", err)
-		return fmt.Errorf("lookup bond %s: %w", name, err)
+		return err
 	}
-	if err := b.ops.LinkDel(link); err != nil {
-		slog.Warn("failed to delete bond", "name", name, "err", err)
-		return fmt.Errorf("delete bond %s: %w", name, err)
+	if released {
+		delete(b.bonds, name)
 	}
-	slog.Info("bond removed", "name", name)
-	delete(b.bonds, name)
 	return nil
 }
