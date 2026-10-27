@@ -52,14 +52,21 @@ import "log/slog"
 // that, one byte). Caps now derive from ONE descriptor table: each row
 // records the encoder maximum (encoderMax, cited per row) and whether
 // the decoder tolerates trailing bytes (growable). A growable row's
-// maxLen is encoderMax + syncExtensionReserve; a fixed row's maxLen IS
-// its encoderMax (any trailing byte is non-conforming there, because
-// the decoder does not length-gate it). Session/Delete/AuthUpgrade
-// rows already carried slack: that slack is now expressed the same
-// way (encoderMax is the encoder's true bound, maxLen keeps the
-// historical cap). A sender must never exceed its type cap, so the
-// failover-ack encoders clamp their free-form detail at encode time
-// (clampFailoverAckPayload / encodeFailoverBatchAckPayload).
+// maxLen exceeds its encoderMax (growableCap rows by exactly
+// syncExtensionReserve; Session/FailoverAck/global-bound rows keep
+// their larger historical caps); a fixed row's decoder does not
+// length-gate, so any trailing byte is non-conforming there. The
+// #18116 fold re-audited every row against its decoder: rows whose
+// decoders reject trailing bytes (AuthUpgradeHello/Proof via Noise,
+// ConfigEncrypted via AEAD, the generation-bearing lease batches via
+// their exact off==len layout) are fixed, PeerCapabilities reads
+// flags2 positionally so an appended byte cannot corrupt it, and the
+// session rows' encoderMax is the true guarded maximum (the rule ID
+// is sender-clamped to sessionRuleIDMaxLen). A sender must never
+// exceed its type cap, so the failover-ack and session encoders
+// clamp their free-form tails at encode time
+// (clampFailoverAckPayload / encodeFailoverBatchAckPayload /
+// sessionRuleIDMaxLen).
 
 // syncExtensionReserve is the trailing-extension headroom granted to
 // every growable sync type (#17093). 256 B is far above any single
@@ -98,10 +105,18 @@ var syncMsgDescriptors = []syncMsgDescriptor{
 	// form stays legal); a longer fence is a newer peer's extension.
 	growableCap(syncMsgFence, "Fence", 8),
 	// encodeSessionV4/V6Payload: fixed body plus a length-gated tail
-	// (rule ID <= 65535 by the u16 length prefix) the decoder skips
-	// past; 64 KiB is the historical cap over the ~240/512 B body.
-	{id: syncMsgSessionV4, name: "SessionV4", encoderMax: 64 * 1024, maxLen: 64 * 1024, growable: true},
-	{id: syncMsgSessionV6, name: "SessionV6", encoderMax: 64 * 1024, maxLen: 64 * 1024, growable: true},
+	// the decoder skips past. encoderMax is the TRUE worst emitted
+	// payload (#18116), measured over every tail combination: the
+	// no-rule maximum (231 B v4 / 307 B v6, including every
+	// length-gated tail field and the primary-liveness marker) plus
+	// the u16 length prefix and a rule ID sender-guarded to
+	// sessionRuleIDMaxLen. The cap stays at the historical 64 KiB,
+	// so growable holds honestly with headroom far above the
+	// reserve. (The pre-#18116 row claimed encoderMax == 64 KiB; a
+	// 64 KiB rule ID then emitted 65747 B and our own conforming
+	// frame was header-refused by the peer.)
+	{id: syncMsgSessionV4, name: "SessionV4", encoderMax: 231 + 2 + sessionRuleIDMaxLen, maxLen: 64 * 1024, growable: true},
+	{id: syncMsgSessionV6, name: "SessionV6", encoderMax: 307 + 2 + sessionRuleIDMaxLen, maxLen: 64 * 1024, growable: true},
 	// encodeDeleteScopedV4/V6: 37/61 B (bare 25/49). The parser
 	// length-gates its tails but FAILS CLOSED on gap lengths, and a
 	// trailing byte past the scoped form would be silently ignored
@@ -125,20 +140,27 @@ var syncMsgDescriptors = []syncMsgDescriptor{
 	growableCap(syncMsgFailover, "Failover", 9),
 	growableCap(syncMsgFailoverCommit, "FailoverCommit", 9),
 	growableCap(syncMsgFailoverAbort, "FailoverAbort", 9),
-	// rgID + status + reqID + free-form detail (sendFailoverResult,
-	// detail clamped at encode). Detail is peer-visible text, not
-	// bulk data; 4 KiB total is the historical cap.
-	{id: syncMsgFailoverAck, name: "FailoverAck", encoderMax: 4096, maxLen: 4096, growable: true},
-	{id: syncMsgFailoverCommitAck, name: "FailoverCommitAck", encoderMax: 4096, maxLen: 4096, growable: true},
+	// rgID + status + reqID + free-form detail (sendFailoverResult).
+	// The detail is the variable tail: the decoder takes payload[10:]
+	// as detail text, so trailing content is data by design, not a
+	// length-gated field a newer peer could extend past the sender's
+	// bound. encoderMax is therefore the FIXED prefix (10 B); detail
+	// is sender-clamped (clampFailoverAckPayload) so the total stays
+	// within the 4096 historical cap, which is the growable headroom.
+	{id: syncMsgFailoverAck, name: "FailoverAck", encoderMax: 10, maxLen: 4096, growable: true},
+	{id: syncMsgFailoverCommitAck, name: "FailoverCommitAck", encoderMax: 10, maxLen: 4096, growable: true},
 	// encodeFailoverBatchRequestPayload: count + <=255 RG ids + reqID;
 	// the decoder reads exactly 1+count+8, trailing bytes ignored.
 	growableCap(syncMsgFailoverBatch, "FailoverBatch", 1+maxFailoverBatchRGCount+8),
 	growableCap(syncMsgFailoverBatchCommit, "FailoverBatchCommit", 1+maxFailoverBatchRGCount+8),
 	growableCap(syncMsgFailoverBatchAbort, "FailoverBatchAbort", 1+maxFailoverBatchRGCount+8),
-	// encodeFailoverBatchAckPayload: request shape + status + detail
-	// (detail clamped at encode); decoder takes the rest as detail.
-	{id: syncMsgFailoverBatchAck, name: "FailoverBatchAck", encoderMax: 1 + maxFailoverBatchRGCount + 1 + 8 + 4096, maxLen: 1 + maxFailoverBatchRGCount + 1 + 8 + 4096, growable: true},
-	{id: syncMsgFailoverBatchCommitAck, name: "FailoverBatchCommitAck", encoderMax: 1 + maxFailoverBatchRGCount + 1 + 8 + 4096, maxLen: 1 + maxFailoverBatchRGCount + 1 + 8 + 4096, growable: true},
+	// encodeFailoverBatchAckPayload: count + RG ids + status + reqID
+	// + free-form detail (detail clamped at encode); decoder takes
+	// the rest as detail. Same shape as FailoverAck: encoderMax is
+	// the fixed prefix at maximum RG count, maxLen the historical
+	// total cap the clamp enforces.
+	{id: syncMsgFailoverBatchAck, name: "FailoverBatchAck", encoderMax: 1 + maxFailoverBatchRGCount + 1 + 8, maxLen: 1 + maxFailoverBatchRGCount + 1 + 8 + 4096, growable: true},
+	{id: syncMsgFailoverBatchCommitAck, name: "FailoverBatchCommitAck", encoderMax: 1 + maxFailoverBatchRGCount + 1 + 8, maxLen: 1 + maxFailoverBatchRGCount + 1 + 8 + 4096, growable: true},
 	// decodeFenceAckPayload gates on >= fenceAckPayloadLen and reads
 	// the fixed 13-byte prefix; trailing bytes are skipped.
 	growableCap(syncMsgFenceAck, "FenceAck", fenceAckPayloadLen),
@@ -153,33 +175,54 @@ var syncMsgDescriptors = []syncMsgDescriptor{
 	// One version byte; the handler gates on payload[0] only.
 	growableCap(syncMsgAuthUpgradeRequest, "AuthUpgradeRequest", 1),
 	// Version byte + one Noise message (48 B msg1; msg2 same class).
-	// 1 KiB is the historical cap; the Noise layer rejects anything
-	// that is not a well-formed message.
-	{id: syncMsgAuthUpgradeHello, name: "AuthUpgradeHello", encoderMax: 1 + 48, maxLen: 1024, growable: true},
-	{id: syncMsgAuthUpgradeProof, name: "AuthUpgradeProof", encoderMax: 1 + 48, maxLen: 1024, growable: true},
+	// 1 KiB is the historical cap. NOT growable (#18116): the Noise
+	// layer (ReadMessage / readUpgradeMsg2 over payload[1:]) rejects
+	// any trailing byte, so a longer frame is non-conforming, not an
+	// extension — fixed at the historical cap.
+	{id: syncMsgAuthUpgradeHello, name: "AuthUpgradeHello", encoderMax: 1 + 48, maxLen: 1024},
+	{id: syncMsgAuthUpgradeProof, name: "AuthUpgradeProof", encoderMax: 1 + 48, maxLen: 1024},
 	// Version byte + HMAC-SHA256, compared whole (hmac.Equal on the
 	// exact expected length): fixed-forever.
 	fixedCap(syncMsgAuthUpgradeConfirm, "AuthUpgradeConfirm", 1+syncAuthUpgradeConfirmLen),
 	// encodeConfigPayloadWithAncestry: the full committed config text
 	// plus generation/ancestry trailers. Config is the one legitimately
-	// large control payload; it keeps the global cap as its per-type cap.
-	{id: syncMsgConfig, name: "Config", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgConfigEncrypted, name: "ConfigEncrypted", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	// Full-set / chunked-set types: encoders chunk below maxSyncPayload
-	// (encodePersistentNatLeaseBatchFrames, DHCP chunk splitter), so
-	// the global cap IS the per-type cap for these.
-	{id: syncMsgIPsecSA, name: "IPsecSA", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgIPsecSAChunk, name: "IPsecSAChunk", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgPersistentNatLease, name: "PersistentNatLease", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgPersistentNatLeaseScoped, name: "PersistentNatLeaseScoped", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgPersistentNatLeaseGeneration, name: "PersistentNatLeaseGeneration", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgPersistentNatLeaseDeterministic, name: "PersistentNatLeaseDeterministic", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgPersistentNatLeaseProvenance, name: "PersistentNatLeaseProvenance", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgPersistentNatLeaseDeterministicProvenance, name: "PersistentNatLeaseDeterministicProvenance", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgDHCPLeaseV4, name: "DHCPLeaseV4", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgDHCPLeaseV6, name: "DHCPLeaseV6", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgDHCPLeaseV4Chunk, name: "DHCPLeaseV4Chunk", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
-	{id: syncMsgDHCPLeaseV6Chunk, name: "DHCPLeaseV6Chunk", encoderMax: maxSyncPayload, maxLen: maxSyncPayload, growable: true},
+	// large control payload; it keeps the global cap as its per-type
+	// cap. At the global cap no extension headroom exists, so this is
+	// a fixed row at the bound (#18116 property: growable requires
+	// maxLen > encoderMax).
+	{id: syncMsgConfig, name: "Config", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	// NOT growable (#18116): openConfigPayload is AES-GCM over the
+	// exact payload — any trailing byte fails the AEAD tag, so a
+	// longer frame is non-conforming. Keeps the global cap as its
+	// per-type cap (config text is legitimately large).
+	{id: syncMsgConfigEncrypted, name: "ConfigEncrypted", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	// Full-set / chunked-set types: encoders chunk below maxSyncPayload,
+	// so the global cap IS the per-type cap. Their payloads are
+	// variable-length up to that bound, so encoderMax == maxLen ==
+	// global cap and the rows are fixed at the bound (no headroom
+	// is possible there), not growable.
+	{id: syncMsgIPsecSA, name: "IPsecSA", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgIPsecSAChunk, name: "IPsecSAChunk", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	// Retired types 38/39: handlers ignore the payload entirely
+	// (migration fence), so any length is tolerated — but they are
+	// not extension surfaces; no future field will ride them. Fixed
+	// at the global cap (#18116).
+	{id: syncMsgPersistentNatLease, name: "PersistentNatLease", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgPersistentNatLeaseScoped, name: "PersistentNatLeaseScoped", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	// Generation-bearing lease batches: NOT growable (#18116). The
+	// batch decoder is exact — decodeOnePersistentNatLeaseLayout
+	// requires off==len per record and the batch loop consumes the
+	// buffer exactly — so a trailing byte is a layout mismatch, not
+	// an extension. (The full-set seq trailer is stripped before
+	// decoding and is not payload growth.) Fixed at the global cap.
+	{id: syncMsgPersistentNatLeaseGeneration, name: "PersistentNatLeaseGeneration", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgPersistentNatLeaseDeterministic, name: "PersistentNatLeaseDeterministic", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgPersistentNatLeaseProvenance, name: "PersistentNatLeaseProvenance", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgPersistentNatLeaseDeterministicProvenance, name: "PersistentNatLeaseDeterministicProvenance", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgDHCPLeaseV4, name: "DHCPLeaseV4", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgDHCPLeaseV6, name: "DHCPLeaseV6", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgDHCPLeaseV4Chunk, name: "DHCPLeaseV4Chunk", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgDHCPLeaseV6Chunk, name: "DHCPLeaseV6Chunk", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
 }
 
 var syncPayloadCapsByType = func() map[uint8]int {

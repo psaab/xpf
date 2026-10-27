@@ -149,6 +149,12 @@ func TestGrowableFramesSurviveReceiveLoop17093(t *testing.T) {
 		if got := ss.PeerSessionSyncWireVersion(); got != SessionSyncWireVersion {
 			t.Fatalf("PeerSessionSyncWireVersion = %d, want %d (leading fields must decode)", got, SessionSyncWireVersion)
 		}
+		// #18116 (B1): the fixture APPENDS its extension bytes after
+		// flags2, so flags2 must still decode from its fixed offset —
+		// a len-1 read would take the trailing 0 byte instead.
+		if got := ss.peerCapabilityFlags2.Load(); got != uint32(localCapabilityFlags2) {
+			t.Fatalf("peerCapabilityFlags2 = %d, want %d (appended trailing byte corrupted flags2)", got, localCapabilityFlags2)
+		}
 		if got := ss.Stats().OversizeFramesRefused; got != 0 {
 			t.Fatalf("OversizeFramesRefused = %d, want 0", got)
 		}
@@ -175,6 +181,9 @@ func TestGrowableFramesSurviveReceiveLoop17093(t *testing.T) {
 		}
 		if got := ss.PeerSessionSyncWireVersion(); got != SessionSyncWireVersion {
 			t.Fatalf("PeerSessionSyncWireVersion = %d, want %d", got, SessionSyncWireVersion)
+		}
+		if got := ss.peerCapabilityFlags2.Load(); got != uint32(localCapabilityFlags2) {
+			t.Fatalf("peerCapabilityFlags2 = %d, want %d at +reserve (appended bytes corrupted flags2)", got, localCapabilityFlags2)
 		}
 	})
 
@@ -294,9 +303,13 @@ func TestGrowableFramesSurviveReceiveLoop17093(t *testing.T) {
 
 func capabilityPayload17093(t *testing.T, total int) []byte {
 	t.Helper()
-	// Leading fields identical to sendCapabilities' full layout, padded
-	// with trailing extension bytes (flags2 stays the last byte, as the
-	// decoder reads it from len-1).
+	// Leading fields identical to sendCapabilities' full layout
+	// (flags2 at its fixed offset, #18116), with extension bytes
+	// APPENDED after flags2 — the shape a newer peer's additive
+	// trailing field actually takes. Appending (not inserting before
+	// flags2) is what pins the positional flags2 read: a len-1 read
+	// would decode the last extension byte (0) as flags2 and lose
+	// every flags2 capability.
 	p := capabilityFrame14161(t, 8, localCapabilityFlags, SessionSyncWireVersion)
 	// capabilityFrame14161 yields the 5-byte head; extend with boot/epoch/token.
 	p = append(p, make([]byte, bootIncarnationLen+8+8)...)
@@ -305,15 +318,17 @@ func capabilityPayload17093(t *testing.T, total int) []byte {
 		t.Fatalf("capability fixture %d > requested %d", len(p), total)
 	}
 	for len(p) < total {
-		// Insert the extension before the trailing flags2 byte.
-		p = append(p[:len(p)-1], append([]byte{0}, p[len(p)-1])...)
+		p = append(p, 0)
 	}
 	return p
 }
 
-// TestSyncPayloadCapHeadroom17093 is the table property: every growable
-// row carries at least encoderMax+reserve, every fixed row equals its
-// encoder max exactly, and no cap exceeds the global bound.
+// TestSyncPayloadCapHeadroom17093 is the table property (#18116):
+// every growable row carries maxLen > encoderMax (real headroom, no
+// exemptions — a growable row at maxLen == encoderMax is the
+// zero-headroom regression this PR exists to remove); every row
+// stays within [encoderMax, maxSyncPayload]; the proven-trailing-
+// intolerant rows are fixed; and no sender emits over its cap.
 func TestSyncPayloadCapHeadroom17093(t *testing.T) {
 	for _, d := range syncMsgDescriptors {
 		c, known := syncPayloadCap(d.id)
@@ -324,28 +339,14 @@ func TestSyncPayloadCapHeadroom17093(t *testing.T) {
 		if c != d.maxLen {
 			t.Errorf("%s: syncPayloadCap = %d, descriptor maxLen = %d", d.name, c, d.maxLen)
 		}
-		// The reserve property binds rows built by growableCap, whose
-		// maxLen is encoderMax+reserve by construction; such rows are
-		// exactly those with maxLen-encoderMax == syncExtensionReserve.
-		// Rows carrying historical slack (Session 64 KiB, Delete 64/96,
-		// FailoverAck 4 KiB, AuthUpgrade 1 KiB, global-cap rows) satisfy
-		// the weaker, still-meaningful bound maxLen >= encoderMax, plus
-		// slack >= reserve measured against the FIXED encoder size where
-		// one exists — asserted via the named growable set below.
 		if d.maxLen < d.encoderMax {
 			t.Errorf("%s: maxLen %d < encoderMax %d (cap below today's encoder)", d.name, d.maxLen, d.encoderMax)
 		}
-		if d.growable && d.maxLen == d.encoderMax+syncExtensionReserve {
-			// growableCap row: exact by construction; nothing to check
-			// beyond the equality this branch already establishes.
-		} else if d.growable && d.maxLen < maxSyncPayload && d.maxLen-d.encoderMax == 0 && d.encoderMax < 4096 {
-			t.Errorf("%s: growable row with zero headroom (maxLen == encoderMax == %d)", d.name, d.encoderMax)
-		}
-		if !d.growable && d.maxLen < d.encoderMax {
-			t.Errorf("%s: fixed maxLen %d < encoderMax %d", d.name, d.maxLen, d.encoderMax)
-		}
 		if d.maxLen < 0 || d.maxLen > maxSyncPayload {
 			t.Errorf("%s: maxLen %d outside [0, maxSyncPayload]", d.name, d.maxLen)
+		}
+		if d.growable && d.maxLen <= d.encoderMax {
+			t.Errorf("%s: growable row with no headroom (maxLen %d <= encoderMax %d)", d.name, d.maxLen, d.encoderMax)
 		}
 	}
 	// The documented growable set must each carry the full reserve
@@ -365,6 +366,45 @@ func TestSyncPayloadCapHeadroom17093(t *testing.T) {
 		if c := mustCap(t, mt); c < encMax+syncExtensionReserve {
 			t.Errorf("type %d: cap %d < encoderMax %d + reserve %d (zero-headroom regression)", mt, c, encMax, syncExtensionReserve)
 		}
+	}
+	// #18116 (B2): these decoders reject trailing bytes (Noise,
+	// config AEAD, exact lease layout), so their rows must be fixed —
+	// growable would promise extension tolerance they do not have.
+	for _, mt := range []uint8{
+		syncMsgAuthUpgradeHello, syncMsgAuthUpgradeProof,
+		syncMsgConfigEncrypted, syncMsgPersistentNatLease,
+		syncMsgPersistentNatLeaseGeneration,
+		syncMsgPersistentNatLeaseDeterministic,
+		syncMsgPersistentNatLeaseProvenance,
+		syncMsgPersistentNatLeaseDeterministicProvenance,
+	} {
+		for _, d := range syncMsgDescriptors {
+			if d.id == mt && d.growable {
+				t.Errorf("%s: marked growable but its decoder rejects trailing bytes (#18116 B2)", d.name)
+			}
+		}
+	}
+	// #18116 (B3): the session encoders must never emit over their
+	// caps, even with a format-maximum (u16-length) rule ID. The
+	// sender-side guard (sessionRuleIDMaxLen) is what makes this
+	// hold; neither session row is exempt from the property.
+	rule := make([]byte, 65535)
+	for i := range rule {
+		rule[i] = 'r'
+	}
+	v4val := val9508()
+	v4val.PolicyRuleID = string(rule)
+	v4val.EgressIfaceFold = 1
+	v4val.PrimaryLiveness = true
+	if v4 := encodeSessionV4Payload(key9508(), v4val); len(v4) > mustCap(t, syncMsgSessionV4) {
+		t.Errorf("session v4 encoder emits %d > cap %d with a 64KiB rule ID (encoderMax falsified)", len(v4), mustCap(t, syncMsgSessionV4))
+	}
+	v6val := dataplane.SessionValueV6{State: dataplane.SessStateEstablished, SessionID: 1,
+		PolicyRuleID: string(rule), EgressIfaceFold: 1, PrimaryLiveness: true}
+	v6key := dataplane.SessionKeyV6{SrcIP: [16]byte{0x20, 0x01}, DstIP: [16]byte{0x20, 0x02},
+		Protocol: 6, SrcPort: 40000, DstPort: 5201}
+	if v6 := encodeSessionV6Payload(v6key, v6val); len(v6) > mustCap(t, syncMsgSessionV6) {
+		t.Errorf("session v6 encoder emits %d > cap %d with a 64KiB rule ID (encoderMax falsified)", len(v6), mustCap(t, syncMsgSessionV6))
 	}
 	if _, known := syncPayloadCap(200); known {
 		t.Error("unknown type 200 must have no per-type cap")
