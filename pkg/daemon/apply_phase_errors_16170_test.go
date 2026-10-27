@@ -1,14 +1,18 @@
 package daemon
 
-// apply_phase_errors_16170_test.go — #16170 (daemon R2).
+// apply_phase_errors_16170_test.go — #16170 (daemon R2), updated #17034.
 //
 // The tests in this file have distinct, limited purposes:
 //
+//   - phaseSentinels16170 is built by reflection over applyPhaseErrors
+//     (#17034), so a field added to the struct automatically gets a
+//     sentinel here instead of requiring a third hand list.
 //   - The sentinel cells below characterize applyPhaseErrors.join itself:
-//     every hand-set field reaches errors.Is, and join's string is the flat
-//     pre-struct order. They deliberately construct applyPhaseErrors in the
-//     test, so they do NOT prove that production assigns any producer's
-//     error to the correct field.
+//     every reflected field reaches errors.Is through join (with zero
+//     tail-locals), and join's string is the flat field order. They
+//     deliberately construct applyPhaseErrors in the test, so they do NOT
+//     prove that production assigns any producer's error to the correct
+//     field.
 //   - The tail-order cell drives the real applyTailReconciles with all
 //     tail-local producers healthy; it therefore pins only phase-relative
 //     order, not interleaving against non-nil local errors.
@@ -17,6 +21,11 @@ package daemon
 //     separately in apply_phase_errors_production_16170_test.go, whose
 //     fixtures fail real production seams and drive applyConfigLocked /
 //     applyDataplaneAndHACore.
+//   - TestEveryApplyPhaseErrorReachesTheCommit17034 (in
+//     apply_phase_errors_production_16170_test.go) is the mutation cell:
+//     it reflects over the struct and drives the production tail, so a
+//     field added per the documented recipe but not wired into join()
+//     turns RED.
 //
 // FAIL-ON-REVERT for these unit cells: swap two operands in join and the
 // all-sentinel order cell goes RED; drop a field from join and the matching
@@ -25,6 +34,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -32,26 +42,30 @@ import (
 )
 
 // phaseSentinels16170 returns one distinct sentinel per applyPhaseErrors
-// field, in the fields' declaration/join order.
+// field, in struct declaration order (= join operand order for phase
+// fields). Built by reflection (#17034) so a field added to the struct
+// automatically gets a sentinel — there is no third hand list to forget.
+// Sentinel strings keep the historic "sentinel-16170-<slug>" shape so
+// exact-string cells in the production file stay byte-identical.
 func phaseSentinels16170() (sentinels []error, phase applyPhaseErrors) {
-	names := []string{"networkd", "dataplane", "dhcp-server", "ipsec", "iface",
-		"route-leak", "routing-rule", "mgmt-route", "vrf", "fabric", "frr"}
-	sentinels = make([]error, len(names))
-	for i, n := range names {
-		sentinels[i] = errors.New("sentinel-16170-" + n)
+	slugs := map[string]string{
+		"Networkd": "networkd", "Dataplane": "dataplane", "DHCPServer": "dhcp-server",
+		"IPsec": "ipsec", "Iface": "iface", "RouteLeak": "route-leak",
+		"RoutingRule": "routing-rule", "MgmtRoute": "mgmt-route", "VRF": "vrf",
+		"Fabric": "fabric", "FRR": "frr",
 	}
-	phase = applyPhaseErrors{
-		Networkd:    sentinels[0],
-		Dataplane:   sentinels[1],
-		DHCPServer:  sentinels[2],
-		IPsec:       sentinels[3],
-		Iface:       sentinels[4],
-		RouteLeak:   sentinels[5],
-		RoutingRule: sentinels[6],
-		MgmtRoute:   sentinels[7],
-		VRF:         sentinels[8],
-		Fabric:      sentinels[9],
-		FRR:         sentinels[10],
+	t := reflect.TypeOf(applyPhaseErrors{})
+	v := reflect.ValueOf(&phase).Elem()
+	sentinels = make([]error, 0, t.NumField())
+	for i := range t.NumField() {
+		name := t.Field(i).Name
+		slug, ok := slugs[name]
+		if !ok {
+			slug = strings.ToLower(name)
+		}
+		s := errors.New("sentinel-16170-" + slug)
+		sentinels = append(sentinels, s)
+		v.Field(i).Set(reflect.ValueOf(s))
 	}
 	return sentinels, phase
 }
@@ -59,11 +73,12 @@ func phaseSentinels16170() (sentinels []error, phase applyPhaseErrors) {
 // TestApplyPhaseErrorsSentinelPerPhase16170 pins join(): every sentinel is
 // reachable via errors.Is from its own field, and the joined error string is
 // exactly the sentinels in field order, newline-joined — the observable
-// commit-output ordering the flat pre-struct join produced.
+// commit-output ordering the flat pre-struct join produced. Called with
+// zero tail-locals, so the string is exactly the phase fields in order.
 func TestApplyPhaseErrorsSentinelPerPhase16170(t *testing.T) {
 	sentinels, phase := phaseSentinels16170()
 
-	joined := phase.join()
+	joined := phase.join(applyTailLocals{})
 	if joined == nil {
 		t.Fatal("applyPhaseErrors.join() returned nil with every phase failed")
 	}
@@ -95,33 +110,25 @@ func TestApplyPhaseErrorsSentinelPerPhase16170(t *testing.T) {
 	}
 }
 
-// TestApplyPhaseErrorsSingleSentinelAttribution16170 proves each hand-set
-// field reaches join by itself and no other hand-set sentinel appears. It
+// TestApplyPhaseErrorsSingleSentinelAttribution16170 proves each field
+// reaches join by itself and no other field's sentinel appears. Fields are
+// set by reflection (#17034) so a new field is covered automatically. It
 // is a join/drop characterization only: because just one operand is
 // non-nil, it cannot detect a permutation among join operands, and because
 // the test constructs the struct itself it cannot detect a production
 // construction-site transposition.
 func TestApplyPhaseErrorsSingleSentinelAttribution16170(t *testing.T) {
 	sentinels, _ := phaseSentinels16170()
-	setters := []func(*applyPhaseErrors, error){
-		func(p *applyPhaseErrors, e error) { p.Networkd = e },
-		func(p *applyPhaseErrors, e error) { p.Dataplane = e },
-		func(p *applyPhaseErrors, e error) { p.DHCPServer = e },
-		func(p *applyPhaseErrors, e error) { p.IPsec = e },
-		func(p *applyPhaseErrors, e error) { p.Iface = e },
-		func(p *applyPhaseErrors, e error) { p.RouteLeak = e },
-		func(p *applyPhaseErrors, e error) { p.RoutingRule = e },
-		func(p *applyPhaseErrors, e error) { p.MgmtRoute = e },
-		func(p *applyPhaseErrors, e error) { p.VRF = e },
-		func(p *applyPhaseErrors, e error) { p.Fabric = e },
-		func(p *applyPhaseErrors, e error) { p.FRR = e },
+	typ := reflect.TypeOf(applyPhaseErrors{})
+	if len(sentinels) != typ.NumField() {
+		t.Fatalf("phaseSentinels16170 returned %d sentinels for %d fields", len(sentinels), typ.NumField())
 	}
-	for i, set := range setters {
+	for i := range sentinels {
 		var phase applyPhaseErrors
-		set(&phase, sentinels[i])
-		joined := phase.join()
+		reflect.ValueOf(&phase).Elem().Field(i).Set(reflect.ValueOf(sentinels[i]))
+		joined := phase.join(applyTailLocals{})
 		if joined == nil || joined.Error() != sentinels[i].Error() {
-			t.Fatalf("field %d alone: join() = %v, want exactly %q", i, joined, sentinels[i])
+			t.Fatalf("field %d (%s) alone: join() = %v, want exactly %q", i, typ.Field(i).Name, joined, sentinels[i])
 		}
 		for j, s := range sentinels {
 			if got := errors.Is(joined, s); got != (i == j) {
@@ -131,7 +138,7 @@ func TestApplyPhaseErrorsSingleSentinelAttribution16170(t *testing.T) {
 	}
 
 	// The zero value joins to nil, matching errors.Join of all-nil operands.
-	if got := (applyPhaseErrors{}).join(); got != nil {
+	if got := (applyPhaseErrors{}).join(applyTailLocals{}); got != nil {
 		t.Fatalf("zero applyPhaseErrors join() = %v, want nil", got)
 	}
 }
@@ -196,7 +203,7 @@ func TestApplyCoreResultTerminalVsDeferred16170(t *testing.T) {
 	if res.Terminal != nil {
 		t.Fatalf("clean core: Terminal = %v, want nil", res.Terminal)
 	}
-	if res.Phase.join() != nil {
-		t.Fatalf("clean core: Phase.join() = %v, want nil", res.Phase.join())
+	if res.Phase.join(applyTailLocals{}) != nil {
+		t.Fatalf("clean core: Phase.join() = %v, want nil", res.Phase.join(applyTailLocals{}))
 	}
 }

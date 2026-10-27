@@ -99,11 +99,14 @@
 //   occupancy.rs: AddressOccupancy + RecycleRing — 25 widenings, all
 //     private -> pub(in crate::nat::allocator), enumerated in that
 //     file's header. Nothing outside nat::allocator can name them.
-// Pure code motion only: allocator.rs:1-43 invariants above, every
-// atomic ordering and the global -> recycle lock order are untouched.
-// Machine-checked by scripts/verify-nat-allocator-split-16135.py,
-// which reconstructs the pre-split allocator.rs byte-for-byte after
-// un-applying exactly the enumerated widenings.
+// At the split commit (b0ff071c29, 2026-10-22) this was pure code
+// motion only: the allocator.rs:1-43 invariants above, every atomic
+// ordering and the global -> recycle lock order were untouched.
+// Verified at that commit by
+// scripts/verify-nat-allocator-split-16135.py, which reconstructs
+// the pre-split allocator.rs byte-for-byte after un-applying
+// exactly the enumerated widenings; re-run it there (pinned
+// --base/--split refs) — it checks the split commit, not this tree.
 //
 // Accounting against the issue's "124-item visibility bill" (the
 // pre-split population, measured on the base file, not a count of
@@ -119,16 +122,17 @@
 //     all were already pub(crate), see that file's header), and
 //     0 moved into occupancy.rs (AddressOccupancy/RecycleRing and
 //     their members were all fully private, never pub(super)).
-//   - 119 stay in this file at the same module depth
+//   - 119 stayed in this file at the same module depth
 //     (nat::allocator is still a direct child of nat::), so their
-//     pub(super) spelling keeps its exact pre-split meaning
-//     (visible in nat::) and needs no widening. This file still
-//     carries all 124 occurrences (119 code + 5 comment).
-// The cost actually paid by this move is therefore NOT the 124:
-// it is 25 private -> pub(in crate::nat::allocator) widenings in
+//     pub(super) spelling kept its exact pre-split meaning
+//     (visible in nat::) and needed no widening. The base
+//     file carried 124 occurrences (119 code + 5 comment);
+//     that was a split-time count, not a current-tree invariant —
+//     the file has been edited since (e.g. #15956 added flows.rs).
+// The cost actually paid by this move was therefore NOT the 124:
+// it was 25 private -> pub(in crate::nat::allocator) widenings in
 // occupancy.rs (plus 0 in deterministic.rs), enumerated there and
-// machine-checked by the verifier above.
-// un-applying exactly the enumerated widenings.
+// verified at the split commit by the verifier above.
 
 mod deterministic;
 mod flows;
@@ -5158,17 +5162,6 @@ impl PortAllocator {
         }
     }
 
-    /// #4559: allocate a deterministic CGNAT port for a NAPT64 (mode 2) flow
-    /// from the IPv6 subscriber's fixed block. Structurally identical to
-    /// [`allocate_deterministic_v4`] — a live flow re-allocates its tuple, a
-    /// fresh flow claims the first free port in the subscriber's block via the
-    /// occupancy bitmap (collision-free, RFC 6146 BIB), and the freed port is
-    /// not recycled onto the per-address queue — differing ONLY in the
-    /// subscriber-index derivation ([`deterministic_indices_v6`]: the 32-bit
-    /// word after the IPv6 prefix). The external IPv4 pool address and the port
-    /// block are a pure function of the subscriber's IPv6 prefix, so
-    /// [`reverse_deterministic_v6`] recovers it from `(external IPv4, port)`
-    /// with no per-flow log. An out-of-range subscriber fails closed.
     pub(crate) fn deterministic_v6_tuple_matches(
         &self,
         params: DeterministicV6,
@@ -5192,52 +5185,6 @@ impl PortAllocator {
         let start = self.port_low as u32 + block_index * params.block_size as u32;
         let end = (start + params.block_size as u32 - 1).min(self.port_high as u32);
         (start..=end).contains(&(port as u32))
-    }
-
-    pub(crate) fn deterministic_tuple_matches(
-        &self,
-        deterministic: Option<super::idle_lease_sync_8121::DeterministicPortedIdentity>,
-        src: std::net::IpAddr,
-        pool_addresses: &[std::net::IpAddr],
-        addr_index: usize,
-        translated_ip: std::net::IpAddr,
-        port: u16,
-    ) -> bool {
-        match (deterministic, src, translated_ip) {
-            (
-                Some(super::idle_lease_sync_8121::DeterministicPortedIdentity::V4(params)),
-                std::net::IpAddr::V4(source),
-                std::net::IpAddr::V4(translated),
-            ) => {
-                let pool: Vec<Ipv4Addr> = pool_addresses
-                    .iter()
-                    .filter_map(|x| match x {
-                        std::net::IpAddr::V4(v4) => Some(*v4),
-                        _ => None,
-                    })
-                    .collect();
-                self.deterministic_v4_tuple_matches(
-                    params, source, &pool, addr_index, translated, port,
-                )
-            }
-            (
-                Some(super::idle_lease_sync_8121::DeterministicPortedIdentity::V6(params)),
-                std::net::IpAddr::V6(source),
-                std::net::IpAddr::V4(translated),
-            ) => {
-                let pool: Vec<Ipv4Addr> = pool_addresses
-                    .iter()
-                    .filter_map(|x| match x {
-                        std::net::IpAddr::V4(v4) => Some(*v4),
-                        _ => None,
-                    })
-                    .collect();
-                self.deterministic_v6_tuple_matches(
-                    params, source, &pool, addr_index, translated, port,
-                )
-            }
-            _ => false,
-        }
     }
 
     pub(crate) fn deterministic_v4_tuple_matches(
@@ -5265,6 +5212,27 @@ impl PortAllocator {
         (start..=end).contains(&(port as u32))
     }
 
+    /// #4559: allocate a deterministic CGNAT port for a NAPT64 (mode 2) flow
+    /// from the IPv6 subscriber's fixed block. Like
+    /// [`allocate_deterministic_v4`], a live flow re-allocates its tuple and a
+    /// fresh flow claims the first free port in the subscriber's block via the
+    /// occupancy bitmap (collision-free, RFC 6146 BIB). Unlike the v4 arm —
+    /// which records no lease (`persistent_key: None`) — this arm mints,
+    /// joins, and expires a persistent BIB lease for the subscriber
+    /// (`allocate_deterministic_v6_at`): flows sharing a BIB join the existing
+    /// lease, an idle lease is reclaimed or re-armed on expiry, and release
+    /// completes the lease rather than simply freeing the tuple. The other
+    /// divergence is the subscriber-index derivation
+    /// ([`deterministic_indices_v6`]: the 32-bit word after the IPv6 prefix).
+    /// A freed port IS recycled onto the per-address queue (#14625,
+    /// [`Self::free_translated_port`]): `claim_in_block` scans the bitmap
+    /// directly and ignores the ring, so recycling is harmless while the pool
+    /// stays deterministic, and a pool that later flips to round-robin PAT on
+    /// this reused allocator can only reach the freed port through the ring.
+    /// The external IPv4 pool address and the port block are a pure function
+    /// of the subscriber's IPv6 prefix, so [`reverse_deterministic_v6`]
+    /// recovers it from `(external IPv4, port)` with no per-flow log. An
+    /// out-of-range subscriber fails closed.
     pub(super) fn allocate_deterministic_v6(
         &self,
         flow: SourceNatFlowKey,

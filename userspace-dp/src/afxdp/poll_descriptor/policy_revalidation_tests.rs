@@ -4817,7 +4817,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
     let mut internal = "2001:db8:1::1234"
         .parse::<std::net::Ipv6Addr>()
         .expect("v6");
-    assert!(configured.nptv6.translate_inbound(&mut internal, ""));
+    assert_eq!(configured.nptv6.translate_inbound_result(&mut internal, ""), crate::nptv6::Nptv6Translation::Translated);
     let in_key = key_14315(6, "2001:db8:9::1", "2001:db8:1::1234", 40000, 443);
     let in_decision = decision_14315(NatDecision {
         rewrite_dst: Some(IpAddr::V6(internal)),
@@ -4851,7 +4851,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
     );
     // Outbound: internal src -> external.
     let mut external = "fd00:1::1234".parse::<std::net::Ipv6Addr>().expect("v6");
-    assert!(configured.nptv6.translate_outbound(&mut external, ""));
+    assert_eq!(configured.nptv6.translate_outbound_result(&mut external, ""), crate::nptv6::Nptv6Translation::Translated);
     let out_key = key_14315(6, "fd00:1::1234", "2001:db8:9::1", 40000, 443);
     let out_decision = decision_14315(NatDecision {
         rewrite_src: Some(IpAddr::V6(external)),
@@ -6417,7 +6417,7 @@ fn selector_less_reverse_still_revokes_nptv6_nat64_15934() {
     let configured = nptv6_forwarding_14315();
     let withdrawn = ForwardingState::default();
     let mut internal = "2001:db8:1::1234".parse::<std::net::Ipv6Addr>().expect("v6");
-    assert!(configured.nptv6.translate_inbound(&mut internal, ""));
+    assert_eq!(configured.nptv6.translate_inbound_result(&mut internal, ""), crate::nptv6::Nptv6Translation::Translated);
     let in_key = key_14315(libc::IPPROTO_ICMPV6 as u8, "2001:db8:9::1", "2001:db8:1::1234", 0x1234, 0);
     let in_decision = decision_14315(NatDecision {
         rewrite_dst: Some(IpAddr::V6(internal)),
