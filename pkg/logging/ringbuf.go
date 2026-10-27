@@ -900,7 +900,7 @@ func (er *EventReader) logEvent(data []byte) {
 	actionStr := recordActionName(evt.EventType, evt.Action)
 	protoStr := protoName(evt.Protocol)
 	rec := mapRawEvent(&evt, data, policyDenyStamped)
-	srcStr, dstStr, _, _ := formatRawEventAddrs(&evt)
+	srcStr, dstStr := rec.SrcAddr, rec.DstAddr
 	rec.InZoneName = er.resolveZoneName(evt.IngressZone)
 	rec.OutZoneName = er.resolveZoneName(evt.EgressZone)
 	rec.IngressIface = er.InterfaceName(evt.IngressIfindex)

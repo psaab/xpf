@@ -773,13 +773,15 @@ func (es *EventStream) readLoop(ctx context.Context) {
 				continue
 			}
 			// #17065: validity is a cheap gate, not a full decode. Decode
-			// a record only when onDataplaneEvent will consume it now or
-			// a queued copy needs it later (pending frames present);
+			// a record only when a consumer will read it: the decoded
+			// callback now, or a queued copy at flush (no callbacks —
+			// dispatchOrQueueDataplaneFrame will queue it — or pending
+			// frames already queued behind which this frame queues);
 			// otherwise — raw callback installed (the production
-			// userspace wiring) or no consumer at all — only validate,
+			// userspace wiring) with an empty queue — only validate,
 			// since the decoded record would be discarded unread.
 			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
-			needRecord := (onRawDataplaneEvent == nil && onDataplaneEvent != nil) || es.hasPendingCallbackFrames()
+			needRecord := onRawDataplaneEvent == nil || es.hasPendingCallbackFrames()
 			var rec logging.EventRecord
 			if needRecord {
 				var ok bool

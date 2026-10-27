@@ -1134,8 +1134,9 @@ with no valueType and no validator, so any string reached the dialer's resolver.
   rejected by the decoder and dropped by the live path.
   `ValidRawEvent` is the allocation-free validity predicate over the
   same parser; the userspace event stream uses it as its per-frame
-  gate and decodes a record only when a consumer (decoded callback or
-  pending queue) will read it. Pins: `TestRawEventParserGolden16127`,
+  gate and decodes a record only when a consumer will read it
+  (decoded callback, or a frame that will queue — no callbacks or a
+  pending queue — for a later flush). Pins: `TestRawEventParserGolden16127`,
   `TestRawEventFamilyPolicy16127`, `TestMapRawEventParity17065`
   (field-identical decode across golden frames on both entry points),
   `TestValidRawEvent17065`. Fanout stays live-only.

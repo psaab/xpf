@@ -77,6 +77,26 @@ func TestMapRawEventParity17065(t *testing.T) {
 	}
 }
 
+// TestDecodedOpenFrameTOSAbsolute17065 pins the open-frame shape with an
+// ABSOLUTE value (not live-vs-decoded parity, which a unified-but-wrong
+// mapper would pass): the #17065 decision reads ToS/flags from the wire
+// on open frames too, so a decoded extended open frame must surface the
+// golden frame's 0xB8/0x13/37 exactly. Mutating mapRawEvent to zero TOS
+// flips this RED.
+func TestDecodedOpenFrameTOSAbsolute17065(t *testing.T) {
+	for _, length := range []int{rawEventExtSize, rawEventSessionIDSize} {
+		frame := frame17065(length, addrFamilyInet, eventTypeSessionOpen, false)
+		decoded, ok := DecodeRawEventRecord(frame)
+		if !ok {
+			t.Fatalf("len %d: DecodeRawEventRecord rejected open frame", length)
+		}
+		if decoded.TOS != 0xB8 || decoded.TCPControlBits != 0x13 || decoded.EgressIfindex != 37 {
+			t.Fatalf("len %d: decoded open CoS block = TOS %#x flags %#x egress %d, want 0xb8/0x13/37",
+				length, decoded.TOS, decoded.TCPControlBits, decoded.EgressIfindex)
+		}
+	}
+}
+
 // assertWireFields17065 compares every wire-derived EventRecord field.
 // Any field either entry point derives from the frame bytes belongs
 // here; adding a wire field to one mapper without the other (the
