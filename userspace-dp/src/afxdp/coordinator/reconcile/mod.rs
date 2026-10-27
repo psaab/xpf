@@ -17,7 +17,6 @@ use super::*;
 use super::super::*;
 
 pub(super) mod bringup;
-pub(super) mod reset;
 pub(super) mod snapshot;
 pub(crate) mod stage;
 pub(super) mod teardown;
@@ -357,26 +356,27 @@ impl Coordinator {
         // stall.
         let will_rebind = snapshot.is_some();
         let mut preserved = teardown::tear_down(self, will_rebind);
-        reset::reset_binding_counters(bindings);
         let Some(snapshot) = snapshot else {
             self.policy_counters.reconcile_rules(&[]);
             // #2218: no snapshot -> no active NAT rules -> drop all counters.
             self.nat_counters.reconcile_ids(&[]);
             // #2515: the no_snapshot teardown stopped every worker
             // (`stop_inner` emptied `workers.live` and cleared the CoS
-            // owner maps), but `reset_binding_counters` only zeroes the
-            // counter scalars + `bound`/`xsk_registered`/`socket_fd` — it
-            // leaves `xsk_bind_mode`, `socket_ifindex`/`queue_id`/
+            // owner maps), but a bare counter zero-pass would leave
+            // `xsk_bind_mode`, `socket_ifindex`/`queue_id`/
             // `bind_flags`, `zero_copy`, and the `flow_cache_capacity`/
             // `active_flow_count` gauges at their pre-teardown values.
             // Without the refresh below, status commands keep reporting
             // those slots as if still bound, and the rebuilt CoS
             // owner->worker map is never emptied. `refresh_bindings`
             // routes every now-workerless slot through `zero_unbound_slot`
-            // (clearing exactly those residual fields) and rebuilds the
-            // CoS owner map empty — the same tail the snapshot-apply path
-            // runs at the end of `reconcile`. Run it BEFORE setting the
-            // stage so the operator-visible state is consistent on return.
+            // (clearing exactly those residual fields, plus every counter)
+            // and rebuilds the CoS owner map empty — the same tail the
+            // snapshot-apply path runs at the end of `reconcile`. Run it
+            // BEFORE setting the stage so the operator-visible state is
+            // consistent on return. #17105: this refresh (and the one
+            // after `bring_up_workers`) is the sole owner of post-teardown
+            // binding state; there is no separate pre-refresh reset pass.
             self.refresh_bindings(bindings);
             self.last_reconcile_stage = ReconcileStage::NoSnapshot;
             // #3789: a config-cleared / shutdown teardown is a successful
