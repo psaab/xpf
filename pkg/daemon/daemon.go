@@ -1247,18 +1247,30 @@ type Daemon struct {
 	// (plus the single-threaded bootstrap path, which runs before applies).
 	earlyInputHandoffDone atomic.Bool
 
+	// earlyInputBarrierStateMu guards the pre-handoff retained-hold state
+	// below (#17854): the writers run under applySem, but the
+	// HostInboundApplied projection and the 30s host-inbound gap loop read
+	// the fields without it, so the fields need their own lock.
+	earlyInputBarrierStateMu sync.Mutex
 	// earlyInputHandoffPendingSince is the wall-clock start of the current
-	// pre-handoff pending hold (#16785): the first apply that retained the
-	// barrier for pending DHCP intent, lo0 failure, changed addresses, or
-	// an uncovered fallback. Zero when no hold is open. The bounded
-	// handoff compares it against earlyInputPendingHandoffBound; the 30s
-	// host-inbound gap loop re-drives an apply so the bound fires without
-	// a commit. Serialized under applySem like earlyInputHandoffDone.
+	// pre-handoff hold (#16785): the first apply that retained the barrier
+	// for pending DHCP intent, lo0 failure, changed addresses, or an
+	// uncovered fallback. Zero when no hold is open. Projection-only: it
+	// drives BarrierRetained reporting, never the bound.
 	earlyInputHandoffPendingSince time.Time
 	// earlyInputHandoffPendingDetail names the scopes holding the barrier
-	// (e.g. "untrust/ge-0-0-1.0 inet6"), for the retained log and the
-	// HostInboundApplied projection. Guarded by applySem.
+	// (e.g. "untrust/ge-0/0/1.0 inet6"), for the retained log and the
+	// HostInboundApplied projection.
 	earlyInputHandoffPendingDetail string
+	// earlyInputPendingBoundSince is the wall-clock start of the bounded
+	// #16785 PENDING hold alone: only a retention for pending DHCP intent
+	// opens it, and only it is compared against
+	// earlyInputPendingHandoffBound. #17854: an lo0 failure or a
+	// changed-addresses hold has no substitute backstop once the barrier
+	// is gone, so it must never be timed out by this clock. The 30s
+	// host-inbound gap loop re-drives an apply when it expires so the
+	// bound fires without a commit. Zero when no pending hold is open.
+	earlyInputPendingBoundSince time.Time
 	// earlyInputBarrierRetainedNowFn is the wall clock for the pending
 	// hold. A var so #16785 tests drive the bound deterministically.
 	earlyInputBarrierRetainedNowFn func() time.Time

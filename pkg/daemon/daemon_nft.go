@@ -967,14 +967,13 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// flag is fresh). An intended lo0-only policy must not lose its
 			// only backstop to an independent host-inbound teardown; the
 			// lo0 error already fails the commit, and the next successful
-			// apply hands off.
+			// apply hands off. #17854: this hold is UNBOUNDED — a failed
+			// lo0 install has no substitute once the barrier is gone, so
+			// the #16785 pending bound must never time it out.
 			if d.lo0LastFailed.Load() {
-				expired := d.noteEarlyInputBarrierRetained("lo0")
-				slog.Warn("retaining early host-input barrier: lo0 protection failed in this apply", "barrier_retained", true, "pending", "lo0", "handoff_bound_expired", expired)
-				if !expired {
-					return nil
-				}
-				slog.Warn("early host-input barrier handoff bound expired; handing off despite lo0 failure", "bound", earlyInputPendingHandoffBound.String(), "pending", "lo0")
+				d.noteEarlyInputBarrierRetained("lo0")
+				slog.Warn("retaining early host-input barrier: lo0 protection failed in this apply", "barrier_retained", true, "pending", "lo0")
+				return nil
 			}
 			// #10751 R5-B: re-sample at handoff and prove coverage. The
 			// teardown above deleted on the install sample's premise
@@ -985,24 +984,26 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// ordering. Rendered destinations, not raw rows: only an
 			// actually-denied destination counts.
 			freshSnaps := sampleHostInboundSnapshots(cfg)
+			// #17854: unbounded like the lo0 hold above — an uncovered
+			// destination is a coverage gap, not a DHCP wait; only a
+			// re-render that covers it may hand off.
 			if newcomers := hostInboundCoverageNewcomers(cfg, nil, freshSnaps); len(newcomers) > 0 {
-				expired := d.noteEarlyInputBarrierRetained("addresses-changed:" + strings.Join(newcomers, ","))
+				d.noteEarlyInputBarrierRetained("addresses-changed:" + strings.Join(newcomers, ","))
 				slog.Warn("retaining early host-input barrier: addresses changed during apply; retry",
-					"newcomers", strings.Join(newcomers, ","), "barrier_retained", true, "handoff_bound_expired", expired)
-				if !expired {
-					d.noteHostInboundApplyFailed(time.Now())
-					return fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(newcomers, ","))
-				}
-				slog.Warn("early host-input barrier handoff bound expired; handing off despite changed addresses", "bound", earlyInputPendingHandoffBound.String(), "newcomers", strings.Join(newcomers, ","))
+					"newcomers", strings.Join(newcomers, ","), "barrier_retained", true)
+				d.noteHostInboundApplyFailed(time.Now())
+				return fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(newcomers, ","))
 			}
 			// B3/F3-A: 'nothing resolved now' is not 'operator requested no
 			// enforcement' — at zone AND interface/family granularity
 			// (mixed zones, sequential v4/v6 acquisition), decided over the
-			// handoff re-sample.
+			// handoff re-sample. #16785 alone is bounded (#17854): the
+			// pending unit keeps its #11577 per-interface backstop after
+			// handoff; the holds above do not.
 			if hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps) {
 				detail := hostInboundPendingDetail(cfg, freshSnaps)
-				expired := d.noteEarlyInputBarrierRetained(detail)
-				slog.Warn("retaining early host-input barrier: enforcing scopes have no address yet", "barrier_retained", true, "pending", detail, "handoff_bound_expired", expired)
+				expired := d.noteEarlyInputPendingRetained(detail)
+				slog.Warn("retaining early host-input barrier: enforcing scopes have no address yet", "barrier_retained", !expired, "pending", detail, "handoff_bound_expired", expired)
 				if !expired {
 					return nil
 				}
@@ -1229,47 +1230,23 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				freshSnaps = sampleHostInboundSnapshots(cfg)
 				snapshotChanged = hostInboundCoverageNewcomers(cfg, fallbackBaseline, freshSnaps)
 			}
+			// #17854: only the pending-DHCP hold is bounded (#16785).
+			// The lo0 and uncovered-destination holds keep the barrier —
+			// the fence covers the host-inbound scope only, and neither
+			// has a substitute backstop once the barrier is gone.
 			pendingExpired := d.earlyInputPendingExpired()
 			if !d.earlyInputHandoffDone.Load() && d.lo0LastFailed.Load() {
-				expired := d.noteEarlyInputBarrierRetained("lo0")
-				slog.Warn("retaining early host-input barrier after fenced fallback: lo0 protection failed in this apply", "barrier_retained", true, "pending", "lo0", "handoff_bound_expired", expired)
-				if expired && barrierHandoffErr == nil {
-					if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load()), fallbackBaseline); barrierErr != nil {
-						barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", tagNftInstallErr(barrierErr))
-					} else if err := d.setEarlyInputHandoffDone(); err != nil {
-						barrierHandoffErr = fmt.Errorf("record early-input handoff after host-inbound fallback: %w", err)
-					} else {
-						d.clearEarlyInputBarrierRetained()
-					}
-				}
-			} else if len(snapshotChanged) > 0 && !pendingExpired {
-				expired := d.noteEarlyInputBarrierRetained("addresses-changed:" + strings.Join(snapshotChanged, ","))
+				d.noteEarlyInputBarrierRetained("lo0")
+				slog.Warn("retaining early host-input barrier after fenced fallback: lo0 protection failed in this apply", "barrier_retained", true, "pending", "lo0")
+			} else if len(snapshotChanged) > 0 {
+				d.noteEarlyInputBarrierRetained("addresses-changed:" + strings.Join(snapshotChanged, ","))
 				slog.Warn("retaining early host-input barrier after fenced fallback: destinations not covered by installed fallback; retry",
-					"newcomers", strings.Join(snapshotChanged, ","), "barrier_retained", true, "handoff_bound_expired", expired)
-				if expired {
-					if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load()), fallbackBaseline); barrierErr != nil {
-						barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", tagNftInstallErr(barrierErr))
-					} else if err := d.setEarlyInputHandoffDone(); err != nil {
-						barrierHandoffErr = fmt.Errorf("record early-input handoff after host-inbound fallback: %w", err)
-					} else {
-						d.clearEarlyInputBarrierRetained()
-					}
-				} else {
-					barrierHandoffErr = fmt.Errorf("host-inbound destinations not covered by installed fallback; retry: %s", strings.Join(snapshotChanged, ","))
-				}
+					"newcomers", strings.Join(snapshotChanged, ","), "barrier_retained", true)
+				barrierHandoffErr = fmt.Errorf("host-inbound destinations not covered by installed fallback; retry: %s", strings.Join(snapshotChanged, ","))
 			} else if !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps) && !pendingExpired {
 				detail := hostInboundPendingDetail(cfg, freshSnaps)
-				expired := d.noteEarlyInputBarrierRetained(detail)
-				slog.Warn("retaining early host-input barrier after fenced fallback: enforcing scopes have no address yet", "barrier_retained", true, "pending", detail, "handoff_bound_expired", expired)
-				if expired {
-					if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load()), fallbackBaseline); barrierErr != nil {
-						barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", tagNftInstallErr(barrierErr))
-					} else if err := d.setEarlyInputHandoffDone(); err != nil {
-						barrierHandoffErr = fmt.Errorf("record early-input handoff after host-inbound fallback: %w", err)
-					} else {
-						d.clearEarlyInputBarrierRetained()
-					}
-				}
+				d.noteEarlyInputPendingRetained(detail)
+				slog.Warn("retaining early host-input barrier after fenced fallback: enforcing scopes have no address yet", "barrier_retained", true, "pending", detail)
 			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load()), fallbackBaseline); barrierErr != nil {
 				barrierErr = tagNftInstallErr(barrierErr)
 				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
@@ -1364,12 +1341,15 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	}
 	pendingRetainsBarrier := !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps)
 	snapshotChangedRetainsBarrier := len(snapshotChanged) > 0
-	// #16785: bound the pre-handoff hold. Once the bound expires the
-	// barrier hands off anyway — the #11577 per-interface backstop
-	// already installed with this render plus the lease-triggered
-	// re-apply cover the pending unit, exactly the post-handoff steady
-	// state the design already accepts.
-	pendingExpired := d.earlyInputPendingExpired()
+	// #16785/#17854: bound the PENDING hold alone. Once that bound
+	// expires, a hold that is pending-only hands off anyway — the
+	// #11577 per-interface backstop already installed with this render
+	// plus the lease-triggered re-apply cover the pending unit, exactly
+	// the post-handoff steady state the design already accepts. The lo0
+	// and changed-address holds are NOT bounded (#17854): neither has a
+	// substitute backstop, so both keep the barrier until a successful
+	// apply hands off — and the changed hold already fails the commit to
+	// drive exactly that retry.
 	detail := ""
 	if pendingRetainsBarrier {
 		detail = hostInboundPendingDetail(cfg, freshSnaps)
@@ -1378,39 +1358,30 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	} else if lo0RetainsBarrier {
 		detail = "lo0"
 	}
-	effectiveLo0 := lo0RetainsBarrier && !pendingExpired
-	effectivePending := pendingRetainsBarrier && !pendingExpired
-	effectiveChanged := snapshotChangedRetainsBarrier && !pendingExpired
 	if lo0RetainsBarrier {
-		expired := d.noteEarlyInputBarrierRetained(detail)
-		slog.Warn("retaining early host-input barrier after real install: lo0 protection failed in this apply", "barrier_retained", true, "pending", detail, "handoff_bound_expired", expired)
-		if expired {
-			slog.Warn("early host-input barrier handoff bound expired; handing off after real install", "bound", earlyInputPendingHandoffBound.String(), "pending", detail)
-		}
+		d.noteEarlyInputBarrierRetained(detail)
+		slog.Warn("retaining early host-input barrier after real install: lo0 protection failed in this apply", "barrier_retained", true, "pending", detail)
 	}
-	if snapshotChangedRetainsBarrier && !pendingExpired {
-		expired := d.noteEarlyInputBarrierRetained(detail)
+	if snapshotChangedRetainsBarrier {
+		d.noteEarlyInputBarrierRetained(detail)
 		slog.Warn("retaining early host-input barrier after real install: addresses changed during apply; retry",
-			"newcomers", strings.Join(snapshotChanged, ","), "barrier_retained", true, "pending", detail, "handoff_bound_expired", expired)
-		if expired {
-			slog.Warn("early host-input barrier handoff bound expired; handing off after real install", "bound", earlyInputPendingHandoffBound.String(), "pending", detail)
-		} else {
-			barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
-		}
+			"newcomers", strings.Join(snapshotChanged, ","), "barrier_retained", true, "pending", detail)
+		barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
 	}
-	if pendingRetainsBarrier && !lo0RetainsBarrier && !snapshotChangedRetainsBarrier {
-		expired := d.noteEarlyInputBarrierRetained(detail)
-		slog.Warn("retaining early host-input barrier after real install: enforcing scopes have no address yet", "barrier_retained", true, "pending", detail, "handoff_bound_expired", expired)
-		if expired {
-			slog.Warn("early host-input barrier handoff bound expired; handing off after real install", "bound", earlyInputPendingHandoffBound.String(), "pending", detail)
-		}
+	pendingBoundExpired := false
+	if pendingRetainsBarrier {
+		pendingBoundExpired = d.noteEarlyInputPendingRetained(detail)
+		slog.Warn("retaining early host-input barrier after real install: enforcing scopes have no address yet",
+			"barrier_retained", !pendingBoundExpired, "pending", detail, "handoff_bound_expired", pendingBoundExpired)
 	}
+	effectiveLo0 := lo0RetainsBarrier
+	effectivePending := pendingRetainsBarrier && !pendingBoundExpired
+	effectiveChanged := snapshotChangedRetainsBarrier
 	holdsBarrier := effectiveLo0 || effectivePending || effectiveChanged
-	if pendingExpired && (lo0RetainsBarrier || pendingRetainsBarrier || snapshotChangedRetainsBarrier) {
-		holdsBarrier = false
-		slog.Warn("early host-input barrier handoff bound expired; handing off after real install", "bound", earlyInputPendingHandoffBound.String(), "pending", detail)
-	}
 	if !holdsBarrier {
+		if pendingBoundExpired {
+			slog.Warn("early host-input barrier handoff bound expired; handing off after real install", "bound", earlyInputPendingHandoffBound.String(), "pending", detail)
+		}
 		if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, []string{xnft.HostInboundTableName}, desiredDrop); barrierErr != nil {
 			barrierErr = tagNftInstallErr(barrierErr)
 			slog.Warn("failed to remove early host-input barrier after real install", "err", barrierErr)
