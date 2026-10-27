@@ -32,9 +32,6 @@ func (h *rearmRecorderHA) SetRGActive(_ context.Context, rgID int, active bool) 
 
 func (h *rearmRecorderHA) SetHAWatchdog(_ context.Context, _ int, _ uint64) error { return nil }
 
-func (h *rearmRecorderHA) SetFabricForwarding(_ context.Context, _ dataplane.FabricID, _ dataplane.FabricFwdInfo) error {
-	return nil
-}
 
 func (h *rearmRecorderHA) SyncFabricState(_ context.Context) error { return nil }
 

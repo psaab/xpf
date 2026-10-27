@@ -239,8 +239,12 @@ type xpfCollector struct {
 	userspaceSNATPoolPersistentDeclinedTotal      *prometheus.Desc
 	userspaceSNATPoolExhaustionsTotal             *prometheus.Desc
 	userspaceSNATPoolIdleLeaseImportCapacityTotal *prometheus.Desc
-	userspaceSNATPoolLiveLockAcquisitionsTotal    *prometheus.Desc
-	userspaceSNATPoolLiveLockContendedTotal       *prometheus.Desc
+	userspaceSNATPoolFlowShardLockAcquisitionsTotal *prometheus.Desc
+	userspaceSNATPoolFlowShardLockContendedTotal    *prometheus.Desc
+	userspaceSNATPoolLiveWriteLockAcquisitionsTotal *prometheus.Desc
+	userspaceSNATPoolLiveWriteLockContendedTotal    *prometheus.Desc
+	userspaceSNATPoolLiveLockAcquisitionsTotal      *prometheus.Desc
+	userspaceSNATPoolLiveLockContendedTotal         *prometheus.Desc
 	userspaceSNATPoolRecycleScanPopsTotal         *prometheus.Desc
 	userspaceSNATPoolRecycleScanWalksTotal        *prometheus.Desc
 	// #16547: the #7717 overlap detector's scans/addresses pair. Two

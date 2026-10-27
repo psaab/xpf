@@ -3,7 +3,6 @@ package userspace
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
@@ -75,8 +74,6 @@ func (c userspaceLinkController) AbandonLinkCycle() bool {
 type userspaceHAOps interface {
 	UpdateRGActive(int, bool) error
 	UpdateHAWatchdog(int, uint64) error
-	UpdateFabricFwd(dataplane.FabricFwdInfo) error
-	UpdateFabricFwd1(dataplane.FabricFwdInfo) error
 	SyncFabricState()
 }
 
@@ -97,21 +94,6 @@ func (o managerHAOps) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	}
 	return o.manager.UpdateHAWatchdog(rgID, timestamp)
 }
-
-func (o managerHAOps) UpdateFabricFwd(info dataplane.FabricFwdInfo) error {
-	if o.manager == nil || o.manager.bpfShim == nil {
-		return errors.New("nil userspace dataplane")
-	}
-	return o.manager.bpfShim.UpdateFabricFwd(info)
-}
-
-func (o managerHAOps) UpdateFabricFwd1(info dataplane.FabricFwdInfo) error {
-	if o.manager == nil || o.manager.bpfShim == nil {
-		return errors.New("nil userspace dataplane")
-	}
-	return o.manager.bpfShim.UpdateFabricFwd1(info)
-}
-
 func (o managerHAOps) SyncFabricState() {
 	if o.manager != nil {
 		o.manager.SyncFabricState()
@@ -140,47 +122,6 @@ func (c userspaceHAController) SetHAWatchdog(ctx context.Context, rgID int, time
 		return errors.New("nil userspace dataplane")
 	}
 	return c.manager.UpdateHAWatchdog(rgID, timestamp)
-}
-
-func (c userspaceHAController) SetFabricForwarding(ctx context.Context, id dataplane.FabricID, info dataplane.FabricFwdInfo) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if c.manager == nil {
-		return errors.New("nil userspace dataplane")
-	}
-	// #8597 K78: dispatch EXHAUSTIVELY. This was `if id == 1 { fabric1 } else
-	// { fabric0 }`, so every FabricID other than 1 — 2, 3, 255 — silently
-	// programmed FABRIC 0. `FabricID` is a uint8, so the type admits 256
-	// values while the dispatch distinguishes two, and the mismatch resolved
-	// by writing the caller's data into the wrong fabric and reporting
-	// success.
-	//
-	// No caller does this today and none ever has: every call site in the tree
-	// passes a literal 0 or 1 (`daemon_ha_fabric.go`), and the only two loops
-	// over the axis — in controllers_binding_table_6871_test.go and
-	// heartbeat_ack_incarnation_5718_test.go — both iterate `{0, 1}`. So this
-	// is not a live defect and the change refuses nothing that exists; it is
-	// the aliasing that would be silent WHEN a third fabric is added, which is
-	// precisely the moment an `else` arm stops being a two-valued dispatch and
-	// becomes a wrong answer.
-	var err error
-	switch id {
-	case 0:
-		err = c.manager.UpdateFabricFwd(info)
-	case 1:
-		err = c.manager.UpdateFabricFwd1(info)
-	default:
-		return fmt.Errorf("fabric id %d out of range: the dataplane has fabric 0 and fabric 1 only", id)
-	}
-	if err != nil {
-		return err
-	}
-	// The map update is committed at this point. Always push helper fabric
-	// state after a successful fabric0 or fabric1 update so RuntimeDataPlane.HA
-	// preserves the same "fresh helper view" contract for every fabric slot.
-	c.manager.SyncFabricState()
-	return nil
 }
 
 func (c userspaceHAController) SyncFabricState(ctx context.Context) error {

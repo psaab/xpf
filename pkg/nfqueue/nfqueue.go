@@ -31,7 +31,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/psaab/xpf/pkg/linuxsock"
 	"golang.org/x/sys/unix"
@@ -83,10 +82,9 @@ var ErrAlreadyVerdicted = errors.New("nfqueue: packet already has a verdict atte
 const (
 	nfnlSubsysQueue = 3
 
-	nfqnlMsgPacket       = 0
-	nfqnlMsgVerdict      = 1
-	nfqnlMsgConfig       = 2
-	nfqnlMsgVerdictBatch = 3
+	nfqnlMsgPacket  = 0
+	nfqnlMsgVerdict = 1
+	nfqnlMsgConfig  = 2
 
 	nfqnlMsgPacketType  = (nfnlSubsysQueue << 8) | nfqnlMsgPacket
 	nfqnlMsgVerdictType = (nfnlSubsysQueue << 8) | nfqnlMsgVerdict
@@ -132,7 +130,6 @@ type QueueStats struct {
 	Accepted          uint64
 	Dropped           uint64
 	VerdictErrors     uint64
-	BatchVerdicts     uint64
 	RecvOverruns      uint64
 	VerdictAttempted  uint64
 	VerdictSuccessful uint64
@@ -160,7 +157,6 @@ type Queue struct {
 	accepted          atomic.Uint64
 	dropped           atomic.Uint64
 	verdictErrors     atomic.Uint64
-	batchVerdicts     atomic.Uint64
 	recvOverruns      atomic.Uint64
 	verdictAttempted  atomic.Uint64
 	verdictSuccessful atomic.Uint64
@@ -196,14 +192,6 @@ func (q *Queue) acquireSendBlocking() {
 	<-q.initSendGate()
 }
 
-// linuxMmsghdr mirrors Linux's struct mmsghdr ABI. x/sys/unix exposes
-// Msghdr but not the mmsghdr/sendmmsg wrapper.
-type linuxMmsghdr struct {
-	msg unix.Msghdr
-	len uint32
-	_   uint32
-}
-
 // Open binds NFQUEUE number queueID with full-payload copy mode. It binds
 // AF_INET and AF_INET6 protocol families (EBUSY on an already-bound family
 // is tolerated), binds the queue (EBUSY fails with an error naming the queue;
@@ -236,8 +224,8 @@ func openWithFamilies(queueID uint16, protocolFamilies []int) (*Queue, error) {
 		closeOnErr()
 		return nil, fmt.Errorf("nfqueue: bind netlink: %w", err)
 	}
-	// Connect once to the kernel endpoint so one-packet Send and sendmmsg use
-	// the same peer without rebuilding a sockaddr for every verdict.
+	// Connect once to the kernel endpoint so one-packet Send uses the
+	// same peer without rebuilding a sockaddr for every verdict.
 	if err := unix.Connect(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Pid: 0}); err != nil {
 		closeOnErr()
 		return nil, fmt.Errorf("nfqueue: connect netlink: %w", err)
@@ -295,7 +283,6 @@ func (q *Queue) Stats() QueueStats {
 		Accepted:          q.accepted.Load(),
 		Dropped:           q.dropped.Load(),
 		VerdictErrors:     q.verdictErrors.Load(),
-		BatchVerdicts:     q.batchVerdicts.Load(),
 		RecvOverruns:      q.recvOverruns.Load(),
 		VerdictAttempted:  q.verdictAttempted.Load(),
 		VerdictSuccessful: q.verdictSuccessful.Load(),
@@ -507,122 +494,6 @@ func (p *Packet) Verdict(v Verdict) error {
 		q.dropped.Add(1)
 	}
 	return nil
-}
-
-// VerdictBatch disposes a batch with one sendmmsg. An empty batch is nil.
-// Contract is transport all-or-error: a failed sendmmsg returns an error and
-// counts it; the kernel applies each datagram independently, so a partial
-// transport failure may dispose a prefix. The error reports how far the
-// transport got; the suffix is terminal-but-uncertain and must be reconciled
-// by the supervisor rather than retried. No partial silent accept: every
-// packet is either verdict-sent or error-reported.
-func (q *Queue) VerdictBatch(v Verdict, pkts []*Packet) error {
-	if len(pkts) == 0 {
-		return nil
-	}
-	if v != VerdictAccept && v != VerdictDrop {
-		q.verdictErrors.Add(uint64(len(pkts)))
-		return fmt.Errorf("nfqueue: unsupported verdict %d", v)
-	}
-	if err := q.acquireSend(); err != nil {
-		for _, pkt := range pkts {
-			if pkt != nil && pkt.q == q {
-				pkt.done.CompareAndSwap(false, true)
-			}
-		}
-		q.verdictUncertain.Add(uint64(len(pkts)))
-		return err
-	}
-	defer q.releaseSend()
-	q.mu.Lock()
-	if q.closed {
-		q.mu.Unlock()
-		q.verdictErrors.Add(uint64(len(pkts)))
-		return ErrClosed
-	}
-	// Prevalidate before reserving any packet. The lock prevents a concurrent
-	// per-packet verdict on this queue from winning between validation and
-	// reservation, and packets from another queue are never accepted.
-	seen := make(map[*Packet]struct{}, len(pkts))
-	for _, pkt := range pkts {
-		if pkt == nil || pkt.q != q || pkt.done.Load() {
-			q.mu.Unlock()
-			q.verdictErrors.Add(1)
-			return ErrAlreadyVerdicted
-		}
-		if _, ok := seen[pkt]; ok {
-			q.mu.Unlock()
-			q.verdictErrors.Add(1)
-			return ErrAlreadyVerdicted
-		}
-		seen[pkt] = struct{}{}
-	}
-	for _, pkt := range pkts {
-		if !pkt.done.CompareAndSwap(false, true) {
-			q.mu.Unlock()
-			q.verdictErrors.Add(1)
-			return ErrAlreadyVerdicted
-		}
-	}
-	q.mu.Unlock()
-	msgs := make([]linuxMmsghdr, len(pkts))
-	iovs := make([]unix.Iovec, len(pkts))
-	bufs := make([][]byte, len(pkts))
-	for i, pkt := range pkts {
-		bufs[i] = buildVerdict(q.ID(), pkt.id, uint32(v))
-		iovs[i] = unix.Iovec{Base: &bufs[i][0], Len: uint64(len(bufs[i]))}
-		msgs[i].msg.Iov = &iovs[i]
-		msgs[i].msg.Iovlen = 1
-	}
-	q.verdictAttempted.Add(uint64(len(pkts)))
-	n, err := sendmmsg(q.fd, msgs)
-	sent := n
-	if sent < 0 {
-		sent = 0
-	}
-	if sent > len(pkts) {
-		sent = len(pkts)
-	}
-	now := time.Now().UnixNano()
-	for i := 0; i < sent; i++ {
-		pkts[i].verdictAt.CompareAndSwap(0, now)
-	}
-	q.batchVerdicts.Add(uint64(sent))
-	q.verdictSuccessful.Add(uint64(sent))
-	q.verdictUncertain.Add(uint64(len(pkts) - sent))
-	switch v {
-	case VerdictAccept:
-		q.accepted.Add(uint64(sent))
-	case VerdictDrop:
-		q.dropped.Add(uint64(sent))
-	}
-	if err != nil {
-		q.verdictErrors.Add(uint64(len(pkts) - sent))
-		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
-			return fmt.Errorf("%w: batch verdict %s: sent %d/%d: %w", ErrVerdictTimeout, v, sent, len(pkts), err)
-		}
-		return fmt.Errorf("nfqueue: batch verdict %s: sent %d/%d: %w", v, sent, len(pkts), err)
-	}
-	if sent != len(pkts) {
-		q.verdictErrors.Add(uint64(len(pkts) - sent))
-		return fmt.Errorf("%w: batch verdict %s: sent %d/%d (short send)", ErrVerdictTimeout, v, sent, len(pkts))
-	}
-	return nil
-}
-
-// sendmmsg invokes Linux sendmmsg directly because x/sys/unix does not expose
-// its mmsghdr wrapper. The local mmsghdr layout is the Linux ABI:
-// struct msghdr followed by unsigned int msg_len and four bytes padding.
-func sendmmsg(fd int, msgs []linuxMmsghdr) (int, error) {
-	if len(msgs) == 0 {
-		return 0, nil
-	}
-	r1, _, errno := unix.Syscall6(unix.SYS_SENDMMSG, uintptr(fd),
-		uintptr(unsafe.Pointer(&msgs[0])), uintptr(len(msgs)), 0, 0, 0)
-	if errno != 0 {
-		return int(r1), errno
-	}
-	return int(r1), nil
 }
 
 // nlAttr is one NLA attribute (host-order header, payload, NLA-aligned).

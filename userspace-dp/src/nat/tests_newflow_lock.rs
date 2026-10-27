@@ -1,13 +1,16 @@
-// #4800: tests for the SNAT pool allocator's `live` map-mutex contention
-// accounting — the NAT-allocator leg of the new-flow-install ceiling
-// instrumentation.
+// #4800/#17036: tests for the SNAT pool allocator's counted lock
+// contention accounting — the NAT-allocator leg of the new-flow-install
+// ceiling instrumentation. Since #15956 the allocator has two counted
+// lock domains: the 16 flow-shard mutexes (`flow_shard_lock_*`) and the
+// retained `live` RwLock write guard (`live_write_lock_*`); the legacy
+// `live_lock_*` totals are their documented sum, kept for one release.
 //
 // The measurement these back exists to settle a specific question: at a
-// sustained new-flow rate, is the residual Phase-1 (#2852) map mutex a
-// material contributor, or do `publish_shared_session` and the N-way
+// sustained new-flow rate, is either allocator lock domain a material
+// contributor, or do `publish_shared_session` and the N-way
 // `replicate_session_upsert` fan-out saturate first? That question has an
-// answer only if the allocator reports BOTH how often it took the mutex and
-// how often it had to block, so every test here treats the two as a pair.
+// answer only if each domain reports BOTH how often it was taken and
+// how often it had to block, so every test here treats each pair as a pair.
 //
 // `PortAllocator` instances are per-test, so these assertions are exact:
 // unlike the process-global publish/replication counters, no concurrently
@@ -94,6 +97,85 @@ fn allocate_counts_live_lock_acquisitions() {
     assert_eq!(
         after_two.live_lock_contended_total, 0,
         "single-threaded allocation cannot contend"
+    );
+}
+
+/// #17036 acceptance: a non-persistent fast-path allocation with an
+/// empty expiry index bumps ONLY the split counters attributable to
+/// that allocation's counted locks (one flow-shard + one live-write),
+/// and the legacy totals remain their sum. RED on revert to the
+/// single summed pair: the split fields stay 0 (or the shard field
+/// absorbs the live-write count) and these equalities fail.
+#[test]
+fn fast_path_allocation_counts_split_lock_domains_17036() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = PortAllocator::new(1, 1024, 2048);
+    let base = alloc.snapshot();
+    assert_eq!(base.flow_shard_lock_acquisitions_total, 0);
+    assert_eq!(base.live_write_lock_acquisitions_total, 0);
+    allocate(&alloc, &addrs, 40000, 1_000);
+    let after = alloc.snapshot();
+    assert_eq!(
+        after.flow_shard_lock_acquisitions_total - base.flow_shard_lock_acquisitions_total,
+        1,
+        "one fast-path allocation must count exactly one flow-shard acquisition"
+    );
+    assert_eq!(
+        after.live_write_lock_acquisitions_total - base.live_write_lock_acquisitions_total,
+        1,
+        "one fast-path allocation with an empty expiry index must count exactly one live-write (try_write) acquisition and no GC live-write"
+    );
+    assert_eq!(
+        after.live_lock_acquisitions_total,
+        after.flow_shard_lock_acquisitions_total + after.live_write_lock_acquisitions_total,
+        "legacy acquisitions must remain the documented sum of the split domains"
+    );
+    assert_eq!(
+        after.live_lock_contended_total,
+        after.flow_shard_lock_contended_total + after.live_write_lock_contended_total,
+        "legacy contended must remain the documented sum of the split domains"
+    );
+    assert_eq!(after.flow_shard_lock_contended_total, 0);
+    assert_eq!(after.live_write_lock_contended_total, 0);
+}
+
+/// #17036 acceptance: a persistent mint goes through the serialized
+/// locked path, so it bumps the live-write counter (the lease mint is
+/// a live-write critical section) and its legacy sum tracks it. RED
+/// on revert to the single pair: the live-write field stays 0.
+#[test]
+fn persistent_mint_counts_live_write_lock_17036() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = PortAllocator::new(1, 1024, 2048);
+    let base = alloc.snapshot();
+    alloc
+        .allocate_translation(
+            pool_flow(40000),
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::TargetHostPort,
+            0,
+            60_000_000_000,
+            1_000,
+            crate::nat::NatHolder::Untracked,
+            0,
+        )
+        .expect("persistent allocation must succeed");
+    let after = alloc.snapshot();
+    assert!(
+        after.live_write_lock_acquisitions_total > base.live_write_lock_acquisitions_total,
+        "a persistent mint must bump the live-write counter: {} -> {}",
+        base.live_write_lock_acquisitions_total,
+        after.live_write_lock_acquisitions_total
+    );
+    assert_eq!(
+        after.live_lock_acquisitions_total,
+        after.flow_shard_lock_acquisitions_total + after.live_write_lock_acquisitions_total,
+        "legacy acquisitions must remain the documented sum after a persistent mint"
     );
 }
 
@@ -895,4 +977,204 @@ fn synced_persistent_reserve_admit_loser_mints_no_lease_15956() {
     assert_eq!(alloc.live_flow_count(), 10);
     assert_eq!(alloc.debug_admission_count(), 10);
     let _ = addrs;
+}
+
+/// #17041: seed one non-expired idle persistent lease. The persistent
+/// flow is allocated then released; completion re-arms its expiry to
+/// `release_ns + timeout`, so the lease sits in `lease_expirations`
+/// with a future earliest expiry at every later allocation time used
+/// below.
+fn seed_idle_persistent_lease_17041(alloc: &PortAllocator, addrs: &[Ipv4Addr]) {
+    let flow = pool_flow(41_000);
+    let translated = alloc
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::TargetHostPort,
+            0,
+            60_000_000_000,
+            1_000,
+            crate::nat::NatHolder::Untracked,
+            0,
+        )
+        .expect("persistent seed allocation must succeed");
+    assert!(
+        alloc.release_flow(flow, translated, 2_000, crate::nat::NatHolder::Untracked),
+        "persistent seed release must succeed"
+    );
+    let live = alloc.debug_live();
+    assert_eq!(
+        live.lease_expirations.len(),
+        1,
+        "fixture: exactly one idle lease must be indexed for expiry"
+    );
+    assert!(
+        live.lease_expirations
+            .first()
+            .is_some_and(|(expires_at_ns, _)| *expires_at_ns > 2_000),
+        "fixture: the seeded idle lease must not yet be expired"
+    );
+}
+
+/// #17041: with one non-expired idle lease, 100 non-persistent
+/// fast-path allocations must add 0 `debug_gc_lock_acquisitions`.
+/// RED on revert: the emptiness-only pre-check fell through to the
+/// blocking write lock on every allocation (100 acquisitions).
+#[test]
+fn idle_lease_gc_takes_no_write_lock_over_fast_path_allocs_17041() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = PortAllocator::new(1, 20_000, 21_000);
+    seed_idle_persistent_lease_17041(&alloc, &addrs);
+    let before = alloc.debug_gc_lock_acquisitions();
+    for i in 0..100u16 {
+        allocate(&alloc, &addrs, 30_000 + i, 3_000);
+    }
+    assert_eq!(
+        alloc.debug_gc_lock_acquisitions() - before,
+        0,
+        "non-expired idle lease must not force a GC write-lock acquisition per fast-path allocation (#17041)"
+    );
+    assert_eq!(alloc.live_flow_count(), 100);
+}
+
+/// #17041: parameterised held-READ cell over {empty index, one
+/// non-expired idle lease}. A non-persistent allocation must complete
+/// while another thread holds the `live` READ guard. On the second
+/// arm this is RED at the pre-fix head: GC's blocking `lock_live()`
+/// waited behind the held reader before the allocation's own
+/// try-write fallback could run. GREEN after: GC peeks the earliest
+/// expiry under the read guard, sees nothing expired, and never
+/// takes the write lock; the allocation then completes via its
+/// existing contended fallback once the guard drops — or, if it
+/// finishes earlier, that also satisfies completion. The assertion
+/// mirrors the #15956/#17024 fallback cell: completion (before or
+/// after drop) plus PAT-owner visibility.
+#[test]
+fn new_flow_allocation_completes_under_held_live_read_15956() {
+    for seed_idle in [false, true] {
+        let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+        let addrs = [pool_ip];
+        let alloc = Arc::new(PortAllocator::new(1, 20_000, 20_100));
+        if seed_idle {
+            seed_idle_persistent_lease_17041(&alloc, &addrs);
+        }
+        let guard = alloc.debug_hold_live_read();
+        let done = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
+        let contended_before = alloc.debug_live_lock_contended_total();
+        let worker = {
+            let alloc = Arc::clone(&alloc);
+            let done = Arc::clone(&done);
+            let started = Arc::clone(&started);
+            std::thread::spawn(move || {
+                let addrs2 = [pool_ip];
+                started.store(true, Ordering::SeqCst);
+                alloc
+                    .allocate_translation(
+                        pool_flow(42_000),
+                        PoolAddressFamily::V4(&addrs2),
+                        0,
+                        false,
+                        false,
+                        PersistentNatPermit::TargetHostPort,
+                        0,
+                        0,
+                        3_000,
+                        crate::nat::NatHolder::Untracked,
+                        0,
+                    )
+                    .expect("new-flow allocation must succeed");
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !started.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            started.load(Ordering::SeqCst),
+            "worker must start allocation"
+        );
+        // Give the worker a bounded window to either complete or hit
+        // the contended try-write. With the fix, GC adds no blocking
+        // write acquisition, so the only wait is the allocation's own
+        // documented fallback. Without the fix (idle-lease arm), GC
+        // itself blocks behind the held reader, which neither
+        // completes nor records contention promptly — the loop below
+        // still exits on deadline and the post-drop assertions catch
+        // a worker that never ran at all via live_flow_count.
+        while !done.load(Ordering::SeqCst)
+            && alloc.debug_live_lock_contended_total() == contended_before
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let observed_contention = alloc.debug_live_lock_contended_total() > contended_before;
+        let completed_under_read = done.load(Ordering::SeqCst);
+        let gc_before_drop = alloc.debug_gc_lock_acquisitions();
+        assert_eq!(
+            gc_before_drop, 0,
+            "seed_idle={seed_idle}: GC must not acquire the live write lock while nothing has expired (#17041)"
+        );
+        drop(guard);
+        worker.join().expect("worker must not panic");
+        // Post-join is where the pre-fix code diverges: the GC
+        // blocked in lock_live() behind the reader acquires once
+        // the guard drops (delta 1); the fix never acquires (0).
+        assert_eq!(
+            alloc.debug_gc_lock_acquisitions(),
+            0,
+            "seed_idle={seed_idle}: GC must not acquire the live write lock at all while nothing has expired (#17041)"
+        );
+        assert!(
+            observed_contention || completed_under_read,
+            "seed_idle={seed_idle}: worker must attempt the contended live write or finish before the deadline"
+        );
+        assert_eq!(
+            alloc.live_flow_count(),
+            1,
+            "seed_idle={seed_idle}: exactly the worker flow must be live"
+        );
+        let pat = alloc
+            .debug_live_flow_translated(&pool_flow(42_000))
+            .expect("PAT flow must remain live");
+        assert!(
+            alloc.debug_pat_owns_wire_identity(&pool_flow(42_000), pat),
+            "seed_idle={seed_idle}: PAT owner must be present after allocation"
+        );
+    }
+}
+
+/// #17041: an actually-expired idle lease is still reclaimed by the
+/// chunked GC (peek does not weaken correctness), and a contended
+/// write guard makes GC skip rather than block: behind a held READ
+/// guard the sweep returns 0 promptly and reclaims once uncontended.
+#[test]
+fn expired_lease_still_reclaimed_and_contended_gc_skips_17041() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = Arc::new(PortAllocator::new(1, 20_000, 20_100));
+    seed_idle_persistent_lease_17041(&alloc, &addrs);
+    // Expiry was re-armed to 2_000 + 60s on release; sweep past it.
+    let past_expiry = 2_000 + 60_000_000_000 + 1;
+    {
+        let _guard = alloc.debug_hold_live_read();
+        assert_eq!(
+            alloc.debug_gc_expired_chunked(past_expiry, 8),
+            0,
+            "contended GC must skip, not block, behind a held live READ guard (#17041)"
+        );
+    }
+    assert_eq!(
+        alloc.debug_gc_expired_chunked(past_expiry, 8),
+        1,
+        "expired idle lease must still be reclaimed once uncontended (#17041)"
+    );
+    let live = alloc.debug_live();
+    assert!(live.persistent_by_source.is_empty());
+    assert!(live.lease_expirations.is_empty());
 }

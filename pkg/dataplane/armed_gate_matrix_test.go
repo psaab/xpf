@@ -49,7 +49,6 @@ var managerMethodClasses = map[string]string{
 	"ClearIfaceZoneMap": "class1", "ClearVlanIfaceMap": "class1",
 	"SwapToUserspaceXDPShimEntryProgram": "class1",
 	"ReadGlobalCounter":                  "class1", "ReadInterfaceCounters": "class1", "ClearInterfaceCounters": "class1",
-	"UpdateFabricFwd": "class1", "UpdateFabricFwd1": "class1",
 	"UpdateRGActive": "class1", "UpdateHAWatchdog": "class1", "BumpFIBGeneration": "class1",
 	"SetIfaceFilter": "class1", "ClearIfaceFilterMap": "class1",
 	"SetFilterConfig": "class1", "ReadFilterConfig": "class1", "SetFilterRule": "class1",
@@ -245,8 +244,8 @@ func TestManager_PreArmMethodMatrix(t *testing.T) {
 			}
 		}
 	}
-	if len(inventory) != 146 {
-		t.Fatalf("exported *Manager method inventory = %d, want 146 (the 140-method baseline plus the #9725 kernel-truth XDP-link count and wake-only observer registration, the #10302 provenance-bearing ifindex census, the #10519 post-acceptance detach-debt reconciler plus test debt seeder, and the cancellable session census; reconcile the count or the plan)", len(inventory))
+	if len(inventory) != 147 {
+		t.Fatalf("exported *Manager method inventory = %d, want 147 (149-method AST inventory minus the two #17044 fabric_fwd writers; reconcile the count or the plan)", len(inventory))
 	}
 	for name := range inventory {
 		if _, ok := managerMethodClasses[name]; !ok {
@@ -1201,8 +1200,6 @@ var registryCallsiteManifest = []registryCallsiteManifestEntry{
 	{"maps_counters.go", "ReadInterfaceCounters", "map", `"interface_counters"`, "required"},
 	{"maps_counters.go", "clearInterfaceCountersRaw", "map", `"interface_counters"`, "raw"}, // class-3 nested-call composition leg (legacy text preserved)
 	{"maps_fabric.go", "BumpFIBGeneration", "map", `"fib_gen_map"`, "required"},
-	{"maps_fabric.go", "UpdateFabricFwd", "map", `"fabric_fwd"`, "required"},
-	{"maps_fabric.go", "UpdateFabricFwd1", "map", `"fabric_fwd"`, "required"},
 	{"maps_fabric.go", "UpdateHAWatchdog", "map", `"ha_watchdog"`, "required"},
 	{"maps_fabric.go", "UpdateRGActive", "map", `"rg_active"`, "required"},
 	{"maps_filter.go", "ClearFilterConfigs", "map", `"filter_configs"`, "required"},

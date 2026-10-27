@@ -68,6 +68,13 @@ func decodeVarbindsFull(t *testing.T, vbListTLV []byte) []decodedVB {
 		if len(valTLV) < 1 {
 			t.Fatalf("varbind: missing value TLV")
 		}
+		// Exactly two elements (#17055): the value TLV must consume the
+		// remainder of the varbind body — a stray third element (the
+		// stray-element mutant class) is malformed VarBind ::= SEQUENCE
+		// { name, value } and must fail here, not be silently ignored.
+		if n := berEncodedLen(valTLV); n != len(valTLV) {
+			t.Fatalf("varbind: value TLV consumes %d of %d remaining bytes (stray element in varbind SEQUENCE)", n, len(valTLV))
+		}
 		out = append(out, decodedVB{oid: oid, valTag: valTLV[0]})
 		remaining = remaining[vbTotal:]
 	}

@@ -83,7 +83,7 @@ func TestMeasureMemory9506(t *testing.T) {
 			if end > len(held) {
 				end = len(held)
 			}
-			if err := q.VerdictBatch(VerdictAccept, held[i:end]); err != nil {
+			if err := q.verdictBatchForMeasure(VerdictAccept, held[i:end]); err != nil {
 				t.Fatalf("M2 cycle=%d drain=%d..%d: %v", cycle+1, i, end, err)
 			}
 			i = end
@@ -207,7 +207,7 @@ func measureM2OverCap(t *testing.T, q *Queue, sender net.Conn) {
 		if end > len(held) {
 			end = len(held)
 		}
-		if err := q.VerdictBatch(VerdictDrop, held[i:end]); err != nil {
+		if err := q.verdictBatchForMeasure(VerdictDrop, held[i:end]); err != nil {
 			t.Fatalf("M2 NFQUEUE over-cap drain %d..%d: %v", i, end, err)
 		}
 	}

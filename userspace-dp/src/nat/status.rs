@@ -43,8 +43,13 @@ pub(crate) fn source_nat_pool_statuses(rules: &[SourceNatRule]) -> Vec<SourceNat
                 allocator_id: snap.allocator_id,
                 persistent_admitted_total: snap.persistent_admitted_total,
                 persistent_declined_total: snap.persistent_declined_total,
-                // #4800: residual map-mutex contention for the new-flow
-                // ceiling harness.
+                // #4800/#17036: counted lock contention split by domain
+                // (flow-shard vs live-write) for the new-flow ceiling
+                // harness; legacy live_lock_* are the documented sums.
+                flow_shard_lock_acquisitions_total: snap.flow_shard_lock_acquisitions_total,
+                flow_shard_lock_contended_total: snap.flow_shard_lock_contended_total,
+                live_write_lock_acquisitions_total: snap.live_write_lock_acquisitions_total,
+                live_write_lock_contended_total: snap.live_write_lock_contended_total,
                 live_lock_acquisitions_total: snap.live_lock_acquisitions_total,
                 live_lock_contended_total: snap.live_lock_contended_total,
                 // #9392: the recycled-phase walk cost, so an operator can see

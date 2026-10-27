@@ -3,6 +3,8 @@ package frr
 import (
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #15184: lenient load must omit non-IP neighbors instead of rendering them
@@ -37,6 +39,26 @@ func TestBGPNeighborAddressRenderOmitsBad15184(t *testing.T) {
 	for _, g := range []string{"192.0.2.1", "2001:db8::1"} {
 		if !validBGPNeighborAddress(g) {
 			t.Errorf("validBGPNeighborAddress(%q)=false, want true", g)
+		}
+	}
+}
+
+// TestBGPNeighborAddressMatchesCommitGate17035 is the #17035 (R4-Q42-06)
+// parity cell: the render belt must be the exported SSOT
+// config.ValidBGPNeighborAddress, not a retyped netip.ParseAddr copy.
+// The witnesses include the cases where the SSOT could diverge from a
+// plain ParseAddr+zone copy (empty, surrounding whitespace/tab/newline,
+// prefix and zone forms); any future gate change mirrored nowhere else
+// surfaces here instead of silently reopening the tolerant-path seam.
+func TestBGPNeighborAddressMatchesCommitGate17035(t *testing.T) {
+	for _, s := range []string{
+		"", " ", "192.0.2.1", "2001:db8::1", " 192.0.2.1", "192.0.2.1 ",
+		"\t192.0.2.1", "192.0.2.1\n", "10.0.0.256", "192.0.2.0/24",
+		"2001:db8::1/64", "fe80::1%ge-0-0-1", "fe80::1%eth0", "peer-a",
+		"peer.example.com", "::", "::1", "0.0.0.0", "256.256.256.256",
+	} {
+		if got, want := validBGPNeighborAddress(s), config.ValidBGPNeighborAddress(s); got != want {
+			t.Errorf("validBGPNeighborAddress(%q) = %v, want %v (config.ValidBGPNeighborAddress); belt and gate disagree", s, got, want)
 		}
 	}
 }

@@ -761,14 +761,14 @@ func (d *Daemon) startClusterSyncAuxLoops(commsCtx context.Context, cc *config.C
 	go d.runPersistentNatLeaseSyncLoop(commsCtx)
 }
 
-// startFabricForwardingLoops starts the fabric_fwd population loops (fab0 and,
+// startFabricForwardingLoops starts the fabric peer population loops (fab0 and,
 // when configured, fab1) plus the netlink fabric-state monitor. Extracted
 // verbatim from startClusterComms (#6428) — pure code motion.
 //
 // Order contract: called only after publishFabricRefreshChansIfCurrent
 // succeeded, and each loop is handed its OWN channel by value (#4038/#4958).
 func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config.ClusterConfig, fabRefreshCh, fabRefreshCh1 chan struct{}) {
-	// Populate fabric_fwd BPF map for cross-chassis redirect,
+	// Resolve the fabric peer for cross-chassis redirect,
 	// then periodically refresh to correct neighbor drift.
 	// Resolve to physical parent (ge-0-0-0) — BPF runs on
 	// the parent, not the IPVLAN overlay. Neighbor resolution
@@ -780,7 +780,7 @@ func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config
 	}
 	go d.populateFabricFwd(commsCtx, fabParent, fabOverlay, cc.FabricPeerAddress, fabRefreshCh)
 
-	// Populate secondary fabric_fwd entry (key=1) if fab1 configured.
+	// Resolve the secondary fabric peer if fab1 configured.
 	if cc.Fabric1Interface != "" && cc.Fabric1PeerAddress != "" {
 		fab1Parent := d.resolveFabricParent(cc.Fabric1Interface)
 		fab1Overlay := config.LinuxIfName(cc.Fabric1Interface)

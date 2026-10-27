@@ -906,7 +906,7 @@ pub(crate) fn build_interface_static_view(
 /// #16015: does an installed NPTv6 external prefix own `ip` (at any
 /// port — NPTv6 preserves the source port statelessly, so prefix
 /// membership IS ownership)? Zone-aware when `zone` is Some (the
-/// packet's egress zone, the axis translate_outbound gates on);
+/// packet's egress zone, the axis translate_outbound_result gates on);
 /// zone-blind when None (NAT64 / synced callers). `None` prefixes =
 /// fast path, every strict-accepted config with no NPTv6/pool overlap.
 pub(crate) fn nptv6_owns_wire_identity(

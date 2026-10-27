@@ -5177,8 +5177,9 @@ fn fabric_stamped_icmpv6_error_gates_nptv6_on_stamped_zone_13647() {
         external_prefix: "2602:fd41:0070::/48".to_string(),
     }]);
     let mut external_client = internal_client;
-    assert!(
-        nptv6.translate_outbound(&mut external_client, "zone-b"),
+    assert_eq!(
+        nptv6.translate_outbound_result(&mut external_client, "zone-b"),
+        crate::nptv6::Nptv6Translation::Translated,
         "test setup: internal_client must translate outbound under zone-b"
     );
 

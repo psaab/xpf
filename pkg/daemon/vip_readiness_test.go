@@ -395,6 +395,14 @@ func TestTakeoverReadinessForRG_NoRethIgnoresClusterSyncReady(t *testing.T) {
 		"set chassis cluster authentication-key test-cluster-psk-6611",
 		"set chassis cluster node 0",
 		"set chassis cluster no-reth-vrrp",
+		// #18053: complete control link for the #16746 gate. Private-
+		// rg-election stays the compiler default, so this fixture keeps
+		// BOTH flags as the sibling comment below describes; inert for
+		// the sync-ready assertion (hold never armed, RG state driven
+		// via the manager).
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		// #6782: the RETH sits in redundancy-group 1, not 0. RG0 is reserved for
 		// control-plane ownership (see cluster.Manager.DataGroupIDs), so a RETH in
@@ -460,6 +468,15 @@ func TestTakeoverReadinessForRG_PrivateRGElectionIgnoresClusterSyncReady_7102(t 
 		"set chassis cluster authentication-key test-cluster-psk-7102",
 		"set chassis cluster node 0",
 		"set chassis cluster private-rg-election",
+		// #18053: this cell's subject IS private-rg-election, so it
+		// must NOT take the no-private-rg-election opt-out (that would
+		// vacate the fixture assertions below). It instead carries the
+		// complete control link the #16746 gate requires. Inert for
+		// the sync-ready assertion: no heartbeat is started here, RG
+		// state is driven via the manager.
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		// #6782: the RETH sits in redundancy-group 1, not 0. RG0 is reserved for
 		// control-plane ownership (see cluster.Manager.DataGroupIDs), so a RETH in
