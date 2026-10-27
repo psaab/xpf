@@ -1,6 +1,8 @@
 package ipsec
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -17,11 +19,12 @@ import (
 // HA IPsec re-initiation attributes each SA name the xpf config generation charon RUNS.
 // The daemon's own record of that (#9511) is empty after an xpfd restart until the first
 // successful load, and is cleared while an apply is in flight. On a failed reload,
-// manager.go restores the prior file (#10712), so a later service start/reload cannot
-// make the rejected candidate live. The marker still lets attribution identify what
-// charon actually runs when its in-process record is empty. So every swanctl config xpf
-// WRITES names its generation inside charon, as an unreferenced address pool
-// `xpf-gen-<generation>`, and LoadedGeneration reads it back.
+// manager.go verifies the prior generation before restoring its file (#10712/#17882).
+// The marker lets attribution identify what charon actually runs when its in-process
+// record is empty. The daemon passes its config-store digest when available; otherwise
+// the rendered IPsec config's digest supplies a distinct identity for reload probing.
+// Each swanctl config xpf WRITES names that identity inside charon as an unreferenced
+// address pool `xpf-gen-<generation>`, and LoadedGeneration reads it back.
 //
 // INERT. No connection references the pool (no `pools =` is ever rendered), so no IKE SA
 // can lease from it, and a pool is not a connection: charon cannot initiate or respond
@@ -37,9 +40,8 @@ const (
 	generationMarkerPrefix = "xpf-gen-"
 	generationMarkerAddrs  = "192.0.2.1/32"
 
-	// UnknownGeneration is the generation a written config names when its writer could
-	// not name one: a plain Apply, or a config that is not the store's active config. It
-	// never matches a retained generation, so attribution always falls back for it.
+	// UnknownGeneration is the token used when a loaded marker predates
+	// content-addressed markers or cannot name a digest.
 	UnknownGeneration = "unknown"
 )
 
@@ -55,6 +57,17 @@ func generationToken(gen string) string {
 		return gen
 	}
 	return UnknownGeneration
+}
+
+// generationMarkerToken uses the config-store digest when available. Plain
+// Apply and other callers without that digest still need a distinct marker
+// so a restart probe can tell the prior rendered config from the candidate.
+func generationMarkerToken(generation, rendered string) string {
+	if token := generationToken(generation); token != UnknownGeneration {
+		return token
+	}
+	sum := sha256.Sum256([]byte(rendered))
+	return hex.EncodeToString(sum[:])
 }
 
 // renderGenerationMarker renders the marker pool section naming gen.

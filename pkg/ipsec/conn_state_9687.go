@@ -13,7 +13,8 @@ import (
 )
 
 // DefaultConnStatePath is where the daemon's Manager persists the swanctl
-// connection set and rendered-content hashes it last loaded, plus teardown debt (#9687).
+// connection set, rendered-content hashes, teardown debt, and deferred eager
+// re-initiation across xpfd restarts (#9687, #10878, #17882).
 const DefaultConnStatePath = "/var/lib/xpf/ipsec-conn-state.json"
 
 // maxConnStateBytes bounds the state read, so a corrupt file cannot exhaust
@@ -21,17 +22,20 @@ const DefaultConnStatePath = "/var/lib/xpf/ipsec-conn-state.json"
 const maxConnStateBytes = 1 << 20
 
 // connState is the on-disk form of loaded connection names/content hashes and
-// outstanding teardown debt (#9687, #10878).
+// outstanding teardown, staged-candidate, or deferred re-initiation debt
+// (#9687, #10878, #17882).
 //
 // strongSwan is a separate service, so its SAs survive xpfd restarts. Persisted
 // fingerprints let a later Apply detect same-name security changes, while
-// Pending and PendingChanged preserve failed removal and reauthentication
-// teardowns across a restart.
+// Pending, PendingChanged, PendingReinitiate, and PendingCandidate preserve
+// teardown, deferred-start, and staged-candidate work across a restart.
 type connState struct {
-	Loaded         []string          `json:"loaded"`
-	Pending        []string          `json:"pending_terminate"`
-	Fingerprints   map[string]string `json:"fingerprints,omitempty"`
-	PendingChanged []string          `json:"pending_changed,omitempty"`
+	Loaded            []string          `json:"loaded"`
+	Pending           []string          `json:"pending_terminate"`
+	Fingerprints      map[string]string `json:"fingerprints,omitempty"`
+	PendingChanged    []string          `json:"pending_changed,omitempty"`
+	PendingReinitiate []string          `json:"pending_reinitiate,omitempty"`
+	PendingCandidate  map[string]string `json:"pending_candidate,omitempty"`
 }
 
 // seedFromStateLocked folds the persisted state into this Manager, once, at
@@ -50,7 +54,7 @@ func (m *Manager) seedFromStateLocked() {
 	st, err := loadConnState(m.statePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			slog.Warn("ignoring unreadable IPsec connection state; connections removed before this start will not be torn down",
+			slog.Warn("ignoring unreadable IPsec connection state; teardown or deferred-start debt may be lost",
 				"path", m.statePath, "err", err)
 		}
 		return
@@ -79,6 +83,18 @@ func (m *Manager) seedFromStateLocked() {
 		}
 		m.pendingChanged[name] = true
 	}
+	for _, name := range st.PendingReinitiate {
+		if m.pendingReinitiate == nil {
+			m.pendingReinitiate = make(map[string]bool, len(st.PendingReinitiate))
+		}
+		m.pendingReinitiate[name] = true
+	}
+	if len(st.PendingCandidate) > 0 {
+		m.pendingCandidateHashes = make(map[string]string, len(st.PendingCandidate))
+		for name, fingerprint := range st.PendingCandidate {
+			m.pendingCandidateHashes[name] = fingerprint
+		}
+	}
 }
 
 // persistStateLocked writes loaded names/fingerprints and the debt, including
@@ -94,11 +110,19 @@ func (m *Manager) persistStateLocked() {
 	}
 	pending := make(map[string]bool, len(m.pendingTerminate)+len(m.inflight))
 	pendingChanged := make(map[string]bool, len(m.pendingChanged)+len(m.inflight))
+	pendingReinitiate := make(map[string]bool, len(m.pendingReinitiate))
 	for name := range m.pendingTerminate {
 		pending[name] = true
 	}
 	for name := range m.pendingChanged {
 		pendingChanged[name] = true
+	}
+	for name := range m.pendingReinitiate {
+		pendingReinitiate[name] = true
+	}
+	pendingCandidate := make(map[string]string, len(m.pendingCandidateHashes))
+	for name, fingerprint := range m.pendingCandidateHashes {
+		pendingCandidate[name] = fingerprint
 	}
 	for name := range m.inflight {
 		if m.prevConnNames[name] {
@@ -108,10 +132,12 @@ func (m *Manager) persistStateLocked() {
 		}
 	}
 	data, err := json.Marshal(connState{
-		Loaded:         sortedConnNames(m.prevConnNames),
-		Pending:        sortedConnNames(pending),
-		Fingerprints:   m.prevConnHashes,
-		PendingChanged: sortedConnNames(pendingChanged),
+		Loaded:            sortedConnNames(m.prevConnNames),
+		Pending:           sortedConnNames(pending),
+		Fingerprints:      m.prevConnHashes,
+		PendingChanged:    sortedConnNames(pendingChanged),
+		PendingReinitiate: sortedConnNames(pendingReinitiate),
+		PendingCandidate:  pendingCandidate,
 	})
 	if err == nil {
 		if err = os.MkdirAll(filepath.Dir(m.statePath), 0o755); err == nil {
@@ -119,7 +145,7 @@ func (m *Manager) persistStateLocked() {
 		}
 	}
 	if err != nil {
-		slog.Warn("could not persist IPsec connection state; a restart before the next apply would not tear down stale connections",
+		slog.Warn("could not persist IPsec connection state; a restart before the next apply could lose stale-SA teardown or deferred-start debt",
 			"path", m.statePath, "err", err)
 	}
 }
