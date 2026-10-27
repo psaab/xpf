@@ -207,17 +207,23 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 			}
 		}
 	}
-	// #16756: the second capability byte rides AFTER the identity tail.
-	// It cannot sit at [5]: a pre-#9818 peer sends a 5-byte frame whose
-	// [5] does not exist, while a #9818 peer's [5:21] is its boot id —
-	// a fixed offset would misread a boot byte as capabilities. The
-	// sender appends exactly one byte after however much identity it
-	// sent, so the byte is at len-1 iff the frame is longer than every
-	// pre-#16756 layout (5, 21, 29, 37). A shorter frame is a peer that
-	// predates the byte: flags2 = 0, incapable, which is true of it.
+	// #16756/#18116: the second capability byte rides AFTER the identity
+	// tail at the FIXED offset 5+bootIncarnationLen+8+8 (38). It cannot
+	// sit at [5]: a pre-#9818 peer sends a 5-byte frame whose [5] does
+	// not exist, while a #9818 peer's [5:21] is its boot id — a fixed
+	// offset there would misread a boot byte as capabilities. The
+	// sender always emits the full identity (boot id read from the
+	// kernel, epoch/token from the wired Manager callbacks, zero when
+	// unwired), so flags2 is always at that offset in a current frame.
+	// A shorter frame is a peer that predates the byte: flags2 = 0,
+	// incapable, which is true of it. Reading it from len-1 (the
+	// pre-#18116 form) corrupted it whenever a newer peer appended a
+	// further trailing field — exactly the mixed-version extension
+	// PeerCapabilities is growable for — so the read is positional and
+	// any bytes past the offset are skipped as trailing extension.
 	var peerFlags2 uint8
 	if len(payload) > 5+bootIncarnationLen+8+8 {
-		peerFlags2 = payload[len(payload)-1]
+		peerFlags2 = payload[5+bootIncarnationLen+8+8]
 	}
 	oldFlags2 := s.peerIncarnationState().peerCapabilityFlags2.Load()
 	capabilityChanged := oldProto != uint32(peerProto) ||

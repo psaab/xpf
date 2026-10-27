@@ -3581,7 +3581,12 @@ takeover gate, and the marker clears when a peer heartbeat returns.
   operator's transfer-out must survive. A takeover that proceeds
   (confirmed, or fail-open with no heartbeat) keeps the clears.
   `TestFenceAbortRestoresOperatorIntent15211` (both preempt values) pins
-  the restore; the confirmed/fail-open controls pin the clears.
+  the restore; the confirmed/fail-open controls pin the clears. The
+  snapshot/restore is the shared `operatorHoldSnapshot` pair in
+  `failover.go` (#17117): an operator `ResetFailover` landing in the
+  unlocked fence wait bumps `failoverGen` and the restore abandons, so
+  the reset is honoured instead of silently undone.
+  `TestFenceAbortResetDuringFenceWaitIsHonoured17117` pins that cell.
 - **A never-seen takeover is marked DEGRADED (#15211 A22-02).**
   `handlePeerNeverSeen` cannot fence a peer that was never seen under any
   policy, so it marks the single-node takeover
@@ -4056,7 +4061,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   and a new explicit transfer retain their normal precedence.
 - **`ResetFailover` ends ALL of the RG's transfer-commit state (#14979,
   D34-04).** The reset cleared only `ManualFailover` / the role pin / the
-  remote lease, leaving `peerTransferOutOverride` (+ snapshot),
+  remote lease, leaving `transferOverrides`,
   `peerTransferCommitGraceUntil`, and `localTransferOutHoldUntil` armed.
   The override has no expiry and re-forces the peer to `SecondaryHold` on
   every heartbeat, so a peer that reclaimed primary after the reset was
@@ -4251,7 +4256,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   `runElection`, then return an error if the local RG did not reach primary.
   The batch caller already aborted on that error; the single-RG caller
   returned it bare and leaked the override. There is no expiry for
-  `peerTransferOutOverride` — `applyTransferCommitOverridesOnPeerStateLocked`
+  `transferOverrides` — `applyTransferCommitOverridesOnPeerStateLocked`
   re-forces the peer to `SecondaryHold` on EVERY subsequent heartbeat with no
   time bound (unlike `peerTransferCommitGraceUntil`, which does expire) — so a
   leaked entry makes `electRG` take its "Peer transfer out" arm forever and
@@ -4276,7 +4281,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   `peerMonitors` and both peer version fields — left this one armed.
 
   That is the other half of the same transfer: `ManualFailover` parks the LOCAL
-  node, `peerTransferOutOverride` forces our view of the PEER. Because it has no
+  node, `transferOverrides` forces our view of the PEER. Because it has no
   expiry and is re-applied to the rebuilt peer-group map on every heartbeat, an
   override that survives peer loss means the peer reconnects — a reboot, a
   rolling deploy, or simply a new process — and from its FIRST heartbeat this

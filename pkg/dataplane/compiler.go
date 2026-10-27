@@ -2678,12 +2678,11 @@ func getOriginalKernelName(ifName string, result *CompileResult) string {
 	if name := netname.FromAltNames(link.Attrs().AltNames); name != "" {
 		return name
 	}
-	// Derive from PCI device path via sysfs.
+	// Derive from PCI device path via sysfs (#17119: the shared
+	// netname extractor, so a virtio netdev resolves to its parent PCI
+	// function and a non-PCI tail yields "" instead of a basename
+	// FromPCIAddr would reject anyway).
 	// /sys/class/net/<name>/device -> .../0000:09:00.0
-	devPath, err := os.Readlink(fmt.Sprintf("/sys/class/net/%s/device", ifName))
-	if err != nil {
-		return ""
-	}
-	pciAddr := devPath[strings.LastIndex(devPath, "/")+1:]
+	pciAddr := netname.PCIAddrForNetdev(ifName)
 	return netname.FromPCIAddr(pciAddr, netname.Multifunction(pciAddr))
 }

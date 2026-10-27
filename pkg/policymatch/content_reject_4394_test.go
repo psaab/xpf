@@ -75,7 +75,7 @@ func TestContentRejectProtocolLessApp4394(t *testing.T) {
 		},
 	})
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	assertContentRejected(t, res, "trust->untrust/permit-noproto")
 }
 
@@ -96,7 +96,7 @@ func TestContentRejectUnrepresentablePort4394(t *testing.T) {
 		},
 	})
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	assertContentRejected(t, res, "trust->untrust/permit-badport")
 }
 
@@ -115,7 +115,7 @@ func TestContentRejectUnrepresentableProtocol4394(t *testing.T) {
 		},
 	})
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	assertContentRejected(t, res, "trust->untrust/permit-badproto")
 }
 
@@ -133,7 +133,7 @@ func TestContentRejectUndefinedApp4394(t *testing.T) {
 		},
 	}, config.ApplicationsConfig{})
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	assertContentRejected(t, res, "trust->untrust/permit-undef-app")
 }
 
@@ -153,7 +153,7 @@ func TestContentRejectUnresolvableAddress4394(t *testing.T) {
 
 	res := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust", Protocol: "tcp",
-		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), DstPort: 80,
+		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), DstPort: PortPtr(80),
 	})
 	assertContentRejected(t, res, "trust->untrust/permit-missing-book")
 }
@@ -182,7 +182,7 @@ func TestContentRejectNonLiteralAddressBook4394(t *testing.T) {
 
 	res := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust", Protocol: "tcp",
-		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), DstPort: 80,
+		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), DstPort: PortPtr(80),
 	})
 	assertContentRejected(t, res, "trust->untrust/permit-dns-book")
 }
@@ -204,7 +204,7 @@ func TestContentRejectPoisonsWholeConfig4394(t *testing.T) {
 
 	// This query matches the clean trust->untrust permit pre-fix, but the config
 	// is poisoned by the dmz->wan undefined-app rule.
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	assertContentRejected(t, res, "dmz->wan/permit-undef-app")
 }
 
@@ -238,7 +238,7 @@ func TestContentRejectNoOverReport4394(t *testing.T) {
 	// Matches junos-http (tcp/80) from the trust-net source.
 	res := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust", Protocol: "tcp",
-		SrcIP: net.ParseIP("10.0.1.5"), DstPort: 80,
+		SrcIP: net.ParseIP("10.0.1.5"), DstPort: PortPtr(80),
 	})
 	if res.ContentRejected {
 		t.Fatalf("ContentRejected = true for a fully-representable config (over-report); reasons=%v", res.ContentRejectionReasons)
@@ -250,7 +250,7 @@ func TestContentRejectNoOverReport4394(t *testing.T) {
 	// The representable custom app also matches on tcp/8080 (no over-narrowing).
 	res = Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust", Protocol: "tcp",
-		SrcIP: net.ParseIP("10.0.1.5"), DstPort: 8080,
+		SrcIP: net.ParseIP("10.0.1.5"), DstPort: PortPtr(8080),
 	})
 	if res.ContentRejected {
 		t.Fatalf("ContentRejected = true for a representable custom-port app (over-report); reasons=%v", res.ContentRejectionReasons)

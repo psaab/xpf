@@ -102,16 +102,82 @@ func citations(t *testing.T, root string) map[string][]string {
 	return out2
 }
 
+// historicalPathsFile is the single source for the historical-archive path
+// set: pkg/docsref and scripts/ci_affected_go_tests.sh (never_read) both
+// load it instead of hand-keeping diverging copies (#17115).
+const historicalPathsFile = "scripts/historical-paths.txt"
+
+// parseHistoricalPatterns17115 parses the shared data-file body.
+func parseHistoricalPatterns17115(body string) []string {
+	var pats []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		pats = append(pats, line)
+	}
+	return pats
+}
+
+// loadHistoricalPatterns17115 reads the shared pattern file.
+func loadHistoricalPatterns17115(t *testing.T, root string) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, historicalPathsFile))
+	if err != nil {
+		t.Fatalf("read %s: %v", historicalPathsFile, err)
+	}
+	pats := parseHistoricalPatterns17115(string(b))
+	if len(pats) == 0 {
+		t.Fatalf("%s parsed to ZERO patterns — the loader or the file has rotted", historicalPathsFile)
+	}
+	return pats
+}
+
+// matchHistoricalPattern reports whether pattern matches slash path f, where
+// "*" matches any (possibly empty) run of characters.
+func matchHistoricalPattern(pattern, f string) bool {
+	pre, suf, found := strings.Cut(pattern, "*")
+	if !found {
+		return pattern == f
+	}
+	return len(f) >= len(pre)+len(suf) && strings.HasPrefix(f, pre) && strings.HasSuffix(f, suf)
+}
+
 // isHistoricalArchive reports whether a file is a generated history or an
-// append-only log, whose contents quote what was written at some past time
-// rather than pointing at rationale a reader should follow now.
+// append-only log (docs/log/ included: CLAUDE.md makes it the successor of
+// _Log.md), whose contents quote what was written at some past time rather
+// than pointing at rationale a reader should follow now. The set itself
+// lives in scripts/historical-paths.txt, shared with the CI selector.
 func isHistoricalArchive(file string) bool {
 	f := filepath.ToSlash(file)
-	if f == "_Log.md" {
-		return true
+	for _, pat := range historicalPatterns17115 {
+		if matchHistoricalPattern(pat, f) {
+			return true
+		}
 	}
-	return strings.HasPrefix(f, "docs/issues/") &&
-		(strings.HasSuffix(f, "-history.md") || strings.HasSuffix(f, "-history-archive.md"))
+	return false
+}
+
+// historicalPatterns17115 is the shared set loaded once at test init.
+// Panic (not an empty set) on failure so a missing file can never silently
+// make the sweep scan archives.
+var historicalPatterns17115 = loadHistoricalPatternsFS17115()
+
+func loadHistoricalPatternsFS17115() []string {
+	root, err := filepath.Abs(filepath.Join(".", "..", ".."))
+	if err != nil {
+		panic(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, historicalPathsFile))
+	if err != nil {
+		panic(fmt.Sprintf("read %s: %v", historicalPathsFile, err))
+	}
+	pats := parseHistoricalPatterns17115(string(b))
+	if len(pats) == 0 {
+		panic(historicalPathsFile + " parsed to ZERO patterns")
+	}
+	return pats
 }
 
 func loadBaseline(t *testing.T) map[string]bool {

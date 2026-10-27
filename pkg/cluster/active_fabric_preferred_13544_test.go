@@ -1,11 +1,8 @@
 package cluster
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-// #13544: Stats().ActiveFabric, ActiveFabric() and FormatStats() reported raw
+// #13544: Stats().ActiveFabric and ActiveFabric() reported raw
 // slot occupancy (conn0 != nil → fabric 0) while outbound traffic actually
 // rides preferredFabricLocked, which prefers the CURRENT-incarnation
 // connection. When the peer rebooted and its replacement rides fabric 1 while
@@ -92,9 +89,11 @@ func TestActiveFabricReportsPreferredIncarnation13544(t *testing.T) {
 			if got := ss.Stats().ActiveFabric; got != tc.want {
 				t.Errorf("Stats().ActiveFabric = %d, want %d (preferred incarnation)", got, tc.want)
 			}
-			out := ss.FormatStats()
-			if !strings.Contains(out, "Active fabric:      "+tc.wantStr) {
-				t.Errorf("FormatStats() does not report %s:\n%s", tc.wantStr, out)
+			// #17107: FormatStats is deleted; the active-fabric rendering
+			// decision is the snapshot value itself (asserted above) plus
+			// the descriptor fabric string.
+			if got := fabricStr17107(ss.Stats().ActiveFabric); got != tc.wantStr {
+				t.Errorf("active fabric string = %q, want %q", got, tc.wantStr)
 			}
 		})
 	}

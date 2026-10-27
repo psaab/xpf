@@ -353,8 +353,22 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 // explicit handshake byte followed by a u32 fold. The handshake byte is
 // present even when its value is zero, so an older decoder reads the correct
 // handshake and safely ignores the new trailing fold.
+// sessionRuleIDMaxLen is the largest rule ID the session encoder will
+// carry (#18116). The wire tail prefixes the ID with a u16 length, so
+// 65535 is the format ceiling; emitting that in full would push a
+// session payload past the SessionV4/V6 per-type cap (64 KiB) and make
+// a #16041 peer drop the connection on our own conforming frame.
+// 1024 B is far above any real zone/policy name pair
+// (StablePolicyRuleID is "<from>-><to>/<name>") and keeps the worst
+// emitted payload at ~1.3 KiB, comfortably under the cap.
+const sessionRuleIDMaxLen = 1024
+
 func appendSessionSyncMetadataTail(payload []byte, ruleID string, handshakeState uint8, egressFold uint32, pptpCallIDs uint64, natScopeFold uint32) []byte {
-	if len(ruleID) > int(^uint16(0)) {
+	if len(ruleID) > sessionRuleIDMaxLen {
+		// An over-long ID cannot ride this frame; drop it rather than
+		// emit a payload the peer's per-type cap will refuse (which
+		// drops the whole connection). The session still syncs; only
+		// its admitting-rule identity is absent, as for a legacy peer.
 		ruleID = ""
 	}
 	if egressFold != 0 || natScopeFold != 0 {

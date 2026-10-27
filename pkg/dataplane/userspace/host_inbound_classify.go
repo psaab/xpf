@@ -175,11 +175,14 @@ func (a HostInboundAdmission) Describe() string {
 // ClassifyHostInbound reports how the ingress zone's host-inbound-traffic gate
 // treats a host-bound query tuple (#3627 B1a). proto/hasProto carry the resolved
 // IP protocol number (hasProto false = the query omitted the protocol); dstPort
-// is the destination port (<= 0 = unspecified); icmpType is the ICMP/ICMPv6 type
+// is the query's destination port and dstPortSet says whether the operator
+// PRESENTED one (#17081: a present literal 0 is decided against the token
+// ranges - no token admits port 0, so denied - while an omitted port leaves a
+// TCP/UDP query indeterminate); icmpType is the ICMP/ICMPv6 type
 // (nil = unspecified); family is "ip" / "ip6" from the query's destination
 // address, or "" when the query gives no IP (both families are then tried and
 // admission is reported if either admits).
-func ClassifyHostInbound(cfg *config.Config, fromZone string, proto uint8, hasProto bool, dstPort int, icmpType *uint8, family string) HostInboundAdmission {
+func ClassifyHostInbound(cfg *config.Config, fromZone string, proto uint8, hasProto bool, dstPort int, dstPortSet bool, icmpType *uint8, family string) HostInboundAdmission {
 	if cfg == nil || fromZone == "" {
 		return HostInboundAdmission{Status: HostInboundNotComputed}
 	}
@@ -202,7 +205,7 @@ func ClassifyHostInbound(cfg *config.Config, fromZone string, proto uint8, hasPr
 		// against an empty view so an isolated global-accept (ESP/AH, ICMP error,
 		// IPv6 ND) or an indeterminate/denied verdict is reported exactly as
 		// before the #5579 per-view refactor.
-		return classifyOneView(ZoneHostInboundView{Zone: fromZone}, proto, hasProto, dstPort, icmpType, family)
+		return classifyOneView(ZoneHostInboundView{Zone: fromZone}, proto, hasProto, dstPort, dstPortSet, icmpType, family)
 	}
 
 	// #5579: classify EACH effective view independently and only fold them into a
@@ -213,11 +216,11 @@ func ClassifyHostInbound(cfg *config.Config, fromZone string, proto uint8, hasPr
 	// with the differing interface groups rather than OR-ing them into a zone-wide
 	// first-admit that lies for the denying interfaces — the false-admission #5579
 	// removes. Supply an ingress-interface selector to resolve one interface.
-	first := classifyOneView(views[0], proto, hasProto, dstPort, icmpType, family)
+	first := classifyOneView(views[0], proto, hasProto, dstPort, dstPortSet, icmpType, family)
 	groups := []HostInboundViewVerdict{verdictFor(views[0], first)}
 	agree := true
 	for _, v := range views[1:] {
-		a := classifyOneView(v, proto, hasProto, dstPort, icmpType, family)
+		a := classifyOneView(v, proto, hasProto, dstPort, dstPortSet, icmpType, family)
 		groups = append(groups, verdictFor(v, a))
 		if a.Status != first.Status || a.Token != first.Token || a.Kind != first.Kind {
 			agree = false
@@ -249,7 +252,7 @@ func verdictFor(v ZoneHostInboundView, a HostInboundAdmission) HostInboundViewVe
 // (see ResolveHostInboundIngressInterface); an unresolved zone/interface yields
 // HostInboundNotComputed defensively. A quarantined zone classifies as the
 // empty view used by ClassifyHostInbound, not from its raw config stanza.
-func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef string, proto uint8, hasProto bool, dstPort int, icmpType *uint8, family string) HostInboundAdmission {
+func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef string, proto uint8, hasProto bool, dstPort int, dstPortSet bool, icmpType *uint8, family string) HostInboundAdmission {
 	if cfg == nil || fromZone == "" || ifaceRef == "" {
 		return HostInboundAdmission{Status: HostInboundNotComputed}
 	}
@@ -269,7 +272,7 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 		return HostInboundAdmission{Status: HostInboundNotComputed}
 	}
 	if _, quarantined := config.ZoneInterfaceQuarantineExclusions(cfg)[split.Literal]; quarantined {
-		return classifyOneView(ZoneHostInboundView{Zone: fromZone, Interfaces: []string{ifaceRef}}, proto, hasProto, dstPort, icmpType, family)
+		return classifyOneView(ZoneHostInboundView{Zone: fromZone, Interfaces: []string{ifaceRef}}, proto, hasProto, dstPort, dstPortSet, icmpType, family)
 	}
 	zone := cfg.Security.Zones[fromZone]
 	if zone == nil {
@@ -278,7 +281,7 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 	if _, quarantined := quarantinedZoneNames(cfg)[fromZone]; quarantined {
 		return classifyOneView(ZoneHostInboundView{
 			Zone: fromZone, Interfaces: []string{ifaceRef},
-		}, proto, hasProto, dstPort, icmpType, family)
+		}, proto, hasProto, dstPort, dstPortSet, icmpType, family)
 	}
 	// Resolve THIS interface's effective host-inbound token set with the same SSOT
 	// the enforcement view builder uses (effectiveHostInboundTokens over the
@@ -292,7 +295,7 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 	// legacy canon).
 	svc, prot := effectiveHostInboundTokens(zone, split.Literal, buildInterfaceHostInboundMap(cfg)[split.Literal])
 	v := ZoneHostInboundView{Zone: fromZone, Interfaces: []string{ifaceRef}, SystemServices: svc, Protocols: prot, ProtocolsExcept: effectiveHostInboundExcept(zone, buildInterfaceHostInboundMap(cfg)[split.Literal])}
-	return classifyOneView(v, proto, hasProto, dstPort, icmpType, family)
+	return classifyOneView(v, proto, hasProto, dstPort, dstPortSet, icmpType, family)
 }
 
 // classifyOneView classifies a host-bound query tuple against a SINGLE effective
@@ -300,7 +303,7 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 // ClassifyHostInboundForInterface (#5579). It mirrors the original whole-zone
 // ordering (full-admit → global pre-accept → indeterminate short-circuits →
 // per-view token admit → default-deny) scoped to one view's token set.
-func classifyOneView(v ZoneHostInboundView, proto uint8, hasProto bool, dstPort int, icmpType *uint8, family string) HostInboundAdmission {
+func classifyOneView(v ZoneHostInboundView, proto uint8, hasProto bool, dstPort int, dstPortSet bool, icmpType *uint8, family string) HostInboundAdmission {
 	// Full-admit (`any-service` ONLY — #3226 narrowed `system-services all` to
 	// the named union) admits everything,
 	// independent of the tuple — report it even when the tuple is otherwise
@@ -337,7 +340,10 @@ func classifyOneView(v ZoneHostInboundView, proto uint8, hasProto bool, dstPort 
 		return HostInboundAdmission{Status: HostInboundIndeterminate}
 	}
 	// A port/ICMP token cannot be identified without the port / icmp-type.
-	if (proto == config.HostInboundProtoTCP || proto == config.HostInboundProtoUDP) && dstPort <= 0 {
+	// #17081: a PRESENT literal port 0 is decided by the token ranges below
+	// (no host-inbound token admits port 0, so it falls through to denied);
+	// only a genuinely omitted port (dstPortSet == false) is indeterminate.
+	if (proto == config.HostInboundProtoTCP || proto == config.HostInboundProtoUDP) && !dstPortSet {
 		return HostInboundAdmission{Status: HostInboundIndeterminate}
 	}
 	if (proto == config.HostInboundProtoICMP || proto == config.HostInboundProtoICMPv6) && icmpType == nil {
@@ -492,7 +498,10 @@ func l4MatchAdmits(m config.L4Match, proto uint8, dstPort int, icmpType *uint8) 
 		if len(m.Ports) == 0 {
 			return true
 		}
-		if dstPort <= 0 || dstPort > 65535 {
+		// #17081: dstPort is present by the time a port token is judged (the
+		// caller short-circuits an omitted port to indeterminate), so the
+		// range check alone decides; port 0 matches no token range.
+		if dstPort < 0 || dstPort > 65535 {
 			return false
 		}
 		dp := uint16(dstPort)
