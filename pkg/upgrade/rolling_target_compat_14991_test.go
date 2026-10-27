@@ -101,8 +101,8 @@ func TestParsePeerHAProtocolMalformedFailsClosed14991(t *testing.T) {
 			if _, _, ok := parseHAProtocolVersions(tc.in); ok {
 				t.Fatalf("parseHAProtocolVersions(%q) ok=true, want fail-closed on malformed", tc.in)
 			}
-			if parseHAProtocolCompatible(tc.in) {
-				t.Fatalf("parseHAProtocolCompatible(%q) = true, want false", tc.in)
+			if compat, _, _ := haProtocolVerdictFromStatus(tc.in); compat {
+				t.Fatalf("haProtocolVerdictFromStatus(%q) = true, want false", tc.in)
 			}
 		})
 	}
