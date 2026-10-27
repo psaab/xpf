@@ -34,6 +34,9 @@ func TestHostInboundTeardownClearsEnforcedThenFailedReinstallFences_5790(t *test
 	d := &Daemon{}
 
 	// --- Step 1: enforceable config, real install succeeds -> flag TRUE. ---
+	// Seed a standing pre-activation fence (#14012/#14033) so step 2 can prove
+	// teardown deletes its table: without this seed the teardown's preactivation
+	// delete is indistinguishable from "forgot to delete" retention.
 	nftInstaller = &fakeNftInstaller{} // all succeed
 	if err := d.applyHostInboundFilter(enforceable); err != nil {
 		t.Fatalf("step 1 (install) apply: %v", err)
@@ -41,14 +44,16 @@ func TestHostInboundTeardownClearsEnforcedThenFailedReinstallFences_5790(t *test
 	if !d.hostInboundEnforced.Load() {
 		t.Fatal("step 1: hostInboundEnforced must be true after a successful real install")
 	}
+	d.hostInboundPreActivationFence = &xnft.GapFenceSpec{PreActivation: true, UncoveredV4: []string{"203.0.113.10"}}
 
 	// --- Step 2: non-enforceable config -> table teardown succeeds -> flag FALSE. ---
-	// The teardown deletes BOTH the main and the additive gap table (#5789), so
-	// accept either target and record which were removed. No install op may run.
+	// The teardown deletes the main, additive gap (#5789), and preactivation
+	// (#14012/#14033) tables, so accept any of those targets and record which
+	// were removed. No install op may run.
 	deleted := map[string]bool{}
 	nftInstaller = &fakeNftInstaller{
 		del: func(name string) error {
-			if name != xnft.HostInboundTableName && name != xnft.HostInboundGapTableName {
+			if name != xnft.HostInboundTableName && name != xnft.HostInboundGapTableName && name != xnft.HostInboundPreActivationTableName {
 				t.Fatalf("step 2: unexpected delete target %q", name)
 			}
 			deleted[name] = true
@@ -58,12 +63,26 @@ func TestHostInboundTeardownClearsEnforcedThenFailedReinstallFences_5790(t *test
 			t.Fatal("step 2: the no-enforcement teardown path must not install a host-inbound table")
 			return nil
 		},
+		gapFence: func(xnft.GapFenceSpec) error {
+			t.Fatal("step 2: the no-enforcement teardown path must not install a gap/preactivation fence")
+			return nil
+		},
+		coldBootFence: func(xnft.FenceSpec) error {
+			t.Fatal("step 2: the no-enforcement teardown path must not install a cold-boot fence")
+			return nil
+		},
 	}
 	if err := d.applyHostInboundFilter(&config.Config{}); err != nil {
 		t.Fatalf("step 2 (teardown) apply: %v", err)
 	}
 	if !deleted[xnft.HostInboundTableName] {
 		t.Fatalf("step 2: teardown must delete the main xpf_hostinbound table, deleted=%v", deleted)
+	}
+	if !deleted[xnft.HostInboundPreActivationTableName] {
+		t.Fatalf("step 2: teardown must delete the preactivation xpf_hostinbound_preactivation table when a pre-activation fence stood, deleted=%v", deleted)
+	}
+	if d.hostInboundPreActivationFence != nil {
+		t.Fatalf("step 2: teardown must clear hostInboundPreActivationFence, got %+v", d.hostInboundPreActivationFence)
 	}
 	if d.hostInboundEnforced.Load() {
 		t.Fatal("step 2 (THE #5790 BUG): a successful teardown must CLEAR hostInboundEnforced; " +
