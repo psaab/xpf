@@ -1,12 +1,15 @@
-// #6386 leaf extraction: the flowless (no-L4) LocalDelivery verdict
-// helpers (#3292/#3600/#4743/#6122), lifted verbatim out of
-// poll_descriptor/mod.rs: enum FlowlessLocalVerdict,
-// ipv6_ext_header_over_limit_drop, flowless_local_delivery_verdict,
-// flowless_base_resolution. Each moved bare fn/enum becomes pub(super).
-// The three per-packet-capable fns GAIN #[inline] (the only non-motion
-// change — restores same-CGU inlining eligibility across the new module
-// boundary per the #6386 hot-path contract). Bodies byte-identical to
-// their prior location.
+// Provenance: extracted from poll_descriptor/mod.rs at
+// 602f34f052 (2026-07-23, #6386): the flowless (no-L4)
+// LocalDelivery verdict helpers (#3292/#3600/#4743/#6122) —
+// enum FlowlessLocalVerdict, ipv6_ext_header_over_limit_drop,
+// flowless_local_delivery_verdict, flowless_base_resolution.
+// At that commit each moved bare fn/enum became pub(super), the
+// three per-packet-capable fns gained #[inline] (the only
+// non-motion change — it restored same-CGU inlining eligibility
+// across the new module boundary per the #6386 hot-path
+// contract), and the bodies matched their prior location.
+// That is a split-time record, not a claim about the current
+// tree: this file has been edited since.
 
 use super::filter::{
     emit_pending_filter_log, evaluate_non_pbr_input_filter_policers_cached,

@@ -39,11 +39,8 @@ func withSeams(t *testing.T,
 	dial func(string, *net.UDPAddr, *net.UDPAddr) (net.Conn, error),
 	fn func()) {
 	t.Helper()
-	origResolve, origDial := resolveUDPAddr, dialUDP
 	origResolveContext, origDialContext := resolveUDPAddrContext, dialUDPContext
 	origResolvedDial := dialUDPResolvedContext
-	resolveUDPAddr = resolve
-	dialUDP = dial
 	dialUDPResolvedContext = func(_ context.Context, network string, laddr, raddr *net.UDPAddr) (net.Conn, error) {
 		return dial(network, laddr, raddr)
 	}
@@ -101,7 +98,6 @@ func withSeams(t *testing.T,
 		}
 	}
 	t.Cleanup(func() {
-		resolveUDPAddr, dialUDP = origResolve, origDial
 		resolveUDPAddrContext, dialUDPContext, dialUDPResolvedContext = origResolveContext, origDialContext, origResolvedDial
 	})
 	fn()

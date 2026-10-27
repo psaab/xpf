@@ -6384,7 +6384,7 @@ fn adopted_flow_survives_subsequent_packet_revalidation_16217() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
                 conntrack: crate::afxdp::session_glue::ConntrackFds { v4: -1, v6: -1 },
-                tick: crate::afxdp::session_glue::Tick { ns: 1_000_000, secs: 1 },
+                tick: crate::afxdp::session_glue::Tick::from_parts(1_000_000, 1),
             },
             &forwarding,
             &ha_state,

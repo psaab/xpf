@@ -421,8 +421,9 @@ type Daemon struct {
 	// #4899 DHCP-lease-change IPsec rebind recovery state. When a DHCP
 	// renewal moves the kernel address an IPsec gateway is dynamically bound
 	// to (external-interface, no explicit local-address), the management-only
-	// lease callback re-renders swanctl local_addrs best-effort
-	// (reapplyIPsecForLeaseChange). Before #4899 a swanctl reload failure on
+	// lease callback re-renders swanctl local_addrs best-effort via
+	// managementOnlyLeaseRefresh → reapplyIPsecLocked. Before #4899 a
+	// swanctl reload failure on
 	// that path was dropped as a slog.Warn: strongSwan kept binding the STALE
 	// lease address, the tunnel could not re-establish, and the operator had
 	// no signal and no recovery. These fields make the failure RECOVERABLE
