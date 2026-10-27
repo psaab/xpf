@@ -128,7 +128,7 @@ the apply path pays no fsync (the file is regenerated on every apply).
   `InitiateConnection` passes `--timeout 5` so swanctl detaches once the
   request is handed to charon instead of waiting out the negotiation
   (and, on a dead peer, the 15 s kill) on the commit/HA paths (#16851).
-- `PrepareConfig(cfg *config.Config) *config.IPsecConfig` — `policy.go`.
+- `PrepareConfig(cfg *config.Config) *config.IPsecConfig` — `policy_addr.go`.
 - `ApplyWithHooks(ipsecCfg, hooks ApplyHooks) error`, `ApplyHooks{Written, Loaded}` and
   `ApplyNotifyLoaded(ipsecCfg, loaded func()) error` — `manager.go`. `Apply` with callbacks
   at the two points where the on-disk swanctl config and what charon runs can diverge.
@@ -180,8 +180,8 @@ the apply path pays no fsync (the file is regenerated on every apply).
   sharing a gateway are unioned under the gateway-named connection. Local addresses are replayed from configuration
   alone (`prepareConfigFromConfig`, `policy_addr.go`, mirroring `PrepareConfig`'s
   configured-address-first resolution). When a rendered connection's local address could
-  have come from the kernel (an unconfigured interface address, e.g. DHCP) or from a
-  DNS-derived family hint, the result is `ErrGenerationUnvalidatable`. Checked against
+  have come from the kernel (an unconfigured interface address, e.g. DHCP),
+  the result is `ErrGenerationUnvalidatable`. Checked against
   real 6.0.5 captures, including a local-address move that keeps every name.
 - `ConnectionNamesForVPN(cfg *config.Config) map[string]string`,
   `RenderedVPNSet(cfg *config.Config) map[string]bool` — `policy.go` (#15024).
@@ -223,11 +223,20 @@ the apply path pays no fsync (the file is regenerated on every apply).
 The package is split by responsibility (one responsibility per module);
 all files stay in `package ipsec`, so the public API is unchanged.
 
-- `manager.go` — transactional SA-config reconciler: `Manager`
-  lifecycle (`New`/`Apply`/`Clear`/`reload`), the removed-connection
-  diff + live-SA teardown (`promoteConnNames`/`terminateRemovedConns`,
-  #3941; promotion gated on reload success, #4898), and the `swanctl`
-  shell-out helper (`runSwanctl`, the `sc` seam, `swanctlTimeout`).
+- `conn_state_9687.go` — durable connection-state persistence across
+  xpfd restarts: the loaded set, rendered-content fingerprints and
+  teardown / deferred re-initiation debt (`seedFromStateLocked` /
+  `persistStateLocked`, `DefaultConnStatePath`).
+- `crypto.go` — Junos `$9$` pre-shared-key decryption entry point
+  (`normalizePSK`, delegating to `config.DecodeJunos9Secret`) and the
+  swanctl secret-token rendering helpers. The
+  decoder itself lives in pkg/config (#15051) so the same decoding
+  applies at compile to routing authentication keys. A `$9$` value
+  that decodes to zero bytes (#15990) is malformed there, so the
+  render belt skips the VPN instead of emitting `secret = ""`.
+- `generation.go` — HA generation marker (#9641): the inert
+  `xpf-gen-<generation>` pool appended to the render, `LoadedGeneration`,
+  `ExpectedLoadedConns` and `LoadedConns.Equal`.
 - `ike.go` — IKE/ESP settings resolution + proposal builders
   (`resolveIKESettings`/`resolveESPSettings`/`deriveDPD`/`buildESPProposal`/
   `dhGroupBits`) and the SA-status query + `swanctl --list-sas` output
@@ -235,16 +244,26 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `parseIKEHeader`/`parseChildHeader`/`parseEndpointHost`/`parseTrafficLine`,
   `TerminateAllSAs`/`InitiateConnection`/`ActiveConnectionNames`). The parser
   is pinned to captured golden fixtures in `testdata/swanctl_list_sas_*.txt`.
-- `crypto.go` — Junos `$9$` pre-shared-key decryption entry point
-  (`normalizePSK`, delegating to `config.DecodeJunos9Secret`). The
-  decoder itself lives in pkg/config (#15051) so the same decoding
-  applies at compile to routing authentication keys. A `$9$` value
-  that decodes to zero bytes (#15990) is malformed there, so the
-  render belt skips the VPN instead of emitting `secret = ""`.
+- `list_conns.go` — `swanctl --list-conns --raw` parsing: `LoadedConn` /
+  `LoadedConns` (names, children and `local_addrs`/`remote_addrs`) and
+  the `--list-pools --raw` parser used by the generation marker.
+- `manager.go` — transactional SA-config reconciler: `Manager`
+  lifecycle (`New`/`Apply`/`Clear`/`reload`), the removed-connection
+  diff + live-SA teardown (`promoteConnNames`/`terminateRemovedConns`,
+  #3941; promotion gated on reload success, #4898), and the `swanctl`
+  shell-out helper (`runSwanctl`, the `sc` seam, `swanctlTimeout`).
+- `policy_addr.go` — runtime address resolution for the render:
+  `PrepareConfig` and its interface-address resolvers, the pure
+  remote-family hint (`gatewayRemoteFamilyHint`, `matchFamily`),
+  `HasDHCPBoundGateway`, and the config-only replay
+  `prepareConfigFromConfig` (#9641).
 - `policy.go` — swanctl config generation (`renderConfig`/`generateConfig`,
   traffic-selector resolution, value sanitizers, identity formatting,
-  `authMethodToSwan`, `xfrmiIfID`) plus XFRM bind-interface preparation
-  (`PrepareConfig` and its interface-address resolvers).
+  `authMethodToSwan`, `xfrmiIfID`).
+- `test_seams.go` — test-only seams (`SetSwanctlForTesting`); production
+  code never calls them.
+- `zeroize.go` — factory-reset erasure of the durable connection state
+  (`CheckConnStateEmpty` / `EraseConnStateIfEmpty` / `ListCrashTemps`).
 
 ## Callers
 
@@ -252,12 +271,13 @@ all files stay in `package ipsec`, so the public API is unchanged.
 
 ## Dependencies
 
-`pkg/config` only.
+`config`, `configstore`, `fsatomic`, `ipsecname`, `rendersafe`, `termsafe`
+(all `pkg/…`; from `go list`).
 
 ## File layout
 
 - Writes `/etc/swanctl/conf.d/xpf.conf` with mode 0600.
-- Reloads via `swanctl --reload`.
+- Reloads via `swanctl --load-all`.
 
 ## Gotchas
 
@@ -603,7 +623,7 @@ all files stay in `package ipsec`, so the public API is unchanged.
     skips the VPN with a warning naming its `external-interface` (#11689);
     it never omits `local_addrs` and binds every local interface.
   - **IPv6 link-local local binds (#2885):** the candidate filter
-    `matchFamily` (`policy.go`) admits an IPv6 link-local unicast source
+    `matchFamily` (`policy_addr.go`) admits an IPv6 link-local unicast source
     (`fe80::/10`) when the gateway family hint is IPv6 (family 6). The
     earlier `IsGlobalUnicast()` gate rejected link-local outright, so an
     IPsec local-bind on a point-to-point / link-local IPv6 link could never
@@ -671,7 +691,7 @@ all files stay in `package ipsec`, so the public API is unchanged.
     interface skips the full recompile, so that branch now calls
     `reapplyIPsecForLeaseChange`, which re-renders + reloads swanctl
     directly.
-  - **Scoping** (`HasDHCPBoundGateway`, `policy.go`): the management-only
+  - **Scoping** (`HasDHCPBoundGateway`, `policy_addr.go`): the management-only
     re-render fires only when some gateway is actually lease-dependent —
     `external-interface` set, no explicit `local-address`, and the
     referenced unit is DHCP/DHCPv6-managed. A lease refresh on a
