@@ -557,14 +557,20 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				if oldName != "" {
 					slog.Info("renamed RETH member interface",
 						"from", oldName, "to", linuxName)
-					fixRethLinkFile(linuxName, oldName)
+					// #17042: a refused/failed .link fix joins Phase.Networkd
+					// instead of the old Warn-only swallow.
+					if err := fixRethLinkFile(linuxName, oldName); err != nil {
+						result.Phase.Networkd = errors.Join(result.Phase.Networkd, err)
+					}
 				}
 			}
 			// Ensure the .link file uses OriginalName= (not MACAddress=)
 			// for stable matching across reboots. The bootstrap .link
 			// files may use MACAddress= which breaks after virtual MAC
 			// programming — the MACAddress= line might reference the wrong one.
-			ensureRethLinkOriginalName(linuxName)
+			if err := ensureRethLinkOriginalName(linuxName); err != nil {
+				result.Phase.Networkd = errors.Join(result.Phase.Networkd, err)
+			}
 			setRethIPv6Knobs(linuxName)
 			var memberMACChanged bool
 			result.Phase.Networkd, needLinkCycleRecovery, rethRollbackKeptLease, memberMACChanged =
