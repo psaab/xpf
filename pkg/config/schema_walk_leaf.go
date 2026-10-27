@@ -493,7 +493,18 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		}
 		for _, tok := range keys {
 			attemptedAny = true
-			if err := leafSchema.checkToken(vc, tok); err != nil {
+			// #18049: a leaf with blockChildValidator validates block-list
+			// children with it instead of the packed validator (VRRP
+			// virtual-address: packed bare Junos form accepts, block-list
+			// bare rejects with the CIDR diagnostic). Leaves without it
+			// keep checkToken (validator/treeValidator) for every token.
+			var err error
+			if leafSchema.blockChildValidator != nil {
+				err = leafSchema.blockChildValidator(tok)
+			} else {
+				err = leafSchema.checkToken(vc, tok)
+			}
+			if err != nil {
 				verr := typedLeafInvalidErrorf(path, tok, err)
 				if vc.recordTypedLeaf(verr) {
 					continue

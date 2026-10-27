@@ -414,22 +414,34 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 // except for the VIP validator means completion and commit validation
 // behave the same across families.
 func vrrpGroupSchemaNode(v6 bool) *schemaNode {
-	// #16558: Junos accepts a BARE virtual address (`virtual-address
-	// 192.168.1.15;`); the compiler normalizes it to CIDR form with the
-	// enclosing unit prefix (or a host prefix when no same-family
-	// enclosing prefix exists) on every path, so the schema validator
-	// accepts bare-or-CIDR. Garbage and wrong-family literals still
-	// reject. Previously this leaf required CIDR, so the flat `set`
-	// spelling was strict-rejected while the tolerant compile normalized
-	// the same text (#15050's gate comment claimed `set` normalized —
-	// it did not).
+	// #16558: Junos accepts a BARE virtual address in the packed spelling
+	// (`virtual-address 192.168.1.15;`); the compiler normalizes it to CIDR
+	// form with the enclosing unit prefix (or a host prefix when no
+	// same-family enclosing prefix exists) on every path, so the packed
+	// schema validator accepts bare-or-CIDR. Garbage and wrong-family
+	// literals still reject. Previously this leaf required CIDR, so the
+	// flat `set` spelling was strict-rejected while the tolerant compile
+	// normalized the same text (#15050's gate comment claimed `set`
+	// normalized — it did not).
+	//
+	// #18049: the hierarchical block-list spelling keeps the #1319 CIDR
+	// requirement (`virtual-address { 10.0.1.1/24; }`). #16558 changed
+	// validator to bare-or-CIDR for every token, so a bare block child
+	// (`virtual-address { 10.0.1.1; }`) started validating instead of
+	// rejecting with the CIDR missing-/prefix-length diagnostic — the
+	// pre-existing TestSchemaValidate_VirtualAddress_BlockListShape red,
+	// hidden while the #17282 panic killed the test binary. The walker
+	// therefore validates block-list children with vaBlockValidator
+	// (strict CIDR) and packed Keys with vaValidator (bare-or-CIDR).
 	vaDesc := "Virtual IPv4 address, bare or with prefix length (e.g. 10.0.1.1 or 10.0.1.1/24; bare Junos form gains the enclosing unit prefix)"
 	vaExamples := []string{"10.0.1.1/24", "10.0.1.1"}
 	vaValidator := ValidateIPv4CIDROrBare
+	vaBlockValidator := ValidateIPv4CIDR
 	if v6 {
 		vaDesc = "Virtual IPv6 address, bare or with prefix length (e.g. 2001:db8::1 or 2001:db8::1/64; bare Junos form gains the enclosing unit prefix)"
 		vaExamples = []string{"2001:db8::1/64", "2001:db8::1"}
 		vaValidator = ValidateIPv6CIDROrBare
+		vaBlockValidator = ValidateIPv6CIDR
 	}
 	// #8839: keyValidator on the IDENTITY slot. Without it a non-numeric id is
 	// accepted at commit and the group silently vanishes -- parseVRRPGroups does
@@ -440,15 +452,16 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 	// parseVRRPGroups both expand this declared packed run.
 	children := map[string]*schemaNode{
 		"virtual-address": {
-			desc:          "Virtual IP address",
-			args:          1,
-			multi:         true,
-			placeholder:   "<address>",
-			valueType:     ValueCIDR,
-			valueDesc:     vaDesc,
-			valueExamples: vaExamples,
-			validator:     vaValidator,
-			children:      nil,
+			desc:                "Virtual IP address",
+			args:                1,
+			multi:               true,
+			placeholder:         "<address>",
+			valueType:           ValueCIDR,
+			valueDesc:           vaDesc,
+			valueExamples:       vaExamples,
+			validator:           vaValidator,
+			blockChildValidator: vaBlockValidator,
+			children:            nil,
 		},
 		"priority": {
 			desc:          "VRRP priority",
@@ -532,15 +545,16 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 	}
 	if v6 {
 		children["virtual-inet6-address"] = &schemaNode{
-			desc:          "Virtual IPv6 address (Junos vrrp-inet6-group spelling)",
-			args:          1,
-			multi:         true,
-			placeholder:   "<address>",
-			valueType:     ValueCIDR,
-			valueDesc:     vaDesc,
-			valueExamples: vaExamples,
-			validator:     vaValidator,
-			children:      nil,
+			desc:                "Virtual IPv6 address (Junos vrrp-inet6-group spelling)",
+			args:                1,
+			multi:               true,
+			placeholder:         "<address>",
+			valueType:           ValueCIDR,
+			valueDesc:           vaDesc,
+			valueExamples:       vaExamples,
+			validator:           vaValidator,
+			blockChildValidator: vaBlockValidator,
+			children:            nil,
 		}
 	}
 	return &schemaNode{desc: "VRRP group", args: 1, placeholder: "<group-id>", keyValidator: ValidateVRRPGroupID, packedFlatRun: true, children: children}

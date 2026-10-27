@@ -46,6 +46,20 @@ type schemaNode struct {
 	// only for leaves whose compiler reads just the child name; as-path-prepend
 	// sets this because firewallMatchValues consumes each child key.
 	allChildKeysAreValues bool
+	// blockChildValidator, when set on a `multi && children == nil` typed
+	// leaf, validates each hierarchical block-list child token
+	// (`leaf { v; }`) instead of validator. Packed Keys
+	// (`leaf v`, bracket lists) keep validator. Only the VRRP
+	// virtual-address leaves set it (#18049): #16558 made the packed
+	// Junos bare spelling (`virtual-address 192.168.1.15;`) commit by
+	// accepting bare-or-CIDR there and letting the compiler normalize
+	// it, but the block-list spelling has required CIDR since #1319
+	// (`virtual-address { 10.0.1.1/24; }`) — a bare block child must
+	// reject with the CIDR validator's missing-/prefix-length
+	// diagnostic rather than silently gaining a prefix the packed
+	// spelling would. Garbage and wrong-family block children reject
+	// under both validators with the same text.
+	blockChildValidator LeafValidator
 	// valueList opts a multi leaf that ALSO declares modifier children into
 	// bracket-list value absorption (#3872 static `next-hop [ a b ]`). By
 	// default the SetPath absorber only collapses a trailing value list onto a
