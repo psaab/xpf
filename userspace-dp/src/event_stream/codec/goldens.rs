@@ -1,7 +1,24 @@
 //! #17131: cross-language golden frames for every event-stream encoder body.
 //!
-//! Each specimen below is built by the REAL Rust encoder with non-default
-//! values in every field the encoder writes, serialized to hex under
+//! Each specimen below is built by the REAL Rust encoder. Every slot the
+//! encoder writes carries a non-default specimen value, EXCEPT the slots
+//! enumerated below, which are intentionally zero/unwritten; the Go side
+//! (`TestEventFrameGoldensDecode17131`) byte-pins or field-asserts every
+//! remaining written slot, so a moved encoder offset reds Go even where
+//! `EventRecord` has no field for the slot. Intentional zero/unwritten
+//! slots:
+//!
+//! * dataplane_event (POLICY_DENY): NAT slots are `None`/0 (no
+//!   translation on a deny); [56:64] carries the config generation in
+//!   place of rule/term, so rule_id/term_id are unwritten for this kind.
+//! * session frames: NAT64/snat_v4 trailing slot is zero (specimen is
+//!   not NAT64; FLAG_NAT64 gates the value).
+//! * session_update: written slots the Go decoder intentionally does not
+//!   surface (disposition, next-hop) are byte-pinned in Go instead.
+//! * rt_flow_create: [56:64] volume/reason slots unwritten by the create
+//!   encoder (a create has no volume or close reason yet).
+//!
+//! Specimens are serialized to hex under
 //! `pkg/dataplane/userspace/testdata/event_frames/<name>.hex`, and decoded
 //! on the Go side through the production decoders
 //! (`decodeSessionEvent` / `decodeSessionCloseEvent` /
@@ -26,7 +43,7 @@ use std::sync::Arc;
 fn golden_decision() -> SessionDecision {
     SessionDecision {
         resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
+            disposition: ForwardingDisposition::LocalDelivery,
             local_ifindex: 12,
             egress_ifindex: 70003,
             tx_ifindex: 70004,

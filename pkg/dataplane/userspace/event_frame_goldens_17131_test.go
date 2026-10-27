@@ -4,10 +4,13 @@ package userspace
 // (userspace-dp/src/event_stream/codec/goldens.rs, regenerated with
 // XPF_WRITE_GOLDEN=1). Each file under testdata/event_frames/ is one full
 // event-stream frame (16-byte header + payload). This test decodes each
-// specimen through the production decoders and asserts the non-default
-// specimen values, so moving any one offset in the Rust encoders (with the
-// Rust pins updated) reds this test instead of silently mislabelling
-// syslog/NetFlow fields.
+// specimen through the production decoders and asserts the specimen
+// values (byte-pinning slots EventRecord/SessionDeltaInfo do not
+// surface), so moving any one offset in the Rust encoders (with the Rust
+// pins updated) reds this test instead of silently mislabelling
+// syslog/NetFlow fields. Intentional zero/unwritten slots are enumerated
+// in goldens.rs: dataplane NAT None/0, session NAT64/snat zero,
+// PolicyDeny rule_id/term_id unwritten (generation rides [56:64]).
 //
 // The pre-existing #9412 golden (testdata/session_update_frame_9412.hex)
 // keeps its own pin in session_update_frame_9412_test.go.
@@ -129,6 +132,16 @@ func TestEventFrameGoldensDecode17131(t *testing.T) {
 		if d.FwdPackets != 111111 || d.RevPackets != 222222 {
 			t.Fatalf("packets = fwd %d rev %d, want 111111/222222", d.FwdPackets, d.RevPackets)
 		}
+		// #17131 fold: slots decodeSessionEvent deliberately does not
+		// surface (NextHop skipped at eventstream.go, disposition only
+		// mapped for local_delivery) are byte-pinned so a moved encoder
+		// offset reds Go instead of silently shifting the trailing block.
+		if d.Disposition != "local_delivery" || payload[31] != 1 {
+			t.Fatalf("disposition = %q payload[31]=%d, want local_delivery/1 (LocalDelivery)", d.Disposition, payload[31])
+		}
+		if got := payload[60:64]; string(got) != string([]byte{10, 9, 8, 1}) {
+			t.Fatalf("next-hop bytes [60:64] = %v, want 10.9.8.1", got)
+		}
 		if d.NeighborMACBin != [6]byte{0xaa, 0x17, 0x13, 0x31, 0x00, 0x01} || d.SrcMACBin != [6]byte{0x11, 0x17, 0x13, 0x31, 0x00, 0x02} {
 			t.Fatalf("MACs = neighbor %v src %v", d.NeighborMACBin, d.SrcMACBin)
 		}
@@ -224,7 +237,7 @@ func TestEventFrameGoldensDecode17131(t *testing.T) {
 		if !ok {
 			t.Fatal("decodeDataplaneEventPayload rejected golden rt_flow_close")
 		}
-		assertRTFlowCloseGolden17131(t, rec)
+		assertRTFlowCloseGolden17131(t, rec, payload)
 	})
 
 	t.Run("rt_flow_create", func(t *testing.T) {
@@ -259,6 +272,23 @@ func TestEventFrameGoldensDecode17131(t *testing.T) {
 		}
 		if rec.SessionID != 0x1122334455667788 {
 			t.Fatalf("SessionID = %#x, want 0x1122334455667788", rec.SessionID)
+		}
+		// #17131 fold: RT_FLOW slots EventRecord has no field for are
+		// byte-pinned (payload-relative offsets, EventRecord has no
+		// AppID/generation surface): AppID [132:134]=9009, syslog gate
+		// [135]=1 (create requested log), GEN1 marker [140:144] and the
+		// paired generation [160:168]=43043.
+		if got := binary.LittleEndian.Uint16(payload[132:134]); got != 9009 {
+			t.Fatalf("create AppID [132:134] = %d, want 9009", got)
+		}
+		if payload[135] != 1 {
+			t.Fatalf("create syslog gate [135] = %d, want 1", payload[135])
+		}
+		if got := string(payload[140:144]); got != "GEN1" {
+			t.Fatalf("create GEN1 marker [140:144] = %q, want GEN1", got)
+		}
+		if got := binary.LittleEndian.Uint64(payload[160:168]); got != 43043 {
+			t.Fatalf("create generation [160:168] = %d, want 43043", got)
 		}
 		if !rec.Time.Equal(time.Unix(0, 1700000123456789012)) {
 			t.Fatalf("Time = %v, want admission instant 1700000123456789012ns", rec.Time)
@@ -301,13 +331,33 @@ func TestEventFrameGoldensDecode17131(t *testing.T) {
 		if !rec.Time.Equal(time.Unix(0, 1700000999000000000)) {
 			t.Fatalf("Time = %v, want 1700000999000000000ns", rec.Time)
 		}
-		// Explicit uncovered-risk pins: DecodeRawEventRecord does not
-		// surface Reason/AppID/Generation for a deny.
-		_ = logging.EventRecord{}
+		// #17131 fold: Reason HAS a Go surface (EventRecord.Reason,
+		// pkg/logging/eventbuf.go:23, mapped from [134] in mapRawEvent);
+		// the deny specimen carries reason byte 5 (closeReasonPolicy).
+		if rec.Reason != "Rejected by policy" {
+			t.Fatalf("Reason = %q, want %q (from [134]=5)", rec.Reason, "Rejected by policy")
+		}
+		// Slots EventRecord does not surface for a deny are byte-pinned:
+		// AppID [132:134]=30303, syslog gate [135]=0 (dataplane-event
+		// encoder never writes it), GEN1 marker [140:144], and the
+		// stamped generation at [56:64]=41041 (POLICY_DENY carries the
+		// generation in place of rule/term; rule_id/term_id unwritten).
+		if got := binary.LittleEndian.Uint16(payload[132:134]); got != 30303 {
+			t.Fatalf("deny AppID [132:134] = %d, want 30303", got)
+		}
+		if payload[135] != 0 {
+			t.Fatalf("deny syslog gate [135] = %d, want 0 (unwritten)", payload[135])
+		}
+		if got := string(payload[140:144]); got != "GEN1" {
+			t.Fatalf("deny GEN1 marker [140:144] = %q, want GEN1", got)
+		}
+		if got := binary.LittleEndian.Uint64(payload[56:64]); got != 41041 {
+			t.Fatalf("deny generation [56:64] = %d, want 41041", got)
+		}
 	})
 }
 
-func assertRTFlowCloseGolden17131(t *testing.T, rec logging.EventRecord) {
+func assertRTFlowCloseGolden17131(t *testing.T, rec logging.EventRecord, payload []byte) {
 	t.Helper()
 	if rec.Type != "SESSION_CLOSE" {
 		t.Fatalf("Type = %q, want SESSION_CLOSE", rec.Type)
@@ -348,5 +398,20 @@ func assertRTFlowCloseGolden17131(t *testing.T, rec logging.EventRecord) {
 	}
 	if !rec.Time.Equal(time.Unix(0, 1700000123000000000)) {
 		t.Fatalf("Time = %v, want close instant 1700000123000000000ns", rec.Time)
+	}
+	// #17131 fold: slots EventRecord has no field for are byte-pinned:
+	// AppID [132:134]=7007, syslog gate [135]=1 (close requested log),
+	// GEN1 marker [140:144] and paired generation [160:168]=41041.
+	if got := binary.LittleEndian.Uint16(payload[132:134]); got != 7007 {
+		t.Fatalf("close AppID [132:134] = %d, want 7007", got)
+	}
+	if payload[135] != 1 {
+		t.Fatalf("close syslog gate [135] = %d, want 1", payload[135])
+	}
+	if got := string(payload[140:144]); got != "GEN1" {
+		t.Fatalf("close GEN1 marker [140:144] = %q, want GEN1", got)
+	}
+	if got := binary.LittleEndian.Uint64(payload[160:168]); got != 41041 {
+		t.Fatalf("close generation [160:168] = %d, want 41041", got)
 	}
 }
