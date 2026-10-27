@@ -334,23 +334,23 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	// incarnation already hit the install fence. Skip quietly (no walk, no
 	// BulkStart): retrying every tick would burn full-table walks that all
 	// abort at the first stamped session.
-	if s.bulkFencedForPeer.Load() {
+	if s.peerIncarnationState().bulkFencedForPeer.Load() {
 		// #9752 round 5 item 4: revalidate on consume. A refuse→learn+
 		// clear→store-true interleave could otherwise latch a capable peer
 		// FOREVER (the caps-branch clear lands between the abort decision
 		// and the latch store, and ordinary retries keep hitting the
 		// stale latch). A peer that proves capable re-arms the bulk here.
 		if s.InstallTableIdentityCapable() {
-			s.bulkFencedForPeer.Store(false)
+			s.peerIncarnationState().bulkFencedForPeer.Store(false)
 		} else {
 			return errBulkFencedForPeer
 		}
 	}
 	// S9.4 has a distinct fence: install-table support does not imply that
 	// an older peer can preserve IPsec if_id identity.
-	if s.bulkFencedForIpsecPeer.Load() {
+	if s.peerIncarnationState().bulkFencedForIpsecPeer.Load() {
 		if s.peerCapabilitiesLearned() && s.IpsecTunnelDiscriminatorCapable() {
-			s.bulkFencedForIpsecPeer.Store(false)
+			s.peerIncarnationState().bulkFencedForIpsecPeer.Store(false)
 		} else {
 			return errBulkFencedForIpsecPeer
 		}
@@ -481,11 +481,12 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	})
 	if fenced {
 		if fencedByIpsec {
-			s.bulkFencedForIpsecPeer.Store(true)
+			s.peerIncarnationState().bulkFencedForIpsecPeer.Store(true)
 			s.clearPendingBulkAck()
 			return fmt.Errorf("bulk sync v4: %w", errBulkFencedForIpsecPeer)
+		} else {
+			s.peerIncarnationState().bulkFencedForPeer.Store(true)
 		}
-		s.bulkFencedForPeer.Store(true)
 		s.clearPendingBulkAck()
 		return fmt.Errorf("bulk sync v4: %w", errBulkFencedForPeer)
 	}
@@ -541,11 +542,12 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	})
 	if fenced {
 		if fencedByIpsec {
-			s.bulkFencedForIpsecPeer.Store(true)
+			s.peerIncarnationState().bulkFencedForIpsecPeer.Store(true)
 			s.clearPendingBulkAck()
 			return fmt.Errorf("bulk sync v6: %w", errBulkFencedForIpsecPeer)
+		} else {
+			s.peerIncarnationState().bulkFencedForPeer.Store(true)
 		}
-		s.bulkFencedForPeer.Store(true)
 		s.clearPendingBulkAck()
 		return fmt.Errorf("bulk sync v6: %w", errBulkFencedForPeer)
 	}

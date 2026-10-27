@@ -42,7 +42,7 @@ func TestIpsecDiscriminatorSuppressorCountsAndWarnsOnce17113(t *testing.T) {
 	if got := ss.Stats().InstallsSuppressedIpsecDiscriminator; got != 2 {
 		t.Errorf("Stats().InstallsSuppressedIpsecDiscriminator = %d, want 2", got)
 	}
-	if !ss.ipsecDiscriminatorSuppressDebt.Load() {
+	if !ss.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Load() {
 		t.Error("suppression must still record cold-prime debt")
 	}
 	if got := strings.Count(logs.String(), "withholding IPsec discriminator session installs"); got != 1 {
@@ -116,7 +116,7 @@ func TestIpsecBulkFenceNamesIpsecCapability17113(t *testing.T) {
 	if bulkEnd {
 		t.Fatal("an IPsec-fenced bulk completed its window")
 	}
-	if !senderSS.bulkFencedForIpsecPeer.Load() {
+	if !senderSS.peerIncarnationState().bulkFencedForIpsecPeer.Load() {
 		t.Error("IPsec fence abort did not latch bulkFencedForIpsecPeer")
 	}
 	if got := senderSS.stats.InstallsSuppressedIpsecDiscriminator.Load(); got != 1 {
@@ -132,7 +132,7 @@ func TestIpsecBulkFenceLatchedNamesIpsecCapability17113(t *testing.T) {
 	ss := fenceSync9752()
 	ss.handleMessage(nil, syncMsgPeerCapabilities,
 		capabilityFrame9714(t, capFlagInstallTableIdentity))
-	ss.bulkFencedForIpsecPeer.Store(true)
+	ss.peerIncarnationState().bulkFencedForIpsecPeer.Store(true)
 	err := ss.BulkSync()
 	if !errors.Is(err, errBulkFencedForIpsecPeer) {
 		t.Fatalf("latched BulkSync error = %v, want the IPsec fence sentinel", err)
