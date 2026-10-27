@@ -5,19 +5,19 @@ use super::super::helpers::{capture_binding_arm_state, finish_binding_reconcile,
 use super::super::ServerState;
 use chrono::Utc;
 use crate::{BindingControlRequest, ControlResponse};
-use std::time::Duration;
 
 pub(super) fn set(
     guard: &mut ServerState,
     binding: Option<BindingControlRequest>,
     response: &mut ControlResponse,
     persist_state: &mut bool,
-    // #5862: where the caller records that a binding-settle wait is owed. The
-    // wait itself runs in handlers::handle_request AFTER the global ServerState
-    // lock is dropped — the same locked-kick / unlocked-wait split #2962 and
-    // #4054 use. Holding the lock across a 2 s settle stalled every HA
-    // `sync_session` on the "dedicated" session socket, which shares this mutex.
-    settle_wait: &mut Option<Duration>,
+    // #5862/#17135: where the caller records that a binding-settle wait is
+    // owed. The wait itself runs in handlers::handle_stream AFTER the global
+    // ServerState lock is dropped — the same locked-kick / unlocked-wait
+    // split #2962 and #4054 use. Holding the lock across a 2 s settle stalled
+    // every HA `sync_session` on the "dedicated" session socket, which
+    // shares this mutex.
+    deferred: &mut Option<super::Deferred>,
 ) {
     let Some(binding_req) = binding else {
         response.ok = false;
@@ -54,7 +54,7 @@ pub(super) fn set(
                 prior,
                 true,
                 persist_state,
-                settle_wait,
+                deferred,
             );
             return;
         }

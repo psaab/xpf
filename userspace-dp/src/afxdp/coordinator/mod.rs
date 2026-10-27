@@ -15,6 +15,7 @@ mod snapshot_refresh;
 mod status;
 mod status_wg;
 mod supervisor;
+mod tunnel_registry;
 mod tunnel_supervision;
 mod wg_control;
 mod worker_manager;
@@ -398,14 +399,14 @@ pub struct Coordinator {
     /// `wg_control_threads` (finished sweep → attachment-stale prune →
     /// spawn with backoff); content changes never restart a thread —
     /// the loop tracks the shared forwarding ArcSwap (plan D.1).
-    pub(crate) tunnel_sources: BTreeMap<u16, LocalTunnelSourceEntry>,
+    pub(crate) tunnel_sources: tunnel_registry::TunnelThreadRegistry<LocalTunnelSourceEntry>,
     /// #1432 S2a / #1866: WG control-thread lifecycle entries keyed by
     /// tunnel_endpoint_id. Each entry records the engine Arc address +
     /// TUN attachment the thread was spawned with (so the apply-time
     /// stale prune detects identity AND attachment changes), survives
     /// thread exit as a tombstone carrying the respawn backoff stamp,
     /// and is removed only when the endpoint leaves the desired set.
-    pub(crate) wg_control_threads: BTreeMap<u16, WgControlEntry>,
+    pub(crate) wg_control_threads: tunnel_registry::TunnelThreadRegistry<WgControlEntry>,
     pub(crate) last_slow_path_status: SlowPathStatus,
     /// #10069: last published status for the delegated slow-path outlet,
     /// retained across teardown when no live reinjector is present.
@@ -708,8 +709,8 @@ impl Coordinator {
             slow_path: None,
             local_tunnel_deliveries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
             wg_uncovered_queues: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
-            tunnel_sources: BTreeMap::new(),
-            wg_control_threads: BTreeMap::new(),
+            tunnel_sources: tunnel_registry::TunnelThreadRegistry::new(),
+            wg_control_threads: tunnel_registry::TunnelThreadRegistry::new(),
             last_slow_path_status: SlowPathStatus::default(),
             last_slow_path_delegated_status: SlowPathStatus::default(),
             last_s5_reinject_status: None,
@@ -1301,21 +1302,10 @@ impl Coordinator {
         // worker, and the resolver thread is provably gone so no stale
         // mutation can occur. The next reconcile spawns a fresh resolver
         // and re-installs the handle on every worker.
-        // #1881: entries may be tombstones (`handle == None`); stop
-        // then join live handles, clear everything (tombstones too —
-        // after a stop the next reconcile re-legitimates entries).
-        for entry in self.tunnel_sources.values_mut() {
-            if let Some(handle) = entry.handle.as_ref() {
-                handle.request_stop();
-            }
-        }
-        for entry in self.tunnel_sources.values_mut() {
-            if let Some(handle) = entry.handle.as_mut() {
-                if let Some(join) = handle.join.take() {
-                    let _ = join.join();
-                }
-            }
-        }
+        // #1881/#17084: entries may be tombstones (`handle == None`);
+        // the shared registry clear signals then joins live handles
+        // and clears everything (tombstones too — after a stop the
+        // next reconcile re-legitimates entries).
         self.tunnel_sources.clear();
         self.local_tunnel_deliveries
             .store(Arc::new(BTreeMap::new()));
@@ -1334,20 +1324,9 @@ impl Coordinator {
         // #1432 S2a: stop + join WG control threads. The persistent wgN
         // TUN is owned by the Go control plane and intentionally NOT
         // torn down here (it must survive a reload — AGY r3 Hazard B).
-        // #1866: tombstones are cleared too — after a stop the next
-        // reconcile re-legitimates entries from a coherent snapshot.
-        for entry in self.wg_control_threads.values_mut() {
-            if let Some(handle) = entry.handle.as_ref() {
-                handle.request_stop();
-            }
-        }
-        for entry in self.wg_control_threads.values_mut() {
-            if let Some(handle) = entry.handle.as_mut() {
-                if let Some(join) = handle.join.take() {
-                    let _ = join.join();
-                }
-            }
-        }
+        // #1866/#17084: tombstones are cleared too via the shared
+        // registry clear — after a stop the next reconcile
+        // re-legitimates entries from a coherent snapshot.
         self.wg_control_threads.clear();
         // #13669 (D11-03): snapshot worker identity and shared atomics so
         // holder retirement can happen after `stop_and_clear` removes records.

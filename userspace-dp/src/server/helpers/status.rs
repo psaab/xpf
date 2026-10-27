@@ -924,7 +924,7 @@ pub(crate) fn finish_binding_reconcile(
     prior: BindingArmSnapshot,
     settle: bool,
     persist_state: &mut bool,
-    settle_wait: &mut Option<Duration>,
+    deferred: &mut Option<crate::server::handlers::Deferred>,
 ) {
     if let Err(err) = reconcile_status_bindings(guard) {
         response.ok = false;
@@ -937,7 +937,7 @@ pub(crate) fn finish_binding_reconcile(
         return;
     }
     if settle {
-        *settle_wait = Some(Duration::from_secs(2));
+        *deferred = Some(crate::server::handlers::Deferred::Settle(Duration::from_secs(2)));
     }
     refresh_status(guard);
     *persist_state = true;

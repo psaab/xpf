@@ -293,9 +293,9 @@ func emitNodeExpandedTunnelNames(tree *ConfigTree, nodeID int, opts compileOpts,
 // upgraded node still boots — the snapshot builder independently
 // drops the later-sorting collider (fail-closed belt-and-braces in
 // buildTunnelEndpointSnapshots). opts is the caller's compileOpts:
-// sanitizeFreeTextControlChars selects lenient warn-vs-error (the
-// historical mode proxy, now part of the threaded opts), and the same
-// opts drive the Views 2/3 side compiles (#17163).
+// opts.tolerant selects lenient warn-vs-error (#17153 — formerly the
+// borrowed sanitizeFreeTextControlChars), and the same opts drive the
+// Views 2/3 side compiles (#17163).
 func validateTunnelEndpointIDCollisionAST(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	names := make(map[string]struct{})
 	// View 1 — pre-expansion presence union (#1873). Union across EVERY
@@ -350,7 +350,7 @@ func validateTunnelEndpointIDCollisionAST(tree *ConfigTree, opts compileOpts) ([
 		msg := fmt.Sprintf(
 			"tunnel endpoint id collision between %q and %q (both fold to %d) — rename one interface (#1873)",
 			owner, name, id)
-		if !opts.sanitizeFreeTextControlChars {
+		if !opts.tolerant {
 			return nil, fmt.Errorf("interfaces: %s", msg)
 		}
 		warnings = append(warnings, msg+

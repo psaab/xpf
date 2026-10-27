@@ -136,7 +136,7 @@ func diagnosticMergeName9023(name string) string {
 // CompileConfig converts a parsed ConfigTree AST into a typed Config struct.
 // It clones the tree before expansion so the original tree is not mutated.
 func CompileConfig(tree *ConfigTree) (*Config, error) {
-	return compileTree(tree, compileOpts{}, nil)
+	return compileTree(tree, strictCompileOpts(), nil)
 }
 
 // CompileConfigWithCurrentClusterPrimary is CompileConfig with the
@@ -162,7 +162,7 @@ func CompileConfigForNodeWithCurrentClusterPrimary(tree *ConfigTree, nodeID int,
 // so the two gates can never be fed different views of "active". Keys are
 // held only for equality checks and never logged or rendered.
 func currentClusterOpts(cfg *Config) compileOpts {
-	var opts compileOpts
+	opts := strictCompileOpts()
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return opts
 	}
@@ -947,7 +947,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 // resolves to group "node0"). This supports a single shared config for both
 // nodes in a chassis cluster.
 func CompileConfigForNode(tree *ConfigTree, nodeID int) (*Config, error) {
-	return compileTree(tree, compileOpts{}, &nodeID)
+	return compileTree(tree, strictCompileOpts(), &nodeID)
 }
 
 // CompileConfigForNodeLenient is CompileConfigForNode with the
@@ -1213,8 +1213,7 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// contested interfaces are rejected/quarantined, but must not expose
 	// partially compiled enforcement state to callers.
 	clearDroppedEnforcementZoneBindings11575(cfg)
-	if opts.lenientTunnelRITarget12520 || opts.lenientWireguardRoutingInstance ||
-		opts.lenientRIDualClaim11060 || opts.lenientRIMgmtMember11392 {
+	if deferJunosHostWarnings(opts) {
 		// #13138: this advisory consumes the final effective ingress ownership,
 		// matching BuildJunosHostDenyProjection downstream.
 		cfg.Warnings = append(cfg.Warnings, validateJunosHostDirectDeliveryWarnings(cfg)...)
