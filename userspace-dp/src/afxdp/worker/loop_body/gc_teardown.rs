@@ -269,7 +269,7 @@ pub(in crate::afxdp) fn production_rotation_purge_for_test(
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: now_ns, secs: 0 },
+            tick: Tick::from_ns(now_ns),
         },
         new_forwarding,
         &removed_zone_ids,

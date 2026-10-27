@@ -91,7 +91,7 @@ now_ns: u64,) {
                     v4: current.bpf_maps.conntrack_v4_fd,
                     v6: current.bpf_maps.conntrack_v6_fd,
                 },
-                tick: Tick { ns: now_ns, secs: 0 },
+                tick: Tick::from_ns(now_ns),
             },
             forwarding,
             &canonical_key,
