@@ -152,7 +152,7 @@ func TestGrowableFramesSurviveReceiveLoop17093(t *testing.T) {
 		// #18116 (B1): the fixture APPENDS its extension bytes after
 		// flags2, so flags2 must still decode from its fixed offset —
 		// a len-1 read would take the trailing 0 byte instead.
-		if got := ss.peerCapabilityFlags2.Load(); got != uint32(localCapabilityFlags2) {
+		if got := ss.peerIncarnationState().peerCapabilityFlags2.Load(); got != uint32(localCapabilityFlags2) {
 			t.Fatalf("peerCapabilityFlags2 = %d, want %d (appended trailing byte corrupted flags2)", got, localCapabilityFlags2)
 		}
 		if got := ss.Stats().OversizeFramesRefused; got != 0 {
@@ -182,7 +182,7 @@ func TestGrowableFramesSurviveReceiveLoop17093(t *testing.T) {
 		if got := ss.PeerSessionSyncWireVersion(); got != SessionSyncWireVersion {
 			t.Fatalf("PeerSessionSyncWireVersion = %d, want %d", got, SessionSyncWireVersion)
 		}
-		if got := ss.peerCapabilityFlags2.Load(); got != uint32(localCapabilityFlags2) {
+		if got := ss.peerIncarnationState().peerCapabilityFlags2.Load(); got != uint32(localCapabilityFlags2) {
 			t.Fatalf("peerCapabilityFlags2 = %d, want %d at +reserve (appended bytes corrupted flags2)", got, localCapabilityFlags2)
 		}
 	})
