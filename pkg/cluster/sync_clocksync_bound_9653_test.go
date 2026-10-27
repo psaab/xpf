@@ -93,9 +93,9 @@ func TestClockSyncWithAnImpossiblePeerClockIsRefused_9653(t *testing.T) {
 			e := newClockEnv9653(t)
 			e.clockSync(0, clockTestNow9653/2)
 			want, synced := e.connOffset(0)
-			if !synced || e.s.peerClockOffset.Load() != want {
+			if !synced || e.s.peerIncarnationState().peerClockOffset.Load() != want {
 				t.Fatalf("setup: the honest clock sync was not stored (fabric 0 synced=%v offset=%d, global=%d)",
-					synced, want, e.s.peerClockOffset.Load())
+					synced, want, e.s.peerIncarnationState().peerClockOffset.Load())
 			}
 
 			e.clockSync(0, tc.peerMono)
@@ -107,7 +107,7 @@ func TestClockSyncWithAnImpossiblePeerClockIsRefused_9653(t *testing.T) {
 			if got := e.s.Stats().ClockSyncsRefused; got != 2 {
 				t.Errorf("Stats().ClockSyncsRefused = %d, want 2: the refusal must reach the snapshot cluster status renders", got)
 			}
-			if got := e.s.peerClockOffset.Load(); got != want {
+			if got := e.s.peerIncarnationState().peerClockOffset.Load(); got != want {
 				t.Errorf("the stored offset moved from %d to %d on peer clock %d", want, got, tc.peerMono)
 			}
 			if got, _ := e.connOffset(0); got != want {

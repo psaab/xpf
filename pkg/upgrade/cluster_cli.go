@@ -213,9 +213,21 @@ func (g *grpcCluster) PeerProtocolVersions() (uint16, uint16, uint16, bool, erro
 	return peerProtocolVersionsFromStatus(s)
 }
 
-// haProtocolVerdictFromStatus is the decision half of HAProtocolCompatible:
-// compatible iff both HA lines parse and are equal. Malformed or absent
-// lines fail closed (compatible=false) with the parsed values for logging.
+// haProtocolVerdictFromStatus is the decision half of HAProtocolCompatible.
+// It compares the local and peer HA protocol version lines from
+// `show chassis cluster status` (FormatStatus):
+//
+//	HA protocol version: N
+//	Peer HA protocol version: M
+//
+// Compatible iff both lines parse and N == M (the rolling contract:
+// mixed N/N+1 nodes only hand off RGs when CurrentHAProtocolVersion
+// matches; a bump means the wire semantics changed and the release is
+// NOT rolling-upgradable). Malformed or absent lines fail closed
+// (compatible=false) with the parsed values for logging: if the peer
+// line is ABSENT (peer not alive / version unknown) we return false so
+// the driver does not proceed blind — PeerAlive already gates the
+// happy path, and a missing peer-version here fails closed.
 func haProtocolVerdictFromStatus(status string) (bool, uint16, uint16) {
 	local, peer, ok := parseHAProtocolVersions(status)
 	if !ok {
@@ -313,7 +325,7 @@ func (g *grpcCluster) SessionSyncWireCompatible() (bool, string, error) {
 //
 // The split is not cosmetic. The first version of this code inlined the decision
 // next to the fetch, and the only test of the absent-line behaviour drove
-// parsePeerSessionSyncWire and cluster.SessionSyncWireCompatible directly —
+// parsePeerSessionSyncWireStrict and cluster.SessionSyncWireCompatible directly —
 // both of which are UNCHANGED by the defect. Reverting the absent-line handling
 // left the whole suite green. The collapse lives HERE, between the parser and
 // the verdict, so this is the layer a test has to reach.
@@ -352,10 +364,21 @@ func sessionSyncWireVerdictFromStatus(status string) (bool, string, error) {
 	return okv, reason, nil
 }
 
-// parsePeerSessionSyncWireStrict is parsePeerSessionSyncWire with the
-// malformed-present case surfaced as an error (#14991) instead of
-// (0, present). "unknown" remains (0, present, nil): a peer that
-// advertises nothing predates #7990 and permits deliberately.
+// parsePeerSessionSyncWireStrict extracts the peer session-sync wire
+// version from `show chassis cluster status` (FormatStatus):
+//
+//	Peer session-sync wire version: N        -> (N, true, nil)
+//	Peer session-sync wire version: unknown  -> (0, true, nil)
+//	line absent                              -> (0, false, nil)
+//	present but malformed                    -> (0, true, error)
+//
+// "unknown" and a missing line are reported DIFFERENTLY even though
+// both yield 0, because they are different facts about the instrument:
+// "unknown" means this node rendered the line and the peer advertised
+// nothing (a peer that predates #7990 and permits deliberately), while
+// a missing line means this node never rendered it at all. A malformed
+// PRESENT value is surfaced as an error (#14991) instead of collapsing
+// to (0, present), so no caller can permit on garbage.
 func parsePeerSessionSyncWireStrict(s string) (uint16, bool, error) {
 	const prefix = "peer session-sync wire version:"
 	for _, line := range strings.Split(s, "\n") {
@@ -487,56 +510,6 @@ func parseSessionSyncBulkPrimed(s string) bool {
 	return false
 }
 
-// parseHAProtocolCompatible compares the local and peer HA protocol
-// version lines from `show chassis cluster status` (FormatStatus):
-//
-//	HA protocol version: N
-//	Peer HA protocol version: M
-//
-// Compatible iff N == M (the rolling contract: mixed N/N+1 nodes only
-// hand off RGs when CurrentHAProtocolVersion matches; a bump means the
-// wire semantics changed and the release is NOT rolling-upgradable). If
-// the peer line is ABSENT (peer not alive / version unknown) we return
-// false so the driver does not proceed blind — PeerAlive already gates
-// the happy path, and a missing peer-version here fails closed.
-// parsePeerSessionSyncWire extracts the peer session-sync wire version from
-// `show chassis cluster status` (FormatStatus):
-//
-//	Peer session-sync wire version: N        -> (N, true)
-//	Peer session-sync wire version: unknown  -> (0, true)
-//	line absent                              -> (0, false)
-//
-// "unknown" and a missing line are reported DIFFERENTLY even though both yield
-// 0, because they are different facts about the instrument: "unknown" means this
-// node rendered the line and the peer advertised nothing, while a missing line
-// means this node never rendered it at all. The caller collapses them, but a
-// future caller that must not may need to tell them apart, and a parser that
-// erases the distinction cannot be asked later.
-func parsePeerSessionSyncWire(s string) (uint16, bool) {
-	// Kept for the #7990 parser table: a malformed present value still
-	// reports (0, true) HERE so the parser's present/absent distinction is
-	// pinned; the VERDICT layer (sessionSyncWireVerdictFromStatus, via
-	// parsePeerSessionSyncWireStrict) refuses it — #14991 moved the
-	// fail-closed decision there so no caller can permit on garbage by
-	// routing through this lenient form.
-	const prefix = "peer session-sync wire version:"
-	for _, line := range strings.Split(s, "\n") {
-		l := strings.TrimSpace(line)
-		if !strings.HasPrefix(strings.ToLower(l), prefix) {
-			continue
-		}
-		val := strings.TrimSpace(l[len(prefix):])
-		if strings.EqualFold(val, "unknown") {
-			return 0, true
-		}
-		if n, ok := strictVersionValue(val); ok {
-			return uint16(n), true
-		}
-		return 0, true
-	}
-	return 0, false
-}
-
 // parseHAProtocolVersions extracts both HA lines strictly: any present
 // line whose value is not a clean uint16, or either line absent, yields
 // ok=false (#14991 — previously trailingInt silently skipped a malformed
@@ -548,11 +521,6 @@ func parseHAProtocolVersions(s string) (local, peer int, ok bool) {
 		return 0, 0, false
 	}
 	return local, peer, true
-}
-
-func parseHAProtocolCompatible(s string) bool {
-	compat, _, _ := haProtocolVerdictFromStatus(s)
-	return compat
 }
 
 func parsePeerTakeoverReady(s string) bool {
@@ -776,14 +744,6 @@ func (g *grpcCluster) ResetFailover() error {
 	// (LocalRejoinComplete, #5044/#5138) then refuses to confirm, so the
 	// roll stops instead of advancing to drain the peer.
 	return g.systemAction("cluster-rejoin")
-}
-
-// configuredRGs returns the redundancy-group IDs enumerated from the live
-// status output. It FAILS CLOSED (#5044) rather than guessing a hardcoded set:
-// see configuredRGsFromStatus.
-func (g *grpcCluster) configuredRGs() ([]int, error) {
-	s, err := g.statusText()
-	return configuredRGsFromStatus(s, err)
 }
 
 // configuredRGsFromStatus derives the configured redundancy-group ID set from
