@@ -3219,6 +3219,7 @@ fn logging_cached_entry(input: bool, output: bool) -> FlowCacheEntry {
             },
             ingress_zone_id: TEST_TRUST_ZONE_ID,
             l4_present: true,
+            source: FilterLogSource::Input,
         });
     }
     if output {
