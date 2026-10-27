@@ -23,8 +23,7 @@ pub(in crate::afxdp) use drain::{
     COS_SURPLUS_ROUND_QUANTUM_BYTES,
 };
 pub(super) use drain::{
-    bound_pending_tx_local, bound_pending_tx_prepared, drain_pending_tx,
-    drain_pending_tx_local_owner, pending_tx_capacity,
+    bound_pending_tx_local, bound_pending_tx_prepared, drain_pending_tx, pending_tx_capacity,
 };
 
 pub(super) mod cos_classify;
@@ -44,7 +43,7 @@ pub(super) use cos_classify::{
     resolve_cos_tx_selection_at_prenat,
 };
 // Private use, not a re-export: a `pub(super) use` of a `pub(super)`
-// item triggers E0364. drain.rs reaches this through `use super::*;`.
+// item triggers E0364. The drain submodule reaches this through `use super::*;`.
 use cos_classify::enqueue_prepared_into_cos;
 
 #[cfg(test)]

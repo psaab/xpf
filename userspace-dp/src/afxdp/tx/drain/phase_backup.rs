@@ -2,49 +2,43 @@
 // that reached this path instead of being shaped, then drains
 // `pending_tx_prepared` via `transmit_prepared_batch`, then
 // the `pending_tx_local`/inbox tail via `transmit_batch` with
-// `TX_BATCH_SIZE` retry batching. Mirrors `drain.rs:201-313`
-// (original).
+// `TX_BATCH_SIZE` retry batching.
 //
-// Codex round-2 finding 3.2 split: factored into two private
-// helpers in the same file. `backup_drain_prepared` returns
-// `Option<BackupOutcome>` so the prepared-side `TxError::Retry`
-// (which must `return true;` unconditionally per `drain.rs:233`)
-// can short-circuit the local-side drain. `backup_drain_local`
-// returns `BackupOutcome` directly so both empty-pending early
-// returns map to the orchestrator's `update_binding_debug_state`
-// distinction.
+// Factored into two private helpers in the same file.
+// `backup_drain_prepared` returns `Option<BackupOutcome>` so the
+// prepared-side `TxError::Retry` (which returns `true`
+// unconditionally) can short-circuit the local-side drain.
+// `backup_drain_local` returns `BackupOutcome` directly; both of
+// its empty-pending early returns collapse to `Return(..)` carrying
+// the already-folded result, and the single
+// `update_binding_debug_state` call is owned by the orchestrator,
+// which invokes `drain_phase_finish` on the fall-through path.
 
 use super::super::*;
 use super::DrainCtx;
 use super::{
-    drop_cos_bound_local_leftovers, drop_cos_bound_prepared_leftovers,
+    binding_has_pending_tx_work, drop_cos_bound_local_leftovers, drop_cos_bound_prepared_leftovers,
     restore_pending_tx_requests, take_pending_tx_requests,
 };
 
-/// Outcome of the backup phase. The orchestrator owns the
-/// final `update_binding_debug_state(binding)` call and the
-/// `did_work || binding_has_pending_tx_work(binding)` OR-fold so
-/// the side-effect distinction at `drain.rs:248` (yes update)
-/// vs `drain.rs:252` (no update) and the unconditional return
-/// at `drain.rs:233` are preserved exactly.
+/// Outcome of the backup phase. Two variants only: either fall
+/// through to phase 6 (`drain_phase_finish`), or return the
+/// enclosed result immediately. The orchestrator owns the single
+/// `update_binding_debug_state` call site (in this branch or in
+/// `drain_phase_finish`); every path reaching this phase passes
+/// through it exactly once. The enclosed result is `true`
+/// unconditionally for the prepared-side `TxError::Retry`
+/// (ignoring accumulated `did_work`), and the
+/// `did_work || binding_has_pending_tx_work(binding)` OR-fold
+/// itself for the empty-pending early returns. Invariant: no
+/// variant encodes a debug-update distinction — that distinction
+/// only shifted a ~1-in-65536 debug-publish cadence tick.
 pub(super) enum BackupOutcome {
-    /// Fall through to phase 6 (`drain_phase_submit_and_wake`).
+    /// Fall through to phase 6 (`drain_phase_finish`).
     Continue,
-    /// `drain.rs:231-233` `TxError::Retry` on prepared transmit
-    /// — orchestrator returns `true` unconditionally, ignoring
-    /// the accumulated `did_work`.
-    EarlyReturnRetry,
-    /// `drain.rs:247-249` — after `transmit_prepared_batch` loop
-    /// completes normally, `pending_tx_local.is_empty() &&
-    /// pending_tx_empty()`. Orchestrator calls
-    /// `update_binding_debug_state(binding)` then returns
-    /// `did_work || binding_has_pending_tx_work(binding)`.
-    EarlyReturnAfterDebugUpdate,
-    /// `drain.rs:251-253` — after `take_pending_tx_requests`,
-    /// `pending.is_empty()`. Orchestrator returns
-    /// `did_work || binding_has_pending_tx_work(binding)`
-    /// WITHOUT calling `update_binding_debug_state`.
-    EarlyReturnNoDebugUpdate,
+    /// Return the enclosed `bool` from `drain_pending_tx`
+    /// immediately, skipping phase 6.
+    Return(bool),
 }
 
 #[inline]
@@ -60,12 +54,13 @@ pub(super) fn drain_phase_drain_local_backup(
     backup_drain_local(binding, ctx, shared_recycles, did_work)
 }
 
-/// Mirrors `drain.rs:201-246` (original):
+/// Invariants:
 /// - #760 fast-exit when no CoS is configured.
 /// - `drop_cos_bound_prepared_leftovers` drops items that
 ///   reached this backup path instead of being shaped.
 /// - `transmit_prepared_batch` loop with `TxError::Retry` →
-///   `return true` (encoded as `Some(EarlyReturnRetry)`).
+///   return `true` unconditionally (encoded as
+///   `Some(BackupOutcome::Return(true))`).
 #[inline]
 fn backup_drain_prepared(
     binding: &mut BindingWorker,
@@ -103,7 +98,7 @@ fn backup_drain_prepared(
                 // #4971: expected TX backpressure — record the reason
                 // lock-free instead of taking the `last_error` mutex.
                 binding.live.set_tx_retry_status(reason);
-                return Some(BackupOutcome::EarlyReturnRetry);
+                return Some(BackupOutcome::Return(true));
             }
             Err(TxError::Drop(reason)) => {
                 // #15786: an all-invalid prepared batch reaches here
@@ -120,16 +115,17 @@ fn backup_drain_prepared(
     None
 }
 
-/// Mirrors `drain.rs:247-313` (original):
-/// - empty-after-prepared short-circuit with debug update.
+/// Invariants:
+/// - empty-after-prepared short-circuit returns the OR-fold.
 /// - `take_pending_tx_requests` + empty-after-take short-circuit
-///   WITHOUT debug update.
+///   likewise returns the OR-fold (the deque allocation is handed
+///   back first, #7204).
 /// - #760 `drop_cos_bound_local_leftovers` when CoS configured.
 /// - `transmit_batch` retry loop with `TxError::Retry` →
 ///   break + `restore_pending_tx_requests` + fall through to
 ///   phase 6 (Continue). This is distinct from the prepared-side
-///   Retry (which `return true` unconditionally) — local-side
-///   Retry restores and continues to submit-and-wake.
+///   Retry (which returns `true` unconditionally) — local-side
+///   Retry restores and continues to the finish phase.
 #[inline]
 fn backup_drain_local(
     binding: &mut BindingWorker,
@@ -138,7 +134,7 @@ fn backup_drain_local(
     did_work: &mut bool,
 ) -> BackupOutcome {
     if binding.tx_pipeline.pending_tx_local.is_empty() && binding.live.pending_tx_empty() {
-        return BackupOutcome::EarlyReturnAfterDebugUpdate;
+        return BackupOutcome::Return(*did_work || binding_has_pending_tx_work(binding));
     }
     let mut pending = take_pending_tx_requests(binding);
     if pending.is_empty() {
@@ -148,7 +144,7 @@ fn backup_drain_local(
         // producer regrow it — the idle-binding path, which is the one this
         // early return exists to make cheap.
         binding.tx_pipeline.pending_tx_local = pending;
-        return BackupOutcome::EarlyReturnNoDebugUpdate;
+        return BackupOutcome::Return(*did_work || binding_has_pending_tx_work(binding));
     }
     // #760: drop any CoS-bound items. Fast-exit if no CoS is
     // configured at all — saves the O(n) scan + reallocation on
