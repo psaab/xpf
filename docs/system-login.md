@@ -1288,11 +1288,10 @@ An empty class is precisely the legacy allow-everything mode, so a
 every command and rendered secrets in cleartext — with `show configuration`
 echoing their intent back. Rejecting is load-bearing because the downstream
 safety nets all read fields the packed drop leaves empty. The `deny-commands` /
-`deny-configuration` gate above is the sharpest case: it keys off
-`LoginClass.DenyLeavesPresent`, so a packed body means the commit it would have
-**refused** is accepted instead, and the restriction the operator wrote is
-discarded without a word. The field the bug empties is the field the check
-reads.
+`deny-configuration` case is the sharpest: the runtime regex evaluator keys
+off `LoginClass.DenyLeavesPresent`, so a packed body means the restriction
+the operator wrote never reaches the evaluator and is discarded without a
+word. The field the bug empties is the field the evaluator reads.
 
 This applies to the whole stanza, at every level:
 

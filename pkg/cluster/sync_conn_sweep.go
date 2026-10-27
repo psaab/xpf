@@ -535,9 +535,10 @@ func (s *SessionSync) syncSweep() int {
 		slog.Warn("cluster sync: forcing full bulk resync after delete-journal overflow (standby may retain stale sessions)")
 		if err := s.doBulkSync(); err != nil {
 			s.forceResync.Store(true)
-			// #9752 round 4: a fenced bulk is a quiet skip (the fence
-			// already counted and warned once), not a hot retry loop.
-			if errors.Is(err, errBulkFencedForPeer) {
+			// #9752 round 4 / #17113: a fenced bulk is a quiet skip
+			// (each fence already counted and warned once), not a hot
+			// retry loop.
+			if errors.Is(err, errBulkFencedForPeer) || errors.Is(err, errBulkFencedForIpsecPeer) {
 				slog.Debug("cluster sync: forced resync bulk fenced for peer; waiting for disconnect or capable discovery")
 			} else {
 				slog.Warn("cluster sync: forced resync bulk failed, will retry", "err", err)
@@ -583,8 +584,8 @@ func (s *SessionSync) syncSweep() int {
 		err := s.doBulkSync()
 		s.bulkRedriveInFlight.Store(false)
 		if err != nil {
-			// #9752 round 4: quiet when fenced (see the forced-resync twin).
-			if errors.Is(err, errBulkFencedForPeer) {
+			// #9752 round 4 / #17113: quiet when fenced (see the forced-resync twin).
+			if errors.Is(err, errBulkFencedForPeer) || errors.Is(err, errBulkFencedForIpsecPeer) {
 				slog.Debug("cluster sync: owed cold-prime re-drive fenced for peer; waiting for disconnect or capable discovery")
 			} else {
 				slog.Warn("cluster sync: owed cold-prime re-drive failed, will retry", "err", err)
@@ -607,7 +608,7 @@ func (s *SessionSync) syncSweep() int {
 		s.bulkRedriveInFlight.Store(false)
 		if err != nil {
 			s.bulkAckRetryOwed.Store(true)
-			if errors.Is(err, errBulkFencedForPeer) {
+			if errors.Is(err, errBulkFencedForPeer) || errors.Is(err, errBulkFencedForIpsecPeer) {
 				slog.Debug("cluster sync: unacknowledged bulk retry fenced for peer; waiting for disconnect or capable discovery")
 			} else {
 				slog.Warn("cluster sync: unacknowledged bulk retry failed, will retry", "err", err)
@@ -689,7 +690,7 @@ func (s *SessionSync) syncSweep() int {
 			if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "sweep_v4") {
 				return true
 			}
-			if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+			if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "sweep_v4") {
 				return true
 			}
 			if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
@@ -740,7 +741,7 @@ func (s *SessionSync) syncSweep() int {
 			if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "sweep_v6") {
 				return true
 			}
-			if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+			if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "sweep_v6") {
 				return true
 			}
 			if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&

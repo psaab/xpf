@@ -52,7 +52,9 @@ func TestWriteLinkFileRefusesUnsafeNames_9886(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=enp9s0\n\n[Link]\nName=ge-0-0-3"
+	// #17042: the boot writer renders through networkd.RenderLink, whose
+	// body ends with the trailing newline generateLink always emitted.
+	want := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=enp9s0\n\n[Link]\nName=ge-0-0-3\n"
 	if string(got) != want {
 		t.Fatalf("clean .link content differs:\n got=%q\nwant=%q", got, want)
 	}

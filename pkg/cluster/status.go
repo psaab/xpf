@@ -497,23 +497,11 @@ func (m *Manager) FormatInformation() string {
 			connected = "Up"
 		}
 		fmt.Fprintf(&b, "  Status: %s\n", connected)
-		fmt.Fprintf(&b, "  Errors: %d\n", syncStats.Errors)
-		if syncStats.PreKeyAuthEvictions > 0 {
-			fmt.Fprintf(&b, "  Pre-key authentication evictions: %d\n", syncStats.PreKeyAuthEvictions)
-		}
-		if syncStats.DeletesSuppressedPeerIncapable > 0 {
-			fmt.Fprintf(&b, "  Deletes suppressed for incapable peer: %d\n", syncStats.DeletesSuppressedPeerIncapable)
-		}
-		if syncStats.DeletesSuppressedPurgeRetirement > 0 {
-			fmt.Fprintf(&b, "  Purge-retirement deletes suppressed: %d\n", syncStats.DeletesSuppressedPurgeRetirement)
-		}
-		if syncStats.DeletesSuppressedScopedPolicy > 0 {
-			fmt.Fprintf(&b, "  Scoped-policy deletes suppressed: %d\n", syncStats.DeletesSuppressedScopedPolicy)
-		}
-		if syncStats.InstallsSuppressedNoPeerInstallTable > 0 {
-			fmt.Fprintf(&b, "  Installs suppressed (peer lacks install-table support): %d\n",
-				syncStats.InstallsSuppressedNoPeerInstallTable)
-		}
+		// #17107: descriptor-driven conditional counters (deletes
+		// suppressed/dropped, pre-auth, malformed, fences, stale-ignored,
+		// ...) — one render decision in syncStatFields, not a hand-picked
+		// subset per surface.
+		b.WriteString(renderSyncFabricCounters17107(syncStats))
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}
@@ -617,126 +605,17 @@ func (m *Manager) FormatInformation() string {
 			fmt.Fprintf(&b, "  WARNING: config sync cleartext fallback has been used (alarm latched; sent %d, received %d)\n",
 				syncStats.ConfigsSentCleartext, syncStats.ConfigsReceivedCleartext)
 		}
-		if syncStats.ConfigsStaleIgnored > 0 {
-			fmt.Fprintf(&b, "  Configs stale-dropped: %d\n", syncStats.ConfigsStaleIgnored)
-		}
-		if syncStats.ConfigsApplyFailed > 0 {
-			fmt.Fprintf(&b, "  Configs apply-failed:  %d\n", syncStats.ConfigsApplyFailed)
-		}
-		// #6785: surface the helper's semantic import refusals. Rendered only
-		// when non-zero, unlike the peer boot incarnation: zero is the ordinary
-		// state and carries no diagnostic value, whereas a non-zero count means
-		// the peer believes it synced sessions this node does not hold.
-		if syncStats.ImportsRefusedByHelper > 0 {
-			fmt.Fprintf(&b, "  Imports refused by helper: %d\n", syncStats.ImportsRefusedByHelper)
-		}
-		if syncStats.ImportsRejectedByHelper > 0 {
-			fmt.Fprintf(&b, "  Imports rejected by helper: %d\n", syncStats.ImportsRejectedByHelper)
-		}
-		// #6778: a config that never reached the ordered apply queue. Rendered
-		// beside apply-failed because the operator consequence is identical —
-		// this node is running a config older than the primary's committed one
-		// — but the cause is different (receive-edge saturation, not a compile
-		// or promote failure), so it gets its own line rather than being folded
-		// into apply-failed.
-		if syncStats.ConfigsQueueFullDropped > 0 {
-			fmt.Fprintf(&b, "  Configs queue-full-dropped: %d\n", syncStats.ConfigsQueueFullDropped)
-		}
-		// #7328/#6778: nacks this node ACCEPTED from the peer, i.e. generations
-		// we pushed that the peer did not apply. Surfaced because it is the
-		// sender-side half of the queue-full / apply-failure recovery loop: a
-		// peer whose queue-full drops climb while this counter stays at zero has
-		// no working re-push driver.
-		if syncStats.ConfigApplyNacksReceived > 0 {
-			fmt.Fprintf(&b, "  Config apply-nacks received: %d\n", syncStats.ConfigApplyNacksReceived)
-		}
-		// #5084: the peer boot incarnation, rendered ALWAYS rather than only
-		// when non-empty. "none" is the operationally interesting value — it
-		// means the fence is in its fail-open state against this peer — and a
-		// line that disappears in exactly that case would hide it.
-		//
-		// A status line plus counters, deliberately NOT a health annotation: an
-		// un-incarnated peer is the expected steady state of a rolling upgrade,
-		// not a fault, and raising cluster health for it would make every
-		// upgrade look degraded. #6387 set the precedent in the other direction
-		// by making a config-sync APPLY FAILURE diagnostic-only so it never
-		// gates failover; a less severe condition must not be louder.
+		// #17107: the conditional config-sync counters that used to be
+		// hand-listed here (stale-dropped, apply-failed, imports refused/
+		// rejected, queue-full-dropped, apply-nacks, dead-incarnation,
+		// clock-refused, generation-guard, rebase, DHCP-no-identity,
+		// foreign/epoch bulk ends, oversize, bulk-recv cap/abort) are now
+		// rendered descriptor-driven in the Fabric link block above via
+		// renderSyncFabricCounters17107; their labels are the
+		// syncStatFields labels, single-sourced there. Peer boot
+		// incarnation stays here: rendered ALWAYS ("none" is the
+		// interesting fail-open value, #5084), not a nonzero row.
 		fmt.Fprintf(&b, "  Peer boot incarnation: %s\n", syncStats.PeerBootIncarnation)
-		if syncStats.BulkPrimesWithoutIncarnation > 0 {
-			fmt.Fprintf(&b, "  Primes without incarnation: %d\n", syncStats.BulkPrimesWithoutIncarnation)
-		}
-		if syncStats.ConfigsDeadIncarnationDropped > 0 {
-			fmt.Fprintf(&b, "  Configs dead-incarnation-dropped: %d\n", syncStats.ConfigsDeadIncarnationDropped)
-		}
-		// #9174 V013: same posture as the two lines above — a refusal the
-		// operator can see. A nonzero value means a BulkEnd from a retired peer
-		// boot was stopped from completing a live transfer.
-		if syncStats.BulkEndsDeadIncarnationDropped > 0 {
-			fmt.Fprintf(&b, "  Bulk ends dead-incarnation-dropped: %d\n", syncStats.BulkEndsDeadIncarnationDropped)
-		}
-		// #9653: same posture. A nonzero value means something on the session-sync
-		// link sent a peer clock no running peer can read, and it was refused.
-		if syncStats.ClockSyncsRefused > 0 {
-			fmt.Fprintf(&b, "  Clock syncs refused: %d\n", syncStats.ClockSyncsRefused)
-		}
-		// #9915 F-044: same posture. A nonzero value means a churn workload
-		// pushed a generation map to its effective cap (GenMapOverflow) or
-		// forced tombstone evictions to make room (GenTombstonesEvicted).
-		if syncStats.GenMapOverflow > 0 {
-			fmt.Fprintf(&b, "  Generation-guard map overflows: %d\n", syncStats.GenMapOverflow)
-		}
-		if syncStats.GenTombstonesEvicted > 0 {
-			fmt.Fprintf(&b, "  Generation-guard tombstones evicted: %d\n", syncStats.GenTombstonesEvicted)
-		}
-		// #9915 F-044: cap growths are demand, not saturation — but an operator
-		// watching saturation wants both counters side by side.
-		if syncStats.GenCapGrown > 0 {
-			fmt.Fprintf(&b, "  Generation-guard cap growths: %d\n", syncStats.GenCapGrown)
-		}
-		// #9915 F-044 review: the wired ceiling shrank below a grown side cap
-		// (fewer helper workers) and the stored cap was clamped down to it.
-		if syncStats.GenCapShrunk > 0 {
-			fmt.Fprintf(&b, "  Generation-guard cap shrinks: %d\n", syncStats.GenCapShrunk)
-		}
-		// #9915 F-043 review: upgrade attempts refused on unresolvable LOCAL
-		// identity. Fix the node/cluster identity; the next commit retries.
-		if syncStats.AuthUpgradeIdentityErrors > 0 {
-			fmt.Fprintf(&b, "  Auth upgrade identity errors: %d\n", syncStats.AuthUpgradeIdentityErrors)
-		}
-		// #9915 F-118: same posture. A nonzero value means installs arrived
-		// with peer timestamps no honest clock can read; they were clamped
-		// to the far future instead of wrapping into the past.
-		if syncStats.RebaseSaturations > 0 {
-			fmt.Fprintf(&b, "  Rebase saturations: %d\n", syncStats.RebaseSaturations)
-		}
-		// #9915 F-117: same posture. Only violating members drop; a push
-		// filtering to zero retains the prior set (see the handler).
-		if syncStats.DHCPLeasesDroppedNoIdentity > 0 {
-			fmt.Fprintf(&b, "  DHCP leases dropped (no identity): %d\n", syncStats.DHCPLeasesDroppedNoIdentity)
-		}
-		// #9716: the connection fence, and the fail-open completions it covers.
-		// Same posture: counters an operator can see, not a health annotation.
-		if syncStats.BulkEndsForeignConnDropped > 0 {
-			fmt.Fprintf(&b, "  Bulk ends foreign-connection-dropped: %d\n", syncStats.BulkEndsForeignConnDropped)
-		}
-		if syncStats.BulkEndsEpochOnlyMatched > 0 {
-			fmt.Fprintf(&b, "  Bulk ends matched on epoch alone: %d\n", syncStats.BulkEndsEpochOnlyMatched)
-		}
-		// #16041: per-type payload cap refusals. A nonzero value means a
-		// keyed peer sent a frame larger than its type's encoder can emit;
-		// the connection was dropped. Conforming peers never trip this.
-		if syncStats.OversizeFramesRefused > 0 {
-			fmt.Fprintf(&b, "  Oversize frames refused (per-type cap): %d\n", syncStats.OversizeFramesRefused)
-		}
-		// #16039: bulk receive windows refused past the table cap or the
-		// window deadline. The window was aborted; a legitimate peer
-		// re-primes on its bounded re-drive.
-		if syncStats.BulkRecvCapped > 0 {
-			fmt.Fprintf(&b, "  Bulk receive keys capped: %d\n", syncStats.BulkRecvCapped)
-		}
-		if syncStats.BulkRecvAborted > 0 {
-			fmt.Fprintf(&b, "  Bulk receive windows aborted: %d\n", syncStats.BulkRecvAborted)
-		}
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}
@@ -892,26 +771,11 @@ func (m *Manager) FormatStatistics() string {
 			"", syncStats.SessionsInstalled)
 		fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Errors",
 			syncStats.Errors, "")
-		if syncStats.PreKeyAuthEvictions > 0 {
-			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Pre-key auth evictions",
-				syncStats.PreKeyAuthEvictions, "")
-		}
-		if syncStats.DeletesSuppressedPeerIncapable > 0 {
-			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Deletes suppressed (peer incapable)",
-				syncStats.DeletesSuppressedPeerIncapable, "")
-		}
-		if syncStats.DeletesSuppressedPurgeRetirement > 0 {
-			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Deletes suppressed (purge retirement)",
-				syncStats.DeletesSuppressedPurgeRetirement, "")
-		}
-		if syncStats.DeletesSuppressedScopedPolicy > 0 {
-			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Deletes suppressed (scoped policy)",
-				syncStats.DeletesSuppressedScopedPolicy, "")
-		}
-		if syncStats.InstallsSuppressedNoPeerInstallTable > 0 {
-			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Installs suppressed (no peer install table)",
-				syncStats.InstallsSuppressedNoPeerInstallTable, "")
-		}
+		// #17107: descriptor-driven conditional rows (label: value when
+		// nonzero) so MalformedRecordsDropped, DeletesDropped,
+		// PreAuthRejected and the other suppression/stale counters reach
+		// `show chassis cluster statistics` from one render decision.
+		b.WriteString(renderSyncStatRows17107(syncStats, "    "))
 		if syncStats.LastFenceSeq > 0 {
 			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Install fence seq",
 				syncStats.LastFenceSeq, "")
@@ -1134,6 +998,8 @@ func (m *Manager) FormatDataPlaneStatistics() string {
 		"", syncStats.SessionsInstalled)
 	fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Errors",
 		syncStats.Errors, "")
+	// #17107: same descriptor-driven conditional rows as FormatStatistics.
+	b.WriteString(renderSyncStatRows17107(syncStats, "    "))
 	if syncStats.LastFenceSeq > 0 {
 		fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Install fence seq",
 			syncStats.LastFenceSeq, "")
@@ -1607,4 +1473,28 @@ func (m *Manager) formatStartupSyncHold() string {
 	}
 	fmt.Fprintln(&b)
 	return b.String()
+}
+
+// renderSyncStatRows17107 renders the descriptor-driven conditional sync
+// counters for the statistics tables (#17107): one "Label: value" row per
+// RenderNonzero field that is nonzero, in syncStatFields order. Shared by
+// FormatStatistics and FormatDataPlaneStatistics so `show chassis cluster
+// statistics` and the data-plane surface cannot drift.
+func renderSyncStatRows17107(snap *SyncStatsSnapshot, indent string) string {
+	var b strings.Builder
+	for _, f := range syncStatFields {
+		if f.mode != RenderNonzero {
+			continue
+		}
+		if v := f.get(nil, snap); v != 0 {
+			fmt.Fprintf(&b, "%s%s: %d\n", indent, f.label, v)
+		}
+	}
+	return b.String()
+}
+
+// renderSyncFabricCounters17107 is the FormatInformation fabric-block form
+// of renderSyncStatRows17107 (two-space indent, #17107).
+func renderSyncFabricCounters17107(snap *SyncStatsSnapshot) string {
+	return renderSyncStatRows17107(snap, "  ")
 }

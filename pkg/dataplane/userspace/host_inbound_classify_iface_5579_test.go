@@ -36,7 +36,7 @@ const (
 func Test_5579_ZoneScopedMixedZoneIsAmbiguous(t *testing.T) {
 	cfg := hostInboundCfg3362()
 
-	got := ClassifyHostInbound(cfg, "wan", hi5579TCP, true, 22, nil, "ip")
+	got := ClassifyHostInbound(cfg, "wan", hi5579TCP, true, 22, true, nil, "ip")
 	if got.Status != HostInboundAmbiguous {
 		t.Fatalf("zone-scoped tcp/22 status = %v, want ambiguous (reth0.50 admits ssh, reth1.0 denies)", got.Status)
 	}
@@ -82,12 +82,12 @@ func Test_5579_ZoneScopedMixedZoneIsAmbiguous(t *testing.T) {
 func Test_5579_IngressInterfaceScopesToTruePosture(t *testing.T) {
 	cfg := hostInboundCfg3362()
 
-	admit := ClassifyHostInboundForInterface(cfg, "wan", "reth0.50", hi5579TCP, true, 22, nil, "ip")
+	admit := ClassifyHostInboundForInterface(cfg, "wan", "reth0.50", hi5579TCP, true, 22, true, nil, "ip")
 	if admit.Status != HostInboundTokenAdmit || admit.Token != "ssh" {
 		t.Errorf("reth0.50 tcp/22 = %v/%q, want token-admit/ssh", admit.Status, admit.Token)
 	}
 
-	deny := ClassifyHostInboundForInterface(cfg, "wan", "reth1.0", hi5579TCP, true, 22, nil, "ip")
+	deny := ClassifyHostInboundForInterface(cfg, "wan", "reth1.0", hi5579TCP, true, 22, true, nil, "ip")
 	if deny.Status != HostInboundDenied {
 		t.Errorf("reth1.0 tcp/22 = %v, want denied (sibling has no host-inbound override, default-deny)", deny.Status)
 	}
@@ -111,18 +111,18 @@ func Test_5579_IngressInterfaceReplacesZoneLevel(t *testing.T) {
 
 	// reth1.0 declares no stanza: it admits the zone-level ping (icmp echo
 	// type 8) and denies ssh.
-	if a := ClassifyHostInboundForInterface(cfg, "wan", "reth1.0", uint8(1), true, 0, u8ptr(8), "ip"); a.Status != HostInboundTokenAdmit || a.Token != "ping" {
+	if a := ClassifyHostInboundForInterface(cfg, "wan", "reth1.0", uint8(1), true, 0, true, u8ptr(8), "ip"); a.Status != HostInboundTokenAdmit || a.Token != "ping" {
 		t.Errorf("reth1.0 icmp echo = %v/%q, want token-admit/ping (zone-level)", a.Status, a.Token)
 	}
-	if a := ClassifyHostInboundForInterface(cfg, "wan", "reth1.0", hi5579TCP, true, 22, nil, "ip"); a.Status != HostInboundDenied {
+	if a := ClassifyHostInboundForInterface(cfg, "wan", "reth1.0", hi5579TCP, true, 22, true, nil, "ip"); a.Status != HostInboundDenied {
 		t.Errorf("reth1.0 tcp/22 = %v, want denied (ssh only on reth0.50)", a.Status)
 	}
 	// reth0.50 declares `ssh`: it admits ssh and NO LONGER inherits the zone's
 	// ping, because its stanza replaces the zone stanza (#6515).
-	if a := ClassifyHostInboundForInterface(cfg, "wan", "reth0.50", hi5579TCP, true, 22, nil, "ip"); a.Status != HostInboundTokenAdmit || a.Token != "ssh" {
+	if a := ClassifyHostInboundForInterface(cfg, "wan", "reth0.50", hi5579TCP, true, 22, true, nil, "ip"); a.Status != HostInboundTokenAdmit || a.Token != "ssh" {
 		t.Errorf("reth0.50 tcp/22 = %v/%q, want token-admit/ssh", a.Status, a.Token)
 	}
-	if a := ClassifyHostInboundForInterface(cfg, "wan", "reth0.50", uint8(1), true, 0, u8ptr(8), "ip"); a.Status != HostInboundDenied {
+	if a := ClassifyHostInboundForInterface(cfg, "wan", "reth0.50", uint8(1), true, 0, true, u8ptr(8), "ip"); a.Status != HostInboundDenied {
 		t.Errorf("reth0.50 icmp echo = %v/%q, want DENIED: the interface stanza lists only "+
 			"ssh and REPLACES the zone-level ping (#6515)", a.Status, a.Token)
 	}
@@ -202,8 +202,8 @@ func Test_5579_ResolveIngressInterfaceRejectsBarePhysical(t *testing.T) {
 
 	// The false-deny the reject prevents: the physical ref, if classified, drops
 	// the unit-authored ssh override and denies, while the logical unit admits.
-	physical := ClassifyHostInboundForInterface(cfg, "wan", "reth0", hi5579TCP, true, 22, nil, "ip")
-	unit := ClassifyHostInboundForInterface(cfg, "wan", "reth0.50", hi5579TCP, true, 22, nil, "ip")
+	physical := ClassifyHostInboundForInterface(cfg, "wan", "reth0", hi5579TCP, true, 22, true, nil, "ip")
+	unit := ClassifyHostInboundForInterface(cfg, "wan", "reth0.50", hi5579TCP, true, 22, true, nil, "ip")
 	if unit.Status != HostInboundTokenAdmit || unit.Token != "ssh" {
 		t.Errorf("reth0.50 = %v/%q, want token-admit/ssh", unit.Status, unit.Token)
 	}
@@ -267,13 +267,13 @@ func Test_5579_IngressInterfaceHonorsZoneQuarantine11068(t *testing.T) {
 		},
 		surviving: {Name: surviving, Interfaces: []string{"ge-0/0/2.0"}},
 	}
-	zone := ClassifyHostInbound(cfg, quarantined, hi5579TCP, true, 22, nil, "ip")
-	iface := ClassifyHostInboundForInterface(cfg, quarantined, "ge-0/0/1.0", hi5579TCP, true, 22, nil, "ip")
+	zone := ClassifyHostInbound(cfg, quarantined, hi5579TCP, true, 22, true, nil, "ip")
+	iface := ClassifyHostInboundForInterface(cfg, quarantined, "ge-0/0/1.0", hi5579TCP, true, 22, true, nil, "ip")
 	if zone.Status != HostInboundDenied || iface.Status != zone.Status {
 		t.Fatalf("quarantined tcp/22 = zone %v, interface %v; both must use the empty, default-deny view",
 			zone.Status, iface.Status)
 	}
-	if global := ClassifyHostInboundForInterface(cfg, quarantined, "ge-0/0/1.0", 50, true, 0, nil, "ip"); global.Status != HostInboundGlobalAccept {
+	if global := ClassifyHostInboundForInterface(cfg, quarantined, "ge-0/0/1.0", 50, true, 0, true, nil, "ip"); global.Status != HostInboundGlobalAccept {
 		t.Errorf("quarantined interface must preserve the global ESP accept, got %v", global.Status)
 	}
 }

@@ -40,7 +40,7 @@ type policyCorpusQuery9167 struct {
 	From, To         string
 	Src, Dst         string
 	Protocol         string
-	SrcPort, DstPort int
+	SrcPort, DstPort *uint16
 	WantAction       string // permit | deny | reject
 	WantPolicy       string // policy name, or "-" for the default verdict
 	Frag             bool   // non-first fragment: Query.NonFirstFragment
@@ -101,14 +101,17 @@ func parsePolicyCorpus9167(t *testing.T, path string) []policyCorpusCase9167 {
 					"(from to src dst proto sport dport action policy [frag]), got %d: %q",
 					path, ln, len(fields), line)
 			}
-			sp, err := strconv.Atoi(fields[5])
+			// #17081: corpus ports are concrete packet ports (Rust u16,
+			// l4_present), so present 0 is literal — never omitted.
+			spN, err := strconv.Atoi(fields[5])
 			if err != nil {
 				t.Fatalf("%s:%d: bad source port %q", path, ln, fields[5])
 			}
-			dp, err := strconv.Atoi(fields[6])
+			dpN, err := strconv.Atoi(fields[6])
 			if err != nil {
 				t.Fatalf("%s:%d: bad dest port %q", path, ln, fields[6])
 			}
+			sp, dp := PortPtr(uint16(spN)), PortPtr(uint16(dpN))
 			switch fields[7] {
 			case "permit", "deny", "reject":
 			default:
@@ -220,7 +223,7 @@ func TestPolicyVerdictCorpusGoHalf9167(t *testing.T) {
 						"produced by neither implementation, so a disagreement here is a "+
 						"defect in pkg/policymatch (or in the expectation, which is reviewed "+
 						"as part of changing it).",
-						q.Line, c.Name, q.From, q.To, q.Protocol, q.Src, q.SrcPort, q.Dst, q.DstPort,
+						q.Line, c.Name, q.From, q.To, q.Protocol, q.Src, *q.SrcPort, q.Dst, *q.DstPort,
 						gotAction, gotPolicy, q.WantAction, q.WantPolicy)
 				}
 			}

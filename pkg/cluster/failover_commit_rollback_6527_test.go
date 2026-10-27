@@ -7,7 +7,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #6527: commitRequestedPeerFailover arms peerTransferOutOverride BEFORE it
+// #6527: commitRequestedPeerFailover arms the transfer override BEFORE it
 // runs the election, so an election that declines to promote this node must
 // roll the override back. The BATCH request path already did
 // (abortRequestedPeerFailoverBatch); the single-RG path returned the error bare
@@ -122,16 +122,11 @@ func TestRequestPeerFailoverCommitFailureRollsBackOverrideOnBothPaths(t *testing
 			}
 
 			m.mu.Lock()
-			leakedOverride := len(m.peerTransferOutOverride)
-			leakedSnapshot := len(m.peerTransferOutPrevious)
+			leakedOverride := len(m.transferOverrides)
 			m.mu.Unlock()
 			if leakedOverride != 0 {
-				t.Errorf("peerTransferOutOverride has %d leaked entries after a failed commit, want 0",
+				t.Errorf("transferOverrides has %d leaked entries after a failed commit, want 0",
 					leakedOverride)
-			}
-			if leakedSnapshot != 0 {
-				t.Errorf("peerTransferOutPrevious has %d leaked entries after a failed commit, want 0",
-					leakedSnapshot)
 			}
 
 			peers := m.PeerGroupStates()
