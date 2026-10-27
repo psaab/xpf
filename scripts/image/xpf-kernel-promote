@@ -3,9 +3,12 @@
 #
 # This is the early-boot half of the A4 channel (r1 Codex Critical-1: the gate
 # must actually be invoked, and a REVERT must actually reboot). On an ordinary
-# boot (no candidate armed) `xpfd upgrade kernel promote` is a fast no-op. On a
-# candidate trial boot it runs the gate (BootCurrent==candidate slot + uname ==
-# candidate + verify-dataplane PASS + forward beacon PASS):
+# boot (no candidate armed) `xpfd upgrade kernel promote` is a fast no-op
+# except that it collects a candidate prune deferred by an earlier revert
+# (#16811/#17860: the prune-owed sidecar; journal absent — see the quiet
+# branch below). On a candidate trial boot it runs the gate
+# (BootCurrent==candidate slot + uname == candidate + verify-dataplane PASS +
+# forward beacon PASS):
 #   exit 0 -> PROMOTED (durable BootOrder reorder already done) — continue boot.
 #   exit 3 -> REVERTED (candidate failed the gate) — reboot NOW; the firmware
 #             already cleared BootNext, so the reboot falls through BootOrder to
@@ -576,6 +579,38 @@ journal_state() {
     echo not-armed
 }
 
+# gate_result maps the xpfd promote exit status to this unit's outcome
+# (#17860). It is SHARED by the armed-candidate exec at the bottom and the
+# ordinary-boot deferred-prune collector exec below: both run the same Go
+# entry point (`upgrade kernel promote`), so both take the same
+# exit-0-on-every-path contract — a non-zero unit exit trips OnFailure= and
+# reboots the box over what may be a transient packaging window.
+gate_result() {
+    case "$1" in
+        0)
+            log "promotion gate: clean (promoted or ordinary boot)"
+            exit 0
+            ;;
+        3)
+            log "promotion gate: REVERT — candidate failed; rebooting to known-good slot"
+            # The firmware already consumed BootNext and revert() restored the
+            # known-good slot to the BootOrder front, so this reboot lands on
+            # known-good. Use --no-wall; this is an unattended recovery reboot.
+            systemctl reboot --no-wall || reboot
+            # Exit 0: issuing the recovery reboot IS the intended outcome of a
+            # revert, so the unit must NOT record failure here — otherwise
+            # OnFailure= (the hang/timeout recovery) would double-fire a second
+            # reboot. The OnFailure handler is reserved for the case where this
+            # script never reaches its own reboot (SIGTERM on TimeoutStartSec).
+            exit 0
+            ;;
+        *)
+            log "promotion gate: infra error (rc=$1); NOT rebooting (avoid a bounce loop) — candidate is un-promoted, next plain reboot falls back to known-good"
+            exit 0
+            ;;
+    esac
+}
+
 XPFD=""
 XPFD_SRC=""
 
@@ -722,7 +757,49 @@ if [ ! -e "$ARM_RECORD" ]; then
     esac
     log "no kernel candidate in trial recorded ($ARM_RECORD absent, $KERNEL_JOURNAL" \
         "$JSTATE); nothing to promote"
-    exit 0
+    # #17860: "nothing to promote" is not "nothing to do". A revert that
+    # deferred its candidate prune while the candidate was the running kernel
+    # (#14165) persisted that debt in the prune-owed sidecar and CLEARED the
+    # journal — this ordinary boot, journal absent, is exactly where the Go
+    # half collects it (settlePruneOwed). Before #17860 this branch exited
+    # here, so the INSTALLED boot entry point never ran the collector and the
+    # #16811 acceptance (exactly one prune on boot 2) was test-only-green:
+    # only a direct `xpfd upgrade kernel promote` ever collected the debt.
+    #
+    # Scoped to an ABSENT journal on purpose. A PRESENT non-trial journal
+    # ($JSTATE=not-armed: mid-run, terminal-uncleared, or record-less ARMING
+    # folded in per #16809) keeps the quiet exit above: the Go half defers
+    # on those states itself (terminal journals take no settle), and a
+    # record-less ARMING boot must not have a gate run manufactured from
+    # journal state alone (#16809) — its Gate 2b would revert a healthy
+    # candidate because the live binary is not the one the dead arm
+    # designated (#6601 r6). The debt survives those boots and is collected
+    # on the next absent-journal boot.
+    if [ "$JSTATE" != absent ]; then
+        exit 0
+    fi
+    # No arm record exists here, so there is no recorded authority to exec.
+    # The ONLY sanctioned resolvers are the same UNAMBIGUOUS-OR-NOTHING
+    # systemd hops the cross-check below uses — never a filesystem fallback
+    # (#6601 r5): a leftover default-path xpfd is indistinguishable from the
+    # live one. MainPID -> /proc/<pid>/exe is the kernel's answer for what
+    # the live daemon is executing; ExecStart is what the cut pinned. When
+    # neither resolves there is honestly no binary this gate may run: say so
+    # loudly and leave the debt for the next boot (fail-safe — the prune is
+    # destructive, so skipping it is the safe direction).
+    try_candidate "$(unit_main_pid_exe)" "systemd MainPID -> /proc/<pid>/exe for $PROMOTE_UNIT"
+    try_candidate "$(unit_exec_start)" "systemd ExecStart for $PROMOTE_UNIT"
+    ORDINARY="$XPFD"
+    if [ -z "$ORDINARY" ]; then
+        log "WARNING: this ordinary boot may owe a deferred candidate prune, but" \
+            "no live xpfd resolves via $PROMOTE_UNIT (MainPID, ExecStart), so" \
+            "the deferred-cleanup collector did NOT run this boot; it retries" \
+            "on the next boot. FACTS: $(unit_facts)."
+        exit 0
+    fi
+    log "ordinary boot: running the deferred-prune collector via $ORDINARY ($XPFD_SRC)"
+    "$ORDINARY" upgrade kernel promote
+    gate_result $?
 fi
 
 # #16809: the record is present but the journal never reached ARMED. That is
@@ -790,28 +867,4 @@ fi
 log "promotion gate: using $XPFD ($XPFD_SRC)"
 
 "$XPFD" upgrade kernel promote
-rc=$?
-
-case "$rc" in
-    0)
-        log "promotion gate: clean (promoted or ordinary boot)"
-        exit 0
-        ;;
-    3)
-        log "promotion gate: REVERT — candidate failed; rebooting to known-good slot"
-        # The firmware already consumed BootNext and revert() restored the
-        # known-good slot to the BootOrder front, so this reboot lands on
-        # known-good. Use --no-wall; this is an unattended recovery reboot.
-        systemctl reboot --no-wall || reboot
-        # Exit 0: issuing the recovery reboot IS the intended outcome of a
-        # revert, so the unit must NOT record failure here — otherwise OnFailure=
-        # (the hang/timeout recovery) would double-fire a second reboot. The
-        # OnFailure handler is reserved for the case where this script never
-        # reaches its own reboot (SIGTERM on TimeoutStartSec).
-        exit 0
-        ;;
-    *)
-        log "promotion gate: infra error (rc=$rc); NOT rebooting (avoid a bounce loop) — candidate is un-promoted, next plain reboot falls back to known-good"
-        exit 0
-        ;;
-esac
+gate_result $?

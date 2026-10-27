@@ -221,6 +221,7 @@ func (f kernelStatusFakeSys) RestoreInactiveSlotSelector(string, string) error {
 func (f kernelStatusFakeSys) PruneInactiveSlot(string, string, string) error {
 	return nil
 }
+func (f kernelStatusFakeSys) PurgeCandidatePackages(string) error { return nil }
 
 // #10848: the anti-rollback floor widens KernelSystem with the two
 // package-version queries; the status/hold paths never reach them.

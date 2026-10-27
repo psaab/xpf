@@ -41,6 +41,7 @@ type fakeKernelSystem struct {
 	clearBootNextErr  error  // #6758: force the un-undoable case (NVRAM stays armed)
 	getBootNextRet    string // #5847: override readback (firmware "lied"); "" => mirror bootNext
 	runningErr        error
+	readSelectorErr   error // #17860: force a slot-selector read failure
 	armWatchdogErr    error
 	disarmWatchdogErr error
 	setBootNextErr    error
@@ -152,6 +153,9 @@ func (f *fakeKernelSystem) WriteSlotSelector(slot, unameR string) error {
 	return nil
 }
 func (f *fakeKernelSystem) ReadSlotSelector(slot string) (string, error) {
+	if f.readSelectorErr != nil {
+		return "", f.readSelectorErr
+	}
 	return f.selectors[slot], nil
 }
 func (f *fakeKernelSystem) SetBootNext(id string) error {
@@ -274,6 +278,10 @@ func (f *fakeKernelSystem) RestoreInactiveSlotSelector(slot, kg string) error {
 func (f *fakeKernelSystem) PruneInactiveSlot(slot, kg, cand string) error {
 	f.log("prune:" + slot)
 	f.selectors[slot] = kg
+	return nil
+}
+func (f *fakeKernelSystem) PurgeCandidatePackages(cand string) error {
+	f.log("purge:" + cand)
 	return nil
 }
 func (f *fakeKernelSystem) Now() time.Time { return f.now }
