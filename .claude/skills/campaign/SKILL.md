@@ -89,6 +89,32 @@ driveable work remains.
      `agents=<live>/<cap> driveable=<n>`; if `<live> < min(cap,
      driveable)` the same message MUST contain the dispatches that
      fix it.
+  6. **HARD GATE — `wait` and yield are the failure, mechanized
+     (2026-10-27, third directive; the prose above kept failing).**
+     The parent MUST NOT call `wait`, end a turn, or write a
+     summary while `live < min(cap, driveable)`. Before any
+     `wait` call the parent MUST, IN THE SAME RESPONSE, first emit
+     the batch `task` dispatch that fills to the cap — the wait
+     then blocks on a FULL board, never an empty one. A response
+     whose only actions are wait/status/fold-on-one-PR while
+     `live < cap` is a campaign failure regardless of how much
+     prose explains it.
+  7. **Pre-scoped pipeline (why parents end up serial).** The
+     drip-feed happens because unscoped issues can't be dispatched
+     blind. FIX THE INPUT, not the discipline: at every reconcile,
+     the parent maintains a ready-queue of >= cap PRE-SCOPED items
+     (issue + STEP-0 result + exact files + acceptance, scoped by
+     scout lanes or prior engineer reports). Refill draws from the
+     ready-queue WITHOUT new parent investigation; when the
+     ready-queue drops below cap, SCOUT lanes (read-only,
+     batch-dispatched like engineers) refill it from the
+     lowest-numbered unscoped issues. Scoping is lane work, never
+     parent serial work.
+  8. **One response = many outcomes.** Each parent response should
+     normally contain: all pending stamps/merges, one batch
+     dispatch to cap, and only then any inline fold. If a response
+     contains zero dispatches while `live < cap` and driveable
+     work exists, it is non-compliant by construction.
   triple reviewers for every PR at a reviewable head, (2) gate
   runners for gated PRs (see the three-cluster cadence below),
   (3) engineers/researchers on the lowest-numbered driveable
