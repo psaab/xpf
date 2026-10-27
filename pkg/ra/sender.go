@@ -452,14 +452,6 @@ func (s *sender) signalStop(m shutdownMode) {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
-// stop tears the sender down WITHOUT a goodbye (Clear / Apply-remove). The
-// owner closes the conn in finishShutdown.
-func (s *sender) stop() { s.signalStop(modeHard); <-s.stopped }
-
-// withdrawAndStop tears the sender down emitting the lifetime-0 goodbye as the
-// final write (graceful demotion).
-func (s *sender) withdrawAndStop() { s.signalStop(modeGraceful); <-s.stopped }
-
 // requestBurst asks the owner to re-emit the startup burst (after a RETH MAC
 // link cycle killed the socket). Non-blocking: if a burst is already queued or
 // the sender is draining, the request is dropped.
