@@ -582,14 +582,15 @@ type Daemon struct {
 	ipfixExporters []*flowexport.IPFIXExporter
 	ipfixCancel    context.CancelFunc
 	ipfixWg        *sync.WaitGroup
-	// #2075 flowexport reconcile state. The bundle pointers carry the
-	// live (exporter, resolved-config) pair read lock-free by the
-	// once-registered session-close callbacks; reconcile swaps them
-	// atomically. The per-family hashes gate the reconcile so an
-	// unrelated commit never bounces a healthy exporter; the *HashSet
-	// bools distinguish "never reconciled" from "reconciled to the
-	// nil sentinel". The *ReconMu serialize the reconcile swap against
-	// shutdown's stopFlow/IPFIXExporter (both touch the cancel/wg).
+	// #2075 flowexport reconcile state. The bundle pointers carry the live
+	// (exporter, resolved-config) pair consumed by the once-registered
+	// session-close callbacks; reconcile publishes them atomically.
+	// flowStateMu linearizes callback/open decision-state access with
+	// carry+publish so a close cannot mutate only the pre-swap copy. The
+	// per-family hashes gate reconcile so unrelated commits never bounce a
+	// healthy exporter; the *HashSet bools distinguish "never reconciled"
+	// from "reconciled to nil". The *ReconMu serialize reconcile against
+	// shutdown's stopFlow/IPFIXExporter (both touch cancel/wg).
 	flowBundle  atomic.Pointer[exporterBundle]
 	flowHash    [32]byte
 	flowHashSet bool
@@ -598,7 +599,13 @@ type Daemon struct {
 	// two protocol close callbacks so an open is sampled once even when
 	// both exporter families are registered on the same EventReader.
 	flowOpenCBOnce sync.Once
-	flowReconMu    sync.Mutex
+	// flowStateMu linearizes open admission and close consumption against
+	// state carry plus bundle publication during reconciliation.
+	flowStateMu sync.Mutex
+	flowReconMu sync.Mutex
+	// flowStateCarryTestHook pauses V9 reconciliation between decision-state
+	// carry and bundle publication. Tests use it to exercise close overlap.
+	flowStateCarryTestHook func()
 	// #3742: last NetFlow v9 exporter build error. Set (under flowReconMu)
 	// when a reconcile's NewExporter build failed and the OLD exporters were
 	// kept running so export stayed up; cleared on the next successful
