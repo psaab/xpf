@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 )
 
@@ -356,18 +355,6 @@ func adapterBindingTable() map[string]adapterBinding {
 				}
 			},
 		},
-		"managerHAOps.UpdateFabricFwd": {
-			drive: func(t *testing.T, m *Manager, _ *leaseControlServer) {
-				err := m.HA().SetFabricForwarding(context.Background(), 0, dataplane.FabricFwdInfo{})
-				assertFabricMapComplaint6871(t, err, "fabric0")
-			},
-		},
-		"managerHAOps.UpdateFabricFwd1": {
-			drive: func(t *testing.T, m *Manager, _ *leaseControlServer) {
-				err := m.HA().SetFabricForwarding(context.Background(), 1, dataplane.FabricFwdInfo{})
-				assertFabricMapComplaint6871(t, err, "fabric1")
-			},
-		},
 		"managerHAOps.SyncFabricState": {
 			setup: func(_ *testing.T, m *Manager) {
 				m.lastSnapshot = &ConfigSnapshot{}
@@ -415,40 +402,6 @@ func adapterBindingTable() map[string]adapterBinding {
 				}
 			},
 		},
-		"userspaceHAController.SetFabricForwarding": {
-			// TWO entry points, because this method has two and testing one
-			// binds neither reliably (Codex, round 8). Its body calls
-			// managerHAOps.SyncFabricState DIRECTLY rather than going through
-			// userspaceHAController.SyncFabricState — so the "always push helper
-			// fabric state after a successful update" contract is invisible to
-			// the fabric-set cells above: map-free, UpdateFabricFwd fails and
-			// the method returns BEFORE the tail. A fake userspaceHAOps is the
-			// only way to reach it, and userspaceHAOps being an interface is
-			// what makes that possible.
-			drive: func(t *testing.T, m *Manager, _ *leaseControlServer) {
-				err := m.HA().SetFabricForwarding(context.Background(), 0, dataplane.FabricFwdInfo{})
-				assertFabricMapComplaint6871(t, err, "fabric0")
-
-				for _, id := range []dataplane.FabricID{0, 1} {
-					ops := &recordingHAOps6871{}
-					c := userspaceHAController{manager: ops}
-					if err := c.SetFabricForwarding(context.Background(), id, dataplane.FabricFwdInfo{}); err != nil {
-						t.Fatalf("SetFabricForwarding(fabric%d) on a succeeding ops: %v", id, err)
-					}
-					if ops.syncCalls != 1 {
-						t.Errorf("fabric%d: SyncFabricState calls after a SUCCESSFUL fabric "+
-							"update = %d, want 1. The map write is committed at that point "+
-							"and the helper's fabric view is not, so cross-chassis redirect "+
-							"runs on the stale peer MAC until some other caller happens to "+
-							"push — during the HA window this exists to cover", id, ops.syncCalls)
-					}
-					if ops.fwdCalls+ops.fwd1Calls != 1 {
-						t.Errorf("fabric%d: routed to %d fabric0 and %d fabric1 updates, want "+
-							"exactly one", id, ops.fwdCalls, ops.fwd1Calls)
-					}
-				}
-			},
-		},
 		"userspaceHAController.SyncFabricState": {
 			drive: func(t *testing.T, m *Manager, _ *leaseControlServer) {
 				ctx, cancel := context.WithCancel(context.Background())
@@ -483,26 +436,6 @@ func adapterBindingTable() map[string]adapterBinding {
 		},
 	}
 }
-
-// recordingHAOps6871 is a userspaceHAOps whose fabric updates SUCCEED, which is
-// the only way to reach userspaceHAController.SetFabricForwarding's tail.
-type recordingHAOps6871 struct {
-	fwdCalls  int
-	fwd1Calls int
-	syncCalls int
-}
-
-func (o *recordingHAOps6871) UpdateRGActive(int, bool) error     { return nil }
-func (o *recordingHAOps6871) UpdateHAWatchdog(int, uint64) error { return nil }
-func (o *recordingHAOps6871) UpdateFabricFwd(dataplane.FabricFwdInfo) error {
-	o.fwdCalls++
-	return nil
-}
-func (o *recordingHAOps6871) UpdateFabricFwd1(dataplane.FabricFwdInfo) error {
-	o.fwd1Calls++
-	return nil
-}
-func (o *recordingHAOps6871) SyncFabricState() { o.syncCalls++ }
 
 // assertReachedManagerMap6871 checks that a call reached the real manager by the
 // specific complaint a missing BPF map produces. A nil return means the adapter

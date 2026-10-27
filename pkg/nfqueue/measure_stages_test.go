@@ -180,7 +180,7 @@ func runStageShape(t *testing.T, batch int, affinity bool, cpus []int) (nsPerPac
 				for j < len(pkts) && payloadOwner(pkts[j].Payload()) == owner {
 					j++
 				}
-				if err := q.VerdictBatch(VerdictAccept, pkts[i:j]); err != nil {
+				if err := q.verdictBatchForMeasure(VerdictAccept, pkts[i:j]); err != nil {
 					t.Fatalf("M1 affinity batch shape=%s packet=%d: %v", phase0ShapeName(batch, affinity), sent+i, err)
 				}
 				i = j
@@ -189,7 +189,7 @@ func runStageShape(t *testing.T, batch int, affinity bool, cpus []int) (nsPerPac
 			if err := pkts[0].Verdict(VerdictAccept); err != nil {
 				t.Fatalf("M1 verdict shape=inline packet=%d: %v", sent, err)
 			}
-		} else if err := q.VerdictBatch(VerdictAccept, pkts); err != nil {
+		} else if err := q.verdictBatchForMeasure(VerdictAccept, pkts); err != nil {
 			t.Fatalf("M1 batch verdict shape=%s packet=%d: %v", phase0ShapeName(batch, affinity), sent, err)
 		}
 		sent += count

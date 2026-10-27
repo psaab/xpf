@@ -143,8 +143,6 @@ func armedGateInvoke() map[string]func(m *Manager) error {
 		"ReadGlobalCounter":      func(m *Manager) error { _, err := m.ReadGlobalCounter(0); return err },
 		"ReadInterfaceCounters":  func(m *Manager) error { _, err := m.ReadInterfaceCounters(1); return err },
 		"ClearInterfaceCounters": func(m *Manager) error { return m.ClearInterfaceCounters() },
-		"UpdateFabricFwd":        func(m *Manager) error { return m.UpdateFabricFwd(FabricFwdInfo{}) },
-		"UpdateFabricFwd1":       func(m *Manager) error { return m.UpdateFabricFwd1(FabricFwdInfo{}) },
 		"UpdateRGActive":         func(m *Manager) error { return m.UpdateRGActive(0, true) },
 		"UpdateHAWatchdog":       func(m *Manager) error { return m.UpdateHAWatchdog(0, 1) },
 		"BumpFIBGeneration":      func(m *Manager) error { _, err := m.BumpFIBGeneration(); return err },

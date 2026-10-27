@@ -1545,14 +1545,6 @@ type SNATValueV6 struct {
 	CounterID uint16 // index into nat_rule_counters
 }
 
-// FabricFwdInfo mirrors the C struct fabric_fwd_info for cluster
-// cross-chassis forwarding via the fabric link.
-type FabricFwdInfo struct {
-	Ifindex    uint32  // fabric interface ifindex, 0 = disabled
-	FIBIfindex uint32  // non-VRF ifindex for zone-decoded FIB lookups
-	PeerMAC    [6]byte // peer's fabric MAC
-	LocalMAC   [6]byte // our fabric MAC
-}
 
 // MirrorConfig mirrors the C struct mirror_config for port mirroring.
 // Key is the ingress ifindex; value tells XDP where to clone-redirect.

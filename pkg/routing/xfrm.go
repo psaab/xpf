@@ -393,40 +393,21 @@ func (x *xfrmManager) clearLocked() error {
 }
 
 // deleteLocked removes a single tracked xfrmi by name and drops it from
-// tracking. Caller must hold mu. A link genuinely gone from the kernel is
-// treated as success (the entry is dropped from tracking). It returns a non-nil
-// error when the netlink LinkDel fails, in which case the name is RETAINED in
-// tracking (#4901) so the next reconcile retries instead of orphaning the link.
-//
-// #5495: only a GENUINE not-found (link-not-found errno) may drop tracking +
-// report gone. The former code took the "already gone" branch on ANY LinkByName
-// error — a transient/lookup failure (EBUSY, timeout, netlink transport) was
-// conflated with genuine absence, so it deleted tracking and returned nil-gone
-// while the xfrmi was still live in the kernel. A later Apply then had no
-// removed-desired entry to drive cleanup, silently ORPHANING the interface (and
-// leaving stale routing/security state) while reporting convergence. On a
-// transient error we now RETAIN the entry and surface the error so the caller
-// aggregates it (fail-closed) and the next reconcile retries. Mirrors
-// reconcileVRFs' transient-lookup retention (vrf.go).
+// tracking. Caller must hold mu. The lookup/classify/delete skeleton
+// is the shared releaseOwnedLink (#17020): ownership is released ONLY
+// on a genuine not-found (#5495) or a successful LinkDel (#4901); a
+// transient lookup error or a failed LinkDel retains the entry and
+// surfaces the error so the caller aggregates it (fail-closed) and
+// the next reconcile retries. xfrm passes alwaysOurs: its removal
+// path has always deleted whatever wears the tracked name (#17020
+// recorded policy; foreign-type refusal is VRF-only).
 func (x *xfrmManager) deleteLocked(name string) error {
-	link, err := x.ops.LinkByName(name)
+	released, err := releaseOwnedLink(x.ops, "xfrmi", name, alwaysOurs)
 	if err != nil {
-		if isLinkNotFound(err) {
-			delete(x.xfrmis, name)
-			return nil // genuinely gone
-		}
-		slog.Warn("xfrmi lookup failed during delete; retaining tracking for retry",
-			"name", name, "err", err)
-		return fmt.Errorf("lookup xfrmi %s for delete: %w", name, err)
+		return err
 	}
-	if err := x.ops.LinkDel(link); err != nil {
-		// #4901: a failed LinkDel leaves the xfrmi in the kernel. Retain
-		// tracking (do NOT delete from x.xfrmis) and surface the error so the
-		// caller can aggregate it and the next reconcile retries.
-		slog.Warn("failed to delete xfrmi", "name", name, "err", err)
-		return fmt.Errorf("delete xfrmi %s: %w", name, err)
+	if released {
+		delete(x.xfrmis, name)
 	}
-	slog.Info("xfrmi removed", "name", name)
-	delete(x.xfrmis, name)
 	return nil
 }

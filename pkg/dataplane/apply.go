@@ -3,7 +3,6 @@ package dataplane
 import (
 	"context"
 	"errors"
-	"fmt"
 	"maps"
 	"slices"
 
@@ -215,12 +214,9 @@ type LinkController interface {
 	AbandonLinkCycle() bool
 }
 
-type FabricID uint8
-
 type HAController interface {
 	SetRGActive(context.Context, int, bool) error
 	SetHAWatchdog(context.Context, int, uint64) error
-	SetFabricForwarding(context.Context, FabricID, FabricFwdInfo) error
 	SyncFabricState(context.Context) error
 }
 
@@ -436,44 +432,6 @@ func (c dataPlaneHAController) SetHAWatchdog(ctx context.Context, rgID int, time
 		return errors.New("nil dataplane")
 	}
 	return c.dp.UpdateHAWatchdog(rgID, timestamp)
-}
-
-func (c dataPlaneHAController) SetFabricForwarding(ctx context.Context, id FabricID, info FabricFwdInfo) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if c.dp == nil {
-		return errors.New("nil dataplane")
-	}
-	// #8597 K78: dispatch EXHAUSTIVELY. This was `if id == 1 { fabric1 } else
-	// { fabric0 }`, so every FabricID other than 1 — 2, 3, 255 — silently
-	// programmed FABRIC 0. `FabricID` is a uint8, so the type admits 256
-	// values while the dispatch distinguishes two, and the mismatch resolved
-	// by writing the caller's data into the wrong fabric and reporting
-	// success.
-	//
-	// No caller does this today and none ever has: every call site in the tree
-	// passes a literal 0 or 1 (`daemon_ha_fabric.go`), and the only two loops
-	// over the axis — in controllers_binding_table_6871_test.go and
-	// heartbeat_ack_incarnation_5718_test.go — both iterate `{0, 1}`. So this
-	// is not a live defect and the change refuses nothing that exists; it is
-	// the aliasing that would be silent WHEN a third fabric is added, which is
-	// precisely the moment an `else` arm stops being a two-valued dispatch and
-	// becomes a wrong answer.
-	//
-	// Fixed here as well as at the userspace controller. Whether this retired
-	// sibling is still reachable is genuinely unclear — `Manager.HA()` returns
-	// it with a non-nil dataplane and `LegacyDataPlaneAdapter.HA()` forwards to
-	// that on success — and resolving the question costs more than making the
-	// two agree.
-	switch id {
-	case 0:
-		return c.dp.UpdateFabricFwd(info)
-	case 1:
-		return c.dp.UpdateFabricFwd1(info)
-	default:
-		return fmt.Errorf("fabric id %d out of range: the dataplane has fabric 0 and fabric 1 only", id)
-	}
 }
 
 func (c dataPlaneHAController) SyncFabricState(ctx context.Context) error {

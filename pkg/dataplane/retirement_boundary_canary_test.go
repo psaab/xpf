@@ -340,7 +340,6 @@ func TestUserspaceShimSharedMapsAreExplicitCompatibilitySet(t *testing.T) {
 		"dnat_table",
 		"dnat_table_v6",
 		"fib_gen_map",
-		"fabric_fwd",
 		"rg_active",
 		"ha_watchdog",
 		"session_id_gen",
@@ -363,6 +362,7 @@ func TestUserspaceShimSharedMapsAreExplicitCompatibilitySet(t *testing.T) {
 		"iface_zone_map",
 		"zone_configs",
 		"policy_rules",
+		"fabric_fwd",
 		"tx_ports",
 		"redirect_capable",
 	} {
