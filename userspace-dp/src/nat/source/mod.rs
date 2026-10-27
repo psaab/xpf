@@ -43,8 +43,8 @@ pub(crate) use lease_note_7560::{dropped_persistent_lease_note, report_dropped_l
 // reverse session entry).
 
 use super::allocator::{
-    DeterministicV4, DeterministicV6, InterfaceDomainReserve, NS_PER_SEC, NatHolder,
-    PersistentSourceKey, PoolAddressFamily, PortAllocator, TranslatedTuple,
+    AllocRequest, DeterministicV4, DeterministicV6, InterfaceDomainReserve, NS_PER_SEC, NatHolder,
+    PersistentParams, PersistentSourceKey, PoolAddressFamily, PortAllocator, TranslatedTuple,
     deterministic_indices_v4, persistent_egress_scope, persistent_egress_scope_v2,
 };
 use super::iface_registry::InterfaceNatAllocators;

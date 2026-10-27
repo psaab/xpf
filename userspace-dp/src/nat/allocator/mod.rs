@@ -835,6 +835,37 @@ impl NatHolder {
     }
 }
 
+/// #17046: persistent-NAT parameters for [`AllocRequest`]. `Some` on the
+/// request IS the former `persistent_nat=true` flag: it keys the lease by
+/// `permit`, authorizes at `epoch`, and expires after `timeout_ns`. `None`
+/// is an ordinary (non-persistent) PAT allocation and moves neither
+/// #8447 admission counter.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PersistentParams {
+    pub(super) permit: super::source::PersistentNatPermit,
+    pub(super) epoch: u64,
+    pub(super) timeout_ns: u64,
+}
+
+/// #17046: the single allocation request consumed by
+/// [`PortAllocator::allocate`]. Replaces the three 12-/13-argument
+/// `allocate_translation*` wrappers, whose positional `u64` triples
+/// (permit epoch / timeout / now) and adjacent `bool`s were guarded only
+/// by comments. Field order mirrors the former argument order so every
+/// migrated call site is a mechanical field-for-argument transcription.
+pub(super) struct AllocRequest<'a> {
+    pub(super) flow: SourceNatFlowKey,
+    pub(super) family_addresses: PoolAddressFamily<'a>,
+    pub(super) family_offset: usize,
+    pub(super) address_persistent: bool,
+    pub(super) persistent: Option<PersistentParams>,
+    pub(super) now_ns: u64,
+    pub(super) holder: NatHolder,
+    pub(super) egress_scope: u32,
+    pub(super) mint_from_zone: Option<&'a str>,
+    pub(super) excluded: &'a dyn Fn(usize, u16) -> bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LiveAllocation {
     translated: TranslatedTuple,
@@ -3641,14 +3672,57 @@ impl PortAllocator {
         self.free_translated_port_at(addr_index, port, 0)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    /// #8447: the persistent-NAT admission counter pair lives here, on a thin
-    /// wrapper, so it observes EVERY return of the real body — including the
-    /// early config-shape refusals (`InvalidPortRange`, `WrongAddressFamily`)
-    /// that sit above the locked path. Counting inside the body instead would
-    /// have missed exactly those, and "declined = 0" would then have been
-    /// reported for a pool that refused every flow before it reached the
-    /// allocator.
+    /// #17046: single entry point for every pool allocation. The
+    /// `AllocRequest` bundles the dozen positional arguments the three
+    /// former `allocate_translation*` wrappers threaded separately, and
+    /// the #8447 persistent-admission epilogue lives ONLY here so it
+    /// observes EVERY return of `allocate_translation_inner_with_zones`
+    /// — including the early config-shape refusals
+    /// (`InvalidPortRange`, `WrongAddressFamily`) that sit above the
+    /// locked path. Counting inside the body instead would have missed
+    /// exactly those, and "declined = 0" would then have been reported
+    /// for a pool that refused every flow before it reached the
+    /// allocator. Prior to #17046 the epilogue was copy-pasted into
+    /// two of three wrappers and the NAT64 persistent mint
+    /// (`allocate_translation_with_exclusions`, #16011) carried none.
+    pub(super) fn allocate(
+        &self,
+        req: &AllocRequest<'_>,
+    ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
+        let out = self.allocate_translation_inner_with_zones(
+            req.flow,
+            req.family_addresses,
+            req.family_offset,
+            req.address_persistent,
+            req.persistent.is_some(),
+            req.persistent
+                .as_ref()
+                .map(|p| p.permit)
+                .unwrap_or_default(),
+            req.persistent.as_ref().map(|p| p.epoch).unwrap_or(0),
+            req.persistent.as_ref().map(|p| p.timeout_ns).unwrap_or(0),
+            req.now_ns,
+            req.mint_from_zone,
+            req.holder,
+            req.egress_scope,
+            req.excluded,
+        );
+        if req.persistent.is_some() {
+            let counter = if out.is_ok() {
+                &self.shared.persistent_admitted_total
+            } else {
+                &self.shared.persistent_declined_total
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        out
+    }
+
+    /// #8447/#17046: test-only shorthand for `allocate` with no zone and
+    /// no probe exclusions. Production callers MUST use `allocate`
+    /// directly so the persistent-admission epilogue stays single-sourced;
+    /// this wrapper exists only to keep the ~70 test call sites terse.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn allocate_translation(
         &self,
@@ -3664,108 +3738,29 @@ impl PortAllocator {
         holder: NatHolder,
         egress_scope: u32,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
-        self.allocate_translation_with_zones(
+        self.allocate(&AllocRequest {
             flow,
             family_addresses,
             family_offset,
             address_persistent,
-            persistent_nat,
-            persistent_nat_permit,
-            persistent_permit_epoch,
-            persistent_nat_timeout_ns,
+            persistent: persistent_nat.then_some(PersistentParams {
+                permit: persistent_nat_permit,
+                epoch: persistent_permit_epoch,
+                timeout_ns: persistent_nat_timeout_ns,
+            }),
             now_ns,
             holder,
             egress_scope,
-            None,
-        )
+            mint_from_zone: None,
+            excluded: &|_, _| false,
+        })
     }
 
+    /// #17046: test-only shorthand for `allocate` with probe exclusions
+    /// and no zone. Production NAT64 mint goes through `allocate`
+    /// directly (see `allocate_nat64_pool_port_excluding`).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn allocate_translation_with_zones(
-        &self,
-        flow: SourceNatFlowKey,
-        family_addresses: PoolAddressFamily<'_>,
-        family_offset: usize,
-        address_persistent: bool,
-        persistent_nat: bool,
-        persistent_nat_permit: super::source::PersistentNatPermit,
-        persistent_permit_epoch: u64,
-        persistent_nat_timeout_ns: u64,
-        now_ns: u64,
-        holder: NatHolder,
-        egress_scope: u32,
-        mint_from_zone: Option<&str>,
-    ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
-        let out = self.allocate_translation_inner_with_zones(
-            flow,
-            family_addresses,
-            family_offset,
-            address_persistent,
-            persistent_nat,
-            persistent_nat_permit,
-            persistent_permit_epoch,
-            persistent_nat_timeout_ns,
-            now_ns,
-            mint_from_zone,
-            holder,
-            egress_scope,
-            &|_, _| false,
-        );
-        if persistent_nat {
-            let counter = if out.is_ok() {
-                &self.shared.persistent_admitted_total
-            } else {
-                &self.shared.persistent_declined_total
-            };
-            counter.fetch_add(1, Ordering::Relaxed);
-        }
-        out
-    }
-
-    /// FOLD (#16350 fold-2): zones + probe-exclusions variant.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn allocate_translation_with_exclusions_and_zones(
-        &self,
-        flow: SourceNatFlowKey,
-        family_addresses: PoolAddressFamily<'_>,
-        family_offset: usize,
-        address_persistent: bool,
-        persistent_nat: bool,
-        persistent_nat_permit: super::source::PersistentNatPermit,
-        persistent_permit_epoch: u64,
-        persistent_nat_timeout_ns: u64,
-        now_ns: u64,
-        holder: NatHolder,
-        egress_scope: u32,
-        mint_from_zone: Option<&str>,
-        excluded: &dyn Fn(usize, u16) -> bool,
-    ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
-        let out = self.allocate_translation_inner_with_zones(
-            flow,
-            family_addresses,
-            family_offset,
-            address_persistent,
-            persistent_nat,
-            persistent_nat_permit,
-            persistent_permit_epoch,
-            persistent_nat_timeout_ns,
-            now_ns,
-            mint_from_zone,
-            holder,
-            egress_scope,
-            excluded,
-        );
-        if persistent_nat {
-            let counter = if out.is_ok() {
-                &self.shared.persistent_admitted_total
-            } else {
-                &self.shared.persistent_declined_total
-            };
-            counter.fetch_add(1, Ordering::Relaxed);
-        }
-        out
-    }
-
     pub(super) fn allocate_translation_with_exclusions(
         &self,
         flow: SourceNatFlowKey,
@@ -3781,21 +3776,22 @@ impl PortAllocator {
         egress_scope: u32,
         excluded: &dyn Fn(usize, u16) -> bool,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
-        self.allocate_translation_inner_with_zones(
+        self.allocate(&AllocRequest {
             flow,
             family_addresses,
             family_offset,
             address_persistent,
-            persistent_nat,
-            persistent_nat_permit,
-            persistent_permit_epoch,
-            persistent_nat_timeout_ns,
+            persistent: persistent_nat.then_some(PersistentParams {
+                permit: persistent_nat_permit,
+                epoch: persistent_permit_epoch,
+                timeout_ns: persistent_nat_timeout_ns,
+            }),
             now_ns,
-            None,
             holder,
             egress_scope,
+            mint_from_zone: None,
             excluded,
-        )
+        })
     }
 
     fn allocate_translation_inner_with_zones(
