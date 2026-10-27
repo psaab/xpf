@@ -10,28 +10,31 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// #14595 (Y10-03): on x86 a USB NIC hangs off a PCI xHCI controller:
-// /sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0. The pre-fix
-// ExtractPCIAddr returned the LAST DDDD:BB:DD.F component with no
-// bus/subsystem check, so the USB interface component 2-1:1.0 failed the
-// pattern and the xHCI BDF won — every device behind one controller
-// shared one "PCI address". That violates the docs contract
-// (docs/bare-metal-device-map.md: a USB NIC has no PCI address; an empty
-// PCI column; `pci` is unavailable) and the #1956 identity invariant
-// (one identity names one device): a pci+mac entry refused when a second
-// dongle appeared, and a pci-only entry bound a foreign dongle as
-// "PCI-only, unverified" despite it having a permanent MAC.
+// #14595 (Y10-03) / #17119: on x86 a USB NIC hangs off a PCI xHCI
+// controller: /sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0.
+// The pre-fix extractor returned the LAST DDDD:BB:DD.F component with
+// no bus/subsystem check, so the USB interface component 2-1:1.0
+// failed the pattern and the xHCI BDF won — every device behind one
+// controller shared one "PCI address". That violates the docs
+// contract (docs/bare-metal-device-map.md: a USB NIC has no PCI
+// address; an empty PCI column; `pci` is unavailable) and the #1956
+// identity invariant (one identity names one device): a pci+mac entry
+// refused when a second dongle appeared, and a pci-only entry bound a
+// foreign dongle as "PCI-only, unverified" despite it having a
+// permanent MAC. The extractor itself now lives once in pkg/netname
+// (#17119); its direct table is TestPCIAddrFromDevicePath17119 there.
 //
 // Probe evidence (verify/z3/probe_y10-03_test.go, issue #14595):
 //   both USB NICs: pci="0000:00:14.0"; pci+mac entry with two USB NICs
 //   -> REFUSED (topology changed ...); mac-only control binds; pci-only
 //   entry binds the foreign dongle unverified.
 //
-// FAIL-ON-REVERT: reverting the non-PCI tail guard in ExtractPCIAddr /
-// extractPCIAddr (or restoring the unconditional last-match walk) makes
-// TestEnumerateUSBNICsX86ReportEmptyPCI14595 and
-// TestClassifyNetdevUSBBehindXHCINoPCI14595 fail with pci="0000:00:14.0"
-// again, and TestExtractPCIAddrNonPCITail14595 fail on the usb/xhci rows.
+// FAIL-ON-REVERT: reverting the non-PCI tail guard in
+// netname.PCIAddrFromDevicePath (or restoring the unconditional
+// last-match walk) makes TestEnumerateUSBNICsX86ReportEmptyPCI14595
+// and TestClassifyNetdevUSBBehindXHCINoPCI14595 fail with
+// pci="0000:00:14.0" again, and TestPCIAddrFromDevicePath17119 fail on
+// the usb/xhci rows.
 
 // x86USBSysfs14595 builds a hermetic sysfs tree mirroring the probe
 // fixture: two USB NICs behind one xHCI controller at 0000:00:14.0.
@@ -132,42 +135,5 @@ func TestClassifyNetdevUSBBehindXHCINoPCI14595(t *testing.T) {
 	}
 	if pci != "" {
 		t.Fatalf("x86 USB NIC pci = %q, want \"\" (0000:00:14.0 is the xHCI controller)", pci)
-	}
-}
-
-// TestExtractPCIAddrNonPCITail14595 pins the extractor directly across
-// the shapes that must keep working and the shapes that must stop
-// leaking an ancestor's BDF.
-func TestExtractPCIAddrNonPCITail14595(t *testing.T) {
-	cases := []struct {
-		name, path, want string
-	}{
-		// Controls: a PCI device itself (direct, through bridges, VF)
-		// keeps its own BDF — only the LAST component is the device.
-		{"direct pci", "/sys/devices/pci0000:00/0000:00:1c.4/0000:08:00.0", "0000:08:00.0"},
-		{"bridge pci", "/sys/devices/pci0000:64/0000:64:03.0/0000:67:00.1", "0000:67:00.1"},
-		{"sriov vf", "/sys/devices/pci0000:b2/0000:b2:00.0/0000:b3:00.0/0000:b4:03.0/0000:b7:02.0", "0000:b7:02.0"},
-		{"bare bdf", "0000:09:00.0", "0000:09:00.0"},
-		// Non-PCI tails: the BDF above belongs to the host controller /
-		// parent, not to this netdev.
-		{"usb xhci", "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0", ""},
-		{"usb hub", "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1.4/1-1.4:1.0", ""},
-		{"usb platform root hub", "/sys/devices/platform/soc/1c1b000.usb/usb1/1-1/1-1:1.0", ""},
-		// Control: virtioN is a 1:1 channel to its PCI function, so the
-		// parent BDF still names this device (linksetup requires it).
-		{"virtio pci", "/sys/devices/pci0000:00/0000:03:00.0/virtio0", "0000:03:00.0"},
-		{"virtio pci 2digit", "/sys/devices/pci0000:00/0000:03:00.0/virtio12", "0000:03:00.0"},
-		{"virtio net child", "/sys/devices/pci0000:00/0000:03:00.0/virtio0/net/eth0", ""},
-		{"virtio mmio", "/sys/devices/platform/4010000000.virtio_mmio/virtio0", ""},
-		{"platform soc", "/sys/devices/platform/soc@0/30be0000.ethernet", ""},
-		{"empty", "", ""},
-		{"garbage", "/sys/devices/foo/bar", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := ExtractPCIAddr(tc.path); got != tc.want {
-				t.Fatalf("ExtractPCIAddr(%q) = %q, want %q", tc.path, got, tc.want)
-			}
-		})
 	}
 }
