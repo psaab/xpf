@@ -6470,9 +6470,10 @@ impl SessionTable {
     /// `ha_activation` flag (always false on this path).
     #[inline]
     pub fn promote_synced_with_origin(&mut self, mut req: SessionUpdate<'_>) -> bool {
-        // #13939: the Owner path applies a deferred FIN/RST immediately after
+        // #13939/#17092: the Owner path replays the packet through a full
+        // `Defer::None` lookup (`apply_deferred_owner_hit`) right after
         // promotion. Do not let its ACK bit complete a pending handshake before
-        // that close propagates to the companion.
+        // that replay's close propagates to the companion.
         if is_closing(req.tcp_flags) {
             req.tcp_flags = 0;
         }
