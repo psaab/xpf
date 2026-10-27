@@ -139,6 +139,8 @@ mod flows;
 mod occupancy;
 
 #[cfg(test)]
+mod tests_deterministic_vectors_17124;
+#[cfg(test)]
 mod tests_occupancy_seam_16135;
 
 pub(crate) use deterministic::{
