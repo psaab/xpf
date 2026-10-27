@@ -2288,6 +2288,169 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
     }
 }
 
+/// #17122 (R4-Q05-02): the shared-entry -> `SessionDelta` mapping is
+/// written ONCE (`SessionDelta::from_shared`); the HA bulk export
+/// (Open) and the tunnel-remap purge (Close) both go through it. This
+/// cell builds a `SyncedSessionEntry` with every carried field
+/// non-default and asserts both production paths carry each value —
+/// the regression shape of #14303 (`pptp_call_ids: 0` in both
+/// hand-written literals) and #14960 (`fabric_redirect_sync: true` +
+/// `session_id: 0` in the bulk literal), which a per-site literal
+/// could silently reintroduce and this cell would not see if either
+/// site bypassed `from_shared`.
+///
+/// FAIL-ON-REVERT: restore either hand-written literal (or zero any
+/// carried field in `from_shared`) and the matching assertion below
+/// goes RED. The purge's two deliberate overrides
+/// (`source_nat_static: None`, `fabric_redirect_sync: false`) are
+/// pinned as the ONLY divergences between the two deltas.
+#[test]
+fn from_shared_carries_every_shared_field_on_bulk_open_and_purge_close_17122() {
+    const SESSION_ID: u64 = 0x17122;
+    const PPTP_PAIR: u64 = 0x1111_2222_3333_4444;
+    let close_class = crate::session::TcpCloseClass::Closing.to_wire();
+    let handshake = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+
+    let mut entry = SyncedSessionEntry {
+        key: test_key(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: SESSION_ID,
+        tcp_close_class: close_class,
+        tcp_handshake_state: handshake,
+        rev_packets: 7,
+        fwd_packets: 11,
+        pptp_call_ids: PPTP_PAIR,
+        persistent_lease_hold: None,
+        source_nat_static: Some(true),
+    };
+    entry.metadata.owner_rg_id = 1;
+    entry.metadata.fabric_ingress = false;
+    entry.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    entry.decision.resolution.tunnel_endpoint_id = 7;
+
+    // (a) Bulk-export Open, through the production snapshot path.
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("activate RG 1");
+    let (sender, _rx) = crate::event_stream::EventStreamSender::test_sender(true, 16);
+    coordinator.event_stream = Some(sender);
+    let export = coordinator
+        .snapshot_all_sessions_export()
+        .expect("bulk export");
+    let open = export
+        .deltas_for_test()
+        .first()
+        .expect("the FabricRedirect forward row must be bulk-exported")
+        .clone();
+
+    // (b) Purge Close, through the struct-update override shape the
+    // purge site uses (its wire bytes are exercised end-to-end by the
+    // #2880 purge cells above).
+    let close = crate::session::SessionDelta {
+        source_nat_static: None,
+        fabric_redirect_sync: false,
+        ..crate::session::SessionDelta::from_shared(
+            &entry,
+            crate::session::SessionDeltaKind::Close,
+        )
+    };
+
+    // Every field the shared entry owns, on BOTH deltas.
+    for (name, delta) in [("open", &open), ("close", &close)] {
+        assert_eq!(delta.key, entry.key, "{name}: key");
+        assert_eq!(delta.decision, entry.decision, "{name}: decision");
+        assert_eq!(delta.metadata, entry.metadata, "{name}: metadata");
+        assert_eq!(delta.origin, entry.origin, "{name}: origin");
+        assert_eq!(
+            delta.session_id, SESSION_ID,
+            "{name}: session_id (#14960 regression shape)"
+        );
+        assert_eq!(
+            delta.pptp_call_ids, PPTP_PAIR,
+            "{name}: pptp_call_ids (#14303 regression shape)"
+        );
+        assert_eq!(delta.tcp_close_class, close_class, "{name}: tcp_close_class");
+        // tcp_handshake_state is asserted per-delta below: the bulk
+        // Open restamps it from node-wide completion evidence (#16217)
+        // — publish_shared_session synthesizes a reverse companion
+        // carrying this row's snapshotted rev_packets (7 > 0), so the
+        // Open reads Established while the purge Close keeps the
+        // entry's own wire.
+        assert_eq!(delta.counters.fwd_packets, 11, "{name}: fwd_packets");
+        assert_eq!(delta.counters.rev_packets, 7, "{name}: rev_packets");
+        assert_eq!(delta.counters.fwd_bytes, 0, "{name}: fwd_bytes (not snapshotted)");
+        assert_eq!(delta.counters.rev_bytes, 0, "{name}: rev_bytes (not snapshotted)");
+        // No-local-snapshot defaults, set once in `from_shared`.
+        assert_eq!(
+            delta.provenance,
+            crate::session::ExportProvenance::Incremental,
+            "{name}: provenance"
+        );
+        assert!(!delta.bulk_resync, "{name}: bulk_resync");
+        assert!(!delta.is_admission, "{name}: is_admission");
+        assert_eq!(delta.policy_generation, 0, "{name}: policy_generation");
+        assert!(!delta.purge_retirement, "{name}: purge_retirement");
+        assert_eq!(delta.created_ns, 0, "{name}: created_ns");
+        assert_eq!(delta.last_seen_ns, 0, "{name}: last_seen_ns");
+        assert_eq!(delta.observed_tos, 0, "{name}: observed_tos");
+        assert_eq!(delta.observed_tcp_flags, 0, "{name}: observed_tcp_flags");
+    }
+    assert_eq!(open.kind, crate::session::SessionDeltaKind::Open);
+    assert_eq!(close.kind, crate::session::SessionDeltaKind::Close);
+    assert_eq!(
+        close.tcp_handshake_state, handshake,
+        "purge Close must carry the entry's own handshake wire"
+    );
+    assert_eq!(
+        open.tcp_handshake_state,
+        crate::session::TcpHandshakeState::Established.to_wire(),
+        "bulk Open restamps Established on the synthesized companion's \
+         snapshotted rev_packets (#16217)"
+    );
+
+    // The disposition-derived flag: true on the Open (FabricRedirect
+    // row), and the purge's deliberate override forces it false on the
+    // Close even for the same row.
+    assert!(
+        open.fabric_redirect_sync,
+        "FabricRedirect disposition must derive fabric_redirect_sync on the Open (#14960)"
+    );
+    assert!(
+        !close.fabric_redirect_sync,
+        "purge Close must keep its deliberate fabric_redirect_sync: false override"
+    );
+    // source_nat_static: carried on the Open, deliberately dropped on
+    // the purge Close.
+    assert_eq!(
+        open.source_nat_static,
+        Some(true),
+        "bulk Open must carry the entry's source-NAT provenance"
+    );
+    assert_eq!(
+        close.source_nat_static, None,
+        "purge Close must keep its deliberate source_nat_static: None override"
+    );
+}
+
 #[test]
 fn drain_export_deltas_from_workers_is_fair_across_workers_9856() {
     use crate::afxdp::binding_state::ExportBufferState;

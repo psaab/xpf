@@ -82,33 +82,24 @@ impl crate::afxdp::Coordinator {
                 keys.push(entry.key.clone());
                 if !entry.metadata.is_reverse {
                     reservations.push((entry.key.clone(), entry.decision.nat));
-                    deltas.push(crate::session::SessionDelta { provenance: crate::session::ExportProvenance::Incremental, bulk_resync: false, is_admission: false, session_id: entry.session_id, kind: crate::session::SessionDeltaKind::Close, key: entry.key.clone(),
-                    decision: entry.decision,
-                    metadata: entry.metadata.clone(),
-                    source_nat_static: None,
-                    policy_generation: 0,
-                    origin: entry.origin,
-                    fabric_redirect_sync: false,
-                    // #2465: the shared SyncedSessionEntry carries no
-                    // creation instant, and this purge path uses
-                    // push_delta_lossless (NOT emit_session_close_rt_flow),
-                    // so these are 0/unknown.
-                    created_ns: 0,
-                    last_seen_ns: 0,
-                    // #2501: the shared SyncedSessionEntry carries no
-                    // per-direction counters, and this purge uses
-                    // push_delta_lossless (not the RT_FLOW exporter), so
-                    // volume is 0/unknown here.
-                    counters: crate::session::SessionCounters::default(),
-                    // #2749: shared purge path; no observed ToS / TCP
-                    // flags in hand (and not routed through the RT_FLOW
-                    // exporter).
-                    observed_tos: 0,
-                    observed_tcp_flags: 0,
-                    tcp_close_class: entry.tcp_close_class,
-                    tcp_handshake_state: entry.tcp_handshake_state,
-                    pptp_call_ids: entry.pptp_call_ids,
-                    purge_retirement: false, });
+                    // #17122: the entry->delta mapping lives once in
+                    // `SessionDelta::from_shared`. The two overrides
+                    // below are the purge's deliberate divergences,
+                    // kept visible here: a Close for a session being
+                    // deleted must not re-advertise its source-NAT
+                    // provenance or fabric-redirect sync (G40-03).
+                    // Counters stay as `from_shared` carries them:
+                    // this path uses push_delta_lossless (NOT
+                    // emit_session_close_rt_flow), so the counts are
+                    // never rendered as RT_FLOW volume (#2501).
+                    deltas.push(crate::session::SessionDelta {
+                        source_nat_static: None,
+                        fabric_redirect_sync: false,
+                        ..crate::session::SessionDelta::from_shared(
+                            entry,
+                            crate::session::SessionDeltaKind::Close,
+                        )
+                    });
                 }
             }
         }
