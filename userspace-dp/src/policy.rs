@@ -2192,8 +2192,14 @@ impl PolicyState {
 
     pub(crate) fn rule_binding_by_stable_id(&self, rule_id: &str) -> Option<(u32, &PolicyRule)> {
         let index = *self.rule_id_to_index.get(rule_id)?;
-        let counter_idx = u32::try_from(index + 1).ok()?;
-        Some((counter_idx, self.rules.get(index)?))
+        // `index` is a live rule-table position: `rule_id_to_index` is built
+        // by enumerating `self.rules` at snapshot build, so
+        // `counter_handle(index)` cannot saturate onto the reserved
+        // default-policy handle here (that would need ~4.29e9 live rules;
+        // see `DEFAULT_POLICY_COUNTER_IDX`). The previous independent
+        // fallible `index + 1` conversion's failure arm was therefore
+        // unreachable for a live rule.
+        Some((counter_handle(index), self.rules.get(index)?))
     }
     /// Resolve a stable rule ID to the CURRENT snapshot's counter and index.
     /// Unknown identities never fall back to a positional index.
@@ -4063,8 +4069,10 @@ pub(crate) fn count_policy_evaluation_result(
 /// resolves `handle - 1` back into `rules`). `0` stays reserved for "no
 /// counter", so rule index 0 carries handle 1. This is the ONLY site that
 /// encodes the handle: every tier of both policy walkers stamps it through
-/// `TierWalk::step`, and `note_skipped_frag_deny` records it through here,
-/// so a per-rule semantic change lands in exactly one place.
+/// `TierWalk::step`, `note_skipped_frag_deny` records it through here, and
+/// the stable-ID rebinding path (`rule_binding_by_stable_id`, used by HA
+/// session import and worker reconcile) resolves it through here, so a
+/// per-rule semantic change lands in exactly one place.
 #[inline]
 fn counter_handle(idx: usize) -> u32 {
     (idx as u32).saturating_add(1)
