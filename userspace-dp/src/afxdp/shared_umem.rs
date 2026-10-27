@@ -280,13 +280,33 @@ fn interface_device_path(ifname: &str) -> Option<String> {
     canonical.to_str().map(str::to_string)
 }
 
+/// #17149: the accepted set is exactly the Go schema enum for
+/// `system dataplane shared-umem mode`
+/// (pkg/config/schema_system.go: auto|off|same-device-debug|cross-nic).
+/// Previously 11 spellings were accepted and any other value fell
+/// through `_ => Off`, so a typo committed clean on the Go side and
+/// silently disabled shared UMEM here. Unknown values still fall back
+/// to Off for fail-safety (a handcrafted / pre-#17149 persisted
+/// snapshot must not brick the helper), but the fallback is now
+/// operator-visible: it logs once per process instead of silently
+/// selecting Off.
 fn parse_shared_umem_mode(value: &str) -> SharedUmemMode {
     match value {
-        "auto" | "on" | "enable" | "enabled" => SharedUmemMode::CrossNic,
-        "same-device-debug" | "same_device_debug" => SharedUmemMode::SameDeviceDebug,
-        "cross-nic" | "cross_nic" => SharedUmemMode::CrossNic,
-        "off" | "disable" | "disabled" => SharedUmemMode::Off,
-        _ => SharedUmemMode::Off,
+        "auto" | "cross-nic" => SharedUmemMode::CrossNic,
+        "same-device-debug" => SharedUmemMode::SameDeviceDebug,
+        "off" => SharedUmemMode::Off,
+        other => {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "xpf-userspace-dp: unknown shared-umem mode {other:?} \
+                     (expected auto|off|same-device-debug|cross-nic); \
+                     falling back to Off (shared UMEM disabled) (#17149)"
+                );
+            }
+            SharedUmemMode::Off
+        }
     }
 }
 
