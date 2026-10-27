@@ -69,7 +69,7 @@ func compileRootAuth8858(t *testing.T, text string) (*RootAuthConfig, *Config) {
 	// The STRICT path must accept it too: a spelling that only survives the
 	// tolerant path is still broken at commit.
 	tree2, _ := NewParser(text).Parse()
-	if _, serr := compileTree(tree2, compileOpts{}, nil); serr != nil {
+	if _, serr := compileTree(tree2, strictCompileOpts(), nil); serr != nil {
 		t.Errorf("strict compile REJECTED %q: %v", text, serr)
 	}
 	return cfg.System.RootAuthentication, cfg

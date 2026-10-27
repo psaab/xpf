@@ -165,3 +165,59 @@ fn off_policy_clears_stale_shared_status() {
         SharedUmemBindingPlan::private()
     );
 }
+
+#[test]
+fn shared_umem_mode_accepts_only_canonical_set_17149() {
+    // #17149: exactly the Go schema enum (auto|off|same-device-debug|
+    // cross-nic). Former aliases must no longer map to a mode.
+    assert_eq!(parse_shared_umem_mode("auto"), SharedUmemMode::CrossNic);
+    assert_eq!(
+        parse_shared_umem_mode("cross-nic"),
+        SharedUmemMode::CrossNic
+    );
+    assert_eq!(
+        parse_shared_umem_mode("same-device-debug"),
+        SharedUmemMode::SameDeviceDebug
+    );
+    assert_eq!(parse_shared_umem_mode("off"), SharedUmemMode::Off);
+}
+
+#[test]
+fn shared_umem_mode_unknown_falls_back_off_17149() {
+    // Fail-safe fallback for handcrafted / pre-#17149 snapshots: unknown
+    // values (including every former alias and typos) select Off rather
+    // than panicking or silently enabling sharing. The arm logs once;
+    // the log itself is not asserted here.
+    for value in [
+        "cross-nick",
+        "bogus",
+        "Cross-Nic",
+        "on",
+        "enable",
+        "enabled",
+        "disable",
+        "disabled",
+        "cross_nic",
+        "same_device_debug",
+        "",
+    ] {
+        assert_eq!(
+            parse_shared_umem_mode(value),
+            SharedUmemMode::Off,
+            "unknown mode {value:?} must fall back to Off"
+        );
+    }
+    // Snapshot-level: a typo'd mode yields an Off policy, not CrossNic.
+    let snapshot = ConfigSnapshot {
+        userspace: json!({
+            "shared_umem": {
+                "mode": "cross-nick"
+            }
+        }),
+        ..ConfigSnapshot::default()
+    };
+    assert_eq!(
+        SharedUmemPolicy::from_snapshot(&snapshot).mode,
+        SharedUmemMode::Off
+    );
+}

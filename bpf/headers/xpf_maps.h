@@ -10,41 +10,17 @@
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
-	__uint(max_entries, XDP_PROG_MAX);
+	__uint(max_entries, 7); /* XDP_PROG_* count; sized here, no mirror outside bpf/ */
 	__type(key, __u32);
 	__type(value, __u32);
 } xdp_progs SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
-	__uint(max_entries, TC_PROG_MAX);
+	__uint(max_entries, 4); /* TC_PROG_* count; sized here, no mirror outside bpf/ */
 	__type(key, __u32);
 	__type(value, __u32);
 } tc_progs SEC(".maps");
-
-/* ============================================================
- * CPU map for distributing XDP processing across CPUs
- * ============================================================ */
-
-struct cpumap_val {
-	__u32 qsize;
-	__u32 bpf_prog_fd;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_CPUMAP);
-	__uint(max_entries, MAX_CPUS);
-	__type(key, __u32);
-	__type(value, struct cpumap_val);
-} cpu_map SEC(".maps");
-
-/* Number of CPUs in cpu_map; 0 = cpumap disabled */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, __u32);
-} cpumap_available SEC(".maps");
 
 /* ============================================================
  * Per-CPU scratch space for passing metadata between tail calls
@@ -116,7 +92,7 @@ struct {
 /* {ifindex, vlan_id} -> zone_id (HASH for VLAN support) */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_LOGICAL_INTERFACES);
+	__uint(max_entries, 512); /* MAX_LOGICAL_INTERFACES: legacy sizing, no mirror outside bpf/ */
 	__type(key, struct iface_zone_key);
 	__type(value, struct iface_zone_value);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -125,7 +101,7 @@ struct {
 /* sub-interface ifindex -> {parent_ifindex, vlan_id} */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_LOGICAL_INTERFACES);
+	__uint(max_entries, 512); /* MAX_LOGICAL_INTERFACES: legacy sizing, no mirror outside bpf/ */
 	__type(key, __u32);
 	__type(value, struct vlan_iface_info);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -262,7 +238,7 @@ struct app_value {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_APPLICATIONS);
+	__uint(max_entries, 1024); /* MAX_APPLICATIONS: legacy sizing, no mirror outside bpf/ */
 	__type(key, struct app_key);
 	__type(value, struct app_value);
 } applications SEC(".maps");
@@ -407,7 +383,7 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, MAX_SCREEN_PROFILES);
+	__uint(max_entries, 64); /* MAX_SCREEN_PROFILES: legacy sizing, no mirror outside bpf/ */
 	__type(key, __u32);
 	__type(value, struct screen_config);
 } screen_configs SEC(".maps");
@@ -419,27 +395,18 @@ struct {
 	__type(value, struct flood_state);
 } flood_counters SEC(".maps");
 
-/* Validated SYN cookie clients -- sources that passed cookie challenge.
- * LRU_HASH auto-evicts oldest entries when full. */
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 65536);
-	__type(key, struct validated_client_key);
-	__type(value, struct validated_client_value);
-} validated_clients SEC(".maps");
-
 /* Per-source-IP tracking for port scan / IP sweep detection.
  * LRU_HASH auto-evicts oldest entries when full. */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, MAX_PORT_SCAN_TRACK);
+	__uint(max_entries, 65536); /* MAX_PORT_SCAN_TRACK: legacy sizing, no mirror outside bpf/ */
 	__type(key, struct scan_track_key);
 	__type(value, struct scan_track_value);
 } port_scan_track SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, MAX_PORT_SCAN_TRACK);
+	__uint(max_entries, 65536); /* MAX_PORT_SCAN_TRACK: legacy sizing, no mirror outside bpf/ */
 	__type(key, struct scan_track_key);
 	__type(value, struct scan_track_value);
 } ip_sweep_track SEC(".maps");
@@ -557,7 +524,7 @@ struct {
  * has interface_mode=1 to pick the correct egress IP. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_LOGICAL_INTERFACES);
+	__uint(max_entries, 512); /* MAX_LOGICAL_INTERFACES: legacy sizing, no mirror outside bpf/ */
 	__type(key, struct snat_egress_key);
 	__type(value, struct snat_egress_value);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -586,7 +553,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, MAX_SESSIONS);
 	__type(key, struct dnat_key_v6);
-	__type(value, struct dnat_value_v6);
+__type(value, struct dnat_value_v6);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } dnat_table_v6 SEC(".maps");
 
@@ -610,7 +577,6 @@ struct {
  * Static 1:1 NAT tables
  * ============================================================ */
 
-#define MAX_STATIC_NAT_ENTRIES 2048
 #define STATIC_NAT_DNAT 0  /* key.ip is external addr */
 #define STATIC_NAT_SNAT 1  /* key.ip is internal addr */
 
@@ -622,7 +588,7 @@ struct static_nat_key_v4 {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_STATIC_NAT_ENTRIES);
+	__uint(max_entries, 2048); /* legacy static-NAT map capacity; sized here, no mirror outside bpf/ */
 	__type(key, struct static_nat_key_v4);
 	__type(value, __be32);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -640,7 +606,7 @@ struct static_nat_value_v6 {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_STATIC_NAT_ENTRIES);
+	__uint(max_entries, 2048); /* legacy static-NAT map capacity; sized here, no mirror outside bpf/ */
 	__type(key, struct static_nat_key_v6);
 	__type(value, struct static_nat_value_v6);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -650,7 +616,6 @@ struct {
  * NPTv6 prefix translation (RFC 6296)
  * ============================================================ */
 
-#define MAX_NPTV6_RULES 128
 
 /* Direction constants for NPTv6 */
 #define NPTV6_INBOUND  0  /* external → internal (rewrite dst) */
@@ -677,7 +642,7 @@ struct nptv6_value {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_NPTV6_RULES);
+	__uint(max_entries, 128); /* legacy NPTv6 map capacity; sized here, no mirror outside bpf/ */
 	__type(key, struct nptv6_key);
 	__type(value, struct nptv6_value);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -756,23 +721,6 @@ struct {
 /* NAT64 FIB cache: translated IPv4 dst -> FIB result (LRU).
  * Avoids bpf_fib_lookup on every NAT64 forward-path packet.
  * Invalidated via fib_gen_map generation counter. */
-struct nat64_fib_cache_key {
-	__be32 ipv4_dst;
-	__u32  tbid;
-};
-struct nat64_fib_cache_val {
-	__u32 ifindex;     /* resolved physical ifindex */
-	__u16 vlan_id;
-	__u16 gen;         /* matches fib_gen_map[0] */
-	__u8  dmac[6];
-	__u8  smac[6];
-};
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 1024);
-	__type(key, struct nat64_fib_cache_key);
-	__type(value, struct nat64_fib_cache_val);
-} nat64_fib_cache SEC(".maps");
 
 /* ============================================================
  * Firewall filter maps
@@ -781,7 +729,7 @@ struct {
 /* Interface filter assignment: {ifindex, vlan_id, family} -> filter_id */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_LOGICAL_INTERFACES * 2); /* *2 for inet + inet6 */
+	__uint(max_entries, 512 * 2); /* *2 for inet + inet6; MAX_LOGICAL_INTERFACES: legacy sizing, no mirror outside bpf/ */
 	__type(key, struct iface_filter_key);
 	__type(value, __u32); /* filter_id (index into filter_configs) */
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -848,19 +796,6 @@ struct {
  * Fabric cross-chassis forwarding (cluster failback)
  * ============================================================ */
 
-struct fabric_fwd_info {
-	__u32 ifindex;       /* fabric interface ifindex, 0 = disabled */
-	__u32 fib_ifindex;   /* non-VRF ifindex for zone-decoded FIB lookups */
-	__u8  peer_mac[6];   /* peer's fabric MAC */
-	__u8  local_mac[6];  /* our fabric MAC */
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 2);
-	__type(key, __u32);
-	__type(value, struct fabric_fwd_info);
-} fabric_fwd SEC(".maps");
 
 /* ============================================================
  * Policer maps (single-rate two-color token bucket)

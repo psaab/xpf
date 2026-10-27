@@ -50,28 +50,11 @@ func (vi *vrrpInstance) masterDownAfterSyncHoldRelease() (time.Duration, bool) {
 	return vi.deafShieldInterval(), true
 }
 
-// advertInterval returns the advertisement interval as a Duration.
-// AdvertiseInterval is in milliseconds. The cfg field is snapshotted under
-// vi.mu.RLock() — mirroring the other config accessors (masterDownInterval,
-// preemptHoldDuration) — so a concurrent locked config update cannot race the
-// read that go test -race would otherwise flag (#6230). The lock is released
-// before the Duration math, matching the masterDownInterval idiom.
-//
-// Callers that ALREADY hold vi.mu (masterAdverFloor, reached from
-// recordMasterAdvert under vi.mu.Lock) MUST use advertIntervalLocked instead:
-// re-taking the RLock while the write lock is held would deadlock.
-func (vi *vrrpInstance) advertInterval() time.Duration {
-	vi.mu.RLock()
-	ms := vi.cfg.AdvertiseInterval
-	vi.mu.RUnlock()
-	return advertIntervalFromMS(ms)
-}
-
 // advertIntervalLocked returns the advertisement interval as a Duration for
-// callers that already hold vi.mu (read or write). It performs the same read as
-// advertInterval WITHOUT taking the lock, for paths that run under vi.mu.Lock
-// (recordMasterAdvert → masterAdverFloor); calling advertInterval there would
-// deadlock on the RLock (#6230).
+// callers that already hold vi.mu (read or write). It reads cfg WITHOUT taking
+// the lock, for paths that run under vi.mu.Lock (admitAndRecord →
+// masterAdverFloor); calling an RLock-taking accessor there would deadlock
+// on the RLock (#6230).
 func (vi *vrrpInstance) advertIntervalLocked() time.Duration {
 	return advertIntervalFromMS(vi.cfg.AdvertiseInterval)
 }
@@ -155,7 +138,7 @@ func (vi *vrrpInstance) masterDownLocked() time.Duration {
 // (Master_Adver_Interval, learned from the received advert's Max Adver Int),
 // falling back to the locally-configured interval only before any advert has
 // been heard (cold-start). localMS is cfg.AdvertiseInterval in milliseconds;
-// learned is the last value recorded by recordMasterAdvert (0 = none yet).
+// learned is the last value recorded by admitAndRecord (0 = none yet).
 func effectiveAdvertInterval(localMS int, learned time.Duration) time.Duration {
 	if learned > 0 {
 		return learned
@@ -226,9 +209,9 @@ func stopAndDrainTimer(t *time.Timer) {
 // garpCount returns the configured gratuitous-ARP burst count under vi.mu.
 //
 // #8597 (muse-004 K20): sendGARP read vi.cfg.GARPCount with no lock while
-// updateConfig writes it under vi.mu on the manager goroutine — the #5087 day-2
+// updateConfigHeld writes it under vi.mu on the manager goroutine — the #5087 day-2
 // path. Every other reader of a mu-guarded cfg field in this package snapshots
-// under the lock (instance_preempt.go, track.go, manager.go, advertInterval
+// under the lock (instance_preempt.go, track.go, manager.go, advertiseIntervalMS
 // here); the send paths were the exception.
 func (vi *vrrpInstance) garpCount() int {
 	vi.mu.RLock()
@@ -254,7 +237,7 @@ func (vi *vrrpInstance) startupLogFields() (priority int, preempt bool) {
 // MILLISECONDS under vi.mu, for the one caller that needs the wire encoding
 // rather than a Duration (sendAdvert's RFC 5798 centisecond field).
 //
-// Deliberately not advertInterval(): that applies advertIntervalFromMS, which
+// Deliberately not advertIntervalFromMS: that applies the Duration conversion,
 // substitutes the 1000 ms default for a non-positive value. The wire field must
 // carry what the peer will use to derive ITS master-down interval, and folding
 // the default in here would make a misconfigured instance advertise a cadence

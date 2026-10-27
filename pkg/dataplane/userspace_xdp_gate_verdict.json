@@ -1,24 +1,24 @@
 {
   "schema_version": 3,
-  "verified_at": "2026-10-26T15:37:38.243867548Z",
+  "verified_at": "2026-10-27T21:58:50.615696222Z",
   "object_sha256": "5f7c6a67e9538f6bcb42e4120816da5f8ee2fc74fd14e353f7589e2b1bdbf45b",
-  "build_digest": "828eab60fecdcc0873b88d5e7d232286a9c064a5b2f4d90e3eb2e5b2c5658596",
+  "build_digest": "f26450b9b0ad3c82feb9696b416d248c50fdec4313e6ea6c4b9bb24ffb73c2c1",
   "verdict": "PASS",
   "override_consumed": false,
-  "reason": "measured headroom 32.66% meets the 15.0% floor",
+  "reason": "measured headroom 32.61% meets the 15.0% floor",
   "stats": {
     "measured": true,
-    "processed_insns": 673420,
+    "processed_insns": 673914,
     "insn_limit": 1000000,
-    "headroom_pct": 32.658,
+    "headroom_pct": 32.6086,
     "floor_pct": 15,
-    "slack_to_floor_insns": 176580
+    "slack_to_floor_insns": 176086
   },
   "provenance": {
     "toolchain": "nightly-2026-05-23",
     "pinned": true,
     "bpf_linker": "0.10.2",
     "codegen_env_digest": "c913ffc49c07557f9577f5bc0cbd4af7863c161072e3e6d82f65a2a939d844b3",
-    "kernel_release": "7.2.8+deb14-amd64"
+    "kernel_release": "7.2.12+deb14-amd64"
   }
 }

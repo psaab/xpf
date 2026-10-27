@@ -29,6 +29,12 @@
 export DH_VERBOSE = 1
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 
+# #18178: dpkg-buildpackage writes .deb files to the source parent by
+# default, which is shared between sibling worktrees. The Makefile deb
+# recipe exports XPF_DEB_STAGE to a private per-invocation directory;
+# keep dpkg's parent default when it is unset (foreign/direct rules use).
+XPF_DEB_STAGE ?= ..
+
 STAGED = /usr/local/share/xpf/staged
 
 %:
@@ -250,3 +256,10 @@ override_dh_usrlocal:
 override_dh_strip:
 
 override_dh_dwz:
+
+# #18178: emit both .deb files into the recipe-private stage instead of
+# the shared source parent; dpkg-buildpackage is told the same stage
+# via --buildinfo-option/--changes-option -u so .buildinfo/.changes
+# resolve the artifacts there.
+override_dh_builddeb:
+	dh_builddeb --destdir=$(XPF_DEB_STAGE)

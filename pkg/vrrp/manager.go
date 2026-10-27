@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/vishvananda/netlink"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // instanceKey identifies a unique VRRP instance.
@@ -128,23 +130,17 @@ func vipClaimKeyFor(iface, vip string) (vipClaimKey, bool) {
 // parseVIPIdentity canonicalizes a VIP to its host identity and family.
 // CIDR and bare spellings of the same host collide; different prefixes on
 // the same host also collide, because both elections would install the
-// same host address.
+// same host address. The parse is config.ParseVRRPVIP (#17150).
 func parseVIPIdentity(vip string) (host, family string, ok bool) {
-	if ip, _, err := net.ParseCIDR(vip); err == nil {
-		family = "inet6"
-		if ip.To4() != nil {
-			family = "inet"
-		}
-		return ip.String(), family, true
+	p, ok := config.ParseVRRPVIP(vip)
+	if !ok {
+		return "", "", false
 	}
-	if ip := net.ParseIP(vip); ip != nil {
-		family = "inet6"
-		if ip.To4() != nil {
-			family = "inet"
-		}
-		return ip.String(), family, true
+	family = "inet6"
+	if p.Addr().Is4() {
+		family = "inet"
 	}
-	return "", "", false
+	return p.Addr().String(), family, true
 }
 
 // secondVIPClaimant reports whether inst claims a VIP already claimed by a
@@ -553,7 +549,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 	needsLinkWatcher := false
 	for _, inst := range desired {
 		if inst != nil {
-			virtualAddresses := dedupeVIPs(inst.VirtualAddresses)
+			virtualAddresses := config.DedupeVRRPVIPs(inst.VirtualAddresses)
 			if len(virtualAddresses) != len(inst.VirtualAddresses) {
 				normalized := *inst
 				normalized.VirtualAddresses = virtualAddresses
@@ -757,7 +753,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 			// and GARPCount (per-VIP gratuitous-ARP burst on failover) are wire/
 			// timer/burst fields the run loop re-reads from cfg, so a day-2 change
 			// to EITHER must break the no-change shortcut and take the in-place
-			// updateConfig arm below — otherwise a commit changing only
+			// updateConfigHeld arm below — otherwise a commit changing only
 			// reth-advertise-interval or gratuitous-arp-count is silently dropped
 			// until an unrelated restart (#5087).
 			existingVIPs := existing.vipsSnapshot()
@@ -971,7 +967,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 // resign arm, #16821); the explicit priority-0 burst after it remains
 // the takeover signal. The resigned instance then keeps priority 0 —
 // so its master-down skew is longest and it cannot win a re-election
-// — until a priority restore (UpdateRGPriority / updateConfig)
+// — until a priority restore (UpdateRGPriority / updateConfigHeld)
 // supersedes and drops the stash.
 // Used when cluster state transitions from Primary to Secondary
 // (manual failover, weight drop, etc.) in non-preempt mode.
@@ -1332,11 +1328,11 @@ func (m *Manager) Status() string {
 		state := vi.getState()
 		// #5718 (codex-182 C-HA C01c): snapshot the mutable cfg fields under
 		// vi.mu.RLock before formatting. Priority/Preempt/AdvertiseInterval are
-		// mutated under vi.mu.Lock (updateConfig, UpdateRGPriority,
+		// mutated under vi.mu.Lock (updateConfigHeld, UpdateRGPriority,
 		// suppressPreempt/restorePreempt); reading them here while holding only
 		// m.mu.RLock races a concurrent failover priority update — a
 		// diagnostic-only data race go test -race flags. Mirrors the snapshot
-		// idiom in advertInterval/getPriority (#6230). VirtualAddresses is
+		// idiom in advertiseIntervalMS/getPriority (#6230). VirtualAddresses is
 		// mutable under vi.mu on an in-place VIP-set commit (#10780), so it is
 		// deep-copied under this same lock alongside the raced scalar fields.
 		// getState() already RLocks internally, so it stays outside this block;
