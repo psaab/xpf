@@ -12,8 +12,8 @@ import (
 )
 
 // CheckConnStateEmpty proves the durable connection/deletion-debt store has no
-// remaining teardown or deferred-start work before factory reset erases the
-// credentials it may need.
+// remaining teardown, staged-candidate, or deferred-start work before factory
+// reset erases the credentials it may need.
 func CheckConnStateEmpty(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -30,7 +30,7 @@ func CheckConnStateEmpty(path string) error {
 		return fmt.Errorf("ipsec: cannot prove connection state %s is empty: %w", path, err)
 	}
 	if len(st.Loaded) != 0 || len(st.Pending) != 0 || len(st.PendingChanged) != 0 ||
-		len(st.PendingReinitiate) != 0 || len(st.Fingerprints) != 0 {
+		len(st.PendingReinitiate) != 0 || len(st.PendingCandidate) != 0 || len(st.Fingerprints) != 0 {
 		return fmt.Errorf("ipsec: connection state %s still contains loaded connections or pending IPsec work", path)
 	}
 	return nil

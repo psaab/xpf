@@ -22,18 +22,20 @@ const DefaultConnStatePath = "/var/lib/xpf/ipsec-conn-state.json"
 const maxConnStateBytes = 1 << 20
 
 // connState is the on-disk form of loaded connection names/content hashes and
-// outstanding teardown or deferred re-initiation debt (#9687, #10878, #17882).
+// outstanding teardown, staged-candidate, or deferred re-initiation debt
+// (#9687, #10878, #17882).
 //
 // strongSwan is a separate service, so its SAs survive xpfd restarts. Persisted
 // fingerprints let a later Apply detect same-name security changes, while
-// Pending, PendingChanged, and PendingReinitiate preserve teardown and deferred
-// reauthentication work across a restart.
+// Pending, PendingChanged, PendingReinitiate, and PendingCandidate preserve
+// teardown, deferred-start, and staged-candidate work across a restart.
 type connState struct {
 	Loaded            []string          `json:"loaded"`
 	Pending           []string          `json:"pending_terminate"`
 	Fingerprints      map[string]string `json:"fingerprints,omitempty"`
 	PendingChanged    []string          `json:"pending_changed,omitempty"`
 	PendingReinitiate []string          `json:"pending_reinitiate,omitempty"`
+	PendingCandidate  map[string]string `json:"pending_candidate,omitempty"`
 }
 
 // seedFromStateLocked folds the persisted state into this Manager, once, at
@@ -87,6 +89,12 @@ func (m *Manager) seedFromStateLocked() {
 		}
 		m.pendingReinitiate[name] = true
 	}
+	if len(st.PendingCandidate) > 0 {
+		m.pendingCandidateHashes = make(map[string]string, len(st.PendingCandidate))
+		for name, fingerprint := range st.PendingCandidate {
+			m.pendingCandidateHashes[name] = fingerprint
+		}
+	}
 }
 
 // persistStateLocked writes loaded names/fingerprints and the debt, including
@@ -112,6 +120,10 @@ func (m *Manager) persistStateLocked() {
 	for name := range m.pendingReinitiate {
 		pendingReinitiate[name] = true
 	}
+	pendingCandidate := make(map[string]string, len(m.pendingCandidateHashes))
+	for name, fingerprint := range m.pendingCandidateHashes {
+		pendingCandidate[name] = fingerprint
+	}
 	for name := range m.inflight {
 		if m.prevConnNames[name] {
 			pendingChanged[name] = true
@@ -125,6 +137,7 @@ func (m *Manager) persistStateLocked() {
 		Fingerprints:      m.prevConnHashes,
 		PendingChanged:    sortedConnNames(pendingChanged),
 		PendingReinitiate: sortedConnNames(pendingReinitiate),
+		PendingCandidate:  pendingCandidate,
 	})
 	if err == nil {
 		if err = os.MkdirAll(filepath.Dir(m.statePath), 0o755); err == nil {

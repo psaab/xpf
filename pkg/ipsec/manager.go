@@ -136,10 +136,15 @@ type Manager struct {
 	// debt, it must still be retried while that name remains loaded.
 	pendingTerminate map[string]bool
 	pendingChanged   map[string]bool
-	// pendingReinitiate defers restoring changed eager tunnels when an
-	// indeterminate probe observes a live SA. It is cleared only after a
-	// candidate is proven and any outstanding teardown succeeds.
+	// pendingReinitiate defers restoring changed eager tunnels after an
+	// indeterminate probe observes a live SA. The debt is persisted before
+	// any teardown and remains until a proven candidate load and successful
+	// teardown discharge it.
 	pendingReinitiate map[string]bool
+	// pendingCandidateHashes carries candidate-only connection fingerprints
+	// staged by an indeterminate apply until a later candidate load proves
+	// them; without them the staged additions would be invisible to diffs.
+	pendingCandidateHashes map[string]string
 
 	// swanctl is the exec seam for shelling out to swanctl. Nil in
 	// production and directly-constructed test Managers; sc() falls back to
@@ -388,9 +393,24 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 				names, hs = map[string]bool{}, map[string]string{}
 			}
 			removed, changed := m.pendingConnDiff(names, hs)
-			terminated, failed := m.terminateRemovedConns(removed)
+			candidateNames := sortedConnNames(names)
+			baselineKnown := append([]string{}, removed...)
+			for _, name := range m.prevConnNamesSnapshot() {
+				baselineKnown = append(baselineKnown, name)
+			}
+			candidateOnly := candidateOnlyConnNames(candidateNames, baselineKnown)
+			deferredSeeds := append([]string{}, changed...)
+			deferredSeeds = append(deferredSeeds, candidateOnly...)
+			m.rememberDeferredReinitiation(deferredSeeds, nil)
+			m.rememberPendingCandidateConns(candidateOnly, hs)
+			_, failed := m.terminateRemovedConns(removed)
+			m.clearDeferredReinitiation(failed)
+			// Deferred debt must only survive for connections whose SA was
+			// actually observed live. A successful teardown lists them via
+			// the changed set; candidate-only additions with no SA keep
+			// only their staged fingerprint (pendingCandidateHashes).
+			m.filterDeferredReinitiation(changed)
 			termErr := m.recordTerminateDebtForNames(removed, failed, names)
-			m.rememberDeferredReinitiation(changed, terminated, failed)
 			// Do not re-initiate from a config that this live probe failed
 			// to prove; the durable deferred debt is discharged only after
 			// a later candidate load is proven.
@@ -410,13 +430,15 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			termErr := m.recordTerminateDebt(removed, failed)
 			var initiateErr error
 			if !cce.clear && !cce.candidateProven {
-				m.rememberDeferredReinitiation(changed, terminated, failed)
+				m.rememberDeferredReinitiation(changed, nil)
 			}
 			if !cce.clear && cce.candidateProven && ipsecCfg != nil {
 				deferred := m.pendingReinitiationNames()
 				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, deferred, failed)
+				m.clearDeferredReinitiation(failed)
 				m.resolvePendingReinitiation(names, failed)
 			} else if cce.clear {
+				m.clearDeferredReinitiation(failed)
 				m.resolvePendingReinitiation(names, failed)
 			}
 			return errors.Join(applyErr, termErr, initiateErr)
@@ -475,6 +497,7 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 	if ipsecCfg != nil {
 		initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, deferred, failed)
 	}
+	m.clearDeferredReinitiation(failed)
 	m.resolvePendingReinitiation(loadedNames, failed)
 	return errors.Join(terminateErr, initiateErr)
 }
@@ -486,10 +509,12 @@ func (m *Manager) Clear() error {
 		var ire *indeterminateReloadError
 		if errors.As(err, &ire) && ire.clear {
 			// Keep the prior fingerprints, but attempt candidate removals
-			// now; the next successful clear will retry any unresolved SA.
 			empty := map[string]bool{}
-			removed, _ := m.pendingConnDiff(empty, map[string]string{})
+			removed, changed := m.pendingConnDiff(empty, map[string]string{})
+			changed = append(changed, candidateOnlyConnNames([]string{}, removed)...)
+			m.rememberDeferredReinitiation(changed, nil)
 			_, failed := m.terminateRemovedConns(removed)
+			m.clearDeferredReinitiation(failed)
 			return errors.Join(err, m.recordTerminateDebtForNames(removed, failed, empty))
 		}
 		var cce *committedCandidateError
@@ -499,6 +524,7 @@ func (m *Manager) Clear() error {
 			removed, _ := m.promoteConnNames(map[string]bool{}, map[string]string{})
 			_, failed := m.terminateRemovedConns(removed)
 			termErr := m.recordTerminateDebt(removed, failed)
+			m.clearDeferredReinitiation(failed)
 			m.resolvePendingReinitiation(map[string]bool{}, failed)
 			return errors.Join(err, termErr)
 		}
@@ -506,7 +532,9 @@ func (m *Manager) Clear() error {
 		if errors.As(err, &pae) && pae.clear {
 			removed, _ := m.promoteConnNames(pae.names, pae.hashes)
 			_, failed := m.terminateRemovedConns(removed)
-			return errors.Join(err, m.recordTerminateDebt(removed, failed))
+			termErr := m.recordTerminateDebt(removed, failed)
+			m.clearDeferredReinitiation(failed)
+			return errors.Join(err, termErr)
 		}
 		// A proven prior generation remains authoritative after this failure.
 		return err
@@ -514,6 +542,7 @@ func (m *Manager) Clear() error {
 	removed, _ := m.promoteConnNames(nil, nil)
 	_, failed := m.terminateRemovedConns(removed)
 	termErr := m.recordTerminateDebt(removed, failed)
+	m.clearDeferredReinitiation(failed)
 	m.resolvePendingReinitiation(nil, failed)
 	return termErr
 }
@@ -1317,7 +1346,10 @@ func (m *Manager) reloadResult() (partialLoadSummary, error) {
 
 // pendingConnDiff computes removals and content changes without advancing the
 // remembered loaded generation. It is used when charon answered a reload probe
-// but its loaded set matches neither the prior nor candidate render.
+// but its loaded set matches neither the prior nor candidate render. On this
+// path names is the candidate render, so candidate-only connections are in
+// removed but not changed: they are staged-only names neither loaded
+// baseline knows (see connDiffLocked).
 func (m *Manager) pendingConnDiff(newNames map[string]bool, newHashes map[string]string) (removed, changed []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1327,27 +1359,48 @@ func (m *Manager) pendingConnDiff(newNames map[string]bool, newHashes map[string
 
 // rememberDeferredReinitiation records changed connections that were observed
 // live during an indeterminate reload probe and cannot safely be re-initiated.
-// They may be started only after a later reload proves the candidate config.
-func (m *Manager) rememberDeferredReinitiation(changed, terminated, failed []string) {
-	if len(changed) == 0 || (len(terminated) == 0 && len(failed) == 0) {
+// It MUST run (and persist) before any terminateRemovedConns call that could
+// destroy their SAs: a crash between termination and persistence must leave
+// the deferred-start debt on disk for the next Manager to discharge.
+// onlyPendingNames restricts the recording to the named set; nil records all.
+func (m *Manager) rememberDeferredReinitiation(changed []string, onlyPendingNames map[string]bool) {
+	if len(changed) == 0 {
 		return
-	}
-	observed := make(map[string]bool, len(terminated)+len(failed))
-	for _, name := range terminated {
-		observed[name] = true
-	}
-	for _, name := range failed {
-		observed[name] = true
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, name := range changed {
-		if observed[name] {
-			if m.pendingReinitiate == nil {
-				m.pendingReinitiate = make(map[string]bool)
-			}
-			m.pendingReinitiate[name] = true
+		if onlyPendingNames != nil && !onlyPendingNames[name] {
+			continue
 		}
+		if m.pendingReinitiate == nil {
+			m.pendingReinitiate = make(map[string]bool)
+		}
+		m.pendingReinitiate[name] = true
+	}
+	m.persistStateLocked()
+}
+
+// rememberPendingCandidateConns records candidate-only connection
+// fingerprints staged by an indeterminate apply. A later proven candidate
+// load still needs these names in the diff so their live SAs terminate and
+// eager tunnels re-initiate; without them the staged candidate additions are
+// invisible because the prior baseline never knew them.
+func (m *Manager) rememberPendingCandidateConns(names []string, hashes map[string]string) {
+	if len(names) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, name := range names {
+		hash, ok := hashes[name]
+		if !ok {
+			continue
+		}
+		if m.pendingCandidateHashes == nil {
+			m.pendingCandidateHashes = make(map[string]string)
+		}
+		m.pendingCandidateHashes[name] = hash
 	}
 	m.persistStateLocked()
 }
@@ -1356,6 +1409,40 @@ func (m *Manager) pendingReinitiationNames() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return sortedConnNames(m.pendingReinitiate)
+}
+
+func (m *Manager) pendingConnNames() map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]bool, len(m.pendingTerminate)+len(m.pendingChanged)+len(m.pendingCandidateHashes))
+	for name := range m.pendingTerminate {
+		out[name] = true
+	}
+	for name := range m.pendingChanged {
+		out[name] = true
+	}
+	for name := range m.pendingCandidateHashes {
+		out[name] = true
+	}
+	return out
+}
+
+// clearDeferredReinitiation drops deferred-start debt for connections whose
+// teardown just failed: their stale SA may still forward, so they must not
+// be re-initiated under any candidate until teardown succeeds.
+func (m *Manager) clearDeferredReinitiation(failed []string) {
+	if len(failed) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, name := range failed {
+		delete(m.pendingReinitiate, name)
+	}
+	if len(m.pendingReinitiate) == 0 {
+		m.pendingReinitiate = nil
+	}
+	m.persistStateLocked()
 }
 
 func excludingConnNames(names, excluded []string) []string {
@@ -1375,13 +1462,63 @@ func excludingConnNames(names, excluded []string) []string {
 	return filtered
 }
 
+// candidateOnlyConnNames returns candidate-render names not present in the
+// known-baseline diff slices.
+func candidateOnlyConnNames(candidateNames, baselineKnown []string) []string {
+	baseline := make(map[string]bool, len(baselineKnown))
+	for _, name := range baselineKnown {
+		baseline[name] = true
+	}
+	var out []string
+	for _, name := range candidateNames {
+		if !baseline[name] {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (m *Manager) prevConnNamesSnapshot() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return sortedConnNames(m.prevConnNames)
+}
+
+// filterDeferredReinitiation keeps deferred-start debt only for the named
+// connections. Used after a successful indeterminate teardown to drop seeds
+// recorded for candidate-only additions that had no live SA (and therefore
+// nothing to restore), while the persisted in-flight obligation still
+// covered a crash during termination.
+func (m *Manager) filterDeferredReinitiation(keepNames []string) {
+	keep := make(map[string]bool, len(keepNames))
+	for _, name := range keepNames {
+		keep[name] = true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name := range m.pendingReinitiate {
+		if !keep[name] {
+			delete(m.pendingReinitiate, name)
+		}
+	}
+	if len(m.pendingReinitiate) == 0 {
+		m.pendingReinitiate = nil
+	}
+	m.persistStateLocked()
+}
+
 // resolvePendingReinitiation settles deferred starts only after a proven
 // candidate load. A teardown failure retains its deferred start for the next
-// apply; names removed from the candidate are no longer startable.
+// apply. A staged candidate fingerprint whose name remains in the proven
+// candidate set is RETAINED: it is the only fingerprint record for a
+// connection the prior baseline never loaded, so dropping it would make a
+// later rotation of that now-loaded connection invisible. It is dropped
+// only when the name leaves the proven set.
 func (m *Manager) resolvePendingReinitiation(targetNames map[string]bool, failed []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.pendingReinitiate) == 0 {
+	if len(m.pendingReinitiate) == 0 && len(m.pendingCandidateHashes) == 0 {
 		return
 	}
 	failedSet := make(map[string]bool, len(failed))
@@ -1393,14 +1530,22 @@ func (m *Manager) resolvePendingReinitiation(targetNames map[string]bool, failed
 			delete(m.pendingReinitiate, name)
 		}
 	}
+	for name := range m.pendingCandidateHashes {
+		if !targetNames[name] {
+			delete(m.pendingCandidateHashes, name)
+		}
+	}
 	if len(m.pendingReinitiate) == 0 {
 		m.pendingReinitiate = nil
+	}
+	if len(m.pendingCandidateHashes) == 0 {
+		m.pendingCandidateHashes = nil
 	}
 	m.persistStateLocked()
 }
 
 func (m *Manager) connDiffLocked(newNames map[string]bool, newHashes map[string]string) (removed, changed []string) {
-	seen := make(map[string]bool, len(m.prevConnNames)+len(m.pendingTerminate)+len(m.pendingChanged))
+	seen := make(map[string]bool, len(m.prevConnNames)+len(m.pendingTerminate)+len(m.pendingChanged)+len(m.pendingCandidateHashes))
 	for name := range m.prevConnNames {
 		if !newNames[name] {
 			removed = append(removed, name)
@@ -1429,6 +1574,21 @@ func (m *Manager) connDiffLocked(newNames map[string]bool, newHashes map[string]
 				changed = append(changed, name)
 			}
 			seen[name] = true
+		}
+	}
+	// #17882: candidate-only connections staged by an indeterminate apply
+	// (pendingCandidateHashes) have no prior fingerprint. A later apply must
+	// still see them: removal drops them from the candidate render, so they
+	// surface here as removals; rotation compares the staged candidate
+	// fingerprint against the new render and surfaces them as changes.
+	for name, stagedHash := range m.pendingCandidateHashes {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		removed = append(removed, name)
+		if newNames[name] && newHashes[name] != stagedHash {
+			changed = append(changed, name)
 		}
 	}
 	sort.Strings(removed)

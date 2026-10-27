@@ -408,11 +408,11 @@ func TestClearAfterRestartProbeKeepsFileRemoved17882(t *testing.T) {
 
 // A live superset is neither the prior nor candidate render. The candidate
 // remains staged, but its fingerprints must not be promoted. Changed SAs are
-// torn down without re-initiation from the unproven config; a later successful
-// apply must still detect and converge the change.
-//
-// fail-on-revert: advancing the candidate fingerprint for this ambiguous
-// probe is caught by the preserved-hash assertion below.
+// torn down without re-initiation from the unproven config; deferred-start
+// debt is persisted before teardown so a later proven candidate load can
+// restore the eager tunnel even after a restart or a successful teardown
+// leaves no live SA. Candidate-only additions are likewise recorded so a
+// later rotation or removal still terminates their live SAs.
 func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
@@ -502,15 +502,20 @@ func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
 				t.Fatalf("indeterminate reload must not re-establish from unproven config; got %d initiates", got)
 			}
 			state := readState9687(t, statePath)
-			if len(state.PendingReinitiate) != 1 || state.PendingReinitiate[0] != "vpn1" {
-				t.Fatalf("indeterminate teardown must persist deferred re-initiation, got %+v", state.PendingReinitiate)
-			}
 			if tc.failFirstTerminate {
+				if len(state.PendingReinitiate) != 0 {
+					t.Fatalf("failed teardown must drop deferred re-initiation, got %+v", state.PendingReinitiate)
+				}
 				if len(state.PendingChanged) != 1 || state.PendingChanged[0] != "vpn1" {
 					t.Fatalf("failed teardown must persist changed-connection debt, got %+v", state.PendingChanged)
 				}
-			} else if len(state.PendingChanged) != 0 {
-				t.Fatalf("successful teardown must not leave changed teardown debt, got %+v", state.PendingChanged)
+			} else {
+				if len(state.PendingReinitiate) != 1 || state.PendingReinitiate[0] != "vpn1" {
+					t.Fatalf("successful indeterminate teardown must persist deferred re-initiation, got %+v", state.PendingReinitiate)
+				}
+				if len(state.PendingChanged) != 0 {
+					t.Fatalf("successful teardown must not leave changed teardown debt, got %+v", state.PendingChanged)
+				}
 			}
 
 			retrySAs := "list-sas reply {}\n"
@@ -551,6 +556,214 @@ func TestIndeterminateSupersetPreservesChangedFingerprint17882(t *testing.T) {
 				t.Fatalf("successful retry must clear deferred-initiation and changed-termination debt, got %+v", state)
 			}
 		})
+	}
+}
+
+// Candidate-only connections staged by an indeterminate apply must not be
+// forgotten: they have no prior fingerprint, so only the persisted
+// pending-candidate fingerprint lets a later proven apply see their rotation
+// (terminate + re-initiate) or removal (terminate, no re-initiate).
+// Crash injection between terminate and persistence is covered separately:
+// the deferred-start debt must already be on disk while terminate runs.
+func TestIndeterminateCandidateOnlyConnectionIsRemembered17882(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remove bool
+	}{
+		{name: "rotation terminates and re-initiates"},
+		{name: "removal terminates without re-initiation", remove: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			statePath := filepath.Join(t.TempDir(), "ipsec-conn-state.json")
+			m := NewWithConfigDir(t.TempDir())
+			m.statePath = statePath
+			oldGeneration := strings.Repeat("a", 64)
+			newGeneration := strings.Repeat("b", 64)
+			oldCfg := vpnCfg("vpn1")
+			oldCfg.VPNs["vpn1"].EstablishTunnels = "immediately"
+			ch := &charonDown16853{}
+			m.swanctl = ch.run
+			if err := m.ApplyGeneration(oldCfg, oldGeneration, ApplyHooks{}); err != nil {
+				t.Fatalf("FIXTURE: initial apply: %v", err)
+			}
+			prior, err := os.ReadFile(m.configPath)
+			if err != nil {
+				t.Fatalf("FIXTURE: read prior: %v", err)
+			}
+
+			reloadErr := errors.New("candidate reload rejected")
+			priorConns := strings.TrimSuffix(string(listConnsForRendered17882(t, prior)), "list-conns reply {}\n")
+			priorConns += "list-conn event {extra {local_addrs=[%any] remote_addrs=[%any] children {extra {}}}}\n"
+			rec := &reloadRecorder{
+				failLoadAll: true,
+				loadErr:     reloadErr,
+				listPools:   poolsForPrior17882(t, prior),
+				listConns:   []byte(priorConns + "list-conns reply {}\n"),
+				listSAs:     liveSA("vpn1"),
+			}
+			m.swanctl = rec.run
+
+			candidate := vpnCfg("vpn1", "vpn2")
+			candidate.VPNs["vpn1"].EstablishTunnels = "immediately"
+			candidate.VPNs["vpn2"].EstablishTunnels = "immediately"
+			if err := m.ApplyGeneration(candidate, newGeneration, ApplyHooks{}); err == nil || !errors.Is(err, reloadErr) {
+				t.Fatalf("ambiguous ApplyGeneration error = %v, want reload error", err)
+			}
+			state := readState9687(t, statePath)
+			if state.PendingCandidate["vpn2"] == "" {
+				t.Fatalf("candidate-only vpn2 fingerprint must persist, got %+v", state.PendingCandidate)
+			}
+			// vpn1 is unchanged here (its prior fingerprint still matches),
+			// and vpn2 has no live SA in this fixture, so neither may gain
+			// deferred-start debt merely from being in the candidate render.
+			if len(state.PendingReinitiate) != 0 {
+				t.Fatalf("unchanged vpn1 and SA-less candidate-only vpn2 must not gain deferred-start debt, got %+v", state.PendingReinitiate)
+			}
+
+			// Rotate the candidate-only connection and prove the candidate.
+			next := vpnCfg("vpn1")
+			next.VPNs["vpn1"].EstablishTunnels = "immediately"
+			if !tc.remove {
+				next = vpnCfg("vpn1", "vpn2")
+				next.VPNs["vpn1"].EstablishTunnels = "immediately"
+				next.VPNs["vpn2"].EstablishTunnels = "immediately"
+				next.VPNs["vpn2"].PSK = config.NewSecret("secret-vpn2-rotated")
+			}
+			rec2 := &reloadRecorder{listSAs: liveSA("vpn2")}
+			m2 := NewWithConfigDir(t.TempDir())
+			m2.statePath = statePath
+			m2.swanctl = rec2.run
+			if err := m2.ApplyGeneration(next, newGeneration, ApplyHooks{}); err != nil {
+				t.Fatalf("proven candidate apply: %v", err)
+			}
+			if got := rec2.terminated(); len(got) != 1 || got[0] != "vpn2" {
+				t.Fatalf("later apply must terminate candidate-only vpn2 SA, got %v", got)
+			}
+			initiates := 0
+			for _, call := range rec2.calls {
+				if len(call) > 0 && call[0] == "--initiate" {
+					initiates++
+				}
+			}
+			wantInitiates := 0
+			if !tc.remove {
+				wantInitiates = 1
+			}
+			if initiates != wantInitiates {
+				t.Fatalf("candidate-only rotation initiate count = %d, want %d", initiates, wantInitiates)
+			}
+			state = readState9687(t, statePath)
+			if tc.remove {
+				if len(state.PendingCandidate) != 0 {
+					t.Fatalf("removal must clear the staged candidate fingerprint, got %+v", state.PendingCandidate)
+				}
+			} else if state.PendingCandidate["vpn2"] == "" {
+				t.Fatalf("rotation must retain the staged candidate fingerprint as the loaded baseline, got %+v", state.PendingCandidate)
+			}
+		})
+	}
+}
+
+// Crash injection: the deferred-start debt for a changed connection must be
+// durable BEFORE terminateRemovedConns destroys its SA. The wrapper snapshots
+// the durable state while terminate is executing and restores it afterwards,
+// simulating a crash+restart at that exact point.
+func TestIndeterminateDeferredDebtPersistedBeforeTerminate17882(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "ipsec-conn-state.json")
+	m := NewWithConfigDir(t.TempDir())
+	m.statePath = statePath
+	oldGeneration := strings.Repeat("a", 64)
+	newGeneration := strings.Repeat("b", 64)
+	oldCfg := vpnCfg("vpn1")
+	oldCfg.VPNs["vpn1"].EstablishTunnels = "immediately"
+	ch := &charonDown16853{}
+	m.swanctl = ch.run
+	if err := m.ApplyGeneration(oldCfg, oldGeneration, ApplyHooks{}); err != nil {
+		t.Fatalf("FIXTURE: initial apply: %v", err)
+	}
+	prior, err := os.ReadFile(m.configPath)
+	if err != nil {
+		t.Fatalf("FIXTURE: read prior: %v", err)
+	}
+
+	reloadErr := errors.New("candidate reload rejected")
+	priorConns := strings.TrimSuffix(string(listConnsForRendered17882(t, prior)), "list-conns reply {}\n")
+	priorConns += "list-conn event {extra {local_addrs=[%any] remote_addrs=[%any] children {extra {}}}}\n"
+	rec := &reloadRecorder{
+		failLoadAll: true,
+		loadErr:     reloadErr,
+		listPools:   poolsForPrior17882(t, prior),
+		listConns:   []byte(priorConns + "list-conns reply {}\n"),
+		listSAs:     liveSA("vpn1"),
+	}
+	var captured []byte
+	m.swanctl = func(args ...string) ([]byte, error) {
+		out, err := rec.run(args...)
+		if len(args) > 0 && args[0] == "--terminate" && err == nil {
+			data, rerr := os.ReadFile(statePath)
+			if rerr != nil {
+				t.Errorf("read state during terminate: %v", rerr)
+			} else {
+				captured = append([]byte(nil), data...)
+			}
+			rec.listSAs = "list-sas reply {}\n"
+		}
+		return out, err
+	}
+
+	rotated := vpnCfg("vpn1")
+	rotated.VPNs["vpn1"].EstablishTunnels = "immediately"
+	rotated.VPNs["vpn1"].PSK = config.NewSecret("secret-rotated")
+	if err := m.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); err == nil || !errors.Is(err, reloadErr) {
+		t.Fatalf("ambiguous ApplyGeneration error = %v, want reload error", err)
+	}
+	if captured == nil {
+		t.Fatal("FICTION: terminate did not run during the indeterminate apply")
+	}
+	// Simulate crash+restart: restore the durable bytes as they were while
+	// terminate was executing (i.e. before any post-terminate persistence).
+	if err := os.WriteFile(statePath, captured, 0o600); err != nil {
+		t.Fatalf("restore crash-injected state: %v", err)
+	}
+	state := readState9687(t, statePath)
+	if len(state.PendingReinitiate) != 1 || state.PendingReinitiate[0] != "vpn1" {
+		t.Fatalf("deferred-start debt must be durable before terminate destroys the SA, got %+v", state.PendingReinitiate)
+	}
+
+	rec2 := &reloadRecorder{listSAs: "list-sas reply {}\n"}
+	m2 := NewWithConfigDir(t.TempDir())
+	m2.statePath = statePath
+	m2.swanctl = rec2.run
+	if err := m2.ApplyGeneration(rotated, newGeneration, ApplyHooks{}); err != nil {
+		t.Fatalf("successful candidate retry after crash: %v", err)
+	}
+	initiates := 0
+	for _, call := range rec2.calls {
+		if len(call) > 0 && call[0] == "--initiate" {
+			initiates++
+		}
+	}
+	if initiates != 1 {
+		t.Fatalf("crash-restored deferred debt must re-initiate the eager tunnel, got %d initiates", initiates)
+	}
+	state = readState9687(t, statePath)
+	if len(state.PendingReinitiate) != 0 {
+		t.Fatalf("successful retry must clear deferred debt, got %+v", state.PendingReinitiate)
+	}
+}
+
+func TestEraseConnStateIfEmptyPreservesPendingCandidateDebt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ipsec-conn-state.json")
+	state := `{"loaded":[],"pending_terminate":[],"pending_candidate":{"site-a":"abc"}}`
+	if err := os.WriteFile(path, []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EraseConnStateIfEmpty(path); err == nil {
+		t.Fatal("pending candidate fingerprints must refuse erasure")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != state {
+		t.Fatalf("failed erase changed staged-candidate authority: body=%q err=%v", got, err)
 	}
 }
 
