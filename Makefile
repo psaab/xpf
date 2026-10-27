@@ -405,6 +405,7 @@ test-go: test-race-dp
 	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" ./... || status=$$?; \
 	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ || status=$$?; \
 	sh scripts/go-buildtag-census.sh || status=$$?; \
+	sh scripts/go-deadcode-gate.sh; dc=$$?; if [ $$dc -eq 77 ]; then echo "test-go: go-deadcode-gate SKIPPED (no go1.26 toolchain; see script header)"; elif [ $$dc -ne 0 ] && [ $$status -eq 0 ]; then status=$$dc; fi; \
 	exit $$status
 
 # #17008: require pkg/nftables and daemon nft mirrors to remain free of
@@ -1406,6 +1407,16 @@ go-skip-census:
 
 test-go-skip-census-lib:
 	bash ./test/incus/go-skip-census-selftest.sh
+
+# #17154 (R4-Q49-01): module-wide reachability gate — the unreachable set
+# (`deadcode@v0.38.0 -test ./...`, go1.26 toolchain; see script header for
+# the go1.27 SSA panic) must equal docs/deadcode-allowlist.txt exactly.
+# Also a leg of `make test-go` above. Hermetic self-test over fixtures:
+go-deadcode-gate:
+	sh scripts/go-deadcode-gate.sh
+
+test-go-deadcode-gate-lib:
+	bash ./scripts/go-deadcode-gate-selftest.sh
 
 test-ignored-cell-census-lib:
 	bash ./test/incus/ignored-cell-census-selftest.sh
