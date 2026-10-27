@@ -388,12 +388,21 @@ func (rr *routeReader) multiPathNextHops(mp []*netlink.NexthopInfo, linkName fun
 }
 
 // rtprotZStatic is FRR's private rtnetlink protocol value for staticd-
-// installed routes (RTPROT_ZSTATIC). It is NOT a Linux UAPI constant, so
-// it has no golang.org/x/sys/unix counterpart; FRR's zebra2proto() maps
-// ZEBRA_ROUTE_STATIC -> RTPROT_ZSTATIC (zebra/rt_netlink.h, value 196)
-// and proto2zebra() reads both RTPROT_STATIC and RTPROT_ZSTATIC back as
-// ZEBRA_ROUTE_STATIC.
-const rtprotZStatic = 196
+// installed routes (RTPROT_ZSTATIC); the constant itself now lives with
+// the route-protocol SSOT in pkg/config (#17029).
+const rtprotZStatic = config.RouteProtocolZStatic
+
+// routeProtocolByRTProto indexes the config.RouteProtocols SSOT by
+// rtnetlink protocol byte (#17029).
+var routeProtocolByRTProto = func() map[int]string {
+	m := make(map[int]string)
+	for _, p := range config.RouteProtocols() {
+		for _, rp := range p.RTProtos {
+			m[rp] = p.Internal
+		}
+	}
+	return m
+}()
 
 // rtProtoName maps a netlink route protocol to its xpf protocol name.
 //
@@ -404,35 +413,13 @@ const rtprotZStatic = 196
 // connected/local/kernel->RTPROT_KERNEL. RTPROT_ZEBRA(11) is reserved by
 // FRR for ZEBRA_ROUTE_TABLE/NHG routes, which xpf does not surface as a
 // named protocol, so it falls through to its numeric string like any
-// other unrecognized value. The numeric comments record the constant
-// values for the reader. The returned name feeds protoTag() and
+// other unrecognized value. The returned name feeds protoTag() and
 // junosProtoName() in routeformat.go and the `show route protocol <x>`
-// filter in pkg/cli/cli_show_routing.go.
+// filter in pkg/cli/cli_show_routing.go. The byte-to-name rows are the
+// config.RouteProtocols SSOT (#17029).
 func rtProtoName(p netlink.RouteProtocol) string {
-	switch int(p) {
-	case unix.RTPROT_REDIRECT: // 1
-		return "redirect"
-	case unix.RTPROT_KERNEL: // 2 — also FRR connected/local/kernel
-		return "connected"
-	case unix.RTPROT_BOOT: // 3
-		return "dhcp"
-	case unix.RTPROT_STATIC: // 4 — manual `ip route` static
-		return "static"
-	case unix.RTPROT_DHCP: // 16
-		return "dhcp"
-	case unix.RTPROT_BGP: // 186
-		return "bgp"
-	case unix.RTPROT_ISIS: // 187
-		return "isis"
-	case unix.RTPROT_OSPF: // 188
-		return "ospf"
-	case unix.RTPROT_RIP: // 189
-		return "rip"
-	case rtprotZStatic: // 196 — FRR staticd (RTPROT_ZSTATIC)
-		return "static"
-	case config.ManagementVRFMultipathStaticProtocol: // 88 — xpf ECMP management static (#12539)
-		return "static"
-	default:
-		return strconv.Itoa(int(p))
+	if name, ok := routeProtocolByRTProto[int(p)]; ok {
+		return name
 	}
+	return strconv.Itoa(int(p))
 }
