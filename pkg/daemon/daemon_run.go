@@ -857,7 +857,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// #15264: low-rate kernel-truth recheck for the host-inbound / lo0
 	// applied-state latches. An out-of-band `nft flush ruleset` otherwise
 	// leaves HostInboundApplied reporting Current over missing tables
-	// until the next apply. Idle cost is two atomic loads per tick.
+	// until the next apply. Idle cost is two atomic loads and one
+	// uncontended applySem round-trip per tick (#17861: the recheck
+	// serializes its whole observe+clear pass with applies).
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

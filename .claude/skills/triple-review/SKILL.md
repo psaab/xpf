@@ -30,6 +30,21 @@ The issue number identifies the GitHub tracking issue. The
 one-line scope distinguishes a multi-step refactor's current
 increment.
 
+
+## Host isolation (2026-10-26)
+
+Test classes: **U** hermetic (workstation, fast loop), **N**
+netns-kernel (workstation ONLY unprivileged under `unshare -rn`
+forcing legs / self-re-exec parity pattern; never root), **R**
+init-namespace privileged (BPF/XFRM/memlock) and **F**
+live-daemon (bgpd/zebra/charon/kea) — Incus VM legs only,
+**V** cluster harnesses — Incus only. A lane that needs R/F/V
+evidence records NOT-EXAMINED with the VM target instead of
+running it on the workstation. New kernel-reachable tests
+declare their class in the same change; reviewers reject
+undeclared host-reachable tests. `XPF_SACRIFICIAL_HOST=1` is
+wrapper-set VM intent only, never set by hand on the workstation.
+
 ## Standing rules (apply at every step)
 
 - **Plan first, code never first.** Never edit code before the

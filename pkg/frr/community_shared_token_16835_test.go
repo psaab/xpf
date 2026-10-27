@@ -424,7 +424,7 @@ func TestCommunityChainLiveBgpd16835(t *testing.T) {
 	}
 }
 
-func TestCommunityChainMixedTermStaysHistorical16835(t *testing.T) {
+func TestCommunityChainMixedTermUsesChain16835(t *testing.T) {
 	po := communityPolicyPO(
 		map[string]*config.CommunityDef{
 			"SH": {Name: "SH", Members: []string{"65000:.*", ".*:100"}},
@@ -436,10 +436,19 @@ func TestCommunityChainMixedTermStaysHistorical16835(t *testing.T) {
 		}, "accept")
 	po.PrefixLists = map[string]*config.PrefixList{"PL": {Name: "PL", Prefixes: []string{"10.0.0.0/8"}}}
 	got := New().generatePolicyOptions(po)
-	if !strings.Contains(got, " match community SH\n") {
-		t.Fatalf("mixed community+prefix-list term must keep the public-list match:\n%s", got)
+	if !strings.Contains(got, " match community "+communityChainListName16835("SH", "65000:.*")+"\n") {
+		t.Fatalf("mixed term does not use first member of the shared-token chain:\n%s", got)
 	}
-	if strings.Contains(got, "on-match goto") {
-		t.Fatalf("mixed term unexpectedly took the chain path:\n%s", got)
+	if !strings.Contains(got, " match community "+communityChainListName16835("SH", ".*:100")+"\n") {
+		t.Fatalf("mixed term does not use second member of the shared-token chain:\n%s", got)
+	}
+	if !strings.Contains(got, " match ip address prefix-list PL\n") {
+		t.Fatalf("mixed term lost its prefix-list AND dimension:\n%s", got)
+	}
+	if strings.Contains(got, " match community SH\n") {
+		t.Fatalf("mixed term still uses the under-matching public list:\n%s", got)
+	}
+	if !strings.Contains(got, "on-match goto") {
+		t.Fatalf("mixed term has no chain continuation:\n%s", got)
 	}
 }

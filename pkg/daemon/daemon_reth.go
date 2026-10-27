@@ -15,7 +15,6 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/netname"
 	"github.com/psaab/xpf/pkg/rendersafe"
@@ -268,7 +267,8 @@ func formerRethMembers(prev, current map[string]struct{}) []string {
 // It returns (cycled, leaseKept, commitErr): leaseKept mirrors
 // programRethMemberMAC's accumulator — an aborted restore's rollback rebound
 // without releasing, so the caller must arm the end-of-apply release. A
-// former member with no PermHWAddr, or already on it, is a no-op success.
+// missing link or permanent MAC is an error, not a successful no-op: the
+// previous-member record must remain pending until restoration can complete.
 //
 // The join hook mirrors programRethMACWithWorkerJoin's: it records that it
 // ran, and on a post-join failure rebinds with NotifyLinkCycleKeepingLease
@@ -277,15 +277,11 @@ func formerRethMembers(prev, current map[string]struct{}) []string {
 func (d *Daemon) restoreFormerRethMemberMAC(linuxName string) (bool, bool, error) {
 	link, err := rethLinkOpsFn.byName(linuxName)
 	if err != nil {
-		slog.Warn("former RETH member not present; cannot restore permanent MAC",
-			"iface", linuxName, "err", err)
-		return false, false, nil
+		return false, false, fmt.Errorf("former RETH member %s: find link for permanent MAC restore: %w", linuxName, err)
 	}
 	perm := link.Attrs().PermHWAddr
 	if len(perm) == 0 {
-		slog.Warn("former RETH member has no permanent MAC to restore",
-			"iface", linuxName)
-		return false, false, nil
+		return false, false, fmt.Errorf("former RETH member %s has no permanent MAC to restore", linuxName)
 	}
 	perm = append(net.HardwareAddr(nil), perm...)
 	if bytes.Equal(link.Attrs().HardwareAddr, perm) {
@@ -294,13 +290,15 @@ func (d *Daemon) restoreFormerRethMemberMAC(linuxName string) (bool, bool, error
 	slog.Info("restoring permanent MAC on former RETH member",
 		"iface", linuxName, "mac", perm)
 	joinRan := false
-	var joined dataplane.RuntimeDataPlane
+	var notifyKeepingLease func() error
 	beforeCycle := func() error {
 		rt := d.dataplane()
 		if rt == nil {
 			return nil
 		}
-		joined = rt
+		notifyKeepingLease = func() error {
+			return rt.Link().NotifyLinkCycleKeepingLease()
+		}
 		joinRan = true
 		slog.Info("userspace: stopping workers before former RETH member MAC restore", "iface", linuxName)
 		return rt.Link().PrepareLinkCycle()
@@ -310,13 +308,16 @@ func (d *Daemon) restoreFormerRethMemberMAC(linuxName string) (bool, bool, error
 	// finishRethMemberLinkTail: children keep the stale virtual MAC otherwise.
 	d.propagateMACToVLANChildren(linuxName, perm)
 	d.renewLinkCycleLease()
-	if macErr == nil || !joinRan {
+	if macErr == nil {
 		return cycled, false, nil
+	}
+	if !joinRan {
+		return cycled, false, fmt.Errorf("restore permanent MAC on former RETH member %s: %w", linuxName, macErr)
 	}
 	if cycled {
 		return cycled, false, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, macErr)
 	}
-	if rebindErr := joined.Link().NotifyLinkCycleKeepingLease(); rebindErr != nil {
+	if rebindErr := notifyKeepingLease(); rebindErr != nil {
 		return cycled, true, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, errors.Join(macErr, rebindErr))
 	}
 	return cycled, true, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, macErr)

@@ -6,6 +6,81 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+// #17875: a fixed gateway whose remote-identity is an ID_ANY spelling
+// (e.g. inet 0.0.0.0) is rescued at commit by its real address
+// (#16845 strict validator), and the PSK selector drop already scopes
+// the secret by that address — but the connection render pinned
+// remote.id = "0.0.0.0", telling charon to expect any identity. Treat
+// an ID_ANY remote-identity as no explicit identity and fall back to
+// the default (single) peer address, exactly as the PSK selector does.
+func TestRemoteIDAnyNotRendered17875(t *testing.T) {
+	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
+
+	mk := func(gw *config.IPsecGateway) *config.IPsecConfig {
+		cfg := &config.IPsecConfig{
+			VPNs:      map[string]*config.IPsecVPN{},
+			Gateways:  map[string]*config.IPsecGateway{},
+			Proposals: map[string]*config.IPsecProposal{},
+		}
+		cfg.VPNs["site"] = &config.IPsecVPN{Gateway: "gw", PSK: config.NewSecret("site-secret")}
+		cfg.Gateways["gw"] = gw
+		return cfg
+	}
+
+	t.Run("fixed gateway ID_ANY remote-identity rescued by real address renders address id", func(t *testing.T) {
+		gw := &config.IPsecGateway{
+			Name:          "gw",
+			Address:       "203.0.113.1",
+			RemoteIDType:  "inet",
+			RemoteIDValue: "0.0.0.0",
+		}
+		text, rendered, err := m.renderConfig(mk(gw))
+		if err != nil {
+			t.Fatalf("renderConfig: %v", err)
+		}
+		if !rendered["gw"] {
+			t.Fatalf("rescued fixed gateway must render, rendered=%v:\n%s", rendered, text)
+		}
+		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw")
+		conn.at(t, "remote").requireSetting(t, "id", `"203.0.113.1"`)
+		blk, ok := parseSecretBlocks(t, text)["ike-gw"]
+		if !ok || len(blk.ids) != 1 || !containsStr(blk.ids, "203.0.113.1") {
+			t.Errorf("PSK selectors = %v, want exactly [203.0.113.1]", blk.ids)
+		}
+	})
+
+	t.Run("discriminating remote-identity still renders verbatim", func(t *testing.T) {
+		gw := &config.IPsecGateway{
+			Name:          "gw",
+			Address:       "203.0.113.1",
+			RemoteIDType:  "inet",
+			RemoteIDValue: "203.0.113.2",
+		}
+		text, rendered, err := m.renderConfig(mk(gw))
+		if err != nil {
+			t.Fatalf("renderConfig: %v", err)
+		}
+		if !rendered["gw"] {
+			t.Fatalf("gateway must render, rendered=%v:\n%s", rendered, text)
+		}
+		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw")
+		conn.at(t, "remote").requireSetting(t, "id", `"203.0.113.2"`)
+	})
+
+	t.Run("no remote-identity keeps address default", func(t *testing.T) {
+		gw := &config.IPsecGateway{Name: "gw", Address: "203.0.113.1"}
+		text, rendered, err := m.renderConfig(mk(gw))
+		if err != nil {
+			t.Fatalf("renderConfig: %v", err)
+		}
+		if !rendered["gw"] {
+			t.Fatalf("gateway must render, rendered=%v:\n%s", rendered, text)
+		}
+		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw")
+		conn.at(t, "remote").requireSetting(t, "id", `"203.0.113.1"`)
+	})
+}
+
 // #16845 (R3-F15-02): the render belts treated only "" / hostname as
 // "no peer selector". A gateway addressed 0.0.0.0/::, an inline
 // endpoint 0.0.0.0, and a responder-only gateway with

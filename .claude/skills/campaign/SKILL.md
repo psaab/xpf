@@ -101,6 +101,43 @@ driveable work remains.
   owner/epoch state), or open gate cell scripts — that is the campaign's
   live memory, not scratch. The gate-baselines directory is protected
   except for indexed captures that have expired under the rule below.
+- **Host isolation — tests NEVER mutate the workstation (2026-10-26)**:
+  the workstation is a long-lived host, not a sacrificial test box.
+  Evidence on this host: 32 orphan `eno5v*` VLAN links, fwmark
+  rules 5210-5270 + table 220, apt-installed FRR/strongSwan
+  (`strongswan-starter` active), `/var/lib/xpf`, host bpffs —
+  all from tests/harnesses that flip from SKIP to REAL EFFECT
+  the moment they run privileged. Classes: **U** hermetic
+  (fakes/fixtures) — workstation + CI, the fast loop. **N**
+  netns-kernel (netlink/nft/FIB in a private netns) —
+  workstation ONLY unprivileged via `unshare -rn` forcing legs
+  (or the repo's self-re-exec parity pattern), NEVER as root.
+  **R** init-namespace privileged (BPF load/pin, XFRM, memlock)
+  and **F** live-daemon (real bgpd/zebra/charon/kea, named
+  netns, `/var/run/frr`) — Incus VM legs ONLY. **V** VM/cluster
+  shell harnesses (`test/incus/*.sh`, apt/systemctl/deploy) —
+  Incus only, under `with-cluster.sh`; NEVER run them directly
+  on the workstation. Rules: (1) no lane runs `go test`/`cargo
+  test` as root on the workstation, and `sudo make test-root`
+  locally is PROHIBITED (privileged legs run in the standalone
+  VM leg); (2) kernel cells assert isolation in-test on a
+  LOCKED thread (`runtime.LockOSThread` + netns Get): initial
+  netns or host bpffs reach = `t.Fatalf`, NEVER a silent skip —
+  NOT-EXAMINED is the honest local outcome; (3) BPF pin paths
+  are host-global (`/sys/fs/bpf/xpf` const): class-R cells
+  need a private mount ns + sacrificial bpffs or a VM, netns
+  alone does NOT isolate them; (4) an env sentinel
+  (`XPF_SACRIFICIAL_HOST=1`) is lane INTENT only, set solely by
+  make/with-cluster wrappers inside VMs — never by hand on the
+  workstation, never as proof overriding a host net+mount
+  identity check; (5) every new kernel-reachable test
+  (LinkAdd/RuleAdd/nft/ebpf.NewMap/exec of ip|nft|systemctl|
+  apt/daemon binaries) declares its class in the same change,
+  and reviewers reject undeclared host-reachable tests;
+  (6) keeper residue tripwire is REPORT-ONLY (links matching
+  `<phys>v[0-9]+`, fwmark 52xx/table-220 rules, `/var/lib/xpf`,
+  active frr/strongswan/xpfd host units): alert, never
+  auto-clean — residue may be operator state.
 - **Disk guard — `/var/worktrees` must never fill up**: unbounded lanes
   plus Go/Rust caches will fill the volume mid-campaign if nobody owns
   it, so the keeper checks it every tick and the parent reaps. Measure
@@ -591,7 +628,21 @@ For each PR an agent opens:
    tool, each explicitly requesting a distinct model from the pool
    (Muse Wonder, Opus 5.5, Codex-6 Astra, GLM-5.3, Kimi K3.1 Pro),
    worktree-scoped, READ-ONLY (reviewers never write to the PR; they
-   return their verdict to the parent). Brief template (fill per
+   **Pool rotation (user directive 2026-10-26): dedicated
+   reviewer agent types exist for Astra (`res-camp-astra`), GLM
+   (`res-camp-glm`), Opus (`res-camp-opus`), and Kimi
+   (`res-camp-kimi`, model `kimi-code/k3.1-pro`). Kimi was
+   historically never used: dispatches defaulted to the three
+   older dedicated types or generic `task` agents (which silently
+   run the parent default, muse-wonder) and nobody named Kimi.
+   Every PR's triple MUST rotate: across any 3 consecutive PR
+   triples, each pool model serves at least once and no model
+   serves all three triples. A generic `task` reviewer counts
+   ONLY as Muse Wonder — never relabel it as another pool model;
+   the stamp records the ACTUAL runtime model the result reports.
+   If a pool model is quota-blocked/unreachable, swap in the next
+   pool model the same tick and note the swap on the PR.
+   Brief template (fill per
    PR): "You are a hostile domain-expert reviewer (HPC networking /
    OS / CPU / protocols; xpf is an eBPF firewall with a userspace
    AF_XDP Rust dataplane). Review PR #<n> at head <SHA> in

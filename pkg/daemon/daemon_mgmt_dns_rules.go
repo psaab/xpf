@@ -360,7 +360,14 @@ func mgmtDNSRefusedNameserver(ip netip.Addr, mainRoutes []netlink.Route, cfg *co
 // them, since they leave the wanted set) and are warned about once per
 // distinct server.
 func mgmtDNSRulePairsFiltered(leases []*dhcp.Lease, mgmtSet map[string]bool, mainRoutes []netlink.Route, cfg *config.Config) []mgmtDNSRulePair {
-	warned := make(map[netip.Addr]bool)
+	return mgmtDNSRulePairsFilteredWithWarnings(leases, mgmtSet, mainRoutes, cfg, true)
+}
+
+func mgmtDNSRulePairsFilteredWithWarnings(leases []*dhcp.Lease, mgmtSet map[string]bool, mainRoutes []netlink.Route, cfg *config.Config, warn bool) []mgmtDNSRulePair {
+	var warned map[netip.Addr]bool
+	if warn {
+		warned = make(map[netip.Addr]bool)
+	}
 	filtered := make([]*dhcp.Lease, 0, len(leases))
 	for _, lease := range leases {
 		if lease == nil {
@@ -372,7 +379,7 @@ func mgmtDNSRulePairsFiltered(leases []*dhcp.Lease, mgmtSet map[string]bool, mai
 		for _, ip := range lease.DNS {
 			if mgmtSet[lease.Interface] {
 				if reason, refused := mgmtDNSRefusedNameserver(ip, mainRoutes, cfg); refused {
-					if !warned[ip] {
+					if warn && !warned[ip] {
 						warned[ip] = true
 						slog.Warn("SECURITY: refusing management DHCP nameserver "+reason+" (#15059); its DNS will use the main-table route, not table 999",
 							"interface", lease.Interface, "server", ip.String(), "reason", reason)

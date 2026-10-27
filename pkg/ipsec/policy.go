@@ -730,7 +730,11 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 		b.WriteString("    }\n")
 		b.WriteString("    remote {\n")
 		fmt.Fprintf(&b, "      auth = %s\n", gc.authMethod)
-		if gw != nil && gw.RemoteIDValue != "" {
+		// #17875: ID_ANY has no discriminating PSK identity. Treat it as
+		// no explicit identity so a fixed-address PSK peer can use the
+		// address default; leave pubkey identity handling unchanged.
+		if gw != nil && gw.RemoteIDValue != "" &&
+			(gc.authMethod != "psk" || hasDiscriminatingRemoteIdentityRender(gw)) {
 			fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(formatIdentity(gw.RemoteIDType, gw.RemoteIDValue))))
 		} else if gw != nil && gw.DynamicHostname != "" {
 			fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(formatIdentity("hostname", gw.DynamicHostname))))
@@ -1475,16 +1479,15 @@ func pskPeerSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 	return ids
 }
 
-// defaultRemoteID returns the implicit remote identity for a gateway that
-// carries no explicit remote-identity and no dynamic hostname and is not
-// responder-only: its sole fixed address. Junos defaults the peer's IKE
-// identity to the gateway address; strongSwan likewise keys the peer by
-// its IP when no id is negotiated. Rendering it explicitly pins what
-// charon, acting as initiator, sends/expects as IDr and what swanctl
-// matches the PSK against (#15193). The caller must have already
-// established the gateway is a fixed-address, non-responder peer; this
-// helper stays pure so the connection render and the secret scoping can
-// never disagree.
+// defaultRemoteID returns the implicit remote identity for a PSK gateway
+// with no discriminating remote-identity (or only ID_ANY), dynamic hostname,
+// or responder-only setting: its sole fixed address. Junos defaults the
+// peer's IKE identity to the gateway address; strongSwan likewise keys
+// the peer by its IP when no id is negotiated. Rendering it explicitly
+// pins what charon, as initiator, sends/expects as IDr and what swanctl
+// matches the PSK against (#15193). The caller must already establish
+// a fixed-address, non-responder peer; this helper stays pure so the
+// connection render and the secret scoping can never disagree.
 //
 // #15766: a multi-address gateway yields "" — swanctl remote.id is
 // single-valued, so pinning the first address would reject the same peer
@@ -1502,7 +1505,7 @@ func pskPeerSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 // the resolved IP cannot be pinned either; omitting remote.id lets
 // charon negotiate the peer's presented (IP) identity instead.
 func defaultRemoteID(gw *config.IPsecGateway) string {
-	if gw == nil || gw.RemoteIDValue != "" || gw.DynamicHostname != "" {
+	if gw == nil || hasDiscriminatingRemoteIdentityRender(gw) || gw.DynamicHostname != "" {
 		return ""
 	}
 	addrs := config.SplitIPsecEndpointList(gw.Address)

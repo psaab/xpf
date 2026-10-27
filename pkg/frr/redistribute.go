@@ -1644,7 +1644,7 @@ func redistReferencedProtocols14380(ps *config.PolicyStatement, nodes [][2]strin
 	return out
 }
 
-func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, entries []redistEntry, resolvedAsPolicy ...bool) {
+func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, entries []redistEntry, resolvedAsPolicy bool, self string) {
 	if metrics == nil {
 		return
 	}
@@ -1652,10 +1652,15 @@ func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, en
 	// #14369: a defined policy-statement named `static` resolves through
 	// the policy branch, so its static entries take the policy QNH map;
 	// the bare-protocol staticMap applies only to the bare-token reading.
-	if export == "static" && knownRedistProtocol(export) && !(len(resolvedAsPolicy) > 0 && resolvedAsPolicy[0]) {
+	if export == "static" && knownRedistProtocol(export) && !resolvedAsPolicy {
 		routeMap = metrics.staticMap
 	} else {
 		routeMap = metrics.policyMaps[export]
+		if routeMap != "" {
+			if ctx, ok := redistVariantForNode16864(self, self); ok && !ctx.isis {
+				routeMap = qnhMetricPolicyVariantRouteMap11447(routeMap, ctx)
+			}
+		}
 	}
 	if routeMap == "" {
 		return
@@ -1663,7 +1668,6 @@ func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, en
 	for i := range entries {
 		if entries[i].proto == "static" {
 			entries[i].routeMap = routeMap
-			entries[i].isis = false
 		}
 	}
 }
@@ -1851,7 +1855,9 @@ func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
 					}
 				}
 				if e.clusterMode && e.proto == "static" {
-					routeMap = guardedStaticRouteMap15158(e)
+					variantEntry := e
+					variantEntry.routeMap = routeMap
+					routeMap = guardedStaticRouteMap15158(variantEntry)
 				}
 				if routeMap == "" {
 					fmt.Fprintf(&sb, " redistribute %s %s %s\n", fam.name, sanitizeFRRValue(e.proto), lv)
@@ -1867,7 +1873,7 @@ func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
 func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsConfig, self string, metrics ...*qnhMetricScope11447) []redistEntry {
 	entries := m.redistributeEntriesAt(export, po, self, self)
 	if len(metrics) > 0 {
-		applyQNHMetricRouteMap11447(export, metrics[0], entries, isDefinedPolicyStatement(export, po))
+		applyQNHMetricRouteMap11447(export, metrics[0], entries, isDefinedPolicyStatement(export, po), self)
 	}
 	return entries
 }

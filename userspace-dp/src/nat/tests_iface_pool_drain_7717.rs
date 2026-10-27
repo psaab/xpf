@@ -35,6 +35,13 @@ fn pool_snapshot(quarantined: bool) -> SourceNATRuleSnapshot {
         ..SourceNATRuleSnapshot::default()
     }
 }
+fn no_translation_pool_snapshot(quarantined: bool) -> SourceNATRuleSnapshot {
+    SourceNATRuleSnapshot {
+        pool_no_translation: true,
+        ..pool_snapshot(quarantined)
+    }
+}
+
 
 fn iface_snapshot() -> SourceNATRuleSnapshot {
     SourceNATRuleSnapshot {
@@ -490,4 +497,115 @@ fn nat64_draining_check_with_disjoint_large_pools_mints_13083() {
     nat64
         .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &draining, 0, None)
         .expect("#13083: disjoint draining pool must not quarantine NAT64 mint");
+}
+/// #17877 RED-on-revert: quarantine retention follows configured pool identity
+/// across the no-translation -> PAT transition, without making the old 0/0
+/// allocator eligible for healthy PAT reuse.
+#[test]
+fn no_translation_pool_keeps_quarantine_drain_across_pat_transition_17877() {
+    let reg = InterfaceNatAllocators::default();
+    let gen1 = parse_source_nat_rules(&[no_translation_pool_snapshot(false)]);
+    let original = match admit(&reg, &gen1, "10.0.0.1", 5555) {
+        SourceNatLookup::Matched(decision) => decision,
+        other => panic!("setup: no-translation pool must admit: {other:?}"),
+    };
+    assert_eq!(original.rewrite_src_port, None, "setup: preserve source port");
+    assert_eq!(gen1[0].pool_allocator.live_flow_count(), 1);
+
+    // The overlap quarantine first arrives while no-translation is still set.
+    let gen2 = parse_source_nat_rules_with_previous(
+        &[iface_snapshot(), no_translation_pool_snapshot(true)],
+        Some(&gen1),
+        &NatCounterStore::default(),
+        0,
+    );
+    assert_eq!(
+        gen2[1].pool_failure,
+        Some(SourceNatFailureReason::PoolIfaceEgressOverlap)
+    );
+    assert_eq!(gen2[1].pool_allocator.live_flow_count(), 1);
+
+    // Remove no-translation while the runtime overlap persists. The still-live
+    // address-only token must remain reachable from the PAT-configured
+    // quarantined rule, and its occupancy must keep interface mints fenced.
+    let gen3 = parse_source_nat_rules_with_previous(
+        &[iface_snapshot(), pool_snapshot(true)],
+        Some(&gen2),
+        &NatCounterStore::default(),
+        0,
+    );
+    assert_eq!(gen3[1].pool_failure, Some(SourceNatFailureReason::PoolIfaceEgressOverlap));
+    assert_eq!(
+        gen3[1].pool_allocator.live_flow_count(),
+        1,
+        "#17877: changing the current rule to PAT must not lose the old 0/0 \
+         allocator's live address-only token"
+    );
+    assert!(matches!(
+        admit(&reg, &gen3, "10.0.0.2", 5555),
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            reason: SourceNatFailureReason::InterfaceOverlapDraining,
+            ..
+        })
+    ));
+
+    // A second quarantined refresh must keep the same token reachable too.
+    let gen4 = parse_source_nat_rules_with_previous(
+        &[iface_snapshot(), pool_snapshot(true)],
+        Some(&gen3),
+        &NatCounterStore::default(),
+        0,
+    );
+    assert_eq!(
+        gen4[1].pool_allocator.live_flow_count(),
+        1,
+        "#17877: retained state must survive another quarantined refresh"
+    );
+    assert!(matches!(
+        admit(&reg, &gen4, "10.0.0.3", 5555),
+        SourceNatLookup::Unavailable(SourceNatFailure {
+            reason: SourceNatFailureReason::InterfaceOverlapDraining,
+            ..
+        })
+    ));
+
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: TCP,
+        src_ip: "10.0.0.1".parse().expect("src"),
+        dst_ip: SRV.parse().expect("dst"),
+        src_port: 5555,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    assert!(
+        release_source_nat_allocation(&reg, &gen4, &key, original, false, 2_000),
+        "#17877: the original address-only token must release through normal teardown"
+    );
+    assert_eq!(gen4[1].pool_allocator.live_flow_count(), 0);
+    assert!(matches!(
+        admit(&reg, &gen4, "10.0.0.2", 5555),
+        SourceNatLookup::Matched(_)
+    ));
+
+    // Once healthy, PAT must build its configured-range allocator rather than
+    // reusing the drain-only zero-range allocator.
+    let healthy_pat = parse_source_nat_rules_with_previous(
+        &[pool_snapshot(false)],
+        Some(&gen4),
+        &NatCounterStore::default(),
+        0,
+    );
+    assert_eq!(healthy_pat[0].pool_failure, None);
+    assert_ne!(
+        healthy_pat[0].pool_allocator.debug_shared_identity(),
+        gen1[0].pool_allocator.debug_shared_identity(),
+        "#17877: the drain-only 0/0 allocator must not become a healthy PAT reuse candidate"
+    );
+    let pat_decision = match admit(&reg, &healthy_pat, "10.0.0.4", 5555) {
+        SourceNatLookup::Matched(decision) => decision,
+        other => panic!("#17877: healthy PAT must mint after the drain: {other:?}"),
+    };
+    assert!(pat_decision.rewrite_src_port.is_some());
 }

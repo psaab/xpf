@@ -2069,9 +2069,11 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// (lease-add → lease-update on collision). Nudge the push
 			// loop so this node replicates its now-owned set.
 			// #16854: skipped when this edge moves no DHCP scope.
+			// The seed wait uses applyCancelCtx so daemon shutdown can cancel
+			// an unapplied generation instead of leaving a goroutine behind.
 			if takeoverWork {
 				if cc := d.clusterConfig(); cc != nil && cc.DHCPLeaseSync && d.getSessionSync() != nil {
-					go d.seedDHCPLeasesFromPeerGen(context.Background(), applyGen)
+					d.spawnDHCPLeaseSeed(d.applyCancelCtx(), applyGen, dhcpLeaseSeedApplyWaitWarnAfter)
 					d.nudgeDHCPLeaseSync()
 				}
 			}
@@ -3116,12 +3118,27 @@ func (d *Daemon) ipsecRGOwnershipEpoch(rg int) uint64 {
 // would then force-terminate the SA reinitiateIPsecSAsForRG (or the
 // remote peer, via the VIP) just re-established — recreating the
 // #15194 failback black hole on the owning node. The caller captures
-// the RG ownership epoch at demotion; immediately before EACH
-// terminate the sweep re-checks that the epoch is unchanged AND that
-// this node is still not primary for rg. Either changing aborts the
-// remainder of the sweep. When d.cluster is nil (non-clustered test
-// Daemons that drive this function directly) only the epoch check
-// applies, so existing direct-call cells keep their behaviour.
+// the RG ownership epoch at demotion; the sweep re-checks that the
+// epoch is unchanged AND that this node is still not primary for rg.
+// Either changing aborts the remainder of the sweep. When d.cluster is
+// nil (non-clustered test Daemons that drive this function directly)
+// only the epoch check applies, so existing direct-call cells keep
+// their behaviour.
+//
+// #17858: the boundary re-check above is necessary but not sufficient.
+// ipsecTerminate → TerminateConnection performs ANOTHER blocking
+// `swanctl --list-sas` (resolving the gateway-named IKE connection)
+// before the terminate exec, so a sweep that passed the boundary check
+// and stalled in that inner read survives a COMPLETE failback — epoch
+// bump, takeover belt, initiate — and its terminate then lands on the
+// replacement SA, which carries the same IKE name; the final operation
+// becomes terminate, not initiate. The same ownership predicate is
+// therefore evaluated at BOTH decision points: at the loop boundary and
+// INSIDE the terminate, via ipsecTerminateGuarded →
+// TerminateConnectionGuarded, which runs it after the inner read,
+// immediately before the exec, under the manager mutex that
+// InitiateConnection also holds. See that method for the ordering
+// argument that makes the stale-after-initiate terminate impossible.
 func (d *Daemon) terminateDemotedRGIPsecSAs(rg int, epoch uint64) {
 	if d.ipsec == nil && d.ipsecTerminateFn == nil {
 		return
@@ -3132,13 +3149,23 @@ func (d *Daemon) terminateDemotedRGIPsecSAs(rg int, epoch uint64) {
 			"rg", rg, "err", err)
 		return
 	}
+	stillDemoted := func() bool {
+		return d.ipsecRGOwnershipEpoch(rg) == epoch &&
+			!(d.cluster != nil && d.cluster.IsLocalPrimary(rg))
+	}
 	for _, name := range d.ipsecSAsForRG(names, rg) {
-		if d.ipsecRGOwnershipEpoch(rg) != epoch || (d.cluster != nil && d.cluster.IsLocalPrimary(rg)) {
+		if !stillDemoted() {
 			slog.Info("cluster: aborting demoted RG IPsec terminate sweep; RG ownership changed during sweep",
 				"rg", rg, "name", name)
 			return
 		}
-		if err := d.ipsecTerminate(name); err != nil {
+		aborted, err := d.ipsecTerminateGuarded(name, stillDemoted)
+		if aborted {
+			slog.Info("cluster: aborting demoted RG IPsec terminate sweep; RG ownership changed during terminate",
+				"rg", rg, "name", name)
+			return
+		}
+		if err != nil {
 			slog.Warn("cluster: failed to terminate demoted RG IPsec SA", "rg", rg, "name", name, "err", err)
 		} else {
 			slog.Info("cluster: terminated IPsec SA on RG demotion", "rg", rg, "name", name)
@@ -3189,6 +3216,29 @@ func (d *Daemon) ipsecTerminate(name string) error {
 		return nil
 	}
 	return d.ipsec.TerminateConnection(name)
+}
+
+// ipsecTerminateGuarded is the demotion sweep's terminate (#17858): the
+// ownership guard travels INSIDE the effect and is evaluated by
+// TerminateConnectionGuarded after the terminate path's own live-SA read,
+// immediately before the swanctl exec — checking here, at the wrapper
+// boundary, is exactly the #16820 shape that a blocking inner read
+// invalidates. The takeover belt keeps plain ipsecTerminate: it runs on
+// the PROMOTION side (post-bump, node primary), where this guard would
+// always decline and break the belt. Through the ipsecTerminateFn seam —
+// which replaces the whole effect, inner read included — the guard runs
+// directly before the seam, the closest equivalent the seam offers.
+func (d *Daemon) ipsecTerminateGuarded(name string, guard func() bool) (aborted bool, err error) {
+	if fn := d.ipsecTerminateFn; fn != nil {
+		if guard != nil && !guard() {
+			return true, nil
+		}
+		return false, fn(name)
+	}
+	if d.ipsec == nil {
+		return false, nil
+	}
+	return d.ipsec.TerminateConnectionGuarded(name, guard)
 }
 
 // desiredStandaloneDHCPConfig returns the DHCP server config the STANDALONE

@@ -452,7 +452,7 @@ func injectUserspaceBootstrapMaps(t *testing.T, m *Manager) {
 	injectUserspaceWGZoneMaps(t, m)
 	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLandScreen, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    2,
+		KeySize:    4,
 		ValueSize:  1,
 		MaxEntries: userspaceLandScreenMapCapacity,
 	})
@@ -463,7 +463,7 @@ func injectUserspaceWGZoneMaps(t *testing.T, m *Manager) {
 	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceWgIngressZones, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(userspaceWGIngressZoneKey{})),
-		ValueSize:  2,
+		ValueSize:  4,
 		MaxEntries: userspaceWGIngressZoneMapCapacity,
 	})
 	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceWgZoneAdmission, &ebpf.MapSpec{
