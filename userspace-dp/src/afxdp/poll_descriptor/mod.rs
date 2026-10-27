@@ -45,6 +45,7 @@ pub(in crate::afxdp) mod frag_assoc;
 mod host_inbound_policy;
 mod nat64_icmp_error;
 mod nat_exception;
+pub(in crate::afxdp) use nat_exception::source_nat_decision_for_flow;
 mod noroute_adjudication;
 mod prerouting_scope;
 
@@ -529,7 +530,7 @@ use cookie_reply::{
     syn_cookie_final_admission, syn_cookie_final_admission_with_fence,
     syn_cookie_host_admission,
 };
-use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
+use nat_exception::record_source_nat_failure;
 use prerouting_scope::{
     PreroutingIngressScope, prerouting_ingress_scope, prerouting_ingress_scope_ambiguous,
 };
@@ -6561,14 +6562,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     worker_ctx.forwarding.has_multiple_zones,
                                 )
                             {
-                                if let Some((seq, _, _, scale)) =
-                                    crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
-                                {
-                                    sessions.seed_tcp_window_scale(&flow.forward_key, scale);
-                                    // #16042: seed the trigger ISN so the first
-                                    // handshake segment can be ack-validated.
-                                    sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
-                                }
+                                crate::afxdp::session_glue::seed_forward_tcp_epilogue(
+                                    sessions,
+                                    &flow.forward_key,
+                                    packet_frame,
+                                    tcp_payload_len(packet_frame, meta),
+                                    meta.tcp_flags,
+                                );
                                 // #15111: host-local inbound session anchors the lease hold.
                                 if let Some(hold) = acquire_persistent_inbound_hold(
                                     worker_ctx.forwarding,
@@ -6980,122 +6980,52 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         effective_resolution_target,
                                         policy_dst_port,
                                     );
-                                    // #3121: NPTv6 outbound source-prefix translation is
-                                    // orthogonal to a pre-routing destination rewrite
-                                    // (DNAT / static DNAT). The two NAT stages COMPOSE --
-                                    // DNAT rewrites the destination, NPTv6 the source --
-                                    // so NPTv6 is attempted regardless of whether a
-                                    // destination rewrite is already present and is
-                                    // merged into the decision (not gated on
-                                    // rewrite_dst.is_none(), which leaked the internal
-                                    // IPv6 source whenever DNAT also matched). The merge
-                                    // preserves rewrite_dst (DNAT) + rewrite_src (NPTv6);
-                                    // the NPTv6 source rewrite is checksum-neutral by
-                                    // RFC 6296 (see afxdp::checksum / frame::apply_nat_ipv6),
-                                    // so only the DNAT destination delta is folded into the
-                                    // L4 checksum. #5176: gate on the EGRESS zone
-                                    // (`to_zone`) so a rule-set scoped `from zone X`
-                                    // never rewrites the source of traffic leaving
-                                    // via another zone (security-domain crossing).
-                                    let nptv6_snat =
-                                        if let IpAddr::V6(mut src_v6) = nat_match_flow.src_ip {
-                                            match worker_ctx
-                                                .forwarding
-                                                .nptv6
-                                                .translate_outbound_result(&mut src_v6, to_zone)
-                                            {
-                                                crate::nptv6::Nptv6Translation::Translated => {
-                                                    worker_ctx
-                                                        .forwarding
-                                                        .nptv6
-                                                        .record_translation(false);
-                                                    Some(NatDecision {
-                                                        rewrite_src: Some(IpAddr::V6(src_v6)),
-                                                        rewrite_dst: None,
-                                                        nat64: false,
-                                                        nptv6: true,
-                                                        ..NatDecision::default()
-                                                    })
-                                                }
-                                                crate::nptv6::Nptv6Translation::NoMatch => None,
-                                                crate::nptv6::Nptv6Translation::Untranslatable => {
-                                                    worker_ctx
-                                                        .forwarding
-                                                        .nptv6
-                                                        .record_untranslatable_drop();
-                                                    // Untranslatable is terminal:
-                                                    // §3.7's all-zero IID is
-                                                    // an explicit MUST-drop;
-                                                    // §3.2 directs discard of
-                                                    // an unmapped internal
-                                                    // subnet, and all-ones is
-                                                    // the scoped review edge.
-                                                    // Do not fall through to
-                                                    // static/interface SNAT.
-                                                    binding.scratch.scratch_recycle.push(desc.addr);
-                                                    continue;
-                                                }
-                                            }
-                                        } else {
-                                            None
-                                        };
-                                    if let Some(nptv6_decision) = nptv6_snat {
-                                        // NPTv6 matched: compose with any pre-routing
-                                        // DNAT decision. NPTv6 is the source translation
-                                        // and takes precedence over static/interface
-                                        // SNAT for the source (same precedence the old
-                                        // rewrite_dst.is_none() branch applied). NPTv6
-                                        // carries no per-rule NAT counter.
-                                        decision.nat = decision.nat.merge(nptv6_decision);
-                                        source_nat_release_key =
-                                            Some(nat_match_flow.forward_key.clone());
-                                    } else {
-                                        // No NPTv6 match: fall back to static / interface
-                                        // SNAT, merging with any pre-routing DNAT decision.
-                                        // #2218: capture the matched rule's counter via
-                                        // the out-param.
-                                        let mut snat_match_counter = None;
-                                        let mut snat_match_static = None;
-                                        match source_nat_decision_for_flow(
-                                            worker_ctx.forwarding,
-                                            meta.ingress_ifindex as i32,
-                                            meta.ingress_vlan_id,
-                                            ingress_nat_scope_ifindex,
-                                            &from_zone,
-                                            &to_zone,
-                                            decision.resolution.egress_ifindex,
-                                            &nat_match_flow,
-                                            now_ns,
-                                            snat_non_first_fragment,
-                                            policy_packet_icmp(packet_frame, meta),
-                                            // #6522: THIS worker holds the
-                                            // pool allocation this decision
-                                            // mints — see `nat::NatHolder`.
-                                            worker_id,
-                                            &mut snat_match_counter,
-                                            &mut snat_match_static,
-                                        ) {
-                                            Ok(snat_decision) => {
-                                                decision.nat = decision.nat.merge(snat_decision);
-                                                source_nat_release_key =
-                                                    Some(nat_match_flow.forward_key.clone());
-                                                source_nat_counter = snat_match_counter;
-                                                source_nat_static = snat_match_static;
-                                            }
-                                            Err(failure) => {
-                                                record_source_nat_failure(
-                                                    telemetry,
-                                                    worker_ctx,
-                                                    meta,
-                                                    flow,
-                                                    from_zone_id,
-                                                    to_zone_id,
-                                                    desc.len,
-                                                    &failure,
-                                                );
-                                                binding.scratch.scratch_recycle.push(desc.addr);
-                                                continue;
-                                            }
+                                    // #17021: NPTv6-to-SNAT composition is the
+                                    // one helper the MissingNeighbor seed also
+                                    // uses (session_glue::compose_outbound_source_nat).
+                                    match crate::afxdp::session_glue::compose_outbound_source_nat(
+                                        worker_ctx.forwarding,
+                                        decision,
+                                        &nat_match_flow,
+                                        meta.ingress_ifindex as i32,
+                                        meta.ingress_vlan_id,
+                                        ingress_nat_scope_ifindex,
+                                        &from_zone,
+                                        &to_zone,
+                                        decision.resolution.egress_ifindex,
+                                        now_ns,
+                                        snat_non_first_fragment,
+                                        policy_packet_icmp(packet_frame, meta),
+                                        worker_id,
+                                    ) {
+                                        Ok(composed) => {
+                                            decision = composed.decision;
+                                            source_nat_release_key =
+                                                composed.source_nat_release_key;
+                                            source_nat_counter = composed.source_nat_counter;
+                                            source_nat_static = composed.source_nat_static;
+                                        }
+                                        Err(
+                                            crate::afxdp::session_glue::NatFailure::Untranslatable,
+                                        ) => {
+                                            binding.scratch.scratch_recycle.push(desc.addr);
+                                            continue;
+                                        }
+                                        Err(crate::afxdp::session_glue::NatFailure::SourceNat(
+                                            failure,
+                                        )) => {
+                                            record_source_nat_failure(
+                                                telemetry,
+                                                worker_ctx,
+                                                meta,
+                                                flow,
+                                                from_zone_id,
+                                                to_zone_id,
+                                                desc.len,
+                                                &failure,
+                                            );
+                                            binding.scratch.scratch_recycle.push(desc.addr);
+                                            continue;
                                         }
                                     }
                                     None
@@ -7600,92 +7530,32 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         .policy
                                         .hit_counter_by_idx(policy_result.policy_counter_idx)
                                         .cloned();
-                                    // #15176: record the validated NAT-scope
-                                    // logical ingress admission used (the V2
-                                    // fabric identity, or the locally resolved
-                                    // logical unit), so session-hit revalidation
-                                    // rebuilds the SAME scope instead of an
-                                    // empty one. `None` when no scope was
-                                    // validated (V1/unstamped fabric).
-                                    let nat_scope_ifindex = if fabric_ingress {
-                                        ingress_nat_scope_ifindex
-                                    } else {
-                                        Some(
-                                            resolve_ingress_logical_ifindex(
-                                                worker_ctx.forwarding,
-                                                meta.ingress_ifindex as i32,
-                                                meta.ingress_vlan_id,
-                                            )
-                                            .unwrap_or(meta.ingress_ifindex as i32),
-                                        )
-                                    };
-                                    let (stamped_ifindex, stamped_vlan) =
-                                        crate::session::stamped_ingress_identity(
-                                            meta.ingress_ifindex,
-                                            meta.ingress_vlan_id,
-                                            fabric_ingress,
+                                    // #17021: the one forward-session metadata
+                                    // builder (session_glue::forward_session_metadata)
+                                    // owns the nat_scope ternary (#15176) and the
+                                    // stamped ingress identity (#4983/#7096), so the
+                                    // MissingNeighbor seed cannot diverge again.
+                                    let forward_metadata =
+                                        crate::afxdp::session_glue::forward_session_metadata(
+                                            crate::afxdp::session_glue::ForwardMetaInput {
+                                                forwarding: worker_ctx.forwarding,
+                                                ingress_zone: from_zone_id,
+                                                egress_zone: to_zone_id,
+                                                ingress_ifindex: meta.ingress_ifindex,
+                                                ingress_vlan_id: meta.ingress_vlan_id,
+                                                ingress_nat_scope_ifindex,
+                                                fabric_ingress,
+                                                decision,
+                                                policy_result: Some(policy_result),
+                                                nat64_reverse: nat64_info,
+                                                owner_rg_id: Some(owner_rg_id),
+                                            },
                                         );
-                                    let forward_metadata = SessionMetadata {
-                                        ingress_zone: from_zone_id,
-                                        egress_zone: to_zone_id,
-                                        ingress_zone_check:
-                                            crate::session::zone_vintage_check_for_id(
-                                                &worker_ctx.forwarding.zone_id_to_name,
-                                                from_zone_id,
-                                            ),
-                                        egress_zone_check:
-                                            crate::session::zone_vintage_check_for_id(
-                                                &worker_ctx.forwarding.zone_id_to_name,
-                                                to_zone_id,
-                                            ),
-                                        // #4983: stamp the session's TRUE ingress identity from the frame that
-                                        // created it — the binding it was actually received on plus its 802.1Q
-                                        // tag. Recorded ONCE here and never re-derived from the zone, which is
-                                        // the approximation `show/clear security flow session interface <name>`
-                                        // is being freed from.
-                                        // #7096: NOT meta.ingress_ifindex directly.
-                                        // A fabric-redirected packet carries the
-                                        // LOCAL fabric member's ifindex while its
-                                        // zone names the PEER's real ingress, and
-                                        // the peer's interface is not knowable here
-                                        // (the fabric stamp carries a zone id and
-                                        // nothing else). See stamped_ingress_identity.
-                                        ingress_ifindex: stamped_ifindex,
-                                        ingress_vlan_id: stamped_vlan,
-                                        forward_ingress_vlan_id: None,
-                                        owner_rg_id,
-                                        fabric_ingress,
-                                        is_reverse: false,
-                                        nat64_reverse: nat64_info,
-                                        // #2508: stamp the admitting policy's
-                                        // per-policy RT_FLOW SYSLOG log selection.
-                                        log_session_init: policy_result.log_session_init,
-                                        log_session_close: policy_result.log_session_close,
-                                        // #3056: stamp the admitting policy's ID so
-                                        // the live-session BPF-compat publish and the
-                                        // SESSION_CREATE RT_FLOW record reference the
-                                        // policy that admitted the flow (was the `0`
-                                        // sentinel → first-configured-policy misattribution).
-                                        policy_id: policy_result.policy_id,
-                                        // #3227: stamp the matched application term's
-                                        // per-application inactivity (idle) timeout
-                                        // (seconds -> ns; None = use the global
-                                        // per-protocol timeout) so the conntrack GC
-                                        // ages this flow out on the app's value,
-                                        // closing the legacy-eBPF appTimeout parity
-                                        // regression.
-                                        inactivity_timeout_ns:
-                                            crate::session::app_inactivity_timeout_ns(
-                                                policy_result.inactivity_timeout,
-                                            ),
-                                        // #3073: stamp the admitting rule's hit-counter
-                                        // handle so the established fast path re-counts
-                                        // every forward packet of this flow.
-                                        policy_counter_idx: policy_result.policy_counter_idx,
-                                        // #3322: the reorder-stable bound handle.
-                                        policy_counter: bound_policy_counter.clone(),
-                                        nat_scope_ifindex,
-                                    };
+                                    let nat_scope_ifindex = forward_metadata.nat_scope_ifindex;
+                                    let (stamped_ifindex, stamped_vlan) = (
+                                        forward_metadata.ingress_ifindex,
+                                        forward_metadata.ingress_vlan_id,
+                                    );
                                     // #3073: carry the admitting rule's handle so
                                     // the flow-cache entry populated for this new
                                     // flow re-counts its cached packets. #3322:
@@ -7732,18 +7602,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             sessions.set_persistent_lease_hold(&flow.forward_key, Some(hold));
                                         }
                                     }
-                                    if forward_installed
-                                        && let Some((seq, _, _, scale)) =
-                                            crate::afxdp::frame::extract_tcp_seq_ack_window_scale(
-                                                packet_frame,
-                                            )
-                                    {
-                                        sessions.seed_tcp_window_scale(
+                                    if forward_installed {
+                                        crate::afxdp::session_glue::seed_forward_tcp_epilogue(
+                                            sessions,
                                             &flow.forward_key,
-                                            scale,
+                                            packet_frame,
+                                            tcp_payload_len(packet_frame, meta),
+                                            meta.tcp_flags,
                                         );
-                                        // #16042: seed the trigger ISN (see local-miss site).
-                                        sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                     }
                                     if forward_installed {
                                         if let Some(incarnation) = leak_incarnation {
@@ -7882,30 +7748,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 }
                                             }
                                         }
-                                        let forward_entry = SyncedSessionEntry { key: flow.forward_key.clone(),
-                                        decision,
-                                        metadata: forward_metadata,
-                                        source_nat_static,
-                                        leak_incarnation: leak_incarnation.unwrap_or(0),
-                                        origin: SessionOrigin::ForwardFlow,
-                                        protocol: meta.protocol,
-                                        tcp_flags: meta.tcp_flags,
-                                        // Local forward-flow learn (#2170): no peer gen.
-                                        generation: 0,
-                                        // #9582: carry the installer's stable id, so every
-                                        // worker replica ADOPTS it instead of minting one.
-                                        // A replica can then announce a close it alone
-                                        // sees with the same id the Open delta, the mirror
-                                        // row and the #9412 sender memo use (#5212).
-                                        session_id: forward_install_info
-                                            .expect("installed forward session info")
-                                            .session_id,
-                                        tcp_close_class: 0, tcp_handshake_state: forward_install_info
-                                            .expect("installed forward session info")
-                                            .handshake_state_wire, rev_packets: sessions.rev_packets_for(&flow.forward_key), fwd_packets: sessions.fwd_packets_for(&flow.forward_key), pptp_call_ids: sessions
-                                        .pptp_call_ids_wire_for(&flow.forward_key),
-                                        persistent_lease_hold: sessions.persistent_lease_hold_for(&flow.forward_key),
-};
+                                        let forward_entry =
+                                            crate::afxdp::session_glue::forward_synced_entry(
+                                                sessions,
+                                                flow.forward_key.clone(),
+                                                decision,
+                                                forward_metadata,
+                                                source_nat_static,
+                                                leak_incarnation,
+                                                SessionOrigin::ForwardFlow,
+                                                meta.protocol,
+                                                meta.tcp_flags,
+                                                forward_install_info
+                                                    .expect("installed forward session info")
+                                                    .session_id,
+                                                forward_install_info
+                                                    .expect("installed forward session info")
+                                                    .handshake_state_wire,
+                                            );
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
                                         // failures are visible in release
@@ -8603,13 +8463,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_ctx.forwarding.has_routing_domains,
                                                 worker_ctx.forwarding.has_multiple_zones,
                                             ) {
-                                                if let Some((seq, _, _, scale)) =
-                                                    crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
-                                                {
-                                                    sessions.seed_tcp_window_scale(&flow.forward_key, scale);
-                                                    // #16042: seed the trigger ISN.
-                                                    sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
-                                                }
+                                                crate::afxdp::session_glue::seed_forward_tcp_epilogue(
+                                                    sessions,
+                                                    &flow.forward_key,
+                                                    packet_frame,
+                                                    tcp_payload_len(packet_frame, meta),
+                                                    meta.tcp_flags,
+                                                );
                                                 if let Some(hold) = acquire_persistent_inbound_hold(
                                                     worker_ctx.forwarding,
                                                     persistent_lease_hold_outer,
@@ -8801,13 +8661,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx.forwarding.has_routing_domains,
                                             worker_ctx.forwarding.has_multiple_zones,
                                         ) {
-                                            if let Some((seq, _, _, scale)) =
-                                                crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
-                                            {
-                                                sessions.seed_tcp_window_scale(&flow.forward_key, scale);
-                                                // #16042: seed the trigger ISN.
-                                                sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
-                                            }
+                                            crate::afxdp::session_glue::seed_forward_tcp_epilogue(
+                                                sessions,
+                                                &flow.forward_key,
+                                                packet_frame,
+                                                tcp_payload_len(packet_frame, meta),
+                                                meta.tcp_flags,
+                                            );
                                             // #15111: punt seed anchors the inbound hold.
                                             if let Some(hold) = acquire_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
@@ -11763,7 +11623,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // #10267/#13974: preserve the complete admitted
                                 // policy result until the MissingNeighbor seed
                                 // is installed; retry never re-installs it.
-                                let mut seed_inactivity_timeout = None;
                                 let mut seed_policy_result = None;
                                 // #1913 (Codex r2/r3): evaluate policy for the
                                 // MissingNeighbor cold path BEFORE any forwarding
@@ -11857,7 +11716,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         now_ns,
                                     );
                                     seed_policy_result = Some(policy_result);
-                                    seed_inactivity_timeout = policy_result.inactivity_timeout;
                                     if cp_sample_tag {
                                         let t_out = crate::afxdp::cold_path_hist::sample_tsc_end();
                                         let q32 = binding.cold_path.ns_per_tsc_q32;
@@ -12657,113 +12515,56 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     meta.addr_family,
                                                 )
                                         };
-                                        // #3121: mirror the main NAT-decision site
-                                        // (Permit path above) on the missing-neighbor
-                                        // seed path so the seed session carries the
-                                        // SAME composed NAT decision regardless of
-                                        // ARP-resolution timing. NPTv6 outbound source
-                                        // translation composes with any pre-routing DNAT
-                                        // (rewrite_dst): NPTv6 rewrites the source, DNAT
-                                        // the destination; both are merged. The NPTv6
-                                        // source rewrite is checksum-neutral (RFC 6296).
-                                        // #5176: gate on the EGRESS zone (`to_zone`) so
-                                        // a rule-set scoped `from zone X` never rewrites
-                                        // the source of traffic leaving via another zone.
-                                        let nptv6_snat =
-                                            if let IpAddr::V6(mut src_v6) = nat_match_flow.src_ip {
-                                                match worker_ctx
-                                                .forwarding
-                                                .nptv6
-                                                .translate_outbound_result(&mut src_v6, to_zone)
-                                            {
-                                                crate::nptv6::Nptv6Translation::Translated => {
-                                                    worker_ctx
-                                                        .forwarding
-                                                        .nptv6
-                                                        .record_translation(false);
-                                                    Some(NatDecision {
-                                                        rewrite_src: Some(IpAddr::V6(src_v6)),
-                                                        rewrite_dst: None,
-                                                        nat64: false,
-                                                        nptv6: true,
-                                                        ..NatDecision::default()
-                                                    })
-                                                }
-                                                crate::nptv6::Nptv6Translation::NoMatch => None,
-                                                crate::nptv6::Nptv6Translation::Untranslatable => {
-                                                    worker_ctx
-                                                        .forwarding
-                                                        .nptv6
-                                                        .record_untranslatable_drop();
-                                                    // Untranslatable is
-                                                    // terminal: §3.7's
-                                                    // all-zero IID is an
-                                                    // explicit MUST-drop;
-                                                    // §3.2 directs discard
-                                                    // of an unmapped
-                                                    // internal subnet, and
-                                                    // all-ones is the
-                                                    // scoped review edge.
-                                                    // Do not seed/fallback
-                                                    // this packet as SNAT.
-                                                    break 'missing_neighbor
-                                                            StageOutcome::RecycleAndContinue;
-                                                }
+                                        // #17021: NPTv6-to-SNAT composition is the
+                                        // one helper the transit arm also uses
+                                        // (session_glue::compose_outbound_source_nat),
+                                        // so the seed carries the SAME composed NAT
+                                        // decision regardless of ARP-resolution timing.
+                                        match crate::afxdp::session_glue::compose_outbound_source_nat(
+                                            worker_ctx.forwarding,
+                                            pending_decision,
+                                            &nat_match_flow,
+                                            meta.ingress_ifindex as i32,
+                                            meta.ingress_vlan_id,
+                                            ingress_nat_scope_ifindex,
+                                            &from_zone,
+                                            &to_zone,
+                                            pending_decision.resolution.egress_ifindex,
+                                            now_ns,
+                                            snat_non_first_fragment,
+                                            policy_packet_icmp(packet_frame, meta),
+                                            worker_id,
+                                        ) {
+                                            Ok(composed) => {
+                                                pending_decision = composed.decision;
+                                                source_nat_release_key =
+                                                    composed.source_nat_release_key;
+                                                source_nat_counter = composed.source_nat_counter;
+                                                source_nat_static = composed.source_nat_static;
                                             }
-                                            } else {
-                                                None
-                                            };
-                                        if let Some(nptv6_decision) = nptv6_snat {
-                                            // NPTv6 is the source translation and takes
-                                            // precedence over static/interface SNAT; merge
-                                            // into any pre-routing DNAT. No per-rule counter.
-                                            pending_decision.nat =
-                                                pending_decision.nat.merge(nptv6_decision);
-                                            source_nat_release_key =
-                                                Some(nat_match_flow.forward_key.clone());
-                                        } else {
-                                            let mut snat_match_counter = None;
-                                            let mut snat_match_static = None;
-                                            match source_nat_decision_for_flow(
-                                                worker_ctx.forwarding,
-                                                meta.ingress_ifindex as i32,
-                                                meta.ingress_vlan_id,
-                                                ingress_nat_scope_ifindex,
-                                                &from_zone,
-                                                &to_zone,
-                                                pending_decision.resolution.egress_ifindex,
-                                                &nat_match_flow,
-                                                now_ns,
-                                                snat_non_first_fragment,
-                                                policy_packet_icmp(packet_frame, meta),
-                                                // #6522: THIS worker holds the
-                                                // pool allocation this decision
-                                                // mints — see `nat::NatHolder`.
-                                                worker_id,
-                                                &mut snat_match_counter,
-                                                &mut snat_match_static,
-                                            ) {
-                                                Ok(snat_decision) => {
-                                                    pending_decision.nat =
-                                                        pending_decision.nat.merge(snat_decision);
-                                                    source_nat_release_key =
-                                                        Some(nat_match_flow.forward_key.clone());
-                                                    source_nat_counter = snat_match_counter;
-                                                    source_nat_static = snat_match_static;
-                                                }
-                                                Err(failure) => {
-                                                    record_source_nat_failure(
-                                                        telemetry,
-                                                        worker_ctx,
-                                                        meta,
-                                                        flow,
-                                                        from_zone_id,
-                                                        to_zone_id,
-                                                        desc.len,
-                                                        &failure,
-                                                    );
-                                                    break 'missing_neighbor StageOutcome::RecycleAndContinue;
-                                                }
+                                            Err(
+                                                crate::afxdp::session_glue::NatFailure::Untranslatable,
+                                            ) => {
+                                                break 'missing_neighbor
+                                                    StageOutcome::RecycleAndContinue;
+                                            }
+                                            Err(
+                                                crate::afxdp::session_glue::NatFailure::SourceNat(
+                                                    failure,
+                                                ),
+                                            ) => {
+                                                record_source_nat_failure(
+                                                    telemetry,
+                                                    worker_ctx,
+                                                    meta,
+                                                    flow,
+                                                    from_zone_id,
+                                                    to_zone_id,
+                                                    desc.len,
+                                                    &failure,
+                                                );
+                                                break 'missing_neighbor
+                                                    StageOutcome::RecycleAndContinue;
                                             }
                                         }
                                     }
@@ -12828,32 +12629,27 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 pending_resolution_target,
                                             ),
                                         );
-                                    let sess_meta = build_missing_neighbor_session_metadata(
-                                        worker_ctx.forwarding,
-                                        from_zone_id,
-                                        to_zone_id,
-                                        // #4983: stamp the seed's TRUE ingress identity from the
-                                        // frame that created it, exactly as the two other
-                                        // FRAME-DRIVEN install sites above do. ("Frame-driven",
-                                        // not "policy-admitted": the transit install is
-                                        // policy-admitted, but the LocalDelivery install also runs
-                                        // for a `JunosHostLocalPolicy::NoMatch` host-bound flow
-                                        // that the zone's host-inbound set admits with no
-                                        // junos-host policy matching at all -- #6928 review.)
-                                        // This seed is published to the BPF
-                                        // conntrack map below and is never re-installed once the
-                                        // neighbor resolves, so it is the session's only chance to
-                                        // record where the flow actually arrived.
-                                        meta.ingress_ifindex,
-                                        meta.ingress_vlan_id,
-                                        ingress_nat_scope_ifindex,
-                                        packet_fabric_ingress,
-                                        pending_decision,
-                                        // #10267: preserve the policy-matched
-                                        // application timeout on the seed.
-                                        seed_inactivity_timeout,
-                                        seed_policy_result,
-                                    );
+                                    // #17021: the seed goes through the SAME
+                                    // forward-session metadata builder as the
+                                    // transit install, so its stamped ingress
+                                    // identity (#4983/#7096) and nat_scope
+                                    // (#15176/#15948) cannot diverge again.
+                                    let sess_meta =
+                                        crate::afxdp::session_glue::forward_session_metadata(
+                                            crate::afxdp::session_glue::ForwardMetaInput {
+                                                forwarding: worker_ctx.forwarding,
+                                                ingress_zone: from_zone_id,
+                                                egress_zone: to_zone_id,
+                                                ingress_ifindex: meta.ingress_ifindex,
+                                                ingress_vlan_id: meta.ingress_vlan_id,
+                                                ingress_nat_scope_ifindex,
+                                                fabric_ingress: packet_fabric_ingress,
+                                                decision: pending_decision,
+                                                policy_result: seed_policy_result,
+                                                nat64_reverse: None,
+                                                owner_rg_id: None,
+                                            },
+                                        );
                                     let reuse_fits =
                                         if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
                                             sessions.can_admit_after_closing_tcp_pair_for_syn(
@@ -12969,18 +12765,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                                 source_nat_static,
                                             );
-                                    if pending_installed
-                                        && let Some((seq, _, _, scale)) =
-                                            crate::afxdp::frame::extract_tcp_seq_ack_window_scale(
-                                                packet_frame,
-                                            )
-                                    {
-                                        sessions.seed_tcp_window_scale(
+                                    if pending_installed {
+                                        crate::afxdp::session_glue::seed_forward_tcp_epilogue(
+                                            sessions,
                                             &flow.forward_key,
-                                            scale,
+                                            packet_frame,
+                                            tcp_payload_len(packet_frame, meta),
+                                            meta.tcp_flags,
                                         );
-                                        // #16042: seed the trigger ISN.
-                                        sessions.seed_tcp_isn(&flow.forward_key, seq, tcp_payload_len(packet_frame, meta), meta.tcp_flags);
                                     }
                                     // Permit held in seed_install_permit_14661
                                     // until after the shared/BPF publish below.
@@ -13052,26 +12844,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         if let Some(c) = source_nat_counter.as_ref() {
                                             c.add(nat_hit_len);
                                         }
-                                        let entry = SyncedSessionEntry { key: flow.forward_key.clone(),
-                                        decision: pending_decision,
-                                        metadata: sess_meta,
-                                        source_nat_static,
-                                        leak_incarnation: pending_leak_incarnation.unwrap_or(0),
-                                        origin: SessionOrigin::MissingNeighborSeed,
-                                        protocol: meta.protocol,
-                                        tcp_flags: meta.tcp_flags,
-                                        // Local missing-neighbor seed (#2170): no peer gen.
-                                        generation: 0,
-                                        // #9582: carry the seed's stable id, so replicas
-                                        // adopt it (see the forward-flow publish above).
-                                        session_id: pending_install_info
-                                            .expect("installed neighbor seed info")
-                                            .session_id,
-                                        tcp_close_class: 0, tcp_handshake_state: pending_install_info
-                                            .expect("installed neighbor seed info")
-                                            .handshake_state_wire, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
-    persistent_lease_hold: sessions.persistent_lease_hold_for(&flow.forward_key),
-};
+                                        let entry =
+                                            crate::afxdp::session_glue::forward_synced_entry(
+                                                sessions,
+                                                flow.forward_key.clone(),
+                                                pending_decision,
+                                                sess_meta,
+                                                source_nat_static,
+                                                pending_leak_incarnation,
+                                                SessionOrigin::MissingNeighborSeed,
+                                                meta.protocol,
+                                                meta.tcp_flags,
+                                                pending_install_info
+                                                    .expect("installed neighbor seed info")
+                                                    .session_id,
+                                                pending_install_info
+                                                    .expect("installed neighbor seed info")
+                                                    .handshake_state_wire,
+                                            );
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,

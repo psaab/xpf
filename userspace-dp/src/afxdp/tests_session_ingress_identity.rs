@@ -34,7 +34,7 @@
 //     addressed to the firewall itself (management, BGP, syslog), driven on a
 //     THIRD binding whose numbers are disjoint from the transit fixture's, so
 //     no single constant satisfies both;
-//   - the MISSING-NEIGHBOR seed (`build_missing_neighbor_session_metadata`);
+//   - the MISSING-NEIGHBOR seed (`session_glue::forward_session_metadata`);
 //   - and the REVERSE companion, whose 0 is asserted as an over-reach guard.
 //
 // SCOPE. The #4983 tests here bind what the poll body STAMPS onto the installed
@@ -579,7 +579,7 @@ fn poll_descriptor_missing_neighbor_seed_publishes_its_session_id_9582() {
 /// conntrack map at install. So whatever it is stamped with is what the flow
 /// carries for its whole life.
 ///
-/// RED on reverting `build_missing_neighbor_session_metadata`'s stamp to 0
+/// RED on reverting the shared `forward_session_metadata` stamp to 0
 /// while the two other FRAME-DRIVEN install sites stay stamped. ("Frame-driven",
 /// not "policy-admitted": the transit install is policy-admitted, but the
 /// LocalDelivery install also runs for a `JunosHostLocalPolicy::NoMatch`
@@ -1022,5 +1022,70 @@ fn flow_miss_tunnel_interface_nat_block_uses_selected_table_12086() {
     assert_eq!(
         dbg.local, 0,
         "the tunnel interface-NAT block must win before LocalDelivery",
+    );
+}
+
+/// #17021 parity: the SAME SNAT'd tuple installed once through
+/// ForwardCandidate (neighbor present) and once through MissingNeighbor
+/// (neighbor absent, local arrival) must carry equal forward
+/// `SessionMetadata` and equal shared-entry wire fields, with exactly
+/// one replicated/shared forward entry each. Before the consolidation
+/// the seed hand-copied the transit construction and diverged on
+/// `nat_scope_ifindex` (None for local arrivals, #15948), the stamped
+/// ingress identity on fabric arrivals, and `pptp_call_ids`.
+#[test]
+fn forward_and_missing_neighbor_seed_metadata_parity_17021() {
+    let transit_sessions = run_ingress_identity_flow();
+    let (transit_forward, _rev) = split_forward_reverse(&transit_sessions);
+    assert_eq!(transit_forward.len(), 1, "transit fixture must install one forward");
+    let (seed_sessions, seed_published) = run_missing_neighbor_seed_flow_capturing_shared(0);
+    let mut seed_meta = Vec::new();
+    seed_sessions.iter_with_origin(|_key, _decision, metadata, origin| {
+        if origin == SessionOrigin::MissingNeighborSeed {
+            seed_meta.push(metadata.clone());
+        }
+    });
+    assert_eq!(seed_meta.len(), 1, "seed fixture must install one seed");
+    assert_eq!(
+        seed_meta[0], transit_forward[0],
+        "MissingNeighbor seed metadata must equal the ForwardCandidate metadata for the same tuple"
+    );
+    assert_eq!(
+        seed_meta[0].nat_scope_ifindex,
+        Some(INGRESS_LOGICAL_IFINDEX),
+        "local-arrival seed must record the resolved logical NAT scope, not None (#15948)"
+    );
+    let seeds: Vec<_> = seed_published
+        .iter()
+        .filter(|e| e.origin == SessionOrigin::MissingNeighborSeed)
+        .collect();
+    assert_eq!(seeds.len(), 1, "seed must publish exactly one shared entry");
+    assert_eq!(seeds[0].metadata, transit_forward[0]);
+    assert_eq!(seeds[0].pptp_call_ids, 0, "non-PPTP tuple carries absent call ids");
+    assert_eq!(seeds[0].rev_packets, 0, "fresh seed has no reverse packets");
+}
+
+/// #17021 structure guard: the hand-copied seed builder is gone and the
+/// poll body contains no direct TCP-epilogue seeding (it all routes
+/// through `seed_forward_tcp_epilogue`).
+#[test]
+fn forward_commit_single_source_structure_17021() {
+    let poll = include_str!("poll_descriptor/mod.rs");
+    assert!(
+        !poll.contains("build_missing_neighbor_session_metadata"),
+        "poll body must not reference the deleted hand-copied seed builder"
+    );
+    assert!(
+        !poll.contains("sessions.seed_tcp_isn("),
+        "poll body must route the TCP epilogue through seed_forward_tcp_epilogue"
+    );
+    assert!(
+        !poll.contains("sessions.seed_tcp_window_scale("),
+        "poll body must route the TCP epilogue through seed_forward_tcp_epilogue"
+    );
+    let neighbor = include_str!("neighbor_dispatch.rs");
+    assert!(
+        !neighbor.contains("fn build_missing_neighbor_session_metadata"),
+        "the hand-copied seed builder must stay deleted"
     );
 }

@@ -37,7 +37,7 @@ use super::*;
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn source_nat_decision_for_flow(
+pub(in crate::afxdp) fn source_nat_decision_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,

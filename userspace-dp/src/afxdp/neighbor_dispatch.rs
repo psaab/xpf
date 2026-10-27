@@ -12,9 +12,9 @@
 // the write entirely when every key already maps to src_mac, so
 // the 64-shard bulk lock is only taken for genuine changes.
 //
-// `build_missing_neighbor_session_metadata` constructs the
-// SessionMetadata stub used while the neighbor is unresolved
-// so subsequent retries have the full forward context.
+// The MissingNeighbor seed's SessionMetadata is built by
+// `session_glue::forward_session_metadata` (#17021), the same builder
+// the transit ForwardCandidate install uses.
 //
 // Pure relocation. `use super::*;` brings every type, helper,
 // and sibling-submodule item from afxdp.rs into scope.
@@ -1734,67 +1734,6 @@ fn learn_dynamic_neighbor_with_mode(
     }
 }
 
-pub(super) fn build_missing_neighbor_session_metadata(
-    forwarding: &ForwardingState,
-    ingress_zone: u32,
-    egress_zone: u32,
-    // #4983: the ingress binding of the frame that created this seed
-    // (`meta.ingress_ifindex` / `meta.ingress_vlan_id`). A missing-neighbor
-    // seed is a FORWARD session that survives for the life of the flow — the
-    // pending-neighbor retry sweep replays the buffered frame but never
-    // re-installs the session, so whatever is stamped here is the identity
-    // the session carries until it expires. Leaving it 0 (as before) meant
-    // every flow whose first packet raced an unresolved ARP/NDP kept the zone
-    // approximation forever — a routine cold-start case on a busy LAN.
-    ingress_ifindex: u32,
-    ingress_vlan_id: u16,
-    // #15948 (H32-04): the ingress NAT scope resolved for this frame, or
-    // None when no scope was recorded. Threaded instead of the former
-    // hardcoded None so a MissingNeighbor-born scoped SNAT/DNAT session
-    // can be revoked when its rule is withdrawn.
-    nat_scope_ifindex: Option<i32>,
-    fabric_ingress: bool,
-    decision: SessionDecision,
-    // #10267/#13974: preserve both the evaluated timeout and policy-derived
-    // logging/counter attribution; seeds are local-only but remain real flows.
-    inactivity_timeout: Option<u32>,
-    policy_result: Option<crate::policy::PolicyEvaluationResult>,
-) -> SessionMetadata {
-    SessionMetadata {
-        ingress_ifindex,
-        ingress_vlan_id,
-        forward_ingress_vlan_id: None,
-        ingress_zone,
-        egress_zone,
-        ingress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            ingress_zone,
-        ),
-        egress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            egress_zone,
-        ),
-        owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
-        fabric_ingress,
-        is_reverse: false,
-        nat64_reverse: None,
-        // #13974: retain per-policy logging and hit-counter attribution on
-        // the local seed; its RT_FLOW delta is not an HA ownership claim.
-        log_session_init: policy_result.is_some_and(|r| r.log_session_init),
-        log_session_close: policy_result.is_some_and(|r| r.log_session_close),
-        policy_id: policy_result.map_or(0, |r| r.policy_id),
-        // #10267: keep the app timeout under the shared authority.
-        inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(inactivity_timeout),
-        policy_counter_idx: policy_result.map_or(0, |r| r.policy_counter_idx),
-        policy_counter: policy_result.and_then(|r| {
-            forwarding
-                .policy
-                .hit_counter_by_idx(r.policy_counter_idx)
-                .cloned()
-        }),
-        nat_scope_ifindex,
-    }
-}
 
 #[cfg(test)]
 #[path = "neighbor_dispatch_mirror_tests.rs"]

@@ -3534,26 +3534,31 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
         install_table_check: 0,
     };
 
-    let metadata = build_missing_neighbor_session_metadata(
-        &state,
-        TEST_LAN_ZONE_ID,
-        TEST_WAN_ZONE_ID,
-        11,
-        50,
-        None,
-        true,
-        decision,
-        None,
-        None,
+    // #17021: the seed metadata comes from the SAME builder as the
+    // transit install. A fabric arrival stamps NO ingress identity
+    // (#7096): the local fabric member is not the peer's ingress.
+    let metadata = crate::afxdp::session_glue::forward_session_metadata(
+        crate::afxdp::session_glue::ForwardMetaInput {
+            forwarding: &state,
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_ifindex: 11,
+            ingress_vlan_id: 50,
+            ingress_nat_scope_ifindex: None,
+            fabric_ingress: true,
+            decision,
+            policy_result: None,
+            nat64_reverse: None,
+            owner_rg_id: None,
+        },
     );
 
     assert_eq!(metadata.ingress_zone, 1);
     assert_eq!(metadata.egress_zone, 2);
     assert!(metadata.fabric_ingress);
     assert!(!metadata.is_reverse);
-    // #4983: the seed carries the frame's ingress binding through, not 0.
-    assert_eq!(metadata.ingress_ifindex, 11);
-    assert_eq!(metadata.ingress_vlan_id, 50);
+    assert_eq!(metadata.ingress_ifindex, 0);
+    assert_eq!(metadata.ingress_vlan_id, 0);
 }
 
 #[test]
