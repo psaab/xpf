@@ -907,7 +907,7 @@ worker bound to multiple queues.
   error/settle/persist tail — including the #6750 `restore_binding_arm_state`
   roll-back before the refresh — now lives in one helper,
   `helpers::finish_binding_reconcile(guard, response, verb, prior, settle,
-  persist_state, settle_wait)`; the handlers keep only their commit and their
+  persist_state, deferred)`; the handlers keep only their commit and their
   settle rule (forwarding settles only when arming; binding/queue settle when
   the registration changed, the only case that reaches the helper). `rebind`
   is excluded: it commits no requested state, so there is nothing to restore.

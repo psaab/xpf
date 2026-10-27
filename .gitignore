@@ -66,3 +66,6 @@ test/xsk-repro/libbpf-xsk-shared-test
 # path into a commit. Shippable per-PR docs (none currently) would be
 # allow-listed explicitly rather than read off this directory.
 docs/pr/
+
+# #18178: private per-invocation deb stage (removed by the deb recipe trap)
+/.deb-stage-*/

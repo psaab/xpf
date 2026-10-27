@@ -4,19 +4,19 @@ use super::super::helpers::{capture_binding_arm_state, finish_binding_reconcile,
 use super::super::ServerState;
 use chrono::Utc;
 use crate::{ControlResponse, QueueControlRequest};
-use std::time::Duration;
 
 pub(super) fn set(
     guard: &mut ServerState,
     queue: Option<QueueControlRequest>,
     response: &mut ControlResponse,
     persist_state: &mut bool,
-    // #5862: where the caller records that a binding-settle wait is owed. The
-    // wait itself runs in handlers::handle_stream AFTER the global ServerState
-    // lock is dropped — the same locked-kick / unlocked-wait split #2962 and
+    // #5862/#17135: where the caller records that a binding-settle wait is
+    // owed, as `Deferred::Settle`. The wait itself runs in
+    // handlers::handle_stream AFTER the global ServerState lock is
+    // dropped — the same locked-kick / unlocked-wait split #2962 and
     // #4054 use. Holding the lock across a 2 s settle stalled every HA
     // `sync_session` before #7209 moved that verb off this mutex.
-    settle_wait: &mut Option<Duration>,
+    deferred: &mut Option<super::Deferred>,
 ) {
     let Some(queue_req) = queue else {
         response.ok = false;
@@ -60,7 +60,7 @@ pub(super) fn set(
                 prior,
                 true,
                 persist_state,
-                settle_wait,
+                deferred,
             );
             return;
         }

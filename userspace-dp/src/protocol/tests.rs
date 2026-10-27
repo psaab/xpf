@@ -2551,6 +2551,9 @@ fn wire_invariant_default_specimens() {
         "idle_lease_wire".into(),
         dump(&IdleLeaseWire {
             pool_name: "p1".into(),
+            pool_kind: 2,
+            nat64_prefix: "64:ff9b::".into(),
+            nat64_scope: "tenant-a|zones=trust|ris=|src=|constrained=0".into(),
             protocol: 6,
             src_ip: "10.0.61.102".into(),
             src_port: 40000,
@@ -2585,6 +2588,9 @@ fn wire_invariant_default_specimens() {
         "display_lease_wire".into(),
         dump(&DisplayLeaseWire {
             pool_name: "p1".into(),
+            pool_kind: 2,
+            nat64_prefix: "64:ff9b::".into(),
+            nat64_scope: "tenant-a|zones=trust|ris=|src=|constrained=0".into(),
             protocol: 6,
             src_ip: "10.0.61.102".into(),
             routing_scope: Some(7),
@@ -3006,6 +3012,9 @@ fn wire_invariant_default_specimens() {
     };
     let populated_idle_lease = IdleLeaseWire {
         pool_name: "p16132".into(),
+        pool_kind: 1,
+        nat64_prefix: String::new(),
+        nat64_scope: String::new(),
         protocol: 6,
         src_ip: "10.0.61.102".into(),
         src_port: 40000,
