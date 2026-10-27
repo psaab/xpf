@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -122,5 +123,42 @@ func TestFlowFamiliesAreSingleParameterizedPath17057(t *testing.T) {
 	}
 	if v9, ipfix := d.FlowExportHandoffDropped(); v9 != 0 || ipfix != 0 {
 		t.Fatalf("handoff dropped = %d/%d, want 0/0", v9, ipfix)
+	}
+}
+
+// TestFlowFamiliesConcurrentFirstUse17057 proves the Once-guarded lazy
+// init (Rev18098 fold): concurrent first use of a bare &Daemon{} — as a
+// metrics scrape racing a boot reconcile/stop would — must observe the
+// same two family pointers, never a torn or double-allocated pair.
+// Run with -race; the census below also fails on divergent identities.
+func TestFlowFamiliesConcurrentFirstUse17057(t *testing.T) {
+	d := &Daemon{}
+	const racers = 16
+	results := make([][]*flowFamily, racers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i] = d.flowFamiliesOrNil()
+			_ = d.v9Family()
+			_ = d.ipfixFamily()
+			_, _ = d.FlowExportHandoffDropped()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i, fams := range results {
+		if len(fams) != 2 || fams[0].name != "netflow-v9" || fams[1].name != "ipfix" {
+			t.Fatalf("racer %d families = %v, want [netflow-v9 ipfix]", i, fams)
+		}
+		if fams[0] != results[0][0] || fams[1] != results[0][1] {
+			t.Fatalf("racer %d got divergent family pointers (double init)", i)
+		}
+		if fams[0] != d.flowFamilies[0] || fams[1] != d.flowFamilies[1] {
+			t.Fatalf("racer %d families differ from the daemon's stored pair", i)
+		}
 	}
 }

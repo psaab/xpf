@@ -573,7 +573,11 @@ type Daemon struct {
 	// netflow-v9, [1] is ipfix; every reconcile/retain/teardown/callback
 	// body lives once on *flowFamily. Daemon-wide state that is NOT
 	// per-family (open fanout, live feed, retry) stays here.
-	flowFamilies [2]*flowFamily
+	// New initializes flowFamilies eagerly; flowFamiliesOnce guards the
+	// lazy fallback for &Daemon{} fixtures that never went through New,
+	// so no goroutine writes the array unsynchronized after construction.
+	flowFamilies     [2]*flowFamily
+	flowFamiliesOnce sync.Once
 	// #16303: the single SESSION_OPEN fanout callback. Separate from the
 	// two protocol close callbacks so an open is sampled once even when
 	// both exporter families are registered on the same EventReader.
@@ -2306,6 +2310,7 @@ func New(opts Options) (*Daemon, error) {
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
 		applySem:                   semaphore.NewWeighted(1),
 	}
+	d.flowFamilies = newFlowFamilies(d)
 	store.SetConfirmRecoveryClockSkewCheck(d.confirmRecoveryClockSkewActive)
 	d.d11Ledger = nfqueue.NewD11AttestationLedger()
 	d.d11Armer = nfqueue.NewD11AttestationArmer(d11NodeID, d.d11Ledger, func(runID string, permitEpoch uint64) error {

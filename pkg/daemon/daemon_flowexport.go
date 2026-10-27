@@ -192,6 +192,14 @@ func (d *Daemon) liveFlowCounters(key flowexport.FlowKey) (uint64, uint64, uint6
 // flowExporter is the method set both stateful encoders expose through
 // the shared exporterCore (#16126). The encoders stay distinct types;
 // the daemon lifecycle speaks only this interface (#17057).
+//
+// Production calls only the lifecycle/tracker/stats methods below.
+// CollectDueExports, SetMaskResolver and ExportSessionClose are a test
+// surface: hermetic cells drive them via firstExp()/group exporters to
+// observe interims and mask resolution without a collector round-trip;
+// production sets the mask resolver inside the flowexport constructors
+// and exports closes via ExportSessionCloseRemainder. TransferFlowStateTo
+// is likewise test-only — production carry uses AbsorbSampledInto.
 type flowExporter interface {
 	Run(ctx context.Context)
 	Close()
@@ -199,7 +207,6 @@ type flowExporter interface {
 	SetHandoffCounter(*atomic.Uint64)
 	CloseFlowOrSample(key flowexport.FlowKey, decide func() bool) (bool, uint64, uint64, uint64, uint64)
 	ExportSessionCloseRemainder(rec logging.EventRecord, evt flowexport.SessionCloseData, basePkts, baseBytes, baseRevPkts, baseRevBytes uint64)
-	ExportSessionClose(rec logging.EventRecord, evt flowexport.SessionCloseData)
 	MarkFlowSampledAtOpen(key flowexport.FlowKey)
 	MarkFlowRejectedAtOpen(key flowexport.FlowKey)
 	TrackFlowOpenRecord(key flowexport.FlowKey, start time.Time, template flowexport.FlowRecord)
@@ -216,10 +223,13 @@ type flowExporter interface {
 	RouteMaskUnresolved() uint64
 	EstimatedDurations() uint64
 	ClockSkewClamped() uint64
+	AbsorbSampledInto(dst flowExporter)
+
+	// Test surface (see comment above); not called by production code.
 	CollectDueExports(now time.Time) []flowexport.FlowRecord
 	SetMaskResolver(r flowexport.MaskResolver)
 	TransferFlowStateTo(dst flowExporter, key flowexport.FlowKey)
-	AbsorbSampledInto(dst flowExporter)
+	ExportSessionClose(rec logging.EventRecord, evt flowexport.SessionCloseData)
 }
 
 type v9Exporter struct{ e *flowexport.Exporter }
@@ -397,13 +407,22 @@ func newFlowFamilies(d *Daemon) [2]*flowFamily {
 	}
 }
 
-func (d *Daemon) flowFamiliesOrNil() []*flowFamily {
+// resolvedFlowFamilies returns the two parameterized families. New
+// initializes them in the constructor; the lazy fallback here runs
+// exactly once behind flowFamiliesOnce so that &Daemon{} fixtures
+// (which never went through New) still get families without an
+// unsynchronized write to d.flowFamilies racing a concurrent metrics
+// scrape or reconcile. Nil-family guards below keep a partially built
+// fixture safe.
+func (d *Daemon) resolvedFlowFamilies() []*flowFamily {
 	if d == nil {
 		return nil
 	}
-	if d.flowFamilies[0] == nil {
-		d.flowFamilies = newFlowFamilies(d)
-	}
+	d.flowFamiliesOnce.Do(func() {
+		if d.flowFamilies[0] == nil {
+			d.flowFamilies = newFlowFamilies(d)
+		}
+	})
 	out := make([]*flowFamily, 0, 2)
 	for _, ff := range d.flowFamilies {
 		if ff != nil {
@@ -413,13 +432,23 @@ func (d *Daemon) flowFamiliesOrNil() []*flowFamily {
 	return out
 }
 
+// flowFamiliesOrNil is the nil-receiver-safe name used by the exported
+// stats accessors; it shares the Once-guarded initialization above.
+func (d *Daemon) flowFamiliesOrNil() []*flowFamily { return d.resolvedFlowFamilies() }
+
 func (d *Daemon) v9Family() *flowFamily {
-	_ = d.flowFamiliesOrNil()
+	fams := d.resolvedFlowFamilies()
+	if len(fams) == 0 {
+		return &flowFamily{name: "netflow-v9", d: d}
+	}
 	return d.flowFamilies[0]
 }
 
 func (d *Daemon) ipfixFamily() *flowFamily {
-	_ = d.flowFamiliesOrNil()
+	fams := d.resolvedFlowFamilies()
+	if len(fams) == 0 {
+		return &flowFamily{name: "ipfix", d: d}
+	}
 	return d.flowFamilies[1]
 }
 
