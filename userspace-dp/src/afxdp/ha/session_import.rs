@@ -224,29 +224,113 @@ pub const SYNCED_IMPORT_REPAIR_PREFIX: &str = "synced-import-repair:";
 pub const SYNCED_DELETE_REFUSED_PREFIX: &str = "synced-delete-refused:";
 
 impl SyncedImportOutcome {
-    /// Stable terminal-refusal reason, or `None` for Applied and repair states.
-    pub fn refusal_reason(self) -> Option<&'static str> {
+    /// Every variant exactly once, in declaration order. The shared
+    /// Go/Rust wire fixture is keyed by variant name, and `wire_error`
+    /// below matches exhaustively, so adding a variant fails to compile
+    /// until it has a wire class here and a fixture row there (#17116).
+    pub const ALL: [Self; 11] = [
+        Self::Applied,
+        Self::AppliedRepairPending,
+        Self::AppliedRepairOverflow,
+        Self::RejectedStaleGeneration,
+        Self::RejectedStaleZone,
+        Self::RejectedCapacity,
+        Self::RejectedReserve,
+        Self::RejectedStandaloneReverse,
+        Self::RejectedGateBusy,
+        Self::RejectedMirrorPublish,
+        Self::RejectedUnknownRoutingDomain,
+    ];
+
+    /// Stable name used as the shared-fixture row key. Must match the
+    /// `variant` strings in `synced_import_wire.json`.
+    pub fn variant_name(self) -> &'static str {
         match self {
-            SyncedImportOutcome::Applied
-            | SyncedImportOutcome::AppliedRepairPending
-            | SyncedImportOutcome::AppliedRepairOverflow => None,
-            SyncedImportOutcome::RejectedStaleGeneration => Some("stale-generation"),
-            SyncedImportOutcome::RejectedStaleZone => Some("stale-zone"),
-            SyncedImportOutcome::RejectedCapacity => Some("capacity"),
-            SyncedImportOutcome::RejectedReserve => Some("reserve"),
-            SyncedImportOutcome::RejectedStandaloneReverse => Some("standalone-reverse"),
-            SyncedImportOutcome::RejectedGateBusy => Some("gate-busy"),
-            SyncedImportOutcome::RejectedMirrorPublish => Some("mirror-write-failed"),
-            SyncedImportOutcome::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
+            Self::Applied => "Applied",
+            Self::AppliedRepairPending => "AppliedRepairPending",
+            Self::AppliedRepairOverflow => "AppliedRepairOverflow",
+            Self::RejectedStaleGeneration => "RejectedStaleGeneration",
+            Self::RejectedStaleZone => "RejectedStaleZone",
+            Self::RejectedCapacity => "RejectedCapacity",
+            Self::RejectedReserve => "RejectedReserve",
+            Self::RejectedStandaloneReverse => "RejectedStandaloneReverse",
+            Self::RejectedGateBusy => "RejectedGateBusy",
+            Self::RejectedMirrorPublish => "RejectedMirrorPublish",
+            Self::RejectedUnknownRoutingDomain => "RejectedUnknownRoutingDomain",
+        }
+    }
+
+    /// Stable terminal-refusal reason, or `None` for Applied, repair, and
+    /// the bare mirror-publish states. Internal to the encoder; external
+    /// callers consume `wire_error` / `repair_reason` instead.
+    pub(crate) fn refusal_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Applied
+            | Self::AppliedRepairPending
+            | Self::AppliedRepairOverflow
+            | Self::RejectedMirrorPublish => None,
+            Self::RejectedStaleGeneration => Some("stale-generation"),
+            Self::RejectedStaleZone => Some("stale-zone"),
+            Self::RejectedCapacity => Some("capacity"),
+            Self::RejectedReserve => Some("reserve"),
+            Self::RejectedStandaloneReverse => Some("standalone-reverse"),
+            Self::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
+            Self::RejectedGateBusy => Some("gate-busy"),
         }
     }
 
     /// Stable repair-status reason, or `None` for Applied and refusals.
     pub fn repair_reason(self) -> Option<&'static str> {
         match self {
-            SyncedImportOutcome::AppliedRepairPending => Some("worker-repair-pending"),
-            SyncedImportOutcome::AppliedRepairOverflow => Some("worker-repair-overflow"),
+            Self::AppliedRepairPending => Some("worker-repair-pending"),
+            Self::AppliedRepairOverflow => Some("worker-repair-overflow"),
             _ => None,
+        }
+    }
+
+    /// The single `ControlResponse.error` encoder for a non-Applied
+    /// outcome, or `None` for `Applied` (#17116). Every wire class is
+    /// decided inside this exhaustive match, next to the variant:
+    ///
+    ///   * `Ok` (`Applied`): no error.
+    ///   * `Repair`: committed, but worker convergence is pending or its
+    ///     latch overflowed — `SYNCED_IMPORT_REPAIR_PREFIX` + repair
+    ///     reason, so older readers fail closed without rolling back.
+    ///   * `TerminalRefusal`: healthy-helper semantic refusal under
+    ///     `SYNCED_IMPORT_REFUSED_PREFIX` — Go maps it to its
+    ///     rollback-class refusal.
+    ///   * `RetryableRefusal` (`RejectedGateBusy`): deliberately under
+    ///     the SAME refusal prefix today (the shipped bytes Go keys its
+    ///     retryable gate-busy class on); the class, not the prefix,
+    ///     records that Go must retry it rather than treat it terminal.
+    ///   * `Bare` (`RejectedMirrorPublish`): the bare
+    ///     `mirror-write-failed` token with NO prefix — a helper-health
+    ///     failure, which Go keeps retryable and latches mirror health
+    ///     on, distinct from every semantic refusal above.
+    ///
+    /// The shared fixture `synced_import_wire.json` pins these exact
+    /// bytes per variant; a Rust rename of the prefix or of `gate-busy`
+    /// reds the Go classifier test that drives the same rows.
+    pub fn wire_error(self) -> Option<String> {
+        match self {
+            Self::Applied => None,
+            Self::AppliedRepairPending | Self::AppliedRepairOverflow => Some(format!(
+                "{SYNCED_IMPORT_REPAIR_PREFIX}{}",
+                self.repair_reason()
+                    .expect("repair outcomes always carry a repair reason")
+            )),
+            Self::RejectedStaleGeneration
+            | Self::RejectedStaleZone
+            | Self::RejectedCapacity
+            | Self::RejectedReserve
+            | Self::RejectedStandaloneReverse
+            | Self::RejectedUnknownRoutingDomain
+            | Self::RejectedGateBusy => Some(format!(
+                "{SYNCED_IMPORT_REFUSED_PREFIX}{}",
+                self.refusal_reason()
+                    .expect("refusals always carry a refusal reason")
+            )),
+            Self::RejectedMirrorPublish => Some("mirror-write-failed".to_string()),
         }
     }
 }
