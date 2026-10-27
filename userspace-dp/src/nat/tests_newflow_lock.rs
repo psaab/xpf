@@ -1040,6 +1040,14 @@ fn new_flow_allocation_completes_under_held_live_read_15956() {
         );
         drop(guard);
         worker.join().expect("worker must not panic");
+        // Post-join is where the pre-fix code diverges: the GC
+        // blocked in lock_live() behind the reader acquires once
+        // the guard drops (delta 1); the fix never acquires (0).
+        assert_eq!(
+            alloc.debug_gc_lock_acquisitions(),
+            0,
+            "seed_idle={seed_idle}: GC must not acquire the live write lock at all while nothing has expired (#17041)"
+        );
         assert!(
             observed_contention || completed_under_read,
             "seed_idle={seed_idle}: worker must attempt the contended live write or finish before the deadline"
