@@ -23,7 +23,7 @@ import (
 //
 // FAIL-ON-REVERT: family-less SamplingInput made the IPv6 close eligible
 // (exported, slot consumed); per-family flags + the family argument to
-// ShouldExport deny it before the counter advances.
+// SampledForOpen deny it before the counter advances.
 
 // buildSessionCloseRawEventV6 is the IPv6 twin of
 // buildSessionCloseRawEventV4: full 16-byte addresses in the [8:24] /

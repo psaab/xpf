@@ -4,10 +4,13 @@
 //! the file: ZERO in-file dependencies in either direction, and its only imports
 //! are `std::net`.
 //!
-//! #6988 PURE CODE MOTION: every line below was moved verbatim from
-//! `nat/source.rs` lines 1094-1267. The only edits are the visibility
-//! widenings enumerated in `source/mod.rs`; no logic, no ordering and no
-//! signature changed.
+//! #6988: moved verbatim from `nat/source.rs` lines 1094-1267 at the
+//! split commit (d85c20ffdf, 2026-08-28; merged as 22b9cb22d0), with
+//! only the visibility widenings enumerated in `source/mod.rs`; no
+//! logic, ordering or signature changed in that move. Verified at
+//! the split by scripts/verify-nat-source-split-6988.py (pinned
+//! refs; it checks the split, not the current tree — this file has
+//! since been edited, e.g. #10700).
 
 use super::*;
 

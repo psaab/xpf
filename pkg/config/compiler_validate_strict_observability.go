@@ -909,7 +909,7 @@ func validateSamplingInstanceConflictsStrict(cfg *Config) error {
 // The defect: compileSampling stored the parsed rate with no lower-bound check,
 // so a typo like `input rate -1` committed cleanly. A negative rate is a
 // fail-open: the 1-in-N export gate in the flow exporter
-// (ExportConfig.ShouldExport, pkg/flowexport) treats `SamplingRate > 1` as
+// (ExportConfig.SampledForOpen, pkg/flowexport) treats `SamplingRate > 1` as
 // false for a negative value, so the operator's intended 1-in-N ratio is
 // silently ignored (every eligible flow exports) — while the userspace
 // snapshot path defensively clamps `rate <= 0 -> 1` and the retired eBPF

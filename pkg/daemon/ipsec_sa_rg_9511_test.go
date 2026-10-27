@@ -42,6 +42,17 @@ var clusterTwoRethIPsec9511 = []string{
 	"set chassis cluster node 0",
 	"set chassis cluster authentication-key test-cluster-psk-9511",
 	"set chassis cluster ipsec-session-synchronization",
+	// Keyed ahead of the #16746 control-link gate (#18053; precedent:
+	// 68b1f8162a keyed fixtures ahead of #6611, #18051 keyed
+	// twoRGIPsecStore): carries the complete control link the gate
+	// requires, keeping PrivateRGElection at its compiler default
+	// (the production shape these HA cells exercise). Inert for the
+	// attribution assertions — RG state is driven via
+	// SetGroupStateForTesting, never elected; no heartbeat is
+	// started; the config only feeds reth→RG attribution.
+	"set chassis cluster control-interface em0",
+	"set chassis cluster peer-address 10.99.0.2",
+	"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 	"set chassis cluster redundancy-group 0 node 0 priority 1",
 	"set chassis cluster redundancy-group 1 node 0 priority 200",
 	"set chassis cluster redundancy-group 2 node 0 priority 100",
@@ -282,6 +293,12 @@ func TestAmbiguousSANameNeedsDeclaredRG0_9511(t *testing.T) {
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9511",
+		// #18053: complete control link for the #16746 gate (see
+		// clusterTwoRethIPsec9511). Inert here — RG0 stays undeclared
+		// and RG state is driven via SetGroupStateForTesting.
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set interfaces reth1 redundant-ether-options redundancy-group 1",
 		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
@@ -447,6 +464,8 @@ func storeWith9511(t *testing.T, vpnLines ...string) *configstore.Store {
 // exactly that config, so these cells install it the same way. A tolerant compile
 // would also turn any OTHER fixture mistake into a warning, so the strict compile
 // must fail on the #9624 collision (or the #14139 missing-key gate, whose render belt keeps the synced config loading the same tunnels) or not at all.
+// #18053: fixtures fed here carry a complete control link, so the #16746
+// gate must never be the strict error this check sees.
 func syncedStore9511(t *testing.T, lines []string) *configstore.Store {
 	t.Helper()
 	tr := &config.ConfigTree{}
@@ -630,7 +649,11 @@ func TestApplyIPsecTrackedRecordsOnlyALoadedGeneration9511(t *testing.T) {
 	m.SetSwanctlForTesting(func(args ...string) ([]byte, error) {
 		switch {
 		case len(args) > 0 && args[0] == "--list-sas":
-			return []byte("vpn-rg1: #1, ESTABLISHED, IKEv2, 8f7c1c8e3a2b1234_i* 4d3c2b1a09876543_r\n"), nil
+			// #18053: since #15024 the live IKE connection is gateway-
+			// named (gw-rg1), not VPN-named (vpn-rg1); the teardown diff
+			// keys off rendered connection names, so the double must
+			// list the gateway name for the debt to be attempted.
+			return []byte("gw-rg1: #1, ESTABLISHED, IKEv2, 8f7c1c8e3a2b1234_i* 4d3c2b1a09876543_r\n"), nil
 		case len(args) > 0 && args[0] == "--terminate":
 			teardownStarted <- struct{}{}
 			select {

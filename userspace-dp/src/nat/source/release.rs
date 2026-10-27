@@ -4,10 +4,13 @@
 //! `release_source_nat_allocation_with_mode` they funnel into. No in-file
 //! callers, and no private items outside this module are touched.
 //!
-//! #6988 PURE CODE MOTION: every line below was moved verbatim from
-//! `nat/source.rs` lines 1580-1836. The only edits are the visibility
-//! widenings enumerated in `source/mod.rs`; no logic, no ordering and no
-//! signature changed.
+//! #6988: moved verbatim from `nat/source.rs` lines 1580-1836 at the
+//! split commit (d85c20ffdf, 2026-08-28; merged as 22b9cb22d0), with
+//! only the visibility widenings enumerated in `source/mod.rs`; no
+//! logic, ordering or signature changed in that move. Verified at
+//! the split by scripts/verify-nat-source-split-6988.py (pinned
+//! refs; it checks the split, not the current tree — this file has
+//! since been edited repeatedly, e.g. #17683).
 
 use super::*;
 

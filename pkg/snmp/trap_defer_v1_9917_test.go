@@ -124,7 +124,7 @@ func TestTrapWorkerDeliversDeferredV19917(t *testing.T) {
 }
 
 // TestTrapWorkerAllVersionOrder9917 pins the `version all` delivery contract:
-// the v1 leg then the v2c leg, matching buildLinkTrapsForVersion's packet order.
+// the v1 leg then the v2c leg, matching trapKindsForVersion's v1-then-v2c order (#17066).
 // Single worker plus FIFO queue makes the order deterministic.
 func TestTrapWorkerAllVersionOrder9917(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
