@@ -1117,20 +1117,28 @@ with no valueType and no validator, so any string reached the dialer's resolver.
   `DecodeRawEventRecord` already honored the wire stamp — under helper
   backlog or reconnect that drifted from the decision instant. Keep the two
   paths on the single `eventTimeFromWire` SSOT.
-- **One raw-event parser, explicit unknown-family REJECT (#16127).**
-  `parseRawEvent` (ringbuf.go) is the single wire parser behind the live
-  `logEvent` path (`Run`/`ProcessRawEvent`) and `DecodeRawEventRecord`;
-  `formatRawEventAddrs` renders the address strings for both. The parser
-  fills a caller-zeroed `rawEvent` in place and allocates nothing (pin:
-  `TestParseRawEventZeroAlloc16127`). Unknown-address-family policy,
-  decided for #16127: only `addrFamilyInet` (2) and `addrFamilyInet6`
-  (10) — the only families either producer emits — are accepted; any
-  other family byte is rejected by the decoder and dropped by the live
-  path (the former live-only "non-v6 means IPv4" rendering is gone).
-  Pins: `TestRawEventParserGolden16127` (short / legacy-144 / extended /
-  IPv6 golden frames, live-vs-decoded field parity) and
-  `TestRawEventFamilyPolicy16127`. Fanout stays live-only: unification
-  is parser-only, per the #16127 validators.
+- **One raw-event mapper, explicit unknown-family REJECT (#16127/#17065).**
+  `parseRawEvent` (ringbuf.go) is the single wire parser and
+  `mapRawEvent` the single wire->`EventRecord` field mapper behind the
+  live `logEvent` path (`Run`/`ProcessRawEvent`) and
+  `DecodeRawEventRecord`; `formatRawEventAddrs` renders the address
+  strings for both. The parser fills a caller-zeroed `rawEvent` in
+  place and allocates nothing (pin: `TestParseRawEventZeroAlloc16127`);
+  the mapper holds every wire-derived rule (type gating, #2853/#3056
+  close slot reuse, the [144:152] block read on open AND close frames,
+  the #4915 session id). Live-only enrichment — name resolution,
+  ElapsedTime, EventSeq, the SessionID ordinal fallback — is an
+  explicit `logEvent` post-step, never a second mapper. Unknown-
+  address-family policy (#16127): only `addrFamilyInet` (2) and
+  `addrFamilyInet6` (10) are accepted; any other family byte is
+  rejected by the decoder and dropped by the live path.
+  `ValidRawEvent` is the allocation-free validity predicate over the
+  same parser; the userspace event stream uses it as its per-frame
+  gate and decodes a record only when a consumer (decoded callback or
+  pending queue) will read it. Pins: `TestRawEventParserGolden16127`,
+  `TestRawEventFamilyPolicy16127`, `TestMapRawEventParity17065`
+  (field-identical decode across golden frames on both entry points),
+  `TestValidRawEvent17065`. Fanout stays live-only.
 - **Text-sink headers carry DECISION time too (#15699).** `logEvent`
   passes `rec.Time` to `SyslogClient.SendFromEventReaderAt` and
   `LocalLogWriter.SendFromEventReaderAt`; the timestamp rides

@@ -772,8 +772,28 @@ func (es *EventStream) readLoop(ctx context.Context) {
 				}
 				continue
 			}
-			rec, ok := decodeDataplaneEventPayload(payload)
-			if !ok {
+			// #17065: validity is a cheap gate, not a full decode. Decode
+			// a record only when onDataplaneEvent will consume it now or
+			// a queued copy needs it later (pending frames present);
+			// otherwise — raw callback installed (the production
+			// userspace wiring) or no consumer at all — only validate,
+			// since the decoded record would be discarded unread.
+			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
+			needRecord := (onRawDataplaneEvent == nil && onDataplaneEvent != nil) || es.hasPendingCallbackFrames()
+			var rec logging.EventRecord
+			if needRecord {
+				var ok bool
+				rec, ok = decodeDataplaneEventPayload(payload)
+				if !ok {
+					es.DecodeErrors.Add(1)
+					es.recordDataplaneEventDrop(typ)
+					if !es.markDroppedFrameAppliedNoGap(seq, &prevSeq) {
+						es.backoffCallbackNotReady(ctx)
+						return
+					}
+					continue
+				}
+			} else if !logging.ValidRawEvent(payload) {
 				es.DecodeErrors.Add(1)
 				es.recordDataplaneEventDrop(typ)
 				if !es.markDroppedFrameAppliedNoGap(seq, &prevSeq) {
@@ -782,7 +802,6 @@ func (es *EventStream) readLoop(ctx context.Context) {
 				}
 				continue
 			}
-			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			// This callback shares the reader with HA session deltas. EventReader

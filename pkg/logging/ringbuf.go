@@ -758,70 +758,75 @@ func formatRawEventAddrs(evt *rawEvent) (srcStr, dstStr, natSrcStr, natDstStr st
 	return srcStr, dstStr, natSrcStr, natDstStr
 }
 
-func (er *EventReader) logEvent(data []byte) {
+// ValidRawEvent reports whether data is a decodable RT_FLOW frame:
+// at least the fixed wire size and an address family parseRawEvent
+// accepts. It is the cheap validity gate for callers that only need
+// to know a frame is well-formed before handing the raw bytes on
+// (#17065); it builds no EventRecord and allocates nothing.
+func ValidRawEvent(data []byte) bool {
+	if len(data) < rawEventWireSize {
+		return false
+	}
 	var evt rawEvent
-	if !parseRawEvent(data, &evt) {
-		// #16127: unknown address family — drop, matching
-		// DecodeRawEventRecord (see parseRawEvent).
-		return
-	}
-	policyGeneration, policyNameStamped := policyNameConfigGeneration(data)
-	policyDenyStamped := evt.EventType == eventTypePolicyDeny && policyNameStamped
-	filterGeneration, filterGenerationStamped := filterLogConfigGeneration(data)
+	return parseRawEvent(data, &evt)
+}
 
-	srcStr, dstStr, natSrcStr, natDstStr := formatRawEventAddrs(&evt)
-
-	eventName := eventTypeName(evt.EventType)
-	// #7531: empty for a lifecycle event, whose action byte is intentionally 0.
-	actionStr := recordActionName(evt.EventType, evt.Action)
-	protoStr := protoName(evt.Protocol)
-
-	// Build EventRecord. #2511: honor the on-wire decision-time stamp via the
-	// shared eventTimeFromWire guard (falls back to time.Now() when absent) so
-	// the live ProcessRawEvent path records the same DECISION time that
-	// DecodeRawEventRecord already does, completing the #2470 producer pair.
+// mapRawEvent is the single wire->EventRecord field mapper (#17065),
+// consumed by both the live logEvent path and DecodeRawEventRecord.
+// It holds every wire-derived rule: event-type gating, the
+// #2853/#3056 slot reuse on SESSION_CLOSE, the [144:152] extended
+// block, and the #4915 session id. It does NOT resolve names
+// (zone/iface/app/policy), stamp EventSeq/ElapsedTime, or apply the
+// live SessionID ordinal fallback — those are live-only enrichments
+// logEvent applies as explicit post-steps. Keeping every
+// `rec.<field> =` wire rule here means a future RT_FLOW field change
+// is one edit; the parity pin is TestMapRawEventParity17065.
+//
+// policyDenyStamped must be the caller's policyDenyConfigGeneration
+// verdict for data (the stamped-deny RuleID/PolicyName rules differ
+// from the unstamped slot reads). On a SESSION_CLOSE the returned
+// record's PolicyID is the admitting policy from [136:140]; callers
+// that still need the raw [44:48] slot must read evt.PolicyID before
+// relying on the record (logEvent zeroes evt.PolicyID, preserving
+// its pre-unification binary-record behaviour).
+func mapRawEvent(evt *rawEvent, data []byte, policyDenyStamped bool) EventRecord {
+	srcStr, dstStr, natSrcStr, natDstStr := formatRawEventAddrs(evt)
+	// Build EventRecord. #2511: honor the on-wire decision-time stamp via
+	// the shared eventTimeFromWire guard (falls back to time.Now() when
+	// absent) so both entry points record the same DECISION time.
 	rec := EventRecord{
-		Time:        eventTimeFromWire(evt.Timestamp),
-		Type:        eventName,
-		SrcAddr:     srcStr,
-		DstAddr:     dstStr,
-		Protocol:    protoStr,
-		ProtocolNum: evt.Protocol,
-		Action:      actionStr,
-		PolicyID:    evt.PolicyID,
-		InZone:      evt.IngressZone,
-		OutZone:     evt.EgressZone,
-		NATSrcAddr:  natSrcStr,
-		NATDstAddr:  natDstStr,
-		InZoneName:  er.resolveZoneName(evt.IngressZone),
-		OutZoneName: er.resolveZoneName(evt.EgressZone),
+		Time:            eventTimeFromWire(evt.Timestamp),
+		Type:            eventTypeName(evt.EventType),
+		SrcAddr:         srcStr,
+		DstAddr:         dstStr,
+		Protocol:        protoName(evt.Protocol),
+		ProtocolNum:     evt.Protocol,
+		Action:          recordActionName(evt.EventType, evt.Action),
+		PolicyID:        evt.PolicyID,
+		InZone:          evt.IngressZone,
+		OutZone:         evt.EgressZone,
+		NATSrcAddr:      natSrcStr,
+		NATDstAddr:      natDstStr,
+		RevSessionPkts:  evt.RevPackets,
+		RevSessionBytes: evt.RevBytes,
+		IngressIfindex:  evt.IngressIfindex,
+		CloseReason:     closeReasonName(evt.CloseReason),
+		// #2465/#16127: carry the absolute session-creation Unix seconds
+		// from [108:112] on every frame. A zero value is unknown (old
+		// frame / synthesized close); exporters preserve that uncertainty.
+		Created: evt.Created,
 	}
-	// #16127 parity: the decoder surfaces the [108:112] created stamp on
-	// every frame, so the live record carries it too (previously close-only).
-	rec.Created = evt.Created
-
 	if evt.EventType == eventTypeSessionClose {
 		rec.SessionPkts = evt.SessionPackets
 		rec.SessionBytes = evt.SessionBytes
 		// #2853: the [44:48] policy_id slot is repurposed on a SESSION_CLOSE
 		// frame to carry the creation instant's sub-second nanosecond
-		// remainder. Reinterpret it as CreatedNanos so the flow exporters keep
-		// millisecond StartTime resolution.
+		// remainder. Reinterpret it as CreatedNanos so the flow exporters
+		// keep millisecond StartTime resolution.
 		rec.CreatedNanos = ClampCreatedNanos(evt.PolicyID)
-		// #3056: the admitting policy ID rides the trailing [136:140] slot on
-		// a SESSION_CLOSE (because #2853 took [44:48]). Read evt.PolicyIDClose
-		// so the RT_FLOW_SESSION_CLOSE record and the NetFlow/IPFIX close
-		// exporters name the admitting policy instead of policy 0. The
-		// policy-name resolution below reads rec.PolicyID.
+		// #3056: the admitting policy ID rides the trailing [136:140] slot
+		// on a SESSION_CLOSE (because #2853 took [44:48]).
 		rec.PolicyID = evt.PolicyIDClose
-		evt.PolicyID = 0
-		// Compute elapsed time from session creation
-		if evt.Created > 0 {
-			nowSec := uint32(evt.Timestamp / 1000000000)
-			if nowSec > evt.Created {
-				rec.ElapsedTime = nowSec - evt.Created
-			}
-		}
 	}
 	if evt.EventType == eventTypeScreenDrop {
 		rec.ScreenCheck = screenFlagName(evt.PolicyID)
@@ -840,30 +845,82 @@ func (er *EventReader) logEvent(data []byte) {
 			rec.Reason = closeReasonName(evt.CloseReason)
 		}
 	}
-
-	// Extended fields (offset 112+), already parsed into evt.
-	closeReasonCode := evt.CloseReason
-	rec.RevSessionPkts = evt.RevPackets
-	rec.RevSessionBytes = evt.RevBytes
-	rec.IngressIface = er.InterfaceName(evt.IngressIfindex)
-	// #2749: retain the raw numeric ifindex so the flow exporters can
-	// populate ingressInterface (NetFlow IE 10 / IPFIX ingressInterface),
-	// which is an SNMP ifIndex value, not the resolved name.
-	rec.IngressIfindex = evt.IngressIfindex
-	rec.AppName = er.resolveAppName(evt.AppID)
-	rec.CloseReason = closeReasonName(closeReasonCode)
-
 	// #2749/#16303: the class-of-service / interface-attribution block
-	// rides the additive [144:152] slots. Read it on session frames that
-	// actually carry the extended length (close always; create since
-	// #16303 stamps its egress ifindex there), so a short legacy frame
-	// leaves the fields at their 0 ("unknown") default.
+	// rides the additive [144:152] slots. Read ToS/flags/egress from the
+	// wire on session frames that actually carry the extended length
+	// (close always; create since #16303 stamps its egress ifindex
+	// there — its [144:148] bytes are 0 on real producer frames, so
+	// reading them is the explicit #17065 decision and changes nothing
+	// observable today), so a short legacy frame leaves the fields at
+	// their 0 ("unknown") default.
 	if (evt.EventType == eventTypeSessionClose || evt.EventType == eventTypeSessionOpen) && len(data) >= rawEventExtSize {
 		rec.TOS = data[rawEventTOSOffset]
 		rec.TCPControlBits = data[rawEventTCPBitOffset]
 		rec.EgressIfindex = binary.LittleEndian.Uint32(
 			data[rawEventEgressOffset : rawEventEgressOffset+4])
+	}
+	if evt.EventType == eventTypePolicyDeny && policyDenyStamped {
+		if name, ok := dataplane.ReservedPolicyName(evt.PolicyID); ok {
+			rec.PolicyName = name
+		} else {
+			rec.PolicyName = dataplane.UnattributedPolicyName
+		}
+	}
+	// #4915: the dataplane's stable session id rides the additive
+	// [152:160] slot on a SESSION_CREATE / SESSION_CLOSE frame. Read it
+	// ONLY when the frame carries the extended length AND only on a
+	// session frame, so a short legacy frame or a non-session event
+	// leaves SessionID at its 0 ("unknown") default. The live path
+	// applies its ordinal fallback as a post-step.
+	if (evt.EventType == eventTypeSessionOpen || evt.EventType == eventTypeSessionClose) &&
+		len(data) >= rawEventSessionIDSize {
+		rec.SessionID = binary.LittleEndian.Uint64(
+			data[rawEventSessionIDOffset : rawEventSessionIDOffset+8])
+	}
+	return rec
+}
+
+func (er *EventReader) logEvent(data []byte) {
+	var evt rawEvent
+	if !parseRawEvent(data, &evt) {
+		// #16127: unknown address family — drop, matching
+		// DecodeRawEventRecord (see parseRawEvent).
+		return
+	}
+	policyGeneration, policyNameStamped := policyNameConfigGeneration(data)
+	policyDenyStamped := evt.EventType == eventTypePolicyDeny && policyNameStamped
+	filterGeneration, filterGenerationStamped := filterLogConfigGeneration(data)
+
+	// #17065: every wire-derived field comes from the single mapper
+	// shared with DecodeRawEventRecord. What remains below is live-only
+	// enrichment as explicit post-steps: name resolution, ElapsedTime,
+	// EventSeq, and the SessionID ordinal fallback.
+	eventName := eventTypeName(evt.EventType)
+	// #7531: empty for a lifecycle event, whose action byte is intentionally 0.
+	actionStr := recordActionName(evt.EventType, evt.Action)
+	protoStr := protoName(evt.Protocol)
+	rec := mapRawEvent(&evt, data, policyDenyStamped)
+	srcStr, dstStr, _, _ := formatRawEventAddrs(&evt)
+	rec.InZoneName = er.resolveZoneName(evt.IngressZone)
+	rec.OutZoneName = er.resolveZoneName(evt.EgressZone)
+	rec.IngressIface = er.InterfaceName(evt.IngressIfindex)
+	rec.AppName = er.resolveAppName(evt.AppID)
+	if (evt.EventType == eventTypeSessionClose || evt.EventType == eventTypeSessionOpen) && len(data) >= rawEventExtSize {
 		rec.EgressIface = er.InterfaceName(rec.EgressIfindex)
+	}
+	closeReasonCode := evt.CloseReason
+	if evt.EventType == eventTypeSessionClose {
+		// #2853/#3056: evt.PolicyID held the created-subsec-nanos slot;
+		// zero it so the binary record and slog paths keep reading the
+		// admitting policy from rec.PolicyID (see formatBinaryRecord).
+		evt.PolicyID = 0
+		// Compute elapsed time from session creation (live-only).
+		if evt.Created > 0 {
+			nowSec := uint32(evt.Timestamp / 1000000000)
+			if nowSec > evt.Created {
+				rec.ElapsedTime = nowSec - evt.Created
+			}
+		}
 	}
 
 	// Resolve policy name (skip for screen drops which repurpose policy_id).
@@ -880,23 +937,15 @@ func (er *EventReader) logEvent(data []byte) {
 		}
 	}
 
-	// #4915: stamp the per-EVENT monotonic ordinal into EventSeq (it increments
-	// on every event, session or not). SessionID becomes the dataplane's STABLE
-	// per-session identity ONLY for a SESSION_CREATE / SESSION_CLOSE frame that
-	// carries the additive [152:160] slot (len >= 160), so a session's create and
-	// close records correlate and a reused 5-tuple is disambiguated. For every
-	// other event (deny/screen/filter — which have no session) AND for a short
-	// legacy session frame from a pre-#4915 helper (len < 160), SessionID falls
-	// back to the per-event ordinal, byte-identical to the pre-#4915 behavior.
-	// This keeps the change strictly additive on the wire: nothing observable
-	// changes until a new helper emits a 160-byte session frame, at which point
-	// its create and close carry the same real id.
+	// #4915 live post-step: stamp the per-EVENT monotonic ordinal into
+	// EventSeq (it increments on every event, session or not). When the
+	// single mapper left SessionID at 0 — a non-session event
+	// (deny/screen/filter) or a short legacy session frame from a
+	// pre-#4915 helper (len < 160) — fall SessionID back to that
+	// ordinal, byte-identical to the pre-#4915 behavior. An extended
+	// session frame keeps the stable wire id mapRawEvent decoded.
 	rec.EventSeq = atomic.AddUint64(&er.sessionSeq, 1)
-	if (evt.EventType == eventTypeSessionOpen || evt.EventType == eventTypeSessionClose) &&
-		len(data) >= rawEventSessionIDSize {
-		rec.SessionID = binary.LittleEndian.Uint64(
-			data[rawEventSessionIDOffset : rawEventSessionIDOffset+8])
-	} else {
+	if rec.SessionID == 0 {
 		rec.SessionID = rec.EventSeq
 	}
 
@@ -1169,11 +1218,15 @@ func formatNATAddr12890(slot [16]byte, flowV6 bool, port uint16) string {
 	}
 }
 
+// DecodeRawEventRecord decodes one RT_FLOW frame via the single
+// mapper (#17065): parse plus mapRawEvent, with no live-only
+// enrichment (names, EventSeq, ElapsedTime, SessionID fallback stay
+// 0/empty). Callers that only need a validity verdict should use
+// ValidRawEvent instead of paying for a record they discard.
 func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 	if len(data) < rawEventWireSize {
 		return EventRecord{}, false
 	}
-
 	var evt rawEvent
 	if !parseRawEvent(data, &evt) {
 		// #16127: unknown address family rejected (see parseRawEvent);
@@ -1181,98 +1234,7 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 		return EventRecord{}, false
 	}
 	_, policyDenyStamped := policyDenyConfigGeneration(data)
-
-	srcStr, dstStr, natSrcStr, natDstStr := formatRawEventAddrs(&evt)
-
-	rec := EventRecord{
-		Time:        eventTimeFromWire(evt.Timestamp),
-		Type:        eventTypeName(evt.EventType),
-		SrcAddr:     srcStr,
-		DstAddr:     dstStr,
-		Protocol:    protoName(evt.Protocol),
-		ProtocolNum: evt.Protocol,
-		// #7531: empty for a lifecycle event (see recordActionName).
-		Action:          recordActionName(evt.EventType, evt.Action),
-		PolicyID:        evt.PolicyID,
-		InZone:          evt.IngressZone,
-		OutZone:         evt.EgressZone,
-		NATSrcAddr:      natSrcStr,
-		NATDstAddr:      natDstStr,
-		SessionPkts:     evt.SessionPackets,
-		SessionBytes:    evt.SessionBytes,
-		RevSessionPkts:  evt.RevPackets,
-		RevSessionBytes: evt.RevBytes,
-		IngressIfindex:  evt.IngressIfindex,
-		CloseReason:     closeReasonName(evt.CloseReason),
-		// #2465: carry the absolute session-creation Unix seconds. A zero value
-		// is unknown (old frame / synthesized close); exporters preserve that
-		// uncertainty with a zero-duration record at the close time.
-		Created: evt.Created,
-	}
-	if evt.EventType == eventTypeSessionClose {
-		// #2853: the [44:48] policy_id slot is repurposed on a SESSION_CLOSE
-		// frame to carry the creation instant's sub-second nanosecond remainder.
-		// Reinterpret it as CreatedNanos so the flow exporters keep millisecond
-		// StartTime resolution.
-		rec.CreatedNanos = ClampCreatedNanos(evt.PolicyID)
-		// #3056: the admitting policy ID rides the trailing [136:140] slot on
-		// a SESSION_CLOSE (because #2853 took [44:48]). Read evt.PolicyIDClose
-		// so the NetFlow/IPFIX close exporters and any consumer of this decoded
-		// record name the admitting policy instead of policy 0.
-		rec.PolicyID = evt.PolicyIDClose
-		// #2749: the class-of-service / interface-attribution block rides the
-		// additive [144:152] slots, present only on the extended close frame.
-		if len(data) >= rawEventExtSize {
-			rec.TOS = data[rawEventTOSOffset]
-			rec.TCPControlBits = data[rawEventTCPBitOffset]
-			rec.EgressIfindex = binary.LittleEndian.Uint32(
-				data[rawEventEgressOffset : rawEventEgressOffset+4])
-		}
-	}
-	if evt.EventType == eventTypeSessionOpen && len(data) >= rawEventExtSize {
-		// #16303: SESSION_CREATE stamps its resolved egress ifindex in
-		// the same additive slot; ToS/flags stay close-only observations.
-		rec.EgressIfindex = binary.LittleEndian.Uint32(
-			data[rawEventEgressOffset : rawEventEgressOffset+4])
-	}
-	if evt.EventType != eventTypeSessionClose {
-		rec.SessionPkts = 0
-		rec.SessionBytes = 0
-		if policyDenyStamped {
-			rec.RuleID = evt.PolicyID
-		} else {
-			rec.RuleID = binary.LittleEndian.Uint32(data[56:60])
-			rec.TermID = binary.LittleEndian.Uint32(data[60:64])
-		}
-		rec.OwnerRGID = int16(binary.LittleEndian.Uint16(data[64:66]))
-		if evt.EventType == eventTypeFilterLog && evt.CloseReason != 0 {
-			rec.Reason = filterLogSourceName(evt.CloseReason)
-		} else if evt.CloseReason != closeReasonNone {
-			rec.Reason = closeReasonName(evt.CloseReason)
-		}
-	}
-	if evt.EventType == eventTypeScreenDrop {
-		rec.ScreenCheck = screenFlagName(evt.PolicyID)
-	}
-	if evt.EventType == eventTypePolicyDeny && policyDenyStamped {
-		if name, ok := dataplane.ReservedPolicyName(evt.PolicyID); ok {
-			rec.PolicyName = name
-		} else {
-			rec.PolicyName = dataplane.UnattributedPolicyName
-		}
-	}
-	// #4915: the dataplane's stable session id rides the additive [152:160] slot
-	// on a SESSION_CREATE / SESSION_CLOSE frame. Read it ONLY when the frame
-	// carries the extended length (len >= rawEventSessionIDSize) AND only on a
-	// session frame, so a short legacy (<= 152-byte) frame or a non-session event
-	// leaves SessionID at its 0 ("unknown") default. This is the SAME id the
-	// live logEvent path decodes, so the two producers stay in lockstep.
-	if (evt.EventType == eventTypeSessionOpen || evt.EventType == eventTypeSessionClose) &&
-		len(data) >= rawEventSessionIDSize {
-		rec.SessionID = binary.LittleEndian.Uint64(
-			data[rawEventSessionIDOffset : rawEventSessionIDOffset+8])
-	}
-	return rec, true
+	return mapRawEvent(&evt, data, policyDenyStamped), true
 }
 
 // eventCategory maps event types to category bitmask values.
