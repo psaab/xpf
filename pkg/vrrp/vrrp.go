@@ -182,7 +182,7 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 	}
 	// When no-reth-vrrp is set, the cluster state machine directly manages
 	// VIPs/GARPs — skip RETH VRRP instance creation.
-	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+	if cc := cfg.Chassis.Cluster; cc != nil && !cc.UsesRethVRRP() {
 		return nil
 	}
 
