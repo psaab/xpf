@@ -64,7 +64,7 @@ func TestRemotePolicySimulatorStrictParse(t *testing.T) {
 		if fake.matchPoliciesCalls != 1 {
 			t.Fatalf("MatchPolicies called %d times on valid input, want 1", fake.matchPoliciesCalls)
 		}
-		if got := fake.matchPoliciesReq; got == nil || got.FromZone != "trust" || got.Protocol != "tcp" || got.DestinationPort != 443 {
+		if got := fake.matchPoliciesReq; got == nil || got.FromZone != "trust" || got.Protocol != "tcp" || (got.DestinationPort == nil || *got.DestinationPort != 443) {
 			t.Fatalf("MatchPolicies req = %+v, want trust/tcp/443", got)
 		}
 	})

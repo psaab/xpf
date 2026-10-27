@@ -4088,6 +4088,7 @@ mod rejected_mirror_reservation_10790_tests {
             coordinator
                 .import_idle_persistent_leases(
                     &[crate::afxdp::PoolIdleLease {
+                        pool: crate::afxdp::LeasePoolId::Source("p".to_string()),
                         pool_name: "p".to_string(),
                         lease: crate::nat::IdleLeaseRecord {
                             protocol: key.protocol,

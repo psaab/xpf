@@ -25,9 +25,9 @@ func TestHostOriginatedFromJunosHost16805(t *testing.T) {
 		name string
 		q    Query
 	}{
-		{"host-originated to transit zone", Query{FromZone: "junos-host", ToZone: "untrust", Protocol: "tcp", DstPort: 53}},
-		{"host-originated to host (from-axis governs)", Query{FromZone: "junos-host", ToZone: "junos-host", Protocol: "tcp", DstPort: 53}},
-		{"host-originated to unknown zone", Query{FromZone: "junos-host", ToZone: "nosuch", Protocol: "tcp", DstPort: 53}},
+		{"host-originated to transit zone", Query{FromZone: "junos-host", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(53)}},
+		{"host-originated to host (from-axis governs)", Query{FromZone: "junos-host", ToZone: "junos-host", Protocol: "tcp", DstPort: PortPtr(53)}},
+		{"host-originated to unknown zone", Query{FromZone: "junos-host", ToZone: "nosuch", Protocol: "tcp", DstPort: PortPtr(53)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -56,7 +56,7 @@ func TestHostOriginatedControlsUnchanged16805(t *testing.T) {
 
 	// Control 1: `from-zone nosuch` is still the unconditional
 	// unknown-ingress-zone deny (#6682/#8318), not host-originated.
-	res := Match(cfg, Query{FromZone: "nosuch", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "nosuch", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if res.HostOriginated || !res.UnzonedIngress || res.Action != config.PolicyDeny {
 		t.Fatalf("from-zone nosuch control changed: want UnzonedIngress deny, got %+v", res)
 	}
@@ -66,7 +66,7 @@ func TestHostOriginatedControlsUnchanged16805(t *testing.T) {
 
 	// Control 2: `to-zone junos-host` is still host-BOUND (host gate /
 	// HostInboundUnmatched), not host-originated.
-	res = Match(cfg, Query{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DstPort: 22})
+	res = Match(cfg, Query{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DstPort: PortPtr(22)})
 	if res.HostOriginated || !res.HostInboundUnmatched {
 		t.Fatalf("to-zone junos-host control changed: want HostInboundUnmatched, got %+v", res)
 	}
@@ -75,7 +75,7 @@ func TestHostOriginatedControlsUnchanged16805(t *testing.T) {
 	}
 
 	// Control 3: a defined transit pair still matches normally.
-	res = Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res = Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if res.HostOriginated || !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("defined transit control changed: want wildcard permit, got %+v", res)
 	}

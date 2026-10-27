@@ -371,7 +371,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
 ## Code Layout
 | Path | Description |
 |------|-------------|
-| `bpf/headers/*.h` | Shared C structs (common, maps, helpers, conntrack, nat) consumed by the retained Rust AF_XDP shim build (`MAX_INTERFACES`) and userspace-dp parity tests. The legacy `bpf/xdp/*.c` and `bpf/tc/*.c` source were deleted in #1476. |
+| `bpf/headers/*.h` | Retained C ABI mirror (common, conntrack, maps; helpers/nat/trace deleted in #17146) read by the shim build (`MAX_INTERFACES`) and userspace-dp parity tests; not compiled. The legacy `bpf/xdp/*.c` and `bpf/tc/*.c` source were deleted in #1476. |
 | `pkg/config/` | Junos parser, AST, typed config, compiler |
 | `pkg/cmdtree/` | Single source of truth for all CLI command trees |
 | `pkg/configstore/` | Candidate/active/commit/rollback, atomic DB persistence, JSONL audit journal |

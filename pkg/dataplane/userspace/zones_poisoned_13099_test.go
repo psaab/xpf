@@ -135,16 +135,16 @@ func TestPoisonedZoneDoesNotQuarantineHealthyCollisionPeer13099(t *testing.T) {
 	if !found214 {
 		t.Fatalf("healthy zzq8100 must keep a host-inbound view, got %+v", views)
 	}
-	if got := ClassifyHostInbound(cfg, "zzq17760", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
+	if got := ClassifyHostInbound(cfg, "zzq17760", config.HostInboundProtoTCP, true, 22, true, nil, "ip"); got.Status == HostInboundTokenAdmit {
 		t.Fatalf("poisoned unbound zzq17760 must not classify as TokenAdmit, got %+v", got)
 	}
-	if got := ClassifyHostInbound(cfg, "zzq8100", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status != HostInboundTokenAdmit {
+	if got := ClassifyHostInbound(cfg, "zzq8100", config.HostInboundProtoTCP, true, 22, true, nil, "ip"); got.Status != HostInboundTokenAdmit {
 		t.Fatalf("healthy zzq8100 ssh must classify as TokenAdmit, got %+v", got)
 	}
-	if got := ClassifyHostInboundForInterface(cfg, "zzq17760", "ge-0/0/0.0", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
+	if got := ClassifyHostInboundForInterface(cfg, "zzq17760", "ge-0/0/0.0", config.HostInboundProtoTCP, true, 22, true, nil, "ip"); got.Status == HostInboundTokenAdmit {
 		t.Fatalf("poisoned zzq17760 per-interface classify must not TokenAdmit, got %+v", got)
 	}
-	if got := ClassifyHostInboundForInterface(cfg, "zzq8100", "ge-0/0/1.0", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status != HostInboundTokenAdmit {
+	if got := ClassifyHostInboundForInterface(cfg, "zzq8100", "ge-0/0/1.0", config.HostInboundProtoTCP, true, 22, true, nil, "ip"); got.Status != HostInboundTokenAdmit {
 		t.Fatalf("healthy zzq8100 per-interface ssh must TokenAdmit, got %+v", got)
 	}
 }
@@ -173,7 +173,7 @@ func TestPoisonedZoneAloneIsQuarantined13099(t *testing.T) {
 			t.Fatalf("lone poisoned zone must have no host-inbound view: %+v", v)
 		}
 	}
-	if got := ClassifyHostInbound(cfg, "poisoned", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
+	if got := ClassifyHostInbound(cfg, "poisoned", config.HostInboundProtoTCP, true, 22, true, nil, "ip"); got.Status == HostInboundTokenAdmit {
 		t.Fatalf("lone poisoned zone must not TokenAdmit, got %+v", got)
 	}
 }
@@ -198,7 +198,7 @@ func TestHealthyZonesUnaffectedByPoisonQuarantine13099(t *testing.T) {
 	if len(snap.Zones) != 1 || snap.Zones[0].Name != "trust" {
 		t.Fatalf("healthy trust must survive, got %+v", snap.Zones)
 	}
-	if got := ClassifyHostInbound(cfg, "trust", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status != HostInboundTokenAdmit {
+	if got := ClassifyHostInbound(cfg, "trust", config.HostInboundProtoTCP, true, 22, true, nil, "ip"); got.Status != HostInboundTokenAdmit {
 		t.Fatalf("healthy trust ssh must TokenAdmit, got %+v", got)
 	}
 }
