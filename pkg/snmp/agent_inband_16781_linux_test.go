@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
@@ -253,27 +254,75 @@ func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.
 }
 
 // TestPktinfoParseOOB16781 pins the pure ancillary-data round trip: a
-// received IP_PKTINFO/IPV6_PKTINFO yields ifindex+local-dst, and the reply
-// oob echoes both so WriteMsgUDP sources the response from the polled
-// address on the ingress interface.
+// received IP_PKTINFO/IPV6_PKTINFO yields ifindex+local-dst, and both reply
+// oob arms source the response from the polled address. The main-table
+// listener's arm (pinEgress=false) must leave the egress ifindex 0 so the
+// kernel routes the reply (#17832) — echoing the received ifindex pins
+// userspace-delivered replies onto the xpf-usp0 reinjection TUN. The
+// VRF-bound listener's arm (pinEgress=true) must echo the ingress ifindex:
+// its sendmsg route lookup needs the explicit oif (#17832 regression
+// verification — with ifindex 0 the VRF leg fails ENETUNREACH).
 func TestPktinfoParseOOB16781(t *testing.T) {
 	v4 := parsePktinfo(pktinfoOOBForTest(t, true))
 	if v4.ifindex != 7 || !v4.dst.Equal(net.ParseIP("198.51.100.1")) {
 		t.Fatalf("v4 pktinfo = %+v, want ifindex 7 dst 198.51.100.1", v4)
 	}
-	if v4.oob() == nil {
-		t.Fatal("v4 pktinfo produced no reply oob")
-	}
+	assertReplyOOB17832(t, v4.oob(false), net.ParseIP("198.51.100.1"), 0)
+	assertReplyOOB17832(t, v4.oob(true), net.ParseIP("198.51.100.1"), 7)
 	v6 := parsePktinfo(pktinfoOOBForTest(t, false))
 	if v6.ifindex != 9 || !v6.dst.Equal(net.ParseIP("2001:db8::1")) {
 		t.Fatalf("v6 pktinfo = %+v, want ifindex 9 dst 2001:db8::1", v6)
 	}
-	if v6.oob() == nil {
-		t.Fatal("v6 pktinfo produced no reply oob")
-	}
-	if got := parsePktinfo(nil); got.ifindex != 0 || got.dst != nil || got.oob() != nil {
+	assertReplyOOB17832(t, v6.oob(false), net.ParseIP("2001:db8::1"), 0)
+	assertReplyOOB17832(t, v6.oob(true), net.ParseIP("2001:db8::1"), 9)
+	if got := parsePktinfo(nil); got.ifindex != 0 || got.dst != nil || got.oob(false) != nil {
 		t.Fatalf("empty oob pktinfo = %+v, want zero with nil reply oob", got)
 	}
+}
+
+// assertReplyOOB17832 decodes a reply oob produced by pktinfo.oob and
+// asserts the pinned source (Spec_dst for v4, Addr for v6) is the polled
+// local address and the egress ifindex equals wantIfindex (0 = unpinned
+// route lookup, #17832).
+func assertReplyOOB17832(t *testing.T, oob []byte, want net.IP, wantIfindex int) {
+	t.Helper()
+	if oob == nil {
+		t.Fatalf("reply oob for %s is nil", want)
+	}
+	msgs, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		t.Fatalf("parse reply oob for %s: %v", want, err)
+	}
+	for i := range msgs {
+		m := &msgs[i]
+		switch {
+		case m.Header.Level == unix.SOL_IP && m.Header.Type == unix.IP_PKTINFO:
+			if len(m.Data) < unix.SizeofInet4Pktinfo {
+				t.Fatalf("short IP_PKTINFO cmsg (%d bytes) for %s", len(m.Data), want)
+			}
+			info := (*unix.Inet4Pktinfo)(unsafe.Pointer(&m.Data[0]))
+			if info.Ifindex != int32(wantIfindex) {
+				t.Fatalf("v4 reply oob egress ifindex = %d for %s; want %d", info.Ifindex, want, wantIfindex)
+			}
+			if got := net.IP(info.Spec_dst[:]); !got.Equal(want.To4()) {
+				t.Fatalf("v4 reply oob source = %s, want %s", got, want)
+			}
+			return
+		case m.Header.Level == unix.SOL_IPV6 && m.Header.Type == unix.IPV6_PKTINFO:
+			if len(m.Data) < unix.SizeofInet6Pktinfo {
+				t.Fatalf("short IPV6_PKTINFO cmsg (%d bytes) for %s", len(m.Data), want)
+			}
+			info := (*unix.Inet6Pktinfo)(unsafe.Pointer(&m.Data[0]))
+			if info.Ifindex != uint32(wantIfindex) {
+				t.Fatalf("v6 reply oob egress ifindex = %d for %s; want %d", info.Ifindex, want, wantIfindex)
+			}
+			if got := net.IP(info.Addr[:]); !got.Equal(want) {
+				t.Fatalf("v6 reply oob source = %s, want %s", got, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("reply oob for %s carries no pktinfo cmsg", want)
 }
 
 func pktinfoOOBForTest(t *testing.T, v4 bool) []byte {

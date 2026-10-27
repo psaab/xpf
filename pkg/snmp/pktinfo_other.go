@@ -20,7 +20,9 @@ type pktinfo struct {
 
 func parsePktinfo([]byte) pktinfo { return pktinfo{} }
 
-func (p pktinfo) oob() []byte { return nil }
+func (p pktinfo) oob(pinEgress bool) []byte { return nil }
+
+func isUserspaceReinjectTUN(ifindex int) bool { return false }
 
 func snmpListenSocketControl() func(string, string, syscall.RawConn) error {
 	return nil
