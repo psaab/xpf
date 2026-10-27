@@ -263,3 +263,30 @@ func TestNATBareST0SameUnitSharingPreserved18030(t *testing.T) {
 		t.Fatalf("description-only bare scope = %q, want st0.0 (bound unit 0)", got)
 	}
 }
+
+// TestNATBareST0PaddedSpellingSiblings18030 (fold of Rev18046Opus
+// residual): padded spellings derive into the same XFRM if_id family,
+// so st00.1 is a sibling of st0, st00.0 is unit 0 of the family, and a
+// st1.1 binding must NOT cross-veto st0.
+func TestNATBareST0PaddedSpellingSiblings18030(t *testing.T) {
+	paddedSibling := append(bareNATBase16827(),
+		"set security ipsec vpn vpn0 bind-interface st00.0",
+		"set security ipsec vpn vpn1 bind-interface st00.1",
+	)
+	assertNATBareST0SiblingRejected18030(t, paddedSibling)
+
+	otherFamily := append(bareNATBase16827(),
+		"set security ipsec vpn vpn0 bind-interface st0.0",
+		"set security ipsec vpn vpn1 bind-interface st1.1",
+		"set security nat source rule-set snat-ok from interface st0",
+		"set security nat source rule-set snat-ok rule r1 match source-address 10.0.0.0/8",
+		"set security nat source rule-set snat-ok rule r1 then source-nat pool pool1",
+	)
+	cfg, err := CompileConfig(buildBindIfaceTree(t, otherFamily...))
+	if err != nil {
+		t.Fatalf("st1.1 sibling must not cross-veto st0: %v", err)
+	}
+	if got := cfg.Security.NAT.Source[0].FromInterface; got != "st0.0" {
+		t.Fatalf("bare scope = %q, want st0.0", got)
+	}
+}
