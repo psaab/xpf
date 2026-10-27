@@ -5,16 +5,19 @@ import (
 )
 
 // #5831 — a custom `system login class` may carry deny-commands /
-// deny-configuration, which xpf's coarse RBAC gate does not enforce. Before
-// this gate such a config committed cleanly and enforced nothing: the operator
-// held a config saying a verb was denied and a box on which it was allowed.
+// deny-configuration. Historically (before #5831) such a config committed
+// cleanly and enforced nothing: the operator held a config saying a verb
+// was denied and a box on which it was allowed. #5831/#6838 therefore
+// hard-rejected the class at commit and folded it to a repair floor on
+// the tolerant path. #7172 implemented real regex enforcement and cut 6
+// retired both the rejection and the fold (see
+// TestDenyClassCommitsAndIsNotFolded_7172).
 //
-// These tests pin the fail-closed half: strict commit REJECTS; the tolerant
-// load / peer-sync path folds the class down to the REPAIR FLOOR ({view,
-// configure} intersected with what it already held — see
-// TestLoginClassDenyFoldKeepsTheRepairPath for why it stops there and not at
-// view-only); and neither over-reaches onto the additive allow-* half or onto
-// ordinary classes.
+// These tests now pin the surviving invariants: leaf presence is recorded
+// (an empty regex differs from an absent one), the classification tables
+// stay in step with the schema and drive the compiler, the additive
+// allow-* half is recorded as allowlists, and a deny-* class commits
+// unfolded on both paths.
 
 // buildLoginTree5831 builds a ConfigTree from flat `set` lines. It uses
 // ParseSetCommand + SetPath and NEVER NewParser: the parser treats newlines as
