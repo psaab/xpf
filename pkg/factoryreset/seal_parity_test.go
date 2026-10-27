@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // seal_parity_test.go binds zeroize's erase set to the image seal set
@@ -17,9 +19,14 @@ import (
 // SNMPv3 EngineID survived a factory reset because the runtime erase set
 // was never derived from the seal). The test parses both tuples out of
 // bake.py, requires every member to have exactly one disposition in
-// wipeSealMapping (leg or survivor-with-reason), requires no stale rows,
-// and drives every leg's member through a full redirected wipe asserting
-// the planted prior-tenant path is gone (or, for machine-id, rotated).
+// wipeSealMapping (leg marker or survivor-with-reason), requires no stale
+// rows, and drives the production wipe once (PerformZeroizeWipe against
+// the redirected appliance tree) asserting every leg member's planted
+// prior-tenant path is gone (or, for machine-id, rotated) and the day-0
+// survivor stamp is gone after completion. The mapping's leg field is an
+// honest marker only: posture gates and the configured config root live
+// inside the production wipe, so no per-member closure could be
+// production-identical; the driven leg is PerformZeroizeWipe itself.
 
 func sealParityRepoRoot(t *testing.T) string {
 	t.Helper()
@@ -106,7 +113,7 @@ func TestSealParityMappingCoversBakeTuples17085(t *testing.T) {
 	ops, purge := parseSealTuples(t, string(src))
 	members := append(append([]string{}, ops...), purge...)
 
-	// Every parsed member has exactly one disposition: a leg XOR a
+	// Every parsed member has exactly one disposition: a leg marker XOR a
 	// non-empty survivor reason. Deleting a mapping row reds here.
 	for _, m := range members {
 		d, ok := wipeSealMapping[m]
@@ -114,8 +121,8 @@ func TestSealParityMappingCoversBakeTuples17085(t *testing.T) {
 			t.Errorf("seal member %q has no wipeSealMapping row: zeroize does not account for it", m)
 			continue
 		}
-		if (d.leg == nil) == (d.survivor == "") {
-			t.Errorf("seal member %q must have exactly one of leg / survivor reason, got leg=%v survivor=%q", m, d.leg != nil, d.survivor)
+		if d.leg == (d.survivor != "") {
+			t.Errorf("seal member %q must have exactly one of leg / survivor reason, got leg=%v survivor=%q", m, d.leg, d.survivor)
 		}
 	}
 	// No stale rows: a row for a member the seal no longer declares is
@@ -180,14 +187,30 @@ func TestSealParityLegsErasePlantedPaths17085(t *testing.T) {
 			t.Fatalf("plant %s (%s): %v", member, plant.path, err)
 		}
 	}
+	// Plant the normal day-0 stamp at the survivor path BEFORE the wipe:
+	// beginZeroize must overwrite it with the prefixed pending record, the
+	// config leg must preserve it while pending, and completeZeroize must
+	// remove it after every leg succeeds — so after a completed wipe the
+	// loader-visible path must be absent. RedirectWipePathsForTesting
+	// points configstore.FactoryResetPendingPath at this exact path
+	// (root/etc/xpf/.day0-config-applied, which is also configDir's marker
+	// here because the redirected config root equals the loader root).
+	day0StampPath := filepath.Join(configDir, configstore.Day0ConfigAppliedBase)
+	if err := os.MkdirAll(filepath.Dir(day0StampPath), 0o700); err != nil {
+		t.Fatalf("plant day0 stamp dir: %v", err)
+	}
+	if err := os.WriteFile(day0StampPath, []byte("/dev/vdb prior-tenant day-0 stamp\n"), 0o600); err != nil {
+		t.Fatalf("plant day0 stamp: %v", err)
+	}
+
 	// Every leg member must have a plant (a leg with no behavioral proof
 	// is a survivor that has not admitted it); every survivor must not.
 	for member, d := range wipeSealMapping {
 		_, planted := plants[member]
-		if d.leg != nil && !planted {
+		if d.leg && !planted {
 			t.Errorf("seal member %q maps to a leg but has no planted-path proof", member)
 		}
-		if d.leg == nil && planted {
+		if !d.leg && planted {
 			t.Errorf("seal member %q is a survivor but has a planted path", member)
 		}
 	}
@@ -213,11 +236,19 @@ func TestSealParityLegsErasePlantedPaths17085(t *testing.T) {
 		}
 	}
 
-	// Survivor behavior: .day0-config-applied is the pending-record path
-	// itself, held by the wipe and cleared only on completion — after a
-	// completed wipe it must be gone via completeZeroize, and the mapping
-	// must keep admitting it is not a plain leg.
-	if d := wipeSealMapping["/etc/xpf/.day0-config-applied"]; d.leg != nil || d.survivor == "" {
-		t.Errorf(".day0-config-applied must remain a survivor-with-reason, got leg=%v survivor=%q", d.leg != nil, d.survivor)
+	// Survivor behavior (F2): the planted normal stamp above was
+	// overwritten by beginZeroize with the prefixed pending record,
+	// held through every wipe leg by the config leg, and removed by
+	// completeZeroize after final verification — so after this completed
+	// PerformZeroizeWipe the pending/loader path must be absent (Lstat),
+	// and the mapping must keep admitting it is not a plain leg.
+	if _, err := os.Lstat(day0StampPath); !os.IsNotExist(err) {
+		t.Errorf("day0 survivor path %s must be absent after completed zeroize (err=%v)", day0StampPath, err)
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); !os.IsNotExist(err) {
+		t.Errorf("pending path %s must be absent after completed zeroize (err=%v)", configstore.FactoryResetPendingPath, err)
+	}
+	if d := wipeSealMapping["/etc/xpf/.day0-config-applied"]; d.leg || d.survivor == "" {
+		t.Errorf(".day0-config-applied must remain a survivor-with-reason, got leg=%v survivor=%q", d.leg, d.survivor)
 	}
 }

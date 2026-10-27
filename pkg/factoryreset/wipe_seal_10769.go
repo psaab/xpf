@@ -87,10 +87,17 @@ var (
 )
 
 // wipeSealDisposition is the zeroize disposition of one image-seal member:
-// exactly one of leg (a production wipe function the parity test drives) or
-// survivor (a reason the member deliberately survives, with its narrowing).
+// exactly one of leg (the member is erased by the production wipe the parity
+// test drives end-to-end) or survivor (a reason the member deliberately
+// survives the wipe legs, with its narrowing).
+// The leg field is an honest marker, not a callable: production posture
+// gates (appliance-only legs, #16448) and the configured config root live
+// inside performWipe / wipeImageSealResidue, so no per-member closure here
+// could be production-identical without re-implementing them. The parity
+// test therefore drives PerformZeroizeWipe once against the redirected
+// tree and asserts every leg member's planted path is gone.
 type wipeSealDisposition struct {
-	leg      func() error
+	leg      bool
 	survivor string
 }
 
@@ -100,58 +107,55 @@ type wipeSealDisposition struct {
 // parses both tuples from scripts/image/bake.py, so a new seal member with
 // no row here — or a deleted row — reds there. Keys are the tuple members
 // verbatim (virt-sysprep op names for ENABLE, absolute paths for PURGE).
+// A leg:true row asserts the production wipe (performWipe, driven by the
+// parity test via PerformZeroizeWipe) erases the member under its real
+// posture gates; it does not name a function to call.
 var wipeSealMapping = map[string]wipeSealDisposition{
 	// SYSPREP_ENABLE_OPS.
-	"machine-id":   {leg: func() error { return wipeRotateMachineID(wipeMachineIDPath) }},
-	"ssh-hostkeys": {leg: wipeEraseSSHHostKeys},
-	"ssh-userdir":  {leg: func() error { return wipeRemovePath(wipeRootSSHUserDir) }},
-	"logfiles":     {leg: func() error { return wipeClearDir(wipeVarLogDir) }},
-	"tmp-files": {leg: func() error {
-		var errs []error
-		for _, dir := range wipeTmpDirs {
-			if err := wipeClearTmpDir(dir); err != nil {
-				errs = append(errs, err)
-			}
-		}
-		return errors.Join(errs...)
-	}},
-	"bash-history": {leg: func() error { return wipeRemovePath(wipeRootBashHistory) }},
-	"package-manager-cache": {leg: func() error {
-		var errs []error
-		for _, dir := range []string{wipeAptListsDir, wipeAptArchiveDir} {
-			if err := wipeClearDir(dir); err != nil {
-				errs = append(errs, err)
-			}
-		}
-		return errors.Join(errs...)
-	}},
-	"backup-files": {leg: func() error {
-		var errs []error
-		if err := wipeSweepOwnedEtcBackups(wipeEtcDir); err != nil {
-			errs = append(errs, err)
-		}
-		for _, target := range wipeServiceBackupSweepTargets() {
-			if err := wipeSweepOwnedBackups(target.dir, target.owned); err != nil {
-				errs = append(errs, err)
-			}
-		}
-		return errors.Join(errs...)
-	}},
-	"passwd-backups": {leg: wipeEraseAccountBackups},
-	"utmp":           {leg: func() error { return wipeRemovePath(wipeRunUtmpPath) }},
+	// machine-id: rotated (fresh random bytes) by the appliance-only leg in
+	// wipeImageSealResidue; on a foreign host the operator host keeps its id.
+	"machine-id": {leg: true},
+	// ssh-hostkeys: erased by wipeEraseSSHHostKeys, appliance-only.
+	"ssh-hostkeys": {leg: true},
+	// ssh-userdir: root's .ssh, erased appliance-only (foreign-host root
+	// material is owned by the marker-aware login teardown, #16448).
+	"ssh-userdir": {leg: true},
+	// logfiles: /var/log cleared appliance-only; on a foreign host only the
+	// xpf-owned firewall logs are erased (wipeFirewallLogs).
+	"logfiles": {leg: true},
+	// tmp-files: /tmp and /var/tmp cleared appliance-only.
+	"tmp-files": {leg: true},
+	// bash-history: root's .bash_history, erased appliance-only.
+	"bash-history": {leg: true},
+	// package-manager-cache: apt lists/archives cleared appliance-only.
+	"package-manager-cache": {leg: true},
+	// backup-files: editor backups swept on every host, stem-gated to
+	// backups of reset-owned files (wipeSweepOwnedEtcBackups and
+	// wipeServiceBackupSweepTargets), never a bare suffix sweep.
+	"backup-files": {leg: true},
+	// passwd-backups: wipeEraseAccountBackups, run after the login-account
+	// teardown that recreates them (every host).
+	"passwd-backups": {leg: true},
+	// utmp: /run/utmp removed appliance-only.
+	"utmp": {leg: true},
 	// SYSPREP_PURGE_PATHS.
-	"/etc/xpf/.configdb": {leg: func() error { return wipeConfigDir(defaultConfigDir, defaultConfigBase) }},
-	"/etc/xpf/xpf.conf":  {leg: func() error { return wipeConfigDir(defaultConfigDir, defaultConfigBase) }},
+	// .configdb and xpf.conf: erased by wipeConfigDir against the
+	// CONFIGURED config root handed to PerformZeroizeWipe (wipe.go: the
+	// configured root, not the hardcoded /etc/xpf default), every host.
+	"/etc/xpf/.configdb": {leg: true},
+	"/etc/xpf/xpf.conf":  {leg: true},
 	"/etc/xpf/.day0-config-applied": {
-		survivor: "held through the wipe as the zeroize-pending record and removed only by completeZeroize after every leg succeeds (wipe.go); a normal stamp is erased by wipeConfigDir",
+		survivor: "overwritten by beginZeroize with the prefixed zeroize-pending record (a metadata record holding ConfigDir/ConfigBase/ArchiveDir and log-file basenames, not tenant secrets), preserved by the config leg while the pending prefix is present, and removed only by completeZeroize after every wipe leg and final verification succeed; on failure it stays as the fail-closed loader gate",
 	},
-	"/etc/xpf/.day0-config-rejected":    {leg: func() error { return wipeRemovePath(wipeDay0RejectedPath) }},
-	"/etc/xpf/.root-grown":              {leg: func() error { return wipeRemovePath(wipeRootGrownPath) }},
-	"/var/lib/xpf/snmp-engine-id":       {leg: func() error { return wipeRemovePath(wipeSNMPEngineIDPath) }},
-	"/var/lib/xpf/snmp-engineboots":     {leg: func() error { return wipeRemovePath(wipeSNMPEngineBootsPath) }},
-	"/var/lib/xpf/uefi-bootorder-front": {leg: func() error { return wipeRemovePath(wipeUEFIStatePath) }},
-	"/var/lib/systemd/random-seed":      {leg: func() error { return wipeRemovePath(wipeSystemdRandomSeed) }},
-	"/var/lib/apt/lists/*":              {leg: func() error { return wipeClearDir(wipeAptListsDir) }},
+	"/etc/xpf/.day0-config-rejected":    {leg: true},
+	"/etc/xpf/.root-grown":              {leg: true},
+	"/var/lib/xpf/snmp-engine-id":       {leg: true},
+	"/var/lib/xpf/snmp-engineboots":     {leg: true},
+	"/var/lib/xpf/uefi-bootorder-front": {leg: true},
+	// random-seed: removed appliance-only (host state on a foreign host).
+	"/var/lib/systemd/random-seed": {leg: true},
+	// apt lists glob: the lists dir is cleared appliance-only.
+	"/var/lib/apt/lists/*": {leg: true},
 }
 
 const wipeManagedHostKeysHeader = "# Managed by xpfd — do not edit\n"
