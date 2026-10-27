@@ -12703,4 +12703,15 @@ fn synced_delete_outcome_contract_table_17138() {
             "{variant:?}: mirror_delete_failed disagrees with the contract table (#17138)"
         );
     }
+    // Reverse direction: every element of ALL must have an expected row.
+    // The length + membership checks above cannot catch a variant that is
+    // added to ALL (bumping its length in step) without a contract row —
+    // the two hand-maintained lists would grow together and stay equal —
+    // nor a duplicate row masking a missing one.
+    for variant in SyncedDeleteOutcome::ALL {
+        assert!(
+            expected.iter().any(|(row, ..)| *row == variant),
+            "{variant:?} is in SyncedDeleteOutcome::ALL without a contract-table row (#17138)"
+        );
+    }
 }

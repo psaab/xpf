@@ -11,16 +11,22 @@ use crate::afxdp::*;
 /// with `BPF_EXIST` precisely so it will not recreate a deleted entry. The moment a
 /// generation-aware helper-originated delete exists, the conflation goes live.
 ///
-/// Per-variant contract (`shared removed` = the forward shared row was removed
-/// by this call; `Go keeps rows` = [`Self::keeps_caller_rows`], i.e. a peer
-/// delete so reported makes the handler answer
-/// `synced-delete-refused:peer-delete-local-owned` and Go keeps its mirror and
-/// DNAT rows; `wire token` = the token this variant surfaces as on the wire —
-/// the peer-delete token above for row-keeping peer deletes, the bare
-/// `mirror-write-failed` error for a failed strict-mirror delete, the
-/// per-match `mirror_delete_policy_batch` token, or no dedicated token):
+/// Per-variant contract (`shared removed` = on the shared conditional-remove
+/// path this call removed the forward shared row — i.e. the predicate’s
+/// classification, not a guarantee that every path reporting the variant
+/// itself removed anything; in particular the generation-marked path can
+/// report `Applied` or strict-mirror `RefusedMirrorDelete` for a
+/// concurrently-absent entry it removed nothing from, where the caller’s
+/// mirror and stale-row cleanup still runs; `Go keeps rows` =
+/// [`Self::keeps_caller_rows`], i.e. a peer delete so reported makes the
+/// handler answer `synced-delete-refused:peer-delete-local-owned` and Go
+/// keeps its mirror and DNAT rows; `wire token` = the token this variant
+/// surfaces as on the wire — the peer-delete token above for row-keeping
+/// peer deletes, the bare `mirror-write-failed` error for a failed
+/// strict-mirror delete, the per-match `mirror_delete_policy_batch` token,
+/// or no dedicated token):
 ///
-/// | Variant | Shared removed | Go keeps rows | Wire token |
+/// | Variant | Shared removed (conditional-remove path) | Go keeps rows | Wire token |
 /// | --- | --- | --- | --- |
 /// | `Applied` | yes | no | none (success) |
 /// | `RefusedLocalOwned` | no | yes | `synced-delete-refused:peer-delete-local-owned` |
@@ -32,7 +38,8 @@ use crate::afxdp::*;
 /// | `StaleForward` | no | no | `stale_forward` (policy batch only) |
 /// | `PartialCompanion` | yes (forward only) | no | `partial_companion` (policy batch only) |
 ///
-/// `Applied`, `PartialCompanion`, and `RefusedMirrorDelete` removed the
+/// On the shared conditional-remove path, `Applied`, `PartialCompanion`,
+/// and `RefusedMirrorDelete` are the outcomes whose call removed the
 /// shared forward row ([`Self::shared_removed`]); for `RefusedMirrorDelete`
 /// the mirror delete then failed, so the caller must keep its rows and the
 /// helper surfaces `mirror-write-failed` instead.
@@ -53,9 +60,11 @@ pub(crate) enum SyncedDeleteOutcome {
     RefusedStaleGeneration,
     /// Refused because tuple admission could not be acquired before timeout.
     RefusedGateBusy,
-    /// The shared entry was removed, but the strict mirror (BPF) delete then
-    /// failed, so the caller keeps its mirror and DNAT rows and the handler
-    /// surfaces `mirror-write-failed`.
+    /// On the shared conditional-remove path the shared entry was removed,
+    /// but the strict mirror (BPF) delete then failed, so the caller keeps
+    /// its mirror and DNAT rows and the handler surfaces
+    /// `mirror-write-failed`. (The generation-marked path can also report
+    /// this for a concurrently-absent entry it removed nothing from.)
     RefusedMirrorDelete,
     /// Refused because the captured session incarnation or its companion changed.
     RefusedIdentity,
@@ -98,9 +107,14 @@ impl SyncedDeleteOutcome {
         )
     }
 
-    /// Whether this call removed the shared forward row: `Applied`, the
-    /// forward half of `PartialCompanion`, and `RefusedMirrorDelete` (whose
-    /// shared removal landed before the mirror delete failed).
+    /// On the shared conditional-remove path, whether this call removed the
+    /// shared forward row: `Applied`, the forward half of
+    /// `PartialCompanion`, and `RefusedMirrorDelete` (whose shared removal
+    /// landed before the mirror delete failed). This is the predicate’s
+    /// classification on that path only; it does not assert that every
+    /// caller path reporting these variants itself removed a row — the
+    /// generation-marked path also reports them for a concurrently-absent
+    /// entry.
     pub(crate) fn shared_removed(self) -> bool {
         matches!(
             self,
