@@ -267,11 +267,7 @@ func prepareConfigFromConfig(cfg *config.Config) (*config.IPsecConfig, map[strin
 		return nil, runtime
 	}
 	out := prepareConfig(cfg, func(name string, gw *config.IPsecGateway) string {
-		family, ok := configuredGatewayFamilyHint(gw)
-		if !ok {
-			runtime[name] = true
-			return ""
-		}
+		family := gatewayRemoteFamilyHint(gw)
 		addr := resolveConfiguredInterfaceAddress(cfg, gw.ExternalIface, family)
 		if addr == "" && family != 0 {
 			// Match resolveInterfaceAddress's single-stack fallback. The
@@ -285,12 +281,6 @@ func prepareConfigFromConfig(cfg *config.Config) (*config.IPsecConfig, map[strin
 		return addr
 	})
 	return out, runtime
-}
-
-// configuredGatewayFamilyHint mirrors gatewayRemoteFamilyHint; both are pure
-// (#14590), so it always reports ok.
-func configuredGatewayFamilyHint(gw *config.IPsecGateway) (family int, ok bool) {
-	return gatewayRemoteFamilyHint(gw), true
 }
 
 func resolveConfiguredInterfaceAddress(cfg *config.Config, ifaceRef string, family int) string {

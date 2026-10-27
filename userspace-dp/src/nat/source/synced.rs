@@ -4,10 +4,13 @@
 //! Reaches back into `source` for exactly one item — `SourceNatRule::matches_ignoring_scope`,
 //! which stays with the rest of the match predicates in `mod.rs`.
 //!
-//! #6988 PURE CODE MOTION: every line below was moved verbatim from
-//! `nat/source.rs` lines 1838-2352. The only edits are the visibility
-//! widenings enumerated in `source/mod.rs`; no logic, no ordering and no
-//! signature changed.
+//! #6988: moved verbatim from `nat/source.rs` lines 1838-2352 at the
+//! split commit (d85c20ffdf, 2026-08-28; merged as 22b9cb22d0), with
+//! only the visibility widenings enumerated in `source/mod.rs`; no
+//! logic, ordering or signature changed in that move. Verified at
+//! the split by scripts/verify-nat-source-split-6988.py (pinned
+//! refs; it checks the split, not the current tree — this file has
+//! since been edited repeatedly, e.g. #17683).
 
 use super::*;
 use crate::nat::SourceNatReservationSnapshot;

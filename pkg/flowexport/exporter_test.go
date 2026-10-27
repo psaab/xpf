@@ -161,7 +161,7 @@ func TestBuildSamplingZonesSkipsNilZone(t *testing.T) {
 	}
 }
 
-func TestShouldExport(t *testing.T) {
+func TestSampledForOpen(t *testing.T) {
 	ec := &ExportConfig{
 		SamplingZones: FamilySamplingDirs{
 			V4: map[uint16]SamplingDir{
@@ -177,22 +177,22 @@ func TestShouldExport(t *testing.T) {
 
 	// Both families share the same directions in this fixture.
 	for _, isV6 := range []bool{false, true} {
-		if !ec.ShouldExport(2, 1, isV6) {
+		if !ec.SampledForOpen(2, 1, isV6, "", "") {
 			t.Error("should export when ingress zone has sampling input")
 		}
-		if !ec.ShouldExport(1, 2, isV6) {
+		if !ec.SampledForOpen(1, 2, isV6, "", "") {
 			t.Error("should export when egress zone has sampling output")
 		}
-		if !ec.ShouldExport(3, 1, isV6) {
+		if !ec.SampledForOpen(3, 1, isV6, "", "") {
 			t.Error("should export when ingress zone has sampling input")
 		}
-		if ec.ShouldExport(1, 3, isV6) {
+		if ec.SampledForOpen(1, 3, isV6, "", "") {
 			t.Error("should not export when neither zone has matching sampling")
 		}
 	}
 	// No sampling zones configured -> export all
 	ecNone := &ExportConfig{}
-	if !ecNone.ShouldExport(1, 2, false) {
+	if !ecNone.SampledForOpen(1, 2, false, "", "") {
 		t.Error("should export all when no sampling zones configured")
 	}
 }
@@ -202,7 +202,7 @@ func TestShouldExport(t *testing.T) {
 // (atomic.Uint64), so it MUST be held by pointer everywhere. NewExporter
 // / NewIPFIXExporter take *ExportConfig and store that same pointer, so
 // the exporter's internal cfg, the daemon-held *ExportConfig, and the
-// session-close callback's ShouldExport all increment ONE counter.
+// daemon-held config's SampledForOpen all increment ONE counter.
 //
 // Revert the fix (cfg ExportConfig by value + NewExporter(*ec)) and this
 // test fails two ways: (1) the exporter's cfg is a distinct copy with a
@@ -235,16 +235,16 @@ func TestExporterSharesSingleSampleCounter(t *testing.T) {
 
 	// Drive the 1-in-N sampler across N packets through the SHARED config
 	// (no SamplingZones -> every packet is eligible). The counter
-	// increments per call (n := counter.Add(1)); ShouldExport returns true
+	// increments per call (n := counter.Add(1)); SampledForOpen returns true
 	// exactly when n % rate == 0. So packet k (1-indexed) samples iff
 	// k % rate == 0 -> exactly floor(N/rate) samples, evenly spaced.
 	const packets = 100
 	got := 0
 	for k := 1; k <= packets; k++ {
-		sampled := ec.ShouldExport(0, 0, false)
+		sampled := ec.SampledForOpen(0, 0, false, "", "")
 		wantSampled := k%rate == 0
 		if sampled != wantSampled {
-			t.Fatalf("packet %d: ShouldExport=%v, want %v (cadence broke -> "+
+			t.Fatalf("packet %d: SampledForOpen=%v, want %v (cadence broke -> "+
 				"counter was forked, not shared)", k, sampled, wantSampled)
 		}
 		if sampled {
@@ -389,11 +389,11 @@ func TestBuildSamplingZonesAbsentUnitDoesNotWidenExport(t *testing.T) {
 				},
 			}
 			ec := &ExportConfig{SamplingZones: BuildSamplingZones(cfg, map[string]uint32{"trust": 1})}
-			if got := ec.ShouldExport(1, 99, false); got != tc.wantEligible {
-				t.Fatalf("ShouldExport(trust, unrelated) = %v, want %v (sampling zones: %#v)",
+			if got := ec.SampledForOpen(1, 99, false, "", ""); got != tc.wantEligible {
+				t.Fatalf("SampledForOpen(trust, unrelated) = %v, want %v (sampling zones: %#v)",
 					got, tc.wantEligible, ec.SamplingZones)
 			}
-			if ec.ShouldExport(99, 99, false) {
+			if ec.SampledForOpen(99, 99, false, "", "") {
 				t.Fatal("session outside the configured sampling zone was exported")
 			}
 		})
@@ -401,7 +401,7 @@ func TestBuildSamplingZonesAbsentUnitDoesNotWidenExport(t *testing.T) {
 
 	// A truly absent sampling-zone restriction intentionally retains the
 	// documented export-all behavior.
-	if !(&ExportConfig{}).ShouldExport(99, 99, false) {
+	if !(&ExportConfig{}).SampledForOpen(99, 99, false, "", "") {
 		t.Fatal("empty ExportConfig should remain export-all")
 	}
 
@@ -409,7 +409,7 @@ func TestBuildSamplingZonesAbsentUnitDoesNotWidenExport(t *testing.T) {
 	if !unrestricted.unrestricted() {
 		t.Fatalf("no configured sampling restriction should produce unrestricted zones, got %#v", unrestricted)
 	}
-	if !(&ExportConfig{SamplingZones: unrestricted}).ShouldExport(99, 99, false) {
+	if !(&ExportConfig{SamplingZones: unrestricted}).SampledForOpen(99, 99, false, "", "") {
 		t.Fatal("unrestricted sampling-zone result should retain export-all behavior")
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -64,10 +65,58 @@ func assertFlatJoin16170(t *testing.T, err error, want []error) {
 
 // TestApplyPhaseErrorsJoinIsFlat16170 pins the allocation/tree-shape fix from
 // the #16232 review: join must be the single flat errors.Join, not nested
-// lead/follow subgroup joins (errors.Join does not flatten nested joins).
+// subgroup joins (errors.Join does not flatten nested joins). With zero
+// tail-locals the children are exactly the phase sentinels in field order;
+// with tail-locals the full 20-operand interleave is pinned by
+// TestApplyTailProductionInterleaveOrder16170 below.
 func TestApplyPhaseErrorsJoinIsFlat16170(t *testing.T) {
 	sentinels, phase := phaseSentinels16170()
-	assertFlatJoin16170(t, phase.join(), sentinels)
+	assertFlatJoin16170(t, phase.join(applyTailLocals{}), sentinels)
+}
+
+// TestEveryApplyPhaseErrorReachesTheCommit17034 is the #17034 mutation cell.
+// It reflects over applyPhaseErrors so ANY field — including one added
+// tomorrow following the documented recipe (one field here, one operand
+// in join(), one assignment site) — is automatically exercised: each
+// field alone, set by reflection, must surface through the PRODUCTION
+// tail (applyTailReconciles via phase.join), not merely through join()
+// in isolation. Pre-#17034 the production tail hand-spelled its own
+// 20-operand errors.Join and never called join(), so a field added to
+// the struct + join() per the old doc was silently dropped by the tail
+// while every #16170 cell stayed green; this cell turns RED for that
+// mutation (verified by adding a probe field wired only into the struct
+// and join()). The paired control asserts the zero struct surfaces
+// nothing, so the cell cannot pass via a tail that always errors.
+func TestEveryApplyPhaseErrorReachesTheCommit17034(t *testing.T) {
+	typ := reflect.TypeOf(applyPhaseErrors{})
+	if typ.NumField() == 0 {
+		t.Fatal("applyPhaseErrors has no fields; reflection cell would be vacuous")
+	}
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		t.Run(field.Name, func(t *testing.T) {
+			sentinel := errors.New("sentinel-17034-field-" + strings.ToLower(field.Name))
+			var phase applyPhaseErrors
+			reflect.ValueOf(&phase).Elem().Field(i).Set(reflect.ValueOf(sentinel))
+
+			f := newCredentialTailFixture6790(t)
+			err := f.d.applyTailReconciles(f.cfg, phase)
+			if err == nil {
+				t.Fatalf("production tail returned nil with only applyPhaseErrors.%s set; the field's error was dropped by the commit join", field.Name)
+			}
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("production tail error %v does not wrap the %s sentinel %v; field dropped or mis-joined in production tail", err, field.Name, sentinel)
+			}
+			if got := err.Error(); got != sentinel.Error() {
+				t.Fatalf("production tail with only %s set = %q, want exactly %q (healthy tail-locals must contribute nothing)", field.Name, got, sentinel.Error())
+			}
+		})
+	}
+	// Paired control: zero phase + healthy fixture must stay clean.
+	f := newCredentialTailFixture6790(t)
+	if err := f.d.applyTailReconciles(f.cfg, applyPhaseErrors{}); err != nil {
+		t.Fatalf("production tail with zero applyPhaseErrors = %v, want nil (control)", err)
+	}
 }
 
 type productionPhaseDP16170 struct {
