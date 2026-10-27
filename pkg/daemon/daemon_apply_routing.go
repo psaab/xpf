@@ -301,25 +301,12 @@ func (d *Daemon) applyPolicyRoutingRules(cfg *config.Config) error {
 
 	// 3b. Apply next-table policy routing rules (ip rule)
 	if d.routing != nil {
-		// Collect all static routes from main + per-rib. Build the combined
-		// list in a fresh slice — appending Inet6StaticRoutes onto
-		// cfg.RoutingOptions.StaticRoutes directly would write into that
-		// slice's backing array when it has spare capacity (cap > len),
-		// mutating the shared active-config object other goroutines read
-		// concurrently (same hazard fixed in collectNeighborProbeTargets,
-		// fbd159e55 / #1781 r1).
-		allRoutes := make([]*config.StaticRoute, 0,
-			len(cfg.RoutingOptions.StaticRoutes)+len(cfg.RoutingOptions.Inet6StaticRoutes))
-		allRoutes = append(allRoutes, cfg.RoutingOptions.StaticRoutes...)
-		allRoutes = append(allRoutes, cfg.RoutingOptions.Inet6StaticRoutes...)
-		// #9420: scope the leak rules to the ingress interfaces of the instance
-		// that authored them. allRoutes above is the DEFAULT instance's
-		// routing-options statics, so the scoping set is every configured
-		// interface unit not claimed by a routing instance and not
-		// management-class (fxp/em/fab, #12061). Without it the
-		// pref-100 rule sits ahead of the kernel l3mdev rule (1000) and steers a
-		// packet ingressing ANY other VRF into the target instance's table.
-		ingressIfaces := routing.DefaultInstanceIngressIfaces(cfg)
+		// allRoutes is the DEFAULT instance's routing-options statics and
+		// ingressIfaces its kernel ifname set, derived by the shared
+		// nextTableApplyInputs (#9420 scoping, #1781 fresh-slice hazard);
+		// the #17971 route-listener churn refresh feeds the reconciler the
+		// identical inputs through the same helper.
+		allRoutes, ingressIfaces := nextTableApplyInputs(cfg)
 		if err := d.routing.ApplyNextTableRules(
 			allRoutes, cfg.RoutingInstances, ingressIfaces); err != nil {
 			slog.Warn("failed to apply next-table rules", "err", err)
@@ -410,6 +397,35 @@ func (d *Daemon) applyPolicyRoutingRules(cfg *config.Config) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// nextTableApplyInputs derives the next-table reconciler's inputs from the
+// active config: the DEFAULT instance's routing-options statics (v4 then v6,
+// in a fresh slice — appending onto the config's own slice can mutate the
+// shared active-config object, #1781 r1) and the default instance's ingress
+// ifname set (#9420). Both the commit path (applyPolicyRoutingRules) and the
+// route-listener churn refresh (#17971) must feed the reconciler identical
+// inputs or the two derivation sites drift.
+func nextTableApplyInputs(cfg *config.Config) ([]*config.StaticRoute, []string) {
+	allRoutes := make([]*config.StaticRoute, 0,
+		len(cfg.RoutingOptions.StaticRoutes)+len(cfg.RoutingOptions.Inet6StaticRoutes))
+	allRoutes = append(allRoutes, cfg.RoutingOptions.StaticRoutes...)
+	allRoutes = append(allRoutes, cfg.RoutingOptions.Inet6StaticRoutes...)
+	return allRoutes, routing.DefaultInstanceIngressIfaces(cfg)
+}
+
+// refreshNextTableCarveouts reconciles ONLY the next-table main-table
+// exception band (#17971) against the live kernel main table. The daemon
+// route listener calls it on its coalesced actuation so learned main routes
+// that appear or withdraw between commits converge the slot-0 carve-outs
+// without reinstalling the leak lookups or shadows. The caller owns
+// applySem, exactly like the commit path.
+func (d *Daemon) refreshNextTableCarveouts(cfg *config.Config) error {
+	if d.routing == nil || cfg == nil {
+		return nil
+	}
+	routes, ingressIfaces := nextTableApplyInputs(cfg)
+	return d.routing.RefreshNextTableCarveouts(routes, cfg.RoutingInstances, ingressIfaces)
 }
 
 // reconcileRouteLeakSnapshot republishes the userspace route snapshot after

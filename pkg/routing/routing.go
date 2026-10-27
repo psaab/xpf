@@ -82,7 +82,7 @@ func New() (*Manager, error) {
 	// cycle: BindInterfaceToVRF takes no lock); vrf is constructed first.
 	m.tunnel = &tunnelManager{ops: h, vrfBinder: m.vrf, keepalives: make(map[string]*keepaliveRunner)}
 	m.xfrm = &xfrmManager{ops: h}
-	m.nextTbl = &nextTableManager{ops: dscpRuleOps{h}}
+	m.nextTbl = &nextTableManager{ops: dscpRuleOps{h}, mainRoutes: importMainLearnedRoutes}
 	m.ribGroup = &ribGroupManager{ops: dscpRuleOps{h}}
 	m.pbr = &pbrManager{ops: dscpRuleOps{h}}
 	m.probePin = &probePinManager{ops: h}
@@ -265,6 +265,17 @@ func (m *Manager) ClearXfrmi() error { return m.xfrm.Clear() }
 // DefaultInstanceIngressIfaces and nextTableManager.Apply.
 func (m *Manager) ApplyNextTableRules(routes []*config.StaticRoute, instances []*config.RoutingInstanceConfig, ingressIfaces []string) error {
 	return m.nextTbl.Apply(routes, instances, ingressIfaces)
+}
+
+// RefreshNextTableCarveouts reconciles ONLY the main-table exception band of
+// the next-table rules against the current config plus the live main-table
+// dump (#17971). Target lookups and miss shadows are left installed; the
+// daemon route listener calls this on its coalesced actuation so learned
+// main routes appearing or withdrawing between commits converge the
+// exception band without a full leak reinstall. The arguments mirror
+// ApplyNextTableRules.
+func (m *Manager) RefreshNextTableCarveouts(routes []*config.StaticRoute, instances []*config.RoutingInstanceConfig, ingressIfaces []string) error {
+	return m.nextTbl.RefreshCarveouts(routes, instances, ingressIfaces)
 }
 
 // ApplyRibGroupRules creates ip rules implementing rib-group route leaking.

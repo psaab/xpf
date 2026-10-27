@@ -89,10 +89,16 @@ const (
 )
 
 // nextTableManager reconciles next-table inter-VRF route-leak ip rules.
-// Stateless apart from the borrowed ruleOps; it reconciles against live
-// kernel ip-rule state.
+// Stateless apart from the borrowed ruleOps and the live main-table dump
+// seam; it reconciles against live kernel ip-rule state.
 type nextTableManager struct {
 	ops ruleOps
+	// mainRoutes dumps the live main-table routes the learned-route
+	// importer adopts (#17971). Nil means the dynamic carve-out leg is
+	// unavailable: only configured-static main exceptions are derived. The
+	// production Manager (routing.New) always wires it; nil occurs only in
+	// partial test constructions that do not exercise the dynamic leg.
+	mainRoutes func() ([]LearnedRoute, error)
 }
 
 // Apply creates Linux policy routing rules (ip rule) for static routes
@@ -320,36 +326,18 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 			"ingress_interfaces", len(ingressIfaces))
 	}
 	// Desired rules are re-added; surface any clear/add/return failure.
-	// Install static main-table exceptions only after every successfully
-	// installed unreachable-shadow/target-lookup pair. A failed shadow add
-	// therefore cannot leave an earlier target or exception lookup unguarded.
+	// Install main-table exceptions (configured statics plus the dynamic
+	// #17971 set enumerated from the live main-table dump) only after every
+	// successfully installed unreachable-shadow/target-lookup pair. A failed
+	// shadow add therefore cannot leave an earlier target or exception
+	// lookup unguarded.
 	definedInstances := make(map[string]struct{}, len(tableIDs))
 	for name := range tableIDs {
 		definedInstances[name] = struct{}{}
 	}
 	admittedLeakRoutes := nextTableAdmittedRoutes(installedLeakRoutes, tableIDs, len(ingressIfaces))
-	var carveoutErrs []error
-	var addedCarveouts []*netlink.Rule
-	for _, rule := range nextTableMainCarveoutRules(routes, admittedLeakRoutes, definedInstances, ingressIfaces) {
-		if err := n.ops.RuleAdd(rule); err != nil {
-			if !isRuleAlreadyPresent(err) {
-				carveoutErrs = append(carveoutErrs, fmt.Errorf(
-					"add next-table static main-table carve-out destination %s iif %s: %w",
-					rule.Dst, rule.IifName, err))
-			}
-		} else {
-			addedCarveouts = append(addedCarveouts, rule)
-		}
-	}
-	if len(carveoutErrs) != 0 {
-		for _, rule := range addedCarveouts {
-			if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
-				carveoutErrs = append(carveoutErrs, fmt.Errorf(
-					"roll back next-table static main-table carve-out destination %s iif %s: %w",
-					rule.Dst, rule.IifName, err))
-			}
-		}
-		errs = append(errs, carveoutErrs...)
+	if err := n.reconcileMainCarveouts(routes, admittedLeakRoutes, definedInstances, ingressIfaces); err != nil {
+		errs = append(errs, err)
 		return errors.Join(errs...)
 	}
 
@@ -447,24 +435,19 @@ func nextTableAdmittedRoutes(
 	return out
 }
 
-// nextTableMainCarveoutRules derives destination- and iif-scoped main lookups
-// for configured non-next-table static routes which FRR actually installs and
-// which are more specific than an admitted next-table leak prefix. If FRR or
-// an operator withdraws a route outside Apply, a broad main-table terminal
-// answer remains fail-closed within that destination prefix. Dynamic,
-// connected, and learned main routes require the follow-up mechanism tracked
-// in #17971.
-func nextTableMainCarveoutRules(
-	routes, admittedLeakRoutes []*config.StaticRoute,
-	definedInstances map[string]struct{},
-	ingressIfaces []string,
-) []*netlink.Rule {
-	type prefix struct {
-		dst       *net.IPNet
-		family    int
-		prefixLen int
-	}
-	var leakPrefixes []prefix
+// nextTableLeakPrefix is one admitted next-table leak destination the
+// main-table exception derivations compete against.
+type nextTableLeakPrefix struct {
+	dst       *net.IPNet
+	family    int
+	prefixLen int
+}
+
+// nextTableAdmittedLeakPrefixes parses the admitted leak routes into the
+// family-scoped prefix set shared by the static and dynamic (#17971)
+// main-table exception derivations.
+func nextTableAdmittedLeakPrefixes(admittedLeakRoutes []*config.StaticRoute) []nextTableLeakPrefix {
+	var leakPrefixes []nextTableLeakPrefix
 	for _, route := range admittedLeakRoutes {
 		if route == nil || route.NoInstall || route.NextTable == "" {
 			continue
@@ -478,16 +461,58 @@ func nextTableMainCarveoutRules(
 		if dst.IP.To4() == nil {
 			family = unix.AF_INET6
 		}
-		leakPrefixes = append(leakPrefixes, prefix{dst: dst, family: family, prefixLen: prefixLen})
+		leakPrefixes = append(leakPrefixes, nextTableLeakPrefix{dst: dst, family: family, prefixLen: prefixLen})
 	}
+	return leakPrefixes
+}
+
+// nextTableCarveoutKey deduplicates exception rules across the static and
+// dynamic derivations: one slot-0 main lookup per (family, prefix, iif).
+type nextTableCarveoutKey struct {
+	family int
+	prefix string
+	ifname string
+}
+
+// mintNextTableCarveout appends the slot-0 main lookup for one eligible
+// destination prefix, deduplicated by seen.
+func mintNextTableCarveout(
+	rules []*netlink.Rule, seen map[nextTableCarveoutKey]struct{},
+	dst *net.IPNet, family int, ingressIfaces []string,
+) []*netlink.Rule {
+	prefixLen, addressBits := dst.Mask.Size()
+	for _, iif := range ingressIfaces {
+		key := nextTableCarveoutKey{family: family, prefix: dst.String(), ifname: iif}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		rule := netlink.NewRule()
+		rule.Dst = dst
+		rule.Table = mainTableID
+		rule.Priority = config.RouteLeakNextTableCarveoutPriority(prefixLen, addressBits)
+		rule.Family = family
+		rule.IifName = iif
+		rule.SuppressPrefixlen = prefixLen - 1
+		rules = append(rules, rule)
+	}
+	return rules
+}
+
+// nextTableMainCarveoutRules derives destination- and iif-scoped main lookups
+// for configured non-next-table static routes which FRR actually installs and
+// which are more specific than an admitted next-table leak prefix. If FRR or
+// an operator withdraws a route outside Apply, a broad main-table terminal
+// answer remains fail-closed within that destination prefix.
+func nextTableMainCarveoutRules(
+	routes, admittedLeakRoutes []*config.StaticRoute,
+	definedInstances map[string]struct{},
+	ingressIfaces []string,
+) []*netlink.Rule {
+	leakPrefixes := nextTableAdmittedLeakPrefixes(admittedLeakRoutes)
 
 	var rules []*netlink.Rule
-	type carveoutKey struct {
-		family int
-		prefix string
-		ifname string
-	}
-	seen := make(map[carveoutKey]struct{})
+	seen := make(map[nextTableCarveoutKey]struct{})
 	for _, route := range routes {
 		if route == nil || route.NextTable != "" ||
 			config.StaticRouteExcludedReason(route, false, definedInstances) != "" ||
@@ -498,38 +523,31 @@ func nextTableMainCarveoutRules(
 		if !ok {
 			continue
 		}
-		prefixLen, addressBits := dst.Mask.Size()
 		family := unix.AF_INET
 		if dst.IP.To4() == nil {
 			family = unix.AF_INET6
 		}
-		matchesLeak := false
-		for _, leak := range leakPrefixes {
-			if leak.family == family && prefixLen > leak.prefixLen && leak.dst.Contains(dst.IP) {
-				matchesLeak = true
-				break
-			}
-		}
-		if !matchesLeak {
+		if !nextTableCarveoutMatchesLeak(dst, family, leakPrefixes) {
 			continue
 		}
-		for _, iif := range ingressIfaces {
-			key := carveoutKey{family: family, prefix: dst.String(), ifname: iif}
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			rule := netlink.NewRule()
-			rule.Dst = dst
-			rule.Table = mainTableID
-			rule.Priority = config.RouteLeakNextTableCarveoutPriority(prefixLen, addressBits)
-			rule.Family = family
-			rule.IifName = iif
-			rule.SuppressPrefixlen = prefixLen - 1
-			rules = append(rules, rule)
-		}
+		rules = mintNextTableCarveout(rules, seen, dst, family, ingressIfaces)
 	}
 	return rules
+}
+
+// nextTableCarveoutMatchesLeak reports whether a main-table destination
+// prefix is strictly more specific than an admitted same-family leak prefix
+// that contains it — the merged-walk condition under which the Rust FIB
+// promotes the main-table outcome over the next-table candidate
+// (junos_next_table_winner's SourceTable arm).
+func nextTableCarveoutMatchesLeak(dst *net.IPNet, family int, leakPrefixes []nextTableLeakPrefix) bool {
+	prefixLen, _ := dst.Mask.Size()
+	for _, leak := range leakPrefixes {
+		if leak.family == family && prefixLen > leak.prefixLen && leak.dst.Contains(dst.IP) {
+			return true
+		}
+	}
+	return false
 }
 
 // staticRouteDestinationPrefix mirrors StaticRouteExcludedReason's accepted
