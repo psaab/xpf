@@ -43,8 +43,8 @@ func helperRenameMatch10626(policyID uint32) dpuserspace.SessionPolicyMatch {
 			DstPort: 443,
 		},
 		PolicyID:      policyID,
-		IngressZoneID: uint16(config.StableZoneID("lan")),
-		EgressZoneID:  uint16(config.StableZoneID("wan")),
+		IngressZoneID: config.StableZoneID("lan"),
+		EgressZoneID:  config.StableZoneID("wan"),
 	}
 }
 
@@ -63,8 +63,8 @@ func TestRematchRenamedMatchPermitted10626(t *testing.T) {
 	if record.RuleID != "lan->wan/p-new" || record.PolicyID == 0 {
 		t.Fatalf("renamed record lost identity: %+v", record)
 	}
-	if record.IngressZone != uint16(config.StableZoneID("lan")) ||
-		record.EgressZone != uint16(config.StableZoneID("wan")) {
+	if record.IngressZone != config.StableZoneID("lan") ||
+		record.EgressZone != config.StableZoneID("wan") {
 		t.Fatalf("renamed record lost zones: %+v", record)
 	}
 	if record.SrcPort != 1234 || record.DstPort != 5201 {
@@ -489,7 +489,7 @@ func TestRematchRenamedMatchZoneRename10626(t *testing.T) {
 	if !permitted {
 		t.Fatal("zone-renamed helper match was not retained")
 	}
-	if record.IngressZone != uint16(config.StableZoneID("lan2")) {
+	if record.IngressZone != config.StableZoneID("lan2") {
 		t.Fatalf("record kept stale ingress zone %d, want lan2", record.IngressZone)
 	}
 }

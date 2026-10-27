@@ -476,7 +476,12 @@ func zoneNamesByID(cfg *config.Config) (map[uint32]string, bool) {
 }
 
 // oldNameByTruncatedID resolves a session record's u16 zone id (the low
-// 16 bits of the u32 StableZoneID, #16557) to its zone name.
+// 16 bits of the u32 StableZoneID, #16557) to its zone name. It serves
+// the BPF-keyed twins, whose SessionValue zone fields are genuinely u16.
+// A truncated id matching no zone fails closed. Truncation collisions
+// (two zones sharing low 16 bits) resolve to an arbitrary first match —
+// nondeterministic across map iteration — which is why the helper-JSON
+// path below does NOT use this helper.
 func oldNameByTruncatedID(names map[uint32]string, id uint16) (string, bool) {
 	for zid, name := range names {
 		if uint16(zid) == id {
@@ -486,20 +491,41 @@ func oldNameByTruncatedID(names map[uint32]string, id uint16) (string, bool) {
 	return "", false
 }
 
+// oldNameByID resolves a full u32 zone id (#18148: the helper JSON leg
+// carries the untruncated StableZoneID) to its zone name. Exact match
+// only — no truncation — so two zones sharing low 16 bits never alias.
+func oldNameByID(names map[uint32]string, id uint32) (string, bool) {
+	name, ok := names[id]
+	return name, ok
+}
+
+// remappedQueryZones resolves recorded zone IDs to old-config names,
+// applies the rename binding, and computes the new full u32 IDs. The
+// BPF twins pass their genuinely-u16 value widened with `truncated=true`
+// (resolution via the low-16-bit match); the helper-JSON match passes
+// its full u32 with `truncated=false` (exact match, #18148).
 func remappedQueryZones(
 	oldCfg, newCfg *config.Config,
 	binding policyRenameBinding,
-	ingressID, egressID uint16,
-) (string, string, uint16, uint16, bool) {
+	ingressID, egressID uint32,
+	truncated bool,
+) (string, string, uint32, uint32, bool) {
 	oldNames, oldOK := zoneNamesByID(oldCfg)
 	newNames, newOK := zoneNamesByID(newCfg)
 	if !oldOK || !newOK {
 		return "", "", 0, 0, false
 	}
-	// #16557: session records carry the low 16 bits of the u32 zone
-	// id, so the recorded ids resolve through their truncation.
-	from, fromOK := oldNameByTruncatedID(oldNames, ingressID)
-	to, toOK := oldNameByTruncatedID(oldNames, egressID)
+	var from, to string
+	var fromOK, toOK bool
+	if truncated {
+		// #16557: session records carry the low 16 bits of the u32 zone
+		// id, so the recorded ids resolve through their truncation.
+		from, fromOK = oldNameByTruncatedID(oldNames, uint16(ingressID))
+		to, toOK = oldNameByTruncatedID(oldNames, uint16(egressID))
+	} else {
+		from, fromOK = oldNameByID(oldNames, ingressID)
+		to, toOK = oldNameByID(oldNames, egressID)
+	}
 	if !fromOK || !toOK {
 		return "", "", 0, 0, false
 	}
@@ -520,7 +546,7 @@ func remappedQueryZones(
 	if newNames[newIngress] != from || newNames[newEgress] != to {
 		return "", "", 0, 0, false
 	}
-	return from, to, uint16(newIngress), uint16(newEgress), true
+	return from, to, newIngress, newEgress, true
 }
 
 // Session tuples are lossy for two protocol classes:
@@ -565,7 +591,7 @@ func rematchRenamedV4(oldCfg, newCfg *config.Config, binding policyRenameBinding
 	if !capturedTupleValid(key.Protocol, value.TunnelDiscriminator) {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
-	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, value.IngressZone, value.EgressZone)
+	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, uint32(value.IngressZone), uint32(value.EgressZone), true)
 	if !ok {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
@@ -599,7 +625,7 @@ func rematchRenamedV6(oldCfg, newCfg *config.Config, binding policyRenameBinding
 	if !capturedTupleValid(key.Protocol, value.TunnelDiscriminator) {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
-	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, value.IngressZone, value.EgressZone)
+	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, uint32(value.IngressZone), uint32(value.EgressZone), true)
 	if !ok {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
@@ -649,7 +675,7 @@ func rematchRenamedMatch(oldCfg, newCfg *config.Config, binding policyRenameBind
 	if !capturedTupleValid(match.Tuple.Protocol, match.Tuple.TunnelDiscriminator) {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
-	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, match.IngressZoneID, match.EgressZoneID)
+	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, match.IngressZoneID, match.EgressZoneID, false)
 	if !ok {
 		return dpuserspace.PolicySessionRebind{}, false
 	}

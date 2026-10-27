@@ -3,13 +3,11 @@ package daemon
 
 import (
 	"log/slog"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
 )
@@ -176,10 +174,10 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 			// RETH HA startup installs a stable router link-local on the active
 			// member. Bind RA to that address so the sender does not auto-pick a
 			// transient EUI-64 link-local which can later be removed by HA reconcile.
-			ra.SourceLinkLocal = cluster.StableRethLinkLocal(
-				cfg.Chassis.Cluster.ClusterID,
-				ifc.RedundancyGroup,
-			).String()
+			// #17049: only when the RA's own unit carries a placement under the
+			// single placement definition (a sibling unit's placement does not
+			// install the address on this RA's netdev).
+			ra.SourceLinkLocal = stableRethLinkLocalForRA(cfg, ra.Interface, ifc)
 		}
 	}
 
@@ -254,18 +252,50 @@ func resolveRASourceLinkLocal(cfg *config.Config, raInterface string) (*config.I
 
 // unitConfiguredLinkLocal returns the first configured IPv6 link-local unicast
 // address (CIDR-stripped) on the unit, or "" when none is configured.
+// Delegates to the single definition in pkg/config (#17049).
 func unitConfiguredLinkLocal(unit *config.InterfaceUnit) string {
-	if unit == nil {
+	return config.UnitConfiguredLinkLocal(unit)
+}
+
+// stableRethLinkLocalForRA returns the stable RETH link-local to bind as the
+// RA source for raInterface, or "" when the RA's unit is not backed by the
+// stable LL (#17049). It gates on the single placement definition
+// (Config.StableRethLinkLocalPlacements), scoped to the RA's own unit: a
+// unit-qualified ref ("reth0.50") binds only when a placement exists for
+// THAT unit of THAT interface (placement IfRef "base.unit"), so an RA on an
+// IPv4-only, disabled, or configured-link-local unit does not bind the
+// stable address merely because a sibling unit of the RG carries a
+// placement — pkg/ra would bind an address never installed on the RA's
+// netdev and every NDP listen on it would fail. A bare ref ("reth0") names
+// no unit, so any placement on the RA's interface binds (the #2996
+// lowest-first configured scan's bare-ref shape). With no matching
+// placement the sender falls back to its auto-selected link-local.
+func stableRethLinkLocalForRA(cfg *config.Config, raInterface string, ifc *config.InterfaceConfig) string {
+	if cfg == nil || ifc == nil || cfg.Chassis.Cluster == nil {
 		return ""
 	}
-	for _, addr := range unit.Addresses {
-		ip, _, err := net.ParseCIDR(addr)
-		if err != nil {
+	placements := cfg.StableRethLinkLocalPlacements(ifc.RedundancyGroup)
+	if len(placements) == 0 {
+		return ""
+	}
+	base, unitTok, hasUnit := strings.Cut(raInterface, ".")
+	wantUnit := -1
+	if hasUnit && unitTok != "" {
+		n, err := strconv.Atoi(unitTok)
+		if err != nil || n < 0 {
+			return "" // malformed/negative unit: fail-safe, sender auto-selects
+		}
+		wantUnit = n
+	}
+	for _, p := range placements {
+		pBase, _, _ := strings.Cut(p.IfRef, ".")
+		if pBase != base {
 			continue
 		}
-		if ip.IsLinkLocalUnicast() && ip.To4() == nil {
-			return ip.String()
+		if wantUnit >= 0 && p.Unit != wantUnit {
+			continue
 		}
+		return config.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, ifc.RedundancyGroup).String()
 	}
 	return ""
 }

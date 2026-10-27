@@ -4,12 +4,17 @@
 // IT IS A DEPENDENCY-FREE LEAF ON PURPOSE (#6895). Three surfaces print this
 // state — the local CLI (pkg/cli), the gRPC text renderer (pkg/grpcapi) and the
 // remote cli binary (cmd/cli) — and the natural home would be pkg/dataplane,
-// beside the ErrCounterNotPopulated sentinel these sentences describe. But the
-// #1451 retirement-boundary canary deliberately keeps cmd/cli free of root
-// pkg/dataplane: the remote cli speaks gRPC and must not link the dataplane.
-// Adding an allowlist entry to share two strings would weaken an intentional
-// architectural boundary for a presentation concern, so the wording lives in a
-// leaf all three may import and the boundary stays as designed.
+// beside the ErrCounterNotPopulated sentinel these sentences describe.
+//
+// The wording lives here so all three surfaces share it without an extra
+// direct import of root pkg/dataplane. That is a narrow source-level choice,
+// not a linkage boundary: the #1451 retirement-boundary canary
+// (TestOperatorPackagesOnlyUseDocumentedLegacyDataplaneImports) only
+// allowlists per-file DIRECT imports of root pkg/dataplane, and cmd/cli
+// already links pkg/dataplane, nftables, routing, ipsec, logging, networkd
+// and configstore transitively (e.g. via pkg/dataplane/userspace, #17112).
+// Nothing keeps the remote CLI free of the dataplane at link time, and no
+// reader should infer that it is a thin gRPC-only binary from this leaf.
 package zonecounters
 
 // The wording below is the rendering of dataplane.ErrCounterNotPopulated for a
