@@ -47,7 +47,7 @@ Triggers `networkctl reload` only when files actually changed.
 
 ## Dependencies
 
-Standard library only.
+`config`, `fsatomic`, `rendersafe` (all `pkg/…`; from `go list`).
 
 ## Naming conventions (CLAUDE.md authoritative)
 
