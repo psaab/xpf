@@ -216,7 +216,18 @@ func (t *FlowTracker) TouchBidirectional(key FlowKey, now time.Time, fwdPackets,
 		if !idle {
 			return
 		}
-		if fwdPackets+revPackets <= m.lastPackets+m.lastRevPackets && fwdBytes+revBytes <= m.lastBytes+m.lastRevBytes {
+		// #17804: progress is per-field — any single counter
+		// advancing — not the forward+reverse sums. A backwards-
+		// racing mirror field (the #16750 reality the #17851 carry
+		// below already clamps) can hold both sums flat while
+		// another field genuinely progresses, wrongly suppressing
+		// the re-arm (resumed traffic stayed outside the live
+		// tracker: the #16747 defect again), and summed uint64s
+		// wrap near 2^64, flipping the comparison either way.
+		// Mirrors the live-path progress test below and Touch's
+		// two-field gate.
+		if fwdPackets <= m.lastPackets && fwdBytes <= m.lastBytes &&
+			revPackets <= m.lastRevPackets && revBytes <= m.lastRevBytes {
 			return
 		}
 		delete(t.idle, key)
