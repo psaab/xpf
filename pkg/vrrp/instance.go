@@ -518,24 +518,11 @@ type configChange15689 struct {
 }
 
 // effectivePriorityLocked computes the track-adjusted advertised priority
-// from cfg/trackDown. Caller MUST hold vi.mu (read or write); it never
-// takes the lock itself (mirrors advertIntervalLocked, #6230). Priority
-// 0/255 pass through; otherwise TrackPriorityCost is subtracted while the
-// tracked link is down, clamped to [1,254] — same math as prioritySnapshot.
+// from cfg/trackDown via effectivePriority (#17145). Caller MUST hold
+// vi.mu (read or write); it never takes the lock itself (mirrors
+// advertIntervalLocked, #6230).
 func (vi *vrrpInstance) effectivePriorityLocked() int {
-	p := vi.cfg.Priority
-	if p == 0 || p == addressOwnerPriority {
-		return p
-	}
-	if vi.trackDown && vi.cfg.TrackInterface != "" {
-		p -= vi.cfg.TrackPriorityCost
-		if p < 1 {
-			p = 1
-		} else if p > 254 {
-			p = 254
-		}
-	}
-	return p
+	return effectivePriority(vi.cfg.Priority, vi.cfg.TrackPriorityCost, vi.trackDown, vi.cfg.TrackInterface)
 }
 
 // takePendingConfigChange consumes the pending #15689 snapshot.
@@ -747,11 +734,10 @@ func (vi *vrrpInstance) armAdvertTimer(advertTimer *time.Timer) {
 // armMasterDownTimer resets masterDownTimer at masterDownInterval()
 // and atomically records the armed interval as applied (same lock
 // discipline as armAdvertTimer; priority is not noted — see
-// armAdvertTimer, #15927). The computation replicates
-// masterDownInterval() under the already-held lock — getPriority()
-// takes RLock, so it cannot be called here; the skew priority is
-// computed exactly as prioritySnapshot does (0/255 pass through;
-// track-down subtracts TrackPriorityCost clamped to [1,254]).
+// armAdvertTimer, #15927). The duration comes from masterDownLocked
+// under the already-held lock — getPriority() takes RLock, so it
+// cannot be called here (#6230); masterDownLocked shares
+// effectivePriority with getPriority()/prioritySnapshot (#17145), and
 // getPriority()'s pending-resignation detour returns that same
 // effective priority from the cfg fields read here, so the durations
 // agree. With a learned master interval the duration is the peer's
@@ -760,18 +746,7 @@ func (vi *vrrpInstance) armAdvertTimer(advertTimer *time.Timer) {
 // interval changes) but harmless.
 func (vi *vrrpInstance) armMasterDownTimer(masterDownTimer *time.Timer) {
 	vi.mu.Lock()
-	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
-	p := vi.cfg.Priority
-	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
-		p -= vi.cfg.TrackPriorityCost
-		if p < 1 {
-			p = 1
-		} else if p > 254 {
-			p = 254
-		}
-	}
-	skew := time.Duration(256-p) * advert / 256
-	masterDownTimer.Reset(3*advert + skew)
+	masterDownTimer.Reset(vi.masterDownLocked())
 	vi.armIntervalAppliedLocked()
 	vi.mu.Unlock()
 }
@@ -788,18 +763,7 @@ func (vi *vrrpInstance) armMasterDownTimer(masterDownTimer *time.Timer) {
 // consumer re-arms instead of retaining an intermediate horizon.
 func (vi *vrrpInstance) armMasterDownSafetyTimer(masterDownTimer *time.Timer) {
 	vi.mu.Lock()
-	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
-	p := vi.cfg.Priority
-	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
-		p -= vi.cfg.TrackPriorityCost
-		if p < 1 {
-			p = 1
-		} else if p > 254 {
-			p = 254
-		}
-	}
-	masterDown := 3*advert + time.Duration(256-p)*advert/256
-	safety := 3 * masterDown
+	safety := 3 * vi.masterDownLocked()
 	if safety < 500*time.Millisecond {
 		safety = 500 * time.Millisecond
 	}

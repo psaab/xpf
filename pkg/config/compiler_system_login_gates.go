@@ -42,13 +42,13 @@ import (
 //     compounds with the #6701 identity fix in the permissive direction, which
 //     is why the two ship together;
 //   - an empty class permission set maps to the coarse `{none}` bucket, and a
-//     dropped `deny-commands` / `deny-configuration` never reaches the #5831
-//     gate: that gate reads LoginClass.DenyLeavesPresent, which the packed drop
-//     leaves empty, so the commit it would have REFUSED is accepted and the
-//     restriction the operator wrote is silently discarded. (Before #5831 the
-//     same drop instead suppressed a MORE PERMISSIVE advisory; the gate
-//     replaced that advisory, but the field the bug empties is still the one
-//     the check reads.);
+//     dropped `deny-commands` / `deny-configuration` never reaches the runtime
+//     regex evaluator: that evaluator reads LoginClass.DenyLeavesPresent
+//     (login_regex_scope_7172.go), which the packed drop leaves empty, so it
+//     enforces no deny restriction and the restriction the operator wrote is
+//     silently discarded. The field the bug empties is still the one the
+//     enforcement reads — it is a runtime evaluator now, not the #5831 commit
+//     gate that was retired when #7172 made the regexes enforced.
 //   - a dropped `authentication` block leaves the account with no key and no
 //     password.
 //
@@ -175,7 +175,7 @@ func loginPackedConsequence(keyword string) string {
 	case "class":
 		return "the class compiles with NO permissions and NO allow/deny regexes, so it " +
 			"grants nothing and a dropped deny-commands / deny-configuration never reaches " +
-			"the #5831 gate that would refuse the commit outright"
+			"the runtime regex evaluator, so the restriction is silently discarded"
 	}
 	return "the instance compiles with an EMPTY body"
 }
