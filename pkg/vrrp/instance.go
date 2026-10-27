@@ -11,6 +11,8 @@ import (
 	"golang.org/x/net/ipv6"
 
 	"github.com/vishvananda/netlink"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // VRRPState represents the VRRPv3 state machine state.
@@ -476,7 +478,7 @@ type vrrpInstance struct {
 }
 
 func newInstance(cfg Instance, iface *net.Interface, eventCh chan<- VRRPEvent, onEventDrop func()) *vrrpInstance {
-	cfg.VirtualAddresses = dedupeVIPs(cfg.VirtualAddresses)
+	cfg.VirtualAddresses = config.DedupeVRRPVIPs(cfg.VirtualAddresses)
 	capErr := instanceAdvertCapacityErr(cfg) // #6779, advert_capacity.go
 	return &vrrpInstance{
 		cfg:               cfg,
