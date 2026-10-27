@@ -198,7 +198,7 @@ func TestPeerHealthyRequiresRecentInboundAfterHeartbeatAckCapability(t *testing.
 		t.Fatal("expected connected pre-capability session sync to be healthy")
 	}
 
-	s.peerHeartbeatAckEver.Store(true)
+	s.peerIncarnationState().peerHeartbeatAckEver.Store(true)
 	s.lastPeerRxMono.Store(MonotonicNanos())
 	if !s.PeerHealthy() {
 		t.Fatal("expected recent peer activity to be healthy")
@@ -5019,7 +5019,7 @@ func TestReceiveLoopDisconnectsSilentConnectionAfterAckCapableReconnect(t *testi
 	ss.bulkEverCompleted.Store(true)
 	ss.readDeadline = 100 * time.Millisecond
 	ss.peerSilenceLimit = 300 * time.Millisecond
-	ss.peerHeartbeatAckEver.Store(true)
+	ss.peerIncarnationState().peerHeartbeatAckEver.Store(true)
 
 	disconnected := make(chan struct{}, 1)
 	ss.OnPeerDisconnected = func() {

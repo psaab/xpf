@@ -115,8 +115,8 @@ func TestPeerConfigStaleRequiresPositiveApplyAck11070(t *testing.T) {
 	// fixture is a legacy peer (no advertisement), which the gate now
 	// judges by NACK-only semantics and this test's premise — silence
 	// is stale — would not hold.
-	s.peerCapabilityFlags2.Store(uint32(capFlag2ConfigApplyAck))
-	s.lastSentConfigAckCapable16756.Store(true)
+	s.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2ConfigApplyAck))
+	s.peerIncarnationState().lastSentConfigAckCapable16756.Store(true)
 	nack := func(typ uint8, gen uint64) {
 		var p [8]byte
 		binary.LittleEndian.PutUint64(p[:], gen)

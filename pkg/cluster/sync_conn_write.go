@@ -350,14 +350,14 @@ func (s *SessionSync) suppressForwardOnlyDeleteForIncapablePeer(source string) b
 		return false
 	}
 	s.stats.DeletesSuppressedPurgeRetirement.Add(1)
-	if s.purgeRetirementSuppressionWarned.CompareAndSwap(false, true) {
+	if s.peerIncarnationState().purgeRetirementSuppressionWarned.CompareAndSwap(false, true) {
 		slog.Warn("cluster sync: withholding forward-only session deletes — the peer does not advertise "+
 			"#9752 forward-only deletes, so it would derive companions and destroy sessions the purge "+
 			"deliberately preserved. That peer will retain sessions this node has retired until they "+
 			"idle out. Completing the upgrade on both nodes restores delete sync.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 	}
 	return true
 }
@@ -388,14 +388,14 @@ func (s *SessionSync) suppressScopedDeleteForIncapablePeer(source string) bool {
 	// is the worse trade by far.
 	if !s.peerCapabilitiesLearned() || !s.ScopedPolicyDeleteCapable() {
 		s.stats.DeletesSuppressedScopedPolicy.Add(1)
-		if s.scopedPolicySuppressionWarned.CompareAndSwap(false, true) {
+		if s.peerIncarnationState().scopedPolicySuppressionWarned.CompareAndSwap(false, true) {
 			slog.Warn("cluster sync: withholding scoped session deletes — the peer does not advertise "+
 				"#10512 scoped policy deletes, so it would apply them by bare tuple and destroy a surviving "+
 				"tenant's session. That peer will retain sessions this node has revoked until they "+
 				"idle out. Completing the upgrade on both nodes restores delete sync.",
 				"source", source,
 				"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-				"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+				"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 		}
 		return true
 	}
@@ -461,15 +461,15 @@ func (s *SessionSync) suppressStampedInstallForIncapablePeer(domain, check uint3
 		return false
 	}
 	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
-	s.installTableSuppressDebt.Store(true)
-	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
+	s.peerIncarnationState().installTableSuppressDebt.Store(true)
+	if s.peerIncarnationState().installTableSuppressionWarned.CompareAndSwap(false, true) {
 		slog.Warn("cluster sync: withholding stamped session installs — the peer has not advertised "+
 			"#9752 install-table identity (incapable or not yet discovered), so it would install them "+
 			"stamp-less and wrong-table after failover. That peer will miss these sessions until a miss "+
 			"re-establishes them or the upgrade completes on both nodes.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 	}
 	return true
 }
@@ -488,7 +488,7 @@ func (s *SessionSync) suppressIpsecDiscriminatorInstallForIncapablePeer(tag uint
 	if s.peerCapabilitiesLearned() && s.IpsecTunnelDiscriminatorCapable() {
 		return false
 	}
-	s.ipsecDiscriminatorSuppressDebt.Store(true)
+	s.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Store(true)
 	return true
 }
 
@@ -520,19 +520,19 @@ func suppressUnannouncedForPBRActivePeer(s *SessionSync, announced bool, source 
 	if announced {
 		return false
 	}
-	if s == nil || !s.pbrAnnouncedForFence.Load() || s.InstallTableIdentityCapable() {
+	if s == nil || !s.peerIncarnationState().pbrAnnouncedForFence.Load() || s.InstallTableIdentityCapable() {
 		return false
 	}
 	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
-	s.installTableSuppressDebt.Store(true)
-	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
+	s.peerIncarnationState().installTableSuppressDebt.Store(true)
+	if s.peerIncarnationState().installTableSuppressionWarned.CompareAndSwap(false, true) {
 		slog.Warn("cluster sync: withholding unannounced session installs — this node does PBR and "+
 			"these mirror-sourced (0,0)s were never announced (in-race delta, foreign row, or memo "+
 			"at cap), so the peer would install possibly-PBR sessions stamp-less. They flow once "+
 			"announced, or on upgrade.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 	}
 	return true
 }
@@ -572,14 +572,14 @@ func (s *SessionSync) suppressDeleteForIncapablePeer(source string) bool {
 		return false
 	}
 	s.stats.DeletesSuppressedPeerIncapable.Add(1)
-	if s.deleteSuppressionWarned.CompareAndSwap(false, true) {
+	if s.peerIncarnationState().deleteSuppressionWarned.CompareAndSwap(false, true) {
 		slog.Warn("cluster sync: withholding session deletes — the peer does not advertise #9714 peer-delete "+
 			"ownership, so it would apply them unconditionally and could tear down a flow it is still "+
 			"forwarding. That peer will retain sessions this node has closed until they idle out. "+
 			"Completing the upgrade on both nodes restores delete sync.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 	}
 	return true
 }

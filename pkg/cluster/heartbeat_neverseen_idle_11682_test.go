@@ -144,7 +144,7 @@ func TestColdBootIdleSyncAckCadenceHoldsNeverSeenPeer11682(t *testing.T) {
 	}
 	ackDeadline := time.After(time.Second)
 	for {
-		if ss.peerHeartbeatAckEver.Load() {
+		if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 			if age, ok := ss.LastPeerReceiveAge(); ok && age <= readDeadline {
 				break
 			}
