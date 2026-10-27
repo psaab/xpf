@@ -476,8 +476,8 @@ func TestCapturePipelineFragmentCompletionOneClass9506(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := FragmentKey{Version: 4, Tunnel: 1, VRF: 1, Generation: 1, ID: 5}
-	for i, frag := range []Fragment{{Offset: 0, More: true, Data: []byte("ab")}, {Offset: 2, More: false, Data: []byte("cd")}} {
-		if err := p.Enqueue(CaptureFrame{Packet: pipelineTestPacket(77, 2, 2, 7, uint32(i+1)), FlowKey: "frag", FragmentKey: &key, Fragment: &frag}); err != nil {
+	for i := range 2 {
+		if err := p.Enqueue(CaptureFrame{Packet: pipelineTestPacket(77, 2, 2, 7, uint32(i+1)), FlowKey: "frag", FragmentKey: &key}); err != nil {
 			t.Fatalf("Enqueue fragment %d: %v", i, err)
 		}
 	}
@@ -490,7 +490,7 @@ func TestCapturePipelineFragmentCompletionOneClass9506(t *testing.T) {
 		}
 	}
 }
-func TestCapturePipelineFragmentsAreDeniedBeforeFragPool9506(t *testing.T) {
+func TestCapturePipelineFragmentsAreDenied9506(t *testing.T) {
 	sink := new(pipelineTestSink)
 	var denyReasons []IpsecInnerReason
 	p, err := NewCapturePipeline(CapturePipelineConfig{
@@ -510,21 +510,13 @@ func TestCapturePipelineFragmentsAreDeniedBeforeFragPool9506(t *testing.T) {
 	}
 	otherKey := key
 	otherKey.ID++
-	frames := []struct {
-		key      FragmentKey
-		fragment Fragment
-	}{
-		{key, Fragment{Offset: 0, More: true, Data: []byte("ab")}},
-		{key, Fragment{Offset: 2, More: false, Data: []byte("cd")}},
-		{otherKey, Fragment{Offset: 0, More: true, Data: []byte("xy")}},
-		{key, Fragment{Offset: 4, More: false, Data: []byte("ef")}},
-	}
+	frames := []FragmentKey{key, key, otherKey, key}
 	for i, tc := range frames {
-		frameKey, fragment := tc.key, tc.fragment
+		frameKey := tc
 		if err := p.Enqueue(CaptureFrame{
 			Packet: pipelineTestPacket(77, 2, 2, 7, uint32(i+1)), FlowKey: "fragment-deny",
 			Generation: 1, SnapshotGeneration: 1,
-			FragmentKey: &frameKey, Fragment: &fragment,
+			FragmentKey: &frameKey,
 		}); err != nil {
 			t.Fatalf("Enqueue fragment %d: %v", i, err)
 		}

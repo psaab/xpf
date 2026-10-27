@@ -941,7 +941,31 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 			[]string{"pool", "rule"},
 			nil,
 		),
-		// #4800: the residual live-state mutex (denominator, contended) pair.
+		// #4800/#17036: split lock pairs plus the legacy summed pair.
+		userspaceSNATPoolFlowShardLockAcquisitionsTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_flow_shard_lock_acquisitions_total",
+			"flow shard lock acquisitions",
+			[]string{"pool", "rule"},
+			nil,
+		),
+		userspaceSNATPoolFlowShardLockContendedTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_flow_shard_lock_contended_total",
+			"flow shard lock contended",
+			[]string{"pool", "rule"},
+			nil,
+		),
+		userspaceSNATPoolLiveWriteLockAcquisitionsTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_live_write_lock_acquisitions_total",
+			"live write lock acquisitions",
+			[]string{"pool", "rule"},
+			nil,
+		),
+		userspaceSNATPoolLiveWriteLockContendedTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_live_write_lock_contended_total",
+			"live write lock contended",
+			[]string{"pool", "rule"},
+			nil,
+		),
 		userspaceSNATPoolLiveLockAcquisitionsTotal: prometheus.NewDesc(
 			"xpf_userspace_source_nat_pool_live_lock_acquisitions_total",
 			"live lock acquisitions",
@@ -979,6 +1003,10 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 			ReusesTotal:                  5,
 			ExhaustionTotal:              7,
 			IdleLeaseImportCapacityTotal: 17,
+			FlowShardLockAcquisitionsTotal: 5,
+			FlowShardLockContendedTotal:    1,
+			LiveWriteLockAcquisitionsTotal: 6,
+			LiveWriteLockContendedTotal:    3,
 			LiveLockAcquisitionsTotal:    11,
 			LiveLockContendedTotal:       4,
 			PersistentAdmittedTotal:      13,
@@ -996,8 +1024,8 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	if len(got) != 14 {
-		t.Fatalf("emitUserspaceSourceNATPoolMetrics: want 14 metrics, got %d", len(got))
+	if len(got) != 18 {
+		t.Fatalf("emitUserspaceSourceNATPoolMetrics: want 18 metrics, got %d", len(got))
 	}
 	labels := map[string]string{"pool": "pool-a", "rule": "snat-a"}
 	assertGaugeClose(t, got, c.userspaceSNATPoolLiveFlows, labels, 2)
@@ -1008,6 +1036,10 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceSNATPoolReusesTotal, labels, 5)
 	assertCounterClose(t, got, c.userspaceSNATPoolExhaustionsTotal, labels, 7)
 	assertCounterClose(t, got, c.userspaceSNATPoolIdleLeaseImportCapacityTotal, labels, 17)
+	assertCounterClose(t, got, c.userspaceSNATPoolFlowShardLockAcquisitionsTotal, labels, 5)
+	assertCounterClose(t, got, c.userspaceSNATPoolFlowShardLockContendedTotal, labels, 1)
+	assertCounterClose(t, got, c.userspaceSNATPoolLiveWriteLockAcquisitionsTotal, labels, 6)
+	assertCounterClose(t, got, c.userspaceSNATPoolLiveWriteLockContendedTotal, labels, 3)
 	assertCounterClose(t, got, c.userspaceSNATPoolLiveLockAcquisitionsTotal, labels, 11)
 	assertCounterClose(t, got, c.userspaceSNATPoolLiveLockContendedTotal, labels, 4)
 	assertCounterClose(t, got, c.userspaceSNATPoolPersistentAdmittedTotal, labels, 13)
@@ -1058,9 +1090,10 @@ func TestEmitUserspaceSourceNATPoolMetricsDeduplicatesDuplicateLabels(t *testing
 		seen[key] = struct{}{}
 		count++
 	}
-	// 14 metrics are emitted once for this shared pool.
-	if count != 14 {
-		t.Fatalf("want 14 deduped metrics, got %d", count)
+	// 18 metrics are emitted once for this shared pool (14 legacy
+	// + the 4 split lock-domain series, #17036).
+	if count != 18 {
+		t.Fatalf("want 18 deduped metrics, got %d", count)
 	}
 }
 
@@ -1081,8 +1114,8 @@ func TestEmitUserspaceSourceNATPoolMetricsDeduplicatesSharedPool(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	if len(got) != 14 {
-		t.Fatalf("want one set of 14 pool metrics, got %d", len(got))
+	if len(got) != 18 {
+		t.Fatalf("want one set of 18 pool metrics, got %d", len(got))
 	}
 	assertGaugeClose(t, got, c.userspaceSNATPoolUsedPorts,
 		map[string]string{"pool": "pool-shared", "rule": "rule-trust"}, 42)

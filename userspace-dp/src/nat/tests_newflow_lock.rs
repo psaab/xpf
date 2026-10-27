@@ -1,13 +1,16 @@
-// #4800: tests for the SNAT pool allocator's `live` map-mutex contention
-// accounting — the NAT-allocator leg of the new-flow-install ceiling
-// instrumentation.
+// #4800/#17036: tests for the SNAT pool allocator's counted lock
+// contention accounting — the NAT-allocator leg of the new-flow-install
+// ceiling instrumentation. Since #15956 the allocator has two counted
+// lock domains: the 16 flow-shard mutexes (`flow_shard_lock_*`) and the
+// retained `live` RwLock write guard (`live_write_lock_*`); the legacy
+// `live_lock_*` totals are their documented sum, kept for one release.
 //
 // The measurement these back exists to settle a specific question: at a
-// sustained new-flow rate, is the residual Phase-1 (#2852) map mutex a
-// material contributor, or do `publish_shared_session` and the N-way
+// sustained new-flow rate, is either allocator lock domain a material
+// contributor, or do `publish_shared_session` and the N-way
 // `replicate_session_upsert` fan-out saturate first? That question has an
-// answer only if the allocator reports BOTH how often it took the mutex and
-// how often it had to block, so every test here treats the two as a pair.
+// answer only if each domain reports BOTH how often it was taken and
+// how often it had to block, so every test here treats each pair as a pair.
 //
 // `PortAllocator` instances are per-test, so these assertions are exact:
 // unlike the process-global publish/replication counters, no concurrently
@@ -94,6 +97,85 @@ fn allocate_counts_live_lock_acquisitions() {
     assert_eq!(
         after_two.live_lock_contended_total, 0,
         "single-threaded allocation cannot contend"
+    );
+}
+
+/// #17036 acceptance: a non-persistent fast-path allocation with an
+/// empty expiry index bumps ONLY the split counters attributable to
+/// that allocation's counted locks (one flow-shard + one live-write),
+/// and the legacy totals remain their sum. RED on revert to the
+/// single summed pair: the split fields stay 0 (or the shard field
+/// absorbs the live-write count) and these equalities fail.
+#[test]
+fn fast_path_allocation_counts_split_lock_domains_17036() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = PortAllocator::new(1, 1024, 2048);
+    let base = alloc.snapshot();
+    assert_eq!(base.flow_shard_lock_acquisitions_total, 0);
+    assert_eq!(base.live_write_lock_acquisitions_total, 0);
+    allocate(&alloc, &addrs, 40000, 1_000);
+    let after = alloc.snapshot();
+    assert_eq!(
+        after.flow_shard_lock_acquisitions_total - base.flow_shard_lock_acquisitions_total,
+        1,
+        "one fast-path allocation must count exactly one flow-shard acquisition"
+    );
+    assert_eq!(
+        after.live_write_lock_acquisitions_total - base.live_write_lock_acquisitions_total,
+        1,
+        "one fast-path allocation with an empty expiry index must count exactly one live-write (try_write) acquisition and no GC live-write"
+    );
+    assert_eq!(
+        after.live_lock_acquisitions_total,
+        after.flow_shard_lock_acquisitions_total + after.live_write_lock_acquisitions_total,
+        "legacy acquisitions must remain the documented sum of the split domains"
+    );
+    assert_eq!(
+        after.live_lock_contended_total,
+        after.flow_shard_lock_contended_total + after.live_write_lock_contended_total,
+        "legacy contended must remain the documented sum of the split domains"
+    );
+    assert_eq!(after.flow_shard_lock_contended_total, 0);
+    assert_eq!(after.live_write_lock_contended_total, 0);
+}
+
+/// #17036 acceptance: a persistent mint goes through the serialized
+/// locked path, so it bumps the live-write counter (the lease mint is
+/// a live-write critical section) and its legacy sum tracks it. RED
+/// on revert to the single pair: the live-write field stays 0.
+#[test]
+fn persistent_mint_counts_live_write_lock_17036() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = PortAllocator::new(1, 1024, 2048);
+    let base = alloc.snapshot();
+    alloc
+        .allocate_translation(
+            pool_flow(40000),
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::TargetHostPort,
+            0,
+            60_000_000_000,
+            1_000,
+            crate::nat::NatHolder::Untracked,
+            0,
+        )
+        .expect("persistent allocation must succeed");
+    let after = alloc.snapshot();
+    assert!(
+        after.live_write_lock_acquisitions_total > base.live_write_lock_acquisitions_total,
+        "a persistent mint must bump the live-write counter: {} -> {}",
+        base.live_write_lock_acquisitions_total,
+        after.live_write_lock_acquisitions_total
+    );
+    assert_eq!(
+        after.live_lock_acquisitions_total,
+        after.flow_shard_lock_acquisitions_total + after.live_write_lock_acquisitions_total,
+        "legacy acquisitions must remain the documented sum after a persistent mint"
     );
 }
 

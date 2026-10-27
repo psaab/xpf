@@ -229,7 +229,7 @@ func flowFailedKey(family string, ec *flowexport.ExportConfig) string {
 // exporterBundle is the immutable per-family set of NetFlow v9 template-
 // group exporters the session-close callback reads via d.flowBundle. An
 // empty groups slice means "no v9 exporter configured". The groups share
-// one ExportConfig.sampleCounter, so the callback evaluates ShouldExport
+// one ExportConfig.sampleCounter, so the callback evaluates SampledForOpen
 // (the shared 1-in-N counter + sampling zones) EXACTLY ONCE and fans the
 // record out to every group (#2461).
 type exporterBundle struct {
@@ -926,7 +926,7 @@ func (d *Daemon) IPFIXExportError() error {
 // set of template-group exporters from the atomic bundle while holding
 // flowStateMu, which also serializes state carry and publication.
 //
-// #2461: the template groups of ONE instance share one ShouldExport state
+// #2461: the template groups of ONE instance share one SampledForOpen state
 // (the 1-in-N counter + sampling zones), so the sampling decision is made
 // EXACTLY ONCE per instance and fanned to that instance's groups — each
 // group encodes with the template its collectors referenced. Deciding per

@@ -26,12 +26,21 @@ import (
 // configured 10.0.1.1) and has one selector "red", so its only child is blue-red.
 // blue-red is anchored on reth2 (RG2, configured 10.0.2.1) and has no selector, so its
 // child is blue-red too.
+//
+// #18053: since #15024 a VPN referencing a named gateway loads under the
+// GATEWAY name (gw-rg1 / gw-rg2), not the VPN name — ExpectedLoadedConns
+// keys by gatewayKeyFor. The hand-written listings below therefore name
+// the gateway connections; their child blue-red, endpoints and selectors
+// are unchanged. (They previously named the VPNs, so the marker
+// validation could never match and every #9641 cell fell back to the
+// promoted config — masked while the #16746 gate failed the fixtures
+// earlier.)
 const (
-	listBlue9641 = "list-conn event {blue {local_addrs=[10.0.1.1] remote_addrs=[198.51.100.1] " +
+	listBlue9641 = "list-conn event {gw-rg1 {local_addrs=[10.0.1.1] remote_addrs=[198.51.100.1] " +
 		"version=IKEv1/2 local-1 {class=pre-shared key groups=[] certs=[]} " +
 		"remote-1 {class=pre-shared key groups=[] certs=[]} " +
 		"children {blue-red {mode=TUNNEL local-ts=[10.0.1.0/24] remote-ts=[10.9.1.0/24]}}}}\n"
-	listBlueRed9641 = "list-conn event {blue-red {local_addrs=[10.0.2.1] remote_addrs=[198.51.100.2] " +
+	listBlueRed9641 = "list-conn event {gw-rg2 {local_addrs=[10.0.2.1] remote_addrs=[198.51.100.2] " +
 		"version=IKEv1/2 local-1 {class=pre-shared key groups=[] certs=[]} " +
 		"remote-1 {class=pre-shared key groups=[] certs=[]} " +
 		"children {blue-red {mode=TUNNEL local-ts=[dynamic] remote-ts=[dynamic]}}}}\n"
@@ -287,9 +296,11 @@ func TestCharonsGenerationIsResolvedOncePerWave9641(t *testing.T) {
 // with identical content, uses the rendered IPsec digest, which must not be
 // attributed to a retained config-store generation.
 func TestApplyIPsecTrackedStampsOnlyTheActiveGeneration9641(t *testing.T) {
-	nonPrivateElection := append([]string{"set chassis cluster no-private-rg-election"}, blueOnRG1_9511...)
-	store := storeWith9511(t, nonPrivateElection...)
-	other := storeWith9511(t, nonPrivateElection...)
+	// #18053: clusterTwoRethIPsec9511 now carries a complete control
+	// link, so this cell's extra keying is unnecessary; blueOnRG1_9511
+	// alone keeps its two stores identical.
+	store := storeWith9511(t, blueOnRG1_9511...)
+	other := storeWith9511(t, blueOnRG1_9511...)
 	for _, tc := range []struct {
 		name   string
 		cfg    *config.Config

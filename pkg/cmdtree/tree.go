@@ -592,7 +592,7 @@ var OperationalTree = map[string]*Node{
 				return append([]string{"inet.0", "inet6.0"}, routingInstanceTableNames(cfg)...)
 			}},
 			"protocol": {Desc: "Show routes learned from named protocol", RequiresValue: true, DynamicFn: func(_ *config.Config) []string {
-				return []string{"static", "direct", "local", "ospf", "bgp", "rip", "isis", "kernel", "connected"}
+				return config.RouteProtocolNames()
 			}},
 			"instance": {Desc: "Show routes for a routing instance", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 				return routingInstanceNames(cfg) // #4866: nil-skip tolerated entries

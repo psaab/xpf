@@ -84,7 +84,7 @@ var (
 	// name one generation.
 	ErrAmbiguousGenerationMarker = errors.New("charon lists more than one xpf generation marker")
 	// ErrGenerationUnvalidatable means a rendered connection's local address was resolved
-	// at apply time from the kernel or through DNS, which cannot be replayed for a stored
+	// at apply time from the kernel, which cannot be replayed for a stored
 	// generation.
 	ErrGenerationUnvalidatable = errors.New("the generation's local addresses depend on apply-time resolution")
 )
@@ -127,7 +127,7 @@ func (m *Manager) LoadedGeneration() (string, error) {
 //
 // It works from the configuration alone (prepareConfigFromConfig), because a stored
 // generation's apply-time resolution cannot be replayed. When a rendered connection's
-// local address came from the kernel or from a DNS-derived family hint, the result is
+// local address came from the kernel, the result is
 // ErrGenerationUnvalidatable. The config-only projection mirrors render skips except that
 // an unresolved external-interface address remains a candidate: production may resolve it
 // from the live kernel, and if configuration alone cannot determine that address the

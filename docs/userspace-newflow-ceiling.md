@@ -19,7 +19,7 @@ Four cross-worker synchronization points sit on that path:
 
 | Site | What serializes | Scope |
 |---|---|---|
-| SNAT pool allocator `live` mutex | flow-map insert + persistent-lease lifecycle (the residual after the #2852 Phase-1 lock-free port claim) | per pool |
+| SNAT pool allocator flow shards + `live` RwLock (#15956) | the flow map lives in 16 per-flow `Mutex` shards; persistent-lease / ownership / GC state stays under the retained `RwLock<PortAllocatorLiveState>` write guard. The non-persistent fast path takes the `live` write guard by try-write plus its flow's shard (live→shard order); read-only consumers take the read guard | per pool |
 | `publish_shared_session` | up to three shared-map mutexes **per publish call** (`sessions`, `nat_sessions`, `forward_wire_sessions`) | process |
 | `replicate_session_upsert` | one sibling command-queue mutex **per worker, per replication call** | process |
 | `event_stream` `producer_seq_lock` (#9169) | wire-seq allocation **and the frame ENCODE** for every session delta, Open as well as Close — #3878 F-152 requires the allocation and the channel enqueue to be atomic together, so the encode is inside the critical section | process |
@@ -62,42 +62,48 @@ quoting a per-connection cost should measure it against
 `xpf_userspace_session_replication_upserts_total` over a known number of
 connections, and say that it is measured.
 
-#2852 Phase-2 (SNAT-allocator sharding) targets only the first. The
-conclusion #4800 reached before any code was written is that this is
-**architecturally insufficient on its own**: publish and the N-way
-replication fan-out serialize every new flow regardless of what the allocator
-does. So a measurement that only reports "new flows/sec plateaued at N"
-settles nothing — it has to say *which* site saturated, and be capable of
-saying *more than one did*.
+#2852 Phase-2 (SNAT-allocator sharding, #15956) has landed and targets
+only the first row's flow map. The conclusion #4800 reached before any
+code was written still stands: this is **architecturally insufficient
+on its own**: publish and the N-way replication fan-out serialize every
+new flow regardless of what the allocator does. So a measurement that
+only reports "new flows/sec plateaued at N" settles nothing — it has to
+say *which* site saturated, and be capable of saying *more than one
+did*. Since #17036 the allocator leg reports two sites
+(`nat_allocator_flow_shard` and `nat_allocator_live_write`), each with
+its own denominator; the pre-#15956 single-mutex baseline (~59%
+contended @M=8) is not comparable to either split ratio or to their sum.
 
 ## What was added
 
 ### Instrumentation (`userspace-dp`)
 
-Cheap monotonic counters, no timing on the hot path. Every lock site
-try-locks first: on an uncontended mutex that is the same single CAS `lock()`
-already cost, so the **lock itself** is unchanged, and only a failed CAS pays
-the extra contended increment on top of a block that was going to happen
-anyway.
+Cheap monotonic counters, no timing on the hot path. Every counted lock
+site try-locks first: on an uncontended lock that is the same single CAS
+`lock()` already cost, so the **lock itself** is unchanged, and only a
+failed CAS pays the extra contended increment on top of a block that was
+going to happen anyway.
 
 The acquisition counters, however, are bumped **unconditionally**, so the
-uncontended path is not free. Measured in atomic read-modify-writes: an
-uncontended `lock_live()` goes from 1 to 2, and one forward
-`publish_shared_session` goes from 3 (three `lock()` CASes) to 7 — the call
-counter plus one relaxed increment and one CAS per shared map. All relaxed, no
-timing, no allocation, and confined to the cold new-flow-install path, but
-"the fast path is unchanged" would be an overstatement and is not the claim.
+uncontended path is not free. All relaxed, no timing, no allocation, and
+confined to the cold new-flow-install path, but "the fast path is
+unchanged" would be an overstatement and is not the claim.
 
 Per pool, on `SourceNatPoolStatus` (Prometheus labels `pool`, `rule`):
 
 | Series | Meaning |
 |---|---|
-| `xpf_userspace_source_nat_pool_live_lock_acquisitions_total` | acquisitions on the production allocate/reserve/release/rollback/GC paths — the **denominator** |
-| `xpf_userspace_source_nat_pool_live_lock_contended_total` | the subset that found the mutex held and blocked |
+| `xpf_userspace_source_nat_pool_flow_shard_lock_acquisitions_total` | counted flow-shard mutex acquisitions — the **denominator** for the shard domain |
+| `xpf_userspace_source_nat_pool_flow_shard_lock_contended_total` | the subset that found the shard held and blocked |
+| `xpf_userspace_source_nat_pool_live_write_lock_acquisitions_total` | counted `live` RwLock write acquisitions (incl. the fast-path try_write) — the **denominator** for the live-write domain |
+| `xpf_userspace_source_nat_pool_live_write_lock_contended_total` | the subset that found the write guard unavailable and blocked (or contended on try_write and fell back) |
+| `xpf_userspace_source_nat_pool_live_lock_acquisitions_total` | legacy sum of the two acquisition counters above — kept for one release (#17036); **not** a perf-gate denominator |
+| `xpf_userspace_source_nat_pool_live_lock_contended_total` | legacy sum of the two contended counters above — kept for one release; **not** a perf-gate numerator |
 
-The ~1s status-poll snapshot takes the same mutex and is **deliberately not
-counted**: it reads these very counters, and counting it would dilute every
-ratio with the observer.
+Read guards and uncounted shard sites (`get_mut_shard`) are not counted,
+so neither split pair totals every lock acquisition. The ~1s status-poll
+snapshot is **deliberately not counted**: it reads these very counters,
+and counting it would dilute every ratio with the observer.
 
 Process-global, on `ProcessStatus`:
 
@@ -303,7 +309,7 @@ harness's own header warns about.
 
 | Site | This harness |
 |---|---|
-| NAT allocator `live` mutex | **attributed** (the pool path is the driven path) |
+| NAT allocator flow shards + `live` RwLock | **attributed as two sites** (`nat_allocator_flow_shard`, `nat_allocator_live_write`; the pool path is the driven path; the legacy summed pair never votes) |
 | `replicate_session_upsert` fan-out | **attributed** (`session_replication_upserts_total`) |
 | `publish_shared_session` | **attributed** (`shared_session_publishes_total`) |
 | `publish_live_session_entry` (up to 6 serial `bpf()` per install) | not attributed — no per-syscall counter |
@@ -312,9 +318,9 @@ harness's own header warns about.
 | source-NAT `matches` O(R) scan | not attributed — one rule-set of 2 rules here; R is not varied |
 | bulk HA import | not attributed — no peer bulk transfer during the sweep |
 
-So even an unblocked run answers **which of three synchronization sites
-saturates first**, which is what #2852 Phase-2 is gated on. It is not a
-per-connection cost for the other five, and nothing should cite it as one.
+So even an unblocked run answers **which synchronization site saturates
+first** (with the allocator leg split into its two #15956 domains). It is
+not a per-connection cost for the other sites, and nothing should cite it as one.
 
 The loss cluster is shared and lock-protected. The harness sources the
 `cluster-cell.sh` preamble, so it queues behind another agent's deploy or
@@ -413,11 +419,12 @@ no `VALID` cells has no ceiling and must be reported as such.
 
 ### What the result decides
 
-* If `nat_allocator_live_mutex` appears in `culprits` **and** publish and
-  replicate do not, #2852 Phase-2 allocator sharding is worth reopening.
-* If publish and/or replicate saturate at or below the NAT ratio — the
-  outcome #4800 predicts — allocator sharding alone cannot move the ceiling,
-  and the Phase-2 design must be re-scoped to shard *all* per-new-flow
+* If `nat_allocator_flow_shard` or `nat_allocator_live_write` appears in
+  `culprits` **and** publish and replicate do not, the remaining allocator
+  lock domain is the bound — read the split site name to know which one.
+* If publish and/or replicate saturate at or below the NAT ratios — the
+  outcome #4800 predicts — allocator work alone cannot move the ceiling,
+  and any follow-up must be re-scoped to shard *all* per-new-flow
   cross-worker state, or dropped.
 * If nothing saturates at the highest sustainable offered rate, the install
   path is not lock-bound at rates this cluster can generate, and the honest

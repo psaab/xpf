@@ -6,23 +6,23 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// TestShouldExportCounters_13307 pins #13307 (D6-07): ShouldExport's
+// TestSampledForOpenCounters_13307 pins #13307 (D6-07): SampledForOpen's
 // zone-filter and 1-in-N sampling decisions were entirely silent — no
 // counter distinguished "nothing to export" from "100% zone-filtered"
 // (e.g. the #11433 fail-closed empty SamplingZones map) or "sampled out".
 // FAIL-ON-REVERT: without the SamplingStats counters this test fails.
-func TestShouldExportCounters_13307(t *testing.T) {
+func TestSampledForOpenCounters_13307(t *testing.T) {
 	ec := &ExportConfig{
 		SamplingZones: FamilySamplingDirs{V4: map[uint16]SamplingDir{2: {Input: true}}},
 		SamplingRate:  2,
 	}
-	if ec.ShouldExport(1, 1, false) {
+	if ec.SampledForOpen(1, 1, false, "", "") {
 		t.Fatal("zone-filtered session exported")
 	}
-	if ec.ShouldExport(2, 9, false) {
+	if ec.SampledForOpen(2, 9, false, "", "") {
 		t.Fatal("first eligible session must be sampled out at rate 2")
 	}
-	if !ec.ShouldExport(2, 9, false) {
+	if !ec.SampledForOpen(2, 9, false, "", "") {
 		t.Fatal("second eligible session must be sampled in at rate 2")
 	}
 	evaluated, selected, zoneFiltered := ec.SamplingStats()
@@ -36,7 +36,7 @@ func TestShouldExportCounters_13307(t *testing.T) {
 	}
 	open := &ExportConfig{}
 	for range 3 {
-		if !open.ShouldExport(1, 2, false) {
+		if !open.SampledForOpen(1, 2, false, "", "") {
 			t.Fatal("unrestricted config must export")
 		}
 	}
@@ -44,7 +44,7 @@ func TestShouldExportCounters_13307(t *testing.T) {
 		t.Fatalf("open SamplingStats = (%d %d %d), want (3 3 0)", ev, sel, zf)
 	}
 	closed := &ExportConfig{SamplingZones: FamilySamplingDirs{V4: map[uint16]SamplingDir{}, V6: map[uint16]SamplingDir{}}}
-	if closed.ShouldExport(1, 1, false) {
+	if closed.SampledForOpen(1, 1, false, "", "") {
 		t.Fatal("empty non-nil SamplingZones must fail closed")
 	}
 	if _, _, zf := closed.SamplingStats(); zf != 1 {

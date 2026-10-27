@@ -5,28 +5,29 @@ import (
 	"net"
 	"sort"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
-// protoTag returns a single-letter Junos-style route protocol marker.
-func protoTag(proto string) string {
-	switch proto {
-	case "static":
-		return "S"
-	case "connected":
-		return "C"
-	case "bgp":
-		return "B"
-	case "ospf":
-		return "O"
-	case "isis":
-		return "I"
-	case "rip":
-		return "R"
-	case "dhcp":
-		return "D"
-	default:
-		return "?"
+// routeProtocolByInternal indexes the config.RouteProtocols SSOT by
+// internal name (#17029). All protocol projections in this package read
+// this one table instead of restating switch arms.
+var routeProtocolByInternal = func() map[string]config.RouteProtocol {
+	m := make(map[string]config.RouteProtocol)
+	for _, p := range config.RouteProtocols() {
+		m[p.Internal] = p
 	}
+	return m
+}()
+
+// protoTag returns a single-letter Junos-style route protocol marker.
+// A protocol whose SSOT row has no assigned tag (redirect, #17029)
+// renders "?", as do unknown names.
+func protoTag(proto string) string {
+	if p, ok := routeProtocolByInternal[proto]; ok && p.Tag != "" {
+		return p.Tag
+	}
+	return "?"
 }
 
 // FormatRouteTerse formats routes in Junos "show route terse" style.
@@ -355,21 +356,26 @@ func FilterRouteEntriesByProtocol(entries []RouteEntry, normalized string) []Rou
 
 // NormalizeRouteProtocol maps an operator `show route protocol <p>` token to
 // the internal protocol name rtProtoName emits, or "" for an unknown token
-// (#15236 A52-02). The completion offers Junos/display spellings (direct,
-// local, kernel, Access-internal) that never equal the internal names
-// (connected, dhcp, ...), so the filter must translate before comparing and
-// reject unknown protocols instead of printing a false "(no routes)".
+// (#15236 A52-02). The SSOT row's Internal name and its accept-only Aliases
+// (Junos/display spellings such as direct, kernel, access-internal, is-is,
+// plus the access_internal / "access internal" tolerances) all normalize to
+// Internal, so the filter translates before comparing and rejects unknown
+// protocols instead of printing a false "(no routes)". Completion offers
+// only the Internal tokens (config.RouteProtocolNames); aliases are
+// accept-only and never offered (#17029).
 func NormalizeRouteProtocol(token string) string {
-	switch strings.ToLower(strings.TrimSpace(token)) {
-	case "connected", "direct", "local", "kernel":
-		return "connected"
-	case "dhcp", "access-internal", "access_internal", "access internal":
-		return "dhcp"
-	case "static", "bgp", "ospf", "isis", "is-is", "rip", "redirect":
-		return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(token)), "is-is", "isis")
-	default:
-		return ""
+	tok := strings.ToLower(strings.TrimSpace(token))
+	for _, p := range config.RouteProtocols() {
+		if tok == p.Internal {
+			return p.Internal
+		}
+		for _, a := range p.Aliases {
+			if tok == a {
+				return p.Internal
+			}
+		}
 	}
+	return ""
 }
 
 // RouteProtocolMatches reports whether an entry's internal protocol name
@@ -378,26 +384,11 @@ func RouteProtocolMatches(entryProtocol, normalized string) bool {
 	return normalized != "" && strings.EqualFold(entryProtocol, normalized)
 }
 
-// junosProtoName maps protocol names to Junos-style names.
+// junosProtoName maps protocol names to Junos-style names. Unknown names
+// pass through unchanged.
 func junosProtoName(proto string) string {
-	switch proto {
-	case "static":
-		return "Static"
-	case "connected":
-		return "Direct"
-	case "bgp":
-		return "BGP"
-	case "ospf":
-		return "OSPF"
-	case "isis":
-		return "IS-IS"
-	case "rip":
-		return "RIP"
-	case "dhcp":
-		return "Access-internal"
-	case "redirect":
-		return "Redirect"
-	default:
-		return proto
+	if p, ok := routeProtocolByInternal[proto]; ok {
+		return p.Junos
 	}
+	return proto
 }
