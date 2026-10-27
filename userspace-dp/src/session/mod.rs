@@ -3872,7 +3872,7 @@ impl SessionTable {
     #[inline]
     pub(crate) fn lookup_aux_info(&self, key: &SessionKey) -> SessionLookupAux {
         let Some(entry) = self.entry_by_key(key) else {
-            return SessionLookupAux::default();
+            return SessionLookupAux::unknown();
         };
         SessionLookupAux {
             session_id: entry.session_id,
