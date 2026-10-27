@@ -7501,3 +7501,11 @@ mod strict_syn_16479_tests;
 #[cfg(test)]
 #[path = "synced_entry_17058_tests.rs"]
 mod synced_entry_17058_tests;
+
+// #17088: the translated-alias twin matrix — key equality across
+// {TCP, UDP, ICMP, ICMPv6} x {none, SNAT-PAT, DNAT, NAT64} against
+// independently written post-translation reply tuples, plus the
+// single-source structural pin for the shared key transform.
+#[cfg(test)]
+#[path = "translated_twin_matrix_17088_tests.rs"]
+mod translated_twin_matrix_17088_tests;
