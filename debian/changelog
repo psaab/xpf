@@ -1,5 +1,52 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * IPsec: restore the prior file only when its marker (if present) and complete
+    loaded connection projection (names, children, local/remote addresses) prove
+    the prior render. A live mismatch keeps the candidate but does not promote
+    its fingerprints; stale SAs are torn down without re-initiation under the
+    unproven config. Deferred eager-initiation debt is preserved until a later
+    successful candidate load, which can re-initiate the changed tunnel even
+    if its stale SA is no longer live. Unreachable or candidate-proven reloads
+    keep and promote the candidate. Empty or malformed listings are not proof.
+    Plain Apply uses a rendered-config fingerprint (#17882).
+  * Upgrade: when a rolling rollback completes after a deferred signal,
+    still wait for session sync and confirm rejoin before surfacing the
+    signal status. Do not classify the committed rollback as destructive
+    and leave the node ForceSecondary-drained (#17957).
+  * DHCP: retain restart-before-seed ordering beyond the old 20-second
+    fail-open deadline and re-age peer lease lifetimes before seeding
+    (#17884).
+  * Config: preserve distinct same-named IPsec traffic-selector fragments;
+    normalize identical direct/chained selector bodies including block-valued
+    local-ip and remote-ip leaves (#17802).
+  * Userspace helper startup: retain and execute the validated helper inode
+    through an inherited file descriptor, closing the pathname re-resolution
+    window between validation and process start (#17881).
+  * daemon: retain failed former-RETH permanent-MAC restorations for retry,
+    surface restore failures as apply errors, preserve actual former-member
+    identity across teardown renames and retire stale markers even when link-up
+    fails, and retain confirmed/legacy MAC owners without absent-member debt (#17890).
+  * Policy simulation: exempt from-zone junos-host queries from the
+    v4-mapped/compatible IPv6 ingress-drop verdict. Locally-generated
+    traffic egresses via the kernel TX path and never traverses the RX
+    gate, so reporting an ingress drop fabricated a forwarding stage
+    (#17865).
+  * Config authorization: surface captured rollback slot errors before scoped
+    subtree authorization on gRPC/REST reads. REST compare command pre-checks
+    ignore ?path= as the handler does; command restrictions and invalid-
+    argument statuses remain enforced (#17967).
+  * FRR: remove the unused rewriteFRRPipeSequences belt. Community
+    regexes, Junos AS-path regexes, and BGP neighbor descriptions
+    handle vty pipe-space through their production translator or gate;
+    the former shared-helper claim overstated its coverage (#17799).
+  * NAT: allocate synthetic logical RETH VLAN ifindexes from the same
+    sorted shared collision set in the session-scope folder as in the
+    interface snapshot builder, preserving imported NAT scope identity
+    when synthetic hash slots collide (#17876).
+ -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Config authorization: atomically sample the candidate, generation,
     and active tree at the gRPC/REST commit gate (#17676), so the
     authorization verdict can only be bound to the candidate it priced.

@@ -23,6 +23,17 @@ registration and repeat-safe handoff to research. Active reports use
 `/var/tmp/deep-review-reports/`, work/state use `/var/tmp/deep-review-work/`,
 and completed source/result pairs use `/var/tmp/deep-review-finished/`.
 
+## Host isolation (2026-10-26)
+
+Review is read-only and never needs host mutation: do NOT run
+kernel/root test cells, live daemons, or deploy harnesses on
+the workstation to "verify" a finding. Classify needed
+validation as U (hermetic, run it), N (netns, `unshare -rn`
+forcing leg), R/F (privileged/live-daemon, Incus VM leg), or
+V (cluster harness, Incus) and record unrun classes as
+NOT-EXAMINED with the VM target. New kernel-reachable tests
+found in review must declare their class; flag undeclared ones.
+
 ## Scope and modes
 
 - `/deep-review`: inventory the full live product and prioritize review depth

@@ -358,9 +358,13 @@ func (s *SessionSync) fabricIndexOf(conn net.Conn) (int, bool) {
 //
 // A keyed node also anchors the bounded pre-key eviction grace on each
 // never-authenticated connection, and the #16857 retired-key grace on each
-// connection whose authPSK has left the accepted set. This call enforces an
-// already-expired grace immediately; the periodic enforcement loop handles a
-// grace that expires between config applies.
+// connection whose authPSK has left the accepted set. The accepted set is
+// read under the same writeMu section as the anchor/clear decisions, once
+// per call for the whole connection batch (#18028), so a concurrent ring
+// change cannot fall between the snapshot and a decision and wedge an
+// anchor against a stale set. This call enforces an already-expired grace
+// immediately; the periodic enforcement loop handles a grace that expires
+// between config applies.
 func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 	key := s.authKey()
 	if len(key) == 0 {
@@ -371,37 +375,58 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 		// the next connection.
 		return
 	}
-	accepted := s.authAcceptedKeys()
 	s.mu.Lock()
 	conns := []net.Conn{s.conn0, s.conn1}
 	s.mu.Unlock()
-	for idx, c := range conns {
+
+	// Grace pass: ONE writeMu section for the whole connection batch, with
+	// the accepted set snapshotted INSIDE it (#18028), the same rule
+	// enforceStrictSessionAuth adopted for #18016. A snapshot taken before
+	// the lock can go stale while this pass waits for the section: a
+	// concurrent finalize reconcile under the NEW set anchors a fresh
+	// retired-key grace, and this pass — still evaluating under the OLD
+	// set, where the connection's PSK looks accepted — would clear that
+	// anchor, leaving it zero so no later pass ever evicts. Under the lock
+	// no ring change can fall between the snapshot and the anchor
+	// decision, and one section evaluates the whole batch against a single
+	// consistent set. Calling authAcceptedKeys here is safe for the same
+	// reason it is safe in enforceStrictSessionAuth: it only reads the
+	// atomic provider and, for *Manager, takes m.mu.RLock.
+	//
+	// Anchor the default #10717 eviction grace BEFORE attempting the
+	// upgrade, and for BOTH roles — the initiator emits a Hello in the pass
+	// below, the responder a Request, and a peer that cannot upgrade
+	// answers neither. Anchoring at key arrival bounds the connection
+	// after keying, while set-once prevents later commits from extending
+	// its lifetime. #16857: the same discipline for a retired-key
+	// connection — anchor at the first reconcile where its key is outside
+	// the accepted set, before beginAuthUpgrade prompts for the rekey it
+	// may decline. A connection back inside the accepted set has any stale
+	// anchor cleared so a later retirement starts a fresh grace.
+	s.writeMu.Lock()
+	accepted := s.authAcceptedKeys()
+	for _, c := range conns {
 		if c == nil {
 			continue
 		}
-		// Anchor the default #10717 eviction grace BEFORE attempting the
-		// upgrade, and for BOTH roles — the initiator emits a Hello here, the
-		// responder a Request, and a peer that cannot upgrade answers neither.
-		// Anchoring at key arrival bounds the connection after keying, while
-		// set-once prevents later commits from extending its lifetime.
-		// #16857: the same discipline for a retired-key connection — anchor
-		// at the first reconcile where its key is outside the accepted set,
-		// before beginAuthUpgrade prompts for the rekey it may decline.
-		// A connection back inside the accepted set has any retired anchor
-		// cleared so a later retirement starts a fresh grace.
-		if ac, ok := c.(*authConn); ok {
-			s.writeMu.Lock()
-			switch {
-			case len(ac.authPSK) == 0:
-				s.noteStrictAuthGraceStartLocked(ac)
-			case authPSKAccepted(ac.authPSK, accepted):
-				if ac.strictGraceRetired {
-					s.clearStrictAuthGraceLocked(ac)
-				}
-			default:
-				s.noteRetiredKeyGraceStartLocked(ac)
-			}
-			s.writeMu.Unlock()
+		ac, ok := c.(*authConn)
+		if !ok {
+			continue
+		}
+		switch {
+		case len(ac.authPSK) == 0:
+			s.noteStrictAuthGraceStartLocked(ac)
+		case authPSKAccepted(ac.authPSK, accepted):
+			s.clearStrictAuthGraceLocked(ac)
+		default:
+			s.noteRetiredKeyGraceStartLocked(ac)
+		}
+	}
+	s.writeMu.Unlock()
+
+	for idx, c := range conns {
+		if c == nil {
+			continue
 		}
 		err := s.beginAuthUpgrade(c, idx, key, reason)
 		if err != nil && !errors.Is(err, errUpgradeNotApplicable) {
@@ -726,8 +751,10 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) bool
 	// The verified Noise msg1 proves that the peer holds an accepted PSK,
 	// independently of whether the remainder of this connection upgrade
 	// succeeds.
-	// #16859: matched is the ring key msg1 verified under — the peer's
-	// signing key — so feed it to the rotation observation as well.
+	// #16859/#17891: matched is the ring key msg1 verified under — the
+	// initiator's signing key, because initiators seal msg1 with their own
+	// signing key alone (#14703). Unlike the upgrade initiator's msg2
+	// observation, this identifies the peer's signing choice.
 	s.recordAuthenticatedPeer(matched)
 
 	msg2, csI2R, csR2I, err := hs.WriteMessage(nil, nil)
@@ -816,11 +843,7 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) bool
 			"err", err, "remote", connRemoteAddrString(conn))
 		return false
 	}
-	// The verified Noise msg2 proves that the peer holds the shared PSK.
-	// #16859: this round authenticated under st.forPSK — the initiator's
-	// signing key for this round, which the responder proved it accepts —
-	// so that is the peer's signing key for rotation purposes.
-	s.recordAuthenticatedPeer(st.forPSK)
+	s.recordAuthenticatedPeer()
 
 	st.keys = syncNoiseSplitKeys(true, csI2R, csR2I)
 	st.haveKeys = true
@@ -860,7 +883,8 @@ func (s *SessionSync) handleAuthUpgradeProof(conn net.Conn, payload []byte) bool
 	// they differ, the connection really is authenticated under a retired key
 	// and the level-triggered reconciler must be able to see that and start a
 	// fresh round; stamping the live key here would make it look current.
-	ac.authPSK = append([]byte(nil), st.forPSK...)
+	accepted := s.authAcceptedKeys()
+	s.recordAuthUpgradeCompleteLocked(ac, st.forPSK, accepted)
 	slog.Info("cluster sync: in-place auth upgrade complete — this connection is now "+
 		"authenticated in both directions (#6628)", "remote", connRemoteAddrString(conn))
 
@@ -928,7 +952,8 @@ func (s *SessionSync) handleAuthUpgradeConfirm(conn net.Conn, payload []byte) bo
 	ac.readKey = st.keys.readKey
 	st.readDone = true
 	if st.writeDone {
-		ac.authPSK = append([]byte(nil), st.forPSK...)
+		accepted := s.authAcceptedKeys()
+		s.recordAuthUpgradeCompleteLocked(ac, st.forPSK, accepted)
 	}
 	slog.Info("cluster sync: in-place auth upgrade complete — this connection is now "+
 		"authenticated in both directions (#6628)", "remote", connRemoteAddrString(conn))

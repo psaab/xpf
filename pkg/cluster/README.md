@@ -2811,9 +2811,13 @@ the eviction and the #9717 listing keyed only on `len(authPSK)==0`, so a holder
 of the retired key kept verifying frames under retired-key-derived connection
 keys for as long as it declined the #6628 rekey, and nothing surfaced it. The
 grace anchors set-once (monotonic) at the reconcile where the key leaves the
-accepted set, the connection is listed during the grace, and it is evicted at
-expiry. A cooperating peer that rekeys within the grace, or whose key is
-re-accepted as the additional key, clears the anchor and is never evicted.
+accepted set; a later reconcile cannot re-arm it. If a round already in flight
+at retirement completes successfully under that now-retired key, its
+authenticated completion starts a fresh grace for the immediately-triggered
+current-key rekey.
+A cooperating peer that rekeys within the grace, or whose key is re-accepted as
+the additional key, clears the anchor and is never evicted. Failed, incomplete,
+malformed, and duplicate completions do not renew the deadline.
 While a rotation window is still open (the old key still in the accepted set),
 an old-key connection is not part of this population.
 
@@ -2976,15 +2980,18 @@ wrong one reopens the dual-master window:
 |---|---|
 | `peer is signing <signing-id> — safe to finalize` | the peer has moved; step 5 is safe |
 | `peer is still signing <other-id> — do NOT finalize` | the peer is still on the retired key |
-| `peer key UNKNOWN — no authenticated peer frame seen; unknown, not known safe to finalize` | usually the peer is down; **not** the same as "not safe" |
+| `peer key UNKNOWN — no verified peer signing key observed; unknown, not known safe to finalize` | no signing-key observation is available; the peer may be down or reachable with only a PSK-acceptance proof; **not** the same as "not safe" |
 
-The peer-key observation is fed by every authenticated control surface, not
-only the heartbeat (#16859): heartbeat admission, the session-sync connect
-handshake (the ring key the responder matched, or the initiator's signing
-key), and the #6628 in-place upgrade. In fabric-transport mode there is no
-heartbeat, so session sync is what answers the question — a peer that has
-completed an authenticated session-sync handshake with the current key
-renders `safe to finalize` there too.
+The peer-key observation is fed by heartbeat admission and the session-sync
+responder roles: the connect responder's matched ring key and the #6628
+in-place-upgrade responder's matched candidate identify the peer's signing
+key. A Noise_NNpsk0 initiator proves only that the peer accepts the
+initiator's signing key; because the responder never signs in that pattern,
+the initiator cannot infer which key the peer signs with and stays UNKNOWN
+until it receives a peer-signing observation (#17891). In fabric-transport
+mode there is no heartbeat, so session sync can answer the question when the
+local node is the responder; completing an authenticated handshake as the
+initiator alone does not make finalization safe.
 
 Every open window also renders its age (`open for 3d`), and a window open
 longer than **7 days** carries an `ALARM` on the same line naming the
@@ -3097,23 +3104,30 @@ path does not exist. Tracked as **#6630**.
 
 ### Key strength
 
-The commit gate rejects an absent or whitespace-only key (whitespace would
-satisfy the runtime's `len(key) > 0` test while being no key at all). Since
-#16025 it is also an entropy floor for the signing primary on strict commit:
-a non-empty `authentication-key` shorter than `MinAdvisedControlLinkKeyLen`
-(16 characters) is rejected, because its HMAC over known control frames is
-an offline dictionary oracle. There is one migration exception: an existing
-short primary is tolerated on strict commit only when that same short
-primary is the persisted/current signing key and a distinct
-`additional-authentication-key` of at least 16 characters is staged (a
-fresh candidate authoring the identical shape is rejected). Stage
-that replacement on both nodes first (rotation steps 1–2), then swap it into
-`authentication-key` and move the old primary to the additional slot (steps
-3–4), and finalize by deleting the additional key (step 5). A short or
-identical additional key does not open the exception. On the tolerant
-load/sync path a short primary still boots with a warning, preserving the
-no-brick upgrade path. `ClusterAuthKeyStrengthWarnings` continues to warn
-below 16 characters and for published placeholders on both paths.
+The strict commit gate rejects a newly authored absent or whitespace-only key
+(whitespace satisfies the runtime's `len(key) > 0` test but is deliberately
+treated as unset by strict validation). Since #16025 it is also an entropy
+floor for the signing primary: a non-empty `authentication-key` shorter than
+`MinAdvisedControlLinkKeyLen` (16 characters) is rejected, because its HMAC
+over known control frames is an offline dictionary oracle.
+
+There are two current-state-proven migration exceptions, each requiring a
+distinct `additional-authentication-key` of at least 16 characters. An
+existing short non-empty primary may remain while the replacement is staged
+only when the active config already signs with that same short primary. A
+previously persisted whitespace-only primary may also remain temporarily, but
+the candidate must preserve its exact raw bytes from the active config while
+staging the strong replacement. The same exact-current exception passes the
+earlier ordered `strict-session-auth` gate, so operators can retain that
+posture throughout the repair. Neither exception can be opened by a fresh
+candidate authoring the same shape. Stage the replacement on both nodes first
+(rotation steps 1–2), then swap it into `authentication-key` and move the old
+primary to the additional slot (steps 3–4), and finalize by deleting the
+additional key (step 5). A short or byte-identical additional key does not
+open either exception. On the tolerant load/sync path, a short primary still
+boots with a warning, preserving the no-brick upgrade path;
+`ClusterAuthKeyStrengthWarnings` continues to warn below 16 characters and
+for published placeholders on both paths.
 These checks cover the duplicate-identity beacon too: anyone who knows a weak
 or published PSK can sign a beacon that passes authentication and triggers its
 warn-only duplicate-node-id signal. Warnings never disclose the key.

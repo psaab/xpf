@@ -125,13 +125,20 @@ type vrrpInstance struct {
 	// resignPending instead of overwriting cfg.Priority, so the routine
 	// MASTER advert path (getPriority, driven by advertTimer) keeps
 	// advertising the pre-resign priority until becomeBackup completes.
-	// becomeBackup applies the stashed 0 under this lock. A dedicated
-	// mutex (not vi.mu/cfg) because the run loop's advert path reads it
-	// without wanting cfg, and ResignRG/becomeBackup must apply the
-	// transition atomically with respect to that reader.
+	// becomeBackup applies the stashed 0 in two phases: extraction under
+	// this lock, installation under mu with a resignEpoch re-check
+	// (#17859). A dedicated mutex (not vi.mu/cfg) because the run loop's
+	// advert path reads it without wanting cfg, and ResignRG/becomeBackup
+	// must apply the transition atomically with respect to that reader.
 	resignMu       sync.Mutex
 	resignPending  bool
 	resignPriority int
+	// resignEpoch counts discards of the pending-resignation stash,
+	// guarded by resignMu (#17859). extractPendingResign snapshots it;
+	// commitPendingResign re-checks it under mu and drops the extracted
+	// value when a discard landed in between, so a cluster-authoritative
+	// priority restore is never overwritten by a stale extraction.
+	resignEpoch uint64
 	// skipNextPreemptHold makes the next masterDownTimer expiry promote
 	// immediately, bypassing the preempt hold-time (#2850). Set when the
 	// master resigns (priority-0) so a graceful, planned failover is never
@@ -876,14 +883,16 @@ func (vi *vrrpInstance) updateConfigHeld(cfg Instance, heldRETH bool) {
 			newHoldSec:       vi.cfg.PreemptHoldTime,
 		}
 	}
-	vi.mu.Unlock()
-
-	// #16821: this priority assignment supersedes a pending
+	// #16821 + #17859: this priority assignment supersedes a pending
 	// resignation. The configured (in practice cluster-restored)
 	// priority was just installed in cfg.Priority above, so the
 	// stashed resigning 0 must not survive to be actuated by a
-	// later, unrelated becomeBackup.
-	vi.discardPendingResign()
+	// later, unrelated becomeBackup. Discard BEFORE releasing mu:
+	// commitPendingResign re-checks resignEpoch under mu, so a
+	// discard outside this critical section could complete after a
+	// commit that already installed the stale 0 (#17859).
+	vi.discardPendingResignLocked()
+	vi.mu.Unlock()
 
 	// Wake the run-loop select (MASTER and BACKUP both consume
 	// configUpdatedCh since #15689) so timers and an armed preempt hold

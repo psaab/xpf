@@ -862,9 +862,11 @@ func protectedForConfig(cfg *config.Config) map[string]bool {
 // errors.Join and surfaced so the caller (daemon_apply) fails the commit closed,
 // mirroring the #4956 startup aggregation and the #4901 retain-on-failed-delete
 // discipline.
-func teardownUnmappedManaged(dm *config.DeviceMapConfig, protected map[string]bool) error {
+// Successful live renames are returned as old-name -> new-name mappings so
+// daemon apply can preserve any outstanding former-RETH restoration identity.
+func teardownUnmappedManaged(dm *config.DeviceMapConfig, protected map[string]bool) (map[string]string, error) {
 	if !dm.Active() || dm.EffectiveUnmappedPolicy() != config.DeviceMapPolicyLeaveAlone {
-		return nil
+		return nil, nil
 	}
 	desiredNames := make(map[string]bool)
 	for _, e := range dm.Entries {
@@ -874,11 +876,12 @@ func teardownUnmappedManaged(dm *config.DeviceMapConfig, protected map[string]bo
 	entries, err := os.ReadDir(linkDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // no link dir → nothing was ever managed → no-op
+			return nil, nil // no link dir → nothing was ever managed → no-op
 		}
-		return fmt.Errorf("device-map teardown: read link dir: %w", err)
+		return nil, fmt.Errorf("device-map teardown: read link dir: %w", err)
 	}
 	reloaded := false
+	var renamedNames map[string]string
 	var teardownErrs []error
 	for _, fe := range entries {
 		fname := fe.Name()
@@ -923,21 +926,37 @@ func teardownUnmappedManaged(dm *config.DeviceMapConfig, protected map[string]bo
 			teardownErrs = append(teardownErrs,
 				fmt.Errorf("no predictable name to restore unmapped NIC %q", target))
 		default:
-			if err := renameInterfaceFn(target, predictable); err != nil {
-				renameOK = false
-				slog.Warn("device-map teardown: rename-back failed; retaining durable state "+
-					"for retry (fail-closed)", "name", target, "to", predictable, "err", err)
+			err := renameInterfaceFn(target, predictable)
+			renameCompleted := err == nil
+			if err != nil {
+				var renamedDown *renamedInterfaceDownError
+				renameCompleted = errors.As(err, &renamedDown)
+				renameOK = renameCompleted
+				if renameCompleted {
+					slog.Warn("device-map teardown: restored predictable name but link-up failed; "+
+						"removing stale managed markers", "name", target, "to", predictable, "err", err)
+				} else {
+					slog.Warn("device-map teardown: rename-back failed; retaining durable state "+
+						"for retry (fail-closed)", "name", target, "to", predictable, "err", err)
+				}
 				teardownErrs = append(teardownErrs,
 					fmt.Errorf("rename-back %s -> %s: %w", target, predictable, err))
 			} else {
 				slog.Info("device-map teardown: restored unmapped NIC to predictable name",
 					"from", target, "to", predictable)
+			}
+			if renameCompleted {
+				if renamedNames == nil {
+					renamedNames = make(map[string]string)
+				}
+				renamedNames[target] = predictable
 				reloaded = true
 			}
 		}
-		// #5309: reclaim the durable markers ONLY when the rename-back
-		// succeeded (or there was no live device to rename). On failure, RETAIN
-		// both files so the next commit retries — never destroy the retry debt.
+		// Retire the managed markers only after the name change completed (or
+		// there was no live device). A typed post-rename link-up error still
+		// returns below, but keeping the stale OriginalName= rule would rename
+		// this host interface back to the removed logical name on reboot.
 		if !renameOK {
 			continue
 		}
@@ -958,10 +977,10 @@ func teardownUnmappedManaged(dm *config.DeviceMapConfig, protected map[string]bo
 		}
 	}
 	if len(teardownErrs) > 0 {
-		return fmt.Errorf("device-map teardown: %d step(s) failed: %w",
+		return renamedNames, fmt.Errorf("device-map teardown: %d step(s) failed: %w",
 			len(teardownErrs), errors.Join(teardownErrs...))
 	}
-	return nil
+	return renamedNames, nil
 }
 
 // teardownRestoreTarget resolves the rename-back target for the

@@ -7,6 +7,15 @@ func (m *Manager) PeerAlive() bool {
 	return m.peerAlive
 }
 
+// ClearPeerHeartbeatLiveness invalidates the peer-alive bit when an accepted
+// comms epoch has no heartbeat path. Peer history and advertised group state
+// remain unchanged; a later accepted heartbeat sets liveness again.
+func (m *Manager) ClearPeerHeartbeatLiveness() {
+	m.mu.Lock()
+	m.peerAlive = false
+	m.mu.Unlock()
+}
+
 // peerHeartbeatFreshLocked reports whether a peer heartbeat is currently within
 // the timeout window (NOT stale). It is the truth source for
 // handlePeerTimeout's post-guard re-check. Must be called with m.mu held (it
@@ -49,18 +58,16 @@ func (m *Manager) HeartbeatPeerAuthSeen() bool {
 	return m.heartbeatAuthState().peerAuthenticated()
 }
 
-// noteSyncPeerAuthenticated records the peer's proof of the shared PSK from
-// the authenticated session-sync handshake, under the key that handshake
-// actually matched (#16859). The same process-lifetime proof is used by the
-// fabric gRPC downgrade guard whether it arrives on heartbeat or session
-// sync. The matched key also feeds the #6630 rotation observation: in
-// fabric-transport mode there is no heartbeat, so this is the ONLY proof that
-// the peer is currently signing with that key — without it the rotation line
-// stays UNKNOWN forever even while session sync authenticates the peer
-// continuously. matchedPSK is the raw PSK (never logged); it is stored only
-// as the derived controlLinkKeyID, exactly as heartbeat admission stores it.
-// A nil/empty key keeps the legacy no-key-id behaviour for providers that
-// cannot name the matched key.
+// noteSyncPeerAuthenticated records the process-lifetime proof that the peer
+// holds an accepted PSK from an authenticated session-sync handshake (#16859).
+// The same sticky signal is used by the fabric gRPC downgrade guard whether
+// it arrives on heartbeat or session sync. When supplied, matchedPSK also
+// feeds the #6630 rotation observation: session sync passes a matched key only
+// where the peer's signing choice is identified (the responder role); an
+// initiator-side proof that the peer accepts its PSK leaves that observation
+// unchanged (#17891). matchedPSK is the raw PSK (never logged); only the
+// derived controlLinkKeyID is stored, exactly as heartbeat admission stores
+// it. A nil/empty key keeps the peer-signing observation unknown.
 func (m *Manager) noteSyncPeerAuthenticated(matchedPSK ...[]byte) {
 	m.heartbeatAuthState().notePeerAuthenticated()
 	for _, k := range matchedPSK {

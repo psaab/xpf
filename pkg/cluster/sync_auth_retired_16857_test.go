@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -238,5 +239,152 @@ func TestCurrentKeyConnectionNeverEvicted16857(t *testing.T) {
 	}
 	if !connStillInstalled(e) {
 		t.Fatal("current-key connection was closed")
+	}
+}
+
+// gatedAcceptedKeysProvider18016 snapshots its key ring before optionally
+// pausing the first enumeration. It models the commit changing the accepted
+// ring while an enforcement tick is between taking its snapshot and locking
+// the auth connection.
+type gatedAcceptedKeysProvider18016 struct {
+	mu             sync.Mutex
+	key            []byte
+	accepted       [][]byte
+	calls          int
+	firstEntered   chan struct{}
+	firstRelease   chan struct{}
+	secondSnapshot chan struct{}
+	secondOnce     sync.Once
+	firstOnce      sync.Once
+}
+
+func (p *gatedAcceptedKeysProvider18016) ControlLinkAuthKey() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]byte(nil), p.key...)
+}
+
+func (p *gatedAcceptedKeysProvider18016) ControlLinkAcceptedKeys() [][]byte {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	keys := make([][]byte, len(p.accepted))
+	for i, key := range p.accepted {
+		keys[i] = append([]byte(nil), key...)
+	}
+	p.mu.Unlock()
+
+	if call == 1 {
+		p.firstOnce.Do(func() { close(p.firstEntered) })
+		<-p.firstRelease
+	}
+	if call == 2 {
+		p.secondOnce.Do(func() { close(p.secondSnapshot) })
+	}
+	return keys
+}
+
+func (p *gatedAcceptedKeysProvider18016) NodeID() int    { return 0 }
+func (p *gatedAcceptedKeysProvider18016) ClusterID() int { return upgClusterID }
+
+func (p *gatedAcceptedKeysProvider18016) setRing(key []byte, accepted [][]byte) {
+	p.mu.Lock()
+	p.key = append(p.key[:0], key...)
+	p.accepted = make([][]byte, len(accepted))
+	for i, acceptedKey := range accepted {
+		p.accepted[i] = append([]byte(nil), acceptedKey...)
+	}
+	p.mu.Unlock()
+}
+
+func TestRetirementGraceSurvivesConcurrentEnforcementSnapshot18016(t *testing.T) {
+	e := retiredEnd(t)
+	provider := &gatedAcceptedKeysProvider18016{
+		key:            []byte(retiredKeyA16857),
+		accepted:       [][]byte{[]byte(retiredKeyA16857)},
+		firstEntered:   make(chan struct{}),
+		firstRelease:   make(chan struct{}),
+		secondSnapshot: make(chan struct{}),
+	}
+	e.s.SetAuthProvider(provider)
+
+	enforceDone := make(chan int, 1)
+	go func() { enforceDone <- e.s.enforceStrictSessionAuth() }()
+	select {
+	case <-provider.firstEntered:
+	case <-time.After(3 * time.Second):
+		close(provider.firstRelease)
+		t.Fatal("enforcement did not reach the accepted-key snapshot")
+	}
+
+	// The gate makes it observable whether the enforcement pass took
+	// writeMu before asking for accepted keys. With the fixed ordering it
+	// holds the lock here; on the old ordering it does not.
+	tickHoldsWriteMu := !e.s.writeMu.TryLock()
+	if !tickHoldsWriteMu {
+		e.s.writeMu.Unlock()
+	}
+	provider.setRing([]byte(retiredKeyB16857), [][]byte{[]byte(retiredKeyB16857)})
+
+	reconcileDone := make(chan struct{})
+	go func() {
+		e.s.ReconcileConnectionAuth("finalize")
+		close(reconcileDone)
+	}()
+
+	if tickHoldsWriteMu {
+		// #18028: the reconcile snapshots the accepted set UNDER writeMu,
+		// so while this enforcement pass is gated inside its own section the
+		// reconcile parks on the lock before it can snapshot anything. There
+		// is nothing to observe yet — the gate has to open first.
+	} else {
+		// On the old enforcement ordering, the reconcile completes and
+		// anchors its fresh retired-key grace before the paused tick
+		// acquires writeMu.
+		select {
+		case <-reconcileDone:
+		case <-time.After(3 * time.Second):
+			close(provider.firstRelease)
+			t.Fatal("retirement reconcile did not complete")
+		}
+	}
+	close(provider.firstRelease)
+
+	if tickHoldsWriteMu {
+		// The gate is open, so this enforcement pass finishes its stale-set
+		// evaluation and releases writeMu; only then does the reconcile take
+		// ITS snapshot. secondSnapshot firing here proves the reconcile read
+		// the FLIPPED ring under the lock — never the pre-flip set the
+		// enforcement pass just used.
+		select {
+		case <-provider.secondSnapshot:
+		case <-time.After(3 * time.Second):
+			t.Fatal("retirement reconcile did not snapshot the new accepted ring")
+		}
+	}
+
+	select {
+	case <-reconcileDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("retirement reconcile did not finish after enforcement released")
+	}
+	if n := <-enforceDone; n != 0 {
+		t.Fatalf("enforcement evicted %d connections before retirement grace expiry, want 0", n)
+	}
+
+	e.s.writeMu.Lock()
+	anchor := e.ac.strictGraceStart
+	retired := e.ac.strictGraceRetired
+	e.s.writeMu.Unlock()
+	if anchor == 0 || !retired {
+		t.Fatalf("fresh retirement grace was cleared by concurrent enforcement: start=%d retired=%v", anchor, retired)
+	}
+
+	backdateGrace16857(e)
+	if n := e.s.enforceStrictSessionAuth(); n != 1 {
+		t.Fatalf("evicted %d connections after the concurrent retirement grace expired, want 1", n)
+	}
+	if connStillInstalled(e) {
+		t.Fatal("retired-key connection survived past the concurrent retirement grace")
 	}
 }

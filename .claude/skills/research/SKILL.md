@@ -15,6 +15,16 @@ review (SMR). File validated defects as part of research, without waiting for a
 solution plan. Requested plans retain their separate three-reviewer approval gate;
 implementation always stops for manual approval.
 
+## Host isolation (2026-10-26)
+
+Research validates defects without mutating the workstation:
+probes that need kernel/root/daemon effects run as U
+(hermetic), N (`unshare -rn` netns legs, unprivileged), or in
+Incus VMs (R/F/V classes). Never apt-install daemons, start
+services, or create links/rules on the workstation host to
+test a hypothesis — file the validation as a VM-leg task
+instead. `XPF_SACRIFICIAL_HOST=1` is VM-wrapper intent only.
+
 ## Inputs and routing
 
 - `/research <issue-number> [framing]`: investigate the tracking issue; prepare

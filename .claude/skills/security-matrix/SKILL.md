@@ -22,6 +22,15 @@ This is the directional **policy-correctness** complement to `/perf-test`
 policy compiler, zones, the dataplane policy/forward path, NAT, the reject
 action, or segmentation.
 
+## Host isolation (2026-10-26)
+
+Class **V**: directional and throughput cases run on Incus VMs
+(loss cluster / standalone 3-zone VM) with captured traffic from
+inside the VMs. Never create VLANs, nft rules, routes, or
+services on the workstation host to stage a matrix case. If a
+topology cannot run in a VM, record `INCONCLUSIVE (env)`, never
+improvise it on the host.
+
 ## Arguments
 
 - `/security-matrix` — full matrix (throughput + all 4 directional cases + negative control). Default.

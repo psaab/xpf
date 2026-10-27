@@ -17,11 +17,13 @@
 // untouched: both this eviction and the #9717 listing keyed only on
 // len(authPSK)==0, so a holder of the retired key kept verifying frames under
 // retired-key-derived connection keys for as long as it declined the #6628
-// rekey. It now anchors a set-once monotonic grace at the reconcile where
-// its key leaves the accepted set, is listed by UnauthenticatedSessionConns
-// during that grace, and is evicted at expiry. A cooperating peer that
-// rekeys (or whose key is re-accepted) within the grace clears the anchor
-// and is never evicted.
+// rekey. It now anchors a set-once monotonic grace at the reconcile where its
+// key leaves the accepted set, is listed by UnauthenticatedSessionConns during
+// that grace, and is evicted at expiry. A round already in flight at retirement
+// may complete under the stale key; that authenticated completion starts a
+// fresh grace for the immediately-triggered current-key rekey. A cooperating
+// peer that rekeys (or whose key is re-accepted) within grace is never evicted,
+// and failed/incomplete rounds never move the deadline.
 //
 // HISTORY (#7441 -> #10717): eviction was operator-declared because no live
 // signal distinguishes a hostile silent peer from a legitimate keyed peer on
@@ -98,9 +100,10 @@ func (s *SessionSync) noteStrictAuthGraceStartLocked(ac *authConn) {
 }
 
 // noteRetiredKeyGraceStartLocked anchors the #16857 eviction grace for a
-// connection authenticated under a key that has left the accepted set, once
-// per stale episode. Set-once for the same reason as the pre-key anchor: a
-// peer able to induce commits must not push its own deadline forward.
+// connection authenticated under a key that has left the accepted set. The
+// reconcile path is set-once so later commits cannot extend a stale
+// connection's lifetime; recordAuthUpgradeCompleteLocked separately handles a
+// round that was already in flight at retirement.
 //
 // Caller must hold s.writeMu.
 func (s *SessionSync) noteRetiredKeyGraceStartLocked(ac *authConn) {
@@ -111,10 +114,10 @@ func (s *SessionSync) noteRetiredKeyGraceStartLocked(ac *authConn) {
 	ac.strictGraceRetired = true
 }
 
-// clearStrictAuthGraceLocked clears the eviction grace when the connection
-// is (again) authenticated under an accepted key: either it completed a
-// rekey to the new key, or its key was re-accepted (e.g. re-added as the
-// additional key). A later retirement then anchors a fresh grace.
+// clearStrictAuthGraceLocked clears the eviction grace when the connection is
+// authenticated under an accepted key: either it completed a rekey to the new
+// key, or its key was re-accepted (e.g. re-added as the additional key). A
+// later retirement then anchors a fresh grace.
 //
 // Caller must hold s.writeMu.
 func (s *SessionSync) clearStrictAuthGraceLocked(ac *authConn) {
@@ -123,6 +126,29 @@ func (s *SessionSync) clearStrictAuthGraceLocked(ac *authConn) {
 	}
 	ac.strictGraceStart = 0
 	ac.strictGraceRetired = false
+}
+
+// recordAuthUpgradeCompleteLocked stamps the key proved by a completed
+// in-place upgrade and updates its eviction grace under the same lock. A
+// completion under an accepted key ends the prior stale episode. If a round
+// that was already in flight completes under a key now outside the accepted
+// set, the peer has completed the old round and the completion path may prompt
+// for the current-key rekey; give that continuation one grace window from this
+// completion rather than inheriting an expired pre-key/retirement deadline.
+// Failed or incomplete rounds never call this, so they cannot re-arm grace.
+//
+// Caller must hold s.writeMu.
+func (s *SessionSync) recordAuthUpgradeCompleteLocked(ac *authConn, psk []byte, accepted [][]byte) {
+	if ac == nil {
+		return
+	}
+	ac.authPSK = append([]byte(nil), psk...)
+	if authPSKAccepted(psk, accepted) {
+		s.clearStrictAuthGraceLocked(ac)
+		return
+	}
+	ac.strictGraceStart = MonotonicNanos()
+	ac.strictGraceRetired = true
 }
 
 // authPSKAccepted reports whether psk is in the accepted set. An empty psk
@@ -169,20 +195,20 @@ func connAuthStaleLocked(ac *authConn, accepted [][]byte) bool {
 // anchor cleared here and is never evicted — enforcement must not close a
 // connection that is no longer stale merely because an anchor exists.
 //
-// authPSK and strictGraceStart are both written under s.writeMu (authPSK by
-// the upgrade exchange, the anchor by the reconciler), so they are read here
-// under the same lock. readKey is deliberately NOT consulted even though
-// authed() would be the more natural-sounding predicate: readKey is owned by
-// the per-connection receiveLoop goroutine with no lock, so reading it from
-// this loop would be a data race. authPSK carries the same fact — it is set
-// only by a completed exchange, which requires the PSK — and is race-safe.
+// authPSK and strictGraceStart are both written under s.writeMu (authPSK and
+// completion-time grace updates by the upgrade exchange, reconcile-time grace
+// updates by the reconciler), so they are read here under the same lock.
+// readKey is deliberately NOT consulted even though authed() would be the more
+// natural-sounding predicate: readKey is owned by the per-connection
+// receiveLoop goroutine with no lock, so reading it from this loop would be a
+// data race. authPSK carries the same fact — it is set only by a completed
+// exchange, which requires the PSK — and is race-safe.
 func (s *SessionSync) enforceStrictSessionAuth() int {
 	if len(s.authKey()) == 0 {
 		// Unkeyed: the rule is inert by design. Evicting here would drop
 		// session sync on a cluster that never asked for authentication.
 		return 0
 	}
-	accepted := s.authAcceptedKeys()
 	now := MonotonicNanos()
 	s.mu.Lock()
 	conns := []net.Conn{s.conn0, s.conn1}
@@ -191,17 +217,25 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 	var doomed []net.Conn
 	var doomedRetired []bool
 	s.writeMu.Lock()
+	// #18016: snapshot accepted keys only after acquiring writeMu. A
+	// snapshot taken before the lock can go stale while this pass waits:
+	// a concurrent retirement reconcile anchors a fresh grace under the
+	// new accepted set, and a stale-set pass could then clear that new
+	// anchor (authPSK accepted under the stale set), leaving the anchor
+	// zero so every later pass skips the connection and eviction never
+	// fires. authAcceptedKeys only reads the atomic provider and, for
+	// *Manager, takes m.mu.RLock; production does not call back into
+	// SessionSync while that manager lock is held.
+	accepted := s.authAcceptedKeys()
 	for _, c := range conns {
 		ac, ok := c.(*authConn)
 		if !ok || ac == nil {
 			continue
 		}
 		if !connAuthStaleLocked(ac, accepted) {
-			// Authenticated under an accepted key (or re-accepted): clear
-			// any retired-key anchor so a later retirement starts fresh.
-			if ac.strictGraceRetired {
-				s.clearStrictAuthGraceLocked(ac)
-			}
+			// Authentication under an accepted key ends either stale
+			// episode, so a later retirement starts a fresh grace.
+			s.clearStrictAuthGraceLocked(ac)
 			continue
 		}
 		if ac.strictGraceStart == 0 {

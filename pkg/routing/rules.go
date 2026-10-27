@@ -886,119 +886,62 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 		return errors.Join(errs...)
 	}
 
-	// Build instance name → table ID map
+	// Build instance name → table ID map.
 	tableIDs := make(map[string]int)
 	for _, inst := range instances {
-		tableIDs[inst.Name] = inst.TableID
+		if inst != nil {
+			tableIDs[inst.Name] = inst.TableID
+		}
 	}
 
-	// Track which source tables we've already added rules for (avoid
-	// duplicate rules if two instances share a table ID).
-	leakedTables := make(map[int]bool)
-
-	// Kernel rule-priority spaces are family-specific. Exhausting one family's
-	// rule budget must not suppress the other family's connected-prefix leaks.
-
-	admitted := map[int]int{unix.AF_INET: 0, unix.AF_INET6: 0}
-	capped := map[int]bool{}
+	candidates, candidateErrs := ribGroupLeakCandidates(ribGroups, instances, connectedPrefixes, tableIDs, true)
+	errs = append(errs, candidateErrs...)
+	byInstance := make(map[*config.RoutingInstanceConfig][]ribGroupLeakCandidate)
+	for _, candidate := range candidates {
+		byInstance[candidate.instance] = append(byInstance[candidate.instance], candidate)
+	}
 	for _, inst := range instances {
-		sourceTable := inst.TableID
-
-		// Phase 1 leaks ONLY into main. A rib-group whose import-ribs resolve
-		// only to non-main tables (VRF→VRF) installs nothing here and is
-		// warned at commit (Phase 2 deferral). Family gating: the v4
-		// rib-group leaks v4 connected prefixes, the v6 rib-group leaks v6.
-		leakV4 := ribGroupLeaksIntoMain(inst.InterfaceRoutesRibGroup, ribGroups, tableIDs, inst.Name, unix.AF_INET)
-		leakV6 := ribGroupLeaksIntoMain(inst.InterfaceRoutesRibGroupV6, ribGroups, tableIDs, inst.Name, unix.AF_INET6)
-		if !leakV4 && !leakV6 {
+		if inst == nil {
 			continue
 		}
-		if leakedTables[sourceTable] {
+		instanceCandidates := byInstance[inst]
+		if len(instanceCandidates) == 0 {
 			continue
 		}
-		leakedTables[sourceTable] = true
-
-		v4, v6 := splitConnectedPrefixesByFamily(connectedPrefixes[inst.Name])
-		var toInstall []struct {
-			prefix string
-			family int
-		}
-		if leakV4 {
-			for _, p := range v4 {
-				toInstall = append(toInstall, struct {
-					prefix string
-					family int
-				}{p, unix.AF_INET})
-			}
-		}
-		if leakV6 {
-			for _, p := range v6 {
-				toInstall = append(toInstall, struct {
-					prefix string
-					family int
-				}{p, unix.AF_INET6})
-			}
-		}
-
 		installed := map[int][]*net.IPNet{}
-		for _, lr := range toInstall {
-			// Admission and priority are separate: this cap bounds installed
-			// rules, while prefix length determines each rule's shared-band
-			// priority.
-			if capped[lr.family] {
-				continue
-			}
-			if admitted[lr.family] >= maxRibGroupLeakRules {
-				familyStr := "inet"
-				if lr.family == unix.AF_INET6 {
-					familyStr = "inet6"
-				}
-				errs = append(errs, fmt.Errorf(
-					"rib-group leak rule limit (%d) reached for family %s; connected prefixes beyond "+
-						"the limit are not leaked — reduce the number of interface-routes "+
-						"rib-group prefixes", maxRibGroupLeakRules, familyStr))
-				capped[lr.family] = true
-				continue
-			}
-			_, dst, err := net.ParseCIDR(lr.prefix)
-			if err != nil || dst == nil {
-				errs = append(errs, fmt.Errorf(
-					"rib-group leak: parse connected prefix %q instance %s: %w",
-					lr.prefix, inst.Name, err))
-				continue
-			}
-			admitted[lr.family]++
-			prefixLength, addressBits := dst.Mask.Size()
+		for _, candidate := range instanceCandidates {
+			sourceTable := inst.TableID
+			prefixLength, addressBits := candidate.prefix.Mask.Size()
 			priority := config.RouteLeakRulePriority(prefixLength, addressBits, config.RouteLeakRibGroup)
 			rule := netlink.NewRule()
-			rule.Dst = dst
+			rule.Dst = candidate.prefix
 			rule.Table = sourceTable
 			rule.Priority = priority
-			rule.Family = lr.family
+			rule.Family = candidate.family
 			familyStr := "inet"
-			if lr.family == unix.AF_INET6 {
+			if candidate.family == unix.AF_INET6 {
 				familyStr = "inet6"
 			}
 			if err := rg.ops.RuleAdd(rule); err != nil {
 				errs = append(errs, fmt.Errorf(
 					"add rib-group leak rule prefix %s instance %s table %d family %s: %w",
-					lr.prefix, inst.Name, sourceTable, familyStr, err))
+					candidate.prefix, inst.Name, sourceTable, familyStr, err))
 				continue
 			}
-			installed[lr.family] = append(installed[lr.family], dst)
+			installed[candidate.family] = append(installed[candidate.family], candidate.prefix)
 			slog.Info("rib-group leak rule added",
-				"instance", inst.Name, "prefix", lr.prefix,
+				"instance", inst.Name, "prefix", candidate.prefix,
 				"table", sourceTable, "family", familyStr, "pref", priority)
 		}
 		// Return only to peers this source is authorized to reach: a peer
 		// prefix is returned to only when one of this source's own
 		// interface-routes rib-groups names the peer's rib in its
-		// import-rib list for that family (the VRF->VRF import case,
-		// #16616). Leaking into main alone authorizes main->tenant, not
-		// tenant->tenant, so unauthorized peers get no return rule and
+		// import-rib list for that family (the VRF→VRF import case,
+		// #16616). Leaking into main alone authorizes main→tenant, not
+		// tenant→tenant, so unauthorized peers get no return rule and
 		// their prefixes hit the miss terminator from this VRF.
 		peerPrefixes, peerErrs := ribGroupPeerReturnPrefixes(
-			inst, instances, ribGroups, tableIDs, connectedPrefixes, installed)
+			inst, instances, ribGroups, tableIDs, connectedPrefixes, installed, true)
 		errs = append(errs, peerErrs...)
 		errs = append(errs, rg.addRibGroupReturnRules(inst, peerPrefixes)...)
 	}
@@ -1026,6 +969,7 @@ func ribGroupPeerReturnPrefixes(
 	tableIDs map[string]int,
 	connectedPrefixes map[string][]string,
 	installed map[int][]*net.IPNet,
+	warnUnknown bool,
 ) (map[int][]ribGroupPeerReturnPrefix, []error) {
 	peers := map[int][]ribGroupPeerReturnPrefix{unix.AF_INET: {}, unix.AF_INET6: {}}
 	seen := make(map[string]bool)
@@ -1044,7 +988,7 @@ func ribGroupPeerReturnPrefixes(
 			{unix.AF_INET6, peer.InterfaceRoutesRibGroupV6, instance.InterfaceRoutesRibGroupV6, len(installed[unix.AF_INET6]) > 0},
 		}
 		for _, candidate := range families {
-			if !candidate.enabled || !ribGroupLeaksIntoMain(candidate.group, ribGroups, tableIDs, peer.Name, candidate.family) {
+			if !candidate.enabled || !ribGroupLeaksIntoMainWithWarnings(candidate.group, ribGroups, tableIDs, peer.Name, candidate.family, warnUnknown) {
 				continue
 			}
 			if !ribGroupImportsInstanceRib(candidate.sourceGroup, ribGroups, peer.Name, candidate.family) {
@@ -1099,20 +1043,19 @@ func ribGroupImportsInstanceRib(rgName string, ribGroups map[string]*config.RibG
 	return false
 }
 
-// ribGroupLeaksIntoMain reports whether the named interface-routes rib-group
-// imports the main RIB for family — the #3876 Phase-1 target for per-prefix
-// connected-route leaking. It returns false for an empty name, an undefined
-// group, a group whose import-ribs resolve only to non-main tables, or main
-// RIBs belonging to the opposite address family. Unresolvable import-ribs are
-// skipped (never treated as a main-table hit) — the #2226 fail-closed guard.
-func ribGroupLeaksIntoMain(rgName string, ribGroups map[string]*config.RibGroup, tableIDs map[string]int, instName string, family int) bool {
+// ribGroupLeaksIntoMainWithWarnings reports whether the named interface-routes
+// rib-group imports the main RIB for family. Unknown references may be logged
+// by commit-time callers but stay quiet in the periodic inventory probe.
+func ribGroupLeaksIntoMainWithWarnings(rgName string, ribGroups map[string]*config.RibGroup, tableIDs map[string]int, instName string, family int, warnUnknown bool) bool {
 	if rgName == "" {
 		return false
 	}
 	rgDef, ok := ribGroups[rgName]
-	if !ok {
-		slog.Warn("interface-routes references unknown rib-group",
-			"instance", instName, "rib-group", rgName)
+	if !ok || rgDef == nil {
+		if warnUnknown {
+			slog.Warn("interface-routes references unknown rib-group",
+				"instance", instName, "rib-group", rgName)
+		}
 		return false
 	}
 	for _, ribName := range rgDef.ImportRibs {
@@ -1120,7 +1063,7 @@ func ribGroupLeaksIntoMain(rgName string, ribGroups map[string]*config.RibGroup,
 		if !ok {
 			// A valid main RIB for the sibling family is not unknown; it just
 			// cannot enable this family's leak.
-			if ribName != "inet.0" && ribName != "inet6.0" {
+			if warnUnknown && ribName != "inet.0" && ribName != "inet6.0" {
 				slog.Warn("rib-group import-rib references unknown rib; skipping (not leaking)",
 					"instance", instName, "rib-group", rgName, "import-rib", ribName)
 			}

@@ -19,16 +19,24 @@ the apply path pays no fsync (the file is regenerated on every apply).
   whether the operator DELETED it (#3941) or it became UNRENDERABLE and was
   omitted from the render (#5494). **The returned error is
   load-bearing (#4433):** a render/write failure leaves the prior file
-  untouched. A total `swanctl --load-all` failure with charon answering
-  (no partial summary) leaves the previously-loaded config active and
-  restores the prior swanctl file before returning (#10712), so a later
-  service restart cannot activate the rejected candidate. A total
-  failure with charon unreachable (#16853) is different: charon runs
-  nothing, so the candidate stays on disk, its set is promoted, the
-  error still propagates, and charon's next start loads the committed
-  generation. A **partial** load — a parseable
-  `loaded N of M ..., F failed to load` summary for connections, pools, or
-  authorities, with any exit code including 0 — is different (#14589):
+  untouched. A total `swanctl --load-all` failure restores the prior file only
+  when the prior marker (if present) and the complete loaded projection prove
+  the prior render: connection names, child names, and local/remote addresses
+  must match exactly (#10712, #17882). A pre-marker prior can be proven only
+  by that exact projection. A reachability probe or generation marker alone is
+  not proof: a fresh charon may answer after loading the candidate already on
+  disk, and the same config-store digest may accompany a DHCP-rebound local
+  address. Malformed or incomplete listings are indeterminate.
+  If a live listing matches neither complete render, the candidate stays on
+  disk and affected SAs are torn down. Do not re-initiate under an unproven
+  config; persist deferred eager-initiation debt so a later successful Apply
+  detects the diff and re-initiates under the proven candidate.
+  If charon is unreachable or the candidate is proven loaded, the
+  candidate stays on disk and its set is promoted for charon's next start
+  (#16853, #17882).
+  A **partial** load — a parseable `loaded N of M ..., F failed to load`
+  summary for connections, pools, or authorities, with any exit code including
+  0 — is different (#14589):
   charon already runs a subset, so restoring the prior file would name a
   set charon is not running and a charon-only restart would resurrect a
   deleted/rotated VPN. Instead xpf asks charon (`ListLoadedConns`) what it
@@ -64,27 +72,31 @@ the apply path pays no fsync (the file is regenerated on every apply).
   remaining reconcile steps still run, so the operator sees a degraded-state
   error instead of a false success. **The empty-clear branch is symmetric
   (#4898/#10712):** deleting the last VPN routes `Apply(nil)` → `clearConfig`, which
-  now RETURNS the `swanctl --load-all` error (it previously did `_ = m.reload()` and
+  now RETURNS the `swanctl --load-all` error instead of discarding it.
   `prevConnNames`, rendered-content fingerprints, and stale-SA teardown are gated on
-  reload SUCCESS — a total reload failure with charon answering leaves the OLD config
-  effective, so the applied state is preserved and no SA is torn down; the next
-  successful Apply/Clear retries the diff + teardown. With charon unreachable
-  (#16853) the removed file stays removed, the empty set is promoted, teardown is
-  attempted, and the error still propagates. (A partial load is the #14589 exception
-  above: the recovered set charon actually runs is promoted and its departed SAs
-  torn down, while the error still propagates.) **A FAILED terminate is also load-bearing (#6542/#10878):**
+  reload SUCCESS — when the marker (if present) and the complete loaded projection
+  prove the prior generation remains effective, the applied state is preserved and
+  no SA is torn down; the next successful Apply/Clear retries the diff + teardown.
+  A live indeterminate set instead triggers teardown without advancing the prior
+  fingerprints, preserving the diff for the next successful apply. If charon is
+  unreachable or a candidate/empty clear set is proven (#16853/#17882), the
+  committed set is promoted, teardown is attempted, and the error still propagates.
+  (A partial load is the #14589 exception above: the recovered set charon actually runs
+  is promoted and its departed SAs are torn down, while the error still propagates.)
+  **A FAILED terminate is also load-bearing (#6542/#10878):**
   failed removals become `pendingTerminate` debt, while failed same-name changes
   become `pendingChanged` debt. Apply RETURNS a failed termination or reinitiation
   error instead of reporting success over a stale SA or an un-reestablished tunnel.
 - `Clear() error` — `manager.go`. Remove the xpf snippet, reload, and
   terminate every previously-applied connection's live SAs (#3941). Like Apply,
-  a total reload failure with charon answering is returned and skips
-  promotion/termination (#4898); with charon unreachable (#16853) the removed
-  file stays removed, the empty set is promoted, teardown is attempted, and
-  the error is still returned; a
-  partial clear (#14589) restores and re-loads the prior file when charon still
-  holds prior connections (or promotes the empty set when it holds none),
-  promotes that recovered set, and still returns the error. The commit path
+  a total reload failure with the prior generation proven by marker (if present)
+  and exact loaded projection restores the prior file and skips promotion/termination
+  (#4898/#10712); an unreachable or candidate-proven clear keeps the removed file,
+  promotes the empty set, attempts teardown, and returns the error. A live
+  indeterminate listing keeps the file removed and attempts teardown without
+  advancing prior fingerprints. A partial clear (#14589) restores and reloads
+  the prior file when charon still holds prior connections, or promotes the empty
+  set when charon holds none; the error still propagates. The commit path
   reaches the same clear via `ApplyGeneration` with an empty config, which
   promotes the same recovered set (#15128): promoting the empty set there
   forgot VPNs the rollback left running in charon, so their SAs were
@@ -135,13 +147,15 @@ the apply path pays no fsync (the file is regenerated on every apply).
   inert **generation marker**: `pools { xpf-gen-<generation> { addrs = 192.0.2.1/32 } }`.
   No connection references the pool, so no SA can lease from or negotiate against it, and
   a pool is not a connection. strongSwan 6.0.5 loads and lists it
-  (`testdata/swanctl_list_pools_*_9641.*`). `generation` must be a 64-hex config digest
-  (the daemon passes the configstore digest of the active config it applies). Anything
-  else, and `ApplyWithHooks`/`Apply`, writes `xpf-gen-unknown`. The marker is appended to
-  the render, not rendered inside it, so `renderConfig`'s other consumers are unchanged,
-  and the empty-config clear path removes the file, so charon then lists no marker. An
-  xpf node's `swanctl --list-pools` therefore shows one `xpf-gen-*` pool with no leases;
-  that is expected.
+  (`testdata/swanctl_list_pools_*_9641.*`). `generation` is the 64-hex config digest
+  (the daemon passes the configstore digest of the active config it applies). For a
+  missing or invalid config-store digest, `ApplyWithHooks`/`Apply` use the SHA-256
+  fingerprint of the rendered IPsec config as the marker identity; it is not a full
+  configstore generation, so attribution still falls back when no retained generation
+  matches. The marker is appended to the render, not rendered inside it, so
+  `renderConfig`'s other consumers are unchanged, and the empty-config clear path removes
+  the file, so charon then lists no marker. An xpf node's `swanctl --list-pools` therefore
+  shows one `xpf-gen-*` pool with no leases; that is expected.
 - `LoadedGeneration() (string, error)` — `generation.go`. `swanctl --list-pools --raw`
   (stdout-only seam, `swanctlTimeout`): the generation the single loaded marker names.
   Errors: `ErrNoGenerationMarker` (no xpf-written file loaded, or one from an older xpf),
@@ -285,11 +299,15 @@ all files stay in `package ipsec`, so the public API is unchanged.
   applies. A later apply lists active SAs, retries stale connections, and clears
   debt silently if an SA disappeared in the meantime. A live-list failure falls
   back to unconditional termination and the next successful listing discharges
-  an ambiguous no-match failure. `Apply`/`Clear` return teardown failures so the
-  operator sees degraded IPsec state instead of a false success.
+  an ambiguous no-match failure. `pendingReinitiate` preserves deferred eager
+  starts for changed tunnels affected by an indeterminate teardown until a
+  candidate is proven, including across daemon restarts. `Apply`/`Clear` return
+  teardown failures so the operator sees degraded IPsec state instead of a
+  false success.
 
-  Covered by `terminate_debt_6542_test.go` and the changed-connection regression
-  in `delete_terminate_3941_test.go`.
+  Covered by `terminate_debt_6542_test.go`, the changed-connection regression
+  in `delete_terminate_3941_test.go`, and the indeterminate deferred-start
+  cases in `charon_down_16853_test.go`.
 
 
 - **The teardown record survives an xpfd restart (#9687/#10878).** The daemon
@@ -951,8 +969,12 @@ all files stay in `package ipsec`, so the public API is unchanged.
   remote identity on fixed-address PSK gateways with no
   `remote-identity`/`local-identity` configured:
   `remote { id = "<sole IP-literal gateway address>" }` (per-address
-  PSK selectors still cover the whole multi-address list). Before
-  #15193, a default-shape (no identities) fixed-address VPN rendered
+  PSK selectors still cover the whole multi-address list).
+  Since #17875, a fixed-address PSK gateway with an ID_ANY
+  `remote-identity` is treated as having no discriminating identity:
+  peer-address selectors scope the secret, and a sole address supplies
+  the default `remote.id`; multi-address gateways still omit it.
+  Before #15193, a default-shape (no identities) fixed-address VPN rendered
   neither, charon-as-initiator found no matching secret, and aborted
   IKE_AUTH — every xpf-initiated path failed and two default-shape xpf
   boxes never established the tunnel. #15193 fixed that by ALSO adding
@@ -984,14 +1006,15 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `config.IsAnyIPsecRemoteIdentity` / `config.HasDiscriminatingIPsecAddress`
   predicates: an ID_ANY spelling (`""`, `%any`, `%any6`, `*`, `0.0.0.0`,
   `::`, `0::0`, any unspecified IP) as gateway address, inline endpoint,
-  or `inet`/`inet6` `remote-identity` discriminates no peer, so strict
-  commit refuses it and the render belts skip it exactly like the
-  empty-selector shapes above; a mixed `0.0.0.0,<real-ip>` list renders
-  scoped by the real address only. Since #15989 (H-4) the same rule covers
-  a gateway-less PSK VPN (no `ike gateway` leaf): it renders with no
-  `remote_addrs` and no peer selector — commit rejects it and the
-  render belt skips it. Inline IP endpoints (a usable IP literal in
-  the gateway leaf, no gateway object) are unaffected: the peer
+  or `inet`/`inet6` `remote-identity` is not a peer selector. Strict
+  commit refuses it (and render skips it) when no other peer selector
+  exists; a real gateway address can rescue an ID_ANY `remote-identity`
+  (#17875), which is ignored for `remote.id`. A mixed
+  `0.0.0.0,<real-ip>` list renders scoped by the real address only. Since
+  #15989 (H-4) the same rule covers a gateway-less PSK VPN (no `ike
+  gateway` leaf): it renders with no `remote_addrs` and no peer selector —
+  commit rejects it and the render belt skips it. Inline IP endpoints (a
+  usable IP literal in the gateway leaf, no gateway object) are unaffected:
   address scopes their secret; inline hostname endpoints are refused
   like hostname gateways (#16708). A cert/EAP VPN has no PSK, so it
   emits no secret block and is unaffected. The selector values reuse

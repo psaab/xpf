@@ -11463,11 +11463,14 @@ reserved for whole-dataplane selection where a rewrite shim
     bare shape (`validateIPsecResponderIdentityStrict`); tolerant loads
     warn and the renderer skips the connection.
   - **#15193 (fixed-address default identity / initiator PSK lookup), as
-    amended by #16708:** a fixed-address (`address <ip>`) PSK gateway with
-    neither `remote-identity` nor `local-identity` — the Junos default
-    shape, accepted by strict commit — renders the Junos default remote
-    identity `remote { id = "<first gateway address>" }` in swanctl and
-    scopes the PSK by every gateway address (peer selectors only).
+    amended by #16708 and #17875:** a fixed-address (`address <ip>`) PSK
+    gateway with no discriminating `remote-identity` (an ID_ANY value is
+    ignored for identity rendering, #17875) and no `local-identity` — the
+    Junos default shape, accepted by strict commit — renders the Junos
+    default remote identity `remote { id = "<sole gateway address>" }`
+    in swanctl and scopes the PSK by that address (peer selector only).
+    An ID_ANY identity does not override the real-address default;
+    multi-address gateways still omit the single-valued `remote.id`.
     #15193 originally also added a box-shared local owner (`local-id`,
     else the pinned local address, else `%any`) so charon-as-initiator
     found the secret; #16708 measured that owner matching the responder
@@ -11475,10 +11478,10 @@ reserved for whole-dataplane selection where a rewrite shim
     the secret, and the verifier tries them all), so a holder of one
     VPN's PSK authenticated into every other VPN — the owner is removed
     and the pinned `remote.id` alone carries the initiator lookup
-    (re-measured, `docs/log/16708.md`). Explicit
-    `remote-identity`/`local-identity`, `dynamic hostname` gateways,
-    responder-only gateways (#14591) and certificate gateways render
-    exactly as before. A hostname-addressed (`address <fqdn>`) PSK
+    (re-measured, `docs/log/16708.md`). Discriminating explicit
+    `remote-identity` and `local-identity` settings, `dynamic hostname`
+    gateways, responder-only gateways (#14591) and certificate gateways
+    render exactly as before. A hostname-addressed (`address <fqdn>`) PSK
     gateway with no `remote-identity` now REQUIRES that identity at
     commit (#16708, extending `validateIPsecResponderIdentityStrict`):
     the hostname is a dial target, never the presented identity, so no
