@@ -1839,10 +1839,12 @@ loss-cluster-stop:
 loss-cluster-restart:
 	$(LOSS_CLUSTER_SETUP) restart $(NODE)
 
-# Build the xpf Debian package (#1917 increment A). Produces ../xpf_*.deb
-# and ../xpf-appliance_*.deb relative to the source tree (dpkg's default
-# parent-dir output), then copies them into dist-deb/ (a staging dir OUTSIDE
-# the image publish root dist/ — see DEB_OUT below).
+# Build the xpf Debian package (#1917 increment A). Produces xpf_*.deb
+# and xpf-appliance_*.deb in a private per-invocation stage (#18178:
+# $(CURDIR)/.deb-stage-<version>-<pid>, removed on exit), then copies
+# them into dist-deb/ (a staging dir OUTSIDE the image publish root
+# dist/ — see DEB_OUT below). Sibling worktrees share the source parent,
+# so dpkg's default parent-dir output raced there before #18178.
 #
 # The package build delegates to `make build build-ctl build-userspace-dp`
 # (see debian/rules), so it picks up the embedded #1864 shim and the
@@ -1915,8 +1917,12 @@ else
 	$(MAKE) --no-print-directory deb
 endif
 
+.PHONY: deb-changelog-check
+deb-changelog-check:
+	@sh "$(CURDIR)/scripts/check-changelog-18178.sh" "$(CURDIR)/debian/changelog"
+
 .PHONY: deb
-deb:
+deb: deb-changelog-check
 	@source_dirty=$$(python3 "$(CURDIR)/scripts/image/build_provenance.py" \
 	  --dirty-suffix --root "$(CURDIR)") || { \
 	    echo "FATAL: provenance probe refused the build" >&2; exit 1; }; \
@@ -1928,16 +1934,21 @@ deb:
 	  fi
 	@echo "==> xpf .deb version: $(DEB_VERSION)"
 	@# Run the whole build inside ONE shell with a trap so the changelog
-	@# version is ALWAYS restored to the committed 0.0.0 and the parent-dir
-	@# build byproducts are ALWAYS removed — even on SIGINT/SIGTERM or a
-	@# failed dpkg-buildpackage. (A backup FILE under debian/ would be
-	@# deleted by dpkg-buildpackage's own clean phase, so re-sed instead.)
+	@# version is ALWAYS restored to the committed 0.0.0 and this
+	@# invocation's private stage is ALWAYS removed — even on
+	@# SIGINT/SIGTERM or a failed dpkg-buildpackage. (A backup FILE under
+	@# debian/ would be deleted by dpkg-buildpackage's own clean phase, so
+	@# re-sed instead.)
 	@# The build version is derived from git at build time, not committed;
 	@# only the top changelog line's version token is rewritten so the rest
-	@# of the entry/trailer stays dpkg-parseable. dpkg-buildpackage writes
-	@# the .deb/.changes/.buildinfo to the PARENT dir (not configurable);
-	@# we keep the canonical copies in dist-deb/ and scrub the parent so it
-	@# never litters the tree above the source dir (a git worktree parent).
+	@# of the entry/trailer stays dpkg-parseable. #18178: dpkg-buildpackage
+	@# would otherwise write .deb/.changes/.buildinfo to the shared PARENT
+	@# dir; we route every artifact into a private per-invocation stage
+	@# ($(CURDIR)/.deb-stage-<version>-<pid>) via XPF_DEB_STAGE (consumed
+	@# by debian/rules dh_builddeb --destdir) plus --buildinfo-file /
+	@# --changes-file and -u<stage> for both generators, keep the canonical
+	@# copies in dist-deb/, and remove ONLY the stage this invocation
+	@# created — never a peer worktree's same-version parent artifacts.
 	@# Signal traps re-raise the caught signal after cleanup (trap - SIG;
 	@# kill -SIG $$) so an interrupted build returns the SIGNAL exit status,
 	@# not 0. A bare `trap cleanup INT TERM` with a cleanup that returns 0
@@ -1952,10 +1963,12 @@ deb:
 	@# VERSION (command line or environment) keeps make's usual precedence;
 	@# bake.py refuses a package whose markers then disagree.
 	set -e; \
+	  deb_stage="$(CURDIR)/.deb-stage-$(DEB_VERSION)-$$$$"; \
+	  case "$$deb_stage" in "$(CURDIR)"/.deb-stage-*) ;; *) echo "FATAL: deb stage escaped CURDIR: $$deb_stage" >&2; exit 1;; esac; \
+	  mkdir -p "$$deb_stage"; \
 	  cleanup() { \
 	    sed -i "1s/^xpf ([^)]*)/xpf (0.0.0)/" debian/changelog; \
-	    rm -f ../xpf_$(DEB_VERSION)_*.deb ../xpf-appliance_$(DEB_VERSION)_*.deb \
-	          ../xpf_$(DEB_VERSION)_*.changes ../xpf_$(DEB_VERSION)_*.buildinfo; \
+	    case "$$deb_stage" in "$(CURDIR)"/.deb-stage-*) rm -rf "$$deb_stage";; *) echo "FATAL: refusing to remove non-stage path: $$deb_stage" >&2;; esac; \
 	  }; \
 	  trap cleanup EXIT; \
 	  trap 'cleanup; trap - INT; kill -INT $$$$' INT; \
@@ -1965,9 +1978,13 @@ deb:
 	  case "$$deb_version" in *.dirty) xpfd_dirty=-dirty;; esac; \
 	  xpfd_version=$${VERSION-$$(git describe --tags --always 2>/dev/null || echo dev)$$xpfd_dirty}; \
 	  echo "==> xpfd embedded version: $$xpfd_version"; \
+	  echo "==> deb private stage: $$deb_stage"; \
 	  sed -i "1s/^xpf ([^)]*)/xpf ($$deb_version)/" debian/changelog; \
-	  VERSION="$$xpfd_version" dpkg-buildpackage -us -uc -b --no-sign; \
+	  XPF_DEB_STAGE="$$deb_stage" VERSION="$$xpfd_version" dpkg-buildpackage -us -uc -b --no-sign \
+	    --buildinfo-file="$$deb_stage/xpf_$(DEB_VERSION)_amd64.buildinfo" \
+	    --changes-file="$$deb_stage/xpf_$(DEB_VERSION)_amd64.changes" \
+	    --buildinfo-option=-u"$$deb_stage" --changes-option=-u"$$deb_stage"; \
 	  mkdir -p $(DEB_OUT); \
-	  cp ../xpf_$(DEB_VERSION)_*.deb ../xpf-appliance_$(DEB_VERSION)_*.deb $(DEB_OUT)/
+	  cp "$$deb_stage"/xpf_$(DEB_VERSION)_*.deb "$$deb_stage"/xpf-appliance_$(DEB_VERSION)_*.deb $(DEB_OUT)/
 	@echo "==> packages in $(DEB_OUT):"
 	@ls -1 $(DEB_OUT)/*.deb
