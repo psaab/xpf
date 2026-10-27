@@ -12,12 +12,8 @@ var wipePersistentNatGenerationStatePath = dpuserspace.PersistentNatLeaseGenerat
 
 func wipeEraseResetState(helperPath string) error {
 	var errs []error
-	if helperPath != "" {
-		errs = append(errs, wipeEraseHelperState(helperPath))
-	}
-	generationPath := wipePersistentNatGenerationStatePath()
-	if generationPath != "" && generationPath != helperPath {
-		errs = append(errs, wipeEraseHelperState(generationPath))
+	for _, path := range ResetStatePaths(helperPath) {
+		errs = append(errs, wipeEraseHelperState(path))
 	}
 	return errors.Join(errs...)
 }

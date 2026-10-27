@@ -153,7 +153,7 @@ type RollingCluster interface {
 	// rolling-upgradable; the driver aborts to Path C image-replace).
 	//
 	// #7990: this used to say "HA/session-sync protocol versions". It does not
-	// and never did look at the session-sync wire version — parseHAProtocolCompatible
+	// and never did look at the session-sync wire version — haProtocolVerdictFromStatus
 	// reads only the two "HA protocol version" lines — and since #7925 the two
 	// are separate counters, so the claim was not merely loose but wrong. The
 	// session-sync half is SessionSyncWireCompatible below.

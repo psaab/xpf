@@ -29,3 +29,37 @@ fn shared_ops_is_split_into_focused_sibling_modules() {
     let synth = std::fs::read_to_string(base.join("reverse_synth.rs")).unwrap();
     assert!(synth.contains("synthesize") || synth.contains("build_reverse_session_from_forward_match"));
 }
+
+#[test]
+fn session_glue_readme_and_commands_doc_match_the_tree_17079() {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp/session_glue");
+    let readme = std::fs::read_to_string(base.join("README.md")).unwrap();
+    // Every non-test session_glue/*.rs must appear in the README Files table.
+    for entry in std::fs::read_dir(&base).unwrap() {
+        let path = entry.unwrap().path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".rs") || name.contains("tests") {
+            continue;
+        }
+        let needle = format!("`{name}`");
+        assert!(readme.contains(&needle), "README Files table omits session_glue/{name}");
+    }
+    // commands/ handlers are a directory entry, not per-file rows.
+    assert!(readme.contains("`commands/`"), "README Files table omits commands/");
+    let commands_doc = std::fs::read_to_string(base.join("commands/mod.rs")).unwrap();
+    assert!(
+        commands_doc.contains("worker_commands.rs"),
+        "commands/mod.rs must name worker_commands.rs as the dispatcher home"
+    );
+    assert!(
+        !commands_doc.contains("`session_glue/mod.rs` matches"),
+        "commands/mod.rs still claims the dispatcher lives in session_glue/mod.rs"
+    );
+    let worker = std::fs::read_to_string(base.join("worker_commands.rs")).unwrap();
+    assert!(
+        worker.contains("pub(in crate::afxdp) fn apply_worker_commands"),
+        "apply_worker_commands no longer lives in worker_commands.rs"
+    );
+}

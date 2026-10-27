@@ -1223,8 +1223,8 @@ func (d *Daemon) reauthorizePolicyCandidates(
 		if key == dataplane.DefaultPolicyName && preserveDefaultRematch {
 			return false
 		}
-		from, _ := oldNameByTruncatedID(zoneNames, match.IngressZoneID)
-		to, _ := oldNameByTruncatedID(zoneNames, match.EgressZoneID)
+		from, _ := oldNameByID(zoneNames, match.IngressZoneID)
+		to, _ := oldNameByID(zoneNames, match.EgressZoneID)
 		if key == "" || from == "" || to == "" {
 			return false
 		}

@@ -21682,7 +21682,7 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
     );
 }
 
-/// Deferred-absent issues no BPF: with remove_mirror == false the
+/// Deferred-absent issues no BPF: with `DeleteOrigin::PolicyBatch` the
 /// already-gone branch must not touch the kernel map — phase 2 executes
 /// the covering forward intent instead ("NO BPF under this fence, ever").
 #[test]
@@ -21707,8 +21707,7 @@ fn deferred_absent_branch_issues_no_bpf_10512() {
         now_ns / 1_000_000_000,
         &mut deleted_keys,
         0,
-        false,
-        false,
+        super::commands::DeleteOrigin::PolicyBatch,
         &mut deferred,
         0,
         None,
@@ -25013,8 +25012,7 @@ fn control_plane_delete_emits_harvested_close_13972() {
             now_ns / 1_000_000_000,
             &mut deleted_keys,
             0,
-            false,
-            true,
+            super::commands::DeleteOrigin::LocalClear,
             &mut deferred,
             0,
             None,
@@ -25092,8 +25090,7 @@ fn control_plane_delete_emits_harvested_close_13972() {
             now_ns / 1_000_000_000,
             &mut deleted_keys,
             0,
-            false,
-            false,
+            super::commands::DeleteOrigin::PolicyBatch,
             &mut deferred,
             0,
             None,
@@ -25119,8 +25116,7 @@ fn control_plane_delete_emits_harvested_close_13972() {
             now_ns / 1_000_000_000,
             &mut deleted_keys,
             0,
-            true,
-            true,
+            super::commands::DeleteOrigin::PeerSync,
             &mut deferred,
             0,
             None,
@@ -25130,6 +25126,109 @@ fn control_plane_delete_emits_harvested_close_13972() {
             "peer-originated delete must emit no Close"
         );
     }
+}
+
+/// #17073: the RT_FLOW close reason is a property of `DeleteOrigin`,
+/// never of mirror timing. Before the guard, the reason was selected by
+/// the mirror-timing bool, so `LocalClear` (immediate mirror, CLEAR)
+/// and `PolicyBatch` (deferred mirror, reason POLICY_DELETE) happened
+/// to pair reason with timing only because no caller combined them
+/// otherwise. This cell drives each origin against a live locally-owned
+/// entry and asserts reason AND mirror timing together: LocalClear
+/// removes mirror rows immediately and logs CLEAR (7); PolicyBatch
+/// queues exactly one deferred intent, issues no BPF, and logs
+/// POLICY_DELETE (8); PeerSync removes mirror rows immediately and
+/// logs nothing. The type makes the old cross-pairings (e.g. a
+/// non-deferred policy delete logging CLEAR) unrepresentable — there
+/// is no bool left to flip. Hermetic: recorder-only steering map, no
+/// kernel/BPF/netns access (class U).
+#[test]
+fn delete_origin_close_reason_independent_of_mirror_mode_17073() {
+    use super::commands::DeleteOrigin;
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+    };
+    let now_ns = 1_000_000_000u64;
+    let install = |sessions: &mut SessionTable| {
+        let key = test_key();
+        let mut metadata = test_metadata();
+        metadata.log_session_close = true;
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            metadata,
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        sessions.drain_deltas(16);
+        key
+    };
+    let run = |origin: DeleteOrigin| {
+        let mut sessions = SessionTable::new();
+        let key = install(&mut sessions);
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        clear_session_map_writes();
+        super::commands::handle_delete_synced_with_guard(
+            &mut sessions,
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            key.clone(),
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            0,
+            origin,
+            &mut deferred,
+            0,
+            None,
+        );
+        let deltas = sessions.drain_deltas(16);
+        let writes = session_map_writes();
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "{origin:?}: entry must be gone"
+        );
+        (deltas, writes, deferred)
+    };
+    // LocalClear: immediate mirror removal (BPF deletes recorded), CLEAR.
+    let (deltas, writes, deferred) = run(DeleteOrigin::LocalClear);
+    assert_eq!(deltas.len(), 1, "LocalClear must emit one Close: {deltas:?}");
+    assert_eq!(
+        deltas[0].tcp_close_class,
+        crate::event_stream::codec::RT_FLOW_CLOSE_REASON_CLEAR,
+        "LocalClear reason must be CLEAR"
+    );
+    assert!(
+        writes.iter().any(|w| w.value.is_none()),
+        "LocalClear must remove mirror rows immediately: {writes:?}"
+    );
+    assert!(deferred.is_empty(), "LocalClear must not defer: {deferred:?}");
+    // PolicyBatch: deferred mirror (no BPF, one intent), POLICY_DELETE.
+    let (deltas, writes, deferred) = run(DeleteOrigin::PolicyBatch);
+    assert_eq!(deltas.len(), 1, "PolicyBatch must emit one Close: {deltas:?}");
+    assert_eq!(
+        deltas[0].tcp_close_class,
+        crate::event_stream::codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE,
+        "PolicyBatch reason must be POLICY_DELETE regardless of deferred mirror"
+    );
+    assert!(
+        writes.is_empty(),
+        "PolicyBatch must issue no BPF under the fence: {writes:?}"
+    );
+    assert_eq!(deferred.len(), 1, "PolicyBatch must queue one intent: {deferred:?}");
+    // PeerSync: immediate mirror removal, silent.
+    let (deltas, writes, deferred) = run(DeleteOrigin::PeerSync);
+    assert!(deltas.is_empty(), "PeerSync must emit no Close: {deltas:?}");
+    assert!(
+        writes.iter().any(|w| w.value.is_none()),
+        "PeerSync must remove mirror rows immediately: {writes:?}"
+    );
+    assert!(deferred.is_empty(), "PeerSync must not defer: {deferred:?}");
 }
 
 /// #15126 (A93-01) FAIL-ON-REVERT: a LossResync owner-RG re-export and a

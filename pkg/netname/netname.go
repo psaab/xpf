@@ -34,6 +34,7 @@ package netname
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -214,4 +215,65 @@ func Resolve(alts []string, pciAddr string) string {
 		return ""
 	}
 	return FromPCIAddr(pciAddr, Multifunction(pciAddr))
+}
+
+// PCIAddrFromDevicePath extracts the PCI address (DDDD:BB:DD.F) from a
+// sysfs device path (#17119, single-sourcing the sysfs→BDF step #7426
+// left in each caller). Every caller passes the resolved `device`
+// symlink target. A PCI netdev's target ends in the device's own BDF
+// (possibly below PCI bridges / a root port), so that BDF names this
+// device; a virtio netdev's target ends in `virtioN` directly below its
+// PCI function, which is a 1:1 channel to that function, so the parent
+// BDF likewise names this device. Any other final component means the
+// device sits on a NON-PCI bus below the last PCI ancestor, and that
+// ancestor's BDF must NOT be reported as this device's address
+// (#14595): on x86 a USB NIC hangs off an xHCI controller
+// (…/0000:00:14.0/usb2/2-1/2-1:1.0), and reporting the controller's BDF
+// gave every NIC behind one controller one shared "PCI address".
+// Returns "" for a non-PCI device.
+func PCIAddrFromDevicePath(realPath string) string {
+	// The length guard must admit index 10 (the '.'), so require
+	// >= 11 — a bare >= 10 lets a 10-char component with ':' at 4 and
+	// 7 index p[10] out of bounds.
+	parts := strings.Split(realPath, "/")
+	last := parts[len(parts)-1]
+	if len(last) >= 11 && last[4] == ':' && last[7] == ':' && last[10] == '.' {
+		return last
+	}
+	if isVirtioComponent(last) {
+		// virtioN directly below a PCI function: report that function.
+		for i := len(parts) - 2; i >= 0; i-- {
+			p := parts[i]
+			if len(p) >= 11 && p[4] == ':' && p[7] == ':' && p[10] == '.' {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
+// isVirtioComponent reports whether a sysfs path component is a virtio
+// device directory (`virtio0`, `virtio12`, …).
+func isVirtioComponent(p string) bool {
+	if !strings.HasPrefix(p, "virtio") || len(p) == len("virtio") {
+		return false
+	}
+	for _, c := range p[len("virtio"):] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// PCIAddrForNetdev returns the PCI address of the NIC named name, by
+// resolving /sys/class/net/<name>/device and applying
+// PCIAddrFromDevicePath. Returns "" when the symlink cannot be
+// resolved or the device has no PCI address (see PCIAddrFromDevicePath).
+func PCIAddrForNetdev(name string) string {
+	devReal, err := filepath.EvalSymlinks("/sys/class/net/" + name + "/device")
+	if err != nil {
+		return ""
+	}
+	return PCIAddrFromDevicePath(devReal)
 }

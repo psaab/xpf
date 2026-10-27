@@ -208,8 +208,8 @@ func (s *SessionSync) SentInstallGenerationV4ForTesting(key dataplane.SessionKey
 func (s *SessionSync) DeleteJournalGenerationV4ForTesting(key dataplane.SessionKey) (uint64, bool) {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	for i := len(s.deleteJournal) - 1; i >= 0; i-- {
-		raw := s.deleteJournal[i]
+	for i := len(s.deleteJournal.entries) - 1; i >= 0; i-- {
+		raw := s.deleteJournal.entries[i]
 		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV4 {
 			continue
 		}
@@ -278,9 +278,9 @@ func (s *SessionSync) SetScopedPolicyDeleteCapableForTesting(capable bool) {
 	if capable {
 		flags |= uint32(capFlagScopedPolicyDelete)
 	}
-	s.peerCapabilityFlags.Store(flags)
+	s.peerIncarnationState().peerCapabilityFlags.Store(flags)
 	// A realistic modern peer also advertises config-apply ACK (#16756).
-	s.peerCapabilityFlags2.Store(uint32(localCapabilityFlags2))
+	s.peerIncarnationState().peerCapabilityFlags2.Store(uint32(localCapabilityFlags2))
 }
 
 // ScopedDeleteJournalEntryForTesting returns the newest journaled scoped
@@ -289,8 +289,8 @@ func (s *SessionSync) SetScopedPolicyDeleteCapableForTesting(capable bool) {
 func (s *SessionSync) ScopedDeleteJournalEntryForTesting(key dataplane.SessionKey) (uint32, uint64, bool) {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	for i := len(s.scopedDeleteJournal) - 1; i >= 0; i-- {
-		raw := s.scopedDeleteJournal[i]
+	for i := len(s.scopedDeleteJournal.entries) - 1; i >= 0; i-- {
+		raw := s.scopedDeleteJournal.entries[i]
 		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV4 {
 			continue
 		}
@@ -307,8 +307,8 @@ func (s *SessionSync) ScopedDeleteJournalEntryForTesting(key dataplane.SessionKe
 func (s *SessionSync) ScopedDeleteJournalEntryV6ForTesting(key dataplane.SessionKeyV6) (uint32, uint64, bool) {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	for i := len(s.scopedDeleteJournal) - 1; i >= 0; i-- {
-		raw := s.scopedDeleteJournal[i]
+	for i := len(s.scopedDeleteJournal.entries) - 1; i >= 0; i-- {
+		raw := s.scopedDeleteJournal.entries[i]
 		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV6 {
 			continue
 		}
@@ -326,8 +326,8 @@ func (s *SessionSync) ScopedDeleteJournalEntryV6ForTesting(key dataplane.Session
 func (s *SessionSync) DeleteJournalGenerationV6ForTesting(key dataplane.SessionKeyV6) (uint64, bool) {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	for i := len(s.deleteJournal) - 1; i >= 0; i-- {
-		raw := s.deleteJournal[i]
+	for i := len(s.deleteJournal.entries) - 1; i >= 0; i-- {
+		raw := s.deleteJournal.entries[i]
 		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV6 {
 			continue
 		}
