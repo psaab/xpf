@@ -15,10 +15,13 @@
 
 use super::summarize_queues;
 use crate::afxdp;
-use crate::protocol::{BindingCountersSnapshot, ProcessStatus, UserspaceCapabilities};
+use crate::protocol::{
+    BindingCountersSnapshot, ControlResponse, ProcessStatus, UserspaceCapabilities,
+};
 use crate::server::ServerState;
 use chrono::Utc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 pub(crate) fn refresh_status(state: &mut ServerState) {
     state.afxdp.refresh_bindings(&mut state.status.bindings);
@@ -888,6 +891,56 @@ pub(crate) fn restore_binding_arm_state(status: &mut ProcessStatus, prior: Bindi
             binding.last_change = last_change;
         }
     }
+}
+
+/// #17126: the shared commit-requested-state / reconcile / roll-back-on-error
+/// tail for the three binding verbs that commit requested arm/registration
+/// bits into `guard.status` before reconciling (`set_forwarding_state`,
+/// `set_binding_state`, `set_queue_state`). #6750 unified only the
+/// capture/restore step (`BindingArmSnapshot`); the error/settle/persist tail
+/// stayed open-coded in three copies, so a fourth reconcile verb or a fifth
+/// outcome rule would repeat the lockstep edit. This helper owns that tail —
+/// the same principle b4465fc7d3 stated for the restore step: a divergence
+/// between the copies could only ever be a bug, never a policy difference.
+///
+/// `settle` is whether a successful reconcile owes the 2 s binding-settle
+/// wait: forwarding settles only when arming, binding/queue settle whenever
+/// the registration changed (their callers only reach here in that case).
+///
+/// On `Err`: `ok=false` with `"<verb> reconcile failed: {err}"` (#5621/#6135),
+/// the prior snapshot captured before the commit is restored (#6750),
+/// status is refreshed, and neither settle nor persist is set — the caller
+/// returns without persisting a success it did not achieve. On success:
+/// settle (if owed), refresh, persist.
+///
+/// Excluded by design: `rebind` commits no requested state (it clears
+/// runtime bits that `refresh_status` re-derives), and
+/// `update_ha_state` applies through `afxdp.update_ha_state`, not this
+/// reconcile — neither shares this tail.
+pub(crate) fn finish_binding_reconcile(
+    guard: &mut ServerState,
+    response: &mut ControlResponse,
+    verb: &str,
+    prior: BindingArmSnapshot,
+    settle: bool,
+    persist_state: &mut bool,
+    settle_wait: &mut Option<Duration>,
+) {
+    if let Err(err) = reconcile_status_bindings(guard) {
+        response.ok = false;
+        response.error = format!("{verb} reconcile failed: {err}");
+        // #6750: roll the requested state back BEFORE refreshing, so the
+        // refreshed status describes what the sockets are actually doing
+        // and Go's 1 Hz poll sees the mismatch that drives a retry.
+        restore_binding_arm_state(&mut guard.status, prior);
+        refresh_status(guard);
+        return;
+    }
+    if settle {
+        *settle_wait = Some(Duration::from_secs(2));
+    }
+    refresh_status(guard);
+    *persist_state = true;
 }
 
 pub(crate) fn set_bindings_forwarding_armed(status: &mut ProcessStatus, armed: bool) {
