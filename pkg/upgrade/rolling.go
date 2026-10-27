@@ -8,38 +8,16 @@ import (
 )
 
 // targetWireVerdict judges a TARGET binary's protocol constants (from its
-// `protocol-versions` probe) against the still-running peer (#14991). HA is
-// a window check (peer in [target floor, target HA]) and the session-sync
-// wire is exact-match — the same rules GateMixedBaseSwap applies to an
-// image, because after the cut it is the target, not the running daemon,
-// that must decode the peer's frames. An UNKNOWN peer wire (0, pre-#7990)
-// permits, mirroring cluster.SessionSyncWireCompatible; an unknown peer HA
-// (0/absent) refuses. A target that cannot prove its own constants is an
-// ERROR (the check cannot run), never a refusal about the peer.
+// `protocol-versions` probe) against the still-running peer (#14991). It is
+// a thin adapter over GateProtocolCompat (the single Go rule, #17091)
+// passing PermitUnknownWire: an unknown peer wire (0, pre-#7990) permits,
+// mirroring cluster.SessionSyncWireCompatible, because refusing would
+// block every roll from a pre-#7990 release; an unknown peer HA (0/absent)
+// refuses. A target that cannot prove its own constants is an ERROR (the
+// check cannot run), never a refusal about the peer.
 func targetWireVerdict(target *ImageVersions, peerWire uint16, peerHA uint16) (bool, string, error) {
-	if target == nil {
-		return false, "", fmt.Errorf("target binary protocol versions unavailable — the staged-target compatibility check cannot run")
-	}
-	for _, k := range requiredKeys {
-		if !target.has(k) {
-			return false, "", fmt.Errorf("target binary protocol versions missing %q — the staged-target compatibility check cannot run", k)
-		}
-	}
-	if peerHA == 0 {
-		return false, "peer HA protocol unknown (peer not advertising) — fail closed", nil
-	}
-	if peerHA < target.HAProtocolMinCompat || peerHA > target.HAProtocol {
-		return false, fmt.Sprintf("peer HA protocol %d outside target window [%d,%d] — the target binary cannot interoperate with the peer; use image-replace",
-			peerHA, target.HAProtocolMinCompat, target.HAProtocol), nil
-	}
-	if peerWire == 0 {
-		return true, "peer advertises no session-sync wire version (predates #7990) — permitted against the target binary", nil
-	}
-	if int(peerWire) != target.SessionSyncProtocol {
-		return false, fmt.Sprintf("target session-sync wire version %d differs from peer %d — after the cut the target could not decode the peer's synced sessions; use image-replace",
-			target.SessionSyncProtocol, peerWire), nil
-	}
-	return true, "target binary is protocol-compatible with the peer", nil
+	v := GateProtocolCompat(target, peerHA, peerWire, PermitUnknownWire)
+	return v.Compatible, v.Reason, v.Err
 }
 
 // checkTargetCompatible probes targetBin and refuses (pre-demotion) when

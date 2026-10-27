@@ -38,7 +38,7 @@ var syncMagic = [4]byte{'B', 'P', 'S', 'Y'}
 // leaves heartbeat/failover semantics alone.
 //
 // The split matters because the mixed-base gate checks the two DIFFERENTLY
-// (upgrade.GateMixedBaseSwap, mirrored in scripts/deploy/xpf-deploy.py):
+// (upgrade.GateProtocolCompat, executed for LANE-2 by _gate_mixed_base in scripts/deploy/xpf-deploy.py):
 // the HA protocol is accepted over a WINDOW [MinCompatHAProtocolVersion,
 // CurrentHAProtocolVersion], while the session-sync version must match EXACTLY.
 // Welded together, a session-wire-only change was forced to push the HA version
@@ -57,7 +57,7 @@ var syncMagic = [4]byte{'B', 'P', 'S', 'Y'}
 // upgrade.
 //
 // The bump is deliberately on THIS counter and not on
-// CurrentHAProtocolVersion. GateMixedBaseSwap treats them differently:
+// CurrentHAProtocolVersion. GateProtocolCompat treats them differently:
 // session-sync must match EXACTLY, so bumping here is what makes the mixed-base
 // swap refuse up front instead of letting an operator discover a fabric that
 // will not come up. The HA protocol is accepted over a window

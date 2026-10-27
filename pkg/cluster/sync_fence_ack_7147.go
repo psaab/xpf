@@ -94,7 +94,7 @@ import (
 //     unaffected by its presence. The #2170 trailing-field discipline.
 //  3. Bumping would be actively harmful. MinCompatHAProtocolVersion ==
 //     CurrentHAProtocolVersion today, so the accepted HA window is a single
-//     point; GateMixedBaseSwap refuses when peerHAProtocol is outside
+//     point; GateProtocolCompat refuses when peerHAProtocol is outside
 //     [MinCompat, Current]. A bump makes the window [N+1, N+1] and refuses a
 //     peer at N — the bump itself would break the rolling upgrade this feature
 //     has to survive, converting a narrowing bug into an outage (#6650 records

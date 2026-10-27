@@ -95,7 +95,7 @@ func TestDrainProceedsOnCompatibleSessionSyncWire7990(t *testing.T) {
 // allowMixedHA must NOT disable this gate. That flag exists because the LANE-2
 // mixed-base gate already validated the HA WINDOW and exact-equality would
 // wrongly abort the second node; it says nothing about the session wire, which
-// GateMixedBaseSwap checks for EXACT equality in both cases. Reusing it here
+// GateProtocolCompat checks for EXACT equality in both cases. Reusing it here
 // would silently disable this gate on the path that most needs it.
 func TestAllowMixedHADoesNotBypassSessionSyncGate7990(t *testing.T) {
 	t.Parallel()

@@ -997,7 +997,7 @@ it too.
 
 **This is a FLAG DAY.** A pre-#7163 peer sends the old HELLO, which is not a
 valid Noise message, so the handshake fails and the connection drops.
-`SessionSyncWireVersion` is bumped 1 → 2 so `GateMixedBaseSwap` refuses a
+`SessionSyncWireVersion` is bumped 1 → 2 so the mixed-base gate (`GateProtocolCompat`, via `_gate_mixed_base`) refuses a
 mixed-base swap up front instead of letting an operator discover it as a fabric
 that will not come up. `CurrentHAProtocolVersion` is deliberately NOT bumped:
 that would additionally refuse the peer over heartbeat/failover semantics this
@@ -3548,7 +3548,7 @@ takeover gate, and the marker clears when a peer heartbeat returns.
   No `SessionSyncWireVersion` / `CurrentHAProtocolVersion` bump, for the same
   reason as #2239 and #6650 below: `MinCompatHAProtocolVersion ==
   CurrentHAProtocolVersion`, so the accepted window is a single point and a
-  bump would make `GateMixedBaseSwap` refuse the rolling upgrade.
+  bump would make `GateProtocolCompat` refuse the rolling upgrade.
 - **The ack means peer-CONFIRMED, not received.** It is written only after the
   receiver's `fenceAllRedundancyGroups` returns, and reports what that
   achieved. The decoder REFUSES a short frame rather than zero-filling it:
