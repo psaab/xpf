@@ -77,12 +77,13 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	var clearDeferWorkers func()
 	rethToPhys := cfg.RethToPhysical()
 	rethMACIndexes := cfg.RethMACIndexes()
+	rethRGOwners := cfg.RethRGOwners() // #17086 SSOT for the MAC loops below
 
 	if d.cluster != nil && cfg.Chassis.Cluster != nil && d.dataplane() != nil {
 		cc := cfg.Chassis.Cluster
 		for rethName, physName := range rethToPhys {
-			rethCfg, ok := cfg.Interfaces.Interfaces[rethName]
-			if !ok || rethCfg == nil || rethCfg.RedundancyGroup <= 0 {
+			rethRG, owned := rethRGOwners[rethName]
+			if !owned || rethRG <= 0 {
 				continue
 			}
 			rethIndex, ok := rethMACIndexes[rethName]
@@ -95,7 +96,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			if err != nil {
 				continue
 			}
-			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, rethIndex, cc.NodeID)
+			mac := cluster.RethMAC(cc.ClusterID, rethRG, rethIndex, cc.NodeID)
 			if !bytes.Equal(link.Attrs().HardwareAddr, mac) {
 				rethMACPending = true
 				break
@@ -491,8 +492,8 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		// rollback of a prepare whose cycle then aborted.
 
 		for rethName, physName := range rethToPhys {
-			rethCfg, ok := cfg.Interfaces.Interfaces[rethName]
-			if !ok || rethCfg == nil || rethCfg.RedundancyGroup <= 0 {
+			rethRG, owned := rethRGOwners[rethName]
+			if !owned || rethRG <= 0 {
 				continue
 			}
 			rethIndex, ok := rethMACIndexes[rethName]
@@ -501,8 +502,8 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				continue
 			}
 			linuxName := config.LinuxIfName(physName)
-			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, rethIndex, cc.NodeID)
-			legacyMAC := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, 0, cc.NodeID)
+			mac := cluster.RethMAC(cc.ClusterID, rethRG, rethIndex, cc.NodeID)
+			legacyMAC := cluster.RethMAC(cc.ClusterID, rethRG, 0, cc.NodeID)
 			memberHadVirtualMAC := false
 			// If the interface doesn't exist under its config name, find it by
 			// its indexed MAC, or by the legacy shared MAC when upgrading.
@@ -576,7 +577,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				d.programRethMemberMAC(linuxName, mac, result.Phase.Networkd,
 					needLinkCycleRecovery, rethRollbackKeptLease)
 			if memberMACChanged {
-				macChangedRGs[rethCfg.RedundancyGroup] = true
+				macChangedRGs[rethRG] = true
 			}
 			trackedMember := memberMACChanged || memberHadVirtualMAC
 			if !trackedMember {
@@ -591,6 +592,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				}
 				d.lastRethMembers[linuxName] = struct{}{}
 			}
+			rethCfg := cfg.Interfaces.Interfaces[rethName]
 			if err := d.finishRethMemberLinkTail(linuxName, mac, rethCfg); err != nil {
 				result.Phase.Networkd = errors.Join(result.Phase.Networkd, err)
 			}
