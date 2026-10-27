@@ -122,6 +122,16 @@ func raClusterStore(t *testing.T, prefix string) *configstore.Store {
 		"set chassis cluster cluster-id 1\n" +
 			"set chassis cluster authentication-key test-cluster-psk-6611\n" +
 			"set chassis cluster node 0\n" +
+			// #18053: complete control link for the #16746 gate. Inert
+			// for these cells — RG ownership is driven via
+			// SetVRRP/rg-state, never elected; the config only feeds
+			// reth→RG and RA-source attribution. The hier per-node
+			// fixture below arrives via SyncApply (lenient), so it
+			// needs no keying; every strict Commit() in this file goes
+			// through this fixture or re-commits on its store.
+			"set chassis cluster control-interface em0\n" +
+			"set chassis cluster peer-address 10.99.0.2\n" +
+			"set interfaces em0 unit 0 family inet address 10.99.0.1/24\n" +
 			"set chassis cluster redundancy-group 1 node 0 priority 200\n" +
 			"set chassis cluster redundancy-group 1 node 1 priority 100\n" +
 			"set interfaces reth0 vlan-tagging\n" +

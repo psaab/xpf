@@ -472,7 +472,16 @@ func (c *xpfCollector) emitUserspaceSourceNATPoolMetrics(ch chan<- prometheus.Me
 			prometheus.CounterValue, float64(pool.ExhaustionTotal), labels...)
 		c.emitConstMetric(ch, c.userspaceSNATPoolIdleLeaseImportCapacityTotal,
 			prometheus.CounterValue, float64(pool.IdleLeaseImportCapacityTotal), labels...)
-		// #4800: always emit the denominator and contended subset together.
+		// #4800/#17036: emit each split denominator/contended pair together,
+		// plus the legacy summed pair for one release.
+		c.emitConstMetric(ch, c.userspaceSNATPoolFlowShardLockAcquisitionsTotal,
+			prometheus.CounterValue, float64(pool.FlowShardLockAcquisitionsTotal), labels...)
+		c.emitConstMetric(ch, c.userspaceSNATPoolFlowShardLockContendedTotal,
+			prometheus.CounterValue, float64(pool.FlowShardLockContendedTotal), labels...)
+		c.emitConstMetric(ch, c.userspaceSNATPoolLiveWriteLockAcquisitionsTotal,
+			prometheus.CounterValue, float64(pool.LiveWriteLockAcquisitionsTotal), labels...)
+		c.emitConstMetric(ch, c.userspaceSNATPoolLiveWriteLockContendedTotal,
+			prometheus.CounterValue, float64(pool.LiveWriteLockContendedTotal), labels...)
 		c.emitConstMetric(ch, c.userspaceSNATPoolLiveLockAcquisitionsTotal,
 			prometheus.CounterValue, float64(pool.LiveLockAcquisitionsTotal), labels...)
 		c.emitConstMetric(ch, c.userspaceSNATPoolLiveLockContendedTotal,

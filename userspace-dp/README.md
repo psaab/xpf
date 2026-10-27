@@ -246,28 +246,38 @@ logging rules, not these specific hot-path constants.
   Fail-on-revert: `pool_snat_subnet_expands_full_cidr_range`,
   `pool_snat_host_cidr_yields_single_address`, and
   `pool_snat_overbroad_prefix_marks_invalid` in `src/nat/tests.rs`.
-- **Source-NAT port allocation is lock-free (#2852 Phase 1)**: port
-  ownership is a per-pool-address atomic occupancy bitmap
-  (`AddressOccupancy` in `src/nat/allocator.rs`: `Vec<AtomicU64>` + an
-  atomic fresh-port cursor). A `fetch_or` CAS on the bit IS the ownership
-  token — a set bit cannot be re-claimed — so the port CLAIM (forward-
-  probe cursor + recycle drain) runs WITHOUT the global mutex. The
-  non-persistent new-flow hot path claims its port lock-free and takes the
-  retained `Mutex<PortAllocatorLiveState>` only for a tiny
-  reuse-check + exact-cap-check + `live_by_flow` insert. The global
-  tracked-flow cap (F4) is `live_by_flow.len()` re-checked under that tiny
-  mutex, so it is EXACT — no M-in-flight overshoot, and a tiny pool near
-  capacity is never falsely exhausted. The pre-#2852 single mutex
-  serialized every claim (`owner_by_translated` +
-  `next_port_offset_by_addr` maps under one lock) and negative-scaled
-  (microbench: 2.87M→0.62M allocs/sec, M=1→8); Phase 1 is 1.4–1.6× at
-  M=6/8 (`docs/research/2852-portalloc/microbench-results.md`). Persistent
-  NAT keeps its lease decision + claim atomic under the mutex (the cold
-  path); Phase 2 (hash-sharding the maps) stays deferred. Fail-on-revert:
+- **Source-NAT port allocation is lock-free (#2852 Phase 1) with a
+  sharded live-flow map (#15956 Phase 2, landed)**: port ownership is a
+  per-pool-address atomic occupancy bitmap (`AddressOccupancy` in
+  `src/nat/allocator/`: `Vec<AtomicU64>` + an atomic fresh-port cursor).
+  A `fetch_or` CAS on the bit IS the ownership token — a set bit cannot
+  be re-claimed — so the port CLAIM (forward-probe cursor + recycle
+  drain) runs WITHOUT any allocator lock. What stays locked, in
+  `src/nat/allocator/mod.rs` + `flows.rs`: the live-flow map lives in 16
+  `Mutex` shards (`LiveFlowMap`), and persistent-lease / ownership / GC
+  state stays under the retained `RwLock<PortAllocatorLiveState>`
+  (`live`). The non-persistent new-flow hot path claims its port
+  lock-free, then takes the `live` write guard by counted `try_write`
+  plus its flow's counted shard mutex (live→shard order) for the
+  reuse-check, wire-identity/owner publication and shard insert; a
+  contended `try_write` releases the unpublished claim and falls back
+  to the serialized `lock_live()` path. Read-only consumers take the
+  `RwLock` read guard concurrently. The global tracked-flow cap (F4) is
+  the sharded map's atomic admission counter (`admit_one`) plus its
+  tracked count re-checked under the held shard, so it is EXACT — no
+  cross-shard overshoot, and a tiny pool near capacity is never falsely
+  exhausted. Persistent NAT keeps its lease decision + claim atomic
+  under the `live` write guard (the cold path). Counted lock telemetry
+  is split by domain (#17036): `flow_shard_lock_*` and
+  `live_write_lock_*` Prometheus pairs, with the legacy `live_lock_*`
+  pair kept as their documented sum for one release — do not use the
+  summed ratio for the #15956 perf gate. Fail-on-revert:
   `pool_snat_lockfree_concurrent_fill_is_exact_and_collision_free`,
   `pool_snat_lockfree_concurrent_churn_no_double_alloc_no_leak`,
   `pool_snat_release_frees_bit_and_port_is_reusable`,
-  `pool_snat_fills_to_exact_capacity_then_exhausts` in `src/nat/tests_pool.rs`.
+  `pool_snat_fills_to_exact_capacity_then_exhausts` in `src/nat/tests_pool.rs`,
+  and `fast_path_allocation_counts_split_lock_domains_17036`,
+  `persistent_mint_counts_live_write_lock_17036` in `src/nat/tests_newflow_lock.rs`.
 - **Source-NAT port recycling is FIFO (#3011)**: freed SNAT source
   ports go into a per-address `VecDeque` (`AddressOccupancy::recycle` in
   `src/nat/allocator.rs`, behind a per-ADDRESS mutex — NOT the global

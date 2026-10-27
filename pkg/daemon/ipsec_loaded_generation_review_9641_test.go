@@ -136,7 +136,9 @@ func TestAttributionKeepsThePromotedConfigForIdenticalConnections9641(t *testing
 	if ipsecVPNRedundancyGroup(c0, c0.Security.IPsec.VPNs["same"]) != 1 || ipsecVPNRedundancyGroup(c1, c1.Security.IPsec.VPNs["same"]) != 2 {
 		t.Fatal("FIXTURE: the gateway must move from RG1 to RG2")
 	}
-	list := "list-conn event {same {local_addrs=[10.0.9.9] remote_addrs=[198.51.100.9] version=IKEv1/2 " +
+	// #18053: since #15024 the connection loads under its gateway name
+	// (gw-x), not the VPN name (same) — see listBlue9641.
+	list := "list-conn event {gw-x {local_addrs=[10.0.9.9] remote_addrs=[198.51.100.9] version=IKEv1/2 " +
 		"local-1 {class=pre-shared key} remote-1 {class=pre-shared key} children {same {mode=TUNNEL}}}}\n"
 	ch := &charon9641{marker: d0, conns: list}
 	d := daemonAskingCharon9641(t, store, ch, 1)

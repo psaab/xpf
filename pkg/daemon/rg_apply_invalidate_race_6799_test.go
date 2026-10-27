@@ -255,9 +255,6 @@ func (h *midApplyFenceHA) SetRGActive(_ context.Context, rgID int, active bool) 
 }
 
 func (h *midApplyFenceHA) SetHAWatchdog(_ context.Context, _ int, _ uint64) error { return nil }
-func (h *midApplyFenceHA) SetFabricForwarding(_ context.Context, _ dataplane.FabricID, _ dataplane.FabricFwdInfo) error {
-	return nil
-}
 func (h *midApplyFenceHA) SyncFabricState(_ context.Context) error { return nil }
 
 func (h *midApplyFenceHA) countOf(w rgActiveWrite) int {

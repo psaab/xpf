@@ -93,23 +93,59 @@ func (c *xpfCollector) initNATDescriptors() {
 		"Total HA idle-lease imports refused because the bounded persistent-lease table remained full after pressure GC.",
 		[]string{"pool", "rule"}, nil,
 	)
+	c.userspaceSNATPoolFlowShardLockAcquisitionsTotal = prometheus.NewDesc(
+		"xpf_userspace_source_nat_pool_flow_shard_lock_acquisitions_total",
+		"Counted acquisitions of this source NAT pool's flow-shard mutexes "+
+			"(one of 16 shards, #15956) on the counted production paths. The "+
+			"DENOMINATOR for the flow-shard contended counter below: a "+
+			"contention rate is only interpretable against the acquisition "+
+			"rate that produced it. Excludes uncounted shard sites and the "+
+			"status-poll snapshot (#4800/#17036).",
+		[]string{"pool", "rule"}, nil,
+	)
+	c.userspaceSNATPoolFlowShardLockContendedTotal = prometheus.NewDesc(
+		"xpf_userspace_source_nat_pool_flow_shard_lock_contended_total",
+		"Subset of counted flow-shard mutex acquisitions that found the "+
+			"shard already held and had to block. Divided by "+
+			"..._flow_shard_lock_acquisitions_total this is the sharded "+
+			"flow-map share of new-flow-install serialization (#4800/#17036).",
+		[]string{"pool", "rule"}, nil,
+	)
+	c.userspaceSNATPoolLiveWriteLockAcquisitionsTotal = prometheus.NewDesc(
+		"xpf_userspace_source_nat_pool_live_write_lock_acquisitions_total",
+		"Counted write acquisitions of this source NAT pool's live-state "+
+			"RwLock (persistent-lease/ownership/GC state, #15956) on the "+
+			"counted production paths, including the non-persistent fast "+
+			"path's counted try_write. The DENOMINATOR for the live-write "+
+			"contended counter below. Excludes read guards and the "+
+			"status-poll snapshot (#4800/#17036).",
+		[]string{"pool", "rule"}, nil,
+	)
+	c.userspaceSNATPoolLiveWriteLockContendedTotal = prometheus.NewDesc(
+		"xpf_userspace_source_nat_pool_live_write_lock_contended_total",
+		"Subset of counted live-state RwLock write acquisitions that found "+
+			"the write guard unavailable and had to block (or, on the fast "+
+			"path try_write, contended and fell back). Divided by "+
+			"..._live_write_lock_acquisitions_total this is the live-write "+
+			"share of new-flow-install serialization (#4800/#17036).",
+		[]string{"pool", "rule"}, nil,
+	)
 	c.userspaceSNATPoolLiveLockAcquisitionsTotal = prometheus.NewDesc(
 		"xpf_userspace_source_nat_pool_live_lock_acquisitions_total",
-		"Acquisitions of this source NAT pool's residual live-state mutex "+
-			"on the helper's production allocate/reserve/release/rollback/GC "+
-			"paths. The DENOMINATOR for the contended counter below: a "+
-			"contention rate is only interpretable against the acquisition "+
-			"rate that produced it. Excludes the status-poll snapshot, which "+
-			"reads these very counters (#4800).",
+		"Legacy summed counted lock acquisitions for this source NAT pool: "+
+			"flow-shard plus live-write acquisitions (#17036). Kept for one "+
+			"release for dashboard continuity. Do NOT use its ratio for the "+
+			"#15956 perf gate — since #15956 it mixes two lock domains; use "+
+			"the flow_shard_lock and live_write_lock pairs instead.",
 		[]string{"pool", "rule"}, nil,
 	)
 	c.userspaceSNATPoolLiveLockContendedTotal = prometheus.NewDesc(
 		"xpf_userspace_source_nat_pool_live_lock_contended_total",
-		"Subset of source NAT pool live-state mutex acquisitions that found "+
-			"the mutex already held and had to block. Divided by "+
-			"..._live_lock_acquisitions_total this is the NAT allocator's "+
-			"share of new-flow-install serialization — the measurement the "+
-			"#2852 Phase-2 sharding decision is gated on (#4800).",
+		"Legacy summed counted lock contended acquisitions for this source "+
+			"NAT pool: flow-shard plus live-write contended acquisitions "+
+			"(#17036). Kept for one release. Do NOT divide by "+
+			"..._live_lock_acquisitions_total for the #15956 perf gate — "+
+			"the population mixes two lock domains; use the split pairs.",
 		[]string{"pool", "rule"}, nil,
 	)
 	c.userspaceSNATPoolRecycleScanPopsTotal = prometheus.NewDesc(

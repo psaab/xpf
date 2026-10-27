@@ -8,7 +8,7 @@ import (
 
 // RED batch: IP classifier for the S5 capture actor (r6 §4.3 per-flow FIFO
 // keys, r5 §6.8 fragment contract inputs). The actor builds FlowKey and
-// FragmentKey/Fragment from ClassifyCapturePayload; unparseable input must
+// FragmentKey from ClassifyCapturePayload; unparseable input must
 // fail loudly so the actor can fall back instead of mis-keying a flow.
 
 func classifyV4Packet(t *testing.T, id uint16, flagsFrag uint16, proto byte, src, dst net.IP, extra ...byte) []byte {
@@ -93,9 +93,8 @@ func TestClassifyV4FragmentsShareDatagramKey9506(t *testing.T) {
 	if key.Version != 4 || key.Tunnel != 3 || key.Generation != 9 || key.ID != 77 {
 		t.Fatalf("fragment key = %+v", key)
 	}
-	piece, ok := b.FragmentPiece(second)
-	if !ok || piece.Offset != 8 || piece.More || len(piece.Data) != 8 {
-		t.Fatalf("second piece = %+v ok=%v", piece, ok)
+	if !b.HasPayload() {
+		t.Fatal("second fragment must report payload")
 	}
 }
 
@@ -371,10 +370,8 @@ func TestClassifyV6FragmentNonTransportProtocols10897(t *testing.T) {
 			if _, ok := got.FragmentKey(7, 2, 9); !ok {
 				t.Fatal("fragment classification has no fragment key")
 			}
-			piece, ok := got.FragmentPiece(packet)
-			if !ok || !piece.More || piece.Offset != 0 ||
-				string(piece.Data) != string([]byte{1, 2, 3, 4}) {
-				t.Fatalf("fragment piece = %+v, ok=%v", piece, ok)
+			if !got.HasPayload() {
+				t.Fatal("fragment must report payload")
 			}
 		})
 	}
@@ -435,9 +432,8 @@ func TestClassifyV6FragmentBehindExtChain13976(t *testing.T) {
 			} else if got.HasPorts {
 				t.Fatalf("non-first fragment must not expose ports: %+v", got)
 			}
-			piece, ok := got.FragmentPiece(tc.pkt)
-			if !ok || piece.Offset != got.FragOffset || len(piece.Data) == 0 {
-				t.Fatalf("piece = %+v ok=%v class=%+v", piece, ok, got)
+			if !got.HasPayload() {
+				t.Fatalf("fragment behind chain must report payload: %+v", got)
 			}
 		})
 	}

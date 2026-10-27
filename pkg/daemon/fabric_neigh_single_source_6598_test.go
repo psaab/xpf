@@ -63,19 +63,22 @@ func TestFabricNeighPredicateHasOneDefinition_6598(t *testing.T) {
 			fabricSourceFile6598, strings.Join(nudIdents, "\n\t"))
 	}
 
-	// Direction 2: it delegates at every site it used to check. Without this,
+	// Direction 2: it delegates at every site it still checks. Without this,
 	// DELETING the validity checks outright would satisfy direction 1 — the
 	// predicate would be gone rather than shared, which is the same fail-open
 	// this issue exists to close.
-	// The five sites: the ARP/NDP probe gate, the link-local candidate filter,
-	// fab0's overlay and parent address-matched legs, and fab1's address-matched
-	// leg. Enumerated rather than lower-bounded so that REMOVING a check fails
-	// here even though adding one also does — the count is a census of the
-	// decisions this file makes, and it should change only deliberately.
-	const wantCalls = 5
+	// After #17044 the daemon no longer resolves the peer itself: the live
+	// resolver in pkg/dataplane/userspace does, and it gates through the same
+	// predicate. The two remaining daemon sites are the ARP/NDP probe gate
+	// and the address-matched identity scan that arms the resolver's
+	// link-local constraint. Enumerated rather than lower-bounded so that
+	// REMOVING a check fails here even though adding one also does — the
+	// count is a census of the decisions this file makes, and it should
+	// change only deliberately.
+	const wantCalls = 2
 	if usableCalls != wantCalls {
 		t.Errorf("%s calls dpuserspace.FabricNeighUsable %d times, want %d "+
-			"(probe gate, link-local filter, fab0 overlay, fab0 parent, fab1); "+
+			"(probe gate, identity scan); "+
 			"a dropped call is a neighbour-validity check that silently went away (#6598)",
 			fabricSourceFile6598, usableCalls, wantCalls)
 	}

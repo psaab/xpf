@@ -1796,7 +1796,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 
 // stopClusterComms tears down heartbeat and session sync so they can be
 // restarted with new transport settings (#87). Cancels the comms sub-context
-// (which stops retry loops, fabric_fwd refresh, IPsec SA sync, sync sweep)
+// (which stops retry loops, fabric peer refresh, IPsec SA sync, sync sweep)
 // and explicitly stops heartbeat + session sync listeners/connections.
 //
 // #4958: the teardown is epoch-safe. Under clusterCommsMu it first bumps

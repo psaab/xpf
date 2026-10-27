@@ -42,6 +42,10 @@ def snap(
     exhaustion=0,
     nat_acq=0,
     nat_blocked=0,
+    shard_acq=None,
+    shard_blocked=None,
+    write_acq=None,
+    write_blocked=None,
     pub_calls=0,
     pub_acq=0,
     pub_blocked=0,
@@ -61,6 +65,10 @@ def snap(
         "pool": {
             "allocations_total": allocations,
             "exhaustion_total": exhaustion,
+            "flow_shard_lock_acquisitions_total": nat_acq // 2 if shard_acq is None else shard_acq,
+            "flow_shard_lock_contended_total": nat_blocked // 2 if shard_blocked is None else shard_blocked,
+            "live_write_lock_acquisitions_total": nat_acq - nat_acq // 2 if write_acq is None else write_acq,
+            "live_write_lock_contended_total": nat_blocked - nat_blocked // 2 if write_blocked is None else write_blocked,
             "live_lock_acquisitions_total": nat_acq,
             "live_lock_contended_total": nat_blocked,
         },
@@ -144,7 +152,7 @@ class AttributionNamesEverySaturatedSite(unittest.TestCase):
         self.assertIn("replicate_session_upsert", a.culprits)
         # And NAT must not be swept in with them — that is the whole #2852
         # Phase-2 question.
-        self.assertNotIn("nat_allocator_live_mutex", a.culprits)
+        self.assertNotIn("nat_allocator_flow_shard", a.culprits)
         # Ratio-descending, so the reader sees the worse one first.
         self.assertEqual(
             a.culprits[:2], ["replicate_session_upsert", "publish_shared_session"]
@@ -178,7 +186,8 @@ class AttributionNamesEverySaturatedSite(unittest.TestCase):
         self.assertEqual(
             names,
             [
-                "nat_allocator_live_mutex",
+                "nat_allocator_flow_shard",
+                "nat_allocator_live_write",
                 "publish_shared_session",
                 "replicate_session_upsert",
                 # #9169: the fourth site. The claim this cell makes — a cold
@@ -191,7 +200,7 @@ class AttributionNamesEverySaturatedSite(unittest.TestCase):
         es = next(s for s in a.sites if s.name == "event_stream_producer_seq")
         self.assertAlmostEqual(es.ratio, 0.005)
         self.assertFalse(es.saturated)
-        nat = next(s for s in a.sites if s.name == "nat_allocator_live_mutex")
+        nat = next(s for s in a.sites if s.name == "nat_allocator_flow_shard")
         self.assertAlmostEqual(nat.ratio, 0.01)
         self.assertFalse(nat.saturated)
 
@@ -282,12 +291,42 @@ class AttributionNamesEverySaturatedSite(unittest.TestCase):
             sorted(a.culprits),
             sorted(
                 [
-                    "nat_allocator_live_mutex",
+                    "nat_allocator_flow_shard",
+                    "nat_allocator_live_write",
                     "publish_shared_session",
                     "replicate_session_upsert",
                 ]
             ),
         )
+
+    def test_shard_saturation_is_not_masked_by_cold_live_write_17036(self):
+        """#17036: the split domains must vote separately.
+
+        Shard domain saturates (50%) while live-write stays cold; the
+        summed legacy pair would dilute the shard ratio. Only the
+        shard site may be named. RED on revert to the summed site:
+        the legacy ratio is 25% over the combined denominator only if
+        both domains are summed — with a colder write domain it drops
+        below naming the true culprit, and the site name is wrong.
+        """
+        a = analyze(
+            snap(0.0, workers=six_even_workers(0)),
+            snap(
+                10.0,
+                allocations=100_000,
+                shard_acq=200_000,
+                shard_blocked=100_000,
+                write_acq=800_000,
+                write_blocked=0,
+                nat_acq=1_000_000,
+                nat_blocked=100_000,
+                workers=six_even_workers(100_000),
+            ),
+        )
+        self.assertEqual(a.verdict, VALID, a.reasons)
+        self.assertIn("nat_allocator_flow_shard", a.culprits)
+        self.assertNotIn("nat_allocator_live_write", a.culprits)
+        self.assertNotIn("nat_allocator_live_mutex", a.culprits)
 
 
 class NegativeControl(unittest.TestCase):
@@ -865,6 +904,14 @@ xpf_userspace_source_nat_pool_allocations_total{pool="lab-pool",rule="snat"} 987
 xpf_userspace_source_nat_pool_allocations_total{pool="idle-pool",rule="other"} 3
 xpf_userspace_source_nat_pool_exhaustions_total{pool="lab-pool",rule="snat"} 0
 xpf_userspace_source_nat_pool_exhaustions_total{pool="idle-pool",rule="other"} 0
+xpf_userspace_source_nat_pool_flow_shard_lock_acquisitions_total{pool="lab-pool",rule="snat"} 1000000
+xpf_userspace_source_nat_pool_flow_shard_lock_acquisitions_total{pool="idle-pool",rule="other"} 4
+xpf_userspace_source_nat_pool_flow_shard_lock_contended_total{pool="lab-pool",rule="snat"} 20000
+xpf_userspace_source_nat_pool_flow_shard_lock_contended_total{pool="idle-pool",rule="other"} 0
+xpf_userspace_source_nat_pool_live_write_lock_acquisitions_total{pool="lab-pool",rule="snat"} 1000000
+xpf_userspace_source_nat_pool_live_write_lock_acquisitions_total{pool="idle-pool",rule="other"} 5
+xpf_userspace_source_nat_pool_live_write_lock_contended_total{pool="lab-pool",rule="snat"} 20000
+xpf_userspace_source_nat_pool_live_write_lock_contended_total{pool="idle-pool",rule="other"} 0
 xpf_userspace_source_nat_pool_live_lock_acquisitions_total{pool="lab-pool",rule="snat"} 2000000
 xpf_userspace_source_nat_pool_live_lock_acquisitions_total{pool="idle-pool",rule="other"} 9
 xpf_userspace_source_nat_pool_live_lock_contended_total{pool="lab-pool",rule="snat"} 40000
@@ -896,6 +943,10 @@ class ScrapeParsing(unittest.TestCase):
             SCRAPE, timestamp=100.0, pool_name="lab-pool", rule_name="snat", helper_pid=7
         )
         self.assertEqual(s["pool"]["allocations_total"], 987654)
+        self.assertEqual(s["pool"]["flow_shard_lock_acquisitions_total"], 1_000_000)
+        self.assertEqual(s["pool"]["flow_shard_lock_contended_total"], 20_000)
+        self.assertEqual(s["pool"]["live_write_lock_acquisitions_total"], 1_000_000)
+        self.assertEqual(s["pool"]["live_write_lock_contended_total"], 20_000)
         self.assertEqual(s["pool"]["live_lock_acquisitions_total"], 2_000_000)
         self.assertEqual(s["pool"]["live_lock_contended_total"], 40_000)
         self.assertEqual(s["publish"]["lock_contended_total"], 900_000)

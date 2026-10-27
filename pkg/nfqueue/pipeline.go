@@ -143,9 +143,12 @@ type CaptureFrame struct {
 	Packet      *Packet
 	FlowKey     string
 	FragmentKey *FragmentKey
-	Fragment    *Fragment
-	Tunnel      uint32
-	VRF         uint32
+	// FragmentMalformed records that fragment metadata was inconsistent
+	// (e.g. key without payload) at capture time; Drain counts it as a
+	// metadata error before denying the frame (#17045).
+	FragmentMalformed bool
+	Tunnel            uint32
+	VRF               uint32
 	// SnapshotGeneration is the immutable capture authority. ConfigGeneration
 	// and FIBGeneration are the accepted packet/config authority; the separate
 	// P-MECH inventory identity is frozen from that same accepted snapshot.
@@ -287,8 +290,9 @@ type flowState struct {
 	dispatching bool
 }
 
-// fragmentDenyKey is deliberately narrower than the legacy FragPool key. It
-// follows the P-MECH deny tombstone identity and never carries reassembly data.
+// fragmentDenyKey is deliberately narrower than the
+// CaptureClassification.FragmentKey identity. It follows the P-MECH deny
+// tombstone identity and never carries reassembly data.
 type fragmentDenyKey struct {
 	Version    uint8
 	Src        [16]byte
@@ -554,11 +558,14 @@ func (p *CapturePipeline) consumeFrames(frames []CaptureFrame) int {
 			drops = append(drops, frame)
 			continue
 		}
-		if (frame.FragmentKey == nil) != (frame.Fragment == nil) {
+		if frame.FragmentKey == nil && frame.FragmentMalformed {
 			p.stats.FragmentMetadataErrors++
 			p.stats.FragmentDrops++
 			malformedFragments = append(malformedFragments, frame)
 			continue
+		}
+		if frame.FragmentKey != nil && frame.FragmentMalformed {
+			p.stats.FragmentMetadataErrors++
 		}
 		if frame.FragmentKey != nil {
 			p.stats.FragmentDrops++
