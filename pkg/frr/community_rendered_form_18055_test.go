@@ -135,3 +135,30 @@ func TestCommunityTabMemberFailsClosed18055(t *testing.T) {
 		t.Errorf("communityListRenderable rejected a valid literal member")
 	}
 }
+
+// TestCommunityNegatedTabMemberWidensDeliberately18055 (fold of
+// Rev18068Opus F2): the sanitized judgment also WIDENS one class —
+// a negated-class control member like "65000:[^\t]" is raw-refused
+// but its rendered form "[^ ]" is valid, so it now RENDERS instead
+// of being omitted. The emitted bytes are the sanitized form the
+// pattern generator always produced; pin the direction change so
+// it is deliberate, not incidental.
+func TestCommunityNegatedTabMemberWidensDeliberately18055(t *testing.T) {
+	member := "65000:[^\t]"
+	po := communityPolicyPO(
+		map[string]*config.CommunityDef{"NEG": {Name: "NEG", Members: []string{member}}},
+		[]*config.PolicyTerm{
+			{Name: "t-reject", FromCommunity: []string{"NEG"}, Action: "reject"},
+			{Name: "t-accept", Action: "accept"},
+		}, "accept")
+	if !communityListRenderable(po.Communities["NEG"].Members) {
+		t.Fatal("sanitized negated-class member must be renderable")
+	}
+	if communityListMissingAtRender(po, "NEG") {
+		t.Fatal("renderable definition must not report missing")
+	}
+	got := New().generatePolicyOptions(po)
+	if !strings.Contains(got, "community-list expanded NEG") {
+		t.Fatalf("widened member did not render its definition:\n%s", got)
+	}
+}
