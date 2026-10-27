@@ -1,9 +1,12 @@
-// #1327 Step 1: extracted from poll_descriptor.rs (now mod.rs) to a
-// sibling module so the inner-loop driver in mod.rs doesn't have to
-// scroll past 180 LOC of pure telemetry to find the next stage.
-// This is a verbatim move — no behavioural change. The `pub(super)`
-// visibility lets the inner-loop driver in mod.rs call it; nothing
-// else in the crate needs to.
+// Provenance: extracted from poll_descriptor.rs (now mod.rs)
+// at 3b1f56a851 (2026-05-26, #1327 Step 1) to a sibling module
+// so the inner-loop driver in mod.rs doesn't have to scroll
+// past 180 LOC of pure telemetry to find the next stage. At
+// that commit this was a pure move — no behavioural change
+// was made then; the `pub(super)` visibility let the
+// inner-loop driver in mod.rs call it and nothing else in the
+// crate needed to. That is a split-time record, not a claim
+// about the current tree: this file has been edited since.
 
 use super::*;
 
