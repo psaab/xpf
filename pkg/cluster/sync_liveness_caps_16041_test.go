@@ -377,6 +377,14 @@ func TestSyncPayloadCapHeadroom17093(t *testing.T) {
 		syncMsgPersistentNatLeaseDeterministic,
 		syncMsgPersistentNatLeaseProvenance,
 		syncMsgPersistentNatLeaseDeterministicProvenance,
+		// #17099 merge fold: types 52/53 share the same exact
+		// off==len lease decoder (decodeOnePersistentNatLeaseLayoutTyped),
+		// so they are fixed rows too — and they must HAVE rows: without
+		// them syncPayloadCap(52/53) is unknown and a typed frame carrying
+		// nat64_scope text would be read under only the global cap with
+		// no per-type accounting.
+		syncMsgPersistentNatLeaseTypedPool,
+		syncMsgPersistentNatLeaseDeterministicTypedPool,
 	} {
 		for _, d := range syncMsgDescriptors {
 			if d.id == mt && d.growable {
@@ -635,6 +643,7 @@ func TestPerTypePayloadCapRefusedAtHeader16041(t *testing.T) {
 			syncMsgIPsecSA, syncMsgIPsecSAChunk, syncMsgPersistentNatLease, syncMsgPersistentNatLeaseScoped,
 			syncMsgPersistentNatLeaseGeneration, syncMsgPersistentNatLeaseDeterministic,
 			syncMsgPersistentNatLeaseProvenance, syncMsgPersistentNatLeaseDeterministicProvenance,
+			syncMsgPersistentNatLeaseTypedPool, syncMsgPersistentNatLeaseDeterministicTypedPool,
 			syncMsgDHCPLeaseV4, syncMsgDHCPLeaseV6, syncMsgDHCPLeaseV4Chunk, syncMsgDHCPLeaseV6Chunk,
 			syncMsgFailover, syncMsgFailoverAck, syncMsgFailoverCommit, syncMsgFailoverCommitAck,
 			syncMsgFailoverBatch, syncMsgFailoverBatchAck, syncMsgFailoverBatchCommit, syncMsgFailoverBatchCommitAck,

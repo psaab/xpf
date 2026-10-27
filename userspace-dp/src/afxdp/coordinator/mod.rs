@@ -20,7 +20,9 @@ mod tunnel_supervision;
 mod wg_control;
 mod worker_manager;
 pub(crate) use bpf_maps::BpfMaps;
-pub(crate) use idle_lease_sync_8121::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
+pub(crate) use idle_lease_sync_8121::{
+    IdleLeaseImportCounts, LeasePoolId, LeasePoolMode, PoolDisplayLease, PoolIdleLease,
+};
 // #3789: the full-`reconcile` abort outcome, so `server/helpers.rs`
 // (`reconcile_status_bindings`) and the control-socket handler can name
 // the fallible return type.

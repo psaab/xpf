@@ -67,12 +67,19 @@ func (m *Manager) ensurePersistentNatLeaseProtocolLocked(required int, feature s
 }
 
 func (m *Manager) ensurePersistentNatLeasePermissionProtocolLocked() error {
-	// The newest idle-lease wire floor subsumes the earlier permission and
-	// egress-scope fields. Check it once: probing each floor in sequence can
-	// issue a redundant status request after an old helper has already been
-	// observed.
+	// #17099: the typed-pool floor (v77) subsumes mint-from-zone (v75),
+	// paging-independent lease identity fields, and every earlier lease
+	// floor. A v76 helper would drop pool_kind/nat64_prefix/nat64_scope
+	// and the helper would fall back to the positional string parse —
+	// misrouting a same-named source pool and collapsing scoped
+	// same-/96 NAT64 tenants — so lease export/import refuse it.
 	return m.ensurePersistentNatLeaseProtocolLocked(
-		MinProtocolPersistentNatLeaseMintFromZone, "mint-from-zone provenance")
+		MinProtocolPersistentNatLeaseTypedPool, "typed pool identity")
+}
+
+func (m *Manager) ensurePersistentNatLeaseTypedPoolProtocolLocked() error {
+	return m.ensurePersistentNatLeaseProtocolLocked(
+		MinProtocolPersistentNatLeaseTypedPool, "typed pool identity")
 }
 
 func (m *Manager) ensurePersistentNatLeaseScopeProtocolLocked() error {
@@ -478,7 +485,7 @@ func (m *Manager) ExportPersistentLeaseDisplay() ([]DisplayLeaseWire, error) {
 	if m.proc == nil {
 		return nil, errors.New("userspace dataplane helper not running")
 	}
-	if err := m.ensurePersistentNatLeaseScopeProtocolLocked(); err != nil {
+	if err := m.ensurePersistentNatLeaseTypedPoolProtocolLocked(); err != nil {
 		return nil, err
 	}
 	if err := m.ensurePersistentNatLeasePagingProtocolLocked(); err != nil {
