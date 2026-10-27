@@ -157,10 +157,6 @@ impl<E: TunnelThreadEntry> TunnelThreadRegistry<E> {
         self.entries.iter()
     }
 
-    #[cfg(test)]
-    pub(crate) fn keys(&self) -> impl Iterator<Item = &u16> {
-        self.entries.keys()
-    }
     /// Pass 1 (shared): join threads that already exited and tombstone
     /// their entries (keep backoff stamp + attachment; never remove).
     /// Returns the number of entries tombstoned.

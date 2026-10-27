@@ -1157,6 +1157,18 @@ impl super::Coordinator {
     /// helper must not hold WG listen ports — mirror the
     /// `reconcile_status_bindings → stop()` semantics.
     pub(crate) fn stop_all_wg_control_threads(&mut self, reason: &str) {
+        if self.wg_control_threads.is_empty() {
+            return;
+        }
+        // Unpublish-before-join (#10553, mirroring the pre-#17084
+        // `stop_remove_wg_control_entries`): exclude exactly the WG
+        // ids so the published map drops their senders while any live
+        // GRE deliveries are preserved, BEFORE `stop_all` joins any
+        // WG thread. Publishing the empty map here (the GRE sibling's
+        // shape) would wrongly withdraw live GRE deliveries, because
+        // the disarmed refresh leg stops WG before GRE.
+        let wg_ids: Vec<u16> = self.wg_control_threads.iter().map(|(id, _)| *id).collect();
+        self.publish_local_tunnel_deliveries_excluding(&wg_ids);
         self.wg_control_threads.stop_all(reason, || {});
     }
 
