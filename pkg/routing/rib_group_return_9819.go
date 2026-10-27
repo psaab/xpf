@@ -72,12 +72,16 @@ type ribGroupPeerReturnPrefix struct {
 // It returns failures for Apply to aggregate; a failed return rule does not
 // withdraw the forward leak.
 func (rg *ribGroupManager) addRibGroupReturnRules(inst *config.RoutingInstanceConfig, peerPrefixes map[int][]ribGroupPeerReturnPrefix) []error {
-	// applyVRFReconcile creates no VRF device for a forwarding instance or a
-	// reserved name, so there is no VRF context to give a return path to.
-	if inst.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(inst.Name) {
+	if !ribGroupReturnAllowed(inst) {
 		return nil
 	}
 	return installDestinationScopedReturnRules(rg.ops, "rib-group", inst.Name, peerPrefixes)
+}
+
+// ribGroupReturnAllowed reports whether the instance has a VRF device that can
+// own destination-scoped peer-return rules.
+func ribGroupReturnAllowed(inst *config.RoutingInstanceConfig) bool {
+	return inst != nil && inst.InstanceType != "forwarding" && !config.IsReservedRoutingInstanceName(inst.Name)
 }
 
 // installDestinationScopedReturnRules installs `to <peer-prefix> iif|oif

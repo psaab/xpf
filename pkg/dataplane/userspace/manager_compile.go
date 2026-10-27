@@ -304,6 +304,15 @@ func (e *PublishedSnapshotTailError) Error() string {
 
 func (e *PublishedSnapshotTailError) Unwrap() error { return e.err }
 
+// SetRethRecoveryExclusions forwards daemon-owned prior member identities to
+// the shared compiler. The set is copied there and retained across retries
+// until the daemon publishes a later apply's updated record.
+func SetRethRecoveryExclusions(m *Manager, names map[string]struct{}) {
+	if m != nil && m.bpfShim != nil {
+		dataplane.SetRethRecoveryExclusions(m.bpfShim, names)
+	}
+}
+
 func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) {
 	// #15919: a clustered snapshot built before the daemon wires the RG
 	// provider carries no ownership evidence for its RG>0 connected

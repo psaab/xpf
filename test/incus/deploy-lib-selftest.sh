@@ -38,6 +38,9 @@ FAKE_EXECSTART="/usr/local/sbin/xpfd"
 # did NOT happen (no stop, no push to /usr/local/sbin) on the REJECT path — the
 # ordering invariant the pre-flight exists to hold.
 FAKE_VERIFY_RC=0
+FAKE_UID=0
+FAKE_HELPER_SYMLINK=0
+FAKE_HELPER_LINK_UID=0
 # A FILE, not an array: every call under test runs in a subshell (die() exits,
 # so the rc has to be caught), and an array mutated in a subshell is discarded
 # on return. A file survives, so "what did NOT happen" is still assertable
@@ -58,6 +61,9 @@ setup_fake_vm() {
 	FAKE_HELPER_PIDS=""
 	FAKE_EXECSTART="/usr/local/sbin/xpfd"
 	FAKE_VERIFY_RC=0
+	FAKE_UID=0
+	FAKE_HELPER_SYMLINK=0
+	FAKE_HELPER_LINK_UID=0
 	FAKE_CALL_LOG=$(mktemp)
 	FAKE_APT_RC=0
 	FAKE_REJECT_EXISTING=0
@@ -231,6 +237,22 @@ _fake_exec() {
 			;;
 		esac
 		return 0
+		;;
+	stat)
+		shift
+		local stat_uid="$FAKE_UID" followed=0
+		if [[ "$1" == "-L" ]]; then
+			followed=1
+			shift
+		fi
+		if [[ "$1" == "-c" && "$2" == "%u" && -n "$stat_uid" ]]; then
+			if [[ "$FAKE_HELPER_SYMLINK" == "1" && $followed -eq 0 ]]; then
+				stat_uid="$FAKE_HELPER_LINK_UID"
+			fi
+			printf '%s\n' "$stat_uid"
+			return 0
+		fi
+		return 1
 		;;
 	sha256sum)
 		shift
@@ -411,6 +433,81 @@ test_verify_pushed_sha_absent_hardfails() {
 	rm -f "$lb"; teardown_fake_vm
 }
 
+test_verify_pushed_uid_root_passes() {
+	setup_fake_vm
+	FAKE_UID=0
+	if deploy_verify_pushed_uid vm /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp >/dev/null 2>&1; then
+		ok "verify_pushed_uid: root-owned helper passes"
+	else
+		bad "verify_pushed_uid: root-owned helper should pass"
+	fi
+	teardown_fake_vm
+}
+
+test_verify_pushed_uid_nonroot_hardfails() {
+	setup_fake_vm
+	FAKE_UID=1000
+	if ( deploy_verify_pushed_uid vm /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp ) >/dev/null 2>&1; then
+		bad "verify_pushed_uid: non-root helper MUST hard-fail"
+	else
+		ok "verify_pushed_uid: non-root helper hard-fails"
+	fi
+	teardown_fake_vm
+}
+test_verify_pushed_uid_follows_symlink_hardfails() {
+	setup_fake_vm
+	FAKE_UID=1000
+	FAKE_HELPER_SYMLINK=1
+	FAKE_HELPER_LINK_UID=0
+	if ( deploy_verify_pushed_uid vm /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp ) >/dev/null 2>&1; then
+		bad "verify_pushed_uid: must check a symlink target, not its root-owned link"
+	else
+		ok "verify_pushed_uid: follows helper symlink and rejects non-root target"
+	fi
+	teardown_fake_vm
+}
+
+test_verify_pushed_uid_empty_hardfails() {
+	setup_fake_vm
+	FAKE_UID=""
+	if ( deploy_verify_pushed_uid vm /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp ) >/dev/null 2>&1; then
+		bad "verify_pushed_uid: empty readback MUST hard-fail"
+	else
+		ok "verify_pushed_uid: empty readback hard-fails"
+	fi
+	teardown_fake_vm
+}
+
+test_cluster_helper_raw_deploy_uses_root_ownership() {
+	local f="$SCRIPT_DIR/cluster-setup.sh" body
+	body=$(awk '/^deploy_vm\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$f")
+	if [[ -z "$body" ]]; then
+		bad "cluster helper ownership wiring: could not extract deploy_vm"
+		return
+	fi
+	if grep -Fq 'incus file push "$PROJECT_ROOT/xpf-userspace-dp" "${rinst}/usr/local/sbin/xpf-userspace-dp" --uid 0 --gid 0 --mode 0755' <<<"$body" &&
+		grep -Fq 'deploy_verify_pushed_sha "$rinst" "$PROJECT_ROOT/xpf-userspace-dp" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp' <<<"$body" &&
+		grep -Fq 'deploy_verify_pushed_uid "$rinst" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp' <<<"$body"; then
+		ok "cluster helper ownership wiring: root-owned push keeps sha and uid verification"
+	else
+		bad "cluster helper ownership wiring: push must pin uid/gid 0 and verify both sha and uid"
+	fi
+}
+test_standalone_helper_raw_deploy_uses_root_ownership() {
+	local f="$SCRIPT_DIR/setup.sh" body
+	body=$(awk '/^cmd_deploy\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$f")
+	if [[ -z "$body" ]]; then
+		bad "standalone helper ownership wiring: could not extract cmd_deploy"
+		return
+	fi
+	if grep -Fq 'incus file push "$PROJECT_ROOT/xpf-userspace-dp" "$INSTANCE_NAME/usr/local/sbin/xpf-userspace-dp" --uid 0 --gid 0 --mode 0755' <<<"$body" &&
+		grep -Fq 'deploy_verify_pushed_sha "$INSTANCE_NAME" "$PROJECT_ROOT/xpf-userspace-dp" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp' <<<"$body" &&
+		grep -Fq 'deploy_verify_pushed_uid "$INSTANCE_NAME" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp' <<<"$body"; then
+		ok "standalone helper ownership wiring: root-owned push keeps sha and uid verification"
+	else
+		bad "standalone helper ownership wiring: push must pin uid/gid 0 and verify both sha and uid"
+	fi
+}
 
 # #10026 regression: two installs of the same local filename must not reuse a
 # fixed remote /tmp/<basename> destination. The fake Incus rejects overwrite,
@@ -2712,6 +2809,12 @@ test_rolling_rg_ids
 test_verify_pushed_sha_match
 test_verify_pushed_sha_mismatch_hardfails
 test_verify_pushed_sha_absent_hardfails
+test_verify_pushed_uid_root_passes
+test_verify_pushed_uid_nonroot_hardfails
+test_verify_pushed_uid_follows_symlink_hardfails
+test_verify_pushed_uid_empty_hardfails
+test_cluster_helper_raw_deploy_uses_root_ownership
+test_standalone_helper_raw_deploy_uses_root_ownership
 test_deb_repush_uses_distinct_remote_slots
 test_deb_repush_wiring
 test_manifest_node_index_maps_configured_instances

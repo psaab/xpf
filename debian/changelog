@@ -22,6 +22,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Userspace helper startup: retain and execute the validated helper inode
     through an inherited file descriptor, closing the pathname re-resolution
     window between validation and process start (#17881).
+  * daemon: retain failed former-RETH permanent-MAC restorations for retry,
+    surface restore failures as apply errors, preserve actual former-member
+    identity across teardown renames and retire stale markers even when link-up
+    fails, and retain confirmed/legacy MAC owners without absent-member debt (#17890).
   * Policy simulation: exempt from-zone junos-host queries from the
     v4-mapped/compatible IPv6 ingress-drop verdict. Locally-generated
     traffic egresses via the kernel TX path and never traverses the RX

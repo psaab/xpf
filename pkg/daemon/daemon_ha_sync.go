@@ -2028,6 +2028,14 @@ func (d *Daemon) setActiveTransportIfCurrent(gen uint64, k clusterTransportKey) 
 		return false
 	}
 	d.activeClusterTransport = k
+	// Heartbeat starts only when both control-link fields are configured.
+	// In the accepted fabric epoch there is no heartbeat to report peer loss;
+	// clear prior heartbeat-derived liveness here, before address resolution
+	// can take the degraded early-return path. Do this inside the generation
+	// fence so a superseded fabric epoch cannot clear the live epoch's state.
+	if d.cluster != nil && (k.ControlInterface == "" || k.PeerAddress == "") {
+		d.cluster.ClearPeerHeartbeatLiveness()
+	}
 	return true
 }
 
