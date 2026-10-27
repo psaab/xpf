@@ -314,8 +314,10 @@ impl super::Coordinator {
             if exclude.contains(id) || entry.handle.is_none() {
                 continue;
             }
-            if let Some(delivery) = entry.delivery_tx.as_ref() {
-                map.insert(entry.spawned_ifindex, delivery.clone());
+            if let (Some(spawned), Some(delivery)) =
+                (entry.spawned.as_ref(), entry.delivery_tx.as_ref())
+            {
+                map.insert(spawned.ifindex, delivery.clone());
             }
         }
         self.local_tunnel_deliveries.store(Arc::new(map));
@@ -663,95 +665,29 @@ impl super::Coordinator {
     /// Visibility (#1890): `pub(super)` — called from
     /// `reconcile/bringup.rs` and the armed snapshot-refresh leg,
     /// which live in sibling files of this module after the split.
+    /// #17089: the stale prune compares ONE fresh `wg_spawn_inputs`
+    /// capture against the entry's stored `spawned` capture. There is
+    /// deliberately no per-capture `else if` ladder: a spawn-time input
+    /// added to `WgSpawnInputs` is compared (and reasoned via
+    /// `diff_reason`) automatically, so a capture can never again exist
+    /// without a prune arm (#2921, #14675). `spawned: None` marks a
+    /// hand-built entry that never went through a spawn (test fixtures
+    /// only — production entries always carry a capture); it is kept
+    /// while the endpoint is still desired, since there is no captured
+    /// thread state to be stale against.
     pub(super) fn spawn_wg_control_threads(&mut self) {
         self.sweep_finished_wg_control_threads();
         self.publish_local_tunnel_deliveries_excluding(&[]);
-        // Current WG engines keyed by id, with their Arc address identity.
-        let mut desired: BTreeMap<u16, usize> = BTreeMap::new();
-        for endpoint in self.forwarding.tunnel_endpoints.values() {
-            if endpoint.mode != "wireguard" {
-                continue;
-            }
-            if let Some(engine) = self.forwarding.wg_engines.get(&endpoint.id) {
-                desired.insert(endpoint.id, Arc::as_ptr(engine) as usize);
-            }
-        }
 
-        // Stale prune: gone, engine Arc changed, or attachment changed.
+        // Stale prune: gone, or any spawn input changed.
         let mut stale: Vec<(u16, &'static str)> = Vec::new();
         for (id, entry) in self.wg_control_threads.iter() {
-            let reason = match desired.get(id) {
+            let reason = match self.wg_spawn_inputs(*id) {
                 None => Some("removed"),
-                Some(&ptr) if ptr != entry.engine_ptr => Some("engine_changed"),
-                Some(_) => {
-                    let attach_ok = self
-                        .forwarding
-                        .tunnel_endpoints
-                        .get(id)
-                        .is_some_and(|ep| {
-                            ep.logical_ifindex == entry.spawned_ifindex
-                                && self
-                                    .forwarding
-                                    .ifindex_to_name
-                                    .get(&ep.logical_ifindex)
-                                    .is_some_and(|name| *name == entry.spawned_tunnel_name)
-                        });
-                    if !attach_ok {
-                        Some("attachment_changed")
-                    } else if self.resolve_wg_outer_mtu(*id) != entry.spawned_outer_mtu
-                        || self.resolve_wg_per_peer_outer_mtus(*id)
-                            != entry.spawned_per_peer_outer_mtu
-                    {
-                        // #2921: the WG identity tuple ignores the underlay
-                        // route/table/egress MTU, so a same-engine refresh
-                        // reuses the Arc and keeps the spawn-time
-                        // `outer_mtu` captured by value in the TUN-origin
-                        // egress guard. Re-resolve the underlay MTU the same
-                        // way `spawn_one_wg_control_thread` does; when it has
-                        // changed, restart the thread so the local TUN path
-                        // enforces the SAME current outer MTU as the
-                        // transit/forwarded path (which re-resolves per
-                        // snapshot). #5291: the same staleness applies to the
-                        // PER-PEER map — a non-first peer's underlay MTU
-                        // change moves no scalar, so compare the whole map so
-                        // every peer's TUN-origin guard stays current.
-                        Some("outer_mtu_changed")
-                    } else if crate::afxdp::coordinator::wg_control::wg_outer_bind_device_for_transport_table(
-                        &self.forwarding.tunnel_endpoints[id].transport_table,
-                    ) != entry.spawned_outer_bind_device
-                    {
-                        // #10196: socket SO_BINDTODEVICE is captured at
-                        // spawn. A same-engine refresh that moves a tunnel
-                        // between the default table and VRF-A/VRF-B must
-                        // restart the control thread, or its already-bound
-                        // UDP socket keeps using the old routing domain.
-                        Some("outer_bind_device_changed")
-                    } else if self.wg_kernel_transport_for_endpoint(*id)
-                        != entry.spawned_kernel_transport
-                    {
-                        // #9521/#9587: the snapshot re-steered WireGuard (set
-                        // membership changed — a tunnel added or removed, or
-                        // a port moved in or out of the steered set), so this
-                        // plaintext changed. The decision is captured by value
-                        // at spawn, so only a restart applies it.
-                        Some("kernel_transport_changed")
-                    } else if self.wg_peer_spawn_config(*id) != entry.spawned_peer_config {
-                        // #14675: the peer configuration is a spawn-time
-                        // capture too — the control thread seeds its peer
-                        // set and effective-endpoint map from the engine
-                        // once, and the resolver captures `endpoint_hosts`
-                        // once. `wg_peers_eq` does not compare
-                        // `endpoint_host`, so a hostname-only (or
-                        // responder-only peer add) commit reuses the
-                        // engine Arc and moves none of the captures above;
-                        // without this reason the thread would drive
-                        // timers/handshakes for the OLD peer set and
-                        // resolve the OLD hostname forever.
-                        Some("peer_config_changed")
-                    } else {
-                        None
-                    }
-                }
+                Some(now) => match &entry.spawned {
+                    Some(spawned) if now != *spawned => Some(now.diff_reason(spawned)),
+                    _ => None,
+                },
             };
             if let Some(reason) = reason {
                 stale.push((*id, reason));
@@ -764,7 +700,13 @@ impl super::Coordinator {
         // Spawn pass (apply-time only — the periodic sweep never creates
         // entries; see reconcile_wg_control_liveness).
         let now = monotonic_nanos();
-        let ids: Vec<u16> = desired.keys().copied().collect();
+        let ids: Vec<u16> = self
+            .forwarding
+            .tunnel_endpoints
+            .values()
+            .filter(|ep| ep.mode == "wireguard" && self.forwarding.wg_engines.contains_key(&ep.id))
+            .map(|ep| ep.id)
+            .collect();
         for id in ids {
             match self.wg_control_threads.get(&id) {
                 Some(entry) if entry.handle.is_some() => continue, // live
@@ -806,7 +748,7 @@ impl super::Coordinator {
                 entry.delivery_tx = None;
                 eprintln!(
                     "xpf-userspace-dp: WG control thread exited endpoint={id} tun={} — tombstoned (respawn if still configured)",
-                    entry.spawned_tunnel_name
+                    entry.spawned_tunnel_name()
                 );
             }
         }
@@ -825,7 +767,7 @@ impl super::Coordinator {
         let mut removed: Vec<(u16, &str, super::LocalTunnelSourceHandle, String)> = Vec::new();
         for (id, reason) in batch {
             if let Some(mut entry) = self.wg_control_threads.remove(&id) {
-                let name = entry.spawned_tunnel_name.clone();
+                let name = entry.spawned_tunnel_name().to_string();
                 if let Some(handle) = entry.handle.take() {
                     handle.request_stop();
                     removed.push((id, reason, handle, name));
@@ -861,7 +803,7 @@ impl super::Coordinator {
             }
             eprintln!(
                 "xpf-userspace-dp: stopped WG control thread endpoint={id} tun={} reason={reason}",
-                entry.spawned_tunnel_name
+                entry.spawned_tunnel_name()
             );
         }
     }
@@ -995,9 +937,7 @@ impl super::Coordinator {
     /// engine table order, so a stable config yields a stable capture).
     /// Read from the forwarding state — the only place `endpoint_host`
     /// exists; the engine's peer table deliberately does not carry it.
-    /// Compared against `WgControlEntry::spawned_peer_config` by the
-    /// stale prune so a peer commit on a reused engine Arc restarts the
-    /// control thread and its resolver.
+    /// One field of the `WgSpawnInputs` capture (#17089).
     fn wg_peer_spawn_config(&self, id: u16) -> Vec<crate::afxdp::types::WgPeerSpawnConfig> {
         let mut peers: Vec<crate::afxdp::types::WgPeerSpawnConfig> = self
             .forwarding
@@ -1019,84 +959,92 @@ impl super::Coordinator {
         peers
     }
 
-    fn spawn_one_wg_control_thread(&mut self, id: u16) {
-        let outer_mtu = self.resolve_wg_outer_mtu(id);
-        // #5291: per-peer underlay MTU snapshot handed into the control
-        // thread alongside the scalar fallback, so the TUN-origin egress
-        // guard sizes each peer against its OWN underlay (matching the
-        // AF_XDP transit path). Resolved at spawn while `forwarding` is
-        // reachable; kept fresh by the #2921 restart-on-MTU-change gate.
-        let per_peer_outer_mtu = self.resolve_wg_per_peer_outer_mtus(id);
-        // #14675: peer-config capture for the stale prune, taken beside
-        // the other spawn-time captures.
-        let peer_config = self.wg_peer_spawn_config(id);
-        let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
-            return;
-        };
+    /// #17089: THE single capture of WG control-thread spawn inputs —
+    /// the only builder of `WgSpawnInputs`. Returns `None` when `id` is
+    /// not currently a spawnable WireGuard endpoint (endpoint gone, not
+    /// wireguard, no engine, or TUN name unresolvable); the stale prune
+    /// reads that as `removed`, and the spawn reads it as "do not
+    /// spawn". Every by-value value handed to `wg_control_loop` that
+    /// is derived from forwarding state at spawn is read HERE, once, so
+    /// the capture the prune compares is by construction the capture
+    /// the thread was spawned with.
+    fn wg_spawn_inputs(&self, id: u16) -> Option<crate::afxdp::types::WgSpawnInputs> {
+        let endpoint = self.forwarding.tunnel_endpoints.get(&id)?;
         if endpoint.mode != "wireguard" {
-            return;
+            return None;
         }
-        let Some(engine) = self.forwarding.wg_engines.get(&id).cloned() else {
-            return;
-        };
-        let engine_ptr = Arc::as_ptr(&engine) as usize;
-        let Some(tunnel_name) = self
+        let engine = self.forwarding.wg_engines.get(&id)?.clone();
+        let tunnel_name = self
             .forwarding
             .ifindex_to_name
-            .get(&endpoint.logical_ifindex)
-            .cloned()
-        else {
+            .get(&endpoint.logical_ifindex)?
+            .clone();
+        // #7158: peers authored with a DNS hostname endpoint. Empty for
+        // a literal-only tunnel, which then starts no resolver thread.
+        let endpoint_hosts: Vec<([u8; 32], String)> = endpoint
+            .wg_peers
+            .iter()
+            .filter_map(|p| p.endpoint_host.as_ref().map(|h| (p.pubkey, h.clone())))
+            .collect();
+        // #15101: address family of the interface's LITERAL endpoints,
+        // preferring any IPv6 literal (the resolver's A/AAAA tie-break).
+        // `None` when the interface is hostname-only.
+        let preferred_v6 = endpoint.wg_peers.iter().filter_map(|p| p.endpoint).fold(
+            None,
+            |acc: Option<bool>, ep| match acc {
+                Some(true) => Some(true),
+                _ => Some(ep.is_ipv6()),
+            },
+        );
+        Some(crate::afxdp::types::WgSpawnInputs {
+            engine,
+            ifindex: endpoint.logical_ifindex,
+            tunnel_name,
+            listen_port: endpoint.wg_listen_port,
+            outer_mtu: self.resolve_wg_outer_mtu(id),
+            per_peer_outer_mtu: self.resolve_wg_per_peer_outer_mtus(id),
+            outer_bind_device:
+                crate::afxdp::coordinator::wg_control::wg_outer_bind_device_for_transport_table(
+                    &endpoint.transport_table,
+                ),
+            kernel_transport: self.wg_kernel_transport_for_endpoint(id),
+            peer_config: self.wg_peer_spawn_config(id),
+            endpoint_hosts,
+            preferred_v6,
+        })
+    }
+
+    /// #17089: one spawn attempt from the single `wg_spawn_inputs`
+    /// capture. The entry stores a clone as `spawned`; the thread moves
+    /// the original's fields into `wg_control_loop` — there is no
+    /// second, field-by-field capture that could diverge.
+    fn spawn_one_wg_control_thread(&mut self, id: u16) {
+        let Some(inputs) = self.wg_spawn_inputs(id) else {
             return;
         };
-        let spawned_ifindex = endpoint.logical_ifindex;
-        let listen_port = endpoint.wg_listen_port;
-        let outer_bind_device =
-            crate::afxdp::coordinator::wg_control::wg_outer_bind_device_for_transport_table(
-                &endpoint.transport_table,
-            );
-        let kernel_transport = self.wg_kernel_transport_for_endpoint(id);
+        let stored = inputs.clone();
+        let crate::afxdp::types::WgSpawnInputs {
+            engine,
+            ifindex: spawned_ifindex,
+            tunnel_name,
+            listen_port,
+            outer_mtu,
+            per_peer_outer_mtu: thread_per_peer_outer_mtu,
+            outer_bind_device: thread_outer_bind_device,
+            kernel_transport,
+            peer_config: _peer_config,
+            endpoint_hosts,
+            preferred_v6,
+        } = inputs;
         // #9594: the same worker-visible runtime handle the GRE local-tunnel
         // source threads receive (#1881 D.1), for the kernel-path posture.
+        // Live Arcs below carry no spawn-time snapshot, so they are not
+        // part of `WgSpawnInputs` (see the #17089 structural guard).
         let shared_runtime = self.ha.runtime_reader();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
         let recent_exceptions = self.recent_exceptions.clone();
         let thread_tunnel_name = tunnel_name.clone();
-        let thread_outer_bind_device = outer_bind_device.clone();
-        let thread_per_peer_outer_mtu = per_peer_outer_mtu.clone();
-        // #7158: peers authored with a DNS hostname endpoint. Empty for a
-        // literal-only tunnel, which then starts no resolver thread — every
-        // tunnel that existed before #7158 is unchanged.
-        let endpoint_hosts: Vec<([u8; 32], String)> = self
-            .forwarding
-            .tunnel_endpoints
-            .get(&id)
-            .map(|e| {
-                e.wg_peers
-                    .iter()
-                    .filter_map(|p| p.endpoint_host.as_ref().map(|h| (p.pubkey, h.clone())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        // #15101: the address family of the interface's LITERAL endpoints,
-        // preferring any IPv6 literal: the resolver's tie-break between A
-        // and AAAA answers on the dual-stack socket. `None` when the
-        // interface is hostname-only (the resolver then prefers AAAA).
-        // Unreachable in practice — the Go gate rejects mixed literals —
-        // but v6-first keeps a v6-configured interface v6.
-        let preferred_v6 = self
-            .forwarding
-            .tunnel_endpoints
-            .get(&id)
-            .and_then(|e| {
-                e.wg_peers.iter().filter_map(|p| p.endpoint).fold(
-                    None,
-                    |acc: Option<bool>, ep| match acc {
-                        Some(true) => Some(true),
-                        _ => Some(ep.is_ipv6()),
-                    },
-                )
-            });
         // #7936: resolver telemetry is created HERE, by the coordinator, and
         // REUSED across restarts of this tunnel's control thread. Creating it
         // inside the thread would reset the counters on every self-heal
@@ -1109,9 +1057,7 @@ impl super::Coordinator {
         let thread_resolver_telemetry = Arc::clone(&resolver_telemetry);
         // #10038/#10409: TUN-origin session-publish handles and the live
         // local-delivery channel. The WG control loop receives the same
-        // session handles as GRE and additionally owns its queue/wake pair;
-        // all are live Arcs with no spawn-time snapshots, so no #2921-style
-        // restart gate is needed for them.
+        // session handles as GRE and additionally owns its queue/wake pair.
         let thread_ha_state = self.ha.rg_runtime.clone();
         let thread_dynamic_neighbors = self.neighbors.dynamic.clone();
         let thread_shared_sessions = self.sessions.synced.clone();
@@ -1131,14 +1077,7 @@ impl super::Coordinator {
                     WgControlEntry {
                         handle: None,
                         delivery_tx: None,
-                        engine_ptr,
-                        spawned_kernel_transport: kernel_transport,
-                        spawned_ifindex,
-                        spawned_tunnel_name: tunnel_name,
-                        spawned_outer_mtu: outer_mtu,
-                        spawned_outer_bind_device: outer_bind_device,
-                        spawned_per_peer_outer_mtu: per_peer_outer_mtu,
-                        spawned_peer_config: peer_config.clone(),
+                        spawned: Some(stored),
                         last_spawn_attempt_ns: monotonic_nanos(),
                         resolver_telemetry: Some(resolver_telemetry),
                     },
@@ -1153,7 +1092,7 @@ impl super::Coordinator {
         let thread_delivery_wake = delivery_wake.clone();
         let thread_wg_uncovered_queues = self.wg_uncovered_queues.clone();
         eprintln!(
-            "xpf-userspace-dp: spawning WG control thread endpoint={id} tun={tunnel_name} port={listen_port} device={outer_bind_device:?} kernel_transport={kernel_transport:?}"
+            "xpf-userspace-dp: spawning WG control thread endpoint={id} tun={tunnel_name} port={listen_port} device={thread_outer_bind_device:?} kernel_transport={kernel_transport:?}"
         );
         let join = spawn_supervised_aux(
             format!("xpf-wg-control-{tunnel_name}"),
@@ -1213,14 +1152,7 @@ impl super::Coordinator {
             WgControlEntry {
                 handle,
                 delivery_tx,
-                engine_ptr,
-                spawned_kernel_transport: kernel_transport,
-                spawned_ifindex,
-                spawned_tunnel_name: tunnel_name,
-                spawned_outer_mtu: outer_mtu,
-                spawned_outer_bind_device: outer_bind_device,
-                spawned_per_peer_outer_mtu: per_peer_outer_mtu,
-                spawned_peer_config: peer_config,
+                spawned: Some(stored),
                 last_spawn_attempt_ns: monotonic_nanos(),
                 resolver_telemetry: Some(resolver_telemetry),
             },

@@ -5068,7 +5068,7 @@ fn wg1866_apply_time_rename_restarts_thread_on_new_attachment() {
         ))
         .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    assert_eq!(entry.spawned_tunnel_name, "wgt1866i");
+    assert_eq!(entry.spawned_tunnel_name(), "wgt1866i");
     // Rename (same id, same identity): engine Arc is REUSED, but the
     // attachment-aware stale prune must restart the thread.
     coordinator
@@ -5085,10 +5085,10 @@ fn wg1866_apply_time_rename_restarts_thread_on_new_attachment() {
         .get(&1)
         .expect("entry after rename");
     assert_eq!(
-        entry.spawned_tunnel_name, "wgt1866j",
+        entry.spawned_tunnel_name(), "wgt1866j",
         "rename must stop the old thread and spawn against the new TUN"
     );
-    assert_eq!(entry.spawned_ifindex, 4243);
+    assert_eq!(entry.spawned.as_ref().expect("capture").ifindex, 4243);
 }
 
 /// PR #1872 Codex code-r1 F2 regression: rows whose `linux_name` is
@@ -5223,10 +5223,10 @@ fn wg2921_outer_mtu_change_restarts_control_thread() {
         .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(
-        entry.spawned_outer_mtu, 1400,
+        entry.spawned.as_ref().expect("capture").outer_mtu, 1400,
         "spawn must capture the resolved underlay egress MTU (not the 1500 default fallback)"
     );
-    let engine_ptr_before = entry.engine_ptr;
+    let engine_before = entry.spawned.as_ref().expect("capture").engine.clone();
     // Stamp the attempt to NOW so a tombstone (open_tun fails in the test
     // env) cannot self-respawn within the backoff window — isolating the
     // restart to the stale-prune path under test.
@@ -5247,12 +5247,12 @@ fn wg2921_outer_mtu_change_restarts_control_thread() {
         .wg_control_threads
         .get(&1)
         .expect("entry after MTU change");
-    assert_eq!(
-        entry.engine_ptr, engine_ptr_before,
+    assert!(
+        entry.spawned_engine_is(&engine_before),
         "engine Arc must be REUSED (identity unchanged) — exercising the same-engine path"
     );
     assert_eq!(
-        entry.spawned_outer_mtu, 1280,
+        entry.spawned.as_ref().expect("capture").outer_mtu, 1280,
         "outer-MTU change must restart the thread and re-resolve the underlay MTU"
     );
     assert_ne!(
@@ -5273,10 +5273,10 @@ fn wg2921_unchanged_outer_mtu_keeps_control_thread() {
         .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(
-        entry.spawned_outer_mtu, 1400,
+        entry.spawned.as_ref().expect("capture").outer_mtu, 1400,
         "resolved underlay MTU captured"
     );
-    let engine_ptr_before = entry.engine_ptr;
+    let engine_before = entry.spawned.as_ref().expect("capture").engine.clone();
     // Recent attempt stamp: suppresses any tombstone self-respawn so the
     // assertion isolates the prune decision.
     let t0 = monotonic_nanos();
@@ -5294,11 +5294,11 @@ fn wg2921_unchanged_outer_mtu_keeps_control_thread() {
         .wg_control_threads
         .get(&1)
         .expect("entry after no-op refresh");
-    assert_eq!(
-        entry.engine_ptr, engine_ptr_before,
+    assert!(
+        entry.spawned_engine_is(&engine_before),
         "engine Arc reused on the unchanged refresh"
     );
-    assert_eq!(entry.spawned_outer_mtu, 1400, "captured MTU unchanged");
+    assert_eq!(entry.spawned.as_ref().expect("capture").outer_mtu, 1400, "captured MTU unchanged");
     assert_eq!(
         entry.last_spawn_attempt_ns, t0,
         "no restart: the spawn attempt stamp must survive an unchanged-MTU refresh"
@@ -5397,9 +5397,9 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
     // The per-peer map captured at spawn (the output of
     // `resolve_wg_per_peer_outer_mtus`, handed by value into the control
     // thread) is retained on the entry — assert on it directly, mirroring
-    // the wg2921 `spawned_outer_mtu` pattern.
+    // the wg2921 captured-`outer_mtu` pattern.
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    let per_peer = &entry.spawned_per_peer_outer_mtu;
+    let per_peer = &entry.spawned.as_ref().expect("capture").per_peer_outer_mtu;
     assert_eq!(
         per_peer.len(),
         2,
@@ -5428,7 +5428,7 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
     // The interface-level scalar remains peer A's 1500 — the fallback for
     // a peer absent from the per-peer map (learned/roamed endpoint).
     assert_eq!(
-        entry.spawned_outer_mtu, 1500,
+        entry.spawned.as_ref().expect("capture").outer_mtu, 1500,
         "the scalar fallback stays the first endpoint-bearing peer's MTU"
     );
 }
@@ -5436,11 +5436,10 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
 // ---------------------------------------------------------------------
 // #14675 — WG control loop / resolver stale peer capture.
 //
-// `wg_peers_eq` does not compare `endpoint_host`, so a hostname-only
-// change (or a hostname peer added alongside an unchanged literal
-// peer, or a responder-only peer added) reuses the engine Arc. Before
-// the fix the control thread kept its spawn-time peer set and the
-// resolver kept its spawn-time `endpoint_hosts` forever.
+// Since #15950 `wg_peers_eq` compares `endpoint_host`, so a
+// hostname-only change rebuilds the engine (#17094 reachability);
+// these cells pin that the control thread restarts and recaptures its
+// spawn-time peer config / `endpoint_hosts` on every peer change.
 // ---------------------------------------------------------------------
 
 /// #14675 helper: decode a hex pubkey constant to bytes.
@@ -5514,8 +5513,8 @@ fn wg14675_hostname_peer_added_restarts_control_thread() {
         .refresh_runtime_snapshot(&snap1)
         .expect("first apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    assert_eq!(entry.spawned_peer_config.len(), 1);
-    assert_eq!(entry.spawned_peer_config[0].endpoint_host, None);
+    assert_eq!(entry.spawned.as_ref().expect("capture").peer_config.len(), 1);
+    assert_eq!(entry.spawned.as_ref().expect("capture").peer_config[0].endpoint_host, None);
     let t0 = monotonic_nanos();
     coordinator
         .wg_control_threads
@@ -5537,12 +5536,15 @@ fn wg14675_hostname_peer_added_restarts_control_thread() {
         .expect("second apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
     assert_eq!(
-        entry.spawned_peer_config.len(),
+        entry.spawned.as_ref().expect("capture").peer_config.len(),
         2,
         "spawned capture must include the added hostname peer"
     );
     let host_peer = entry
-        .spawned_peer_config
+        .spawned
+        .as_ref()
+        .expect("capture")
+        .peer_config
         .iter()
         .find(|p| p.pubkey == wg14675_pubkey(WG14675_PUBKEY_B))
         .expect("hostname peer in capture");
@@ -5581,10 +5583,10 @@ fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
         .expect("first apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(
-        entry.spawned_peer_config[0].endpoint_host.as_deref(),
+        entry.spawned.as_ref().expect("capture").peer_config[0].endpoint_host.as_deref(),
         Some("old.example.com:51820")
     );
-    let engine_ptr_before = entry.engine_ptr;
+    let engine_before = entry.spawned.as_ref().expect("capture").engine.clone();
     let t0 = monotonic_nanos();
     coordinator
         .wg_control_threads
@@ -5602,12 +5604,12 @@ fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
         .refresh_runtime_snapshot(&snap2)
         .expect("second apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
-    assert_ne!(
-        entry.engine_ptr, engine_ptr_before,
+    assert!(
+        !entry.spawned_engine_is(&engine_before),
         "hostname-only change must REBUILD the engine (#15950 H37-01)"
     );
     assert_eq!(
-        entry.spawned_peer_config[0].endpoint_host.as_deref(),
+        entry.spawned.as_ref().expect("capture").peer_config[0].endpoint_host.as_deref(),
         Some("new.example.com:51820"),
         "hostname rename must restart and recapture endpoint_hosts"
     );
@@ -5654,7 +5656,7 @@ fn wg14675_literal_change_and_responder_add_restart() {
         .get(&1)
         .expect("entry after literal");
     assert_eq!(
-        entry.spawned_peer_config[0]
+        entry.spawned.as_ref().expect("capture").peer_config[0]
             .endpoint
             .map(|e| e.to_string())
             .as_deref(),
@@ -5686,12 +5688,15 @@ fn wg14675_literal_change_and_responder_add_restart() {
         .get(&1)
         .expect("entry after responder");
     assert_eq!(
-        entry.spawned_peer_config.len(),
+        entry.spawned.as_ref().expect("capture").peer_config.len(),
         2,
         "responder peer captured"
     );
     let resp = entry
-        .spawned_peer_config
+        .spawned
+        .as_ref()
+        .expect("capture")
+        .peer_config
         .iter()
         .find(|p| p.pubkey == wg14675_pubkey(WG14675_PUBKEY_B))
         .expect("responder peer");
@@ -5720,7 +5725,7 @@ fn wg14675_unchanged_peer_config_keeps_control_thread() {
         .refresh_runtime_snapshot(&snap)
         .expect("first apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    let engine_ptr_before = entry.engine_ptr;
+    let engine_before = entry.spawned.as_ref().expect("capture").engine.clone();
     let t0 = monotonic_nanos();
     coordinator
         .wg_control_threads
@@ -5731,11 +5736,308 @@ fn wg14675_unchanged_peer_config_keeps_control_thread() {
         .refresh_runtime_snapshot(&snap)
         .expect("no-op apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
-    assert_eq!(entry.engine_ptr, engine_ptr_before);
+    assert!(entry.spawned_engine_is(&engine_before));
     assert_eq!(
         entry.last_spawn_attempt_ns, t0,
         "unchanged peer config must not restart the control thread"
     );
+}
+
+// ---------------------------------------------------------------------
+// #17089 — single-capture guard for WG control-thread spawn inputs.
+//
+// Before this change each spawn-time capture needed a matching
+// hand-written arm in the stale prune; #2921 (outer MTU) and #14675
+// (peer config) shipped as stale-capture defects when the arm was
+// forgotten. Now `wg_spawn_inputs` is the only builder of
+// `WgSpawnInputs`, the entry stores that one value as `spawned`, and
+// the prune compares it whole. The cells below pin both halves:
+// value semantics (equal captures keep the thread, any single-field
+// divergence restarts it with the historical reason) and structure
+// (a by-value `wg_control_loop` parameter that is neither a
+// `WgSpawnInputs` field nor a named live-Arc allowlist entry fails).
+// ---------------------------------------------------------------------
+
+/// #17089 helper: a minimal spawn capture over a fresh engine.
+fn wg17089_inputs() -> crate::afxdp::types::WgSpawnInputs {
+    crate::afxdp::types::WgSpawnInputs {
+        engine: std::sync::Arc::new(crate::afxdp::wg::WgEngine::new(
+            crate::afxdp::wg::WgEngineConfig {
+                local_private_key: [3u8; 32].into(),
+                listen_port: 51820,
+                peers: Vec::new(),
+            },
+        )),
+        ifindex: 47089,
+        tunnel_name: "wg17089".into(),
+        listen_port: 51820,
+        outer_mtu: 1400,
+        per_peer_outer_mtu: std::collections::HashMap::new(),
+        outer_bind_device: None,
+        kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,
+        peer_config: Vec::new(),
+        endpoint_hosts: Vec::new(),
+        preferred_v6: None,
+    }
+}
+
+/// #17089: identical captures are equal (engine by `ptr_eq`), and each
+/// single-field divergence flips equality AND reports the historical
+/// prune reason for that field — the field-diff half of the guard.
+/// A field added to `WgSpawnInputs` without an entry in
+/// `diff_reason`'s chain would fall through to the final reason and
+/// fail the per-field expectation below only if listed; the
+/// structural cell below is what forces new fields to be listed.
+#[test]
+fn wg_spawn_inputs_diff_reason_names_each_field_17089() {
+    let base = wg17089_inputs();
+    assert!(base == base.clone(), "identical captures must be equal");
+
+    let mut cases: Vec<(&str, crate::afxdp::types::WgSpawnInputs)> = Vec::new();
+    let mut c = base.clone();
+    c.engine = std::sync::Arc::new(crate::afxdp::wg::WgEngine::new(
+        crate::afxdp::wg::WgEngineConfig {
+            local_private_key: [4u8; 32].into(),
+            listen_port: 51820,
+            peers: Vec::new(),
+        },
+    ));
+    cases.push(("engine_changed", c));
+    let mut c = base.clone();
+    c.tunnel_name = "wg17089-renamed".into();
+    cases.push(("attachment_changed", c));
+    let mut c = base.clone();
+    c.ifindex = 47090;
+    cases.push(("attachment_changed", c));
+    let mut c = base.clone();
+    c.outer_mtu = 1280;
+    cases.push(("outer_mtu_changed", c));
+    let mut c = base.clone();
+    c.per_peer_outer_mtu.insert([9u8; 32], 1280);
+    cases.push(("outer_mtu_changed", c));
+    let mut c = base.clone();
+    c.outer_bind_device = Some("vrf-a".into());
+    cases.push(("outer_bind_device_changed", c));
+    let mut c = base.clone();
+    c.kernel_transport = crate::afxdp::types::WgKernelTransport::DropUnsteered;
+    cases.push(("kernel_transport_changed", c));
+    let mut c = base.clone();
+    c.peer_config.push(crate::afxdp::types::WgPeerSpawnConfig {
+        pubkey: [9u8; 32],
+        endpoint: None,
+        endpoint_host: Some("peer.example.com:51820".into()),
+    });
+    cases.push(("peer_config_changed", c));
+    let mut c = base.clone();
+    c.listen_port = 51821;
+    cases.push(("listen_port_changed", c));
+    let mut c = base.clone();
+    c.endpoint_hosts
+        .push(([9u8; 32], "peer.example.com:51820".into()));
+    cases.push(("endpoint_hosts_changed", c));
+    let mut c = base.clone();
+    c.preferred_v6 = Some(true);
+    cases.push(("preferred_v6_changed", c));
+
+    for (reason, changed) in &cases {
+        assert!(*changed != base, "{reason}: divergence must flip equality");
+        assert_eq!(
+            changed.diff_reason(&base),
+            *reason,
+            "diff_reason must name the diverged field"
+        );
+    }
+    // Precedence: engine identity outranks every later field, matching
+    // the pre-#17089 ladder (engine_changed was checked first).
+    let mut both = base.clone();
+    both.engine = cases[0].1.engine.clone();
+    both.outer_mtu = 1280;
+    assert_eq!(both.diff_reason(&base), "engine_changed");
+}
+
+/// #17089 THE RATCHET (the #6961 pattern): parse `wg_control_loop`'s
+/// parameter list and `WgSpawnInputs`' field list from source. Every
+/// by-value parameter of the loop must be either a `WgSpawnInputs`
+/// field (spawn capture — automatically pruned) or on the named
+/// live-Arc allowlist below (shared state the thread reads live, so
+/// no spawn-time staleness is possible). A future spawn-time capture
+/// added as a bare parameter fails here until it is moved into
+/// `WgSpawnInputs` — the exact step whose omission shipped #2921 and
+/// #14675. The field list is read from the definition, never restated.
+#[test]
+fn every_wg_control_loop_capture_is_in_spawn_inputs_17089() {
+    // Parameters that are NOT spawn captures: coordinator identity for
+    // this spawn, and live shared Arcs/channels the thread reads or
+    // writes through for its whole lifetime. Adding a name here is a
+    // deliberate claim that the value cannot go stale; a by-value
+    // snapshot (String, integer, map, Vec, enum) does not belong here.
+    const LIVE_ALLOWLIST: &[&str] = &[
+        "tunnel_endpoint_id",     // map key, not a capture
+        "shared_runtime",         // RuntimeViewReader: live ArcSwap view
+        "resolver_telemetry",     // coordinator-owned Arc, read/written live
+        "recent_exceptions",      // shared exception ring Arc
+        "stop",                   // stop flag Arc
+        "ha_state",               // HA runtime ArcSwap Arc
+        "dynamic_neighbors",      // shared neighbor map Arc
+        "shared_sessions",        // shared session table Arc
+        "shared_nat_sessions",    // shared NAT session table Arc
+        "shared_forward_wire_sessions", // shared forward-wire table Arc
+        "shared_owner_rg_indexes", // shared owner-RG index Arc
+        "delivery_rx",            // live mpsc receiver, created per spawn
+        "delivery_wake",          // delivery eventfd Arc
+        "wg_uncovered_queues",    // live ArcSwap queue map Arc
+    ];
+    // `wg_control_loop` parameter name -> `WgSpawnInputs` field name
+    // where the two deliberately differ (the loop's TUN-attachment
+    // parameter predates the capture struct).
+    const RENAMED: &[(&str, &str)] = &[("spawned_logical_ifindex", "ifindex")];
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let control_src = std::fs::read_to_string(
+        manifest.join("src/afxdp/coordinator/wg_control/mod.rs"),
+    )
+    .expect("read wg_control/mod.rs (the #17089 ratchet cannot run)");
+    let sig = control_src
+        .split_once("pub(super) fn wg_control_loop(")
+        .expect("wg_control_loop definition")
+        .1
+        .split_once(") {")
+        .expect("end of wg_control_loop signature")
+        .0;
+    // Parameter names: first token of each top-level comma segment.
+    // The signature contains commas inside generic type arguments, so
+    // split at angle/paren/bracket depth zero only.
+    let mut params: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut segment = String::new();
+    let mut segments: Vec<String> = Vec::new();
+    for ch in sig.chars() {
+        match ch {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                segments.push(std::mem::take(&mut segment));
+                continue;
+            }
+            _ => {}
+        }
+        segment.push(ch);
+    }
+    if !segment.trim().is_empty() {
+        segments.push(segment);
+    }
+    for seg in &segments {
+        // Doc comments sit INSIDE the parameter list, between
+        // parameters, so a comment block and the parameter after it
+        // share one comma segment: keep only the code after the last
+        // comment line, then take `name:`.
+        let mut cleaned = String::new();
+        for line in seg.lines() {
+            // A comment may END mid-line's logical content: e.g. a
+            // multi-line doc whose last line's text precedes the next
+            // parameter in the same segment. Clearing on comment lines
+            // handles the common shape; the name check below rejects
+            // any residual prose instead of silently misparsing it.
+            if line.trim_start().starts_with("//") {
+                cleaned.clear();
+            } else {
+                if !cleaned.is_empty() {
+                    cleaned.push(' ');
+                }
+                cleaned.push_str(line.trim());
+            }
+        }
+        let Some((name, _ty)) = cleaned.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if !name.is_empty() {
+            // A valid parameter name is a single identifier; anything
+            // else means comment prose leaked into the segment (a doc
+            // comment whose final line shares the segment) — drop the
+            // prose before the final token.
+            let name = name.rsplit(|c: char| c.is_whitespace()).next().unwrap_or(name);
+            params.push(name.to_string());
+        }
+    }
+    assert!(
+        params.len() >= 20,
+        "parsed only {} wg_control_loop parameters; the parse broke, so this ratchet is \
+         vacuous. FIX THE PARSE — do not delete the guard",
+        params.len()
+    );
+
+    let types_src = std::fs::read_to_string(manifest.join("src/afxdp/types/runtime.rs"))
+        .expect("read types/runtime.rs (the #17089 ratchet cannot run)");
+    let body = types_src
+        .split_once("pub(crate) struct WgSpawnInputs {")
+        .expect("WgSpawnInputs definition")
+        .1
+        .split_once("\n}")
+        .expect("end of WgSpawnInputs")
+        .0;
+    let mut fields: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let t = line.trim();
+        if t.starts_with("//") {
+            continue;
+        }
+        let Some(rest) = t
+            .strip_prefix("pub(in crate::afxdp) ")
+            .or_else(|| t.strip_prefix("pub(crate) "))
+        else {
+            continue;
+        };
+        if let Some((name, _)) = rest.split_once(':') {
+            fields.push(name.trim().to_string());
+        }
+    }
+    assert!(
+        fields.len() >= 10,
+        "parsed only {} WgSpawnInputs fields; the parse broke, so this ratchet is vacuous. \
+         FIX THE PARSE — do not delete the guard",
+        fields.len()
+    );
+
+    for param in &params {
+        let field = RENAMED
+            .iter()
+            .find(|(p, _)| p == param)
+            .map_or(param.as_str(), |(_, f)| *f);
+        assert!(
+            fields.iter().any(|f| f == field) || LIVE_ALLOWLIST.contains(&param.as_str()),
+            "wg_control_loop parameter `{param}` is a by-value spawn capture that is neither a \
+             WgSpawnInputs field nor on the #17089 live-Arc allowlist. A spawn-time value frozen \
+             in the thread without a WgSpawnInputs field is never compared by the stale prune — \
+             that is exactly how #2921 and #14675 shipped stale state. Move it into \
+             WgSpawnInputs (built by wg_spawn_inputs), or, only if it is a live shared Arc that \
+             cannot go stale, add it to LIVE_ALLOWLIST with a reason"
+        );
+    }
+    // The allowlist must not rot: every name on it must still be a
+    // parameter, and every capture field must still reach the loop
+    // (a field the loop never receives is dead capture weight).
+    for name in LIVE_ALLOWLIST {
+        assert!(
+            params.iter().any(|p| p == name),
+            "LIVE_ALLOWLIST names {name}, which is no longer a wg_control_loop parameter. \
+             Remove the stale entry — a stale exclusion silently widens what the ratchet tolerates"
+        );
+    }
+    for field in &fields {
+        if field == "peer_config" {
+            continue; // prune-only capture: compared, never handed to the loop
+        }
+        let param = RENAMED
+            .iter()
+            .find(|(_, f)| f == field)
+            .map_or(field.as_str(), |(p, _)| *p);
+        assert!(
+            params.iter().any(|p| p == param),
+            "WgSpawnInputs.{field} never reaches wg_control_loop. Either hand it to the loop \
+             or remove the field — a captured-but-unused input misleads the prune"
+        );
+    }
 }
 // ---------------------------------------------------------------------
 // #1881 — GRE local-origin thread lifecycle regression suite.
@@ -12660,7 +12962,7 @@ fn wg9521_decision(
     coordinator
         .wg_control_threads
         .get(&id)
-        .map(|entry| entry.spawned_kernel_transport)
+        .and_then(|entry| entry.spawned.as_ref().map(|s| s.kernel_transport))
 }
 
 /// #9521/#10527 end to end. Two WireGuard endpoints on distinct listen ports;
