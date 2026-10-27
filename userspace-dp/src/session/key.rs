@@ -518,8 +518,9 @@ pub(crate) fn forward_wire_key(forward_key: &SessionKey, nat: NatDecision) -> Se
 /// REVERSE decisions — `NatDecision::reverse` moved the forward
 /// `rewrite_src_port` into `rewrite_dst_port`, and the shared
 /// direction-agnostic ICMP-id rule in `nat_applied_key` recovers the
-/// original id; the NAT64 remap keeps the alias in the family the
-/// post-translation reply actually carries).
+/// original id; the NAT64 remap keeps the alias as the
+/// pre-translation tuple in the forward family, NOT the family the
+/// post-translation reply carries — see the twin matrix).
 pub(crate) fn translated_session_key(key: &SessionKey, nat: NatDecision) -> SessionKey {
     nat_applied_key(key, nat, Dir::Same, Disc::Keep, Domain::Keep)
 }

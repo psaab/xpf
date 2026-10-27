@@ -327,7 +327,6 @@ fn translated_alias_matches_independent_reply_tuple_across_twin_matrix_17088() {
             cell.name
         );
 
-        // Twin control 3: for the non-NAT64 cells the reverse wire key
         // Twin control 3: the reverse wire key is domain-agnostic. For
         // NAT64 cells it is the POST-translation (wire-family) reply
         // tuple — written literally here: v4 for the v6-forward cells
