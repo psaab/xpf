@@ -26,7 +26,7 @@ func TestUnzonedIngressDeniesRegardlessOfDefaultPolicy8318(t *testing.T) {
 
 	t.Run("unknown FromZone denies under permit-all", func(t *testing.T) {
 		res := Match(permitAll(), Query{
-			FromZone: "not-a-zone", ToZone: "untrust", Protocol: "tcp", DstPort: 80,
+			FromZone: "not-a-zone", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80),
 		})
 		if res.Action != config.PolicyDeny {
 			t.Fatalf("unknown FromZone must DENY under default-policy permit-all "+
@@ -55,7 +55,7 @@ func TestUnzonedIngressDeniesRegardlessOfDefaultPolicy8318(t *testing.T) {
 	// A resolved unknown TO zone is the egress deny, not the default-policy.
 	t.Run("unknown ToZone denies as unzoned egress under permit-all", func(t *testing.T) {
 		res := Match(permitAll(), Query{
-			FromZone: "trust", ToZone: "not-a-zone", Protocol: "tcp", DstPort: 80,
+			FromZone: "trust", ToZone: "not-a-zone", Protocol: "tcp", DstPort: PortPtr(80),
 		})
 		if res.Action != config.PolicyDeny {
 			t.Fatalf("unknown ToZone must DENY under default-policy permit-all "+
@@ -75,7 +75,7 @@ func TestUnzonedIngressDeniesRegardlessOfDefaultPolicy8318(t *testing.T) {
 	// runs first and returns before the to_id fall-through is reached.
 	t.Run("both unknown denies as ingress", func(t *testing.T) {
 		res := Match(permitAll(), Query{
-			FromZone: "nope", ToZone: "also-nope", Protocol: "tcp", DstPort: 80,
+			FromZone: "nope", ToZone: "also-nope", Protocol: "tcp", DstPort: PortPtr(80),
 		})
 		if res.Action != config.PolicyDeny || !res.UnzonedIngress {
 			t.Fatalf("both-unknown must take the ingress deny (the runtime checks "+
@@ -92,10 +92,10 @@ func TestUnzonedIngressDeniesRegardlessOfDefaultPolicy8318(t *testing.T) {
 			DefaultPolicy: config.PolicyDeny,
 			Zones:         zones("trust", "untrust"),
 		}}
-		if res := Match(denyAll, Query{FromZone: "nope", ToZone: "untrust", Protocol: "tcp", DstPort: 80}); !res.UnzonedIngress || res.DefaultUsed {
+		if res := Match(denyAll, Query{FromZone: "nope", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)}); !res.UnzonedIngress || res.DefaultUsed {
 			t.Errorf("unknown FromZone must remain an ingress deny under deny-all, got %+v", res)
 		}
-		if res := Match(denyAll, Query{FromZone: "trust", ToZone: "nope", Protocol: "tcp", DstPort: 80}); !res.UnzonedEgress || res.DefaultUsed {
+		if res := Match(denyAll, Query{FromZone: "trust", ToZone: "nope", Protocol: "tcp", DstPort: PortPtr(80)}); !res.UnzonedEgress || res.DefaultUsed {
 			t.Errorf("unknown ToZone must be an egress deny under deny-all, got %+v", res)
 		}
 	})
@@ -117,7 +117,7 @@ func TestUnzonedIngressDeniesRegardlessOfDefaultPolicy8318(t *testing.T) {
 				}},
 			}},
 		}}
-		res := Match(wildcard, Query{FromZone: "nope", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+		res := Match(wildcard, Query{FromZone: "nope", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 		if res.Matched {
 			t.Fatalf("an unknown FromZone must remain INELIGIBLE for the from-any/to-any "+
 				"tier (#3355) — it matched %q", res.PolicyName)

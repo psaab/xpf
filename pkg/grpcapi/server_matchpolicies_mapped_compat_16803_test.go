@@ -22,7 +22,7 @@ func TestMatchPoliciesGRPCV4MappedCompatIngressDrop16803(t *testing.T) {
 	resp, err := s.MatchPolicies(context.Background(), &pb.MatchPoliciesRequest{
 		FromZone: "trust", ToZone: "untrust",
 		SourceIp: "::ffff:192.0.2.1", DestinationIp: "2001:db8::1",
-		Protocol: "tcp", DestinationPort: 80,
+		Protocol: "tcp", DestinationPort: int32Ptr17081(80),
 	})
 	if err != nil {
 		t.Fatalf("MatchPolicies error = %v", err)
@@ -41,7 +41,7 @@ func TestMatchPoliciesGRPCV4MappedCompatIngressDrop16803(t *testing.T) {
 	ctrl, err := s.MatchPolicies(context.Background(), &pb.MatchPoliciesRequest{
 		FromZone: "trust", ToZone: "untrust",
 		SourceIp: "2001:db8::9", DestinationIp: "2001:db8::1",
-		Protocol: "tcp", DestinationPort: 80,
+		Protocol: "tcp", DestinationPort: int32Ptr17081(80),
 	})
 	if err != nil {
 		t.Fatalf("MatchPolicies control error = %v", err)

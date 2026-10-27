@@ -595,14 +595,6 @@ impl Peer {
         self.live_endpoint.store(Some(Arc::new(endpoint)));
     }
 
-    /// #14675: drop the adopted live endpoint when the operator's
-    /// configured endpoint changes or is removed. Without this the
-    /// dataplane peer_for_dest keeps preferring the stale roamed /
-    /// resolved address over the new configured value even after the
-    /// control loop resets its own effective map.
-    pub(crate) fn clear_live_endpoint(&self) {
-        self.live_endpoint.store(None);
-    }
     /// #16711: the fresh learned outer PMTU for this peer, if any.
     #[inline]
     pub(crate) fn learned_pmtu(&self, now_ns: u64) -> Option<usize> {

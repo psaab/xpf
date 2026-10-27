@@ -53,7 +53,7 @@ func chainedAppQuery(cfg *config.Config, proto string, dstPort int) Result {
 	return Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
-		Protocol: proto, SrcPort: 40000, DstPort: dstPort,
+		Protocol: proto, SrcPort: PortPtr(40000), DstPort: PortPtr(uint16(dstPort)),
 	})
 }
 
@@ -102,7 +102,7 @@ func TestChainedAppSourcePortPolicyConstrainsSourcePort(t *testing.T) {
 		return Match(cfg, Query{
 			FromZone: "trust", ToZone: "untrust",
 			SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
-			Protocol: "tcp", SrcPort: srcPort, DstPort: 80,
+			Protocol: "tcp", SrcPort: PortPtr(uint16(srcPort)), DstPort: PortPtr(80),
 		})
 	}
 	if res := q(5000); !res.Matched || res.Action != config.PolicyPermit {

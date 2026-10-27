@@ -32,19 +32,19 @@ func TestClassifyHostInboundProtocolsAllNotFullAdmit(t *testing.T) {
 	cfg := cfgWithHostInbound("edge", []string{"ssh"}, []string{"all"})
 
 	// ssh admitted via system-services (not swallowed by `protocols all`).
-	if got := ClassifyHostInbound(cfg, "edge", TCP, true, 22, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != "ssh" || got.Kind != "system-services" {
+	if got := ClassifyHostInbound(cfg, "edge", TCP, true, 22, true, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != "ssh" || got.Kind != "system-services" {
 		t.Fatalf("ssh tcp/22: got %+v, want token-admit ssh/system-services", got)
 	}
 
 	// bgp (tcp/179) admitted via `protocols all` -> token "all", kind protocols.
-	if got := ClassifyHostInbound(cfg, "edge", TCP, true, 179, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != "all" || got.Kind != "protocols" {
+	if got := ClassifyHostInbound(cfg, "edge", TCP, true, 179, true, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != "all" || got.Kind != "protocols" {
 		t.Fatalf("bgp tcp/179 via protocols all: got %+v, want token-admit all/protocols", got)
 	}
 
 	// tcp/9999 is neither ssh nor a routing protocol in the `all` expansion, so
 	// it is DENIED. This is the boundary: `protocols all` must not open arbitrary
 	// ports the way a full-admit system-service would.
-	if got := ClassifyHostInbound(cfg, "edge", TCP, true, 9999, nil, "ip"); got.Status != HostInboundDenied {
+	if got := ClassifyHostInbound(cfg, "edge", TCP, true, 9999, true, nil, "ip"); got.Status != HostInboundDenied {
 		t.Fatalf("tcp/9999 with protocols all + ssh: got %+v, want denied (protocols all is not a full admit)", got)
 	}
 }

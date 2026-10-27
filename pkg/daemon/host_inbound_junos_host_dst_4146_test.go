@@ -125,7 +125,7 @@ func junosHostOracleDenies(cfg *config.Config, zone string, q junosHostVerdictQu
 	res := policymatch.Match(cfg, policymatch.Query{
 		FromZone: zone, ToZone: policymatch.JunosHostZone,
 		SrcIP: net.ParseIP(q.src), DstIP: net.ParseIP(q.dst),
-		Protocol: q.proto, DstPort: int(q.dport),
+		Protocol: q.proto, DstPort: policymatch.PortPtr(uint16(q.dport)),
 	})
 	return res.Matched && res.Action == config.PolicyDeny
 }

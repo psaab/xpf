@@ -85,7 +85,7 @@ func TestExcludedDenyOverEmptyDropFeedFailsClosed12050(t *testing.T) {
 				SrcIP:       net.ParseIP("203.0.113.7"),
 				DstIP:       net.ParseIP("192.0.2.80"),
 				Protocol:    "tcp",
-				DstPort:     80,
+				DstPort:     PortPtr(80),
 				FeedOverlay: map[string][]string{"partners": {}},
 			})
 			// Before the content-rejection fix, the excluded DENY did not match
@@ -130,7 +130,7 @@ func TestLiteralNamedDropFeedExcludedDenyFailsClosed12277(t *testing.T) {
 				SrcIP:       net.ParseIP("203.0.113.7"),
 				DstIP:       net.ParseIP("192.0.2.80"),
 				Protocol:    "tcp",
-				DstPort:     80,
+				DstPort:     PortPtr(80),
 				FeedOverlay: map[string][]string{binding: {}},
 			})
 			assertContentRejected(t, res, "trust->untrust/deny-except-feed")

@@ -507,7 +507,7 @@ func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
 			return
 		}
 		if s.lastSentConfigGen.CompareAndSwap(old, gen) {
-			s.lastSentConfigAckCapable16756.Store(s.ConfigApplyAckCapable())
+			s.peerIncarnationState().lastSentConfigAckCapable16756.Store(s.ConfigApplyAckCapable())
 			return
 		}
 	}
