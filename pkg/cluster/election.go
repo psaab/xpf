@@ -931,16 +931,11 @@ func (m *Manager) electSingleNode() {
 //     it reaches the cumulative global-threshold sum, which this chokepoint
 //     could not protect: a masked threshold installs NO debt, so
 //     SetMonitorWeight is never called at all.
-//   - pkg/routing/monitor.go monitorManager.Apply — the statuses
-//     pkg/daemon/daemon_apply_tail.go feeds back in on EVERY commit / boot
-//     Load / peer SyncApply. Before either clamp existed, that raw value
-//     landed here six lines after UpdateConfig had already clamped the same
-//     debt, so the apply tail OVERWROTE the clamp and could restore a
-//     correctly-demoted group to primary with every monitored link down. The
-//     poll path cannot repair it: pollInterfaceMonitors re-fires
-//     SetMonitorWeight only on a dampened state TRANSITION, and a link that
-//     was already down before the apply produces none, so the raw debt
-//     persists indefinitely.
+//
+// #17132 removed the second producer (pkg/routing's per-apply raw sample
+// fed back in by the daemon apply tail): the dampened Monitor is now the
+// ONLY interface-monitor producer, so a raw sample can no longer overwrite
+// or clear dampened debt between transitions.
 func (m *Manager) SetMonitorWeight(rgID int, iface string, down bool, weight int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

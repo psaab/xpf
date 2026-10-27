@@ -708,7 +708,17 @@ func TestHAWatchdogClaimMatcherRejectsRewordedAndFootnotedStaleClaims10791(t *te
 func TestRetiredBPFWatchdogHeadersHaveNoLiveCallers10791(t *testing.T) {
 	t.Parallel()
 
-	for _, rel := range []string{"bpf/headers/xpf_maps.h", "bpf/headers/xpf_helpers.h"} {
+	// #17146: xpf_helpers.h (with xpf_nat.h and xpf_trace.h) had no
+	// compiler and no live reader, so it is deleted, not retained.
+	// Asserting absence keeps a re-added dead copy from re-entering
+	// the retained-ABI mirror by inertia.
+	for _, rel := range []string{"bpf/headers/xpf_helpers.h", "bpf/headers/xpf_nat.h", "bpf/headers/xpf_trace.h"} {
+		if _, err := os.Stat(filepath.Join(repoRootForBoundaryCanary, rel)); !os.IsNotExist(err) {
+			t.Errorf("retired header %s must be absent (#17146): stat err=%v", rel, err)
+		}
+	}
+
+	for _, rel := range []string{"bpf/headers/xpf_maps.h"} {
 		raw, err := os.ReadFile(filepath.Join(repoRootForBoundaryCanary, rel))
 		if err != nil {
 			t.Fatalf("read retired BPF header %s: %v", rel, err)
@@ -747,6 +757,130 @@ func TestRetiredBPFWatchdogHeadersHaveNoLiveCallers10791(t *testing.T) {
 	}
 	if !strings.Contains(doc, "no c caller") {
 		t.Errorf("%s must explain there is no current C caller", docRel)
+	}
+}
+
+// headerIdentifierHasLiveReader17146 reports whether ident appears
+// outside bpf/ in a .go/.rs/.sh file, after deleting bpf/ comments
+// from that corpus. Matching is alphanumeric-normalized so
+// MAX_NAT_POOLS matches MaxNatPools and GlobalCtrMax. Comments are
+// stripped only on the corpus side: a mention in a comment is not a
+// reader (#17146).
+func headerIdentifierHasLiveReader17146(corpus string, ident string) bool {
+	norm := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	return strings.Contains(corpus, norm(ident))
+}
+
+func stripCComments17146(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
+			end := strings.Index(s[i+2:], "*/")
+			if end < 0 {
+				break
+			}
+			i += 2 + end + 2
+			continue
+		}
+		if i+1 < len(s) && s[i] == '/' && s[i+1] == '/' {
+			end := strings.IndexByte(s[i:], '\n')
+			if end < 0 {
+				break
+			}
+			i += end
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// TestEveryHeaderIdentifierHasLiveReader17146 is the #17146
+// acceptance gate: every #define and named struct left in
+// bpf/headers must appear (comment-stripped, alphanumeric-
+// normalized) in some .go, .rs or .sh outside bpf/. Internal-only
+// use inside the remaining headers does not count. Guards are
+// exempt. FAIL-ON-REVERT: add any dead define/struct to a retained
+// header (or restore a deleted header's identifiers) and this
+// test names it.
+func TestEveryHeaderIdentifierHasLiveReader17146(t *testing.T) {
+	t.Parallel()
+
+	root := repoRootForBoundaryCanary
+	var corpus strings.Builder
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		if info.IsDir() {
+			if rel == ".git" || rel == filepath.Join("bpf") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		switch filepath.Ext(path) {
+		case ".go", ".rs", ".sh":
+			raw, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			corpus.WriteString(stripCComments17146(string(raw)))
+			corpus.WriteByte('\n')
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk corpus: %v", err)
+	}
+	normCorpus := func() string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(corpus.String()) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}()
+
+	defineRe := regexp.MustCompile(`(?m)^#define\s+([A-Za-z_][A-Za-z0-9_]*)`)
+	structRe := regexp.MustCompile(`(?m)^struct\s+([a-z_][a-z0-9_]*)\s*\{`)
+	var dead []string
+	for _, hdr := range []string{"xpf_common.h", "xpf_conntrack.h", "xpf_maps.h"} {
+		raw, err := os.ReadFile(filepath.Join(root, "bpf", "headers", hdr))
+		if err != nil {
+			t.Fatalf("read %s: %v", hdr, err)
+		}
+		text := stripCComments17146(string(raw))
+		for _, m := range defineRe.FindAllStringSubmatch(text, -1) {
+			if strings.HasPrefix(m[1], "__") && strings.HasSuffix(m[1], "_H__") {
+				continue
+			}
+			if !headerIdentifierHasLiveReader17146(normCorpus, m[1]) {
+				dead = append(dead, hdr+": "+m[1])
+			}
+		}
+		for _, m := range structRe.FindAllStringSubmatch(text, -1) {
+			if !headerIdentifierHasLiveReader17146(normCorpus, m[1]) {
+				dead = append(dead, hdr+": struct "+m[1])
+			}
+		}
+	}
+	if len(dead) > 0 {
+		sort.Strings(dead)
+		t.Errorf("identifiers in bpf/headers with no live reader outside bpf/ (#17146):\n%s", strings.Join(dead, "\n"))
 	}
 }
 
