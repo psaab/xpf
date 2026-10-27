@@ -555,6 +555,54 @@ func TestLenientCompletenessAllowlistFullPath16166(t *testing.T) {
 	}
 }
 
+// collectPointerToMapFields17157 returns the dotted paths of every
+// *map[...] field reachable from struct type t, recursing into
+// embedded and named struct fields and through pointer-to-struct
+// fields (the walkBoolFieldsRec16166 traversal shape). It is purely
+// type-driven, so a nil pointer-to-struct in any instance can never
+// hide a nested field. Recursion is bounded per PATH, not per type:
+// the same nested type reached under two different field paths is
+// walked under both (a *map hidden under either path must red), and
+// only a type already on the current path stops the descent, which
+// terminates self-referential types (and matches the bool walk's
+// distinct-path reporting under a nil self-pointer).
+func collectPointerToMapFields17157(t reflect.Type, path string, pathTypes map[reflect.Type]bool, offenders *[]string) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct || pathTypes[t] {
+		return
+	}
+	pathTypes[t] = true
+	defer delete(pathTypes, t)
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		p := sf.Name
+		if path != "" {
+			p = path + "." + sf.Name
+		}
+		ft := sf.Type
+		if ft.Kind() == reflect.Pointer && ft.Elem().Kind() == reflect.Map {
+			*offenders = append(*offenders, p+" "+ft.String())
+			continue
+		}
+		for ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct {
+			collectPointerToMapFields17157(ft, p, pathTypes, offenders)
+		}
+	}
+}
+
+// pointerToMapFields17157 returns the dotted paths of every
+// *map[...] field anywhere in the type graph rooted at t.
+func pointerToMapFields17157(t reflect.Type) []string {
+	var offenders []string
+	collectPointerToMapFields17157(t, "", map[reflect.Type]bool{}, &offenders)
+	return offenders
+}
+
 // TestCompileOptsShape17157 is the #17157 acceptance guard: compileOpts
 // must carry NO pointer-to-map fields (the pre-#17157
 // *map[string]struct{} out-parameters that runPreWalkGates wrote
@@ -562,20 +610,47 @@ func TestLenientCompletenessAllowlistFullPath16166(t *testing.T) {
 // not carry a nodeAware entry (node identity derives from
 // opts.nodeID != nil, compileTree's own selector).
 //
+// The no-*map check recurses through embedded and nested struct
+// fields (including pointer-to-struct fields such as
+// currentClusterAccepted16858), following the walkBoolFieldsRec16166
+// pattern: a *map[...] field hidden inside protocolScopeOpts or any
+// other nested struct is an offender, not just a direct field.
+//
 // FAIL-ON-REVERT: re-adding `applicationNameCollisions
-// *map[string]struct{}` (or any *map[...] field) to compileOpts turns
-// this RED, as does re-adding a "nodeAware" key to
+// *map[string]struct{}` (or any *map[...] field, direct or nested) to
+// compileOpts turns this RED, as does re-adding a "nodeAware" key to
 // lenientCompletenessAllowlist16166.
 func TestCompileOptsShape17157(t *testing.T) {
-	ct := reflect.TypeOf(compileOpts{})
-	var offenders []string
-	for i := range ct.NumField() {
-		ft := ct.Field(i).Type
-		if ft.Kind() == reflect.Pointer && ft.Elem().Kind() == reflect.Map {
-			offenders = append(offenders, ct.Field(i).Name+" "+ft.String())
-		}
+	// Mutant-proof the recursion itself, independent of the current
+	// field population: a planted *map[...] field inside an embedded
+	// struct and inside a pointer-to-struct field must both be
+	// reported under their dotted paths, while a plain (non-pointer)
+	// map field must NOT be reported. A walk flattened to direct
+	// fields would report only the direct offender and turn this RED.
+	type plantedNested17157 struct {
+		plantedPtrMap *map[string]struct{}
 	}
-	if len(offenders) > 0 {
+	type plantedRoot17157 struct {
+		directPtrMap *map[string]int
+		plainMap     map[string]bool
+		plantedNested17157
+		nestedPtr *plantedNested17157
+		self      *plantedRoot17157
+	}
+	got := pointerToMapFields17157(reflect.TypeOf(plantedRoot17157{}))
+	sort.Strings(got)
+	want := []string{
+		"directPtrMap *map[string]int",
+		"nestedPtr.plantedPtrMap *map[string]struct {}",
+		"plantedNested17157.plantedPtrMap *map[string]struct {}",
+	}
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("pointerToMapFields17157(plantedRoot17157) = %v, want %v "+
+			"(recursion into embedded/nested/pointer-to-struct fields is broken)", got, want)
+	}
+
+	if offenders := pointerToMapFields17157(reflect.TypeOf(compileOpts{})); len(offenders) > 0 {
 		t.Errorf("compileOpts has pointer-to-map field(s) %s: phase results must return "+
 			"as ordinary return values (preWalkResult), never through pointer "+
 			"out-parameters on compileOpts (#17157)", strings.Join(offenders, ", "))

@@ -885,7 +885,8 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 // Strict path (commit / commit-check, lenient=false): the first collision is a
 // hard compile error naming the offending filter and its families. Lenient path
 // (load / peer-sync, lenient=true): every collision is returned as a warning
-// plus the colliding-name set; compileExpanded stamps it on
+// plus the colliding-name set, which the caller returns in
+// preWalkResult; compileExpanded stamps it on
 // Firewall.CollidingNames and compileFirewall omits those names from both
 // pools (#15997), so no last-write-wins winner stays enforceable. Duplicates
 // with identical family-resolved effective compiled form are excluded by
