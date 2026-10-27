@@ -266,13 +266,24 @@ func TestQueueWithoutConnection(t *testing.T) {
 	}
 }
 
-func TestFormatStats(t *testing.T) {
+// #17107: FormatStats is deleted (it was a test-only fourth renderer
+// reading s.stats directly). Its rendering decision now lives in
+// syncStatFields; the operator surface is Manager.FormatStatistics /
+// FormatDataPlaneStatistics / FormatInformation. This cell pins that the
+// descriptor render produces the always rows for a populated snapshot.
+func TestSyncStatsDescriptorRender17107(t *testing.T) {
 	ss := NewSessionSync(":4785", "10.0.0.2:4785", nil)
 	ss.stats.SessionsSent.Store(100)
 	ss.stats.SessionsReceived.Store(50)
-	out := ss.FormatStats()
+	out := renderSyncStats(&SyncStatsSnapshot{SessionsSent: 100, SessionsReceived: 50}, "  ")
+	_ = ss
 	if out == "" {
-		t.Fatal("format stats should produce output")
+		t.Fatal("descriptor render should produce output")
+	}
+	for _, want := range []string{"Sessions sent: 100", "Sessions received: 50"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("descriptor render missing %q:\n%s", want, out)
+		}
 	}
 }
 
