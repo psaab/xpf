@@ -37,7 +37,7 @@ func TestUnsupportedTupleStillReportsRetention9993(t *testing.T) {
 
 	// Same-family control: the config IS content-rejected for an ordinary
 	// query, so the mixed-tuple query below must report it too.
-	control := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	control := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !control.ContentRejected {
 		t.Fatalf("control: ContentRejected = false, want true for undefined-app config (res=%+v)", control)
 	}

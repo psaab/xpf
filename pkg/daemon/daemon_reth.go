@@ -22,59 +22,159 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fixRethLinkFile rewrites the .link file for a RETH member to use
-// OriginalName= (the kernel name) instead of MACAddress= for matching.
-// This ensures the .link works on reboot when the MAC reverts to physical.
-func fixRethLinkFile(ifName, kernelName string) {
-	if !rendersafe.SafeInterfaceName(kernelName) {
-		slog.Warn("refusing unsafe RETH OriginalName", "iface", ifName, "kernelName", kernelName)
-		return
-	}
-	if glob := rendersafe.FirstGlobMetacharacter(kernelName); glob != "" {
-		slog.Warn("refusing glob RETH OriginalName", "iface", ifName, "kernelName", kernelName, "glob", glob)
-		return
-	}
-	if rendersafe.IsNegatedMatchPattern(kernelName) {
-		slog.Warn("refusing negated RETH OriginalName", "iface", ifName, "kernelName", kernelName)
-		return
-	}
+// fixRethLinkFile ensures the .link file for a RETH member freshly renamed
+// from kernelName uses OriginalName= (the kernel name) for matching,
+// without downgrading a richer unit networkd already wrote (#17042,
+// R4-Q43-01). The MAC alternates between physical and virtual, so a
+// MACAddress= match breaks after virtual-MAC programming; an
+// OriginalName= match is stable across reboots.
+//
+// It no longer renders its own stripped body or swallows the write
+// error: an existing richer file is preserved field-for-field via
+// preserveLinkFields, a missing file is created through writeLinkFile
+// (networkd.RenderLink), and every refusal or write failure returns an
+// error the apply caller joins into Phase.Networkd (the old Warn-only
+// policy hid a failed write from the commit result — #2987 class). A
+// refusal (unsafe/glob/negated kernelName, mismatched [Link] Name=)
+// likewise returns an error and writes nothing.
+func fixRethLinkFile(ifName, kernelName string) error {
 	path := filepath.Join(linkDir, linkPrefix+ifName+".link")
-	content := fmt.Sprintf("# Managed by xpfd — do not edit\n[Match]\nOriginalName=%s\n\n[Link]\nName=%s\n", kernelName, ifName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			_, werr := writeLinkFile(ifName, kernelName)
+			if werr != nil {
+				return fmt.Errorf("write RETH .link for %s: %w", ifName, werr)
+			}
+			return nil
+		}
+		return fmt.Errorf("read RETH .link %s: %w", path, err)
+	}
+	if !strings.Contains(string(data), "MACAddress=") {
+		return nil // already OriginalName= or other match; never downgrade
+	}
+	return rewriteLinkOriginalName(path, ifName, kernelName)
+}
+
+// rewriteLinkOriginalName rewrites a MAC-form .link at path to
+// OriginalName=kernelName, preserving the richer fields networkd
+// rendered (MTU/speed/duplex/description) so the rewrite never strips
+// them (#17042).
+func rewriteLinkOriginalName(path, ifName, kernelName string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read .link %s: %w", path, err)
+	}
+	content, err := preserveLinkFields(string(data), kernelName)
+	if err != nil {
+		return err
+	}
+	if content == string(data) {
+		return nil
+	}
+	if err := validatePreservedLink(content, ifName, kernelName); err != nil {
+		return err
+	}
 	// AtomicGeneratedConfig: regenerated each apply/boot; a torn file is
 	// unacceptable (would mis-name a RETH member) but a power-cut loss
 	// self-heals next apply.
 	if err := fsatomic.WriteFileAtomic(path, []byte(content), 0644); err != nil {
-		slog.Warn("failed to fix RETH .link file", "path", path, "err", err)
+		return fmt.Errorf("write RETH .link %s: %w", path, err)
 	}
+	return nil
+}
+
+// preserveLinkFields returns content with EVERY MACAddress= line in its
+// [Match] section replaced by OriginalName=kernelName, preserving every
+// other line byte-for-byte (#17042 fold B3). It is section-scoped:
+// MACAddress= directives outside [Match] (e.g. a [Link] MACAddress=
+// permanent-address assignment) are link directives, not match
+// criteria, and are left untouched. A file with no [Match] MACAddress=
+// line is returned unchanged.
+func preserveLinkFields(content, kernelName string) (string, error) {
+	if !rendersafe.SafeInterfaceName(kernelName) {
+		return "", fmt.Errorf("refusing unsafe RETH OriginalName %q: it is not exactly one [Match] OriginalName= pattern (#9886/#10718)", kernelName)
+	}
+	if glob := rendersafe.FirstGlobMetacharacter(kernelName); glob != "" {
+		return "", fmt.Errorf("refusing glob RETH OriginalName %q: glob metacharacter %q in [Match] OriginalName= (#10089)", kernelName, glob)
+	}
+	if rendersafe.IsNegatedMatchPattern(kernelName) {
+		return "", fmt.Errorf("refusing negated RETH OriginalName %q: a leading '!' in [Match] OriginalName= inverts the match list (#15079)", kernelName)
+	}
+	lines := strings.Split(content, "\n")
+	section := ""
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			section = trimmed
+			continue
+		}
+		if section == "[Match]" && strings.HasPrefix(trimmed, "MACAddress=") {
+			lines[i] = "OriginalName=" + kernelName
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// validatePreservedLink checks the rewritten content stays well-formed:
+// the [Link] Name= (when present) still names ifName, the [Match]
+// section now carries OriginalName=kernelName, and no MACAddress= match
+// survives in [Match] (#17042 fold B3 — a leftover MAC match would
+// still claim the member by its alternating MAC).
+func validatePreservedLink(content, ifName, kernelName string) error {
+	section := ""
+	hasOriginalName := false
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = line
+			continue
+		}
+		if section == "[Match]" && strings.HasPrefix(line, "MACAddress=") {
+			return fmt.Errorf("refusing RETH .link rewrite for %q: rewritten content still carries a [Match] MACAddress= match", ifName)
+		}
+		if section == "[Match]" && line == "OriginalName="+kernelName {
+			hasOriginalName = true
+		}
+		if strings.HasPrefix(line, "Name=") {
+			if got := strings.TrimSpace(strings.TrimPrefix(line, "Name=")); got != ifName {
+				return fmt.Errorf("refusing RETH .link rewrite for %q: existing [Link] Name=%q does not match", ifName, got)
+			}
+		}
+	}
+	if !hasOriginalName {
+		return fmt.Errorf("refusing RETH .link rewrite for %q: rewritten content lacks OriginalName=%s", ifName, kernelName)
+	}
+	return nil
 }
 
 // ensureRethLinkOriginalName checks that a RETH member's .link file uses
-// OriginalName= (PCI kernel name) instead of MACAddress=. If the file still
-// uses MACAddress=, it derives the kernel name and rewrites the file. This
-// handles bootstrap .link files that were created before the daemon ran.
-func ensureRethLinkOriginalName(ifName string) {
-	path := fmt.Sprintf("/etc/systemd/network/10-xpf-%s.link", ifName)
+// OriginalName= (PCI kernel name) instead of MACAddress=. If the file
+// still uses MACAddress=, it derives the kernel name and rewrites the
+// file, preserving networkd's richer fields. This handles bootstrap
+// .link files that were created before the daemon ran. It reads through
+// the linkDir seam (the old copy hard-coded /etc/systemd/network) and
+// returns any rewrite failure so it joins Phase.Networkd (#17042).
+func ensureRethLinkOriginalName(ifName string) error {
+	path := filepath.Join(linkDir, linkPrefix+ifName+".link")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return nil // missing/unreadable: networkd owns the file; nothing to fix
 	}
-	content := string(data)
-	if !strings.Contains(content, "MACAddress=") {
-		return // already uses OriginalName= or other match
+	if !strings.Contains(string(data), "MACAddress=") {
+		return nil // already uses OriginalName= or other match
 	}
-	// Derive the kernel name. deriveKernelName consults the SAME altnames this
-	// used to walk inline, in systemd's NamePolicy order, and falls back to the
-	// sysfs PCI derivation — so the two paths cannot disagree about what a
-	// NIC's pre-rename name is. A divergence between them would always be a
-	// bug, which is why this is one implementation rather than two kept in
-	// agreement.
-	kernelName := deriveKernelName(ifName)
+	// Derive the kernel name. deriveKernelName consults the SAME altnames
+	// this used to walk inline, in systemd's NamePolicy order, and falls
+	// back to the sysfs PCI derivation — so the two paths cannot disagree
+	// about what a NIC's pre-rename name is.
+	kernelName := deriveKernelNameFn(ifName)
 	if kernelName == "" {
-		return
+		return nil
 	}
 	slog.Info("fixing RETH .link file to use OriginalName",
 		"iface", ifName, "kernelName", kernelName)
-	fixRethLinkFile(ifName, kernelName)
+	return rewriteLinkOriginalName(path, ifName, kernelName)
 }
 
 // altNameCandidatesFn returns an interface's kernel ALTERNATIVE names. It is a
@@ -726,41 +826,16 @@ func rethParentLinkLocalRepair(linuxName string, rethCfg *config.InterfaceConfig
 	}
 }
 
-// rethUnitHasConfiguredLinkLocal checks whether the RETH config has an
-// explicitly configured link-local IPv6 address (fe80::/10) on the given unit.
-func rethUnitHasConfiguredLinkLocal(rethCfg *config.InterfaceConfig, unitNum int) bool {
-	unit, ok := rethCfg.Units[unitNum]
-	if !ok {
-		return false
-	}
-	for _, addr := range unit.Addresses {
-		ip, _, err := net.ParseCIDR(addr)
-		if err != nil {
-			continue
-		}
-		if ip.IsLinkLocalUnicast() && ip.To4() == nil {
-			return true
-		}
-	}
-	return false
-}
 
 // rethUnitHasIPv6 checks whether the RETH config has IPv6 addresses on the
 // given logical unit number. Unit 0 is the native/untagged interface. The
 // argument is a UNIT number, not a vlan-id — callers that start from a kernel
 // VLAN sub-interface suffix must translate the vlan-id to a unit with
-// rethUnitForVlanID first (#5107).
+// rethUnitForVlanID first (#5107). Delegates to the single definition in
+// pkg/config (#17049), which also counts DHCPv6Client (#13102).
 func rethUnitHasIPv6(rethCfg *config.InterfaceConfig, unitNum int) bool {
-	unit, ok := rethCfg.Units[unitNum]
-	if !ok {
-		return false
-	}
-	for _, addr := range unit.Addresses {
-		if strings.Contains(addr, ":") {
-			return true
-		}
-	}
-	return unit.DHCPv6
+	unit, ok := config.LookupUnit(rethCfg, unitNum)
+	return ok && config.UnitHasIPv6(unit)
 }
 
 // rethUnitForVlanID reverse-maps a kernel VLAN id to the logical unit number

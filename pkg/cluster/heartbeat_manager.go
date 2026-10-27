@@ -391,14 +391,13 @@ func (m *Manager) stopHeartbeat() {
 // apart. Depending on that coincidence would make this silently wrong if the
 // fallback ever changed.
 func (m *Manager) ApplyCommittedHeartbeatTiming() bool {
-	// The decision is heartbeatTimingDivergedLocked's, called rather than
-	// restated: a second copy of the condition here could disagree with the one
-	// the table in heartbeat_timing_apply_7164_test.go asserts, and then the
-	// tests would pass while production restarted on the wrong commits.
+	// One RLock covers the decision and the logged values together, so
+	// the log can never contradict the decision that produced it.
+	m.mu.RLock()
 	if !m.heartbeatTimingDivergedLocked() {
+		m.mu.RUnlock()
 		return false
 	}
-	m.mu.RLock()
 	liveInterval, liveThreshold := m.liveHeartbeatTimingLocked()
 	wantInterval, wantThreshold := m.hbInterval, m.hbThreshold
 	m.mu.RUnlock()
@@ -410,7 +409,7 @@ func (m *Manager) ApplyCommittedHeartbeatTiming() bool {
 
 // heartbeatTimingDivergedLocked is the DECISION half of
 // ApplyCommittedHeartbeatTiming, split out so it can be asserted without
-// standing up a real heartbeat.
+// standing up a real heartbeat. Caller must hold m.mu.
 //
 // The split is deliberate: the restart MECHANISM is already covered by the
 // VRF-rebind path's tests, and binding a socket in a unit test to observe a
@@ -418,8 +417,6 @@ func (m *Manager) ApplyCommittedHeartbeatTiming() bool {
 // predicate. What #7164 changed is which commits decide to restart, so that is
 // what gets its own name and its own table.
 func (m *Manager) heartbeatTimingDivergedLocked() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 	if m.hbReceiver == nil {
 		return false
 	}
@@ -980,48 +977,46 @@ func (m *Manager) handlePeerTimeout() {
 	// lost and a later peer-aware election can move the RG contrary to it
 	// (under preempt, an unrequested move back). Only restore on abort;
 	// a takeover that proceeds keeps the clears exactly as before.
-	type peerLossHoldSnapshot15211 struct {
-		rg              *RedundancyGroupState
-		manual          bool
-		forcedSecondary bool
-		at              time.Time
-		state           NodeState
-		weight          int
-		override        transferOverride
-		hasOverride     bool
-		abortedReqID    uint64
-		hasAborted      bool
-	}
-	holds15211 := make(map[int]peerLossHoldSnapshot15211)
+	//
+	// #17117: the snapshot/restore is the shared operatorHoldSnapshot pair
+	// in failover.go, not a local copy — the copy dropped the failoverGen
+	// supersede check, so an operator ResetFailover landing in the
+	// unlocked fence wait (which bumps the generation) was silently
+	// undone by the restore. snapshotOperatorHoldLocked captures the
+	// generation under m.mu here; restoreOperatorHoldLocked abandons the
+	// restore when it has moved.
+	holds15211 := make(map[int]operatorHoldSnapshot)
 	if m.peerFencing == PeerFencingDisableRGConfirmed {
-		for _, rg := range m.groups {
-			snap := peerLossHoldSnapshot15211{rg: rg, manual: rg.ManualFailover, forcedSecondary: rg.forcedSecondary, at: rg.ManualFailoverAt, state: rg.State, weight: rg.Weight}
-			if override, ok := m.transferOverrides[rg.GroupID]; ok {
-				snap.override, snap.hasOverride = override, true
-			}
-			if reqID, ok := m.abortedPeerTransferReqID[rg.GroupID]; ok {
-				snap.abortedReqID, snap.hasAborted = reqID, true
-			}
-			holds15211[rg.GroupID] = snap
-		}
-		// Overrides/aborted markers keyed by an RG no longer in m.groups
-		// are cleared by the loops below too; snapshot them (rg == nil)
-		// so an abort restores them as well.
-		for rgID, override := range m.transferOverrides {
-			if _, ok := holds15211[rgID]; ok {
-				continue
-			}
-			snap := peerLossHoldSnapshot15211{override: override, hasOverride: true}
-			if aborted, ok := m.abortedPeerTransferReqID[rgID]; ok {
-				snap.abortedReqID, snap.hasAborted = aborted, true
+		for rgID := range m.groups {
+			snap := m.snapshotOperatorHoldLocked(rgID)
+			// Preserve the pre-#17117 unconditional weight restore on
+			// this path: the peer-loss clear recomputes weight from
+			// monitor debt, and the fence abort must put back the exact
+			// pre-clear weight even when it happened to equal the debt
+			// weight at snapshot time.
+			if snap.armed {
+				snap.restoreWeight = true
 			}
 			holds15211[rgID] = snap
 		}
-		for rgID, reqID := range m.abortedPeerTransferReqID {
+		// #17117-fold/#18148: overrides/aborted markers keyed by an RG
+		// no longer in m.groups snapshotted as rg==nil entries. The
+		// restore now drops them (no proven incarnation; see
+		// restoreOperatorHoldLocked) instead of restoring an override
+		// that could be seeded onto a same-id re-add in the fence
+		// window. The peer-loss clears below therefore STAND for such
+		// ids — the fail-open/safe direction (#8435 dual-primary class).
+		for rgID := range m.transferOverrides {
 			if _, ok := holds15211[rgID]; ok {
 				continue
 			}
-			holds15211[rgID] = peerLossHoldSnapshot15211{abortedReqID: reqID, hasAborted: true}
+			holds15211[rgID] = m.snapshotOperatorHoldLocked(rgID)
+		}
+		for rgID := range m.abortedPeerTransferReqID {
+			if _, ok := holds15211[rgID]; ok {
+				continue
+			}
+			holds15211[rgID] = m.snapshotOperatorHoldLocked(rgID)
 		}
 	}
 	for _, rg := range m.groups {
@@ -1102,29 +1097,7 @@ func (m *Manager) handlePeerTimeout() {
 			// reconverges under the restored holds — the same
 			// election a subsequent heartbeat would run.
 			for rgID, snap := range holds15211 {
-				if snap.rg != nil && m.groups[rgID] == snap.rg && snap.manual {
-					oldState := snap.rg.State
-					snap.rg.ManualFailover = true
-					snap.rg.forcedSecondary = snap.forcedSecondary
-					snap.rg.ManualFailoverAt = snap.at
-					snap.rg.Weight = snap.weight
-					snap.rg.State = snap.state
-					if snap.rg.State != oldState {
-						m.sendEvent(rgID, oldState, snap.rg.State, "Manual failover restored after aborted peer fence")
-					}
-				}
-				if snap.hasOverride {
-					m.transferOverrides[rgID] = snap.override
-					if pg, ok := m.peerGroups[rgID]; ok {
-						pg.State = StateSecondaryHold
-						pg.StateOverriddenLocally = true
-						pg.OverrideReason = "transfer-out override"
-						m.peerGroups[rgID] = pg
-					}
-				}
-				if snap.hasAborted {
-					m.abortedPeerTransferReqID[rgID] = snap.abortedReqID
-				}
+				m.restoreOperatorHoldLocked(rgID, snap, "Manual failover restored after aborted peer fence")
 			}
 			m.runElection()
 			return
