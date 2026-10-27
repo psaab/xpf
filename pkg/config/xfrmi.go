@@ -444,6 +444,43 @@ func (c *Config) secureTunnelBindingForRef(ref string) (string, secureTunnelBind
 	return owner, secureTunnelBound
 }
 
+// secureTunnelBindingSiblingUnit reports whether any authored VPN
+// bind-interface materializes a NONZERO logical unit on the secure-tunnel
+// BASE base (e.g. "st0") — a binding-derived sibling of unit 0.
+//
+// #18030/#18031: units exist on a secure tunnel even with NO `interfaces`
+// stanza, because each bind-interface string IS a unit declaration to the
+// xfrmi reconciler (see SecureTunnelNetdevForRef — the device is created
+// from the authored string itself). A sibling census that only reads
+// authored ifc.Units therefore under-counts exactly the stanza-less shapes.
+// The census is keyed on the XFRM if_id FAMILY (stIndex), not the string
+// base, so padded spellings (`st00.1`) join the family they actually
+// derive, matching how pkg/routing creates and collides devices.
+//
+// A sibling makes a BARE unit-less ref (e.g. a NAT scope `st0`) identify no
+// single logical unit: with unit 0 alone the bare name would mean
+// "st0.0", but a sibling forces the operator to spell the unit. Two VPNs
+// sharing the SAME unit (both `bind-interface st0.0`) derive one if_id and
+// are NOT siblings — legitimate multi-VPN sharing is preserved.
+func (c *Config) secureTunnelBindingSiblingUnit(base string) bool {
+	if c == nil {
+		return false
+	}
+	idx, ok := secureTunnelIndex(base)
+	if !ok {
+		return false
+	}
+	for _, vpn := range c.Security.IPsec.VPNs {
+		if vpn == nil || vpn.BindInterface == "" {
+			continue
+		}
+		if _, id := XFRMIfNameAndID(vpn.BindInterface); id != 0 && int(id>>16) == idx && id&0xffff != 1 {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidateSecureTunnelBindInterface reports whether a `security ipsec vpn
 // <name> bind-interface` value is a canonical secure-tunnel interface — the
 // only shape the route-based-VPN datapath can bind. The accepted lexical form

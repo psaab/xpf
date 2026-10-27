@@ -184,23 +184,33 @@ func natInterfaceDefined15278(cfg *Config, ref string) bool {
 		if base == "lo0" {
 			return true
 		}
-		// #17883: reject the ambiguous unit-0-plus-sibling shape before
-		// SecureTunnelNetdevForRef(ref+".0") can make the bare ref look
-		// defined. The tunnel's exact logical-unit match cannot consume
-		// the unresolved bare spelling.
-		// #18024: unit 0 may be supplied only by its secure-tunnel binding
-		// (no authored `interfaces st0 unit 0` stanza) while a sibling is
-		// authored; the materialized .0 counts exactly like an authored
-		// unit 0 for ambiguity.
-		if ifc := cfg.Interfaces.Interfaces[base]; ifc != nil {
-			_, unit0Bound := cfg.SecureTunnelNetdevForRef(ref + ".0")
-			if ifc.Units[0] != nil || unit0Bound {
-				for unitNum, sibling := range ifc.Units {
-					if sibling != nil && unitNum != 0 {
-						return false
-					}
+		ifc := cfg.Interfaces.Interfaces[base]
+		// #17883/#18024/#18030/#18031: a bare ref means unit 0 only when
+		// unit 0 is the SOLE logical unit on the base. Unit 0 may be
+		// supplied by an authored stanza, a unitless tunnel stanza, or a
+		// unit-0 binding; a sibling — AUTHORED or binding-derived — makes
+		// the bare name identify no single unit. The census must not
+		// depend on an interface stanza existing (#18030: bindings alone
+		// materialize units) and must not stop at authored ifc.Units
+		// (#18031: binding-derived siblings).
+		unit0 := ifc != nil && (ifc.Units[0] != nil || (ifc.Tunnel != nil && !ifc.AuthoredUnits))
+		sibling := false
+		if ifc != nil {
+			for unitNum, sib := range ifc.Units {
+				if sib != nil && unitNum != 0 {
+					sibling = true
+					break
 				}
 			}
+		}
+		if cfg.secureTunnelBindingSiblingUnit(base) {
+			sibling = true
+		}
+		if _, bound := cfg.SecureTunnelNetdevForRef(ref + ".0"); bound {
+			unit0 = true
+		}
+		if unit0 && sibling {
+			return false
 		}
 
 		// Materialized st0: a bare ref that resolves only through its
@@ -210,14 +220,14 @@ func natInterfaceDefined15278(cfg *Config, ref string) bool {
 		}
 		if _, bound := cfg.SecureTunnelNetdevForRef(ref); bound {
 			st0Defined := false
-			if ifc := cfg.Interfaces.Interfaces[base]; ifc != nil {
+			if ifc != nil {
 				if _, ok := ifc.Units[0]; ok {
 					st0Defined = true
 				}
 			}
 			return st0Defined
 		}
-		if ifc := cfg.Interfaces.Interfaces[base]; ifc != nil {
+		if ifc != nil {
 			// #16827: unit 0 must exist for a bare ref to be matchable;
 			// a stanza with no unit (or only non-zero units) leaves the
 			// bare ref naming no unit traffic reaches it on.
