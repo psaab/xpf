@@ -1417,8 +1417,10 @@ tracker therefore retains a **bounded sampled-idle marker**
 (`idleMarkerMax` = 8192 per tracker, cleared wholesale at the cap) holding
 the final record's cumulative baselines and the record template.
 `Keys()`/`Has()` include marker keys, so the daemon live feed keeps
-polling them: a `Touch`/`TouchBidirectional` showing cumulative progress
-re-arms a live entry whose export baselines are the marker's (the final
+polling them: a `Touch`/`TouchBidirectional` showing per-field cumulative
+progress (any one counter advancing, #17804 — not the forward+reverse
+sums, which a backwards-racing mirror field can hold flat) re-arms a live
+entry whose export baselines are the marker's (the final
 span is never recounted), and the real `SESSION_CLOSE` — via
 `CloseWithBaseline` — reports sampled with those baselines whether or
 not a resumed poll landed first, so `ExportSessionCloseRemainder`
