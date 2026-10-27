@@ -85,8 +85,7 @@ func TestFenceAbortRestoresOperatorIntent15211(t *testing.T) {
 			rg := m.groups[0]
 			manual, at, weight := rg.ManualFailover, rg.ManualFailoverAt, rg.Weight
 			state := rg.State
-			_, overrideArmed := m.peerTransferOutOverride[0]
-			_, prevPresent := m.peerTransferOutPrevious[0]
+			_, overrideArmed := m.transferOverrides[0]
 			_, abortedArmed := m.abortedPeerTransferReqID[0]
 			m.mu.RUnlock()
 			if !manual {
@@ -102,10 +101,7 @@ func TestFenceAbortRestoresOperatorIntent15211(t *testing.T) {
 				t.Errorf("preempt=%v: State=%v, want secondary-hold (restored hold state)", preempt, state)
 			}
 			if !overrideArmed {
-				t.Errorf("preempt=%v: peerTransferOutOverride cleared and not restored on fence abort", preempt)
-			}
-			if !prevPresent {
-				t.Errorf("preempt=%v: peerTransferOutPrevious snapshot lost on fence abort", preempt)
+				t.Errorf("preempt=%v: transferOverrides cleared and not restored on fence abort", preempt)
 			}
 			if !abortedArmed {
 				t.Errorf("preempt=%v: abortedPeerTransferReqID cleared and not restored on fence abort", preempt)
@@ -153,8 +149,8 @@ func TestFenceConfirmedStillClearsOperatorIntent15211(t *testing.T) {
 	if m.groups[0].ManualFailover {
 		t.Error("confirmed takeover must clear ManualFailover")
 	}
-	if _, ok := m.peerTransferOutOverride[0]; ok {
-		t.Error("confirmed takeover must clear peerTransferOutOverride")
+	if _, ok := m.transferOverrides[0]; ok {
+		t.Error("confirmed takeover must clear transferOverrides")
 	}
 	if _, ok := m.abortedPeerTransferReqID[0]; ok {
 		t.Error("confirmed takeover must clear abortedPeerTransferReqID")
@@ -176,8 +172,8 @@ func TestFenceFailOpenNoHeartbeatStillClears15211(t *testing.T) {
 	if m.groups[0].ManualFailover {
 		t.Error("fail-open takeover must clear ManualFailover")
 	}
-	if _, ok := m.peerTransferOutOverride[0]; ok {
-		t.Error("fail-open takeover must clear peerTransferOutOverride")
+	if _, ok := m.transferOverrides[0]; ok {
+		t.Error("fail-open takeover must clear transferOverrides")
 	}
 }
 

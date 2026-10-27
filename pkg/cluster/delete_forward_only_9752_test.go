@@ -126,7 +126,7 @@ func TestQueuedDeleteCarriesTheMarkerByte9752(t *testing.T) {
 		t.Fatalf("unconnected queue must journal the delete, journal holds %d", got)
 	}
 	s.deleteJournalMu.Lock()
-	msg := s.deleteJournal[0]
+	msg := s.deleteJournal.entries[0]
 	s.deleteJournalMu.Unlock()
 	payload := msg[syncHeaderSize:]
 	if len(payload) != 25 || payload[24] == 0 {
@@ -197,7 +197,7 @@ func TestQueuedDeleteCarriesTheMarkerByteV610068(t *testing.T) {
 		t.Fatalf("unconnected v6 queue must journal one delete, got %d", got)
 	}
 	s.deleteJournalMu.Lock()
-	msg := s.deleteJournal[0]
+	msg := s.deleteJournal.entries[0]
 	s.deleteJournalMu.Unlock()
 	payload := msg[syncHeaderSize:]
 	if len(payload) != 49 || payload[48] == 0 {
