@@ -353,13 +353,11 @@ func (a *IpsecCapturePipeline) receiveQueue(ctx context.Context, captureQueue Ip
 		frame.FlowKey = classification.FlowKey
 		if classification.IsFragment {
 			key, keyOK := classification.FragmentKey(captureQueue.Tunnel, captureQueue.VRF, captureQueue.Generation)
-			piece, pieceOK := classification.FragmentPiece(packet.Payload())
-			if !keyOK || !pieceOK || len(piece.Data) == 0 {
+			if !keyOK || !classification.HasPayload() {
 				_ = a.pipeline.RejectPreFrame(frame, nfqueue.CaptureFragmentMetadataError)
 				continue
 			}
 			frame.FragmentKey = &key
-			frame.Fragment = &piece
 		}
 		if err := a.pipeline.Enqueue(frame); err != nil && errors.Is(err, nfqueue.ErrPipelineClosed) {
 			return
