@@ -32,6 +32,14 @@ func twoRGIPsecStore(t *testing.T) *configstore.Store {
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9139",
 		"set chassis cluster ipsec-session-synchronization",
+		// Keyed ahead of the #16746 control-link gate (precedent:
+		// 68b1f8162a keyed the chassis-cluster fixtures ahead of #6611):
+		// private-rg-election without control-interface/peer-address is
+		// rejected at commit, so the fixture opts into RETH VRRP
+		// arbitration. Inert for these cells — RG state is driven via
+		// SetGroupStateForTesting, never elected; the config only feeds
+		// reth→RG attribution.
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 2 node 0 priority 100",
 		"set interfaces reth1 redundant-ether-options redundancy-group 1",

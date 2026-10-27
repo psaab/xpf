@@ -1043,10 +1043,12 @@ func (m *Manager) UpdateRGPriority(rgID int, priority int) {
 			old := vi.cfg.Priority
 			newPriority := clampConfigPriority(priority)
 			vi.cfg.Priority = newPriority
-			// #16821: this restore supersedes a pending
+			// #16821 + #17859: this restore supersedes a pending
 			// resignation — drop the stashed 0 so a later,
-			// unrelated becomeBackup cannot install it.
-			vi.discardPendingResign()
+			// unrelated becomeBackup cannot install it, and bump
+			// resignEpoch under mu so an already-extracted
+			// resignation cannot overwrite this restore either.
+			vi.discardPendingResignLocked()
 			vi.mu.Unlock()
 			if old != newPriority {
 				slog.Info("vrrp: immediate priority update",

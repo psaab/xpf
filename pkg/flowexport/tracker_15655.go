@@ -216,7 +216,18 @@ func (t *FlowTracker) TouchBidirectional(key FlowKey, now time.Time, fwdPackets,
 		if !idle {
 			return
 		}
-		if fwdPackets+revPackets <= m.lastPackets+m.lastRevPackets && fwdBytes+revBytes <= m.lastBytes+m.lastRevBytes {
+		// #17804: progress is per-field — any single counter
+		// advancing — not the forward+reverse sums. A backwards-
+		// racing mirror field (the #16750 reality the #17851 carry
+		// below already clamps) can hold both sums flat while
+		// another field genuinely progresses, wrongly suppressing
+		// the re-arm (resumed traffic stayed outside the live
+		// tracker: the #16747 defect again), and summed uint64s
+		// wrap near 2^64, flipping the comparison either way.
+		// Mirrors the live-path progress test below and Touch's
+		// two-field gate.
+		if fwdPackets <= m.lastPackets && fwdBytes <= m.lastBytes &&
+			revPackets <= m.lastRevPackets && revBytes <= m.lastRevBytes {
 			return
 		}
 		delete(t.idle, key)
@@ -397,6 +408,40 @@ func (t *FlowTracker) Adopt(f *trackedFlow) bool {
 	}
 	cp := *f
 	t.flows[f.key] = &cp
+	return true
+}
+
+// CloneIdleMarker copies the sampled-idle marker for key (#17834), so a
+// replacement exporter can carry the re-admission and close-remainder
+// state across a rebuild the way Clone carries live flows. ok is false
+// when key holds no marker (live entry or forgotten).
+func (t *FlowTracker) CloneIdleMarker(key FlowKey) (idleMarker, bool) {
+	if !t.enabled() {
+		return idleMarker{}, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	m, ok := t.idle[key]
+	return m, ok
+}
+
+// AdoptIdleMarker installs a previously cloned marker unless the key
+// already holds state (live entry or marker): state already present in
+// the destination wins, mirroring Adopt. The same idleMarkerMax bound
+// as ordinary marker storage applies.
+func (t *FlowTracker) AdoptIdleMarker(key FlowKey, m idleMarker) bool {
+	if !t.enabled() {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, live := t.flows[key]; live {
+		return false
+	}
+	if _, exists := t.idle[key]; exists {
+		return false
+	}
+	t.storeIdleMarkerLocked(key, m)
 	return true
 }
 

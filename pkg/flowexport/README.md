@@ -1424,19 +1424,27 @@ tracker therefore retains a **bounded sampled-idle marker**
 (`idleMarkerMax` = 8192 per tracker, cleared wholesale at the cap) holding
 the final record's cumulative baselines and the record template.
 `Keys()`/`Has()` include marker keys, so the daemon live feed keeps
-polling them: a `Touch`/`TouchBidirectional` showing cumulative progress
-re-arms a live entry whose export baselines are the marker's (the final
+polling them: a `Touch`/`TouchBidirectional` showing per-field cumulative
+progress (any one counter advancing, #17804 — not the forward+reverse
+sums, which a backwards-racing mirror field can hold flat) re-arms a live
+entry whose export baselines are the marker's (the final
 span is never recounted), and the real `SESSION_CLOSE` — via
 `CloseWithBaseline` — reports sampled with those baselines whether or
 not a resumed poll landed first, so `ExportSessionCloseRemainder`
 exports exactly the post-expiry remainder (lifetime minus final
 baselines, saturating to zero when nothing resumed) exactly once.
 Markers are created only for flows that were tracked at expiry (never
-for unsampled or never-opened flows), and are dropped on re-open or close.
-While retained, the marker is the post-expiry state and a real close makes
-no second sampling decision. If the cap clear evicts a marker, that key has
-no state or baselines at close and follows the #16742 fallback, which may
-re-export counters already covered by the inactive final if selected.
+for unsampled or never-opened flows), are dropped on re-open or close,
+and are the only post-expiry state: no second sampling decision is made.
+Markers are open state for exporter replacement too (#17834): a
+flowexport config rebuild swaps exporter groups, and
+`AbsorbSampledInto`/`TransferFlowStateTo` carry each marker to the
+replacement exactly like a live tracker entry (state already present in
+the destination wins). Without the transfer, a rebuild landing inside an
+idle window silenced the key's polling — resumed traffic went unobserved
+again — and the real close fell to the #16742 close-time fallback, which
+could consume a second sampling slot and re-export the full lifetime the
+inactive final had already emitted, or drop the remainder entirely.
 
 
 ## Gotchas
