@@ -3,7 +3,7 @@
 //!
 //! The seed survives for the flow's life — the pending-neighbor retry sweep
 //! replays the buffered frame but never re-installs the session — so whatever
-//! `build_missing_neighbor_session_metadata` stamps is the window the flow
+//! `forward_session_metadata` stamps is the window the flow
 //! ages on until it expires. Stamping `inactivity_timeout_ns: None`
 //! unconditionally pins a policy-permitted custom-app flow to the global
 //! per-protocol timeout: the wire gate observes a stale session past the
@@ -77,10 +77,59 @@ fn seed_forwarding_10267() -> ForwardingState {
     build_forwarding_state(&ConfigSnapshot::default())
 }
 
+fn seed_meta_17021(
+    forwarding: &ForwardingState,
+    ingress_zone: u32,
+    egress_zone: u32,
+    ingress_ifindex: u32,
+    ingress_vlan_id: u16,
+    nat_scope_ifindex: Option<i32>,
+    fabric_ingress: bool,
+    decision: SessionDecision,
+    inactivity_timeout: Option<u32>,
+    policy_result: Option<crate::policy::PolicyEvaluationResult>,
+) -> crate::session::SessionMetadata {
+    // #17021: tests drive the SAME builder production uses. The old
+    // hand-copied seed builder threaded `inactivity_timeout`
+    // separately; the shared builder reads it from the policy result,
+    // so synthesize one when only a timeout is supplied.
+    let policy_result = match (policy_result, inactivity_timeout) {
+        (Some(mut result), timeout) => {
+            if result.inactivity_timeout.is_none() {
+                result.inactivity_timeout = timeout;
+            }
+            Some(result)
+        }
+        (None, Some(timeout)) => Some(crate::policy::PolicyEvaluationResult {
+            action: crate::policy::PolicyAction::Permit,
+            policy_id: 0,
+            log_session_init: false,
+            log_session_close: false,
+            inactivity_timeout: Some(timeout),
+            policy_counter_idx: 0,
+        }),
+        (None, None) => None,
+    };
+    crate::afxdp::session_glue::forward_session_metadata(crate::afxdp::session_glue::ForwardMetaInput {
+        forwarding,
+        ingress_zone,
+        egress_zone,
+        ingress_ifindex,
+        ingress_vlan_id,
+        ingress_nat_scope_ifindex: nat_scope_ifindex,
+        fabric_ingress,
+        decision,
+        policy_result,
+        nat64_reverse: None,
+        owner_rg_id: None,
+    })
+}
+
+
 #[test]
 fn seed_builder_stamps_app_timeout_10267() {
     let forwarding = seed_forwarding_10267();
-    let meta = build_missing_neighbor_session_metadata(
+    let meta = seed_meta_17021(
         &forwarding,
         1,
         2,
@@ -103,7 +152,7 @@ fn seed_builder_stamps_app_timeout_10267() {
 fn seed_builder_zero_and_unset_use_global_10267() {
     let forwarding = seed_forwarding_10267();
     for timeout in [None, Some(0)] {
-        let meta = build_missing_neighbor_session_metadata(
+        let meta = seed_meta_17021(
             &forwarding,
             1,
             2,
@@ -136,7 +185,7 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
     // normal SYN-ACK / completing-ACK handshake.
     let fwd = seed_key_10267(40000);
     let rev = reverse_of_10267(&fwd);
-    let seed_meta = build_missing_neighbor_session_metadata(
+    let seed_meta = seed_meta_17021(
         &forwarding,
         1,
         2,
@@ -156,7 +205,7 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
         PROTO_TCP,
         TCP_SYN,
     ));
-    let mut rev_meta = build_missing_neighbor_session_metadata(
+    let mut rev_meta = seed_meta_17021(
         &forwarding,
         2,
         1,
@@ -193,7 +242,7 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
     // Default-timeout control flow on distinct tuples (same table, same clock).
     let ctl_fwd = seed_key_10267(40001);
     let ctl_rev = reverse_of_10267(&ctl_fwd);
-    let ctl_meta = build_missing_neighbor_session_metadata(
+    let ctl_meta = seed_meta_17021(
         &forwarding,
         1,
         2,
@@ -213,7 +262,7 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
         PROTO_TCP,
         TCP_SYN,
     ));
-    let mut ctl_rev_meta = build_missing_neighbor_session_metadata(
+    let mut ctl_rev_meta = seed_meta_17021(
         &forwarding,
         2,
         1,
@@ -273,7 +322,7 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
 #[test]
 fn seed_builder_does_not_drop_policy_log_flags_13974() {
     let forwarding = seed_forwarding_10267();
-    let meta = build_missing_neighbor_session_metadata(
+    let meta = seed_meta_17021(
         &forwarding,
         1,
         2,
@@ -319,7 +368,7 @@ fn missing_neighbor_seed_emits_open_and_close_deltas_13974() {
         inactivity_timeout: None,
         policy_counter_idx: crate::policy::DEFAULT_POLICY_COUNTER_IDX,
     };
-    let metadata = build_missing_neighbor_session_metadata(
+    let metadata = seed_meta_17021(
         &forwarding,
         1,
         2,

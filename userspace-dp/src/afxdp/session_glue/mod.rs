@@ -60,6 +60,7 @@ pub(crate) fn handle_refresh_owner_rgs_for_test(
 use promote::purge_translated_synced_hit;
 use promote::should_keep_synced_hit_transient;
 
+mod forward_commit;
 mod resolution;
 mod worker_commands;
 mod revalidation;
@@ -67,6 +68,10 @@ mod tx_cancel;
 mod resolve;
 #[cfg(test)]
 mod modularity_13082_tests;
+pub(super) use forward_commit::{
+    ComposedNat, ForwardMetaInput, NatFailure, compose_outbound_source_nat, forward_session_metadata,
+    forward_synced_entry, seed_forward_tcp_epilogue,
+};
 pub(super) use resolution::*;
 pub(super) use worker_commands::*;
 pub(super) use revalidation::*;

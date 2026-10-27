@@ -1976,7 +1976,7 @@ no path on which old-format rows reach a new reader. A row written in the old
 format can therefore never be read by a new reader; the mixed state the
 population would describe is unreachable rather than merely rare.
 
-The MISSING-NEIGHBOR seed (`build_missing_neighbor_session_metadata`) is NOT in
+The MISSING-NEIGHBOR seed (`session_glue::forward_session_metadata`, #17021) is NOT in
 that list: it is a forward session installed when a flow's first packet races
 an unresolved ARP/NDP, it is published to the conntrack map, and the
 pending-neighbor retry sweep never re-installs it — so it is stamped from the
@@ -1985,14 +1985,15 @@ not both policy-admitted: the transit install is, but the LocalDelivery install
 also runs for a `JunosHostLocalPolicy::NoMatch` host-bound flow, admitted by the
 zone's host-inbound set with no junos-host policy matching at all (#6928 review).
 
-That leaves exactly THREE production sites that stamp the pair — the TRANSIT
-forward install and the HOST-INBOUND (`LocalMiss`) install, both in
-`afxdp/poll_descriptor`, plus the missing-neighbor seed. Each has its own
-fail-on-revert test in `afxdp/tests_session_ingress_identity.rs`, driven
-through the real `poll_binding_process_descriptor` body on a binding whose
-{ifindex, VLAN} is distinct from the other two fixtures', so reverting any ONE
-site to `0` reddens exactly its own test. The reverse companion's deliberate
-`0` is pinned by an over-reach test in the same module.
+Since #17021 the TRANSIT forward install and the missing-neighbor seed stamp
+the pair through the ONE builder (`session_glue::forward_session_metadata`),
+so they cannot diverge; the HOST-INBOUND (`LocalMiss`) install stamps it
+inline. Each population has its own fail-on-revert test in
+`afxdp/tests_session_ingress_identity.rs`, driven through the real
+`poll_binding_process_descriptor` body on a binding whose {ifindex, VLAN} is
+distinct from the other fixtures', so reverting any ONE site to `0` reddens
+exactly its own test. The reverse companion's deliberate `0` is pinned by an
+over-reach test in the same module.
 
 A NON-ZERO ifindex the running config cannot name (an interface deleted since
 install, a tunnel/fabric ingress with no config unit) falls back the same way.
