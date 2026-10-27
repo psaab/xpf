@@ -370,6 +370,146 @@ func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks)
 // matches the generation charon still runs (or will load on its next start) in every
 // case. A render or write failure runs neither.
 // Both run on the caller's goroutine with no Manager lock held.
+// reloadOutcome carries the post-reload settlement inputs for one
+// reload, in the vocabulary settleAfterReload consumes. names/hashes
+// are the set charon demonstrably runs after the reload (the candidate
+// render on success, the recovered set on a partial load, the
+// committed candidate/clear set on a committedCandidateError) and are
+// never nil when err is nil, partial, or a committed candidate; err
+// carries the reload failure for those shapes and is nil only on full
+// success. indeterminate marks the one shape that must not promote:
+// charon answered but neither complete render is proven, so the prior
+// fingerprints stay authoritative. candidateProven gates re-initiation
+// on committed-candidate outcomes: an unreachable charon has not
+// proven a config under which deferred starts are safe.
+type reloadOutcome struct {
+	names           map[string]bool
+	hashes          map[string]string
+	clear           bool
+	partial         bool
+	indeterminate   bool
+	candidateProven bool
+	err             error
+}
+
+// settleAfterReload is the single post-reload settlement shared by
+// ApplyGeneration and Clear (#17048): promote the set charon runs (or,
+// for an indeterminate probe, diff against it without promoting),
+// fire the Loaded hook on full success only, terminate the departed
+// SAs, record terminate debt, and re-initiate when the outcome allows
+// it. Clear and the commit path previously wrote this sequence twice;
+// the copies diverged once already (#15128, when ApplyGeneration
+// promoted {} for a clear partial while Clear promoted the recovered
+// set, so deleted VPNs' SAs were never terminated). hooks.Loaded is
+// honoured only when out.err == nil, so Clear (no hooks) and every
+// failure settlement leave it unfired.
+func (m *Manager) settleAfterReload(out reloadOutcome, cfg *config.IPsecConfig, hooks ApplyHooks) error {
+	if out.indeterminate {
+		// Charon answered, but neither complete render is proven. Tear
+		// down SAs changed by the candidate while keeping the old
+		// fingerprints, so a later successful apply still observes the
+		// change and converges under the candidate configuration.
+		names, hs := out.names, out.hashes
+		removed, changed := m.pendingConnDiff(names, hs)
+		candidateNames := sortedConnNames(names)
+		baselineKnown := append([]string{}, removed...)
+		for _, name := range m.prevConnNamesSnapshot() {
+			baselineKnown = append(baselineKnown, name)
+		}
+		candidateOnly := candidateOnlyConnNames(candidateNames, baselineKnown)
+		deferredSeeds := append([]string{}, changed...)
+		deferredSeeds = append(deferredSeeds, candidateOnly...)
+		m.rememberDeferredReinitiation(deferredSeeds)
+		m.rememberPendingCandidateConns(candidateOnly, hs)
+		_, failed := m.terminateRemovedConns(removed)
+		m.clearDeferredReinitiation(failed)
+		if !out.clear {
+			// Deferred debt must only survive for connections whose SA was
+			// actually observed live. A successful teardown lists them via
+			// the changed set; candidate-only additions with no SA keep
+			// only their staged fingerprint (pendingCandidateHashes).
+			// A clear passes names={}, so changed is always empty and
+			// filtering would wipe the whole deferred set: parent Clear
+			// never filtered, and a deferred eager tunnel must survive
+			// a delete so an identical re-add can re-initiate it.
+			m.filterDeferredReinitiation(changed)
+		}
+		termErr := m.recordTerminateDebtForNames(removed, failed, names)
+		// Do not re-initiate from a config that this live probe failed
+		// to prove; the durable deferred debt is discharged only after
+		// a later candidate load is proven.
+		return errors.Join(out.err, termErr)
+	}
+
+	// #14589 partial loads promote only the recovered set charon
+	// demonstrably runs; committed candidates and full successes
+	// promote the candidate/clear set.
+	var removed, changed []string
+	if out.clear && out.partial {
+		// #15128: a clear partial promotes the recovered set pae.names
+		// carries (the set charon still runs), exactly as Clear does;
+		// promoting {} here forgot VPNs charon still runs.
+		removed, _ = m.promoteConnNames(out.names, out.hashes)
+	} else {
+		removed, changed = m.promoteConnNames(out.names, out.hashes)
+	}
+	isCommitted := out.err != nil && !out.partial
+	// Persist deferred-start debt BEFORE termination on committed
+	// candidates too: a crash between terminateRemovedConns and any
+	// post-teardown persistence must not lose the obligation to
+	// restore changed eager tunnels under the candidate charon will
+	// load on restart.
+	if isCommitted && !out.clear {
+		m.rememberDeferredReinitiation(changed)
+	}
+	if out.err == nil && hooks.Loaded != nil {
+		hooks.Loaded()
+	}
+	terminated, failed := m.terminateRemovedConns(removed)
+	// The indeterminate arm returned above; every settlement reaching
+	// here has promoted, so debt classifies against the promoted set.
+	termErr := m.recordTerminateDebt(removed, failed)
+	var initiateErr error
+	switch {
+	case out.err == nil:
+		// Reload succeeded: a changed live connection is re-initiated
+		// with its new configuration, forcing the peer to authenticate
+		// again.
+		deferred := m.pendingReinitiationNames()
+		if cfg != nil {
+			initiateErr = m.reinitiateChangedConnections(cfg, changed, terminated, deferred, failed)
+		}
+		m.clearDeferredReinitiation(failed)
+		m.resolvePendingReinitiation(out.names, failed)
+	case out.partial && !out.clear && cfg != nil:
+		// #14589 partial survivors: re-initiate changed survivors the
+		// recovered set still runs, minus any already deferred.
+		deferred := m.pendingReinitiationNames()
+		changed = excludingConnNames(changed, deferred)
+		terminated = excludingConnNames(terminated, deferred)
+		initiateErr = m.reinitiateChangedConnections(cfg, changed, terminated, nil, nil)
+	case isCommitted && !out.clear:
+		if out.candidateProven && cfg != nil {
+			deferred := m.pendingReinitiationNames()
+			initiateErr = m.reinitiateChangedConnections(cfg, changed, terminated, deferred, failed)
+			m.clearDeferredReinitiation(failed)
+			m.resolvePendingReinitiation(out.names, failed)
+		}
+	case isCommitted && out.clear:
+		m.clearDeferredReinitiation(failed)
+		m.resolvePendingReinitiation(out.names, failed)
+	case out.clear:
+		// Clear's partial settlement drops deferred-start debt for
+		// failed teardown; ApplyGeneration's clear partial previously
+		// left it to the next proven load (resolvePendingReinitiation).
+		m.clearDeferredReinitiation(failed)
+	}
+	if out.err != nil {
+		return errors.Join(out.err, termErr, initiateErr)
+	}
+	return errors.Join(termErr, initiateErr)
+}
+
 func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation string, hooks ApplyHooks) error {
 	// loadedNames and loadedHashes describe the connections swanctl actually
 	// loaded on this apply. For the render path they come from renderConfig;
@@ -377,7 +517,8 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 	var loadedNames map[string]bool
 	var loadedHashes map[string]string
 	var applyErr error
-	if ipsecCfg == nil || len(ipsecCfg.VPNs) == 0 {
+	isClear := ipsecCfg == nil || len(ipsecCfg.VPNs) == 0
+	if isClear {
 		applyErr = m.clearConfig(hooks.Written)
 	} else {
 		loadedNames, loadedHashes, applyErr = m.applyConfig(ipsecCfg, generation, hooks.Written)
@@ -393,37 +534,11 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 	if applyErr != nil {
 		var ire *indeterminateReloadError
 		if errors.As(applyErr, &ire) {
-			// Charon answered, but neither complete render is proven. Tear
-			// down SAs changed by the candidate while keeping the old
-			// fingerprints, so a later successful apply still observes the
-			// change and converges under the candidate configuration.
 			names, hs := ire.names, ire.hashes
 			if ire.clear || names == nil {
 				names, hs = map[string]bool{}, map[string]string{}
 			}
-			removed, changed := m.pendingConnDiff(names, hs)
-			candidateNames := sortedConnNames(names)
-			baselineKnown := append([]string{}, removed...)
-			for _, name := range m.prevConnNamesSnapshot() {
-				baselineKnown = append(baselineKnown, name)
-			}
-			candidateOnly := candidateOnlyConnNames(candidateNames, baselineKnown)
-			deferredSeeds := append([]string{}, changed...)
-			deferredSeeds = append(deferredSeeds, candidateOnly...)
-			m.rememberDeferredReinitiation(deferredSeeds)
-			m.rememberPendingCandidateConns(candidateOnly, hs)
-			_, failed := m.terminateRemovedConns(removed)
-			m.clearDeferredReinitiation(failed)
-			// Deferred debt must only survive for connections whose SA was
-			// actually observed live. A successful teardown lists them via
-			// the changed set; candidate-only additions with no SA keep
-			// only their staged fingerprint (pendingCandidateHashes).
-			m.filterDeferredReinitiation(changed)
-			termErr := m.recordTerminateDebtForNames(removed, failed, names)
-			// Do not re-initiate from a config that this live probe failed
-			// to prove; the durable deferred debt is discharged only after
-			// a later candidate load is proven.
-			return errors.Join(applyErr, termErr)
+			return m.settleAfterReload(reloadOutcome{names: names, hashes: hs, clear: ire.clear, indeterminate: true, err: applyErr}, ipsecCfg, hooks)
 		}
 		var cce *committedCandidateError
 		if errors.As(applyErr, &cce) {
@@ -434,27 +549,7 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			if cce.clear || names == nil {
 				names, hs = map[string]bool{}, map[string]string{}
 			}
-			removed, changed := m.promoteConnNames(names, hs)
-			// Persist deferred-start debt BEFORE termination here too: a
-			// crash between terminateRemovedConns and any post-teardown
-			// persistence must not lose the obligation to restore changed
-			// eager tunnels under the candidate charon will load on restart.
-			if !cce.clear {
-				m.rememberDeferredReinitiation(changed)
-			}
-			terminated, failed := m.terminateRemovedConns(removed)
-			termErr := m.recordTerminateDebt(removed, failed)
-			var initiateErr error
-			if !cce.clear && cce.candidateProven && ipsecCfg != nil {
-				deferred := m.pendingReinitiationNames()
-				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, deferred, failed)
-				m.clearDeferredReinitiation(failed)
-				m.resolvePendingReinitiation(names, failed)
-			} else if cce.clear {
-				m.clearDeferredReinitiation(failed)
-				m.resolvePendingReinitiation(names, failed)
-			}
-			return errors.Join(applyErr, termErr, initiateErr)
+			return m.settleAfterReload(reloadOutcome{names: names, hashes: hs, clear: cce.clear, candidateProven: cce.candidateProven, err: applyErr}, ipsecCfg, hooks)
 		}
 		var pae *partialApplyError
 		if errors.As(applyErr, &pae) {
@@ -462,57 +557,20 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			// Promote the recovered set (tearing down SAs that departed
 			// it, e.g. the deleted b whose config charon unloaded),
 			// do NOT fire Loaded (the candidate generation did not
-			// load), and still return the partial error.
-			var removed, changed []string
-			if pae.clear {
-				if pae.names == nil {
-					// Empty-set clear recovered with nothing loaded
-					// (clearConfig encodes that as names={}); pae.names
-					// is then already the recovered set.
-					removed, _ = m.promoteConnNames(map[string]bool{}, map[string]string{})
-				} else {
-					// #15128: a clear partial that rolled charon back to
-					// the prior set carries that set in pae.names — the
-					// set charon still runs. Promote it (as Clear does);
-					// promoting {} here forgot VPNs charon still runs,
-					// so their SAs were never terminated.
-					removed, _ = m.promoteConnNames(pae.names, pae.hashes)
-				}
-			} else {
-				removed, changed = m.promoteConnNames(pae.names, pae.hashes)
-			}
-			terminated, failed := m.terminateRemovedConns(removed)
-			termErr := m.recordTerminateDebt(removed, failed)
-			var initiateErr error
-			if !pae.clear && ipsecCfg != nil {
-				deferred := m.pendingReinitiationNames()
-				changed = excludingConnNames(changed, deferred)
-				terminated = excludingConnNames(terminated, deferred)
-				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, nil, nil)
-			}
-			return errors.Join(applyErr, termErr, initiateErr)
+			// load), and still return the partial error. pae.names is
+			// never nil: every constructor supplies {} or the recovered
+			// prior set (see partialApplyError).
+			return m.settleAfterReload(reloadOutcome{names: pae.names, hashes: pae.hashes, clear: pae.clear, partial: true, err: applyErr}, ipsecCfg, hooks)
 		}
 		return applyErr
 	}
 
-	// Reload succeeded: advance the loaded connection content and tear down the
-	// live SAs of connections that departed or changed security-effective
-	// settings. A changed live connection is then re-initiated with its new
-	// configuration, forcing the peer to authenticate again.
-	removed, changed := m.promoteConnNames(loadedNames, loadedHashes)
-	if hooks.Loaded != nil {
-		hooks.Loaded()
+	// Reload succeeded: promote the loaded set and tear down departed
+	// or changed SAs (settleAfterReload fires Loaded, then re-initiates).
+	if isClear {
+		return m.settleAfterReload(reloadOutcome{names: map[string]bool{}, hashes: map[string]string{}, clear: true}, nil, hooks)
 	}
-	terminated, failed := m.terminateRemovedConns(removed)
-	terminateErr := m.recordTerminateDebt(removed, failed)
-	deferred := m.pendingReinitiationNames()
-	var initiateErr error
-	if ipsecCfg != nil {
-		initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, deferred, failed)
-	}
-	m.clearDeferredReinitiation(failed)
-	m.resolvePendingReinitiation(loadedNames, failed)
-	return errors.Join(terminateErr, initiateErr)
+	return m.settleAfterReload(reloadOutcome{names: loadedNames, hashes: loadedHashes}, ipsecCfg, hooks)
 }
 
 // Clear removes the xpf config and reloads strongSwan, terminating the live
@@ -521,43 +579,20 @@ func (m *Manager) Clear() error {
 	if err := m.clearConfig(nil); err != nil {
 		var ire *indeterminateReloadError
 		if errors.As(err, &ire) && ire.clear {
-			// Keep the prior fingerprints, but attempt candidate removals
-			empty := map[string]bool{}
-			removed, changed := m.pendingConnDiff(empty, map[string]string{})
-			changed = append(changed, candidateOnlyConnNames([]string{}, removed)...)
-			m.rememberDeferredReinitiation(changed)
-			_, failed := m.terminateRemovedConns(removed)
-			m.clearDeferredReinitiation(failed)
-			return errors.Join(err, m.recordTerminateDebtForNames(removed, failed, empty))
+			return m.settleAfterReload(reloadOutcome{names: map[string]bool{}, hashes: map[string]string{}, clear: true, indeterminate: true, err: err}, nil, ApplyHooks{})
 		}
 		var cce *committedCandidateError
 		if errors.As(err, &cce) && cce.clear {
-			// The clear was committed on disk or charon is unreachable.
-			// Promote the empty set, attempt teardown, and return the error.
-			removed, _ := m.promoteConnNames(map[string]bool{}, map[string]string{})
-			_, failed := m.terminateRemovedConns(removed)
-			termErr := m.recordTerminateDebt(removed, failed)
-			m.clearDeferredReinitiation(failed)
-			m.resolvePendingReinitiation(map[string]bool{}, failed)
-			return errors.Join(err, termErr)
+			return m.settleAfterReload(reloadOutcome{names: map[string]bool{}, hashes: map[string]string{}, clear: true, candidateProven: cce.candidateProven, err: err}, nil, ApplyHooks{})
 		}
 		var pae *partialApplyError
 		if errors.As(err, &pae) && pae.clear {
-			removed, _ := m.promoteConnNames(pae.names, pae.hashes)
-			_, failed := m.terminateRemovedConns(removed)
-			termErr := m.recordTerminateDebt(removed, failed)
-			m.clearDeferredReinitiation(failed)
-			return errors.Join(err, termErr)
+			return m.settleAfterReload(reloadOutcome{names: pae.names, hashes: pae.hashes, clear: true, partial: true, err: err}, nil, ApplyHooks{})
 		}
 		// A proven prior generation remains authoritative after this failure.
 		return err
 	}
-	removed, _ := m.promoteConnNames(nil, nil)
-	_, failed := m.terminateRemovedConns(removed)
-	termErr := m.recordTerminateDebt(removed, failed)
-	m.clearDeferredReinitiation(failed)
-	m.resolvePendingReinitiation(nil, failed)
-	return termErr
+	return m.settleAfterReload(reloadOutcome{names: map[string]bool{}, hashes: map[string]string{}, clear: true}, nil, ApplyHooks{})
 }
 
 // applyConfig renders + atomically writes the swanctl snippet and reloads.
@@ -878,7 +913,10 @@ func generationFromConfigText17882(prior []byte, havePrior bool) (string, bool) 
 // promotes names/hashes and still returns the underlying partial error.
 // For clearConfig, names is the recovered set charon runs: {} when the
 // clear unloaded everything, the prior set when it was rolled back
-// (#15128).
+// (#15128). names and hashes are never nil: every constructor supplies
+// the recovered set ({} or priorSet14589's non-nil maps), so
+// settleAfterReload promotes pae.names directly with no nil arm
+// (#17048).
 type partialApplyError struct {
 	err    error
 	names  map[string]bool
@@ -1480,10 +1518,12 @@ func (m *Manager) prevConnNamesSnapshot() []string {
 }
 
 // filterDeferredReinitiation keeps deferred-start debt only for the named
-// connections. Used after a successful indeterminate teardown to drop seeds
-// recorded for candidate-only additions that had no live SA (and therefore
-// nothing to restore), while the persisted in-flight obligation still
-// covered a crash during termination.
+// connections. Used on the non-clear indeterminate arm after teardown to
+// drop seeds recorded for candidate-only additions that had no live SA
+// (and therefore nothing to restore), while the persisted in-flight
+// obligation still covered a crash during termination. Never called for
+// a clear: its changed set is always empty, so filtering would wipe
+// pre-existing deferred debt parent Clear preserved.
 func (m *Manager) filterDeferredReinitiation(keepNames []string) {
 	keep := make(map[string]bool, len(keepNames))
 	for _, name := range keepNames {

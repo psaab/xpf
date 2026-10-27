@@ -511,7 +511,7 @@ fn effective_match_zones<'a>(plural: &'a [String], singular: &'a str) -> Cow<'a,
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct PolicyRule {
     pub(crate) rule_id: String,
     pub(crate) policy_id: u32,
@@ -571,6 +571,10 @@ pub(crate) struct PolicyRule {
     /// per-policy RT_FLOW SYSLOG records gate on the admitting policy.
     pub(crate) log_session_init: bool,
     pub(crate) log_session_close: bool,
+    /// Clones share the counter (#3322 carry-forward): a cloned rule
+    /// keeps counting into the same `Arc<PolicyRuleCounter>` as the
+    /// original, so an in-flight session bound to the handle keeps
+    /// attributing hits to the admitting rule across snapshot rebuilds.
     pub(crate) hit_counter: Arc<PolicyRuleCounter>,
 }
 
@@ -610,43 +614,6 @@ impl Default for PolicyRule {
             log_session_init: false,
             log_session_close: false,
             hit_counter: Arc::new(PolicyRuleCounter::default()),
-        }
-    }
-}
-
-impl Clone for PolicyRule {
-    fn clone(&self) -> Self {
-        Self {
-            rule_id: self.rule_id.clone(),
-            policy_id: self.policy_id,
-            from_zone: self.from_zone.clone(),
-            to_zone: self.to_zone.clone(),
-            global_from_zone: self.global_from_zone.clone(),
-            global_to_zone: self.global_to_zone.clone(),
-            scheduler_name: self.scheduler_name.clone(),
-            inactive: self.inactive,
-            source_literal_v4: self.source_literal_v4.clone(),
-            source_literal_v6: self.source_literal_v6.clone(),
-            destination_literal_v4: self.destination_literal_v4.clone(),
-            destination_literal_v6: self.destination_literal_v6.clone(),
-            source_book_idxs: self.source_book_idxs.clone(),
-            destination_book_idxs: self.destination_book_idxs.clone(),
-            source_v4_match_any: self.source_v4_match_any,
-            source_v6_match_any: self.source_v6_match_any,
-            destination_v4_match_any: self.destination_v4_match_any,
-            destination_v6_match_any: self.destination_v6_match_any,
-            source_excluded: self.source_excluded,
-            destination_excluded: self.destination_excluded,
-            source_v4_empty: self.source_v4_empty,
-            source_v6_empty: self.source_v6_empty,
-            destination_v4_empty: self.destination_v4_empty,
-            destination_v6_empty: self.destination_v6_empty,
-            applications: self.applications.clone(),
-            compiled_apps: self.compiled_apps.clone(),
-            action: self.action,
-            log_session_init: self.log_session_init,
-            log_session_close: self.log_session_close,
-            hit_counter: self.hit_counter.clone(),
         }
     }
 }

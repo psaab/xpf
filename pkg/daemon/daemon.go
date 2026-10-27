@@ -31,6 +31,7 @@ import (
 	"github.com/psaab/xpf/pkg/feeds"
 	"github.com/psaab/xpf/pkg/flowexport"
 	"github.com/psaab/xpf/pkg/frr"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/grpcapi"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/ipsec"
@@ -1359,6 +1360,13 @@ type Daemon struct {
 	// ingress netdevs and cannot suppress a later unleased-DHCP interface guard.
 	// Updated and cleared alongside hostInboundCoveredAddrs under applySem.
 	hostInboundDHCPRetainedAddrs map[string]struct{}
+	// kernelKnobs is the #17068 BestEffortKernelKnob lifecycle registry:
+	// owners assert procfs knobs through it (prior captured on first
+	// assert) and release them on config removal so the host returns to
+	// its pre-assert state. Lazily created by knobs(); guarded by
+	// kernelKnobsMu because apply paths and ipmon actuation can race.
+	kernelKnobsMu sync.Mutex
+	kernelKnobs   *fsatomic.KernelKnobs
 	// lo0Enforced records whether the currently-loaded xpf_lo0 table is a REAL
 	// operator filter (the #6476 lo0 cold-boot fence gate). It is set true ONLY by
 	// a successful real InstallLo0 that RENDERED AT LEAST ONE KERNEL RULE. A cold-boot

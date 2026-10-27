@@ -281,10 +281,10 @@ func TestRemappedQueryZonesSimultaneousPolicyAndZoneRename12881(t *testing.T) {
 		t.Fatalf("missing non-zero global-policy binding for ID %d", oldID)
 	}
 	from, to, ingress, egress, ok := remappedQueryZones(
-		oldCfg, newCfg, binding, uint16(config.StableZoneID("lan")), uint16(config.StableZoneID("wan")),
+		oldCfg, newCfg, binding, uint32(uint16(config.StableZoneID("lan"))), uint32(uint16(config.StableZoneID("wan"))), true,
 	)
 	if !ok || from != "lan2" || to != "wan" ||
-		ingress != uint16(config.StableZoneID("lan2")) || egress != uint16(config.StableZoneID("wan")) {
+		ingress != config.StableZoneID("lan2") || egress != config.StableZoneID("wan") {
 		t.Fatalf("global policy scope prevented concrete zone remap: %q/%q IDs=%d/%d ok=%v", from, to, ingress, egress, ok)
 	}
 	key := dataplane.SessionKey{
@@ -295,8 +295,8 @@ func TestRemappedQueryZonesSimultaneousPolicyAndZoneRename12881(t *testing.T) {
 		PolicyID: oldID, IngressZone: uint16(config.StableZoneID("lan")), EgressZone: uint16(config.StableZoneID("wan")),
 	}
 	record, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key, value)
-	if !permitted || record.IngressZone != uint16(config.StableZoneID("lan2")) ||
-		record.EgressZone != uint16(config.StableZoneID("wan")) {
+	if !permitted || record.IngressZone != config.StableZoneID("lan2") ||
+		record.EgressZone != config.StableZoneID("wan") {
 		t.Fatalf("session was not rebound into renamed concrete zones: %+v permitted=%v", record, permitted)
 	}
 }
@@ -328,10 +328,10 @@ func TestRemappedQueryZonesWildcardPolicyAndZoneRename12881(t *testing.T) {
 		t.Fatalf("missing wildcard-policy binding for ID %d", oldID)
 	}
 	from, to, ingress, egress, ok := remappedQueryZones(
-		oldCfg, newCfg, binding, uint16(config.StableZoneID("lan")), uint16(config.StableZoneID("wan")),
+		oldCfg, newCfg, binding, uint32(uint16(config.StableZoneID("lan"))), uint32(uint16(config.StableZoneID("wan"))), true,
 	)
 	if !ok || from != "lan2" || to != "wan" ||
-		ingress != uint16(config.StableZoneID("lan2")) || egress != uint16(config.StableZoneID("wan")) {
+		ingress != config.StableZoneID("lan2") || egress != config.StableZoneID("wan") {
 		t.Fatalf("wildcard policy scope prevented concrete zone remap: %q/%q IDs=%d/%d ok=%v", from, to, ingress, egress, ok)
 	}
 }
@@ -920,8 +920,8 @@ func TestExpandAndRematchPolicyRenameEvaluator10511(t *testing.T) {
 		t.Fatal("matching renamed session was not retained")
 	}
 	if record.RuleID != "lan->wan/p-new" || record.PolicyID == 0 ||
-		record.IngressZone != uint16(config.StableZoneID("lan")) ||
-		record.EgressZone != uint16(config.StableZoneID("wan")) {
+		record.IngressZone != config.StableZoneID("lan") ||
+		record.EgressZone != config.StableZoneID("wan") {
 		t.Fatalf("renamed record lost identity: %+v", record)
 	}
 	if record.SrcIP != "10.0.0.10" || record.DstIP != "10.0.0.20" ||
@@ -1266,8 +1266,8 @@ func TestRematchRenamedMatchFailsClosedOnICMPWhenDenyICMPTypePrecedesPermit14697
 			SrcIP: "10.0.0.10", DstIP: "10.0.0.20",
 			SrcPort: 0x1234, DstPort: 0x1234,
 		},
-		IngressZoneID: uint16(config.StableZoneID("lan")),
-		EgressZoneID:  uint16(config.StableZoneID("wan")),
+		IngressZoneID: config.StableZoneID("lan"),
+		EgressZoneID:  config.StableZoneID("wan"),
 	}
 	if rec, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match); permitted {
 		t.Fatalf("helper ICMP session without captured type retained: %+v", rec)
@@ -1603,8 +1603,8 @@ func TestExpandZoneRenameScopedGlobal12857(t *testing.T) {
 		t.Fatalf("binding zones = %q->%q, want lan->lan2", binding.sourceFromZone, binding.destinationFromZone)
 	}
 	_, _, newIngress, _, rok := remappedQueryZones(oldCfg, newCfg, binding,
-		uint16(config.StableZoneID("lan")), uint16(config.StableZoneID("wan")))
-	if !rok || newIngress != uint16(config.StableZoneID("lan2")) {
+		uint32(uint16(config.StableZoneID("lan"))), uint32(uint16(config.StableZoneID("wan"))), true)
+	if !rok || newIngress != config.StableZoneID("lan2") {
 		t.Fatalf("remappedQueryZones = ingress %d ok=%v, want lan2 id", newIngress, rok)
 	}
 	changed := build(true, "wan")

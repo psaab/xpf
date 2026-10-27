@@ -37,9 +37,15 @@ func rgParity17086Config(t *testing.T) *config.Config {
 	// Units carrying the addresses the RPM VIP map and DDNS scopes key on.
 	cfg.Interfaces.Interfaces["bond0"].Units = map[int]*config.InterfaceUnit{
 		50: {Number: 50, Addresses: []string{"10.0.50.1/24"}},
+		// #17049 merge: the RA stable-source cells below need a stable-LL
+		// placement on the RETH itself — an IPv6-bearing unit with no
+		// configured link-local. Unit 0 carries only a global IPv6
+		// address, so StableRethLinkLocalPlacements(2) installs the
+		// stable address there and the member RA may bind it.
+		0: {Number: 0, Addresses: []string{"2001:db8:b0::1/64"}},
 	}
 	cfg.Interfaces.Interfaces["reth0"].Units = map[int]*config.InterfaceUnit{
-		0: {Number: 0, Addresses: []string{"10.0.0.1/24"}},
+		0: {Number: 0, Addresses: []string{"10.0.0.1/24", "2001:db8:10::1/64"}},
 	}
 	cfg.Chassis.Cluster = &config.ClusterConfig{
 		ClusterID:        1,
@@ -204,6 +210,12 @@ func TestSurfaceARGScopeOwnerParity17086(t *testing.T) {
 // address on a plain interface).
 func TestRAStableLinkLocalParity17086(t *testing.T) {
 	cfg := rgParity17086Config(t)
+	// RA refs name the member / owner interfaces BARE: the bare member
+	// resolves (via ResolveKernelIfName) to the member's bare kernel
+	// device, which is exactly where the owner's unit-0 placement
+	// installs the stable LL. (A unit-qualified member ref such as
+	// ge-0/0/1.50 would name bond0's unit 50 — IPv4-only in this
+	// fixture, hence no placement and correctly no stable bind.)
 	cfg.Protocols.RouterAdvertisement = []*config.RAInterfaceConfig{
 		{Interface: "ge-0/0/1"},
 		{Interface: "ge-0/0/5"},

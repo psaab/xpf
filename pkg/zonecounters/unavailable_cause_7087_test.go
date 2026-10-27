@@ -33,9 +33,9 @@ func TestUnavailableLineNamesTheCause_7087(t *testing.T) {
 		{"old helper AND overflow set", 0, true, "predates per-zone accounting"},
 		{"current helper, slots exhausted", 2, true, "EXHAUSTED"},
 		{"current helper, room, nothing recorded", 2, false, "the zone is idle"},
-		// The caller that CANNOT read a status at all — cmd/cli, which is
-		// dependency-free of pkg/dataplane by design. It must get the ambiguous
-		// line, because for it the three causes really are indistinguishable.
+		// The caller that CANNOT read a status at all (its input has
+		// no status to read). It must get the ambiguous line, because
+		// for it the three causes really are indistinguishable.
 		{"no status readable", LayoutVersionUnknown, false, "helper predates"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
