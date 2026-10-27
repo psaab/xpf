@@ -31,6 +31,11 @@ func TestVIPParseAgreement17150(t *testing.T) {
 		{"FE80::AB/64", true, false, "inet6"},      // uppercase v6 CIDR
 		{"2001:0DB8::10/64", true, false, "inet6"}, // expanded uppercase v6
 		{"not-an-address", false, false, ""},
+		{"::ffff:10.0.0.1", true, true, "inet"},      // bare mapped == v4 host
+		{"::ffff:10.0.0.1/120", true, true, "inet"},  // mapped CIDR /120 == v4 /24
+		{"::ffff:10.0.0.1/128", true, true, "inet"},  // mapped /128 == v4 /32
+		{"::ffff:10.0.0.1/96", true, true, "inet"},   // mapped /96 == v4 /0
+		{"::ffff:10.0.0.1/95", true, false, "inet6"}, // sub-96 mapped: kept mapped
 	}
 	for _, c := range cases {
 		p, ok := config.ParseVRRPVIP(c.vip)
@@ -72,6 +77,22 @@ func TestVIPParseAgreement17150(t *testing.T) {
 			t.Errorf("parseVIPIdentity(%q) ok with empty host", c.vip)
 		}
 
+		// canonAddr is the #2516 exclusion key: it must be the net.IP
+		// lookup form. A mapped VIP must key as "10.0.0.1" (the form
+		// resolveLocalIPv4's ip4.String() produces), never as
+		// "::ffff:10.0.0.1", or the VIP leaks into source selection.
+		if c.wantOK && (c.vip == "::ffff:10.0.0.1" || c.vip == "::ffff:10.0.0.1/120" || c.vip == "::ffff:10.0.0.1/128" || c.vip == "::ffff:10.0.0.1/96" || c.vip == "::ffff:10.0.0.1/95") {
+			wantCanon := "::ffff:10.0.0.1"
+			if c.vip != "::ffff:10.0.0.1/95" {
+				wantCanon = "10.0.0.1"
+			}
+			if got := canonAddr(c.vip); got != wantCanon {
+				t.Errorf("canonAddr(%q) = %q, want %q (net.IP lookup form)", c.vip, got, wantCanon)
+			}
+			if pok && host != canonAddr(c.vip) {
+				t.Errorf("parseVIPIdentity(%q) host %q != canonAddr %q: claim and exclusion keys must agree", c.vip, host, canonAddr(c.vip))
+			}
+		}
 		if c.wantOK {
 			if err := checkAdvertCapacity([]string{c.vip}); err != nil {
 				t.Errorf("checkAdvertCapacity(%q) = %v, want nil (single valid VIP)", c.vip, err)
@@ -110,5 +131,16 @@ func TestVIPParseAgreement17150(t *testing.T) {
 	}
 	if got := config.DedupeVRRPVIPs([]string{"10.0.0.1", "10.0.0.1/32", "10.0.0.2/24"}); len(got) != 2 {
 		t.Errorf("DedupeVRRPVIPs(bare + /32 alias + distinct) = %v, want 2 entries", got)
+	}
+	// Mapped spellings claim as the IPv4 host they denote.
+	if h, fam, ok := parseVIPIdentity("::ffff:10.0.0.1/120"); !ok || h != "10.0.0.1" || fam != "inet" {
+		t.Errorf("parseVIPIdentity(mapped /120) = (%q,%q,%v), want (10.0.0.1,inet,true)", h, fam, ok)
+	}
+	if h, fam, ok := parseVIPIdentity("::ffff:10.0.0.1"); !ok || h != "10.0.0.1" || fam != "inet" {
+		t.Errorf("parseVIPIdentity(bare mapped) = (%q,%q,%v), want (10.0.0.1,inet,true)", h, fam, ok)
+	}
+	// Dedupe: mapped /120 == v4 /24 (one identity); bare mapped == v4 /32 == bare v4 (one identity) — two distinct prefix identities total.
+	if got := config.DedupeVRRPVIPs([]string{"::ffff:10.0.0.1/120", "10.0.0.1/24", "::ffff:10.0.0.1", "10.0.0.1/32", "10.0.0.1"}); len(got) != 2 {
+		t.Errorf("DedupeVRRPVIPs(mapped aliases) = %v, want 2 entries (10.0.0.1/24 and 10.0.0.1/32)", got)
 	}
 }

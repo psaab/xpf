@@ -1008,7 +1008,11 @@ updates. The parse, identity, and dedupe live in `pkg/config`
 implementation repo-wide — because `pkg/vrrp` imports `pkg/config`; every
 `pkg/vrrp` VIP helper is a one-liner over that parse, so a malformed entry
 such as `10.0.0.1/33` is skipped by the capacity guard, the advert builder,
-the claim check, and the commit-time counter alike.
+the claim check, and the commit-time counter alike. IPv4-mapped spellings
+(`::ffff:10.0.0.1/120`) are IPv4 on every one of those paths (unmapped
+with the /96-offset bit translation in `ParseVRRPVIP`), so `canonAddr`'s
+exclusion key is the `net.IP` lookup form `10.0.0.1` (#2516); a mapped
+prefix below /96 is kept mapped.
 
 **Why an oversized set was more than a malformed packet.** `sendAdvert`
 discards a `Marshal` failure at `slog.Debug`, and `becomeMaster` claimed the

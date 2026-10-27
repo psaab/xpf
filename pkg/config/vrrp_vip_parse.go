@@ -18,6 +18,32 @@ import (
 // cross-election claim check and the commit-time count on exactly
 // those malformed entries.
 //
+// IPv4-mapped IPv6 spellings ("::ffff:10.0.0.1", "::ffff:10.0.0.1/120")
+// are IPv4 everywhere. The bare path already unmapped them; the CIDR
+// path now does too, WITH the /96-offset bit translation: the mapped
+// range occupies bits 96..127 of the 128-bit space, so a mapped prefix
+// of N>=96 bits is the IPv4 prefix of N-96 bits ("::ffff:10.0.0.1/120"
+// is "10.0.0.1/24", "/128" is "/32", "/96" is "/0"). This matches the
+// pre-#17150 sites: net.ParseCIDR / net.ParseIP fold a mapped host to
+// its 4-byte form (To4() != nil, String() == "10.0.0.1"), so the old
+// strip/ParseCIDR helpers classified, claimed, and deduped it as IPv4
+// while only the new ParsePrefix-first parse kept it IPv6 — the split
+// that reopened the #2516 leak: canonAddr keyed "::ffff:10.0.0.1"
+// (never equal to a net.IP lookup key "10.0.0.1") while
+// vrrpVIPHostIP-based gates classified the same string as IPv4.
+//
+// A mapped prefix with Bits() < 96 has NO IPv4 equivalent (it covers
+// space outside ::ffff:0:0/96; its N-96 translation is negative). It is
+// kept mapped — returned as the 128-bit prefix as authored — rather
+// than rejected: the pre-#17150 ParseCIDR sites accepted it as the IPv4
+// host "10.0.0.1" regardless of bits, so fail-closed here would newly
+// drop a spelling the gates have always classified, and keeping it
+// mapped leaves it consistently IPv6 to EVERY consumer of this parse
+// (this mirrors proxyARPUnmap4In6, #8631, which likewise leaves
+// Bits() < 96 alone). Either choice is safe only because all consumers
+// share this one parse; the invariant is agreement, not the family a
+// sub-96 mapped prefix lands in.
+//
 // The mask is returned unmasked: Prefix.Addr is the host address as
 // authored and Bits is the authored prefix length, so callers keep
 // the host identity and the prefix-preserving identity (#11482)
@@ -26,7 +52,7 @@ import (
 func ParseVRRPVIP(s string) (netip.Prefix, bool) {
 	p, err := netip.ParsePrefix(normalizeCIDRMaskPadding(s))
 	if err == nil {
-		return p, true
+		return unmapVRRPMappedPrefix(p), true
 	}
 	a, err := netip.ParseAddr(s)
 	if err != nil || a.Zone() != "" {
@@ -34,6 +60,21 @@ func ParseVRRPVIP(s string) (netip.Prefix, bool) {
 	}
 	a = a.Unmap()
 	return netip.PrefixFrom(a, a.BitLen()), true
+}
+
+// unmapVRRPMappedPrefix translates an IPv4-mapped CIDR prefix to its
+// IPv4 equivalent (address unmapped, bits shifted by the 96-bit mapped
+// offset). Prefixes that are not mapped, and mapped prefixes below
+// /96 (no IPv4 equivalent — see ParseVRRPVIP), are returned unchanged.
+func unmapVRRPMappedPrefix(p netip.Prefix) netip.Prefix {
+	if !p.Addr().Is4In6() || p.Bits() < 96 {
+		return p
+	}
+	q := netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+	if !q.IsValid() {
+		return p
+	}
+	return q
 }
 
 // VRRPVIPIdentity returns the prefix-preserving canonical identity of

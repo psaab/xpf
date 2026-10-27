@@ -23,6 +23,11 @@ func TestParseVRRPVIPAgreement17150(t *testing.T) {
 		{"FE80::AB/64", true, false},
 		{"2001:0DB8::10/64", true, false},
 		{"not-an-address", false, false},
+		{"::ffff:10.0.0.1", true, true},
+		{"::ffff:10.0.0.1/120", true, true},
+		{"::ffff:10.0.0.1/128", true, true},
+		{"::ffff:10.0.0.1/96", true, true},
+		{"::ffff:10.0.0.1/95", true, false},
 	}
 	for _, c := range cases {
 		p, ok := ParseVRRPVIP(c.vip)
@@ -47,6 +52,14 @@ func TestParseVRRPVIPAgreement17150(t *testing.T) {
 		if (vrrpVIPHostIP(c.vip) == nil) == c.wantOK {
 			t.Errorf("vrrpVIPHostIP(%q) nil-mismatch with ParseVRRPVIP ok=%v", c.vip, c.wantOK)
 		}
+		// Mapped spellings agree with the IPv4 host they denote:
+		// vrrpVIPHostIP (net.IP form) must be the "10.0.0.1" the
+		// vrrp-side lookups key on, never a mapped form.
+		if c.wantOK && (c.vip == "::ffff:10.0.0.1" || c.vip == "::ffff:10.0.0.1/120" || c.vip == "::ffff:10.0.0.1/128" || c.vip == "::ffff:10.0.0.1/96" || c.vip == "::ffff:10.0.0.1/95") {
+			if got := vrrpVIPHostIP(c.vip); got == nil || got.String() != "10.0.0.1" {
+				t.Errorf("vrrpVIPHostIP(%q) = %v, want 10.0.0.1", c.vip, got)
+			}
+		}
 	}
 
 	// Capacity-counter agreement cell: cap-sized valid set + malformed
@@ -69,6 +82,28 @@ func TestParseVRRPVIPAgreement17150(t *testing.T) {
 	}
 	if len(DedupeVRRPVIPs([]string{"10.0.0.1/24", "10.0.0.1/32"})) != 2 {
 		t.Error("DedupeVRRPVIPs(/24, /32) must keep 2 entries (prefix-preserving, #11482)")
+	}
+	// Mapped spellings share the IPv4 host's identity: bare mapped ==
+	// v4 bare, mapped /120 == v4 /24, mapped /128 == v4 /32 (the /96
+	// offset translation), while mapped /24-spelling prefix lengths
+	// stay prefix-preserving distinct.
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1", "10.0.0.1"})) != 1 {
+		t.Error("DedupeVRRPVIPs(bare mapped, bare v4) must keep 1 entry")
+	}
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1/120", "10.0.0.1/24"})) != 1 {
+		t.Error("DedupeVRRPVIPs(mapped /120, v4 /24) must keep 1 entry (/120 == /24)")
+	}
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1/128", "10.0.0.1/32", "10.0.0.1"})) != 1 {
+		t.Error("DedupeVRRPVIPs(mapped /128, v4 /32, bare v4) must keep 1 entry")
+	}
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1/120", "10.0.0.1/32"})) != 2 {
+		t.Error("DedupeVRRPVIPs(mapped /120, v4 /32) must keep 2 entries (prefix-preserving)")
+	}
+	if VRRPVIPIdentity("::ffff:10.0.0.1/120") != "10.0.0.1/24" {
+		t.Errorf("VRRPVIPIdentity(mapped /120) = %q, want 10.0.0.1/24", VRRPVIPIdentity("::ffff:10.0.0.1/120"))
+	}
+	if VRRPVIPIdentity("::ffff:10.0.0.1/95") != "::ffff:10.0.0.1/95" {
+		t.Errorf("VRRPVIPIdentity(sub-96 mapped) = %q, want kept-mapped ::ffff:10.0.0.1/95", VRRPVIPIdentity("::ffff:10.0.0.1/95"))
 	}
 	if len(DedupeVRRPVIPs([]string{"2001:db8::10/64", "2001:0DB8:0:0:0:0:0:10/64"})) != 1 {
 		t.Error("DedupeVRRPVIPs(uppercase expanded alias) must keep 1 entry")
