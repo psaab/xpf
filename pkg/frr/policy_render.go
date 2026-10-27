@@ -137,10 +137,20 @@ func communityListKind(members []string) string {
 }
 
 // communityListRenderable reports whether every member passes the
-// shared ValidCommunityMember predicate (#8449 belt).
+// shared ValidCommunityMember predicate (#8449 belt). It judges the
+// SANITIZED form that will actually be rendered (#18055, mirroring
+// the #17839 description fix): sanitizeFRRValue turns control bytes
+// into spaces, so a raw-safe typed member such as "65000:[|\t]"
+// renders as "65000:[| ]", whose translation the pattern generators
+// (communityExpandedConjunctionPatterns, renderCommunityListDefinitions)
+// refuse — the definition emits nothing. Judging the raw member here
+// while those generators judge the sanitized form left this predicate
+// reporting the definition present, so communityListMissingAtRender
+// stayed false and a referencing reject term dangled instead of
+// lowering to deny-all.
 func communityListRenderable(members []string) bool {
 	for _, member := range members {
-		if err := config.ValidCommunityMember(member); err != nil {
+		if err := config.ValidCommunityMember(sanitizeFRRValue(member)); err != nil {
 			return false
 		}
 	}
