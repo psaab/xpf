@@ -478,10 +478,10 @@ func zoneNamesByID(cfg *config.Config) (map[uint32]string, bool) {
 // oldNameByTruncatedID resolves a session record's u16 zone id (the low
 // 16 bits of the u32 StableZoneID, #16557) to its zone name. It serves
 // the BPF-keyed twins, whose SessionValue zone fields are genuinely u16.
-// A truncated id that matches no zone, or matches ambiguously, fails
-// closed (the map is keyed by full u32 and zoneNamesByID already rejects
-// full-id collisions; truncation collisions resolve to the first match,
-// which is why the helper-JSON path below does NOT use this helper).
+// A truncated id matching no zone fails closed. Truncation collisions
+// (two zones sharing low 16 bits) resolve to an arbitrary first match —
+// nondeterministic across map iteration — which is why the helper-JSON
+// path below does NOT use this helper.
 func oldNameByTruncatedID(names map[uint32]string, id uint16) (string, bool) {
 	for zid, name := range names {
 		if uint16(zid) == id {
