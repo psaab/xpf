@@ -7,14 +7,17 @@
 //! visible here without a visibility change (a private item is visible to its
 //! module AND that module's descendants).
 //!
-//! #6988 was PURE CODE MOTION: every line was moved verbatim from
-//! `nat/source.rs` lines 2495-3241, with only the visibility widenings
-//! enumerated in `source/mod.rs`.
+//! #6988: moved verbatim from `nat/source.rs` lines 2495-3241 at the
+//! split commit, with only the visibility widenings enumerated in
+//! `source/mod.rs`; verified at the split by
+//! scripts/verify-nat-source-split-6988.py (pinned refs; it checks
+//! the split, not the current tree).
 //!
 //! That is no longer the whole story and the claim must not be left standing as
 //! though it were: #6979 F6 added `reject_peer_owned_identity` here and calls
 //! it at the three PAT allocation sites (deterministic-v4, v4 round-robin, v6
-//! round-robin). Everything else remains the moved code.
+//! round-robin), and the file has been edited repeatedly since (e.g.
+//! #16011). Everything else remains the moved code.
 
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,7 +82,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// No rollback side effect, so the retry loop can consult it BEFORE
 /// publishing (via allocator exclusions) as well as after.
 /// #16015 zone-aware variant: pool rules know their packet's egress
-/// (to) zone, the axis translate_outbound gates NPTv6 on. The plain
+/// (to) zone, the axis translate_outbound_result gates NPTv6 on. The plain
 /// `pat_identity_excluded` (zone-blind, via exclusions closures that
 /// lack the zone) is kept for the allocator probe; the post-mint and
 /// address-only checks use this so split-horizon NPTv6 in a disjoint

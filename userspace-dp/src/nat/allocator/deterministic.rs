@@ -1,9 +1,10 @@
-//! #16135: deterministic CGNAT math, split out of nat/allocator.rs as
-//! PURE CODE MOTION (deterministic first, per the issue order). This
-//! module is stateless: subscriber -> (pool address, port block) forward
-//! mapping and the stateless reverse mapping, with no allocator state.
-//! Visibility bill for this move: ZERO widenings. Every item below was
-//! already pub(crate) in allocator.rs (DeterministicV4 + its 4 fields,
+//! #16135: deterministic CGNAT math, split out of nat/allocator.rs at
+//! b0ff071c29 (2026-10-22) as pure code motion (deterministic first,
+//! per the issue order). This module is stateless: subscriber ->
+//! (pool address, port block) forward mapping and the stateless
+//! reverse mapping, with no allocator state. Visibility bill for
+//! this move: ZERO widenings. Every item below was already
+//! pub(crate) in allocator.rs (DeterministicV4 + its 4 fields,
 //! deterministic_indices_v4, PoolReverseIndex, build_pool_reverse_index,
 //! reverse_deterministic_v4, DeterministicV6 + its 5 fields,
 //! deterministic_indices_v6, reverse_deterministic_v6);
@@ -11,7 +12,9 @@
 //! allocator/mod.rs re-exports the pub(crate) items, so every existing
 //! path (crate::nat::DeterministicV4, super::allocator::
 //! deterministic_indices_v4, ...) resolves exactly as before.
-//! Machine-checked by scripts/verify-nat-allocator-split-16135.py.
+//! The motion was verified at the split commit by
+//! scripts/verify-nat-allocator-split-16135.py (pinned --base/--split
+//! refs; it checks that commit, not the current tree).
 
 use rustc_hash::FxHashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
