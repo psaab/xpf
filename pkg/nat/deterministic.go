@@ -569,7 +569,7 @@ func expandPoolV4(pool *config.NATPool, mode Mode) ([]net.IP, *LookupError) {
 			return
 		}
 		seen[v] = struct{}{}
-		out = append(out, uint32ToIP(v))
+		out = append(out, hostOrderUint32ToIP(v))
 	}
 	for _, a := range addrs {
 		// Classify the family with the colon-strict Go/Rust-parity SSOT
@@ -808,7 +808,7 @@ func lookupReverseInPool(p detParams, poolName string, natIP net.IP, natPort uin
 		if subIdx > math.MaxUint32-p.hostBaseV4 {
 			return nil, lerrf(ErrCodeNotFound, "subscriber index overflow")
 		}
-		subscriber = uint32ToIP(p.hostBaseV4 + subIdx).String()
+		subscriber = hostOrderUint32ToIP(p.hostBaseV4 + subIdx).String()
 	case ModeV6:
 		off := p.wordOffset
 		baseWord := binary.BigEndian.Uint32(p.hostBaseV6[off : off+4])
@@ -879,7 +879,14 @@ func blockPorts(p detParams, blockIdx uint32) (uint16, uint16) {
 	return low, high
 }
 
-func uint32ToIP(v uint32) net.IP {
+// hostOrderUint32ToIP converts a host-order pool-arithmetic u32 to
+// net.IP with BigEndian. This is deliberate: deterministic-NAT pool
+// words are computed in host order (see binary.BigEndian.Uint32 over
+// pool base addresses in this file). It is the OPPOSITE semantics of
+// dataplane.SessionIPv4 (#17188) — session-map NAT fields are
+// native-endian (from_ne_bytes) and must go through that decoder,
+// never this one. The former shared name hid that trap.
+func hostOrderUint32ToIP(v uint32) net.IP {
 	b := make(net.IP, 4)
 	binary.BigEndian.PutUint32(b, v)
 	return b

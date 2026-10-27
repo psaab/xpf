@@ -522,13 +522,13 @@ func (c *CLI) showFlowSession(args []string) error {
 		outDstIP := srcIP.String()
 		outDstPort := srcPort
 		if val.Flags&dataplane.SessFlagSNAT != 0 {
-			natIP := uint32ToIP(val.NATSrcIP)
+			natIP := val.NATSrcAddr()
 			outDstIP = natIP.String()
 			outDstPort = translatedSrcPort(val.Flags, ntohs(val.NATSrcPort), srcPort)
 			localNAT[sessionTupleKey{family: 4, src: srcIP.String(), dst: dstIP.String(), srcPort: srcPort, dstPort: dstPort, proto: key.Protocol}] = localTranslatedPort{port: outDstPort}
 		}
 		if val.Flags&dataplane.SessFlagDNAT != 0 {
-			natIP := uint32ToIP(val.NATDstIP)
+			natIP := val.NATDstAddr()
 			outSrcIP = natIP.String()
 			outSrcPort = translatedDstPort(val.Flags, ntohs(val.NATDstPort), dstPort)
 		}
