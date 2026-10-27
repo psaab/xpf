@@ -487,13 +487,16 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
     {
         return rg;
     }
-    let ifindex = crate::afxdp::forwarding::connected_lpm_ifindex(
+    // #17053 fold (Rev18099 F1): the dispatcher returns `Option` so a
+    // matched winner is final EVEN when its owner RG is 0 (missing
+    // egress row / RG 0) — exactly the index's `Hit(0)` and the legacy
+    // scan's populated `best`. Only `None` (no match) reaches Source 2.
+    if let Some(ifindex) = crate::afxdp::forwarding::connected_lpm_ifindex(
         forwarding,
         target,
         table,
         crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
-    );
-    if ifindex > 0 {
+    ) {
         return crate::afxdp::forwarding::owner_rg_for_flow(forwarding, ifindex);
     }
     // Source 2: the interface-NAT local table (an interface address
@@ -579,6 +582,7 @@ pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
         table,
         crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
     )
+    .unwrap_or(0)
 }
 
 /// RI-scoped re-home (round-5): the connected-interface test runs

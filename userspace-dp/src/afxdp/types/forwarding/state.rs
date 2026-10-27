@@ -192,7 +192,15 @@ pub(in crate::afxdp) struct ForwardingState {
     /// — same answer, old cost. Slot shape:
     /// `(table_key, winning_ifindex, winning_rg)`; the rebuild keeps
     /// the LOWEST ifindex at equal (table, len, network) for both
-    /// FIB and ledger entries (#17053).
+    /// FIB and ledger entries (#17053). Ledger slots store the
+    /// ifindex negated as `-ifindex - 1` (always negative, so the
+    /// probe's `>= 0` / `< 0` split never confuses them with FIB
+    /// slots). INVARIANT (#17053 fold, Rev18099 F2): ledger keys are
+    /// kernel ifindexes and are therefore > 0 in every production
+    /// state (populated from `iface.ifindex` in
+    /// `forwarding_build`); the negation is computed with
+    /// `checked_neg` and skips (never wraps) the one value it cannot
+    /// encode, `i32::MIN`, whose wrap would alias a FIB slot.
     pub(in crate::afxdp) connected_owner_index_v4:
         FastMap<(u8, u32), Vec<(Box<str>, i32, i32)>>,
     pub(in crate::afxdp) connected_owner_index_v6:
@@ -902,6 +910,15 @@ impl ForwardingState {
         // entries store their raw (>= 0) ifindex. Scope per the
         // canonical per-family predicate (see above); within one
         // scoped key the LOWEST ifindex wins (#17053).
+        // #17053 fold (Rev18099 F2): the negation MUST NOT wrap.
+        // Ledger keys are kernel ifindexes (> 0 in production; see
+        // the slot-shape invariant on the index fields), but
+        // `-i32::MIN - 1` overflows (debug panic / release wrap to a
+        // positive value the probe would misread as a FIB slot).
+        // Encode via `checked_neg(..).map(|n| n - 1)` and skip the
+        // unencodable `i32::MIN` key entirely; decoding an existing
+        // slot (`-existing - 1`) is exact because stored ledger
+        // values are in `i32::MIN..=-1` by construction.
         for (ifindex, prefixes) in &self.connected_v4_by_ifindex {
             let rg = crate::afxdp::forwarding::owner_rg_for_flow(self, *ifindex);
             let instance = self
@@ -921,13 +938,17 @@ impl ForwardingState {
                     .connected_owner_index_v4
                     .entry((len, net))
                     .or_default();
+                // F2: skip the unencodable i32::MIN ledger key.
+                let Some(encoded) = ifindex.checked_neg().map(|n| n - 1) else {
+                    continue;
+                };
                 if let Some(existing) = slot.iter_mut().find(|(k, _, _)| &**k == scoped.as_str()) {
                     if existing.1 < 0 && *ifindex < -existing.1 - 1 {
-                        existing.1 = -*ifindex - 1;
+                        existing.1 = encoded;
                         existing.2 = rg;
                     }
                 } else {
-                    slot.push((scoped.clone().into_boxed_str(), -*ifindex - 1, rg));
+                    slot.push((scoped.clone().into_boxed_str(), encoded, rg));
                 }
             }
         }
@@ -950,13 +971,17 @@ impl ForwardingState {
                     .connected_owner_index_v6
                     .entry((len, net))
                     .or_default();
+                // F2: skip the unencodable i32::MIN ledger key.
+                let Some(encoded) = ifindex.checked_neg().map(|n| n - 1) else {
+                    continue;
+                };
                 if let Some(existing) = slot.iter_mut().find(|(k, _, _)| &**k == scoped.as_str()) {
                     if existing.1 < 0 && *ifindex < -existing.1 - 1 {
-                        existing.1 = -*ifindex - 1;
+                        existing.1 = encoded;
                         existing.2 = rg;
                     }
                 } else {
-                    slot.push((scoped.clone().into_boxed_str(), -*ifindex - 1, rg));
+                    slot.push((scoped.clone().into_boxed_str(), encoded, rg));
                 }
             }
         }

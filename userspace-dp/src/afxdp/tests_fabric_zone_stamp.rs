@@ -7128,7 +7128,7 @@ fn connected_tie_lowest_ifindex_both_orders_17053() {
                 None,
                 crate::afxdp::forwarding::ConnectedSources::LedgerOnly,
             ),
-            5,
+            Some(5),
             "#17053: canonical ledger LPM must agree (order {order:?})"
         );
         // The build-time index must answer identically.
@@ -7153,7 +7153,8 @@ fn connected_tie_lowest_ifindex_both_orders_17053() {
             target,
             None,
             crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
-        ),
+        )
+        .unwrap_or(0),
         "#17053: session_glue and canonical LPM must not diverge"
     );
 }
@@ -7185,6 +7186,87 @@ fn connected_lpm_single_source_structure_17053() {
     assert!(
         !state.contains("len >= best_len"),
         "#17053: connected-owner index re-introduced the last-wins tie"
+    );
+}
+/// #17053 fold (Rev18099 F1): a connected winner with owner RG 0 is a
+/// FINAL answer (legacy `Hit(0)`): the scan fallback must NOT fall
+/// through to the interface-NAT tail, and scan and index must AGREE.
+/// The assignment's shape is "connected winner, missing egress row
+/// -> RG 0": the winner (ifindex 0, connected /24, NO egress row) has
+/// `owner_rg_for_flow(..) == 0` BECAUSE its egress row is missing,
+/// and the pre-fold `i32` dispatcher returned 0 for it exactly as
+/// for no-match, so `if ifindex > 0` fell through. The SAME target is
+/// an interface-NAT entry on ifindex 24 (RG1), so the NAT tail
+/// answers 1 if reached. RED pre-fold (scan 1, index Hit(0)); GREEN
+/// once the dispatcher returns `Option<i32>` (`Some(0)` = matched).
+/// The ifindex-0 winner also pins that a matched ifindex 0 itself is
+/// not collapsed into no-match.
+#[test]
+fn connected_winner_rg0_missing_egress_no_nat_tail_17053() {
+    let mut forwarding = ForwardingState::default();
+    let prefix = crate::prefix::PrefixV4::from_net(
+        "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+    );
+    // Connected winner: ifindex 0, default table, NO egress row, so
+    // `owner_rg_for_flow(.., 0) == 0` (missing egress row -> RG 0).
+    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix,
+        host: Ipv4Addr::new(10, 0, 61, 1),
+        ifindex: 0,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    let target_v4 = Ipv4Addr::new(10, 0, 61, 102);
+    let target = IpAddr::V4(target_v4);
+    // NAT tail would answer differently: the target itself is an
+    // interface-NAT address on ifindex 24 whose egress row says RG1.
+    forwarding
+        .interface_nat_v4
+        .entry(target_v4)
+        .or_default()
+        .insert("inet.0".to_string(), 24);
+    forwarding.egress.insert(24, crate::afxdp::EgressInterface {
+        bind_ifindex: 24, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x03, 0x03], zone_id: 21230,
+        redundancy_group: 1, primary_v4: Some(target_v4), primary_v6: None,
+    });
+    // Sanity: winner RG 0 (missing egress), NAT-tail RG 1, LPM matched.
+    assert_eq!(
+        crate::afxdp::forwarding::owner_rg_for_flow(&forwarding, 0), 0,
+        "#17053 fold: fixture winner must have no egress row (RG 0)"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::owner_rg_for_flow(&forwarding, 24), 1,
+        "#17053 fold: fixture NAT-tail interface must be RG1"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::connected_lpm_ifindex(
+            &forwarding,
+            target,
+            None,
+            crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+        ),
+        Some(0),
+        "#17053 fold: canonical LPM must match the ifindex-0 winner"
+    );
+    // Scan fallback (no index built): canonical RG 0 wins; the NAT
+    // tail must NOT be consulted for a matched target.
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        0,
+        "#17053 fold: scan must return the RG-0 winner, not the NAT tail"
+    );
+    // Index fast path must agree exactly (Hit(0) is final).
+    forwarding.rebuild_connected_owner_index();
+    assert_eq!(
+        forwarding.connected_owner_index_lookup(target, None),
+        Some(crate::afxdp::ConnectedOwnerIndex::Hit(0)),
+        "#17053 fold: index must answer Hit(0) for the RG-0 winner"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        0,
+        "#17053 fold: scan and index must agree for RG-0 winners"
     );
 }
 

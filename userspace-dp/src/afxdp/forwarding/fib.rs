@@ -2259,12 +2259,12 @@ pub(in crate::afxdp) fn instance_owns_table_v6(instance: &str, table: &str) -> b
 /// the note above). Longest prefix wins; equal lengths pick the
 /// lowest ifindex (#10645 precedent).
 pub(in crate::afxdp) fn connected_lpm_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
-    connected_lpm_ifindex(state, IpAddr::V4(ip), Some(table), ConnectedSources::LedgerOnly)
+    connected_lpm_ifindex(state, IpAddr::V4(ip), Some(table), ConnectedSources::LedgerOnly).unwrap_or(0)
 }
 
 /// #15917: v6 twin of `connected_lpm_ifindex_v4`.
 pub(in crate::afxdp) fn connected_lpm_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> i32 {
-    connected_lpm_ifindex(state, IpAddr::V6(ip), Some(table), ConnectedSources::LedgerOnly)
+    connected_lpm_ifindex(state, IpAddr::V6(ip), Some(table), ConnectedSources::LedgerOnly).unwrap_or(0)
 }
 
 /// #17053: which connected row sets `connected_lpm_ifindex` may
@@ -2291,14 +2291,22 @@ pub(in crate::afxdp) enum ConnectedSources {
 /// the result never depends on FastMap iteration order or Vec
 /// insertion order. `table` is the session's installing table;
 /// `None` resolves to the family default (`inet.0` / `inet6.0`),
-/// mirroring the legacy wrappers. Returns 0 when no in-scope
-/// connected prefix contains `ip`.
+/// mirroring the legacy wrappers.
+///
+/// #17053 fold (Rev18099 F1): returns `Option<i32>` — `Some(ifindex)`
+/// when an in-scope connected prefix contains `ip` (the winning
+/// ifindex itself may be 0 or negative in synthetic states), `None`
+/// on no match. The legacy `i32` form returned 0 for BOTH, so a
+/// matched winner whose owner RG is 0 was indistinguishable from
+/// no-match and the session_glue scan fell through to the
+/// interface-NAT tail while the build-time index returned `Hit(0)`.
+/// Callers that only need the ifindex map `None` to 0 at the edge.
 pub(in crate::afxdp) fn connected_lpm_ifindex(
     state: &ForwardingState,
     ip: IpAddr,
     table: Option<&str>,
     sources: ConnectedSources,
-) -> i32 {
+) -> Option<i32> {
     match ip {
         IpAddr::V4(v4) => {
             let want = table.unwrap_or(DEFAULT_V4_TABLE);
@@ -2324,7 +2332,7 @@ pub(in crate::afxdp) fn connected_lpm_ifindex(
                     }
                 }
                 if let Some((_, ifindex)) = best {
-                    return ifindex;
+                    return Some(ifindex);
                 }
             }
             connected_lpm_ifindex_ledger_v4(state, v4, want)
@@ -2353,7 +2361,7 @@ pub(in crate::afxdp) fn connected_lpm_ifindex(
                     }
                 }
                 if let Some((_, ifindex)) = best {
-                    return ifindex;
+                    return Some(ifindex);
                 }
             }
             connected_lpm_ifindex_ledger_v6(state, v6, want)
@@ -2362,7 +2370,8 @@ pub(in crate::afxdp) fn connected_lpm_ifindex(
 }
 
 /// #17053: ledger-only kernel of `connected_lpm_ifindex` (v4).
-fn connected_lpm_ifindex_ledger_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
+/// `None` on no match (see the dispatcher note above).
+fn connected_lpm_ifindex_ledger_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> Option<i32> {
     let mut best: Option<(u8, i32)> = None;
     for (ifindex, prefixes) in &state.connected_v4_by_ifindex {
         let instance = state
@@ -2389,11 +2398,11 @@ fn connected_lpm_ifindex_ledger_v4(state: &ForwardingState, ip: Ipv4Addr, table:
             }
         }
     }
-    best.map(|(_, ifindex)| ifindex).unwrap_or(0)
+    best.map(|(_, ifindex)| ifindex)
 }
 
 /// #17053: ledger-only kernel of `connected_lpm_ifindex` (v6).
-fn connected_lpm_ifindex_ledger_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> i32 {
+fn connected_lpm_ifindex_ledger_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> Option<i32> {
     let mut best: Option<(u8, i32)> = None;
     for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
         let instance = state
@@ -2420,7 +2429,7 @@ fn connected_lpm_ifindex_ledger_v6(state: &ForwardingState, ip: Ipv6Addr, table:
             }
         }
     }
-    best.map(|(_, ifindex)| ifindex).unwrap_or(0)
+    best.map(|(_, ifindex)| ifindex)
 }
 
 /// #15742: the gateway ifindex of the route that WOULD carry `ip`
