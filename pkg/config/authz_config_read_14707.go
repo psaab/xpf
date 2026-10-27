@@ -238,6 +238,25 @@ func AuthorizeConfigShowCompareCommand(cfg *Config, class string, path []string)
 	return nil
 }
 
+// AuthorizeConfigShowRollbackCommand adjudicates only the operational
+// command pair for a rollback render, without charging configuration
+// paths or rendered descendants. It mirrors the command spellings used
+// by the scoped and whole-tree rollback gates.
+func AuthorizeConfigShowRollbackCommand(cfg *Config, class string, path []string, displaySuffix string) error {
+	if class == "" {
+		return nil
+	}
+	if len(path) == 0 {
+		return authorizeShowCommand(cfg, class, "show configuration", displaySuffix)
+	}
+	for _, spelling := range readSpellings15994(path) {
+		if err := authorizeShowCommandReadSpelling(cfg, class, spelling, displaySuffix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // AuthorizeConfigShowRollbackAtPathRendered is
 // AuthorizeConfigShowRollbackAtPath priced over the rendered rollback
 // tree: a denied strict descendant below path refuses the scoped

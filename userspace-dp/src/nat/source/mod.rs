@@ -394,16 +394,26 @@ impl SourceNatRule {
     /// the state that releases them, which is the stranding the merged config
     /// gate names as the reason the quarantine could not ship alone.
     ///
-    /// This is a strict WIDENING of `allocator_key`: for a healthy pool the two
-    /// return the same key, so retention is unchanged there. It must also
-    /// survive REPEATED quarantined snapshots — every rebuild while the overlap
-    /// persists re-derives the previous generation through this key, and a
-    /// key that dropped on the second one would strand exactly the flows the
-    /// first one preserved.
-    fn drain_allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
+    /// Key a quarantined pool by configured identity, independent of the
+    /// current translation mode. A no-translation allocator is built at 0/0,
+    /// but a later PAT rule under the same config still needs its live tokens
+    /// during quarantine. This index is retention-only; healthy PAT reuse
+    /// continues to consult the actual-range `previous_allocators` index.
+    fn quarantine_drain_allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
         let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
         (self.pool_mode && total_pool > 0)
             .then(|| self.allocator_key_for(self.pool_port_low, self.pool_port_high))
+    }
+
+    /// Index the previous generation by its actual allocator range. Newly
+    /// parsed draining rules still hold the empty default allocator, so they
+    /// use the separate configured-identity drain index instead.
+    fn previous_drain_allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
+        let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
+        (self.pool_mode && total_pool > 0)
+            .then(|| {
+                self.allocator_key_for(self.pool_allocator.port_low, self.pool_allocator.port_high)
+            })
     }
 
     /// #7717: is this rule a quarantined pool whose allocator is DRAINING —
@@ -903,6 +913,7 @@ fn resolve_pool_allocators(
     out: &mut [SourceNatRule],
     pendings: &[Option<PendingPoolAllocator>],
     previous_allocators: &FxHashMap<SourceNatPoolAllocatorKey, PortAllocator>,
+    previous_drain_allocators: &FxHashMap<SourceNatPoolAllocatorKey, PortAllocator>,
     previous_pools: &FxHashMap<String, Option<PreviousPool>>,
     budget: &SourceNatAggregateBudget,
     now_ns: u64,
@@ -976,24 +987,23 @@ fn resolve_pool_allocators(
         if !rule.is_draining_pool() {
             continue;
         }
-        let Some(key) = rule.drain_allocator_key() else {
+        let Some(key) = rule.quarantine_drain_allocator_key() else {
             continue;
         };
-        if !previous_allocators.contains_key(&key) || reserved.contains_key(&key) {
+        let Some(existing) = previous_drain_allocators.get(&key) else {
+            continue;
+        };
+        if reserved.contains_key(&key) {
             continue;
         }
-        // Charged through the SAME `PendingPoolAllocator::charge` formula the
-        // healthy rules use, rather than a second copy of the arithmetic — a
-        // draining pool occupies exactly what it occupied before it was
-        // quarantined.
+        // Charge the retained allocator's actual range; no-translation may
+        // have built a zero-range allocator despite its configured PAT key.
         used = used.saturating_with(
             PendingPoolAllocator {
-                port_low: rule.pool_port_low,
-                port_high: rule.pool_port_high,
+                port_low: existing.port_low,
+                port_high: existing.port_high,
                 total_pool: rule.pool_addresses_v4.len() + rule.pool_addresses_v6.len(),
-                // #16840: a draining no-translation pool materialised no
-                // bitmap, so it charges 0 port slots like a healthy one.
-                no_translation: rule.no_translation,
+                no_translation: existing.port_low == 0 && existing.port_high == 0,
             }
             .charge(),
         );
@@ -1009,13 +1019,14 @@ fn resolve_pool_allocators(
         if !rule.is_draining_pool() {
             continue;
         }
-        let Some(key) = rule.drain_allocator_key() else {
+        let Some(key) = rule.quarantine_drain_allocator_key() else {
             continue;
         };
-        if let Some(existing) = previous_allocators.get(&key) {
+        if let Some(existing) = previous_drain_allocators.get(&key) {
             rule.pool_allocator = existing.clone();
         }
     }
+
 
     // #6979 F6: the pool names this generation still has. A previous allocator
     // whose name is absent here was RENAMED (or removed); one whose name is
@@ -1958,6 +1969,8 @@ fn parse_source_nat_rules_inner(
     let mut out = Vec::with_capacity(snaps.len());
     let mut pendings: Vec<Option<PendingPoolAllocator>> = Vec::with_capacity(snaps.len());
     let mut previous_allocators = FxHashMap::<SourceNatPoolAllocatorKey, PortAllocator>::default();
+    let mut previous_drain_allocators =
+        FxHashMap::<SourceNatPoolAllocatorKey, PortAllocator>::default();
     // #6765: the PARTIAL-OVERLAP index, keyed by pool NAME rather than by the
     // whole address list. `previous_allocators` above is the exact-match reuse
     // path and is unchanged; this one exists to answer a different question —
@@ -1972,31 +1985,28 @@ fn parse_source_nat_rules_inner(
     let mut previous_pools = FxHashMap::<String, Option<PreviousPool>>::default();
     if let Some(prev_rules) = previous {
         for prev in prev_rules {
-            // #9874: a poisoned rule that is NOT draining holds only the
-            // never-built default allocator (no pending, so neither phase 2
-            // nor the 1c drain carry-over ever assigns it one). Contributing
-            // it would publish a placeholder with max_tracked_flows == 0
-            // under a live pool key: a subsequently healthy rule for that key
-            // would reuse it and fail every mint as AllocatorExhausted — so
-            // correcting the empty match would NOT restore pool SNAT, and on
-            // a shared pool the placeholder could displace a healthy sibling's
-            // real allocator on refresh (or_insert below is first-wins). Skip
-            // it, so recovery builds fresh. It also stays out of
-            // previous_pools: a placeholder carries no live port ownership to
-            // reseed, so its only possible contribution there is marking a
-            // genuinely unambiguous pool name ambiguous. A poisoned DRAINING
-            // rule still contributes: phase 1c may have carried a real
-            // allocator with live flows into it, and dropping that strands
-            // them (#7717).
-            if prev.lenient_match_dropped && !prev.is_draining_pool() {
+            // #17877: a failed pool has the never-built default allocator,
+            // whose range fields can accidentally match a later healthy
+            // configured key. Never index an allocator with no tracking
+            // capacity. A genuinely built draining allocator (including a
+            // no-translation 0/0 allocator) has positive `max_tracked_flows`
+            // and remains eligible for both exact reuse and quarantine drain
+            // retention.
+            if prev.pool_allocator.snapshot().max_tracked_flows == 0 {
                 continue;
             }
-            // #7717: keyed on `drain_allocator_key`, which ignores
-            // `pool_failure`. A QUARANTINED pool's allocator must survive into
-            // the next generation or its live flows lose the state that
-            // releases them. Widening only: a healthy pool keys identically.
-            if let Some(key) = prev.drain_allocator_key() {
+            // Normal reuse must match the allocator's ACTUAL range, so a
+            // no-translation 0/0 allocator cannot become a healthy PAT match.
+            if let Some(key) = prev.previous_drain_allocator_key() {
                 previous_allocators
+                    .entry(key)
+                    .or_insert_with(|| prev.pool_allocator.clone());
+            }
+            // Quarantine retention follows configured identity instead, to
+            // keep live tokens reachable when the rule changes mode while it
+            // remains quarantined.
+            if let Some(key) = prev.quarantine_drain_allocator_key() {
+                previous_drain_allocators
                     .entry(key)
                     .or_insert_with(|| prev.pool_allocator.clone());
             }
@@ -2271,6 +2281,7 @@ fn parse_source_nat_rules_inner(
         &mut out,
         &pendings,
         &previous_allocators,
+        &previous_drain_allocators,
         &previous_pools,
         budget,
         now_ns,

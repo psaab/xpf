@@ -112,10 +112,15 @@ func (m *Manager) IsSyncBulkPrimed() bool {
 }
 
 // SetSyncTransport records the active sync transport mode ("fabric" or "control-link").
+// A fabric transport has no heartbeat path, so a previous control-link heartbeat
+// cannot keep the peer marked alive after the transport switches to fabric.
 func (m *Manager) SetSyncTransport(transport string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.syncTransport = transport
+	if transport == "fabric" {
+		m.peerAlive = false
+	}
 }
 
 // SyncTransport returns the active sync transport mode.

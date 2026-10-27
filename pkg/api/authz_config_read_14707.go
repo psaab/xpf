@@ -28,6 +28,12 @@ type restConfigReadSnapshots struct {
 	Renders bool
 }
 
+type restConfigReadSlotError struct {
+	err error
+}
+
+func (e restConfigReadSlotError) Error() string { return e.err.Error() }
+
 func restConfigReadSnapshotsFrom(r *http.Request) (restConfigReadSnapshots, bool) {
 	s, ok := r.Context().Value(restConfigReadSnapshotsKey{}).(restConfigReadSnapshots)
 	return s, ok
@@ -156,13 +162,21 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		snaps := restConfigReadSnapshots{Present: true, NodeID: -1}
 		priceCfg := cfg
 		if rollbackN > 0 {
-			scfg, slot, candidate, nid, _, _ := s.store.RollbackCompareSnapshot(rollbackN, false)
+			scfg, slot, candidate, nid, _, slotErr := s.store.RollbackCompareSnapshot(rollbackN, false)
 			if scfg != nil {
 				priceCfg = scfg
 			}
 			snaps.NodeID = nid
 			snaps.Primary, snaps.Other = slot, candidate
 			snaps.Renders = candidate != nil
+			if slotErr != nil {
+				// The compare handler ignores ?path=; keep the missing-slot
+				// pre-check aligned with its full-arm render.
+				if err := config.AuthorizeConfigShowCompareCommand(priceCfg, class, nil); err != nil {
+					return snaps, err
+				}
+				return snaps, restConfigReadSlotError{err: slotErr}
+			}
 			return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, slot, candidate)
 		}
 		scfg, active, candidate, _ := s.store.CompareSnapshot()
@@ -184,8 +198,10 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		var trees []*config.ConfigTree
 		nodeID := -1
 		priceCfg := cfg
+		var slotErr error
 		if s.store != nil {
-			scfg, tree, nid, _, _ := s.store.RollbackSnapshot(n)
+			scfg, tree, nid, _, capturedSlotErr := s.store.RollbackSnapshot(n)
+			slotErr = capturedSlotErr
 			if scfg != nil {
 				priceCfg = scfg
 			}
@@ -197,6 +213,14 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		snaps := restConfigReadSnapshots{NodeID: nodeID, Present: true}
 		if len(trees) > 0 {
 			snaps.Primary = trees[0]
+		}
+		if slotErr != nil {
+			if err := config.AuthorizeConfigShowRollbackCommand(priceCfg, class,
+				strings.Fields(r.URL.Query().Get("path")),
+				config.ConfigShowDisplaySuffix(restShowFormat(format))); err != nil {
+				return snaps, err
+			}
+			return snaps, restConfigReadSlotError{err: slotErr}
 		}
 		if restShowFormat(format) == "inheritance" {
 			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(priceCfg, class,

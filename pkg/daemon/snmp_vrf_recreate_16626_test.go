@@ -83,18 +83,22 @@ func newSNMPVRFRecreateFixture16626(t *testing.T) *snmpVRFRecreateFixture16626 {
 	f.d.setDataplane(&runtimeOnlyApplyTestDP{})
 	f.d.linkByNameFn = func(name string) (netlink.Link, error) {
 		if name == config.ManagementVRFDeviceName {
+			link, ok := f.ops.links[name]
+			if !ok {
+				return nil, netlink.LinkNotFoundError{}
+			}
+			if _, isVRF := link.(*netlink.Vrf); !isVRF {
+				return link, nil
+			}
 			// After the routing fake re-creates the device its map entry
 			// exists (index 0); report the kernel-assigned live index.
-			if _, ok := f.ops.links[name]; ok {
-				f.mu.Lock()
-				idx := f.liveIndex
-				f.mu.Unlock()
-				if idx == 0 {
-					idx = 77
-				}
-				return &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: name, Index: idx}}, nil
+			f.mu.Lock()
+			idx := f.liveIndex
+			f.mu.Unlock()
+			if idx == 0 {
+				idx = 77
 			}
-			return nil, netlink.LinkNotFoundError{}
+			return &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: name, Index: idx}}, nil
 		}
 		return f.ops.LinkByName(name)
 	}

@@ -40,6 +40,12 @@ func TestFailedReloadRestoresPriorConfigForRestart10712(t *testing.T) {
 				t.Fatalf("read config during simulated service restart: %v", err)
 			}
 		}
+		if len(args) > 0 && args[0] == "--list-pools" {
+			return poolsForPrior17882(t, prior), nil
+		}
+		if len(args) > 0 && args[0] == "--list-conns" {
+			return listConnsForRendered17882(t, prior), nil
+		}
 		return nil, nil
 	}
 
@@ -83,6 +89,12 @@ func TestFailedClearRestoresPriorConfigForRestart10712(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read config during simulated service restart: %v", err)
 			}
+		}
+		if len(args) > 0 && args[0] == "--list-pools" {
+			return poolsForPrior17882(t, prior), nil
+		}
+		if len(args) > 0 && args[0] == "--list-conns" {
+			return listConnsForRendered17882(t, prior), nil
 		}
 		return nil, nil
 	}
