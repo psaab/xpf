@@ -88,31 +88,6 @@ SYS_NET = "/sys/class/net"
 
 
 
-@contextlib.contextmanager
-def _owner_only_umask():
-    """Force a 0077 umask for the duration of the block (#6764).
-
-    The ISO tools create the output file themselves, so its mode comes from the
-    process umask at creation time — typically 0022, i.e. 0644 world-readable.
-    The chmod that follows the build only narrows it AFTERWARDS, and the file
-    already contains xpf.conf from the moment the tool writes it, so every
-    co-located UID has the whole build's duration to `isoinfo -x /xpf.conf` the
-    day-0 secrets out.
-
-    Setting the umask around the call closes the window at CREATION rather than
-    after it, and it survives the tool unlinking and recreating its output —
-    which a pre-created 0600 file would not. The chmod afterwards is kept as a
-    belt: it also fixes an output file that already existed with a wider mode.
-
-    umask is process-global and not thread-safe; these scripts are
-    single-threaded, and the block is a single subprocess call.
-    """
-    old = os.umask(0o077)
-    try:
-        yield
-    finally:
-        os.umask(old)
-
 def backing_sort_key(backing):
     """Guest enumeration sort key for a backing, mirroring the sk=0
     (virtio) / sk=1 (hardware) tiebreaker in enumeratePCINICs()
@@ -211,6 +186,14 @@ def _load_sign():
         sys.path.insert(0, dist)
     import sign
     return sign
+
+def _load_make_config_drive():
+    here_d = os.path.dirname(os.path.abspath(__file__))
+    image = os.path.join(os.path.dirname(here_d), "image")
+    if image not in sys.path:
+        sys.path.insert(0, image)
+    import make_config_drive
+    return make_config_drive
 
 
 def validate_version(value, field):
@@ -441,6 +424,10 @@ def load_yaml_appliance(path):
 
 
 # ── day-0 config drive (pure Python; xorriso/genisoimage for the ISO) ──
+# The stage -> mkiso -> chmod core and _owner_only_umask live ONCE in
+# scripts/image/make_config_drive.py (write_day0_iso, #17104); deploy
+# keeps only its own find_xpfd, dry-run and messaging and injects
+# run_capture so a failed mkiso dies with the tool's real error (H-21).
 def find_xpfd():
     for c in (os.environ.get("XPFD"), os.path.join(os.getcwd(), "xpfd"),
               shutil.which("xpfd")):
@@ -478,37 +465,19 @@ def build_config_drive(ap, runner):
     else:
         print("WARNING: no xpfd binary found — day-0 config not validated on "
               "build host (the appliance still validates at first boot).")
+    mcd = _load_make_config_drive()
     mkiso = next((t for t in ("xorriso", "genisoimage", "mkisofs") if shutil.which(t)), None)
     if not mkiso:
         die("need xorriso/genisoimage/mkisofs to build the config drive (apt install xorriso)")
-    stage = tempfile.mkdtemp(prefix="xpf-day0-")
-    try:
-        shutil.copyfile(cfg_path, os.path.join(stage, "xpf.conf"))
-        # 0o600, not 0o644: the staged xpf.conf carries every day-0 secret
-        # (root-authentication hash, IKE PSK, SNMP community, DDNS tokens).
-        # The 0700 mkdtemp already shields it, so this is belt-and-suspenders,
-        # but it keeps the staged copy owner-only too (#4586).
-        os.chmod(os.path.join(stage, "xpf.conf"), 0o600)
-        if ap["mode"] == "cluster":
-            with open(os.path.join(stage, "node-id"), "w") as f:
-                f.write(f"{ap['node_id']}\n")
-        if mkiso == "xorriso":
-            argv = ["xorriso", "-as", "mkisofs", "-quiet", "-V", "xpf-config",
-                    "-J", "-r", "-o", iso, stage]
-        else:
-            argv = [mkiso, "-quiet", "-V", "xpf-config", "-J", "-r", "-o", iso, stage]
-        with _owner_only_umask():
-            run_capture(argv)   # die with the mkiso error, not a bare traceback (H-21)
-        # The ISO embeds xpf.conf — the most secret-bearing day-0 artifact
-        # (root-authentication hash, IKE PSK, SNMP community, DDNS tokens).
-        # xorriso/genisoimage writes it under the process umask (~0022 ->
-        # 0644, world-readable) and it lingers in CWD until destroy. Restrict
-        # it to owner-only so a co-located UID cannot `isoinfo -x /xpf.conf`
-        # the secrets out (#4586). The owner (daemon/VM) still reads it fine.
-        os.chmod(iso, 0o600)
-        print(f"==> built day-0 drive {iso} (label xpf-config)")
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
+    # run_capture(argv) die()s on failure (H-21); write_day0_iso calls
+    # run(argv, check=True), so adapt the signature and let run_capture's
+    # die() carry the failure (check is unused).
+    mcd.write_day0_iso(
+        cfg_path, iso,
+        node_id=ap["node_id"] if ap["mode"] == "cluster" else None,
+        iso_tool=mkiso,
+        run=lambda argv, check=True: run_capture(argv))
+    print(f"==> built day-0 drive {iso} (label xpf-config)")
     return iso
 
 
