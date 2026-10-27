@@ -1228,7 +1228,7 @@ re-resolution lands on the interface address. Three re-resolution points close
 the timing: a second `reconcileWebManagement` in `applyConfigLocked` AFTER
 `applyDataplaneAndHACore` (same-commit address + stanza), the re-assert tick
 (address appears/vanishes with no commit at all), and
-`rebindWebMgmtForLeaseChange` on the DHCP management-only fast path in
+`managementOnlyLeaseRefresh` → `rebindWebMgmtLocked` on the DHCP management-only fast path in
 `onDHCPAddressChange` (lifeline lease change, gated on the bound interface
 being DHCP-managed, serialized under `applySem` — the #2884 shape). Pinned by
 `webmgmt_rebind_14582_test.go`.
