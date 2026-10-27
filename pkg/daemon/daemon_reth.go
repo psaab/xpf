@@ -84,9 +84,13 @@ func rewriteLinkOriginalName(path, ifName, kernelName string) error {
 	return nil
 }
 
-// preserveLinkFields returns content with its [Match] MACAddress= line
-// replaced by OriginalName=kernelName, preserving every other line
-// byte-for-byte. A file with no MACAddress= line is returned unchanged.
+// preserveLinkFields returns content with EVERY MACAddress= line in its
+// [Match] section replaced by OriginalName=kernelName, preserving every
+// other line byte-for-byte (#17042 fold B3). It is section-scoped:
+// MACAddress= directives outside [Match] (e.g. a [Link] MACAddress=
+// permanent-address assignment) are link directives, not match
+// criteria, and are left untouched. A file with no [Match] MACAddress=
+// line is returned unchanged.
 func preserveLinkFields(content, kernelName string) (string, error) {
 	if !rendersafe.SafeInterfaceName(kernelName) {
 		return "", fmt.Errorf("refusing unsafe RETH OriginalName %q: it is not exactly one [Match] OriginalName= pattern (#9886/#10718)", kernelName)
@@ -98,28 +102,47 @@ func preserveLinkFields(content, kernelName string) (string, error) {
 		return "", fmt.Errorf("refusing negated RETH OriginalName %q: a leading '!' in [Match] OriginalName= inverts the match list (#15079)", kernelName)
 	}
 	lines := strings.Split(content, "\n")
+	section := ""
 	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "MACAddress=") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			section = trimmed
+			continue
+		}
+		if section == "[Match]" && strings.HasPrefix(trimmed, "MACAddress=") {
 			lines[i] = "OriginalName=" + kernelName
-			return strings.Join(lines, "\n"), nil
 		}
 	}
-	return content, nil
+	return strings.Join(lines, "\n"), nil
 }
 
 // validatePreservedLink checks the rewritten content stays well-formed:
-// the [Link] Name= (when present) still names ifName and the match now
-// carries OriginalName=kernelName.
+// the [Link] Name= (when present) still names ifName, the [Match]
+// section now carries OriginalName=kernelName, and no MACAddress= match
+// survives in [Match] (#17042 fold B3 — a leftover MAC match would
+// still claim the member by its alternating MAC).
 func validatePreservedLink(content, ifName, kernelName string) error {
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
+	section := ""
+	hasOriginalName := false
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = line
+			continue
+		}
+		if section == "[Match]" && strings.HasPrefix(line, "MACAddress=") {
+			return fmt.Errorf("refusing RETH .link rewrite for %q: rewritten content still carries a [Match] MACAddress= match", ifName)
+		}
+		if section == "[Match]" && line == "OriginalName="+kernelName {
+			hasOriginalName = true
+		}
 		if strings.HasPrefix(line, "Name=") {
 			if got := strings.TrimSpace(strings.TrimPrefix(line, "Name=")); got != ifName {
 				return fmt.Errorf("refusing RETH .link rewrite for %q: existing [Link] Name=%q does not match", ifName, got)
 			}
 		}
 	}
-	if !strings.Contains(content, "OriginalName="+kernelName) {
+	if !hasOriginalName {
 		return fmt.Errorf("refusing RETH .link rewrite for %q: rewritten content lacks OriginalName=%s", ifName, kernelName)
 	}
 	return nil

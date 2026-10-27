@@ -1141,6 +1141,16 @@ func linkMACAddress(content string) (string, bool) {
 // accepts goes through RenderLink, and the OriginalName ladder above
 // runs first so its refusals are never bypassed.
 func writeLinkFile(target, originalName string) (bool, error) {
+	// B1 (#17042 fold): refuse an unsafe target BEFORE any fallback
+	// decision. The old gate let a target that merely CONTAINED a glob
+	// or '!' byte (e.g. "ge*\nDHCP=yes", "ge*\\", "!ge 0") fall through
+	// to the verbatim literal body even though SafeInterfaceName fails
+	// on its space/control/trailing-backslash — injecting a directive
+	// into a root-written unit. Glob/'!' targets stay writable only
+	// when they are otherwise safe single tokens.
+	if !rendersafe.SafeInterfaceName(target) {
+		return false, fmt.Errorf("linksetup: refusing .link target name %q: it is not exactly one pattern, carries control bytes, or ends in a line-continuation backslash — no file written (#9886/#10718)", target)
+	}
 	if !rendersafe.SafeInterfaceName(originalName) {
 		return false, fmt.Errorf("linksetup: refusing .link OriginalName %q for target %q: it is not exactly one [Match] OriginalName= pattern, carries control bytes, or ends in a line-continuation backslash — no file written (#9886/#10718)", originalName, target)
 	}
@@ -1150,19 +1160,21 @@ func writeLinkFile(target, originalName string) (bool, error) {
 	if rendersafe.IsNegatedMatchPattern(originalName) {
 		return false, fmt.Errorf("linksetup: refusing .link OriginalName %q for target %q: a leading '!' in [Match] OriginalName= inverts the match list and would claim every interface except the named one — no file written (#15079)", originalName, target)
 	}
-	content, err := networkd.RenderLink(networkd.LinkSpec{Name: target, OriginalName: originalName})
+	// B2 (#17042 fold): seed the rendered spec from any richer unit
+	// already on disk so the boot writer does not strip networkd's
+	// MTU/speed/duplex/description every boot. A missing/unreadable
+	// file, or one whose [Link] Name= names a different target, seeds
+	// nothing (the writer owns the file for this target).
+	spec := networkd.LinkSpec{Name: target, OriginalName: originalName}
+	spec = seedBootLinkSpec(spec)
+	content, err := networkd.RenderLink(spec)
 	if err != nil {
 		if !targetSlotOnlyRefusal(err) {
 			return false, err
 		}
-		// Only glob/'!' targets reach the fallback. An unsafe target
-		// (space/control/backslash/empty) carries neither mark, so keep
-		// the #9886 refusal the old writer returned, daemon wording
-		// included.
-		if rendersafe.FirstGlobMetacharacter(target) == "" && !rendersafe.IsNegatedMatchPattern(target) {
-			return false, fmt.Errorf("linksetup: refusing .link target name %q: it is not exactly one pattern, carries control bytes, or ends in a line-continuation backslash — no file written (#9886/#10718)", target)
-		}
-		content = renderBootLinkBody(target, originalName)
+		// Only a Safe-but-glob/'!' target reaches the fallback (the
+		// unsafe gate above already refused every other target).
+		content = renderBootLinkBody(target, originalName, spec)
 	}
 	changed, err := networkd.WriteUnitIfChanged(linkDir, target, ".link", content)
 	if err != nil {
@@ -1189,12 +1201,116 @@ func targetSlotOnlyRefusal(err error) bool {
 		!strings.Contains(msg, "OriginalName")
 }
 
+// seedBootLinkSpec copies the rich [Link] fields (MTUBytes/,
+// BitsPerSecond/, Duplex=/AutoNegotiation=/Description=) from an
+// existing .link file for spec.Name into spec (#17042 fold B2), so the
+// boot writer's RenderLink reproduces networkd's richer unit instead
+// of stripping it. The existing file must be for this target: its
+// [Link] Name= value must equal spec.Name, else nothing is seeded (a
+// foreign or stale unit is the writer's to replace wholesale). A
+// [Match] OriginalName= already on disk never overrides the caller's
+// originalName — the caller owns the match identity.
+func seedBootLinkSpec(spec networkd.LinkSpec) networkd.LinkSpec {
+	data, err := os.ReadFile(filepath.Join(linkDir, linkPrefix+spec.Name+".link"))
+	if err != nil {
+		return spec
+	}
+	section := ""
+	nameSeen := false
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = line
+			continue
+		}
+		if section != "[Link]" {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		switch strings.TrimSpace(key) {
+		case "Name":
+			if val != spec.Name {
+				return spec
+			}
+			nameSeen = true
+		case "MTUBytes":
+			if n, cerr := strconv.Atoi(val); cerr == nil && n > 0 {
+				spec.MTU = n
+			}
+		case "BitsPerSecond":
+			if s, ok := bitsPerSecondToJunosSpeed(val); ok {
+				spec.Speed = s
+			}
+		case "Duplex":
+			if val == "full" || val == "half" {
+				spec.Duplex = val
+			}
+		case "AutoNegotiation":
+			if val == "yes" && spec.Duplex == "" {
+				spec.Duplex = "auto"
+			}
+		case "Description":
+			spec.Description = val
+		}
+	}
+	if !nameSeen {
+		return networkd.LinkSpec{Name: spec.Name, OriginalName: spec.OriginalName}
+	}
+	return spec
+}
+
+// bitsPerSecondToJunosSpeed maps a numeric BitsPerSecond= value back to
+// the Junos speed token RenderLink accepts. Values outside the known
+// table seed nothing (the writer owns the file on the next Apply).
+var bitsPerSecondToJunosSpeedMap = map[string]string{
+	"10000000": "10m", "100000000": "100m", "1000000000": "1g",
+	"2500000000": "2.5g", "5000000000": "5g", "10000000000": "10g",
+	"25000000000": "25g", "40000000000": "40g", "100000000000": "100g",
+}
+
+func bitsPerSecondToJunosSpeed(bps string) (string, bool) {
+	s, ok := bitsPerSecondToJunosSpeedMap[bps]
+	return s, ok
+}
+
 // renderBootLinkBody renders the boot .link body for a target RenderLink
 // refused on its Name slot alone (glob/'!' targets; [Link] Name= is
-// literal there). Byte-identical to what writeLinkFile wrote before
-// #17042 plus the trailing newline generateLink always emitted.
-func renderBootLinkBody(target, originalName string) string {
-	return "# Managed by xpfd — do not edit\n[Match]\nOriginalName=" + originalName + "\n\n[Link]\nName=" + target + "\n"
+// literal there). The header and section skeleton are literals; the rich
+// [Link] tail is rendered by RenderLink for a safe surrogate name and
+// spliced after the literal Name=, so a glob/'!' target seeded from a
+// rich on-disk unit keeps its MTU/speed/duplex/description (#17042 fold
+// B2). Byte-identical to what writeLinkFile wrote before #17042 plus
+// the trailing newline generateLink always emitted, for the minimal
+// (unseeded) case.
+func renderBootLinkBody(target, originalName string, spec networkd.LinkSpec) string {
+	body := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=" + originalName + "\n\n[Link]\nName=" + target + "\n"
+	if spec.MTU == 0 && spec.Speed == "" && spec.Duplex == "" && spec.Description == "" {
+		return body
+	}
+	surrogate := spec
+	surrogate.Name = "xpf-seed"
+	rendered, err := networkd.RenderLink(surrogate)
+	if err != nil {
+		return body
+	}
+	const linkMarker = "[Link]\n"
+	idx := strings.Index(rendered, linkMarker)
+	if idx < 0 {
+		return body
+	}
+	tail := rendered[idx+len(linkMarker):]
+	// Drop the surrogate's Name= line (first line of the [Link] block);
+	// keep MTU/speed/duplex/description verbatim.
+	if nl := strings.Index(tail, "\n"); nl >= 0 {
+		tail = tail[nl+1:]
+	} else {
+		tail = ""
+	}
+	return body + tail
 }
 
 // writeBootstrapFxp0Network writes a bootstrap DHCP .network file for fxp0

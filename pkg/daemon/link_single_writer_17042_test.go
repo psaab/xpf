@@ -17,37 +17,14 @@ const richLink17042 = "# Managed by xpfd — do not edit\n" +
 	"[Match]\nOriginalName=enp8s0\n\n[Link]\nName=ge-0-0-1\n" +
 	"MTUBytes=9000\nBitsPerSecond=10000000000\nDuplex=full\nDescription=reth member\n"
 
-// TestBootWriterByteIdenticalToNetworkd17042 pins the acceptance shape:
-// seed networkd's rendering, run the boot writer, and the file must be
-// untouched (changed=false) with MTUBytes/BitsPerSecond still on disk.
+// TestBootWriterByteIdenticalToNetworkd17042 pins the B2 acceptance
+// shape (#17042 fold): seed networkd's RICH rendering, run the boot
+// writer, and the file must be untouched (changed=false) with
+// MTUBytes/BitsPerSecond still on disk — the boot writer seeds its
+// spec from the on-disk unit instead of stripping it every boot.
 func TestBootWriterByteIdenticalToNetworkd17042(t *testing.T) {
 	dir := withTempLinkDir(t)
 	path := filepath.Join(dir, linkPrefix+"ge-0-0-1.link")
-	if err := os.WriteFile(path, []byte(richLink17042), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// The boot writer knows only (target, originalName). Its rendering
-	// lacks the rich fields, so it cannot reproduce the seeded file —
-	// the parity claim is instead at the renderer level: for the same
-	// (target, originalName) inputs the boot writer's bytes equal
-	// RenderLink's bytes. Seed THAT minimal rendering and prove the
-	// boot writer is a no-op over it.
-	minimal, err := networkd.RenderLink(networkd.LinkSpec{Name: "ge-0-0-1", OriginalName: "enp8s0"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(minimal), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	changed, err := writeLinkFile("ge-0-0-1", "enp8s0")
-	if err != nil || changed {
-		t.Fatalf("boot writer over networkd rendering = (changed=%v, err=%v), want (false, nil)", changed, err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil || string(got) != minimal {
-		t.Fatalf("boot writer changed networkd's rendering:\n got=%q\nwant=%q (err=%v)", got, minimal, err)
-	}
-	// And the renderer itself carries the rich fields when given them.
 	rich, err := networkd.RenderLink(networkd.LinkSpec{
 		Name: "ge-0-0-1", OriginalName: "enp8s0", MTU: 9000, Speed: "10g", Duplex: "full", Description: "reth member",
 	})
@@ -56,6 +33,106 @@ func TestBootWriterByteIdenticalToNetworkd17042(t *testing.T) {
 	}
 	if rich != richLink17042 {
 		t.Fatalf("RenderLink rich rendering differs:\n got=%q\nwant=%q", rich, richLink17042)
+	}
+	if err := os.WriteFile(path, []byte(rich), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := writeLinkFile("ge-0-0-1", "enp8s0")
+	if err != nil || changed {
+		t.Fatalf("boot writer over networkd RICH rendering = (changed=%v, err=%v), want (false, nil)", changed, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != rich {
+		t.Fatalf("boot writer stripped networkd's rich rendering:\n got=%q\nwant=%q (err=%v)", got, rich, err)
+	}
+	for _, want := range []string{"MTUBytes=9000", "BitsPerSecond=10000000000", "Duplex=full", "Description=reth member"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("boot writer lost %q:\n%s", want, got)
+		}
+	}
+
+	// A rich unit for a DIFFERENT [Link] Name= must not seed this
+	// target: the writer owns the file and rewrites it minimal.
+	foreign := strings.Replace(rich, "Name=ge-0-0-1", "Name=ge-0-0-9", 1)
+	if err := os.WriteFile(path, []byte(foreign), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = writeLinkFile("ge-0-0-1", "enp8s0")
+	if err != nil || !changed {
+		t.Fatalf("boot writer over foreign rich unit = (changed=%v, err=%v), want (true, nil)", changed, err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimal, err := networkd.RenderLink(networkd.LinkSpec{Name: "ge-0-0-1", OriginalName: "enp8s0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != minimal {
+		t.Fatalf("boot writer over foreign unit =\n got=%q\nwant minimal %q", got, minimal)
+	}
+}
+
+// TestWriteLinkFileRefusesMixedUnsafeTargets17042 pins B1: a target that
+// mixes a glob/'!' byte with an unsafe byte (space, newline directive
+// injection, trailing line-continuation backslash) must be REFUSED —
+// the old gate wrote it verbatim through the literal fallback. Pure
+// glob/'!' targets stay writable (pinned #10089/#15079 cells).
+func TestWriteLinkFileRefusesMixedUnsafeTargets17042(t *testing.T) {
+	dir := withTempLinkDir(t)
+	for _, tc := range []struct{ name, target string }{
+		{"glob plus space", "ge *"},
+		{"bang plus space", "!ge 0"},
+		{"glob plus trailing backslash", `ge*\`},
+		{"glob plus newline injection", "ge*\nDHCP=yes"},
+		{"bang plus newline injection", "!ge-0\nDHCP=yes"},
+		{"glob plus control byte", "ge*\x010"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wrote, err := writeLinkFile(tc.target, "enp9s0")
+			if err == nil || wrote {
+				t.Fatalf("writeLinkFile(%q) = (%v, %v), want (false, refusal error)", tc.target, wrote, err)
+			}
+			if !strings.Contains(err.Error(), "#9886") {
+				t.Errorf("error must mention #9886, got %v", err)
+			}
+		})
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("refused mixed targets must leave no files, found %v", entries)
+	}
+	// Controls: pure glob and pure bang targets remain writable.
+	if wrote, err := writeLinkFile("ge*", "enp9s0"); err != nil || !wrote {
+		t.Fatalf("pure glob target = (%v, %v), want (true, nil)", wrote, err)
+	}
+	if wrote, err := writeLinkFile("!ge-0-0-9", "enp9s0"); err != nil || !wrote {
+		t.Fatalf("pure bang target = (%v, %v), want (true, nil)", wrote, err)
+	}
+}
+
+// TestWriteLinkFileGlobTargetPreservesRich17042 pins B2 for the
+// fallback arm: a glob target seeded from a rich on-disk unit keeps its
+// MTU/speed/duplex/description instead of being stripped to the
+// literal Name=/OriginalName= skeleton.
+func TestWriteLinkFileGlobTargetPreservesRich17042(t *testing.T) {
+	dir := withTempLinkDir(t)
+	path := filepath.Join(dir, linkPrefix+"ge*.link")
+	seeded := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=enp9s0\n\n[Link]\nName=ge*\nMTUBytes=9000\nBitsPerSecond=10000000000\nDuplex=full\nDescription=reth member\n"
+	if err := os.WriteFile(path, []byte(seeded), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := writeLinkFile("ge*", "enp9s0")
+	if err != nil || changed {
+		t.Fatalf("boot writer over rich glob unit = (changed=%v, err=%v), want (false, nil)", changed, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != seeded {
+		t.Fatalf("glob boot writer stripped rich unit:\n got=%q\nwant=%q (err=%v)", got, seeded, err)
 	}
 }
 
@@ -190,5 +267,65 @@ func TestRethEnsureErrorJoinsPhaseNetworkd17042(t *testing.T) {
 	got, rerr := os.ReadFile(path)
 	if rerr != nil || string(got) != macForm {
 		t.Fatalf("refused rewrite changed the file: got=%q err=%v", got, rerr)
+	}
+}
+
+// TestPreserveLinkFieldsSectionScoped17042 pins B3: preserveLinkFields
+// rewrites EVERY [Match] MACAddress= line (not first-match only) and
+// leaves a [Link] MACAddress= directive untouched — the old
+// section-blind first-match rewrite could corrupt a [Link] directive
+// and strand later [Match] MAC lines.
+func TestPreserveLinkFieldsSectionScoped17042(t *testing.T) {
+	multi := "# Managed by xpfd — do not edit\n" +
+		"[Match]\nMACAddress=52:54:00:aa:bb:cc\nMACAddress=52:54:00:aa:bb:dd\n" +
+		"\n[Link]\nName=ge-0-0-1\nMACAddress=52:54:00:11:22:33\nMTUBytes=9000\n"
+	got, err := preserveLinkFields(multi, "enp8s0")
+	if err != nil {
+		t.Fatalf("preserveLinkFields(multi): %v", err)
+	}
+	want := "# Managed by xpfd — do not edit\n" +
+		"[Match]\nOriginalName=enp8s0\nOriginalName=enp8s0\n" +
+		"\n[Link]\nName=ge-0-0-1\nMACAddress=52:54:00:11:22:33\nMTUBytes=9000\n"
+	if got != want {
+		t.Fatalf("section-scoped rewrite differs:\n got=%q\nwant=%q", got, want)
+	}
+	if err := validatePreservedLink(got, "ge-0-0-1", "enp8s0"); err != nil {
+		t.Fatalf("validatePreservedLink(rewritten): %v", err)
+	}
+
+	// A [Link]-only MACAddress= (no [Match] MAC) is not a match: the
+	// old first-match code rewrote it into a bogus [Link]
+	// OriginalName=; now content is unchanged.
+	linkOnly := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=enp8s0\n\n[Link]\nName=ge-0-0-1\nMACAddress=52:54:00:11:22:33\n"
+	got, err = preserveLinkFields(linkOnly, "enp8s0")
+	if err != nil {
+		t.Fatalf("preserveLinkFields(linkOnly): %v", err)
+	}
+	if got != linkOnly {
+		t.Fatalf("[Link] MACAddress= was corrupted:\n got=%q\nwant=%q", got, linkOnly)
+	}
+
+	// Validation must reject a leftover [Match] MAC match.
+	leftover := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=enp8s0\nMACAddress=52:54:00:aa:bb:cc\n\n[Link]\nName=ge-0-0-1\n"
+	if err := validatePreservedLink(leftover, "ge-0-0-1", "enp8s0"); err == nil {
+		t.Fatal("validatePreservedLink must reject a leftover [Match] MACAddress= match")
+	}
+
+	// End-to-end: a multi-MAC rich file through fixRethLinkFile lands
+	// with no [Match] MACAddress= left and MTU preserved.
+	dir := withTempLinkDir(t)
+	path := filepath.Join(dir, linkPrefix+"ge-0-0-1.link")
+	if err := os.WriteFile(path, []byte(multi), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixRethLinkFile("ge-0-0-1", "enp8s0"); err != nil {
+		t.Fatalf("fixRethLinkFile(multi): %v", err)
+	}
+	gotB, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotB) != want {
+		t.Fatalf("fixRethLinkFile multi-MAC rewrite differs:\n got=%q\nwant=%q", gotB, want)
 	}
 }
