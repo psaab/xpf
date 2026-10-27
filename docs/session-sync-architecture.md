@@ -3504,7 +3504,7 @@ the lower-latency userspace delta path scoped to the AF_XDP helper.
 
 ### Delete Journal Overflow
 
-The delete journal is bounded (`deleteJournalCap`, default 10000). Extended
+The delete journals (bare and scoped) are bounded (`boundedFrameJournal`, default cap 10000 each). Extended
 disconnects with high churn can push it past the cap, evicting the oldest queued
 deletes. Those evicted records are session teardowns the standby still needs;
 they are already gone from the primary's local table, so no incremental install

@@ -283,19 +283,19 @@ func TestIpsecSuppressionDebtRearmsColdPrimeOnCapableDiscovery9506(t *testing.T)
 	ss.QueueSessionV4(rtflowKeyV4(9508), dataplane.SessionValue{
 		TunnelDiscriminator: uint64(3)<<32 | 72,
 	})
-	if len(ss.sendCh) != 0 || !ss.ipsecDiscriminatorSuppressDebt.Load() {
+	if len(ss.sendCh) != 0 || !ss.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Load() {
 		t.Fatalf("unlearned-peer suppression: queue=%d debt=%v, want 0/true",
-			len(ss.sendCh), ss.ipsecDiscriminatorSuppressDebt.Load())
+			len(ss.sendCh), ss.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Load())
 	}
 
 	ss.handleMessage(nil, syncMsgPeerCapabilities,
 		capabilityFrame9714(t, capFlagIpsecTunnelDiscriminator))
 	if !ss.IpsecTunnelDiscriminatorCapable() ||
-		ss.ipsecDiscriminatorSuppressDebt.Load() ||
+		ss.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Load() ||
 		!ss.needColdPrime.Load() {
 		t.Fatalf("capable discovery must transfer withheld state into cold prime: capable=%v debt=%v prime=%v",
 			ss.IpsecTunnelDiscriminatorCapable(),
-			ss.ipsecDiscriminatorSuppressDebt.Load(),
+			ss.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Load(),
 			ss.needColdPrime.Load())
 	}
 }
@@ -312,9 +312,9 @@ func TestIpsecBulkFenceRevalidatesOnlyItsCapability9506(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ss := fenceSync9752()
-			ss.bulkFencedForIpsecPeer.Store(true)
+			ss.peerIncarnationState().bulkFencedForIpsecPeer.Store(true)
 			ss.handleMessage(nil, syncMsgPeerCapabilities, capabilityFrame9714(t, tt.flags))
-			if got := ss.bulkFencedForIpsecPeer.Load(); got != tt.staysFenced {
+			if got := ss.peerIncarnationState().bulkFencedForIpsecPeer.Load(); got != tt.staysFenced {
 				t.Fatalf("IPsec bulk fence remains=%v, want %v", got, tt.staysFenced)
 			}
 			err := ss.BulkSync()

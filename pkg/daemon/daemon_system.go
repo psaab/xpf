@@ -1436,14 +1436,14 @@ const defaultICMPv6Ratelimit = "1000"
 // the operator's/kernel's own and is left alone. Best-effort: a failed
 // write is logged, never fatal to the apply.
 func reconcileICMPv6Ratelimit() {
-	current, err := os.ReadFile(icmpv6RatelimitPath)
+	current, err := fsatomic.ReadKernelKnob(icmpv6RatelimitPath)
 	if err != nil {
 		return
 	}
-	if strings.TrimSpace(string(current)) != "0" {
+	if current != "0" {
 		return
 	}
-	if err := os.WriteFile(icmpv6RatelimitPath, []byte(defaultICMPv6Ratelimit+"\n"), 0644); err != nil {
+	if _, err := fsatomic.WriteKernelKnob(icmpv6RatelimitPath, defaultICMPv6Ratelimit); err != nil {
 		slog.Warn("failed to restore sysctl", "path", icmpv6RatelimitPath, "err", err)
 	}
 }

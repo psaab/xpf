@@ -159,36 +159,11 @@ func deriveKernelName(ifName string) string {
 	if name := kernelNameFromAltNames(ifName); name != "" {
 		return name
 	}
-	devPath, err := filepath.EvalSymlinks(fmt.Sprintf("/sys/class/net/%s/device", ifName))
-	if err != nil {
-		return ""
-	}
-	pciAddr := pciAddrFromPath(devPath)
-	if pciAddr == "" {
-		// Virtio: device is virtioN, parent directory is the PCI device
-		parent := filepath.Dir(devPath)
-		pciAddr = pciAddrFromPath(parent)
-	}
+	pciAddr := netname.PCIAddrForNetdev(ifName)
 	if pciAddr == "" {
 		return ""
 	}
 	return pciAddrToEnp(pciAddr)
-}
-
-// pciAddrFromPath extracts a PCI address (domain:bus:slot.fn) from a sysfs
-// path basename. Returns "" if the basename is not a PCI address.
-func pciAddrFromPath(path string) string {
-	base := filepath.Base(path)
-	// PCI addresses look like "0000:08:00.0"
-	parts := strings.SplitN(base, ":", 3)
-	if len(parts) != 3 {
-		return ""
-	}
-	// Validate slot.fn exists
-	if !strings.Contains(parts[2], ".") {
-		return ""
-	}
-	return base
 }
 
 // pciAddrToEnp converts a PCI address like "0000:08:00.0" to a predictable
