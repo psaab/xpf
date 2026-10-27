@@ -909,33 +909,34 @@ pub(crate) fn build_interface_static_view(
 /// packet's egress zone, the axis translate_outbound_result gates on);
 /// zone-blind when None (NAT64 / synced callers). `None` prefixes =
 /// fast path, every strict-accepted config with no NPTv6/pool overlap.
+/// #17067: delegates to the single `Nptv6External::contains`.
 pub(crate) fn nptv6_owns_wire_identity(
-    prefixes: Option<&[(std::net::Ipv6Addr, u8, String)]>,
+    prefixes: Option<&[crate::nptv6::Nptv6External]>,
     ip: IpAddr,
     zone: Option<&str>,
 ) -> bool {
     match prefixes {
-        Some(p) => crate::nptv6::nptv6_prefix_contains(p, ip, zone),
+        Some(p) => p.iter().any(|e| e.contains(ip, zone)),
         None => false,
     }
 }
 
-/// #16015: hand the NPTv6 zoned external prefixes to every pool rule /
+/// #16015: hand the NPTv6 external prefixes to every pool rule /
 /// NAT64 prefix whose addresses they cover (zone-aware per rule where
 /// a to-zone exists; zone-blind wiring, zone-checked at mint).
 ///
 /// Called from `forwarding_build` AFTER `state.nptv6` is built. A
 /// rule/prefix no prefix covers keeps `None`, so strict-accepted
 /// configs pay one `Option::is_none` per mint. One shared `Arc`.
+/// #17067: takes the state's shared `Arc<[Nptv6External]>` directly.
 pub(crate) fn wire_nptv6_overlap_peers(
     rules: &mut [SourceNatRule],
     prefixes: &mut [crate::nat64::Nat64Prefix],
-    nptv6: Vec<(std::net::Ipv6Addr, u8, String)>,
+    nptv6: Arc<[crate::nptv6::Nptv6External]>,
 ) {
     if nptv6.is_empty() {
         return;
     }
-    let shared = Arc::new(nptv6);
     for rule in rules.iter_mut() {
         if rule.interface_mode {
             // #16015 fold: an interface-only config has no pool rule to
@@ -943,7 +944,7 @@ pub(crate) fn wire_nptv6_overlap_peers(
             // — so the interface rule itself must hold it. Wiring is
             // unconditional here (egress address is runtime-resolved,
             // not config-static); the mint check is zone-aware.
-            rule.nptv6_externals = Some(Arc::clone(&shared));
+            rule.nptv6_externals = Some(Arc::clone(&nptv6));
             continue;
         }
         if !rule.pool_mode {
@@ -955,9 +956,9 @@ pub(crate) fn wire_nptv6_overlap_peers(
         let touched = rule
             .pool_addresses_v6
             .iter()
-            .any(|a| crate::nptv6::nptv6_prefix_contains(&shared, IpAddr::V6(*a), None));
+            .any(|a| nptv6.iter().any(|e| e.contains(IpAddr::V6(*a), None)));
         if touched {
-            rule.nptv6_externals = Some(Arc::clone(&shared));
+            rule.nptv6_externals = Some(Arc::clone(&nptv6));
         }
     }
     // NAT64 prefixes take no field: their pools are v4-only and a v6

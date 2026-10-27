@@ -919,7 +919,7 @@ fn build_fallible_forwarding_state(
     crate::nat::wire_nptv6_overlap_peers(
         &mut state.source_nat_rules,
         &mut state.nat64.prefixes,
-        state.nptv6.external_prefixes_zoned(),
+        state.nptv6.externals(),
     );
     state.screen_profiles = build_screen_profiles(snapshot);
     state.screen_missing_profiles = build_screen_missing_profiles(snapshot);
@@ -1197,7 +1197,7 @@ fn build_fallible_forwarding_state(
             if state.nptv6.is_empty() {
                 0
             } else {
-                state.nptv6.external_prefixes().len()
+                state.nptv6.external_count()
             },
             state.connected_v4.len(),
             state.routes_v4.values().map(|v| v.len()).sum::<usize>(),
