@@ -39,12 +39,16 @@ func haStateFromTextFallback(cli haStateClient, ctxFn func() (context.Context, c
 	if err != nil {
 		return nil, err
 	}
-	return haStateFromText(info, st), nil
+	return haStateFromText(info, st)
 }
 
 // haStateFromText converts the two text renders into typed state. It is
 // the fallback equivalent of cluster.Manager.HAState + HAStateToProto.
-func haStateFromText(info, st string) *pb.GetClusterHAStateResponse {
+// A malformed peer session-sync wire value fails the conversion
+// (#18118 B2): the strict parser's error must not be dropped into
+// present+nil, which the verdict permits as advertised-unknown
+// (#14991 fail-open).
+func haStateFromText(info, st string) (*pb.GetClusterHAStateResponse, error) {
 	resp := &pb.GetClusterHAStateResponse{
 		PeerAlive:       parsePeerAlive(info),
 		SyncEstablished: parseSyncEstablished(info),
@@ -54,8 +58,17 @@ func haStateFromText(info, st string) *pb.GetClusterHAStateResponse {
 	// peer is alive in its view; derive presence from the line itself
 	// so a partial render (information says healthy, status lacks the
 	// line) stays absent rather than fabricating presence.
-	if _, present, _ := parsePeerSessionSyncWireStrict(st); present {
+	wire, wirePresent, werr := parsePeerSessionSyncWireStrict(st)
+	if werr != nil {
+		return nil, werr
+	}
+	if wirePresent {
 		resp.SessionSyncWirePresent = true
+		// "unknown" (predates #7990) leaves the value unset.
+		if !isUnknownWireLine(st) {
+			w := uint32(wire)
+			resp.PeerSessionSyncWire = &w
+		}
 	}
 	if id, ok := parseLocalNodeID(st); ok {
 		resp.LocalNodeId = int32(id)
@@ -66,13 +79,6 @@ func haStateFromText(info, st string) *pb.GetClusterHAStateResponse {
 	} else if local, present := parseLocalHAProtocol(st); present {
 		l := uint32(local)
 		resp.LocalHaProtocol = &l
-	}
-	if wire, present, werr := parsePeerSessionSyncWireStrict(st); werr == nil && present {
-		// "unknown" (predates #7990) leaves the value unset.
-		if !isUnknownWireLine(st) {
-			w := uint32(wire)
-			resp.PeerSessionSyncWire = &w
-		}
 	}
 	weights := parseLocalRGWeights(info)
 	takeoverBlock := peerTakeoverBlockers(info)
@@ -90,7 +96,7 @@ func haStateFromText(info, st string) *pb.GetClusterHAStateResponse {
 		}
 		resp.RedundancyGroups = append(resp.RedundancyGroups, rg)
 	}
-	return resp
+	return resp, nil
 }
 
 func isUnknownWireLine(st string) bool {
@@ -601,12 +607,20 @@ func haProtocolVerdictFromStatus(status string) (bool, uint16, uint16) {
 }
 
 func peerProtocolVersionsFromStatus(status string) (uint16, uint16, uint16, bool, error) {
-	return peerProtocolVersionsFromState(haStateFromText("", status))
+	st, err := haStateFromText("", status)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	return peerProtocolVersionsFromState(st)
 }
 
 func sessionSyncWireVerdictFromStatus(status string) (bool, string, error) {
 	if _, _, err := parsePeerSessionSyncWireStrict(status); err != nil {
 		return false, "", err
 	}
-	return sessionSyncWireVerdictFromState(haStateFromText("", status))
+	st, err := haStateFromText("", status)
+	if err != nil {
+		return false, "", err
+	}
+	return sessionSyncWireVerdictFromState(st)
 }

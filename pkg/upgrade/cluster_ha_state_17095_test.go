@@ -222,6 +222,53 @@ func TestHAStateFallbackOnlyOnUnimplemented17095(t *testing.T) {
 	}
 }
 
+// TestHAStateFallbackMalformedWireFailsClosed17095 is the #18118 B2
+// cell: a pre-#17095 daemon whose status render carries a malformed
+// peer session-sync wire value ("banana") must FAIL the fetch, not
+// convert it into present+nil which sessionSyncWireVerdictFromState
+// PERMITS as advertised-unknown (#14991 fail-open through the
+// fallback). Driven through haStateFromClient — the production entry
+// — so the strict error must survive haStateFromTextFallback and
+// haStateFromText, not only the verdict helper that already checks
+// it. A good wire and the unknown shape stay green as controls.
+func TestHAStateFallbackMalformedWireFailsClosed17095(t *testing.T) {
+	t.Parallel()
+	info := "Remote node: healthy (node1)\nFabric link statistics:\n  Status: Up\n  Bulk sync primed: yes\n"
+	mkStat := func(wire string) string {
+		return "Node name: node0\nHA protocol version: 1\nPeer HA protocol version: 1\n" +
+			"Peer session-sync wire version: " + wire + "\n" +
+			"Redundancy group: 0 , Failover count: 2\nnode0   100      secondary      yes      no       None\nnode1   200      primary        yes      no       None\n"
+	}
+	unimpl := status.Error(codes.Unimplemented, "method GetClusterHAState not implemented")
+	for _, wire := range []string{"banana", "-1", "70000", "2.5", ""} {
+		cli := &fakeHAStateClient{err: unimpl, infoText: info, statText: mkStat(wire)}
+		st, err := haStateFromClient(cli, testCtxFn)
+		if err == nil {
+			t.Errorf("malformed peer wire %q through haStateFromClient: st=%+v err=nil, want fail-closed error (#18118 B2)", wire, st)
+			continue
+		}
+		if st != nil {
+			t.Errorf("malformed peer wire %q: got non-nil state alongside error, want nil", wire)
+		}
+		// The downstream verdict must never see a permitting shape:
+		// if a state had been returned, present+nil would permit.
+		if st != nil {
+			if ok, _, verr := sessionSyncWireVerdictFromState(st); ok && verr == nil {
+				t.Errorf("malformed peer wire %q converted to a permitting typed state", wire)
+			}
+		}
+	}
+	// Controls: unknown (pre-#7990 permit shape) and a numeric wire
+	// still convert without error through the same entry point.
+	for _, wire := range []string{"unknown", "2"} {
+		cli := &fakeHAStateClient{err: unimpl, infoText: info, statText: mkStat(wire)}
+		st, err := haStateFromClient(cli, testCtxFn)
+		if err != nil || st == nil {
+			t.Errorf("wire %q control: st=%v err=%v, want converted state", wire, st, err)
+		}
+	}
+}
+
 // TestHAStateSkewAddedFieldStaysGreen17095 is the N-driver / N+1-state
 // skew cell: a state carrying fields this driver does not know (a
 // future RG/state extension, simulated by an unknown enum value and an

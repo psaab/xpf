@@ -136,6 +136,10 @@ var methodPermissions = map[string]config.LoginClassPermission{
 	// past the control tier, so it costs PermControl too.
 	"MatchPolicies": config.PermControl, // `show security match-policies`
 	"GetSystemInfo": config.PermView,
+	// #17095: typed equivalent of `show chassis cluster` — the
+	// ShowText topics chassis-cluster* are PermView in pkg/optopic,
+	// so the typed channel costs the same.
+	"GetClusterHAState": config.PermView,
 	// ShowText multiplexes ~127 topics across TWO command families. The entry
 	// here is the FLOOR for a request whose topic the gate cannot read; a
 	// decoded request is priced by showTextTopicPermission below. The floor is
