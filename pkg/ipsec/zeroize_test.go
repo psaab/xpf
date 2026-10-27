@@ -37,6 +37,21 @@ func TestEraseConnStateIfEmptyPreservesTeardownDebt(t *testing.T) {
 	}
 }
 
+func TestEraseConnStateIfEmptyPreservesDeferredReinitiationDebt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ipsec-conn-state.json")
+	state := `{"loaded":[],"pending_terminate":[],"pending_reinitiate":["site-a"]}`
+	if err := os.WriteFile(path, []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EraseConnStateIfEmpty(path); err == nil {
+		t.Fatal("pending deferred re-initiation must refuse erasure")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != state {
+		t.Fatalf("failed erase changed deferred-initiation authority: body=%q err=%v", got, err)
+	}
+}
+
 func TestEraseConnStateIfEmptyRemovesCrashTemps(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ipsec-conn-state.json")

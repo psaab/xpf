@@ -83,38 +83,13 @@ func TestExternalMatchParityWithRealNetworkd16797(t *testing.T) {
 
 			probeDir := t.TempDir()
 			writeExternalNetwork12135(t, probeDir, "05-ext.network", sc.body)
-			script := `#!/bin/bash
-set -u
-mount -t sysfs sysfs /sys
-mount -t tmpfs tmpfs /run
-mount -t tmpfs tmpfs /etc/systemd/network
-mkdir -p /run/systemd/network
-cp /probe-nets/05-ext.network /etc/systemd/network/
-/lib/systemd/systemd-udevd > /probe-nets/udevd.log 2>&1 &
-/lib/systemd/systemd-networkd > /probe-nets/networkd.log 2>&1 &
-NPID=$!
-for i in $(seq 1 30); do [ -S /run/systemd/netif/io.systemd.Network ] && break; sleep 0.5; done
-sleep 1
-for d in eth0 eth1 eth2 eth9; do ip link add $d type dummy; ip link set $d up; done
-ip tunnel add gre1 mode gre local 192.0.2.1 remote 192.0.2.2; ip link set gre1 up
-sleep 4
-fail=0
-for d in eth0 eth1 eth2 gre1 eth9; do
-  f=$(networkctl --no-pager status $d 2>/dev/null | grep -m1 "Network File:" || true)
-  case "$f" in *05-ext.network*) verdict=configured;; *) verdict=unmanaged;; esac
-  mac=$(cat /sys/class/net/$d/address)
-  echo "VERDICT $d $verdict $mac"
-done
-cat /probe-nets/networkd.log
-kill $NPID 2>/dev/null; pkill systemd-udevd 2>/dev/null; wait 2>/dev/null
-exit $fail
-`
+			script := parityProbeScript16797()
 			scriptPath := filepath.Join(probeDir, "probe.sh")
 			if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			inner := "mkdir -p /probe-nets; mount --bind " + probeDir + " /probe-nets; exec /probe-nets/probe.sh"
-			cmd := exec.Command("unshare", "-n", "-m", "--propagation", "private", "bash", "-c", inner)
+			cmd := netnsProbeCommand17857(inner)
 			out, err := cmd.CombinedOutput()
 			t.Logf("netns parity probe (%s) output:\n%s", sc.name, out)
 			if err != nil {
