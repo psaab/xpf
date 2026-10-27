@@ -1070,6 +1070,14 @@ type Daemon struct {
 	// (#16601) — notably the DNS refresher's clone — so the pre-apply
 	// resolver does not resolve them again. Guarded by dnsRefreshMu.
 	dnsResolvedConfigs map[*config.Config]struct{}
+	// relayRefRGIndex is the per-packet DHCP-relay gate's precomputed
+	// ref→RG index (#17086), keyed by config pointer identity: rebuilt
+	// only when the active config pointer changes, so the per-packet
+	// Lookup stays O(1) instead of paying InterfaceRefRG's
+	// O(interfaces) build per packet. Guarded by relayRefRGIndexMu.
+	relayRefRGIndexMu sync.Mutex
+	relayRefRGIndex   *config.RefRGIndex
+	relayRefRGBase    *config.Config
 	// lastRethMembers records the local RETH member Linux names programmed by
 	// the previous apply (#16860). A member that leaves its RETH keeps the
 	// virtual MAC until the next apply restores its PermHWAddr; without this

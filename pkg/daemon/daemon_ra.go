@@ -172,14 +172,19 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 		if ll != "" {
 			ra.SourceLinkLocal = ll
 		}
-		if ra.SourceLinkLocal == "" && cfg.Chassis.Cluster != nil && ifc.RedundancyGroup != 0 {
-			// RETH HA startup installs a stable router link-local on the active
-			// member. Bind RA to that address so the sender does not auto-pick a
-			// transient EUI-64 link-local which can later be removed by HA reconcile.
-			ra.SourceLinkLocal = cluster.StableRethLinkLocal(
-				cfg.Chassis.Cluster.ClusterID,
-				ifc.RedundancyGroup,
-			).String()
+		if ra.SourceLinkLocal == "" && cfg.Chassis.Cluster != nil {
+			if rg := cfg.RefRG(ra.Interface); rg != 0 {
+				// RETH HA startup installs a stable router link-local on the active
+				// member. Bind RA to that address so the sender does not auto-pick a
+				// transient EUI-64 link-local which can later be removed by HA reconcile.
+				// #17086 SSOT: the group comes from InterfaceRefRG, so a member
+				// interface binds its RETH's stable address and a stray group on
+				// a non-RETH binds nothing.
+				ra.SourceLinkLocal = cluster.StableRethLinkLocal(
+					cfg.Chassis.Cluster.ClusterID,
+					rg,
+				).String()
+			}
 		}
 	}
 
