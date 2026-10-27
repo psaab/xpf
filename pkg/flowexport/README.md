@@ -1427,6 +1427,15 @@ baselines, saturating to zero when nothing resumed) exactly once.
 Markers are created only for flows that were tracked at expiry (never
 for unsampled or never-opened flows), are dropped on re-open or close,
 and are the only post-expiry state: no second sampling decision is made.
+Markers are open state for exporter replacement too (#17834): a
+flowexport config rebuild swaps exporter groups, and
+`AbsorbSampledInto`/`TransferFlowStateTo` carry each marker to the
+replacement exactly like a live tracker entry (state already present in
+the destination wins). Without the transfer, a rebuild landing inside an
+idle window silenced the key's polling — resumed traffic went unobserved
+again — and the real close fell to the #16742 close-time fallback, which
+could consume a second sampling slot and re-export the full lifetime the
+inactive final had already emitted, or drop the remainder entirely.
 
 
 ## Gotchas

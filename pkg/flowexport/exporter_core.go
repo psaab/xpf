@@ -375,8 +375,9 @@ func (c *exporterCore) CloseFlowOrSample(key FlowKey, decide func() bool) (sampl
 
 // TransferFlowStateTo carries this exporter's open state for key to
 // dst (the replacement exporter for the same group key, #16742):
-// the tracker entry (with its interim baselines) when dst has a
-// tracker, otherwise the close-only sampled mark. State already
+// the tracker entry (with its interim baselines), or — for a flow
+// inside its idle window — its sampled-idle marker (#17834), when dst
+// has a tracker, otherwise the close-only sampled mark. State already
 // present in dst wins. The source keeps its copy; the caller retires
 // the source, whose Run flush never re-emits tracker state, so the
 // close is exported exactly once by the replacement.
@@ -387,6 +388,16 @@ func (c *exporterCore) TransferFlowStateTo(dst *exporterCore, key FlowKey) {
 	if c.tracker != nil && dst.tracker != nil {
 		if f := c.tracker.Clone(key); f != nil {
 			dst.tracker.Adopt(f)
+			return
+		}
+		// #17834: an idle-expired flow's marker is open state too.
+		// Dropping it on rebuild silenced the key's polling and its
+		// close baselines: resumed traffic was never re-armed (the
+		// #16747 defect again), and the close fell to the #16742
+		// fallback, re-exporting the full lifetime the inactive final
+		// had already emitted.
+		if m, ok := c.tracker.CloneIdleMarker(key); ok {
+			dst.tracker.AdoptIdleMarker(key, m)
 			return
 		}
 	}
@@ -429,9 +440,9 @@ func (c *exporterCore) SampledKeys() []FlowKey {
 }
 
 // AbsorbSampledInto transfers every open-state key this exporter holds
-// (tracker keys plus close-only sampled marks) into dst via
-// TransferFlowStateTo. Used when dst replaces this exporter for the
-// same group key (#16742).
+// (tracker entries, sampled-idle markers #17834, and close-only
+// sampled marks) into dst via TransferFlowStateTo. Used when dst
+// replaces this exporter for the same group key (#16742).
 func (c *exporterCore) AbsorbSampledInto(dst *exporterCore) {
 	if dst == nil || dst == c {
 		return
