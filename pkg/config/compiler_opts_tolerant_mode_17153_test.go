@@ -10,14 +10,21 @@ import (
 	"testing"
 )
 
-// #17153 guard: mode queries read the tolerant mode bit, flag docs name
-// every governed validator, and deferJunosHostWarnings has one definition.
+// #17153 guard (hardened by the fold): mode queries read the tolerant mode
+// bit, flag docs name every governed validator, deferJunosHostWarnings has
+// one definition whose body is exactly `return opts.tolerant`, and
+// `opts.tolerant =` cannot be assigned outside lenientCompileOpts().
 //
 // RED-on-revert: restoring `tree, opts.sanitizeFreeTextControlChars)` at the
 // tunnel gate, restoring either copy of the four-flag OR, pointing the
 // RX-MTU/mgmt advisories back at suppressContestedTrunkZoneAdvisory,
-// dropping a validator name from the lenientFirewallRefs doc, or reading
-// opts.tolerant at a scrub site each turn a cell below RED.
+// dropping a validator name from the lenientFirewallRefs doc, reading
+// opts.tolerant at a scrub site, adding a dummy
+// validateTunnelEndpointIDCollisionAST call that discards its result while
+// the production call borrows another flag, changing
+// deferJunosHostWarnings to anything but `return opts.tolerant`, or an
+// `opts.tolerant =` assignment outside lenientCompileOpts() each turn a
+// cell below RED.
 
 func parseConfigPackage17153(t *testing.T) (map[string]*ast.File, *token.FileSet) {
 	t.Helper()
@@ -168,23 +175,35 @@ func TestTolerantModeBit17153(t *testing.T) {
 	if (compileOpts{}).tolerant {
 		t.Fatal("zero compileOpts must be strict (tolerant=false)")
 	}
-	// Only lenientCompileOpts() may set tolerant:true in non-test code.
+	// Only lenientCompileOpts() may set tolerant in non-test code, by
+	// composite-literal key or by an `opts.tolerant =` assignment. The
+	// literal leg is scoped to the lenientCompileOpts body inside
+	// compiler_opts.go; the assignment leg scans every non-test file.
 	files, _ := parseConfigPackage17153(t)
 	for name, f := range files {
-		ast.Inspect(f, func(n ast.Node) bool {
-			kv, ok := n.(*ast.KeyValueExpr)
-			if !ok {
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			inLenient := name == "compiler_opts.go" && fd.Name.Name == "lenientCompileOpts"
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch e := n.(type) {
+				case *ast.KeyValueExpr:
+					id, ok := e.Key.(*ast.Ident)
+					if ok && id.Name == "tolerant" && !inLenient {
+						t.Errorf("%s (%s) sets tolerant outside lenientCompileOpts()", name, fd.Name.Name)
+					}
+				case *ast.AssignStmt:
+					for _, lhs := range e.Lhs {
+						if isOptsField17153(lhs, "tolerant") && !inLenient {
+							t.Errorf("%s (%s) assigns opts.tolerant outside lenientCompileOpts()", name, fd.Name.Name)
+						}
+					}
+				}
 				return true
-			}
-			id, ok := kv.Key.(*ast.Ident)
-			if !ok || id.Name != "tolerant" {
-				return true
-			}
-			if name != "compiler_opts.go" {
-				t.Errorf("%s sets tolerant outside lenientCompileOpts()", name)
-			}
-			return true
-		})
+			})
+		}
 	}
 }
 
@@ -207,29 +226,45 @@ func TestSanitizeReadOnlyAtScrubSites17153(t *testing.T) {
 	if count == 0 {
 		t.Fatal("no sanitizeFreeTextControlChars read found — guard is vacuous")
 	}
-	// Tunnel gate must read tolerant, not sanitize.
-	found := false
-	for _, f := range files {
+	// Tunnel gate must read tolerant, not sanitize, at exactly one
+	// non-test call site. An exact count defeats a dummy call that
+	// passes opts.tolerant and discards its result while the real
+	// gate borrows another flag.
+	tunnelCalls := 0
+	for name, f := range files {
 		ast.Inspect(f, func(n ast.Node) bool {
 			c, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "validateTunnelEndpointIDCollisionAST" {
-				for _, a := range c.Args {
-					if isOptsField17153(a, "tolerant") {
-						found = true
+			id, ok := c.Fun.(*ast.Ident)
+			if !ok || id.Name != "validateTunnelEndpointIDCollisionAST" {
+				return true
+			}
+			tunnelCalls++
+			if name != "compiler.go" {
+				t.Errorf("validateTunnelEndpointIDCollisionAST called in %s, want only compiler.go", name)
+			}
+			sawTolerant := false
+			for _, a := range c.Args {
+				ast.Inspect(a, func(m ast.Node) bool {
+					if isOptsField17153(m, "tolerant") {
+						sawTolerant = true
 					}
-					if isOptsField17153(a, "sanitizeFreeTextControlChars") {
+					if isOptsField17153(m, "sanitizeFreeTextControlChars") {
 						t.Error("tunnel gate still borrows sanitizeFreeTextControlChars")
 					}
-				}
+					return true
+				})
+			}
+			if !sawTolerant {
+				t.Errorf("validateTunnelEndpointIDCollisionAST call in %s does not pass opts.tolerant", name)
 			}
 			return true
 		})
 	}
-	if !found {
-		t.Fatal("validateTunnelEndpointIDCollisionAST call does not pass opts.tolerant")
+	if tunnelCalls != 1 {
+		t.Fatalf("validateTunnelEndpointIDCollisionAST has %d non-test call sites, want exactly 1 (dummy-call bypass?)", tunnelCalls)
 	}
 }
 
@@ -239,11 +274,23 @@ func TestDeferJunosHostWarningsSingleDefinition17153(t *testing.T) {
 	calls := 0
 	for name, f := range files {
 		for _, decl := range f.Decls {
-			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "deferJunosHostWarnings" {
-				defs++
-				if name != "compiler_tailgates.go" {
-					t.Errorf("deferJunosHostWarnings defined in %s, want compiler_tailgates.go", name)
-				}
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Name.Name != "deferJunosHostWarnings" {
+				continue
+			}
+			defs++
+			if name != "compiler_tailgates.go" {
+				t.Errorf("deferJunosHostWarnings defined in %s, want compiler_tailgates.go", name)
+			}
+			// Body must be exactly `return opts.tolerant`: a single
+			// return of that selector, nothing else (no wrapper logic).
+			if fd.Body == nil || len(fd.Body.List) != 1 {
+				t.Errorf("deferJunosHostWarnings body is not the single statement `return opts.tolerant`")
+				continue
+			}
+			ret, ok := fd.Body.List[0].(*ast.ReturnStmt)
+			if !ok || len(ret.Results) != 1 || !isOptsField17153(ret.Results[0], "tolerant") {
+				t.Errorf("deferJunosHostWarnings body is not `return opts.tolerant`")
 			}
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -312,16 +359,49 @@ func TestFlagDocsNameGovernedValidators17153(t *testing.T) {
 		}
 	}
 
-	// tolerant: doc must name every function whose suppression/mode it governs.
+	// tolerant: doc must name every function whose suppression/mode it
+	// governs. appendContestedTrunkZoneAdvisoryLocked and
+	// appendSharedDeviceUnzonedUnitAdvisoryLocked are NOT in this list:
+	// they keep their co-set suppressor (see the suppressor census below)
+	// and must not be claimed for tolerant.
 	tdoc := fieldDoc17153(t, files, "compileOpts", "tolerant")
 	for _, want := range []string{
 		"validateTunnelEndpointIDCollisionAST", "deferJunosHostWarnings",
-		"appendContestedTrunkZoneAdvisoryLocked", "appendSharedDeviceUnzonedUnitAdvisoryLocked",
 		"appendUserspaceRxMTUAdvisoryLocked", "appendUserspaceMgmtZoneAdvisoryLocked",
 	} {
 		if !strings.Contains(tdoc, want) {
 			t.Errorf("tolerant doc does not name governed site %s", want)
 		}
+	}
+	// tolerant's governed set is exactly the four sites above: an
+	// additional opts.tolerant read elsewhere would be claimed by no doc.
+	tolerantReads := 0
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if isOptsField17153(n, "tolerant") {
+				tolerantReads++
+			}
+			return true
+		})
+	}
+	// Reads: tunnel arg (compiler.go), `return opts.tolerant`
+	// (compiler_tailgates.go), RX-MTU guard, mgmt-zone guard. The
+	// composite literal in lenientCompileOpts is a key, not a read.
+	if tolerantReads != 4 {
+		t.Errorf("opts.tolerant is read at %d non-test sites, want exactly 4 (tunnel gate, deferJunosHostWarnings body, RX-MTU guard, mgmt-zone guard); an extra read is governed by no doc claim", tolerantReads)
+	}
+	// Contested/shared advisories must read their co-set suppressor,
+	// not tolerant (the other half of the F1 doc fix).
+	for name, f := range files {
+		if name != "contested_trunk_zone_advisory_7509.go" {
+			continue
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if isOptsField17153(n, "tolerant") {
+				t.Errorf("%s reads opts.tolerant: contested/shared advisories keep suppressContestedTrunkZoneAdvisory", name)
+			}
+			return true
+		})
 	}
 	// RX-MTU and mgmt advisories must read tolerant, not the contested suppressor.
 	for name, f := range files {

@@ -19,8 +19,8 @@ import (
 // `control` must continue to compile. Tunnel, local-fabric, and config-owned
 // secure-tunnel members are already excluded by other dataplane classes and
 // therefore do not receive this data-NIC advisory. Tolerant load / peer-sync
-// paths suppress it through the existing advisory suppression flag so a
-// persisted config does not repeat the same message on every boot.
+// paths suppress it through opts.tolerant (#17153) so a persisted config
+// does not repeat the same message on every boot.
 func appendUserspaceMgmtZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 	if cfg == nil || opts.tolerant || cfg.Security.Zones == nil {
 		return

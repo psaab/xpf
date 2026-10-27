@@ -52,11 +52,12 @@ type compileOpts struct {
 	// validateTunnelEndpointIDCollisionAST (compiler.go),
 	// deferJunosHostWarnings (the Junos host direct-delivery warning
 	// deferral), and the tolerant-path suppression in
-	// appendContestedTrunkZoneAdvisoryLocked,
-	// appendSharedDeviceUnzonedUnitAdvisoryLocked,
 	// appendUserspaceRxMTUAdvisoryLocked and
-	// appendUserspaceMgmtZoneAdvisoryLocked. The #16166 completeness
-	// test pins it true in lenientCompileOpts().
+	// appendUserspaceMgmtZoneAdvisoryLocked. The contested-trunk and
+	// shared-device advisories keep their dedicated co-set suppressor
+	// suppressContestedTrunkZoneAdvisory, which lenientCompileOpts()
+	// sets together with this bit — they do not read tolerant. The
+	// #16166 completeness test pins it true in lenientCompileOpts().
 	tolerant bool
 
 	// lenientUnknownTopLevelStanza lets tolerant compilation retain an operator-
