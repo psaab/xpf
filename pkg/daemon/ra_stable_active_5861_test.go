@@ -150,6 +150,25 @@ func raClusterStore(t *testing.T, prefix string) *configstore.Store {
 	return s
 }
 
+// raClusterStore17049 is raClusterStore plus an IPv6 address on reth0.50 so
+// the unit carries a stable-LL placement under the single placement
+// definition (#17049) and the RA builder binds the shared source.
+func raClusterStore17049(t *testing.T, prefix string) *configstore.Store {
+	t.Helper()
+	s := raClusterStore(t, prefix)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSet("set interfaces reth0 unit 50 family inet6 address 2001:db8:50::1/64\n"); err != nil {
+		t.Fatalf("LoadSet unit-50 address: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit unit-50 address: %v", err)
+	}
+	s.ExitConfigure()
+	return s
+}
+
 // TestClusterRAStableActiveReappliesOnCommit is the #5861 stable-active
 // regression. A day-2 RA edit (a new prefix added) on an RG that stays MASTER —
 // with NO ownership transition — must re-apply RA on this active owner. Before
@@ -382,7 +401,13 @@ func (s *sharedLLClearSpy10779) ClearInterfacesWithoutGoodbye(names []string) er
 func (s *sharedLLClearSpy10779) Status() []ra.SenderInfo { return s.statuses }
 
 func TestStartupGoodbyeSkipsSharedStableRethIdentity10779(t *testing.T) {
-	store := raClusterStore(t, "2001:db8:1077:9::/64")
+	// #17049 updated fixture: raClusterStore's reth0.50 unit had NO IPv6
+	// addresses at all, so under the single placement definition the
+	// stable LL is never installed there and the RA must not bind to it
+	// (pre-fix buildRAConfigs bound unconditionally). The unit now carries
+	// an IPv6 address so a placement exists and the shared-source binding
+	// this cell pins is exercised as before.
+	store := raClusterStore17049(t, "2001:db8:1077:9::/64")
 	cfg := store.ActiveConfig()
 	d := &Daemon{}
 	raConfigs := d.buildRAConfigs(cfg)
@@ -406,7 +431,7 @@ func TestStartupGoodbyeSkipsSharedStableRethIdentity10779(t *testing.T) {
 }
 
 func TestDemotionStopsOnlySharedSourceRAWithoutGoodbye10779(t *testing.T) {
-	store := raClusterStore(t, "2001:db8:1077:9::/64")
+	store := raClusterStore17049(t, "2001:db8:1077:9::/64")
 	cfg := store.ActiveConfig()
 	d := &Daemon{}
 	raConfigs := d.buildRAConfigs(cfg)
@@ -546,7 +571,7 @@ func TestClusterRADemotionConfigRemovalUsesLiveSharedSource10789(t *testing.T) {
 // for the router identity the peer may already advertise. The fix judges the
 // sender on its CONFIGURED source.
 func TestClusterRAUnopenedSharedSenderSilentlyStopped14978(t *testing.T) {
-	store := raClusterStore(t, "2001:db8:1::/64")
+	store := raClusterStore17049(t, "2001:db8:1::/64")
 	spy := &raApplySpy{}
 	var cleared [][]string
 	d := &Daemon{
@@ -580,7 +605,7 @@ func TestClusterRAUnopenedSharedSenderSilentlyStopped14978(t *testing.T) {
 // configured shared-stable sender on an inactive RG must still be named for
 // silent stop instead of reaching Apply's graceful withdrawal.
 func TestClusterRANoLiveSharedSenderSilentlyStopped14978(t *testing.T) {
-	store := raClusterStore(t, "2001:db8:1::/64")
+	store := raClusterStore17049(t, "2001:db8:1::/64")
 	spy := &raApplySpy{}
 	var cleared [][]string
 	d := &Daemon{
@@ -699,7 +724,7 @@ func TestClusterRANodeLocalRAKept14978(t *testing.T) {
 // demotion edge itself: clearRethRASendersWithoutGoodbye must name an
 // unopened (empty SrcAddr) shared sender for silent stop.
 func TestDemotionUnopenedSharedSenderClearedWithoutGoodbye14978(t *testing.T) {
-	store := raClusterStore(t, "2001:db8:1077:9::/64")
+	store := raClusterStore17049(t, "2001:db8:1077:9::/64")
 	cfg := store.ActiveConfig()
 	clearer := &sharedLLClearSpy10779{
 		statuses: []ra.SenderInfo{

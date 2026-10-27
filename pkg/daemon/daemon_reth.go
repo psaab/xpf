@@ -726,41 +726,16 @@ func rethParentLinkLocalRepair(linuxName string, rethCfg *config.InterfaceConfig
 	}
 }
 
-// rethUnitHasConfiguredLinkLocal checks whether the RETH config has an
-// explicitly configured link-local IPv6 address (fe80::/10) on the given unit.
-func rethUnitHasConfiguredLinkLocal(rethCfg *config.InterfaceConfig, unitNum int) bool {
-	unit, ok := rethCfg.Units[unitNum]
-	if !ok {
-		return false
-	}
-	for _, addr := range unit.Addresses {
-		ip, _, err := net.ParseCIDR(addr)
-		if err != nil {
-			continue
-		}
-		if ip.IsLinkLocalUnicast() && ip.To4() == nil {
-			return true
-		}
-	}
-	return false
-}
 
 // rethUnitHasIPv6 checks whether the RETH config has IPv6 addresses on the
 // given logical unit number. Unit 0 is the native/untagged interface. The
 // argument is a UNIT number, not a vlan-id — callers that start from a kernel
 // VLAN sub-interface suffix must translate the vlan-id to a unit with
-// rethUnitForVlanID first (#5107).
+// rethUnitForVlanID first (#5107). Delegates to the single definition in
+// pkg/config (#17049), which also counts DHCPv6Client (#13102).
 func rethUnitHasIPv6(rethCfg *config.InterfaceConfig, unitNum int) bool {
-	unit, ok := rethCfg.Units[unitNum]
-	if !ok {
-		return false
-	}
-	for _, addr := range unit.Addresses {
-		if strings.Contains(addr, ":") {
-			return true
-		}
-	}
-	return unit.DHCPv6
+	unit, ok := config.LookupUnit(rethCfg, unitNum)
+	return ok && config.UnitHasIPv6(unit)
 }
 
 // rethUnitForVlanID reverse-maps a kernel VLAN id to the logical unit number

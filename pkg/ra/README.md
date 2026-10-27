@@ -634,8 +634,12 @@ never retried and the stale IPv6 default-router identity lingered on hosts
   link-local configured on THAT unit; a **bare** name scans units lowest-first
   and uses the lowest-numbered unit that carries a configured link-local
   (byte-identical to the historical unit-0-only lookup when unit 0 holds it).
-  When no unit carries a configured link-local, a RETH interface still falls
-  back to `cluster.StableRethLinkLocal`. Before #2996 the lookup only ever read
+  When no unit carries a configured link-local, a RETH interface falls
+  back to the stable RETH link-local only when the RA's unit carries a
+  placement under the single definition
+  `Config.StableRethLinkLocalPlacements` in `pkg/config` (#17049;
+  `cluster.StableRethLinkLocal` delegates to `config.StableRethLinkLocal`).
+  Before #2996 the lookup only ever read
   `Units[0]`, so an RA on a subinterface (link-local under a non-zero unit)
   silently ignored the configured source.
 - **Bind retry runs UNLOCKED, in the owner goroutine (#2453).** `start()` no
