@@ -244,7 +244,7 @@ func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 	// claims to police. A walk that silently visits nothing would green
 	// while missing exactly the class this test exists to catch, so pin
 	// two fields by name and require a plausible census. The floor is
-	// deliberately below the current count (334 lenient*/sanitize* bools
+	// deliberately below the current count (329 lenient*/sanitize* bools
 	// re-measured for #17168) so removing a retired gate does not flake
 	// this test, while a collapsed walk (0) still trips it via the
 	// named pins below. Recursion into embedded structs is pinned
@@ -252,7 +252,7 @@ func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 	// planted shape does not depend on the current field population.
 	if downgrades < 250 {
 		t.Errorf("census: only %d lenient*/sanitize* bools reached by the recursive walk; "+
-			"the walk is not reaching the compileOpts population (want 334)", downgrades)
+			"the walk is not reaching the compileOpts population (want 329)", downgrades)
 	}
 	if others == 0 {
 		t.Error("census: no allowlisted non-downgrade bools reached; the walk is not " +
