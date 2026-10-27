@@ -401,7 +401,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 	// Leaving any of it armed means stale transfer authority outlives the
 	// reset it was granted under:
 	//
-	//   - peerTransferOutOverride has NO expiry: it re-forces the peer to
+	//   - transferOverrides has NO expiry: it re-forces the peer to
 	//     SecondaryHold on every heartbeat (#6527/#6656), so electRG takes
 	//     its "Peer transfer out" arm and self-elects primary regardless
 	//     of what the peer reports — dual-primary if the peer has also
@@ -415,11 +415,9 @@ func (m *Manager) ResetFailover(rgID int) error {
 	//     also keeps a transferCommitRolePinned secondary parked via
 	//     electRG's committed-secondary arm.
 	//
-	// clearPeerTransferOutOverrideLocked also drops the reqID-matched
-	// peerTransferOutPrevious snapshot, keeping the override pair in
-	// lockstep (same pairing as notePeerTransferCommitted /
-	// FinalizePeerTransferOut / the RG-removal purge #8435). A later
-	// abort restore for a pre-reset reqID then no-ops on reqID mismatch.
+	// clearPeerTransferOutOverrideLocked drops the whole transferOverride
+	// entry (reqID + peer snapshot together, #17125), so a later abort
+	// restore for a pre-reset reqID then no-ops on reqID mismatch.
 	m.clearPeerTransferOutOverrideLocked(rgID)
 	delete(m.abortedPeerTransferReqID, rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
@@ -452,7 +450,8 @@ func (m *Manager) FenceStatus() (action string, events []HistoryEvent) {
 
 // operatorHoldSnapshot records the operator intent that a peer-transfer
 // request or the peer-loss clears temporarily clear: the local manual hold,
-// the peer transfer-out override pair, and the aborted-request marker. A
+// the peer transfer-out override (#17125: one transferOverride
+// value), and the aborted-request marker. A
 // reset that wins while the caller is outside m.mu increments failoverGen;
 // the generation check prevents a stale restore from resurrecting that
 // newer operator decision (#5246). The restore also leaves any newer hold
@@ -472,10 +471,8 @@ type operatorHoldSnapshot struct {
 	// forcedSecondary records whether the snapshotted hold was an ISSU
 	// drain pin (#16743), so the abort restores the pin with the hold.
 	forcedSecondary bool
-	overrideReqID   uint64
+	override        transferOverride
 	hasOverride     bool
-	previous        peerGroupSnapshot
-	hasPrevious     bool
 	abortedReqID    uint64
 	hasAborted      bool
 	generation      uint64
@@ -483,7 +480,7 @@ type operatorHoldSnapshot struct {
 
 // snapshotOperatorHoldLocked captures the operator intent for rgID. The
 // hold fields are armed only when ManualFailover is set (mirroring the
-// peer-transfer snapshot sites); the override pair and aborted marker are
+// peer-transfer snapshot sites); the override and aborted marker are
 // captured independently. An RG removed from m.groups restores NOTHING:
 // the restore requires the same RG incarnation for every arm (#17117
 // fold; a removed+re-added RG must not inherit the old override). Caller holds m.mu.
@@ -505,11 +502,8 @@ func (m *Manager) snapshotOperatorHoldLocked(rgID int) operatorHoldSnapshot {
 			snap.restoreWeight = rg.Weight != m.debtDerivedWeightLocked(rg)
 		}
 	}
-	if reqID, ok := m.peerTransferOutOverride[rgID]; ok {
-		snap.overrideReqID, snap.hasOverride = reqID, true
-	}
-	if prev, ok := m.peerTransferOutPrevious[rgID]; ok {
-		snap.previous, snap.hasPrevious = prev, true
+	if override, ok := m.transferOverrides[rgID]; ok {
+		snap.override, snap.hasOverride = override, true
 	}
 	if reqID, ok := m.abortedPeerTransferReqID[rgID]; ok {
 		snap.abortedReqID, snap.hasAborted = reqID, true
@@ -568,9 +562,20 @@ func (m *Manager) restoreOperatorHoldLocked(rgID int, snapshot operatorHoldSnaps
 		return
 	}
 	if snapshot.hasOverride {
-		m.applyPeerTransferOutOverrideLocked(rgID, snapshot.overrideReqID)
-		if snapshot.hasPrevious {
-			m.peerTransferOutPrevious[rgID] = snapshot.previous
+		// Restore the whole transferOverride (#17125): writing it
+		// directly puts back the snapshotted reqID + previous peer
+		// snapshot together, instead of re-deriving `previous` from
+		// the peer view as it stands after the fence wait (the way
+		// applyPeerTransferOutOverrideLocked would).
+		m.transferOverrides[rgID] = snapshot.override
+		if pg, ok := m.peerGroups[rgID]; ok {
+			pg.State = StateSecondaryHold
+			pg.StateOverriddenLocally = true
+			pg.OverrideReason = "transfer-out override"
+			m.peerGroups[rgID] = pg
+			if rg := m.groups[rgID]; rg != nil {
+				rg.PeerPriority = pg.Priority
+			}
 		}
 	}
 	if snapshot.hasAborted {
@@ -696,8 +701,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		// reqID-matched restorePeerTransferOutOverrideLocked; the hold
 		// snapshot's override/aborted arms belong to the fence-abort
 		// caller and must not replay here.
-		hold.overrideReqID, hold.hasOverride = 0, false
-		hold.previous, hold.hasPrevious = peerGroupSnapshot{}, false
+		hold.override, hold.hasOverride = transferOverride{}, false
 		hold.abortedReqID, hold.hasAborted = 0, false
 		rg.ManualFailover = false
 		rg.forcedSecondary = false
@@ -706,7 +710,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	}
 	m.mu.Unlock()
 	if err := m.commitRequestedPeerFailover(rgID, reqID); err != nil {
-		// The commit applies peerTransferOutOverride before running the
+		// The commit applies the transfer override before running the
 		// election. Roll back the reqID-matched override and restore the
 		// preexisting local manual-failover hold on every commit failure.
 		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
@@ -1001,7 +1005,7 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 	// from the previous owner direction. If we keep forcing the peer into
 	// secondary-hold here, the next heartbeat can immediately re-elect the
 	// old owner during rapid failback/failover sequences.
-	delete(m.peerTransferOutOverride, rgID)
+	m.clearPeerTransferOutOverrideLocked(rgID)
 	delete(m.abortedPeerTransferReqID, rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
@@ -1363,8 +1367,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 			// As in the single-RG twin: the batch abort rolls the override
 			// back through its own reqID-matched restore; the fence-abort
 			// override/aborted arms must not replay here.
-			snap.overrideReqID, snap.hasOverride = 0, false
-			snap.previous, snap.hasPrevious = peerGroupSnapshot{}, false
+			snap.override, snap.hasOverride = transferOverride{}, false
 			snap.abortedReqID, snap.hasAborted = 0, false
 			holdSnapshots[rgID] = snap
 			rg.ManualFailover = false
@@ -1525,7 +1528,7 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 		// before we park this node as the old owner. Otherwise the next peer
 		// heartbeat can still force the peer into secondary-hold and snap the
 		// RG back during rapid alternating moves.
-		delete(m.peerTransferOutOverride, rgID)
+		m.clearPeerTransferOutOverrideLocked(rgID)
 		delete(m.abortedPeerTransferReqID, rgID)
 		delete(m.peerTransferCommitGraceUntil, rgID)
 		m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
@@ -1547,10 +1550,12 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 
 func (m *Manager) applyPeerTransferOutOverrideLocked(rgID int, reqID uint64) {
 	previous, ok := m.peerGroups[rgID]
-	m.peerTransferOutOverride[rgID] = reqID
-	m.peerTransferOutPrevious[rgID] = peerGroupSnapshot{
-		state:   previous,
-		present: ok,
+	m.transferOverrides[rgID] = transferOverride{
+		reqID: reqID,
+		previous: peerGroupSnapshot{
+			state:   previous,
+			present: ok,
+		},
 	}
 	peerGroup := previous
 	peerGroup.GroupID = rgID
@@ -1567,19 +1572,17 @@ func (m *Manager) applyPeerTransferOutOverrideLocked(rgID int, reqID uint64) {
 }
 
 func (m *Manager) clearPeerTransferOutOverrideLocked(rgID int) {
-	delete(m.peerTransferOutOverride, rgID)
-	delete(m.peerTransferOutPrevious, rgID)
+	delete(m.transferOverrides, rgID)
 }
 
 func (m *Manager) restorePeerTransferOutOverrideLocked(rgID int, reqID uint64) bool {
-	currentReqID, ok := m.peerTransferOutOverride[rgID]
-	if !ok || currentReqID != reqID {
+	override, ok := m.transferOverrides[rgID]
+	if !ok || override.reqID != reqID {
 		return false
 	}
-	delete(m.peerTransferOutOverride, rgID)
-	snapshot, hadSnapshot := m.peerTransferOutPrevious[rgID]
-	delete(m.peerTransferOutPrevious, rgID)
-	if hadSnapshot && snapshot.present {
+	delete(m.transferOverrides, rgID)
+	snapshot := override.previous
+	if snapshot.present {
 		// A fresh heartbeat can race this restore and overwrite peerGroups
 		// with newer live state. If that happens we may briefly put the older
 		// snapshot back here, but the next heartbeat corrects it again.
@@ -1672,7 +1675,7 @@ func (m *Manager) suppressPeerTimeoutForTransferCommitLocked(now time.Time) (boo
 //
 // The helper takes newPeerGroups as the map being rebuilt (Go maps are
 // reference types, so mutations on the parameter are visible to the caller)
-// and now as the heartbeat reception timestamp. m.peerTransferOutOverride,
+// and now as the heartbeat reception timestamp. m.transferOverrides,
 // m.peerTransferCommitGraceUntil, and m.localTransferOutHoldUntil are
 // read/mutated through the *Manager receiver as before. Caller must hold
 // m.mu write-locked (matching the existing handlePeerHeartbeat protocol).
@@ -1688,7 +1691,7 @@ func (m *Manager) applyTransferCommitOverridesOnPeerStateLocked(newPeerGroups ma
 			delete(m.abortedPeerTransferReqID, rgID)
 		}
 	}
-	for rgID := range m.peerTransferOutOverride {
+	for rgID := range m.transferOverrides {
 		peerGroup, ok := newPeerGroups[rgID]
 		if !ok {
 			continue

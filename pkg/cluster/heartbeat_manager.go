@@ -391,14 +391,13 @@ func (m *Manager) stopHeartbeat() {
 // apart. Depending on that coincidence would make this silently wrong if the
 // fallback ever changed.
 func (m *Manager) ApplyCommittedHeartbeatTiming() bool {
-	// The decision is heartbeatTimingDivergedLocked's, called rather than
-	// restated: a second copy of the condition here could disagree with the one
-	// the table in heartbeat_timing_apply_7164_test.go asserts, and then the
-	// tests would pass while production restarted on the wrong commits.
+	// One RLock covers the decision and the logged values together, so
+	// the log can never contradict the decision that produced it.
+	m.mu.RLock()
 	if !m.heartbeatTimingDivergedLocked() {
+		m.mu.RUnlock()
 		return false
 	}
-	m.mu.RLock()
 	liveInterval, liveThreshold := m.liveHeartbeatTimingLocked()
 	wantInterval, wantThreshold := m.hbInterval, m.hbThreshold
 	m.mu.RUnlock()
@@ -410,7 +409,7 @@ func (m *Manager) ApplyCommittedHeartbeatTiming() bool {
 
 // heartbeatTimingDivergedLocked is the DECISION half of
 // ApplyCommittedHeartbeatTiming, split out so it can be asserted without
-// standing up a real heartbeat.
+// standing up a real heartbeat. Caller must hold m.mu.
 //
 // The split is deliberate: the restart MECHANISM is already covered by the
 // VRF-rebind path's tests, and binding a socket in a unit test to observe a
@@ -418,8 +417,6 @@ func (m *Manager) ApplyCommittedHeartbeatTiming() bool {
 // predicate. What #7164 changed is which commits decide to restart, so that is
 // what gets its own name and its own table.
 func (m *Manager) heartbeatTimingDivergedLocked() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 	if m.hbReceiver == nil {
 		return false
 	}
@@ -1009,7 +1006,7 @@ func (m *Manager) handlePeerTimeout() {
 		// that could be seeded onto a same-id re-add in the fence
 		// window. The peer-loss clears below therefore STAND for such
 		// ids — the fail-open/safe direction (#8435 dual-primary class).
-		for rgID := range m.peerTransferOutOverride {
+		for rgID := range m.transferOverrides {
 			if _, ok := holds15211[rgID]; ok {
 				continue
 			}
@@ -1066,7 +1063,7 @@ func (m *Manager) handlePeerTimeout() {
 	// (peerTransferCommitGraceUntil / localTransferOutHoldUntil) are left alone
 	// deliberately — they expire on their own, and clearing them here would
 	// shorten a window a live transfer may still be inside.
-	for rgID := range m.peerTransferOutOverride {
+	for rgID := range m.transferOverrides {
 		slog.Info("cluster: clearing peer transfer-out override (peer lost)", "rg", rgID)
 		m.clearPeerTransferOutOverrideLocked(rgID)
 	}

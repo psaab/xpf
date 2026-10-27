@@ -9,7 +9,7 @@ import (
 // #17117 (R4-Q35-01): the #15211 fence-abort restore in handlePeerTimeout
 // is a hand copy of the canonical operator-hold restore without its failoverGen
 // check, so an operator ResetFailover during the unlocked fence wait is
-// undone — ManualFailover and the no-expiry peerTransferOutOverride both
+// undone — ManualFailover and the no-expiry transferOverrides entry both
 // come back.
 //
 // FAIL-ON-REVERT: revert the operatorHoldSnapshot generation gate (restore
@@ -51,8 +51,8 @@ func TestFenceAbortResetDuringFenceWaitIsHonoured17117(t *testing.T) {
 	if m.groups[0].ManualFailover {
 		t.Error("ResetFailover during the fence wait was undone: ManualFailover restored by the fence-abort restore (#17117)")
 	}
-	if _, ok := m.peerTransferOutOverride[0]; ok {
-		t.Error("ResetFailover during the fence wait was undone: peerTransferOutOverride restored by the fence-abort restore (#17117)")
+	if _, ok := m.transferOverrides[0]; ok {
+		t.Error("ResetFailover during the fence wait was undone: transferOverrides restored by the fence-abort restore (#17117)")
 	}
 	if _, ok := m.abortedPeerTransferReqID[0]; ok {
 		t.Error("ResetFailover during the fence wait was undone: abortedPeerTransferReqID restored by the fence-abort restore (#17117)")
@@ -145,11 +145,8 @@ func TestFenceAbortReaddDuringFenceWaitDoesNotRestore17117(t *testing.T) {
 	if gen := m.failoverGen[0]; gen != 0 {
 		t.Fatalf("failoverGen[0] = %d after purge+re-add, want 0 (the gen-0 snapshot gates pass; only incarnation rejects it)", gen)
 	}
-	if _, ok := m.peerTransferOutOverride[0]; ok {
-		t.Error("fence-abort restore resurrected peerTransferOutOverride onto the re-added RG after remove+re-add in the fence window (#18148/#8435)")
-	}
-	if _, ok := m.peerTransferOutPrevious[0]; ok {
-		t.Error("fence-abort restore resurrected peerTransferOutPrevious onto the re-added RG (#18148)")
+	if _, ok := m.transferOverrides[0]; ok {
+		t.Error("fence-abort restore resurrected transferOverrides (reqID + peer snapshot, #17125) onto the re-added RG after remove+re-add in the fence window (#18148/#8435)")
 	}
 	if _, ok := m.abortedPeerTransferReqID[0]; ok {
 		t.Error("fence-abort restore resurrected abortedPeerTransferReqID onto the re-added RG (#18148)")

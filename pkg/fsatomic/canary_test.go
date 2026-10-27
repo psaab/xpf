@@ -23,40 +23,21 @@ import (
 // on a DIFFERENT receiver type, or a plain func of the same name, will NOT
 // inherit `daemon::realHostTunableFS.writeFile`'s exemption.
 //
-// Every non-pkg/daemon, non-pkg/api site below was verified (#1916 §2.C/§2.D)
-// to be a procfs/sysfs/bind-mount knob — none is DurableState or
-// AtomicGeneratedConfig. The pkg/daemon procfs writers were extracted into
-// the three single-purpose helpers (setRethIPv6Knobs, setVLANSubAddrGenMode,
-// setFibMultipathHashPolicy) so the giant applyConfigLocked / applyFRRConfig
-// functions are NOT allowlisted — a future durable write added there is still
-// caught.
+// #17068: pkg/daemon knob writers no longer appear here at all — they go
+// through fsatomic.WriteKernelKnob / KernelKnobs (kernel_knob.go), whose
+// realKnobFS.WriteFile is the single allowlisted daemon-knob write. The
+// only daemon entry left is the resolv.conf bind-mount fallback.
 var allowedFunctions = map[string]string{
-	// pkg/daemon — sysctl / procfs knobs.
-	"daemon::Daemon.applyKernelTuning":     "procfs sysctls (rp_filter etc.)",
-	"daemon::CloseKernelTransitForCleanup": "procfs transit closure before standalone cleanup (#9725)",
-	"daemon::applyHostForwardingPosture":   "procfs host forwarding posture (#9725)",
-	"daemon::writeTransitForwardSysctls":   "procfs transit-forwarding knobs (#5275 arm gate)",
-	"daemon::realHostTunableFS.writeFile":  "sysfs governor/neigh knob writer",
 	// pkg/daemon — DNS bind-mount fallback (rename onto a bind mount is
-	// EXDEV/EBUSY; in-place write is the only option).
+	// EXDEV/EBUSY; in-place write is the only option). This is the ONLY
+	// remaining direct os.WriteFile in pkg/daemon (#17068): every
+	// BestEffortKernelKnob writer now goes through
+	// fsatomic.WriteKernelKnob / KernelKnobs.
 	"daemon::writeResolvConfBindMountFallback": "resolv.conf bind-mount in-place fallback",
-	// pkg/daemon — procfs knobs extracted from the giant apply functions
-	// (#1916 §2.D) so the big functions are never allowlisted.
-	"daemon::setRethIPv6Knobs":          "procfs accept_dad / addr_gen_mode",
-	"daemon::setVLANSubAddrGenMode":     "procfs addr_gen_mode (VLAN sub-iface)",
-	"daemon::setFibMultipathHashPolicy": "procfs fib_multipath_hash_policy",
-	// #16723 classification: icmpv6 ratelimit restore and the redirect
-	// sysctl writer are the same BestEffortKernelKnob class — sysctl
-	// files where rename(2) is impossible by construction.
-	"daemon::reconcileICMPv6Ratelimit": "sysctl icmpv6 ratelimit restore knob",
-	"daemon::writeRedirectKnobs":       "sysctl send_redirects knobs",
-	// #16723: restore counterpart of writeRedirectKnobs — writes back the
-	// captured per-path values (ipv4 accept_redirects capped at
-	// !ip_forward) to the same /proc/sys/net/ipv4|ipv6/conf/*/send_redirects
-	// and accept_redirects procfs knobs. Same BestEffortKernelKnob class:
-	// a procfs knob cannot be replaced by rename(2), so the fsatomic
-	// durable/atomic writers cannot be used here.
-	"daemon::restoreRedirectKnobs": "sysctl send_redirects/accept_redirects restore knobs (procfs, rename impossible)",
+	// pkg/fsatomic — the BestEffortKernelKnob writer itself (#17068):
+	// procfs/sysfs has no rename, so the primitive holds the direct
+	// write that every daemon knob owner now shares.
+	"fsatomic::realKnobFS.WriteFile": "procfs/sysfs kernel-knob writer (#17068 lifecycle primitive)",
 	// pkg/dataplane — RPS/RFS/XPS + accept_ra sysfs/procfs knobs.
 	"dataplane::CompileResult.tuneInterfaceBuffers": "sysfs RPS/RFS/XPS knobs",
 	"dataplane::ensureVLANSubInterface":             "procfs accept_ra knob",

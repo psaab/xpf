@@ -13,9 +13,10 @@
 # So the list can only shrink. Removing an entry means either the plan was
 # merged or the citation was corrected — both are progress.
 #
-# Generated-history files (docs/issues/*-history.md) and _Log.md are excluded
-# from the sweep: they quote what a PR body or log entry once said, and are
-# regenerated wholesale, so a repair there would be reverted.
+# Historical-archive files (scripts/historical-paths.txt: _Log.md,
+# docs/log/*, docs/issues/*-history*.md) are excluded from the sweep:
+# they quote what a PR body or log entry once said, and the history files
+# are regenerated wholesale, so a repair there would be reverted (#17115).
 #
 # Format: one path per line. Comments start with #.
 
@@ -146,46 +147,14 @@ docs/research/6749-armed-state/plan.md
 # Verified: none of the 11 exists on disk or is tracked on HEAD; `git log
 # --all` finds path history only for 9506 (research/9506-xfrm-capture) and
 # 9821 (tag 9821-pre-scrub), neither on the master line. docs/log/9814.md
-# cites five only by quoting this gate's failure output verbatim; that quote is
-# a historical record, so it stays and the paths are grandfathered rather than
-# unquoted.
+# cites five only by quoting this gate's failure output verbatim; that quote
+# is a historical record, so it stays. Since #17115 (docs/log/* is a
+# historical archive in the shared scripts/historical-paths.txt) this gate
+# no longer sweeps docs/log/ at all, so the rows cited only from docs/log/
+# (9506, 9604, 9637, 9644, 9821, 9824, 9903, 9905, 9916, 9956 and the
+# #14649 z14649 sentinel) are removed — the uncited arm would force it.
+# 9587 stays: docs/wireguard-interop.md (not an archive) also cites it.
 #
-# cited by: docs/log/9506.md
-# Exists on research/9506-xfrm-capture, not on the master line.
-docs/pr/9506-xfrm-capture/plan.md
 # cited by: docs/log/9814.md, docs/wireguard-interop.md
 # Never committed on any ref; #9587 itself landed, but the plan did not.
 docs/pr/9587/plan.md
-# cited by: docs/log/9604.md, docs/log/9814.md
-# Never committed on any ref; the log marks it (uncommitted) at every round.
-docs/pr/9604/plan.md
-# cited by: docs/log/9637.md, docs/log/9814.md
-# Worktree-only follow-up note; its design was filed as #10069 instead.
-docs/pr/9637/followups/mtu-delegated-retry-reporting.md
-# cited by: docs/log/9644.md
-# Never committed on any ref; the log marks it "uncommitted worktree file, audit-only" and "never to merge".
-docs/pr/9644/plan.md
-# cited by: docs/log/9814.md, docs/log/9821.md
-# Plan checkpoint lives only on tag 9821-pre-scrub, not master.
-docs/pr/9821/plan.md
-# cited by: docs/log/9814.md, docs/log/9824.md
-# Never committed on any ref; the log marks it (uncommitted) at every round.
-docs/pr/9824/plan.md
-# cited by: docs/log/9903.md
-# Never committed on any ref; the log marks it (untracked).
-docs/pr/9903/brief.md
-# cited by: docs/log/9905.md
-# Never committed on any ref; gitignored worktree file, never added.
-docs/pr/9905-delta-hotpath/plan.md
-# cited by: docs/log/9916.md
-# Never committed on any ref; the log marks it (untracked, not shipped).
-docs/pr/9916/brief.md
-# cited by: docs/log/9956.md
-# Never committed on any ref; gitignored worktree file.
-docs/pr/9956-session-scope/plan.md
-# #14649 test sentinel — the docsref RED proof deliberately cited this
-# nonexistent plan in docs/log/14649.md; logs 16466 and 16763 record that
-# fixture as an unrelated pre-existing citation. This synthetic plan was
-# never a real proposal and will not land.
-# cited by: docs/log/14649.md, docs/log/16466.md, docs/log/16763.md
-docs/research/z14649-nonexistent-plan.md
