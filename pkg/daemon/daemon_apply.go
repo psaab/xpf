@@ -6,34 +6,40 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 // setRethIPv6Knobs writes the per-interface IPv6 procfs knobs for a RETH
 // member: disable DAD (the virtual MAC may still collide with the peer on
 // some deployments) and suppress kernel-generated link-locals (which else
 // trigger continuous MLDv2 reports on the L2 segment; VIPs are managed
-// explicitly). These are BestEffortKernelKnob procfs writes — a rename(2)
-// is impossible on procfs, so they stay direct os.WriteFile. Extracted from
-// applyConfigLocked (#1916 §2.D) so the giant apply function is never
-// allowlisted in the fsatomic canary; this single-purpose helper is.
+// explicitly). BestEffortKernelKnob writes go through
+// fsatomic.WriteKernelKnob (#17068): read-compare-write with the error
+// surfaced as a warning instead of silently discarded. Deliberately
+// daemon-lifetime posture (no registry capture): the interface is
+// daemon-created and its knobs are re-asserted on every apply.
 func setRethIPv6Knobs(iface string) {
 	dadPath := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/accept_dad", iface)
-	os.WriteFile(dadPath, []byte("0"), 0644)
+	if _, err := fsatomic.WriteKernelKnob(dadPath, "0"); err != nil {
+		slog.Warn("failed to set accept_dad", "path", dadPath, "err", err)
+	}
 	addrGenPath := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/addr_gen_mode", iface)
-	os.WriteFile(addrGenPath, []byte("1"), 0644)
+	if _, err := fsatomic.WriteKernelKnob(addrGenPath, "1"); err != nil {
+		slog.Warn("failed to set addr_gen_mode", "path", addrGenPath, "err", err)
+	}
 }
 
 // setVLANSubAddrGenMode suppresses kernel-generated link-locals on a VLAN
-// sub-interface (addr_gen_mode=1). BestEffortKernelKnob procfs write,
-// extracted from applyConfigLocked (#1916 §2.D) so it can be allowlisted
-// without exempting the whole apply function.
+// sub-interface (addr_gen_mode=1). Same #17068 treatment as
+// setRethIPv6Knobs.
 func setVLANSubAddrGenMode(iface string) {
 	subAddrGen := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/addr_gen_mode", iface)
-	os.WriteFile(subAddrGen, []byte("1"), 0644)
+	if _, err := fsatomic.WriteKernelKnob(subAddrGen, "1"); err != nil {
+		slog.Warn("failed to set addr_gen_mode", "path", subAddrGen, "err", err)
+	}
 }
 
 // stampActiveAppliedIfConvergedUnderSem stamps the CURRENT active config

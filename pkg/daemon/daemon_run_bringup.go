@@ -18,6 +18,7 @@ import (
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 	"github.com/psaab/xpf/pkg/frr"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/ipsec"
 	"github.com/psaab/xpf/pkg/networkd"
@@ -889,9 +890,17 @@ var hostForwardingPostureSysctls = map[string]string{
 	"/proc/sys/net/ipv4/conf/all/accept_local": "1",
 }
 
+// applyHostForwardingPosture asserts the daemon-lifetime host posture.
+// It deliberately does NOT register these knobs with the #17068
+// lifecycle registry: the posture is not tied to a config stanza whose
+// removal should restore a prior (it is re-asserted at boot/naming and
+// nf_conntrack_tcp_loose is separately re-asserted+verified by
+// reassertTCPloosePosture, the knob's single lifecycle owner). Writes
+// still go through fsatomic.WriteKernelKnob so the error policy and
+// read-compare are the shared ones, not a fifth hand-rolled convention.
 func applyHostForwardingPosture() {
 	for path, val := range hostForwardingPostureSysctls {
-		if err := os.WriteFile(path, []byte(val), 0644); err != nil {
+		if _, err := fsatomic.WriteKernelKnob(path, val); err != nil {
 			slog.Warn("failed to set sysctl", "path", path, "err", err)
 		}
 	}

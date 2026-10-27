@@ -42,11 +42,11 @@ import (
 	"fmt"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/frr"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/vishvananda/netlink"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 )
@@ -405,30 +405,34 @@ func (d *Daemon) applyFRRConfig(fc *frr.FullConfig) error {
 		}
 	}
 
-	// Set L4 ECMP hash when consistent-hash is configured. Independent of
-	// the reload outcome (an idempotent procfs knob); attempted even on a
-	// degraded/hard-failed reload so it is not stranded.
-	if fc.ConsistentHash {
-		setFibMultipathHashPolicy()
-	}
+	// Set L4 ECMP hash when consistent-hash is configured; restore the
+	// captured prior when it is removed (#17068 — previously assert-only,
+	// so deleting load-balance consistent-hash left L4 hashing on until
+	// reboot). Independent of the reload outcome (an idempotent procfs
+	// knob); attempted even on a degraded/hard-failed reload so it is
+	// not stranded.
+	d.reconcileFibMultipathHashPolicy(fc.ConsistentHash)
 	return err
 }
 
-// setFibMultipathHashPolicy enables L4 (5-tuple) ECMP hashing by writing
-// net.ipv4.fib_multipath_hash_policy=1 when it is not already set.
-// BestEffortKernelKnob procfs write — rename(2) is impossible on procfs, so
-// it stays a direct os.WriteFile. Extracted from applyFRRConfig (#1916
-// §2.D) so the enclosing function is never allowlisted in the fsatomic
-// canary; this single-purpose helper is.
-func setFibMultipathHashPolicy() {
-	path := "/proc/sys/net/ipv4/fib_multipath_hash_policy"
-	current, _ := os.ReadFile(path)
-	if strings.TrimSpace(string(current)) != "1" {
-		if err := os.WriteFile(path, []byte("1\n"), 0644); err != nil {
+// fibMultipathHashPolicyPath is overridable in tests.
+var fibMultipathHashPolicyPath = "/proc/sys/net/ipv4/fib_multipath_hash_policy"
+
+// reconcileFibMultipathHashPolicy asserts fib_multipath_hash_policy=1
+// while consistent-hash is configured and releases it (restoring the
+// value captured on first assert) when it is not. Best-effort: failures
+// are warned, never fatal to the FRR apply.
+func (d *Daemon) reconcileFibMultipathHashPolicy(enabled bool) {
+	if enabled {
+		if err := d.knobs().Assert(fibMultipathHashPolicyPath, "1", knobOwnerFib, fsatomic.RestorePrior); err != nil {
 			slog.Warn("failed to set fib_multipath_hash_policy", "err", err)
 		} else {
 			slog.Info("enabled L4 ECMP hashing (consistent-hash)")
 		}
+		return
+	}
+	for _, path := range d.knobs().Release(knobOwnerFib) {
+		slog.Warn("failed to restore fib_multipath_hash_policy; will retry on next apply", "path", path)
 	}
 }
 
