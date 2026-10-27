@@ -103,7 +103,7 @@ type templateField struct {
 // #3270: IncludeFlowDir toggles fieldDirection (IE 61) in the v9 template
 // again. Unlike the pre-#2613 version (which exported a synthetic zero), the
 // field now carries a REAL per-flow value derived in Go from the per-zone
-// sampling-direction (ExportConfig.FlowDirection): a flow whose ingress zone
+// sampling-direction (ExportConfig.FlowDirectionIface): a flow whose ingress zone
 // has `sampling input` is ingress (0), a flow selected only by its egress
 // zone's `sampling output` is egress (1). It is opt-in: only a template that
 // configured `export-extension flow-dir` advertises IE 61, so a config that
