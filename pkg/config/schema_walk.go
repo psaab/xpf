@@ -215,12 +215,22 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// other packed token, or any other child, re-enters the
 	// ordinary typed-leaf validation below (scalar TTL range,
 	// packed `ttl` modifier, unknown-modifier rejection).
+	// #17833: on the `multihop ttl` arm (len(Keys)==2) the value child
+	// is REQUIRED: `multihop ttl` with no keyed child is a missing
+	// value (the bare presence form is `multihop;`), so it falls
+	// through to the typed-leaf branch, which refuses it as `modifier
+	// "ttl" requires a value` instead of the old silent accept that
+	// the extractor then defaulted to TTL 64.
 	if keyword == "multihop" && exactMatch && (len(node.Keys) == 1 || (len(node.Keys) == 2 && node.Keys[1] == "ttl")) {
 		onlyModifierChildren := true
+		hasValueChild := false
 		for _, c := range node.Children {
 			if len(node.Keys) == 2 {
 				// Value child of the flat-set ttl shape — not a
 				// modifier child to judge here.
+				if c != nil && len(c.Keys) > 0 {
+					hasValueChild = true
+				}
 				continue
 			}
 			if c == nil || len(c.Keys) == 0 || (c.Keys[0] != "ttl" && c.Keys[0] != "no-nexthop-change") {
@@ -228,7 +238,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 				break
 			}
 		}
-		if onlyModifierChildren {
+		if onlyModifierChildren && (len(node.Keys) == 1 || hasValueChild) {
 			return nil
 		}
 	}

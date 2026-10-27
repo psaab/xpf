@@ -119,33 +119,48 @@ func validateBGPMultihop16679(node *Node, _ *schemaNode) error {
 	if node == nil {
 		return nil
 	}
-	// Packed tokens: `multihop no-nexthop-change`,
-	// `multihop 2 no-nexthop-change`, `multihop ttl 2 no-nexthop-change`.
-	for _, tok := range node.Keys[1:] {
-		if tok == "no-nexthop-change" {
-			return fmt.Errorf("%s", bgpMultihopRefusal16679())
-		}
+	// #17833: `no-nexthop-change` refuses BY NAME in every spelling —
+	// packed token on the node (`multihop no-nexthop-change`,
+	// `multihop 2 no-nexthop-change`, `multihop ttl 2
+	// no-nexthop-change`), blocked child (`multihop { ttl 2;
+	// no-nexthop-change; }`), fused onto the blocked ttl statement
+	// (`multihop { ttl 2 no-nexthop-change; }`, flag at child
+	// Keys[2]) or onto the flat-set value child (`multihop ttl 2
+	// no-nexthop-change`). The old first-position-only scans missed
+	// every non-initial position and strict-committed the fused
+	// spellings clean while still compiling their TTL.
+	if bgpMultihopHasNoNexthopChange16679(node) {
+		return fmt.Errorf("%s", bgpMultihopRefusal16679())
 	}
 	// Flat-set packed shape: `multihop ttl` with the TTL as the sole
-	// CHILD token (child Keys=["256"], or ["0","passive"] fused).
+	// CHILD token (child Keys=["256"], or ["3","passive"] fused).
 	// The child is a value, not a `ttl` child node, so the loop below
-	// never sees it; range-check its first token here.
-	if len(node.Keys) == 2 && node.Keys[1] == "ttl" && len(node.Children) > 0 {
-		if c := node.Children[0]; c != nil && len(c.Keys) > 0 {
-			if err := ValidateInteger(1, 255)(c.Keys[0]); err != nil {
-				return fmt.Errorf("multihop ttl: invalid value %q: %v (#16679)", c.Keys[0], err)
-			}
+	// never sees it; range-check its first token here. #17833: with
+	// no keyed child there is no TTL at all — a MISSING value, not
+	// the bare presence form (`multihop;`) that defaults to 64.
+	if len(node.Keys) == 2 && node.Keys[1] == "ttl" {
+		v := firstKeyedChildToken17833(node)
+		if v == "" {
+			return fmt.Errorf("multihop ttl: missing value — `multihop ttl <1..255>` requires a TTL, or author bare `multihop;` for the Junos default 64 (#16679)")
+		}
+		if err := ValidateInteger(1, 255)(v); err != nil {
+			return fmt.Errorf("multihop ttl: invalid value %q: %v (#16679)", v, err)
 		}
 	}
-	// Blocked / flat-set children: `multihop { no-nexthop-change; }`,
-	// `multihop { ttl 2; no-nexthop-change; }`, and the flat-set
-	// child shape (child Keys=["ttl"], value as grandchild or packed).
+	// Blocked / flat-set children: `multihop { ttl 2; }`, and the
+	// flat-set child shape (child Keys=["ttl"], value as grandchild
+	// or packed). `no-nexthop-change` was already refused above.
 	for _, c := range node.Children {
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
-		if c.Keys[0] == "no-nexthop-change" {
-			return fmt.Errorf("%s", bgpMultihopRefusal16679())
+		// #17833: on the blocked form every keyed child is a
+		// STATEMENT. One that is neither `ttl` nor the refused flag
+		// is an unknown statement: the old `continue` silently
+		// accepted `multihop { banana; }` and the extractor still
+		// invented the TTL-64 default for it.
+		if len(node.Keys) == 1 && c.Keys[0] != "ttl" && c.Keys[0] != "no-nexthop-change" {
+			return fmt.Errorf("multihop: unknown statement %q — modelled statements are `ttl <1..255>` and the refused `no-nexthop-change`; author bare `multihop;` for the Junos default 64 (#16679)", c.Keys[0])
 		}
 		if c.Keys[0] != "ttl" {
 			continue
@@ -193,16 +208,11 @@ func bgpMultihopTTLOf16679(node *Node) (ttl int, present bool) {
 		return 0, false
 	}
 	keys := node.Keys
-	// Refused spelling mixed into this node: not partially honoured.
-	for _, tok := range keys[1:] {
-		if tok == "no-nexthop-change" {
-			return 0, false
-		}
-	}
-	for _, c := range node.Children {
-		if c != nil && len(c.Keys) > 0 && c.Keys[0] == "no-nexthop-change" {
-			return 0, false
-		}
+	// Refused spelling mixed into this node — packed token, blocked
+	// child, fused onto a ttl statement or onto the flat-set value
+	// child, at ANY position (#17833): not partially honoured.
+	if bgpMultihopHasNoNexthopChange16679(node) {
+		return 0, false
 	}
 	// Packed scalar: `multihop 2` (hierarchical lexer / braced form).
 	// SetPath's flat-set grouping instead packs the Junos modifier
@@ -229,11 +239,27 @@ func bgpMultihopTTLOf16679(node *Node) (ttl int, present bool) {
 					return n, true
 				}
 			}
-			return bgpMultihopDefaultTTL16679, true
+			// #17833: `multihop ttl` with no usable value child is a
+			// MISSING value, not the bare presence form — no TTL is
+			// invented for it (strict commit refuses it; the tolerant
+			// path keeps the inherited TTL).
+			return 0, false
 		}
 		// A non-numeric, non-ttl first token is schema-rejected garbage
 		// on the strict path; on the tolerant path it carries no TTL.
 		return 0, false
+	}
+	// #17833: a keyed blocked child that is neither `ttl` nor the
+	// (already returned) refused flag is an unknown statement — no
+	// part of the block is honoured on the tolerant path either
+	// (strict commit refuses it by name).
+	for _, c := range node.Children {
+		if c == nil || len(c.Keys) == 0 {
+			continue
+		}
+		if c.Keys[0] != "ttl" && c.Keys[0] != "no-nexthop-change" {
+			return 0, false
+		}
 	}
 	// Blocked children: `multihop { ttl 2; }` (child Keys=["ttl","2"]),
 	// the brace-elided child shape (child Keys=["ttl"], grandchild
@@ -253,36 +279,55 @@ func bgpMultihopTTLOf16679(node *Node) (ttl int, present bool) {
 					return n, true
 				}
 			}
-			return bgpMultihopDefaultTTL16679, true
+			// #17833: `multihop { ttl; }` carries no TTL — no default
+			// invented (strict commit refuses the missing value).
+			return 0, false
 		}
 	}
 	// Bare presence form.
 	return bgpMultihopDefaultTTL16679, true
 }
 
-// bgpGroupMultihop16679 resolves one group-level `multihop` child node
-// to the group TTL it sets, keeping `prior` when the node carries the
-// refused `no-nexthop-change` spelling (present=false from the
-// extractor). It first normalises the flat-set child shape — SetPath
+// bgpMultihopChildTTL16679 resolves one authored `multihop` child node
+// (bgp-, group- or neighbor-level) to the TTL it sets, keeping `prior`
+// when the node carries a spelling the extractor refuses or cannot read
+// (present=false). It first normalises the flat-set child shape — SetPath
 // groups `... group G multihop ttl 2` as multihop -> `ttl` -> `2`,
 // where `ttl` is a CHILD of the multihop node rather than a packed
 // key — into the packed form the extractor reads, without mutating
 // the authored node.
-func bgpGroupMultihop16679(child *Node, prior int) int {
+//
+// #17833: the normalisation REPLACES the authored node with a
+// synthesised `multihop ttl <v>` that has no children, so it must not
+// run when a sibling statement would be discarded by the replacement.
+// `multihop { ttl 2; no-nexthop-change; }` used to normalise into
+// `multihop ttl 2` here, dropping the refused sibling BEFORE the
+// extractor's refusal check — the tolerant compile then applied the
+// TTL of a statement its own warning said was dropped. Normalise only
+// when every keyed child is a `ttl` statement; anything else (the
+// refused flag, an unknown statement) reaches the extractor as
+// authored, and its own scans return present=false.
+func bgpMultihopChildTTL16679(child *Node, prior int) int {
 	node := child
-	if len(child.Keys) == 1 {
+	if len(child.Keys) == 1 && !bgpMultihopHasNoNexthopChange16679(child) {
+		onlyTTLChildren := len(child.Children) > 0
 		for _, c := range child.Children {
 			if c == nil || len(c.Keys) == 0 || c.Keys[0] != "ttl" {
-				continue
+				onlyTTLChildren = false
+				break
 			}
-			v := nodeVal(c)
-			if v == "" && len(c.Keys) >= 2 {
-				v = c.Keys[1]
+		}
+		if onlyTTLChildren {
+			for _, c := range child.Children {
+				v := nodeVal(c)
+				if v == "" && len(c.Keys) >= 2 {
+					v = c.Keys[1]
+				}
+				if v != "" {
+					node = &Node{Keys: []string{"multihop", "ttl", v}}
+				}
+				break
 			}
-			if v != "" {
-				node = &Node{Keys: []string{"multihop", "ttl", v}}
-			}
-			break
 		}
 	}
 	if ttl, ok := bgpMultihopTTLOf16679(node); ok {
@@ -293,10 +338,16 @@ func bgpGroupMultihop16679(child *Node, prior int) int {
 
 // bgpMultihopNoNexthopChange16679 reports whether an authored
 // `multihop` statement anywhere in the tree carries the refused
-// `no-nexthop-change` modifier, in any spelling (packed token on the
-// multihop node, blocked child, or flat-set child). Used by the
-// tolerant-path warning; the strict path refuses via the schema
-// nodeValidator instead.
+// `no-nexthop-change` modifier, in any spelling. Used by the strict
+// validator and the tolerant-path extractor/warning alike.
+//
+// #17833: the scan reads EVERY token position, not just the first —
+// the parser fuses trailing statements (`multihop { ttl 2
+// no-nexthop-change; }` puts the flag at child Keys[2]; a flat-set
+// `multihop ttl 2 no-nexthop-change` puts it on the value child's
+// Keys[1]; a brace-elided value can carry it on a grandchild), and
+// the old Keys[0]-only scan strict-committed every one of those
+// clean while compiling the TTL.
 func bgpMultihopHasNoNexthopChange16679(node *Node) bool {
 	if node == nil || len(node.Keys) == 0 || node.Keys[0] != "multihop" {
 		return false
@@ -307,11 +358,40 @@ func bgpMultihopHasNoNexthopChange16679(node *Node) bool {
 		}
 	}
 	for _, c := range node.Children {
-		if c != nil && len(c.Keys) > 0 && c.Keys[0] == "no-nexthop-change" {
-			return true
+		if c == nil {
+			continue
+		}
+		for _, tok := range c.Keys {
+			if tok == "no-nexthop-change" {
+				return true
+			}
+		}
+		for _, gc := range c.Children {
+			if gc == nil {
+				continue
+			}
+			for _, tok := range gc.Keys {
+				if tok == "no-nexthop-change" {
+					return true
+				}
+			}
 		}
 	}
 	return false
+}
+
+// firstKeyedChildToken17833 returns the first token of the first
+// child carrying keys, or "" when the node has no keyed child — the
+// flat-set `multihop ttl` value-child probe shared by the validator
+// (missing-value refusal) and the extractor (no default TTL without
+// a value).
+func firstKeyedChildToken17833(node *Node) string {
+	for _, c := range node.Children {
+		if c != nil && len(c.Keys) > 0 {
+			return c.Keys[0]
+		}
+	}
+	return ""
 }
 
 // warnBGPMultihop16679 returns a specific warning for each authored
