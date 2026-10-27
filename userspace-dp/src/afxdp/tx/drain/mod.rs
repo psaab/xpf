@@ -105,9 +105,9 @@ pub(in crate::afxdp) fn drain_pending_tx(
     drain_phase_maybe_rekick(binding, &ctx);
     drain_phase_ingest_cos(binding, &ctx, shared_recycles);
     drain_phase_drain_cos(binding, &ctx, shared_recycles, &mut did_work);
-    // The single `update_binding_debug_state` call site for this
-    // drain: every path that reaches the backup phase passes through
-    // it exactly once — here on an early `Return`, or in
+    // `update_binding_debug_state` executes exactly once per drain
+    // invocation that reaches the backup phase, via one of two
+    // textual call sites: here on an early `Return`, or in
     // `drain_phase_finish` on fall-through. (The pre-backup
     // `!binding_has_pending_tx_work` bail above returns before any
     // phase runs and never had a debug-state call.) The call only
@@ -115,7 +115,7 @@ pub(in crate::afxdp) fn drain_pending_tx(
     // actually publish; see `debug_state.rs`), so collapsing the
     // former yes/no-update early-return split — and the prepared
     // `TxError::Retry` path that formerly skipped it — into this
-    // one call site does not change observable behaviour; at most
+    // single execution does not change observable behaviour; at most
     // the cadence counter ticks once extra on those paths.
     match drain_phase_drain_local_backup(binding, &ctx, shared_recycles, &mut did_work) {
         BackupOutcome::Continue => {}

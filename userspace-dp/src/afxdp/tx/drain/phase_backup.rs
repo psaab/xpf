@@ -10,9 +10,10 @@
 // unconditionally) can short-circuit the local-side drain.
 // `backup_drain_local` returns `BackupOutcome` directly; both of
 // its empty-pending early returns collapse to `Return(..)` carrying
-// the already-folded result, and the single
-// `update_binding_debug_state` call is owned by the orchestrator,
-// which invokes `drain_phase_finish` on the fall-through path.
+// the already-folded result, and the one-per-drain
+// `update_binding_debug_state` execution is owned by the
+// orchestrator (directly, or via `drain_phase_finish` on the
+// fall-through path).
 
 use super::super::*;
 use super::DrainCtx;
@@ -23,8 +24,9 @@ use super::{
 
 /// Outcome of the backup phase. Two variants only: either fall
 /// through to phase 6 (`drain_phase_finish`), or return the
-/// enclosed result immediately. The orchestrator owns the single
-/// `update_binding_debug_state` call site (in this branch or in
+/// enclosed result immediately. The orchestrator owns the
+/// one-per-drain `update_binding_debug_state` execution (at one of
+/// two textual call sites: in this branch or in
 /// `drain_phase_finish`); every path reaching this phase passes
 /// through it exactly once. The enclosed result is `true`
 /// unconditionally for the prepared-side `TxError::Retry`

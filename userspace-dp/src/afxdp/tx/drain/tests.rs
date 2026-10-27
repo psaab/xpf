@@ -428,14 +428,25 @@ fn drain_phase_names_and_anchors_stay_current_17166() {
             );
         }
     }
-    // BackupOutcome collapsed to exactly {Continue, Return(bool)}.
+    // BackupOutcome collapsed to exactly {Continue, Return(bool)}:
+    // reject any third variant, payload change, or rename.
     let backup = include_str!("phase_backup.rs");
     let enum_start = backup
         .find("pub(super) enum BackupOutcome")
         .expect("BackupOutcome enum present");
     let enum_body = &backup[enum_start..backup[enum_start..].find('}').map(|i| enum_start + i).expect("enum closes")];
-    assert!(enum_body.contains("Continue"), "Continue variant retained");
-    assert!(enum_body.contains("Return(bool)"), "Return(bool) variant retained");
+    let variants: Vec<&str> = enum_body
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && !line.starts_with("//") && !line.contains("enum BackupOutcome")
+        })
+        .collect();
+    assert_eq!(
+        variants,
+        ["Continue,", "Return(bool),"],
+        "BackupOutcome must have exactly the Continue and Return(bool) variants (#17166)"
+    );
     // Callers repointed directly at drain_pending_tx.
     for (name, src) in [
         ("dispatch/mod.rs", include_str!("../dispatch/mod.rs")),
