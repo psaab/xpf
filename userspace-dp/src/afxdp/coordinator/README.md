@@ -46,7 +46,7 @@ retained), stale prune, spawn with backoff — reconciled at bring-up
 AND on every armed `refresh_runtime_snapshot` (tunnel interfaces are
 excluded from the binding plan, so tunnel-only commits never reach a
 full reconcile), plus a tombstone-only periodic liveness pass from
-`refresh_status` and a narrow prune on the defer-workers apply leg.
+`supervise_tunnels` and a narrow prune on the defer-workers apply leg.
 
 Differences that matter (#1881):
 
@@ -294,7 +294,7 @@ Differences that matter (#1881):
   the D11 IPsec-inner worker (#7092 / #6979 / #9367 / #15149).**
   `retire_worker_holders_where` walks every worker its predicate selects,
   under a one-shot `holders_retired` CAS, and is driven from the 1 Hz
-  `refresh_status` path. It reclaims the three NAT allocator families for
+  `supervise_tunnels` path. It reclaims the three NAT allocator families for
   every worker the predicate selects and — since #9367 — calls
   `vacate_worker_v_min_slots` for those whose `atomics.dead` is set, releasing
   the worker's slot in every `cos.queue_vtime_floors` entry. Since #15149 the
@@ -577,7 +577,7 @@ Differences that matter (#1881):
     `BindingSetupFailure`s IMMEDIATELY AFTER calling `stop_inner`: that ordering
     IS the fix, and inverting it is one of the mutations the cells kill.
   - The restore is in `refresh_bindings`, not in a one-shot write into
-    `bindings`, because `refresh_status` runs the refresh on EVERY control
+    `bindings`, because `project_status` runs the refresh on EVERY control
     response — a cause restored once is erased within one status poll, well
     inside the Go predicate's 5s dwell.
   - It can never mark a HEALTHY slot: the map is consulted only on the branch

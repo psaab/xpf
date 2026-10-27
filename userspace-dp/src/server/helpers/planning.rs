@@ -15,7 +15,7 @@
 // filter and the candidate loop rather than restated in each. Cold path
 // only (control responses), no per-packet work.
 
-use super::{lock_server_state_recover, refresh_status, should_run_afxdp};
+use super::{lock_server_state_recover, project_status, should_run_afxdp};
 use crate::protocol::{BindingStatus, ConfigSnapshot, InterfaceSnapshot, QueueStatus};
 use crate::server::ServerState;
 use chrono::Utc;
@@ -105,7 +105,7 @@ pub(crate) fn wait_for_binding_settle(state: &Arc<Mutex<ServerState>>, timeout: 
             if guard.quarantined_after_panic {
                 return;
             }
-            refresh_status(&mut guard);
+            project_status(&mut guard);
             if bindings_settled(&guard.status.bindings) || Instant::now() >= deadline {
                 return;
             }
@@ -1155,7 +1155,7 @@ pub(crate) fn replan_bindings_from_candidates(
                 // Without this, ANY binding-plan expansion — a zone gaining an
                 // interface, a fabric parent appearing, a queue-count change
                 // that widens the slot range — silently disables the WHOLE
-                // dataplane. `refresh_status` computes
+                // dataplane. `project_status` computes
                 // `status.enabled = forwarding_armed && ... &&
                 // bindings.iter().all(|b| b.registered && b.armed)`
                 // (helpers/status.rs), so one unarmed slot makes `enabled`

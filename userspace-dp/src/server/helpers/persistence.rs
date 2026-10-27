@@ -2,7 +2,7 @@
 // monolithic `server/helpers.rs`).
 //
 // `write_state` holds the `ServerState` lock ONLY long enough to
-// `refresh_status` and clone a minimal owned payload
+// `project_status` and clone a minimal owned payload
 // (`build_state_payload` → `OwnedStatePayload`); the fallible
 // serialize + fsync (`encode` + `StateWriter::persist`) run with the
 // guard dropped (#5469). The `OwnedStatePayload` type structure is the
@@ -10,7 +10,7 @@
 // reach the guard. Cold path (periodic + fallback delta poll), not the
 // worker loop. Bodies byte-for-byte identical to the pre-split source.
 
-use super::{lock_server_state_recover, refresh_status};
+use super::{lock_server_state_recover, project_status};
 use crate::protocol::{ConfigSnapshot, ProcessStatus};
 use crate::server::ServerState;
 use serde::Serialize;
@@ -55,7 +55,7 @@ impl OwnedStatePayload {
 /// caller must hold the lock to reach it, and it returns owned data the caller
 /// can persist after dropping the guard.
 fn build_state_payload(state: &mut ServerState) -> OwnedStatePayload {
-    refresh_status(state);
+    project_status(state);
     OwnedStatePayload {
         status: state.status.clone(),
         snapshot: state.snapshot.clone(),

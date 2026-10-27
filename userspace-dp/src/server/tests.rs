@@ -11,7 +11,7 @@
 use super::helpers::{
     bindings_settled, build_synced_session_entry, clear_pre_persist_lock_probe,
     forwarding_unsupported_error, parse_session_sync_mac, reconcile_status_bindings,
-    refresh_status, set_bindings_forwarding_armed, should_run_afxdp, take_pre_persist_lock_free,
+    project_status, set_bindings_forwarding_armed, should_run_afxdp, take_pre_persist_lock_free,
     write_state,
 };
 use super::{handle_stream, ServerState, SocketMode};
@@ -398,6 +398,53 @@ fn update_ha_state_populates_status_ha_groups() {
     // exact status-field-parity surface #1642 regressed in.
     assert_eq!(status.ha_groups.len(), 1, "expected one HA group");
     assert_eq!(status.ha_groups[0].rg_id, 1);
+}
+
+/// #17141: an unchanged, non-suppressed `update_ha_state` must publish the
+/// worker-visible delivery map at most once. Pre-split, the handler's
+/// `refresh_status` and the dispatcher's post-match `refresh_status` each
+/// ran both liveness reconciles, and the WG reconcile republished
+/// unconditionally twice — four rebuild-and-store cycles per request.
+/// With no tunnel entries the changed-set is empty, so the correct count
+/// is zero; `<= 1` leaves room for a legitimate single change publish.
+#[test]
+fn update_ha_state_publishes_delivery_map_at_most_once_17141() {
+    let state = new_state(ProcessStatus {
+        forwarding_armed: true,
+        capabilities: crate::UserspaceCapabilities {
+            forwarding_supported: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    state
+        .lock()
+        .expect("state")
+        .afxdp
+        .arm_delivery_publish_count_for_test();
+    let mut request = req("update_ha_state");
+    request.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }],
+    });
+    // Deliberately NOT suppress_status: the Go HA senders leave it unset
+    // on the control socket, which is the double-run shape.
+    let response = run_request(state.clone(), request);
+    assert!(response.ok, "unexpected error: {}", response.error);
+    let publishes = state
+        .lock()
+        .expect("state")
+        .afxdp
+        .delivery_publish_count_for_test();
+    assert!(
+        publishes <= 1,
+        "#17141: unchanged update_ha_state published the delivery map \
+         {publishes} times, want <= 1 (supervision must run once and the \
+         WG reconcile must publish only on change)"
+    );
 }
 
 /// #9629 acceptance: an `update_ha_state` refresh must LAND while another
@@ -5860,7 +5907,7 @@ fn synced_import_rejects_incomplete_packet_path_keys_and_counts_10720() {
             1,
             "{name}: incomplete-key refusal must be counted exactly once"
         );
-        refresh_status(&mut guard);
+        project_status(&mut guard);
         assert_eq!(
             guard.status.synced_import_incomplete_key,
             1,
@@ -9060,7 +9107,7 @@ fn refresh_status_projects_interface_snat_registry_counters_6751() {
     crate::nat::INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION.fetch_add(7, Ordering::Relaxed);
     crate::nat::INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS.fetch_add(11, Ordering::Relaxed);
 
-    refresh_status(&mut guard);
+    project_status(&mut guard);
 
     assert_eq!(
         guard.status.interface_snat_pat_collisions_total,
@@ -10718,7 +10765,7 @@ fn refresh_status_projects_the_delete_replica_counters_8586() {
     crate::afxdp::SESSION_DELETE_REPLICA_DROP_REPAIRED
         .fetch_add(5, Ordering::Relaxed);
 
-    refresh_status(&mut guard);
+    project_status(&mut guard);
 
     assert_eq!(
         guard.status.session_delete_replica_dropped,
@@ -10817,7 +10864,7 @@ fn refresh_status_projects_ipsec_inner_counters() {
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL
         .store(41, Ordering::Relaxed);
 
-    refresh_status(&mut guard);
+    project_status(&mut guard);
     // Restore process-global counters before assertions so a failed assertion
     // cannot poison later tests in this process.
     crate::afxdp::ipsec_inner::zone_gate_unzoned_total

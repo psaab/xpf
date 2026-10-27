@@ -41,6 +41,24 @@ pub(super) fn take_test_gre_unpublish_before_join_observed() -> bool {
     TEST_GRE_UNPUBLISH_BEFORE_JOIN_OBSERVED.swap(false, std::sync::atomic::Ordering::Acquire)
 }
 
+/// #17141 test-only publish counter: each
+/// `publish_local_tunnel_deliveries_excluding` store bumps this so a
+/// dispatcher cell can assert an unchanged `update_ha_state` republishes
+/// at most once. Re-arming resets it.
+#[cfg(test)]
+static TEST_DELIVERY_PUBLISH_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(super) fn arm_test_delivery_publish_count() {
+    TEST_DELIVERY_PUBLISH_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn test_delivery_publish_count() -> u64 {
+    TEST_DELIVERY_PUBLISH_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl super::Coordinator {
     /// #9549: how many WireGuard engines the current forwarding state holds. A
     /// server-level cell asserts this before trusting a "no WG thread was spawned"
@@ -48,6 +66,17 @@ impl super::Coordinator {
     #[cfg(test)]
     pub(crate) fn wg_engine_count_for_test(&self) -> usize {
         self.forwarding.wg_engines.len()
+    }
+
+    /// #17141: reset/read the test-only delivery-publish counter.
+    #[cfg(test)]
+    pub(crate) fn arm_delivery_publish_count_for_test(&self) {
+        arm_test_delivery_publish_count();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delivery_publish_count_for_test(&self) -> u64 {
+        test_delivery_publish_count()
     }
 
     /// #14131: whether endpoint `id` currently holds a LIVE WG control
@@ -318,6 +347,8 @@ impl super::Coordinator {
                 map.insert(entry.spawned_ifindex, delivery.clone());
             }
         }
+        #[cfg(test)]
+        TEST_DELIVERY_PUBLISH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.local_tunnel_deliveries.store(Arc::new(map));
     }
 
@@ -549,7 +580,7 @@ impl super::Coordinator {
     }
 
     /// #1881 (mirrors `reconcile_wg_control_liveness`): periodic
-    /// self-heal, called from the server's `refresh_status` ONLY while
+    /// self-heal, called from the server's `supervise_tunnels` ONLY while
     /// `should_run_afxdp` holds. TOMBSTONE-ONLY and SNAPSHOT-COHERENT:
     /// never creates entries; a tombstone respawns only past the
     /// backoff AND only when the latest STORED snapshot's row for the
@@ -770,7 +801,8 @@ impl super::Coordinator {
 
     /// #1866 pass 1: join threads that already exited and tombstone
     /// their entries (keep backoff stamp + identity; never remove).
-    fn sweep_finished_wg_control_threads(&mut self) {
+    /// Returns the number of entries tombstoned.
+    fn sweep_finished_wg_control_threads(&mut self) -> usize {
         let finished: Vec<u16> = self
             .wg_control_threads
             .iter()
@@ -782,6 +814,7 @@ impl super::Coordinator {
             })
             .map(|(id, _)| *id)
             .collect();
+        let swept = finished.len();
         for id in finished {
             if let Some(entry) = self.wg_control_threads.get_mut(&id) {
                 if let Some(mut handle) = entry.handle.take() {
@@ -797,6 +830,7 @@ impl super::Coordinator {
                 );
             }
         }
+        swept
     }
 
     /// #1889: bulk stop + join + REMOVE. Signals ALL the listed
@@ -976,7 +1010,8 @@ impl super::Coordinator {
         per_peer
     }
 
-    fn spawn_one_wg_control_thread(&mut self, id: u16) {
+    /// Returns true when a live control thread was started.
+    fn spawn_one_wg_control_thread(&mut self, id: u16) -> bool {
         let outer_mtu = self.resolve_wg_outer_mtu(id);
         // #5291: per-peer underlay MTU snapshot handed into the control
         // thread alongside the scalar fallback, so the TUN-origin egress
@@ -985,13 +1020,13 @@ impl super::Coordinator {
         // reachable; kept fresh by the #2921 restart-on-MTU-change gate.
         let per_peer_outer_mtu = self.resolve_wg_per_peer_outer_mtus(id);
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
-            return;
+            return false;
         };
         if endpoint.mode != "wireguard" {
-            return;
+            return false;
         }
         let Some(engine) = self.forwarding.wg_engines.get(&id).cloned() else {
-            return;
+            return false;
         };
         let engine_ptr = Arc::as_ptr(&engine) as usize;
         let Some(tunnel_name) = self
@@ -1000,7 +1035,7 @@ impl super::Coordinator {
             .get(&endpoint.logical_ifindex)
             .cloned()
         else {
-            return;
+            return false;
         };
         let spawned_ifindex = endpoint.logical_ifindex;
         let listen_port = endpoint.wg_listen_port;
@@ -1096,7 +1131,7 @@ impl super::Coordinator {
                         resolver_telemetry: Some(resolver_telemetry),
                     },
                 );
-                return;
+                return false;
             }
         };
         let delivery = LocalTunnelDelivery {
@@ -1160,6 +1195,7 @@ impl super::Coordinator {
                 None
             }
         };
+        let started = handle.is_some();
         let delivery_tx = handle.as_ref().map(|_| delivery);
         self.wg_control_threads.insert(
             id,
@@ -1177,10 +1213,11 @@ impl super::Coordinator {
                 resolver_telemetry: Some(resolver_telemetry),
             },
         );
+        started
     }
 
     /// #1866 Change 2: periodic self-heal, called from the server's
-    /// `refresh_status` ONLY while `should_run_afxdp` holds. TOMBSTONE-
+    /// `supervise_tunnels` ONLY while `should_run_afxdp` holds. TOMBSTONE-
     /// ONLY and SNAPSHOT-COHERENT:
     ///
     ///   - never creates entries for ids absent from the map (entry
@@ -1192,37 +1229,40 @@ impl super::Coordinator {
     ///     identity-identical and attachment-identical to the forwarding
     ///     endpoint the spawn would use (a sweep must never start a
     ///     thread the latest accepted snapshot does not describe);
-    ///   - at most one spawn attempt per invocation.
+    ///   - at most one spawn attempt per invocation;
+    ///   - the delivery map is republished only when the sweep or a
+    ///     respawn changed the set (mirrors `reconcile_local_tunnel_liveness`).
     pub(crate) fn reconcile_wg_control_liveness(
         &mut self,
         latest_snapshot: Option<&crate::ConfigSnapshot>,
     ) {
-        self.sweep_finished_wg_control_threads();
-        self.publish_local_tunnel_deliveries_excluding(&[]);
-        let Some(snapshot) = latest_snapshot else {
-            return;
-        };
-        let now = monotonic_nanos();
-        let tombstones: Vec<u16> = self
-            .wg_control_threads
-            .iter()
-            .filter(|(_, entry)| entry.handle.is_none())
-            .map(|(id, _)| *id)
-            .collect();
-        for id in tombstones {
-            let Some(entry) = self.wg_control_threads.get(&id) else {
-                continue;
-            };
-            if now.saturating_sub(entry.last_spawn_attempt_ns) < WG_SPAWN_BACKOFF_NS {
-                continue;
+        let swept = self.sweep_finished_wg_control_threads();
+        let mut spawned = false;
+        if let Some(snapshot) = latest_snapshot {
+            let now = monotonic_nanos();
+            let tombstones: Vec<u16> = self
+                .wg_control_threads
+                .iter()
+                .filter(|(_, entry)| entry.handle.is_none())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in tombstones {
+                let Some(entry) = self.wg_control_threads.get(&id) else {
+                    continue;
+                };
+                if now.saturating_sub(entry.last_spawn_attempt_ns) < WG_SPAWN_BACKOFF_NS {
+                    continue;
+                }
+                if !self.wg_tombstone_respawn_coherent(id, snapshot) {
+                    continue;
+                }
+                spawned = self.spawn_one_wg_control_thread(id);
+                break; // ≤1 spawn attempt per invocation
             }
-            if !self.wg_tombstone_respawn_coherent(id, snapshot) {
-                continue;
-            }
-            self.spawn_one_wg_control_thread(id);
-            break; // ≤1 spawn attempt per invocation
         }
-        self.publish_local_tunnel_deliveries_excluding(&[]);
+        if swept > 0 || spawned {
+            self.publish_local_tunnel_deliveries_excluding(&[]);
+        }
     }
 
     /// #1866: whether a tombstone respawn for `id` is coherent — the

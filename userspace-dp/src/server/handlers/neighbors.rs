@@ -1,7 +1,7 @@
 // #1345: per-verb handler for update_neighbors. Body byte-identical to
 // handlers.rs lines 186-208.
 
-use super::super::helpers::refresh_status;
+use super::super::helpers::project_status;
 use super::super::ServerState;
 use crate::{afxdp, NeighborSnapshot};
 
@@ -46,7 +46,7 @@ pub(super) fn update(
     }
     // #6034/#10035: carry the replace-generation envelope. The helper fences
     // a stale / reordered replace (generation <= last applied) and returns
-    // false without touching the table; `refresh_status` still runs so the
+    // false without touching the table; `project_status` still runs so the
     // ACK (`ProcessStatus.manager_neighbor_generation`) reflects the current
     // applied generation. The additive outcome bit distinguishes an
     // exact-match fence from a successful apply: both have the same ACK
@@ -132,5 +132,5 @@ pub(super) fn update(
             }
         }
     }
-    refresh_status(guard);
+    project_status(guard);
 }

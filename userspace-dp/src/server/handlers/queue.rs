@@ -1,7 +1,7 @@
 // #1345: per-verb handler for set_queue_state. Body byte-identical to
 // handlers.rs lines 231-264.
 
-use super::super::helpers::{capture_binding_arm_state, finish_binding_reconcile, refresh_status};
+use super::super::helpers::{capture_binding_arm_state, finish_binding_reconcile, project_status};
 use super::super::ServerState;
 use chrono::Utc;
 use crate::{ControlResponse, QueueControlRequest};
@@ -65,7 +65,7 @@ pub(super) fn set(
             );
             return;
         }
-        refresh_status(guard);
+        project_status(guard);
         *persist_state = true;
     } else {
         response.ok = false;

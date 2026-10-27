@@ -1,7 +1,7 @@
 // #1345: per-verb handler for set_binding_state. Body byte-identical to
 // handlers.rs lines 265-291.
 
-use super::super::helpers::{capture_binding_arm_state, finish_binding_reconcile, refresh_status};
+use super::super::helpers::{capture_binding_arm_state, finish_binding_reconcile, project_status};
 use super::super::ServerState;
 use chrono::Utc;
 use crate::{BindingControlRequest, ControlResponse};
@@ -58,7 +58,7 @@ pub(super) fn set(
             );
             return;
         }
-        refresh_status(guard);
+        project_status(guard);
         *persist_state = true;
     } else {
         response.ok = false;

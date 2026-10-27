@@ -5,7 +5,7 @@
 // substitution described in docs/pr/1345-server-handlers-split/plan.md.
 
 use super::super::helpers::{
-    reconcile_status_bindings_with_policy_state, refresh_status, replan_queues,
+    reconcile_status_bindings_with_policy_state, project_status, replan_queues,
     same_plan_apply_needs_binding_reconcile, should_run_afxdp, snapshot_binding_plan_key,
 };
 use super::super::ServerState;
@@ -400,7 +400,7 @@ pub(super) fn apply(
             // ("a retry / forwarding toggle then reconciles last-good")
             // becomes true instead of performing a refresh-only no-op.
             // The coordinator workers themselves cannot be un-stopped —
-            // refresh_status still reports their real zero-worker state
+            // project_status still reports their real zero-worker state
             // on the very next status poll (refresh_bindings zeroes
             // workerless slots); what this restores is the CONTROL-PLANE
             // plan truth, which is exactly what the recovery predicate
@@ -530,7 +530,7 @@ pub(super) fn apply(
             }
             guard.snapshot = Some(snapshot);
         }
-        refresh_status(guard);
+        project_status(guard);
         *persist_state = true;
     } else {
         let defer_workers = snapshot.defer_workers;
@@ -678,7 +678,7 @@ pub(super) fn apply(
                 // reconciles last-good).
                 //
                 // #14959 (D26-03): the pre-#14959 form deliberately did NOT
-                // restore existing_bindings here ("refresh_status must report
+                // restore existing_bindings here ("project_status must report
                 // the REAL post-teardown per-binding state, not the
                 // pre-teardown workers that no longer exist"). That
                 // desynchronized guard.snapshot (rolled back to prior) from
@@ -695,7 +695,7 @@ pub(super) fn apply(
                 // PRIOR bindings + worker count with the rollback, so
                 // guard.snapshot and guard.status.bindings describe the SAME
                 // prior plan and the recovery predicate gates on a
-                // live-runnable binding set again. refresh_status still
+                // live-runnable binding set again. project_status still
                 // reports the real zero-worker state on the next status poll
                 // (refresh_bindings zeroes workerless slots); what this
                 // restores is the CONTROL-PLANE plan truth the recovery
@@ -751,7 +751,7 @@ pub(super) fn apply(
             );
             return;
         }
-        refresh_status(guard);
+        project_status(guard);
         // #9803: only a successful full apply clears the dirty plan marker.
         // Every refusal above restores the prior state and leaves it set so
         // the next valid apply cannot fall back to same-plan refresh.
@@ -822,7 +822,7 @@ pub(super) fn bump_fib(
         // contents.
         snap.content_digest.clear();
     }
-    refresh_status(guard);
+    project_status(guard);
     // #3767 M2: persist the accepted bump. Previously bump_fib mutated
     // guard.status.last_fib_generation and guard.snapshot.fib_generation in
     // RAM only (no persist_state), so a route-only overlay bump to gen N left
