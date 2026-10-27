@@ -14,8 +14,8 @@
 //! rules the second out.
 
 use super::allocator::{NatHolder, PoolAddressFamily, PortAllocator};
-use super::source::{PersistentNatPermit, SourceNatFlowKey};
-use std::net::Ipv4Addr;
+use super::source::{PersistentNatPermit, SourceNatFlowKey, allocate_nat64_pool_port};
+use std::net::{IpAddr, Ipv4Addr};
 
 const TCP: u8 = 6;
 const TIMEOUT_NS: u64 = 300 * 1_000_000_000;
@@ -131,4 +131,81 @@ fn an_early_config_shape_refusal_is_still_counted_declined_8447() {
         "a pre-locked-path refusal must still land in the decline counter"
     );
     assert_eq!(snap.persistent_admitted_total, 0);
+}
+
+/// #17046 acceptance: a NAT64 BIB mint via `allocate_nat64_pool_port`
+/// bumps `persistent_admitted_total` by exactly 1. Before the fix this
+/// mint routed through `allocate_translation_with_exclusions`, the one
+/// wrapper with no #8447 epilogue, so the counter stayed at 0. A
+/// declined NAT64 mint (empty pool) must count the other arm.
+#[test]
+fn nat64_bib_mint_counts_persistent_admitted_17046() {
+    let pool = ["203.0.113.1".parse::<Ipv4Addr>().unwrap()];
+    let alloc = PortAllocator::new(1, 1024, 2048);
+    let bib_flow = SourceNatFlowKey {
+        protocol: TCP,
+        src_ip: "2001:db8::1".parse::<IpAddr>().unwrap(),
+        dst_ip: "2001:db8::2".parse::<IpAddr>().unwrap(),
+        src_port: 5000,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    let (ip, _port) =
+        allocate_nat64_pool_port(&alloc, bib_flow, &pool, 1_000, NatHolder::Untracked)
+            .expect("NAT64 BIB mint must succeed on a fresh pool");
+    assert_eq!(ip, pool[0]);
+    let snap = alloc.snapshot();
+    assert_eq!(
+        snap.persistent_admitted_total, 1,
+        "a NAT64 BIB mint is a persistent admission and must count it"
+    );
+    assert_eq!(snap.persistent_declined_total, 0);
+    let empty: [Ipv4Addr; 0] = [];
+    let alloc2 = PortAllocator::new(1, 1024, 2048);
+    assert!(
+        allocate_nat64_pool_port(&alloc2, bib_flow, &empty, 1_000, NatHolder::Untracked).is_err()
+    );
+    let snap2 = alloc2.snapshot();
+    assert_eq!(snap2.persistent_admitted_total, 0);
+    assert_eq!(
+        snap2.persistent_declined_total, 1,
+        "a refused NAT64 BIB mint must count as declined, not vanish"
+    );
+}
+
+/// #17046 structural pin: the #8447 epilogue is single-sourced. The
+/// allocator source must contain exactly one admission-counter
+/// selection/bump site; a second copy-pasted epilogue (the pre-fix
+/// shape) fails this cell even if every behavioural cell still passes.
+#[test]
+fn persistent_admission_epilogue_is_single_sourced_17046() {
+    let src = include_str!("allocator/mod.rs");
+    let selections = src.matches("&self.shared.persistent_admitted_total").count();
+    assert_eq!(
+        selections, 1,
+        "exactly one counter-selection site may exist in allocator/mod.rs, got {selections}"
+    );
+    let epilogue = src
+        .split("if req.persistent.is_some()")
+        .nth(1)
+        .expect("the single allocate() epilogue must exist");
+    let epilogue = &epilogue[..epilogue.len().min(400)];
+    assert_eq!(
+        epilogue.matches("counter.fetch_add(1, Ordering::Relaxed)").count(),
+        1,
+        "the allocate() epilogue must bump exactly one selected counter"
+    );
+    assert_eq!(
+        src.matches("persistent_admitted_total").count(),
+        7,
+        "admitted counter may be named only at field/ctors/snapshot/epilogue sites"
+    );
+    assert!(
+        !src.contains("fn allocate_translation_with_zones"),
+        "the counted zones wrapper must not return as a second epilogue copy"
+    );
+    assert!(
+        !src.contains("fn allocate_translation_with_exclusions_and_zones"),
+        "the counted exclusions+zones wrapper must not return as a second epilogue copy"
+    );
 }
