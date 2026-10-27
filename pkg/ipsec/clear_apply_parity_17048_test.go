@@ -200,3 +200,178 @@ func sameStringSet17048(a, b []string) bool {
 	}
 	return true
 }
+
+// F1 regression (#17048 fold): pre-existing deferred-start debt must
+// survive a Clear whose reload probe is indeterminate. Parent Clear
+// ran rememberDeferredReinitiation(changed) (no-op on the empty clear
+// diff) and clearDeferredReinitiation(failed) only — it never ran
+// filterDeferredReinitiation, so a deferred eager tunnel seeded by an
+// earlier indeterminate/committed apply survived a delete and was
+// re-initiated when the identical config was re-applied. The shared
+// settleAfterReload indeterminate arm must preserve that: skip the
+// total filter for the clear shape (its changed set is always empty,
+// so filtering would wipe the whole pendingReinitiate set).
+func TestClearIndeterminatePreservesDeferredReinitiation17048(t *testing.T) {
+	m := NewWithConfigDir(t.TempDir())
+	ch := &partialCharon14589{loaded: map[string]bool{}}
+	ch.loadedFromDisk = func() map[string]bool {
+		data, rerr := os.ReadFile(m.configPath)
+		if rerr != nil {
+			return map[string]bool{}
+		}
+		return connNamesInFile14589(t, string(data))
+	}
+	m.swanctl = ch.run
+	cfg := vpnCfg("a", "b")
+	cfg.VPNs["a"].EstablishTunnels = "immediately"
+	cfg.VPNs["b"].EstablishTunnels = "immediately"
+	if err := m.Apply(cfg); err != nil {
+		t.Fatalf("FIXTURE gen1 apply: %v", err)
+	}
+	ch.loaded = map[string]bool{"a": true, "b": true}
+	// Seed deferred-start debt as an earlier indeterminate/committed
+	// apply would: "a" was changed, its SA torn down, re-initiation
+	// deferred until a candidate is proven.
+	m.rememberDeferredReinitiation([]string{"a"})
+	if got := m.pendingReinitiationNames(); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("FIXTURE seed: pendingReinitiate=%v want [a]", got)
+	}
+
+	// Clear with an indeterminate probe: charon answers live but
+	// matches neither the prior render nor the empty clear, and both
+	// SAs are live and terminate successfully.
+	var initiated []string
+	m.swanctl = func(args ...string) ([]byte, error) {
+		if len(args) == 0 {
+			return ch.run(args...)
+		}
+		switch args[0] {
+		case "--load-all":
+			return nil, errors.New("connecting to 'unix:///var/run/charon.vici' failed: No such file or directory")
+		case "--list-pools":
+			return []byte("get-pools reply {some-other-pool {base=192.0.2.9 size=1 online=0 offline=0}}\n"), nil
+		case "--list-conns":
+			return []byte("list-conn event {zzz {local_addrs=[10.9.9.9] remote_addrs=[10.8.8.8] children {zzz {}}}}\nlist-conns reply {}\n"), nil
+		case "--list-sas":
+			return []byte(liveSA("a", "b")), nil
+		case "--initiate":
+			if len(args) >= 3 {
+				initiated = append(initiated, args[2])
+			}
+			return nil, nil
+		}
+		return ch.run(args...)
+	}
+	if err := m.Clear(); err == nil {
+		t.Fatal("indeterminate Clear must return the reload error")
+	}
+	if got := m.pendingReinitiationNames(); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("Clear-indeterminate wiped deferred debt: pendingReinitiate=%v want [a] to survive", got)
+	}
+
+	// Re-add the identical config: hashes still match the retained
+	// prior baseline, so the diff is clean — only the surviving
+	// deferred debt can drive re-initiation of the eager tunnel.
+	m.swanctl = func(args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "--initiate" {
+			if len(args) >= 3 {
+				initiated = append(initiated, args[2])
+			}
+			return nil, nil
+		}
+		if len(args) > 0 && args[0] == "--list-sas" {
+			return nil, nil
+		}
+		return ch.run(args...)
+	}
+	ch.loaded = map[string]bool{"a": true, "b": true}
+	if err := m.Apply(cfg); err != nil {
+		t.Fatalf("re-add identical config: %v", err)
+	}
+	foundA := false
+	for _, n := range initiated {
+		if n == "a" {
+			foundA = true
+		}
+	}
+	if !foundA {
+		t.Fatalf("re-add must consider re-initiation of deferred eager tunnel a, initiated=%v", initiated)
+	}
+}
+
+// F2 (#17048 fold): a partial clear whose teardown fails must clear
+// deferred-start debt for the failed name (the deliberate unification:
+// a stale SA may still forward, so it must not be re-initiated) while
+// the terminate debt itself remains for retry on the next commit.
+// Drives both Clear() and ApplyGeneration(nil, ...) — the head code
+// clears deferred debt on the clear-partial arm for both entry points,
+// where parent ApplyGeneration left it to the next proven load.
+func TestPartialClearFailedTerminateClearsDeferred17048(t *testing.T) {
+	for _, entry := range []string{"clear", "apply"} {
+		t.Run(entry, func(t *testing.T) {
+			m := NewWithConfigDir(t.TempDir())
+			ch := &partialCharon14589{loaded: map[string]bool{}}
+			ch.loadedFromDisk = func() map[string]bool {
+				data, rerr := os.ReadFile(m.configPath)
+				if rerr != nil {
+					return map[string]bool{}
+				}
+				return connNamesInFile14589(t, string(data))
+			}
+			m.swanctl = ch.run
+			if err := m.Apply(vpnCfg("a", "b")); err != nil {
+				t.Fatalf("FIXTURE gen1 apply: %v", err)
+			}
+			ch.loaded = map[string]bool{"a": true, "b": true}
+			// Seed deferred debt for both names; the partial clear
+			// below promotes {} (charon unloaded all), so both are
+			// removals whose teardown is attempted.
+			m.rememberDeferredReinitiation([]string{"a", "b"})
+
+			m.swanctl = func(args ...string) ([]byte, error) {
+				if len(args) == 0 {
+					return ch.run(args...)
+				}
+				switch args[0] {
+				case "--load-all":
+					if _, serr := os.Stat(m.configPath); os.IsNotExist(serr) {
+						ch.loaded = map[string]bool{}
+						return []byte("loaded 0 of 1 connections, 1 failed to load, 1 unloaded\n"), errors.New("exit status 22")
+					}
+					return nil, nil
+				case "--list-sas":
+					return []byte(liveSA("a", "b")), nil
+				case "--terminate":
+					return nil, errors.New("terminate refused")
+				}
+				return ch.run(args...)
+			}
+			var err error
+			if entry == "clear" {
+				err = m.Clear()
+			} else {
+				err = m.ApplyGeneration(nil, UnknownGeneration, ApplyHooks{})
+			}
+			if err == nil {
+				t.Fatal("partial clear with failed terminate must return an error")
+			}
+			if got := m.pendingReinitiationNames(); len(got) != 0 {
+				t.Fatalf("partial-clear failed teardown must clear deferred debt, pendingReinitiate=%v want empty", got)
+			}
+			m.mu.Lock()
+			pendingTerm := []string{}
+			for n := range m.pendingTerminate {
+				pendingTerm = append(pendingTerm, n)
+			}
+			pendingChanged := []string{}
+			for n := range m.pendingChanged {
+				pendingChanged = append(pendingChanged, n)
+			}
+			m.mu.Unlock()
+			pendingTerm = sortedNames17048(pendingTerm)
+			if len(pendingTerm) != 2 {
+				t.Fatalf("terminate debt must remain after partial-clear failed teardown, pendingTerminate=%v want [a b] (pendingChanged=%v)", pendingTerm, pendingChanged)
+			}
+		})
+	}
+}

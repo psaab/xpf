@@ -423,11 +423,17 @@ func (m *Manager) settleAfterReload(out reloadOutcome, cfg *config.IPsecConfig, 
 		m.rememberPendingCandidateConns(candidateOnly, hs)
 		_, failed := m.terminateRemovedConns(removed)
 		m.clearDeferredReinitiation(failed)
-		// Deferred debt must only survive for connections whose SA was
-		// actually observed live. A successful teardown lists them via
-		// the changed set; candidate-only additions with no SA keep
-		// only their staged fingerprint (pendingCandidateHashes).
-		m.filterDeferredReinitiation(changed)
+		if !out.clear {
+			// Deferred debt must only survive for connections whose SA was
+			// actually observed live. A successful teardown lists them via
+			// the changed set; candidate-only additions with no SA keep
+			// only their staged fingerprint (pendingCandidateHashes).
+			// A clear passes names={}, so changed is always empty and
+			// filtering would wipe the whole deferred set: parent Clear
+			// never filtered, and a deferred eager tunnel must survive
+			// a delete so an identical re-add can re-initiate it.
+			m.filterDeferredReinitiation(changed)
+		}
 		termErr := m.recordTerminateDebtForNames(removed, failed, names)
 		// Do not re-initiate from a config that this live probe failed
 		// to prove; the durable deferred debt is discharged only after
@@ -1512,10 +1518,12 @@ func (m *Manager) prevConnNamesSnapshot() []string {
 }
 
 // filterDeferredReinitiation keeps deferred-start debt only for the named
-// connections. Used after a successful indeterminate teardown to drop seeds
-// recorded for candidate-only additions that had no live SA (and therefore
-// nothing to restore), while the persisted in-flight obligation still
-// covered a crash during termination.
+// connections. Used on the non-clear indeterminate arm after teardown to
+// drop seeds recorded for candidate-only additions that had no live SA
+// (and therefore nothing to restore), while the persisted in-flight
+// obligation still covered a crash during termination. Never called for
+// a clear: its changed set is always empty, so filtering would wipe
+// pre-existing deferred debt parent Clear preserved.
 func (m *Manager) filterDeferredReinitiation(keepNames []string) {
 	keep := make(map[string]bool, len(keepNames))
 	for _, name := range keepNames {
