@@ -1,11 +1,13 @@
-// #1327 Step 1: stage_flow_cache_hit extracted from the inline body
-// of poll_binding_process_descriptor (formerly lines 563-894 of the
-// flat poll_descriptor.rs). The flow-cache fast path is the single
-// largest self-contained `continue`-terminated block in the function
-// and the only stage that's cleanly liftable without touching the
-// order-coupled stage-12+ slow path. See
-// docs/pr/1327-poll-descriptor-stages/plan.md for the architectural
-// verdict on remaining stages.
+// Provenance: extracted at 3b1f56a851 (2026-05-26, #1327
+// Step 1) from the inline body of
+// poll_binding_process_descriptor (formerly lines 563-894 of
+// the flat poll_descriptor.rs). The flow-cache fast path was
+// the single largest self-contained `continue`-terminated
+// block in the function and the only stage cleanly liftable
+// without touching the order-coupled stage-12+ slow path. See
+// docs/pr/1327-poll-descriptor-stages/plan.md for the
+// architectural verdict on remaining stages. That is a
+// split-time record: this file has been edited since.
 //
 // #6433: the SEED (write) half of the cache contract now lives in the
 // `flow_cache_seed.rs` sibling (`stage_flow_cache_seed`) — the #1861
@@ -14,11 +16,15 @@
 // against this hit path as one contract.
 //
 // HOT PATH discipline:
-//   - `#[inline(always)]` mandated by the plan (and by Codex
-//     round-2 review). The 280-LOC body has a single call site;
-//     LLVM produces the same IR as the original inline code. The
-//     `cargo asm` spot-check in the test plan confirms no `call`
-//     edge to this helper is emitted in optimised builds.
+//   - `#[inline(always)]` on `stage_flow_cache_hit`: it has a
+//     single call site (in mod.rs), so forcing it inline keeps
+//     the extracted body in the caller's codegen unit instead
+//     of paying a per-packet call edge on the established-flow
+//     fast path. The body has grown well past its split-time
+//     size (it spans most of this file today), so treat this
+//     as a deliberate single-call-site choice to re-measure
+//     with `cargo asm` / perf before changing it — no asm
+//     check is recorded against the current body.
 //   - Zero new per-packet allocations: every `cached_*` binding
 //     is a borrow into the existing flow-cache Cache entry, never
 //     a clone. The two heap interactions in the body are the
