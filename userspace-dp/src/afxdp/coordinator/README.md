@@ -53,7 +53,11 @@ Differences that matter (#1881):
 - WG threads restart when the engine Arc identity OR attachment
   changes — and also on an underlay outer-MTU change (#2921) and when a
   snapshot changes whether the thread may deliver kernel-path transport
-  plaintext (`kernel_transport_changed`, #9521); GRE threads restart ONLY
+  plaintext (`kernel_transport_changed`, #9521). Every WG peer commit
+  rebuilds the engine (#15950: `wg_peers_eq` compares `endpoint_host`),
+  so peer adds/removes and endpoint/hostname changes restart via
+  `engine_changed` (#17094 retired the dead #14675 same-engine guard);
+  GRE threads restart ONLY
   on attachment drift — endpoint
   content (destination/source/key, routes, CoS) reaches the live GRE
   loop through the shared `ha.runtime` ArcSwap (one
