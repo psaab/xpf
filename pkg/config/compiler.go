@@ -549,7 +549,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// hard-reject; lenient paths warn (see tunnelid.go). Read-only, so it is
 	// safe to run on the soon-to-be-expanded copy.
 	tunnelIDWarnings, tunnelIDErr := validateTunnelEndpointIDCollisionAST(
-		tree, opts.sanitizeFreeTextControlChars)
+		tree, opts)
 	if tunnelIDErr != nil {
 		return nil, tunnelIDErr
 	}

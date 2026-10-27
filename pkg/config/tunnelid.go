@@ -181,13 +181,20 @@ func astTunnelModeWireguard(tunnelNode *Node) bool {
 // for node0, View 3 for node1) used by validateTunnelEndpointIDCollisionAST.
 //
 // It is RECURSION-FREE by construction: it clones the candidate, expands
-// groups for the node, runs the gate-free interfaces sub-compiler
+// groups for the node, runs the interfaces sub-compiler
 // (compileInterfaces — which does NOT call this collision gate) into a
 // throwaway InterfacesConfig, and feeds that typed config through the SSOT
 // emitter EmitTunnelEndpointNames. It NEVER calls CompileConfig* (which
 // would call the gate first and recurse) and NEVER consults the
 // post-usedIDs snapshot (the builder's collision drop has not run, so both
 // colliding refs are present).
+//
+// The side compile receives the CALLER's compileOpts (opts), so every
+// tolerant downgrade the main compile applies — interface speed, duplex,
+// bandwidth, numeric bounds, and any future one — applies here too
+// (#17163). It additionally forces lenientNonNumericUnit so the #5829
+// quarantine holds even on strict commits, and discards side-compile
+// warnings: the view only contributes endpoint names, never diagnostics.
 //
 // Per-node expansion or compile errors are NON-FATAL: the view contributes
 // the EMPTY set. A config that defines only `groups node0` and references
@@ -196,11 +203,10 @@ func astTunnelModeWireguard(tunnelNode *Node) bool {
 // condition on the real per-node compile path (CompileConfig falls back to
 // node0 for an undefined ${node}), and the collision gate must not turn it
 // into a spurious commit failure. View 1's pre-expansion presence union
-// still covers any collision inside the un-expandable group, so dropping
-// the failed node's view loses no real coverage and keeps the verdict a
-// pure function of the candidate config (both nodes compute identical
-// error-to-empty-set handling).
-func emitNodeExpandedTunnelNames(tree *ConfigTree, nodeID int, out map[string]struct{}) {
+// covers collisions among names authored literally (including inside an
+// un-expandable group); only a collision that exists solely as concrete
+// post-expansion names in the failed view is out of view for that node.
+func emitNodeExpandedTunnelNames(tree *ConfigTree, nodeID int, opts compileOpts, out map[string]struct{}) {
 	clone := tree.Clone()
 	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
 	if err := clone.ExpandGroupsWithVars(vars); err != nil {
@@ -216,14 +222,20 @@ func emitNodeExpandedTunnelNames(tree *ConfigTree, nodeID int, out map[string]st
 	if len(ifacesNodes) == 0 {
 		return
 	}
+	sideOpts := opts
+	sideOpts.lenientNonNumericUnit = true
+	var discard []string
 	ifaces := InterfacesConfig{Interfaces: make(map[string]*InterfaceConfig)}
 	for _, ifacesNode := range ifacesNodes {
-		// #5829: this is the best-effort tunnel-endpoint-name UNION used for
-		// ID allocation, not a commit gate — compile leniently so a malformed
-		// `unit <id>` is quarantined (dropped from the union, no hard error)
-		// exactly as the pre-#5829 bare-continue did. The strict commit path
-		// (compileSections) still hard-rejects the same config.
-		if err := compileInterfaces(ifacesNode, &ifaces, compileOpts{lenientNonNumericUnit: true}, nil); err != nil {
+		// #5829/#17163: this is the best-effort tunnel-endpoint-name UNION
+		// used for ID allocation, not a commit gate — compile with the
+		// caller's opts (plus the forced #5829 quarantine above) so a
+		// malformed `unit <id>` is quarantined (dropped from the union,
+		// no hard error) exactly as the pre-#5829 bare-continue did, and
+		// so interface values the caller's mode downgrades cannot erase
+		// the view. The strict commit path (compileSections) still
+		// hard-rejects the same config.
+		if err := compileInterfaces(ifacesNode, &ifaces, sideOpts, &discard); err != nil {
 			return
 		}
 	}
@@ -280,8 +292,11 @@ func emitNodeExpandedTunnelNames(tree *ConfigTree, nodeID int, out map[string]st
 // peer-sync of an already-active config) returns a warning so an
 // upgraded node still boots — the snapshot builder independently
 // drops the later-sorting collider (fail-closed belt-and-braces in
-// buildTunnelEndpointSnapshots).
-func validateTunnelEndpointIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, error) {
+// buildTunnelEndpointSnapshots). opts is the caller's compileOpts:
+// sanitizeFreeTextControlChars selects lenient warn-vs-error (the
+// historical mode proxy, now part of the threaded opts), and the same
+// opts drive the Views 2/3 side compiles (#17163).
+func validateTunnelEndpointIDCollisionAST(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	names := make(map[string]struct{})
 	// View 1 — pre-expansion presence union (#1873). Union across EVERY
 	// top-level `interfaces` root (#5691): a split config can declare tunnel
@@ -313,8 +328,8 @@ func validateTunnelEndpointIDCollisionAST(tree *ConfigTree, lenient bool) ([]str
 	// (#1914). Both computed on both nodes from the shared candidate, so
 	// the union stays HA-symmetric; per-node expansion errors contribute
 	// the empty set (non-fatal).
-	emitNodeExpandedTunnelNames(tree, 0, names)
-	emitNodeExpandedTunnelNames(tree, 1, names)
+	emitNodeExpandedTunnelNames(tree, 0, opts, names)
+	emitNodeExpandedTunnelNames(tree, 1, opts, names)
 	if len(names) < 2 {
 		return nil, nil
 	}
@@ -335,7 +350,7 @@ func validateTunnelEndpointIDCollisionAST(tree *ConfigTree, lenient bool) ([]str
 		msg := fmt.Sprintf(
 			"tunnel endpoint id collision between %q and %q (both fold to %d) — rename one interface (#1873)",
 			owner, name, id)
-		if !lenient {
+		if !opts.sanitizeFreeTextControlChars {
 			return nil, fmt.Errorf("interfaces: %s", msg)
 		}
 		warnings = append(warnings, msg+
