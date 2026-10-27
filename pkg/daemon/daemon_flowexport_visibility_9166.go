@@ -26,58 +26,30 @@ func (d *Daemon) FlowExportBuildStates() []flowexport.BuildState {
 	if d == nil {
 		return nil
 	}
-	return []flowexport.BuildState{
-		{
-			Family:              "netflow-v9",
-			ConfiguredGroups:    int(d.flowConfiguredGroups.Load()),
-			BuildFailed:         d.flowExportBuildFailed(),
-			ExcludedFlowServers: int(d.flowExcludedFlowServers.Load()),
-		},
-		{
-			Family:              "ipfix",
-			ConfiguredGroups:    int(d.ipfixConfiguredGroups.Load()),
-			BuildFailed:         d.ipfixExportBuildFailed(),
-			ExcludedFlowServers: int(d.ipfixExcludedFlowServers.Load()),
-		},
+	var out []flowexport.BuildState
+	for _, ff := range d.flowFamiliesOrNil() {
+		out = append(out, flowexport.BuildState{
+			Family:              ff.name,
+			ConfiguredGroups:    int(ff.configured.Load()),
+			BuildFailed:         ff.buildFailed(),
+			ExcludedFlowServers: int(ff.excluded.Load()),
+		})
 	}
+	return out
 }
 
-// flowExportBuildFailed reports whether the last NetFlow v9 reconcile failed to
-// build its exporters. Takes flowReconMu, which the reconcile holds for the
-// duration of a swap, so a scrape never observes a half-applied reconcile.
-func (d *Daemon) flowExportBuildFailed() bool {
-	d.flowReconMu.Lock()
-	defer d.flowReconMu.Unlock()
-	return d.flowExportErr != nil
-}
-
-// ipfixExportBuildFailed is the IPFIX sibling of flowExportBuildFailed.
-func (d *Daemon) ipfixExportBuildFailed() bool {
-	d.ipfixReconMu.Lock()
-	defer d.ipfixReconMu.Unlock()
-	return d.ipfixExportErr != nil
-}
-
-// FlowExportFailedGroups returns the sorted per-group build failures
-// (keys "family\x00instance") across both families (#15230). It lets
-// operators and tests distinguish "instance b failed, a is live" from a
-// whole-family failure. The family-level BuildFailed gauge stays set
-// whenever this is non-empty for that family.
 func (d *Daemon) FlowExportFailedGroups() []string {
 	if d == nil {
 		return nil
 	}
 	var out []string
-	d.flowReconMu.Lock()
-	for k := range d.flowFailedGroups {
-		out = append(out, k)
+	for _, ff := range d.flowFamiliesOrNil() {
+		ff.mu.Lock()
+		for k := range ff.failedGroups {
+			out = append(out, k)
+		}
+		ff.mu.Unlock()
 	}
-	d.flowReconMu.Unlock()
-	d.ipfixReconMu.Lock()
-	for k := range d.ipfixFailedGroups {
-		out = append(out, k)
-	}
-	d.ipfixReconMu.Unlock()
 	sort.Strings(out)
 	return out
 }
@@ -130,7 +102,7 @@ type flowExportRetryState struct {
 // nothing was there to notice.
 //
 // Safe to call from a reconcile and from the loop itself; a live loop is not
-// duplicated. Callers must NOT hold flowReconMu — the loop's tick re-enters
+// duplicated. Callers must NOT hold a family reconcile mutex — the loop's tick re-enters
 // reconcileFlowExporters, which takes it.
 func (d *Daemon) armFlowExportRetry() {
 	d.flowRetry.mu.Lock()
@@ -231,7 +203,12 @@ func (d *Daemon) tryFlowExportRetry() bool {
 // Called with NEITHER reconcile mutex held: the loop this may start re-enters
 // reconcileFlowExporters, which takes them.
 func (d *Daemon) noteFlowExportBuildResult() {
-	failed := d.flowExportBuildFailed() || d.ipfixExportBuildFailed()
+	failed := false
+	for _, ff := range d.flowFamiliesOrNil() {
+		if ff.buildFailed() {
+			failed = true
+		}
+	}
 
 	d.flowRetry.mu.Lock()
 	d.flowRetry.pending = failed

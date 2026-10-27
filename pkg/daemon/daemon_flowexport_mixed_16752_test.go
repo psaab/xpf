@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/flowexport"
 )
 
 // #16752 R3-A46-05: when one instance fails to build, the old build was
@@ -55,11 +54,11 @@ func TestMixedGenerationRetiresReplacedHealthyExporter16752(t *testing.T) {
 	if !d.reconcileFlowExporters(healthy) {
 		t.Fatal("healthy reconcile must start exporters")
 	}
-	first := d.flowBundle.Load()
+	first := d.v9Family().bundle.Load()
 	if first == nil || len(first.groups) != 2 {
 		t.Fatalf("healthy groups = %v, want 2", first)
 	}
-	var aOld, bOld *flowexport.Exporter
+	var aOld, bOld flowExporter
 	for _, g := range first.groups {
 		switch g.ec.InstanceName {
 		case "a":
@@ -80,13 +79,13 @@ func TestMixedGenerationRetiresReplacedHealthyExporter16752(t *testing.T) {
 	if !d.reconcileFlowExporters(changed) {
 		t.Fatal("partial day-2 reconcile must report a change")
 	}
-	b := d.flowBundle.Load()
+	b := d.v9Family().bundle.Load()
 	if b == nil || len(b.groups) != 2 {
 		t.Fatalf("published groups after partial day-2 = %v, want a(new)+b(retained)", b)
 	}
-	if len(d.flowExporters) != len(b.groups) {
+	if len(d.v9Family().exporters) != len(b.groups) {
 		t.Fatalf("live v9 exporters = %d, want %d (published groups)",
-			len(d.flowExporters), len(b.groups))
+			len(d.v9Family().exporters), len(b.groups))
 	}
 	var aNewAddr string
 	for _, g := range b.groups {
@@ -97,13 +96,13 @@ func TestMixedGenerationRetiresReplacedHealthyExporter16752(t *testing.T) {
 	if want := "127.0.0.1:3199"; aNewAddr != want {
 		t.Fatalf("healthy instance collector = %q, want new %q", aNewAddr, want)
 	}
-	for _, exp := range d.flowExporters {
+	for _, exp := range d.v9Family().exporters {
 		if exp == aOld {
 			t.Fatal("replaced old a exporter is still in the live exporter set (#16752 leak)")
 		}
 	}
 	foundB := false
-	for _, exp := range d.flowExporters {
+	for _, exp := range d.v9Family().exporters {
 		if exp == bOld {
 			foundB = true
 		}
@@ -140,11 +139,11 @@ func TestMixedGenerationIPFIXMirror16752(t *testing.T) {
 	if !d.reconcileFlowExporters(mk(2055, "127.0.0.1")) {
 		t.Fatal("healthy reconcile must start exporters")
 	}
-	first := d.ipfixBundlePtr.Load()
+	first := d.ipfixFamily().bundle.Load()
 	if first == nil || len(first.groups) != 2 {
 		t.Fatalf("healthy IPFIX groups = %v, want 2 (a+b)", first)
 	}
-	var aOld, bOld *flowexport.IPFIXExporter
+	var aOld, bOld flowExporter
 	for _, g := range first.groups {
 		switch g.ec.InstanceName {
 		case "a":
@@ -160,21 +159,21 @@ func TestMixedGenerationIPFIXMirror16752(t *testing.T) {
 	if !d.reconcileFlowExporters(mk(3199, "192.0.2.250")) {
 		t.Fatal("partial day-2 reconcile must report a change")
 	}
-	b := d.ipfixBundlePtr.Load()
+	b := d.ipfixFamily().bundle.Load()
 	if b == nil || len(b.groups) != 2 {
 		t.Fatalf("published IPFIX groups after partial day-2 = %v, want a(new)+b(retained)", b)
 	}
-	if len(d.ipfixExporters) != len(b.groups) {
+	if len(d.ipfixFamily().exporters) != len(b.groups) {
 		t.Fatalf("live IPFIX exporters = %d, want %d (published groups)",
-			len(d.ipfixExporters), len(b.groups))
+			len(d.ipfixFamily().exporters), len(b.groups))
 	}
-	for _, exp := range d.ipfixExporters {
+	for _, exp := range d.ipfixFamily().exporters {
 		if exp == aOld {
 			t.Fatal("replaced old IPFIX a exporter is still live (#16752 leak)")
 		}
 	}
 	foundB := false
-	for _, exp := range d.ipfixExporters {
+	for _, exp := range d.ipfixFamily().exporters {
 		if exp == bOld {
 			foundB = true
 		}
@@ -193,14 +192,14 @@ func twoFamilyConfig17801(aPort int, bSource string) *config.Config {
 	return cfg
 }
 
-func waitV9GroupsDone17801(t *testing.T, groups []v9Group) bool {
+func waitV9GroupsDone17801(t *testing.T, groups []flowGroup) bool {
 	t.Helper()
 	done := make(chan struct{}, len(groups))
 	for _, g := range groups {
 		if g.wg == nil {
 			return false
 		}
-		go func(g v9Group) {
+		go func(g flowGroup) {
 			g.wg.Wait()
 			done <- struct{}{}
 		}(g)
@@ -217,14 +216,14 @@ func waitV9GroupsDone17801(t *testing.T, groups []v9Group) bool {
 	return true
 }
 
-func waitIPFIXGroupsDone17801(t *testing.T, groups []ipfixGroup) bool {
+func waitIPFIXGroupsDone17801(t *testing.T, groups []flowGroup) bool {
 	t.Helper()
 	done := make(chan struct{}, len(groups))
 	for _, g := range groups {
 		if g.wg == nil {
 			return false
 		}
-		go func(g ipfixGroup) {
+		go func(g flowGroup) {
 			g.wg.Wait()
 			done <- struct{}{}
 		}(g)
@@ -251,16 +250,16 @@ func TestRemoveAllExporterGroupsJoinsEveryWorker17801(t *testing.T) {
 		if !d.reconcileFlowExporters(twoFamilyConfig17801(2055, "127.0.0.1")) {
 			t.Fatalf("cycle %d: adding exporters must report a change", cycle+1)
 		}
-		v9Bundle := d.flowBundle.Load()
-		ipfixBundle := d.ipfixBundlePtr.Load()
+		v9Bundle := d.v9Family().bundle.Load()
+		flowBundle := d.ipfixFamily().bundle.Load()
 		if v9Bundle == nil || len(v9Bundle.groups) != 2 {
 			t.Fatalf("cycle %d: v9 groups = %v, want 2", cycle+1, v9Bundle)
 		}
-		if ipfixBundle == nil || len(ipfixBundle.groups) != 2 {
-			t.Fatalf("cycle %d: IPFIX groups = %v, want 2", cycle+1, ipfixBundle)
+		if flowBundle == nil || len(flowBundle.groups) != 2 {
+			t.Fatalf("cycle %d: IPFIX groups = %v, want 2", cycle+1, flowBundle)
 		}
-		v9Groups := append([]v9Group(nil), v9Bundle.groups...)
-		ipfixGroups := append([]ipfixGroup(nil), ipfixBundle.groups...)
+		v9Groups := append([]flowGroup(nil), v9Bundle.groups...)
+		ipfixGroups := append([]flowGroup(nil), flowBundle.groups...)
 
 		if !d.reconcileFlowExporters(&config.Config{}) {
 			t.Fatalf("cycle %d: removing all exporters must report a change", cycle+1)
@@ -299,15 +298,15 @@ func TestRemoveAllExporterGroupsJoinsRetainedFailedSiblings17801(t *testing.T) {
 	if !d.reconcileFlowExporters(twoFamilyConfig17801(2055, "127.0.0.1")) {
 		t.Fatal("initial healthy reconcile must report a change")
 	}
-	initialV9 := d.flowBundle.Load()
-	initialIPFIX := d.ipfixBundlePtr.Load()
+	initialV9 := d.v9Family().bundle.Load()
+	initialIPFIX := d.ipfixFamily().bundle.Load()
 	if initialV9 == nil || initialIPFIX == nil {
 		t.Fatal("initial healthy reconcile must publish both families")
 	}
-	var retainedV9 *flowexport.Exporter
-	var retainedIPFIX *flowexport.IPFIXExporter
-	var retainedV9Group v9Group
-	var retainedIPFIXGroup ipfixGroup
+	var retainedV9 flowExporter
+	var retainedIPFIX flowExporter
+	var retainedV9Group flowGroup
+	var retainedIPFIXGroup flowGroup
 	for _, g := range initialV9.groups {
 		if g.ec.InstanceName == "b" {
 			retainedV9 = g.exp
@@ -327,19 +326,19 @@ func TestRemoveAllExporterGroupsJoinsRetainedFailedSiblings17801(t *testing.T) {
 	if !d.reconcileFlowExporters(twoFamilyConfig17801(3199, "192.0.2.250")) {
 		t.Fatal("partial reconcile with failed b siblings must report a change")
 	}
-	v9Bundle := d.flowBundle.Load()
-	ipfixBundle := d.ipfixBundlePtr.Load()
+	v9Bundle := d.v9Family().bundle.Load()
+	flowBundle := d.ipfixFamily().bundle.Load()
 	if v9Bundle == nil || len(v9Bundle.groups) != 2 {
 		t.Fatalf("partial v9 groups = %v, want replaced a and retained b", v9Bundle)
 	}
-	if ipfixBundle == nil || len(ipfixBundle.groups) != 2 {
-		t.Fatalf("partial IPFIX groups = %v, want replaced a and retained b", ipfixBundle)
+	if flowBundle == nil || len(flowBundle.groups) != 2 {
+		t.Fatalf("partial IPFIX groups = %v, want replaced a and retained b", flowBundle)
 	}
 	foundV9, foundIPFIX := false, false
 	for _, g := range v9Bundle.groups {
 		foundV9 = foundV9 || g.exp == retainedV9
 	}
-	for _, g := range ipfixBundle.groups {
+	for _, g := range flowBundle.groups {
 		foundIPFIX = foundIPFIX || g.exp == retainedIPFIX
 	}
 	if !foundV9 || !foundIPFIX {
@@ -348,8 +347,8 @@ func TestRemoveAllExporterGroupsJoinsRetainedFailedSiblings17801(t *testing.T) {
 	assertGroupStillRunning17801(t, "v9", retainedV9Group.wg)
 	assertGroupStillRunning17801(t, "IPFIX", retainedIPFIXGroup.wg)
 
-	v9Groups := append([]v9Group(nil), v9Bundle.groups...)
-	ipfixGroups := append([]ipfixGroup(nil), ipfixBundle.groups...)
+	v9Groups := append([]flowGroup(nil), v9Bundle.groups...)
+	ipfixGroups := append([]flowGroup(nil), flowBundle.groups...)
 	if !d.reconcileFlowExporters(&config.Config{}) {
 		t.Fatal("removing all exporters after partial failure must report a change")
 	}

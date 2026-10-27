@@ -44,6 +44,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -108,25 +109,23 @@ func (d *Daemon) flowLiveFeedLoop(ctx context.Context) {
 // lookup missed, so this counter is the operator-visible signal that
 // the live feed is not reaching the session store.
 func (d *Daemon) feedFlowLiveCounters(now time.Time) {
-	if b := d.flowBundle.Load(); b != nil {
-		for _, g := range b.groups {
-			for _, key := range g.exp.TrackedKeys() {
-				if fp, fb, rp, rb, ok := d.liveFlowCounters(key); ok {
-					g.exp.TouchFlowBidirectional(key, now, fp, fb, rp, rb)
-				} else {
-					d.flowLiveFeedMisses.Add(1)
-				}
-			}
-		}
+	for _, ff := range d.flowFamiliesOrNil() {
+		ff.feedLiveCounters(d, now)
 	}
-	if b := d.ipfixBundlePtr.Load(); b != nil {
-		for _, g := range b.groups {
-			for _, key := range g.exp.TrackedKeys() {
-				if fp, fb, rp, rb, ok := d.liveFlowCounters(key); ok {
-					g.exp.TouchFlowBidirectional(key, now, fp, fb, rp, rb)
-				} else {
-					d.flowLiveFeedMisses.Add(1)
-				}
+}
+
+// feedLiveCounters feeds live counters into this family's groups.
+func (ff *flowFamily) feedLiveCounters(d *Daemon, now time.Time) {
+	b := ff.bundle.Load()
+	if b == nil {
+		return
+	}
+	for _, g := range b.groups {
+		for _, key := range g.exp.TrackedKeys() {
+			if fp, fb, rp, rb, ok := d.liveFlowCounters(key); ok {
+				g.exp.TouchFlowBidirectional(key, now, fp, fb, rp, rb)
+			} else {
+				d.flowLiveFeedMisses.Add(1)
 			}
 		}
 	}
@@ -190,72 +189,275 @@ func (d *Daemon) liveFlowCounters(key flowexport.FlowKey) (uint64, uint64, uint6
 	return val.FwdPackets, val.FwdBytes, val.RevPackets, val.RevBytes, true
 }
 
-// v9Group is one running NetFlow v9 template-group exporter and its
-// resolved config (#2461). One flow-server template => one group => one
-// exporter, so a collector receives exactly the template it referenced.
-// cancel/wg retire exactly this exporter (#16752): exporters of one
-// build no longer share a generation context, so a replaced member of
-// a partially retained set can be stopped without stopping its
-// retained siblings.
-type v9Group struct {
-	exp    *flowexport.Exporter
+// flowExporter is the method set both stateful encoders expose through
+// the shared exporterCore (#16126). The encoders stay distinct types;
+// the daemon lifecycle speaks only this interface (#17057).
+type flowExporter interface {
+	Run(ctx context.Context)
+	Close()
+	Retire()
+	SetHandoffCounter(*atomic.Uint64)
+	CloseFlowOrSample(key flowexport.FlowKey, decide func() bool) (bool, uint64, uint64, uint64, uint64)
+	ExportSessionCloseRemainder(rec logging.EventRecord, evt flowexport.SessionCloseData, basePkts, baseBytes, baseRevPkts, baseRevBytes uint64)
+	ExportSessionClose(rec logging.EventRecord, evt flowexport.SessionCloseData)
+	MarkFlowSampledAtOpen(key flowexport.FlowKey)
+	MarkFlowRejectedAtOpen(key flowexport.FlowKey)
+	TrackFlowOpenRecord(key flowexport.FlowKey, start time.Time, template flowexport.FlowRecord)
+	TrackedKeys() []flowexport.FlowKey
+	Tracked(key flowexport.FlowKey) bool
+	HasFlowState(key flowexport.FlowKey) bool
+	TouchFlowBidirectional(key flowexport.FlowKey, now time.Time, fwdPackets, fwdBytes, revPackets, revBytes uint64)
+	CollectorHealth() []flowexport.CollectorHealth
+	Stats() (flows, packets uint64)
+	BatchDepth() uint64
+	BatchMaxDepth() uint64
+	BatchDropped() uint64
+	HandoffDropped() uint64
+	RouteMaskUnresolved() uint64
+	EstimatedDurations() uint64
+	ClockSkewClamped() uint64
+	CollectDueExports(now time.Time) []flowexport.FlowRecord
+	SetMaskResolver(r flowexport.MaskResolver)
+	TransferFlowStateTo(dst flowExporter, key flowexport.FlowKey)
+	AbsorbSampledInto(dst flowExporter)
+}
+
+type v9Exporter struct{ e *flowexport.Exporter }
+
+func (w v9Exporter) Run(ctx context.Context) { w.e.Run(ctx) }
+func (w v9Exporter) Close()                  { w.e.Close() }
+func (w v9Exporter) Retire()                 { w.e.Retire() }
+func (w v9Exporter) SetHandoffCounter(c *atomic.Uint64) {
+	w.e.SetHandoffCounter(c)
+}
+func (w v9Exporter) CloseFlowOrSample(key flowexport.FlowKey, decide func() bool) (bool, uint64, uint64, uint64, uint64) {
+	return w.e.CloseFlowOrSample(key, decide)
+}
+func (w v9Exporter) ExportSessionCloseRemainder(rec logging.EventRecord, evt flowexport.SessionCloseData, a, b, c, e uint64) {
+	w.e.ExportSessionCloseRemainder(rec, evt, a, b, c, e)
+}
+func (w v9Exporter) ExportSessionClose(rec logging.EventRecord, evt flowexport.SessionCloseData) {
+	w.e.ExportSessionClose(rec, evt)
+}
+func (w v9Exporter) MarkFlowSampledAtOpen(key flowexport.FlowKey)  { w.e.MarkFlowSampledAtOpen(key) }
+func (w v9Exporter) MarkFlowRejectedAtOpen(key flowexport.FlowKey) { w.e.MarkFlowRejectedAtOpen(key) }
+func (w v9Exporter) TrackFlowOpenRecord(key flowexport.FlowKey, start time.Time, tmpl flowexport.FlowRecord) {
+	w.e.TrackFlowOpenRecord(key, start, tmpl)
+}
+func (w v9Exporter) TrackedKeys() []flowexport.FlowKey { return w.e.TrackedKeys() }
+func (w v9Exporter) Tracked(key flowexport.FlowKey) bool {
+	return w.e.Tracked(key)
+}
+func (w v9Exporter) HasFlowState(key flowexport.FlowKey) bool { return w.e.HasFlowState(key) }
+func (w v9Exporter) TouchFlowBidirectional(key flowexport.FlowKey, now time.Time, a, b, c, e uint64) {
+	w.e.TouchFlowBidirectional(key, now, a, b, c, e)
+}
+func (w v9Exporter) CollectorHealth() []flowexport.CollectorHealth {
+	return w.e.CollectorHealth()
+}
+func (w v9Exporter) Stats() (uint64, uint64) { return w.e.Stats() }
+func (w v9Exporter) BatchDepth() uint64      { return w.e.BatchDepth() }
+func (w v9Exporter) BatchMaxDepth() uint64   { return w.e.BatchMaxDepth() }
+func (w v9Exporter) BatchDropped() uint64    { return w.e.BatchDropped() }
+func (w v9Exporter) HandoffDropped() uint64  { return w.e.HandoffDropped() }
+func (w v9Exporter) RouteMaskUnresolved() uint64 {
+	return w.e.RouteMaskUnresolved()
+}
+func (w v9Exporter) EstimatedDurations() uint64 { return w.e.EstimatedDurations() }
+func (w v9Exporter) ClockSkewClamped() uint64   { return w.e.ClockSkewClamped() }
+func (w v9Exporter) CollectDueExports(now time.Time) []flowexport.FlowRecord {
+	return w.e.CollectDueExports(now)
+}
+func (w v9Exporter) SetMaskResolver(r flowexport.MaskResolver) { w.e.MaskResolver = r }
+func (w v9Exporter) TransferFlowStateTo(dst flowExporter, key flowexport.FlowKey) {
+	if d, ok := dst.(v9Exporter); ok {
+		w.e.TransferFlowStateTo(d.e, key)
+	}
+}
+func (w v9Exporter) AbsorbSampledInto(dst flowExporter) {
+	if d, ok := dst.(v9Exporter); ok {
+		w.e.AbsorbSampledInto(d.e)
+	}
+}
+
+type ipfixExporter struct{ e *flowexport.IPFIXExporter }
+
+func (w ipfixExporter) Run(ctx context.Context) { w.e.Run(ctx) }
+func (w ipfixExporter) Close()                  { w.e.Close() }
+func (w ipfixExporter) Retire()                 { w.e.Retire() }
+func (w ipfixExporter) SetHandoffCounter(c *atomic.Uint64) {
+	w.e.SetHandoffCounter(c)
+}
+func (w ipfixExporter) CloseFlowOrSample(key flowexport.FlowKey, decide func() bool) (bool, uint64, uint64, uint64, uint64) {
+	return w.e.CloseFlowOrSample(key, decide)
+}
+func (w ipfixExporter) ExportSessionCloseRemainder(rec logging.EventRecord, evt flowexport.SessionCloseData, a, b, c, e uint64) {
+	w.e.ExportSessionCloseRemainder(rec, evt, a, b, c, e)
+}
+func (w ipfixExporter) ExportSessionClose(rec logging.EventRecord, evt flowexport.SessionCloseData) {
+	w.e.ExportSessionClose(rec, evt)
+}
+func (w ipfixExporter) MarkFlowSampledAtOpen(key flowexport.FlowKey) { w.e.MarkFlowSampledAtOpen(key) }
+func (w ipfixExporter) MarkFlowRejectedAtOpen(key flowexport.FlowKey) {
+	w.e.MarkFlowRejectedAtOpen(key)
+}
+func (w ipfixExporter) TrackFlowOpenRecord(key flowexport.FlowKey, start time.Time, tmpl flowexport.FlowRecord) {
+	w.e.TrackFlowOpenRecord(key, start, tmpl)
+}
+func (w ipfixExporter) TrackedKeys() []flowexport.FlowKey { return w.e.TrackedKeys() }
+func (w ipfixExporter) Tracked(key flowexport.FlowKey) bool {
+	return w.e.Tracked(key)
+}
+func (w ipfixExporter) HasFlowState(key flowexport.FlowKey) bool { return w.e.HasFlowState(key) }
+func (w ipfixExporter) TouchFlowBidirectional(key flowexport.FlowKey, now time.Time, a, b, c, e uint64) {
+	w.e.TouchFlowBidirectional(key, now, a, b, c, e)
+}
+func (w ipfixExporter) CollectorHealth() []flowexport.CollectorHealth {
+	return w.e.CollectorHealth()
+}
+func (w ipfixExporter) Stats() (uint64, uint64) { return w.e.Stats() }
+func (w ipfixExporter) BatchDepth() uint64      { return w.e.BatchDepth() }
+func (w ipfixExporter) BatchMaxDepth() uint64   { return w.e.BatchMaxDepth() }
+func (w ipfixExporter) BatchDropped() uint64    { return w.e.BatchDropped() }
+func (w ipfixExporter) HandoffDropped() uint64  { return w.e.HandoffDropped() }
+func (w ipfixExporter) RouteMaskUnresolved() uint64 {
+	return w.e.RouteMaskUnresolved()
+}
+func (w ipfixExporter) EstimatedDurations() uint64 { return w.e.EstimatedDurations() }
+func (w ipfixExporter) ClockSkewClamped() uint64   { return w.e.ClockSkewClamped() }
+func (w ipfixExporter) CollectDueExports(now time.Time) []flowexport.FlowRecord {
+	return w.e.CollectDueExports(now)
+}
+func (w ipfixExporter) SetMaskResolver(r flowexport.MaskResolver) { w.e.MaskResolver = r }
+func (w ipfixExporter) TransferFlowStateTo(dst flowExporter, key flowexport.FlowKey) {
+	if d, ok := dst.(ipfixExporter); ok {
+		w.e.TransferFlowStateTo(d.e, key)
+	}
+}
+func (w ipfixExporter) AbsorbSampledInto(dst flowExporter) {
+	if d, ok := dst.(ipfixExporter); ok {
+		w.e.AbsorbSampledInto(d.e)
+	}
+}
+
+// flowGroup is one running template-group exporter and its resolved
+// config (#2461). cancel/wg retire exactly this exporter (#16752).
+type flowGroup struct {
+	exp    flowExporter
 	ec     *flowexport.ExportConfig
 	cancel context.CancelFunc
 	wg     *sync.WaitGroup
 }
 
-// ipfixGroup is the IPFIX equivalent of v9Group.
-type ipfixGroup struct {
-	exp    *flowexport.IPFIXExporter
-	ec     *flowexport.ExportConfig
-	cancel context.CancelFunc
-	wg     *sync.WaitGroup
+// flowBundle is the immutable per-family set of template-group exporters
+// the session-close callback reads. An empty groups slice means "no
+// exporter configured" for that family. The groups share one
+// ExportConfig.sampleCounter, so the callback evaluates SampledForOpen
+// EXACTLY ONCE per instance and fans out to every group (#2461).
+type flowBundle struct {
+	groups []flowGroup
 }
 
-func flowGroupKey(ec *flowexport.ExportConfig) string {
-	if ec == nil {
-		return ""
-	}
-	return ec.InstanceName + "\x00" + ec.TemplateName + "\x00" + flowExportAddressFamily(ec.GroupIsV6)
-}
-
-func flowFailedKey(family string, ec *flowexport.ExportConfig) string {
-	if ec == nil {
-		return family + "\x00"
-	}
-	return family + "\x00" + ec.InstanceName
-}
-
-// exporterBundle is the immutable per-family set of NetFlow v9 template-
-// group exporters the session-close callback reads via d.flowBundle. An
-// empty groups slice means "no v9 exporter configured". The groups share
-// one ExportConfig.sampleCounter, so the callback evaluates SampledForOpen
-// (the shared 1-in-N counter + sampling zones) EXACTLY ONCE and fans the
-// record out to every group (#2461).
-type exporterBundle struct {
-	groups []v9Group
-}
-
-// ipfixBundle is the IPFIX equivalent of exporterBundle.
-type ipfixBundle struct {
-	groups []ipfixGroup
-}
-
-// firstExp returns the first running v9 group exporter, or nil when no v9
-// exporter is configured. A test/inspection convenience over b.groups.
-func (b *exporterBundle) firstExp() *flowexport.Exporter {
+// firstExp returns the first running group exporter, or nil.
+func (b *flowBundle) firstExp() flowExporter {
 	if b == nil || len(b.groups) == 0 {
 		return nil
 	}
 	return b.groups[0].exp
 }
 
-// firstExp returns the first running IPFIX group exporter, or nil.
-func (b *ipfixBundle) firstExp() *flowexport.IPFIXExporter {
-	if b == nil || len(b.groups) == 0 {
+// flowFamily holds all per-protocol lifecycle state once (#17057).
+type flowFamily struct {
+	name string
+	d    *Daemon
+	mu   sync.Mutex
+
+	bundle atomic.Pointer[flowBundle]
+	hash   [32]byte
+	hasSet bool
+	cbOnce sync.Once
+	err    error
+
+	exporters []flowExporter
+	cancel    context.CancelFunc
+	wg        *sync.WaitGroup
+
+	configured     atomic.Int64
+	excluded       atomic.Int64
+	handoffDropped atomic.Uint64
+	failedGroups   map[string]bool
+
+	stateCarryTestHook func()
+}
+
+func newFlowFamilies(d *Daemon) [2]*flowFamily {
+	return [2]*flowFamily{
+		{name: "netflow-v9", d: d},
+		{name: "ipfix", d: d},
+	}
+}
+
+func (d *Daemon) flowFamiliesOrNil() []*flowFamily {
+	if d == nil {
 		return nil
 	}
-	return b.groups[0].exp
+	if d.flowFamilies[0] == nil {
+		d.flowFamilies = newFlowFamilies(d)
+	}
+	out := make([]*flowFamily, 0, 2)
+	for _, ff := range d.flowFamilies {
+		if ff != nil {
+			out = append(out, ff)
+		}
+	}
+	return out
+}
+
+func (d *Daemon) v9Family() *flowFamily {
+	_ = d.flowFamiliesOrNil()
+	return d.flowFamilies[0]
+}
+
+func (d *Daemon) ipfixFamily() *flowFamily {
+	_ = d.flowFamiliesOrNil()
+	return d.flowFamilies[1]
+}
+
+func (ff *flowFamily) buildConfigs(cfg *config.Config) []*flowexport.ExportConfig {
+	var ecs []*flowexport.ExportConfig
+	if ff.name == "netflow-v9" {
+		ff.excluded.Store(int64(flowexport.CountExcludedFlowServers(
+			&cfg.Services, &cfg.ForwardingOptions, config.FlowServerVersion9)))
+		ecs = flowexport.ResolveV9TemplateGroups(&cfg.Services, &cfg.ForwardingOptions)
+	} else {
+		ff.excluded.Store(int64(flowexport.CountExcludedFlowServers(
+			&cfg.Services, &cfg.ForwardingOptions, config.FlowServerVersionIPFIX)))
+		ecs = flowexport.ResolveIPFIXTemplateGroups(&cfg.Services, &cfg.ForwardingOptions)
+	}
+	if len(ecs) == 0 {
+		return nil
+	}
+	zoneIDs := buildZoneIDs(cfg)
+	zones := flowexport.BuildSamplingZones(cfg, zoneIDs)
+	for _, ec := range ecs {
+		ec.SamplingZones = zones
+	}
+	return ecs
+}
+
+func (ff *flowFamily) newExporter(ec *flowexport.ExportConfig) (flowExporter, error) {
+	if ff.name == "netflow-v9" {
+		e, err := flowexport.NewExporter(ec)
+		if err != nil {
+			return nil, err
+		}
+		return v9Exporter{e: e}, nil
+	}
+	e, err := flowexport.NewIPFIXExporter(ec)
+	if err != nil {
+		return nil, err
+	}
+	return ipfixExporter{e: e}, nil
 }
 
 // flowExportConfigHash hashes the resolved per-family template groups
@@ -280,41 +482,18 @@ func flowExportConfigHash(ecs []*flowexport.ExportConfig) [32]byte {
 	return sha256.Sum256(data)
 }
 
-// buildFlowExportConfigs resolves the NetFlow v9 export config from the
-// committed config into one ExportConfig per per-flow-server template group
-// (#2461), filling per-zone sampling directions on each. Returns nil when
-// flow export is not configured.
-func (d *Daemon) buildFlowExportConfigs(cfg *config.Config) []*flowexport.ExportConfig {
-	d.flowExcludedFlowServers.Store(int64(flowexport.CountExcludedFlowServers(
-		&cfg.Services, &cfg.ForwardingOptions, config.FlowServerVersion9)))
-	ecs := flowexport.ResolveV9TemplateGroups(&cfg.Services, &cfg.ForwardingOptions)
-	if len(ecs) == 0 {
-		return nil
+func flowGroupKey(ec *flowexport.ExportConfig) string {
+	if ec == nil {
+		return ""
 	}
-	zoneIDs := buildZoneIDs(cfg)
-	zones := flowexport.BuildSamplingZones(cfg, zoneIDs)
-	for _, ec := range ecs {
-		ec.SamplingZones = zones
-	}
-	return ecs
+	return ec.InstanceName + "\x00" + ec.TemplateName + "\x00" + flowExportAddressFamily(ec.GroupIsV6)
 }
 
-// buildIPFIXExportConfigs resolves the IPFIX export config from the
-// committed config into one ExportConfig per template group. Returns nil
-// when IPFIX export is not configured.
-func (d *Daemon) buildIPFIXExportConfigs(cfg *config.Config) []*flowexport.ExportConfig {
-	d.ipfixExcludedFlowServers.Store(int64(flowexport.CountExcludedFlowServers(
-		&cfg.Services, &cfg.ForwardingOptions, config.FlowServerVersionIPFIX)))
-	ecs := flowexport.ResolveIPFIXTemplateGroups(&cfg.Services, &cfg.ForwardingOptions)
-	if len(ecs) == 0 {
-		return nil
+func flowFailedKey(family string, ec *flowexport.ExportConfig) string {
+	if ec == nil {
+		return family + "\x00"
 	}
-	zoneIDs := buildZoneIDs(cfg)
-	zones := flowexport.BuildSamplingZones(cfg, zoneIDs)
-	for _, ec := range ecs {
-		ec.SamplingZones = zones
-	}
-	return ecs
+	return family + "\x00" + ec.InstanceName
 }
 
 // reconcileFlowExporters reconciles BOTH the NetFlow v9 and IPFIX
@@ -330,8 +509,12 @@ func (d *Daemon) reconcileFlowExporters(cfg *config.Config) bool {
 	if cfg == nil || d.eventReader == nil || d.daemonCtx == nil {
 		return false
 	}
-	v9 := d.reconcileV9Exporter(cfg)
-	ipfix := d.reconcileIPFIXExporter(cfg)
+	changed := false
+	for _, ff := range d.flowFamiliesOrNil() {
+		if ff.reconcile(cfg) {
+			changed = true
+		}
+	}
 	// #9166: a build failure here used to wait for the NEXT COMMIT, which on a
 	// stable box is never — while the two faults that cause one (unresolvable
 	// collector DNS, a pinned source bind before the interface is up) both
@@ -340,48 +523,41 @@ func (d *Daemon) reconcileFlowExporters(cfg *config.Config) bool {
 	// Armed HERE, outside both reconcile mutexes: armFlowExportRetry's loop
 	// re-enters reconcileFlowExporters, which takes them.
 	d.noteFlowExportBuildResult()
-	return v9 || ipfix
+	return changed
 }
 
-// reconcileV9Exporter reconciles the NetFlow v9 template-group exporters
-// (one per per-flow-server template, #2461).
-//
-// #15230 (A46-02): groups build independently. A group that fails to
-// build is marked failed and retried (family hash not recorded); groups
-// that build are published with the new config even when a sibling
-// fails. A failed group with a previously running exporter keeps that
-// exporter (per-group #3742); a failed group with nothing running
-// simply stays unpublished for that group.
-func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
-	d.flowReconMu.Lock()
-	defer d.flowReconMu.Unlock()
-
-	ecs := d.buildFlowExportConfigs(cfg)
-	d.flowConfiguredGroups.Store(int64(len(ecs)))
+// reconcile reconciles this family's template-group exporters (one per
+// per-flow-server template, #2461). #15230: groups build independently.
+func (ff *flowFamily) reconcile(cfg *config.Config) bool {
+	d := ff.d
+	ff.mu.Lock()
+	defer ff.mu.Unlock()
+	ecs := ff.buildConfigs(cfg)
+	ff.configured.Store(int64(len(ecs)))
 	h := flowExportConfigHash(ecs)
-	if d.flowHashSet && h == d.flowHash {
+	if ff.hasSet && h == ff.hash {
 		return false
 	}
-	wasRunning := len(d.flowExporters) > 0
+	wasRunning := len(ff.exporters) > 0
 	if len(ecs) == 0 {
-		d.teardownV9Locked()
-		d.flowHash, d.flowHashSet = h, true
-		d.flowExportErr = nil
-		d.flowFailedGroups = nil
+		ff.teardownLocked()
+		ff.hash, ff.hasSet = h, true
+		ff.err = nil
+		ff.failedGroups = nil
 		if !wasRunning {
 			return false
 		}
-		slog.Info("NetFlow v9 exporter stopped (flow export removed)")
+		slog.Info("flow exporter stopped (flow export removed)", "family", ff.name)
 		return true
 	}
-	oldByKey := make(map[string]v9Group)
-	if b := d.flowBundle.Load(); b != nil {
+	oldByKey := make(map[string]flowGroup)
+	if b := ff.bundle.Load(); b != nil {
 		for _, g := range b.groups {
 			oldByKey[flowGroupKey(g.ec)] = g
 		}
 	}
-	var newGroups []v9Group
-	var newExps []*flowexport.Exporter
+	var newGroups []flowGroup
+	var newExps []flowExporter
 	var failedErr error
 	failed := make(map[string]bool)
 	failedInstances := make(map[string]bool)
@@ -390,42 +566,38 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 		desiredKeys[flowGroupKey(ec)] = true
 	}
 	for _, ec := range ecs {
-		exp, err := flowexport.NewExporter(ec)
+		exp, err := ff.newExporter(ec)
 		if err != nil {
 			slog.Warn("failed to create flow exporter group; other groups continue",
-				"template", ec.TemplateName, "instance", ec.InstanceName, "err", err)
-			failed[flowFailedKey("netflow-v9", ec)] = true
+				"family", ff.name, "template", ec.TemplateName, "instance", ec.InstanceName, "err", err)
+			failed[flowFailedKey(ff.name, ec)] = true
 			failedInstances[ec.InstanceName] = true
 			if failedErr == nil {
 				failedErr = err
 			}
 			continue
 		}
-		exp.SetHandoffCounter(&d.flowHandoffDropped)
+		exp.SetHandoffCounter(&ff.handoffDropped)
 		newExps = append(newExps, exp)
-		newGroups = append(newGroups, v9Group{exp: exp, ec: ec})
+		newGroups = append(newGroups, flowGroup{exp: exp, ec: ec})
 	}
-	retainedGroups, retainedExps := d.retainedV9Locked(failedInstances, desiredKeys, oldByKey)
+	retainedGroups, retainedExps := ff.retainedLocked(failedInstances, desiredKeys, oldByKey)
 	if len(newGroups) == 0 && len(retainedGroups) == 0 {
 		if !wasRunning {
 			d.flowStateMu.Lock()
-			d.flowBundle.Store(&exporterBundle{})
+			ff.bundle.Store(&flowBundle{})
 			d.flowStateMu.Unlock()
 		}
-		d.flowHashSet = false
-		d.flowExportErr = failedErr
-		d.flowFailedGroups = failed
+		ff.hasSet = false
+		ff.err = failedErr
+		ff.failedGroups = failed
 		return true
 	}
 	d.ensureFlowExportOpenCallback()
 	d.ensureFlowLiveFeed()
-	d.flowCBOnce.Do(func() {
-		d.eventReader.AddCallback(d.flowExportCallback)
+	ff.cbOnce.Do(func() {
+		d.eventReader.AddCallback(ff.closeCallback)
 	})
-	// Every exporter runs under its OWN child of the daemon context
-	// (#16752), so a later reconcile can retire exactly the replaced
-	// groups of a partially retained build without cancelling
-	// retained siblings.
 	for i := range newGroups {
 		childCtx, childCancel := context.WithCancel(d.daemonCtx)
 		wg := &sync.WaitGroup{}
@@ -438,15 +610,15 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 			exp.Run(childCtx)
 		}()
 	}
-	newByKey := make(map[string]v9Group)
+	newByKey := make(map[string]flowGroup)
 	for _, g := range newGroups {
 		newByKey[flowGroupKey(g.ec)] = g
 	}
-	retByKey := make(map[string]v9Group)
+	retByKey := make(map[string]flowGroup)
 	for _, g := range retainedGroups {
 		retByKey[flowGroupKey(g.ec)] = g
 	}
-	var published []v9Group
+	var published []flowGroup
 	for _, ec := range ecs {
 		k := flowGroupKey(ec)
 		if g, ok := newByKey[k]; ok {
@@ -455,42 +627,40 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 			published = append(published, g)
 		}
 	}
-	allExps := make([]*flowexport.Exporter, 0, len(newExps)+len(retainedExps))
+	allExps := make([]flowExporter, 0, len(newExps)+len(retainedExps))
 	allExps = append(allExps, retainedExps...)
 	allExps = append(allExps, newExps...)
-	d.flowExporters = allExps
+	ff.exporters = allExps
 	if len(published) > 0 {
 		last := published[len(published)-1]
-		d.flowCancel = last.cancel
-		d.flowWg = last.wg
+		ff.cancel = last.cancel
+		ff.wg = last.wg
 	} else {
-		d.flowCancel = nil
-		d.flowWg = nil
+		ff.cancel = nil
+		ff.wg = nil
 	}
-	// #16742: carry live open state to same-key replacements before
-	// publishing, so the swap does not drop every live flow's close.
 	d.flowStateMu.Lock()
-	d.carryFlowStateV9Locked(published)
-	if d.flowStateCarryTestHook != nil {
-		d.flowStateCarryTestHook()
+	ff.carryFlowStateLocked(published)
+	if ff.stateCarryTestHook != nil {
+		ff.stateCarryTestHook()
 	}
-	d.flowBundle.Store(&exporterBundle{groups: published})
+	ff.bundle.Store(&flowBundle{groups: published})
 	d.flowStateMu.Unlock()
-	publishedExp := make(map[*flowexport.Exporter]bool)
+	publishedExp := make(map[flowExporter]bool)
 	for _, g := range published {
 		publishedExp[g.exp] = true
 	}
-	retireV9Groups(oldByKey, publishedExp)
+	ff.retireGroups(oldByKey, publishedExp)
 	if failedErr != nil {
-		d.flowHashSet = false
-		d.flowExportErr = failedErr
-		d.flowFailedGroups = failed
+		ff.hasSet = false
+		ff.err = failedErr
+		ff.failedGroups = failed
 	} else {
-		d.flowHash, d.flowHashSet = h, true
-		d.flowExportErr = nil
-		d.flowFailedGroups = nil
+		ff.hash, ff.hasSet = h, true
+		ff.err = nil
+		ff.failedGroups = nil
 	}
-	slog.Info("NetFlow v9 exporter reconciled",
+	slog.Info("flow exporter reconciled", "family", ff.name,
 		"template_groups", len(published),
 		"failed_groups", len(failed),
 		"sampling_zones", len(ecs[0].SamplingZones.V4)+len(ecs[0].SamplingZones.V6),
@@ -498,15 +668,10 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	return true
 }
 
-// retireV9Groups stops exactly the exporters of oldByKey that are not
-// in publishedExp (#16752). Each group owns its child context, so a
-// replaced healthy exporter is retired and closed even when a sibling
-// of its original build was retained for a failed instance. Retire
-// happens after the new bundle is published (#4963 handoff lease),
-// then this group's context is cancelled, joined, and closed.
-func retireV9Groups(oldByKey map[string]v9Group, publishedExp map[*flowexport.Exporter]bool) {
-	var doomed []v9Group
-	seen := make(map[*flowexport.Exporter]bool)
+// retireGroups stops exactly the exporters of oldByKey not in publishedExp.
+func (ff *flowFamily) retireGroups(oldByKey map[string]flowGroup, publishedExp map[flowExporter]bool) {
+	var doomed []flowGroup
+	seen := make(map[flowExporter]bool)
 	for _, g := range oldByKey {
 		if g.exp == nil || publishedExp[g.exp] || seen[g.exp] {
 			continue
@@ -521,19 +686,17 @@ func retireV9Groups(oldByKey map[string]v9Group, publishedExp map[*flowexport.Ex
 		if g.cancel != nil {
 			g.cancel()
 		}
-		joinWithBudget(g.wg, "netflow-v9")
+		joinWithBudget(g.wg, ff.name)
 		g.exp.Close()
 	}
 }
 
-// retainedV9Locked returns old groups/exps that must stay live because
-// their instance failed to build (#15230 per-group #3742). Retained
-// groups keep their per-exporter context (#16752), so a later
-// reconcile can still retire them individually.
-func (d *Daemon) retainedV9Locked(failedInstances map[string]bool, desiredKeys map[string]bool, oldByKey map[string]v9Group) ([]v9Group, []*flowexport.Exporter) {
-	var groups []v9Group
-	var exps []*flowexport.Exporter
-	seenExp := make(map[*flowexport.Exporter]bool)
+// retainedLocked returns old groups/exps that must stay live because
+// their instance failed to build (#15230 per-group #3742).
+func (ff *flowFamily) retainedLocked(failedInstances map[string]bool, desiredKeys map[string]bool, oldByKey map[string]flowGroup) ([]flowGroup, []flowExporter) {
+	var groups []flowGroup
+	var exps []flowExporter
+	seenExp := make(map[flowExporter]bool)
 	for k, g := range oldByKey {
 		if !desiredKeys[k] || !failedInstances[g.ec.InstanceName] {
 			continue
@@ -547,12 +710,8 @@ func (d *Daemon) retainedV9Locked(failedInstances map[string]bool, desiredKeys m
 	return groups, exps
 }
 
-// teardownV9Locked cancels, waits for, and closes the running NetFlow
-// v9 exporters, clearing the daemon's handles. It captures the live
-// bundle BEFORE unpublishing it, so it stays correct when a caller
-// (the removal reconcile) has not unpublished yet; stopFlowExporter
-// captures first and calls teardownV9GroupsLocked directly. The
-// caller MUST hold flowReconMu. Nil-safe / idempotent.
+// teardownLocked captures the live bundle BEFORE unpublishing it.
+// Caller MUST hold ff.mu. Nil-safe / idempotent.
 // telemetryDrainBudget bounds a flow-exporter generation join at shutdown
 // (#9035).
 //
@@ -609,47 +768,39 @@ func joinWithBudget(wg *sync.WaitGroup, what string) bool {
 	}
 }
 
-func (d *Daemon) teardownV9Locked() {
+// teardownLocked unpublishes and tears down this family. Caller holds ff.mu.
+func (ff *flowFamily) teardownLocked() {
+	d := ff.d
 	d.flowStateMu.Lock()
-	live := d.flowBundle.Load()
-	d.flowBundle.Store(&exporterBundle{})
+	live := ff.bundle.Load()
+	ff.bundle.Store(&flowBundle{})
 	d.flowStateMu.Unlock()
-	d.teardownV9GroupsLocked(liveGroupsV9(live))
+	ff.teardownGroupsLocked(liveGroups(live))
 }
 
-func liveGroupsV9(b *exporterBundle) []v9Group {
+func liveGroups(b *flowBundle) []flowGroup {
 	if b == nil {
 		return nil
 	}
 	return b.groups
 }
 
-func liveGroupsIPFIX(b *ipfixBundle) []ipfixGroup {
-	if b == nil {
-		return nil
-	}
-	return b.groups
-}
-
-// teardownV9GroupsLocked retires exactly groups (#4963 + #16752):
-// every live group owns its context, so retire, cancel, bounded-join,
-// and close each group exactly once. With no groups it falls back to
-// the exporter list, which carries no per-exporter handles.
-func (d *Daemon) teardownV9GroupsLocked(groups []v9Group) {
+// teardownGroupsLocked retires exactly groups (#4963 + #16752).
+func (ff *flowFamily) teardownGroupsLocked(groups []flowGroup) {
 	if len(groups) == 0 {
-		for _, exp := range d.flowExporters {
+		for _, exp := range ff.exporters {
 			exp.Retire()
 		}
-		if d.flowCancel != nil {
-			d.flowCancel()
+		if ff.cancel != nil {
+			ff.cancel()
 		}
-		joinWithBudget(d.flowWg, "netflow-v9")
-		for _, exp := range d.flowExporters {
+		joinWithBudget(ff.wg, ff.name)
+		for _, exp := range ff.exporters {
 			exp.Close()
 		}
 	} else {
-		seen := make(map[*flowexport.Exporter]bool)
-		var live []v9Group
+		seen := make(map[flowExporter]bool)
+		var live []flowGroup
 		for _, g := range groups {
 			if g.exp == nil || seen[g.exp] {
 				continue
@@ -664,264 +815,53 @@ func (d *Daemon) teardownV9GroupsLocked(groups []v9Group) {
 			if g.cancel != nil {
 				g.cancel()
 			}
-			joinWithBudget(g.wg, "netflow-v9")
+			joinWithBudget(g.wg, ff.name)
 			g.exp.Close()
 		}
 	}
-	d.flowExporters = nil
-	d.flowCancel = nil
-	d.flowWg = nil
+	ff.exporters = nil
+	ff.cancel = nil
+	ff.wg = nil
 }
 
-// FlowExportError returns the last NetFlow v9 exporter build error, or nil
-// when the exporters are healthy / not configured (#3742). It is set when a
-// reconcile's NewExporter build failed and the OLD exporters were kept
-// running so export stayed up, and cleared on the next successful reconcile.
-func (d *Daemon) FlowExportError() error {
-	d.flowReconMu.Lock()
-	defer d.flowReconMu.Unlock()
-	return d.flowExportErr
+// exportError returns this family's last build error.
+func (ff *flowFamily) exportError() error {
+	ff.mu.Lock()
+	defer ff.mu.Unlock()
+	return ff.err
 }
 
-// reconcileIPFIXExporter reconciles the IPFIX template-group exporters.
-// #15230: per-group independent build, mirroring reconcileV9Exporter.
-func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
-	d.ipfixReconMu.Lock()
-	defer d.ipfixReconMu.Unlock()
+func (ff *flowFamily) buildFailed() bool {
+	ff.mu.Lock()
+	defer ff.mu.Unlock()
+	return ff.err != nil
+}
 
-	ecs := d.buildIPFIXExportConfigs(cfg)
-	d.ipfixConfiguredGroups.Store(int64(len(ecs)))
-	h := flowExportConfigHash(ecs)
-	if d.ipfixHashSet && h == d.ipfixHash {
-		return false
-	}
-	wasRunning := len(d.ipfixExporters) > 0
-	if len(ecs) == 0 {
-		d.teardownIPFIXLocked()
-		d.ipfixHash, d.ipfixHashSet = h, true
-		d.ipfixExportErr = nil
-		d.ipfixFailedGroups = nil
-		if !wasRunning {
-			return false
-		}
-		slog.Info("IPFIX exporter stopped (flow export removed)")
-		return true
-	}
-	oldByKey := make(map[string]ipfixGroup)
-	if b := d.ipfixBundlePtr.Load(); b != nil {
-		for _, g := range b.groups {
-			oldByKey[flowGroupKey(g.ec)] = g
-		}
-	}
-	var newGroups []ipfixGroup
-	var newExps []*flowexport.IPFIXExporter
-	var failedErr error
-	failed := make(map[string]bool)
-	failedInstances := make(map[string]bool)
-	desiredKeys := make(map[string]bool)
-	for _, ec := range ecs {
-		desiredKeys[flowGroupKey(ec)] = true
-	}
-	for _, ec := range ecs {
-		exp, err := flowexport.NewIPFIXExporter(ec)
-		if err != nil {
-			slog.Warn("failed to create IPFIX exporter group; other groups continue",
-				"template", ec.TemplateName, "instance", ec.InstanceName, "err", err)
-			failed[flowFailedKey("ipfix", ec)] = true
-			failedInstances[ec.InstanceName] = true
-			if failedErr == nil {
-				failedErr = err
-			}
-			continue
-		}
-		exp.SetHandoffCounter(&d.ipfixHandoffDropped)
-		newExps = append(newExps, exp)
-		newGroups = append(newGroups, ipfixGroup{exp: exp, ec: ec})
-	}
-	retainedGroups, retainedExps := d.retainedIPFIXLocked(failedInstances, desiredKeys, oldByKey)
-	if len(newGroups) == 0 && len(retainedGroups) == 0 {
-		if !wasRunning {
-			d.flowStateMu.Lock()
-			d.ipfixBundlePtr.Store(&ipfixBundle{})
-			d.flowStateMu.Unlock()
-		}
-		d.ipfixHashSet = false
-		d.ipfixExportErr = failedErr
-		d.ipfixFailedGroups = failed
-		return true
-	}
-	d.ensureFlowExportOpenCallback()
-	d.ensureFlowLiveFeed()
-	d.ipfixCBOnce.Do(func() {
-		d.eventReader.AddCallback(d.ipfixExportCallback)
-	})
-	// Every exporter runs under its OWN child of the daemon context
-	// (#16752), mirroring reconcileV9Exporter.
-	for i := range newGroups {
-		childCtx, childCancel := context.WithCancel(d.daemonCtx)
-		wg := &sync.WaitGroup{}
-		wg.Add(1)
-		newGroups[i].cancel = childCancel
-		newGroups[i].wg = wg
-		exp := newGroups[i].exp
-		go func() {
-			defer wg.Done()
-			exp.Run(childCtx)
-		}()
-	}
-	newByKey := make(map[string]ipfixGroup)
-	for _, g := range newGroups {
-		newByKey[flowGroupKey(g.ec)] = g
-	}
-	retByKey := make(map[string]ipfixGroup)
-	for _, g := range retainedGroups {
-		retByKey[flowGroupKey(g.ec)] = g
-	}
-	var published []ipfixGroup
-	for _, ec := range ecs {
-		k := flowGroupKey(ec)
-		if g, ok := newByKey[k]; ok {
-			published = append(published, g)
-		} else if g, ok := retByKey[k]; ok {
-			published = append(published, g)
-		}
-	}
-	allExps := make([]*flowexport.IPFIXExporter, 0, len(newExps)+len(retainedExps))
-	allExps = append(allExps, retainedExps...)
-	allExps = append(allExps, newExps...)
-	d.ipfixExporters = allExps
-	if len(published) > 0 {
-		last := published[len(published)-1]
-		d.ipfixCancel = last.cancel
-		d.ipfixWg = last.wg
-	} else {
-		d.ipfixCancel = nil
-		d.ipfixWg = nil
-	}
-	// #16742: carry live open state to same-key replacements (v9 twin).
+// stop stops this family at shutdown.
+func (ff *flowFamily) stop() {
+	ff.mu.Lock()
+	defer ff.mu.Unlock()
+	d := ff.d
 	d.flowStateMu.Lock()
-	d.carryFlowStateIPFIXLocked(published)
-	d.ipfixBundlePtr.Store(&ipfixBundle{groups: published})
+	live := ff.bundle.Load()
+	ff.bundle.Store(&flowBundle{})
 	d.flowStateMu.Unlock()
-	publishedExp := make(map[*flowexport.IPFIXExporter]bool)
-	for _, g := range published {
-		publishedExp[g.exp] = true
-	}
-	retireIPFIXGroups(oldByKey, publishedExp)
-	if failedErr != nil {
-		d.ipfixHashSet = false
-		d.ipfixExportErr = failedErr
-		d.ipfixFailedGroups = failed
-	} else {
-		d.ipfixHash, d.ipfixHashSet = h, true
-		d.ipfixExportErr = nil
-		d.ipfixFailedGroups = nil
-	}
-	slog.Info("IPFIX exporter reconciled",
-		"template_groups", len(published),
-		"failed_groups", len(failed),
-		"sampling_zones", len(ecs[0].SamplingZones.V4)+len(ecs[0].SamplingZones.V6),
-		"sampling_rate", ecs[0].SamplingRate)
-	return true
+	ff.teardownGroupsLocked(liveGroups(live))
+	ff.err = nil
 }
 
-// retireIPFIXGroups is the IPFIX equivalent of retireV9Groups (#16752).
-func retireIPFIXGroups(oldByKey map[string]ipfixGroup, publishedExp map[*flowexport.IPFIXExporter]bool) {
-	var doomed []ipfixGroup
-	seen := make(map[*flowexport.IPFIXExporter]bool)
-	for _, g := range oldByKey {
-		if g.exp == nil || publishedExp[g.exp] || seen[g.exp] {
-			continue
-		}
-		seen[g.exp] = true
-		doomed = append(doomed, g)
-	}
-	for _, g := range doomed {
-		g.exp.Retire()
-	}
-	for _, g := range doomed {
-		if g.cancel != nil {
-			g.cancel()
-		}
-		joinWithBudget(g.wg, "ipfix")
-		g.exp.Close()
-	}
-}
+// FlowExportError returns the last NetFlow v9 build error (#3742 wrappers).
+func (d *Daemon) FlowExportError() error { return d.v9Family().exportError() }
 
-func (d *Daemon) retainedIPFIXLocked(failedInstances map[string]bool, desiredKeys map[string]bool, oldByKey map[string]ipfixGroup) ([]ipfixGroup, []*flowexport.IPFIXExporter) {
-	var groups []ipfixGroup
-	var exps []*flowexport.IPFIXExporter
-	seenExp := make(map[*flowexport.IPFIXExporter]bool)
-	for k, g := range oldByKey {
-		if !desiredKeys[k] || !failedInstances[g.ec.InstanceName] {
-			continue
-		}
-		groups = append(groups, g)
-		if !seenExp[g.exp] {
-			seenExp[g.exp] = true
-			exps = append(exps, g.exp)
-		}
-	}
-	return groups, exps
-}
+// IPFIXExportError returns the last IPFIX build error.
+func (d *Daemon) IPFIXExportError() error { return d.ipfixFamily().exportError() }
 
-// teardownIPFIXLocked is the IPFIX equivalent of teardownV9Locked.
-func (d *Daemon) teardownIPFIXLocked() {
-	d.flowStateMu.Lock()
-	live := d.ipfixBundlePtr.Load()
-	d.ipfixBundlePtr.Store(&ipfixBundle{})
-	d.flowStateMu.Unlock()
-	d.teardownIPFIXGroupsLocked(liveGroupsIPFIX(live))
-}
+// stopFlowExporter / stopIPFIXExporter are shutdown wrappers (names kept
+// for the shutdown sequence and its AST canary).
+func (d *Daemon) stopFlowExporter()  { d.v9Family().stop() }
+func (d *Daemon) stopIPFIXExporter() { d.ipfixFamily().stop() }
 
-// teardownIPFIXGroupsLocked retires exactly groups (#4963 + #16752).
-func (d *Daemon) teardownIPFIXGroupsLocked(groups []ipfixGroup) {
-	if len(groups) == 0 {
-		for _, exp := range d.ipfixExporters {
-			exp.Retire()
-		}
-		if d.ipfixCancel != nil {
-			d.ipfixCancel()
-		}
-		joinWithBudget(d.ipfixWg, "ipfix")
-		for _, exp := range d.ipfixExporters {
-			exp.Close()
-		}
-	} else {
-		seen := make(map[*flowexport.IPFIXExporter]bool)
-		var live []ipfixGroup
-		for _, g := range groups {
-			if g.exp == nil || seen[g.exp] {
-				continue
-			}
-			seen[g.exp] = true
-			live = append(live, g)
-		}
-		for _, g := range live {
-			g.exp.Retire()
-		}
-		for _, g := range live {
-			if g.cancel != nil {
-				g.cancel()
-			}
-			joinWithBudget(g.wg, "ipfix")
-			g.exp.Close()
-		}
-	}
-	d.ipfixExporters = nil
-	d.ipfixCancel = nil
-	d.ipfixWg = nil
-}
-
-// IPFIXExportError returns the last IPFIX exporter build error, or nil when
-// the exporters are healthy / not configured (#3742).
-func (d *Daemon) IPFIXExportError() error {
-	d.ipfixReconMu.Lock()
-	defer d.ipfixReconMu.Unlock()
-	return d.ipfixExportErr
-}
-
-// flowExportCallback is the single, stable NetFlow v9 session-close
+// closeCallback is the single, stable per-family session-close
 // handler registered on the EventReader exactly once. It loads the live
 // set of template-group exporters from the atomic bundle while holding
 // flowStateMu, which also serializes state carry and publication.
@@ -940,7 +880,8 @@ func (d *Daemon) IPFIXExportError() error {
 // (groupedByInstance walks contiguous same-instance runs — the resolver
 // emits an instance's groups consecutively) so the shared per-instance
 // counter advances exactly once per eligible flow.
-func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
+func (ff *flowFamily) closeCallback(rec logging.EventRecord, raw []byte) {
+	d := ff.d
 	// #16303: SESSION_OPEN sampling is owned by the single fanout
 	// callback below, not by each protocol callback. EventReader invokes
 	// every registered callback for every record, so letting both the v9
@@ -954,7 +895,7 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 	}
 	d.flowStateMu.Lock()
 	defer d.flowStateMu.Unlock()
-	b := d.flowBundle.Load()
+	b := ff.bundle.Load()
 	if b == nil || len(b.groups) == 0 {
 		return
 	}
@@ -1064,89 +1005,6 @@ func (d *Daemon) flowExportOpenCallback(rec logging.EventRecord, raw []byte) {
 	d.trackFlowOpen(rec)
 }
 
-// ipfixExportCallback is the IPFIX equivalent of flowExportCallback.
-func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
-	if rec.Type == "SESSION_OPEN" {
-		return
-	}
-	if rec.Type != "SESSION_CLOSE" {
-		return
-	}
-	d.flowStateMu.Lock()
-	defer d.flowStateMu.Unlock()
-	b := d.ipfixBundlePtr.Load()
-	if b == nil || len(b.groups) == 0 {
-		return
-	}
-	sd := flowexport.SessionCloseData{
-		SrcPort: parseSrcPort(rec.SrcAddr),
-		DstPort: parseSrcPort(rec.DstAddr),
-		// #3939: carry the record's raw numeric IP protocol (rec.ProtocolNum,
-		// 0-255) verbatim — see the NetFlow callback above. parseProtocol's
-		// name table dropped GRE/ESP/AH (and all non-TCP/UDP/ICMP) to 0.
-		Protocol: rec.ProtocolNum,
-		// #2749: ingress ifindex (SNMP ifIndex) for the IPFIX
-		// ingressInterface field; carried on the close frame since #2615.
-		InIf: rec.IngressIfindex,
-		// #2749: class-of-service + egress-interface attribution carried on the
-		// extended SESSION_CLOSE frame's [144:152] block.
-		TOS:      rec.TOS,
-		TCPFlags: rec.TCPControlBits,
-		OutIf:    rec.EgressIfindex,
-	}
-	sd.SrcIP, sd.DstIP, sd.IsIPv6 = parseAddrPair(rec.SrcAddr, rec.DstAddr)
-	// #2526: parse the post-NAT translated tuple; the exporter falls back to
-	// the pre-NAT tuple for any half that is absent/unspecified.
-	sd.NATSrcIP = parseHost(rec.NATSrcAddr)
-	sd.NATDstIP = parseHost(rec.NATDstAddr)
-	sd.NATSrcPort = parseSrcPort(rec.NATSrcAddr)
-	sd.NATDstPort = parseSrcPort(rec.NATDstAddr)
-
-	i := 0
-	for i < len(b.groups) {
-		inst := b.groups[i].ec.InstanceName
-		lead := b.groups[i].ec
-		j := i
-		for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
-			j++
-		}
-		key := flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6)
-		if lead.ServesFamily(sd.IsIPv6) {
-			// #16303 fold 3: per-exporter baselines, as in the v9 callback.
-			// #16742: no recorded open anywhere in this instance ->
-			// one shared close-time decision, as in the v9 callback.
-			anyState := false
-			for k := i; k < j; k++ {
-				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
-					continue
-				}
-				if b.groups[k].exp.HasFlowState(key) {
-					anyState = true
-					break
-				}
-			}
-			var decide func() bool
-			if !anyState {
-				decide = sync.OnceValue(func() bool {
-					return lead.SampledForClose(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
-				})
-			}
-			for k := i; k < j; k++ {
-				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
-					continue
-				}
-				s, p, by, rp, rb := b.groups[k].exp.CloseFlowOrSample(key, decide)
-				if !s {
-					continue
-				}
-				sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
-				b.groups[k].exp.ExportSessionCloseRemainder(rec, sd, p, by, rp, rb)
-			}
-		}
-		i = j
-	}
-}
-
 // trackFlowOpen is the shared SESSION_OPEN tracker feed (#15946,
 // #16303). For each protocol and instance it makes one sampling
 // decision. The exporter records either selected state or a rejected
@@ -1195,73 +1053,47 @@ func (d *Daemon) trackFlowOpenLocked(rec logging.EventRecord) {
 		tmpl.NATDstIP = dstIP
 		tmpl.NATDstPort = key.DstPort
 	}
-	if b := d.flowBundle.Load(); b != nil {
-		for i := 0; i < len(b.groups); {
-			inst := b.groups[i].ec.InstanceName
-			lead := b.groups[i].ec
-			j := i
-			for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
-				j++
-			}
-			if lead.ServesFamily(isV6) {
-				decided := false
-				for k := i; k < j; k++ {
-					if b.groups[k].ec.GroupIsV6 == isV6 && b.groups[k].exp.HasFlowState(key) {
-						decided = true
-						break
-					}
-				}
-				if !decided {
-					selected := lead.SampledForOpen(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface)
-					for k := i; k < j; k++ {
-						if b.groups[k].ec.GroupIsV6 != isV6 {
-							continue
-						}
-						if selected {
-							b.groups[k].exp.MarkFlowSampledAtOpen(key)
-							b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
-						} else {
-							b.groups[k].exp.MarkFlowRejectedAtOpen(key)
-						}
-					}
-				}
-			}
-			i = j
-		}
+	for _, ff := range d.flowFamiliesOrNil() {
+		ff.trackOpenLocked(rec, key, tmpl, isV6)
 	}
-	if b := d.ipfixBundlePtr.Load(); b != nil {
-		for i := 0; i < len(b.groups); {
-			inst := b.groups[i].ec.InstanceName
-			lead := b.groups[i].ec
-			j := i
-			for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
-				j++
-			}
-			if lead.ServesFamily(isV6) {
-				decided := false
-				for k := i; k < j; k++ {
-					if b.groups[k].ec.GroupIsV6 == isV6 && b.groups[k].exp.HasFlowState(key) {
-						decided = true
-						break
-					}
-				}
-				if !decided {
-					selected := lead.SampledForOpen(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface)
-					for k := i; k < j; k++ {
-						if b.groups[k].ec.GroupIsV6 != isV6 {
-							continue
-						}
-						if selected {
-							b.groups[k].exp.MarkFlowSampledAtOpen(key)
-							b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
-						} else {
-							b.groups[k].exp.MarkFlowRejectedAtOpen(key)
-						}
-					}
-				}
-			}
-			i = j
+}
+
+func (ff *flowFamily) trackOpenLocked(rec logging.EventRecord, key flowexport.FlowKey, tmpl flowexport.FlowRecord, isV6 bool) {
+	b := ff.bundle.Load()
+	if b == nil {
+		return
+	}
+	for i := 0; i < len(b.groups); {
+		inst := b.groups[i].ec.InstanceName
+		lead := b.groups[i].ec
+		j := i
+		for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
+			j++
 		}
+		if lead.ServesFamily(isV6) {
+			decided := false
+			for k := i; k < j; k++ {
+				if b.groups[k].ec.GroupIsV6 == isV6 && b.groups[k].exp.HasFlowState(key) {
+					decided = true
+					break
+				}
+			}
+			if !decided {
+				selected := lead.SampledForOpen(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface)
+				for k := i; k < j; k++ {
+					if b.groups[k].ec.GroupIsV6 != isV6 {
+						continue
+					}
+					if selected {
+						b.groups[k].exp.MarkFlowSampledAtOpen(key)
+						b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
+					} else {
+						b.groups[k].exp.MarkFlowRejectedAtOpen(key)
+					}
+				}
+			}
+		}
+		i = j
 	}
 }
 
@@ -1285,7 +1117,13 @@ func (d *Daemon) trackFlowOpenFromSync(delta dpuserspace.SessionDeltaInfo) {
 	}
 	d.flowStateMu.Lock()
 	defer d.flowStateMu.Unlock()
-	if d.flowBundle.Load() == nil && d.ipfixBundlePtr.Load() == nil {
+	hasBundle := false
+	for _, ff := range d.flowFamiliesOrNil() {
+		if ff.bundle.Load() != nil {
+			hasBundle = true
+		}
+	}
+	if !hasBundle {
 		return
 	}
 	rec := logging.EventRecord{
@@ -1316,38 +1154,14 @@ func (d *Daemon) trackFlowOpenFromSync(delta dpuserspace.SessionDeltaInfo) {
 	d.trackFlowOpenLocked(rec)
 }
 
-// carryFlowStateV9Locked transfers live open state from the previously
-// published v9 groups to their same-key replacements (#16742). Called
-// with flowReconMu held, before the old generation is retired, so an
-// open -> exporter-replacing reconcile -> close still exports exactly
-// once (the replacement holds the state; the retired source's flush
-// never re-emits tracker state).
-func (d *Daemon) carryFlowStateV9Locked(published []v9Group) {
-	old := d.flowBundle.Load()
+// carryFlowStateLocked transfers live open state from the previously
+// published groups to their same-key replacements (#16742).
+func (ff *flowFamily) carryFlowStateLocked(published []flowGroup) {
+	old := ff.bundle.Load()
 	if old == nil || len(old.groups) == 0 {
 		return
 	}
-	oldByKey := make(map[string]v9Group, len(old.groups))
-	for _, g := range old.groups {
-		oldByKey[flowGroupKey(g.ec)] = g
-	}
-	for _, ng := range published {
-		og, ok := oldByKey[flowGroupKey(ng.ec)]
-		if !ok || og.exp == ng.exp {
-			continue
-		}
-		og.exp.AbsorbSampledInto(ng.exp)
-	}
-}
-
-// carryFlowStateIPFIXLocked is the IPFIX equivalent of
-// carryFlowStateV9Locked (#16742).
-func (d *Daemon) carryFlowStateIPFIXLocked(published []ipfixGroup) {
-	old := d.ipfixBundlePtr.Load()
-	if old == nil || len(old.groups) == 0 {
-		return
-	}
-	oldByKey := make(map[string]ipfixGroup, len(old.groups))
+	oldByKey := make(map[string]flowGroup, len(old.groups))
 	for _, g := range old.groups {
 		oldByKey[flowGroupKey(g.ec)] = g
 	}
@@ -1387,14 +1201,11 @@ func (d *Daemon) FlowExportSamplingStats() []flowexport.SamplingStatsSnapshot {
 			Evaluated: evaluated, Selected: selected, ZoneFiltered: zoneFiltered,
 		})
 	}
-	if b := d.flowBundle.Load(); b != nil {
-		for _, g := range b.groups {
-			appendStats("netflow-v9", g.ec)
-		}
-	}
-	if b := d.ipfixBundlePtr.Load(); b != nil {
-		for _, g := range b.groups {
-			appendStats("ipfix", g.ec)
+	for _, ff := range d.flowFamiliesOrNil() {
+		if b := ff.bundle.Load(); b != nil {
+			for _, g := range b.groups {
+				appendStats(ff.name, g.ec)
+			}
 		}
 	}
 	return out
@@ -1405,29 +1216,18 @@ func (d *Daemon) FlowExportSamplingStats() []flowexport.SamplingStatsSnapshot {
 
 func (d *Daemon) FlowCollectorHealth() []flowexport.ExporterCollectorHealth {
 	var out []flowexport.ExporterCollectorHealth
-	if b := d.flowBundle.Load(); b != nil {
-		for _, g := range b.groups {
-			for _, h := range g.exp.CollectorHealth() {
-				out = append(out, flowexport.ExporterCollectorHealth{
-					Protocol:        "netflow-v9",
-					Instance:        g.ec.InstanceName,
-					Template:        g.ec.TemplateName,
-					Family:          flowExportAddressFamily(g.ec.GroupIsV6),
-					CollectorHealth: h,
-				})
-			}
-		}
-	}
-	if b := d.ipfixBundlePtr.Load(); b != nil {
-		for _, g := range b.groups {
-			for _, h := range g.exp.CollectorHealth() {
-				out = append(out, flowexport.ExporterCollectorHealth{
-					Protocol:        "ipfix",
-					Instance:        g.ec.InstanceName,
-					Template:        g.ec.TemplateName,
-					Family:          flowExportAddressFamily(g.ec.GroupIsV6),
-					CollectorHealth: h,
-				})
+	for _, ff := range d.flowFamiliesOrNil() {
+		if b := ff.bundle.Load(); b != nil {
+			for _, g := range b.groups {
+				for _, h := range g.exp.CollectorHealth() {
+					out = append(out, flowexport.ExporterCollectorHealth{
+						Protocol:        ff.name,
+						Instance:        g.ec.InstanceName,
+						Template:        g.ec.TemplateName,
+						Family:          flowExportAddressFamily(g.ec.GroupIsV6),
+						CollectorHealth: h,
+					})
+				}
 			}
 		}
 	}
@@ -1443,44 +1243,26 @@ func (d *Daemon) FlowCollectorHealth() []flowexport.ExporterCollectorHealth {
 // mutex-guarded read. Surfaced through the daemon to REST/Prometheus.
 func (d *Daemon) FlowExportBatchStats() []flowexport.ExporterBatchStats {
 	var out []flowexport.ExporterBatchStats
-	if b := d.flowBundle.Load(); b != nil {
-		for _, g := range b.groups {
-			flows, packets := g.exp.Stats()
-			out = append(out, flowexport.ExporterBatchStats{
-				Protocol:            "netflow-v9",
-				Instance:            g.ec.InstanceName,
-				Template:            g.ec.TemplateName,
-				Family:              flowExportAddressFamily(g.ec.GroupIsV6),
-				Depth:               g.exp.BatchDepth(),
-				MaxDepth:            g.exp.BatchMaxDepth(),
-				Dropped:             g.exp.BatchDropped(),
-				ExportedFlows:       flows,
-				ExportedPackets:     packets,
-				HandoffDropped:      g.exp.HandoffDropped(),
-				RouteMaskUnresolved: g.exp.RouteMaskUnresolved(),
-				EstimatedDurations:  g.exp.EstimatedDurations(),
-				ClockSkewClamped:    g.exp.ClockSkewClamped(),
-			})
-		}
-	}
-	if b := d.ipfixBundlePtr.Load(); b != nil {
-		for _, g := range b.groups {
-			flows, packets := g.exp.Stats()
-			out = append(out, flowexport.ExporterBatchStats{
-				Protocol:            "ipfix",
-				Instance:            g.ec.InstanceName,
-				Template:            g.ec.TemplateName,
-				Family:              flowExportAddressFamily(g.ec.GroupIsV6),
-				Depth:               g.exp.BatchDepth(),
-				MaxDepth:            g.exp.BatchMaxDepth(),
-				Dropped:             g.exp.BatchDropped(),
-				ExportedFlows:       flows,
-				ExportedPackets:     packets,
-				HandoffDropped:      g.exp.HandoffDropped(),
-				RouteMaskUnresolved: g.exp.RouteMaskUnresolved(),
-				EstimatedDurations:  g.exp.EstimatedDurations(),
-				ClockSkewClamped:    g.exp.ClockSkewClamped(),
-			})
+	for _, ff := range d.flowFamiliesOrNil() {
+		if b := ff.bundle.Load(); b != nil {
+			for _, g := range b.groups {
+				flows, packets := g.exp.Stats()
+				out = append(out, flowexport.ExporterBatchStats{
+					Protocol:            ff.name,
+					Instance:            g.ec.InstanceName,
+					Template:            g.ec.TemplateName,
+					Family:              flowExportAddressFamily(g.ec.GroupIsV6),
+					Depth:               g.exp.BatchDepth(),
+					MaxDepth:            g.exp.BatchMaxDepth(),
+					Dropped:             g.exp.BatchDropped(),
+					ExportedFlows:       flows,
+					ExportedPackets:     packets,
+					HandoffDropped:      g.exp.HandoffDropped(),
+					RouteMaskUnresolved: g.exp.RouteMaskUnresolved(),
+					EstimatedDurations:  g.exp.EstimatedDurations(),
+					ClockSkewClamped:    g.exp.ClockSkewClamped(),
+				})
+			}
 		}
 	}
 	return out
@@ -1495,5 +1277,9 @@ func (d *Daemon) FlowExportBatchStats() []flowexport.ExporterBatchStats {
 // shared family counter), so a nonzero value is the operator-visible signal
 // that day-2 flow-export reconciles are losing close records at handoff.
 func (d *Daemon) FlowExportHandoffDropped() (netflowV9, ipfix uint64) {
-	return d.flowHandoffDropped.Load(), d.ipfixHandoffDropped.Load()
+	fams := d.flowFamiliesOrNil()
+	if len(fams) < 2 {
+		return 0, 0
+	}
+	return fams[0].handoffDropped.Load(), fams[1].handoffDropped.Load()
 }

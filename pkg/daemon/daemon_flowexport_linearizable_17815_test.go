@@ -37,7 +37,7 @@ func TestConcurrentSyncOpenDecisionIsAtomic17815(t *testing.T) {
 		t.Fatalf("concurrent duplicate opens sampled %d/%d, want 2/2 (one decision per protocol bundle)", evaluated, selected)
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24041, DstPort: 443, Protocol: 6}
-	if !d.flowBundle.Load().firstExp().Tracked(key) || !d.ipfixBundlePtr.Load().firstExp().Tracked(key) {
+	if !d.v9Family().bundle.Load().firstExp().Tracked(key) || !d.ipfixFamily().bundle.Load().firstExp().Tracked(key) {
 		t.Fatal("the one selected decision must be registered in both protocol bundles")
 	}
 }
@@ -50,7 +50,7 @@ func TestCloseWaitsForStateCarryAndPublication17815(t *testing.T) {
 		t.Fatal("rejected open rejected")
 	}
 
-	oldBundle := d.flowBundle.Load()
+	oldBundle := d.v9Family().bundle.Load()
 	if oldBundle == nil || len(oldBundle.groups) == 0 {
 		t.Fatal("initial v9 exporter bundle missing")
 	}
@@ -66,13 +66,13 @@ func TestCloseWaitsForStateCarryAndPublication17815(t *testing.T) {
 	collector, port := listenUDP(t)
 	t.Cleanup(func() { collector.Close() })
 	replacementConfig := openSamplingConfig16303(t, port, port, "1")
-	copied := make(chan *flowexport.Exporter, 1)
+	copied := make(chan flowExporter, 1)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseCarry := func() { releaseOnce.Do(func() { close(release) }) }
-	d.flowStateCarryTestHook = func() {
-		var replacement *flowexport.Exporter
-		for _, exp := range d.flowExporters {
+	d.v9Family().stateCarryTestHook = func() {
+		var replacement flowExporter
+		for _, exp := range d.v9Family().exporters {
 			if exp != oldGroup.exp && exp.HasFlowState(key) {
 				replacement = exp
 				break
@@ -86,7 +86,7 @@ func TestCloseWaitsForStateCarryAndPublication17815(t *testing.T) {
 	var reconcileOK bool
 	var closeDone chan struct{}
 	go func() {
-		reconcileOK = d.reconcileV9Exporter(replacementConfig)
+		reconcileOK = d.v9Family().reconcile(replacementConfig)
 		close(reconcileDone)
 	}()
 	t.Cleanup(func() {
@@ -95,13 +95,13 @@ func TestCloseWaitsForStateCarryAndPublication17815(t *testing.T) {
 		if closeDone != nil {
 			<-closeDone
 		}
-		d.flowStateCarryTestHook = nil
+		d.v9Family().stateCarryTestHook = nil
 		// Also retire the captured original explicitly: cleanup remains
 		// complete even if the test exits while reconciliation is paused.
-		retireV9Groups(map[string]v9Group{flowGroupKey(oldGroup.ec): oldGroup}, nil)
+		d.v9Family().retireGroups(map[string]flowGroup{flowGroupKey(oldGroup.ec): oldGroup}, nil)
 	})
 
-	var replacement *flowexport.Exporter
+	var replacement flowExporter
 	select {
 	case replacement = <-copied:
 	case <-reconcileDone:
@@ -124,7 +124,7 @@ func TestCloseWaitsForStateCarryAndPublication17815(t *testing.T) {
 	closeStarted := make(chan struct{})
 	go func() {
 		close(closeStarted)
-		d.flowExportCallback(closeRec, nil)
+		d.v9Family().closeCallback(closeRec, nil)
 		close(closeDone)
 	}()
 	<-closeStarted
@@ -145,7 +145,7 @@ func TestCloseWaitsForStateCarryAndPublication17815(t *testing.T) {
 		t.Fatal("close did not resume after bundle publication")
 	}
 
-	published := d.flowBundle.Load()
+	published := d.v9Family().bundle.Load()
 	if published == nil {
 		t.Fatal("replacement bundle was not published")
 	}
@@ -195,8 +195,8 @@ func TestStopIPFIXExporterClearsOnlyIPFIXError17815(t *testing.T) {
 	d := newFlowTestDaemon()
 	v9Err := errors.New("v9 build error")
 	ipfixErr := errors.New("IPFIX build error")
-	d.flowExportErr = v9Err
-	d.ipfixExportErr = ipfixErr
+	d.v9Family().err = v9Err
+	d.ipfixFamily().err = ipfixErr
 
 	d.stopIPFIXExporter()
 	if got := d.IPFIXExportError(); got != nil {

@@ -111,14 +111,14 @@ func TestTrackerInterimEgressDirectionAndMasks16754(t *testing.T) {
 		return 0, false
 	})
 
-	var v9exp *flowexport.Exporter
-	var ipexp *flowexport.IPFIXExporter
-	for _, g := range d.flowBundle.Load().groups {
+	var v9exp flowExporter
+	var ipexp flowExporter
+	for _, g := range d.v9Family().bundle.Load().groups {
 		if !g.ec.GroupIsV6 {
 			v9exp = g.exp
 		}
 	}
-	for _, g := range d.ipfixBundlePtr.Load().groups {
+	for _, g := range d.ipfixFamily().bundle.Load().groups {
 		if !g.ec.GroupIsV6 {
 			ipexp = g.exp
 		}
@@ -126,8 +126,8 @@ func TestTrackerInterimEgressDirectionAndMasks16754(t *testing.T) {
 	if v9exp == nil || ipexp == nil {
 		t.Fatal("v4 groups must exist")
 	}
-	v9exp.MaskResolver = maskFor
-	ipexp.MaskResolver = maskFor
+	v9exp.SetMaskResolver(maskFor)
+	ipexp.SetMaskResolver(maskFor)
 
 	trust, untrust := config.StableZoneID("trust"), config.StableZoneID("untrust")
 	if !d.eventReader.ProcessRawEvent(openRaw16303(44567, 11, 12, uint16(trust), uint16(untrust))) {

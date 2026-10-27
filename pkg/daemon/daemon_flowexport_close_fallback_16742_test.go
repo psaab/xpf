@@ -47,10 +47,10 @@ func TestCloseAfterExporterReplacingReconcileExportsOnce16742(t *testing.T) {
 		t.Fatal("open rejected")
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 23457, DstPort: 443, Protocol: 6}
-	if b := d.flowBundle.Load(); b == nil || !b.firstExp().Tracked(key) {
+	if b := d.v9Family().bundle.Load(); b == nil || !b.firstExp().Tracked(key) {
 		t.Fatal("sampled open must be tracked before reconcile")
 	}
-	oldExp := d.flowBundle.Load().firstExp()
+	oldExp := d.v9Family().bundle.Load().firstExp()
 
 	// Exporter-replacing reconcile: different collector port (hash
 	// change) with the same instance/template/family group key.
@@ -59,7 +59,7 @@ func TestCloseAfterExporterReplacingReconcileExportsOnce16742(t *testing.T) {
 	if !d.reconcileFlowExporters(openSamplingConfig16303(t, port2, port2, "1")) {
 		t.Fatal("replacing reconcile must apply")
 	}
-	newExp := d.flowBundle.Load().firstExp()
+	newExp := d.v9Family().bundle.Load().firstExp()
 	if newExp == nil || newExp == oldExp {
 		t.Fatal("reconcile must swap to a new exporter")
 	}
@@ -103,10 +103,10 @@ func TestCloseWithNoOpenAtRateOneExports16742(t *testing.T) {
 	if !d.eventReader.ProcessRawEvent(closeRaw16742(23458, trust, untrust)) {
 		t.Fatal("close rejected")
 	}
-	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got != 1 {
+	if got := waitFlows(t, d.v9Family().bundle.Load().firstExp().Stats); got != 1 {
 		t.Fatalf("no-open close at rate 1: v9 flows = %d, want 1", got)
 	}
-	if got := waitFlows(t, d.ipfixBundlePtr.Load().firstExp().Stats); got != 1 {
+	if got := waitFlows(t, d.ipfixFamily().bundle.Load().firstExp().Stats); got != 1 {
 		t.Fatalf("no-open close at rate 1: ipfix flows = %d, want 1", got)
 	}
 	for _, s := range d.FlowExportSamplingStats() {
@@ -136,7 +136,7 @@ func TestCloseWithNoOpenRateTwoFallbackCadence16742(t *testing.T) {
 	// Rate 2: first no-open close consumes slot 1 (miss), second slot 2 (hit).
 	closeFor(23459)
 	closeFor(23460)
-	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got != 1 {
+	if got := waitFlows(t, d.v9Family().bundle.Load().firstExp().Stats); got != 1 {
 		t.Fatalf("rate-2 no-open closes: v9 flows = %d, want 1 (second close)", got)
 	}
 	for _, s := range d.FlowExportSamplingStats() {
@@ -167,10 +167,10 @@ func TestPromoteOpenFromSyncRegistersForExport16742(t *testing.T) {
 		IngressIfindex: 11, EgressIfindex: 12,
 	})
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 23461, DstPort: 443, Protocol: 6}
-	if b := d.flowBundle.Load(); b == nil || !b.firstExp().Tracked(key) {
+	if b := d.v9Family().bundle.Load(); b == nil || !b.firstExp().Tracked(key) {
 		t.Fatal("#16742: promote open from sync must be tracked for flow export (no syslog CREATE)")
 	}
-	if b := d.ipfixBundlePtr.Load(); b == nil || !b.firstExp().Tracked(key) {
+	if b := d.ipfixFamily().bundle.Load(); b == nil || !b.firstExp().Tracked(key) {
 		t.Fatal("#16742: promote open from sync must be tracked in ipfix too")
 	}
 	// Its close then exports via the recorded open (no fallback slot).
@@ -179,7 +179,7 @@ func TestPromoteOpenFromSyncRegistersForExport16742(t *testing.T) {
 	if !d.eventReader.ProcessRawEvent(closeBuf) {
 		t.Fatal("close rejected")
 	}
-	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got != 1 {
+	if got := waitFlows(t, d.v9Family().bundle.Load().firstExp().Stats); got != 1 {
 		t.Fatalf("promoted flow close: v9 flows = %d, want 1", got)
 	}
 }
