@@ -415,7 +415,22 @@ same family and priority and does not validate DSCP/action fields.
   The AF_XDP FIB applies source-table LPM precedence only when a configured
   next-table route covers the destination. Rib-group-only leaks keep
   lookup-first behavior. Exceptions are limited to static config routes;
-  dynamic, connected, and learned main routes remain the #17971 follow-up.
+  Dynamic, connected, and learned main routes were the #17971 follow-up;
+  the dynamic learned leg landed there (see below), connected routes
+  remain excluded.
+
+  Dynamic carve-outs (#17971) extend the exception set beyond configured
+  statics: slot-0 main lookups are also minted for live learned main-table
+  rows (the `ImportLearnedRoutes` dump over table 254) strictly more
+  specific than an admitted leak prefix — BGP/OSPF/RIP/ISIS/DHCP/zebra
+  installs, operator routes, and blackhole/unreachable negatives. Apply
+  reconciles the whole exception band on every commit, and the daemon
+  route listener re-runs only that band (`RefreshNextTableCarveouts`) on
+  its coalesced actuation so learned churn between commits converges
+  without reinstalling leak lookups or shadows. A failed live dump leaves
+  the installed band untouched and surfaces an error. Connected
+  (gateway-less) main routes remain excluded: the importer rejects them
+  and their parity needs the RG-ownership-aware connected set (#15742).
 
   The `maxNextTableRules` admission cap remains separate from priority
   assignment. Its eligible routes are drawn down IPv4-first (#6583), with
@@ -674,9 +689,9 @@ same family and priority and does not validate DSCP/action fields.
   recognizes the old selector-identical shadow for in-place upgrades.
   In the AF_XDP FIB, config statics remain Junos routes (LPM + terminal target
   miss, protocol v73). The kernel's target lookup runs before broad main-table
-  terminal defaults; configured static main routes more specific than a matching
-  next-table leak are represented by iif-scoped slot-0 exceptions. Dynamic,
-  connected, and learned route parity remains tracked in #17971.
+  terminal defaults; configured static and live learned (#17971) main routes
+  more specific than a matching next-table leak are represented by iif-scoped
+  slot-0 exceptions. Connected route parity remains excluded (see above).
 - `32000–32099`: legacy next-table leak priorities, cleared only to remove
   stale rules left by an in-place upgrade.
 - `33000–33099`: legacy pre-#3876 blanket rib-group rules. New rules are
