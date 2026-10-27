@@ -974,8 +974,9 @@ deploy_vm() {
 
 	if [[ -f "$PROJECT_ROOT/xpf-userspace-dp" ]]; then
 		info "Pushing xpf-userspace-dp to $vm..."
-		incus file push "$PROJECT_ROOT/xpf-userspace-dp" "${rinst}/usr/local/sbin/xpf-userspace-dp" --mode 0755
+		incus file push "$PROJECT_ROOT/xpf-userspace-dp" "${rinst}/usr/local/sbin/xpf-userspace-dp" --uid 0 --gid 0 --mode 0755
 		deploy_verify_pushed_sha "$rinst" "$PROJECT_ROOT/xpf-userspace-dp" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp
+		deploy_verify_pushed_uid "$rinst" /usr/local/sbin/xpf-userspace-dp xpf-userspace-dp
 	else
 		warn "xpf-userspace-dp not found locally; helper not pushed to $vm"
 	fi
