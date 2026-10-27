@@ -117,7 +117,7 @@ func assertVariantRuleMatch12686(
 	result := policymatch.Match(cfg, policymatch.Query{
 		FromZone: from, ToZone: to,
 		SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("10.0.0.2"),
-		Protocol: "tcp", SrcPort: int(srcPort), DstPort: int(variantDestinationPort12686(name)),
+		Protocol: "tcp", SrcPort: policymatch.PortPtr(uint16(srcPort)), DstPort: policymatch.PortPtr(uint16(variantDestinationPort12686(name))),
 		SrcFamily: "v4", DstFamily: "v4",
 	})
 	want := ruleZones + "/" + name
@@ -249,7 +249,7 @@ func TestPolicyInvalidationRollbackAnyZone12686(t *testing.T) {
 	mismatch := policymatch.Match(c0, policymatch.Query{
 		FromZone: "other", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("10.0.0.2"),
-		Protocol: "udp", SrcPort: 2001, DstPort: 5353,
+		Protocol: "udp", SrcPort: policymatch.PortPtr(2001), DstPort: policymatch.PortPtr(5353),
 		SrcFamily: "v4", DstFamily: "v4",
 	})
 	if mismatch.Action == config.PolicyPermit {

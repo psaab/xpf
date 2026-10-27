@@ -59,7 +59,7 @@ func TestExcludedFlagsAndRuleIDOnMatch(t *testing.T) {
 		SrcIP:    net.ParseIP("10.0.5.7"),
 		DstIP:    net.ParseIP("198.51.100.7"),
 		Protocol: "tcp",
-		DstPort:  80,
+		DstPort:  PortPtr(80),
 	})
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("expected permit match for a source/dest outside the excluded sets; res = %+v", res)
@@ -106,7 +106,7 @@ func TestNonExcludedRuleReportsNoExclusion(t *testing.T) {
 		Applications: config.ApplicationsConfig{},
 	}
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.Matched {
 		t.Fatalf("expected match; res = %+v", res)
 	}
@@ -154,7 +154,7 @@ func TestGlobalMatchRuleIDUsesJunosGlobal(t *testing.T) {
 		ToZone:   "untrust",
 		SrcIP:    net.ParseIP("10.0.5.7"), // outside the excluded set => matches
 		Protocol: "tcp",
-		DstPort:  80,
+		DstPort:  PortPtr(80),
 	})
 	if !res.Matched || !res.Global {
 		t.Fatalf("expected global match; res = %+v", res)

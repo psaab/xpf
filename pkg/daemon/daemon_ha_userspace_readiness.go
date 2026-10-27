@@ -298,8 +298,10 @@ func userspaceRGConfigured(cfg *config.Config, rgID int) bool {
 	if cfg == nil || dataplane.EffectiveType(cfg.System.DataplaneType) != dataplane.TypeUserspace || rgID <= 0 {
 		return false
 	}
-	for _, ifc := range cfg.Interfaces.Interfaces {
-		if ifc != nil && ifc.RedundancyGroup == rgID {
+	// #17086 SSOT: membership in RethRGOwners, not a raw field scan —
+	// a stray group on a non-RETH interface does not configure the RG.
+	for _, ownerRG := range cfg.RethRGOwners() {
+		if ownerRG == rgID {
 			return true
 		}
 	}

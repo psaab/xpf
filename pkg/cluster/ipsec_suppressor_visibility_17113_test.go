@@ -153,7 +153,7 @@ func TestIpsecSuppressionCountersVisibleInStatistics17113(t *testing.T) {
 	if out := m.FormatInformation(); !strings.Contains(out, "Installs suppressed (peer lacks IPsec discriminator support): 7") {
 		t.Errorf("FormatInformation does not expose the IPsec suppression counter:\n%s", out)
 	}
-	if out := m.FormatStatistics(); !strings.Contains(out, "Installs suppressed (no peer IPsec discriminator)") {
+	if out := m.FormatStatistics(); !strings.Contains(out, "Installs suppressed (peer lacks IPsec discriminator support)") {
 		t.Errorf("FormatStatistics does not expose the IPsec suppression counter:\n%s", out)
 	}
 }

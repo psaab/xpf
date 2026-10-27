@@ -240,8 +240,8 @@ func (c *CLI) testPolicy(args []string) error {
 	} else {
 		fmt.Printf("any")
 	}
-	if dstPort > 0 {
-		fmt.Printf(":%d", dstPort)
+	if dstPort != nil {
+		fmt.Printf(":%d", *dstPort)
 	}
 	// #4497 (avo-001 F3): echo the queried ICMP/ICMPv6 type and code alongside
 	// the protocol so the `test policy` verdict names the FULL tuple the

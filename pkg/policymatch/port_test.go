@@ -2,19 +2,17 @@ package policymatch
 
 import "testing"
 
-// TestValidatePort asserts the #3116 contract for already-parsed port values
-// (the gRPC int32 field and the REST query int): 0 means "unspecified"; a
-// port-constrained term never matches without a port. 1..65535 is accepted,
-// and a negative or >65535 value is REJECTED rather than becoming unspecified.
+// TestValidatePort asserts the #3116/#17081 contract for already-parsed
+// present port values: 0 is a valid literal port, 1..65535 accepted, and a
+// negative or >65535 value is REJECTED rather than becoming omitted.
 //
-// FAIL-ON-REVERT: dropping the range check (return nil unconditionally) flips
-// the want-error cases (-1, 65536, 70000) to nil and turns them red.
+// FAIL-ON-REVERT: dropping the range check flips (-1, 65536, 70000) red.
 func TestValidatePort(t *testing.T) {
 	cases := []struct {
 		port    int
 		wantErr bool
 	}{
-		{0, false},     // unspecified; constrained terms do not match
+		{0, false},     // literal port 0 (#17081)
 		{1, false},     // low bound
 		{443, false},   // typical valid
 		{65535, false}, // high bound
@@ -31,31 +29,21 @@ func TestValidatePort(t *testing.T) {
 	}
 }
 
-// TestParsePort asserts the #3116 contract for operator string tokens (the CLI
-// surface): an empty/whitespace token is "unspecified" (0, nil), a valid token
-// parses, and an explicit "0" is also unspecified. A constrained term does not
-// match without a port, while an unconstrained term may still match. A malformed,
-// negative, or out-of-range token is REJECTED rather than silently becoming 0.
+// TestParsePort asserts the #17081 contract: empty is omitted (nil), an
+// explicit "0" is a PRESENT literal 0, and malformed/signed/out-of-range
+// tokens are rejected rather than silently becoming omitted.
 //
-// FAIL-ON-REVERT: restoring `dstPort, _ = strconv.Atoi(token)` (ignoring the
-// error) makes "abc" and "" both become 0 with no error, flipping the want-error
-// "abc"/"70000"/"-1" cases red.
-//
-// #3679 FAIL-ON-REVERT: restoring strconv.Atoi in place of
-// config.ParseCanonicalUint makes the signed "+80"/"+0"/"+443" tokens parse as
-// 80/0/443 with no error — Atoi accepts a leading '+' — flipping the want-error
-// signed cases red. The CLI `show security match-policies` and `request security
-// test policy` port surfaces both funnel through ParsePort, so this unit case is
-// their RED-on-revert coverage.
+// FAIL-ON-REVERT: restoring the int/0-sentinel ParsePort makes "0" return
+// the omitted value and flips the present-zero cases red.
 func TestParsePort(t *testing.T) {
 	cases := []struct {
 		in      string
-		want    int
+		want    int // -1 = omitted (nil)
 		wantErr bool
 	}{
-		{"", 0, false},          // absent -> unspecified, unchanged
-		{"   ", 0, false},       // whitespace -> unspecified
-		{"0", 0, false},         // explicit 0 -> unspecified (gRPC parity)
+		{"", -1, false},         // absent -> unspecified
+		{"   ", -1, false},      // whitespace -> unspecified
+		{"0", 0, false},         // explicit 0 -> PRESENT literal 0 (#17081)
 		{"443", 443, false},     // valid
 		{"65535", 65535, false}, // high bound
 		{"abc", 0, true},        // malformed
@@ -63,20 +51,29 @@ func TestParsePort(t *testing.T) {
 		{"65536", 0, true},      // one past the top
 		{"-1", 0, true},         // negative
 		{"44a", 0, true},        // partial-numeric garbage
-		{"+80", 0, true},        // #3679 signed spelling (Atoi accepted as 80)
+		{"+80", 0, true},        // #3679 signed spelling
 		{"+443", 0, true},       // #3679 signed spelling
-		{"+0", 0, true},         // #3679 signed zero (Atoi accepted as 0)
+		{"+0", 0, true},         // #3679 signed zero
 	}
 	for _, tc := range cases {
 		got, err := ParsePort(tc.in)
 		if (err != nil) != tc.wantErr {
 			t.Fatalf("ParsePort(%q) err = %v, wantErr = %v", tc.in, err, tc.wantErr)
 		}
-		if !tc.wantErr && got != tc.want {
-			t.Fatalf("ParsePort(%q) = %d, want %d", tc.in, got, tc.want)
+		if tc.wantErr {
+			if got != nil {
+				t.Fatalf("ParsePort(%q) rejected but returned %v, want nil", tc.in, got)
+			}
+			continue
 		}
-		if tc.wantErr && got != 0 {
-			t.Fatalf("ParsePort(%q) rejected but returned %d, want 0", tc.in, got)
+		if tc.want < 0 {
+			if got != nil {
+				t.Fatalf("ParsePort(%q) = %v, want nil (omitted)", tc.in, *got)
+			}
+			continue
+		}
+		if got == nil || int(*got) != tc.want {
+			t.Fatalf("ParsePort(%q) = %v, want %d", tc.in, got, tc.want)
 		}
 	}
 }
