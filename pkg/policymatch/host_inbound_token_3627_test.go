@@ -63,6 +63,18 @@ func TestMatchReportsHostInboundAdmittingToken(t *testing.T) {
 			q:        Query{FromZone: "edge", ToZone: "junos-host", DstIP: net.ParseIP("192.0.2.1")},
 			wantStat: dpuserspace.HostInboundIndeterminate,
 		},
+		{
+			// #17081: a PRESENT literal dst port 0 is decided, not
+			// indeterminate - no host-inbound token admits port 0.
+			name:     "literal dst port 0 -> denied, not indeterminate",
+			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstPort: PortPtr(0), DstIP: net.ParseIP("192.0.2.1")},
+			wantStat: dpuserspace.HostInboundDenied,
+		},
+		{
+			name:     "omitted dst port -> indeterminate (control)",
+			q:        Query{FromZone: "edge", ToZone: "junos-host", Protocol: "tcp", DstIP: net.ParseIP("192.0.2.1")},
+			wantStat: dpuserspace.HostInboundIndeterminate,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

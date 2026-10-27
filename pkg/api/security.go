@@ -842,9 +842,20 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 	// #17081: an ABSENT dst_port/src_port key is omitted (nil); a present
 	// key, including "0", is a literal port. A malformed present value must
 	// not silently become omitted (#2934): fail closed with 400.
-	// queryIntStrict rejects malformed/negative values; ValidatePort
-	// rejects >65535 (#3116).
+	// A present-but-EMPTY value (?dst_port=) is malformed on this surface:
+	// the CLI grammar rejects a valueless port token and the test-policy:
+	// topic reports an explicit-empty token, so REST must not silently
+	// degrade it to omitted (Rev18131 minor). queryIntStrict rejects
+	// malformed/negative values; ValidatePort rejects >65535 (#3116).
 	var dstPort, srcPort *uint16
+	if _, present := q["dst_port"]; present && q.Get("dst_port") == "" {
+		writeError(w, http.StatusBadRequest, "invalid dst_port: ")
+		return
+	}
+	if _, present := q["src_port"]; present && q.Get("src_port") == "" {
+		writeError(w, http.StatusBadRequest, "invalid src_port: ")
+		return
+	}
 	if _, present := q["dst_port"]; present {
 		v, ok := queryIntStrict(r, "dst_port", 0)
 		if !ok {

@@ -1984,10 +1984,10 @@ func hostInboundAdmission(cfg *config.Config, q Query) *dpuserspace.HostInboundA
 	// selector, the zone-scoped classifier reports HostInboundAmbiguous if the
 	// zone's per-interface views disagree.
 	if q.IngressInterface != "" {
-		adm := dpuserspace.ClassifyHostInboundForInterface(cfg, q.FromZone, q.IngressInterface, proto, hasProto, portValue(q.DstPort), q.ICMPType, family)
+		adm := dpuserspace.ClassifyHostInboundForInterface(cfg, q.FromZone, q.IngressInterface, proto, hasProto, portValue(q.DstPort), q.DstPort != nil, q.ICMPType, family)
 		return &adm
 	}
-	adm := dpuserspace.ClassifyHostInbound(cfg, q.FromZone, proto, hasProto, portValue(q.DstPort), q.ICMPType, family)
+	adm := dpuserspace.ClassifyHostInbound(cfg, q.FromZone, proto, hasProto, portValue(q.DstPort), q.DstPort != nil, q.ICMPType, family)
 	return &adm
 }
 

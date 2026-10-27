@@ -51,7 +51,8 @@ is present, exactly as the dataplane enforces (#13920). Before #17081, `0`
 encoded both omitted and literal 0, so the simulator returned the inverse
 verdict for literal port-0 TCP/UDP against a `0-N` term. Presence is also
 explicit on every wire: the proto fields are `optional int32`, an absent
-REST key is omitted while `dst_port=0` is literal, and the CLI grammar
+REST key is omitted while `dst_port=0` is literal (a present-but-empty
+REST value is rejected, like the valueless CLI token), and the CLI grammar
 distinguishes no token from `destination-port 0`. A malformed, negative, or
 out-of-range port remains DANGEROUS at the adapter boundary if it silently
 coerces to omitted, so two shared validators close this across every surface:
@@ -396,7 +397,10 @@ reports WHICH system-service/protocol token admits the packet (`token-admit` +
 `Token`/`Kind`), a `global-accept` (ICMP error/PMTUD, IPv6 ND, or ESP/AH — the
 top-of-chain nft accepts, #3171), a `denied` (post-#3405 default-deny — the box
 drops it), or `indeterminate` (the query omits the protocol, or the
-destination-port / icmp-type a port/ICMP token needs). The classifier
+destination-port / icmp-type a port/ICMP token needs). A PRESENT literal
+destination-port 0 (#17081) is not indeterminate: presence is threaded
+through `ClassifyHostInbound`, and since no host-inbound token admits port 0
+it is decided `denied`. The classifier
 (`ClassifyHostInbound`) reads the SAME structured token→tuple SSOT the kernel-nft
 builder renders from (`config.HostInboundServiceMatch` /
 `HostInboundProtocolMatch`), so the reported token cannot claim a port the kernel
