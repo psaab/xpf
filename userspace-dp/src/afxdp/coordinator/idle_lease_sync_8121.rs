@@ -158,17 +158,6 @@ impl PoolIdleLease {
             lease,
         }
     }
-
-    /// Construct from a legacy string identity (wire kind 0 decode fallback).
-    /// A real source pool of that name wins over the NAT64 parse (resolved
-    /// at import time, not here).
-    pub(crate) fn from_legacy_pool_name(pool_name: String, lease: IdleLeaseRecord) -> Self {
-        Self {
-            pool: LeasePoolId::Legacy(pool_name.clone()),
-            pool_name,
-            lease,
-        }
-    }
 }
 
 /// #8615: a display lease tagged with the pool it belongs to. Separate from

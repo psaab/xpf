@@ -654,20 +654,6 @@ impl Nat64ScopeKey {
             source_constrained: constrained,
         })
     }
-
-    /// Name portion of a `scope_text` value.
-    pub(crate) fn scope_name(text: &str) -> &str {
-        text.split('|').next().unwrap_or("")
-    }
-
-    /// Equality against a live prefix: a non-empty name is authoritative
-    /// (matching `find_previous_prefix`); otherwise full scope equality.
-    pub(crate) fn matches_prefix(&self, wire_name: &str, prefix: &Nat64Prefix) -> bool {
-        if !wire_name.is_empty() || !prefix.name.is_empty() {
-            return prefix.name == wire_name;
-        }
-        *self == Self::of_prefix(prefix)
-    }
 }
 
 /// #16484: normalize a snapshot's scope exactly as the build loop
