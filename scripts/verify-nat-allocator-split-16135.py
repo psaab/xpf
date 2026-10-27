@@ -1,24 +1,50 @@
 """#16135 code-motion verifier (deterministic -> occupancy, first two phases).
 
 Reconstructs the pre-split nat/allocator.rs from nat/allocator/{mod,
-deterministic,occupancy}.rs and compares it byte-for-byte with the
-pre-split file at the base commit, allowing ONLY the visibility
-widenings enumerated below. Any other difference — a reordered
-statement, a changed literal, a dropped comment, a changed atomic
-ordering — fails. This is the #6988 discipline applied to the
-allocator: the header invariants (allocator.rs:1-43, lock-free claim +
-FIFO recycle + global -> recycle lock order) are inside the compared
-byte range, so an edit to them fails here too.
+deterministic,occupancy}.rs AS THEY WERE AT THE SPLIT COMMIT and compares it
+byte-for-byte with the pre-split file at the split's parent, allowing ONLY
+the visibility widenings enumerated below. Any other difference — a
+reordered statement, a changed literal, a dropped comment, a changed atomic
+ordering — fails. This is the #6988 discipline applied to the allocator:
+the header invariants (allocator.rs:1-43, lock-free claim + FIFO recycle +
+global -> recycle lock order) are inside the compared byte range, so an
+edit to them in the split fails here too.
 
-Usage: python3 scripts/verify-nat-allocator-split-16135.py [base-ref]
+Both inputs are pinned git refs (defaults below), NOT the working tree, so
+this verifier is reproducible indefinitely: later edits to the allocator
+cannot break it, and it makes NO claim about the current tree. Defaults:
+--split b0ff071c2965715eacf45d5ab1af94d9fbb6e1db (2026-10-22),
+--base 42fc35ece88d95402712305bb76ef29d6ea53648 (its parent; the
+original default 974028945c is an ancestor with an identical
+allocator.rs, so either base reconstructs the same 7620-line file).
+
+Usage: python3 scripts/verify-nat-allocator-split-16135.py [--base REF] [--split REF]
+       (one positional [base-ref] is also accepted, for compatibility)
 """
-import subprocess, sys
-
-BASE_REF = sys.argv[1] if len(sys.argv) > 1 else '974028945cff6421f3af0a5160a85ccbcf9584a2'
-BASE = subprocess.run(['git', 'show', f'{BASE_REF}:userspace-dp/src/nat/allocator.rs'],
-                      capture_output=True, text=True, check=True).stdout.split('\n')
+import argparse, subprocess, sys
 
 W = 'pub(in crate::nat::allocator) '
+
+
+def show(ref, path):
+    return subprocess.run(['git', 'show', f'{ref}:{path}'],
+                          capture_output=True, text=True, check=True).stdout.split('\n')
+
+
+def parse_refs(argv):
+    p = argparse.ArgumentParser(description='#16135 split verifier (pinned refs)')
+    p.add_argument('--base', default=None, help='pre-split ref (default: split parent)')
+    p.add_argument('--split', default=None, help='split-commit ref')
+    p.add_argument('base_pos', nargs='?', default=None, help='[compat] positional base ref')
+    a = p.parse_args(argv)
+    split = a.split or 'b0ff071c2965715eacf45d5ab1af94d9fbb6e1db'
+    base = a.base or a.base_pos or '42fc35ece88d95402712305bb76ef29d6ea53648'
+    return base, split
+
+
+BASE_REF, SPLIT_REF = parse_refs(sys.argv[1:])
+BASE = show(BASE_REF, 'userspace-dp/src/nat/allocator.rs')
+
 ALLOWED = [
     (f'{W}struct RecycleRing {{', 'struct RecycleRing {'),
     (f'    {W}queue: VecDeque<u16>,', '    queue: VecDeque<u16>,'),
@@ -64,13 +90,15 @@ NEW_VIS = ('// - The remaining types (LiveAllocation, PortAllocatorShared\n'
            '//   and its private fields, GC constants, capacity/sticky helpers) stay\n'
            '//   fully private to this file.')
 
+
 def submodule_body(path, use_marker):
-    lines = open(path).read().split('\n')
+    lines = show(SPLIT_REF, path)
     i = lines.index(use_marker)
     body = lines[i + 2:]
     while body and body[-1] == '':
         body.pop()
     return body
+
 
 def unapply(body_lines):
     body = '\n'.join(body_lines)
@@ -80,12 +108,13 @@ def unapply(body_lines):
             body = body.replace(new, old)
     return body.split('\n')
 
+
 det = unapply(submodule_body('userspace-dp/src/nat/allocator/deterministic.rs',
                              'use std::net::{Ipv4Addr, Ipv6Addr};'))
 occ = unapply(submodule_body('userspace-dp/src/nat/allocator/occupancy.rs',
                              'use std::sync::Mutex;'))
 
-mod_lines = open('userspace-dp/src/nat/allocator/mod.rs').read().split('\n')
+mod_lines = show(SPLIT_REF, 'userspace-dp/src/nat/allocator/mod.rs')
 start = next(i for i, l in enumerate(mod_lines) if l == 'mod deterministic;')
 end = next(i for i, l in enumerate(mod_lines) if l == 'use occupancy::{AddressOccupancy, RecycleRing};')
 residual = mod_lines[:start] + mod_lines[end + 2:]
@@ -122,7 +151,8 @@ if ri != len(residual):
     print(f'FAIL: {len(residual) - ri} residual mod.rs lines unaccounted for'); sys.exit(1)
 
 if out == BASE:
-    print(f'PASS: the split reconstructs nat/allocator.rs EXACTLY ({len(BASE)} lines).')
+    print(f'PASS: the split at {SPLIT_REF[:12]} reconstructs nat/allocator.rs EXACTLY ({len(BASE)} lines).')
+    print(f'      (base {BASE_REF[:12]}; this checks the split commit only, not the current tree)')
     print(f'      Allowed edits, and nothing else: {len(ALLOWED)} widenings (occupancy), 0 (deterministic)')
     sys.exit(0)
 

@@ -47,7 +47,7 @@ func TestBuildLinkTrapV1_Structure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &Agent{startTime: time.Now().Add(-30 * time.Second)}
-			pkt := a.buildLinkTrapV1("public", "", tc.linkUp, 5, "ge-0-0-0", true)
+			pkt := a.buildLinkTrapV1WithUptime("public", "", tc.linkUp, 5, "ge-0-0-0", int(time.Since(a.startTime).Milliseconds()/10), true)
 
 			version, pduTag := decodeTrapVersionAndPDU(t, pkt)
 			if version != snmpVersion1 {
@@ -219,5 +219,30 @@ func TestSendLinkTraps_VersionAll_EmitsBoth(t *testing.T) {
 	}
 	if !sawV1 || !sawV2c {
 		t.Fatalf("version all: sawV1=%v sawV2c=%v (packets=%v), want both", sawV1, sawV2c, got)
+	}
+}
+
+// TestTrapKindsForVersion17066 pins the sole version dispatch (#17066).
+// Before this, buildLinkTrapsForVersion switched on v1/all but its only
+// production callers passed "v2" or a version sendLinkTraps had already
+// routed away, so its v1/all arms were dead while tests and the README
+// treated them as the dispatch. Mutating trapKindsForVersion (e.g. swapping
+// the v1/all returns) must redden this cell.
+func TestTrapKindsForVersion17066(t *testing.T) {
+	cases := []struct {
+		version string
+		v1, v2c bool
+	}{
+		{"v1", true, false},
+		{"all", true, true},
+		{"v2", false, true},
+		{"", false, true},
+		{"bogus", false, true},
+	}
+	for _, tc := range cases {
+		v1, v2c := trapKindsForVersion(tc.version)
+		if v1 != tc.v1 || v2c != tc.v2c {
+			t.Errorf("trapKindsForVersion(%q) = (%v, %v), want (%v, %v)", tc.version, v1, v2c, tc.v1, tc.v2c)
+		}
 	}
 }
