@@ -502,7 +502,22 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			children:      nil,
 		},
 		"shared-umem": {desc: "AF_XDP shared-UMEM policy override", children: map[string]*schemaNode{
-			"mode":                 {args: 1, desc: "Shared UMEM mode override (auto|off|same-device-debug|cross-nic)", children: nil},
+			// #17149: typed enum mirroring Rust parse_shared_umem_mode.
+			// Previously untyped: a typo (cross-nick) committed clean and
+			// Rust's `_ => Off` silently disabled shared UMEM (private
+			// UMEM + copy path), opposite of the absent-key CrossNic
+			// default. Only these four spellings are accepted; the Rust
+			// aliases (on/enable/enabled/cross_nic/…) are removed, not
+			// kept, so there is one vocabulary.
+			"mode": {
+				args:          1,
+				desc:          "Shared UMEM mode override (auto|off|same-device-debug|cross-nic)",
+				valueType:     ValueEnumOf,
+				valueDesc:     "Shared UMEM mode override (auto | off | same-device-debug | cross-nic)",
+				valueExamples: []string{"auto", "off", "same-device-debug", "cross-nic"},
+				validator:     ValidateEnum([]string{"auto", "off", "same-device-debug", "cross-nic"}),
+				children:      nil,
+			},
 			"interface":            {args: 1, multi: true, desc: "Optional participating Linux interface filter", children: nil},
 			"phase0-artifact-file": {args: 1, desc: "Optional machine-readable Phase 0 audit artifact", children: nil},
 			"artifact-file":        {args: 1, desc: "Alias for phase0-artifact-file", children: nil},
