@@ -708,7 +708,7 @@ fn resolve_with_unique_reply_proof_12257(
         dst_ip: forward_key.dst_ip,
         forward_key,
     };
-    crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack_and_payload(
+    crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
         sessions,
         crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
         SharedSessionRefs {
@@ -735,6 +735,7 @@ fn resolve_with_unique_reply_proof_12257(
         0,
         0,
         Some(proof),
+        None,
         false,
         None,
     )
@@ -5176,8 +5177,9 @@ fn fabric_stamped_icmpv6_error_gates_nptv6_on_stamped_zone_13647() {
         external_prefix: "2602:fd41:0070::/48".to_string(),
     }]);
     let mut external_client = internal_client;
-    assert!(
-        nptv6.translate_outbound(&mut external_client, "zone-b"),
+    assert_eq!(
+        nptv6.translate_outbound_result(&mut external_client, "zone-b"),
+        crate::nptv6::Nptv6Translation::Translated,
         "test setup: internal_client must translate outbound under zone-b"
     );
 

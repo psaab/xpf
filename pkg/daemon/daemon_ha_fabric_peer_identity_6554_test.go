@@ -13,6 +13,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/dataplane"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // #6554 — the fabric peer-MAC IPv6-NDP fallback must not accept an arbitrary
@@ -22,20 +23,26 @@ import (
 // pinging ff02::1, so every IPv6-speaking host on the segment answers. The
 // pre-fix fallback then took the FIRST non-self link-local entry it found. On a
 // shared fabric segment that is an unrelated adjacent host: the refresh
-// programs a stranger's MAC as the cross-chassis peer, reports success, and
+// resolves a stranger's MAC as the cross-chassis peer, reports success, and
 // latches fabricPopulated (which feeds the RG takeover-readiness gate).
 //
 // These tests drive the real refreshFabricFwd end-to-end against a synthetic
-// link + neighbour table and assert on the MAC actually handed to
-// SetFabricForwarding — the value that is programmed — not on an intermediate.
+// link + neighbour table and assert on the peer MAC the live resolver
+// (pkg/dataplane/userspace.ResolveFabricPeer, #17044) returns for the slot
+// — the value readiness latches on — not on an intermediate. The daemon
+// neighbour table below is also the resolver's table: test daemons install
+// a resolver that delegates to dpuserspace.ResolveFabricPeerWithNeighbours
+// over the SAME synthetic dumps, so daemon readiness and helper PeerMAC
+// agree by construction.
 
-// fabricProgramRecorder captures every SetFabricForwarding call so a test can
-// assert on the FabricFwdInfo that was actually programmed.
+// fabricProgramRecorder captures every ResolveFabricPeer call so a test
+// can assert on the peer MAC that was resolved.
 type fabricProgramRecorder struct {
-	mu     sync.Mutex
-	writes []dataplane.FabricFwdInfo
-	ids    []dataplane.FabricID
-	syncs  int
+	mu      sync.Mutex
+	writes  []dpuserspace.FabricPeerResolution
+	ids     []int
+	syncs   int
+	neighFn func(ifindex, family int) ([]netlink.Neigh, error)
 }
 
 func (h *fabricProgramRecorder) SetRGActive(_ context.Context, _ int, _ bool) error { return nil }
@@ -43,12 +50,15 @@ func (h *fabricProgramRecorder) SetHAWatchdog(_ context.Context, _ int, _ uint64
 	return nil
 }
 
-func (h *fabricProgramRecorder) SetFabricForwarding(_ context.Context, id dataplane.FabricID, info dataplane.FabricFwdInfo) error {
+// neighFn is installed by the test daemon factories; ResolveFabricPeer
+// delegates to the live resolver over the same synthetic tables.
+func (h *fabricProgramRecorder) ResolveFabricPeer(slot int, overlayIfindex, parentIfindex int, peer string, localMAC net.HardwareAddr) dpuserspace.FabricPeerResolution {
+	res := dpuserspace.ResolveFabricPeerWithNeighbours(overlayIfindex, parentIfindex, peer, localMAC, h.neighFn)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.ids = append(h.ids, id)
-	h.writes = append(h.writes, info)
-	return nil
+	h.ids = append(h.ids, slot)
+	h.writes = append(h.writes, res)
+	return res
 }
 
 func (h *fabricProgramRecorder) SyncFabricState(_ context.Context) error {
@@ -58,28 +68,28 @@ func (h *fabricProgramRecorder) SyncFabricState(_ context.Context) error {
 	return nil
 }
 
-// programmedPeerMACs returns the peer MACs of every NON-ZERO fabric write, in
-// order. A zeroed write is a clear (clearFabricFwd0), not a programmed peer.
+// programmedPeerMACs returns the peer MACs of every resolved fabric
+// resolution, in order. Unresolved resolutions carry no MAC.
 func (h *fabricProgramRecorder) programmedPeerMACs() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var out []string
 	for _, w := range h.writes {
-		if w.Ifindex == 0 {
+		if len(w.PeerMAC) == 0 {
 			continue
 		}
-		out = append(out, net.HardwareAddr(w.PeerMAC[:]).String())
+		out = append(out, w.PeerMAC.String())
 	}
 	return out
 }
 
-// programmedIDs returns the FabricIDs of every NON-ZERO fabric write, in order.
-func (h *fabricProgramRecorder) programmedIDs() []dataplane.FabricID {
+// programmedIDs returns the slots of every resolved fabric resolution, in order.
+func (h *fabricProgramRecorder) programmedIDs() []int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	var out []dataplane.FabricID
+	var out []int
 	for i, w := range h.writes {
-		if w.Ifindex == 0 {
+		if len(w.PeerMAC) == 0 {
 			continue
 		}
 		out = append(out, h.ids[i])
@@ -93,6 +103,10 @@ type fabricProgramDP struct {
 }
 
 func (d *fabricProgramDP) HA() dataplane.HAController { return d.ha }
+
+func (d *fabricProgramDP) ResolveFabricPeer(slot int, overlayIfindex, parentIfindex int, peer string, localMAC net.HardwareAddr) dpuserspace.FabricPeerResolution {
+	return d.ha.ResolveFabricPeer(slot, overlayIfindex, parentIfindex, peer, localMAC)
+}
 
 const (
 	fabPeerTestLocalMAC = "02:00:00:00:00:0a" // this node's fabric parent MAC
@@ -133,6 +147,8 @@ func fabPeerNeigh(t *testing.T, ip, mac string) netlink.Neigh {
 // real netlink LinkSetTxQLen against the fake link.
 func fabPeerTestDaemon(t *testing.T, parentV6 []netlink.Neigh) (*Daemon, *fabricProgramRecorder) {
 	t.Helper()
+	dpuserspace.RegisterFabricPeerMACConstraint("10.99.13.2", nil)
+	t.Cleanup(func() { dpuserspace.RegisterFabricPeerMACConstraint("10.99.13.2", nil) })
 	const (
 		parentIdx  = 11
 		overlayIdx = 12
@@ -154,19 +170,22 @@ func fabPeerTestDaemon(t *testing.T, parentV6 []netlink.Neigh) (*Daemon, *fabric
 	}}
 
 	rec := &fabricProgramRecorder{}
+	neighFn := func(ifindex, family int) ([]netlink.Neigh, error) {
+		if ifindex == parentIdx && family == netlink.FAMILY_V6 {
+			return parentV6, nil
+		}
+		// Overlay ARP and parent IPv4 both miss — the state this
+		// fallback exists to recover from.
+		return nil, nil
+	}
+	rec.neighFn = neighFn
 	d := &Daemon{
+		fabricPeerIP: net.ParseIP("10.99.13.2"),
 		linkByNameFn: mockLinkByName(map[string]*testLink{
 			"ge-0-0-0": parent,
 			"fab0":     overlay,
 		}),
-		neighListFn: func(ifindex, family int) ([]netlink.Neigh, error) {
-			if ifindex == parentIdx && family == netlink.FAMILY_V6 {
-				return parentV6, nil
-			}
-			// Overlay ARP and parent IPv4 both miss — the state this
-			// fallback exists to recover from.
-			return nil, nil
-		},
+		neighListFn: neighFn,
 	}
 	d.setDataplane(&fabricProgramDP{ha: rec}) // #2114: publish through the cell
 	return d, rec
@@ -302,7 +321,7 @@ func TestFabricPeerNDPFallbackRefusesLoneDecoyWhenPeerKnown(t *testing.T) {
 // fallback's own result never promotes itself into that identity.
 func TestFabricPeerAddressMatchRecordsIdentity(t *testing.T) {
 	t.Run("address match records", func(t *testing.T) {
-		d, _ := fabPeerTestDaemon(t, nil)
+		d, rec := fabPeerTestDaemon(t, nil)
 		peerIP := net.ParseIP("10.99.13.2")
 		d.neighListFn = func(ifindex, family int) ([]netlink.Neigh, error) {
 			if ifindex == 12 && family == netlink.FAMILY_V4 {
@@ -312,6 +331,7 @@ func TestFabricPeerAddressMatchRecordsIdentity(t *testing.T) {
 			}
 			return nil, nil
 		}
+		rec.neighFn = d.neighListFn
 		if !fabPeerRefresh(t, d) {
 			t.Fatal("refreshFabricFwd returned false on an address-matched resolution")
 		}
@@ -567,6 +587,8 @@ func TestSelectFabricPeerLinkLocalMAC(t *testing.T) {
 // parentNeighs maps (ifindex, family) -> neighbours; unlisted keys miss.
 func fab1PeerTestDaemon(t *testing.T, parentNeighs map[[2]int][]netlink.Neigh) (*Daemon, *fabricProgramRecorder) {
 	t.Helper()
+	dpuserspace.RegisterFabricPeerMACConstraint("10.99.14.2", nil)
+	t.Cleanup(func() { dpuserspace.RegisterFabricPeerMACConstraint("10.99.14.2", nil) })
 	const (
 		parentIdx  = 21
 		overlayIdx = 22
@@ -587,17 +609,20 @@ func fab1PeerTestDaemon(t *testing.T, parentNeighs map[[2]int][]netlink.Neigh) (
 		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
 	}}
 	rec := &fabricProgramRecorder{}
+	neighFn := func(ifindex, family int) ([]netlink.Neigh, error) {
+		if got, ok := parentNeighs[[2]int{ifindex, family}]; ok {
+			return got, nil
+		}
+		return nil, nil
+	}
+	rec.neighFn = neighFn
 	d := &Daemon{
+		fabricPeerIP1: net.ParseIP("10.99.14.2"),
 		linkByNameFn: mockLinkByName(map[string]*testLink{
 			"ge-0-0-1": parent,
 			"fab1":     overlay,
 		}),
-		neighListFn: func(ifindex, family int) ([]netlink.Neigh, error) {
-			if got, ok := parentNeighs[[2]int{ifindex, family}]; ok {
-				return got, nil
-			}
-			return nil, nil
-		},
+		neighListFn: neighFn,
 	}
 	d.setDataplane(&fabricProgramDP{ha: rec})
 	return d, rec
@@ -628,8 +653,8 @@ func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
 			t.Fatal("d.fabric1Populated = false, want true")
 		}
 		ids := rec.programmedIDs()
-		if len(ids) != 1 || ids[0] != dataplane.FabricID(1) {
-			t.Fatalf("programmed FabricIDs = %v, want exactly [%v]", ids, dataplane.FabricID(1))
+		if len(ids) != 1 || ids[0] != 1 {
+			t.Fatalf("resolved slots = %v, want exactly [1]", ids)
 		}
 		if got := rec.programmedPeerMACs(); len(got) != 1 || got[0] != fabPeerTestPeerMAC {
 			t.Fatalf("programmed peer MACs = %v, want exactly [%s]", got, fabPeerTestPeerMAC)
@@ -652,8 +677,8 @@ func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
 			t.Fatal("fabric1Populated not set after link-local fallback resolution")
 		}
 		ids := rec.programmedIDs()
-		if len(ids) != 1 || ids[0] != dataplane.FabricID(1) {
-			t.Fatalf("programmed FabricIDs = %v, want exactly [%v]", ids, dataplane.FabricID(1))
+		if len(ids) != 1 || ids[0] != 1 {
+			t.Fatalf("resolved slots = %v, want exactly [1]", ids)
 		}
 		if got := rec.programmedPeerMACs(); len(got) != 1 || got[0] != fabPeerTestPeerMAC {
 			t.Fatalf("programmed peer MACs = %v, want exactly [%s]", got, fabPeerTestPeerMAC)
@@ -761,7 +786,7 @@ func TestReconcileRGStateFabricReadyWithFab1Only(t *testing.T) {
 
 // TestRefreshFabricFwd1LinkLocalSyncsHelper15918 is the #15918 consumer gate:
 // the fab1 link-local fallback must not only latch fabric1Populated and
-// program the BPF map, it must also push SyncFabricState so the userspace
+// resolve, it must also push SyncFabricState so the userspace
 // helper receives the resolved fabric (its buildFabricPeerMAC now resolves
 // the same sole link-local neighbour). Pre-fix refreshFabricFwd1 never
 // called SyncFabricState on its success path (fab0 did).

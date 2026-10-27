@@ -175,23 +175,21 @@ func validFRRInterfaceOperand(s string) bool {
 // (10.0.0.256, 192.0.2.0/24, peer-a, a hostname, fe80::1%ge-0-0-1) is
 // refused by bgpd and fails every frr-reload (#15184).
 //
-// The predicate mirrors pkg/config ValidateBGPNeighborAddress:
-// netip.ParseAddr must succeed with no zone and no prefix. The prior
-// single-token-only test deliberately accepted hostnames; #15184 supersedes
-// that for BGP neighbors — bgpd refuses them in this rendering, so on the
-// tolerant load path they are omitted rather than breaking the reload.
-// Hostname neighbors previously committed will be omitted here (warned at
+// The predicate delegates to config.ValidBGPNeighborAddress (#17035,
+// R4-Q42-06): netip.ParseAddr must succeed with no zone and no prefix,
+// plus the SSOT's TrimSpace check (already implied by ParseAddr, so
+// the accept set is identical). The prior single-token-only test
+// deliberately accepted hostnames; #15184 supersedes that for BGP
+// neighbors — bgpd refuses them in this rendering, so on the tolerant
+// load path they are omitted rather than breaking the reload. Hostname
+// neighbors previously committed will be omitted here (warned at
 // lenient compile) until the operator changes them to an IP.
 //
 // Commit / commit-check stay strict (validateBGPNeighborAddressStrict); this is
 // the #1960 belt for the tolerant load / peer-sync / rollback paths, which only
 // warn.
 func validBGPNeighborAddress(s string) bool {
-	addr, err := netip.ParseAddr(s)
-	if err != nil {
-		return false
-	}
-	return addr.Zone() == ""
+	return config.ValidBGPNeighborAddress(s)
 }
 
 // validBGPOrigin reports whether a route-map `then origin` value is one of the

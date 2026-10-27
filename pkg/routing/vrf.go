@@ -588,32 +588,35 @@ func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, e
 		if _, stillDesired := desiredByName[existing]; stillDesired {
 			continue
 		}
-		link, err := ops.LinkByName(existing)
-		if err != nil {
-			if !isLinkNotFound(err) {
-				// Transient — retain ownership; don't drop silently.
-				newTracked = append(newTracked, existing)
-				recordErr(fmt.Errorf("lookup VRF %s for delete: %w", existing, err))
-			}
-			// Not found: already gone; nothing to do.
+		// Shared release skeleton (#17020): released=true ONLY on a
+		// genuine not-found or a successful LinkDel; a transient
+		// lookup error or a failed LinkDel retains ownership and
+		// surfaces the error (first-error aggregation stays here at
+		// the call site). VRF is the one manager that refuses a
+		// foreign occupant on removal: isOurs admits only
+		// *netlink.Vrf (#12062). The link is NOT deleted; ownership
+		// is RELEASED without error (errForeignOccupant branch
+		// below) — the name is no longer ours to manage.
+		released, relErr := releaseOwnedLink(ops, "VRF", existing, func(link netlink.Link) bool {
+			_, ok := link.(*netlink.Vrf)
+			return ok
+		})
+		switch {
+		case errors.Is(relErr, errForeignOccupant):
+			// Refused, foreign link left alone; drop ownership.
 			continue
-		}
-		if _, ok := link.(*netlink.Vrf); !ok {
-			// Tracked name swapped out-of-band for a non-VRF (and
-			// removed from config in the same interval): the link is
-			// foreign, not our stale VRF. Refuse deletion (#12062).
-			slog.Warn("refusing to delete tracked-not-desired non-VRF link",
-				"name", existing, "type", link.Type())
-			continue
-		}
-		if err := ops.LinkDel(link); err != nil {
-			// Delete failed — VRF still exists. Retain in tracked so
-			// next reconcile retries instead of losing ownership.
+		case relErr != nil:
+			// Transient lookup or failed delete — retain ownership.
 			newTracked = append(newTracked, existing)
-			recordErr(fmt.Errorf("delete VRF %s: %w", existing, err))
+			recordErr(relErr)
+			continue
+		case !released:
+			// Unreachable (every !released outcome carries an
+			// error); retain defensively.
+			newTracked = append(newTracked, existing)
 			continue
 		}
-		slog.Info("VRF removed", "name", existing)
+		// Released: genuine not-found or successful delete.
 	}
 
 	// #847: orphan reap. After a routing-instance rename across a

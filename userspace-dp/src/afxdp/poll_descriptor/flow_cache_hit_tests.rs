@@ -6373,7 +6373,7 @@ fn adopted_flow_survives_subsequent_packet_revalidation_16217() {
     let dynamic_neighbors = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
     let peer_worker_commands: Vec<Arc<std::sync::Mutex<std::collections::VecDeque<WorkerCommand>>>> = Vec::new();
     let resolve = |sessions: &mut crate::session::SessionTable, adopted: bool| {
-        crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack_and_payload(
+        crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
             sessions,
             SteeringMap::unshared_for_test(-1),
             crate::afxdp::session_glue::SharedSessionRefs {
@@ -6399,6 +6399,7 @@ fn adopted_flow_survives_subsequent_packet_revalidation_16217() {
             true,
             0,
             0,
+            None,
             None,
             adopted,
             adopted.then(|| crate::afxdp::session_glue::AdoptedRecovery {

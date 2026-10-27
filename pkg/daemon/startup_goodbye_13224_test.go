@@ -28,6 +28,16 @@ func TestReconcileStartupGoodbyeDoneEmptyAndActive13224(t *testing.T) {
 				"set chassis cluster cluster-id 1",
 				"set chassis cluster node 0",
 				"set chassis cluster authentication-key test-cluster-psk",
+				// #18053: keyed ahead of the #16746 gate with
+				// no-private-rg-election (NOT a control link): with a
+				// control-interface set the manager would treat this as
+				// cluster mode and the non-preempt never-seen hold would
+				// keep the priority-200 RG secondary, vacating the
+				// boots-active case. Opting out keeps the standalone
+				// election this cell relies on. Inert for its assertions
+				// — primary/inactive is still forced via the manager
+				// priority and kernel-upgrade hold.
+				"set chassis cluster no-private-rg-election",
 				"set chassis cluster redundancy-group 1 node 0 priority " + tc.priority,
 				"set interfaces reth1 redundant-ether-options redundancy-group 1",
 				"set interfaces reth1 unit 0 family inet address 10.0.61.1/24",

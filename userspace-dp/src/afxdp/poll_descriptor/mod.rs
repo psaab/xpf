@@ -2891,43 +2891,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // invalidates its policy verdict (#12074). Persist
                         // before the deferred close below, as the inline write
                         // did, so a #9412 close Update carries the new route.
-                        if foreign_arrival_zone.is_none()
-                            && let Some(revalidation) = resolved.deferred_forwarding_revalidation
-                        {
-                            if revalidation.invalidate_policy_revalidation {
-                                sessions.invalidate_policy_revalidation(&resolved.key);
-                            }
-                            // #14941: `new_egress_zone` is direction-relative
-                            // (the hit packet's egress leg). Map it to the
-                            // forward flow's egress before persisting: a
-                            // reverse hit's resolved zone is the forward
-                            // ingress and must not overwrite forward
-                            // `egress_zone` / reverse `ingress_zone`, or every
-                            // later ACK classifies Foreign and stops
-                            // refreshing the session.
-                            let forward_zone =
-                                crate::afxdp::shared_ops::forward_egress_zone_for_hit(
-                                    resolved.metadata.is_reverse,
-                                    revalidation.new_egress_zone,
-                                    resolved.metadata.ingress_zone,
-                                )
-                                .as_option();
-                            sessions.revalidate_forwarding_resolution_with_egress_zone(
-                                &resolved.key,
-                                revalidation.resolution,
-                                revalidation.owner_rg_id,
-                                forward_zone,
+                        // #17063: the persist itself lives in
+                        // `apply_deferred_forwarding_revalidation`, the
+                        // single source of truth the test wrapper also
+                        // calls — no second copy to drift.
+                        if foreign_arrival_zone.is_none() {
+                            crate::afxdp::session_glue::apply_deferred_forwarding_revalidation(
+                                sessions, &mut resolved,
                             );
-                            if let Some(owner_rg_id) = revalidation.owner_rg_id {
-                                resolved.metadata.owner_rg_id = owner_rg_id;
-                            }
-                            if let Some(zone) = forward_zone {
-                                if resolved.metadata.is_reverse {
-                                    resolved.metadata.ingress_zone = zone;
-                                } else {
-                                    resolved.metadata.egress_zone = zone;
-                                }
-                            }
                         }
                         // #13938: replay every local-hit mutation only after
                         // THIS packet's authority verdict names it an Owner.
@@ -3008,7 +2979,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // Thus `show security policies hit-count` reflects
                         // the rule's real traffic load, not just the first
                         // frame of each flow.
-                        // `resolve_flow_session_decision` never runs policy
+                        // The production resolver
+                        // (`resolve_flow_session_decision_with_conntrack_and_payload_and_ack`)
+                        // never runs policy
                         // evaluation, so a packet reaching here was never counted
                         // by the cold path: exactly-once holds. The per-worker
                         // coalescer keeps this off the shared counter cacheline.
@@ -4370,7 +4343,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.dynamic_neighbors,
                             )
                         {
-                            resolve_flow_session_decision_with_conntrack_and_payload(
+                            resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
                                     sessions,
                                     binding.bpf_maps.session_map.handle(),
                                     crate::afxdp::session_glue::SharedSessionRefs {
@@ -4396,6 +4369,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     fabric_link_ingress,
                                     ha_startup_grace_until_secs,
                                     worker_id,
+                                    None,
+                                    // #17063: no segment ack is parsed at
+                                    // this miss site; the session-hit site
+                                    // threads the parsed ack.
                                     None,
                                     // #16217: the gate above already
                                     // proved Established + this node is
@@ -4497,7 +4474,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // reverts to a bounded drop, which the #6478 verifier
                         // explicitly prefers over unauthenticated seeding; a
                         // genuine established flow's return is still served by
-                        // the synced session in `resolve_flow_session_decision`
+                        // the synced session in the production resolver
+                        // (`resolve_flow_session_decision_with_conntrack_and_payload_and_ack`)
                         // before this point.
 
                         // --- DNAT pre-routing ---
@@ -5952,7 +5930,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // and NoRoute / FabricRedirect / HAInactive never seed
                         // a local session from this packet. Established and
                         // HA-synced sessions are session HITS served by
-                        // `resolve_flow_session_decision` before this miss path.
+                        // the production resolver
+                        // (`resolve_flow_session_decision_with_conntrack_and_payload_and_ack`)
+                        // before this miss path.
                         // A SYN-bearing packet is always eligible; the
                         // configured no-syn-check opt-out also admits
                         // mid-stream ACK/data, while strict-syn-check

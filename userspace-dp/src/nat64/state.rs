@@ -475,26 +475,95 @@ pub(crate) fn nat64_prefix_charge_for_range(
     }
 }
 
-/// #6982 phase 1 helper: the (prefix, pool, deterministic) IDENTITY of a
-/// snapshot, or `None` if the rule is one the build loop will skip as
-/// malformed.
+/// #17059: THE single parse of one NAT64 rule snapshot, shared by the
+/// #6982 phase-1 budget pass and the build loop below.
 ///
-/// SILENT by design. The build loop below logs each skip loudly (#3888
-/// all-or-nothing); this pass runs first, over the same snapshots, purely to
-/// learn which prefixes will REUSE a live allocator. Logging here would double
-/// every malformed-rule warning. It must stay in lockstep with the loop's own
-/// parse — `nat64_6982_identity_parser_matches_the_build_loop` binds that, so
-/// a rule the loop accepts can never be invisible to the budget.
+/// The two copies this replaces diverged on #14962 `pool_unusable`:
+/// phase 1 returned `None` (no identity, no charge, no reuse) while the
+/// loop installed the prefix with an EMPTY pool and could then
+/// `reuse_allocator` that empty allocator unconditionally on the next
+/// apply. Which copy is right was decided from the callers:
 ///
-/// #15178: the reuse identity for a NAT64 rule: prefix bytes, deduped pool,
-/// AND the deterministic identity the new prefix will carry. Pre-fix this
-/// returned only `(prefix_bytes, pool_v4)`, so a block-size / host-base /
-/// /32<->/64 / deterministic<->round-robin edit on the same pool reused the
-/// old allocator with its stale BIB leases. `None` deterministic covers both
-/// the round-robin mode and the over-budget/unusable downgrade (both build
-/// `deterministic_v6: None` below); including the derived `DeterministicV6`
-/// (which folds in pool length via `host_count`) makes any geometry change
-/// a reuse miss while a true no-op re-apply still hits.
+///   * install — the loop. A referenced-but-unusable pool must still
+///     INSTALL (Go builder `nat64.go`: `SourceNATPoolUnusableReason`
+///     stamps `pool_unusable` on the snapshot; skipping the rule would
+///     leave no prefix to match, so prefix traffic falls through to
+///     `NoPrefixMatch` and is ROUTED untranslated instead of dropping
+///     `MatchUnavailable`). Pinned at consumption by
+///     `nat64_pool_unusable_installs_prefix_and_drops_14962`.
+///   * empty pool — both copies. The wire members of an unusable rule
+///     must NEVER mint: `pool_v4` is empty, `deterministic_v6` is
+///     `None`, and the loop logs `pool_unusable_reason` once.
+///   * budget/reuse — neither copy verbatim. Phase 1's `None` made
+///     the installed prefix invisible to the budget; the loop's reuse
+///     arm then accepted it "unconditionally (it was charged in
+///     phase 1)" — the false premise behind the apply-count-dependent
+///     verdict. The unified rule keeps TWO charges per identity and
+///     never mixes them (see [`Nat64RuleIdentity::wire_pool_v4`]):
+///     a FIRST install is charged its wire charge
+///     (`nat64_prefix_charge_for_range(wire_pool_v4.len(), lo, hi)` —
+///     for an unusable 1-address pool, 1/1/64512; the healthy charge),
+///     because apply-count invariance requires the first verdict to
+///     already account for everything later applies will hold; a
+///     REUSED allocator — healthy or empty-unusable — is charged its
+///     installed charge in phase 1 (unusable: 1/0/0) iff
+///     `reuse_allocator` actually matches it, and accepted
+///     unconditionally in phase 2. An unusable rule therefore costs
+///     its full wire charge exactly once (first apply) and its empty
+///     installed charge on every reuse, so no later apply can admit a
+///     prefix the first refused. Pinned by
+///     `nat64_17059_unusable_reapply_does_not_grow_past_the_prefix_cap`.
+///
+/// SILENT by design on the `Err` side. The build loop logs each skip
+/// loudly (#3888 all-or-nothing); phase 1 runs first over the same
+/// snapshots purely to learn which prefixes will REUSE a live
+/// allocator. Logging here would double every malformed-rule warning,
+/// so the skip is returned, not printed; the loop matches on it and
+/// owns the log.
+///
+/// #15178: the reuse identity carries prefix bytes, deduped pool, AND
+/// the deterministic identity the new prefix will carry. `None`
+/// deterministic covers round-robin and the over-budget/unusable
+/// downgrade (both install `deterministic_v6: None`); including the
+/// derived `DeterministicV6` (which folds in pool length via
+/// `host_count`) makes any geometry change a reuse miss while a true
+/// no-op re-apply still hits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Nat64RuleIdentity {
+    pub(super) prefix_bytes: [u8; 12],
+    /// Pool as installed: empty iff `unusable`, else the deduped pool
+    /// exactly as parsed (before any over-budget clear).
+    pub(super) pool_v4: Vec<Ipv4Addr>,
+    /// Deduped wire pool BEFORE the unusable clear (`[]` when usable
+    /// parsing was skipped for another reason — there is none: usable
+    /// rules always parse, unusable rules always fill this). The
+    /// distinction installed-vs-wire is what the budget charges:
+    /// first-install charges the wire charge (the rule the operator
+    /// configured costs what it claims until the budget refuses it),
+    /// reuse charges the installed charge (what actually lives).
+    /// See the charge note on [`parse_nat64_rule`].
+    pub(super) wire_pool_v4: Vec<Ipv4Addr>,
+    /// Deterministic identity the installed prefix will carry;
+    /// `None` when `unusable` (install downgrades it, #14962).
+    pub(super) deterministic_v6: Option<DeterministicV6>,
+    /// #14962: Go stamped this pool unusable; loop installs it empty.
+    pub(super) unusable: bool,
+}
+
+/// Why [`parse_nat64_rule`] refused the rule. The build loop logs the
+/// payload loudly and skips the rule; phase 1 drops it silently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Nat64RuleSkip {
+    EmptyPrefix,
+    /// Not exactly `<ipv6>/96`: wrong part count (missing mask, extra
+    /// slash) or a mask that does not parse to 96.
+    BadPrefixShape,
+    /// The address part before `/` is not an IPv6 address.
+    BadPrefixAddress,
+    /// One usable-pool member [`parse_pool_v4`] rejects; the whole
+    /// rule is skipped (#3888 all-or-nothing, #2212 anti-narrowing).
+    BadPoolAddress(String),
+}
 
 
 /// #16484: the normalized ingress scope of a snapshot / prefix: the
@@ -594,43 +663,173 @@ pub(super) fn nat64_snapshot_scope(snap: &NAT64RuleSnapshot) -> Nat64ScopeKey {
     }
 }
 
-pub(super) fn nat64_rule_identity(
-    snap: &NAT64RuleSnapshot,
-) -> Option<([u8; 12], Vec<Ipv4Addr>, Option<DeterministicV6>)> {
-    // #14962: an unusable pool installs with an empty pool (see the build
-    // loop), so it has no reusable allocator identity and no #6982 charge.
-    // Returning None here keeps phase 1 from reserving/charging a pool the
-    // loop will clear before any allocator is built.
-    if snap.pool_unusable {
-        return None;
-    }
+pub(super) fn parse_nat64_rule(snap: &NAT64RuleSnapshot) -> Result<Nat64RuleIdentity, Nat64RuleSkip> {
     if snap.prefix.is_empty() {
-        return None;
+        return Err(Nat64RuleSkip::EmptyPrefix);
     }
+    // Parse "64:ff9b::/96" — require EXACTLY `<ipv6>/96`: two
+    // '/'-split parts AND a /96 mask. This backstop is the corrupt /
+    // lenient-snapshot path (a #1960 leniently-loaded or HA
+    // peer-synced config the Go #3886/#3887 commit gate did not vet),
+    // so it must be strict: a missing mask (one part), an EXTRA slash
+    // ("64:ff9b::/96/garbage" → three parts, whose trailing garbage
+    // would otherwise be silently ignored), or a non-/96 length skips
+    // the whole rule (#3888). Mirrors the exact-2-parts `parse_prefix`
+    // in nptv6.rs.
+    //
+    // #8597 K62, MEASURED — this check is strict, but it is not
+    // IDENTICAL to the Go gate it backstops, and the difference is
+    // exactly one character. Go validates the same token with
+    // `strconv.ParseUint(parts[1], 10, 8)`
+    // (pkg/config/compiler_validate_strict_nat.go), and Go's ParseUint
+    // permits NO sign, while Rust's integer FromStr permits a leading
+    // '+'. So `64:ff9b::/+96` is REJECTED at a strict commit and
+    // ACCEPTED here.
+    //
+    // Swept exhaustively over all 7240 strings of length <= 3 drawn
+    // from [0-9 + - _ space x X . e E]: 110 tokens differ, every one of
+    // them a leading '+', and there is NO token that Go accepts and
+    // this parse rejects. Rust's accepted language is a strict superset
+    // of Go's, and both agree on the VALUE wherever both accept.
+    //
+    // It is REACHABLE. An earlier revision of this note called it
+    // unreachable, reasoning that no xpf version can persist a `/+96`
+    // because the commit gate rejects it. That is a COMMIT-path
+    // argument, and the commit path does not bound what reaches this
+    // loader — the same mistake #8597 K51 documents one file over.
+    // Measured end to end instead:
+    //
+    //   1. strict commit           -> REJECTED.
+    //   2. Store.Load / SyncApply  -> compiles LENIENTLY; the rule is
+    //      not dropped and not zeroed, so NAT64RuleSnapshot.prefix
+    //      arrives here as "64:ff9b::/+96" verbatim.
+    //   3. this loader             -> INSTALLS it: is_active=true, one
+    //      prefix, prefix_bytes = 00:64:ff:9b:00.. — BYTE-IDENTICAL to
+    //      the state a canonical "64:ff9b::/96" produces. (Packets were
+    //      not driven through it; the claim is that the installed rule
+    //      is the same rule, not a separate datapath observation.)
+    //      Control: "/64" gives is_active=false, 0 prefixes, so the
+    //      loader does reject a bad length — the acceptance of "/+96"
+    //      is attributable to the '+' specifically.
+    //
+    // So a hand-edited or peer-synced config reaches a state where the
+    // dataplane is running a NAT64 rule the control plane rejected at
+    // commit. #8667 fixed the half that was doing active harm: the
+    // lenient path used to WARN that this rule "will not reach the
+    // dataplane until it is corrected" while it was installed, so the
+    // operator was steered away from the config that was running. The
+    // Go side now mirrors this parse and stays silent for exactly the
+    // tokens this parse accepts.
+    //
+    // DO NOT TIGHTEN THIS PARSE UNILATERALLY. Not because tightening is
+    // wrong — an earlier revision of this note claimed that, and the
+    // claim did not survive: it argued a stricter backstop would strand
+    // a cleanly-committed rule, but the commit gate rejects every one of
+    // those 110 tokens, so no such rule exists and the hazard is vacuous
+    // over exactly this set.
+    //
+    // The real reason is that tightening converts a fail-OPEN into a
+    // fail-CLOSED, and which of those is correct here is a genuine
+    // behaviour decision, not a cleanup. Today a leniently-loaded
+    // `/+96` translates with the right prefix. Tightened, it would be
+    // rejected at this loader and NAT64 would be off for that rule-set
+    // — a defensible posture ("the rule you were warned about is not
+    // running") and arguably better than the current one. That choice
+    // belongs to #8667, which weighs it against normalising the token
+    // when the snapshot is built or accepting the spelling at commit.
+    // Making it here in isolation also papers over the live defect,
+    // which is on the Go side of the lenient path.
+    //
+    // Whatever is chosen, the two grammars should be bound by a test
+    // that reds on divergence in EITHER direction; a one-directional
+    // cell lets the next drift through on the other side. #17059: with
+    // ONE parser there is no second grammar left in this file to bind.
     let parts: Vec<&str> = snap.prefix.split('/').collect();
     if parts.len() != 2 || parts[1].parse::<u8>().ok() != Some(96) {
-        return None;
+        return Err(Nat64RuleSkip::BadPrefixShape);
     }
-    let addr: Ipv6Addr = parts[0].parse().ok()?;
+    let addr: Ipv6Addr = parts[0].parse().map_err(|_| Nat64RuleSkip::BadPrefixAddress)?;
     let octets = addr.octets();
     let mut prefix_bytes = [0u8; 12];
     prefix_bytes.copy_from_slice(&octets[..12]);
-    // #14624: first-occurrence dedupe, IDENTICAL to the build loop below.
-    // This identity is the reuse key AND the #6982 charge basis: if it kept
-    // a duplicate the build loop dropped (or vice versa), reuse would miss
-    // a pool it should have matched and the charge would count phantom
-    // addresses. `parse_pool_v4` accepts both `X` and `X/32`, so the same
-    // address can arrive twice under two spellings on a tolerated load.
+    // Pool addresses may carry a canonical host mask: an
+    // address-range source pool (`address A to B`) is expanded by
+    // the Go compiler into per-IP `/32` entries (#2123), and
+    // `Ipv4Addr::from_str` rejects CIDR notation. Strip the host mask
+    // before parse so range-form pools are not silently dropped,
+    // leaving pool_v4 empty and NAT64 forward translation
+    // non-functional. A non-host mask (`/24`) or garbage suffix is
+    // unparseable: skip the WHOLE rule (#3888, all-or-nothing) rather
+    // than silently NARROWING the pool by dropping just the bad entry
+    // (the #2212 fail-open).
+    //
+    // #14624: keep only the FIRST occurrence of each pool address.
+    // A tolerated load (legacy / mixed-version / lenient
+    // configstore) can carry the same address twice — bare and
+    // with the /32 host mask range-expansion stamps — and each
+    // duplicate position got an INDEPENDENT occupancy bitmap, so
+    // round-robin placement minted the same (address, port) BIB
+    // for two IPv6 subscribers (RFC 6146 §3.5; the #10700 class,
+    // whose fix covered only the SNAT parser). One address is one
+    // allocator slot here, exactly as the strict message
+    // ("the dataplane keeps only the first occurrence … on
+    // tolerated loads") and the overlap.rs #10700 note claim.
+    // First-seen order is preserved, so the #6982 charge and
+    // `build_deterministic_v6`'s host_count see the same deduped
+    // pool the loop installs.
+    //
+    // #14962: a Go-stamped unusable pool installs EMPTY — the same
+    // posture as the #6982 budget refusal. Returning the rule with an
+    // empty pool (rather than skipping it) means an unparseable member
+    // no longer skips the whole rule: the prefix still installs, so
+    // prefix traffic classifies MatchUnavailable (drop) instead of
+    // falling through to NoPrefixMatch and being ROUTED as ordinary
+    // IPv6. It also means no allocator bitmap is materialised for a
+    // pool that must never mint. The loop logs the reason once.
+    // For an unusable rule the members are parsed LENIENTLY into
+    // `wire_pool_v4` (bad members dropped, never a skip): they exist
+    // only to size the first-install budget charge, and the installed
+    // pool stays empty regardless. For a usable rule they are parsed
+    // STRICTLY into `pool_v4` (one bad member skips the whole rule).
     let mut seen = FxHashSet::default();
+    let mut wire_pool_v4 = Vec::with_capacity(snap.pool_addresses.len());
     let mut pool_v4 = Vec::with_capacity(snap.pool_addresses.len());
-    for s in &snap.pool_addresses {
-        let addr = parse_pool_v4(s)?;
-        if seen.insert(addr) {
-            pool_v4.push(addr);
+    if snap.pool_unusable {
+        for s in &snap.pool_addresses {
+            if let Some(addr) = parse_pool_v4(s) {
+                if seen.insert(addr) {
+                    wire_pool_v4.push(addr);
+                }
+            }
         }
+    } else {
+        for s in &snap.pool_addresses {
+            match parse_pool_v4(s) {
+                Some(addr) => {
+                    if seen.insert(addr) {
+                        pool_v4.push(addr);
+                    }
+                }
+                None => return Err(Nat64RuleSkip::BadPoolAddress(s.clone())),
+            }
+        }
+        wire_pool_v4.clone_from(&pool_v4);
     }
-    let deterministic_v6 = build_deterministic_v6(snap, pool_v4.len());
-    Some((prefix_bytes, pool_v4, deterministic_v6))
+    // #14962: an unusable prefix carries no deterministic mapping even
+    // if the snapshot still names one (the downgrade warning in the
+    // loop is likewise suppressed for it).
+    let deterministic_v6 = if snap.pool_unusable {
+        None
+    } else {
+        build_deterministic_v6(snap, pool_v4.len())
+    };
+    Ok(Nat64RuleIdentity {
+        prefix_bytes,
+        pool_v4,
+        wire_pool_v4,
+        deterministic_v6,
+        unusable: snap.pool_unusable,
+    })
 }
 
 /// #6982: prefixes refused by the aggregate budget since boot.
@@ -780,15 +979,37 @@ impl Nat64State {
         let mut used = Nat64AggregateUse::default();
         if let Some(prev) = previous {
             for snap in snaps {
-                if let Some((pb, pool, det)) = nat64_rule_identity(snap) {
+                // #17059: phase 1 and the loop call the SAME parser;
+                // a skip here is the loop's skip too, dropped silently.
+                if let Ok(identity) = parse_nat64_rule(snap) {
                     let (lo, hi) = nat64_effective_port_range(snap);
                     let scope = nat64_snapshot_scope(snap);
+                    // #17059: reuse uses the INSTALLED identity — an
+                    // unusable rule's empty pool + `None` deterministic,
+                    // never the wire pool. The empty allocator is a
+                    // reuse candidate like any other, and if it is
+                    // reused it is CHARGED here like any other reuse:
+                    // `nat64_prefix_charge_for_range(identity.pool_v4.len(), lo, hi)`
+                    // is 1 prefix / 0 addresses / 0 port slots. Accepting
+                    // it uncharged in the loop is the #17059 divergence:
+                    // it let the same snapshots admit one more healthy
+                    // prefix per re-apply past `max_prefixes`.
                     if prev
-                        .reuse_allocator(&snap.name, &pb, &pool, det, (lo, hi), &scope)
+                        .reuse_allocator(
+                            &snap.name,
+                            &identity.prefix_bytes,
+                            &identity.pool_v4,
+                            identity.deterministic_v6,
+                            (lo, hi),
+                            &scope,
+                        )
                         .is_some()
                     {
-                        used =
-                            used.saturating_with(nat64_prefix_charge_for_range(pool.len(), lo, hi));
+                        used = used.saturating_with(nat64_prefix_charge_for_range(
+                            identity.pool_v4.len(),
+                            lo,
+                            hi,
+                        ));
                     }
                 }
             }
@@ -796,153 +1017,50 @@ impl Nat64State {
         // Labeled so a bad pool entry can skip the WHOLE rule (all-or-nothing,
         // #3888) rather than narrowing the pool (the #2212 fail-open).
         'rules: for snap in snaps {
-            // Every NAT64 rule on the wire is enabled (the Go side skips
-            // empty-prefix rules in buildNAT64Snapshots), so an empty prefix
-            // here is anomalous: skip THIS rule with a loud warning (#3888,
-            // consistent with the other malformed-rule skips below) rather than
-            // silently dropping it — a disappeared rule stays visible in logs.
-            if snap.prefix.is_empty() {
-                eprintln!(
-                    "xpf nat64: skipping malformed rule {:?}: empty prefix",
-                    snap.name
-                );
-                continue;
-            }
-            // Parse "64:ff9b::/96" — require EXACTLY `<ipv6>/96`: two
-            // '/'-split parts AND a /96 mask. This backstop is the corrupt /
-            // lenient-snapshot path (a #1960 leniently-loaded or HA
-            // peer-synced config the Go #3886/#3887 commit gate did not vet),
-            // so it must be strict: a missing mask (one part), an EXTRA slash
-            // ("64:ff9b::/96/garbage" → three parts, whose trailing garbage
-            // would otherwise be silently ignored), or a non-/96 length skips
-            // the whole rule (#3888) — loudly, so the drop is visible. Mirrors
-            // the exact-2-parts `parse_prefix` in nptv6.rs.
-            //
-            // #8597 K62, MEASURED — this check is strict, but it is not
-            // IDENTICAL to the Go gate it backstops, and the difference is
-            // exactly one character. Go validates the same token with
-            // `strconv.ParseUint(parts[1], 10, 8)`
-            // (pkg/config/compiler_validate_strict_nat.go), and Go's ParseUint
-            // permits NO sign, while Rust's integer FromStr permits a leading
-            // '+'. So `64:ff9b::/+96` is REJECTED at a strict commit and
-            // ACCEPTED here.
-            //
-            // Swept exhaustively over all 7240 strings of length <= 3 drawn
-            // from [0-9 + - _ space x X . e E]: 110 tokens differ, every one of
-            // them a leading '+', and there is NO token that Go accepts and
-            // this parse rejects. Rust's accepted language is a strict superset
-            // of Go's, and both agree on the VALUE wherever both accept.
-            //
-            // It is REACHABLE. An earlier revision of this note called it
-            // unreachable, reasoning that no xpf version can persist a `/+96`
-            // because the commit gate rejects it. That is a COMMIT-path
-            // argument, and the commit path does not bound what reaches this
-            // loader — the same mistake #8597 K51 documents one file over.
-            // Measured end to end instead:
-            //
-            //   1. strict commit           -> REJECTED.
-            //   2. Store.Load / SyncApply  -> compiles LENIENTLY; the rule is
-            //      not dropped and not zeroed, so NAT64RuleSnapshot.prefix
-            //      arrives here as "64:ff9b::/+96" verbatim.
-            //   3. this loader             -> INSTALLS it: is_active=true, one
-            //      prefix, prefix_bytes = 00:64:ff:9b:00.. — BYTE-IDENTICAL to
-            //      the state a canonical "64:ff9b::/96" produces. (Packets were
-            //      not driven through it; the claim is that the installed rule
-            //      is the same rule, not a separate datapath observation.)
-            //      Control: "/64" gives is_active=false, 0 prefixes, so the
-            //      loader does reject a bad length — the acceptance of "/+96"
-            //      is attributable to the '+' specifically.
-            //
-            // So a hand-edited or peer-synced config reaches a state where the
-            // dataplane is running a NAT64 rule the control plane rejected at
-            // commit. #8667 fixed the half that was doing active harm: the
-            // lenient path used to WARN that this rule "will not reach the
-            // dataplane until it is corrected" while it was installed, so the
-            // operator was steered away from the config that was running. The
-            // Go side now mirrors this parse and stays silent for exactly the
-            // tokens this parse accepts.
-            //
-            // DO NOT TIGHTEN THIS PARSE UNILATERALLY. Not because tightening is
-            // wrong — an earlier revision of this note claimed that, and the
-            // claim did not survive: it argued a stricter backstop would strand
-            // a cleanly-committed rule, but the commit gate rejects every one of
-            // those 110 tokens, so no such rule exists and the hazard is vacuous
-            // over exactly this set.
-            //
-            // The real reason is that tightening converts a fail-OPEN into a
-            // fail-CLOSED, and which of those is correct here is a genuine
-            // behaviour decision, not a cleanup. Today a leniently-loaded
-            // `/+96` translates with the right prefix. Tightened, it would be
-            // rejected at this loader and NAT64 would be off for that rule-set
-            // — a defensible posture ("the rule you were warned about is not
-            // running") and arguably better than the current one. That choice
-            // belongs to #8667, which weighs it against normalising the token
-            // when the snapshot is built or accepting the spelling at commit.
-            // Making it here in isolation also papers over the live defect,
-            // which is on the Go side of the lenient path.
-            //
-            // Whatever is chosen, the two grammars should be bound by a test
-            // that reds on divergence in EITHER direction; a one-directional
-            // cell lets the next drift through on the other side.
-            let parts: Vec<&str> = snap.prefix.split('/').collect();
-            if parts.len() != 2 || parts[1].parse::<u8>().ok() != Some(96) {
-                eprintln!(
-                    "xpf nat64: skipping malformed rule {:?}: prefix {:?} (only <ipv6>/96 is supported)",
-                    snap.name, snap.prefix
-                );
-                continue;
-            }
-            let addr: Ipv6Addr = match parts[0].parse() {
-                Ok(a) => a,
-                Err(_) => {
-                    eprintln!(
-                        "xpf nat64: skipping malformed rule {:?}: unparseable prefix address {:?}",
-                        snap.name, parts[0]
-                    );
-                    continue;
+            // #17059: THE parse. Phase 1 above called the same fn and
+            // dropped `Err` silently; the loop owns the loud log for
+            // each skip kind (#3888) and skips the WHOLE rule.
+            let identity = match parse_nat64_rule(snap) {
+                Ok(identity) => identity,
+                Err(skip) => {
+                    match skip {
+                        Nat64RuleSkip::EmptyPrefix => eprintln!(
+                            "xpf nat64: skipping malformed rule {:?}: empty prefix",
+                            snap.name
+                        ),
+                        Nat64RuleSkip::BadPrefixShape => eprintln!(
+                            "xpf nat64: skipping malformed rule {:?}: prefix {:?} (only <ipv6>/96 is supported)",
+                            snap.name, snap.prefix
+                        ),
+                        // Log-only: recover the address part without a
+                        // second grammar — everything before the last
+                        // '/' (the shape check already passed the 2-part
+                        // split, so this is the part [0] string).
+                        Nat64RuleSkip::BadPrefixAddress => {
+                            let addr_part = match snap.prefix.rfind('/') {
+                                Some(idx) => &snap.prefix[..idx],
+                                None => &snap.prefix,
+                            };
+                            eprintln!(
+                                "xpf nat64: skipping malformed rule {:?}: unparseable prefix address {:?}",
+                                snap.name, addr_part
+                            )
+                        }
+                        Nat64RuleSkip::BadPoolAddress(bad) => eprintln!(
+                            "xpf nat64: skipping malformed rule {:?}: unparseable source-pool address {:?}",
+                            snap.name, bad
+                        ),
+                    }
+                    continue 'rules;
                 }
             };
-            let octets = addr.octets();
-            let mut prefix_bytes = [0u8; 12];
-            prefix_bytes.copy_from_slice(&octets[..12]);
-            // Pool addresses may carry a canonical host mask: an
-            // address-range source pool (`address A to B`) is expanded by
-            // the Go compiler into per-IP `/32` entries (#2123), and
-            // `Ipv4Addr::from_str` rejects CIDR notation. Strip the host mask
-            // before parse so range-form pools are not silently dropped,
-            // leaving pool_v4 empty and NAT64 forward translation
-            // non-functional. A non-host mask (`/24`) or garbage suffix is
-            // unparseable: skip the WHOLE rule (#3888, all-or-nothing) rather
-            // than silently NARROWING the pool by dropping just the bad entry
-            // (the #2212 fail-open). `continue 'rules` bails on the offending
-            // rule so no partially-installed pool reaches the dataplane.
-            // #14624: keep only the FIRST occurrence of each pool address.
-            // A tolerated load (legacy / mixed-version / lenient
-            // configstore) can carry the same address twice — bare and
-            // with the /32 host mask range-expansion stamps — and each
-            // duplicate position got an INDEPENDENT occupancy bitmap, so
-            // round-robin placement minted the same (address, port) BIB
-            // for two IPv6 subscribers (RFC 6146 §3.5; the #10700 class,
-            // whose fix covered only the SNAT parser). One address is one
-            // allocator slot here too, exactly as the strict message
-            // ("the dataplane keeps only the first occurrence … on
-            // tolerated loads") and the overlap.rs #10700 note claim.
-            // First-seen order is preserved, so `nat64_rule_identity`,
-            // the #6982 charge, and `build_deterministic_v6`'s host_count
-            // all see the same deduped pool this loop builds.
-            let mut seen_pool = FxHashSet::default();
-            let mut pool_v4 = Vec::with_capacity(snap.pool_addresses.len());
-            // #14962: a Go-stamped unusable pool installs EMPTY — the same
-            // posture as the #6982 budget refusal below. Clearing here,
-            // BEFORE the parse loop, means an unparseable member no longer
-            // SKIPs the whole rule ('rules continue): the prefix still
-            // installs, so prefix traffic classifies MatchUnavailable
-            // (drop) instead of falling through to NoPrefixMatch and being
-            // ROUTED as ordinary IPv6. It also means no allocator bitmap
-            // is materialised for a pool that must never mint, and the
-            // deterministic branch below sees an empty pool. Logged once:
-            // the reason is the operator's remedy.
-            if snap.pool_unusable {
+            let prefix_bytes = identity.prefix_bytes;
+            let mut pool_v4 = identity.pool_v4;
+            let new_deterministic_v6 = identity.deterministic_v6;
+            // #14962: a Go-stamped unusable pool installed EMPTY above
+            // (the parser cleared it); log the reason once here — it is
+            // the operator's remedy.
+            if identity.unusable {
                 eprintln!(
                     "xpf nat64: rule {:?} source pool is UNUSABLE ({}); installing it with an \
                      EMPTY pool so its traffic drops fail-closed rather than minting from the \
@@ -950,54 +1068,6 @@ impl Nat64State {
                     snap.name, snap.pool_unusable_reason
                 );
             }
-            if !snap.pool_unusable {
-                for s in &snap.pool_addresses {
-                    match parse_pool_v4(s) {
-                        Some(addr) => {
-                            if seen_pool.insert(addr) {
-                                pool_v4.push(addr);
-                            }
-                        }
-                        None => {
-                            eprintln!(
-                                "xpf nat64: skipping malformed rule {:?}: unparseable source-pool address {:?}",
-                                snap.name, s
-                            );
-                            continue 'rules;
-                        }
-                    }
-                }
-            }
-            // #4381: one stateful port allocator per prefix, sized to the pool.
-            // An empty pool yields a zero-capacity allocator (allocate returns
-            // AllocatorExhausted), which the fail-closed classify path treats
-            // exactly like the historical empty-pool `MatchUnavailable`.
-            //
-            // #4518: on a config reload, REUSE the previous prefix's allocator
-            // (an `Arc`-backed clone carrying the live tuple-ownership set) when
-            // the pool is byte-identical, so pre-reload NAT64 sessions keep
-            // owning their translated ports and new flows do not collide with
-            // them at port-offset 0. A changed pool (addresses added / removed /
-            // reordered) falls through to a fresh allocator — the round-robin
-            // counters are pool-position indexed, so stale reservations against
-            // a different pool must not be replayed. Mirrors source NAT's
-            // `previous_allocators` reuse in `parse_source_nat_rules_with_previous`.
-            //
-            // #6982 PHASE 2. A REUSED allocator is accepted unconditionally (it
-            // was charged in phase 1): a no-op re-apply must never kill live
-            // translations. A NEW one is admitted only if it fits the remaining
-            // budget; a refused prefix commits nothing (first-fit), so a later
-            // smaller prefix can still install.
-            // #15178: reuse only when the deterministic identity the new
-            // prefix will carry equals the previous prefix's. Computed
-            // BEFORE the over-budget clear below: a refused prefix builds
-            // with an empty pool and `deterministic_v6: None`, so it must
-            // never reuse (its identity here uses the real pool; the
-            // `reused.is_none()` arm then charges/refuses it). A geometry
-            // change falls through to a fresh allocator; the #6765 reseed
-            // below is skipped for deterministic prefixes (see there).
-            // #15283: reuse additionally requires the same port range.
-            let new_deterministic_v6 = build_deterministic_v6(snap, pool_v4.len());
             let (eff_low, eff_high) = nat64_effective_port_range(snap);
             // #16484: this rule's identity for every previous-state
             // lookup below (reuse, deterministic probe, reseed).
@@ -1012,10 +1082,13 @@ impl Nat64State {
                     &scope_key,
                 )
             });
+            // #17059: a NEW prefix is charged its WIRE charge (see
+            // `wire_pool_v4`); a reused one was already charged its
+            // installed charge in phase 1 and is accepted above.
             let mut over_budget = false;
             if reused.is_none() {
                 match used.admitted_with(
-                    nat64_prefix_charge_for_range(pool_v4.len(), eff_low, eff_high),
+                    nat64_prefix_charge_for_range(identity.wire_pool_v4.len(), eff_low, eff_high),
                     &NAT64_AGGREGATE_BUDGET,
                 ) {
                     Some(next) => used = next,
@@ -1167,13 +1240,16 @@ impl Nat64State {
             // #6982: a refused prefix has no pool, so it has no deterministic
             // mapping either — and it must NOT emit the downgrade warning below,
             // which would attribute a budget refusal to bad deterministic config.
-            let deterministic_v6 = if over_budget || snap.pool_unusable {
+            // #17059: `new_deterministic_v6` already encodes the
+            // unusable downgrade (the parser forced it `None`); only
+            // the over-budget clear remains loop-local.
+            let deterministic_v6 = if over_budget {
                 None
             } else {
                 new_deterministic_v6
             };
             if !over_budget
-                && !snap.pool_unusable
+                && !identity.unusable
                 && deterministic_v6.is_none()
                 && !snap.deterministic_host_base_v6.is_empty()
             {

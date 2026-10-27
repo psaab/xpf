@@ -548,7 +548,7 @@ func fabricPeerMACConstraint(peer string) net.HardwareAddr {
 // This is the LIVE resolver: its result becomes FabricSnapshot.PeerMAC and
 // reaches the dataplane as the cross-chassis redirect destination.
 //
-// Resolution order mirrors pkg/daemon's refreshFabricFwd (#6554/#15683/#15918):
+// Resolution order (#6554/#15683/#15918/#17044 — this is now the ONLY resolver; the daemon latches readiness on it):
 //  1. address-matched neighbour for the configured peer IP on overlay, then
 //     parent (existing #6598/#7443 behaviour, NUD/length-gated);
 //  2. if that fails, the identity-constrained parent IPv6 link-local fallback
@@ -563,6 +563,10 @@ func fabricPeerMACConstraint(peer string) net.HardwareAddr {
 // UNRESOLVED (FabricSkipReason::UnresolvedPeerMac) rather than forwarding
 // to a MAC the peer may not own.
 func buildFabricPeerMAC(overlayIfindex, parentIfindex int, peer string, localMAC, expected net.HardwareAddr) string {
+	return buildFabricPeerMACWithNeighbours(overlayIfindex, parentIfindex, peer, localMAC, expected, fabricNeighListFn)
+}
+
+func buildFabricPeerMACWithNeighbours(overlayIfindex, parentIfindex int, peer string, localMAC, expected net.HardwareAddr, listFn func(int, int) ([]netlink.Neigh, error)) string {
 	ip := net.ParseIP(peer)
 	if ip == nil {
 		return ""
@@ -575,7 +579,7 @@ func buildFabricPeerMAC(overlayIfindex, parentIfindex int, peer string, localMAC
 		if ifindex <= 0 {
 			continue
 		}
-		neighs, err := fabricNeighListFn(ifindex, family)
+		neighs, err := listFn(ifindex, family)
 		if err != nil {
 			continue
 		}
@@ -584,11 +588,74 @@ func buildFabricPeerMAC(overlayIfindex, parentIfindex int, peer string, localMAC
 		}
 	}
 	if parentIfindex > 0 && !ip.IsLinkLocalUnicast() {
-		if v6Neighs, err := fabricNeighListFn(parentIfindex, netlink.FAMILY_V6); err == nil {
+		if v6Neighs, err := listFn(parentIfindex, netlink.FAMILY_V6); err == nil {
 			if mac, _, _, _ := SelectFabricPeerLinkLocalMAC(v6Neighs, localMAC, expected); mac != nil {
 				return mac.String()
 			}
 		}
 	}
 	return ""
+}
+
+// ResolveFabricPeerWithNeighbours is ResolveFabricPeer over an explicit
+// neighbour enumerator, so daemon tests can drive the live resolver over
+// the same synthetic tables as the daemon refresh (#17044).
+func ResolveFabricPeerWithNeighbours(overlayIfindex, parentIfindex int, peer string, localMAC net.HardwareAddr, listFn func(int, int) ([]netlink.Neigh, error)) FabricPeerResolution {
+	out := FabricPeerResolution{LocalMAC: localMAC, Ifindex: parentIfindex}
+	if listFn == nil {
+		listFn = fabricNeighListFn
+	}
+	s := buildFabricPeerMACWithNeighbours(overlayIfindex, parentIfindex, peer, localMAC, fabricPeerMACConstraint(peer), listFn)
+	if s == "" {
+		out.Reason = "no usable fabric peer neighbour"
+		return out
+	}
+	mac, err := net.ParseMAC(s)
+	if err != nil || len(mac) != 6 {
+		out.Reason = "resolved fabric peer MAC is not a 6-byte Ethernet address"
+		return out
+	}
+	out.PeerMAC = mac
+	return out
+}
+
+// FabricPeerResolution is the daemon-facing result of the live fabric
+// peer resolver (#17044). PeerMAC empty means unresolved; Reason names
+// why (empty when resolved). LocalMAC/Ifindex describe the fabric parent.
+type FabricPeerResolution struct {
+	PeerMAC  net.HardwareAddr
+	LocalMAC net.HardwareAddr
+	Ifindex  int
+	Reason   string
+}
+
+// FabricPeerResolver is implemented by *Manager.
+type FabricPeerResolver interface {
+	ResolveFabricPeer(slot int, overlayIfindex, parentIfindex int, peer string, localMAC net.HardwareAddr) FabricPeerResolution
+}
+
+// ResolveFabricPeer is the single live resolver (#17044): its result is
+// both the helper's FabricSnapshot.PeerMAC source (via buildFabricPeerMAC)
+// and the daemon's fabricPopulated readiness input. It consults the
+// daemon-registered identity constraint exactly as buildFabricSnapshotsFrom
+// does, so both paths agree by construction.
+func ResolveFabricPeer(overlayIfindex, parentIfindex int, peer string, localMAC net.HardwareAddr) FabricPeerResolution {
+	out := FabricPeerResolution{LocalMAC: localMAC, Ifindex: parentIfindex}
+	s := buildFabricPeerMAC(overlayIfindex, parentIfindex, peer, localMAC, fabricPeerMACConstraint(peer))
+	if s == "" {
+		out.Reason = "no usable fabric peer neighbour"
+		return out
+	}
+	mac, err := net.ParseMAC(s)
+	if err != nil || len(mac) != 6 {
+		out.Reason = "resolved fabric peer MAC is not a 6-byte Ethernet address"
+		return out
+	}
+	out.PeerMAC = mac
+	return out
+}
+
+// ResolveFabricPeer implements FabricPeerResolver on the userspace Manager.
+func (m *Manager) ResolveFabricPeer(_ int, overlayIfindex, parentIfindex int, peer string, localMAC net.HardwareAddr) FabricPeerResolution {
+	return ResolveFabricPeer(overlayIfindex, parentIfindex, peer, localMAC)
 }

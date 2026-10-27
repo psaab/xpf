@@ -717,6 +717,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
         12,
         0,
         false,
+        false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -838,6 +839,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
         0x18,
         12,
         0,
+        false,
         false,
         0,
         0,
@@ -965,6 +967,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
             0x18,
             0,
             0,
+            false,
             false,
             0,
             3,
@@ -1128,6 +1131,7 @@ fn ha_imported_transient_dynamic_snat_local_alias_keeps_shared_canonical_12187()
         0x18,
         0,
         0,
+        false,
         false,
         0,
         3,
@@ -4817,7 +4821,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
     let mut internal = "2001:db8:1::1234"
         .parse::<std::net::Ipv6Addr>()
         .expect("v6");
-    assert!(configured.nptv6.translate_inbound(&mut internal, ""));
+    assert_eq!(configured.nptv6.translate_inbound_result(&mut internal, ""), crate::nptv6::Nptv6Translation::Translated);
     let in_key = key_14315(6, "2001:db8:9::1", "2001:db8:1::1234", 40000, 443);
     let in_decision = decision_14315(NatDecision {
         rewrite_dst: Some(IpAddr::V6(internal)),
@@ -4851,7 +4855,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
     );
     // Outbound: internal src -> external.
     let mut external = "fd00:1::1234".parse::<std::net::Ipv6Addr>().expect("v6");
-    assert!(configured.nptv6.translate_outbound(&mut external, ""));
+    assert_eq!(configured.nptv6.translate_outbound_result(&mut external, ""), crate::nptv6::Nptv6Translation::Translated);
     let out_key = key_14315(6, "fd00:1::1234", "2001:db8:9::1", 40000, 443);
     let out_decision = decision_14315(NatDecision {
         rewrite_src: Some(IpAddr::V6(external)),
@@ -5420,6 +5424,7 @@ fn reverse_hit_revalidation_preserves_pair_zones_14941() {
         12,
         0,
         false,
+        false,
         0,
         0,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,
@@ -5548,6 +5553,7 @@ fn forward_hit_revalidation_still_rebinds_pair_14941() {
         0x10,
         24,
         0,
+        false,
         false,
         0,
         0,
@@ -6417,7 +6423,7 @@ fn selector_less_reverse_still_revokes_nptv6_nat64_15934() {
     let configured = nptv6_forwarding_14315();
     let withdrawn = ForwardingState::default();
     let mut internal = "2001:db8:1::1234".parse::<std::net::Ipv6Addr>().expect("v6");
-    assert!(configured.nptv6.translate_inbound(&mut internal, ""));
+    assert_eq!(configured.nptv6.translate_inbound_result(&mut internal, ""), crate::nptv6::Nptv6Translation::Translated);
     let in_key = key_14315(libc::IPPROTO_ICMPV6 as u8, "2001:db8:9::1", "2001:db8:1::1234", 0x1234, 0);
     let in_decision = decision_14315(NatDecision {
         rewrite_dst: Some(IpAddr::V6(internal)),
@@ -7467,9 +7473,11 @@ fn imported_terminal_stored_resolution_judged_by_reresolved_16109() {
         12,
         0,
         false,
+        false,
         0,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner,)
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("the refreshed imported row must resolve on its first hit");
     assert_eq!(
         resolved.decision.resolution.disposition,

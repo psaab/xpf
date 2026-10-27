@@ -24,9 +24,7 @@ import (
 // applyCtx idea: do not build a second context struct later. Named fields make
 // a transposition a compile-visible review diff instead of a clean-compiling
 // positional swap that mislabels retry debt (the class that forced vrfTermErr
-// to be split out of networkdErr — see applyDataplaneAndHACore). Adding a
-// phase 12 is a one-field edit here plus its join() operand and its
-// assignment site.
+// to be split out of networkdErr — see applyDataplaneAndHACore).
 type applyPhaseErrors struct {
 	Networkd    error
 	Dataplane   error
@@ -41,21 +39,46 @@ type applyPhaseErrors struct {
 	FRR         error
 }
 
-// join returns one flat errors.Join of the carried phase errors in exactly
-// today's operand order relative to each other
+// join returns one flat errors.Join in exactly the production tail order
 // (#1778/#2987/#4433/#5083/#5310/#5679/#5696/#5700/#6790/#6792/#9947):
-// Networkd, Dataplane, DHCPServer, IPsec, Iface, RouteLeak, RoutingRule,
-// MgmtRoute, VRF, Fabric, FRR — the flat tail order with the tail-local
-// operands (hostInboundErr/lo0Err/dnsErr, the five host-credential errors,
-// vrrpErr) removed. It deliberately constructs a single flat join rather
-// than wrapping subgroup joins: errors.Join does not flatten nested joins,
-// so subgroups would add intermediate join nodes. Error-string order is
-// observable in commit output, so this order MUST NOT change; it is pinned
-// by TestApplyPhaseErrorsSentinelPerPhase16170.
-func (e applyPhaseErrors) join() error {
+// Networkd, Dataplane, DHCPServer, [hostInbound, lo0, dns], [login,
+// sudoers, absentUsers, sshConfig, rootAuth], IPsec, Iface, RouteLeak,
+// RoutingRule, MgmtRoute, VRF, Fabric, [vrrp], FRR. The tail-local errors
+// (hostInboundErr/lo0Err/dnsErr from steps 9/9.5, the five host-credential
+// errors from steps 11-13, vrrpErr from step 8) are supplied by the caller
+// via applyTailLocals so this method is the SINGLE registration point:
+// adding a phase is a one-field edit to applyPhaseErrors, one operand in
+// join(), and its assignment site — the production tail in
+// applyTailReconciles calls this method, and
+// TestEveryApplyPhaseErrorReachesTheCommit17034 reflects over the struct
+// and fails if any field's sentinel does not surface through the
+// production tail (so a field added to the struct but not to join()
+// turns RED instead of being silently dropped). It deliberately
+// constructs a single flat join rather than wrapping subgroup joins:
+// errors.Join does not flatten nested joins, so subgroups would add
+// intermediate join nodes. Error-string order is observable in commit
+// output, so this order MUST NOT change; it is pinned by
+// TestApplyPhaseErrorsSentinelPerPhase16170 and
+// TestApplyTailProductionInterleaveOrder16170.
+type applyTailLocals struct {
+	hostInbound error
+	lo0         error
+	dns         error
+	login       error
+	sudoers     error
+	absentUsers error
+	sshConfig   error
+	rootAuth    error
+	vrrp        error
+}
+
+func (e applyPhaseErrors) join(locals applyTailLocals) error {
 	return errors.Join(
-		e.Networkd, e.Dataplane, e.DHCPServer, e.IPsec, e.Iface, e.RouteLeak,
-		e.RoutingRule, e.MgmtRoute, e.VRF, e.Fabric, e.FRR,
+		e.Networkd, e.Dataplane, e.DHCPServer,
+		locals.hostInbound, locals.lo0, locals.dns,
+		locals.login, locals.sudoers, locals.absentUsers, locals.sshConfig, locals.rootAuth,
+		e.IPsec, e.Iface, e.RouteLeak, e.RoutingRule, e.MgmtRoute, e.VRF, e.Fabric,
+		locals.vrrp, e.FRR,
 	)
 }
 
@@ -522,13 +545,15 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 	// sshd / root-auth), whose failures were discarded here — a commit that did
 	// not actually revoke a removed operator's password or authorized_keys is
 	// not a successful commit. All are joined so none masks the other.
-	// One flat join, exactly the pre-#16170 operand order. It is spelled out
-	// with named phase fields rather than via phase.join() because the
-	// tail-local operands are interleaved here, and because errors.Join does
-	// not flatten subgroup joins — subgroups would add intermediate nodes.
-	return errors.Join(phase.Networkd, phase.Dataplane, phase.DHCPServer, hostInboundErr, lo0Err, dnsErr,
-		loginErr, sudoersErr, absentUsersErr, sshConfigErr, rootAuthErr,
-		phase.IPsec, phase.Iface, phase.RouteLeak, phase.RoutingRule, phase.MgmtRoute, phase.VRF, phase.Fabric, vrrpErr, phase.FRR)
+	// One flat join via phase.join (the single registration point), exactly
+	// the pre-#16170 operand order with the tail-locals interleaved at
+	// their named positions. phase.join constructs the single flat
+	// errors.Join itself, so no subgroup joins add intermediate nodes.
+	return phase.join(applyTailLocals{
+		hostInbound: hostInboundErr, lo0: lo0Err, dns: dnsErr,
+		login: loginErr, sudoers: sudoersErr, absentUsers: absentUsersErr, sshConfig: sshConfigErr, rootAuth: rootAuthErr,
+		vrrp: vrrpErr,
+	})
 }
 
 // reconcileClusterTransportBinding compares the live transport epoch with

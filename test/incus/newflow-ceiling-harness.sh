@@ -11,10 +11,13 @@
 # and the whole point of #4800 is a number somebody can defend.
 #
 # The measurement it produces answers: at a sustained new-flow rate, WHICH of
-# the NAT allocator's `live` mutex, `publish_shared_session`, or the N-way
+# the NAT allocator's two counted lock domains (#15956: the 16 flow-shard
+# mutexes, or the retained `live` RwLock write guard — reported as separate
+# sites `nat_allocator_flow_shard` / `nat_allocator_live_write` since #17036,
+# never as the legacy summed pair), `publish_shared_session`, or the N-way
 # `replicate_session_upsert` fan-out saturates first? #2852 Phase-2 sharding
-# targets only the first, so a run that shows publish and replicate saturating
-# earlier is a decision NOT to do that work.
+# (#15956, landed) targeted only the flow map, so a run that shows publish and
+# replicate saturating earlier is a decision NOT to do more allocator work.
 #
 # HOW IT CAN FAIL (it must be able to)
 # ------------------------------------

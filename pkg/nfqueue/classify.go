@@ -27,6 +27,33 @@ type CaptureClassification struct {
 	payloadLength int
 }
 
+// FragmentKey identifies one fragment datagram for pipeline deny
+// accounting. Tunnel, VRF and generation are intentionally part of the
+// key: state cannot cross a tunnel, routing instance or queue generation
+// boundary. It carries identity only - no fragment payload (#17045).
+type FragmentKey struct {
+	Version    uint8
+	Protocol   uint8
+	Tunnel     uint32
+	IfID       uint32
+	VRF        uint32
+	Generation uint64
+	ID         uint32
+	Src        [16]byte
+	Dst        [16]byte
+}
+
+// Fragment is one L3 fragment payload retained by the test-only
+// fragment-pool measurement apparatus (#17045). Offset is in bytes. More
+// indicates that another fragment follows this one; a fragment with
+// More=false supplies the datagram end. No production path constructs
+// or reads Fragment.
+type Fragment struct {
+	Offset uint32
+	More   bool
+	Data   []byte
+}
+
 // FragmentKey derives the generation-scoped fragment identity. Whole packets
 // intentionally cannot produce a fragment key.
 func (c CaptureClassification) FragmentKey(tunnel, vrf uint32, generation uint64) (FragmentKey, bool) {
@@ -45,21 +72,10 @@ func (c CaptureClassification) FragmentKey(tunnel, vrf uint32, generation uint64
 	}, true
 }
 
-// FragmentPiece returns the L3 data carried by this fragment. It reparses the
-// payload before slicing so malformed or mismatched packets are refused rather
-// than being inserted under a caller-supplied key.
-func (c CaptureClassification) FragmentPiece(payload []byte) (Fragment, bool) {
-	parsed, err := ClassifyCapturePayload(payload)
-	if err != nil || !parsed.IsFragment || parsed.FlowKey != c.FlowKey || parsed.FragOffset != c.FragOffset || parsed.FragID != c.FragID {
-		return Fragment{}, false
-	}
-	end := parsed.payloadOffset + parsed.payloadLength
-	if parsed.payloadOffset < 0 || parsed.payloadLength < 0 || end > len(payload) {
-		return Fragment{}, false
-	}
-	data := append([]byte(nil), payload[parsed.payloadOffset:end]...)
-	return Fragment{Offset: parsed.FragOffset, More: parsed.FragMore, Data: data}, true
-}
+// HasPayload reports whether the classified datagram carries any L3
+// payload bytes. The daemon uses it to refuse empty fragments without
+// copying payload bytes (#17045: replaces the former piece-copy check).
+func (c CaptureClassification) HasPayload() bool { return c.payloadLength > 0 }
 
 // ClassifyCapturePayload parses an IPv4 or IPv6 packet from an NFQUEUE
 // payload. It rejects truncation and unsupported/malformed headers; callers
