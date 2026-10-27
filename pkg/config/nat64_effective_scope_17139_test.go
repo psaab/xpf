@@ -31,6 +31,29 @@ func TestNAT64EffectiveScopeUnion17139(t *testing.T) {
 	if got := NAT64EffectiveZones(dup); !reflect.DeepEqual(got, []string{"b"}) {
 		t.Fatalf("NAT64EffectiveZones(dup) = %v, want [b]", got)
 	}
+	// "default" singular + "" list member + explicit-master flag: both
+	// members lower to the same wire token, so the effective set is ONE
+	// token (dedup after lowering), and the owner key is the canonical
+	// single-token key.
+	defaultDup := &NAT64RuleSet{
+		Prefix:              "64:ff9b::/96",
+		FromRoutingInstance: "default", FromRoutingInstances: []string{""},
+		FromRoutingInstanceDefault: true,
+	}
+	if got := NAT64EffectiveRoutingInstances(nil, defaultDup); !reflect.DeepEqual(got, []string{NATDefaultRoutingInstanceWire}) {
+		t.Fatalf("NAT64EffectiveRoutingInstances(default+\"\"+flag) = %q, want [%q] (one token)", got, NATDefaultRoutingInstanceWire)
+	}
+	keyDup, ok := nat64PrefixOwnerKeyScoped(nil, defaultDup)
+	if !ok {
+		t.Fatal("nat64PrefixOwnerKeyScoped(default+\"\"+flag) not ok")
+	}
+	keyCanonical, ok := nat64PrefixOwnerKeyScoped(nil, &NAT64RuleSet{Prefix: "64:ff9b::/96", FromRoutingInstanceDefault: true})
+	if !ok {
+		t.Fatal("nat64PrefixOwnerKeyScoped(canonical master) not ok")
+	}
+	if keyDup != keyCanonical {
+		t.Fatalf("owner key for default+\"\"+flag = %q, want canonical single-token key %q", keyDup, keyCanonical)
+	}
 	// nil and unscoped stay empty.
 	if got := NAT64EffectiveZones(nil); got != nil {
 		t.Fatalf("NAT64EffectiveZones(nil) = %v, want nil", got)

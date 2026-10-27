@@ -50,4 +50,23 @@ func TestBuildNAT64SnapshotsEffectiveScopeUnion17139(t *testing.T) {
 	if riSnaps[0].FromRoutingInstance != "r1" {
 		t.Fatalf("wire FromRoutingInstance = %q, want r1 (singular mirror)", riSnaps[0].FromRoutingInstance)
 	}
+
+	// "default" singular + "" list member + explicit-master flag lowers
+	// to ONE wire token on the snapshot, not a duplicated token.
+	defaultCfg := &config.Config{}
+	defaultCfg.Security.NAT.SourcePools = map[string]*config.NATPool{
+		"p64": {Name: "p64", Addresses: []string{"100.64.0.1/32"}},
+	}
+	defaultCfg.Security.NAT.NAT64 = []*config.NAT64RuleSet{{
+		Name: "rs1", Prefix: "64:ff9b::/96", SourcePool: "p64",
+		FromRoutingInstance: "default", FromRoutingInstances: []string{""},
+		FromRoutingInstanceDefault: true,
+	}}
+	defaultSnaps := buildNAT64Snapshots(defaultCfg)
+	if len(defaultSnaps) != 1 {
+		t.Fatalf("default snapshots = %d, want 1", len(defaultSnaps))
+	}
+	if !reflect.DeepEqual(defaultSnaps[0].FromRoutingInstances, []string{config.NATDefaultRoutingInstanceWire}) {
+		t.Fatalf("wire FromRoutingInstances(default+\"\"+flag) = %q, want [%q] (one token)", defaultSnaps[0].FromRoutingInstances, config.NATDefaultRoutingInstanceWire)
+	}
 }

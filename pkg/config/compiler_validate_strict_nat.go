@@ -6333,21 +6333,18 @@ func NAT64EffectiveZones(rs *NAT64RuleSet) []string {
 	return out
 }
 
-// NAT64EffectiveRoutingInstances (#16049, #17139) is the
-// routing-instance set a NAT64 rule-set admits: the deduped union of
-// the authored FromRoutingInstances list and the singular
-// FromRoutingInstance, order-preserved and then lowered to wire space
-// exactly as snapshot emission is. #16604: an explicit master scope
-// (list member "" + flag) keys as the wire token so it neither collides
-// with the unscoped key nor with a named instance. A raw literal
-// `default` is normalized using cfg's declaration, as snapshot
-// emission is.
-func NAT64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
+// nat64UnionRoutingInstances is the pre-lowering deduped union of the
+// authored FromRoutingInstances list and the singular
+// FromRoutingInstance, order-preserved (list order first, singular
+// appended when not already present). It is the single union loop
+// shared by NAT64EffectiveRoutingInstances (which then lowers it to
+// wire space) and nat64GateRoutingInstances (which validates the
+// authored names as-is).
+func nat64UnionRoutingInstances(rs *NAT64RuleSet) []string {
 	if rs == nil {
 		return nil
 	}
-	var out []string
-	out = append(out, rs.FromRoutingInstances...)
+	out := append([]string(nil), rs.FromRoutingInstances...)
 	if rs.FromRoutingInstance != "" {
 		found := false
 		for _, ri := range out {
@@ -6360,6 +6357,27 @@ func NAT64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
 			out = append(out, rs.FromRoutingInstance)
 		}
 	}
+	return out
+}
+
+// NAT64EffectiveRoutingInstances (#16049, #17139) is the
+// routing-instance set a NAT64 rule-set admits: the deduped union of
+// the authored FromRoutingInstances list and the singular
+// FromRoutingInstance, order-preserved and then lowered to wire space
+// exactly as snapshot emission is. #16604: an explicit master scope
+// (list member "" + flag) keys as the wire token so it neither collides
+// with the unscoped key nor with a named instance. A raw literal
+// `default` is normalized using cfg's declaration, as snapshot
+// emission is. Dedup runs again AFTER all lowering (first occurrence
+// wins): distinct authored members can lower to the same wire token
+// (e.g. singular "default" beside a "" list member under the
+// explicit-master flag), and the wire set — and therefore the owner
+// key — must carry that token once, canonically.
+func NAT64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
+	if rs == nil {
+		return nil
+	}
+	out := nat64UnionRoutingInstances(rs)
 	if rs.FromRoutingInstanceDefault {
 		for i, ri := range out {
 			if ri == "" {
@@ -6373,7 +6391,22 @@ func NAT64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
 	for i, ri := range out {
 		out[i] = NormalizeNATRoutingInstanceScope16604(cfg, ri)
 	}
-	return out
+	// Dedup after lowering, first occurrence wins. `out` is freshly
+	// built above, so filtering in place cannot alias authored state.
+	deduped := out[:0]
+	for _, ri := range out {
+		found := false
+		for _, kept := range deduped {
+			if kept == ri {
+				found = true
+				break
+			}
+		}
+		if !found {
+			deduped = append(deduped, ri)
+		}
+	}
+	return deduped
 }
 
 func nat64EffectiveZones(rs *NAT64RuleSet) []string {
@@ -6394,23 +6427,7 @@ func nat64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
 // wire lowering itself stays single-sourced in
 // NAT64EffectiveRoutingInstances for the owner key and the builder.
 func nat64GateRoutingInstances(rs *NAT64RuleSet) []string {
-	if rs == nil {
-		return nil
-	}
-	out := append([]string(nil), rs.FromRoutingInstances...)
-	if rs.FromRoutingInstance != "" {
-		found := false
-		for _, ri := range out {
-			if ri == rs.FromRoutingInstance {
-				found = true
-				break
-			}
-		}
-		if !found {
-			out = append(out, rs.FromRoutingInstance)
-		}
-	}
-	return out
+	return nat64UnionRoutingInstances(rs)
 }
 
 // nat64PrefixOwnerKeyScoped is the shadow key (#9555/#15678): same
