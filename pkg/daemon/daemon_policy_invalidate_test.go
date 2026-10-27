@@ -620,7 +620,7 @@ func TestApplyAndSyncCommittedSurfacesInvalidationError(t *testing.T) {
 	d.setDataplane(dp) // #2114: publish through the cell
 
 	// peerSyncNever: no cluster wiring needed; the peer push is orthogonal.
-	got, err := d.applyAndSyncCommitted(oldActive, compiled, peerSyncNever)
+	got, err := d.applyAndSyncCommittedForTest(oldActive, compiled, peerSyncNever)
 	if err == nil {
 		t.Fatal("applyAndSyncCommitted returned nil error despite a failed policy session " +
 			"invalidation; the stale-authorization gap was swallowed (#5578)")
@@ -753,7 +753,7 @@ func TestCommitWindowArmApplySweepOrder10591(t *testing.T) {
 		d.captureAndStagePolicyRenameAncestry(cfg)
 		phases = append(phases, "apply")
 	}
-	if _, err := d.applyAndSyncCommitted(oldCfg, newCfg, peerSyncNever); err != nil {
+	if _, err := d.applyAndSyncCommittedForTest(oldCfg, newCfg, peerSyncNever); err != nil {
 		t.Fatalf("applyAndSyncCommitted: %v", err)
 	}
 	if len(phases) != 1 || phases[0] != "apply" {

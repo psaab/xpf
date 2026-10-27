@@ -223,7 +223,7 @@ func TestPeerSyncBackstopStillReconcilesManagement6720(t *testing.T) {
 	mgmtAuthCommit(t, peerStore, mgmtAuthConfigFor("ge-0/0/0", newSecret))
 	peerText := peerStore.ShowActive()
 
-	_, err = e.d.syncAndApply(context.Background(), peerText, nil)
+	_, err = e.d.syncAndApplyForTest(context.Background(), peerText, nil)
 	if err == nil {
 		t.Fatal("setup: the topology backstop must reject a peer-synced topology transition " +
 			"on a daemon whose HA runtime cannot be torn down live; without that rejection " +
@@ -297,7 +297,7 @@ func TestPeerSyncIdentityBackstopStillReconcilesManagement6720(t *testing.T) {
 	mgmtAuthCommit(t, peerStore, mgmtAuthConfigFor("ge-0/0/0", newSecret)+clusterLines(2))
 	peerText := peerStore.ShowActive()
 
-	_, err = e.d.syncAndApply(context.Background(), peerText, nil)
+	_, err = e.d.syncAndApplyForTest(context.Background(), peerText, nil)
 	if err == nil {
 		t.Fatal("setup: the identity backstop must reject a peer-synced cluster-id change; " +
 			"without that rejection this test exercises the ordinary apply path")
