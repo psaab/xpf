@@ -10,8 +10,10 @@ import (
 
 // v4View builds an applied view with a single mode-1 (IPv4) deterministic
 // pool matching the Rust golden vectors in
-// userspace-dp/src/nat/tests_pool.rs
-// (deterministic_cgnat_v4_fixed_block_per_subscriber_reversible):
+// the shared fixture
+// userspace-dp/tests/fixtures/deterministic_nat_vectors_v1.json
+// (vector v4-golden-a; Rust deterministic_cgnat_v4_fixed_block_per_subscriber_reversible in
+// userspace-dp/src/nat/tests_pool.rs asserts the same values):
 // pool 203.0.113.1-4, port range 1024-65535, block-size 512 (=> 126
 // blocks/addr), subscriber CIDR 100.64.0.0/22 (=> host_count 1024).
 func v4View(gen uint64) AppliedView {
@@ -31,8 +33,9 @@ func v4View(gen uint64) AppliedView {
 }
 
 // v6View builds an applied view with a single mode-2 (IPv6/NAPT64)
-// deterministic pool matching the Rust golden vectors
-// (deterministic_napt64_v6_fixed_block_per_subscriber_reversible):
+// deterministic pool matching the shared fixture vector v6-golden-32
+// (Rust deterministic_napt64_v6_fixed_block_per_subscriber_reversible in
+// userspace-dp/src/nat/tests_pool.rs asserts the same values):
 // external pool 198.51.100.1-4, NAT64 port range 1024-65535, block-size 512
 // (=> 126 blocks/addr), subscriber prefix 2001:db8::/32 (=> host_count 504).
 func v6View(gen uint64) AppliedView {
@@ -55,133 +58,56 @@ func v6View(gen uint64) AppliedView {
 }
 
 // TestDeterministicV4GoldenVectors pins the mode-1 forward + reverse mapping
-// to the exact values the Rust allocator test asserts. If the Go arithmetic
-// drifts from the enforced dataplane mapping, these fail.
+// to the shared-fixture vector v4-golden-a (#17124). The same values are
+// asserted Rust-side from the same file, so a drift on either side reds both.
 func TestDeterministicV4GoldenVectors(t *testing.T) {
+	// The literal rows live in the shared fixture (vector v4-golden-a);
+	// TestDeterministicNATVectorsSharedFixture17124 drives them, and the
+	// Rust fixture test asserts the same rows. This cell keeps the
+	// generation/mode surface the fixture driver does not pin.
 	view := v4View(7)
-
-	// Subscriber A = 100.64.0.5 -> sub_idx 5, ip_idx 0, block_idx 5,
-	// block [3584, 4095], external pool[0] = 203.0.113.1.
 	fwd, err := LookupForward(view, "cgn-pool", "100.64.0.5")
 	if err != nil {
 		t.Fatalf("forward A: unexpected error %v", err)
 	}
-	if fwd.ExternalIP != "203.0.113.1" || fwd.PortLow != 3584 || fwd.PortHigh != 4095 ||
-		fwd.BlockIndex != 5 || fwd.BlockSize != 512 || fwd.Mode != ModeV4 || fwd.AppliedGeneration != 7 {
-		t.Fatalf("forward A mismatch: %+v", fwd)
+	if fwd.Mode != ModeV4 || fwd.AppliedGeneration != 7 {
+		t.Fatalf("forward A surface mismatch: %+v", fwd)
 	}
-
-	// Subscriber B = 100.64.1.0 -> sub_idx 256, ip_idx 2, block_idx 4,
-	// block [3072, 3583], external pool[2] = 203.0.113.3.
-	fwd, err = LookupForward(view, "cgn-pool", "100.64.1.0")
-	if err != nil {
-		t.Fatalf("forward B: unexpected error %v", err)
-	}
-	if fwd.ExternalIP != "203.0.113.3" || fwd.PortLow != 3072 || fwd.PortHigh != 3583 || fwd.BlockIndex != 4 {
-		t.Fatalf("forward B mismatch: %+v", fwd)
-	}
-
-	// Reverse the two golden tuples back to their subscribers.
 	rev, err := LookupReverse(view, "cgn-pool", "203.0.113.1", 3584)
 	if err != nil {
 		t.Fatalf("reverse A: unexpected error %v", err)
 	}
-	if rev.InternalHost != "100.64.0.5" || rev.PortLow != 3584 || rev.PortHigh != 4095 || rev.AppliedGeneration != 7 {
-		t.Fatalf("reverse A mismatch: %+v", rev)
-	}
-	rev, err = LookupReverse(view, "cgn-pool", "203.0.113.3", 3072)
-	if err != nil {
-		t.Fatalf("reverse B: unexpected error %v", err)
-	}
-	if rev.InternalHost != "100.64.1.0" {
-		t.Fatalf("reverse B mismatch: %+v", rev)
+	if rev.AppliedGeneration != 7 {
+		t.Fatalf("reverse A generation mismatch: %+v", rev)
 	}
 }
 
 // TestDeterministicV6GoldenVectors pins the mode-2 (NAPT64) forward +
-// reverse mapping to the Rust golden vectors.
+// reverse mapping to the shared-fixture vector v6-golden-32 (#17124).
 func TestDeterministicV6GoldenVectors(t *testing.T) {
+	// Literal rows live in the shared fixture (vector v6-golden-32),
+	// driven by TestDeterministicNATVectorsSharedFixture17124 and asserted
+	// Rust-side from the same file. Kept here: the beyond-capacity
+	// fail-closed row (also a fixture row) exercised by name.
 	view := v6View(3)
-
-	// Subscriber A = 2001:db8:0:5:: -> word 5 -> sub_idx 5, ip_idx 0,
-	// block_idx 5, block [3584, 4095], external pool[0] = 198.51.100.1.
-	fwd, err := LookupForward(view, "napt64-pool", "2001:db8:0:5::")
-	if err != nil {
-		t.Fatalf("forward A: unexpected error %v", err)
-	}
-	if fwd.ExternalIP != "198.51.100.1" || fwd.PortLow != 3584 || fwd.PortHigh != 4095 ||
-		fwd.BlockIndex != 5 || fwd.Mode != ModeV6 {
-		t.Fatalf("forward A mismatch: %+v", fwd)
-	}
-
-	// Subscriber B = 2001:db8:0:100:: -> word 256 -> sub_idx 256, ip_idx 2,
-	// block_idx 4, block [3072, 3583], external pool[2] = 198.51.100.3.
-	fwd, err = LookupForward(view, "napt64-pool", "2001:db8:0:100::")
-	if err != nil {
-		t.Fatalf("forward B: unexpected error %v", err)
-	}
-	if fwd.ExternalIP != "198.51.100.3" || fwd.PortLow != 3072 || fwd.PortHigh != 3583 || fwd.BlockIndex != 4 {
-		t.Fatalf("forward B mismatch: %+v", fwd)
-	}
-
-	// Reverse recovers the subscriber PREFIX (network base + word).
-	rev, err := LookupReverse(view, "napt64-pool", "198.51.100.1", 3584)
-	if err != nil {
-		t.Fatalf("reverse A: unexpected error %v", err)
-	}
-	if rev.InternalHost != "2001:db8:0:5::" {
-		t.Fatalf("reverse A mismatch: got %q want 2001:db8:0:5::", rev.InternalHost)
-	}
-	rev, err = LookupReverse(view, "napt64-pool", "198.51.100.3", 3072)
-	if err != nil {
-		t.Fatalf("reverse B: unexpected error %v", err)
-	}
-	if rev.InternalHost != "2001:db8:0:100::" {
-		t.Fatalf("reverse B mismatch: got %q", rev.InternalHost)
-	}
-
-	// A subscriber beyond the pool-bounded host_count (504) fails closed.
-	// sub_idx 504 is word 0x1f8 -> 2001:db8:0:1f8::.
 	if _, e := LookupForward(view, "napt64-pool", "2001:db8:0:1f8::"); e == nil || e.Code != ErrCodeOutOfRange {
 		t.Fatalf("beyond-capacity subscriber must be out-of-range, got %v", e)
 	}
 }
 
 // TestDeterministicV6Prefix64 checks the /64 subscriber-word offset (octet
-// 8) golden value from the Rust test: 2001:db8::7:0:0 -> sub_idx 7.
+// 8) golden value from the shared-fixture vector v6-golden-64: 2001:db8::7:0:0 -> sub_idx 7.
 func TestDeterministicV6Prefix64(t *testing.T) {
-	pool := &config.NATPool{
-		Name:      "p64",
-		Addresses: []string{"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4"},
-		Deterministic: &config.DeterministicNATConfig{
-			BlockSize:   512,
-			HostAddress: "2001:db8::/64",
-		},
-	}
-	cfg := &config.Config{}
-	cfg.Security.NAT.SourcePools = map[string]*config.NATPool{"p64": pool}
-	cfg.Security.NAT.NAT64 = []*config.NAT64RuleSet{{
-		Name:       "v6-to-v4",
-		Prefix:     "64:ff9b::/96",
-		SourcePool: "p64",
-	}}
-	view := AppliedView{Config: cfg, Generation: 1, Available: true}
-
-	// word 7 -> sub_idx 7, ip_idx 0, block_idx 7, block [1024+7*512, ..+511]
-	// = [4608, 5119], external pool[0].
-	fwd, err := LookupForward(view, "p64", "2001:db8::7:0:0")
+	// The /64 rows live in the shared fixture (vector v6-golden-64),
+	// driven by TestDeterministicNATVectorsSharedFixture17124 and
+	// asserted Rust-side from the same file (#17124).
+	view := v6View64(1)
+	fwd, err := LookupForward(view, "napt64-pool64", "2001:db8::7:0:0")
 	if err != nil {
 		t.Fatalf("forward /64: %v", err)
 	}
-	if fwd.BlockIndex != 7 || fwd.ExternalIP != "198.51.100.1" || fwd.PortLow != 4608 || fwd.PortHigh != 5119 {
-		t.Fatalf("/64 forward mismatch: %+v", fwd)
-	}
-	rev, err := LookupReverse(view, "p64", "198.51.100.1", 4700)
-	if err != nil {
-		t.Fatalf("reverse /64: %v", err)
-	}
-	if rev.InternalHost != "2001:db8::7:0:0" {
-		t.Fatalf("/64 reverse mismatch: got %q", rev.InternalHost)
+	if fwd.Mode != ModeV6 {
+		t.Fatalf("/64 forward mode mismatch: %+v", fwd)
 	}
 }
 
@@ -310,7 +236,7 @@ func TestDeterministicV6RejectsSubnetPoolAddress(t *testing.T) {
 
 // TestNAT64UninstallablePrefixRuleIsNotDeterministic covers the finding that a
 // NAT64 rule whose prefix the dataplane refuses to install (empty, non-/96,
-// extra-slash, or unparseable — userspace-dp/src/nat64.rs skips the whole rule)
+// extra-slash, or unparseable — userspace-dp/src/nat64/state.rs (parse_nat64_rule) skips the whole rule)
 // must NOT expose its source pool as deterministic. Before the fix
 // nat64ReferencedPools counted any bare reference, so an empty-prefix rule
 // reported a confident mapping that no installed rule actually performs.

@@ -166,7 +166,7 @@ func strictVIPOwnershipByDefault(cc *config.ClusterConfig, cfg *config.Config) b
 	if cc == nil {
 		return false
 	}
-	if cc.NoRethVRRP || cc.PrivateRGElection {
+	if !cc.UsesRethVRRP() {
 		return false
 	}
 	// In the userspace dataplane, hot standby depends on the future owner
@@ -226,7 +226,7 @@ func (d *Daemon) legacyNoRethVRRPCommitReady(rgID int, s *rgStateMachine, noReth
 		return false
 	}
 	cc := d.clusterConfig()
-	if cc == nil || cc.NoRethVRRP || cc.PrivateRGElection {
+	if cc == nil || !cc.UsesRethVRRP() {
 		return false
 	}
 	if d.cluster == nil || !d.cluster.IsLocalPrimary(rgID) {

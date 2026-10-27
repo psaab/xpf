@@ -139,6 +139,8 @@ mod flows;
 mod occupancy;
 
 #[cfg(test)]
+mod tests_deterministic_vectors_17124;
+#[cfg(test)]
 mod tests_occupancy_seam_16135;
 
 pub(crate) use deterministic::{
@@ -1121,7 +1123,10 @@ impl ReverseIdentityIndex {
     }
 }
 
-pub(super) const DETERMINISTIC_NAT64_BIB_TIMEOUT_NS: u64 = 300 * NS_PER_SEC;
+/// #17099: single source for the NAT64 BIB idle-lease lifetime. Every
+/// NAT64 mint/reserve/import site uses this constant instead of spelling
+/// the 300-second literal, so the value cannot drift between arms.
+pub(crate) const DETERMINISTIC_NAT64_BIB_TIMEOUT_NS: u64 = 300 * NS_PER_SEC;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PersistentLease {
     pub(super) translated: TranslatedTuple,

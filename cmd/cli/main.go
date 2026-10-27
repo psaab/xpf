@@ -743,11 +743,11 @@ func (c *ctl) testPolicy(args []string) error {
 	if dstIP != "" {
 		topic += ",dst=" + dstIP
 	}
-	if srcPort > 0 {
-		topic += ",srcport=" + strconv.Itoa(srcPort)
+	if srcPort != nil {
+		topic += ",srcport=" + strconv.Itoa(int(*srcPort))
 	}
-	if dstPort > 0 {
-		topic += ",port=" + strconv.Itoa(dstPort)
+	if dstPort != nil {
+		topic += ",port=" + strconv.Itoa(int(*dstPort))
 	}
 	if proto != "" {
 		topic += ",proto=" + proto

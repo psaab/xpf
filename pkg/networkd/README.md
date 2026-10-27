@@ -52,12 +52,17 @@ Triggers `networkctl reload` only when files actually changed.
 ## Naming conventions (CLAUDE.md authoritative)
 
 - File prefix `10-xpf-` distinguishes xpf-managed files from manual
-  configs. Anything else is left alone.
+  configs. Anything else is left alone. Exported as `FilePrefix` (#17042).
+- One `.link` renderer (#17042, R4-Q43-01): `RenderLink(LinkSpec)` owns
+  the guard ladder and the full property set; `generateLink` delegates
+  to it, and pkg/daemon's boot writer (`writeLinkFile`) renders through
+  it, so the boot unit and the apply unit are byte-identical for the
+  same inputs. `WriteUnitIfChanged` is the shared read-compare-write.
 - Non-RETH interfaces match by `MACAddress=` — MAC is stable.
 - RETH member interfaces match by `OriginalName=` (PCI kernel name)
   because the MAC alternates between physical and virtual at boot. The
   daemon's `ensureRethLinkOriginalName()` auto-fixes stale `.link` files
-  that still use `MACAddress=`.
+  that still use `MACAddress=`, preserving the richer rendered fields.
 - `KeepConfiguration=static` on RETH interfaces preserves VRRP VIPs
   across `networkctl reload`. DHCP rows preserve the daemon's lease
   address the same way (#14594): `keepConfigurationValue` emits `yes`

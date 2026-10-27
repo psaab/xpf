@@ -32,7 +32,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/fsatomic"
@@ -253,7 +252,7 @@ func Seed(cfg Config) (err error) {
 func copyStagedToVersion(stagedDir, versionsDir, verDir string) error {
 	partial := verDir + ".partial"
 	_ = os.RemoveAll(partial)
-	if err := copyTreeFsync(stagedDir, partial); err != nil {
+	if err := fsatomic.CopyTreeDurable(stagedDir, partial, fsatomic.CopyTreeOptions{}); err != nil {
 		_ = os.RemoveAll(partial)
 		return fmt.Errorf("seed: copy staged -> partial: %w", err)
 	}
@@ -381,120 +380,6 @@ func atomicSymlink(link, target string) error {
 	}
 	if err := fsatomic.SyncDir(dir); err != nil {
 		return fmt.Errorf("fsync symlink dir: %w", err)
-	}
-	return nil
-}
-
-// copyTreeFsync recursively copies src into dst (which must not exist),
-// preserving file modes and fsyncing each file. Mirrors upgrade.copyTree's
-// durability without the checksum (Seed re-runs idempotently; there is no
-// torn-source race at install — dpkg has finished unpacking staged/ before
-// the postinst configure step runs).
-func copyTreeFsync(src, dst string) error {
-	type ent struct {
-		rel  string
-		info os.FileInfo
-		path string
-	}
-	var ents []ent
-	err := filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, rerr := filepath.Rel(src, p)
-		if rerr != nil {
-			return rerr
-		}
-		ents = append(ents, ent{rel: rel, info: info, path: p})
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	sort.Slice(ents, func(i, j int) bool { return ents[i].rel < ents[j].rel })
-
-	var createdDirs []string
-	for _, e := range ents {
-		target := filepath.Join(dst, e.rel)
-		switch {
-		case e.info.IsDir():
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return fmt.Errorf("mkdir %s: %w", target, err)
-			}
-			// Preserve the SOURCE dir's permissions (MkdirAll applies the
-			// umask and won't chmod an existing dir, so set it explicitly) —
-			// otherwise versions/<ver>/ could end up more permissive than
-			// staged/ for a non-0755 staged subdir. preservedMode keeps the
-			// setuid/setgid/sticky bits too (Copilot).
-			if err := os.Chmod(target, preservedMode(e.info.Mode())); err != nil {
-				return fmt.Errorf("chmod %s: %w", target, err)
-			}
-			createdDirs = append(createdDirs, target)
-		case e.info.Mode().IsRegular():
-			if err := copyFileFsync(e.path, target, e.info.Mode()); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("copyTreeFsync: unsupported file type for %s", e.path)
-		}
-	}
-	// Fsync created dirs deepest-first so a child's entries are durable
-	// before the parent entry referencing it.
-	sort.Slice(createdDirs, func(i, j int) bool {
-		di := strings.Count(createdDirs[i], string(os.PathSeparator))
-		dj := strings.Count(createdDirs[j], string(os.PathSeparator))
-		if di != dj {
-			return di > dj
-		}
-		return createdDirs[i] > createdDirs[j]
-	})
-	for _, d := range createdDirs {
-		if err := fsatomic.SyncDir(d); err != nil {
-			return fmt.Errorf("fsync copied dir %s: %w", d, err)
-		}
-	}
-	return nil
-}
-
-// preservedMode returns the chmod-applicable mode bits of m: the rwx
-// permission bits PLUS setuid/setgid/sticky. m.Perm() alone masks the
-// special bits off (Copilot). Staged content is 0755 today, so this is
-// forward-looking exactness rather than a current bug.
-func preservedMode(m os.FileMode) os.FileMode {
-	return m.Perm() | (m & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky))
-}
-
-func copyFileFsync(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", src, err)
-	}
-	defer in.Close()
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", dst, err)
-	}
-	// OpenFile applies the umask to the create mode, so chmod to the exact
-	// source mode — the staged binaries are 0755 and must stay executable
-	// through versions/<ver>/ regardless of the installing process's umask.
-	// preservedMode keeps any setuid/setgid/sticky bits too (Copilot).
-	if err := out.Chmod(preservedMode(mode)); err != nil {
-		out.Close()
-		return fmt.Errorf("chmod %s: %w", dst, err)
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return fmt.Errorf("copy %s -> %s: %w", src, dst, err)
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		return fmt.Errorf("fsync %s: %w", dst, err)
-	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", dst, err)
 	}
 	return nil
 }

@@ -5,19 +5,25 @@ import (
 	"sort"
 )
 
-// RethVIPsForRG returns the VIPs (CIDR strings) per Linux interface name for
-// RETH interfaces belonging to the given redundancy group. Used by direct
-// VIP mode (when no-reth-vrrp is set) where the daemon manages VIPs without
-// VRRP, by the VRRP collector, and by the cluster ip-monitor probe source
-// resolution (#15038) — one derivation so the probe source can never drift
-// from the installed set.
-func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
+// RethVIPsByRG returns, for every redundancy group, the VIPs (CIDR strings)
+// per Linux interface name owned by that group. It is the ONE walk that
+// builds the RETH sub-interface name and collects unit addresses (#17140):
+// the direct VIP mode, the VRRP collector and the cluster ip-monitor probe
+// source all derive from it, so they can never drift.
+//
+// The walk skips present-but-nil and disabled interfaces (#6780/#16590) and
+// disabled or nil units (#16590), resolves RETH->physical via
+// RethToPhysical, applies VLAN sub-interface naming when tagging is
+// enabled, and canonically dedupes each sub-interface's VIPs (#11482) so
+// alias spellings (e.g. 2001:db8:61::1/64 vs 2001:DB8:61:0::1/64) yield
+// one entry — the direct path must not feed a duplicate to AddrAdd or to
+// a GARP/NA burst.
+func (c *Config) RethVIPsByRG() map[int]map[string][]string {
 	if c == nil {
 		return nil
 	}
 	rethToPhys := c.RethToPhysical()
 
-	result := make(map[string][]string)
 	// #6781: the same structural ownership predicate the VRRP-backed collector
 	// uses. This replaces a `strings.HasPrefix(name, "reth")` filter whose
 	// stated purpose — "skip fabric, control, and management interfaces that
@@ -27,6 +33,7 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 	// with no VIPs installed at all.
 	rgOwners := c.RethRGOwners()
 
+	result := make(map[int]map[string][]string)
 	for _, name := range sortedRethIfNames(c) {
 		ifc := c.Interfaces.Interfaces[name]
 		// #6780: skip a present-but-nil interface — this is the direct
@@ -38,7 +45,8 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 		if ifc.Disable {
 			continue
 		}
-		if owns, ok := rgOwners[name]; !ok || owns != rgID {
+		rgID, ok := rgOwners[name]
+		if !ok {
 			continue
 		}
 
@@ -54,6 +62,7 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 		}
 		sort.Ints(unitNums)
 
+		rgMap := result[rgID]
 		if ifc.TaggingEnabled() {
 			for _, n := range unitNums {
 				unit := ifc.Units[n]
@@ -65,7 +74,11 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 				if unit.VlanID > 0 {
 					subIface = fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
 				}
-				result[subIface] = append(result[subIface], unit.Addresses...)
+				if rgMap == nil {
+					rgMap = make(map[string][]string)
+					result[rgID] = rgMap
+				}
+				rgMap[subIface] = append(rgMap[subIface], unit.Addresses...)
 			}
 		} else {
 			var vips []string
@@ -77,11 +90,36 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 				vips = append(vips, unit.Addresses...)
 			}
 			if len(vips) > 0 {
-				result[linuxName] = append(result[linuxName], vips...)
+				if rgMap == nil {
+					rgMap = make(map[string][]string)
+					result[rgID] = rgMap
+				}
+				rgMap[linuxName] = append(rgMap[linuxName], vips...)
 			}
 		}
 	}
+	// #11482 canonical dedupe, applied once here so every consumer sees the
+	// same one-entry-per-VIP set. Dedupe after merging all interfaces/units
+	// that can land on the same sub-interface.
+	for _, rgMap := range result {
+		for subIface, vips := range rgMap {
+			rgMap[subIface] = DedupeVRRPVIPs(vips)
+		}
+	}
 	return result
+}
+
+// RethVIPsForRG returns the VIPs (CIDR strings) per Linux interface name for
+// RETH interfaces belonging to the given redundancy group. Used by direct
+// VIP mode (when no-reth-vrrp is set) where the daemon manages VIPs without
+// VRRP, by the VRRP collector, and by the cluster ip-monitor probe source
+// resolution (#15038) — one derivation (RethVIPsByRG) so the probe source
+// can never drift from the installed set.
+func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
+	if c == nil {
+		return nil
+	}
+	return c.RethVIPsByRG()[rgID]
 }
 
 // sortedRethIfNames returns sorted interface names for deterministic iteration.
