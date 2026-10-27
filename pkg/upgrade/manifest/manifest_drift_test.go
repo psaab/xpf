@@ -223,23 +223,25 @@ var censusToken = regexp.MustCompile(`[A-Za-z0-9._-]+`)
 type censusHit struct {
 	file  string
 	line  int
+	start int
 	names []string
 }
 
 // censusRuns returns every maximal run of >=3 adjacent manifest.Names()
-// tokens in src, attributed to its starting line. Tokens are
-// [A-Za-z0-9._-]+ words; any other byte (whitespace, punctuation,
-// quotes, comment markers) is a separator, so runs may span line
-// breaks. Occurrences of the generated list in gen_bins.go and this
-// test's own literals are inventoried by the allowance below, never
-// silently skipped.
+// tokens in src, attributed to its starting line and byte offset.
+// Tokens are [A-Za-z0-9._-]+ words; any other byte (whitespace,
+// punctuation, quotes, comment markers) is a separator, so runs may
+// span line breaks. Occurrences are inventoried by the allowance
+// below or skipped only when the same occurrence is verified by a
+// named extractor (see censusVerifiedSpans) — never silently skipped.
 func censusRuns(src string, nameSet map[string]bool) []censusHit {
 	var hits []censusHit
 	var run []string
 	runLine := 0
+	runStart := 0
 	flush := func() {
 		if len(run) >= 3 {
-			hits = append(hits, censusHit{line: runLine, names: append([]string(nil), run...)})
+			hits = append(hits, censusHit{line: runLine, start: runStart, names: append([]string(nil), run...)})
 		}
 		run = nil
 	}
@@ -248,6 +250,7 @@ func censusRuns(src string, nameSet map[string]bool) []censusHit {
 		if nameSet[tok] {
 			if len(run) == 0 {
 				runLine = strings.Count(src[:loc[0]], "\n") + 1
+				runStart = loc[0]
 			}
 			run = append(run, tok)
 		} else {
@@ -258,15 +261,54 @@ func censusRuns(src string, nameSet map[string]bool) []censusHit {
 	return hits
 }
 
+// span identifies one verified name occurrence inside a file: the
+// byte offset where the verified run starts and the names the named
+// extractor compared against the SSOT at that occurrence.
+type span struct {
+	start int
+	names []string
+}
+
+// indexSpan locates the exact token sequence names in src at or
+// after byte offset from, returning its starting byte offset or -1.
+// It tokenises from scratch because censusRuns reports only maximal
+// runs: an extracted list that is a contiguous subsequence of a
+// longer run (e.g. debian/rules' install recipe inside the
+// staged-path comment run) must still be locatable token by token.
+func indexSpan(src string, names []string, from int) int {
+	if len(names) == 0 {
+		return -1
+	}
+	locs := censusToken.FindAllStringIndex(src, -1)
+	for i := 0; i+len(names) <= len(locs); i++ {
+		if locs[i][0] < from {
+			continue
+		}
+		ok := true
+		for j, n := range names {
+			if src[locs[i+j][0]:locs[i+j][1]] != n {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return locs[i][0]
+		}
+	}
+	return -1
+}
+
 // censusAllowlist records, per file, every census run that is not
-// verified by a dedicated extractor (see censusCoveredRun). Entries
-// are positional: the walk rejects a run with no remaining entry,
-// and the final check rejects a stale entry with no run. Covered
-// files participate in this accounting for their unverified runs:
-// a run in a covered file is skipped only when that file's named
-// extractor verifies that very run, so a new divergent run appended
-// to a covered file reds, and allowlist entries in covered files
-// can go stale. Counts were inventoried from the census at #17101.
+// verified at its occurrence by a dedicated extractor (see
+// censusVerifiedSpans / censusRunCovered). Entries are positional:
+// the walk rejects a run with no remaining entry, and the final
+// check rejects a stale entry with no run. Covered files participate
+// in this accounting for their unverified runs: a run in a covered
+// file is skipped only when a named extractor verifies that very
+// occurrence, so an identical full-set run appended to a covered
+// file — or a full-set-length run in any position the extractor
+// does not check — reds unless allowlisted, and allowlist entries
+// in covered files can go stale. Counts were inventoried at #17101.
 var censusAllowlist = map[string][]string{
 	// Derives BINS from seed_layout._BINS (bins.txt), so it contains
 	// no >=3 run; kept with zero runs so a retyped list would need a
@@ -279,9 +321,9 @@ var censusAllowlist = map[string][]string{
 	"test/incus/harness-result-selftest.sh": {"fixture-not-a-list"},
 	// Incidental fixture loops over a subset (missing xpfd): setup
 	// scaffolding that iterates BINS-adjacent fixtures, not the
-	// managed set definition. The BINS= run in each such file is
-	// verified by extractBINS (see censusCoveredRun) and does not
-	// consume an entry here.
+	// managed set definition. The BINS= occurrence in each such file
+	// is verified by extractBINS (see censusVerifiedSpans) and does
+	// not consume an entry here.
 	"test/debian/postinst-test.sh": {
 		"fixture-loop-missing-xpfd", "fixture-loop-missing-xpfd",
 		"fixture-loop-missing-xpfd", "fixture-loop-missing-xpfd",
@@ -290,10 +332,14 @@ var censusAllowlist = map[string][]string{
 	"test/debian/postrm-test.sh": {
 		"fixture-loop-missing-xpfd", "fixture-loop-missing-xpfd",
 	},
-	// The full-set loop is the covered besteffort site; this subset
-	// run is fixture scaffolding in the same file.
+	// The full-set loop occurrence is the covered besteffort site;
+	// this subset run is fixture scaffolding in the same file.
 	"test/debian/preinst-besteffort-test.sh": {"fixture-loop-missing-xpfd"},
 	"test/debian/preinst-migrate-test.sh":    {"fixture-loop-missing-xpfd"},
+	// The staged-path comment run in debian/rules: prose layout
+	// documentation, not an install list. The install-recipe
+	// occurrences are verified by extractRulesInstall/StagedSrc.
+	"debian/rules": {"prose-staged-path-comment"},
 	// Prose naming the pushed/verified binaries: not a list
 	// definition, and the push set is separately pinned below.
 	"test/incus/deploy-lib.sh": {
@@ -312,50 +358,124 @@ var censusAllowlist = map[string][]string{
 	},
 }
 
-// censusCoveredFiles are the files with a dedicated extractor in
-// this test that compares a managed-binary list against the SSOT.
-// Coverage is PER-RUN, not per-file: censusCoveredRun skips only a
-// run that the file's extractor actually verifies. Any other run in
-// one of these files must consume a censusAllowlist entry (and can
-// stale it), exactly as in an uncovered file. debian/rules is
-// covered by the install-set + StagedSrc checks; bins.txt by the
-// exact in-order comparison; manifest.go by the Names() definition
-// itself (its only run is the ShellBINS doc example, equal to
-// Names()); gen_bins.go by the direct literal pin below;
-// seed_layout_10771.py by the no-literal scan, which rejects any
-// managed-binary token at all.
-var censusCoveredFiles = map[string]bool{
-	"debian/rules":                           true,
-	"debian/xpf.preinst":                     true,
-	"debian/xpf.postinst":                    true,
-	"debian/xpf.postrm":                      true,
-	"test/debian/preinst-migrate-test.sh":    true,
-	"test/debian/postrm-test.sh":             true,
-	"test/debian/postinst-test.sh":           true,
-	"test/debian/preinst-besteffort-test.sh": true,
-	"scripts/image/seed_layout_10771.py":     true,
-	"pkg/upgrade/manifest/bins.txt":          true,
-	"pkg/upgrade/manifest/manifest.go":       true,
-	"pkg/upgrade/manifest/gen_bins.go":       true,
+// censusVerifiedSpans returns the name occurrences in each file that
+// a named extractor in TestManagedBinaryDriftCanary verifies against
+// the SSOT, keyed by file with each occurrence's start offset and
+// extracted names. Coverage is OCCURRENCE-exact: censusRunCovered
+// skips a census run only if its byte offset and token-for-token
+// sequence match a verified occurrence. A later identical full-set
+// run elsewhere in the same file is a different occurrence and is
+// NOT covered. The extractors run here (before the census) and fail
+// the test via t.Fatalf/t.Errorf on divergence, exactly as the
+// canary body does, so a divergent verified occurrence reds before
+// coverage is even consulted.
+func censusVerifiedSpans(t *testing.T, root string, want []string) map[string][]span {
+	t.Helper()
+	out := map[string][]span{}
+	add := func(rel string, names []string) {
+		src := readFile(t, root, rel)
+		start := indexSpan(src, names, 0)
+		if start < 0 {
+			t.Errorf("census: %s: verified occurrence %q not found as a "+
+				"contiguous token run — extractor/census tokenisation diverged (#17101)", rel, names)
+			return
+		}
+		out[rel] = append(out[rel], span{start: start, names: append([]string(nil), names...)})
+	}
+	// Shell sites carrying a BINS="..." literal (extractBINS).
+	for _, rel := range []string{
+		"debian/xpf.preinst", "debian/xpf.postinst", "debian/xpf.postrm",
+		"test/debian/preinst-migrate-test.sh",
+		"test/debian/postrm-test.sh", "test/debian/postinst-test.sh",
+	} {
+		got := extractBINS(t, rel, readFile(t, root, rel))
+		if !sortedEqual(got, want) {
+			t.Errorf("%s: BINS=%q diverges from manifest.Names()=%q — update "+
+				"pkg/upgrade/manifest/manifest.go and every site together", rel, got, want)
+		}
+		add(rel, got)
+	}
+	// debian/rules install set + StagedSrc sources.
+	rulesSrc := readFile(t, root, "debian/rules")
+	gotRules := extractRulesInstall(t, rulesSrc)
+	if !sortedEqual(gotRules, want) {
+		t.Errorf("debian/rules: install set %q diverges from manifest.Names()=%q", gotRules, want)
+	}
+	for _, msg := range stagedSrcMismatches(extractRulesInstallPairs(t, rulesSrc)) {
+		t.Error("debian/rules: " + msg)
+	}
+	// Each installed basename is a separate verified occurrence in
+	// the recipe; the staged-path comment run is allowlisted above.
+	for _, name := range gotRules {
+		add("debian/rules", []string{name})
+	}
+	// preinst-besteffort-test.sh literal for-loop (first full loop).
+	{
+		rel := "test/debian/preinst-besteffort-test.sh"
+		gotBE := extractBesteffortLoop(t, readFile(t, root, rel))
+		if !sortedEqual(gotBE, want) {
+			t.Errorf("%s: for-loop set %q diverges from manifest.Names()=%q", rel, gotBE, want)
+		}
+		add(rel, gotBE)
+	}
+	// Generated bins.txt: exact in-order occurrence.
+	{
+		rel := "pkg/upgrade/manifest/bins.txt"
+		var binsNames []string
+		for _, line := range strings.Split(readFile(t, root, rel), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				binsNames = append(binsNames, strings.Fields(line)...)
+			}
+		}
+		if strings.Join(binsNames, " ") != strings.Join(want, " ") {
+			t.Errorf("pkg/upgrade/manifest/bins.txt=%q diverges from "+
+				"manifest.Names()=%q — regenerate with "+
+				"`go generate ./pkg/upgrade/manifest/`", binsNames, want)
+		}
+		add(rel, binsNames)
+	}
+	// gen_bins.go mirror literal: exact in-order occurrence, pinned
+	// directly against Names() (see also the canary-body check).
+	{
+		rel := "pkg/upgrade/manifest/gen_bins.go"
+		gotGen := extractGenBinsNames(readFile(t, root, rel))
+		if gotGen == nil {
+			t.Error("pkg/upgrade/manifest/gen_bins.go: no `names := []string{...}` " +
+				"mirror literal found — the canary pins that literal against " +
+				"manifest.Names() directly (#17101)")
+		} else {
+			if strings.Join(gotGen, " ") != strings.Join(want, " ") {
+				t.Errorf("pkg/upgrade/manifest/gen_bins.go: mirror literal %q diverges "+
+					"from manifest.Names()=%q — fix the generator literal, do not "+
+					"regenerate bins.txt from a drifted generator (#17101)", gotGen, want)
+			}
+			add(rel, gotGen)
+		}
+	}
+	// manifest.go: the ShellBINS doc example is the only run; it is
+	// rendered from Names() itself, so its occurrence is verified by
+	// construction (ShellBINS() == strings.Join(Names(), " ")).
+	add("pkg/upgrade/manifest/manifest.go", want)
+	return out
 }
 
-// censusCoveredRun reports whether the dedicated extractor for rel
-// verifies this specific run. For every covered file except
-// seed_layout_10771.py the extractor compares a full managed set
-// against Names(), so only a run equal to Names() as a
-// set-with-multiplicity is covered; a divergent (subset, superset
-// or order-only — order matters for gen_bins/bins.txt, pinned
-// directly) run in the same file is not. seed_layout_10771.py's
-// extractor rejects any managed-binary token, so any run there is
-// already red by that scan before the census sees it.
-func censusCoveredRun(rel string, hit censusHit, want []string) bool {
+// censusRunCovered reports whether this exact census occurrence —
+// same file, same byte offset, same token sequence — is one of the
+// verified occurrences. seed_layout_10771.py is handled specially:
+// its named check rejects ANY managed-binary token, so any run
+// there is already red before the census consults coverage; it is
+// reported covered here only so the census does not double-report.
+func censusRunCovered(rel string, hit censusHit, verified map[string][]span) bool {
 	if rel == "scripts/image/seed_layout_10771.py" {
 		return true
 	}
-	if !censusCoveredFiles[rel] {
-		return false
+	for _, s := range verified[rel] {
+		if s.start == hit.start && strings.Join(s.names, " ") == strings.Join(hit.names, " ") {
+			return true
+		}
 	}
-	return sortedEqual(hit.names, want)
+	return false
 }
 
 // genBinsLiteral matches the mirror literal in gen_bins.go so the
@@ -430,89 +550,25 @@ func firstLineOf(root, rel string) (string, error) {
 // the generated bins.txt or the gen_bins.go mirror literal diverges
 // from Names(), if the deploy push set is not exactly Names() minus
 // xpf-day0-config, or if a tracked file in census scope contains a
-// run of >=3 adjacent Names() tokens that is neither verified by
-// that file's named extractor (per-run) nor an allowlisted run with
-// a reason. Census scope is tracked files selected by extension
+// run of >=3 adjacent Names() tokens that is neither the exact
+// occurrence a named extractor verifies for that file (see
+// censusVerifiedSpans) nor an allowlisted run with a reason. Census
+// scope is tracked files selected by extension
 // (.sh/.bash/.py/.service/.timer/.socket/.path/.target/.mk),
 // basename Makefile, a first-line shell shebang (any extension or
 // none — e.g. debian/xpf.prerm), or the explicit manifest-package
 // files — NOT every tracked file: prose formats (.md/.txt/.yaml)
 // and Go/Rust sources are out of scope by design. The census is the
-// coverage claim: a new duplicated list anywhere in scope reds
-// this test until it is covered or allowlisted with a reason.
+// coverage claim: a new duplicated list anywhere in scope —
+// including an identical full-set list appended to a covered file —
+// reds this test until it is covered or allowlisted with a reason.
 func TestManagedBinaryDriftCanary(t *testing.T) {
 	root := repoRoot(t)
 	want := Names()
 
-	// Shell sites carrying a BINS="..." literal.
-	binsSites := []string{
-		"debian/xpf.preinst",
-		"debian/xpf.postinst",
-		"debian/xpf.postrm",
-		"test/debian/preinst-migrate-test.sh",
-		"test/debian/postrm-test.sh",
-		"test/debian/postinst-test.sh",
-	}
-	for _, rel := range binsSites {
-		got := extractBINS(t, rel, readFile(t, root, rel))
-		if !sortedEqual(got, want) {
-			t.Errorf("%s: BINS=%q diverges from manifest.Names()=%q — update "+
-				"pkg/upgrade/manifest/manifest.go and every site together", rel, got, want)
-		}
-	}
-
-	// debian/rules install set.
-	rulesSrc := readFile(t, root, "debian/rules")
-	gotRules := extractRulesInstall(t, rulesSrc)
-	if !sortedEqual(gotRules, want) {
-		t.Errorf("debian/rules: install set %q diverges from manifest.Names()=%q",
-			gotRules, want)
-	}
-	// Install SOURCE must also match manifest StagedSrc (#1999), not just the
-	// destination basename — otherwise a wrong artifact under the correct
-	// staged name ships silently (the StagedSrc field used to be unchecked).
-	for _, msg := range stagedSrcMismatches(extractRulesInstallPairs(t, rulesSrc)) {
-		t.Error("debian/rules: " + msg)
-	}
-
-	// preinst-besteffort-test.sh literal for-loop.
-	gotBE := extractBesteffortLoop(t, readFile(t, root, "test/debian/preinst-besteffort-test.sh"))
-	if !sortedEqual(gotBE, want) {
-		t.Errorf("test/debian/preinst-besteffort-test.sh: for-loop set %q "+
-			"diverges from manifest.Names()=%q", gotBE, want)
-	}
-
-	// gen_bins.go's mirror literal must equal Names() directly, in
-	// order — BEFORE any regeneration: a reordered or drifted
-	// generator literal reds here at introduction, not only after
-	// someone runs `go generate` and rewrites bins.txt.
-	if gotGen := extractGenBinsNames(readFile(t, root, "pkg/upgrade/manifest/gen_bins.go")); gotGen == nil {
-		t.Error("pkg/upgrade/manifest/gen_bins.go: no `names := []string{...}` " +
-			"mirror literal found — the canary pins that literal against " +
-			"manifest.Names() directly (#17101)")
-	} else if strings.Join(gotGen, " ") != strings.Join(want, " ") {
-		t.Errorf("pkg/upgrade/manifest/gen_bins.go: mirror literal %q diverges "+
-			"from manifest.Names()=%q — fix the generator literal, do not "+
-			"regenerate bins.txt from a drifted generator (#17101)", gotGen, want)
-	}
-
-	// Generated bins.txt must equal Names() exactly, in order (#17101):
-	// seed_layout_10771.py and its test derive their lists from it, so
-	// adding a fifth managed binary reds here until bins.txt is
-	// regenerated (go generate ./pkg/upgrade/manifest/).
-	binsTxt := readFile(t, root, "pkg/upgrade/manifest/bins.txt")
-	var binsNames []string
-	for _, line := range strings.Split(binsTxt, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			binsNames = append(binsNames, strings.Fields(line)...)
-		}
-	}
-	if strings.Join(binsNames, " ") != strings.Join(want, " ") {
-		t.Errorf("pkg/upgrade/manifest/bins.txt=%q diverges from "+
-			"manifest.Names()=%q — regenerate with "+
-			"`go generate ./pkg/upgrade/manifest/`", binsNames, want)
-	}
+	// Named extractors: each compares its site against Names() and
+	// records the exact verified occurrence(s) for the census.
+	verified := censusVerifiedSpans(t, root, want)
 
 	// seed_layout_10771.py (ACCEPTANCE) and its test oracle contain no
 	// literal binary list: the subject must read bins.txt and name no
@@ -563,10 +619,10 @@ func TestManagedBinaryDriftCanary(t *testing.T) {
 
 	// Census (#17101): every run of >=3 adjacent Names() tokens in a
 	// file in census scope (see the doc comment above) must be either
-	// verified by that file's named extractor (per-run: only the
-	// exact run the extractor checks is skipped) or allowlisted with
-	// a reason. Allowlist entries in covered files participate in
-	// the stale check below: coverage never exempts a file from
+	// the exact occurrence a named extractor verifies (same file,
+	// same byte offset, same token sequence) or allowlisted with a
+	// reason. Allowlist entries in covered files participate in the
+	// stale check below: coverage never exempts a file from
 	// allowlist accounting.
 	nameSet := map[string]bool{}
 	for _, name := range want {
@@ -613,7 +669,7 @@ func TestManagedBinaryDriftCanary(t *testing.T) {
 		src := readFile(t, root, rel)
 		for _, hit := range censusRuns(src, nameSet) {
 			hit.file = rel
-			if censusCoveredRun(rel, hit, want) {
+			if censusRunCovered(rel, hit, verified) {
 				continue
 			}
 			idx := allowUsed[rel]
@@ -692,24 +748,43 @@ case "$1" in`
 			"— the canary would false-positive", strings.Fields(m[1]), want)
 	}
 
-	// Per-run coverage (F1): in a covered file only the exact run the
-	// named extractor verifies is covered; a new divergent run appended
-	// to that same file must NOT be covered. A stale check that skipped
-	// covered files would let these pass silently.
+	// Occurrence-exact coverage (F1): in a covered file only the exact
+	// occurrence (file + byte offset + token sequence) a named
+	// extractor verifies is covered. An IDENTICAL full-set run at a
+	// different offset — e.g. appended to the same covered file —
+	// must NOT be covered, and neither must a divergent run. A
+	// type-level (any full-set run in a covered file) check would
+	// let both pass silently. Build the verified map from a synthetic
+	// occurrence so the offsets are firsthand: readFile/census
+	// plumbing is exercised end-to-end by the canary itself.
 	covered := "test/debian/postrm-test.sh"
-	divergent := censusHit{file: covered, names: []string{"xpfd", "cli", "xpf-userspace-dp"}}
-	if censusCoveredRun(covered, divergent, want) {
-		t.Fatalf("per-run coverage FAILED: divergent appended run %q in "+
-			"covered file %s was treated as covered — the canary would "+
-			"pass vacuously on a new list in a covered file", divergent.names, covered)
+	verifiedSrc := "BINS=\"" + strings.Join(want, " ") + "\"\n"
+	verified := map[string][]span{
+		covered: {{start: indexSpan(verifiedSrc, want, 0), names: append([]string(nil), want...)}},
 	}
-	exact := censusHit{file: covered, names: append([]string(nil), want...)}
-	if !censusCoveredRun(covered, exact, want) {
-		t.Fatalf("per-run coverage rejected the extractor-verified run %q "+
-			"in %s — the canary would false-positive", exact.names, covered)
+	if verified[covered][0].start < 0 {
+		t.Fatal("counterfactual setup: verified occurrence not located")
 	}
-	if censusCoveredRun("debian/xpf.prerm", exact, want) {
-		t.Fatal("per-run coverage treated an uncovered file as covered")
+	atVerified := censusHit{file: covered, start: verified[covered][0].start, names: append([]string(nil), want...)}
+	if !censusRunCovered(covered, atVerified, verified) {
+		t.Fatalf("occurrence coverage rejected the extractor-verified "+
+			"occurrence %q at offset %d in %s — the canary would false-positive",
+			atVerified.names, atVerified.start, covered)
+	}
+	appended := censusHit{file: covered, start: atVerified.start + 4096, names: append([]string(nil), want...)}
+	if censusRunCovered(covered, appended, verified) {
+		t.Fatalf("occurrence coverage FAILED: identical full-set run %q "+
+			"appended at a different offset in covered file %s was treated "+
+			"as covered — the canary would pass vacuously on a duplicate "+
+			"list in a covered file", appended.names, covered)
+	}
+	divergent := censusHit{file: covered, start: atVerified.start, names: []string{"xpfd", "cli", "xpf-userspace-dp"}}
+	if censusRunCovered(covered, divergent, verified) {
+		t.Fatalf("occurrence coverage FAILED: divergent run %q at the "+
+			"verified offset in %s was treated as covered", divergent.names, covered)
+	}
+	if censusRunCovered("debian/xpf.prerm", atVerified, verified) {
+		t.Fatal("occurrence coverage treated an uncovered file as covered")
 	}
 
 	// gen_bins.go pin (F3): reordering the mirror literal without
