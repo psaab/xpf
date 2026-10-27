@@ -24,6 +24,7 @@ package dataplane
 // newer than the object that source produced.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -77,16 +78,19 @@ const (
 // the repo-root cargo config (cargo loads ancestor configs too, so a
 // root-level BPF-target rustflags edit could change the .o — currently
 // inert x86_64, hashed for completeness), the build recipe itself
-// (build-userspace-xdp.sh embeds the bpf-linker version pin and threads
-// MAX_INTERFACES), and bpf/headers/xpf_common.h (whose MAX_INTERFACES
-// #define is awk-extracted by the recipe and sizes the shim's binding
-// array + maps). Paths are repo-relative POSIX.
+// (build-userspace-xdp.sh embeds the bpf-linker version pin), and
+// bpf/headers/xpf_common.h (whose MAX_INTERFACES #define is awk-extracted
+// by the recipe, now via ShimMaxInterfacesHeader, and sizes the shim's
+// binding array + maps). Paths are repo-relative POSIX.
 //
-// xpf_common.h is hashed directly here so the freshness gate is
+// The header is hashed directly here so the freshness gate is
 // self-sufficient: the header->Go max_entries parity canary
 // (TestMaxInterfacesMatchesCHeader) t.Skips when the header is absent, so
-// leaning on it alone left a fail-open hole. Whole-file hashing trades a
-// little churn on unrelated header edits for a fail-closed gate.
+// leaning on it alone left a fail-open hole. The extraction reads only
+// MAX_INTERFACES (#17146: the shim consumes nothing else from this
+// header), so edits to other retained-ABI content no longer churn the
+// freshness hash — the two master-red windows in #10561/#17146 came
+// from exactly that whole-file coupling.
 //
 // Deliberately EXCLUDED: userspace-xdp/.gitignore (not a build input) and
 // cargo's target/ tree (build artifacts, untracked).
@@ -205,6 +209,20 @@ func ShimCodegenEnvDigest(maxInterfaces, toolchain string) string {
 		"RUSTUP_TOOLCHAIN=" + toolchain + "\n"
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// ShimMaxInterfacesHeader is the only text the shim build consumes
+// from bpf/headers/xpf_common.h: the single MAX_INTERFACES define
+// line (#17146). Hashing or extracting anything beyond this line
+// re-couples the freshness gate to retained-ABI content the shim
+// never reads.
+func ShimMaxInterfacesHeader(b []byte) string {
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("#define MAX_INTERFACES ")) {
+			return string(bytes.TrimSpace(line))
+		}
+	}
+	return ""
 }
 
 // ShimMaxInterfaces returns MAX_INTERFACES from bpf/headers/xpf_common.h.
