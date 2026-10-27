@@ -138,6 +138,23 @@ func validateBGPMultihop16679(node *Node, _ *schemaNode) error {
 	// never sees it; range-check its first token here. #17833: with
 	// no keyed child there is no TTL at all — a MISSING value, not
 	// the bare presence form (`multihop;`) that defaults to 64.
+	// Fully packed form (`multihop ttl 2` on this node's own Keys):
+	// anything past the value is a fused statement — refuse by name
+	// (Rev18059Opus B1).
+	if len(node.Keys) >= 3 && node.Keys[1] == "ttl" {
+		if len(node.Keys) > 3 && node.Keys[3] != "passive" {
+			return fmt.Errorf("multihop ttl: unexpected token %q after the value — author it as its own statement (#16679)", node.Keys[3])
+		}
+		if err := ValidateInteger(1, 255)(node.Keys[2]); err != nil {
+			return fmt.Errorf("multihop ttl: invalid value %q: %v (#16679)", node.Keys[2], err)
+		}
+	}
+	// Flat-set packed shape: `multihop ttl` with the TTL as the sole
+	// CHILD token (child Keys=["256"], or ["3","passive"] fused).
+	// The child is a value, not a `ttl` child node, so the loop below
+	// never sees it; range-check its first token here. #17833: with
+	// no keyed child there is no TTL at all — a MISSING value, not
+	// the bare presence form (`multihop;`) that defaults to 64.
 	if len(node.Keys) == 2 && node.Keys[1] == "ttl" {
 		v := firstKeyedChildToken17833(node)
 		if v == "" {
@@ -164,6 +181,13 @@ func validateBGPMultihop16679(node *Node, _ *schemaNode) error {
 		}
 		if c.Keys[0] != "ttl" {
 			continue
+		}
+		// Tokens fused AFTER the ttl value (`ttl 2 banana;` packs
+		// Keys=["ttl","2","banana"]) are a further statement fused
+		// onto this one: refuse by name instead of honouring the
+		// TTL and silently dropping the tail (Rev18059Opus B1).
+		if len(c.Keys) > 2 {
+			return fmt.Errorf("multihop ttl: unexpected token %q after the value — author it as its own statement (#16679)", c.Keys[2])
 		}
 		// The ttl value rides Keys[1], a sole grandchild (flat-set),
 		// or — brace-elided — deeper packed keys; nodeVal reads the
@@ -221,12 +245,20 @@ func bgpMultihopTTLOf16679(node *Node) (ttl int, present bool) {
 	// `multihop ttl 2` whole.
 	if len(keys) >= 2 {
 		if n, err := strconv.Atoi(keys[1]); err == nil {
+			// A token fused after the scalar (`multihop 2 banana`)
+			// or an out-of-range TTL carries no honourable TTL.
+			if len(keys) > 2 || n < 1 || n > 255 {
+				return 0, false
+			}
 			return n, true
 		}
 		// Packed ttl modifier: `multihop ttl 2`.
 		if keys[1] == "ttl" {
 			if len(keys) >= 3 {
-				if n, err := strconv.Atoi(keys[2]); err == nil {
+				if len(keys) > 3 && keys[3] != "passive" {
+					return 0, false // fused tail after the value
+				}
+				if n, err := strconv.Atoi(keys[2]); err == nil && n >= 1 && n <= 255 {
 					return n, true
 				}
 				return 0, false
@@ -235,7 +267,10 @@ func bgpMultihopTTLOf16679(node *Node) (ttl int, present bool) {
 			// (`multihop ttl` -> child ["2"], or ["3","passive"]
 			// when a following statement fused onto the child).
 			if len(node.Children) == 1 && len(node.Children[0].Keys) >= 1 {
-				if n, err := strconv.Atoi(node.Children[0].Keys[0]); err == nil {
+				if len(node.Children[0].Keys) > 1 && node.Children[0].Keys[1] != "passive" {
+					return 0, false // fused tail on the value child
+				}
+				if n, err := strconv.Atoi(node.Children[0].Keys[0]); err == nil && n >= 1 && n <= 255 {
 					return n, true
 				}
 			}
@@ -270,12 +305,15 @@ func bgpMultihopTTLOf16679(node *Node) (ttl int, present bool) {
 			continue
 		}
 		if c.Keys[0] == "ttl" {
+			if len(c.Keys) > 2 {
+				return 0, false // fused tail after the value
+			}
 			v := nodeVal(c)
 			if v == "" && len(c.Keys) >= 2 {
 				v = c.Keys[1]
 			}
 			if v != "" {
-				if n, err := strconv.Atoi(v); err == nil {
+				if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 255 {
 					return n, true
 				}
 			}

@@ -390,3 +390,33 @@ func TestBGPMultihopMissingValueRefused17833(t *testing.T) {
 		}
 	}
 }
+
+// TestBGPMultihopFusedTailRefused17833 (fold of Rev18059Opus B1-B3):
+// tokens fused AFTER a ttl value, out-of-range TTLs, and duplicate ttl
+// statements must never silently apply or silently vanish.
+func TestBGPMultihopFusedTailRefused17833(t *testing.T) {
+	// B1: fused tail after the value — strict refuses by name.
+	for _, src := range []string{
+		`protocols { bgp { local-as 65001; group G { peer-as 65002; multihop { ttl 2 banana; } neighbor 10.0.0.1; } } }`,
+		`protocols { bgp { local-as 65001; group G { peer-as 65002; multihop ttl 2 banana; neighbor 10.0.0.1; } } }`,
+	} {
+		if err := SchemaValidate(multihopHier16679(t, src)); err == nil {
+			t.Errorf("fused tail must refuse: %s", src)
+		}
+	}
+	// B2: out-of-range TTL on the tolerant path keeps the inherited
+	// TTL (group 9), never the verbatim 999.
+	src := `protocols { bgp { local-as 65001; group G { peer-as 65002; multihop { ttl 9; } neighbor 10.0.0.1 { multihop { ttl 999; } } } } }`
+	cfg, err := CompileConfigLenient(multihopHier16679(t, src))
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	nb := cfg.Protocols.BGP.Neighbors[0]
+	if nb.MultihopTTL != 9 {
+		t.Errorf("out-of-range neighbor TTL = %d, want inherited 9", nb.MultihopTTL)
+	}
+	// B1 extractor direction: fused tail honours nothing.
+	if _, ok := bgpMultihopTTLOf16679(&Node{Keys: []string{"multihop", "ttl", "2", "banana"}}); ok {
+		t.Error("fused packed tail must report present=false")
+	}
+}
