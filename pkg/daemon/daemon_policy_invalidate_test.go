@@ -792,7 +792,7 @@ func TestFeedOverlayRenameEvaluatorUnit10592(t *testing.T) {
 		return policymatch.Query{
 			FromZone: "lan", ToZone: "wan",
 			SrcIP: net.ParseIP("203.0.113.7"), DstIP: net.ParseIP("10.0.0.20"),
-			Protocol: "tcp", SrcPort: 40000, DstPort: 443,
+			Protocol: "tcp", SrcPort: policymatch.PortPtr(40000), DstPort: policymatch.PortPtr(443),
 		}
 	}
 	withOverlay := binding

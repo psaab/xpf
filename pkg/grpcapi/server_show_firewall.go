@@ -259,7 +259,7 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf *strings.Builder) (*pb.ShowTextResponse, error) {
 	params := strings.TrimPrefix(req.Topic, "test-policy:")
 	var fromZone, toZone, srcIP, dstIP, proto, ingressIface string
-	var srcPort, dstPort int
+	var srcPort, dstPort *uint16
 	var icmpType, icmpCode *uint8
 	var nonFirstFrag bool
 	var srcPortErr, portErr, protoErr, icmpTypeErr, icmpCodeErr, fragErr, parseErr error
@@ -272,7 +272,7 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 	// constrained term would not match, but `application any` could still match,
 	// so a skipped deny could let a later permit match.
 	// An explicit-empty typed value (`port=`) was likewise treated as omitted
-	// because ParsePort("") returns (0, nil), so the handler could not tell
+	// because ParsePort("") returns (nil, nil), so the handler could not tell
 	// "key absent" (unspecified; constrained terms do not match) from "key
 	// present, empty value" (malformed).
 	// A malformed segment, an unknown key, or an empty value is now a reported

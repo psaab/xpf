@@ -46,6 +46,136 @@ type DataPlaneAccessor interface {
 	GetMapStats() []MapStats
 }
 
+// MapStatsSource is the minimal dataplane surface NewAccessor needs
+// for the mandatory accessors, already in the package-local MapStats
+// shape. Callers pass a value whose IsLoaded/GetMapStats forward to
+// the provider stored on their surface (liveDataPlane forwards both).
+type MapStatsSource interface {
+	IsLoaded() bool
+	GetMapStats() []MapStats
+}
+
+// CrashReporter is the named crash-capability surface (#17128).
+// Build asserts CrashReporter instead of anonymous interfaces, so a
+// missing HelperCrashState/HelperCrashHistory on the shared accessor
+// is a compile error (see the var _ assertions below), not silence.
+type CrashReporter interface {
+	HelperCrashState() (userspace.HelperCrashRecord, bool)
+	HelperCrashHistory() ([]userspace.HelperCrashEpisode, int)
+}
+
+// StatusProvider is the named userspace-status capability Build keys
+// backend identity on.
+type StatusProvider interface {
+	Status() (userspace.ProcessStatus, error)
+}
+
+// accessor is the single shared forwarding-status adapter (#17128).
+// It replaces the verbatim forwardingStatus*DataPlane twins formerly
+// in pkg/cli and pkg/grpcapi.
+//
+// The userspace/non-userspace distinction is preserved by which
+// concrete type NewAccessor returns (see below): only the userspace
+// wrapper carries Status/CrashReporter, matching the old adapters
+// where only forwardingStatus*UserspaceDataPlane carried them.
+type accessor struct {
+	src     MapStatsSource
+	backend any
+	status  func() (userspace.ProcessStatus, error)
+}
+
+func (a accessor) IsLoaded() bool {
+	if a.src == nil {
+		return false
+	}
+	return a.src.IsLoaded()
+}
+
+func (a accessor) GetMapStats() []MapStats {
+	if a.src == nil {
+		return nil
+	}
+	return a.src.GetMapStats()
+}
+
+// userspaceAccessor is the userspace flavour: it additionally carries
+// Status and the crash reporters, so Build's named assertions succeed
+// only for a published userspace backend.
+type userspaceAccessor struct {
+	accessor
+}
+
+func (a userspaceAccessor) Status() (userspace.ProcessStatus, error) {
+	if a.status == nil {
+		return userspace.ProcessStatus{}, errStatusUnavailable
+	}
+	return a.status()
+}
+
+// HelperCrashState resolves the backend directly (#7250): the crash
+// record is Manager-owned and is NOT part of ProcessStatus — a crash
+// clears the cached status, so routing through Status would blank
+// the block in the one case it exists for.
+func (a userspaceAccessor) HelperCrashState() (userspace.HelperCrashRecord, bool) {
+	provider, ok := a.backend.(interface {
+		HelperCrashState() (userspace.HelperCrashRecord, bool)
+	})
+	if !ok {
+		return userspace.HelperCrashRecord{}, false
+	}
+	return provider.HelperCrashState()
+}
+
+// HelperCrashHistory feeds the #8397 completed-episode summary.
+// Resolve the backend directly: completed history remains available
+// after the live episode closes.
+func (a userspaceAccessor) HelperCrashHistory() ([]userspace.HelperCrashEpisode, int) {
+	provider, ok := a.backend.(interface {
+		HelperCrashHistory() ([]userspace.HelperCrashEpisode, int)
+	})
+	if !ok {
+		return nil, 0
+	}
+	return provider.HelperCrashHistory()
+}
+
+var (
+	_ DataPlaneAccessor = accessor{}
+	_ DataPlaneAccessor = userspaceAccessor{}
+	_ StatusProvider    = userspaceAccessor{}
+	_ CrashReporter     = userspaceAccessor{}
+)
+
+// errStatusUnavailable mirrors the per-surface "userspace status
+// unavailable" error the old Status methods produced via their
+// surface helpers when no provider was present.
+var errStatusUnavailable = statusUnavailableError{}
+
+type statusUnavailableError struct{}
+
+func (statusUnavailableError) Error() string { return "userspace status unavailable" }
+
+// NewAccessor builds the single shared forwarding-status accessor
+// (#17128). dp supplies IsLoaded/GetMapStats (already in the
+// package-local MapStats shape); backend is the single-resolved
+// published backend (mgmtview.Probe result) used for capability
+// detection and crash reporting; status, when non-nil, is the
+// surface's userspace-status func. A nil backend yields a nil
+// accessor (the #6743 publication check: an emptied cell must read
+// as no dataplane, not as a trusted-zero BPF backend). A backend
+// implementing StatusProvider yields the userspace accessor;
+// otherwise the plain (map-stats) accessor.
+func NewAccessor(dp MapStatsSource, backend any, status func() (userspace.ProcessStatus, error)) DataPlaneAccessor {
+	if backend == nil {
+		return nil
+	}
+	base := accessor{src: dp, backend: backend, status: status}
+	if _, ok := backend.(StatusProvider); ok {
+		return userspaceAccessor{accessor: base}
+	}
+	return base
+}
+
 // Build gathers all fields of a ForwardingStatus.  Nil `dp` is
 // tolerated (treated as "dataplane not loaded" → State=Unknown).
 // `proc` must be non-nil; callers that want to bypass /proc should
@@ -125,9 +255,7 @@ func Build(
 	// don't wire this into a high-frequency poller.
 	isUserspace := false
 	if dp != nil {
-		if _, ok := dp.(interface {
-			Status() (userspace.ProcessStatus, error)
-		}); ok {
+		if _, ok := dp.(StatusProvider); ok {
 			isUserspace = true
 		}
 	}
@@ -169,9 +297,7 @@ func Build(
 	var usStatus userspace.ProcessStatus
 	var usErr error
 	if dp != nil && isUserspace {
-		if acc, ok := dp.(interface {
-			Status() (userspace.ProcessStatus, error)
-		}); ok {
+		if acc, ok := dp.(StatusProvider); ok {
 			usStatus, usErr = acc.Status()
 		}
 	}
@@ -226,9 +352,10 @@ func Build(
 
 	// --- Helper crash/restart record (#7250) ---------------------
 	//
-	// Probed as an anonymous interface, matching the Status() probe above, so
-	// DataPlaneAccessor stays the two-method surface every caller and test
-	// already implements.
+	// Probed via the named CrashReporter interface (#17128), so
+	// DataPlaneAccessor stays the two-method surface every caller and
+	// test already implements while the shared accessor's crash
+	// methods are compile-checked (var _ CrashReporter above).
 	//
 	// This is deliberately NOT gated on `usErr == nil`. The crash record lives
 	// on the Manager, not in the helper's published status, and a crash runs
@@ -240,9 +367,7 @@ func Build(
 	// `isUserspace` is a type assertion rather than a Status() outcome, so it
 	// stays true across a crash; that is what keeps this reachable.
 	if dp != nil && isUserspace {
-		if acc, ok := dp.(interface {
-			HelperCrashState() (userspace.HelperCrashRecord, bool)
-		}); ok {
+		if acc, ok := dp.(CrashReporter); ok {
 			if rec, known := acc.HelperCrashState(); known {
 				fs.HelperCrashKnown = true
 				fs.LastExitWasCrash = rec.LastExitWasCrash
@@ -258,17 +383,13 @@ func Build(
 				fs.HelperLastRestartAttempt = rec.LastRestartAttempt
 				fs.HelperNextRestart = rec.NextRestart
 			}
-		}
-		// #8397: crash HISTORY, a separate accessor because it has a separate
-		// lifetime. Asserted independently of HelperCrashState so a build that
-		// has one and not the other still renders what it has -- and, more to
-		// the point, so this block is reachable when the CURRENT record is the
-		// zero value, which is exactly the case history exists for: a helper
-		// that crashed repeatedly and is healthy right now.
-		if hist, ok := dp.(interface {
-			HelperCrashHistory() ([]userspace.HelperCrashEpisode, int)
-		}); ok {
-			episodes, total := hist.HelperCrashHistory()
+			// #8397: crash HISTORY, carried by the same CrashReporter
+			// because it has a separate lifetime but the same reporter:
+			// the completed-episode summary must be reachable when the
+			// CURRENT record is the zero value, which is exactly the
+			// case history exists for: a helper that crashed repeatedly
+			// and is healthy right now.
+			episodes, total := acc.HelperCrashHistory()
 			fs.HelperCrashEpisodes = total
 			if len(episodes) > 0 {
 				fs.HelperCrashEpisodesOldest = episodes[0].At

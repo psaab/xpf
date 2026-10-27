@@ -103,7 +103,7 @@ func TestQuarantinedZoneHasNoHostInboundView_11011(t *testing.T) {
 			t.Errorf("quarantined-zone address %s still scoped by zone %q's host-inbound view, want unzoned", addr, zone)
 		}
 	}
-	if got := ClassifyHostInbound(cfg, "zzq8100", config.HostInboundProtoTCP, true, 22, nil, "ip"); got.Status == HostInboundTokenAdmit {
+	if got := ClassifyHostInbound(cfg, "zzq8100", config.HostInboundProtoTCP, true, 22, true, nil, "ip"); got.Status == HostInboundTokenAdmit {
 		t.Errorf("quarantined zone zzq8100 tcp/22 = %+v, want no token-admit (its ssh override is quarantined)", got)
 	}
 
@@ -132,7 +132,7 @@ func TestQuarantinedZoneHasNoHostInboundView_11011(t *testing.T) {
 	if !survivorScoped {
 		t.Errorf("survivor zzq17760 lost its 198.51.100.10 host-inbound scope: %+v", views)
 	}
-	if got := ClassifyHostInboundForInterface(cfg, "zzq17760", "ge-0/0/1.0", config.HostInboundProtoTCP, true, 443, nil, "ip"); got.Status != HostInboundTokenAdmit {
+	if got := ClassifyHostInboundForInterface(cfg, "zzq17760", "ge-0/0/1.0", config.HostInboundProtoTCP, true, 443, true, nil, "ip"); got.Status != HostInboundTokenAdmit {
 		t.Errorf("survivor zzq17760 ge-0/0/1.0 tcp/443 = %+v, want token-admit via its https override", got)
 	}
 }

@@ -503,16 +503,14 @@ fn companion_retention_respects_close_state_and_direction_10885() {
     assert!(table.entry_by_key(&reverse).is_none());
 }
 
-/// #13682 (D12-13): the close-DEferring lookup (`defer_close = true`, #10636)
-/// runs BEFORE the #9519 owner-zone verdict, so a foreign-zone RST/FIN that
-/// will be dropped must not slide a closing entry's deadline while it waits.
-/// Pre-fix the scrubbed flags made `do_close` false, so the refresh gate read
-/// a closing segment as ordinary traffic: on the non-FINed companion
-/// (`!fin_own`, `!reset`) `refresh` was true and `last_seen_ns` re-stamped
-/// onto the FIN_WAIT/CLOSING window — a dropped foreign packet extending the
-/// close deadline the inline path (#10885) explicitly fixes.
+/// #13682 (D12-13) retargeted in #17092: the pre-verdict probe is now the
+/// fully read-only authority lookup (`Defer::All`, #13938) — the former
+/// close-only deferring lookup had no production caller.
+/// A foreign-zone RST/FIN that will be dropped must not slide a closing
+/// entry's deadline while it waits, nor stamp any close state.
 ///
-/// RED pre-fix: the deferring RST/FIN hits below re-stamp the reverse half.
+/// RED pre-#13938-fix: the deferring RST/FIN hits below re-stamp the
+/// reverse half.
 #[test]
 fn deferring_lookup_foreign_close_segments_do_not_slide_closing_13682() {
     let forward = key_v4();
@@ -529,12 +527,13 @@ fn deferring_lookup_foreign_close_segments_do_not_slide_closing_13682() {
     let rev_stamp = rev_before.last_seen_ns;
     let rev_window = rev_before.expires_after_ns;
 
-    // A foreign RST/FIN pair arrives through the deferring (pre-verdict)
-    // lookup. The verdict will drop them; they must not slide the deadline.
+    // A foreign RST/FIN pair arrives through the read-only authority probe
+    // (pre-verdict). The verdict will drop them; they must not slide the
+    // deadline.
     for (label, flags) in [("rst", TCP_RST), ("fin", TCP_FIN)] {
         let hit_ns = rev_stamp + 1_000_000_000;
         assert!(matches!(
-            table.lookup_with_origin_deferring_close_expiry(&reverse, hit_ns, flags),
+            table.lookup_with_origin_deferring_authority_with_payload(&reverse, hit_ns, flags, 0),
             SessionExpiryProbe::Live(_)
         ));
         let rev = table.entry_by_key(&reverse).expect("reverse after deferring hit");
@@ -548,29 +547,28 @@ fn deferring_lookup_foreign_close_segments_do_not_slide_closing_13682() {
         );
         assert!(
             !rev.fin_own && !rev.reset,
-            "{label}: the deferring lookup must not stamp close state either"
+            "{label}: the read-only probe must not stamp close state either"
         );
     }
 
     // Control: ordinary (non-closing) traffic from the non-FINed direction
-    // through the same deferring lookup still slides the half-close, exactly
-    // as the inline path does (#10885) — the gate targets closing segments,
-    // not the deferring lookup itself.
+    // through the Owner replay (production `Defer::None` path) still slides
+    // the half-close, exactly as the inline path does (#10885) — the gate
+    // targets closing segments, not lookups themselves.
     let ack_ns = rev_stamp + 2_000_000_000;
-    assert!(matches!(
-        table.lookup_with_origin_deferring_close_expiry(&reverse, ack_ns, TCP_ACK),
-        SessionExpiryProbe::Live(_)
-    ));
+    table.apply_deferred_owner_hit(&reverse, ack_ns, TCP_ACK);
     assert_eq!(
         table.entry_by_key(&reverse).expect("reverse ack").last_seen_ns,
         ack_ns,
-        "control: non-closing traffic still refreshes via the deferring lookup"
+        "control: non-closing Owner replay still refreshes the half-close"
     );
 }
 
-/// The same deferred FIN that cannot extend a foreign entry's deadline must
-/// still be applied after an Owner verdict. This pins owner-path parity when
-/// close progress arrives on the non-FINed half of a half-closed pair.
+/// The same FIN that cannot extend a foreign entry's deadline must still
+/// be applied after an Owner verdict via the production replay
+/// (`apply_deferred_owner_hit`, #17092 retarget). This pins owner-path
+/// parity when close progress arrives on the non-FINed half of a
+/// half-closed pair.
 #[test]
 fn deferred_owner_fin_still_advances_half_close_to_time_wait_13682() {
     let forward = key_v4();
@@ -583,14 +581,14 @@ fn deferred_owner_fin_still_advances_half_close_to_time_wait_13682() {
     assert!(table.lookup(&forward, first_fin_ns, TCP_FIN).is_some());
     let second_fin_ns = t0 + 2_000_000_000;
     assert!(matches!(
-        table.lookup_with_origin_deferring_close_expiry(&reverse, second_fin_ns, TCP_FIN),
+        table.lookup_with_origin_deferring_authority_with_payload(&reverse, second_fin_ns, TCP_FIN, 0),
         SessionExpiryProbe::Live(_)
     ));
     let before_owner_apply = table.entry_by_key(&reverse).expect("deferred reverse");
     assert!(!before_owner_apply.fin_own);
     assert_eq!(before_owner_apply.last_seen_ns, first_fin_ns);
 
-    table.apply_deferred_owner_close(&reverse, second_fin_ns, TCP_FIN);
+    table.apply_deferred_owner_hit(&reverse, second_fin_ns, TCP_FIN);
 
     for (label, key) in [("forward", &forward), ("reverse", &reverse)] {
         let entry = table.entry_by_key(key).expect("live time-wait half");

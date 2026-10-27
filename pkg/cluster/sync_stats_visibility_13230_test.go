@@ -55,12 +55,14 @@ func TestSyncSuppressionCountersVisibleInStatistics13230(t *testing.T) {
 	}
 
 	statistics := m.FormatStatistics()
+	// #17107: statistics rows now use the single descriptor labels
+	// (syncStatFields), shared with FormatInformation above.
 	for _, want := range []string{
-		"Pre-key auth evictions",
-		"Deletes suppressed (peer incapable)",
-		"Deletes suppressed (purge retirement)",
-		"Deletes suppressed (scoped policy)",
-		"Installs suppressed (no peer install table)",
+		"Pre-key authentication evictions",
+		"Deletes suppressed for incapable peer",
+		"Purge-retirement deletes suppressed",
+		"Scoped-policy deletes suppressed",
+		"Installs suppressed (peer lacks install-table support)",
 	} {
 		if !strings.Contains(statistics, want) {
 			t.Errorf("FormatStatistics does not expose %q:\n%s", want, statistics)
