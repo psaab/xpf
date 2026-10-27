@@ -74,3 +74,29 @@ func TestResolveFabricPeerParity17044(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveFabricPeerParityConstrainedDecoy17044 (fold of
+// Rev18083Opus F2): the constrained leg — a link-local decoy segment
+// plus a registered identity constraint naming the peer's MAC — must
+// agree between ResolveFabricPeer (which consults the registered
+// constraint) and buildFabricPeerMAC with the same constraint.
+func TestResolveFabricPeerParityConstrainedDecoy17044(t *testing.T) {
+	local := mustMAC7443(t, "02:00:00:00:00:0a")
+	peerMAC := "02:00:00:00:00:0b"
+	decoyMAC := "02:00:00:00:00:99"
+	byIdx := map[int][]netlink.Neigh{
+		parentIfindex7443: {neighRow(t, "fe80::dec0", decoyMAC), neighRow(t, "fe80::b", peerMAC)},
+	}
+	stubFabricNeighList(t, byIdx, nil)
+	hint := mustMAC7443(t, peerMAC)
+	RegisterFabricPeerMACConstraint(peerV4_7443, hint)
+	defer RegisterFabricPeerMACConstraint(peerV4_7443, nil)
+	res := ResolveFabricPeer(overlayIfindex7443, parentIfindex7443, peerV4_7443, local)
+	live := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443, local, hint)
+	if res.PeerMAC.String() != live {
+		t.Fatalf("constrained decoy: ResolveFabricPeer=%v buildFabricPeerMAC=%q disagree", res.PeerMAC, live)
+	}
+	if live != peerMAC {
+		t.Fatalf("constrained decoy: got %q, want identity %s", live, peerMAC)
+	}
+}

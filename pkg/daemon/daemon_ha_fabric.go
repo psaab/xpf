@@ -579,6 +579,7 @@ func (d *Daemon) refreshFabricPeer(ctx context.Context, slot int, fabIface, over
 	// Scan overlay then parent so rememberFabricPeerMAC arms the
 	// constraint the live resolver's link-local fallback checks. The
 	// resolver re-reads the same tables; this scan only records identity.
+scan:
 	for _, idx := range []int{overlayIdx, parentIdx} {
 		neighs, err := d.fabricNeighList(idx, neighFamily)
 		if err != nil {
@@ -587,7 +588,7 @@ func (d *Daemon) refreshFabricPeer(ctx context.Context, slot int, fabIface, over
 		for _, n := range neighs {
 			if n.IP.Equal(peerIP) && dpuserspace.FabricNeighUsable(n) {
 				d.rememberFabricPeerMAC(slot, n.HardwareAddr)
-				break
+				break scan // overlay priority, matching the resolver's order (#17044 fold)
 			}
 		}
 	}
