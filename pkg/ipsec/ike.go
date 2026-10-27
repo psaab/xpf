@@ -972,7 +972,20 @@ func activeSANames(sas []SAStatus) []string {
 const initiateTimeout = "5"
 
 // InitiateConnection initiates a single IPsec connection by name.
+//
+// #17858: the exec runs under opMu, the same mutex the terminate path
+// holds across its ownership guard and terminate exec. A demotion sweep
+// that already passed its ownership check can still be parked in
+// TerminateConnectionGuarded's blocking --list-sas when the RG fails back
+// and this initiate runs; without opMu the initiate could complete between
+// that guard read and the terminate exec, and the sweep would then kill
+// the replacement SA by IKE name. With both effects under opMu the sweep
+// either sees the epoch the promotion bumped (before it launched this
+// initiate) and aborts, or its terminate execs first and can only hit the
+// OLD SA.
 func (m *Manager) InitiateConnection(name string) error {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	if out, err := m.sc("--initiate", "--child", name, "--timeout", initiateTimeout); err != nil {
 		return fmt.Errorf("swanctl --initiate %s: %w: %s", name, err, termsafe.SanitizeForDisplay(string(out)))
 	}
@@ -997,12 +1010,40 @@ func (m *Manager) InitiateConnection(name string) error {
 // returned: the caller must not guess at a connection name, because
 // terminating the wrong IKE SA tears down a tunnel another RG still owns.
 func (m *Manager) TerminateConnection(name string) error {
+	_, err := m.TerminateConnectionGuarded(name, nil)
+	return err
+}
+
+// TerminateConnectionGuarded is TerminateConnection with a last-chance
+// ownership guard (#17858). Plain TerminateConnection is not enough for the
+// demotion sweep: the daemon's #16820 epoch/primary re-check runs at the
+// CALLER boundary, while the terminate below performs another blocking
+// --list-sas (resolving the IKE name) before the terminate exec — so a
+// sweep parked in that inner read survives a complete failback (epoch bump
+// + takeover belt + initiate) and its terminate then lands on the
+// replacement SA, which carries the SAME IKE name. The final operation
+// becomes terminate instead of initiate: the #15194 failback black hole
+// recreated on the node that owns the RG.
+//
+// Contract: guard is invoked AFTER the live-SA read resolves the IKE name,
+// IMMEDIATELY before the terminate exec, while holding opMu — the same
+// mutex InitiateConnection holds across its exec. Together with the daemon
+// bumping the RG ownership epoch BEFORE launching the failback's
+// re-initiate leg, this removes the race by ordering, not by timing: if
+// guard reads the pre-failback epoch, the failback initiate cannot have
+// exec'd yet (an initiate that completed under opMu would hand the mutex —
+// and with it the epoch bump that strictly precedes it — down to this
+// guard read), so this terminate still precedes, and can only hit, the OLD
+// SA; if the failback already began, guard reads the bumped epoch and
+// aborts. aborted reports the guard declining; the caller should stop the
+// whole sweep, not merely skip this name.
+func (m *Manager) TerminateConnectionGuarded(name string, guard func() bool) (aborted bool, err error) {
 	if name == "" {
-		return nil
+		return false, nil
 	}
 	sas, err := m.listSAsForTerminate()
 	if err != nil {
-		return fmt.Errorf("swanctl --list-sas before terminate %s: %w", name, err)
+		return false, fmt.Errorf("swanctl --list-sas before terminate %s: %w", name, err)
 	}
 	ikeName := ""
 	for _, sa := range sas {
@@ -1016,12 +1057,17 @@ func (m *Manager) TerminateConnection(name string) error {
 		break
 	}
 	if ikeName == "" {
-		return nil
+		return false, nil
+	}
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	if guard != nil && !guard() {
+		return true, nil
 	}
 	if out, err := m.sc("--terminate", "--ike", ikeName, "--force"); err != nil {
-		return fmt.Errorf("swanctl --terminate --ike %s --force: %w: %s", ikeName, err, termsafe.SanitizeForDisplay(string(out)))
+		return false, fmt.Errorf("swanctl --terminate --ike %s --force: %w: %s", ikeName, err, termsafe.SanitizeForDisplay(string(out)))
 	}
-	return nil
+	return false, nil
 }
 
 // listSAsForTerminate lists live SAs through the manager's exec seams
