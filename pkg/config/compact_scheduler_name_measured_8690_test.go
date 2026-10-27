@@ -64,9 +64,11 @@ func TestSchedulerNameIsNotDroppedAtEitherSpelling8690(t *testing.T) {
 	// the pass must not be load-bearing at this site in either direction.
 	for _, skipNormalize := range []bool{false, true} {
 		t.Run(map[bool]string{false: "passEnabled", true: "passDisabled"}[skipNormalize], func(t *testing.T) {
+			opts8690 := strictCompileOpts()
+			opts8690.skipCompactNormalize = skipNormalize
 			// 1. scheduler defined -> reference is HONOURED, not dropped.
 			cfg, err := compileTree(build(t, append(append([]string{}, base...), schedulerRef, schedulerDef)),
-				compileOpts{skipCompactNormalize: skipNormalize}, nil)
+				opts8690, nil)
 			if err != nil {
 				t.Fatalf("defined scheduler: want clean compile, got %v", err)
 			}
@@ -77,7 +79,7 @@ func TestSchedulerNameIsNotDroppedAtEitherSpelling8690(t *testing.T) {
 			// 2. scheduler NOT defined -> strict commit REJECTS. The validator is
 			// live at this spelling; it is not a vacuous gate.
 			_, err = compileTree(build(t, append(append([]string{}, base...), schedulerRef)),
-				compileOpts{skipCompactNormalize: skipNormalize}, nil)
+				opts8690, nil)
 			if err == nil {
 				t.Error("undefined scheduler: want rejection, got clean compile — the reference validator is not reached at the packed spelling")
 			}
@@ -86,7 +88,7 @@ func TestSchedulerNameIsNotDroppedAtEitherSpelling8690(t *testing.T) {
 			// config still compiles. Without this, case 1 could pass on a config
 			// that carries "S" for some unrelated reason.
 			cfg, err = compileTree(build(t, append(append([]string{}, base...), schedulerDef)),
-				compileOpts{skipCompactNormalize: skipNormalize}, nil)
+				opts8690, nil)
 			if err != nil {
 				t.Fatalf("no scheduler-name: want clean compile, got %v", err)
 			}

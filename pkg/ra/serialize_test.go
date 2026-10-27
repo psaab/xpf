@@ -2427,7 +2427,7 @@ func TestT2453_SlowBindDoesNotStallOtherManagerOps(t *testing.T) {
 	probeDone := make(chan struct{}, 1)
 	start := time.Now()
 	go func() {
-		m.WithdrawInterfaces([]string{"ge-0-0-9"})
+		m.withdrawInterfacesForTest([]string{"ge-0-0-9"})
 		_ = m.Status()
 		probeDone <- struct{}{}
 	}()

@@ -43,7 +43,6 @@ const IFF_NO_PI: libc::c_short = 0x1000;
 const ADJUDICATED_QUEUE_INDEX: u32 = 0;
 const ADJUDICATED_QUEUE_MAPPING: u32 = ADJUDICATED_QUEUE_INDEX + 1;
 const ADJUDICATED_TRANSIT_MARK: u32 = 0x5846_5001;
-const ADJUDICATED_TRANSIT_MARK_MASK: u32 = 0xffff_ffff;
 const ADJUDICATED_TC_PRIORITY: u32 = 0x7fff;
 
 /// The MTU the kernel assigns a freshly created TUN device. When the

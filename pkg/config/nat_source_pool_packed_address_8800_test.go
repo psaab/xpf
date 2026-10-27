@@ -75,7 +75,11 @@ func TestSourceNATPoolPackedAddress8800(t *testing.T) {
 				addrs = p.Addresses
 			}
 		}
-		_, serr := compileTree(norm(), compileOpts{skipCompactNormalize: true}, nil)
+		_, serr := func() (*Config, error) {
+			o := strictCompileOpts()
+			o.skipCompactNormalize = true
+			return compileTree(norm(), o, nil)
+		}()
 		return addrs, serr != nil
 	}
 
@@ -196,7 +200,7 @@ func TestDestinationNATPoolPackedAddress8800(t *testing.T) {
 			}
 		}
 		tr2, _ := NewParser(txt).Parse()
-		_, serr := compileTree(tr2, compileOpts{}, nil)
+		_, serr := compileTree(tr2, strictCompileOpts(), nil)
 		return addr, port, serr != nil
 	}
 	for _, tc := range []struct{ name, packed, braced string }{

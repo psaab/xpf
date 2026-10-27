@@ -136,7 +136,7 @@ func diagnosticMergeName9023(name string) string {
 // CompileConfig converts a parsed ConfigTree AST into a typed Config struct.
 // It clones the tree before expansion so the original tree is not mutated.
 func CompileConfig(tree *ConfigTree) (*Config, error) {
-	return compileTree(tree, compileOpts{}, nil)
+	return compileTree(tree, strictCompileOpts(), nil)
 }
 
 // CompileConfigWithCurrentClusterPrimary is CompileConfig with the
@@ -162,7 +162,7 @@ func CompileConfigForNodeWithCurrentClusterPrimary(tree *ConfigTree, nodeID int,
 // so the two gates can never be fed different views of "active". Keys are
 // held only for equality checks and never logged or rendered.
 func currentClusterOpts(cfg *Config) compileOpts {
-	var opts compileOpts
+	opts := strictCompileOpts()
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return opts
 	}
@@ -549,7 +549,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// hard-reject; lenient paths warn (see tunnelid.go). Read-only, so it is
 	// safe to run on the soon-to-be-expanded copy.
 	tunnelIDWarnings, tunnelIDErr := validateTunnelEndpointIDCollisionAST(
-		tree, opts.sanitizeFreeTextControlChars)
+		tree, opts.tolerant)
 	if tunnelIDErr != nil {
 		return nil, tunnelIDErr
 	}
@@ -851,15 +851,15 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 			directActionConflicts, expandedConflicts)
 	}
 
-	if nodeID != nil {
-		// #4329: thread the runtime cluster node identity into compileExpanded so
-		// it can stamp ClusterConfig.NodeID for a leaf-less flat vSRX config
-		// BEFORE any NodeID-dependent derivation runs (reth member resolution AND
-		// the compile-time fabric-member / FabricInterface auto-detect). See the
-		// stamp block in compileExpanded for the full rationale and guards.
-		opts.nodeAware = true
-		opts.stampNodeID = *nodeID
-	}
+	// #4329/#17157: thread the runtime cluster node identity into
+	// compileExpanded so it can stamp ClusterConfig.NodeID for a leaf-less
+	// flat vSRX config BEFORE any NodeID-dependent derivation runs (reth
+	// member resolution AND the compile-time fabric-member /
+	// FabricInterface auto-detect). The pointer IS the node-scope
+	// selector (#16167 presence-carried-by-pointer): opts.nodeID ==
+	// nodeID, so no parallel boolean can disagree with the stamped
+	// value. See resolveDerivedConfig for the full rationale and guards.
+	opts.nodeID = nodeID
 	cfg, err := compileExpanded(tree, opts)
 	if err != nil {
 		return nil, err
@@ -947,7 +947,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 // resolves to group "node0"). This supports a single shared config for both
 // nodes in a chassis cluster.
 func CompileConfigForNode(tree *ConfigTree, nodeID int) (*Config, error) {
-	return compileTree(tree, compileOpts{}, &nodeID)
+	return compileTree(tree, strictCompileOpts(), &nodeID)
 }
 
 // CompileConfigForNodeLenient is CompileConfigForNode with the
@@ -982,20 +982,20 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// section dispatch (P4), returning its warnings in source order for the P3
 	// append below and the FIRST gate error. Behavior-preserving lift; do NOT
 	// reorder P1 relative to P2+.
-	var applicationNameCollisions map[string]struct{}
-	if opts.lenientApplicationNameCollisions {
-		opts.applicationNameCollisions = &applicationNameCollisions
-	}
-	var firewallFilterCollisions map[string]struct{}
-	if opts.lenientFirewallFilterFamilyCollisions {
-		opts.firewallFilterCollisions = &firewallFilterCollisions
-	}
-	preWalkWarnings, uncovered16001, err := runPreWalkGates(tree, opts)
+	//
+	// #17157: every #16001/#3339/#3884 result returns the SAME way — in the
+	// preWalkResult return value. No pointer out-parameter on compileOpts
+	// carries a result out of this phase anymore.
+	preWalk, err := runPreWalkGates(tree, opts)
 	if err != nil {
 		return nil, err
 	}
-	// #15037: the any-node physical-interface set arrives via opts (the
-	// wrappers computed it pre-expansion; this tree is already expanded)
+	preWalkWarnings := preWalk.warnings
+	uncovered16001 := preWalk.uncovered16001
+	applicationNameCollisions := preWalk.applicationNameCollisions
+	firewallFilterCollisions := preWalk.firewallFilterCollisions
+	// #15037: the any-node physical-interface set arrives via opts (compileTree
+	// computed it pre-expansion; this tree is already expanded)
 	// and is stamped onto cfg below for the interface-monitor name gate.
 
 	cfg := &Config{
@@ -1213,8 +1213,7 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// contested interfaces are rejected/quarantined, but must not expose
 	// partially compiled enforcement state to callers.
 	clearDroppedEnforcementZoneBindings11575(cfg)
-	if opts.lenientTunnelRITarget12520 || opts.lenientWireguardRoutingInstance ||
-		opts.lenientRIDualClaim11060 || opts.lenientRIMgmtMember11392 {
+	if deferJunosHostWarnings(opts) {
 		// #13138: this advisory consumes the final effective ingress ownership,
 		// matching BuildJunosHostDenyProjection downstream.
 		cfg.Warnings = append(cfg.Warnings, validateJunosHostDirectDeliveryWarnings(cfg)...)
