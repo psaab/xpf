@@ -130,16 +130,20 @@ func effectiveAdvertInterval(localMS int, learned time.Duration) time.Duration {
 // priority is used for Skew_Time (RFC 5798 §6.1).
 //
 // Pending-resign window (#18045): while a forced resignation is
-// pending (resignPending set, becomeBackup not yet run), getPriority
-// deliberately reports the PRE-resign priority so routine MASTER
-// adverts do not leak the stashed 0. A resigned BACKUP therefore
-// keeps its pre-resign skew — and election competitiveness — until
-// its run loop services resignCh and applies priority 0. The
-// window is bounded by design: one run-loop iteration, and the
-// posture reconcile re-sends the restored priority after a 10s
-// mismatch. Making skew read the pending state instead would let
-// a resigning backup win master-down races it has already
-// surrendered; the retained skew is the conservative direction.
+// pending (resignPending set), getPriority deliberately reports the
+// PRE-resign priority so routine MASTER adverts do not leak the
+// stashed 0. A resigned BACKUP therefore keeps its pre-resign skew
+// — short skew, full election competitiveness — until its run loop
+// services resignCh (normally the next iteration; the stepBackup
+// resign arm applies priority 0, instance.go stepBackup arm) and
+// the MASTER path applies it in becomeBackup. Note the direction:
+// skew is (256-priority)/256 of an advert interval, so applying 0
+// would MAXIMIZE this backup's master-down delay (least
+// competitive — the surrender-consistent posture); the retained
+// pre-resign skew is the aggressive residue, bounded only by
+// resign consumption, not by the posture reconcile (which re-sends
+// priority 200 on a NeedsMaster mismatch after a 2s steady-state
+// delay, 10s inside the 30s startup window — daemon/rg_state.go).
 func (vi *vrrpInstance) masterDownInterval() time.Duration {
 	vi.mu.RLock()
 	localMS := vi.cfg.AdvertiseInterval
