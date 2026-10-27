@@ -1,9 +1,6 @@
 package cluster
 
-import (
-	"fmt"
-	"time"
-)
+import "fmt"
 
 // renderMode selects the operator-surface posture of a sync-stats field
 // (#17107). Exported for the completeness test's allowlist audit.
@@ -463,54 +460,6 @@ func setSyncStatUint(snap *SyncStatsSnapshot, name string, v uint64) {
 	case "LastFenceSeq":
 		snap.LastFenceSeq = v
 	}
-}
-
-// renderSyncStats renders every descriptor-driven counter line for snap
-// in descriptor order. Statistics renderers (FormatStatistics,
-// FormatDataPlaneStatistics, FormatInformation) share it so a counter
-// decided RenderNonzero cannot appear on one surface and vanish on
-// another (#17107).
-func renderSyncStats(snap *SyncStatsSnapshot, indent string) string {
-	var b []byte
-	for _, f := range syncStatFields {
-		if f.mode == RenderNever {
-			continue
-		}
-		v := f.get(nil, snap)
-		if f.mode == RenderNonzero && v == 0 {
-			continue
-		}
-		b = append(b, indent...)
-		b = append(b, f.label...)
-		b = append(b, ": "...)
-		b = appendUint(b, v)
-		b = append(b, '\n')
-	}
-	return string(b)
-}
-
-func appendUint(b []byte, v uint64) []byte {
-	var tmp [20]byte
-	i := len(tmp)
-	if v == 0 {
-		return append(b, '0')
-	}
-	for v > 0 {
-		i--
-		tmp[i] = byte('0' + v%10)
-		v /= 10
-	}
-	return append(b, tmp[i:]...)
-}
-
-// fenceTimeStr renders a LastFenceAckAt nanos value the way the deleted
-// FormatStats did (#17107); the live install-fence rendering is in
-// status.go FormatInformation.
-func fenceTimeStr(nanos int64) string {
-	if nanos <= 0 {
-		return "never"
-	}
-	return time.Unix(0, nanos).Format("Jan 02 15:04:05.000")
 }
 
 // fabricStr17107 renders an ActiveFabric snapshot value as the fabric
