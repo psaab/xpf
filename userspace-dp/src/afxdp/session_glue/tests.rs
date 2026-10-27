@@ -24643,12 +24643,20 @@ fn deferred_forwarding_revalidation_persist_is_single_sourced_17063() {
     let afxdp_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp");
     let mut scanned = 0usize;
     let mut persist_sites = 0usize;
-    for dir_name in ["poll_descriptor", "session_glue"] {
-        let dir = afxdp_root.join(dir_name);
+    let mut dirs = vec![
+        afxdp_root.join("poll_descriptor"),
+        afxdp_root.join("session_glue"),
+    ];
+    while let Some(dir) = dirs.pop() {
         let entries =
             std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
         for entry in entries {
-            let path = entry.expect("dir entry").path();
+            let entry = entry.expect("dir entry");
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                dirs.push(entry.path());
+                continue;
+            }
+            let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
                 continue;
             }
@@ -24703,7 +24711,7 @@ fn deferred_forwarding_revalidation_persist_is_single_sourced_17063() {
         }
     }
     assert!(
-        scanned >= 30,
+        scanned >= 69,
         "#17063: scanned only {scanned} .rs files under poll_descriptor/ + session_glue/; the walk is vacuous"
     );
     assert_eq!(
@@ -24784,13 +24792,17 @@ fn wrapper_drives_fabric_ingress_without_fabric_link_17063() {
     // persisted session's disposition/egress/zone fields — the
     // strongest assertions this fixture honestly supports (both
     // legs legitimately serve the local ForwardCandidate here, so
-    // no disposition divergence is claimed). The pin is not
-    // test-only-green: reverting the wrapper to the old double-pass
-    // (fabric_ingress for both flags) re-routes the (true,false)
-    // leg through the fabric-link path — anti-loop redirect
-    // suppression and the enforced-resolution leg — instead of the
-    // off-link re-home leg it asserts, so the split shape is no
-    // longer the code under test.
+    // no disposition divergence is claimed). Honest scope
+    // (Rev18090bOpus, mutation-verified): in THIS fixture the
+    // resolver returns identical disposition/egress/zone for
+    // both flag values, so this leg does NOT discriminate the
+    // wrapper's flag forwarding — reverting to the old
+    // double-pass stays green here. Discrimination rests on
+    // the (true,true)/(false,false) extraction parity cells
+    // above; a discriminating fixture needs a stale reverse
+    // hit against a departed-RG destination (deferred
+    // persisted-resolution divergence), recorded in
+    // docs/log/17063.md as future work.
     let key = test_key();
     let decision = SessionDecision {
         resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
