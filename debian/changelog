@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: build lenientCompileOpts() with per-flag assignments instead
+    of one gofmt-aligned ~330-key composite literal, and un-embed the
+    formatting-workaround embedded struct into two plain compileOpts
+    fields, so adding a long-named lenient flag changes exactly two
+    lines instead of realigning the whole literal (#17168). No
+    behavior change: the tolerant flag set is unchanged and the #4406
+    golden compiled output is byte-identical to master.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * HA: answer interface-ref → redundancy-group ownership from one
     SSOT (config.InterfaceRefRG / RefRG / RefRGIndex over
     RethRGOwners). RPM no longer name-tests `reth*`, so a structural
