@@ -14033,7 +14033,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
     );
     coordinator
         .session_domain()
-        .delete_synced_tunnel_variants(target.clone(), false, false, false);
+        .delete_synced_tunnel_variants(target.clone(), crate::afxdp::SyncedDeleteMode::LOCAL, false);
     let remaining = crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced);
     assert!(
         !remaining.contains_key(&target),
@@ -14119,12 +14119,13 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     source_nat_static: None, };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(target.clone(), entry);
-    let outcome = coordinator.session_domain().delete_synced_tunnel_variants(
-        target.clone(),
-        false,
-        false,
-        true,
-    );
+    let outcome = coordinator
+        .session_domain()
+        .delete_synced_tunnel_variants(
+            target.clone(),
+            crate::afxdp::SyncedDeleteMode::LOCAL_MIRROR,
+            false,
+        );
     assert_eq!(
         outcome,
         SyncedDeleteOutcome::RefusedMirrorDelete,
@@ -14132,11 +14133,153 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     );
     let lenient = coordinator.session_domain().delete_synced_tunnel_variants(
         target.clone(),
-        false,
-        false,
+        crate::afxdp::SyncedDeleteMode::LOCAL,
         false,
     );
     assert_eq!(lenient, SyncedDeleteOutcome::Applied);
+}
+
+/// #17133: every mode must behave identically through the exact delete and
+/// the tunnel-variant purge — the parity #12886 lacked (the variant ladder
+/// had no strict arm, and no scoped arm at all). One GRE fixture per mode:
+/// the stored entry carries session_id 4242 and the scoped mode names a
+/// DIFFERENT incarnation, so the scoped leg is the identity refusal.
+///
+/// Expected outcomes in the unit environment (no BPF fds, so strict mirror
+/// writes fail): LOCAL/PEER apply; LOCAL_MIRROR/PEER_MIRROR surface
+/// RefusedMirrorDelete; the scoped mode refuses identity on BOTH paths and
+/// the live entry survives both.
+#[test]
+fn synced_delete_mode_parity_exact_vs_tunnel_variants_17133() {
+    fn gre_key(discriminator: crate::session::TunnelDiscriminator) -> crate::session::SessionKey {
+        crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_GRE,
+            src_ip: "10.0.0.10".parse().unwrap(),
+            dst_ip: "10.0.0.20".parse().unwrap(),
+            src_port: 0,
+            dst_port: 0,
+            discriminator,
+            routing_domain: 0,
+        }
+    }
+    fn seed(coordinator: &Coordinator, key: &crate::session::SessionKey) {
+        let entry = crate::afxdp::worker::SyncedSessionEntry {
+            key: key.clone(),
+            decision: crate::afxdp::SessionDecision {
+                resolution: crate::afxdp::ForwardingResolution {
+                    disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    source_ifindex: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: crate::nat::NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: crate::session::SessionMetadata {
+                ingress_zone: 1,
+                egress_zone: 2,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 1,
+                fabric_ingress: false,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            leak_incarnation: 0,
+            origin: crate::afxdp::SessionOrigin::SyncImport,
+            protocol: key.protocol,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 4242,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
+            persistent_lease_hold: None,
+            source_nat_static: None,
+        };
+        crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+            .insert(key.clone(), entry);
+    }
+    use crate::afxdp::{SyncedDeleteMode, SyncedDeleteOutcome};
+    let scoped_mismatch = SyncedDeleteMode::peer_mirror_scoped(9999).expect("non-zero");
+    let cases: [(&str, SyncedDeleteMode, SyncedDeleteOutcome, bool); 5] = [
+        ("LOCAL", SyncedDeleteMode::LOCAL, SyncedDeleteOutcome::Applied, false),
+        (
+            "LOCAL_MIRROR",
+            SyncedDeleteMode::LOCAL_MIRROR,
+            SyncedDeleteOutcome::RefusedMirrorDelete,
+            false,
+        ),
+        ("PEER", SyncedDeleteMode::PEER, SyncedDeleteOutcome::Applied, false),
+        (
+            "PEER_MIRROR",
+            SyncedDeleteMode::PEER_MIRROR,
+            SyncedDeleteOutcome::RefusedMirrorDelete,
+            false,
+        ),
+        (
+            "PEER_MIRROR_SCOPED(mismatch)",
+            scoped_mismatch,
+            SyncedDeleteOutcome::RefusedIdentity,
+            true,
+        ),
+    ];
+    for (name, mode, expected, survives) in cases {
+        let exact_coordinator = Coordinator::new();
+        let exact_key = gre_key(crate::session::TunnelDiscriminator::Keyed(1));
+        seed(&exact_coordinator, &exact_key);
+        let exact = exact_coordinator
+            .session_domain()
+            .delete_synced(exact_key.clone(), mode, false);
+        let exact_survives = crate::afxdp::shared_ops::lock_shared_recover(
+            &exact_coordinator.sessions.synced,
+        )
+        .contains_key(&exact_key);
+
+        let variant_coordinator = Coordinator::new();
+        let variant_key = gre_key(crate::session::TunnelDiscriminator::Keyed(2));
+        seed(&variant_coordinator, &variant_key);
+        let variant = variant_coordinator
+            .session_domain()
+            .delete_synced_tunnel_variants(variant_key.clone(), mode, false);
+        let variant_survives = crate::afxdp::shared_ops::lock_shared_recover(
+            &variant_coordinator.sessions.synced,
+        )
+        .contains_key(&variant_key);
+
+        assert_eq!(exact, expected, "{name}: exact delete outcome");
+        assert_eq!(
+            variant, exact,
+            "{name}: variant purge must match the exact delete (#17133/#12886)"
+        );
+        assert_eq!(exact_survives, survives, "{name}: exact delete survival");
+        assert_eq!(
+            variant_survives, exact_survives,
+            "{name}: variant purge survival must match the exact delete"
+        );
+    }
 }
 
 /// #15153 (B11-01): after a full reconcile / worker respawn, synced PPTP GRE

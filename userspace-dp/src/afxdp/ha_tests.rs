@@ -6974,7 +6974,7 @@ impl Fixture9714 {
 ///
 /// THERE IS DELIBERATELY NO V6 TWIN, and the asymmetry is a decision rather than
 /// an oversight. The v6 peer delete reaches identical code:
-/// `delete_peer_synced_session` is one function over a `SessionKey` that carries
+/// `delete_synced` with `SyncedDeleteMode::PEER` is one function over a `SessionKey` that carries
 /// `addr_family` as a FIELD, `delete_synced_session_gen_marked` is its only
 /// implementation, `handlers/sync_session.rs` its only call site, and the delete
 /// handler contains no family branch at all. The predicate under test —
@@ -7004,7 +7004,7 @@ fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -7063,7 +7063,7 @@ fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false)
         .is_refused_local_owned();
 
     assert!(
@@ -7431,7 +7431,7 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -7531,7 +7531,7 @@ fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -7566,7 +7566,7 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -7602,7 +7602,7 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.reverse_key.clone(), false)
+        .delete_synced(fixture.reverse_key.clone(), SyncedDeleteMode::PEER, false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -7818,7 +7818,7 @@ fn activation_fan_out_collects_live_queues_only_9900() {
 /// key — the reverse shared entry survives and no reverse `DeleteSynced` is
 /// queued. The sender (a purge-retirement close) already decided every
 /// companion; deriving here would destroy a session the purge deliberately
-/// preserved. Production shape: the real `delete_peer_synced_session` on a
+/// preserved. Production shape: the real peer-mode `delete_synced` on a
 /// real Coordinator (shared maps + worker queues + session-map fd).
 #[test]
 fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
@@ -7830,7 +7830,7 @@ fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), true)
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, true)
         .is_refused_local_owned();
     assert!(!refused, "forward-only delete must apply");
     assert!(
@@ -7858,7 +7858,7 @@ fn ordinary_peer_delete_retires_both_halves_9752() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false)
         .is_refused_local_owned();
     assert!(!refused, "ordinary delete must apply");
     assert!(
@@ -9345,7 +9345,7 @@ fn declined_delete_fixture_9960() -> (
             );
             published.wait();
         });
-        let outcome = domain.delete_peer_synced_session(key.clone(), false);
+        let outcome = domain.delete_synced(key.clone(), SyncedDeleteMode::PEER, false);
         publisher.join().expect("decline publisher");
         outcome
     });
@@ -9491,7 +9491,7 @@ fn an_unraced_peer_delete_still_reports_applied_9960() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
     assert!(
         matches!(outcome, SyncedDeleteOutcome::Applied),
         "an applied peer delete must retain the Applied outcome"
@@ -9508,7 +9508,7 @@ fn early_ownership_refusal_keeps_its_original_outcome_9960() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
     assert!(
         matches!(outcome, SyncedDeleteOutcome::RefusedLocalOwned),
         "the #9714 early ownership refusal changed outcome"
@@ -9527,7 +9527,7 @@ fn single_threaded_peer_delete_never_spuriously_declines_9960() {
         let outcome = fixture
             .coordinator
             .session_domain()
-            .delete_peer_synced_session(fixture.forward.key.clone(), false);
+            .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
         assert!(matches!(outcome, SyncedDeleteOutcome::Applied));
     }
 }
@@ -10585,10 +10585,11 @@ fn scoped_peer_delete_matched_removes_and_fans_out_conditional_10512() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(
+        .delete_synced(
             fixture.forward.key.clone(),
+            SyncedDeleteMode::peer_mirror_scoped(fixture.forward.session_id)
+                .expect("fixture session_id is non-zero"),
             false,
-            fixture.forward.session_id,
         );
     // Applied in production; RefusedMirrorDelete here (no BPF fds in unit
     // tests, and scoped deletes are mirror-strict). Either way the
@@ -10651,10 +10652,11 @@ fn scoped_peer_delete_captures_companion_id_before_reverse_removal_15784() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(
+        .delete_synced(
             fixture.forward.key.clone(),
+            SyncedDeleteMode::peer_mirror_scoped(fixture.forward.session_id)
+                .expect("fixture session_id is non-zero"),
             false,
-            fixture.forward.session_id,
         );
     assert!(
         matches!(
@@ -10702,10 +10704,11 @@ fn scoped_peer_delete_replaced_companion_survives_queue_delay_15784() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(
+        .delete_synced(
             fixture.forward.key.clone(),
+            SyncedDeleteMode::peer_mirror_scoped(fixture.forward.session_id)
+                .expect("fixture session_id is non-zero"),
             false,
-            fixture.forward.session_id,
         );
     assert!(matches!(
         outcome,
@@ -10770,7 +10773,7 @@ fn scoped_peer_delete_mismatched_survives_and_counts_10512() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(fixture.forward.key.clone(), false, 0xDEADBEEF);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::peer_mirror_scoped(0xDEADBEEF).expect("non-zero"), false);
     assert!(
         matches!(outcome, SyncedDeleteOutcome::RefusedIdentity),
         "mismatched scoped delete must refuse identity, got {outcome:?}"
@@ -10808,7 +10811,7 @@ fn scoped_peer_delete_absent_is_stale_without_side_effects_10512() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(missing, false, 0xF30512);
+        .delete_synced(missing, SyncedDeleteMode::peer_mirror_scoped(0xF30512).expect("non-zero"), false);
     assert!(
         matches!(outcome, SyncedDeleteOutcome::StaleForward),
         "absent scoped delete must be StaleForward, got {outcome:?}"
@@ -10825,7 +10828,9 @@ fn scoped_peer_delete_absent_is_stale_without_side_effects_10512() {
 
 /// #10512 scoped entry with zero identity refuses WITHOUT touching the
 /// table: 0 is identity-missing (plan §2.1), and the callee's legacy
-/// "0 disables the check" must not leak through this API.
+/// "0 disables the check" must not leak through this API. #17133: the
+/// scoped mode is unconstructible from zero, so the refusal is the
+/// constructor's `None`, mapped here exactly as the handler maps it.
 #[test]
 fn scoped_peer_delete_zero_identity_refuses_without_side_effects_10512() {
     use super::session_import::SyncedDeleteOutcome;
@@ -10836,10 +10841,17 @@ fn scoped_peer_delete_zero_identity_refuses_without_side_effects_10512() {
         WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
         None,
     );
-    let outcome = fixture
-        .coordinator
-        .session_domain()
-        .delete_peer_synced_session_mirror_scoped(fixture.forward.key.clone(), false, 0);
+    assert!(
+        SyncedDeleteMode::peer_mirror_scoped(0).is_none(),
+        "zero must be identity-missing: no scoped mode may be built from it"
+    );
+    let outcome = match SyncedDeleteMode::peer_mirror_scoped(0) {
+        Some(mode) => fixture
+            .coordinator
+            .session_domain()
+            .delete_synced(fixture.forward.key.clone(), mode, false),
+        None => SyncedDeleteOutcome::RefusedIdentity,
+    };
     assert!(
         matches!(outcome, SyncedDeleteOutcome::RefusedIdentity),
         "zero-identity scoped delete must refuse, got {outcome:?}"

@@ -8,7 +8,7 @@ use super::super::helpers::{
 };
 use crate::afxdp::SessionDomain;
 use crate::afxdp::{
-    SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
+    SyncedDeleteMode, SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
     SYNCED_IMPORT_REPAIR_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
 };
 use crate::{ControlResponse, SessionSyncRequest};
@@ -321,27 +321,26 @@ pub(super) fn handle(
                     sync_req.operation.as_str(),
                     "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped"
                 );
+                // #17133: build the (peer x strict x scoped) mode ONCE and
+                // thread it through both the exact delete and the
+                // tunnel-variant purge. #12886 was the variant path
+                // rebuilding this choice from a narrower signature and
+                // dropping `strict_mirror`; `expected_id` was dropped the
+                // same way. The scoped zero check above guarantees the
+                // scoped constructor succeeds here.
+                let mode = if scoped {
+                    SyncedDeleteMode::peer_mirror_scoped(sync_req.session_id)
+                        .expect("scoped verb with session_id 0 returned above")
+                } else {
+                    SyncedDeleteMode {
+                        peer: sync_req.peer_delete,
+                        strict_mirror,
+                        expected_id: None,
+                    }
+                };
                 let mut mirror_delete_error = false;
                 let mut delete = |key| {
-                    let outcome = if sync_req.peer_delete {
-                        if strict_mirror {
-                            if scoped {
-                                domain.delete_peer_synced_session_mirror_scoped(
-                                    key,
-                                    forward_only,
-                                    sync_req.session_id,
-                                )
-                            } else {
-                                domain.delete_peer_synced_session_mirror(key, forward_only)
-                            }
-                        } else {
-                            domain.delete_peer_synced_session(key, forward_only)
-                        }
-                    } else if strict_mirror {
-                        domain.delete_synced_session_mirror(key, forward_only)
-                    } else {
-                        domain.delete_synced_session(key, forward_only)
-                    };
+                    let outcome = domain.delete_synced(key, mode, forward_only);
                     mirror_delete_error |= outcome.mirror_delete_failed();
                     if sync_req.peer_delete {
                         outcome.keeps_caller_rows()
@@ -351,12 +350,7 @@ pub(super) fn handle(
                 };
                 // (keeps_caller_rows, mirror_delete_failed) per variant purge.
                 let delete_tunnel_variants = |key| {
-                    let outcome = domain.delete_synced_tunnel_variants(
-                        key,
-                        sync_req.peer_delete,
-                        forward_only,
-                        strict_mirror,
-                    );
+                    let outcome = domain.delete_synced_tunnel_variants(key, mode, forward_only);
                     (
                         outcome.keeps_caller_rows(),
                         outcome.mirror_delete_failed(),
