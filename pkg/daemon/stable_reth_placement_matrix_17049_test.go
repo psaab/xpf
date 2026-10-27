@@ -146,6 +146,31 @@ func placementCells17049() []placementCell17049 {
 			raUnit: 50, wantIfRefs: []string{"reth0.0", "reth0.50"}, wantRA: stable,
 			wantRemove: []string{"ge-0-0-0", "ge-0-0-0.50"},
 		},
+		{
+			// RA on an IPv4-only unit (70) alongside a placement-bearing
+			// sibling (unit 0): the RA's unit has NO placement, so the
+			// stable source must NOT bind — a sibling placement does not
+			// install the address on ge-0-0-0.70 and pkg/ra would fail
+			// every NDP listen there (Rev18119 blocker).
+			name: "ra-ipv4-only-unit-with-placement-sibling",
+			cfg: cellCfg17049(map[int]*config.InterfaceUnit{
+				0:  {Number: 0, Addresses: []string{"2001:db8:0::1/64"}},
+				70: {Number: 70, VlanID: 70, Addresses: []string{"10.0.70.1/24"}},
+			}),
+			raUnit: 70, wantIfRefs: []string{"reth0.0"}, wantRA: "",
+			wantRemove: []string{"ge-0-0-0", "ge-0-0-0.70"},
+		},
+		{
+			// Control: same shape, RA on the placement-bearing unit
+			// itself — the stable source DOES bind.
+			name: "ra-on-placement-unit-control",
+			cfg: cellCfg17049(map[int]*config.InterfaceUnit{
+				0:  {Number: 0, Addresses: []string{"2001:db8:0::1/64"}},
+				70: {Number: 70, VlanID: 70, Addresses: []string{"10.0.70.1/24"}},
+			}),
+			raUnit: 0, wantIfRefs: []string{"reth0.0"}, wantRA: stable,
+			wantRemove: []string{"ge-0-0-0", "ge-0-0-0.70"},
+		},
 	}
 }
 func netdevsOf17049(placements []config.StableLLPlacement) []string {
@@ -270,10 +295,9 @@ func TestStableRethPlacementMatrix17049(t *testing.T) {
 			if cell.wantRA != "" {
 				// RA bind netdev: when the RA unit itself carries a
 				// placement, the resolved netdev must be that placement's
-				// netdev. The binding itself is unit-agnostic when any
-				// placement exists (see stableRethLinkLocalForRA), so a
-				// cell whose RA unit has no placement of its own pins only
-				// the source string above.
+				// netdev. When it carries none, wantRA == "" above already
+				// pins that the stable source does not bind at all (the
+				// mixed cells pin it against a placement-bearing sibling).
 				for _, p := range placements {
 					if p.Unit == cell.raUnit {
 						if got := raCfg.ResolveKernelIfName(ras[0].Interface); got != p.Netdev {

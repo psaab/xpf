@@ -125,7 +125,6 @@ func (c *Config) StableRethLinkLocalPlacements(rgID int) []StableLLPlacement {
 // link-local, not the stable LL): the set the router-NA leg must announce —
 // each unit announces its own configured link-local if present, otherwise the
 // stable LL (#15684).
-type RouterLLPlacement = StableLLPlacement
 
 // RouterLinkLocalPlacements returns the per-unit router link-locals to
 // announce for rgID, in the same deterministic order as
