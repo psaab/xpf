@@ -614,6 +614,11 @@ mod tests_leak_precheck_14319;
 #[cfg(test)]
 #[path = "tests_return_order_16799.rs"]
 mod tests_return_order_16799;
+// #17852: the #16799 source-ownership scan runs only when a deferred
+// return covering the destination exists.
+#[cfg(test)]
+#[path = "tests_ownership_scan_gate_17852.rs"]
+mod tests_ownership_scan_gate_17852;
 // #9956 F-052: the SNAT scope must resolve on the logical ingress unit.
 #[cfg(test)]
 #[path = "tests_snat_scope_9956.rs"]
