@@ -323,31 +323,27 @@ func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 			continue
 		}
 		t.stopKeepaliveLocked(name)
-		if link, err := t.ops.LinkByName(name); err == nil {
-			if delErr := t.ops.LinkDel(link); delErr != nil {
-				slog.Warn("failed to delete removed tunnel",
-					"name", name, "err", delErr)
-				next[name] = true // retain ownership; retry next apply
-				// #5355: a genuine LinkDel failure leaves the removed
-				// tunnel's device (and its addresses) live in the kernel —
-				// fail the commit closed rather than report a clean removal.
-				errs = append(errs, fmt.Errorf("delete removed tunnel %s: %w", name, delErr))
-				continue
+		if released, relErr := releaseOwnedLink(t.ops, "tunnel", name, alwaysOurs); relErr != nil {
+			// Shared release skeleton (#17020): a transient LinkByName
+			// error (EBUSY/netlink/timeout) has NOT proven the device
+			// gone and has NOT deleted it — retain ownership so the
+			// next Apply retries, or the live link (and stale
+			// addresses on it) is orphaned (#1919 r2). A genuine
+			// LinkDel failure likewise retains AND fails the commit
+			// closed (#5355). tunnel passes alwaysOurs: its removal
+			// path has always deleted whatever wears the tracked
+			// name (#17020 recorded policy).
+			next[name] = true // retain ownership; retry next apply
+			if errors.Is(relErr, errLinkDelFailed) {
+				// Only a genuine LinkDel failure fails the commit
+				// (#5355); a transient lookup defers silently to
+				// the next Apply, exactly as before #17020.
+				errs = append(errs, relErr)
 			}
-			slog.Info("tunnel removed", "name", name)
-		} else if !isLinkNotFound(err) {
-			// Transient LinkByName error (EBUSY/netlink/timeout): we have
-			// NOT proven the device gone and have NOT deleted it. Retain
-			// ownership so the next Apply retries the LinkDel — dropping it
-			// here would orphan a live link (and any stale addresses on it)
-			// with no state left to clean it up. A genuine not-found falls
-			// through to drop tracking. (#1919 r2 Codex: closes the
-			// WG→non-WG-handoff + transient-removal leak chain; also hardens
-			// the pre-existing GRE/anchor removal path against transient
-			// lookup errors, mirroring the WG prune loop's isLinkNotFound
-			// discipline below.)
-			slog.Warn("failed to look up removed tunnel for deletion",
-				"name", name, "err", err)
+			continue
+		} else if !released {
+			// Unreachable with alwaysOurs (every !released outcome
+			// carries a non-nil error); retain defensively.
 			next[name] = true
 			continue
 		}
@@ -1454,34 +1450,23 @@ func (t *tunnelManager) clearLocked() error {
 	var errs []error
 	failed := map[string]bool{}
 	for name := range names {
-		link, err := t.ops.LinkByName(name)
-		if err != nil {
-			if isLinkNotFound(err) {
-				continue // genuinely gone
-			}
-			// #7529: a transient lookup failure is not absence. Falling through
-			// here dropped the name from ownedNames (it is rebuilt from
-			// `failed` below), so a tunnel still present in the kernel became
-			// untracked and no later Apply retried its delete — leaving a live
-			// link with stale addresses and XFRM if_id state that xpf no longer
-			// believes it owns. Same treatment as a failed LinkDel: retain
-			// ownership and surface the error.
-			slog.Warn("tunnel clear: link lookup failed, retaining ownership for retry",
-				"name", name, "err", err)
-			errs = append(errs, fmt.Errorf("lookup tunnel %s: %w", name, err))
+		// Shared release skeleton (#17020): released=true ONLY on a
+		// genuine not-found or a successful LinkDel. A transient
+		// lookup failure is not absence (#7529) and a failed LinkDel
+		// leaves the tunnel in the kernel (#4901): both retain
+		// ownership (ownedNames is rebuilt from `failed` below) and
+		// surface the error, so a post-Clear Apply's removal diff
+		// retries the delete instead of orphaning a live link with
+		// stale addresses and XFRM if_id state.
+		released, relErr := releaseOwnedLink(t.ops, "tunnel", name, alwaysOurs)
+		if relErr != nil {
+			errs = append(errs, relErr)
 			failed[name] = true
 			continue
 		}
-		if err := t.ops.LinkDel(link); err != nil {
-			// #4901: a failed LinkDel leaves the tunnel in the kernel. Retain
-			// ownership so a post-Clear Apply's removal diff (which keys off
-			// ownedNames) retries the delete instead of orphaning a live link
-			// with stale addresses / XFRM if_id state, and surface the error.
-			slog.Warn("failed to delete tunnel", "name", name, "err", err)
-			errs = append(errs, fmt.Errorf("delete tunnel %s: %w", name, err))
+		if !released {
+			// Unreachable with alwaysOurs; retain defensively.
 			failed[name] = true
-		} else {
-			slog.Info("tunnel removed", "name", name)
 		}
 	}
 	t.tunnels = nil

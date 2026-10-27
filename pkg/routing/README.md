@@ -142,9 +142,23 @@ path already draws (see the WireGuard/tunnel removal notes below and
 
   Worth noting for the next sibling: the shape here is not a bug that recurred,
   it is one fix that was applied to one of three managers holding the same
-  branch. When a predicate like `isLinkNotFound` is introduced, the question to
-  ask is which OTHER call sites make the same conflation — grep for
-  `LinkByName` with an error branch that assumes absence.
+  branch. That is now closed structurally by **#17020**: the whole
+  lookup → classify → delete skeleton lives in ONE primitive,
+  `releaseOwnedLink` (`owned_link.go`) — released=true ONLY on a genuine
+  not-found or a successful `LinkDel`; every other outcome (transient
+  lookup, failed delete, foreign occupant) retains ownership and surfaces
+  the error. bond/xfrm/tunnel `deleteLocked`, the tunnel Apply removal
+  loop, tunnel `clearLocked`, and the `reconcileVRFs` tracked-not-desired
+  loop all route through it, so a future conflation cannot be re-introduced
+  copy-by-copy — it would have to be written into the single helper, where
+  `TestReleaseOwnedLink17020` plus the #4901/#5495/#7529 cells pin every
+  error class. **Recorded foreign-occupant policy (#17020):** bond, xfrm
+  and tunnel pass `alwaysOurs` and delete whatever wears a tracked name
+  (their historical behaviour, preserved); VRF passes a `*netlink.Vrf`
+  check and REFUSES the foreign link — no delete, ownership released
+  without error (#12062). When a new manager needs this release shape, it
+  calls `releaseOwnedLink` with its own `isOurs`; it does not hand-write
+  the branch.
 
 **Identity re-assertion on every post-create readback (#5523 C179-104 +
 #6396).** `LinkAdd` and the `LinkByName` readback that follows it are two
