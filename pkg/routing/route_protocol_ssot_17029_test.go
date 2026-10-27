@@ -125,3 +125,26 @@ func TestRouteProtocolNamesAreCanonical17029(t *testing.T) {
 		}
 	}
 }
+
+// TestRouteProtocolLiteralPins17029 (fold of Rev18085Opus F2): the
+// Tag/Junos projections are pinned to LITERAL expectations, not to
+// the table they derive from, so a table edit cannot drift both
+// sides of the comparison at once.
+func TestRouteProtocolLiteralPins17029(t *testing.T) {
+	wantTag := map[string]string{
+		"redirect": "?", "connected": "C", "dhcp": "D", "static": "S",
+		"bgp": "B", "isis": "I", "ospf": "O", "rip": "R",
+	}
+	wantJunos := map[string]string{
+		"redirect": "Redirect", "connected": "Direct", "dhcp": "Access-internal",
+		"static": "Static", "bgp": "BGP", "isis": "IS-IS", "ospf": "OSPF", "rip": "RIP",
+	}
+	for internal, tag := range wantTag {
+		if got := protoTag(internal); got != tag {
+			t.Errorf("protoTag(%q) = %q, want literal %q", internal, got, tag)
+		}
+		if got := junosProtoName(internal); got != wantJunos[internal] {
+			t.Errorf("junosProtoName(%q) = %q, want literal %q", internal, got, wantJunos[internal])
+		}
+	}
+}
