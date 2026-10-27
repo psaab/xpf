@@ -283,7 +283,7 @@ func (d *Daemon) initManagers(failClosed bool) error {
 	// Only applies when VRRP is enabled — otherwise no RETH VRRP instances.
 	if cfg := d.store.ActiveConfig(); cfg != nil && cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
-		if cc.FabricInterface != "" && cc.FabricPeerAddress != "" && !cc.NoRethVRRP && !cc.PrivateRGElection {
+		if cc.FabricInterface != "" && cc.FabricPeerAddress != "" && cc.UsesRethVRRP() {
 			d.vrrpMgr.SetSyncHold(30 * time.Second)
 			if d.cluster != nil {
 				d.cluster.SetStartupSyncHoldStatus("reth-vrrp", true, "")
@@ -324,7 +324,7 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// this one), and this timer's callback returns early while no sync
 		// peer is connected. Whether promotion SHOULD be sync-gated is
 		// #110; do not read this call as already doing it.
-		if cc.PrivateRGElection && cc.FabricInterface != "" && cc.FabricPeerAddress != "" {
+		if cc.RethOwnershipMode() == config.RethPrivateRG && cc.FabricInterface != "" && cc.FabricPeerAddress != "" {
 			d.armSyncReadyTimer()
 		}
 	}

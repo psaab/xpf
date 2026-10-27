@@ -103,8 +103,9 @@ var peerEffectiveStrictSubjects = []peerEffectiveStrictSubject{
 // That arm IS reachable, but not for the reason an earlier revision of this
 // comment gave (#6861 re-gate C1). It cited validateTunnelEndpointIDCollisionAST
 // as "returned unconditionally, with no lenient flag" — false: its signature is
-// (tree *ConfigTree, lenient bool) (tunnelid.go), both call sites pass
-// opts.sanitizeFreeTextControlChars (compiler.go), and lenientCompileOpts sets
+// (tree *ConfigTree, lenient bool) (tunnelid.go), its single call site passes
+// opts.tolerant (compiler.go, #17153 — formerly the borrowed
+// opts.sanitizeFreeTextControlChars), and lenientCompileOpts sets
 // that true (compiler_opts.go), so on the lenient path it WARNS. A maintainer
 // following that citation would find the gate already lenient, conclude this
 // arm unreachable, and delete the clone+rewrite in configstore store.go that

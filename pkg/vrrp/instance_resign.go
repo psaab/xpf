@@ -50,7 +50,7 @@ type pendingResign struct {
 // #17859: split into two phases. extractPendingResign snapshots the
 // stash and clears the pending flag under resignMu; commitPendingResign
 // installs it under mu. A cluster-authoritative priority restore
-// (UpdateRGPriority, updateConfig) can complete between the phases —
+// (UpdateRGPriority, updateConfigHeld) can complete between the phases —
 // in that window the pending flag is already false, so the flag alone
 // cannot cancel the extracted value. commitPendingResign therefore
 // re-checks resignEpoch under mu and drops a superseded extraction
@@ -101,7 +101,7 @@ func (vi *vrrpInstance) commitPendingResign(r pendingResign) {
 
 // discardPendingResignLocked drops a pending resignation WITHOUT
 // installing its stashed priority (#16821). A superseding priority
-// assignment (UpdateRGPriority, updateConfig) is cluster-authoritative:
+// assignment (UpdateRGPriority, updateConfigHeld) is cluster-authoritative:
 // the RG has been driven back to Primary (or reconfigured) before
 // becomeBackup actuated the resign, so the stashed 0 must not survive
 // to be installed by a later, unrelated step-down. The caller has
@@ -118,14 +118,6 @@ func (vi *vrrpInstance) discardPendingResignLocked() {
 	defer vi.resignMu.Unlock()
 	vi.resignPending = false
 	vi.resignEpoch++
-}
-
-// resignIsPending reports whether a forced resignation is queued but
-// not yet actuated by becomeBackup.
-func (vi *vrrpInstance) resignIsPending() bool {
-	vi.resignMu.Lock()
-	defer vi.resignMu.Unlock()
-	return vi.resignPending
 }
 
 // armResignAck registers b as a waiter for this instance's next VIP release.

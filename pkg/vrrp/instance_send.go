@@ -61,7 +61,7 @@ func (vi *vrrpInstance) sendAdvert(priority int) {
 	// under the lock, before either arm reads it.
 	//
 	// This ran on the instance run loop (a 30ms advert timer on RETH) reading
-	// the config field directly while updateConfig writes it under vi.mu on the
+	// the config field directly while updateConfigHeld writes it under vi.mu on the
 	// manager goroutine — the #5087 day-2 path, reached by any commit that
 	// changes reth-advertise-interval. `go test -race` reports it at
 	// instance_send.go:46 against instance.go:378.
