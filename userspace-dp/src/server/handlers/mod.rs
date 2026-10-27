@@ -16,11 +16,16 @@
 //     `clear_policy_counters`, `clear_nat_counters`, `clear_zone_counters`,
 //     `clear_flood_counters`, `clear_filter_counters`, `shutdown`,
 //     catch-all), followed by post-match `refresh_status` + status attach
-//     (gated by `!suppress_status`) unless a deferred wait is owed.
-//   - Deferred off-lock waits, each re-deriving status under a fresh
-//     short lock acquisition when needed: the binding-settle poll
-//     (#5862), the owner-RG export ack-wait (#2962), the all-sessions
-//     export push (#4054), and the session-counter collect (#7919).
+//     (gated by `!suppress_status`) unless an export/settle wait is owed
+//     (the gate checks only `export_wait`/`all_export`/`settle_wait`).
+//   - Deferred off-lock waits: the binding-settle poll (#5862), the
+//     owner-RG export ack-wait (#2962), and the all-sessions export push
+//     (#4054) each re-derive status under a fresh short lock acquisition
+//     afterwards (still gated by `!suppress_status`). The session-counter
+//     collect (#7919) is the exception: its kick sets `counter_query_wait`
+//     OUTSIDE that gate, so the in-lock attach above already ran, and its
+//     `collect` only waits for the per-worker replies — it takes no fresh
+//     lock and does no status re-derivation.
 //   - Encode + flush via BufWriter / serde_json / newline; only after a
 //     successful flush, `write_state` persists (when `persist_state` is
 //     set), and a failed flush arms delta loss on drained contributors
