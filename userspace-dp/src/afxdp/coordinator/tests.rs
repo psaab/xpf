@@ -11867,7 +11867,7 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
             peer_worker_commands: &[],
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick { ns: 2_000_000, secs: 0 },
+        tick: Tick::from_ns(2_000_000),
 };
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<crate::afxdp::WorkerCommand>>>> = Vec::new();
     let promoted_metadata = crate::afxdp::session_glue::maybe_promote_synced_session(

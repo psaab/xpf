@@ -382,9 +382,12 @@ never drains) — here there was simply no release call at all.
 wiring. #16185 extended it — deliberately not a parallel
 `SharedSessionCtx` — with `peer_worker_commands`,
 `worker_commands_by_id` (normalised to `&WorkerCommandQueues`),
-`ConntrackFds { v4, v6 }` and `Tick { ns, secs }`, and collapsed the
-`resolve_*` (26→17), `delete_terminal_*` (17→9) and purge signatures
-onto it. `session_map` stays separate (per-binding steering handle,
-not shared wiring); `WorkerContext` keeps the broader poll context;
+`ConntrackFds { v4, v6 }` and `Tick` (one monotonic reading as
+`ns` + derived `secs`, constructed only via `Tick::from_ns` —
+#17069; the sole `secs` reader is the resolve path's HA-lease
+checks), and collapsed the `resolve_*` (26→17),
+`delete_terminal_*` (17→9) and purge signatures onto it.
+`session_map` stays separate (per-binding steering handle, not
+shared wiring); `WorkerContext` keeps the broader poll context;
 no `CommandTick` and no flow-cache stage context were introduced.
 Wiring cells: `shared_session_refs_16185_tests.rs`.

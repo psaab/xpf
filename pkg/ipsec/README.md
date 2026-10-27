@@ -689,7 +689,7 @@ all files stay in `package ipsec`, so the public API is unchanged.
     DATAPLANE-facing interface already triggers a full `applyConfig`,
     whose step 6 re-renders IPsec. A lease change on a MANAGEMENT-only
     interface skips the full recompile, so that branch now calls
-    `reapplyIPsecForLeaseChange`, which re-renders + reloads swanctl
+    `managementOnlyLeaseRefresh` → `reapplyIPsecLocked`, which re-renders + reloads swanctl
     directly.
   - **Scoping** (`HasDHCPBoundGateway`, `policy_addr.go`): the management-only
     re-render fires only when some gateway is actually lease-dependent —
@@ -703,7 +703,7 @@ all files stay in `package ipsec`, so the public API is unchanged.
     interface) still rely on a commit/boot re-render; only DHCP lease
     changes have a runtime hook today.
   - **Recoverable + visible rebind failure (#4899).** The management-only
-    `reapplyIPsecForLeaseChange` re-render is best-effort with respect to
+    `managementOnlyLeaseRefresh` → `reapplyIPsecLocked` re-render is best-effort with respect to
     lease processing (a swanctl failure must never block or fail DHCP
     handling), but its reload error is NO LONGER dropped as a bare
     `slog.Warn`. Before #4899 a failed `swanctl --load-all` on this path
