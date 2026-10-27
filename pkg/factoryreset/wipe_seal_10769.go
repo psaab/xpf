@@ -25,7 +25,10 @@ import (
 )
 
 // The system-path seams mirror the image's SYSPREP_ENABLE_OPS and
-// SYSPREP_PURGE_PATHS. Tests point them at a disposable tree; production values
+// SYSPREP_PURGE_PATHS. wipeSealMapping below binds every member of those
+// tuples to its zeroize leg or survivor reason, and seal_parity_test.go
+// parses the tuples from scripts/image/bake.py so drift reds (#17085).
+// Tests point them at a disposable tree; production values
 // remain the image paths whose previous-tenant state must not survive reset.
 var (
 	wipeMachineIDPath         = "/etc/machine-id"
@@ -35,6 +38,7 @@ var (
 	wipeRootBashHistory       = "/root/.bash_history"
 	wipeSNMPEngineIDPath      = "/var/lib/xpf/snmp-engine-id"
 	wipeSNMPEngineBootsPath   = "/var/lib/xpf/snmp-engineboots"
+	wipeUEFIStatePath         = "/var/lib/xpf/uefi-bootorder-front"
 	wipeFeedShrinkHistoryPath = configstore.FeedShrinkHistoryPath
 	wipeSystemdRandomSeed     = "/var/lib/systemd/random-seed"
 	wipeAptListsDir           = "/var/lib/apt/lists"
@@ -81,6 +85,74 @@ var (
 	errWipeIPsecOwnership = errors.New("zeroize refused to erase config while IPsec teardown is unresolved")
 	errWipeKeaStop        = errors.New("zeroize could not stop Kea before lease-file erasure")
 )
+
+// wipeSealDisposition is the zeroize disposition of one image-seal member:
+// exactly one of leg (a production wipe function the parity test drives) or
+// survivor (a reason the member deliberately survives, with its narrowing).
+type wipeSealDisposition struct {
+	leg      func() error
+	survivor string
+}
+
+// wipeSealMapping binds every member of bake.py's SYSPREP_ENABLE_OPS and
+// SYSPREP_PURGE_PATHS (#17085, R4-Q46-01) to its zeroize disposition. It is
+// the single source the parity test (seal_parity_test.go) checks: the test
+// parses both tuples from scripts/image/bake.py, so a new seal member with
+// no row here — or a deleted row — reds there. Keys are the tuple members
+// verbatim (virt-sysprep op names for ENABLE, absolute paths for PURGE).
+var wipeSealMapping = map[string]wipeSealDisposition{
+	// SYSPREP_ENABLE_OPS.
+	"machine-id":   {leg: func() error { return wipeRotateMachineID(wipeMachineIDPath) }},
+	"ssh-hostkeys": {leg: wipeEraseSSHHostKeys},
+	"ssh-userdir":  {leg: func() error { return wipeRemovePath(wipeRootSSHUserDir) }},
+	"logfiles":     {leg: func() error { return wipeClearDir(wipeVarLogDir) }},
+	"tmp-files": {leg: func() error {
+		var errs []error
+		for _, dir := range wipeTmpDirs {
+			if err := wipeClearTmpDir(dir); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}},
+	"bash-history": {leg: func() error { return wipeRemovePath(wipeRootBashHistory) }},
+	"package-manager-cache": {leg: func() error {
+		var errs []error
+		for _, dir := range []string{wipeAptListsDir, wipeAptArchiveDir} {
+			if err := wipeClearDir(dir); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}},
+	"backup-files": {leg: func() error {
+		var errs []error
+		if err := wipeSweepOwnedEtcBackups(wipeEtcDir); err != nil {
+			errs = append(errs, err)
+		}
+		for _, target := range wipeServiceBackupSweepTargets() {
+			if err := wipeSweepOwnedBackups(target.dir, target.owned); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}},
+	"passwd-backups": {leg: wipeEraseAccountBackups},
+	"utmp":           {leg: func() error { return wipeRemovePath(wipeRunUtmpPath) }},
+	// SYSPREP_PURGE_PATHS.
+	"/etc/xpf/.configdb": {leg: func() error { return wipeConfigDir(defaultConfigDir, defaultConfigBase) }},
+	"/etc/xpf/xpf.conf":  {leg: func() error { return wipeConfigDir(defaultConfigDir, defaultConfigBase) }},
+	"/etc/xpf/.day0-config-applied": {
+		survivor: "held through the wipe as the zeroize-pending record and removed only by completeZeroize after every leg succeeds (wipe.go); a normal stamp is erased by wipeConfigDir",
+	},
+	"/etc/xpf/.day0-config-rejected":    {leg: func() error { return wipeRemovePath(wipeDay0RejectedPath) }},
+	"/etc/xpf/.root-grown":              {leg: func() error { return wipeRemovePath(wipeRootGrownPath) }},
+	"/var/lib/xpf/snmp-engine-id":       {leg: func() error { return wipeRemovePath(wipeSNMPEngineIDPath) }},
+	"/var/lib/xpf/snmp-engineboots":     {leg: func() error { return wipeRemovePath(wipeSNMPEngineBootsPath) }},
+	"/var/lib/xpf/uefi-bootorder-front": {leg: func() error { return wipeRemovePath(wipeUEFIStatePath) }},
+	"/var/lib/systemd/random-seed":      {leg: func() error { return wipeRemovePath(wipeSystemdRandomSeed) }},
+	"/var/lib/apt/lists/*":              {leg: func() error { return wipeClearDir(wipeAptListsDir) }},
+}
 
 const wipeManagedHostKeysHeader = "# Managed by xpfd — do not edit\n"
 
@@ -183,6 +255,7 @@ func wipeImageSealResidue() error {
 	for _, path := range []string{
 		wipeSNMPEngineIDPath,
 		wipeSNMPEngineBootsPath,
+		wipeUEFIStatePath,
 		wipeFeedShrinkHistoryPath,
 		wipeDay0RejectedPath,
 		wipeRootGrownPath,
