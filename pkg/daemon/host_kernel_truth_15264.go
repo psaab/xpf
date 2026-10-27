@@ -41,6 +41,21 @@ import (
 // hostInboundEstablished15264 bit (also the probe gate above), while
 // LastApplyFailed keeps the state Stale until a real install succeeds.
 //
+// #17861: the whole observe+clear pass runs under applySem. The retention
+// state the drift arms clear (hostInboundEnforced, the covered /
+// DHCP-retained sets, the gap + pre-activation fence pointers, lo0Enforced)
+// is applySem-owned — every other reader and writer holds applySem — so the
+// kernel reads and the clears must be ONE critical section relative to
+// applies. An unlocked probe that had already observed a flushed table
+// could be preempted between its reads and the clears while a concurrent
+// apply installed and published a fresh real generation; resuming, the
+// stale observation wiped the FRESH generation's retention state, so the
+// next failed apply replaced the valid retained table and its service
+// accepts with the cold-boot deny-only fence and lost the retained fence
+// bookkeeping. Under applySem an apply either completes before the kernel
+// reads (the probe then observes the fresh table and stays Current) or
+// runs after the clears (its publication supersedes them).
+//
 // Probe choice:
 //   - xpf_hostinbound: TableDropsInput. A real generation always carries a
 //     DROP verdict on its base input chain except a junos-host program-only
@@ -69,10 +84,20 @@ var hostKernelTruthInterval15264 = 30 * time.Second
 // recheckHostKernelTruth15264 performs one kernel-truth pass. now is the
 // observation time recorded as the failure time when host-inbound drift is
 // found (lo0 has no timestamped failure latch; lo0LastFailed carries it).
+//
+// #17861: the pass holds applySem from before the first kernel read until
+// after the last clear (see the file comment). A cancelled acquire means
+// the daemon is stopping — skip the tick; the shutdown drain owns the
+// semaphore from there, and the next tick of a still-running daemon
+// re-probes.
 func (d *Daemon) recheckHostKernelTruth15264(now time.Time) {
 	if d == nil || nftInstaller == nil {
 		return
 	}
+	if err := d.applySem.Acquire(d.applyCancelCtx(), 1); err != nil {
+		return
+	}
+	defer d.applySem.Release(1)
 	drift := false
 
 	// Host-inbound: only an established surface can drift. The probe gate
@@ -166,8 +191,9 @@ func (d *Daemon) recheckHostKernelTruth15264(now time.Time) {
 }
 
 // hostKernelTruthLoop15264 is the always-on low-rate owner started from
-// Run beside the other reassert loops. Idle cost is two atomic loads per
-// tick when nothing is established.
+// Run beside the other reassert loops. Idle cost is two atomic loads and
+// one uncontended applySem round-trip per tick when nothing is established
+// (#17861: the recheck serializes with applies for its whole pass).
 func (d *Daemon) hostKernelTruthLoop15264(ctx context.Context) {
 	interval := hostKernelTruthInterval15264
 	if interval <= 0 {

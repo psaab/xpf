@@ -35,7 +35,10 @@ import (
 //     [:alnum:] matches the separator's neighbours only via the class's
 //     letters/digits in practice but [:space:] and [:blank:] match the
 //     separator itself, and any unanalysed class is refused rather
-//     than guessed at), an escape that can match a space (\s) or whose
+//     than guessed at), a bracket class whose verbatim text spells
+//     "| " (the class renders as-is, so it trips FRR's vty pipe hook —
+//     #16776's refusal extended inside brackets, #17977), an escape
+//     that can match a space (\s) or whose
 //     meaning differs between Junos, Go POSIX and glibc (\d, \w, \b and
 //     friends), and "(?..." Perl constructs POSIX ERE has no spelling
 //     for.
@@ -84,7 +87,8 @@ func TranslateCommunityMemberRegex(member string) (string, error) {
 // translateCommunityCore confines one anchor-stripped member body to
 // a single community token: "." outside brackets becomes [^ ], and
 // anything that can match the separator space, an interior anchor, a
-// non-POSIX escape, or a "(?..." construct is rejected.
+// non-POSIX escape, a "(?..." construct, or a bracket class spelling
+// "| " (the pipe-hook literal rendered verbatim, #17977) is rejected.
 func translateCommunityCore(body string) (string, error) {
 	if body == "" {
 		return "", fmt.Errorf("member matches only the empty community, which no route carries (#16788)")
@@ -189,7 +193,9 @@ func RenderableCommunityMember(member string) (string, error) {
 // body[start] (a '[') and returns the index just past its ']' plus the
 // expression verbatim. A bracket expression is refused when it can
 // match a space, when it carries a POSIX class other than [:digit:],
-// or when it is unterminated.
+// when its verbatim text spells "| " (FRR's vty pipe hook refuses
+// that literal even inside a character class, #17977), or when it is
+// unterminated.
 func scanCommunityBracket(body string, start int) (int, string, error) {
 	i := start + 1
 	negated := false
@@ -274,6 +280,13 @@ func scanCommunityBracket(body string, start int) (int, string, error) {
 				"the separator between communities in FRR's joined community string; " +
 				"exclude it explicitly, e.g. [^ ] (#16788)")
 		}
+	}
+	if strings.Contains(body[start:pos+1], "| ") {
+		return 0, "", fmt.Errorf("bracket expression %s spells \"| \", which the render "+
+			"emits verbatim; FRR's vty pipe hook refuses any line containing \"| \" "+
+			"while frr-reload.py exits 0, so the community-list would silently "+
+			"never install; a community token never contains |, so drop it from "+
+			"the class (e.g. [^| ] -> [^ ]) (#17977)", body[start:pos+1])
 	}
 	return pos + 1, body[start : pos+1], nil
 }

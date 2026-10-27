@@ -32,9 +32,9 @@ import (
 // (pkg/frr/manager.go reloadTimeout). #1794/#1800.
 const swanctlTimeout = 15 * time.Second
 
-// charonProbeAttempts/Interval bound the liveness probe after a
-// total --load-all failure (#16853): charon is treated as not
-// running only when ListLoadedConns fails on every attempt.
+// charonProbeAttempts/Interval bound the post-failure generation probe
+// (#17882): prior configuration is restored only when charon proves it
+// still has the prior generation loaded.
 const (
 	charonProbeAttempts = 3
 	charonProbeInterval = 200 * time.Millisecond
@@ -145,6 +145,15 @@ type Manager struct {
 	// debt, it must still be retried while that name remains loaded.
 	pendingTerminate map[string]bool
 	pendingChanged   map[string]bool
+	// pendingReinitiate defers restoring changed eager tunnels after an
+	// indeterminate probe observes a live SA. The debt is persisted before
+	// any teardown and remains until a proven candidate load and successful
+	// teardown discharge it.
+	pendingReinitiate map[string]bool
+	// pendingCandidateHashes carries candidate-only connection fingerprints
+	// staged by an indeterminate apply until a later candidate load proves
+	// them; without them the staged additions would be invisible to diffs.
+	pendingCandidateHashes map[string]string
 
 	// swanctl is the exec seam for shelling out to swanctl. Nil in
 	// production and directly-constructed test Managers; sc() falls back to
@@ -159,10 +168,11 @@ type Manager struct {
 	// output as stdout) or to runSwanctlSplit.
 	swanctlSplit func(args ...string) (stdout, stderr []byte, err error)
 
-	// statePath persists loaded names, rendered fingerprints, and teardown debt
-	// across xpfd restarts (#9687/#10878, conn_state_9687.go). Empty disables
-	// persistence, which is what NewWithConfigDir and directly-constructed
-	// Managers get; New sets DefaultConnStatePath.
+	// statePath persists loaded names, rendered fingerprints, and teardown or
+	// deferred re-initiation debt across xpfd restarts (#9687/#10878/#17882,
+	// conn_state_9687.go). Empty disables persistence, which is what
+	// NewWithConfigDir and directly-constructed Managers get; New sets
+	// DefaultConnStatePath.
 	statePath string
 	// stateSeeded records that the persisted state was folded in, which
 	// happens once, at this Manager's first promotion.
@@ -339,7 +349,7 @@ type ApplyHooks struct {
 	Loaded func()
 }
 
-// ApplyWithHooks is ApplyGeneration naming no generation (UnknownGeneration).
+// ApplyWithHooks is ApplyGeneration without a config-store generation digest.
 func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks) error {
 	return m.ApplyGeneration(ipsecCfg, UnknownGeneration, hooks)
 }
@@ -347,17 +357,18 @@ func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks)
 // ApplyGeneration is Apply with the ApplyHooks callbacks, and the file it writes names
 // generation inside charon through the inert marker pool (#9641, generation.go).
 // generation is a config digest the caller can look up later (the daemon passes the
-// configstore digest of the active config it applies); anything else is written as
-// UnknownGeneration. Only a rendered config carries the marker: the empty-config clear
-// path removes the file, so charon then lists no marker at all.
+// configstore digest of the active config it applies); otherwise the rendered IPsec
+// config's digest identifies the marker, without claiming to be a config-store
+// generation. Only a rendered config carries the marker: the empty-config clear path
+// removes the file, so charon then lists no marker at all.
 // A successful apply runs Written, then Loaded. A write followed by a total reload
-// failure with charon answering runs only Written, and the prior file is restored
-// (#10712); with charon unreachable it runs only Written, the candidate stays on
-// disk and its set is promoted (#16853); a partial load runs only Written and is
-// reconciled to charon's loaded set (#14589, changed immediately survivors
-// re-initiated per #15129), so the disk again matches the generation charon still
-// runs (or will load on its next start) in every case. A render or write failure
-// runs neither.
+// failure runs only Written: when charon proves the prior generation remains loaded,
+// the prior file is restored (#10712); otherwise the candidate stays on disk and its
+// set is promoted, so a charon restart loads the committed generation (#16853,
+// #17882); a partial load runs only Written and is reconciled to charon's loaded set
+// (#14589, changed immediately survivors re-initiated per #15129), so the disk again
+// matches the generation charon still runs (or will load on its next start) in every
+// case. A render or write failure runs neither.
 // Both run on the caller's goroutine with no Manager lock held.
 func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation string, hooks ApplyHooks) error {
 	// loadedNames and loadedHashes describe the connections swanctl actually
@@ -372,35 +383,76 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 		loadedNames, loadedHashes, applyErr = m.applyConfig(ipsecCfg, generation, hooks.Written)
 	}
 
-	// #4898: state promotion and SA teardown are gated on reload SUCCESS. On a
-	// total reload failure strongSwan keeps the PREVIOUS config loaded and
-	// effective, so prevConnNames and prevConnHashes must NOT advance and stale
-	// connections' live SAs must NOT be terminated — they may still be the
-	// effective policy. Leaving this state unchanged lets the next successful
-	// Apply/Clear recompute the diff and retry the teardown. The #14589
-	// partial exception (recovered set promoted below) is the one case where
-	// charon demonstrably no longer runs the previous set.
+	// #4898: a proven prior generation keeps its fingerprints and skips
+	// teardown; a later Apply/Clear recomputes the candidate diff. A live but
+	// indeterminate set triggers stale-SA teardown without advancing that
+	// baseline, so a successful retry still detects the change. Candidate-
+	// proven or unreachable outcomes promote the candidate because it is the
+	// committed file charon runs now or will load on restart. #14589 partial
+	// loads promote only the recovered set charon demonstrably runs.
 	if applyErr != nil {
-		var uae *unreachableApplyError
-		if errors.As(applyErr, &uae) {
-			// #16853: charon was unreachable, so it runs nothing and
-			// the candidate on disk is what its next start loads.
-			// Promote the candidate set so a later successful apply
-			// still diffs against the committed generation (a
-			// deleted VPN stays in the diff and is never
-			// resurrected), do NOT fire Loaded (nothing loaded),
-			// attempt teardown of departed/changed SAs, and still
-			// return the reload error.
-			names, hs := uae.names, uae.hashes
-			if uae.clear || names == nil {
+		var ire *indeterminateReloadError
+		if errors.As(applyErr, &ire) {
+			// Charon answered, but neither complete render is proven. Tear
+			// down SAs changed by the candidate while keeping the old
+			// fingerprints, so a later successful apply still observes the
+			// change and converges under the candidate configuration.
+			names, hs := ire.names, ire.hashes
+			if ire.clear || names == nil {
+				names, hs = map[string]bool{}, map[string]string{}
+			}
+			removed, changed := m.pendingConnDiff(names, hs)
+			candidateNames := sortedConnNames(names)
+			baselineKnown := append([]string{}, removed...)
+			for _, name := range m.prevConnNamesSnapshot() {
+				baselineKnown = append(baselineKnown, name)
+			}
+			candidateOnly := candidateOnlyConnNames(candidateNames, baselineKnown)
+			deferredSeeds := append([]string{}, changed...)
+			deferredSeeds = append(deferredSeeds, candidateOnly...)
+			m.rememberDeferredReinitiation(deferredSeeds)
+			m.rememberPendingCandidateConns(candidateOnly, hs)
+			_, failed := m.terminateRemovedConns(removed)
+			m.clearDeferredReinitiation(failed)
+			// Deferred debt must only survive for connections whose SA was
+			// actually observed live. A successful teardown lists them via
+			// the changed set; candidate-only additions with no SA keep
+			// only their staged fingerprint (pendingCandidateHashes).
+			m.filterDeferredReinitiation(changed)
+			termErr := m.recordTerminateDebtForNames(removed, failed, names)
+			// Do not re-initiate from a config that this live probe failed
+			// to prove; the durable deferred debt is discharged only after
+			// a later candidate load is proven.
+			return errors.Join(applyErr, termErr)
+		}
+		var cce *committedCandidateError
+		if errors.As(applyErr, &cce) {
+			// Candidate-loaded outcomes promote the committed set. An
+			// unreachable charon keeps it for the next start but does not
+			// prove a config under which deferred starts are safe.
+			names, hs := cce.names, cce.hashes
+			if cce.clear || names == nil {
 				names, hs = map[string]bool{}, map[string]string{}
 			}
 			removed, changed := m.promoteConnNames(names, hs)
+			// Persist deferred-start debt BEFORE termination here too: a
+			// crash between terminateRemovedConns and any post-teardown
+			// persistence must not lose the obligation to restore changed
+			// eager tunnels under the candidate charon will load on restart.
+			if !cce.clear {
+				m.rememberDeferredReinitiation(changed)
+			}
 			terminated, failed := m.terminateRemovedConns(removed)
 			termErr := m.recordTerminateDebt(removed, failed)
 			var initiateErr error
-			if !uae.clear && ipsecCfg != nil {
-				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated)
+			if !cce.clear && cce.candidateProven && ipsecCfg != nil {
+				deferred := m.pendingReinitiationNames()
+				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, deferred, failed)
+				m.clearDeferredReinitiation(failed)
+				m.resolvePendingReinitiation(names, failed)
+			} else if cce.clear {
+				m.clearDeferredReinitiation(failed)
+				m.resolvePendingReinitiation(names, failed)
 			}
 			return errors.Join(applyErr, termErr, initiateErr)
 		}
@@ -431,23 +483,12 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			}
 			terminated, failed := m.terminateRemovedConns(removed)
 			termErr := m.recordTerminateDebt(removed, failed)
-			// #15129: a changed survivor is in `changed` exactly as on
-			// the full-load path: its stale SA was just terminated and
-			// its new hash promoted, so without re-initiation an
-			// establish-tunnels=immediately tunnel stays down (no
-			// start fires after load, no trap remains) and a later fix
-			// of the refused VPN cannot restore it. Re-initiate it
-			// with the CANDIDATE config — the survivor's VPN is in it
-			// with its new settings; the recovered subset on disk is
-			// that same VPN. The #14140 intent gate inside
-			// reinitiateChangedConnections still suppresses non-eager
-			// modes. The clear path has no candidate config (nil):
-			// reinitiateChangedConnections is a no-op for it because
-			// changed names cannot be in the empty promoted set, and
-			// the guard below keeps it that way explicitly.
 			var initiateErr error
 			if !pae.clear && ipsecCfg != nil {
-				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated)
+				deferred := m.pendingReinitiationNames()
+				changed = excludingConnNames(changed, deferred)
+				terminated = excludingConnNames(terminated, deferred)
+				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, nil, nil)
 			}
 			return errors.Join(applyErr, termErr, initiateErr)
 		}
@@ -464,7 +505,13 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 	}
 	terminated, failed := m.terminateRemovedConns(removed)
 	terminateErr := m.recordTerminateDebt(removed, failed)
-	initiateErr := m.reinitiateChangedConnections(ipsecCfg, changed, terminated)
+	deferred := m.pendingReinitiationNames()
+	var initiateErr error
+	if ipsecCfg != nil {
+		initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, deferred, failed)
+	}
+	m.clearDeferredReinitiation(failed)
+	m.resolvePendingReinitiation(loadedNames, failed)
 	return errors.Join(terminateErr, initiateErr)
 }
 
@@ -472,29 +519,45 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 // SAs of every previously-applied connection.
 func (m *Manager) Clear() error {
 	if err := m.clearConfig(nil); err != nil {
-		var uae *unreachableApplyError
-		if errors.As(err, &uae) && uae.clear {
-			// #16853: charon down — nothing runs, the removed file
-			// stays removed. Promote the empty set, attempt
-			// teardown, and still return the reload error.
+		var ire *indeterminateReloadError
+		if errors.As(err, &ire) && ire.clear {
+			// Keep the prior fingerprints, but attempt candidate removals
+			empty := map[string]bool{}
+			removed, changed := m.pendingConnDiff(empty, map[string]string{})
+			changed = append(changed, candidateOnlyConnNames([]string{}, removed)...)
+			m.rememberDeferredReinitiation(changed)
+			_, failed := m.terminateRemovedConns(removed)
+			m.clearDeferredReinitiation(failed)
+			return errors.Join(err, m.recordTerminateDebtForNames(removed, failed, empty))
+		}
+		var cce *committedCandidateError
+		if errors.As(err, &cce) && cce.clear {
+			// The clear was committed on disk or charon is unreachable.
+			// Promote the empty set, attempt teardown, and return the error.
 			removed, _ := m.promoteConnNames(map[string]bool{}, map[string]string{})
 			_, failed := m.terminateRemovedConns(removed)
-			return errors.Join(err, m.recordTerminateDebt(removed, failed))
+			termErr := m.recordTerminateDebt(removed, failed)
+			m.clearDeferredReinitiation(failed)
+			m.resolvePendingReinitiation(map[string]bool{}, failed)
+			return errors.Join(err, termErr)
 		}
 		var pae *partialApplyError
 		if errors.As(err, &pae) && pae.clear {
 			removed, _ := m.promoteConnNames(pae.names, pae.hashes)
 			_, failed := m.terminateRemovedConns(removed)
-			return errors.Join(err, m.recordTerminateDebt(removed, failed))
+			termErr := m.recordTerminateDebt(removed, failed)
+			m.clearDeferredReinitiation(failed)
+			return errors.Join(err, termErr)
 		}
-		// #4898: the reload failed — the old config is still the effective
-		// loaded config. Preserve the loaded names and hashes and skip termination
-		// so a later Clear retries the teardown rather than reporting false success.
+		// A proven prior generation remains authoritative after this failure.
 		return err
 	}
 	removed, _ := m.promoteConnNames(nil, nil)
 	_, failed := m.terminateRemovedConns(removed)
-	return m.recordTerminateDebt(removed, failed)
+	termErr := m.recordTerminateDebt(removed, failed)
+	m.clearDeferredReinitiation(failed)
+	m.resolvePendingReinitiation(nil, failed)
+	return termErr
 }
 
 // applyConfig renders + atomically writes the swanctl snippet and reloads.
@@ -516,7 +579,8 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 	if err != nil {
 		return nil, nil, err
 	}
-	cfg += "\n" + renderGenerationMarker(generation)
+	markerGeneration := generationMarkerToken(generation, cfg)
+	cfg += "\n" + renderGenerationMarker(markerGeneration)
 
 	if err := os.MkdirAll(m.configDir, 0755); err != nil {
 		return nil, nil, fmt.Errorf("create config dir: %w", err)
@@ -584,58 +648,229 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 			// partialApplyError for ApplyGeneration to promote.
 			return loadedNames, loadedHashes, &partialApplyError{err: err, names: loadedNames, hashes: loadedHashes}
 		}
-		// #16853: a total failure while charon cannot be asked means
-		// charon runs nothing, not the prior generation. Keep the
-		// candidate on disk so charon's next start loads the
-		// committed generation; still report the reload error.
-		if m.charonUnreachable() {
-			slog.Warn("swanctl reload failed; charon unreachable, keeping candidate config", "err", err)
-			return rendered, hashes, &unreachableApplyError{err: err, names: rendered, hashes: hashes}
+		// A complete prior-set match is the only failure outcome that restores
+		// the prior bytes. An exact candidate match proves charon loaded this
+		// file; an unreachable probe keeps the candidate for charon's restart;
+		// a live mismatch keeps it without promoting candidate fingerprints.
+		outcome := m.probeReload17882(prior, havePrior, []byte(cfg), markerGeneration)
+		if outcome == probePriorProven17882 || outcome == probeNoPriorLoaded17882 {
+			slog.Warn("swanctl reload failed; restoring the prior config after loaded-state proof", "err", err)
+			if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {
+				return nil, nil, errors.Join(err, restoreErr)
+			}
+			return nil, nil, err
 		}
-		slog.Warn("swanctl reload failed", "err", err)
-		if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {
-			return nil, nil, errors.Join(err, restoreErr)
+		slog.Warn("swanctl reload failed; prior generation not proven loaded, keeping candidate config", "err", err)
+		if outcome == probeLiveIndeterminate17882 {
+			return rendered, hashes, &indeterminateReloadError{err: err, names: rendered, hashes: hashes}
 		}
-		return nil, nil, err
+		return rendered, hashes, &committedCandidateError{
+			err: err, names: rendered, hashes: hashes,
+			candidateProven: outcome == probeCandidateProven17882,
+		}
 	}
 
 	return rendered, hashes, nil
 }
 
-// unreachableApplyError is returned by applyConfig (and clearConfig)
-// when a total --load-all failure happened because charon could not be
-// asked at all (#16853): the candidate (or the clear's removed file)
-// stays on disk so charon's next start loads the committed
-// generation, and ApplyGeneration promotes the candidate set.
-// Loaded stays unfired and the underlying reload error still
-// propagates. names/hashes describe the candidate set for the render
-// path and are nil for a clear (the empty set).
-type unreachableApplyError struct {
+// committedCandidateError is returned by applyConfig (and clearConfig) after a
+// total reload failure when charon is unreachable or the candidate/empty set
+// is proven loaded. The candidate (or removed clear file) stays on disk, so
+// ApplyGeneration promotes that committed set and attempts stale-SA teardown.
+// Only candidateProven permits deferred re-initiation; an unreachable charon
+// loads the staged candidate later. Loaded stays unfired and the reload error
+// still propagates.
+// names/hashes describe an apply render and are nil for clear.
+type committedCandidateError struct {
+	err             error
+	names           map[string]bool
+	hashes          map[string]string
+	clear           bool
+	candidateProven bool
+}
+
+func (e *committedCandidateError) Error() string { return e.err.Error() }
+func (e *committedCandidateError) Unwrap() error { return e.err }
+
+// indeterminateReloadError is a live-but-unproven total reload failure. The
+// candidate remains on disk, but the previous loaded fingerprints stay
+// authoritative until a later successful reload proves convergence.
+type indeterminateReloadError struct {
 	err    error
 	names  map[string]bool
 	hashes map[string]string
 	clear  bool
 }
 
-func (e *unreachableApplyError) Error() string { return e.err.Error() }
-func (e *unreachableApplyError) Unwrap() error { return e.err }
+func (e *indeterminateReloadError) Error() string { return e.err.Error() }
+func (e *indeterminateReloadError) Unwrap() error { return e.err }
 
-// charonUnreachable reports whether charon can be asked at all
-// (#16853). It retries ListLoadedConns a small bounded number of
-// times so a probe racing a charon restart window does not answer
-// "down" while charon is coming up. Only a probe that succeeds on
-// every retry window proves charon down for the whole span; any
-// success means charon answered and still runs its prior set.
-func (m *Manager) charonUnreachable() bool {
+type probeOutcome17882 uint8
+
+const (
+	probePriorProven17882 probeOutcome17882 = iota
+	probeCandidateProven17882
+	probeNoPriorLoaded17882
+	probeLiveIndeterminate17882
+	probeUnreachable17882
+)
+
+// probeReload17882 distinguishes prior-proven, candidate-proven,
+// no-prior-loaded, live-indeterminate, and unreachable outcomes. The
+// generation pool is only identity: prior/candidate proof also requires an
+// exact LoadedConns.Equal match on connection names, children, and endpoints.
+func (m *Manager) probeReload17882(prior []byte, havePrior bool, candidate []byte, candidateGeneration string) probeOutcome17882 {
+	priorGeneration, hasPriorMarker := generationFromConfigText17882(prior, havePrior)
+	priorExpected, priorComparable := loadedConnsFromConfigText17882(string(prior))
+	candidateClear := len(candidate) == 0
+	candidateExpected, candidateComparable := LoadedConns(nil), candidateClear
+	if !candidateClear {
+		candidateExpected, candidateComparable = loadedConnsFromConfigText17882(string(candidate))
+	}
+	sawLive := false
 	for attempt := range charonProbeAttempts {
 		if attempt > 0 {
 			time.Sleep(charonProbeInterval)
 		}
-		if _, err := m.ListLoadedConns(); err == nil {
-			return false
+		loadedGeneration, markerErr := m.LoadedGeneration()
+		markerAvailable := markerErr == nil
+		markerAnswered := markerAvailable || errors.Is(markerErr, ErrNoGenerationMarker) ||
+			errors.Is(markerErr, ErrAmbiguousGenerationMarker) ||
+			(markerErr != nil && !strings.HasPrefix(markerErr.Error(), "swanctl --list-pools --raw:"))
+		if markerAnswered {
+			sawLive = true
+		}
+		out, _, err := m.scSplit("--list-conns", "--raw")
+		if err != nil {
+			continue
+		}
+		loaded, err := parseListConnsRaw(string(out))
+		if err != nil {
+			sawLive = true
+			continue
+		}
+		sawLive = true
+		markerIsPrior := markerAvailable && hasPriorMarker && loadedGeneration == priorGeneration
+		markerIsCandidate := markerAvailable && candidateGeneration != "" && loadedGeneration == candidateGeneration
+		priorMatches := havePrior && priorComparable && len(priorExpected) != 0 &&
+			len(loaded) != 0 && loaded.Equal(priorExpected)
+		candidateMatches := !candidateClear && candidateComparable && loaded.Equal(candidateExpected)
+
+		// When both renders have the same config-store digest, loaded endpoint
+		// equality disambiguates a DHCP rebind's prior and candidate local_addrs.
+		if markerIsPrior && priorMatches {
+			return probePriorProven17882
+		}
+		if markerIsCandidate && candidateMatches {
+			return probeCandidateProven17882
+		}
+		if candidateClear && len(loaded) == 0 {
+			return probeCandidateProven17882
+		}
+		// A pre-marker prior has no pool identity, so exact rendered
+		// connection equality is the only available proof.
+		if havePrior && !hasPriorMarker && priorMatches {
+			return probePriorProven17882
+		}
+		if !havePrior && len(loaded) == 0 && errors.Is(markerErr, ErrNoGenerationMarker) {
+			return probeNoPriorLoaded17882
+		}
+		// A valid answer that matches neither complete render is live but
+		// ambiguous; retry in case charon is still finishing its startup load.
+	}
+	if sawLive {
+		return probeLiveIndeterminate17882
+	}
+	return probeUnreachable17882
+}
+
+// loadedConnsFromConfigText17882 projects the connection fields xpf renders
+// that charon exposes in ListLoadedConns: connection/child names and endpoint
+// lists. It deliberately ignores other swanctl settings and secrets.
+func loadedConnsFromConfigText17882(text string) (LoadedConns, bool) {
+	conns := make(LoadedConns)
+	inConnections := false
+	current := ""
+	inChildren := false
+	for _, line := range strings.Split(text, "\n") {
+		trim := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if trim == "" || (indent == 0 && strings.HasPrefix(trim, "#")) {
+			continue
+		}
+		if !inConnections {
+			if indent == 0 && trim == "connections {" {
+				inConnections = true
+			}
+			continue
+		}
+		switch {
+		case indent == 0 && trim == "}":
+			return conns, current == ""
+		case indent == 2 && strings.HasSuffix(trim, "{"):
+			if current != "" {
+				return nil, false
+			}
+			name := strings.TrimSpace(strings.TrimSuffix(trim, "{"))
+			if name == "" || conns[name] != nil {
+				return nil, false
+			}
+			current = name
+			conns[name] = &LoadedConn{
+				LocalAddrs:  []string{"%any"},
+				RemoteAddrs: []string{"%any"},
+			}
+		case indent == 2 && trim == "}":
+			if current == "" {
+				return nil, false
+			}
+			current = ""
+			inChildren = false
+		case current != "" && indent == 4 && trim == "children {":
+			if inChildren {
+				return nil, false
+			}
+			inChildren = true
+		case current != "" && indent == 4 && trim == "}" && inChildren:
+			inChildren = false
+		case current != "" && indent == 4 && strings.Contains(trim, "="):
+			key, value, _ := strings.Cut(trim, "=")
+			value = strings.TrimSpace(value)
+			switch strings.TrimSpace(key) {
+			case "local_addrs":
+				conns[current].LocalAddrs = swanctlAddrList(value)
+			case "remote_addrs":
+				conns[current].RemoteAddrs = swanctlAddrList(value)
+			}
+		case current != "" && inChildren && indent == 6 && strings.HasSuffix(trim, "{"):
+			child := strings.TrimSpace(strings.TrimSuffix(trim, "{"))
+			if child == "" {
+				return nil, false
+			}
+			conns[current].Children = append(conns[current].Children, child)
 		}
 	}
-	return true
+	return nil, false
+}
+
+// generationFromConfigText17882 returns the unique digest or legacy
+// UnknownGeneration marker from the prior rendered file.
+func generationFromConfigText17882(prior []byte, havePrior bool) (string, bool) {
+	if !havePrior {
+		return "", false
+	}
+	var generation string
+	for _, field := range strings.Fields(string(prior)) {
+		raw, ok := strings.CutPrefix(field, generationMarkerPrefix)
+		if !ok {
+			continue
+		}
+		if generation != "" || (raw != UnknownGeneration && !generationDigest.MatchString(raw)) {
+			return "", false
+		}
+		generation = raw
+	}
+	return generation, generation != ""
 }
 
 // partialApplyError is returned by applyConfig (and clearConfig) when a
@@ -874,7 +1109,7 @@ func (m *Manager) renderSubsetFile14589(ipsecCfg *config.IPsecConfig, generation
 	if err != nil {
 		return "", nil, err
 	}
-	text += "\n" + renderGenerationMarker(generation)
+	text += "\n" + renderGenerationMarker(generationMarkerToken(generation, text))
 	return text, hs, nil
 }
 
@@ -966,11 +1201,10 @@ func (m *Manager) clearConfig(written func()) error {
 		return err
 	}
 	// #10712: snapshot the prior file BEFORE removing it, mirroring applyConfig:
-	// if the reload below fails with charon answering, charon still runs
-	// the OLD config, so the removed file must be restored — otherwise
-	// charon's own next start or reload would load NO xpf config while
-	// charon runs the old one. With charon unreachable (#16853) the
-	// removed file stays removed.
+	// if the reload fails and charon's marker still proves the prior generation
+	// loaded, restore the old file — otherwise charon's own next start or reload
+	// could load no xpf config while the old VPN remains active. If the prior
+	// generation cannot be proven (#16853, #17882), the removed file stays removed.
 	prior, priorErr := os.ReadFile(m.configPath)
 	havePrior := true
 	if priorErr != nil {
@@ -1012,16 +1246,22 @@ func (m *Manager) clearConfig(written func()) error {
 			names, hs := m.priorSet14589(prior, havePrior)
 			return &partialApplyError{err: err, names: names, hashes: hs, clear: true}
 		}
-		// #16853: charon down — the removed file stays removed so
-		// the next charon start loads no revoked VPN.
-		if m.charonUnreachable() {
-			slog.Warn("swanctl clear reload failed; charon unreachable, keeping cleared config", "err", err)
-			return &unreachableApplyError{err: err, clear: true}
+		// Keep the removed file only when a live probe proves the exact prior
+		// render; a live mismatch remains indeterminate, while an empty loaded
+		// set or unreachable charon commits the clear on disk.
+		outcome := m.probeReload17882(prior, havePrior, nil, "")
+		if outcome == probePriorProven17882 || outcome == probeNoPriorLoaded17882 {
+			if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {
+				return errors.Join(err, restoreErr)
+			}
+			return err
 		}
-		if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {
-			return errors.Join(err, restoreErr)
+		if outcome == probeLiveIndeterminate17882 {
+			slog.Warn("swanctl clear reload failed; live loaded set is indeterminate", "err", err)
+			return &indeterminateReloadError{err: err, clear: true}
 		}
-		return err
+		slog.Warn("swanctl clear reload failed; keeping cleared config", "err", err)
+		return &committedCandidateError{err: err, clear: true, candidateProven: outcome == probeCandidateProven17882}
 	}
 	return nil
 }
@@ -1117,32 +1357,189 @@ func (m *Manager) reloadResult() (partialLoadSummary, error) {
 	return partialLoadSummary{}, nil
 }
 
-// promoteConnNames records newNames — the set of connections that were
-// actually RENDERED+LOADED on this apply — and their effective-content hashes.
-// It returns names whose live SAs must be terminated because the connection
-// departed, changed, or still has outstanding changed-connection teardown debt.
-//
-// A prior connection is gone if the operator DELETED its VPN OR it fell out of
-// the render as unrenderable (#5494). A same-name connection is changed when
-// its rendered security-effective content differs from the last successful
-// apply. Both cases leave a live SA operating under stale configuration and
-// must be torn down. Cosmetic fields not emitted by renderConfig do not affect
-// the hash.
-//
-// #4898: this is called ONLY after a successful reload, or after a #14589
-// partial load recovered to a set charon demonstrably runs, so the remembered
-// names/hashes always describe the last config strongSwan actually loaded.
-// The diff and state advance stay atomic under mu.
-//
-// #6542: removal debt is retried only while the name remains absent; adding a
-// connection back discharges that debt. Changed-connection debt is retried
-// even while the name remains loaded, because its live SA may still use stale
-// credentials/selectors.
-func (m *Manager) promoteConnNames(newNames map[string]bool, newHashes map[string]string) (removed, changed []string) {
+// pendingConnDiff computes removals and content changes without advancing the
+// remembered loaded generation. It is used when charon answered a reload probe
+// but its loaded set matches neither the prior nor candidate render. On this
+// path names is the candidate render, so candidate-only connections are in
+// removed but not changed: they are staged-only names neither loaded
+// baseline knows (see connDiffLocked).
+func (m *Manager) pendingConnDiff(newNames map[string]bool, newHashes map[string]string) (removed, changed []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.seedFromStateLocked() // #9687
-	seen := make(map[string]bool, len(m.prevConnNames)+len(m.pendingTerminate)+len(m.pendingChanged))
+	m.seedFromStateLocked()
+	return m.connDiffLocked(newNames, newHashes)
+}
+
+// rememberDeferredReinitiation records connections whose SAs an
+// indeterminate or not-yet-proven reload path may destroy, and cannot
+// safely be re-initiated yet. It MUST run (and persist) before any
+// terminateRemovedConns call that could destroy their SAs: a crash between
+// termination and persistence must leave the deferred-start debt on disk
+// for the next Manager to discharge.
+func (m *Manager) rememberDeferredReinitiation(changed []string) {
+	if len(changed) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, name := range changed {
+		if m.pendingReinitiate == nil {
+			m.pendingReinitiate = make(map[string]bool)
+		}
+		m.pendingReinitiate[name] = true
+	}
+	m.persistStateLocked()
+}
+
+// rememberPendingCandidateConns records candidate-only connection
+// fingerprints staged by an indeterminate apply. A later proven candidate
+// load still needs these names in the diff so their live SAs terminate and
+// eager tunnels re-initiate; without them the staged candidate additions are
+// invisible because the prior baseline never knew them.
+func (m *Manager) rememberPendingCandidateConns(names []string, hashes map[string]string) {
+	if len(names) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, name := range names {
+		hash, ok := hashes[name]
+		if !ok {
+			continue
+		}
+		if m.pendingCandidateHashes == nil {
+			m.pendingCandidateHashes = make(map[string]string)
+		}
+		m.pendingCandidateHashes[name] = hash
+	}
+	m.persistStateLocked()
+}
+
+func (m *Manager) pendingReinitiationNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return sortedConnNames(m.pendingReinitiate)
+}
+
+// clearDeferredReinitiation drops deferred-start debt for connections whose
+// teardown just failed: their stale SA may still forward, so they must not
+// be re-initiated under any candidate until teardown succeeds.
+func (m *Manager) clearDeferredReinitiation(failed []string) {
+	if len(failed) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, name := range failed {
+		delete(m.pendingReinitiate, name)
+	}
+	if len(m.pendingReinitiate) == 0 {
+		m.pendingReinitiate = nil
+	}
+	m.persistStateLocked()
+}
+
+func excludingConnNames(names, excluded []string) []string {
+	if len(names) == 0 || len(excluded) == 0 {
+		return names
+	}
+	excludedSet := make(map[string]bool, len(excluded))
+	for _, name := range excluded {
+		excludedSet[name] = true
+	}
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if !excludedSet[name] {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered
+}
+
+// candidateOnlyConnNames returns candidate-render names not present in the
+// known-baseline diff slices.
+func candidateOnlyConnNames(candidateNames, baselineKnown []string) []string {
+	baseline := make(map[string]bool, len(baselineKnown))
+	for _, name := range baselineKnown {
+		baseline[name] = true
+	}
+	var out []string
+	for _, name := range candidateNames {
+		if !baseline[name] {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (m *Manager) prevConnNamesSnapshot() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return sortedConnNames(m.prevConnNames)
+}
+
+// filterDeferredReinitiation keeps deferred-start debt only for the named
+// connections. Used after a successful indeterminate teardown to drop seeds
+// recorded for candidate-only additions that had no live SA (and therefore
+// nothing to restore), while the persisted in-flight obligation still
+// covered a crash during termination.
+func (m *Manager) filterDeferredReinitiation(keepNames []string) {
+	keep := make(map[string]bool, len(keepNames))
+	for _, name := range keepNames {
+		keep[name] = true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name := range m.pendingReinitiate {
+		if !keep[name] {
+			delete(m.pendingReinitiate, name)
+		}
+	}
+	if len(m.pendingReinitiate) == 0 {
+		m.pendingReinitiate = nil
+	}
+	m.persistStateLocked()
+}
+
+// resolvePendingReinitiation settles deferred starts only after a proven
+// candidate load. A teardown failure retains its deferred start for the next
+// apply. A staged candidate fingerprint whose name remains in the proven
+// candidate set is RETAINED: it is the only fingerprint record for a
+// connection the prior baseline never loaded, so dropping it would make a
+// later rotation of that now-loaded connection invisible. It is dropped
+// only when the name leaves the proven set.
+func (m *Manager) resolvePendingReinitiation(targetNames map[string]bool, failed []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.pendingReinitiate) == 0 && len(m.pendingCandidateHashes) == 0 {
+		return
+	}
+	failedSet := make(map[string]bool, len(failed))
+	for _, name := range failed {
+		failedSet[name] = true
+	}
+	for name := range m.pendingReinitiate {
+		if !targetNames[name] || !failedSet[name] {
+			delete(m.pendingReinitiate, name)
+		}
+	}
+	for name := range m.pendingCandidateHashes {
+		if !targetNames[name] {
+			delete(m.pendingCandidateHashes, name)
+		}
+	}
+	if len(m.pendingReinitiate) == 0 {
+		m.pendingReinitiate = nil
+	}
+	if len(m.pendingCandidateHashes) == 0 {
+		m.pendingCandidateHashes = nil
+	}
+	m.persistStateLocked()
+}
+
+func (m *Manager) connDiffLocked(newNames map[string]bool, newHashes map[string]string) (removed, changed []string) {
+	seen := make(map[string]bool, len(m.prevConnNames)+len(m.pendingTerminate)+len(m.pendingChanged)+len(m.pendingCandidateHashes))
 	for name := range m.prevConnNames {
 		if !newNames[name] {
 			removed = append(removed, name)
@@ -1173,10 +1570,58 @@ func (m *Manager) promoteConnNames(newNames map[string]bool, newHashes map[strin
 			seen[name] = true
 		}
 	}
+	// #17882: candidate-only connections staged by an indeterminate apply
+	// (pendingCandidateHashes) have no prior fingerprint. A later apply must
+	// still see them when they change or depart: removal drops them from the
+	// candidate render, so they surface here as removals; rotation compares
+	// the staged candidate fingerprint against the new render and surfaces
+	// them as changes. An UNCHANGED staged name still present in the
+	// candidate must surface as NEITHER — otherwise every later apply would
+	// terminate its (possibly re-established) SA again (perpetual flap).
+	for name, stagedHash := range m.pendingCandidateHashes {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if !newNames[name] {
+			removed = append(removed, name)
+			continue
+		}
+		if newHashes[name] != stagedHash {
+			removed = append(removed, name)
+			changed = append(changed, name)
+		}
+	}
+	sort.Strings(removed)
+	sort.Strings(changed)
+	return removed, changed
+}
+
+// promoteConnNames records newNames — the set of connections actually
+// rendered and loaded — and their effective-content hashes. Promotion is
+// reserved for reload success or a recovered partial/candidate-proven load.
+// At promotion the staged candidate fingerprints are REFRESHED to the
+// proven render (and dropped for names no longer present): after this the
+// proven set is the baseline, so an identical later apply diffs clean.
+func (m *Manager) promoteConnNames(newNames map[string]bool, newHashes map[string]string) (removed, changed []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.seedFromStateLocked() // #9687
+	removed, changed = m.connDiffLocked(newNames, newHashes)
 	m.prevConnNames = newNames
 	m.prevConnHashes = newHashes
 	m.pendingTerminate = nil
 	m.pendingChanged = nil
+	for name := range m.pendingCandidateHashes {
+		if !newNames[name] {
+			delete(m.pendingCandidateHashes, name)
+		} else if hash, ok := newHashes[name]; ok {
+			m.pendingCandidateHashes[name] = hash
+		}
+	}
+	if len(m.pendingCandidateHashes) == 0 {
+		m.pendingCandidateHashes = nil
+	}
 	// #9687: any removal/change is debt from here until recordTerminateDebt settles it.
 	for _, name := range removed {
 		if m.inflight == nil {
@@ -1185,34 +1630,35 @@ func (m *Manager) promoteConnNames(newNames map[string]bool, newHashes map[strin
 		m.inflight[name]++
 	}
 	m.persistStateLocked()
-	sort.Strings(removed)
-	sort.Strings(changed)
 	return removed, changed
 }
 
-// recordTerminateDebt records the connections whose teardown failed on this
-// apply so the next reconcile retries them, and returns the error Apply/Clear
-// reports to the caller. An empty failed set discharges cleanly (nil error).
-//
-// The debt is UNIONED into the pending sets rather than replacing them:
-// promoteConnNames releases mu before the terminates run, so a concurrent Apply
-// could otherwise clobber the other's debt. Removal debt is filtered by the
-// loaded set; changed-connection debt is retained while loaded.
-//
-// #9687: it also settles removed, the set the matching promotion counted as
-// in flight, and persists the result. That write happens on success too, so a
-// completed teardown leaves no debt on disk.
+// recordTerminateDebt records connections whose teardown failed and returns
+// the error Apply/Clear reports. The target names classify failures as
+// changed (still loaded in the target) or removed. Only a matching promotion
+// settles in-flight teardown accounting.
 func (m *Manager) recordTerminateDebt(removed, failed []string) error {
 	m.mu.Lock()
-	for _, name := range removed {
-		if m.inflight[name] <= 1 {
-			delete(m.inflight, name)
-		} else {
-			m.inflight[name]--
+	return m.recordTerminateDebtLocked(removed, failed, m.prevConnNames, true)
+}
+
+func (m *Manager) recordTerminateDebtForNames(removed, failed []string, targetNames map[string]bool) error {
+	m.mu.Lock()
+	return m.recordTerminateDebtLocked(removed, failed, targetNames, false)
+}
+
+func (m *Manager) recordTerminateDebtLocked(removed, failed []string, targetNames map[string]bool, settleInflight bool) error {
+	if settleInflight {
+		for _, name := range removed {
+			if m.inflight[name] <= 1 {
+				delete(m.inflight, name)
+			} else {
+				m.inflight[name]--
+			}
 		}
 	}
 	for _, name := range failed {
-		if m.prevConnNames[name] {
+		if targetNames[name] {
 			if m.pendingChanged == nil {
 				m.pendingChanged = make(map[string]bool)
 			}
@@ -1307,17 +1753,30 @@ func (m *Manager) terminateRemovedConns(removed []string) (terminated, failed []
 // not leaving the tunnel down by accident: the new config is loaded,
 // the peer (responder-only) or the first matching packet (trap)
 // re-establishes under the new settings, exactly as on a fresh load.
-func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, changed, terminated []string) error {
-	if len(changed) == 0 || len(terminated) == 0 {
+func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, changed, terminated, deferred, failed []string) error {
+	if ipsecCfg == nil || (len(changed) == 0 && len(deferred) == 0) {
 		return nil
 	}
-	changedSet := make(map[string]bool, len(changed))
+	changedSet := make(map[string]bool, len(changed)+len(deferred))
 	for _, name := range changed {
 		changedSet[name] = true
 	}
-	terminatedSet := make(map[string]bool, len(terminated))
+	terminatedSet := make(map[string]bool, len(terminated)+len(deferred))
 	for _, name := range terminated {
 		terminatedSet[name] = true
+	}
+	failedSet := make(map[string]bool, len(failed))
+	for _, name := range failed {
+		failedSet[name] = true
+	}
+	for _, name := range deferred {
+		if !failedSet[name] {
+			changedSet[name] = true
+			terminatedSet[name] = true
+		}
+	}
+	if len(changedSet) == 0 || len(terminatedSet) == 0 {
+		return nil
 	}
 	// Membership is per-VPN (#15989 fold): a VPN the renderer skipped
 	// (e.g. a gateway-less PSK) must never initiate, and must not mark

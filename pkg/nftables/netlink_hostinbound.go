@@ -56,6 +56,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 				emit(verdictDrop()...)
 		}
 	}
+	screenFloodRules := HostInboundScreenFloodRules(spec.Views)
 	if len(spec.Programs) > 0 {
 		// junos-host path (#4146). #16862: mandatory L3 admits precede the
 		// fine jumps so a restricted permit's terminal drop cannot break ND.
@@ -65,15 +66,16 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		))
 		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV4, famV4, spec.WGListenPorts, spec.WGZonePorts)
 		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV6, famV6, spec.WGListenPorts, spec.WGZonePorts)
-		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
+		emitHostInboundScreenFloodNetlink(p, screenFloodRules, HostInboundScreenFloodReplyDirection)
 		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
-		emitHostInboundICMPAcceptsNetlink(p, spec.Views)
+		emitHostInboundScreenFloodNetlink(p, screenFloodRules, HostInboundScreenFloodOriginalICMP)
+		emitHostInboundICMPAcceptsNetlink(p, spec.Views, spec.Programs)
 		for i, prog := range spec.Programs {
 			emitJunosHostProgramJumpNetlink(p, i, prog)
 		}
-		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
+		emitHostInboundScreenFloodNetlink(p, screenFloodRules, HostInboundScreenFloodOriginalNonICMP)
 	} else {
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
@@ -81,12 +83,12 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		))
 		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV4, famV4, spec.WGListenPorts, spec.WGZonePorts)
 		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV6, famV6, spec.WGListenPorts, spec.WGZonePorts)
-		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
+		emitHostInboundScreenFloodNetlink(p, screenFloodRules, HostInboundScreenFloodReplyDirection)
 		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
-		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
-		emitHostInboundICMPAcceptsNetlink(p, spec.Views)
+		emitHostInboundScreenFloodNetlink(p, screenFloodRules, HostInboundScreenFloodOriginal)
+		emitHostInboundICMPAcceptsNetlink(p, spec.Views, nil)
 	}
 
 	// #10751/#11577: scoped DHCPv6 server replies pass before the backstop
@@ -305,25 +307,21 @@ func hostInboundAnyNDPDefault(views []HostInboundZoneView) bool {
 	return false
 }
 
-// emitHostInboundNDPAcceptsNetlink emits the ND (133-136) accepts
-// scoped to each retaining view's ingress (#15931), mirroring
-// emitHostInboundNDPAcceptsText rule-for-rule. Per retaining view:
-// (a) an ingress-scoped admit covering BOTH the zone unicast
-// destination union and link-scope multicast (ff02::/16); (b) a
-// destination fallback for views with no ingress scope, even when a
-// sibling has ingress. Any-service retaining views are skipped (the
-// bare full admit already covers ND; #6618 lock). Excluding views
-// emit nothing. The unscoped accept is emitted ONLY when no view
-// carries any scope at all OR no view excludes ndp (Codex F1).
-// counted attaches the aggregate ND counter (steady state); fence
-// callers pass counted=false (no counter objects in fences, #5719).
-// #16861: each VRF scope ALSO emits the ND admit keyed on the member
-// as iifname (NDISC presents member iifname, sdif unset).
-func emitHostInboundNDPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView) {
-	emitHostInboundNDPAcceptsCountedNetlink(p, views, true)
-}
-
-func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneView, counted bool) {
+// emitHostInboundNDPAcceptsCountedNetlink emits the ND (133-136) accepts
+// scoped to each retaining view's ingress (#15931), mirroring the text
+// oracle rule-for-rule. Per retaining view: an ingress-scoped admit covers
+// both the zone unicast destination union and link-scope multicast
+// (ff02::/16); a destination fallback covers views with no ingress scope,
+// even when a sibling has ingress. Any-service views normally skip counted
+// steady-state admits because their later coarse full admit covers ND. When
+// the view's zone has a junos-host program, emit scoped ND before that
+// program's fine terminal drops. Excluding views emit nothing. The unscoped
+// accept is emitted ONLY when no view carries any scope OR no view excludes
+// ndp (Codex F1). Fence callers pass counted=false (no counter objects,
+// #5719); fence mode also emits scoped any-service admits because it has no
+// full-service rule. #16861: VRF scopes ALSO admit the member as iifname
+// (NDISC presents member iifname, sdif unset).
+func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneView, counted bool, programs []JunosHostProgram) {
 	if !hostInboundAnyNDPDefault(views) {
 		return
 	}
@@ -343,8 +341,20 @@ func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneV
 	_, zoneIngressV6 := hostInboundZoneIngressDestinations(views)
 	anyScope := false
 	for _, v := range views {
-		if !hostInboundViewNDPDefault(v) || (hostInboundAllowsAll(v) && counted) {
+		if !hostInboundViewNDPDefault(v) {
 			continue
+		}
+		if hostInboundAllowsAll(v) && counted {
+			hasFineProgram := false
+			for _, prog := range programs {
+				if prog.Zone == v.Zone {
+					hasFineProgram = true
+					break
+				}
+			}
+			if !hasFineProgram {
+				continue
+			}
 		}
 		direct := hostInboundDirectIngressNetdevs(v)
 		scoped := false
@@ -414,11 +424,12 @@ func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneV
 // emitHostInboundICMPAcceptsNetlink mirrors emitHostInboundICMPAccepts: the
 // v4/v6 PMTUD/error accepts plus the ND default accept (#15671 —
 // emitted only when no view excluded ndp), each carrying its named
-// aggregate counter (#4759).
-func emitHostInboundICMPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView) {
+// aggregate counter (#4759). programs identifies zones whose any-service
+// ND must precede a fine terminal drop.
+func emitHostInboundICMPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView, programs []JunosHostProgram) {
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6Error)).emit(verdictAccept()...)
-	emitHostInboundNDPAcceptsNetlink(p, views)
+	emitHostInboundNDPAcceptsCountedNetlink(p, views, true, programs)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP4Error)).emit(verdictAccept()...)
 }
@@ -1040,12 +1051,20 @@ func u8ToInts(vals []uint8) []int {
 	return out
 }
 
-// emitHostInboundScreenFloodNetlink mirrors the text renderer's two-phase
-// placement: reply-direction packets are screened before their early accept,
-// while original-direction packets are screened after any fine Junos-host
-// program has run.
-func emitHostInboundScreenFloodNetlink(p *nlPlan, rules []HostInboundScreenFloodRule, repliesOnly bool) {
+// emitHostInboundScreenFloodNetlink keeps the original-direction placement
+// consistent with the text renderer: replies are screened before their accept,
+// original ICMP before mandatory accepts, and other original traffic after
+// fine junos-host policy. The phases partition each screen profile so it is
+// emitted once per direction.
+func emitHostInboundScreenFloodNetlink(p *nlPlan, rules []HostInboundScreenFloodRule, phase HostInboundScreenFloodPhase) {
 	for _, screen := range rules {
+		isICMP := screen.Protocol == "icmp" || screen.Protocol == "icmpv6"
+		if phase == HostInboundScreenFloodOriginalICMP && !isICMP {
+			continue
+		}
+		if phase == HostInboundScreenFloodOriginalNonICMP && isICMP {
+			continue
+		}
 		var sourceSet, aggregateSet *expr.Dynset
 		if screen.SourceThreshold > 0 {
 			sourceSet = addHostInboundScreenFloodSet(p, screen, true)
@@ -1086,7 +1105,7 @@ func emitHostInboundScreenFloodNetlink(p *nlPlan, rules []HostInboundScreenFlood
 		makeBase := func(scope func(*ruleAsm)) func() *ruleAsm {
 			return func() *ruleAsm {
 				a := p.rule()
-				if repliesOnly {
+				if phase == HostInboundScreenFloodReplyDirection {
 					a.ctEstablishedRelated().ctDirectionReply()
 				}
 				scope(a)
