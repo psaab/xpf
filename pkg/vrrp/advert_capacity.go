@@ -4,12 +4,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
-// splitVIPsByFamily parses a configured virtual-address list (CIDR or bare
-// literals) into the per-family net.IP slices a VRRPv3 advertisement carries.
-// Unparseable entries are skipped, exactly as the send path has always done.
+// splitVIPsByFamily parses a configured virtual-address list into the
+// per-family net.IP slices a VRRPv3 advertisement carries, via
+// config.ParseVRRPVIP — the single repo-wide VIP parse (#17150).
+// Unparseable entries (including malformed CIDRs such as
+// "10.0.0.1/33") are skipped, exactly as the send path has always
+// done for entries it could not parse.
 //
 // This is the SINGLE source of per-family address parsing. sendAdvert calls it
 // with the instance's canonical unique VIP set; checkAdvertCapacity canonical-
@@ -17,18 +21,14 @@ import (
 // packet builder cannot disagree about the number of addresses (#6779).
 func splitVIPsByFamily(vips []string) (v4Addrs, v6Addrs []net.IP) {
 	for _, vip := range vips {
-		addr := vip
-		if idx := strings.Index(addr, "/"); idx >= 0 {
-			addr = addr[:idx]
-		}
-		ip := net.ParseIP(addr)
-		if ip == nil {
+		p, ok := config.ParseVRRPVIP(vip)
+		if !ok {
 			continue
 		}
-		if ip.To4() != nil {
-			v4Addrs = append(v4Addrs, ip.To4())
+		if p.Addr().Is4() {
+			v4Addrs = append(v4Addrs, net.IP(p.Addr().AsSlice()).To4())
 		} else {
-			v6Addrs = append(v6Addrs, ip.To16())
+			v6Addrs = append(v6Addrs, net.IP(p.Addr().AsSlice()).To16())
 		}
 	}
 	return v4Addrs, v6Addrs
@@ -71,7 +71,7 @@ func splitVIPsByFamily(vips []string) (v4Addrs, v6Addrs []net.IP) {
 // The predicate is pure for a given VIP list. It is evaluated at construction
 // and again when updateVIPs changes the live configuration (#10780).
 func checkAdvertCapacity(vips []string) error {
-	v4Addrs, v6Addrs := splitVIPsByFamily(dedupeVIPs(vips))
+	v4Addrs, v6Addrs := splitVIPsByFamily(config.DedupeVRRPVIPs(vips))
 
 	if n := len(v4Addrs); n > MaxConfiguredVIPs(false) {
 		return fmt.Errorf("%d IPv4 virtual addresses exceed the %d that fit in a "+
