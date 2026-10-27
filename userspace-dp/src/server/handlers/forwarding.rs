@@ -14,12 +14,13 @@ pub(super) fn set(
     forwarding: Option<ForwardingControlRequest>,
     response: &mut ControlResponse,
     persist_state: &mut bool,
-    // #5862: where the caller records that a binding-settle wait is owed. The
-    // wait itself runs in handlers::handle_request AFTER the global ServerState
-    // lock is dropped — the same locked-kick / unlocked-wait split #2962 and
-    // #4054 use. Holding the lock across a 2 s settle stalled every HA
-    // `sync_session` on the "dedicated" session socket, which shares this mutex.
-    settle_wait: &mut Option<Duration>,
+    // #5862/#17135: where the caller records that a binding-settle wait is
+    // owed. The wait itself runs in handlers::handle_stream AFTER the global
+    // ServerState lock is dropped — the same locked-kick / unlocked-wait
+    // split #2962 and #4054 use. Holding the lock across a 2 s settle stalled
+    // every HA `sync_session` on the "dedicated" session socket, which
+    // shares this mutex.
+    deferred: &mut Option<super::Deferred>,
 ) {
     let Some(forwarding_req) = forwarding else {
         response.ok = false;
@@ -66,7 +67,7 @@ pub(super) fn set(
         return;
     }
     if forwarding_req.armed {
-        *settle_wait = Some(Duration::from_secs(2));
+        *deferred = Some(super::Deferred::Settle(Duration::from_secs(2)));
     }
     refresh_status(guard);
     *persist_state = true;
