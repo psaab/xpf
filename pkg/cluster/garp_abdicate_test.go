@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -85,7 +86,8 @@ func TestARPBurstFollowups_RunsToCompletionWhileMaster(t *testing.T) {
 // predicate is refused and sends nothing, at both the follow-up helper
 // and the exported burst entry points. Reverting the nil check (restoring
 // the ungated twin behaviour) makes the helper send (burst-1)*2 frames
-// and the exported calls return nil/interface errors instead — RED.
+// and the exported calls fall through to interface/address errors instead
+// of the predicate-error text asserted below — RED.
 func TestARPBurstFollowups_NilPredicateRefused17158(t *testing.T) {
 	count, restore := recordingBurstSend(t)
 	defer restore()
@@ -104,14 +106,29 @@ func TestARPBurstFollowups_NilPredicateRefused17158(t *testing.T) {
 	// Exported entry points refuse before any socket/interface work: the
 	// predicate check precedes address/interface validation, so a bogus
 	// interface still yields the predicate error, not a lookup error.
-	if err := SendGratuitousARPBurstGated("no-such-iface-17158", nil, 3, nil); err == nil {
-		t.Fatal("SendGratuitousARPBurstGated with nil predicate was accepted (#17158)")
-	}
-	if err := SendGratuitousIPv6BurstGated("no-such-iface-17158", nil, 3, nil); err == nil {
-		t.Fatal("SendGratuitousIPv6BurstGated with nil predicate was accepted (#17158)")
-	}
-	if err := SendProxyGratuitousIPv6BurstGated("no-such-iface-17158", nil, 3, nil); err == nil {
-		t.Fatal("SendProxyGratuitousIPv6BurstGated with nil predicate was accepted (#17158)")
+	// Asserting only err != nil would also pass pre-fix via that lookup
+	// error, so the predicate-error text itself is asserted.
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"SendGratuitousARPBurstGated", func() error {
+			return SendGratuitousARPBurstGated("no-such-iface-17158", nil, 3, nil)
+		}},
+		{"SendGratuitousIPv6BurstGated", func() error {
+			return SendGratuitousIPv6BurstGated("no-such-iface-17158", nil, 3, nil)
+		}},
+		{"SendProxyGratuitousIPv6BurstGated", func() error {
+			return SendProxyGratuitousIPv6BurstGated("no-such-iface-17158", nil, 3, nil)
+		}},
+	} {
+		err := tc.call()
+		if err == nil {
+			t.Fatalf("%s with nil predicate was accepted (#17158)", tc.name)
+		}
+		if !strings.Contains(err.Error(), "requires a non-nil BurstStillValid predicate") {
+			t.Fatalf("%s with nil predicate returned %q, want the BurstStillValid predicate error (#17158)", tc.name, err)
+		}
 	}
 }
 
