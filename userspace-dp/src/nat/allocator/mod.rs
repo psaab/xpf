@@ -8203,14 +8203,28 @@ impl PortAllocator {
         if now_ns == 0 || budget == 0 {
             return 0;
         }
-        // #15956 fold: GC is opportunistic on the new-flow path —
-        // never stall admission behind a `live` writer for it.
-        // Try the shared read guard: empty index (common case)
-        // skips the sweep with no write acquisition; a contended
-        // lock (writer active) also skips, and the next admission
-        // or release retries.
+        // #15956 fold + #17041: GC is opportunistic on the new-flow
+        // path — never stall admission behind a `live` writer for it.
+        // Try the shared read guard: no expired lease (empty index or
+        // earliest expiry in the future) skips the sweep with no write
+        // acquisition; a contended lock (writer active) also skips,
+        // and the next admission or release retries.
+        // #17041: peek the earliest expiry, not just emptiness. With one
+        // non-expired idle lease the old emptiness check fell through to
+        // the blocking `lock_live()` write on every fast-path allocation,
+        // re-serializing the #15956 hot path behind readers/writers.
+        // `lease_expirations` is ordered by expiry, so `first()` is the
+        // earliest; nothing is expired iff it is absent or lies in the
+        // future (`> now_ns`, mirroring `collect_expired_global_locked`).
         match self.shared.live.try_read() {
-            Ok(live) if live.lease_expirations.is_empty() => return 0,
+            Ok(live)
+                if live
+                    .lease_expirations
+                    .first()
+                    .is_none_or(|(expires_at_ns, _)| *expires_at_ns > now_ns) =>
+            {
+                return 0;
+            }
             Ok(_) => {}
             Err(_) => return 0,
         }
@@ -8220,7 +8234,21 @@ impl PortAllocator {
             let chunk = (budget - reclaimed).min(GC_CHUNK);
             freed.clear();
             let collected = {
-                let mut live = self.lock_live();
+                // #17041: take the write guard with `try_write` and skip
+                // on contention, as the opportunistic-GC contract above
+                // promises. The pre-check only proves something WAS
+                // expired at peek time; a contended re-check loses
+                // nothing — the next admission or release retries.
+                // A poisoned guard is still usable, mirroring
+                // `lock_live()`.
+                let mut live = match self.shared.live.try_write() {
+                    Ok(guard) => guard,
+                    Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                    Err(TryLockError::WouldBlock) => return reclaimed,
+                };
+                self.shared
+                    .live_lock_acquisitions
+                    .fetch_add(1, Ordering::Relaxed);
                 #[cfg(test)]
                 self.shared
                     .gc_lock_acquisitions
