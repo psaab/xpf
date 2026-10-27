@@ -17,17 +17,22 @@ fn pmech_replay_drain_is_a_sibling_stage_13081() {
 }
 
 #[test]
-fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
+fn syn_cookie_admission_uses_effective_tuple_and_finalized_zone_pair_17920() {
     let cookie = include_str!("cookie_reply.rs");
     let admission = include_str!("session_admission.rs");
     let poll = include_str!("mod.rs");
     let prescreen = cookie
-        .split("pub(super) fn syn_cookie_reply_admitted(")
+        .split("pub(super) fn syn_cookie_challenge_is_session_miss(")
         .nth(1)
-        .expect("prescreen admission helper exists")
-        .split("/// Final admission check")
+        .expect("challenge session-miss guard exists")
+        .split("pub(super) fn syn_cookie_final_admission(")
         .next()
-        .expect("prescreen helper ends before final helper");
+        .expect("challenge guard ends before final admission");
+    assert!(
+        prescreen.contains("has_session_hit_at")
+            && !prescreen.contains("transit_admission_verdict("),
+        "the early challenge gate must not judge an incomplete raw tuple"
+    );
     let final_admission = cookie
         .split("pub(super) fn syn_cookie_final_admission_with_fence(")
         .nth(1)
@@ -35,8 +40,6 @@ fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
         .split("/// Host-bound counterpart")
         .next()
         .expect("final helper ends before host helper");
-    // #17929 review fold: also slice the non-fence wrapper between the
-    // prescreen and the fenced final, so it cannot re-encode either.
     let final_wrapper = cookie
         .split("pub(super) fn syn_cookie_final_admission(")
         .nth(1)
@@ -52,29 +55,33 @@ fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
         "transit_source_class_drop(",
         "transit_dst_is_martian",
     ];
-    for (name, body) in [
-        ("prescreen", prescreen),
-        ("final", final_admission),
-    ] {
-        assert!(
-            body.contains("transit_admission_verdict("),
-            "{name} must consume the shared session-admission verdict"
-        );
-        for banned in REENCODED {
-            assert!(
-                !body.contains(banned),
-                "{name} must not re-encode policy or martian admission ({banned})"
-            );
-        }
-    }
-    // The non-fence wrapper delegates to the fenced final; it must not
-    // re-encode admission itself.
+    assert!(final_admission.contains("cookie_reply_admission_verdict("));
     for banned in REENCODED {
+        assert!(
+            !final_admission.contains(banned),
+            "final admission must not re-encode policy or martian admission ({banned})"
+        );
         assert!(
             !final_wrapper.contains(banned),
             "final wrapper must not re-encode policy or martian admission ({banned})"
         );
     }
+    assert!(
+        final_admission.contains("class_dst: flow.dst_ip")
+            && final_admission.contains("translated_dst,")
+            && final_admission.contains("policy_dst: effective_dst"),
+        "final admission keeps raw/class and translated policy tuples distinct"
+    );
+    assert!(
+        final_admission.contains(
+            "packet_fabric_ingress,\n        fabric_link_ingress,\n        meta.ingress_ifindex as i32,\n        from_zone_id,\n        ha_startup_grace_until_secs,"
+        ),
+        "cookie HA finalization receives the packet's fabric and startup-grace context"
+    );
+    assert!(
+        final_admission.contains("session_miss_zone_pair_ids("),
+        "cookie admission uses the same finalized zone-pair helper as session misses"
+    );
     for field in [
         "class_dst",
         "translated_dst",
@@ -88,6 +95,24 @@ fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
         );
     }
     assert!(admission.contains("pub(super) fn transit_admission_verdict("));
+    assert!(admission.contains("pub(super) fn cookie_reply_admission_verdict("));
+    assert!(
+        admission.contains("let local_policy_disposition = matches!(")
+            && admission.contains(
+                "ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor"
+            )
+            && admission.contains(
+                "authorize_fabric_redirect\n        && input.resolution.disposition == ForwardingDisposition::FabricRedirect"
+            ),
+        "ordinary punts delegate policy while locally consumed cookie replies evaluate finalized redirects"
+    );
+    assert!(
+        poll.contains("let route_from_zone_id = from_zone_id;")
+            && poll.contains("let route_to_zone_id = to_zone_id;")
+            && poll.contains("route_from_zone_id,\n                                    seed_to_zone_id,")
+            && poll.contains("route_from_zone_id,\n                                route_to_zone_id,"),
+        "punt-seed authorization retains the real pre-redirect route zone pair"
+    );
     let miss_class = poll
         .split("// #11413/#10689: share the pure destination/source")
         .nth(1)
@@ -101,6 +126,46 @@ fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
             && miss_class.contains("record_transit_source_martian_drop()"),
         "the session-miss effects preserve both class-drop counters"
     );
+    let finalized_zone_pair = poll
+        .split("let final_resolution = finalize_new_flow_ha_resolution(")
+        .nth(1)
+        .expect("session-miss HA finalization exists")
+        .split("if miss_input_policer_gate_covers(final_resolution.disposition)")
+        .next()
+        .expect("finalized zone pair is selected before downstream admission");
+    assert!(
+        finalized_zone_pair.contains("decision.resolution = final_resolution")
+            && finalized_zone_pair.contains("session_miss_zone_pair_ids("),
+        "the miss path recomputes its policy zone pair after HA finalization"
+    );
+    assert!(
+        finalized_zone_pair
+            .contains("admission_to_zone = if final_resolution.disposition")
+            && finalized_zone_pair.contains("route_to_zone_id"),
+        "FabricRedirect accounting retains the routed admission zone"
+    );
+    let cookie_challenge_call = poll
+        .split("syn_cookie_final_admission_with_fence(")
+        .nth(1)
+        .expect("cookie challenge admission call exists")
+        .split(");")
+        .next()
+        .expect("cookie challenge admission call is terminated");
+    let cookie_ack_call = poll
+        .split("syn_cookie_final_admission(")
+        .nth(1)
+        .expect("cookie ACK admission call exists")
+        .split(");")
+        .next()
+        .expect("cookie ACK admission call is terminated");
+    for call in [cookie_challenge_call, cookie_ack_call] {
+        assert!(
+            call.contains("packet_fabric_ingress")
+                && call.contains("fabric_link_ingress")
+                && call.contains("ha_startup_grace_until_secs"),
+            "each production cookie finalizer receives the miss-path HA context"
+        );
+    }
     let miss_policy = poll
         .split("let admission_verdict = transit_admission_verdict(")
         .nth(1)
@@ -116,8 +181,6 @@ fn syn_cookie_prescreen_and_final_share_admission_chain_17017() {
         miss_policy.contains("count_policy_evaluation_result("),
         "session-miss applies the effect to the shared pure policy verdict"
     );
-    // The miss policy slice must not ALSO evaluate policy directly
-    // beside the shared verdict (double evaluation / drift).
     for banned in REENCODED {
         assert!(
             !miss_policy.contains(banned),

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dhcp"
+	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -33,71 +35,106 @@ import (
 // bootstrap mode suppresses that takeover write. It never runs the FRR apply,
 // whose manager owns its own degraded retry.
 
-// #16804 adds the flush arm: systemd-networkd's default foreign-rule
-// cleanup (ManageForeignRoutingPolicyRules=yes) deletes every xpf rule
-// band on `networkctl reconfigure` and on networkd restart. The shipped
-// drop-in disables that cleanup, but on a host without it (or after any
-// external flush) this owner is the no-commit healer. The always-on
-// terminator re-assert above runs first in the tick; its RuleList
-// readback (terminatorFlushed16804) then decides whether the tick
-// escalates to re-run the policy bands, the route-leak republish and
-// the mgmt-DNS steering reconcile, latching any failure as ordinary
-// routing debt. Post-#16804 ordering invariant: the terminator
-// re-assert precedes the mgmt-DNS re-assert, because tenant-VRF DNS
-// lookups at prefs 2500-2503 rely on the pref-2000 l3mdev miss
-// terminator ahead of them; installing steering first would open a
-// window where a VRF-context lookup that should terminate instead
-// follows the fresh steering rule.
+// #16804 and #18005 add the flush arm: systemd-networkd's default
+// foreign-rule cleanup (ManageForeignRoutingPolicyRules=yes) deletes every
+// xpf rule band on `networkctl reconfigure` and on networkd restart. The
+// shipped drop-in disables that cleanup, but on a host without it (or after
+// any external flush) this owner is the no-commit healer. On eligible ticks,
+// the owner samples desired rule priorities and the pref-2000 canary with
+// RuleList before attempting the terminator re-assert, so a successful repair
+// cannot erase flush evidence. A probe error conservatively triggers full
+// recovery too. The terminator write still precedes every band and DNS write:
+// DNS write: tenant-VRF DNS lookups at prefs 2500-2503 rely on the
+// pref-2000 l3mdev miss terminator ahead of them; installing steering
+// first would open a window where a VRF-context lookup that should
+// terminate instead follows the fresh steering rule.
 
 // vrfMissTerminatorPriority16804 is the pref-2000 #9819 terminator
 // priority (pkg/routing's vrfMissTerminatorPriority, unexported). The
 // flush probe matches it in the live rule table.
 const vrfMissTerminatorPriority16804 = 2000
 
-// terminatorFlushRuleListFn reads the live policy-rule table for the
-// #16804 flush probe. Production uses netlink; tests substitute a fake
-// so no privileged handle is needed.
-var terminatorFlushRuleListFn = func(family int) ([]int, error) {
-	rules, err := netlink.RuleList(family)
-	if err != nil {
-		return nil, err
-	}
-	prio := make([]int, 0, len(rules))
-	for _, r := range rules {
-		prio = append(prio, r.Priority)
-	}
-	return prio, nil
+// terminatorFlushRuleListFn reads one family of live policy rules for the
+// routing flush probe. Production uses netlink; tests substitute a shared
+// stateful fake so readback and recovery observe the same rules.
+var terminatorFlushRuleListFn = func(family int) ([]netlink.Rule, error) {
+	return netlink.RuleList(family)
 }
 
-// terminatorFlushed16804 reports whether the VRF miss terminator is
-// desired but missing from the live kernel rule table — the canary for
-// a networkd foreign-rule flush (#16804). The probe compares the
-// desired state (shouldReassertVRFMissTerminator) against a fresh
-// RuleList readback in both families. A missing terminator means
-// networkd (or another foreign writer) deleted xpf's rules, and every
-// other band went with it.
-func terminatorFlushed16804(d *Daemon) (bool, error) {
+type routingRulePriorityKey18005 struct {
+	family   int
+	priority int
+}
+
+// routingRuleBandsFlushed18005 reports whether any desired policy band or an
+// owned VRF miss terminator is missing from the live rule table. Desired
+// policy rules are compared by family/priority multiplicity: RuleList cannot
+// expose every selector (notably DSCP), and foreign rules at a matching slot
+// remain indistinguishable from xpf rules.
+func routingRuleBandsFlushed18005(d *Daemon) (bool, error) {
 	if d.routing == nil || d.store == nil {
 		return false, nil
 	}
 	cfg := d.store.ActiveConfig()
-	if cfg == nil || !d.shouldReassertVRFMissTerminator(cfg) {
+	if cfg == nil {
 		return false, nil
 	}
-	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		prios, err := terminatorFlushRuleListFn(family)
+
+	desired := make(map[routingRulePriorityKey18005]int)
+	families := make(map[int]bool)
+	for _, count := range routing.DesiredPolicyRulePriorityCounts(cfg) {
+		key := routingRulePriorityKey18005{family: count.Family, priority: count.Priority}
+		desired[key] += count.Count
+		families[count.Family] = true
+	}
+
+	var leases []*dhcp.Lease
+	if d.dhcp != nil {
+		leases = d.dhcp.Leases()
+	}
+	mgmtSet := d.mgmtVRFIfaceSet()
+	if len(mgmtSet) > 0 && len(leases) > 0 && len(mgmtDNSRulePairs(leases, mgmtSet)) > 0 {
+		mainRoutes, err := mgmtDNSMainRoutes()
 		if err != nil {
 			return false, err
 		}
-		found := false
-		for _, p := range prios {
-			if p == vrfMissTerminatorPriority16804 {
-				found = true
-				break
+		for _, pair := range mgmtDNSRulePairsFilteredWithWarnings(leases, mgmtSet, mainRoutes, cfg, false) {
+			for _, priority := range []int{pair.lookup.Priority, pair.shadow.Priority} {
+				key := routingRulePriorityKey18005{family: pair.key.family, priority: priority}
+				desired[key]++
+				families[pair.key.family] = true
 			}
 		}
-		if !found {
+	}
+
+	needsTerminator := d.shouldReassertVRFMissTerminator(cfg)
+	if needsTerminator {
+		families[unix.AF_INET] = true
+		families[unix.AF_INET6] = true
+	}
+	if len(families) == 0 {
+		return false, nil
+	}
+
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+		if !families[family] {
+			continue
+		}
+		rules, err := terminatorFlushRuleListFn(family)
+		if err != nil {
+			return false, err
+		}
+		live := make(map[int]int)
+		for _, rule := range rules {
+			live[rule.Priority]++
+		}
+		if needsTerminator && live[vrfMissTerminatorPriority16804] == 0 {
 			return true, nil
+		}
+		for key, count := range desired {
+			if key.family == family && live[key.priority] < count {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
@@ -256,10 +293,11 @@ func (d *Daemon) routingReconcileReassertLoop(ctx context.Context) {
 // the proxy-ARP loop: a config read outside the semaphore could capture a
 // pre-commit snapshot and re-assert rules a concurrent commit has just removed.
 // A canceled tick returns before any semaphore acquisition; bootstrap ticks
-// retain debt-gated policy/route-leak retries but skip VRF takeover writes. A
-// no-debt tick uses TryAcquire so it does not queue behind a commit that has
-// nothing for the retry owner to do; once it owns the semaphore it still
-// reasserts the VRF miss terminator.
+// suppress the canary probe and terminator takeover while retaining existing
+// debt-gated policy/route-leak/DNS retries. A no-debt tick uses TryAcquire so
+// it does not queue behind a commit that has nothing for the retry owner to
+// do; once it owns the semaphore it samples the eligible canary before
+// reasserting the VRF miss terminator.
 func (d *Daemon) reassertRoutingReconcileOnce(ctx context.Context) {
 	if d.store == nil || ctx.Err() != nil {
 		return
@@ -278,6 +316,23 @@ func (d *Daemon) reassertRoutingReconcileOnce(ctx context.Context) {
 		return
 	}
 
+	// #16804/#18005: sample desired policy priorities and the canary before
+	// restoring either. A successful terminator re-assert would otherwise
+	// erase evidence of a flush before this tick decides whether other bands
+	// need recovery. An eligible RuleList or DNS-inventory error is treated as
+	// recovery-required; the missing state is unknown.
+	flushed := false
+	if !d.inBootstrap() {
+		f, ferr := routingRuleBandsFlushed18005(d)
+		if ferr != nil {
+			slog.Warn("networkd foreign-rule flush probe failed; running conservative full recovery",
+				"err", ferr, "issue", "#18005")
+			flushed = true
+		} else {
+			flushed = f
+		}
+	}
+
 	var vrfErr error
 	if !d.inBootstrap() {
 		vrfErr = vrfMissTerminatorReconcileFn(d)
@@ -287,27 +342,6 @@ func (d *Daemon) reassertRoutingReconcileOnce(ctx context.Context) {
 	routingOwed := d.routingDebt.owed
 	mgmtRoutesOwed := d.routingDebt.mgmtRoutesOwed
 	d.routingDebt.mu.Unlock()
-
-	// #16804: detect external networkd foreign-rule cleanup (a networkd
-	// restart on a host without the shipped drop-in, or any flush between
-	// commits). The terminator above is the canary: when the always-on
-	// re-assert finds kernel rules missing — the terminator had to be
-	// (re)installed — every other xpf band was flushed too, so the tick
-	// escalates to a full re-assert of the policy bands, the route-leak
-	// snapshot and the mgmt-DNS steering pairs, then latches the outcome
-	// as routing debt so a failure keeps retrying. RuleList/readback
-	// counts as detection: the terminator reconcile reads live state on
-	// every tick. Nothing is written on a healthy no-flush tick beyond
-	// the terminator's existing check.
-	flushed := false
-	if !d.inBootstrap() {
-		f, ferr := terminatorFlushed16804(d)
-		if ferr != nil {
-			slog.Warn("networkd foreign-rule flush probe failed; will retry",
-				"err", ferr, "issue", "#16804")
-		}
-		flushed = f
-	}
 
 	if !routingOwed && !flushed {
 		// The VRF miss terminator remains an always-on day-2 check, independent

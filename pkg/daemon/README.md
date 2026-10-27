@@ -3670,16 +3670,20 @@ never lock an operator out of a remote box it manages.
   (`reconcileRouteLeakSnapshot`), and maintains the managed VRF miss-terminator
   desired state after networkd activation (`ReassertVRFMissTerminator`). #5844,
   #5696, #10421, and #10458 make those failures visible as deferred commit
-  errors, while this owner retries the idempotent reconciles. #16804
-  extends the owner with the networkd flush arm: the shipped
+  errors, while this owner retries the idempotent reconciles. #16804 and
+  #18005 extend the owner with the networkd flush recovery: the shipped
   `ManageForeignRoutingPolicyRules=no` drop-in stops networkd deleting
-  xpf's bands, and on a host without it the tick compares the desired
-  terminator against a RuleList readback — a desired-but-missing
-  pref-2000 rule escalates the tick to re-run the policy bands, the
-  route-leak republish and `applyMgmtDNSRules`, so an external networkd
-  restart heals without a commit (tests:
-  `networkd_rule_flush_16804_test.go`). Configured
-  management-scoped statics and the system backup-router are installed in
+  xpf's bands. On eligible 30 s ticks without the drop-in, the owner
+  compares family/priority counts of distinct desired next-table, rib-group,
+  PBR, and filtered lease-derived management-DNS rules against RuleList; exact
+  duplicate next-table shapes count once because RuleAdd treats EEXIST as
+  installed, while distinct same-priority shapes remain separate counts. It
+  separately checks the pref-2000 terminator only when it is owned. A missing
+  desired count, canary, or eligible read triggers policy-band, route-leak and
+  `applyMgmtDNSRules` recovery. The terminator write still precedes band and DNS
+  writes. With no desired managed rule bands and no owned terminator, the tick
+  does not probe or install a canary. Foreign same-slot rules can mask loss.
+  Configured management-scoped statics and the system backup-router are installed in
   table 999 by `applyMgmtVRFStaticRoutesTo`, independently of FRR and DHCP:
   every management static (single-path and ECMP) and the backup-router as
   `config.ManagementVRFMultipathStaticProtocol` (0x58), with single-path
@@ -3947,8 +3951,8 @@ never lock an operator out of a remote box it manages.
   fails the commit closed. A failed commit is the retry owner (the next apply
   re-reconciles). The rebind skips only a confirmed missing link for a configured
   tagged management unit that was not materialized (for example, an unzoned
-  parent); missing base interfaces and all other lookup/bind failures still fail
-  closed. The heartbeat restart that follows the rebind is surfaced the
+  parent), or a confirmed-missing chassis fabric interface (#18034); missing
+  base interfaces and all other lookup/bind failures still fail closed. The heartbeat restart that follows the rebind is surfaced the
   same way (#9751): `restartHeartbeatAfterRebind` joins a restart that exhausted
   its bind retries into `networkdErr`. That restart leaves the heartbeat stopped,
   owing a retry the next apply performs. The old call discarded

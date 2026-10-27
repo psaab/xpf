@@ -68,6 +68,10 @@ type Manager struct {
 	attachedLinksObserver func()
 	tcLinks               map[int]link.Link
 	lastCompile           *CompileResult
+	// rethRecoveryExclusions is the set of previous RETH member names that
+	// must not be reclaimed as missing current members until permanent-MAC
+	// restoration has completed. Guarded by mu.
+	rethRecoveryExclusions map[string]struct{}
 	applyMu               sync.Mutex
 	applyGeneration       uint64
 	// registryGeneration counts REGISTRY publications (#6741). It is bumped

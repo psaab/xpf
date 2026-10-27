@@ -103,7 +103,7 @@ func TestTeardownUnmappedManaged_RenameBackFailureRetainsAndErrors_5309(t *testi
 	ebusy := errors.New("simulated rename-back EBUSY/collision")
 	renameCalls, _ := stubTeardownSeams(t, true, "enp99s0", ebusy, nil)
 
-	err := teardownUnmappedManaged(unmappedTeardownConfig(), nil)
+	_, err := teardownUnmappedManaged(unmappedTeardownConfig(), nil)
 	if err == nil {
 		t.Fatal("teardownUnmappedManaged must return an error when the rename-back " +
 			"fails (fail-closed); got nil — the void warn-only #5309 describes")
@@ -135,7 +135,7 @@ func TestTeardownUnmappedManaged_RenameBackSuccessDeletesMarkers_5309(t *testing
 
 	renameCalls, reloadCalls := stubTeardownSeams(t, true, "enp99s0", nil, nil)
 
-	if err := teardownUnmappedManaged(unmappedTeardownConfig(), nil); err != nil {
+	if _, err := teardownUnmappedManaged(unmappedTeardownConfig(), nil); err != nil {
 		t.Fatalf("teardownUnmappedManaged must succeed when the rename-back succeeds: %v", err)
 	}
 	if *renameCalls == 0 {
@@ -163,7 +163,7 @@ func TestTeardownUnmappedManaged_ReloadFailureRetainsAndErrors_5309(t *testing.T
 	reloadFail := errors.New("simulated networkctl reload failure")
 	_, reloadCalls := stubTeardownSeams(t, true, "enp99s0", nil, reloadFail)
 
-	err := teardownUnmappedManaged(unmappedTeardownConfig(), nil)
+	_, err := teardownUnmappedManaged(unmappedTeardownConfig(), nil)
 	if err == nil {
 		t.Fatal("teardownUnmappedManaged must return an error when networkctl reload " +
 			"fails (fail-closed); got nil")
@@ -190,7 +190,7 @@ func TestTeardownUnmappedManaged_IdempotentAlreadyTornDown_5309(t *testing.T) {
 	// called; the leftover marker is reclaimed; the teardown returns nil.
 	renameCalls, _ := stubTeardownSeams(t, false, "", nil, nil)
 
-	if err := teardownUnmappedManaged(unmappedTeardownConfig(), nil); err != nil {
+	if _, err := teardownUnmappedManaged(unmappedTeardownConfig(), nil); err != nil {
 		t.Fatalf("an already-torn-down NIC must be an idempotent no-op success, got %v", err)
 	}
 	if *renameCalls != 0 {
@@ -211,7 +211,7 @@ func TestTeardownUnmappedManaged_PureNoOpNoReload_5309(t *testing.T) {
 
 	_, reloadCalls := stubTeardownSeams(t, true, "enp99s0", nil, nil)
 
-	if err := teardownUnmappedManaged(unmappedTeardownConfig(), nil); err != nil {
+	if _, err := teardownUnmappedManaged(unmappedTeardownConfig(), nil); err != nil {
 		t.Fatalf("no-op teardown (all names desired) must return nil, got %v", err)
 	}
 	if *reloadCalls != 0 {

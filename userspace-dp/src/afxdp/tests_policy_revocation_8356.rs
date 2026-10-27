@@ -6581,6 +6581,17 @@ fn forwarding_with_fabric_dmz_10507() -> ForwardingState {
         link_local: false,
         ..Default::default()
     });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".to_string(),
+        ip: SRC.to_string(),
+        mac: "00:aa:bb:cc:dd:61".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
     build_forwarding_state(&snapshot)
 }
 
@@ -7157,15 +7168,14 @@ fn recorded_icmp_revoked_when_type_armed_after_promotion_10507() {
 /// WAN), cold-judge lan -> dmz, and revoke BOTH halves on Deny — never
 /// forward the reply on the stored recorded Permit.
 ///
-/// Fixture notes: the reverse half is installed with a LIVE DMZ ingress
-/// zone (not the recorded-swapped WAN) so the live DMZ arrival is Owner
-/// (`arrival_zone == ingress_zone`) and reaches M2 instead of the foreign
-/// Drop arm. The forward/reverse zone mismatch (forward egress WAN vs
-/// reverse ingress DMZ) is the live divergence under test — recorded WAN
-/// vs live DMZ — and the reverse zones never enter the verdict (GATE 1:
-/// judged by the forward companion only). RED-on-revert: without the
-/// fence the reverse coasts on its Stale row or judges the stored WAN and
-/// survives (revoked 0, count 2).
+/// Phase 1 revalidation synchronizes the reverse pair's ingress to the
+/// forward entry's recorded WAN egress. The reverse reply arrives in that
+/// recorded WAN zone (Owner authority), while the live forward lookup has
+/// moved to DMZ. The fence re-resolves the forward companion and cold-judges
+/// lan -> dmz, revoking BOTH halves on Deny.
+///
+/// RED-on-revert: without the fence the reverse coasts on its stale row or
+/// judges the stored WAN and survives (revoked 0, count 2).
 #[test]
 fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
     let forwarding = forwarding_with_fabric_dmz_10507();
@@ -7186,8 +7196,8 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
         "fixture must import the forward half"
     );
     // Reverse half: stored MissingNeighbor LAN (no .102 neighbor in this
-    // snapshot — still would-forward for gate intent), live DMZ ingress
-    // for Owner authority on the live DMZ arrival (see doc above).
+    // snapshot — still would-forward for gate intent), paired to WAN ingress
+    // by the forward egress recorded at phase 1.
     let rev_decision = SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::MissingNeighbor,
@@ -7208,7 +7218,6 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
         install_table_check: 0,
     };
     let mut rev_metadata = metadata(true);
-    rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
     rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
     rev_metadata.ingress_ifindex = 0;
     rev_metadata.owner_rg_id = 1;
@@ -7225,8 +7234,8 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
         "fixture must import the reverse half"
     );
     // Phase 1: forward standby Permit through poll (RG 1 inactive →
-    // FabricRedirect, recorded lan -> wan Permits, stamps forward
-    // Recorded; reverse untouched).
+    // FabricRedirect, recorded lan -> wan Permits, stamps forward Recorded
+    // and synchronizes reverse ingress to that recorded WAN egress).
     let mut ha_standby = txn_ha_state();
     ha_standby.insert(1, inactive_rg_10507(122));
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
@@ -7256,24 +7265,31 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
         crate::session::PolicyRevalidationKind::RecordedEgress,
         "phase 1 must stamp the forward half Recorded"
     );
-    // Phase 3 (no phase 2 Refresh — reverse-first): the reply arrives
-    // DMZ through poll on a fresh binding (active HA). The fence
-    // re-resolves the forward companion live (DMZ) and revokes the pair
-    // on lan -> dmz Deny.
+    let (_, reverse_metadata, _) = sessions
+        .entry_with_origin(&rev_key)
+        .expect("phase 1 leaves the reverse companion installed");
+    assert_eq!(
+        reverse_metadata.ingress_zone, TEST_WAN_ZONE_ID,
+        "phase 1 must synchronize reverse ingress to the forward's recorded WAN egress",
+    );
+    // Phase 3 (no phase 2 Refresh — reverse-first): the reply arrives in
+    // WAN, the zone phase 1 synchronized to the reverse half. The active
+    // forward companion now resolves through DMZ, so the fence must judge
+    // lan -> dmz and revoke the pair.
     let ha_state = txn_ha_state();
-    let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
-    dmz_binding.interface = Arc::<str>::from("reth2.0");
+    let mut reply_binding = BindingWorker::new_for_mirror_test(0, 0, WAN_IFINDEX, 0);
+    reply_binding.interface = Arc::<str>::from("reth0.80");
     let rev_frame = build_txn_tcp_syn_frame_v4(
         DMZ_DST_10507,
         SRC,
         DPORT,
         SPORT,
         TCP_ACK,
-        REVOCATION_DMZ_MAC,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, TCP_ACK, rev_frame.len() as u16);
+    let rev_meta = txn_wan_meta_v4(TCP_ACK, rev_frame.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut dmz_binding,
+        &mut reply_binding,
         &mut sessions,
         &forwarding,
         &ha_state,
@@ -7301,8 +7317,8 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
 /// type-armed forward protocol must pair-fail-closed before the reverse
 /// ICMP `None`/Decline exit. Phase 1 earns a forward recorded ICMP Permit
 /// (standby, unarmed gen 7); a publish arms ICMP (gen 8, Stale Recorded
-/// preserved Fresh-only); the reverse reply (active, live DMZ arrival,
-/// locally forwarding) must revoke the pair at the type guard.
+/// preserved Fresh-only); the reply arrives in its recorded WAN zone while
+/// the current forward companion route is DMZ, and must revoke the pair.
 ///
 /// RED-on-revert: pre-fence reverse takes the type-armed Decline and both
 /// halves survive (revoked 0, count 2).
@@ -7345,7 +7361,6 @@ fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
         install_table_check: 0,
     };
     let mut rev_metadata = metadata(true);
-    rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
     rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
     rev_metadata.ingress_ifindex = 0;
     rev_metadata.owner_rg_id = 1;
@@ -7398,14 +7413,14 @@ fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
     let forwarding8 = forwarding_with_fabric_dmz_armed_10507();
     sessions.set_policy_revalidation_gen(8);
     let ha_state = txn_ha_state();
-    let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
-    dmz_binding.interface = Arc::<str>::from("reth2.0");
-    let rev_frame = build_icmp_echo_frame_v4(DMZ_DST_10507, SRC, 64, REVOCATION_DMZ_MAC);
-    let mut rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, 0, rev_frame.len() as u16);
+    let mut reply_binding = BindingWorker::new_for_mirror_test(0, 0, WAN_IFINDEX, 0);
+    reply_binding.interface = Arc::<str>::from("reth0.80");
+    let rev_frame = build_icmp_echo_frame_v4(DMZ_DST_10507, SRC, 64, crate::afxdp::tests_support::TEST_WAN_MAC);
+    let mut rev_meta = txn_wan_meta_v4(0, rev_frame.len() as u16);
     rev_meta.protocol = PROTO_ICMP;
     rev_meta.payload_offset = 42;
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut dmz_binding,
+        &mut reply_binding,
         &mut sessions,
         &forwarding8,
         &ha_state,
@@ -7759,7 +7774,247 @@ fn forwarding_noroute_10507() -> ForwardingState {
         ..Default::default()
     });
     snapshot.routes.retain(|r| r.destination != "0.0.0.0/0");
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".to_string(),
+        ip: SRC.to_string(),
+        mac: "00:aa:bb:cc:dd:61".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    // The predicate is snapshot-wide; the TCP NoRoute guards below remain
+    // unchanged, while ICMP exercises the reverse type-unknown Decline arm.
+    snapshot.policies.push(junos_icmp_ping_permit());
     build_forwarding_state(&snapshot)
+}
+
+/// #10507: the NoLocalEntry reverse arm must consult the forward companion's
+/// recorded authorization before declining a type-dependent ICMP verdict.
+///
+/// RED-on-revert: the old ICMP early return ignored the recorded forward
+/// provenance and returned `None`, leaving the established authorization live.
+#[test]
+fn reverse_sessionless_recorded_icmp_companion_fails_closed_10507() {
+    let forwarding = forwarding_with_fabric_dmz_armed_10507();
+    assert!(
+        forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "fixture must arm the ICMP type-dependent predicate"
+    );
+    let fwd_key = icmp_flow_key_to_10507(DMZ_DST_10507);
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(8);
+    sessions.set_forwarding_revalidation_gen(8, 9);
+    assert!(sessions.install_with_protocol_with_origin(
+        fwd_key.clone(),
+        syncimport_wan_decision_10507(),
+        syncimport_recorded_metadata_10507(),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_ICMP,
+        0,
+    ));
+    sessions.mark_policy_revalidated(
+        &fwd_key,
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+    );
+    assert!(sessions.policy_revalidation_fenced(&fwd_key));
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        crate::session::PolicyRevalidationTarget::NoLocalEntry
+    );
+
+    let mut reverse_meta = txn_wan_meta_v4(0, 80);
+    reverse_meta.protocol = PROTO_ICMP;
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &rev_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: rev_key.src_ip,
+            dst_ip: rev_key.dst_ip,
+            forward_key: rev_key.clone(),
+        }),
+        reverse_meta,
+        false,
+    );
+    assert_eq!(
+        canonical,
+        Some(fwd_key.clone()),
+        "recorded forward authorization must fail closed without a local reverse row"
+    );
+    assert!(
+        sessions.entry_with_origin(&fwd_key).is_some(),
+        "the owner tears down after the seam returns the canonical forward key"
+    );
+}
+
+/// #10507: a sessionless reverse hit with a NoRoute forward companion must
+/// fail closed if the stored-pair policy walk Declines.
+///
+/// RED-on-revert: without the unresolvable-companion Decline arm, the
+/// sessionless reverse path returns `None` and retains the forward row.
+#[test]
+fn reverse_sessionless_live_noroute_decline_fails_closed_10507() {
+    let forwarding = forwarding_noroute_10507();
+    let fwd_key = flow_key_to(DMZ_DST_10507);
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let mut stored_fwd_decision = decision(0);
+    stored_fwd_decision.resolution.disposition = ForwardingDisposition::NoRoute;
+    stored_fwd_decision.resolution.next_hop = None;
+    stored_fwd_decision.resolution.neighbor_mac = None;
+    stored_fwd_decision.resolution.src_mac = None;
+    assert!(sessions.install_with_protocol_with_origin(
+        fwd_key.clone(),
+        stored_fwd_decision,
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    sessions.mark_policy_revalidated(
+        &fwd_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    sessions.set_forwarding_revalidation_gen(7, 10);
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        crate::session::PolicyRevalidationTarget::NoLocalEntry
+    );
+    assert!(
+        !sessions.policy_revalidation_fenced(&fwd_key),
+        "the test must isolate NoRoute provenance, not a recorded forward fence"
+    );
+    let mut reverse_meta = txn_wan_meta_v4(TCP_ACK, 80);
+    reverse_meta.config_generation = 7;
+    reverse_meta.fib_generation = 10;
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &rev_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: rev_key.src_ip,
+            dst_ip: rev_key.dst_ip,
+            forward_key: rev_key.clone(),
+        }),
+        reverse_meta,
+        false,
+    );
+    assert_eq!(
+        canonical,
+        Some(fwd_key.clone()),
+        "NoRoute companion must fail closed when the stored policy walk Declines"
+    );
+    assert!(sessions.entry_with_origin(&fwd_key).is_some());
+}
+
+/// NoRoute must fail closed when the stored pair's policy walk Declines.
+///
+/// RED-on-revert: without the unresolvable-companion Decline arm, the stale
+/// live pair returns `None` and retains both rows.
+#[test]
+fn reverse_stale_live_noroute_decline_fails_closed_10507() {
+    let forwarding = forwarding_noroute_10507();
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding,
+            IpAddr::V4(DMZ_DST_10507),
+        )
+        .resolution
+        .disposition,
+        ForwardingDisposition::NoRoute
+    );
+    let fwd_key = flow_key_to(DMZ_DST_10507);
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let mut stored_fwd_decision = decision(0);
+    stored_fwd_decision.resolution.disposition = ForwardingDisposition::NoRoute;
+    stored_fwd_decision.resolution.next_hop = None;
+    stored_fwd_decision.resolution.neighbor_mac = None;
+    stored_fwd_decision.resolution.src_mac = None;
+    assert!(sessions.install_with_protocol_with_origin(
+        fwd_key.clone(),
+        stored_fwd_decision,
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    sessions.mark_policy_revalidated(
+        &fwd_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    assert!(sessions.install_with_protocol_with_origin(
+        rev_key.clone(),
+        decision(LAN_IFINDEX),
+        metadata(true),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    sessions.mark_policy_revalidated(
+        &rev_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    sessions.set_forwarding_revalidation_gen(7, 10);
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        crate::session::PolicyRevalidationTarget::Fresh
+    );
+    assert!(
+        !sessions.policy_revalidation_fenced(&fwd_key),
+        "the test must isolate NoRoute provenance, not a recorded forward fence"
+    );
+    let reverse_gate = sessions.policy_revalidation_gate(
+        &rev_key,
+        crate::session::PolicyGateCurrent::LocalForwarding,
+    );
+    assert!(
+        !reverse_gate.fail_closed_decline,
+        "the test must not take the reverse row's own Decline fail-closed gate"
+    );
+    assert!(
+        !sessions.policy_revalidation_fenced(&rev_key),
+        "the reverse row must carry only LiveEgress provenance"
+    );
+    let mut reverse_meta = txn_wan_meta_v4(TCP_ACK, 80);
+    reverse_meta.config_generation = 7;
+    reverse_meta.fib_generation = 10;
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &rev_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: rev_key.src_ip,
+            dst_ip: rev_key.dst_ip,
+            forward_key: rev_key.clone(),
+        }),
+        reverse_meta,
+        false,
+    );
+    assert_eq!(
+        canonical,
+        Some(rev_key.clone()),
+        "NoRoute companion must fail closed when the stored policy walk Declines"
+    );
+    assert!(sessions.entry_with_origin(&fwd_key).is_some());
 }
 
 /// #10507 Cell 6 (reverse, companion unresolvable live): build the pair
@@ -7767,9 +8022,9 @@ fn forwarding_noroute_10507() -> ForwardingState {
 /// FabricRedirect, recorded lan -> wan), then switch the live snapshot to
 /// NoRoute for the forward flow (same gen 7, FIB-only flap — the forward
 /// companion cannot produce a valid current egress) and drive the reverse
-/// reply (live DMZ arrival, locally forwarding toward LAN). The reverse
-/// fence must fail closed (revoke the pair) rather than Decline on the
-/// unresolvable companion.
+/// reply from its recorded WAN zone (the reverse row's paired ingress).
+/// The reverse fence must fail closed (revoke the pair) rather than Decline
+/// on the unresolvable companion.
 ///
 /// RED-on-revert: pre-fence reverse judges the stored WAN companion
 /// (lan -> wan Permit), stamps the reverse half, and both survive
@@ -7813,7 +8068,6 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
         install_table_check: 0,
     };
     let mut rev_metadata = metadata(true);
-    rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
     rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
     rev_metadata.ingress_ifindex = 0;
     rev_metadata.owner_rg_id = 1;
@@ -7870,19 +8124,19 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
         "fixture: forward live must be NoRoute (unresolvable companion)"
     );
     let ha_state = txn_ha_state();
-    let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
-    dmz_binding.interface = Arc::<str>::from("reth2.0");
+    let mut reply_binding = BindingWorker::new_for_mirror_test(0, 0, WAN_IFINDEX, 0);
+    reply_binding.interface = Arc::<str>::from("reth0.80");
     let rev_frame = build_txn_tcp_syn_frame_v4(
         DMZ_DST_10507,
         SRC,
         DPORT,
         SPORT,
         TCP_ACK,
-        REVOCATION_DMZ_MAC,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, TCP_ACK, rev_frame.len() as u16);
+    let rev_meta = txn_wan_meta_v4(TCP_ACK, rev_frame.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut dmz_binding,
+        &mut reply_binding,
         &mut sessions,
         &forwarding_nr,
         &ha_state,
@@ -8774,13 +9028,11 @@ fn worker_local_import_backlog_flap_fenced_10507() {
 /// a SyncImport pair earns a forward recorded Permit through poll (standby
 /// FabricRedirect, recorded lan -> wan, punts). With the SAME standby HA
 /// (still peer-owned, no promotion, no Refresh — forward live stays
-/// FabricRedirect), the reverse reply (live DMZ arrival, locally
-/// forwardable toward LAN) must be retained: no revocation, both halves
-/// survive, and NEITHER row is re-stamped (retention returns before cold,
-/// unlike a Permit which would stamp the reverse half Fresh). This pins
-/// the plan-required broad retention branch (any FabricRedirect retains,
-/// per §4.2.4/§4.3 — Cell 1 phase 1 covers forward-hit SyncImport
-/// retention; #7770 covers seed; this covers reverse-hit non-seed).
+/// FabricRedirect), the reverse reply arrives on its recorded WAN ingress and
+/// must be retained: no revocation, both halves survive, and NEITHER row is
+/// re-stamped (retention returns before cold, unlike a Permit which would
+/// stamp the reverse half). This pins the broad retention branch (any
+/// FabricRedirect retains, per §4.2.4/§4.3).
 /// RED via stamp (pre-fence cold Permits stored WAN and stamps reverse
 /// Fresh; retention stamps nothing).
 #[test]
@@ -8822,7 +9074,6 @@ fn reverse_syncimport_redirect_retained_without_stamp_10507() {
         install_table_check: 0,
     };
     let mut rev_metadata = metadata(true);
-    rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
     rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
     rev_metadata.ingress_ifindex = 0;
     rev_metadata.owner_rg_id = 1;
@@ -8873,19 +9124,19 @@ fn reverse_syncimport_redirect_retained_without_stamp_10507() {
     // Same standby HA (still peer-owned, no promotion): reverse reply with
     // forward live still FabricRedirect (peer-owned, redirect, non-local).
     // Retention: admit without revoking, stamp neither half.
-    let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
-    dmz_binding.interface = Arc::<str>::from("reth2.0");
+    let mut reply_binding = BindingWorker::new_for_mirror_test(0, 0, WAN_IFINDEX, 0);
+    reply_binding.interface = Arc::<str>::from("reth0.80");
     let rev_frame = build_txn_tcp_syn_frame_v4(
         DMZ_DST_10507,
         SRC,
         DPORT,
         SPORT,
         TCP_ACK,
-        REVOCATION_DMZ_MAC,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, TCP_ACK, rev_frame.len() as u16);
+    let rev_meta = txn_wan_meta_v4(TCP_ACK, rev_frame.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut dmz_binding,
+        &mut reply_binding,
         &mut sessions,
         &forwarding,
         &ha_standby,
@@ -9593,6 +9844,11 @@ fn drive_removed_source_nat_rule_11600(
     let forward_key = forward_key.expect("the admitted flow has a forward entry");
     let reverse_key = reverse_key.expect("the admitted flow has a reverse entry");
     let stored_nat = stored_nat.expect("the forward entry carries its source translation");
+    assert_eq!(
+        sessions.source_nat_static_for(&forward_key),
+        Some(false),
+        "dynamic pool admission must preserve non-static source-NAT provenance"
+    );
     assert!(
         stored_nat.rewrite_src.is_some() && stored_nat.rewrite_src_port.is_some(),
         "fixture must install a pool-mode SNAT translation before testing its staleness"
@@ -9617,14 +9873,21 @@ fn drive_removed_source_nat_rule_11600(
         SourceNatUpdate11600::Unchanged => {}
     }
     if update == SourceNatUpdate11600::StaticReplacement {
+        // Reuse the allocation's actual dynamic port. The shared pool
+        // allocator can return a later port when other flows have already
+        // allocated from this pool, so assuming the first port (20000) makes
+        // the fixture fail before source-NAT revalidation runs.
+        let dynamic_port = stored_nat
+            .rewrite_src_port
+            .expect("dynamic SNAT fixture must allocate a source port");
         updated_snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
             name: "same-translation-static-snat-11600".into(),
             from_zone: "wan".into(),
             external_ip: "172.16.80.100".into(),
             internal_ip: SRC.to_string(),
-            // Source port SPORT is translated to the dynamic pool's first
-            // port (20000), making this a genuinely identical NAT decision.
-            match_destination_port: 20000,
+            // Static SNAT emits this same port, making translation geometry
+            // byte-identical while its source-NAT provenance changes.
+            match_destination_port: dynamic_port,
             mapped_port: SPORT,
             ..Default::default()
         }];

@@ -20,6 +20,13 @@ summed across streams.
 > binaries by hand, issue ad-hoc daemon-control commands, or kill another
 > agent's lock holder. See `docs/engineering-style.md` shared-cluster protocol.
 
+> **Host isolation (2026-10-26).** Class **V**: every deploy and
+> measurement runs inside Incus VMs under `with-cluster.sh`.
+> Never run `make test-failover`, deploy scripts, or daemon
+> control directly on the workstation host — a privileged host
+> run mutates host networking/systemd. Workstation work is
+> build-only (DEB outside the lock).
+
 ## Arguments
 
 - `/failover-test` — standard failover smoke (`make test-failover`)

@@ -7,6 +7,16 @@ user-invocable: true
 # Performance Testing Skill
 
 Run throughput benchmarks and CPU profiling on the bpfrx firewall.
+
+## Host isolation (2026-10-26)
+
+Class **V** (VM/cluster) skill: ALL measurement runs inside Incus
+VMs under the cluster lock. Never run iperf/perf, deploy scripts,
+or `apt`/`systemctl` directly on the workstation host. If the
+target is not provably a VM (`incus list` instance), STOP.
+Workstation-side work is limited to building the DEB and reading
+results. Kernel/perf cells needing the host kernel belong to the
+VM leg, not the workstation.
 Traffic flows THROUGH the firewall (from LAN host to WAN) to exercise the full XDP/TC pipeline.
 
 ## Arguments
