@@ -660,6 +660,33 @@ func TestIndeterminateCandidateOnlyConnectionIsRemembered17882(t *testing.T) {
 			} else if state.PendingCandidate["vpn2"] == "" {
 				t.Fatalf("rotation must retain the staged candidate fingerprint as the loaded baseline, got %+v", state.PendingCandidate)
 			}
+
+			// THIRD apply with the identical proven candidate must diff
+			// clean: the refreshed staged fingerprint (or the promoted
+			// baseline) matches, so no terminate and no re-initiate — the
+			// perpetual-flap regression. A fresh Manager over the same
+			// durable state proves the staged record survives restart.
+			if !tc.remove {
+				rec3 := &reloadRecorder{listSAs: liveSA("vpn2")}
+				m3 := NewWithConfigDir(t.TempDir())
+				m3.statePath = statePath
+				m3.swanctl = rec3.run
+				if err := m3.ApplyGeneration(next, newGeneration, ApplyHooks{}); err != nil {
+					t.Fatalf("identical third apply: %v", err)
+				}
+				if got := rec3.terminated(); len(got) != 0 {
+					t.Fatalf("identical proven apply must not terminate the staged candidate SA (perpetual flap), got %v", got)
+				}
+				thirdInitiates := 0
+				for _, call := range rec3.calls {
+					if len(call) > 0 && call[0] == "--initiate" {
+						thirdInitiates++
+					}
+				}
+				if thirdInitiates != 0 {
+					t.Fatalf("identical proven apply must not re-initiate, got %d initiates", thirdInitiates)
+				}
+			}
 		})
 	}
 }
@@ -749,6 +776,66 @@ func TestIndeterminateDeferredDebtPersistedBeforeTerminate17882(t *testing.T) {
 	state = readState9687(t, statePath)
 	if len(state.PendingReinitiate) != 0 {
 		t.Fatalf("successful retry must clear deferred debt, got %+v", state.PendingReinitiate)
+	}
+}
+
+// Crash injection on the committed-candidate branch (charon unreachable, so
+// the candidate is promoted for its next start): deferred-start debt for the
+// changed connection must be durable BEFORE terminateRemovedConns runs,
+// exactly as on the indeterminate branch.
+func TestCommittedCandidateDeferredDebtPersistedBeforeTerminate17882(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "ipsec-conn-state.json")
+	m := NewWithConfigDir(t.TempDir())
+	m.statePath = statePath
+	oldGeneration := strings.Repeat("a", 64)
+	oldCfg := vpnCfg("vpn1")
+	oldCfg.VPNs["vpn1"].EstablishTunnels = "immediately"
+	ch := &charonDown16853{}
+	m.swanctl = ch.run
+	if err := m.ApplyGeneration(oldCfg, oldGeneration, ApplyHooks{}); err != nil {
+		t.Fatalf("FIXTURE: initial apply: %v", err)
+	}
+
+	rotated := vpnCfg("vpn1")
+	rotated.VPNs["vpn1"].EstablishTunnels = "immediately"
+	rotated.VPNs["vpn1"].PSK = config.NewSecret("secret-rotated")
+	reloadErr := errors.New("charon vici unreachable")
+	var captured []byte
+	m.swanctl = func(args ...string) ([]byte, error) {
+		if len(args) > 0 {
+			switch args[0] {
+			case "--load-all":
+				return nil, reloadErr
+			case "--list-pools", "--list-conns":
+				// Unreachable probe: no marker/conns answer, so the
+				// candidate is committed for charon's next start.
+				return nil, reloadErr
+			case "--list-sas":
+				return []byte(liveSA("vpn1")), nil
+			case "--terminate":
+				data, rerr := os.ReadFile(statePath)
+				if rerr != nil {
+					t.Errorf("read state during terminate: %v", rerr)
+				} else {
+					captured = append([]byte(nil), data...)
+				}
+				return nil, nil
+			}
+		}
+		return nil, nil
+	}
+	if err := m.ApplyGeneration(rotated, strings.Repeat("b", 64), ApplyHooks{}); err == nil {
+		t.Fatal("unreachable reload must return an error")
+	}
+	if captured == nil {
+		t.Fatal("FICTION: terminate did not run on the committed-candidate branch")
+	}
+	if err := os.WriteFile(statePath, captured, 0o600); err != nil {
+		t.Fatalf("restore crash-injected state: %v", err)
+	}
+	state := readState9687(t, statePath)
+	if len(state.PendingReinitiate) != 1 || state.PendingReinitiate[0] != "vpn1" {
+		t.Fatalf("committed-candidate deferred debt must be durable before terminate, got %+v", state.PendingReinitiate)
 	}
 }
 

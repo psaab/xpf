@@ -401,7 +401,7 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			candidateOnly := candidateOnlyConnNames(candidateNames, baselineKnown)
 			deferredSeeds := append([]string{}, changed...)
 			deferredSeeds = append(deferredSeeds, candidateOnly...)
-			m.rememberDeferredReinitiation(deferredSeeds, nil)
+			m.rememberDeferredReinitiation(deferredSeeds)
 			m.rememberPendingCandidateConns(candidateOnly, hs)
 			_, failed := m.terminateRemovedConns(removed)
 			m.clearDeferredReinitiation(failed)
@@ -426,12 +426,16 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 				names, hs = map[string]bool{}, map[string]string{}
 			}
 			removed, changed := m.promoteConnNames(names, hs)
+			// Persist deferred-start debt BEFORE termination here too: a
+			// crash between terminateRemovedConns and any post-teardown
+			// persistence must not lose the obligation to restore changed
+			// eager tunnels under the candidate charon will load on restart.
+			if !cce.clear {
+				m.rememberDeferredReinitiation(changed)
+			}
 			terminated, failed := m.terminateRemovedConns(removed)
 			termErr := m.recordTerminateDebt(removed, failed)
 			var initiateErr error
-			if !cce.clear && !cce.candidateProven {
-				m.rememberDeferredReinitiation(changed, nil)
-			}
 			if !cce.clear && cce.candidateProven && ipsecCfg != nil {
 				deferred := m.pendingReinitiationNames()
 				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated, deferred, failed)
@@ -512,7 +516,7 @@ func (m *Manager) Clear() error {
 			empty := map[string]bool{}
 			removed, changed := m.pendingConnDiff(empty, map[string]string{})
 			changed = append(changed, candidateOnlyConnNames([]string{}, removed)...)
-			m.rememberDeferredReinitiation(changed, nil)
+			m.rememberDeferredReinitiation(changed)
 			_, failed := m.terminateRemovedConns(removed)
 			m.clearDeferredReinitiation(failed)
 			return errors.Join(err, m.recordTerminateDebtForNames(removed, failed, empty))
@@ -1357,22 +1361,19 @@ func (m *Manager) pendingConnDiff(newNames map[string]bool, newHashes map[string
 	return m.connDiffLocked(newNames, newHashes)
 }
 
-// rememberDeferredReinitiation records changed connections that were observed
-// live during an indeterminate reload probe and cannot safely be re-initiated.
-// It MUST run (and persist) before any terminateRemovedConns call that could
-// destroy their SAs: a crash between termination and persistence must leave
-// the deferred-start debt on disk for the next Manager to discharge.
-// onlyPendingNames restricts the recording to the named set; nil records all.
-func (m *Manager) rememberDeferredReinitiation(changed []string, onlyPendingNames map[string]bool) {
+// rememberDeferredReinitiation records connections whose SAs an
+// indeterminate or not-yet-proven reload path may destroy, and cannot
+// safely be re-initiated yet. It MUST run (and persist) before any
+// terminateRemovedConns call that could destroy their SAs: a crash between
+// termination and persistence must leave the deferred-start debt on disk
+// for the next Manager to discharge.
+func (m *Manager) rememberDeferredReinitiation(changed []string) {
 	if len(changed) == 0 {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, name := range changed {
-		if onlyPendingNames != nil && !onlyPendingNames[name] {
-			continue
-		}
 		if m.pendingReinitiate == nil {
 			m.pendingReinitiate = make(map[string]bool)
 		}
@@ -1409,22 +1410,6 @@ func (m *Manager) pendingReinitiationNames() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return sortedConnNames(m.pendingReinitiate)
-}
-
-func (m *Manager) pendingConnNames() map[string]bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make(map[string]bool, len(m.pendingTerminate)+len(m.pendingChanged)+len(m.pendingCandidateHashes))
-	for name := range m.pendingTerminate {
-		out[name] = true
-	}
-	for name := range m.pendingChanged {
-		out[name] = true
-	}
-	for name := range m.pendingCandidateHashes {
-		out[name] = true
-	}
-	return out
 }
 
 // clearDeferredReinitiation drops deferred-start debt for connections whose
@@ -1578,16 +1563,23 @@ func (m *Manager) connDiffLocked(newNames map[string]bool, newHashes map[string]
 	}
 	// #17882: candidate-only connections staged by an indeterminate apply
 	// (pendingCandidateHashes) have no prior fingerprint. A later apply must
-	// still see them: removal drops them from the candidate render, so they
-	// surface here as removals; rotation compares the staged candidate
-	// fingerprint against the new render and surfaces them as changes.
+	// still see them when they change or depart: removal drops them from the
+	// candidate render, so they surface here as removals; rotation compares
+	// the staged candidate fingerprint against the new render and surfaces
+	// them as changes. An UNCHANGED staged name still present in the
+	// candidate must surface as NEITHER — otherwise every later apply would
+	// terminate its (possibly re-established) SA again (perpetual flap).
 	for name, stagedHash := range m.pendingCandidateHashes {
 		if seen[name] {
 			continue
 		}
 		seen[name] = true
-		removed = append(removed, name)
-		if newNames[name] && newHashes[name] != stagedHash {
+		if !newNames[name] {
+			removed = append(removed, name)
+			continue
+		}
+		if newHashes[name] != stagedHash {
+			removed = append(removed, name)
 			changed = append(changed, name)
 		}
 	}
@@ -1599,6 +1591,9 @@ func (m *Manager) connDiffLocked(newNames map[string]bool, newHashes map[string]
 // promoteConnNames records newNames — the set of connections actually
 // rendered and loaded — and their effective-content hashes. Promotion is
 // reserved for reload success or a recovered partial/candidate-proven load.
+// At promotion the staged candidate fingerprints are REFRESHED to the
+// proven render (and dropped for names no longer present): after this the
+// proven set is the baseline, so an identical later apply diffs clean.
 func (m *Manager) promoteConnNames(newNames map[string]bool, newHashes map[string]string) (removed, changed []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1608,6 +1603,16 @@ func (m *Manager) promoteConnNames(newNames map[string]bool, newHashes map[strin
 	m.prevConnHashes = newHashes
 	m.pendingTerminate = nil
 	m.pendingChanged = nil
+	for name := range m.pendingCandidateHashes {
+		if !newNames[name] {
+			delete(m.pendingCandidateHashes, name)
+		} else if hash, ok := newHashes[name]; ok {
+			m.pendingCandidateHashes[name] = hash
+		}
+	}
+	if len(m.pendingCandidateHashes) == 0 {
+		m.pendingCandidateHashes = nil
+	}
 	// #9687: any removal/change is debt from here until recordTerminateDebt settles it.
 	for _, name := range removed {
 		if m.inflight == nil {
