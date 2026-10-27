@@ -19961,15 +19961,11 @@ fn delete_drop_sweep_then_late_delete_preserves_replacement_nat64_port_14961() {
         .nat64
         .allocate_source_for_worker(
             0,
-            PROTO_TCP,
-            "2001:db8::2".parse().unwrap(),
+            &replacement_key,
             "8.8.8.8".parse().unwrap(),
-            5000,
-            443,
             2_500_000,
             WORKER,
             &[],
-            0,
             None,
         )
         .expect("the freed port must be allocatable to a fresh local flow");
