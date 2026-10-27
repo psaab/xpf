@@ -3465,7 +3465,7 @@ fn reverse_sessionless_companion_uses_forward_provenance_10582() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_000, secs: 0 },
+            tick: Tick::from_ns(2_000_000),
         },
         &forwarding,
         &fwd_key,
