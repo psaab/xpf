@@ -2,10 +2,10 @@ package routing
 
 import (
 	"log/slog"
-	"net"
 	"sync"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/linkstate"
 	"github.com/vishvananda/netlink"
 )
 
@@ -22,11 +22,11 @@ type InterfaceMonitorStatus struct {
 	Clamped          bool
 }
 
-// monitorManager owns interface-monitor link-state tracking for
-// redundancy groups. This is the only live HA signal in the routing
-// package: ApplyInterfaceMonitors results feed cluster weight via
-// InterfaceMonitorStatuses. The mu field replaces the former shared
-// Manager.mu.
+// monitorManager is a DISPLAY-ONLY sample of interface-monitor link state
+// for `show chassis cluster interfaces` (#17132). It is NOT an election
+// producer: pkg/cluster.Monitor is the only producer of interface-monitor
+// debt. This sample never feeds SetMonitorWeight. The mu field replaces
+// the former shared Manager.mu.
 type monitorManager struct {
 	ops linkOps
 
@@ -49,20 +49,12 @@ func (mm *monitorManager) Apply(groups []*config.RedundancyGroup) {
 		var statuses []InterfaceMonitorStatus
 		for _, mon := range rg.InterfaceMonitors {
 			// #6549: bound the configured weight to the [0,255] heartbeat
-			// weight domain. These statuses are not display-only — the daemon
-			// config-apply tail feeds them straight into
-			// cluster.Manager.SetMonitorWeight as election debt
-			// (daemon_apply_tail.go), so the raw value would install
-			// out-of-range debt; and `show chassis cluster interfaces` renders
-			// them, so a raw value would report a weight the election does not
-			// use. The strict commit path rejects an out-of-range weight; the
-			// tolerant load / peer-sync path only warns (#1960 no-brick), so
-			// one can still reach here. Deliberately not logged: the cluster
-			// manager's reconcileMonitorDebtsLocked already reports this
-			// weight once per config apply, against the config that carried
-			// it. (Because this clamp runs first, the SetMonitorWeight
-			// chokepoint sees an already-bounded value and stays silent — its
-			// warning fires only for a producer that skipped its own clamp.)
+			// weight domain so `show chassis cluster interfaces` renders
+			// the weight the election applies, not a raw out-of-range one.
+			// (Display only since #17132; the election's own clamp lives in
+			// pkg/cluster.) The strict commit path rejects an out-of-range
+			// weight; the tolerant load / peer-sync path only warns
+			// (#1960 no-brick), so one can still reach here.
 			weight, weightClamped := config.ClampInterfaceMonitorWeight(mon.Weight)
 
 			// Translate Junos name (ge-0/0/0) to Linux name (ge-0-0-0).
@@ -77,24 +69,15 @@ func (mm *monitorManager) Apply(groups []*config.RedundancyGroup) {
 				// ENOBUFS under load, EINTR, and a busy or truncated netlink
 				// socket, and those took the same silent branch.
 				//
-				// That matters more than a missing row in `show chassis cluster
-				// interfaces`, because these statuses are not display-only: the
-				// config-apply tail feeds each one straight into
-				// cluster.Manager.SetMonitorWeight. An interface dropped here is
-				// absent from the slice entirely, so SetMonitorWeight is never
-				// CALLED for it and its recorded weight is not recomputed -- it
-				// persists stale. If a transient error coincided with the link
-				// actually going down, the interface kept its last-known Up
-				// weight and the RG did not demote.
+				// (#17132: display only — the election reads the dampened
+				// pkg/cluster Monitor, not this sample.)
 				//
 				// isLinkNotFound (vrf.go) is the predicate the sibling bond and
 				// tunnel managers already use for this exact conflation, and
 				// both RETAIN on the transient arm rather than treating the
 				// error as absence. The faithful mirror of that here is to carry
 				// the previous pass's status forward: it keeps the interface
-				// visible in `show`, and it keeps SetMonitorWeight being called
-				// with the last value we actually observed rather than silently
-				// not being called at all.
+				// visible in `show` with the last value actually observed.
 				//
 				// Deliberately NOT synthesizing Up=false: demoting a redundancy
 				// group because a netlink lookup hiccuped would be a worse
@@ -155,22 +138,10 @@ func (mm *monitorManager) Apply(groups []*config.RedundancyGroup) {
 	}
 }
 
-// linkAttrsUp reports whether a monitored interface is operationally up.
-//
-// Interface-monitoring exists to detect carrier loss (cable pulled / peer
-// link down) and demote the redundancy group so HA failover fires. The
-// administrative IFF_UP flag (net.FlagUp) stays set whenever the interface
-// is admin-up — and xpfd admin-ups ALL managed interfaces — so it must NOT
-// be used to decide carrier health: a carrier-down link keeps IFF_UP set
-// while OperState transitions to OperDown/OperLowerLayerDown. Decide from
-// the operational state (IFLA_OPERSTATE):
-//   - OperUp                 -> up.
-//   - OperUnknown            -> fall back to the admin flag (common on
-//     virtual devices that report no carrier state).
-//   - OperDown / lower-layer-down / anything else -> down.
-//
-// This mirrors pkg/vrrp.linkAttrsUp, the canonical link-state read used by
-// VRRP track-interface detection (#2070).
+// linkAttrsUp is an alias of linkstate.Up (#17132: one predicate repo-wide;
+// see pkg/linkstate for the carrier rule, #2070).
+func linkAttrsUp(attrs *netlink.LinkAttrs) bool { return linkstate.Up(attrs) }
+
 // findPrevMonitorStatus returns the previous pass's status for one monitored
 // interface in one redundancy group.
 //
@@ -184,17 +155,6 @@ func findPrevMonitorStatus(prev map[int][]InterfaceMonitorStatus, rgID int, ifac
 		}
 	}
 	return InterfaceMonitorStatus{}, false
-}
-
-func linkAttrsUp(attrs *netlink.LinkAttrs) bool {
-	switch attrs.OperState {
-	case netlink.OperUp:
-		return true
-	case netlink.OperUnknown:
-		return attrs.Flags&net.FlagUp != 0
-	default:
-		return false
-	}
 }
 
 // Statuses returns the current monitor state for all redundancy groups.

@@ -73,9 +73,15 @@ func isNoSuchInterface(err error) bool {
 const (
 	// DefaultNetworkDir is the systemd-networkd configuration directory.
 	DefaultNetworkDir = "/etc/systemd/network"
-	// filePrefix distinguishes xpf-managed files from manually created ones.
-	filePrefix = "10-xpf-"
+	// FilePrefix distinguishes xpf-managed files from manually created ones.
+	// Exported (#17042, R4-Q43-01) so pkg/daemon's boot/RETH writers build
+	// the same 10-xpf-<name>.link path through RenderLink/WriteUnitIfChanged
+	// instead of keeping a second literal for the shared namespace.
+	FilePrefix = "10-xpf-"
 )
+
+// filePrefix is the unexported alias used throughout this package.
+const filePrefix = FilePrefix
 
 // InterfaceConfig describes a single interface for networkd generation.
 type InterfaceConfig struct {
@@ -1674,35 +1680,134 @@ func (m *Manager) generateBridgeNetdev(ifc InterfaceConfig) string {
 	return b.String()
 }
 
-func (m *Manager) generateLink(ifc InterfaceConfig) string {
+// LinkSpec is the pure input to RenderLink (#17042, R4-Q43-01). It carries
+// exactly the fields generateLink renders, so pkg/daemon's boot-time and
+// RETH rename-recovery writers — which run when no InterfaceConfig exists —
+// render through the same code instead of their own stripped copies.
+type LinkSpec struct {
+	Name         string // [Link] Name= target
+	OriginalName string // [Match] OriginalName= when non-empty
+	MACAddress   string // [Match] MACAddress= when OriginalName is empty
+	MTU          int    // MTUBytes= when > 0
+	Speed        string // Junos speed, converted to BitsPerSecond=
+	Duplex       string // "full"/"half" -> Duplex=; "auto" -> AutoNegotiation=yes
+	Description  string // Description= when non-empty (control-sanitized)
+}
+
+// validateLinkSpec owns the guard ladder for both rendered .link slots
+// (#17042): Name is checked as a [Match] Name= value (SafeInterfaceName +
+// glob + negation), OriginalName as a [Match] OriginalName= value (same
+// three, with empty meaning unset), and the MAC/speed/duplex tokens via
+// renderedUnitTokenError's link arm. generateLink and RenderLink share it
+// so a future belt lands once. [Link] Name= as a directive is literal
+// non-match syntax, but the name ALSO becomes a [Match] Name= in the
+// .network unit and a file-name component, so the match-list ladder
+// applies — exactly as Apply's filter loop already enforces.
+func validateLinkSpec(spec LinkSpec) error {
+	if !rendersafe.SafeInterfaceName(spec.Name) {
+		return fmt.Errorf("networkd: refusing interface name %q: it must be exactly one [Match] Name= pattern and may not contain control bytes or end in a backslash (systemd line continuation) (#9886/#10718)", spec.Name)
+	}
+	if glob := rendersafe.FirstGlobMetacharacter(spec.Name); glob != "" {
+		return fmt.Errorf("networkd: refusing interface name %q: glob metacharacter %q in [Match] Name= would be interpreted as a shell-style glob and claim every matching interface (#10089)", spec.Name, glob)
+	}
+	if rendersafe.IsNegatedMatchPattern(spec.Name) {
+		return fmt.Errorf("networkd: refusing interface name %q: a leading '!' in [Match] Name= inverts the match list, so the unit would claim every interface except the named one (#15079)", spec.Name)
+	}
+	if spec.OriginalName != "" && !rendersafe.SafeInterfaceName(spec.OriginalName) {
+		return fmt.Errorf("networkd: refusing OriginalName %q for interface %q: it must be exactly one [Match] OriginalName= pattern and may not contain control bytes or end in a backslash (systemd line continuation) (#9886/#10718)", spec.OriginalName, spec.Name)
+	}
+	if spec.OriginalName != "" {
+		if glob := rendersafe.FirstGlobMetacharacter(spec.OriginalName); glob != "" {
+			return fmt.Errorf("networkd: refusing OriginalName %q for interface %q: glob metacharacter %q in [Match] OriginalName= would be interpreted as a shell-style glob and claim every matching interface (#10089)", spec.OriginalName, spec.Name, glob)
+		}
+		if rendersafe.IsNegatedMatchPattern(spec.OriginalName) {
+			return fmt.Errorf("networkd: refusing OriginalName %q for interface %q: a leading '!' in [Match] OriginalName= inverts the match list, so the unit would claim every interface except the named one (#15079)", spec.OriginalName, spec.Name)
+		}
+	}
+	if err := renderedUnitTokenError(InterfaceConfig{
+		Name: spec.Name, OriginalName: spec.OriginalName, MACAddress: spec.MACAddress,
+		Speed: spec.Speed, Duplex: spec.Duplex,
+	}); err != nil {
+		return err
+	}
+	return confinedInterfaceName(spec.Name)
+}
+
+// renderLinkBody renders the .link content for spec. The caller must have
+// validated spec (generateLink's callers do so in Apply's filter loop;
+// RenderLink does so itself).
+func renderLinkBody(spec LinkSpec) string {
 	var b strings.Builder
 	b.WriteString("# Managed by xpfd — do not edit\n")
 	b.WriteString("[Match]\n")
-	if ifc.OriginalName != "" {
+	if spec.OriginalName != "" {
 		// RETH members: match by kernel name (PCI-based, stable across
 		// reboots) because the MAC alternates between physical and virtual.
-		fmt.Fprintf(&b, "OriginalName=%s\n", ifc.OriginalName)
+		fmt.Fprintf(&b, "OriginalName=%s\n", spec.OriginalName)
 	} else {
-		fmt.Fprintf(&b, "MACAddress=%s\n", ifc.MACAddress)
+		fmt.Fprintf(&b, "MACAddress=%s\n", spec.MACAddress)
 	}
 	b.WriteString("\n[Link]\n")
-	fmt.Fprintf(&b, "Name=%s\n", ifc.Name)
-	if ifc.MTU > 0 {
-		fmt.Fprintf(&b, "MTUBytes=%d\n", ifc.MTU)
+	fmt.Fprintf(&b, "Name=%s\n", spec.Name)
+	if spec.MTU > 0 {
+		fmt.Fprintf(&b, "MTUBytes=%d\n", spec.MTU)
 	}
-	if speed := junosSpeedToNetworkd(ifc.Speed); speed != "" {
+	if speed := junosSpeedToNetworkd(spec.Speed); speed != "" {
 		fmt.Fprintf(&b, "BitsPerSecond=%s\n", speed)
 	}
-	switch ifc.Duplex {
+	switch spec.Duplex {
 	case "full", "half":
-		fmt.Fprintf(&b, "Duplex=%s\n", ifc.Duplex)
+		fmt.Fprintf(&b, "Duplex=%s\n", spec.Duplex)
 	case "auto":
 		b.WriteString("AutoNegotiation=yes\n")
 	}
-	if ifc.Description != "" {
-		fmt.Fprintf(&b, "Description=%s\n", sanitizeUnitValue(ifc.Description))
+	if spec.Description != "" {
+		fmt.Fprintf(&b, "Description=%s\n", sanitizeUnitValue(spec.Description))
 	}
 	return b.String()
+}
+
+// RenderLink validates spec and returns the exact .link content
+// generateLink writes for the equivalent InterfaceConfig (#17042,
+// R4-Q43-01). Pure: no I/O. This is the single renderer for the
+// 10-xpf-<name>.link unit; pkg/daemon's boot writer calls it with only
+// Name+OriginalName, which is also why its output gains the trailing
+// newline generateLink always emitted.
+func RenderLink(spec LinkSpec) (string, error) {
+	if spec.OriginalName == "" && spec.MACAddress == "" {
+		return "", fmt.Errorf("networkd: refusing .link for interface %q: neither OriginalName nor MACAddress is set, so the [Match] section would match nothing (#17042)", spec.Name)
+	}
+	if err := validateLinkSpec(spec); err != nil {
+		return "", err
+	}
+	return renderLinkBody(spec), nil
+}
+
+// WriteUnitIfChanged writes content to dir/FilePrefix+name+suffix only if
+// it differs from the existing file (#17042). It is writeIfChanged with
+// the managed path built from the exported prefix, so daemon writers
+// share networkd's read-compare-write instead of a second copy. For
+// .link writes the error is re-prefixed "write .link" — the daemon's
+// old writer returned "write .link <path>: …" and the #12718/#5842
+// cells pin that substring on the fail-closed channel; other suffixes
+// keep writeIfChanged's error verbatim. Returns (changed, err).
+func WriteUnitIfChanged(dir, name, suffix, content string) (bool, error) {
+	if err := confinedInterfaceName(name); err != nil {
+		return false, err
+	}
+	path := filepath.Join(dir, FilePrefix+name+suffix)
+	changed, err := writeIfChanged(path, content)
+	if err != nil && suffix == ".link" {
+		return false, fmt.Errorf("write .link %s: %w", path, errors.Unwrap(err))
+	}
+	return changed, err
+}
+
+func (m *Manager) generateLink(ifc InterfaceConfig) string {
+	return renderLinkBody(LinkSpec{
+		Name: ifc.Name, OriginalName: ifc.OriginalName, MACAddress: ifc.MACAddress,
+		MTU: ifc.MTU, Speed: ifc.Speed, Duplex: ifc.Duplex, Description: ifc.Description,
+	})
 }
 
 func (m *Manager) generateNetwork(ifc InterfaceConfig) string {

@@ -542,7 +542,7 @@ func TestJunosHostNftMatchesRustOracle(t *testing.T) {
 		res := policymatch.Match(cfg, policymatch.Query{
 			FromZone: "untrust", ToZone: policymatch.JunosHostZone,
 			SrcIP: ip, DstIP: net.ParseIP("10.0.2.10"),
-			Protocol: "tcp", DstPort: 22,
+			Protocol: "tcp", DstPort: policymatch.PortPtr(22),
 		})
 		oracleDeny := res.Matched && res.Action == config.PolicyDeny
 		// nft projection verdict.
@@ -581,7 +581,7 @@ func TestJunosHostExemptTupleParity(t *testing.T) {
 		res := policymatch.Match(junosHostDenyTestConfig4146Oracle(), policymatch.Query{
 			FromZone: "untrust", ToZone: policymatch.JunosHostZone,
 			SrcIP: net.ParseIP("10.0.0.5"), DstIP: net.ParseIP("10.0.2.10"),
-			Protocol: proto, DstPort: port,
+			Protocol: proto, DstPort: policymatch.PortPtr(uint16(port)),
 		})
 		return res.Matched && res.Action == config.PolicyDeny
 	}

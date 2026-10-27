@@ -660,7 +660,9 @@ pub(crate) use coordinator::neigh_monitor_test_serial;
 #[cfg(test)]
 pub(crate) use coordinator::{ListTestWorker, register_list_test_worker};
 // #8121 part 2: idle persistent-NAT lease sync records.
-pub(crate) use coordinator::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
+pub(crate) use coordinator::{
+    IdleLeaseImportCounts, LeasePoolId, LeasePoolMode, PoolDisplayLease, PoolIdleLease,
+};
 // afxdp/tests.rs (14k-LOC catch-all) was split into cohesive per-subsystem
 // sibling test modules plus a shared support module in #4840. Pure test
 // code-motion; each file carries the union use-block and reaches production
@@ -874,7 +876,7 @@ pub(crate) use self::coordinator::{MandatoryPin, ReconcileStage, WorkerBindShort
 pub(in crate::afxdp) use self::coordinator::WorkerRuntimeRecord;
 // #2962: the lock-free owner-RG export wait handle. The control-socket
 // dispatcher (server/handlers) names this as the return type of
-// kick_owner_rg_export so it can run the blocking ack-wait off the
+// kick_owner_rg_export_unpaged so it can run the blocking ack-wait off the
 // global ServerState lock.
 pub(crate) use self::ha::OwnerRgExportWait;
 // #4054: re-export the two-phase all-sessions bulk export handle so the

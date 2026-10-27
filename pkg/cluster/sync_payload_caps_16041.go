@@ -219,6 +219,24 @@ var syncMsgDescriptors = []syncMsgDescriptor{
 	{id: syncMsgPersistentNatLeaseDeterministic, name: "PersistentNatLeaseDeterministic", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
 	{id: syncMsgPersistentNatLeaseProvenance, name: "PersistentNatLeaseProvenance", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
 	{id: syncMsgPersistentNatLeaseDeterministicProvenance, name: "PersistentNatLeaseDeterministicProvenance", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	// Typed-pool lease batches (#17099, types 52/53): same exact-layout
+	// generation-bearing batches as 50/51 plus the per-record typed-pool
+	// tail (pool_kind byte + nat64_prefix string + nat64_scope string,
+	// each string u16-length-prefixed via putLeaseString). NOT growable
+	// (#18116): decodeOnePersistentNatLeaseLayoutTyped requires
+	// off==len per record and the batch loop consumes the buffer
+	// exactly, so a trailing byte is a layout mismatch, not an
+	// extension. The scope text rides inside each record: the sender
+	// chunks records below maxSyncPayload (persistentNatLeaseFrameBudget
+	// = maxSyncPayload-64, budget check in
+	// encodePersistentNatLeaseLayoutFrames drops any single record —
+	// scope text included — that cannot fit any frame, and
+	// QueuePersistentNatLeaseBatch refuses any framed payload +
+	// fullSetSeqTrailerLen over maxSyncPayload), so the encoder can
+	// never emit over the global cap and it IS the per-type cap,
+	// exactly as the branch's pre-descriptor switch row had it.
+	{id: syncMsgPersistentNatLeaseTypedPool, name: "PersistentNatLeaseTypedPool", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
+	{id: syncMsgPersistentNatLeaseDeterministicTypedPool, name: "PersistentNatLeaseDeterministicTypedPool", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
 	{id: syncMsgDHCPLeaseV4, name: "DHCPLeaseV4", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
 	{id: syncMsgDHCPLeaseV6, name: "DHCPLeaseV6", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},
 	{id: syncMsgDHCPLeaseV4Chunk, name: "DHCPLeaseV4Chunk", encoderMax: maxSyncPayload, maxLen: maxSyncPayload},

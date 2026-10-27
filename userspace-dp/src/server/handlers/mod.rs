@@ -53,7 +53,7 @@ use std::time::Duration;
 /// Only the post-wait status attach is shared. `status_after_wait` is the
 /// single predicate the in-lock attach consults instead of a hand-kept
 /// boolean over the individual `Option`s.
-enum Deferred {
+pub(crate) enum Deferred {
     Settle(Duration),
     OwnerRgExport(crate::afxdp::OwnerRgExportWait),
     AllSessionsExport(crate::afxdp::AllSessionsExport),
@@ -128,16 +128,46 @@ mod deferred_17135_tests {
 
     #[test]
     fn deferred_status_after_wait_classifies_each_variant_17135() {
-        // Settle is the only payload constructible without a live
-        // coordinator/export fixture; OwnerRgExport/AllSessionsExport/
-        // CounterQuery carry opaque worker handles. Their classification
-        // is pinned by the `matches!` in `status_after_wait` and exercised
-        // end-to-end by the #2962/#4054/#7919 dispatcher cells.
+        // Every variant is built from a REAL kick on an empty coordinator
+        // (no workers, no sessions): OwnerRgExport via the empty-set kick
+        // (#2962 no-op), CounterQuery via the broadcast with zero workers
+        // (#7919), AllSessionsExport via the bulk snapshot with a test
+        // event stream and no sessions (#4054). Pinning CounterQuery ->
+        // false is load-bearing: it is the sole variant whose status was
+        // already attached in-lock, so a flipped arm would double-attach.
         assert!(Deferred::Settle(Duration::from_secs(2)).status_after_wait());
+
+        let coordinator = crate::afxdp::Coordinator::new();
+        let owner_wait = coordinator
+            .kick_owner_rg_export_unpaged(&[], 0)
+            .expect("empty owner-RG kick");
+        assert!(Deferred::OwnerRgExport(owner_wait).status_after_wait());
+
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 40001,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let counter_wait = coordinator.kick_session_counter_query(&key);
+        assert!(
+            !Deferred::CounterQuery(counter_wait).status_after_wait(),
+            "CounterQuery attaches in-lock; it must NOT attach after the wait"
+        );
+
+        let (sender, _rx) = crate::event_stream::EventStreamSender::test_sender(true, 16);
+        let mut coordinator = crate::afxdp::Coordinator::new();
+        coordinator.event_stream = Some(sender);
+        let all_export = coordinator
+            .snapshot_all_sessions_export()
+            .expect("empty bulk export");
+        assert!(Deferred::AllSessionsExport(all_export).status_after_wait());
     }
 }
-
-
 
 /// #9629: which socket accepted this connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

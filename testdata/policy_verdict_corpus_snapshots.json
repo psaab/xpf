@@ -6,12 +6,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -56,12 +56,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -87,7 +87,7 @@
         },
         {
           "rule_id": "junos-global-\u003ejunos-global/g-deny",
-          "policy_id": 256,
+          "policy_id": 1,
           "name": "g-deny",
           "from_zone": "junos-global",
           "to_zone": "junos-global",
@@ -114,12 +114,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -147,12 +147,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -181,12 +181,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ],
@@ -247,12 +247,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -304,12 +304,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -343,12 +343,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -400,12 +400,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ],
@@ -442,12 +442,52 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
+          "host_inbound_configured": true
+        }
+      ]
+    },
+    "port-zero-range-17081": {
+      "default_policy": "permit",
+      "rules": [
+        {
+          "rule_id": "trust-\u003euntrust/d",
+          "name": "d",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "app-low"
+          ],
+          "application_terms": [
+            {
+              "name": "app-low",
+              "protocol": "udp",
+              "destination_port": "0-1023"
+            }
+          ],
+          "action": "deny"
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -479,17 +519,17 @@
       "zones": [
         {
           "name": "dmz",
-          "id": 56918,
+          "id": 1053679769,
           "host_inbound_configured": true
         },
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -515,7 +555,7 @@
         },
         {
           "rule_id": "untrust-\u003eany/to-any-permit",
-          "policy_id": 256,
+          "policy_id": 1,
           "name": "to-any-permit",
           "from_zone": "untrust",
           "to_zone": "any",
@@ -534,17 +574,17 @@
       "zones": [
         {
           "name": "dmz",
-          "id": 56918,
+          "id": 1053679769,
           "host_inbound_configured": true
         },
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -570,7 +610,7 @@
         },
         {
           "rule_id": "any-\u003etrust/from-any-deny",
-          "policy_id": 256,
+          "policy_id": 1,
           "name": "from-any-deny",
           "from_zone": "any",
           "to_zone": "trust",
@@ -589,17 +629,17 @@
       "zones": [
         {
           "name": "dmz",
-          "id": 56918,
+          "id": 1053679769,
           "host_inbound_configured": true
         },
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -627,12 +667,12 @@
       "zones": [
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ],
@@ -669,17 +709,17 @@
       "zones": [
         {
           "name": "dmz",
-          "id": 56918,
+          "id": 1053679769,
           "host_inbound_configured": true
         },
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
@@ -707,17 +747,17 @@
       "zones": [
         {
           "name": "dmz",
-          "id": 56918,
+          "id": 1053679769,
           "host_inbound_configured": true
         },
         {
           "name": "trust",
-          "id": 50675,
+          "id": 2868932339,
           "host_inbound_configured": true
         },
         {
           "name": "untrust",
-          "id": 20665,
+          "id": 1929257543,
           "host_inbound_configured": true
         }
       ]
