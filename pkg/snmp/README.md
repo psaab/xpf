@@ -572,9 +572,14 @@ this module states the divergence, not only the compiler.
   set `SO_REUSEPORT` (coexistence, not load-balancing: the kernel
   demultiplexes by L3 domain under `udp_l3mdev_accept=1`) and arm
   `IP_PKTINFO`/`IPV6_RECVPKTINFO`; each reply is written on the socket that
-  received its request with pktinfo pinning the egress interface and
-  source to the request's ingress, so an in-band reply leaves from the
-  polled trust/reth address and a management reply from the fxp0 address.
+  received its request with pktinfo pinning the reply source to the polled
+  local address, so an in-band reply leaves from the polled trust/reth
+  address and a management reply from the fxp0 address. Reply egress
+  follows the request's ingress interface (the explicit oif is what makes a
+  VRF-domain lookup reach the VRF's table) — except that a request ingressed
+  through one of the userspace reinjection TUNs (`xpf-usp0`/`xpf-usp1`,
+  write-only AF_XDP local-delivery taps) never echoes that ifindex: the
+  reply is routed normally instead of being stranded in the TUN (#17832).
   Without a device there is a single unbound listener. Packet handling
   stays serialized across both sockets (`handleMu`) because the v3
   `lastPacket` auth state is per-Agent.

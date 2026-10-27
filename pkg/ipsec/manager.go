@@ -125,6 +125,15 @@ type Manager struct {
 	// Apply callers (the ordered commit path and DHCP-rebind re-render both call
 	// Apply).
 	mu sync.Mutex
+	// opMu serializes the EXTERNAL swanctl effects of InitiateConnection
+	// and the terminate path (#17858). It is deliberately separate from mu:
+	// mu guards loaded-config bookkeeping across Apply callers, opMu orders
+	// initiate vs terminate execs. The HA failback path bumps the RG
+	// ownership epoch BEFORE launching its re-initiate leg, so a terminate
+	// whose ownership guard read a pre-failback epoch while holding opMu is
+	// provably ordered before (or aborted by) that leg's initiate — see
+	// TerminateConnectionGuarded.
+	opMu sync.Mutex
 	// prevConnNames and prevConnHashes describe the rendered connections from
 	// the most recent successful Apply. Departed names and same-name security
 	// content changes both require stale live SAs to be torn down.
