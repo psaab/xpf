@@ -42,39 +42,8 @@ func ListShrinkHistoryCrashTemps(path string) ([]string, error) {
 // fail closed so a clean zeroize receipt cannot leave prior-tenant bytes under
 // another name.
 func EraseShrinkHistoryCrashTemps(path string) error {
-	temps, err := ListShrinkHistoryCrashTemps(path)
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, temp := range temps {
-		info, err := os.Lstat(temp)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("feeds: inspect shrink-history crash temp %s: %w", temp, err))
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			errs = append(errs, fmt.Errorf("feeds: shrink-history crash temp %s is a symlink; NOT erasing it", temp))
-			continue
-		}
-		hardlinks, err := configstore.CollectHardlinkedFiles(temp, "")
-		if err != nil {
-			errs = append(errs, fmt.Errorf("feeds: inspect hard links for shrink-history crash temp %s: %w", temp, err))
-			continue
-		}
-		if len(hardlinks) != 0 {
-			errs = append(errs, fmt.Errorf("feeds: refusing to erase hard-linked shrink-history crash temp %s: %w", temp, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
-			continue
-		}
-		if err := os.Remove(temp); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("feeds: remove shrink-history crash temp %s: %w", temp, err))
-		}
-	}
-	if len(errs) != 0 {
-		return errors.Join(errs...)
+	if err := configstore.SweepCrashTemps(func() ([]string, error) { return ListShrinkHistoryCrashTemps(path) }); err != nil {
+		return fmt.Errorf("feeds: %w", err)
 	}
 	if err := fsatomic.SyncDir(filepath.Dir(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("feeds: sync shrink-history directory for %s: %w", path, err)

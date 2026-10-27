@@ -1005,6 +1005,18 @@ func wipeClearDir(dir string) error {
 // retry succeed over bytes a sibling still holds.
 func wipeRemovePath(path string) error {
 	info, err := os.Lstat(path)
+	if err == nil && info.Mode().IsRegular() {
+		// Single regular file: the shared primitive (#17171) owns the
+		// inspect -> refuse symlink -> refuse hardlink -> remove
+		// sequence. Only the seal leg's parent-sync barrier stays here.
+		if err := configstore.EraseFileForReset(path); err != nil {
+			return fmt.Errorf("zeroize: %w", err)
+		}
+		if err := wipeSyncDurable(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("zeroize: sync parent of %s: %w", path, err)
+		}
+		return nil
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		// Retry durability: the unlink may have landed on an attempt whose
 		// barrier failed. Syncing the nearest surviving ancestor retires

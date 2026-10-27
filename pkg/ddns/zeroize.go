@@ -55,15 +55,8 @@ func EraseStateIfEmpty(path string) error {
 	if err := CheckStateEmpty(path); err != nil {
 		return err
 	}
-	hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
-	if herr != nil {
-		return fmt.Errorf("ddns: inspect hard links for %s: %w", path, herr)
-	}
-	if len(hardlinks) != 0 {
-		return fmt.Errorf("ddns: refusing to erase hard-linked %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("ddns: remove empty ownership state %s: %w", path, err)
+	if err := configstore.EraseFileForReset(path); err != nil {
+		return fmt.Errorf("ddns: %w", err)
 	}
 	if err := sweepCrashTemps(path); err != nil {
 		return err
@@ -107,38 +100,10 @@ func ListCrashTemps(path string) ([]string, error) {
 // this store's base name so another writer's temps in the shared directory
 // are untouched. A symlinked temp fails closed for operator inspection.
 func sweepCrashTemps(path string) error {
-	temps, err := ListCrashTemps(path)
-	if err != nil {
-		return err
+	if err := configstore.SweepCrashTemps(func() ([]string, error) { return ListCrashTemps(path) }); err != nil {
+		return fmt.Errorf("ddns: %w", err)
 	}
-	var errs []error
-	for _, full := range temps {
-		info, err := os.Lstat(full)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("ddns: inspect crash temp %s: %w", full, err))
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			errs = append(errs, fmt.Errorf("ddns: crash temp %s is a symlink; NOT erasing it", full))
-			continue
-		}
-		hardlinks, herr := configstore.CollectHardlinkedFiles(full, "")
-		if herr != nil {
-			errs = append(errs, fmt.Errorf("ddns: inspect hard links for crash temp %s: %w", full, herr))
-			continue
-		}
-		if len(hardlinks) != 0 {
-			errs = append(errs, fmt.Errorf("ddns: refusing to erase hard-linked crash temp %s: %w", full, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
-			continue
-		}
-		if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("ddns: remove crash temp %s: %w", full, err))
-		}
-	}
-	return errors.Join(errs...)
+	return nil
 }
 func checkNoStateResidue(path string) error {
 	if _, err := os.Lstat(degradedMarkerPath(path)); err == nil {

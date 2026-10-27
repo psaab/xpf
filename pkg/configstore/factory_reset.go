@@ -367,6 +367,69 @@ func CollectHardlinkedFiles(root, exclude string) ([]HardlinkedPath, error) {
 	return out, nil
 }
 
+// EraseFileForReset erases ONE regular file for a factory reset (#17171):
+// absent -> nil; symlink -> FactoryResetSymlinkError; non-regular ->
+// refusal; hardlinked -> FactoryResetHardlinkError; otherwise os.Remove.
+// It is the single-file, no-RemoveAll form of the reset-erase discipline
+// that wipeRemovePath (RemoveAll-capable, directory-aware) cannot offer,
+// exported from here — which already owns CollectHardlinkedFiles,
+// SymlinkTarget, FactoryResetHardlinkError and FactoryResetSymlinkError
+// and is imported by every caller — so the Lstat -> refuse symlink ->
+// refuse hardlink -> remove sequence is written once, not hand-rolled
+// per package. Callers wrap the returned error with their own prefix
+// (fmt.Errorf("ddns: %w", err)) so asserted prefixes survive and
+// errors.As still finds the typed refusals.
+func EraseFileForReset(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if sk, isLink := SymlinkTarget(path); isLink {
+		return &FactoryResetSymlinkError{Skipped: []SymlinkedTarget{sk}}
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing to erase non-regular file %s", path)
+	}
+	hardlinks, herr := CollectHardlinkedFiles(path, "")
+	if herr != nil {
+		return fmt.Errorf("inspect hard links for %s: %w", path, herr)
+	}
+	if len(hardlinks) != 0 {
+		// Fail BEFORE unlinking: removing first would destroy the census
+		// evidence and let a retry succeed while a sibling retains the
+		// bytes.
+		return &FactoryResetHardlinkError{Paths: hardlinks}
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// SweepCrashTemps erases every path returned by list, each through
+// EraseFileForReset, joining per-file failures. The ddns/ipsec/feeds
+// crash-temp triplet (#17171) shared this list-then-refuse-then-remove
+// loop; it lives here so a hardening of the erase discipline lands in
+// all of them at once. list itself stays per-package (the crash-temp
+// match rule differs and backs post-sweep verification). Callers wrap
+// the joined error with their own prefix.
+func SweepCrashTemps(list func() ([]string, error)) error {
+	temps, err := list()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, full := range temps {
+		if err := EraseFileForReset(full); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // ArchiveDirSkippedError reports that the config archive was NOT erased because
 // its directory could not be proven to be xpf-owned (#7173).
 //
