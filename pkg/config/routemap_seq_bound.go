@@ -168,13 +168,28 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 	return total
 }
 
+// sanitizeCommunityMember18055 mirrors pkg/frr's sanitizeFRRValue for
+// community members (control bytes and DEL collapse to space) — the
+// rendered form every frr predicate judges since #18055.
+func sanitizeCommunityMember18055(s string) string {
+	b := []byte(s)
+	for i := range b {
+		if b[i] < 0x20 || b[i] == 0x7f {
+			b[i] = ' '
+		}
+	}
+	return string(b)
+}
+
 // communityChainWidth16869 mirrors pkg/frr's communityChainWidth16835:
 // the distinct-member count of a multi-member EXPANDED community
 // definition that actually renders its #16835 chain lists, else 0.
-// Renderable means every member passes ValidCommunityMember, the
-// distinct count is within the #15779 permutation bound (4), and at
-// least two distinct members exist. pkg/config cannot import pkg/frr,
-// so the predicates are re-derived from the shared config helpers
+// Renderable means every member passes ValidCommunityMember ON ITS
+// RENDERED (sanitized) FORM — pkg/frr's communityListRenderable
+// judges the sanitized spelling since #18055, so this mirror must
+// too or the sequence bound drifts from the renderer in both
+// directions. pkg/config cannot import pkg/frr, so the predicates
+// are re-derived from the shared config helpers
 // (CommunityMemberIsRegex, ValidCommunityMember) the frr predicates
 // themselves delegate to.
 func communityChainWidth16869(po *PolicyOptionsConfig, name string) int {
@@ -201,7 +216,7 @@ func communityChainWidth16869(po *PolicyOptionsConfig, name string) int {
 		return 0
 	}
 	for _, m := range cd.Members {
-		if ValidCommunityMember(m) != nil {
+		if ValidCommunityMember(sanitizeCommunityMember18055(m)) != nil {
 			return 0
 		}
 	}
