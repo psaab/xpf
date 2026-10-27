@@ -87,9 +87,22 @@ driveable work remains.
   If a model runs out
   of credits / is quota-blocked or unreachable, swap in the next pool
   model immediately and note the swap on the PR — a blocked reviewer
-  never waives the gate and never idles a lane. Dispatch mechanics
-  and the auditable verdict stamp are in Step 3. Message-shape gate
-  first (see Step 3).
+  never waives the gate and never idles a lane.
+- **Model seat-swap on quota death (ANY seat, user directive
+  2026-10-27)**: the swap rule above covers engineers, gate runners,
+  and researchers identically, not just reviewers. On a
+  quota/429/rate-limit death (e.g. GLM-5.3 `[1308]`), the parent MUST
+  in the SAME turn: (1) salvage the dead lane's worktree in place
+  (verify + finish inline or hand the worktree to the replacement
+  lane — never re-dispatch over it), and (2) re-staff the seat from
+  the bench (Kimi K3.1 Pro, Codex-6 Astra, Opus 5.5, Muse Wonder —
+  whichever pool models are live) so lane count never drops for a
+  single model's quota. A quota error is a routing event, not a work
+  stoppage: never park lanes, reviews, or gates waiting for that
+  model's reset time. The pool has five models; no single quota
+  blocks the campaign.
+  Dispatch mechanics and the auditable verdict stamp are in Step 3.
+  Message-shape gate first (see Step 3).
 - **Scratch discipline**: ALL temp files, intermediate files, tests, probes,
   and worktrees live in `/var/worktrees/` (NOT `/var/tmp`, NOT `/tmp`, NOT
   inside the repo checkout). `GOCACHE=/var/worktrees/.cache/go-build`,
