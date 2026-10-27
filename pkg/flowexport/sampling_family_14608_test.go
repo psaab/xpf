@@ -10,11 +10,11 @@ import (
 // on the trust unit must NOT select IPv6 flows, and an unselected IPv6
 // flow must not consume a 1-in-N slot; the twin `family inet6 sampling
 // input` MUST select IPv6 flows. The probe runs through the real parser
-// -> compiler -> BuildSamplingZones -> ShouldExport path.
+// -> compiler -> BuildSamplingZones -> SampledForOpen path.
 //
 // FAIL-ON-REVERT: on the pre-fix code the two compiler arms wrote one
 // family-less SamplingInput/SamplingOutput pair, BuildSamplingZones had
-// no family dimension, and ShouldExport had no family parameter — an
+// no family dimension, and SampledForOpen had no family parameter — an
 // inet-only config exported the IPv6 trust->untrust close (RED evidence
 // in docs/log/14608.md).
 
@@ -83,20 +83,20 @@ func TestSamplingPerFamily14608(t *testing.T) {
 		ec := &ExportConfig{SamplingZones: sz, SamplingRate: 2}
 		// IPv6 trust->untrust: NOT exported, on either of two calls (the
 		// second call proves no 1-in-N slot was consumed by the first).
-		if ec.ShouldExport(2, 3, true) {
+		if ec.SampledForOpen(2, 3, true, "", "") {
 			t.Fatal("IPv6 flow exported with only family inet sampling configured")
 		}
-		if ec.ShouldExport(2, 3, true) {
+		if ec.SampledForOpen(2, 3, true, "", "") {
 			t.Fatal("IPv6 flow exported on second call: an unselected family consumed a 1-in-N slot")
 		}
 		if ev, sel, _ := ec.SamplingStats(); ev != 0 || sel != 0 {
 			t.Fatalf("IPv6 evaluations consumed sampling state: evaluated=%d selected=%d, want 0/0", ev, sel)
 		}
 		// IPv4 trust->untrust IS eligible: rate 2 samples the second call in.
-		if ec.ShouldExport(2, 3, false) {
+		if ec.SampledForOpen(2, 3, false, "", "") {
 			t.Fatal("first eligible IPv4 flow must be sampled out at rate 2")
 		}
-		if !ec.ShouldExport(2, 3, false) {
+		if !ec.SampledForOpen(2, 3, false, "", "") {
 			t.Fatal("second eligible IPv4 flow must be sampled in at rate 2")
 		}
 	})
@@ -104,13 +104,13 @@ func TestSamplingPerFamily14608(t *testing.T) {
 	t.Run("inet6 only: IPv6 exported, IPv4 not", func(t *testing.T) {
 		cfg := samplingFamilyConfig14608(t, "inet6")
 		ec := &ExportConfig{SamplingZones: BuildSamplingZones(cfg, zoneIDs), SamplingRate: 2}
-		if ec.ShouldExport(2, 3, false) || ec.ShouldExport(2, 3, false) {
+		if ec.SampledForOpen(2, 3, false, "", "") || ec.SampledForOpen(2, 3, false, "", "") {
 			t.Fatal("IPv4 flow exported with only family inet6 sampling configured")
 		}
-		if ec.ShouldExport(2, 3, true) {
+		if ec.SampledForOpen(2, 3, true, "", "") {
 			t.Fatal("first eligible IPv6 flow must be sampled out at rate 2")
 		}
-		if !ec.ShouldExport(2, 3, true) {
+		if !ec.SampledForOpen(2, 3, true, "", "") {
 			t.Fatal("second eligible IPv6 flow must be sampled in at rate 2")
 		}
 	})
@@ -121,12 +121,12 @@ func TestSamplingPerFamily14608(t *testing.T) {
 		// has no output sampling in either family).
 		cfg := samplingFamilyConfig14608(t, "inet")
 		ec := &ExportConfig{SamplingZones: BuildSamplingZones(cfg, zoneIDs)}
-		if ec.ShouldExport(3, 2, true) {
+		if ec.SampledForOpen(3, 2, true, "", "") {
 			t.Fatal("IPv6 untrust->trust exported with only inet trust-input sampling")
 		}
 		// IPv4 is also unselected in this direction: ingress untrust has
 		// no input sampling and egress trust has no output sampling.
-		if ec.ShouldExport(3, 2, false) {
+		if ec.SampledForOpen(3, 2, false, "", "") {
 			t.Fatal("IPv4 untrust->trust exported (no input on untrust, no output on trust)")
 		}
 	})
@@ -138,7 +138,7 @@ func TestSamplingPerFamily14608(t *testing.T) {
 			t.Fatalf("no sampling anywhere: zones = %#v, want unrestricted (both nil)", sz)
 		}
 		ec := &ExportConfig{SamplingZones: sz}
-		if !ec.ShouldExport(2, 3, false) || !ec.ShouldExport(2, 3, true) {
+		if !ec.SampledForOpen(2, 3, false, "", "") || !ec.SampledForOpen(2, 3, true, "", "") {
 			t.Fatal("export-all broken when no interface sampling is configured")
 		}
 	})

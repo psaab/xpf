@@ -147,7 +147,7 @@ func TestInstanceFamilyFlagsStayInstanceWide_6811(t *testing.T) {
 			t.Errorf("group (template=%q isV6=%v) has ServesInet=%v ServesInet6=%v; both must "+
 				"stay TRUE because the INSTANCE serves both families. These flags gate the "+
 				"per-instance sampling decision, not the per-group fan-out — narrowing them "+
-				"to the group would make a record of the other family skip ShouldExport and "+
+				"to the group would make a record of the other family skip SampledForOpen and "+
 				"change the 1-in-N denominator (#6811/#2462)",
 				g.TemplateName, g.GroupIsV6, g.ServesInet, g.ServesInet6)
 		}

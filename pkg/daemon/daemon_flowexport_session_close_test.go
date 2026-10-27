@@ -94,7 +94,7 @@ func feedOpenThenClose15946(t *testing.T, d *Daemon, close []byte) {
 // flowIPFIXConfigPorts builds a sampling config with the v9 and IPFIX
 // collectors bound to caller-chosen ports (so a test can bind a real UDP
 // listener for each and observe the transmitted datagram). rate=1 so
-// ShouldExport always admits the close.
+// SampledForOpen always admits.
 func flowIPFIXConfigPorts(addr string, v9Port, ipfixPort int) *config.Config {
 	cfg := flowSamplingConfig(addr, 1)
 	fam := cfg.ForwardingOptions.Sampling.Instances["s"].FamilyInet
@@ -123,7 +123,7 @@ func listenUDP(t *testing.T) (*net.UDPConn, int) {
 // EXPORTED FLOW RECORD (not a template — Stats.flows increments only in
 // sendRecords, never in sendTemplates), or the 3s deadline elapses. The
 // v9/IPFIX exporters flush queued records on a 100ms ticker started by
-// reconcile, so a SESSION_CLOSE admitted by ShouldExport becomes an
+// reconcile, so a SESSION_CLOSE admitted at open becomes an
 // exported flow well within the deadline. A non-zero flow count is
 // close-specific: it proves the SESSION_CLOSE-derived FlowRecord reached
 // the real exporter and was transmitted, distinct from the unconditional
@@ -341,7 +341,7 @@ func TestNonSessionCloseRawEventDoesNotDriveFlowExport(t *testing.T) {
 // twoInstanceV9Config builds a config with TWO NetFlow v9 sampling instances
 // disambiguated by address family (#2462): "alpha" serves inet (IPv4) with its
 // own collector, "bravo" serves inet6 (IPv6) with its own collector. Both at
-// rate 1 so ShouldExport always admits. Each flow-server is pinned to version9
+// rate 1 so SampledForOpen always admits. Each flow-server is pinned to version9
 // so both land in the v9 bundle (exercising the per-instance fanout walk in
 // flowExportCallback). The two collectors bind different ports so the test can
 // observe each exporter's Stats independently.
@@ -414,7 +414,7 @@ func waitInstanceFlows(t *testing.T, b *exporterBundle, inst string) uint64 {
 // instance and fans only to that instance's groups.
 //
 // Fail-on-revert: reverting the callback to the pre-#2462 global decision —
-// one ShouldExport on groups[0] then export to EVERY group regardless of
+// one SampledForOpen on groups[0] then export to EVERY group regardless of
 // family/instance — makes the IPv4 flow wrongly reach bravo (inet6), so
 // bravo's exported-flow count goes from 0 to >= 1 and this test fails.
 func TestSessionCloseMultiInstanceFamilyIsolation(t *testing.T) {

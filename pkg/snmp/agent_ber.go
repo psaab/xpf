@@ -243,6 +243,46 @@ func berEncodeValue(tag byte, value []byte) []byte {
 	return berEncodeTLV(tag, value)
 }
 
+// encodeVarbind encodes one varbind as SEQUENCE { name OID, value } and
+// appends it to dst (#17055). This is the sole varbind SEQUENCE wrap in the
+// package: buildResponseVersion, buildV3Response, buildReportPDU /
+// buildV3Discovery and both trap builders all go through it (traps build a
+// []varbind first), so a varbind-encoding change lands in exactly one place.
+//
+// Exception tags (noSuchObject / noSuchInstance / endOfMibView) carry a nil
+// value by definition; encodeVarbind preserves that even if the caller left
+// a stray value on the varbind.
+func encodeVarbind(dst []byte, vb varbind) []byte {
+	body := berEncodeTLV(tagObjectIdentifier, berEncodeOID(vb.oid))
+	if vb.tag == tagNoSuchObject || vb.tag == tagNoSuchInstance || vb.tag == tagEndOfMibView {
+		body = append(body, berEncodeTLV(vb.tag, nil)...)
+	} else {
+		body = append(body, berEncodeValue(vb.tag, vb.value)...)
+	}
+	return append(dst, berEncodeTLV(tagSequence, body)...)
+}
+
+// encodeVarbindList encodes vbs as the varbind-list SEQUENCE (SEQUENCE OF
+// VarBind) appended to nothing — it returns the complete list TLV.
+func encodeVarbindList(vbs []varbind) []byte {
+	var list []byte
+	for _, vb := range vbs {
+		list = encodeVarbind(list, vb)
+	}
+	return berEncodeTLV(tagSequence, list)
+}
+
+// encodePDU encodes a PDU whose body is request-id / error-status /
+// error-index / varbind-list (GetResponse and Report share this shape,
+// RFC 3416 §3) under the given PDU tag.
+func encodePDU(tag byte, reqID, errStatus, errIndex int, vbList []byte) []byte {
+	pduBody := berEncodeIntegerTLV(reqID)
+	pduBody = append(pduBody, berEncodeIntegerTLV(errStatus)...)
+	pduBody = append(pduBody, berEncodeIntegerTLV(errIndex)...)
+	pduBody = append(pduBody, vbList...)
+	return berEncodeTLV(tag, pduBody)
+}
+
 // --- BER decoding helpers ---
 
 // berDecodeHeader decodes a BER TLV header, returning the tag, the value bytes, and any error.
