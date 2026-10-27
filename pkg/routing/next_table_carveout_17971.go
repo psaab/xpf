@@ -108,9 +108,13 @@ func nextTableDynamicCarveoutRules(
 
 // desiredMainCarveoutRules computes the complete desired slot-0 exception
 // set: configured statics (as in #17684) plus the live learned rows. The
-// dump runs FIRST — before any kernel mutation — so a failed dump leaves the
-// installed band untouched instead of replacing it with a statics-only
-// subset (a silent partial state would re-create the #17971 divergence).
+// dump runs FIRST — before any kernel mutation inside this reconcile —
+// so a failed dump cannot replace the band with a statics-only subset
+// (a silent partial state would re-create the #17971 divergence).
+// Scope note: on the Apply/commit path, clear() and the leak reinstall
+// precede this reconcile, so the untouched-band guarantee is exact for
+// RefreshCarveouts (churn); on the commit path the error still surfaces
+// joined into the commit error and the band heals on the retry.
 func (n *nextTableManager) desiredMainCarveoutRules(
 	routes, admittedLeakRoutes []*config.StaticRoute,
 	definedInstances map[string]struct{},
