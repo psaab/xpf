@@ -134,15 +134,19 @@ func parsePktinfo(oob []byte) pktinfo {
 // into xpf-usp1 (userspace-dp/src/slowpath.rs). From the kernel's side they
 // are write-only taps — nothing reads the far end for replies — so a reply
 // whose egress is pinned to one of these ifindexes can never reach its
-// manager (#17832).
+// manager (#17832). The literals mirror the Rust DEFAULT_SLOW_PATH_TUN /
+// DELEGATED_SLOW_PATH_TUN declarations and are pinned to them by
+// reinject_tun_names_test.go; keep all three in step on any rename.
 const (
 	reinjectTUNUSP0 = "xpf-usp0"
 	reinjectTUNUSP1 = "xpf-usp1"
 )
 
 // isUserspaceReinjectTUN reports whether ifindex currently belongs to one of
-// the userspace reinjection TUNs above. A vanished device reports false (the
-// reply then leaves egress unpinned rather than pinned to a dead index).
+// the userspace reinjection TUNs above. A vanished device reports false,
+// which keeps the reply pinned to the (now stale) received ifindex:
+// fail-closed toward the #16781 VRF behaviour rather than silently
+// unpinned, and unreachable for a TUN that disappeared mid-request.
 func isUserspaceReinjectTUN(ifindex int) bool {
 	if ifindex == 0 {
 		return false

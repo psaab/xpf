@@ -1040,11 +1040,6 @@ func (a *Agent) serveOne(conn *net.UDPConn) {
 			continue
 		}
 		ingress := parsePktinfo(oob[:oobn])
-		// Reply egress follows the request's ingress interface — the
-		// explicit oif is required for VRF-domain route lookups (#17832
-		// regression run) — except on the userspace reinjection TUNs,
-		// whose write-only ifindex would strand the reply (#17832).
-		pinEgress := !isUserspaceReinjectTUN(ingress.ifindex)
 
 		srcIP := sourceIPForUDP(remoteAddr)
 		// #9917 F-139: per-source request budget plus a global aggregate
@@ -1071,6 +1066,14 @@ func (a *Agent) serveOne(conn *net.UDPConn) {
 		// serial loop forever without depleting.
 		a.serveBudget.account(srcIP, a.serveBudget.clock().Sub(start))
 		if resp != nil {
+			// Reply egress follows the request's ingress interface — the
+			// explicit oif is required for VRF-domain route lookups (#17832
+			// regression run) — except on the userspace reinjection TUNs,
+			// whose write-only ifindex would strand the reply (#17832).
+			// Resolved only for an admitted request that produced a reply:
+			// the lookup costs a full link dump, so shed datagrams must not
+			// pay it ahead of the #9917 budget that exists to shed them.
+			pinEgress := !isUserspaceReinjectTUN(ingress.ifindex)
 			if _, _, err := conn.WriteMsgUDP(resp, ingress.oob(pinEgress), remoteAddr); err != nil {
 				slog.Error("SNMP write error", "err", err, "remote", remoteAddr)
 			}
