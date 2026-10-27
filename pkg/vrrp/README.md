@@ -1513,8 +1513,14 @@ dataplane reuses this Go walker, and do NOT try to consolidate them.
   `becomeBackup` signals takeover. An already-BACKUP instance applies
   the stash in the `stepBackup` resign arm (its VIPs are already off
   the wire). A superseding priority assignment — `UpdateRGPriority`
-  or `updateConfig` — drops the stash (`discardPendingResign`) so a
-  later, unrelated step-down cannot install the resolved 0.
+  or `updateConfig` — drops the stash
+  (`discardPendingResignLocked`, under `mu`) so a later, unrelated
+  step-down cannot install the resolved 0. Applying the stash is
+  two-phase (`extractPendingResign` under `resignMu`, then
+  `commitPendingResign` under `mu` with a `resignEpoch` re-check,
+  #17859): a restore completing after the extraction but before the
+  commit bumps `resignEpoch`, so the already-extracted 0 is dropped
+  instead of overwriting the newer restored priority.
   `getPriority` ignores the stash (it exists to hide 0 from routine
   adverts), so `masterDownInterval`'s skew uses the pre-resign
   priority while pending; once the stash is applied or dropped the
