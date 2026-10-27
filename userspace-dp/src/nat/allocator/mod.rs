@@ -8267,7 +8267,7 @@ impl PortAllocator {
                     Err(TryLockError::WouldBlock) => return reclaimed,
                 };
                 self.shared
-                    .live_lock_acquisitions
+                    .live_write_lock_acquisitions
                     .fetch_add(1, Ordering::Relaxed);
                 #[cfg(test)]
                 self.shared
