@@ -1,5 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * NFQUEUE reinject: write the P-MECH tail zone id as u32 in the Go
+    submit encoder, matching both Rust readers widened by #17623
+    (#16557); the u16 writer displaced every following field and every
+    Go-produced frame failed decode. The P-MECH tail is 81 bytes, and
+    a shared Go/Rust golden frame (zone id above the u16 range) now
+    pins the wire so the pair cannot drift again (#18207).
+
   * HA: answer interface-ref → redundancy-group ownership from one
     SSOT (config.InterfaceRefRG / RefRG / RefRGIndex over
     RethRGOwners). RPM no longer name-tests `reth*`, so a structural
