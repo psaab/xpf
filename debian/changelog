@@ -13,6 +13,16 @@ xpf (0.0.0) unstable; urgency=medium
     if its stale SA is no longer live. Unreachable or candidate-proven reloads
     keep and promote the candidate. Empty or malformed listings are not proof.
     Plain Apply uses a rendered-config fingerprint (#17882).
+  * CLI/login-class: a deny alternative that merely touches the command
+    core no longer disables the pipe-text veto (#17856). #16780's guard
+    asked whether the whole deny pattern ever matched the pipe-less
+    core, so the losing `^sh` branch of `deny-commands "^sh|display set"`
+    let `show configuration | display set` run under `allow ^show` while
+    the winning `display set` branch matched only pipe text. The guard
+    now judges the branches realizing the deny's winning extent on the
+    piped spelling, so that denial stands; core-winning exception
+    geometry (`^show log 100$` beside `^show log$`, public-vrf) still
+    saves through a benign pipe.
   * Upgrade: when a rolling rollback completes after a deferred signal,
     still wait for session sync and confirm rejoin before surfacing the
     signal status. Do not classify the committed rollback as destructive

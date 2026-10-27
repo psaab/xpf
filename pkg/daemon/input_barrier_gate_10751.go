@@ -249,14 +249,16 @@ func hostInboundHasPendingEnforcingIntentFromSnapshots(cfg *config.Config, snaps
 	return dpuserspace.HostInboundPendingIntentFromSnapshots(cfg, snaps)
 }
 
-// earlyInputPendingHandoffBound bounds how long a pre-handoff pending
-// hold may keep the #10751 early input barrier standing (#16785). A
-// zoned DHCP/DHCPv6 unit that never leases — an unplugged backup WAN,
-// an ISP that never answers — otherwise holds the global policy-DROP
-// barrier over every data-zone host service indefinitely while commits
-// succeed. Five minutes is far beyond a normal first lease (seconds,
-// including the 30s link-local wait) yet short enough that a stranded
-// box recovers without operator intervention. A var so tests shrink it.
+// earlyInputPendingHandoffBound bounds how long a pre-handoff PENDING-DHCP
+// hold may keep the #10751 early input barrier standing (#16785). A zoned
+// DHCP/DHCPv6 unit that never leases — an unplugged backup WAN, an ISP that
+// never answers — otherwise holds the global policy-DROP barrier over every
+// data-zone host service indefinitely while commits succeed. Five minutes is
+// far beyond a normal first lease (seconds, including the 30s link-local
+// wait) yet short enough that a stranded box recovers without operator
+// intervention. A var so tests shrink it. #17854: only the pending hold is
+// bounded; an lo0-enforcement failure or an uncovered-destination hold has
+// no substitute backstop and is never timed out.
 var earlyInputPendingHandoffBound = 5 * time.Minute
 
 // earlyInputBarrierNow is the daemon's wall clock for the pending hold:
@@ -268,35 +270,74 @@ func (d *Daemon) earlyInputBarrierNow() time.Time {
 	return time.Now()
 }
 
-// noteEarlyInputBarrierRetained records (or refreshes) the pre-handoff
-// pending hold and reports whether the bounded handoff has expired:
-// true means the caller must hand off now instead of retaining again.
-// The first retention opens the hold at now; later retentions keep the
-// original start so repeated applies cannot extend the bound. Must be
-// called under applySem (the handoff sites are serialized there).
-func (d *Daemon) noteEarlyInputBarrierRetained(detail string) (expired bool) {
+// noteEarlyInputBarrierRetained records (or refreshes) the pre-handoff hold
+// for an UNBOUNDED retention reason — lo0 enforcement failure or changed
+// addresses (#17854). Those holds have no substitute backstop once the
+// barrier is removed, so no bound may ever time them out; only a later
+// successful apply hands off. The first retention opens the hold at now;
+// later retentions keep the original start. Must be called under applySem
+// (the handoff sites are serialized there).
+func (d *Daemon) noteEarlyInputBarrierRetained(detail string) {
 	now := d.earlyInputBarrierNow()
+	d.earlyInputBarrierStateMu.Lock()
+	defer d.earlyInputBarrierStateMu.Unlock()
 	if d.earlyInputHandoffPendingSince.IsZero() {
 		d.earlyInputHandoffPendingSince = now
 	}
 	d.earlyInputHandoffPendingDetail = detail
-	return !now.Before(d.earlyInputHandoffPendingSince.Add(earlyInputPendingHandoffBound))
 }
 
-// earlyInputPendingExpired reports whether an open pending hold has
-// crossed the bound, without opening or refreshing one.
-func (d *Daemon) earlyInputPendingExpired() bool {
+// noteEarlyInputPendingRetained records (or refreshes) the pre-handoff hold
+// for the bounded #16785 reason — pending DHCP intent — and reports whether
+// that bound has expired: true means a caller whose hold is pending-only
+// must hand off now instead of retaining again. The first PENDING retention
+// opens the bound clock at now; later retentions keep the original start so
+// repeated applies cannot extend it, and retentions for the unbounded
+// reasons neither open nor extend it. Must be called under applySem.
+func (d *Daemon) noteEarlyInputPendingRetained(detail string) (expired bool) {
+	now := d.earlyInputBarrierNow()
+	d.earlyInputBarrierStateMu.Lock()
+	defer d.earlyInputBarrierStateMu.Unlock()
 	if d.earlyInputHandoffPendingSince.IsZero() {
+		d.earlyInputHandoffPendingSince = now
+	}
+	if d.earlyInputPendingBoundSince.IsZero() {
+		d.earlyInputPendingBoundSince = now
+	}
+	d.earlyInputHandoffPendingDetail = detail
+	return !now.Before(d.earlyInputPendingBoundSince.Add(earlyInputPendingHandoffBound))
+}
+
+// earlyInputPendingExpired reports whether an open PENDING hold has crossed
+// the bound, without opening or refreshing one. It says nothing about the
+// unbounded lo0/changed holds (#17854): those never expire.
+func (d *Daemon) earlyInputPendingExpired() bool {
+	d.earlyInputBarrierStateMu.Lock()
+	defer d.earlyInputBarrierStateMu.Unlock()
+	if d.earlyInputPendingBoundSince.IsZero() {
 		return false
 	}
-	return !d.earlyInputBarrierNow().Before(d.earlyInputHandoffPendingSince.Add(earlyInputPendingHandoffBound))
+	return !d.earlyInputBarrierNow().Before(d.earlyInputPendingBoundSince.Add(earlyInputPendingHandoffBound))
 }
 
 // clearEarlyInputBarrierRetained closes the pending hold (handoff done
 // or no longer pending).
 func (d *Daemon) clearEarlyInputBarrierRetained() {
+	d.earlyInputBarrierStateMu.Lock()
+	defer d.earlyInputBarrierStateMu.Unlock()
 	d.earlyInputHandoffPendingSince = time.Time{}
 	d.earlyInputHandoffPendingDetail = ""
+	d.earlyInputPendingBoundSince = time.Time{}
+}
+
+// earlyInputBarrierHoldSnapshot returns a coherent copy of the retained-hold
+// projection state (#17854): HostInboundApplied and other readers that run
+// without applySem must observe the since/detail pair under the same lock
+// the retention writers hold.
+func (d *Daemon) earlyInputBarrierHoldSnapshot() (since time.Time, detail string) {
+	d.earlyInputBarrierStateMu.Lock()
+	defer d.earlyInputBarrierStateMu.Unlock()
+	return d.earlyInputHandoffPendingSince, d.earlyInputHandoffPendingDetail
 }
 
 // hostInboundPendingDetail renders the pending scopes holding the

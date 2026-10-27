@@ -58,19 +58,25 @@ ARM_RECORD="/var/lib/xpf/kernel-promote-binary"
 #
 # That is `ARMED` (the verified trial), OR `ARMING` when the arm record is
 # ALSO present (#16809): arming writes the record (recordPromoteBinary)
-# BEFORE the verified ARMED transition, so a record present with the journal
-# still at ARMING means the process died — or a landed-but-errored
-# SetBootNext's clear never ran — with BootNext actually queued, and THIS
-# boot may be the unconfirmed candidate. The record's presence is what the
-# shell can prove; the Go half (upgrade.UnconfirmedTrial / Promote)
-# convicts on BootCurrent + `uname -r` and gates it. Treating ARMING as
-# never-a-trial here (the pre-#16809 rule) made the gate refuse that boot
-# as "armed but no record to run" — exactly backwards: it left the
-# unverified candidate running with no gate at all.
+# BEFORE the BootNext mutation (#17862), so a record present with the journal
+# still at ARMING covers every interruption from the NVRAM write onward —
+# the process died, or a landed-but-errored SetBootNext's clear never ran —
+# with BootNext possibly queued, and THIS boot may be the unconfirmed
+# candidate. The record's presence is what the shell can prove; the Go half
+# (upgrade.UnconfirmedTrial / Promote) convicts on BootCurrent + `uname -r`
+# and gates it. Treating ARMING as never-a-trial here (the pre-#16809 rule)
+# made the gate refuse that boot as "armed but no record to run" — exactly
+# backwards: it left the unverified candidate running with no gate at all.
 #
-# ARMING WITHOUT a record stays not-a-trial: no binary was ever designated
-# to verify it, so there is nothing this gate can run, and the journal
-# state alone must not manufacture a loud refusal on every interrupted arm.
+# ARMING WITHOUT a record is NOT folded into not-armed (#17862): nothing can
+# run — no binary was ever designated (or the designation was lost out of
+# band), and this gate never infers one — but the pre-#17862 arm order wrote
+# the record only AFTER the BootNext readback, so a journal from such a build
+# reaches this boot with the one-shot genuinely QUEUED and the candidate
+# would run UNVERIFIED behind an ordinary-boot log line. That shape is LOUD
+# (WARNING + the durable did-not-run record below). From a current build the
+# same shape proves the arm died BEFORE any NVRAM write — the record now
+# precedes it — which the WARNING states rather than hides.
 # Both state constants are pinned against Go by drift canaries
 # (TestPromoteScriptJournalMatchesGo, pkg/upgrade).
 KERNEL_JOURNAL="/var/lib/xpf/kernel-upgrade.state"
@@ -96,6 +102,10 @@ JOURNAL_ARMING_STATE="ARMING"
 #   * the indeterminate-journal WARNING, which is not a refusal but is the same
 #     operator problem (a candidate may be armed, the gate did not run, nothing
 #     durable said so).
+#   * the unrecorded-arming WARNING (#17862) -- the same operator problem a
+#     third way: the journal says an arm was in flight, no record designates
+#     a gate to run, and a pre-#17862 journal may even have a one-shot
+#     queued behind an ordinary-boot log line.
 #
 # Including the second is not scope creep, it is what makes the record's
 # ABSENCE meaningful: if only refuse() wrote one, "no record" would not
@@ -526,18 +536,18 @@ unit_exec_start() {
 # candidate IN TRIAL? — and echoes exactly one of:
 #
 #   absent        : no journal at all. Nothing was ever armed here.
-#   not-armed     : a journal exists but is not at a trial state
-#                   (PREFLIGHT/INSTALLED mid-run, or a terminal
-#                   PROMOTED/REVERTED that has not been cleared yet), OR it
-#                   is ARMING *with no arm record present* — prepared intent
-#                   whose one-shot was never shown to be queued (#16809).
-#   arming        : ARMING *with the arm record present*: the record is
-#                   written before the ARMED transition, so a one-shot may
-#                   have been queued without a verified ARMED record
-#                   (#16809). Only returned when the record exists; with the
-#                   record absent ARMING folds into not-armed, because there
-#                   is no designated binary to gate with either way. The Go
-#                   half convicts on BootCurrent + uname -r.
+#     not-armed     : a journal exists but is not at a trial state
+#                     (PREFLIGHT/INSTALLED mid-run, or a terminal
+#                     PROMOTED/REVERTED that has not been cleared yet).
+#     arming        : ARMING *with the arm record present*: the record is
+#                     written before the ARMED transition, so a one-shot may
+#                     have been queued without a verified ARMED record
+#                     (#16809). The Go half convicts on BootCurrent +
+#                     uname -r.
+#     arming-unrecorded : ARMING *with no arm record present* (#17862):
+#                     no designated binary exists to gate with, and the
+#                     state must never fold into the quiet not-armed
+#                     exit — the caller warns loudly and records durably.
 #   armed         : a candidate kernel IS in a verified trial right now.
 #   indeterminate : a journal exists but cannot be read as one. Absence of
 #                   evidence is not evidence of absence, so this is NOT folded
@@ -567,10 +577,17 @@ journal_state() {
         case "$jline" in
             *'"state":'*"\"$JOURNAL_ARMED_STATE\""*) echo armed; return 0 ;;
             *'"state":'*"\"$JOURNAL_ARMING_STATE\""*)
+                # ARMING with the record present is the #16809
+                # unconfirmed trial (run the recorded gate); ARMING
+                # without one is an unrecorded arm (#17862) and must
+                # reach its caller as its own state, never folded into
+                # the quiet not-armed exit. The durable record writes
+                # this token verbatim, so operators can tell the two
+                # apart (journal_state=arming vs arming-unrecorded).
                 if [ -f "$ARM_RECORD" ] && [ -r "$ARM_RECORD" ]; then
                     echo arming
                 else
-                    echo not-armed
+                    echo arming-unrecorded
                 fi
                 return 0 ;;
         esac
@@ -752,6 +769,31 @@ if [ ! -e "$ARM_RECORD" ]; then
                 "UNVERIFIED and will NOT be promoted; the next plain reboot" \
                 "falls back to the known-good slot. Check $KERNEL_JOURNAL is a" \
                 "readable regular file, then re-arm from the live xpfd."
+            exit 0
+            ;;
+        arming-unrecorded)
+            # #17862: arming now writes the record BEFORE the BootNext
+            # mutation, so a current-build arm that died before any
+            # NVRAM write can also land here — but so can a
+            # pre-#17862-build arm (record after the readback) whose
+            # one-shot may be QUEUED, and an out-of-band sidecar loss.
+            # No designated binary exists to gate with, and inferring
+            # one is forbidden, so the honest maximum is loud and
+            # durable — never the quiet not-armed fold below, which
+            # read like an ordinary boot while a candidate may have
+            # been running UNVERIFIED with no gate at all.
+            record_refusal unrecorded-arming "the journal $KERNEL_JOURNAL is ARMING" \
+                "but the arm record $ARM_RECORD is absent (#17862), so no" \
+                "designated binary exists to gate"
+            log "WARNING: the promotion gate did NOT run. The kernel" \
+                "journal $KERNEL_JOURNAL is ARMING but the arm record" \
+                "$ARM_RECORD is" \
+                "absent (#17862): either the arm died before any BootNext" \
+                "write, or a pre-#17862 arm queued a one-shot whose" \
+                "designated binary is unrecoverable. If a candidate IS" \
+                "booted it is running UNVERIFIED and will NOT be" \
+                "promoted; the next plain reboot falls back to the" \
+                "known-good slot. Re-arm from the live xpfd to retry."
             exit 0
             ;;
     esac
