@@ -260,6 +260,7 @@ mod tests_reseed_persistent_siblings_15110;
 #[cfg(test)]
 #[path = "tests_static_multiport_index_15790.rs"]
 mod tests_static_multiport_index_15790;
+#[cfg(test)]
 #[path = "tests_synced_det_v4_15267.rs"]
 mod tests_synced_det_v4_15267;
 // #16481: deterministic NAT64 reseed carries retained tuples on pool-length change.
