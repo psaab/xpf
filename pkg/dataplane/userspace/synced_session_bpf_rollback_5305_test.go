@@ -76,8 +76,8 @@ func newMirrorOKManager5305(t *testing.T) *Manager {
 							syncReq.PolicyID != 42 {
 							resp = ControlResponse{OK: false, Error: "unexpected IPv4 helper request"}
 						} else if err := m.bpfShim.SetSessionV4(key,
-							dataplane.SessionValue{IngressZone: syncReq.IngressZoneID,
-								EgressZone: syncReq.EgressZoneID, PolicyID: syncReq.PolicyID}); err != nil {
+							dataplane.SessionValue{IngressZone: uint16(syncReq.IngressZoneID),
+								EgressZone: uint16(syncReq.EgressZoneID), PolicyID: syncReq.PolicyID}); err != nil {
 							resp = ControlResponse{OK: false, Error: err.Error()}
 						} else {
 							resp = ControlResponse{OK: true}
@@ -95,8 +95,8 @@ func newMirrorOKManager5305(t *testing.T) *Manager {
 							syncReq.PolicyID != 42 {
 							resp = ControlResponse{OK: false, Error: "unexpected IPv6 helper request"}
 						} else if err := m.bpfShim.SetSessionV6(key,
-							dataplane.SessionValueV6{IngressZone: syncReq.IngressZoneID,
-								EgressZone: syncReq.EgressZoneID, PolicyID: syncReq.PolicyID}); err != nil {
+							dataplane.SessionValueV6{IngressZone: uint16(syncReq.IngressZoneID),
+								EgressZone: uint16(syncReq.EgressZoneID), PolicyID: syncReq.PolicyID}); err != nil {
 							resp = ControlResponse{OK: false, Error: err.Error()}
 						} else {
 							resp = ControlResponse{OK: true}

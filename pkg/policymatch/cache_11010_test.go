@@ -113,7 +113,7 @@ func TestSharedAddressSetExpansionIsMemoizedWithinQuery11010(t *testing.T) {
 		SrcIP:    net.ParseIP("10.1.2.3"),
 		DstIP:    net.ParseIP("192.0.2.1"),
 		Protocol: "tcp",
-		DstPort:  80,
+		DstPort:  PortPtr(80),
 	}
 
 	rules := cfg.Security.Policies[0].Policies

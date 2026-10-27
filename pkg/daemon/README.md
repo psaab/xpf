@@ -1962,7 +1962,13 @@ identity is tracked by follow-up #12550.
 
 RETH members match by `OriginalName=` (PCI kernel name), not `MACAddress=` —
 the MAC alternates between physical and virtual at boot, and
-`ensureRethLinkOriginalName()` auto-fixes stale `.link` files.
+`ensureRethLinkOriginalName()` auto-fixes stale `.link` files. Since #17042
+(R4-Q43-01) there is one `.link` renderer: `networkd.RenderLink` (+
+`networkd.WriteUnitIfChanged` / `networkd.FilePrefix`). `writeLinkFile` is
+the boot writer over it, and the RETH helpers preserve networkd's richer
+fields (MTU/speed/duplex/description) when converting a MAC-form file to
+OriginalName=, returning errors the apply joins into `Phase.Networkd`
+instead of the old Warn-only swallow.
 
 It **returns an error when naming does not converge** (#5842). Every step
 that can fail — the `.link` write, the rename, and the `networkctl reload`

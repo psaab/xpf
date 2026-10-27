@@ -193,16 +193,16 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	parsedSrc := net.ParseIP(req.SourceIp)
 	parsedDst := net.ParseIP(req.DestinationIp)
 
-	// A negative or >65535 port cannot describe a real packet. The int32
-	// wire field accepts both; without validation a negative value reaches the
-	// shared matcher as an omitted port, so constrained terms never match while
-	// unconstrained terms may still match, yielding a misleading verdict (#3116).
-	// 0 is also unspecified (constrained terms do not match); proto3 cannot
-	// distinguish an unset scalar from 0.
-	if err := policymatch.ValidatePort(int(req.SourcePort)); err != nil {
+	// #17081: ports are proto3 optional — absent stays omitted, a present
+	// value (including literal 0) is a concrete port. A negative or >65535
+	// present value cannot describe a real packet and is rejected rather
+	// than coerced to omitted (#3116).
+	srcPort, err := grpcPortValue(req.SourcePort)
+	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid source-port: %v", err)
 	}
-	if err := policymatch.ValidatePort(int(req.DestinationPort)); err != nil {
+	dstPort, err := grpcPortValue(req.DestinationPort)
+	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid destination-port: %v", err)
 	}
 
@@ -271,8 +271,8 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 		SrcFamily: config.NATAddrFamily(req.SourceIp),
 		DstFamily: config.NATAddrFamily(req.DestinationIp),
 		Protocol:  req.Protocol,
-		SrcPort:   int(req.SourcePort),
-		DstPort:   int(req.DestinationPort),
+		SrcPort:   srcPort,
+		DstPort:   dstPort,
 		ICMPType:  icmpType,
 		ICMPCode:  icmpCode,
 		// #5572: a non-first IP fragment (no L4 header) is the flowless packet
@@ -429,6 +429,19 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 		FragmentAssociatedDeny: res.FragmentAssociatedDeny,
 		FragmentDenyNote:       res.FragmentDenyNote(),
 	}, nil
+}
+
+// grpcPortValue converts an optional proto3 int32 port field into the
+// *uint16 the shared simulator consumes (#17081). nil (absent) stays nil
+// (omitted); a present value, including literal 0, is validated and kept.
+func grpcPortValue(v *int32) (*uint16, error) {
+	if v == nil {
+		return nil, nil
+	}
+	if err := policymatch.ValidatePort(int(*v)); err != nil {
+		return nil, err
+	}
+	return policymatch.PortPtr(uint16(*v)), nil
 }
 
 // grpcICMPValue converts an optional proto3 uint32 ICMP type/code field into

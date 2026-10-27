@@ -27,8 +27,23 @@ fn peer_synced_pair(close_flags: u8) -> (SessionTable, SessionKey, SessionKey) {
     }
     let _ = table.drain_deltas(8);
 
-    // Reproduce the owner-hit ordering: promotion consumes the packet flags
-    // before the deferred close is applied by poll_descriptor.
+    // #17092: production sequence (shared_ops probe -> promote -> Owner
+    // replay). The read-only `Defer::All` probe must not close anything;
+    // promotion strips FIN/RST (#13939); the full `Defer::None` replay
+    // (`apply_deferred_owner_hit`, as in poll_descriptor) re-applies the
+    // close and propagates it to the companion. Removing the companion
+    // propagation from that replay's close arm goes RED here.
+    assert!(matches!(
+        table.lookup_with_origin_deferring_authority_with_payload(
+            &reverse, NOW_NS + 1, close_flags, 0
+        ),
+        SessionExpiryProbe::Live(_)
+    ));
+    assert!(
+        !table.entry_by_key(&reverse).expect("reverse").closing
+            && !table.entry_by_key(&forward).expect("forward").closing,
+        "read-only authority probe must not close"
+    );
     assert!(table.promote_synced_with_origin(SessionUpdate {
         key: &reverse,
         decision: decision(),
@@ -37,9 +52,9 @@ fn peer_synced_pair(close_flags: u8) -> (SessionTable, SessionKey, SessionKey) {
         now_ns: NOW_NS + 1,
         protocol: PROTO_TCP,
         tcp_flags: close_flags,
-            ack: None,
-}));
-    table.apply_deferred_owner_close(&reverse, NOW_NS + 1, close_flags);
+        ack: None,
+    }));
+    table.apply_deferred_owner_hit(&reverse, NOW_NS + 1, close_flags);
     (table, forward, reverse)
 }
 
@@ -129,7 +144,7 @@ fn promoted_synced_fin_ack_does_not_complete_pending_handshake_13939() {
         "a FIN|ACK promotion must not complete the pending handshake"
     );
 
-    table.apply_deferred_owner_close(&forward, NOW_NS + 1, flags);
+    table.apply_deferred_owner_hit(&forward, NOW_NS + 1, flags);
     assert!(
         table
             .entry_by_key(&forward)

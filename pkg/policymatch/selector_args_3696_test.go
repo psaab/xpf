@@ -95,8 +95,8 @@ func TestParseSelectorArgsPopulatesQuery(t *testing.T) {
 	if sel.SrcIP != "10.0.1.1" || sel.DstIP != "10.0.2.1" {
 		t.Fatalf("ips = %q/%q", sel.SrcIP, sel.DstIP)
 	}
-	if sel.SrcPort != 1024 || sel.DstPort != 443 {
-		t.Fatalf("ports = %d/%d, want 1024/443", sel.SrcPort, sel.DstPort)
+	if sel.SrcPort == nil || *sel.SrcPort != 1024 || sel.DstPort == nil || *sel.DstPort != 443 {
+		t.Fatalf("ports = %v/%v, want 1024/443", sel.SrcPort, sel.DstPort)
 	}
 	if sel.Protocol != "tcp" {
 		t.Fatalf("protocol = %q, want tcp", sel.Protocol)
@@ -109,7 +109,7 @@ func TestParseSelectorArgsPopulatesQuery(t *testing.T) {
 	if q.SrcIP == nil || q.SrcIP.String() != "10.0.1.1" {
 		t.Fatalf("Query SrcIP = %v, want 10.0.1.1", q.SrcIP)
 	}
-	if q.DstPort != 443 || q.Protocol != "tcp" {
+	if q.DstPort == nil || *q.DstPort != 443 || q.Protocol != "tcp" {
 		t.Fatalf("Query = %+v, want DstPort 443 / tcp", q)
 	}
 
