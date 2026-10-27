@@ -7001,17 +7001,16 @@ fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_
     );
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
     // an outcome-first order hides every state property behind it from the matrix.
     let mut violations: Vec<String> = Vec::new();
-    if !refused {
+    if outcome != SyncedDeleteOutcome::RefusedLocalOwned {
         violations.push(
             "a peer delete of a live LOCAL session whose owner RG is UNRESOLVED was applied: \
              owner 0 is unknown-not-absent, and the install guard already refuses it (#9714 F4)"
@@ -7060,14 +7059,14 @@ fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9
     );
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
-    assert!(
-        !refused,
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
         "owner 0 was treated as protected with NO group forwarding-active: the guard must key on \
          whether this node is actually forwarding, not on the owner being unknown (#9714 F4)"
     );
@@ -7428,11 +7427,10 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // PREMISES fail fast (a broken fixture makes the cell meaningless); PROPERTIES are
@@ -7446,7 +7444,7 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     // under-lock predicate as the sole defence) reds this cell on "got ok=true" and
     // never reaches "were the shared rows kept?", which was the entire question.
     let mut violations: Vec<String> = Vec::new();
-    if !refused {
+    if outcome != SyncedDeleteOutcome::RefusedLocalOwned {
         violations.push(
             "the refusal must be reported, or the handler answers ok and the Go side deletes its \
              mirror and DNAT rows for a flow the helper kept (#9714)"
@@ -7528,15 +7526,15 @@ fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
     let fixture = fixture_9714(false);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
-    assert!(
-        !refused,
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
         "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
          for a session the helper removed (#9714)"
     );
@@ -7563,15 +7561,15 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
     let fixture = fixture_9714_with_origin(true, SessionOrigin::SyncImport);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
-    assert!(
-        !refused,
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
         "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
          for a session the helper removed (#9714)"
     );
@@ -7599,17 +7597,16 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
     let holds_before = fixture.dnat_holds();
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.reverse_key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.reverse_key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
     // an outcome-first order hides every state property behind it from the matrix.
     let mut violations: Vec<String> = Vec::new();
-    if !refused {
+    if outcome != SyncedDeleteOutcome::RefusedLocalOwned {
         violations.push(
             "a peer delete of the reverse key of a live local session must be refused and say so \
              (#9714)"
@@ -7827,12 +7824,11 @@ fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
         fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
         "FIXTURE: forward and reverse must be in the shared maps"
     );
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), true)
-        .is_refused_local_owned();
-    assert!(!refused, "forward-only delete must apply");
+        .delete_peer_synced_session(fixture.forward.key.clone(), true);
+    assert_eq!(outcome, SyncedDeleteOutcome::Applied, "forward-only delete must apply");
     assert!(
         !fixture.shared_has(&fixture.forward.key),
         "forward-only delete must remove the named key"
@@ -7855,12 +7851,11 @@ fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
 #[test]
 fn ordinary_peer_delete_retires_both_halves_9752() {
     let fixture = fixture_9714_with_origin(false, SessionOrigin::SyncImport);
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
-    assert!(!refused, "ordinary delete must apply");
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+    assert_eq!(outcome, SyncedDeleteOutcome::Applied, "ordinary delete must apply");
     assert!(
         !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
         "ordinary delete must remove both halves"
@@ -12648,4 +12643,64 @@ fn kick_export_refused_worker_fails_fast_15950() {
     let wait = coordinator.kick_owner_rg_export(&[1], 0, false).expect("retry after drain must kick");
     // ack it
     let _ = wait;
+}
+
+/// #17138: the `SyncedDeleteOutcome` contract table is the single source of
+/// truth for (shared removed / Go keeps rows / mirror delete failed) per
+/// variant. This guard enumerates `SyncedDeleteOutcome::ALL`, so adding a
+/// variant without a table row — or flipping a predicate without updating
+/// the row — fails here instead of silently diverging from the doc table
+/// in `session_import.rs` and from the handler's wire mapping.
+#[test]
+fn synced_delete_outcome_contract_table_17138() {
+    use super::session_import::SyncedDeleteOutcome;
+
+    // (variant, shared_removed, keeps_caller_rows, mirror_delete_failed)
+    let expected: [(SyncedDeleteOutcome, bool, bool, bool); 9] = [
+        (SyncedDeleteOutcome::Applied, true, false, false),
+        (SyncedDeleteOutcome::RefusedLocalOwned, false, true, false),
+        (
+            SyncedDeleteOutcome::RefusedConcurrentLocalOwned,
+            false,
+            true,
+            false,
+        ),
+        (
+            SyncedDeleteOutcome::RefusedStaleGeneration,
+            false,
+            false,
+            false,
+        ),
+        (SyncedDeleteOutcome::RefusedGateBusy, false, true, false),
+        (SyncedDeleteOutcome::RefusedMirrorDelete, true, true, true),
+        (SyncedDeleteOutcome::RefusedIdentity, false, true, false),
+        (SyncedDeleteOutcome::StaleForward, false, false, false),
+        (SyncedDeleteOutcome::PartialCompanion, true, false, false),
+    ];
+    assert_eq!(
+        SyncedDeleteOutcome::ALL.len(),
+        expected.len(),
+        "a SyncedDeleteOutcome variant was added without a contract-table row (#17138)"
+    );
+    for (variant, shared_removed, keeps_rows, mirror_failed) in expected {
+        assert!(
+            SyncedDeleteOutcome::ALL.contains(&variant),
+            "{variant:?} missing from SyncedDeleteOutcome::ALL (#17138)"
+        );
+        assert_eq!(
+            variant.shared_removed(),
+            shared_removed,
+            "{variant:?}: shared_removed disagrees with the contract table (#17138)"
+        );
+        assert_eq!(
+            variant.keeps_caller_rows(),
+            keeps_rows,
+            "{variant:?}: keeps_caller_rows disagrees with the contract table (#17138)"
+        );
+        assert_eq!(
+            variant.mirror_delete_failed(),
+            mirror_failed,
+            "{variant:?}: mirror_delete_failed disagrees with the contract table (#17138)"
+        );
+    }
 }

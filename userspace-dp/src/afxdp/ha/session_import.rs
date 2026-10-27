@@ -11,9 +11,31 @@ use crate::afxdp::*;
 /// with `BPF_EXIST` precisely so it will not recreate a deleted entry. The moment a
 /// generation-aware helper-originated delete exists, the conflation goes live.
 ///
-/// Four states, because "I did it", "I declined early", "I declined under the
-/// removal lock" and "I declined for a DIFFERENT reason" are different answers
-/// to the caller, and only the first of them permits any further teardown.
+/// Per-variant contract (`shared removed` = the forward shared row was removed
+/// by this call; `Go keeps rows` = [`Self::keeps_caller_rows`], i.e. a peer
+/// delete so reported makes the handler answer
+/// `synced-delete-refused:peer-delete-local-owned` and Go keeps its mirror and
+/// DNAT rows; `wire token` = the token this variant surfaces as on the wire —
+/// the peer-delete token above for row-keeping peer deletes, the bare
+/// `mirror-write-failed` error for a failed strict-mirror delete, the
+/// per-match `mirror_delete_policy_batch` token, or no dedicated token):
+///
+/// | Variant | Shared removed | Go keeps rows | Wire token |
+/// | --- | --- | --- | --- |
+/// | `Applied` | yes | no | none (success) |
+/// | `RefusedLocalOwned` | no | yes | `synced-delete-refused:peer-delete-local-owned` |
+/// | `RefusedConcurrentLocalOwned` | no | yes | `synced-delete-refused:peer-delete-local-owned` |
+/// | `RefusedStaleGeneration` | no | no | none |
+/// | `RefusedGateBusy` | no | yes | `synced-delete-refused:peer-delete-local-owned` |
+/// | `RefusedMirrorDelete` | yes | yes | `mirror-write-failed` |
+/// | `RefusedIdentity` | no | yes | `synced-delete-refused:peer-delete-local-owned`; `refused_identity` (policy batch) |
+/// | `StaleForward` | no | no | `stale_forward` (policy batch only) |
+/// | `PartialCompanion` | yes (forward only) | no | `partial_companion` (policy batch only) |
+///
+/// `Applied`, `PartialCompanion`, and `RefusedMirrorDelete` removed the
+/// shared forward row ([`Self::shared_removed`]); for `RefusedMirrorDelete`
+/// the mirror delete then failed, so the caller must keep its rows and the
+/// helper surfaces `mirror-write-failed` instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncedDeleteOutcome {
     /// The entry named by the key was removed.
@@ -31,6 +53,9 @@ pub(crate) enum SyncedDeleteOutcome {
     RefusedStaleGeneration,
     /// Refused because tuple admission could not be acquired before timeout.
     RefusedGateBusy,
+    /// The shared entry was removed, but the strict mirror (BPF) delete then
+    /// failed, so the caller keeps its mirror and DNAT rows and the handler
+    /// surfaces `mirror-write-failed`.
     RefusedMirrorDelete,
     /// Refused because the captured session incarnation or its companion changed.
     RefusedIdentity,
@@ -43,9 +68,25 @@ pub(crate) enum SyncedDeleteOutcome {
 }
 
 impl SyncedDeleteOutcome {
+    /// Every variant, for the contract-table guard test. Adding a variant
+    /// without a row in the table above and in
+    /// `synced_delete_outcome_contract_table_17138` fails that test.
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Applied,
+        Self::RefusedLocalOwned,
+        Self::RefusedConcurrentLocalOwned,
+        Self::RefusedStaleGeneration,
+        Self::RefusedGateBusy,
+        Self::RefusedMirrorDelete,
+        Self::RefusedIdentity,
+        Self::StaleForward,
+        Self::PartialCompanion,
+    ];
+
     /// Whether the helper refused a PEER delete while the caller must keep its
     /// mirror and DNAT rows. A stale-generation refusal is NOT this: it means
     /// the helper already holds something newer, so the Go side has nothing to
+    /// keep for the named incarnation.
     pub(crate) fn keeps_caller_rows(self) -> bool {
         matches!(
             self,
@@ -57,11 +98,14 @@ impl SyncedDeleteOutcome {
         )
     }
 
-    /// Compatibility predicate for the #9714 early ownership refusal. New
-    /// callers should use [`Self::keeps_caller_rows`], which also covers the
-    /// under-lock concurrent ownership decline from #9960.
-    pub(crate) fn is_refused_local_owned(self) -> bool {
-        matches!(self, Self::RefusedLocalOwned)
+    /// Whether this call removed the shared forward row: `Applied`, the
+    /// forward half of `PartialCompanion`, and `RefusedMirrorDelete` (whose
+    /// shared removal landed before the mirror delete failed).
+    pub(crate) fn shared_removed(self) -> bool {
+        matches!(
+            self,
+            Self::Applied | Self::PartialCompanion | Self::RefusedMirrorDelete
+        )
     }
 
     pub(crate) fn mirror_delete_failed(self) -> bool {
