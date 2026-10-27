@@ -240,7 +240,7 @@ consults to DECIDE at SESSION_OPEN whether to export a flow
 (via `SampledForOpen`; the direction itself is `FlowDirectionIface`): a flow is exported because
 its ingress zone has `sampling input` in the flow's own family (observed
 at ingress → `0`) or its egress zone has `sampling output` in that family
-(observed at egress → `1`). `ExportConfig.FlowDirection` mirrors that
+(observed at egress → `1`). `ExportConfig.FlowDirectionIface` mirrors that
 decision (RFC 5102 ingress/egress observation point; the exact mapping
 Junos SRX inline active-flow-monitoring uses for input- vs output-applied
 sampling). **Ingress wins ties** (both directions sampled) to match the
@@ -549,8 +549,8 @@ the daemon's single `flowExportOpenCallback` (registered once via
 `ensureFlowExportOpenCallback`, so dual-format v9+IPFIX deployments do
 not evaluate an open twice) fans the SESSION_OPEN record to every
 published instance, and each instance's lead config consumes exactly one
-slot via `SampledForOpen` (the daemon zone/interface gate,
-`ShouldExportIfaceDaemon`). A sampled open is remembered per exporter
+slot via `SampledForOpen` (the single production zone/interface
+gate, built on the pure `eligible` predicate). A sampled open is remembered per exporter
 group: `TrackFlowOpenRecord` registers the tracker entry carrying the
 open-time template (tuple/NAT/ifindex/ToS/flags), or, for a close-only
 exporter, `MarkFlowSampledAtOpen` records the key in `sampledFlows`.
@@ -563,7 +563,7 @@ inserting a novel key at the cap clears the set before retaining that
 key. A later close for a cleared rejection follows the existing orphan
 close-fallback behavior (#16742). The SESSION_CLOSE callbacks
 (`flowExportCallback` / `ipfixExportCallback`) skip SESSION_OPEN records,
-and do not make another decision for selected or retained-rejected
+and make no second 1-in-N decision at close for selected or retained-rejected
 opens; selected groups queue `ExportSessionCloseRemainder`.
 
 **Close handling for retained and missing state.** A close for a key
@@ -647,9 +647,9 @@ The package is split by responsibility (#1988):
 
 - `manager.go` — resolved export config (`ExportConfig`,
   `CollectorConfig`, `SamplingDir`), the sampling scheduler
-  (`SampledForOpen` / `ShouldExportIfaceDaemon`; the strict
-  `ShouldExport`/`ShouldExportIface` forms remain for non-daemon
-  callers), the shared `FlowRecord`/`SessionCloseData` shapes,
+  (`SampledForOpen` / `SampledForClose`, both built on the pure
+  `eligible` predicate and `zoneSelected` helper shared with
+  `FlowDirectionIface`), the shared `FlowRecord`/`SessionCloseData` shapes,
   and the `BuildExportConfig` / `BuildIPFIXExportConfig` /
   `BuildSamplingZones` config resolvers.
 - `exporter_core.go` — the shared `exporterCore` embedded by both
@@ -901,15 +901,13 @@ group; teardown joins every live group through `joinWithBudget`.
 
 Interface sampling is likewise no longer zone-OR-ed: `BuildSamplingZones`
 also records `IfacesV4`/`IfacesV6` keyed by authored unit ref, and the
-daemon open path gates on `SampledForOpen` (which wraps the daemon gate
-`ShouldExportIfaceDaemon(..., rec.IngressIface, rec.EgressIface)`) — the
+daemon open path gates on `SampledForOpen(..., rec.IngressIface, rec.EgressIface)` — the
 flow's own interfaces (from Ingress/EgressIfindex via the ifindex->name
 table). An unsampled
 interface in a sampled zone is denied before the 1-in-N counter and
 counts as zone-filtered; a record naming no interface falls back to zone
-semantics on the daemon path, while the strict `ShouldExportIface`
-form fails closed on empty refs. Hand-built configs without per-interface
-data keep the prior zone semantics via `ShouldExport`.
+semantics, and hand-built configs without per-interface
+data keep the prior zone semantics through the same gate.
 
 The `if fs.Port > 0` guard before `net.JoinHostPort` is kept even though
 the exclusion makes `Port >= 1` on every path that reaches it. It is the
@@ -1328,7 +1326,7 @@ grouping key is `(instance, version, template)`:
   carries four flags on the unit (`SamplingV4Input/Output`,
   `SamplingV6Input/Output`), `BuildSamplingZones` returns a
   `FamilySamplingDirs` (one zone->direction map per family), and
-  the open gate (`SampledForOpen`) / `FlowDirection(in, out, isIPv6)`
+  the open gate (`SampledForOpen`) / `FlowDirectionIface`
   consult only the flow's own family. Once any family is sampled, a
   family sampled nowhere fails closed (non-nil empty map) and never
   consumes a 1-in-N slot; no sampling anywhere keeps both maps nil
