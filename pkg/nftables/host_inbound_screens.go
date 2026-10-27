@@ -34,6 +34,19 @@ type HostInboundScreenFloodRule struct {
 	AlarmWithoutDrop   bool
 }
 
+// HostInboundScreenFloodPhase selects a rule placement without copying screen
+// profiles: reply-direction screens precede the reply accept, original ICMP
+// screens precede mandatory ICMP accepts, and other original screens remain
+// after the fine junos-host policy.
+type HostInboundScreenFloodPhase uint8
+
+const (
+	HostInboundScreenFloodReplyDirection HostInboundScreenFloodPhase = iota
+	HostInboundScreenFloodOriginal
+	HostInboundScreenFloodOriginalICMP
+	HostInboundScreenFloodOriginalNonICMP
+)
+
 // HostInboundScreenFloodRules coalesces per-interface host-inbound views into
 // one screen budget per zone and address family. Ingress device scopes cover
 // unambiguous views; Addresses retains the destination fallback for views

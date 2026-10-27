@@ -1219,6 +1219,9 @@ type Daemon struct {
 	// sets) when an established table is kernel-proven gone after an out-of-band
 	// `nft flush ruleset` — the retention premise is equally false there, and a
 	// failed re-apply must fence instead of trusting the stale covered set.
+	// #17861: the recheck clears that state while holding applySem, so a
+	// stale observation can never wipe a concurrently published fresh
+	// generation's retention state.
 	// True proves neither current xpf_hostinbound table presence nor coverage
 	// of every current local address — the day-2 COVERAGE gap is tracked
 	// separately by hostInboundCoveredAddrs (#5789, #5790). Production access
