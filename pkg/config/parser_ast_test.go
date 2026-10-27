@@ -3518,7 +3518,7 @@ func TestUserspaceDataplaneSharedUMEMConfig(t *testing.T) {
 	if !sharedUMEMArtifactPassed(parsed) {
 		t.Fatalf("audit artifact must pass: %#v", parsed)
 	}
-	if reason := sharedUMEMArtifactEnvironmentMismatch(parsed); reason != "" {
+	if reason := sharedUMEMArtifactEnvironmentMismatch(parsed, dp.SharedUMEM.Interfaces); reason != "" {
 		t.Fatalf("matching artifact must not mismatch: %s", reason)
 	}
 }

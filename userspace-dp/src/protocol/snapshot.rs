@@ -1380,14 +1380,54 @@ pub(crate) struct UserspaceSnapshot {
 /// a Go rename is visible here; the helper never reads the file — the
 /// environment audit is owned by the Go compile-time
 /// `sharedUMEMAuditWarnings` (#5300, ported in #17134).
-#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+///
+/// `mode` defaults to `cross-nic` when the leaf is absent: Go declares
+/// `Mode string json:"mode,omitempty"` and `compileSharedUMEMConfig`
+/// only sets it when a `mode` leaf exists, so a stanza setting only
+/// `phase0-artifact-file` or only `interface …` emits a present
+/// `shared_umem` with NO mode. The pre-#17134 `Value` reader defaulted a
+/// missing mode to `CrossNic` (auto); without this default the typed
+/// empty string falls through `parse_shared_umem_mode` to `Off` and
+/// silently marks every binding private.
+fn default_shared_umem_mode() -> String {
+    "cross-nic".to_string()
+}
+
+/// An explicit JSON `null` mode is treated the same as a missing leaf
+/// (auto/cross-NIC): Go's `omitempty` never emits one, but the old
+/// `Value` reader's `as_str()` fallback did, and a null must not flip
+/// the policy to `Off` either.
+fn deserialize_shared_umem_mode<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(Option::<String>::deserialize(deserializer)?
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(default_shared_umem_mode))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SharedUmemSnapshot {
-    #[serde(default)]
+    #[serde(
+        default = "default_shared_umem_mode",
+        deserialize_with = "deserialize_shared_umem_mode"
+    )]
     pub mode: String,
     #[serde(default, deserialize_with = "crate::protocol::null_tolerant_vec")]
     pub interfaces: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub phase0_artifact_file: String,
+}
+
+impl Default for SharedUmemSnapshot {
+    fn default() -> Self {
+        Self {
+            mode: default_shared_umem_mode(),
+            interfaces: Vec::new(),
+            phase0_artifact_file: String::new(),
+        }
+    }
 }
 
 /// #17134: `userspace` is `null` in the #16132 wire specimens and when an

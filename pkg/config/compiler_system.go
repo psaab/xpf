@@ -2473,20 +2473,60 @@ func sortedSharedUMEMKeys[V any](m map[string]V) []string {
 	return keys
 }
 
+func sharedUMEMStringSlicesEqualAsSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		set[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := set[s]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // sharedUMEMArtifactEnvironmentMismatch is the #17134 Go port of the
 // environment comparison the Rust helper used to run against a
 // `phase0_artifact` object no Go build emitted (dead since #5300). It
 // compares kernel, selected interfaces, PCI IDs / device set, driver,
 // MTU and queue topology against the live host, in that order, and
 // returns the first mismatch ("" when the artifact matches).
-func sharedUMEMArtifactEnvironmentMismatch(artifact map[string]interface{}) string {
+//
+// The interface set under audit is the CONFIGURED `shared-umem
+// interface` list when the operator declared one (#17134 fold F3):
+// the old Rust audit compared the artifact's selected interfaces
+// against exactly that configured set (falling back to the artifact's
+// own list only when no interfaces were configured). Deriving the
+// list from the artifact alone would let an artifact recorded for
+// entirely different NICs pass silently as long as it matched its own
+// NICs' live data.
+func sharedUMEMArtifactEnvironmentMismatch(artifact map[string]interface{}, configuredInterfaces []string) string {
 	artifactKernel, _ := sharedUMEMArtifactString(artifact["kernel_release"])
 	if artifactKernel == "" {
 		return "Phase 0 artifact missing kernel_release"
 	}
-	interfaces := sharedUMEMArtifactInterfaces(artifact)
-	if len(interfaces) == 0 {
+	artifactInterfaces := sharedUMEMArtifactInterfaces(artifact)
+	if len(artifactInterfaces) == 0 {
 		return "Phase 0 artifact missing selected_interfaces"
+	}
+	interfaces := artifactInterfaces
+	if len(configuredInterfaces) > 0 {
+		configured := make([]string, 0, len(configuredInterfaces))
+		for _, ifname := range configuredInterfaces {
+			if ifname != "" {
+				configured = append(configured, LinuxIfName(ifname))
+			}
+		}
+		if len(configured) > 0 {
+			if !sharedUMEMStringSlicesEqualAsSets(artifactInterfaces, configured) {
+				return "Phase 0 artifact selected interfaces do not match configured shared-umem interfaces"
+			}
+			interfaces = configured
+		}
 	}
 	env, err := sharedUMEMLiveEnvFn(interfaces)
 	if err != nil {
@@ -2560,7 +2600,7 @@ func sharedUMEMAuditWarnings(cfg *Config) []string {
 		return []string{fmt.Sprintf(
 			"system dataplane shared-umem phase0-artifact-file %s: audit artifact did not pass; shared-UMEM selection is decided at runtime by live bind validation, not this artifact", path)}
 	}
-	if reason := sharedUMEMArtifactEnvironmentMismatch(artifact); reason != "" {
+	if reason := sharedUMEMArtifactEnvironmentMismatch(artifact, cfg.System.UserspaceDataplane.SharedUMEM.Interfaces); reason != "" {
 		return []string{fmt.Sprintf(
 			"system dataplane shared-umem phase0-artifact-file %s: %s; non-blocking, does not gate the commit or change the compiled config", path, reason)}
 	}

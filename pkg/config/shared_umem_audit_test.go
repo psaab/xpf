@@ -243,3 +243,28 @@ func TestSharedUMEMAuditMatchingArtifactSilent17134(t *testing.T) {
 		t.Fatalf("matching artifact must not warn, got %#v", cfg.Warnings)
 	}
 }
+
+// TestSharedUMEMAuditConfiguredInterfacesMismatchWarns17134: #17134
+// fold F3 — the audit must compare the artifact's selected interfaces
+// against the CONFIGURED `shared-umem interface` list (threaded from
+// `sharedUMEMAuditWarnings(cfg)`), not merely derive the list from
+// the artifact itself. An artifact recorded for entirely different
+// NICs than configured must warn even though it is self-consistent
+// with its own NICs' (stubbed) live data.
+func TestSharedUMEMAuditConfiguredInterfacesMismatchWarns17134(t *testing.T) {
+	artifact := t.TempDir() + "/phase0.json"
+	body := `{"passed":true,"kernel_release":"test-kernel","selected_interfaces":["ge-0/0/3","ge-0/0/4"],"selected_nic_pci_ids":["0000:08:00.0","0000:09:00.0"],"selected_device_set":["0000:08:00.0","0000:09:00.0"],"driver":"mlx5_core","mtu":1500,"queue_topology":4}`
+	if err := os.WriteFile(artifact, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	restore := stubSharedUMEMLiveEnv17134(t, goodSharedUMEMLiveEnv17134())
+	defer restore()
+	// buildSharedUMEMTree configures ge-0/0/1 + ge-0/0/2.
+	cfg, err := compileWithinTimeout(t, buildSharedUMEMTree(t, artifact), 10*time.Second)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "selected interfaces do not match configured") {
+		t.Fatalf("expected configured-interface mismatch warning, got %#v", cfg.Warnings)
+	}
+}

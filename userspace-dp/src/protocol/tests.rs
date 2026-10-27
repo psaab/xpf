@@ -5416,7 +5416,10 @@ fn wire_fixture_completeness_16132() {
                     // another struct's names in — and custom containers
                     // likewise; fail loudly rather than model either
                     // wrong. `with =` is allowed only in its known
-                    // null-tolerant/present-ring value forms.
+                    // null-tolerant/present-ring value forms;
+                    // `deserialize_shared_umem_mode` (#17134 fold)
+                    // likewise changes only the VALUE (missing/empty/
+                    // null mode → "cross-nic"), never the field name.
                     assert!(
                         !pending_attrs.contains("flatten"),
                         "wire census: field {name}.{field_name} uses flatten — extend the census deliberately instead of modelling it wrong"
@@ -5429,7 +5432,8 @@ fn wire_fixture_completeness_16132() {
                             pending_attrs.contains("null_tolerant_vec")
                                 || pending_attrs.contains("null_tolerant_u64")
                                 || pending_attrs.contains("deserialize_present_key_ring")
-                                || pending_attrs.contains("deserialize_userspace_snapshot"),
+                                || pending_attrs.contains("deserialize_userspace_snapshot")
+                                || pending_attrs.contains("deserialize_shared_umem_mode"),
                             "wire census: field {name}.{field_name} uses an unmodelled custom (de)serializer — extend the census deliberately"
                         );
                     }

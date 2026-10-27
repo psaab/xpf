@@ -47,6 +47,48 @@ fn explicit_interfaces_limit_policy_candidates() {
 }
 
 #[test]
+fn present_but_modeless_snapshot_defaults_to_cross_nic() {
+    // #17134 fold (Rev18187 B1): Go emits a present `shared_umem` with
+    // no `mode` leaf routinely (`Mode` is `json:"mode,omitempty"` and
+    // `compileSharedUMEMConfig` sets it only from a `mode` leaf — a
+    // stanza setting only `interface …` or only
+    // `phase0-artifact-file`). The pre-#17134 `Value` reader defaulted
+    // a missing mode to CrossNic; the typed path must too — an empty
+    // mode falling through to `Off` would silently mark every binding
+    // private. Covers the missing leaf, an explicit empty string, and
+    // an explicit null.
+    for shared in [
+        json!({ "interfaces": ["lan0", "wan0"] }),
+        json!({ "mode": "", "interfaces": ["lan0"] }),
+        json!({ "mode": null, "interfaces": ["lan0"] }),
+        json!({ "phase0_artifact_file": "/run/xpf/phase0.json" }),
+    ] {
+        let snapshot = ConfigSnapshot {
+            userspace: serde_json::from_value(json!({ "shared_umem": shared }))
+                .expect("modeless shared_umem decodes"),
+            ..ConfigSnapshot::default()
+        };
+        let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+        assert_eq!(
+            policy.mode,
+            SharedUmemMode::CrossNic,
+            "present-but-modeless shared_umem must stay cross-NIC/auto"
+        );
+    }
+    // …with its configured interface filter intact.
+    let snapshot = ConfigSnapshot {
+        userspace: serde_json::from_value(json!({
+            "shared_umem": { "interfaces": ["lan0", "wan0"] }
+        }))
+        .unwrap(),
+        ..ConfigSnapshot::default()
+    };
+    let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+    assert!(policy.selects_interface("lan0"));
+    assert!(!policy.selects_interface("dmz0"));
+}
+
+#[test]
 fn unknown_shared_umem_keys_are_ignored() {
     // #17134: unknown keys in the typed subtree (e.g. a future Go
     // `SharedUMEMConfig` field, or a retired artifact object

@@ -142,10 +142,18 @@ fn update_snapshot_binding_plan_key(hasher: &mut Sha256, snapshot: &ConfigSnapsh
     if let Some(shared_umem) = &snapshot.userspace.shared_umem {
         let mut interfaces: Vec<&str> = shared_umem.interfaces.iter().map(String::as_str).collect();
         interfaces.sort_unstable();
+        // Keep the standalone `hash_update(hasher, "shared_umem=")` call
+        // shape: the Go liveness guard
+        // `TestBindingPlanKeyTopLevelInputsAgree8901` extracts exactly
+        // that literal to prove this hash still covers shared_umem
+        // (#17134 fold, Rev18187 B2). Fusing the prefix into the
+        // formatted payload reds that guard even though the hashed
+        // bytes still move with Go's.
+        hash_update(hasher, "shared_umem=");
         hash_update(
             hasher,
             &format!(
-                "shared_umem={};interfaces={};phase0_artifact_file={};",
+                "{};interfaces={};phase0_artifact_file={};",
                 shared_umem.mode,
                 interfaces.join(","),
                 shared_umem.phase0_artifact_file
