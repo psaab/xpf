@@ -19,9 +19,11 @@ import (
 // peerIncarnationState to 1 via reflection, fires each production trigger,
 // and asserts every field is zero or seeded. A new field added to
 // peerIncarnationState is covered automatically (reflection enumerates it);
-// a field added OUTSIDE the struct is caught by
-// TestIncarnationScopedFieldsLiveInPeerIncarnationState17097, which pins
-// that no incarnation-scoped name remains directly on SessionSync.
+// a field added OUTSIDE the struct is NOT caught automatically — the
+// structural pin in TestIncarnationScopedFieldsLiveInPeerIncarnationState17097
+// checks only the hardcoded 16-name list below, so a newly named
+// incarnation-scoped field placed directly on SessionSync (or in another
+// sub-struct) would escape it and must be added to that list by hand.
 //
 // RED on revert (pre-fix shape): the supersession, epoch-raise, and switch
 // cells fail for deleteSuppressionWarned, purgeRetirementSuppressionWarned,
@@ -238,13 +240,22 @@ func TestBootIDSwitchSeedsOnlyPrimingConnSet17097(t *testing.T) {
 	ss.installConn(1, ac1)
 	const newSnap = 3
 	const newFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagInstallTableIdentity
-	ss.handleMessage(ac1, syncMsgPeerCapabilities,
-		capabilityFrame14161(t, newSnap, newFlags, SessionSyncWireVersion))
+	// Long frame: capabilityFrame14161's fixed 5 bytes cannot carry
+	// peerCapabilityFlags2, which rides as the last byte after the identity
+	// tail (5+bootIncarnationLen+8+8). A non-zero flags2 here is what makes
+	// the seeded-map entry below discriminate: deleting the flags2 seed in
+	// retirePeerIncarnationLocked would leave the fresh value 0 and red.
+	const newFlags2 = capFlag2ConfigApplyAck | capFlag2PrimaryLiveness
+	newFrame := capabilityFrame14161(t, newSnap, newFlags, SessionSyncWireVersion)
+	newFrame = append(newFrame, make([]byte, bootIncarnationLen+8+8)...)
+	newFrame = append(newFrame, newFlags2)
+	ss.handleMessage(ac1, syncMsgPeerCapabilities, newFrame)
 	// handlePeerCapabilities stored the new advertisement into the globals;
 	// re-dirty so the assertion measures the switch's seeding, not the
 	// advertisement's. Keep the per-connection record (that is the seed).
 	st := ss.peerIncarnationState()
 	st.peerCapabilityFlags.Store(1)
+	st.peerCapabilityFlags2.Store(1)
 	st.deleteSuppressionWarned.Store(true)
 	st.pbrAnnouncedForFence.Store(true)
 	ss.peerSnaps.peerSnapshotProtocol.Store(7)
@@ -252,14 +263,18 @@ func TestBootIDSwitchSeedsOnlyPrimingConnSet17097(t *testing.T) {
 	ss.handleMessage(ac1, syncMsgBulkStart, bulkStartPayload6910(2, incarnation6910(0xB2)))
 
 	assertRetired17097(t, ss, map[string]uint64{
-		"peerCapabilityFlags": uint64(newFlags),
-		"peerSessionSyncWire": uint64(SessionSyncWireVersion),
-		"__snapshotProtocol":  uint64(newSnap),
+		"peerCapabilityFlags":  uint64(newFlags),
+		"peerCapabilityFlags2": uint64(newFlags2),
+		"peerSessionSyncWire":  uint64(SessionSyncWireVersion),
+		"__snapshotProtocol":   uint64(newSnap),
 	}, genBefore)
 	// Positive control: the seeded set is the priming connection's, not the
 	// retired 1-valued dirt and not the old boot's frame.
 	if got := ss.peerIncarnationState().peerCapabilityFlags.Load(); got != uint32(newFlags) {
 		t.Fatalf("capability flags = %#x, want the priming connection's %#x", got, uint32(newFlags))
+	}
+	if got := ss.peerIncarnationState().peerCapabilityFlags2.Load(); got != uint32(newFlags2) {
+		t.Fatalf("capability flags2 = %#x, want the priming connection's %#x", got, uint32(newFlags2))
 	}
 }
 
@@ -285,13 +300,16 @@ func TestFullDisconnectRetiresEveryIncarnationField17097(t *testing.T) {
 	assertRetired17097(t, ss, nil, genBefore)
 }
 
-// TestIncarnationScopedFieldsLiveInPeerIncarnationState17097 pins the
-// structural claim: every incarnation-scoped field name lives on
-// peerIncarnationState and none remains directly on SessionSync, so the next
-// field of this class cannot be added where the three trigger sites would
-// miss it. It also pins the single-sourcing: retirePeerIncarnationLocked is
-// the only peerIncarnationState constructor outside the lazy accessor, and
-// all three trigger sites call it.
+// TestIncarnationScopedFieldsLiveInPeerIncarnationState17097 pins what it
+// can: the 16 hardcoded incarnation-scoped names below live on
+// peerIncarnationState and none remains directly on SessionSync. A NOVEL
+// incarnation-scoped field added flat under a new name (or in another
+// sub-struct) escapes this pin and must be added to the list by hand; a
+// field added INSIDE the struct is covered behaviorally by the reflection
+// cells above. It also checks the two call strings appear in sync_conn.go:
+// the seeded switch call and the shared nil call — the two nil-seed sites
+// share one string, so this pin cannot count them; the supersession,
+// epoch-raise, and full-disconnect cells cover each trigger behaviorally.
 func TestIncarnationScopedFieldsLiveInPeerIncarnationState17097(t *testing.T) {
 	names := []string{
 		"peerCapabilityFlags", "peerCapabilityFlags2", "peerSessionSyncWire",

@@ -177,10 +177,13 @@ type peerIncarnationState struct {
 // Caller must hold s.mu and s.peerSnaps.peerSnapshotProtocolWriteMu: the
 // snapshot store and generation bump must serialize with gated config
 // writes exactly as the inline lists they replace did. The state swap
-// itself is a pointer store under s.mu; readers load the pointer
-// atomically, so a gate check concurrent with retirement sees either the
-// whole old incarnation or the whole new one, never a torn mix — replacing
-// ~16 scattered atomic stores with one pointer install.
+// itself is a single pointer store under s.mu, so each individual
+// peerIncarnationState() load observes either the whole old incarnation
+// or the whole new one. That atomicity is per load only: production gates
+// that re-load the pointer per field (rather than loading once and
+// reading several fields from that snapshot) can still mix incarnations
+// if a retirement lands mid-sequence, exactly as the pre-change flat
+// atomics could — no stronger cross-field guarantee is claimed.
 func (s *SessionSync) retirePeerIncarnationLocked(seed net.Conn) {
 	fresh := &peerIncarnationState{}
 	var snapshotProtocol uint32
