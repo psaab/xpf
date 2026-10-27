@@ -370,7 +370,7 @@ pub(in crate::afxdp) fn build_injected_packet(
             return None;
         }
     };
-    let Some(inner_len) = crate::afxdp::gre::packet_trimmed_len(&descriptor.inner, inner_family)
+    let Some(inner_len) = crate::afxdp::frame::packet_trimmed_len(&descriptor.inner, inner_family)
     else {
         WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
         return None;
@@ -380,7 +380,7 @@ pub(in crate::afxdp) fn build_injected_packet(
         return None;
     };
     let Some((protocol, rel_l4_offset, payload_offset)) =
-        crate::afxdp::gre::parse_inner_protocol_and_offsets(inner, inner_family)
+        crate::afxdp::frame::parse_inner_protocol_and_offsets(inner, inner_family)
     else {
         WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
         return None;

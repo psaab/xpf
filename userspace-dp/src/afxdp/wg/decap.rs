@@ -53,9 +53,8 @@
 
 use super::super::*;
 use super::WG_TYPE_DATA;
-use crate::afxdp::gre::{
-    outer_datagram_end, outer_ecn_bits, packet_trimmed_len, parse_inner_protocol_and_offsets,
-};
+use crate::afxdp::frame::{packet_trimmed_len, parse_inner_protocol_and_offsets};
+use crate::afxdp::gre::{outer_datagram_end, outer_ecn_bits};
 
 /// A decapsulated WireGuard transport-data record, ready to replace its outer
 /// frame for the rest of the worker's pass.
