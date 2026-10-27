@@ -1,5 +1,4 @@
-// #1345: per-verb handler for set_queue_state. Body byte-identical to
-// handlers.rs lines 231-264.
+// #1345: per-verb handler for set_queue_state, split out of handlers.rs in #1345.
 
 use super::super::helpers::{capture_binding_arm_state, finish_binding_reconcile, refresh_status};
 use super::super::ServerState;
@@ -13,10 +12,10 @@ pub(super) fn set(
     response: &mut ControlResponse,
     persist_state: &mut bool,
     // #5862: where the caller records that a binding-settle wait is owed. The
-    // wait itself runs in handlers::handle_request AFTER the global ServerState
+    // wait itself runs in handlers::handle_stream AFTER the global ServerState
     // lock is dropped — the same locked-kick / unlocked-wait split #2962 and
     // #4054 use. Holding the lock across a 2 s settle stalled every HA
-    // `sync_session` on the "dedicated" session socket, which shares this mutex.
+    // `sync_session` before #7209 moved that verb off this mutex.
     settle_wait: &mut Option<Duration>,
 ) {
     let Some(queue_req) = queue else {
