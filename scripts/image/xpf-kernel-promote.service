@@ -11,7 +11,7 @@ Wants=network-online.target
 # path never runs, so without this the candidate would sit booted-but-held
 # SECONDARY indefinitely (r2 AGY Finding 3). OnFailure reboots once to the
 # known-good slot. SAFE against a bounce loop: an ordinary (known-good) boot's
-# gate is a fast exit-0 no-op, so this handler only ever fires on a candidate
+# gate settles any deferred prune and exits 0, so this handler only ever fires on a candidate
 # boot whose gate failed/hung — and Arm() never reordered BootOrder (it set only
 # the firmware-cleared BootNext), so the reboot falls through BootOrder to
 # known-good.

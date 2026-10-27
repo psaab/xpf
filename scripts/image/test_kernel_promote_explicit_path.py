@@ -179,9 +179,10 @@ class TestNoPathResolution(unittest.TestCase):
             "so a string compare refuses a healthy candidate on every never-cut "
             "box (#6601 r8 MAJOR-1)",
         )
-        # `same_file` must stay confined to the cross-check: the `-ef` lint
-        # exemption above is scoped to its body, so a second caller would be a
-        # selection path smuggled past the ban.
+        # `same_file` must stay confined to disagreement CHECKS: the `-ef`
+        # lint exemption above is scoped to its body, so any caller beyond
+        # the two pinned checks would be a selection path smuggled past
+        # the ban.
         calls = [
             f"{SCRIPT.name}:{lineno}: {code.strip()}"
             for lineno, code in code_lines()
@@ -189,8 +190,11 @@ class TestNoPathResolution(unittest.TestCase):
         ]
         self.assertEqual(
             len(calls),
-            1,
-            "same_file must be called ONCE, by the cross-check. Any other "
+            2,
+            "same_file calls must be exactly the two disagreement CHECKS: "
+            "the armed cross-check, and the #17860 ordinary-boot "
+            "MainPID-vs-ExecStart check (Rev18063Opus B3). Neither selects "
+            "a binary — both refuse/skip on disagreement. Any FURTHER "
             f"caller is a filesystem-derived SELECTION (#6601 r8): {calls}",
         )
 

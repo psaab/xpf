@@ -378,6 +378,16 @@ type KernelSystem interface {
 	// it while the candidate is the running kernel (#14165); the real
 	// implementation enforces the same check against uname -r.
 	PruneInactiveSlot(slot, knownGoodUnameR, candidateVersion string) error
+	// PurgeCandidatePackages is the package/file half of PruneInactiveSlot
+	// WITHOUT the selector restore: it purges the un-promoted candidate's
+	// kernel packages and deletes /lib/modules/<candidate> +
+	// /boot/*-<candidate>, with the same #5452 segment validation and the
+	// same #14165 running-kernel refusal, but never rewrites a slot
+	// selector. Used by the prune-owed collector when the recorded slot has
+	// been repurposed by a later roll (#17860): the debt's candidate
+	// packages are obsolete, but the slot's current selector belongs to
+	// that later roll and must not be rewritten to the debt's known-good.
+	PurgeCandidatePackages(candidateVersion string) error
 
 	// Now returns the current time.
 	Now() time.Time

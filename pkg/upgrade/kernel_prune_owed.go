@@ -119,12 +119,24 @@ func (r *KernelRunner) clearPruneOwed() error {
 // a leftover record is the ONLY remaining evidence that a prune was
 // deferred, and this boot is where it is collected.
 //
-// The running kernel is re-checked here, and `PruneInactiveSlot` checks
-// uname -r again internally, so the owed prune fires only on positive
-// evidence that the box is off the deferred candidate. Still running it —
-// or unable to prove otherwise — leaves the record in place and returns
-// WITHOUT an error: this boot is not the one that can collect the debt,
-// and that must not turn an otherwise clean boot into an infra failure.
+// The running kernel is re-checked here, and the prune seams check uname -r
+// again internally, so the owed prune fires only on positive evidence that
+// the box is off the deferred candidate. Still running it — or unable to
+// prove otherwise — leaves the record in place and returns WITHOUT an
+// error: this boot is not the one that can collect the debt, and that must
+// not turn an otherwise clean boot into an infra failure.
+//
+// #17860: the debt is only allowed the FULL prune while it still OWNS the
+// recorded slot. restoreKnownGood left that slot's selector at the debt's
+// known-good when it deferred; a later roll reusing the slot (Arm writes
+// the new candidate's selector into it, and may even promote it, making it
+// the running default) overwrites exactly that evidence. A selector naming
+// anything other than the debt's own versions means a later roll owns the
+// slot now, so the selector restore is skipped and only the package half
+// of the debt is collected (PurgeCandidatePackages): rewriting the
+// repurposed slot's selector to a stale known-good would silently abandon
+// that roll's kernel on the next reboot. An UNREADABLE selector proves
+// nothing either way — fail closed and leave the record for a later boot.
 func (r *KernelRunner) settlePruneOwed() error {
 	rec, err := r.readPruneOwed()
 	if err != nil {
@@ -143,6 +155,43 @@ func (r *KernelRunner) settlePruneOwed() error {
 		r.logf("kernel-upgrade: prune of candidate %s still owed but it is the "+
 			"RUNNING kernel; leaving the prune-owed record for a later boot", rec.CandidateVersion)
 		return nil
+	}
+	sel, selErr := r.cfg.Sys.ReadSlotSelector(rec.Slot)
+	switch {
+	case selErr != nil:
+		r.logf("kernel-upgrade: prune of candidate %s still owed but slot %s selector "+
+			"unreadable (%v); cannot prove the slot still belongs to this debt — "+
+			"leaving the prune-owed record for a later boot (#17860)",
+			rec.CandidateVersion, rec.Slot, selErr)
+		return nil
+	case sel == "":
+		// Empty selector: the file is missing or unparseable, not
+		// proven repurposed (a corrupt selector would otherwise be
+		// discharged as "repurposed to ''" and never repaired —
+		// Rev18063Opus B2). Retention keeps the repair opportunity.
+		r.logf("kernel-upgrade: prune of candidate %s still owed but slot %s has "+
+			"no readable selector; cannot prove the slot was repurposed — "+
+			"leaving the prune-owed record for a later boot (#17860)",
+			rec.CandidateVersion, rec.Slot)
+		return nil
+	case sel != rec.KnownGoodVersion && sel != rec.CandidateVersion:
+		// The recorded slot was repurposed by a later roll (#17860): its
+		// selector names neither the debt's known-good (what the deferring
+		// revert left) nor the debt's own candidate (a stranded selector
+		// whose repair belongs to this debt). Restore-then-purge would move
+		// that selector to a stale known-good and abandon the later roll's
+		// kernel on the next reboot, so only the package debt is collected.
+		if err := r.cfg.Sys.PurgeCandidatePackages(rec.CandidateVersion); err != nil {
+			// Keep the record, exactly like a failed full prune: the debt
+			// is still owed and the next boot retries it.
+			return fmt.Errorf("kernel-upgrade: owed purge of candidate %s (slot %s repurposed to %s): %w",
+				rec.CandidateVersion, rec.Slot, sel, err)
+		}
+		r.logf("kernel-upgrade: slot %s selector points at %s, no longer this debt's "+
+			"{known-good %s, candidate %s}; purged deferred candidate %s packages "+
+			"WITHOUT rewriting the repurposed slot's selector (#17860)",
+			rec.Slot, sel, rec.KnownGoodVersion, rec.CandidateVersion, rec.CandidateVersion)
+		return r.clearPruneOwed()
 	}
 	if err := r.cfg.Sys.PruneInactiveSlot(rec.Slot, rec.KnownGoodVersion, rec.CandidateVersion); err != nil {
 		// Keep the record: the prune is still owed and the next boot

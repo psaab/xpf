@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Upgrade: collect a deferred kernel prune on an ordinary boot without
+    rewriting a slot selector that a later roll has repurposed (purge the
+    obsolete candidate packages only), and reach that collector from the
+    installed boot gate instead of only via a manual promote (#17860).
   * IPsec: restore the prior file only when its marker (if present) and complete
     loaded connection projection (names, children, local/remote addresses) prove
     the prior render. A live mismatch keeps the candidate but does not promote
