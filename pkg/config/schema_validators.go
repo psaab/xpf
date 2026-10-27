@@ -347,6 +347,15 @@ func CanonicalInterfaceUnitRef(ref string) string {
 // or a bare ref that does not resolve to a plain physical interface,
 // returns the input unchanged so the #15278 undefined-scope gate keeps
 // its strict-reject / tolerant-warn disposition for it.
+//
+// #18030/#18031: "multi-unit" includes units materialized only by VPN
+// bind-interfaces — secureTunnelBindingSiblingUnit. A stanza-less bare ref
+// whose binding family carries a nonzero sibling is NOT folded onto .0:
+// the fold used to silently select unit 0 before the gate could judge the
+// ambiguity. Conversely a stanza that carries no unit of its own
+// (description-only) still folds onto a BOUND unit 0 (#18024 doctrine), so
+// the admitted scope is the name the dataplane compares instead of an
+// inert bare spelling.
 func (c *Config) CanonicalNATInterfaceScopeRef(ref string) string {
 	if ref == "" {
 		return ref
@@ -370,6 +379,12 @@ func (c *Config) CanonicalNATInterfaceScopeRef(ref string) string {
 		if _, bound := c.SecureTunnelNetdevForRef(ref); bound {
 			return ref
 		}
+		// #18030: no stanza at all — a binding-derived nonzero sibling
+		// makes the bare ref ambiguous; leave it for the gate instead of
+		// folding through the bound unit 0.
+		if c.secureTunnelBindingSiblingUnit(base) {
+			return ref
+		}
 		if _, bound := c.SecureTunnelNetdevForRef(ref + ".0"); bound {
 			return ref + ".0"
 		}
@@ -377,16 +392,32 @@ func (c *Config) CanonicalNATInterfaceScopeRef(ref string) string {
 	}
 	if len(ifc.Units) == 0 {
 		if ifc.Tunnel != nil && !ifc.AuthoredUnits {
+			// The unitless tunnel stanza is unit 0 — unless a binding
+			// materializes a sibling (#18031).
+			if c.secureTunnelBindingSiblingUnit(base) {
+				return ref
+			}
 			return ref + ".0"
 		}
 		// No stanza-authored unit at all: nothing here proves the ref
-		// means unit 0, so leave it for the caller's diagnosis.
+		// means unit 0 — except a binding that does (#18024 doctrine).
+		if c.secureTunnelBindingSiblingUnit(base) {
+			return ref
+		}
+		if _, bound := c.SecureTunnelNetdevForRef(ref + ".0"); bound {
+			return ref + ".0"
+		}
 		return ref
 	}
 	for unitNum, u := range ifc.Units {
 		if u != nil && unitNum != 0 {
 			return ref
 		}
+	}
+	// Authored unit 0 only — a binding-derived sibling still makes the
+	// bare ref ambiguous (#18031).
+	if c.secureTunnelBindingSiblingUnit(base) {
+		return ref
 	}
 	return ref + ".0"
 }
