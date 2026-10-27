@@ -1,10 +1,12 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -171,5 +173,127 @@ func TestFailoverRoundTripReqIDOnErrorContract17102(t *testing.T) {
 				t.Fatal("waiter not released by disconnect drain")
 			}
 		})
+	}
+}
+
+// captureConn17102 records the last frame written to it.
+type captureConn17102 struct {
+	mu     sync.Mutex
+	frame  []byte
+	closed bool
+}
+
+func (c *captureConn17102) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *captureConn17102) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.frame = append([]byte(nil), b...)
+	return len(b), nil
+}
+func (c *captureConn17102) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	return nil
+}
+func (c *captureConn17102) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 4785}
+}
+func (c *captureConn17102) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 4785}
+}
+func (c *captureConn17102) SetDeadline(time.Time) error      { return nil }
+func (c *captureConn17102) SetReadDeadline(time.Time) error  { return nil }
+func (c *captureConn17102) SetWriteDeadline(time.Time) error { return nil }
+func (c *captureConn17102) payload() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.frame) <= syncHeaderSize {
+		return nil
+	}
+	return append([]byte(nil), c.frame[syncHeaderSize:]...)
+}
+func (c *captureConn17102) msgType() uint8 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.frame) < 5 {
+		return 0
+	}
+	return c.frame[4]
+}
+
+var _ net.Conn = (*captureConn17102)(nil)
+
+// TestSendFailoverAckFrameOneRGBatchAckDecodes17102 pins fold B1: a batch
+// ack (msgType = syncMsgFailoverBatchAck / BatchCommitAck) carrying exactly
+// one RG must be batch-encoded. Before the fix sendFailoverAckFrame keyed
+// single-vs-batch on len(rgIDs)==1, emitted the 10-byte single layout, and
+// the peer's decodeFailoverBatchAckPayload rejected it ("message too
+// short"), so the 1-RG batch waiter burned the full 20s failoverAckTimeout.
+// This cell DECODES the emitted payload with the production batch decoder.
+func TestSendFailoverAckFrameOneRGBatchAckDecodes17102(t *testing.T) {
+	for _, msgType := range []uint8{syncMsgFailoverBatchAck, syncMsgFailoverBatchCommitAck} {
+		ack := &captureConn17102{}
+		fallback := &captureConn17102{}
+		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+		ss.outboundBulkAcked.Store(true)
+		ss.mu.Lock()
+		ss.conn0 = ack
+		ss.conn1 = fallback
+		ss.mu.Unlock()
+		ss.sendFailoverAckFrame(fallback, msgType, []int{7}, 42, failoverAckApplied, "")
+		if got := ack.msgType(); got != msgType {
+			t.Fatalf("msgType=%d: emitted frame type = %d, want %d", msgType, got, msgType)
+		}
+		payload := ack.payload()
+		if len(payload) == 0 {
+			t.Fatalf("msgType=%d: no ack frame captured on active conn", msgType)
+		}
+		ids, status, reqID, detail, err := decodeFailoverBatchAckPayload(payload)
+		if err != nil {
+			t.Fatalf("msgType=%d: 1-RG batch ack payload %v fails batch decode: %v (B1: single-encoded batch ack, waiter would burn 20s)", msgType, payload, err)
+		}
+		if len(ids) != 1 || ids[0] != 7 || status != failoverAckApplied || reqID != 42 || detail != "" {
+			t.Fatalf("msgType=%d: decoded ids=%v status=%d reqID=%d detail=%q, want [7] applied 42 \"\"", msgType, ids, status, reqID, detail)
+		}
+	}
+	ack := &captureConn17102{}
+	fallback := &captureConn17102{}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.outboundBulkAcked.Store(true)
+	ss.mu.Lock()
+	ss.conn0 = ack
+	ss.conn1 = fallback
+	ss.mu.Unlock()
+	ss.sendFailoverAckFrame(fallback, syncMsgFailoverAck, []int{7}, 42, failoverAckApplied, "")
+	payload := ack.payload()
+	if len(payload) < 10 || payload[0] != 7 || payload[1] != failoverAckApplied || binary.LittleEndian.Uint64(payload[2:10]) != 42 {
+		t.Fatalf("single ack payload = %v, want single layout rg=7 status=applied reqID=42", payload)
+	}
+}
+
+// TestFailoverRoundTripSendFailureDisconnectsUsedConn17102 pins fold M1:
+// on send failure the wrapper disconnects the conn failoverRoundTrip
+// actually wrote to (UsedConn), returned in the outcome, not a conn
+// re-resolved by the wrapper before the round trip.
+func TestFailoverRoundTripSendFailureDisconnectsUsedConn17102(t *testing.T) {
+	broken := &failoverFailConn17102{writeErr: errors.New("write boom")}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.outboundBulkAcked.Store(true)
+	ss.mu.Lock()
+	ss.conn0 = broken
+	ss.stats.Connected.Store(true)
+	ss.mu.Unlock()
+	if _, err := ss.SendFailover(3); err == nil || !strings.Contains(err.Error(), "failed to send") {
+		t.Fatalf("err = %v, want failed-to-send", err)
+	}
+	if !broken.closed {
+		t.Fatal("send failure did not disconnect the used (broken) conn via UsedConn (M1)")
+	}
+	ss.mu.Lock()
+	remaining := ss.conn0
+	ss.mu.Unlock()
+	if remaining != nil {
+		t.Fatal("broken used conn still installed after send-failure disconnect (M1)")
 	}
 }

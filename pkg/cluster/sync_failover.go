@@ -174,18 +174,31 @@ const (
 	failoverTripTimedOut
 )
 
+// failoverTripResult carries failoverRoundTrip's outcome. UsedConn is the
+// connection the frame was actually written to (nil before the write); on
+// send failure the wrapper MUST disconnect UsedConn, not a freshly
+// re-resolved active conn, which may have changed since the write (#17102
+// fold M1).
+type failoverTripResult struct {
+	Ack      failoverAck
+	ReqID    uint64
+	Outcome  failoverTripOutcome
+	Err      error
+	UsedConn net.Conn
+}
+
 // failoverRoundTrip is the single failover request/commit skeleton (#17102):
 // register one waiter, write one frame, drain the ack or the timeout, and
 // mirror the send-error arm. Payload encoding and ack interpretation stay
 // with the caller, so nothing here knows the single/batch wire shapes.
 //
-// The returned reqID mirrors SendFailover's contract (#16592): non-zero
+// The returned ReqID mirrors SendFailover's contract (#16592): non-zero
 // whenever the request was sent (including ack failure/timeout), zero on
 // local rejection or failed send. Commit callers discard it.
-func (s *SessionSync) failoverRoundTrip(msgType uint8, rgIDs []int, single bool, reqID uint64, genReqID bool, payload []byte, payloadFor func(reqID uint64) []byte) (failoverAck, uint64, failoverTripOutcome, error) {
+func (s *SessionSync) failoverRoundTrip(msgType uint8, rgIDs []int, single bool, reqID uint64, genReqID bool, payload []byte, payloadFor func(reqID uint64) []byte) failoverTripResult {
 	conn := s.getActiveConn()
 	if conn == nil {
-		return failoverAck{}, 0, failoverTripRejected, fmt.Errorf("peer not connected")
+		return failoverTripResult{Outcome: failoverTripRejected, Err: fmt.Errorf("peer not connected")}
 	}
 	if genReqID {
 		reqID = s.failoverSeq.Add(1)
@@ -201,9 +214,9 @@ func (s *SessionSync) failoverRoundTrip(msgType uint8, rgIDs []int, single bool,
 	if _, exists := s.failoverWaiters[key]; exists || s.failoverRGInUseLocked(rgIDs) {
 		s.failoverWaitMu.Unlock()
 		if partition == failoverWaitCommit {
-			return failoverAck{}, 0, failoverTripRejected, fmt.Errorf("failover commit already in flight for %s", failoverRGLabel(rgIDs))
+			return failoverTripResult{Outcome: failoverTripRejected, Err: fmt.Errorf("failover commit already in flight for %s", failoverRGLabel(rgIDs))}
 		}
-		return failoverAck{}, 0, failoverTripRejected, fmt.Errorf("failover request already in flight for %s", failoverRGLabel(rgIDs))
+		return failoverTripResult{Outcome: failoverTripRejected, Err: fmt.Errorf("failover request already in flight for %s", failoverRGLabel(rgIDs))}
 	}
 	s.failoverWaiters[key] = failoverWaiter{reqID: reqID, ch: waitCh, rgIDs: append([]int(nil), rgIDs...)}
 	s.failoverWaitMu.Unlock()
@@ -215,21 +228,21 @@ func (s *SessionSync) failoverRoundTrip(msgType uint8, rgIDs []int, single bool,
 	s.writeMu.Unlock()
 	if err != nil {
 		s.completeFailoverWait(key, reqID, failoverAck{status: failoverAckDisconnected, detail: "send failed"})
-		return failoverAck{}, 0, failoverTripSendFailed, err
+		return failoverTripResult{Outcome: failoverTripSendFailed, Err: err, UsedConn: conn}
 	}
 	timer := time.NewTimer(failoverAckTimeout)
 	defer timer.Stop()
 	select {
 	case ack := <-waitCh:
-		return ack, reqID, failoverTripAcked, nil
+		return failoverTripResult{Ack: ack, ReqID: reqID, Outcome: failoverTripAcked, UsedConn: conn}
 	case <-timer.C:
 		select {
 		case ack := <-waitCh:
-			return ack, reqID, failoverTripAcked, nil
+			return failoverTripResult{Ack: ack, ReqID: reqID, Outcome: failoverTripAcked, UsedConn: conn}
 		default:
 		}
 		s.removeFailoverWait(key, reqID, waitCh)
-		return failoverAck{}, reqID, failoverTripTimedOut, errFailoverTimeoutFor(msgType, rgIDs)
+		return failoverTripResult{ReqID: reqID, Outcome: failoverTripTimedOut, Err: errFailoverTimeoutFor(msgType, rgIDs), UsedConn: conn}
 	}
 }
 
@@ -264,26 +277,22 @@ func (s *SessionSync) SendFailover(rgID int) (uint64, error) {
 	if err := validateFailoverProtocolRGID(rgID); err != nil {
 		return 0, err
 	}
-	conn := s.getActiveConn()
-	if conn == nil {
-		return 0, fmt.Errorf("peer not connected")
-	}
-	ack, reqID, outcome, err := s.failoverRoundTrip(syncMsgFailover, []int{rgID}, true, 0, true, nil,
+	res := s.failoverRoundTrip(syncMsgFailover, []int{rgID}, true, 0, true, nil,
 		func(reqID uint64) []byte { return encodeFailoverSingleReqPayload(rgID, reqID) })
-	switch outcome {
+	switch res.Outcome {
 	case failoverTripAcked:
 		slog.Info("cluster sync: failover request sent to peer", "rg", rgID)
-		return reqID, failoverAckError([]int{rgID}, ack)
+		return res.ReqID, failoverAckError([]int{rgID}, res.Ack)
 	case failoverTripSendFailed:
-		slog.Warn("cluster sync: failover send error", "err", err, "rg", rgID)
+		slog.Warn("cluster sync: failover send error", "err", res.Err, "rg", rgID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
-		return 0, fmt.Errorf("failed to send failover request: %w", err)
+		s.handleDisconnect(res.UsedConn)
+		return 0, fmt.Errorf("failed to send failover request: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: failover request sent to peer", "rg", rgID)
-		return reqID, err
+		return res.ReqID, res.Err
 	default:
-		return 0, err
+		return 0, res.Err
 	}
 }
 
@@ -303,26 +312,22 @@ func (s *SessionSync) SendFailoverBatch(rgIDs []int) (uint64, error) {
 	if err := validateFailoverBatchRGCount(ids); err != nil {
 		return 0, err
 	}
-	conn := s.getActiveConn()
-	if conn == nil {
-		return 0, fmt.Errorf("peer not connected")
-	}
-	ack, reqID, outcome, err := s.failoverRoundTrip(syncMsgFailoverBatch, ids, false, 0, true, nil,
+	res := s.failoverRoundTrip(syncMsgFailoverBatch, ids, false, 0, true, nil,
 		func(reqID uint64) []byte { return encodeFailoverBatchRequestPayload(ids, reqID) })
-	switch outcome {
+	switch res.Outcome {
 	case failoverTripAcked:
 		slog.Info("cluster sync: batch failover request sent to peer", "rgs", ids)
-		return reqID, failoverAckError(ids, ack)
+		return res.ReqID, failoverAckError(ids, res.Ack)
 	case failoverTripSendFailed:
-		slog.Warn("cluster sync: batch failover send error", "err", err, "rgs", ids)
+		slog.Warn("cluster sync: batch failover send error", "err", res.Err, "rgs", ids)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
-		return 0, fmt.Errorf("failed to send batch failover request: %w", err)
+		s.handleDisconnect(res.UsedConn)
+		return 0, fmt.Errorf("failed to send batch failover request: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: batch failover request sent to peer", "rgs", ids)
-		return reqID, err
+		return res.ReqID, res.Err
 	default:
-		return 0, err
+		return 0, res.Err
 	}
 }
 func failoverAckError(rgIDs []int, ack failoverAck) error {
@@ -357,26 +362,22 @@ func (s *SessionSync) SendFailoverCommit(rgID int, reqID uint64) error {
 	if err := validateFailoverProtocolRGID(rgID); err != nil {
 		return err
 	}
-	conn := s.getActiveConn()
-	if conn == nil {
-		return fmt.Errorf("peer not connected")
-	}
 	payload := encodeFailoverSingleReqPayload(rgID, reqID)
-	ack, _, outcome, err := s.failoverRoundTrip(syncMsgFailoverCommit, []int{rgID}, true, reqID, false, payload, nil)
-	switch outcome {
+	res := s.failoverRoundTrip(syncMsgFailoverCommit, []int{rgID}, true, reqID, false, payload, nil)
+	switch res.Outcome {
 	case failoverTripAcked:
 		slog.Info("cluster sync: failover commit sent to peer", "rg", rgID, "req_id", reqID)
-		return failoverCommitAckError(rgID, ack)
+		return failoverCommitAckError(rgID, res.Ack)
 	case failoverTripSendFailed:
-		slog.Warn("cluster sync: failover commit send error", "err", err, "rg", rgID, "req_id", reqID)
+		slog.Warn("cluster sync: failover commit send error", "err", res.Err, "rg", rgID, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
-		return fmt.Errorf("failed to send failover commit: %w", err)
+		s.handleDisconnect(res.UsedConn)
+		return fmt.Errorf("failed to send failover commit: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: failover commit sent to peer", "rg", rgID, "req_id", reqID)
-		return err
+		return res.Err
 	default:
-		return err
+		return res.Err
 	}
 }
 
@@ -396,26 +397,22 @@ func (s *SessionSync) SendFailoverCommitBatch(rgIDs []int, reqID uint64) error {
 	if err := validateFailoverBatchRGCount(ids); err != nil {
 		return err
 	}
-	conn := s.getActiveConn()
-	if conn == nil {
-		return fmt.Errorf("peer not connected")
-	}
 	payload := encodeFailoverBatchRequestPayload(ids, reqID)
-	ack, _, outcome, err := s.failoverRoundTrip(syncMsgFailoverBatchCommit, ids, false, reqID, false, payload, nil)
-	switch outcome {
+	res := s.failoverRoundTrip(syncMsgFailoverBatchCommit, ids, false, reqID, false, payload, nil)
+	switch res.Outcome {
 	case failoverTripAcked:
 		slog.Info("cluster sync: batch failover commit sent to peer", "rgs", ids, "req_id", reqID)
-		return failoverCommitAckBatchError(ids, ack)
+		return failoverCommitAckBatchError(ids, res.Ack)
 	case failoverTripSendFailed:
-		slog.Warn("cluster sync: batch failover commit send error", "err", err, "rgs", ids, "req_id", reqID)
+		slog.Warn("cluster sync: batch failover commit send error", "err", res.Err, "rgs", ids, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
-		return fmt.Errorf("failed to send batch failover commit: %w", err)
+		s.handleDisconnect(res.UsedConn)
+		return fmt.Errorf("failed to send batch failover commit: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: batch failover commit sent to peer", "rgs", ids, "req_id", reqID)
-		return err
+		return res.Err
 	default:
-		return err
+		return res.Err
 	}
 }
 func failoverCommitAckBatchError(rgIDs []int, ack failoverAck) error {
@@ -657,17 +654,31 @@ func (s *SessionSync) handleRemoteFailoverAbortBatch(rgIDs []int, reqID uint64) 
 	}
 }
 
+// isBatchFailoverAck reports whether msgType carries the batch ack wire
+// shape. Encoding MUST key on msgType, never on len(rgIDs): a batch ack
+// for exactly one RG is still a batch frame, and encoding it as single
+// leaves the peer's batch decoder unable to parse it, so its waiter
+// burns the full failoverAckTimeout (#17102 fold B1).
+func isBatchFailoverAck(msgType uint8) bool {
+	return msgType == syncMsgFailoverBatchAck || msgType == syncMsgFailoverBatchCommitAck
+}
+
 // sendFailoverAckFrame is the single result sender (#17102): it builds the
 // single or batch ack payload for rgIDs and owns the #14160 two-conn write
 // protocol — a broken active conn is disconnected even when the fallback
 // delivers, and on dual failure both conns are disconnected with one error
 // counted. The single path's success Info log is preserved only for single
-// frames; the batch path never logged success.
+// frames; the batch path never logged success. Single-vs-batch is decided
+// by msgType (see isBatchFailoverAck), not by the RG count.
 func (s *SessionSync) sendFailoverAckFrame(conn net.Conn, msgType uint8, rgIDs []int, reqID uint64, status uint8, detail string) {
-	single := len(rgIDs) == 1
+	single := !isBatchFailoverAck(msgType)
 	if !single {
 		if err := validateFailoverBatchRGCount(rgIDs); err != nil {
 			slog.Warn("cluster sync: refusing to send oversized batch failover result", "err", err, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
+			return
+		}
+		if len(rgIDs) == 0 {
+			slog.Warn("cluster sync: refusing to send batch failover result with no redundancy groups", "msg_type", msgType, "req_id", reqID, "status", status)
 			return
 		}
 	}
