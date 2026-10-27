@@ -2220,7 +2220,13 @@ enum ResolvedRouteV6<'a> {
 /// Interfaces absent from that map are the default instance (the
 /// map's documented convention). Runs only on the terminal/miss
 /// path, never per forwarded packet.
-
+/// #17053: the session_glue connected attribution (owner RG and
+/// connected ifindex for a destination) is built on this same
+/// canonical LPM via `connected_lpm_ifindex`. `ConnectedSources`
+/// selects which row sets participate; the tie rule, the per-family
+/// table scoping (`instance_owns_table_*`) and the precedence
+/// (transit rows before the ledger fallback) are defined HERE only,
+/// so a scoping or tie fix lands in one place.
 /// #15917: does `instance` ("" = default) own the v4 `table`?
 /// Spells `connected_route_tables(instance).0 == table` without
 /// allocating the canonical pair: the default instance owns only
@@ -2228,7 +2234,7 @@ enum ResolvedRouteV6<'a> {
 /// `connected_route_tables` remains the build-time spelling
 /// authority; this is its allocation-free lookup-time twin, kept
 /// next to its only consumers (Opus perf fold on PR #15926).
-fn instance_owns_table_v4(instance: &str, table: &str) -> bool {
+pub(in crate::afxdp) fn instance_owns_table_v4(instance: &str, table: &str) -> bool {
     if instance.is_empty() {
         table == DEFAULT_V4_TABLE
     } else {
@@ -2239,7 +2245,7 @@ fn instance_owns_table_v4(instance: &str, table: &str) -> bool {
 }
 
 /// #15917: v6 twin of `instance_owns_table_v4`.
-fn instance_owns_table_v6(instance: &str, table: &str) -> bool {
+pub(in crate::afxdp) fn instance_owns_table_v6(instance: &str, table: &str) -> bool {
     if instance.is_empty() {
         table == DEFAULT_V6_TABLE
     } else {
@@ -2252,7 +2258,111 @@ fn instance_owns_table_v6(instance: &str, table: &str) -> bool {
 /// #15917: v4 connected-prefix LPM attribution for `table` (see
 /// the note above). Longest prefix wins; equal lengths pick the
 /// lowest ifindex (#10645 precedent).
-fn connected_lpm_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
+pub(in crate::afxdp) fn connected_lpm_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
+    connected_lpm_ifindex(state, IpAddr::V4(ip), Some(table), ConnectedSources::LedgerOnly)
+}
+
+/// #15917: v6 twin of `connected_lpm_ifindex_v4`.
+pub(in crate::afxdp) fn connected_lpm_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> i32 {
+    connected_lpm_ifindex(state, IpAddr::V6(ip), Some(table), ConnectedSources::LedgerOnly)
+}
+
+/// #17053: which connected row sets `connected_lpm_ifindex` may
+/// consult. The canonical LPM defines the longest-prefix / lowest-
+/// ifindex tie rule and the per-family table scoping once; callers
+/// differ only in which row sets participate.
+///
+/// * `LedgerOnly` — the #15917 cluster-terminal fallback: only the
+///   `connected_*_by_ifindex` ledger (peer-owned prefixes live only
+///   there). This is what `connected_lpm_ifindex_{v4,v6}` do.
+/// * `RowsThenLedger` — the session_glue attribution: the FIB
+///   `connected_v*` transit rows first; the ledger only when no
+///   transit row contains the target. Mirrors the legacy
+///   session_glue precedence, now with the canonical tie rule.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::afxdp) enum ConnectedSources {
+    LedgerOnly,
+    RowsThenLedger,
+}
+
+/// #17053: canonical connected-prefix LPM dispatcher — the single
+/// source of truth for connected attribution. Longest prefix wins;
+/// equal-length ties pick the LOWEST ifindex (#10645 precedent), so
+/// the result never depends on FastMap iteration order or Vec
+/// insertion order. `table` is the session's installing table;
+/// `None` resolves to the family default (`inet.0` / `inet6.0`),
+/// mirroring the legacy wrappers. Returns 0 when no in-scope
+/// connected prefix contains `ip`.
+pub(in crate::afxdp) fn connected_lpm_ifindex(
+    state: &ForwardingState,
+    ip: IpAddr,
+    table: Option<&str>,
+    sources: ConnectedSources,
+) -> i32 {
+    match ip {
+        IpAddr::V4(v4) => {
+            let want = table.unwrap_or(DEFAULT_V4_TABLE);
+            if sources == ConnectedSources::RowsThenLedger {
+                let mut best: Option<(u8, i32)> = None;
+                for row in &state.connected_v4 {
+                    if row.table != want && !row.table.is_empty() {
+                        continue;
+                    }
+                    if row.prefix.contains(v4) {
+                        let candidate = (row.prefix.prefix_len(), row.ifindex);
+                        best = Some(match best {
+                            None => candidate,
+                            Some((best_len, best_ifindex))
+                                if candidate.0 > best_len
+                                    || (candidate.0 == best_len
+                                        && candidate.1 < best_ifindex) =>
+                            {
+                                candidate
+                            }
+                            Some(current) => current,
+                        });
+                    }
+                }
+                if let Some((_, ifindex)) = best {
+                    return ifindex;
+                }
+            }
+            connected_lpm_ifindex_ledger_v4(state, v4, want)
+        }
+        IpAddr::V6(v6) => {
+            let want = table.unwrap_or(DEFAULT_V6_TABLE);
+            if sources == ConnectedSources::RowsThenLedger {
+                let mut best: Option<(u8, i32)> = None;
+                for row in &state.connected_v6 {
+                    if row.table != want && !row.table.is_empty() {
+                        continue;
+                    }
+                    if row.prefix.contains(v6) {
+                        let candidate = (row.prefix.prefix_len(), row.ifindex);
+                        best = Some(match best {
+                            None => candidate,
+                            Some((best_len, best_ifindex))
+                                if candidate.0 > best_len
+                                    || (candidate.0 == best_len
+                                        && candidate.1 < best_ifindex) =>
+                            {
+                                candidate
+                            }
+                            Some(current) => current,
+                        });
+                    }
+                }
+                if let Some((_, ifindex)) = best {
+                    return ifindex;
+                }
+            }
+            connected_lpm_ifindex_ledger_v6(state, v6, want)
+        }
+    }
+}
+
+/// #17053: ledger-only kernel of `connected_lpm_ifindex` (v4).
+fn connected_lpm_ifindex_ledger_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
     let mut best: Option<(u8, i32)> = None;
     for (ifindex, prefixes) in &state.connected_v4_by_ifindex {
         let instance = state
@@ -2282,8 +2392,8 @@ fn connected_lpm_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) 
     best.map(|(_, ifindex)| ifindex).unwrap_or(0)
 }
 
-/// #15917: v6 twin of `connected_lpm_ifindex_v4`.
-fn connected_lpm_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> i32 {
+/// #17053: ledger-only kernel of `connected_lpm_ifindex` (v6).
+fn connected_lpm_ifindex_ledger_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> i32 {
     let mut best: Option<(u8, i32)> = None;
     for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
         let instance = state

@@ -7068,6 +7068,126 @@ fn split_rg_peer_owned_ledger_scoped_by_ri_15958b() {
     );
 }
 
+/// #17053: equal-length connected ties are deterministic — the
+/// LOWEST ifindex wins regardless of insertion order — and the
+/// session_glue attribution agrees with the canonical fib LPM.
+/// The legacy session_glue scan replaced on `len >= best_len`
+/// (last row / last hash entry wins), so inserting the same two
+/// /24s in opposite orders flipped the answer; the index kept the
+/// same order dependence. FAIL-ON-REVERT: restore `>=` in either
+/// place and the reversed-order arms flip to ifindex 24 / RG1.
+#[test]
+fn connected_tie_lowest_ifindex_both_orders_17053() {
+    // Two interfaces carry the same /24 (10.0.61.0/24): ifindex 5
+    // (RG2) and ifindex 24 (RG1), default instance, present in
+    // BOTH the FIB rows and the ledger so each source set ties.
+    let build = |order: [i32; 2]| {
+        let mut forwarding = ForwardingState::default();
+        for ifindex in order {
+            let rg = if ifindex == 5 { 2 } else { 1 };
+            let prefix = crate::prefix::PrefixV4::from_net(
+                "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+            );
+            forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+                prefix,
+                host: Ipv4Addr::new(10, 0, 61, 1),
+                ifindex,
+                tunnel_endpoint_id: 0,
+                table: "inet.0".to_string(),
+            });
+            forwarding
+                .connected_v4_by_ifindex
+                .entry(ifindex)
+                .or_default()
+                .push(prefix);
+            forwarding.egress.insert(ifindex, crate::afxdp::EgressInterface {
+                bind_ifindex: ifindex, vlan_id: 0, mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
+                redundancy_group: rg, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
+            });
+        }
+        forwarding
+    };
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    for order in [[24, 5], [5, 24]] {
+        let mut forwarding = build(order);
+        assert_eq!(
+            crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+            5,
+            "#17053: lowest ifindex must win the /24 tie (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+            2,
+            "#17053: owner RG must follow the lowest ifindex (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::forwarding::connected_lpm_ifindex(
+                &forwarding,
+                target,
+                None,
+                crate::afxdp::forwarding::ConnectedSources::LedgerOnly,
+            ),
+            5,
+            "#17053: canonical ledger LPM must agree (order {order:?})"
+        );
+        // The build-time index must answer identically.
+        forwarding.rebuild_connected_owner_index();
+        assert_eq!(
+            crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+            2,
+            "#17053: indexed owner must keep the lowest-ifindex winner (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+            5,
+            "#17053: indexed scan path must keep the lowest ifindex (order {order:?})"
+        );
+    }
+    // Canonical vs session_glue parity on the same state.
+    let forwarding = build([24, 5]);
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+        crate::afxdp::forwarding::connected_lpm_ifindex(
+            &forwarding,
+            target,
+            None,
+            crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+        ),
+        "#17053: session_glue and canonical LPM must not diverge"
+    );
+}
+
+/// #17053 guard: the divergent session_glue LPM must not return.
+/// Same family-blind scope predicate, dead local branch and
+/// last-wins tie were deleted; any reintroduction trips this cell.
+#[test]
+fn connected_lpm_single_source_structure_17053() {
+    let resolution = include_str!("session_glue/resolution.rs");
+    assert!(
+        !resolution.contains("len >= best_len"),
+        "#17053: session_glue re-introduced the last-wins tie"
+    );
+    assert!(
+        !resolution.contains("fn interface_in_table_scope"),
+        "#17053: session_glue re-introduced the family-blind scope predicate"
+    );
+    assert!(
+        resolution.contains("ConnectedSources::RowsThenLedger"),
+        "#17053: session_glue must delegate to the canonical LPM"
+    );
+    let fib = include_str!("forwarding/fib.rs");
+    assert!(
+        fib.contains("pub(in crate::afxdp) fn connected_lpm_ifindex("),
+        "#17053: canonical dispatcher missing from fib.rs"
+    );
+    let state = include_str!("types/forwarding/state.rs");
+    assert!(
+        !state.contains("len >= best_len"),
+        "#17053: connected-owner index re-introduced the last-wins tie"
+    );
+}
+
 /// #16524: gateway-routed destination (no connected owner) must
 /// re-home on failback, while the connected control and the
 /// transient-mixed-state retention stay green. Direct helper cells
