@@ -99,6 +99,7 @@ var syncStatFields = []syncStatField{
 	{name: "DeletesSuppressedPurgeRetirement", label: "Purge-retirement deletes suppressed", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.DeletesSuppressedPurgeRetirement })},
 	{name: "DeletesSuppressedScopedPolicy", label: "Scoped-policy deletes suppressed", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.DeletesSuppressedScopedPolicy })},
 	{name: "InstallsSuppressedNoPeerInstallTable", label: "Installs suppressed (peer lacks install-table support)", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.InstallsSuppressedNoPeerInstallTable })},
+	{name: "InstallsSuppressedIpsecDiscriminator", label: "Installs suppressed (peer lacks IPsec discriminator support)", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.InstallsSuppressedIpsecDiscriminator })},
 	{name: "DeletesStaleIgnored", label: "Deletes stale-ignored", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.DeletesStaleIgnored })},
 	{name: "InstallsStaleIgnored", label: "Installs stale-ignored", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.InstallsStaleIgnored })},
 	{name: "SessionsStaleConfigIgnored", label: "Sessions stale-config-ignored", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.SessionsStaleConfigIgnored })},
@@ -263,6 +264,8 @@ func loadSyncStat(s *SessionSync, name string) uint64 {
 		return s.stats.DeletesSuppressedScopedPolicy.Load()
 	case "InstallsSuppressedNoPeerInstallTable":
 		return s.stats.InstallsSuppressedNoPeerInstallTable.Load()
+	case "InstallsSuppressedIpsecDiscriminator":
+		return s.stats.InstallsSuppressedIpsecDiscriminator.Load()
 	case "DeletesStaleIgnored":
 		return s.stats.DeletesStaleIgnored.Load()
 	case "InstallsStaleIgnored":
@@ -431,6 +434,8 @@ func setSyncStatUint(snap *SyncStatsSnapshot, name string, v uint64) {
 		snap.DeletesSuppressedScopedPolicy = v
 	case "InstallsSuppressedNoPeerInstallTable":
 		snap.InstallsSuppressedNoPeerInstallTable = v
+	case "InstallsSuppressedIpsecDiscriminator":
+		snap.InstallsSuppressedIpsecDiscriminator = v
 	case "DeletesStaleIgnored":
 		snap.DeletesStaleIgnored = v
 	case "InstallsStaleIgnored":

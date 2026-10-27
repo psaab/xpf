@@ -511,9 +511,8 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                 }
             }
             WorkerCommand::UpsertLocal(entry) => {
-                // Kept inline (#1346 plan v2 §4.1): lifting a short
-                // delegate to its own sibling file is negative value.
-                //
+                // Inline in the dispatcher (no `commands/` handler):
+                // the debug_assert contract below is tied to this arm.
                 // #1870: local-tunnel pair entries are coordinator-
                 // authoritative replicas of state ALREADY published to
                 // the shared maps (the tunnel.rs publish precedes the
@@ -581,8 +580,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                     now_secs,
                     &mut deleted_synced_keys,
                     worker_id,
-                    false,
-                    true,
+                    commands::DeleteOrigin::LocalClear,
                     &mut Vec::new(),
                     0,
                     None,
@@ -735,7 +733,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                 }
             }
             WorkerCommand::EnqueueShapedLocal(req) => {
-                // Trivial variant — kept inline (#1346 plan v2 §4.1).
+                // Inline push into the tick results.
                 shaped_tx_requests.push(req);
             }
             WorkerCommand::InstallPptpCall {
@@ -772,7 +770,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                     .forget_control_channel_learned_by(control, closed_ns);
             }
             WorkerCommand::VacateAllSharedExactSlots => {
-                // Trivial variant — kept inline (#1346 plan v2 §4.1).
+                // Inline flag set into the tick results.
                 // #941 Work item C: signal the outer poll loop to vacate
                 // all shared_exact slots (we don't have BindingWorker
                 // access here, so we set the flag and let

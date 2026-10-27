@@ -25,8 +25,8 @@ import (
 //	<root>/<name>/dev_port, <root>/<name>/phys_port_name (optional files)
 //
 // The device symlink target is a directory whose name IS the PCI address,
-// so filepath.EvalSymlinks + extractPCIAddr resolve it exactly as on a
-// real box.
+// so filepath.EvalSymlinks + netname.PCIAddrFromDevicePath resolve it
+// exactly as on a real box.
 type multiportDev12545 struct {
 	name, busAddr, driver string
 	devPort               *int
