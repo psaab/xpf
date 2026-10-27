@@ -388,7 +388,11 @@ func (er *EventReader) SetIfNames(names map[uint32]string) {
 	er.ifNamesMu.Unlock()
 }
 
-func (er *EventReader) resolveIfName(ifindex uint32) string {
+// InterfaceName returns the current name for an ifindex, or empty when
+// the index has not been resolved. It is used by daemon consumers that
+// synthesize events from session deltas and need the same sampling scope
+// as raw events.
+func (er *EventReader) InterfaceName(ifindex uint32) string {
 	if ifindex == 0 {
 		return ""
 	}
@@ -841,7 +845,7 @@ func (er *EventReader) logEvent(data []byte) {
 	closeReasonCode := evt.CloseReason
 	rec.RevSessionPkts = evt.RevPackets
 	rec.RevSessionBytes = evt.RevBytes
-	rec.IngressIface = er.resolveIfName(evt.IngressIfindex)
+	rec.IngressIface = er.InterfaceName(evt.IngressIfindex)
 	// #2749: retain the raw numeric ifindex so the flow exporters can
 	// populate ingressInterface (NetFlow IE 10 / IPFIX ingressInterface),
 	// which is an SNMP ifIndex value, not the resolved name.
@@ -859,7 +863,7 @@ func (er *EventReader) logEvent(data []byte) {
 		rec.TCPControlBits = data[rawEventTCPBitOffset]
 		rec.EgressIfindex = binary.LittleEndian.Uint32(
 			data[rawEventEgressOffset : rawEventEgressOffset+4])
-		rec.EgressIface = er.resolveIfName(rec.EgressIfindex)
+		rec.EgressIface = er.InterfaceName(rec.EgressIfindex)
 	}
 
 	// Resolve policy name (skip for screen drops which repurpose policy_id).
