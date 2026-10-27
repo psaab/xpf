@@ -787,8 +787,21 @@ if [ ! -e "$ARM_RECORD" ]; then
     # neither resolves there is honestly no binary this gate may run: say so
     # loudly and leave the debt for the next boot (fail-safe — the prune is
     # destructive, so skipping it is the safe direction).
-    try_candidate "$(unit_main_pid_exe)" "systemd MainPID -> /proc/<pid>/exe for $PROMOTE_UNIT"
-    try_candidate "$(unit_exec_start)" "systemd ExecStart for $PROMOTE_UNIT"
+    MAIN_EXE="$(unit_main_pid_exe)"
+    EXEC_EXE="$(unit_exec_start)"
+    # Unambiguous-or-nothing, like the armed cross-check below: if BOTH
+    # hops resolve but name DIFFERENT files (stale drop-in vs running
+    # daemon), no binary may run — a stale binary could settle the debt
+    # with pre-#17860 logic (Rev18063Opus B3).
+    if [ -n "$MAIN_EXE" ] && [ -n "$EXEC_EXE" ] && ! same_file "$MAIN_EXE" "$EXEC_EXE"; then
+        log "WARNING: this ordinary boot may owe a deferred candidate prune, but" \
+            "the live-daemon hops disagree (MainPID -> $MAIN_EXE, ExecStart ->" \
+            "$EXEC_EXE), so the deferred-cleanup collector did NOT run this" \
+            "boot; it retries on the next boot. FACTS: $(unit_facts)."
+        exit 0
+    fi
+    try_candidate "$MAIN_EXE" "systemd MainPID -> /proc/<pid>/exe for $PROMOTE_UNIT"
+    try_candidate "$EXEC_EXE" "systemd ExecStart for $PROMOTE_UNIT"
     ORDINARY="$XPFD"
     if [ -z "$ORDINARY" ]; then
         log "WARNING: this ordinary boot may owe a deferred candidate prune, but" \

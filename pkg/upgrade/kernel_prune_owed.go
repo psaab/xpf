@@ -164,6 +164,16 @@ func (r *KernelRunner) settlePruneOwed() error {
 			"leaving the prune-owed record for a later boot (#17860)",
 			rec.CandidateVersion, rec.Slot, selErr)
 		return nil
+	case sel == "":
+		// Empty selector: the file is missing or unparseable, not
+		// proven repurposed (a corrupt selector would otherwise be
+		// discharged as "repurposed to ''" and never repaired —
+		// Rev18063Opus B2). Retention keeps the repair opportunity.
+		r.logf("kernel-upgrade: prune of candidate %s still owed but slot %s has "+
+			"no readable selector; cannot prove the slot was repurposed — "+
+			"leaving the prune-owed record for a later boot (#17860)",
+			rec.CandidateVersion, rec.Slot)
+		return nil
 	case sel != rec.KnownGoodVersion && sel != rec.CandidateVersion:
 		// The recorded slot was repurposed by a later roll (#17860): its
 		// selector names neither the debt's known-good (what the deferring
