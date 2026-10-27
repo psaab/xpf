@@ -1074,8 +1074,8 @@ mod routing_domain_row_9546_tests {
         .expect("a same-family v4 key must build a row");
         assert_eq!(
             row.routing_domain, TENANT,
-            "build_conntrack_value_v4 wrote routing_domain={}, want {TENANT} — the Go GC reads \
-             this back to scope its delete; 0 here restores the #9546 inertness",
+            "build_conntrack_value_v4 wrote routing_domain={}, want {TENANT} — scoped \
+             delete paths read this back to scope their delete; 0 here restores the #9546 inertness",
             row.routing_domain
         );
     }

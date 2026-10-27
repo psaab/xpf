@@ -3203,7 +3203,7 @@ systems have different boot times and independent monotonic clocks.
 When a node becomes primary for an RG:
 
 - synced sessions for newly-owned zones become locally authoritative
-- GC delete callbacks become active for those zones
+- helper session-delta delete queueing becomes active for those zones (the peer-delete gate is `IsLocalPrimaryAny`, see `daemon_policy_invalidate.go` / `daemon_ha_userspace_stream.go`)
 - userspace session state for the newly-owned RG is refreshed or promoted as
   needed for local forwarding
 - direct-mode failover also relies on post-transition re-announcements to move
@@ -3419,8 +3419,8 @@ the same key.
 `PauseIncrementalSync(reason)` / `ResumeIncrementalSync(reason)` provide a
 depth-counted pause mechanism. Multiple callers can pause independently; the
 sweep only resumes when all callers have resumed. The pause stops only the
-periodic sweep goroutine without affecting GC delete callbacks or explicit sync
-producers. (These helpers — along with `WaitForIdle` and
+periodic sweep goroutine without affecting helper session-delta delete
+queueing or explicit sync producers. (These helpers — along with `WaitForIdle` and
 `WaitForPeerBarriersDrained` — are retained primitives with no current live
 caller; the demotion path uses only the single peer barrier described above.)
 

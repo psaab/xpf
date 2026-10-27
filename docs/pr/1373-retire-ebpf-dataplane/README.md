@@ -350,8 +350,10 @@ surfaces move to domain interfaces such as `RuntimeDataPlane`, `SessionStore`,
 
 - `pkg/dataplane.DataPlane` is still load-bearing for API, gRPC, CLI, status,
   cluster session sync, daemon HA, daemon flow, and daemon apply bridges listed
-  above. Conntrack GC now enters through `SessionStore` and `Telemetry`
-  runtime-domain providers. `pkg/monitoriface` now uses a
+  above. The retired Go conntrack GC (`pkg/conntrack`, deleted in #17155)
+  formerly entered through `SessionStore` and `Telemetry` runtime-domain
+  providers; session expiry and delete-sync are now owned by the helper's
+  per-worker expiry and the session-delta stream. `pkg/monitoriface` now uses a
   package-local `RuntimeDataPlane`/`CounterReader` shape; CLI and gRPC adapt
   their wider dataplane fields before entering the monitor-interface package.
 - Omitted `system dataplane-type` now resolves to the userspace runtime path.

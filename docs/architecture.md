@@ -88,7 +88,9 @@ It is no longer a selectable backend.
 
 ## Key design patterns
 
-- **Go control plane** handles config compilation, session GC, management
+- **Go control plane** handles config compilation, session management
+  (expiry itself is owned by the Rust helper's per-worker expiry; the
+  retired Go conntrack GC was deleted in #17155), management
   APIs, HA cluster, and routing.
 - **Rust AF_XDP userspace dataplane** owns the only packet-forwarding path.
 - **Retained eBPF surface** is the userspace XDP shim (`userspace-xdp/`)

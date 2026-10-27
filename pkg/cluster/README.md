@@ -4305,9 +4305,10 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   routine rather than exceptional. And `RequestPeerFailover` early-returns
   "node is already primary" without touching the peer, which is why re-issuing
   the same failover to diagnose the state changes nothing.
-- HA delete-sync callbacks fire from the GC loop. They must not block, and
-  must log at `slog.Debug` — earlier `slog.Info` flooded at 15 req/s and
-  drowned out real diagnostics (per CLAUDE.md logging rules).
+- HA delete-sync queueing (helper session-delta closes in
+  `daemon_ha_userspace_stream.go`, and commit-time policy invalidation) must
+  not block, and must log at `slog.Debug` — earlier `slog.Info` flooded at
+  15 req/s and drowned out real diagnostics (per CLAUDE.md logging rules).
 - **`Manager.Start` must NOT hold `m.mu` across the monitor's `Stop()` (#4828).**
   The `Monitor` poll goroutine calls back into `SetMonitorWeight`, which takes
   `m.mu`; `Stop()` joins that goroutine via `wg.Wait()`. Holding `m.mu` while

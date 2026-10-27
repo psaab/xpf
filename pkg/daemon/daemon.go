@@ -129,10 +129,10 @@ type Daemon struct {
 	// here so a corrected commit re-arms it — #6741 owns that window).
 	// The three operator-facing management servers therefore receive
 	// liveDataPlane (daemon_dp_live.go), which re-reads this cell per
-	// call, instead of a startup snapshot of the handle; the conntrack
-	// GC, cluster SessionSync, and the userspace event-stream loop stay
-	// deliberate capture-once consumers (rationale in daemon_dp_live.go
-	// and pkg/daemon/README.md).
+	// call, instead of a startup snapshot of the handle; cluster
+	// SessionSync is the sole deliberate capture-once consumer and the
+	// userspace event-stream loop re-resolves per tick (rationale in
+	// daemon_dp_live.go and pkg/daemon/README.md).
 	dpCell atomic.Pointer[dpSlot]
 
 	// dataplaneArmed is the #5275 arm state: true ONLY while the runtime

@@ -1513,16 +1513,32 @@ Key properties:
 
 Formerly the Go conntrack GC (`pkg/conntrack/gc.go`, deleted in #17155)
 queued a DeleteV4/V6 message to the peer for every session its 10-second
-sweep expired. That sweep never ran on the userspace dataplane, and the
-package is retired.
+sweep expired. That sweep never ran on the userspace dataplane (its
+`SkipSweep` was always set there), and the package is retired; session
+expiry is owned by the Rust helper's per-worker expiry.
 
 Deletes now originate from the helper's session-delta stream: when the
-Rust helper reports a session close, the daemon queues DeleteV4/V6 to the
-peer (`pkg/daemon/daemon_ha_userspace_stream.go` → `QueueDeleteV4`/`V6`),
-and commit-time policy invalidation queues deletes the same way
-(`pkg/daemon/daemon_policy_invalidate.go`). The peer receives the delete
-and removes the forward entry from its session table; expiry of any
-orphaned reverse entries is owned by the helper's per-worker expiry.
+Rust helper reports a session close, the daemon queues a delete to the
+peer (`pkg/daemon/daemon_ha_userspace_stream.go`). The scoped variant is
+taken first — when the close carries a nonzero `RTFlowSessionID` and
+`RoutingDomain` and the peer is scoped-delete capable, the daemon queues
+`QueueDeleteScopedV4`/`V6` (domain + expected RT_FLOW id,
+`daemon_ha_userspace_stream.go:840-843`) so a colliding bare tuple in
+another tenant cannot be killed; otherwise (purge-marked, unstated
+domain, missing id, or incapable peer) it falls back to
+`QueueDeleteV4`/`V6`. Commit-time policy invalidation queues deletes the
+same way (`pkg/daemon/daemon_policy_invalidate.go`: scoped on the
+helper-matched path, bare on the store path).
+
+On the peer, `handleDeleteV4`/`V6` (`pkg/cluster/sync_sessions_recv.go`)
+dispatches scoped frames to `DeleteClusterScopedV4`/`V6` and bare frames
+to `deleteClusterSyncedV4`/`V6`, which deletes the session synchronously
+via `SessionStore.DeleteWithCompanionsV4`/`V6` — the forward entry, its
+reverse companion, and any dynamic DNAT/NAT64 companion — unless
+`forwardOnly` is set (purge-retirement), in which case only the named
+forward key is retracted. There is no peer-side GC pass that later
+collects orphaned reverse entries: the companion is removed with the
+forward entry at delete time.
 
 ### 4. Ring Buffer Callback (near-real-time, <1ms)
 
@@ -1669,7 +1685,7 @@ All counters are `atomic.Uint64` / `atomic.Bool`, lock-free:
 | Bulk sync | Once on connect | Seconds (depends on table size) |
 | Periodic sweep | 1 second | 0-1s for new sessions |
 | Ring buffer callback | Per SESSION_OPEN event | <1ms |
-| GC delete propagation | 10 second GC interval | 0-10s |
+| Session-delta delete propagation | Per helper session-close delta | Near-real-time (delta stream) |
 | Heartbeat | 30s idle timeout | - |
 | Connect retry | 5 seconds | - |
 
@@ -1685,10 +1701,10 @@ BPF creates session
   ├─ 1s sweep ticker ──→ syncSweep ──┤
   │                                  ├──→ sendCh ──→ TCP ──→ receiveLoop
   │                                  │                         │
-  │  GC expires session              │                    handleMessage
+  │  Helper expires session          │                    handleMessage
   │    │                             │                         │
-  │    └── OnDeleteV4/V6 ───────────┘                    SetSessionV4/V6
-  │                                                      DeleteSession
+  │    └── QueueDelete(Scoped)V4/V6 ─┘                    SetSessionV4/V6
+  │                                                      DeleteWithCompanions
   │                                                           │
-  │                                                      BPF map updated
+  │                                                      Session table updated
 ```
