@@ -194,6 +194,12 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9139",
+		// #18053: complete control link for the #16746 gate (as in
+		// clusterTwoRethIPsec9511). Inert here — RG state is driven via
+		// SetGroupStateForTesting and RG0 presence/absence.
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set interfaces reth1 redundant-ether-options redundancy-group 1",
 		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
@@ -343,6 +349,11 @@ func TestApplyRethServicesForRGReinitiatesIPsec9139(t *testing.T) {
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9139",
 		"set chassis cluster ipsec-session-synchronization",
+		// #18053: complete control link for the #16746 gate; inert —
+		// RG state is driven via SetGroupStateForTesting.
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 		"set chassis cluster redundancy-group 0 node 0 priority 1",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set chassis cluster redundancy-group 2 node 0 priority 100",
@@ -433,6 +444,11 @@ func TestApplyRethServicesForRGRespectsSASyncFlag9139(t *testing.T) {
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9139",
+		// #18053: complete control link for the #16746 gate; inert —
+		// RG state is driven via SetGroupStateForTesting.
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set interfaces reth1 redundant-ether-options redundancy-group 1",
 		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
