@@ -384,7 +384,7 @@ func sweepGateVerdict8859(bracedText, elidedText string) string {
 	if len(perrs) > 0 || tr == nil {
 		return "?"
 	}
-	if _, err := compileTree(tr, compileOpts{}, nil); err != nil {
+	if _, err := compileTree(tr, strictCompileOpts(), nil); err != nil {
 		// A STRICT REJECTION ONLY MEANS "HANDLED" IF THE BRACED ARM WAS
 		// ACCEPTED. If both arms are refused, the rejection is about the fixture
 		// -- an undefined reference, a missing required sibling -- and says
@@ -406,7 +406,7 @@ func sweepGateVerdict8859(bracedText, elidedText string) string {
 		if len(bperrs) > 0 || bt == nil {
 			return "?"
 		}
-		if _, berr := compileTree(bt, compileOpts{}, nil); berr != nil {
+		if _, berr := compileTree(bt, strictCompileOpts(), nil); berr != nil {
 			return "BOTH-ARMS-REJECTED"
 		}
 		return "STRICT-REJECTS"
