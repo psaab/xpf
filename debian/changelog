@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config compiler: strict mode now has a single constructor,
+    strictCompileOpts() beside lenientCompileOpts(); the production
+    strict entries and strict-named test compiles start from it
+    instead of hand-copied compileOpts literals, so a future
+    always-on strict fold cannot diverge from the tests that claim
+    to measure the commit path (#17148).
   * Flow export: delete the production-dead ExportConfig sampling gates
     (ShouldExport, ShouldExportIface, ShouldExportIfaceDaemon,
     FlowDirection); SampledForOpen/SampledForClose are the single
