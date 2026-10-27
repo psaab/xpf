@@ -75,6 +75,7 @@ var lenientCompletenessAllowlist16166 = map[string]string{
 	"suppressDPDThresholdIKEv2Advisory":  "advisory suppressor (#15025), true in lenientCompileOpts",
 	"suppressFabricStampAdvisory":        "advisory suppressor (#10105), true in lenientCompileOpts",
 	"suppressSSHUnmanagedAdvisory16737":  "advisory suppressor (#16737), true in lenientCompileOpts",
+	"tolerant":                           "tolerant-path mode bit (#17153), true only in lenientCompileOpts",
 	"igpIdentityExcused16810":            "compileTree-only exemption for the node-specific IGP identity gate; it is not a lenient downgrade",
 }
 
@@ -275,6 +276,9 @@ func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 		t.Error("a suppress* advisory bool is false in lenientCompileOpts(): the tolerant " +
 			"paths would re-fire commit-time advisories on every boot / peer sync; " +
 			"restore its `true` entry in lenientCompileOpts()")
+	}
+	if !opts.tolerant {
+		t.Error("tolerant is false in lenientCompileOpts(): mode queries (#17153) would read strict on the tolerant path; restore its `true` entry")
 	}
 	if opts.skipCompactNormalize {
 		t.Error("skipCompactNormalize is true in lenientCompileOpts(): the tolerant path " +

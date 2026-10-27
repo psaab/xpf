@@ -549,7 +549,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// hard-reject; lenient paths warn (see tunnelid.go). Read-only, so it is
 	// safe to run on the soon-to-be-expanded copy.
 	tunnelIDWarnings, tunnelIDErr := validateTunnelEndpointIDCollisionAST(
-		tree, opts.sanitizeFreeTextControlChars)
+		tree, opts.tolerant)
 	if tunnelIDErr != nil {
 		return nil, tunnelIDErr
 	}
@@ -1213,8 +1213,7 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// contested interfaces are rejected/quarantined, but must not expose
 	// partially compiled enforcement state to callers.
 	clearDroppedEnforcementZoneBindings11575(cfg)
-	if opts.lenientTunnelRITarget12520 || opts.lenientWireguardRoutingInstance ||
-		opts.lenientRIDualClaim11060 || opts.lenientRIMgmtMember11392 {
+	if deferJunosHostWarnings(opts) {
 		// #13138: this advisory consumes the final effective ingress ownership,
 		// matching BuildJunosHostDenyProjection downstream.
 		cfg.Warnings = append(cfg.Warnings, validateJunosHostDirectDeliveryWarnings(cfg)...)

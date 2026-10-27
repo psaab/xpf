@@ -39,6 +39,27 @@ type compileOpts struct {
 	// from the already-expanded tree. Internal only.
 	igpIdentityExcused16810 bool
 
+	// tolerant (#17153) is the explicit tolerant-path mode bit: true
+	// ONLY in the compileOpts built by lenientCompileOpts() (tolerant
+	// load / peer-sync / peer-display), false on every strict commit /
+	// commit-check path. Code that needs to know "is this the tolerant
+	// path?" — as opposed to "is this one gate downgraded?" — reads
+	// this field, never an unrelated gate's lenient*/sanitize* flag
+	// (the tunnel-ID collision gate formerly borrowed
+	// sanitizeFreeTextControlChars, and the Junos host-warning deferral
+	// was a four-flag OR written twice). Per-gate severity downgrades
+	// keep their own lenient* flags; this bit governs exactly:
+	// validateTunnelEndpointIDCollisionAST (compiler.go),
+	// deferJunosHostWarnings (the Junos host direct-delivery warning
+	// deferral), and the tolerant-path suppression in
+	// appendUserspaceRxMTUAdvisoryLocked and
+	// appendUserspaceMgmtZoneAdvisoryLocked. The contested-trunk and
+	// shared-device advisories keep their dedicated co-set suppressor
+	// suppressContestedTrunkZoneAdvisory, which lenientCompileOpts()
+	// sets together with this bit — they do not read tolerant. The
+	// #16166 completeness test pins it true in lenientCompileOpts().
+	tolerant bool
+
 	// lenientUnknownTopLevelStanza lets tolerant compilation retain an operator-
 	// visible warning while ignoring a root stanza the compiler does not model.
 	lenientUnknownTopLevelStanza bool
@@ -281,11 +302,13 @@ type compileOpts struct {
 	// else.
 	suppressClusterNTPAdvisory bool
 	// suppressContestedTrunkZoneAdvisory (#7509) suppresses the commit-time
-	// advisory for a parent interface whose units span different zones. Set on
-	// the TOLERANT paths (Store.Load, Store.SyncApply) for the same reason as
+	// advisories in appendContestedTrunkZoneAdvisoryLocked and
+	// appendSharedDeviceUnzonedUnitAdvisoryLocked (contested_trunk_zone_advisory_7509.go).
+	// Set on the TOLERANT paths (Store.Load, Store.SyncApply) for the same reason as
 	// its sibling above: the condition is a property of a config already
 	// committed, so firing on every boot and peer sync trains the operator to
-	// skip it.
+	// skip it. It does NOT govern the userspace RX-MTU (#9727) or
+	// mgmt-zone (#10308) advisories — those read opts.tolerant (#17153).
 	suppressContestedTrunkZoneAdvisory bool
 	// suppressDPDThresholdIKEv2Advisory (#15025) suppresses the commit-time
 	// advisory that a DPD threshold is IKEv1-only (dpd_timeout is not
@@ -1545,11 +1568,25 @@ type compileOpts struct {
 	// collide, so the warning retains that caveat. Commit stays strict so the
 	// operator's next edit fails loudly. Same doctrine as lenientNPTv6.
 	lenientNATPoolOverlap bool
-	// lenientFirewallRefs (#2217) downgrades the firewall-filter term
-	// cross-reference gates — `then policer <name>` (Finding A,
+	// lenientFirewallRefs (#2217) downgrades, from a hard compile error
+	// to a cfg.Warnings entry, exactly these gates (the #17153 AST
+	// guard test asserts this list stays complete): the firewall-filter
+	// term cross-reference gates `then policer <name>` (Finding A,
 	// validateFirewallPolicerReferencesStrict) and `then routing-instance
-	// <name>` FBF (Finding C, validateFirewallRoutingInstanceReferencesStrict)
-	// — from a hard compile error to a cfg.Warnings entry. Both references were
+	// <name>` FBF (Finding C, validateFirewallRoutingInstanceReferencesStrict),
+	// validateFirewallPrefixListReferencesStrict,
+	// validateFirewallPrefixListEntriesStrict,
+	// validateFirewallFilterReferencesStrict,
+	// validateFilterRoutingInstanceDirectionStrict,
+	// validateFirewallUnknownChildrenStrict,
+	// ValidateFirewallNamelessTermsAST12526 (pre-walk),
+	// validateNATSourceAddressNameReferencesStrict,
+	// validateStaticNATThenTargetStrict,
+	// validateStaticNATInetTargetStrict,
+	// validateStaticNATMatchAddressesStrict,
+	// validateStaticNATSelectedMatchAddressStrict,
+	// validateStaticNATSingleTargetStrict and
+	// validateProxyARPAddressesStrict. Both originally-named references were
 	// previously unvalidated: a dangling policer silently never rate-limited
 	// (fail-open) and a dangling FBF routing-instance silently blackholed /
 	// fell through to the default table. The strict commit / commit-check path
@@ -3917,6 +3954,7 @@ func strictCompileOpts() compileOpts {
 // original inline literals.
 func lenientCompileOpts() compileOpts {
 	return compileOpts{
+		tolerant:                                 true,
 		sanitizeFreeTextControlChars:             true,
 		lenientUnknownTopLevelStanza:             true,
 		lenientVRRPTrackDuplicates:               true,
