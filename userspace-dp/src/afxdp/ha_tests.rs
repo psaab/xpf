@@ -2292,12 +2292,21 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
 /// written ONCE (`SessionDelta::from_shared`); the HA bulk export
 /// (Open) and the tunnel-remap purge (Close) both go through it. This
 /// cell builds a `SyncedSessionEntry` with every carried field
-/// non-default and asserts both production paths carry each value —
-/// the regression shape of #14303 (`pptp_call_ids: 0` in both
-/// hand-written literals) and #14960 (`fabric_redirect_sync: true` +
-/// `session_id: 0` in the bulk literal), which a per-site literal
-/// could silently reintroduce and this cell would not see if either
-/// site bypassed `from_shared`.
+/// non-default (tunnel id 7, non-zero counters, `Some(true)` SNAT,
+/// FabricRedirect disposition) and asserts both production paths
+/// carry each value — the regression shape of #14303
+/// (`pptp_call_ids: 0` in both hand-written literals) and #14960
+/// (`fabric_redirect_sync: true` + `session_id: 0` in the bulk
+/// literal), which a per-site literal could silently reintroduce.
+///
+/// The purge Close encodes ONLY key/owner RG/close_flags/zones/
+/// purge_retirement/ingress identity on the wire (`encode_delta_frame`
+/// Close branch) — counters, session_id, pptp_call_ids and
+/// source_nat_static are not serialized there — so the purge leg
+/// pins the delta-level fields at the production push seam
+/// (`push_purge_close_deltas` input) and the Close frame bytes at the
+/// channel receiver. Asserting only the wire bytes would miss exactly
+/// the hand-literal revert this cell exists to catch.
 ///
 /// FAIL-ON-REVERT: restore either hand-written literal (or zero any
 /// carried field in `from_shared`) and the matching assertion below
@@ -2361,18 +2370,121 @@ fn from_shared_carries_every_shared_field_on_bulk_open_and_purge_close_17122() {
         .first()
         .expect("the FabricRedirect forward row must be bulk-exported")
         .clone();
-
-    // (b) Purge Close, through the struct-update override shape the
-    // purge site uses (its wire bytes are exercised end-to-end by the
-    // #2880 purge cells above).
-    let close = crate::session::SessionDelta {
-        source_nat_static: None,
-        fabric_redirect_sync: false,
-        ..crate::session::SessionDelta::from_shared(
-            &entry,
-            crate::session::SessionDeltaKind::Close,
-        )
-    };
+    // (b) Purge Close, through the production purge. A fresh
+    // coordinator is seeded with the SAME non-default entry (tunnel
+    // id 7, counters 11/7, `Some(true)` SNAT, FabricRedirect) and
+    // `purge_remapped_tunnel_sessions(&[7], ..)` drives it. The purge
+    // Close builder is not separately observable: the wire frame
+    // encodes only key/owner RG/flags/zones/retirement/ingress (see
+    // the doc comment), so the delta handed to the lossless push is
+    // captured thread-locally at `push_purge_close_deltas` and the
+    // encoded Close frame is read from the channel receiver. Both
+    // must carry every non-wire field the hand-written literal used
+    // to zero (counters, session_id, pptp_call_ids) plus the two
+    // deliberate overrides; the frame pins the wire-visible subset.
+    let mut purge_coordinator = Coordinator::new();
+    purge_coordinator.set_forwarding_for_test(ForwardingState::default());
+    publish_shared_session(
+        &purge_coordinator.sessions.synced,
+        &purge_coordinator.sessions.nat,
+        &purge_coordinator.sessions.forward_wire,
+        &purge_coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    let (purge_sender, purge_rx) =
+        crate::event_stream::EventStreamSender::test_sender(true, 16);
+    purge_coordinator.event_stream = Some(purge_sender);
+    let capture = super::ha::tunnel_purge::PurgeCloseDeltaCaptureForTest::start();
+    let purged =
+        purge_coordinator.purge_remapped_tunnel_sessions(&[7], &ForwardingState::default());
+    let captured = capture.take();
+    assert_eq!(purged, 1, "purge must remove the tunnel-id-7 row");
+    assert!(
+        purge_coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced")
+            .get(&entry.key)
+            .is_none(),
+        "purge must delete the shared row locally"
+    );
+    let close = captured
+        .first()
+        .expect("purge must hand exactly one Close delta to the lossless push")
+        .clone();
+    assert_eq!(
+        captured.len(),
+        1,
+        "purge must hand exactly one Close delta to the lossless push"
+    );
+    // The Close frame on the channel: type-2, carrying the entry key,
+    // owner RG and FLAG_FABRIC_REDIRECT (close_flags ORs the
+    // FabricRedirect disposition even though the delta's
+    // fabric_redirect_sync override is false at the struct level).
+    let frame = purge_rx
+        .try_recv()
+        .expect("purge Close frame must reach the connected consumer");
+    let bytes = frame.as_bytes();
+    assert_eq!(bytes[4], 2, "purge frame must be MSG_SESSION_CLOSE (2)");
+    assert_eq!(bytes[16], 4, "close payload: AddrFamily v4");
+    assert_eq!(bytes[17], entry.key.protocol, "close payload: protocol");
+    assert_eq!(
+        u16::from_le_bytes([bytes[18], bytes[19]]),
+        entry.key.src_port,
+        "close payload: src port"
+    );
+    assert_eq!(
+        u16::from_le_bytes([bytes[20], bytes[21]]),
+        entry.key.dst_port,
+        "close payload: dst port"
+    );
+    assert_eq!(
+        &bytes[22..26],
+        &[10, 0, 61, 102],
+        "close payload: src ip (test_key)"
+    );
+    assert_eq!(
+        &bytes[26..30],
+        &[172, 16, 80, 200],
+        "close payload: dst ip (test_key)"
+    );
+    assert_eq!(
+        i32::from_le_bytes(bytes[30..34].try_into().unwrap()),
+        entry.metadata.owner_rg_id as i32,
+        "close payload: owner RG"
+    );
+    assert_eq!(
+        bytes[34] & 1,
+        1,
+        "close flags: FLAG_FABRIC_REDIRECT (disposition OR, so the \
+         struct-level false override does not clear it on the wire)"
+    );
+    assert_eq!(bytes[34] & 2, 0, "close flags: fabric_ingress false");
+    assert_eq!(
+        u16::from_le_bytes([bytes[35], bytes[36]]),
+        entry.metadata.ingress_zone as u16,
+        "close payload: ingress zone"
+    );
+    assert_eq!(
+        u16::from_le_bytes([bytes[37], bytes[38]]),
+        entry.metadata.egress_zone as u16,
+        "close payload: egress zone"
+    );
+    assert_eq!(
+        bytes[51], 0,
+        "close payload: purge_retirement marker must stay 0"
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[52..56].try_into().unwrap()),
+        entry.metadata.ingress_ifindex,
+        "close payload: ingress ifindex"
+    );
+    assert_eq!(
+        u16::from_le_bytes([bytes[56], bytes[57]]),
+        entry.metadata.ingress_vlan_id,
+        "close payload: ingress VLAN"
+    );
 
     // Every field the shared entry owns, on BOTH deltas.
     for (name, delta) in [("open", &open), ("close", &close)] {

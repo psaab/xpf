@@ -87,7 +87,11 @@ impl crate::afxdp::Coordinator {
                     // below are the purge's deliberate divergences,
                     // kept visible here: a Close for a session being
                     // deleted must not re-advertise its source-NAT
-                    // provenance or fabric-redirect sync (G40-03).
+                    // provenance (G40-03). The fabric flag override is
+                    // struct-level only: `close_flags` also ORs
+                    // `disposition == FabricRedirect`, so a
+                    // FabricRedirect-disposition row still encodes
+                    // FLAG_FABRIC_REDIRECT on the Close frame.
                     // Counters stay as `from_shared` carries them:
                     // this path uses push_delta_lossless (NOT
                     // emit_session_close_rt_flow), so the counts are
@@ -211,6 +215,14 @@ impl crate::afxdp::Coordinator {
         deltas: &[crate::session::SessionDelta],
     ) -> usize {
         let zone_name_to_id = &self.forwarding.zone_name_to_id;
+        // #17122 fold: test-only capture of the exact deltas this seam
+        // receives (compiled out of production builds).
+        #[cfg(test)]
+        PURGE_CLOSE_DELTAS_FOR_TEST.with(|slot| {
+            if let Some(captured) = slot.borrow_mut().as_mut() {
+                captured.extend(deltas.iter().cloned());
+            }
+        });
         for (delivered, delta) in deltas.iter().enumerate() {
             if let Err(err) = handle.push_delta_lossless(delta, zone_name_to_id) {
                 let dropped = deltas.len() - delivered;
@@ -223,5 +235,41 @@ impl crate::afxdp::Coordinator {
             }
         }
         0
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// #17122 fold: thread-local capture of the Close deltas handed to
+    /// `push_purge_close_deltas`. Thread-local so concurrent tests stay
+    /// isolated; compiled out of production builds entirely.
+    static PURGE_CLOSE_DELTAS_FOR_TEST: std::cell::RefCell<
+        Option<Vec<crate::session::SessionDelta>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+/// #17122 fold: guard returned by
+/// [`PurgeCloseDeltaCaptureForTest::start`]; dropping it disarms the
+/// capture even on panic, so a failed cell cannot leak armed state
+/// into a later test on the same thread.
+#[cfg(test)]
+pub(crate) struct PurgeCloseDeltaCaptureForTest;
+
+#[cfg(test)]
+impl PurgeCloseDeltaCaptureForTest {
+    pub(crate) fn start() -> Self {
+        PURGE_CLOSE_DELTAS_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+        Self
+    }
+
+    pub(crate) fn take(self) -> Vec<crate::session::SessionDelta> {
+        PURGE_CLOSE_DELTAS_FOR_TEST.with(|slot| slot.borrow_mut().take().unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+impl Drop for PurgeCloseDeltaCaptureForTest {
+    fn drop(&mut self) {
+        PURGE_CLOSE_DELTAS_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
     }
 }

@@ -101,8 +101,9 @@ impl crate::session::SessionDelta {
     /// true` + `session_id: 0` on every bulk-exported plain session).
     /// The compiler only forces that a value is present, not that it is
     /// the right one, so every carried field is read from `entry` here
-    /// and nowhere else: adding a field to `SyncedSessionEntry` touches
-    /// only this constructor.
+    /// and nowhere else: a new `SessionDelta` field fails compilation
+    /// until this constructor sets it (entry constructors elsewhere
+    /// must still populate any new `SyncedSessionEntry` field).
     ///
     /// Carried from the entry: `key`, `decision`, `metadata`,
     /// `source_nat_static`, `origin`, `session_id`, `tcp_close_class`,
