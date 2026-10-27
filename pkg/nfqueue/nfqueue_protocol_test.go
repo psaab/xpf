@@ -7,14 +7,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestVerdictBatchPrevalidatesDuplicate9506 protects the reservation boundary:
+// TestVerdictBatchForMeasurePrevalidatesDuplicate9506 protects the reservation boundary:
 // a duplicate pointer must fail before any packet is marked terminal or sent.
 // Reverting the prevalidation would strand the first reservation and make a
 // supervisor unable to reconcile the batch.
-func TestVerdictBatchPrevalidatesDuplicate9506(t *testing.T) {
+func TestVerdictBatchForMeasurePrevalidatesDuplicate9506(t *testing.T) {
 	q := &Queue{id: 61, fd: -1}
 	pkt := &Packet{q: q, id: 1}
-	if err := q.VerdictBatch(VerdictAccept, []*Packet{pkt, pkt}); !errors.Is(err, ErrAlreadyVerdicted) {
+	if err := q.verdictBatchForMeasure(VerdictAccept, []*Packet{pkt, pkt}); !errors.Is(err, ErrAlreadyVerdicted) {
 		t.Fatalf("duplicate batch error=%v, want ErrAlreadyVerdicted", err)
 	}
 	if pkt.done.Load() {
