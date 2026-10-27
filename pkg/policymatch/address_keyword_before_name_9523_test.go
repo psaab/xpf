@@ -62,11 +62,11 @@ func TestAddressNamedAnyVerdictKeepsMatchAll9523(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			q := Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP("1.2.3.4"), DstIP: net.ParseIP("5.6.7.8"), Protocol: "tcp", SrcPort: 40000, DstPort: 23, FeedOverlay: tc.overlay}
+			q := Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP("1.2.3.4"), DstIP: net.ParseIP("5.6.7.8"), Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(23), FeedOverlay: tc.overlay}
 			if res := Match(cfg, q); !res.Matched || res.PolicyName != "d1" || res.Action != config.PolicyDeny {
 				t.Errorf("#9523: telnet outside the object's prefix must hit the `deny any` rule, got Matched=%v Policy=%q Action=%v", res.Matched, res.PolicyName, res.Action)
 			}
-			q.DstPort = 80
+			q.DstPort = PortPtr(80)
 			if res := Match(cfg, q); !res.Matched || res.PolicyName != "p1" || res.Action != config.PolicyPermit {
 				t.Errorf("#9523: web outside the object's prefix must hit the `permit any` rule, got Matched=%v Policy=%q Action=%v", res.Matched, res.PolicyName, res.Action)
 			}
@@ -88,7 +88,7 @@ func TestAddressNameBeforeLiteralStillHolds9523(t *testing.T) {
 	if err != nil {
 		t.Fatalf("control must commit: %v", err)
 	}
-	q := Query{FromZone: "trust", ToZone: "untrust", DstIP: net.ParseIP("5.6.7.8"), Protocol: "tcp", SrcPort: 40000, DstPort: 80}
+	q := Query{FromZone: "trust", ToZone: "untrust", DstIP: net.ParseIP("5.6.7.8"), Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(80)}
 	q.SrcIP = net.ParseIP("192.0.2.5")
 	if res := Match(cfg, q); !res.Matched || res.PolicyName != "d1" {
 		t.Errorf("the token names the address, so its VALUE must match: %+v", res)

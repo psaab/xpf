@@ -578,7 +578,9 @@ func TestPerInstanceBGPNeighbourElidedSpellingHasNoGateToDisarm9351(t *testing.T
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		return compileTree(tree, compileOpts{skipCompactNormalize: skipPass}, nil)
+		o := strictCompileOpts()
+		o.skipCompactNormalize = skipPass
+		return compileTree(tree, o, nil)
 	}
 
 	// --- peer-as: a gate DOES fire, and it objects to the DROP, not the shape.

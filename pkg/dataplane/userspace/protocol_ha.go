@@ -80,8 +80,8 @@ type SessionPolicyMatch struct {
 	// live session key/metadata/decision. All additive + omitempty: an older
 	// helper omits them (zero values) and the rematch fails closed to the
 	// deleted bucket rather than retaining on unknown zones.
-	IngressZoneID uint16 `json:"ingress_zone_id,omitempty"`
-	EgressZoneID  uint16 `json:"egress_zone_id,omitempty"`
+	IngressZoneID uint32 `json:"ingress_zone_id,omitempty"`
+	EgressZoneID  uint32 `json:"egress_zone_id,omitempty"`
 	DNAT          bool   `json:"dnat,omitempty"`
 	NATDstIP      string `json:"nat_dst_ip,omitempty"`
 	NATDstPort    uint16 `json:"nat_dst_port,omitempty"`
@@ -106,12 +106,14 @@ type SessionSyncRequest struct {
 	DstPort     uint16 `json:"dst_port,omitempty"`
 	IngressZone string `json:"ingress_zone,omitempty"`
 	EgressZone  string `json:"egress_zone,omitempty"`
-	// #919/#922: u16 zone-id mirrors. Additive — the Rust daemon
+	// #919/#922/#18148: u32 zone-id mirrors (Rust emits u32 since #16557;
+	// a Go u16 field fails every JSON status poll carrying a hash-derived
+	// id > 65535). Additive — the Rust daemon
 	// prefers the IDs when nonzero and falls back to the legacy
 	// name strings otherwise. Old peers without these fields
 	// continue to work (Rust serde sets the IDs to 0).
-	IngressZoneID uint16 `json:"ingress_zone_id,omitempty"`
-	EgressZoneID  uint16 `json:"egress_zone_id,omitempty"`
+	IngressZoneID uint32 `json:"ingress_zone_id,omitempty"`
+	EgressZoneID  uint32 `json:"egress_zone_id,omitempty"`
 	// #7095: the LOCAL ingress identity a peer-imported session should carry,
 	// resolved on THIS node from the cluster-stable fold the sender put on the
 	// wire. #6928 deliberately imported 0 because the sender's IFINDEX is
@@ -343,12 +345,16 @@ type SessionDeltaInfo struct {
 	DstPort     uint16    `json:"dst_port,omitempty"`
 	IngressZone string    `json:"ingress_zone,omitempty"`
 	EgressZone  string    `json:"egress_zone,omitempty"`
-	// #919/#922: u16 zone-id mirrors decoded directly from the binary
-	// event-stream payload (bytes [21],[22] u8 → u16 here for symmetry
-	// with SessionSyncRequest). The HA delta path prefers these IDs;
-	// the legacy strings stay populated when JSON callers fill them.
-	IngressZoneID  uint16 `json:"ingress_zone_id,omitempty"`
-	EgressZoneID   uint16 `json:"egress_zone_id,omitempty"`
+	// #919/#922/#18148: u32 zone-id mirrors. The JSON leg carries the full
+	// u32 the Rust producer emits (protocol/binding.rs, control.rs); the
+	// binary event-stream leg is genuinely u16 LE at [27:29]/[29:31]
+	// (event_stream/codec/session_sync.rs casts metadata `as u16`), so
+	// binary-decoded values are zero-extended into this field and are
+	// capped at 65535 by that wire, not by this type. The HA delta path
+	// prefers these IDs; the legacy strings stay populated when JSON
+	// callers fill them.
+	IngressZoneID  uint32 `json:"ingress_zone_id,omitempty"`
+	EgressZoneID   uint32 `json:"egress_zone_id,omitempty"`
 	IngressIfindex int    `json:"ingress_ifindex,omitempty"`
 	IngressVLANID  uint16 `json:"ingress_vlan_id,omitempty"`
 	// #15176: node-local logical NAT-scope ingress ifindex (0 = none).

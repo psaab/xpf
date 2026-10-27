@@ -646,7 +646,7 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	}
 
 	// Validate strict-vip-ownership requires VRRP (incompatible with no-reth-vrrp / private-rg-election)
-	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+	if cc := cfg.Chassis.Cluster; cc != nil && !cc.UsesRethVRRP() {
 		for _, rg := range cc.RedundancyGroups {
 			if rg == nil { // #3494: tolerant/HA-sync path may carry a nil redundancy-group
 				continue
@@ -659,7 +659,7 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	}
 
 	// Warn if no-reth-vrrp set explicitly — redundant since private-rg-election is now default
-	if cc := cfg.Chassis.Cluster; cc != nil && cc.PrivateRGElection && cc.NoRethVRRP {
+	if cc := cfg.Chassis.Cluster; cc != nil && cc.RethOwnershipMode() == RethPrivateRG && cc.NoRethVRRP {
 		warnings = append(warnings, "chassis cluster: no-reth-vrrp is redundant (private-rg-election is the default)")
 	}
 

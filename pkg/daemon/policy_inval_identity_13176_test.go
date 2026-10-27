@@ -61,14 +61,14 @@ func TestReauthorizeSplitKeysByFullIdentity13176(t *testing.T) {
 	permittedMatch := dpuserspace.SessionPolicyMatch{
 		AddrFamily: 4, Tuple: tuple, RoutingDomain: 1,
 		ExpectedRTFlowSessionID: 101,
-		IngressZoneID:           uint16(config.StableZoneID("trust")),
-		EgressZoneID:            uint16(config.StableZoneID("untrust")),
+		IngressZoneID:           config.StableZoneID("trust"),
+		EgressZoneID:            config.StableZoneID("untrust"),
 	}
 	deniedMatch := dpuserspace.SessionPolicyMatch{
 		AddrFamily: 4, Tuple: tuple, RoutingDomain: 2,
 		ExpectedRTFlowSessionID: 202,
-		IngressZoneID:           uint16(config.StableZoneID("trust")),
-		EgressZoneID:            uint16(config.StableZoneID("untrust")),
+		IngressZoneID:           config.StableZoneID("trust"),
+		EgressZoneID:            config.StableZoneID("untrust"),
 	}
 	cfg := reauthConfig12879(config.PolicyDeny, []string{"trust", "untrust"},
 		&config.ZonePairPolicies{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{

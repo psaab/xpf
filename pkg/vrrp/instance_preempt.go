@@ -154,28 +154,18 @@ func (vi *vrrpInstance) shouldPreemptObservedMaster() bool {
 		return false
 	}
 
-	// Effective advertised priority — replicates getPriority() (track.go)
-	// from the snapshot: priority 0/255 pass through unchanged; otherwise
-	// while the tracked link is down, TrackPriorityCost is subtracted and
-	// clamped to [1, 254].
-	effective := priority
-	if priority != 0 && priority != 255 && trackDown && trackIface != "" {
-		effective -= trackCost
-		if effective < 1 {
-			effective = 1
-		} else if effective > 254 {
-			effective = 254
-		}
-	}
+	// Effective advertised priority from the RLock snapshot via the
+	// shared effectivePriority (#17145) — the same rule getPriority()
+	// (track.go) applies.
+	effective := effectivePriority(priority, trackCost, trackDown, trackIface)
 
-	// masterDownInterval staleness horizon — replicates masterDownInterval()
-	// (3*advert + skew) from the snapshot using the effective priority AND the
-	// master's LEARNED advertised interval (RFC 5798 §6.1/§6.4.2), so the
+	// masterDownInterval staleness horizon via masterDownFor (#17145)
+	// from the snapshot using the effective priority AND the master's
+	// LEARNED advertised interval (RFC 5798 §6.1/§6.4.2), so the
 	// "is the observed master still live" horizon matches the master's cadence,
 	// not the local config, exactly as masterDownInterval() now does.
 	advert := effectiveAdvertInterval(advertMS, masterAdver)
-	skew := time.Duration(256-effective) * advert / 256
-	masterDown := 3*advert + skew
+	masterDown := masterDownFor(advert, effective)
 
 	// No live master observed (cold-start) or the last advert is older than
 	// the master-down horizon (silent death / peer-down) → no master to
@@ -249,23 +239,13 @@ func (vi *vrrpInstance) preemptingLiveLowerMaster() bool {
 	lastMasterPriority := vi.lastMasterPriority
 	lastMasterSeen := vi.lastMasterSeen
 	vi.mu.RUnlock()
-
-	effective := priority
-	if priority != 0 && priority != 255 && trackDown && trackIface != "" {
-		effective -= trackCost
-		if effective < 1 {
-			effective = 1
-		} else if effective > 254 {
-			effective = 254
-		}
-	}
+	effective := effectivePriority(priority, trackCost, trackDown, trackIface)
 
 	// Master-down staleness horizon from the master's LEARNED interval (RFC
 	// 5798 §6.1/§6.4.2), matching masterDownInterval(); falls back to the local
 	// interval before any advert is heard.
 	advert := effectiveAdvertInterval(advertMS, masterAdver)
-	skew := time.Duration(256-effective) * advert / 256
-	masterDown := 3*advert + skew
+	masterDown := masterDownFor(advert, effective)
 
 	// No recent live master → this is a dead-master takeover, not preemption.
 	if lastMasterSeen.IsZero() || time.Since(lastMasterSeen) > masterDown {
@@ -308,20 +288,10 @@ func (vi *vrrpInstance) heldMasterIsStale() bool {
 	masterAdver := vi.masterAdverInterval
 	lastMasterSeen := vi.lastMasterSeen
 	vi.mu.RUnlock()
-
-	effective := priority
-	if priority != 0 && priority != 255 && trackDown && trackIface != "" {
-		effective -= trackCost
-		if effective < 1 {
-			effective = 1
-		} else if effective > 254 {
-			effective = 254
-		}
-	}
+	effective := effectivePriority(priority, trackCost, trackDown, trackIface)
 
 	advert := effectiveAdvertInterval(advertMS, masterAdver)
-	skew := time.Duration(256-effective) * advert / 256
-	masterDown := 3*advert + skew
+	masterDown := masterDownFor(advert, effective)
 
 	return lastMasterSeen.IsZero() || time.Since(lastMasterSeen) > masterDown
 }
@@ -366,17 +336,7 @@ func (vi *vrrpInstance) armPreemptHold(masterDownTimer, preemptHoldTimer *time.T
 	stopAndDrainTimer(masterDownTimer)
 	vi.mu.Lock()
 	preemptHoldTimer.Reset(hold)
-	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
-	p := vi.cfg.Priority
-	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
-		p -= vi.cfg.TrackPriorityCost
-		if p < 1 {
-			p = 1
-		} else if p > 254 {
-			p = 254
-		}
-	}
-	masterDownTimer.Reset(3*advert + time.Duration(256-p)*advert/256)
+	masterDownTimer.Reset(vi.masterDownLocked())
 	if vi.pendingConfigChange.valid {
 		vi.pendingConfigChange.oldHoldSec = snapSec
 		vi.armIntervalAppliedLocked()

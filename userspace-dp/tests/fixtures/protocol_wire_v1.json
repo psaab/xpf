@@ -904,6 +904,7 @@
           }
         ],
         "pool": "p16132",
+        "pool_kind": 1,
         "protocol": 6,
         "remaining_ns": 123,
         "remote_ip": "8.8.8.8",
@@ -1039,6 +1040,7 @@
           }
         ],
         "pool": "p16132",
+        "pool_kind": 1,
         "protocol": 6,
         "remaining_ns": 123,
         "remote_ip": "8.8.8.8",
@@ -1768,6 +1770,8 @@
     "deterministic_host_prefix_len": 32,
     "deterministic_mode": 2,
     "egress_scope": 11,
+    "nat64_prefix": "64:ff9b::",
+    "nat64_scope": "tenant-a|zones=trust|ris=|src=|constrained=0",
     "permit_any_remote": true,
     "permitted_remotes": [
       {
@@ -1776,6 +1780,7 @@
       }
     ],
     "pool": "p1",
+    "pool_kind": 2,
     "protocol": 6,
     "remaining_ns": 123,
     "remote_ip": "8.8.8.8",
@@ -2140,6 +2145,8 @@
     "deterministic_mode": 2,
     "egress_scope": 11,
     "mint_from_zone": "trust",
+    "nat64_prefix": "64:ff9b::",
+    "nat64_scope": "tenant-a|zones=trust|ris=|src=|constrained=0",
     "permit_any_remote": true,
     "permitted_remotes": [
       {
@@ -2148,6 +2155,7 @@
       }
     ],
     "pool": "p1",
+    "pool_kind": 2,
     "protocol": 6,
     "remaining_ns": 123,
     "remote_ip": "8.8.8.8",
