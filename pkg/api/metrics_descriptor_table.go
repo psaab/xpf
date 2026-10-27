@@ -562,6 +562,7 @@ var collectorDescUserspaceSession = []int{
 	xpfCollectorDescFieldIndex("userspaceWorkerCommandQueueShed"),
 	xpfCollectorDescFieldIndex("userspaceServerStatePoisonRecoveries"),
 	xpfCollectorDescFieldIndex("userspaceServerHandlerPanics"),
+	xpfCollectorDescFieldIndex("userspaceReinjectHandlerPanics"),
 }
 
 // initUserspaceStatus13280Descriptors (metrics_descriptors_userspace_status_13280.go).

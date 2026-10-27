@@ -742,6 +742,10 @@ pub(crate) struct ProcessStatus {
     /// (each one quarantined + restarted). Additive / defaulted.
     #[serde(rename = "server_handler_panics", default)]
     pub server_handler_panics: u64,
+    /// #17123: reinject handler panics contained per-connection (each one
+    /// drops one connection; the loop keeps accepting). Additive / defaulted.
+    #[serde(rename = "reinject_handler_panics", default)]
+    pub reinject_handler_panics: u64,
     /// #9048: peer `DeleteSynced` commands REFUSED because the key named a
     /// LIVE LOCAL session this node is actively forwarding for — the
     /// delete-side mirror of the install-side clobber guard in

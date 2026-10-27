@@ -760,6 +760,7 @@ type xpfCollector struct {
 	userspaceWorkerCommandQueueShed      *prometheus.Desc
 	userspaceServerStatePoisonRecoveries *prometheus.Desc
 	userspaceServerHandlerPanics         *prometheus.Desc
+	userspaceReinjectHandlerPanics        *prometheus.Desc
 	// #10695 (#9506): IPsec-inner admission, parse, and D11 queue counters.
 	userspaceZoneGateUnzoned                 *prometheus.Desc
 	userspaceZoneGateAmbiguous               *prometheus.Desc

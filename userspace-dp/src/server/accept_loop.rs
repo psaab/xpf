@@ -42,7 +42,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::server::helpers::{
-    serve_connection_panic_counted, serve_one_catch_unwind, REINJECT_HANDLER_PANICS,
+    serve_connection_panic_counted, serve_one_catch_unwind, reinject_panic_should_log,
+    REINJECT_HANDLER_PANICS,
 };
 use crate::server::ServerState;
 
@@ -127,7 +128,9 @@ pub(crate) fn run_accept_loop(
                         // them in `Ok(())` — they handle errors by
                         // closing the connection, as before #17123.
                         if let Err(payload) = serve_connection_panic_counted(|| serve(stream)) {
-                            if REINJECT_HANDLER_PANICS.load(Ordering::Relaxed) <= 10 {
+                            if reinject_panic_should_log(
+                                REINJECT_HANDLER_PANICS.load(Ordering::Relaxed),
+                            ) {
                                 eprintln!(
                                     "xpf-userspace-dp: {} handler panicked: {payload}; connection dropped, accept loop continues (#15112)",
                                     spec.peer_label
@@ -214,6 +217,22 @@ mod accept_loop_tests_17123 {
             REINJECT_HANDLER_PANICS.load(Ordering::Relaxed),
             before,
             "only panics count"
+        );
+    }
+
+    /// #17123 B2: the cap DECISION is the exact helper the production
+    /// DropConnection arm calls. Removing the cap (helper returns
+    /// true unconditionally) reds the second assertion; shifting it
+    /// reds the first/last.
+    #[test]
+    fn reinject_panic_cap_admits_first_ten_only_17123() {
+        use super::reinject_panic_should_log;
+        assert!(reinject_panic_should_log(1), "first panic logs");
+        assert!(reinject_panic_should_log(10), "tenth panic logs");
+        assert!(!reinject_panic_should_log(11), "eleventh panic is silent");
+        assert!(
+            !reinject_panic_should_log(u64::MAX),
+            "far past cap stays silent"
         );
     }
 }

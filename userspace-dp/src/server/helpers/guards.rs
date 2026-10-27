@@ -182,6 +182,18 @@ pub(crate) fn serve_connection_panic_counted(
     }
 }
 
+/// #17123: the first-10 log cap for a counted reinject panic, as a
+/// decision both the production accept loop and its test call. The
+/// counter has already been incremented by
+/// `serve_connection_panic_counted`, so the first 10 panics (post-
+/// increment values 1..=10) log and the 11th onward stays silent -
+/// the operator counter (`reinject_handler_panics`, surfaced) keeps
+/// counting either way. A pure function of the counter value: no
+/// I/O, no globals read here, so the cap is testable without a hook.
+pub(crate) fn reinject_panic_should_log(count_after_increment: u64) -> bool {
+    count_after_increment <= 10
+}
+
 #[cfg(test)]
 mod guards_tests_9900 {
     use super::*;

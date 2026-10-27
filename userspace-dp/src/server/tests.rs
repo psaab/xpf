@@ -11182,3 +11182,22 @@ fn apply_snapshot_authorized_clear_marker_installs_empty() {
         "prior policies retained after unmarked refusal"
     );
 }
+
+/// #17123 B1: refresh_status must project REINJECT_HANDLER_PANICS onto its
+/// own ProcessStatus field. Deleting or mis-wiring that one assignment
+/// leaves the field at 0 while the counter holds before+29, red here.
+#[test]
+fn refresh_status_projects_reinject_handler_panics_17123() {
+    use std::sync::atomic::Ordering;
+
+    let state = new_state(ProcessStatus::default());
+    let mut guard = state.lock().expect("server state");
+    let before = crate::server::helpers::REINJECT_HANDLER_PANICS.load(Ordering::Relaxed);
+    crate::server::helpers::REINJECT_HANDLER_PANICS.fetch_add(29, Ordering::Relaxed);
+    refresh_status(&mut guard);
+    assert_eq!(
+        guard.status.reinject_handler_panics,
+        before + 29,
+        "reinject handler panics must reach their own status field (#17123)"
+    );
+}
