@@ -79,7 +79,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// No rollback side effect, so the retry loop can consult it BEFORE
 /// publishing (via allocator exclusions) as well as after.
 /// #16015 zone-aware variant: pool rules know their packet's egress
-/// (to) zone, the axis translate_outbound gates NPTv6 on. The plain
+/// (to) zone, the axis translate_outbound_result gates NPTv6 on. The plain
 /// `pat_identity_excluded` (zone-blind, via exclusions closures that
 /// lack the zone) is kept for the allocator probe; the post-mint and
 /// address-only checks use this so split-horizon NPTv6 in a disjoint

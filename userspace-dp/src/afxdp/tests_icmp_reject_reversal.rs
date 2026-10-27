@@ -1548,7 +1548,7 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
 /// the session by its OWN stored reverse mapping, masking this bug (as it
 /// does in `icmpv6_te_nptv6_reverse_lookup_restores_internal_client` above,
 /// which resolves via that alias regardless of the local zone lookup). Here
-/// the ONLY path to the session is the zone-gated `nptv6.translate_inbound`
+/// the ONLY path to the session is the zone-gated `nptv6.translate_inbound_result`
 /// feeding `embedded_key`, so a wrong zone means NO session is found at all
 /// (`try_embedded_icmp_nat_match_from_frame` returns `NoMatch`) instead of
 /// merely returning the wrong `original_src`.
@@ -1587,8 +1587,9 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
     // other's actual translation — computing it here guarantees the inbound
     // reverse (exercised below) is a true round trip.
     let mut external_client = internal_client;
-    assert!(
-        nptv6.translate_outbound(&mut external_client, "zone-b"),
+    assert_eq!(
+        nptv6.translate_outbound_result(&mut external_client, "zone-b"),
+        crate::nptv6::Nptv6Translation::Translated,
         "test setup: internal_client must translate outbound under zone-b"
     );
 

@@ -104,8 +104,9 @@ fn pool_mint_inside_nptv6_external_is_refused_16015() {
     // keeps the source port unchanged — verify the prefix really
     // publishes the pool address at the minted port.
     let mut npt_src: Ipv6Addr = "0db8:2001:1::10".parse().expect("internal");
-    assert!(
-        state.nptv6.translate_outbound(&mut npt_src, "wan"),
+    assert_eq!(
+        state.nptv6.translate_outbound_result(&mut npt_src, "wan"),
+        crate::nptv6::Nptv6Translation::Translated,
         "fixture: NPTv6 must translate the internal host"
     );
     assert_eq!(

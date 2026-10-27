@@ -121,7 +121,7 @@ fn inbound_translation_48() {
         external_prefix: "2001:db8:1::/48".to_string(),
     }]);
     let mut dst: Ipv6Addr = "2001:db8:1:abcd::1".parse().unwrap();
-    assert!(state.translate_inbound(&mut dst, ""));
+    assert_eq!(state.translate_inbound_result(&mut dst, ""), Nptv6Translation::Translated);
     // Prefix should be fd00:1::
     let words = ipv6_to_words(&dst);
     assert_eq!(words[0], 0xfd00);
@@ -143,7 +143,7 @@ fn outbound_translation_48() {
         external_prefix: "2001:db8:1::/48".to_string(),
     }]);
     let mut src: Ipv6Addr = "fd00:1:0:abcd::1".parse().unwrap();
-    assert!(state.translate_outbound(&mut src, ""));
+    assert_eq!(state.translate_outbound_result(&mut src, ""), Nptv6Translation::Translated);
     let words = ipv6_to_words(&src);
     assert_eq!(words[0], 0x2001);
     assert_eq!(words[1], 0x0db8);
@@ -168,14 +168,14 @@ fn round_trip_48() {
     let mut addr = original;
 
     // Outbound: internal -> external
-    assert!(state.translate_outbound(&mut addr, ""));
+    assert_eq!(state.translate_outbound_result(&mut addr, ""), Nptv6Translation::Translated);
     let words = ipv6_to_words(&addr);
     assert_eq!(words[0], 0x2001);
     assert_eq!(words[1], 0x0db8);
     assert_eq!(words[2], 0x0001);
 
     // Inbound: external -> internal
-    assert!(state.translate_inbound(&mut addr, ""));
+    assert_eq!(state.translate_inbound_result(&mut addr, ""), Nptv6Translation::Translated);
     assert_eq!(
         addr, original,
         "round-trip should preserve original address"
@@ -193,14 +193,14 @@ fn round_trip_64() {
     let original: Ipv6Addr = "fd00:1:2:3:abcd:ef01:2345:6789".parse().unwrap();
     let mut addr = original;
 
-    assert!(state.translate_outbound(&mut addr, ""));
+    assert_eq!(state.translate_outbound_result(&mut addr, ""), Nptv6Translation::Translated);
     let words = ipv6_to_words(&addr);
     assert_eq!(words[0], 0x2001);
     assert_eq!(words[1], 0x0db8);
     assert_eq!(words[2], 0x0001);
     assert_eq!(words[3], 0x0002);
 
-    assert!(state.translate_inbound(&mut addr, ""));
+    assert_eq!(state.translate_inbound_result(&mut addr, ""), Nptv6Translation::Translated);
     assert_eq!(
         addr, original,
         "round-trip should preserve original address"
@@ -223,7 +223,7 @@ fn checksum_neutrality() {
     let orig_sum = ones_complement_sum(&orig_words);
 
     let mut translated = original;
-    assert!(state.translate_outbound(&mut translated, ""));
+    assert_eq!(state.translate_outbound_result(&mut translated, ""), Nptv6Translation::Translated);
     let xlat_words = ipv6_to_words(&translated);
     let xlat_sum = ones_complement_sum(&xlat_words);
 
@@ -248,7 +248,7 @@ fn checksum_neutrality_64() {
     let orig_sum = ones_complement_sum(&orig_words);
 
     let mut translated = original;
-    assert!(state.translate_outbound(&mut translated, ""));
+    assert_eq!(state.translate_outbound_result(&mut translated, ""), Nptv6Translation::Translated);
     let xlat_words = ipv6_to_words(&translated);
     let xlat_sum = ones_complement_sum(&xlat_words);
 
@@ -298,7 +298,7 @@ fn edge_case_0xffff_becomes_0x0000() {
 }
 
 #[test]
-fn no_match_returns_false() {
+fn no_match_returns_no_match() {
     let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
         name: "test".to_string(),
         from_zone: String::new(),
@@ -308,12 +308,12 @@ fn no_match_returns_false() {
     // Address that doesn't match either prefix.
     let mut addr: Ipv6Addr = "2001:db8:2:abcd::1".parse().unwrap();
     let original = addr;
-    assert!(!state.translate_inbound(&mut addr, ""));
+    assert_eq!(state.translate_inbound_result(&mut addr, ""), Nptv6Translation::NoMatch);
     assert_eq!(addr, original, "non-matching address should be unchanged");
 
     let mut addr2: Ipv6Addr = "fd00:2:0:abcd::1".parse().unwrap();
     let original2 = addr2;
-    assert!(!state.translate_outbound(&mut addr2, ""));
+    assert_eq!(state.translate_outbound_result(&mut addr2, ""), Nptv6Translation::NoMatch);
     assert_eq!(addr2, original2);
 }
 
@@ -322,8 +322,8 @@ fn empty_state() {
     let state = Nptv6State::from_snapshots(&[]);
     assert!(state.is_empty());
     let mut addr: Ipv6Addr = "2001:db8:1::1".parse().unwrap();
-    assert!(!state.translate_inbound(&mut addr, ""));
-    assert!(!state.translate_outbound(&mut addr, ""));
+    assert_eq!(state.translate_inbound_result(&mut addr, ""), Nptv6Translation::NoMatch);
+    assert_eq!(state.translate_outbound_result(&mut addr, ""), Nptv6Translation::NoMatch);
 }
 
 #[test]
@@ -565,7 +565,7 @@ fn real_world_prefixes() {
     // fail-on-revert of the negative case).
     // Inbound: external dst -> internal dst
     let mut dst: Ipv6Addr = "2602:fd41:70:100::1".parse().unwrap();
-    assert!(state.translate_inbound(&mut dst, "untrust"));
+    assert_eq!(state.translate_inbound_result(&mut dst, "untrust"), Nptv6Translation::Translated);
     let words = ipv6_to_words(&dst);
     assert_eq!(words[0], 0xfd35);
     assert_eq!(words[1], 0x1940);
@@ -574,8 +574,8 @@ fn real_world_prefixes() {
     // Round-trip
     let original_src: Ipv6Addr = "fd35:1940:27:200::42".parse().unwrap();
     let mut src = original_src;
-    assert!(state.translate_outbound(&mut src, "untrust"));
-    assert!(state.translate_inbound(&mut src, "untrust"));
+    assert_eq!(state.translate_outbound_result(&mut src, "untrust"), Nptv6Translation::Translated);
+    assert_eq!(state.translate_inbound_result(&mut src, "untrust"), Nptv6Translation::Translated);
     assert_eq!(src, original_src);
 }
 
@@ -600,8 +600,8 @@ fn multiple_addresses_same_prefix() {
     ] {
         let original: Ipv6Addr = addr_str.parse().unwrap();
         let mut addr = original;
-        assert!(state.translate_outbound(&mut addr, ""));
-        assert!(state.translate_inbound(&mut addr, ""));
+        assert_eq!(state.translate_outbound_result(&mut addr, ""), Nptv6Translation::Translated);
+        assert_eq!(state.translate_inbound_result(&mut addr, ""), Nptv6Translation::Translated);
         assert_eq!(addr, original, "round-trip failed for {original}");
     }
 }
@@ -697,7 +697,7 @@ fn checksum_neutral_pair_has_ones_complement_zero_adjustment() {
 // #3233 fail-on-revert (THE bug): a checksum-neutral /48 prefix pair and a host
 // whose adjustment word (word[3]) is 0xFFFF. Outbound must swap the prefix and
 // leave word[3] == 0xFFFF (NOT fold it to 0x0000). Revert the adj==zero skip in
-// translate_outbound -> word[3] collapses to 0x0000 -> this assert goes RED.
+// translate_outbound_result -> word[3] collapses to 0x0000 -> this assert goes RED.
 #[test]
 fn checksum_neutral_0xffff_host_word_survives_outbound() {
     let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
@@ -709,7 +709,7 @@ fn checksum_neutral_0xffff_host_word_survives_outbound() {
     }]);
     // word[3] = 0xffff (the adjustment word for a /48).
     let mut src: Ipv6Addr = "2001:db8:1:ffff::1".parse().unwrap();
-    assert!(state.translate_outbound(&mut src, ""));
+    assert_eq!(state.translate_outbound_result(&mut src, ""), Nptv6Translation::Translated);
     let words = ipv6_to_words(&src);
     // Prefix swapped to external.
     assert_eq!(words[0], 0x2001);
@@ -736,8 +736,8 @@ fn checksum_neutral_0xffff_and_0x0000_hosts_stay_distinct() {
     }]);
     let mut host_ffff: Ipv6Addr = "2001:db8:1:ffff::1".parse().unwrap();
     let mut host_0000: Ipv6Addr = "2001:db8:1:0:0:0:0:1".parse().unwrap();
-    assert!(state.translate_outbound(&mut host_ffff, ""));
-    assert!(state.translate_outbound(&mut host_0000, ""));
+    assert_eq!(state.translate_outbound_result(&mut host_ffff, ""), Nptv6Translation::Translated);
+    assert_eq!(state.translate_outbound_result(&mut host_0000, ""), Nptv6Translation::Translated);
     assert_ne!(
         host_ffff, host_0000,
         "the 0xFFFF host must not collapse onto the 0x0000 host (the #3233 collision)"
@@ -764,13 +764,13 @@ fn checksum_neutral_round_trip_preserves_0xffff_host() {
     ] {
         let original: Ipv6Addr = addr_str.parse().unwrap();
         let mut addr = original;
-        assert!(state.translate_outbound(&mut addr, ""));
-        assert!(state.translate_inbound(&mut addr, ""));
+        assert_eq!(state.translate_outbound_result(&mut addr, ""), Nptv6Translation::Translated);
+        assert_eq!(state.translate_inbound_result(&mut addr, ""), Nptv6Translation::Translated);
         assert_eq!(addr, original, "checksum-neutral round-trip failed for {original}");
     }
     // Inbound on an external dst with a 0xFFFF host word also survives.
     let mut dst: Ipv6Addr = "2001:1:db8:ffff::9".parse().unwrap();
-    assert!(state.translate_inbound(&mut dst, ""));
+    assert_eq!(state.translate_inbound_result(&mut dst, ""), Nptv6Translation::Translated);
     let words = ipv6_to_words(&dst);
     assert_eq!(words[0], 0x2001);
     assert_eq!(words[1], 0x0db8);
@@ -792,7 +792,7 @@ fn checksum_neutral_pair_is_checksum_neutral_without_fixup() {
     let original: Ipv6Addr = "2001:db8:1:ffff::42".parse().unwrap();
     let orig_sum = ones_complement_sum(&ipv6_to_words(&original));
     let mut translated = original;
-    assert!(state.translate_outbound(&mut translated, ""));
+    assert_eq!(state.translate_outbound_result(&mut translated, ""), Nptv6Translation::Translated);
     let xlat_sum = ones_complement_sum(&ipv6_to_words(&translated));
     assert_eq!(
         orig_sum, xlat_sum,
@@ -820,7 +820,7 @@ fn general_case_still_folds_0xffff_to_0x0000() {
     // Outbound on a host whose word[3] folds to 0xFFFF still becomes 0x0000 and
     // is never left at 0xFFFF (the RFC 6296 convention for the general case).
     let mut src: Ipv6Addr = "fd00:1:0:abcd::1".parse().unwrap();
-    assert!(state.translate_outbound(&mut src, ""));
+    assert_eq!(state.translate_outbound_result(&mut src, ""), Nptv6Translation::Translated);
     assert_ne!(ipv6_to_words(&src)[3], 0xFFFF, "adjusted word must never be 0xFFFF");
 }
 // #13695: RFC 6296 §3.5 forbids the external /48 subnet word 0xFFFF on a
@@ -855,8 +855,8 @@ fn inbound_non_neutral_48_rejects_ffff_subnet_word_13695() {
 // UNTRANSLATED — otherwise the scoped rule translates+routes traffic from every
 // zone (the #5176 security-domain crossing). Neutralize the gate — make
 // `Nptv6Rule::zone_matches` return `true` unconditionally, or drop the
-// `rule.zone_matches(...)` conjunct in `translate_inbound` (nptv6.rs) — and the
-// wrong-zone `assert!(!translated)` below goes RED.
+// `rule.zone_matches(...)` conjunct in `translate_inbound_result` (nptv6.rs) — and the
+// wrong-zone `assert_eq!(.., NoMatch)` below goes RED.
 #[test]
 fn nptv6_zone_scope_gates_inbound_5176() {
     let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
@@ -868,8 +868,9 @@ fn nptv6_zone_scope_gates_inbound_5176() {
 
     // In-scope ingress zone -> translated to the internal prefix.
     let mut dst_untrust: Ipv6Addr = "2001:db8:1:abcd::1".parse().unwrap();
-    assert!(
-        state.translate_inbound(&mut dst_untrust, "untrust"),
+    assert_eq!(
+        state.translate_inbound_result(&mut dst_untrust, "untrust"),
+        Nptv6Translation::Translated,
         "in-scope ingress zone must translate"
     );
     assert_eq!(ipv6_to_words(&dst_untrust)[0], 0xfd00);
@@ -877,8 +878,9 @@ fn nptv6_zone_scope_gates_inbound_5176() {
     // Out-of-scope ingress zone, SAME prefix -> NOT translated, unchanged.
     let orig: Ipv6Addr = "2001:db8:1:abcd::1".parse().unwrap();
     let mut dst_trust = orig;
-    assert!(
-        !state.translate_inbound(&mut dst_trust, "trust"),
+    assert_eq!(
+        state.translate_inbound_result(&mut dst_trust, "trust"),
+        Nptv6Translation::NoMatch,
         "out-of-scope ingress zone must NOT translate (security-domain crossing)"
     );
     assert_eq!(dst_trust, orig, "wrong-zone packet must be left unmodified");
@@ -888,7 +890,7 @@ fn nptv6_zone_scope_gates_inbound_5176() {
 // zone. A rule scoped `from zone untrust` rewrites the source only for traffic
 // leaving via untrust; a same-prefix flow egressing another zone (trust) is
 // left untouched. Same neutralization as above -> the wrong-zone
-// `assert!(!translated)` goes RED.
+// `assert_eq!(.., NoMatch)` goes RED.
 #[test]
 fn nptv6_zone_scope_gates_outbound_5176() {
     let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
@@ -900,8 +902,9 @@ fn nptv6_zone_scope_gates_outbound_5176() {
 
     // In-scope egress zone -> translated to the external prefix.
     let mut src_untrust: Ipv6Addr = "fd00:1:0:abcd::1".parse().unwrap();
-    assert!(
-        state.translate_outbound(&mut src_untrust, "untrust"),
+    assert_eq!(
+        state.translate_outbound_result(&mut src_untrust, "untrust"),
+        Nptv6Translation::Translated,
         "in-scope egress zone must translate"
     );
     assert_eq!(ipv6_to_words(&src_untrust)[0], 0x2001);
@@ -909,8 +912,9 @@ fn nptv6_zone_scope_gates_outbound_5176() {
     // Out-of-scope egress zone, SAME prefix -> untouched.
     let orig: Ipv6Addr = "fd00:1:0:abcd::1".parse().unwrap();
     let mut src_trust = orig;
-    assert!(
-        !state.translate_outbound(&mut src_trust, "trust"),
+    assert_eq!(
+        state.translate_outbound_result(&mut src_trust, "trust"),
+        Nptv6Translation::NoMatch,
         "out-of-scope egress zone must NOT translate"
     );
     assert_eq!(src_trust, orig);
@@ -946,12 +950,12 @@ fn nptv6_split_horizon_same_prefix_distinct_zones_admitted_5176() {
 
     // Each egress zone resolves to its OWN external prefix — deterministic.
     let mut via_untrust: Ipv6Addr = "fd00:1:0:abcd::1".parse().unwrap();
-    assert!(state.translate_outbound(&mut via_untrust, "untrust"));
+    assert_eq!(state.translate_outbound_result(&mut via_untrust, "untrust"), Nptv6Translation::Translated);
     let wu = ipv6_to_words(&via_untrust);
     assert_eq!((wu[0], wu[1], wu[2]), (0x2001, 0x0db8, 0x0001));
 
     let mut via_trust: Ipv6Addr = "fd00:1:0:abcd::1".parse().unwrap();
-    assert!(state.translate_outbound(&mut via_trust, "trust"));
+    assert_eq!(state.translate_outbound_result(&mut via_trust, "trust"), Nptv6Translation::Translated);
     let wt = ipv6_to_words(&via_trust);
     assert_eq!((wt[0], wt[1], wt[2]), (0x2001, 0x0db8, 0x0002));
 }
@@ -969,13 +973,13 @@ fn nptv6_wildcard_from_zone_matches_any_zone_5176() {
     }]);
     // Matches an arbitrary zone name...
     let mut a: Ipv6Addr = "2001:db8:1:abcd::1".parse().unwrap();
-    assert!(state.translate_inbound(&mut a, "any-zone-name"));
+    assert_eq!(state.translate_inbound_result(&mut a, "any-zone-name"), Nptv6Translation::Translated);
     // ...and the empty zone.
     let mut b: Ipv6Addr = "2001:db8:1:abcd::1".parse().unwrap();
-    assert!(state.translate_inbound(&mut b, ""));
+    assert_eq!(state.translate_inbound_result(&mut b, ""), Nptv6Translation::Translated);
     // Outbound wildcard likewise matches any egress zone.
     let mut c: Ipv6Addr = "fd00:1:0:abcd::1".parse().unwrap();
-    assert!(state.translate_outbound(&mut c, "whatever"));
+    assert_eq!(state.translate_outbound_result(&mut c, "whatever"), Nptv6Translation::Translated);
 }
 
 // #5611 fail-on-revert: a WILDCARD (`from_zone = ""`) rule and a CONCRETE-zone
@@ -1145,8 +1149,8 @@ fn ffff_vs_0000_sibling_collision_non_neutral_64_10290() {
     );
     let mut host_ffff: Ipv6Addr = "fd00:1:2:3:ffff:0:0:1".parse().unwrap();
     let mut host_0000: Ipv6Addr = "fd00:1:2:3:0:0:0:1".parse().unwrap();
-    assert!(state.translate_outbound(&mut host_ffff, ""));
-    assert!(state.translate_outbound(&mut host_0000, ""));
+    assert_eq!(state.translate_outbound_result(&mut host_ffff, ""), Nptv6Translation::Translated);
+    assert_eq!(state.translate_outbound_result(&mut host_0000, ""), Nptv6Translation::Translated);
     assert_ne!(
         host_ffff, host_0000,
         "the 0xFFFF-first-word host must not collapse onto its 0x0000 sibling"
@@ -1154,8 +1158,8 @@ fn ffff_vs_0000_sibling_collision_non_neutral_64_10290() {
     // Inbound demaps each external address back to ITS OWN host.
     let mut back_ffff = host_ffff;
     let mut back_0000 = host_0000;
-    assert!(state.translate_inbound(&mut back_ffff, ""));
-    assert!(state.translate_inbound(&mut back_0000, ""));
+    assert_eq!(state.translate_inbound_result(&mut back_ffff, ""), Nptv6Translation::Translated);
+    assert_eq!(state.translate_inbound_result(&mut back_0000, ""), Nptv6Translation::Translated);
     assert_eq!(
         back_ffff, "fd00:1:2:3:ffff:0:0:1".parse::<Ipv6Addr>().unwrap(),
         "inbound for the ffff-host's external must return to the ffff-host, not the sibling"
@@ -1180,7 +1184,7 @@ fn ffff_first_word_adjusts_next_word_64_10290() {
     }]);
     let original: Ipv6Addr = "fd00:1:2:3:ffff:1234:5678:9abc".parse().unwrap();
     let mut addr = original;
-    assert!(state.translate_outbound(&mut addr, ""));
+    assert_eq!(state.translate_outbound_result(&mut addr, ""), Nptv6Translation::Translated);
     let words = ipv6_to_words(&addr);
     assert_eq!(words[0], 0x2001);
     assert_eq!(words[1], 0x0db8);
@@ -1195,7 +1199,7 @@ fn ffff_first_word_adjusts_next_word_64_10290() {
     assert_eq!(words[6], 0x5678);
     assert_eq!(words[7], 0x9abc);
     // Round-trip is identity: inbound selects the same word.
-    assert!(state.translate_inbound(&mut addr, ""));
+    assert_eq!(state.translate_inbound_result(&mut addr, ""), Nptv6Translation::Translated);
     assert_eq!(addr, original, "scanned-word round-trip must preserve the address");
 }
 
@@ -1211,14 +1215,14 @@ fn multiple_leading_ffff_adjusts_first_non_ffff_64_10290() {
     }]);
     let original: Ipv6Addr = "fd00:1:2:3:ffff:ffff:9abc:def0".parse().unwrap();
     let mut addr = original;
-    assert!(state.translate_outbound(&mut addr, ""));
+    assert_eq!(state.translate_outbound_result(&mut addr, ""), Nptv6Translation::Translated);
     let words = ipv6_to_words(&addr);
     assert_eq!(words[4], 0xffff);
     assert_eq!(words[5], 0xffff);
     // 0x9abc + 0xcf4a = 0x16a06 -> fold -> 0x6a07.
     assert_eq!(words[6], 0x6a07, "the first non-0xFFFF IID word takes the adjustment");
     assert_eq!(words[7], 0xdef0);
-    assert!(state.translate_inbound(&mut addr, ""));
+    assert_eq!(state.translate_inbound_result(&mut addr, ""), Nptv6Translation::Translated);
     assert_eq!(addr, original, "scanned-word round-trip must preserve the address");
 }
 
@@ -1236,15 +1240,17 @@ fn all_ones_iid_untranslatable_64_10290() {
     }]);
     let mut src: Ipv6Addr = "fd00:1:2:3:ffff:ffff:ffff:ffff".parse().unwrap();
     let original_src = src;
-    assert!(
-        !state.translate_outbound(&mut src, ""),
+    assert_eq!(
+        state.translate_outbound_result(&mut src, ""),
+        Nptv6Translation::Untranslatable,
         "a /64 all-ones IID has no adjustable word and must be refused outbound"
     );
     assert_eq!(src, original_src, "a refused address must be left untouched");
     let mut dst: Ipv6Addr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
     let original_dst = dst;
-    assert!(
-        !state.translate_inbound(&mut dst, ""),
+    assert_eq!(
+        state.translate_inbound_result(&mut dst, ""),
+        Nptv6Translation::Untranslatable,
         "a /64 all-ones IID has no adjustable word and must be refused inbound"
     );
     assert_eq!(dst, original_dst, "a refused address must be left untouched");
@@ -1327,7 +1333,7 @@ fn scanned_word_checksum_neutral_64_10290() {
     let original: Ipv6Addr = "fd00:1:2:3:ffff:1234:5678:9abc".parse().unwrap();
     let orig_sum = ones_complement_sum(&ipv6_to_words(&original));
     let mut translated = original;
-    assert!(state.translate_outbound(&mut translated, ""));
+    assert_eq!(state.translate_outbound_result(&mut translated, ""), Nptv6Translation::Translated);
     let xlat_sum = ones_complement_sum(&ipv6_to_words(&translated));
     assert_eq!(
         orig_sum, xlat_sum,
