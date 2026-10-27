@@ -34,10 +34,6 @@ import (
 // Single-RG manual failover and transfer protocol.
 // =============================================================================
 
-// ManualFailover forces a redundancy group to transfer out of primary.
-// Unlike ForceSecondary, this preserves the group's monitor-derived weight
-// and advertises an explicit transfer-out state so the peer can claim
-// primary without relying on weight-zero election semantics.
 // FailoverOutcome reports what a manual-failover request actually did to one
 // redundancy group (#8000).
 //
@@ -101,6 +97,10 @@ func (m *Manager) releaseFailoverLocked(rgID int, owner uint64) {
 	}
 }
 
+// ManualFailover forces a redundancy group to transfer out of primary.
+// Unlike ForceSecondary, this preserves the group's monitor-derived weight
+// and advertises an explicit transfer-out state so the peer can claim
+// primary without relying on weight-zero election semantics.
 func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 	m.mu.Lock()
 	rg, ok := m.groups[rgID]
