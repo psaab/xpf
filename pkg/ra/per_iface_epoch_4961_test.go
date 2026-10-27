@@ -30,7 +30,7 @@ func TestWithdrawInterfacesUnrelatedDoesNotCancelRestart_4961(t *testing.T) {
 	old, cfg, startEpoch := installRestartEntry(t, fl, m)
 
 	// A withdraw of an UNRELATED interface: it must not touch lo's restart.
-	m.WithdrawInterfaces([]string{"eth-unrelated-4961"})
+	m.withdrawInterfacesForTest([]string{"eth-unrelated-4961"})
 
 	started := false
 	onProvenClose := func() error {
@@ -73,7 +73,7 @@ func TestWithdrawInterfacesSameIfaceCancelsRestart_4961(t *testing.T) {
 
 	// A withdraw NAMING lo: flips goodbyeWanted on lo's tombstone AND bumps
 	// lo's per-interface epoch — either alone must suppress the replacement.
-	m.WithdrawInterfaces([]string{"lo"})
+	m.withdrawInterfacesForTest([]string{"lo"})
 
 	started := false
 	onProvenClose := func() error {
@@ -104,7 +104,7 @@ func TestWithdrawInterfacesUnrelatedDoesNotBumpGlobalEpoch_4961(t *testing.T) {
 	globalBefore := m.epoch
 	m.mu.Unlock()
 
-	m.WithdrawInterfaces([]string{"eth-x-4961"})
+	m.withdrawInterfacesForTest([]string{"eth-x-4961"})
 
 	m.mu.Lock()
 	globalAfter := m.epoch

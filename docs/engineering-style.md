@@ -561,6 +561,18 @@ the mechanics, so this section is sequencing only.
   correct mechanisms, including its own flagship target, because
   correct markers are correct via caller contracts and readbacks that
   no intra-function dominance rule can see.
+- **Reachability is gated, like vet (#17154).** `make test-go` runs
+  `scripts/go-deadcode-gate.sh` beside the #9590 vet leg: the set of
+  functions unreachable from any binary or test
+  (`deadcode@v0.38.0 -test ./...`, go1.26 toolchain — the pinned
+  analyser's SSA builder panics under go1.27) must equal
+  `docs/deadcode-allowlist.txt` exactly. A function whose last caller
+  you removed is dead in the same change: delete it, do not leave it
+  for the next review to re-derive. A carve-out is a named, reasoned
+  allowlist row (`LEGITIMATE` for `var _` compile guards and
+  `ForTest` seams only); stale rows red, so the list only shrinks.
+  The seeded `LEGACY-DEBT` baseline is pre-existing debt to delete
+  per-package with its row — never a place to park new dead code.
 
 ## API shape discipline
 
