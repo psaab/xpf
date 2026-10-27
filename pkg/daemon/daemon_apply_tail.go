@@ -421,9 +421,10 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 		d.cluster.ApplyCommittedHeartbeatTiming()
 		// #17132: NO interface-monitor feed here. pkg/cluster.Monitor is the
 		// only producer of interface-monitor debt; UpdateConfig above runs
-		// one immediate dampened poll (Monitor.PollNow) so this commit is
-		// reflected without a raw per-apply sample that could strand or
-		// clear dampened debt. d.routing.ApplyInterfaceMonitors (step 18)
+		// one immediate interface-only dampened poll (Monitor.PollNow —
+		// no ICMP sweep on the commit path) so this commit is reflected
+		// without a raw per-apply sample that could strand or clear
+		// dampened debt. d.routing.ApplyInterfaceMonitors (step 18)
 		// remains display-only for `show chassis cluster interfaces`.
 
 		// RETH GARP is handled by native VRRP (VRRP-backed RETH).

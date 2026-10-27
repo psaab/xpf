@@ -68,14 +68,20 @@ type Monitor struct {
 	mgr    *Manager
 	groups []*config.RedundancyGroup
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	mu sync.Mutex
+	// lifecycle binds every poll cycle: Start (re)creates it, Stop
+	// cancels it and clears the pointer so a later commit poll cannot
+	// resurrect work on a stopped monitor. Never-started monitors get a
+	// Background-derived lifecycle lazily (see lifecycleContext). wg
+	// counts the poll loop AND in-flight PollNow cycles so Stop joins
+	// both (#17132 fold).
+	lifecycle context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 
 	// Dampened state per interface/IP monitor.
 	ifaceState map[monitorKey]*monitorState
 	ipState    map[ipMonitorKey]*monitorState
-
 	// missingWarned records, per (rg, interface), that the
 	// "local interface missing" warning has already been emitted for the
 	// current absence episode (#15210). pollInterfaceMonitors runs every
@@ -314,18 +320,22 @@ func (mon *Monitor) Start(ctx context.Context) {
 	mon.Stop()
 
 	mon.mu.Lock()
-	defer mon.mu.Unlock()
-
 	ctx, cancel := context.WithCancel(ctx)
+	mon.lifecycle = ctx
 	mon.cancel = cancel
+	mon.mu.Unlock()
 
 	mon.wg.Add(1)
 	go mon.loop(ctx)
 }
 
-// Stop halts the monitoring goroutine and waits for it to exit.
+// Stop halts the monitoring goroutine, cancels any in-flight commit
+// (PollNow) poll, waits for both to exit, then closes the cached
+// netlink handle. A PollNow that starts after Stop finds no lifecycle
+// and is a no-op (see PollNow).
 func (mon *Monitor) Stop() {
 	mon.mu.Lock()
+	mon.lifecycle = nil
 	cancel := mon.cancel
 	mon.cancel = nil
 	nlh := mon.cachedNlHandle
@@ -334,8 +344,8 @@ func (mon *Monitor) Stop() {
 
 	if cancel != nil {
 		cancel()
-		mon.wg.Wait()
 	}
+	mon.wg.Wait()
 	if nlh != nil {
 		nlh.Close()
 	}
@@ -366,15 +376,64 @@ func (mon *Monitor) Stop() {
 // call the locking SetMonitorWeight here: it is invoked from
 // Manager.UpdateConfig with m.mu already held, so re-acquiring m.mu would
 // self-deadlock. It touches only the Monitor's own maps (guarded by mon.mu).
-// PollNow runs one dampened poll cycle immediately (#17132). UpdateConfig
-// calls it after releasing m.mu so a commit's new monitor set / weights are
-// reflected within this apply rather than at the next 1s tick — but only
-// through the dampened transition machinery, never a raw sample. Safe
-// before Start (no goroutine needed) and concurrently with the poll loop:
-// dampening state is under mon.mu and SetMonitorWeight under m.mu in the
-// established order.
+// lifecycleContext returns the monitor's lifecycle context for a
+// non-loop poll cycle. A started monitor reuses the Start context (so
+// Stop cancels the cycle). A never-started monitor — the shape the
+// daemon's boot-load / peer-sync UpdateConfig can hit before Start,
+// and the shape component tests construct — lazily installs a
+// Background-derived lifecycle so a later Stop still cancels and
+// joins it. A stopped monitor (cancel consumed and lifecycle cleared
+// by Stop) returns ok=false: no new cycle may start.
+//
+// The caller must Add to wg while still holding mon.mu: Stop clears
+// the lifecycle under the same lock before Waiting, so the Add is
+// either visible to that Wait or impossible (ok=false). Adding after
+// unlocking would race Stop's Wait.
+func (mon *Monitor) lifecycleContext() (ctx context.Context, ok bool) {
+	mon.mu.Lock()
+	defer mon.mu.Unlock()
+	if mon.cancel == nil {
+		if mon.lifecycle != nil {
+			// Stopped (or Start superseded): no live lifecycle.
+			return nil, false
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		mon.lifecycle = ctx
+		mon.cancel = cancel
+	}
+	mon.wg.Add(1)
+	return mon.lifecycle, true
+}
+
+// PollNow runs one INTERFACE-ONLY dampened poll cycle immediately
+// (#17132, fold). UpdateConfig calls it after releasing m.mu so a
+// commit's new monitor set / weights are reflected within this apply
+// rather than at the next 1s tick — but only through the dampened
+// transition machinery, never a raw sample.
+//
+// Interface-only: the commit path must not run the ICMP IP-probe
+// sweep synchronously — that sweep is bounded only by
+// waves*800ms+500ms and would add multi-second latency to every
+// commit / boot-load / peer-sync apply. IP-monitor debt is owned by
+// the 1s poll loop's full cycle; a commit neither advances IP
+// dampening nor reconciles IP debt (the loop does, within ~1s, from
+// unchanged dampened state — failover-neutral because a commit
+// changes no probe result).
+//
+// Lifecycle-bound: the cycle runs on the monitor lifecycle context
+// and is counted in wg, so Monitor.Stop (via Manager.Stop) cancels
+// and joins it — a commit poll racing Stop cannot SetMonitorWeight
+// on a stopping manager. After Stop, PollNow is a no-op. Safe before
+// Start (lazily installs a cancellable lifecycle) and concurrently
+// with the poll loop: dampening state is under mon.mu and
+// SetMonitorWeight under m.mu in the established order.
 func (mon *Monitor) PollNow() {
-	mon.pollCycle(context.Background())
+	ctx, ok := mon.lifecycleContext()
+	if !ok {
+		return
+	}
+	defer mon.wg.Done()
+	mon.pollCycleMode(ctx, false)
 }
 
 func (mon *Monitor) UpdateGroups(groups []*config.RedundancyGroup) {
@@ -446,10 +505,16 @@ func (mon *Monitor) loop(ctx context.Context) {
 	}
 }
 
-// poll runs one monitoring cycle with a non-cancellable context. Retained for
-// tests and any caller that does not thread a lifecycle context.
+// poll runs one FULL monitoring cycle (interface + IP probe sweep)
+// with a non-cancellable context. Retained for tests and any caller
+// that does not thread a lifecycle context; the production commit
+// path uses the interface-only, lifecycle-bound PollNow instead.
 func (mon *Monitor) poll() {
 	mon.pollCycle(context.Background())
+}
+
+func (mon *Monitor) pollCycle(ctx context.Context) {
+	mon.pollCycleMode(ctx, true)
 }
 
 // pollCycle runs one monitoring cycle. It splits the IP-monitor work into a
@@ -466,29 +531,36 @@ func (mon *Monitor) poll() {
 // path, so the change is failover-neutral. Interface link-state checks stay
 // serial — they are fast local netlink calls, not the ~800ms-per-target ICMP
 // blocking that motivated this.
-func (mon *Monitor) pollCycle(ctx context.Context) {
+// pollCycleMode runs one monitoring cycle; includeIP=false skips the
+// IP-probe phase entirely (no snapshot, no probe, no dampening
+// advance, no IP-debt reconcile) for the commit-time PollNow.
+func (mon *Monitor) pollCycleMode(ctx context.Context, includeIP bool) {
 	mon.mu.Lock()
 	groups := mon.groups
 	mon.mu.Unlock()
-
-	// Phase 1: immutable IP-target snapshot in stable order. Each task
-	// carries the resolved probe source/device/measurability for its
-	// RG+target (#15038, #16734): the primary probes from the RG's VIP
-	// on the target interface, the secondary from secondary-ip-address;
-	// unbound targets keep src="" and stay measurable.
+	// Phase 1+2 are skipped entirely on the interface-only commit path
+	// (includeIP=false): no IP snapshot, no ICMP sweep on the commit.
 	var ipTasks []ipProbeTask
-	for _, rg := range groups {
-		if rg.IPMonitoring == nil || len(rg.IPMonitoring.Targets) == 0 {
-			continue
+	var ipResults []ipProbeResult
+	if includeIP {
+		// Phase 1: immutable IP-target snapshot in stable order. Each task
+		// carries the resolved probe source/device/measurability for its
+		// RG+target (#15038, #16734): the primary probes from the RG's VIP
+		// on the target interface, the secondary from secondary-ip-address;
+		// unbound targets keep src="" and stay measurable.
+		for _, rg := range groups {
+			if rg.IPMonitoring == nil || len(rg.IPMonitoring.Targets) == 0 {
+				continue
+			}
+			for _, target := range rg.IPMonitoring.Targets {
+				src, device, canMeasure := mon.probeSourceFor(rg, target)
+				ipTasks = append(ipTasks, ipProbeTask{target: target, rgID: rg.ID, src: src, device: device, canMeasure: canMeasure})
+			}
 		}
-		for _, target := range rg.IPMonitoring.Targets {
-			src, device, canMeasure := mon.probeSourceFor(rg, target)
-			ipTasks = append(ipTasks, ipProbeTask{target: target, rgID: rg.ID, src: src, device: device, canMeasure: canMeasure})
-		}
-	}
 
-	// Phase 2: parallel probe.
-	ipResults := mon.probeIPTargets(ctx, ipTasks)
+		// Phase 2: parallel probe.
+		ipResults = mon.probeIPTargets(ctx, ipTasks)
+	}
 
 	// Phase 3: serial apply in stable order. Rebuild local statuses into a
 	// local slice, then swap under lock to avoid racing with
@@ -496,8 +568,8 @@ func (mon *Monitor) pollCycle(ctx context.Context) {
 	var statuses []InterfaceMonitorInfo
 	ipIdx := 0
 	for _, rg := range groups {
-		statuses = mon.pollInterfaceMonitors(rg, statuses)
-		if rg.IPMonitoring != nil && len(rg.IPMonitoring.Targets) > 0 {
+		statuses = mon.pollInterfaceMonitors(ctx, rg, statuses)
+		if includeIP && rg.IPMonitoring != nil && len(rg.IPMonitoring.Targets) > 0 {
 			for _, target := range rg.IPMonitoring.Targets {
 				res := ipResults[ipIdx]
 				task := ipTasks[ipIdx]
@@ -524,12 +596,16 @@ func (mon *Monitor) pollCycle(ctx context.Context) {
 				mon.updateIPTargetDampenedState(rg, target, res.reachable)
 			}
 		}
-		// Reconcile the RG's ip-monitor election debts to exactly what the
-		// CURRENT mode (independent vs global-threshold) + dampened reachability
-		// dictate (#5271). Run for EVERY RG — including one that disabled or
-		// removed ip-monitoring while being kept — so a stale debt from the
-		// other mode is cleared rather than stranded or double-counted.
-		mon.reconcileRGIPDebts(rg)
+		if includeIP {
+			// Reconcile the RG's ip-monitor election debts to exactly what the
+			// CURRENT mode (independent vs global-threshold) + dampened reachability
+			// dictate (#5271). Run for EVERY RG — including one that disabled or
+			// removed ip-monitoring while being kept — so a stale debt from the
+			// other mode is cleared rather than stranded or double-counted.
+			// Skipped on the commit path: IP dampening did not advance, so
+			// the desired set cannot have changed; the 1s loop reconciles.
+			mon.reconcileRGIPDebts(rg)
+		}
 	}
 
 	mon.mu.Lock()
@@ -550,7 +626,7 @@ func (mon *Monitor) LocalInterfaceStatuses() []InterfaceMonitorInfo {
 	return cp
 }
 
-func (mon *Monitor) pollInterfaceMonitors(rg *config.RedundancyGroup, statuses []InterfaceMonitorInfo) []InterfaceMonitorInfo {
+func (mon *Monitor) pollInterfaceMonitors(ctx context.Context, rg *config.RedundancyGroup, statuses []InterfaceMonitorInfo) []InterfaceMonitorInfo {
 	nlh := mon.getNlHandle()
 
 	for _, im := range rg.InterfaceMonitors {
@@ -639,6 +715,16 @@ func (mon *Monitor) pollInterfaceMonitors(rg *config.RedundancyGroup, statuses [
 
 		if transitioned {
 			mon.beforeManagerApply()
+			// Lifecycle gate (#17132 fold): Stop cancels ctx while a
+			// commit/loop cycle is in flight (e.g. parked in the hook
+			// above, or queued behind a slow netlink read). A cancelled
+			// cycle must not write weight/event on a stopping manager.
+			// The periodic loop re-derives the transition next cycle
+			// only if dampening still reports it; a stopped monitor
+			// never re-polls, so dropping here is terminal and safe.
+			if ctx.Err() != nil {
+				continue
+			}
 			mon.mgr.SetMonitorWeight(rg.ID, im.Interface, nowDown, weight)
 			if nowDown {
 				mon.mgr.RecordEvent(EventMonitor, rg.ID, fmt.Sprintf(

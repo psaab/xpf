@@ -25,10 +25,11 @@ import (
 // that UpdateConfig alone (reconcile + PollNow) cannot install raw debt.
 //
 // That is now closed at TWO independent layers, deliberately: pkg/routing
-// bounds the weight where it builds the status (it is election input, not
-// display-only, and it is also what `show chassis cluster interfaces`
-// renders), and Manager.SetMonitorWeight bounds every debt on the way in so a
-// FUTURE producer that forgets its own clamp is still safe.
+// bounds the weight where it builds the status so the DISPLAY renders
+// the effective (clamped) value, not the raw configured one — display
+// only since #17132, never election input — and Manager.SetMonitorWeight
+// bounds every debt on the way in so a FUTURE producer that forgets its
+// own clamp is still safe.
 //
 // WHAT THESE TESTS BIND. Because both layers are live, the two
 // TestDaemonApplyTail_* cases below fail only when BOTH are removed — either
