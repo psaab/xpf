@@ -5,10 +5,13 @@
 //! `source`; it reads `SourceNatRule` only through that type's `pub(crate)`
 //! fields.
 //!
-//! #6988 PURE CODE MOTION: every line below was moved verbatim from
-//! `nat/source.rs` lines 59-215. The only edits are the visibility
-//! widenings enumerated in `source/mod.rs`; no logic, no ordering and no
-//! signature changed.
+//! #6988: moved verbatim from `nat/source.rs` lines 59-215 at the
+//! #7860 merge (22b9cb22d0, 2026-08-28), with only the visibility
+//! widenings enumerated in `source/mod.rs`; no logic, ordering or
+//! signature changed in that move. Verified at that merge by
+//! scripts/verify-nat-source-split-6988.py (pinned refs; it checks
+//! the split merge, not the current tree — this file has since
+//! been edited, e.g. #9874).
 
 use super::*;
 

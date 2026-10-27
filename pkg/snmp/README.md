@@ -18,7 +18,7 @@ The request dispatch (`handlePacketFrom`) routes the message version field:
 0 → `handleV1Packet`, 1 → `handleV2cPacket`, 3 → `handleV3Packet`. Before
 #5049 only versions 1 and 3 had a case and version 0 fell through to the
 "unsupported version" default — so the agent emitted v1 traps
-(`buildLinkTrapV1`, `set snmp trap-group … version v1`) yet silently dropped
+(`buildLinkTrapV1WithUptime`, `set snmp trap-group … version v1`) yet silently dropped
 every v1 GET/GETNEXT/SET, and a legacy v1-only manager timed out and marked
 the device down.
 
@@ -913,9 +913,10 @@ packet handlers, and MIB view that call into them.
 - **Trap-group `version` selects the emitted PDU shape (#3948).** Each trap
   group carries a `version` (`v1` | `v2` | `all`, schema enum in
   `pkg/config/schema_system.go`) compiled onto `config.SNMPTrapGroup.Version`.
-  `sendLinkTraps` builds the trap **per group** and honors it via
-  `buildLinkTrapsForVersion`: `v1` emits an SNMPv1 Trap-PDU
-  (`buildLinkTrapV1` — message version field 0, PDU tag 0xa4, the trap type
+  `sendLinkTraps` builds the trap **per group** and honors it via the sole
+  version switch `trapKindsForVersion` (#17066): `v1` enqueues a deferred v1
+  job the worker builds via `buildLinkTrapV1WithUptime`, emitting an SNMPv1
+  Trap-PDU (message version field 0, PDU tag 0xa4, the trap type
   carried in the enterprise/generic-trap/specific-trap/time-stamp fields per
   RFC 1157, with ifIndex/ifAdminStatus/ifOperStatus varbinds in RFC 2863
   OBJECTS order plus ifDescr as a trailing additional varbind (#16778);

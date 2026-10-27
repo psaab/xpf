@@ -1,11 +1,12 @@
 //! #16135: per-address lock-free port occupancy, split out of
-//! nat/allocator.rs as PURE CODE MOTION (deterministic -> occupancy, per
-//! the issue order). This module owns the atomic bitmap, the monotonic
-//! keyed fresh-port probe (#16011) and the FIFO recycle ring; it holds NO live-state
+//! nat/allocator.rs at b0ff071c29 (2026-10-22) as pure code motion
+//! (deterministic -> occupancy, per the issue order). This module
+//! owns the atomic bitmap, the monotonic keyed fresh-port probe
+//! (#16011) and the FIFO recycle ring; it holds NO live-state
 //! (flow map / persistent leases) and never touches the global allocator
 //! mutex — the only mutex here is the per-address recycle mutex, which
 //! stays innermost (allocator.rs header: global -> recycle lock order).
-//! No atomic ordering, lock order or FIFO behaviour changes in this move.
+//! No atomic ordering, lock order or FIFO behaviour changed in that move.
 //!
 //! Visibility bill for this move (25 widenings, all
 //! private -> pub(in crate::nat::allocator)): the absolute spelling
@@ -32,8 +33,11 @@
 //!   AddressOccupancy::probe_word_loads, probe_claim_rmws (fields)
 //! Everything else (claim_offset, free_offset, RecycleRing::is_queued /
 //! mark / unmark, all FIFO/atomic internals) stays fully private to
-//! this file. Machine-checked by
-//! scripts/verify-nat-allocator-split-16135.py.
+//! this file. The motion was verified at the split commit by
+//! scripts/verify-nat-allocator-split-16135.py (pinned --base/--split
+//! refs; it checks that commit, not the current tree). This file has
+//! since been edited (#16011, #16035), so the verbatim claim now
+//! covers only the split commit.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

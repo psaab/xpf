@@ -143,7 +143,7 @@ type ipfixField struct {
 // the extended SESSION_CLOSE wire frame. #3270: flowDirection (IE 61) is
 // advertised CONDITIONALLY — only when `export-extension flow-dir` is set on
 // the template — and populated in Go from the per-zone sampling-direction
-// (ExportConfig.FlowDirection). The base ipfixTemplateV4/V6 slices below are
+// (ExportConfig.FlowDirectionIface). The base ipfixTemplateV4/V6 slices below are
 // the flow-dir-ABSENT templates; ipfixTemplateFieldsV4/V6 splice IE 61 in
 // before the post-NAT trailer when includeDir is set, so a config that did not
 // opt in keeps the field absent (no #2613 synthetic-zero regression).
@@ -758,7 +758,7 @@ type IPFIXExporter struct {
 	// construction (rate is fixed per group) and re-sent on the template-refresh
 	// cadence. emitSampler gates emission on SamplingRate > 1 -- an unsampled
 	// group (rate 0/1, export-all) advertises nothing, matching the
-	// ShouldExport sampling gate.
+	// SampledForOpen sampling gate.
 	emitSampler        bool
 	optionsTemplateSet []byte
 	optionsDataSet     []byte
@@ -789,7 +789,7 @@ func NewIPFIXExporter(cfg *ExportConfig) (*IPFIXExporter, error) {
 
 	// #3748: advertise the 1-in-N sampling rate via an Options Template +
 	// Options Data Record only when the group is actually sampled (rate > 1),
-	// matching the ShouldExport gate. Precompute both (the rate and ODID are
+	// matching the SampledForOpen gate. Precompute both (the rate and ODID are
 	// fixed per group) so the refresh path just re-sends the bytes.
 	if cfg.SamplingRate > 1 {
 		e.emitSampler = true
