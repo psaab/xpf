@@ -42,7 +42,7 @@ func flowDirRecord(v6 bool, dir uint8) FlowRecord {
 
 // TestFlowDirectionFromSampling pins the per-zone sampling-direction →
 // flowDirection mapping, including the ingress-wins tie-break. Reverting the
-// FlowDirection method (or the ingress-first ordering) flips a case RED.
+// FlowDirectionIface method (or the ingress-first ordering) flips a case RED.
 func TestFlowDirectionFromSampling(t *testing.T) {
 	dirs := map[uint16]SamplingDir{
 		1: {Input: true},
@@ -64,8 +64,8 @@ func TestFlowDirectionFromSampling(t *testing.T) {
 		{"v6 ingress input-sampled", 1, 9, true, 0},
 		{"v6 egress output-sampled only", 9, 2, true, 1},
 	} {
-		if got := ec.FlowDirection(tc.inZone, tc.outZone, tc.isV6); got != tc.want {
-			t.Errorf("%s: FlowDirection(%d,%d) = %d, want %d",
+		if got := ec.FlowDirectionIface(tc.inZone, tc.outZone, tc.isV6, "", ""); got != tc.want {
+			t.Errorf("%s: FlowDirectionIface(%d,%d) = %d, want %d",
 				tc.name, tc.inZone, tc.outZone, got, tc.want)
 		}
 	}

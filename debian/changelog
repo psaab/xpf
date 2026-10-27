@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Flow export: delete the production-dead ExportConfig sampling gates
+    (ShouldExport, ShouldExportIface, ShouldExportIfaceDaemon,
+    FlowDirection); SampledForOpen/SampledForClose are the single
+    production gates on one eligible predicate, and tests now exercise
+    them instead of the dead wrappers (#17061).
   * Upgrade: collect a deferred kernel prune on an ordinary boot without
     rewriting a slot selector that a later roll has repurposed (purge the
     obsolete candidate packages only), and reach that collector from the
