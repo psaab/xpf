@@ -1412,6 +1412,7 @@ test-go-skip-census-lib:
 # (`deadcode@v0.38.0 -test ./...`, go1.26 toolchain; see script header for
 # the go1.27 SSA panic) must equal docs/deadcode-allowlist.txt exactly.
 # Also a leg of `make test-go` above. Hermetic self-test over fixtures:
+.PHONY: go-deadcode-gate test-go-deadcode-gate-lib
 go-deadcode-gate:
 	sh scripts/go-deadcode-gate.sh
 

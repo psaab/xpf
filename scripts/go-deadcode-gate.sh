@@ -69,8 +69,12 @@
 #   go1.26.* binary under /usr/lib/go-1.26*/bin, /usr/local/go/bin or
 #   $HOME/sdk/go1.26*/bin. With none, it exits 77 (SKIP — the measurement
 #   did not happen) rather than red or green; `make test-go` treats 77
-#   as a skip-with-message, and XPF_DEADCODE_REQUIRE=1 (CI) turns the
-#   skip into a hard failure so the leg cannot silently vanish there.
+#   as a skip-with-message. Today the gate therefore enforces only on
+#   `make test-go` hosts with a go1.26 toolchain. XPF_DEADCODE_REQUIRE=1
+#   turns the skip into a hard failure where it is set, but it is wired
+#   nowhere today: CI uses go 1.24.9 via go-version-file (go.mod) and
+#   never runs `make test-go`. Hardening REQUIRE in CI is pending until
+#   the workflow installs go1.26 and sets XPF_DEADCODE_REQUIRE=1.
 #
 # OVERRIDES (hermetic self-test and fixtures)
 #
@@ -79,7 +83,7 @@
 #   DEADCODE_ALLOWLIST=<f>  allowlist path (default docs/deadcode-allowlist.txt).
 #   DEADCODE_GO=<go>        go binary used for `go run` (default: resolved).
 #   GO_DEADCODE_ROOT=<dir>  tree to cd into (default: this script's repo).
-#   XPF_DEADCODE_REQUIRE=1  a missing go1.26 toolchain is exit 1, not 77.
+#   XPF_DEADCODE_REQUIRE=1  a missing go1.26 toolchain is exit 1, not 77 (not set by CI today; see TOOLCHAIN PIN above).
 #
 # Exit: 0 = exact match, 1 = mismatch/malformed, 2 = analyser/toolchain
 # error, 77 = SKIP (no usable toolchain and not required).
