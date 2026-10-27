@@ -259,6 +259,20 @@ func (d *Daemon) actuateLearnedRouteRefresh(ctx context.Context) bool {
 		// will publish anyway. Converged.
 		return true
 	}
+	// #17971: the same kernel route churn that stales the helper FIB also
+	// stales the next-table main-table exception band — a learned main route
+	// more specific than a leak prefix needs a slot-0 carve-out, and a
+	// withdrawn one leaves a stale exception behind. Reconcile that band
+	// from the live main-table dump BEFORE republishing, so the helper
+	// snapshot and the kernel rule state converge together. A failure keeps
+	// the coalescer dirty: the carve-out band is a forwarding instruction,
+	// and silently accepting a stale one here would re-create the
+	// kernel/helper divergence this refresh exists to close.
+	if err := d.refreshNextTableCarveouts(cfg); err != nil {
+		slog.Warn("route listener: next-table carve-out refresh failed — staying dirty for retry",
+			"err", err)
+		return false
+	}
 	pub, ok := d.dataplane().(routeOverlayPublisher)
 	if !ok {
 		// Helperless build: FRR is the only routing consumer. Converged.

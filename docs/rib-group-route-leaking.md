@@ -85,12 +85,18 @@ In the AF_XDP FIB, a more-specific source-table route participates only when a
 configured next-table route covers the destination; a rib-group-only leak keeps
 lookup-first behavior in both models.
 
-Exceptions deliberately enumerate only `Apply`'s configured static routes.
-Dynamic, connected, and learned main routes are not discoverable from this
-static set; their full carve-out parity is the design follow-up filed as
-#17971. Until then, the Rust FIB retains Junos LPM semantics for these route
-classes when a config next-table route covers the destination, so this remains
-a documented kernel-model limitation.
+Since #17971, exceptions also enumerate the live main table: the manager
+reuses the `ImportLearnedRoutes` dump over table 254, so learned
+BGP/OSPF/RIP/ISIS/DHCP/zebra routes, operator installs, and
+blackhole/unreachable negatives strictly more specific than an admitted
+leak prefix mint the same slot-0 exceptions as configured statics. Apply
+reconciles the whole exception band on every commit, and the daemon route
+listener re-runs only that band on its coalesced actuation, so learned
+churn between commits converges without reinstalling leak rules. A failed
+live dump leaves the installed band untouched. Connected (gateway-less)
+main routes remain excluded: the importer rejects them and their parity
+needs the RG-ownership-aware connected set from the snapshot layer
+(#15742), so that class remains a documented kernel-model limitation.
 
 The old next-table and PBR bands are retained only for upgrade cleanup:
 `nextTableManager.clear()` removes stale rules at 32000-32099 and 100-199, and
