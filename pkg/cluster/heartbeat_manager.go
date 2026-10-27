@@ -987,10 +987,8 @@ func (m *Manager) handlePeerTimeout() {
 		at              time.Time
 		state           NodeState
 		weight          int
-		overrideReqID   uint64
+		override        transferOverride
 		hasOverride     bool
-		previous        peerGroupSnapshot
-		hasPrevious     bool
 		abortedReqID    uint64
 		hasAborted      bool
 	}
@@ -998,11 +996,8 @@ func (m *Manager) handlePeerTimeout() {
 	if m.peerFencing == PeerFencingDisableRGConfirmed {
 		for _, rg := range m.groups {
 			snap := peerLossHoldSnapshot15211{rg: rg, manual: rg.ManualFailover, forcedSecondary: rg.forcedSecondary, at: rg.ManualFailoverAt, state: rg.State, weight: rg.Weight}
-			if reqID, ok := m.peerTransferOutOverride[rg.GroupID]; ok {
-				snap.overrideReqID, snap.hasOverride = reqID, true
-			}
-			if prev, ok := m.peerTransferOutPrevious[rg.GroupID]; ok {
-				snap.previous, snap.hasPrevious = prev, true
+			if override, ok := m.transferOverrides[rg.GroupID]; ok {
+				snap.override, snap.hasOverride = override, true
 			}
 			if reqID, ok := m.abortedPeerTransferReqID[rg.GroupID]; ok {
 				snap.abortedReqID, snap.hasAborted = reqID, true
@@ -1012,14 +1007,11 @@ func (m *Manager) handlePeerTimeout() {
 		// Overrides/aborted markers keyed by an RG no longer in m.groups
 		// are cleared by the loops below too; snapshot them (rg == nil)
 		// so an abort restores them as well.
-		for rgID, reqID := range m.peerTransferOutOverride {
+		for rgID, override := range m.transferOverrides {
 			if _, ok := holds15211[rgID]; ok {
 				continue
 			}
-			snap := peerLossHoldSnapshot15211{overrideReqID: reqID, hasOverride: true}
-			if prev, ok := m.peerTransferOutPrevious[rgID]; ok {
-				snap.previous, snap.hasPrevious = prev, true
-			}
+			snap := peerLossHoldSnapshot15211{override: override, hasOverride: true}
 			if aborted, ok := m.abortedPeerTransferReqID[rgID]; ok {
 				snap.abortedReqID, snap.hasAborted = aborted, true
 			}
@@ -1076,7 +1068,7 @@ func (m *Manager) handlePeerTimeout() {
 	// (peerTransferCommitGraceUntil / localTransferOutHoldUntil) are left alone
 	// deliberately — they expire on their own, and clearing them here would
 	// shorten a window a live transfer may still be inside.
-	for rgID := range m.peerTransferOutOverride {
+	for rgID := range m.transferOverrides {
 		slog.Info("cluster: clearing peer transfer-out override (peer lost)", "rg", rgID)
 		m.clearPeerTransferOutOverrideLocked(rgID)
 	}
@@ -1122,10 +1114,7 @@ func (m *Manager) handlePeerTimeout() {
 					}
 				}
 				if snap.hasOverride {
-					m.peerTransferOutOverride[rgID] = snap.overrideReqID
-					if snap.hasPrevious {
-						m.peerTransferOutPrevious[rgID] = snap.previous
-					}
+					m.transferOverrides[rgID] = snap.override
 					if pg, ok := m.peerGroups[rgID]; ok {
 						pg.State = StateSecondaryHold
 						pg.StateOverriddenLocally = true
