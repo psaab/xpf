@@ -517,6 +517,15 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		"authentication-algorithm": unmodeledBGPAuthAlgorithmLeaf(),
 		"graceful-restart":         {desc: "Graceful restart", children: nil},
 		"log-updown":               {desc: "Log up/down events", children: nil},
+		// #17833: the third Junos hierarchy level for multihop (the
+		// #16679 contract: "at the bgp, group and neighbor hierarchy
+		// levels"). Inherited by every group/neighbor — most-specific
+		// wins (neighbor > group > bgp) — and compiled through the same
+		// BGPNeighbor.MultihopTTL / `neighbor X ebgp-multihop` path.
+		// Before this the statement committed on the open-world bgp
+		// subtree and was silently dropped (generic #10707 advisory
+		// only, no rendered line).
+		"multihop": bgpMultihopSchema16679(),
 		"multipath": {desc: "Multipath", children: map[string]*schemaNode{
 			"multiple-as": {desc: "Multiple AS", children: nil},
 			"ibgp":        {desc: "Enable iBGP multipath", children: nil},

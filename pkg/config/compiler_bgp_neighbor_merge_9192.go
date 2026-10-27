@@ -327,13 +327,11 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 		case "description":
 			neighbor.Description = nodeVal(prop)
 		case "multihop":
-			// #16679: all Junos spellings (bare, scalar, ttl
-			// modifier, blocked) resolve through the shared
-			// extractor; the refused no-nexthop-change spelling
-			// reports present=false and keeps the prior TTL.
-			if ttl, ok := bgpMultihopTTLOf16679(prop); ok {
-				neighbor.MultihopTTL = ttl
-			}
+			// #16679/#17833: resolve through the same wrapper the
+			// bgp/group sites use, so the flat-set child shape is
+			// normalised and refused/unreadable spellings keep the
+			// prior (inherited) TTL instead of being read raw.
+			neighbor.MultihopTTL = bgpMultihopChildTTL16679(prop, neighbor.MultihopTTL)
 		case "peer-as":
 			neighbor.peerASConfigured = true
 			if v := nodeVal(prop); v != "" {

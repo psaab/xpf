@@ -552,6 +552,11 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		// #16621: protocol-level authentication-key, inherited by every
 		// neighbor (group key overrides it, neighbor key overrides both).
 		var bgpAuthKey string
+		// #17833: bgp-level multihop — the third Junos hierarchy
+		// level named by the #16679 contract — inherited by every
+		// group/neighbor below (most-specific wins: neighbor >
+		// group > bgp), exactly like authentication-key #16621.
+		var bgpMultihop int
 		for _, child := range bgpChildren {
 			switch child.Name() {
 			case "hold-time":
@@ -636,6 +641,11 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 						}
 					}
 				}
+			case "multihop":
+				// #17833: all Junos spellings resolve through the shared
+				// helper (which normalises the flat-set child shape and
+				// keeps `prior` on refused/unreadable spellings).
+				bgpMultihop = bgpMultihopChildTTL16679(child, bgpMultihop)
 			case "export":
 				// Multi-value leaf (#2587): accumulate ALL policies across
 				// both AST shapes via the firewallMatchValues SSOT.
@@ -654,7 +664,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			var groupHoldTime int
 			var groupPassive bool
 			var groupDesc string
-			var groupMultihop int
+			// #17833: seed from the bgp-level statement; a group `multihop`
+			// overrides it, and a refused group spelling keeps the seed.
+			groupMultihop := bgpMultihop
 			var groupDisable bool
 			var groupExport []string
 			var groupImport []string
@@ -783,7 +795,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 						// helper normalises the flat-set child
 						// shape); the refused no-nexthop-change
 						// spelling keeps the prior group TTL.
-						groupMultihop = bgpGroupMultihop16679(child, groupMultihop)
+						groupMultihop = bgpMultihopChildTTL16679(child, groupMultihop)
 					case "export":
 						// Multi-value leaf (#2702): a bracket-list
 						// `export [ p1 p2 ]` collapses every policy onto
