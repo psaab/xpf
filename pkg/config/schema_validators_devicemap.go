@@ -8,8 +8,8 @@ import (
 
 // ValidatePCIAddr accepts a PCI bus address in the canonical
 // DDDD:BB:DD.F form (e.g. 0000:09:00.0), the #1956 device-map primary
-// identity key. The format mirrors what extractPCIAddr produces from
-// sysfs (pkg/daemon/linksetup.go) so a committed key resolves against the
+// identity key. The format mirrors what netname.PCIAddrFromDevicePath
+// produces from sysfs (pkg/netname) so a committed key resolves against the
 // live enumeration without normalization drift. The shorter BB:DD.F form
 // (no domain) is rejected: sysfs always carries the 4-digit domain, and
 // accepting an ambiguous short form would silently never match.

@@ -2025,6 +2025,12 @@ func decodeFailoverBatchRequestPayload(payload []byte) ([]int, uint64, error) {
 	return ids, binary.LittleEndian.Uint64(payload[1+count : 1+count+8]), nil
 }
 func encodeFailoverBatchAckPayload(rgIDs []int, status uint8, reqID uint64, detail string) []byte {
+	// #17093: clamp the free-form detail so the payload never exceeds
+	// the FailoverBatchAck per-type cap; an over-cap ack would make a
+	// #16041-or-later peer drop the connection.
+	if maxDetail := (1 + maxFailoverBatchRGCount + 1 + 8 + 4096) - (1 + len(rgIDs) + 1 + 8); len(detail) > maxDetail {
+		detail = detail[:maxDetail]
+	}
 	payload := make([]byte, 1+len(rgIDs)+1+8+len(detail))
 	payload[0] = byte(len(rgIDs))
 	for i, rgID := range rgIDs {
