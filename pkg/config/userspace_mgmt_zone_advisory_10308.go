@@ -22,7 +22,7 @@ import (
 // paths suppress it through the existing advisory suppression flag so a
 // persisted config does not repeat the same message on every boot.
 func appendUserspaceMgmtZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
-	if cfg == nil || opts.suppressContestedTrunkZoneAdvisory || cfg.Security.Zones == nil {
+	if cfg == nil || opts.tolerant || cfg.Security.Zones == nil {
 		return
 	}
 	// Early-out before the quarantine walks when no mgmt/control zone
