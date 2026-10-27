@@ -11,7 +11,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/linuxsock"
 )
@@ -187,7 +186,7 @@ func (d *Daemon) resolveFabricParent(fabName string) string {
 }
 
 // populateFabricFwd resolves the fabric interface MACs and populates the
-// fabric_fwd BPF map for cross-chassis packet redirect during failback.
+// fabric peer for cross-chassis redirect during failback (#17044: live resolver in pkg/dataplane/userspace).
 // fabIface is the physical parent (XDP attachment point); overlay is the
 // IPVLAN child where the sync IP lives (neighbor resolution target, #129).
 // If overlay is empty, fabIface is used for both (legacy/no-IPVLAN mode).
@@ -248,7 +247,7 @@ func (d *Daemon) populateFabricFwd(ctx context.Context, fabIface, overlay, peerA
 			break
 		}
 		if i == 9 {
-			slog.Warn("cluster: fabric_fwd not populated after fast retries, continuing with periodic refresh")
+			slog.Warn("cluster: fabric peer not resolved after fast retries, continuing with periodic refresh")
 		}
 	}
 
@@ -513,56 +512,54 @@ func (d *Daemon) retainFabricFwdOnNeighborMiss(slot int, peerIP net.IP, overlay 
 	}
 
 	if slot == 1 {
-		d.logFabricRefreshFailure(1, "cluster: retaining fabric1_fwd despite missing peer neighbor",
+		d.logFabricRefreshFailure(1, "cluster: retaining fabric1 peer despite missing peer neighbor",
 			"peer", peerIP, "overlay", overlay)
 	} else {
-		d.logFabricRefreshFailure(0, "cluster: retaining fabric_fwd despite missing peer neighbor",
+		d.logFabricRefreshFailure(0, "cluster: retaining fabric peer despite missing peer neighbor",
 			"peer", peerIP, "overlay", overlay)
 	}
 	return true
 }
 
-// refreshFabricFwd resolves fabric link/neighbor state and updates the
-// fabric_fwd BPF map. Returns true on success. Called during initial
-// population and periodic drift correction.
-// fabIface is the physical parent (for ifindex/MAC); overlay is the IPVLAN
-// child where the sync IP lives (for neighbor resolution, #129).
+// refreshFabricFwd resolves fabric link/neighbor state via the live
+// resolver in pkg/dataplane/userspace (#17044). Returns true on success.
 func (d *Daemon) refreshFabricFwd(ctx context.Context, fabIface, overlay string, peerIP net.IP, logWaiting bool) bool {
+	return d.refreshFabricPeer(ctx, 0, fabIface, overlay, peerIP, logWaiting)
+}
+
+// refreshFabricPeer is the single daemon fabric refresh (#17044). The
+// live resolver in pkg/dataplane/userspace decides the peer MAC; the
+// daemon only gates on link state, remembers address-matched identity
+// for the link-local constraint, latches readiness, and pushes
+// SyncFabricState. No fabric_fwd map write remains.
+func (d *Daemon) refreshFabricPeer(ctx context.Context, slot int, fabIface, overlay string, peerIP net.IP, logWaiting bool) bool {
 	link, err := d.fabricLinkByName(fabIface)
 	if err != nil {
-		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (link not found)",
+		d.logFabricRefreshFailure(slot, "cluster: fabric refresh failed (link not found)",
 			"interface", fabIface, "err", err)
-		d.clearFabricFwd0(ctx)
+		d.clearFabricPeer(ctx, slot)
 		return false
 	}
 	localMAC := link.Attrs().HardwareAddr
 	if len(localMAC) != 6 {
-		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (invalid local mac)",
+		d.logFabricRefreshFailure(slot, "cluster: fabric refresh failed (invalid local mac)",
 			"interface", fabIface, "local_mac", localMAC)
-		d.clearFabricFwd0(ctx)
+		d.clearFabricPeer(ctx, slot)
 		return false
 	}
-
-	// Check oper-state: non-UP interfaces cannot forward (#122).
 	operState := link.Attrs().OperState
 	if operState != netlink.OperUp && operState != netlink.OperUnknown {
-		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (link not operational)",
+		d.logFabricRefreshFailure(slot, "cluster: fabric refresh failed (link not operational)",
 			"interface", fabIface, "oper_state", operState)
-		d.clearFabricFwd0(ctx)
+		d.clearFabricPeer(ctx, slot)
 		return false
 	}
-
-	// Increase fabric txqueuelen for generic XDP.
 	if link.Attrs().TxQLen < 10000 {
 		if err := netlink.LinkSetTxQLen(link, 10000); err != nil {
 			slog.Warn("cluster: failed to set fabric txqueuelen",
 				"interface", fabIface, "err", err)
 		}
 	}
-
-	// Resolve peer MAC from ARP/NDP table on the overlay interface (#129).
-	// The sync IP lives on the overlay (fab0/fab1), so neighbor entries
-	// are associated with the overlay's ifindex, not the parent's.
 	neighLink := link
 	if overlay != fabIface {
 		if ol, err := d.fabricLinkByName(overlay); err == nil {
@@ -573,152 +570,114 @@ func (d *Daemon) refreshFabricFwd(ctx context.Context, fabIface, overlay string,
 	if peerIP.To4() == nil {
 		neighFamily = netlink.FAMILY_V6
 	}
-
-	neighs, err := d.fabricNeighList(neighLink.Attrs().Index, neighFamily)
-	if err != nil {
-		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (neighbor list)",
-			"overlay", neighLink.Attrs().Name, "peer", peerIP, "err", err)
-		d.clearFabricFwd0(ctx)
-		return false
+	overlayIdx := neighLink.Attrs().Index
+	parentIdx := neighLink.Attrs().ParentIndex
+	if parentIdx == 0 {
+		parentIdx = link.Attrs().Index
 	}
-	var peerMAC net.HardwareAddr
-	for _, n := range neighs {
-		if n.IP.Equal(peerIP) && dpuserspace.FabricNeighUsable(n) {
-			peerMAC = n.HardwareAddr
-			break
+	// Identity hint: an address-matched neighbour is a real binding.
+	// Scan overlay then parent so rememberFabricPeerMAC arms the
+	// constraint the live resolver's link-local fallback checks. The
+	// resolver re-reads the same tables; this scan only records identity.
+	for _, idx := range []int{overlayIdx, parentIdx} {
+		neighs, err := d.fabricNeighList(idx, neighFamily)
+		if err != nil {
+			continue
 		}
-	}
-	// An address-matched hit is a real identity binding: this MAC answered for
-	// the CONFIGURED peer address. Remember it so the link-local fallback below
-	// has a peer identity to check against on a later refresh (#6554).
-	if peerMAC != nil {
-		d.rememberFabricPeerMAC(0, peerMAC)
-	}
-
-	// Fallback: if overlay ARP failed, try the parent interface's neighbor
-	// tables (both IPv4 and IPv6). After crash recovery, the IPVLAN overlay
-	// may not resolve ARP due to stale MAC or VRF isolation, but the parent
-	// (ge-X-0-0) is a real NIC on the same L2 — its ARP/NDP is reliable.
-	if peerMAC == nil {
-		parentIdx := neighLink.Attrs().ParentIndex
-		if parentIdx == 0 {
-			parentIdx = link.Attrs().Index // use fabric parent directly
-		}
-		// Check parent IPv4 neighbors for the peer IP.
-		parentNeighs, _ := d.fabricNeighList(parentIdx, neighFamily)
-		for _, n := range parentNeighs {
+		for _, n := range neighs {
 			if n.IP.Equal(peerIP) && dpuserspace.FabricNeighUsable(n) {
-				peerMAC = n.HardwareAddr
-				// Still address-matched — same identity binding as above.
-				d.rememberFabricPeerMAC(0, peerMAC)
-				slog.Info("cluster: fabric peer MAC resolved via parent ARP",
-					"peer_mac", peerMAC, "overlay", overlay)
+				d.rememberFabricPeerMAC(slot, n.HardwareAddr)
 				break
 			}
 		}
-		// Check parent IPv6 NDP neighbors (populated via the ff02::1 probe).
-		// This leg has NO peer address to match on, so it is constrained to the
-		// peer's identity by selectFabricPeerLinkLocalMAC and fails closed when
-		// the segment cannot be shown to hold exactly the peer (#6554).
-		if peerMAC == nil {
-			v6Neighs, _ := d.fabricNeighList(parentIdx, netlink.FAMILY_V6)
-			mac, peerLL, nCandidates, reason := selectFabricPeerLinkLocalMAC(
-				v6Neighs, localMAC, d.fabricPeerMACHint(0))
-			switch {
-			case mac != nil:
-				peerMAC = mac
-				slog.Info("cluster: fabric peer MAC resolved via parent IPv6 NDP",
-					"peer_mac", peerMAC, "peer_ll", peerLL, "overlay", overlay)
-			case nCandidates > 0:
-				// Candidates existed but none could be attributed to the peer.
-				// Throttled: this runs on every neighbour event plus the 30s tick.
-				d.logFabricRefreshFailure(0,
-					"cluster: fabric peer MAC NDP fallback refused (unidentified neighbour)",
-					"reason", reason, "candidates", nCandidates,
-					"peer", peerIP, "overlay", overlay)
-			}
-		}
 	}
-
+	resolver := d.fabricPeerResolver()
+	var res dpuserspace.FabricPeerResolution
+	if resolver != nil {
+		res = resolver.ResolveFabricPeer(slot, overlayIdx, parentIdx, peerIP.String(), localMAC)
+	} else {
+		res = dpuserspace.ResolveFabricPeer(overlayIdx, parentIdx, peerIP.String(), localMAC)
+	}
+	peerMAC := res.PeerMAC
 	if peerMAC == nil {
-		if d.retainFabricFwdOnNeighborMiss(0, peerIP, overlay, logWaiting) {
+		if d.retainFabricFwdOnNeighborMiss(slot, peerIP, overlay, logWaiting) {
 			return true
 		}
-		d.clearFabricFwd0(ctx)
+		d.clearFabricPeer(ctx, slot)
 		return false
 	}
-
-	// Use parent's ifindex for redirect — XDP runs on the parent.
-	info := dataplane.FabricFwdInfo{
-		Ifindex: uint32(link.Attrs().Index),
-	}
-	copy(info.PeerMAC[:], peerMAC)
-	copy(info.LocalMAC[:], localMAC)
-
-	// Find a non-VRF interface for zone-decoded FIB lookups.
-	// Prefer the fabric interface itself (known UP, non-VRF).
-	// Fall back to loopback (ifindex 1): always present, always
-	// UP, never a VRF member — deterministic across reboots.
-	info.FIBIfindex = uint32(link.Attrs().Index)
-	if link.Attrs().MasterIndex != 0 {
-		// Fabric link is a VRF member — use loopback for
-		// main-table FIB lookups (avoids l3mdev interference).
-		info.FIBIfindex = 1
-	}
-
 	rt := d.dataplane()
 	if rt == nil {
-		d.logFabricRefreshFailure(0, "cluster: fabric refresh failed (dataplane not ready)")
+		d.logFabricRefreshFailure(slot, "cluster: fabric refresh failed (dataplane not ready)")
 		return false
 	}
-	if err := rt.HA().SetFabricForwarding(ctx, dataplane.FabricID(0), info); err != nil {
-		slog.Warn("cluster: failed to update fabric_fwd map", "err", err)
-		return false
-	}
-
 	d.fabricMu.Lock()
-	d.fabricPopulated = true
+	if slot == 1 {
+		d.fabric1Populated = true
+	} else {
+		d.fabricPopulated = true
+	}
 	d.fabricMu.Unlock()
-
-	slog.Info("cluster: fabric_fwd updated",
-		"interface", fabIface, "ifindex", info.Ifindex,
-		"fib_ifindex", info.FIBIfindex,
+	slog.Info("cluster: fabric peer resolved",
+		"interface", fabIface, "ifindex", link.Attrs().Index,
 		"local_mac", localMAC, "peer_mac", peerMAC)
-
-	// Push updated fabric MACs to userspace helper so it can do
-	// cross-chassis fabric redirect. The initial snapshot may have
-	// been built before the peer MAC was resolved. #2114 (Codex PR
-	// #6743 r3-7): reuse the snapshot from above — the map update and
-	// the helper sync are one coupled operation, and a second load
-	// could observe a mid-refresh clear (map updated, sync skipped).
 	rt.HA().SyncFabricState(ctx)
-
 	return true
 }
 
-// clearFabricFwd0 writes a zeroed FabricFwdInfo to key=0 if a valid entry
-// was previously written, ensuring the dataplane falls back (#121).
-func (d *Daemon) clearFabricFwd0(ctx context.Context) {
-	d.fabricMu.RLock()
-	populated := d.fabricPopulated
-	d.fabricMu.RUnlock()
+// fabricPeerResolver returns the live resolver when the published
+// dataplane exposes it, else nil (caller uses the package function,
+// which reads the same kernel tables).
+func (d *Daemon) fabricPeerResolver() dpuserspace.FabricPeerResolver {
 	rt := d.dataplane()
-	if !populated || rt == nil {
-		return
+	if rt == nil {
+		return nil
 	}
-	if err := rt.HA().SetFabricForwarding(ctx, dataplane.FabricID(0), dataplane.FabricFwdInfo{}); err != nil {
-		slog.Warn("cluster: failed to clear fabric_fwd[0]", "err", err)
-		return
+	if p, ok := rt.(dpuserspace.FabricPeerResolver); ok {
+		return p
 	}
-	d.fabricMu.Lock()
-	d.fabricPopulated = false
-	d.fabricMu.Unlock()
-	slog.Info("cluster: fabric_fwd[0] cleared (path down)")
+	if u, ok := rt.(interface{ Unwrap() any }); ok {
+		if p, ok := u.Unwrap().(dpuserspace.FabricPeerResolver); ok {
+			return p
+		}
+	}
+	// Production publishes NewLegacyDataPlaneAdapter(New()) (Boot), which
+	// exposes the Manager via Manager() rather than the resolver directly.
+	if mp, ok := rt.(interface{ Manager() *dpuserspace.Manager }); ok {
+		if m := mp.Manager(); m != nil {
+			return m
+		}
+	}
+	return nil
 }
 
+// clearFabricPeer clears the slot's populated latch on path down (#121
+// retained as readiness state; there is no map entry to zero any more).
+func (d *Daemon) clearFabricPeer(_ context.Context, slot int) {
+	d.fabricMu.Lock()
+	if slot == 1 {
+		was := d.fabric1Populated
+		d.fabric1Populated = false
+		d.fabricMu.Unlock()
+		if was {
+			slog.Info("cluster: fabric1 peer cleared (path down)")
+		}
+		return
+	}
+	was := d.fabricPopulated
+	d.fabricPopulated = false
+	d.fabricMu.Unlock()
+	if was {
+		slog.Info("cluster: fabric peer cleared (path down)")
+	}
+}
+
+func (d *Daemon) clearFabricFwd0(ctx context.Context) { d.clearFabricPeer(ctx, 0) }
+func (d *Daemon) clearFabricFwd1(ctx context.Context) { d.clearFabricPeer(ctx, 1) }
+
 // populateFabricFwd1 resolves the secondary fabric interface MACs and populates
-// the fabric_fwd BPF map entry at key=1 for cross-chassis packet redirect.
-// Mirrors populateFabricFwd but writes to key=1 via UpdateFabricFwd1.
+// the secondary fabric peer for cross-chassis redirect (#17044).
+// Mirrors populateFabricFwd for slot 1.
 // refreshCh is fab1's OWN event-driven refresh channel, handed in by value at
 // launch (#4958) — see populateFabricFwd for the rationale.
 func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peerAddr string, refreshCh chan struct{}) {
@@ -767,7 +726,7 @@ func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peer
 			break
 		}
 		if i == 9 {
-			slog.Warn("cluster: fabric1_fwd not populated after fast retries, continuing with periodic refresh")
+			slog.Warn("cluster: fabric1 peer not resolved after fast retries, continuing with periodic refresh")
 		}
 	}
 
@@ -791,189 +750,13 @@ func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peer
 	}
 }
 
-// refreshFabricFwd1 resolves secondary fabric link/neighbor state and updates
-// the fabric_fwd BPF map at key=1. Returns true on success.
-// fabIface is the physical parent; overlay is the IPVLAN child (#129).
+// refreshFabricFwd1 resolves secondary fabric state via the live
+// resolver (#17044). Returns true on success.
 func (d *Daemon) refreshFabricFwd1(ctx context.Context, fabIface, overlay string, peerIP net.IP, logWaiting bool) bool {
-	link, err := d.fabricLinkByName(fabIface)
-	if err != nil {
-		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (link not found)",
-			"interface", fabIface, "err", err)
-		d.clearFabricFwd1(ctx)
-		return false
-	}
-	localMAC := link.Attrs().HardwareAddr
-	if len(localMAC) != 6 {
-		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (invalid local mac)",
-			"interface", fabIface, "local_mac", localMAC)
-		d.clearFabricFwd1(ctx)
-		return false
-	}
-
-	// Check oper-state: non-UP interfaces cannot forward (#122).
-	operState := link.Attrs().OperState
-	if operState != netlink.OperUp && operState != netlink.OperUnknown {
-		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (link not operational)",
-			"interface", fabIface, "oper_state", operState)
-		d.clearFabricFwd1(ctx)
-		return false
-	}
-
-	// Increase fabric txqueuelen for generic XDP.
-	if link.Attrs().TxQLen < 10000 {
-		if err := netlink.LinkSetTxQLen(link, 10000); err != nil {
-			slog.Warn("cluster: failed to set fabric1 txqueuelen",
-				"interface", fabIface, "err", err)
-		}
-	}
-
-	// Resolve peer MAC from overlay interface (#129).
-	neighLink := link
-	if overlay != fabIface {
-		if ol, err := d.fabricLinkByName(overlay); err == nil {
-			neighLink = ol
-		}
-	}
-	neighFamily := netlink.FAMILY_V4
-	if peerIP.To4() == nil {
-		neighFamily = netlink.FAMILY_V6
-	}
-	neighs, err := d.fabricNeighList(neighLink.Attrs().Index, neighFamily)
-	if err != nil {
-		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (neighbor list)",
-			"overlay", neighLink.Attrs().Name, "peer", peerIP, "err", err)
-		d.clearFabricFwd1(ctx)
-		return false
-	}
-	var peerMAC net.HardwareAddr
-	for _, n := range neighs {
-		if n.IP.Equal(peerIP) && dpuserspace.FabricNeighUsable(n) {
-			peerMAC = n.HardwareAddr
-			break
-		}
-	}
-	// An address-matched hit is a real identity binding: this MAC answered for
-	// the CONFIGURED peer address. Remember it so the link-local fallback below
-	// has a peer identity to check against on a later refresh (#6554).
-	if peerMAC != nil {
-		d.rememberFabricPeerMAC(1, peerMAC)
-	}
-
-	// Fallback: if overlay ARP failed, try the parent interface's neighbor
-	// tables (both IPv4 and IPv6). After crash recovery, the IPVLAN overlay
-	// may not resolve ARP due to stale MAC or VRF isolation, but the parent
-	// (ge-X-0-0) is a real NIC on the same L2 — its ARP/NDP is reliable.
-	// Mirrors refreshFabricFwd slot 0 (#15683).
-	if peerMAC == nil {
-		parentIdx := neighLink.Attrs().ParentIndex
-		if parentIdx == 0 {
-			parentIdx = link.Attrs().Index // use fabric parent directly
-		}
-		// Check parent IPv4 neighbors for the peer IP.
-		parentNeighs, _ := d.fabricNeighList(parentIdx, neighFamily)
-		for _, n := range parentNeighs {
-			if n.IP.Equal(peerIP) && dpuserspace.FabricNeighUsable(n) {
-				peerMAC = n.HardwareAddr
-				// Still address-matched — same identity binding as above.
-				d.rememberFabricPeerMAC(1, peerMAC)
-				slog.Info("cluster: fabric1 peer MAC resolved via parent ARP",
-					"peer_mac", peerMAC, "overlay", overlay)
-				break
-			}
-		}
-		// Check parent IPv6 NDP neighbors (populated via the ff02::1 probe).
-		// This leg has NO peer address to match on, so it is constrained to the
-		// peer's identity by selectFabricPeerLinkLocalMAC and fails closed when
-		// the segment cannot be shown to hold exactly the peer (#6554).
-		if peerMAC == nil {
-			v6Neighs, _ := d.fabricNeighList(parentIdx, netlink.FAMILY_V6)
-			mac, peerLL, nCandidates, reason := selectFabricPeerLinkLocalMAC(
-				v6Neighs, localMAC, d.fabricPeerMACHint(1))
-			switch {
-			case mac != nil:
-				peerMAC = mac
-				slog.Info("cluster: fabric1 peer MAC resolved via parent IPv6 NDP",
-					"peer_mac", peerMAC, "peer_ll", peerLL, "overlay", overlay)
-			case nCandidates > 0:
-				// Candidates existed but none could be attributed to the peer.
-				// Throttled: this runs on every neighbour event plus the 30s tick.
-				d.logFabricRefreshFailure(1,
-					"cluster: fabric1 peer MAC NDP fallback refused (unidentified neighbour)",
-					"reason", reason, "candidates", nCandidates,
-					"peer", peerIP, "overlay", overlay)
-			}
-		}
-	}
-	if peerMAC == nil {
-		if d.retainFabricFwdOnNeighborMiss(1, peerIP, overlay, logWaiting) {
-			return true
-		}
-		d.clearFabricFwd1(ctx)
-		return false
-	}
-
-	info := dataplane.FabricFwdInfo{
-		Ifindex: uint32(link.Attrs().Index),
-	}
-	copy(info.PeerMAC[:], peerMAC)
-	copy(info.LocalMAC[:], localMAC)
-
-	info.FIBIfindex = uint32(link.Attrs().Index)
-	if link.Attrs().MasterIndex != 0 {
-		info.FIBIfindex = 1
-	}
-
-	rt := d.dataplane()
-	if rt == nil {
-		d.logFabricRefreshFailure(1, "cluster: fabric1 refresh failed (dataplane not ready)")
-		return false
-	}
-	if err := rt.HA().SetFabricForwarding(ctx, dataplane.FabricID(1), info); err != nil {
-		slog.Warn("cluster: failed to update fabric1_fwd map", "err", err)
-		return false
-	}
-
-	d.fabricMu.Lock()
-	d.fabric1Populated = true
-	d.fabricMu.Unlock()
-
-	slog.Info("cluster: fabric1_fwd updated",
-		"interface", fabIface, "ifindex", info.Ifindex,
-		"fib_ifindex", info.FIBIfindex,
-		"local_mac", localMAC, "peer_mac", peerMAC)
-
-	// #15918: mirror refreshFabricFwd — push the freshly resolved fabric
-	// state to the userspace helper. Without this, a fab1-only resolution
-	// (especially the link-local fallback) latched fabric1Populated and
-	// passed the takeover gate while the helper never received a resolved
-	// PeerMAC for fab1. SetFabricForwarding above already triggers a sync
-	// through the userspace controller; this explicit call preserves the
-	// same contract on the legacy controller path, matching fab0.
-	rt.HA().SyncFabricState(ctx)
-	return true
+	return d.refreshFabricPeer(ctx, 1, fabIface, overlay, peerIP, logWaiting)
 }
 
-// clearFabricFwd1 writes a zeroed FabricFwdInfo to key=1 if a valid entry
-// was previously written, ensuring the dataplane falls back (#121).
-func (d *Daemon) clearFabricFwd1(ctx context.Context) {
-	d.fabricMu.RLock()
-	populated := d.fabric1Populated
-	d.fabricMu.RUnlock()
-	rt := d.dataplane()
-	if !populated || rt == nil {
-		return
-	}
-	if err := rt.HA().SetFabricForwarding(ctx, dataplane.FabricID(1), dataplane.FabricFwdInfo{}); err != nil {
-		slog.Warn("cluster: failed to clear fabric_fwd[1]", "err", err)
-		return
-	}
-	d.fabricMu.Lock()
-	d.fabric1Populated = false
-	d.fabricMu.Unlock()
-	slog.Info("cluster: fabric_fwd[1] cleared (path down)")
-}
-
-// RefreshFabricFwd triggers an immediate refresh of the fabric_fwd BPF map.
+// RefreshFabricFwd triggers an immediate fabric peer refresh.
 // Call this on link state changes, neighbor changes, or failover transitions.
 // Refreshes both fab0 (key=0) and fab1 (key=1) entries.
 func (d *Daemon) RefreshFabricFwd() {
@@ -1034,7 +817,7 @@ func defaultFabricNeighSubscribe(ch chan<- netlink.NeighUpdate, done <-chan stru
 }
 
 // monitorFabricState subscribes to netlink link and neighbor updates and
-// triggers immediate fabric_fwd refresh when fabric interfaces or their
+// triggers immediate fabric peer refresh when fabric interfaces or their
 // neighbor entries change (#124). The 30s ticker in populateFabricFwd
 // remains as a safety net.
 //

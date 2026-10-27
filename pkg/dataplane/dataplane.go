@@ -459,9 +459,7 @@ type DataPlane interface {
 	DeleteStaleIfaceFilter(written map[IfaceFilterKey]bool)
 	ZeroStaleFilterConfigs(startID uint32)
 
-	// Fabric cross-chassis forwarding
-	UpdateFabricFwd(info FabricFwdInfo) error
-	UpdateFabricFwd1(info FabricFwdInfo) error
+	// HA map state
 	UpdateRGActive(rgID int, active bool) error
 	UpdateHAWatchdog(rgID int, timestamp uint64) error
 

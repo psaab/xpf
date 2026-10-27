@@ -792,7 +792,6 @@ func userspaceShimSharedMapSpecs() []*ebpf.MapSpec {
 		hashMapSpec("dnat_table", sizeOf[DNATKey](), sizeOf[DNATValue](), userspaceShimMaxSessions, unix.BPF_F_NO_PREALLOC),
 		hashMapSpec("dnat_table_v6", sizeOf[DNATKeyV6](), sizeOf[DNATValueV6](), userspaceShimMaxSessions, unix.BPF_F_NO_PREALLOC),
 		arrayMapSpec("fib_gen_map", sizeOf[uint32](), 1),
-		arrayMapSpec("fabric_fwd", sizeOf[FabricFwdInfo](), 2),
 		arrayMapSpec("rg_active", sizeOf[uint8](), MaxRedundancyGroups),
 		arrayMapSpec("ha_watchdog", sizeOf[uint64](), MaxRedundancyGroups),
 		perCPUArrayMapSpec("session_id_gen", sizeOf[uint64](), 1),

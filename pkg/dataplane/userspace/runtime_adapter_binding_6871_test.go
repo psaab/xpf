@@ -326,22 +326,6 @@ func TestRuntimeAdaptersForwardToTheManager_6871(t *testing.T) {
 			check: func(*testing.T, *Manager, *leaseControlServer) {},
 		},
 		{
-			name: "ha/set_fabric_forwarding_fabric0",
-			drive: func(t *testing.T, m *Manager) {
-				err := m.HA().SetFabricForwarding(context.Background(), 0, dataplane.FabricFwdInfo{})
-				assertFabricMapComplaint6871(t, err, "fabric0")
-			},
-			check: func(*testing.T, *Manager, *leaseControlServer) {},
-		},
-		{
-			name: "ha/set_fabric_forwarding_fabric1",
-			drive: func(t *testing.T, m *Manager) {
-				err := m.HA().SetFabricForwarding(context.Background(), 1, dataplane.FabricFwdInfo{})
-				assertFabricMapComplaint6871(t, err, "fabric1")
-			},
-			check: func(*testing.T, *Manager, *leaseControlServer) {},
-		},
-		{
 			name: "ha/sync_fabric_state",
 			setup: func(_ *testing.T, m *Manager) {
 				m.lastSnapshot = &ConfigSnapshot{}
@@ -372,26 +356,6 @@ func TestRuntimeAdaptersForwardToTheManager_6871(t *testing.T) {
 			tc.drive(t, m)
 			tc.check(t, m, srv)
 		})
-	}
-}
-
-// assertFabricMapComplaint6871 checks that a fabric-forwarding call reached the
-// real manager. Map-free, Manager.bpfShim.UpdateFabricFwd{,1} fails with
-// "fabric_fwd map not found", so that complaint is proof the adapter forwarded;
-// a nil return means it answered on its own and the peer MAC the HA path needs
-// was never written.
-func assertFabricMapComplaint6871(t *testing.T, err error, slot string) {
-	t.Helper()
-	if err == nil {
-		t.Errorf("SetFabricForwarding(%s) returned nil with no fabric_fwd map loaded; the "+
-			"real manager writes that map and fails when it is absent, so the adapter is "+
-			"not forwarding and cross-chassis redirect would silently keep a stale peer MAC",
-			slot)
-		return
-	}
-	if !strings.Contains(err.Error(), "fabric_fwd") {
-		t.Errorf("SetFabricForwarding(%s) error = %q, want it to name fabric_fwd: some other "+
-			"layer refused before the manager's own map write was attempted", slot, err)
 	}
 }
 
