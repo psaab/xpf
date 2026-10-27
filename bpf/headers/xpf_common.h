@@ -671,7 +671,7 @@ struct scan_track_value {
 	__u32 window_start;    /* ktime_ns / 1e9 (seconds) */
 };
 
-/* Per-IP session count (populated by Go GC sweep for session limiting). */
+/* Per-IP session count (populated by the dataplane for session limiting). */
 struct session_count_key {
 	__u32 ip;        /* IPv4 addr or XOR hash of IPv6 */
 	__u16 zone_id;
