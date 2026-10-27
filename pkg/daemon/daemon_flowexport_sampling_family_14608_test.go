@@ -19,7 +19,7 @@ import (
 // an IPv6 trust->untrust SESSION_CLOSE must NOT be exported and must not
 // consume a 1-in-N slot; the twin with `family inet6 sampling input`
 // MUST export it. Exercises the real parser -> compiler ->
-// reconcileFlowExporters -> flowExportCallback/ipfixExportCallback path.
+// reconcileFlowExporters -> closeCallback/closeCallback path.
 //
 // FAIL-ON-REVERT: family-less SamplingInput made the IPv6 close eligible
 // (exported, slot consumed); per-family flags + the family argument to
@@ -136,11 +136,11 @@ func TestSessionCloseSamplingPerFamily14608(t *testing.T) {
 			if !d.reconcileFlowExporters(cfg) {
 				t.Fatal("dual-family exporters must start")
 			}
-			b := d.flowBundle.Load()
+			b := d.v9Family().bundle.Load()
 			if b == nil || len(b.groups) == 0 {
 				t.Fatal("v9 bundle must be live")
 			}
-			ib := d.ipfixBundlePtr.Load()
+			ib := d.ipfixFamily().bundle.Load()
 			if ib == nil || len(ib.groups) == 0 {
 				t.Fatal("ipfix bundle must be live")
 			}

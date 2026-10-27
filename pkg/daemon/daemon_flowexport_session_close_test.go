@@ -149,7 +149,7 @@ func waitFlows(t *testing.T, stats func() (uint64, uint64)) uint64 {
 // the NetFlow v9 and IPFIX flow-export callbacks, carrying the correct
 // 5-tuple. It proves "both callbacks" two ways:
 //
-//  1. The two REAL exporters (flowExportCallback / ipfixExportCallback,
+//  1. The two REAL exporters (closeCallback / closeCallback,
 //     registered by reconcile) are bound to real UDP collectors and each
 //     transmits a datagram for the admitted close — proving the record
 //     truly reaches both production export paths, not just a spy.
@@ -162,7 +162,7 @@ func waitFlows(t *testing.T, stats func() (uint64, uint64)) uint64 {
 //
 // Fail-on-revert: without the helper emitting the type-14 SESSION_CLOSE
 // frame, no SESSION_CLOSE EventRecord is ever produced in userspace mode, so
-// the flowExportCallback / ipfixExportCallback early-return on
+// the closeCallback / closeCallback early-return on
 // rec.Type != "SESSION_CLOSE" and never fire — exactly the #2460 defect.
 // Dropping EITHER fanout callback registration drops its fire count to 0.
 func TestSessionCloseRawEventDrivesFlowExport(t *testing.T) {
@@ -178,10 +178,10 @@ func TestSessionCloseRawEventDrivesFlowExport(t *testing.T) {
 	if !d.reconcileFlowExporters(flowIPFIXConfigPorts("127.0.0.1", v9Port, ipfixPort)) {
 		t.Fatal("flow + ipfix exporters must start")
 	}
-	if b := d.flowBundle.Load(); b == nil || b.firstExp() == nil {
+	if b := d.v9Family().bundle.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("v9 exporter must be live")
 	}
-	if b := d.ipfixBundlePtr.Load(); b == nil || b.firstExp() == nil {
+	if b := d.ipfixFamily().bundle.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("ipfix exporter must be live")
 	}
 	// The open fanout plus the two real export callbacks are registered exactly once.
@@ -230,17 +230,17 @@ func TestSessionCloseRawEventDrivesFlowExport(t *testing.T) {
 	// Both REAL exporters export a flow record for the close — proving the
 	// SESSION_CLOSE-derived FlowRecord reaches both production export paths
 	// (Stats.flows counts data records, not templates).
-	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got < 1 {
+	if got := waitFlows(t, d.v9Family().bundle.Load().firstExp().Stats); got < 1 {
 		t.Fatalf("NetFlow v9 exporter exported %d flows after the SESSION_CLOSE, want >= 1", got)
 	}
-	if got := waitFlows(t, d.ipfixBundlePtr.Load().firstExp().Stats); got < 1 {
+	if got := waitFlows(t, d.ipfixFamily().bundle.Load().firstExp().Stats); got < 1 {
 		t.Fatalf("IPFIX exporter exported %d flows after the SESSION_CLOSE, want >= 1", got)
 	}
 
 	// The daemon snapshot used by Prometheus must carry the same live
 	// successful-write counts from both exporters.
-	netflowFlows, netflowPackets := d.flowBundle.Load().firstExp().Stats()
-	ipfixFlows, ipfixPackets := d.ipfixBundlePtr.Load().firstExp().Stats()
+	netflowFlows, netflowPackets := d.v9Family().bundle.Load().firstExp().Stats()
+	ipfixFlows, ipfixPackets := d.ipfixFamily().bundle.Load().firstExp().Stats()
 	if netflowFlows == 0 || netflowPackets == 0 {
 		t.Fatalf("NetFlow v9 exporter counts = %d/%d, want nonzero flows and packets", netflowFlows, netflowPackets)
 	}
@@ -343,7 +343,7 @@ func TestNonSessionCloseRawEventDoesNotDriveFlowExport(t *testing.T) {
 // own collector, "bravo" serves inet6 (IPv6) with its own collector. Both at
 // rate 1 so SampledForOpen always admits. Each flow-server is pinned to version9
 // so both land in the v9 bundle (exercising the per-instance fanout walk in
-// flowExportCallback). The two collectors bind different ports so the test can
+// closeCallback). The two collectors bind different ports so the test can
 // observe each exporter's Stats independently.
 func twoInstanceV9Config(addr string, alphaPort, bravoPort int) *config.Config {
 	cfg := &config.Config{}
@@ -379,7 +379,7 @@ func twoInstanceV9Config(addr string, alphaPort, bravoPort int) *config.Config {
 
 // groupStatsForInstance returns the summed exported-flow count across all
 // template groups of the named instance in the live v9 bundle.
-func groupStatsForInstance(b *exporterBundle, inst string) uint64 {
+func groupStatsForInstance(b *flowBundle, inst string) uint64 {
 	var total uint64
 	for _, g := range b.groups {
 		if g.ec.InstanceName == inst {
@@ -392,7 +392,7 @@ func groupStatsForInstance(b *exporterBundle, inst string) uint64 {
 
 // waitInstanceFlows polls until the named instance's exporter(s) report at
 // least one exported flow record, or the 3s deadline elapses.
-func waitInstanceFlows(t *testing.T, b *exporterBundle, inst string) uint64 {
+func waitInstanceFlows(t *testing.T, b *flowBundle, inst string) uint64 {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -405,7 +405,7 @@ func waitInstanceFlows(t *testing.T, b *exporterBundle, inst string) uint64 {
 }
 
 // TestSessionCloseMultiInstanceFamilyIsolation is the #2462 daemon-level
-// fail-on-revert test for the per-instance fanout walk in flowExportCallback
+// fail-on-revert test for the per-instance fanout walk in closeCallback
 // (and its IPFIX twin). Two v9 sampling instances are wired through the REAL
 // reconcile + callback path: "alpha" (inet, rate 1) and "bravo" (inet6, rate
 // 1). An IPv4 SESSION_CLOSE is fed on the raw dataplane-event channel and must
@@ -430,7 +430,7 @@ func TestSessionCloseMultiInstanceFamilyIsolation(t *testing.T) {
 	if !d.reconcileFlowExporters(twoInstanceV9Config("127.0.0.1", alphaPort, bravoPort)) {
 		t.Fatal("two-instance v9 reconcile must start exporters")
 	}
-	b := d.flowBundle.Load()
+	b := d.v9Family().bundle.Load()
 	if b == nil || len(b.groups) != 2 {
 		t.Fatalf("expected two v9 groups (alpha + bravo), got %v", b)
 	}

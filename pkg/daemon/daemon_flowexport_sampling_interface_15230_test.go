@@ -137,12 +137,12 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 		t.Fatalf("probe IngressIface = %q, want ge-0/0/1.0 (fixture would be vacuous)", probe.IngressIface)
 	}
 	time.Sleep(400 * time.Millisecond)
-	if b := d.flowBundle.Load(); b != nil && len(b.groups) > 0 {
+	if b := d.v9Family().bundle.Load(); b != nil && len(b.groups) > 0 {
 		if flows, _ := b.firstExp().Stats(); flows != 0 {
 			t.Fatalf("v9 exported %d flows from unsampled ge-0/0/1.0, want 0", flows)
 		}
 	}
-	if b := d.ipfixBundlePtr.Load(); b != nil && len(b.groups) > 0 {
+	if b := d.ipfixFamily().bundle.Load(); b != nil && len(b.groups) > 0 {
 		if flows, _ := b.firstExp().Stats(); flows != 0 {
 			t.Fatalf("ipfix exported %d flows from unsampled ge-0/0/1.0, want 0", flows)
 		}
@@ -166,7 +166,7 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(99, uint16(trust), uint16(untrust))) {
 		t.Fatal("ProcessRawEvent rejected nameless close")
 	}
-	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got < 1 {
+	if got := waitFlows(t, d.v9Family().bundle.Load().firstExp().Stats); got < 1 {
 		t.Fatalf("v9 nameless no-open close: exported %d, want 1 via #16742 close-time fallback (zone semantics, rate 1)", got)
 	}
 	for _, s := range d.FlowExportSamplingStats() {
@@ -186,10 +186,10 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 	if probe.IngressIface != "ge-0/0/0.0" {
 		t.Fatalf("probe IngressIface = %q, want ge-0/0/0.0", probe.IngressIface)
 	}
-	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got < 1 {
+	if got := waitFlows(t, d.v9Family().bundle.Load().firstExp().Stats); got < 1 {
 		t.Fatalf("v9 exported %d sampled flows, want >=1", got)
 	}
-	if got := waitFlows(t, d.ipfixBundlePtr.Load().firstExp().Stats); got < 1 {
+	if got := waitFlows(t, d.ipfixFamily().bundle.Load().firstExp().Stats); got < 1 {
 		t.Fatalf("ipfix exported %d sampled flows, want >=1", got)
 	}
 	for _, s := range d.FlowExportSamplingStats() {

@@ -995,37 +995,6 @@ func logFinalStats(ready dataplaneReadyProbe, telemetry dataplane.Telemetry) {
 	slog.Info("final statistics", attrs...)
 }
 
-// stopFlowExporter stops the running NetFlow v9 exporter (shutdown).
-//
-// #2075: reconcile starts exporters; this function is shutdown-only.
-// flowReconMu prevents a concurrent reconcile, and flowStateMu linearizes
-// unpublication against open/close decision processing. It is nil-safe and
-// idempotent when reconcile already stopped the exporter.
-func (d *Daemon) stopFlowExporter() {
-	d.flowReconMu.Lock()
-	defer d.flowReconMu.Unlock()
-	// Capture the live groups before unpublishing (#16752): teardown
-	// retires exactly those per-exporter contexts.
-	d.flowStateMu.Lock()
-	live := d.flowBundle.Load()
-	d.flowBundle.Store(&exporterBundle{})
-	d.flowStateMu.Unlock()
-	d.teardownV9GroupsLocked(liveGroupsV9(live))
-	d.flowExportErr = nil
-}
-
-// stopIPFIXExporter stops the running IPFIX exporter (shutdown).
-func (d *Daemon) stopIPFIXExporter() {
-	d.ipfixReconMu.Lock()
-	defer d.ipfixReconMu.Unlock()
-	d.flowStateMu.Lock()
-	live := d.ipfixBundlePtr.Load()
-	d.ipfixBundlePtr.Store(&ipfixBundle{})
-	d.flowStateMu.Unlock()
-	d.teardownIPFIXGroupsLocked(liveGroupsIPFIX(live))
-	d.ipfixExportErr = nil
-}
-
 // parseAddrPair parses "ip:port" or "[ip]:port" into net.IPs and IPv6 flag.
 func parseAddrPair(src, dst string) (srcIP, dstIP net.IP, isV6 bool) {
 	srcIP = parseHost(src)

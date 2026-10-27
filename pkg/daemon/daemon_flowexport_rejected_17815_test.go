@@ -75,7 +75,7 @@ func TestRejectedOpenCloseDoesNotResample17815(t *testing.T) {
 
 	openClose17815(t, d, 24001, trust, untrust)
 	time.Sleep(300 * time.Millisecond)
-	if f, _ := d.flowBundle.Load().firstExp().Stats(); f != 0 {
+	if f, _ := d.v9Family().bundle.Load().firstExp().Stats(); f != 0 {
 		t.Fatalf("v9 flows after rejected-open close = %d, want 0 (close must not consume slot 2)", f)
 	}
 	if ev, sel := samplingTotals17815(t, d); ev != 2 || sel != 0 {
@@ -83,7 +83,7 @@ func TestRejectedOpenCloseDoesNotResample17815(t *testing.T) {
 	}
 
 	openClose17815(t, d, 24002, trust, untrust)
-	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got != 1 {
+	if got := waitFlows(t, d.v9Family().bundle.Load().firstExp().Stats); got != 1 {
 		t.Fatalf("v9 flows after next sampled open close = %d, want 1", got)
 	}
 	if ev, sel := samplingTotals17815(t, d); ev != 4 || sel != 2 {
@@ -103,14 +103,14 @@ func TestRejectedOpenSurvivesExporterReplacement17815(t *testing.T) {
 		t.Fatal("open rejected")
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24011, DstPort: 443, Protocol: 6}
-	oldExp := d.flowBundle.Load().firstExp()
+	oldExp := d.v9Family().bundle.Load().firstExp()
 
 	coll2, port2 := listenUDP(t)
 	t.Cleanup(func() { coll2.Close() })
 	if !d.reconcileFlowExporters(openSamplingConfig16303(t, port2, port2, "2")) {
 		t.Fatal("replacing reconcile must apply")
 	}
-	newExp := d.flowBundle.Load().firstExp()
+	newExp := d.v9Family().bundle.Load().firstExp()
 	if newExp == oldExp {
 		t.Fatal("reconcile must replace exporter")
 	}
@@ -159,7 +159,7 @@ func TestSyncDuplicateOfRejectedOpenDoesNotResample17815(t *testing.T) {
 		IngressIfindex: 11, EgressIfindex: 12,
 	})
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24021, DstPort: 443, Protocol: 6}
-	if d.flowBundle.Load().firstExp().Tracked(key) {
+	if d.v9Family().bundle.Load().firstExp().Tracked(key) {
 		t.Fatal("#17815: sync duplicate of a sampling-rejected open must not track it (second decision selected it)")
 	}
 	ev, sel := samplingTotals17815(t, d)
@@ -173,7 +173,7 @@ func TestSyncDuplicateOfRejectedOpenDoesNotResample17815(t *testing.T) {
 	}
 
 	time.Sleep(300 * time.Millisecond)
-	if f, _ := d.flowBundle.Load().firstExp().Stats(); f != 0 {
+	if f, _ := d.v9Family().bundle.Load().firstExp().Stats(); f != 0 {
 		t.Fatalf("v9 flows = %d, want 0", f)
 	}
 }
@@ -194,7 +194,7 @@ func TestSyncOpenRegistersOnceWhenUndecided17815(t *testing.T) {
 	}
 	d.trackFlowOpenFromSync(delta)
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24031, DstPort: 443, Protocol: 6}
-	if !d.flowBundle.Load().firstExp().Tracked(key) {
+	if !d.v9Family().bundle.Load().firstExp().Tracked(key) {
 		t.Fatal("promote open from sync must be tracked (rate 1)")
 	}
 	// Duplicate registration (update delta / re-walk): no new
@@ -208,7 +208,7 @@ func TestSyncOpenRegistersOnceWhenUndecided17815(t *testing.T) {
 	if !d.eventReader.ProcessRawEvent(closeBuf) {
 		t.Fatal("close rejected")
 	}
-	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got != 1 {
+	if got := waitFlows(t, d.v9Family().bundle.Load().firstExp().Stats); got != 1 {
 		t.Fatalf("promoted flow close: v9 flows = %d, want 1", got)
 	}
 }
@@ -280,7 +280,7 @@ services {
 		IngressIfindex: 11, EgressIfindex: 14,
 	})
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 24041, DstPort: 443, Protocol: 6}
-	if d.flowBundle.Load().firstExp().Tracked(key) {
+	if d.v9Family().bundle.Load().firstExp().Tracked(key) {
 		t.Fatal("#17815: sync open on an unsampled interface must not be admitted via its sampled zone-mate")
 	}
 	for _, s := range d.FlowExportSamplingStats() {

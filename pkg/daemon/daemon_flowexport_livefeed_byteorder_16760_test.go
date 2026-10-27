@@ -137,14 +137,14 @@ func TestLiveFeedMissCounter16760(t *testing.T) {
 	hit := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 34567, DstPort: 443, Protocol: 6}
 	miss := flowexport.FlowKey{SrcIP: "10.0.0.103", DstIP: "192.0.2.201", SrcPort: 2222, DstPort: 443, Protocol: 6}
 	groups := 0
-	if b := d.flowBundle.Load(); b != nil {
+	if b := d.v9Family().bundle.Load(); b != nil {
 		for _, g := range b.groups {
 			g.exp.TrackFlowOpenRecord(hit, time.Now(), template16760(hit))
 			g.exp.TrackFlowOpenRecord(miss, time.Now(), template16760(miss))
 			groups++
 		}
 	}
-	if b := d.ipfixBundlePtr.Load(); b != nil {
+	if b := d.ipfixFamily().bundle.Load(); b != nil {
 		for _, g := range b.groups {
 			g.exp.TrackFlowOpenRecord(hit, time.Now(), template16760(hit))
 			g.exp.TrackFlowOpenRecord(miss, time.Now(), template16760(miss))

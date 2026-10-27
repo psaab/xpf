@@ -50,8 +50,8 @@ func TestFlowLiveFeedDrivesActiveInactive16303(t *testing.T) {
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 34567, DstPort: 443, Protocol: 6}
 	// The v4 group (not groups[0], which may be the v6 group) holds it.
-	var exp *flowexport.Exporter
-	for _, g := range d.flowBundle.Load().groups {
+	var exp flowExporter
+	for _, g := range d.v9Family().bundle.Load().groups {
 		if !g.ec.GroupIsV6 {
 			exp = g.exp
 		}

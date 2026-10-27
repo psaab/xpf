@@ -569,58 +569,23 @@ type Daemon struct {
 	// snapshot refresh or its FIB-generation invalidation. The single worker
 	// retries the owed refresh; metrics read this atomically.
 	interfaceLinkSnapshotPending atomic.Bool
-	// #2461: one exporter per per-flow-server template group, so a
-	// collector receives the template it referenced (was a single exporter
-	// using the first map-iteration template for every collector).
-	flowExporters []*flowexport.Exporter
-	flowCancel    context.CancelFunc
-	// #3742: flowWg/ipfixWg are POINTERS so a build-before-swap reconcile
-	// can start the new generation on a FRESH WaitGroup while the old
-	// generation is waited on separately during teardown. A value field
-	// cannot be handed off (a WaitGroup must not be copied). nil == no
-	// generation running.
-	flowWg         *sync.WaitGroup
-	ipfixExporters []*flowexport.IPFIXExporter
-	ipfixCancel    context.CancelFunc
-	ipfixWg        *sync.WaitGroup
-	// #2075 flowexport reconcile state. The bundle pointers carry the live
-	// (exporter, resolved-config) pair consumed by the once-registered
-	// session-close callbacks; reconcile publishes them atomically.
-	// flowStateMu linearizes callback/open decision-state access with
-	// carry+publish so a close cannot mutate only the pre-swap copy. The
-	// per-family hashes gate reconcile so unrelated commits never bounce a
-	// healthy exporter; the *HashSet bools distinguish "never reconciled"
-	// from "reconciled to nil". The *ReconMu serialize reconcile against
-	// shutdown's stopFlow/IPFIXExporter (both touch cancel/wg).
-	flowBundle  atomic.Pointer[exporterBundle]
-	flowHash    [32]byte
-	flowHashSet bool
-	flowCBOnce  sync.Once
+	// #17057: the NetFlow v9 / IPFIX lifecycle twins are one parameterized
+	// flowFamily per protocol (daemon_flowexport.go). flowFamilies[0] is
+	// netflow-v9, [1] is ipfix; every reconcile/retain/teardown/callback
+	// body lives once on *flowFamily. Daemon-wide state that is NOT
+	// per-family (open fanout, live feed, retry) stays here.
+	// New initializes flowFamilies eagerly; flowFamiliesOnce guards the
+	// lazy fallback for &Daemon{} fixtures that never went through New,
+	// so no goroutine writes the array unsynchronized after construction.
+	flowFamilies     [2]*flowFamily
+	flowFamiliesOnce sync.Once
 	// #16303: the single SESSION_OPEN fanout callback. Separate from the
 	// two protocol close callbacks so an open is sampled once even when
 	// both exporter families are registered on the same EventReader.
 	flowOpenCBOnce sync.Once
-	// flowStateMu linearizes open admission and close consumption against
-	// state carry plus bundle publication during reconciliation.
+	// flowStateMu linearizes callback/open decision-state access with
+	// carry+publish so a close cannot mutate only the pre-swap copy.
 	flowStateMu sync.Mutex
-	flowReconMu sync.Mutex
-	// flowStateCarryTestHook pauses V9 reconciliation between decision-state
-	// carry and bundle publication. Tests use it to exercise close overlap.
-	flowStateCarryTestHook func()
-	// #3742: last NetFlow v9 exporter build error. Set (under flowReconMu)
-	// when a reconcile's NewExporter build failed and the OLD exporters were
-	// kept running so export stayed up; cleared on the next successful
-	// reconcile. Surfaced via FlowExportError().
-	flowExportErr error
-	// #9166: the CONFIGURED NetFlow v9 / IPFIX template-group counts, recorded
-	// by each reconcile BEFORE its hash gate. Without them, "not configured"
-	// and "configured but the build failed" are the same observation on every
-	// surface — the health family is omitted in both cases, and `show` renders
-	// the config as present in both. Read lock-free by the metrics collector.
-	flowConfiguredGroups     atomic.Int64
-	ipfixConfiguredGroups    atomic.Int64
-	flowExcludedFlowServers  atomic.Int64
-	ipfixExcludedFlowServers atomic.Int64
 	// #9166: single-flight lifecycle of the autonomous flow-exporter build
 	// retry. reconcileFlowExporters runs only from the apply tail and the boot
 	// block, so before this the retry cadence was "the next commit" — which on
@@ -641,29 +606,7 @@ type Daemon struct {
 	// tracked flow. Surfaced via FlowLiveFeedMisses() and the
 	// xpf_flow_export_live_feed_misses_total Prometheus counter.
 	flowLiveFeedMisses atomic.Uint64
-	// #4963 fixed-cardinality handoff-drop totals. Each exporter of a family
-	// is injected (SetHandoffCounter) with a pointer to the matching counter
-	// here, so a session-close record rejected because it reached an exporter
-	// that was already retired during a reconcile (loaded the pre-swap bundle
-	// too late) is counted at ONE stable location per family regardless of how
-	// many exporter generations have come and gone — the record is no longer
-	// silently stranded. Surfaced via FlowExportHandoffDropped().
-	flowHandoffDropped  atomic.Uint64
-	ipfixHandoffDropped atomic.Uint64
-	ipfixBundlePtr      atomic.Pointer[ipfixBundle]
-	ipfixHash           [32]byte
-	ipfixHashSet        bool
-	ipfixCBOnce         sync.Once
-	ipfixReconMu        sync.Mutex
-	ipfixExportErr      error
-	// #15230: per-group build state. Failed groups (key family\x00instance)
-	// that the last reconcile could not build; healthy groups of the same
-	// family were published anyway. Retained old exporters for a failed
-	// group keep their per-exporter context (#16752) so a partial swap
-	// never closes a failed group's still-running exporter.
-	flowFailedGroups  map[string]bool
-	ipfixFailedGroups map[string]bool
-	dhcpRelay         *dhcprelay.Manager
+	dhcpRelay          *dhcprelay.Manager
 	// mgmt owns the HTTP/HTTPS management-listener lifecycle (#5866): it starts
 	// the listener at boot and, on every day-2 commit, reconciles the live
 	// listener + authentication snapshot against the committed web-management
@@ -2368,6 +2311,7 @@ func New(opts Options) (*Daemon, error) {
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
 		applySem:                   semaphore.NewWeighted(1),
 	}
+	d.flowFamilies = newFlowFamilies(d)
 	store.SetConfirmRecoveryClockSkewCheck(d.confirmRecoveryClockSkewActive)
 	d.d11Ledger = nfqueue.NewD11AttestationLedger()
 	d.d11Armer = nfqueue.NewD11AttestationArmer(d11NodeID, d.d11Ledger, func(runID string, permitEpoch uint64) error {
