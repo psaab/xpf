@@ -48,9 +48,12 @@ func TestCliDataplaneLinkClaimRemoved17112(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)
 		}
-		// Wrap-insensitive: the retired claim spanned two lines in both
-		// files, so compare against whitespace-flattened text.
-		flat := strings.Join(strings.Fields(string(raw)), " ")
+		// Wrap-insensitive: flatten whitespace AND strip line-comment
+		// markers first, so a phrase wrapped across comment lines
+		// still matches (field-joining alone leaves "//" between
+		// the wrapped words). Literal reintroduction only.
+		fields := strings.Fields(strings.ReplaceAll(string(raw), "//", " "))
+		flat := strings.Join(fields, " ")
 		if strings.Contains(flat, retired) {
 			t.Errorf("%s has reacquired the false #17112 claim %q.\n\n"+
 				"cmd/cli links pkg/dataplane and the daemon stack transitively "+
