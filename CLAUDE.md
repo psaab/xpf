@@ -380,7 +380,6 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
 | `pkg/daemon/` | Daemon lifecycle (TTY detection, signal handling) |
 | `pkg/cluster/` | Chassis cluster HA (state machine, session sync, config sync, IPsec SA sync) |
 | `pkg/cli/` | Interactive Junos-style CLI |
-| `pkg/conntrack/` | Session garbage collection (with HA delete sync callbacks) |
 | `pkg/logging/` | Ring buffer reader, event buffer, syslog client |
 | `pkg/dhcp/` | DHCPv4/DHCPv6 clients |
 | `pkg/frr/` | FRR config generation + managed section in frr.conf |

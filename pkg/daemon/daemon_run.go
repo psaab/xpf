@@ -328,7 +328,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		// #8607: keep the persistent-NAT SHOW table populated.
 		//
 		// It is started HERE, beside where the retired GC used to sit
-		// (#17155: its SkipSweep was the reason this is needed), and NOT from cluster-comms wiring where the
+		// (#17155: the retired GC's never-run sweep was the reason this is needed), and NOT from cluster-comms wiring where the
 		// #8121 lease PUSH loop lives. That loop is gated on being RG master,
 		// which is right for a peer push and wrong for an operator table: a
 		// standalone box with a persistent-NAT pool would keep the empty table

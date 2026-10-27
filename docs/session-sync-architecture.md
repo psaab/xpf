@@ -731,7 +731,7 @@ could not see it.
 rather than table-truth, for a reason that has nothing to do with which sites
 publish: the helper owns session lifetime in its own `SessionTable`, the mirror
 is written best-effort (a publish that fails under map pressure is counted, not
-retried), and the Go GC has `SkipSweep` set precisely because the map is not
+retried), and the retired Go conntrack GC (`pkg/conntrack`, deleted in #17155) never ran against it precisely because the map is not
 authoritative. Framing the window from it would still be framing it from a
 copy. The table-truth window source stays.
 
@@ -1978,7 +1978,7 @@ grown.
 
 ### Delete Journal
 
-Delete messages are queued immediately from conntrack GC callbacks. If the peer
+Delete messages are queued immediately when the helper's session-delta stream reports a close (and from commit-time policy invalidation). If the peer
 is disconnected — **or the peer is connected but `sendCh` is momentarily full
 (backpressure)** — the delete is journaled in a bounded ring by
 `QueueDeleteV4`/`V6` instead of being sent inline.
@@ -3564,7 +3564,7 @@ wrong.
 | `pkg/cluster/sync.go` | Wire protocol, bulk sync, barriers, retry state |
 | `pkg/cluster/sync_test.go` | Session sync protocol tests |
 | `pkg/daemon/daemon.go` | Readiness, retry, userspace delta filtering, demotion prep |
-| `pkg/conntrack/gc.go` | GC delete callbacks |
+| `pkg/cluster/sync_conn_write.go` | Delete queueing (`QueueDeleteV4`/`V6`) for helper session-delta closes |
 | `pkg/dataplane/types.go` | Session key/value definitions |
 | `pkg/dataplane/userspace/manager.go` | Userspace session install, helper RPCs |
 | `userspace-dp/src/session.rs` | Rust session table |

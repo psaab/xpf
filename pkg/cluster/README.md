@@ -4378,7 +4378,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   later sweep) carries a higher generation and still installs (last-writer-wins).
   A `gen == 0` (legacy) delete still evicts. The generation maps start bounded by
   `genGuardMapDefaultCap` (200000) and grow on full-of-live demand toward the
-  `genGuardMapCap` ceiling (half of conntrack.MaxSessions; #9915 F-044). On overflow the map is NEVER cleared (#2198 F1): an
+  `genGuardMapCap` ceiling (half of `dataplane.MaxSessions`, moved from the deleted `pkg/conntrack` in #17155; #9915 F-044). On overflow the map is NEVER cleared (#2198 F1): an
   existing key updates in place, and a live entry is never dropped.
   **Tombstones age out oldest-first (#9719).**
   - A tombstone never frees its entry. So a long-lived connection used to fill the
@@ -5012,7 +5012,7 @@ it.
     is what bounds that pre-verdict growth: the combined live keys in
     one window may not exceed `bulkRecvCap()` — the forward-session
     table capacity (`maxCap()`: the wired helper capacity, else the
-    200k default, ceiling `conntrack.MaxSessions/2`). The cap is on
+    200k default, ceiling `dataplane.MaxSessions/2`). The cap is on
     live occupancy, not cumulative distinct keys: a successful delete
     during the window frees its key's slot
     (`removeBulkRecvV4/V6` from the delete paths), so delete+reinstall

@@ -584,7 +584,7 @@ bridge in `pkg/api`.
 
 ## Dependencies
 
-`cluster`, `config`, `configstore`, `conntrack`, `dataplane`, `dhcp`,
+`cluster`, `config`, `configstore`, `dataplane`, `dhcp`,
 `dhcpserver`, `feeds`, `frr`, `ipsec`, `logging`, `fwdstatus`, `ra`,
 `routing`, `rpm`, `vrrp`, plus most of the rest of `pkg/`.
 

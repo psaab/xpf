@@ -459,7 +459,6 @@ editing cmdtree.
 | `pkg/vrrp/` | Native VRRPv3 state machine; 30ms default RETH advertisements only in legacy VRRP-backed mode (`no-private-rg-election`, unless `no-reth-vrrp`); the compiler-default private-RG mode suppresses RETH VRRP (`pkg/config/compiler_system.go:3132-3137`, `pkg/vrrp/vrrp.go:153-166`) |
 | `pkg/ra/` | Embedded RA sender (replaces radvd) |
 | `pkg/cli/` | Interactive Junos-style CLI |
-| `pkg/conntrack/` | Session garbage collection (with HA delete sync) |
 | `pkg/logging/` | Ring buffer reader, event buffer, syslog client |
 | `pkg/dhcp/` | DHCPv4/DHCPv6 clients |
 | `pkg/frr/` | FRR config generation + managed section in frr.conf |

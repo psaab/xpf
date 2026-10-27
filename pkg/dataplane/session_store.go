@@ -129,9 +129,10 @@ type ClusterBulkReconcileResult struct {
 // A bare delete reaches the helper as `routing_domain = 0`, which it reads as
 // WIRE_ABSENT and resolves by PROBING every routing instance for the 5-tuple.
 // When two tenants hold that tuple the probe is ambiguous and the helper REFUSES
-// (#8636). #9146 fixed the SINGULAR delete this way; the batch path — which is
-// the one that retires sessions continuously, from the conntrack GC — still
-// stripped the value.
+// (#8636). #9146 fixed the SINGULAR delete this way; the batch path — the
+// one the retired Go conntrack GC (`pkg/conntrack`, deleted in #17155) used
+// to retire sessions continuously, now driven by commit-time policy
+// invalidation — still stripped the value.
 //
 // `RoutingDomain == 0` means "no domain to name", which is both the default
 // instance and "the caller had no value". Both want the pre-#9364 bare delete, so
@@ -164,7 +165,7 @@ type ScopedSessionKeyV6 struct {
 //
 // The END-TO-END proof is privileged, because the mirror is a real BPF map:
 // `TestBatchDeleteNamesTheMirroredDomainOnTheWire9546` seeds a tenant row, reads
-// it back through ForEachV4 exactly as the GC does, deletes it through this path
+// it back through ForEachV4 exactly as the retired GC did, deletes it through this path
 // and asserts the helper delete names the domain. Its singular twin,
 // `TestDeleteSessionItselfNamesTheDomainOnTheWire9146`, failed on master until
 // #9546 and passes now. Both SKIP without CAP_BPF (#9337), so an ordinary run

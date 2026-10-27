@@ -7,7 +7,7 @@ import (
 )
 
 // #9364 — the BATCH session-delete path stripped the routing domain, so the
-// conntrack GC's deletes went out as bare 5-tuples and hit #8636's
+// (now-retired, #17155) conntrack GC's deletes went out as bare 5-tuples and hit #8636's
 // ambiguous-routing-domain refusal on a standby.
 //
 // #9146 fixed the SINGULAR delete. This is the half that matters more: the batch

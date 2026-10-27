@@ -47,9 +47,9 @@ func (c *xpfCollector) collectSessionGaugesContext(ctx context.Context, ch chan<
 	// #3929: derive the active/established/breakdown session gauges from the
 	// LIVE dataplane session table — the same source `show security flow
 	// session` reads. Previously xpf_sessions_active/xpf_sessions_established
-	// were sourced from GC sweep stats (gc.Stats().TotalEntries /
-	// EstablishedSessions), which are permanently 0 on the userspace dataplane
-	// because the BPF GC sweep is skipped (#333).
+	// were sourced from the retired Go conntrack GC's sweep stats
+	// (`pkg/conntrack`, deleted in #17155), which were permanently 0 on the
+	// userspace dataplane because that sweep never ran there (#333).
 	//
 	// #4162: the walk is behind a short-TTL, singleflight-coalesced cache
 	// (sessionGaugeSnapshotCached) so the scrape rate is decoupled from the

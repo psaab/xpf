@@ -1,6 +1,6 @@
 # Cluster Session Sync Protocol (RTO)
 
-Reference for `pkg/cluster/sync.go` and `pkg/conntrack/gc.go`.
+Reference for `pkg/cluster/sync.go`. (The former `pkg/conntrack/gc.go` GC delete source was retired in #17155; deletes now originate from helper session-delta closes.)
 
 ## Transport
 
@@ -1509,25 +1509,20 @@ Key properties:
 - **Non-blocking send:** Messages dropped silently if sendCh is full (4096 buffer)
 - **Primary-only:** Skips when not primary for redundancy group 0
 
-### 3. GC Delete Callbacks (expired session cleanup)
+### 3. Session-Delta Delete Queueing (expired session cleanup)
 
-Wired in `daemon.go` after GC creation:
+Formerly the Go conntrack GC (`pkg/conntrack/gc.go`, deleted in #17155)
+queued a DeleteV4/V6 message to the peer for every session its 10-second
+sweep expired. That sweep never ran on the userspace dataplane, and the
+package is retired.
 
-```
-gc.OnDeleteV4 = func(key SessionKey) {
-    if isPrimary && sessionSync != nil {
-        sessionSync.QueueDeleteV4(key)
-    }
-}
-```
-
-The conntrack GC (`sweep()` in gc.go) runs every 10 seconds:
-1. Iterates all sessions, checks `LastSeen + Timeout < now`
-2. Builds `toDelete` slice as pairs: `[fwd, rev, fwd, rev, ...]`
-3. After each successful `DeleteSession(key)`, fires callback for forward entries only (`i%2 == 0`)
-4. The callback queues a DeleteV4/V6 message to the peer
-
-The peer receives the delete and calls `DeleteSession(key)` to remove the forward entry from its BPF map. The peer's own GC handles cleaning up any orphaned reverse entries.
+Deletes now originate from the helper's session-delta stream: when the
+Rust helper reports a session close, the daemon queues DeleteV4/V6 to the
+peer (`pkg/daemon/daemon_ha_userspace_stream.go` → `QueueDeleteV4`/`V6`),
+and commit-time policy invalidation queues deletes the same way
+(`pkg/daemon/daemon_policy_invalidate.go`). The peer receives the delete
+and removes the forward entry from its session table; expiry of any
+orphaned reverse entries is owned by the helper's per-worker expiry.
 
 ### 4. Ring Buffer Callback (near-real-time, <1ms)
 
