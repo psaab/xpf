@@ -232,20 +232,20 @@ func TestPermittedRenameResultRejectsDefaultPermit10592(t *testing.T) {
 	}
 	t.Run("default-path", func(t *testing.T) {
 		// No pair covers other->lan: falls to default-permit, must not retain.
-		q := policymatch.Query{FromZone: "other", ToZone: "lan", DstPort: 9999}
+		q := policymatch.Query{FromZone: "other", ToZone: "lan", DstPort: policymatch.PortPtr(9999)}
 		if _, permitted := permittedRenameResult(newCfg, binding, q); permitted {
 			t.Fatal("default-permit fallback retained a renamed session")
 		}
 	})
 	t.Run("other-pair", func(t *testing.T) {
 		// Matches p-seed (Deny) on other->wan, not the renamed rule.
-		q := policymatch.Query{FromZone: "other", ToZone: "wan", DstPort: 443}
+		q := policymatch.Query{FromZone: "other", ToZone: "wan", DstPort: policymatch.PortPtr(443)}
 		if _, permitted := permittedRenameResult(newCfg, binding, q); permitted {
 			t.Fatal("non-renamed pair retained through the evaluator")
 		}
 	})
 	t.Run("renamed-permit-control", func(t *testing.T) {
-		q := policymatch.Query{FromZone: "lan", ToZone: "wan", DstPort: 443}
+		q := policymatch.Query{FromZone: "lan", ToZone: "wan", DstPort: policymatch.PortPtr(443)}
 		record, permitted := permittedRenameResult(newCfg, binding, q)
 		if !permitted {
 			t.Fatal("renamed permit was not retained")
@@ -343,12 +343,12 @@ func TestRemappedQueryZonesWildcardPolicyAndZoneRename12881(t *testing.T) {
 // textually identical modulo address width, and v6-DNAT address handling is
 // pinned by the 10511 DNAT test).
 func TestNetworkPortByteOrder10592(t *testing.T) {
-	if got := networkPort(0x1234); got != 0x3412 {
-		t.Fatalf("networkPort(0x1234) = %#x, want 0x3412", got)
+	if got := networkPort(0x1234); got == nil || *got != 0x3412 {
+		t.Fatalf("networkPort(0x1234) = %v, want 0x3412", got)
 	}
 	for _, port := range []uint16{0, 1, 80, 443, 8443, 0xFFFF} {
-		if got := networkPort(uint16(networkPort(port))); got != int(port) {
-			t.Fatalf("networkPort round-trip of %d gave %d", port, got)
+		if got := networkPort(*networkPort(port)); got == nil || *got != port {
+			t.Fatalf("networkPort round-trip of %d gave %v", port, got)
 		}
 	}
 }
@@ -472,7 +472,7 @@ func TestPermittedRenameResultAnyPermitAlternate10592(t *testing.T) {
 	}
 	// Outside the renamed scope: served by p-alternate. Assert the RETURNED
 	// identity names the alternate, proving no RuleID==destination restriction.
-	q := policymatch.Query{FromZone: "lan", ToZone: "wan", DstIP: net.ParseIP("10.0.0.20"), DstPort: 444}
+	q := policymatch.Query{FromZone: "lan", ToZone: "wan", DstIP: net.ParseIP("10.0.0.20"), DstPort: policymatch.PortPtr(444)}
 	record, permitted := permittedRenameResult(newCfg, binding, q)
 	if !permitted {
 		t.Fatal("alternate permit did not retain")
@@ -507,7 +507,7 @@ func TestPermittedRenameResultAlternateRemovedDenies10592(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing binding for old policy id %d", oldID)
 	}
-	q := policymatch.Query{FromZone: "lan", ToZone: "wan", DstIP: net.ParseIP("10.0.0.20"), DstPort: 444}
+	q := policymatch.Query{FromZone: "lan", ToZone: "wan", DstIP: net.ParseIP("10.0.0.20"), DstPort: policymatch.PortPtr(444)}
 	if _, permitted := permittedRenameResult(newCfg, binding, q); permitted {
 		t.Fatal("query retained without the alternate permit")
 	}
@@ -1189,7 +1189,7 @@ func TestRematchRenamedV4FailsClosedOnICMPWhenDenyICMPTypePrecedesPermit14697(t 
 	pre := policymatch.Match(newCfg, policymatch.Query{
 		FromZone: "lan", ToZone: "wan",
 		SrcIP: net.ParseIP("10.0.0.10"), DstIP: net.ParseIP("10.0.0.20"),
-		Protocol: "icmp", SrcPort: 0x1234, DstPort: 0x1234,
+		Protocol: "icmp", SrcPort: policymatch.PortPtr(0x1234), DstPort: policymatch.PortPtr(0x1234),
 		SrcFamily: "v4", DstFamily: "v4", ICMPType: &ty,
 	})
 	if !pre.Matched || pre.Action != config.PolicyDeny || pre.RuleID != "lan->wan/deny-ping" {
@@ -1234,7 +1234,7 @@ func TestRematchRenamedV6FailsClosedOnICMPv6WhenDenyICMPTypePrecedesPermit14697(
 	pre := policymatch.Match(newCfg, policymatch.Query{
 		FromZone: "lan", ToZone: "wan",
 		SrcIP: net.ParseIP("2001:db8::10"), DstIP: net.ParseIP("2001:db8::20"),
-		Protocol: "icmpv6", SrcPort: 0x1234, DstPort: 0x1234,
+		Protocol: "icmpv6", SrcPort: policymatch.PortPtr(0x1234), DstPort: policymatch.PortPtr(0x1234),
 		SrcFamily: "v6", DstFamily: "v6", ICMPType: &ty,
 	})
 	if !pre.Matched || pre.Action != config.PolicyDeny {

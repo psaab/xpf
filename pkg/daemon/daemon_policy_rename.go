@@ -409,10 +409,17 @@ func policyQueryProtocol(proto uint8) string {
 	return strconv.Itoa(int(proto))
 }
 
-func networkPort(port uint16) int {
+func portOrZero(port *uint16) uint16 {
+	if port == nil {
+		return 0
+	}
+	return *port
+}
+
+func networkPort(port uint16) *uint16 {
 	var raw [2]byte
 	binary.NativeEndian.PutUint16(raw[:], port)
-	return int(binary.BigEndian.Uint16(raw[:]))
+	return policymatch.PortPtr(binary.BigEndian.Uint16(raw[:]))
 }
 
 func permittedRenameResult(cfg *config.Config, binding policyRenameBinding, q policymatch.Query) (dpuserspace.PolicySessionRebind, bool) {
@@ -433,7 +440,7 @@ func permittedRenameResult(cfg *config.Config, binding policyRenameBinding, q po
 	return dpuserspace.PolicySessionRebind{
 		Family: q.SrcFamily,
 		SrcIP:  q.SrcIP.String(), DstIP: q.DstIP.String(),
-		SrcPort: uint16(q.SrcPort), DstPort: uint16(q.DstPort),
+		SrcPort: portOrZero(q.SrcPort), DstPort: portOrZero(q.DstPort),
 		Protocol: qProtocol(q.Protocol), PolicyID: result.PolicyID, RuleID: result.RuleID,
 	}, true
 }
@@ -588,7 +595,7 @@ func rematchRenamedV4(oldCfg, newCfg *config.Config, binding policyRenameBinding
 	if permitted {
 		record.SrcIP = net.IPv4(key.SrcIP[0], key.SrcIP[1], key.SrcIP[2], key.SrcIP[3]).String()
 		record.DstIP = net.IPv4(key.DstIP[0], key.DstIP[1], key.DstIP[2], key.DstIP[3]).String()
-		record.SrcPort, record.DstPort = uint16(networkPort(key.SrcPort)), uint16(networkPort(key.DstPort))
+		record.SrcPort, record.DstPort = *networkPort(key.SrcPort), *networkPort(key.DstPort)
 		record.IngressZone, record.EgressZone = newIngress, newEgress
 		record.RoutingDomain = value.RoutingDomain
 		record.TunnelDiscriminator = value.TunnelDiscriminator
@@ -629,7 +636,7 @@ func rematchRenamedV6(oldCfg, newCfg *config.Config, binding policyRenameBinding
 	if permitted {
 		record.SrcIP = net.IP(append([]byte(nil), key.SrcIP[:]...)).String()
 		record.DstIP = net.IP(append([]byte(nil), key.DstIP[:]...)).String()
-		record.SrcPort, record.DstPort = uint16(networkPort(key.SrcPort)), uint16(networkPort(key.DstPort))
+		record.SrcPort, record.DstPort = *networkPort(key.SrcPort), *networkPort(key.DstPort)
 		record.IngressZone, record.EgressZone = newIngress, newEgress
 		record.RoutingDomain = value.RoutingDomain
 		record.TunnelDiscriminator = value.TunnelDiscriminator
@@ -702,11 +709,11 @@ func rematchRenamedMatch(oldCfg, newCfg *config.Config, binding policyRenameBind
 		FromZone: from, ToZone: to,
 		SrcIP: src, DstIP: dst,
 		Protocol: policyQueryProtocol(match.Tuple.Protocol),
-		SrcPort:  int(match.Tuple.SrcPort), DstPort: int(match.Tuple.DstPort),
+		SrcPort:  policymatch.PortPtr(match.Tuple.SrcPort), DstPort: policymatch.PortPtr(match.Tuple.DstPort),
 		SrcFamily: srcFam, DstFamily: dstFam,
 	}
 	if match.DNAT && match.NATDstPort != 0 {
-		q.DstPort = int(match.NATDstPort)
+		q.DstPort = policymatch.PortPtr(match.NATDstPort)
 	}
 	record, permitted := permittedRenameResult(newCfg, binding, q)
 	if !permitted {

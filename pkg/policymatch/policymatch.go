@@ -183,50 +183,51 @@ const (
 // precedence chain. See matchJunosHost / Result.HostInboundUnmatched (#3285).
 const JunosHostZone = "junos-host"
 
-// ValidatePort checks an already-parsed simulator port value (the gRPC int32
-// field and the REST query int, which arrive numeric). A zero value means
-// "unspecified": a port-constrained term never matches; an unconstrained term
-// may still match. A nonzero value outside [1, MaxPort] (negative, or above the
-// 16-bit port space) cannot describe a real packet, so it is REJECTED with an
-// error rather than silently coerced to the 0 unspecified value (#3116). The
-// shared matcher gates the port term on dstPort/srcPort > 0, so an invalid value
-// that slips through is treated as absent: constrained terms never match, while
-// unconstrained terms may still match, yielding a misleading verdict.
+// PortPtr returns a present port value for Query/SelectorArgs (#17081).
+// A nil *uint16 means the operator omitted the port; PortPtr(0) is a
+// literal L4 port 0, which a `0-N` application term matches when L4 is
+// present (Rust `zero_port_range_denies_literal_zero_when_l4_present_13920`).
+// (A value helper is kept because go.mod pins go 1.24; `new(expr)` needs 1.26.)
+func PortPtr(port uint16) *uint16 { return &port }
+
+func portValue(port *uint16) int {
+	if port == nil {
+		return -1
+	}
+	return int(*port)
+}
+
+// ValidatePort checks an already-parsed present simulator port value (the
+// optional gRPC field and the present REST query value). 0 is a valid
+// literal port; negative or >MaxPort cannot describe a real packet and is
+// REJECTED rather than coerced to omitted (#3116, #17081).
 func ValidatePort(port int) error {
 	if port < 0 || port > MaxPort {
-		return fmt.Errorf("port %d out of range (0-%d, 0 = unspecified)", port, MaxPort)
+		return fmt.Errorf("port %d out of range (0-%d)", port, MaxPort)
 	}
 	return nil
 }
 
-// ParsePort parses a simulator port token supplied as an operator string (the
-// CLI surface). An empty/whitespace token means "unspecified" and returns
-// (0, nil). No concrete port is supplied, so a port-constrained term never
-// matches; an unconstrained term may still match. A non-empty token must be a
-// canonical unsigned decimal that ValidatePort accepts ([0, MaxPort]); a
-// malformed ("abc"), signed ("+80"/"-80", #3679), or >MaxPort token is REJECTED
-// with an error so it can never silently degrade to the 0 unspecified value
-// (#3116). An explicit "0" is accepted as "unspecified" for parity with the
-// gRPC int field, where proto3 cannot distinguish an unset scalar from 0.
-//
-// #3679: this diagnostic parser routes through config.ParseCanonicalUint — the
-// same canonical-form primitive the #3606 commit-time and dataplane port
-// parsers use — so a signed spelling the config grammar and dataplane now reject
-// can no longer be accepted here (a commit-vs-diagnostic split that made
-// automated policy verification green for a token the platform rejects).
-func ParsePort(s string) (int, error) {
+// ParsePort parses a simulator port token supplied as an operator string.
+// An empty/whitespace token means "unspecified" and returns (nil, nil).
+// A non-empty token, including explicit "0", is a PRESENT port: "0" is
+// literal port 0 (#17081), not omitted. Malformed, signed, or >MaxPort
+// tokens are REJECTED so they never degrade to omitted (#3116). #3679:
+// parsing routes through config.ParseCanonicalUint, the same primitive
+// the commit-time and dataplane parsers use.
+func ParsePort(s string) (*uint16, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, nil
+		return nil, nil
 	}
 	n, err := config.ParseCanonicalUint(s)
 	if err != nil {
-		return 0, fmt.Errorf("invalid port %q", s)
+		return nil, fmt.Errorf("invalid port %q", s)
 	}
 	if err := ValidatePort(n); err != nil {
-		return 0, err
+		return nil, err
 	}
-	return n, nil
+	return PortPtr(uint16(n)), nil
 }
 
 // ParseICMPValue parses an operator-supplied ICMP type or code token (#3284)
@@ -366,19 +367,20 @@ func postNATInputNote(cfg *config.Config) string {
 // Query is a 5-tuple policy-simulation request. The destination address and
 // port are expected to already reflect inbound destination NAT, and ToZone
 // must be the zone of the translated (real-server) destination; Match does not
-// execute DNAT, static NAT, NPTv6, or NAT64. A nil SrcIP/DstIP or an empty
-// Protocol means that query dimension is unspecified. Omitted address selectors
-// match any address; a term constrained on protocol, port, or ICMP type/code
-// never matches when that query value is absent, while unconstrained terms may
-// still match.
+// execute DNAT, static NAT, NPTv6, or NAT64. A nil SrcIP/DstIP, an empty
+// Protocol, or a nil SrcPort/DstPort (*uint16, #17081) means that query
+// dimension is unspecified — nil distinguishes omitted from literal port 0,
+// mirroring ICMPType/ICMPCode. Omitted address selectors match any address;
+// a term constrained on protocol, port, or ICMP type/code never matches when
+// that query value is absent, while unconstrained terms may still match.
 type Query struct {
 	FromZone string
 	ToZone   string
 	SrcIP    net.IP
 	DstIP    net.IP
-	Protocol string // "tcp", "udp", "89", "ospf", ... ("" = unspecified)
-	SrcPort  int
-	DstPort  int
+	Protocol string  // "tcp", "udp", "89", "ospf", ... ("" = unspecified)
+	SrcPort  *uint16 // nil = unspecified; PortPtr(0) = literal port 0 (#17081)
+	DstPort  *uint16 // nil = unspecified; PortPtr(0) = literal port 0 (#17081)
 
 	// IngressInterface scopes a `to-zone junos-host` query's host-inbound
 	// admission to ONE ingress interface's effective host-inbound view (#5579).
@@ -531,24 +533,24 @@ type Query struct {
 // four operator surfaces accept: the local CLI `show security match-policies`
 // and `test policy` (pkg/cli), and the remote CLI equivalents (cmd/cli).
 //
-// A "" SrcIP/DstIP/Protocol or a 0 SrcPort/DstPort means the operator OMITTED
+// A "" SrcIP/DstIP/Protocol or a nil SrcPort/DstPort means the operator OMITTED
 // that selector and left the corresponding query dimension unspecified. An
 // omitted address acts as a wildcard; a term constrained on an omitted
 // protocol, port, or ICMP type/code never matches, while unconstrained terms may
 // still match. A nil ICMPType/ICMPCode is likewise unspecified. These are the
 // ONLY signals for omission: a selector that is PRESENT always carries a
 // validated value (ParseSelectorArgs rejects a present-but-valueless selector),
-// so a zero field never means silently dropped input.
+// so a nil field never means silently dropped input (#17081).
 type SelectorArgs struct {
 	FromZone string
 	ToZone   string
-	SrcIP    string // "" = unspecified; non-empty is a net.ParseIP-validated literal
-	DstIP    string // "" = unspecified; non-empty is a net.ParseIP-validated literal
-	Protocol string // "" = unspecified; non-empty resolves via appid.ProtocolNumber
-	SrcPort  int    // 0 = unspecified
-	DstPort  int    // 0 = unspecified
-	ICMPType *uint8 // nil = unspecified
-	ICMPCode *uint8 // nil = unspecified
+	SrcIP    string  // "" = unspecified; non-empty is a net.ParseIP-validated literal
+	DstIP    string  // "" = unspecified; non-empty is a net.ParseIP-validated literal
+	Protocol string  // "" = unspecified; non-empty resolves via appid.ProtocolNumber
+	SrcPort  *uint16 // nil = unspecified; PortPtr(0) = literal port 0
+	DstPort  *uint16 // nil = unspecified; PortPtr(0) = literal port 0
+	ICMPType *uint8  // nil = unspecified
+	ICMPCode *uint8  // nil = unspecified
 
 	// IngressInterface scopes a `to-zone junos-host` host-inbound query to one
 	// ingress interface's effective host-inbound view (#5579). "" = unspecified
@@ -1982,10 +1984,10 @@ func hostInboundAdmission(cfg *config.Config, q Query) *dpuserspace.HostInboundA
 	// selector, the zone-scoped classifier reports HostInboundAmbiguous if the
 	// zone's per-interface views disagree.
 	if q.IngressInterface != "" {
-		adm := dpuserspace.ClassifyHostInboundForInterface(cfg, q.FromZone, q.IngressInterface, proto, hasProto, q.DstPort, q.ICMPType, family)
+		adm := dpuserspace.ClassifyHostInboundForInterface(cfg, q.FromZone, q.IngressInterface, proto, hasProto, portValue(q.DstPort), q.ICMPType, family)
 		return &adm
 	}
-	adm := dpuserspace.ClassifyHostInbound(cfg, q.FromZone, proto, hasProto, q.DstPort, q.ICMPType, family)
+	adm := dpuserspace.ClassifyHostInbound(cfg, q.FromZone, proto, hasProto, portValue(q.DstPort), q.ICMPType, family)
 	return &adm
 }
 
@@ -3031,7 +3033,7 @@ func policyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 // classified into) while a protocol-only / `any` term still matches on the known
 // IP protocol — a direct mirror of CompiledApplications::matches. Every ordinary
 // (L4-present) caller passes true, so the L4 path is byte-identical.
-func matchApp(cfg *config.Config, apps []string, proto string, srcPort, dstPort int, icmpType, icmpCode *uint8, l4Present bool) bool {
+func matchApp(cfg *config.Config, apps []string, proto string, srcPort, dstPort *uint16, icmpType, icmpCode *uint8, l4Present bool) bool {
 	if len(apps) == 0 {
 		return true
 	}
@@ -3079,7 +3081,7 @@ func matchApp(cfg *config.Config, apps []string, proto string, srcPort, dstPort 
 	return false
 }
 
-func matchSingleApp(cfg *config.Config, appName string, queryProto uint8, queryProtoOK bool, srcPort, dstPort int, icmpType, icmpCode *uint8, l4Present bool) bool {
+func matchSingleApp(cfg *config.Config, appName string, queryProto uint8, queryProtoOK bool, srcPort, dstPort *uint16, icmpType, icmpCode *uint8, l4Present bool) bool {
 	app, ok := config.ResolveApplication(appName, cfg.Applications.Applications)
 	if !ok {
 		return false
@@ -3143,23 +3145,20 @@ func matchSingleApp(cfg *config.Config, appName string, queryProto uint8, queryP
 			return false
 		}
 	}
-	// #3330: when the application term CONSTRAINS a port, an OMITTED query
-	// port must NOT match-any — it must fail closed, mirroring the runtime.
-	// Query encodes an omitted port as zero, so it cannot distinguish a literal
-	// L4 port 0 from no extracted port; only the dataplane's `l4Present` bit can
-	// make that distinction.
+	// #3330/#17081: when the application term CONSTRAINS a port, an OMITTED
+	// (nil) query port must NOT match-any — it must fail closed. A present
+	// port, including literal 0, is evaluated against the spec: port 0
+	// matches a `0-N` term when L4 is present, mirroring the dataplane.
 	if app.DestinationPort != "" {
-		// #5572: a non-first fragment (l4Present == false) has no L4 header, so a
-		// destination-port term fails closed unconditionally — even a term like
-		// `destination-port 0-1023` must not match an omitted-port query.
-		if !l4Present || dstPort <= 0 || !portMatches(app.DestinationPort, dstPort) {
+		// #5572: a non-first fragment has no L4 header, so a port term fails
+		// closed even for `0-1023`.
+		if !l4Present || dstPort == nil || !portMatches(app.DestinationPort, int(*dstPort)) {
 			return false
 		}
 	}
-	// #3415: when the application term CONSTRAINS a source port, an omitted
-	// query source port must fail closed, mirroring the runtime.
+	// #3415/#17081: source-port sibling of the destination gate above.
 	if app.SourcePort != "" {
-		if !l4Present || srcPort <= 0 || !portMatches(app.SourcePort, srcPort) {
+		if !l4Present || srcPort == nil || !portMatches(app.SourcePort, int(*srcPort)) {
 			return false
 		}
 	}
@@ -3367,8 +3366,8 @@ func isSkippedFragDenyWithMemo(
 	}
 	// A protocol-only / `any` term would match flowlessly → the rule is a real
 	// deny handled directly by the tier walk, not a skip. Fail-closed ports pass
-	// 0 and l4Present == false so port/icmp terms cannot match.
-	if matchApp(cfg, pol.Match.Applications, q.Protocol, 0, 0, nil, nil, false) {
+	// nil ports and l4Present == false so port/icmp terms cannot match.
+	if matchApp(cfg, pol.Match.Applications, q.Protocol, nil, nil, nil, nil, false) {
 		return false
 	}
 	// L3 overlap: the zone is fixed by the tier bucket, so only source +

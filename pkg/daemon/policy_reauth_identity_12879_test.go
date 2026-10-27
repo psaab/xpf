@@ -192,7 +192,7 @@ func TestReauthorizeHostUnmatchedActionIsMeaningless12879(t *testing.T) {
 	result := policymatch.Match(cfg, policymatch.Query{
 		FromZone: "trust", ToZone: "junos-host",
 		SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("10.0.0.2"),
-		Protocol: "tcp", SrcPort: 2077, DstPort: 80, SrcFamily: "v4", DstFamily: "v4",
+		Protocol: "tcp", SrcPort: policymatch.PortPtr(2077), DstPort: policymatch.PortPtr(80), SrcFamily: "v4", DstFamily: "v4",
 	})
 	if !result.HostInboundUnmatched || result.Matched || result.DefaultUsed {
 		t.Fatalf("premise: unmatched host query returned %+v", result)

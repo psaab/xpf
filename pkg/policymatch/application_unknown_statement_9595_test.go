@@ -14,7 +14,7 @@ import (
 func tcpQuery9595(port int) Query {
 	return Query{FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
-		Protocol: "tcp", SrcPort: 40000, DstPort: port}
+		Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(uint16(port))}
 }
 
 func TestLostConstraintStatementIsReportedAsRefused9595(t *testing.T) {

@@ -1265,7 +1265,7 @@ func (d *Daemon) reauthorizePolicyCandidates(
 		query := policymatch.Query{
 			FromZone: from, ToZone: to, SrcIP: src, DstIP: dst,
 			Protocol: policyQueryProtocol(match.Tuple.Protocol),
-			SrcPort:  int(match.Tuple.SrcPort), DstPort: int(match.Tuple.DstPort),
+			SrcPort:  policymatch.PortPtr(match.Tuple.SrcPort), DstPort: policymatch.PortPtr(match.Tuple.DstPort),
 			SrcFamily: fmt.Sprintf("v%d", family), DstFamily: fmt.Sprintf("v%d", family),
 		}
 		if match.DNAT && match.NATDstIP != "" {
@@ -1286,7 +1286,7 @@ func (d *Daemon) reauthorizePolicyCandidates(
 			query.DstIP = translated
 		}
 		if match.DNAT && match.NATDstPort != 0 {
-			query.DstPort = int(match.NATDstPort)
+			query.DstPort = policymatch.PortPtr(match.NATDstPort)
 		}
 		query.FeedOverlay = feedOverlay
 		query.PolicyInactiveFn = policyInactive

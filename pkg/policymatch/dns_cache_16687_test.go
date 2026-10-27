@@ -42,7 +42,7 @@ func TestPolicymatchCacheKeysOnDNSAnswers16687(t *testing.T) {
 	cfg := dnsCacheConfig16687()
 	q := Query{
 		FromZone: "trust", ToZone: "untrust", Protocol: "tcp",
-		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("198.51.100.20"), DstPort: 443,
+		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("198.51.100.20"), DstPort: PortPtr(443),
 	}
 
 	// Unresolved dns-name: no usable prefixes and no lookup-failure
