@@ -341,6 +341,10 @@ run_shell test/debian/preinst-safe-segment-test.sh
 # code is untested.
 run_bash scripts/mutate-selftest.sh
 run_bash scripts/go-test-json-selftest.sh
+# #17154: prove the deadcode gate reds on a new dead function, a stale
+# row and malformed rows, and greens on an exact fixture match. Hermetic
+# (recorded analyser output via DEADCODE_OUTPUT); no toolchain.
+run_bash scripts/go-deadcode-gate-selftest.sh
 run_bash scripts/no-git-stash-selftest.sh
 run_shell scripts/scratch-pinning-selftest.sh
 # #14647: the affected-Go-test selector must seed from non-Go paths and
