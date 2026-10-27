@@ -82,25 +82,13 @@ func (vi *vrrpInstance) learnMasterSourceLocked(pkt *VRRPPacket, staleBefore boo
 
 // observedMasterStaleLocked reports whether the retained master record
 // is stale under the interval learned from that same master. Caller
-// holds vi.mu; the effective priority is recomputed from cfg/tracking
-// fields (never via an RLock-taking accessor) mirroring
-// shouldPreemptObservedMaster.
+// holds vi.mu; the horizon comes from masterDownLocked (#17145), never
+// an RLock-taking accessor (#6230).
 func (vi *vrrpInstance) observedMasterStaleLocked(now time.Time) bool {
 	if vi.lastMasterSeen.IsZero() {
 		return true
 	}
-	effective := vi.cfg.Priority
-	if effective != 0 && effective != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
-		effective -= vi.cfg.TrackPriorityCost
-		if effective < 1 {
-			effective = 1
-		} else if effective > 254 {
-			effective = 254
-		}
-	}
-	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
-	skew := time.Duration(256-effective) * advert / 256
-	return now.Sub(vi.lastMasterSeen) > 3*advert+skew
+	return now.Sub(vi.lastMasterSeen) > vi.masterDownLocked()
 }
 
 // admitAndRecord decides, under a single vi.mu hold, both halves of the
