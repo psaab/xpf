@@ -138,24 +138,6 @@ type userspaceFIBProvider interface {
 	DumpFIB() (uint32, []dpuserspace.FibRouteWire, error)
 }
 
-// userspaceCrashProvider is the #7250 helper-crash accessor. Separate from
-// userspaceStatusProvider for the reason given on its pkg/cli twin: the crash
-// record is Manager state that survives the helper, ProcessStatus is the
-// helper's own and is cleared when it dies.
-type userspaceCrashProvider interface {
-	HelperCrashState() (dpuserspace.HelperCrashRecord, bool)
-}
-
-// userspaceCrashHistoryProvider is the #8397 completed-episode accessor.
-//
-// Separate from userspaceCrashProvider because the open crash record,
-// completed-episode ring, and cumulative unexpected-exit counter have distinct
-// lifetimes. A successful retry leaves the current episode open until its
-// quiet-window boundary; completed history is retained after that boundary.
-type userspaceCrashHistoryProvider interface {
-	HelperCrashHistory() ([]dpuserspace.HelperCrashEpisode, int)
-}
-
 // userspaceControlProvider: superset of statusProvider used by the
 // diag/control path (queue/binding admin, forwarding-armed, inject).
 type userspaceControlProvider interface {

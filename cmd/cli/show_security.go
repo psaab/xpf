@@ -740,13 +740,11 @@ func (c *ctl) showMatchPolicies(args []string) error {
 	}
 
 	req := &pb.MatchPoliciesRequest{
-		FromZone:        sel.FromZone,
-		ToZone:          sel.ToZone,
-		SourceIp:        sel.SrcIP,
-		DestinationIp:   sel.DstIP,
-		Protocol:        sel.Protocol,
-		SourcePort:      int32(sel.SrcPort),
-		DestinationPort: int32(sel.DstPort),
+		FromZone:      sel.FromZone,
+		ToZone:        sel.ToZone,
+		SourceIp:      sel.SrcIP,
+		DestinationIp: sel.DstIP,
+		Protocol:      sel.Protocol,
 		// #5572: forward the non-first-fragment (l4_present == false)
 		// discriminator so the typed MatchPolicies RPC reproduces the #4569
 		// fragment-associated deny; false is a normal L4 packet.
@@ -755,6 +753,16 @@ func (c *ctl) showMatchPolicies(args []string) error {
 		// host-inbound classifier to one interface's effective view (the server
 		// validates zone membership + lifeline reject). "" = zone-scoped.
 		IngressInterface: sel.IngressInterface,
+	}
+	// #17081: forward port presence via proto3 optional — present 0 is
+	// literal, absent stays omitted.
+	if sel.SrcPort != nil {
+		u := int32(*sel.SrcPort)
+		req.SourcePort = &u
+	}
+	if sel.DstPort != nil {
+		u := int32(*sel.DstPort)
+		req.DestinationPort = &u
 	}
 	if sel.ICMPType != nil {
 		u := uint32(*sel.ICMPType)

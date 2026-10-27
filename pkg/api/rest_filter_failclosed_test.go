@@ -168,6 +168,43 @@ func TestRESTPolicyMatchDstPortFailsClosed(t *testing.T) {
 // queryIntStrict makes dst_port=70000 / src_port=70000 pass through (queryIntStrict
 // only rejects negatives/malformed, not >65535) and the handler returns HTTP 200,
 // flipping the want-400 range cases red.
+
+// TestRESTPolicyMatchEmptyPortRejected17081 asserts the Rev18131 minor:
+// a present-but-empty port value (?dst_port= / ?src_port=) must 400, not
+// silently degrade to an omitted port. The CLI grammar rejects a valueless
+// port token and the test-policy: topic reports an explicit-empty token;
+// REST aligning keeps the three surfaces in agreement.
+//
+// FAIL-ON-REVERT: removing the present-empty guard makes queryIntStrict
+// return the default for the empty value and the handler proceed (HTTP 200),
+// flipping both want-400 cases red.
+func TestRESTPolicyMatchEmptyPortRejected17081(t *testing.T) {
+	s := &Server{store: newPolicyMatchStore(t)}
+
+	base := "/api/v1/security/policies/match?from_zone=trust&to_zone=untrust"
+	cases := []struct {
+		name string
+		url  string
+		want int
+	}{
+		{"dst_port present empty", base + "&dst_port=", 400},
+		{"src_port present empty", base + "&src_port=", 400},
+		{"dst_port literal zero proceeds", base + "&dst_port=0", 200},
+		{"src_port literal zero proceeds", base + "&src_port=0", 200},
+		{"both ports absent", base, 200},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			s.matchPoliciesHandler(rr, httptest.NewRequest("GET", tc.url, nil))
+			if rr.Code != tc.want {
+				t.Fatalf("%s: status = %d, want %d; body: %s",
+					tc.name, rr.Code, tc.want, rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestRESTPolicyMatchPortRange(t *testing.T) {
 	s := &Server{store: newPolicyMatchStore(t)}
 

@@ -39,7 +39,7 @@ func TestUndefinedFromZoneJunosHostUsesFromAnyTier11369(t *testing.T) {
 		},
 	}, nil)
 
-	res := Match(cfg, Query{FromZone: "bogus", ToZone: JunosHostZone, Protocol: "tcp", DstPort: 22})
+	res := Match(cfg, Query{FromZone: "bogus", ToZone: JunosHostZone, Protocol: "tcp", DstPort: PortPtr(22)})
 	if !res.Matched || res.Action != config.PolicyDeny || res.PolicyName != "block-unzoned" {
 		t.Fatalf("unknown ingress must reach from-any junos-host policy (#11369); got %+v", res)
 	}
@@ -54,7 +54,7 @@ func TestUndefinedFromZoneJunosHostUsesGlobalTier11369(t *testing.T) {
 	})
 	cfg.Security.GlobalPolicies[0].Match.ToZones = []string{JunosHostZone}
 
-	res := Match(cfg, Query{FromZone: "bogus", ToZone: JunosHostZone, Protocol: "tcp", DstPort: 22})
+	res := Match(cfg, Query{FromZone: "bogus", ToZone: JunosHostZone, Protocol: "tcp", DstPort: PortPtr(22)})
 	if !res.Matched || !res.Global || res.Action != config.PolicyDeny || res.PolicyName != "block-global-unzoned" {
 		t.Fatalf("unknown ingress must reach global junos-host policy (#11369); got %+v", res)
 	}
@@ -84,7 +84,7 @@ func TestUndefinedFromZoneJunosHostNoMatchingTierStillDelivers11369(t *testing.T
 		},
 	})
 
-	res := Match(cfg, Query{FromZone: "bogus", ToZone: JunosHostZone, Protocol: "tcp", DstPort: 22})
+	res := Match(cfg, Query{FromZone: "bogus", ToZone: JunosHostZone, Protocol: "tcp", DstPort: PortPtr(22)})
 	if res.Matched || !res.HostInboundUnmatched {
 		t.Fatalf("unknown ingress outside exact/scoped global tiers must keep the local-delivery lifeline; got %+v", res)
 	}

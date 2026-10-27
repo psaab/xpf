@@ -26,7 +26,7 @@ pub(crate) use self::session_domain::{
     policy_match_from_parts, policy_tuple_from_key, policy_wire_family, HaRefreshOutcome,
     HelperMutationBegin, HelperMutationOutcome, SessionDomain,
 };
-pub(crate) use self::export::{AllSessionsExport, OwnerRgExportWait};
+pub(crate) use self::export::{AllSessionsExport, ExportKick, OwnerRgExportWait};
 #[cfg(test)]
 pub(crate) use self::export::drain_export_deltas_from_workers;
 
