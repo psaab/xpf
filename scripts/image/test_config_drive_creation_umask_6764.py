@@ -33,6 +33,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from load_subject import load_subject  # noqa: E402
 
 mcd = load_subject("make_config_drive", Path(__file__).with_name("make_config_drive.py"))
+xpf_deploy = load_subject(
+    "xpf_deploy", Path(__file__).resolve().parent.parent / "deploy" / "xpf-deploy.py")
+
+
+class _RealBuildRunner:
+    def __init__(self):
+        self.dry = False
 
 
 class ConfigDriveCreationUmaskTests(unittest.TestCase):
@@ -97,6 +104,75 @@ class ConfigDriveCreationUmaskTests(unittest.TestCase):
             f"the build left the umask at {umask_after_build:04o}, not the caller's 0022. "
             "umask is process-global, so a leaked 0077 silently narrows every file the "
             "caller creates afterwards")
+
+class DeployConfigDriveCreationUmaskTests(unittest.TestCase):
+    """Same creation-umask probe through the deploy entry point (#17104).
+
+    Before the fix deploy hand-kept its own _owner_only_umask + stage ->
+    mkiso -> chmod core, so this cell (which only drove make_config_drive)
+    could not see a one-sided regression in the twin — exactly how
+    #4905-C happened. Now deploy delegates to mcd.write_day0_iso with
+    run=run_capture, so the same creation-mode observation must hold.
+    RED on revert: restore deploy's own core without the umask guard (or
+    reintroduce a duplicate _owner_only_umask there) and the recorded
+    creation mode is 0644.
+    """
+
+    def test_deploy_iso_is_never_created_world_readable(self):
+        seen = []
+
+        def fake_run_capture(argv, dry=False):
+            out = argv[argv.index("-o") + 1]
+            with open(out, "wb") as f:
+                f.write(b"\x00" * 2048)
+            seen.append(os.stat(out).st_mode & 0o777)
+            return ""
+
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "day0.conf"), "w") as f:
+                f.write("system { host-name t; }\n")
+            ap = {
+                "name": "fw-umask", "mode": "standalone", "node_id": None,
+                "image": "xpf-appliance", "cpu": 2, "memory": "4G",
+                "config": "day0.conf", "base_dir": td, "interfaces": [],
+            }
+            old = os.umask(0o022)
+            old_cwd = os.getcwd()
+            os.chdir(td)
+            try:
+                with mock.patch.object(xpf_deploy, "find_xpfd",
+                                       return_value=None), \
+                     mock.patch.object(xpf_deploy.shutil, "which",
+                                       return_value="/usr/bin/xorriso"), \
+                     mock.patch.object(xpf_deploy, "run_capture",
+                                       side_effect=fake_run_capture), \
+                     mock.patch.object(xpf_deploy, "_load_make_config_drive",
+                                       return_value=mcd):
+                    iso = xpf_deploy.build_config_drive(ap, _RealBuildRunner())
+                final = os.stat(iso).st_mode & 0o777
+            finally:
+                os.chdir(old_cwd)
+                os.umask(old)
+        self.assertEqual(len(seen), 1, "the ISO tool was not invoked exactly once")
+        self.assertEqual(
+            seen[0] & 0o077, 0,
+            f"deploy-created ISO was CREATED mode {seen[0]:04o} under a 0022 "
+            "umask; it already contains xpf.conf at that moment (#17104)")
+        self.assertEqual(
+            final & 0o077, 0,
+            f"finished deploy ISO mode {final:04o}, want owner-only")
+
+    def test_owner_only_umask_defined_exactly_once(self):
+        # ACCEPTANCE (#17104): one definition under scripts/ (non-test).
+        scripts = Path(__file__).resolve().parent.parent
+        hits = []
+        for p in scripts.rglob("*.py"):
+            if p.name.startswith("test_"):
+                continue
+            for line in p.read_text().splitlines():
+                if line.startswith("def _owner_only_umask"):
+                    hits.append(str(p.relative_to(scripts)))
+        self.assertEqual(hits, ["image/make_config_drive.py"])
 
 
 if __name__ == "__main__":
