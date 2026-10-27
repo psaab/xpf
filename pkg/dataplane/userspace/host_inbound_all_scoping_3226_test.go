@@ -51,7 +51,7 @@ func TestClassifyHostInboundSystemServicesAllScopedToNamedServices(t *testing.T)
 		{"netconf tcp/830", TCP, 830},
 	}
 	for _, tc := range admitted {
-		got := ClassifyHostInbound(cfg, "edge", tc.proto, true, tc.port, nil, "ip")
+		got := ClassifyHostInbound(cfg, "edge", tc.proto, true, tc.port, tc.port != 0, nil, "ip")
 		if got.Status != HostInboundTokenAdmit {
 			t.Errorf("%s with system-services all: got %+v, want token-admit (`all` expands to the named service union)", tc.name, got)
 		}
@@ -75,7 +75,7 @@ func TestClassifyHostInboundSystemServicesAllScopedToNamedServices(t *testing.T)
 		{"an unassigned future protocol 253", 253},
 	}
 	for _, tc := range deniedProtos {
-		got := ClassifyHostInbound(cfg, "edge", tc.proto, true, 0, nil, "ip")
+		got := ClassifyHostInbound(cfg, "edge", tc.proto, true, 0, false, nil, "ip")
 		if got.Status != HostInboundDenied {
 			t.Errorf("%s with system-services all: got %+v, want DENIED — `all` is the union of named system-services, not a packet-wide admit (#3226)", tc.name, got)
 		}
@@ -84,7 +84,7 @@ func TestClassifyHostInboundSystemServicesAllScopedToNamedServices(t *testing.T)
 	// --- DENIED: an unlisted TCP/UDP port. -----------------------------------
 	// The catch-all deny is re-armed for the zone, so a port outside the named
 	// service union is denied just as it is for any explicit service list.
-	if got := ClassifyHostInbound(cfg, "edge", TCP, true, 9999, nil, "ip"); got.Status != HostInboundDenied {
+	if got := ClassifyHostInbound(cfg, "edge", TCP, true, 9999, true, nil, "ip"); got.Status != HostInboundDenied {
 		t.Errorf("tcp/9999 with system-services all: got %+v, want DENIED (unlisted port, #3226)", got)
 	}
 }
@@ -102,14 +102,14 @@ func TestClassifyHostInboundSystemServicesAllExcludesGRE(t *testing.T) {
 	const gre = uint8(47)
 
 	if got := ClassifyHostInbound(cfgWithHostInbound("edge", []string{"all"}, nil),
-		"edge", gre, true, 0, nil, "ip"); got.Status != HostInboundDenied {
+		"edge", gre, true, 0, false, nil, "ip"); got.Status != HostInboundDenied {
 		t.Errorf("gre proto 47 with system-services all: got %+v, want DENIED (gre is an xpf extension, excluded from the Junos `all` union)", got)
 	}
 
 	// Explicitly listed, it is admitted — the carve-out narrows `all`, it does
 	// not remove the token.
 	if got := ClassifyHostInbound(cfgWithHostInbound("edge", []string{"gre"}, nil),
-		"edge", gre, true, 0, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != "gre" {
+		"edge", gre, true, 0, false, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != "gre" {
 		t.Errorf("gre proto 47 with an explicit system-services gre: got %+v, want token-admit gre", got)
 	}
 }
@@ -155,13 +155,13 @@ func TestClassifyHostInboundAllAdmitsDocumentedJunosServices(t *testing.T) {
 		{"lsselfping udp/8503", "lsselfping", UDP, 8503},
 	} {
 		// Reached through the `all` union.
-		if got := ClassifyHostInbound(all, "edge", tc.proto, true, tc.port, nil, "ip"); got.Status != HostInboundTokenAdmit {
+		if got := ClassifyHostInbound(all, "edge", tc.proto, true, tc.port, tc.port != 0, nil, "ip"); got.Status != HostInboundTokenAdmit {
 			t.Errorf("%s with system-services all: got %+v, want token-admit — %q is a documented Junos system-service and `all` is the union of them", tc.name, got, tc.token)
 		}
 		// And reachable by NAMING the service, which is what makes the union
 		// restorable rather than a dead end.
 		named := cfgWithHostInbound("edge", []string{tc.token}, nil)
-		if got := ClassifyHostInbound(named, "edge", tc.proto, true, tc.port, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != tc.token {
+		if got := ClassifyHostInbound(named, "edge", tc.proto, true, tc.port, tc.port != 0, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != tc.token {
 			t.Errorf("%s with an explicit system-services %s: got %+v, want token-admit %s", tc.name, tc.token, got, tc.token)
 		}
 	}
@@ -219,7 +219,7 @@ func TestClassifyHostInboundUnportedServicesAdmitNothing(t *testing.T) {
 	}
 	for _, tc := range probes {
 		for _, family := range []string{"ip", "ip6"} {
-			if got := ClassifyHostInbound(all, "edge", tc.proto, true, tc.port, nil, family); got.Status != HostInboundDenied {
+			if got := ClassifyHostInbound(all, "edge", tc.proto, true, tc.port, tc.port != 0, nil, family); got.Status != HostInboundDenied {
 				t.Errorf("%s with system-services all (%s): got %+v, want DENIED — no service in "+
 					"Juniper's enumeration fixes this port (#3226)", tc.name, family, got)
 			}
@@ -232,7 +232,7 @@ func TestClassifyHostInboundUnportedServicesAdmitNothing(t *testing.T) {
 	for _, token := range []string{"r2cp", "rpm", "tcp-encap", "appqoe", "high-availability"} {
 		named := cfgWithHostInbound("edge", []string{token}, nil)
 		for _, tc := range probes {
-			if got := ClassifyHostInbound(named, "edge", tc.proto, true, tc.port, nil, "ip"); got.Status != HostInboundDenied {
+			if got := ClassifyHostInbound(named, "edge", tc.proto, true, tc.port, tc.port != 0, nil, "ip"); got.Status != HostInboundDenied {
 				t.Errorf("explicit `system-services %s`: %s got %+v, want DENIED — xpf has no "+
 					"authoritative listening port for this service. For rpm/r2cp the port is "+
 					"operator-configured, so none exists to restore; for tcp-encap/appqoe/"+
@@ -255,7 +255,7 @@ func TestClassifyHostInboundUnportedServicesAdmitNothing(t *testing.T) {
 		{"lsselfping udp/8503", UDP, 8503},
 		{"ssh tcp/22", TCP, 22},
 	} {
-		if got := ClassifyHostInbound(all, "edge", tc.proto, true, tc.port, nil, "ip"); got.Status != HostInboundTokenAdmit {
+		if got := ClassifyHostInbound(all, "edge", tc.proto, true, tc.port, tc.port != 0, nil, "ip"); got.Status != HostInboundTokenAdmit {
 			t.Errorf("%s with system-services all: got %+v, want token-admit — otherwise the deny "+
 				"assertions above are vacuous", tc.name, got)
 		}
@@ -277,7 +277,7 @@ func TestClassifyHostInboundSystemServicesAllExcludesRexec(t *testing.T) {
 	const TCP = uint8(6)
 
 	if got := ClassifyHostInbound(cfgWithHostInbound("edge", []string{"all"}, nil),
-		"edge", TCP, true, 512, nil, "ip"); got.Status != HostInboundDenied {
+		"edge", TCP, true, 512, true, nil, "ip"); got.Status != HostInboundDenied {
 		t.Errorf("rexec tcp/512 with system-services all: got %+v, want DENIED (rexec is an xpf extension, absent from Juniper's documented service list)", got)
 	}
 
@@ -285,7 +285,7 @@ func TestClassifyHostInboundSystemServicesAllExcludesRexec(t *testing.T) {
 	// narrows `all`, it does not remove the token.
 	for _, tok := range []string{"r-exec", "rexec"} {
 		if got := ClassifyHostInbound(cfgWithHostInbound("edge", []string{tok}, nil),
-			"edge", TCP, true, 512, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != tok {
+			"edge", TCP, true, 512, true, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Token != tok {
 			t.Errorf("rexec tcp/512 with an explicit system-services %s: got %+v, want token-admit %s", tok, got, tok)
 		}
 	}
@@ -313,7 +313,7 @@ func TestClassifyHostInboundAnyServiceStillFullAdmit(t *testing.T) {
 		{"vrrp proto 112", 112, 0},
 		{"an unlisted tcp/9999", 6, 9999},
 	} {
-		got := ClassifyHostInbound(cfg, "edge", tc.proto, true, tc.port, nil, "ip")
+		got := ClassifyHostInbound(cfg, "edge", tc.proto, true, tc.port, tc.port != 0, nil, "ip")
 		if got.Status != HostInboundTokenAdmit || got.Token != "any-service" {
 			t.Errorf("%s with system-services any-service: got %+v, want token-admit any-service (full-admit escape hatch retained)", tc.name, got)
 		}
@@ -336,17 +336,17 @@ func TestClassifyHostInboundSystemServicesAllPlusProtocols(t *testing.T) {
 
 	// system-services all ALONE: ssh admitted, ospf denied.
 	svcOnly := cfgWithHostInbound("edge", []string{"all"}, nil)
-	if got := ClassifyHostInbound(svcOnly, "edge", TCP, true, 22, nil, "ip"); got.Status != HostInboundTokenAdmit {
+	if got := ClassifyHostInbound(svcOnly, "edge", TCP, true, 22, true, nil, "ip"); got.Status != HostInboundTokenAdmit {
 		t.Fatalf("ssh tcp/22 with system-services all: got %+v, want token-admit", got)
 	}
-	if got := ClassifyHostInbound(svcOnly, "edge", ospf, true, 0, nil, "ip"); got.Status != HostInboundDenied {
+	if got := ClassifyHostInbound(svcOnly, "edge", ospf, true, 0, false, nil, "ip"); got.Status != HostInboundDenied {
 		t.Fatalf("ospf proto 89 with system-services all only: got %+v, want DENIED", got)
 	}
 
 	// Add the matching `protocols ospf` entry and ospf is admitted — the
 	// operator now says what they mean, which is the point of the narrowing.
 	withProto := cfgWithHostInbound("edge", []string{"all"}, []string{"ospf"})
-	if got := ClassifyHostInbound(withProto, "edge", ospf, true, 0, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Kind != "protocols" {
+	if got := ClassifyHostInbound(withProto, "edge", ospf, true, 0, false, nil, "ip"); got.Status != HostInboundTokenAdmit || got.Kind != "protocols" {
 		t.Fatalf("ospf proto 89 with system-services all + protocols ospf: got %+v, want token-admit via protocols", got)
 	}
 }

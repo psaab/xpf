@@ -86,7 +86,7 @@ func TestEnforcementFullAdmitsTheTwoPhysicalUnitShapes_6640(t *testing.T) {
 					"and unit overrides are BOTH interface-level statements and union (#3720)", svc)
 			}
 
-			adm := ClassifyHostInboundForInterface(cfg, "trust", "ge-0/0/0.0", 6, true, 7000, nil, "inet")
+			adm := ClassifyHostInboundForInterface(cfg, "trust", "ge-0/0/0.0", 6, true, 7000, true, nil, "inet")
 			if adm.Status == HostInboundDenied {
 				t.Errorf("classifier DENIED tcp/7000 on a full-admitting interface (status %v) — "+
 					"if this reds together with the pkg/config advisory test, the two are sharing "+
@@ -103,7 +103,7 @@ func TestEnforcementFullAdmitsTheTwoPhysicalUnitShapes_6640(t *testing.T) {
 // be satisfied by a classifier that never denies anything.
 func TestEnforcementDeniesWhenNeitherLevelFullAdmits_6640(t *testing.T) {
 	cfg := hostInbound6640Cfg(t, hostInbound6640PhysicalUnitLines("rpm", "ping"))
-	adm := ClassifyHostInboundForInterface(cfg, "trust", "ge-0/0/0.0", 6, true, 7000, nil, "inet")
+	adm := ClassifyHostInboundForInterface(cfg, "trust", "ge-0/0/0.0", 6, true, 7000, true, nil, "inet")
 	if adm.Status != HostInboundDenied {
 		t.Errorf("tcp/7000 with effective set [rpm ping] must be DENIED, got %v", adm.Status)
 	}

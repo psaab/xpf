@@ -38,7 +38,7 @@ func TestMatchResultCarriesDescriptionAndScheduler(t *testing.T) {
 		FromZone:         "trust",
 		ToZone:           "untrust",
 		Protocol:         "tcp",
-		DstPort:          80,
+		DstPort:          PortPtr(80),
 		PolicyInactiveFn: inactiveFnFor(map[string]bool{"workhours": true}),
 	})
 	if !res.Matched || res.Action != config.PolicyPermit || res.PolicyName != "allow-web" {
@@ -65,7 +65,7 @@ func TestMatchResultNonScheduledHasEmptySchedulerName(t *testing.T) {
 				permit("plain-allow", config.PolicyMatch{Applications: []string{"any"}})),
 		},
 	}, config.ApplicationsConfig{})
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.Matched {
 		t.Fatalf("want match, got %+v", res)
 	}

@@ -85,14 +85,14 @@ func TestMatchPoliciesGRPCHostInboundToken(t *testing.T) {
 	}{
 		{
 			name:       "ssh token-admit",
-			req:        &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: 22, DestinationIp: "10.0.1.10"},
+			req:        &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: int32Ptr17081(22), DestinationIp: "10.0.1.10"},
 			wantStatus: pb.HostInboundAdmissionStatus_HOST_INBOUND_ADMISSION_STATUS_TOKEN_ADMIT,
 			wantToken:  "ssh",
 			wantKind:   "system-services",
 		},
 		{
 			name:       "bgp protocols token-admit",
-			req:        &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: 179, DestinationIp: "10.0.1.10"},
+			req:        &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: int32Ptr17081(179), DestinationIp: "10.0.1.10"},
 			wantStatus: pb.HostInboundAdmissionStatus_HOST_INBOUND_ADMISSION_STATUS_TOKEN_ADMIT,
 			wantToken:  "bgp",
 			wantKind:   "protocols",
@@ -104,12 +104,12 @@ func TestMatchPoliciesGRPCHostInboundToken(t *testing.T) {
 		},
 		{
 			name:       "telnet denied",
-			req:        &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: 23, DestinationIp: "10.0.1.10"},
+			req:        &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: int32Ptr17081(23), DestinationIp: "10.0.1.10"},
 			wantStatus: pb.HostInboundAdmissionStatus_HOST_INBOUND_ADMISSION_STATUS_DENIED,
 		},
 		{
 			name:       "untrust no-stanza denied",
-			req:        &pb.MatchPoliciesRequest{FromZone: "untrust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: 22, DestinationIp: "10.0.1.10"},
+			req:        &pb.MatchPoliciesRequest{FromZone: "untrust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: int32Ptr17081(22), DestinationIp: "10.0.1.10"},
 			wantStatus: pb.HostInboundAdmissionStatus_HOST_INBOUND_ADMISSION_STATUS_DENIED,
 		},
 	}
@@ -167,7 +167,7 @@ func TestMatchPoliciesGRPCHostInboundOffHostOmitted(t *testing.T) {
 
 	// Positive transit match trust->untrust.
 	m, err := s.MatchPolicies(context.Background(), &pb.MatchPoliciesRequest{
-		FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DestinationPort: 22,
+		FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DestinationPort: int32Ptr17081(22),
 	})
 	if err != nil {
 		t.Fatalf("MatchPolicies(match) error = %v", err)
@@ -181,7 +181,7 @@ func TestMatchPoliciesGRPCHostInboundOffHostOmitted(t *testing.T) {
 
 	// No-match / default deny untrust->trust.
 	dd, err := s.MatchPolicies(context.Background(), &pb.MatchPoliciesRequest{
-		FromZone: "untrust", ToZone: "trust", Protocol: "tcp", DestinationPort: 22,
+		FromZone: "untrust", ToZone: "trust", Protocol: "tcp", DestinationPort: int32Ptr17081(22),
 	})
 	if err != nil {
 		t.Fatalf("MatchPolicies(default) error = %v", err)
@@ -203,14 +203,22 @@ func queryFromReq(req *pb.MatchPoliciesRequest) policymatch.Query {
 		v := uint8(*req.IcmpCode)
 		icmpCode = &v
 	}
+	// #17081: req ports are optional int32 — absent stays omitted.
+	var srcPort, dstPort *uint16
+	if req.SourcePort != nil {
+		srcPort = policymatch.PortPtr(uint16(*req.SourcePort))
+	}
+	if req.DestinationPort != nil {
+		dstPort = policymatch.PortPtr(uint16(*req.DestinationPort))
+	}
 	return policymatch.Query{
 		FromZone: req.FromZone,
 		ToZone:   req.ToZone,
 		SrcIP:    net.ParseIP(req.SourceIp),
 		DstIP:    net.ParseIP(req.DestinationIp),
 		Protocol: req.Protocol,
-		SrcPort:  int(req.SourcePort),
-		DstPort:  int(req.DestinationPort),
+		SrcPort:  srcPort,
+		DstPort:  dstPort,
 		ICMPType: icmpType,
 		ICMPCode: icmpCode,
 	}

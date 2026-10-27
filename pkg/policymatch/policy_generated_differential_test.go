@@ -221,6 +221,13 @@ func generatedQuery10587(t *testing.T, q generatedPolicyQuery10587) Query {
 	if q.Frag && q.L4Present {
 		t.Fatalf("generated query marks a fragment with l4_present=true")
 	}
+	// #17081: generated rows carry concrete packet ports (l4_present rows
+	// include literal 0, e.g. boundary-port-0); a no-L4 row omits them.
+	var srcPort, dstPort *uint16
+	if q.L4Present {
+		srcPort = PortPtr(uint16(q.SrcPort))
+		dstPort = PortPtr(uint16(q.DstPort))
+	}
 	return Query{
 		FromZone:         q.FromZone,
 		ToZone:           q.ToZone,
@@ -229,8 +236,8 @@ func generatedQuery10587(t *testing.T, q generatedPolicyQuery10587) Query {
 		SrcFamily:        config.NATAddrFamily(q.SrcIP),
 		DstFamily:        config.NATAddrFamily(q.DstIP),
 		Protocol:         q.Protocol,
-		SrcPort:          q.SrcPort,
-		DstPort:          q.DstPort,
+		SrcPort:          srcPort,
+		DstPort:          dstPort,
 		ICMPType:         q.ICMPType,
 		ICMPCode:         q.ICMPCode,
 		NonFirstFragment: q.Frag,
@@ -422,7 +429,7 @@ func TestPolicyGeneratedContentRejectRefusal10587(t *testing.T) {
 		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
 		SrcFamily: config.NATAddrFamily("10.0.1.5"),
 		DstFamily: config.NATAddrFamily("10.0.2.5"),
-		Protocol:  "tcp", SrcPort: 1234, DstPort: 80,
+		Protocol:  "tcp", SrcPort: PortPtr(1234), DstPort: PortPtr(80),
 	})
 	if !res.ContentRejected {
 		t.Fatalf("Match did not surface ContentRejected: %+v", res)

@@ -51,7 +51,7 @@ func TestMatchPoliciesGRPCIngressInterfaceScopesHostInbound(t *testing.T) {
 	s := &Server{store: mixedHostInboundGRPCStore(t)}
 
 	base := func() *pb.MatchPoliciesRequest {
-		return &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: 22}
+		return &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: int32Ptr17081(22)}
 	}
 
 	// ge-0/0/0.0 (ssh override) — admits.
@@ -96,7 +96,7 @@ func TestMatchPoliciesGRPCIngressInterfaceRejectsBadRef(t *testing.T) {
 	s := &Server{store: mixedHostInboundGRPCStore(t)}
 
 	_, err := s.MatchPolicies(context.Background(), &pb.MatchPoliciesRequest{
-		FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: 22,
+		FromZone: "trust", ToZone: "junos-host", Protocol: "tcp", DestinationPort: int32Ptr17081(22),
 		IngressInterface: "ge-9/9/9.9",
 	})
 	if status.Code(err) != codes.InvalidArgument {
