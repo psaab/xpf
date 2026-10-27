@@ -885,6 +885,15 @@ worker bound to multiple queues.
   BEFORE `wait_for_binding_settle` / `persist_state=true`) instead of the old
   `let _ = reconcile_status_bindings(..)` discard that acked `ok=true` after a
   failed (re)bind; `rebind::handle` took a `response` parameter for this.
+  #17126: for the three verbs that commit requested state before reconciling
+  (`set_forwarding_state`, `set_binding_state`, `set_queue_state`) that
+  error/settle/persist tail — including the #6750 `restore_binding_arm_state`
+  roll-back before the refresh — now lives in one helper,
+  `helpers::finish_binding_reconcile(guard, response, verb, prior, settle,
+  persist_state, settle_wait)`; the handlers keep only their commit and their
+  settle rule (forwarding settles only when arming; binding/queue settle when
+  the registration changed, the only case that reaches the helper). `rebind`
+  is excluded: it commits no requested state, so there is nothing to restore.
   #4952: the reconcile `Err` now also carries `ReconcileError::WorkerSpawn`
   — the one variant raised AFTER teardown (a `bring_up_workers`
   `spawn_supervised_worker` / `pthread_create` EAGAIN/ENOMEM leaves a queue

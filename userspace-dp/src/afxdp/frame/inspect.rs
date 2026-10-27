@@ -62,10 +62,10 @@ pub(crate) static IPV6_AH_FLOWLESS_TOTAL: AtomicU64 = AtomicU64::new(0);
 // the single loop every L4 resolver / fragment predicate in this file
 // (and, via the `crate::afxdp` re-export, the NAT64 and embedded-ICMP
 // walkers) folds into its own verdict, so the set above can never drift
-// between copies again. `screen/extract.rs` keeps its own walk: it
-// extracts screen-specific state (routing-header type, fragment info)
-// into its parse struct and fails with a screen-specific `Err`, a
-// different contract than L4 resolution.
+// between copies again. #17106: `screen/extract.rs` folds the same walk
+// too — the walk now records the two screen-only sightings
+// (`rh_source_route_seen`, `second_non_atomic_seen`) so the screen keeps
+// only its screen-specific `Err` mapping, not a second loop.
 
 /// #6435: terminal verdict of the one shared IPv6 extension-header walk
 /// ([`walk_ipv6_ext_chain`]). Every wrapper folds this into its own
@@ -194,6 +194,23 @@ pub(crate) struct ExtChainWalk {
     /// non-atomic predicate) fail closed on this rather than judging
     /// the chain from a readable ATOMIC sighting alone.
     pub fragment_truncated: bool,
+    /// #17106: set when ANY readable Routing (43) header along the walk
+    /// carried a source-route routing type (0 or 1, #2973). The walk
+    /// still traverses past the header; the screen folds this into
+    /// `saw_ipv6_routing_header` for its `source-route` screen. A Routing
+    /// header whose type byte (offset+2) is unreadable is never sighted
+    /// here — the walk's generic arm reports `Truncated` for it instead,
+    /// so the screen's fail-closed verdict is preserved.
+    pub rh_source_route_seen: bool,
+    /// #17106: set when a SECOND readably non-ATOMIC Fragment header was
+    /// sighted along the walk (#14325). The first non-ATOMIC sighting
+    /// still governs `first_non_atomic_fragment`; this flag lets the
+    /// screen reject the duplicated header as malformed instead of
+    /// downgrading `is_first_fragment`. ATOMIC repeats never set it,
+    /// and a readable non-first sighting stops the walk before any
+    /// later header can be sighted, so `[first][non-first]` chains set
+    /// it only when both headers are actually traversed.
+    pub second_non_atomic_seen: bool,
 }
 
 /// #6435: the single IPv6 extension-header chain walk shared by every
@@ -244,6 +261,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
     let mut ah_present = false;
     let mut first_non_atomic_fragment = None;
     let mut fragment_truncated = false;
+    let mut rh_source_route_seen = false;
+    let mut second_non_atomic_seen = false;
     if buf.len() < l3 + 40 {
         return ExtChainWalk {
             outcome: ExtChainOutcome::Truncated,
@@ -252,6 +271,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
             ah_present,
             first_non_atomic_fragment,
             fragment_truncated,
+            rh_source_route_seen,
+            second_non_atomic_seen,
         };
     }
     let mut protocol = buf[l3 + 6];
@@ -276,6 +297,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                     &mut non_first_fragment_offset_seen,
                     &mut first_non_atomic_fragment,
                     &mut fragment_truncated,
+                    &mut second_non_atomic_seen,
                 );
             }
             return ExtChainWalk {
@@ -285,6 +307,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                 ah_present,
                 first_non_atomic_fragment,
                 fragment_truncated,
+                rh_source_route_seen,
+                second_non_atomic_seen,
             };
         }
         match protocol {
@@ -300,8 +324,31 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 };
+                // #17106: Routing (43) type byte at offset+2 (#2973).
+                // Matches the old screen walk's `offset + 4` readability
+                // gate: fewer than 4 readable bytes is Truncated, never a
+                // silent non-sighting.
+                if protocol == 43 {
+                    let Some(rh) = buf.get(offset..offset + 4) else {
+                        return ExtChainWalk {
+                            outcome: ExtChainOutcome::Truncated,
+                            fragment,
+                            non_first_fragment_offset_seen,
+                            ah_present,
+                            first_non_atomic_fragment,
+                            fragment_truncated,
+                            rh_source_route_seen,
+                            second_non_atomic_seen,
+                        };
+                    };
+                    if rh[2] == 0 || rh[2] == 1 {
+                        rh_source_route_seen = true;
+                    }
+                }
                 protocol = opt[0];
                 let Some(next) = offset.checked_add((usize::from(opt[1]) + 1) * 8) else {
                     return ExtChainWalk {
@@ -311,6 +358,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 };
                 offset = next;
@@ -322,6 +371,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 }
             }
@@ -334,6 +385,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 };
                 // Readable AH header sighted (#10729 X2-F6).
@@ -347,6 +400,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 };
                 offset = next;
@@ -358,6 +413,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 }
             }
@@ -369,6 +426,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                     &mut non_first_fragment_offset_seen,
                     &mut first_non_atomic_fragment,
                     &mut fragment_truncated,
+                    &mut second_non_atomic_seen,
                 );
                 let Some(frag) = header else {
                     return ExtChainWalk {
@@ -378,6 +436,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 };
                 protocol = frag[0];
@@ -389,6 +449,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 };
                 offset = next;
@@ -400,6 +462,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 }
                 // #14116: a readable non-first Fragment header ends the
@@ -418,6 +482,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         ah_present,
                         first_non_atomic_fragment,
                         fragment_truncated,
+                        rh_source_route_seen,
+                        second_non_atomic_seen,
                     };
                 }
             }
@@ -429,6 +495,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                     ah_present,
                     first_non_atomic_fragment,
                     fragment_truncated,
+                    rh_source_route_seen,
+                    second_non_atomic_seen,
                 };
             }
             _ => {
@@ -439,6 +507,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                     ah_present,
                     first_non_atomic_fragment,
                     fragment_truncated,
+                    rh_source_route_seen,
+                    second_non_atomic_seen,
                 };
             }
         }
@@ -450,6 +520,8 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
         ah_present,
         first_non_atomic_fragment,
         fragment_truncated,
+        rh_source_route_seen,
+        second_non_atomic_seen,
     }
 }
 
@@ -558,8 +630,9 @@ fn protocol_from_declared_packet(packet: &[u8], addr_family: u8) -> Option<u8> {
 /// header. Shared by the in-loop arm and bound early-return so both paths
 /// agree. `fragment` retains the first declaration; offset status accumulates
 /// across sightings; `first_non_atomic_fragment` retains the first readable
-/// header with offset != 0 or M != 0; and an unreadable header sets
-/// `fragment_truncated`. Returns the bytes when readable.
+/// header with offset != 0 or M != 0; `second_non_atomic_seen` (#17106)
+/// latches on a SECOND readable non-ATOMIC sighting; and an unreadable
+/// header sets `fragment_truncated`. Returns the bytes when readable.
 #[inline(always)]
 fn record_fragment_sighting<'a>(
     buf: &'a [u8],
@@ -568,6 +641,7 @@ fn record_fragment_sighting<'a>(
     non_first_fragment_offset_seen: &mut bool,
     first_non_atomic_fragment: &mut Option<ExtChainFragment>,
     fragment_truncated: &mut bool,
+    second_non_atomic_seen: &mut bool,
 ) -> Option<&'a [u8]> {
     let header = buf.get(offset..offset + 8);
     if fragment.is_none() {
@@ -583,11 +657,15 @@ fn record_fragment_sighting<'a>(
         if (word & 0xFFF8) != 0 {
             *non_first_fragment_offset_seen = true;
         }
-        if first_non_atomic_fragment.is_none() && (word & 0xFFF9) != 0 {
-            *first_non_atomic_fragment = Some(ExtChainFragment {
-                bytes: Some([f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]]),
-                header_offset: offset,
-            });
+        if (word & 0xFFF9) != 0 {
+            if first_non_atomic_fragment.is_none() {
+                *first_non_atomic_fragment = Some(ExtChainFragment {
+                    bytes: Some([f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]]),
+                    header_offset: offset,
+                });
+            } else {
+                *second_non_atomic_seen = true;
+            }
         }
     } else {
         *fragment_truncated = true;

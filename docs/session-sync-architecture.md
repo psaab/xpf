@@ -2934,7 +2934,7 @@ the export sequence — so doing that wait under the lock would freeze the whole
 control plane for up to 15 s whenever a worker is slow or stalled (exactly the
 failover-critical moment). The handler is therefore split into two phases:
 
-- **Locked phase** (`Coordinator::kick_owner_rg_export`): enqueue the
+- **Locked phase** (`Coordinator::kick_owner_rg_export_unpaged` / `kick_owner_rg_export_v2`): enqueue the
   `ExportOwnerRGSessions` command to every worker, bump `export_seq`, and
   snapshot the lock-free handles the wait needs — the per-worker
   `session_export_ack` atomics (`Arc<AtomicU64>`) and the per-binding delta

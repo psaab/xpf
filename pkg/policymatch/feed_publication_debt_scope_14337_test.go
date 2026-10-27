@@ -54,7 +54,7 @@ func TestMatch_FeedPublicationDebtNotPoisonedByAppMismatchRule(t *testing.T) {
 	q := Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.0.0.5"), DstIP: net.ParseIP("10.0.2.10"),
-		Protocol: "tcp", DstPort: 22,
+		Protocol: "tcp", DstPort: PortPtr(22),
 		FeedOverlay:         map[string][]string{"other": {"192.0.2.99/32"}},
 		FeedPublicationDebt: map[string]bool{"other": true},
 	}
@@ -118,7 +118,7 @@ func TestMatch_FeedPublicationDebtNotPoisonedBySourceMismatchRule(t *testing.T) 
 	res := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.9.0.5"), DstIP: net.ParseIP("10.0.2.10"),
-		Protocol: "tcp", DstPort: 22,
+		Protocol: "tcp", DstPort: PortPtr(22),
 		FeedOverlay:         map[string][]string{"other": {"192.0.2.99/32"}},
 		FeedPublicationDebt: map[string]bool{"other": true},
 	})
@@ -138,7 +138,7 @@ func TestMatch_FeedPublicationDebtOnMatchingRuleStillReported(t *testing.T) {
 	res := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("192.0.2.99"), DstIP: net.ParseIP("10.0.2.10"),
-		Protocol: "tcp", DstPort: 80,
+		Protocol: "tcp", DstPort: PortPtr(80),
 		FeedOverlay:         map[string][]string{"other": {"192.0.2.99/32"}},
 		FeedPublicationDebt: map[string]bool{"other": true},
 	})
@@ -152,7 +152,7 @@ func TestMatch_FeedPublicationDebtOnMatchingRuleStillReported(t *testing.T) {
 	res2 := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.0.0.5"), DstIP: net.ParseIP("10.0.2.10"),
-		Protocol: "tcp", DstPort: 80,
+		Protocol: "tcp", DstPort: PortPtr(80),
 		FeedOverlay:         map[string][]string{"other": {"192.0.2.99/32"}},
 		FeedPublicationDebt: map[string]bool{"other": true},
 	})
@@ -205,7 +205,7 @@ func TestMatch_FeedPublicationDebtNotPoisonedOnJunosHost(t *testing.T) {
 	res := Match(cfg, Query{
 		FromZone: "trust", ToZone: JunosHostZone,
 		SrcIP: net.ParseIP("10.0.0.5"), DstIP: net.ParseIP("10.0.0.1"),
-		Protocol: "tcp", DstPort: 22,
+		Protocol: "tcp", DstPort: PortPtr(22),
 		FeedOverlay:         map[string][]string{"other": {"192.0.2.99/32"}},
 		FeedPublicationDebt: map[string]bool{"other": true},
 	})
@@ -258,7 +258,7 @@ func TestMatch_NilIPExcludedEmptyFeedFailsClosed(t *testing.T) {
 	concrete := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("203.0.113.7"), DstIP: net.ParseIP("192.0.2.80"),
-		Protocol: "tcp", DstPort: 80,
+		Protocol: "tcp", DstPort: PortPtr(80),
 		FeedOverlay: overlay,
 	})
 	if concrete.ContentRejected {
@@ -271,7 +271,7 @@ func TestMatch_NilIPExcludedEmptyFeedFailsClosed(t *testing.T) {
 	nilSrc := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		DstIP:    net.ParseIP("192.0.2.80"),
-		Protocol: "tcp", DstPort: 80,
+		Protocol: "tcp", DstPort: PortPtr(80),
 		FeedOverlay: overlay,
 	})
 	if nilSrc.Matched || nilSrc.Action == config.PolicyPermit {
@@ -297,7 +297,7 @@ func TestMatch_ExcludedEmptyBindingAbsentFromOverlayFailsClosed(t *testing.T) {
 			res := Match(cfg, Query{
 				FromZone: "trust", ToZone: "untrust",
 				SrcIP: tc.src, DstIP: net.ParseIP("192.0.2.80"),
-				Protocol: "tcp", DstPort: 80,
+				Protocol: "tcp", DstPort: PortPtr(80),
 				// No overlay entry for "partners" at all.
 			})
 			if res.Matched || res.Action == config.PolicyPermit {
@@ -322,7 +322,7 @@ func TestMatch_NilIPExcludedEmptyFeedRecordsDebt(t *testing.T) {
 	res := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		DstIP:    net.ParseIP("192.0.2.80"),
-		Protocol: "tcp", DstPort: 80,
+		Protocol: "tcp", DstPort: PortPtr(80),
 		FeedOverlay:         map[string][]string{"partners": {}},
 		FeedPublicationDebt: map[string]bool{"partner-feed": true},
 	})

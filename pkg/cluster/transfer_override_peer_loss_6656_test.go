@@ -12,7 +12,7 @@
 // preempt gate. An inapplicable hypothesis left standing sends the next
 // investigator down the same path.
 //
-// WHAT DOES PRODUCE THAT SIGNATURE is peerTransferOutOverride outliving the
+// WHAT DOES PRODUCE THAT SIGNATURE is transferOverrides outliving the
 // peer incarnation it was granted against:
 //
 //   - `request chassis cluster failover redundancy-group N node 0` arms it,
@@ -48,7 +48,7 @@ func armTransferOutOverride(t *testing.T, m *Manager, rgID int, reqID uint64) {
 	m.applyPeerTransferOutOverrideLocked(rgID, reqID)
 	m.mu.Unlock()
 	m.mu.RLock()
-	_, armed := m.peerTransferOutOverride[rgID]
+	_, armed := m.transferOverrides[rgID]
 	m.mu.RUnlock()
 	if !armed {
 		t.Fatalf("setup: override for RG%d not armed", rgID)
@@ -58,7 +58,7 @@ func armTransferOutOverride(t *testing.T, m *Manager, rgID int, reqID uint64) {
 func overrideArmed(m *Manager, rgID int) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	_, ok := m.peerTransferOutOverride[rgID]
+	_, ok := m.transferOverrides[rgID]
 	return ok
 }
 
