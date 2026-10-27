@@ -1107,15 +1107,19 @@ A PD-only DHCPv6 client (`dhcpv6-client client-ia-type ia-pd` without
 not hold the early input barrier — its link-local deny already covers
 everything reachable on that unit, and the delegated prefix is consumed
 for downstream RA, not as a WAN address. For any other zoned pending
-unit the pre-handoff hold is BOUNDED (`earlyInputPendingHandoffBound`,
-5 minutes from the first retention, re-driven by the 30s host-inbound
+unit the pre-handoff PENDING hold is BOUNDED (`earlyInputPendingHandoffBound`,
+5 minutes from the first pending retention, re-driven by the 30s host-inbound
 retry loop with no commit needed): after the bound the daemon hands the
 barrier off with the #11577 per-interface backstop standing, and a later
 lease re-renders through the lease-triggered re-apply — the same
-post-handoff steady state already accepted for handed-off units. While
-a hold is open, `HostInboundApplied` reports `BarrierRetained` with the
-pending scopes (and `show security zones` renders a RETAINED line), so
-a retained barrier no longer reads as plain Current.
+post-handoff steady state already accepted for handed-off units. The bound
+applies to the pending-DHCP hold ALONE (#17854): an lo0-enforcement failure
+or an uncovered-destination (addresses-changed) hold has no substitute
+backstop once the barrier is gone, so it keeps the barrier until a
+successful apply hands off (the changed hold also fails its commit, driving
+that retry). While a hold is open, `HostInboundApplied` reports
+`BarrierRetained` with the holding scopes (and `show security zones` renders
+a RETAINED line), so a retained barrier no longer reads as plain Current.
 
 Lifeline units are excluded (management must survive). Unzoned VRF-enslaved
 units remain excluded from the unleased iifname backstop because their
