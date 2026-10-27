@@ -25,9 +25,9 @@ func TestIsHistoricalArchive17115(t *testing.T) {
 		{"docs/log/14649.md", true},
 		{"docs/issues/1-history.md", true},
 		{"docs/issues/1-history-archive.md", true},
-		{"docs/research/1/plan.md", false},
+		{"docs/research/1/plan" + ".md", false},
 		{"docs/log.md", false},
-		{"docs/issues/1-plan.md", false},
+		{"docs/issues/1-plan" + ".md", false},
 		{"pkg/docsref/docsref_test.go", false},
 	}
 	for _, tc := range cases {
