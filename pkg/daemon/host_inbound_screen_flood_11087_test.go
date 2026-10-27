@@ -46,22 +46,42 @@ func TestHostInboundScreenFloodTextOrder11087(t *testing.T) {
 	if !strings.Contains(payload, "    "+replyAggregate) {
 		t.Fatalf("reply-direction 8x zone ceiling is missing:\n%s", payload)
 	}
-	replyAccept := strings.Index(payload, "    ct state established,related ct direction reply accept")
+	replyAcceptRule := "    ct state established,related ct direction reply accept"
+	replyAccept := strings.Index(payload, replyAcceptRule)
 	replyRule := strings.Index(payload, "    "+replyScreen)
 	replyAggregateRule := strings.Index(payload, "    "+replyAggregate)
 	if replyRule < 0 || replyAggregateRule < 0 || replyAccept < 0 || replyRule >= replyAggregateRule || replyAggregateRule >= replyAccept {
 		t.Fatalf("reply per-source then zone-ceiling screens must precede the early reply accept (source=%d aggregate=%d accept=%d):\n%s", replyRule, replyAggregateRule, replyAccept, payload)
 	}
 	fineJump := strings.Index(payload, "    iifname \"ge-0-0-0\" jump ")
-	originalRule := strings.Index(payload[replyAccept+len("    ct state established,related ct direction reply accept"):], "    iifname \"ge-0-0-0\" meta nfproto ipv4 meta l4proto 17 update @")
-	if originalRule >= 0 {
-		originalRule += replyAccept + len("    ct state established,related ct direction reply accept")
+	afterReplyOffset, afterReply := 0, ""
+	if replyAccept >= 0 {
+		afterReplyOffset = replyAccept + len(replyAcceptRule)
+		afterReply = payload[afterReplyOffset:]
 	}
-	globalICMP := strings.Index(payload, "    icmpv6 type { 1, 2, 3, 4 }")
-	// #16862: mandatory ICMP admits now precede the fine jump; the
-	// original-direction screens still follow the fine policy.
-	if fineJump < replyAccept || originalRule <= fineJump || globalICMP < 0 || globalICMP >= fineJump {
-		t.Fatalf("mandatory ICMP accepts must precede the fine jump and original-direction screens must follow it (jump=%d screen=%d icmp=%d):\n%s", fineJump, originalRule, globalICMP, payload)
+	originalRule := strings.Index(afterReply, "    iifname \"ge-0-0-0\" meta nfproto ipv4 meta l4proto 17 update @")
+	originalICMPv4 := strings.Index(afterReply, "    iifname \"ge-0-0-0\" meta nfproto ipv4 meta l4proto 1 update @")
+	originalICMPv6 := strings.Index(afterReply, "    iifname \"ge-0-0-0\" meta nfproto ipv6 meta l4proto 58 update @")
+	if originalRule >= 0 {
+		originalRule += afterReplyOffset
+	}
+	if originalICMPv4 >= 0 {
+		originalICMPv4 += afterReplyOffset
+	}
+	if originalICMPv6 >= 0 {
+		originalICMPv6 += afterReplyOffset
+	}
+	globalICMPv6 := strings.Index(payload, "    icmpv6 type { 1, 2, 3, 4 }")
+	globalICMPv4 := strings.Index(payload, "    icmp type { destination-unreachable, time-exceeded, parameter-problem }")
+	// #17894: original-direction ICMP screens precede mandatory ICMP accepts,
+	// while UDP/SYN screens remain after fine policy without duplicate rules.
+	if fineJump < replyAccept || originalRule <= fineJump ||
+		originalICMPv6 < 0 || originalICMPv6 >= globalICMPv6 ||
+		originalICMPv4 < 0 || originalICMPv4 >= globalICMPv4 ||
+		globalICMPv6 < 0 || globalICMPv6 >= fineJump ||
+		globalICMPv4 < 0 || globalICMPv4 >= fineJump {
+		t.Fatalf("mandatory ICMP accepts must follow ICMP screens and precede the fine jump; UDP/SYN screens follow fine policy (jump=%d UDP=%d ICMPv4Screen=%d ICMPv4Accept=%d ICMPv6Screen=%d ICMPv6Accept=%d):\n%s",
+			fineJump, originalRule, originalICMPv4, globalICMPv4, originalICMPv6, globalICMPv6, payload)
 	}
 	for _, fragment := range []string{
 		"meta nfproto ipv4",

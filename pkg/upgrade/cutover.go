@@ -42,7 +42,6 @@ type cutCommittedDeferredError struct {
 func (e *cutCommittedDeferredError) Error() string { return e.err.Error() }
 func (e *cutCommittedDeferredError) Unwrap() error { return e.err }
 
-
 // Options modify a single Run.
 //
 // SignalGuard, when set, is the #16796 interrupt capture consulted at
@@ -197,13 +196,15 @@ func (r *Runner) Run(opts Options) (err error) {
 			err = &cutBeforeStopError{err: err}
 		}
 	}()
-	// #16796: a captured interrupt aborts only before STOP. Check at
-	// entry too so a signal delivered while the caller waited on the
-	// upgrade lock (or in pre-Run CLI work) aborts a run that has not
-	// stopped anything, instead of starting a cut nobody wants.
-	if sig, abort := opts.SignalGuard.MayAbort(!stopAttempted); abort {
-		return fmt.Errorf("upgrade: aborted by %s before STOP; the daemon was not stopped (#16796)", sig)
-	}
+	// #16796/#17831: a captured interrupt aborts only before STOP, but
+	// whether STOP already happened in a PRIOR attempt is proven only by
+	// the persisted journal — read below, under the upgrade lock, after
+	// the cluster gate. There is deliberately NO entry-time abort here:
+	// aborting on a signal pending from pre-Run work would exit a
+	// STOPPED/ROLLINGBACK resume claiming "the daemon was not stopped"
+	// while the unit sits down (#17831). The single pre-STOP interrupt
+	// boundary is the post-journal check below, which classifies the
+	// persisted stop state before honouring the signal.
 
 	// ---- CLUSTER GATE (#5284): refuse an UNCOORDINATED standalone cut on a
 	// clustered node. This is the FINAL privileged boundary — evaluated
@@ -283,10 +284,12 @@ func (r *Runner) Run(opts Options) (err error) {
 	// the UnitAlreadyStopped seed from entry (MINOR-1): with the STOP block
 	// skipped, later flip/start failures must not read as pre-STOP.
 	stopAttempted = stopAttempted || j.State == StateRollingBack || j.State.atLeast(StateStopped)
-	// #16796 boundary (post-journal): a journal at/after STOPPED (or
-	// ROLLINGBACK) means a prior attempt already stopped the unit, so a
-	// pending signal must defer, never abort this resume. A pre-STOP
-	// journal aborts here before any further phase runs.
+	// #16796 boundary (post-journal, the ONLY pre-STOP abort point —
+	// #17831): a journal at/after STOPPED (or ROLLINGBACK) means a prior
+	// attempt already stopped the unit, so a pending signal — including
+	// one captured before Run was invoked — must defer, never abort this
+	// resume. A fresh or pre-STOP journal aborts here before any phase
+	// runs, so an entry-pending signal still stops a cut nobody wants.
 	if sig, abort := opts.SignalGuard.MayAbort(!stopAttempted); abort {
 		return fmt.Errorf("upgrade: aborted by %s before STOP; the daemon was not stopped (#16796)", sig)
 	}
