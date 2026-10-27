@@ -1090,9 +1090,10 @@ func TestEmitUserspaceSourceNATPoolMetricsDeduplicatesDuplicateLabels(t *testing
 		seen[key] = struct{}{}
 		count++
 	}
-	// 14 metrics are emitted once for this shared pool.
-	if count != 14 {
-		t.Fatalf("want 14 deduped metrics, got %d", count)
+	// 18 metrics are emitted once for this shared pool (14 legacy
+	// + the 4 split lock-domain series, #17036).
+	if count != 18 {
+		t.Fatalf("want 18 deduped metrics, got %d", count)
 	}
 }
 
@@ -1113,8 +1114,8 @@ func TestEmitUserspaceSourceNATPoolMetricsDeduplicatesSharedPool(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	if len(got) != 14 {
-		t.Fatalf("want one set of 14 pool metrics, got %d", len(got))
+	if len(got) != 18 {
+		t.Fatalf("want one set of 18 pool metrics, got %d", len(got))
 	}
 	assertGaugeClose(t, got, c.userspaceSNATPoolUsedPorts,
 		map[string]string{"pool": "pool-shared", "rule": "rule-trust"}, 42)
