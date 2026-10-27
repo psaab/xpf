@@ -33,37 +33,91 @@ func (vi *vrrpInstance) beginResign() bool {
 	return true
 }
 
+// pendingResign is one extracted forced resignation: the stashed priority
+// to install plus the resignEpoch observed at extraction (#17859).
+type pendingResign struct {
+	priority int
+	epoch    uint64
+}
+
 // applyPendingResign installs the stashed resigning priority into
 // cfg.Priority. Called by becomeBackup once the VIP release has been
 // actuated, and by the stepBackup resign arm for an already-BACKUP
 // instance (whose VIPs are already off the wire), so priority 0 never
 // reaches a routine advert while this node still holds its VIPs.
 // No-op when no resign is pending.
+//
+// #17859: split into two phases. extractPendingResign snapshots the
+// stash and clears the pending flag under resignMu; commitPendingResign
+// installs it under mu. A cluster-authoritative priority restore
+// (UpdateRGPriority, updateConfig) can complete between the phases —
+// in that window the pending flag is already false, so the flag alone
+// cannot cancel the extracted value. commitPendingResign therefore
+// re-checks resignEpoch under mu and drops a superseded extraction
+// instead of overwriting the restored priority.
 func (vi *vrrpInstance) applyPendingResign() {
+	r, ok := vi.extractPendingResign()
+	if !ok {
+		return
+	}
+	vi.commitPendingResign(r)
+}
+
+// extractPendingResign is phase 1 of applyPendingResign: snapshot the
+// stashed priority and clear the pending flag. The phases are split so
+// the #17859 regression test can interleave a priority restore inside
+// the real window (extracted, not yet installed); production code uses
+// applyPendingResign, which runs the phases back to back.
+func (vi *vrrpInstance) extractPendingResign() (pendingResign, bool) {
 	vi.resignMu.Lock()
 	if !vi.resignPending {
 		vi.resignMu.Unlock()
-		return
+		return pendingResign{}, false
 	}
-	pri := vi.resignPriority
+	r := pendingResign{priority: vi.resignPriority, epoch: vi.resignEpoch}
 	vi.resignPending = false
 	vi.resignMu.Unlock()
+	return r, true
+}
+
+// commitPendingResign is phase 2 of applyPendingResign: install the
+// extracted priority unless a discard superseded it while this
+// goroutine waited for mu (#17859). Every discard site bumps
+// resignEpoch while holding mu, and the check plus the write happen
+// under one mu hold, so mu ordering alone decides the outcome: discard
+// first drops this install; commit first lets the completed restore
+// overwrite the 0 afterwards. Either way the cluster-authoritative
+// restored priority survives.
+func (vi *vrrpInstance) commitPendingResign(r pendingResign) {
 	vi.mu.Lock()
-	vi.cfg.Priority = pri
+	vi.resignMu.Lock()
+	superseded := vi.resignEpoch != r.epoch
+	vi.resignMu.Unlock()
+	if !superseded {
+		vi.cfg.Priority = r.priority
+	}
 	vi.mu.Unlock()
 }
 
-// discardPendingResign drops a pending resignation WITHOUT installing
-// its stashed priority (#16821). A superseding priority assignment
-// (UpdateRGPriority, updateConfig) is cluster-authoritative: the RG has
-// been driven back to Primary (or reconfigured) before becomeBackup
-// actuated the resign, so the stashed 0 must not survive to be
-// installed by a later, unrelated step-down. The caller has already
-// written the replacement priority to cfg.Priority.
-func (vi *vrrpInstance) discardPendingResign() {
+// discardPendingResignLocked drops a pending resignation WITHOUT
+// installing its stashed priority (#16821). A superseding priority
+// assignment (UpdateRGPriority, updateConfig) is cluster-authoritative:
+// the RG has been driven back to Primary (or reconfigured) before
+// becomeBackup actuated the resign, so the stashed 0 must not survive
+// to be installed by a later, unrelated step-down. The caller has
+// already written the replacement priority to cfg.Priority.
+//
+// #17859: the caller MUST hold mu — the same critical section that
+// wrote the replacement priority (hence the Locked suffix, like
+// removeVIPsLocked). Discarding bumps resignEpoch, which
+// commitPendingResign re-checks under mu; a discard racing outside
+// that critical section can complete after a commit already installed
+// the stale 0, and nothing would repair cfg.Priority until reconcile.
+func (vi *vrrpInstance) discardPendingResignLocked() {
 	vi.resignMu.Lock()
 	defer vi.resignMu.Unlock()
 	vi.resignPending = false
+	vi.resignEpoch++
 }
 
 // resignIsPending reports whether a forced resignation is queued but
