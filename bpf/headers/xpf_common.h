@@ -1,5 +1,5 @@
-#ifndef __BPFRX_COMMON_H__
-#define __BPFRX_COMMON_H__
+#ifndef __XPF_COMMON_H__
+#define __XPF_COMMON_H__
 
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
@@ -7,160 +7,27 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-/* ============================================================
- * Network header definitions for BPF programs.
- * We define these directly to avoid pulling in userspace headers
- * (linux/icmp.h -> linux/if.h -> sys/socket.h) which don't
- * compile under BPF cross-compilation.
- * ============================================================ */
-
-#ifndef AF_INET
-#define AF_INET 2
-#endif
-
-#define AF_INET6        10
-
-#ifndef ETH_ALEN
-#define ETH_ALEN 6
-#endif
-
-/* IPv6 extension header next-header values */
-#define PROTO_ICMPV6    58
-#define NEXTHDR_HOP     0
-#define NEXTHDR_ROUTING 43
-#define NEXTHDR_FRAGMENT 44
-#define NEXTHDR_AUTH    51
-#define NEXTHDR_DEST    60
-#define NEXTHDR_NONE    59
-/* RETIRED-eBPF (#1476): this bound belongs to the deleted XDP/TC pipeline's
- * walker in xpf_helpers.h, which no .c file compiles any more. It is NOT the
- * live AF_XDP shim's bound — that is MAX_EXT_HDRS in
- * userspace-xdp/src/ipv6_ext_walk.rs (#6885: it lives there now; lib.rs only
- * re-exports it),
- * which #4555 moved to 7 to reach parity with MAX_IPV6_EXT_HEADERS in
- * userspace-dp/src/afxdp/frame/inspect.rs. Editing THIS define changes nothing
- * at runtime; see pkg/dataplane/README.md "IPv6 extension-header walk". */
-#define MAX_EXT_HDRS    6
-
-struct iphdr {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-	__u8  ihl:4, version:4;
-#else
-	__u8  version:4, ihl:4;
-#endif
-	__u8  tos;
-	__be16 tot_len;
-	__be16 id;
-	__be16 frag_off;
-	__u8  ttl;
-	__u8  protocol;
-	__sum16 check;
-	__be32 saddr;
-	__be32 daddr;
-};
-
-struct tcphdr {
-	__be16 source;
-	__be16 dest;
-	__be32 seq;
-	__be32 ack_seq;
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-	__u16 res1:4, doff:4, fin:1, syn:1, rst:1, psh:1, ack:1, urg:1, ece:1, cwr:1;
-#else
-	__u16 doff:4, res1:4, cwr:1, ece:1, urg:1, ack:1, psh:1, rst:1, syn:1, fin:1;
-#endif
-	__be16 window;
-	__sum16 check;
-	__be16 urg_ptr;
-};
-
-struct udphdr {
-	__be16 source;
-	__be16 dest;
-	__be16 len;
-	__sum16 check;
-};
-
-struct icmphdr {
-	__u8  type;
-	__u8  code;
-	__sum16 checksum;
-	union {
-		struct {
-			__be16 id;
-			__be16 sequence;
-		} echo;
-		__be32 gateway;
-		struct {
-			__be16 __unused;
-			__be16 mtu;
-		} frag;
-	} un;
-};
-
-/* IPv6 header structures */
-struct in6_addr {
-	union {
-		__u8   u6_addr8[16];
-		__be32 u6_addr32[4];
-	};
-};
-
-struct ipv6hdr {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-	__u8 priority:4, version:4;
-#else
-	__u8 version:4, priority:4;
-#endif
-	__u8  flow_lbl[3];
-	__be16 payload_len;
-	__u8  nexthdr;
-	__u8  hop_limit;
-	struct in6_addr saddr;
-	struct in6_addr daddr;
-};
-
-struct ipv6_opt_hdr {
-	__u8 nexthdr;
-	__u8 hdrlen;
-};
-
-struct frag_hdr {
-	__u8   nexthdr;
-	__u8   reserved;
-	__be16 frag_off;
-	__be32 identification;
-};
-
-struct icmp6hdr {
-	__u8    icmp6_type;
-	__u8    icmp6_code;
-	__sum16 icmp6_cksum;
-	union {
-		struct { __be16 id; __be16 sequence; } echo;
-		__be32 data32[1];
-	} un;
-};
-
-/* ============================================================
- * Constants
- * ============================================================ */
+/* #17146: retained ABI mirror, not compiled code. No BPF program or
+ * .c file includes this header since the #1476 eBPF retirement. The
+ * file survives only for the identifiers its live readers consume:
+ * the shim build (MAX_INTERFACES), Go parity tests (MAX_INTERFACES,
+ * MAX_NAT_POOLS, GLOBAL_CTR_MAX, struct event) and
+ * C-side layout sizing in xpf_conntrack.h / xpf_maps.h. Everything
+ * else from the retired pipeline's copy has been removed; adding a
+ * define or struct here without a non-comment reader in a build
+ * script or test outside bpf/ fails
+ * TestEveryHeaderIdentifierHasLiveReader17146. */
 
 /* Maximum values */
 #define MAX_ZONES              64
 #define MAX_INTERFACES         65536
-#define MAX_LOGICAL_INTERFACES 512
 #define MAX_POLICIES           4096
 #define MAX_RULES_PER_POLICY   256
 #define MAX_SESSIONS           10000000 /* 10M sessions */
 #define MAX_NAT_POOLS          32
-#define MAX_NAT_POOL_IPS       8192  /* MAX_NAT_POOLS * MAX_NAT_POOL_IPS_PER_POOL */
 #define MAX_NAT_RULE_COUNTERS  256
 #define MAX_ADDRESSES          8192
-#define MAX_APPLICATIONS       1024
 #define MAX_APP_RANGES         32     /* range-based application entries */
-#define MAX_SCREEN_PROFILES    64
-#define MAX_PORT_SCAN_TRACK    65536
 #define MAX_CPUS               256
 
 /* XDP tail call program indices */
@@ -171,14 +38,12 @@ struct icmp6hdr {
 #define XDP_PROG_NAT           4
 #define XDP_PROG_FORWARD       5
 #define XDP_PROG_NAT64         6
-#define XDP_PROG_MAX           7
 
 /* TC tail call program indices */
 #define TC_PROG_CONNTRACK      0
 #define TC_PROG_NAT            1
 #define TC_PROG_SCREEN_EGRESS  2
 #define TC_PROG_FORWARD        3
-#define TC_PROG_MAX            4
 
 /* Session states */
 #define SESS_STATE_NONE        0
@@ -199,9 +64,6 @@ struct icmp6hdr {
 #define SESS_FLAG_SNAT         (1 << 0)
 #define SESS_FLAG_DNAT         (1 << 1)
 #define SESS_FLAG_LOG          (1 << 2)
-#define SESS_FLAG_COUNT        (1 << 3)
-#define SESS_FLAG_ALG          (1 << 4)
-#define SESS_FLAG_PREDICTED    (1 << 5)
 #define SESS_FLAG_STATIC_NAT   (1 << 6)
 #define SESS_FLAG_NAT64        (1 << 7)
 #define SESS_FLAG_NPTV6        (1 << 8)   /* bit 8 -- requires __u16 flags */
@@ -221,20 +83,6 @@ struct icmp6hdr {
  * into the Rust (BpfSessionValue*) and Go (bpfSessionValue*) structs. */
 #define SESS_FLAG_SNAT_PROVENANCE_KNOWN (1 << 10)
 
-/* pkt_meta.meta_flags bits */
-#define META_FLAG_EMBEDDED_ICMP      (1 << 0)
-#define META_FLAG_NAT64_ICMP_ERR     (1 << 1)
-#define META_FLAG_KERNEL_ROUTE       (1 << 2)
-#define META_FLAG_TUNNEL             (1 << 3)  /* arrived via tunnel interface */
-#define META_FLAG_FABRIC_FWD         (1 << 4)  /* plain fabric redirect (not zone-encoded) */
-#define META_FLAG_INGRESS_RESOLVED   (1 << 5)  /* ingress zone/routing already resolved */
-#define META_FLAG_DNS_REPLY_FASTPATH (1 << 6)  /* #850: allow-dns-reply sessionless admit */
-#define META_FLAG_SCREEN_SKIPPED     (1 << 7)  /* #867: ACK-only fast-path bypassed xdp_screen */
-
-/* Per-rule logging flags (policy_rule.log and session_value.log_flags) */
-#define LOG_FLAG_SESSION_INIT  (1 << 0)
-#define LOG_FLAG_SESSION_CLOSE (1 << 1)
-
 /* Policy actions */
 #define ACTION_DENY            0
 #define ACTION_PERMIT          1
@@ -244,17 +92,13 @@ struct icmp6hdr {
 #define PROTO_TCP              6
 #define PROTO_UDP              17
 #define PROTO_ICMP             1
-#define PROTO_GRE              47
-#define PROTO_ESP              50
-#define PROTO_AH               51
-#define PROTO_VRRP             112
+#define PROTO_ICMPV6           58
 
 /* Event types for ring buffer */
 #define EVENT_TYPE_SESSION_OPEN   1
 #define EVENT_TYPE_SESSION_CLOSE  2
 #define EVENT_TYPE_POLICY_DENY    3
 #define EVENT_TYPE_SCREEN_DROP    4
-#define EVENT_TYPE_ALG_REQUEST    5
 #define EVENT_TYPE_FILTER_LOG     6
 
 /* Session close reason codes for structured logging */
@@ -319,13 +163,6 @@ struct icmp6hdr {
 #define GLOBAL_CTR_MAX                   48
 
 /* Flow timeout indices for flow_timeouts ARRAY map */
-#define FLOW_TIMEOUT_TCP_ESTABLISHED   0
-#define FLOW_TIMEOUT_TCP_INITIAL       1
-#define FLOW_TIMEOUT_TCP_CLOSING       2
-#define FLOW_TIMEOUT_TCP_TIME_WAIT     3
-#define FLOW_TIMEOUT_UDP               4
-#define FLOW_TIMEOUT_ICMP              5
-#define FLOW_TIMEOUT_OTHER             6
 #define FLOW_TIMEOUT_MAX               7
 
 /* Screen option flags */
@@ -408,34 +245,11 @@ struct iface_zone_value {
 
 #define MAX_REDUNDANCY_GROUPS 16
 
-/* Fabric zone-encoded MAC marker.  When redirecting a new connection
- * across the fabric link, the ingress zone is encoded in the source
- * MAC: {0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, zone_id}.
- * The receiving node detects this magic prefix on the fabric interface
- * and uses h_source[5] as the ingress zone.  This avoids VLAN tag
- * issues (bridge filtering, SKB vlan_tci stripping in generic XDP). */
-#define FABRIC_ZONE_MAC_MAGIC 0xfe
-
 #define IFACE_FLAG_TUNNEL       (1 << 0)  /* GRE/IPsec tunnel interface */
 #define IFACE_FLAG_NATIVE_XDP   (1 << 1)  /* interface runs native/driver XDP */
 #define IFACE_FLAG_XDP_ATTACHED (1 << 2)  /* #863: XDP (native or generic) attached on
                                            * the ingress side; positive proof for the
                                            * tc_main tunnel-egress bypass */
-
-#ifndef BPF_FIB_LOOKUP_DIRECT
-#define BPF_FIB_LOOKUP_DIRECT (1U << 0)
-#endif
-#ifndef BPF_FIB_LOOKUP_TBID
-#define BPF_FIB_LOOKUP_TBID (1U << 3)
-#endif
-
-/* BPF_FIB_LOOKUP_TBID only works when combined with BPF_FIB_LOOKUP_DIRECT.
- * The kernel checks for TBID inside the DIRECT code path. */
-#define BPF_FIB_LOOKUP_DIRECT_TBID (BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID)
-
-#ifndef BPF_FIB_LOOKUP_SKIP_NEIGH
-#define BPF_FIB_LOOKUP_SKIP_NEIGH (1U << 2)
-#endif
 
 /* Reverse mapping: sub-interface ifindex -> parent physical info */
 struct vlan_iface_info {
@@ -523,8 +337,8 @@ struct pkt_meta {
 
 	/* Forwarding decision */
 	__u32 fwd_ifindex;
-	__u8  fwd_dmac[ETH_ALEN];
-	__u8  fwd_smac[ETH_ALEN];
+	__u8  fwd_dmac[6];
+	__u8  fwd_smac[6];
 
 	/* Policy-based routing (set by firewall filter) */
 	__u32 routing_table;  /* VRF table ID, 0 = main table */
@@ -605,13 +419,6 @@ struct counter_value {
 	__u64 bytes;
 };
 
-struct iface_counter_value {
-	__u64 rx_packets;
-	__u64 rx_bytes;
-	__u64 tx_packets;
-	__u64 tx_bytes;
-};
-
 /* ============================================================
  * Screen/IDS configuration
  * ============================================================ */
@@ -637,38 +444,6 @@ struct flood_state {
 	__u64 window_start;       /* ktime_ns / 1e9 (seconds) */
 	__u8  synproxy_active;    /* 1 when syn-cookie mode active for zone */
 	__u8  pad_fs[7];
-};
-
-/* Validated SYN cookie client tracking.
- * Source IPs that passed cookie validation are remembered in an LRU map
- * so subsequent SYNs bypass the challenge during an active flood.
- *
- * #859: src_ip / dst_ip are 16 bytes.  For v4 the low 4 bytes carry the
- * address and high 12 bytes are zero.  For v6 the full 16-byte address
- * is used; previously the key stored only the first 4 bytes of a v6
- * source, so one successful handshake whitelisted an entire /32. */
-struct validated_client_key {
-	__u8   src_ip[16];
-	__u8   dst_ip[16];
-	__be16 dst_port;
-	__u16  pad_vck;
-};
-
-struct validated_client_value {
-	__u64 validated_at;  /* ktime_ns / 1e9 */
-};
-
-/* Per-source-IP tracking for port scan / IP sweep detection.
- * Key: source IPv4 address.  Stored in LRU_HASH for auto-eviction. */
-struct scan_track_key {
-	__u32 src_ip;
-	__u16 zone_id;
-	__u16 pad;
-};
-
-struct scan_track_value {
-	__u32 count;           /* unique attempts in current window */
-	__u32 window_start;    /* ktime_ns / 1e9 (seconds) */
 };
 
 /* Per-IP session count (populated by Go GC sweep for session limiting). */
@@ -717,10 +492,6 @@ struct snat_egress_value {
 	__u8   ipv6[16];
 };
 
-struct nat_pool_ip_v6 {
-	__u8 ip[16];
-};
-
 struct nat_port_counter {
 	__u64 counter;
 };
@@ -734,13 +505,11 @@ struct nat_port_counter {
 /* Firewall filter limits */
 #define MAX_FILTER_CONFIGS 64
 #define MAX_FILTER_RULES   512
-#define MAX_FILTER_RULES_PER_FILTER 32
 
 /* Policer limits */
 #define MAX_POLICERS 64
 
 /* Policer action when rate exceeded */
-#define POLICER_ACTION_DISCARD 0
 
 /* Filter match flags */
 #define FILTER_MATCH_DSCP      (1 << 0)
@@ -766,16 +535,7 @@ struct nat_port_counter {
 /* DSCP codepoint values */
 #define DSCP_EF  46
 #define DSCP_AF11 10
-#define DSCP_AF12 12
-#define DSCP_AF13 14
-#define DSCP_AF21 18
-#define DSCP_AF22 20
-#define DSCP_AF23 22
 #define DSCP_AF31 26
-#define DSCP_AF32 28
-#define DSCP_AF33 30
-#define DSCP_AF41 34
-#define DSCP_AF42 36
 #define DSCP_AF43 38
 
 /* NAT64 prefix lookup key: first 96 bits of IPv6 destination address. */
@@ -789,25 +549,6 @@ struct nat64_config {
 	__be32 prefix[3];  /* first 96 bits of NAT64 prefix (3 x 32-bit words) */
 	__u8   snat_pool_id;
 	__u8   pad[3];
-};
-
-/* NAT64 reverse state: keyed by translated IPv4 5-tuple, maps back to
- * original IPv6 client address + port for v4→v6 reverse translation. */
-struct nat64_state_key {
-	__be32 src_ip;    /* original v4 server IP */
-	__be32 dst_ip;    /* our SNAT'd v4 address */
-	__be16 src_port;  /* server port */
-	__be16 dst_port;  /* our SNAT'd port */
-	__u8   protocol;
-	__u8   pad[3];
-};
-
-struct nat64_state_value {
-	__u8   orig_src_v6[16]; /* original IPv6 client address */
-	__u8   orig_dst_v6[16]; /* original IPv6 dest (prefix + v4 addr) */
-	__be16 orig_src_port;   /* original client port */
-	__be16 orig_dst_port;   /* original dest port */
-	__u32  nat64_idx;       /* which NAT64 prefix was used */
 };
 
 /* ============================================================
@@ -869,7 +610,6 @@ struct filter_rule {
 /* color_mode values */
 #define POLICER_MODE_SINGLE_RATE  0  /* single-rate two-color (default) */
 #define POLICER_MODE_TWO_RATE     1  /* two-rate three-color (RFC 2698) */
-#define POLICER_MODE_SR3C         2  /* single-rate three-color (RFC 2697) */
 
 struct policer_config {
 	__u64 rate_bytes_sec;   /* CIR: token refill rate (bytes per second) */
@@ -915,13 +655,6 @@ struct flow_config {
 	                          bit 2: pre-ID log session-close */
 };
 
-#define FLOW_TCP_NO_SYN_CHECK          (1 << 0)
-#define FLOW_TCP_RST_INVALIDATE        (1 << 1)
-#define FLOW_TCP_NO_SYN_CHECK_TUNNEL   (1 << 2)
-#define FLOW_APPID_ENABLED             (1 << 0)
-#define FLOW_PREID_LOG_SESSION_INIT    (1 << 1)
-#define FLOW_PREID_LOG_SESSION_CLOSE   (1 << 2)
-
 /* ============================================================
  * Port mirroring (SPAN) configuration
  * ============================================================ */
@@ -931,4 +664,4 @@ struct mirror_config {
 	__u32 rate;            /* 1-in-N sampling rate (0 = mirror all) */
 };
 
-#endif /* __BPFRX_COMMON_H__ */
+#endif /* __XPF_COMMON_H__ */
