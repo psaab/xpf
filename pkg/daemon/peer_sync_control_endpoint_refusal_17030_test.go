@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"context"
 	"path/filepath"
 	"strconv"
@@ -197,5 +198,37 @@ func TestPeerSyncIdentityRefusalKeepsIdentityText17030(t *testing.T) {
 	}
 	if !e.liveSecretMatches(t, newSecret) {
 		t.Fatal("the listener must honour the promoted config's credential")
+	}
+}
+
+// TestPeerSyncRefusalReasonsAreDistinctLiterals17030 (fold of
+// Rev18077Opus F1, narrowed): the reviewer proved the distinct
+// `why` reason is observable ONLY inside
+// reconcileManagementAfterPromotion's failure log, and that no
+// hermetic harness input makes reconcileWebManagement fail (its
+// desired state derives from the daemon's own committed store
+// and bind outcomes are retained, not errored). The reason
+// literals are therefore pinned at their five call sites: each
+// refusal branch in syncAndApplyWithAncestry must pass its OWN
+// literal to reconcileManagementAfterPromotion. Reverting any
+// literal to a sibling's reds this census; branch REACH (the
+// refusals fire) is pinned by the two cells above.
+func TestPeerSyncRefusalReasonsAreDistinctLiterals17030(t *testing.T) {
+	src, err := os.ReadFile("daemon_apply_commit.go")
+	if err != nil {
+		t.Fatalf("read daemon_apply_commit.go: %v", err)
+	}
+	want := map[string]int{
+		"peer-synced topology transition refused":    0,
+		"peer-synced identity change refused":        0,
+		"peer-synced control-endpoint move refused":  0,
+		"peer-synced control-interface move refused": 0,
+		"peer-synced sync-endpoint move refused":     0,
+	}
+	for lit := range want {
+		want[lit] = strings.Count(string(src), "reconcileManagementAfterPromotion(compiled, \""+lit+"\")")
+		if want[lit] != 1 {
+			t.Errorf("reason literal %q must appear at exactly one refusal call site, got %d", lit, want[lit])
+		}
 	}
 }
