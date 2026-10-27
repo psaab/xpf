@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/vishvananda/netlink"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // instanceKey identifies a unique VRRP instance.
@@ -128,23 +130,17 @@ func vipClaimKeyFor(iface, vip string) (vipClaimKey, bool) {
 // parseVIPIdentity canonicalizes a VIP to its host identity and family.
 // CIDR and bare spellings of the same host collide; different prefixes on
 // the same host also collide, because both elections would install the
-// same host address.
+// same host address. The parse is config.ParseVRRPVIP (#17150).
 func parseVIPIdentity(vip string) (host, family string, ok bool) {
-	if ip, _, err := net.ParseCIDR(vip); err == nil {
-		family = "inet6"
-		if ip.To4() != nil {
-			family = "inet"
-		}
-		return ip.String(), family, true
+	p, ok := config.ParseVRRPVIP(vip)
+	if !ok {
+		return "", "", false
 	}
-	if ip := net.ParseIP(vip); ip != nil {
-		family = "inet6"
-		if ip.To4() != nil {
-			family = "inet"
-		}
-		return ip.String(), family, true
+	family = "inet6"
+	if p.Addr().Is4() {
+		family = "inet"
 	}
-	return "", "", false
+	return p.Addr().String(), family, true
 }
 
 // secondVIPClaimant reports whether inst claims a VIP already claimed by a
@@ -553,7 +549,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 	needsLinkWatcher := false
 	for _, inst := range desired {
 		if inst != nil {
-			virtualAddresses := dedupeVIPs(inst.VirtualAddresses)
+			virtualAddresses := config.DedupeVRRPVIPs(inst.VirtualAddresses)
 			if len(virtualAddresses) != len(inst.VirtualAddresses) {
 				normalized := *inst
 				normalized.VirtualAddresses = virtualAddresses

@@ -178,7 +178,7 @@ func (vi *vrrpInstance) addPendingGARPVIPsLocked(vips []string) {
 		vi.pendingGARPVIPs = make(map[string]struct{}, len(vips))
 	}
 	for _, vip := range vips {
-		vi.pendingGARPVIPs[canonicalVIPIdentity(vip)] = struct{}{}
+		vi.pendingGARPVIPs[config.VRRPVIPIdentity(vip)] = struct{}{}
 	}
 }
 
@@ -186,7 +186,7 @@ func (vi *vrrpInstance) addPendingGARPVIPsLocked(vips []string) {
 // synchronous first frame succeeds while its captured ownership and membership
 // token is still current. The caller holds vipMu.
 func (vi *vrrpInstance) markGARPAnnouncedLocked(vip string) {
-	delete(vi.pendingGARPVIPs, canonicalVIPIdentity(vip))
+	delete(vi.pendingGARPVIPs, config.VRRPVIPIdentity(vip))
 	if len(vi.pendingGARPVIPs) == 0 {
 		vi.pendingGARPVIPs = nil
 	}
@@ -203,14 +203,14 @@ func (vi *vrrpInstance) pendingGARPForSetLocked(current, added []string, include
 	}
 	next := make(map[string]struct{}, len(vi.pendingGARPVIPs)+len(added))
 	for _, vip := range current {
-		id := canonicalVIPIdentity(vip)
+		id := config.VRRPVIPIdentity(vip)
 		if _, pending := vi.pendingGARPVIPs[id]; pending {
 			next[id] = struct{}{}
 		}
 	}
 	if includeAdded {
 		for _, vip := range added {
-			next[canonicalVIPIdentity(vip)] = struct{}{}
+			next[config.VRRPVIPIdentity(vip)] = struct{}{}
 		}
 	}
 	if len(next) == 0 {
@@ -221,7 +221,7 @@ func (vi *vrrpInstance) pendingGARPForSetLocked(current, added []string, include
 	announcements := make([]string, 0, len(next))
 	rendered := make(map[string]struct{}, len(next))
 	for _, vip := range current {
-		id := canonicalVIPIdentity(vip)
+		id := config.VRRPVIPIdentity(vip)
 		if _, pending := next[id]; !pending {
 			continue
 		}
@@ -342,7 +342,7 @@ func (vi *vrrpInstance) sendGARPReservedMode(vips []string, epoch, ownerGen uint
 			return
 		}
 		if pendingOnly {
-			if _, pending := vi.pendingGARPVIPs[canonicalVIPIdentity(vip)]; !pending {
+			if _, pending := vi.pendingGARPVIPs[config.VRRPVIPIdentity(vip)]; !pending {
 				vi.vipMu.Unlock()
 				continue
 			}

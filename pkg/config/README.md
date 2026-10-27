@@ -1213,7 +1213,11 @@ accepts rather than pinning either side to a literal. Same doctrine as #4826.
 Canonical CIDR aliases within a desired set are treated as one VIP (#11482):
 collection retains the first spelling, and strict capacity validation counts
 distinct canonical identities rather than repeated entries. The RETH-derived
-untagged set is canonicalized across its combined unit-address list.
+untagged set is canonicalized across its combined unit-address list. The
+parse, identity, and dedupe are `ParseVRRPVIP` / `VRRPVIPIdentity` /
+`DedupeVRRPVIPs` (`vrrp_vip_parse.go`, #17150) — the one implementation
+repo-wide, consumed by `pkg/vrrp` — so every VIP helper gives one verdict
+per string, including skipping a malformed `10.0.0.1/33` everywhere.
 
 **Same VIP must not be claimed by two elections on one interface (#14407):**
 each `vrrp-group` (and each RETH-derived instance, VRID `100+RG`) is an
