@@ -831,14 +831,17 @@ worker bound to multiple queues.
 
 ## Gotchas
 
-- **An accept error does not crash-loop the helper (#9172, V031; #15112).** All
-  four accept loops decide through `accept_step`, which also returns the
-  journal line to write, so log volume is tested rather than assumed: the
-  control and session loops in `lifecycle.rs`, and the #9506 reinject
-  submit/complete loops in `reinject_9506.rs` (#15112 — these two used to
-  `break` on any non-`WouldBlock` error, dropping the listener permanently
-  on an idle EMFILE; each accepted connection there is also served under
-  `catch_unwind` so a handler panic drops one connection, not the loop).
+- **An accept error does not crash-loop the helper (#9172, V031; #15112; #17123).** All
+  four sockets are served by the single accept loop in `server/accept_loop.rs`
+  (`run_accept_loop`), which decides through `accept_step`; `accept_step` also
+  returns the journal line to write, so log volume is tested rather than assumed.
+  The control and session loops are wired from `lifecycle.rs`, and the #9506
+  reinject submit/complete loops from `reinject_9506.rs` (#15112 — these two used
+  to `break` on any non-`WouldBlock` error, dropping the listener permanently
+  on an idle EMFILE; #17123 collapsed the four hand-written copies into the one
+  loop, and reinject handler panics are now counted (`REINJECT_HANDLER_PANICS`),
+  payload-rendered and capped at the first 10 like the control/session arm,
+  while still dropping one connection rather than the loop).
   - `WouldBlock` keeps each loop's poll interval.
   - EMFILE / ENFILE / ENOBUFS / ENOMEM -- what the accept path returns under
     descriptor or memory pressure -- are RETRIED on both loops: 50 ms doubling to

@@ -7,11 +7,11 @@
 
 // Submodules are private — external callers reach their items only
 // through the explicit `pub(crate) use` re-exports below.
+pub(crate) mod accept_loop;
 pub(crate) mod reinject_9506;
 mod handlers;
 pub(crate) mod helpers;
 pub(crate) mod lifecycle;
-// #6979: pub(crate) so the coordinator test can build a ServerState and drive
 // refresh_status, binding the retirement CALL SITE rather than the function.
 pub(crate) mod state;
 
