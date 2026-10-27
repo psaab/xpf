@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -215,9 +216,125 @@ func sortedEqual(a, b []string) bool {
 	return true
 }
 
-// TestManagedBinaryDriftCanary is the #1982 drift guard. It FAILS the suite if
-// any shell site's managed-binary list diverges from the Go SSOT
-// (manifest.Names). Every duplicated edit site is covered.
+// censusToken matches one word token for the census scanner.
+var censusToken = regexp.MustCompile(`[A-Za-z0-9._-]+`)
+
+type censusHit struct {
+	file  string
+	line  int
+	names []string
+}
+
+// censusRuns returns every maximal run of >=3 adjacent manifest.Names()
+// tokens in src, attributed to its starting line. Tokens are
+// [A-Za-z0-9._-]+ words; any other byte (whitespace, punctuation,
+// quotes, comment markers) is a separator, so runs may span line
+// breaks. Occurrences of the generated list in gen_bins.go and this
+// test's own literals are inventoried by the allowance below, never
+// silently skipped.
+func censusRuns(src string, nameSet map[string]bool) []censusHit {
+	var hits []censusHit
+	var run []string
+	runLine := 0
+	flush := func() {
+		if len(run) >= 3 {
+			hits = append(hits, censusHit{line: runLine, names: append([]string(nil), run...)})
+		}
+		run = nil
+	}
+	for _, loc := range censusToken.FindAllStringIndex(src, -1) {
+		tok := src[loc[0]:loc[1]]
+		if nameSet[tok] {
+			if len(run) == 0 {
+				runLine = strings.Count(src[:loc[0]], "\n") + 1
+			}
+			run = append(run, tok)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return hits
+}
+
+// censusAllowlist records, per file, every census run that is neither
+// a covered site compared against the SSOT nor the generated file.
+// Entries are positional: the walk rejects a run with no remaining
+// entry, and the final check rejects a stale entry with no run.
+// Counts were inventoried from the census at #17101.
+var censusAllowlist = map[string][]string{
+	// Derives BINS from seed_layout._BINS (bins.txt), so it contains
+	// no >=3 run; kept with zero runs so a retyped list would need a
+	// new allowlist reason AND would fail the no-literal scan.
+	"scripts/image/test_seed_layout_10771.py": {},
+	// Prose info line naming the deb payload (all four, updated by
+	// #17101 to match Names()), not a list definition.
+	"scripts/image/bake.py": {"prose-not-a-list"},
+	// Captured tcpdump fixture text (xpfd xpfd cli), not a list.
+	"test/incus/harness-result-selftest.sh": {"fixture-not-a-list"},
+	// Incidental fixture loops over a subset (missing xpfd): setup
+	// scaffolding that iterates BINS-adjacent fixtures, not the
+	// managed set definition.
+	"test/debian/postinst-test.sh": {
+		"fixture-loop-missing-xpfd", "fixture-loop-missing-xpfd",
+		"fixture-loop-missing-xpfd", "fixture-loop-missing-xpfd",
+		"fixture-loop-missing-xpfd", "fixture-loop-missing-xpfd",
+	},
+	"test/debian/postrm-test.sh": {
+		"fixture-loop-missing-xpfd", "fixture-loop-missing-xpfd",
+	},
+	// The full-set loop is the covered besteffort site; this subset
+	// run is fixture scaffolding in the same file.
+	"test/debian/preinst-besteffort-test.sh": {"fixture-loop-missing-xpfd"},
+	"test/debian/preinst-migrate-test.sh":    {"fixture-loop-missing-xpfd"},
+	// Dual-covered: the staged-path comment run is pinned by the
+	// debian/rules install-set and StagedSrc checks in this test.
+	"debian/rules": {"covered-rules"},
+	// Prose naming the pushed/verified binaries: not a list
+	// definition, and the push set is separately pinned below.
+	"test/incus/deploy-lib.sh": {
+		"prose-not-a-list", "prose-not-a-list",
+		"prose-not-a-list", "prose-not-a-list",
+	},
+	// Prose comment describing the deb payload, not a list.
+	"Makefile": {"prose-not-a-list"},
+	// This test's own literals: comparator fixtures (drifted, extra,
+	// renamed), the StagedSrc counterfactual, and the push-set
+	// xpf-day0-config filter — inputs to the code under test.
+	"pkg/upgrade/manifest/manifest_drift_test.go": {
+		"test-fixture", "test-fixture", "test-fixture", "test-fixture",
+	},
+	// Generator's Names() mirror literal: pinned transitively (its
+	// output must equal bins.txt; bins.txt is pinned to Names()).
+	"pkg/upgrade/manifest/gen_bins.go": {"generated-mirror-pinned-by-canary"},
+}
+
+// censusCoveredRuns are the covered managed-binary sites whose raw
+// census runs the dedicated extractors above already compare against
+// the SSOT. bins.txt is the generated copy, compared directly.
+var censusCoveredRuns = map[string]bool{
+	"debian/xpf.preinst":                     true,
+	"debian/xpf.postinst":                    true,
+	"debian/xpf.postrm":                      true,
+	"test/debian/preinst-migrate-test.sh":    true,
+	"test/debian/postrm-test.sh":             true,
+	"test/debian/postinst-test.sh":           true,
+	"test/debian/preinst-besteffort-test.sh": true,
+	"scripts/image/seed_layout_10771.py":     true,
+	"pkg/upgrade/manifest/bins.txt":          true,
+	"pkg/upgrade/manifest/manifest.go":       true,
+}
+
+// TestManagedBinaryDriftCanary is the #1982 drift guard, extended to a
+// census by #17101. It FAILS the suite if any covered site's
+// managed-binary list diverges from the Go SSOT (manifest.Names), if
+// the generated bins.txt diverges, if the deploy push set is not
+// exactly Names() minus xpf-day0-config, or if a tracked shell,
+// Python, Makefile or systemd-unit file contains a run of >=3
+// adjacent Names() tokens that is neither a covered site nor an
+// allowlisted run with a reason. The census is the coverage claim:
+// a new duplicated list anywhere in scope reds this test until it is
+// covered or allowlisted with a reason.
 func TestManagedBinaryDriftCanary(t *testing.T) {
 	root := repoRoot(t)
 	want := Names()
@@ -258,6 +375,142 @@ func TestManagedBinaryDriftCanary(t *testing.T) {
 	if !sortedEqual(gotBE, want) {
 		t.Errorf("test/debian/preinst-besteffort-test.sh: for-loop set %q "+
 			"diverges from manifest.Names()=%q", gotBE, want)
+	}
+
+	// Generated bins.txt must equal Names() exactly, in order (#17101):
+	// seed_layout_10771.py and its test derive their lists from it, so
+	// adding a fifth managed binary reds here until bins.txt is
+	// regenerated (go generate ./pkg/upgrade/manifest/).
+	binsTxt := readFile(t, root, "pkg/upgrade/manifest/bins.txt")
+	var binsNames []string
+	for _, line := range strings.Split(binsTxt, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			binsNames = append(binsNames, strings.Fields(line)...)
+		}
+	}
+	if strings.Join(binsNames, " ") != strings.Join(want, " ") {
+		t.Errorf("pkg/upgrade/manifest/bins.txt=%q diverges from "+
+			"manifest.Names()=%q — regenerate with "+
+			"`go generate ./pkg/upgrade/manifest/`", binsNames, want)
+	}
+
+	// seed_layout_10771.py (ACCEPTANCE) and its test oracle contain no
+	// literal binary list: the subject must read bins.txt and name no
+	// managed binary at all; the oracle derives from the subject, but
+	// keeps individual binary names in assertions (fine — those are
+	// assertions, not a list), so it is checked only for a >=3 run
+	// via the census.
+	{
+		src := readFile(t, root, "scripts/image/seed_layout_10771.py")
+		if !strings.Contains(src, "bins.txt") {
+			t.Error("scripts/image/seed_layout_10771.py: does not read " +
+				"pkg/upgrade/manifest/bins.txt — the image layout gate " +
+				"must derive from the SSOT (#17101)")
+		}
+		for _, tok := range censusToken.FindAllString(src, -1) {
+			for _, name := range want {
+				if tok == name {
+					t.Errorf("scripts/image/seed_layout_10771.py: contains "+
+						"literal managed-binary name %q — derive from "+
+						"bins.txt instead (#17101)", tok)
+				}
+			}
+		}
+	}
+	if !strings.Contains(readFile(t, root, "scripts/image/test_seed_layout_10771.py"), "seed_layout._BINS") {
+		t.Error("scripts/image/test_seed_layout_10771.py: oracle does not " +
+			"derive from seed_layout._BINS (#17101)")
+	}
+
+	// Deploy push set: deploy_managed_bins must be exactly Names()
+	// minus xpf-day0-config (the one binary raw deploy never pushes).
+	deploySrc := readFile(t, root, "test/incus/deploy-lib.sh")
+	m := regexp.MustCompile(`(?m)^deploy_managed_bins=\(([^)]*)\)`).FindStringSubmatch(deploySrc)
+	if m == nil {
+		t.Fatal("test/incus/deploy-lib.sh: no deploy_managed_bins=(...) " +
+			"push-set literal found (the canary expects the push set here)")
+	}
+	pushWant := make([]string, 0, len(want))
+	for _, name := range want {
+		if name != "xpf-day0-config" {
+			pushWant = append(pushWant, name)
+		}
+	}
+	if got := strings.Fields(m[1]); !sortedEqual(got, pushWant) {
+		t.Errorf("test/incus/deploy-lib.sh: deploy_managed_bins=%q, want "+
+			"push set %q (manifest.Names() minus xpf-day0-config)", got, pushWant)
+	}
+
+	// Census (#17101): every run of >=3 adjacent Names() tokens in a
+	// tracked shell, Python, Makefile or unit file must be covered or
+	// allowlisted with a reason.
+	nameSet := map[string]bool{}
+	for _, name := range want {
+		nameSet[name] = true
+	}
+	out, err := exec.Command("git", "-C", root, "ls-files").Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v (the census needs a git checkout)", err)
+	}
+	exts := map[string]bool{
+		".sh": true, ".py": true, ".bash": true, ".service": true,
+		".timer": true, ".socket": true, ".path": true, ".target": true,
+		".mk": true,
+	}
+	allowUsed := map[string]int{}
+	files := []string{"debian/rules", "debian/xpf.preinst",
+		"debian/xpf.postinst", "debian/xpf.postrm",
+		"pkg/upgrade/manifest/manifest_drift_test.go",
+		"pkg/upgrade/manifest/gen_bins.go",
+		"pkg/upgrade/manifest/manifest.go",
+		"pkg/upgrade/manifest/bins.txt"}
+	seenFile := map[string]bool{}
+	for _, rel := range strings.Fields(string(out)) {
+		if exts[filepath.Ext(rel)] || filepath.Base(rel) == "Makefile" ||
+			strings.HasSuffix(rel, "/Makefile") {
+			files = append(files, rel)
+		}
+	}
+	for _, rel := range files {
+		if seenFile[rel] {
+			continue
+		}
+		seenFile[rel] = true
+		if strings.HasPrefix(rel, "docs/") {
+			continue
+		}
+		src := readFile(t, root, rel)
+		for _, hit := range censusRuns(src, nameSet) {
+			hit.file = rel
+			if censusCoveredRuns[rel] {
+				continue
+			}
+			idx := allowUsed[rel]
+			reasons := censusAllowlist[rel]
+			if idx < len(reasons) {
+				allowUsed[rel]++
+				continue
+			}
+			t.Errorf("census: %s:%d: uncovered run of managed-binary "+
+				"names %q — cover it against manifest.Names(), derive "+
+				"it from bins.txt, or allowlist it in "+
+				"manifest_drift_test.go with a reason (#17101)",
+				hit.file, hit.line, hit.names)
+		}
+	}
+	// Stale-entry check: covered files skip the per-run allowlist
+	// accounting above, so only non-covered allowlisted files must
+	// fully consume their entries.
+	for rel, reasons := range censusAllowlist {
+		if censusCoveredRuns[rel] {
+			continue
+		}
+		if allowUsed[rel] != len(reasons) {
+			t.Errorf("census: allowlist for %s has %d reason(s) but %d "+
+				"run(s) found — stale allowlist entries must be removed "+
+				"(#17101)", rel, len(reasons), allowUsed[rel])
+		}
 	}
 }
 
