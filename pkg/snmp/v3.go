@@ -1010,14 +1010,9 @@ func (a *Agent) buildV3Discovery(msgID int) []byte {
 
 	// Report PDU with usmStatsUnknownEngineIDs (1.3.6.1.6.3.15.1.1.4.0).
 	reportOID := []int{1, 3, 6, 1, 6, 3, 15, 1, 1, 4, 0}
-	vb := berEncodeTLV(tagObjectIdentifier, berEncodeOID(reportOID))
-	vb = append(vb, berEncodeTLV(tagCounter32, berEncodeCounter32(0))...)
-	vbList := berEncodeTLV(tagSequence, berEncodeTLV(tagSequence, vb))
-	pduBody := berEncodeIntegerTLV(0)
-	pduBody = append(pduBody, berEncodeIntegerTLV(0)...)
-	pduBody = append(pduBody, berEncodeIntegerTLV(0)...)
-	pduBody = append(pduBody, vbList...)
-	reportPDU := berEncodeTLV(0xa8, pduBody) // Report PDU tag
+	reportPDU := encodePDU(0xa8, 0, 0, 0, encodeVarbindList([]varbind{
+		{oid: reportOID, tag: tagCounter32, value: berEncodeCounter32(0)},
+	}))
 
 	scopedBody := berEncodeTLV(tagOctetString, a.engineID)
 	scopedBody = append(scopedBody, berEncodeTLV(tagOctetString, nil)...)
@@ -1095,14 +1090,9 @@ func (a *Agent) buildV3TimelinessReport(msgID int, reqFlags byte, user *usmUser)
 // OID is the supplied usmStats counter and whose value is Counter32(0). The
 // varbind value is informational — the OID identifies the error to the manager.
 func (a *Agent) buildReportPDU(statsOID []int) []byte {
-	vb := berEncodeTLV(tagObjectIdentifier, berEncodeOID(statsOID))
-	vb = append(vb, berEncodeTLV(tagCounter32, berEncodeCounter32(0))...)
-	vbList := berEncodeTLV(tagSequence, berEncodeTLV(tagSequence, vb))
-	pduBody := berEncodeIntegerTLV(0) // request-id
-	pduBody = append(pduBody, berEncodeIntegerTLV(0)...)
-	pduBody = append(pduBody, berEncodeIntegerTLV(0)...)
-	pduBody = append(pduBody, vbList...)
-	return berEncodeTLV(0xa8, pduBody) // Report PDU tag
+	return encodePDU(0xa8, 0, 0, 0, encodeVarbindList([]varbind{
+		{oid: statsOID, tag: tagCounter32, value: berEncodeCounter32(0)},
+	}))
 }
 
 // buildV3Response builds an authenticated (and optionally encrypted) SNMPv3
@@ -1115,26 +1105,7 @@ func (a *Agent) buildReportPDU(statsOID []int) []byte {
 func (a *Agent) buildV3Response(msgID int, reqFlags byte, user *usmUser,
 	contextName []byte, requestID, errorStatus, errorIndex int, vbs []varbind) []byte {
 
-	// Build varbind list.
-	var vbListBytes []byte
-	for _, vb := range vbs {
-		oidBytes := berEncodeTLV(tagObjectIdentifier, berEncodeOID(vb.oid))
-		var valBytes []byte
-		if vb.tag == tagNoSuchObject || vb.tag == tagNoSuchInstance || vb.tag == tagEndOfMibView {
-			valBytes = berEncodeTLV(vb.tag, nil)
-		} else {
-			valBytes = berEncodeValue(vb.tag, vb.value)
-		}
-		vbListBytes = append(vbListBytes, berEncodeTLV(tagSequence, append(oidBytes, valBytes...))...)
-	}
-	vbListEncoded := berEncodeTLV(tagSequence, vbListBytes)
-
-	// Build response PDU.
-	pduBody := berEncodeIntegerTLV(requestID)
-	pduBody = append(pduBody, berEncodeIntegerTLV(errorStatus)...)
-	pduBody = append(pduBody, berEncodeIntegerTLV(errorIndex)...)
-	pduBody = append(pduBody, vbListEncoded...)
-	responsePDU := berEncodeTLV(pduGetResponse, pduBody)
+	responsePDU := encodePDU(pduGetResponse, requestID, errorStatus, errorIndex, encodeVarbindList(vbs))
 
 	// Build scopedPDU. contextEngineID is our engineID (we are the authoritative
 	// engine); contextName echoes the requested context (empty = default).
