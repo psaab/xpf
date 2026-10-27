@@ -79,7 +79,37 @@
 
 use crate::Nptv6RuleSnapshot;
 use crate::policy::SnapshotIntegrityError;
+use crate::prefix::PrefixV6;
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::Arc;
+
+/// #17067: one installed NPTv6 external prefix with its from-zone
+/// scope. The single ownership representation every consumer shares:
+/// built once in `try_from_snapshots`, `Arc`-shared into pool rules,
+/// and borrowed directly by synced-domain callers. Empty `from_zone`
+/// is the wildcard (matches any zone), mirroring `Nptv6Rule`.
+#[derive(Clone, Debug)]
+pub(crate) struct Nptv6External {
+    pub(crate) prefix: PrefixV6,
+    pub(crate) from_zone: String,
+}
+
+impl Nptv6External {
+    /// Zone-aware containment: `None` zone is zone-blind (NAT64 /
+    /// synced callers with no zone axis); `Some(z)` admits only a
+    /// wildcard or exactly-matching `from_zone`.
+    pub(crate) fn contains(&self, addr: IpAddr, zone: Option<&str>) -> bool {
+        if let Some(z) = zone
+            && !(self.from_zone.is_empty() || self.from_zone == z)
+        {
+            return false;
+        }
+        match addr {
+            IpAddr::V6(v6) => self.prefix.contains(v6),
+            IpAddr::V4(_) => false,
+        }
+    }
+}
 
 /// A parsed NPTv6 rule with precomputed adjustment.
 #[derive(Clone, Debug)]
@@ -158,6 +188,9 @@ pub(crate) struct Nptv6State {
     /// Rules for outbound translation (internal src -> external src).
     /// Indexed by internal prefix.
     outbound: Vec<Nptv6Rule>,
+    /// #17067: the external prefixes of `inbound`, built once at
+    /// snapshot time and shared by every ownership consumer.
+    externals: Arc<[Nptv6External]>,
     counters: std::sync::Arc<Nptv6Counters>,
 }
 
@@ -473,6 +506,26 @@ impl Nptv6State {
             // Outbound: match internal prefix on src, rewrite to external.
             state.outbound.push(rule);
         }
+        // #17067: build the shared external-ownership view once, from
+        // the installed inbound rules (same words/len the deleted
+        // per-call getters recomputed on every invocation).
+        state.externals = state
+            .inbound
+            .iter()
+            .map(|rule| {
+                let mut words = [0u16; 8];
+                for i in 0..rule.prefix_words {
+                    words[i] = rule.external_prefix[i];
+                }
+                Nptv6External {
+                    prefix: PrefixV6::from_addr_len(
+                        words_to_ipv6(&words),
+                        (rule.prefix_words * 16) as u8,
+                    ),
+                    from_zone: rule.from_zone.clone(),
+                }
+            })
+            .collect();
         Ok(state)
     }
 
@@ -629,67 +682,34 @@ impl Nptv6State {
         self.inbound.is_empty()
     }
 
-    /// Returns all external prefixes as (prefix_addr, prefix_len) pairs.
-    pub(crate) fn external_prefixes(&self) -> Vec<(Ipv6Addr, u8)> {
-        self.inbound
-            .iter()
-            .map(|rule| {
-                let mut words = [0u16; 8];
-                for i in 0..rule.prefix_words {
-                    words[i] = rule.external_prefix[i];
-                }
-                let prefix_len = (rule.prefix_words * 16) as u8;
-                (words_to_ipv6(&words), prefix_len)
-            })
-            .collect()
+    /// #17067: the shared external-ownership view built in
+    /// `try_from_snapshots` — one `Arc` clone per consumer, no
+    /// per-call recomputation.
+    pub(crate) fn externals(&self) -> Arc<[Nptv6External]> {
+        Arc::clone(&self.externals)
     }
-}
 
-/// #16015: do any installed NPTv6 external prefixes contain `addr`?
-/// Zone-aware: only prefixes whose from-zone can match a packet with
-/// egress/ingress zone `zone` count (empty = wildcard). `None` zone
-/// means the caller has no zone axis (NAT64/synced) — zone-blind.
-/// NPTv6 publishes statelessly with the port unchanged, so prefix
-/// membership IS ownership at every port.
-pub(crate) fn nptv6_prefix_contains(
-    prefixes: &[(Ipv6Addr, u8, String)],
-    addr: IpAddr,
-    zone: Option<&str>,
-) -> bool {
-    let IpAddr::V6(v6) = addr else { return false };
-    prefixes.iter().any(|(base, len, from_zone)| {
-        if let Some(z) = zone {
-            if !(from_zone.is_empty() || from_zone == z) {
-                return false;
-            }
-        }
-        if *len == 0 {
-            return true;
-        }
-        if *len >= 128 {
-            return *base == v6;
-        }
-        let host = u128::MAX >> *len;
-        (u128::from(v6) & !host) == (u128::from(*base) & !host)
-    })
-}
+    /// #17067: number of installed external prefixes (log/diagnostic
+    /// callers that previously counted a freshly built getter Vec).
+    pub(crate) fn external_count(&self) -> usize {
+        self.externals.len()
+    }
 
-impl Nptv6State {
-    /// #16015: external prefixes WITH their from-zone scope, for the
-    /// pool/interface mint refusal. `external_prefixes` stays zone-less
-    /// for its existing synced-domain callers.
-    pub(crate) fn external_prefixes_zoned(&self) -> Vec<(Ipv6Addr, u8, String)> {
-        self.inbound
-            .iter()
-            .map(|rule| {
-                let mut words = [0u16; 8];
-                for i in 0..rule.prefix_words {
-                    words[i] = rule.external_prefix[i];
-                }
-                let prefix_len = (rule.prefix_words * 16) as u8;
-                (words_to_ipv6(&words), prefix_len, rule.from_zone.clone())
-            })
-            .collect()
+    /// #16015/#17067: does an installed NPTv6 external prefix own
+    /// `addr`? Zone-aware when `zone` is Some (the packet's egress
+    /// zone, the axis `translate_outbound_result` gates on);
+    /// zone-blind when None (NAT64/synced callers with no zone axis).
+    /// NPTv6 publishes statelessly with the port unchanged, so prefix
+    /// membership IS ownership at every port. Synced callers pass
+    /// `None` — the zone-blind shape the deleted zone-less getter
+    /// served is expressible here, so no second getter is needed.
+    /// Production ownership queries go through the shared
+    /// `externals()` view (`nptv6_owns_wire_identity` / synced
+    /// domains); this is the state-level surface the #17067
+    /// equivalence matrix pins.
+    #[cfg(test)]
+    pub(crate) fn owns_external(&self, addr: IpAddr, zone: Option<&str>) -> bool {
+        self.externals.iter().any(|ext| ext.contains(addr, zone))
     }
 }
 

@@ -61,6 +61,19 @@ impl PrefixV6 {
         }
     }
 
+    /// #17067: build directly from a network address and length without
+    /// an `IpNet` detour. The mask is applied here so callers cannot
+    /// install host bits.
+    pub(crate) fn from_addr_len(addr: Ipv6Addr, prefix_len: u8) -> Self {
+        debug_assert!(prefix_len <= 128);
+        let mask = mask_v6(prefix_len);
+        Self {
+            network: u128::from(addr) & mask,
+            mask,
+            prefix_len,
+        }
+    }
+
     pub(crate) fn contains(&self, ip: Ipv6Addr) -> bool {
         (u128::from(ip) & self.mask) == self.network
     }

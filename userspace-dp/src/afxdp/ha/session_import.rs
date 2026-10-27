@@ -435,11 +435,11 @@ impl crate::afxdp::ha::SessionDomain {
         let forwarding = view.forwarding();
         // #15191: the non-pool domains, from this same generation.
         let static_externals = forwarding.static_nat.external_identities();
-        let nptv6_prefixes = forwarding.nptv6.external_prefixes();
+        let nptv6_externals = forwarding.nptv6.externals();
         let domains = crate::nat::SyncedSourceNatDomains {
             source_nat_static: entry.source_nat_static,
             static_externals: Some(&static_externals),
-            nptv6_external_prefixes: &nptv6_prefixes,
+            nptv6_externals: Some(&nptv6_externals),
         };
 
         let zones =
@@ -618,11 +618,11 @@ impl crate::afxdp::ha::SessionDomain {
             );
             // #15191: the non-pool domains, from this same generation.
             let prev_static_externals = forwarding.static_nat.external_identities();
-            let prev_nptv6_prefixes = forwarding.nptv6.external_prefixes();
+            let prev_nptv6_externals = forwarding.nptv6.externals();
             let prev_domains = crate::nat::SyncedSourceNatDomains {
                 source_nat_static: previous.source_nat_static,
                 static_externals: Some(&prev_static_externals),
-                nptv6_external_prefixes: &prev_nptv6_prefixes,
+                nptv6_externals: Some(&prev_nptv6_externals),
             };
             let mut snat_restored =
                 crate::nat::reserve_synced_source_nat_allocation_untracked_preserving_persistent_hold(

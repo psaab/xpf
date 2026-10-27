@@ -353,7 +353,7 @@ fn ha_iface_import_on_static_external_is_refused_16034() {
         crate::nat::SyncedSourceNatDomains {
             source_nat_static: Some(false),
             static_externals: Some(&statics),
-            nptv6_external_prefixes: &[],
+            nptv6_externals: None,
         },
     );
     assert!(
@@ -383,7 +383,7 @@ fn ha_iface_import_outside_static_still_reserves_16034() {
         crate::nat::SyncedSourceNatDomains {
             source_nat_static: Some(false),
             static_externals: Some(&statics),
-            nptv6_external_prefixes: &[],
+            nptv6_externals: None,
         },
     );
     assert!(
@@ -415,7 +415,7 @@ fn ha_genuine_static_import_still_succeeds_16034() {
         crate::nat::SyncedSourceNatDomains {
             source_nat_static: Some(true),
             static_externals: Some(&statics),
-            nptv6_external_prefixes: &[],
+            nptv6_externals: None,
         },
     );
     assert!(

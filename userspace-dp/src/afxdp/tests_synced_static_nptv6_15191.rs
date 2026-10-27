@@ -74,7 +74,7 @@ fn import_synced(
     source_nat_static: Option<bool>,
 ) -> bool {
     let static_externals = state.static_nat.external_identities();
-    let nptv6_prefixes = state.nptv6.external_prefixes();
+    let nptv6_externals = state.nptv6.externals();
     crate::nat::reserve_synced_source_nat_allocation_untracked(
         &state.iface_nat_allocators,
         &state.source_nat_rules,
@@ -86,7 +86,7 @@ fn import_synced(
         crate::nat::SyncedSourceNatDomains {
             source_nat_static,
             static_externals: Some(&static_externals),
-            nptv6_external_prefixes: &nptv6_prefixes,
+            nptv6_externals: Some(&nptv6_externals),
         },
     )
 }

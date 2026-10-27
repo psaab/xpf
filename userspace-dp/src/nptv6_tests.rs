@@ -1422,3 +1422,160 @@ fn outbound_iid_adjusting_to_all_zero_is_untranslatable_13694() {
     );
     assert_eq!(src, original, "a refused address must be left untouched");
 }
+
+// #17067: the single ownership surface. `owns_external` (via
+// `Nptv6External::contains` over the `PrefixV6` built in
+// `try_from_snapshots`) must reproduce BOTH deleted predicates
+// across their reachable matrix. The oracle below is the verbatim
+// pre-refactor `ipv6_prefix_contains` formula (synced.rs) and the
+// verbatim zone gate from `nptv6_prefix_contains` (nptv6.rs),
+// inlined here so this cell fails if the unified implementation
+// drifts from either legacy behaviour.
+#[test]
+fn owns_external_matches_both_legacy_predicates_across_matrix_17067() {
+    fn legacy_zone_blind(base: Ipv6Addr, len: u8, addr: Ipv6Addr) -> bool {
+        if len == 0 {
+            return true;
+        }
+        if len >= 128 {
+            return base == addr;
+        }
+        let host = u128::MAX >> len;
+        (u128::from(addr) & !host) == (u128::from(base) & !host)
+    }
+    fn legacy_zoned(base: Ipv6Addr, len: u8, from_zone: &str, addr: IpAddr, zone: Option<&str>) -> bool {
+        let IpAddr::V6(v6) = addr else { return false };
+        if let Some(z) = zone
+            && !(from_zone.is_empty() || from_zone == z)
+        {
+            return false;
+        }
+        legacy_zone_blind(base, len, v6)
+    }
+
+    // (external_prefix, from_zone) — /48 + /64, wildcard + zoned.
+    let cases: &[(&str, &str, Ipv6Addr, u8)] = &[
+        ("2001:db8:1::/48", "wan", "2001:db8:1::".parse().unwrap(), 48),
+        ("2001:db8:2:0::/64", "", "2001:db8:2::".parse().unwrap(), 64),
+        ("2001:db8:3::/48", "", "2001:db8:3::".parse().unwrap(), 48),
+    ];
+    let state = Nptv6State::from_snapshots(
+        &cases
+            .iter()
+            .enumerate()
+            .map(|(i, (ext, zone, _, _))| Nptv6RuleSnapshot {
+                name: format!("m{i}"),
+                from_zone: zone.to_string(),
+                internal_prefix: format!("fd00:{}::/{}", i + 1, ext.rsplit('/').next().unwrap()),
+                external_prefix: ext.to_string(),
+            })
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(state.external_count(), cases.len());
+    let externals = state.externals();
+    assert_eq!(externals.len(), cases.len());
+
+    let addrs: &[&str] = &[
+        "2001:db8:1::1",          // inside /48, network+1
+        "2001:db8:1:ffff::1",     // inside /48, last subnet
+        "2001:db8:1::",           // network address itself
+        "2001:db8:2::1",          // just outside /48 (next prefix)
+        "2001:db8:0:ffff::1",     // just below /48
+        "2001:db8:2:0::1",        // inside /64
+        "2001:db8:2:0:ffff::1",   // inside /64, host bits set
+        "2001:db8:2:1::1",        // outside /64, inside nothing
+        "2001:db8:3:abcd::5",     // inside wildcard /48
+        "::1",                     // loopback, outside all
+        "fe80::1",                 // link-local, outside all
+    ];
+    let zones: &[Option<&str>] = &[None, Some("wan"), Some("lan"), Some("")];
+    for (ext_str, from_zone, base, len) in cases {
+        let _ = ext_str;
+        for a in addrs {
+            let addr: IpAddr = a.parse().unwrap();
+            for z in zones {
+                let expected = legacy_zoned(*base, *len, from_zone, addr, *z);
+                // Per-external: the owned type alone must match the
+                // legacy zoned closure for its own (base,len,zone).
+                let ext = externals
+                    .iter()
+                    .find(|e| e.prefix.addr() == *base && e.prefix.prefix_len() == *len)
+                    .expect("fixture external present");
+                assert_eq!(
+                    ext.contains(addr, *z),
+                    expected,
+                    "Nptv6External mismatch base={base}/{len} zone={from_zone:?} addr={a} query={z:?}"
+                );
+            }
+            // Zone-blind aggregate must match the legacy synced
+            // predicate OR-ed over every installed prefix.
+            let v6: Ipv6Addr = a.parse().unwrap();
+            let expected_blind = cases
+                .iter()
+                .any(|(_, _, b, l)| legacy_zone_blind(*b, *l, v6));
+            assert_eq!(
+                state.owns_external(addr, None),
+                expected_blind,
+                "owns_external(None) mismatch addr={a}"
+            );
+        }
+    }
+    // Zone-aware aggregate: only the wan-scoped /48 counts for "wan";
+    // wildcard prefixes count for every zone; "lan" sees wildcards only.
+    let inside48: IpAddr = "2001:db8:1::9".parse().unwrap();
+    assert!(state.owns_external(inside48, Some("wan")));
+    assert!(!state.owns_external(inside48, Some("lan")));
+    assert!(state.owns_external(inside48, None));
+    // V4 is never owned (both legacy predicates returned false).
+    assert!(!state.owns_external("10.0.0.1".parse::<IpAddr>().unwrap(), None));
+    assert!(!state.owns_external("10.0.0.1".parse::<IpAddr>().unwrap(), Some("wan")));
+    // Empty state owns nothing.
+    let empty = Nptv6State::from_snapshots(&[]);
+    assert_eq!(empty.external_count(), 0);
+    assert!(!empty.owns_external(inside48, None));
+}
+
+// #17067: the forwarding-state path production actually queries —
+// `wire_nptv6_overlap_peers` hands `state.nptv6.externals()` to pool
+// rules, and `nptv6_owns_wire_identity` over that shared view must
+// agree with `owns_external` (and therefore both legacy predicates)
+// on the same matrix. Guards against a wiring regression where the
+// state and the rule-carried view diverge.
+#[test]
+fn owns_external_agrees_with_rule_carried_view_17067() {
+    let state = Nptv6State::from_snapshots(&[
+        Nptv6RuleSnapshot {
+            name: "w".to_string(),
+            from_zone: "wan".to_string(),
+            internal_prefix: "fd00:1::/48".to_string(),
+            external_prefix: "2001:db8:1::/48".to_string(),
+        },
+        Nptv6RuleSnapshot {
+            name: "wild".to_string(),
+            from_zone: String::new(),
+            internal_prefix: "fd00:2::/64".to_string(),
+            external_prefix: "2001:db8:2::/64".to_string(),
+        },
+    ]);
+    let view = state.externals();
+    for (a, z) in [
+        ("2001:db8:1::1", Some("wan")),
+        ("2001:db8:1::1", Some("lan")),
+        ("2001:db8:1::1", None),
+        ("2001:db8:2::1", Some("lan")),
+        ("2001:db8:9::1", None),
+    ] {
+        let addr: IpAddr = a.parse().unwrap();
+        assert_eq!(
+            state.owns_external(addr, z),
+            crate::nat::nptv6_owns_wire_identity(Some(&view), addr, z),
+            "state vs rule-carried view mismatch addr={a} zone={z:?}"
+        );
+    }
+    // The `None`-view fast path stays false.
+    assert!(!crate::nat::nptv6_owns_wire_identity(
+        None,
+        "2001:db8:1::1".parse().unwrap(),
+        None
+    ));
+}

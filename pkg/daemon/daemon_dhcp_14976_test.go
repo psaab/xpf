@@ -89,7 +89,7 @@ const removeGateway14976 = "delete security ike gateway gw1\n"
 // RED on pre-fix code:
 //   - the mgmt-route seam observes applySem FREE (routes reconciled
 //     unserialized against a concurrent commit), and
-//   - reapplyIPsecForLeaseChange receives the stale config A, so the
+//   - the management-only rebind receives the stale config A, so the
 //     just-removed gateway (and its PSKs) would be resurrected into
 //     swanctl by ipsecApplyForLeaseChange.
 //

@@ -18,15 +18,45 @@ pub(in crate::afxdp) struct ConntrackFds {
 }
 
 /// #16185: one packet's two clocks. `ns` (monotonic nanoseconds) and
-/// `secs` (seconds for HA leases) travel together at every
-/// resolve/teardown site; bundling them removes the same-typed `u64`
-/// neighbour swap hazard. `Tick` carries only these two: the HA
+/// `secs` (seconds for the HA-lease checks in the resolve path) are
+/// two readings of the same monotonic clock: `secs == ns / 1_000_000_000`.
+/// #17069: construction is only through [`Tick::from_ns`], which
+/// derives `secs` from `ns`, so the pairing the bundle asserts cannot
+/// be broken by a zero-filled or independently sampled `secs`. The
+/// sole `secs` reader is the resolve path (`resolve.rs` reads
+/// `shared.tick.secs` for `should_keep_synced_hit_transient` and the
+/// HA forwarding-active checks); teardown/housekeeping bundles fed
+/// through this constructor therefore carry the real seconds value
+/// instead of the pre-#17069 `secs: 0`, which would have read every
+/// non-zero HA lease as active (fail-open at time 0) had a teardown
+/// consumer ever read it. `Tick` carries only these two: the HA
 /// startup-grace deadline stays a separate named argument because it
 /// is a deadline, not a clock reading.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) struct Tick {
     pub ns: u64,
     pub secs: u64,
+}
+
+impl Tick {
+    /// The only clock constructor: both fields from one monotonic
+    /// reading, `secs` derived so the two can never disagree.
+    pub(in crate::afxdp) fn from_ns(ns: u64) -> Self {
+        Self {
+            ns,
+            secs: ns / 1_000_000_000,
+        }
+    }
+
+    /// Test-only decoupled clock: HA-lease cells need a `secs` that
+    /// `from_ns` cannot express (e.g. `ns: 1_000_000, secs: 1_000`
+    /// against a lease expiring at 500). Production has no caller:
+    /// every production bundle goes through `from_ns`, so the
+    /// `secs == ns / 1_000_000_000` invariant holds outside tests.
+    #[cfg(test)]
+    pub(in crate::afxdp) fn from_parts(ns: u64, secs: u64) -> Self {
+        Self { ns, secs }
+    }
 }
 
 /// Shared-session backing references that travel together at every
@@ -93,7 +123,7 @@ impl<'a> SharedSessionRefs<'a> {
             peer_worker_commands,
             worker_commands_by_id,
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick::default(),
+            tick: Tick::from_ns(0),
         }
     }
 
@@ -342,7 +372,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     // so the promote leg stamps the install time, not the purge's.
     let shared = shared.with_conntrack_tick(
         shared.conntrack,
-        Tick { ns: promotion.now_ns, secs: shared.tick.secs },
+        Tick::from_ns(promotion.now_ns),
     );
     resolved.metadata = promote_synced_session_with_conntrack(
         sessions,

@@ -1,13 +1,18 @@
-// #6386 leaf extraction: the Junos host-inbound / to-zone junos-host
-// policy helpers (#3019/#3292/#3610/#3706), lifted verbatim out of
-// poll_descriptor/mod.rs: policy_packet_icmp, junos_host_policy_eval,
-// enum JunosHostLocalPolicy, emit_junos_host_deny, emit_host_inbound_deny,
-// junos_host_local_policy. policy_packet_icmp keeps its #[inline]; the
-// two per-packet-capable evaluators junos_host_policy_eval and
-// junos_host_local_policy GAIN #[inline] (the only non-motion change,
-// #6386 hot-path preservation contract — restores same-CGU inlining
-// eligibility across the new module boundary); the two cold event
-// emitters stay un-hinted. Bodies byte-identical to their prior location.
+// Provenance: extracted from poll_descriptor/mod.rs at
+// f90e55a944 (2026-07-23, #6386): the Junos host-inbound /
+// to-zone junos-host policy helpers (#3019/#3292/#3610/#3706) —
+// policy_packet_icmp, junos_host_policy_eval, enum
+// JunosHostLocalPolicy, emit_junos_host_deny,
+// emit_host_inbound_deny, junos_host_local_policy. At that
+// commit policy_packet_icmp kept its #[inline]; the two
+// per-packet-capable evaluators junos_host_policy_eval and
+// junos_host_local_policy gained #[inline] (the only non-motion
+// change, #6386 hot-path preservation contract — it restored
+// same-CGU inlining eligibility across the new module
+// boundary); the two cold event emitters stayed un-hinted; and
+// the bodies matched their prior location. That is a
+// split-time record, not a claim about the current tree: this
+// file has been edited since.
 
 use super::reject_reply::enqueue_deny_reply;
 use super::*;

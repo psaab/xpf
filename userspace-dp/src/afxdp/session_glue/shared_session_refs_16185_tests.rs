@@ -21,7 +21,10 @@
 //! only the `detached`/`with_conntrack_tick` constructor values.
 //! No cell observes a `Tick.secs` consumer: the resolve path's
 //! seconds reading is exercised by the existing HA resolution
-//! tests through their own bundles, not asserted here.
+//! tests through their own bundles, not asserted here. #17069:
+//! the `tick_from_ns_derives_secs_17069` and
+//! `tick_no_literal_construction_17069` cells below pin the
+//! single-constructor invariant instead.
 
 use super::*;
 use std::net::{IpAddr, Ipv4Addr};
@@ -158,10 +161,7 @@ fn shared_refs_maps_and_peer_queue_reach_promote_16185() {
             v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
             v6: -1,
         },
-        tick: Tick {
-            ns: 2_000_000,
-            secs: 9,
-        },
+        tick: Tick::from_parts(2_000_000, 9),
     };
     let promoted = maybe_promote_synced_session(
         &mut sessions,
@@ -303,10 +303,7 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
             v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD_V6,
             v6: -1,
         },
-        tick: Tick {
-            ns: 1_000_000,
-            secs: 9,
-        },
+        tick: Tick::from_parts(1_000_000, 9),
     };
     let mut resolved = ResolvedFlowSessionDecision {
         key: wire_key.clone(),
@@ -387,13 +384,92 @@ fn shared_refs_detached_is_no_conntrack_no_clock_16185() {
         empty_worker_commands_by_id(),
     );
     assert_eq!(shared.conntrack, ConntrackFds { v4: -1, v6: -1 });
-    assert_eq!(shared.tick, Tick { ns: 0, secs: 0 });
+    assert_eq!(shared.tick, Tick::from_ns(0));
     // with_conntrack_tick grafts exactly the named fields.
     let grafted =
-        shared.with_conntrack_tick(ConntrackFds { v4: 11, v6: 22 }, Tick { ns: 33, secs: 44 });
+        shared.with_conntrack_tick(ConntrackFds { v4: 11, v6: 22 }, Tick::from_parts(33, 44));
     assert_eq!(grafted.conntrack, ConntrackFds { v4: 11, v6: 22 });
-    assert_eq!(grafted.tick, Tick { ns: 33, secs: 44 });
+    assert_eq!(grafted.tick, Tick::from_parts(33, 44));
     assert!(std::ptr::eq(grafted.sessions, &shared_sessions));
+}
+
+/// #17069: `Tick::from_ns` is the only clock constructor — `secs`
+/// is derived from the same monotonic reading as `ns`, so no
+/// production bundle can carry the pre-#17069 `secs: 0` that would
+/// have evaluated HA leases at time 0 (fail-open).
+#[test]
+fn tick_from_ns_derives_secs_17069() {
+    assert_eq!(Tick::from_ns(0), Tick::from_parts(0, 0));
+    assert_eq!(Tick::from_ns(999_999_999), Tick::from_parts(999_999_999, 0));
+    assert_eq!(
+        Tick::from_ns(2_500_000_000),
+        Tick::from_parts(2_500_000_000, 2)
+    );
+    // `detached` is the zero clock, still through the constructor.
+    assert_eq!(Tick::from_ns(0).secs, 0);
+}
+
+/// #17069 structure guard: no `Tick { .. }` literal and no
+/// `Tick::default()` in the six production files listed below
+/// (the sites that construct Tick bundles today) — new sites in
+/// OTHER files escape this guard; extending the list is part of
+/// adding one. Every policed bundle goes through `from_ns` (or
+/// the cfg(test) `from_parts` for decoupled HA-lease cells), so
+/// a zero-filled `secs` cannot return at a policed site.
+#[test]
+fn tick_no_literal_construction_17069() {
+    let prod_files: &[(&str, &str)] = &[
+        (
+            "poll_descriptor/mod.rs",
+            include_str!("../poll_descriptor/mod.rs"),
+        ),
+        (
+            "session_glue/promote.rs",
+            include_str!("promote.rs"),
+        ),
+        (
+            "session_glue/tx_cancel.rs",
+            include_str!("tx_cancel.rs"),
+        ),
+        (
+            "worker/loop_body/mod.rs",
+            include_str!("../worker/loop_body/mod.rs"),
+        ),
+        (
+            "worker/loop_body/reconcile.rs",
+            include_str!("../worker/loop_body/reconcile.rs"),
+        ),
+        (
+            "worker/loop_body/gc_teardown.rs",
+            include_str!("../worker/loop_body/gc_teardown.rs"),
+        ),
+    ];
+    for (name, src) in prod_files {
+        // The promote.rs doc comment cites the old zero-filled form
+        // historically, and its `struct Tick {` line is the type
+        // declaration; neither is a construction site.
+        let body: String = src
+            .lines()
+            .filter(|l| {
+                !l.trim_start().starts_with("///")
+                    && !l.contains("struct Tick {")
+                    && !l.contains("impl Tick {")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !body.contains("Tick {"),
+            "{name} must construct Tick via Tick::from_ns, not a literal"
+        );
+        assert!(
+            !body.contains("Tick::default"),
+            "{name} must not use Tick::default (removed in #17069)"
+        );
+        assert!(
+            !body.contains("secs: 0"),
+            "{name} must not zero-fill Tick.secs (#17069)"
+        );
+    }
 }
 
 /// #16185 wiring cell 4: the deferred-promotion leg of
@@ -465,7 +541,7 @@ fn shared_refs_conntrack_v4_reaches_deferred_promotion_16185() {
             v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
             v6: -1,
         },
-        tick: Tick { ns: 5, secs: 9 },
+        tick: Tick::from_parts(5, 9),
     };
     let mut resolved = ResolvedFlowSessionDecision {
         key: key.clone(),

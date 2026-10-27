@@ -719,7 +719,7 @@ fn resolve_with_unique_reply_proof_12257(
             peer_worker_commands: &[],
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: now_ns, secs: now_secs },
+            tick: Tick::from_ns(now_ns),
         },
         forwarding,
         &ha_state,
