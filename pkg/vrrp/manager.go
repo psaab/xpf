@@ -753,7 +753,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 			// and GARPCount (per-VIP gratuitous-ARP burst on failover) are wire/
 			// timer/burst fields the run loop re-reads from cfg, so a day-2 change
 			// to EITHER must break the no-change shortcut and take the in-place
-			// updateConfig arm below — otherwise a commit changing only
+			// updateConfigHeld arm below — otherwise a commit changing only
 			// reth-advertise-interval or gratuitous-arp-count is silently dropped
 			// until an unrelated restart (#5087).
 			existingVIPs := existing.vipsSnapshot()
@@ -967,7 +967,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 // resign arm, #16821); the explicit priority-0 burst after it remains
 // the takeover signal. The resigned instance then keeps priority 0 —
 // so its master-down skew is longest and it cannot win a re-election
-// — until a priority restore (UpdateRGPriority / updateConfig)
+// — until a priority restore (UpdateRGPriority / updateConfigHeld)
 // supersedes and drops the stash.
 // Used when cluster state transitions from Primary to Secondary
 // (manual failover, weight drop, etc.) in non-preempt mode.
@@ -1328,11 +1328,11 @@ func (m *Manager) Status() string {
 		state := vi.getState()
 		// #5718 (codex-182 C-HA C01c): snapshot the mutable cfg fields under
 		// vi.mu.RLock before formatting. Priority/Preempt/AdvertiseInterval are
-		// mutated under vi.mu.Lock (updateConfig, UpdateRGPriority,
+		// mutated under vi.mu.Lock (updateConfigHeld, UpdateRGPriority,
 		// suppressPreempt/restorePreempt); reading them here while holding only
 		// m.mu.RLock races a concurrent failover priority update — a
 		// diagnostic-only data race go test -race flags. Mirrors the snapshot
-		// idiom in advertInterval/getPriority (#6230). VirtualAddresses is
+		// idiom in advertiseIntervalMS/getPriority (#6230). VirtualAddresses is
 		// mutable under vi.mu on an in-place VIP-set commit (#10780), so it is
 		// deep-copied under this same lock alongside the raced scalar fields.
 		// getState() already RLocks internally, so it stays outside this block;

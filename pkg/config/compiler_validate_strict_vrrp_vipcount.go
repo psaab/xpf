@@ -135,7 +135,7 @@ func validateVRRPVIPCountStrict(cfg *Config) error {
 	// RETH unit's address count has no advert consequence. Explicit vrrp-group
 	// blocks are still checked — they are independent of cluster mode.
 	rethVRRPActive := true
-	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+	if cc := cfg.Chassis.Cluster; cc != nil && !cc.UsesRethVRRP() {
 		rethVRRPActive = false
 	}
 

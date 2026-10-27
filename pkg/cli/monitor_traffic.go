@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/monitoriface"
 	"github.com/psaab/xpf/pkg/termsafe"
 )
 
@@ -165,7 +166,7 @@ func (c *CLI) handleMonitorTraffic(args []string) error {
 
 	// Resolve fabric IPVLAN overlays to physical parent (#136).
 	origName := iface
-	iface = resolveFabricParent(kernelIface)
+	iface = monitoriface.ResolvePhysicalParent(kernelIface)
 
 	// Warn about XDP redirect visibility on fabric interfaces (#138).
 	if strings.HasPrefix(origName, "fab") || strings.HasPrefix(origName, "em") {

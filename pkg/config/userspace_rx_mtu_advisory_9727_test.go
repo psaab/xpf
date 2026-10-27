@@ -136,7 +136,7 @@ func TestRxMTUAdvisoryStaysSilentForInterfacesTheDataplaneDoesNotBind9727(t *tes
 func TestRxMTUAdvisoryIsSuppressedOnTheTolerantPaths9727(t *testing.T) {
 	cfg := rxMTUCfg9727(map[string][]string{"trust": {"ge-0/0/1.0"}},
 		map[string]*InterfaceConfig{"ge-0/0/1": iface9727("ge-0/0/1", 9000, map[int]int{0: 0})})
-	appendUserspaceRxMTUAdvisoryLocked(cfg, compileOpts{suppressContestedTrunkZoneAdvisory: true})
+	appendUserspaceRxMTUAdvisoryLocked(cfg, compileOpts{tolerant: true})
 	if w := rxMTUWarnings9727(cfg); len(w) != 0 {
 		t.Fatalf("the tolerant boot/peer-sync paths must not repeat the advisory: %v", w)
 	}

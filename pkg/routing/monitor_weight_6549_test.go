@@ -11,18 +11,12 @@ import (
 // #6549: InterfaceMonitorStatus.Weight must carry the EFFECTIVE monitor weight,
 // bounded to the [0,255] heartbeat weight domain — not the raw configured one.
 //
-// These statuses are not display-only. pkg/daemon's config-apply tail feeds
-// them straight into cluster.Manager.SetMonitorWeight as election debt on every
-// commit / boot Load / peer SyncApply:
-//
-//	d.routing.ApplyInterfaceMonitors(cfg.Chassis.Cluster.RedundancyGroups)
-//	d.cluster.UpdateConfig(cfg.Chassis.Cluster)
-//	d.cluster.SetMonitorWeight(rgID, st.Interface, !st.Up, st.Weight)
-//
-// A raw negative weight there is negative DEBT: it credits weight back and
-// cancels a genuinely dead sibling link, leaving the node primary on dead
-// links. They are ALSO what `show chassis cluster interfaces` renders for a
-// live monitor, so a raw value is simultaneously an observability lie.
+// #17132: these statuses are DISPLAY ONLY (they were election debt via the
+// daemon apply tail before #17132 removed that feed). They are what
+// `show chassis cluster interfaces` renders for a live monitor, so a raw
+// out-of-range value is an observability lie: the display would claim a
+// monitor contributes -100 while the election (pkg/cluster, the only
+// producer) contributes the clamped 0.
 //
 // An out-of-range weight is rejected at commit but survives the TOLERANT paths
 // (Store.Load of a persisted config, Store.SyncApply of a peer-pushed one),
@@ -83,8 +77,7 @@ func TestInterfaceMonitorStatus_WeightIsBounded_6549(t *testing.T) {
 				}
 				if statuses[0].Weight != tt.want {
 					t.Errorf("up=%v: configured weight %d reported as %d, want the "+
-						"effective %d — the daemon apply tail installs this value "+
-						"as election debt", up, tt.configured, statuses[0].Weight, tt.want)
+						"effective %d", up, tt.configured, statuses[0].Weight, tt.want)
 				}
 			}
 		})

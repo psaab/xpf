@@ -6068,7 +6068,7 @@ fn gre1881_mode_flip_to_wireguard_prunes_gre_entry() {
     // Post-#10409 contract: live WG entries publish too — the flip
     // leaves exactly the WG delivery; the GRE sender was unpublished
     // before the live thread was joined (Store #1 excludes the stale
-    // id; stop_remove_local_tunnel_entry joins synchronously).
+    // id; the registry bulk stop_remove joins synchronously).
     let deliveries = coordinator.local_tunnel_deliveries.load();
     assert_eq!(
         deliveries.len(),
@@ -6151,6 +6151,149 @@ fn gre1881_defer_prune_removes_only_stale_entries() {
     coordinator.prune_local_tunnel_sources_for_snapshot(&ConfigSnapshot::default());
     assert!(coordinator.tunnel_sources.is_empty());
     assert!(coordinator.local_tunnel_deliveries.load().is_empty());
+}
+
+/// #17084 parity: a same-id moved-attachment (and, for WG, a changed
+/// crypto identity that stays hydratable) snapshot on the defer-workers
+/// path must prune BOTH families. Pre-fix the WG prune kept the entry
+/// because it only checked hydratable presence.
+#[test]
+fn tunnel17084_defer_prune_parity_moved_attachment_and_identity() {
+    // GRE side: same-id moved attachment prunes.
+    let mut gre = gre1881_coordinator_with_worker();
+    let gre_snap = gre1881_snapshot(1, 36289, "gre1881h", "198.51.100.7");
+    gre.refresh_runtime_snapshot(&gre_snap)
+        .expect("GRE refresh must succeed");
+    assert!(gre.tunnel_sources.contains_key(&1));
+    let gre_moved = gre1881_snapshot(1, 46289, "gre1881h", "198.51.100.7");
+    gre.prune_local_tunnel_sources_for_snapshot(&gre_moved);
+    assert!(
+        gre.tunnel_sources.is_empty(),
+        "GRE defer prune must remove same-id moved attachment"
+    );
+
+    // WG side: same-id moved attachment prunes (fails pre-fix).
+    let mut wg = Coordinator::new();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let wg_snap = wg1866_snapshot(1, 4242, "wgt17084a", port, WG1866_PRIVKEY_A);
+    wg.refresh_runtime_snapshot(&wg_snap)
+        .expect("WG refresh must succeed");
+    assert!(wg.wg_control_threads.contains_key(&1));
+    let wg_moved = wg1866_snapshot(1, 4243, "wgt17084a", port, WG1866_PRIVKEY_A);
+    wg.prune_wg_control_threads_for_snapshot(&wg_moved);
+    assert!(
+        wg.wg_control_threads.is_empty(),
+        "WG defer prune must remove same-id moved attachment (parity with GRE)"
+    );
+
+    // WG side: same-id changed crypto identity (still hydratable) prunes.
+    let mut wg2 = Coordinator::new();
+    let port2 = crate::test_ports::reserve_ephemeral_udp_port();
+    wg2.refresh_runtime_snapshot(&wg1866_snapshot(1, 4242, "wgt17084b", port2, WG1866_PRIVKEY_A))
+        .expect("WG refresh must succeed");
+    assert!(wg2.wg_control_threads.contains_key(&1));
+    wg2.prune_wg_control_threads_for_snapshot(&wg1866_snapshot(
+        1,
+        4242,
+        "wgt17084b",
+        port2,
+        WG1866_PRIVKEY_B,
+    ));
+    assert!(
+        wg2.wg_control_threads.is_empty(),
+        "WG defer prune must remove same-id changed crypto identity"
+    );
+
+    // Unchanged snapshot keeps both entries.
+    let mut gre_keep = gre1881_coordinator_with_worker();
+    gre_keep
+        .refresh_runtime_snapshot(&gre_snap)
+        .expect("GRE refresh must succeed");
+    gre_keep.prune_local_tunnel_sources_for_snapshot(&gre_snap);
+    assert!(gre_keep.tunnel_sources.contains_key(&1));
+    let mut wg_keep = Coordinator::new();
+    let port3 = crate::test_ports::reserve_ephemeral_udp_port();
+    let keep_snap = wg1866_snapshot(1, 4242, "wgt17084c", port3, WG1866_PRIVKEY_A);
+    wg_keep
+        .refresh_runtime_snapshot(&keep_snap)
+        .expect("WG refresh must succeed");
+    wg_keep.prune_wg_control_threads_for_snapshot(&keep_snap);
+    assert!(wg_keep.wg_control_threads.contains_key(&1));
+}
+
+/// #17084 fold (Rev18138): the WG stop-all on the disarmed refresh leg
+/// must unpublish the WG delivery BEFORE joining its thread, while
+/// preserving any live GRE delivery — the pre-consolidation helper
+/// published excluding the WG batch; the consolidated `stop_all`
+/// initially published nothing, leaving a dead WG sender in
+/// `local_tunnel_deliveries` indefinitely while disarmed.
+///
+/// Both entries are driven live together (one joint snapshot, TUN
+/// stand-ins so neither thread exits on `open_tun`), then
+/// `stop_all_wg_control_threads` — the exact helper the disarmed leg
+/// calls first — runs: the WG entry is gone and its ifindex is
+/// unpublished, while the live GRE entry and its delivery survive
+/// (the leg's later GRE stop-all is what eventually empties the map).
+/// Reverting the publish (plain `stop_all`) leaves the WG sender
+/// published and this cell goes RED; publishing the empty map
+/// instead would withdraw the GRE sender and also go RED.
+#[test]
+fn wg1866_stop_all_unpublishes_wg_delivery_and_preserves_gre() {
+    use crate::afxdp::tunnel::register_tun_standin_10553;
+    // Keep both spawned threads live: without stand-ins they exit on
+    // open_tun, tombstone, and their deliveries are unpublished by
+    // the sweep — the joint precondition below could not hold.
+    let _gre_tun = register_tun_standin_10553("gre1866wg");
+    let _wg_tun = super::wg_control::register_tun_standin_9521("wgt1866wg");
+    let mut coordinator = gre1881_coordinator_with_worker();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let gre_snap = gre1881_snapshot(1, 36291, "gre1866wg", "198.51.100.7");
+    let wg_snap = wg1866_snapshot(2, 4244, "wgt1866wg", port, WG1866_PRIVKEY_A);
+    let mut both = gre_snap;
+    both.interfaces.extend(wg_snap.interfaces.iter().cloned());
+    both.tunnel_endpoints
+        .extend(wg_snap.tunnel_endpoints.iter().cloned());
+    coordinator
+        .refresh_runtime_snapshot(&both)
+        .expect("joint refresh must succeed");
+    assert!(
+        coordinator.tunnel_sources.contains_key(&1),
+        "precondition: GRE entry live"
+    );
+    assert!(
+        coordinator.wg_control_threads.contains_key(&2),
+        "precondition: WG entry live"
+    );
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert!(
+        deliveries.contains_key(&36291),
+        "precondition: GRE delivery published"
+    );
+    assert!(
+        deliveries.contains_key(&4244),
+        "precondition: WG delivery published"
+    );
+    drop(deliveries);
+
+    coordinator.stop_all_wg_control_threads("disarmed");
+
+    assert!(
+        coordinator.wg_control_threads.is_empty(),
+        "stop-all must stop+join+remove every WG entry"
+    );
+    assert!(
+        coordinator.tunnel_sources.contains_key(&1),
+        "WG stop-all must not touch the GRE registry"
+    );
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert!(
+        !deliveries.contains_key(&4244),
+        "WG delivery must be unpublished before/by the stop-all join"
+    );
+    assert!(
+        deliveries.contains_key(&36291),
+        "live GRE delivery must survive the WG stop-all publish"
+    );
 }
 
 /// #1881 F6: a thread that exits (open_tun failure here) is
