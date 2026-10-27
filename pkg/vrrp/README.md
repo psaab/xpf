@@ -72,7 +72,7 @@ default RETH ownership/failover path.
   `gratuitous-arp-count` is detected, and `updateConfigHeld` copies both into the
   running instance's `cfg` (#5087). Since #15689 the run loop consumes
   `configUpdatedCh` in BOTH states: StateMaster immediately advertises and
-  re-arms `advertTimer` via `armAdvertTimer` at the new interval (snapshot via `advertiseIntervalMS()`) when the interval
+  re-arms `advertTimer` via `armAdvertTimer` at the new interval (`armAdvertTimer` snapshots `cfg` under `Lock()` via `advertIntervalFromMS`) when the interval
   or effective priority changed (a shrink left on the old arm starved
   BACKUP peers into a dual-MASTER window, and the undrained token leaked
   into a later BACKUP tenure); StateBackup re-arms `masterDownTimer` when
@@ -527,7 +527,7 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   path pass `force=false`; `ReconcileVIPs` passes `force=true` because the RETH
   MAC just changed and the correction GARP must not be swallowed by a routine
   burst that fired in the prior 500 ms (#2081). The decision lives in the
-  network-free helper `garpSendAllowedForOwner`, which is unit-tested directly.
+  network-free helper `garpSendAllowedForOwner`, which tests reach through the two-argument `garpSendAllowed` seam in `test_helpers_17165_test.go` (production `sendGARP` passes its captured owner generation directly).
   `becomeMaster` records its actuated VIPs as pending under `vipMu` before
   releasing the lock (#14155), so an `updateVIPs` that publishes a newer
   epoch before the deferred failover sender runs carries the still-
@@ -1178,16 +1178,21 @@ pointer means unresolved). The lazy-resolve semantics are preserved —
 the address still becomes available once it is resolvable — and the
 packet hot path stays lock-free, mirroring the `lastDropWarn` atomic.
 
-`advertiseIntervalMS()` / `armAdvertTimer` is a third cross-goroutine hazard (#6230). The
-run-loop goroutine reads it on every advert-timer reset to read
-`cfg.AdvertiseInterval`, while cfg writers (`updateConfigHeld`) mutate `cfg`
+`armAdvertTimer` is a third cross-goroutine hazard (#6230). The
+run-loop goroutine reads `cfg.AdvertiseInterval` on every advert-timer
+reset, while cfg writers (`updateConfigHeld`) mutate `cfg`
 under `vi.mu.Lock()`. The read was unlocked — a data race `go test
 -race` flags — where every sibling accessor (`getState`,
 `masterDownInterval`, `preemptHoldDuration`) already snapshots `cfg`
-under `vi.mu`. It now RLocks like they do (via `advertiseIntervalMS()` and `armAdvertTimer`). The one caller that already
-holds the write lock, `admitAndRecord` → `masterAdverFloor`, reads
-via the lock-free `advertIntervalLocked` variant instead — re-taking the
-RLock under the held `Lock()` would self-deadlock.
+under `vi.mu`. The re-arm path now takes the write lock:
+`armAdvertTimer` reads `cfg` under `Lock()` via
+`advertIntervalFromMS`, so snapshot, `Reset`, and the applied-interval
+note share one hold. `advertiseIntervalMS()` (RLock) serves only the
+send sink — `sendAdvert`'s wire encoding — not the timer. The one
+caller that already holds the write lock, `admitAndRecord` →
+`masterAdverFloor`, reads via the lock-free `advertIntervalLocked`
+variant instead — re-taking the RLock under the held `Lock()` would
+self-deadlock.
 
 #### Source re-resolution on address change (#2528)
 

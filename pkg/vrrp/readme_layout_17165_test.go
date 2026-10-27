@@ -14,7 +14,8 @@ import (
 // and the File layout omitted the files the #8090 split and later work
 // created (instance_preempt/resign/rx/timing/transition/vipupdate.go
 // and resign_barrier.go). The seams now live in _test.go helpers; the
-// prose is re-pointed at advertiseIntervalMS-carrying armAdvertTimer,
+// prose is re-pointed at armAdvertTimer (Lock-held cfg snapshot via
+// advertIntervalFromMS; advertiseIntervalMS serves only the send sink),
 // updateConfigHeld and admitAndRecord.
 //
 // FAIL-ON-REVERT: restoring any stale string below, dropping a
@@ -37,6 +38,10 @@ func TestReadmeLayout17165(t *testing.T) {
 
 	// Stale pointers that sent a #6230-class census to dead callers.
 	stale := []string{
+		"snapshot via `advertiseIntervalMS()`",
+		"`advertiseIntervalMS()` / `armAdvertTimer` is a third",
+		"It now RLocks like they do (via `advertiseIntervalMS()` and `armAdvertTimer`)",
+		"which is unit-tested directly",
 		"sole caller, recordMasterAdvert",
 		"reached from `recordMasterAdvert`",
 		"`recordMasterAdvert` → `masterAdverFloor`",
@@ -67,6 +72,9 @@ func TestReadmeLayout17165(t *testing.T) {
 		"`admitAndRecord`",
 		"armAdvertTimer",
 		"`advertiseIntervalMS()`",
+		"`armAdvertTimer` snapshots `cfg` under `Lock()` via",
+		"`armAdvertTimer` reads `cfg` under `Lock()` via",
+		"through the two-argument `garpSendAllowed` seam",
 		"`newInstance`-adjacent install clamp in `manager.go`, and `updateConfigHeld`",
 	} {
 		if !strings.Contains(readme, want) {
