@@ -70,13 +70,17 @@ type Monitor struct {
 
 	mu sync.Mutex
 	// lifecycle binds every poll cycle: Start (re)creates it, Stop
-	// cancels it and clears the pointer so a later commit poll cannot
-	// resurrect work on a stopped monitor. Never-started monitors get a
-	// Background-derived lifecycle lazily (see lifecycleContext). wg
-	// counts the poll loop AND in-flight PollNow cycles so Stop joins
-	// both (#17132 fold).
+	// cancels it. Never-started monitors get a Background-derived
+	// lifecycle lazily (see lifecycleContext). wg counts the poll loop
+	// AND in-flight PollNow cycles so Stop joins both (#17132 fold).
+	// stopped is the explicit stopped state: Stop sets it, only Start
+	// clears it. It distinguishes "stopped" from "never started"
+	// (both have lifecycle == nil): once stopped, lifecycleContext
+	// refuses new cycles until Start, so a post-Stop PollNow cannot
+	// lazily resurrect a stopped monitor (#17132 fold).
 	lifecycle context.Context
 	cancel    context.CancelFunc
+	stopped   bool
 	wg        sync.WaitGroup
 
 	// Dampened state per interface/IP monitor.
@@ -323,6 +327,7 @@ func (mon *Monitor) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	mon.lifecycle = ctx
 	mon.cancel = cancel
+	mon.stopped = false
 	mon.mu.Unlock()
 
 	mon.wg.Add(1)
@@ -331,10 +336,13 @@ func (mon *Monitor) Start(ctx context.Context) {
 
 // Stop halts the monitoring goroutine, cancels any in-flight commit
 // (PollNow) poll, waits for both to exit, then closes the cached
-// netlink handle. A PollNow that starts after Stop finds no lifecycle
-// and is a no-op (see PollNow).
+// netlink handle. Stop latches mon.stopped: a PollNow that starts
+// after Stop is a no-op (returns ok=false) until Start clears the
+// latch — it must NOT lazily resurrect a lifecycle the way a
+// never-started monitor may (see lifecycleContext).
 func (mon *Monitor) Stop() {
 	mon.mu.Lock()
+	mon.stopped = true
 	mon.lifecycle = nil
 	cancel := mon.cancel
 	mon.cancel = nil
@@ -382,21 +390,27 @@ func (mon *Monitor) Stop() {
 // daemon's boot-load / peer-sync UpdateConfig can hit before Start,
 // and the shape component tests construct — lazily installs a
 // Background-derived lifecycle so a later Stop still cancels and
-// joins it. A stopped monitor (cancel consumed and lifecycle cleared
-// by Stop) returns ok=false: no new cycle may start.
+// joins it.
 //
-// The caller must Add to wg while still holding mon.mu: Stop clears
-// the lifecycle under the same lock before Waiting, so the Add is
-// either visible to that Wait or impossible (ok=false). Adding after
-// unlocking would race Stop's Wait.
+// A stopped monitor is NOT never-started: Stop latches mon.stopped
+// (and clears lifecycle/cancel), and lifecycleContext returns
+// ok=false while that latch is set — no new cycle may start until
+// Start clears it. Without the explicit latch, a stopped monitor
+// (lifecycle == nil && cancel == nil) is indistinguishable from a
+// never-started one and a post-Stop PollNow would lazily install a
+// fresh lifecycle and resurrect polling/weight writes past Stop.
+//
+// The caller must Add to wg while still holding mon.mu: Stop sets
+// stopped and clears the lifecycle under the same lock before
+// Waiting, so the Add is either visible to that Wait or impossible
+// (ok=false). Adding after unlocking would race Stop's Wait.
 func (mon *Monitor) lifecycleContext() (ctx context.Context, ok bool) {
 	mon.mu.Lock()
 	defer mon.mu.Unlock()
+	if mon.stopped {
+		return nil, false
+	}
 	if mon.cancel == nil {
-		if mon.lifecycle != nil {
-			// Stopped (or Start superseded): no live lifecycle.
-			return nil, false
-		}
 		ctx, cancel := context.WithCancel(context.Background())
 		mon.lifecycle = ctx
 		mon.cancel = cancel

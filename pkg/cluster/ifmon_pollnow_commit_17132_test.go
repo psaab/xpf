@@ -24,7 +24,12 @@ import (
 //     TestPollNow_CommitPathSkipsIPProbeSweep17132 sees probe calls on
 //     the commit path (and, for the Stop cell, the weight write lands);
 //   - keep the full cycle but merely thread a context and the sweep
-//     assertion still fails — the sweep must not run at all.
+//     assertion still fails — the sweep must not run at all;
+//   - drop the explicit mon.stopped latch (Rev18171bOpus F1 on
+//     931d3b1f4f: Stop cleared lifecycle/cancel, so a stopped monitor
+//     looked never-started and lifecycleContext lazily resurrected
+//     it) and the Stop cell's post-Stop fresh-transition leg reds:
+//     the resurrected poll installs the fresh down debt (weight 155).
 
 // TestPollNow_CommitPathSkipsIPProbeSweep17132 drives the real commit
 // path (Manager.UpdateConfig -> deferred PollNow) against an RG that
@@ -195,13 +200,51 @@ func TestPollNow_StopDuringCommitPollLeavesNoWeightWrite17132(t *testing.T) {
 			"cancelled by Stop must leave no weight write on the manager", w)
 	}
 
-	// A commit attempted entirely after Stop is likewise a no-op:
-	// PollNow finds no live lifecycle and never polls.
+	// A commit attempted entirely after Stop is likewise a no-op — and
+	// it must CREATE A FRESH TRANSITION after Stop to prove it. The
+	// parked poll above already advanced dampening to down before its
+	// write was suppressed, so re-committing with the link still down
+	// would see no new transition and write nothing even if PollNow
+	// wrongly resurrected and polled (Rev18171bOpus F1: the shipped
+	// post-Stop leg was test-only-green for exactly that reason).
+	// Flip the link back UP after Stop: a resurrected poll would
+	// transition down->up, and then flipping it DOWN again gives the
+	// resurrecting poll a fresh down transition that installs the 100
+	// debt (weight 155). A true no-op leaves weight 255 throughout.
 	mon.beforeManagerApplyHook = nil
+	nlh.setLink("trust0", true)
 	m.UpdateConfig(cfg)
 	drainEvents(m, 8)
 	if w := m.GroupStates()[0].Weight; w != 255 {
-		t.Fatalf("weight after post-Stop commit = %d, want 255: PollNow after "+
-			"Stop must not write weight", w)
+		t.Fatalf("weight after post-Stop up-flip commit = %d, want 255: PollNow after "+
+			"Stop must not poll (a resurrected poll clears/sets weight on a stopped monitor)", w)
 	}
+	nlh.setLink("trust0", false)
+	m.UpdateConfig(cfg)
+	drainEvents(m, 8)
+	if w := m.GroupStates()[0].Weight; w != 255 {
+		t.Fatalf("weight after post-Stop down-flip commit = %d, want 255: PollNow after "+
+			"Stop must not write weight (a resurrected poll would install the fresh "+
+			"down-transition debt, weight 155)", w)
+	}
+
+	// Start clears the stopped latch: the restarted monitor polls
+	// again. Drive it synchronously through PollNow (the loop's own
+	// immediate cycle sees the already-down dampening state and cannot
+	// transition, so PollNow is what proves the latch cleared): flip
+	// up — PollNow consumes the down->up transition (no debt was ever
+	// installed, so weight stays 255) — then flip down and PollNow
+	// installs the fresh down debt. With the latch stuck, both PollNow
+	// calls are no-ops, no transition ever fires, and weight stays 255.
+	mon.Start(context.Background())
+	nlh.setLink("trust0", true)
+	mon.PollNow()
+	nlh.setLink("trust0", false)
+	mon.PollNow()
+	drainEvents(m, 8)
+	if w := m.GroupStates()[0].Weight; w != 155 {
+		t.Fatalf("weight after Start following Stop = %d, want 155: Start must clear "+
+			"the stopped latch so the restarted monitor polls again", w)
+	}
+	mon.Stop()
 }
