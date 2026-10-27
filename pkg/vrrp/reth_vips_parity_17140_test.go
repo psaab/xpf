@@ -128,3 +128,50 @@ func TestRethVIPParityControl17140(t *testing.T) {
 		t.Fatalf("RethVIPsByRG[1] = %v want %v", byRG[1], want)
 	}
 }
+
+// Two-RG order pin (#17140 fold): with reth0 in RG 2 and reth1 in RG 1,
+// CollectRethInstances must emit RG-major order — RG 1's instance (reth1's
+// physical ge-0-0-1) first, then RG 2's (reth0's ge-0-0-0) — NOT name order
+// (ge-0-0-0 < ge-0-0-1) and NOT map iteration. Exact sequence assertion so
+// replacing the sorted RG loop with bare map iteration reds this cell.
+func TestRethInstanceOrderRGMajor17140(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"reth0": {
+			Name: "reth0", RedundancyGroup: 2,
+			Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0, Addresses: []string{"10.0.20.1/24"}},
+			},
+		},
+		"reth1": {
+			Name: "reth1", RedundancyGroup: 1,
+			Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0, Addresses: []string{"10.0.10.1/24"}},
+			},
+		},
+		"ge-0/0/0": {Name: "ge-0/0/0", RedundantParent: "reth0"},
+		"ge-0/0/1": {Name: "ge-0/0/1", RedundantParent: "reth1"},
+	}
+	insts := CollectRethInstances(cfg, map[int]int{1: 200, 2: 100})
+	if len(insts) != 2 {
+		t.Fatalf("got %d instances, want 2: %+v", len(insts), insts)
+	}
+	type id struct {
+		iface string
+		vrid  int
+		vips  []string
+	}
+	got := make([]id, 0, len(insts))
+	for _, in := range insts {
+		got = append(got, id{in.Interface, in.GroupID, in.VirtualAddresses})
+	}
+	// RG ascending: RG1 (VRID 101, reth1->ge-0-0-1) before RG2 (VRID 102,
+	// reth0->ge-0-0-0), even though ge-0-0-0 sorts before ge-0-0-1.
+	want := []id{
+		{"ge-0-0-1", 101, []string{"10.0.10.1/24"}},
+		{"ge-0-0-0", 102, []string{"10.0.20.1/24"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("instance sequence = %+v, want RG-major %+v", got, want)
+	}
+}

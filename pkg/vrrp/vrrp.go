@@ -217,8 +217,14 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 	byRG := cfg.RethVIPsByRG()
 
 	// Pin deterministic order: RG ascending, then sub-interface name.
-	// updateVIPs is order-sensitive (vipsEqual), so instance order must
-	// not depend on map iteration.
+	// Instance order must not depend on map iteration: the manager's
+	// UpdateInstances is first-wins in desired order — a duplicate
+	// (interface, VRID, family) identity and a second election claiming
+	// an already-claimed VIP (secondVIPClaimant) are both refused
+	// keeping the first claimant — and the CLI/REST/gRPC display
+	// handlers render instances in append order. vipsEqual is not the
+	// consumer: it compares a single instance's VIP slice, not the
+	// order of instances in this slice.
 	rgIDs := make([]int, 0, len(byRG))
 	for rgID := range byRG {
 		if rgID <= 0 {
