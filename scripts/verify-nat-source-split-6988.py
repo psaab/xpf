@@ -17,8 +17,8 @@ that made it un-runnable once source.rs itself was deleted by the split.
 Defaults: --split 22b9cb22d07be2c041efb7ef250083a6c53f9c6b (the #7860 merge,
 2026-08-28), --base 63705b4421d0c5ec42c04d88e449aab86ced30ac (its first
 parent, the last master with a monolithic source.rs, 3414 lines). The split
-commit d85c20ffdf with its own parent 44a3356249 also verifies, with the
-pre-shift seams in that commit's copy of this script.
+commit d85c20ffdf with its own parent 44a3356249 verified at the time,
+with the pre-shift seams in that commit's copy of this script.
 
 Usage: python3 scripts/verify-nat-source-split-6988.py [--base REF] [--split REF]
        (one positional [base-ref] is also accepted, for compatibility)

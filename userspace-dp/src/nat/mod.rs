@@ -20,7 +20,8 @@
 // the [REFACTOR] tier is 2000 — so six clusters moved into
 // `source/{failure,expand,release,synced,nat64_ports,match_rules}.rs`
 // as pure code motion at the #7860 merge (22b9cb22d0, 2026-08-28),
-// leaving `source/mod.rs` at 1367. The clusters were chosen by
+// leaving `source/mod.rs` at 1367 at the split commit
+// d85c20ffdf (1466 at the #7860 merge, which also brought master-side changes). The clusters were chosen by
 // dependency COST, not by name: the whole split needed two
 // visibility widenings and one respelling, all enumerated in
 // `source/mod.rs` and verified at that merge by

@@ -125,8 +125,8 @@
 //   - 119 stayed in this file at the same module depth
 //     (nat::allocator is still a direct child of nat::), so their
 //     pub(super) spelling kept its exact pre-split meaning
-//     (visible in nat::) and needed no widening. At the split this
-//     file still carried all 124 occurrences (119 code + 5 comment);
+//     (visible in nat::) and needed no widening. The base
+//     file carried 124 occurrences (119 code + 5 comment);
 //     that was a split-time count, not a current-tree invariant —
 //     the file has been edited since (e.g. #15956 added flows.rs).
 // The cost actually paid by this move was therefore NOT the 124:
