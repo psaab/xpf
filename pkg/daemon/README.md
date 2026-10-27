@@ -1861,16 +1861,21 @@ to `Apply`'s graceful goodbye (#14978). If both nodes are BACKUP, a stale
 host route may remain until Router Lifetime expiry; a later MASTER's RA
 refresh repairs it.
 
-**Stable-LL placement (#16686).** `addStableRethLinkLocal` installs the
-stable router link-local on the netdev selected by `unit.VlanID > 0`
+**Stable-LL placement (#16686, #17049).** Placement is the single
+definition `Config.StableRethLinkLocalPlacements` in `pkg/config`
+(#17049); `addStableRethLinkLocal`, `removeStableRethLinkLocal`
+(via `Config.RemoveNetdevs`), the direct-mode router NA (via
+`Config.RouterLinkLocalPlacements`), the RA builder
+(`stableRethLinkLocalForRA`) and `stableRethLinkLocalTargets`
+(userspace host-inbound) all iterate it, so the four former copies
+cannot diverge. The stable router link-local is installed on the
+netdev selected by `unit.VlanID > 0`
 (the `RethVIPsForRG`/`ResolveKernelIfName` rule): a tagged unit 0 lives
 on `<member>.<vlan-id>`, an untagged unit 0 on the bare member, and only
 IPv6-bearing units without their own configured link-local receive it.
 Keying on `unitNum > 0` instead left a tagged unit 0's RA sender bound
 to an address never installed on its VLAN sub-interface, so no RAs were
-sent on that VLAN. `removeStableRethLinkLocal`, the direct-mode router
-NA, and `stableRethLinkLocalTargets` (userspace host-inbound) use the
-same rule.
+sent on that VLAN.
 
 **Idempotence.** A stable digest of the desired set (`lastRAReconcileHash`,
 updated only on a successful apply) gates the actual `ra.Apply`, so the
@@ -1957,7 +1962,13 @@ identity is tracked by follow-up #12550.
 
 RETH members match by `OriginalName=` (PCI kernel name), not `MACAddress=` —
 the MAC alternates between physical and virtual at boot, and
-`ensureRethLinkOriginalName()` auto-fixes stale `.link` files.
+`ensureRethLinkOriginalName()` auto-fixes stale `.link` files. Since #17042
+(R4-Q43-01) there is one `.link` renderer: `networkd.RenderLink` (+
+`networkd.WriteUnitIfChanged` / `networkd.FilePrefix`). `writeLinkFile` is
+the boot writer over it, and the RETH helpers preserve networkd's richer
+fields (MTU/speed/duplex/description) when converting a MAC-form file to
+OriginalName=, returning errors the apply joins into `Phase.Networkd`
+instead of the old Warn-only swallow.
 
 It **returns an error when naming does not converge** (#5842). Every step
 that can fail — the `.link` write, the rename, and the `networkctl reload`

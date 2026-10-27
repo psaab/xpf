@@ -41,32 +41,32 @@ post-translation destination address and port, and `to-zone` must be the zone
 of the translated (real-server) destination. Shared usage text and
 `Result.PostNATInputNote` expose this requirement on operator-facing surfaces.
 
-## Port input validation (#3116)
+## Port presence and validation (#3116, #17081)
 
-`Match` gates a port term on `SrcPort/DstPort > 0`, so a port of `0` means
-"unspecified": the query has no concrete port. A port-constrained application
-term never matches it; an unconstrained term may still match. That makes a
-malformed, negative, or out-of-range port DANGEROUS at the adapter boundary: if
-it silently coerces to `0`, a constrained term is skipped while an unconstrained
-term may still match. A verdict for the partly specified query is not
-exhaustive: a skipped deny can let a later permit match. Two shared validators
-close this across every surface:
+`Query.SrcPort`/`DstPort` (and `SelectorArgs`) are `*uint16`: nil means the
+operator OMITTED the port — a port-constrained term never matches it, while
+an unconstrained term may still match. A present value, including literal
+`0` (`PortPtr(0)`), is a concrete port: port 0 matches a `0-N` term when L4
+is present, exactly as the dataplane enforces (#13920). Before #17081, `0`
+encoded both omitted and literal 0, so the simulator returned the inverse
+verdict for literal port-0 TCP/UDP against a `0-N` term. Presence is also
+explicit on every wire: the proto fields are `optional int32`, an absent
+REST key is omitted while `dst_port=0` is literal (a present-but-empty
+REST value is rejected, like the valueless CLI token), and the CLI grammar
+distinguishes no token from `destination-port 0`. A malformed, negative, or
+out-of-range port remains DANGEROUS at the adapter boundary if it silently
+coerces to omitted, so two shared validators close this across every surface:
 
-- `ValidatePort(int) error` — for the already-parsed numeric inputs (the gRPC
-  `int32` field, and the REST query int after `queryIntStrict`). Accepts `0`
-  (unspecified; constrained terms do not match without a port) and `1..65535`;
-  rejects negative or `>65535`.
-- `ParsePort(string) (int, error)` — for operator string tokens (the CLI
+- `ValidatePort(int) error` — for already-parsed present numeric inputs
+  (the optional gRPC field, the present REST value). Accepts `0..65535`
+  (0 = literal); rejects negative or `>65535`.
+- `ParsePort(string) (*uint16, error)` — for operator string tokens (the CLI
   `destination-port`/`source-port` args, the gRPC `ShowText` `test-policy:`
-  `port=` token, and the remote `cli` client's `destination-port`/`source-port`
-  — the remote surface was fixed in #3354 to route through `ParsePort` instead
-  of a silent `strconv.Atoi` drop that coerced a malformed port to the `0`
-  unspecified value). An empty/whitespace token is unspecified `(0, nil)`;
-  a port-constrained term never matches without a port, while unconstrained
-  terms may still match. A non-empty token must parse and pass `ValidatePort`;
+  `port=` token, and the remote `cli` client's selectors — #3354). An
+  empty/whitespace token is omitted `(nil, nil)`; an explicit `0` is a
+  PRESENT literal 0. A non-empty token must parse and pass `ValidatePort`;
   a malformed (`abc`), signed (`+80`/`-80`, #3679), or out-of-range token is
-  rejected. An explicit `0` is accepted as "unspecified" for parity with the
-  gRPC `int32` field, where proto3 cannot distinguish an unset scalar from `0`.
+  rejected.
 - `ParseICMPValue(string) (*uint8, error)` — for the CLI/REST/gRPC ICMP
   `type`/`code` selector tokens. Empty/whitespace is unspecified `(nil, nil)`; a
   type/code-constrained term never matches without that value, while
@@ -94,10 +94,13 @@ above), so "all surfaces validate the port" is literally true:
 - CLI `test policy` + `show security match-policies` (local `pkg/cli`) AND the
   remote `cli` client (`cmd/cli`) — `ParsePort` → a command error.
 
-A valid port (`1..65535`) behaves as before. An absent port remains unspecified,
-so constrained terms do not match without it while unconstrained terms may
-still match. Only an explicitly-invalid port newly errors. Coverage: `port_test.go`
-(helpers), `pkg/api/rest_filter_failclosed_test.go`,
+A valid port (`0..65535`, present) behaves as a concrete packet port. An
+absent port remains omitted, so constrained terms do not match without it
+while unconstrained terms may still match. Only an explicitly-invalid port
+newly errors. Coverage: `port_test.go` (helpers),
+`port_zero_literal_17081_test.go` (literal-0 vs omitted, both directions,
+plus the shared corpus row `port-zero-range-17081`),
+`pkg/api/rest_filter_failclosed_test.go`,
 `pkg/grpcapi/server_cluster_test.go` (`MatchPolicies` + `ShowText` `test-policy:`),
 `pkg/cli/policymatch_port_test.go`, and `cmd/cli/testpolicy_port_test.go`.
 
@@ -194,7 +197,7 @@ plus the gRPC text bridge:
 - gRPC `ShowText` `test-policy:` (`showTestPolicy`) — the server-boundary sibling
   hardened directly: a comma segment lacking `key=value`, an unknown key, or an
   explicit-empty typed value (`port=`, indistinguishable from "key absent" under
-  the old `ParsePort("") == (0, nil)`) is reported as a `malformed selector
+  the old `ParsePort("") == omitted) is reported as a `malformed selector
   segment` / `unknown selector` diagnostic instead of being silently skipped. A
   bare `test-policy:` (no params) still falls through to the missing-from/to-zone
   diagnostic.
@@ -394,7 +397,10 @@ reports WHICH system-service/protocol token admits the packet (`token-admit` +
 `Token`/`Kind`), a `global-accept` (ICMP error/PMTUD, IPv6 ND, or ESP/AH — the
 top-of-chain nft accepts, #3171), a `denied` (post-#3405 default-deny — the box
 drops it), or `indeterminate` (the query omits the protocol, or the
-destination-port / icmp-type a port/ICMP token needs). The classifier
+destination-port / icmp-type a port/ICMP token needs). A PRESENT literal
+destination-port 0 (#17081) is not indeterminate: presence is threaded
+through `ClassifyHostInbound`, and since no host-inbound token admits port 0
+it is decided `denied`. The classifier
 (`ClassifyHostInbound`) reads the SAME structured token→tuple SSOT the kernel-nft
 builder renders from (`config.HostInboundServiceMatch` /
 `HostInboundProtocolMatch`), so the reported token cannot claim a port the kernel

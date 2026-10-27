@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sort"
@@ -71,6 +72,78 @@ const (
 	// Ethernet header length.
 	ethHdrLen = 14
 )
+
+// EffectiveTiming returns the effective LLDP timing for cfg: the
+// transmit interval and hold multiplier with runtime defaults applied
+// (30s and 4 when unset or non-positive, matching Apply), and the hold
+// time (TTL) in seconds clamped to the 16-bit wire maximum exactly as
+// encodeTTL clamps it (#4596). This is the single source of truth for
+// the interval × hold formula: txLoop advertises ttlSeconds and the
+// `show lldp` renderers display it, so neither can drift from the wire.
+// A nil cfg yields the defaults. Interval conversion goes through
+// config.SecondsToDuration so an overflowing seconds value falls back
+// to the default rather than wrapping (#8642), as Apply does.
+func EffectiveTiming(cfg *LLDPConfig) (interval time.Duration, holdMult, ttlSeconds int) {
+	var rawInterval, rawHold int
+	if cfg != nil {
+		rawInterval = cfg.Interval
+		rawHold = cfg.HoldMultiplier
+	}
+	interval = config.SecondsToDuration(rawInterval, 0)
+	if interval <= 0 {
+		interval = defaultInterval
+	}
+	holdMult = rawHold
+	if holdMult <= 0 {
+		holdMult = defaultHoldMultiplier
+	}
+	ttlSeconds = int(interval.Seconds()) * holdMult
+	if ttlSeconds < 0 {
+		ttlSeconds = 0
+	}
+	if ttlSeconds > 0xffff {
+		ttlSeconds = 0xffff
+	}
+	return interval, holdMult, ttlSeconds
+}
+
+// RenderSummary writes the `show lldp` summary for cfg to w: the
+// effective transmit interval, hold multiplier and clamped hold time
+// (via EffectiveTiming), the configured interfaces, and — when
+// neighbours is non-negative — the neighbour count. A nil or disabled
+// cfg renders the same not-configured/disabled line both show surfaces
+// used before; a negative neighbours count omits the count line (the
+// surface has no neighbour source). This is the sole renderer of the
+// hold-time line so the CLI and gRPC twins cannot diverge (#17130).
+func RenderSummary(w io.Writer, cfg *LLDPConfig, neighbours int) {
+	if cfg == nil {
+		fmt.Fprintln(w, "LLDP not configured")
+		return
+	}
+	if cfg.Disable {
+		fmt.Fprintln(w, "LLDP: disabled")
+		return
+	}
+	interval, holdMult, ttlSeconds := EffectiveTiming(cfg)
+	fmt.Fprintln(w, "LLDP:")
+	fmt.Fprintf(w, "  Transmit interval: %ds\n", int(interval.Seconds()))
+	fmt.Fprintf(w, "  Hold multiplier:   %d\n", holdMult)
+	fmt.Fprintf(w, "  Hold time:         %ds\n", ttlSeconds)
+	if len(cfg.Interfaces) > 0 {
+		var ifNames []string
+		for _, iface := range cfg.Interfaces {
+			if iface.Disable {
+				ifNames = append(ifNames, iface.Name+" (disabled)")
+			} else {
+				ifNames = append(ifNames, iface.Name)
+			}
+		}
+		fmt.Fprintf(w, "  Interfaces:        %s\n", strings.Join(ifNames, ", "))
+	}
+	if neighbours >= 0 {
+		fmt.Fprintf(w, "  Neighbors:         %d\n", neighbours)
+	}
+}
 
 // Neighbor represents a discovered LLDP neighbor on an interface.
 //
@@ -523,14 +596,7 @@ func (m *Manager) Apply(ctx context.Context, cfg *LLDPConfig) (unresolved []stri
 	// blind to overflow — past MaxDurationSeconds the multiply wraps to a
 	// 512ns-multiple POSITIVE residue, which sails through it and makes txLoop
 	// emit an LLDP frame every 512ns on every configured interface.
-	interval := config.SecondsToDuration(cfg.Interval, 0)
-	if interval <= 0 {
-		interval = defaultInterval
-	}
-	holdMult := cfg.HoldMultiplier
-	if holdMult <= 0 {
-		holdMult = defaultHoldMultiplier
-	}
+	interval, _, ttl := EffectiveTiming(cfg)
 
 	sysName := cfg.SystemName
 	if sysName == "" {
@@ -610,7 +676,7 @@ func (m *Manager) Apply(ctx context.Context, cfg *LLDPConfig) (unresolved []stri
 		m.wg.Add(1)
 		go func(sess *ifSession) {
 			defer m.wg.Done()
-			m.txLoop(lldpCtx, sess, interval, holdMult, sysName, cfg.SystemDesc, chassisMAC)
+			m.txLoop(lldpCtx, sess, interval, ttl, sysName, cfg.SystemDesc, chassisMAC)
 		}(sess)
 
 		// Start RX goroutine.
@@ -885,8 +951,7 @@ func (m *Manager) Neighbors() []*Neighbor {
 
 // txLoop periodically sends LLDP frames on the session's interface, reusing the
 // session's TX socket for every advertisement.
-func (m *Manager) txLoop(ctx context.Context, sess *ifSession, interval time.Duration, holdMult int, sysName, sysDesc string, chassisMAC net.HardwareAddr) {
-	ttl := int(interval.Seconds()) * holdMult
+func (m *Manager) txLoop(ctx context.Context, sess *ifSession, interval time.Duration, ttl int, sysName, sysDesc string, chassisMAC net.HardwareAddr) {
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

@@ -67,6 +67,10 @@ edge is a larger commitment than a zero-import leaf.
 - `FromUdevProperties(props)` — `ID_NET_NAME_ONBOARD` → `SLOT` → `PATH`.
 - `FromPCIAddr(addr, multifunction)` — best-effort derivation; blind to the port
   suffix (`np0`) and SR-IOV VF parentage, so it is the last resort.
+- `PCIAddrFromDevicePath(realPath)` / `PCIAddrForNetdev(name)` — the
+  sysfs→BDF step (#17119): resolved `device` symlink target (or netdev
+  name) to the device's own PCI address, `virtioN` counting as its parent
+  function, `""` for a non-PCI bus below a PCI ancestor (#14595).
 - `FunctionSuffix(multifunction, fn)` / `Multifunction(addr)` — the `f<n>` rule
   and the `PCI_HEADER_TYPE` probe behind it.
 - `Resolve(alts, pciAddr)` — the chain. Callers pass altnames because each call

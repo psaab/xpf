@@ -57,7 +57,7 @@ func zoneQuarantineCfg(t *testing.T) *config.Config {
 func TestQuarantinedZoneNoTransitMatch(t *testing.T) {
 	cfg := zoneQuarantineCfg(t)
 
-	res := Match(cfg, Query{FromZone: "zzq8100", ToZone: "trust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "zzq8100", ToZone: "trust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if res.Matched {
 		t.Fatalf("quarantined from-zone zzq8100 matched a transit rule the runtime dropped (#5649); res = %+v", res)
 	}
@@ -75,7 +75,7 @@ func TestQuarantinedZoneNoTransitMatch(t *testing.T) {
 func TestQuarantinedZoneJunosHostUnmatched(t *testing.T) {
 	cfg := zoneQuarantineCfg(t)
 
-	res := Match(cfg, Query{FromZone: "zzq8100", ToZone: JunosHostZone, Protocol: "tcp", DstPort: 22})
+	res := Match(cfg, Query{FromZone: "zzq8100", ToZone: JunosHostZone, Protocol: "tcp", DstPort: PortPtr(22)})
 	if res.Matched {
 		t.Fatalf("quarantined ingress zone matched a junos-host rule (#5649); res = %+v", res)
 	}
@@ -102,7 +102,7 @@ func TestSurvivorZoneStillMatches(t *testing.T) {
 		}},
 	})
 
-	res := Match(cfg, Query{FromZone: "zzq17760", ToZone: "trust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "zzq17760", ToZone: "trust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("survivor zone zzq17760 over-blocked by the #5649 quarantine guard; res = %+v", res)
 	}
@@ -114,7 +114,7 @@ func TestSurvivorZoneStillMatches(t *testing.T) {
 func TestNoCollisionZonesUnaffected(t *testing.T) {
 	cfg := undefinedZoneCfg()
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("non-colliding zones affected by the #5649 quarantine projection; res = %+v", res)
 	}

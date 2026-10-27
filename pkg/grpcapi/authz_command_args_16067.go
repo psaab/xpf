@@ -752,11 +752,11 @@ func matchPoliciesArgumentForms(mp *pb.MatchPoliciesRequest, base string) ([]str
 	if v := mp.GetDestinationIp(); v != "" {
 		full += " destination-ip " + v
 	}
-	if v := mp.GetSourcePort(); v != 0 {
-		full += " source-port " + strconv.Itoa(int(v))
+	if mp.SourcePort != nil {
+		full += " source-port " + strconv.Itoa(int(*mp.SourcePort))
 	}
-	if v := mp.GetDestinationPort(); v != 0 {
-		full += " destination-port " + strconv.Itoa(int(v))
+	if mp.DestinationPort != nil {
+		full += " destination-port " + strconv.Itoa(int(*mp.DestinationPort))
 	}
 	if v := mp.GetProtocol(); v != "" {
 		full += " protocol " + v

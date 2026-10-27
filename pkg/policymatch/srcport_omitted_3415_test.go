@@ -61,7 +61,7 @@ func TestSrcPortConstrainedAppOmittedQuerySrcPortNoMatch(t *testing.T) {
 
 	// SrcPort omitted (0); destination port supplied so only the source-port
 	// dimension is in question.
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if res.Matched {
 		t.Fatalf("source-port-constrained app over-matched an omitted query source port (#3415); res = %+v", res)
 	}
@@ -76,7 +76,7 @@ func TestSrcPortConstrainedAppOmittedQuerySrcPortNoMatch(t *testing.T) {
 func TestSrcPortConstrainedAppMatchingSrcPortStillPermits(t *testing.T) {
 	cfg := srcPortConstrainedAppCfg()
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", SrcPort: 5000, DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", SrcPort: PortPtr(5000), DstPort: PortPtr(80)})
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("concrete in-spec source port no longer matches (#3415 over-narrowed); res = %+v", res)
 	}
@@ -88,7 +88,7 @@ func TestSrcPortConstrainedAppMatchingSrcPortStillPermits(t *testing.T) {
 func TestSrcPortConstrainedAppWrongSrcPortNoMatch(t *testing.T) {
 	cfg := srcPortConstrainedAppCfg()
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", SrcPort: 6000, DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", SrcPort: PortPtr(6000), DstPort: PortPtr(80)})
 	if res.Matched {
 		t.Fatalf("wrong source port matched a source-port-constrained app; res = %+v", res)
 	}
@@ -102,7 +102,7 @@ func TestSrcPortConstrainedAppWrongSrcPortNoMatch(t *testing.T) {
 func TestUnconstrainedSrcPortAppOmittedQuerySrcPortStillMatches(t *testing.T) {
 	cfg := portConstrainedAppCfg() // web80: tcp, destination-port 80, no source-port
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80}) // SrcPort omitted (0)
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)}) // SrcPort omitted (0)
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("source-port-UNCONSTRAINED app must still match an omitted query source port (#3415 over-narrowed); res = %+v", res)
 	}

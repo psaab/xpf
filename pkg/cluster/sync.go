@@ -595,6 +595,15 @@ type SyncStats struct {
 	// lie. Unstamped installs are never withheld. Same operational meaning
 	// as the delete suppressors: counted, visible gap over silent corruption.
 	InstallsSuppressedNoPeerInstallTable atomic.Uint64
+	// InstallsSuppressedIpsecDiscriminator counts outgoing IPsec
+	// (S9.4 class-3 discriminator) session installs WITHHELD because
+	// the peer did not advertise capFlagIpsecTunnelDiscriminator or
+	// its capabilities are not yet learned (#17113). Such a peer
+	// cannot preserve the IPsec if_id discriminator, so sending the
+	// install would alias it onto another tunnel's key. Same
+	// operational meaning as the other install suppressor: counted,
+	// visible gap over silent corruption.
+	InstallsSuppressedIpsecDiscriminator atomic.Uint64
 	// DeletesStaleIgnored counts deletes refused by the #2170 install-
 	// generation guard: a journaled/deferred delete whose generation was
 	// strictly older than the currently-installed same-key entry. A nonzero
@@ -676,8 +685,12 @@ type SyncStats struct {
 type SyncStatsSnapshot struct {
 	SessionsSent uint64
 	// SweepSessionsSent is the mirror-sweep SUB-TOTAL of SessionsSent (#7842).
-	SweepSessionsSent         uint64
-	SessionsReceived          uint64
+	SweepSessionsSent uint64
+	SessionsReceived  uint64
+	// MalformedRecordsDropped is the #7175/#10724 rejected-record counter:
+	// descriptor-driven via syncStatFields (#17107) so it cannot again be
+	// counted in SyncStats yet absent from every operator surface.
+	MalformedRecordsDropped   uint64
 	SessionsInstalled         uint64
 	DeletesSent               uint64
 	DeletesReceived           uint64
@@ -741,6 +754,7 @@ type SyncStatsSnapshot struct {
 	DeletesSuppressedPurgeRetirement     uint64
 	DeletesSuppressedScopedPolicy        uint64
 	InstallsSuppressedNoPeerInstallTable uint64
+	InstallsSuppressedIpsecDiscriminator uint64
 	DeletesStaleIgnored                  uint64
 	InstallsStaleIgnored                 uint64
 	SessionsStaleConfigIgnored           uint64
@@ -1479,21 +1493,8 @@ type SessionSync struct {
 	deleteJournal       boundedFrameJournal
 	scopedDeleteJournal boundedFrameJournal
 	lastPeerRxMono      atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
-	// peerHeartbeatAckEver latches when the CURRENTLY connected peer proves it
-	// understands syncMsgHeartbeat by replying syncMsgHeartbeatAck. It gates
-	// the two enforcement paths that would otherwise punish a legacy peer that
-	// simply never acks: the receiveLoop missed-heartbeat teardown
-	// (sync_conn_read.go) and PeerHealthy's silence window (below).
-	//
-	// #5718 C01a: this is peer-INCARNATION scoped, NOT SessionSync-lifetime.
-	// handleDisconnect clears it on full disconnect (alongside clockSynced) so
-	// a peer downgrade — new build acks, then rolls back to a build that never
-	// acks — cannot leave the flag latched and turn a healthy old peer into
-	// permanent connection churn plus a failover-readiness block. Do not
-	// promote this back to a set-once flag.
-	peerHeartbeatAckEver atomic.Bool
-	readDeadline         time.Duration
-	peerSilenceLimit     time.Duration
+	readDeadline        time.Duration
+	peerSilenceLimit    time.Duration
 	// bulkStartMu serializes queued incremental writes with the
 	// table-truth snapshot -> BulkStart boundary (#10283). A bulk holds it
 	// while reading BulkSnapshotSource and until BulkStart is written under
@@ -2028,6 +2029,12 @@ func decodeFailoverBatchRequestPayload(payload []byte) ([]int, uint64, error) {
 	return ids, binary.LittleEndian.Uint64(payload[1+count : 1+count+8]), nil
 }
 func encodeFailoverBatchAckPayload(rgIDs []int, status uint8, reqID uint64, detail string) []byte {
+	// #17093: clamp the free-form detail so the payload never exceeds
+	// the FailoverBatchAck per-type cap; an over-cap ack would make a
+	// #16041-or-later peer drop the connection.
+	if maxDetail := (1 + maxFailoverBatchRGCount + 1 + 8 + 4096) - (1 + len(rgIDs) + 1 + 8); len(detail) > maxDetail {
+		detail = detail[:maxDetail]
+	}
 	payload := make([]byte, 1+len(rgIDs)+1+8+len(detail))
 	payload[0] = byte(len(rgIDs))
 	for i, rgID := range rgIDs {
@@ -2405,67 +2412,37 @@ func (s *SessionSync) SetRuntimeDomains(sessions dataplane.SessionStore, telemet
 }
 
 // Stats returns a point-in-time snapshot of sync statistics.
+//
+// #17107: the uint64 fields are loaded through syncStatFields (see
+// sync_stats.go) so the set Stats() can populate is exactly the
+// descriptor set the statistics render draws from. A SyncStats counter
+// with no descriptor cannot reach the snapshot, and
+// TestSyncStatsSnapshotComplete fails until a descriptor (and a render
+// decision) exists. The derived snapshot fields (string/bool/int/int64)
+// are populated explicitly below; they are RenderNever descriptors.
 func (s *SessionSync) Stats() SyncStatsSnapshot {
 	s.mu.Lock()
 	activeFabric := s.preferredFabricLocked()
 	s.mu.Unlock()
-	return SyncStatsSnapshot{
-		SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(),
-		SessionsReceived: s.stats.SessionsReceived.Load(), SessionsInstalled: s.stats.SessionsInstalled.Load(),
-		DeletesSent: s.stats.DeletesSent.Load(), DeletesReceived: s.stats.DeletesReceived.Load(),
-		BulkSyncs:   s.stats.BulkSyncs.Load(),
-		ConfigsSent: s.stats.ConfigsSent.Load(), ConfigsReceived: s.stats.ConfigsReceived.Load(),
-		ConfigsSentCleartext:           s.stats.ConfigsSentCleartext.Load(),
-		ConfigsReceivedCleartext:       s.stats.ConfigsReceivedCleartext.Load(),
-		CleartextSyncAlarmLatched:      s.stats.CleartextSyncAlarmLatched.Load(),
-		ConfigsStaleIgnored:            s.stats.ConfigsStaleIgnored.Load(),
-		BulkPrimesWithoutIncarnation:   s.stats.BulkPrimesWithoutIncarnation.Load(),
-		PeerBootIncarnation:            s.PeerBootIncarnation().String(),
-		ConfigsDeadIncarnationDropped:  s.stats.ConfigsDeadIncarnationDropped.Load(),
-		BulkEndsDeadIncarnationDropped: s.stats.BulkEndsDeadIncarnationDropped.Load(),
-		ClockSyncsRefused:              s.stats.ClockSyncsRefused.Load(),
-		BulkEndsForeignConnDropped:     s.stats.BulkEndsForeignConnDropped.Load(),
-		BulkEndsEpochOnlyMatched:       s.stats.BulkEndsEpochOnlyMatched.Load(),
-		BulkRecvCapped:                 s.stats.BulkRecvCapped.Load(),
-		BulkRecvAborted:                s.stats.BulkRecvAborted.Load(),
-		ConfigsApplyFailed:             s.stats.ConfigsApplyFailed.Load(),
-		ImportsRefusedByHelper:         s.stats.ImportsRefusedByHelper.Load(),
-		ImportsRejectedByHelper:        s.stats.ImportsRejectedByHelper.Load(),
-		ConfigsQueueFullDropped:        s.stats.ConfigsQueueFullDropped.Load(),
-		ConfigApplyNacksReceived:       s.stats.ConfigApplyNacksReceived.Load(),
-		IPsecSASent:                    s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(),
-		IPsecSAStaleIgnored:         s.stats.IPsecSAStaleIgnored.Load(),
-		IPsecSAMalformedIgnored:     s.stats.IPsecSAMalformedIgnored.Load(),
-		IPsecSAOversizeAlarmLatched: s.stats.IPsecSAOversizeAlarmLatched.Load(),
-		IPsecSAOverCapSets:          s.stats.IPsecSAOverCapSets.Load(),
-		DHCPLeasesSent:              s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(),
-		DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(),
-		DHCPLeasesSeeded:       s.stats.DHCPLeasesSeeded.Load(),
-		FencesSent:             s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(),
-		FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(),
-		FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(),
-		DeletesDropped:                       s.stats.DeletesDropped.Load(),
-		PreKeyAuthEvictions:                  s.stats.PreKeyAuthEvictions.Load(),
-		DeletesSuppressedPeerIncapable:       s.stats.DeletesSuppressedPeerIncapable.Load(),
-		DeletesSuppressedPurgeRetirement:     s.stats.DeletesSuppressedPurgeRetirement.Load(),
-		DeletesSuppressedScopedPolicy:        s.stats.DeletesSuppressedScopedPolicy.Load(),
-		InstallsSuppressedNoPeerInstallTable: s.stats.InstallsSuppressedNoPeerInstallTable.Load(),
-		DeletesStaleIgnored:                  s.stats.DeletesStaleIgnored.Load(),
-		InstallsStaleIgnored:                 s.stats.InstallsStaleIgnored.Load(),
-		SessionsStaleConfigIgnored:           s.stats.SessionsStaleConfigIgnored.Load(),
-		GenMapOverflow:                       s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(),
-		PreAuthRejected: s.stats.PreAuthRejected.Load(), PreAuthHandshakeFailed: s.stats.PreAuthHandshakeFailed.Load(), OversizeFramesRefused: s.stats.OversizeFramesRefused.Load(), Connected: s.stats.Connected.Load(),
-		ActiveFabric:      activeFabric,
-		BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(),
-		BulkSyncSessions:   s.stats.BulkSyncSessions.Load(),
-		LastConfigSyncTime: s.stats.LastConfigSyncTime.Load(), LastConfigSyncSize: s.stats.LastConfigSyncSize.Load(),
-		LastFenceSeq: s.stats.LastFenceSeq.Load(), LastFenceAckAt: s.stats.LastFenceAckAt.Load(),
-		GenCapGrown: s.stats.GenCapGrown.Load(), GenCapShrunk: s.stats.GenCapShrunk.Load(),
-		RebaseSaturations:           s.stats.RebaseSaturations.Load(),
-		AuthUpgradeIdentityErrors:   s.stats.AuthUpgradeIdentityErrors.Load(),
-		DHCPLeasesDroppedNoIdentity: s.stats.DHCPLeasesDroppedNoIdentity.Load(),
-		GenGuardSessionCap:          s.genState.genGuardSessionCap.Load(),
+	snap := SyncStatsSnapshot{
+		PeerBootIncarnation:         s.PeerBootIncarnation().String(),
+		CleartextSyncAlarmLatched:   boolSyncStat(s, "CleartextSyncAlarmLatched"),
+		IPsecSAOversizeAlarmLatched: boolSyncStat(s, "IPsecSAOversizeAlarmLatched"),
+		Connected:                   boolSyncStat(s, "Connected"),
+		ActiveFabric:                activeFabric,
+		BulkSyncStartTime:           int64SyncStat(s, "BulkSyncStartTime"),
+		BulkSyncEndTime:             int64SyncStat(s, "BulkSyncEndTime"),
+		LastConfigSyncTime:          int64SyncStat(s, "LastConfigSyncTime"),
+		LastFenceAckAt:              int64SyncStat(s, "LastFenceAckAt"),
 	}
+	for _, f := range syncStatFields {
+		switch f.name {
+		case "PeerBootIncarnation", "CleartextSyncAlarmLatched", "IPsecSAOversizeAlarmLatched", "Connected", "ActiveFabric", "BulkSyncStartTime", "BulkSyncEndTime", "LastConfigSyncTime", "LastFenceAckAt":
+			continue
+		}
+		setSyncStatUint(&snap, f.name, loadSyncStat(s, f.name))
+	}
+	return snap
 }
 
 // IsConnected reports whether a peer sync connection is currently established.
@@ -2778,21 +2755,6 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, b
 	}
 	slog.Info("cluster sync: reconcile stale sessions complete", "deleted", deleted, "elapsed", time.Since(start))
 	return true, inventoryGeneration, inventoryRequested
-}
-
-func (s *SessionSync) FormatStats() string {
-	activeFabric := s.ActiveFabric()
-	fabricStr := "none"
-	if activeFabric >= 0 {
-		fabricStr = fmt.Sprintf("fab%d", activeFabric)
-	}
-	fenceSeq := s.stats.LastFenceSeq.Load()
-	fenceAckAt := s.stats.LastFenceAckAt.Load()
-	fenceAckStr := "never"
-	if fenceAckAt > 0 {
-		fenceAckStr = time.Unix(0, fenceAckAt).Format("Jan 02 15:04:05.000")
-	}
-	return fmt.Sprintf("Session sync statistics:\n"+"  Connected:          %v\n"+"  Active fabric:      %s\n"+"  Sessions sent:      %d\n"+"  Sessions received:  %d\n"+"  Sessions installed: %d\n"+"  Deletes sent:       %d\n"+"  Deletes received:   %d\n"+"  Bulk syncs:         %d\n"+"  Configs sent:       %d\n"+"  Configs received:   %d\n"+"  IPsec SAs sent:     %d\n"+"  IPsec SAs received: %d\n"+"  Fences sent:        %d\n"+"  Fences received:    %d\n"+"  Install fence seq:  %d\n"+"  Last fence ack:     %s\n"+"  Errors:             %d\n", s.stats.Connected.Load(), fabricStr, s.stats.SessionsSent.Load(), s.stats.SessionsReceived.Load(), s.stats.SessionsInstalled.Load(), s.stats.DeletesSent.Load(), s.stats.DeletesReceived.Load(), s.stats.BulkSyncs.Load(), s.stats.ConfigsSent.Load(), s.stats.ConfigsReceived.Load(), s.stats.IPsecSASent.Load(), s.stats.IPsecSAReceived.Load(), s.stats.FencesSent.Load(), s.stats.FencesReceived.Load(), fenceSeq, fenceAckStr, s.stats.Errors.Load())
 }
 
 func (s *SessionSync) PeerIPsecSAs() []string {

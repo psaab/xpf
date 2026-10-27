@@ -45,7 +45,7 @@ func policyLines9570(prefix, action string) []string {
 }
 
 func query9570(from, to string) Query {
-	return Query{FromZone: from, ToZone: to, SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), Protocol: "tcp", SrcPort: 40000, DstPort: 443}
+	return Query{FromZone: from, ToZone: to, SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(443)}
 }
 
 func TestZonePairGlobalSentinelSimulatorReportsTheRefusal9570(t *testing.T) {
