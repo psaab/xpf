@@ -1003,8 +1003,8 @@ func interfaceHasSampling(ifCfg *config.InterfaceConfig) bool {
 // flow's own family admit it (#3270, per-family since #14608): the
 // ingress zone carries sampling input or the egress zone sampling
 // output. A nil zone map is unrestricted; a non-nil map with no match
-// denies. Ingress wins ties in FlowDirectionIface, which shares this
-// check with eligible.
+// denies. Ingress wins ties in FlowDirectionIface, which duplicates
+// this zone leg inline (it needs WHICH leg matched, not a boolean).
 func (ec *ExportConfig) zoneSelected(inZone, outZone uint16, isIPv6 bool) bool {
 	dirs := ec.SamplingZones.dirsFor(isIPv6)
 	if dirs == nil {

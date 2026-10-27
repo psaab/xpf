@@ -648,7 +648,8 @@ The package is split by responsibility (#1988):
 - `manager.go` — resolved export config (`ExportConfig`,
   `CollectorConfig`, `SamplingDir`), the sampling scheduler
   (`SampledForOpen` / `SampledForClose`, both built on the pure
-  `eligible` predicate and `zoneSelected` helper shared with
+  `eligible` predicate and `zoneSelected` helper (the direction
+  leg duplicates the zone check inline), shared with
   `FlowDirectionIface`), the shared `FlowRecord`/`SessionCloseData` shapes,
   and the `BuildExportConfig` / `BuildIPFIXExportConfig` /
   `BuildSamplingZones` config resolvers.
