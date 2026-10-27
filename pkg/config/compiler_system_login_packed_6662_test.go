@@ -81,14 +81,12 @@ func mustReject(t *testing.T, err error, marker, what string) {
 // TestLoginNestedCompilesCorrectly_6662 is the baseline: the block spelling
 // carries every leaf through.
 //
-// The fixture carries no deny-* leaf, and that is a #5831 consequence, not an
-// oversight: those two leaves are now hard-REJECTED at commit
-// (validateLoginClassDenyStrict), so a fixture carrying one can no longer be a
-// positive control for "this spelling compiles". Their carry-through moved to
-// TestLoginNestedCarriesDenyLeaves_6662 below, which drives the same nested
-// spelling through the tolerant path where the class is folded rather than
-// refused. Splitting them keeps BOTH properties bound; deleting the leaves
-// outright would have dropped the second one.
+// The fixture carries no deny-* leaf, by fixture scope rather than by
+// gate: deny-* leaves commit on both paths since #7172 cut 6 retired the
+// former #5831 reject-and-fold gate, and their carry-through in both
+// spellings is bound separately by
+// TestLoginCarriesDenyLeavesBothShapes_6662 below. Keeping them out of
+// this baseline keeps its failure attributable to the packed-body shape.
 // ROLE: POSITIVE CONTROL — the shape that must keep working. Measured, not assumed: disabling
 // validateLoginPackedStatementsAST entirely leaves this test GREEN (#6706
 // review r11), so it binds no gate behaviour and must not be counted as gate
@@ -186,15 +184,15 @@ func TestLoginNestedCompilesCorrectly_6662(t *testing.T) {
 	}
 }
 
-// TestLoginCarriesDenyLeavesBothShapes_6662 holds the half that moved out of
-// the two positive controls when #5831 made deny-* a commit rejection.
+// TestLoginCarriesDenyLeavesBothShapes_6662 holds the deny-* carry-through
+// kept out of the two positive controls above.
 //
 // Both spellings must still carry the restrictive leaves into the typed class —
 // value AND presence — because that is exactly what the packed-body bug
-// destroyed, and because a #5831 gate reading DenyLeavesPresent is only ever as
-// good as the parse that fills it. Compiled through the tolerant path (the
-// peer-sync / persisted-load ingress) because the strict path now refuses the
-// config outright; that rejection is the #5831 suite's job, not this file's.
+// destroyed, and because the runtime regex evaluator reading
+// DenyLeavesPresent is only ever as good as the parse that fills it.
+// Compiled through the tolerant path as well as (in the #5831 suite) the
+// strict path: since #7172 cut 6 both commit unfolded.
 //
 // Running BOTH shapes is the point: DenyLeavesPresent is populated off
 // prop.Name() from the loginClassLeafRestrictive table, and the two AST shapes
@@ -421,9 +419,9 @@ func TestLoginPackedUserRejectionExplainsTheRBACCost_6662(t *testing.T) {
 // identity-key count wrong would reject every `set system login ...` line and
 // brick config authoring, while the reject-table above stayed green.
 //
-// Carries no deny-* line for the same #5831 reason as the nested control above:
-// those leaves are refused at commit now, so they cannot appear in a fixture
-// whose job is to compile. Their flat-set carry-through is bound by
+// Carries no deny-* line, by the same fixture-scope choice as the nested
+// control above: deny-* leaves commit since #7172 cut 6, and their
+// flat-set carry-through is bound by
 // TestLoginCarriesDenyLeavesBothShapes_6662.
 // ROLE: POSITIVE CONTROL — the ingress the gate must never touch. Measured, not assumed: disabling
 // validateLoginPackedStatementsAST entirely leaves this test GREEN (#6706
