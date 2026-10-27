@@ -2,11 +2,11 @@ package vrrp
 
 import (
 	"log/slog"
-	"net"
 	"time"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/psaab/xpf/pkg/linkstate"
 	"github.com/vishvananda/netlink"
 )
 
@@ -367,16 +367,6 @@ func netlinkLinkState(name string) (bool, error) {
 	return linkAttrsUp(link.Attrs()), nil
 }
 
-// linkAttrsUp interprets link operational state. OperUnknown is common
-// on virtual devices that report no carrier state — fall back to the
-// IFF_UP admin flag there.
-func linkAttrsUp(attrs *netlink.LinkAttrs) bool {
-	switch attrs.OperState {
-	case netlink.OperUp:
-		return true
-	case netlink.OperUnknown:
-		return attrs.Flags&net.FlagUp != 0
-	default:
-		return false
-	}
-}
+// linkAttrsUp is an alias of linkstate.Up (#17132: one predicate repo-wide;
+// see pkg/linkstate for the carrier rule, #2070).
+func linkAttrsUp(attrs *netlink.LinkAttrs) bool { return linkstate.Up(attrs) }

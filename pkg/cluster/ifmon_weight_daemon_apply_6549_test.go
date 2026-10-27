@@ -14,13 +14,15 @@ import (
 //
 // pkg/daemon/daemon_apply_tail.go runs three steps in order on EVERY config apply:
 //
-//	18.  d.routing.ApplyInterfaceMonitors(cfg.Chassis.Cluster.RedundancyGroups)
-//	19a. d.cluster.UpdateConfig(cfg.Chassis.Cluster)   -> reconcileMonitorDebtsLocked
-//	19b. d.cluster.SetMonitorWeight(rgID, st.Interface, !st.Up, st.Weight)
+//	18.  d.routing.ApplyInterfaceMonitors(...)  (display sample only, #17132)
+//	19.  d.cluster.UpdateConfig(cfg.Chassis.Cluster) -> reconcile + PollNow
+//	(pre-#17132 19b fed SetMonitorWeight from the routing sample; deleted.)
 //
 // pkg/routing's monitorManager.Apply USED to copy `mon.Weight` verbatim off
-// the compiled *config.InterfaceMonitor, so step 19b fed the RAW configured
-// weight into the debt map — overwriting the value step 19a had just clamped.
+// the compiled *config.InterfaceMonitor, so the (pre-#17132) step 19b fed the
+// RAW configured weight into the debt map — overwriting the value step 19a
+// had just clamped. #17132 deleted step 19b entirely; these cells now pin
+// that UpdateConfig alone (reconcile + PollNow) cannot install raw debt.
 //
 // That is now closed at TWO independent layers, deliberately: pkg/routing
 // bounds the weight where it builds the status (it is election input, not
@@ -106,14 +108,12 @@ func applyTailLinks(up bool, junosNames ...string) *applyTailFakeOps {
 
 // runDaemonApplyTail replays pkg/daemon/daemon_apply_tail.go steps 18/19 in the
 // daemon's exact order against a real routing.Manager and the cluster Manager.
+// #17132: step 19 no longer feeds routing statuses into SetMonitorWeight —
+// pkg/cluster.Monitor is the only producer; UpdateConfig's PollNow is the
+// commit-time poll. The routing Manager is still exercised (display sample).
 func runDaemonApplyTail(m *Manager, rm *routing.Manager, cfg *config.ClusterConfig) {
 	rm.ApplyInterfaceMonitors(cfg.RedundancyGroups)
 	m.UpdateConfig(cfg)
-	for rgID, statuses := range rm.InterfaceMonitorStatuses() {
-		for _, st := range statuses {
-			m.SetMonitorWeight(rgID, st.Interface, !st.Up, st.Weight)
-		}
-	}
 	drainEvents(m, 8)
 }
 
@@ -144,6 +144,18 @@ func TestDaemonApplyTail_OutOfRangeWeightCannotCancelARealFailure_6549(t *testin
 	))
 
 	m := NewManager(0, 1)
+	// #17132: install the real dampened Monitor (backed by the same fake
+	// links, both down) BEFORE the apply, so UpdateConfig's PollNow drives
+	// it — the daemon's monitor exists from Start, before any apply.
+	downMon := NewMonitor(m, cfg.RedundancyGroups)
+	downNlh := newMockNlHandle()
+	downNlh.setLink(ifA, false)
+	downNlh.setLink(ifB, false)
+	downMon.nlHandle = downNlh
+	setNoDampening(downMon)
+	m.mu.Lock()
+	m.monitor = downMon
+	m.mu.Unlock()
 	rm := routing.NewManagerWithLinkOpsForTest(applyTailLinks(false, ifA, ifB))
 
 	runDaemonApplyTail(m, rm, cfg)

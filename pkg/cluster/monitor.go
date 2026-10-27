@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/linkstate"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -365,6 +366,17 @@ func (mon *Monitor) Stop() {
 // call the locking SetMonitorWeight here: it is invoked from
 // Manager.UpdateConfig with m.mu already held, so re-acquiring m.mu would
 // self-deadlock. It touches only the Monitor's own maps (guarded by mon.mu).
+// PollNow runs one dampened poll cycle immediately (#17132). UpdateConfig
+// calls it after releasing m.mu so a commit's new monitor set / weights are
+// reflected within this apply rather than at the next 1s tick — but only
+// through the dampened transition machinery, never a raw sample. Safe
+// before Start (no goroutine needed) and concurrently with the poll loop:
+// dampening state is under mon.mu and SetMonitorWeight under m.mu in the
+// established order.
+func (mon *Monitor) PollNow() {
+	mon.pollCycle(context.Background())
+}
+
 func (mon *Monitor) UpdateGroups(groups []*config.RedundancyGroup) {
 	mon.mu.Lock()
 	defer mon.mu.Unlock()
@@ -1598,35 +1610,12 @@ func (mon *Monitor) getNlHandle() nlLinkGetter {
 	return h
 }
 
-// LinkAttrsUp reports whether an interface is operationally up. It is the
-// shared carrier-state read for the cluster package: the interface-monitor
-// demotion loop (Monitor.pollInterfaceMonitors, RGInterfaceReady) and
-// the daemon no-reth-vrrp VIP-readiness gate
-// (pkg/daemon.checkVIPReadinessForConfig, #2090).
-//
-// Carrier health must NOT be decided from the administrative IFF_UP flag
-// (net.FlagUp): xpfd admin-ups ALL managed interfaces, so IFF_UP stays set
-// whenever the interface is admin-up — including when the cable is pulled.
-// A carrier-down link keeps IFF_UP set while OperState transitions to
-// OperDown/OperLowerLayerDown. Decide from the operational state
-// (IFLA_OPERSTATE):
-//   - OperUp                 -> up.
-//   - OperUnknown            -> fall back to the admin flag (common on
-//     virtual devices and 802.1Q VLAN sub-interfaces that report no
-//     independent carrier state).
-//   - OperDown / lower-layer-down / anything else -> down.
-//
-// This mirrors pkg/vrrp.linkAttrsUp, the canonical link-state read used by
-// VRRP track-interface detection (#2070).
+// LinkAttrsUp reports whether an interface is operationally up. It is an
+// alias of linkstate.Up (#17132: one predicate repo-wide) kept for the
+// cluster package's existing callers: the interface-monitor demotion loop
+// and the daemon VIP-readiness gate (#2090). See pkg/linkstate for the rule.
 func LinkAttrsUp(attrs *netlink.LinkAttrs) bool {
-	switch attrs.OperState {
-	case netlink.OperUp:
-		return true
-	case netlink.OperUnknown:
-		return attrs.Flags&net.FlagUp != 0
-	default:
-		return false
-	}
+	return linkstate.Up(attrs)
 }
 
 type noopNlHandle struct{}
