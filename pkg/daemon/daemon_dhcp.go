@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
-	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
@@ -539,24 +538,35 @@ func resolveConfigSubnetLinuxName(cfg *config.Config, ip net.IP) (string, string
 
 // relayInterfaceRG resolves the redundancy group that owns the DHCP-relay
 // interface named ifaceName (the raw config form the relay carries, e.g.
-// "reth0.0" or "ge-0/0/0.0"), or 0 when the interface is not RG-owned (#2456).
-// It mirrors rgForInterfaces (#2664): strip the unit suffix, then look up the
-// base interface in the config table and read its RedundancyGroup. A nil config
-// or unknown interface yields 0 (non-HA → always relay at the caller).
+// "reth0.0" or "ge-0/0/0.0"), or 0 when the interface is not RG-owned
+// (#2456). It is the positive-group form of config.Config.InterfaceRefRG
+// (#17086 SSOT). This package-level form builds a fresh RefRGIndex per
+// call for tests and one-shot callers; the per-packet gate below uses
+// the daemon's cached index instead. A nil config or unknown interface
+// yields 0 (non-HA → always relay at the caller).
 func relayInterfaceRG(cfg *config.Config, ifaceName string) int {
-	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+	if cfg == nil {
 		return 0
 	}
-	base := ifaceName
-	if i := strings.IndexByte(base, '.'); i >= 0 {
-		base = base[:i]
-	}
-	if ifc, ok := cfg.Interfaces.Interfaces[base]; ok && ifc != nil {
-		if ifc.RedundancyGroup > 0 {
-			return ifc.RedundancyGroup
-		}
+	if rg, owned := cfg.RefRGIndexFor().Lookup(ifaceName); owned && rg > 0 {
+		return rg
 	}
 	return 0
+}
+
+// relayRefRGIndexFor returns the daemon's cached RefRGIndex for cfg,
+// rebuilding it only when the config pointer changes (#17086). The
+// relay gate reads it per packet, so the build must not be per packet:
+// pointer identity is the invalidation key, the same idiom as
+// lastDNSRefreshBase.
+func (d *Daemon) relayRefRGIndexFor(cfg *config.Config) *config.RefRGIndex {
+	d.relayRefRGIndexMu.Lock()
+	defer d.relayRefRGIndexMu.Unlock()
+	if d.relayRefRGBase != cfg || d.relayRefRGIndex == nil {
+		d.relayRefRGIndex = cfg.RefRGIndexFor()
+		d.relayRefRGBase = cfg
+	}
+	return d.relayRefRGIndex
 }
 
 // relayMasterGateOpen reports whether THIS node may relay client requests
@@ -579,8 +589,9 @@ func (d *Daemon) relayMasterGateOpen(ifaceName string) bool {
 	if d.cluster == nil {
 		return true
 	}
-	rg := relayInterfaceRG(d.store.ActiveConfig(), ifaceName)
-	if rg == 0 {
+	cfg := d.store.ActiveConfig()
+	rg, owned := d.relayRefRGIndexFor(cfg).Lookup(ifaceName)
+	if !owned || rg == 0 {
 		return true
 	}
 	return d.isRethMasterState(rg)

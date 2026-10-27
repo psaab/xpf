@@ -13870,7 +13870,7 @@ fn owner_rg_export_with_shed_worker_fails_incomplete_9900() {
     live_export_ack.store(u64::MAX, Ordering::Release);
 
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 100, false)
+        .kick_owner_rg_export_unpaged(&[1], 100)
         .expect("kick");
     let t0 = Instant::now();
     let err = wait.wait_and_collect().expect_err("shed export must fail");
@@ -13893,7 +13893,7 @@ fn owner_rg_export_with_shed_worker_fails_incomplete_9900() {
         .store(u64::MAX, Ordering::Release);
     coordinator.workers.register(6, live_rec, None);
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 100, false)
+        .kick_owner_rg_export_unpaged(&[1], 100)
         .expect("kick");
     let (deltas, more) = wait.wait_and_collect().expect("live export must succeed");
     assert!(deltas.is_empty());
