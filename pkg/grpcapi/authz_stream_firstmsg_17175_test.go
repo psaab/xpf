@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/psaab/xpf/pkg/authz"
+	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -254,6 +256,86 @@ func TestStreamFirstMessageArgumentDeny17175(t *testing.T) {
 	}
 }
 
+// TestStreamSecondRecvMsgDoesNotReplaceRetained17175 pins F1: only
+// the first RecvMsg is authorized and retained. A second RecvMsg into
+// a denied target (unreachable in production — the generated wrapper
+// receives exactly once) must neither replace the retained message
+// nor terminate the stream on a tick with no config change; pre-fold
+// it overwrote retained and the tick priced the swapped message.
+func TestStreamSecondRecvMsgDoesNotReplaceRetained17175(t *testing.T) {
+	shortenStreamReauth9051(t)
+	s := streamServer17175(t, streamAuthzConfig17175)
+	ctx, cancelFn := context.WithCancel(ctxWithPeerUID(uidPingDeny17175))
+	defer cancelFn()
+	entered := make(chan struct{})
+	var once sync.Once
+	handler := func(_ any, stream grpc.ServerStream) error {
+		first := &pb.PingRequest{}
+		if err := stream.RecvMsg(first); err != nil {
+			return err
+		}
+		second := &pb.PingRequest{}
+		if err := stream.RecvMsg(second); err != nil {
+			return err
+		}
+		once.Do(func() { close(entered) })
+		<-stream.Context().Done()
+		return nil
+	}
+	// The fake delivers its one pre-decoded request on every RecvMsg,
+	// so the interceptor arm proves a second RecvMsg is harmless; the
+	// direct wrapper arm below proves the denied-target swap case.
+	fs := &drivingStream17175{ctx: ctx, req: &pb.PingRequest{Target: "10.98.1.1"}}
+	errc := make(chan error, 1)
+	go func() {
+		errc <- s.principalStreamInterceptor(nil, fs,
+			&grpc.StreamServerInfo{FullMethod: fullMethod17175("Ping")}, handler)
+	}()
+	select {
+	case <-entered:
+	case err := <-errc:
+		t.Fatalf("stream refused: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never entered")
+	}
+	select {
+	case err := <-errc:
+		t.Fatalf("stream terminated after second RecvMsg with no config change: %v", err)
+	case <-time.After(3*streamReauthInterval9051 + 100*time.Millisecond):
+	}
+	cancelFn()
+	select {
+	case <-errc:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not end on hangup")
+	}
+
+	// Direct wrapper arm: first message admitted, second message with
+	// a denied target must leave retained pointing at the first.
+	recv := &authzRecvStream{
+		ServerStream: &drivingStream17175{ctx: ctx, req: &pb.PingRequest{Target: "10.98.1.1"}},
+		s:            s,
+		fullMethod:   fullMethod17175("Ping"),
+		baseCtx:      ctxWithPeerUID(uidPingDeny17175),
+	}
+	first := &pb.PingRequest{}
+	if err := recv.RecvMsg(first); err != nil {
+		t.Fatalf("first RecvMsg: %v", err)
+	}
+	recv.ServerStream = &drivingStream17175{ctx: ctx, req: &pb.PingRequest{Target: "10.99.1.1"}}
+	second := &pb.PingRequest{}
+	if err := recv.RecvMsg(second); err != nil {
+		t.Fatalf("second RecvMsg must not re-authorize: %v", err)
+	}
+	retained, decided := recv.retainedRequest()
+	if !decided {
+		t.Fatal("retainedRequest reports undecided after first message")
+	}
+	if got, ok := retained.(*pb.PingRequest); !ok || got != first || got.GetTarget() != "10.98.1.1" {
+		t.Fatalf("retained = %v, want the first message (10.98.1.1) — a second RecvMsg replaced it", retained)
+	}
+}
+
 // TestStreamReauthUsesRetainedMessage17175 pins the tick half: a class
 // edit committed mid-stream that makes the RETAINED arguments denied
 // must terminate the stream, while the same stream survives ticks when
@@ -375,16 +457,159 @@ func TestStreamRequestSpecCoversEveryStream17175(t *testing.T) {
 			t.Errorf("%s must be declared request-dependent in streamRequestSpec17175 (#17175)", m)
 		}
 	}
+	// F3: a needsRequest=false declaration is a claim that NO
+	// request-priced arm can distinguish the typed empty request from
+	// the retained actual request (or from nil). If a future arm is
+	// added for such a method, open (typed-empty) and tick (retained
+	// actual) would silently diverge. Assert it structurally: for
+	// every needsRequest=false stream, the empty request and a
+	// populated request must name the same argument forms, resolve
+	// the same canonical command, price the same method permission,
+	// require no config-target price, carry no alias forms, and not
+	// be a config-read/commit-priced method.
+	for full, needs := range streamRequestSpec17175 {
+		if needs {
+			continue
+		}
+		empty := emptyStreamRequest17175(full)
+		if empty == nil {
+			t.Errorf("%s is needsRequest=false but has no typed empty request in emptyStreamRequest17175", full)
+			continue
+		}
+		populated := populatedStreamRequest17175(full)
+		if populated == nil {
+			t.Errorf("%s is needsRequest=false but has no populated probe request", full)
+			continue
+		}
+		_, method, _ := splitFullMethod(full)
+		base, resolved := rpcCanonicalCommand(full, empty)
+		if !resolved {
+			t.Errorf("%s needsRequest=false: empty request has no canonical command", full)
+			continue
+		}
+		if got, ok := rpcCanonicalCommand(full, populated); !ok || got != base {
+			t.Errorf("%s needsRequest=false: canonical command differs for populated request %q vs empty %q — a request-priced arm exists", full, got, base)
+		}
+		cfg := streamCensusCfg17175(t)
+		emptyForms, emptyNamed := rpcArgumentForms(cfg, full, empty, base)
+		popForms, popNamed := rpcArgumentForms(cfg, full, populated, base)
+		if emptyNamed != popNamed || fmt.Sprint(emptyForms) != fmt.Sprint(popForms) {
+			t.Errorf("%s needsRequest=false: rpcArgumentForms differs empty=%v/%v populated=%v/%v — a request-priced arm exists", full, emptyForms, emptyNamed, popForms, popNamed)
+		}
+		p1, _ := methodPermission(full, empty)
+		if p2, _ := methodPermission(full, populated); p1 != p2 {
+			t.Errorf("%s needsRequest=false: methodPermission differs empty=%v populated=%v", full, p1, p2)
+		}
+		if p3, _ := methodPermission(full, nil); p1 != p3 {
+			t.Errorf("%s needsRequest=false: methodPermission differs empty=%v nil=%v", full, p1, p3)
+		}
+		if _, ok := configTargetReadPermission(full, populated); ok {
+			t.Errorf("%s needsRequest=false: configTargetReadPermission prices the populated request", full)
+		}
+		if _, ok := rpcAliasCommands16605[method]; ok {
+			t.Errorf("%s needsRequest=false: rpcAliasCommands16605 has an arm for %s", full, method)
+		}
+		switch method {
+		case "ShowConfig", "ShowCompare", "ShowRollback", "Commit", "CommitConfirmed":
+			t.Errorf("%s needsRequest=false: %s is config-read/commit-priced", full, method)
+		}
+	}
+}
+
+func streamCensusCfg17175(t *testing.T) *config.Config {
+	t.Helper()
+	s := streamServer17175(t, streamAuthzConfig17175)
+	return s.activeConfig()
+}
+
+// populatedStreamRequest17175 returns a fully-populated request for a
+// request-independent stream, so the census can prove no gate reads it.
+func populatedStreamRequest17175(fullMethod string) any {
+	switch fullMethod {
+	case pb.BpfrxService_MonitorPacketDrop_FullMethodName:
+		return &pb.MonitorPacketDropRequest{SourcePrefix: "10.99.1.0/24", DestinationPrefix: "10.98.0.0/16", Protocol: "tcp", FromZone: "trust", Interface: "ge-0/0/0", SourcePort: 1234, DestinationPort: 443, Count: 7}
+	}
+	return nil
+}
+
+// TestStreamMonitorPacketDropAdmitDeny17175 drives MonitorPacketDrop
+// (the needsRequest=false stream) through the real interceptor: a
+// class whose bare `monitor security packet-drop` charge is denied
+// must be refused, and a class that admits it must stream even with a
+// populated filter request — proving the populated request is priced
+// identically to the typed empty request at open and on ticks.
+func TestStreamMonitorPacketDropAdmitDeny17175(t *testing.T) {
+	shortenStreamReauth9051(t)
+	const cfgText = `
+system {
+    host-name authz-17175;
+    login {
+        class drop-deny {
+            permissions view;
+            deny-commands "^monitor security packet-drop";
+        }
+        class drop-allow {
+            permissions view;
+            allow-commands "^monitor";
+        }
+        user opsuser {
+            class drop-deny;
+        }
+        user allowuser {
+            class drop-allow;
+        }
+    }
+}
+`
+	populated := &pb.MonitorPacketDropRequest{SourcePrefix: "10.99.1.0/24", Protocol: "tcp", Count: 1}
+
+	// Deny: the bare charge is denied, so open must refuse before the
+	// handler is entered, regardless of the populated filters.
+	s := streamServer17175(t, cfgText)
+	errc, entered, cancel := runStream17175(t, s, uidPingDeny17175,
+		fullMethod17175("MonitorPacketDrop"), populated)
+	defer cancel()
+	select {
+	case <-entered:
+		t.Fatal("MonitorPacketDrop entered the handler under deny-commands ^monitor security packet-drop")
+	case err := <-errc:
+		if status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("MonitorPacketDrop deny verdict = %v (code %v), want PermissionDenied", err, status.Code(err))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no verdict for denied MonitorPacketDrop")
+	}
+
+	// Admit: the allowlist admits ^monitor, so the populated request
+	// streams and survives ticks (tick re-prices the retained actual
+	// request, which must decide identically to the empty one).
+	s2 := streamServer17175(t, cfgText)
+	errc2, entered2, cancel2 := runStream17175(t, s2, uidDiagAllow17175,
+		fullMethod17175("MonitorPacketDrop"), populated)
+	defer cancel2()
+	select {
+	case <-entered2:
+	case err := <-errc2:
+		t.Fatalf("MonitorPacketDrop was refused under allow-commands ^monitor: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never entered for admitted MonitorPacketDrop")
+	}
+	select {
+	case err := <-errc2:
+		t.Fatalf("admitted MonitorPacketDrop terminated on tick: %v", err)
+	case <-time.After(3*streamReauthInterval9051 + 100*time.Millisecond):
+	}
+	cancel2()
+	select {
+	case <-errc2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("admitted MonitorPacketDrop did not end on hangup")
+	}
 }
 
 // TestStreamBufconnArgumentDeny17175 is the acceptance cell over the
 // wire: through bufconn, the real generated Ping handler and the real
 // interceptor chain, Ping{10.99.1.1} is PermissionDenied under
-// "^ping 10\.99\." and Ping{10.98.1.1} is NOT PermissionDenied (it
-// proceeds to the handler, which fails on the sandbox's missing ping
-// binary / completes — either way the authz verdict is admission).
-// TestStreamBufconnArgumentDeny17175Real drives bufconn with the peer
-// lookup injected to the ping-deny user.
 func TestStreamBufconnArgumentDeny17175Real(t *testing.T) {
 	usePasswdFixture17175(t)
 	s := NewServer("127.0.0.1:0", Config{Store: authzStore5278(t, streamAuthzConfig17175)})

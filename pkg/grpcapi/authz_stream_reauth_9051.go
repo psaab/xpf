@@ -45,16 +45,6 @@ import (
 // it. Tests must restore it with t.Cleanup.
 var streamReauthInterval9051 = 5 * time.Second
 
-// reauthServerStream re-parents a stream's context so the re-authorization
-// goroutine can cancel it. grpc.ServerStream has no setter; embedding and
-// overriding Context() is the standard shape (same as peerMarkerServerStream).
-type reauthServerStream struct {
-	grpc.ServerStream
-	ctx context.Context
-}
-
-func (s reauthServerStream) Context() context.Context { return s.ctx }
-
 // authzRecvStream defers the request-dependent half of stream
 // authorization to the first RecvMsg (#17175).
 //
@@ -62,15 +52,26 @@ func (s reauthServerStream) Context() context.Context { return s.ctx }
 // RecvMsg on the stream the interceptor handed it, BEFORE invoking the
 // handler body. Wrapping that stream lets the interceptor run the full
 // authorizeRPCContext with the decoded message at exactly that point —
-// before any handler logic, before any Send — and retain the message so
-// the #9051 tick re-prices the same arguments instead of nil.
+// before any handler logic, before any Send — and retain ONLY that
+// first message so the #9051 tick re-prices the same arguments instead
+// of nil. Later RecvMsg calls (unreachable in production: the generated
+// wrapper receives exactly once) neither re-authorize nor replace the
+// retained message.
 //
 // retained/authCtx are written by the handler goroutine (first RecvMsg)
 // and read by the watcher goroutine (tick); mu guards both. Context()
-// returns the authorized context once the first message is admitted, so
-// the handler sees the exactly-admitted principal as the unary path
-// does; before that it returns baseCtx, whose parent chain still
-// carries the open-time authorized principal.
+// returns the authorized context once the first message is admitted;
+// before that it returns baseCtx. baseCtx is parented on the open-time
+// authorizedCtx (authorizeStreamContinuously), so before the first
+// message it carries the open-time authorizedPrincipalKey{} and after
+// admission the first-message principal. The next interceptor in the
+// primary chain (peerMarkerStreamInterceptor) captures Context()
+// before any RecvMsg and freezes that value into the stream the
+// handler sees, so in production a handler re-reading stream.Context()
+// still sees the pre-message (open-time) context — the authCtx swap
+// is observable only on this wrapper itself. No stream handler today
+// reads authorizedPrincipalFromContext, so that freeze is harmless;
+// it is documented here rather than silently implied.
 type authzRecvStream struct {
 	grpc.ServerStream
 	s          *Server
@@ -102,8 +103,10 @@ func (w *authzRecvStream) RecvMsg(m any) error {
 	}
 	w.mu.Lock()
 	already := w.decided
-	w.decided = true
-	w.retained = m
+	if !already {
+		w.decided = true
+		w.retained = m
+	}
 	w.mu.Unlock()
 	if already {
 		return nil
@@ -143,7 +146,11 @@ func (s *Server) authorizeStreamContinuously(
 	handler grpc.StreamHandler,
 	authorizedCtx context.Context,
 ) error {
-	ctx, cancel := context.WithCancel(ss.Context())
+	// Parent on authorizedCtx, not ss.Context(): authorizedCtx carries
+	// the open-time authorizedPrincipalKey{} (authorizeStreamOpenContext
+	// / authorizeRPCContext), while ss.Context() is its sibling and
+	// carries no such value. Cancelling ctx still cancels the stream.
+	ctx, cancel := context.WithCancel(authorizedCtx)
 	defer cancel()
 
 	revoked := make(chan error, 1)

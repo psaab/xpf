@@ -49,7 +49,13 @@ import (
 // from the table, if the table names a non-stream, or if any stream is
 // client-streaming (ClientStreams: true) — a client-streaming RPC
 // sends many messages and this first-message-only design must not be
-// silently extended to it.
+// silently extended to it. The same census also guards the
+// needsRequest=false claim above: for every such method it asserts
+// the typed empty request and a populated request name identical
+// argument forms, canonical command and method permission, with no
+// config-target, alias, config-read or commit arm — so adding a
+// request-priced arm for a request-independent stream fails there
+// instead of silently diverging open (empty) from tick (retained).
 var streamRequestSpec17175 = map[string]bool{
 	pb.BpfrxService_Ping_FullMethodName:              true,
 	pb.BpfrxService_Traceroute_FullMethodName:        true,
