@@ -215,7 +215,7 @@ default RETH ownership/failover path.
     (`vipsSnapshot`, `vipSetDelta`, `updateVIPs`, `getAdvertCapacityErr`).
 - `advert_capacity.go` — per-family VIP cardinality guard (#6779):
   `splitVIPsByFamily` (the SSOT for how a configured VIP list is counted
-  by family, shared with `sendAdvert`) and `checkAdvertCapacity` (whether
+  by family, shared with `sendAdvert`, over `config.ParseVRRPVIP` #17150) and `checkAdvertCapacity` (whether
   that list can produce a legal advert). See "Advert capacity" below.
 - `packet.go` — VRRPv3 advert parser/builder + IPv4/IPv6 checksums.
 - `track.go` — interface tracking (#1814): the per-instance
@@ -1016,12 +1016,22 @@ link-local prepend above, the ceiling on **configured** VIPs is:
 `MaxConfiguredVIPs(isIPv6)` (`packet.go`) derives both from
 `MaxAdvertAddrCount`, so the subtraction lives in one place.
 
-**Canonical VIP-set identity (#11482).** Virtual addresses are an ordered set:
+**Canonical VIP-set identity (#11482, #17150).** Virtual addresses are an ordered set:
 the first spelling of each canonical address/prefix identity is retained, and
 aliases are removed during config collection and in-place updates. Advertisement
 construction, GARP selection, and capacity checks therefore see one entry per
 VIP. Capacity is reevaluated against the canonical set, including on day-2
-updates.
+updates. The parse, identity, and dedupe live in `pkg/config`
+(`ParseVRRPVIP` / `VRRPVIPIdentity` / `DedupeVRRPVIPs`) — the one
+implementation repo-wide — because `pkg/vrrp` imports `pkg/config`; every
+`pkg/vrrp` VIP helper is a one-liner over that parse, so a malformed entry
+such as `10.0.0.1/33` is skipped by the capacity guard, the advert builder,
+the claim check, and the commit-time counter alike. IPv4-mapped spellings
+(`::ffff:10.0.0.1/120`) are IPv4 on every one of those paths (unmapped
+with the /96-offset bit translation in `ParseVRRPVIP`), so `canonAddr`'s
+exclusion key is the `net.IP` lookup form `10.0.0.1` (#2516); a mapped
+prefix below /96 has no v4 prefix equivalent and parses as the same v4
+host identity (`10.0.0.1/32`), so actuation and GARP agree it is IPv4.
 
 **Why an oversized set was more than a malformed packet.** `sendAdvert`
 discards a `Marshal` failure at `slog.Debug`, and `becomeMaster` claimed the

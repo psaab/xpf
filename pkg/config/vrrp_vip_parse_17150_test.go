@@ -1,0 +1,126 @@
+package config
+
+import "testing"
+
+// TestParseVRRPVIPAgreement17150 pins the shared VIP parse (#17150):
+// one verdict per string for the commit-time counter and the exported
+// parse pkg/vrrp consumes. Before #17150 the commit-time counter used
+// ParseCIDR-first while pkg/vrrp's strip-at-"/" helpers counted
+// "10.0.0.1/33" as a real IPv4 address.
+//
+// FAIL-ON-REVERT: restoring a strip-then-ParseIP counter (or making
+// ParseVRRPVIP accept "/33") counts the malformed rows below and fails.
+func TestParseVRRPVIPAgreement17150(t *testing.T) {
+	cases := []struct {
+		vip    string
+		wantOK bool
+		wantV4 bool
+	}{
+		{"10.0.0.1/33", false, false},
+		{"10.0.0.1/x", false, false},
+		{"10.0.0.1", true, true},
+		{"10.0.0.1/24", true, true},
+		{"FE80::AB/64", true, false},
+		{"2001:0DB8::10/64", true, false},
+		{"not-an-address", false, false},
+		{"::ffff:10.0.0.1", true, true},
+		{"::ffff:10.0.0.1/120", true, true},
+		{"::ffff:10.0.0.1/128", true, true},
+		{"::ffff:10.0.0.1/96", true, true},
+		{"::ffff:10.0.0.1/95", true, true},
+	}
+	for _, c := range cases {
+		p, ok := ParseVRRPVIP(c.vip)
+		if ok != c.wantOK {
+			t.Errorf("ParseVRRPVIP(%q) ok=%v, want %v", c.vip, ok, c.wantOK)
+			continue
+		}
+		if ok && p.Addr().Is4() != c.wantV4 {
+			t.Errorf("ParseVRRPVIP(%q) Is4=%v, want %v", c.vip, p.Addr().Is4(), c.wantV4)
+		}
+		n4, n6 := countVRRPVIPFamilies([]string{c.vip})
+		if (n4+n6 == 1) != c.wantOK {
+			t.Errorf("countVRRPVIPFamilies(%q) = (%d,%d), wantOK=%v", c.vip, n4, n6, c.wantOK)
+		}
+		if c.wantOK && c.wantV4 && n4 != 1 {
+			t.Errorf("countVRRPVIPFamilies(%q) n4=%d, want 1", c.vip, n4)
+		}
+		if c.wantOK && !c.wantV4 && n6 != 1 {
+			t.Errorf("countVRRPVIPFamilies(%q) n6=%d, want 1", c.vip, n6)
+		}
+		// The host helper must agree: nil exactly when the parse fails.
+		if (vrrpVIPHostIP(c.vip) == nil) == c.wantOK {
+			t.Errorf("vrrpVIPHostIP(%q) nil-mismatch with ParseVRRPVIP ok=%v", c.vip, c.wantOK)
+		}
+		// Mapped spellings agree with the IPv4 host they denote:
+		// vrrpVIPHostIP (net.IP form) must be the "10.0.0.1" the
+		// vrrp-side lookups key on, never a mapped form. For the
+		// sub-96 row this additionally pins the family: To4() must be
+		// non-nil and the string must be the v4 host — the gates branch
+		// on exactly that, so a kept-mapped parse would split commit
+		// (inet) from runtime (inet6).
+		if c.wantOK && (c.vip == "::ffff:10.0.0.1" || c.vip == "::ffff:10.0.0.1/120" || c.vip == "::ffff:10.0.0.1/128" || c.vip == "::ffff:10.0.0.1/96" || c.vip == "::ffff:10.0.0.1/95") {
+			if got := vrrpVIPHostIP(c.vip); got == nil || got.String() != "10.0.0.1" || got.To4() == nil {
+				t.Errorf("vrrpVIPHostIP(%q) = %v (To4=%v), want IPv4 host 10.0.0.1", c.vip, got, got.To4())
+			}
+		}
+		if c.vip == "::ffff:10.0.0.1/95" {
+			if got := VRRPVIPIdentity(c.vip); got != "10.0.0.1/32" {
+				t.Errorf("VRRPVIPIdentity(sub-96 mapped) = %q, want v4 host identity 10.0.0.1/32", got)
+			}
+			if p.Addr().String() != "10.0.0.1" || p.Bits() != 32 {
+				t.Errorf("ParseVRRPVIP(sub-96 mapped) = %v, want 10.0.0.1/32 host prefix", p)
+			}
+		}
+	}
+
+	// Capacity-counter agreement cell: cap-sized valid set + malformed
+	// entry still fits; cap-sized + one distinct valid VIP does not.
+	vips := vipCountV4(MaxVRRPVirtualAddressesIPv4)
+	withBad := append(append([]string(nil), vips...), "10.0.0.1/33")
+	if err := vrrpVIPCountErr("test", withBad); err != nil {
+		t.Errorf("vrrpVIPCountErr(cap + 10.0.0.1/33) = %v, want nil (malformed skipped)", err)
+	}
+	over := append(append([]string(nil), vips...), vipCountV4(MaxVRRPVirtualAddressesIPv4 + 1)[MaxVRRPVirtualAddressesIPv4])
+	if err := vrrpVIPCountErr("test", over); err == nil {
+		t.Error("vrrpVIPCountErr(cap + distinct valid) = nil, want over-capacity error (control)")
+	}
+
+	// Dedupe identity: bare == host-route, prefix-preserving otherwise.
+	if DedupeVRRPVIPs([]string{"10.0.0.1", "10.0.0.1/32"}) != nil &&
+		len(DedupeVRRPVIPs([]string{"10.0.0.1", "10.0.0.1/32"})) != 1 {
+		t.Errorf("DedupeVRRPVIPs(bare, /32) = %v, want 1 entry",
+			DedupeVRRPVIPs([]string{"10.0.0.1", "10.0.0.1/32"}))
+	}
+	if len(DedupeVRRPVIPs([]string{"10.0.0.1/24", "10.0.0.1/32"})) != 2 {
+		t.Error("DedupeVRRPVIPs(/24, /32) must keep 2 entries (prefix-preserving, #11482)")
+	}
+	// Mapped spellings share the IPv4 host's identity: bare mapped ==
+	// v4 bare, mapped /120 == v4 /24, mapped /128 == v4 /32 (the /96
+	// offset translation), while mapped /24-spelling prefix lengths
+	// stay prefix-preserving distinct.
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1", "10.0.0.1"})) != 1 {
+		t.Error("DedupeVRRPVIPs(bare mapped, bare v4) must keep 1 entry")
+	}
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1/120", "10.0.0.1/24"})) != 1 {
+		t.Error("DedupeVRRPVIPs(mapped /120, v4 /24) must keep 1 entry (/120 == /24)")
+	}
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1/128", "10.0.0.1/32", "10.0.0.1"})) != 1 {
+		t.Error("DedupeVRRPVIPs(mapped /128, v4 /32, bare v4) must keep 1 entry")
+	}
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1/120", "10.0.0.1/32"})) != 2 {
+		t.Error("DedupeVRRPVIPs(mapped /120, v4 /32) must keep 2 entries (prefix-preserving)")
+	}
+	if VRRPVIPIdentity("::ffff:10.0.0.1/120") != "10.0.0.1/24" {
+		t.Errorf("VRRPVIPIdentity(mapped /120) = %q, want 10.0.0.1/24", VRRPVIPIdentity("::ffff:10.0.0.1/120"))
+	}
+	if VRRPVIPIdentity("::ffff:10.0.0.1/95") != "10.0.0.1/32" {
+		t.Errorf("VRRPVIPIdentity(sub-96 mapped) = %q, want v4 host identity 10.0.0.1/32", VRRPVIPIdentity("::ffff:10.0.0.1/95"))
+	}
+	if len(DedupeVRRPVIPs([]string{"::ffff:10.0.0.1/95", "10.0.0.1", "::ffff:10.0.0.1/95"})) != 1 {
+		t.Error("DedupeVRRPVIPs(sub-96 mapped, bare v4) must keep 1 entry (same v4 host identity)")
+	}
+	if len(DedupeVRRPVIPs([]string{"2001:db8::10/64", "2001:0DB8:0:0:0:0:0:10/64"})) != 1 {
+		t.Error("DedupeVRRPVIPs(uppercase expanded alias) must keep 1 entry")
+	}
+}
