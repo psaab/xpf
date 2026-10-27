@@ -21,8 +21,8 @@ pub(in crate::afxdp::session_glue) use delete_synced::{
 };
 pub(in crate::afxdp::session_glue) use demote_owner_rgs::handle_demote_owner_rgs;
 // Shared by the worker's peer/local-control delete commands and tests that
-// exercise the guard parameters directly.
-pub(in crate::afxdp::session_glue) use delete_synced::handle_delete_synced_with_guard;
+// exercise the delete origin directly.
+pub(in crate::afxdp::session_glue) use delete_synced::{DeleteOrigin, handle_delete_synced_with_guard};
 pub(in crate::afxdp::session_glue) use export_owner_rg_sessions::handle_export_owner_rg_sessions;
 pub(in crate::afxdp::session_glue) use refresh_owner_rgs::handle_refresh_owner_rgs;
 pub(in crate::afxdp::session_glue) use upsert_synced::handle_upsert_synced;
