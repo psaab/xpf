@@ -193,31 +193,45 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 	return berEncodeTLV(tagSequence, msgBody)
 }
 
-// buildLinkTrapV1 builds an SNMPv1 Trap-PDU (RFC 1157) for a link up/down
-// event, for a trap group configured `version v1` (#3948). A v1-only receiver
-// drops the SNMPv2c trap buildLinkTrap emits, so a v1 group must send the
-// distinct v1 PDU shape: the trap type is carried in the generic-trap /
+// trapKindsForVersion returns the trap kinds a trap group with the given
+// configured version emits for a link event (#3948, #17066). Junos trap-group
+// version semantics: "v1" emits an SNMPv1 Trap-PDU, "v2" (or an
+// empty/unspecified value — the default) emits an SNMPv2c trap, and "all"
+// emits BOTH. Any unrecognized value defaults to v2c (the pre-#3948 behavior)
+// rather than dropping the notification. This is the sole switch on
+// trap-group version; sendLinkTraps executes the plan by enqueuing a deferred
+// v1 job and/or a prebuilt v2c packet.
+func trapKindsForVersion(version string) (v1Deferred, v2c bool) {
+	switch version {
+	case "v1":
+		return true, false
+	case "all":
+		return true, true
+	default: // "v2", "" (unspecified), or anything else -> v2c
+		return false, true
+	}
+}
+
+// buildLinkTrapV1WithUptime builds an SNMPv1 Trap-PDU (RFC 1157) for a link
+// up/down event with the caller-supplied sysUpTime (hundredths of a second),
+// for a trap group configured `version v1` (#3948). A v1-only receiver drops
+// the SNMPv2c trap buildLinkTrap emits, so a v1 group must send the distinct
+// v1 PDU shape: the trap type is carried in the generic-trap /
 // specific-trap / time-stamp fields (not as sysUpTime.0 + snmpTrapOID.0
 // varbinds), and the message version field is 0. The enterprise is the
 // snmpTraps node.
 //
 // #9123: agent-addr is derived from the source address this trap will actually
-// leave from (agentAddrForTargetOnVRF uses the same VRF pin as the sender), NOT
-// hardcoded to 0.0.0.0. The old justification cited "RFC 2576 §3.1", the wrong
-// direction of the mapping; RFC 3584 §3.2 instead requires the originator's IP
-// address for IP notifications. 0.0.0.0 is the fallback for non-IP transport.
-// agent_addr_9123.go.
-func (a *Agent) buildLinkTrapV1(community, target string, linkUp bool, ifindex int, ifname string, adminUp bool) []byte {
-	// sysUpTime in hundredths of a second.
-	return a.buildLinkTrapV1WithUptime(community, target, linkUp, ifindex, ifname, int(time.Since(a.startTime).Milliseconds()/10), adminUp)
-}
-
-// buildLinkTrapV1WithUptime is buildLinkTrapV1 with the time-stamp supplied by
-// the caller. The trap worker uses it for deferred v1 jobs (#9917 F-134) with
-// the uptime captured at event time, so a trap delivered after backlog carries
-// the event's time-stamp rather than the delivery time's.
+// leave from (agentAddrForTargetOnVRF uses the same VRF pin as the sender),
+// NOT hardcoded to 0.0.0.0. The old justification cited "RFC 2576 §3.1", the
+// wrong direction of the mapping; RFC 3584 §3.2 instead requires the
+// originator's IP address for IP notifications. 0.0.0.0 is the fallback for
+// non-IP transport. agent_addr_9123.go.
+//
+// The trap worker uses this builder for deferred v1 jobs (#9917 F-134) with
+// the uptime captured at event time, so a trap delivered after backlog
+// carries the event's time-stamp rather than the delivery time's.
 func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool, ifindex int, ifname string, uptime int, adminUp bool) []byte {
-
 	genericTrap := genericTrapLinkDown
 	operStatus := 2 // down
 	if linkUp {
@@ -280,31 +294,6 @@ func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool,
 	msgBody = append(msgBody, pduEncoded...)
 
 	return berEncodeTLV(tagSequence, msgBody)
-}
-
-// buildLinkTrapsForVersion returns the pre-built trap packet(s) a trap group
-// with the given configured version emits for a link event (#3948). Junos
-// trap-group version semantics: "v1" emits an SNMPv1 Trap-PDU, "v2" (or an
-// empty/unspecified value — the default) emits an SNMPv2c trap, and "all"
-// emits BOTH. Any unrecognized value defaults to v2c (the pre-#3948 behavior)
-// rather than dropping the notification.
-//
-// #9123: it now takes the target, because the v1 PDU carries an agent-addr that
-// must agree with the source address the trap will leave from. On a multi-homed
-// box that differs per target, so the packet is built per target rather than
-// once per group.
-func (a *Agent) buildLinkTrapsForVersion(community, version, target string, linkUp bool, ifindex int, ifname string, adminUp bool) [][]byte {
-	switch version {
-	case "v1":
-		return [][]byte{a.buildLinkTrapV1(community, target, linkUp, ifindex, ifname, adminUp)}
-	case "all":
-		return [][]byte{
-			a.buildLinkTrapV1(community, target, linkUp, ifindex, ifname, adminUp),
-			a.buildLinkTrap(community, linkUp, ifindex, ifname, adminUp),
-		}
-	default: // "v2", "" (unspecified), or anything else -> v2c
-		return [][]byte{a.buildLinkTrap(community, linkUp, ifindex, ifname, adminUp)}
-	}
 }
 
 // sendTrap sends a pre-built trap packet to a single target on port 162 without
@@ -434,35 +423,40 @@ func (a *Agent) sendLinkTraps(linkUp bool, ifindex int, ifname string, adminUp b
 			// toward THIS target, so the v1 build stays per target -- it just
 			// runs on the worker now instead of the caller. The v2c packet
 			// carries no agent-addr and is built here, unaffected.
-			switch tg.Version {
-			case "v1":
+			v1Deferred, v2c := trapKindsForVersion(tg.Version)
+			if v1Deferred {
+				a.enqueueTrap(a.deferredV1TrapJob(tg.Name, target, direction, ifname, ifindex, community, linkUp, uptime, adminUp))
+			}
+			if v2c {
 				a.enqueueTrap(trapJob{
-					target: target, group: tg.Name, event: "link" + direction,
-					iface: ifname, ifindex: ifindex,
-					deferredV1: true, community: community, linkUp: linkUp, uptime: uptime, adminUp: adminUp,
+					target: target, pkt: a.buildLinkTrap(community, linkUp, ifindex, ifname, adminUp), group: tg.Name,
+					event: "link" + direction, iface: ifname, ifindex: ifindex,
 				})
-			case "all":
-				a.enqueueTrap(trapJob{
-					target: target, group: tg.Name, event: "link" + direction,
-					iface: ifname, ifindex: ifindex,
-					deferredV1: true, community: community, linkUp: linkUp, uptime: uptime, adminUp: adminUp,
-				})
-				for _, pkt := range a.buildLinkTrapsForVersion(community, "v2", target, linkUp, ifindex, ifname, adminUp) {
-					a.enqueueTrap(trapJob{
-						target: target, pkt: pkt, group: tg.Name,
-						event: "link" + direction, iface: ifname, ifindex: ifindex,
-					})
-				}
-			default: // "v2", "" (unspecified), or anything else -> v2c
-				for _, pkt := range a.buildLinkTrapsForVersion(community, tg.Version, target, linkUp, ifindex, ifname, adminUp) {
-					a.enqueueTrap(trapJob{
-						target: target, pkt: pkt, group: tg.Name,
-						event: "link" + direction, iface: ifname, ifindex: ifindex,
-					})
-				}
 			}
 		}
 	}
+}
+
+// deferredV1TrapJob builds the deferred v1 trap job for one trap-group
+// target (#9917 F-134, #17066). The v1 packet itself is built on the trap
+// worker by buildLinkTrapV1WithUptime; this job carries event-time uptime,
+// community, and admin state so delivery under backlog keeps event semantics.
+func (a *Agent) deferredV1TrapJob(group, target, direction, ifname string, ifindex int, community string, linkUp bool, uptime int, adminUp bool) trapJob {
+	return trapJob{
+		target: target, group: group, event: "link" + direction,
+		iface: ifname, ifindex: ifindex,
+		deferredV1: true, community: community, linkUp: linkUp, uptime: uptime, adminUp: adminUp,
+	}
+}
+
+// logTrapAbandonedOnStop accounts for one dequeued-but-undelivered trap job
+// abandoned because Stop fired (#17066). The worker and its shutdown drain
+// share this single slog site so the drop accounting cannot drift.
+func (a *Agent) logTrapAbandonedOnStop(job trapJob) {
+	dropped := a.trapsDropped.Add(1)
+	slog.Warn("SNMP trap abandoned on stop, dropping trap",
+		"target", job.target, "group", config.SecretDataPlaceholder,
+		"event", job.event, "iface", job.iface, "dropped_total", dropped)
 }
 
 // trapCommunityForGroup returns the v1/v2c trap community for one trap
@@ -697,10 +691,7 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 				// This job was dequeued but must not be sent (Stop raced the
 				// outer select). Count it, then account for the rest of the
 				// buffered backlog, then exit.
-				dropped := a.trapsDropped.Add(1)
-				slog.Warn("SNMP trap abandoned on stop, dropping trap",
-					"target", job.target, "group", config.SecretDataPlaceholder,
-					"event", job.event, "iface", job.iface, "dropped_total", dropped)
+				a.logTrapAbandonedOnStop(job)
 				a.countAbandonedTraps(queue)
 				return
 			default:
@@ -718,10 +709,7 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 				// grows by one agent-addr dial for a deferred job in flight.
 				select {
 				case <-stop:
-					dropped := a.trapsDropped.Add(1)
-					slog.Warn("SNMP trap abandoned on stop, dropping trap",
-						"target", job.target, "group", config.SecretDataPlaceholder,
-						"event", job.event, "iface", job.iface, "dropped_total", dropped)
+					a.logTrapAbandonedOnStop(job)
 					a.countAbandonedTraps(queue)
 					return
 				default:
@@ -765,10 +753,7 @@ func (a *Agent) countAbandonedTraps(queue chan trapJob) {
 				return
 			}
 			a.decTrapPerTarget(normalizeTrapTarget(job.target))
-			dropped := a.trapsDropped.Add(1)
-			slog.Warn("SNMP trap abandoned on stop, dropping trap",
-				"target", job.target, "group", config.SecretDataPlaceholder,
-				"event", job.event, "iface", job.iface, "dropped_total", dropped)
+			a.logTrapAbandonedOnStop(job)
 		default:
 			return
 		}

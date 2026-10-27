@@ -196,7 +196,7 @@ func TestLinkTrapIfAdminStatus16778(t *testing.T) {
 		})
 		t.Run(tc.name+"/v1", func(t *testing.T) {
 			a := &Agent{startTime: time.Now().Add(-10 * time.Second)}
-			pkt := a.buildLinkTrapV1("public", "", tc.linkUp, 5, "ge-0-0-0", tc.adminUp)
+			pkt := a.buildLinkTrapV1WithUptime("public", "", tc.linkUp, 5, "ge-0-0-0", int(time.Since(a.startTime).Milliseconds()/10), tc.adminUp)
 			vbs := decodeTrapVarbinds16778(t, pkt, true)
 			if len(vbs) != 4 {
 				t.Fatalf("v1 varbind count = %d, want 4 (ifIndex, ifAdminStatus, ifOperStatus, ifDescr): %+v", len(vbs), vbs)

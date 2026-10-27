@@ -9,7 +9,7 @@ import (
 // #5049: the request-dispatch switch handled only v2c (version 1) and v3
 // (version 3); the version-0 (SNMPv1) case fell through to the "unsupported
 // version" default and returned nil, so the agent emitted v1 traps
-// (buildLinkTrapV1) but silently dropped every v1 GET/GETNEXT/SET poll — a
+// (buildLinkTrapV1WithUptime) but silently dropped every v1 GET/GETNEXT/SET poll — a
 // legacy v1 manager timed out and saw the device as down. These tests exercise
 // the v1 request path end to end and assert the v1 response rules (RFC 1157 /
 // RFC 2089): noSuchName on a missing/unresolvable name, a 1-based error-index,
