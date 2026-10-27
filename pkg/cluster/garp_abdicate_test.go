@@ -81,18 +81,37 @@ func TestARPBurstFollowups_RunsToCompletionWhileMaster(t *testing.T) {
 	}
 }
 
-// TestARPBurstFollowups_NilPredicateRunsToCompletion proves a nil predicate
-// (ungated callers: direct-mode re-announce) keeps the original behavior.
-func TestARPBurstFollowups_NilPredicateRunsToCompletion(t *testing.T) {
+// TestARPBurstFollowups_NilPredicateRefused17158 proves #17158: a nil
+// predicate is refused and sends nothing, at both the follow-up helper
+// and the exported burst entry points. Reverting the nil check (restoring
+// the ungated twin behaviour) makes the helper send (burst-1)*2 frames
+// and the exported calls return nil/interface errors instead — RED.
+func TestARPBurstFollowups_NilPredicateRefused17158(t *testing.T) {
 	count, restore := recordingBurstSend(t)
 	defer restore()
 
 	const burst = 4
 	runARPBurstFollowups(-1, "eth0", "10.0.0.1", []byte{1}, []byte{2},
 		unix.SockaddrLinklayer{}, burst, nil)
-
-	if got, want := count(), (burst-1)*2; got != want {
-		t.Fatalf("nil-predicate burst changed: sent %d follow-up frames, want %d", got, want)
+	if got := count(); got != 0 {
+		t.Fatalf("nil-predicate ARP follow-ups sent %d frames, want 0 (#17158)", got)
+	}
+	runNABurstFollowups(-1, "eth0", "fd00::1", []byte{1},
+		unix.SockaddrLinklayer{}, burst, nil)
+	if got := count(); got != 0 {
+		t.Fatalf("nil-predicate NA follow-ups sent %d frames, want 0 (#17158)", got)
+	}
+	// Exported entry points refuse before any socket/interface work: the
+	// predicate check precedes address/interface validation, so a bogus
+	// interface still yields the predicate error, not a lookup error.
+	if err := SendGratuitousARPBurstGated("no-such-iface-17158", nil, 3, nil); err == nil {
+		t.Fatal("SendGratuitousARPBurstGated with nil predicate was accepted (#17158)")
+	}
+	if err := SendGratuitousIPv6BurstGated("no-such-iface-17158", nil, 3, nil); err == nil {
+		t.Fatal("SendGratuitousIPv6BurstGated with nil predicate was accepted (#17158)")
+	}
+	if err := SendProxyGratuitousIPv6BurstGated("no-such-iface-17158", nil, 3, nil); err == nil {
+		t.Fatal("SendProxyGratuitousIPv6BurstGated with nil predicate was accepted (#17158)")
 	}
 }
 

@@ -555,8 +555,8 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   `becomeMaster`) keeps broadcasting GARP/NA for VIPs it no longer owns —
   re-poisoning neighbor caches toward an abdicated node, the exact blackhole
   GARP exists to prevent. The epoch/owner check also protects the synchronous
-  first frame from an already-stale snapshot; a nil predicate (direct-mode
-  re-announce, tests) keeps the original run-to-completion behavior.
+  first frame from an already-stale snapshot; the predicate is REQUIRED
+  (#17158): a nil predicate is refused, never run-to-completion.
 - Event debounce is 500ms before priority updates in legacy VRRP-backed mode;
   `watchClusterEvents` skips it when RETH VRRP is suppressed
   (`pkg/daemon/daemon_ha.go:782-824`).

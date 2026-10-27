@@ -230,7 +230,7 @@ running heartbeat onto the defaults just as a changed value does.
   barrier (`LastFenceSeq`), not the peer split-brain fence.
 - `triggerGARP` (no-op/log hook today — native VRRP owns GARP),
   plus the gratuitous-ARP / unsolicited-NA burst senders — `garp.go`.
-  `SendGratuitousARPBurst` / `SendGratuitousIPv6Burst` send the first
+  `SendGratuitousARPBurstGated` / `SendGratuitousIPv6BurstGated` send the first
   frame synchronously (error returned to the caller) and the remaining
   follow-up frames at 50ms intervals in a background goroutine. The
   follow-up sends are the failover-convergence reliability mechanism, so
@@ -242,15 +242,13 @@ running heartbeat onto the defaults just as a changed value does.
   dampener storm-control gates live in `pkg/vrrp`, untouched by this.
   The follow-up loop DOES abort cleanly — before any further frame — on
   abdication: `SendGratuitousARPBurstGated` / `SendGratuitousIPv6BurstGated`
-  take a `BurstStillValid func() bool` predicate, captured at burst start and
+  take a REQUIRED `BurstStillValid func() bool` predicate (#17158: a nil
+  predicate is refused), captured at burst start and
   checked before EVERY follow-up frame; `pkg/vrrp.sendGARP` passes a closure
   that returns true only while the node is still master AND `garpEpoch` is
   unchanged (#2867). When it returns false the loop stops, so a node that
   loses master (or whose burst is superseded by a newer epoch) mid-burst stops
-  re-poisoning neighbor caches for VIPs it no longer owns. The original
-  `SendGratuitousARPBurst` / `SendGratuitousIPv6Burst` are thin wrappers that
-  pass a nil predicate (ungated, run-to-completion) for callers with no
-  per-instance epoch/state to gate against (direct-mode re-announce, tests).
+  re-poisoning neighbor caches for VIPs it no longer owns.
 - `SessionSync` — `sync.go`, `sync_conn.go` (connection lifecycle:
   dial/accept/install/start/stop/disconnect), `sync_conn_gen.go` (session
   generation guards + synced-session apply), `sync_conn_read.go`

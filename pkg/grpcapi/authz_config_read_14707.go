@@ -112,7 +112,7 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 				snaps.NodeID = nid
 				snaps.Primary = tree
 			}
-			return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, suffix, snaps.Primary)
+			return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, suffix, []*config.ConfigTree{snaps.Primary})
 		}
 		// #15995: price every rendered descendant, not just the
 		// requested path — the handler renders the whole subtree.
@@ -145,9 +145,9 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 			snaps.Primary = trees[0]
 		}
 		if r.GetFormat() == pb.ConfigFormat_INHERITANCE {
-			return snaps, config.AuthorizeExpandedConfigShowPathRendered(priceCfg, class, r.GetPath(), suffix, nodeID, trees...)
+			return snaps, config.AuthorizeExpandedConfigShowPathRendered(priceCfg, class, r.GetPath(), suffix, nodeID, trees)
 		}
-		return snaps, config.AuthorizeConfigShowPathRendered(priceCfg, class, r.GetPath(), suffix, trees...)
+		return snaps, config.AuthorizeConfigShowPathRendered(priceCfg, class, r.GetPath(), suffix, trees)
 	case "ShowCompare":
 		r, okReq := req.(*pb.ShowCompareRequest)
 		if !okReq || r == nil {
@@ -208,7 +208,7 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 				snaps.Primary, snaps.Other = active, candidate
 			}
 		}
-		return snaps, config.AuthorizeConfigShowCompareAtPathRendered(priceCfg, class, r.GetPath(), trees...)
+		return snaps, config.AuthorizeConfigShowCompareAtPathRendered(priceCfg, class, r.GetPath(), trees)
 	case "ShowRollback":
 		r, okReq := req.(*pb.ShowRollbackRequest)
 		if !okReq || r == nil {
@@ -252,10 +252,10 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 		}
 		if r.GetFormat() == pb.ConfigFormat_INHERITANCE {
 			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(priceCfg, class, r.GetPath(),
-				config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())), nodeID, trees...)
+				config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())), nodeID, trees)
 		}
 		return snaps, config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, class, r.GetPath(),
-			config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())), trees...)
+			config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())), trees)
 	}
 	return configReadSnapshots{}, nil
 }

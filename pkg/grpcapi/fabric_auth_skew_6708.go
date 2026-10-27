@@ -115,12 +115,8 @@ type fabricSkewState struct {
 // caller must NOT present a skew in that case, or a bad-PSK failure would be
 // mislabelled as a clock problem, which is the same class of mistake #6708 is
 // about.
-func measureFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time, method ...string) (int64, bool) {
-	methodName := ""
-	if len(method) > 0 {
-		methodName = method[0]
-	}
-	return measureFabricAuthSkewForDigest(keys, tokenHex, now, methodName, fabricAuthEmptyRequestDigest[:])
+func measureFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time, method string) (int64, bool) {
+	return measureFabricAuthSkewForDigest(keys, tokenHex, now, method, fabricAuthEmptyRequestDigest[:])
 }
 
 func measureFabricAuthSkewForDigest(keys [][]byte, tokenHex string, now time.Time, method string, reqDigest []byte) (int64, bool) {
@@ -155,12 +151,8 @@ func measureFabricAuthSkewForDigest(keys [][]byte, tokenHex string, now time.Tim
 // when the token is not explained by clock skew.
 //
 // now is injected so a test does not have to move the machine's clock.
-func (s *Server) noteFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time, method ...string) string {
-	methodName := ""
-	if len(method) > 0 {
-		methodName = method[0]
-	}
-	return s.noteFabricAuthSkewForDigest(keys, tokenHex, now, methodName, fabricAuthEmptyRequestDigest[:])
+func (s *Server) noteFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time, method string) string {
+	return s.noteFabricAuthSkewForDigest(keys, tokenHex, now, method, fabricAuthEmptyRequestDigest[:])
 }
 
 func (s *Server) noteFabricAuthSkewForDigest(keys [][]byte, tokenHex string, now time.Time, method string, reqDigest []byte) string {

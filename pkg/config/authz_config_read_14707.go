@@ -86,6 +86,31 @@ func readSpellings15994(path []string) [][]string {
 	return out
 }
 
+// requireRenderedTreeSlice17158 enforces #17158: a *Rendered authorizer
+// invoked for a non-empty path with a configuration-restricted class must
+// be given the tree(s) it will price. An empty slice would silently skip
+// the rendered-descendant pricing that #15995 added — the same fail-open
+// the deleted AtPath twins embodied. Nil entries inside a non-empty slice
+// still mean "that arm renders nothing" and are skipped by the walks.
+// Unrestricted classes (no configuration regexes) and the empty class pay
+// nothing. Whole-tree forms pass a synthetic non-empty path (see
+// AuthorizeConfigShowWholeAtTree).
+func requireRenderedTreeSlice17158(cfg *Config, class string, path []string, trees []*ConfigTree) error {
+	if len(trees) != 0 || len(path) == 0 || class == "" {
+		return nil
+	}
+	_, restricted, err := ConfigurationLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
+	}
+	if !restricted {
+		return nil
+	}
+	return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+		"the rendered descendants of %q cannot be adjudicated without the rendered tree; "+
+		"refusing the unpriced read (#17158)", class, strings.Join(path, " "))
+}
+
 func AuthorizeConfigShowPath(cfg *Config, class string, path []string, displaySuffix string) error {
 	if class == "" {
 		return nil
@@ -130,9 +155,12 @@ func authorizeShowCommandReadSpelling(cfg *Config, class string, spelling []stri
 // (see AuthorizeExpandedConfigShowPathRendered / the store's
 // *Expanded trees accessors): pricing the raw tree would miss denied
 // descendants an applied group materializes at the requested path.
-func AuthorizeConfigShowPathRendered(cfg *Config, class string, path []string, displaySuffix string, trees ...*ConfigTree) error {
+func AuthorizeConfigShowPathRendered(cfg *Config, class string, path []string, displaySuffix string, trees []*ConfigTree) error {
 	if class == "" {
 		return nil
+	}
+	if err := requireRenderedTreeSlice17158(cfg, class, path, trees); err != nil {
+		return err
 	}
 	if err := AuthorizeConfigShowPath(cfg, class, path, displaySuffix); err != nil {
 		return err
@@ -153,9 +181,12 @@ func AuthorizeConfigShowPathRendered(cfg *Config, class string, path []string, d
 // unexpanded tree instead could admit what the expanded render would
 // disclose on a retry with a fixed group. nodeID is the rendering
 // store's cluster identity (negative = standalone/node0 view).
-func AuthorizeExpandedConfigShowPathRendered(cfg *Config, class string, path []string, displaySuffix string, nodeID int, trees ...*ConfigTree) error {
+func AuthorizeExpandedConfigShowPathRendered(cfg *Config, class string, path []string, displaySuffix string, nodeID int, trees []*ConfigTree) error {
 	if class == "" {
 		return nil
+	}
+	if err := requireRenderedTreeSlice17158(cfg, class, path, trees); err != nil {
+		return err
 	}
 	if err := AuthorizeConfigShowPath(cfg, class, path, displaySuffix); err != nil {
 		return err
@@ -206,17 +237,18 @@ func expandRenderedTrees15995(class string, path []string, nodeID int, trees []*
 	return expanded, nil
 }
 
-// AuthorizeConfigShowCompareAtPathRendered is
-// AuthorizeConfigShowCompareAtPath priced over the rendered compare
-// arms: a candidate (or rollback) descendant below path that the
-// *-configuration pair denies refuses the scoped diff, because the
-// diff lines disclose it (#15995). A nil/empty path is the global
-// compare (AuthorizeConfigShowCompare).
-func AuthorizeConfigShowCompareAtPathRendered(cfg *Config, class string, path []string, trees ...*ConfigTree) error {
+// AuthorizeConfigShowCompareAtPathRendered is the scoped candidate
+// compare priced over the rendered compare arms: a candidate (or
+// rollback) descendant below path that the *-configuration pair denies
+// refuses the scoped diff, because the diff lines disclose it (#15995).
+// trees is REQUIRED (#17158) for a non-empty path; the pre-fix AtPath
+// twin that priced only the requested path is deleted. A nil/empty
+// path is the global compare (AuthorizeConfigShowCompare).
+func AuthorizeConfigShowCompareAtPathRendered(cfg *Config, class string, path []string, trees []*ConfigTree) error {
 	if class == "" || len(path) == 0 {
 		return AuthorizeConfigShowCompare(cfg, class)
 	}
-	return AuthorizeConfigShowPathRendered(cfg, class, path, "", trees...)
+	return AuthorizeConfigShowPathRendered(cfg, class, path, "", trees)
 }
 
 // AuthorizeConfigShowCompareCommand adjudicates only the operational
@@ -257,27 +289,28 @@ func AuthorizeConfigShowRollbackCommand(cfg *Config, class string, path []string
 	return nil
 }
 
-// AuthorizeConfigShowRollbackAtPathRendered is
-// AuthorizeConfigShowRollbackAtPath priced over the rendered rollback
-// tree: a denied strict descendant below path refuses the scoped
-// rollback render (#15995). A nil/empty path is the whole-tree
-// rollback (AuthorizeConfigShowRollback).
-func AuthorizeConfigShowRollbackAtPathRendered(cfg *Config, class string, path []string, displaySuffix string, trees ...*ConfigTree) error {
+// AuthorizeConfigShowRollbackAtPathRendered is the scoped rollback
+// render priced over the rendered rollback tree: a denied strict
+// descendant below path refuses the scoped rollback render (#15995).
+// trees is REQUIRED (#17158) for a non-empty path; the pre-fix AtPath
+// twin is deleted. A nil/empty path is the whole-tree rollback
+// (AuthorizeConfigShowRollback).
+func AuthorizeConfigShowRollbackAtPathRendered(cfg *Config, class string, path []string, displaySuffix string, trees []*ConfigTree) error {
 	if class == "" || len(path) == 0 {
 		return AuthorizeConfigShowRollback(cfg, class, displaySuffix)
 	}
-	return AuthorizeConfigShowPathRendered(cfg, class, path, displaySuffix, trees...)
+	return AuthorizeConfigShowPathRendered(cfg, class, path, displaySuffix, trees)
 }
 
 // AuthorizeExpandedConfigShowRollbackAtPathRendered is the scoped
 // rollback twin of AuthorizeExpandedConfigShowPathRendered, for a
 // `display inheritance` rollback render: the slot tree is expanded
 // exactly as the renderer expands it before descendants are priced.
-func AuthorizeExpandedConfigShowRollbackAtPathRendered(cfg *Config, class string, path []string, displaySuffix string, nodeID int, trees ...*ConfigTree) error {
+func AuthorizeExpandedConfigShowRollbackAtPathRendered(cfg *Config, class string, path []string, displaySuffix string, nodeID int, trees []*ConfigTree) error {
 	if class == "" || len(path) == 0 {
 		return AuthorizeConfigShowRollback(cfg, class, displaySuffix)
 	}
-	return AuthorizeExpandedConfigShowPathRendered(cfg, class, path, displaySuffix, nodeID, trees...)
+	return AuthorizeExpandedConfigShowPathRendered(cfg, class, path, displaySuffix, nodeID, trees)
 }
 
 // authorizeConfigRenderedDescendants adjudicates every descendant path
@@ -574,10 +607,14 @@ func authorizeConfigReadExpanded15994(cfg *Config, class string, tree *ConfigTre
 // path; the operational bare command (with display suffix) is ALWAYS
 // re-charged afterwards, so an op-only deny (e.g. `display set`)
 // can never be substituted away (fold B1). A groupless tree keeps
-// the blanket refusal.
-func AuthorizeConfigShowWholeAtTree(cfg *Config, class string, displaySuffix string, trees ...*ConfigTree) error {
+// the blanket refusal. trees is REQUIRED (#17158): callers pass the
+// rendered tree slice explicitly (a single tree as []*ConfigTree{t}).
+func AuthorizeConfigShowWholeAtTree(cfg *Config, class string, displaySuffix string, trees []*ConfigTree) error {
 	if class == "" {
 		return nil
+	}
+	if err := requireRenderedTreeSlice17158(cfg, class, []string{"(whole-tree)"}, trees); err != nil {
+		return err
 	}
 	base := AuthorizeConfigShowWhole(cfg, class, displaySuffix)
 	if base == nil {
@@ -686,17 +723,6 @@ func AuthorizeConfigShowCompare(cfg *Config, class string) error {
 	return AuthorizeConfigShowCompareCommand(cfg, class, nil)
 }
 
-// AuthorizeConfigShowCompareAtPath adjudicates a candidate diff filtered
-// to path (#15272 B24-03): the diff discloses only that subtree, so it is
-// priced as a path read (AuthorizeConfigShowPath), not refused as a
-// whole-tree render. A nil/empty path is the global compare.
-func AuthorizeConfigShowCompareAtPath(cfg *Config, class string, path []string) error {
-	if class == "" || len(path) == 0 {
-		return AuthorizeConfigShowCompare(cfg, class)
-	}
-	return AuthorizeConfigShowPath(cfg, class, path, "")
-}
-
 // AuthorizeConfigShowRollback adjudicates a rollback-slot render
 // (ShowRollback). Same whole-tree shape as AuthorizeConfigShowWhole.
 func AuthorizeConfigShowRollback(cfg *Config, class string, displaySuffix string) error {
@@ -707,19 +733,6 @@ func AuthorizeConfigShowRollback(cfg *Config, class string, displaySuffix string
 		return err
 	}
 	return authorizeShowCommand(cfg, class, "show configuration", displaySuffix)
-}
-
-// AuthorizeConfigShowRollbackAtPath adjudicates a rollback-slot render
-// scoped to path (#15942 H2-04): the render discloses only that
-// subtree, so it is priced as a path read (AuthorizeConfigShowPath),
-// not refused as a whole-tree render and not waved through by a gate
-// that never saw the path. A nil/empty path is the whole-tree rollback
-// (AuthorizeConfigShowRollback).
-func AuthorizeConfigShowRollbackAtPath(cfg *Config, class string, path []string, displaySuffix string) error {
-	if class == "" || len(path) == 0 {
-		return AuthorizeConfigShowRollback(cfg, class, displaySuffix)
-	}
-	return AuthorizeConfigShowPath(cfg, class, path, displaySuffix)
 }
 
 // AuthorizeConfigShowSystemPath adjudicates an operational
@@ -776,12 +789,15 @@ func AuthorizeConfigPathOnlyWithOp15994(cfg *Config, class string, path []string
 // AuthorizeConfigPathOnlyRenderedWithOp15994 is
 // AuthorizeConfigPathOnlyWithOp15994 plus the rendered-descendant
 // price (#15995), for the CLI operational arm.
-func AuthorizeConfigPathOnlyRenderedWithOp15994(cfg *Config, class string, path []string, displaySuffix string, trees ...*ConfigTree) error {
+func AuthorizeConfigPathOnlyRenderedWithOp15994(cfg *Config, class string, path []string, displaySuffix string, trees []*ConfigTree) error {
 	if err := AuthorizeConfigPathOnlyWithOp15994(cfg, class, path, displaySuffix); err != nil {
 		return err
 	}
 	if class == "" {
 		return nil
+	}
+	if err := requireRenderedTreeSlice17158(cfg, class, path, trees); err != nil {
+		return err
 	}
 	if err := authorizeRenderedDescendantsGroups(cfg, class, path, trees); err != nil {
 		return err
@@ -791,12 +807,15 @@ func AuthorizeConfigPathOnlyRenderedWithOp15994(cfg *Config, class string, path 
 
 // AuthorizeExpandedConfigPathOnlyRenderedWithOp15994 is the
 // `| display inheritance` twin (expanded trees).
-func AuthorizeExpandedConfigPathOnlyRenderedWithOp15994(cfg *Config, class string, path []string, displaySuffix string, nodeID int, trees ...*ConfigTree) error {
+func AuthorizeExpandedConfigPathOnlyRenderedWithOp15994(cfg *Config, class string, path []string, displaySuffix string, nodeID int, trees []*ConfigTree) error {
 	if err := AuthorizeConfigPathOnlyWithOp15994(cfg, class, path, displaySuffix); err != nil {
 		return err
 	}
 	if class == "" {
 		return nil
+	}
+	if err := requireRenderedTreeSlice17158(cfg, class, path, trees); err != nil {
+		return err
 	}
 	// Fold2-4: both walks regardless of which pair restricts.
 	if err := authorizeRenderedDescendantsGroups(cfg, class, path, trees); err != nil {
@@ -1023,12 +1042,15 @@ func authorizeOpPath15994(cfg *Config, class string, path []string, displaySuffi
 // command exactly as a denied descendant refuses
 // AuthorizeConfigShowPathRendered. The operational pair is charged
 // once, on the real `show system <name>` spelling, as before.
-func AuthorizeConfigShowSystemPathRendered(cfg *Config, class string, path []string, command string, trees ...*ConfigTree) error {
+func AuthorizeConfigShowSystemPathRendered(cfg *Config, class string, path []string, command string, trees []*ConfigTree) error {
 	if err := AuthorizeConfigShowSystemPath(cfg, class, path, command); err != nil {
 		return err
 	}
 	if class == "" {
 		return nil
+	}
+	if err := requireRenderedTreeSlice17158(cfg, class, path, trees); err != nil {
+		return err
 	}
 	return authorizeRenderedDescendantsGroups(cfg, class, path, trees)
 }
@@ -1101,9 +1123,12 @@ func AuthorizeConfigPathOnly(cfg *Config, class string, path []string) error {
 // rendered-descendant price (#15995): every strict descendant of path
 // present in trees is adjudicated against the *-configuration pair,
 // and a denied one refuses the ancestor read.
-func AuthorizeConfigPathOnlyRendered(cfg *Config, class string, path []string, trees ...*ConfigTree) error {
+func AuthorizeConfigPathOnlyRendered(cfg *Config, class string, path []string, trees []*ConfigTree) error {
 	if class == "" {
 		return nil
+	}
+	if err := requireRenderedTreeSlice17158(cfg, class, path, trees); err != nil {
+		return err
 	}
 	if err := AuthorizeConfigPathOnly(cfg, class, path); err != nil {
 		return err
@@ -1116,9 +1141,12 @@ func AuthorizeConfigPathOnlyRendered(cfg *Config, class string, path []string, t
 // for the CLI operational `show configuration … | display inheritance`
 // arm whose operational pair was already charged on the full command
 // line (#15995 fold).
-func AuthorizeExpandedConfigPathOnlyRendered(cfg *Config, class string, path []string, nodeID int, trees ...*ConfigTree) error {
+func AuthorizeExpandedConfigPathOnlyRendered(cfg *Config, class string, path []string, nodeID int, trees []*ConfigTree) error {
 	if class == "" {
 		return nil
+	}
+	if err := requireRenderedTreeSlice17158(cfg, class, path, trees); err != nil {
+		return err
 	}
 	if err := AuthorizeConfigPathOnly(cfg, class, path); err != nil {
 		return err
