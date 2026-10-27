@@ -120,9 +120,9 @@ func (d *Daemon) HostInboundApplied() HostInboundAppliedState {
 	if at := d.hostInboundLastFailureUnixNano.Load(); at != 0 {
 		st.LastFailureAt = time.Unix(0, at)
 	}
-	if !d.earlyInputHandoffDone.Load() && !d.earlyInputHandoffPendingSince.IsZero() {
+	if since, detail := d.earlyInputBarrierHoldSnapshot(); !d.earlyInputHandoffDone.Load() && !since.IsZero() {
 		st.BarrierRetained = true
-		st.BarrierPendingDetail = d.earlyInputHandoffPendingDetail
+		st.BarrierPendingDetail = detail
 	}
 	return st
 }

@@ -173,9 +173,10 @@ func (r *Runner) restampKernelArmRecord(ver string) error {
 
 // kernelArmRecordArmed reports whether state is an in-flight kernel trial
 // whose arm record exists to re-stamp: at least ARMED, but not a terminal
-// PROMOTED/REVERTED. A journal at ARMING or below recorded only INTENT (no
-// confirmed one-shot, no promote binary recorded), so there is no record to
-// move — the same predicate restampKernelArmRecord applies at 6d.
+// PROMOTED/REVERTED. A journal at ARMING or below is only INTENT: the
+// sidecar IS written during ARMING (#17862, before SetBootNext), but it is
+// deliberately not re-stamped until a verified ARMED trial exists — the
+// same predicate restampKernelArmRecord applies at 6d.
 func kernelArmRecordArmed(s KernelState) bool {
 	return s.atLeast(KernelStateArmed) &&
 		s != KernelStatePromoted && s != KernelStateReverted
