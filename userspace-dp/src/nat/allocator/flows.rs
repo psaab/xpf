@@ -194,9 +194,11 @@ impl LiveFlowMap {
         }
     }
 
-    /// Counted shard write guard for the #4800 telemetry pair:
-    /// callers that previously went through `lock_live()` for a
-    /// flow-only critical section use this so acquisitions and
+    /// Counted shard write guard for the #4800/#17036 flow-shard
+    /// telemetry pair: callers that previously went through
+    /// `lock_live()` for a flow-only critical section use this so
+    /// acquisitions and contended acquisitions stay comparable as a
+    /// pair within the shard domain.
     pub(in crate::nat::allocator) fn write_shard_counted<'a>(
         &'a self,
         flow: &SourceNatFlowKey,

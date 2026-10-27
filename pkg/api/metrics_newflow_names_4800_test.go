@@ -37,7 +37,11 @@ func TestNewFlowContentionMetricNamesAreStable_4800(t *testing.T) {
 		// Per-worker install distribution — the sole input to both
 		// cross-worker analyzer gates.
 		{"xpf_userspace_worker_new_flow_installs_total", c.workerNewFlowInstalls},
-		// SNAT allocator lock pair, per pool.
+		// SNAT allocator lock pairs, per pool (#17036 split + legacy sum).
+		{"xpf_userspace_source_nat_pool_flow_shard_lock_acquisitions_total", c.userspaceSNATPoolFlowShardLockAcquisitionsTotal},
+		{"xpf_userspace_source_nat_pool_flow_shard_lock_contended_total", c.userspaceSNATPoolFlowShardLockContendedTotal},
+		{"xpf_userspace_source_nat_pool_live_write_lock_acquisitions_total", c.userspaceSNATPoolLiveWriteLockAcquisitionsTotal},
+		{"xpf_userspace_source_nat_pool_live_write_lock_contended_total", c.userspaceSNATPoolLiveWriteLockContendedTotal},
 		{"xpf_userspace_source_nat_pool_live_lock_acquisitions_total", c.userspaceSNATPoolLiveLockAcquisitionsTotal},
 		{"xpf_userspace_source_nat_pool_live_lock_contended_total", c.userspaceSNATPoolLiveLockContendedTotal},
 		// Publish leg: call count + lock pair.
