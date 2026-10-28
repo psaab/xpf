@@ -30,7 +30,12 @@
 //! [`read_tolerant_counted`] / [`write_tolerant_counted`]: pass
 //! `Some(&AtomicU64)` to bump a per-subsystem recovery counter on the
 //! poisoned arm only (no journald line per acquisition). Pass `None` (the
-//! plain helpers) when the subsystem has no counter to stamp.
+//! plain helpers) when the subsystem has no counter to stamp. The counted
+//! helpers `clear_poison()` before returning the recovered guard (and the
+//! plain helpers clear poison even without a counter, mirroring
+//! `worker_queue::lock_recover`), so the counter measures recovery
+//! EVENTS — exactly +1 per poisoning — not every later hot-path
+//! acquisition; without the clear, one poisoning would bump it forever.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -53,6 +58,7 @@ pub(crate) fn lock_tolerant_counted<'a, T>(
     match m.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
+            m.clear_poison();
             if let Some(counter) = counter {
                 counter.fetch_add(1, Ordering::Relaxed);
             }
@@ -76,6 +82,7 @@ pub(crate) fn read_tolerant_counted<'a, T>(
     match l.read() {
         Ok(guard) => guard,
         Err(poisoned) => {
+            l.clear_poison();
             if let Some(counter) = counter {
                 counter.fetch_add(1, Ordering::Relaxed);
             }
@@ -99,6 +106,7 @@ pub(crate) fn write_tolerant_counted<'a, T>(
     match l.write() {
         Ok(guard) => guard,
         Err(poisoned) => {
+            l.clear_poison();
             if let Some(counter) = counter {
                 counter.fetch_add(1, Ordering::Relaxed);
             }
@@ -132,6 +140,11 @@ pub(crate) fn wait_timeout_tolerant_counted<'a, T>(
     match condvar.wait_timeout(guard, dur) {
         Ok(pair) => pair,
         Err(poisoned) => {
+            // No lock handle is available here (the guard is consumed), so
+            // the poison bit cannot be cleared; the caller's next counted
+            // `lock_tolerant_counted` on the same mutex clears it and is
+            // the event that gets counted. This arm therefore also counts
+            // each poisoned wait itself.
             if let Some(counter) = counter {
                 counter.fetch_add(1, Ordering::Relaxed);
             }
@@ -178,9 +191,26 @@ mod sync_util_tests {
             0,
             "fast path must not count"
         );
+        // Exactly +1 per poisoning: poison twice, recover twice (with
+        // extra clean acquisitions interleaved) -> count == 2, not
+        // "greater than before". Without `clear_poison()` the second
+        // and third acquisitions after the first poisoning would each
+        // bump again and this would read 3+.
         poison_mutex(&m);
         drop(lock_tolerant_counted(&m, Some(&counter)));
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+        assert!(!m.is_poisoned(), "recovery must clear_poison");
+        drop(lock_tolerant_counted(&m, Some(&counter)));
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "clean acquisition after a cleared recovery must not recount"
+        );
+        poison_mutex(&m);
+        drop(lock_tolerant_counted(&m, Some(&counter)));
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+        drop(lock_tolerant_counted(&m, Some(&counter)));
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
 
     #[test]

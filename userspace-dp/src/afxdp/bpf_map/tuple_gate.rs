@@ -506,6 +506,11 @@ pub(crate) fn global_tuple_gate() -> Arc<TupleGate> {
     Arc::clone(&GLOBAL_TUPLE_GATE)
 }
 
+/// #17201: read the process-global TupleGate poison-recovery counter.
+pub(crate) fn tuple_gate_poison_recoveries() -> u64 {
+    TUPLE_GATE_POISON_RECOVERIES.load(Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,9 +708,32 @@ mod tests {
         drop(lease);
         let fence = gate.begin_clear().expect("poisoned admission must not panic clears");
         drop(fence);
-        assert!(
-            TUPLE_GATE_POISON_RECOVERIES.load(Ordering::Relaxed) > before,
-            "poisoned acquisitions must be counted, not silently skipped"
+        // Exactly +2 (measured firsthand on this path): the shard-entries
+        // lock and the entry lock are each poisoned and each recovered
+        // exactly once; the poisoned admission lock's recovery does not
+        // add a third counted event on this path (its counted
+        // acquisitions run while... the delta measured is 2). Pinning
+        // exactly 2, not "> before", is what catches a missing
+        // `clear_poison()`: every later acquisition above touches
+        // shard+entry+admission repeatedly and would recount, pushing
+        // the delta far past 2.
+        let after = TUPLE_GATE_POISON_RECOVERIES.load(Ordering::Relaxed);
+        assert_eq!(
+            after,
+            before + 2,
+            "exactly one counted recovery per re-acquired poisoned lock"
+        );
+        assert_eq!(
+            tuple_gate_poison_recoveries(),
+            after,
+            "the surfaced accessor must read the same counter"
+        );
+        // A further clean install must not move the counter at all.
+        drop(gate.try_acquire_install(&key(1000, 7)).expect("clean install after recovery"));
+        assert_eq!(
+            TUPLE_GATE_POISON_RECOVERIES.load(Ordering::Relaxed),
+            after,
+            "clean acquisitions after cleared recoveries must not recount"
         );
     }
 }

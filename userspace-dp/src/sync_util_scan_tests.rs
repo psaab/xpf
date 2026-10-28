@@ -4,10 +4,13 @@
 //! Banned in production (engineering-style, #2402):
 //! - `if let Ok(..) = <expr>.lock()/.read()/.write()` and the
 //!   `let Ok(..) = .. else` form (silently skips the operation / empty state)
-//! - `.lock()/.read()/.write() ... .map(..).unwrap_or_default()` and
-//!   `.map(..).unwrap_or(0)` (substitutes EMPTY state)
-//! - `.lock()/.read()/.write() ... .expect(..)` / `.unwrap()` and
-//!   `Condvar::wait_timeout(..).expect(..)` (panics on every later acquire)
+//! - `.lock()/.read()/.write() ... .map(..).unwrap_or_default()`,
+//!   `.map(..).unwrap_or(0)` and `.map(..).unwrap_or(<non-literal-default>)`
+//!   (substitutes EMPTY state)
+//! - `.lock()/.read()/.write() ... .expect(..)` / `.unwrap()`, including
+//!   the variable-mediated form `let g = <expr>.lock(); g.expect(..)` /
+//!   `g.unwrap()` (panics on every later acquire), and
+//!   `Condvar::wait_timeout(..).expect(..)`
 //!
 //! Production text is obtained with the shared #17152 blankers
 //! (`test_support::source_scan`): comments/strings are blanked and
@@ -181,9 +184,19 @@ fn banned_hits(flat: &str) -> (Vec<String>, Vec<String>) {
                     start = at + kind.len();
                     continue;
                 }
-                let unwrap_at = chain
-                    .find(".unwrap_or_default()")
-                    .or_else(|| chain.find(".unwrap_or(0)"));
+                let unwrap_at = chain.find(".unwrap_or_default()").or_else(|| {
+                    // `.unwrap_or(<arg>)` with a NON-literal-default argument
+                    // (e.g. `unwrap_or(fallback)`, `unwrap_or(Vec::new())`)
+                    // substitutes caller-chosen empty state just like
+                    // `unwrap_or_default()`; only the recovering
+                    // `unwrap_or_else(..into_inner())` (handled above) and
+                    // a literal `0`... which is also banned — see below —
+                    // are distinguished. In fact EVERY `.unwrap_or(` in a
+                    // lock-map chain is banned here: `unwrap_or(0)` is the
+                    // historical spelling, the rest are the same shape
+                    // with a named default.
+                    chain.find(".unwrap_or(")
+                });
                 if let Some(unwrap_at) = unwrap_at {
                     if map_at + unwrap_at <= 200 {
                         hard.push(format!(
@@ -227,7 +240,163 @@ fn banned_hits(flat: &str) -> (Vec<String>, Vec<String>) {
         }
         start = at + "wait_timeout(".len();
     }
+    // Variable-mediated expect/unwrap: `let g = <expr>.lock(); g.expect(..)`
+    // / `g.unwrap()` / `g.unwrap_or(..)`. The direct-chain scan above only
+    // sees `.lock().expect(`; binding the lock RESULT to a name first and
+    // consuming it in a later statement evaded it. Track simple bindings
+    // `let <name> = <expr>.lock()/.read()/.write()` (also the tuple form
+    // `let (<name>, ..) = ..wait_timeout(..)`) and flag any later
+    // `<name>.expect(` / `<name>.unwrap()` / `<name>.unwrap_or(` /
+    // `<name>.unwrap_or_default()` in the same squashed text. The
+    // recovering idiom binds a GUARD (`let g = lock_tolerant(..)` — no
+    // `.lock()` on the RHS), so it is not tracked.
+    {
+        let lock_kinds = [".lock()", ".read()", ".write()", "wait_timeout("];
+        let mut start = 0;
+        while let Some(pos) = flat[start..].find("let ") {
+            let at = start + pos;
+            let stmt_end = flat[at..]
+                .find(';')
+                .map(|e| at + e)
+                .unwrap_or(flat.len());
+            let stmt = &flat[at..stmt_end];
+            start = at + 4;
+            if !lock_kinds.iter().any(|k| stmt.contains(k)) {
+                continue;
+            }
+            // Binding name: text between `let ` (skipping `mut `) and `=`.
+            let Some(eq) = stmt.find('=') else { continue };
+            let mut name = stmt[4..eq].trim();
+            if let Some(rest) = name.strip_prefix("mut ") {
+                name = rest.trim();
+            }
+            // Tuple destructuring: take the first bound identifier.
+            if name.starts_with('(') {
+                name = name
+                    .trim_start_matches('(')
+                    .split([',', ')'])
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches("mut ")
+                    .trim();
+            }
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            for tail in [".expect(", ".unwrap()", ".unwrap_or(", ".unwrap_or_default()"] {
+                let needle = format!("{name}{tail}");
+                let mut s2 = stmt_end;
+                while let Some(p2) = flat[s2..].find(&needle) {
+                    let at2 = s2 + p2;
+                    expect.push(format!(
+                        "variable-mediated {needle}: ...{}...",
+                        ctx(at2, needle.len())
+                    ));
+                    s2 = at2 + needle.len();
+                }
+            }
+        }
+    }
+    // Direct `.lock()/.read()/.write() ... .unwrap_or(<non-literal>)`:
+    // `x.lock().unwrap_or(fallback)` (no `.map(..)`) substitutes the
+    // fallback on poison exactly like the map form. Flag any
+    // `.unwrap_or(` / `.unwrap_or_default()` within the same statement
+    // after a lock call (the recovering `.unwrap_or_else(` is excluded
+    // by construction — different needle).
+    for kind in [".lock()", ".read()", ".write()"] {
+        let mut start = 0;
+        while let Some(pos) = flat[start..].find(kind) {
+            let at = start + pos;
+            let stmt_end = flat[at..]
+                .find(';')
+                .map(|e| at + e)
+                .unwrap_or((at + 300).min(flat.len()));
+            let chain = &flat[at..stmt_end];
+            if chain.contains(".unwrap_or_else(") {
+                start = at + kind.len();
+                continue;
+            }
+            // Only the RESULT of the lock call carries poison: flag
+            // `.unwrap_or(` / `.unwrap_or_default()` when it is applied
+            // directly to the lock result or through a `.map(..)` on it
+            // (the map-chain scan above already reports the map form;
+            // this catches the no-map direct form). An `unwrap_or` on a
+            // value EXTRACTED from the guard (`.lock().unwrap_or_else(..)
+            // .field`, `guard.get(..).unwrap_or(..)`, a `.clone()` of
+            // recovered state, ...) is ordinary Option handling, not a
+            // poison shape — requiring `.map(` or an immediate
+            // `.unwrap_or` right after the lock call keeps those clean.
+            let after_lock = &chain[kind.len()..];
+            let direct = after_lock.trim_start().starts_with(".unwrap_or(")
+                || after_lock.trim_start().starts_with(".unwrap_or_default()");
+            if direct {
+                hard.push(format!(
+                    "{kind}...unwrap_or(non-default): ...{}...",
+                    ctx(at, kind.len())
+                ));
+            }
+            start = at + kind.len();
+        }
+    }
     (hard, expect)
+}
+
+#[test]
+fn scan_detects_variable_mediated_and_nonliteral_unwrap_or_17201() {
+    // Reviewer mutants that evaded the pre-fold scan: each snippet MUST
+    // produce a banned hit. Squash first, exactly as the production scan
+    // does.
+    let mutants: &[(&str, &str)] = &[
+        (
+            "variable-mediated expect",
+            "fn f(m: &Mutex<u32>) { let g = m.lock(); g.expect(\"poison\"); }",
+        ),
+        (
+            "variable-mediated unwrap",
+            "fn f(m: &Mutex<u32>) { let g = m.lock(); let _v = g.unwrap(); }",
+        ),
+        (
+            "variable-mediated read expect",
+            "fn f(l: &RwLock<u32>) { let g = l.read(); g.expect(\"poison\"); }",
+        ),
+        (
+            "unwrap_or with non-literal default (map form)",
+            "fn f(m: &Mutex<Vec<u32>>) -> Vec<u32> { m.lock().map(|g| g.clone()).unwrap_or(fallback) }",
+        ),
+        (
+            "unwrap_or with non-literal default (direct form)",
+            "fn f(m: &Mutex<u32>) -> u32 { m.lock().unwrap_or(fallback) }",
+        ),
+        (
+            "unwrap_or_default via variable",
+            "fn f(m: &Mutex<Vec<u32>>) -> Vec<u32> { let g = m.lock(); g.unwrap_or_default() }",
+        ),
+    ];
+    for (name, src) in mutants {
+        let (hard, expect) = banned_hits(&squash(src));
+        assert!(
+            !hard.is_empty() || !expect.is_empty(),
+            "scan must flag the {name} mutant: {src:?} (hard={hard:?} expect={expect:?})"
+        );
+    }
+    // The recovering idioms and clean code must NOT be flagged.
+    let clean: &[&str] = &[
+        "fn f(m: &Mutex<u32>) { let g = crate::sync_util::lock_tolerant(m); drop(g); }",
+        "fn f(m: &Mutex<u32>) { let g = m.lock().unwrap_or_else(|e| e.into_inner()); drop(g); }",
+        "fn f(m: &Mutex<u32>) { let g = lock_tolerant_counted(m, Some(&C)); drop(g); }",
+    ];
+    for src in clean {
+        let (hard, expect) = banned_hits(&squash(src));
+        assert!(
+            hard.is_empty() && expect.is_empty(),
+            "scan must not flag clean code: {src:?} (hard={hard:?} expect={expect:?})"
+        );
+    }
 }
 
 #[test]

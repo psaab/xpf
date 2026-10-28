@@ -18,6 +18,7 @@ func TestWGUncoveredCountersEmit13289(t *testing.T) {
 		WgUncoveredQueueShedTotal:        16,
 		WgUncoveredQueueOrphanTotal:      17,
 		WgUncoveredQueuePoisonRecoveries: 18,
+		TupleGatePoisonRecoveries:        19,
 	}
 	ch := make(chan prometheus.Metric)
 	go func() {
@@ -39,4 +40,5 @@ func TestWGUncoveredCountersEmit13289(t *testing.T) {
 			map[string]string{"outcome": outcome.name}, outcome.value)
 	}
 	assertCounterClose(t, got, c.userspaceWGUncoveredQueuePoison, nil, 18)
+	assertCounterClose(t, got, c.userspaceTupleGatePoison, nil, 19)
 }

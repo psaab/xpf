@@ -900,6 +900,9 @@ type ProcessStatus struct {
 	WgUncoveredQueueShedTotal        uint64 `json:"wg_uncovered_queue_shed_total,omitempty"`
 	WgUncoveredQueueOrphanTotal      uint64 `json:"wg_uncovered_queue_orphan_total,omitempty"`
 	WgUncoveredQueuePoisonRecoveries uint64 `json:"wg_uncovered_queue_poison_recoveries,omitempty"`
+	// #17201: TupleGate mutex poison recoveries. Surfaced as
+	// xpf_tuple_gate_poison_recoveries_total.
+	TupleGatePoisonRecoveries uint64 `json:"tuple_gate_poison_recoveries,omitempty"`
 	// #10695 (#9506 counter slice): D13/D11 logical-frame build failures
 	// (including ECN-combine refusals), and D13 RFC 6040 §4.2 illegal
 	// inner-ECN refusals. Surfaced as

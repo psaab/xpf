@@ -55,6 +55,14 @@ impl super::Coordinator {
             .load(Ordering::Relaxed)
     }
 
+    /// #17201: TupleGate mutex poison recoveries (shard, entry and
+    /// admission locks). Process-global atomic, read directly like the
+    /// WG uncovered twin above. Surfaced as
+    /// `xpf_tuple_gate_poison_recoveries_total`.
+    pub fn tuple_gate_poison_recoveries(&self) -> u64 {
+        crate::afxdp::bpf_map::tuple_gate_poison_recoveries()
+    }
+
     pub fn dynamic_neighbor_status(&self) -> (usize, u64) {
         let entries = self.neighbors.dynamic.len();
         let generation = self.neighbors.generation.load(Ordering::Relaxed);
@@ -1839,11 +1847,9 @@ impl super::Coordinator {
                     .dead
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let panic_message = if dead {
-                    match rec.panic.lock() {
-                        Ok(g) => g.clone(),
-                        Err(poisoned) => poisoned.into_inner().clone(),
-                    }
-                    .unwrap_or_default()
+                    crate::sync_util::lock_tolerant(&rec.panic)
+                        .clone()
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 };

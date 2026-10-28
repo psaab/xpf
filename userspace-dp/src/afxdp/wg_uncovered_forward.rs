@@ -152,6 +152,7 @@ impl WgUncoveredIngressQueue {
         let mut pending = match self.pending.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                self.pending.clear_poison();
                 WG_UNCOVERED_QUEUE_POISON_RECOVERIES.fetch_add(1, Ordering::Relaxed);
                 poisoned.into_inner()
             }

@@ -362,11 +362,9 @@ fn apply_resolution(
             // address is retained across a failed lookup.
         }
     }
-    shared
-        .resolved
-        .lock()
-        .map(|m| m.contains_key(pubkey))
-        .unwrap_or(false)
+    // #17201: recover the committed map on poison instead of reading
+    // poison as "not resolved".
+    crate::sync_util::lock_tolerant(&shared.resolved).contains_key(pubkey)
 }
 
 /// A pass with the blocking lookup injected, so concurrency can be tested
