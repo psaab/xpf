@@ -41,6 +41,7 @@ func TestRedactEmbeddedNonSetVerbs16726(t *testing.T) {
 		{"bare open-world wifi-password", "wifi-password " + secret16726, secret16726, SecretDataPlaceholder},
 		{"bare open-world auth-token", "auth-token " + secret16726, secret16726, SecretDataPlaceholder},
 		{"bare open-world community-name", "community-name " + secret16726, secret16726, SecretDataPlaceholder},
+		{"bare open-world after apply-groups", "set apply-groups g1 groups g2 new-password " + secret16726, secret16726, SecretDataPlaceholder},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

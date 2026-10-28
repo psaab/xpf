@@ -1007,7 +1007,12 @@ func (w *credentialShapePositionWalker17806) position(fp []string, index int) (s
 		endRun := k == "pre-shared-key" ||
 			(!strings.Contains(k, "-") && isCredentialShapedKeyword16731(k))
 		if !endRun {
-			if sib, ok := w.multiParent.children[k]; ok && len(sib.children) > 0 {
+			if _, ok := w.multiParent.children[k]; ok {
+				// ANY resolvable sibling ends the run: containers,
+				// plain leaves, and wildcard-only siblings (groups)
+				// alike start a new statement whose tokens must
+				// classify through the schema (Rev18384FinalKimi:
+				// apply-groups -> groups leak).
 				endRun = true
 			}
 		}
