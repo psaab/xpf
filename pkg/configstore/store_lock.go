@@ -447,6 +447,18 @@ func (s *Store) InConfigMode() bool {
 	return s.configDir
 }
 
+// InConfigModeForSession reports whether sessionID currently owns configuration
+// mode. The config-mode flag and holder are checked together under the store
+// lock, so a stale session cannot mistake another holder's mode for its own.
+func (s *Store) InConfigModeForSession(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configDir && s.effectiveHolderLocked() == sessionID
+}
+
 // IsDirty returns true if the candidate differs from active.
 func (s *Store) IsDirty() bool {
 	s.mu.RLock()

@@ -83,3 +83,46 @@ func TestTopExitRestoreStillWorksForOwnSession17822(t *testing.T) {
 		t.Fatalf("own-session restore got %v, want %v (#17822 control)", got, want)
 	}
 }
+
+// TestRefreshPromptStaysOperationalWithForeignHolder17822 drives the
+// runOneLine/refreshPrompt path with a foreign session in config mode. The
+// local CLI never acquired that session, so its prompt must stay operational.
+func TestRefreshPromptStaysOperationalWithForeignHolder17822(t *testing.T) {
+	store := topUpStore15082(t)
+	if !store.ExitConfigureSession(localConfigSessionID) {
+		t.Fatal("local session failed to release setup lock (#17822 prompt)")
+	}
+	if err := store.EnterConfigureSession("grpc-peer-1"); err != nil {
+		t.Fatalf("foreign EnterConfigureSession: %v (#17822 prompt)", err)
+	}
+	c := cliWithDiscardReadline14716(t, store, "")
+	c.setConfigOwned(false)
+	var refreshedPrompt string
+	c.setPromptFn = func(prompt string) { refreshedPrompt = prompt }
+	c.readLineFn = func() (string, error) { return "help", nil }
+	done, err := c.runOneLine()
+	if err != nil || done {
+		t.Fatalf("runOneLine: done=%v err=%v (#17822 prompt)", done, err)
+	}
+	if refreshedPrompt != c.operationalPrompt() {
+		t.Fatalf("foreign config holder refreshed local prompt to %q, want operational %q (#17822 prompt)", refreshedPrompt, c.operationalPrompt())
+	}
+}
+
+// TestRefreshPromptOwnSessionControl17822 verifies the local holder still
+// receives its config prompt through the same runOneLine/refreshPrompt path.
+func TestRefreshPromptOwnSessionControl17822(t *testing.T) {
+	store := topUpStore15082(t)
+	c := cliWithDiscardReadline14716(t, store, "")
+	c.setConfigOwned(true)
+	var refreshedPrompt string
+	c.setPromptFn = func(prompt string) { refreshedPrompt = prompt }
+	c.readLineFn = func() (string, error) { return "help", nil }
+	done, err := c.runOneLine()
+	if err != nil || done {
+		t.Fatalf("runOneLine: done=%v err=%v (#17822 control)", done, err)
+	}
+	if refreshedPrompt != c.configPrompt() {
+		t.Fatalf("own config holder refreshed local prompt to %q, want config %q (#17822 control)", refreshedPrompt, c.configPrompt())
+	}
+}

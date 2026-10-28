@@ -54,7 +54,9 @@ type CLI struct {
 	// read loop is a security-relevant control flow (a Ctrl-C-aborted paste
 	// must not be applied, #6548) and it was unguarded for exactly as long as
 	// it had no injectable input. See readLine below.
-	readLineFn      func() (string, error)
+	readLineFn func() (string, error)
+	// setPromptFn overrides readline prompt updates in focused tests.
+	setPromptFn     func(string)
 	store           *configstore.Store
 	dp              cliRuntime
 	eventBuf        *logging.EventBuffer
@@ -861,13 +863,21 @@ func (c *CLI) refreshPrompt() {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		c.hostname = h
 	}
-	if c.rl != nil {
-		if c.store.InConfigMode() {
-			c.rl.SetPrompt(c.configPrompt())
+	if c.rl != nil || c.setPromptFn != nil {
+		prompt := c.promptForCurrentMode()
+		if c.setPromptFn != nil {
+			c.setPromptFn(prompt)
 		} else {
-			c.rl.SetPrompt(c.operationalPrompt())
+			c.rl.SetPrompt(prompt)
 		}
 	}
+}
+
+func (c *CLI) promptForCurrentMode() string {
+	if c.configOwnedNow() && c.store.InConfigModeForSession(localConfigSessionID) {
+		return c.configPrompt()
+	}
+	return c.operationalPrompt()
 }
 
 func (c *CLI) clusterPrefix() string {
