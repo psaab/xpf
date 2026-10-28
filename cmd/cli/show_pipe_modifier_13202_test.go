@@ -113,19 +113,19 @@ func TestShowPipeModifierRejectsGarbage_13202(t *testing.T) {
 			return c.handleShow([]string{"configuration", "|", "frobnicate"})
 		}},
 		{"config show compare bogus", func(c *ctl) error {
-			return c.handleConfigShow([]string{"|", "compare", "bogus"})
+			return c.handleConfigShow([]string{"|", "compare", "bogus"}, nil)
 		}},
 		{"config show compare rollback extra", func(c *ctl) error {
-			return c.handleConfigShow([]string{"|", "compare", "rollback", "1", "extra"})
+			return c.handleConfigShow([]string{"|", "compare", "rollback", "1", "extra"}, nil)
 		}},
 		{"config show trailing garbage after display", func(c *ctl) error {
-			return c.handleConfigShow([]string{"interfaces", "|", "display", "set", "bogus"})
+			return c.handleConfigShow([]string{"interfaces", "|", "display", "set", "bogus"}, nil)
 		}},
 		{"config show unknown display", func(c *ctl) error {
-			return c.handleConfigShow([]string{"|", "display", "yaml"})
+			return c.handleConfigShow([]string{"|", "display", "yaml"}, nil)
 		}},
 		{"config show unknown pipe", func(c *ctl) error {
-			return c.handleConfigShow([]string{"|", "frobnicate"})
+			return c.handleConfigShow([]string{"|", "frobnicate"}, nil)
 		}},
 	}
 	for _, tc := range cases {
@@ -193,7 +193,7 @@ func TestShowPipeModifierAcceptsExact_13202(t *testing.T) {
 	})
 	t.Run("config show plain path", func(t *testing.T) {
 		fake := &showPipeRecorderClient{}
-		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces"}); err != nil {
+		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces"}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if fake.configCalls != 1 || fake.configTarget != pb.ConfigTarget_CANDIDATE ||
@@ -203,7 +203,7 @@ func TestShowPipeModifierAcceptsExact_13202(t *testing.T) {
 	})
 	t.Run("config show display set with path", func(t *testing.T) {
 		fake := &showPipeRecorderClient{}
-		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces", "|", "display", "set"}); err != nil {
+		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces", "|", "display", "set"}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if fake.configCalls != 1 || fake.configFmt != pb.ConfigFormat_SET ||
@@ -213,7 +213,7 @@ func TestShowPipeModifierAcceptsExact_13202(t *testing.T) {
 	})
 	t.Run("config show compare", func(t *testing.T) {
 		fake := &showPipeRecorderClient{}
-		if err := configModeCtl(fake).handleConfigShow([]string{"|", "compare"}); err != nil {
+		if err := configModeCtl(fake).handleConfigShow([]string{"|", "compare"}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if fake.compareCalls != 1 || fake.compareN != 0 {
@@ -222,7 +222,7 @@ func TestShowPipeModifierAcceptsExact_13202(t *testing.T) {
 	})
 	t.Run("config show compare rollback", func(t *testing.T) {
 		fake := &showPipeRecorderClient{}
-		if err := configModeCtl(fake).handleConfigShow([]string{"|", "compare", "rollback", "2"}); err != nil {
+		if err := configModeCtl(fake).handleConfigShow([]string{"|", "compare", "rollback", "2"}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if fake.compareCalls != 1 || fake.compareN != 2 {
@@ -231,7 +231,7 @@ func TestShowPipeModifierAcceptsExact_13202(t *testing.T) {
 	})
 	t.Run("config show scoped compare", func(t *testing.T) {
 		fake := &showPipeRecorderClient{}
-		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces", "|", "compare"}); err != nil {
+		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces", "|", "compare"}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if fake.compareCalls != 1 || fake.compareN != 0 || !reflect.DeepEqual(fake.comparePath, []string{"interfaces"}) {
@@ -240,7 +240,7 @@ func TestShowPipeModifierAcceptsExact_13202(t *testing.T) {
 	})
 	t.Run("config show scoped compare rollback", func(t *testing.T) {
 		fake := &showPipeRecorderClient{}
-		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces", "|", "compare", "rollback", "1"}); err != nil {
+		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces", "|", "compare", "rollback", "1"}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if fake.compareCalls != 1 || fake.compareN != 1 || !reflect.DeepEqual(fake.comparePath, []string{"interfaces"}) {

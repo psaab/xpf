@@ -21,10 +21,11 @@ import (
 
 type lexRecorder16790 struct {
 	pb.BpfrxServiceClient
-	setInputs   []string
-	configPath  []string
-	configCalls int
-	comparePath []string
+	setInputs    []string
+	configPath   []string
+	configFormat pb.ConfigFormat
+	configCalls  int
+	comparePath  []string
 }
 
 func (f *lexRecorder16790) Set(_ context.Context, in *pb.SetRequest, _ ...grpc.CallOption) (*pb.SetResponse, error) {
@@ -35,6 +36,7 @@ func (f *lexRecorder16790) Set(_ context.Context, in *pb.SetRequest, _ ...grpc.C
 func (f *lexRecorder16790) ShowConfig(_ context.Context, in *pb.ShowConfigRequest, _ ...grpc.CallOption) (*pb.ShowConfigResponse, error) {
 	f.configCalls++
 	f.configPath = append([]string(nil), in.GetPath()...)
+	f.configFormat = in.GetFormat()
 	return &pb.ShowConfigResponse{Output: "stub"}, nil
 }
 
@@ -124,7 +126,7 @@ func TestRemoteConfigShowUsesLexedPath16790(t *testing.T) {
 		t.Fatalf("ShowConfig calls=%d path=%v, want [security zones security-zone \"lan in\"] (#16790)", fake.configCalls, fake.configPath)
 	}
 
-	// Pipe survives, and a quoted "|" is data, not a pipe.
+	// Pipe survives, and a quoted token containing "|" is path data.
 	fake2 := &lexRecorder16790{}
 	c2 := configModeCtl(fake2)
 	if err := c2.dispatchConfig(`show security zones security-zone "a|b" | display set`); err != nil {
@@ -132,6 +134,26 @@ func TestRemoteConfigShowUsesLexedPath16790(t *testing.T) {
 	}
 	if fake2.configCalls != 1 || !reflect.DeepEqual(fake2.configPath, []string{"security", "zones", "security-zone", "a|b"}) {
 		t.Fatalf("ShowConfig calls=%d path=%v, want quoted-pipe element (#16790)", fake2.configCalls, fake2.configPath)
+	}
+
+	// A quoted token equal to "|" is data; the unquoted pipe remains a modifier.
+	fakeQuotedPipe := &lexRecorder16790{}
+	cQuotedPipe := configModeCtl(fakeQuotedPipe)
+	if err := cQuotedPipe.dispatchConfig(`show security policies from-zone trust to-zone untrust policy "|"`); err != nil {
+		t.Fatalf("dispatchConfig show quoted pipe: %v", err)
+	}
+	if fakeQuotedPipe.configCalls != 1 || !reflect.DeepEqual(fakeQuotedPipe.configPath, []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "|"}) {
+		t.Fatalf("ShowConfig calls=%d path=%v, want quoted '|' as path data (#17809)", fakeQuotedPipe.configCalls, fakeQuotedPipe.configPath)
+	}
+
+	fakeQuotedPipeMod := &lexRecorder16790{}
+	cQuotedPipeMod := configModeCtl(fakeQuotedPipeMod)
+	if err := cQuotedPipeMod.dispatchConfig(`show security policies from-zone trust to-zone untrust policy "|" | display set`); err != nil {
+		t.Fatalf("dispatchConfig show quoted pipe with display: %v", err)
+	}
+	if fakeQuotedPipeMod.configCalls != 1 || fakeQuotedPipeMod.configFormat != pb.ConfigFormat_SET ||
+		!reflect.DeepEqual(fakeQuotedPipeMod.configPath, []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "|"}) {
+		t.Fatalf("ShowConfig calls=%d format=%v path=%v, want quoted '|' path with unquoted display pipe (#17809)", fakeQuotedPipeMod.configCalls, fakeQuotedPipeMod.configFormat, fakeQuotedPipeMod.configPath)
 	}
 
 	// Plain control + compare pipe.

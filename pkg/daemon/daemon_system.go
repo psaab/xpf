@@ -101,7 +101,103 @@ func (d *Daemon) syslogCachedClient15231(name, fp string) *logging.SyslogClient 
 	if d.syslogBuiltFP15231[name] != fp {
 		return nil
 	}
-	return d.syslogBuiltByName15231[name]
+	c := d.syslogBuiltByName15231[name]
+	// #18368: a closed client is terminal — Send can never recover
+	// (#4806) — so an unchanged fingerprint must not serve it. Evict
+	// the exact cached pointer and miss, so the caller rebuilds.
+	if c == nil || c.Closed() {
+		delete(d.syslogBuiltByName15231, name)
+		delete(d.syslogBuiltFP15231, name)
+		return nil
+	}
+	return c
+}
+
+// syslogForgetCachedNotInstalled15231 evicts stream-cache entries whose
+// clients are terminally closed or whose identity the EventReader no
+// longer owns (#18368, the stream twin of
+// systemSyslogForgetCachedNotInstalled). The identity check alone is
+// not sufficient: external replacement can leave a cached client open.
+// Eviction removes only this stale cache entry; other stream names are
+// unaffected. A displaced open client is closed after releasing syslogBuiltMu.
+func (d *Daemon) syslogForgetCachedNotInstalled15231(installed []*logging.SyslogClient) {
+	var closeAfterUnlock []*logging.SyslogClient
+	d.syslogBuiltMu.Lock()
+	for name, cached := range d.syslogBuiltByName15231 {
+		open := cached != nil && !cached.Closed()
+		stillInstalled := false
+		if open {
+			for _, client := range installed {
+				if client == cached {
+					stillInstalled = true
+					break
+				}
+			}
+		}
+		if !stillInstalled {
+			delete(d.syslogBuiltByName15231, name)
+			delete(d.syslogBuiltFP15231, name)
+			if open {
+				duplicate := false
+				for _, alreadyQueued := range closeAfterUnlock {
+					if alreadyQueued == cached {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					closeAfterUnlock = append(closeAfterUnlock, cached)
+				}
+			}
+		}
+	}
+	d.syslogBuiltMu.Unlock()
+	for _, cached := range closeAfterUnlock {
+		_ = cached.Close()
+	}
+}
+
+// syslogCachedClientsInstalled15231 reports whether every configured
+// stream has an open cached client still installed in er, and the
+// installed set has not drifted (#18368). Stream config is a map, so
+// compare set membership rather than order (the apply loop's map order
+// is intentionally unspecified).
+func (d *Daemon) syslogCachedClientsInstalled15231(er *logging.EventReader, cfg *config.Config) bool {
+	if er == nil || cfg == nil {
+		return false
+	}
+	installed := er.SyslogClients()
+	streams := cfg.Security.Log.Streams
+	if len(installed) != len(streams) {
+		return false
+	}
+	d.syslogBuiltMu.Lock()
+	defer d.syslogBuiltMu.Unlock()
+	if len(d.syslogBuiltByName15231) != len(streams) {
+		return false
+	}
+	for _, client := range installed {
+		if client == nil || client.Closed() {
+			return false
+		}
+	}
+	for name := range streams {
+		cached, ok := d.syslogBuiltByName15231[name]
+		if !ok || cached == nil || cached.Closed() {
+			return false
+		}
+		found := false
+		for _, client := range installed {
+			if client == cached {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *Daemon) syslogCacheClient15231(name, fp string, c *logging.SyslogClient) {
@@ -589,7 +685,8 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	var pendingHash string
 	var pendingHashOK bool
 	if h, ok := syslogClientFingerprint(cfg); ok {
-		if d.syslogHashSet && h == d.syslogHash {
+		if d.syslogHashSet && h == d.syslogHash &&
+			d.syslogCachedClientsInstalled15231(er, cfg) {
 			d.applyAggregator(er, cfg)
 			return
 		}
@@ -601,6 +698,9 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		// that matters here.
 		d.syslogHashSet = false
 	}
+	// The fingerprint gate can fail open after a closed client or handler drift.
+	// Only still-installed clients are eligible for per-stream reuse (#18368).
+	d.syslogForgetCachedNotInstalled15231(er.SyslogClients())
 
 	var clients []*logging.SyslogClient
 	var freshClients15231 []*logging.SyslogClient

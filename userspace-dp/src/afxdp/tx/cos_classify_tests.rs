@@ -5991,7 +5991,7 @@ fn classify_post_transform_inner_ptb_admitted_without_filter() {
             ..Default::default()
         },
     );
-    let ptb = post_transform_inner_frag_needed_ptb(1325); // WG inner MTU
+    let ptb = post_transform_inner_frag_needed_ptb(1340); // WG inner MTU
     let verdict = classify_generated_reply(&forwarding, 202, &ptb, 0);
     assert!(
         !verdict.drop,

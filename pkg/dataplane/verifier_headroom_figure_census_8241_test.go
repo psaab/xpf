@@ -53,15 +53,14 @@ var headroomCensusFiles = []string{
 }
 
 var (
-	// A processed-instruction count for THIS object: 700,000-999,999 or the
-	// 1,000,000/1,000,001 cap boundary. Narrow on purpose -- it is the range the
-	// shim has ever occupied, so a session cap or a bps conversion does not match.
-	// 700,000-999,999 -- the range this object has ever occupied. Deliberately
-	// EXCLUDES 1,000,000 and 1,000,001: those are the kernel's cap and its
-	// reject boundary, constants rather than measurements of our object, and
-	// including them flagged a #7494 matrix row that records WHICH SHAPES the
-	// verifier rejected. A constant cannot rot.
-	headroomInsnFigure = regexp.MustCompile(`\b(?:7|8|9)\d{2},\d{3}\b`)
+	// Processed-instruction counts for THIS object: 700,000-999,999, written
+	// with or without a comma, plus approximate `~NNNk` shorthand. Narrow on purpose
+	// -- it is the range the shim has occupied, so a session cap or bps conversion
+	// does not match. Deliberately exclude 1,000,000 and 1,000,001: those are the
+	// kernel cap and reject boundary, constants rather than measurements of our
+	// object. Including them flagged a #7494 matrix row that records WHICH SHAPES
+	// the verifier rejected. A constant cannot rot.
+	headroomInsnFigure = regexp.MustCompile(`\b(?:7|8|9)\d{2},?\d{3}\b|~\d{3}k`)
 	headroomPctFigure  = regexp.MustCompile(`\b\d{1,2}\.\d{1,2}%|\b\d{1,2}%`)
 	// Deliberately does NOT include a bare "headroom": that is the over-scoping the
 	// issue warns about, and the control cell below proves it — an ECN/WRED line
@@ -101,6 +100,12 @@ var headroomCensusAccepted = map[string]string{
 	"947,188 insns with and without it": "a DIFFERENTIAL, not a level. The claim is that " +
 		"the facts section costs zero budget, proven by both sides being equal; the " +
 		"absolute is incidental and the claim cannot rot, because zero stays zero.",
+	"~186k": "the 3% floor's historical slack delta in verify_userspace_shim.go and " +
+		"README.md, not an absolute measurement of the object's verifier cost.",
+	"~206k insns": "the README's historical #4555 tree-to-tree movement; it is a " +
+		"differential explaining that the absolute table values are stale.",
+	"3.8-6.1%": "historical guest-kernel versus build-host verifier charge variation " +
+		"from #15645/#15854, not a headroom verdict for this object.",
 	"773,966": "docs/userspace-dataplane-architecture.md, scoped to what #304 cost. " +
 		"Past-tense by construction -- the model this census holds everything else to.",
 }
@@ -135,8 +140,18 @@ func headroomCensusViolations(root string, accepted map[string]string) (viol []s
 		}
 		lines := strings.Split(string(raw), "\n")
 		for i, line := range lines {
+			lowerLine := strings.ToLower(line)
+			hasHeadroom := strings.Contains(lowerLine, "headroom")
+			// The word can wrap onto the line immediately before or after the
+			// percentage; treat each adjacent pair as a two-line window.
+			if !hasHeadroom && i > 0 {
+				hasHeadroom = strings.Contains(strings.ToLower(lines[i-1]), "headroom")
+			}
+			if !hasHeadroom && i+1 < len(lines) {
+				hasHeadroom = strings.Contains(strings.ToLower(lines[i+1]), "headroom")
+			}
 			isFigure := headroomInsnFigure.MatchString(line) ||
-				(headroomPctFigure.MatchString(line) && strings.Contains(strings.ToLower(line), "headroom"))
+				(headroomPctFigure.MatchString(line) && hasHeadroom)
 			if !isFigure {
 				continue
 			}
@@ -267,6 +282,88 @@ func TestHeadroomCensusDetectsABareFigure_8241(t *testing.T) {
 		"# x\n\nThe shim sits at 801,448 insns, 19.86% headroom against the 15.0% floor.\n")
 	if v, _, _ := headroomCensusViolations(dir, map[string]string{}); len(v) != 0 {
 		t.Errorf("the census rejected a figure measured against a named floor: %v", v)
+	}
+}
+
+func writeHeadroomCensusREADME(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pkg", "dataplane", "README.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestHeadroomCensusDetectsUncommaedFigure_17245(t *testing.T) {
+	dir := writeHeadroomCensusREADME(t, "# x\n\nThe verifier reported 963340 processed insns.\n")
+	viol, _, scanned := headroomCensusViolations(dir, map[string]string{})
+	if scanned == 0 {
+		t.Fatal("the uncommaed verifier figure was not scanned")
+	}
+	if len(viol) == 0 {
+		t.Fatal("the census passed an unfloored, uncommitted uncommaed verifier figure")
+	}
+}
+
+func TestHeadroomCensusDetectsPercentWithWrappedHeadroom_17245(t *testing.T) {
+	dir := writeHeadroomCensusREADME(t, "# x\n\nThe verifier reported 3.67%\nheadroom.\n")
+	viol, _, scanned := headroomCensusViolations(dir, map[string]string{})
+	if scanned == 0 {
+		t.Fatal("the percentage with wrapped headroom was not scanned")
+	}
+	if len(viol) == 0 {
+		t.Fatal("the census passed a percent figure whose headroom marker is on the next line")
+	}
+}
+
+func TestHeadroomCensusDetectsApproximateFigure_17245(t *testing.T) {
+	dir := writeHeadroomCensusREADME(t, "# x\n\nThe verifier measured ~816k processed insns.\n")
+	viol, _, scanned := headroomCensusViolations(dir, map[string]string{})
+	if scanned == 0 {
+		t.Fatal("the approximate verifier figure was not scanned")
+	}
+	if len(viol) == 0 {
+		t.Fatal("the census passed an unfloored, uncommitted approximate verifier figure")
+	}
+}
+
+func TestHeadroomCensusAcceptsHistoricalDeltas_17245(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, accepted string
+	}{
+		{
+			"floor-sensitivity delta",
+			"# x\n\nAt 21.58% the old constant admitted ~186k insns.\n",
+			"~186k",
+		},
+		{
+			"tree-to-tree delta",
+			"# x\n\nThe table is a snapshot of a tree moved by ~206k insns.\n",
+			"~206k insns",
+		},
+		{
+			"kernel charge variation",
+			"# x\n\nThe verifier on guest kernels charges 3.8-6.1% more than the build host; " +
+				"that can overstate deploy headroom.\n",
+			"3.8-6.1%",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeHeadroomCensusREADME(t, tc.body)
+			accepted := map[string]string{tc.accepted: headroomCensusAccepted[tc.accepted]}
+			viol, matched, scanned := headroomCensusViolations(dir, accepted)
+			if scanned == 0 {
+				t.Fatal("the historical figure was not scanned")
+			}
+			if len(viol) != 0 || !matched[tc.accepted] {
+				t.Fatalf("historical figure was not accepted by %q: violations=%v matched=%v",
+					tc.accepted, viol, matched)
+			}
+		})
 	}
 }
 
