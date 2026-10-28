@@ -197,3 +197,42 @@ func TestRIPPerGroupRejectTermConfines16625(t *testing.T) {
 		t.Errorf("reject term must render as earlier deny (deny@%d permit@%d):\n%s", denyIdx, permitIdx, got)
 	}
 }
+
+func TestRIPPerGroupMaxLengthLongerBoundaryPreservesSibling16625(t *testing.T) {
+	// #18361: a max-length `longer` filter (10.0.0.1/32 longer) is a
+	// valid empty match set. It must not make the whole RIP per-group
+	// export render deny-all; the sibling broader permit in the same
+	// accepting term must survive. The host route itself must stay
+	// denied (Junos longest-match: 10.0.0.1/32 matches the /32 longer
+	// boundary and fails), so a bare exact-host deny precedes the permit.
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", Terms: []*config.PolicyTerm{
+				{Name: "t1", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "longer"},
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	permits := listPermits16625(got, list)
+	if len(permits) != 1 || permits[0] != "10.0.0.0/8 le 32" {
+		t.Errorf("sibling broader permit must survive, permits=%v:\n%s", permits, got)
+	}
+	if strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("empty max-length longer must NOT deny-all the group:\n%s", got)
+	}
+	hostDeny := "ip prefix-list " + list + " seq 5 deny 10.0.0.1/32\n"
+	siblingPermit := "ip prefix-list " + list + " seq 10 permit 10.0.0.0/8 le 32\n"
+	if denyIdx, permitIdx := strings.Index(got, hostDeny), strings.Index(got, siblingPermit); denyIdx < 0 || permitIdx < 0 || denyIdx > permitIdx {
+		t.Errorf("bare exact-host deny must precede the sibling broader permit (deny@%d permit@%d):\n%s", denyIdx, permitIdx, got)
+	}
+}
