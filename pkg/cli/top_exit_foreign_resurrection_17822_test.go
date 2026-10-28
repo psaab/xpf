@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/chzyer/readline"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // #17822: restoring top/up state is valid only while the calling local
@@ -84,6 +88,32 @@ func TestTopExitRestoreStillWorksForOwnSession17822(t *testing.T) {
 	}
 }
 
+type promptCaptureWriter17822 struct{ output []byte }
+
+func (w *promptCaptureWriter17822) Write(p []byte) (int, error) {
+	w.output = append(w.output, p...)
+	return len(p), nil
+}
+
+func promptCLI17822(t *testing.T, store *configstore.Store) (*CLI, *promptCaptureWriter17822) {
+	t.Helper()
+	output := &promptCaptureWriter17822{}
+	rl, err := readline.NewEx(&readline.Config{
+		Stdin:               io.NopCloser(strings.NewReader("")),
+		Stdout:              output,
+		Stderr:              io.Discard,
+		ForceUseInteractive: true,
+		FuncIsTerminal:      func() bool { return true },
+		FuncMakeRaw:         func() error { return nil },
+		FuncExitRaw:         func() error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("readline.NewEx: %v", err)
+	}
+	t.Cleanup(func() { rl.Close() })
+	return &CLI{store: store, rl: rl, username: "operator"}, output
+}
+
 // TestRefreshPromptStaysOperationalWithForeignHolder17822 drives the
 // runOneLine/refreshPrompt path with a foreign session in config mode. The
 // local CLI never acquired that session, so its prompt must stay operational.
@@ -95,17 +125,20 @@ func TestRefreshPromptStaysOperationalWithForeignHolder17822(t *testing.T) {
 	if err := store.EnterConfigureSession("grpc-peer-1"); err != nil {
 		t.Fatalf("foreign EnterConfigureSession: %v (#17822 prompt)", err)
 	}
-	c := cliWithDiscardReadline14716(t, store, "")
+	c, output := promptCLI17822(t, store)
 	c.setConfigOwned(false)
-	var refreshedPrompt string
-	c.setPromptFn = func(prompt string) { refreshedPrompt = prompt }
 	c.readLineFn = func() (string, error) { return "help", nil }
 	done, err := c.runOneLine()
 	if err != nil || done {
 		t.Fatalf("runOneLine: done=%v err=%v (#17822 prompt)", done, err)
 	}
-	if refreshedPrompt != c.operationalPrompt() {
-		t.Fatalf("foreign config holder refreshed local prompt to %q, want operational %q (#17822 prompt)", refreshedPrompt, c.operationalPrompt())
+	c.rl.Operation.SetBuffer("")
+	paintedPrompt := string(output.output)
+	if !strings.Contains(paintedPrompt, c.operationalPrompt()) {
+		t.Fatalf("foreign holder painted %q, want operational prompt %q (#17822 prompt)", paintedPrompt, c.operationalPrompt())
+	}
+	if strings.Contains(paintedPrompt, c.configPrompt()) {
+		t.Fatalf("foreign holder painted local config prompt %q: %q (#17822 prompt)", c.configPrompt(), paintedPrompt)
 	}
 }
 
@@ -113,16 +146,16 @@ func TestRefreshPromptStaysOperationalWithForeignHolder17822(t *testing.T) {
 // receives its config prompt through the same runOneLine/refreshPrompt path.
 func TestRefreshPromptOwnSessionControl17822(t *testing.T) {
 	store := topUpStore15082(t)
-	c := cliWithDiscardReadline14716(t, store, "")
+	c, output := promptCLI17822(t, store)
 	c.setConfigOwned(true)
-	var refreshedPrompt string
-	c.setPromptFn = func(prompt string) { refreshedPrompt = prompt }
 	c.readLineFn = func() (string, error) { return "help", nil }
 	done, err := c.runOneLine()
 	if err != nil || done {
 		t.Fatalf("runOneLine: done=%v err=%v (#17822 control)", done, err)
 	}
-	if refreshedPrompt != c.configPrompt() {
-		t.Fatalf("own config holder refreshed local prompt to %q, want config %q (#17822 control)", refreshedPrompt, c.configPrompt())
+	c.rl.Operation.SetBuffer("")
+	paintedPrompt := string(output.output)
+	if !strings.Contains(paintedPrompt, c.configPrompt()) {
+		t.Fatalf("own config holder painted %q, want config prompt %q (#17822 control)", paintedPrompt, c.configPrompt())
 	}
 }

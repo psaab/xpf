@@ -54,9 +54,7 @@ type CLI struct {
 	// read loop is a security-relevant control flow (a Ctrl-C-aborted paste
 	// must not be applied, #6548) and it was unguarded for exactly as long as
 	// it had no injectable input. See readLine below.
-	readLineFn func() (string, error)
-	// setPromptFn overrides readline prompt updates in focused tests.
-	setPromptFn     func(string)
+	readLineFn      func() (string, error)
 	store           *configstore.Store
 	dp              cliRuntime
 	eventBuf        *logging.EventBuffer
@@ -863,13 +861,8 @@ func (c *CLI) refreshPrompt() {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		c.hostname = h
 	}
-	if c.rl != nil || c.setPromptFn != nil {
-		prompt := c.promptForCurrentMode()
-		if c.setPromptFn != nil {
-			c.setPromptFn(prompt)
-		} else {
-			c.rl.SetPrompt(prompt)
-		}
+	if c.rl != nil {
+		c.rl.SetPrompt(c.promptForCurrentMode())
 	}
 }
 
