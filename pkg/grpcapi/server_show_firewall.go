@@ -367,10 +367,15 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			}
 		}
 	}
-	// #5579: resolve the ingress-interface validation once (cfg==nil returns nil,
-	// so this is safe before the cfg==nil case; the switch surfaces it only after
-	// the cfg / grammar / zone checks below).
-	ingressErr := dpuserspace.ResolveHostInboundIngressInterface(cfg, fromZone, ingressIface)
+	// #18240: validateErr feeds the ordered text switch below so the
+	// deliberate cfg==nil-before-grammar ordering is preserved: the switch
+	// checks cfg==nil first, so a no-config query still prints "No active
+	// configuration" even when Validate would error. With a live config,
+	// shared Validate re-checks the IP (#1711) and — config-dependent —
+	// the ingress interface (#5579; cfg==nil returns nil there); the
+	// per-field text errors captured above stay first in the switch.
+	req17198 := policymatch.Request{FromZone: fromZone, ToZone: toZone, SrcIP: srcIP, DstIP: dstIP, Protocol: proto, SrcPort: srcPort, DstPort: dstPort, ICMPType: icmpType, ICMPCode: icmpCode, NonFirstFragment: nonFirstFrag, IngressInterface: ingressIface}
+	validateErr := req17198.Validate(cfg)
 	switch {
 	case cfg == nil:
 		buf.WriteString("No active configuration\n")
@@ -402,12 +407,13 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 		fmt.Fprintf(buf, "invalid src %q\n", srcIP)
 	case dstIP != "" && net.ParseIP(dstIP) == nil:
 		fmt.Fprintf(buf, "invalid dst %q\n", dstIP)
-	case ingressErr != nil:
-		// #5579: an unknown / zone-mismatched / lifeline / bare-physical
-		// ingress-interface fails the query closed, so the host-inbound classifier
-		// is only scoped to a real logical-unit interface of the queried zone
-		// (parity with the REST/gRPC/local surfaces).
-		fmt.Fprintf(buf, "%v\n", ingressErr)
+	case validateErr != nil:
+		// #18240/#5579: the shared Validate ingress-interface leg (its only
+		// arm that can fire here — zones/IPs/protocol/ports/ICMP/frag were
+		// discharged by the branches above or the transport parsers): an
+		// unknown / zone-mismatched / lifeline / bare-physical ref fails the
+		// query closed (parity with the REST/gRPC/local surfaces).
+		fmt.Fprintf(buf, "%v\n", validateErr)
 	default:
 		// #3103: route the gRPC `test policy` diagnostic through the single
 		// shared simulator (pkg/policymatch) so it agrees with the runtime
@@ -421,8 +427,13 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 		// CIDRs, and ignored the feed overlay — exactly the operator-lie class
 		// #3042 removed from the REST/gRPC MatchPolicies and CLI
 		// match-policies surfaces. This was the one surface #3042 missed.
-		req17198 := policymatch.Request{FromZone: fromZone, ToZone: toZone, SrcIP: srcIP, DstIP: dstIP, Protocol: proto, SrcPort: srcPort, DstPort: dstPort, ICMPType: icmpType, ICMPCode: icmpCode, NonFirstFragment: nonFirstFrag, IngressInterface: ingressIface}
-		res := policymatch.Match(cfg, policymatch.Assemble(cfg, req17198, s.matchLive(cfg)))
+		// #18240: via shared Evaluate (Validate already passed above), whose
+		// Verdict this text renderer reads from Result directly.
+		res, err := policymatch.Evaluate(cfg, req17198, s.matchLive(cfg))
+		if err != nil {
+			fmt.Fprintf(buf, "%v\n", err)
+			break
+		}
 		if res.PostNATInputNote != "" {
 			fmt.Fprintf(buf, "NOTE: %s\n", res.PostNATInputNote)
 		}

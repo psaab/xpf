@@ -27,13 +27,14 @@ type Request struct {
 }
 
 // Validate runs the config-independent grammar checks first (zones, IPs,
-// ports, protocol, ICMP) so a malformed query fails identically during the
-// boot window (cfg == nil, #3709) and once a config is live, then — only
-// with a live config — the config-dependent ingress-interface check.
-// Port/ICMP presence values arrive already ranged by the transport
-// decoders (grpcPortValue/grpcICMPValue/REST present-value parsing);
-// Validate re-checks ICMP range for direct callers. Callers map the shared
-// hyphenated zone/IP wording to their historical surface wording where needed.
+// protocol) so a malformed query fails identically during the boot window
+// (cfg == nil, #3709) and once a config is live, then — only with a live
+// config — the config-dependent ingress-interface check. Port/ICMP
+// presence values arrive already ranged by the transport decoders
+// (grpcPortValue/grpcICMPValue/REST present-value parsing, ParsePort/
+// ParseICMPValue on the CLI grammars), so *uint16/*uint8 values need no
+// re-check here. Callers map the shared hyphenated zone/IP wording to
+// their historical surface wording where needed.
 func (r Request) Validate(cfg *config.Config) error {
 	if r.FromZone == "" || r.ToZone == "" {
 		return fmt.Errorf("from-zone and to-zone are required")
@@ -46,12 +47,6 @@ func (r Request) Validate(cfg *config.Config) error {
 	}
 	if err := ValidateProtocol(r.Protocol); err != nil {
 		return err
-	}
-	if r.ICMPType != nil && *r.ICMPType > 255 {
-		return fmt.Errorf("invalid icmp-type: %d out of range (0-255)", *r.ICMPType)
-	}
-	if r.ICMPCode != nil && *r.ICMPCode > 255 {
-		return fmt.Errorf("invalid icmp-code: %d out of range (0-255)", *r.ICMPCode)
 	}
 	if cfg != nil {
 		if err := dpuserspace.ResolveHostInboundIngressInterface(cfg, r.FromZone, r.IngressInterface); err != nil {
@@ -106,10 +101,12 @@ func (l Live) PublicationDebt() map[string]bool {
 	return debt
 }
 
-// Assemble builds the Query for cfg+r under live, owning the
-// publication-debt loop and the family threading (#6377) once. cfg must be
-// non-nil (callers render the no-config verdict before assembling).
-func Assemble(cfg *config.Config, r Request, live Live) Query {
+// Assemble builds the Query for r under live, owning the
+// publication-debt loop and the family threading (#6377) once. cfg is
+// accepted for signature symmetry with Evaluate/Match but ignored:
+// assembly is nil-config safe (SelectorArgs.Query passes nil), and the
+// #3375 no-config verdict is Evaluate's job, never Assemble's.
+func Assemble(_ *config.Config, r Request, live Live) Query {
 	return Query{
 		FromZone:            r.FromZone,
 		ToZone:              r.ToZone,

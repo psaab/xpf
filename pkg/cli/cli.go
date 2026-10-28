@@ -391,16 +391,6 @@ func (c *CLI) feedOverlay() map[string][]string {
 	return c.feedOverlayFn()
 }
 
-// feedPublicationDebt reports feeds whose installed snapshot has not been
-// confirmed applied. The simulator uses this with feedOverlay to avoid
-// certifying a verdict from content the dataplane rejected (#10974).
-func (c *CLI) feedPublicationDebt() map[string]bool {
-	if c == nil || c.feedsFn == nil {
-		return nil
-	}
-	return (policymatch.Live{Feeds: policymatch.FeedInfos(c.feedsFn(), func(i feeds.FeedInfo) bool { return i.PublicationDebt })}).PublicationDebt()
-}
-
 // matchLive assembles shared Live inputs (#17198).
 func (c *CLI) matchLive(cfg *config.Config) policymatch.Live {
 	live := policymatch.Live{FeedOverlay: c.feedOverlay(), PolicyInactiveForFn: c.policyInactiveForFn(cfg)}

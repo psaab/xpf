@@ -170,19 +170,20 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	}
 	r := policymatch.Request{FromZone: req.FromZone, ToZone: req.ToZone, SrcIP: req.SourceIp, DstIP: req.DestinationIp, Protocol: req.Protocol, SrcPort: srcPort, DstPort: dstPort, ICMPType: icmpType, ICMPCode: icmpCode, NonFirstFragment: req.NonFirstFragment, IngressInterface: req.IngressInterface}
 	cfg := s.store.ActiveConfig()
-	// #17198: shared Validate runs config-independent grammar BEFORE the
-	// cfg==nil verdict (#3709 boot window, previously REST-only); with a
-	// live config it also validates ingress_interface (#5579).
-	if err := r.Validate(cfg); err != nil {
+	// #17198/#18240: shared Evaluate runs config-independent grammar
+	// BEFORE the cfg==nil verdict (#3709 boot window, previously REST-only);
+	// with a live config it also validates ingress_interface (#5579), then
+	// assembles and runs Match; cfg==nil well-formed yields the #3375
+	// default-deny Result rendered below.
+	res, err := policymatch.Evaluate(cfg, r, s.matchLive(cfg))
+	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 	if cfg == nil {
 		// #3375: deterministic fail-closed default deny + queried zones.
-		nilRes := policymatch.Result{DefaultUsed: true, Action: config.PolicyDeny}
-		return &pb.MatchPoliciesResponse{Action: nilRes.DisplayAction(), DefaultUsed: true, QueriedFromZone: req.FromZone, QueriedToZone: req.ToZone}, nil
+		return &pb.MatchPoliciesResponse{Action: res.DisplayAction(), DefaultUsed: true, QueriedFromZone: req.FromZone, QueriedToZone: req.ToZone}, nil
 	}
-	// #3042/#17198: shared Assemble + VerdictFrom own assembly/projection.
-	res := policymatch.Match(cfg, policymatch.Assemble(cfg, r, s.matchLive(cfg)))
+	// #3042/#17198: shared Evaluate + VerdictFrom own evaluation/projection.
 	return verdictToProto(policymatch.VerdictFrom(res, req.FromZone, req.ToZone), res), nil
 }
 

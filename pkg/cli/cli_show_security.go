@@ -643,25 +643,18 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 		return nil
 	}
 
-	// #5579: validate the optional ingress-interface selector against the live
-	// config (zone membership + lifeline reject) so the host-inbound classifier is
-	// scoped only to a real interface of the queried zone, failing closed on an
-	// unknown / zone-mismatched / lifeline ref exactly like the REST/gRPC surfaces.
-	if err := dpuserspace.ResolveHostInboundIngressInterface(cfg, fromZone, sel.IngressInterface); err != nil {
+	// #18240: route through the shared Request.Validate + Evaluate — the
+	// parser validated the per-value grammar (#3116/#3108/#3284/#1711);
+	// Validate re-checks zones/IPs/protocol and (live cfg) the ingress
+	// interface (#5579), then Evaluate assembles and runs Match.
+	req17198 := sel.Request()
+	if err := req17198.Validate(cfg); err != nil {
 		return err
 	}
-
-	// #3042: delegate to the single shared simulator so the CLI agrees with
-	// the runtime evaluator. The pre-#3042 loop scanned only zone-pair
-	// policies (never globals), hard-coded "default deny" (ignoring
-	// default-policy permit-all), and used a narrow address/app matcher that
-	// missed predefined apps, nested application-sets, literal CIDRs,
-	// any-ipv4/any-ipv6, and source/destination exclusion.
-	// #3105: pass the live dynamic-address feed-prefix overlay so a feed-backed
-	// address-name resolves to its live CIDRs on-box, matching the REST/gRPC
-	// simulators and the AF_XDP helper. Nil (CLI outside the daemon) keeps the
-	// pre-#3105 static-only behavior.
-	res := policymatch.Match(cfg, policymatch.Assemble(cfg, sel.Request(), c.matchLive(cfg)))
+	res, err := policymatch.Evaluate(cfg, req17198, c.matchLive(cfg))
+	if err != nil {
+		return err
+	}
 	if res.PostNATInputNote != "" {
 		fmt.Printf("NOTE: %s\n", res.PostNATInputNote)
 	}

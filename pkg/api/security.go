@@ -940,14 +940,18 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.store.ActiveConfig()
-	// #17198: shared (Request).Validate runs config-independent grammar
+	// #17198/#18240: shared Evaluate runs config-independent grammar
 	// first, so the boot window (cfg==nil) rejects malformed input the same
 	// way as the live path (#3709, previously REST-only); with a live config
-	// it also validates ingress_interface (#5579). REST-only transport
-	// grammar (duplicate/unknown keys, present-empty ports, bool fragment
-	// flag) was decoded above.
+	// it also validates ingress_interface (#5579). An error means grammar
+	// failed (a nil-config well-formed query returns the #3375 default-deny
+	// Result with nil error, rendered below). REST-only transport grammar
+	// (duplicate/unknown keys, present-empty ports, bool fragment flag) was
+	// decoded above. Evaluate needs the live inputs even for cfg==nil
+	// (unused there), so matchLive must be nil-config safe.
 	req17198 := policymatch.Request{FromZone: fromZone, ToZone: toZone, SrcIP: srcIPStr, DstIP: dstIPStr, Protocol: proto, SrcPort: srcPort, DstPort: dstPort, ICMPType: icmpType, ICMPCode: icmpCode, NonFirstFragment: nonFirstFrag, IngressInterface: q.Get("ingress_interface")}
-	if err := req17198.Validate(cfg); err != nil {
+	res, err := policymatch.Evaluate(cfg, req17198, s.matchLive(cfg))
+	if err != nil {
 		msg := err.Error()
 		switch {
 		case strings.HasPrefix(msg, "from-zone and to-zone are required"):
@@ -965,13 +969,11 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg == nil {
-		nilRes := policymatch.Result{DefaultUsed: true, Action: config.PolicyDeny}
-		writeOK(w, MatchPoliciesResult{Action: nilRes.DisplayAction(), DefaultUsed: true, QueriedFromZone: fromZone, QueriedToZone: toZone})
+		writeOK(w, MatchPoliciesResult{Action: res.DisplayAction(), DefaultUsed: true, QueriedFromZone: fromZone, QueriedToZone: toZone})
 		return
 	}
-	// #3042/#17198: shared Assemble owns overlay/debt/scheduler assembly;
-	// shared VerdictFrom owns result projection (incl. unsupported tuple).
-	res := policymatch.Match(cfg, policymatch.Assemble(cfg, req17198, s.matchLive(cfg)))
+	// #3042/#17198: shared Evaluate owns validation+Match; shared
+	// VerdictFrom owns result projection (incl. unsupported tuple).
 	writeOK(w, verdictToREST(policymatch.VerdictFrom(res, fromZone, toZone)))
 }
 
