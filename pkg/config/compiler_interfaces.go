@@ -423,6 +423,8 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		// #14450: iterate EVERY `tunnel` sibling, not FindChild first-only —
 		// a second block's WireGuard config was dropped, installing
 		// plaintext GRE. Scalars last-win across blocks; peers accumulate.
+		// #17236: the property read lives in applyTunnelProps17236,
+		// shared with the unit site; only the quarantine target differs.
 		tunnelNodes := ifBody.FindChildren("tunnel")
 		skipIface9899 := false
 		if len(tunnelNodes) > 0 {
@@ -435,91 +437,14 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				Name: LinuxIfName(ifName),
 				Mode: defaultMode,
 			}
-			// #9156: expand the flat-set run before reading it. An untyped head
-			// (`keepalive-retry`, `routing-instance`) admits the whole run past
-			// the strict gate and this loop would then read only the head.
-			// #13215/#14440: retain values from braced scalar blocks before
-			// tunnelRunChildren9156 flattens their body into sibling nodes.
-			for _, tunnelNode := range tunnelNodes {
-				applyTunnelBracedScalars14440(tc, tunnelNode)
-				for _, prop := range tunnelRunChildren9156(tunnelNode) {
-					switch prop.Name() {
-					case "source":
-						if v := nodeVal(prop); v != "" {
-							tc.Source = v
-						}
-					case "destination":
-						if v := nodeVal(prop); v != "" {
-							tc.Destination = v
-						}
-					case "mode":
-						if v := nodeVal(prop); v != "" {
-							tc.Mode = TunnelMode(v)
-						}
-					case "key":
-						raw := nodeVal(prop)
-						v, perr := parseInterfaceNumeric9899(raw, 0, 4294967295)
-						if perr != nil {
-							msg := fmt.Sprintf("interfaces %s: tunnel key %s", ifName, perr.Error())
-							if opts.lenientInterfaceNumericBounds {
-								if warnings != nil {
-									*warnings = append(*warnings, msg+fmt.Sprintf("; quarantining interface %q", ifName))
-								}
-								skipIface9899 = true
-								break
-							}
-							return fmt.Errorf("%s", msg)
-						}
-						tc.Key = uint32(v)
-					case "ttl":
-						raw := nodeVal(prop)
-						v, perr := parseInterfaceNumeric9899(raw, 1, 255)
-						if perr != nil {
-							msg := fmt.Sprintf("interfaces %s: tunnel ttl %s", ifName, perr.Error())
-							if opts.lenientInterfaceNumericBounds {
-								if warnings != nil {
-									*warnings = append(*warnings, msg+fmt.Sprintf("; quarantining interface %q", ifName))
-								}
-								skipIface9899 = true
-								break
-							}
-							return fmt.Errorf("%s", msg)
-						}
-						tc.TTL = int(v)
-					case "keepalive":
-						if v := nodeVal(prop); v != "" {
-							if n, err := strconv.Atoi(v); err == nil {
-								tc.Keepalive = n
-							}
-						}
-					case "keepalive-retry":
-						if v := nodeVal(prop); v != "" {
-							if n, err := strconv.Atoi(v); err == nil {
-								tc.KeepaliveRetry = n
-							}
-						}
-					case "routing-instance":
-						// routing-instance { destination <name>; }
-						if destNode := prop.FindChild("destination"); destNode != nil {
-							tc.RoutingInstance = nodeVal(destNode)
-						} else if v, packed := packedTunnelRoutingInstance8936(prop); packed {
-							tc.RoutingInstance = v
-						} else if v := nodeVal(prop); v != "" {
-							tc.RoutingInstance = v
-						}
-					case "wireguard":
-						parseTunnelWireguard(tc, prop)
-					case "clear-dont-fragment-bit":
-						tc.ClearDontFragmentBit = true
-					}
-					if skipIface9899 {
-						break
-					}
-				}
-				if skipIface9899 {
-					break
-				}
+			quarantine, terr := applyTunnelProps17236(tc, tunnelNodes,
+				fmt.Sprintf("interfaces %s:", ifName),
+				fmt.Sprintf("; quarantining interface %q", ifName),
+				opts.lenientInterfaceNumericBounds, warnings)
+			if terr != nil {
+				return terr
 			}
+			skipIface9899 = quarantine
 			if skipIface9899 {
 				continue
 			}
@@ -634,91 +559,22 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				if ifc.Tunnel != nil {
 					tc = ifc.Tunnel.cloneForUnit(linuxName)
 				}
-				// #9156: same expansion as the interface-level reader above.
-				for _, tunnelNode := range unitTunnelNodes {
-					// #14440: same braced-scalar pre-pass as the interface-level
-					// reader, applied after cloneForUnit so only leaves the unit
-					// itself authored override the inherited interface values.
-					// #14450: inside the merge loop, per block in order.
-					applyTunnelBracedScalars14440(tc, tunnelNode)
-					for _, prop := range tunnelRunChildren9156(tunnelNode) {
-						switch prop.Name() {
-						case "source":
-							if v := nodeVal(prop); v != "" {
-								tc.Source = v
-							}
-						case "destination":
-							if v := nodeVal(prop); v != "" {
-								tc.Destination = v
-							}
-						case "routing-instance":
-							if destNode := prop.FindChild("destination"); destNode != nil {
-								tc.RoutingInstance = nodeVal(destNode)
-							} else if v, packed := packedTunnelRoutingInstance8936(prop); packed {
-								tc.RoutingInstance = v
-							} else if v := nodeVal(prop); v != "" {
-								tc.RoutingInstance = v
-							}
-						case "mode":
-							if v := nodeVal(prop); v != "" {
-								tc.Mode = TunnelMode(v)
-							}
-						case "key":
-							v := nodeVal(prop)
-							n, perr := parseInterfaceNumeric9899(v, 0, 4294967295)
-							if perr != nil {
-								msg := fmt.Sprintf("interfaces %s unit %d: tunnel key %s", ifName, unitNum, perr.Error())
-								if opts.lenientInterfaceNumericBounds {
-									if warnings != nil {
-										*warnings = append(*warnings, msg+fmt.Sprintf("; skipping unit %d", unitNum))
-									}
-									skipUnit9899 = true
-									break
-								}
-								return fmt.Errorf("%s", msg)
-							}
-							tc.Key = uint32(n)
-						case "ttl":
-							v := nodeVal(prop)
-							n, perr := parseInterfaceNumeric9899(v, 1, 255)
-							if perr != nil {
-								msg := fmt.Sprintf("interfaces %s unit %d: tunnel ttl %s", ifName, unitNum, perr.Error())
-								if opts.lenientInterfaceNumericBounds {
-									if warnings != nil {
-										*warnings = append(*warnings, msg+fmt.Sprintf("; skipping unit %d", unitNum))
-									}
-									skipUnit9899 = true
-									break
-								}
-								return fmt.Errorf("%s", msg)
-							}
-							tc.TTL = int(n)
-						case "keepalive":
-							if v := nodeVal(prop); v != "" {
-								if n, err := strconv.Atoi(v); err == nil {
-									tc.Keepalive = n
-								}
-							}
-						case "keepalive-retry":
-							if v := nodeVal(prop); v != "" {
-								if n, err := strconv.Atoi(v); err == nil {
-									tc.KeepaliveRetry = n
-								}
-							}
-						case "clear-dont-fragment-bit":
-							tc.ClearDontFragmentBit = true
-						case "wireguard":
-							parseTunnelWireguard(tc, prop)
-						}
-						if skipUnit9899 {
-							break
-						}
-					}
-					if skipUnit9899 {
-						break
-					}
+				// #17236: the property read lives in
+				// applyTunnelProps17236, shared with the interface
+				// site; only the quarantine target differs.
+				// #14440 ordering is preserved inside the helper:
+				// the braced pre-pass runs after cloneForUnit, per
+				// block, so only leaves the unit itself authored
+				// override the inherited interface values.
+				quarantine, terr := applyTunnelProps17236(tc, unitTunnelNodes,
+					fmt.Sprintf("interfaces %s unit %d:", ifName, unitNum),
+					fmt.Sprintf("; skipping unit %d", unitNum),
+					opts.lenientInterfaceNumericBounds, warnings)
+				if terr != nil {
+					return terr
 				}
-				if skipUnit9899 {
+				if quarantine {
+					skipUnit9899 = true
 					continue
 				}
 				unit.Tunnel = tc
