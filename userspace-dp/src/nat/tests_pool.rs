@@ -7948,7 +7948,6 @@ fn pool_snat_lockfree_concurrent_churn_no_double_alloc_no_leak() {
         let exhausted = exhausted.clone();
         let live_set = live_set.clone();
         let barrier = barrier.clone();
-        let addrs2 = addrs2;
         handles.push(thread::spawn(move || {
             barrier.wait();
             for it in 0..iters {

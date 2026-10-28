@@ -44,7 +44,7 @@ pub(super) enum AttemptTrigger {
 /// count the timer-driven rekey classes, send the first initiation,
 /// and record the baseline session identity the success check compares
 /// against.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn start_attempt(
     engine: &crate::afxdp::wg::WgEngine,
     socket: &UdpSocket,
@@ -89,7 +89,7 @@ pub(super) fn start_attempt(
 /// One step of the handshake attempt machine (runs inside the timer
 /// arm). Returns the machine's next deadline (retry or give-up) for
 /// the poll-timeout computation; WG_NO_DEADLINE_NS when idle.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn drive_attempt_machine(
     engine: &crate::afxdp::wg::WgEngine,
     socket: &UdpSocket,
@@ -224,7 +224,7 @@ pub(super) fn drive_attempt_machine(
 /// confirmation) toward the peer endpoint. Failure paths advance the
 /// corresponding pacing anchor so a due-but-unsendable keepalive can
 /// never leave a past deadline spinning the poll loop (skip-pacing).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn send_keepalive(
     engine: &crate::afxdp::wg::WgEngine,
     socket: &UdpSocket,
@@ -296,7 +296,7 @@ pub(super) fn pace_keepalive_skip(
 /// Build + send a fresh initiation toward the peer endpoint. A send
 /// error is surfaced as an exception (the next tick retries); a missing
 /// session keeps the timer armed.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn drive_initiation(
     engine: &crate::afxdp::wg::WgEngine,
     socket: &UdpSocket,

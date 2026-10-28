@@ -143,7 +143,7 @@ pub(in crate::afxdp) fn noroute_policy_denial(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn noroute_policy_denial_at(
     policy: &crate::policy::PolicyState,
     from_zone_id: u32,
@@ -262,7 +262,7 @@ pub(in crate::afxdp) fn noroute_policy_denial_gated(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn noroute_policy_denial_gated_at(
     forwarding: &ForwardingState,
     from_zone_id: u32,

@@ -2490,7 +2490,6 @@ impl Coordinator {
     /// a legitimate config-transition reset still lands.
     ///
     /// Returns `true` when the bump was applied, `false` when it was refused
-
     /// as a rollback.
     #[cfg(test)]
     #[must_use]

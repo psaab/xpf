@@ -1077,7 +1077,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
     left: &mut [BindingWorker],
     ingress_index: usize,

@@ -475,7 +475,7 @@ fn session_lookup_hits_after_install() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux {
                 session_id: 1,
-                ..SessionLookupAux::default()
+                ..SessionLookupAux::unknown()
             },
         })
     );
@@ -2026,7 +2026,7 @@ fn tcp_fin_keeps_session_until_closing_timeout() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux {
                 session_id: 1,
-                ..SessionLookupAux::default()
+                ..SessionLookupAux::unknown()
             },
         })
     );
@@ -3210,7 +3210,7 @@ fn synced_sessions_do_not_emit_deltas() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux {
                 session_id: 1,
-                ..SessionLookupAux::default()
+                ..SessionLookupAux::unknown()
             },
         })
     );
@@ -3323,7 +3323,7 @@ fn promote_synced_forward_session_emits_open_delta() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux {
                 session_id: 1,
-                ..SessionLookupAux::default()
+                ..SessionLookupAux::unknown()
             },
         })
     );
@@ -3371,7 +3371,7 @@ fn promote_synced_reverse_session_stays_quiet() {
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux {
                 session_id: 1,
-                ..SessionLookupAux::default()
+                ..SessionLookupAux::unknown()
             },
         })
     );

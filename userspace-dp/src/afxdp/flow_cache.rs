@@ -830,7 +830,7 @@ impl FlowCacheEntry {
             fabric_established: false,
         })
     }
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(super) fn from_deny_decision(
         flow: &SessionFlow,
         meta: UserspaceDpMeta,

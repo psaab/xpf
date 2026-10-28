@@ -14,7 +14,7 @@ use super::*;
 /// gateway/default-routed) is not peer-ownership and never
 /// converts. The session's stored owner stamp is deliberately NOT
 /// consulted: pre-fix rows carry the reply-egress row's RG there.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_hit_departed_destination_redirect(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -249,7 +249,7 @@ pub(in crate::afxdp) fn apply_deferred_forwarding_revalidation(
 /// `fabric_ingress=true, fabric_link_ingress=false` (a logical fabric
 /// arrival that did not arrive on the fabric link).
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn resolve_flow_session_decision(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
@@ -314,7 +314,7 @@ pub(in crate::afxdp) fn resolve_flow_session_decision(
 /// parsed segment ack. This is the entry point the production poll
 /// session-hit path calls; the poll fabric-adoption miss site calls
 /// it with `ack = None`, since no segment ack is parsed there.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
@@ -384,7 +384,7 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
 }
 
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn resolve_flow_session_decision_with_conntrack_inner(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
 shared: SharedSessionRefs<'_>,
@@ -1031,7 +1031,6 @@ ingress_zone: u32,) -> ForwardingResolution {
 /// owner creates (or hits) the authoritative session there, instead
 /// of dropping on the split node forever. Operator discards carry no
 /// stamp and never rescue; a fabric-ingress packet never re-redirects.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn redirect_session_via_fabric_if_needed_at(forwarding: &ForwardingState,
 ha_state: &BTreeMap<i32, HAGroupRuntime>,
 now_secs: u64,

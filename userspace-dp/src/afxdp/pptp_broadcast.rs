@@ -351,7 +351,6 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
 ) -> usize {
     drain_pptp_control_inbox_at_epoch(inbox, sessions, self_worker_commands, peer_worker_commands, now_ns, 0)
 }
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn drain_pptp_control_inbox_at_epoch(
     inbox: &crate::session::pptp_control::PptpControlInbox,
     sessions: &mut crate::session::SessionTable,

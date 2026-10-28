@@ -22,7 +22,6 @@ use crate::afxdp::UMEM_FRAME_SHIFT;
 /// slot to `TX_SIDECAR_UNSTAMPED` on reap, so a frame whose sidecar
 /// did NOT receive a stamp in the current cycle is already in the
 /// correct "skip at reap time" state.
-
 /// #812: stamp the submit-timestamp sidecar for the accepted prefix
 /// of the current TX batch. Called ONCE per `writer.commit()` at each
 /// of the six submit sites (plan §3.1 table) with the scratch

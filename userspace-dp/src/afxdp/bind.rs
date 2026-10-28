@@ -691,7 +691,7 @@ fn fail_identity_mismatched_bind(
     drop(device);
     drop(tx);
     drop(rx);
-    drop(user);
+    // `user` (no Drop: raw fd closed by the socket delete above) drops at scope exit, last as before.
     post_create_bind_error(format!("bind identity mismatch: {mismatch}"))
 }
 
@@ -785,7 +785,7 @@ fn try_open_bind(
                             drop(device);
                             drop(tx);
                             drop(rx);
-                            drop(user);
+                            // `user` has no Drop (raw fd closed by the delete); it drops on return.
                             return Err(post_create_bind_error(format!(
                                 "prime fill ring after socket create: {err}"
                             )));
@@ -803,7 +803,7 @@ fn try_open_bind(
                     drop(device);
                     drop(tx);
                     drop(rx);
-                    drop(user);
+                    // `user` has no Drop (raw fd closed by the delete); it drops on return.
                     return Err(post_create_bind_error(format!(
                         "{} bind(fd={}) did not report XDP_OPTIONS_ZEROCOPY after bind",
                         socket_role.describe(),

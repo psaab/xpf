@@ -1409,7 +1409,6 @@ impl ForwardingState {
     /// adds the genuine interface IPs that the NAT exclusion stripped.
     /// NAT-translated POOL addresses are in
     /// neither set, so the gate still scopes to addresses the router owns.
-
     #[inline]
     pub(in crate::afxdp) fn owns_configured_ip(&self, ip: IpAddr) -> bool {
         match ip {

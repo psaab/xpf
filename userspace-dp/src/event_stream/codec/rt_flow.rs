@@ -176,7 +176,7 @@ impl EventFrame {
     /// the configuration generation paired with the RE-RESOLVED policy ID. The
     /// Go reader refuses to resolve a marked policy ID through another generation's
     /// name map while preserving the numeric ID.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn encode_session_close_rt_flow(
         seq: u64,
         addr_family: u8,
@@ -412,7 +412,7 @@ impl EventFrame {
     /// with no entry in hand) stays 0 and keeps the Go-side `time.Now()`
     /// fallback, so a create record is no longer stamped at socket-drain time
     /// when the admission instant IS known.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn encode_session_create_rt_flow(
         seq: u64,
         addr_family: u8,

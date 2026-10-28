@@ -73,27 +73,29 @@ const (
 // gateLeafCompared reports whether the differential got at least two usable
 // spelling verdicts for this leaf under ANY value pair — the same condition
 // TestSchemaSpellingDifferentialGate uses to count a leaf as compared.
+// gateLeafCompared shares the differential's comparison set via
+// gateComparisonSpellings (#17191) and the memoised spellingVerdicts:
+// before #17191 it re-implemented the scalar/multi set selection here
+// and recomputed the verdict matrix per leaf and value pair. The
+// "compared" condition itself (>= 2 usable keep/drop verdicts under
+// ANY value pair) is unchanged.
 func gateLeafCompared(g gateLeaf) bool {
+	cmpSet := gateComparisonSpellings(g)
 	for _, vp := range gateValuePairsForLeaf(g) {
 		state := spellingVerdicts(g, vp.v1, vp.v2)
-		cmpSet := gateSpellingsScalar
-		if g.multi {
-			cmpSet = gateSpellingsMulti
-		}
 		usable := 0
 		for _, name := range cmpSet {
-			// A MISSING key is not a verdict. spellingVerdicts populates its map
-			// by ranging gateSpellingsMulti, while a scalar leaf compares over
-			// gateSpellingsScalar; the two are consistent today but nothing
-			// enforces it, and `state[name]` for an unpopulated spelling yields
-			// "" — which matches none of the discard cases and would be counted
-			// as a usable verdict. Measured: removing two entries from
-			// gateSpellingsMulti made coverage "rise" 619 -> 1034, because every
-			// scalar leaf then scored two phantom verdicts. A missing verdict
-			// reading as a passing one is the same failure shape this whole file
-			// exists to close, so it is rejected explicitly rather than by
-			// convention. TestGateSpellingSetsAreConsistent_7484 guards the
-			// invariant itself.
+			// A MISSING key is not a verdict. Before #17191 nothing
+			// enforced that the comparison set named only spellings
+			// spellingVerdicts populates: `state[name]` for an
+			// unpopulated spelling yields "", which matches none of
+			// the discard cases and would be counted as a usable
+			// verdict. Measured then: removing two entries from the
+			// differential's list made coverage "rise" 619 -> 1034,
+			// because every scalar leaf scored two phantom verdicts.
+			// Both now derive from the one gateSpellingForms table,
+			// and TestGateSpellingSetsAreConsistent_7484 still guards
+			// the invariant explicitly.
 			switch state[name] {
 			case "keep", "drop":
 				usable++
@@ -872,26 +874,40 @@ func TestSchemaSpellingGateCoverageIsGated_7484(t *testing.T) {
 
 // TestGateSpellingSetsAreConsistent_7484 pins the invariant the helper above
 // defends against: every spelling a comparison set names must actually be
-// produced by spellingVerdicts, which builds its map by ranging
-// gateSpellingsMulti. If someone edits one list and not the other, the
-// differential silently starts scoring phantom verdicts instead of failing.
+// produced by spellingVerdicts. Both now derive from the one
+// gateSpellingForms table (#17191), and this test keeps the invariant
+// explicit: if a row loses its verdict author, the differential would
+// silently start scoring phantom verdicts instead of failing.
 func TestGateSpellingSetsAreConsistent_7484(t *testing.T) {
 	produced := map[string]bool{}
-	for _, n := range gateSpellingsMulti {
-		produced[n] = true
+	for _, f := range gateSpellingForms() {
+		if f.slotEscapeOnly {
+			continue
+		}
+		if f.verdict == nil {
+			t.Errorf("spelling %q is in the differential's set but has no verdict author; "+
+				"spellingVerdicts never populates it and every leaf would score a PHANTOM "+
+				"verdict: state[%q] is \"\", which is neither err/unstable/inert nor a real keep/drop.", f.name, f.name)
+			continue
+		}
+		produced[f.name] = true
 	}
-	for _, n := range gateSpellingsScalar {
+	scalar := gateLeaf{multi: false}
+	multi := gateLeaf{multi: true}
+	for _, n := range gateComparisonSpellings(scalar) {
 		if !produced[n] {
-			t.Errorf("gateSpellingsScalar names %q, which spellingVerdicts never populates "+
-				"(it ranges gateSpellingsMulti). Every leaf comparing over that set would "+
-				"score a PHANTOM verdict for it: state[%q] is \"\", which is neither "+
-				"err/unstable/inert nor a real keep/drop.", n, n)
+			t.Errorf("scalar comparison set names %q, which spellingVerdicts never populates", n)
+		}
+	}
+	for _, n := range gateComparisonSpellings(multi) {
+		if !produced[n] {
+			t.Errorf("multi comparison set names %q, which spellingVerdicts never populates", n)
 		}
 	}
 	// The differential must have something to compare, in both sets.
-	if len(gateSpellingsScalar) < 2 || len(gateSpellingsMulti) < 2 {
+	if len(gateComparisonSpellings(scalar)) < 2 || len(gateComparisonSpellings(multi)) < 2 {
 		t.Errorf("a differential needs at least two spellings per set; got scalar=%d multi=%d",
-			len(gateSpellingsScalar), len(gateSpellingsMulti))
+			len(gateComparisonSpellings(scalar)), len(gateComparisonSpellings(multi)))
 	}
 }
 

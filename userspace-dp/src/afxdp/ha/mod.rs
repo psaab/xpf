@@ -18,7 +18,7 @@ pub use session_import::{
     SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX,
     SYNCED_IMPORT_REFUSED_PREFIX,
 };
-pub(crate) use session_import::SyncedDeleteOutcome;
+pub(crate) use session_import::{SyncedDeleteMode, SyncedDeleteOutcome};
 pub use self::session_domain::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 mod tunnel_purge;
 
