@@ -233,6 +233,9 @@ default RETH ownership/failover path.
   different concern — but both share `m.watcherStop` cancellation.
 - `resign_barrier.go` — resign acknowledgement barrier (#6177)
   (`ResignBarrier`, `newResignBarrier`, `ErrStaleVIPOnBackup`).
+- `test_seams.go` — cross-package #17052 RETH announce-mode test seam:
+  swaps GARP/NA/probe senders and drives the real reserved-mode sender
+  through collected instances.
 - `vrrp.go` — `Instance` config type plus `CollectInstances` /
   `CollectRethInstances` config extraction.
 
@@ -609,16 +612,17 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   cluster-authoritative Secondary→Primary promotion) bypasses the gate
   unchanged; the gate governs only the shortcut and never prevents the normal
   master-down timer from promoting this legacy VRRP instance.
-- Stale preempt-token drain (#16766): a `preemptNowCh` kick is a
-  BACKUP-tenure one-shot. `triggerPreemptNow` posts nothing while the
-  instance is MASTER (state check under `vi.mu`, serialized against
-  `setState`), `becomeMaster` drains any queued kick and clears
-  `forcePreemptOnce` on every MASTER entry, and the `stepMaster`
-  resign edge drains again — so a token posted while MASTER (sync-hold
-  release racing a master-down promotion, or a `ForceRGMaster` raced
-  past its non-MASTER filter) cannot survive a forced resignation and
-  re-promote the just-resigned node at priority 0 in its first BACKUP
-  iteration.
+- Stale preempt-token/force drain (#16766/#17827): a `preemptNowCh`
+  kick is a BACKUP-tenure one-shot. `triggerPreemptNow` posts nothing
+  while the instance is MASTER (the state check and non-blocking enqueue
+  share one `vi.mu` write-lock critical section, serialized against
+  `setState`). `ForceRGMaster` likewise checks the state, sets
+  `forcePreemptOnce`, and enqueues its kick under one `vi.mu` write lock.
+  A force ordered before MASTER entry is invalidated by the entry drain;
+  a force observing MASTER posts nothing. `becomeMaster` clears
+  `forcePreemptOnce` on entry, and the `stepMaster` resign edge drains
+  again, so a stale kick cannot survive resignation and re-promote the
+  node at priority 0 in its first BACKUP iteration.
 
 ## Preempt hold-time (#2850)
 
