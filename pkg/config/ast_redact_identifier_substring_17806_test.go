@@ -18,10 +18,11 @@ import (
 // The positional fix: the substring classifier may fire only where the
 // token occupies a KEYWORD position (it resolves as the schema child /
 // statement keyword at that point in the walk, or the path has left the
-// modelled grammar at a keyword position and the token names an
-// unmodelled leaf). Identifier/value tokens never trigger masking by
-// substring. All nine #16731 credential rows must still mask: in those
-// rows the credential token is a keyword-position leaf name.
+// modelled grammar — the open world — where a credential-shaped token
+// is not a value slot and stays fail-closed, #16731). Identifier/value
+// tokens never trigger masking by substring. All nine #16731 credential
+// rows must still mask: in those rows the credential token is a
+// keyword-position leaf name.
 
 var nonSecretIdentifierRows17806 = []struct {
 	name  string
@@ -151,14 +152,11 @@ func TestCredentialUnderSubstringIdentifierStillMasked17806(t *testing.T) {
 // the same token fires in keyword position and does not fire in
 // identifier/value position, and the #16731 rows keep masking.
 func TestCredentialShapeKeywordPosition17806(t *testing.T) {
-	// Identifier position: no masking at all.
+	// Identifier position (schema-modelled paths): no masking at all.
 	for _, fp := range [][]string{
 		{"system", "login", "user", "password-admin", "class", "read-only"},
 		{"system", "login", "user", "password", "class", "super-user"},
 		{"system", "login", "user", "secret", "class", "operator"},
-		{"unmodelled", "password-admin", "class", "read-only"},
-		{"unmodelled", "secret-agent", "class", "operator"},
-		{"unmodelled", "password", "class", "read-only"},
 		{"system", "description", "secret-rotation"},
 	} {
 		if got := secretIndices(fp); len(got) != 0 {
@@ -175,6 +173,38 @@ func TestCredentialShapeKeywordPosition17806(t *testing.T) {
 		got := secretIndices(fp)
 		if len(got) == 0 || got[len(got)-1] != len(fp)-1 {
 			t.Errorf("secretIndices(%v) = %v, want trailing value masked", fp, got)
+		}
+	}
+}
+
+// TestOpenWorldCredentialShapeStaysFailClosed17806 pins the #18384
+// review fold: a credential-shaped leaf outside the modelled grammar
+// must mask (fail-closed, #16731), while an identifier-shaped token
+// there keeps trailing tokens visible.
+func TestOpenWorldCredentialShapeStaysFailClosed17806(t *testing.T) {
+	for _, fp := range [][]string{
+		{"unmodelled-thing", "new-password", "LEAK17806-OPEN"},
+		{"unmodelled-thing", "wifi-password", "LEAK17806-OPEN"},
+		{"unmodelled-thing", "nested", "bind-secret", "LEAK17806-OPEN"},
+		{"interfaces", "pp0", "unit", "0", "ppp-options", "chap", "password", "LEAK17806-OPEN"},
+		{"services", "foo", "authentication", "auth-token", "LEAK17806-OPEN"},
+	} {
+		got := secretIndices(fp)
+		if len(got) == 0 || got[len(got)-1] != len(fp)-1 {
+			t.Errorf("secretIndices(%v) = %v, want open-world credential value masked", fp, got)
+		}
+	}
+	// A bare unmodelled root is fail-closed even for identifier-shaped
+	// tokens: position alone cannot distinguish an instance name from a
+	// credential keyword there, so #16731's substring masking applies
+	// (this is the pre-#17806 open-world behavior, kept deliberately).
+	for _, fp := range [][]string{
+		{"unmodelled", "password-admin", "class", "read-only"},
+		{"unmodelled", "secret-agent", "class", "operator"},
+	} {
+		got := secretIndices(fp)
+		if len(got) == 0 || got[len(got)-1] != len(fp)-1 {
+			t.Errorf("secretIndices(%v) = %v, want fail-closed masking (open-world bare root)", fp, got)
 		}
 	}
 }

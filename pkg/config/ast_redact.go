@@ -62,10 +62,11 @@ import (
 //	                          to `auth-token` / `community-name`, mask
 //	                          every trailing token. Schema arguments and
 //	                          wildcard instance names never arm this
-//	                          classifier (#17806). The existing unmodelled
-//	                          credential spellings remain explicitly
-//	                          recognized; arbitrary open-world values do
-//	                          not trigger by substring. Valued `*-key` is
+//	                          classifier (#17806). Open-world tokens (the
+//	                          path left the modelled grammar, so they are
+//	                          not in a value slot) stay fail-closed: an
+//	                          unmodelled *password*/*secret* leaf masks
+//	                          (#18384 review fold). Valued `*-key` is
 //	                          deliberately NOT shape-masked:
 //	                          trusted-key/tsig-key/aws-access-key are
 //	                          public identifiers and GRE/chassis `key`
@@ -978,33 +979,12 @@ type credentialShapePositionWalker17806 struct {
 	skipUntil int
 }
 
-func isKnownOpenWorldCredentialKeyword16731(fp []string, index int, k string) bool {
-	if index < 0 || index >= len(fp) {
-		return false
-	}
-	switch k {
-	case "default-chap-secret":
-		return index >= 2 && fp[index-2] == "ppp-options" && fp[index-1] == "chap"
-	case "local-password":
-		return index >= 2 && fp[index-2] == "ppp-options" && fp[index-1] == "pap"
-	case "auth-token":
-		return index > 0 && fp[index-1] == "authentication" &&
-			containsAnyOf(fp[:index], "security-intelligence")
-	case "community-name":
-		return index >= 2 && fp[index-2] == "snmp-community" &&
-			containsAnyOf(fp[:index], "snmp") && containsAnyOf(fp[:index], "v3")
-	case "password":
-		return index > 0 && fp[index-1] == "authentication" &&
-			containsAnyOf(fp[:index], "dhcp-local-server", "dhcpv6-local-server", "dhcp-relay")
-	}
-	return false
-}
 
 // position reports whether fp[index] is a schema child keyword or a value/
 // identifier slot. The remaining false/false case is an open-world token.
-func (w *credentialShapePositionWalker17806) position(fp []string, index int) (schemaKeyword, valuePosition bool) {
+func (w *credentialShapePositionWalker17806) position(fp []string, index int) (schemaKeyword, valuePosition, positionKnown bool) {
 	if index < w.skipUntil {
-		return false, true
+		return false, true, true
 	}
 	if index == 0 {
 		switch fp[index] {
@@ -1012,11 +992,11 @@ func (w *credentialShapePositionWalker17806) position(fp []string, index int) (s
 			"rename", "copy", "replace", "annotate", "protect",
 			"unprotect":
 			w.skipUntil = index + 1
-			return false, true
+			return false, true, true
 		}
 	}
 	if w.schema == nil {
-		return false, false
+		return false, false, false
 	}
 	child, ok := w.schema.children[fp[index]]
 	if !ok {
@@ -1025,28 +1005,32 @@ func (w *credentialShapePositionWalker17806) position(fp []string, index int) (s
 			// instance's schema for the next token.
 			w.schema = w.schema.wildcard
 			w.skipUntil = index + 1
-			return false, true
+			return false, true, true
 		}
 		// Open-world token: the path has left the known grammar.
 		w.schema = nil
-		return false, false
+		return false, false, false
 	}
 	consumed, next := consumeNodeKeys(fp[index:], child)
 	w.schema = next
 	w.skipUntil = index + consumed
-	return true, false
+	return true, false, true
 }
 
 func secretIndices(fp []string) []int {
 	var out []int
 	positionWalker := credentialShapePositionWalker17806{schema: credentialShapeSchemaRoot17806}
 	for i, k := range fp {
-		schemaKeyword, valuePosition := positionWalker.position(fp, i)
+		schemaKeyword, valuePosition, positionKnown := positionWalker.position(fp, i)
 		// The broad shape classifier applies only to schema keywords.
-		// Existing unmodelled credential leaves stay recognized by their
-		// exact names; unknown open-world values never match by substring.
+		// In the open world (path left the modelled grammar) a
+		// credential-shaped token is not a value position, so it
+		// stays fail-closed (#16731): an unmodelled *password*/
+		// *secret* leaf masks its value rather than leaking it
+		// (#18384 review fold; the five recognizers remain as
+		// documentation of modelled open-world leaves, now subsumed).
 		if isCredentialShapedKeyword16731(k) && !valuePosition &&
-			(schemaKeyword || isKnownOpenWorldCredentialKeyword16731(fp, i, k)) {
+			(schemaKeyword || !positionKnown) {
 			for j := i + 1; j < len(fp); j++ {
 				out = append(out, j)
 			}
