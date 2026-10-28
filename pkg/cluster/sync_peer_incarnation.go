@@ -83,17 +83,14 @@ type peerIncarnationState struct {
 	// (#9653/#9915 F-118). Every retirement zeroes it; the boot-ID switch
 	// then re-seeds it from the kept connection's proven offset.
 	peerClockOffset atomic.Int64
-	// lastSentConfigAckCapable16756 records, atomically with
-	// lastSentConfigGen, whether the peer incarnation that was current
-	// when the newest generation was sent advertised config-apply-ACK
-	// support (#16756). It lets PeerConfigStale charge a missing ACK
-	// only to a peer that promised one.
-	lastSentConfigAckCapable16756 atomic.Bool
+	// This remains on SessionSync instead: its generation and send-time
+	// capability form one coherent stale-gate debt that survives a peer
+	// incarnation retirement until the successor applies it or an explicit
+	// legacy advertisement selects the legacy fallback.
 	// peerConfigNackedGen16756 is the generation of the newest
 	// current-send NACK (#16756 legacy fallback), or 0. A NACK whose
-	// generation is behind lastSentConfigGen is a straggler and is
-	// ignored by the fallback exactly as handleConfigApplyNack ignores
-	// it for the re-push marker.
+	// generation is behind lastSentConfigDebt16756.generation is a straggler
+	// and is ignored by both the re-push marker and the legacy fallback.
 	peerConfigNackedGen16756 atomic.Uint64
 	// deleteSuppressionWarned latches the #9714 F5 operator warning so a
 	// path that can run thousands of times a second logs the episode

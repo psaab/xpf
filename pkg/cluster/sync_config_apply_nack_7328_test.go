@@ -76,10 +76,11 @@ func TestConfigApplyNackFiresOnlyOnFailure7328(t *testing.T) {
 // by a newer one. Acting on it would re-push a config the peer may already have
 // applied, which is a spurious push on the shared control path.
 //
-// FAIL-ON-REVERT: delete the `if sent := s.lastSentConfigGen.Load(); nackedGen
-// != sent` guard from the syncMsgConfigApplyNack arm and the stale-nack leg
-// reds. Drop the `s.lastSentConfigGen.Store(gen)` from QueueConfig and the
-// matching leg reds, because the recorded generation stays 0.
+// FAIL-ON-REVERT: delete the generation comparison against
+// `configApplyDebtSnapshot16756().generation` in the syncMsgConfigApplyNack
+// arm and the stale-nack leg reds. Drop the `recordLastSentConfigGen` call
+// from QueueConfig and the matching leg reds, because the recorded generation
+// stays 0.
 func TestConfigApplyNackAcceptedOnlyForLastSentGen7328(t *testing.T) {
 	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
 
@@ -87,7 +88,7 @@ func TestConfigApplyNackAcceptedOnlyForLastSentGen7328(t *testing.T) {
 	s.OnPeerConfigApplyFailed = func(gen uint64) { fired = append(fired, gen) }
 
 	// Model QueueConfig having put generation 42 on the wire.
-	s.lastSentConfigGen.Store(42)
+	s.recordLastSentConfigGen(42)
 
 	nack := func(gen uint64) []byte {
 		var b [8]byte

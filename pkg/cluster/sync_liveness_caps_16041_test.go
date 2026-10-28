@@ -790,7 +790,7 @@ func TestDownstreamRejectedFramesDoNotRefreshLiveness16041(t *testing.T) {
 		if ss.handleMessage(nil, syncMsgConfigApplyAck, gen8[:]) {
 			t.Fatal("config ack for an unsent generation must be rejected")
 		}
-		ss.lastSentConfigGen.Store(5)
+		ss.recordLastSentConfigGen(5)
 		if !ss.handleMessage(nil, syncMsgConfigApplyAck, gen8[:]) {
 			t.Fatal("CONTROL: config ack for the last-sent generation must be accepted")
 		}

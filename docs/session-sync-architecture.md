@@ -1084,9 +1084,9 @@ config state (`HeartbeatPacket` is node/cluster id, per-RG group state,
 interface monitors, software and protocol version), and `configSyncFailing`
 never leaves the node it is raised on. So `configApplyLoop`'s failure branch
 sends `syncMsgConfigApplyNack` carrying the generation that did not take effect;
-the sender accepts it only when it names `lastSentConfigGen` — the generation it
-most recently put on the wire — and invalidates the push marker, so the next
-ordinary reconcile tick re-sends.
+the sender accepts it only when it names the generation in the coherent
+`lastSentConfigDebt16756` snapshot — the newest generation put on the wire —
+and invalidates the push marker, so the next ordinary reconcile tick re-sends.
 
 #6778 added a SECOND sender of that frame: `handleConfigPayload`'s queue-full
 drop. When `configApplyCh` is full the non-blocking enqueue discards the

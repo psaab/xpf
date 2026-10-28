@@ -24,7 +24,7 @@ func (s *SessionSync) handleConfigApplyNack(conn net.Conn, payload []byte) bool 
 	// re-arm the push marker. An older generation is a straggler for a
 	// push already superseded by a newer one; acting on it would re-push
 	// a config the peer may already have applied.
-	if sent := s.lastSentConfigGen.Load(); nackedGen != sent {
+	if sent := s.configApplyDebtSnapshot16756().generation; nackedGen != sent {
 		slog.Debug("cluster sync: ignoring stale config-apply nack",
 			"nacked_gen", nackedGen, "last_sent_gen", sent)
 		return false
@@ -59,7 +59,7 @@ func (s *SessionSync) handleConfigApplyAck(conn net.Conn, payload []byte) bool {
 		s.mu.Unlock()
 		return false
 	}
-	lastSent := s.lastSentConfigGen.Load()
+	lastSent := s.configApplyDebtSnapshot16756().generation
 	if lastSent == 0 || appliedGen > lastSent {
 		s.mu.Unlock()
 		slog.Debug("cluster sync: ignoring config-apply ack for an unsent generation",

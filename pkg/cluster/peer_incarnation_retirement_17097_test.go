@@ -314,7 +314,7 @@ func TestIncarnationScopedFieldsLiveInPeerIncarnationState17097(t *testing.T) {
 	names := []string{
 		"peerCapabilityFlags", "peerCapabilityFlags2", "peerSessionSyncWire",
 		"peerHeartbeatAckEver", "peerClockOffset",
-		"lastSentConfigAckCapable16756", "peerConfigNackedGen16756",
+		"peerConfigNackedGen16756",
 		"deleteSuppressionWarned", "purgeRetirementSuppressionWarned",
 		"scopedPolicySuppressionWarned", "installTableSuppressionWarned",
 		"ipsecDiscriminatorSuppressionWarned",

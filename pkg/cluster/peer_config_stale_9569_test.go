@@ -115,8 +115,8 @@ func TestPeerConfigStaleRequiresPositiveApplyAck11070(t *testing.T) {
 	// fixture is a legacy peer (no advertisement), which the gate now
 	// judges by NACK-only semantics and this test's premise — silence
 	// is stale — would not hold.
+	s.peerSnaps.peerSnapshotProtocol.Store(8)
 	s.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2ConfigApplyAck))
-	s.peerIncarnationState().lastSentConfigAckCapable16756.Store(true)
 	nack := func(typ uint8, gen uint64) {
 		var p [8]byte
 		binary.LittleEndian.PutUint64(p[:], gen)
@@ -126,13 +126,13 @@ func TestPeerConfigStaleRequiresPositiveApplyAck11070(t *testing.T) {
 	if stale, _ := s.PeerConfigStale(); stale {
 		t.Fatal("a SessionSync that sent nothing reports a stale peer")
 	}
-	s.lastSentConfigGen.Store(7)
+	s.recordLastSentConfigGen(7)
 	nack(syncMsgConfigApplyNack, 7)
 	if stale, reason := s.PeerConfigStale(); !stale || reason == "" {
 		t.Fatalf("the newest sent generation without an apply ACK must be stale: stale=%v reason=%q", stale, reason)
 	}
 
-	s.lastSentConfigGen.Store(8)
+	s.recordLastSentConfigGen(8)
 	if stale, _ := s.PeerConfigStale(); !stale {
 		t.Fatal("a newer send cleared stale state before the standby applied it")
 	}

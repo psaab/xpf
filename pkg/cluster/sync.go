@@ -726,8 +726,8 @@ type SyncStatsSnapshot struct {
 	// #6778 receive-edge loss, and #7328's nack counter alongside it: the
 	// queue-full drop is recovered BY a nack, so a drop that is climbing while
 	// nacks are not tells the operator the recovery path itself is broken (a
-	// pre-#7328 peer, or a nack that never matched lastSentConfigGen). Both are
-	// rendered only when nonzero.
+	// pre-#7328 peer, or a nack that never matched the current config-debt
+	// generation). Both are rendered only when nonzero.
 	ConfigsQueueFullDropped              uint64
 	ConfigApplyNacksReceived             uint64
 	IPsecSASent                          uint64
@@ -1162,8 +1162,8 @@ type SessionSync struct {
 	// OnPeerConfigApplyFailed reports that the PEER refused or failed to apply
 	// the config generation this node most recently sent (#7328). It fires on
 	// the sender when a syncMsgConfigApplyNack arrives whose generation matches
-	// lastSentConfigGen — a nack for any other generation is a straggler for a
-	// push this node has already superseded and is ignored.
+	// `lastSentConfigDebt16756.generation` — a nack for any other generation
+	// is a straggler for a push this node has already superseded and is ignored.
 	//
 	// The daemon wires this to invalidate the #5863 (epoch x generation) push
 	// marker, which is the ONLY thing standing between the standby and the
@@ -1725,13 +1725,14 @@ type SessionSync struct {
 	// whose monotonic counter restarts lower — is accepted instead of refused
 	// as stale (the #2198 F2 inverse-of-stale-RETAIN reasoning, applied to
 	// config).
-	// #7328: the config generation this node most recently PUT ON THE WIRE
-	// (QueueConfig). Distinct from configGenCounter, which is the next value to
-	// draw: a nack naming an older generation is a straggler for a push already
-	// superseded and must not re-arm the marker for the current one.
-	lastSentConfigGen atomic.Uint64
+	// #17816: generation and send-time ACK capability are one coherent
+	// config-apply debt. This SessionSync-lifetime state survives peer
+	// incarnation retirement: disconnect alone does not prove the successor
+	// applied a generation already sent.
+	configApplyDebtMu       sync.RWMutex
+	lastSentConfigDebt16756 configApplyDebt16756
 	// Highest config generation the peer positively acknowledged as applied.
-	// PeerConfigStale compares this with lastSentConfigGen.
+	// PeerConfigStale compares this with lastSentConfigDebt16756.generation.
 	peerAppliedConfigGen atomic.Uint64
 
 	configGenCounter     atomic.Uint64
@@ -1959,6 +1960,9 @@ type SessionSync struct {
 	// testBeforePeerSnapshotConfigWrite changes the learned protocol after
 	// queue preparation but immediately before the final guarded socket write.
 	testBeforePeerSnapshotConfigWrite func()
+	// testAfterLastSentConfigGenPublish parks after the complete generation /
+	// capability debt snapshot is published. Nil in production.
+	testAfterLastSentConfigGenPublish func()
 	// testBeforeScopedJournalTake runs in flushScopedDeleteJournal after
 	// the capability re-check and before the journal take, then nils
 	// itself (testBeforeQueuedWrite shape). Test-only; pins the
