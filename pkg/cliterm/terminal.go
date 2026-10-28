@@ -152,7 +152,14 @@ func ConfigureReadlineHistory(cfg *readline.Config) *readline.Config {
 // (oldest first), skipping blank lines exactly as readline's own loader does.
 // A missing file is an empty seed, not an error: first-run has no history.
 // The seed filter replays config-mode navigation and retains all cursor
-// interpretations made possible by an unrecorded EOF before re-entry.
+// interpretations made possible by an unrecorded EOF before re-entry. Because
+// both CLI processes append to the same per-home file without session markers,
+// replay cannot prove which session cursor governed a line. Seed replay
+// therefore also suppresses mutations and edit commands carrying a value
+// after a keyword that can be context-gated as secret, regardless of cursor.
+// deliberately favors secret safety over retaining some benign generic
+// identifiers in recalled history; live-session recording still uses its
+// known cursor and is unchanged.
 func ReadHistorySeed(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -189,6 +196,11 @@ func ReadHistorySeed(path string) ([]string, error) {
 				break
 			}
 		}
+		// In particular, never trust the linear cursor for context-gated
+		// values: another CLI process may have contributed the navigation.
+		if !sensitive && hasPotentialSeedContextSecretLine(line) {
+			sensitive = true
+		}
 		if !sensitive {
 			filtered = append(filtered, line)
 		}
@@ -208,6 +220,61 @@ func ReadHistorySeed(path string) ([]string, error) {
 	}
 	return filtered, nil
 }
+var historySeedContextSecretKeywords = func() map[string]struct{} {
+	keywords := config.SecretContextKeywords16794()
+	out := make(map[string]struct{}, len(keywords))
+	for _, keyword := range keywords {
+		out[keyword] = struct{}{}
+	}
+	return out
+}()
+
+// hasPotentialSeedContextSecretLine is intentionally stricter than the
+// live recorder. A shared history seed has no session boundary, so even a
+// cursor that linear replay appears to establish cannot rule out a different
+// session's context. Drop a mutation or edit command if any configured
+// secret-context keyword is followed by a value; the exported keyword set
+// stays sourced from config's secret-resolution SSOT. Generic identifiers
+// (for example a GRE `key` or a policy-options `community`) may be omitted,
+// which is safe because seeded history is only a convenience and is never
+// used to execute configuration.
+func hasPotentialSeedContextSecretLine(line string) bool {
+	// Dispatch strips supported unquoted output-pipe stages before it
+	// interprets a command; judge the underlying command the same way.
+	for {
+		command, _, _, ok := SplitPipe(line)
+		if !ok {
+			break
+		}
+		line = command
+	}
+	tokens, _, lexOK := config.ParseConfigMutationLine(line)
+	if !lexOK || len(tokens) == 0 {
+		return false
+	}
+	command := -1
+	if tokens[0] == "edit" || config.IsConfigMutationVerb(tokens[0]) {
+		command = 0
+	} else if tokens[0] == "top" || tokens[0] == "up" {
+		// top/up prefixes carry their inner command after the target.
+		for i := 1; i < len(tokens); i++ {
+			if tokens[i] == "edit" || config.IsConfigMutationVerb(tokens[i]) {
+				command = i
+				break
+			}
+		}
+	}
+	if command < 0 {
+		return false
+	}
+	for i := command + 1; i+1 < len(tokens); i++ {
+		if _, contextKeyword := historySeedContextSecretKeywords[tokens[i]]; contextKeyword {
+			return true
+		}
+	}
+	return false
+}
+
 
 type historySeedCursor struct {
 	editPath   []string
