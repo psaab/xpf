@@ -18,6 +18,7 @@ pub(crate) use cache_sensitive::{
     interface_input_filter_has_dscp_match, interface_input_filter_has_per_packet_l4_match, interface_output_filter_has_dscp_match,
     interface_output_filter_has_per_packet_l4_match, lo0_filter_families_changed,
 };
+
 #[cfg(test)]
 pub(crate) use cache_sensitive::interface_input_filter_varies_per_packet;
 pub(crate) use eval::{

@@ -104,8 +104,7 @@ pub(crate) mod wg_uncovered_forward;
 pub use ha::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 pub(crate) use ha::{
     HelperMutationBegin, HelperMutationOutcome, SYNCED_DELETE_REFUSED_PREFIX,
-    SYNCED_IMPORT_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX, SyncedDeleteMode,
-    SyncedDeleteOutcome, SyncedImportOutcome,
+    SYNCED_IMPORT_REFUSED_PREFIX, SyncedDeleteMode, SyncedDeleteOutcome, SyncedImportOutcome,
 };
 // #7919: the per-session counter query's wait handle + reply row, used by the
 // control-socket handler's two-phase dispatch.
