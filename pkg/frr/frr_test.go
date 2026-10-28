@@ -4698,19 +4698,24 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 		}
 	})
 
-	// Mixed term (#2103/#2105 F1/F6): a skipped /32 longer at index 0
-	// followed by a valid /24 longer at index 1. No strict containment
-	// exists, so #17824 preserves the historical seq 10 gap for the skip.
-	// The term still emits a match line.
-	t.Run("mixed_skipped_then_valid_keeps_seq_and_match", func(t *testing.T) {
+	// Mixed term (#2103/#2105 F1/F6, #17823): a valid empty /32 longer is
+	// retained as the more-specific boundary under the /24 permit. Its stop
+	// deny at seq 5 prevents the route Junos rejects at /32 from falling
+	// through to the broader /24; the /24 permit is resequenced to seq 10.
+	// This is a boundary stop, not a skipped index gap. The term still
+	// emits a match line.
+	t.Run("mixed_empty_longer_boundary_then_valid_keeps_seq_and_match", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "10.0.0.0/32", MatchType: "longer"},
 			&config.RouteFilter{Prefix: "10.0.0.0/24", MatchType: "longer"}))
 		if strings.Contains(got, "permit 10.0.0.0/32") {
-			t.Errorf("index-0 /32 longer must be skipped, got:\n%s", got)
+			t.Errorf("empty /32 longer must not render a permit, got:\n%s", got)
+		}
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 deny 10.0.0.0/32\n") {
+			t.Errorf("empty /32 longer must retain its seq-5 boundary stop, got:\n%s", got)
 		}
 		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 10 permit 10.0.0.0/24 ge 25 le 32\n") {
-			t.Errorf("surviving /24 longer must keep its historical seq 10, got:\n%s", got)
+			t.Errorf("broader /24 longer must follow the boundary at seq 10, got:\n%s", got)
 		}
 		if !strings.Contains(got, "match ip address prefix-list "+inlineName+"\n") {
 			t.Errorf("mixed term with a surviving entry must emit the match line, got:\n%s", got)
