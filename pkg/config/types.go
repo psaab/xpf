@@ -664,7 +664,7 @@ type Config struct {
 	// registry (including the trailing warning-only NAT potential-
 	// shadow appender) appear in Warnings only. Warnings remains the
 	// prose surface every existing consumer reads. Compile-time only;
-	// never serialized.
+	// never serialized or compared (fingerprintIgnore).
 	Diagnostics []Diagnostic `json:"-"`
 
 	// LenientNATTerminalActionRules records every NAT rule the TOLERANT path
