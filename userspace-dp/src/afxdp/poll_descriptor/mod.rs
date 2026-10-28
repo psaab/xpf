@@ -46,7 +46,7 @@ mod host_inbound_policy;
 mod nat64_icmp_error;
 mod nat_exception;
 pub(in crate::afxdp) use nat_exception::source_nat_decision_for_flow;
-mod noroute_adjudication;
+mod transit_policy;
 mod prerouting_dnat;
 mod prerouting_scope;
 
@@ -101,7 +101,10 @@ use host_inbound_policy::{
     junos_host_policy_eval, session_host_bound_policy_dst,
 };
 use nat64_icmp_error::try_translate_nat64_icmp_error;
-use noroute_adjudication::{noroute_policy_adjudication, noroute_policy_protocol};
+use transit_policy::{
+    admission_zone_override, nat64_dest_only_v4, noroute_policy_protocol,
+    post_translation_policy_dst, transit_policy_adjudication,
+};
 use rx_telemetry::record_rx_descriptor_telemetry;
 use session_admission::{
     AdmissionInput, TransitClassDrop, new_flow_session_limit_drop,
@@ -5244,23 +5247,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ingress_zone_override.or(ambiguous_zone);
                         let frag_authority_nat_scope_ifindex =
                             ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex);
-                        let ingress_zone_override = gate_fabric_zone_override_on_owner_rg(
+                        // #17031: the ONE admission rule (gate +
+                        // #15916 promotion) in transit_policy.
+                        let ingress_zone_override = admission_zone_override(
                             worker_ctx.forwarding,
                             worker_ctx.ha_state,
                             now_secs,
-                            ingress_zone_override.or_else(|| {
-                                // #15916: an ambiguous stamp's claimed
-                                // zone is promoted only by this same
-                                // owner-RG proof on the packet's own
-                                // resolution.
-                                promote_ambiguous_fabric_zone(
-                                    worker_ctx.forwarding,
-                                    worker_ctx.ha_state,
-                                    now_secs,
-                                    ambiguous_zone,
-                                    resolution,
-                                )
-                            }),
+                            ingress_zone_override,
+                            ambiguous_zone,
                             resolution,
                         );
                         // #14663 leg 3b: the fabric ingress scope is only
@@ -9657,21 +9651,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // session-miss gate above); otherwise the stamp is ignored
                     // and the fabric interface's own zone governs the transit
                     // policy (3) and host-inbound local-delivery (4) checks.
-                    let ingress_zone_override = gate_fabric_zone_override_on_owner_rg(
+                    let ingress_zone_override = admission_zone_override(
                         worker_ctx.forwarding,
                         worker_ctx.ha_state,
                         now_secs,
-                        ingress_zone_override.or_else(|| {
-                            // #15916: promote the ambiguous claimed
-                            // zone only on this packet's owner-RG proof.
-                            promote_ambiguous_fabric_zone(
-                                worker_ctx.forwarding,
-                                worker_ctx.ha_state,
-                                now_secs,
-                                ambiguous_zone,
-                                final_resolution,
-                            )
-                        }),
+                        ingress_zone_override,
+                        ambiguous_zone,
                         final_resolution,
                     );
                     // #14663 leg 3b: rejected fabric stamp must not steer BA.
@@ -10651,11 +10636,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         meta.ingress_vlan_id,
                     )
                     .unwrap_or(meta.ingress_ifindex as i32);
-                    let counter_override = gate_fabric_zone_override_on_owner_rg(
+                    // #17031: counters use the SAME admission rule as
+                    // the policy sites (previously raw-only: a promoted
+                    // flow was credited to the fabric zone).
+                    let counter_override = admission_zone_override(
                         worker_ctx.forwarding,
                         worker_ctx.ha_state,
                         now_secs,
                         ingress_zone_override,
+                        ambiguous_zone,
                         decision.resolution,
                     );
                     let (counter_from_zone, counter_to_zone) = zone_pair_ids_for_flow_with_override(
@@ -10901,6 +10890,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 &flow_cache_policy_counter,
                                 filter_match_extra,
                                 ingress_zone_override,
+                                ambiguous_zone,
                                 now_secs,
                                 admission_to_zone,
                                 apply_nat_on_fabric,
@@ -11208,13 +11198,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // gated stamp shadows the raw one so the NAT fences
                                 // and the deny seed below see the same zone the
                                 // policy judged. Pure function; see
-                                // `noroute_adjudication` and its cells.
-                                let adjudication = noroute_policy_adjudication(
+                                // `transit_policy` and its cells.
+                                let adjudication = transit_policy_adjudication(
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,
                                     now_secs,
                                     ingress_logical,
                                     ingress_zone_override,
+                                    ambiguous_zone,
                                     decision.resolution,
                                     decision.nat,
                                     flow.is_some(),
@@ -11466,21 +11457,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     ingress_zone_override.or(ambiguous_zone);
                                 let frag_authority_nat_scope_ifindex =
                                     ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex);
-                                let ingress_zone_override = gate_fabric_zone_override_on_owner_rg(
+                                let ingress_zone_override = admission_zone_override(
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,
                                     now_secs,
-                                    ingress_zone_override.or_else(|| {
-                                        // #15916: ambiguous-zone promotion
-                                        // on the decision's owner-RG proof.
-                                        promote_ambiguous_fabric_zone(
-                                            worker_ctx.forwarding,
-                                            worker_ctx.ha_state,
-                                            now_secs,
-                                            ambiguous_zone,
-                                            decision.resolution,
-                                        )
-                                    }),
+                                    ingress_zone_override,
+                                    ambiguous_zone,
                                     decision.resolution,
                                 );
                                 // #14663 leg 3b: rejected fabric stamp must not steer BA.
@@ -11533,26 +11515,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // (zero cold-start loss) is deferred to a follow-up —
                                 // the cross-family v6->v4 replay the cold-path lacks is
                                 // why this is fail-closed, not buffered.
+                                // #17031: dest-only re-classify via the
+                                // shared transit_policy helper (was a
+                                // line-for-line copy of the NoRoute one).
                                 let nat64_dst_v4 = flow.as_ref().and_then(|f| {
-                                    if decision.nat.rewrite_dst.is_some() {
-                                        return None;
-                                    }
-                                    match f.dst_ip {
-                                        IpAddr::V6(dst_v6) => {
-                                            match worker_ctx
-                                                .forwarding
-                                                .nat64
-                                                .classify_ipv6_dest(dst_v6)
-                                            {
-                                                crate::nat64::Nat64Match::MatchReady {
-                                                    dst_v4,
-                                                    ..
-                                                } => Some(dst_v4),
-                                                _ => None,
-                                            }
-                                        }
-                                        IpAddr::V4(_) => None,
-                                    }
+                                    nat64_dest_only_v4(
+                                        worker_ctx.forwarding,
+                                        &decision.nat,
+                                        f.dst_ip,
+                                    )
                                 });
                                 // #10267/#13974: preserve the complete admitted
                                 // policy result until the MissingNeighbor seed
@@ -11622,14 +11593,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     //     `decision.nat`.
                                     // Both halves fall back to the original dst/port
                                     // when no inbound destination translation applies.
-                                    let policy_dst_ip = match nat64_dst_v4 {
-                                        Some(dst_v4) => IpAddr::V4(dst_v4),
-                                        None => decision.nat.rewrite_dst.unwrap_or(flow.dst_ip),
-                                    };
-                                    let policy_dst_port = decision
-                                        .nat
-                                        .rewrite_dst_port
-                                        .unwrap_or(flow.forward_key.dst_port);
+                                    let (policy_dst_ip, policy_dst_port) =
+                                        post_translation_policy_dst(
+                                            nat64_dst_v4,
+                                            &decision.nat,
+                                            flow.dst_ip,
+                                            flow.forward_key.dst_port,
+                                        );
                                     // #3020: same ICMP type/code extraction as the
                                     // ForwardCandidate path so a denied/permitted
                                     // verdict for an icmp-type-constrained term
