@@ -8,26 +8,256 @@
 // the unit.
 //
 // This file pins the two acceptance guards:
-//  1. a source guard: exactly one tunnel property switch exists in
-//     the non-test package, compiler_interfaces.go holds none of it,
-//     and both compileInterfaces tunnel sites call the shared helper
-//     (so a future edit cannot re-fork the reader silently);
+//  1. an AST source guard: exactly one tunnel-property dispatch site
+//     exists over ALL non-test pkg/config .go files (switch cases plus
+//     if/else comparisons against the 10 tunnel leaf literals;
+//     const-case via map lookup is also caught — see
+//     tunnelDispatchSites17236), compiler_interfaces.go holds no
+//     dispatch, and both compileInterfaces tunnel sites call the
+//     shared helper (so a future edit cannot re-fork the reader
+//     silently, in any file or spelling);
 //  2. a parity table: every tunnel leaf compiles identically at
 //     interface and unit level in braced, packed and flat-set
 //     spellings, including the strict/lenient numeric outcomes.
 package config
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// TestTunnelPropertySwitchIsSingle17236 is the source guard for
-// #17236's acceptance: `grep -c 'case "keepalive-retry"'
-// pkg/config/compiler_interfaces.go` == 0 and exactly one tunnel
-// property switch exists in the package.
+// tunnelLeafNames17236 is the closed set of 10 tunnel property leaves
+// the single reader dispatches over (#17236).
+var tunnelLeafNames17236 = []string{
+	"source", "destination", "mode", "key", "ttl",
+	"keepalive", "keepalive-retry", "routing-instance",
+	"wireguard", "clear-dont-fragment-bit",
+}
+
+func tunnelLeafSet17236() map[string]bool {
+	m := make(map[string]bool, len(tunnelLeafNames17236))
+	for _, leaf := range tunnelLeafNames17236 {
+		m[leaf] = true
+	}
+	return m
+}
+
+// tunnelDispatchSite17236 is one dispatch site: a switch, an if/else
+// chain, or a map index whose leaves include >=2 tunnel leaves.
+type tunnelDispatchSite17236 struct {
+	file   string
+	line   int
+	kind   string // "switch", "if-chain" or "map-index"
+	leaves []string
+}
+
+func stringLit17236(e ast.Expr) (string, bool) {
+	bl, ok := e.(*ast.BasicLit)
+	if !ok || bl.Kind != token.STRING {
+		return "", false
+	}
+	s, err := strconv.Unquote(bl.Value)
+	if err != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// tunnelCondLeaves17236 collects tunnel-leaf literals compared with
+// == or != anywhere inside an if condition.
+func tunnelCondLeaves17236(cond ast.Expr, leaves map[string]bool, out map[string]bool) {
+	ast.Inspect(cond, func(n ast.Node) bool {
+		be, ok := n.(*ast.BinaryExpr)
+		if !ok || (be.Op != token.EQL && be.Op != token.NEQ) {
+			return true
+		}
+		for _, side := range []ast.Expr{be.X, be.Y} {
+			if s, ok := stringLit17236(side); ok && leaves[s] {
+				out[s] = true
+			}
+		}
+		return true
+	})
+}
+
+func sortedLeafKeys17236(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for leaf := range m {
+		out = append(out, leaf)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// tunnelDispatchSites17236 is an AST census over ALL non-test
+// pkg/config .go files counting dispatch over the 10 tunnel leaf
+// names. A dispatch site is:
+//
+//   - a switch whose case clauses name >=2 tunnel leaves,
+//   - an if/else chain (else-if continuations folded into the head)
+//     whose conditions compare against >=2 distinct tunnel leaves, or
+//   - a handler map literal (map[string]func... keyed by >=2 tunnel
+//     leaves — the const-case spelling; schema/lookup maps whose
+//     values are not funcs cannot dispatch and are excluded).
+//
+// Package-wide unrelated same-name switches exist (e.g. a system
+// switch over "key"/"routing-instance" in a non-tunnel scope); they
+// are DISCOVERED by this census and must be allow-listed explicitly
+// below with their scope, so any NEW multi-leaf dispatch — in any
+// file, spelled as switch, if/else chain or map lookup — fails
+// instead of evading a substring count. A single-leaf helper (e.g.
+// reading only "mode" to detect WireGuard) is not a property
+// dispatch: it cannot re-implement the 10-leaf reader.
+func tunnelDispatchSites17236(t *testing.T) []tunnelDispatchSite17236 {
+	t.Helper()
+	leaves := tunnelLeafSet17236()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("ReadDir(.): %v", err)
+	}
+	var files []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		files = append(files, name)
+	}
+	sort.Strings(files)
+	if len(files) < 100 {
+		t.Fatalf("census: only %d non-test .go files in pkg/config; the package-wide walk is not reaching the package and a green would measure nothing", len(files))
+	}
+	fset := token.NewFileSet()
+	var sites []tunnelDispatchSite17236
+	parsed := 0
+	for _, name := range files {
+		f, perr := parser.ParseFile(fset, name, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", name, perr)
+		}
+		parsed++
+		lineOf := func(p token.Pos) int { return fset.Position(p).Line }
+		// else-if continuations are folded into their chain head.
+		elseIf := map[*ast.IfStmt]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if ifs, ok := n.(*ast.IfStmt); ok {
+				if ei, ok := ifs.Else.(*ast.IfStmt); ok {
+					elseIf[ei] = true
+				}
+			}
+			return true
+		})
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.SwitchStmt:
+				found := map[string]bool{}
+				for _, stmt := range node.Body.List {
+					cc, ok := stmt.(*ast.CaseClause)
+					if !ok {
+						continue
+					}
+					for _, e := range cc.List {
+						if s, ok := stringLit17236(e); ok && leaves[s] {
+							found[s] = true
+						}
+					}
+				}
+				if len(found) >= 2 {
+					sites = append(sites, tunnelDispatchSite17236{name, lineOf(node.Pos()), "switch", sortedLeafKeys17236(found)})
+				}
+			case *ast.TypeSwitchStmt:
+				found := map[string]bool{}
+				if node.Body != nil {
+					for _, stmt := range node.Body.List {
+						cc, ok := stmt.(*ast.CaseClause)
+						if !ok {
+							continue
+						}
+						for _, e := range cc.List {
+							if s, ok := stringLit17236(e); ok && leaves[s] {
+								found[s] = true
+							}
+						}
+					}
+				}
+				if len(found) >= 2 {
+					sites = append(sites, tunnelDispatchSite17236{name, lineOf(node.Pos()), "switch", sortedLeafKeys17236(found)})
+				}
+			case *ast.IfStmt:
+				if elseIf[node] {
+					return true
+				}
+				found := map[string]bool{}
+				for cur := node; cur != nil; {
+					tunnelCondLeaves17236(cur.Cond, leaves, found)
+					ei, ok := cur.Else.(*ast.IfStmt)
+					if !ok {
+						break
+					}
+					cur = ei
+				}
+				if len(found) >= 2 {
+					sites = append(sites, tunnelDispatchSite17236{name, lineOf(node.Pos()), "if-chain", sortedLeafKeys17236(found)})
+				}
+			}
+			return true
+		})
+		// Map-literal dispatch tables (const-case spelling): a map
+		// literal keyed by any tunnel leaf, whether indexed inline or
+		// bound to a var and indexed later.
+		ast.Inspect(f, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			mt, isMap := cl.Type.(*ast.MapType)
+			if !isMap {
+				return true
+			}
+			// Only a handler map can dispatch: its values are funcs.
+			// Schema/lookup maps in this package are keyed by leaf
+			// names by design (schema_*.go, natScopeKinds, ...) and
+			// never hold code, so they are not const-case readers.
+			if _, isFunc := mt.Value.(*ast.FuncType); !isFunc {
+				return true
+			}
+			found := map[string]bool{}
+			for _, elt := range cl.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if s, ok := stringLit17236(kv.Key); ok && leaves[s] {
+					found[s] = true
+				}
+			}
+			if len(found) >= 2 {
+				sites = append(sites, tunnelDispatchSite17236{name, lineOf(cl.Pos()), "map-index", sortedLeafKeys17236(found)})
+			}
+			return true
+		})
+	}
+	if parsed < 100 {
+		t.Fatalf("census: parsed only %d production files; not reaching pkg/config", parsed)
+	}
+	return sites
+}
+
+// TestTunnelPropertySwitchIsSingle17236 is the AST source guard for
+// #17236: exactly ONE tunnel-property dispatch site exists over all
+// non-test pkg/config .go files — applyTunnelProps17236's switch in
+// tunnel_flat_run_9156.go — and both compileInterfaces tunnel sites
+// call it. A second reader in a new file, or spelled as if/else or
+// map lookup, is a new dispatch site and fails. Also pins the
+// historical acceptance: no `case "keepalive-retry"` substring in
+// compiler_interfaces.go.
 func TestTunnelPropertySwitchIsSingle17236(t *testing.T) {
 	ci, err := os.ReadFile("compiler_interfaces.go")
 	if err != nil {
@@ -36,37 +266,112 @@ func TestTunnelPropertySwitchIsSingle17236(t *testing.T) {
 	if n := strings.Count(string(ci), `case "keepalive-retry"`); n != 0 {
 		t.Errorf("compiler_interfaces.go has %d `case \"keepalive-retry\"`, want 0 (tunnel switch must live only in applyTunnelProps17236)", n)
 	}
-	if n := strings.Count(string(ci), "applyTunnelProps17236("); n != 2 {
-		t.Errorf("compiler_interfaces.go calls applyTunnelProps17236 %d times, want 2 (interface + unit sites)", n)
+	// AST-count helper callsites: the two compileInterfaces tunnel
+	// sites, not every textual mention (docs/comments included).
+	helperCalls := 0
+	{
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, "compiler_interfaces.go", nil, 0)
+		if perr != nil {
+			t.Fatalf("parse compiler_interfaces.go: %v", perr)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "applyTunnelProps17236" {
+				helperCalls++
+			}
+			return true
+		})
+	}
+	if helperCalls != 2 {
+		t.Errorf("compiler_interfaces.go calls applyTunnelProps17236 %d times, want 2 (interface + unit sites)", helperCalls)
 	}
 
-	tf, err := os.ReadFile("tunnel_flat_run_9156.go")
-	if err != nil {
-		t.Fatalf("read tunnel_flat_run_9156.go: %v", err)
+	sites := tunnelDispatchSites17236(t)
+	// Known non-tunnel multi-leaf dispatches discovered by the
+	// census. Each entry scopes WHY the site is not a tunnel
+	// property reader; any site not listed here (and not the single
+	// allowed helper switch) fails.
+	allowed := []tunnelDispatchSite17236{
+		// compiler_system.go: system login/authentication switch over
+		// node names in a system scope (keys like "key" collide by
+		// name only; it never reads tunnel nodes / TunnelConfig).
+		{file: "compiler_system.go", kind: "switch"},
+		// tunnel_flat_run_9156.go braced-scalar pre-pass: handles only
+		// source/destination/mode/keepalive/keepalive-retry, NOT a
+		// property switch (no key/ttl/routing-instance/wireguard/
+		// clear-dont-fragment-bit); called only from the helper.
+		{file: "tunnel_flat_run_9156.go", kind: "switch"},
+		// tunnelid.go:171: astTunnelModeWireguard compares a node's
+		// Name() to "mode" and its VALUE to "wireguard" (a value, not
+		// a leaf name) to answer one boolean; it reads no other leaf
+		// and writes no TunnelConfig field.
+		{file: "tunnelid.go", kind: "if-chain"},
 	}
-	// The shared switch is the only `case "keepalive-retry"` in the
-	// helper file besides the braced-scalar pre-pass (which handles
-	// only source/destination/mode/keepalive/keepalive-retry and is
-	// not a property switch: no key/ttl/routing-instance/wireguard).
-	if n := strings.Count(string(tf), `case "keepalive-retry"`); n != 2 {
-		t.Errorf("tunnel_flat_run_9156.go has %d `case \"keepalive-retry\"`, want 2 (shared switch + braced pre-pass)", n)
+	var tunnelSites []tunnelDispatchSite17236
+	for _, s := range sites {
+		isAllowed := false
+		for _, a := range allowed {
+			if s.file == a.file && s.kind == a.kind {
+				// The helper file carries exactly two switches; the
+				// system file carries exactly one. Counted below.
+				isAllowed = true
+			}
+		}
+		if s.file == "tunnel_flat_run_9156.go" && s.kind == "switch" {
+			tunnelSites = append(tunnelSites, s)
+			continue
+		}
+		if isAllowed {
+			continue
+		}
+		t.Errorf("unexpected tunnel-property dispatch site %s:%d (%s over %v): a second tunnel reader must not exist in any file or spelling; fold it into applyTunnelProps17236", s.file, s.line, s.kind, s.leaves)
 	}
-	// Leaves the pre-pass does NOT handle must appear exactly once
-	// (the shared switch). source/destination/mode/keepalive/
-	// keepalive-retry appear twice (pre-pass + switch) by design.
-	for _, leaf := range []string{
-		`case "key"`, `case "ttl"`, `case "routing-instance"`,
-		`case "wireguard"`, `case "clear-dont-fragment-bit"`,
-	} {
-		if n := strings.Count(string(tf), leaf); n != 1 {
-			t.Errorf("tunnel_flat_run_9156.go has %d %s, want exactly 1 (single tunnel property switch)", n, leaf)
+	// Exactly two switches in the helper file: the single property
+	// switch (all 10 leaves) plus the braced pre-pass (5 leaves).
+	if len(tunnelSites) != 2 {
+		t.Fatalf("tunnel_flat_run_9156.go has %d dispatch switches, want 2 (property switch + braced pre-pass): %+v", len(tunnelSites), tunnelSites)
+	}
+	var propSwitch *tunnelDispatchSite17236
+	for i := range tunnelSites {
+		if len(tunnelSites[i].leaves) == len(tunnelLeafNames17236) {
+			propSwitch = &tunnelSites[i]
 		}
 	}
-	for _, leaf := range []string{
-		`case "source"`, `case "destination"`, `case "mode"`,
+	if propSwitch == nil {
+		t.Fatalf("no switch in tunnel_flat_run_9156.go covers all 10 tunnel leaves: %+v", tunnelSites)
+	}
+	for _, leaf := range tunnelLeafNames17236 {
+		found := false
+		for _, l := range propSwitch.leaves {
+			if l == leaf {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("single tunnel property switch misses leaf %q (leaves=%v)", leaf, propSwitch.leaves)
+		}
+	}
+
+	// The allowed non-helper switches must stay exactly one each; a
+	// second one in an allow-listed file is a new dispatch.
+	for _, want := range []struct {
+		file, kind string
+	}{
+		{"compiler_system.go", "switch"},
+		{"tunnelid.go", "if-chain"},
 	} {
-		if n := strings.Count(string(tf), leaf); n != 2 {
-			t.Errorf("tunnel_flat_run_9156.go has %d %s, want 2 (braced pre-pass + shared switch)", n, leaf)
+		n := 0
+		for _, s := range sites {
+			if s.file == want.file && s.kind == want.kind {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s has %d %s dispatch sites, want exactly the 1 allow-listed non-tunnel site", want.file, n, want.kind)
 		}
 	}
 }
@@ -356,18 +661,76 @@ func TestTunnelPropsParity17236(t *testing.T) {
 			// stripping caller-owned fields. The unit fixture has
 			// no interface tunnel, so nothing is inherited.
 			if leaf.name == "wireguard" {
-				// Flat wireguard needs its key material spelled as
-				// separate set lines; the braced row above already
-				// covers the leaf, so compare braced iface vs unit
-				// only (plus packed, which reuses the braced body).
+				// Braced, packed and flat spellings are all run
+				// through their real compilers: braced via
+				// compileBraced17236, packed via compilePacked17236
+				// (source rider, so Source is forced to 10.9.0.1 as
+				// for every other leaf), and flat via separate
+				// wireguard set lines (mode/listen-port/private-key/
+				// peer — a lone `mode wireguard` flat line would be
+				// rejected by the WireGuard validator for missing
+				// key material). All three must DeepEqual the braced
+				// result after stripping caller-owned fields, except
+				// the flat peer's AllowedIPs, which the flat fixture
+				// authors as 10.77.0.0/16 (wgTunnel5618) vs the
+				// braced 10.9.0.0/24.
 				ib := stripCallerOwned17236(ifaceTunnel17236(t, compileBraced17236(t, false, leaf.braced)))
 				ub := stripCallerOwned17236(unitTunnel17236(t, compileBraced17236(t, true, leaf.braced)))
 				if ib == nil || ub == nil {
-					t.Fatalf("wireguard tunnels: iface=%+v unit=%+v", ib, ub)
+					t.Fatalf("wireguard braced tunnels: iface=%+v unit=%+v", ib, ub)
 				}
 				leaf.check(t, ib)
+				leaf.check(t, ub)
+				if ib.WgListenPort != 51820 || len(ib.WgPeers) != 1 {
+					t.Errorf("wireguard braced iface: port=%d peers=%+v, want 51820 + 1 peer", ib.WgListenPort, ib.WgPeers)
+				}
 				if !reflect.DeepEqual(ib, ub) {
-					t.Errorf("wireguard parity: iface %+v != unit %+v", ib, ub)
+					t.Errorf("wireguard braced parity: iface %+v != unit %+v", ib, ub)
+				}
+				ip := stripCallerOwned17236(ifaceTunnel17236(t, compilePacked17236(t, false, leaf.braced)))
+				up := stripCallerOwned17236(unitTunnel17236(t, compilePacked17236(t, true, leaf.braced)))
+				if ip == nil || up == nil {
+					t.Fatalf("wireguard packed tunnels: iface=%+v unit=%+v", ip, up)
+				}
+				wantPI, wantPU := *ib, *ub
+				wantPI.Source, wantPU.Source = "10.9.0.1", "10.9.0.1"
+				if !reflect.DeepEqual(&wantPI, ip) {
+					t.Errorf("wireguard packed vs braced iface: %+v != %+v", ip, &wantPI)
+				}
+				if !reflect.DeepEqual(&wantPU, up) {
+					t.Errorf("wireguard packed vs braced unit: %+v != %+v", up, &wantPU)
+				}
+				for _, unit := range []bool{false, true} {
+					var lines []string
+					if unit {
+						lines = wgTunnel5618("gr-0/0/0", 0, 51820, wgKeyA, wgKeyB)
+					} else {
+						lines = wgTunnel5618("gr-0/0/0", -1, 51820, wgKeyA, wgKeyB)
+					}
+					cfg, err := CompileConfig(parseSetCommands(t, lines...))
+					if err != nil {
+						t.Fatalf("wireguard flat unit=%v: %v", unit, err)
+					}
+					var got *TunnelConfig
+					if unit {
+						got = stripCallerOwned17236(unitTunnel17236(t, cfg))
+					} else {
+						got = stripCallerOwned17236(ifaceTunnel17236(t, cfg))
+					}
+					if got == nil {
+						t.Fatalf("wireguard flat unit=%v: tunnel nil", unit)
+					}
+					want := *ib
+					if unit {
+						want = *ub
+					}
+					if len(want.WgPeers) == 1 && len(got.WgPeers) == 1 {
+						want.WgPeers = append([]WgPeerConfig(nil), want.WgPeers...)
+						want.WgPeers[0].AllowedIPs = append([]string(nil), got.WgPeers[0].AllowedIPs...)
+					}
+					if !reflect.DeepEqual(&want, got) {
+						t.Errorf("wireguard flat vs braced unit=%v: %+v != %+v", unit, got, &want)
+					}
 				}
 				return
 			}
