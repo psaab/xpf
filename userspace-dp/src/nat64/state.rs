@@ -575,23 +575,18 @@ pub(crate) struct Nat64ScopeKey {
 
 impl Nat64ScopeKey {
     pub(crate) fn of_prefix(prefix: &Nat64Prefix) -> Self {
+        // #17076: the built prefix stores only the resolved plural
+        // unions (singular folded in at build by `union_scope`), so
+        // read them back directly — no singular copy survives.
         Self {
-            from_zones: {
-                let mut v = prefix.from_zones.clone();
-                if v.is_empty() && !prefix.from_zone.is_empty() {
-                    v.push(prefix.from_zone.clone());
-                }
-                v
-            },
-            from_routing_instances: {
-                let mut raw = prefix.from_routing_instances.clone();
-                if raw.is_empty() && !prefix.from_routing_instance.is_empty() {
-                    raw.push(prefix.from_routing_instance.clone());
-                }
-                raw.iter()
-                    .map(|ri| crate::nat::nat_ri_key(ri).to_string())
-                    .collect()
-            },
+            from_zones: prefix.from_zones.clone(),
+            // #16604/#17677: preserve the explicit-master token separately
+            // from a named routing-instance literally called `default`.
+            from_routing_instances: prefix
+                .from_routing_instances
+                .iter()
+                .map(|ri| crate::nat::nat_ri_key(ri).to_string())
+                .collect(),
             source_prefixes: prefix
                 .source_prefixes
                 .iter()
