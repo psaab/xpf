@@ -194,17 +194,18 @@ func TestStalePreemptToken16766_ControlBackupReleaseUnchanged(t *testing.T) {
 }
 
 // TestStalePreemptToken16766_TokenDuringMasterTenureDrainedAtResign
-// covers a token/force that lands DURING a MASTER tenure (bypassing the
-// post-time gate, e.g. ForceRGMaster raced past its non-MASTER filter
-// and wrote forcePreemptOnce directly): the resign edge must drain
-// both so the first BACKUP iteration cannot consume them.
+// preserves the drain's defensive behavior for an already queued token
+// and force flag at a MASTER tenure (constructed directly here; the
+// ForceRGMaster path now serializes its check/set/enqueue against state
+// transitions). The resign edge must drain both so the first BACKUP
+// iteration cannot consume them.
 func TestStalePreemptToken16766_TokenDuringMasterTenureDrainedAtResign(t *testing.T) {
 	vi, _ := newStaleTokenInstance16766(t)
 	adverts := capturePriorities16766(t)
 	vi.setState(StateMaster)
 
-	// Race the kick past the gate: raw channel post + raw force flag,
-	// modelling ForceRGMaster's check-then-set window.
+	// Directly inject a queued request to verify defensive draining of
+	// the otherwise unreachable MASTER-tenure token/flag state.
 	vi.preemptNowCh <- struct{}{}
 	vi.mu.Lock()
 	vi.forcePreemptOnce = true

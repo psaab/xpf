@@ -1303,13 +1303,13 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 				vi.sendAdvert(0)
 			}
 		}
-		// #16766: the resign edge is the last MASTER-tenure boundary —
-		// invalidate any one-shot preempt kick/force queued during this
-		// tenure so the first BACKUP iteration cannot consume it as a
-		// fresh preempt and re-promote at the stashed priority 0.
-		// (becomeMaster already drains on entry; a kick posted DURING
-		// the tenure — e.g. a ForceRGMaster raced past its non-MASTER
-		// filter — is caught here and by triggerPreemptNow's MASTER gate.)
+		// #16766: invalidate any one-shot preempt kick/force at the
+		// resign edge so the first BACKUP iteration cannot consume it
+		// as a fresh preempt and re-promote at the stashed priority 0.
+		// becomeMaster drains on entry as well. ForceRGMaster now
+		// serializes its state check, flag write, and enqueue against
+		// state transitions, so a stale BACKUP sample cannot install a
+		// force in the new tenure.
 		vi.discardPendingPreemptNow()
 		// Use an extended safety-net timer instead of stopping entirely.
 		// With short RETH intervals (30ms), the normal masterDown timer

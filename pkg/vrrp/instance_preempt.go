@@ -35,16 +35,13 @@ func (vi *vrrpInstance) restorePreempt() {
 }
 
 // discardPendingPreemptNow drops any queued one-shot preempt kick and
-// clears the ForceRGMaster one-shot flag (#16766). A token posted
-// while this instance is MASTER (sync-hold release racing a
-// master-down promotion, or ForceRGMaster raced past its non-MASTER
-// filter) is meaningless for the current tenure: stepMaster never
-// consumes preemptNowCh, so without this drain the stale token would
-// survive the next forced resignation and the first stepBackup would
-// consume it as a fresh "preempt now", re-promoting the just-resigned
-// node (at the stashed priority 0) until a peer advert or the posture
-// reconcile demotes it again. Draining on every MASTER entry — and
-// again at the resign edge in stepMaster — enforces the channel-token
+// clears the ForceRGMaster one-shot flag (#16766). A queued signal is
+// meaningless after its state tenure ends: stepMaster never consumes
+// preemptNowCh, so a token left across forced resignation could be
+// consumed in BACKUP as a fresh "preempt now", re-promoting the
+// just-resigned node at the stashed priority 0 until a peer advert or
+// posture reconcile demotes it again. Draining on every MASTER entry —
+// and again at the resign edge in stepMaster — enforces the channel-token
 // lifetime invariant: a one-shot signal is consumed or invalidated at
 // the state edge it was issued for. Called only from the run-loop
 // goroutine (becomeMaster / stepMaster), so the channel drain races
@@ -62,15 +59,15 @@ func (vi *vrrpInstance) discardPendingPreemptNow() {
 // triggerPreemptNow signals the run loop to attempt immediate preemption.
 // Non-blocking: if a signal is already pending it is silently dropped.
 //
-// #16766: a kick posted while the instance is MASTER is never posted at
-// all. stepMaster does not select on preemptNowCh, so the token would
-// park in the capacity-1 channel until the next BACKUP tenure and then
-// fire as a stale "preempt now" (see discardPendingPreemptNow). The
-// state check and the send are serialized against setState by vi.mu:
-// either the token lands before the BACKUP→MASTER edge and
-// becomeMaster drains it, or the edge lands first and this gate drops
-// it. A ForceRGMaster force flag that raced past ForceRGMaster's
-// non-MASTER filter is likewise cleared by the MASTER-entry drain.
+// #16766: a kick requested while the instance is MASTER is never posted.
+// stepMaster does not select on preemptNowCh, so a queued token would
+// otherwise park until the next BACKUP tenure and fire as a stale "preempt
+// now" (see discardPendingPreemptNow). The state check and send are
+// serialized against setState by vi.mu: either the token lands before the
+// BACKUP→MASTER edge and becomeMaster drains it, or the edge lands first
+// and this gate drops the kick. `ForceRGMaster` uses the same lock
+// discipline for its state check, force flag, and enqueue, so an old
+// BACKUP sample cannot install a force after a state edge.
 //
 // #17827: the check and enqueue must be one vi.mu critical section.
 // Otherwise, a poster paused after sampling BACKUP but before sending
@@ -97,6 +94,42 @@ func (vi *vrrpInstance) triggerPreemptNow() {
 	default:
 	}
 	vi.mu.Unlock()
+}
+
+// forceMasterOnce is ForceRGMaster's per-instance actuation: it sets the
+// one-shot forcePreemptOnce flag and enqueues a preemptNowCh kick for a
+// non-MASTER instance, and reports whether it did so.
+//
+// #17827: the state sample, flag write, and enqueue must be ONE vi.mu
+// critical section — the manager used to perform them as three separately
+// locked operations (getState, a mu-guarded flag write, then
+// triggerPreemptNow's own locked check/send). A Force paused after
+// sampling BACKUP could then cross the MASTER-entry, peer-demotion, and
+// forced-resignation drains, resume in the new BACKUP tenure, and write
+// flag + enqueue into it; the stepBackup consumer reads the flag as
+// current-tenure authority and re-promotes the just-resigned node at the
+// stashed priority 0. With one critical section the force either lands
+// entirely before an edge (and that edge's drain invalidates it) or
+// observes the post-edge state: MASTER forces are dropped entirely, and
+// a flag written into a fresh BACKUP tenure is a current-tenure force.
+// The preemptNowEnqueueHook exists solely for deterministic tests; it
+// runs with vi.mu held, must not re-enter that lock, and is nil in
+// production.
+func (vi *vrrpInstance) forceMasterOnce() bool {
+	vi.mu.Lock()
+	defer vi.mu.Unlock()
+	if vi.state == StateMaster {
+		return false
+	}
+	if preemptNowEnqueueHook != nil {
+		preemptNowEnqueueHook()
+	}
+	vi.forcePreemptOnce = true
+	select {
+	case vi.preemptNowCh <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // getPreempt reports the EFFECTIVE preempt mode. It is the configured
