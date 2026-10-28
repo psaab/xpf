@@ -4,8 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/optopic"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -269,6 +271,46 @@ func TestTopicCommandAndPermissionResolveTheSameKey7172(t *testing.T) {
 				"the other does not, so a request would be charged a permission with no "+
 				"command to match, or the reverse", probe, pricedOK, cmdOK)
 		}
+	}
+}
+
+// #17108: gRPC show-text and the registry agree over every key.
+// RED-on-revert: restoring the init-built prefix copy with a broken or
+// exact-only body makes packed topics diverge from optopic here, while
+// REST (which calls optopic directly) stays green — the cross-surface
+// split this issue exists to make unrepresentable.
+func TestGRPCShowTextMatchesRegistry17108(t *testing.T) {
+	entries := optopic.ShowTextEntries()
+	if len(entries) < 100 {
+		t.Fatalf("only %d registry entries; a pass would certify nothing", len(entries))
+	}
+	prefixes := 0
+	for _, e := range entries {
+		probes := []string{e.Key}
+		if e.IsPrefix() {
+			prefixes++
+			probes = append(probes, e.Key+"x", e.Key+"probe-value")
+		}
+		for _, topic := range probes {
+			gotCmd, gotOK := showTextTopicCanonicalCommand(topic)
+			wantCmd, wantOK := optopic.ShowTextCommand(topic)
+			if gotCmd != wantCmd || gotOK != wantOK {
+				t.Errorf("gRPC topic %q = (%q,%v), registry = (%q,%v)", topic, gotCmd, gotOK, wantCmd, wantOK)
+			}
+			if cmd, ok := cmdtree.CommandForShowTextTopic(topic); cmd != wantCmd || ok != wantOK {
+				t.Errorf("cmdtree topic %q = (%q,%v), registry = (%q,%v)", topic, cmd, ok, wantCmd, wantOK)
+			}
+			// Price and command must resolve the same key.
+			if _, priced := showTextTopicPermission(topic); priced != gotOK {
+				t.Errorf("topic %q: priced=%v but command-resolved=%v", topic, priced, gotOK)
+			}
+		}
+	}
+	if prefixes == 0 {
+		t.Fatal("no prefix entries; the packed-topic arm is vacuous")
+	}
+	if cmd, ok := showTextTopicCanonicalCommand("zzbogus-topic-17108"); ok || cmd != "" {
+		t.Errorf("gRPC unknown topic = (%q,%v), want (\"\",false)", cmd, ok)
 	}
 }
 

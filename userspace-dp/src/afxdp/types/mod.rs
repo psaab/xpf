@@ -18,7 +18,9 @@ mod cos;
 pub(in crate::afxdp) use cos::*;
 
 // Issue 68.2: routing/forwarding types extracted into types/forwarding.rs.
-mod forwarding;
+// #17207: `pub(in crate::afxdp)` so afxdp/mod.rs can name
+// `types::forwarding::{...}` directly, breaking the glob cycle.
+pub(in crate::afxdp) mod forwarding;
 pub(in crate::afxdp) use forwarding::*;
 // Three forwarding types had wider-than-pub(super) visibility in the original
 // types/mod.rs and are re-exported at their original surface so afxdp.rs's

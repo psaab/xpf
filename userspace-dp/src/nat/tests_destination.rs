@@ -165,6 +165,63 @@ fn dnat_pooled_port_does_not_translate_icmp_identifier() {
 // re-translate the exempted flow. Before #3844 the off rule compiled to an
 // empty Then and was dropped, so the "exempted" traffic fell through and was
 // DNAT'd by the later rule (fail-open).
+// #17210: the tier-walk `reproduces` derivation must agree with the lookup
+// derivation through the shared `DnatValue::rewritten_dst_port` helper —
+// for TCP (port rewritten) and for ICMP (address-only, #4074) alike.
+#[test]
+fn dnat_17210_decision_and_tier_walk_reproduces_agree_tcp_and_icmp() {
+    let table = DnatTable::from_snapshots(
+        &[DestinationNATRuleSnapshot {
+            counter_id: 0,
+            name: "web".to_string(),
+            destination_address: "203.0.113.10".to_string(),
+            destination_port: 0,
+            protocol: String::new(),
+            pool_address: "10.0.0.5".to_string(),
+            pool_port: 8080,
+            ..DestinationNATRuleSnapshot::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let src: IpAddr = "198.51.100.1".parse().unwrap();
+    let dst: IpAddr = "203.0.113.10".parse().unwrap();
+    // Direct helper: ICMP with a pooled port stays address-only (#4074);
+    // TCP carries the pooled port.
+    let value = super::destination::DnatValue {
+        new_dst_ip: "10.0.0.5".parse().unwrap(),
+        new_dst_port: 8080,
+    };
+    assert_eq!(value.decision(PROTO_ICMP, 0).rewrite_dst_port, None);
+    assert_eq!(
+        value.decision(PROTO_ICMP, 0).rewrite_dst,
+        Some("10.0.0.5".parse().unwrap())
+    );
+    assert_eq!(value.decision(PROTO_TCP, 80).rewrite_dst_port, Some(8080));
+    assert_eq!(value.decision(PROTO_TCP, 8080).rewrite_dst_port, None);
+    // Lookup vs tier-walk agreement.
+    for (protocol, dst_port) in [(PROTO_TCP, 80), (PROTO_ICMP, 0)] {
+        let (decision, _) = table
+            .lookup_with_counter_scoped(protocol, src, dst, 0, dst_port, "", "", "", None)
+            .expect("DNAT lookup must match");
+        assert_eq!(
+            table.tier_walk_reproduces_ignoring_icmp_selector_scoped(
+                protocol,
+                src,
+                dst,
+                0,
+                dst_port,
+                "",
+                "",
+                "",
+                decision.rewrite_dst.unwrap(),
+                decision.rewrite_dst_port,
+            ),
+            Some(true),
+            "tier walk must reproduce lookup decision for protocol {protocol}",
+        );
+    }
+}
+
 #[test]
 fn dnat_off_exemption_short_circuits_identical_translate_rule() {
     let table = DnatTable::from_snapshots(

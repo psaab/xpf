@@ -14,7 +14,7 @@ import (
 // onto its commit warnings. The mechanism is deliberately narrow:
 //
 // ONLY operator-commit applies project, via applyConfigLockedForCommit,
-// called from exactly one site: applyAndSyncCommitted (which both
+// called from exactly one site: applyAndSyncCommittedWithPeerSnapshotAuthorization (which both
 // commitAndApply and commitConfirmedAndApply funnel through — pinned by
 // TestApplyAndSyncCommittedSyncsMTUWarnings9841). Peer-sync, rollback,
 // feed, debt and boot applies never project: no response exists to carry

@@ -2,8 +2,30 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 
-_BINS = "xpfd cli xpf-userspace-dp xpf-day0-config"
+
+def _managed_bins() -> str:
+    """Return the managed-binary list from the generated SSOT file.
+
+    pkg/upgrade/manifest/bins.txt is generated from manifest.Names()
+    (#17101) and pinned by TestManagedBinaryDriftCanary, so this gate
+    asserts every managed binary's sbin link without retyping the
+    list. Fails closed (raises) if the file is missing or empty.
+    """
+    path = (Path(__file__).resolve().parent.parent.parent
+            / "pkg/upgrade/manifest/bins.txt")
+    names = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            names.extend(line.split())
+    if not names:
+        raise ValueError(f"no managed binaries in {path}")
+    return " ".join(names)
+
+
+_BINS = _managed_bins()
 
 
 def seeded_runtime_layout_snippet(*, test_root: bool = False) -> str:

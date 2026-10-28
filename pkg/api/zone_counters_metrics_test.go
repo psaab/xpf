@@ -14,7 +14,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
@@ -498,7 +497,7 @@ func TestCollectDoesNotFalseAlertOnZoneReads(t *testing.T) {
 
 	ids := fixtureZoneIDs(t)
 	store := newDescriptorCoverageStore(t)
-	srv := &Server{store: store, gc: conntrack.NewGC(nil, time.Minute), startTime: time.Now()}
+	srv := &Server{store: store, startTime: time.Now()}
 	srv.dp = &zoneRealReadDP{&descriptorCoverageDP{
 		Manager: dataplane.New(),
 		apply: &dataplane.ApplyResult{
@@ -721,7 +720,7 @@ func TestZoneUnpopulatedGaugeEmittedOnDegradedBoot(t *testing.T) {
 	neutralizeKernelCounterReads(t)
 
 	ids := fixtureZoneIDs(t)
-	srv := &Server{store: newDescriptorCoverageStore(t), gc: conntrack.NewGC(nil, time.Minute), startTime: time.Now()}
+	srv := &Server{store: newDescriptorCoverageStore(t), startTime: time.Now()}
 	srv.dp = &notLoadedDP{&descriptorCoverageDP{
 		Manager: dataplane.New(),
 		apply:   &dataplane.ApplyResult{ZoneIDs: ids},

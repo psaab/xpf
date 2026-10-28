@@ -4,103 +4,21 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
 
-// rustSnapshotSerdeRename returns the WIRE KEY that userspace-dp declares for a
-// field of a snapshot struct, parsed out of the Rust source.
-//
-// Parsed rather than mirrored, for the reason TestSnapshotProtocolVersionLockstepWithRust
-// parses CONFIG_SNAPSHOT_PROTOCOL_VERSION rather than restating it: a constant
-// written down twice is two constants. A Go test that asserts its own literal
-// pins the Go emitter to a string this repository can change on the Rust side
-// without anything noticing; parsing the Rust declaration makes the assertion an
-// AGREEMENT between the planes instead of a spelling preference.
-func rustSnapshotSerdeRename(t *testing.T, rustField string) string {
-	t.Helper()
-	// Test cwd is pkg/dataplane/userspace.
-	return rustSerdeRenameIn(t,
-		filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "snapshot.rs"),
-		rustField)
-}
-
-// rustSerdeRenameIn is rustSnapshotSerdeRename against an arbitrary Rust wire
-// module, so a sibling key-agreement guard over another protocol struct
-// (session_delta_rt_flow_session_id_key_6312_test.go) parses the declaration
-// with the SAME regex instead of writing a second one that could drift.
-// rustProcessStatusRename resolves a ProcessStatus field's `#[serde(rename)]`
-// WITHOUT pinning which file under `userspace-dp/src/protocol/` declares it.
-//
-// #7160: `ProcessStatus` moved from `control.rs` to `status.rs` when
-// `control.rs` crossed the modularity floor, and two lockstep guards that
-// hardcoded the path went red on a pure code motion — reporting "no
-// serde(rename) found", which reads like a DELETED rename rather than a moved
-// file. The guards are worth keeping and the path is not the thing they are
-// guarding, so they search the directory instead.
-//
-// It fails if the field is found in NO file (a genuinely lost rename) and if
-// it is found in more than one (two declarations of one wire key is itself a
-// drift hazard, and silently taking the first would hide it).
-func rustProcessStatusRename(t *testing.T, rustField string) string {
-	t.Helper()
-	dir := filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read %s: %v (the Go/Rust wire-key lockstep guard cannot run)", dir, err)
-	}
-	var found []string
-	var key string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".rs") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		src, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if !regexp.MustCompile(`(?m)^\s*pub ` + regexp.QuoteMeta(rustField) + `:`).Match(src) {
-			continue
-		}
-		found = append(found, e.Name())
-		key = rustSerdeRenameIn(t, path, rustField)
-	}
-	switch len(found) {
-	case 0:
-		t.Fatalf("no `pub %s` field found under %s. If it was renamed or removed, UPDATE "+
-			"this lockstep guard rather than deleting it — without it nothing pins the Go "+
-			"emitter's JSON key to the key the Rust decoder reads, and a key mismatch is "+
-			"silent on both planes", rustField, dir)
-	case 1:
-	default:
-		t.Fatalf("`pub %s` is declared in %d files under %s (%v). Two declarations of one "+
-			"wire key is the drift this guard exists to catch", rustField, len(found), dir, found)
-	}
-	return key
-}
-
-func rustSerdeRenameIn(t *testing.T, path, rustField string) string {
-	t.Helper()
-	src, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v (the Go/Rust wire-key lockstep guard cannot run)", path, err)
-	}
-	// The serde attribute immediately precedes the field. `[^)]*` cannot cross a
-	// `)`, so the rename captured is the one on THIS field's own attribute and
-	// not a neighbour's.
-	re := regexp.MustCompile(`#\[serde\([^)]*rename\s*=\s*"([A-Za-z0-9_]+)"[^)]*\)\]\s*pub\s+` +
-		regexp.QuoteMeta(rustField) + `\s*:`)
-	match := re.FindSubmatch(src)
-	if match == nil {
-		t.Fatalf("no `#[serde(rename = ...)]` found on `pub %s` in %s. If the field was "+
-			"renamed, moved, or lost its explicit rename, UPDATE this lockstep guard rather "+
-			"than deleting it — without it nothing pins the Go emitter's JSON key to the key "+
-			"the Rust decoder reads, and a key mismatch is silent on both planes", rustField, path)
-	}
-	return string(match[1])
-}
+// #17142: rustSnapshotSerdeRename / rustSerdeRenameIn / rustProcessStatusRename
+// are DELETED. They were the file-wide first-match scanner the #11070 cell
+// was bound to: `rustSerdeRenameIn(t, binding.rs, "ingress_ifindex")`
+// returned ExceptionStatus's rename (declared first in binding.rs)
+// instead of SessionDeltaInfo's, so a swap of SessionDeltaInfo's ingress
+// and NAT-scope renames passed every Go cell (issue mutant C). Every
+// caller now resolves through the struct-scoped shared parser in
+// rustwire_test.go: rustWireKeyInStruct (file + struct) or
+// rustWireKeyInProtocolStruct (struct located by name under protocol/,
+// the #7160 directory search, now also requiring exactly one struct
+// declaration instead of silently taking the first field match).
 
 // TestSecureTunnelWireKeyLockstepWithRust pins the JSON KEY of
 // InterfaceSnapshot.SecureTunnel to the key userspace-dp decodes (#6691 round
@@ -126,7 +44,7 @@ func rustSerdeRenameIn(t *testing.T, path, rustField string) string {
 // FAIL-ON-REVERT: change the Go struct tag (or the Rust rename) without changing
 // the other and this reds.
 func TestSecureTunnelWireKeyLockstepWithRust(t *testing.T) {
-	rustKey := rustSnapshotSerdeRename(t, "secure_tunnel")
+	rustKey := rustWireKeyInStruct(t, filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "snapshot.rs"), "InterfaceSnapshot", "secure_tunnel", false)
 
 	row := InterfaceSnapshot{
 		Name:      "st10",
@@ -203,7 +121,7 @@ func TestSecureTunnelWireKeyLockstepWithRust(t *testing.T) {
 // FAIL-ON-REVERT: change the Go struct tag (or the Rust rename) without changing
 // the other and this reds.
 func TestFabricParentUnbindableWireKeyLockstepWithRust(t *testing.T) {
-	rustKey := rustSnapshotSerdeRename(t, "parent_unbindable")
+	rustKey := rustWireKeyInStruct(t, filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "snapshot.rs"), "FabricSnapshot", "parent_unbindable", false)
 
 	for _, tc := range []struct {
 		name       string

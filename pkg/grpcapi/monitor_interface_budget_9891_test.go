@@ -803,8 +803,8 @@ func TestSendBoundarySeversOnConcurrentSuccess_9891(t *testing.T) {
 // ctxDecoupledBlockingStream14150 models the #14150 production shape: its
 // Context() is the reauth-derived context (cancellable independently), while
 // Send parks on a SEPARATE transport release channel — cancelling the derived
-// context does NOT unblock Send, exactly as revocation-cancel of
-// reauthServerStream does not cancel the underlying transport Send. This is
+// context does NOT unblock Send, exactly as revocation-cancel of the
+// authorizeStreamContinuously context does not cancel the underlying transport Send. This is
 // distinct from blockingMonitorStream9891, whose Send keys off the same ctx,
 // so a premature limiter release is invisible there.
 type ctxDecoupledBlockingStream14150 struct {
