@@ -41,9 +41,9 @@ func newSurfaceAManagerRealBackend(t *testing.T, srv *fakeDNSServer) *SurfaceAMa
 		now:     func() time.Time { return time.Unix(1_700_000_000, 0) },
 		// PRODUCTION WIRING: only newBackend is set; backend stays nil.
 		newBackend: func(p *config.DDNSProvider, fqdn string, ttl int) (DNSUpdater, error) {
-			c := &config.DHCPDynamicDNSConfig{UpdateServer: srv.addrUDP}
+			c := &config.DHCPDynamicDNSConfig{RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: srv.addrUDP}}
 			pol := ddnsPolicy{conflictPolicy: "replace-owned", backend: "rfc2136"}
-			u, err := newRFC2136Updater(pol, c, nil, nil, nil)
+			u, err := newRFC2136Updater(pol, c.RFC2136Endpoint, nil, nil, nil)
 			if err != nil {
 				return nil, err
 			}

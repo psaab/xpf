@@ -6166,7 +6166,7 @@ fn adopted_reverse_reply_converts_to_fabric_redirect_16217() {
         },
         metadata: test_metadata(),
         forwarding_generation: ForwardingGenerationStamp::default(),
-        aux: SessionLookupAux::default(),
+        aux: SessionLookupAux::unknown(),
         synced_synthesis: false,
     };
     // Adopted shape: forward stored as FabricRedirect, LAN RG
@@ -6309,7 +6309,7 @@ fn reverse_synth_stamps_forward_owner_not_reply_egress_16217() {
         // session id is deliberately ZERO below — a local table match
         // built by the NAT lookup helpers carries a default aux, and
         // the pre-flag discriminator keyed on that id inverted it.
-        aux: SessionLookupAux::default(),
+        aux: SessionLookupAux::unknown(),
         synced_synthesis: false,
     };
     let reverse = build_reverse_session_from_forward_match(
@@ -6362,7 +6362,7 @@ fn reverse_synth_synced_match_keeps_reply_derivation_16217() {
         },
         metadata: SessionMetadata { owner_rg_id: 1, ..test_metadata() },
         forwarding_generation: ForwardingGenerationStamp::default(),
-        aux: SessionLookupAux { session_id: 4242, ..SessionLookupAux::default() },
+        aux: SessionLookupAux { session_id: 4242, ..SessionLookupAux::unknown() },
         synced_synthesis: true,
     };
     let reverse = build_reverse_session_from_forward_match(
@@ -10287,7 +10287,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             decision: test_decision(),
             metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
             synced_synthesis: false,
         },
         1,
@@ -10310,7 +10310,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
             synced_synthesis: false,
         },
         1,
@@ -10593,7 +10593,7 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
             policy_counter: None,
             nat_scope_ifindex: None },
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
             synced_synthesis: false,
         },
         100,
@@ -10935,7 +10935,7 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
             policy_counter: None,
             nat_scope_ifindex: None },
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
             synced_synthesis: false,
         },
         1,
@@ -12289,7 +12289,7 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
         },
         shared_entry: Some(SyncedSessionEntry { key: key.clone(),
         decision: test_decision(),
@@ -12348,7 +12348,7 @@ fn adopted_materialize_replaces_local_incumbent_16217() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
         },
         shared_entry: Some(SyncedSessionEntry { key: key.clone(),
         decision: test_decision(),
@@ -12952,7 +12952,7 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
         },
         shared_entry: Some(SyncedSessionEntry { key: key.clone(),
         decision: test_decision(),
@@ -13551,7 +13551,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             .count();
         queue.clear();
     }
-    drop(flush);
+    // `flush`'s mutable captures end here (closures have no Drop); the counters below are read borrow-free.
     let dnat_after = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
     assert_eq!(
         dnat_after - dnat_before,
@@ -20669,7 +20669,7 @@ fn reverse_companion_stamps_zero_install_table_9752() {
             decision: forward_decision,
             metadata: forward_metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
             synced_synthesis: false,
         },
         1_000_000_000,
@@ -21208,7 +21208,7 @@ fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
             synced_synthesis: false,
         };
         let (_lookup, installed) = install_reverse_session_from_forward_match(
@@ -22709,7 +22709,7 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
         },
         shared_entry: Some(SyncedSessionEntry { key: key.clone(),
         decision: test_decision(),
@@ -26677,4 +26677,95 @@ fn stream_delivered_delta_is_not_left_in_fallback_buffer_16627() {
     assert!(frames.is_empty(), "CommandExport must not echo on the event stream");
     assert_eq!(drained.len(), 1, "CommandExport deltas ride the fallback/control leg");
     assert_eq!(drained[0].stream_seq, 0);
+}
+
+/// #17080 acceptance (vq13_p01b shape): a local SNAT forward row with
+/// `Some(false)` provenance, found by the REAL local finder, installed
+/// as a reverse companion via `install_reverse_session_from_forward_match`
+/// must carry `Some(false)` on BOTH the local reverse row and the shared
+/// reverse row. RED pre-fix: the finder zeroed aux, so both were None.
+#[test]
+fn local_finder_reverse_install_preserves_snat_provenance_17080() {
+    use crate::afxdp::bpf_map::{RECORDER_ONLY_MAP_FD, SteeringMap};
+    let now_ns = 1_000_000_000u64;
+    let now_secs = 1u64;
+    let forwarding = test_forwarding_state();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_queues: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+
+    let forward_key = test_key();
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        rewrite_src_port: Some(45_000),
+        ..NatDecision::default()
+    };
+    let mut forward_decision = test_decision();
+    forward_decision.nat = nat;
+    let reverse_key = reverse_session_key(&forward_key, nat);
+
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin_and_source_nat(
+        forward_key.clone(),
+        forward_decision,
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        Some(false),
+    ));
+    // Probe by the reverse (post-NAT) tuple through the real finder.
+    let reply_key = crate::session::reverse_session_key(&forward_key, nat);
+    let forward_match = sessions
+        .find_forward_nat_match(&reply_key, |_| 0)
+        .expect("#17080: local finder must find the SNAT forward row");
+    assert_eq!(
+        forward_match.aux.source_nat_static,
+        Some(false),
+        "#17080: finder must preserve SNAT provenance"
+    );
+    let (reverse, installed) = install_reverse_session_from_forward_match(
+        &mut sessions,
+        SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_queues,
+        crate::afxdp::empty_worker_commands_by_id(),
+        &forwarding,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        &reverse_key,
+        forward_match,
+        now_ns,
+        now_secs,
+        0,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    );
+    assert!(installed, "#17080: reverse companion must install");
+    assert_eq!(reverse.aux.source_nat_static, Some(false));
+    // Local reverse row provenance (read back via the table's aux probe).
+    assert_eq!(
+        sessions.lookup_aux_info(&reverse_key).source_nat_static,
+        Some(false),
+        "#17080: local reverse row must carry the forward SNAT provenance"
+    );
+    // Shared reverse row provenance.
+    let shared = shared_sessions
+        .lock()
+        .expect("shared lock")
+        .get(&reverse_key)
+        .expect("#17080: reverse companion must publish to the shared map")
+        .clone();
+    assert_eq!(
+        shared.source_nat_static,
+        Some(false),
+        "#17080: shared reverse row must carry the forward SNAT provenance"
+    );
 }

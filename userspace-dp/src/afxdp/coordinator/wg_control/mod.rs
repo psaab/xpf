@@ -1,6 +1,6 @@
 //! WireGuard control thread (#1432 S2a).
 //!
-//! One supervised aux thread per `mode == "wireguard"` tunnel endpoint,
+//! One supervised aux thread per WireGuard-kind tunnel endpoint,
 //! modeled on `spawn_local_tunnel_sources` (the GRE local-origin
 //! template). The thread owns three handles:
 //!
@@ -56,8 +56,8 @@
 //! (timeout = min(next timer deadline, 100ms cap) — the cap bounds
 //! stop/join and worker-edge latency) and runs a 1s-granularity timer
 //! arm: session expiry (REJECT_AFTER_TIME teardown), the pure
-//! `WgEngine::timer_pass` (passive/persistent keepalives, no-reply
-//! reinit), and the handshake ATTEMPT machine (5s retransmit pacing,
+//! per-peer `WgEngine::timer_pass_for_peer` (passive/persistent keepalives,
+//! no-reply reinit), and the handshake ATTEMPT machine (5s retransmit pacing,
 //! 90s give-up window, identity-based success). Per-use T1/T2/T3 age
 //! enforcement lives in the engine's encap/decap paths; this loop owns
 //! all sends. Design of record:
@@ -136,7 +136,7 @@ const WG_TIMER_TICK_NS: u64 = 1_000_000_000;
 /// the #1872 tombstone + backoff respawn machinery).
 const WG_TUN_FATAL_READ_LIMIT: u32 = 8;
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn wg_control_loop(
     tunnel_name: String,
     tunnel_endpoint_id: u16,
@@ -325,7 +325,7 @@ pub(super) fn wg_control_loop(
 /// plaintext is refused under #10527. Production `wg_control_loop` passes the
 /// shim-map view.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn run_wg_control_loop(
     tunnel_name: &str,
     engine: &crate::afxdp::wg::WgEngine,
@@ -516,7 +516,7 @@ fn init_consumer_state(
 /// The per-tunnel control loop proper, on pre-opened fds so the loop
 /// logic is unit-testable without a real TUN device (the production
 /// caller binds the socket and attaches the persistent wgN TUN above).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn run_wg_control_loop_with_kernel_path_and_forward(
     tunnel_name: &str,
     engine: &crate::afxdp::wg::WgEngine,
@@ -1084,7 +1084,7 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
 /// the production G6a zero-worker fallback is exercised rather than a hidden
 /// pre-Half-B direct-TUN path. New traversal cells pass a populated map to
 /// `run_wg_control_loop_with_kernel_path_and_forward`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn run_wg_control_loop_with_kernel_path(
     tunnel_name: &str,
     engine: &crate::afxdp::wg::WgEngine,

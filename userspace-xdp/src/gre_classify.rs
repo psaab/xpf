@@ -208,9 +208,11 @@ pub fn wg_degraded_fragment_excluded(
 /// share one verdict:
 ///
 /// * FRAGMENTED inner — an IPv4 fragment field with MF set or a
-///   non-zero offset, or an IPv6 chain that sighted a non-atomic
-///   Fragment header (offset != 0 or M set), has no complete L4 header
-///   in this packet; ports read from it are payload bytes.
+///   non-zero offset, or an IPv6 first next-header that is not a
+///   genuine L4 terminal (production v6 rejects every non-terminal
+///   first header, atomic Fragment included — see below), has no
+///   complete L4 header in this packet; ports read from it are
+///   payload bytes.
 /// * DECLARED LENGTH — the readable L4 span must lie inside the inner
 ///   datagram's declared end (`total_len` for v4, `40 + payload_len`
 ///   for v6, measured from the inner L3 start). Slack past it is
@@ -218,53 +220,39 @@ pub fn wg_degraded_fragment_excluded(
 ///   inner bytes. A declared end past the capture (lying-long) is
 ///   bounded by the capture reads themselves, exactly as the shim's
 ///   outer parsers treat it.
-/// * LAND — inner src == inner dst. The healthy/degraded outer LAND
-///   drops compare the OUTER addresses; a GRE inner with equal
-///   addresses rides a `PASS_TO_KERNEL` hit to the kernel decapsulated
-///   with no screen ever seeing the inner.
+/// * LAND — inner src == inner dst, judged by [`gre_inner_land`].
+///   The healthy/degraded outer LAND drops compare the OUTER
+///   addresses; a GRE inner with equal addresses rides a
+///   `PASS_TO_KERNEL` hit to the kernel decapsulated with no screen
+///   ever seeing the inner.
 ///
-/// `inner_is_fragment` is caller-computed: v4 from the fragment field,
-/// v6 from the shared walk (`fragment_seen` excludes atomic headers, so
-/// a whole datagram carrying an atomic Fragment header still classifies
-/// — the worker's `packet_trimmed_len`/`parse_inner_protocol_and_offsets`
-/// treat it the same way). `l4_span_start`/`l4_span_len` are the span
-/// the caller is about to read for the tuple (0 length = no L4 read for
-/// this protocol, so the length gate is vacuous for the span — the
-/// header itself was already read inside the declared minimums the
-/// caller checked). Address slices are the fixed 16-byte shim shape
-/// (v4 in the first 4 bytes, zero-padded), family-correct for one
-/// comparison.
-#[inline(always)]
-pub fn gre_inner_classify_allowed(
-    inner_is_fragment: bool,
-    inner_src_addr: &[u8; 16],
-    inner_dst_addr: &[u8; 16],
-    inner_l3_offset: usize,
-    declared_end: usize,
-    l4_span_start: usize,
-    l4_span_len: usize,
-) -> bool {
-    if inner_src_addr == inner_dst_addr {
-        return false;
-    }
-    !gre_inner_fragment_or_length_rejected(
-        inner_is_fragment,
-        inner_l3_offset,
-        declared_end,
-        l4_span_start,
-        l4_span_len,
-    )
-}
-
-/// #14954 scalar half of [`gre_inner_classify_allowed`]: the fragment and
-/// declared-length verdicts without the address comparison.
+/// Production composition (what the host cells execute):
 ///
-/// The shim's call sites judge LAND separately (a direct address
-/// comparison on the key they just built) and call this half for the
-/// fragment/length verdicts with inner-L3-relative offsets, so no
-/// packet-derived absolute offset crosses into the comparison. The
-/// combined wrapper above is exactly LAND + this half, and the host
-/// test executes both.
+/// * v4 (`classify_native_gre_inner_ipv4`) calls
+///   [`gre_inner_fragment_or_length_rejected`] per protocol arm with
+///   `inner_is_fragment = (frag_field & 0x3fff) != 0`, declared end =
+///   `total_len`, span start = `ihl`, span = the arm's read length
+///   (14/8/8/0), then judges LAND via [`gre_inner_land`] on the key
+///   it built.
+/// * v6 (`classify_native_gre_inner_ipv6`) calls the same verdict
+///   once with `inner_is_fragment = (eh_class(protocol) !=
+///   EH_CLASS_TERMINAL)`, declared end = `40 + payload_len`, span
+///   start = 40, span = the protocol's read length (14/8/0), then
+///   judges LAND via [`gre_inner_land`] on the key it built.
+///
+/// The v6 fragment input is deliberately NOT the shared extension
+/// walk: production v6 never walks the inner chain, it bails on any
+/// non-terminal FIRST header. That is stricter than the walk (which
+/// would let an atomic Fragment header classify), and it is the
+/// behaviour the v6 cell pins. `l4_span_start`/`l4_span_len` are the
+/// span the caller is about to read for the tuple, inner-L3-relative
+/// (0 length = no L4 read for this protocol, so the length gate is
+/// vacuous for the span — the header itself was already read inside
+/// the declared minimums the caller checked).
+///
+/// #14954 scalar verdict shared by both classifiers: the fragment and
+/// declared-length verdicts without the address comparison (LAND is
+/// [`gre_inner_land`], judged by both classifiers on the key).
 #[inline(always)]
 pub fn gre_inner_fragment_or_length_rejected(
     inner_is_fragment: bool,
@@ -288,4 +276,14 @@ pub fn gre_inner_fragment_or_length_rejected(
     declared_end < inner_l3_offset
         || l4_span_start > declared_end
         || l4_span_len > declared_end - l4_span_start
+}
+
+/// #14954 LAND half shared by both GRE-inner classifiers: inner
+/// source equals inner destination on the 16-byte shim address
+/// shape (v4 in the first 4 bytes, zero-padded), so one comparison
+/// is family-correct. This is the sole inner-LAND compare under
+/// `userspace-xdp/src` outside the outer-packet `land` module.
+#[inline(always)]
+pub fn gre_inner_land(inner_src_addr: &[u8; 16], inner_dst_addr: &[u8; 16]) -> bool {
+    inner_src_addr == inner_dst_addr
 }

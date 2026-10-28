@@ -273,6 +273,7 @@ fn gre_version_refusal_counter_ignores_a_non_gre_row_with_the_same_outer_tuple()
     let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
     for endpoint in forwarding.tunnel_endpoints.values_mut() {
         endpoint.mode = "wireguard".to_string();
+        endpoint.kind = TunnelKind::WireGuard;
     }
     let inner = build_gre_inner_icmp_packet_v4();
     let frame = build_gre_versioned_outer_frame_v4(1, GRE_FLAG_KEY, 0, 0, TUNNEL_PEER, &inner);

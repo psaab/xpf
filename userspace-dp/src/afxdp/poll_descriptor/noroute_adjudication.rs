@@ -82,7 +82,7 @@ pub(super) fn noroute_policy_protocol(
 /// ran in the pre-routing classify). Both halves fall back to the wire
 /// tuple when no inbound destination translation applies, so an untranslated
 /// NoRoute flow adjudicates exactly as before.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn noroute_policy_adjudication(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,

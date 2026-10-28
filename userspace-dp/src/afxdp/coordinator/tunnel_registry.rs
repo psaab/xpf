@@ -87,10 +87,10 @@ impl TunnelThreadEntry for WgControlEntry {
         &mut self.handle
     }
     fn spawned_ifindex(&self) -> i32 {
-        self.spawned_ifindex
+        WgControlEntry::spawned_ifindex(self)
     }
     fn spawned_tunnel_name(&self) -> &str {
-        &self.spawned_tunnel_name
+        WgControlEntry::spawned_tunnel_name(self)
     }
     fn delivery_tx_mut(&mut self) -> &mut Option<LocalTunnelDelivery> {
         &mut self.delivery_tx

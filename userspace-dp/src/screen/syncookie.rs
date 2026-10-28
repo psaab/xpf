@@ -89,7 +89,6 @@ pub(crate) const SYN_COOKIE_MSS_VALUES: [u16; 8] =
     [536, 1200, 1300, 1360, 1400, 1440, 1460, 8960];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SynCookieTuple {
     pub src_ip: IpAddr,
     pub dst_ip: IpAddr,
@@ -98,7 +97,6 @@ pub(crate) struct SynCookieTuple {
 }
 
 impl SynCookieTuple {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_packet(pkt: &ScreenPacketInfo) -> Self {
         Self {
             src_ip: pkt.src_ip,
@@ -179,7 +177,6 @@ impl SynCookieClientKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SynCookieValidation {
     pub full_epoch: u64,
     pub mss_index: u8,
@@ -187,14 +184,12 @@ pub(crate) struct SynCookieValidation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SynCookieChallenge {
     pub cookie_isn: u32,
     pub peer_mss: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum SynCookieAckVerdict {
     NotApplicable,
     Validated,
@@ -205,21 +200,17 @@ pub(crate) enum SynCookieAckVerdict {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SynCookieCodec {
     master_key: [u8; 16],
 }
 
 impl SynCookieCodec {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const EPOCH_SECS: u64 = 64;
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn new(master_key: [u8; 16]) -> Self {
         Self { master_key }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn full_epoch_from_unix_secs(unix_secs: u64) -> u64 {
         unix_secs / Self::EPOCH_SECS
     }
@@ -238,7 +229,6 @@ impl SynCookieCodec {
         Self::full_epoch_from_unix_secs(now_secs)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn mss_index(peer_mss: u16) -> u8 {
         let mut selected = 0u8;
         let mut i = 1;
@@ -251,7 +241,6 @@ impl SynCookieCodec {
         selected
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn mint_isn(
         &self,
         tuple: SynCookieTuple,
@@ -266,7 +255,7 @@ impl SynCookieCodec {
             | mac
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn validate_isn(
         &self,
         tuple: SynCookieTuple,

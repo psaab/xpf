@@ -1069,7 +1069,7 @@ fn actionless_rule_falls_through_to_later_broader_rule_5717() {
 /// `record_source_nat_failure` + `scratch_recycle.push` + `continue` in
 /// afxdp/poll_descriptor/mod.rs — the packet is DROPPED. The wrapper is also
 /// reachable in production only through `match_source_nat_for_flow`, which is
-/// `#[cfg_attr(not(test), allow(dead_code))]`; the live entry point is
+/// `#[cfg(test)]` (#17195); the live entry point is
 /// `match_source_nat_result_for_tuple`, which is what this calls, with a real
 /// TCP tuple rather than the address-only `protocol: None` sentinel.
 #[test]

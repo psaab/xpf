@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"strconv"
+	"strings"
 )
 
 // walkContext carries the per-walk validation inputs: the tree-derived
@@ -57,11 +59,39 @@ type leafNodeValidator func(node *Node, parent *schemaNode) error
 // sibling that supplies the value). See schemaNode.tailValidator.
 type leafTailValidator func(tokens []string, siblingTails [][]string) error
 
+// refuseEdgeWhitespace is the single shared padding refusal (#17177).
+// It returns a non-nil error when tok carries leading or trailing
+// whitespace. Every typed value slot and identity-arg slot is gated by
+// it before its validator runs, so "validator trims, consumer reads
+// raw" cannot recur one validator at a time: the compiler stores the
+// raw token and runtime consumers parse it exactly, so a padded value
+// the validator silently trimmed would commit green and then be
+// silently dropped downstream (RDNSS, device-map pci, scheduler
+// bounds — #9820/#14377/#15184/#15196 were single-site fixes of this
+// class). The tolerant Load/SyncApply path downgrades schema errors
+// to warnings (#1960), so stored configs are not bricked.
+func refuseEdgeWhitespace(tok string) error {
+	if tok != strings.TrimSpace(tok) {
+		return fmt.Errorf("value %q must not have leading or trailing whitespace (use the bare value without padding)", tok)
+	}
+	return nil
+}
+
 // checkToken validates one token against a typed leaf directly: the
 // scalar LeafValidator when set, else the tree-based cross-reference
 // validator bound to the walk's collected refs. A typed leaf sets
 // exactly one of the two (walkSchemaNode gates on either).
+//
+// #17177: padding policy is owned HERE, not inside each validator.
+// Before dispatch, a token with leading/trailing whitespace is
+// refused with the one shared message (unless the leaf explicitly
+// opts out via allowEdgeWhitespace with a recorded reason).
 func (n *schemaNode) checkToken(vc *walkContext, tok string) error {
+	if !n.allowEdgeWhitespace {
+		if err := refuseEdgeWhitespace(tok); err != nil {
+			return err
+		}
+	}
 	if n.validator != nil {
 		return n.validator(tok)
 	}

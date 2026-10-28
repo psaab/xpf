@@ -1937,6 +1937,39 @@ fn purge_remapped_tunnel_sessions_no_drop_on_lossless_success() {
     );
 }
 
+/// #17144: a gate-refused purge delete must not emit a Close, must not
+/// release the reservation and must not be counted as purged.
+/// RED pre-fix: the purge discarded the outcome, emitted the Close,
+/// released the (pool, port) and returned 1.
+#[test]
+fn purge_gate_refusal_emits_no_close_and_releases_nothing_17144() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    register_test_worker_7209(&mut coordinator);
+    let allocs = std::sync::Arc::clone(&coordinator.forwarding.iface_nat_allocators);
+    let rules = coordinator.forwarding.source_nat_rules.clone();
+    let entry = purge8138_entry(43000, 52100, 7);
+    let key = entry.key.clone();
+    assert_eq!(coordinator.upsert_synced_session(entry.clone()), SyncedImportOutcome::Applied, "fixture import must apply");
+    assert!(purge8138_port_held(&allocs, &rules, 43001, 52100, 1_000), "precondition: import must hold the reservation");
+    let (sender, rx) = crate::event_stream::EventStreamSender::test_sender(true, 16);
+    coordinator.event_stream = Some(sender);
+    let reverse_key = crate::session::reverse_session_key(&key, entry.decision.nat);
+    let _held = crate::afxdp::bpf_map::global_tuple_gate().try_acquire_installs([reverse_key]).expect("test holds the contending reverse-key permit");
+    let purged = coordinator.purge_remapped_tunnel_sessions(&[7], &coordinator.forwarding.clone());
+    assert_eq!(purged, 0, "#17144: a refused delete must not be counted as purged");
+    assert!(synced6600_contains(&coordinator, &key), "#17144: a refused delete must leave the shared session in place");
+    assert!(rx.try_recv().is_err(), "#17144: a refused delete must emit no Close delta");
+    assert!(purge8138_port_held(&allocs, &rules, 43002, 52100, 2_000), "#17144: a refused delete must not release the reservation");
+    assert_eq!(coordinator.tunnel_purge_reservations_released_total(), 0, "#17144: nothing was freed");
+    assert_eq!(coordinator.tunnel_purge_delete_refused_total(), 1, "#17144: the refused purge delete must be counted");
+    drop(_held);
+    let purged2 = coordinator.purge_remapped_tunnel_sessions(&[7], &coordinator.forwarding.clone());
+    assert_eq!(purged2, 1, "the next purge must retry and apply the delete");
+    assert!(!synced6600_contains(&coordinator, &key));
+    assert!(rx.try_recv().is_ok(), "the retried purge must emit its Close");
+}
+
 /// #14303: a PPTP session that reaches the standby only via bulk export must
 /// carry its call-id pair, or the import gate withholds it as
 /// `pptp-call-ids-not-carried` — the #13965 failure surviving on the resync
@@ -2286,6 +2319,281 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
              must stay out of the bulk export"
         );
     }
+}
+
+/// #17122 (R4-Q05-02): the shared-entry -> `SessionDelta` mapping is
+/// written ONCE (`SessionDelta::from_shared`); the HA bulk export
+/// (Open) and the tunnel-remap purge (Close) both go through it. This
+/// cell builds a `SyncedSessionEntry` with every carried field
+/// non-default (tunnel id 7, non-zero counters, `Some(true)` SNAT,
+/// FabricRedirect disposition) and asserts both production paths
+/// carry each value — the regression shape of #14303
+/// (`pptp_call_ids: 0` in both hand-written literals) and #14960
+/// (`fabric_redirect_sync: true` + `session_id: 0` in the bulk
+/// literal), which a per-site literal could silently reintroduce.
+///
+/// The purge Close encodes ONLY key/owner RG/close_flags/zones/
+/// purge_retirement/ingress identity on the wire (`encode_delta_frame`
+/// Close branch) — counters, session_id, pptp_call_ids and
+/// source_nat_static are not serialized there — so the purge leg
+/// pins the delta-level fields at the production push seam
+/// (`push_purge_close_deltas` input) and the Close frame bytes at the
+/// channel receiver. Asserting only the wire bytes would miss exactly
+/// the hand-literal revert this cell exists to catch.
+///
+/// FAIL-ON-REVERT: restore either hand-written literal (or zero any
+/// carried field in `from_shared`) and the matching assertion below
+/// goes RED. The purge's two deliberate overrides
+/// (`source_nat_static: None`, `fabric_redirect_sync: false`) are
+/// pinned as the ONLY divergences between the two deltas.
+#[test]
+fn from_shared_carries_every_shared_field_on_bulk_open_and_purge_close_17122() {
+    const SESSION_ID: u64 = 0x17122;
+    const PPTP_PAIR: u64 = 0x1111_2222_3333_4444;
+    let close_class = crate::session::TcpCloseClass::Closing.to_wire();
+    let handshake = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+
+    let mut entry = SyncedSessionEntry {
+        key: test_key(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: SESSION_ID,
+        tcp_close_class: close_class,
+        tcp_handshake_state: handshake,
+        rev_packets: 7,
+        fwd_packets: 11,
+        pptp_call_ids: PPTP_PAIR,
+        persistent_lease_hold: None,
+        source_nat_static: Some(true),
+    };
+    entry.metadata.owner_rg_id = 1;
+    entry.metadata.fabric_ingress = false;
+    entry.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    entry.decision.resolution.tunnel_endpoint_id = 7;
+
+    // (a) Bulk-export Open, through the production snapshot path.
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("activate RG 1");
+    let (sender, _rx) = crate::event_stream::EventStreamSender::test_sender(true, 16);
+    coordinator.event_stream = Some(sender);
+    let export = coordinator
+        .snapshot_all_sessions_export()
+        .expect("bulk export");
+    let open = export
+        .deltas_for_test()
+        .first()
+        .expect("the FabricRedirect forward row must be bulk-exported")
+        .clone();
+    // (b) Purge Close, through the production purge. A fresh
+    // coordinator is seeded with the SAME non-default entry (tunnel
+    // id 7, counters 11/7, `Some(true)` SNAT, FabricRedirect) and
+    // `purge_remapped_tunnel_sessions(&[7], ..)` drives it. The purge
+    // Close builder is not separately observable: the wire frame
+    // encodes only key/owner RG/flags/zones/retirement/ingress (see
+    // the doc comment), so the delta handed to the lossless push is
+    // captured thread-locally at `push_purge_close_deltas` and the
+    // encoded Close frame is read from the channel receiver. Both
+    // must carry every non-wire field the hand-written literal used
+    // to zero (counters, session_id, pptp_call_ids) plus the two
+    // deliberate overrides; the frame pins the wire-visible subset.
+    let mut purge_coordinator = Coordinator::new();
+    purge_coordinator.set_forwarding_for_test(ForwardingState::default());
+    publish_shared_session(
+        &purge_coordinator.sessions.synced,
+        &purge_coordinator.sessions.nat,
+        &purge_coordinator.sessions.forward_wire,
+        &purge_coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    let (purge_sender, purge_rx) =
+        crate::event_stream::EventStreamSender::test_sender(true, 16);
+    purge_coordinator.event_stream = Some(purge_sender);
+    let capture = super::ha::tunnel_purge::PurgeCloseDeltaCaptureForTest::start();
+    let purged =
+        purge_coordinator.purge_remapped_tunnel_sessions(&[7], &ForwardingState::default());
+    let captured = capture.take();
+    assert_eq!(purged, 1, "purge must remove the tunnel-id-7 row");
+    assert!(
+        purge_coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced")
+            .get(&entry.key)
+            .is_none(),
+        "purge must delete the shared row locally"
+    );
+    let close = captured
+        .first()
+        .expect("purge must hand exactly one Close delta to the lossless push")
+        .clone();
+    assert_eq!(
+        captured.len(),
+        1,
+        "purge must hand exactly one Close delta to the lossless push"
+    );
+    // The Close frame on the channel: type-2, carrying the entry key,
+    // owner RG and FLAG_FABRIC_REDIRECT (close_flags ORs the
+    // FabricRedirect disposition even though the delta's
+    // fabric_redirect_sync override is false at the struct level).
+    let frame = purge_rx
+        .try_recv()
+        .expect("purge Close frame must reach the connected consumer");
+    let bytes = frame.as_bytes();
+    assert_eq!(bytes[4], 2, "purge frame must be MSG_SESSION_CLOSE (2)");
+    assert_eq!(bytes[16], 4, "close payload: AddrFamily v4");
+    assert_eq!(bytes[17], entry.key.protocol, "close payload: protocol");
+    assert_eq!(
+        u16::from_le_bytes([bytes[18], bytes[19]]),
+        entry.key.src_port,
+        "close payload: src port"
+    );
+    assert_eq!(
+        u16::from_le_bytes([bytes[20], bytes[21]]),
+        entry.key.dst_port,
+        "close payload: dst port"
+    );
+    assert_eq!(
+        &bytes[22..26],
+        &[10, 0, 61, 102],
+        "close payload: src ip (test_key)"
+    );
+    assert_eq!(
+        &bytes[26..30],
+        &[172, 16, 80, 200],
+        "close payload: dst ip (test_key)"
+    );
+    assert_eq!(
+        i32::from_le_bytes(bytes[30..34].try_into().unwrap()),
+        entry.metadata.owner_rg_id as i32,
+        "close payload: owner RG"
+    );
+    assert_eq!(
+        bytes[34] & 1,
+        1,
+        "close flags: FLAG_FABRIC_REDIRECT (disposition OR, so the \
+         struct-level false override does not clear it on the wire)"
+    );
+    assert_eq!(bytes[34] & 2, 0, "close flags: fabric_ingress false");
+    assert_eq!(
+        u16::from_le_bytes([bytes[35], bytes[36]]),
+        entry.metadata.ingress_zone as u16,
+        "close payload: ingress zone"
+    );
+    assert_eq!(
+        u16::from_le_bytes([bytes[37], bytes[38]]),
+        entry.metadata.egress_zone as u16,
+        "close payload: egress zone"
+    );
+    assert_eq!(
+        bytes[51], 0,
+        "close payload: purge_retirement marker must stay 0"
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[52..56].try_into().unwrap()),
+        entry.metadata.ingress_ifindex,
+        "close payload: ingress ifindex"
+    );
+    assert_eq!(
+        u16::from_le_bytes([bytes[56], bytes[57]]),
+        entry.metadata.ingress_vlan_id,
+        "close payload: ingress VLAN"
+    );
+
+    // Every field the shared entry owns, on BOTH deltas.
+    for (name, delta) in [("open", &open), ("close", &close)] {
+        assert_eq!(delta.key, entry.key, "{name}: key");
+        assert_eq!(delta.decision, entry.decision, "{name}: decision");
+        assert_eq!(delta.metadata, entry.metadata, "{name}: metadata");
+        assert_eq!(delta.origin, entry.origin, "{name}: origin");
+        assert_eq!(
+            delta.session_id, SESSION_ID,
+            "{name}: session_id (#14960 regression shape)"
+        );
+        assert_eq!(
+            delta.pptp_call_ids, PPTP_PAIR,
+            "{name}: pptp_call_ids (#14303 regression shape)"
+        );
+        assert_eq!(delta.tcp_close_class, close_class, "{name}: tcp_close_class");
+        // tcp_handshake_state is asserted per-delta below: the bulk
+        // Open restamps it from node-wide completion evidence (#16217)
+        // — publish_shared_session synthesizes a reverse companion
+        // carrying this row's snapshotted rev_packets (7 > 0), so the
+        // Open reads Established while the purge Close keeps the
+        // entry's own wire.
+        assert_eq!(delta.counters.fwd_packets, 11, "{name}: fwd_packets");
+        assert_eq!(delta.counters.rev_packets, 7, "{name}: rev_packets");
+        assert_eq!(delta.counters.fwd_bytes, 0, "{name}: fwd_bytes (not snapshotted)");
+        assert_eq!(delta.counters.rev_bytes, 0, "{name}: rev_bytes (not snapshotted)");
+        // No-local-snapshot defaults, set once in `from_shared`.
+        assert_eq!(
+            delta.provenance,
+            crate::session::ExportProvenance::Incremental,
+            "{name}: provenance"
+        );
+        assert!(!delta.bulk_resync, "{name}: bulk_resync");
+        assert!(!delta.is_admission, "{name}: is_admission");
+        assert_eq!(delta.policy_generation, 0, "{name}: policy_generation");
+        assert!(!delta.purge_retirement, "{name}: purge_retirement");
+        assert_eq!(delta.created_ns, 0, "{name}: created_ns");
+        assert_eq!(delta.last_seen_ns, 0, "{name}: last_seen_ns");
+        assert_eq!(delta.observed_tos, 0, "{name}: observed_tos");
+        assert_eq!(delta.observed_tcp_flags, 0, "{name}: observed_tcp_flags");
+    }
+    assert_eq!(open.kind, crate::session::SessionDeltaKind::Open);
+    assert_eq!(close.kind, crate::session::SessionDeltaKind::Close);
+    assert_eq!(
+        close.tcp_handshake_state, handshake,
+        "purge Close must carry the entry's own handshake wire"
+    );
+    assert_eq!(
+        open.tcp_handshake_state,
+        crate::session::TcpHandshakeState::Established.to_wire(),
+        "bulk Open restamps Established on the synthesized companion's \
+         snapshotted rev_packets (#16217)"
+    );
+
+    // The disposition-derived flag: true on the Open (FabricRedirect
+    // row), and the purge's deliberate override forces it false on the
+    // Close even for the same row.
+    assert!(
+        open.fabric_redirect_sync,
+        "FabricRedirect disposition must derive fabric_redirect_sync on the Open (#14960)"
+    );
+    assert!(
+        !close.fabric_redirect_sync,
+        "purge Close must keep its deliberate fabric_redirect_sync: false override"
+    );
+    // source_nat_static: carried on the Open, deliberately dropped on
+    // the purge Close.
+    assert_eq!(
+        open.source_nat_static,
+        Some(true),
+        "bulk Open must carry the entry's source-NAT provenance"
+    );
+    assert_eq!(
+        close.source_nat_static, None,
+        "purge Close must keep its deliberate source_nat_static: None override"
+    );
 }
 
 #[test]
@@ -5893,9 +6201,11 @@ fn upsert_synced_session_refuses_standalone_reverse_8015() {
          derived from and must be refused (#8015)"
     );
     assert_eq!(
-        SyncedImportOutcome::RejectedStandaloneReverse.refusal_reason(),
-        Some("standalone-reverse"),
-        "the refusal must carry a stable reason token — Go discriminates a \
+        SyncedImportOutcome::RejectedStandaloneReverse.wire_error(),
+        Some(format!(
+            "{SYNCED_IMPORT_REFUSED_PREFIX}standalone-reverse"
+        )),
+        "the refusal must carry a stable wire token — Go discriminates a \
          SEMANTIC refusal from a transport failure on the token, and a transport \
          failure gates HA takeover-readiness (#5247)"
     );
@@ -7248,7 +7558,7 @@ impl Fixture9714 {
 ///
 /// THERE IS DELIBERATELY NO V6 TWIN, and the asymmetry is a decision rather than
 /// an oversight. The v6 peer delete reaches identical code:
-/// `delete_peer_synced_session` is one function over a `SessionKey` that carries
+/// `delete_synced` with `SyncedDeleteMode::PEER` is one function over a `SessionKey` that carries
 /// `addr_family` as a FIELD, `delete_synced_session_gen_marked` is its only
 /// implementation, `handlers/sync_session.rs` its only call site, and the delete
 /// handler contains no family branch at all. The predicate under test —
@@ -7278,7 +7588,7 @@ fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
@@ -7336,7 +7646,7 @@ fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
 
     assert_eq!(
         outcome,
@@ -7704,7 +8014,7 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // PREMISES fail fast (a broken fixture makes the cell meaningless); PROPERTIES are
@@ -7803,7 +8113,7 @@ fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     assert_eq!(
@@ -7838,7 +8148,7 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     assert_eq!(
@@ -7874,7 +8184,7 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.reverse_key.clone(), false);
+        .delete_synced(fixture.reverse_key.clone(), SyncedDeleteMode::PEER, false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
@@ -8089,7 +8399,7 @@ fn activation_fan_out_collects_live_queues_only_9900() {
 /// key — the reverse shared entry survives and no reverse `DeleteSynced` is
 /// queued. The sender (a purge-retirement close) already decided every
 /// companion; deriving here would destroy a session the purge deliberately
-/// preserved. Production shape: the real `delete_peer_synced_session` on a
+/// preserved. Production shape: the real peer-mode `delete_synced` on a
 /// real Coordinator (shared maps + worker queues + session-map fd).
 #[test]
 fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
@@ -8101,7 +8411,7 @@ fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), true);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, true);
     assert_eq!(outcome, SyncedDeleteOutcome::Applied, "forward-only delete must apply");
     assert!(
         !fixture.shared_has(&fixture.forward.key),
@@ -8128,7 +8438,7 @@ fn ordinary_peer_delete_retires_both_halves_9752() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
     assert_eq!(outcome, SyncedDeleteOutcome::Applied, "ordinary delete must apply");
     assert!(
         !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
@@ -9614,7 +9924,7 @@ fn declined_delete_fixture_9960() -> (
             );
             published.wait();
         });
-        let outcome = domain.delete_peer_synced_session(key.clone(), false);
+        let outcome = domain.delete_synced(key.clone(), SyncedDeleteMode::PEER, false);
         publisher.join().expect("decline publisher");
         outcome
     });
@@ -9760,7 +10070,7 @@ fn an_unraced_peer_delete_still_reports_applied_9960() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
     assert!(
         matches!(outcome, SyncedDeleteOutcome::Applied),
         "an applied peer delete must retain the Applied outcome"
@@ -9777,7 +10087,7 @@ fn early_ownership_refusal_keeps_its_original_outcome_9960() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
     assert!(
         matches!(outcome, SyncedDeleteOutcome::RefusedLocalOwned),
         "the #9714 early ownership refusal changed outcome"
@@ -9796,7 +10106,7 @@ fn single_threaded_peer_delete_never_spuriously_declines_9960() {
         let outcome = fixture
             .coordinator
             .session_domain()
-            .delete_peer_synced_session(fixture.forward.key.clone(), false);
+            .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::PEER, false);
         assert!(matches!(outcome, SyncedDeleteOutcome::Applied));
     }
 }
@@ -10854,10 +11164,11 @@ fn scoped_peer_delete_matched_removes_and_fans_out_conditional_10512() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(
+        .delete_synced(
             fixture.forward.key.clone(),
+            SyncedDeleteMode::peer_mirror_scoped(fixture.forward.session_id)
+                .expect("fixture session_id is non-zero"),
             false,
-            fixture.forward.session_id,
         );
     // Applied in production; RefusedMirrorDelete here (no BPF fds in unit
     // tests, and scoped deletes are mirror-strict). Either way the
@@ -10920,10 +11231,11 @@ fn scoped_peer_delete_captures_companion_id_before_reverse_removal_15784() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(
+        .delete_synced(
             fixture.forward.key.clone(),
+            SyncedDeleteMode::peer_mirror_scoped(fixture.forward.session_id)
+                .expect("fixture session_id is non-zero"),
             false,
-            fixture.forward.session_id,
         );
     assert!(
         matches!(
@@ -10971,10 +11283,11 @@ fn scoped_peer_delete_replaced_companion_survives_queue_delay_15784() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(
+        .delete_synced(
             fixture.forward.key.clone(),
+            SyncedDeleteMode::peer_mirror_scoped(fixture.forward.session_id)
+                .expect("fixture session_id is non-zero"),
             false,
-            fixture.forward.session_id,
         );
     assert!(matches!(
         outcome,
@@ -11039,7 +11352,7 @@ fn scoped_peer_delete_mismatched_survives_and_counts_10512() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(fixture.forward.key.clone(), false, 0xDEADBEEF);
+        .delete_synced(fixture.forward.key.clone(), SyncedDeleteMode::peer_mirror_scoped(0xDEADBEEF).expect("non-zero"), false);
     assert!(
         matches!(outcome, SyncedDeleteOutcome::RefusedIdentity),
         "mismatched scoped delete must refuse identity, got {outcome:?}"
@@ -11077,7 +11390,7 @@ fn scoped_peer_delete_absent_is_stale_without_side_effects_10512() {
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(missing, false, 0xF30512);
+        .delete_synced(missing, SyncedDeleteMode::peer_mirror_scoped(0xF30512).expect("non-zero"), false);
     assert!(
         matches!(outcome, SyncedDeleteOutcome::StaleForward),
         "absent scoped delete must be StaleForward, got {outcome:?}"
@@ -11094,7 +11407,9 @@ fn scoped_peer_delete_absent_is_stale_without_side_effects_10512() {
 
 /// #10512 scoped entry with zero identity refuses WITHOUT touching the
 /// table: 0 is identity-missing (plan §2.1), and the callee's legacy
-/// "0 disables the check" must not leak through this API.
+/// "0 disables the check" must not leak through this API. #17133: the
+/// scoped mode is unconstructible from zero, so the refusal is the
+/// constructor's `None`, mapped here exactly as the handler maps it.
 #[test]
 fn scoped_peer_delete_zero_identity_refuses_without_side_effects_10512() {
     use super::session_import::SyncedDeleteOutcome;
@@ -11105,10 +11420,17 @@ fn scoped_peer_delete_zero_identity_refuses_without_side_effects_10512() {
         WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
         None,
     );
-    let outcome = fixture
-        .coordinator
-        .session_domain()
-        .delete_peer_synced_session_mirror_scoped(fixture.forward.key.clone(), false, 0);
+    assert!(
+        SyncedDeleteMode::peer_mirror_scoped(0).is_none(),
+        "zero must be identity-missing: no scoped mode may be built from it"
+    );
+    let outcome = match SyncedDeleteMode::peer_mirror_scoped(0) {
+        Some(mode) => fixture
+            .coordinator
+            .session_domain()
+            .delete_synced(fixture.forward.key.clone(), mode, false),
+        None => SyncedDeleteOutcome::RefusedIdentity,
+    };
     assert!(
         matches!(outcome, SyncedDeleteOutcome::RefusedIdentity),
         "zero-identity scoped delete must refuse, got {outcome:?}"
@@ -12051,9 +12373,9 @@ fn upsert_synced_session_refuses_stale_zone_replay_10612() {
         "a removed-zone replay must be refused before shared publication (#10612)"
     );
     assert_eq!(
-        SyncedImportOutcome::RejectedStaleZone.refusal_reason(),
-        Some("stale-zone"),
-        "the refusal must carry a stable reason token"
+        SyncedImportOutcome::RejectedStaleZone.wire_error(),
+        Some(format!("{SYNCED_IMPORT_REFUSED_PREFIX}stale-zone")),
+        "the refusal must carry a stable wire token"
     );
     {
         let synced = coordinator.sessions.synced.lock().expect("shared sessions");

@@ -183,6 +183,102 @@ fn forwarding_state_refresh_preserves_three_color_runtime_state() {
     assert_eq!(status[0].drop_packets, 1);
 }
 
+// #17220: builder-level cell for the production entry. Production never
+// calls the policy-parsing wrappers above — it parses once via
+// `PreparedPolicyState::parse_snapshot` and threads the resulting
+// `PolicyState` (and its `scheduler_lease`) into
+// `build_forwarding_state_with_preparsed_policy_and_previous`. Before this
+// cell that entry had 0 direct tests, so a regression in how the prepared
+// state is threaded (dropping it for a re-parse, losing the lease) was
+// invisible at builder level.
+#[test]
+fn preparsed_policy_state_threads_through_production_build_17220() {
+    let snapshot = ConfigSnapshot {
+        zones: vec![
+            crate::ZoneSnapshot {
+                name: "trust".into(),
+                id: 7,
+                ..Default::default()
+            },
+            crate::ZoneSnapshot {
+                name: "untrust".into(),
+                id: 9,
+                ..Default::default()
+            },
+        ],
+        policies: vec![crate::PolicyRuleSnapshot {
+            name: "sched-permit".into(),
+            from_zone: "trust".into(),
+            to_zone: "untrust".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            action: "permit".into(),
+            scheduler_name: "business-hours".into(),
+            ..Default::default()
+        }],
+        default_policy: "deny".into(),
+        ..Default::default()
+    };
+    let policy_counters = PolicyCounterStore::default();
+    let lease = std::sync::Arc::new(crate::policy::SchedulerHeartbeatLease::default());
+    let mut prepared = crate::policy::PreparedPolicyState::parse_snapshot(
+        &snapshot,
+        &policy_counters,
+        std::sync::Arc::clone(&lease),
+    )
+    .expect("preparsed policy must parse");
+    policy_counters.reset_parse_calls_for_test();
+
+    let prev = build_forwarding_state(&snapshot);
+    let state = build_forwarding_state_with_preparsed_policy_and_previous(
+        &snapshot,
+        &policy_counters,
+        &crate::nat::NatCounterStore::default(),
+        Some(&prev),
+        prepared.take_state(),
+    )
+    .expect("production preparsed build must succeed");
+    prepared.commit();
+
+    // The prepared PolicyState is threaded verbatim: the build must not
+    // re-parse policy against the counter store.
+    assert_eq!(
+        policy_counters.parse_calls_for_test(),
+        0,
+        "production build must consume the prepared PolicyState, not re-parse"
+    );
+    // The scheduler_lease handed to parse_snapshot survives into the built
+    // state's policy — it is the same Arc, not a fresh default.
+    assert!(
+        std::sync::Arc::ptr_eq(&state.policy.scheduler_lease, &lease),
+        "scheduler_lease from PreparedPolicyState must thread into the built state"
+    );
+    assert!(
+        state.policy.has_scheduled_rules(),
+        "the scheduled rule from the prepared parse must be present"
+    );
+    // previous-state carry-over still runs on the production entry.
+    assert!(
+        std::sync::Arc::ptr_eq(&state.ipsec_sa, &prev.ipsec_sa),
+        "production build must carry ipsec_sa forward from previous"
+    );
+    // And the threaded policy actually evaluates.
+    assert_eq!(
+        evaluate_policy(
+            &state.policy,
+            7,
+            9,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+            6,
+            12345,
+            443,
+        ),
+        PolicyAction::Permit,
+    );
+}
+
 #[test]
 fn build_cos_state_translates_scheduler_map_entries() {
     let snapshot = ConfigSnapshot {
@@ -7866,6 +7962,247 @@ fn interface_vlan_id_in_range_builds_exactly() {
     assert_eq!(state.egress.get(&31).expect("egress 31").vlan_id, 0);
 }
 
+/// #17206: every builder site shares the VlanId decoder verdict.
+/// fail-on-revert: restoring the mirror `unwrap_or(0)`, the native
+/// 4094 cap, or a raw ambiguity/prune comparison makes a cell below
+/// build (or count apart) instead of failing/counting as decoded.
+#[test]
+fn vlan_decode_once_parity_17206() {
+    use crate::MirrorConfigSnapshot;
+    // Mirror 4097 and native 4095-vs-4097 parity: same decoder verdict.
+    for (label, snap) in [
+        (
+            "mirror 4097",
+            ConfigSnapshot {
+                mirror_configs: vec![MirrorConfigSnapshot {
+                    ingress_ifindex: 11,
+                    output_ifindex: 22,
+                    ingress_vlan_id: 4097,
+                    unit_scoped: true,
+                    ingress_unit: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ),
+        (
+            "mirror -1 scoped is untagged, not an error",
+            ConfigSnapshot {
+                mirror_configs: vec![MirrorConfigSnapshot {
+                    ingress_ifindex: 11,
+                    output_ifindex: 22,
+                    ingress_vlan_id: -1,
+                    unit_scoped: true,
+                    ingress_unit: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ),
+    ] {
+        let res = try_build_forwarding_state_with_policy_counters(
+            &snap,
+            &crate::policy::PolicyCounterStore::default(),
+        );
+        if label == "mirror 4097" {
+            match res.expect_err("mirror 4097 must fail closed") {
+                crate::policy::SnapshotIntegrityError::InterfaceVlanOutOfRange {
+                    vlan_id, ..
+                } => assert_eq!(vlan_id, 4097),
+                other => panic!("mirror 4097: expected InterfaceVlanOutOfRange, got {other:?}"),
+            }
+        } else {
+            let st = res.expect("mirror -1 decodes to untagged 0");
+            assert!(
+                st.mirror_configs_scoped.contains_key(&(11, 0, 0)),
+                "mirror -1 must key the untagged scope, got {:?}",
+                st.mirror_configs_scoped.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+    // Native 4095 accepted (wire-representable, same as vlan_id);
+    // native 4097 rejected with the raw value in the error.
+    let native_ok = ConfigSnapshot {
+        zones: vec![crate::ZoneSnapshot {
+            name: "trust".into(),
+            id: 11,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/1".into(),
+                ifindex: 10,
+                native_vlan_id: 4095,
+                is_unit: Some(false),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0/0/1.4095".into(),
+                zone: "trust".into(),
+                ifindex: 14095,
+                parent_ifindex: 10,
+                vlan_id: 4095,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    try_build_forwarding_state_with_policy_counters(
+        &native_ok,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("native 4095 is wire-representable and must build like vlan_id 4095");
+    let native_bad = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0/0/1".into(),
+            ifindex: 10,
+            native_vlan_id: 4097,
+            is_unit: Some(false),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    match try_build_forwarding_state_with_policy_counters(
+        &native_bad,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect_err("native 4097 must fail closed")
+    {
+        crate::policy::SnapshotIntegrityError::InterfaceVlanOutOfRange {
+            interface,
+            vlan_id,
+        } => {
+            assert_eq!(interface, "ge-0/0/1");
+            assert_eq!(vlan_id, 4097);
+        }
+        other => panic!("native 4097: expected InterfaceVlanOutOfRange, got {other:?}"),
+    }
+    // Negative native decodes to None (no native), not an error.
+    let native_neg = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0/0/1".into(),
+            ifindex: 10,
+            native_vlan_id: -1,
+            is_unit: Some(false),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    try_build_forwarding_state_with_policy_counters(
+        &native_neg,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("native -1 decodes to untagged/None and must build");
+    // Ambiguity count: -1 and 0 are the same decoded VLAN, so two
+    // unit rows on one bind with those raw values are ambiguous and
+    // neither is admitted to ingress_unit_by_logical.
+    let amb = ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "wg0.0".into(),
+                ifindex: 100,
+                parent_ifindex: 10,
+                vlan_id: -1,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "wg0.1".into(),
+                ifindex: 101,
+                parent_ifindex: 10,
+                vlan_id: 0,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let st = build_forwarding_state(&amb);
+    assert!(
+        !st.ingress_unit_by_logical.contains_key(&100)
+            && !st.ingress_unit_by_logical.contains_key(&101),
+        "-1 and 0 decode to the same VLAN and must count as ambiguous, got {:?}",
+        st.ingress_unit_by_logical
+    );
+    // Control: distinct decoded VIDs are unambiguous.
+    let distinct = ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/1.0".into(),
+                ifindex: 100,
+                parent_ifindex: 10,
+                vlan_id: 0,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0/0/1.100".into(),
+                ifindex: 101,
+                parent_ifindex: 10,
+                vlan_id: 100,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let st = build_forwarding_state(&distinct);
+    assert_eq!(st.ingress_unit_by_logical.get(&100), Some(&0));
+    assert_eq!(st.ingress_unit_by_logical.get(&101), Some(&100));
+    // VID-0 prune: a disabled/unzoned unit-0 row with vlan_id -1 owns
+    // (bind,0) via the decoded 0 in the main loop; only the decoded
+    // prune comparison (row_vlan == 0) removes it. Raw `vlan_id == 0`
+    // would leave the key. Tagged sibling nominates the bind as
+    // tagged-only. Assert the key is PRUNED from the resolved map.
+    let prune = ConfigSnapshot {
+        zones: vec![crate::ZoneSnapshot {
+            name: "trust".into(),
+            id: 11,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/9.100".into(),
+                zone: "trust".into(),
+                ifindex: 110,
+                parent_ifindex: 10,
+                vlan_id: 100,
+                is_unit: Some(true),
+                hardware_addr: "02:00:00:00:00:6e".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0/0/9.0".into(),
+                zone: String::new(),
+                ifindex: 100,
+                parent_ifindex: 10,
+                vlan_id: -1,
+                is_unit: Some(true),
+                hardware_addr: "02:00:00:00:00:64".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let st = try_build_forwarding_state_with_policy_counters(
+        &prune,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("VID-0 prune fixture must build");
+    assert!(
+        !st.ingress_logical_ifindex.contains_key(&(10, 0)),
+        "decoded VID-0 prune must remove (10,0) owned by the disabled/unzoned \
+         unit-0 row with vlan_id -1, got {:?}",
+        st.ingress_logical_ifindex
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::resolve_ingress_logical_ifindex(&st, 10, 0),
+        None,
+        "pruned (10,0) must not resolve"
+    );
+}
+
 /// #2706: a NEGATIVE interface MTU fails the snapshot CLOSED via
 /// `InterfaceMtuInvalid`. fail-on-revert: restoring `iface.mtu.max(0) as
 /// usize` silently collapses -1 → 0, the egress MTU guard then treats 0 as
@@ -10605,9 +10942,9 @@ fn config_apply_builds_both_per_zone_counter_slot_maps_3651() {
     // carry-forward the store is recreated empty and every count resets to 0 on
     // every commit.
     record_zone_flood_drop(&first.flood_counter_slot_map, TRUST, "syn-flood");
-    flush_recorded_flood_counters(&first.flood_counter_store, &first.flood_counter_slot_map);
+    flush_recorded_flood_counters(&first.flood_counter_store, &first.flood_counter_slot_map, &first.flood_counter_caches);
     record_zone_traffic(&first.zone_counter_slot_map, TRUST, UNTRUST, 1500);
-    flush_recorded_zone_counters(&first.zone_counter_store, &first.zone_counter_slot_map);
+    flush_recorded_zone_counters(&first.zone_counter_store, &first.zone_counter_slot_map, &first.zone_counter_caches);
 
     let second = build_forwarding_state_with_policy_counters_and_previous(
         &snapshot,
@@ -10617,7 +10954,7 @@ fn config_apply_builds_both_per_zone_counter_slot_maps_3651() {
     )
     .expect("re-apply of a clean snapshot must build");
 
-    let flood = second.flood_counter_store.snapshot();
+    let flood = crate::afxdp::flood_counters::flood_counter_snapshot(&second.flood_counter_store);
     let trust_flood = flood
         .iter()
         .find(|r| r.zone_id == TRUST)
@@ -10628,7 +10965,7 @@ fn config_apply_builds_both_per_zone_counter_slot_maps_3651() {
          per-zone counters survive a commit"
     );
 
-    let traffic = second.zone_counter_store.snapshot();
+    let traffic = crate::afxdp::zone_counters::zone_counter_snapshot(&second.zone_counter_store);
     let trust_traffic = traffic
         .iter()
         .find(|r| r.zone_id == TRUST)
@@ -10806,9 +11143,9 @@ fn zone_counter_prev_state() -> ForwardingState {
     };
     let prev = build_forwarding_state(&prev_snapshot);
     record_zone_traffic(&prev.zone_counter_slot_map, 100, 200, 64);
-    flush_recorded_zone_counters(&prev.zone_counter_store, &prev.zone_counter_slot_map);
+    flush_recorded_zone_counters(&prev.zone_counter_store, &prev.zone_counter_slot_map, &prev.zone_counter_caches);
     assert_eq!(
-        prev.zone_counter_store.snapshot().len(),
+        crate::afxdp::zone_counters::zone_counter_snapshot(&prev.zone_counter_store).len(),
         2,
         "both zones must be counting before the build under test"
     );
@@ -10834,7 +11171,7 @@ fn zone_counter_snapshot_with_zones(zone_ids: &[u32]) -> ConfigSnapshot {
 /// The candidate zone set every rejection row below builds on: it DROPS live
 /// zone 200 and ADDS a brand-new zone 300, so one drive exercises both live-store
 /// mutations a rejected build must not make — the destructive `reconcile` prune
-/// of 200, and the `ZoneCounterSlotMap::build` get-or-create of 300.
+/// of 200, and the `ZoneSlotMap::build` get-or-create of 300.
 const ZONE_COUNTER_CANDIDATE_ZONES: [u32; 2] = [100, 300];
 
 /// FOUR of the inner builder's ten fallible integrity belts, chosen by
@@ -11348,7 +11685,7 @@ fn rejected_build_does_not_prune_live_zone_counters() {
             "{label}: rejected through a different belt than the row names              ({err:?}) — the row is no longer exercising the belt it is here for"
         );
 
-        let live = prev.zone_counter_store.snapshot();
+        let live = crate::afxdp::zone_counters::zone_counter_snapshot(&prev.zone_counter_store);
         assert_eq!(
             live.len(),
             2,
@@ -11364,7 +11701,7 @@ fn rejected_build_does_not_prune_live_zone_counters() {
 #[test]
 fn rejected_build_does_not_create_zone_blocks_in_the_live_store() {
     // The mirror image of the prune, and the half the sparse snapshot hides.
-    // `ZoneCounterSlotMap::build` GET-OR-CREATES one atomic block per
+    // `ZoneSlotMap::build` GET-OR-CREATES one atomic block per
     // SLOT-ASSIGNED zone — a subset of the configured set, since it skips zone
     // id 0 and stops at `ZONE_COUNTER_ASSIGNABLE_SLOTS` — resolved out of the
     // store it is handed — and that is
@@ -11695,9 +12032,7 @@ fn accepted_build_defers_the_prune_to_the_commit_point() {
     // Half 1 — the build itself is now ADDITIVE ONLY. Zone 200 is absent from
     // this snapshot and its totals are still here, because no apply has
     // committed yet.
-    let mut after_build: Vec<u32> = next
-        .zone_counter_store
-        .snapshot()
+    let mut after_build: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&next.zone_counter_store)
         .iter()
         .map(|r| r.zone_id)
         .collect();
@@ -11714,7 +12049,7 @@ fn accepted_build_defers_the_prune_to_the_commit_point() {
     // moving it) reds here, and every rejected-apply assertion stays green.
     commit_zone_counter_prune(&next);
 
-    let live = next.zone_counter_store.snapshot();
+    let live = crate::afxdp::zone_counters::zone_counter_snapshot(&next.zone_counter_store);
     assert_eq!(
         live.len(),
         1,
@@ -11727,14 +12062,14 @@ fn accepted_build_defers_the_prune_to_the_commit_point() {
     );
     // The prune is on the shared store, so the previous state's handle
     // observes it too (same Arc).
-    assert_eq!(prev.zone_counter_store.snapshot().len(), 1);
+    assert_eq!(crate::afxdp::zone_counters::zone_counter_snapshot(&prev.zone_counter_store).len(), 1);
 }
 
 // ── #3651 flood half of the #5716/#6832 rejected-build guarantee ──────
 //
 // The flood-event store is the traffic store's exact sibling: `Arc`-backed,
 // carried forward through the SAME `previous` handle, get-or-created per
-// slot-assigned zone by `FloodCounterSlotMap::build`, and pruned by the same
+// slot-assigned zone by `ZoneSlotMap::build`, and pruned by the same
 // `reconcile`. #6938 therefore binds it inside `attach_zone_counters` and
 // prunes it inside `commit_zone_counter_prune` rather than giving it its own
 // pair, so it inherits the ordering structurally.
@@ -11755,7 +12090,7 @@ fn flood_counter_prev_state() -> ForwardingState {
     let prev = zone_counter_prev_state();
     record_zone_flood_drop(&prev.flood_counter_slot_map, 100, "syn-flood");
     record_zone_flood_drop(&prev.flood_counter_slot_map, 200, "syn-flood");
-    flush_recorded_flood_counters(&prev.flood_counter_store, &prev.flood_counter_slot_map);
+    flush_recorded_flood_counters(&prev.flood_counter_store, &prev.flood_counter_slot_map, &prev.flood_counter_caches);
     assert_eq!(
         flood_store_zone_ids(&prev),
         vec![100, 200],
@@ -11766,9 +12101,7 @@ fn flood_counter_prev_state() -> ForwardingState {
 
 /// Sorted zone ids currently tracked by a state's flood store.
 fn flood_store_zone_ids(state: &ForwardingState) -> Vec<u32> {
-    let mut ids: Vec<u32> = state
-        .flood_counter_store
-        .snapshot()
+    let mut ids: Vec<u32> = crate::afxdp::flood_counters::flood_counter_snapshot(&state.flood_counter_store)
         .iter()
         .map(|r| r.zone_id)
         .collect();
@@ -11851,7 +12184,7 @@ fn accepted_build_defers_the_flood_prune_to_the_commit_point_3651() {
          well as the traffic store — commit_zone_counter_prune reconciles both"
     );
     // The survivor keeps its carried-forward count rather than resetting.
-    let live = next.flood_counter_store.snapshot();
+    let live = crate::afxdp::flood_counters::flood_counter_snapshot(&next.flood_counter_store);
     assert_eq!(live[0].zone_id, 100);
     assert!(
         live[0].syn_flood_events > 0,

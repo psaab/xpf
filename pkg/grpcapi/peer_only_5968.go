@@ -143,20 +143,13 @@ func (s *Server) PeerSessions(ctx context.Context, req *pb.GetSessionsRequest) (
 	// these fields; PageToken is carried because that function suppresses the
 	// peer fetch on a non-first page, and dropping it here would re-attach the
 	// peer table to every page and over-count it (#3423).
-	peerReq := &pb.GetSessionsRequest{IncludePeer: true}
+	// The selector travels via the shared #17189 helper; the list and
+	// pagination state below stays local to this hop.
+	peerReq := selectorFromSessions(req)
+	peerReq.IncludePeer = true
 	if req != nil {
 		peerReq.Limit = req.Limit
 		peerReq.Offset = req.Offset
-		peerReq.Zone = req.Zone
-		peerReq.Protocol = req.Protocol
-		peerReq.SourcePrefix = req.SourcePrefix
-		peerReq.DestinationPrefix = req.DestinationPrefix
-		peerReq.SourcePort = req.SourcePort
-		peerReq.DestinationPort = req.DestinationPort
-		peerReq.NatOnly = req.NatOnly
-		peerReq.Application = req.Application
-		peerReq.InterfaceFilter = req.InterfaceFilter
-		peerReq.SourceNatPool = req.SourceNatPool
 		peerReq.PageSize = req.PageSize
 		peerReq.PageToken = req.PageToken
 		peerReq.NoEnrich = req.NoEnrich

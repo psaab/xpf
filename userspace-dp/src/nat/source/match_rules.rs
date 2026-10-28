@@ -75,7 +75,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// for an address-only record: #6528's `unlink_live_allocation_locked` clears
 /// the reverse-identity token and frees NO port bit for an `address_only`
 /// allocation, which is exactly what this mint claimed.
-
 /// FOLD (#16350 fold-2): pure overlap predicate behind
 /// [`reject_peer_owned_identity`] — true when a peer pool / interface
 /// allocator / static external already owns this wire identity.
@@ -292,7 +291,7 @@ fn reject_peer_owned_identity_zoned(
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn match_source_nat(
     // #6751: threaded for signature symmetry with the tuple entry point. This
     // wrapper supplies NO L4 tuple, so it always takes the `tuple_unknown`
@@ -326,7 +325,7 @@ pub(crate) fn match_source_nat(
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn match_source_nat_result(
     // #6751: see `match_source_nat` — probe-pure, threaded for symmetry.
     iface_allocs: &InterfaceNatAllocators,
@@ -368,14 +367,6 @@ pub(crate) fn match_source_nat_result(
     )
 }
 
-/// #2218: same as `match_source_nat_result_for_tuple` but the matched
-/// rule's per-rule hit counter (if any) is written to `matched_counter`.
-/// The `SourceNatLookup` enum stays wire-/Eq-frozen (it is destructured
-/// and `matches!`-compared in many tests and over no wire), so the counter
-/// rides out via this out-parameter rather than a new enum payload — the
-/// least-invasive shape. The cold-path commit site clones the captured
-/// `Arc` and increments it once per committed translated flow.
-#[allow(clippy::too_many_arguments)]
 /// #8447: the rule-match outcome counters live on this thin wrapper, so they
 /// observe EVERY return of the real body. The body has many early returns and
 /// per-return instrumentation would silently under-count the moment another is
@@ -385,7 +376,14 @@ pub(crate) fn match_source_nat_result(
 /// `consulted` is bumped for every call including `NoMatch`, because the
 /// question it answers is "did a packet reach source-NAT at all", not "did NAT
 /// act on one". Without it a zero in the other three is unreadable.
-#[allow(clippy::too_many_arguments)]
+/// #2218: same as `match_source_nat_result_for_tuple` but the matched
+/// rule's per-rule hit counter (if any) is written to `matched_counter`.
+/// The `SourceNatLookup` enum stays wire-/Eq-frozen (it is destructured
+/// and `matches!`-compared in many tests and over no wire), so the counter
+/// rides out via this out-parameter rather than a new enum payload — the
+/// least-invasive shape. The cold-path commit site clones the captured
+/// `Arc` and increments it once per committed translated flow.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn match_source_nat_result_for_tuple(
     iface_allocs: &InterfaceNatAllocators,
     rules: &[SourceNatRule],
@@ -427,7 +425,7 @@ pub(crate) fn match_source_nat_result_for_tuple(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn match_source_nat_result_for_tuple_with_icmp(
     iface_allocs: &InterfaceNatAllocators,
     rules: &[SourceNatRule],
@@ -479,7 +477,7 @@ pub(crate) fn match_source_nat_result_for_tuple_with_icmp(
     out
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn match_source_nat_result_for_tuple_inner(
     // #6751: the node-lifetime interface-mode identity registry. Interface
     // SNAT has no pool to allocate from, so this is where its translated

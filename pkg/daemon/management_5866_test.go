@@ -99,6 +99,17 @@ func cfgFor(reg *fakeReg, addr string, useTLS bool, httpsAddr string, auth *api.
 	return api.Config{Addr: addr, TLS: useTLS, HTTPSAddr: httpsAddr, Auth: auth, ListenFunc: reg.listen}
 }
 
+// cfgForDir is cfgFor with the durable self-signed directory pinned at
+// construction (#17213): NewServer installs the production cert loader
+// for dir, so a later TLS reconcile loads/mints there instead of
+// /etc/xpf/tls. The start config MUST carry it — the directory is a
+// construction-time property of the server, not a reconcile input.
+func cfgForDir(reg *fakeReg, dir string, addr string, useTLS bool, httpsAddr string, auth *api.AuthConfig) api.Config {
+	cfg := cfgFor(reg, addr, useTLS, httpsAddr, auth)
+	cfg.TLSSelfSignedDir = dir
+	return cfg
+}
+
 func newTestMgmt(reg *fakeReg) *managementReconciler {
 	// reconcileTo/startTo do not dereference d (only desired()/start() do), so a
 	// bare Daemon is sufficient for these listener-lifecycle tests.
@@ -170,7 +181,7 @@ func TestMgmtReconcileBindChange_5866(t *testing.T) {
 // reconcile therefore re-minted a fresh in-memory cert whose leaf bytes
 // differed. In production (writable /etc/xpf/tls) the second reconcile RELOADS
 // the same pair -> identical bytes -> the old assertion would have FAILED. This
-// test redirects certGen to a writable temp dir (SetTLSCertDirForTest) so the
+// test pins certGen to a writable temp dir (Config.TLSSelfSignedDir) so the
 // shipping durable-reload path is actually exercised, and asserts the intended
 // invariant: the listener rebinds, but the durable cert is reloaded AS-IS.
 func TestMgmtReconcileTLSChange_5866(t *testing.T) {
@@ -179,22 +190,23 @@ func TestMgmtReconcileTLSChange_5866(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start HTTP-only.
-	if err := m.startTo(ctx, cfgFor(reg, "10.0.0.1:8080", false, "", nil)); err != nil {
+	// Start HTTP-only, with the self-signed directory pinned at
+	// construction to a WRITABLE temp dir so the durable-reload path
+	// (#1916 D6) genuinely persists — otherwise the write fails and every
+	// reconcile re-mints a fresh in-memory cert, masking the real invariant
+	// (#6381). The directory is construction-time (#17213): startTo is
+	// HTTP-only, so certGen is untouched until the first enable-TLS
+	// reconcile below, but it must already point at the temp dir.
+	dir := t.TempDir()
+	if err := m.startTo(ctx, cfgForDir(reg, dir, "10.0.0.1:8080", false, "", nil)); err != nil {
 		t.Fatalf("initial start: %v", err)
 	}
-	// Redirect HTTPS cert generation to a WRITABLE temp dir so the durable-reload
-	// path (#1916 D6) genuinely persists — otherwise the write fails and every
-	// reconcile re-mints a fresh in-memory cert, masking the real invariant
-	// (#6381). Set before any TLS is enabled: startTo is HTTP-only, so certGen is
-	// untouched until the first enable-TLS reconcile below.
-	m.srv.SetTLSCertDirForTest(t.TempDir())
 	if m.srv.HTTPSCertForTest() != nil {
 		t.Fatal("HTTP-only server must not serve a TLS cert")
 	}
 
 	// Enable HTTPS -> the HTTPS leg binds and mints+persists the durable cert.
-	if err := m.reconcileTo(cfgFor(reg, "10.0.0.1:8080", true, "10.0.0.1:8443", nil)); err != nil {
+	if err := m.reconcileTo(cfgForDir(reg, dir, "10.0.0.1:8080", true, "10.0.0.1:8443", nil)); err != nil {
 		t.Fatalf("enable-TLS reconcile: %v", err)
 	}
 	cert1 := m.srv.HTTPSCertForTest()
@@ -207,7 +219,7 @@ func TestMgmtReconcileTLSChange_5866(t *testing.T) {
 	}
 
 	// Change the HTTPS bind -> make-before-break rebind of the HTTPS leg.
-	if err := m.reconcileTo(cfgFor(reg, "10.0.0.1:8080", true, "10.0.0.2:8443", nil)); err != nil {
+	if err := m.reconcileTo(cfgForDir(reg, dir, "10.0.0.1:8080", true, "10.0.0.2:8443", nil)); err != nil {
 		t.Fatalf("https-rebind reconcile: %v", err)
 	}
 	cert2 := m.srv.HTTPSCertForTest()

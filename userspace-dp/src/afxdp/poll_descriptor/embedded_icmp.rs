@@ -80,7 +80,7 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
 /// owner-RG ownership (the same V2 predicate as
 /// `promote_ambiguous_fabric_zone`); an unowned claim leaves the raw
 /// fabric arrival zone in force, so it can never manufacture RELATED.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     desc: XdpDesc,
     // #8271: the frame this function PARSES. On a native-GRE-decapped packet
@@ -338,7 +338,7 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
 /// both arms carry ONE copy of the CoS/target-binding/queue mechanics —
 /// behavior for the #5690 path is byte-identical to the pre-extraction
 /// inline tail.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn queue_prebuilt_embedded_icmp_error(
     desc: XdpDesc,
     meta: UserspaceDpMeta,

@@ -338,11 +338,11 @@ func TestSessionRecvWakeAndForeignFD16669(t *testing.T) {
 	}
 	defer unix.Close(foreign[0])
 	defer unix.Close(foreign[1])
-	if _, err := unix.FcntlInt(uintptr(sess.rxFD), unix.F_GETFD, 0); err != nil {
-		t.Fatalf("rxFD %d was closed before the join — fd number free for reuse under a parked reader (#16669): %v", sess.rxFD, err)
+	if _, err := unix.FcntlInt(uintptr(sess.rxFD()), unix.F_GETFD, 0); err != nil {
+		t.Fatalf("rxFD %d was closed before the join — fd number free for reuse under a parked reader (#16669): %v", sess.rxFD(), err)
 	}
-	if foreign[0] == sess.rxFD || foreign[1] == sess.rxFD {
-		t.Fatalf("foreign fd reused the still-open rxFD number %d", sess.rxFD)
+	if foreign[0] == sess.rxFD() || foreign[1] == sess.rxFD() {
+		t.Fatalf("foreign fd reused the still-open rxFD number %d", sess.rxFD())
 	}
 	if _, err := unix.Write(foreign[1], []byte("foreign-frame-not-for-lldp")); err != nil {
 		t.Fatalf("write foreign socket: %v", err)

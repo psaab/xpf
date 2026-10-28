@@ -1140,3 +1140,46 @@ fn park_counter_queue_token_starvation_ticks_only_its_reason_on_exact() {
         before.tx_ring_full_submit_stalls
     );
 }
+
+#[test]
+fn refresh_cos_interface_activity_publishes_exact_backlog_17186() {
+    // B1 FAIL-ON-REVERT: the whole-binding wrapper must publish the exact
+    // backlog (parent ended refresh with publish_cos_exact_backlog). A
+    // peer slot (1) observes slot 0's publish via has_peer_backlog.
+    let mut root = test_mixed_class_root_with_primed_queues();
+    for queue in &mut root.queues {
+        if queue.config.exact {
+            queue.hot.queued_bytes = 12_000;
+        } else {
+            queue.hot.items.clear();
+            queue.hot.queued_bytes = 0;
+            queue.hot.runnable = false;
+        }
+    }
+    let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    let mut fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![
+            (0, test_queue_fast_path(false, 0, None, None)),
+            (1, test_queue_fast_path(false, 0, None, None)),
+            (2, test_queue_fast_path(false, 0, None, None)),
+            (3, test_queue_fast_path(false, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    fast_interfaces
+        .get_mut(&42)
+        .expect("test fast path")
+        .shared_exact_backlog = Some(shared_exact_backlog.clone());
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    assert!(!shared_exact_backlog.has_peer_backlog(1), "precondition: nothing published yet");
+    refresh_cos_interface_activity(&mut binding, 42);
+    assert!(
+        shared_exact_backlog.has_peer_backlog(1),
+        "whole-binding refresh must publish exact backlog for slot 0"
+    );
+}

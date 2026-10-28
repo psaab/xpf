@@ -25,11 +25,15 @@ pub(crate) use eval::{
     evaluate_filter_ref_routing_instance_uncounted, evaluate_interface_filter,
     evaluate_interface_filter_counted, evaluate_interface_filter_log_match,
     evaluate_interface_filter_non_routing_counted, evaluate_interface_output_filter,
-    evaluate_interface_output_filter_counted, evaluate_lo0_filter, evaluate_lo0_filter_counted,
+    evaluate_interface_output_filter_counted, evaluate_lo0_filter_counted,
     evaluate_lo0_filter_log_match, filter_ref_deny_is_flow_invariant, filter_ref_static_verdict,
     interface_filter_affects_route_lookup, interface_filter_route_lookup_affecting,
     interface_input_filter,
 };
+// #17195: `evaluate_lo0_filter` is dead in every build; eval.rs gates it
+// `#[cfg(test)]`, so the re-export follows that gate.
+#[cfg(test)]
+pub(crate) use eval::evaluate_lo0_filter;
 // #6236 PR-2C: the `(state, ifindex, ..)` routing-instance map-lookup wrappers
 // are test-only now — production shares the `interface_filter_route_lookup_affecting`
 // borrow into the `&Filter` core `evaluate_filter_ref_routing_instance_event_counted`.

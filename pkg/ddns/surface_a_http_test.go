@@ -165,7 +165,9 @@ func TestEngineSecretsNeverLogged(t *testing.T) {
 		Name: "dd2", Backend: "dyndns2", Server: srv.URL,
 		Username: "u", Password: config.NewSecret(secret),
 		APIToken: config.NewSecret(secret), AWSSecretAccessKey: config.NewSecret(secret),
-		TSIGSecret: config.NewSecret(secret),
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			TSIGSecret: config.NewSecret(secret),
+		},
 	}
 	// String()/slog formatting must redact every secret.
 	if s := prov.String(); strings.Contains(s, secret) {

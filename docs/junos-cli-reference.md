@@ -832,7 +832,7 @@ From zone: guest, To zone: lan
     services while the zone's other interfaces get a catch-all drop; the Rust
     AF_XDP secondary (XSK local-delivery) path keys the admit check by ingress
     interface (`ForwardingState::ifindex_host_inbound` /
-    `host_inbound_admits_iface`), falling back to the zone-keyed check where no
+    `host_inbound_admits_iface_for_destination`), falling back to the zone-keyed check where no
     override exists. Interface-level tokens are validated at commit by the same
     SSOT as the zone-level stanza (#3200), and management/cluster-control
     lifeline interfaces are excluded from the override exactly as from the

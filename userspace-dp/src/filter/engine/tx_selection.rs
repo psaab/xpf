@@ -182,7 +182,7 @@ pub(crate) fn evaluate_filter_ref_tx_selection_deferred<'a>(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_filter_ref_tx_selection_runtime<'a>(
     filter: &'a Filter,
     src_ip: IpAddr,
@@ -223,7 +223,7 @@ fn evaluate_filter_ref_tx_selection_runtime<'a>(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_filter_ref_tx_selection_runtime_inner<'a>(
     filter: &'a Filter,
     src_ip: IpAddr,
@@ -279,7 +279,7 @@ fn evaluate_filter_ref_tx_selection_runtime_inner<'a>(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_filter_ref_tx_selection_counted_family<'a, F: AddrFamily>(
     filter: &'a Filter,
     src_ip: F::Addr,
@@ -336,7 +336,7 @@ fn evaluate_filter_ref_tx_selection_counted_family<'a, F: AddrFamily>(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
     filter: &'a Filter,
     src_ip: Ipv4Addr,
@@ -409,7 +409,7 @@ fn merge_matched_tx_modifiers<'a>(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
     filter: &'a Filter,
     src_ip: Ipv6Addr,
@@ -475,7 +475,7 @@ pub(crate) fn evaluate_filter_ref_tx_selection_runtime_routing_bearing<'a>(
 /// drop flag (not a borrowing result): the caller consumes only
 /// `policer_drop`, so no sliced `Filter` view is materialized.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn routing_bearing_remainder_policer_drop_from(
     filter: &Filter,
     src_ip: IpAddr,
