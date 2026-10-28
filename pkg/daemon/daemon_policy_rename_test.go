@@ -1427,7 +1427,7 @@ func TestRenameAncestryOwnershipTransfersAtBindTime10511(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d.applyErrForTest = tc.applyErr
-			got, err := d.applyAndSyncCommitted(oldActive, compiled, peerSyncNever)
+			got, err := d.applyAndSyncCommittedForTest(oldActive, compiled, peerSyncNever)
 			if tc.applyErr == nil && err != nil {
 				t.Fatalf("converging apply returned %v", err)
 			}

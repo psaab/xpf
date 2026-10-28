@@ -2,8 +2,10 @@ package grpcapi
 
 import (
 	"context"
+
 	"errors"
 	"fmt"
+	"github.com/psaab/xpf/pkg/diagcmd"
 	"testing"
 	"time"
 )
@@ -54,18 +56,18 @@ func TestStreamDiagCmdKillsChildOnSendError(t *testing.T) {
 }
 
 // TestClampDiagTimeout pins the ceiling streamDiagCmd applies to every
-// caller-supplied budget.
+// caller-supplied budget — now diagcmd.ClampDiagTimeout (#17203).
 func TestClampDiagTimeout(t *testing.T) {
 	cases := []struct{ in, want time.Duration }{
 		{time.Second, time.Second},
-		{diagExecCeiling - 1, diagExecCeiling - 1},
-		{diagExecCeiling, diagExecCeiling},
-		{diagExecCeiling + 1, diagExecCeiling},
-		{24 * time.Hour, diagExecCeiling},
+		{diagcmd.DiagExecCeiling - 1, diagcmd.DiagExecCeiling - 1},
+		{diagcmd.DiagExecCeiling, diagcmd.DiagExecCeiling},
+		{diagcmd.DiagExecCeiling + 1, diagcmd.DiagExecCeiling},
+		{24 * time.Hour, diagcmd.DiagExecCeiling},
 	}
 	for _, c := range cases {
-		if got := clampDiagTimeout(c.in); got != c.want {
-			t.Errorf("clampDiagTimeout(%v) = %v, want %v", c.in, got, c.want)
+		if got := diagcmd.ClampDiagTimeout(c.in); got != c.want {
+			t.Errorf("ClampDiagTimeout(%v) = %v, want %v", c.in, got, c.want)
 		}
 	}
 }

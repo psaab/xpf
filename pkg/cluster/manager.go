@@ -629,26 +629,23 @@ type Manager struct {
 	// fire-and-forget behaviour unchanged.
 	peerFenceConfirmFn func(timeout time.Duration) (FenceAck, error)
 
-	// peerTimeoutGuardFn can suppress heartbeat-driven peer loss when an
-	// external signal proves the peer is still alive (for example, recent
-	// session-sync traffic on the control link).
-	peerTimeoutGuardFn func() (suppress bool, reason string)
-	// peerNeverSeenSyncFreshFn reports whether the session-sync receive proof
-	// is still fresh while no heartbeat has ever arrived. handlePeerNeverSeen
-	// calls it under m.mu; it must be a fast, lock-free probe and must not
-	// re-enter Manager.
-	peerNeverSeenSyncFreshFn func() bool
+	// peerSync is the published session-sync receive-recency source for the
+	// heartbeat-timeout suppression and never-seen policies, which are owned
+	// by heartbeat_suppress.go under this same lock (#17056). Nil when
+	// cluster comms are stopped. Reads through it are lock-free atomics on
+	// SessionSync, safe under m.mu.
+	peerSync peerSyncSource
 
-	// peerHeartbeatRecoveredFn is notified on admitted peer heartbeats and
-	// post-guard freshness rechecks so an external liveness guard can end its
-	// continuous-suppression window. It runs under m.mu and must be fast,
-	// lock-free, idempotent, and must not re-enter Manager.
-	peerHeartbeatRecoveredFn func()
+	// hbSuppressStart is the CLOCK_MONOTONIC nanos stamp of the first
+	// heartbeat suppression in the current continuous window; 0 = inactive
+	// (#1792). A plain field under m.mu, cleared by heartbeat admission in
+	// the same critical section (#12165, #17056).
+	hbSuppressStart int64
 
 	// peerHeartbeatFreshFn reports whether a peer heartbeat is currently
 	// within the timeout window (i.e. NOT stale). handlePeerTimeout consults
-	// it AFTER the (possibly slow) guard window so a heartbeat that arrived
-	// during the guard aborts the spurious peer-lost transition. Defaults to
+	// it under m.mu before the suppression decision so a fresh heartbeat
+	// aborts the spurious peer-lost transition. Defaults to
 	// the live receiver-backed check via peerHeartbeatFresh; overridable in
 	// tests to inject a fresh/stale heartbeat without a real socket.
 	peerHeartbeatFreshFn func() bool

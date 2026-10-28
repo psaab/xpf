@@ -742,8 +742,8 @@ func (s *Server) principalFrom(r *http.Request, cfg *config.Config, ri *requestI
 	// credentialless after a commit ADDED one, so a tightening the operator
 	// committed did not reach the request it was committed to stop.
 	//
-	// It is routed through credentialPrincipalUser rather than authCheck
-	// because authCheck's two exemptions (/health always, /metrics on a
+	// It is routed through credentialPrincipalUser rather than the
+	// credential check because that check's two exemptions (/health always, /metrics on a
 	// loopback bind) are GET-only paths that isSafeHTTPMethod already returned
 	// before the gate ran; on a mutating route the two are the same predicate.
 	//
@@ -1029,7 +1029,7 @@ func logRESTLoginDenial(r *http.Request, p authz.Principal, required, decision s
 func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	// #16727: GET /metrics on a credential-gated leg (non-loopback bind,
 	// or loopback with metrics-require-auth) was authenticated by
-	// authCheck but received NO login-class decision, so a credential
+	// the auth gate but received NO login-class decision, so a credential
 	// whose class lacks view (built-in unauthorized, or a custom class)
 	// — refused every /api/v1 read — still received the exposition
 	// naming zones, policies, NAT pools and interfaces. When the leg's

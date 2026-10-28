@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 
@@ -633,10 +632,7 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 	if err != nil {
 		return err
 	}
-	fromZone, toZone, srcIP, dstIP, proto := sel.FromZone, sel.ToZone, sel.SrcIP, sel.DstIP, sel.Protocol
-	srcPort, dstPort := sel.SrcPort, sel.DstPort
-	icmpType, icmpCode := sel.ICMPType, sel.ICMPCode
-	nonFirstFrag := sel.NonFirstFragment
+	fromZone, toZone := sel.FromZone, sel.ToZone
 
 	if fromZone == "" || toZone == "" {
 		// #3628: the selector list is the shared SSOT in policymatch so all four
@@ -647,53 +643,18 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 		return nil
 	}
 
-	parsedSrc := net.ParseIP(srcIP)
-	parsedDst := net.ParseIP(dstIP)
-
-	// #5579: validate the optional ingress-interface selector against the live
-	// config (zone membership + lifeline reject) so the host-inbound classifier is
-	// scoped only to a real interface of the queried zone, failing closed on an
-	// unknown / zone-mismatched / lifeline ref exactly like the REST/gRPC surfaces.
-	if err := dpuserspace.ResolveHostInboundIngressInterface(cfg, fromZone, sel.IngressInterface); err != nil {
+	// #18240: route through the shared Request.Validate + Evaluate — the
+	// parser validated the per-value grammar (#3116/#3108/#3284/#1711);
+	// Validate re-checks zones/IPs/protocol and (live cfg) the ingress
+	// interface (#5579), then Evaluate assembles and runs Match.
+	req17198 := sel.Request()
+	if err := req17198.Validate(cfg); err != nil {
 		return err
 	}
-
-	// #3042: delegate to the single shared simulator so the CLI agrees with
-	// the runtime evaluator. The pre-#3042 loop scanned only zone-pair
-	// policies (never globals), hard-coded "default deny" (ignoring
-	// default-policy permit-all), and used a narrow address/app matcher that
-	// missed predefined apps, nested application-sets, literal CIDRs,
-	// any-ipv4/any-ipv6, and source/destination exclusion.
-	// #3105: pass the live dynamic-address feed-prefix overlay so a feed-backed
-	// address-name resolves to its live CIDRs on-box, matching the REST/gRPC
-	// simulators and the AF_XDP helper. Nil (CLI outside the daemon) keeps the
-	// pre-#3105 static-only behavior.
-	res := policymatch.Match(cfg, policymatch.Query{
-		FromZone: fromZone,
-		ToZone:   toZone,
-		SrcIP:    parsedSrc,
-		DstIP:    parsedDst,
-		// #6377: colon-strict text family from the RAW operator string so the
-		// unsupported-tuple gate does not fold an IPv4-mapped IPv6 source to v4.
-		SrcFamily: config.NATAddrFamily(srcIP),
-		DstFamily: config.NATAddrFamily(dstIP),
-		Protocol:  proto,
-		SrcPort:   srcPort,
-		DstPort:   dstPort,
-		ICMPType:  icmpType,
-		ICMPCode:  icmpCode,
-		// #5572: a non-first IP fragment (no L4 header) reproduces the #4569
-		// fragment-associated deny; false is a normal L4-present packet.
-		NonFirstFragment: nonFirstFrag,
-		// #5579: scope the host-inbound classifier to this ingress interface's
-		// effective view (validated above). "" = zone-scoped, unchanged.
-		IngressInterface:    sel.IngressInterface,
-		FeedOverlay:         c.feedOverlay(),
-		FeedPublicationDebt: c.feedPublicationDebt(),
-		// #3104: skip scheduler-inactive policies like the runtime does, so the
-		// simulator falls through to the next active rule / default-policy.
-		PolicyInactiveForFn: c.policyInactiveForFn(cfg),
-	})
+	res, err := policymatch.Evaluate(cfg, req17198, c.matchLive(cfg))
+	if err != nil {
+		return err
+	}
 	if res.PostNATInputNote != "" {
 		fmt.Printf("NOTE: %s\n", res.PostNATInputNote)
 	}
