@@ -501,9 +501,12 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		// enforced by the dataplane. LastApplyResult tracks full applies only;
 		// successful partial publishes can advance the applied identity
 		// without replacing it, so syslog retries must use filterGeneration.
-		// When SnapshotPublishDeferred the new snapshot has not landed: keep
-		// the previous generation's map until deferred completion installs it.
-		if !cr.SnapshotPublishDeferred && filterGeneration != 0 {
+		// SnapshotPublishDeferred remains set on that historical result after
+		// the publish lands. Keep the prior map only while the applied identity
+		// is still older than the deferred full snapshot.
+		snapshotStillDeferred := cr.SnapshotPublishDeferred &&
+			(appliedGeneration == 0 || appliedGeneration < cr.Generation)
+		if !snapshotStillDeferred && filterGeneration != 0 {
 			er.SetFilterTermSyslogForGeneration(filterGeneration, dpuserspace.FilterTermSyslogMap(cfg))
 		} else if cr.Generation == 0 {
 			er.SetFilterTermSyslog(dpuserspace.FilterTermSyslogMap(cfg))

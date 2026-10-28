@@ -207,16 +207,33 @@ func (d *appliedSnapshotRetryTestDP) AppliedSnapshotGeneration() uint64 {
 	return d.appliedSnapshotGeneration
 }
 
-// TestSyslogRetryKeepsFilterMapAtAppliedSnapshotGeneration17810 reproduces
-// #17810: a partial snapshot publish advances the applied identity from G to H,
-// but does not replace LastApplyResult. A later syslog retry must install the
-// filter projection under H so an H-stamped `then syslog` event reaches its
-// collector.
+// #17810 retry regressions model a full generation G whose last-apply result
+// remains unchanged after a retained-snapshot partial publish advances the
+// applied identity to H.
+const (
+	fullFilterGeneration17810    uint64 = 41
+	partialFilterGeneration17810 uint64 = 42
+)
+
+// TestSyslogRetryKeepsFilterMapAtAppliedSnapshotGeneration17810 confirms that
+// retry does not replace an already-H map with stale G.
 func TestSyslogRetryKeepsFilterMapAtAppliedSnapshotGeneration17810(t *testing.T) {
-	const fullGeneration, partialGeneration = 41, 42
-	if fullGeneration == partialGeneration {
-		t.Fatal("premise: full and partial generations must differ")
-	}
+	// The completed partial publish has already installed H. The retry must
+	// not overwrite it with LastApplyResult's stale G.
+	checkSyslogRetryAppliedGeneration17810(t, false, partialFilterGeneration17810)
+}
+
+// TestDeferredSyslogRetryUsesAppliedSnapshotGeneration17810 confirms the
+// sticky deferred flag does not block installation once H is applied.
+func TestDeferredSyslogRetryUsesAppliedSnapshotGeneration17810(t *testing.T) {
+	// The full G publish was initially deferred and installed under G when it
+	// landed. A later partial H publish advances the applied identity, but the
+	// historical LastApplyResult keeps SnapshotPublishDeferred=true.
+	checkSyslogRetryAppliedGeneration17810(t, true, fullFilterGeneration17810)
+}
+
+func checkSyslogRetryAppliedGeneration17810(t *testing.T, wasDeferred bool, previousGeneration uint64) {
+	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -226,12 +243,16 @@ func TestSyslogRetryKeepsFilterMapAtAppliedSnapshotGeneration17810(t *testing.T)
 	cfg := filterCfg6859()
 	cfg.Security.Log.Streams["s1"].Port = pc.LocalAddr().(*net.UDPAddr).Port
 	er := logging.NewEventReader(nil, logging.NewEventBuffer(4))
+	er.SetFilterTermSyslogForGeneration(previousGeneration, dpuserspace.FilterTermSyslogMap(cfg))
 	dp := &appliedSnapshotRetryTestDP{
 		runtimeOnlyApplyTestDP: &runtimeOnlyApplyTestDP{
-			gen:       fullGeneration,
-			lastApply: &dataplane.ApplyResult{Generation: fullGeneration},
+			gen: fullFilterGeneration17810,
+			lastApply: &dataplane.ApplyResult{
+				Generation:              fullFilterGeneration17810,
+				SnapshotPublishDeferred: wasDeferred,
+			},
 		},
-		appliedSnapshotGeneration: partialGeneration,
+		appliedSnapshotGeneration: partialFilterGeneration17810,
 	}
 	d := &Daemon{eventReader: er}
 	d.setDataplane(dp)
@@ -239,11 +260,10 @@ func TestSyslogRetryKeepsFilterMapAtAppliedSnapshotGeneration17810(t *testing.T)
 	d.reassertSyslogOnceForTest(cfg)
 
 	installedGeneration, versioned := er.FilterTermSyslogGeneration()
-	if !versioned || installedGeneration != partialGeneration {
-		t.Fatalf("retry installed filter map at generation %d,%v; want applied partial generation %d (last full apply is %d)",
-			installedGeneration, versioned, partialGeneration, fullGeneration)
+	if !versioned || installedGeneration != partialFilterGeneration17810 {
+		t.Fatalf("retry installed filter map at generation %d,%v; want applied partial generation %d (last full apply is %d, deferred=%v)",
+			installedGeneration, versioned, partialFilterGeneration17810, fullFilterGeneration17810, wasDeferred)
 	}
-
 	if !er.FilterTermSyslog()[logging.FilterTermSyslogKey(0, 1)] {
 		t.Fatal("retry's filter projection lost the `then syslog` term at (0,1)")
 	}
@@ -262,7 +282,7 @@ func TestSyslogRetryKeepsFilterMapAtAppliedSnapshotGeneration17810(t *testing.T)
 	binary.LittleEndian.PutUint32(frame[60:64], 1)
 	frame[135] = 1
 	binary.LittleEndian.PutUint32(frame[140:144], 0x314e4547)
-	binary.LittleEndian.PutUint64(frame[144:152], partialGeneration)
+	binary.LittleEndian.PutUint64(frame[144:152], partialFilterGeneration17810)
 	if !er.ProcessRawEvent(frame) {
 		t.Fatal("EventReader rejected a valid H-stamped FILTER_LOG frame")
 	}
