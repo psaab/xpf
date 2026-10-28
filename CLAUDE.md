@@ -515,9 +515,9 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `docs/ha-cluster-userspace.conf:71-72`). This is not necessarily the
   peer-loss declaration time: while session sync stays connected and inbound
-  peer traffic is no more than 2s old, `shouldSuppressPeerHeartbeatTimeout`
+  peer traffic is no more than 2s old, `syncSuppressesPeerTimeoutLocked` (pkg/cluster, #17056)
   defers the heartbeat timeout; its continuous-suppression cap is 5s
-  (`pkg/daemon/daemon_ha_sync.go:170-206`). With an ESTABLISHED sync stream,
+  (`pkg/cluster/heartbeat_suppress.go`). With an ESTABLISHED sync stream,
   the guard can defer declaration until peer traffic is 2s old. Detection is
   max(threshold, remaining sync-recency window) plus up to one heartbeat tick:
   roughly 0.5–2.1s from peer death at defaults, or 1.0–2.2s with the lab
@@ -559,7 +559,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   (`pkg/cluster/manager.go:1026-1077`;
   `pkg/daemon/daemon_run_shutdown.go:418-428`;
   `DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
-  `pkg/daemon/daemon_ha_sync.go:170-206`)
+  `pkg/cluster/heartbeat_suppress.go`)
 - **VRRP advertisement**: VRRP-backed RETH instances (legacy `no-private-rg-election`, unless `no-reth-vrrp` is set) default to 30ms; `AdvertiseInterval` is milliseconds internally, centiseconds on wire per RFC 5798
 - **Async GARP**: `becomeMaster()` runs GARP in a goroutine — first pair <1ms, remaining at 50ms intervals in background. Critical path: addVIPs → sendAdvert → emitEvent (sync), then go sendGARP(false) (async). `sendGARP` has two suppression gates: a per-epoch dedup (`garpEpoch`/`lastGARPEpoch`) and a 500ms time dampener (`lastGARPTime`/`garpDampened`). `sendGARP(force)` — `force=true` bypasses ONLY the time dampener (keeps the epoch dedup); the routine `becomeMaster`/periodic path passes `force=false` so storm-control survives (#2081)
 - **Fabric forwarding**: the userspace dataplane redirects packets for peer-owned synced sessions over the fabric link — `resolve_fabric_redirect()` / `ingress_is_fabric()` in `userspace-dp/src/afxdp/forwarding/fabric.rs` (re-exported through the `forwarding` module; see `docs/fabric-cross-chassis-fwd.md`) — prevents TCP death on VRRP failback. The pre-#1476 eBPF mechanism (`try_fabric_redirect()` in xdp_zone) is historical
@@ -583,7 +583,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   also handles simultaneous boot
   (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `pkg/daemon/daemon_ha_sync.go:1514-1570`;
-  `pkg/daemon/daemon_ha_sync.go:170-206`;
+  `pkg/cluster/heartbeat_suppress.go`;
   `docs/ha-cluster-userspace.conf:71-72`)
 - **Session sync connect**: immediate first dial, 1s retry (`pkg/cluster/sync_conn.go:1379-1414`)
 - **Event debounce**: 500ms for cluster state → VRRP priority updates in
