@@ -110,6 +110,7 @@ const (
 	userspaceWGIngressZonesMapName = "userspace_wg_ingress_zones"
 	userspaceWGAdmissionMapName    = "userspace_wg_zone_admission"
 	userspaceLandScreenMapName     = "userspace_land_screen"
+	userspaceHostScreenMapName     = "userspace_host_screen"
 )
 
 // These pins contain counters or configuration-derived classifier rows that
@@ -122,6 +123,7 @@ var userspaceRebuiltCollectionPinMapNames = [...]string{
 	userspaceWGIngressZonesMapName,
 	userspaceWGAdmissionMapName,
 	userspaceLandScreenMapName,
+	userspaceHostScreenMapName,
 }
 
 // pinnedMaps lists maps that survive daemon restarts via BPF
@@ -625,6 +627,9 @@ func userspacePinnedShimMaps() []string {
 		// #15789: per-zone LAND screen disposition, rebuilt from each
 		// validated config snapshot like the WG zone maps above.
 		"userspace_land_screen",
+		// #16009: per-zone stateless-malformed screen mask, rebuilt from
+		// each validated config snapshot like the LAND map above.
+		"userspace_host_screen",
 		"userspace_sessions",
 		"userspace_trace",
 		"userspace_fallback_stats",

@@ -223,6 +223,20 @@ pub struct ExtWalk {
     /// a resolved verdict and never sets this. Callers MUST fail closed on
     /// it; see `parse_ipv6`.
     pub exhausted: bool,
+    /// #16009: raw frag_off word of the FIRST non-atomic Fragment header
+    /// sighted (0 when none) — the worker screen's `ip_frag_off`.
+    pub frag_off: u16,
+    /// #16009: the governing fragment is a first fragment (offset 0 with
+    /// the M bit set), in the worker screen's `is_first_fragment` sense.
+    pub is_first_fragment: bool,
+    /// #16009: payload-region bytes preceding the governing fragment's
+    /// data (extension headers up to and including its 8-byte Fragment
+    /// header), the worker screen's `frag_data_off`. 0 when no fragment.
+    pub frag_data_off: u16,
+    /// #16009: a Routing (43) header along the walk carried a
+    /// source-route routing type (0 or 1) — the worker screen's
+    /// `saw_ipv6_routing_header` (#2973).
+    pub routing_source_route: bool,
 }
 
 /// Walk the extension-header chain from `first_protocol` at `offset`.
@@ -281,10 +295,29 @@ pub fn walk_ipv6_ext_headers(
     let mut offset = start_offset;
     let mut non_first_fragment = false;
     let mut fragment_seen = false;
+    // #16009: first non-atomic Fragment sighting's screen fields plus
+    // the Routing source-route sighting. Recorded only; the walk's
+    // advance/break behaviour is unchanged.
+    let mut frag_off = 0u16;
+    let mut is_first_fragment = false;
+    let mut frag_data_off = 0u16;
+    let mut routing_source_route = false;
     for _ in 0..MAX_EXT_HDRS {
         match eh_class(protocol) {
             EH_CLASS_GENERIC => {
                 let opt = unsafe { read_bytes(data, data_end, offset as usize, 2) }?;
+                // #16009: Routing (43) type byte at offset+2 (#2973).
+                // Read inside the already-validated generic span: the
+                // advance below revalidates the whole header, so a
+                // truncated Routing header still fails closed via `?`
+                // before any sighting is consumed.
+                if protocol == NEXTHDR_ROUTING {
+                    if let Some(rh) = unsafe { read_bytes(data, data_end, offset as usize, 4) } {
+                        if rh[2] == 0 || rh[2] == 1 {
+                            routing_source_route = true;
+                        }
+                    }
+                }
                 protocol = opt[0];
                 offset = offset.checked_add(((opt[1] as u16) + 1) * 8)?;
                 unsafe { read_bytes(
@@ -322,8 +355,19 @@ pub fn walk_ipv6_ext_headers(
                 let non_first_fragment_sighting = (word & 0xFFF8) != 0;
                 let fragment_seen_before = fragment_seen;
                 fragment_seen = true;
+                // #16009: keep the FIRST non-atomic sighting's fields
+                // (the worker extractor's governing-header rule). An
+                // atomic header (offset 0, M clear) never governs.
+                let is_atomic = (word & 0xFFF8) == 0 && (word & 0x0001) == 0;
+                if !is_atomic && frag_data_off == 0 {
+                    frag_off = word;
+                    is_first_fragment =
+                        (word & 0x0001) != 0 && (word & 0xFFF8) == 0;
+                    frag_data_off = offset
+                        .checked_add(8)
+                        .map_or(0, |end| end.saturating_sub(l3_offset + 40));
+                }
                 protocol = frag[0];
-                offset = offset.checked_add(mem::size_of::<FragHdr>() as u16)?;
                 if non_first_fragment_sighting {
                     non_first_fragment = true;
                     break;
@@ -364,5 +408,9 @@ pub fn walk_ipv6_ext_headers(
         non_first_fragment,
         fragment_seen,
         exhausted,
+        frag_off,
+        is_first_fragment,
+        frag_data_off,
+        routing_source_route,
     })
 }

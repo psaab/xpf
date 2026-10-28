@@ -373,3 +373,57 @@ pub(super) fn check_fragment_and_route(
     }
     None
 }
+
+/// #16009 test-only: the stateless malformed verdict as a mask of the
+/// shim's HOST_SCREEN_* bits, so the shim parity corpus can compare
+/// verdicts without depending on drop-reason precedence. Bit layout
+/// mirrors `userspace-xdp/src/host_screen.rs`: 0 ping-death, 1
+/// teardrop, 2 icmp-fragment, 3 syn-frag, 4 source-route, 5 syn-fin,
+/// 6 no-flag/fin-no-ack/winnuke family. Production code keeps using
+/// the reason-returning helpers above.
+#[cfg(test)]
+pub(crate) fn worker_malformed_mask_for_test(
+    profile: &super::packet::ScreenProfile,
+    pkt: &super::packet::ScreenPacketInfo,
+) -> u8 {
+    let mut mask = 0u8;
+    if check_ping_of_death(profile, pkt).is_some() {
+        mask |= 1 << 0;
+    }
+    if check_teardrop(profile, pkt).is_some() {
+        mask |= 1 << 1;
+    }
+    if check_icmp_fragment(profile, pkt).is_some() {
+        mask |= 1 << 2;
+    }
+    // Mirror check_tcp_flag_screens arm-by-arm (not by its first
+    // reason): SYN+FIN also satisfies fin-no-ack, so both bits set.
+    if pkt.protocol == super::packet::PROTO_TCP
+        && (!pkt.is_fragment || pkt.is_first_fragment)
+    {
+        if pkt.tcp_flags_unknown && pkt.is_first_fragment {
+            mask |= 1 << 3;
+        } else {
+            let tf = pkt.tcp_flags;
+            if profile.syn_fin && (tf & super::packet::TCP_SYN) != 0 && (tf & super::packet::TCP_FIN) != 0 {
+                mask |= 1 << 5;
+            }
+            if profile.no_flag && tf == 0 {
+                mask |= 1 << 6;
+            }
+            if profile.fin_no_ack && (tf & super::packet::TCP_FIN) != 0 && (tf & super::packet::TCP_ACK) == 0 {
+                mask |= 1 << 6;
+            }
+            if profile.winnuke && (tf & super::packet::TCP_URG) != 0 && pkt.dst_port == 139 {
+                mask |= 1 << 6;
+            }
+            if profile.syn_frag && (tf & super::packet::TCP_SYN) != 0 && pkt.is_first_fragment {
+                mask |= 1 << 3;
+            }
+        }
+    }
+    if check_source_route(profile, pkt).is_some() {
+        mask |= 1 << 4;
+    }
+    mask
+}

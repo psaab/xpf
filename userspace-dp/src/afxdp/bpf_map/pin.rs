@@ -100,6 +100,8 @@ pub(in crate::afxdp) const DEGRADED_PATH_REASON_NAMES: &[&str] = &[
     "tagged_only_local_drop",   // 18
     "land_drop",                // 19
     "land_alarm",               // 20
+    "host_screen_drop",         // 21
+    "host_screen_alarm",        // 22
 ];
 
 // #16241: per-arm XDP dispatch hit counters (the shim's

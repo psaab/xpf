@@ -2921,6 +2921,11 @@ mod tests_shim_tunnel_frag_10677;
 #[cfg(test)]
 #[path = "tests_shim_land_13953.rs"]
 mod tests_shim_land_13953;
+// #16009: the shim's stateless-malformed screen verdict, executed
+// rather than modelled — same shape as above.
+#[cfg(test)]
+#[path = "tests_shim_host_screen_16009.rs"]
+mod tests_shim_host_screen_16009;
 // #17223: the shim's shared kernel-pass predicates, degraded composition
 // and DEGRADED_TWIN agreement, executed rather than modelled.
 #[cfg(test)]

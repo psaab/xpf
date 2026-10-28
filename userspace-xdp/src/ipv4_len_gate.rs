@@ -54,3 +54,46 @@ pub fn ipv4_declared_read_end(l3_offset: usize, total_len: u16, data_end: usize)
         data_end
     }
 }
+
+/// #16009: whether the IPv4 options region of an already-validated
+/// header carries an LSRR (131) or SSRR (137) source-route option —
+/// the worker screen's `saw_ipv4_source_route` (#2973). `iph` is the
+/// header slice the caller already holds (at least `ihl_bytes` long)
+/// and `ihl_bytes` the validated header length. Mirrors the worker
+/// extractor's TLV walk verdict for well-formed options: EOOL (0)
+/// ends, NOP (1) is one byte, LSRR/SSRR sight on the kind byte. A
+/// malformed tail (missing length byte, length < 2, overrun) stops
+/// the scan without a sighting; the shim parser has already validated
+/// the header length, and the worker fails closed on malformed
+/// options at its own extractor — a shape the shim's parser drops
+/// earlier is never consulted here.
+#[inline(always)]
+pub fn ipv4_has_source_route_option(iph: &[u8], ihl_bytes: usize) -> bool {
+    if ihl_bytes <= 20 || iph.len() < ihl_bytes {
+        return false;
+    }
+    let options = &iph[20..ihl_bytes];
+    let mut pos = 0usize;
+    while pos < options.len() {
+        let kind = options[pos];
+        if kind == 0 {
+            break;
+        }
+        if kind == 1 {
+            pos += 1;
+            continue;
+        }
+        if kind == 131 || kind == 137 {
+            return true;
+        }
+        if pos + 1 >= options.len() {
+            break;
+        }
+        let opt_len = options[pos + 1] as usize;
+        if opt_len < 2 || pos + opt_len > options.len() {
+            break;
+        }
+        pos += opt_len;
+    }
+    false
+}

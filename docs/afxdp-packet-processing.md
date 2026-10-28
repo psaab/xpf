@@ -284,12 +284,20 @@ drop — the #13953 posture. Before #15789 the drop was unconditional, which
 made the worker's profile-gated `check_land` unreachable on these arms and
 bypassed audit-mode accounting.
 
-Screens other than LAND apply to host-bound traffic only as
-follows: flood screens are mirrored for XDP-passed traffic by the
-`xpf_hostinbound` input chain below; the remaining worker screens
-(stateless/TCP-flag/fragment, scan/sweep, limit-session) do not run on
-packets the shim passes to the kernel, because that pass is terminal and
-the worker never sees the packet.
+Screens other than LAND apply to host-bound traffic as follows:
+since #16009 the shim also runs the STATELESS malformed family
+(ping-of-death, teardrop stateless parts, icmp-fragment, source-route,
+TCP SYN+FIN / no-flag / fin-no-ack / winnuke / syn-frag) on the same
+terminal kernel-pass arms, decided per ingress zone from the
+`userspace_host_screen` mask the Go control plane publishes
+(StableZoneID keyed; DROP counts `host_screen_drop`, audit mode counts
+`host_screen_alarm` and passes, an unresolved zone fails closed to
+DROP). Flood screens are mirrored for XDP-passed traffic by the
+`xpf_hostinbound` input chain below. The remaining worker screens —
+true fragment-overlap detection, scan/sweep, limit-session, SYN-cookie
+challenge, and per-reason worker screen counters — do not run on
+packets the shim passes to the kernel, because that pass is terminal
+and the worker never sees the packet (residue recorded on #16009).
 
 Flood screens are mirrored in the `inet xpf_hostinbound` **input** chain, which
 still sees XDP-passed traffic. Reply-direction rules run before the established

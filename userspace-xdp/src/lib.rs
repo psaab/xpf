@@ -56,7 +56,9 @@ const USERSPACE_FALLBACK_REASON_STAG_DROP: u32 = 17;
 const USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP: u32 = 18;
 const USERSPACE_FALLBACK_REASON_LAND_DROP: u32 = 19;
 const USERSPACE_FALLBACK_REASON_LAND_ALARM: u32 = 20;
-const USERSPACE_FALLBACK_REASON_MAX: u32 = 21;
+const USERSPACE_FALLBACK_REASON_HOST_SCREEN_DROP: u32 = 21;
+const USERSPACE_FALLBACK_REASON_HOST_SCREEN_ALARM: u32 = 22;
+const USERSPACE_FALLBACK_REASON_MAX: u32 = 23;
 // #16241: per-arm hit counters for the healthy XDP dispatch, in a
 // SEPARATE per-CPU map from the degraded-path reasons above. The
 // degraded map's indices are a pinned operator ABI (Go
@@ -167,6 +169,7 @@ mod ipv6_ext_walk;
 mod ipv6_len_gate;
 mod kernel_pass;
 mod land;
+mod host_screen;
 mod tunnel_frag;
 mod wg_classify;
 use binding_index::{
@@ -179,7 +182,12 @@ use gre_classify::{
     wg_degraded_fragment_excluded, wg_fragment_stays_on_helper,
 };
 use ipv4_key::ipv4_map_key;
-use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
+use ipv4_len_gate::{
+    ipv4_declared_len_covers_header, ipv4_declared_read_end, ipv4_has_source_route_option,
+};
+use host_screen::{
+    HostMalformedDisposition, HostScreenPacket, host_malformed_disposition, host_malformed_verdict,
+};
 use ipv6_ext_walk::{
     EH_CLASS_TERMINAL, FragHdr, MAX_EXT_HDRS, PROTO_FRAGMENT_NO_L4, eh_class, eh_class_table,
     read_bytes,
@@ -537,6 +545,14 @@ static USERSPACE_WG_INGRESS_ZONES: HashMap<UserspaceWgIngressZoneKey, u32> =
 #[map(name = "userspace_land_screen")]
 static USERSPACE_LAND_SCREEN: HashMap<u32, u8> = HashMap::with_max_entries(65536, 0);
 
+// #16009: per-ingress-zone stateless-malformed screen mask (see
+// `host_screen`). Keyed by the same StableZoneID; the value packs the
+// enabled malformed checks plus the profile-wide alarm-without-drop
+// bit. Absent under a resolved zone = checks off; an unresolved zone
+// fails closed to DROP for a tripped packet (see `land`).
+#[map(name = "userspace_host_screen")]
+static USERSPACE_HOST_SCREEN: HashMap<u32, u8> = HashMap::with_max_entries(65536, 0);
+
 // Entries exist only for unique local-address owners and WG ports served by
 // that same zone. Zone 0 and missing keys both fail closed.
 #[map(name = "userspace_wg_zone_admission")]
@@ -808,6 +824,15 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     if land_gate(&parsed, ingress_ifindex) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_LAND_DROP);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
+    }
+    // #16009: stateless malformed screens (ping-of-death, teardrop,
+    // icmp-fragment, source-route, TCP-flag family) for every
+    // kernel-pass arm below — the worker's stage-10 stateless checks
+    // never see those packets. Ordered after LAND so LAND keeps its
+    // own counter, and after the #8279 authority gate so a
+    // non-adjudicated ifindex still takes cpumap_or_pass untouched.
+    if host_screen_gate(&parsed, ingress_ifindex) {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_HOST_SCREEN_DROP);
     }
     let native_gre =
         parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0;
@@ -1746,6 +1771,10 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     if land_gate(&parsed, ingress_ifindex) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
     }
+    // #16009: same stateless-malformed gate on the ctrl-disabled twin.
+    if host_screen_gate(&parsed, ingress_ifindex) {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_HOST_SCREEN_DROP);
+    }
     let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain, ingress_ifindex);
     match degraded_ctrl_disabled::ctrl_disabled_action(ingress_iface_flags, false, local_or_control)
     {
@@ -2190,6 +2219,17 @@ struct ParsedPacket {
     // header; false for a whole datagram. Read by the native-GRE and
     // WireGuard fragment dispositions.
     is_fragment: bool,
+    // #16009: worker stateless-screen inputs the shim parsers already
+    // validate (fragment geometry + source-route sightings), carried so
+    // the host-bound malformed gate can mirror
+    // userspace-dp/src/screen/stateless.rs exactly.
+    is_first_fragment: bool,
+    ip_frag_off: u16,
+    ip_total_len: u16,
+    ip_payload_len: u16,
+    frag_data_off: u16,
+    ip_ihl: u8,
+    saw_source_route: bool,
     // #16038: true iff `parse_ipv6`'s walk exhausted on a still-traversable
     // next-header. `parse_ipv6` returns `None` in that case today, so this is
     // always false in production; it exists so `should_fallback_early` and
@@ -2304,7 +2344,7 @@ fn parse_ipv4(
     if ihl < 20 {
         return None;
     }
-    unsafe { read_bytes(data, data_end, l3_offset as usize, ihl) }?;
+    let ihdr = unsafe { read_bytes(data, data_end, l3_offset as usize, ihl) }?;
     // #9901 (F-075): the declared-length gate. Bytes 2..4 sit inside the
     // 20-byte header slice already held, so consulting them costs nothing.
     // A total length below the header length is impossible on the wire and
@@ -2394,6 +2434,13 @@ fn parse_ipv4(
         payload_offset,
         udp_wg_transport_data,
         is_fragment: (frag_field & 0x2000) != 0 || non_first_fragment,
+        is_first_fragment: first_fragment,
+        ip_frag_off: frag_field,
+        ip_total_len: total_len,
+        ip_payload_len: 0,
+        frag_data_off: 0,
+        ip_ihl: (version_ihl & 0x0f) as u8,
+        saw_source_route: ipv4_has_source_route_option(ihdr, ihl),
         tcp_flags_unknown: tcp_flags_unknown,
         unresolved_ipv6_ext_chain: false,
         addr_family: AF_INET,
@@ -2528,6 +2575,13 @@ fn parse_ipv6(
         l4_offset: offset,
         udp_wg_transport_data,
         is_fragment: walk.fragment_seen,
+        is_first_fragment: walk.is_first_fragment,
+        ip_frag_off: walk.frag_off,
+        ip_total_len: 0,
+        ip_payload_len: payload_len,
+        frag_data_off: walk.frag_data_off,
+        ip_ihl: 0,
+        saw_source_route: walk.routing_source_route,
         tcp_flags_unknown: false,
         payload_offset,
         unresolved_ipv6_ext_chain: false,
@@ -2656,6 +2710,95 @@ fn land_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
             false
         }
     }
+}
+
+// #16009/#15854: the whole stateless-malformed gate as one outlined
+// subprogram, returning true iff the caller must drop with
+// HOST_SCREEN_DROP. The cheap verdict runs first so ordinary packets
+// pay no map reads; only a tripped packet resolves its zone. A
+// resolved zone reads its host_screen byte (absent = checks off, the
+// Go sync publishes explicit rows for screened zones); an unresolved
+// zone fails closed to Drop. ALARM counts HOST_SCREEN_ALARM here and
+// returns false so the caller's normal kernel-pass arms proceed. Do
+// not re-inline without re-measuring through cmd/shimverify.
+#[inline(never)]
+fn host_screen_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
+    // Cheap fragment/flag pre-check: most packets cannot trip any
+    // screen, so avoid even building the verdict struct for them.
+    // (Measurement variant - replaced below if ineffective.)
+    let ingress_key = UserspaceWgIngressZoneKey {
+        ifindex: ingress_ifindex,
+        vlan_id: if pkt.vlan_present {
+            pkt.vlan_id
+        } else {
+            u16::MAX
+        },
+        reserved: 0,
+    };
+    let zone_id = (unsafe { USERSPACE_WG_INGRESS_ZONES.get(&ingress_key) })
+        .copied()
+        .unwrap_or(0);
+    if zone_id != 0 {
+        let screen_byte = (unsafe { USERSPACE_HOST_SCREEN.get(&zone_id) })
+            .copied()
+            .unwrap_or(0);
+        if screen_byte & host_screen::HOST_SCREEN_ALL_CHECKS == 0
+            && (screen_byte & host_screen::HOST_SCREEN_ALARM_WITHOUT_DROP) == 0
+        {
+            // Resolved zone with no malformed check enabled: only fail
+            // if verdict trips AND zone disabled -> Pass. Skip verdict.
+            // But unresolved-zone fail-closed needs verdict, handled below.
+            // For resolved checks-off zone, disposition is Pass for any mask.
+            return false;
+        }
+        let mask = host_malformed_verdict(&HostScreenPacket {
+            is_ipv4: pkt.addr_family == AF_INET,
+            protocol: pkt.protocol,
+            wire_protocol: pkt.wire_protocol,
+            tcp_flags: pkt.tcp_flags,
+            tcp_flags_unknown: pkt.tcp_flags_unknown,
+            dst_port: pkt.flow_dst_port,
+            is_fragment: pkt.is_fragment,
+            is_first_fragment: pkt.is_first_fragment,
+            ip_frag_off: pkt.ip_frag_off,
+            ip_total_len: pkt.ip_total_len,
+            ip_ihl: pkt.ip_ihl,
+            ip_payload_len: pkt.ip_payload_len,
+            frag_data_off: pkt.frag_data_off,
+            saw_source_route: pkt.saw_source_route,
+        });
+        if mask == 0 {
+            return false;
+        }
+        return match host_malformed_disposition(true, screen_byte, mask) {
+            HostMalformedDisposition::Pass => false,
+            HostMalformedDisposition::Drop => true,
+            HostMalformedDisposition::AlarmPass => {
+                incr_fallback_stat(USERSPACE_FALLBACK_REASON_HOST_SCREEN_ALARM);
+                false
+            }
+        };
+    }
+    let mask = host_malformed_verdict(&HostScreenPacket {
+        is_ipv4: pkt.addr_family == AF_INET,
+        protocol: pkt.protocol,
+        wire_protocol: pkt.wire_protocol,
+        tcp_flags: pkt.tcp_flags,
+        tcp_flags_unknown: pkt.tcp_flags_unknown,
+        dst_port: pkt.flow_dst_port,
+        is_fragment: pkt.is_fragment,
+        is_first_fragment: pkt.is_first_fragment,
+        ip_frag_off: pkt.ip_frag_off,
+        ip_total_len: pkt.ip_total_len,
+        ip_ihl: pkt.ip_ihl,
+        ip_payload_len: pkt.ip_payload_len,
+        frag_data_off: pkt.frag_data_off,
+        saw_source_route: pkt.saw_source_route,
+    });
+    if mask == 0 {
+        return false;
+    }
+    host_malformed_disposition(false, 0, mask) == HostMalformedDisposition::Drop
 }
 
 // #15854: outlined like the other map-touching helpers (#14851

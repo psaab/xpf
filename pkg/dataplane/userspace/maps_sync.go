@@ -537,6 +537,9 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 	if err := m.syncUserspaceLandScreenLocked(snapshot); err != nil {
 		return err
 	}
+	if err := m.syncUserspaceHostScreenLocked(snapshot); err != nil {
+		return err
+	}
 	if err := m.syncInterfaceNATAddressMapsWithSetsLocked(natV4, natV6, rstV4, rstV6); err != nil {
 		return err
 	}
@@ -962,7 +965,7 @@ func appendBindingIndex(indices []uint32, idx uint32) []uint32 {
 
 // degradedPathReasonNames maps BPF array index to a human-readable name.
 // Must stay in sync with USERSPACE_FALLBACK_REASON_* in userspace-xdp/src/lib.rs.
-var degradedPathReasonNames = [21]string{
+var degradedPathReasonNames = [23]string{
 	0:  "ctrl_disabled",
 	1:  "parse_fail",
 	2:  "binding_missing",
@@ -984,6 +987,8 @@ var degradedPathReasonNames = [21]string{
 	18: "tagged_only_local_drop",
 	19: "land_drop",
 	20: "land_alarm",
+	21: "host_screen_drop",
+	22: "host_screen_alarm",
 }
 
 // readDegradedPathStatsLocked reads retained-shim degraded-path counters and

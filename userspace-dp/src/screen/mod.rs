@@ -192,6 +192,8 @@ mod zone;
 
 pub(crate) use extract::extract_screen_info;
 pub(crate) use packet::{ScreenPacketInfo, ScreenProfile, ScreenVerdict};
+#[cfg(test)]
+pub(crate) use stateless::worker_malformed_mask_for_test;
 pub(crate) use unresolved::UnresolvedProfileRef;
 // `ScreenParseError` is named only by `extract.rs` (via the `packet`
 // path) and by the test module. Production call sites in `afxdp/`
