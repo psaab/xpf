@@ -3046,6 +3046,34 @@ fn zone_policy_deny_on_session_hit(
     ZonePolicyJudgment::Revoke
 }
 
+/// Test-only access to the actual stale-hit zone-policy judgment, keeping
+/// its private input and verdict types inside this module.
+#[cfg(test)]
+pub(super) fn zone_policy_permits_for_test(
+    forwarding: &ForwardingState,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    flow: &SessionFlow,
+    from_source: FromZoneSource,
+    now_ns: u64,
+) -> bool {
+    let input = PolicyJudgmentInput {
+        decision,
+        metadata: metadata.clone(),
+        protocol: flow.forward_key.protocol,
+        src_ip: flow.forward_key.src_ip,
+        dst_ip: flow.dst_ip,
+        src_port: flow.forward_key.src_port,
+        dst_port: flow.forward_key.dst_port,
+        from_source,
+        now_ns,
+    };
+    matches!(
+        zone_policy_deny_on_session_hit(forwarding, &input),
+        ZonePolicyJudgment::Permit
+    )
+}
+
 #[cfg(test)]
 #[path = "policy_revalidation_tests.rs"]
 mod tests;
