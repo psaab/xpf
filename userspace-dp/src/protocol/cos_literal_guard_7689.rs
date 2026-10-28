@@ -607,9 +607,9 @@ fn additive_wire_census_applies_the_stated_rule_17147() {
             "rename alone is not default, and the comma inside Vec<A, B> must not mint a ninth field",
         ),
         (
-            "#[derive(Default)] struct Wire { #[serde(default)] a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: Vec<u8, u8> }",
+            "#[derive(Default)] struct Wire { #[serde(default)] a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: Vec<u8, other: u8> }",
             &[],
-            "7 fields with a Vec<A, B> field is below the floor: the angle comma must not mint an eighth field (isolates the angle leg — serde-default is present and Default is derived, unlike the rename case above)",
+            "7 named fields is below the >= 8 floor only with angle tracking: without it the comma inside Vec<..> splits off ' other: u8', whose name: head passes the field filter and mints a phantom eighth field (isolates the angle leg - serde-default is present and Default is derived, unlike the rename case above)",
         ),
         (
             "struct Wire { #[serde(default)] a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8 } impl Default for Wire { fn default() -> Self { todo!() } }",
