@@ -9,7 +9,12 @@ xpf (0.0.0) unstable; urgency=medium
     priority-cost by source order, and a bad packed sibling erased
     a good nested cost to 0 on the lenient path. Nested cost now
     wins regardless of spelling or order, and a bad sibling is
-    ignored (#17227).
+    ignored. A bare packed `preempt` no longer swallows the next
+    property: its optional `hold-time <n>` pair is reserved only
+    when the next token is literally `hold-time`, so
+    `preempt priority 200` keeps priority 200 and
+    `preempt no-preempt` stays non-preempting instead of inverting
+    (#17227).
   * Config reads: the rollback slot error now travels inside one
     captured value (configstore.RollbackCapture from CaptureRollback /
     CaptureRollbackSlot) through the REST, gRPC and CLI gates to their

@@ -68,10 +68,6 @@ var vrrpGroupPropertyKeywords = map[string]bool{
 // statement keyword itself. Nested containers carry their own inner tokens
 // as arguments here so their inner keywords cannot re-arm the splitter:
 //
-//   - `preempt hold-time <n>`   — optional pair, reserved statically as 2
-//     (a bare `preempt` simply absorbs the following tokens as its own
-//     Keys run; the child reader below ignores anything that is not a
-//     `hold-time` pair, exactly as the former Keys arm did).
 //   - `track interface <if> priority-cost <n>` — see vrrpTrackPending:
 //     a FIXED reservation of 4 would let a short `track interface <if>`
 //     swallow the FOLLOWING property keyword as its fourth token (the
@@ -82,6 +78,14 @@ var vrrpGroupPropertyKeywords = map[string]bool{
 //     -1 entry means "absorb every token up to the next recognized
 //     property keyword" (#1813).
 //
+// `preempt` has NO entry here: its optional `hold-time <n>` pair is
+// reserved only when the token after `preempt` IS `hold-time`
+// (vrrpPreemptPending below); a bare `preempt` reserves nothing, so the
+// following property keyword opens its own statement — the former Keys
+// arm consumed the pair conditionally the same way, and a static
+// reservation of 2 would swallow `preempt priority 200` into a
+// synthetic preempt node the reader cannot see past.
+//
 // Every other statement takes exactly one value token (the schema's
 // args:1 leaves) or zero (the flags), as listed. An arity must be
 // declared for every member of vrrpGroupPropertyKeywords: a missing
@@ -91,7 +95,6 @@ var vrrpGroupStatementArity = map[string]int{
 	"virtual-address":            -1, // multi-value run (#1813)
 	"virtual-inet6-address":      -1, // multi-value run (#1813)
 	"priority":                   1,
-	"preempt":                    2, // optional `hold-time <n>`
 	"no-preempt":                 0,
 	"accept-data":                0,
 	"advertise-interval":         1,
@@ -113,6 +116,29 @@ func vrrpPendingAfter(kw string) (int, bool) {
 		return 0, true
 	default:
 		return 0, false
+	}
+}
+
+// vrrpPreemptPending recomputes the reservation for an open packed
+// `preempt` statement from the tokens absorbed so far (#17227). The
+// only continuation is the optional Junos pair `hold-time <n>`: after
+// `preempt` itself one token is reserved so a literal `hold-time` can
+// arrive; once it does, one more token (its value) is reserved. Any
+// other first token means the `preempt` was bare — the caller checks
+// each token while pending==0 (see vrrpGroupStatements) and lets a
+// property keyword open the next statement instead of absorbing it
+// into this node, exactly as the former Keys arm consumed the pair
+// only when keys[i+1] was literally `hold-time`.
+func vrrpPreemptPending(keys []string) int {
+	switch {
+	case len(keys) == 1: // [preempt]
+		return 1
+	case len(keys) == 2 && keys[1] == "hold-time": // [preempt hold-time]
+		return 1
+	default:
+		// [preempt hold-time <n>] complete, or a bare `preempt` whose
+		// next token was not `hold-time`: nothing more is reserved.
+		return 0
 	}
 }
 
@@ -197,6 +223,28 @@ func vrrpGroupStatements(inst *Node) []*Node {
 				cur = &Node{Keys: []string{tok}, Line: inst.Line, Column: inst.Column}
 				props = append(props, cur)
 				pending, multi = vrrpPendingAfter(tok)
+				if tok == "preempt" {
+					pending = 1
+				}
+				continue
+			}
+			// A bare packed `preempt` whose next token is NOT
+			// `hold-time` is complete: let a property keyword open the
+			// next statement instead of absorbing it into the preempt
+			// node (where the reader would ignore it). This check runs
+			// while the one-token `hold-time` reservation is still
+			// pending, so it must not require pending==0 — a keyword
+			// here is never the reserved slot's content unless it IS
+			// `hold-time`. A non-keyword token stays absorbed, as
+			// under the former Keys arm.
+			if cur != nil && len(cur.Keys) == 1 && cur.Keys[0] == "preempt" &&
+				tok != "hold-time" && isProp(tok) {
+				cur = &Node{Keys: []string{tok}, Line: inst.Line, Column: inst.Column}
+				props = append(props, cur)
+				pending, multi = vrrpPendingAfter(tok)
+				if tok == "preempt" {
+					pending = 1
+				}
 				continue
 			}
 			switch {
@@ -206,6 +254,9 @@ func vrrpGroupStatements(inst *Node) []*Node {
 					cur = &Node{Keys: []string{tok}, Line: inst.Line, Column: inst.Column}
 					props = append(props, cur)
 					pending, multi = vrrpPendingAfter(tok)
+					if tok == "preempt" {
+						pending = 1
+					}
 					continue
 				}
 				cur.Keys = append(cur.Keys, tok)
@@ -214,12 +265,16 @@ func vrrpGroupStatements(inst *Node) []*Node {
 				cur.Keys = append(cur.Keys, tok)
 				if cur.Keys[0] == "track" {
 					pending = vrrpTrackPending(cur.Keys)
+				} else if cur.Keys[0] == "preempt" {
+					pending = vrrpPreemptPending(cur.Keys)
 				}
 			case cur == nil || isProp(tok):
 				cur = &Node{Keys: []string{tok}, Line: inst.Line, Column: inst.Column}
 				props = append(props, cur)
 				pending, multi = vrrpPendingAfter(tok)
 				if tok == "track" {
+					pending = 1
+				} else if tok == "preempt" {
 					pending = 1
 				}
 			default:
