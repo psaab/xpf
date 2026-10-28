@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/psaab/xpf/pkg/argforms"
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
@@ -505,7 +506,7 @@ func (s *Server) authorizeRESTCommandBare(r *http.Request, cfg *config.Config, p
 		return fmt.Errorf("permission denied: login class %q restricts commands and this route "+
 			"has no canonical command to evaluate, so the restriction cannot be applied to it", class)
 	}
-	forms := restChargeForms16472(cmd)
+	forms := argforms.ChargeForms(cmd)
 	if len(forms) == 0 {
 		return fmt.Errorf("permission denied: login class %q restricts commands and this "+
 			"request's arguments cannot be named as a command, so the restriction cannot be "+
@@ -529,10 +530,10 @@ func (s *Server) authorizeRESTCommandBare(r *http.Request, cfg *config.Config, p
 	return nil
 }
 
-// restDistinctRescue16472 is the REST twin of the gRPC/console #14687
-// distinct-narrower rescue (#16472), via the shared
-// cmdtree.DistinctNarrowerAllowed. pkg/api keeps its own thin wrapper
-// because it must not import pkg/grpcapi.
+// restDistinctRescue16472 is the REST application of the shared #14687
+// distinct-narrower rescue (#16472), via cmdtree.DistinctNarrowerAllowed
+// — the same helper the gRPC gate applies over the same forms (#17179:
+// both surfaces now reconstruct those forms in pkg/argforms).
 func restDistinctRescue16472(rules config.CompiledLoginRegexes, forms []string) bool {
 	if len(forms) == 0 {
 		return false
