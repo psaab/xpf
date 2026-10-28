@@ -1242,3 +1242,370 @@ fn remove_dropped_prepared_snapshots_sorts_phase_order_15949() {
     assert_eq!(ff.pop_snapshot_stack.len(), 1, "exactly two dropped snapshots removed");
     assert_eq!(ff.pop_snapshot_stack[0].bucket, 20, "survivor snapshot (orig pos 1) must remain; unsorted removal would delete it");
 }
+
+// #17159: the non-exact CoS submit handlers must count a ring-full
+// submit stall per queue, exactly as the four exact direct-service
+// sites do. The queue-less `tx/transmit` primitives cannot count
+// (no queue identity), so `submit_local` / `submit_prepared`
+// compensate on their Retry arms when the typed retry reason
+// reports a ring-full insert failure.
+//
+// FAIL-ON-REVERT (assertion, NOT a build break — the production
+// mutant below proves it): removing the
+// `count_tx_ring_full_submit_stall(...)` call from either Retry arm
+// — or gating it on the wrong retry reason — leaves the queue
+// counter at 0 (or bumps it on a non-ring-full retry) and the
+// matching assert fails. The cited divergence (ring-starved
+// non-exact queue reporting `tx_ring_full_submit_stalls == 0`)
+// can no longer recur because these two tests are the ONLY
+// non-exact Retry entry points and both are pinned here.
+//
+// MUTANT (run by hand, not in the suite): delete the
+// `count_tx_ring_full_submit_stall` call in `submit_local` and in
+// `submit_prepared`; both tests below must go RED on the stall
+// assert and green again once restored.
+//
+// How a real `inserted == 0` is forced hermetically without a
+// kernel XSK: the first `submit_*` call fills the test TX ring
+// (capacity 64) with committed descriptors that are never reaped
+// (no completions are ever consumed in the test fixture), so the
+// ring's producer reservation fails on the second call and the
+// real `transmit_batch` / `transmit_prepared_queue` returns
+// `Err(TxError::Retry(TxRingInsertFailed |
+// PreparedTxRingInsertFailed))` through the genuine production
+// path — no stub, no fake error injection at the handler level.
+//
+// Premise probes inside each test pin the mechanism: the first
+// call must make progress, the binding-level `dbg_tx_ring_full`
+// must advance on the second call (proving `inserted == 0` really
+// fired inside the transmit primitive), and the stalled items
+// must be restored to the queue head (NOT dropped, NOT counted
+// in `tx_submit_error_drops` — a Retry never touches that
+// counter, which is the false claim the pre-#17159 comment made).
+
+fn stall_test_root() -> CoSInterfaceRuntime {
+    let mut root = test_cos_runtime_with_queues(
+        10_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "iperf-c".into(),
+            priority: 5,
+            transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
+            exact: false,
+            surplus_sharing: true,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    root.tokens = 1_000_000;
+    root.queues[0].hot.tokens = 1_000_000;
+    root
+}
+
+fn stall_test_binding(root: CoSInterfaceRuntime) -> BindingWorker {
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path)
+}
+
+fn stall_test_local_items(n: usize, now_ns: u64) -> VecDeque<TxRequest> {
+    (0..n)
+        .map(|_| TxRequest {
+            bytes: vec![0u8; 100].into(),
+            expected_ports: None,
+            expected_addr_family: libc::AF_INET as u8,
+            expected_protocol: PROTO_TCP,
+            flow_key: None,
+            egress_ifindex: 42,
+            cos_queue_id: Some(0),
+            dscp_rewrite: None,
+            mirror_clone: false,
+            overlap_admissions: None,
+            enqueue_ns: now_ns,
+        })
+        .collect()
+}
+
+fn queue_stalls(binding: &BindingWorker) -> u64 {
+    binding.cos.cos_interfaces[&42].queues[0]
+        .telemetry
+        .drop_counters
+        .tx_ring_full_submit_stalls
+}
+
+/// Fill the 64-slot test TX ring with committed prepared
+/// descriptors that are never reaped, leaving the local
+/// free-frame pool untouched so a subsequent local submit can
+/// stage frames and reach the real `inserted == 0` branch.
+fn fill_test_tx_ring_with_prepared(
+    binding: &mut BindingWorker,
+    now_ns: u64,
+    shared_recycles: &mut Vec<(u32, u64)>,
+) {
+    let mut fill_items = VecDeque::new();
+    for i in 0..64u64 {
+        let offset = i << UMEM_FRAME_SHIFT;
+        let frame = unsafe {
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(offset as usize, 100)
+        }
+        .expect("umem frame slice");
+        frame.fill(0);
+        fill_items.push_back(PreparedTxRequest {
+            offset,
+            len: 100,
+            recycle: PreparedTxRecycle::FreeTxFrame,
+            expected_ports: None,
+            expected_addr_family: libc::AF_INET as u8,
+            expected_protocol: PROTO_TCP,
+            flow_key: None,
+            egress_ifindex: 42,
+            cos_queue_id: Some(0),
+            dscp_rewrite: None,
+            mirror_clone: false,
+            overlap_admissions: None,
+            enqueue_ns: now_ns,
+        });
+    }
+    assert!(
+        submit_prepared(
+            binding,
+            42,
+            0,
+            CoSServicePhase::Surplus,
+            6400,
+            fill_items,
+            now_ns,
+            shared_recycles,
+        ),
+        "premise: prepared fill must commit 64 descriptors to the TX ring"
+    );
+}
+
+#[test]
+fn submit_local_counts_tx_ring_full_submit_stall_on_ring_full() {
+    let now_ns = 1_000_000_000u64;
+    let mut binding = stall_test_binding(stall_test_root());
+    // Suppress maybe_wake_tx's first-N error eprintln (test fd -1).
+    binding.telemetry.dbg_sendto_err = 100;
+    let mut shared_recycles = Vec::new();
+
+    // Fill the test TX ring (capacity 64) via the prepared path:
+    // 64 committed descriptors are never reaped, so the ring stays
+    // full, while the local free-frame pool stays intact — the
+    // second (local) submit can stage frames and reach the real
+    // `inserted == 0` ring-full branch in `transmit_batch`.
+    fill_test_tx_ring_with_prepared(&mut binding, now_ns, &mut shared_recycles);
+    // Premise: after the fill commit the ring is full — a fresh
+    // reservation of one slot must come back empty.
+    assert_eq!(
+        binding.xsk.tx.transmit(1).insert(std::iter::empty()),
+        0,
+        "premise: TX ring must be full after the 64-descriptor fill"
+    );
+    assert_eq!(queue_stalls(&binding), 0, "no stall before ring pressure");
+
+    // Ring-full second submit: 3 items. The queue must already hold
+    // them (the Retry arm restores to the queue head), so seed the
+    // queue bookkeeping the same way build_cos_batch_from_queue
+    // leaves it: items popped, queued_bytes still charged.
+    binding.cos.cos_interfaces.get_mut(&42).unwrap().queues[0]
+        .hot
+        .queued_bytes = 300;
+    let ring_full_before = binding.telemetry.dbg_tx_ring_full;
+    let drops_before = binding
+        .live
+        .tx_submit_error_drops
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let items = stall_test_local_items(3, now_ns);
+    let progress = submit_local(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Surplus,
+        300,
+        items,
+        now_ns,
+        &mut shared_recycles,
+    );
+    assert!(!progress, "a ring-full retry makes no send progress");
+    // The staged frames were popped and returned by the ring-full
+    // unwind, so the pool is whole again (64) — the items, not the
+    // frames, are what the queue restoration is about.
+    assert_eq!(binding.tx_pipeline.free_tx_frames.len(), 64);
+    assert_eq!(
+        binding.live.snapshot().last_error,
+        TxRetryReason::TxRingInsertFailed.as_str(),
+        "premise: the retry reason must be the typed ring-full reason"
+    );
+    assert_eq!(
+        binding.telemetry.dbg_tx_ring_full,
+        ring_full_before + 1,
+        "premise: inserted == 0 must have fired inside transmit_batch"
+    );
+    assert_eq!(
+        queue_stalls(&binding),
+        3,
+        "#17159: submit_local must count the 3 stalled packets on the queue"
+    );
+    // A Retry is not a drop: the false pre-#17159 comment claimed
+    // tx_submit_error_drops covers this case. It must not move.
+    assert_eq!(
+        binding
+            .live
+            .tx_submit_error_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
+        drops_before,
+        "a Retry must never bump tx_submit_error_drops"
+    );
+    assert_eq!(
+        binding.cos.cos_interfaces[&42].queues[0].hot.items.len(),
+        3,
+        "stalled items must be restored to the queue head, not lost"
+    );
+}
+
+#[test]
+fn submit_prepared_counts_tx_ring_full_submit_stall_on_ring_full() {
+    let now_ns = 1_000_000_000u64;
+    let mut binding = stall_test_binding(stall_test_root());
+    // Suppress maybe_wake_tx's first-N error eprintln (test fd -1).
+    binding.telemetry.dbg_sendto_err = 100;
+    let mut shared_recycles = Vec::new();
+
+    let mk_prepared = |offset: u64, len: u32| PreparedTxRequest {
+        offset,
+        len,
+        recycle: PreparedTxRecycle::FreeTxFrame,
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 42,
+        cos_queue_id: Some(0),
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: now_ns,
+    };
+    // Commit 64 prepared descriptors so the TX ring fills (the
+    // pooled frames stay checked out; see the helper).
+    fill_test_tx_ring_with_prepared(&mut binding, now_ns, &mut shared_recycles);
+    assert_eq!(
+        binding.xsk.tx.transmit(1).insert(std::iter::empty()),
+        0,
+        "premise: TX ring must be full after the 64-descriptor fill"
+    );
+    assert_eq!(queue_stalls(&binding), 0, "no stall before ring pressure");
+
+    // Ring-full second submit: 2 prepared items, restored on Retry.
+    binding.cos.cos_interfaces.get_mut(&42).unwrap().queues[0]
+        .hot
+        .queued_bytes = 200;
+    let ring_full_before = binding.telemetry.dbg_tx_ring_full;
+    let drops_before = binding
+        .live
+        .tx_submit_error_drops
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let mut items = VecDeque::new();
+    for i in 0..2u64 {
+        let offset = i << UMEM_FRAME_SHIFT;
+        let frame = unsafe {
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(offset as usize, 100)
+        }
+        .expect("umem frame slice");
+        frame.fill(0);
+        items.push_back(mk_prepared(offset, 100));
+    }
+    let progress = submit_prepared(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Surplus,
+        200,
+        items,
+        now_ns,
+        &mut shared_recycles,
+    );
+    assert!(!progress, "a ring-full retry makes no send progress");
+    assert_eq!(
+        binding.telemetry.dbg_tx_ring_full,
+        ring_full_before + 1,
+        "premise: inserted == 0 must have fired inside finalise_prepared"
+    );
+    assert_eq!(
+        queue_stalls(&binding),
+        2,
+        "#17159: submit_prepared must count the 2 stalled packets on the queue"
+    );
+    assert_eq!(
+        binding
+            .live
+            .tx_submit_error_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
+        drops_before,
+        "a Retry must never bump tx_submit_error_drops"
+    );
+    assert_eq!(
+        binding.cos.cos_interfaces[&42].queues[0].hot.items.len(),
+        2,
+        "stalled items must be restored to the queue head, not lost"
+    );
+}
+
+#[test]
+fn submit_local_no_free_frame_retry_does_not_count_stall() {
+    // Negative gate: a NoFreeTxFrame retry is TX backpressure but
+    // NOT a ring-full insert failure. Counting it here would
+    // inflate the stall counter with a different pressure signal
+    // (and would make the two positive tests above pass for the
+    // wrong reason if the reason gate were widened).
+    let now_ns = 1_000_000_000u64;
+    let mut binding = stall_test_binding(stall_test_root());
+    binding.telemetry.dbg_sendto_err = 100;
+    // Force the NoFreeTxFrame retry inside transmit_batch.
+    binding.tx_pipeline.free_tx_frames.clear();
+    binding.cos.cos_interfaces.get_mut(&42).unwrap().queues[0]
+        .hot
+        .queued_bytes = 100;
+    let mut shared_recycles = Vec::new();
+    let items = stall_test_local_items(1, now_ns);
+    let progress = submit_local(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Surplus,
+        100,
+        items,
+        now_ns,
+        &mut shared_recycles,
+    );
+    assert!(!progress, "an expected retry makes no send progress");
+    assert_eq!(
+        queue_stalls(&binding),
+        0,
+        "NoFreeTxFrame must not count as a ring-full submit stall"
+    );
+    assert_eq!(
+        binding.cos.cos_interfaces[&42].queues[0].hot.items.len(),
+        1,
+        "the retried item must be restored to the queue head"
+    );
+}

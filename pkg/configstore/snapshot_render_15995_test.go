@@ -75,7 +75,7 @@ func TestSnapshotTreesAreImmutableCopies15995(t *testing.T) {
 			defer wg.Done()
 			for range 25 {
 				fresh := s.ShowConfigTrees("candidate")
-				_ = config.AuthorizeConfigShowPathRendered(compiled, "limited", []string{"security"}, "", fresh...)
+				_ = config.AuthorizeConfigShowPathRendered(compiled, "limited", []string{"security"}, "", fresh)
 				if len(fresh) == 1 {
 					_ = RenderShowRedacted(fresh[0], []string{"security"}, "text")
 				}

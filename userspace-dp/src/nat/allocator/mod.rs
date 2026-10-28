@@ -354,7 +354,7 @@ pub(super) fn persistent_egress_scope_v2(
 /// control-plane helper that owns the lease-control version knows which
 /// encoding the peer used. FOLLOWUP(#15133): the coordinator-side
 /// re-encode site, once the lease-control version negotiation carries it.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(super) fn persistent_egress_scope_reencode_for_peer(_scope: u32) -> Option<u32> {
     None
 }
@@ -2267,7 +2267,7 @@ enum ReuseCount {
     /// Count the re-entry (the ordinary idempotent-reuse return).
     Counted,
     /// Record the holder only, without bumping `reuses_total`.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     Uncounted,
 }
 
@@ -2526,9 +2526,117 @@ impl PortAllocator {
         )
     }
 
+    /// #17197: non-counting twin of
+    /// [`persistent_inbound_lookup_for_rule`] for pure classification
+    /// callers (the Stage-11 DNAT verdict). Same rule-scoped admission,
+    /// but the lease tables are read under `read_live`, so no
+    /// `live_write_lock_acquisitions` / `live_write_lock_contended`
+    /// telemetry is charged and no write guard is taken. The returned
+    /// lease key is a plain key copy; holding it is the caller's
+    /// separate `acquire_persistent_inbound*` step, which the verdict
+    /// path never performs.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn persistent_inbound_peek_for_rule(
+        &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+        rule: &super::source::SourceNatRule,
+        ingress_zone: &str,
+        packet_from_zone: &str,
+        packet_to_zone: &str,
+        scope: &super::NatScopeCtx<'_>,
+    ) -> PersistentInbound {
+        let arrival_scope =
+            rule.persistent_rule_scope(packet_from_zone, packet_to_zone, ingress_zone, scope);
+        self.persistent_inbound_peek_scoped_for_rule(
+            protocol,
+            translated_ip,
+            translated_port,
+            remote_ip,
+            remote_port,
+            now_ns,
+            arrival_scope,
+            rule,
+            ingress_zone,
+        )
+    }
+
+    /// #17197: read-only peek twin of the scoped-for-rule lookup:
+    /// identical admission logic under a shared `live` read guard
+    /// instead of the counted write guard (`lock_live`). The lookup
+    /// body only reads `persistent_by_translated` /
+    /// `persistent_by_source` / `persistent_permissions` and never
+    /// mutates lease state, so a read guard is sufficient;
+    /// `read_live` is deliberately NOT #4800-counted (see its doc),
+    /// so this path bumps no `live_write_lock_acquisitions` /
+    /// `live_write_lock_contended` telemetry. Pure classification
+    /// callers (the Stage-11 verdict) use it; the committed-install
+    /// path keeps the counting entry point so its telemetry is
+    /// unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn persistent_inbound_peek_scoped_for_rule(
+        &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+        arrival_scope: u32,
+        rule: &super::source::SourceNatRule,
+        ingress_zone: &str,
+    ) -> PersistentInbound {
+        let live = self.read_live();
+        self.persistent_inbound_lookup_scoped_for_rule_locked(
+            &live,
+            protocol,
+            translated_ip,
+            translated_port,
+            remote_ip,
+            remote_port,
+            now_ns,
+            arrival_scope,
+            rule,
+            ingress_zone,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn persistent_inbound_lookup_scoped_for_rule(
         &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+        arrival_scope: u32,
+        rule: &super::source::SourceNatRule,
+        ingress_zone: &str,
+    ) -> PersistentInbound {
+        let live = self.lock_live();
+        self.persistent_inbound_lookup_scoped_for_rule_locked(
+            &live,
+            protocol,
+            translated_ip,
+            translated_port,
+            remote_ip,
+            remote_port,
+            now_ns,
+            arrival_scope,
+            rule,
+            ingress_zone,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persistent_inbound_lookup_scoped_for_rule_locked(
+        &self,
+        live: &PortAllocatorLiveState,
         protocol: u8,
         translated_ip: IpAddr,
         translated_port: u16,
@@ -2544,7 +2652,6 @@ impl PortAllocator {
             translated_ip,
             translated_port,
         };
-        let live = self.lock_live();
         let Some(keys) = live.persistent_by_translated.get(&reverse) else {
             return PersistentInbound::Miss;
         };
@@ -3577,7 +3684,6 @@ impl PortAllocator {
     /// mint the same translated identity.
     // #8121 part 1: reached only from `idle_lease_sync_8121` and its tests
     // until the transport lands (see that module's header).
-    #[allow(dead_code)]
     pub(super) fn try_claim_translated_port(&self, addr_index: usize, port: u16) -> Option<bool> {
         Some(self.shared.occupancy.get(addr_index)?.reserve(port))
     }

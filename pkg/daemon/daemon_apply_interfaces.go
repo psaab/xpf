@@ -71,9 +71,7 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 			if bindingCtrl != nil && !bindingCtrl.XSKBoundNotified() {
 				// First applyConfig — remove stale IPVLAN so XSK can zerocopy.
 				if link, err := netlink.LinkByName(fabLinux); err == nil {
-					netlink.LinkDel(link)
-					slog.Info("removed fabric IPVLAN for deferred zerocopy XSK bind",
-						"name", fabLinux)
+					_ = d.deleteFabricOverlay(link, "deferred zerocopy XSK bind")
 				}
 				deferredOverlays = append(deferredOverlays, deferredIPVLAN{
 					parent: parentLinux, name: fabLinux, addrs: addrs, mtu: ifCfg.MTU,
@@ -116,14 +114,14 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 		bindingCtrl.SetOnXSKBound(func() { d.createDeferredFabricOverlays(deferredOverlays) })
 	}
 	// Clean up stale fabric IPVLAN overlays not in current config (#128).
-	for _, name := range []string{"fab0", "fab1"} {
+	// Enumerated via the #8372 single source (#17224).
+	for _, name := range fabricOverlayNames() {
 		if activeFabricOverlays[name] {
 			continue
 		}
 		if link, err := d.fabricLinkByName(name); err == nil {
 			if _, ok := link.(*netlink.IPVlan); ok {
-				netlink.LinkDel(link)
-				slog.Info("removed stale fabric IPVLAN", "name", name)
+				_ = d.deleteFabricOverlay(link, "stale fabric IPVLAN")
 			}
 		}
 	}

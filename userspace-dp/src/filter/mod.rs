@@ -235,7 +235,6 @@ pub(crate) enum FlexMatchStart {
 }
 
 /// Compiled filter term with pre-parsed match criteria.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct FilterTerm {
     pub(crate) id: u32,
@@ -587,7 +586,6 @@ impl PortMatcher {
 }
 
 /// A compiled firewall filter (ordered list of terms).
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct Filter {
     pub(crate) id: u32,

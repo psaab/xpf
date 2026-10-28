@@ -179,9 +179,12 @@ func TestReconcileStopsRespondersWhenProxyARPIsRemoved8621(t *testing.T) {
 	// A responder is running from a prior config.
 	_, cancel := context.WithCancel(context.Background())
 	stopped := false
+	done8621 := make(chan struct{})
 	d.arpResponders.running["ge-0-0-2.80"] = &proxyARPResponder{
-		cancel:   func() { stopped = true; cancel() },
-		done:     make(chan struct{}),
+		// The fake goroutine: cancel closes done, as the real loop's
+		// exit does, so stop()'s join returns (#17231).
+		cancel:   func() { stopped = true; cancel(); close(done8621) },
+		done:     done8621,
 		junosRef: "reth0.80",
 		addrs:    map[string]struct{}{"172.16.80.7": {}},
 	}
@@ -207,9 +210,12 @@ func TestReconcileStopsRespondersWhenProxyARPIsRemoved8621(t *testing.T) {
 func TestTheEarlyReturnStillStopsResponders8621(t *testing.T) {
 	d := &Daemon{arpResponders: newProxyARPResponders()}
 	stopped := false
+	doneEarly := make(chan struct{})
 	d.arpResponders.running["ge-0-0-2.80"] = &proxyARPResponder{
-		cancel:   func() { stopped = true },
-		done:     make(chan struct{}),
+		// The fake goroutine: cancel closes done, as the real loop's
+		// exit does, so stop()'s join returns (#17231).
+		cancel:   func() { stopped = true; close(doneEarly) },
+		done:     doneEarly,
 		junosRef: "reth0.80",
 	}
 	// hasEntries == false AND no prior installed entries => the early return.
