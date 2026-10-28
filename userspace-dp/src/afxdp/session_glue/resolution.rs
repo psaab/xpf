@@ -597,7 +597,7 @@ pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
 
 /// #17047: the connected owner of a stored session's destination,
 /// computed ONCE inside `reresolve_stored_session`. `Unknown` is
-/// `dest_rg == 0` (no connected prefix serves the target — a
+/// `dest_rg <= 0` (no connected prefix serves the target — a
 /// gateway-routed destination); it is NOT peer ownership, so the
 /// #16524 routed re-home applies. `Active`/`Inactive` carry the
 /// known owner RG. This replaces the per-caller boolean owner

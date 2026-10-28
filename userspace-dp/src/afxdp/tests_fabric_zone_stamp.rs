@@ -8570,6 +8570,7 @@ fn reresolve_destination_owner_fabric_table_17047() {
             assert_eq!(out.egress_ifindex, want_egress, "{name}: egress");
         } else {
             assert_eq!(out.disposition, ForwardingDisposition::FabricRedirect, "{name}: retained");
+            assert_eq!(out.egress_ifindex, want_egress, "{name}: retained egress");
         }
     }
 }
