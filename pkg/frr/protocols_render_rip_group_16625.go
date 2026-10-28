@@ -275,7 +275,83 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 		seenText[text] = true
 		entries = append(entries, entry{text, is6})
 	}
-	hasLaterAccept := func(policyIdx, termIdx int) bool {
+	hasLaterAccept := func(policyIdx, termIdx int, boundary string) bool {
+		boundaryBase, boundaryLen := parseRouteFilterPrefix16762(strings.TrimPrefix(boundary, "boundary\x00"))
+		if boundaryBase == nil {
+			// The boundary came from a validated route-filter, so this
+			// is unreachable. If its host cannot be parsed, stay closed.
+			return true
+		}
+		termCanMatchBoundary := func(term *config.PolicyTerm) bool {
+			if term == nil {
+				return false
+			}
+			if len(term.PrefixList) > 0 && len(term.RouteFilters) > 0 {
+				return true
+			}
+			if len(term.PrefixList) > 0 {
+				for _, name := range term.PrefixList {
+					pl, found := po.PrefixLists[name]
+					if !found || pl == nil {
+						return true
+					}
+					for _, prefix := range pl.Prefixes {
+						normalized, ok := config.NormalizePrefixListEntry(prefix)
+						if !ok {
+							return true
+						}
+						base, _ := parseRouteFilterPrefix16762(normalized)
+						if sameRouteFilterBase16762(base, boundaryBase) {
+							return true
+						}
+					}
+				}
+				return false
+			}
+			if len(term.RouteFilters) == 0 {
+				// No destination match means the term can match any
+				// route, including this host.
+				return true
+			}
+			mostSpecificBaseLen := -1
+			matchesMostSpecific := false
+			for _, rf := range term.RouteFilters {
+				if rf == nil {
+					continue
+				}
+				base, baseLen := parseRouteFilterPrefix16762(rf.Prefix)
+				if base == nil {
+					return true
+				}
+				if !routeFilterContains16762(base, boundaryBase.IP, boundaryLen) || baseLen < mostSpecificBaseLen {
+					continue
+				}
+				matches := false
+				switch rf.MatchType {
+				case "exact":
+					matches = sameRouteFilterBase16762(base, boundaryBase)
+				case "", "orlonger":
+					matches = true
+				case "longer":
+					matches = baseLen < boundaryLen
+				case "upto":
+					matches = baseLen <= boundaryLen && rf.UptoLen >= boundaryLen
+				case "prefix-length-range":
+					matches = rf.RangeLow > baseLen && rf.RangeLow <= boundaryLen && rf.RangeHigh >= boundaryLen
+				default:
+					// An unsupported shape may still match the host;
+					// do not weaken the existing fail-closed behavior.
+					return true
+				}
+				if baseLen > mostSpecificBaseLen {
+					mostSpecificBaseLen = baseLen
+					matchesMostSpecific = matches
+				} else if matches {
+					matchesMostSpecific = true
+				}
+			}
+			return matchesMostSpecific
+		}
 		for i := policyIdx; i < len(chain); i++ {
 			later, defined := po.PolicyStatements[chain[i]]
 			if !defined || later == nil {
@@ -286,7 +362,7 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 				start = termIdx + 1
 			}
 			for _, laterTerm := range later.Terms[start:] {
-				if laterTerm != nil && (laterTerm.Action == "accept" || laterTerm.NextPolicy) {
+				if laterTerm != nil && (laterTerm.Action == "accept" || laterTerm.NextPolicy) && termCanMatchBoundary(laterTerm) {
 					return true
 				}
 			}
@@ -410,7 +486,7 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 				// longest-match stops still require term fallthrough
 				// that this destination-only list cannot express.
 				if strings.HasPrefix(e.text, "boundary\x00") {
-					if !isAccept || hasLaterAccept(chainIdx, termIdx) {
+					if !isAccept || hasLaterAccept(chainIdx, termIdx, e.text) {
 						return nil, nil, false
 					}
 					add("deny\x00"+strings.TrimPrefix(e.text, "boundary\x00"), e.v6)
