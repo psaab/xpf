@@ -17,7 +17,99 @@
 // to a constant.
 
 use crate::afxdp::{PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use crate::afxdp::types::SessionFlow;
+use crate::nat::NatDecision;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+/// Whether NAT address changes contribute to the L4 pseudo-header checksum.
+/// A single-sided NPTv6 rewrite is checksum-neutral (RFC 6296); a composed
+/// NPTv6 rewrite has both address slots populated, so the other side's
+/// non-neutral DNAT delta must still be folded.
+#[inline]
+pub(in crate::afxdp) fn nat_folds_l4_checksum(nat: &NatDecision) -> bool {
+    !nat.nptv6 || (nat.rewrite_src.is_some() && nat.rewrite_dst.is_some())
+}
+
+/// Add one RFC 1624 old-word/new-word pair without finishing the sum.
+#[inline(always)]
+fn checksum16_word_delta(sum: u32, old: u16, new: u16) -> u32 {
+    sum + ((!u32::from(old)) & 0xffff) + u32::from(new)
+}
+
+#[inline]
+fn checksum16_fold_delta(mut sum: u32) -> u16 {
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    sum as u16
+}
+
+fn add_ip_word_delta(sum: u32, old: IpAddr, new: IpAddr) -> u32 {
+    match (old, new) {
+        (IpAddr::V4(old), IpAddr::V4(new)) => ipv4_words(old)
+            .into_iter()
+            .zip(ipv4_words(new))
+            .fold(sum, |sum, (old, new)| checksum16_word_delta(sum, old, new)),
+        (IpAddr::V6(old), IpAddr::V6(new)) => {
+            ipv6_words_from_octets(old.octets())
+                .into_iter()
+                .zip(ipv6_words_from_octets(new.octets()))
+                .fold(sum, |sum, (old, new)| checksum16_word_delta(sum, old, new))
+        }
+        _ => sum,
+    }
+}
+
+/// Precompute the IPv4 header address-rewrite delta for a descriptor.
+/// The caller separately folds the TTL decrement into the header checksum.
+pub(in crate::afxdp) fn compute_ip_csum_delta(
+    flow: &SessionFlow,
+    nat: &NatDecision,
+) -> u16 {
+    let mut sum = 0;
+    if let Some(IpAddr::V4(new_src)) = nat.rewrite_src {
+        if let IpAddr::V4(old_src) = flow.src_ip {
+            for (old, new) in ipv4_words(old_src).into_iter().zip(ipv4_words(new_src)) {
+                sum = checksum16_word_delta(sum, old, new);
+            }
+        }
+    }
+    if let Some(IpAddr::V4(new_dst)) = nat.rewrite_dst {
+        if let IpAddr::V4(old_dst) = flow.dst_ip {
+            for (old, new) in ipv4_words(old_dst).into_iter().zip(ipv4_words(new_dst)) {
+                sum = checksum16_word_delta(sum, old, new);
+            }
+        }
+    }
+    checksum16_fold_delta(sum)
+}
+
+/// Precompute the IPv4/IPv6 L4 pseudo-header and port delta for a
+/// descriptor. The decision whether NAT addresses fold is shared with the
+/// generic IPv6 rewrite path through `nat_folds_l4_checksum`.
+pub(in crate::afxdp) fn compute_l4_csum_delta(
+    flow: &SessionFlow,
+    nat: &NatDecision,
+) -> u16 {
+    if !nat_folds_l4_checksum(nat) {
+        return 0;
+    }
+
+    let mut sum = 0;
+    if let Some(new_src) = nat.rewrite_src {
+        sum = add_ip_word_delta(sum, flow.src_ip, new_src);
+    }
+    if let Some(new_dst) = nat.rewrite_dst {
+        sum = add_ip_word_delta(sum, flow.dst_ip, new_dst);
+    }
+    if let Some(new_port) = nat.rewrite_src_port {
+        sum = checksum16_word_delta(sum, flow.forward_key.src_port, new_port);
+    }
+    if let Some(new_port) = nat.rewrite_dst_port {
+        sum = checksum16_word_delta(sum, flow.forward_key.dst_port, new_port);
+    }
+    checksum16_fold_delta(sum)
+}
 
 /// Address family for the L4 checksum-offset / zero-checksum helpers.
 /// Only ever passed as a compile-time-literal at the call sites, so the
