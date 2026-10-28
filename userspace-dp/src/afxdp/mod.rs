@@ -134,24 +134,29 @@ mod sharded_neighbor;
 // so the explicit `#[path]` is unnecessary — auto-resolution finds mod.rs.
 #[path = "cos/mod.rs"]
 mod cos;
-mod session_glue;
+// #17207: `worker_commands` / `revalidation` are `pub(in crate::afxdp)`
+// (not private) so afxdp/mod.rs can import the six names below from
+// their defining leaves, breaking the `use super::*` +
+// `pub(super) use child::*` glob cycle that made the `session_glue::*`
+// re-exports ambiguous (rust-lang/rust#149145).
+pub(in crate::afxdp) mod session_glue;
 // #9856: the CommandExport direct conversion (control leg), so the worker
 // loop's cursor slice can reach it without naming the private module.
 pub(in crate::afxdp) use session_delta::{export_close_direct, export_open_direct};
 // #2442: re-export the owner-RG export walk + its chunkable candidate collector
 // so the worker loop's loss-of-sync resync path and the session-module resync
 // test can reach them without naming the private `session_glue` module.
-pub(crate) use session_glue::forward_export_candidates_for_owner_rgs;
+pub(crate) use session_glue::revalidation::forward_export_candidates_for_owner_rgs;
 /// #8586: the DELETE-specific split of `WORKER_COMMAND_QUEUE_DROPS`, re-exported
 /// so the coordinator status accessors and their wiring cell can name it
 /// without reaching into a private module.
-pub(crate) use session_glue::{
+pub(crate) use session_glue::worker_commands::{
     SESSION_DELETE_REPLICA_DROP_REPAIRED, SESSION_DELETE_REPLICA_DROPPED,
 };
 // #2653: the unbounded "emit all at once" helper is now a test-only fixture
 // (the production paths use the chunked drain-as-you-export in worker::loop_body).
 #[cfg(test)]
-pub(crate) use session_glue::export_forward_sessions_for_owner_rgs;
+pub(crate) use session_glue::revalidation::export_forward_sessions_for_owner_rgs;
 mod shared_ops;
 #[path = "shared_umem.rs"]
 mod shared_umem;
@@ -269,7 +274,7 @@ use self::tunnel::*;
 use self::tx::dispatch::*;
 use self::tx::*;
 use self::types::*;
-pub(crate) use self::types::{ForwardingDisposition, ForwardingResolution, NeighborEntry};
+pub(crate) use self::types::forwarding::{ForwardingDisposition, ForwardingResolution, NeighborEntry};
 // #2844: expose the SSOT in-place Ethernet-header writer to the
 // top-level `crate::nat64` module. NAT64 lives outside `crate::afxdp`
 // (it is `mod nat64;` at the crate root), so it cannot reach the

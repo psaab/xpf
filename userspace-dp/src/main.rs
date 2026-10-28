@@ -1,3 +1,5 @@
+#![deny(future_incompatible)]
+
 mod afxdp;
 mod event_stream;
 // #1219: fairness pure-fns — included here only for `cargo test` so
