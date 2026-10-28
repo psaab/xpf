@@ -1,9 +1,9 @@
 //! Orchestrator for `apply_rewrite_descriptor`.
 //!
-//! Validates the rewrite descriptor's L2 parameters via
-//! `rewrite_prepare_eth_from_parts` (NAT64/NPTv6 early-return; eth
-//! header write + apply_nat / skip_ttl / ip_start computation), then
-//! dispatches to the address-family helper.
+//! The orchestrator declines NAT64 and malformed non-v6 NPTv6 descriptors,
+//! then uses `rewrite_plan_eth_from_parts` to prepare L2 changes. It commits
+//! those changes after validation gates pass before dispatching to the
+//! address-family helper.
 //!
 //! Codegen contract (see docs/pr/1352-frame-build-rewrite-split/plan.md):
 //!   - This orchestrator is `#[inline]` (standard hint). It has
