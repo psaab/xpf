@@ -4496,24 +4496,22 @@ func TestPolicyMixedFamilyRouteFilterSplit(t *testing.T) {
 // TestPolicySingleFamilyRouteFilterUnchanged is the #2607 no-churn control:
 // a homogeneous (single-family) route-filter term must render ONE sequence
 // and one deterministic unsuffixed inline prefix-list name. This guards the
-// common case against any accidental always-split regression. #16762:
-// entry ORDER follows Junos longest-match (the disjoint /12 before
-// the /8, no stop interposed); the one-sequence / unsuffixed-name
-// shape is unchanged.
+// common case against any accidental always-split regression.
+// #16762: for disjoint bases there is no longest-match precedence, so
+// preserve authored entry order and bytes (including when prefix lengths
+// differ); no stop is interposed.
 func TestPolicySingleFamilyRouteFilterUnchanged(t *testing.T) {
 	inlineName := inlinePrefixListName("p", "p", "t1", "")
 	inlineV4Name := inlinePrefixListName("p", "p", "t1", "_v4")
 	inlineV6Name := inlinePrefixListName("p", "p", "t1", "_v6")
-	// v4-only term. #16762: longest-first — 172.16.0.0/12 is disjoint
-	// from 10.0.0.0/8, so no stop is interposed; the /8 lands at seq 10.
 	gotV4 := New().generatePolicyOptions(rfPolicyOptions(
 		&config.RouteFilter{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
 		&config.RouteFilter{Prefix: "172.16.0.0/12", MatchType: "exact"}))
-	if !strings.Contains(gotV4, "ip prefix-list "+inlineName+" seq 10 permit 10.0.0.0/8 le 32\n") {
-		t.Errorf("v4-only term must keep the derived unsuffixed inline list:\n%s", gotV4)
+	if !strings.Contains(gotV4, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/8 le 32\n") {
+		t.Errorf("v4-only disjoint list must preserve the authored /8 first:\n%s", gotV4)
 	}
-	if !strings.Contains(gotV4, "ip prefix-list "+inlineName+" seq 5 permit 172.16.0.0/12\n") {
-		t.Errorf("#16762: the /12 must precede the /8 (longest-first):\n%s", gotV4)
+	if !strings.Contains(gotV4, "ip prefix-list "+inlineName+" seq 10 permit 172.16.0.0/12\n") {
+		t.Errorf("v4-only disjoint list must preserve the authored /12 second:\n%s", gotV4)
 	}
 	if !strings.Contains(gotV4, "match ip address prefix-list "+inlineName+"\n") {
 		t.Errorf("v4-only term must emit one un-suffixed match line:\n%s", gotV4)
