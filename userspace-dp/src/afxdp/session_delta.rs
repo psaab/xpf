@@ -1160,8 +1160,8 @@ pub(super) fn flush_session_deltas(
                 }
             }
         }
-        if !telemetry_only_seed && let Ok(mut recent) = recent_session_deltas.lock() {
-            push_recent_session_delta(&mut recent, info);
+        if !telemetry_only_seed {
+            push_recent_session_delta(&mut crate::sync_util::lock_tolerant(recent_session_deltas), info);
         }
     }
     // #5468: propagate this batch's wedge into the per-drain-cycle latch so the

@@ -534,6 +534,7 @@ pub(crate) fn run() -> Result<(), String> {
             wg_uncovered_queue_shed_total: 0,
             wg_uncovered_queue_orphan_total: 0,
             wg_uncovered_queue_poison_recoveries: 0,
+            tuple_gate_poison_recoveries: 0,
             ipsec_inner_permit_forward_armed_total: 0,
             session_delete_replica_dropped: 0,
             session_delete_replica_drop_repaired: 0,
@@ -901,10 +902,10 @@ pub(crate) fn run() -> Result<(), String> {
     // into clean state (`superviseHelper` treats any unexpected exit as a
     // crash). A poisoned-at-shutdown lock reads as quarantined too — suspect
     // either way, and there is nothing left to serve.
-    let quarantined = state
-        .lock()
-        .map(|guard| guard.quarantined_after_panic)
-        .unwrap_or(true);
+    // #17201: recovered-state read; a poisoned lock still has
+    // `quarantined_after_panic` set by `lock_server_state_recover`, so
+    // recovering preserves the fail-closed (nonzero-exit) outcome.
+    let quarantined = crate::server::helpers::lock_server_state_recover(&state).quarantined_after_panic;
     if quarantined {
         return Err("shut down quarantined after a handler panic; restart required".to_string());
     }
