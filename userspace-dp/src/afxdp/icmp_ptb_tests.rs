@@ -1372,9 +1372,11 @@ fn post_transform_inner_mtu_gre_counts_key_word() {
 
 #[test]
 fn post_transform_inner_mtu_wireguard_is_pad_aware() {
-    // WG over an IPv4 outer: inner MTU = outer_mtu - WG_OVERHEAD_V4 - 15
-    // (worst-case §5.4.6 padding). WG_OVERHEAD_V4 = 20 + 8 + 16 + 16 = 60.
-    // 1400 - 60 = 1340 (#16499 capped pad). The inverse of frame::wg::wg_encapped_size.
+    // WG over an IPv4 outer: inner MTU = outer_mtu - WG_OVERHEAD_V4.
+    // WG_OVERHEAD_V4 = outer IP(20) + UDP(8) + WG data header(16) +
+    // Poly1305 tag(16) = 60. #16499 caps §5.4.6 pad at this budget, so
+    // the largest inner packet fits exactly without subtracting 15 extra.
+    // 1400 - 60 = 1340, the inverse of frame::wg::wg_encapped_size.
     let mut fwd = forwarding_with_egress(1400);
     insert_tunnel_endpoint(&mut fwd, "wireguard", libc::AF_INET, 0);
     let inner = post_transform_inner_mtu(
