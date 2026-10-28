@@ -91,6 +91,12 @@ func TestSyncAndArmHoldsComposeAtWeightOne17814(t *testing.T) {
 }
 
 func TestSyncAndArmHoldsRecompute17814(t *testing.T) {
+	syncOnly := newSyncArmCompositionManager17814(t, "")
+	syncOnly.SetMonitorWeight(1, startupSyncHoldMonitorIface, true, startupSyncHoldMonitorCost)
+	if got := syncOnly.GroupState(1).Weight; got != 1 {
+		t.Fatalf("sync-only weight = %d, want 1", got)
+	}
+
 	m := newSyncArmCompositionManager17814(t, "")
 	m.SetMonitorWeight(1, DataplaneArmMonitorIface, true, DataplaneArmMonitorCost)
 	if got := m.GroupState(1).Weight; got != 1 {
@@ -111,6 +117,33 @@ func TestSyncAndArmHoldsRecompute17814(t *testing.T) {
 	}
 	if !isDebt {
 		t.Fatal("overlapping hold weight must still read as monitor-debt-derived")
+	}
+}
+
+func TestSyncHoldFloorRecoversWhenIndependentDebtDecays17814(t *testing.T) {
+	m := newSyncArmCompositionManager17814(t, "")
+	m.SetMonitorWeight(1, startupSyncHoldMonitorIface, true, startupSyncHoldMonitorCost)
+	if got := m.GroupState(1).Weight; got != 1 {
+		t.Fatalf("sync-only weight = %d, want 1", got)
+	}
+
+	m.SetMonitorWeight(1, "ge-0/0/1", true, 1)
+	if got := m.GroupState(1).Weight; got != 0 {
+		t.Fatalf("sync hold plus independent debt weight = %d, want 0", got)
+	}
+
+	// Decay the independent debt to zero, then clear it, without changing the hold.
+	m.SetMonitorWeight(1, "ge-0/0/1", true, 0)
+	if got := m.GroupState(1).Weight; got != 1 {
+		t.Fatalf("weight after independent debt decays to zero = %d, want 1", got)
+	}
+	m.SetMonitorWeight(1, "ge-0/0/1", false, 0)
+	if got := m.GroupState(1).Weight; got != 1 {
+		t.Fatalf("weight after independent debt clears = %d, want 1", got)
+	}
+	fails := m.GroupState(1).MonitorFails
+	if len(fails) != 1 || fails[0] != startupSyncHoldMonitorIface {
+		t.Fatalf("monitor failures after independent debt clears = %v, want only the unchanged sync hold", fails)
 	}
 }
 
