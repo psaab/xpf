@@ -672,6 +672,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_zone_gate_no_generation_total",
 		"xpf_userspace_ipsec_inner_parse_drops_total",
 		"xpf_userspace_ipsec_inner_ecn_illegal_drops_total",
+		"xpf_userspace_ipsec_inner_noroute_total", // #17218
 		"xpf_userspace_ipsec_inner_worker_queue_full_total",
 		"xpf_userspace_ipsec_inner_verdict_queue_full_total",
 		"xpf_userspace_ipsec_inner_verdict_queue_contended_total", // #15150

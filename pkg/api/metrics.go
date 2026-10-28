@@ -760,6 +760,7 @@ type xpfCollector struct {
 	userspaceZoneGateNoGeneration            *prometheus.Desc
 	userspaceIpsecInnerParseDrops            *prometheus.Desc
 	userspaceIpsecInnerEcnIllegalDrops       *prometheus.Desc
+	userspaceIpsecInnerNoroute               *prometheus.Desc
 	userspaceIpsecInnerWorkerQueueFull       *prometheus.Desc
 	userspaceIpsecInnerVerdictQueueFull      *prometheus.Desc
 	userspaceIpsecInnerVerdictQueueContended *prometheus.Desc
