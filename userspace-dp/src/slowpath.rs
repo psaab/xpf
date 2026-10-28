@@ -1448,6 +1448,23 @@ impl SlowPathReinjector {
         self.reinject_core.note_dry_run(decision.admitted);
         decision
     }
+    /// #17169 B3: single source of truth for the IPsec-inner transport
+    /// refusal -> ADMIT wire-reason map, shared by the non-pooled and
+    /// pooled V1 submit paths so the production pooled path cannot
+    /// drift from the hermetically tested non-pooled map.
+    fn ipsec_inner_admit_reason(reason: u8) -> u8 {
+        match reason {
+            ipsec_reason::STALE_GENERATION => ADMIT_STALE,
+            ipsec_reason::EVALUATOR_UNAVAILABLE => ADMIT_SHUTDOWN,
+            // #15151: BUSY (61) is Rust-internal, never on the wire;
+            // map it to the same fail-closed ADMIT_FULL drop as FULL.
+            ipsec_reason::WORKER_QUEUE_FULL
+            | ipsec_reason::WORKER_QUEUE_BUSY
+            | ipsec_reason::SLAB_EXHAUSTED => ADMIT_FULL,
+            _ => ADMIT_BAD_LEASE,
+        }
+    }
+
     /// D11/V1 admission: copy the Go-owned submit bytes into a bounded slab
     /// and hand the descriptor to the Rust worker transport. V1 never enters
     /// q0 and never asks Rust to permit a frame.
@@ -1500,17 +1517,11 @@ impl SlowPathReinjector {
             connection_id,
         );
         if let Err(reason) = self.ipsec_inner_transport.admit_descriptor(descriptor) {
-            // #15151: BUSY (61) is Rust-internal, never on the wire;
-            // map it to the same fail-closed ADMIT_FULL drop as FULL.
-            let admit_reason = match reason {
-                ipsec_reason::STALE_GENERATION => ADMIT_STALE,
-                ipsec_reason::EVALUATOR_UNAVAILABLE => ADMIT_SHUTDOWN,
-                ipsec_reason::WORKER_QUEUE_FULL
-                | ipsec_reason::WORKER_QUEUE_BUSY
-                | ipsec_reason::SLAB_EXHAUSTED => ADMIT_FULL,
-                _ => ADMIT_BAD_LEASE,
-            };
-            refuse(&mut decision, admit_reason, "ipsec-inner transport refused");
+            refuse(
+                &mut decision,
+                Self::ipsec_inner_admit_reason(reason),
+                "ipsec-inner transport refused",
+            );
         }
         decision
     }
@@ -1588,14 +1599,7 @@ impl SlowPathReinjector {
             connection_id,
         );
         if let Err(reason) = self.ipsec_inner_transport.admit_descriptor(descriptor) {
-            let admit_reason = match reason {
-                ipsec_reason::STALE_GENERATION => ADMIT_STALE,
-                ipsec_reason::EVALUATOR_UNAVAILABLE => ADMIT_SHUTDOWN,
-                ipsec_reason::WORKER_QUEUE_FULL
-                | ipsec_reason::WORKER_QUEUE_BUSY
-                | ipsec_reason::SLAB_EXHAUSTED => ADMIT_FULL,
-                _ => ADMIT_BAD_LEASE,
-            };
+            let admit_reason = Self::ipsec_inner_admit_reason(reason);
             let _ = self.reinject_core.refuse_queued_for(
                 connection_id,
                 &frame.lease,

@@ -372,6 +372,57 @@ fn submit_conn_pooled_slab_exhaustion_refuses_per_frame_without_closing() {
 }
 
 #[test]
+fn submit_conn_pooled_worker_queue_busy_refuses_admit_full_17169() {
+    // #17169 B3: force WORKER_QUEUE_BUSY through the production pooled
+    // path (MSG_SUBMIT_BATCH -> submit_ipsec_inner_v1_pooled). Worker 9
+    // is live in the authority (so routing selects it) but has no
+    // ingress queue, so admit_descriptor returns WORKER_QUEUE_BUSY;
+    // the pooled submit must map it via the single-sourced reason map
+    // to ADMIT_FULL, never ADMIT_BAD_LEASE. Removing the BUSY arm from
+    // ipsec_inner_admit_reason must turn this cell RED.
+    let core = open_core();
+    let target = live_target(&core);
+    let reinjector = target.load_full().unwrap();
+    reinjector.ipsec_inner_transport().authority().add_worker(9);
+    // live {0, 9}; flow_tag 1 routes to index 1 -> worker 9 (no queue),
+    // mirroring the non-pooled BUSY cell in v1_submit_reason_map_table_17169.
+    let (client, server) = UnixStream::pair().unwrap();
+    let worker_core = core.clone();
+    let worker_target = target.clone();
+    let handle = std::thread::spawn(move || {
+        serve_submit_conn(server, &worker_core, &worker_target);
+    });
+    let mut client = client;
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut busy = frame(51, 1);
+    busy.flags = 0;
+    client
+        .write_all(&encode_message(MSG_SUBMIT_BATCH, &encode_submit_batch(&[busy])))
+        .unwrap();
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_ADMIT);
+    let decisions = crate::slowpath_reinject_9506::decode_admit(&payload).unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert!(!decisions[0].admitted, "pooled BUSY cell must refuse: {decisions:?}");
+    assert_eq!(
+        decisions[0].reason,
+        crate::slowpath_reinject_9506::ADMIT_FULL,
+        "pooled WORKER_QUEUE_BUSY must map to ADMIT_FULL"
+    );
+    assert_eq!(
+        reinjector.delegated_status().queued_packets, 0,
+        "V1 pooled submit must never reach the q0 writer channel"
+    );
+    assert_eq!(
+        reinjector.ipsec_inner_transport().worker_pending(0),
+        Some(0),
+        "BUSY refusal must not enqueue on the real worker"
+    );
+    drop(client);
+    handle.join().unwrap();
+}
+
+#[test]
 fn submit_conn_bad_frame_refused_per_frame_bad_message_closes() {
     let core = open_core();
     let target = live_target(&core);
