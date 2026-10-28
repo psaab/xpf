@@ -734,7 +734,7 @@ func (m *Manager) takeoverReadyLocked(peerAlive bool) (bool, []string) {
 	// ifindex) only ADDS installs Go cannot see, so requiring LocalMAC is
 	// conservative, never false-ready. An unconverged update_fabrics
 	// (partialFabrics debt) must not be outstanding. This closes the fab1
-	// link-local false-ready: daemon fabric1Populated=true with PeerMAC=""
+	// link-local false-ready: daemon slot-1 populated=true with PeerMAC=""
 	// / UnresolvedPeerMac in Rust no longer passes.
 	// Configured-but-unbuildable: if the applied config names a fabric but
 	// the builder emitted no row (missing interface stanza is only a

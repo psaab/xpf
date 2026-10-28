@@ -3143,7 +3143,7 @@ never lock an operator out of a remote box it manages.
     calls `stopPolicySchedulerLoop()` + `stopPinRetryLoop()` immediately after
     `wg.Wait()` and BEFORE the subsystems they call into are torn down: the
     scheduler republishes schedule state through the dataplane runtime
-    (`UpdatePolicyScheduleState`, closed by `dp.Close`/`dp.Teardown`), and the
+    (`UpdatePolicyScheduleStateWithLatch`, closed by `dp.Close`/`dp.Teardown`), and the
     pin-retry loop runs routing-pin syscalls through the routing/FRR manager
     (stopped by `frr.Stop`/routing teardown). Each helper cancels its loop's
     context (the scheduler's `schedulerCancel`; a cancellable child of

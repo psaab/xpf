@@ -11,18 +11,9 @@ import (
 	"github.com/psaab/xpf/pkg/scheduler"
 )
 
-type policySchedulerActiveStateSetter interface {
-	SetPolicySchedulerActiveState(map[string]bool)
-}
-
 type policySchedulerActiveStateLatchSetter interface {
 	SetPolicySchedulerActiveStateWithLatch(map[string]bool, bool)
 }
-
-type policyScheduleStateUpdater interface {
-	UpdatePolicyScheduleState(*config.Config, map[string]bool) error
-}
-
 type policyScheduleFailClosedUpdater interface {
 	UpdatePolicyScheduleStateWithLatch(*config.Config, map[string]bool, bool) error
 }
@@ -202,7 +193,7 @@ func (d *Daemon) startPolicySchedulerLoopLocked() {
 
 // stopPolicySchedulerLoop cancels the policy-scheduler Run() goroutine and
 // joins it. It is called from the shutdown sequence BEFORE the dataplane
-// runtime the scheduler republishes into (UpdatePolicyScheduleState) is torn
+// runtime the scheduler republishes into (UpdatePolicyScheduleStateWithLatch) is torn
 // down, so a late scheduler tick can never run against a closed runtime
 // (#5308). The applySem is acquired only to read+cancel schedulerCancel under
 // the same lock that guards it, then RELEASED before the join: an in-flight
@@ -357,28 +348,18 @@ func (d *Daemon) seedPolicySchedulerActiveStateLocked(activeState map[string]boo
 	rt := d.dataplane()
 	if setter, ok := rt.(policySchedulerActiveStateLatchSetter); ok {
 		setter.SetPolicySchedulerActiveStateWithLatch(activeState, failClosed)
-		return
-	}
-	if setter, ok := rt.(policySchedulerActiveStateSetter); ok {
-		setter.SetPolicySchedulerActiveState(activeState)
 	}
 }
 
+// updatePolicyScheduleStateLocked is the apply-transaction publication: it
+// carries no stale-republish latch, so it forwards failClosed=false to the
+// latch updater every published backend satisfies (see the compile-time
+// assertions in policy_scheduler_published_type_17082.go). Before #17082 the
+// optional-interface fallback was needed only by the retired eBPF backend;
+// both published userspace types also expose the non-latch method and satisfy
+// the latch updater used here.
 func (d *Daemon) updatePolicyScheduleStateLocked(cfg *config.Config, activeState map[string]bool) error {
-	rt := d.dataplane()
-	if rt == nil {
-		return nil
-	}
-	// Both in-tree backends satisfy policyScheduleStateUpdater
-	// directly: *dataplane.Manager via UpdatePolicyScheduleState in
-	// pkg/dataplane/maps_policy.go
-	// and *dataplane/userspace.LegacyDataPlaneAdapter via
-	// pkg/dataplane/userspace/legacy_dataplane.go:161. The legacyDP()
-	// fallback branch was dead code; removed in #1519.
-	if updater, ok := rt.(policyScheduleStateUpdater); ok {
-		return updater.UpdatePolicyScheduleState(cfg, activeState)
-	}
-	return nil
+	return d.updatePolicyScheduleStateWithLatchLocked(cfg, activeState, false)
 }
 
 func (d *Daemon) updatePolicyScheduleStateWithLatchLocked(cfg *config.Config, activeState map[string]bool, failClosed bool) error {
@@ -389,7 +370,7 @@ func (d *Daemon) updatePolicyScheduleStateWithLatchLocked(cfg *config.Config, ac
 	if updater, ok := rt.(policyScheduleFailClosedUpdater); ok {
 		return updater.UpdatePolicyScheduleStateWithLatch(cfg, activeState, failClosed)
 	}
-	return d.updatePolicyScheduleStateLocked(cfg, activeState)
+	return nil
 }
 
 // recordPolicySchedulerInitialPublishResult keeps apply-transaction publishes

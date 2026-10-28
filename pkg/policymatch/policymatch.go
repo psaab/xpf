@@ -1726,68 +1726,18 @@ func Match(cfg *config.Config, q Query) (res Result) {
 	noteFrag := frag.note
 	matchOr := frag.override
 
-	// Tier 1: exact zone-pair policies, in config order (first match wins).
-	// q.FromZone/q.ToZone are concrete zone names; a wildcard set
-	// (FromZone/ToZone == "any") never compares equal, so it is excluded here.
-	for setIdx, zpp := range cfg.Security.Policies {
-		if zpp == nil || zpp.FromZone != q.FromZone || zpp.ToZone != q.ToZone {
-			continue
+	// Transit zone-pair tiers (#17075): ONE stream walk replaces the three
+	// hand-written tier loops. ZonePairStream yields exact, then
+	// single-wildcard (both shapes merged in config order, #3090 — the
+	// dataplane two-pointer-merges its from_any/to_any index buckets by
+	// global rule index and the snapshot builder emits sets in slice order,
+	// so config order within the tier reproduces that merge exactly), then
+	// both-any, first match wins.
+	for ref := range ZonePairStream(ConfigZonePairStanzas(cfg), q.FromZone, q.ToZone, StreamTransit) {
+		if ruleMatchesWithMemo(cfg, q, ref.Policy, addressMemoPtr) {
+			return matchOr(matchedResult(ids, ref.Policy, false, ref.From, ref.To, ref.SetIdx, ref.SliceIdx))
 		}
-		for sliceIdx, pol := range zpp.Policies {
-			if pol == nil {
-				continue
-			}
-			if ruleMatchesWithMemo(cfg, q, pol, addressMemoPtr) {
-				return matchOr(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx))
-			}
-			noteFrag(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
-		}
-	}
-
-	// Tier 2: single-wildcard tier (#3090) — `from-zone any to-zone <q.ToZone>`
-	// OR `from-zone <q.FromZone> to-zone any`, MERGED in config order. The
-	// dataplane two-pointer-merges its from_any/to_any index buckets by global
-	// rule index; the snapshot builder (walkPolicyRuleSlots) emits rules in
-	// cfg.Security.Policies slice order with each set's policies contiguous, so
-	// a single in-order pass over the sets reproduces that merge exactly.
-	for setIdx, zpp := range cfg.Security.Policies {
-		if zpp == nil {
-			continue
-		}
-		fromAny := zpp.FromZone == "any"
-		toAny := zpp.ToZone == "any"
-		if fromAny == toAny {
-			continue // both-any (Tier 3) or neither (Tier 1) — not single-wildcard
-		}
-		applies := (fromAny && zpp.ToZone == q.ToZone) || (toAny && zpp.FromZone == q.FromZone)
-		if !applies {
-			continue
-		}
-		for sliceIdx, pol := range zpp.Policies {
-			if pol == nil {
-				continue
-			}
-			if ruleMatchesWithMemo(cfg, q, pol, addressMemoPtr) {
-				return matchOr(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx))
-			}
-			noteFrag(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
-		}
-	}
-
-	// Tier 3: both-any (`from-zone any to-zone any`), in config order.
-	for setIdx, zpp := range cfg.Security.Policies {
-		if zpp == nil || zpp.FromZone != "any" || zpp.ToZone != "any" {
-			continue
-		}
-		for sliceIdx, pol := range zpp.Policies {
-			if pol == nil {
-				continue
-			}
-			if ruleMatchesWithMemo(cfg, q, pol, addressMemoPtr) {
-				return matchOr(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx))
-			}
-			noteFrag(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
-		}
+		noteFrag(ref.Policy, false, ref.From, ref.To, ref.SetIdx, ref.SliceIdx)
 	}
 
 	// Tier 4: global policies (junos-global), in config order, gated by the
@@ -1875,39 +1825,21 @@ func matchJunosHostWithMemo(
 	// did not follow.
 	frag := newFragDenyTrackerWithMemo(cfg, q, ids, addressMemo)
 
-	// Exact ingress -> junos-host. Runtime zone id 0 is not eligible for this
-	// tier, even if a malformed or leniently loaded config contains a policy
-	// named for the query's unknown zone.
-	if zoneKnown(cfg, q.FromZone) {
-		for setIdx, zpp := range cfg.Security.Policies {
-			if zpp == nil || zpp.ToZone != JunosHostZone || zpp.FromZone != q.FromZone {
-				continue
-			}
-			for sliceIdx, pol := range zpp.Policies {
-				if pol == nil {
-					continue
-				}
-				if ruleMatchesWithMemo(cfg, q, pol, addressMemo) {
-					return withHI(frag.override(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)))
-				}
-				frag.note(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
-			}
-		}
-	}
-	// from-zone any -> junos-host.
-	for setIdx, zpp := range cfg.Security.Policies {
-		if zpp == nil || zpp.ToZone != JunosHostZone || zpp.FromZone != "any" {
+	// Host zone-pair tiers (#17075): ONE stream walk. The stream yields the
+	// exact ingress -> junos-host tier (tier 0) then any -> junos-host
+	// (tier 1). Runtime zone id 0 is not eligible for the exact tier, even if
+	// a malformed or leniently loaded config contains a policy named for the
+	// query's unknown zone, so exact refs are skipped for unknown ingress;
+	// the from-any tier still runs (#10644).
+	ingressKnown := zoneKnown(cfg, q.FromZone)
+	for ref := range ZonePairStream(ConfigZonePairStanzas(cfg), q.FromZone, q.ToZone, StreamHost) {
+		if ref.Tier == 0 && !ingressKnown {
 			continue
 		}
-		for sliceIdx, pol := range zpp.Policies {
-			if pol == nil {
-				continue
-			}
-			if ruleMatchesWithMemo(cfg, q, pol, addressMemo) {
-				return withHI(frag.override(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)))
-			}
-			frag.note(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
+		if ruleMatchesWithMemo(cfg, q, ref.Policy, addressMemo) {
+			return withHI(frag.override(matchedResult(ids, ref.Policy, false, ref.From, ref.To, ref.SetIdx, ref.SliceIdx)))
 		}
+		frag.note(ref.Policy, false, ref.From, ref.To, ref.SetIdx, ref.SliceIdx)
 	}
 	// #3639 / #3611 Piece B: a GLOBAL policy `match to-zone junos-host`
 	// (host-INBOUND) governs host-bound traffic in the GLOBAL tier — consulted

@@ -426,7 +426,7 @@ func TestRun_FullFreshCutover(t *testing.T) {
 	assertOrder(t, fs.calls, "stop", "dropin")
 	assertOrder(t, fs.calls, "dropin", "start")
 	assertOrder(t, fs.calls, "verify", "stop")
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil || !stamp.Committed || stamp.Version != "2.0.0" || stamp.Predecessor != "" {
 		t.Errorf("committed version record = (%+v,present=%v), want committed 2.0.0 with empty first-cut predecessor", stamp, present)
 	}

@@ -325,7 +325,7 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 					// Information-Request path), which is now an explicit,
 					// validated choice instead of an accident of any typo.
 					"client-type":    {desc: "Client type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "DHCPv6 client type (stateful | stateless | autoconfig)", valueExamples: []string{"stateful", "stateless", "autoconfig"}, validator: ValidateEnum([]string{"stateful", "stateless", "autoconfig"}), children: nil},
-					"client-ia-type": {desc: "Client IA type", args: 1, multi: true, placeholder: "<type>", children: nil},
+					"client-ia-type": {desc: "Client IA type", args: 1, multi: true, placeholder: "<type>", refuseNonLeafBlockChildren: true, children: nil},
 					"prefix-delegating": {desc: "Prefix delegation", children: map[string]*schemaNode{
 						// #6587: both leaves were untyped `<length>` placeholders
 						// parsed with an unbounded strconv.Atoi whose error is
@@ -379,13 +379,13 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 							valueExamples: []string{"fd00:1234::/48", "2001:db8:1::/48"},
 							keyValidator:  ValidateIPv6CIDR,
 							validator:     ValidateIPv6CIDR,
-							children:      nil,
+							children:      nil, refuseNonLeafBlockChildren: true,
 						},
 					}},
 					"client-identifier": {desc: "Client identifier", children: map[string]*schemaNode{
 						"duid-type": {desc: "DUID type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "DUID type (duid-ll | duid-llt)", valueExamples: []string{"duid-ll", "duid-llt"}, validator: ValidateEnum([]string{"duid-ll", "duid-llt"}), children: nil},
 					}},
-					"req-option": {desc: "Request option", args: 1, multi: true, placeholder: "<option>", valueType: ValueEnumOf, valueDesc: "DHCPv6 option to request (dns-server | domain-name)", valueExamples: []string{"dns-server", "domain-name"}, validator: ValidateEnum([]string{"dns-server", "domain-name"}), children: nil},
+					"req-option": {desc: "Request option", args: 1, multi: true, placeholder: "<option>", valueType: ValueEnumOf, valueDesc: "DHCPv6 option to request (dns-server | domain-name)", valueExamples: []string{"dns-server", "domain-name"}, validator: ValidateEnum([]string{"dns-server", "domain-name"}), refuseNonLeafBlockChildren: true, children: nil},
 					"update-router-advertisement": {desc: "Update router advertisement", children: map[string]*schemaNode{
 						"interface": {desc: "Interface", args: 1, placeholder: "<interface>", children: nil},
 					}},

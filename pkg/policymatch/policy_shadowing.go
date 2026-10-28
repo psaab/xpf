@@ -195,60 +195,21 @@ func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePai
 			same bool // coverer shares the global's action
 		}
 		covered := make(map[[2]string]cover)
-		// #12893: first-cover wins must follow RUNTIME tier precedence
-		// (exact pair, then single-wildcard, then both-any), not the
-		// lexicographical pair sort — "any" < "trust" would let a
-		// wildcard stanza claim coverage the runtime gives to an exact
-		// stanza first, inverting SHADOWED vs REDUNDANT.
-		// #15238 A55-01: WITHIN the single-wildcard tier the runtime
-		// merges its two sub-buckets in CONFIG order (Match tier 2), so
-		// the walk inside tier 1 must iterate cfg.Security.Policies
-		// (authored order), not the lexically sorted `pairs` — otherwise
-		// a ("trust","any") deny authored before an ("any","untrust")
-		// permit loses to the permit and SHADOWED is downgraded to
-		// REDUNDANT. Exact and both-any stanzas occur at most in one
-		// wildcard shape per (f,t), so iterating cfg directly preserves
-		// tiers 0/2 as well.
-		tierOf := func(zpp *config.ZonePairPolicies, f, t string) int {
-			exact := zpp.FromZone == f && zpp.ToZone == t
-			if exact {
-				return 0
-			}
-			if (zpp.FromZone == "any") != (zpp.ToZone == "any") {
-				return 1
-			}
-			return 2
-		}
+		// #12893/#15238: first-cover wins must follow RUNTIME tier
+		// precedence (exact, then single-wildcard merged in config order,
+		// then both-any), not the lexicographical pair sort. #17075: that
+		// order is now the shared ZonePairStream (StreamTransit) — the
+		// per-pair tierOf copy and its three nested pass loops are gone.
+		stanzaSrc := ConfigZonePairStanzas(cfg)
 		for _, f := range fromSet {
 			for _, t := range toSet {
 				k := [2]string{f, t}
-				for tier := 0; tier <= 2; tier++ {
-					recorded := false
-					for _, zpp := range cfg.Security.Policies {
-						if zpp == nil || tierOf(zpp, f, t) != tier {
-							continue
-						}
-						if zpp.FromZone != "any" && zpp.FromZone != f {
-							continue
-						}
-						if zpp.ToZone != "any" && zpp.ToZone != t {
-							continue
-						}
-						for _, pol := range zpp.Policies {
-							if pol == nil || !policyMatchIsSuperset(pol, global) {
-								continue
-							}
-							covered[k] = cover{rule: pol.Name, same: pol.Action == global.Action}
-							recorded = true
-							break
-						}
-						if recorded {
-							break
-						}
+				for ref := range ZonePairStream(stanzaSrc, f, t, StreamTransit) {
+					if !policyMatchIsSuperset(ref.Policy, global) {
+						continue
 					}
-					if recorded {
-						break
-					}
+					covered[k] = cover{rule: ref.Policy.Name, same: ref.Policy.Action == global.Action}
+					break
 				}
 			}
 		}
