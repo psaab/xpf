@@ -371,8 +371,12 @@ type schemaNode struct {
 	// allowEdgeWhitespace opts a typed/key slot OUT of the central
 	// edge-whitespace refusal in checkToken/validateKeySlot (#17177).
 	// It exists only for a leaf whose consumer genuinely wants the
-	// edge whitespace as data (e.g. a credential whose bytes are
-	// significant). The reason MUST be recorded in
+	// edge whitespace as data (e.g. an OpenSSH authorized-key value,
+	// whose grammar is '<type> <base64> [comment]' — internal spaces
+	// are the value). Credentials deliberately do NOT opt out
+	// (#17888): their bytes are stored and compared exactly, so a
+	// padded credential must refuse, not ride along. The reason MUST
+	// be recorded in
 	// allowEdgeWhitespaceReason; the padding census
 	// (TestTypedValidatorsRefusePadding17177) fails any opt-out
 	// without a reason. Default false: every typed value and

@@ -415,9 +415,16 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNo
 // with a targeted message. route is family-agnostic so both families pass.
 func ValidateRouteDestination(raw string) error {
 	// #17177: edge-whitespace refusal is owned centrally by
-	// validateKeySlot (this validator is also called directly by the
-	// strict compiler gate, where a padded value still fails the
-	// CIDR parse below; the commit-path message is the shared one).
+	// validateKeySlot (and by checkToken for value slots) on the
+	// SchemaValidate commit path. This validator is also called
+	// directly by the strict compiler gate, which performs no
+	// padding refusal of its own: parseCIDRStrict below trims before
+	// parsing, so a padded CIDR is ACCEPTED on that direct path.
+	// Only the commit path is gated earlier (SchemaValidate runs
+	// first) and refuses padded spellings with the shared message;
+	// the direct-path leniency is deliberate (see
+	// static_route_padding_9820_test.go) — do not add a local
+	// refusal here.
 	// parseCIDRStrict requires a /prefix-length and upgrades the two common
 	// operator mistakes (bare IP, garbage) to targeted messages. The returned
 	// IP is discarded because both v4 and v6 destinations are valid here.

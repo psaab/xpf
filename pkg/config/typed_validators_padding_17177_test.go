@@ -175,9 +175,87 @@ func TestTypedValidatorsRefusePadding17177(t *testing.T) {
 
 // TestTypedValidatorsRefusePaddingPositiveControl17177 is the
 // positive control: a synthetic trimming validator (the exact pre-fix
-// defect shape) MUST be flagged by the probe, and the same validator
-// behind a non-trimming gate must not be. Without this, a probe that
-// always reports "refused" would pass the census above vacuously.
+// defect shape) MUST be flagged by the probe when it sits behind a
+// gate-less dispatch, and the same validator behind the production
+// gate (checkToken/validateKeySlot) must not be. Without this, a probe
+// that always reports "refused" would pass the census above vacuously.
+
+// dispatchPaddedUngated17177 dispatches one padded token WITHOUT the
+// central refuseEdgeWhitespace gate: it calls the node's raw validator
+// (or keyValidator/keyValidatorPos) directly. It exists solely so the
+// positive control can run the identical probe against a gate-less
+// dispatch — the pre-fix world — without touching production code.
+func dispatchPaddedUngated17177(n *schemaNode, tok string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	if n.keyValidatorPos != nil {
+		return n.keyValidatorPos(0, tok)
+	}
+	if n.keyValidator != nil {
+		return n.keyValidator(tok)
+	}
+	if n.validator != nil {
+		return n.validator(tok)
+	}
+	if n.treeValidator != nil {
+		return n.treeValidator(tok, nil)
+	}
+	return nil
+}
+
+// probePaddingUngated17177 runs probePadding17177 with the dispatch
+// swapped to dispatchPaddedUngated17177. The production probe
+// hard-codes paddingDispatch17177; this wrapper re-implements only the
+// thin per-node loop so the control exercises the SAME example
+// selection and classification code (accepted-example lookup still
+// goes through the production dispatch, which is unpadded input and
+// therefore gate-insensitive).
+func probePaddingUngated17177(nodes []censusNode16163) (results []paddingProbeResult17177) {
+	for _, cn := range nodes {
+		n := cn.node
+		hasValue := n.validator != nil || n.treeValidator != nil
+		hasKey := n.keyValidator != nil || n.keyValidatorPos != nil
+		hasTail := n.tailValidator != nil
+		if !hasValue && !hasKey && !hasTail {
+			continue
+		}
+		res := paddingProbeResult17177{path: cn.path}
+		if n.allowEdgeWhitespace {
+			res.allowListed = true
+			results = append(results, res)
+			continue
+		}
+		var cands []string
+		cands = append(cands, n.valueExamples...)
+		cands = append(cands, n.keyValueExamples...)
+		accepted := ""
+		found := false
+		for _, c := range cands {
+			if c == "" || c != strings.TrimSpace(c) {
+				continue
+			}
+			if paddingExampleAccepted17177(n, c) {
+				accepted, found = c, true
+				break
+			}
+		}
+		if !found {
+			res.noExample = true
+			results = append(results, res)
+			continue
+		}
+		for _, padded := range []string{" " + accepted, accepted + " ", "\t" + accepted} {
+			if dispatchPaddedUngated17177(n, padded) == nil {
+				res.padAccepted = append(res.padAccepted, padded)
+			}
+		}
+		results = append(results, res)
+	}
+	return results
+}
 func TestTypedValidatorsRefusePaddingPositiveControl17177(t *testing.T) {
 	trimming := func(raw string) error {
 		if strings.TrimSpace(raw) == "10.0.0.1" {
@@ -211,9 +289,23 @@ func TestTypedValidatorsRefusePaddingPositiveControl17177(t *testing.T) {
 	if got := byPath["fixture trimming-validator"].padAccepted; len(got) != 0 {
 		t.Errorf("central gate failed: trimming fixture padAccepted=%v, want none (checkToken must refuse)", got)
 	}
-	// ...therefore the probe's ability to SEE the defect is proven by
-	// calling the raw validator directly, bypassing the gate: it must
-	// accept the padded spelling (that is the defect the gate closes).
+	// ...so the probe's sensitivity must be proven against a gate-less
+	// dispatch: run the identical probe (same example selection and
+	// classification) with only the padded dispatch swapped to the raw
+	// validator. The trimming defect MUST be flagged there — if the
+	// probe were broken (always reporting refusal), padAccepted would
+	// be empty on the ungated run too and the census above would be
+	// test-only-green.
+	ungated := probePaddingUngated17177(fixture)
+	ungatedByPath := map[string]paddingProbeResult17177{}
+	for _, r := range ungated {
+		ungatedByPath[r.path] = r
+	}
+	if got := ungatedByPath["fixture trimming-validator"].padAccepted; len(got) == 0 {
+		t.Errorf("positive control failed: ungated probe did not flag the trimming fixture (padAccepted empty); the census probe cannot see the defect it claims to census")
+	}
+	// The raw-validator cross-check: the trimming func itself accepts
+	// the padded spellings (that is the defect the gate closes).
 	if err := trimming(" 10.0.0.1"); err != nil {
 		t.Fatalf("positive control broken: raw trimming validator must accept padded input, got %v", err)
 	}
