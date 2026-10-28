@@ -82,12 +82,10 @@ type dhcpLeaseSyncState struct {
 	lastSent6  string // last-pushed v6 set fingerprint (change-detect)
 
 	// #10170: the sender's ownership generation stays stable across lease
-	// heartbeat pushes and advances on a MASTER apply. A snapshot is marked
-	// Applied only after the corresponding local Kea apply succeeds.
-	authorityMu            sync.Mutex
-	authorityGeneration    uint64
-	pendingApplyGeneration uint64
-	appliedGeneration      uint64
+	// heartbeat pushes and advances on a MASTER apply. The applied
+	// generation is tracked by the applier (AppliedGeneration), not here.
+	authorityMu         sync.Mutex
+	authorityGeneration uint64
 
 	// loopMu guards the push-loop lifecycle (#4647). loopCancel is the
 	// cancel func of the currently-running push loop's context (nil when the
@@ -897,12 +895,6 @@ func (d *Daemon) nextDHCPLeaseApplyAuthority(cfg *config.Config, masterState ...
 		Scopes4:    dhcpLeaseScopeAuthorities(cfg, 4, generation, false, masters),
 		Scopes6:    dhcpLeaseScopeAuthorities(cfg, 6, generation, false, masters),
 	}
-}
-
-func (d *Daemon) enqueueDHCPApply(cfg *config.DHCPServerConfig, reason string) {
-	masters := d.snapshotRethMasterState()
-	fullCfg := d.store.ActiveConfig()
-	d.enqueueDHCPApplyWithAuthorityState(cfg, reason, fullCfg, masters)
 }
 
 func (d *Daemon) enqueueDHCPApplyWithAuthorityState(cfg *config.DHCPServerConfig, reason string, fullCfg *config.Config, masters map[int]bool) uint64 {

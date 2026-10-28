@@ -37,49 +37,19 @@ func TestParseImageVersions_BothSeparators(t *testing.T) {
 	}
 }
 
-func TestGateMixedBase_PeerInWindow_Survives(t *testing.T) {
+// The gate vector table lives in the shared cross-language fixture
+// (scripts/deploy/mixed_base_gate_fixture.json, #17091) — see
+// TestMixedBaseGateFixture17091. The cells below keep the parse-level
+// parity pins that a uint16-typed Go fixture row cannot express.
+
+func TestGateProtocolCompat_PeerInWindow_Survives(t *testing.T) {
 	iv, _ := parseImageVersions(sampleProtoVersions) // speaks 2, floor 1, sync 3
-	v := GateMixedBaseSwap(iv, 1, 3)                 // peer speaks 1 (in [1,2]), sync 3
-	if !v.SessionsSurvive {
-		t.Fatalf("peer HA 1 in window [1,2] + sync match must survive: %s", v.Reason)
+	v := GateProtocolCompat(iv, 1, 3, RefuseUnknownWire)
+	if v.Err != nil || !v.Compatible {
+		t.Fatalf("peer HA 1 in window [1,2] + sync match must survive: err=%v %s", v.Err, v.Reason)
 	}
-	// Same-version peer also survives.
-	if v2 := GateMixedBaseSwap(iv, 2, 3); !v2.SessionsSurvive {
-		t.Fatalf("same-version peer must survive: %s", v2.Reason)
-	}
-}
-
-func TestGateMixedBase_PeerBelowFloor_DropsClosed(t *testing.T) {
-	iv, _ := parseImageVersions(sampleProtoVersions) // floor 1
-	if v := GateMixedBaseSwap(iv, 0, 3); v.SessionsSurvive {
-		t.Fatal("unknown peer HA (0) must fail closed")
-	}
-	// Hypothetical: new image floor raised to 2, peer still on 1 -> drop.
-	iv.HAProtocolMinCompat = 2
-	if v := GateMixedBaseSwap(iv, 1, 3); v.SessionsSurvive {
-		t.Fatalf("peer below the new image's compat floor must drop: %s", v.Reason)
-	}
-}
-
-func TestGateMixedBase_PeerNewerThanImage_DropsClosed(t *testing.T) {
-	iv, _ := parseImageVersions(sampleProtoVersions) // speaks 2
-	if v := GateMixedBaseSwap(iv, 3, 3); v.SessionsSurvive {
-		t.Fatalf("peer newer than the new image must drop (downgrade not gated safe): %s", v.Reason)
-	}
-}
-
-func TestGateMixedBase_SessionSyncMismatch_DropsClosed(t *testing.T) {
-	iv, _ := parseImageVersions(sampleProtoVersions) // sync 3
-	if v := GateMixedBaseSwap(iv, 1, 4); v.SessionsSurvive {
-		t.Fatalf("session-sync mismatch must drop: %s", v.Reason)
-	}
-}
-
-func TestGateMixedBase_UnknownPeerSessionSync_DropsClosed(t *testing.T) {
-	iv, _ := parseImageVersions(sampleProtoVersions) // sync 3, HA window [1,2]
-	// peer HA is fine (1) but peer session-sync is UNKNOWN (0) -> fail closed.
-	if v := GateMixedBaseSwap(iv, 1, 0); v.SessionsSurvive {
-		t.Fatalf("unknown peer session-sync must fail closed: %s", v.Reason)
+	if v2 := GateProtocolCompat(iv, 2, 3, RefuseUnknownWire); v2.Err != nil || !v2.Compatible {
+		t.Fatalf("same-version peer must survive: err=%v %s", v2.Err, v2.Reason)
 	}
 }
 
@@ -101,10 +71,10 @@ session-sync-protocol-version=-1
 	if iv.has("session-sync-protocol-version") {
 		t.Fatal("negative session-sync must be rejected at parse (key absent)")
 	}
-	// Peer also reporting -1 must NOT pass: the gate fails closed on the absent
-	// required key regardless of the (rejected) peer value.
-	if v := GateMixedBaseSwap(iv, 1, -1); v.SessionsSurvive {
-		t.Fatalf("negative session-sync must fail closed: %s", v.Reason)
+	// The gate must fail closed on the absent required key (as a target
+	// error), never judge the pair compatible.
+	if v := GateProtocolCompat(iv, 1, 3, RefuseUnknownWire); v.Err == nil || v.Compatible {
+		t.Fatalf("missing required key must fail closed as error: %+v", v)
 	}
 	// Out-of-uint16-range is likewise rejected.
 	iv2, _ := parseImageVersions("ha-protocol-version=2\nha-protocol-min-compat=1\nsession-sync-protocol-version=70000\n")
@@ -113,12 +83,12 @@ session-sync-protocol-version=-1
 	}
 }
 
-func TestGateMixedBase_MissingFields_DropsClosed(t *testing.T) {
+func TestGateProtocolCompat_MissingFields_DropsClosed(t *testing.T) {
 	iv, _ := parseImageVersions("xpf-version=1.2.3\n") // no protocol fields
-	if v := GateMixedBaseSwap(iv, 1, 3); v.SessionsSurvive {
-		t.Fatalf("missing required protocol fields must fail closed: %s", v.Reason)
+	if v := GateProtocolCompat(iv, 1, 3, RefuseUnknownWire); v.Err == nil || v.Compatible {
+		t.Fatalf("missing required protocol fields must fail closed: %+v", v)
 	}
-	if v := GateMixedBaseSwap(nil, 1, 3); v.SessionsSurvive {
+	if v := GateProtocolCompat(nil, 1, 3, RefuseUnknownWire); v.Err == nil || v.Compatible {
 		t.Fatal("nil image versions must fail closed")
 	}
 }

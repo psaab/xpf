@@ -150,7 +150,6 @@ type xpfCollector struct {
 	dataplaneArmUncoveredSurfaces        *prometheus.Desc
 	dataplaneArmTotalSurfaces            *prometheus.Desc
 	dataplaneXDPAttachModeSurfaces       *prometheus.Desc
-	dataplaneSafetyOnce                  sync.Once
 	snmpRequestsShedTotal                *prometheus.Desc
 	snmpSourceBucketEvictionsTotal       *prometheus.Desc
 	snmpTrackedSources                   *prometheus.Desc
