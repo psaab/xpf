@@ -1765,6 +1765,12 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // sessionSync and the fabric refresh channels and Stop() the session sync. The
 // join runs OUTSIDE the lock (the constructor's publish path also takes the
 // lock), so there is no deadlock.
+//
+// #17060 fold: after the constructor join it also joins the fabric
+// populate loops (fabricPopulateWG.Wait) BEFORE clearFabricSlots, so the
+// clear is the last writer of slot state — an in-flight refresh cannot
+// latch populated after it, and a not-yet-scheduled loop cannot store
+// its config after it.
 func (d *Daemon) stopClusterComms() {
 	d.clusterCommsMu.Lock()
 	d.clusterCommsGen++
@@ -1781,6 +1787,15 @@ func (d *Daemon) stopClusterComms() {
 	// published before the generation bump it finishes wiring) cannot race the
 	// teardown below.
 	d.clusterCommsWG.Wait()
+	// #17060 fold: join the fabric populate loops BEFORE clearFabricSlots
+	// below. clusterCommsWG tracks only the constructor goroutine, which
+	// can return while its populate loops are still in-flight (or not yet
+	// scheduled). The loops exit via the cancel above: a fast-retry loop
+	// exits at its next ctx check (an in-flight refresh always returns),
+	// and a periodic loop exits on ctx.Done. Runs outside
+	// clusterCommsMu, like the constructor join, so a loop finishing its
+	// last fabricMu write cannot deadlock the teardown.
+	d.fabricPopulateWG.Wait()
 
 	// #4647: the lease-sync loop is scoped to the comms context just
 	// cancelled, so it is already stopping; clear the cancel handle so the

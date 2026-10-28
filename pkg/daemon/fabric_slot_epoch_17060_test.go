@@ -10,6 +10,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 
+	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -249,4 +250,186 @@ func TestRefreshFabricFwdWakesEpochLoops17060(t *testing.T) {
 		t.Fatal("fab0 probe flag must be consumable exactly once")
 	}
 	d.probeFabricNeighbor(context.Background(), "fab0", net.ParseIP("10.99.0.2"))
+}
+
+// blockingFabricRecorder17060 is a FabricPeerResolver whose ResolveFabricPeer
+// blocks until released, so the test can hold a REAL populate loop inside
+// refreshFabricPeer (past resolution, before the populated latch) while
+// stopClusterComms runs concurrently. SyncFabricState records pushes so
+// the test can prove no helper state was pushed for the cleared epoch.
+type blockingFabricRecorder17060 struct {
+	mu      sync.Mutex
+	syncs   int
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingFabricRecorder17060() *blockingFabricRecorder17060 {
+	return &blockingFabricRecorder17060{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (r *blockingFabricRecorder17060) ResolveFabricPeer(_ int, _, _ int, _ string, localMAC net.HardwareAddr) dpuserspace.FabricPeerResolution {
+	r.once.Do(func() { close(r.entered) })
+	<-r.release
+	mac, _ := net.ParseMAC(fabPeerTestPeerMAC)
+	return dpuserspace.FabricPeerResolution{PeerMAC: mac, LocalMAC: localMAC}
+}
+
+func (r *blockingFabricRecorder17060) SyncFabricState(_ context.Context) error {
+	r.mu.Lock()
+	r.syncs++
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *blockingFabricRecorder17060) SetRGActive(_ context.Context, _ int, _ bool) error {
+	return nil
+}
+
+func (r *blockingFabricRecorder17060) SetHAWatchdog(_ context.Context, _ int, _ uint64) error {
+	return nil
+}
+
+func (r *blockingFabricRecorder17060) syncCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.syncs
+}
+
+type blockingFabricDP17060 struct {
+	dataplane.RuntimeDataPlane
+	rec *blockingFabricRecorder17060
+}
+
+func (p *blockingFabricDP17060) HA() dataplane.HAController { return p.rec }
+
+func (p *blockingFabricDP17060) ResolveFabricPeer(slot int, overlayIfindex, parentIfindex int, peer string, localMAC net.HardwareAddr) dpuserspace.FabricPeerResolution {
+	return p.rec.ResolveFabricPeer(slot, overlayIfindex, parentIfindex, peer, localMAC)
+}
+
+// TestPopulateLoopJoinedBeforeSlotClear17060 runs REAL populate loops
+// (fab0 + fab1, both sharing peer 10.99.0.2) concurrently with the REAL
+// stopClusterComms. The fab0 loop is held inside refreshFabricPeer by a
+// blocking resolver at the moment stop cancels the epoch; stop must JOIN
+// both loops (fabricPopulateWG) before clearFabricSlots, so afterwards
+// both slots stay cleared and the shared peer's helper constraint stays
+// dropped. Sharing one peer address across both slots also pins the
+// clearFabricSlots dedupe branch and the fab1 constraint drop.
+//
+// RED pre-fold: the loops were launched bare and never joined, so the
+// blocked refresh latched fabricPopulated (and rememberFabricPeerMAC
+// re-armed the constraint) after the clear.
+func TestPopulateLoopJoinedBeforeSlotClear17060(t *testing.T) {
+	const sharedPeer = "10.99.0.2"
+	dpuserspace.RegisterFabricPeerMACConstraint(sharedPeer, nil)
+	t.Cleanup(func() { dpuserspace.RegisterFabricPeerMACConstraint(sharedPeer, nil) })
+
+	rec := newBlockingFabricRecorder17060()
+	parent0 := &testLink{attrs: netlink.LinkAttrs{
+		Name: "ge-0-0-0", Index: 11, OperState: netlink.OperUp, TxQLen: 10000,
+		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	overlay0 := &testLink{attrs: netlink.LinkAttrs{
+		Name: "fab0", Index: 12, ParentIndex: 11, OperState: netlink.OperUp, TxQLen: 10000,
+		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	parent1 := &testLink{attrs: netlink.LinkAttrs{
+		Name: "ge-0-0-5", Index: 21, OperState: netlink.OperUp, TxQLen: 10000,
+		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	overlay1 := &testLink{attrs: netlink.LinkAttrs{
+		Name: "fab1", Index: 22, ParentIndex: 21, OperState: netlink.OperUp, TxQLen: 10000,
+		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	// Address-matched neighbour so rememberFabricPeerMAC arms the
+	// constraint before the blocked resolver parks the loop.
+	peerNeigh := fabPeerNeigh(t, sharedPeer, fabPeerTestPeerMAC)
+	neighFn := func(ifindex, family int) ([]netlink.Neigh, error) {
+		if family == netlink.FAMILY_V4 && (ifindex == 12 || ifindex == 11 || ifindex == 22 || ifindex == 21) {
+			return []netlink.Neigh{peerNeigh}, nil
+		}
+		return nil, nil
+	}
+	d := &Daemon{
+		linkByNameFn: mockLinkByName(map[string]*testLink{
+			"ge-0-0-0": parent0, "fab0": overlay0,
+			"ge-0-0-5": parent1, "fab1": overlay1,
+		}),
+		neighListFn: neighFn,
+	}
+	d.setDataplane(&blockingFabricDP17060{rec: rec})
+
+	// Wire the comms-epoch plumbing stopClusterComms drives: a live
+	// epoch context + cancel, and published refresh channels. The
+	// loops are registered on fabricPopulateWG exactly as
+	// startFabricForwardingLoops registers them (Add on this stack).
+	ctx, cancel := context.WithCancel(context.Background())
+	d.clusterCommsMu.Lock()
+	d.clusterCommsCtx = ctx
+	d.clusterCommsCancel = cancel
+	ch0 := make(chan struct{}, 1)
+	ch1 := make(chan struct{}, 1)
+	d.fabricRefreshCh = ch0
+	d.fabricRefreshCh1 = ch1
+	d.clusterCommsMu.Unlock()
+
+	d.fabricPopulateWG.Add(1)
+	go d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", sharedPeer, ch0)
+	d.fabricPopulateWG.Add(1)
+	go d.populateFabricFwd1(ctx, "ge-0-0-5", "fab1", sharedPeer, ch1)
+
+	// Wait until a loop is parked inside the blocking resolver: it has
+	// already stored its config and (via the address-matched neighbour)
+	// armed the shared constraint, and its next step is the latch.
+	select {
+	case <-rec.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("populate loop never reached the resolver (#17060)")
+	}
+
+	// Stop concurrently; release the parked refresh only after stop has
+	// had the chance to cancel (its join must wait for the loop).
+	stopDone := make(chan struct{})
+	go func() {
+		d.stopClusterComms()
+		close(stopDone)
+	}()
+	// Give stop a moment to cancel + reach the join, then let the
+	// in-flight refresh finish (latch attempt + ctx-guarded sync).
+	time.Sleep(50 * time.Millisecond)
+	close(rec.release)
+
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopClusterComms did not return — populate join deadlocked (#17060)")
+	}
+
+	// Both slots must stay cleared even though a live loop raced stop.
+	assertFabricSlotsZeroed17060(t, d)
+	if got := rec.syncCount(); got != 0 {
+		t.Fatalf("SyncFabricState pushed %d time(s) for a cleared epoch (#17060)", got)
+	}
+	// Shared-peer constraint must stay dropped: with two link-local
+	// candidates and no constraint, resolution must fail closed. A
+	// resurrected non-nil constraint would let the sole-matching
+	// candidate resolve. Probe via the live resolver directly.
+	probeNeigh := func(_, family int) ([]netlink.Neigh, error) {
+		if family == netlink.FAMILY_V6 {
+			return []netlink.Neigh{
+				fabPeerNeigh(t, "fe80::dec0", fabPeerTestDecoyMAC),
+				fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
+			}, nil
+		}
+		return nil, nil
+	}
+	res := dpuserspace.ResolveFabricPeerWithNeighbours(12, 11, sharedPeer,
+		mustMAC(t, fabPeerTestLocalMAC), probeNeigh)
+	if res.PeerMAC != nil {
+		t.Fatalf("shared-peer constraint resurrected after stop: resolved %v (#17060)", res.PeerMAC)
+	}
 }

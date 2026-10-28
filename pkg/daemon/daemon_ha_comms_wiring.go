@@ -782,6 +782,13 @@ func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config
 	if fabOverlay == fabParent {
 		fabOverlay = "" // no overlay — legacy mode
 	}
+	// #17060 fold: register each populate loop on fabricPopulateWG on THIS
+	// stack, never inside the goroutine, so stopClusterComms cannot Wait()
+	// past a loop that has not been scheduled yet. (monitorFabricState is
+	// deliberately untracked: it only pokes the refresh channels via
+	// triggerFabricRefresh and never writes slot state, so the clear does
+	// not need to join it.)
+	d.fabricPopulateWG.Add(1)
 	go d.populateFabricFwd(commsCtx, fabParent, fabOverlay, cc.FabricPeerAddress, fabRefreshCh)
 
 	// Resolve the secondary fabric peer if fab1 configured.
@@ -791,6 +798,7 @@ func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config
 		if fab1Overlay == fab1Parent {
 			fab1Overlay = "" // no overlay
 		}
+		d.fabricPopulateWG.Add(1)
 		go d.populateFabricFwd1(commsCtx, fab1Parent, fab1Overlay, cc.Fabric1PeerAddress, fabRefreshCh1)
 	}
 

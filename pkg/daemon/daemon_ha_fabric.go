@@ -347,6 +347,7 @@ func (d *Daemon) resolveFabricParent(fabName string) string {
 // sender (triggerFabricRefresh) targets whatever channel the live epoch
 // published.
 func (d *Daemon) populateFabricFwd(ctx context.Context, fabIface, overlay, peerAddr string, refreshCh chan struct{}) {
+	defer d.fabricPopulateWG.Done()
 	peerIP := net.ParseIP(peerAddr)
 	if peerIP == nil {
 		slog.Warn("cluster: invalid fabric peer address", "addr", peerAddr)
@@ -356,16 +357,30 @@ func (d *Daemon) populateFabricFwd(ctx context.Context, fabIface, overlay, peerA
 		overlay = fabIface
 	}
 
-	// Store fabric config for RefreshFabricFwd.
+	// Store fabric config for RefreshFabricFwd (#17060 fold): a loop
+	// cancelled before it was ever scheduled must not store after
+	// clearFabricSlots, and stopClusterComms joins this loop (via
+	// fabricPopulateWG) before that clear in any case. The cancelled-
+	// before-store case still records the peer-change identity drop
+	// below (a re-point supersedes the old identity even when the new
+	// epoch is already dead).
+	cancelled := ctx.Err() != nil
 	d.fabricMu.Lock()
-	d.fabricIface = fabIface
-	d.fabricOverlay = overlay
+	if !cancelled {
+		d.fabricIface = fabIface
+		d.fabricOverlay = overlay
+	}
 	peerChanged := !d.fabricPeerIP.Equal(peerIP)
 	if peerChanged {
 		d.fabricPeerMAC = nil
 	}
-	d.fabricPeerIP = peerIP
+	if !cancelled {
+		d.fabricPeerIP = peerIP
+	}
 	d.fabricMu.Unlock()
+	if cancelled {
+		return
+	}
 	if peerChanged {
 		dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
 	}
@@ -618,11 +633,32 @@ func (d *Daemon) rememberFabricPeerMAC(slot int, mac net.HardwareAddr) {
 		d.fabricPeerMAC = stored
 		peerIP = d.fabricPeerIP
 	}
+	epoch := d.fabricEpoch
 	d.fabricMu.Unlock()
 	// #15918: publish the identity to the live userspace resolver so its
 	// link-local fallback is constrained identically even on snapshot builds
 	// that never pass through a daemon refresh.
-	if peerIP != nil {
+	//
+	// #17060 fold: re-check the epoch under fabricMu before publishing.
+	// A reader that read peerIP before clearFabricSlots bumped the epoch
+	// must not re-arm the non-nil constraint the clear dropped. When the
+	// epochs match the registration is ordered with any concurrent clear by
+	// fabricMu itself (register-then-clear drops it; clear-then-register
+	// keeps the live peer's identity), so no registration is lost.
+	if peerIP == nil {
+		return
+	}
+	d.fabricMu.Lock()
+	current := d.fabricEpoch == epoch
+	if current {
+		if slot == 1 {
+			current = d.fabricPeerIP1.Equal(peerIP)
+		} else {
+			current = d.fabricPeerIP.Equal(peerIP)
+		}
+	}
+	d.fabricMu.Unlock()
+	if current {
 		dpuserspace.RegisterFabricPeerMACConstraint(peerIP.String(), stored)
 	}
 }
@@ -771,6 +807,14 @@ scan:
 		d.fabricPopulated = true
 	}
 	d.fabricMu.Unlock()
+	// #17060 fold: if stopClusterComms cleared the slot while this refresh
+	// was between resolution and the latch, the epoch join
+	// (fabricPopulateWG) has not yet drained us, so do not push helper
+	// state for the removed fabric. Re-check ctx after the latch; the
+	// joined clear remains the last slot writer either way.
+	if ctx.Err() != nil {
+		return true
+	}
 	slog.Info("cluster: fabric peer resolved",
 		"interface", fabIface, "ifindex", link.Attrs().Index,
 		"local_mac", localMAC, "peer_mac", peerMAC)
@@ -831,18 +875,21 @@ func (d *Daemon) clearFabricFwd1(ctx context.Context) { d.clearFabricPeer(ctx, 1
 // clearFabricSlots zeroes BOTH fabric slots' epoch state (#17060) and
 // drops the helper identity constraints they registered. It runs from
 // stopClusterComms under clusterCommsMu, mirroring the fabricRefreshCh
-// nilling there, AFTER cancel + clusterCommsWG.Wait: no constructor can
-// still publish, and the populate loops are drained by that same cancel.
-// A still-perched loop may re-store its config between the cancel and
-// this clear — that ordering is exactly why the clear sits here rather
-// than under fabricMu alone at cancel time. Keep it that late.
+// nilling there, AFTER cancel + clusterCommsWG.Wait AND after
+// fabricPopulateWG.Wait (#17060 fold): stopClusterComms joins the
+// populate loops before this clear, so no in-flight refresh can latch
+// fabric{,1}Populated, no not-yet-scheduled loop can store its config,
+// and no loop remains to write slot state after the clear. Keep it
+// that late — moving it before either join reopens those races.
 //
 // Only the constraint CLEARS race a peer-changed populate's own clear
-// for the same address (both write nil). fabricPeerMAC itself is
-// snapshotted and cleared under fabricMu, so a racing
-// rememberFabricPeerMAC cannot resurrect a cleared slot.
+// for the same address (both write nil). The non-nil publish in
+// rememberFabricPeerMAC is epoch-guarded under fabricMu (fabricEpoch
+// is bumped here under the same lock), so a pre-clear reader cannot
+// re-arm a constraint this clear drops.
 func (d *Daemon) clearFabricSlots() {
 	d.fabricMu.Lock()
+	d.fabricEpoch++
 	peer0, peer1 := d.fabricPeerIP, d.fabricPeerIP1
 	staleConstraints := make([]string, 0, 2)
 	if peer0 != nil {
@@ -877,6 +924,7 @@ func (d *Daemon) clearFabricSlots() {
 // refreshCh is fab1's OWN event-driven refresh channel, handed in by value at
 // launch (#4958) — see populateFabricFwd for the rationale.
 func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peerAddr string, refreshCh chan struct{}) {
+	defer d.fabricPopulateWG.Done()
 	peerIP := net.ParseIP(peerAddr)
 	if peerIP == nil {
 		slog.Warn("cluster: invalid fabric1 peer address", "addr", peerAddr)
@@ -886,16 +934,30 @@ func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peer
 		overlay = fabIface
 	}
 
-	// Store fabric1 config for RefreshFabricFwd.
+	// Store fabric1 config for RefreshFabricFwd (#17060 fold): a loop
+	// cancelled before it was ever scheduled must not store after
+	// clearFabricSlots, and stopClusterComms joins this loop (via
+	// fabricPopulateWG) before that clear in any case. The cancelled-
+	// before-store case still records the peer-change identity drop
+	// below (a re-point supersedes the old identity even when the new
+	// epoch is already dead).
+	cancelled := ctx.Err() != nil
 	d.fabricMu.Lock()
-	d.fabricIface1 = fabIface
-	d.fabricOverlay1 = overlay
+	if !cancelled {
+		d.fabricIface1 = fabIface
+		d.fabricOverlay1 = overlay
+	}
 	peer1Changed := !d.fabricPeerIP1.Equal(peerIP)
 	if peer1Changed {
 		d.fabricPeerMAC1 = nil
 	}
-	d.fabricPeerIP1 = peerIP
+	if !cancelled {
+		d.fabricPeerIP1 = peerIP
+	}
 	d.fabricMu.Unlock()
+	if cancelled {
+		return
+	}
 	if peer1Changed {
 		dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
 	}

@@ -382,17 +382,20 @@ func TestFabricPeerIdentityClearedOnPeerChange(t *testing.T) {
 	// Same peer — identity survives.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	d.fabricPopulateWG.Add(1)
 	d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", "10.99.13.2", nil)
 	if d.fabricPeerMACHint(0) == nil {
 		t.Fatal("peer identity cleared even though the peer address is unchanged")
 	}
 
 	// Different peer — identity must be dropped.
+	d.fabricPopulateWG.Add(1)
 	d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", "10.99.13.3", nil)
 	if hint := d.fabricPeerMACHint(0); hint != nil {
 		t.Fatalf("stale peer identity %v retained across a fabric peer change", hint)
 	}
 
+	d.fabricPopulateWG.Add(1)
 	d.populateFabricFwd1(ctx, "ge-0-0-0", "fab1", "10.99.14.3", nil)
 	if hint := d.fabricPeerMACHint(1); hint != nil {
 		t.Fatalf("stale fab1 peer identity %v retained across a peer change", hint)
@@ -417,9 +420,11 @@ func TestPopulateFabricFwdHonoursCancelledContextBeforeFirstProbe(t *testing.T) 
 		run  func(d *Daemon, ctx context.Context)
 	}{
 		{"fab0", func(d *Daemon, ctx context.Context) {
+			d.fabricPopulateWG.Add(1)
 			d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", "10.99.13.2", nil)
 		}},
 		{"fab1", func(d *Daemon, ctx context.Context) {
+			d.fabricPopulateWG.Add(1)
 			d.populateFabricFwd1(ctx, "ge-0-0-0", "fab1", "10.99.14.2", nil)
 		}},
 	} {

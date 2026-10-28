@@ -1508,6 +1508,18 @@ type Daemon struct {
 	fabricProbePending1 bool          // fab1 probe queued for the epoch loop (#17060)
 	lastFabricLog0      time.Time     // rate-limit fab0 refresh failure logs
 	lastFabricLog1      time.Time     // rate-limit fab1 refresh failure logs
+	// fabricEpoch is bumped by clearFabricSlots under fabricMu (#17060 fold).
+	// rememberFabricPeerMAC captures it with the peer it read under fabricMu
+	// and re-checks it under fabricMu before publishing a
+	// non-nil helper constraint, so a pre-clear reader cannot re-arm the
+	// constraint clearFabricSlots just dropped.
+	fabricEpoch uint64
+	// fabricPopulateWG tracks the live populateFabricFwd{,1} loops
+	// (#17060 fold). startFabricForwardingLoops Adds on its own stack before
+	// each go statement (never inside the loop goroutine), and
+	// stopClusterComms joins it BEFORE clearFabricSlots, so no in-flight
+	// refresh or not-yet-scheduled loop can write slot state after the clear.
+	fabricPopulateWG sync.WaitGroup
 
 	// vipWarnedIfaces tracks interfaces that already emitted a
 	// "directAddVIPs: interface not found" warning to avoid log spam
