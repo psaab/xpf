@@ -254,6 +254,13 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 			"system rolls back automatically unless you confirm it from a still-reachable session)")
 	}
 
+	// #18330: reject reset work before sampling the configstore generation.
+	// factoryReset enters a terminal generation before wiping, so this is
+	// safe to check lock-free here; the under-applySem check below still
+	// catches a reset that starts after this sample.
+	if d.isResetting() {
+		return nil, errDaemonResetting
+	}
 	// #16719: sample the rollback-discard token BEFORE waiting on
 	// applySem. A commit-confirmed rollback that discards the dirty
 	// candidate while this commit is parked must be visible to the
@@ -980,6 +987,12 @@ func (d *Daemon) deviceMapPassiveAdmissionAlarm(synced *config.Config) {
 // commitConfirmedAndApply is the commit-confirmed analogue of
 // commitAndApply. Same atomicity guarantees.
 func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configstore.CommitAuthority, minutes int, syncPeer peerSyncPolicy) (*config.Config, error) {
+	// #18330: match commitAndApply's reset guard before sampling the
+	// configstore token. The generation is terminal; the under-semaphore
+	// check below catches a reset that starts after this lock-free check.
+	if d.isResetting() {
+		return nil, errDaemonResetting
+	}
 	// #16719: sample before Acquire, as in commitAndApply — a
 	// dirty-discarding rollback that wins applySem while this
 	// commit-confirmed is parked must refuse it, not let it re-arm
