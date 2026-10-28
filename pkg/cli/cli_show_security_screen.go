@@ -93,37 +93,36 @@ func (c *CLI) showScreen() error {
 
 	// Show screen drop counters (total + per-type)
 	if c.dp != nil && c.dp.IsLoaded() {
-		// #3345: surface a counter-read failure rather than printing a clean
-		// zero that hides a degraded counter bridge.
-		var readErr error
-		readCtr := func(idx uint32) uint64 {
-			v, err := c.dp.ReadGlobalCounter(idx)
-			if err != nil && readErr == nil {
-				readErr = err
-			}
-			return v
+		// #17193: shared snapshot classification. #3345: a genuine failure
+		// still warns; an unavailable total prints "unavailable", never a
+		// fabricated 0.
+		indexes := []uint32{dataplane.GlobalCtrScreenDrops}
+		for i := range dataplane.ScreenReasonCounters {
+			indexes = append(indexes, dataplane.ScreenReasonCounters[i].Index)
 		}
-
-		totalDrops := readCtr(dataplane.GlobalCtrScreenDrops)
-		fmt.Printf("Total screen drops: %d\n", totalDrops)
-
-		if totalDrops > 0 {
-			// #3343: shared screen-reason table so the per-reason breakdown
-			// includes port-scan / ip-sweep / session-limit and matches the
-			// other surfaces.
-			for i := range dataplane.ScreenReasonCounters {
-				rc := &dataplane.ScreenReasonCounters[i]
-				v := readCtr(rc.Index)
-				if v > 0 {
-					fmt.Printf("  %-25s %d\n", rc.Label+":", v)
+		snap := dataplane.ReadGlobalCounters(c.dp, indexes...)
+		if snap.IsUnavailable(dataplane.GlobalCtrScreenDrops) {
+			fmt.Printf("Total screen drops: %s\n", "unavailable")
+		} else {
+			totalDrops, _ := snap.Value(dataplane.GlobalCtrScreenDrops)
+			fmt.Printf("Total screen drops: %d\n", totalDrops)
+			if totalDrops > 0 {
+				// #3343: shared screen-reason table so the per-reason breakdown
+				// includes port-scan / ip-sweep / session-limit and matches the
+				// other surfaces.
+				for i := range dataplane.ScreenReasonCounters {
+					rc := &dataplane.ScreenReasonCounters[i]
+					if v, ok := snap.Value(rc.Index); ok && v > 0 {
+						fmt.Printf("  %-25s %d\n", rc.Label+":", v)
+					}
 				}
 			}
 		}
 		// #3345: check AFTER all reads (incl. the per-type loop) so a failure
 		// on ANY read — not just the first — is surfaced. An early check
 		// before the loop would let a late read print a stale 0.
-		if readErr != nil {
-			fmt.Printf("warning: screen counter read failed (counters may be incomplete): %v\n", readErr)
+		if snap.Err != nil {
+			fmt.Printf("warning: screen counter read failed (counters may be incomplete): %v\n", snap.Err)
 		}
 	}
 

@@ -21,14 +21,21 @@ import "fmt"
 // fail-open gates and BEFORE the final `return cfg, nil`. The pre-existing
 // tail-gate sequence and warning-append order remain unchanged; #11571 adds
 // the managed-multicast migration gate immediately after ValidateConfig.
+//
+// deferJunosHostWarnings (#17153, #13138) is the single definition of
+// whether the Junos host direct-delivery warnings are deferred to the
+// final effective-ingress pass: true exactly on the tolerant path
+// (opts.tolerant), where a tolerant quarantine can change the effective
+// ingress the projection observes. Both call sites (runTailGates here
+// and the final pass in compileExpanded) must use this helper so the
+// two copies of the former four-flag OR cannot drift.
+func deferJunosHostWarnings(opts compileOpts) bool { return opts.tolerant }
+
 func runTailGates(cfg *Config, opts compileOpts) error {
 	// #13138: defer the VRF-sensitive advisory only when a tolerant quarantine
 	// can change the effective ingress that the projection observes. All other
 	// ValidateConfig warnings remain in their established phase and order.
-	deferJunosHostWarnings := opts.lenientTunnelRITarget12520 ||
-		opts.lenientWireguardRoutingInstance || opts.lenientRIDualClaim11060 ||
-		opts.lenientRIMgmtMember11392
-	for _, warning := range validateConfig(cfg, !deferJunosHostWarnings) {
+	for _, warning := range validateConfig(cfg, !deferJunosHostWarnings(opts)) {
 		cfg.Warnings = append(cfg.Warnings, warning)
 	}
 

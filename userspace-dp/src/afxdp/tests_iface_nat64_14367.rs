@@ -110,15 +110,20 @@ fn pool_admit(state: &ForwardingState, src: &str, src_port: u16) -> SourceNatLoo
 fn nat64_mint(state: &ForwardingState, src_port: u16) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
     state.nat64.allocate_source_for_worker(
         0,
-        TCP,
-        "2001:db8::1".parse::<Ipv6Addr>().unwrap(),
+        &crate::session::SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: TCP,
+            src_ip: IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+            dst_ip: IpAddr::V6("64:ff9b::5db8:d822".parse::<Ipv6Addr>().unwrap()),
+            src_port,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
         SRV.parse::<Ipv4Addr>().unwrap(),
-        src_port,
-        443,
         1_000,
         0,
         &state.source_nat_rules,
-        0,
         Some(&state.iface_nat_allocators),
     )
 }

@@ -1613,13 +1613,19 @@ fn tx_batch_hist_binding_status_wire_roundtrip_and_projection() {
     assert_eq!(back.tx_batch_descriptors, status.tx_batch_descriptors);
     assert_eq!(back.tx_kick_batch_hist, status.tx_kick_batch_hist);
     assert_eq!(back.tx_kick_batch_kicks, status.tx_kick_batch_kicks);
-    assert_eq!(back.tx_kick_batch_descriptors, status.tx_kick_batch_descriptors);
+    assert_eq!(
+        back.tx_kick_batch_descriptors,
+        status.tx_kick_batch_descriptors
+    );
 
     let snap: BindingCountersSnapshot = (&status).into();
     assert_eq!(snap.tx_batch_hist, status.tx_batch_hist);
     assert_eq!(snap.tx_batch_commits, status.tx_batch_commits);
     assert_eq!(snap.tx_kick_batch_hist, status.tx_kick_batch_hist);
-    assert_eq!(snap.tx_kick_batch_descriptors, status.tx_kick_batch_descriptors);
+    assert_eq!(
+        snap.tx_kick_batch_descriptors,
+        status.tx_kick_batch_descriptors
+    );
 }
 
 #[test]
@@ -2557,6 +2563,9 @@ fn wire_invariant_default_specimens() {
         "idle_lease_wire".into(),
         dump(&IdleLeaseWire {
             pool_name: "p1".into(),
+            pool_kind: 2,
+            nat64_prefix: "64:ff9b::".into(),
+            nat64_scope: "tenant-a|zones=trust|ris=|src=|constrained=0".into(),
             protocol: 6,
             src_ip: "10.0.61.102".into(),
             src_port: 40000,
@@ -2591,6 +2600,9 @@ fn wire_invariant_default_specimens() {
         "display_lease_wire".into(),
         dump(&DisplayLeaseWire {
             pool_name: "p1".into(),
+            pool_kind: 2,
+            nat64_prefix: "64:ff9b::".into(),
+            nat64_scope: "tenant-a|zones=trust|ris=|src=|constrained=0".into(),
             protocol: 6,
             src_ip: "10.0.61.102".into(),
             routing_scope: Some(7),
@@ -2831,6 +2843,10 @@ fn wire_invariant_default_specimens() {
             destination: "203.0.113.0/24".into(),
             next_hops: vec!["192.0.2.1".into(), "192.0.2.2".into()],
             next_hop_weights: vec![1, 4],
+            // #17142: next_table_route is skip_serializing_if=false, so a
+            // default specimen cannot pin it; the true value here is what
+            // lets the #16132 Go gate see the key at all.
+            next_table_route: true,
             ..Default::default()
         }),
     );
@@ -2853,6 +2869,84 @@ fn wire_invariant_default_specimens() {
     s.insert(
         "session_delta_info".into(),
         dump(&SessionDeltaInfo::default()),
+    );
+    // #17142: a POPULATED session_delta_info specimen with a DISTINCT
+    // sentinel per field. The default specimen above has
+    // ingress_ifindex == nat_scope_ifindex == 0, so its key set cannot
+    // see a rename SWAP between those two fields (issue mutant C: swap
+    // the two renames in binding.rs and every key-set cell stayed
+    // green). The Go cell TestSessionDeltaPopulatedSpecimenValues17142
+    // decodes THIS specimen field-by-value, so a swap — or any
+    // one-sided rename that regenerates the fixture — reds there with
+    // the two values transposed. Bools that are false by design in a
+    // meaningful delta stay false only where true would contradict
+    // another sentinel; every numeric/string field carries a unique
+    // value so no two fields can be transposed undetected.
+    s.insert(
+        "session_delta_info_populated".into(),
+        dump(&SessionDeltaInfo {
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                .expect("sentinel timestamp"),
+            slot: 17142001,
+            queue_id: 17142002,
+            worker_id: 17142003,
+            interface: "ge-0/0/0.17142".into(),
+            ifindex: 17142004,
+            event: "open-17142".into(),
+            addr_family: 42,
+            protocol: 43,
+            src_ip: "10.171.42.1".into(),
+            dst_ip: "10.171.42.2".into(),
+            src_port: 4201,
+            dst_port: 4202,
+            ingress_zone: "ingress-zone-17142".into(),
+            egress_zone: "egress-zone-17142".into(),
+            ingress_zone_id: 17142005,
+            egress_zone_id: 17142006,
+            ingress_ifindex: 17142007,
+            ingress_vlan_id: 4203,
+            nat_scope_ifindex: 17142008,
+            owner_rg_id: 17142009,
+            disposition: "disposition-17142".into(),
+            origin: "origin-17142".into(),
+            egress_ifindex: 17142010,
+            tx_ifindex: 17142011,
+            tunnel_endpoint_id: 4204,
+            tx_vlan_id: 4205,
+            next_hop: "10.171.42.3".into(),
+            neighbor_mac: "02:17:14:20:00:01".into(),
+            src_mac: "02:17:14:20:00:02".into(),
+            nat_src_ip: "10.171.42.4".into(),
+            nat_dst_ip: "10.171.42.5".into(),
+            nat_src_port: 4206,
+            nat_dst_port: 4207,
+            source_nat_provenance: 44,
+            fabric_redirect: true,
+            fabric_ingress: true,
+            log_session_init: true,
+            log_session_close: true,
+            rt_flow_session_id: 17142012,
+            routing_domain: 17142013,
+            policy_id: 17142014,
+            policy_counter_idx: 17142015,
+            policy_rule_id: "policy-rule-17142".into(),
+            app_timeout: 17142016,
+            nat64: true,
+            nat64_snat_v4: "10.171.42.6".into(),
+            source_nat_icmp_valid: true,
+            source_nat_icmp_type: 45,
+            source_nat_icmp_code: 46,
+            tunnel_discriminator: 17142017,
+            pptp_call_ids: 17142018,
+            tcp_close_class: 47,
+            tcp_handshake_state: 48,
+            install_table_domain: 17142019,
+            install_table_check: 17142020,
+            purge_retirement: true,
+            fwd_packets: 17142021,
+            rev_packets: 17142022,
+            stream_seq: 17142023,
+        }),
     );
     s.insert(
         "session_export_request".into(),
@@ -3012,6 +3106,9 @@ fn wire_invariant_default_specimens() {
     };
     let populated_idle_lease = IdleLeaseWire {
         pool_name: "p16132".into(),
+        pool_kind: 1,
+        nat64_prefix: String::new(),
+        nat64_scope: String::new(),
         protocol: 6,
         src_ip: "10.0.61.102".into(),
         src_port: 40000,
@@ -3115,7 +3212,42 @@ fn wire_invariant_default_specimens() {
             clear_policies: true,
             cold_path_sample_mask: Some(22),
             content_digest: "16132-digest".into(),
+            // #17134: populated typed userspace subtree so the
+            // shared_umem wire keys are pinned by this fixture and the
+            // Go #16132 cell (previously `userspace` was `null` here,
+            // which is how the #5300 rename drifted unseen).
+            userspace: UserspaceSnapshot {
+                workers: 23,
+                ring_entries: 24,
+                shared_umem: Some(SharedUmemSnapshot {
+                    mode: "cross-nic".into(),
+                    interfaces: vec!["ge-0-0-1".into(), "ge-0-0-2".into()],
+                    phase0_artifact_file: "/run/xpf/shared-umem-phase0.json".into(),
+                }),
+            },
             ..Default::default()
+        }),
+    );
+    // #17134: standalone specimens for the typed userspace subtree, so
+    // the Rust census gate requires these types (not just ConfigSnapshot).
+    s.insert(
+        "userspace_snapshot".into(),
+        dump(&UserspaceSnapshot {
+            workers: 23,
+            ring_entries: 24,
+            shared_umem: Some(SharedUmemSnapshot {
+                mode: "cross-nic".into(),
+                interfaces: vec!["ge-0-0-1".into(), "ge-0-0-2".into()],
+                phase0_artifact_file: "/run/xpf/shared-umem-phase0.json".into(),
+            }),
+        }),
+    );
+    s.insert(
+        "shared_umem_snapshot".into(),
+        dump(&SharedUmemSnapshot {
+            mode: "cross-nic".into(),
+            interfaces: vec!["ge-0-0-1".into(), "ge-0-0-2".into()],
+            phase0_artifact_file: "/run/xpf/shared-umem-phase0.json".into(),
         }),
     );
     s.insert(
@@ -3450,6 +3582,11 @@ fn wire_invariant_default_specimens() {
         "route_snapshot_populated".into(),
         dump(&RouteSnapshot {
             mtu: 1500,
+            // #17134 drive-by (witness of the class this issue fixes):
+            // `next_table_route` (#16614) is `skip_serializing_if` false,
+            // so no specimen carried it and the Go #16132 cell was red
+            // on master. Pin it true here.
+            next_table_route: true,
             ..Default::default()
         }),
     );
@@ -4490,7 +4627,10 @@ fn session_sync_request_primary_liveness_roundtrip_16880() {
     );
     let back: SessionSyncRequest =
         serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
-    assert!(back.primary_liveness, "primary-liveness marker must round-trip");
+    assert!(
+        back.primary_liveness,
+        "primary-liveness marker must round-trip"
+    );
 
     let legacy: SessionSyncRequest =
         serde_json::from_str(r#"{"operation":"upsert"}"#).expect("legacy request decodes");
@@ -5373,7 +5513,10 @@ fn wire_fixture_completeness_16132() {
                     // another struct's names in — and custom containers
                     // likewise; fail loudly rather than model either
                     // wrong. `with =` is allowed only in its known
-                    // null-tolerant/present-ring value forms.
+                    // null-tolerant/present-ring value forms;
+                    // `deserialize_shared_umem_mode` (#17134 fold)
+                    // likewise changes only the VALUE (missing/empty/
+                    // null mode → "cross-nic"), never the field name.
                     assert!(
                         !pending_attrs.contains("flatten"),
                         "wire census: field {name}.{field_name} uses flatten — extend the census deliberately instead of modelling it wrong"
@@ -5384,7 +5527,10 @@ fn wire_fixture_completeness_16132() {
                     {
                         assert!(
                             pending_attrs.contains("null_tolerant_vec")
-                                || pending_attrs.contains("deserialize_present_key_ring"),
+                                || pending_attrs.contains("null_tolerant_u64")
+                                || pending_attrs.contains("deserialize_present_key_ring")
+                                || pending_attrs.contains("deserialize_userspace_snapshot")
+                                || pending_attrs.contains("deserialize_shared_umem_mode"),
                             "wire census: field {name}.{field_name} uses an unmodelled custom (de)serializer — extend the census deliberately"
                         );
                     }

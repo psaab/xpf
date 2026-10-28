@@ -11,7 +11,7 @@ import (
 // #8435: an RG's incarnation boundary must purge EVERY per-RG authority map.
 //
 // `UpdateConfig`'s removal loop purged holdTimer, degradedTimer,
-// monitorWeights, garpCounts and groups — but not peerTransferOutOverride. A
+// monitorWeights, garpCounts and groups — but not transferOverrides. A
 // stale override survived an RG being removed and re-added under the same id,
 // and the subject then SELF-PROMOTED TO PRIMARY. Reproduced at master, with a
 // control (identical remove + re-add without the override stays secondary)
@@ -176,7 +176,7 @@ func TestEveryRGKeyedMapIsPurgedOnRemoval8435(t *testing.T) {
 	for _, f := range fields {
 		found[f.name] = true
 	}
-	for _, want := range []string{"groups", "monitorWeights", "garpCounts", "peerTransferOutOverride"} {
+	for _, want := range []string{"groups", "monitorWeights", "garpCounts", "transferOverrides"} {
 		if !found[want] {
 			t.Fatalf("the reflection enumeration did not find Manager.%s, which IS "+
 				"an RG-keyed map. The scan is broken, not the tree — a clean result "+
@@ -210,7 +210,7 @@ func TestEveryRGKeyedMapIsPurgedOnRemoval8435(t *testing.T) {
 				"from the config.\n\n"+
 				"Every per-RG authority map must be purged at the incarnation "+
 				"boundary, or a same-id re-add inherits this incarnation's state. "+
-				"For peerTransferOutOverride that inheritance is a DUAL-PRIMARY "+
+				"For transferOverrides that inheritance is a DUAL-PRIMARY "+
 				"(#8435); for garpCounts it was a stale ARP count (#6027); for the "+
 				"ip-monitor maps it was #5990. This is the fourth. Add the delete to "+
 				"the removal loop in group_state.go.", f.name, rg)

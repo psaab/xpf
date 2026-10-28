@@ -8,7 +8,7 @@
 //! Pre-fix, a packet that hits an established session but is not served from
 //! the flow cache (RST/FIN close packets, TTL=1, first ACK before the cache
 //! warms) ran those side effects and only met the guards at the common tail —
-//! after `apply_deferred_owner_close` had already stamped closing state and
+//! after the former deferred owner close had already stamped closing state and
 //! after the Time-Exceeded builder had already queued a reply.
 //!
 //! FAIL-ON-REVERT: removing the early hit-arm gate lets the broadcast RST

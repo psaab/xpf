@@ -79,7 +79,7 @@ func TestMatchPoliciesResponseCarriesExclusionAndRuleID(t *testing.T) {
 		SourceIp:        "10.0.5.7",
 		DestinationIp:   "198.51.100.7",
 		Protocol:        "tcp",
-		DestinationPort: 80,
+		DestinationPort: int32Ptr17081(80),
 	})
 	if err != nil {
 		t.Fatalf("MatchPolicies error = %v", err)

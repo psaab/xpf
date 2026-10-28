@@ -216,18 +216,22 @@ That needs to become owner-RG ownership:
 - reconcile peer-owned sessions using `OwnerRGID`
 - stop deleting or preserving sessions based on `IngressZone`
 
-### 7. Fix GC ownership at the same time
+### 7. Fix expiry ownership at the same time
 
 This is part of the same bug.
 
-Today GC expiry is globally gated by `IsLocalPrimaryAny()`. That means a node
-that is primary for one RG can still expire sessions belonging to other RGs.
+The retired Go conntrack GC (`pkg/conntrack`, deleted in #17155) formerly
+gated expiry globally by `IsLocalPrimaryAny()`. That meant a node that was
+primary for one RG could still expire sessions belonging to other RGs.
+Expiry is now owned by the Rust helper's per-worker expiry.
 
 Required change:
 
-- add `IsLocalPrimaryForRG func(rgID uint16) bool` to GC
-- expire only sessions whose `OwnerRGID` is locally primary
-- only emit delete sync for sessions whose owner RG is locally primary
+- per-worker expiry in the Rust helper expires only sessions whose
+  `OwnerRGID` is locally primary
+- helper session-delta delete queueing (daemon-side gated by
+  `IsLocalPrimaryAny`) only emits delete sync for sessions whose owner RG
+  is locally primary
 
 This keeps delete messages key-only; the sender should simply never emit
 ownership-invalid deletes.
@@ -247,7 +251,7 @@ Add coverage for:
 - sync sweep only sends locally-owned owner RG sessions
 - bulk sync only sends locally-owned owner RG sessions
 - stale reconciliation only deletes peer-owned owner RG sessions
-- GC only expires sessions for locally-owned owner RGs
+- Rust helper per-worker expiry only expires sessions for locally-owned owner RGs, and helper session-delta delete queueing (gated by `IsLocalPrimaryAny`) only emits deletes for those sessions
 - reverse entry creation preserves `OwnerRGID`
 
 Keep the existing zone-based tests only as fallback compatibility coverage.
@@ -258,7 +262,7 @@ Recommended implementation order:
 
 1. session structs + wire format + sync filtering + bulk reconciliation
 2. dataplane owner stamping in XDP / TC (~~DPDK~~ retired #1525)
-3. GC per-owner expiry and delete behavior
+3. Rust helper per-worker expiry and helper session-delta delete behaviour
 
 That keeps review scope narrow and makes rollback safer if HA regressions appear.
 

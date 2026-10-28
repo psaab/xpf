@@ -135,7 +135,7 @@ func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.Ses
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
 		return
 	}
-	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "session_v4") {
 		return
 	}
 	msg := s.encodeSessionV4ForPeer(key, val)
@@ -151,7 +151,7 @@ func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.S
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
 		return
 	}
-	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "session_v6") {
 		return
 	}
 	msg := s.encodeSessionV6ForPeer(key, val)
@@ -178,7 +178,7 @@ func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplan
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
 		return false
 	}
-	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "session_v4") {
 		return false
 	}
 	queued := s.queueMessagePaced(s.encodeSessionV4ForPeer(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
@@ -192,7 +192,7 @@ func (s *SessionSync) QueueSessionV6Paced(key dataplane.SessionKeyV6, val datapl
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
 		return false
 	}
-	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "session_v6") {
 		return false
 	}
 	queued := s.queueMessagePaced(s.encodeSessionV6ForPeer(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
@@ -474,11 +474,18 @@ func (s *SessionSync) suppressStampedInstallForIncapablePeer(domain, check uint3
 	return true
 }
 
-// suppressIpsecDiscriminatorInstallForIncapablePeer withholds the S9.4
-// discriminator class from an unlearned peer or one that did not advertise
-// support. The repeated install sweep and capability-triggered cold prime
-// replay any withheld state after a capable peer is discovered.
-func (s *SessionSync) suppressIpsecDiscriminatorInstallForIncapablePeer(tag uint64) bool {
+// suppressIpsecDiscriminatorInstallForIncapablePeer reports whether an
+// outgoing S9.4 IPsec (class-3 discriminator) session install must be
+// WITHHELD because the peer has not learned capabilities or did not
+// advertise capFlagIpsecTunnelDiscriminator (#9506, counted #17113).
+//
+// Such a peer cannot preserve the IPsec if_id discriminator, so the
+// install would alias onto another tunnel's key. Withholding leaves
+// the session off the peer; the repeated install sweep and
+// capability-triggered cold prime replay any withheld state after a
+// capable peer is discovered. Same counter and one-shot warning as
+// the stamped suppressor (one alarm per incarnation).
+func (s *SessionSync) suppressIpsecDiscriminatorInstallForIncapablePeer(tag uint64, source string) bool {
 	if tag>>32 != 3 || uint32(tag) == 0 {
 		return false
 	}
@@ -488,7 +495,17 @@ func (s *SessionSync) suppressIpsecDiscriminatorInstallForIncapablePeer(tag uint
 	if s.peerCapabilitiesLearned() && s.IpsecTunnelDiscriminatorCapable() {
 		return false
 	}
+	s.stats.InstallsSuppressedIpsecDiscriminator.Add(1)
 	s.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Store(true)
+	if s.peerIncarnationState().ipsecDiscriminatorSuppressionWarned.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: withholding IPsec discriminator session installs — the peer has not advertised "+
+			"the S9.4 IPsec tunnel discriminator capability (incapable or not yet discovered), so it would "+
+			"alias these installs onto another tunnel. That peer will miss these sessions until a capable "+
+			"peer is discovered or the upgrade completes on both nodes.",
+			"source", source,
+			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
+	}
 	return true
 }
 
@@ -894,7 +911,7 @@ func (s *SessionSync) rejournalScopedTail(tail [][]byte) {
 // this node is still alive is sync traffic — and the sync-level heartbeat is
 // normally emitted only on the 10s read-timeout cadence, far coarser than
 // the 2s recency window of the peer's heartbeat-timeout suppression guard
-// (shouldSuppressPeerHeartbeatTimeout). Best-effort: a no-op when no peer
+// (syncSuppressesPeerTimeoutLocked, #17056). Best-effort: a no-op when no peer
 // connection exists; a write error follows the standard sender pattern and
 // triggers reconnect via handleDisconnect.
 func (s *SessionSync) SendLivenessKeepalive() {

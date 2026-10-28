@@ -187,7 +187,6 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 			return &snapshot
 		},
 		EventBuf:   eventBuf,
-		GC:         d.gc,
 		Routing:    d.routing,
 		FRR:        d.frr,
 		IPsec:      d.ipsec,
@@ -633,7 +632,6 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		Store:    d.store,
 		DP:       apiDP,
 		EventBuf: eventBuf,
-		GC:       d.gc,
 		Routing:  d.routing,
 		FRR:      d.frr,
 		IPsec:    d.ipsec,

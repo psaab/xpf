@@ -146,7 +146,7 @@ func TestNonFirstFragmentConcretePortStillDeniesDirectly(t *testing.T) {
 	res := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.1.2.3"), DstIP: net.ParseIP("203.0.113.9"),
-		Protocol: "tcp", DstPort: 443,
+		Protocol: "tcp", DstPort: PortPtr(443),
 	})
 	if !res.Matched || res.Action != config.PolicyDeny || res.PolicyName != "block-https" {
 		t.Fatalf("concrete TCP/443 must deny directly via block-https; got %+v", res)
@@ -361,7 +361,7 @@ func TestNonFirstFragmentSkippedRejectKeepsAction(t *testing.T) {
 	direct := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.1.2.3"), DstIP: net.ParseIP("203.0.113.9"),
-		Protocol: "tcp", DstPort: 443,
+		Protocol: "tcp", DstPort: PortPtr(443),
 	})
 	if !direct.Matched || direct.Action != config.PolicyReject || direct.FragmentAssociatedDeny {
 		t.Fatalf("a concrete L4 reject must still report reject (not normalized); got %+v", direct)
