@@ -623,8 +623,8 @@ func pointerToMapFields17157(t reflect.Type) []string {
 // The no-*map check recurses through embedded and nested struct
 // fields (including pointer-to-struct fields such as
 // currentClusterAccepted16858), following the walkBoolFieldsRec16166
-// pattern: a *map[...] field hidden inside protocolScopeOpts or any
-// other nested struct is an offender, not just a direct field.
+// pattern: a *map[...] field hidden inside any nested struct is an
+// offender, not just a direct field.
 //
 // FAIL-ON-REVERT: re-adding `applicationNameCollisions
 // *map[string]struct{}` (or any *map[...] field, direct or nested) to
