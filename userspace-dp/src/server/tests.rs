@@ -9067,13 +9067,9 @@ fn sync_session_upsert_reports_a_semantic_refusal_on_the_wire_6785() {
     );
     assert_eq!(
         second.error,
-        format!(
-            "{}{}",
-            crate::afxdp::SYNCED_IMPORT_REFUSED_PREFIX,
-            crate::afxdp::SyncedImportOutcome::RejectedCapacity
-                .refusal_reason()
-                .expect("capacity is a refusal")
-        ),
+        crate::afxdp::SyncedImportOutcome::RejectedCapacity
+            .wire_error()
+            .expect("capacity is a refusal"),
         "the wire error must name WHICH refusal happened — an operator cannot \
          tell a capacity problem from a stale peer otherwise"
     );

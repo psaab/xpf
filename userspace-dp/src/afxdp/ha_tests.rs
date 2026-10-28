@@ -6168,9 +6168,11 @@ fn upsert_synced_session_refuses_standalone_reverse_8015() {
          derived from and must be refused (#8015)"
     );
     assert_eq!(
-        SyncedImportOutcome::RejectedStandaloneReverse.refusal_reason(),
-        Some("standalone-reverse"),
-        "the refusal must carry a stable reason token — Go discriminates a \
+        SyncedImportOutcome::RejectedStandaloneReverse.wire_error(),
+        Some(format!(
+            "{SYNCED_IMPORT_REFUSED_PREFIX}standalone-reverse"
+        )),
+        "the refusal must carry a stable wire token — Go discriminates a \
          SEMANTIC refusal from a transport failure on the token, and a transport \
          failure gates HA takeover-readiness (#5247)"
     );
@@ -12326,9 +12328,9 @@ fn upsert_synced_session_refuses_stale_zone_replay_10612() {
         "a removed-zone replay must be refused before shared publication (#10612)"
     );
     assert_eq!(
-        SyncedImportOutcome::RejectedStaleZone.refusal_reason(),
-        Some("stale-zone"),
-        "the refusal must carry a stable reason token"
+        SyncedImportOutcome::RejectedStaleZone.wire_error(),
+        Some(format!("{SYNCED_IMPORT_REFUSED_PREFIX}stale-zone")),
+        "the refusal must carry a stable wire token"
     );
     {
         let synced = coordinator.sessions.synced.lock().expect("shared sessions");
