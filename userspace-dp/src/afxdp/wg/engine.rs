@@ -98,8 +98,10 @@ pub(crate) struct EncapOutcome {
     /// encapsulated wire image starts at offset 0.
     pub(crate) len: usize,
     /// The receiver_index used (peer-chosen). Useful for tracing.
+    #[expect(dead_code, reason = "test-only tracing field read by wg tests (#17212)")]
     pub(crate) receiver_index: u32,
     /// The counter value used (engine-chosen). Useful for tracing.
+    #[expect(dead_code, reason = "test-only tracing field read by wg tests (#17212)")]
     pub(crate) counter: u64,
     /// Whether this record is an empty keepalive (#13667).
     /// `note_encap_sent` must receive this verbatim.
@@ -903,8 +905,9 @@ impl WgEngine {
     }
 
     /// The pubkey of the first (S2a: only) configured peer, if any.
-    /// Used by the control thread to drive initiator bring-up without
-    /// re-plumbing the peer config through the spawn site.
+    /// Used by tests and the test-only `timer_pass` wrapper to drive
+    /// initiator bring-up without re-plumbing the peer config.
+    #[cfg(test)]
     pub(crate) fn first_peer_pubkey(&self) -> Option<[u8; WG_KEY_LEN]> {
         self.load_table().peers.first().map(|e| e.peer.pubkey)
     }
@@ -981,6 +984,7 @@ impl WgEngine {
 
     /// Atomic snapshot of the peer-routing table for per-packet
     /// callers outside the engine (frame/PTB/dispatch selection).
+    #[cfg(test)]
     pub(crate) fn table_snapshot(&self) -> Arc<PeerTable> {
         self.load_table()
     }
@@ -1052,6 +1056,7 @@ impl WgEngine {
         self.local_public_key
     }
 
+    #[cfg(test)]
     pub(crate) fn listen_port(&self) -> u16 {
         self.listen_port
     }
@@ -1501,6 +1506,7 @@ impl WgEngine {
     /// and the demux map can only carry one entry per index. The
     /// slow-path installer must retry handshake completion with a
     /// fresh receiver_index when this fires.
+    #[cfg(test)]
     pub(crate) fn install_session(
         &self,
         pubkey: &[u8; 32],
@@ -1617,6 +1623,10 @@ impl WgEngine {
     /// the WG transport record (header + ciphertext + tag) is
     /// written starting at `out[0]`. Outer L2/L3/L4 headers are
     /// the caller's responsibility (`outer.rs` builders).
+    ///
+    /// Test-only uncapped wrapper (#17212): production calls
+    /// `try_encap_capped`.
+    #[cfg(test)]
     pub(crate) fn try_encap(
         &self,
         peer_pubkey: &[u8; 32],

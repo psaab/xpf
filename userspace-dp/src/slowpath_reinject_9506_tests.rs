@@ -982,6 +982,14 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     }
 }
 
+/// #18207 LOCKSTEP. The shared golden is produced by the Go encoder
+/// (`TestReinjectSubmitGoRustPinnedLayout9506` byte-matches it) and both
+/// Rust readers must decode those exact bytes. The zone field is u32 since
+/// #17623 widened zone ids; the pre-fix Go writer emitted u16, displacing
+/// every following field by 2 bytes so every frame failed decode. A Rust
+/// round-trip cannot catch that (encoder+decoder both u32).
+/// Regenerate only for an intentional wire-layout change with
+/// `XPF_WRITE_GOLDEN_18207=1`.
 #[test]
 fn submit_wire_matches_pinned_go_vector_and_pooled_decoder() {
     const GO_SUBMIT_VECTOR: &[u8] = &[
@@ -1010,10 +1018,36 @@ fn submit_wire_matches_pinned_go_vector_and_pooled_decoder() {
         deadline_clock_id: PMECH_DEADLINE_CLOCK_MONOTONIC,
     };
     assert_eq!(GO_SUBMIT_VECTOR.len(), 140);
+    assert_eq!(SUBMIT_PMECH_TAIL_LEN, 81);
     assert_eq!(
         encode_submit_batch(std::slice::from_ref(&expected_frame)).as_slice(),
         GO_SUBMIT_VECTOR
     );
+    // The Rust encoder must byte-match the shared golden the Go encoder is
+    // pinned to; regenerate only under XPF_WRITE_GOLDEN_18207=1 (#9412 pattern).
+    let hex: String = GO_SUBMIT_VECTOR.iter().map(|b| format!("{b:02x}")).collect();
+    let golden_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pkg/nfqueue/testdata/reinject_submit_frame_18207.hex"
+    );
+    if std::env::var_os("XPF_WRITE_GOLDEN_18207").is_some() {
+        std::fs::write(golden_path, format!("{hex}\n")).expect("write golden");
+    }
+    let golden = std::fs::read_to_string(golden_path).expect("read the shared golden");
+    assert_eq!(
+        hex,
+        golden.trim(),
+        "#18207: the submit frame no longer matches the golden the Go encoder is pinned to"
+    );
+    // No-target validator must accept the same u32 bytes (it syntax-checks
+    // the pooled decoder's layout without materialising frames; PR #17169
+    // removed the allocating `decode_submit_batch`).
+    let validated = decode_submit_batch_no_target(GO_SUBMIT_VECTOR).expect("validate Go submit vector");
+    assert_eq!(validated.len(), 1);
+    assert_eq!(validated[0].0.request_id, 1);
+    assert_eq!(validated[0].0.permit_epoch, 7);
+    assert_eq!(validated[0].0.queue_epoch, 11);
+    assert_eq!(validated[0].0.queue_number, 9);
     const TAIL_START: usize = 59;
     assert_eq!(&GO_SUBMIT_VECTOR[TAIL_START..67], &13u64.to_be_bytes()[..]);
     assert_eq!(&GO_SUBMIT_VECTOR[67..75], &17u64.to_be_bytes()[..]);
