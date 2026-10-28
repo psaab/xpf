@@ -928,13 +928,17 @@ explicit-config test seam.
     `liveLegsSanctionedLocked` / `liveAllLoopbackLocked` now ask
     `api.Server.ServingLegAddrs` (the requested address of every serving
     leg) and fall back to the fingerprint only when no server exists;
-    `syncCurFromLiveLocked` rewrites `m.cur` from the serving legs after
-    each HTTP/HTTPS reconcile — the exact desired fingerprint on full
-    success, the converged-plus-retained union on partial failure, with
-    a plane that bound nothing keeping its previous fingerprint as retry
-    debt. The nil-direction gate (`publishNilDirectionLocked`) judges
-    loopback-ness against the same live set, so a retained off-loopback
-    leg can never be published nil by a fingerprint that dropped it.
+    `syncCurFromLiveLocked` rewrites the address/TLS fields in `m.cur`
+    from serving legs after each HTTP/HTTPS reconcile — the exact
+    desired endpoint on full success, the converged-plus-retained union
+    on partial failure, with a plane that bound nothing keeping its
+    previous endpoint as retry debt. The separate bind-device scope
+    fingerprint is copied from the desired snapshot only after every
+    scope-driven plane reconcile succeeds (#17812), so a failed rebind
+    keeps the old scope as retry debt. The nil-direction gate
+    (`publishNilDirectionLocked`) judges loopback-ness against the same
+    live set, so a retained off-loopback leg can never be published nil
+    by a fingerprint that dropped it.
 
     Both exits rest on the unnamed address being one a committed config CAN
     name. Round 13's predicate quietly assumed HTTP was always live at
