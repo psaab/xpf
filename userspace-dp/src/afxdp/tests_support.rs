@@ -5,7 +5,7 @@
 // fn is moved verbatim (visibility widened to `pub(super)` so the
 // per-subsystem test modules can call them via `use super::tests_support::*`).
 #![allow(unused_imports)]
-#![allow(dead_code)]
+#![expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 
 use super::test_fixtures::*;
 use super::worker::WorkerTxPipeline;

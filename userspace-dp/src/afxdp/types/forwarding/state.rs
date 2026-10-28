@@ -684,7 +684,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// tunnels between the same endpoints map to distinct sessions. The
     /// userspace dataplane keys GRE flows on the 5-tuple only, so this flag is
     /// threaded into ForwardingState for config truth/parity but is NOT yet read
-    /// by any packet/forwarding path — hence `#[allow(dead_code)]`. The consumer
+    /// by any packet/forwarding path. The consumer
     /// #7188: READ by stage_parse_flow_and_learn, which gives transit GRE an
     /// identity keyed on the RFC 2890 discriminator when this is set. Off, the
     /// packet stays flowless exactly as #6837 left it.
@@ -700,7 +700,6 @@ pub(in crate::afxdp) struct ForwardingState {
     /// userspace dataplane has a single forwarding path, so the flag is held
     /// for config truth/parity and does not currently switch behavior (there
     /// is no express/regular split to select between).
-    #[allow(dead_code)]
     pub(in crate::afxdp) power_mode_disable: bool,
     // #2130: the dead Rust FlowExporter + its flow_export_config field were
     // removed. Flow export is owned by the Go control plane (pkg/flowexport);

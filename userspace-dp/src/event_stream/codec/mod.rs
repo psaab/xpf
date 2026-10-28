@@ -40,7 +40,7 @@ impl EventFrame {
         &self.data[..self.len as usize]
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(crate) fn dataplane_event_payload(&self) -> Option<&[u8]> {
         let event_kind = DataplaneEventKind::from_msg_type(self.data[4])?;
         let payload_len = u32::from_le_bytes(self.data[0..4].try_into().ok()?) as usize;
@@ -79,7 +79,7 @@ impl EventFrame {
         )
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(crate) fn decode_dataplane_event(&self) -> Option<DataplaneEventPayload> {
         decode_dataplane_event(self.data[4], self.dataplane_event_payload()?)
     }
