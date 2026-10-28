@@ -201,9 +201,8 @@ func astTunnelModeWireguard(tunnelNode *Node) bool {
 // pure function of the candidate config (both nodes compute identical
 // error-to-empty-set handling).
 func emitNodeExpandedTunnelNames(tree *ConfigTree, nodeID int, out map[string]struct{}) {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
+	clone := gateNodeView(tree, nodeID, false)
+	if clone == nil {
 		return
 	}
 	// #5691: compile EVERY top-level `interfaces` root into one InterfacesConfig
