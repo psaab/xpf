@@ -829,10 +829,12 @@ var headerCensusAllowlist18273 = map[string]string{
 	"iface_counter_value": "mirror is Go InterfaceCounterValue (types.go): C abbreviates Interface to iface (#18273)",
 	// The Go rename appends the plural "s" (MaxNATPoolIPsPerPool).
 	"MAX_NAT_POOL_IPS_PER_POOL": "mirror is Go MaxNATPoolIPsPerPool (types.go): exact rename differing only by the plural-s suffix (#18273)",
-	// Restored with its key (xpf_common.h): the Rust reverse-NAT state
-	// carries the same fields (orig_src_v6, userspace-dp frame/mod.rs)
-	// but no type named after the C struct.
-	"nat64_state_value": "restored with nat64_state_key for the nat64_state map (#18273); Rust carries its fields (orig_src_v6) without a same-named type",
+	// Restored together (xpf_common.h) for the nat64_state map: the
+	// Rust reverse-NAT state (Nat64ReverseInfo, userspace-dp
+	// nat64/state.rs) carries the same address fields (orig_src_v6,
+	// orig_dst_v6) but no type named after the C structs.
+	"nat64_state_key":   "key for the nat64_state map (#18273); Rust reverse state is Nat64ReverseInfo (nat64/state.rs) with orig_src_v6/orig_dst_v6, no same-named type",
+	"nat64_state_value": "value for the nat64_state map (#18273); Rust reverse state is Nat64ReverseInfo (nat64/state.rs) with orig_src_v6/orig_dst_v6, no same-named type",
 	// Go collapses the acronym seam: HostInboundDHCPv6 ("DHCP"+"v6")
 	// vs C HOST_INBOUND_DHCPV6 — no camel seam separates DHCP from V6.
 	"HOST_INBOUND_DHCPV6": "mirror is Go HostInboundDHCPv6 (types.go): C suffix DHCPV6 has no camel seam before V6 (#18273)",
@@ -866,7 +868,10 @@ func headerCensusDSCPPins18273(t *testing.T, texts ...string) {
 				continue
 			}
 			got, err := strconv.Atoi(m[2])
-			if err != nil || uint8(got) != want {
+			// Compare in int space with an explicit range guard: a
+			// uint8(got) conversion wraps mod 256, so a header value
+			// of e.g. 266 would alias AF11's 10 and stay green.
+			if err != nil || got < 0 || got > 255 || got != int(want) {
 				t.Errorf("header define %s=%s drifts from DSCPValues[%q]=%d (#18273)", m[1], m[2], alias, want)
 			}
 			seen[m[1]] = true
@@ -1038,13 +1043,20 @@ func TestEveryHeaderIdentifierHasLiveReader17146(t *testing.T) {
 			}
 		}
 	}
-	// Macro use in the map declarations: max_entries(SOME_MACRO) must
-	// resolve to a retained define.
-	maxEntriesMacroRe := regexp.MustCompile(`max_entries,\s*([A-Z_][A-Z0-9_]*)\s*[);]`)
+	// Macro use in the map declarations: every macro operand of a
+	// max_entries(...) expression must resolve to a retained define.
+	// Capturing only a lone bare macro would miss compound operands
+	// (MAX_POLICIES * MAX_RULES_PER_POLICY): deleting or renaming the
+	// second operand would stay green, so check EVERY uppercase token
+	// in the full argument.
+	maxEntriesRe := regexp.MustCompile(`max_entries,\s*([^);]+)`)
+	macroOperandRe := regexp.MustCompile(`[A-Z][A-Z0-9_]*`)
 	for _, hdr := range headerNames {
-		for _, m := range maxEntriesMacroRe.FindAllStringSubmatch(headerText[hdr], -1) {
-			if !defined[m[1]] {
-				dangling = append(dangling, hdr+": macro "+m[1])
+		for _, m := range maxEntriesRe.FindAllStringSubmatch(headerText[hdr], -1) {
+			for _, tok := range macroOperandRe.FindAllString(m[1], -1) {
+				if !defined[tok] {
+					dangling = append(dangling, hdr+": macro "+tok)
+				}
 			}
 		}
 	}
