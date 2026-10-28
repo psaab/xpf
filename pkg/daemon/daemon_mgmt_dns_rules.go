@@ -105,8 +105,7 @@ func (netlinkMgmtDNSRuleOps) RuleDel(rule *netlink.Rule) error { return netlink.
 // fib_rule_hdr action this reconciler keys its lookup/shadow pairs
 // on, and the full decoder lives with the package that owns rule
 // machinery (#17078). Only the netlink.Rule projection is consumed
-// here; the FRA_DSCP / FRA_L3MDEV sidecar stays with pkg/routing's
-// own readbacks.
+// here; the FRA_DSCP sidecar stays with pkg/routing's own readbacks.
 func (netlinkMgmtDNSRuleOps) RuleList(family int) ([]netlink.Rule, error) {
 	rows, err := routing.RuleListFull(family)
 	if err != nil {

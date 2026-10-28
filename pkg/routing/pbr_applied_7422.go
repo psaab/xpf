@@ -37,6 +37,7 @@ import (
 // zeros. Both families must succeed.
 
 // PBRAppliedStatus returns PBR-band occupancy, the number of mismatched
+// desired rules, and whether the readback succeeded.
 //
 // Desired PBR lookup rules are assigned even priorities in slice order, with
 // one rule per two-priority pair. A mismatch is one for each missing or

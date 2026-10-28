@@ -14,10 +14,10 @@ import (
 // netlink v1.3.1's RuleListFiltered cannot represent.
 //
 // Type is fib_rule_hdr.action, carried on netlink.Rule itself (the
-// library leaves it zero). The fields netlink.Rule has no slot for at
-// all — the FRA_DSCP selector (#7796) and the FRA_L3MDEV selector — are
-// sidecar fields here, so one dump serves every readback consumer
-// instead of each keeping its own partial decoder.
+// library leaves it zero). The field netlink.Rule has no slot for at
+// all — the FRA_DSCP selector (#7796) — is a sidecar field here, so
+// one dump serves every readback consumer instead of each keeping its
+// own partial decoder.
 type RuleRow struct {
 	netlink.Rule
 
@@ -26,9 +26,6 @@ type RuleRow struct {
 	// selector", mirroring PBRRule.DSCPSet.
 	DSCP    uint8
 	DSCPSet bool
-
-	// L3MDevSet reports the row carries FRA_L3MDEV.
-	L3MDevSet bool
 }
 
 // RuleListFull dumps the kernel fib-rule table for family and decodes
@@ -37,9 +34,9 @@ type RuleRow struct {
 // It exists because netlink v1.3.1's RuleList omits the fib-rule action
 // (Rule.Type) and silently drops FRA_DSCP, and the two raw decoders
 // that grew around that gap — the validating one formerly in
-// pkg/daemon's DNS-rule file and the unvalidated DSCP sidecar below —
-// disagree on validation and on the FRA_IP_PROTO width. This is the
-// single RTM_GETRULE dump site for the tree (#17078).
+// pkg/daemon's DNS-rule file and the unvalidated one formerly in
+// rule_dscp_linux.go — disagree on validation and on the FRA_IP_PROTO
+// width. This is the single RTM_GETRULE dump site for the tree (#17078).
 //
 // Any dump, header, attribute or length failure is returned: callers
 // reconcile or report against this readback, so a malformed row must
@@ -69,7 +66,7 @@ func RuleListFull(family int) ([]RuleRow, error) {
 // &net.IPNet{IP, Mask} construction — and adds the three things the
 // library cannot do: Rule.Type from fib_rule_hdr, length validation on
 // every attribute (the library slices [0:4]/[0:8] unchecked), and the
-// FRA_DSCP / FRA_L3MDEV sidecar. FRA_IP_PROTO is width-tolerant
+// FRA_DSCP sidecar. FRA_IP_PROTO is width-tolerant
 // (1..4 bytes): the kernel emits it as u8 (#14971) while the library
 // and its encoders emit 4 bytes.
 func ruleRowFromDumpMessage(family int, raw []byte) (RuleRow, error) {
@@ -78,7 +75,24 @@ func ruleRowFromDumpMessage(family int, raw []byte) (RuleRow, error) {
 		return row, fmt.Errorf("short family %d policy-rule message: %d bytes", family, len(raw))
 	}
 	msg := nl.DeserializeRtMsg(raw)
-	attrs, err := nl.ParseRouteAttr(raw[msg.Len():])
+	attrRegion := raw[msg.Len():]
+	// nl.ParseRouteAttr trusts each attribute's aligned length and
+	// slices past the end of a truncated final attribute whose
+	// padding is missing (v1.3.1 nl_linux.go), panicking instead of
+	// returning its EINVAL path. Validate the walk here so a
+	// truncated tail fails closed like every other malformed row.
+	for rest := attrRegion; len(rest) >= unix.SizeofRtAttr; {
+		alen := int(nl.NativeEndian().Uint16(rest[:2]))
+		if alen < unix.SizeofRtAttr || alen > len(rest) {
+			return row, fmt.Errorf("truncated policy-rule attribute in family %d: header claims %d bytes, %d remain", family, alen, len(rest))
+		}
+		aligned := (alen + unix.RTA_ALIGNTO - 1) &^ (unix.RTA_ALIGNTO - 1)
+		if aligned > len(rest) {
+			return row, fmt.Errorf("truncated policy-rule attribute in family %d: header claims %d bytes, %d remain", family, alen, len(rest))
+		}
+		rest = rest[aligned:]
+	}
+	attrs, err := nl.ParseRouteAttr(attrRegion)
 	if err != nil {
 		return row, fmt.Errorf("parse family %d policy-rule attributes: %w", family, err)
 	}
@@ -204,11 +218,6 @@ func ruleRowFromDumpMessage(family int, raw []byte) (RuleRow, error) {
 			}
 			row.DSCP = attr.Value[0]
 			row.DSCPSet = true
-		case nl.FRA_L3MDEV:
-			if len(attr.Value) < 1 {
-				return row, fmt.Errorf("short policy-rule l3mdev attribute in family %d", family)
-			}
-			row.L3MDevSet = attr.Value[0] != 0
 		}
 	}
 	row.Rule = *rule

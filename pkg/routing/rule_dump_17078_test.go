@@ -85,6 +85,12 @@ func TestRuleDumpRejectsMalformedRows17078(t *testing.T) {
 		}
 		return raw
 	}
+	// An unpadded final attribute: FRA_IP_PROTO carries one byte, so
+	// its header claims 5 bytes but RTA alignment requires 8. Stripping
+	// the padding leaves a tail ParseRouteAttr would advance past the
+	// end of (aligned length > remaining bytes) and panic on.
+	unpaddedTail := build(nl.NewRtAttr(nl.FRA_IP_PROTO, []byte{6}))
+	unpaddedTail = unpaddedTail[:len(unpaddedTail)-3]
 	cases := []struct {
 		name string
 		raw  []byte
@@ -98,6 +104,7 @@ func TestRuleDumpRejectsMalformedRows17078(t *testing.T) {
 		{"oversize ip proto", build(nl.NewRtAttr(nl.FRA_IP_PROTO, []byte{1, 2, 3, 4, 5}))},
 		{"bad dst width", build(nl.NewRtAttr(nl.FRA_DST, []byte{1, 2, 3}))},
 		{"empty dscp", build(nl.NewRtAttr(FRA_DSCP, []byte{}))},
+		{"truncated attribute tail", unpaddedTail},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

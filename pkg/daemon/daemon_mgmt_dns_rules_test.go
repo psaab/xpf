@@ -204,11 +204,6 @@ func TestNetlinkMgmtDNSRuleListReadsKernelAction11385(t *testing.T) {
 	t.Skip("kernel has no default priority-0 local-table rule")
 }
 
-// TestMgmtDNSRuleDumpDecodesActionAndExtendedTable11385 moved with
-// the decoder: the synthetic-dump decode cell now lives in
-// pkg/routing (TestRuleDumpDecodesActionAndExtendedTable17078),
-// and the daemon projection is covered by
-// TestNetlinkMgmtDNSRuleListReadsKernelAction11385 above.
 func TestMgmtDNSRuleFailureKeepsNameserverOutOfResolver11385(t *testing.T) {
 	server := netip.MustParseAddr("192.0.2.53")
 	leases := []*dhcp.Lease{{Interface: "fxp0", Family: dhcp.AFInet, DNS: []netip.Addr{server}}}
