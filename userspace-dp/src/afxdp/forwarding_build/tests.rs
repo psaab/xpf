@@ -183,6 +183,102 @@ fn forwarding_state_refresh_preserves_three_color_runtime_state() {
     assert_eq!(status[0].drop_packets, 1);
 }
 
+// #17220: builder-level cell for the production entry. Production never
+// calls the policy-parsing wrappers above — it parses once via
+// `PreparedPolicyState::parse_snapshot` and threads the resulting
+// `PolicyState` (and its `scheduler_lease`) into
+// `build_forwarding_state_with_preparsed_policy_and_previous`. Before this
+// cell that entry had 0 direct tests, so a regression in how the prepared
+// state is threaded (dropping it for a re-parse, losing the lease) was
+// invisible at builder level.
+#[test]
+fn preparsed_policy_state_threads_through_production_build_17220() {
+    let snapshot = ConfigSnapshot {
+        zones: vec![
+            crate::ZoneSnapshot {
+                name: "trust".into(),
+                id: 7,
+                ..Default::default()
+            },
+            crate::ZoneSnapshot {
+                name: "untrust".into(),
+                id: 9,
+                ..Default::default()
+            },
+        ],
+        policies: vec![crate::PolicyRuleSnapshot {
+            name: "sched-permit".into(),
+            from_zone: "trust".into(),
+            to_zone: "untrust".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            action: "permit".into(),
+            scheduler_name: "business-hours".into(),
+            ..Default::default()
+        }],
+        default_policy: "deny".into(),
+        ..Default::default()
+    };
+    let policy_counters = PolicyCounterStore::default();
+    let lease = std::sync::Arc::new(crate::policy::SchedulerHeartbeatLease::default());
+    let mut prepared = crate::policy::PreparedPolicyState::parse_snapshot(
+        &snapshot,
+        &policy_counters,
+        std::sync::Arc::clone(&lease),
+    )
+    .expect("preparsed policy must parse");
+    policy_counters.reset_parse_calls_for_test();
+
+    let prev = build_forwarding_state(&snapshot);
+    let state = build_forwarding_state_with_preparsed_policy_and_previous(
+        &snapshot,
+        &policy_counters,
+        &crate::nat::NatCounterStore::default(),
+        Some(&prev),
+        prepared.take_state(),
+    )
+    .expect("production preparsed build must succeed");
+    prepared.commit();
+
+    // The prepared PolicyState is threaded verbatim: the build must not
+    // re-parse policy against the counter store.
+    assert_eq!(
+        policy_counters.parse_calls_for_test(),
+        0,
+        "production build must consume the prepared PolicyState, not re-parse"
+    );
+    // The scheduler_lease handed to parse_snapshot survives into the built
+    // state's policy — it is the same Arc, not a fresh default.
+    assert!(
+        std::sync::Arc::ptr_eq(&state.policy.scheduler_lease, &lease),
+        "scheduler_lease from PreparedPolicyState must thread into the built state"
+    );
+    assert!(
+        state.policy.has_scheduled_rules(),
+        "the scheduled rule from the prepared parse must be present"
+    );
+    // previous-state carry-over still runs on the production entry.
+    assert!(
+        std::sync::Arc::ptr_eq(&state.ipsec_sa, &prev.ipsec_sa),
+        "production build must carry ipsec_sa forward from previous"
+    );
+    // And the threaded policy actually evaluates.
+    assert_eq!(
+        evaluate_policy(
+            &state.policy,
+            7,
+            9,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+            6,
+            12345,
+            443,
+        ),
+        PolicyAction::Permit,
+    );
+}
+
 #[test]
 fn build_cos_state_translates_scheduler_map_entries() {
     let snapshot = ConfigSnapshot {
