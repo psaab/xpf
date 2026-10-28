@@ -1483,8 +1483,9 @@ physical interface (no configured non-zero unit) — and `lo0` — to
 the userspace snapshot builders for hand-built configs. A bare ref
 naming no unit traffic reaches it on (undeclared interface, no unit,
 only non-zero units, or several units) stays bare: strict commit
-rejects it and the tolerant path warns and records it in
-`LenientNATUndefinedScopeRuleSets`, exactly as an undefined scope.
+rejects it; tolerant load warns but preserves the unresolved scope in
+the NAT snapshots. #17247 unifies the diagnostics without adding a
+skip path, so the prior never-match dataplane disposition remains.
 `snapshotInterfaceNameMatches` (`pkg/dataplane/userspace`) is
 deliberately unchanged: it is only the over-approximating #7717
 detection matcher, and the snapshots it reads now carry the canonical
@@ -1497,7 +1498,7 @@ VPN `bind-interface` string IS a unit declaration to the xfrmi reconciler.
 binding-derived units by XFRM if_id family, and both
 `CanonicalNATInterfaceScopeRef` (no fold to `.0` — previously the fold ran
 before the gate could judge, silently selecting unit 0) and the #15278 gate
-(strict reject / lenient warn+record) consult it: a bare `st0` scope with
+(strict reject / lenient warn) consult it: a bare `st0` scope with
 bindings for `st0.0` AND `st0.1` — stanza-less, authored-unit-0-only,
 unitless-tunnel-stanza, or bare-`bind-interface st0` spelling — identifies
 no single logical unit. A stanza carrying no unit of its own plus a single

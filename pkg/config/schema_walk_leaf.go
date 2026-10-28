@@ -485,11 +485,13 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
-		// Multi-value readers consume child Keys but never recurse into the
-		// child's Children. Refuse both non-empty and empty child blocks so
-		// the gate cannot accept content that compilation silently drops.
+		// A block child that itself has Children (or is a non-leaf block such
+		// as `a { }`) carries nested content the list reader never reads.
+		// firewallMatchValues consumes only the child's Keys, so any deeper
+		// statement would be silently dropped. Use the dedicated hard-error
+		// class also used by the existing #17241 refused leaves.
 		if leafSchema.refuseNonLeafBlockChildren && (len(c.Children) > 0 || !c.IsLeaf) {
-			err := nestedMultiValueContentErrorf(path, leafName, c.Keys[0])
+			err := nestedListContentErrorf(path, leafName, c.Keys[0])
 			if vc.recordTypedLeaf(err) {
 				continue
 			}

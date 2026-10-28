@@ -46,11 +46,14 @@ type schemaNode struct {
 	// only for leaves whose compiler reads just the child name; as-path-prepend
 	// sets this because firewallMatchValues consumes each child key.
 	allChildKeysAreValues bool
-	// refuseNonLeafBlockChildren opts a multi-value leaf whose compiler reads
-	// direct child keys but never descends into a child block into rejecting
-	// that nested content. It is intentionally set only on such readers:
-	// other multi leaves can have their own nested grammar (proxy-ARP address
-	// ranges are one example).
+	// refuseNonLeafBlockChildren opts a typed multi-value leaf into refusing any
+	// hierarchical block-list child that is not a plain leaf value. The leaf's
+	// reader consumes direct child keys but does not descend into child blocks,
+	// so nested content would be silently dropped. Set it only on value-list
+	// leaves without their own nested grammar; proxy-ARP address ranges use a
+	// separate reader and remain unmarked. Existing #17241 users include VRRP
+	// virtual-address/virtual-inet6-address and WireGuard allowed-ips; the
+	// tolerant compiler treats this refusal as a hard error.
 	refuseNonLeafBlockChildren bool
 	// blockChildValidator, when set on a `multi && children == nil` typed
 	// leaf, validates each hierarchical block-list child token

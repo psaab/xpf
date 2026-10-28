@@ -51,16 +51,6 @@ func walkSchemaChildren(nodes []*Node, parent *schemaNode, path []string, vc *wa
 	}
 	return nil
 }
-// nestedMultiValueContentErrorf rejects a child block under a multi-value
-// leaf. Such a leaf has no declared children, and its readers consume only
-// each direct child's keys; accepting a block there would silently discard
-// every grandchild. This follows the same fail-closed value-list convention
-// as validateMultiValueLeaf's refusal of ambiguous multi-token block rows.
-func nestedMultiValueContentErrorf(path []string, leafName, value string) error {
-	return typedLeafErrorf(path,
-		"nested content under %s value %q is unsupported; the value-list reader does not descend into child blocks, so the nested statement would be silently dropped",
-		leafName, value)
-}
 
 // findNestedMultiValueContentError scans the schema-recognized portions of an
 // expanded tree for nested blocks under multi-value leaves. It is also called
@@ -85,7 +75,7 @@ func findNestedMultiValueContentError(nodes []*Node, parent *schemaNode, path []
 				if child == nil || len(child.Keys) == 0 || (len(child.Children) == 0 && child.IsLeaf) {
 					continue
 				}
-				return nestedMultiValueContentErrorf(leafPath, keyword, child.Keys[0])
+				return nestedListContentErrorf(leafPath, keyword, child.Keys[0])
 			}
 			continue
 		}
@@ -151,6 +141,90 @@ func findNestedMultiValueContentInInstances(nodes []*Node, containerSchema *sche
 	return nil
 }
 
+// findNestedListContentError searches only the schema leaves that opt into
+// refuseNonLeafBlockChildren. The collect-all validator uses it as a fallback
+// when an unrelated structural error stops its normal walk or the bounded
+// typed-error list fills first; an opted-in hard refusal must not be hidden by
+// a tolerated finding encountered earlier.
+func findNestedListContentError(nodes []*Node, parent *schemaNode, path []string) error {
+	if parent == nil {
+		return nil
+	}
+	for _, node := range nodes {
+		if node == nil || len(node.Keys) == 0 {
+			continue
+		}
+		keyword := node.Keys[0]
+		childSchema := resolveSchemaChild(parent, keyword)
+		if childSchema == nil {
+			continue
+		}
+		if childSchema.refuseNonLeafBlockChildren {
+			leafPath := append(append([]string(nil), path...), keyword)
+			for _, child := range node.Children {
+				if child == nil || len(child.Keys) == 0 || (len(child.Children) == 0 && child.IsLeaf) {
+					continue
+				}
+				return nestedListContentErrorf(leafPath, keyword, child.Keys[0])
+			}
+			continue
+		}
+
+		consumed, descendSchema := consumeNodeKeys(node.Keys, childSchema)
+		newPath := append(append([]string(nil), path...), node.Keys[:consumed]...)
+		missingArgs := 1 + childSchema.args - consumed
+		if missingArgs > 0 && !childSchema.compoundKey {
+			if err := findNestedListContentInInstances(node.Children, childSchema, missingArgs, newPath); err != nil {
+				return err
+			}
+			continue
+		}
+
+		walkChildren := node.Children
+		if keyword == "qualified-next-hop" {
+			walkChildren = expandRunChildren9235(walkChildren, childSchema)
+		}
+		if childSchema.packedTail && len(node.Keys) > consumed {
+			walkChildren = packedBodyChildren(node, childSchema)
+		} else if childSchema.packedFlatRun && len(node.Children) > 0 {
+			walkChildren = expandFlatRun(node.Children, childSchema)
+		}
+		if err := findNestedListContentError(walkChildren, descendSchema, newPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// findNestedListContentInInstances peels hierarchical named-instance keys
+// like walkInstanceChildren, then resumes schema matching on the instance
+// block's children.
+func findNestedListContentInInstances(nodes []*Node, containerSchema *schemaNode, remaining int, path []string) error {
+	if containerSchema == nil || remaining <= 0 {
+		return nil
+	}
+	for _, node := range nodes {
+		if node == nil || len(node.Keys) == 0 {
+			continue
+		}
+		consumed := len(node.Keys)
+		if consumed > remaining {
+			consumed = remaining
+		}
+		newPath := append(append([]string(nil), path...), node.Keys[:consumed]...)
+		if stillMissing := remaining - consumed; stillMissing > 0 {
+			if err := findNestedListContentInInstances(node.Children, containerSchema, stillMissing, newPath); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := findNestedListContentError(node.Children, containerSchema, newPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // walkSchemaNode matches a single AST node against the current schema
 // level (parent), validates it if it resolves to a typed leaf, then
 // recurses into its children.
@@ -204,14 +278,12 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// the very grep it tells you to run, inflating the count by one. An
 		// instruction that corrupts its own measurement is worse than none.
 		//
-		// Strict-vs-tolerant, since it is asked every round and is written
-		// nowhere else: this rejects at the OPERATOR boundary, where the
-		// alternative is a silent drop. It is NOT a reject on the paths where
-		// refusing would mean an outage — configstore's Store.Load (boot) and
-		// Store.SyncApply (HA peer sync) downgrade schema violations to a
-		// warning (pkg/configstore/store.go), so a config an older build
-		// persisted, or a peer sends, still loads. Strict where the operator
-		// can fix it, tolerant where refusing would brick the node.
+		// Strict-vs-tolerant: this closed-world unknown-keyword finding
+		// rejects at the operator boundary, where the alternative is a
+		// silent drop. Store.Load / Store.SyncApply downgrade ordinary
+		// schema violations, but the narrow #17241 nested-list refusal is
+		// hard there too because the compiler discards the nested value
+		// without diagnostic (pkg/configstore/store.go).
 		// #12628: accept only the known non-enforcement shapes. A name-only
 		// exemption would also admit a fused policy/default-policy subtree.
 		if parent == securityPoliciesSchema12217() && nonEnforcementSecurityPoliciesChild12628(node) {
@@ -453,7 +525,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 			}
 			if childSchema.refuseNonLeafBlockChildren && (len(c.Children) > 0 || !c.IsLeaf) {
 				leafPath := append(append([]string(nil), path...), keyword)
-				err := nestedMultiValueContentErrorf(leafPath, keyword, c.Keys[0])
+				err := nestedListContentErrorf(leafPath, keyword, c.Keys[0])
 				if vc.recordTypedLeaf(err) {
 					continue
 				}

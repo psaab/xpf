@@ -461,7 +461,14 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 			valueExamples:       vaExamples,
 			validator:           vaValidator,
 			blockChildValidator: vaBlockValidator,
-			children:            nil,
+			// #17241: the compiler reads EVERY key of each block
+			// child via firewallMatchValues, so the packed braced
+			// spelling `virtual-address { a b; }` must validate
+			// every token (and must not be refused as a
+			// multi-token child) — see validateMultiValueLeaf.
+			allChildKeysAreValues:      true,
+			refuseNonLeafBlockChildren: true,
+			children:                   nil,
 		},
 		"priority": {
 			desc:          "VRRP priority",
@@ -554,7 +561,12 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 			valueExamples:       vaExamples,
 			validator:           vaValidator,
 			blockChildValidator: vaBlockValidator,
-			children:            nil,
+			// #17241: see virtual-address — every child key is a
+			// compiled value (firewallMatchValues), so validate
+			// every token instead of refusing packed children.
+			allChildKeysAreValues:      true,
+			refuseNonLeafBlockChildren: true,
+			children:                   nil,
 		}
 	}
 	return &schemaNode{desc: "VRRP group", args: 1, placeholder: "<group-id>", keyValidator: ValidateVRRPGroupID, packedFlatRun: true, children: children}
@@ -733,7 +745,7 @@ func wireguardSchemaNode() *schemaNode {
 			// child). The compiler hard-rejects duplicate pubkeys at
 			// commit (schema_walk.go validateWireguardPeers).
 			"peer": {desc: "WireGuard peer (keyed by public key)", args: 1, placeholder: "<public-key>", children: map[string]*schemaNode{
-				"allowed-ips": {desc: "Peer allowed IPs (CIDR)", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+				"allowed-ips": {desc: "Peer allowed IPs (CIDR)", args: 1, multi: true, placeholder: "<prefix>", valueType: ValueCIDR, valueDesc: "Peer allowed prefix (CIDR, e.g. 10.0.0.0/8 or 2001:db8::/48)", valueExamples: []string{"10.0.0.0/8", "2001:db8::/48"}, validator: ValidateWGAllowedIPPrefix, children: nil, allChildKeysAreValues: true, refuseNonLeafBlockChildren: true},
 				"endpoint":    {desc: "Peer endpoint (ip:port)", args: 1, placeholder: "<ip:port>", children: nil},
 				"persistent-keepalive": {
 					desc:          "Persistent keepalive seconds",
