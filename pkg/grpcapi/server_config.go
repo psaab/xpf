@@ -545,9 +545,6 @@ func (s *Server) ShowCompare(ctx context.Context, req *pb.ShowCompareRequest) (*
 		if !req.ActiveBaseline && snaps.Other == nil {
 			return nil, status.Errorf(codes.InvalidArgument, "not in configuration mode")
 		}
-		if req.RollbackN > 0 && snaps.Primary == nil {
-			return nil, status.Errorf(codes.InvalidArgument, "rollback slot %d not found", req.RollbackN)
-		}
 		hasCandidate := snaps.Other != nil || req.ActiveBaseline
 		return &pb.ShowCompareResponse{Output: configstore.RenderCompareRedacted(snaps.Primary, snaps.Other, req.Path, hasCandidate)}, nil
 	}

@@ -73,4 +73,27 @@ func TestGRPCRollbackCapture17215(t *testing.T) {
 		!strings.Contains(herr.Error(), "out of range") {
 		t.Errorf("ShowCompare captured SlotErr = %v, want out-of-range", herr)
 	}
+	// #17215 fold: the handler's nil-Primary arm without a captured
+	// slot error must NOT synthesize "rollback slot %d not found".
+	// CaptureRollback invariants make Primary==nil imply Err!=nil for
+	// slotted captures (rollbackTree(0) yields the — possibly nil —
+	// active tree with no error, so RollbackN==0 with no active renders
+	// empty; a nil store yields no capture), so this state is only
+	// constructible by hand: pin that it falls through to the
+	// renderer, not an error. Before the fold this returned the
+	// synthesized spelling. ActiveBaseline gets past the mode arm.
+	noErr := configReadSnapshots{Present: true}
+	nctx := context.WithValue(ctx, configReadSnapshotsKey{}, noErr)
+	// No path: the unscoped diff of a nil slot arm against the
+	// active tree renders "" (FormatCompare would dereference a nil
+	// arm, so scope the request the way a priced snapshot is consumed
+	// — path-scoped rendering tolerates the absent arm exactly as
+	// ShowRollback renders a nil Primary as "").
+	// No-slot content at the scoped path renders "[no changes]" (the
+	// absent arm contributes nothing against the active arm) — the
+	// contract is only: no error, no synthesized slot text.
+	resp2, herr := s.ShowCompare(nctx, &pb.ShowCompareRequest{RollbackN: 1, ActiveBaseline: true, Path: []string{"system"}})
+	if herr != nil || resp2 == nil || strings.Contains(resp2.Output, "not found") {
+		t.Errorf("ShowCompare nil Primary / nil SlotErr = resp %v err %v, want no error and no synthesized slot text", resp2, herr)
+	}
 }
