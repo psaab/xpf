@@ -834,7 +834,11 @@ func (r *Runner) Run(opts Options) (err error) {
 	// backup is restored unconditionally on every failure arm below.
 	var predecessorBackup *predecessorStampBackup
 	if !j.State.atLeast(StateStopped) {
-		predecessorBackup = r.backupCommittedPredecessor(j, j.TargetVersion)
+		var backupErr error
+		predecessorBackup, backupErr = r.backupCommittedPredecessor(j, j.TargetVersion)
+		if backupErr != nil {
+			return fmt.Errorf("backup committed predecessor: %w", backupErr)
+		}
 		if predecessorBackup != nil {
 			predecessorBackup.stashImmune = true
 		}
@@ -908,16 +912,16 @@ func (r *Runner) Run(opts Options) (err error) {
 			r.discardPredecessorBackup(predecessorBackup)
 			return fmt.Errorf("copy: %w", err)
 		}
-		if predecessorBackup != nil {
-			// COPY has landed: post-COPY failures restore the backup
-			// (pre-STOP / verify arms) or leave the stashed snapshot for
-			// an auto-rollback, so a lingering stash must never be
-			// re-adopted by a cut-boundary re-snapshot (#16765).
-			predecessorBackup.stashImmune = false
-		}
 		if err := r.transition(j, StateCopied); err != nil {
 			return err
 		}
+	}
+	// COPY is complete in this run, or the persisted state says a previous
+	// run completed it. From this point onward the cut-boundary snapshot is
+	// this cut's rollback source and must not be replaced by the predecessor
+	// backup (#17817).
+	if predecessorBackup != nil {
+		predecessorBackup.stashImmune = false
 	}
 
 	// ---- VERIFY (pure) ----

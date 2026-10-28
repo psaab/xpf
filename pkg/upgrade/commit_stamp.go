@@ -125,35 +125,44 @@ type predecessorStampBackup struct {
 	stashImmune bool
 }
 
+// backupSnapshotCopyTree copies a committed predecessor's DB snapshot into
+// its private backup tree. It is a package var so tests can inject backup
+// copy failures deterministically (#17817). Production is copyTree.
+var backupSnapshotCopyTree = copyTree
+
 // backupCommittedPredecessor preserves the committed stamp bytes and the
 // .<ver>.dbsnap tree of a committed predecessor before a recopy demotes or
-// replaces it (#14720). Returns nil when target is not a committed
-// predecessor of the journal's live version.
-func (r *Runner) backupCommittedPredecessor(j *Journal, target string) *predecessorStampBackup {
+// replaces it (#14720). Returns (nil, nil) when target is not a committed
+// predecessor, and an error if an existing rollback artifact cannot be
+// secured before snapshot mutation.
+func (r *Runner) backupCommittedPredecessor(j *Journal, target string) (*predecessorStampBackup, error) {
 	if r.committedPredecessorStamp(j, target) == nil {
-		return nil
+		return nil, nil
 	}
 	b := &predecessorStampBackup{version: target}
-	if data, err := os.ReadFile(r.committedStampPath(target)); err == nil {
-		b.stampData = data
+	data, err := os.ReadFile(r.committedStampPath(target))
+	if err != nil {
+		return nil, fmt.Errorf("read committed stamp: %w", err)
 	}
+	b.stampData = data
+
 	snap := filepath.Join(r.cfg.VersionsDir, "."+target+".dbsnap")
-	if _, err := os.Stat(snap); err == nil {
-		tmp, err := os.MkdirTemp(r.cfg.VersionsDir, ".predbak-*")
-		if err != nil {
-			r.logf("upgrade: WARN backup committed predecessor %s snapshot: %v", target, err)
-			return b
-		}
-		b.backupDir = tmp
-		b.dbsnapDir = filepath.Join(tmp, "dbsnap")
-		if _, err := copyTree(snap, b.dbsnapDir); err != nil {
-			r.logf("upgrade: WARN backup committed predecessor %s snapshot: %v", target, err)
-			_ = os.RemoveAll(tmp)
-			b.backupDir = ""
-			b.dbsnapDir = ""
-		}
+	if _, err := os.Stat(snap); os.IsNotExist(err) {
+		return b, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("stat committed snapshot %s: %w", snap, err)
 	}
-	return b
+	tmp, err := os.MkdirTemp(r.cfg.VersionsDir, ".predbak-*")
+	if err != nil {
+		return nil, fmt.Errorf("create committed snapshot backup: %w", err)
+	}
+	b.backupDir = tmp
+	b.dbsnapDir = filepath.Join(tmp, "dbsnap")
+	if _, err := backupSnapshotCopyTree(snap, b.dbsnapDir); err != nil {
+		_ = os.RemoveAll(tmp)
+		return nil, fmt.Errorf("copy committed snapshot backup: %w", err)
+	}
+	return b, nil
 }
 
 // discardPredecessorBackup removes the temporary backup copy without
