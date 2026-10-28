@@ -351,12 +351,29 @@ func eraseKeaLeasesForReset() error {
 		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
 			_, statErr := os.Lstat(path)
 			if err := configstore.EraseFileForReset(path); err != nil {
+				// Historic Kea spellings preserved verbatim (#17171
+				// fold), mapped from the primitive's typed/sentinel
+				// classes like the helper canonical. The old code
+				// had no non-regular arm (it lumped the class into
+				// its remove error); the primitive's refusal is
+				// already Kea-scoped here, so it takes "factory
+				// reset: %w" without inventing a historic string.
 				var symErr *configstore.FactoryResetSymlinkError
-				if errors.As(err, &symErr) {
+				var linkErr *configstore.FactoryResetHardlinkError
+				switch {
+				case errors.As(err, &symErr):
 					errs = append(errs, fmt.Errorf("factory reset: refusing to re-erase symlinked Kea lease file %s: link target is out of erase scope", path))
-					continue
+				case errors.As(err, &linkErr):
+					errs = append(errs, fmt.Errorf("factory reset: refusing to erase hard-linked Kea lease file %s: %w", path, linkErr))
+				case errors.Is(err, configstore.ErrEraseInspect):
+					errs = append(errs, fmt.Errorf("factory reset: inspect Kea lease file %s: %w", path, err))
+				case errors.Is(err, configstore.ErrEraseInspectLinks):
+					errs = append(errs, fmt.Errorf("factory reset: inspect hard links for Kea lease file %s: %w", path, err))
+				case errors.Is(err, configstore.ErrEraseRemove):
+					errs = append(errs, fmt.Errorf("factory reset: re-erase Kea lease file %s: %w", path, err))
+				default:
+					errs = append(errs, fmt.Errorf("factory reset: %w", err))
 				}
-				errs = append(errs, fmt.Errorf("factory reset: %w", err))
 				continue
 			}
 			if statErr == nil {

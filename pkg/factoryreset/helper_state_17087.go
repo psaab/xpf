@@ -82,11 +82,17 @@ func SweepHelperState(path string, opts SweepOpts) error {
 				canonicalErr = fmt.Errorf("%srefusing to sweep symlinked helper state %s: link target is out of erase scope", p, path)
 			case errors.As(err, &linkErr):
 				canonicalErr = fmt.Errorf("%srefusing to erase hard-linked helper state %s: %w", p, path, linkErr)
+			case errors.Is(err, configstore.ErrEraseInspect):
+				canonicalErr = fmt.Errorf("%sinspect helper state %s: %w", p, path, err)
+			case errors.Is(err, configstore.ErrEraseInspectLinks):
+				canonicalErr = fmt.Errorf("%sinspect hard links for helper state %s: %w", p, path, err)
+			case errors.Is(err, configstore.ErrEraseRemove):
+				canonicalErr = fmt.Errorf("%sremove helper state file %s: %w", p, path, err)
 			default:
-				// inspect/remove failure from the shared primitive;
-				// prefix it like the historic spellings.
-				// The primitive's wrapped message already names the
-				// path; keep it verbatim under the caller's prefix.
+				// Non-regular refusal: no historic helper spelling
+				// (the old code lumped the class into its remove
+				// error); keep the primitive's wording under the
+				// caller's prefix.
 				canonicalErr = fmt.Errorf("%s%w", p, err)
 			}
 		}

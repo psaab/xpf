@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -73,6 +75,24 @@ func TestEraseFileForResetTable17171(t *testing.T) {
 			t.Fatalf("regular file survived: %v", err)
 		}
 	})
+	t.Run("non-regular FIFO refused", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "state.json")
+		if err := syscall.Mkfifo(p, 0o600); err != nil {
+			t.Skipf("mkfifo unsupported here: %v", err)
+		}
+		// The refusal text is the primitive's own wording; the
+		// class contract is the ErrEraseNonRegular sentinel plus
+		// the FIFO surviving untouched (an unlink would delete it).
+		if err := EraseFileForReset(p); !errors.Is(err, ErrEraseNonRegular) {
+			t.Fatalf("expected ErrEraseNonRegular, got %v", err)
+		} else if !strings.Contains(err.Error(), "refusing to erase non-regular file "+p) {
+			t.Fatalf("non-regular refusal = %q, want it to name %s", err, p)
+		}
+		if _, err := os.Lstat(p); err != nil {
+			t.Fatalf("refusal must retain the FIFO: %v", err)
+		}
+	})
 	t.Run("absent is clean", func(t *testing.T) {
 		if err := EraseFileForReset(filepath.Join(t.TempDir(), "nope.json")); err != nil {
 			t.Fatalf("absent erase must be nil, got %v", err)
@@ -109,5 +129,32 @@ func TestSweepCrashTemps17171(t *testing.T) {
 		if _, err := os.Lstat(p); err != nil {
 			t.Fatalf("refusal must remove nothing, %s: %v", p, err)
 		}
+	}
+}
+
+// TestSweepCrashTempsWithListError17171 pins the fold-F2 split: a list
+// failure (which already embeds the caller's "<pkg>: " prefix) comes
+// back as listErr and ONLY as listErr, so the caller can return it
+// without stacking a second identical prefix; erase failures stay on
+// the joined error channel with listErr nil.
+func TestSweepCrashTempsWithListError17171(t *testing.T) {
+	listBoom := errors.New("ddns: inspect ownership-state directory for /x: boom")
+	listErr, err := SweepCrashTempsWithListError(func() ([]string, error) { return nil, listBoom })
+	if !errors.Is(listErr, listBoom) || err != nil {
+		t.Fatalf("list failure = (listErr=%v, err=%v), want (boom, nil)", listErr, err)
+	}
+	dir := t.TempDir()
+	link := filepath.Join(dir, ".state.json.tmp-1")
+	target := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(target, []byte("tenant"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	var symErr *FactoryResetSymlinkError
+	listErr, err = SweepCrashTempsWithListError(func() ([]string, error) { return []string{link}, nil })
+	if listErr != nil || !errors.As(err, &symErr) {
+		t.Fatalf("erase failure = (listErr=%v, err=%v), want (nil, FactoryResetSymlinkError)", listErr, err)
 	}
 }

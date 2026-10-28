@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/configstore"
@@ -60,6 +61,49 @@ func TestEraseConnStateIfEmptyParity17171(t *testing.T) {
 	t.Run("absent is clean", func(t *testing.T) {
 		if err := EraseConnStateIfEmpty(filepath.Join(t.TempDir(), "nope.json")); err != nil {
 			t.Fatalf("absent erase must be nil, got %v", err)
+		}
+	})
+}
+
+// TestEraseConnStateIfEmptyHistoricWording17171 pins the fold-F1/F2
+// message contract at the ipsec entry point: a hardlinked crash temp
+// keeps the verbatim historic ipsec spelling (with the typed error),
+// and a list failure carries exactly ONE "ipsec: " prefix.
+func TestEraseConnStateIfEmptyHistoricWording17171(t *testing.T) {
+	t.Run("hardlinked temp keeps historic wording", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "ipsec-conn-state.json")
+		if err := os.WriteFile(path, []byte(`{"loaded":[],"pending_terminate":[]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		temp := filepath.Join(dir, ".ipsec-conn-state.json.tmp-1")
+		sibling := filepath.Join(dir, "sibling.json")
+		if err := os.WriteFile(temp, []byte("temp"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(temp, sibling); err != nil {
+			t.Fatalf("hardlink plant: %v", err)
+		}
+		err := EraseConnStateIfEmpty(path)
+		var linkErr *configstore.FactoryResetHardlinkError
+		if !errors.As(err, &linkErr) {
+			t.Fatalf("expected FactoryResetHardlinkError, got %v", err)
+		}
+		want := "ipsec: refusing to erase hard-linked crash temp " + temp + ": "
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("hardlink refusal = %q, want verbatim historic %q", err, want)
+		}
+	})
+	t.Run("list failure has a single ipsec prefix", func(t *testing.T) {
+		dir := t.TempDir()
+		blocker := filepath.Join(dir, "blocker")
+		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(blocker, "ipsec-conn-state.json")
+		err := sweepCrashTemps(path)
+		if err == nil || strings.Count(err.Error(), "ipsec: ") != 1 || !strings.Contains(err.Error(), "ipsec: inspect connection-state directory for "+path+": ") {
+			t.Fatalf("list failure = %q, want a single 'ipsec: inspect connection-state directory' prefix", err)
 		}
 	})
 }

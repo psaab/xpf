@@ -205,8 +205,21 @@ func removeStateTempDead(dead []string) error {
 		// unlinked a symlinked dead-writer temp and reported clean
 		// while the target bytes survived. EraseFileForReset refuses
 		// symlinks (and non-regulars) before its hardlink census.
+		// Historic per-temp spellings preserved verbatim (#17171
+		// fold), mapped from the typed/sentinel classes; the
+		// symlink/non-regular refusals are new fail-closed classes
+		// with no historic spelling, so they keep the prefixed
+		// primitive wording.
 		if err := configstore.EraseFileForReset(full); err != nil {
-			errs = append(errs, fmt.Errorf("sweep stale state temp %s: %w", full, err))
+			var linkErr *configstore.FactoryResetHardlinkError
+			switch {
+			case errors.As(err, &linkErr):
+				errs = append(errs, fmt.Errorf("sweep stale state temp: refusing to erase hard-linked %s: %w", full, linkErr))
+			case errors.Is(err, configstore.ErrEraseInspectLinks):
+				errs = append(errs, fmt.Errorf("sweep stale state temp %s: inspect hard links: %w", full, err))
+			default:
+				errs = append(errs, fmt.Errorf("sweep stale state temp %s: %w", full, err))
+			}
 			continue
 		}
 		slog.Info("swept stale orphan helper state temp (dead writer instance)", "temp", full)

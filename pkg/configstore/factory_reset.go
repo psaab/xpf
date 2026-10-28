@@ -378,24 +378,35 @@ func CollectHardlinkedFiles(root, exclude string) ([]HardlinkedPath, error) {
 // refuse hardlink -> remove sequence is written once, not hand-rolled
 // per package. Callers wrap the returned error with their own prefix
 // (fmt.Errorf("ddns: %w", err)) so asserted prefixes survive and
-// errors.As still finds the typed refusals.
+// errors.As still finds the typed refusals. Failures that are neither
+// FactoryResetSymlinkError nor FactoryResetHardlinkError wrap one of
+// the ErrErase* sentinels below so a caller that must restore its OWN
+// historic wording for that failure class can tell the classes apart
+// without matching message text; use errors.Is, never the message.
+var (
+	ErrEraseInspect      = errors.New("erase: inspect failed")
+	ErrEraseNonRegular   = errors.New("erase: not a regular file")
+	ErrEraseInspectLinks = errors.New("erase: inspect hard links failed")
+	ErrEraseRemove       = errors.New("erase: remove failed")
+)
+
 func EraseFileForReset(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("inspect %s: %w", path, err)
+		return fmt.Errorf("%w: inspect %s: %w", ErrEraseInspect, path, err)
 	}
 	if sk, isLink := SymlinkTarget(path); isLink {
 		return &FactoryResetSymlinkError{Skipped: []SymlinkedTarget{sk}}
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("refusing to erase non-regular file %s", path)
+		return fmt.Errorf("%w: refusing to erase non-regular file %s", ErrEraseNonRegular, path)
 	}
 	hardlinks, herr := CollectHardlinkedFiles(path, "")
 	if herr != nil {
-		return fmt.Errorf("inspect hard links for %s: %w", path, herr)
+		return fmt.Errorf("%w: inspect hard links for %s: %w", ErrEraseInspectLinks, path, herr)
 	}
 	if len(hardlinks) != 0 {
 		// Fail BEFORE unlinking: removing first would destroy the census
@@ -404,7 +415,7 @@ func EraseFileForReset(path string) error {
 		return &FactoryResetHardlinkError{Paths: hardlinks}
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove %s: %w", path, err)
+		return fmt.Errorf("%w: remove %s: %w", ErrEraseRemove, path, err)
 	}
 	return nil
 }
@@ -428,6 +439,27 @@ func SweepCrashTemps(list func() ([]string, error)) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// SweepCrashTempsWithListError is SweepCrashTemps with the list failure
+// split out (#17171 fold): the per-package ListCrashTemps functions
+// already embed their own "<pkg>: " prefix, so when SweepCrashTemps
+// returned that failure under the caller's identical "%w" wrap it read
+// "ddns: ddns: inspect …". The caller checks listErr FIRST and returns
+// it unwrapped; only per-file erase failures take the "<pkg>: %w" wrap.
+// listErr is nil whenever listing succeeded (even if erases failed).
+func SweepCrashTempsWithListError(list func() ([]string, error)) (listErr error, err error) {
+	temps, lerr := list()
+	if lerr != nil {
+		return lerr, nil
+	}
+	var errs []error
+	for _, full := range temps {
+		if err := EraseFileForReset(full); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return nil, errors.Join(errs...)
 }
 
 // ArchiveDirSkippedError reports that the config archive was NOT erased because
