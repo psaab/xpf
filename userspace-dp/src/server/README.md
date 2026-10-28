@@ -89,7 +89,7 @@ this surface over a Unix socket using a newline-delimited text protocol.
 - `helpers/` — shared daemon-loop utilities, split into cohesive
   submodules (#6234) behind a narrow `helpers/mod.rs` re-export facade so
   every `server::helpers::<name>` call site is unchanged:
-  - `helpers/status.rs` — `refresh_status` cold-path projection onto
+  - `helpers/status.rs` — `project_status` cold-path projection onto
     `ProcessStatus` plus the capability/forwarding predicates
     (`should_run_afxdp`, `reconcile_status_bindings`,
     `set_bindings_forwarding_armed`, `forwarding_unsupported_error`).
@@ -106,14 +106,14 @@ this surface over a Unix socket using a newline-delimited text protocol.
     lock-free `write_state`.
   - **`write_state` holds the `ServerState` lock only to snapshot, not to
     persist (#5469).** Persisting the state file used to run
-    `refresh_status`, `serde_json::to_vec_pretty` over the whole
+    `project_status`, `serde_json::to_vec_pretty` over the whole
     `ProcessStatus` + `ConfigSnapshot`, AND `StateWriter::persist` (file +
     parent-dir fsync) all under the `ServerState` lock. Because the fallback
     session-delta poll sets `persist_state` on every nonempty request, under
     session churn each delta poll serialized+fsynced the full state while
     holding the lock that also gates snapshot apply, status, and HA/control
     ops — a lock convoy. `write_state` now holds the lock ONLY long enough to
-    `refresh_status` and clone a minimal owned payload (`build_state_payload`,
+    `project_status` and clone a minimal owned payload (`build_state_payload`,
     the sole guard-touching half) plus a cheap Arc bump of the writer handle,
     then DROPS the guard before `encode()` (the `to_vec_pretty`) and
     `persist`. All persists still funnel through `StateWriter`'s single writer

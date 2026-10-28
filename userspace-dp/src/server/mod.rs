@@ -12,7 +12,8 @@ pub(crate) mod reinject_9506;
 mod handlers;
 pub(crate) mod helpers;
 pub(crate) mod lifecycle;
-// refresh_status, binding the retirement CALL SITE rather than the function.
+// #6979: pub(crate) so the coordinator test can build a ServerState and drive
+// project_status, binding the retirement CALL SITE rather than the function.
 pub(crate) mod state;
 
 #[cfg(test)]
