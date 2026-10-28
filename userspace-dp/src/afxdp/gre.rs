@@ -290,7 +290,6 @@ pub(in crate::afxdp) fn gre_checksum_counter_test_lock() -> std::sync::MutexGuar
 /// nonzero value means a peer is offering PPTP/enhanced GRE to a
 /// configured GRE tunnel endpoint; xpf has no PPTP ALG (see #6842) so
 /// that traffic is not terminated here.
-
 /// #10865: `pt_nibble_mismatch_refusals` separately counts configured GRE
 /// endpoint refusals when the GRE Protocol Type disagrees with the inner IP
 /// version nibble for the endpoint's matching outer tuple, key, and domain.
@@ -1317,7 +1316,6 @@ fn match_tunnel_endpoint<'a>(
 /// counter charge redirected to a scratch store (see
 /// [`outer_head_admits_gre_endpoint`]); `counted=true` is the
 /// production decap path, byte-identical to the pre-#16028 matcher.
-#[allow(clippy::too_many_arguments)]
 fn match_tunnel_endpoint_counted<'a>(
     forwarding: &'a ForwardingState,
     outer_src: IpAddr,

@@ -234,6 +234,7 @@ impl MmapArea {
     /// AF_XDP single-writer (owner-worker) discipline plus per-frame
     /// offset assignment from the free-frame ring is what holds
     /// these invariants in production.
+    #[expect(clippy::mut_from_ref, reason = "SAFETY: see # Safety above; AF_XDP single-writer")]
     pub(in crate::afxdp) unsafe fn slice_mut_unchecked(
         &self,
         offset: usize,

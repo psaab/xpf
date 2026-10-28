@@ -1353,7 +1353,7 @@ impl SourceNatRule {
     ///
     /// #3491: application source-port constraints are AND-ed with protocol and
     /// destination-port constraints within each application term.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn l4_matches(
         &self,
         tuple_unknown: bool,
@@ -1519,7 +1519,7 @@ impl SourceNatRule {
     /// onto a later one — strictly worse than the pre-#6211 first-pool-match.
     /// Ignoring the axis only declines to narrow on it: every other axis still
     /// narrows, and the pre-#6211 selection narrowed on none of them.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn matches_ignoring_scope(
         &self,
         from_zone: &str,
@@ -1550,7 +1550,7 @@ impl SourceNatRule {
 /// allocating an interface identity or pool mapping. Preserve rule order and
 /// `off` semantics from the production matcher; exact ports are available, so
 /// unlike the flowless probe this does not widen L4 selectors to "possible".
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn source_nat_tuple_translation_possible(
     rules: &[SourceNatRule],
     scope: &NatScopeCtx<'_>,
@@ -1632,7 +1632,7 @@ pub(crate) enum ChallengeSourceNat {
 
 /// #16537: predicate-only source-NAT shape mirroring
 /// [`candidate_source_nat_translations`] without enumerating pool addresses.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn challenge_source_nat_shape(
     rules: &[SourceNatRule],
     scope: &NatScopeCtx<'_>,
@@ -1705,7 +1705,7 @@ pub(crate) fn challenge_source_nat_shape(
 /// This is a read-only revalidation probe: it does not allocate a new pool
 /// address/port or mutate interface-NAT state. Keeping a stale translation is
 /// valid only when the live rule still permits that exact address/port.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn source_nat_translation_matches(
     rules: &[SourceNatRule],
     scope: &NatScopeCtx<'_>,

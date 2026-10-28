@@ -150,7 +150,7 @@ mod tests;
 // When `bindings` is empty we synthesize a binding identity (labels
 // only — no XSK) and fall back to the loop-cached map fds (which are
 // `-1`, making the live session-map delete a harmless EBADF no-op).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn flush_session_deltas_loop(
     sessions: &mut crate::session::SessionTable,
     bindings: &[BindingWorker],

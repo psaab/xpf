@@ -8785,7 +8785,7 @@ fn crossfield_filter(
 
 // Full-shape variant for #14445: source/destination except lists, forbidden
 // tcp-flags half, and icmp codes.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn crossfield_filter_full(
     family: &str,
     protocols: Vec<String>,

@@ -1626,7 +1626,6 @@ fn stamped_fabric_frag_frame(zone_id: u32, frag_word: u16, id: u16) -> Vec<u8> {
 /// thing that can distinguish their authorities. If a future edit varies any
 /// of these, the test silently stops being a zone test — the
 /// `differing == 1` assertion in the guard below exists to catch exactly that.
-
 fn stamped_fabric_frag_frame_src(zone_id: u32, frag_word: u16, id: u16, src: Ipv4Addr) -> Vec<u8> {
     let mut frame = stamped_fabric_frag_frame(zone_id, frag_word, id);
     frame[26..30].copy_from_slice(&src.octets());

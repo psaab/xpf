@@ -306,7 +306,6 @@ pub(in crate::afxdp) fn post_transform_needs_inner_dst(
 /// `egress_mtu` is the effective plain-forward MTU (minimum known interface
 /// and selected-route MTU); used only for the NAT64-only arm (tunnel arms
 /// resolve physical transport MTUs separately).
-
 pub(in crate::afxdp) fn post_transform_inner_mtu(
     decision: &SessionDecision,
     forwarding: &ForwardingState,

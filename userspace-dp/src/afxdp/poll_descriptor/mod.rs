@@ -243,7 +243,7 @@ pub(in crate::afxdp) fn forget_pptp_control_channel(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn emit_session_hit_policy_deny_event(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
@@ -13410,7 +13410,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     received.release();
     drop(received);
 }
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn poll_binding_process_descriptor(
     binding: &mut BindingWorker,
     binding_index: usize,

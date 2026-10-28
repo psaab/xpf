@@ -1296,7 +1296,7 @@ impl SlowPathReinjector {
         self.enqueue_request(tx, status, bytes, queue, None, 0, 0, true)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn enqueue_request(
         &self,
         tx: &SyncSender<PacketRequest>,

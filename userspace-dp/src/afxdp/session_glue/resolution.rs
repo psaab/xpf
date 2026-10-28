@@ -794,7 +794,7 @@ pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_scoped_15958b(
 /// five production callers (which compute `dest_rg` themselves)
 /// can re-home routed destinations. `destination_owner_unknown`
 /// is `dest_rg == 0`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_16524(
     forwarding: &ForwardingState,
     stored: ForwardingResolution,
@@ -817,7 +817,7 @@ pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_16524(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn rehome_or_retain_fabric_redirect_inner(
     forwarding: &ForwardingState,
     stored: ForwardingResolution,

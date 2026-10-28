@@ -288,7 +288,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow_in_ta
 /// host's address that merely shares an IP with a scoped NAT rule, and the
 /// caller must fall through to the FIB instead of LocalDelivering it.
 /// `icmp` carries the packet's ICMP type/code when known.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn nat_destination_claims_local(
     state: &ForwardingState,
     dst: IpAddr,
@@ -349,7 +349,7 @@ pub(in crate::afxdp) fn nat_destination_claims_local(
 /// (the caller in `poll_descriptor` stamps installing-table provenance from
 /// it — pre-fix the helper discarded it and the miss arm hard-coded
 /// `resolved_in_table = false`).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn lookup_forwarding_resolution_for_nat_flow(
     state: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
@@ -885,7 +885,7 @@ pub(in crate::afxdp) fn reset_source_ownership_scans_for_test() {
 /// #14319). Returns `Some` only when a deferred target actually
 /// resolves (non-NoRoute); otherwise the caller keeps its source-miss
 /// (NoRoute) outcome — never a fabricated result.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn try_deferred_leaks_v4(
     state: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
@@ -931,7 +931,7 @@ fn try_deferred_leaks_v4(
     None
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn try_deferred_leaks_v6(
     state: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
@@ -2220,7 +2220,6 @@ enum ResolvedRouteV6<'a> {
 /// Interfaces absent from that map are the default instance (the
 /// map's documented convention). Runs only on the terminal/miss
 /// path, never per forwarded packet.
-
 /// #15917: does `instance` ("" = default) own the v4 `table`?
 /// Spells `connected_route_tables(instance).0 == table` without
 /// allocating the canonical pair: the default instance owns only
@@ -2991,7 +2990,6 @@ pub(in crate::afxdp) fn select_route_next_hop_weighted<'a, T: Copy>(
 /// cannot change the scores of survivors. If none are live, choose the best
 /// drivable candidate, falling back to the best overall only when none is
 /// drivable. The streaming scan uses constant stack space and never allocates.
-
 fn select_route_next_hop_with_status<'a, T: Copy>(
     candidates: &'a [T],
     flow_hash: u64,

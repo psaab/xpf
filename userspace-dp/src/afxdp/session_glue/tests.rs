@@ -13551,7 +13551,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             .count();
         queue.clear();
     }
-    drop(flush);
+    // `flush`'s mutable captures end here (closures have no Drop); the counters below are read borrow-free.
     let dnat_after = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
     assert_eq!(
         dnat_after - dnat_before,

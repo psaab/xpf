@@ -2636,7 +2636,7 @@ fn wg_tun_origin_builder_to_shared_to_delivery_10038() {
 /// (origin/ingress/policy-counter are the discriminator inputs under test),
 /// the reverse always the host-bound solicited shape. `install_forward=false`
 /// installs the lone reverse (fail-closed pin).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn install_solicited_pair_10038(
     sessions: &mut SessionTable,
     fwd_key: &SessionKey,

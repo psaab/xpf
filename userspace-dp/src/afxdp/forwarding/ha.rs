@@ -432,7 +432,7 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
 /// the session path retains the redirect on fabric-link ingress
 /// (resolve.rs), so revalidation must not supersede it there either.
 /// The destination-only entry point remains for flow-less fixtures only.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_flow(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -460,7 +460,7 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_flow(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -486,7 +486,7 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn cached_flow_decision_invalid_reason_inner(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,

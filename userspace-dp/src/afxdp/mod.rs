@@ -2025,7 +2025,6 @@ struct PendingForwardHints {
 // from the live UMEM area before .to_vec() copy (fixes #199).  Retained for
 // its unit test and potential future use.
 #[allow(dead_code)]
-
 fn binding_by_index_mut<'a>(
     left: &'a mut [BindingWorker],
     current_index: usize,

@@ -786,7 +786,7 @@ impl StaticNatTable {
     /// the source-address constraint, and the from-zone/interface/routing-
     /// instance scope — exactly the gates `match_dnat_with_counter_scoped`
     /// applies. A non-L4 protocol never claims a port-mapped rule.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn nat_local_match_possible(
         &self,
         protocol: u8,

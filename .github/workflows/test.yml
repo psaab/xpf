@@ -196,3 +196,15 @@ jobs:
         run: >-
           cargo check --manifest-path userspace-dp/Cargo.toml
           --workspace --all-targets
+      # #17200: clippy gate. Clippy could not complete on this crate
+      # until #17200 (deny-by-default `clippy::mut_from_ref` and a
+      # `never_loop` test), so its 246 `#[expect(clippy::…)]`
+      # attributes were unfalsifiable. `make clippy-rust` runs the full
+      # `--all-targets` clippy (must exit 0; a stale expect reds it via
+      # `unfulfilled_lint_expectations`) plus a second pass denying
+      # `clippy::correctness` and `clippy::suspicious`. Like the compile
+      # check above.
+      - name: Clippy Rust workspace and all targets (#17200)
+        env:
+          CARGO: cargo
+        run: make clippy-rust

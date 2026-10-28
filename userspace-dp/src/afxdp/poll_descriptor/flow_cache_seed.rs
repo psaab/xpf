@@ -30,7 +30,7 @@ use super::*;
 use crate::filter::TermMatchExtra;
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn stage_flow_cache_seed(
     flow_cache: &mut FlowCache,
     flow: &Option<SessionFlow>,
@@ -260,7 +260,7 @@ pub(super) fn stage_flow_cache_seed(
 /// dependency or neighbor descriptor; lookup generation, scheduler, RG, and
 /// short-expiry fences authorize replay.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn stage_flow_cache_deny_seed(
     flow_cache: &mut FlowCache,
     flow: Option<&SessionFlow>,

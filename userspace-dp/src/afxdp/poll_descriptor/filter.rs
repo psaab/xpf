@@ -110,7 +110,7 @@ pub(super) fn emit_pending_filter_log(
 /// loop body itself is un-callable) — see `filter_terminal_tests`.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn filter_terminal(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
@@ -356,7 +356,6 @@ pub(super) fn policer_drop_action(
 /// here, so this preserves the underlay interface's input-filter contract.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
 /// #14120: does any FIB row deliver `dst` locally? The tunnel gate runs
 /// before route lookup, so this mirrors the miss path's local-delivery
 /// arms with the state available here (interface primaries are covered by
@@ -2160,7 +2159,7 @@ fn sessionless_static_input_filter_verdict(
 /// packet it drops.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn revalidate_static_input_filter_on_session_hit(
     forwarding: &ForwardingState,
     sessions: &mut SessionTable,
@@ -2264,7 +2263,7 @@ pub(super) fn emit_input_filter_log_match(
 /// one, mirroring the deferred counter/policer settlement.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn emit_generated_reply_filter_log(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
@@ -2360,7 +2359,7 @@ pub(super) fn emit_cached_output_filter_log(
 
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn emit_cached_output_filter_log_tail(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
@@ -2562,7 +2561,7 @@ pub(super) fn stage11_input_filter_terminal(
 /// the lo0 filter-log ingress-zone hint, preserved per-path unchanged.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn host_inbound_gated_lo0_action(
     forwarding: &ForwardingState,
     logical_ingress_ifindex: i32,
@@ -2630,7 +2629,6 @@ pub(super) fn host_inbound_gated_lo0_action(
 /// the packet filter.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lo0_action_for_solicited_reply(
     forwarding: &ForwardingState,
     logical_ingress_ifindex: i32,

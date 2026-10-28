@@ -243,12 +243,16 @@ fn shared_umem_mode_unknown_falls_back_off_17149() {
         );
     }
     // Snapshot-level: a typo'd mode yields an Off policy, not CrossNic.
+    // #17200: decode through `serde_json::from_value` as the sibling
+    // cells do — #17134 typed `userspace` as `UserspaceSnapshot`, so a
+    // bare `json!` Value no longer type-checks here.
     let snapshot = ConfigSnapshot {
-        userspace: json!({
+        userspace: serde_json::from_value(json!({
             "shared_umem": {
                 "mode": "cross-nick"
             }
-        }),
+        }))
+        .expect("typo'd shared_umem mode decodes"),
         ..ConfigSnapshot::default()
     };
     assert_eq!(

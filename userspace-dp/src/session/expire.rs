@@ -945,7 +945,7 @@ impl SessionTable {
     /// Pure (reads only the passed snapshot + the HA context closures),
     /// so it can be unit-tested in isolation and called from the expire
     /// pass while the entry borrow is already dropped.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn standby_gate_decision(
         &self,
         ha: &ExpireHaContext<'_>,
