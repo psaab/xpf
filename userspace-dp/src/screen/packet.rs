@@ -17,6 +17,76 @@ pub(super) use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP}
 // submodules keep importing them via `packet::TCP_*`.
 pub(super) use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN, TCP_URG};
 
+/// #17109: family-agnostic decoded view of a fragment, computed ONCE in
+/// `extract.rs` from the family-overloaded raw fragment word. `offset_bytes`
+/// is the fragment's byte offset in the reassembled datagram, `more` is the
+/// More-Fragments / M bit, `data_len` is this fragment's data contribution
+/// (IPv4: `ip_total_len - ip_ihl*4`, saturating at 0; IPv6:
+/// `ip_payload_len - frag_data_off`, saturating at 0), and `pod_extent` is
+/// the quantity the ping-of-death screen compares against 65535 (IPv4:
+/// `ip_total_len`; IPv6: `data_len`). `None` on `ScreenPacketInfo::frag`
+/// means "not a fragment" — including the IPv6 ATOMIC header (offset 0,
+/// M=0), which RFC 8200 §4.5 defines as a no-op. Screens consume this view
+/// only; they never re-decode the raw word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FragView {
+    pub offset_bytes: u32,
+    pub more: bool,
+    pub data_len: u32,
+    pub pod_extent: u32,
+}
+
+/// #17109: the single source for the family-overloaded fragment-word
+/// layouts. IPv4 (RFC 791 §3.1): flags+offset word, MF is bit 0x2000 and
+/// the offset field (0x1FFF) counts 8-byte units. IPv6 (RFC 8200 §4.5):
+/// Fragment-header word, the offset field (0xFFF8) already IS the byte
+/// offset (upper 13 bits in 8-byte units, low 3 bits masked off) and M is
+/// the low bit 0x1. Every decode of either layout goes through
+/// `frag_view_v4` / `frag_view_v6`; no other site names these masks.
+pub(crate) mod ip_frag {
+    pub(crate) const IPV4_MF: u16 = 0x2000;
+    pub(crate) const IPV4_OFFSET_MASK: u16 = 0x1FFF;
+    pub(crate) const IPV6_FRAG_OFFSET_MASK: u16 = 0xFFF8;
+    pub(crate) const IPV6_FRAG_M: u16 = 0x1;
+
+    use super::FragView;
+
+    /// Decode an IPv4 flags+offset word. Returns `None` when the packet is
+    /// not a fragment (MF clear and offset 0). `data_len` saturates at 0
+    /// so an under-length `ip_total_len <= ihl*4` reads as the malformed
+    /// zero-payload case (#3027) instead of underflowing.
+    #[inline]
+    pub(crate) fn frag_view_v4(raw: u16, ip_total_len: u16, ip_ihl: u8) -> Option<FragView> {
+        let more = (raw & IPV4_MF) != 0;
+        let offset_units = raw & IPV4_OFFSET_MASK;
+        if !more && offset_units == 0 {
+            return None;
+        }
+        let data_len = (ip_total_len as u32).saturating_sub((ip_ihl as u32) * 4);
+        Some(FragView {
+            offset_bytes: (offset_units as u32) << 3,
+            more,
+            data_len,
+            pod_extent: ip_total_len as u32,
+        })
+    }
+
+    /// Decode an IPv6 Fragment-header word. The caller only invokes this
+    /// for a governing non-ATOMIC sighting (offset/M not both zero in
+    /// effect); `data_len` is `ip_payload_len - frag_data_off`, saturating
+    /// at 0 for a hostile under-length (#3119's IPv6 #3027 analogue).
+    #[inline]
+    pub(crate) fn frag_view_v6(raw: u16, ip_payload_len: u16, frag_data_off: u16) -> FragView {
+        let data_len = ip_payload_len.saturating_sub(frag_data_off) as u32;
+        FragView {
+            offset_bytes: (raw & IPV6_FRAG_OFFSET_MASK) as u32,
+            more: (raw & IPV6_FRAG_M) != 0,
+            data_len,
+            pod_extent: data_len,
+        }
+    }
+}
+
 /// Parsed packet fields needed for screen checks.
 /// Extracted from raw packet bytes for speed — no allocations.
 #[derive(Debug, Clone)]
@@ -44,21 +114,20 @@ pub(crate) struct ScreenPacketInfo {
     /// `is_first_fragment` flag in pkt_meta. `is_fragment=1 &&
     /// is_first_fragment=0` indicates a subsequent fragment.
     pub is_first_fragment: bool,
-    pub ip_ihl: u8,        // IPv4 IHL field (header length in 32-bit words)
-    pub ip_frag_off: u16,  // raw frag_off field (network byte order already parsed)
+    pub ip_ihl: u8, // IPv4 IHL field (header length in 32-bit words)
+    /// #17109: the decoded fragment view, filled by `extract.rs` via
+    /// `ip_frag::frag_view_v4` / `frag_view_v6`. `None` when this packet
+    /// is not a fragment. This REPLACES the former family-overloaded raw
+    /// fields (`ip_frag_off`, `ip_total_len`, `ip_payload_len`,
+    /// `frag_data_off`): consumers must not re-derive offset/MF/data
+    /// length per family. `ip_total_len` / `ip_payload_len` survive only
+    /// as the #16007 declared-datagram bounds in `extract.rs`.
+    pub frag: Option<FragView>,
     pub ip_total_len: u16, // IPv4 total length
     /// #2293: IPv6 payload-length field (bytes 4-5 of the base header),
     /// i.e. the length of everything after the 40-byte fixed header
     /// (extension headers + L4 + data). 0 for IPv4 / when not parsed.
-    /// Used by the IPv6 ping-of-death check together with `frag_data_off`.
     pub ip_payload_len: u16,
-    /// #2293: for an IPv6 fragment, the number of payload-region bytes
-    /// (after the 40-byte base header) that precede THIS fragment's data
-    /// — i.e. the extension headers up to and including the 8-byte
-    /// fragment header. `ip_payload_len - frag_data_off` is therefore the
-    /// L4/data bytes this fragment contributes to the reassembled
-    /// datagram. 0 when there is no fragment header.
-    pub frag_data_off: u16,
     /// #2973: an actual IPv4 source-route option (LSRR=131 or SSRR=137)
     /// was found in the IPv4 options region. The `source-route` screen
     /// drops ONLY when this is set, not on every IHL>5 packet — benign
@@ -219,10 +288,10 @@ pub(crate) enum ScreenParseError {
     /// bytes, so the screens cannot meaningfully pick between the two
     /// headers' offset/M bits (#14129's sticky-first governing header
     /// plus a later `is_first_fragment` downgrade left
-    /// `is_first_fragment == false` while `ip_frag_off` still reported
-    /// the first header's offset 0, splitting the TCP-flag screens
-    /// (`!is_first_fragment`, so they skipped) from the sizing screens
-    /// (`(ip_frag_off & 0xFFF8) > 0`, so they skipped too) and letting a
+    /// `is_first_fragment == false` while the decoded fragment view
+    /// still reported the first header's offset 0, splitting the TCP-flag
+    /// screens (`!is_first_fragment`, so they skipped) from the sizing
+    /// screens (offset-keyed, so they skipped too) and letting a
     /// `[Frag(off=0,M=1), Frag(off>0)]` packet evade BOTH families).
     /// The malformed chain is rejected outright -- the same fail-closed
     /// posture as a truncated chain -- rather than resolved by

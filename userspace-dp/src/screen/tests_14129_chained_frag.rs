@@ -6,6 +6,7 @@
 // single-header control for each case.
 
 use super::*;
+use crate::screen::FragView;
 use std::net::{IpAddr, Ipv6Addr};
 
 const L3: usize = 14;
@@ -113,12 +114,15 @@ fn chained_real_first_then_atomic_syn_frag_drops_14129() {
     let info = extract(&chained, PROTO_TCP, 0x02);
     assert!(
         info.is_fragment && info.is_first_fragment,
-        "#14129: trailing ATOMIC must not clear the real first fragment, got is_fragment={} is_first={} ip_frag_off={:#x}",
+        "#14129: trailing ATOMIC must not clear the real first fragment, got is_fragment={} is_first={} frag={:?}",
         info.is_fragment,
         info.is_first_fragment,
-        info.ip_frag_off
+        info.frag
     );
-    assert_eq!(info.ip_frag_off, WORD_FIRST);
+    assert_eq!(
+        info.frag,
+        Some(FragView { offset_bytes: 0, more: true, data_len: (info.ip_payload_len - 8) as u32, pod_extent: (info.ip_payload_len - 8) as u32 })
+    );
     let mut state = make_state("trust", default_profile());
     assert_eq!(
         state.check_packet("trust", &info, 1),
@@ -228,7 +232,10 @@ fn chained_first_then_max_nonfirst_14325_wording() {
         control_info.is_fragment && !control_info.is_first_fragment,
         "#14325 control: single max-offset fragment must parse as non-first"
     );
-    assert_eq!(control_info.ip_frag_off, WORD_NONFIRST_MAX);
+    assert_eq!(
+        control_info.frag.map(|f| f.offset_bytes),
+        Some(65528)
+    );
     let mut state = make_state("trust", sizing_profile());
     assert_eq!(
         state.check_packet("trust", &control_info, 1),
@@ -264,9 +271,16 @@ fn chained_first_then_max_nonfirst_14325_wording() {
     // instead. The extractor rejection remains load-bearing for the
     // ping-of-death claim and for shapes teardrop does not cover.
     let mut pre_fix_shape = control_info.clone();
-    pre_fix_shape.ip_frag_off = WORD_FIRST;
+    // #17109: the pre-fix shape is now expressed as the decoded view the
+    // old extractor's governing fields implied (offset 0, M=1, data =
+    // payload_len - 8 with a single 8-byte fragment header).
+    pre_fix_shape.frag = Some(FragView {
+        offset_bytes: 0,
+        more: true,
+        data_len: (pre_fix_shape.ip_payload_len - 8) as u32,
+        pod_extent: (pre_fix_shape.ip_payload_len - 8) as u32,
+    });
     pre_fix_shape.is_first_fragment = false;
-    pre_fix_shape.frag_data_off = 8;
     assert_eq!(
         stateless::check_ping_of_death(&sizing_profile(), &pre_fix_shape),
         None,
@@ -332,8 +346,9 @@ fn chained_atomic_then_nonfirst_still_decides_14325() {
         info.is_fragment && !info.is_first_fragment,
         "#14325: [ATOMIC][real-non-first] must parse as the real non-first fragment"
     );
-    assert_eq!(info.ip_frag_off, WORD_NONFIRST_MAX);
-    assert_eq!(info.frag_data_off, 16);
+    assert_eq!(info.frag.map(|f| f.offset_bytes), Some(65528));
+    // frag_data_off 16 (two fragment headers) → data = payload_len - 16.
+    assert_eq!(info.frag.map(|f| f.data_len), Some((info.ip_payload_len - 16) as u32));
     let mut state = make_state("trust", sizing_profile());
     assert_eq!(
         state.check_packet("trust", &info, 1),

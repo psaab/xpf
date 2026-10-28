@@ -1979,7 +1979,7 @@ fn forward_hit_existing_flow_forwards_translated_9950() {
 /// the receiver reassembles attacker flags the screens never saw.
 #[test]
 fn f035_enforcement_order_armed_screen_9950() {
-    use crate::screen::{ScreenPacketInfo, ScreenProfile, ScreenState, ScreenVerdict};
+    use crate::screen::{FragView, ScreenPacketInfo, ScreenProfile, ScreenState, ScreenVerdict};
     let mut zones = rustc_hash::FxHashMap::default();
     zones.insert(
         "lan".to_string(),
@@ -2006,10 +2006,9 @@ fn f035_enforcement_order_armed_screen_9950() {
         is_fragment: true,
         is_first_fragment: true,
         ip_ihl: 5,
-        ip_frag_off: 0x2000,
+        frag: Some(FragView { offset_bytes: 0, more: true, data_len: 20, pod_extent: 40 }),
         ip_total_len: 40,
         ip_payload_len: 0,
-        frag_data_off: 0,
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     };
@@ -2024,7 +2023,7 @@ fn f035_enforcement_order_armed_screen_9950() {
         tcp_flags: 0x03, // SYN|FIN smuggled in the overlapping bytes.
         tcp_flags_unknown: false,
         is_first_fragment: false,
-        ip_frag_off: 0x0001,
+        frag: Some(FragView { offset_bytes: 8, more: false, data_len: 20, pod_extent: 40 }),
         ..base.clone()
     };
     assert_eq!(
