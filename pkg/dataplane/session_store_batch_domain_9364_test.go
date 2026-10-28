@@ -42,8 +42,6 @@ func (d *domainRecorderDP) BatchDeleteSessions(keys []SessionKey) (int, error) {
 	return len(keys), nil
 }
 
-func (d *domainRecorderDP) DeleteDNATEntry(DNATKey) error { return nil }
-
 func key9364(port uint16) SessionKey {
 	return SessionKey{
 		SrcIP: [4]byte{10, 0, 0, 5}, DstIP: [4]byte{10, 0, 0, 9},
@@ -164,7 +162,6 @@ func (d *noCapabilityDP9364) BatchDeleteSessions(keys []SessionKey) (int, error)
 	d.bare = append(d.bare, keys)
 	return len(keys), nil
 }
-func (d *noCapabilityDP9364) DeleteDNATEntry(DNATKey) error { return nil }
 
 func TestDataplaneWithoutTheCapabilityStillDeletesBare9364(t *testing.T) {
 	dp := &noCapabilityDP9364{}

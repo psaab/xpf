@@ -165,6 +165,7 @@ mod ipv4_key;
 mod ipv4_len_gate;
 mod ipv6_ext_walk;
 mod ipv6_len_gate;
+mod kernel_pass;
 mod land;
 mod tunnel_frag;
 mod wg_classify;
@@ -202,7 +203,6 @@ const MAX_INTERFACES: u32 = match u32::from_str_radix(env!("MAX_INTERFACES"), 10
     Err(_) => panic!("MAX_INTERFACES env var must be a u32 decimal literal"),
 };
 const BINDING_ARRAY_MAX_ENTRIES: u32 = MAX_INTERFACES * BINDING_QUEUES_PER_IFACE;
-const USERSPACE_SHIM_MAX_DNAT_ENTRIES: u32 = 10_000_000;
 const USERSPACE_TRACE_STAGE_RECEIVED: u32 = 1;
 const USERSPACE_TRACE_STAGE_BINDING_MISSING: u32 = 2;
 const USERSPACE_TRACE_STAGE_BINDING_NOT_READY: u32 = 3;
@@ -394,51 +394,6 @@ const _: [(); 28] = [(); mem::size_of::<UserspaceWgAdmissionKey>()];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct DnatKeyV4 {
-    protocol: u8,
-    pad: [u8; 3],
-    dst_ip: u32,
-    dst_port: u16,
-    pad2: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DnatValueV4 {
-    new_dst_ip: u32,
-    new_dst_port: u16,
-    flags: u8,
-    pad: u8,
-}
-
-// Mirrors `struct dnat_key_v6` / `struct dnat_value_v6` in
-// bpf/headers/xpf_maps.h (24-byte key, 20-byte value). The v6 reverse-NAT
-// table is the IPv6 analog of DNAT_TABLE: the userspace-dp helper publishes
-// a (proto, snat_ip, snat_port) -> (orig_src, orig_src_port) entry for each
-// SNAT66 flow so an inbound ICMPv6 error carried over a native-GRE tunnel
-// (whose inner destination is the SNAT pool address) is steered to the
-// helper for embedded-ICMP reverse-NAT (#2406).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DnatKeyV6 {
-    protocol: u8,
-    pad: [u8; 3],
-    dst_ip: [u8; 16],
-    dst_port: u16,
-    from_zone: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DnatValueV6 {
-    new_dst_ip: [u8; 16],
-    new_dst_port: u16,
-    flags: u8,
-    pad: u8,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
 struct UserspaceSessionKey {
     addr_family: u8,
     protocol: u8,
@@ -614,22 +569,6 @@ static USERSPACE_INTERFACE_NAT_V6: HashMap<UserspaceInterfaceNatV6Key, u8> =
 #[map(name = "userspace_proxy_ndp_v6_domain")]
 static USERSPACE_PROXY_NDP_V6: HashMap<UserspaceProxyNdpV6Key, u8> =
     HashMap::with_max_entries(8192, 0);
-
-// NOTE: This map MUST be pinned/reused from the main eBPF pipeline's
-// dnat_table so dynamic SNAT-return entries are visible here. The Go
-// loader (pkg/dataplane/loader.go) must ensure the userspace XDP
-// collection shares the same pinned dnat_table map fd.
-#[map(name = "dnat_table")]
-static DNAT_TABLE: HashMap<DnatKeyV4, DnatValueV4> =
-    HashMap::with_max_entries(USERSPACE_SHIM_MAX_DNAT_ENTRIES, BPF_F_NO_PREALLOC);
-
-// IPv6 reverse-NAT steering table. Shares the same pinned-map contract as
-// DNAT_TABLE above: the Go loader / userspace-dp coordinator reuse the
-// pinned dnat_table_v6 fd so SNAT66-return entries published by the helper
-// are visible to this classify path (#2406).
-#[map(name = "dnat_table_v6")]
-static DNAT_TABLE_V6: HashMap<DnatKeyV6, DnatValueV6> =
-    HashMap::with_max_entries(USERSPACE_SHIM_MAX_DNAT_ENTRIES, BPF_F_NO_PREALLOC);
 
 // #13931: a worker may contribute four distinct rows per session (the live
 // tuple and up to three NAT wire/canonical tuples). The binding planner caps
@@ -887,8 +826,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // disposition change. The tail has no port/type, so this predicate
     // keeps it off every kernel-pass arm and the worker buffers it only
     // against an admitted head.
+    // #17223: the tail-only conjunct is the shared `kernel_pass::wg_tail_fragment`
+    // predicate, also called by the degraded composition, so the healthy
+    // narrowing and its degraded twin cannot diverge again (#16438).
     let wg_fragment = parsed.is_fragment
-        && parsed.protocol == PROTO_FRAGMENT_NO_L4
+        && kernel_pass::wg_tail_fragment(parsed.protocol, PROTO_FRAGMENT_NO_L4)
         && wg_fragment_stays_on_helper(
             parsed.protocol,
             parsed.wire_protocol,
@@ -1017,10 +959,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     } else {
         0
     };
-    if wg_steer_candidate
-        && wg_steer_session_action != USERSPACE_SESSION_ACTION_REDIRECT
-        && wg_steer_session_action != USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
-    {
+    if kernel_pass::wg_steer_passes_to_kernel(
+        wg_steer_candidate,
+        wg_steer_session_action == USERSPACE_SESSION_ACTION_REDIRECT,
+        wg_steer_session_action == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
+    ) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_WG_STEER);
         return Ok(cpumap_or_pass(ctrl));
     }
@@ -1608,16 +1551,6 @@ fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize
     session_action_for_key(&key)
 }
 
-// #16241 residual (via #16695): the `DNAT_TABLE`/`DNAT_TABLE_V6` shim
-// declarations above are deliberately RETAINED even though the GRE-inner
-// classifiers no longer look into them (the `dnat_lookup_*` helpers are
-// deleted with their only callers). The maps are a load-time ABI: the Go
-// loader replaces them with the pinned dataplane-owned tables
-// (`MapReplacements["dnat_table*"]`) and validates their declared shape,
-// so deleting the declarations would break shim loading, not just dead
-// code. What was disposition-dead was the post-session *lookup* in the
-// classifiers, not the map contract.
-
 fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize) -> u8 {
     let Some(ip6) = (unsafe { read_bytes(data, data_end, l3_offset, 40) }) else {
         return 0;
@@ -1908,6 +1841,7 @@ fn pass_local_control(ctrl: &UserspaceCtrl, reason: u32) -> Result<u32, i64> {
     Ok(cpumap_or_pass(ctrl))
 }
 
+
 #[inline(always)]
 fn is_degraded_local_or_control(
     ctrl: &UserspaceCtrl,
@@ -1917,120 +1851,162 @@ fn is_degraded_local_or_control(
     ingress_domain: u32,
     ingress_ifindex: u32,
 ) -> bool {
-    // #14645/#15102: a tunnel fragment has no kernel terminator for its
-    // inner; in degraded mode it drops with its head rather than passing
-    // to the kernel.
-    if native_gre_fragment_stays_on_helper(
+    // #17223: this function resolves the degraded facts and executes
+    // the shared composition (`kernel_pass::degraded_local_or_control`)
+    // through its staged decomposition; it no longer restates the arm
+    // order by hand. The head facts are decided by
+    // `degraded_local_or_control_head`; on fall-through the remaining
+    // prefix facts are decided by `degraded_local_or_control_prefix`;
+    // on fall-through the tail facts are decided by
+    // `degraded_local_or_control_mid`, then the native-GRE gate.
+    // Together the stages are exactly the host-executed
+    // `degraded_local_or_control`, so
+    // reordering any veto or arm inside the composition changes the
+    // executed verdict. Resolution stays lazy in the original order,
+    // with one exception: `gre_inner_pass` is computed (guarded by
+    // `native_gre`) before the mid call, so the read-only GRE inner
+    // session lookup runs even when mid decides — one wasted
+    // session-map lookup on the degraded native-GRE path; every
+    // fact is a pure function of inputs the old chain already loaded
+    // (packet fields, ctrl flags, read-only map verdicts); none
+    // mutates state or consumes the packet, so no verdict changes,
+    // and each remaining stage's map lookups run only after the
+    // previous stage falls through. The GRE inner classification
+    // reuses the already-resolved `destination_is_local` as the former
+    // native-GRE arm did. The staged form is the verifier shape that
+    // passes: the fully resolved single call rejects at the 1M cap
+    // (see docs/log/17223.md).
+    //
+    // #14645/#15102: a native-GRE fragment has no kernel terminator for
+    // its inner; in degraded mode it drops with its head.
+    let native_gre_fragment_on_helper = native_gre_fragment_stays_on_helper(
         parsed.protocol,
         parsed.wire_protocol,
         parsed.is_fragment,
         (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0,
-    ) {
-        return false;
-    }
+    );
     // #16438: only a WG TAIL is excluded here (the executed
-    // `wg_degraded_fragment_excluded` helper). A head keeps UDP
+    // `wg_degraded_fragment_excluded` helper, gated on the shared
+    // `kernel_pass::wg_tail_fragment` predicate). A head keeps UDP
     // (17/17) and carries a port, so it is not provably WG: an
     // IKE/NAT-T/DNS head to a local (or interface-NAT) address must
     // reach the local/control arms below, exactly as the healthy
-    // path's PROTO_FRAGMENT_NO_L4-gated wg_fragment binding allows.
+    // path's `wg_tail_fragment`-gated wg_fragment binding allows.
     // Tails (255/17) have no port and follow their head: a WG tail
-    // drops in degraded mode, and a non-WG tail to a local address
-    // was never kernel-reassemblable as a lone fragment either —
-    // the head decides the datagram.
-    if wg_degraded_fragment_excluded(
-        parsed.protocol,
-        parsed.wire_protocol,
-        parsed.is_fragment,
-        (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0,
+    // drops in degraded mode, and a non-WG tail to a local address was
+    // never kernel-reassemblable as a lone fragment either — the head
+    // decides the datagram.
+    let wg_tail_excluded = kernel_pass::wg_tail_fragment(parsed.protocol, PROTO_FRAGMENT_NO_L4)
+        && wg_degraded_fragment_excluded(
+            parsed.protocol,
+            parsed.wire_protocol,
+            parsed.is_fragment,
+            (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0,
+        );
+    // #16038: never kernel-PASS an unresolved ext chain on the degraded
+    // path. `parse_ipv6` drops these before a ParsedPacket exists, so
+    // this is defence in depth; the prefix applies this veto before
+    // `early_pass`, whose multicast arm would otherwise pass the packet.
+    let unresolved_ext_chain = parsed.unresolved_ipv6_ext_chain;
+    let early_pass = should_fallback_early(parsed, ingress_domain);
+    if let Some(verdict) = kernel_pass::degraded_local_or_control_head(
+        native_gre_fragment_on_helper,
+        wg_tail_excluded,
+        unresolved_ext_chain,
+        early_pass,
     ) {
-        return false;
+        return verdict;
     }
-    // #16038: never kernel-PASS an unresolved ext chain on the degraded path.
-    // `parse_ipv6` drops these before a ParsedPacket exists, so this is
-    // defence in depth; it must precede `should_fallback_early`, whose
-    // multicast arm would otherwise pass the packet.
-    if parsed.unresolved_ipv6_ext_chain {
-        return false;
-    }
-    if should_fallback_early(parsed, ingress_domain) {
-        return true;
-    }
-    // #10863: NDP is local control only when its destination is local. The
-    // early filter above handles multicast NDP; unicast uses this ownership
-    // check.
-    if is_icmp_to_interface_nat_local(parsed, ingress_domain) {
-        return true;
-    }
+    // #10863: NDP is local control only when its destination is local.
+    let icmp_to_interface_nat_local = is_icmp_to_interface_nat_local(parsed, ingress_domain);
     let destination_is_local = is_local_destination(parsed, ingress_domain);
-    if parsed.protocol == PROTO_ICMPV6
-        && degraded_ndp::is_local_ndp_control(parsed.icmp_type, parsed.hop_limit, destination_is_local)
-    {
-        return true;
-    }
-    // #15946: degraded twin of healthy NAT-external NDP arm (:1077).
-    if parsed.protocol == PROTO_ICMPV6
+    let local_ndp_control = parsed.protocol == PROTO_ICMPV6
+        && degraded_ndp::is_local_ndp_control(
+            parsed.icmp_type,
+            parsed.hop_limit,
+            destination_is_local,
+        );
+    // #15946: degraded twin of the healthy NAT-external NDP arm
+    // (`degraded_ndp::is_nat_external_ndp_control`).
+    let nat_external_ndp_control = parsed.protocol == PROTO_ICMPV6
         && degraded_ndp::is_nat_external_ndp_control(
             parsed.icmp_type,
             parsed.hop_limit,
             is_interface_nat_destination(parsed, ingress_domain),
-        )
-    {
-        return true;
-    }
-    // #16660: degraded twin of the healthy proxy-NDP arm.
-    if parsed.protocol == PROTO_ICMPV6
+        );
+    // #16660: degraded twin of the healthy proxy-NDP arm
+    // (`degraded_ndp::is_proxy_ndp_ndp_control`).
+    let proxy_ndp_control = parsed.protocol == PROTO_ICMPV6
         && degraded_ndp::is_proxy_ndp_ndp_control(
             parsed.icmp_type,
             parsed.hop_limit,
             is_proxy_ndp_destination(parsed, ingress_domain),
-        )
-    {
-        return true;
+        );
+    if let Some(verdict) = kernel_pass::degraded_local_or_control_prefix(
+        native_gre_fragment_on_helper,
+        wg_tail_excluded,
+        unresolved_ext_chain,
+        early_pass,
+        icmp_to_interface_nat_local,
+        local_ndp_control,
+        nat_external_ndp_control,
+        proxy_ndp_control,
+    ) {
+        return verdict;
     }
-    // #16841: the degraded path must not pass a hop-limit-0 local
-    // packet the knob rejects, via any arm below.
-    if destination_is_local && zero_hop_limit_local_drop_shim(parsed, ctrl.flags) {
-        return false;
-    }
-    // #15946: degraded PASS_TO_KERNEL session + WG steer (healthy :1049/:982).
-    if live_userspace_session_action(parsed) == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL {
-        return true;
-    }
-    if (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
-        && wg_steer_to_kernel(ctrl, parsed, ingress_ifindex, ingress_domain)
-    {
-        return true;
-    }
-    // #14327: a native-GRE frame's outer destination is the local tunnel
-    // endpoint by construction, so the general local pass must not claim
-    // it — otherwise the #10651 inner gate below is unreachable exactly
-    // for outer-local frames and inner transit reaches the kernel with
-    // no zone policy. Native GRE falls through to that gate; every other
-    // local packet keeps the degraded local pass.
+    // Prefix fell through: resolve the tail facts in their order.
+    // #16841: the mid stage applies the zero-hop-limit veto (via
+    // `kernel_pass::zero_hop_limit_vetoes_local_pass`) before the
+    // session/WG arms below it.
+    let zero_hop_limit_drop = zero_hop_limit_local_drop_shim(parsed, ctrl.flags);
+    // #15946: degraded session arm, tested by the mid stage through
+    // `kernel_pass::session_pass_to_kernel`.
+    let session_is_pass_to_kernel =
+        live_userspace_session_action(parsed) == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL;
+    // Declared Narrowed twin (DEGRADED_TWIN `ARM_WG_STEER`): this fact
+    // is the raw steer candidate. The mid stage passes it without the
+    // healthy `wg_steer_passes_to_kernel` session-REDIRECT exclusion,
+    // so a candidate with a live REDIRECT session kernel-passes here
+    // but not on the healthy path — pre-existing, declared divergence.
+    let wg_steer_candidate = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
+        && wg_steer_to_kernel(ctrl, parsed, ingress_ifindex, ingress_domain);
+    // #14327: native GRE declines the general local pass
+    // (`gre_classify::degraded_general_local_pass_applies`).
     let native_gre =
         parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0;
-    if degraded_general_local_pass_applies(native_gre, destination_is_local) {
-        return true;
-    }
-    if degraded_interface_nat_esp_passes_to_kernel(parsed.protocol, parsed.wire_protocol)
-        && is_interface_nat_destination(parsed, ingress_domain)
-    {
-        return true;
-    }
-    // #10651: the degraded twin of the healthy native-GRE arm's outer-local
-    // gate. An inner PASS_TO_KERNEL hit must not kernel-forward a non-local
-    // outer here either; the degraded path is cold, so the outer predicate
-    // runs before the inner classify.
-    if native_gre {
-        return native_gre_inner_pass_steers_to_kernel_typed(
+    let general_local_pass = degraded_general_local_pass_applies(native_gre, destination_is_local);
+    let interface_nat_esp_pass =
+        degraded_interface_nat_esp_passes_to_kernel(parsed.protocol, parsed.wire_protocol)
+            && is_interface_nat_destination(parsed, ingress_domain);
+    // #10651: degraded twin of the healthy native-GRE inner arm
+    // (`gre_classify::native_gre_inner_pass_steers_to_kernel_typed`).
+    // The mid stage consults this fact only when `native_gre` is set;
+    // it is resolved here — after the prefix fall-through but before
+    // the mid call — guarded so non-GRE packets never classify. The
+    // read-only session lookup therefore also runs when mid decides;
+    // no verdict changes.
+    let gre_inner_pass = if native_gre {
+        native_gre_inner_pass_steers_to_kernel_typed(
             OuterDestinationLocal::from_is_local_destination(destination_is_local),
             InnerSessionAction::from_classifier_action(classify_native_gre_inner(
                 data, data_end, parsed,
             )),
-        );
+        )
+    } else {
+        false
+    };
+    if let Some(verdict) = kernel_pass::degraded_local_or_control_mid(
+        destination_is_local,
+        zero_hop_limit_drop,
+        session_is_pass_to_kernel,
+        wg_steer_candidate,
+        general_local_pass,
+        interface_nat_esp_pass,
+        native_gre,
+    ) {
+        return verdict;
     }
-    false
+    gre_inner_pass
 }
 
 #[inline(always)]

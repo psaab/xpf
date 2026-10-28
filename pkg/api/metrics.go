@@ -134,6 +134,7 @@ type xpfCollector struct {
 	// reader; see metrics_dataplane_silent_skips_9019.go.
 	napiProbeTargetSkipsTotal              *prometheus.Desc
 	bindingWedgeGiveupsTotal               *prometheus.Desc
+	statusPollDecodeErrorsTotal            *prometheus.Desc
 	learnedRouteCapHitsTotal               *prometheus.Desc
 	learnedRouteCapGroupShedsTotal         *prometheus.Desc
 	learnedRouteCapGroupShedsByFamilyTotal *prometheus.Desc
@@ -657,11 +658,6 @@ type xpfCollector struct {
 	// #11503: unzoned transit denials kept separate by ingress/egress cause.
 	userspaceUnzonedIngressDenied *prometheus.Desc
 	userspaceUnzonedEgressDenied  *prometheus.Desc
-
-	// #2244: total failed dnat_table reverse-SNAT BPF-map publishes — the
-	// cause-side signal for dnat_table map-capacity pressure that silently
-	// breaks embedded-ICMP NAT reversal (PMTUD / traceroute).
-	userspaceDnatPublishErrors *prometheus.Desc
 
 	// #5674: peer-synced session imports rejected by the coordinator's
 	// aggregate admission bound — the availability/DoS ceiling that keeps a

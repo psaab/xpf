@@ -17,7 +17,7 @@ import (
 //
 // Before the fix the set was userspacePinnedShimMaps() minus rebuilt maps only,
 // so the state-bearing shared maps the shim does not declare — sessions_v6,
-// dnat_table_v6, and the HA/per-CPU maps (rg_active, ha_watchdog,
+// and the HA/per-CPU maps (rg_active, ha_watchdog,
 // session_id_gen, the *_counters) — were never ABI-checked. An incompatible
 // live pin for one of those passed the deploy pre-flight and then failed
 // ErrMapIncompatible in loadUserspaceShimSharedMaps AFTER the old daemon was
@@ -33,8 +33,7 @@ func TestUserspaceABICheckedPinnedMapsCoversAllRequiredPins(t *testing.T) {
 		set[n]++
 	}
 
-	// No duplicates: dnat_table / dnat_table_v6 appear in BOTH source lists and
-	// must be folded to a single entry.
+	// No duplicates.
 	for n, c := range set {
 		if c != 1 {
 			t.Fatalf("map %q appears %d times, want deduplicated single entry", n, c)
@@ -52,7 +51,7 @@ func TestUserspaceABICheckedPinnedMapsCoversAllRequiredPins(t *testing.T) {
 	// Spot-check the previously-omitted state-bearing shared maps that the #5484
 	// stranding scenario turns on.
 	for _, want := range []string{
-		"sessions_v6", "dnat_table_v6", "ha_watchdog", "rg_active",
+		"sessions_v6", "ha_watchdog", "rg_active",
 		"session_id_gen", "interface_counters", "nat_rule_counters",
 	} {
 		if _, ok := set[want]; !ok {
@@ -87,8 +86,6 @@ func TestUserspaceABICheckedPinnedMapsCoversAllRequiredPins(t *testing.T) {
 // TestABICheckedMapProvenance documents HOW each newly covered map is confirmed
 // embedded+pinned, and that abiCheckedRefSpec resolves it to the right shape:
 //
-//   - dnat_table_v6 is DECLARED by the shim ELF (like dnat_table) and replaced
-//     at load, so its ABI reference is the embedded shim spec.
 //   - sessions_v6 and the HA/counter maps are Go-created shared maps (present in
 //     userspaceShimSharedMapSpecs, ABSENT from the shim ELF), so their reference
 //     is the Go SSOT spec — the shape loadUserspaceShimSharedMaps creates+pins.
@@ -101,14 +98,6 @@ func TestABICheckedMapProvenance(t *testing.T) {
 	spec, err := loadRustUserspaceXDP()
 	if err != nil {
 		t.Fatalf("load Rust userspace XDP spec: %v", err)
-	}
-
-	// dnat_table_v6: shim-declared (#2406) and replaced at load, like dnat_table.
-	if spec.Maps[userspaceShimCompatibilityDNATV6Name] == nil {
-		t.Fatalf("embedded shim spec missing %s (expected shim-declared)", userspaceShimCompatibilityDNATV6Name)
-	}
-	if got := abiCheckedRefSpec(spec, userspaceShimCompatibilityDNATV6Name); got != spec.Maps[userspaceShimCompatibilityDNATV6Name] {
-		t.Errorf("abiCheckedRefSpec(%s) must resolve to the embedded shim spec", userspaceShimCompatibilityDNATV6Name)
 	}
 
 	shared := make(map[string]bool)
@@ -131,63 +120,6 @@ func TestABICheckedMapProvenance(t *testing.T) {
 		if got == nil || wantSpec == nil || got.Name != name || mapABIFromSpec(got) != mapABIFromSpec(wantSpec) {
 			t.Errorf("abiCheckedRefSpec(%s) must resolve to the Go SSOT shared spec (got %+v)", name, got)
 		}
-	}
-}
-
-// TestValidateUserspaceShimSpecDNATV6ExpectedABIDrift covers the #5484
-// expected-value arm for the IPv6 reverse-NAT steering table: an embedded
-// dnat_table_v6 whose Type/KeySize/ValueSize drifts from the Go single source
-// of truth (userspaceShimSharedMapSpecs) is rejected even on a fresh node with
-// no live pin, exactly as dnat_table already was. The correct shape is
-// accepted. RED-on-revert: without the v6 arm in validateUserspaceShimSpecWith
-// the drift is invisible until the post-stop load fails ErrMapIncompatible.
-func TestValidateUserspaceShimSpecDNATV6ExpectedABIDrift(t *testing.T) {
-	t.Parallel()
-
-	v6 := sharedShimMapSpecByName(userspaceShimCompatibilityDNATV6Name)
-	if v6 == nil {
-		t.Fatalf("Go SSOT missing %s spec", userspaceShimCompatibilityDNATV6Name)
-	}
-
-	// Accept: the correct embedded v6 shape passes on a fresh node.
-	base := validABIBaseSpec()
-	base.Maps[userspaceShimCompatibilityDNATV6Name] = v6.Copy()
-	if err := validateUserspaceShimSpecWith(base, noPinReader()); err != nil {
-		t.Fatalf("correct dnat_table_v6 shape rejected: %v", err)
-	}
-
-	tests := []struct {
-		name   string
-		mutate func(*ebpf.MapSpec)
-		field  string
-	}{
-		{"value-size", func(m *ebpf.MapSpec) { m.ValueSize = v6.ValueSize + 8 }, "value_size"},
-		{"key-size", func(m *ebpf.MapSpec) { m.KeySize = v6.KeySize + 4 }, "key_size"},
-		{"type", func(m *ebpf.MapSpec) { m.Type = ebpf.LRUHash }, "type"},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			drift := validABIBaseSpec()
-			mv6 := v6.Copy()
-			tt.mutate(mv6)
-			drift.Maps[userspaceShimCompatibilityDNATV6Name] = mv6
-
-			// RED-on-revert: the pre-#5484 validator accepts the base spec (it never
-			// inspects dnat_table_v6), so the ONLY reject signal is the new v6 arm.
-			if err := legacyPresenceMaxEntriesValidate(drift); err != nil {
-				t.Fatalf("legacy validator rejected base (%v); cannot prove RED-on-revert", err)
-			}
-
-			err := validateUserspaceShimSpecWith(drift, noPinReader())
-			if err == nil {
-				t.Fatalf("want dnat_table_v6 %s drift error on fresh node, got nil (would brick post-stop)", tt.field)
-			}
-			if !strings.Contains(err.Error(), "dnat_table_v6") || !strings.Contains(err.Error(), tt.field) {
-				t.Fatalf("err = %v, want dnat_table_v6 %s drift", err, tt.field)
-			}
-		})
 	}
 }
 

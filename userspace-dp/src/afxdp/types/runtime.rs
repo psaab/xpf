@@ -855,11 +855,7 @@ impl PolicyReadCollector {
     }
     /// Whether this exact conditional-delete identity was reserved by a worker
     /// scan.
-    pub(in crate::afxdp) fn contains_identity(
-        &self,
-        key: &SessionKey,
-        session_id: u64,
-    ) -> bool {
+    pub(in crate::afxdp) fn contains_identity(&self, key: &SessionKey, session_id: u64) -> bool {
         self.seen.contains(&(key.clone(), session_id))
     }
 }
@@ -1305,7 +1301,6 @@ pub(in crate::afxdp) struct WorkerContext<'a> {
     /// worker-ID map. A reused worker ID therefore cannot make an old queue
     /// appear to belong to a new worker.
     pub(in crate::afxdp) worker_commands_by_id: &'a WorkerCommandQueues,
-    pub(in crate::afxdp) dnat_fds: &'a DnatTableFds,
     pub(in crate::afxdp) rg_epochs: &'a [AtomicU32; MAX_RG_EPOCHS],
     /// #1620: cold-path latency histogram sample mask. Loaded once
     /// per poll cycle from `ForwardingState.cold_path_sample_mask`

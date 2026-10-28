@@ -756,7 +756,7 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 					// Resolve the application match so an unresolvable
 					// application or application-set still warns. The
 					// protocol/port expansion this used to drive existed
-					// only to key dnat_table entries; the userspace
+					// only to key NAT map entries; the userspace
 					// snapshot carries the rule's own match instead.
 					// #16143: iterate every plural value so a bracket-list
 					// rule's later applications are not invisible.

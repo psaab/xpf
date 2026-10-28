@@ -29,9 +29,8 @@ type clearFaultGRPCDP struct {
 	// key; revDelErr for any other (computed reverse) key. This split
 	// lets a test inject ErrKeyNotExist on the reverse delete (a
 	// successful NAT'd clear) independent of the forward delete.
-	fwdDelErr  error
-	revDelErr  error
-	delDNATErr error
+	fwdDelErr error
+	revDelErr error
 
 	iterCalls       int
 	iterV6Calls     int
@@ -39,8 +38,6 @@ type clearFaultGRPCDP struct {
 	iterV6FromCalls int
 	deleteCalls     int
 	deleteV6Calls   int
-	dnatCalls       int
-	dnatV6Calls     int
 	clearAllCalls   int
 }
 
@@ -86,14 +83,6 @@ func (d *clearFaultGRPCDP) DeleteSession(key dataplane.SessionKey) error {
 }
 func (d *clearFaultGRPCDP) DeleteSessionV6(dataplane.SessionKeyV6) error {
 	d.deleteV6Calls++
-	return nil
-}
-func (d *clearFaultGRPCDP) DeleteDNATEntry(dataplane.DNATKey) error {
-	d.dnatCalls++
-	return d.delDNATErr
-}
-func (d *clearFaultGRPCDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error {
-	d.dnatV6Calls++
 	return nil
 }
 func (d *clearFaultGRPCDP) ClearAllSessions() (int, int, error) {
@@ -190,9 +179,9 @@ func TestClearSessionsRPCReportsReverseDeleteRealError(t *testing.T) {
 	}
 }
 
-// #2468 finding 6: the naive-swap reverse key and the DNAT companion key
-// are absent for a NAT'd session (the real reverse companion is keyed on
-// the translated tuple val.ReverseKey), so both deletes return
+// #2468 finding 6: the naive-swap reverse key
+// is absent for a NAT'd session (the real reverse companion is keyed on
+// the translated tuple val.ReverseKey), so the delete returns
 // ErrKeyNotExist on a fully-successful clear. That benign not-found must
 // NOT inflate Failures. Fail-on-revert: addExceptNotFound -> add() turns
 // this RED.
@@ -201,7 +190,6 @@ func TestClearSessionsRPCNATReverseNotFoundNotReported(t *testing.T) {
 		Manager:    dataplane.New(),
 		v4Sessions: seedGRPCV4(true),    // SNAT session
 		revDelErr:  ebpf.ErrKeyNotExist, // naive-swap reverse key absent
-		delDNATErr: ebpf.ErrKeyNotExist, // DNAT companion key absent
 	}
 	s := newClearServer(t, dp)
 	resp, err := s.ClearSessions(context.Background(), protoReq())
@@ -213,22 +201,6 @@ func TestClearSessionsRPCNATReverseNotFoundNotReported(t *testing.T) {
 	}
 	if resp.Ipv4Cleared != 1 {
 		t.Fatalf("Ipv4Cleared=%d, want 1", resp.Ipv4Cleared)
-	}
-}
-
-func TestClearSessionsRPCReportsDNATCompanionFailure(t *testing.T) {
-	dp := &clearFaultGRPCDP{
-		Manager:    dataplane.New(),
-		v4Sessions: seedGRPCV4(true), // SNAT -> DNAT companion delete attempted
-		delDNATErr: fmt.Errorf("dnat map delete failed"),
-	}
-	s := newClearServer(t, dp)
-	resp, err := s.ClearSessions(context.Background(), protoReq())
-	if err != nil {
-		t.Fatalf("ClearSessions unexpected RPC error: %v", err)
-	}
-	if resp.Failures == 0 {
-		t.Fatalf("DNAT companion failure not reported: Failures=0, summary=%q", resp.FailureSummary)
 	}
 }
 

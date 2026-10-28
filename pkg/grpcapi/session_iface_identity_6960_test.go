@@ -139,8 +139,6 @@ func (d *ifaceIdentity6960DP) DeleteSessionV6(key dataplane.SessionKeyV6) error 
 	}
 	return nil
 }
-func (d *ifaceIdentity6960DP) DeleteDNATEntry(dataplane.DNATKey) error     { return nil }
-func (d *ifaceIdentity6960DP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error { return nil }
 
 func ifaceIdentity6960Server(t *testing.T, dp *ifaceIdentity6960DP) *Server {
 	t.Helper()

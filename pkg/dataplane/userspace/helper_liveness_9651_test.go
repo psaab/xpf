@@ -186,3 +186,89 @@ func TestStatusLoopWiresTheLivenessCount9651(t *testing.T) {
 		t.Error("a failed status poll no longer feeds the #9651 wedge count or kills a wedged helper")
 	}
 }
+
+// --- #18293: decode failures are answers, not silence ---
+
+var errDecode18293 = &statusDecodeError{cause: errors.New("json: cannot unmarshal string into Go struct field")}
+
+// TestUndecodableAnswersNeverKill18293 is the confirming cell from #18293:
+// a helper that answers every poll with an undecodable status payload for
+// more than helperWedgeFailedPolls polls is never declared wedged, each poll
+// is counted as a decode error, and the silence streak never starts.
+func TestUndecodableAnswersNeverKill18293(t *testing.T) {
+	m := &Manager{}
+	before := StatusPollDecodeErrors()
+	if at := feed9651(m, errDecode18293, time.Now(), 3*helperWedgeFailedPolls); at != 0 {
+		t.Fatalf("declared wedged at poll %d on answered-but-undecodable polls (#18293)", at)
+	}
+	if m.liveness.failures != 0 || !m.liveness.firstFailure.IsZero() {
+		t.Fatalf("decode failures leaked into the wedge count: failures=%d firstFailure=%v", m.liveness.failures, m.liveness.firstFailure)
+	}
+	if got, want := m.liveness.decodeErrors, uint64(3*helperWedgeFailedPolls); got != want {
+		t.Fatalf("per-manager decodeErrors = %d, want %d", got, want)
+	}
+	if got, want := StatusPollDecodeErrors()-before, uint64(3*helperWedgeFailedPolls); got != want {
+		t.Fatalf("StatusPollDecodeErrors moved by %d, want %d (decode error/metric must surface)", got, want)
+	}
+	if m.liveness.kills != 0 {
+		t.Fatalf("kills = %d, want 0", m.liveness.kills)
+	}
+}
+
+// TestDecodeFailureNeitherAdvancesNorResetsSilence18293: a decode failure
+// interleaved in a genuine-silence streak leaves the streak untouched, so
+// silence before and after it still kills on the original schedule.
+func TestDecodeFailureNeitherAdvancesNorResetsSilence18293(t *testing.T) {
+	m := &Manager{}
+	start := time.Now()
+	// 29 silent polls, one decode failure, then the 30th silent poll.
+	if at := feed9651(m, errTransport9651, start, helperWedgeFailedPolls-1); at != 0 {
+		t.Fatalf("wedged early at silent poll %d", at)
+	}
+	if m.noteStatusPollResultLocked(errDecode18293, start.Add(29*time.Second)) {
+		t.Fatal("a decode failure asked for a kill")
+	}
+	if m.liveness.failures != helperWedgeFailedPolls-1 {
+		t.Fatalf("decode failure changed the silence streak: failures=%d, want %d", m.liveness.failures, helperWedgeFailedPolls-1)
+	}
+	if !m.noteStatusPollResultLocked(errTransport9651, start.Add(30*time.Second)) {
+		t.Fatal("30th silent poll (span satisfied) did not ask for a kill after an interleaved decode failure")
+	}
+}
+
+// TestSilentHelperStillKilledOnSchedule18293: the other half of the
+// confirming cell — genuine silence still kills. (The full supervisor path
+// is already bound by TestWedgedHelperIsKilledAndRestarted9651.)
+func TestSilentHelperStillKilledOnSchedule18293(t *testing.T) {
+	m := &Manager{}
+	before := StatusPollDecodeErrors()
+	if at := feed9651(m, errTransport9651, time.Now(), helperWedgeFailedPolls+1); at != helperWedgeFailedPolls+1 {
+		t.Fatalf("silent helper declared wedged at poll %d, want %d", at, helperWedgeFailedPolls+1)
+	}
+	if got := StatusPollDecodeErrors() - before; got != 0 {
+		t.Fatalf("silence moved the decode counter by %d, want 0", got)
+	}
+}
+
+// TestStatusDecodeClassification18293 pins the error class itself: it matches
+// errStatusDecode, preserves the cause verbatim, and does not collide with
+// the refusal or silence classes.
+func TestStatusDecodeClassification18293(t *testing.T) {
+	cause := errors.New("json: cannot unmarshal number into Go value of type string")
+	err := error(&statusDecodeError{cause: cause})
+	if !errors.Is(err, errStatusDecode) {
+		t.Fatal("statusDecodeError does not match errStatusDecode")
+	}
+	if !errors.Is(err, cause) {
+		t.Fatal("statusDecodeError lost its cause")
+	}
+	if err.Error() != cause.Error() {
+		t.Fatalf("message = %q, want verbatim cause %q", err.Error(), cause.Error())
+	}
+	if errors.Is(err, errHelperRejected) || errors.Is(err, errHelperPostTeardown) {
+		t.Fatal("decode failure misclassified as a helper refusal")
+	}
+	if errors.Is(errTransport9651, errStatusDecode) || errors.Is(newHelperRejection("busy"), errStatusDecode) {
+		t.Fatal("silence/refusal misclassified as a decode failure")
+	}
+}

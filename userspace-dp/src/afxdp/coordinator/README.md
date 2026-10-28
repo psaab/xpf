@@ -259,8 +259,8 @@ Differences that matter (#1881):
   only to fail-OPEN at the later deferred bring-up.
 - **The map-pin gate is ONE opener shared by both callers (#6243).** The
   activated `preflight_map_fds` and the deferred `validate_map_pins` used
-  to carry two hand-kept copies of the seven-pin contract (3 mandatory
-  xsk/heartbeat/sessions + 4 optional conntrack v4/v6, dnat_table[/v6]).
+  to carry two hand-kept copies of the five-pin contract (3 mandatory
+  xsk/heartbeat/sessions + 2 optional conntrack v4/v6).
   They now both route through one pure `open_snapshot_maps(&MapPins) ->
   Result<OpenedSnapshotMaps, MapPinFault>` (`reconcile/snapshot.rs`), so
   they can never drift on which snapshots pass or how a fault is
@@ -280,13 +280,13 @@ Differences that matter (#1881):
   so a multi-fault snapshot could report a different stage from each path;
   the shared two-pass order makes them identical. (2) the deferred walk
   dropped each FD immediately, so under FD-table pressure it could PASS
-  where activated (retaining all seven FDs simultaneously) FAILED; the
+  where activated (retaining all five FDs simultaneously) FAILED; the
   shared bundle now holds every opened FD until the whole contract
   succeeds, giving the deferred path the same low-FD failure. Fail-on-
-  revert: `reconcile_all_seven_pin_faults_lock_stage_and_binding_strings_6243`,
+  revert: `reconcile_all_five_pin_faults_lock_stage_and_binding_strings_6243`,
   `map_pin_faults_react_identically_activated_and_deferred_6243`,
   `multi_fault_map_pins_use_two_pass_precedence_from_both_paths_6243`,
-  `both_paths_open_full_seven_pin_bundle_before_ok_6243`. (Follow-up:
+  `both_paths_open_full_five_pin_bundle_before_ok_6243`. (Follow-up:
   #6246's `ReconcileSnapshotFds` state-representability cleanup — no
   `default()` placeholder, non-`Option` `apply_snapshot` return — is a
   SEPARATE concern tracked on #6243, not done here.)

@@ -132,8 +132,13 @@ fn key(src_port: u16) -> SessionKey {
     }
 }
 
-fn entry(key: SessionKey, is_reverse: bool, counter: Option<Arc<crate::policy::PolicyRuleCounter>>) -> SyncedSessionEntry {
-    SyncedSessionEntry { key,
+fn entry(
+    key: SessionKey,
+    is_reverse: bool,
+    counter: Option<Arc<crate::policy::PolicyRuleCounter>>,
+) -> SyncedSessionEntry {
+    SyncedSessionEntry {
+        key,
     decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
@@ -179,9 +184,14 @@ fn entry(key: SessionKey, is_reverse: bool, counter: Option<Arc<crate::policy::P
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 fn record(ingress_zone: u32, egress_zone: u32) -> crate::protocol::PolicySessionRebind {
@@ -207,7 +217,10 @@ fn wait_for_iterations(heartbeat: &AtomicU64, n: usize) {
         let before = heartbeat.load(Ordering::Relaxed);
         let deadline = Instant::now() + Duration::from_secs(30);
         while heartbeat.load(Ordering::Relaxed) == before {
-            assert!(Instant::now() < deadline, "the worker loop stopped iterating");
+            assert!(
+                Instant::now() < deadline,
+                "the worker loop stopped iterating"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
     }
@@ -228,7 +241,10 @@ impl Harness {
         clear_restamp_attempts();
         let coord = Coordinator::new();
         let channel = RuntimeViewChannel::default();
-        let old_rules = [rule("p-first", 0, "lan", "wan"), rule("p-web", 1, "lan", "wan")];
+        let old_rules = [
+            rule("p-first", 0, "lan", "wan"),
+            rule("p-web", 1, "lan", "wan"),
+        ];
         let old_forwarding = forwarding(7, &old_rules, Vec::new());
         let first_counter = old_forwarding.policy.hit_counter_by_idx(1).cloned();
         assert_eq!(
@@ -256,7 +272,7 @@ impl Harness {
             None,
             startup_tx,
         );
-        let plan = WorkerLaunchPlan::new(0, 0, Vec::new(), crate::PollMode::BusyPoll, DnatTableFds::default());
+        let plan = WorkerLaunchPlan::new(0, 0, Vec::new(), crate::PollMode::BusyPoll);
         let cos = WorkerCoSState::from_coord(&coord);
         let telemetry = WorkerPublishedTelemetry::new(
             Arc::new(Mutex::new(ExceptionEventRing::new())),
@@ -289,11 +305,22 @@ impl Harness {
         }
         let deadline = Instant::now() + Duration::from_secs(30);
         while !commands.lock().expect("worker command queue").is_empty() {
-            assert!(Instant::now() < deadline, "the worker never drained its command queue");
+            assert!(
+                Instant::now() < deadline,
+                "the worker never drained its command queue"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
         wait_for_iterations(&heartbeat, 2);
-        Self { channel, synced, stop, heartbeat, worker: Some(worker), fwd, rev }
+        Self {
+            channel,
+            synced,
+            stop,
+            heartbeat,
+            worker: Some(worker),
+            fwd,
+            rev,
+        }
     }
 
     fn publish(&self, generation: u64, fwd: Arc<ForwardingState>) {
@@ -303,8 +330,12 @@ impl Harness {
 
     fn zones(&self) -> ((u32, u32), (u32, u32)) {
         let map = self.synced.lock().expect("shared synced map");
-        let f = map.get(&self.fwd).expect("forward half must survive every rotation");
-        let r = map.get(&self.rev).expect("reverse half must survive every rotation");
+        let f = map
+            .get(&self.fwd)
+            .expect("forward half must survive every rotation");
+        let r = map
+            .get(&self.rev)
+            .expect("reverse half must survive every rotation");
         (
             (f.metadata.ingress_zone, f.metadata.egress_zone),
             (r.metadata.ingress_zone, r.metadata.egress_zone),
@@ -313,14 +344,20 @@ impl Harness {
 
     fn counter_rule_id(&self) -> Option<String> {
         let map = self.synced.lock().expect("shared synced map");
-        map.get(&self.fwd)
-            .and_then(|e| e.metadata.policy_counter.as_ref().map(|c| c.rule_id().to_string()))
+        map.get(&self.fwd).and_then(|e| {
+            e.metadata
+                .policy_counter
+                .as_ref()
+                .map(|c| c.rule_id().to_string())
+        })
     }
 
     fn shutdown(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
-            worker.join().expect("the worker loop exits cleanly on stop");
+            worker
+                .join()
+                .expect("the worker loop exits cleanly on stop");
         }
     }
 }
@@ -334,12 +371,23 @@ impl Drop for Harness {
 #[test]
 fn rebind_record_applied_exactly_once_per_generation_15188() {
     let harness = Harness::start();
-    let new_rules = [rule("p-new", 0, "dmz", "wan"), rule("p-web", 1, "lan", "wan")];
+    let new_rules = [
+        rule("p-new", 0, "dmz", "wan"),
+        rule("p-web", 1, "lan", "wan"),
+    ];
 
     // Full apply (gen 8): the record rebinds the pair to dmz->wan/p-new.
     harness.publish(8, forwarding(8, &new_rules, vec![record(3, 2)]));
-    assert_eq!(harness.counter_rule_id().as_deref(), Some("dmz->wan/p-new"), "control: the full apply's record must rebind the pair");
-    assert_eq!(harness.zones(), ((3, 2), (2, 3)), "control: first consumption stamps the record's zones");
+    assert_eq!(
+        harness.counter_rule_id().as_deref(),
+        Some("dmz->wan/p-new"),
+        "control: the full apply's record must rebind the pair"
+    );
+    assert_eq!(
+        harness.zones(),
+        ((3, 2), (2, 3)),
+        "control: first consumption stamps the record's zones"
+    );
 
     // Helper republish (still gen 8, record still carried — the pre-fix
     // shape — but with different zones as the re-application probe). The

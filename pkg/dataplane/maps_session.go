@@ -12,7 +12,7 @@ import (
 )
 
 // IsKeyNotFound reports whether err is a map "key does not exist" error
-// from a session/DNAT/companion delete or lookup. It keeps the
+// from a session/companion delete or lookup. It keeps the
 // github.com/cilium/ebpf sentinel behind the dataplane boundary so
 // operator packages (pkg/cli, pkg/grpcapi) can classify a delete result
 // without importing the BPF-artifact package directly (the
@@ -21,7 +21,7 @@ import (
 //
 // Used by the session-clear paths (#2468): a NAT'd session's reverse
 // companion is keyed on the TRANSLATED tuple, so the naive-swap reverse
-// key and the DNAT companion key are frequently absent on an otherwise
+// key is frequently absent on an otherwise
 // successful clear — a benign idempotent not-found, not a failure.
 func IsKeyNotFound(err error) bool {
 	return errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, unix.ENOENT)
@@ -29,8 +29,7 @@ func IsKeyNotFound(err error) bool {
 
 // Conntrack session-table map accessors.
 // Same-package split of maps.go (#1686): iterate/batch/get/set/delete for the
-// v4 and v6 session maps, session counting, full-table clear (which also drops
-// the associated dynamic DNAT entries — see ClearAllSessions), and the
+// v4 and v6 session maps, session counting, full-table clear (see ClearAllSessions), and the
 // node-scoped session-ID counter seed.
 
 // IterateSessions iterates all session entries, calling fn for each.
@@ -468,18 +467,17 @@ var sessionClearSnapshotObserver func(chunkKeys int)
 
 // sessionClearSnapshotChunk bounds the working set of the full-table clear. The
 // session table can hold up to ~10M entries per family; snapshotting every key
-// (v4 + v6) plus the dynamic DNAT key lists into slices before any delete
+// (v4 + v6) into slices before any delete
 // stacks them all in RSS at once — ~1 GB on a max-loaded table, enough for the
 // supported-max recovery command (`clear security flow session all`) to stall
 // or OOM-kill the daemon (#5304). The clear instead collects at most this many
-// keys, deletes that chunk (and its DNAT entries), then re-scans for the next
+// keys, deletes that chunk, then re-scans for the next
 // chunk, so peak key-slice memory is O(chunk), not O(table). It is a var (not
 // const) so a test can shrink it to exercise the multi-chunk path with a small
 // table.
 var sessionClearSnapshotChunk = 4096
 
-// ClearAllSessions deletes all IPv4 and IPv6 sessions, plus associated
-// dynamic DNAT table entries for SNAT sessions. Returns (v4_deleted, v6_deleted, err).
+// ClearAllSessions deletes all IPv4 and IPv6 sessions. Returns (v4_deleted, v6_deleted, err).
 func (m *Manager) ClearAllSessions() (int, int, error) {
 	return m.ClearAllSessionsChunked(nil, nil)
 }
@@ -503,7 +501,7 @@ func (m *Manager) ClearAllSessions() (int, int, error) {
 // BPF_MAP_DELETE_BATCH syscalls that yield between chunks
 // (clearSessionsV4/clearSessionsV6). Semantics are unchanged: every session —
 // both the forward and the reverse conntrack entry — present at the start is
-// still removed, plus the dynamic dnat_table entries for SNAT sessions.
+// still removed.
 func (m *Manager) ClearAllSessionsChunked(onV4Chunk func([]SessionKey), onV6Chunk func([]SessionKeyV6)) (int, int, error) {
 	v4Deleted, err := m.clearSessionsChunkedV4(onV4Chunk)
 	if err != nil {
@@ -517,8 +515,8 @@ func (m *Manager) ClearAllSessionsChunked(onV4Chunk func([]SessionKey), onV6Chun
 }
 
 // clearSessionsChunkedV4 drains the IPv4 session map in bounded chunks: it
-// collects up to sessionClearSnapshotChunk keys (plus the SNAT sessions' DNAT
-// keys) from a fresh batch scan, deletes that chunk and its DNAT entries, hands
+// collects up to sessionClearSnapshotChunk keys from a fresh batch scan,
+// deletes that chunk, hands
 // the chunk to onChunk, then re-scans for the remainder until the map is empty.
 // Because every collected key is deleted before the next scan, a fresh scan
 // never re-returns it, so the loop converges — every key present at the start
@@ -526,20 +524,11 @@ func (m *Manager) ClearAllSessionsChunked(onV4Chunk func([]SessionKey), onV6Chun
 func (m *Manager) clearSessionsChunkedV4(onChunk func([]SessionKey)) (int, error) {
 	deleted := 0
 	keys := make([]SessionKey, 0, sessionClearSnapshotChunk)
-	var snatDNATKeys []DNATKey
 	for {
 		keys = keys[:0]
-		snatDNATKeys = snatDNATKeys[:0]
 		full := false
 		if err := m.BatchIterateSessions(func(key SessionKey, val SessionValue) bool {
 			keys = append(keys, key)
-			// Track dynamic SNAT sessions for dnat_table cleanup.
-			if val.IsReverse == 0 &&
-				val.Flags&SessFlagSNAT != 0 &&
-				val.Flags&SessFlagStaticNAT == 0 {
-				// Must match the write-side key encoding (#2406: host-order port).
-				snatDNATKeys = append(snatDNATKeys, dnatKeyForSessionV4(key, val))
-			}
 			if len(keys) >= sessionClearSnapshotChunk {
 				full = true
 				return false // chunk full — stop and re-scan for the remainder
@@ -556,12 +545,6 @@ func (m *Manager) clearSessionsChunkedV4(onChunk func([]SessionKey)) (int, error
 		}
 		before := deleted
 		deleted += m.clearSessionsV4(keys)
-		for i, dk := range snatDNATKeys {
-			m.DeleteDNATEntry(dk)
-			if (i+1)%sessionDeleteBatchSize == 0 {
-				runtime.Gosched()
-			}
-		}
 		if onChunk != nil {
 			onChunk(keys)
 		}
@@ -582,19 +565,11 @@ func (m *Manager) clearSessionsChunkedV4(onChunk func([]SessionKey)) (int, error
 func (m *Manager) clearSessionsChunkedV6(onChunk func([]SessionKeyV6)) (int, error) {
 	deleted := 0
 	keys := make([]SessionKeyV6, 0, sessionClearSnapshotChunk)
-	var snatDNATKeys []DNATKeyV6
 	for {
 		keys = keys[:0]
-		snatDNATKeys = snatDNATKeys[:0]
 		full := false
 		if err := m.BatchIterateSessionsV6(func(key SessionKeyV6, val SessionValueV6) bool {
 			keys = append(keys, key)
-			if val.IsReverse == 0 &&
-				val.Flags&SessFlagSNAT != 0 &&
-				val.Flags&SessFlagStaticNAT == 0 {
-				// Must match the write-side key encoding (#2406: host-order port).
-				snatDNATKeys = append(snatDNATKeys, dnatKeyForSessionV6(key, val))
-			}
 			if len(keys) >= sessionClearSnapshotChunk {
 				full = true
 				return false
@@ -611,12 +586,6 @@ func (m *Manager) clearSessionsChunkedV6(onChunk func([]SessionKeyV6)) (int, err
 		}
 		before := deleted
 		deleted += m.clearSessionsV6(keys)
-		for i, dk := range snatDNATKeys {
-			m.DeleteDNATEntryV6(dk)
-			if (i+1)%sessionDeleteBatchSize == 0 {
-				runtime.Gosched()
-			}
-		}
 		if onChunk != nil {
 			onChunk(keys)
 		}

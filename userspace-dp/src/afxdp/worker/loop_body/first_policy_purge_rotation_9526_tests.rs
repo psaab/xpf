@@ -179,7 +179,8 @@ fn entry(
     is_reverse: bool,
     counter: Option<Arc<PolicyRuleCounter>>,
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry { key,
+    SyncedSessionEntry {
+        key,
     decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
@@ -227,9 +228,14 @@ fn entry(
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 /// Waits until the worker has completed `n` more loop iterations (the loop
@@ -368,13 +374,7 @@ impl RotationHarness {
             None,
             startup_tx,
         );
-        let plan = WorkerLaunchPlan::new(
-            0,
-            0,
-            Vec::new(),
-            crate::PollMode::BusyPoll,
-            DnatTableFds::default(),
-        );
+        let plan = WorkerLaunchPlan::new(0, 0, Vec::new(), crate::PollMode::BusyPoll);
         let cos = WorkerCoSState::from_coord(&coord);
         let runtime_atomics = Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new());
         let telemetry = WorkerPublishedTelemetry::new(

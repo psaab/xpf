@@ -202,7 +202,6 @@ func TestClearSessionsRejectsInvalidProtocol(t *testing.T) {
 	if dp.iterCalls != 0 || dp.iterV6Calls != 0 ||
 		dp.iterFromCalls != 0 || dp.iterV6FromCalls != 0 ||
 		dp.deleteCalls != 0 || dp.deleteV6Calls != 0 ||
-		dp.dnatCalls != 0 || dp.dnatV6Calls != 0 ||
 		dp.clearAllCalls != 0 {
 		t.Fatalf("invalid protocol performed dataplane work: %+v", dp)
 	}

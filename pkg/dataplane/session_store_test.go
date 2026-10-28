@@ -17,19 +17,11 @@ type sessionStoreTestDP struct {
 	DataPlane
 	v4           map[SessionKey]SessionValue
 	v6           map[SessionKeyV6]SessionValueV6
-	deletedDNAT  []DNATKey
-	deletedDNAT6 []DNATKeyV6
-	setDNAT      []DNATKey
-	setDNAT6     []DNATKeyV6
 	pnat         *PersistentNATTable
 	failSetV4    map[SessionKey]error
 	failSetV6    map[SessionKeyV6]error
-	failSetDNAT  error
-	failSetDNAT6 error
 	failDelV4    map[SessionKey]error
 	failDelV6    map[SessionKeyV6]error
-	failDelDNAT  map[DNATKey]error
-	failDelDNAT6 map[DNATKeyV6]error
 	batchDelV4   int
 	batchDelV6   int
 	forceGetMiss bool
@@ -139,38 +131,6 @@ func (m *sessionStoreTestDP) BatchDeleteSessionsV6(keys []SessionKeyV6) (int, er
 	return len(keys), nil
 }
 
-func (m *sessionStoreTestDP) DeleteDNATEntry(key DNATKey) error {
-	if err, ok := m.failDelDNAT[key]; ok {
-		return err
-	}
-	m.deletedDNAT = append(m.deletedDNAT, key)
-	return nil
-}
-
-func (m *sessionStoreTestDP) DeleteDNATEntryV6(key DNATKeyV6) error {
-	if err, ok := m.failDelDNAT6[key]; ok {
-		return err
-	}
-	m.deletedDNAT6 = append(m.deletedDNAT6, key)
-	return nil
-}
-
-func (m *sessionStoreTestDP) SetDNATEntry(key DNATKey, _ DNATValue) error {
-	if m.failSetDNAT != nil {
-		return m.failSetDNAT
-	}
-	m.setDNAT = append(m.setDNAT, key)
-	return nil
-}
-
-func (m *sessionStoreTestDP) SetDNATEntryV6(key DNATKeyV6, _ DNATValueV6) error {
-	if m.failSetDNAT6 != nil {
-		return m.failSetDNAT6
-	}
-	m.setDNAT6 = append(m.setDNAT6, key)
-	return nil
-}
-
 func (m *sessionStoreTestDP) GetPersistentNAT() *PersistentNATTable { return m.pnat }
 
 func TestPutClusterSyncedV4RollsBackForwardWhenReverseInstallFails(t *testing.T) {
@@ -210,49 +170,6 @@ func TestPutClusterSyncedV4RollsBackForwardWhenReverseInstallFails(t *testing.T)
 	}
 }
 
-func TestPutClusterSyncedV4RollsBackForwardAndReverseWhenDNATFails(t *testing.T) {
-	forward := SessionKey{
-		Protocol: 6,
-		SrcIP:    [4]byte{10, 0, 0, 1},
-		DstIP:    [4]byte{10, 0, 0, 2},
-		SrcPort:  1234,
-		DstPort:  80,
-	}
-	reverse := SessionKey{
-		Protocol: 6,
-		SrcIP:    [4]byte{10, 0, 0, 2},
-		DstIP:    [4]byte{10, 0, 0, 1},
-		SrcPort:  80,
-		DstPort:  1234,
-	}
-	dnatErr := errors.New("dnat install failed")
-	dp := &sessionStoreTestDP{
-		v4:          map[SessionKey]SessionValue{},
-		failSetDNAT: dnatErr,
-	}
-	store := NewDataPlaneSessionStore(dp)
-
-	err := store.PutClusterSyncedV4(forward, SessionValue{
-		State:      SessStateEstablished,
-		ReverseKey: reverse,
-		Flags:      SessFlagSNAT,
-		NATSrcIP:   0x0a0200c0,
-		NATSrcPort: 40000,
-	})
-	if !errors.Is(err, dnatErr) {
-		t.Fatalf("PutClusterSyncedV4 error = %v, want DNAT error", err)
-	}
-	if _, ok := dp.v4[forward]; ok {
-		t.Fatal("forward session remained after DNAT install failure")
-	}
-	if _, ok := dp.v4[reverse]; ok {
-		t.Fatal("reverse session remained after DNAT install failure")
-	}
-	if len(dp.setDNAT) != 0 {
-		t.Fatalf("DNAT entries installed despite failure: %+v", dp.setDNAT)
-	}
-}
-
 func TestPutClusterSyncedV6RollsBackForwardWhenReverseInstallFails(t *testing.T) {
 	forward := SessionKeyV6{Protocol: 6, SrcPort: 1234, DstPort: 80}
 	forward.SrcIP[15] = 1
@@ -283,7 +200,7 @@ func TestPutClusterSyncedV6RollsBackForwardWhenReverseInstallFails(t *testing.T)
 	}
 }
 
-func TestDeleteWithCompanionsV4RemovesReverseAndDNAT(t *testing.T) {
+func TestDeleteWithCompanionsV4RemovesReverse(t *testing.T) {
 	forward := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 1234, DstPort: 80}
 	reverse := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 2}, DstIP: [4]byte{10, 0, 0, 1}, SrcPort: 80, DstPort: 1234}
 	dp := &sessionStoreTestDP{
@@ -307,43 +224,6 @@ func TestDeleteWithCompanionsV4RemovesReverseAndDNAT(t *testing.T) {
 	}
 	if _, ok := dp.v4[reverse]; ok {
 		t.Fatal("reverse session still present")
-	}
-	wantDNAT := DNATKey{Protocol: 6, DstIP: 0x0a0200c0, DstPort: ntohs(40000)} // #2406 host-order key port
-	if len(dp.deletedDNAT) != 1 || dp.deletedDNAT[0] != wantDNAT {
-		t.Fatalf("deleted DNAT = %+v, want [%+v]", dp.deletedDNAT, wantDNAT)
-	}
-}
-
-func TestDeleteKnownV4StopsBeforeSessionsWhenDNATDeleteFails(t *testing.T) {
-	forward := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 1234, DstPort: 80}
-	reverse := SessionKey{Protocol: 6, SrcIP: [4]byte{10, 0, 0, 2}, DstIP: [4]byte{10, 0, 0, 1}, SrcPort: 80, DstPort: 1234}
-	val := SessionValue{
-		ReverseKey: reverse,
-		Flags:      SessFlagSNAT,
-		NATSrcIP:   0x0a0200c0,
-		NATSrcPort: 40000,
-	}
-	dnatErr := errors.New("dnat delete failed")
-	dp := &sessionStoreTestDP{
-		v4: map[SessionKey]SessionValue{
-			forward: val,
-			reverse: {IsReverse: 1},
-		},
-		failDelDNAT: map[DNATKey]error{
-			dnatKeyForSessionV4(forward, val): dnatErr,
-		},
-	}
-	store := NewDataPlaneSessionStore(dp)
-
-	err := store.DeleteKnownV4(forward, val, DeleteReasonGCExpired, false)
-	if !errors.Is(err, dnatErr) {
-		t.Fatalf("DeleteKnownV4 error = %v, want DNAT error", err)
-	}
-	if _, ok := dp.v4[forward]; !ok {
-		t.Fatal("forward session was deleted after DNAT cleanup failure")
-	}
-	if _, ok := dp.v4[reverse]; !ok {
-		t.Fatal("reverse session was deleted after DNAT cleanup failure")
 	}
 }
 
@@ -510,10 +390,6 @@ func TestReconcileClusterBulkUsesIteratorValueForCompanionDeleteV4(t *testing.T)
 	if _, ok := dp.v4[reverse]; ok {
 		t.Fatal("reverse session still present")
 	}
-	wantDNAT := DNATKey{Protocol: 6, DstIP: 0x0a0200c0, DstPort: ntohs(40000)} // #2406 host-order key port
-	if len(dp.deletedDNAT) != 1 || dp.deletedDNAT[0] != wantDNAT {
-		t.Fatalf("deleted DNAT = %+v, want [%+v]", dp.deletedDNAT, wantDNAT)
-	}
 }
 
 func TestDeleteWithCompanionsV4PreservesPersistentNATBinding(t *testing.T) {
@@ -581,7 +457,7 @@ func TestDataPlaneSessionStoreReportsNoRuntimeDeltaSource(t *testing.T) {
 	}
 }
 
-func TestDeleteWithCompanionsV6RemovesReverseAndDNAT(t *testing.T) {
+func TestDeleteWithCompanionsV6RemovesReverse(t *testing.T) {
 	forward := SessionKeyV6{Protocol: 17, SrcPort: 1234, DstPort: 53}
 	forward.SrcIP[15] = 1
 	forward.DstIP[15] = 2
@@ -610,73 +486,6 @@ func TestDeleteWithCompanionsV6RemovesReverseAndDNAT(t *testing.T) {
 	}
 	if _, ok := dp.v6[reverse]; ok {
 		t.Fatal("reverse session still present")
-	}
-	wantDNAT := DNATKeyV6{Protocol: 17, DstIP: natIP, DstPort: ntohs(53000)} // #2406 host-order key port
-	if len(dp.deletedDNAT6) != 1 || dp.deletedDNAT6[0] != wantDNAT {
-		t.Fatalf("deleted DNATv6 = %+v, want [%+v]", dp.deletedDNAT6, wantDNAT)
-	}
-}
-
-// TestDNATKeyForSessionPortParityWithShimReader is the #2406 Go<->Rust dnat
-// key parity guard. The AF_XDP shim reader (userspace-xdp classify_native_gre_
-// inner_*) builds its dnat lookup key port via u16::from_be_bytes(wire) — the
-// HOST-ORDER numeric value — then stores it natively into the key struct. The
-// Go session-derived dnat-table key writer must produce the SAME native key
-// port bytes for the same flow, or the shim lookup misses and the inbound
-// ICMP error is never steered (the network-order 3c bug).
-//
-// This test mirrors the shim reader's construction as golden bytes and proves
-// DNATKeyForSessionV4/V6 match. Reverting DNATKeyForSession* to write
-// val.NATSrcPort raw (network order, the pre-fix code) makes this RED on
-// little-endian, because the network-order key port bytes differ from the
-// host-order ones the reader builds.
-func TestDNATKeyForSessionPortParityWithShimReader(t *testing.T) {
-	// On the wire, port 443 is network order [0x01, 0xbb].
-	wirePortBytes := [2]byte{0x01, 0xbb}
-	// The shim reads u16::from_be_bytes(wire) => host-order numeric 443.
-	shimHostNumeric := binary.BigEndian.Uint16(wirePortBytes[:])
-	if shimHostNumeric != 443 {
-		t.Fatalf("from_be_bytes(wire) = %d, want 443", shimHostNumeric)
-	}
-	// The shim stores that numeric natively into the key struct.
-	var shimKeyPortBytes [2]byte
-	binary.NativeEndian.PutUint16(shimKeyPortBytes[:], shimHostNumeric)
-
-	// The SessionValue holds NATSrcPort in NETWORK order (== wire bytes
-	// interpreted natively). Build it the way the session-install path does.
-	natSrcPortNetwork := binary.NativeEndian.Uint16(wirePortBytes[:])
-
-	// V4 builder.
-	v4Key := DNATKeyForSessionV4(
-		SessionKey{Protocol: 6},
-		SessionValue{NATSrcPort: natSrcPortNetwork},
-	)
-	var goV4PortBytes [2]byte
-	binary.NativeEndian.PutUint16(goV4PortBytes[:], v4Key.DstPort)
-	if goV4PortBytes != shimKeyPortBytes {
-		t.Fatalf("DNATKeyForSessionV4 key port bytes = % x, want % x (shim reader)",
-			goV4PortBytes, shimKeyPortBytes)
-	}
-
-	// V6 builder.
-	v6Key := DNATKeyForSessionV6(
-		SessionKeyV6{Protocol: 6},
-		SessionValueV6{NATSrcPort: natSrcPortNetwork},
-	)
-	var goV6PortBytes [2]byte
-	binary.NativeEndian.PutUint16(goV6PortBytes[:], v6Key.DstPort)
-	if goV6PortBytes != shimKeyPortBytes {
-		t.Fatalf("DNATKeyForSessionV6 key port bytes = % x, want % x (shim reader)",
-			goV6PortBytes, shimKeyPortBytes)
-	}
-
-	// Counter-factual: the pre-fix network-order encoding (raw NATSrcPort)
-	// would NOT match the shim reader on little-endian.
-	var preFixBytes [2]byte
-	binary.NativeEndian.PutUint16(preFixBytes[:], natSrcPortNetwork)
-	if binary.NativeEndian.Uint16(preFixBytes[:]) == binary.NativeEndian.Uint16(shimKeyPortBytes[:]) &&
-		shimKeyPortBytes != preFixBytes {
-		t.Fatal("sanity: host and network encodings unexpectedly identical")
 	}
 }
 
