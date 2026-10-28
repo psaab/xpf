@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"net"
-	"slices"
 	"sort"
 	"strings"
 )
@@ -1156,8 +1155,8 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	}
 
 	// #3440 H1 / #10890: `security flow aging` values still do not reach the
-	// userspace session table. The Go-side conntrack GC sweep is skipped on
-	// the userspace AF_XDP dataplane, and the configured early-ageout and
+	// userspace session table. The Go-side conntrack GC that consumed them is
+	// retired (`pkg/conntrack`, deleted in #17155), and the configured early-ageout and
 	// high/low-watermark values are not wired into its admission policy.
 	// #10890 adds a separate fixed 90%-of-cap policy: when a validated new
 	// TCP initial SYN reaches a worker at that pressure, it sheds local
@@ -1749,56 +1748,23 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 							iface.Name, unit.Unit, unit.OutputTrafficControlProfile))
 					}
 				}
-				if unit.DSCPClassifier != "" {
-					if _, ok := cos.DSCPClassifiers[unit.DSCPClassifier]; !ok {
+				// #17183 (folding #7081/#4228): all five bindable code-point
+				// kinds warn through the one isDefined predicate the strict
+				// gate uses. Definedness is name resolution, independent of
+				// entries: a classifier defined with an empty or
+				// wholly-rejected body still has zero entries, and keying
+				// definedness on entry-bearing Defs would report
+				// "references undefined ... classifier" for a classifier the
+				// operator can see in their own config -- a confident wrong
+				// name, which is worse than silence. A defined-but-empty
+				// classifier is a separate condition and not this warning's
+				// subject.
+				for _, kind := range cosBoundKinds() {
+					name, bound := kind.bound(unit)
+					if bound && !kind.isDefined(cos, name) {
 						warnings = append(warnings, fmt.Sprintf(
-							"class-of-service interface %s unit %d references undefined dscp classifier %q",
-							iface.Name, unit.Unit, unit.DSCPClassifier))
-					}
-				}
-				if unit.IEEE8021Classifier != "" {
-					if _, ok := cos.IEEE8021Classifiers[unit.IEEE8021Classifier]; !ok {
-						warnings = append(warnings, fmt.Sprintf(
-							"class-of-service interface %s unit %d references undefined ieee-802.1 classifier %q",
-							iface.Name, unit.Unit, unit.IEEE8021Classifier))
-					}
-				}
-				// #7081: the third behavior-aggregate classifier. #6847 added
-				// the binding site and the enforcement, and this warning list --
-				// which covers every OTHER CoS binding a unit can carry -- was
-				// not extended with it, so a dangling inet-precedence reference
-				// was the only one that committed silently.
-				//
-				// DEFINEDNESS comes from INetPrecedenceClassifiers, the NAME
-				// list, not from INetPrecedenceClassifierDefs. Since #15681
-				// Defs is populated unconditionally, but a classifier defined
-				// with an empty or wholly-rejected body still has zero
-				// entries; keying definedness on entry-bearing Defs would
-				// report "references undefined ... classifier" for a
-				// classifier the operator can see in their own config -- a
-				// confident wrong name, which is worse than the silence
-				// being fixed. A defined-but-empty classifier is a separate
-				// condition and not this warning's subject.
-				if unit.INetPrecedenceClassifier != "" {
-					if !slices.Contains(cos.INetPrecedenceClassifiers, unit.INetPrecedenceClassifier) {
-						warnings = append(warnings, fmt.Sprintf(
-							"class-of-service interface %s unit %d references undefined inet-precedence classifier %q",
-							iface.Name, unit.Unit, unit.INetPrecedenceClassifier))
-					}
-				}
-				if unit.DSCPRewriteRule != "" {
-					if _, ok := cos.DSCPRewriteRules[unit.DSCPRewriteRule]; !ok {
-						warnings = append(warnings, fmt.Sprintf(
-							"class-of-service interface %s unit %d references undefined dscp rewrite-rule %q",
-							iface.Name, unit.Unit, unit.DSCPRewriteRule))
-					}
-				}
-				// #4228 Gap 4: a dangling ieee-802.1 (PCP) rewrite-rule binding.
-				if unit.IEEE8021RewriteRule != "" {
-					if _, ok := cos.IEEE8021RewriteRules[unit.IEEE8021RewriteRule]; !ok {
-						warnings = append(warnings, fmt.Sprintf(
-							"class-of-service interface %s unit %d references undefined ieee-802.1 rewrite-rule %q",
-							iface.Name, unit.Unit, unit.IEEE8021RewriteRule))
+							"class-of-service interface %s unit %d references undefined %s %q",
+							iface.Name, unit.Unit, kind.label, name))
 					}
 				}
 				// #hb166 T-4: a behavior-aggregate classifier code-point that

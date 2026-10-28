@@ -187,7 +187,7 @@ type detParams struct {
 	hostCount   uint32
 
 	// mode 1 (IPv4 subscriber):
-	hostBaseV4 uint32 // host-order numeric base (== Rust u32::from(Ipv4Addr))
+	hostBaseV4 uint32 // pool-numeric base (big-endian; == Rust u32::from(Ipv4Addr), NOT CPU order)
 
 	// mode 2 (IPv6 subscriber / NAPT64):
 	hostBaseV6 [16]byte
@@ -561,15 +561,15 @@ func expandPoolV4(pool *config.NATPool, mode Mode) ([]net.IP, *LookupError) {
 	// expand_pool_address, mode 2 mirrors the seen-set parse_nat64_rule
 	// threads through parse_pool_v4 (#14624; before that fix the NAT64
 	// caller appended verbatim and a duplicated member minted the same
-	// translated tuple for two subscribers). Keyed on the host-order u32
-	// so a bare host, its /32 form, and a CIDR-enumerated host all collide.
+	// translated tuple for two subscribers). Keyed on the pool-numeric
+	// u32 (big-endian, Rust u32::from(Ipv4Addr)) so a bare host, its /32
 	seen := make(map[uint32]struct{})
 	appendV4 := func(v uint32) {
 		if _, dup := seen[v]; dup {
 			return
 		}
 		seen[v] = struct{}{}
-		out = append(out, uint32ToIP(v))
+		out = append(out, bigEndianPoolUint32ToIP(v))
 	}
 	for _, a := range addrs {
 		// Classify the family with the colon-strict Go/Rust-parity SSOT
@@ -808,7 +808,7 @@ func lookupReverseInPool(p detParams, poolName string, natIP net.IP, natPort uin
 		if subIdx > math.MaxUint32-p.hostBaseV4 {
 			return nil, lerrf(ErrCodeNotFound, "subscriber index overflow")
 		}
-		subscriber = uint32ToIP(p.hostBaseV4 + subIdx).String()
+		subscriber = bigEndianPoolUint32ToIP(p.hostBaseV4 + subIdx).String()
 	case ModeV6:
 		off := p.wordOffset
 		baseWord := binary.BigEndian.Uint32(p.hostBaseV6[off : off+4])
@@ -879,7 +879,17 @@ func blockPorts(p detParams, blockIdx uint32) (uint16, uint16) {
 	return low, high
 }
 
-func uint32ToIP(v uint32) net.IP {
+// bigEndianPoolUint32ToIP converts a deterministic-NAT pool-numeric
+// u32 to net.IP with BigEndian. Pool numeric means Rust
+// u32::from(Ipv4Addr) — the first octet is the most significant
+// byte — NOT CPU/host byte order: pool words are derived with
+// binary.BigEndian.Uint32 over pool base addresses in this file, so
+// the inverse decode is BigEndian on every CPU. It is the OPPOSITE
+// semantics of dataplane.SessionIPv4 (#17188) — session-map NAT
+// fields are native-endian (from_ne_bytes) and must go through that
+// decoder, never this one. The former shared/host-order names hid
+// that trap.
+func bigEndianPoolUint32ToIP(v uint32) net.IP {
 	b := make(net.IP, 4)
 	binary.BigEndian.PutUint32(b, v)
 	return b

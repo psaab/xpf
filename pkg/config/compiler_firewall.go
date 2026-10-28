@@ -588,7 +588,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 		// structured nodes), so gate and compiler cannot disagree on any
 		// shape — including a malformed multi-key child, whose residue the
 		// quarantine below also consults.
-		for _, m := range firewallFamilyMembers9883(familyNode) {
+		for _, m := range familyMembers(familyNode) {
 			afNode, af := m.AfNode, m.Af
 			// #9883 QUARANTINE: an address-family token the schema does not
 			// declare (a typo like `inett`, or a not-yet-modelled family)
@@ -971,7 +971,7 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 			// The shared extractor (see compileFirewall): same members, same
 			// tokens, same quarantine verdict — this gate cannot see a
 			// family the compiler installs differently.
-			for _, m := range firewallFamilyMembers9883(familyNode) {
+			for _, m := range familyMembers(familyNode) {
 				afNode, af := m.AfNode, m.Af
 				if firewallFamilyQuarantined9883(m, firewallPermitted) {
 					continue // #9883: compiles to NOTHING, cannot collide
@@ -1094,7 +1094,7 @@ func effectiveFirewallInstances15997(tree *ConfigTree, colliding map[string]stru
 			continue
 		}
 		for _, familyNode := range fwNode.FindChildren("family") {
-			for _, m := range firewallFamilyMembers9883(familyNode) {
+			for _, m := range familyMembers(familyNode) {
 				if firewallFamilyQuarantined9883(m, permitted) {
 					continue
 				}
@@ -1299,7 +1299,7 @@ func pruneIdenticalFirewallCollisions15997(tree *ConfigTree, colliding map[strin
 // the metrics collector aggregates the duplicated key into one series.
 //
 // The walk mirrors compileFirewall exactly: every top-level `firewall`
-// node, firewallFamilyMembers9883 for both AST shapes (including the
+// node, familyMembers for both AST shapes (including the
 // implicit-inet `firewall { filter F { ... } }` spelling, whose terms
 // compileFirewall's family loop never installs today but which is still
 // an authored duplicate), quarantined families skipped, and
@@ -1352,7 +1352,7 @@ func validateFirewallFilterDuplicateTermsAST(nodes []*Node, lenient bool) ([]str
 		}
 		// Explicit families (both AST shapes, shared extractor).
 		for _, familyNode := range fwNode.FindChildren("family") {
-			for _, m := range firewallFamilyMembers9883(familyNode) {
+			for _, m := range familyMembers(familyNode) {
 				if firewallFamilyQuarantined9883(m, firewallPermitted) {
 					continue
 				}
@@ -1572,7 +1572,7 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 			// The shared extractor (see compileFirewall): same members, same
 			// tokens — this gate cannot see a family the compiler installs
 			// differently.
-			for _, m := range firewallFamilyMembers9883(familyNode) {
+			for _, m := range familyMembers(familyNode) {
 				afNode, af := m.AfNode, m.Af
 				if firewallFamilyQuarantined9883(m, firewallPermitted) {
 					continue
