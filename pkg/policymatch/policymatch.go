@@ -752,26 +752,14 @@ func ParseSelectorArgs(args []string) (SelectorArgs, error) {
 	return s, nil
 }
 
-// Query builds a policymatch.Query from parsed selectors. FeedOverlay,
-// PolicyInactiveFn, and PolicyInactiveForFn are left nil for the caller to
-// populate.
-// An empty SrcIP/DstIP maps to a nil net.IP (the match-any wildcard); a
-// non-empty value is already net.ParseIP-validated by ParseSelectorArgs.
-//
-// #6377: the colon-strict family hint is derived from the RAW selector text
-// (s.SrcIP/s.DstIP), before net.ParseIP folds an IPv4-mapped IPv6 literal, so a
-// Query built here classifies the tuple family the same way the four operator
-// surfaces do. (No production surface currently routes through this helper — it
-// is a test/convenience builder — but keeping it colon-strict avoids seeding the
-// fold into any future caller.)
-func (s SelectorArgs) Query() Query {
-	return Query{
+// Request converts parsed selectors to the shared Request (#17198).
+// FeedOverlay / scheduler inputs are supplied via Live at Assemble/Evaluate.
+func (s SelectorArgs) Request() Request {
+	return Request{
 		FromZone:         s.FromZone,
 		ToZone:           s.ToZone,
-		SrcIP:            net.ParseIP(s.SrcIP),
-		DstIP:            net.ParseIP(s.DstIP),
-		SrcFamily:        config.NATAddrFamily(s.SrcIP),
-		DstFamily:        config.NATAddrFamily(s.DstIP),
+		SrcIP:            s.SrcIP,
+		DstIP:            s.DstIP,
 		Protocol:         s.Protocol,
 		SrcPort:          s.SrcPort,
 		DstPort:          s.DstPort,
@@ -780,6 +768,12 @@ func (s SelectorArgs) Query() Query {
 		NonFirstFragment: s.NonFirstFragment,
 		IngressInterface: s.IngressInterface,
 	}
+}
+
+// Query assembles via the shared Assemble path (#17198); kept for tests /
+// offline callers with no live feed/scheduler inputs.
+func (s SelectorArgs) Query() Query {
+	return Assemble(nil, s.Request(), Live{})
 }
 
 // Result is the simulator verdict.

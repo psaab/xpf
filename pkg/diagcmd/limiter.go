@@ -12,14 +12,14 @@ import (
 // them (the REST API and the gRPC API share the single DefaultLimiter
 // below). Each in-flight diagnostic holds a child process, its output
 // pipes, a handler goroutine and — on gRPC — a stream, for up to the
-// 150s diagExecCeiling. Without an aggregate bound a burst of concurrent
+// 150s DiagExecCeiling. Without an aggregate bound a burst of concurrent
 // diagnostic requests can pin hundreds/thousands of PIDs/FDs/goroutines
 // and starve the control plane that drives the dataplane (#5057).
 //
 // The value is deliberately small: legitimate operator/automation use
 // runs a handful of diagnostics at once, while a firewall must never let
 // a diagnostic flood exhaust host resources. A per-job deadline (present
-// via pingExecTimeout/diagTracerouteTimeout in the API packages) plus
+// via PingExecTimeout/TracerouteTimeout above) plus
 // this aggregate concurrency bound together cap the worst-case resource
 // footprint.
 const MaxConcurrentDiagnostics = 4
