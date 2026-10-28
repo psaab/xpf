@@ -1,5 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: reject redundancy-group node statements without an explicit
+    election priority at commit; tolerant loads warn and continue booting
+    persisted configurations (#17820, following the #16672 node-shape gate).
+  * VRRP: serialize both ordinary preempt kicks and cluster-authoritative
+    `ForceRGMaster` against state transitions. The manager now checks the
+    state, sets `forcePreemptOnce`, and queues its kick in one `vi.mu`
+    critical section, preventing a delayed force from crossing MASTER
+    entry/resignation drains and re-promoting a resigned node (#17827).
   * Coalesce/ipmon: ipmon actuation is single-flighted — the engine
     tick is the only Tick driver (the loop is started context-only,
     no second sweep goroutine), and Tick itself claims an in-flight

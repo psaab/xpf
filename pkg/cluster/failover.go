@@ -1050,12 +1050,7 @@ func (m *Manager) debtDerivedWeightLocked(rg *RedundancyGroupState) int {
 	if rg.forcedSecondary {
 		return 0
 	}
-	totalLost := 0
-	for _, iface := range rg.MonitorFails {
-		key := monitorKey{rgID: rg.GroupID, iface: iface}
-		totalLost += m.monitorWeights[key]
-	}
-	return rgWeightFromDebt(totalLost)
+	return rgWeightFromDebt(m.monitorDebtTotalLocked(rg))
 }
 
 // manualFailoverRestoreWeightLocked recomputes an RG's monitor-derived weight

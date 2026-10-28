@@ -96,7 +96,7 @@ func (r *Runner) alreadyAtStagedVersion() (bool, error) {
 		return false, fmt.Errorf("refuse-before-PREFLIGHT: cannot prove the live version dir %s matches this cut (read source-generation stamp: %v); re-stage under a DISTINCT version tag", r.versionDir(stagedVer), gerr)
 	}
 	if existingGen == srcGen {
-		if stamp, present := r.readCommittedStamp(stagedVer); present && stamp != nil && stamp.Committed {
+		if stamp, present, stampErr := r.readCommittedStamp(stagedVer); stampErr == nil && present && stamp != nil && stamp.Committed {
 			if srcGen == "" {
 				return true, nil
 			}
