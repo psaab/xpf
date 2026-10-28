@@ -17,8 +17,7 @@ impl super::Coordinator {
     /// These atomics are shared across workers, so read directly rather than
     /// summing per-worker state.
     pub fn wg_uncovered_enqueued_total(&self) -> u64 {
-        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_ENQUEUED_TOTAL
-            .load(Ordering::Relaxed)
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_ENQUEUED_TOTAL.load(Ordering::Relaxed)
     }
 
     pub fn wg_uncovered_stale_total(&self) -> u64 {
@@ -26,28 +25,23 @@ impl super::Coordinator {
     }
 
     pub fn wg_uncovered_malformed_total(&self) -> u64 {
-        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_MALFORMED_TOTAL
-            .load(Ordering::Relaxed)
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_MALFORMED_TOTAL.load(Ordering::Relaxed)
     }
 
     pub fn wg_uncovered_nonlocal_total(&self) -> u64 {
-        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
-            .load(Ordering::Relaxed)
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL.load(Ordering::Relaxed)
     }
 
     pub fn wg_uncovered_queue_full_total(&self) -> u64 {
-        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_FULL_TOTAL
-            .load(Ordering::Relaxed)
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_FULL_TOTAL.load(Ordering::Relaxed)
     }
 
     pub fn wg_uncovered_queue_shed_total(&self) -> u64 {
-        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
-            .load(Ordering::Relaxed)
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL.load(Ordering::Relaxed)
     }
 
     pub fn wg_uncovered_queue_orphan_total(&self) -> u64 {
-        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_ORPHAN_TOTAL
-            .load(Ordering::Relaxed)
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_ORPHAN_TOTAL.load(Ordering::Relaxed)
     }
 
     pub fn wg_uncovered_queue_poison_recoveries(&self) -> u64 {
@@ -404,28 +398,6 @@ impl super::Coordinator {
 
     pub fn session_replication_queue_depth_max(&self) -> u64 {
         crate::afxdp::session_glue::SESSION_REPLICATION_QUEUE_DEPTH_MAX.load(Ordering::Relaxed)
-    }
-
-    /// #2244: total failed `dnat_table` reverse-SNAT BPF-map publishes.
-    /// Sum of the per-binding `dnat_publish_errors` atomics bumped on the
-    /// two worker poll-path `publish_dnat_table_entry` call sites whose
-    /// `bpf_map_update_elem` return code was previously discarded, PLUS the
-    /// shared `DNAT_PUBLISH_ERRORS_SHARED` static bumped on the coordinator's
-    /// peer-synced install path (`upsert_synced_session`, #4393), which has no
-    /// per-binding context. The `dnat_table` backs embedded-ICMP NAT reversal
-    /// (PMTUD / traceroute inbound ICMP errors mapped back to the pre-NAT
-    /// source); a failed publish silently drops the reverse record, so a
-    /// nonzero value is the cause-side signal for `dnat_table` capacity
-    /// pressure or kernel resource exhaustion. Surfaced as
-    /// `xpf_userspace_dnat_publish_errors_total`.
-    pub fn dnat_publish_errors_total(&self) -> u64 {
-        let per_binding: u64 = self
-            .workers
-            .live
-            .values()
-            .map(|live| live.dnat_publish_errors.load(Ordering::Relaxed))
-            .sum();
-        per_binding.saturating_add(DNAT_PUBLISH_ERRORS_SHARED.load(Ordering::Relaxed))
     }
 
     /// #2170: total stale-generation installs refused by the helper's
@@ -1446,9 +1418,7 @@ impl super::Coordinator {
             .session_delta_drain_cursor
             .load(Ordering::Relaxed);
         let (out, next_cursor, overflow, contributed_idx) =
-            crate::afxdp::session_delta::drain_session_deltas_fair_tracked(
-                &bindings, max, start,
-            );
+            crate::afxdp::session_delta::drain_session_deltas_fair_tracked(&bindings, max, start);
         self.workers
             .session_delta_drain_cursor
             .store(next_cursor, Ordering::Relaxed);

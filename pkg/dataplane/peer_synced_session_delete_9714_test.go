@@ -1,7 +1,6 @@
 package dataplane
 
 import (
-	"slices"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -26,13 +25,12 @@ type peerRecorderDP struct {
 	scopedV6     []ScopedSessionKeyV6
 	peerSingleV4 []SessionKey
 	singleV4     []SessionKey
-	dnatV4       []DNATKey
 	// #9752 round 3: the forward-only mark each helper batch/single carried.
 	peerBatchMarks  []bool
 	peerSingleMarks []bool
 	// refuseV4 names the keys the "helper" refuses as peer deletes; absentV4/V6
 	// model helper-applied rows whose mirror disappeared concurrently. events
-	// records the order of peer deletes and DNAT deletes; iterV4 is what a bulk
+	// records the order of peer deletes; iterV4 is what a bulk
 	// sweep sees.
 	refuseV4 map[ScopedSessionKey]bool
 	absentV4 map[ScopedSessionKey]bool
@@ -143,12 +141,6 @@ func (d *peerRecorderDP) GetSessionV4(SessionKey) (SessionValue, error) {
 
 func (d *peerRecorderDP) GetPersistentNAT() *PersistentNATTable { return nil }
 
-func (d *peerRecorderDP) DeleteDNATEntry(k DNATKey) error {
-	d.dnatV4 = append(d.dnatV4, k)
-	d.events = append(d.events, "dnat-delete")
-	return nil
-}
-
 func (d *peerRecorderDP) BatchIterateSessions(fn func(SessionKey, SessionValue) bool) error {
 	for _, entry := range d.iterV4 {
 		if !fn(entry.Key, entry.Value) {
@@ -161,8 +153,6 @@ func (d *peerRecorderDP) BatchIterateSessions(fn func(SessionKey, SessionValue) 
 func (d *peerRecorderDP) BatchIterateSessionsV6(func(SessionKeyV6, SessionValueV6) bool) error {
 	return nil
 }
-
-func (d *peerRecorderDP) DeleteDNATEntryV6(DNATKeyV6) error { return nil }
 
 func knownEntry9714() []SessionEntryV4 {
 	return []SessionEntryV4{{
@@ -335,9 +325,8 @@ func snatEntry9714() []SessionEntryV4 {
 }
 
 // #9714 review F1: a forward key the helper refuses keeps everything this node holds
-// for it. Its reverse companion is not deleted, and neither is its reverse-SNAT DNAT
-// row, which the unmarked path deletes before the helper is ever asked.
-func TestARefusedPeerDeleteKeepsItsReverseAndDNATRow9714(t *testing.T) {
+// for it. Its reverse companion is not deleted.
+func TestARefusedPeerDeleteKeepsItsReverse9714(t *testing.T) {
 	entries := snatEntry9714()
 	forward := ScopedSessionKey{Key: entries[0].Key, RoutingDomain: entries[0].Value.RoutingDomain}
 	dp := &peerRecorderDP{refuseV4: map[ScopedSessionKey]bool{forward: true}}
@@ -348,25 +337,6 @@ func TestARefusedPeerDeleteKeepsItsReverseAndDNATRow9714(t *testing.T) {
 	}
 	if len(dp.peerBatchV4) != 1 || dp.peerBatchV4[0] != forward {
 		t.Errorf("a refused forward still had its reverse companion deleted: peer deletes %v", dp.peerBatchV4)
-	}
-	if len(dp.dnatV4) != 0 {
-		t.Errorf("a refused peer delete still deleted the flow's reverse-SNAT DNAT row %v; its replies lose "+
-			"their steering while the helper keeps the session (#9714)", dp.dnatV4)
-	}
-}
-
-// #9714 review F1: an applied peer delete removes the DNAT row only AFTER the helper
-// applied the forward and reverse deletes.
-func TestAnAppliedPeerDeleteDeletesTheDNATRowAfterTheHelper9714(t *testing.T) {
-	dp := &peerRecorderDP{}
-	store := dataPlaneSessionStore{dp: dp}
-	if _, err := store.DeleteBatchKnownV4(snatEntry9714(), DeleteReasonClusterStale, false); err != nil {
-		t.Fatalf("DeleteBatchKnownV4: %v", err)
-	}
-	want := []string{"peer-delete", "peer-delete", "dnat-delete"}
-	if !slices.Equal(dp.events, want) {
-		t.Errorf("events %v, want %v: the DNAT row must go only after the helper applied the forward and "+
-			"reverse deletes (#9714)", dp.events, want)
 	}
 }
 

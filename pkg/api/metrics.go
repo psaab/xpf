@@ -134,6 +134,7 @@ type xpfCollector struct {
 	// reader; see metrics_dataplane_silent_skips_9019.go.
 	napiProbeTargetSkipsTotal              *prometheus.Desc
 	bindingWedgeGiveupsTotal               *prometheus.Desc
+	statusPollDecodeErrorsTotal            *prometheus.Desc
 	learnedRouteCapHitsTotal               *prometheus.Desc
 	learnedRouteCapGroupShedsTotal         *prometheus.Desc
 	learnedRouteCapGroupShedsByFamilyTotal *prometheus.Desc
@@ -658,11 +659,6 @@ type xpfCollector struct {
 	userspaceUnzonedIngressDenied *prometheus.Desc
 	userspaceUnzonedEgressDenied  *prometheus.Desc
 
-	// #2244: total failed dnat_table reverse-SNAT BPF-map publishes — the
-	// cause-side signal for dnat_table map-capacity pressure that silently
-	// breaks embedded-ICMP NAT reversal (PMTUD / traceroute).
-	userspaceDnatPublishErrors *prometheus.Desc
-
 	// #5674: peer-synced session imports rejected by the coordinator's
 	// aggregate admission bound — the availability/DoS ceiling that keeps a
 	// peer under session-table pressure (or a compromised peer) from driving
@@ -752,6 +748,7 @@ type xpfCollector struct {
 	userspaceWorkerCommandQueueShed      *prometheus.Desc
 	userspaceServerStatePoisonRecoveries *prometheus.Desc
 	userspaceServerHandlerPanics         *prometheus.Desc
+	userspaceReinjectHandlerPanics        *prometheus.Desc
 	// #10695 (#9506): IPsec-inner admission, parse, and D11 queue counters.
 	userspaceZoneGateUnzoned                 *prometheus.Desc
 	userspaceZoneGateAmbiguous               *prometheus.Desc
@@ -759,6 +756,7 @@ type xpfCollector struct {
 	userspaceZoneGateNoGeneration            *prometheus.Desc
 	userspaceIpsecInnerParseDrops            *prometheus.Desc
 	userspaceIpsecInnerEcnIllegalDrops       *prometheus.Desc
+	userspaceIpsecInnerNoroute               *prometheus.Desc
 	userspaceIpsecInnerWorkerQueueFull       *prometheus.Desc
 	userspaceIpsecInnerVerdictQueueFull      *prometheus.Desc
 	userspaceIpsecInnerVerdictQueueContended *prometheus.Desc

@@ -1607,13 +1607,16 @@ pub(in crate::afxdp) struct CoSQueueDropCounters {
     /// refill. High count indicates the per-queue rate cap is the
     /// limiter for this queue.
     pub(in crate::afxdp) queue_token_starvation_parks: u64,
-    /// Counts `writer.insert` returning zero on the exact-drain path —
-    /// i.e. the TX ring refused the batch. NOT a packet-loss event on
-    /// the exact path: FIFO variants leave items in `queue.hot.items` and
-    /// flow-fair variants explicitly restore them via
-    /// `restore_exact_*_scratch_to_queue_head_flow_fair`. Frames copied
-    /// into UMEM are released back to `free_tx_frames` by the caller;
-    /// the packets themselves are retried on the next drain cycle.
+    /// Counts `writer.insert` returning zero on a CoS submit —
+    /// i.e. the TX ring refused the batch. Counted on the exact-
+    /// drain path at the four direct-service sites and on the
+    /// non-exact CoS submit path (`submit_local` / `submit_prepared`,
+    /// #17159) when the typed retry reason reports a ring-full
+    /// insert failure. NOT a packet-loss event: FIFO variants leave
+    /// items in `queue.hot.items` and flow-fair / retry variants
+    /// explicitly restore them; frames copied into UMEM are released
+    /// back to `free_tx_frames` by the caller; the packets
+    /// themselves are retried on the next drain cycle.
     /// Elevated values indicate TX ring / completion reap pressure, not
     /// packet loss. See #706 / #709 for the downstream causes operators
     /// typically chase when this fires.

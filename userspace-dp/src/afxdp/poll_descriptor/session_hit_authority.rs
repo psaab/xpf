@@ -267,7 +267,6 @@ pub(super) enum OwnerHitIcmpVerdict {
 
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn owner_hit_icmp_verdict(
     forwarding: &ForwardingState,
     metadata: &SessionMetadata,
@@ -374,7 +373,7 @@ fn hit_egress_zone(
 
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn foreign_hit_verdict(
     forwarding: &ForwardingState,
     sessions: &SessionTable,

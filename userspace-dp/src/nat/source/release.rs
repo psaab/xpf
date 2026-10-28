@@ -442,7 +442,7 @@ pub(crate) fn rollback_source_nat_allocation_for_worker(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn release_source_nat_allocation_with_mode(
     iface_allocs: &InterfaceNatAllocators,
     rules: &[SourceNatRule],

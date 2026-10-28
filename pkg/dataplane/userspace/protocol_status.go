@@ -480,17 +480,6 @@ type ProcessStatus struct {
 	// Rust serde rename(...) exactly (protocol/status.rs).
 	EventStreamProducerSeqLockAcquisitionsTotal uint64 `json:"event_stream_producer_seq_lock_acquisitions_total,omitempty"`
 	EventStreamProducerSeqLockContendedTotal    uint64 `json:"event_stream_producer_seq_lock_contended_total,omitempty"`
-	// DnatPublishErrorsTotal counts failed dnat_table reverse-SNAT BPF-map
-	// publishes across userspace workers (#2244). The dnat_table is the
-	// reverse lookup the embedded-ICMP NAT path consults to map an inbound
-	// ICMP error (PMTUD Packet Too Big / Time Exceeded / traceroute) back
-	// to the original pre-NAT source; a failed publish (map at capacity,
-	// EINVAL) silently omits the record so the error is dropped or
-	// mis-delivered. A rising value is the cause-side signal for dnat_table
-	// map-capacity pressure. Surfaced as
-	// xpf_userspace_dnat_publish_errors_total. Omitempty for wire compat
-	// with older helpers.
-	DnatPublishErrorsTotal uint64 `json:"dnat_publish_errors_total,omitempty"`
 	// SyncedImportCapDropsTotal counts peer-synced session imports rejected by
 	// the coordinator's aggregate admission bound (#5674). Locally-created
 	// sessions are capped per worker at max_sessions; peer-synced imports were
@@ -709,6 +698,11 @@ type ProcessStatus struct {
 	// xpf_userspace_server_handler_panics_total. Decodes to 0 for an older
 	// helper that does not send the key.
 	ServerHandlerPanics uint64 `json:"server_handler_panics,omitempty"`
+	// #17123: reinject handler panics contained per-connection (each one
+	// drops one connection; the loop keeps accepting). Surfaced as
+	// xpf_userspace_reinject_handler_panics_total. Decodes to 0 for an older
+	// helper that does not send the key.
+	ReinjectHandlerPanics uint64 `json:"reinject_handler_panics,omitempty"`
 
 	// SessionInstallStaleIgnored is xpf_userspace_session_install_stale_ignored_total
 	// (#2170/#7398): stale-generation session INSTALLS refused by the helper's
@@ -910,6 +904,9 @@ type ProcessStatus struct {
 	// helpers (defaults to 0).
 	IpsecInnerParseDropsTotal uint64 `json:"ipsec_inner_parse_drops_total,omitempty"`
 	IpsecInnerEcnIllegalDrops uint64 `json:"ipsec_inner_ecn_illegal_drops,omitempty"`
+	// #17218: D19 no-route denials. Surfaced as
+	// xpf_userspace_ipsec_inner_noroute_total.
+	IpsecInnerNorouteTotal uint64 `json:"ipsec_inner_noroute_total,omitempty"`
 	// #10695 (#9506 counter slice): D11 queue/slab/verdict/orphan
 	// accounting — ingress-enqueue refusals (contended/closed/full/per-flow
 	// cap), verdict-post refusals, slab exhaustion, worker-set retirements,

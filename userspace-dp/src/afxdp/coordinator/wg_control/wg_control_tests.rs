@@ -449,14 +449,28 @@ fn wg_local_delivery_publication_tracks_live_entry_10409() {
                 tx,
                 wake: wake.clone(),
             }),
-            engine_ptr: 0,
-            spawned_ifindex: 400,
-            spawned_tunnel_name: "wg0".into(),
-            spawned_outer_mtu: WG_DEFAULT_OUTER_MTU,
-            spawned_outer_bind_device: None,
-            spawned_per_peer_outer_mtu: std::collections::HashMap::new(),
+            // #17089: hand-built entry; the publication path needs the
+            // captured ifindex, so it carries a full spawn capture.
+            spawned: Some(crate::afxdp::types::WgSpawnInputs {
+                engine: Arc::new(crate::afxdp::wg::WgEngine::new(
+                    crate::afxdp::wg::WgEngineConfig {
+                        local_private_key: [0u8; 32].into(),
+                        listen_port: 51820,
+                        peers: Vec::new(),
+                    },
+                )),
+                ifindex: 400,
+                tunnel_name: "wg0".into(),
+                listen_port: 51820,
+                outer_mtu: WG_DEFAULT_OUTER_MTU,
+                per_peer_outer_mtu: std::collections::HashMap::new(),
+                outer_bind_device: None,
+                kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,
+                peer_config: Vec::new(),
+                endpoint_hosts: Vec::new(),
+                preferred_v6: None,
+            }),
             last_spawn_attempt_ns: 0,
-            spawned_kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,
             resolver_telemetry: None,
         },
     );

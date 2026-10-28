@@ -819,7 +819,7 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
         )
     })?;
     let inner_packet = inner_frame.get(inner_l3..)?;
-    let inner_len = crate::afxdp::gre::packet_trimmed_len(inner_packet, inner_meta.addr_family)?;
+    let inner_len = packet_trimmed_len(inner_packet, inner_meta.addr_family)?;
     let inner_packet = &inner_packet[..inner_len];
 
     // #1434 B1b cryptokey routing: select the egress peer by the inner

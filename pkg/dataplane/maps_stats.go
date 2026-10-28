@@ -56,8 +56,6 @@ var mapStatsReportDescriptors = []mapStatDescriptor{
 	{"address_membership", true},
 	{"applications", true},
 	{"snat_rules", false},
-	{"dnat_table", true},
-	{"dnat_table_v6", true},
 	{"nat_pool_configs", false},
 	{"screen_configs", false},
 	{"global_counters", false},

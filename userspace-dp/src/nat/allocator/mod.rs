@@ -298,7 +298,7 @@ pub(super) fn persistent_egress_scope(from_zone: &str, to_zone: &str) -> u32 {
 /// normalized key, and the literal `0` stays reserved for NAT64 BIBs,
 /// legacy/imported records and direct allocator calls whose grants share
 /// one bucket by design. Never returns 0.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn persistent_egress_scope_v2(
     from_zone: &str,
     to_zone: &str,
@@ -2496,7 +2496,7 @@ impl PortAllocator {
     /// zone-pair lookup below collapsed that to UNSCOPED (any grant bucket
     /// admits), widening a strict sibling's `target-host-port` binding to
     /// `any-remote-host` when the two share one pool.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn persistent_inbound_lookup_for_rule(
         &self,
         protocol: u8,
@@ -2526,9 +2526,117 @@ impl PortAllocator {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// #17197: non-counting twin of
+    /// [`persistent_inbound_lookup_for_rule`] for pure classification
+    /// callers (the Stage-11 DNAT verdict). Same rule-scoped admission,
+    /// but the lease tables are read under `read_live`, so no
+    /// `live_write_lock_acquisitions` / `live_write_lock_contended`
+    /// telemetry is charged and no write guard is taken. The returned
+    /// lease key is a plain key copy; holding it is the caller's
+    /// separate `acquire_persistent_inbound*` step, which the verdict
+    /// path never performs.
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    pub(crate) fn persistent_inbound_peek_for_rule(
+        &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+        rule: &super::source::SourceNatRule,
+        ingress_zone: &str,
+        packet_from_zone: &str,
+        packet_to_zone: &str,
+        scope: &super::NatScopeCtx<'_>,
+    ) -> PersistentInbound {
+        let arrival_scope =
+            rule.persistent_rule_scope(packet_from_zone, packet_to_zone, ingress_zone, scope);
+        self.persistent_inbound_peek_scoped_for_rule(
+            protocol,
+            translated_ip,
+            translated_port,
+            remote_ip,
+            remote_port,
+            now_ns,
+            arrival_scope,
+            rule,
+            ingress_zone,
+        )
+    }
+
+    /// #17197: read-only peek twin of the scoped-for-rule lookup:
+    /// identical admission logic under a shared `live` read guard
+    /// instead of the counted write guard (`lock_live`). The lookup
+    /// body only reads `persistent_by_translated` /
+    /// `persistent_by_source` / `persistent_permissions` and never
+    /// mutates lease state, so a read guard is sufficient;
+    /// `read_live` is deliberately NOT #4800-counted (see its doc),
+    /// so this path bumps no `live_write_lock_acquisitions` /
+    /// `live_write_lock_contended` telemetry. Pure classification
+    /// callers (the Stage-11 verdict) use it; the committed-install
+    /// path keeps the counting entry point so its telemetry is
+    /// unchanged.
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    fn persistent_inbound_peek_scoped_for_rule(
+        &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+        arrival_scope: u32,
+        rule: &super::source::SourceNatRule,
+        ingress_zone: &str,
+    ) -> PersistentInbound {
+        let live = self.read_live();
+        self.persistent_inbound_lookup_scoped_for_rule_locked(
+            &live,
+            protocol,
+            translated_ip,
+            translated_port,
+            remote_ip,
+            remote_port,
+            now_ns,
+            arrival_scope,
+            rule,
+            ingress_zone,
+        )
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn persistent_inbound_lookup_scoped_for_rule(
         &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+        arrival_scope: u32,
+        rule: &super::source::SourceNatRule,
+        ingress_zone: &str,
+    ) -> PersistentInbound {
+        let live = self.lock_live();
+        self.persistent_inbound_lookup_scoped_for_rule_locked(
+            &live,
+            protocol,
+            translated_ip,
+            translated_port,
+            remote_ip,
+            remote_port,
+            now_ns,
+            arrival_scope,
+            rule,
+            ingress_zone,
+        )
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    fn persistent_inbound_lookup_scoped_for_rule_locked(
+        &self,
+        live: &PortAllocatorLiveState,
         protocol: u8,
         translated_ip: IpAddr,
         translated_port: u16,
@@ -2544,7 +2652,6 @@ impl PortAllocator {
             translated_ip,
             translated_port,
         };
-        let live = self.lock_live();
         let Some(keys) = live.persistent_by_translated.get(&reverse) else {
             return PersistentInbound::Miss;
         };
@@ -3776,7 +3883,7 @@ impl PortAllocator {
     /// directly so the persistent-admission epilogue stays single-sourced;
     /// this wrapper exists only to keep the ~70 test call sites terse.
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(super) fn allocate_translation(
         &self,
         flow: SourceNatFlowKey,
@@ -3813,7 +3920,7 @@ impl PortAllocator {
     /// and no zone. Production NAT64 mint goes through `allocate`
     /// directly (see `allocate_nat64_pool_port_excluding`).
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(super) fn allocate_translation_with_exclusions(
         &self,
         flow: SourceNatFlowKey,
@@ -4065,7 +4172,7 @@ impl PortAllocator {
     /// near-capacity pressure fallback (bounded expiry GC per address, then
     /// retry). Both hold the global mutex; the port claim uses the same lock-
     /// free bitmap (correctness is unaffected by whether the mutex is held).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn allocate_translation_locked(
         &self,
         flow: SourceNatFlowKey,
@@ -5845,7 +5952,6 @@ impl PortAllocator {
     /// tuple deterministically from the new geometry.
     ///
     /// Runs at config-apply only; no per-packet work.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn reseed_retained_deterministic_v6_from(
         &self,
         prev: &PortAllocator,
@@ -6260,7 +6366,7 @@ impl PortAllocator {
     /// configured. When `capture_previous_holders` is true, the incumbent mask
     /// is captured by `capture_and_replace` while the same live-state guard
     /// remains held through eviction and installation.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(super) fn reserve_flow_maybe_persistent_with_identity(
         &self,
         flow: SourceNatFlowKey,
@@ -6314,7 +6420,7 @@ impl PortAllocator {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn reserve_flow_maybe_persistent_inner(
         &self,
         flow: SourceNatFlowKey,
@@ -7561,7 +7667,7 @@ impl PortAllocator {
     /// `address-persistent` pool (the address is a pure function of the source)
     /// and an EXISTING lease (the address is pinned by `persistent-nat` for the
     /// permit scope's lifetime). A blanket fallback would break both.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(super) fn reserve_address_only_persistent(
         &self,
         flow: SourceNatFlowKey,
@@ -7595,7 +7701,7 @@ impl PortAllocator {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(super) fn reserve_address_only_persistent_with_zones(
         &self,
         flow: SourceNatFlowKey,

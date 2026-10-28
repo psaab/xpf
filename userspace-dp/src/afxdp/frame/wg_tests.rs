@@ -1599,7 +1599,7 @@ fn wg_encap_in_place_matches_separate_buffer() {
     let inner_l3 = 14usize;
     let inner_packet = &frame[inner_l3..];
     let inner_len =
-        crate::afxdp::gre::packet_trimmed_len(inner_packet, libc::AF_INET as u8).unwrap();
+        packet_trimmed_len(inner_packet, libc::AF_INET as u8).unwrap();
     let expected_inner = inner_packet[..inner_len].to_vec();
 
     let out = wg_encap_frame(&frame, inner_v4_meta(), &decision, &state)

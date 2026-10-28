@@ -7,6 +7,7 @@ pub(crate) mod checksum;
 mod generated;
 mod headers;
 mod inspect;
+mod inner_l4;
 mod tcp;
 mod wg;
 
@@ -46,6 +47,10 @@ pub(in crate::afxdp) use headers::{
 // #2844: re-exported `pub(crate)` so the top-level `crate::nat64`
 // module (outside `crate::afxdp`) can use the one SSOT Ethernet writer.
 pub(crate) use headers::write_eth_header_slice;
+// #17164: the shared tunnel-inner L4 parser (GRE/WG/IPsec), re-exported
+// `pub(crate)` so `crate::slowpath`'s IPsec-inner descriptor builder
+// reaches the same single source as the afxdp decap paths.
+pub(crate) use inner_l4::{packet_trimmed_len, parse_inner_protocol_and_offsets};
 
 use byte_writes::{
     write_ipv4_dst, write_ipv4_src, write_ipv6_dst, write_ipv6_src, write_l4_dst_port,
@@ -2916,6 +2921,11 @@ mod tests_shim_tunnel_frag_10677;
 #[cfg(test)]
 #[path = "tests_shim_land_13953.rs"]
 mod tests_shim_land_13953;
+// #17223: the shim's shared kernel-pass predicates, degraded composition
+// and DEGRADED_TWIN agreement, executed rather than modelled.
+#[cfg(test)]
+#[path = "tests_shim_kernel_pass_17223.rs"]
+mod tests_shim_kernel_pass_17223;
 // #10661: ATOMIC+real Fragment chain consistency cells (tracker/shim/screens).
 #[cfg(test)]
 #[path = "tests_10661_atomic_chain.rs"]

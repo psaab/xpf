@@ -159,14 +159,6 @@ func ConntrackV6PinPath() string {
 	return filepath.Join(bpfPinPath, "sessions_v6")
 }
 
-func UserspaceDnatTablePinPath() string {
-	return filepath.Join(bpfPinPath, "dnat_table")
-}
-
-func UserspaceDnatTableV6PinPath() string {
-	return filepath.Join(bpfPinPath, "dnat_table_v6")
-}
-
 func UserspaceTracePinPath() string {
 	return filepath.Join(bpfPinPath, "userspace_trace")
 }
@@ -341,12 +333,6 @@ type DataPlane interface {
 	SessionCount() (v4, v6 int)
 	ClearAllSessions() (int, int, error)
 
-	// DNAT
-	SetDNATEntry(key DNATKey, val DNATValue) error
-	DeleteDNATEntry(key DNATKey) error
-	SetDNATEntryV6(key DNATKeyV6, val DNATValueV6) error
-	DeleteDNATEntryV6(key DNATKeyV6) error
-
 	// SNAT
 
 	// NAT pools
@@ -452,8 +438,6 @@ type DataPlane interface {
 	DeleteStaleVlanIface(written map[uint32]bool)
 	DeleteStaleZonePairPolicies(written map[ZonePairKey]bool)
 	DeleteStaleApplications(written map[AppKey]bool)
-	DeleteStaleDNATStatic(written map[DNATKey]bool)
-	DeleteStaleDNATStaticV6(written map[DNATKeyV6]bool)
 	DeleteStaleStaticNAT(writtenV4 map[StaticNATKeyV4]bool, writtenV6 map[StaticNATKeyV6]bool)
 	ZeroStaleScreenConfigs(maxID uint32)
 	DeleteStaleIfaceFilter(written map[IfaceFilterKey]bool)

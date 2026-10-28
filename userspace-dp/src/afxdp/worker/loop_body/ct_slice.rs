@@ -71,7 +71,7 @@ impl PendingNeighTimer {
 /// Drive one timer pending-neighbor retry pass over every binding.
 /// Returns true when the cadence fired (the caller may count it as
 /// work for idle regulation); false when gated off.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn run_pending_neigh_timer(
     timer: &mut PendingNeighTimer,
     bindings: &mut [BindingWorker],
@@ -129,7 +129,7 @@ pub(super) fn run_pending_neigh_timer(
     }
     true
 }
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline(never)]
 pub(super) fn run_ct_slice(
     sessions: &mut crate::session::SessionTable,

@@ -35,7 +35,7 @@ func TestVerifyEmbeddedUserspaceShim(t *testing.T) {
 // both ways. This is the gate behind making the shrunk C2 pre-flight
 // authoritative while production loads full map geometry. Root-only
 // and slow (~20-40s: the unmodified loads create the full 10M-entry
-// dnat_table and the REJECT walks ~1M insns twice).
+// hash maps and the REJECT walks ~1M insns twice).
 func TestVerifyUserspaceShimShrinkEquivalence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow verifier walks; skipped in -short")
@@ -68,8 +68,8 @@ func TestVerifyUserspaceShimShrinkEquivalence(t *testing.T) {
 			t.Fatalf("embedded PASS object failed with shrink=%v: %v", shrink, err)
 		}
 	}
-	if got := goodSpec.Maps[userspaceShimCompatibilityDNATName].MaxEntries; got != userspaceShimMaxSessions {
-		t.Fatalf("verify mutated the caller's spec: dnat_table MaxEntries = %d, want %d", got, userspaceShimMaxSessions)
+	if got := goodSpec.Maps[userspaceSessionsMapName].MaxEntries; got != UserspaceSessionsMaxEntries {
+		t.Fatalf("verify mutated the caller's spec: userspace_sessions MaxEntries = %d, want %d", got, UserspaceSessionsMaxEntries)
 	}
 
 	badSpec := load(t, "testdata/userspace_xdp_bpfel_1864_reject.o")
@@ -83,7 +83,7 @@ func TestVerifyUserspaceShimShrinkEquivalence(t *testing.T) {
 
 // TestVerifyUserspaceShimSpecValidationOrder guards the SMR r2
 // ordering trap: spec validation must see the UNMODIFIED spec (it
-// asserts dnat_table.MaxEntries == userspaceShimMaxSessions), while
+// asserts userspace_sessions.MaxEntries == UserspaceSessionsMaxEntries), while
 // the verify-only load shrinks hash maps afterwards on a copy. This
 // unprivileged test proves the embedded spec passes the production
 // validation with its full map geometry intact (if the shrink ever
@@ -99,11 +99,11 @@ func TestVerifyUserspaceShimSpecValidationOrder(t *testing.T) {
 	if err := validateUserspaceShimSpec(spec); err != nil {
 		t.Fatalf("embedded spec failed production validation: %v", err)
 	}
-	dnat, ok := spec.Maps[userspaceShimCompatibilityDNATName]
+	sess, ok := spec.Maps[userspaceSessionsMapName]
 	if !ok {
-		t.Fatalf("embedded spec missing %s", userspaceShimCompatibilityDNATName)
+		t.Fatalf("embedded spec missing %s", userspaceSessionsMapName)
 	}
-	if dnat.MaxEntries != userspaceShimMaxSessions {
-		t.Fatalf("dnat_table MaxEntries = %d, want %d", dnat.MaxEntries, userspaceShimMaxSessions)
+	if sess.MaxEntries != UserspaceSessionsMaxEntries {
+		t.Fatalf("userspace_sessions MaxEntries = %d, want %d", sess.MaxEntries, UserspaceSessionsMaxEntries)
 	}
 }

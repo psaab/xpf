@@ -111,52 +111,6 @@ func (m *Manager) DeleteStaleApplications(written map[AppKey]bool) {
 	}
 }
 
-// DeleteStaleDNATStatic removes static dnat_table entries not in the written set.
-func (m *Manager) DeleteStaleDNATStatic(written map[DNATKey]bool) {
-	zm, present, _ := m.lookupMapLocked("dnat_table")
-	if !present {
-		return
-	}
-	var key DNATKey
-	var val DNATValue
-	iter := zm.Iterate()
-	var stale []DNATKey
-	for iter.Next(&key, &val) {
-		if val.Flags == DNATFlagStatic && !written[key] {
-			stale = append(stale, key)
-		}
-	}
-	for _, k := range stale {
-		zm.Delete(k)
-	}
-	if len(stale) > 0 {
-		slog.Info("deleted stale dnat_table entries", "count", len(stale))
-	}
-}
-
-// DeleteStaleDNATStaticV6 removes static dnat_table_v6 entries not in the written set.
-func (m *Manager) DeleteStaleDNATStaticV6(written map[DNATKeyV6]bool) {
-	zm, present, _ := m.lookupMapLocked("dnat_table_v6")
-	if !present {
-		return
-	}
-	var key DNATKeyV6
-	var val DNATValueV6
-	iter := zm.Iterate()
-	var stale []DNATKeyV6
-	for iter.Next(&key, &val) {
-		if val.Flags == DNATFlagStatic && !written[key] {
-			stale = append(stale, key)
-		}
-	}
-	for _, k := range stale {
-		zm.Delete(k)
-	}
-	if len(stale) > 0 {
-		slog.Info("deleted stale dnat_table_v6 entries", "count", len(stale))
-	}
-}
-
 // DeleteStaleStaticNAT removes static_nat entries not in the written sets.
 func (m *Manager) DeleteStaleStaticNAT(writtenV4 map[StaticNATKeyV4]bool, writtenV6 map[StaticNATKeyV6]bool) {
 	if zm, present, _ := m.lookupMapLocked("static_nat_v4"); present {

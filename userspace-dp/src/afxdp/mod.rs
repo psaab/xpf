@@ -106,8 +106,8 @@ pub(crate) mod wg_uncovered_forward;
 pub use ha::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 pub(crate) use ha::{
     HelperMutationBegin, HelperMutationOutcome, SYNCED_DELETE_REFUSED_PREFIX,
-    SYNCED_IMPORT_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX, SyncedDeleteOutcome,
-    SyncedImportOutcome,
+    SYNCED_IMPORT_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX, SyncedDeleteMode,
+    SyncedDeleteOutcome, SyncedImportOutcome,
 };
 // #7919: the per-session counter query's wait handle + reply row, used by the
 // control-socket handler's two-phase dispatch.
@@ -315,15 +315,6 @@ use self::umem::*;
 // afxdp-private in production — this wrapper exists only under `cfg(test)`.
 #[cfg(test)]
 pub(crate) fn packet_rel_l4_offset_and_protocol_for_test(
-    packet: &[u8],
-    addr_family: u8,
-) -> Option<(usize, u8)> {
-    self::frame::packet_rel_l4_offset_and_protocol(packet, addr_family)
-}
-
-/// Production wrapper for the canonical ext-aware L4 walker used by the
-/// deny-only IPsec-inner descriptor path.
-pub(crate) fn packet_rel_l4_offset_and_protocol_for_ipsec(
     packet: &[u8],
     addr_family: u8,
 ) -> Option<(usize, u8)> {

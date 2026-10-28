@@ -1,7 +1,7 @@
 package cli
 
 // #4886 A (CLI half): the on-box filtered session clear used to snapshot EVERY
-// matching forward key + its reverse/DNAT companions (v4 then v6) into growing
+// matching forward key + its reverse companions (v4 then v6) into growing
 // slices before deleting, so a broad filtered clear on a multi-million-entry
 // table allocated O(matches) up front and could OOM the in-process daemon before
 // making progress. It now collects at most cliClearFilteredBatch keys, deletes
@@ -89,8 +89,6 @@ func (d *orderedClearDP) DeleteSession(key dataplane.SessionKey) error {
 }
 
 func (d *orderedClearDP) DeleteSessionV6(dataplane.SessionKeyV6) error { return nil }
-func (d *orderedClearDP) DeleteDNATEntry(dataplane.DNATKey) error      { return nil }
-func (d *orderedClearDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error  { return nil }
 
 type protocolClearDP struct {
 	*dataplane.Manager
@@ -128,8 +126,6 @@ func (d *protocolClearDP) DeleteSession(key dataplane.SessionKey) error {
 }
 
 func (d *protocolClearDP) DeleteSessionV6(dataplane.SessionKeyV6) error { return nil }
-func (d *protocolClearDP) DeleteDNATEntry(dataplane.DNATKey) error      { return nil }
-func (d *protocolClearDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error  { return nil }
 
 func TestClearFilteredSessionsSCTPOnly_10486(t *testing.T) {
 	sctp := dataplane.SessionKey{
@@ -192,7 +188,7 @@ func TestClearFilteredSessionsBoundedWorkingSet_4886(t *testing.T) {
 		deleted: map[dataplane.SessionKey]bool{},
 	}
 	for i := 0; i < n; i++ {
-		// Non-NAT TCP sessions (no reverse/DNAT companion): only the forward
+		// Non-NAT TCP sessions (no reverse companion): only the forward
 		// key is collected, so the chunk size == forward-key count.
 		k := dataplane.SessionKey{Protocol: 6, SrcPort: uint16(1000 + i)}
 		dp.keys = append(dp.keys, k)

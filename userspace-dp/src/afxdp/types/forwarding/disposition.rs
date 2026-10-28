@@ -78,7 +78,6 @@ impl ForwardingDisposition {
     ///   - `MissingNeighbor`: route exists, ARP/NDP unresolved; the kernel
     ///     can resolve and forward (the userspace prober runs in parallel).
     ///
-
     /// NOT eligible (drop — do NOT reinject):
     ///   - `PolicyDenied`: a zone-policy DENY. Reinjecting would silently
     ///     bypass the firewall by forwarding the packet via the kernel FIB

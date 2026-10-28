@@ -15,54 +15,6 @@ import (
 // maps_counters.go) by the #1686 rule that domain-specific counters stay with
 // their domain.
 
-// SetDNATEntry writes a dnat_table entry.
-func (m *Manager) SetDNATEntry(key DNATKey, val DNATValue) error {
-	zm, present, st := m.lookupMapLocked("dnat_table")
-	if st == registryFresh {
-		return fmt.Errorf("%w: dnat_table", ErrDataplaneNotArmed)
-	}
-	if !present {
-		return fmt.Errorf("dnat_table map not found")
-	}
-	return zm.Update(key, val, ebpf.UpdateAny)
-}
-
-// DeleteDNATEntry deletes a dnat_table entry.
-func (m *Manager) DeleteDNATEntry(key DNATKey) error {
-	zm, present, st := m.lookupMapLocked("dnat_table")
-	if st == registryFresh {
-		return fmt.Errorf("%w: dnat_table", ErrDataplaneNotArmed)
-	}
-	if !present {
-		return fmt.Errorf("dnat_table map not found")
-	}
-	return zm.Delete(key)
-}
-
-// SetDNATEntryV6 writes a dnat_table_v6 entry.
-func (m *Manager) SetDNATEntryV6(key DNATKeyV6, val DNATValueV6) error {
-	zm, present, st := m.lookupMapLocked("dnat_table_v6")
-	if st == registryFresh {
-		return fmt.Errorf("%w: dnat_table_v6", ErrDataplaneNotArmed)
-	}
-	if !present {
-		return fmt.Errorf("dnat_table_v6 map not found")
-	}
-	return zm.Update(key, val, ebpf.UpdateAny)
-}
-
-// DeleteDNATEntryV6 deletes a dnat_table_v6 entry.
-func (m *Manager) DeleteDNATEntryV6(key DNATKeyV6) error {
-	zm, present, st := m.lookupMapLocked("dnat_table_v6")
-	if st == registryFresh {
-		return fmt.Errorf("%w: dnat_table_v6", ErrDataplaneNotArmed)
-	}
-	if !present {
-		return fmt.Errorf("dnat_table_v6 map not found")
-	}
-	return zm.Delete(key)
-}
-
 // ReadNATRuleCounter returns the per-rule NAT translation hit total for a
 // counter ID (#2218). The value is the userspace-reported offset: the Rust
 // userspace dataplane never writes the legacy nat_rule_counters BPF array map

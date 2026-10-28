@@ -14,7 +14,6 @@ use crate::session::{PMechSessionDirectory, PMechTokenProbe};
 /// the RX list hands a TX address to the RX fill ring and strands the TX
 /// frame — the #10597 contract). Native RX descriptors go to
 /// `scratch_recycle` and return to the RX fill ring.
-
 /// #15243 (A60-01): whether a reverse packet may be admitted to the hold
 /// queue. Only packets whose `meta` still describes the frame referenced
 /// by their descriptor may be held:

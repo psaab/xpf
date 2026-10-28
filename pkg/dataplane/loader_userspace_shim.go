@@ -82,17 +82,11 @@ const (
 		"routes. Either way brief downtime is unavoidable. Do NOT `make " +
 		"generate` (the embedded shim is the intended target, not broken). See " +
 		"pkg/dataplane/README.md (#1864)."
-	userspaceSessionsMapName           = "userspace_sessions"
-	userspaceBindingsMapName           = "userspace_bindings"
-	userspaceIngressIfacesMapName      = "userspace_ingress_ifaces"
-	userspaceHeartbeatMapName          = "userspace_heartbeat"
-	userspaceXskMapName                = "userspace_xsk_map"
-	userspaceShimCompatibilityDNATName = "dnat_table"
-	// userspaceShimCompatibilityDNATV6Name is the IPv6 reverse-NAT steering
-	// table. Like dnat_table it is BOTH declared by the shim ELF and replaced at
-	// load (opts.MapReplacements["dnat_table_v6"]); #5484 pulls it into the same
-	// ABI arms dnat_table already had.
-	userspaceShimCompatibilityDNATV6Name = "dnat_table_v6"
+	userspaceSessionsMapName      = "userspace_sessions"
+	userspaceBindingsMapName      = "userspace_bindings"
+	userspaceIngressIfacesMapName = "userspace_ingress_ifaces"
+	userspaceHeartbeatMapName     = "userspace_heartbeat"
+	userspaceXskMapName           = "userspace_xsk_map"
 	// userspaceFallbackStatsMapName is the internal mixed-version compatibility
 	// name for the degraded-path counter map (operator surface:
 	// degraded_path_counters). #4113 changed its BPF type from Array to
@@ -144,8 +138,6 @@ var userspaceRebuiltCollectionPinMapNames = [...]string{
 var pinnedMaps = map[string]bool{
 	"sessions":          true,
 	"sessions_v6":       true,
-	"dnat_table":        true,
-	"dnat_table_v6":     true,
 	"nat64_state":       true,
 	"nat_port_counters": true, // retained shim shared state (loader_ebpf.go used to also list this — kept here)
 }
@@ -216,16 +208,6 @@ func (m *Manager) loadUserspaceShimObjectsOnce() (err error) {
 			PinPath: bpfPinPath,
 		},
 		MapReplacements: map[string]*ebpf.Map{},
-	}
-	if dnat := sharedMaps["dnat_table"]; dnat != nil {
-		opts.MapReplacements["dnat_table"] = dnat
-	}
-	// #2406: bind the shim's dnat_table_v6 reader to the Go-created/pinned
-	// shared map so SNAT66-return entries published by the userspace-dp
-	// helper (publish_dnat_table_entry v6 arm) are visible to the shim's
-	// GRE-inner v6 classify (dnat_lookup_v6). Mirrors the v4 binding above.
-	if dnatV6 := sharedMaps["dnat_table_v6"]; dnatV6 != nil {
-		opts.MapReplacements["dnat_table_v6"] = dnatV6
 	}
 	userspaceCollection, err := ebpf.NewCollectionWithOptions(userspaceSpec, opts)
 	if err != nil {
@@ -307,47 +289,6 @@ func validateUserspaceShimSpecWith(userspaceSpec *ebpf.CollectionSpec, readPin u
 			"userspace_sessions flags drift: embedded=%d, expected BPF_F_NO_PREALLOC (steering-map capacity). %s",
 			ms.Flags, userspaceShimGenerateRemediation,
 		)
-	}
-	if ms, ok := userspaceSpec.Maps[userspaceShimCompatibilityDNATName]; !ok {
-		return fmt.Errorf("Rust xdp_userspace spec missing map dnat_table")
-	} else if ms.MaxEntries != userspaceShimMaxSessions {
-		return fmt.Errorf(
-			"dnat_table max_entries drift: embedded=%d, expected=%d (userspace shim compatibility map). %s",
-			ms.MaxEntries, userspaceShimMaxSessions, userspaceShimGenerateRemediation,
-		)
-	} else if ms.Flags&unix.BPF_F_NO_PREALLOC == 0 {
-		return fmt.Errorf(
-			"dnat_table flags drift: embedded=%d, expected BPF_F_NO_PREALLOC (userspace shim compatibility map). %s",
-			ms.Flags, userspaceShimGenerateRemediation,
-		)
-	} else if err := validateSharedMapExpectedABI(ms, userspaceShimCompatibilityDNATName); err != nil {
-		return err
-	}
-	// #5484: dnat_table_v6 is declared by the shim AND replaced at load, exactly
-	// like dnat_table, but was omitted from every expected-shape arm — so an
-	// embedded v6 DNAT ABI drift was invisible on a fresh node (no live pin to
-	// compare against). Validate its embedded shape against the Go SSOT
-	// (userspaceShimSharedMapSpecs). Guarded on presence rather than mandatory so
-	// a synthetic/partial spec that omits the v6 table still exercises the other
-	// arms; the real embedded shim always declares dnat_table_v6 (#2406). The
-	// running-daemon case is covered by the live-pin arm below, which now
-	// includes dnat_table_v6 in its ABI-checked set.
-	if ms, ok := userspaceSpec.Maps[userspaceShimCompatibilityDNATV6Name]; ok {
-		if ms.MaxEntries != userspaceShimMaxSessions {
-			return fmt.Errorf(
-				"dnat_table_v6 max_entries drift: embedded=%d, expected=%d (userspace shim compatibility map). %s",
-				ms.MaxEntries, userspaceShimMaxSessions, userspaceShimGenerateRemediation,
-			)
-		}
-		if ms.Flags&unix.BPF_F_NO_PREALLOC == 0 {
-			return fmt.Errorf(
-				"dnat_table_v6 flags drift: embedded=%d, expected BPF_F_NO_PREALLOC (userspace shim compatibility map). %s",
-				ms.Flags, userspaceShimGenerateRemediation,
-			)
-		}
-		if err := validateSharedMapExpectedABI(ms, userspaceShimCompatibilityDNATV6Name); err != nil {
-			return err
-		}
 	}
 	// #5307/#5484: compare the embedded shim's map ABI against the RUNNING
 	// daemon's live pins so ErrMapIncompatible is caught pre-stop, not post-stop.
@@ -445,7 +386,7 @@ func userspaceMapABIDiff(embedded, ref userspaceMapABI) string {
 // drift even on a fresh node that has no live pin to compare against (#5307
 // expected-value arm; #5484 generalized so the v6 DNAT steering table gets the
 // same fresh-node protection as v4). Only maps with a Go-side expected shape
-// (dnat_table / dnat_table_v6) are validated here; the other pinned shim maps
+// are validated here; the other pinned shim maps
 // are Rust-defined and are guarded by the live-pin comparison. A name with no
 // Go SSOT spec returns nil (nothing to compare against).
 func validateSharedMapExpectedABI(embedded *ebpf.MapSpec, name string) error {
@@ -547,7 +488,7 @@ func isUserspaceRebuiltCollectionPinMap(name string) bool {
 // since nothing would ever fail ErrMapIncompatible for it.
 //
 // The reference shape is resolved per map by abiCheckedRefSpec: the embedded
-// shim's own MapSpec for a shim-declared map (dnat_table, dnat_table_v6, the
+// shim's own MapSpec for a shim-declared map (the
 // userspace_* maps), else the Go-side SSOT spec for a shared map the loader
 // creates itself (sessions_v6, the HA/counter family). The reference ABI is
 // spec-derived via livePinRefABI — never a hardcoded live shape — so a healthy
@@ -666,13 +607,6 @@ func userspaceIngressIfacesMaxEntriesDriftError(got uint32) error {
 
 func userspacePinnedShimMaps() []string {
 	return []string{
-		"dnat_table",
-		// #5484: dnat_table_v6 is the IPv6 twin of dnat_table — declared by the
-		// shim ELF and replaced at load (MapReplacements["dnat_table_v6"]) — but
-		// was omitted from this inventory, so the live-pin ABI arm never checked
-		// it. Listed here for parity with dnat_table (both replaced maps are
-		// re-pinned idempotently via userspaceRequiredShimPins).
-		"dnat_table_v6",
 		"userspace_ctrl",
 		"userspace_bindings",
 		"userspace_ingress_ifaces",
@@ -789,8 +723,6 @@ func userspaceShimSharedMapSpecs() []*ebpf.MapSpec {
 		// single source of truth shared with the test fixtures.
 		hashMapSpec("sessions", sizeOf[SessionKey](), ConntrackSessionValueSize, userspaceShimMaxSessions, unix.BPF_F_NO_PREALLOC),
 		hashMapSpec("sessions_v6", sizeOf[SessionKeyV6](), ConntrackSessionValueSizeV6, userspaceShimMaxSessions, unix.BPF_F_NO_PREALLOC),
-		hashMapSpec("dnat_table", sizeOf[DNATKey](), sizeOf[DNATValue](), userspaceShimMaxSessions, unix.BPF_F_NO_PREALLOC),
-		hashMapSpec("dnat_table_v6", sizeOf[DNATKeyV6](), sizeOf[DNATValueV6](), userspaceShimMaxSessions, unix.BPF_F_NO_PREALLOC),
 		arrayMapSpec("fib_gen_map", sizeOf[uint32](), 1),
 		arrayMapSpec("rg_active", sizeOf[uint8](), MaxRedundancyGroups),
 		arrayMapSpec("ha_watchdog", sizeOf[uint64](), MaxRedundancyGroups),
@@ -868,7 +800,7 @@ func sizeOf[T any]() uint32 {
 // dataplane is activated: counters reset to zero, and config-derived
 // classifiers (userspace_ingress_domains_vlan and the #17996 WG maps) are
 // repopulated from the current snapshot. State-bearing maps (sessions,
-// conntrack, dnat) must never be silently reset; those go through
+// conntrack) must never be silently reset; those go through
 // loadOrCreatePinnedShimMapWith, which deliberately refuses to reset an
 // incompatible pin (#2360).
 //

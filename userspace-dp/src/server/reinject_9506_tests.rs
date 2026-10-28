@@ -979,10 +979,12 @@ fn reinject_complete_accept_survives_idle_emfile_15112() {
 
 #[test]
 fn reinject_accept_loops_are_wired_through_accept_step_15112() {
-    // Same textual-wiring shape as the #9172 lifecycle cell, extended to the
-    // #9506 loops in this file: every accept() result must go through
-    // accept_step with retry_unclassified = true. Patterns are built at
-    // runtime so this test's own text does not match.
+    // #17123: both reinject loops are now served by the single accept
+    // loop in accept_loop.rs. Textual-wiring shape as the #9172 lifecycle
+    // cell: spawn_reinject_socket_servers must carry no accept()/
+    // accept_step of its own and must wire both sockets through
+    // run_accept_loop with retry_unclassified = true. Patterns are built
+    // at runtime so this test's own text does not match.
     let file = include_str!("reinject_9506.rs");
     let spawn_sig = ["fn ", "spawn_reinject_socket_servers", "("].concat();
     let start = file
@@ -991,32 +993,28 @@ fn reinject_accept_loops_are_wired_through_accept_step_15112() {
     let src = &file[start..];
     let bare = [".", "accept", "()"].concat();
     let call = ["accept_step", "("].concat();
-    let total = src.matches(bare.as_str()).count();
-    let mut calls = Vec::new();
-    for (i, _) in src.match_indices(call.as_str()) {
-        let args_end = src[i..]
-            .find(");")
-            .map(|e| i + e)
-            .expect("unterminated accept_step call");
-        calls.push(&src[i + call.len()..args_end]);
-    }
-    let wired = calls.iter().filter(|a| a.contains(bare.as_str())).count();
     assert_eq!(
-        total, 2,
-        "spawn must accept on exactly the two reinject listeners, found {total}"
+        src.matches(bare.as_str()).count(),
+        0,
+        "spawn must not accept() directly after #17123 — the loop lives in accept_loop.rs"
     );
     assert_eq!(
-        wired, total,
-        "every reinject accept() result must go through accept_step"
+        src.matches(call.as_str()).count(),
+        0,
+        "spawn must not call accept_step directly after #17123"
+    );
+    let loop_call = ["run_accept_loop", "("].concat();
+    assert_eq!(
+        src.matches(loop_call.as_str()).count(),
+        2,
+        "spawn must wire exactly the submit and complete loops through run_accept_loop"
     );
     for name in ["\"reinject submit socket\"", "\"reinject complete socket\""] {
-        let c = calls
-            .iter()
-            .find(|a| a.contains(name))
-            .unwrap_or_else(|| panic!("{name} accept_step call missing"));
-        assert!(
-            c.trim_end().trim_end_matches(',').ends_with("true"),
-            "{name} loop must retry unclassified errors (retry_unclassified=true)"
-        );
+        assert!(src.contains(name), "{name} spec missing from spawn");
     }
+    assert_eq!(
+        src.matches("retry_unclassified: true").count(),
+        2,
+        "both reinject loops must retry unclassified errors (retry_unclassified=true)"
+    );
 }

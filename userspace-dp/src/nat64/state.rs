@@ -2032,7 +2032,7 @@ impl Nat64State {
     /// does not name its own owner ends up with a holder mask covering every
     /// worker EXCEPT the one forwarding — and the last sibling replica to
     /// age-reap frees a live `(pool_v4, port)`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn allocate_source_for_worker(
         &self,
         prefix_idx: usize,
@@ -2074,7 +2074,7 @@ impl Nat64State {
     /// #17072: the BIB key is built by [`nat64_bib_flow_key`] from `key`;
     /// `key.routing_domain` (#9680) keys the BIB, so there is no loose
     /// scope integer to swap with `worker_id`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn allocate_source_with_holder(
         &self,
         prefix_idx: usize,

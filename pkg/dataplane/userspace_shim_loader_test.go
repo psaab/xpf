@@ -39,49 +39,6 @@ func (f *fakePinnedTCLink) Close() error {
 	return nil
 }
 
-func TestUserspaceShimDNATMapCapacityMatchesLegacyPinnedMap(t *testing.T) {
-	t.Parallel()
-
-	specs := userspaceShimSharedMapSpecs()
-	byName := make(map[string]uint32, len(specs))
-	flagsByName := make(map[string]uint32, len(specs))
-	for _, spec := range specs {
-		byName[spec.Name] = spec.MaxEntries
-		flagsByName[spec.Name] = spec.Flags
-	}
-	for _, name := range []string{"dnat_table", "dnat_table_v6"} {
-		if got := byName[name]; got != userspaceShimMaxSessions {
-			t.Fatalf("%s max_entries = %d, want legacy-compatible %d",
-				name, got, userspaceShimMaxSessions)
-		}
-		if flagsByName[name]&unix.BPF_F_NO_PREALLOC == 0 {
-			t.Fatalf("%s flags = %#x, want BPF_F_NO_PREALLOC",
-				name, flagsByName[name])
-		}
-	}
-}
-
-func TestEmbeddedUserspaceShimDNATMapMatchesSharedPinnedMap(t *testing.T) {
-	t.Parallel()
-
-	spec, err := loadRustUserspaceXDP()
-	if err != nil {
-		t.Fatalf("load Rust userspace XDP spec: %v", err)
-	}
-	dnat := spec.Maps["dnat_table"]
-	if dnat == nil {
-		t.Fatal("Rust userspace XDP spec missing dnat_table")
-	}
-	if dnat.MaxEntries != userspaceShimMaxSessions {
-		t.Fatalf("embedded dnat_table max_entries = %d, want %d",
-			dnat.MaxEntries, userspaceShimMaxSessions)
-	}
-	if dnat.Flags&unix.BPF_F_NO_PREALLOC == 0 {
-		t.Fatalf("embedded dnat_table flags = %#x, want BPF_F_NO_PREALLOC",
-			dnat.Flags)
-	}
-}
-
 // #13931: each live session can publish four distinct steering rows, and
 // sessions may be present on every worker. The embedded map must therefore
 // hold the full worker/session/row product; an insert failure here silently
@@ -157,8 +114,8 @@ func TestValidateUserspaceShimSpecDriftMentionsUserspaceXDPGenerate(t *testing.T
 }
 
 // validABIBaseSpec builds a shim spec that passes the preflight map-shape
-// checks (including #13931 userspace_sessions capacity) and the dnat_table
-// expected-shape check, so live-pin tests reach only the #5307 ABI comparison.
+// checks (including #13931 userspace_sessions capacity), so live-pin tests
+// reach only the #5307 ABI comparison.
 // Shapes mirror the real embedded shim (Type/KeySize/ValueSize).
 func validABIBaseSpec() *ebpf.CollectionSpec {
 	return &ebpf.CollectionSpec{
@@ -166,7 +123,6 @@ func validABIBaseSpec() *ebpf.CollectionSpec {
 			"userspace_sessions":       {Type: ebpf.Hash, KeySize: 40, ValueSize: 1, MaxEntries: UserspaceSessionsMaxEntries, Flags: unix.BPF_F_NO_PREALLOC},
 			"userspace_bindings":       {Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: BindingArrayMaxEntries},
 			"userspace_ingress_ifaces": {Type: ebpf.Hash, KeySize: 4, ValueSize: 1, MaxEntries: MaxInterfaces},
-			"dnat_table":               {Type: ebpf.Hash, KeySize: 12, ValueSize: 8, MaxEntries: userspaceShimMaxSessions, Flags: unix.BPF_F_NO_PREALLOC},
 			// #9587: the ctrl value grew 40 -> 56 (count+array replacing the
 			// steering scalar); the drift cells below still catch any other
 			// ValueSize.
@@ -293,13 +249,6 @@ func legacyPresenceMaxEntriesValidate(spec *ebpf.CollectionSpec) error {
 	} else if ms.MaxEntries != MaxInterfaces {
 		return fmt.Errorf("userspace_ingress_ifaces max_entries drift")
 	}
-	if ms, ok := spec.Maps["dnat_table"]; !ok {
-		return fmt.Errorf("missing dnat_table")
-	} else if ms.MaxEntries != userspaceShimMaxSessions {
-		return fmt.Errorf("dnat_table max_entries drift")
-	} else if ms.Flags&unix.BPF_F_NO_PREALLOC == 0 {
-		return fmt.Errorf("dnat_table flags drift")
-	}
 	return nil
 }
 
@@ -326,9 +275,9 @@ func TestValidateUserspaceShimSpecLivePinABI(t *testing.T) {
 			wantMap:   "userspace_ctrl", wantField: "ValueSize",
 		},
 		{
-			name:      "key-size-on-dnat_table",
-			overrides: map[string]userspaceMapABI{"dnat_table": {Type: ebpf.Hash, KeySize: 16, ValueSize: 8, MaxEntries: userspaceShimMaxSessions, Flags: unix.BPF_F_NO_PREALLOC}},
-			wantMap:   "dnat_table", wantField: "KeySize",
+			name:      "key-size-on-userspace_sessions",
+			overrides: map[string]userspaceMapABI{"userspace_sessions": {Type: ebpf.Hash, KeySize: 48, ValueSize: 1, MaxEntries: UserspaceSessionsMaxEntries, Flags: unix.BPF_F_NO_PREALLOC}},
+			wantMap:   "userspace_sessions", wantField: "KeySize",
 		},
 		{
 			name:      "type-on-userspace_ingress_ifaces",
@@ -336,9 +285,9 @@ func TestValidateUserspaceShimSpecLivePinABI(t *testing.T) {
 			wantMap:   "userspace_ingress_ifaces", wantField: "Type",
 		},
 		{
-			name:      "flags-on-dnat_table",
-			overrides: map[string]userspaceMapABI{"dnat_table": {Type: ebpf.Hash, KeySize: 12, ValueSize: 8, MaxEntries: userspaceShimMaxSessions, Flags: 0}},
-			wantMap:   "dnat_table", wantField: "Flags",
+			name:      "flags-on-userspace_sessions",
+			overrides: map[string]userspaceMapABI{"userspace_sessions": {Type: ebpf.Hash, KeySize: 40, ValueSize: 1, MaxEntries: UserspaceSessionsMaxEntries, Flags: 0}},
+			wantMap:   "userspace_sessions", wantField: "Flags",
 		},
 		{
 			name:      "max-entries-on-userspace_bindings",
@@ -463,44 +412,6 @@ func TestValidateUserspaceShimSpecNoLivePinSkips(t *testing.T) {
 	}
 }
 
-// TestValidateUserspaceShimSpecDNATExpectedABIDrift covers the expected-value
-// arm: an embedded dnat_table whose Type/KeySize/ValueSize drifts from the Go
-// single source of truth is rejected even on a fresh node with no live pin. The
-// legacy validator accepts these (RED-on-revert).
-func TestValidateUserspaceShimSpecDNATExpectedABIDrift(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		mutate func(*ebpf.MapSpec)
-		field  string
-	}{
-		{"value-size", func(m *ebpf.MapSpec) { m.ValueSize = 16 }, "value_size"},
-		{"key-size", func(m *ebpf.MapSpec) { m.KeySize = 16 }, "key_size"},
-		{"type", func(m *ebpf.MapSpec) { m.Type = ebpf.LRUHash }, "type"},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			base := validABIBaseSpec()
-			tt.mutate(base.Maps["dnat_table"])
-
-			if err := legacyPresenceMaxEntriesValidate(base); err != nil {
-				t.Fatalf("legacy validator rejected base (%v); cannot prove RED-on-revert", err)
-			}
-
-			err := validateUserspaceShimSpecWith(base, noPinReader())
-			if err == nil {
-				t.Fatalf("want dnat_table %s drift error on fresh node, got nil", tt.field)
-			}
-			if !strings.Contains(err.Error(), "dnat_table") || !strings.Contains(err.Error(), tt.field) {
-				t.Fatalf("err = %v, want dnat_table %s drift", err, tt.field)
-			}
-		})
-	}
-}
-
 // TestValidateUserspaceShimSpecLivePinReadErrorSurfaces proves an unexpected
 // live-pin read error is not swallowed (it aborts the pre-flight rather than
 // silently proceeding to a possibly-incompatible load).
@@ -545,7 +456,7 @@ func TestReadPinnedShimMapABISkipsUnsearchablePinDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
 
-	_, exists, err := readPinnedShimMapABI(filepath.Join(sub, "dnat_table"))
+	_, exists, err := readPinnedShimMapABI(filepath.Join(sub, "sessions"))
 	if err != nil {
 		t.Fatalf("unsearchable pin dir: want skip (nil err), got %v", err)
 	}
@@ -772,7 +683,7 @@ func TestCleanupUserspaceShimLegacyOnlyMapPinsRemovesOnlyLegacyPins(t *testing.T
 		"xdp_progs",
 		"tc_progs",
 		"policer_states",
-		"dnat_table",
+		"userspace_sessions",
 		"sessions",
 		"xdp_progs.bak",
 	} {
@@ -790,7 +701,7 @@ func TestCleanupUserspaceShimLegacyOnlyMapPinsRemovesOnlyLegacyPins(t *testing.T
 			t.Fatalf("%s still exists after cleanup, err=%v", name, err)
 		}
 	}
-	for _, name := range []string{"dnat_table", "sessions", "xdp_progs.bak"} {
+	for _, name := range []string{"sessions", "xdp_progs.bak"} {
 		if got, err := os.ReadFile(filepath.Join(dir, name)); err != nil || string(got) != "pin" {
 			t.Fatalf("%s = %q, %v; want preserved pin marker", name, got, err)
 		}

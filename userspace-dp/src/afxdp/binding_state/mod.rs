@@ -51,13 +51,14 @@ mod tx_inbox;
 // `profile::Owner|Peer` precedent and to avoid E0364 (documented in
 // `userspace-dp/src/afxdp/tx/mod.rs:38`).
 pub(in crate::afxdp) use debug_state::{
-    DEBUG_STATE_PUBLISH_MASK, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
     advance_debug_state_publish_counter, flush_v_min_scratches_into, idle_debug_state_publish_due,
-    update_binding_debug_state, update_binding_idle_debug_state,
+    publish_binding_debug_state_fields, update_binding_debug_state,
+    update_binding_idle_debug_state, DEBUG_STATE_PUBLISH_MASK,
+    IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
 };
 pub(in crate::afxdp) use latency::{
-    bucket_index_for_ns, tx_batch_bucket, DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS,
-    TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,
+    DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS, TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,
+    bucket_index_for_ns, tx_batch_bucket,
 };
 // Only `binding_state/tests/latency_buckets.rs` consumes this
 // re-export (via the `use super::*;` chain); gate on `cfg(test)` so
@@ -713,24 +714,12 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// a branch that already does a BPF map update and three mutex
     /// acquisitions.
     pub(super) new_flow_installs: AtomicU64,
-    /// #2244: per-binding count of failed `dnat_table` BPF-map publishes
-    /// (`publish_dnat_table_entry` `bpf_map_update_elem` returning < 0)
-    /// on the worker poll paths that previously discarded the syscall
-    /// result entirely. The `dnat_table` is the reverse-SNAT lookup the
-    /// embedded-ICMP NAT path consults to reverse-NAT an inbound ICMP
-    /// error (Time Exceeded / Packet Too Big for PMTUD, traceroute) back
-    /// to the original pre-NAT source. A failed publish silently omits
-    /// the reverse record, so the matching ICMP error is dropped or
-    /// mis-delivered with no operator-visible signal. One Relaxed
-    /// fetch_add on the existing (rare) error branch — no new hot-path
-    /// work on success. Summed by `Coordinator::dnat_publish_errors_total()`
-    /// (Prometheus `xpf_userspace_dnat_publish_errors_total`).
-    pub(super) dnat_publish_errors: AtomicU64,
     /// #709 / #746: owner-written telemetry, cacheline-isolated.
     /// `drain_latency_hist` buckets sum to `drain_invocations` (pinned
     /// in unit tests); `drain_noop_invocations` is a subset counter
-    /// (drains that returned `false`). `owner_pps` is the owner-local
-    /// pps window.
+    /// (terminating `drain_shaped_tx` calls that returned `None` — one
+    /// per `service_shaped_until_noop` pass, #17151). `owner_pps` is
+    /// the owner-local pps window.
     ///
     /// Written only by the owner worker (the sole caller of
     /// `drain_shaped_tx` on this binding); read by the snapshot path
@@ -1087,8 +1076,8 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // eviction counters and snat_revoked counter, all before both
 // sentinels): compiler-verified values.
 const _: [(); 3072] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2896] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 3025] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2888] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 3017] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1261,7 +1250,6 @@ impl BindingLiveState {
             neg_neigh_keys: AtomicU64::new(0),
             session_publish_errors: AtomicU64::new(0),
             new_flow_installs: AtomicU64::new(0),
-            dnat_publish_errors: AtomicU64::new(0),
             // #709 / #746: owner-profile telemetry, split by writer
             // into two cacheline-isolated groups. Histograms are zero-
             // init fixed-cap arrays; sum of buckets == drain_invocations

@@ -106,8 +106,6 @@ type grpcDataPlane interface {
 	ClearAllSessions() (v4 int, v6 int, err error)
 	DeleteSession(key dataplane.SessionKey) error
 	DeleteSessionV6(key dataplane.SessionKeyV6) error
-	DeleteDNATEntry(key dataplane.DNATKey) error
-	DeleteDNATEntryV6(key dataplane.DNATKeyV6) error
 
 	GetPersistentNAT() *dataplane.PersistentNATTable
 	GetMapStats() []dataplane.MapStats
@@ -140,9 +138,6 @@ type cliDataPlane interface {
 	IterateSessionsV6(fn func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error
 	DeleteSession(key dataplane.SessionKey) error
 	DeleteSessionV6(key dataplane.SessionKeyV6) error
-
-	DeleteDNATEntry(key dataplane.DNATKey) error
-	DeleteDNATEntryV6(key dataplane.DNATKeyV6) error
 
 	ClearAllCounters() error
 	ClearAllSessions() (v4, v6 int, err error)
