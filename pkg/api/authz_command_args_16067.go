@@ -10,6 +10,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/logging"
 )
 
 // #16067: argument-scoped allow/deny-commands regexes never fired on REST
@@ -85,8 +86,146 @@ func restArgumentForms(cfg *config.Config, route string, r *http.Request, cmd st
 			return restCanonicalForms(cmd+" "+name, cmd)
 		}
 		return restChargeForms16472(cmd), true
+	case "GET /api/v1/security/events":
+		// REST twin of eventsArgumentForms: the handler's zone /
+		// protocol / action filters execute the
+		// `show security log [zone Z] [protocol P] [action A]`
+		// command (eventsArgumentForms). Zone travels as a numeric
+		// ID (or unknown/none for 0, which has no on-box name);
+		// malformed limit/zone/protocol the handler 400s is
+		// unnameable here.
+		q := r.URL.Query()
+		if _, present := q["limit"]; present {
+			if _, ok := queryIntStrict(r, "limit", 50); !ok {
+				return nil, false
+			}
+		}
+		full := "show security log"
+		if v := q.Get("zone"); v != "" {
+			id, ok := parseEventZoneFilter(v)
+			if !ok || id == 0 {
+				return nil, false
+			}
+			name, ok := restZoneNameForID(cfg, uint32(id))
+			if !ok {
+				return nil, false
+			}
+			full += " zone " + name
+		}
+		if v := q.Get("protocol"); v != "" {
+			if _, ok := logging.ResolveEventProtocol(v); !ok {
+				return nil, false
+			}
+			full += " protocol " + v
+		}
+		if v := q.Get("action"); v != "" {
+			full += " action " + v
+		}
+		if full == "show security log" {
+			return restChargeForms16472(cmd), true
+		}
+		return restCanonicalForms(full, cmd)
+	case "GET /api/v1/security/nat/deterministic":
+		// #17184: forward/reverse lookup arguments (?internal-host=
+		// / ?nat-ip=&nat-port=, optional ?pool=), mirroring the gRPC
+		// GetNATDeterministic reconstruction.
+		q := r.URL.Query()
+		switch {
+		case q.Get("internal-host") != "":
+			full := cmd + " internal-host " + q.Get("internal-host")
+			if pool := q.Get("pool"); pool != "" {
+				full += " pool " + pool
+			}
+			return restCanonicalForms(full, cmd)
+		case q.Get("nat-ip") != "":
+			port, err := strconv.Atoi(q.Get("nat-port"))
+			if err != nil || port < 1 || port > 65535 {
+				return nil, false
+			}
+			full := cmd + " nat-ip " + q.Get("nat-ip") + " nat-port " + strconv.Itoa(port)
+			if pool := q.Get("pool"); pool != "" {
+				full += " pool " + pool
+			}
+			return restCanonicalForms(full, cmd)
+		default:
+			// The handler answers a directionless lookup as a typed
+			// malformed result; there is no executed lookup line to
+			// judge, so a restricted class denies.
+			return nil, false
+		}
+	case "GET /api/v1/security/nat/rules":
+		// #17184: ?rule_set= is argument text (`... rule-set <name>`);
+		// rule-set is a SIBLING of the charge's `rule` leaf, so the
+		// spelling is built from the family prefix. The handler reads
+		// no per-rule selector.
+		if rs := r.URL.Query().Get("rule_set"); rs != "" {
+			family := strings.TrimSuffix(cmd, " rule")
+			if family == cmd {
+				return nil, false
+			}
+			return restCanonicalForms(family+" rule-set "+rs, cmd)
+		}
+		return restChargeForms16472(cmd), true
+	case "POST /api/v1/dhcp/identifiers/clear":
+		// #17184: the body's interface is argument text
+		// (`clear dhcp client-identifier interface <name>`); an empty
+		// body/interface is the clear-all bare charge. The body was
+		// buffered by the mutation pipeline (decodeBufferedJSON puts
+		// it back for the handler).
+		if r.ContentLength == 0 {
+			return restChargeForms16472(cmd), true
+		}
+		var req ClearDHCPIdentifierRequest
+		if !decodeBufferedJSON(r, &req) {
+			return nil, false
+		}
+		if req.Interface == "" {
+			return restChargeForms16472(cmd), true
+		}
+		return restCanonicalForms(cmd+" interface "+req.Interface, cmd)
 	}
-	return restChargeForms16472(cmd), true
+	// #17184: NO bare-charge default (twin of the gRPC rule). A route
+	// whose query/body carries operator argument text needs an arm
+	// above; a route whose inputs do not must be named in
+	// restRoutesWithoutArgumentForms with a reason. Anything else is
+	// unnameable, so a restricted class denies.
+	if _, named := restRoutesWithoutArgumentForms[route]; named {
+		return restChargeForms16472(cmd), true
+	}
+	return nil, false
+}
+
+// restRoutesWithoutArgumentForms records, WITH A REASON, every
+// restRouteCommand route whose query/body carries no operator
+// argument text the on-box command spells (#17184, twin of
+// methodsWithoutArgumentForms in pkg/grpcapi).
+// TestEveryRESTRouteInputIsReconstructedOrNamedAbsent17184 keeps both
+// directions honest against restRouteCommand and the switch above.
+var restRoutesWithoutArgumentForms = map[string]string{
+	"GET /api/v1/statistics/global":        "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/security/zones":           "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/security/policies":        "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/security/nat/source":      "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/security/nat/pools":       "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/security/nat/destination": "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/security/screen":          "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/security/ipsec/sa":        "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/security/vrrp":            "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/interfaces":               "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/dhcp/leases":              "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/dhcp/identifiers":         "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/routes":                   "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/config":                   "config-read path adjudicated by authorizeRESTConfigRead (#14707)",
+	"GET /api/v1/config/show":              "config-read path adjudicated by authorizeRESTConfigRead (#14707)",
+	"GET /api/v1/config/compare":           "config-read path adjudicated by authorizeRESTConfigRead (#14707)",
+	"GET /api/v1/config/show-rollback":     "config-read path adjudicated by authorizeRESTConfigRead (#14707)",
+	"GET /api/v1/config/export":            "config-read path adjudicated by authorizeRESTConfigRead (#14707)",
+	"GET /api/v1/config/search":            "config-read path adjudicated by authorizeRESTConfigRead (#14707)",
+	"GET /api/v1/config/history":           "no query/body selectors; the bare charge is argument-complete",
+	"GET /api/v1/events/stream":            "stream filters are not command argument text; the bare charge is argument-complete",
+	"GET /api/v1/logs/stream":              "stream filters are not command argument text; the bare charge is argument-complete",
+	"POST /api/v1/security/sessions/clear": "clear-all body carries no selectors the handler executes (see authz_command_args_16067.go twin note)",
+	"POST /api/v1/security/counters/clear": "no body selectors; the bare charge is argument-complete",
 }
 
 // decodeBufferedJSON decodes the already-buffered mutation body and
@@ -577,6 +716,10 @@ var argumentSampleCommandsREST16067 = []string{
 	"show security flow session zone trust",
 	"show security match-policies from-zone trust to-zone untrust",
 	"test policy from-zone trust to-zone untrust",
+	"show security nat source deterministic-nat internal-host 192.0.2.1",
+	"show security nat source deterministic-nat nat-ip 192.0.2.1 nat-port 1024",
+	"clear dhcp client-identifier interface ge-0/0/0",
+	"show security nat source rule-set rs1",
 }
 
 func init() {

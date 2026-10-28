@@ -36,6 +36,15 @@ import (
 // keywords the on-box gate strips into selector spellings — the forms
 // canonicalForms would produce there. ok=false means the request cannot
 // be named, so a restricted class must deny.
+//
+// #17184: there is NO bare-charge default. A method whose fields carry
+// operator argument text needs a switch arm; a method whose fields do
+// not must be named in methodsWithoutArgumentForms with a reason. The
+// pre-#17184 default returned the bare charge for every unlisted
+// method, so GetNATDeterministic, ClearDHCPClientIdentifier,
+// MonitorPacketDrop and GetNATRuleStats escaped argument-scoped
+// denies (and the #16378 fold had already caught five more RPCs in
+// the same default).
 func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base string) ([]string, bool) {
 	service, method, ok := splitFullMethod(fullMethod)
 	if !ok || service != serviceName {
@@ -181,12 +190,204 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 			return canonicalArgumentForms("show interfaces "+sd.GetFilter(), base)
 		}
 		return canonicalArgumentForms("show interfaces "+sd.GetFilter(), base)
+	case "GetNATDeterministic":
+		dr, isDet := req.(*pb.GetNATDeterministicRequest)
+		if !isDet || dr == nil {
+			return nil, false
+		}
+		return natDeterministicArgumentForms(dr, base)
+	case "ClearDHCPClientIdentifier":
+		cr, isClear := req.(*pb.ClearDHCPClientIdentifierRequest)
+		if !isClear || cr == nil {
+			return nil, false
+		}
+		if cr.GetInterface() == "" {
+			return chargeForms16472(base), true
+		}
+		return canonicalArgumentForms(base+" interface "+cr.GetInterface(), base)
+	case "MonitorPacketDrop":
+		mr, isMon := req.(*pb.MonitorPacketDropRequest)
+		if !isMon || mr == nil {
+			return nil, false
+		}
+		return packetDropArgumentForms(mr, base)
+	case "GetNATRuleStats":
+		nr, isNAT := req.(*pb.GetNATRuleStatsRequest)
+		if !isNAT || nr == nil {
+			return nil, false
+		}
+		return natRuleStatsArgumentForms(nr, base)
 	}
-	// Every other method's typed fields are selectors the on-box command
-	// does not carry as free argument text the operator typed (or the
-	// charge is already argument-complete); the bare charge is the form,
-	// expanded to its canonical spellings (#16472).
-	return chargeForms16472(base), true
+	if _, named := methodsWithoutArgumentForms[method]; named {
+		return chargeForms16472(base), true
+	}
+	return nil, false
+}
+
+// methodsWithoutArgumentForms records, WITH A REASON, every method
+// whose request fields do NOT carry operator argument text the on-box
+// command spells, so the bare charge IS its argument-complete form
+// (#17184, mirroring methodsWithoutCanonicalCommand). A method in
+// neither this map nor the rpcArgumentForms switch is unnameable and
+// denies for a restricted class; TestEveryRequestFieldIsReconstructedOrNamedAbsent17184
+// keeps both directions honest against the generated descriptor and
+// the switch's own case labels. Request-decoded families (ShowText,
+// SystemAction, GetSystemInfo, GetBGPStatus) reconstruct inside their
+// arms/helpers and are named here only for the census direction.
+var methodsWithoutArgumentForms = map[string]string{
+	"EnterConfigure":           "config-mode entry; governed by deny-configuration, not deny-commands (#9633)",
+	"ExitConfigure":            "config-mode exit; governed by deny-configuration (#9633)",
+	"Set":                      "configuration mutation; governed by deny-configuration (#9633)",
+	"Delete":                   "configuration mutation; governed by deny-configuration (#9633)",
+	"Load":                     "configuration content adjudicated per written path (#9633/#9892)",
+	"Commit":                   "acts on the candidate as a whole; comment is not command argument text",
+	"CommitCheck":              "no request fields; acts on the candidate as a whole",
+	"CommitConfirmed":          "minutes is a timer value, not command argument text",
+	"ConfirmCommit":            "no request fields; resolves a pending commit",
+	"Rollback":                 "governed by deny-configuration; n selects a saved candidate, not command argument text (#9633)",
+	"Complete":                 "typed line adjudicated by authorizeCompleteRPCCommand (#14952), not rpcArgumentForms",
+	"GetStatus":                "session plumbing probe; exempt from the operational gate (#15077)",
+	"GetConfigModeStatus":      "session plumbing probe; exempt from the operational gate (#15077)",
+	"ShowConfig":               "config-read path adjudicated by authorizeRPCConfigRead (#14707); format/target are render selectors the command does not spell",
+	"ShowCompare":              "config-read path adjudicated by authorizeRPCConfigRead (#14707)",
+	"ShowRollback":             "config-read path adjudicated by authorizeRPCConfigRead (#14707)",
+	"ListHistory":              "no request fields; the bare charge is argument-complete",
+	"GetGlobalStats":           "no request fields; the bare charge is argument-complete",
+	"GetZones":                 "no request fields; the bare charge is argument-complete",
+	"GetPolicies":              "no request fields; the bare charge is argument-complete",
+	"GetNATSource":             "no request fields; the bare charge is argument-complete",
+	"GetNATDestination":        "no request fields; the bare charge is argument-complete",
+	"GetScreen":                "no request fields; the bare charge is argument-complete",
+	"GetDHCPLeases":            "no request fields; the bare charge is argument-complete",
+	"GetDHCPClientIdentifiers": "no request fields; the bare charge is argument-complete",
+	"GetRoutes":                "no request fields; the bare charge is argument-complete",
+	"GetIPsecSA":               "no request fields; the bare charge is argument-complete",
+	"GetNATPoolStats":          "no request fields; the bare charge is argument-complete",
+	"GetVRRPStatus":            "no request fields; the bare charge is argument-complete",
+	"ClearCounters":            "no request fields; the bare charge is argument-complete",
+	"GetD11AttestationLedger":  "no request fields; privileged evidence read with no operator command",
+	"GetOSPFStatus":            "type selects a status view rpcCanonicalCommand cannot name; no canonical command exists in the tree",
+	"GetRIPStatus":             "no request fields and no canonical command exists in the tree",
+	"GetISISStatus":            "type selects a status view rpcCanonicalCommand cannot name; no canonical command exists in the tree",
+	"GetInterfaces":            "no request fields; the bare charge is argument-complete",
+	"SystemAction":             "verb selects the command via rpcCanonicalCommand; target/candidate fields are not command argument text",
+	"GetSystemInfo":            "type selects a fixed command via systemInfoCanonicalCommand; no free argument text",
+	"GetBGPStatus":             "type selects a fixed command via bgpStatusCanonicalCommand; no free argument text",
+}
+
+// natDeterministicArgumentForms rebuilds the deterministic-NAT lookup
+// line (#17184). Direction selects the spelling the handler executes;
+// an unspecified direction, or the selected direction's missing
+// host/ip/port, is a request the handler answers as malformed, so it
+// is unnameable here rather than judged on the bare charge.
+func natDeterministicArgumentForms(dr *pb.GetNATDeterministicRequest, base string) ([]string, bool) {
+	var full string
+	switch dr.GetDirection() {
+	case pb.NATDeterministicDirection_NAT_DETERMINISTIC_DIRECTION_FORWARD:
+		if dr.GetInternalHost() == "" {
+			return nil, false
+		}
+		full = base + " internal-host " + dr.GetInternalHost()
+	case pb.NATDeterministicDirection_NAT_DETERMINISTIC_DIRECTION_REVERSE:
+		if dr.GetNatIp() == "" || dr.GetNatPort() == 0 || dr.GetNatPort() > 65535 {
+			return nil, false
+		}
+		full = base + " nat-ip " + dr.GetNatIp() + " nat-port " + strconv.Itoa(int(dr.GetNatPort()))
+	default:
+		return nil, false
+	}
+	if dr.GetPool() != "" {
+		full += " pool " + dr.GetPool()
+	}
+	return canonicalArgumentForms(full, base)
+}
+
+// packetDropArgumentForms rebuilds `monitor security packet-drop ...`
+// from the request's selectors in the CLI parser's field order
+// (cmd/cli/monitor.go); the node is an Options node, so any order
+// canonicalises to itself. Out-of-range ports/count the handler
+// rejects are unnameable.
+func packetDropArgumentForms(mr *pb.MonitorPacketDropRequest, base string) ([]string, bool) {
+	if mr.GetSourcePort() > 65535 || mr.GetDestinationPort() > 65535 || mr.GetCount() < 0 || mr.GetCount() > 8192 {
+		return nil, false
+	}
+	full := base
+	if v := mr.GetSourcePrefix(); v != "" {
+		full += " source-prefix " + v
+	}
+	if v := mr.GetDestinationPrefix(); v != "" {
+		full += " destination-prefix " + v
+	}
+	if v := mr.GetSourcePort(); v != 0 {
+		full += " source-port " + strconv.Itoa(int(v))
+	}
+	if v := mr.GetDestinationPort(); v != 0 {
+		full += " destination-port " + strconv.Itoa(int(v))
+	}
+	if v := mr.GetProtocol(); v != "" {
+		full += " protocol " + v
+	}
+	if v := mr.GetFromZone(); v != "" {
+		full += " from-zone " + v
+	}
+	if v := mr.GetInterface(); v != "" {
+		full += " interface " + v
+	}
+	if v := mr.GetCount(); v != 0 {
+		full += " count " + strconv.Itoa(int(v))
+	}
+	if v := mr.GetNode(); v != "" {
+		full += " node " + v
+	}
+	if full == base {
+		return chargeForms16472(base), true
+	}
+	return canonicalArgumentForms(full, base)
+}
+
+// natRuleStatsArgumentForms rebuilds the rule-set/rule argument text
+// (#17184). The charge already ends in `rule` (the family leaf), and
+// `rule-set` is its SIBLING under source/destination, so the rule-set
+// spelling is built from the family prefix, never by appending to
+// the charge. Both selectors may be present in one request; the CLI
+// spells them as two different commands (`... rule-set <name>` lists
+// a set, `... rule <name>` filters by rule), so both spellings join
+// the form set and EvaluateForms unanimity lets a deny on either
+// veto.
+func natRuleStatsArgumentForms(nr *pb.GetNATRuleStatsRequest, base string) ([]string, bool) {
+	ruleSet, rule := nr.GetRuleSet(), nr.GetRule()
+	family := strings.TrimSuffix(base, " rule")
+	if family == base {
+		return nil, false
+	}
+	switch {
+	case ruleSet == "" && rule == "":
+		return chargeForms16472(base), true
+	case ruleSet != "" && rule != "":
+		bySet, ok := canonicalArgumentForms(family+" rule-set "+ruleSet, base)
+		if !ok {
+			return nil, false
+		}
+		byRule, ok := canonicalArgumentForms(base+" "+rule, base)
+		if !ok {
+			return nil, false
+		}
+		seen := map[string]bool{}
+		var forms []string
+		for _, group := range [][]string{bySet, byRule} {
+			for _, f := range group {
+				if !seen[f] {
+					seen[f] = true
+					forms = append(forms, f)
+				}
+			}
+		}
+		return forms, true
+	case ruleSet != "":
+		return canonicalArgumentForms(family+" rule-set "+ruleSet, base)
+	default:
+		return canonicalArgumentForms(base+" "+rule, base)
+	}
 }
 
 // canonicalArgumentForms validates full against the operational tree: it
@@ -820,6 +1021,12 @@ var argumentSampleCommands16067 = []string{
 	"test security-zone interface ge-0/0/0",
 	"show security flow session zone trust",
 	"show security match-policies from-zone trust to-zone untrust",
+	"show security nat source deterministic-nat internal-host 192.0.2.1",
+	"show security nat source deterministic-nat nat-ip 192.0.2.1 nat-port 1024",
+	"clear dhcp client-identifier interface ge-0/0/0",
+	"monitor security packet-drop source-prefix 192.0.2.0/24",
+	"show security nat source rule-set rs1",
+	"show security nat source rule r1",
 }
 
 func init() {
