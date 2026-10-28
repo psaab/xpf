@@ -97,14 +97,17 @@
 //! blanket drop: a flow whose ingress legitimately moves between permitted zones
 //! (a multi-homed WAN, an asymmetric path) keeps forwarding.
 //!
-//! How the question is asked:
+//! How the question is asked (one builder, `hit_policy::hit_policy_query`):
 //!
-//! * FORWARD — `(arrival_zone -> metadata.egress_zone)` on the
-//!   POST-destination-translation tuple, as #8356 asks it (#9382). The to-zone is
-//!   the entry's, not the live resolution's: an HA-inactive hit has already been
-//!   rewritten into a fabric redirect by the time this runs, and the fabric
-//!   link's zone is not where the flow goes.
-//! * REVERSE — the same pair on the WIRE destination. A reply's only destination
+//! * FORWARD — `(arrival_zone -> live egress zone)` on the
+//!   POST-destination-translation tuple, as #8356 asks it (#9382). The
+//!   to-zone is the LIVE resolution of the stored egress (#9384/#13924),
+//!   not the entry's recorded zone: a commit that moves the egress
+//!   interface into a denying zone is judged on the next hit.
+//!   `FabricRedirect` is the sole exception — its stored egress names
+//!   the fabric transport, so the recorded `metadata.egress_zone`
+//!   remains the judged to-zone (#7770).
+//! * REVERSE — the same live pair on the WIRE destination. A reply's only destination
 //!   translation is an un-SNAT, which admission never applies to a new flow;
 //!   judging the un-translated client would let a foreign zone reach an internal
 //!   host through a pool address no policy names.
@@ -127,17 +130,26 @@
 //!   #7212's static-filter revocation can still be driven from there. That is a
 //!   per-interface filter question, not a zone one.
 
-use super::policy_revalidation::{PolicyRevocation, PolicyRevocationReason};
+use super::hit_policy::{JudgedSource, QueryDirection, hit_policy_query, permits};
+use super::policy_revalidation::{FromZoneSource, PolicyRevocation, PolicyRevocationReason};
 use super::*;
-use crate::policy::{PolicyEvaluationResult, evaluate_policy_result_without_counting_at};
+use crate::policy::PolicyEvaluationResult;
 use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
 
 /// Attribution for an established-hit denial. Evaluation intentionally skips
 /// hit counters; retain the result for its POLICY_DENY record.
+///
+/// #17027: `judged_from_zone`/`judged_to_zone` are the pair the shared
+/// query actually judged, carried so the deny emitter names the judged
+/// zones rather than re-deriving them from the session record (which
+/// kept naming the recorded egress after #13924 moved the verdict to
+/// the live one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct HitPolicyDeny {
     pub(super) result: PolicyEvaluationResult,
     pub(super) policy_dst_port: u16,
+    pub(super) judged_from_zone: u32,
+    pub(super) judged_to_zone: u32,
 }
 
 /// Whether THIS packet may act for the session it hit.
@@ -265,6 +277,11 @@ pub(super) enum OwnerHitIcmpVerdict {
     Drop(HitPolicyDeny),
 }
 
+/// #17027: `judged_source` is the authenticated pre-SNAT source the
+/// caller resolved for this hit (the canonical key, or the resolver's
+/// `source_nat_validation_key` for a translated alias). `None` means
+/// the wire tuple IS the original (no translation to undo), so the
+/// flow's own source is judged.
 #[cold]
 #[inline(never)]
 pub(super) fn owner_hit_icmp_verdict(
@@ -275,12 +292,14 @@ pub(super) fn owner_hit_icmp_verdict(
     meta: UserspaceDpMeta,
     packet_frame: &[u8],
     now_ns: u64,
+    judged_source: Option<&SessionKey>,
 ) -> Option<OwnerHitIcmpVerdict> {
     // Host-bound packets have a different authority plane (`junos-host`).
     // Transit owners are judged by their ingress identity and this packet's ICMP type using the LIVE egress zone. FabricRedirect is the exception: its stored egress is the fabric transport, so its admission zone remains authoritative (#7770).
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery {
         return None;
     }
+    let source = judged_source_or_wire(judged_source, flow);
     // Reverse ICMP requests are new queries, even when no configured rule
     // constrains the type. The default-deny reverse pair is still policy and
     // must be consulted; only actual reply types coast on the session.
@@ -296,29 +315,30 @@ pub(super) fn owner_hit_icmp_verdict(
         }) {
             return None;
         }
-        let egress_zone = hit_egress_zone(forwarding, metadata, decision);
-        let result = evaluate_policy_result_without_counting_at(
-            &forwarding.policy,
-            metadata.ingress_zone,
-            egress_zone,
-            flow.src_ip,
+        // #10637: the reverse arm deliberately judges the REVERSE pair on
+        // WIRE tuples (`ReverseWire`) — the sole direction exception.
+        let query = hit_policy_query(
+            forwarding,
+            metadata,
+            decision,
+            FromZoneSource::RecordedZone(metadata.ingress_zone),
+            source,
             flow.dst_ip,
-            meta.protocol,
-            flow.forward_key.src_port,
             flow.forward_key.dst_port,
+            meta.protocol,
+            QueryDirection::ReverseWire,
             packet_icmp,
             now_ns,
         );
-        return Some(
-            if matches!(result.action, crate::policy::PolicyAction::Permit) {
-                OwnerHitIcmpVerdict::Forward
-            } else {
-                OwnerHitIcmpVerdict::Drop(HitPolicyDeny {
-                    result,
-                    policy_dst_port: flow.forward_key.dst_port,
-                })
-            },
-        );
+        return Some(match permits(&query, &forwarding.policy) {
+            Ok(()) => OwnerHitIcmpVerdict::Forward,
+            Err(result) => OwnerHitIcmpVerdict::Drop(HitPolicyDeny {
+                result,
+                policy_dst_port: query.dst_port,
+                judged_from_zone: query.from_id,
+                judged_to_zone: query.to_id,
+            }),
+        });
     }
     if !forwarding
         .policy
@@ -326,51 +346,47 @@ pub(super) fn owner_hit_icmp_verdict(
     {
         return None;
     }
-    let egress_zone = hit_egress_zone(forwarding, metadata, decision);
-    let dst_ip = decision.nat.rewrite_dst.unwrap_or(flow.dst_ip);
-    let dst_port = decision
-        .nat
-        .rewrite_dst_port
-        .unwrap_or(flow.forward_key.dst_port);
-    let result = evaluate_policy_result_without_counting_at(
-        &forwarding.policy,
-        metadata.ingress_zone,
-        egress_zone,
-        flow.src_ip,
-        dst_ip,
+    let query = hit_policy_query(
+        forwarding,
+        metadata,
+        decision,
+        FromZoneSource::RecordedZone(metadata.ingress_zone),
+        source,
+        flow.dst_ip,
+        flow.forward_key.dst_port,
         meta.protocol,
-        flow.forward_key.src_port,
-        dst_port,
+        QueryDirection::ForwardPostDnat,
         packet_icmp,
         now_ns,
     );
-    Some(
-        if matches!(result.action, crate::policy::PolicyAction::Permit) {
-            OwnerHitIcmpVerdict::Forward
-        } else {
-            OwnerHitIcmpVerdict::Drop(HitPolicyDeny {
-                result,
-                policy_dst_port: dst_port,
-            })
-        },
-    )
+    Some(match permits(&query, &forwarding.policy) {
+        Ok(()) => OwnerHitIcmpVerdict::Forward,
+        Err(result) => OwnerHitIcmpVerdict::Drop(HitPolicyDeny {
+            result,
+            policy_dst_port: query.dst_port,
+            judged_from_zone: query.from_id,
+            judged_to_zone: query.to_id,
+        }),
+    })
 }
 
-/// The recorded zone is the policy destination only when the stored egress
-/// names a fabric transport rather than the flow's actual egress.
+/// The source the established-hit query judges: the caller's
+/// authenticated pre-SNAT key when it supplied one, else the wire
+/// flow's own source (no translation to undo). Reverse hits always
+/// judge the wire source — their packet is a reply whose source is
+/// the responder, never a translated forward alias (#17027).
 #[inline]
-fn hit_egress_zone(
-    forwarding: &ForwardingState,
-    metadata: &SessionMetadata,
-    decision: SessionDecision,
-) -> u32 {
-    if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
-        metadata.egress_zone
-    } else {
-        forwarding.egress_zone_id(decision.resolution.egress_ifindex)
+fn judged_source_or_wire(key: Option<&SessionKey>, flow: &SessionFlow) -> JudgedSource {
+    match key {
+        Some(key) => JudgedSource::new(key.src_ip, key.src_port),
+        None => JudgedSource::new(flow.src_ip, flow.forward_key.src_port),
     }
 }
 
+/// #17027: `judged_source` is the authenticated pre-SNAT source (see
+/// [`owner_hit_icmp_verdict`]); a foreign FORWARD packet on a translated
+/// alias is judged by its original, a foreign REVERSE packet by the
+/// wire responder.
 #[cold]
 #[inline(never)]
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
@@ -386,30 +402,33 @@ pub(super) fn foreign_hit_verdict(
     arrival_zone: u32,
     on_admitting_interface: bool,
     now_ns: u64,
+    judged_source: Option<&SessionKey>,
 ) -> ForeignHitVerdict {
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery {
         return ForeignHitVerdict::Forward;
     }
-    let (dst_ip, dst_port) = if metadata.is_reverse {
-        (flow.dst_ip, flow.forward_key.dst_port)
+    // A reverse foreign packet is a reply: judge the wire pair as itself
+    // (#10637 shape). A forward foreign packet judges the post-DNAT pair.
+    let direction = if metadata.is_reverse {
+        QueryDirection::ReverseWire
     } else {
-        (
-            decision.nat.rewrite_dst.unwrap_or(flow.dst_ip),
-            decision
-                .nat
-                .rewrite_dst_port
-                .unwrap_or(flow.forward_key.dst_port),
-        )
+        QueryDirection::ForwardPostDnat
     };
-    let result = evaluate_policy_result_without_counting_at(
-        &forwarding.policy,
-        arrival_zone,
-        hit_egress_zone(forwarding, metadata, decision),
-        flow.src_ip,
-        dst_ip,
+    let source = if metadata.is_reverse {
+        JudgedSource::new(flow.src_ip, flow.forward_key.src_port)
+    } else {
+        judged_source_or_wire(judged_source, flow)
+    };
+    let query = hit_policy_query(
+        forwarding,
+        metadata,
+        decision,
+        FromZoneSource::Resolved(arrival_zone),
+        source,
+        flow.dst_ip,
+        flow.forward_key.dst_port,
         meta.protocol,
-        flow.forward_key.src_port,
-        dst_port,
+        direction,
         policy_packet_icmp(packet_frame, meta),
         now_ns,
     );
@@ -417,15 +436,20 @@ pub(super) fn foreign_hit_verdict(
     // permits is still dropped — the permit arm is removed. The drop is
     // evaluated AFTER the policy question so a deny keeps its exact prior
     // shape (attributed Drop / #9384 Revoke); only a permit is diverted.
-    if matches!(result.action, crate::policy::PolicyAction::Permit) {
-        if forwarding.drop_foreign_session_hits {
-            return ForeignHitVerdict::DropForeign;
+    let result = match permits(&query, &forwarding.policy) {
+        Ok(()) => {
+            if forwarding.drop_foreign_session_hits {
+                return ForeignHitVerdict::DropForeign;
+            }
+            return ForeignHitVerdict::Forward;
         }
-        return ForeignHitVerdict::Forward;
-    }
+        Err(result) => result,
+    };
     let deny = HitPolicyDeny {
         result,
-        policy_dst_port: dst_port,
+        policy_dst_port: query.dst_port,
+        judged_from_zone: query.from_id,
+        judged_to_zone: query.to_id,
     };
     if !on_admitting_interface
         || metadata.is_reverse

@@ -559,6 +559,7 @@ fn owner_forward_icmp_verdict_uses_descriptor_time_12868() {
             icmp_meta(),
             &frame,
             SCHED_RECEIPT_NS,
+            None,
         ),
         Some(OwnerHitIcmpVerdict::Forward),
         "at the fresh descriptor time the scheduled permit is live"
@@ -572,6 +573,7 @@ fn owner_forward_icmp_verdict_uses_descriptor_time_12868() {
             icmp_meta(),
             &frame,
             SCHED_EXPIRED_NS,
+            None,
         ),
         Some(OwnerHitIcmpVerdict::Drop(_))
     ));
@@ -594,6 +596,7 @@ fn owner_reverse_icmp_verdict_uses_descriptor_time_12868() {
             icmp_meta(),
             &frame,
             SCHED_RECEIPT_NS,
+            None,
         ),
         Some(OwnerHitIcmpVerdict::Forward),
         "reverse non-answer at fresh descriptor time uses the scheduled permit"
@@ -607,6 +610,7 @@ fn owner_reverse_icmp_verdict_uses_descriptor_time_12868() {
             icmp_meta(),
             &frame,
             SCHED_EXPIRED_NS,
+            None,
         ),
         Some(OwnerHitIcmpVerdict::Drop(_))
     ));
@@ -636,6 +640,7 @@ fn foreign_hit_verdict_uses_descriptor_time_12868() {
             TEST_DMZ_ZONE_ID,
             false,
             SCHED_RECEIPT_NS,
+            None,
         ),
         ForeignHitVerdict::Forward
     ));
@@ -652,6 +657,7 @@ fn foreign_hit_verdict_uses_descriptor_time_12868() {
             TEST_DMZ_ZONE_ID,
             false,
             SCHED_EXPIRED_NS,
+            None,
         ),
         ForeignHitVerdict::Drop(_)
     ));
@@ -683,6 +689,7 @@ fn drop_foreign_knob_turns_a_permitted_foreign_hit_into_a_drop_16044() {
                 TEST_DMZ_ZONE_ID,
                 false,
                 SCHED_RECEIPT_NS,
+            None,
             ),
             ForeignHitVerdict::Forward
         ),
@@ -703,6 +710,7 @@ fn drop_foreign_knob_turns_a_permitted_foreign_hit_into_a_drop_16044() {
                 TEST_DMZ_ZONE_ID,
                 false,
                 SCHED_RECEIPT_NS,
+            None,
             ),
             ForeignHitVerdict::DropForeign
         ),
@@ -724,6 +732,7 @@ fn drop_foreign_knob_turns_a_permitted_foreign_hit_into_a_drop_16044() {
                 TEST_DMZ_ZONE_ID,
                 false,
                 SCHED_EXPIRED_NS,
+            None,
             ),
             ForeignHitVerdict::Drop(_)
         ),
@@ -747,6 +756,7 @@ fn drop_foreign_knob_turns_a_permitted_foreign_hit_into_a_drop_16044() {
                 TEST_DMZ_ZONE_ID,
                 false,
                 SCHED_RECEIPT_NS,
+                None,
             ),
             ForeignHitVerdict::Forward
         ),

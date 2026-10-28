@@ -42,6 +42,7 @@ mod flow_cache_hit;
 mod flow_cache_seed;
 mod flowless_verdict;
 pub(in crate::afxdp) mod frag_assoc;
+mod hit_policy;
 mod host_inbound_policy;
 mod nat64_icmp_error;
 mod nat_exception;
@@ -3545,6 +3546,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta,
                                     packet_frame,
                                     now_ns,
+                                    // #17027/#12867: thread the resolver's
+                                    // authenticated pre-SNAT original into
+                                    // the owner verdict, as revalidation
+                                    // already received it.
+                                    resolved.source_nat_validation_key.as_ref(),
                                 )
                             } else {
                                 None
@@ -3601,6 +3607,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     arrival_zone,
                                     may_revoke,
                                     now_ns,
+                                    // #17027/#12867: thread the resolver's
+                                    // authenticated pre-SNAT original into
+                                    // the foreign verdict too.
+                                    resolved.source_nat_validation_key.as_ref(),
                                 ) {
                                     ForeignHitVerdict::Forward => None,
                                     // #16044: knob-driven drop of a
@@ -3623,8 +3633,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             resolved.decision,
                                             flow,
                                             meta,
-                                            arrival_zone,
-                                            resolved.metadata.egress_zone,
+                                            deny.judged_from_zone,
+                                            deny.judged_to_zone,
                                             deny,
                                             now_ns,
                                         );
@@ -3746,8 +3756,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 resolved.decision,
                                 flow,
                                 meta,
-                                resolved.metadata.ingress_zone,
-                                resolved.metadata.egress_zone,
+                                deny.judged_from_zone,
+                                deny.judged_to_zone,
                                 deny,
                                 now_ns,
                             );
@@ -3772,8 +3782,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     resolved.decision,
                                     flow,
                                     meta,
-                                    resolved.metadata.ingress_zone,
-                                    resolved.metadata.egress_zone,
+                                    deny.judged_from_zone,
+                                    deny.judged_to_zone,
                                     deny,
                                     now_ns,
                                 );
