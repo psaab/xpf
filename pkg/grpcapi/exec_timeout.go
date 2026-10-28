@@ -3,9 +3,8 @@ package grpcapi
 import (
 	"context"
 	"errors"
-	"os/exec"
-	"time"
 
+	"github.com/psaab/xpf/pkg/diagcmd"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -19,16 +18,17 @@ import (
 // timedatectl/tail/ip neigh flush/systemctl); without a bound, a wedged
 // binary pins the handler goroutine and its gRPC stream indefinitely.
 //
-// requestExecTimeout bounds the child process runtime; on expiry the
-// process is killed and the error reflects the context deadline.
-const requestExecTimeout = 15 * time.Second
-
-// requestExecWaitDelay caps the post-kill pipe-drain window (see the
-// WaitDelay rationale in pkg/daemon/exec_timeout.go): without it,
-// Output/CombinedOutput block until every inherited write end of the
-// output pipe closes, which may be long after the main process dies.
-// Hard ceiling per exec becomes 15s+5s=20s.
-const requestExecWaitDelay = 5 * time.Second
+// The request-path exec constants and plain helpers live in
+// pkg/diagcmd (#17203: diagcmd.RequestExecTimeout /
+// RequestExecWaitDelay / RunTimeout / OutputTimeout /
+// CombinedOutputTimeout) — the sole implementation shared with
+// pkg/api and the remote CLI. Aliases keep package-local call sites
+// short. The 15s/5s values mirror the apply-path contract in
+// pkg/daemon/exec_timeout.go (#1794, contract reference).
+const (
+	requestExecTimeout   = diagcmd.RequestExecTimeout
+	requestExecWaitDelay = diagcmd.RequestExecWaitDelay
+)
 
 // Concurrency bounding for request-path diagnostic forks (#6552).
 //
@@ -65,6 +65,10 @@ const requestExecWaitDelay = 5 * time.Second
 // diagLimiter (declared in server_diag_ping.go) is the shared
 // diagcmd.DefaultLimiter, so these forks and ping/traceroute — on both the
 // gRPC and REST surfaces — contend for one MaxConcurrentDiagnostics budget.
+// The diag ping/traceroute budgets likewise live in diagcmd
+// (PingExecTimeout, TracerouteTimeout, DiagExecCeiling, ClampDiagTimeout
+// — #1819, #15235, #17203); this file holds only the limiter-aware
+// wrappers and the fork-exemption policy below.
 
 // errDiagBusy reports that the diagnostic concurrency cap was reached before
 // the command was forked. It is distinguished from an exec failure so callers
@@ -105,7 +109,7 @@ func outputTimeout(ctx context.Context, name string, args ...string) ([]byte, er
 		return nil, err
 	}
 	defer release()
-	return outputTimeoutUnlimited(ctx, name, args...)
+	return diagcmd.OutputTimeout(ctx, name, args...)
 }
 
 // combinedOutputTimeout runs a command under the request-path bound AND the
@@ -116,27 +120,19 @@ func combinedOutputTimeout(ctx context.Context, name string, args ...string) ([]
 		return nil, err
 	}
 	defer release()
-	return combinedOutputTimeoutUnlimited(ctx, name, args...)
+	return diagcmd.CombinedOutputTimeout(ctx, name, args...)
 }
 
 // outputTimeoutUnlimited is outputTimeout without the concurrency cap. See the
 // exemption list above before using it.
 func outputTimeoutUnlimited(ctx context.Context, name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestExecTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.WaitDelay = requestExecWaitDelay
-	return cmd.Output()
+	return diagcmd.OutputTimeout(ctx, name, args...)
 }
 
 // combinedOutputTimeoutUnlimited is combinedOutputTimeout without the
 // concurrency cap. See the exemption list above before using it.
 func combinedOutputTimeoutUnlimited(ctx context.Context, name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestExecTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.WaitDelay = requestExecWaitDelay
-	return cmd.CombinedOutput()
+	return diagcmd.CombinedOutputTimeout(ctx, name, args...)
 }
 
 // runTimeout runs a command under the request-path bound, discarding
@@ -146,69 +142,7 @@ func combinedOutputTimeoutUnlimited(ctx context.Context, name string, args ...st
 // returned error exactly as the raw .Run() calls did. Deliberately NOT
 // concurrency-capped (#6552): see the exemption list above.
 func runTimeout(ctx context.Context, name string, args ...string) error {
-	ctx, cancel := context.WithTimeout(ctx, requestExecTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.WaitDelay = requestExecWaitDelay
-	return cmd.Run()
-}
-
-// Diag-stream budgets (#1819). Ping/Traceroute stream child output and
-// legitimately run longer than requestExecTimeout, so they size their
-// bound from the request instead of sharing the 15s constant. The same
-// formulas live in pkg/api/exec_timeout.go for the HTTP REST siblings
-// (pkg/api already imports pkg/grpcapi, so api importing an exported
-// helper from grpcapi would be cycle-free — the reverse would cycle;
-// kept as unexported mirrors by choice — see docs/log/9937.md); keep
-// the two copies in sync.
-
-// diagPingPacketInterval is the per-packet budget for ping: the
-// handlers do not pass -i, so ping sends one packet per second
-// (iputils default). If an interval knob is ever added to the request,
-// this constant must become a parameter of pingExecTimeout.
-const diagPingPacketInterval = 1 * time.Second
-
-// diagExecSlack absorbs exec/VRF setup, DNS resolution, and the final
-// per-packet reply timeout so a fully-successful run never grazes the
-// deadline.
-const diagExecSlack = 15 * time.Second
-
-// diagPingFloor is the previous hardcoded streamDiagCmd bound. The
-// #1819 right-sizing must not tighten any existing budget, so small
-// counts keep at least the 30s they had.
-const diagPingFloor = 30 * time.Second
-
-// diagExecCeiling caps every request-sized diag budget. The Count
-// clamp (≤100 → 115s) keeps well under it today; the ceiling is
-// defense-in-depth so a future clamp change cannot let one request pin
-// a handler goroutine for minutes.
-const diagExecCeiling = 150 * time.Second
-
-// diagTracerouteTimeout bounds gRPC and HTTP traceroute. Neither
-// request carries max_ttl, so this is a constant rather than a
-// formula; 60s matches the pre-#1819 HTTP bound (the gRPC path was
-// 30s — this aligns it without tightening the HTTP side).
-const diagTracerouteTimeout = 60 * time.Second
-
-// pingExecTimeout sizes the ping budget from the (already clamped)
-// packet count: count × 1s/packet + slack, floored at the previous 30s
-// bound and capped at the diag ceiling.
-func pingExecTimeout(count int) time.Duration {
-	d := time.Duration(count)*diagPingPacketInterval + diagExecSlack
-	if d < diagPingFloor {
-		d = diagPingFloor
-	}
-	return clampDiagTimeout(d)
-}
-
-// clampDiagTimeout enforces diagExecCeiling on any diag-stream budget;
-// streamDiagCmd applies it to whatever the caller passes so no future
-// formula can exceed the ceiling.
-func clampDiagTimeout(d time.Duration) time.Duration {
-	if d > diagExecCeiling {
-		return diagExecCeiling
-	}
-	return d
+	return diagcmd.RunTimeout(ctx, name, args...)
 }
 
 // clampTailLines bounds the request-controlled `tail -n N` line count to

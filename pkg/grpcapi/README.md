@@ -1020,9 +1020,10 @@ contract.
   ntpq, timedatectl, tail, ip neigh flush, systemctl power actions)
   must go through the bounded helpers in `exec_timeout.go` (#1805):
   `outputTimeout` / `combinedOutputTimeout` / `runTimeout` (15s timeout
-  + 5s WaitDelay, and — for the first two as of #6552 — a slot from the
-  shared diagnostic semaphore; mirroring the apply-path contract in
-  `pkg/daemon/exec_timeout.go`, #1794 — not importable here because
+  + 5s WaitDelay via the shared `pkg/diagcmd` helpers, #17203, and — for
+  the first two as of #6552 — a slot from the shared diagnostic semaphore;
+  mirroring the apply-path contract in `pkg/daemon/exec_timeout.go`, #1794
+  — not importable here because
   pkg/daemon imports this package). Do not add raw `exec.Command` calls
   in handlers: a wedged binary pins the handler goroutine and its gRPC
   stream. Power actions take `context.Background()` (client disconnect
@@ -1030,10 +1031,10 @@ contract.
   request ctx. Request-controlled `tail -n N` is additionally clamped
   via `clampTailLines` — a time bound alone does not cap response bytes.
   The streaming Ping/Traceroute diags size their budget from the request
-  instead of the 15s constant (#1819): `pingExecTimeout` (count × 1s +
-  15s slack, 30s floor) and `diagTracerouteTimeout` (60s, aligned with
-  the HTTP path), both capped at the 150s `diagExecCeiling`; the same
-  formulas live in `pkg/api/exec_timeout.go` for the REST siblings, and
+  instead of the 15s constant (#1819): `diagcmd.PingExecTimeout` (count × 1s +
+  15s slack, 30s floor) and `diagcmd.TracerouteTimeout` (60s, aligned with
+  the HTTP path), both capped at the 150s `diagcmd.DiagExecCeiling`
+  (#17203: sole implementation in `pkg/diagcmd`, shared with REST), and
   `streamDiagCmd` kills the child promptly when a stream send fails.
   `streamDiagCmd` must also reap the child on the scanner-error path
   (#5060): a combined-output line larger than the scanner token cap
@@ -1077,7 +1078,7 @@ contract.
   because Wait joins the exec copy goroutine that stays blocked in
   `pw.Write` while the scanner is parked in `sendFn`. On cancellation
   it closes both pipe ends, joins only Wait under
-  `requestExecWaitDelay`, and abandons a ctx-parked scanner to the
+  `diagcmd.RequestExecWaitDelay`, and abandons a ctx-parked scanner to the
   caller's Send bound before returning the ctx error, so the wait
   cannot re-wedge the handler (and its slot) behind a parked scanner.
 
