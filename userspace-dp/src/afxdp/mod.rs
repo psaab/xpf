@@ -186,6 +186,9 @@ mod zone_counters;
 // #3651: per-zone SYN/ICMP/UDP flood-event counters — the flood half of the
 // same POPULATE, accounted on the screen-drop path rather than the forward path.
 mod flood_counters;
+// #17204: the ONE shared per-zone slot-counter machine (slot map, store,
+// pending, fold) both families above are built on.
+mod zone_slot_counters;
 // Clean-room WireGuard tunnel termination — see
 // docs/pr/wireguard-clean/plan.md. Engine + tests only in this PR;
 // hot-path activation lands in a follow-up.
@@ -1218,7 +1221,7 @@ impl BatchCounters {
         &mut self,
         reason: &str,
         zone_id: u32,
-        flood_slots: &crate::afxdp::flood_counters::FloodCounterSlotMap,
+        flood_slots: &crate::afxdp::zone_slot_counters::ZoneSlotMap,
     ) {
         self.touched = true;
         self.screen_drops += 1;
