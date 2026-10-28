@@ -20,8 +20,9 @@ import (
 // IPv4 addresses on little-endian hosts while gRPC was correct. One
 // decoder, owned here, cannot diverge that way.
 //
-// Do NOT use pkg/nat's hostOrderUint32ToIP for these fields: that
-// helper does host-order (BigEndian) pool arithmetic, the opposite
+// Do NOT use pkg/nat's bigEndianPoolUint32ToIP for these fields:
+// that helper decodes deterministic-NAT pool-numeric u32s (Rust
+// u32::from(Ipv4Addr), big-endian on every CPU), the opposite
 // semantics under a formerly identical name.
 
 // SessionIPv4 decodes a session-field IPv4 u32 (SessionValue.NATSrcIP /
