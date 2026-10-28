@@ -969,15 +969,15 @@ fn unknown_tunnel_kind_mtu_forwards_and_counts_9901() {
     );
 }
 
-/// #10705: the PTB forwarding state plus a native-tunnel endpoint of the
-/// given `mode` (mirrors the #9901 unknown-tunnel fixture, rebuilt here
-/// because that module's helpers are private). Transport MTU 1400 via the
-/// `tunnel_outer_mtu` chain (tx_ifindex 22 misses, egress_ifindex 80 hits),
-/// so the GRE inner budget is 1376 (1400 - outer_ip(20) - gre(4)) and the
-/// WG inner budget is 1340 (1400 - WG_OVERHEAD_V4(60): outer IP(20) +
-/// UDP(8) + WG data header(16) + Poly1305 tag(16); #16499 caps the §5.4.6
-/// pad at this budget, so no worst-case 15-byte pad is subtracted — the
-/// pre-#16499 pin of 1325 drifted when the pad model changed).
+/// #10705: fixture's outer-MTU input is 1400. GRE obtains it from
+/// `tunnel_outer_mtu` (tx_ifindex 22 misses, egress ifindex 80 hits); this
+/// peer-less WG fixture takes `wg_selected_peer_outer_with_dynamic`'s
+/// no-peer fallback to `decision.resolution.egress_ifindex` (80)'s MTU.
+/// Thus GRE's inner budget is 1376 (1400 - outer_ip(20) - gre(4)), and WG's
+/// is 1340 (1400 - WG_OVERHEAD_V4(60): outer IP(20) + UDP(8) + WG data
+/// header(16) + Poly1305 tag(16)). #16499 caps the §5.4.6 pad at this
+/// budget, so no worst-case 15-byte pad is subtracted — the pre-#16499
+/// pin of 1325 drifted when the pad model changed.
 fn forwarding_for_ptb_with_tunnel(mtu: usize, mode: &str) -> ForwardingState {
     let mut forwarding = forwarding_for_ptb(mtu);
     forwarding.tunnel_endpoints.insert(
