@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -44,15 +45,97 @@ import (
 // it. Tests must restore it with t.Cleanup.
 var streamReauthInterval9051 = 5 * time.Second
 
-// reauthServerStream re-parents a stream's context so the re-authorization
-// goroutine can cancel it. grpc.ServerStream has no setter; embedding and
-// overriding Context() is the standard shape (same as peerMarkerServerStream).
-type reauthServerStream struct {
+// authzRecvStream defers the request-dependent half of stream
+// authorization to the first RecvMsg (#17175).
+//
+// The generated server-streaming wrapper decodes the request by calling
+// RecvMsg on the stream the interceptor handed it, BEFORE invoking the
+// handler body. Wrapping that stream lets the interceptor run the full
+// authorizeRPCContext with the decoded message at exactly that point —
+// before any handler logic, before any Send — and retain ONLY that
+// first message so the #9051 tick re-prices the same arguments instead
+// of nil. For a request-independent stream the wrapper starts
+// undecided like any other: its first RecvMsg runs the (request-
+// independent) full authorization and retains the decoded message,
+// so ticks price that retained message. Later RecvMsg calls
+// (unreachable in production: the generated wrapper receives exactly
+// once) neither re-authorize nor replace the retained message.
+//
+// retained/authCtx are written by the handler goroutine (first RecvMsg)
+// and read by the watcher goroutine (tick); mu guards both. Context()
+// returns the authorized context once the first message is admitted;
+// before that it returns baseCtx. baseCtx is parented on the open-time
+// authorizedCtx (authorizeStreamContinuously), so before the first
+// message it carries the open-time authorizedPrincipalKey{} and after
+// admission the first-message principal. The next interceptor in the
+// primary chain (peerMarkerStreamInterceptor) captures Context()
+// before any RecvMsg and freezes that value into the stream the
+// handler sees, so in production a handler re-reading stream.Context()
+// still sees the pre-message (open-time) context — the authCtx swap
+// is observable only on this wrapper itself. No stream handler today
+// reads authorizedPrincipalFromContext, so that freeze is harmless;
+// it is documented here rather than silently implied.
+type authzRecvStream struct {
 	grpc.ServerStream
-	ctx context.Context
+	s          *Server
+	fullMethod string
+	baseCtx    context.Context
+
+	mu       sync.Mutex
+	decided  bool
+	retained any
+	authCtx  context.Context
 }
 
-func (s reauthServerStream) Context() context.Context { return s.ctx }
+func (w *authzRecvStream) Context() context.Context {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.authCtx != nil {
+		return w.authCtx
+	}
+	return w.baseCtx
+}
+
+// RecvMsg runs the deferred full authorization on the first message
+// and retains it for the re-auth tick. For a request-independent
+// stream that verdict decides identically for the decoded message
+// and the typed empty request (census-enforced), so the duplicate of
+// the open-time verdict changes nothing. A denied first message
+// returns the PermissionDenied verdict from RecvMsg, which the
+// generated wrapper propagates before the handler body runs — the
+// client sees the denial, never stream output.
+func (w *authzRecvStream) RecvMsg(m any) error {
+	if err := w.ServerStream.RecvMsg(m); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	already := w.decided
+	if !already {
+		w.decided = true
+		w.retained = m
+	}
+	w.mu.Unlock()
+	if already {
+		return nil
+	}
+	authorizedCtx, err := w.s.authorizeRPCContext(w.baseCtx, w.fullMethod, m)
+	if err != nil {
+		return err
+	}
+	w.mu.Lock()
+	w.authCtx = authorizedCtx
+	w.mu.Unlock()
+	return nil
+}
+
+// retainedRequest returns the retained request and whether the first
+// message has been decided. The retained request is the decoded first
+// message (nil before it arrives) for every stream kind.
+func (w *authzRecvStream) retainedRequest() (any, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.retained, w.decided
+}
 
 // authorizeStreamContinuously runs handler with a context that is cancelled as
 // soon as the principal stops being authorized for fullMethod.
@@ -69,8 +152,13 @@ func (s *Server) authorizeStreamContinuously(
 	ss grpc.ServerStream,
 	fullMethod string,
 	handler grpc.StreamHandler,
+	authorizedCtx context.Context,
 ) error {
-	ctx, cancel := context.WithCancel(ss.Context())
+	// Parent on authorizedCtx, not ss.Context(): authorizedCtx carries
+	// the open-time authorizedPrincipalKey{} (authorizeStreamOpenContext
+	// / authorizeRPCContext), while ss.Context() is its sibling and
+	// carries no such value. Cancelling ctx still cancels the stream.
+	ctx, cancel := context.WithCancel(authorizedCtx)
 	defer cancel()
 
 	revoked := make(chan error, 1)
@@ -87,6 +175,20 @@ func (s *Server) authorizeStreamContinuously(
 	// the restore across sequential runs. All var reads are now sequenced
 	// in the interceptor body.
 	interval := streamReauthInterval9051
+
+	// #17175: wrap the stream so its first RecvMsg retains the decoded
+	// message and runs the full authorization there. The watcher below
+	// re-prices the RETAINED message on each tick — never nil, and
+	// never the typed empty request: ticks price exactly what the
+	// client sent, for request-independent streams too (their verdict
+	// decides identically for any message, census-enforced).
+	recv := &authzRecvStream{
+		ServerStream: ss,
+		s:            s,
+		fullMethod:   fullMethod,
+		baseCtx:      ctx,
+	}
+
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -97,11 +199,29 @@ func (s *Server) authorizeStreamContinuously(
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if err := s.authorizeRPC(ctx, fullMethod, nil); err != nil {
+				var tickErr error
+				if req, decided := recv.retainedRequest(); decided && req != nil {
+					// Re-price the retained decoded first message —
+					// never nil (#17175).
+					_, tickErr = s.authorizeRPCContext(ctx, fullMethod, req)
+				} else {
+					// No message yet: nothing has been served, but
+					// the class may have been revoked wholesale
+					// (#9051). Re-check the open price (the full
+					// typed-empty verdict for a request-
+					// independent stream, the coarse floor
+					// otherwise); the full verdict on the decoded
+					// message still runs on the first RecvMsg
+					// against the then-current config, so a
+					// principal revoked before its first message
+					// is denied before any output.
+					_, tickErr = s.authorizeStreamOpenContext(ctx, fullMethod)
+				}
+				if tickErr != nil {
 					slog.Warn("gRPC stream terminated: the principal is no longer "+
 						"authorized for this method (#9051)",
-						"method", fullMethod, "reason", err.Error())
-					revoked <- err
+						"method", fullMethod, "reason", tickErr.Error())
+					revoked <- tickErr
 					cancel()
 					return
 				}
@@ -109,7 +229,7 @@ func (s *Server) authorizeStreamContinuously(
 		}
 	}()
 
-	herr := handler(srv, reauthServerStream{ServerStream: ss, ctx: ctx})
+	herr := handler(srv, recv)
 	// #9903 F-128: consult the revocation BEFORE the handler error. The
 	// watcher sends to revoked (buffered) BEFORE cancelling, so when the
 	// handler returns *because of* the revocation, revoked is already

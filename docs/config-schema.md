@@ -4082,9 +4082,12 @@ plus — since #6714 — every key of each child, which covers every leaf whose
 flat-set path absorbs the list onto the node itself. `interfaces fab0 fabric-options
 member-interfaces` does not: its schema node is a plain `children: nil` leaf
 with no `args` and no `multi`, so `SetPath` files the whole bracket list as ONE
-child carrying every name on that child's Keys — and `firewallMatchValues`
-would keep only the first. `fabricMemberValues` (`compiler_interfaces.go`)
-therefore descends the subtree and takes EVERY key. The same read is now driven
+child carrying every name on that child's Keys. Since #6714
+`firewallMatchValues` reads every key of each DIRECT child, so it would in
+fact keep every name of that bracket list; what it would not do is DESCEND
+below a child, nor does it take a bare self-repeat on the node's own tail
+as a value. `fabricMemberValues` (`compiler_interfaces.go`) therefore uses
+`plainListValues`, which descends the subtree and takes EVERY key. The same read is now driven
 through `FindChildren("member-interfaces")` rather than `FindChild`, because
 repeated hierarchical statements land as sibling nodes. Before the fold the
 hierarchical bracket spelling and the plain single-value spelling

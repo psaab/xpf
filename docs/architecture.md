@@ -419,7 +419,7 @@ editing cmdtree.
     cross-site `<form>` POST. The same-origin policy blocks *reading* the
     response but not *sending* the side-effecting request, so a malicious page
     could drive a credentialed state change. `mutationCrossSiteGuard`
-    (`pkg/api/crosssite.go`) wraps the mux BEFORE `authMiddleware` and rejects
+    (`pkg/api/crosssite.go`) wraps the mux BEFORE the auth gate and rejects
     any non-safe-method request (403) that shows cross-site provenance:
     `Sec-Fetch-Site: cross-site|same-site`, an `Origin`/`Referer` whose
     host:port differs from the target, or a CORS "simple" form content type

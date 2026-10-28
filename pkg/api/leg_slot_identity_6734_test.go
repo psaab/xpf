@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 )
 
@@ -138,8 +139,9 @@ func TestLegSlotIsTheSlotTheHandlerReads6734(t *testing.T) {
 
 	t.Run("ReconcileHTTPS", func(t *testing.T) {
 		s := retireTestServer(t, &AuthConfig{Users: map[string]string{"admin": "boot"}})
+		dir := t.TempDir()
 		s.certGen = func(bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
-			return generateSelfSignedCertAtWithStatusHosts(tlsDir, certPath, keyPath, bindHosts)
+			return generateSelfSignedCertAtWithStatusHosts(dir, filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"), bindHosts)
 		}
 		if err := s.ReconcileHTTPS(true, "10.0.0.3:8443"); err != nil {
 			t.Fatalf("ReconcileHTTPS: %v", err)
