@@ -10,11 +10,8 @@ use super::*;
 #[derive(Debug)]
 pub(in crate::afxdp) struct TxRequest {
     pub(in crate::afxdp) bytes: crate::afxdp::cos::redirect_pool::PooledBuffer,
-    #[allow(dead_code)]
     pub(in crate::afxdp) expected_ports: Option<(u16, u16)>,
-    #[allow(dead_code)]
     pub(in crate::afxdp) expected_addr_family: u8,
-    #[allow(dead_code)]
     pub(in crate::afxdp) expected_protocol: u8,
     pub(in crate::afxdp) flow_key: Option<SessionKey>,
     pub(in crate::afxdp) egress_ifindex: i32,
@@ -152,11 +149,8 @@ pub(in crate::afxdp) struct PreparedTxRequest {
     pub(in crate::afxdp) offset: u64,
     pub(in crate::afxdp) len: u32,
     pub(in crate::afxdp) recycle: PreparedTxRecycle,
-    #[allow(dead_code)]
     pub(in crate::afxdp) expected_ports: Option<(u16, u16)>,
-    #[allow(dead_code)]
     pub(in crate::afxdp) expected_addr_family: u8,
-    #[allow(dead_code)]
     pub(in crate::afxdp) expected_protocol: u8,
     pub(in crate::afxdp) flow_key: Option<SessionKey>,
     /// Fragment-overlap admission ownership transferred to TX queues.

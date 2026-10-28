@@ -214,7 +214,7 @@ impl super::Coordinator {
         for (id, entry) in self.tunnel_sources.iter() {
             let reason = match self.forwarding.tunnel_endpoints.get(id) {
                 None => Some("removed"),
-                Some(ep) if ep.mode != "gre" && ep.mode != "ip6gre" => Some("mode_changed"),
+                Some(ep) if ep.kind != TunnelKind::Gre => Some("mode_changed"),
                 Some(ep) => {
                     let attach_ok = ep.logical_ifindex == entry.spawned_ifindex
                         && self
@@ -258,7 +258,7 @@ impl super::Coordinator {
                 .forwarding
                 .tunnel_endpoints
                 .values()
-                .filter(|ep| ep.mode == "gre" || ep.mode == "ip6gre")
+                .filter(|ep| ep.kind == TunnelKind::Gre)
                 .map(|ep| ep.id)
                 .collect();
             for id in desired {
@@ -307,7 +307,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "gre" && endpoint.mode != "ip6gre" {
+        if endpoint.kind != TunnelKind::Gre {
             return false;
         }
         let Some(tunnel_name) = self
@@ -506,7 +506,7 @@ impl super::Coordinator {
             else {
                 return Some("removed_deferred");
             };
-            if row.mode != "gre" && row.mode != "ip6gre" {
+            if tunnel_mode_kind(&row.mode) != TunnelKind::Gre {
                 return Some("mode_changed_deferred");
             }
             if row.ifindex != entry.spawned_ifindex
@@ -586,7 +586,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "gre" && endpoint.mode != "ip6gre" {
+        if endpoint.kind != TunnelKind::Gre {
             return false;
         }
         let Some(name) = self
@@ -640,7 +640,7 @@ impl super::Coordinator {
         // Current WG engines keyed by id, with their Arc address identity.
         let mut desired: BTreeMap<u16, usize> = BTreeMap::new();
         for endpoint in self.forwarding.tunnel_endpoints.values() {
-            if endpoint.mode != "wireguard" {
+            if endpoint.kind != TunnelKind::WireGuard {
                 continue;
             }
             if let Some(engine) = self.forwarding.wg_engines.get(&endpoint.id) {
@@ -873,7 +873,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "wireguard" {
+        if endpoint.kind != TunnelKind::WireGuard {
             return false;
         }
         let Some(engine) = self.forwarding.wg_engines.get(&id).cloned() else {
@@ -1118,7 +1118,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "wireguard" || !self.forwarding.wg_engines.contains_key(&id) {
+        if endpoint.kind != TunnelKind::WireGuard || !self.forwarding.wg_engines.contains_key(&id) {
             return false;
         }
         let Some(name) = self

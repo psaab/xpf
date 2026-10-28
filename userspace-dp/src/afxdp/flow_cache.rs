@@ -142,11 +142,11 @@ pub(super) struct RewriteDescriptor {
     pub(super) rewrite_dst_port: Option<u16>,
     pub(super) ip_csum_delta: u16,
     pub(super) l4_csum_delta: u16,
-    #[allow(dead_code)] // populated for future flow-cache fast-path TX
+    // populated for future flow-cache fast-path TX
     pub(super) egress_ifindex: i32,
-    #[allow(dead_code)] // populated for future flow-cache fast-path TX
+    // populated for future flow-cache fast-path TX
     pub(super) tx_ifindex: i32,
-    #[allow(dead_code)] // populated for future flow-cache fast-path TX
+    // populated for future flow-cache fast-path TX
     pub(super) target_binding_index: Option<usize>,
     pub(super) input_filter_log: Option<CachedInputFilterLog>,
     // #3777/#10566: interface INPUT `then count` term handles matched by this
@@ -158,7 +158,7 @@ pub(super) struct RewriteDescriptor {
     pub(super) tx_selection: CachedTxSelectionDescriptor,
     pub(super) nat64: bool,
     pub(super) nptv6: bool,
-    #[allow(dead_code)] // populated for future flow-cache fast-path TX
+    // populated for future flow-cache fast-path TX
     pub(super) apply_nat_on_fabric: bool,
     /// #13077: queue this flow's packets were last actually served on.
     /// Seeded in `FlowCache::insert` from `tx_selection.queue_id` and
@@ -1799,7 +1799,7 @@ impl FlowCache {
     /// Nuclear invalidation — clears every entry. Reserved for rare events
     /// like link-cycle or full config reload where epoch-based invalidation
     /// is insufficient (e.g. routing table rebuild, interface renumbering).
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(super) fn invalidate_all(&mut self) {
         for entry in &mut self.entries {
             *entry = None;

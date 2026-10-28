@@ -959,7 +959,7 @@ pub(crate) struct BindingStatus {
     #[serde(rename = "mirror_drops_queue_full_cross_worker", default)]
     pub mirror_drops_queue_full_cross_worker: u64,
     // #760 instrumentation: post-CoS backup transmit bytes
-    // (drain_pending_tx fallbacks (tx/drain.rs::drain_pending_tx)) that bypass
+    // (drain_pending_tx fallbacks in tx/drain/) that bypass
     // any CoS queue's token gate.
     #[serde(rename = "post_drain_backup_bytes", default)]
     pub post_drain_backup_bytes: u64,

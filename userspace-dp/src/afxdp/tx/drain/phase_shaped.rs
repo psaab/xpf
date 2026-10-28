@@ -1,12 +1,12 @@
 // Phase 4 — service shaped CoS queues until noop, then a bounded
 // re-ingest budget that catches late peer arrivals on the MPSC
-// inbox. Mirrors `drain.rs:101-200` (original line numbers).
+// inbox.
 //
 // Codex round-2 finding 3.1 split: factored into two private
 // helpers in the same file so the orchestrator still has one
 // `drain_phase_drain_cos` entry point. `did_work: &mut bool` lets
 // inner loops accumulate cumulative state into the orchestrator's
-// local without leaking the `BackupOutcome` machinery here.
+// local without leaking the backup outcome machinery here.
 
 use super::super::*;
 use super::DrainCtx;
@@ -33,7 +33,8 @@ pub(super) fn drain_phase_drain_cos(
 /// bail, but the caller would still pay `monotonic_nanos()`, one
 /// no-op call, and noop telemetry on every idle worker tick.
 ///
-/// Mirrors `drain.rs:109-137` (original).
+/// Invariant: loops until `should_enter_shaped_drain` is false
+/// or `drain_shaped_tx` returns no serviced queue (noop).
 #[inline]
 fn shaped_initial_drain(
     binding: &mut BindingWorker,
@@ -90,10 +91,9 @@ fn shaped_initial_drain(
 /// inbox-only guard keeps the non-CoS fast path at exactly the
 /// pre-#760 cost.
 ///
-/// Mirrors `drain.rs:155-200` (original). The
-/// `forwarding.cos.interfaces.is_empty()` guard MUST stay here
-/// and MUST NOT be hoisted into the orchestrator — it is
-/// independent of the same guard in the backup phase.
+/// Invariant: the `forwarding.cos.interfaces.is_empty()` guard
+/// MUST stay here and MUST NOT be hoisted into the orchestrator —
+/// it is independent of the same guard in the backup phase.
 #[inline]
 fn shaped_reingest_budget(
     binding: &mut BindingWorker,
