@@ -50,6 +50,14 @@ func (v *sessionSyncView) egressZone() uint16 {
 	return v.val6.EgressZone
 }
 
+// #18148: the JSON wire field is u32 (Rust u32). The BPF session value
+// carries only the low 16 bits (#16557 frozen ABI), so the widening here
+// is a zero-extension of that truncated value — no new information, but
+// the field must accept full u32 values from the helper on the JSON leg.
+func (v *sessionSyncView) ingressZoneID32() uint32 { return uint32(v.ingressZone()) }
+
+func (v *sessionSyncView) egressZoneID32() uint32 { return uint32(v.egressZone()) }
+
 func (v *sessionSyncView) ingressIfaceFold() uint32 {
 	if v.val4 != nil {
 		return v.val4.IngressIfaceFold
@@ -123,19 +131,23 @@ func (v *sessionSyncView) fibSmac() []byte {
 }
 
 // natSrcIP/natDstIP render the NAT addresses from their NATIVE storage:
-// V4 widens its native-endian uint32 in a stack local (the pre-collapse
-// nativeUint32ToIP hop), V6 borrows its [16]byte in place. Neither path
-// stores an address slice, so nothing about the caller's value escapes.
+// V4 decodes its native-endian uint32 via dataplane.SessionIPv4
+// (#17188), V6 borrows its [16]byte in place. Neither path stores an
+// address slice, so nothing about the caller's value escapes. The
+// zero-field (no NAT) case stays a caller-side check here: ipString
+// already renders a nil or all-zero address as "", and SessionIPv4(0)
+// is 0.0.0.0, which ipString likewise renders as "" — so dropping the
+// old nil-for-zero hop changes no output.
 func (v *sessionSyncView) natSrcIP() string {
 	if v.val4 != nil {
-		return ipString(nativeUint32ToIP(v.val4.NATSrcIP))
+		return ipString(v.val4.NATSrcAddr())
 	}
 	return ipString(net.IP(v.val6.NATSrcIP[:]))
 }
 
 func (v *sessionSyncView) natDstIP() string {
 	if v.val4 != nil {
-		return ipString(nativeUint32ToIP(v.val4.NATDstIP))
+		return ipString(v.val4.NATDstAddr())
 	}
 	return ipString(net.IP(v.val6.NATDstIP[:]))
 }
@@ -295,9 +307,10 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 	// the twins' original order (NAT64 is the one V6-only insertion).
 	req.IngressZone = m.zoneNameByID(view.ingressZone())
 	req.EgressZone = m.zoneNameByID(view.egressZone())
-	// #919/#922: forward the raw u16 IDs alongside the legacy
-	// strings; the Rust daemon prefers IDs when nonzero.
-	req.IngressZoneID = view.ingressZone()
+	// #919/#922/#18148: forward the raw zone IDs alongside the legacy
+	// strings; the Rust daemon prefers IDs when nonzero. The BPF value
+	// is u16 (low bits of the u32 StableZoneID), widened losslessly here.
+	req.IngressZoneID = view.ingressZoneID32()
 	// #7095: resolve the peer's cluster-stable ingress fold to THIS node's
 	// ifindex. The sender could not ship its own ifindex — it is node-local
 	// — so it shipped a fold of the reth-relative name both nodes agree on,
@@ -328,7 +341,7 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 	// A carried domain cannot drift that way; 0 means the default instance,
 	// which is what a peer predating the field sends.
 	req.RoutingDomain = view.routingDomain()
-	req.EgressZoneID = view.egressZone()
+	req.EgressZoneID = view.egressZoneID32()
 	var peerEgress bool
 	req.EgressIfindex, req.TXIfindex, req.OwnerRGID, req.TXVLANID, peerEgress =
 		m.sessionSyncEgressIdentityLocked(view.fibIfindex(), view.fibVlanID(), view.egressIfaceFold(), req.EgressZone)
@@ -525,15 +538,6 @@ func (m *Manager) zoneNameByID(zoneID uint16) string {
 		}
 	}
 	return owner
-}
-
-func nativeUint32ToIP(v uint32) net.IP {
-	if v == 0 {
-		return nil
-	}
-	var raw [4]byte
-	binary.NativeEndian.PutUint32(raw[:], v)
-	return net.IPv4(raw[0], raw[1], raw[2], raw[3]).To4()
 }
 
 func networkUint16ToHost(v uint16) uint16 {

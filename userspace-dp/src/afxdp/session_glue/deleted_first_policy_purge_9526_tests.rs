@@ -159,7 +159,7 @@ fn purge(sessions: &mut SessionTable, rule_id: &str) -> usize {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2, secs: 0 },
+            tick: Tick::from_ns(2),
         },
         &ForwardingState::default(),
         rule_id,

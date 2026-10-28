@@ -11,7 +11,7 @@ import (
 //
 // pkg/flowexport proves the resolver now partitions collectors into one group
 // per (template, address family). That alone does not stop the cross-fan: the
-// fan-out lives here, in flowExportCallback, which gates the INSTANCE once via
+// fan-out lives here, in closeCallback, which gates the INSTANCE once via
 // ServesFamily and then sends the record to EVERY group of that instance.
 // Delete the per-group gate and every resolver cell stays green while the bug
 // is fully restored — so this cell exists to bind the gate, not the grouping.
@@ -58,7 +58,7 @@ func oneInstanceBothFamiliesV9Config(addr string, inetPort, inet6Port int) *conf
 // instance name, because this defect lives BETWEEN the groups of a single
 // instance — an instance-keyed total (what the #2462 helper reports) sums both
 // families and cannot see a cross-fan at all.
-func groupStatsForFamily(b *exporterBundle, inst string, isV6 bool) uint64 {
+func groupStatsForFamily(b *flowBundle, inst string, isV6 bool) uint64 {
 	var total uint64
 	for _, g := range b.groups {
 		if g.ec.InstanceName == inst && g.ec.GroupIsV6 == isV6 {
@@ -78,7 +78,7 @@ func groupStatsForFamily(b *exporterBundle, inst string, isV6 bool) uint64 {
 // records is the contamination R72 describes.
 //
 // FAIL-ON-REVERT: delete the `if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 { continue }`
-// gate in flowExportCallback and the inet6 count goes from 0 to >= 1.
+// gate in closeCallback and the inet6 count goes from 0 to >= 1.
 func TestSessionCloseSingleInstanceMultiFamilyDoesNotCrossFan_6811(t *testing.T) {
 	inetColl, inetPort := listenUDP(t)
 	t.Cleanup(func() { inetColl.Close() })
@@ -92,7 +92,7 @@ func TestSessionCloseSingleInstanceMultiFamilyDoesNotCrossFan_6811(t *testing.T)
 	if !d.reconcileFlowExporters(oneInstanceBothFamiliesV9Config("127.0.0.1", inetPort, inet6Port)) {
 		t.Fatal("single-instance multi-family v9 reconcile must start exporters")
 	}
-	b := d.flowBundle.Load()
+	b := d.v9Family().bundle.Load()
 	if b == nil {
 		t.Fatal("no v9 bundle")
 	}

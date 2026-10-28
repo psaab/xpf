@@ -21,6 +21,7 @@ pub(super) mod reset;
 pub(super) mod snapshot;
 pub(crate) mod stage;
 pub(super) mod teardown;
+pub(super) mod test_seams;
 
 pub(crate) use stage::{MandatoryPin, ReconcileStage, WorkerBindShortfall};
 

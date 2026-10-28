@@ -8,8 +8,8 @@ import (
 
 // ValidatePCIAddr accepts a PCI bus address in the canonical
 // DDDD:BB:DD.F form (e.g. 0000:09:00.0), the #1956 device-map primary
-// identity key. The format mirrors what extractPCIAddr produces from
-// sysfs (pkg/daemon/linksetup.go) so a committed key resolves against the
+// identity key. The format mirrors what netname.PCIAddrFromDevicePath
+// produces from sysfs (pkg/netname) so a committed key resolves against the
 // live enumeration without normalization drift. The shorter BB:DD.F form
 // (no domain) is rejected: sysfs always carries the 4-digit domain, and
 // accepting an ambiguous short form would silently never match.
@@ -90,6 +90,10 @@ func ValidateDeviceMapLogicalName(raw string) error {
 	if name == "" {
 		return fmt.Errorf("missing logical interface name (e.g. ge-0/0/3 or fxp0)")
 	}
+	// Strict-validator contract: the compiler stores the RAW logical
+	// name and LinuxIfName folds only "/", so a padded name keys as a
+	// distinct interface and never binds. Refuse padding here as well
+	// as centrally (#17177 validateKeySlot).
 	if name != raw {
 		return fmt.Errorf("logical interface name %q must not have leading/trailing whitespace", raw)
 	}

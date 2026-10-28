@@ -166,7 +166,7 @@ func (s *Server) Ping(req *pb.PingRequest, stream grpc.ServerStreamingServer[pb.
 
 	cmd := buildPingArgv(req, count)
 
-	return streamDiag(stream.Context(), pingExecTimeout(count), cmd, func(line string) error {
+	return streamDiag(stream.Context(), diagcmd.PingExecTimeout(count), cmd, func(line string) error {
 		err, xfer := sendDiagFrame(stream.Context(), func() error {
 			return stream.Send(&pb.PingResponse{Output: line})
 		}, release)
@@ -229,7 +229,7 @@ func (s *Server) Traceroute(req *pb.TracerouteRequest, stream grpc.ServerStreami
 
 	cmd := buildTracerouteArgv(req)
 
-	return streamDiag(stream.Context(), diagTracerouteTimeout, cmd, func(line string) error {
+	return streamDiag(stream.Context(), diagcmd.TracerouteTimeout, cmd, func(line string) error {
 		err, xfer := sendDiagFrame(stream.Context(), func() error {
 			return stream.Send(&pb.TracerouteResponse{Output: line})
 		}, release)
@@ -266,10 +266,10 @@ const (
 
 // streamDiagCmd runs a command and streams each line of combined output
 // via sendFn. timeout is request-sized by the caller (#1819, see the
-// diag-stream budget block in exec_timeout.go); it is always capped at
-// diagExecCeiling so a pathological request cannot pin the handler.
+// diag budget block in pkg/diagcmd); it is always capped at
+// diagcmd.DiagExecCeiling so a pathological request cannot pin the handler.
 func streamDiagCmd(ctx context.Context, timeout time.Duration, cmd []string, sendFn func(string) error) error {
-	ctx, cancelTimeout := context.WithTimeout(ctx, clampDiagTimeout(timeout))
+	ctx, cancelTimeout := context.WithTimeout(ctx, diagcmd.ClampDiagTimeout(timeout))
 	defer cancelTimeout()
 	// Cancelable layer for the send-failure path: when sendFn fails the
 	// scanner goroutine stops reading the pipe, so without an explicit
@@ -341,7 +341,7 @@ func streamDiagCmd(ctx context.Context, timeout time.Duration, cmd []string, sen
 	//     error) is reported.
 	//   - ctx.Done first: external cancel/timeout behind a parked
 	//     scanner; close both pipe ends, join only Wait under
-	//     requestExecWaitDelay, and abandon (never join) a scanner
+	//     diagcmd.RequestExecWaitDelay, and abandon (never join) a scanner
 	//     parked in a ctx-independent sendFn to the caller's
 	//     per-write Send bound (#14980).
 	waitDone := make(chan error, 1)
@@ -391,7 +391,7 @@ func streamDiagCmd(ctx context.Context, timeout time.Duration, cmd []string, sen
 		// would re-wedge the return — it is abandoned to the
 		// caller's Send bound (#14980), whose sever (or the
 		// handler-return stream cancel in real grpc-go) ends it.
-		// Bound only the Wait join by requestExecWaitDelay, the
+		// Bound only the Wait join by diagcmd.RequestExecWaitDelay, the
 		// same post-kill pipe-drain window WaitDelay enforces.
 		_ = pr.Close()
 		pw.Close()

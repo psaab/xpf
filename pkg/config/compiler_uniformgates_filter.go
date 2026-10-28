@@ -118,15 +118,19 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	}
 
 	// #3203 (agy-070 #02/#03/#04) firewall-filter flexible-match-range gate.
-	// Strict on commit / commit-check (hard-reject a term whose byte-offset/
-	// bit-length/match-value/match-mask could not be parsed or fell outside the
-	// representable range). Before this gate such a token was silently ignored
-	// by compileFilterFrom, leaving the field at its zero default — a malformed
-	// or >32-bit match-value became 0x0 and the rule matched the WRONG (zero)
-	// pattern with a clean commit. Lenient on load / peer-sync (warn so an
-	// already-persisted or peer-synced config still boots — #1960 no-brick).
-	// Runs on the fully-compiled *Config so the typed term list (with
-	// UnknownFlexMatch populated by compileFilterFrom) is available.
+	// Strict on commit / commit-check: hard-reject a value-less
+	// flexible-match-range on a discard/reject term (#16849), and any term
+	// whose byte-offset/bit-length/match-value/match-mask could not be
+	// parsed or fell outside the representable range. Before this gate such
+	// a token was silently ignored by compileFilterFrom, leaving the field
+	// at its zero default — a malformed or >32-bit match-value became 0x0
+	// and the rule matched the WRONG (zero) pattern with a clean commit.
+	// A value-less accept/next-term term stays strict-accepted with the
+	// warning below and is refused at the dataplane. Lenient on load /
+	// peer-sync (warn so an already-persisted or peer-synced config still
+	// boots — #1960 no-brick). Runs on the fully-compiled *Config so the
+	// typed term list (with UnknownFlexMatch populated by
+	// compileFilterFrom) is available.
 	// Keep the warning for tolerant loads and strict-accepted value-less
 	// accept/next-term terms; discard/reject remain strict errors.
 	if msg := flexMatchValueMissingWarning(cfg, !opts.lenientFlexMatch); msg != "" {

@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
-	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
@@ -232,17 +231,17 @@ func (d *Daemon) managementOnlyLeaseRefresh() {
 	d.reconcileDNSFromDHCP()
 }
 
-// reapplyIPsecForLeaseChange re-renders + reloads swanctl when a DHCP
-// lease change may have moved the kernel address an IPsec gateway is
-// dynamically bound to (#2884). It is called from onDHCPAddressChange's
-// management-only branch, which skips the full recompile; the
+// reapplyIPsecLocked re-renders + reloads swanctl when a DHCP lease
+// change may have moved the kernel address an IPsec gateway is
+// dynamically bound to (#2884). It is driven by
+// managementOnlyLeaseRefresh, the management-only branch of
+// onDHCPAddressChange, which skips the full recompile; the
 // dataplane-facing branch already re-renders IPsec through applyConfig.
 //
 // The re-render is scoped to lease-dependent gateways
 // (ipsec.HasDHCPBoundGateway): a lease refresh on a management interface
 // no IPsec gateway uses is a no-op, so an unrelated renew never churns
-// swanctl or resets live SAs. It runs under applySem to serialize with a
-// concurrent commit's IPsec apply (both write the same swanctl conf).
+// swanctl or resets live SAs.
 //
 // #4899: the swanctl reload is NO LONGER best-effort-and-forgotten. On
 // failure strongSwan keeps binding the stale lease address and the tunnel
@@ -253,28 +252,10 @@ func (d *Daemon) managementOnlyLeaseRefresh() {
 // xpf_ipsec_rebind_pending gauge while local_addrs are stale. The lease
 // callback itself stays NON-FATAL: the retry + gauge ARE the recovery, so
 // a failed rebind never blocks or fails DHCP lease processing.
-func (d *Daemon) reapplyIPsecForLeaseChange(cfg *config.Config) {
-	if d.ipsec == nil || cfg == nil {
-		return
-	}
-	// Pre-acquire gate (preserves the pre-#14976 contract for direct
-	// callers); the authoritative gate re-runs under the semaphore in
-	// reapplyIPsecLocked on the fresh snapshot.
-	if !ipsec.HasDHCPBoundGateway(cfg) {
-		return
-	}
-	if err := d.acquireBackgroundApplySem(); err != nil {
-		slog.Warn("IPsec: failed to acquire apply lock for DHCP lease re-render", "err", err)
-		return
-	}
-	defer d.applySem.Release(1)
-	d.reapplyIPsecLocked(cfg)
-}
-
-// reapplyIPsecLocked is the swanctl re-render under a HELD applySem
-// (#14976). The caller MUST hold applySem. The gate lives here (not in
-// the acquiring wrapper) so the management-only path's gate is evaluated
-// against the fresh snapshot read under the semaphore.
+//
+// The caller MUST hold applySem. The gate lives here (not in the caller)
+// so the management-only path's gate is evaluated against the fresh
+// snapshot read under the semaphore (#14976).
 func (d *Daemon) reapplyIPsecLocked(cfg *config.Config) {
 	if d.ipsec == nil || cfg == nil {
 		return
@@ -354,44 +335,17 @@ func interfaceRefHasDHCPUnit(cfg *config.Config, ref string) bool {
 	return u != nil && (u.DHCP || u.DHCPv6)
 }
 
-// rebindWebMgmtForLeaseChange re-resolves the web-management bind after a
-// DHCP lease change on the management-only fast path (#14582). It mirrors
-// reapplyIPsecForLeaseChange: gated on the bound interface actually being
-// DHCP-managed, serialized under applySem, and non-fatal — a failed rebind
-// keeps the previous listener (fail-safe in reconcileTo) and the degraded
-// state keeps the 30s re-assert owner re-driving until it converges.
-func (d *Daemon) rebindWebMgmtForLeaseChange(cfg *config.Config) {
-	if d.applySem == nil {
-		return
-	}
-	// Pre-acquire gate: a config that binds no DHCP-managed interface is
-	// never re-driven (preserves the pre-#14976 contract for direct
-	// callers); the authoritative gate re-runs under the semaphore in
-	// rebindWebMgmtLocked on the fresh snapshot.
-	if !webMgmtBindsToDHCPInterface(cfg) {
-		return
-	}
-	if err := d.acquireBackgroundApplySem(); err != nil {
-		slog.Warn("web-management: failed to acquire apply lock for DHCP lease rebind", "err", err)
-		return
-	}
-	defer d.applySem.Release(1)
-	// Re-read the active config under the semaphore (the #6716 discipline
-	// applyActiveConfig follows): a commit that landed while waiting must
-	// not be reverted by this callback's older snapshot. committedDesired
-	// inside reconcile would fence the endpoint anyway; passing the fresh
-	// config keeps the two agreeing rather than relying on it.
-	if d.store != nil {
-		if active := d.store.ActiveConfig(); active != nil {
-			cfg = active
-		}
-	}
-	d.rebindWebMgmtLocked(cfg)
-}
-
-// rebindWebMgmtLocked re-resolves the web-management bind under a HELD
-// applySem (#14976). The caller MUST hold applySem. The gate lives here
-// so the management-only path evaluates it against the fresh snapshot.
+// rebindWebMgmtLocked re-resolves the web-management bind after a
+// DHCP lease change on the management-only fast path (#14582). It is
+// driven by managementOnlyLeaseRefresh. It mirrors reapplyIPsecLocked:
+// gated on the bound interface actually being DHCP-managed, and
+// non-fatal — a failed rebind keeps the previous listener (fail-safe in
+// reconcileTo) and the degraded state keeps the 30s re-assert owner
+// re-driving until it converges.
+//
+// The caller MUST hold applySem. The gate lives here so the
+// management-only path evaluates it against the fresh snapshot read
+// under the semaphore (#14976).
 func (d *Daemon) rebindWebMgmtLocked(cfg *config.Config) {
 	if cfg == nil || d.mgmt.Load() == nil {
 		return
@@ -584,24 +538,35 @@ func resolveConfigSubnetLinuxName(cfg *config.Config, ip net.IP) (string, string
 
 // relayInterfaceRG resolves the redundancy group that owns the DHCP-relay
 // interface named ifaceName (the raw config form the relay carries, e.g.
-// "reth0.0" or "ge-0/0/0.0"), or 0 when the interface is not RG-owned (#2456).
-// It mirrors rgForInterfaces (#2664): strip the unit suffix, then look up the
-// base interface in the config table and read its RedundancyGroup. A nil config
-// or unknown interface yields 0 (non-HA → always relay at the caller).
+// "reth0.0" or "ge-0/0/0.0"), or 0 when the interface is not RG-owned
+// (#2456). It is the positive-group form of config.Config.InterfaceRefRG
+// (#17086 SSOT). This package-level form builds a fresh RefRGIndex per
+// call for tests and one-shot callers; the per-packet gate below uses
+// the daemon's cached index instead. A nil config or unknown interface
+// yields 0 (non-HA → always relay at the caller).
 func relayInterfaceRG(cfg *config.Config, ifaceName string) int {
-	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+	if cfg == nil {
 		return 0
 	}
-	base := ifaceName
-	if i := strings.IndexByte(base, '.'); i >= 0 {
-		base = base[:i]
-	}
-	if ifc, ok := cfg.Interfaces.Interfaces[base]; ok && ifc != nil {
-		if ifc.RedundancyGroup > 0 {
-			return ifc.RedundancyGroup
-		}
+	if rg, owned := cfg.RefRGIndexFor().Lookup(ifaceName); owned && rg > 0 {
+		return rg
 	}
 	return 0
+}
+
+// relayRefRGIndexFor returns the daemon's cached RefRGIndex for cfg,
+// rebuilding it only when the config pointer changes (#17086). The
+// relay gate reads it per packet, so the build must not be per packet:
+// pointer identity is the invalidation key, the same idiom as
+// lastDNSRefreshBase.
+func (d *Daemon) relayRefRGIndexFor(cfg *config.Config) *config.RefRGIndex {
+	d.relayRefRGIndexMu.Lock()
+	defer d.relayRefRGIndexMu.Unlock()
+	if d.relayRefRGBase != cfg || d.relayRefRGIndex == nil {
+		d.relayRefRGIndex = cfg.RefRGIndexFor()
+		d.relayRefRGBase = cfg
+	}
+	return d.relayRefRGIndex
 }
 
 // relayMasterGateOpen reports whether THIS node may relay client requests
@@ -624,8 +589,9 @@ func (d *Daemon) relayMasterGateOpen(ifaceName string) bool {
 	if d.cluster == nil {
 		return true
 	}
-	rg := relayInterfaceRG(d.store.ActiveConfig(), ifaceName)
-	if rg == 0 {
+	cfg := d.store.ActiveConfig()
+	rg, owned := d.relayRefRGIndexFor(cfg).Lookup(ifaceName)
+	if !owned || rg == 0 {
 		return true
 	}
 	return d.isRethMasterState(rg)

@@ -291,8 +291,8 @@ func TestPerGroupCloseBaselines16303(t *testing.T) {
 	if !d.reconcileFlowExporters(twoTemplateConfig16303(t, v9Port, ipfixPort)) {
 		t.Fatal("exporters must start")
 	}
-	vb := d.flowBundle.Load()
-	ib := d.ipfixBundlePtr.Load()
+	vb := d.v9Family().bundle.Load()
+	ib := d.ipfixFamily().bundle.Load()
 	if vb == nil || len(vb.groups) < 2 || ib == nil || len(ib.groups) < 2 {
 		t.Fatalf("want >=2 groups per family, v9=%v ipfix=%v", vb, ib)
 	}
@@ -302,13 +302,13 @@ func TestPerGroupCloseBaselines16303(t *testing.T) {
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 45678, DstPort: 443, Protocol: 6}
 
-	byTemplateV9 := map[string]*flowexport.Exporter{}
+	byTemplateV9 := map[string]flowExporter{}
 	for _, g := range vb.groups {
 		if !g.ec.GroupIsV6 {
 			byTemplateV9[g.ec.TemplateName] = g.exp
 		}
 	}
-	byTemplateIPFIX := map[string]*flowexport.IPFIXExporter{}
+	byTemplateIPFIX := map[string]flowExporter{}
 	for _, g := range ib.groups {
 		if !g.ec.GroupIsV6 {
 			byTemplateIPFIX[g.ec.TemplateName] = g.exp

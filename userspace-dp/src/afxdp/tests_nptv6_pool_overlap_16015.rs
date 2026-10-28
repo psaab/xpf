@@ -287,7 +287,7 @@ fn ha_import_inside_nptv6_external_is_refused_before_success_16015() {
         crate::nat::SyncedSourceNatDomains {
             source_nat_static: Some(false),
             static_externals: None,
-            nptv6_external_prefixes: &[],
+            nptv6_externals: None,
         },
     );
     assert!(
@@ -317,7 +317,7 @@ fn ha_import_outside_nptv6_external_still_reserves_16015() {
         crate::nat::SyncedSourceNatDomains {
             source_nat_static: Some(false),
             static_externals: None,
-            nptv6_external_prefixes: &[],
+            nptv6_externals: None,
         },
     );
     assert!(
@@ -347,7 +347,7 @@ fn ha_iface_import_inside_nptv6_external_is_refused_16015() {
         crate::nat::SyncedSourceNatDomains {
             source_nat_static: Some(false),
             static_externals: None,
-            nptv6_external_prefixes: &[],
+            nptv6_externals: None,
         },
     );
     assert!(
@@ -360,13 +360,13 @@ fn ha_iface_import_inside_nptv6_external_is_refused_16015() {
 fn ha_dynamic_import_with_populated_prefixes_is_refused_16015() {
     // Fold-2 production shape: domains carries the REAL populated
     // NPTv6 prefix list (as session_import/upsert_synced build it from
-    // forwarding.nptv6.external_prefixes()). owns_no_reservation's
+    // forwarding.nptv6.externals()). owns_no_reservation's
     // address arm would return true for this dynamic rewrite merely
     // because it lands inside the prefix — the guard must run first.
     let mut snapshot = base_snapshot(INSIDE);
     snapshot.nptv6_rules = vec![nptv6_rule("wan")];
     let state = build_forwarding_state(&snapshot);
-    let prefixes = state.nptv6.external_prefixes();
+    let prefixes = state.nptv6.externals();
     assert!(
         !prefixes.is_empty(),
         "fixture: production domains must carry populated prefixes"
@@ -389,7 +389,7 @@ fn ha_dynamic_import_with_populated_prefixes_is_refused_16015() {
         crate::nat::SyncedSourceNatDomains {
             source_nat_static: Some(false),
             static_externals: None,
-            nptv6_external_prefixes: &prefixes,
+            nptv6_externals: Some(&prefixes),
         },
     );
     assert!(
@@ -406,7 +406,7 @@ fn ha_genuine_nptv6_import_with_populated_prefixes_still_succeeds_16015() {
     let mut snapshot = base_snapshot(INSIDE);
     snapshot.nptv6_rules = vec![nptv6_rule("wan")];
     let state = build_forwarding_state(&snapshot);
-    let prefixes = state.nptv6.external_prefixes();
+    let prefixes = state.nptv6.externals();
     let nat = crate::nat::NatDecision {
         rewrite_src: Some(INSIDE.parse().expect("rewrite")),
         nptv6: true,
@@ -423,7 +423,7 @@ fn ha_genuine_nptv6_import_with_populated_prefixes_still_succeeds_16015() {
         crate::nat::SyncedSourceNatDomains {
             source_nat_static: None,
             static_externals: None,
-            nptv6_external_prefixes: &prefixes,
+            nptv6_externals: Some(&prefixes),
         },
     );
     assert!(

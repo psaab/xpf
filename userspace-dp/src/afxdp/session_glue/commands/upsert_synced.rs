@@ -344,11 +344,11 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         if reserving_origin && !metadata.is_reverse {
             // #15191: the non-pool domains, from this same generation.
             let synced_static_externals = forwarding.static_nat.external_identities();
-            let synced_nptv6_prefixes = forwarding.nptv6.external_prefixes();
+            let synced_nptv6_externals = forwarding.nptv6.externals();
             let synced_domains = crate::nat::SyncedSourceNatDomains {
                 source_nat_static: entry_source_nat_static,
                 static_externals: Some(&synced_static_externals),
-                nptv6_external_prefixes: &synced_nptv6_prefixes,
+                nptv6_externals: Some(&synced_nptv6_externals),
             };
             crate::nat::reserve_synced_source_nat_allocation_for_worker_preserving_persistent_hold(
                 &forwarding.iface_nat_allocators,

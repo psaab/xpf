@@ -779,7 +779,7 @@ impl LiveCallSiteFixture {
     /// without it. Only the zone-counter cell opts in.
     ///
     /// Without this, `record_zone_traffic` early-returns before touching
-    /// anything: the default `ZoneCounterSlotMap` is empty so `slot_of` is 0 for
+    /// anything: the default slot map is empty so `slot_of` is 0 for
     /// the ingress zone, and `EGRESS_IFINDEX` is in no map `egress_zone_id`
     /// reads so the egress slot is 0 too — `if ingress_slot == 0 && egress_slot
     /// == 0 { return; }`. That is why deleting the call was green across the
@@ -869,11 +869,14 @@ impl LiveCallSiteFixture {
         self.forwarding
             .ifindex_unambiguous_zone_id
             .insert(EGRESS_IFINDEX, TEST_UNTRUST_ZONE_ID);
-        self.forwarding.zone_counter_slot_map =
-            Arc::new(crate::afxdp::zone_counters::ZoneCounterSlotMap::build(
-                &[TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID],
-                &self.forwarding.zone_counter_store,
-            ));
+        let (zone_map, zone_caches) = crate::afxdp::zone_slot_counters::ZoneSlotMap::build(
+            &[TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID],
+            &self.forwarding.zone_counter_store,
+            &self.forwarding.flood_counter_store,
+        );
+        self.forwarding.zone_counter_slot_map = Arc::new(zone_map);
+        self.forwarding.zone_counter_caches = Arc::new(zone_caches.clone());
+        self.forwarding.flood_counter_caches = Arc::new(zone_caches);
         self
     }
 
@@ -2374,7 +2377,7 @@ fn live_flow_cache_callsite_recounts_the_established_policy_hit_6304() {
 /// reported.
 ///
 /// Here the call RAN on every fixture and did nothing: with an empty
-/// `ZoneCounterSlotMap` and `EGRESS_IFINDEX` absent from `forwarding.egress`,
+/// slot map and `EGRESS_IFINDEX` absent from `forwarding.egress`,
 /// both slot lookups are 0 and the function returns at its first branch.
 /// `with_zone_accounting` supplies exactly the wiring production always has —
 /// a slot map built over the configured zones, and an egress interface carrying
@@ -2396,12 +2399,15 @@ fn live_flow_cache_callsite_recounts_the_established_policy_hit_6304() {
 #[test]
 fn live_flow_cache_callsite_accounts_per_zone_traffic_6304() {
     let discard = crate::afxdp::zone_counters::ZoneCounterStore::default();
+    let (discard_map, discard_caches) = crate::afxdp::zone_slot_counters::ZoneSlotMap::build(
+        &[TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID],
+        &discard,
+        &crate::afxdp::flood_counters::FloodCounterStore::default(),
+    );
     crate::afxdp::zone_counters::flush_recorded_zone_counters(
         &discard,
-        &crate::afxdp::zone_counters::ZoneCounterSlotMap::build(
-            &[TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID],
-            &discard,
-        ),
+        &discard_map,
+        &discard_caches,
     );
 
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
@@ -2419,8 +2425,9 @@ fn live_flow_cache_callsite_accounts_per_zone_traffic_6304() {
     crate::afxdp::zone_counters::flush_recorded_zone_counters(
         &fixture.forwarding.zone_counter_store,
         &fixture.forwarding.zone_counter_slot_map,
+        &fixture.forwarding.zone_counter_caches,
     );
-    let rows = fixture.forwarding.zone_counter_store.snapshot();
+    let rows = crate::afxdp::zone_counters::zone_counter_snapshot(&fixture.forwarding.zone_counter_store);
 
     // --- THE DISCRIMINATOR: the forwarded packet is charged to BOTH zones.
     let ingress = rows
@@ -2469,12 +2476,15 @@ fn live_flow_cache_callsite_accounts_per_zone_traffic_6304() {
 #[test]
 fn live_flow_cache_callsite_accounts_metadata_ingress_zone_12865() {
     let discard = crate::afxdp::zone_counters::ZoneCounterStore::default();
+    let (discard_map, discard_caches) = crate::afxdp::zone_slot_counters::ZoneSlotMap::build(
+        &[TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID],
+        &discard,
+        &crate::afxdp::flood_counters::FloodCounterStore::default(),
+    );
     crate::afxdp::zone_counters::flush_recorded_zone_counters(
         &discard,
-        &crate::afxdp::zone_counters::ZoneCounterSlotMap::build(
-            &[TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID],
-            &discard,
-        ),
+        &discard_map,
+        &discard_caches,
     );
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
     let frame = tcp_v4_ack_frame();
@@ -2485,8 +2495,9 @@ fn live_flow_cache_callsite_accounts_metadata_ingress_zone_12865() {
     crate::afxdp::zone_counters::flush_recorded_zone_counters(
         &fixture.forwarding.zone_counter_store,
         &fixture.forwarding.zone_counter_slot_map,
+        &fixture.forwarding.zone_counter_caches,
     );
-    let rows = fixture.forwarding.zone_counter_store.snapshot();
+    let rows = crate::afxdp::zone_counters::zone_counter_snapshot(&fixture.forwarding.zone_counter_store);
     let ingress = rows.iter().find(|r| r.zone_id == TEST_TRUST_ZONE_ID).expect(
         "#12865: ingress must be credited to cached_metadata.ingress_zone (trust), not raw meta.ingress_zone=0",
     );
@@ -6384,7 +6395,7 @@ fn adopted_flow_survives_subsequent_packet_revalidation_16217() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
                 conntrack: crate::afxdp::session_glue::ConntrackFds { v4: -1, v6: -1 },
-                tick: crate::afxdp::session_glue::Tick { ns: 1_000_000, secs: 1 },
+                tick: crate::afxdp::session_glue::Tick::from_parts(1_000_000, 1),
             },
             &forwarding,
             &ha_state,

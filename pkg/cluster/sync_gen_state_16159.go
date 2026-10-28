@@ -237,9 +237,9 @@ type peerSnapshotState struct {
 	// 0 is NOT "unknown, assume compatible": a connected peer that advertises
 	// nothing is by definition running a build that predates #6650, so it also
 	// predates every snapshot version this gate could care about. It is cleared
-	// on full disconnect alongside clockSynced -- the capability belongs to the
-	// peer INCARNATION that proved it, and the peer that reconnects may be a
-	// different, older process.
+	// at every incarnation retirement (#17097, retirePeerIncarnationLocked) --
+	// the capability belongs to the peer INCARNATION that proved it, and the
+	// peer that reconnects may be a different, older process.
 	peerSnapshotProtocol atomic.Uint32
 
 	// peerSnapshotProtocolWriteMu serializes capability-incarnation changes

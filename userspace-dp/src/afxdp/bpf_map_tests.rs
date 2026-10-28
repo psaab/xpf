@@ -1003,6 +1003,31 @@ fn cluster_synced_origin_flip_preserves_v4_v6_flags_10227() {
     }
 }
 
+/// #17058: the mirror flags `repair_policy_bares` writes for a probed
+/// survivor. `Some(true)` (static SNAT) must set both provenance bits;
+/// `Some(false)` sets only the known bit; `None` (the pre-fix probe
+/// value) clears both — which is exactly the divergence the shared
+/// `synced_entry_for` construction removes.
+#[test]
+fn source_nat_provenance_flags_static_dynamic_unknown_17058() {
+    let base = SESS_FLAG_SNAT;
+    assert_eq!(
+        source_nat_provenance_flags(base, Some(true)),
+        base | SESS_FLAG_STATIC_NAT | SESS_FLAG_SNAT_PROVENANCE_KNOWN,
+        "static SNAT survivor must republish with both provenance bits"
+    );
+    assert_eq!(
+        source_nat_provenance_flags(base, Some(false)),
+        base | SESS_FLAG_SNAT_PROVENANCE_KNOWN,
+        "dynamic SNAT survivor keeps the known bit, clears the static bit"
+    );
+    assert_eq!(
+        source_nat_provenance_flags(base, None),
+        base,
+        "unknown provenance clears both bits (the pre-fix probe behaviour)"
+    );
+}
+
 // #5287 FAIL-ON-REVERT: `refresh_bpf_conntrack_last_seen` is an INCREMENTAL,
 // budgeted slice — NOT a full-table pass. It must advance a persistent cursor
 // by at most `budget` slab slots per call and resume across calls, so no single

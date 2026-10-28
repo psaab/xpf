@@ -45,6 +45,44 @@ func TestShowTextLookupExactThenPrefix16136(t *testing.T) {
 	}
 }
 
+// #17108: ShowTextCommand is the one topic→command resolution both gates
+// use. RED-on-revert: an exact-only body makes every packed (prefix-key)
+// topic below unresolvable.
+func TestShowTextCommand17108(t *testing.T) {
+	for topic, want := range map[string]string{
+		"version":            "show version",
+		"route-table:":       "show route table",
+		"route-table:inet.0": "show route table",
+		"log:messages":       "show log",
+		"test-policy:from=a": "test policy",
+		"chassis-forwarding": "show chassis forwarding",
+	} {
+		if got, ok := ShowTextCommand(topic); !ok || got != want {
+			t.Errorf("ShowTextCommand(%q) = (%q,%v), want (%q,true)", topic, got, ok, want)
+		}
+		// The command helper must agree with the priced entry.
+		e, ok := LookupShowText(topic)
+		if !ok || e.Command != want {
+			t.Errorf("LookupShowText(%q) = (%q,%v), disagreeing with ShowTextCommand", topic, e.Command, ok)
+		}
+	}
+	if got, ok := ShowTextCommand("zzbogus-topic-17108"); ok || got != "" {
+		t.Errorf("ShowTextCommand(unknown) = (%q,%v), want (\"\",false) — unmapped must stay deny", got, ok)
+	}
+	// Every registered key resolves to its own command; every prefix key
+	// also resolves key+"x" to the same command.
+	for _, e := range ShowTextEntries() {
+		if got, ok := ShowTextCommand(e.Key); !ok || got != e.Command {
+			t.Errorf("ShowTextCommand(%q) = (%q,%v), want (%q,true)", e.Key, got, ok, e.Command)
+		}
+		if e.IsPrefix() {
+			if got, ok := ShowTextCommand(e.Key + "x"); !ok || got != e.Command {
+				t.Errorf("ShowTextCommand(%q) = (%q,%v), want (%q,true)", e.Key+"x", got, ok, e.Command)
+			}
+		}
+	}
+}
+
 func TestSystemActionLookupAndPrefixPrice16136(t *testing.T) {
 	if e, ok := LookupSystemAction("reboot"); !ok || e.Permission != config.PermMaint {
 		t.Fatalf("reboot = (%+v,%v), want PermMaint", e, ok)

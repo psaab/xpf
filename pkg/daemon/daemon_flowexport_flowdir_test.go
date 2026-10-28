@@ -144,7 +144,7 @@ func TestSessionCloseFlowDirectionEgress(t *testing.T) {
 	if !d.reconcileFlowExporters(flowDirV9Config("127.0.0.1", port)) {
 		t.Fatal("flow exporter must start")
 	}
-	exp := d.flowBundle.Load()
+	exp := d.v9Family().bundle.Load()
 	if exp == nil || exp.firstExp() == nil {
 		t.Fatal("v9 exporter must be live")
 	}

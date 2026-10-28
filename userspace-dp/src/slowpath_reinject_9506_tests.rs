@@ -924,7 +924,7 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     expected.extend_from_slice(&13u64.to_be_bytes());
     expected.extend_from_slice(&17u64.to_be_bytes());
     expected.extend_from_slice(&19u32.to_be_bytes());
-    expected.extend_from_slice(&23u16.to_be_bytes());
+    expected.extend_from_slice(&23u32.to_be_bytes());
     expected.extend_from_slice(&29u32.to_be_bytes());
     expected.extend_from_slice(&31u64.to_be_bytes());
     expected.extend_from_slice(&32u32.to_be_bytes());
@@ -948,7 +948,7 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     expected.extend_from_slice(&14u64.to_be_bytes());
     expected.extend_from_slice(&18u64.to_be_bytes());
     expected.extend_from_slice(&20u32.to_be_bytes());
-    expected.extend_from_slice(&24u16.to_be_bytes());
+    expected.extend_from_slice(&24u32.to_be_bytes());
     expected.extend_from_slice(&30u32.to_be_bytes());
     expected.extend_from_slice(&41u64.to_be_bytes());
     expected.extend_from_slice(&42u32.to_be_bytes());
@@ -962,6 +962,14 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     assert_eq!(decode_submit_batch(&empty).unwrap(), vec![]);
 }
 
+/// #18207 LOCKSTEP. The shared golden is produced by the Go encoder
+/// (`TestReinjectSubmitGoRustPinnedLayout9506` byte-matches it) and both
+/// Rust readers must decode those exact bytes. The zone field is u32 since
+/// #17623 widened zone ids; the pre-fix Go writer emitted u16, displacing
+/// every following field by 2 bytes so every frame failed decode. A Rust
+/// round-trip cannot catch that (encoder+decoder both u32).
+/// Regenerate only for an intentional wire-layout change with
+/// `XPF_WRITE_GOLDEN_18207=1`.
 #[test]
 fn submit_wire_matches_pinned_go_vector_and_both_decoders() {
     const GO_SUBMIT_VECTOR: &[u8] = &[
@@ -971,12 +979,12 @@ fn submit_wire_matches_pinned_go_vector_and_both_decoders() {
          0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x2a, 0x05, 0x6f, 0x77, 0x6e, 0x65,
          0x72, 0x03, 0x73, 0x74, 0x6e, 0x00, 0x00, 0x00, 0x02, 0x45, 0x00, 0x00,
          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00,
-         0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x13, 0x00, 0x17, 0x00, 0x00, 0x00,
-         0x1d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00,
-         0x20, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+         0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x13, 0x00, 0x01, 0x00, 0x17, 0x00,
+         0x00, 0x00, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x00,
+         0x00, 0x00, 0x20, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
          0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
-         0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x01, 0x02, 0x03,
-         0x04, 0x05, 0x06, 0x07, 0x08, 0x01,
+         0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x01,
+         0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01,
     ];
     let expected_frame = SubmitFrame {
         lease: ReinjectLease {
@@ -992,7 +1000,7 @@ fn submit_wire_matches_pinned_go_vector_and_both_decoders() {
         snapshot_generation: 13,
         config_generation: 17,
         fib_generation: 19,
-        zone_id: 23,
+        zone_id: 0x0001_0017,
         if_id: 29,
         pmech_inventory_generation: 31,
         pmech_inventory_fib_generation: 32,
@@ -1000,25 +1008,42 @@ fn submit_wire_matches_pinned_go_vector_and_both_decoders() {
         deadline_mono_ns: 0x0102_0304_0506_0708,
         deadline_clock_id: PMECH_DEADLINE_CLOCK_MONOTONIC,
     };
-    assert_eq!(GO_SUBMIT_VECTOR.len(), 138);
+    assert_eq!(GO_SUBMIT_VECTOR.len(), 140);
+    assert_eq!(SUBMIT_PMECH_TAIL_LEN, 81);
     assert_eq!(
         encode_submit_batch(std::slice::from_ref(&expected_frame)).as_slice(),
         GO_SUBMIT_VECTOR
+    );
+    // The Rust encoder must byte-match the shared golden the Go encoder is
+    // pinned to; regenerate only under XPF_WRITE_GOLDEN_18207=1 (#9412 pattern).
+    let hex: String = GO_SUBMIT_VECTOR.iter().map(|b| format!("{b:02x}")).collect();
+    let golden_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pkg/nfqueue/testdata/reinject_submit_frame_18207.hex"
+    );
+    if std::env::var_os("XPF_WRITE_GOLDEN_18207").is_some() {
+        std::fs::write(golden_path, format!("{hex}\n")).expect("write golden");
+    }
+    let golden = std::fs::read_to_string(golden_path).expect("read the shared golden");
+    assert_eq!(
+        hex,
+        golden.trim(),
+        "#18207: the submit frame no longer matches the golden the Go encoder is pinned to"
     );
     const TAIL_START: usize = 59;
     assert_eq!(&GO_SUBMIT_VECTOR[TAIL_START..67], &13u64.to_be_bytes()[..]);
     assert_eq!(&GO_SUBMIT_VECTOR[67..75], &17u64.to_be_bytes()[..]);
     assert_eq!(&GO_SUBMIT_VECTOR[75..79], &19u32.to_be_bytes()[..]);
-    assert_eq!(&GO_SUBMIT_VECTOR[79..81], &23u16.to_be_bytes()[..]);
-    assert_eq!(&GO_SUBMIT_VECTOR[81..85], &29u32.to_be_bytes()[..]);
-    assert_eq!(&GO_SUBMIT_VECTOR[85..93], &31u64.to_be_bytes()[..]);
-    assert_eq!(&GO_SUBMIT_VECTOR[93..97], &32u32.to_be_bytes()[..]);
-    assert_eq!(&GO_SUBMIT_VECTOR[97..129], &[0x41; 32]);
+    assert_eq!(&GO_SUBMIT_VECTOR[79..83], &0x0001_0017u32.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[83..87], &29u32.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[87..95], &31u64.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[95..99], &32u32.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[99..131], &[0x41; 32]);
     assert_eq!(
-        &GO_SUBMIT_VECTOR[129..137],
+        &GO_SUBMIT_VECTOR[131..139],
         &0x0102_0304_0506_0708u64.to_be_bytes()[..]
     );
-    assert_eq!(GO_SUBMIT_VECTOR[137], 1);
+    assert_eq!(GO_SUBMIT_VECTOR[139], 1);
 
     let decoded = decode_submit_batch(GO_SUBMIT_VECTOR).expect("decode Go submit vector");
     assert_eq!(decoded, vec![expected_frame.clone()]);
@@ -1028,7 +1053,7 @@ fn submit_wire_matches_pinned_go_vector_and_both_decoders() {
     assert_eq!(decoded[0].snapshot_generation, 13);
     assert_eq!(decoded[0].config_generation, 17);
     assert_eq!(decoded[0].fib_generation, 19);
-    assert_eq!(decoded[0].zone_id, 23);
+    assert_eq!(decoded[0].zone_id, 0x0001_0017);
     assert_eq!(decoded[0].if_id, 29);
     assert_eq!(decoded[0].pmech_inventory_generation, 31);
     assert_eq!(decoded[0].pmech_inventory_fib_generation, 32);
@@ -1049,7 +1074,7 @@ fn submit_wire_matches_pinned_go_vector_and_both_decoders() {
     assert_eq!(row.snapshot_generation, 13);
     assert_eq!(row.config_generation, 17);
     assert_eq!(row.fib_generation, 19);
-    assert_eq!(row.zone_id, 23);
+    assert_eq!(row.zone_id, 0x0001_0017);
     assert_eq!(row.if_id, 29);
     assert_eq!(row.pmech_inventory_generation, 31);
     assert_eq!(row.pmech_inventory_fib_generation, 32);

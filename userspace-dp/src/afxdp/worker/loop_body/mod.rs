@@ -1085,7 +1085,7 @@ pub(crate) fn worker_loop(
                     peer_worker_commands: &peer_worker_commands,
                     worker_commands_by_id: &worker_commands_by_id,
                     conntrack: ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
-                    tick: Tick { ns: loop_now_ns, secs: 0 },
+                    tick: Tick::from_ns(loop_now_ns),
                 },
                 &forwarding,
                 &removed_zone_ids,
@@ -1110,7 +1110,7 @@ pub(crate) fn worker_loop(
                     peer_worker_commands: &peer_worker_commands,
                     worker_commands_by_id: &worker_commands_by_id,
                     conntrack: ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
-                    tick: Tick { ns: loop_now_ns, secs: 0 },
+                    tick: Tick::from_ns(loop_now_ns),
                 },
                 &old_forwarding_for_filter_purge,
                 &forwarding,
@@ -1138,7 +1138,7 @@ pub(crate) fn worker_loop(
                             peer_worker_commands: &peer_worker_commands,
                             worker_commands_by_id: &worker_commands_by_id,
                             conntrack: ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
-                            tick: Tick { ns: loop_now_ns, secs: 0 },
+                            tick: Tick::from_ns(loop_now_ns),
                         },
                         &forwarding,
                         rule_id,
@@ -1698,6 +1698,7 @@ pub(crate) fn worker_loop(
         crate::afxdp::zone_counters::flush_recorded_zone_counters(
             &forwarding.zone_counter_store,
             &forwarding.zone_counter_slot_map,
+            &forwarding.zone_counter_caches,
         );
         // #3651: and this worker's coalesced per-zone flood-EVENT tally. Same
         // cadence and same `forwarding` snapshot, so the slot map matches the
@@ -1708,6 +1709,7 @@ pub(crate) fn worker_loop(
         crate::afxdp::flood_counters::flush_recorded_flood_counters(
             &forwarding.flood_counter_store,
             &forwarding.flood_counter_slot_map,
+            &forwarding.flood_counter_caches,
         );
         #[cfg(feature = "debug-log")]
         {

@@ -3293,6 +3293,40 @@ impl SessionTable {
         self.entry_by_key(key)
             .and_then(|entry| entry.source_nat_static)
     }
+    /// #17058: the one construction of a `SyncedSessionEntry` from a live
+    /// table row. Every wire field is read from the SAME entry in one
+    /// lookup, so a field added to `SyncedSessionEntry` cannot be
+    /// silently zero-filled by a hand-built literal at a call site (the
+    /// #12187 `source_nat_static: None` divergence this closes).
+    /// `tcp_flags` stays 0: the live entry carries only the OR-folded
+    /// `observed_tcp_flags`, which is not the HA wire's per-packet flag
+    /// byte (see `SessionEntry::observed_tcp_flags`). `generation` stays
+    /// 0 (local origin; only peer imports carry one). Returns `None`
+    /// when no live entry exists for `key`.
+    pub(crate) fn synced_entry_for(
+        &self,
+        key: &SessionKey,
+    ) -> Option<crate::afxdp::SyncedSessionEntry> {
+        let entry = self.entry_by_key(key)?;
+        Some(crate::afxdp::SyncedSessionEntry {
+            key: key.clone(),
+            decision: entry.decision,
+            metadata: entry.metadata.clone(),
+            source_nat_static: entry.source_nat_static,
+            leak_incarnation: self.leak_incarnations.get(key).copied().unwrap_or(0),
+            origin: entry.origin,
+            protocol: key.protocol,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: entry.session_id,
+            tcp_close_class: entry.tcp_close_class_wire(),
+            tcp_handshake_state: entry.tcp_handshake_state_wire(key.protocol),
+            rev_packets: entry.counters.rev_packets,
+            fwd_packets: entry.counters.fwd_packets,
+            pptp_call_ids: self.pptp_call_ids_wire_for(key),
+            persistent_lease_hold: entry.persistent_lease_hold,
+        })
+    }
 
     /// #10507: the receiver-local provenance paired with the zone policy
     /// stamp. The hit-row fast path answers freshness+authority through
@@ -6436,9 +6470,10 @@ impl SessionTable {
     /// `ha_activation` flag (always false on this path).
     #[inline]
     pub fn promote_synced_with_origin(&mut self, mut req: SessionUpdate<'_>) -> bool {
-        // #13939: the Owner path applies a deferred FIN/RST immediately after
+        // #13939/#17092: the Owner path replays the packet through a full
+        // `Defer::None` lookup (`apply_deferred_owner_hit`) right after
         // promotion. Do not let its ACK bit complete a pending handshake before
-        // that close propagates to the companion.
+        // that replay's close propagates to the companion.
         if is_closing(req.tcp_flags) {
             req.tcp_flags = 0;
         }
@@ -7462,3 +7497,16 @@ mod handshake_ack_16042_tests;
 #[cfg(test)]
 #[path = "strict_syn_16479_tests.rs"]
 mod strict_syn_16479_tests;
+
+// #17058: the shared `SyncedSessionEntry` construction from a live row.
+#[cfg(test)]
+#[path = "synced_entry_17058_tests.rs"]
+mod synced_entry_17058_tests;
+
+// #17088: the translated-alias twin matrix — key equality across
+// {TCP, UDP, ICMP, ICMPv6} x {none, SNAT-PAT, DNAT, NAT64} against
+// independently written post-translation reply tuples, plus the
+// single-source structural pin for the shared key transform.
+#[cfg(test)]
+#[path = "translated_twin_matrix_17088_tests.rs"]
+mod translated_twin_matrix_17088_tests;

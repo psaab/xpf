@@ -21,13 +21,14 @@ one recorded fact cannot render two different ways.
 
 ## Helper crash block (#7250)
 
-`Build` probes the dataplane for
-`HelperCrashState() (userspace.HelperCrashRecord, bool)` — an anonymous
-interface, matching the existing `Status()` probe, so `DataPlaneAccessor` stays
-the two-method surface every caller and test already implements.
+`Build` probes the dataplane for the named `CrashReporter` interface
+(`HelperCrashState() (userspace.HelperCrashRecord, bool)` +
+`HelperCrashHistory() ([]userspace.HelperCrashEpisode, int)`), so
+`DataPlaneAccessor` stays the two-method surface every caller and test
+already implements while the shared accessor is compile-checked.
 
 `HelperCrashHistory() ([]userspace.HelperCrashEpisode, int)` — the #8397
-companion, asserted independently of `HelperCrashState` because they have
+companion, carried by the same `CrashReporter` because they have
 different lifetimes. `HelperCrashState` describes the current open episode: a
 supervisor retry that proves READY keeps it open until the quiet window ends,
 while ordinary generation-advancing Compile closes it immediately. The
@@ -78,11 +79,16 @@ Three things about it are easy to break:
   because every cell reached the guard *through* `Build`, which sanitizes on the
   way in; the cells that catch them construct `ForwardingStatus` directly.
 
-Both frontends must expose the accessor on their `forwardingStatus*Userspace*`
-adapter or the probe silently misses with **no compile error** —
-`cli_show_chassis_adapter_test.go` and `server_show_forwarding_adapter_test.go`
-each carry a cell that reds on that deletion, because this package's own tests
-cannot see the wiring.
+The single shared accessor is `fwdstatus.NewAccessor` (#17128): both
+frontends supply their map-stats source, the single-resolved published
+backend, and their status func, and `NewAccessor` returns the concrete
+accessor (userspace flavour only for a `Status`-carrying backend).
+Deleting a crash method from the shared `userspaceAccessor` fails to
+compile (`var _ CrashReporter = userspaceAccessor{}`), and
+`accessor_17128_test.go` covers crash state and history end to end.
+The per-surface wiring cells (`cli_show_chassis_adapter_test.go`,
+`server_show_forwarding_adapter_test.go`) still red if a frontend
+stops routing through `NewAccessor`.
 
 ## Dependencies
 

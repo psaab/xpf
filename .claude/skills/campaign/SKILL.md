@@ -89,9 +89,44 @@ driveable work remains.
      `agents=<live>/<cap> driveable=<n>`; if `<live> < min(cap,
      driveable)` the same message MUST contain the dispatches that
      fix it.
+  6. **HARD GATE — `wait` and yield are the failure, mechanized
+     (2026-10-27, third directive; the prose above kept failing).**
+     The parent MUST NOT call `wait`, end a turn, or write a
+     summary while `live < min(cap, driveable)`. Before any
+     `wait` call the parent MUST, IN THE SAME RESPONSE, first emit
+     the batch `task` dispatch that fills to the cap — the wait
+     then blocks on a FULL board, never an empty one. A response
+     whose only actions are wait/status/fold-on-one-PR while
+     `live < cap` is a campaign failure regardless of how much
+     prose explains it.
+  7. **Pre-scoped pipeline (why parents end up serial).** The
+     drip-feed happens because unscoped issues can't be dispatched
+     blind. FIX THE INPUT, not the discipline: at every reconcile,
+     the parent maintains a ready-queue of >= cap PRE-SCOPED items
+     (issue + STEP-0 result + exact files + acceptance, scoped by
+     scout lanes or prior engineer reports). Refill draws from the
+     ready-queue WITHOUT new parent investigation; when the
+     ready-queue drops below cap, SCOUT lanes (read-only,
+     batch-dispatched like engineers) refill it from the
+     lowest-numbered unscoped issues. Scoping is lane work, never
+     parent serial work.
+  8. **One response = many outcomes.** Each parent response should
+     normally contain: all pending stamps/merges, one batch
+     dispatch to cap, and only then any inline fold. If a response
+     contains zero dispatches while `live < cap` and driveable
+     work exists, it is non-compliant by construction.
+  9. **Gate slots are standing lanes, not a remembered duty
+     (2026-10-27).** Three of the cap's lanes are RESERVED
+     gate-runner slots, one per cluster (`loss`, `tcp`, `udp`),
+     filled exactly like engineer lanes: at every refill, a free
+     gate slot is dispatched BEFORE the next engineer. Each gate
+     lane's standing job: deploy current `origin/master` to its
+     cluster and run the full measurement (merge-wave gate
+     below), append the baseline record, then immediately re-run
+     at the then-current master. A gate slot is never converted
+     to engineer work while its cluster's baseline is older than
+     the validity window.
   triple reviewers for every PR at a reviewable head, (2) gate
-  runners for gated PRs (see the three-cluster cadence below),
-  (3) engineers/researchers on the lowest-numbered driveable
   issues in band order. Reserve capacity is not idle capacity:
   the 6 reserved slots are the reserve; inside the cap, all
   lanes work. Reap idle/dead agents (liveness = commit-time +
@@ -492,6 +527,18 @@ gates PRs discovers a dead `tcp`/`udp` cluster weeks later.
   master baseline (Step 3 item 4 validity window). A wave is not
   "landed" until all three cluster records exist at the new
   master SHA or an env failure is recorded per cluster.
+  **Trigger is a counter, not a memory (2026-10-27):** the parent
+  counts merges since each cluster's last completed gate. At 5
+  merges (or 60 min, whichever first) that cluster's gate slot
+  MUST be dispatched at the next refill — ahead of new engineer
+  work. The count lives on the tracking task line
+  (`gates: loss=<n> tcp=<n> udp=<n>` = merges since last gate).
+  A cluster whose gate is BLOCKED (env failure, e.g. a deploy
+  floor) never excuses the other two: each cluster gates on its
+  own slot independently, and a blocked cluster's env failure is
+  recorded and re-dispositioned (fix / named-rollback / escalate)
+  within one wave — never left as an open deferral while merges
+  continue past it.
 - **Keeper enforcement**: every keeper tick reads the last line
   of each `smoke-watch-<C>.log` and each cluster's newest baseline
   INDEX row, and prints staleness in the summary line
@@ -499,7 +546,11 @@ gates PRs discovers a dead `tcp`/`udp` cluster weeks later.
   watch older than 30 min, tcp/udp watch older than 45 min, or a
   baseline older than the validity window while gated PRs wait =
   STALE flag; the parent relaunches the watch / dispatches gate
-  runners the same tick. A NEW failure (not the known external
+  runners the same tick. **The keeper's `base=` age is a dispatch
+  trigger for the parent, not a report:** a parent response that
+  reads a STALE baseline and does not dispatch that cluster's
+  gate slot in the same response is the same campaign failure as
+  an unactioned verdict. A NEW failure (not the known external
   Internet-IPv6 one) on any cluster files an issue immediately
   and enters the normal queue — it never holds the landing queue.
   Downstream skills (`security-matrix`, `failover-test`,

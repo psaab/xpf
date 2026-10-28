@@ -29,10 +29,11 @@ func (s *Server) GetStatus(ctx context.Context, _ *pb.GetStatusRequest) (*pb.Get
 		resp.ZoneCount = int32(len(cfg.Security.Zones))
 	}
 	// #3929: read the live session count from the dataplane session table (the
-	// same source `show security flow session` uses), NOT the BPF GC sweep
-	// stats. On the userspace dataplane (the only live forwarding path) the BPF
-	// GC sweep is skipped (#333), so gc.Stats().TotalEntries is permanently 0 —
-	// this reported 0 sessions on every real deployment. SessionCount counts
+	// same source `show security flow session` uses), NOT the retired Go
+	// conntrack GC's sweep stats (`pkg/conntrack`, deleted in #17155). On the
+	// userspace dataplane (the only live forwarding path) that sweep never ran
+	// (#333), so its TotalEntries was permanently 0 — this reported 0 sessions
+	// on every real deployment. SessionCount counts
 	// forward entries only, so it is the live session total.
 	if s.dp != nil && s.dp.IsLoaded() {
 		// Gate the cancellable full-table walk through the same admission
@@ -70,32 +71,43 @@ func (s *Server) GetGlobalStats(_ context.Context, _ *pb.GetGlobalStatsRequest) 
 	if s.dp == nil || !s.dp.IsLoaded() {
 		return nil, status.Error(codes.Unavailable, "dataplane not loaded")
 	}
-	// #3345: surface a global-counter read failure instead of silently
-	// reporting 0. A degraded counter bridge must not be indistinguishable
-	// from "no events" on the structured stats RPC.
-	var readErr error
-	readCounter := func(idx uint32) uint64 {
-		v, err := s.dp.ReadGlobalCounter(idx)
-		if err != nil && readErr == nil {
-			readErr = err
-		}
-		return v
+	// #17193: one shared snapshot classifies every global counter once.
+	// #3345: a genuine read failure still fails the RPC (codes.Internal
+	// below) instead of returning zeros indistinguishable from "no
+	// events". #13274: ErrCounterNotPopulated is known-unsourced, NOT a
+	// failure — the snapshot records it in Unavailable, and the response
+	// names those counters in unavailable_counters so the remote CLI
+	// renders "unavailable" instead of failing on every call.
+	indexes := []uint32{
+		dataplane.GlobalCtrRxPackets, dataplane.GlobalCtrTxPackets,
+		dataplane.GlobalCtrDrops, dataplane.GlobalCtrUnknownVLANDrops,
+		dataplane.GlobalCtrDstMACDrops, dataplane.GlobalCtrSessionsNew,
+		dataplane.GlobalCtrSessionsClosed, dataplane.GlobalCtrScreenDrops,
+		dataplane.GlobalCtrPolicyDeny, dataplane.GlobalCtrNATAllocFail,
+		dataplane.GlobalCtrHostInboundDeny, dataplane.GlobalCtrTCEgressPackets,
+		dataplane.GlobalCtrNAT64Xlate, dataplane.GlobalCtrHostInbound,
 	}
+	for i := range dataplane.ScreenReasonCounters {
+		indexes = append(indexes, dataplane.ScreenReasonCounters[i].Index)
+	}
+	indexes = append(indexes,
+		dataplane.GlobalCtrSyncookieSent, dataplane.GlobalCtrSyncookieValid,
+		dataplane.GlobalCtrSyncookieInvalid, dataplane.GlobalCtrSyncookieBypass)
+	snap := dataplane.ReadGlobalCounters(s.dp, indexes...)
 
-	// Collect per-screen-type drop counters. #3343: the per-reason screen
-	// counters (incl. port-scan / ip-sweep / session-limit, omitted before) now
-	// carry live values from the userspace counter bridge; iterate the shared
+	// Collect per-screen-type drop counters. #3343: iterate the shared
 	// dataplane.ScreenReasonCounters table so this RPC and every other
-	// screen-statistics surface agree on the reason set. The SYN-cookie counters
-	// are a distinct set and stay appended.
+	// screen-statistics surface agree on the reason set. The SYN-cookie
+	// counters are a distinct set and stay appended. Unavailable counters
+	// are absent from Values, so they never appear as fabricated zeros.
 	screenDetails := make(map[string]uint64)
 	for i := range dataplane.ScreenReasonCounters {
 		rc := &dataplane.ScreenReasonCounters[i]
-		if v := readCounter(rc.Index); v > 0 {
+		if v, ok := snap.Value(rc.Index); ok && v > 0 {
 			screenDetails[rc.Reason] = v
 		}
 	}
-	syncookieCounters := []struct {
+	for _, sc := range []struct {
 		idx  uint32
 		name string
 	}{
@@ -103,37 +115,41 @@ func (s *Server) GetGlobalStats(_ context.Context, _ *pb.GetGlobalStatsRequest) 
 		{dataplane.GlobalCtrSyncookieValid, "syncookie-valid"},
 		{dataplane.GlobalCtrSyncookieInvalid, "syncookie-invalid"},
 		{dataplane.GlobalCtrSyncookieBypass, "syncookie-bypass"},
-	}
-	for _, sc := range syncookieCounters {
-		if v := readCounter(sc.idx); v > 0 {
+	} {
+		if v, ok := snap.Value(sc.idx); ok && v > 0 {
 			screenDetails[sc.name] = v
 		}
 	}
 
+	value := func(idx uint32) uint64 {
+		v, _ := snap.Value(idx)
+		return v
+	}
 	resp := &pb.GetGlobalStatsResponse{
-		RxPackets:          readCounter(dataplane.GlobalCtrRxPackets),
-		TxPackets:          readCounter(dataplane.GlobalCtrTxPackets),
-		Drops:              readCounter(dataplane.GlobalCtrDrops),
-		UnknownVlanDrops:   readCounter(dataplane.GlobalCtrUnknownVLANDrops),
-		DstMacDrops:        readCounter(dataplane.GlobalCtrDstMACDrops),
-		SessionsCreated:    readCounter(dataplane.GlobalCtrSessionsNew),
-		SessionsClosed:     readCounter(dataplane.GlobalCtrSessionsClosed),
-		ScreenDrops:        readCounter(dataplane.GlobalCtrScreenDrops),
-		PolicyDenies:       readCounter(dataplane.GlobalCtrPolicyDeny),
-		NatAllocFailures:   readCounter(dataplane.GlobalCtrNATAllocFail),
-		HostInboundDenies:  readCounter(dataplane.GlobalCtrHostInboundDeny),
-		TcEgressPackets:    readCounter(dataplane.GlobalCtrTCEgressPackets),
-		Nat64Translations:  readCounter(dataplane.GlobalCtrNAT64Xlate),
-		HostInboundAllowed: readCounter(dataplane.GlobalCtrHostInbound),
-		ScreenDropDetails:  screenDetails,
+		RxPackets:           value(dataplane.GlobalCtrRxPackets),
+		TxPackets:           value(dataplane.GlobalCtrTxPackets),
+		Drops:               value(dataplane.GlobalCtrDrops),
+		UnknownVlanDrops:    value(dataplane.GlobalCtrUnknownVLANDrops),
+		DstMacDrops:         value(dataplane.GlobalCtrDstMACDrops),
+		SessionsCreated:     value(dataplane.GlobalCtrSessionsNew),
+		SessionsClosed:      value(dataplane.GlobalCtrSessionsClosed),
+		ScreenDrops:         value(dataplane.GlobalCtrScreenDrops),
+		PolicyDenies:        value(dataplane.GlobalCtrPolicyDeny),
+		NatAllocFailures:    value(dataplane.GlobalCtrNATAllocFail),
+		HostInboundDenies:   value(dataplane.GlobalCtrHostInboundDeny),
+		TcEgressPackets:     value(dataplane.GlobalCtrTCEgressPackets),
+		Nat64Translations:   value(dataplane.GlobalCtrNAT64Xlate),
+		HostInboundAllowed:  value(dataplane.GlobalCtrHostInbound),
+		ScreenDropDetails:   screenDetails,
+		UnavailableCounters: snap.SortedUnavailableNames(),
 	}
 
-	// #3345: check readErr AFTER the full struct build so EVERY global read
-	// (incl. RxPackets/HostInbound below the screen loop) is covered — a
-	// failure on any of them must not return a zero-valued field.
-	if readErr != nil {
+	// #3345: check Err AFTER the full snapshot so EVERY global read is
+	// covered — a genuine failure on any of them must not return a
+	// zero-valued field. Unavailable counters never reach Err.
+	if snap.Err != nil {
 		return nil, status.Errorf(codes.Internal,
-			"reading global counter: %v", readErr)
+			"reading global counter: %v", snap.Err)
 	}
 
 	return resp, nil

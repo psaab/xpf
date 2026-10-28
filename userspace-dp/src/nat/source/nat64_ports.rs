@@ -50,20 +50,22 @@ pub(crate) fn allocate_nat64_pool_port_excluding(
     holder: NatHolder,
     excluded: &dyn Fn(usize, u16) -> bool,
 ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
-    let translated = allocator.allocate_translation_with_exclusions(
+    let translated = allocator.allocate(&AllocRequest {
         flow,
-        PoolAddressFamily::V4(pool_v4),
-        0,     // family_offset — NAT64 pool addresses start at index 0
-        false, // address_persistent
-        true,  // persistent_nat: BIB identity excludes the remote endpoint
-        PersistentNatPermit::AnyRemoteHost,
-        0,                   // #16017: NAT64 BIBs have no authorizing source-NAT rule version
-        300 * 1_000_000_000, // RFC 6146 idle BIB lifetime
+        family_addresses: PoolAddressFamily::V4(pool_v4),
+        family_offset: 0,
+        address_persistent: false,
+        persistent: Some(PersistentParams {
+            permit: PersistentNatPermit::AnyRemoteHost,
+            epoch: 0,
+            timeout_ns: DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
+        }),
         now_ns,
         holder,
-        0,
+        egress_scope: 0,
+        mint_from_zone: None,
         excluded,
-    )?;
+    })?;
     match translated.ip {
         IpAddr::V4(v4) => Ok((v4, translated.port)),
         // The pool is always v4 for NAT64, so this is unreachable; fail closed.
@@ -171,7 +173,7 @@ pub(crate) fn reserve_nat64_pool_port(
     };
     let persistent = Some((
         flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
-        300 * 1_000_000_000,
+        DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
     ));
     let mut previous_snapshot = None;
     allocator.reserve_flow_maybe_persistent_with_identity(
@@ -217,7 +219,7 @@ pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
         holder,
         Some((
             flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
-            300 * 1_000_000_000,
+            DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
         )),
         true,
         &mut previous_snapshot,

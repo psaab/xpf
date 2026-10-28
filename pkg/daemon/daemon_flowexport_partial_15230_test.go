@@ -67,7 +67,7 @@ func TestPartialBuildPublishesHealthyInstance15230(t *testing.T) {
 	if !d.reconcileFlowExporters(cfg) {
 		t.Fatal("partial reconcile must report a change")
 	}
-	b := d.flowBundle.Load()
+	b := d.v9Family().bundle.Load()
 	if b == nil || len(b.groups) == 0 {
 		t.Fatal("healthy instance a must be live despite instance b build failure")
 	}
@@ -102,7 +102,7 @@ func TestPartialBuildPublishesHealthyInstance15230(t *testing.T) {
 		t.Fatal("v9 BuildState.BuildFailed must be true on partial failure")
 	}
 	// The healthy exporter actually exports.
-	d.flowExportCallback(logging.EventRecord{
+	d.v9Family().closeCallback(logging.EventRecord{
 		Type: "SESSION_CLOSE", SrcAddr: "10.0.0.1:1234", DstAddr: "10.0.0.2:80", Protocol: "tcp",
 	}, nil)
 }
@@ -125,7 +125,7 @@ func TestPartialBuildDoesNotFreezeHealthyInstance15230(t *testing.T) {
 	if err := d.FlowExportError(); err != nil {
 		t.Fatalf("healthy reconcile error = %v", err)
 	}
-	firstBundle := d.flowBundle.Load()
+	firstBundle := d.v9Family().bundle.Load()
 	if len(firstBundle.groups) != 2 {
 		t.Fatalf("healthy groups = %d, want 2 (a+b)", len(firstBundle.groups))
 	}
@@ -134,7 +134,7 @@ func TestPartialBuildDoesNotFreezeHealthyInstance15230(t *testing.T) {
 	if !d.reconcileFlowExporters(changed) {
 		t.Fatal("partial day-2 reconcile must report a change")
 	}
-	b := d.flowBundle.Load()
+	b := d.v9Family().bundle.Load()
 	if b == nil || len(b.groups) != 2 {
 		t.Fatalf("published groups after partial day-2 = %v, want a(new)+b(retained)", b)
 	}
@@ -169,7 +169,7 @@ func TestPartialBuildDoesNotFreezeHealthyInstance15230(t *testing.T) {
 	if !d.reconcileFlowExporters(fixed) {
 		t.Fatal("recovery reconcile must report a change")
 	}
-	if b := d.flowBundle.Load(); b == nil || len(b.groups) != 2 {
+	if b := d.v9Family().bundle.Load(); b == nil || len(b.groups) != 2 {
 		t.Fatalf("recovered groups = %v, want 2", b)
 	}
 	if err := d.FlowExportError(); err != nil {

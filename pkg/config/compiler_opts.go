@@ -1,20 +1,15 @@
 package config
 
-type protocolScopeOpts struct {
-	// lenientProtocolInterfaceMembership11310 downgrades global/RI protocol
-	// interface ownership mismatches to warnings during tolerant loading. The
-	// strict commit and commit-check paths reject the same cross-scope refs.
-	lenientProtocolInterfaceMembership11310 bool
-	// lenientOSPFAreaInterface11400 downgrades interfaces assigned to multiple
-	// OSPF areas to warnings on tolerant loads. The renderer retains the first
-	// area's membership and drops later conflicting activations.
-	lenientOSPFAreaInterface11400 bool
-}
-
-// compileOpts carries per-call compilation policy. It is threaded into
+// compileOpts carries per-call compilation policy plus the computed
+// inputs compileTree derives before expansion (physicalInterfaces,
+// zoneQuarantineNames, currentClusterPrimary16025,
+// currentClusterAccepted16858, nodeID). It is threaded into
 // compileExpanded so the strict commit path and the tolerant
 // load/peer-sync path can share the identical compile + group-expansion
-// pipeline while differing on narrow validator severities.
+// pipeline while differing on narrow validator severities. Outputs are
+// NOT carried here (#17157): every phase result returns as an ordinary
+// return value (runPreWalkGates returns preWalkResult); compileOpts has
+// no pointer-to-map out-parameters.
 type compileOpts struct {
 	// #8690 TEST SEAM. When true, the brace-elided normalizer
 	// (compact_normalize_8662.go) is not run.
@@ -38,6 +33,27 @@ type compileOpts struct {
 	// the cluster IGP identity gate instead of re-deriving node views
 	// from the already-expanded tree. Internal only.
 	igpIdentityExcused16810 bool
+
+	// tolerant (#17153) is the explicit tolerant-path mode bit: true
+	// ONLY in the compileOpts built by lenientCompileOpts() (tolerant
+	// load / peer-sync / peer-display), false on every strict commit /
+	// commit-check path. Code that needs to know "is this the tolerant
+	// path?" — as opposed to "is this one gate downgraded?" — reads
+	// this field, never an unrelated gate's lenient*/sanitize* flag
+	// (the tunnel-ID collision gate formerly borrowed
+	// sanitizeFreeTextControlChars, and the Junos host-warning deferral
+	// was a four-flag OR written twice). Per-gate severity downgrades
+	// keep their own lenient* flags; this bit governs exactly:
+	// validateTunnelEndpointIDCollisionAST (compiler.go),
+	// deferJunosHostWarnings (the Junos host direct-delivery warning
+	// deferral), and the tolerant-path suppression in
+	// appendUserspaceRxMTUAdvisoryLocked and
+	// appendUserspaceMgmtZoneAdvisoryLocked. The contested-trunk and
+	// shared-device advisories keep their dedicated co-set suppressor
+	// suppressContestedTrunkZoneAdvisory, which lenientCompileOpts()
+	// sets together with this bit — they do not read tolerant. The
+	// #16166 completeness test pins it true in lenientCompileOpts().
+	tolerant bool
 
 	// lenientUnknownTopLevelStanza lets tolerant compilation retain an operator-
 	// visible warning while ignoring a root stanza the compiler does not model.
@@ -281,11 +297,13 @@ type compileOpts struct {
 	// else.
 	suppressClusterNTPAdvisory bool
 	// suppressContestedTrunkZoneAdvisory (#7509) suppresses the commit-time
-	// advisory for a parent interface whose units span different zones. Set on
-	// the TOLERANT paths (Store.Load, Store.SyncApply) for the same reason as
+	// advisories in appendContestedTrunkZoneAdvisoryLocked and
+	// appendSharedDeviceUnzonedUnitAdvisoryLocked (contested_trunk_zone_advisory_7509.go).
+	// Set on the TOLERANT paths (Store.Load, Store.SyncApply) for the same reason as
 	// its sibling above: the condition is a property of a config already
 	// committed, so firing on every boot and peer sync trains the operator to
-	// skip it.
+	// skip it. It does NOT govern the userspace RX-MTU (#9727) or
+	// mgmt-zone (#10308) advisories — those read opts.tolerant (#17153).
 	suppressContestedTrunkZoneAdvisory bool
 	// suppressDPDThresholdIKEv2Advisory (#15025) suppresses the commit-time
 	// advisory that a DPD threshold is IKEv1-only (dpd_timeout is not
@@ -1171,7 +1189,6 @@ type compileOpts struct {
 	// boot compatibility, but colliding references are recorded and refused
 	// during userspace expansion rather than matching an arbitrary winner.
 	lenientApplicationNameCollisions bool
-	applicationNameCollisions        *map[string]struct{}
 
 	// lenientReservedApplicationNames (#5821, #12048) downgrades the
 	// reserved-name gate (validateReservedApplicationNamesStrict) from a hard
@@ -1212,7 +1229,6 @@ type compileOpts struct {
 	// without poisoning kept a discard-to-accept replacement enforceable.
 	// Same doctrine as lenientApplicationNameCollisions.
 	lenientFirewallFilterFamilyCollisions bool
-	firewallFilterCollisions              *map[string]struct{}
 
 	// lenientRoutingInstanceChildTokens (#9323) downgrades the
 	// routing-instance child-keyword gate
@@ -1545,11 +1561,25 @@ type compileOpts struct {
 	// collide, so the warning retains that caveat. Commit stays strict so the
 	// operator's next edit fails loudly. Same doctrine as lenientNPTv6.
 	lenientNATPoolOverlap bool
-	// lenientFirewallRefs (#2217) downgrades the firewall-filter term
-	// cross-reference gates — `then policer <name>` (Finding A,
+	// lenientFirewallRefs (#2217) downgrades, from a hard compile error
+	// to a cfg.Warnings entry, exactly these gates (the #17153 AST
+	// guard test asserts this list stays complete): the firewall-filter
+	// term cross-reference gates `then policer <name>` (Finding A,
 	// validateFirewallPolicerReferencesStrict) and `then routing-instance
-	// <name>` FBF (Finding C, validateFirewallRoutingInstanceReferencesStrict)
-	// — from a hard compile error to a cfg.Warnings entry. Both references were
+	// <name>` FBF (Finding C, validateFirewallRoutingInstanceReferencesStrict),
+	// validateFirewallPrefixListReferencesStrict,
+	// validateFirewallPrefixListEntriesStrict,
+	// validateFirewallFilterReferencesStrict,
+	// validateFilterRoutingInstanceDirectionStrict,
+	// validateFirewallUnknownChildrenStrict,
+	// ValidateFirewallNamelessTermsAST12526 (pre-walk),
+	// validateNATSourceAddressNameReferencesStrict,
+	// validateStaticNATThenTargetStrict,
+	// validateStaticNATInetTargetStrict,
+	// validateStaticNATMatchAddressesStrict,
+	// validateStaticNATSelectedMatchAddressStrict,
+	// validateStaticNATSingleTargetStrict and
+	// validateProxyARPAddressesStrict. Both originally-named references were
 	// previously unvalidated: a dangling policer silently never rate-limited
 	// (fail-open) and a dangling FBF routing-instance silently blackholed /
 	// fell through to the default table. The strict commit / commit-check path
@@ -1621,6 +1651,18 @@ type compileOpts struct {
 	// transport cannot bind a malformed or address-family-incompatible source.
 	// Non-local but valid sources remain a separate advisory in ValidateConfig.
 	lenientSamplingSourceAddress bool
+	// lenientFamilyMembers17196 (#17196) downgrades the shared-extractor
+	// unknown-family diagnostic at the three non-firewall tops
+	// (interfaces unit family, forwarding-options family,
+	// forwarding-options sampling instance family) from a hard compile
+	// error to a cfg.Warnings entry on tolerant load / peer-sync. An
+	// unknown member (empty-Keys child, undeclared token, or undeclared
+	// residue on a structured member) compiles to nothing in every
+	// case — the compiler installs nothing for it on either path — so a
+	// leniently-loaded malformed persisted/synced config still BOOTS
+	// (#1960) while strict commit rejects the typo. Same doctrine as
+	// lenientSamplingInstanceConflicts.
+	lenientFamilyMembers17196 bool
 	// lenientSSHKnownHosts16770 (#16770) downgrades an invalid
 	// ssh-known-hosts host/key (unknown type, type/key mismatch,
 	// wildcard/malformed host) to a warning on tolerant load / peer-sync
@@ -1789,7 +1831,14 @@ type compileOpts struct {
 	// default domain, matching the daemon's no-VRF binding behavior.
 	lenientForwardingInstanceMembers bool
 
-	protocolScopeOpts
+	// lenientProtocolInterfaceMembership11310 downgrades global/RI protocol
+	// interface ownership mismatches to warnings during tolerant loading. The
+	// strict commit and commit-check paths reject the same cross-scope refs.
+	lenientProtocolInterfaceMembership11310 bool
+	// lenientOSPFAreaInterface11400 downgrades interfaces assigned to multiple
+	// OSPF areas to warnings on tolerant loads. The renderer retains the first
+	// area's membership and drops later conflicting activations.
+	lenientOSPFAreaInterface11400 bool
 	// lenientDHCPRelayDHCPv6 (#9553) downgrades validateDHCPRelayDHCPv6AST from
 	// a hard compile error to a cfg.Warnings entry. The implemented RFC 8415
 	// subset is compiled into the typed DHCPv6 relay configuration and excluded
@@ -1919,6 +1968,13 @@ type compileOpts struct {
 	// path: a published malformed prefix fails the helper snapshot closed
 	// (RouteDestinationUnparseable), fail-closed for a blackhole.
 	lenientGenerateRoutePrefix bool
+	// lenientStaticRoutePrefix downgrades an invalid static-route
+	// destination (staticRouteInvalidPrefixes: garbage, bare IP, or
+	// whitespace-padded CIDR) from a strict compile error to
+	// cfg.Warnings entries. Mirrors lenientGenerateRoutePrefix
+	// (#15658): the route is kept on the tolerant path so a persisted
+	// malformed destination fails the helper snapshot closed.
+	lenientStaticRoutePrefix bool
 	// lenientDHCPStaticBindings (#2243 review) downgrades the DHCP-server
 	// static (fixed/reserved) host-binding gate (validateDHCPStaticBindingsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The strict commit /
@@ -3703,21 +3759,6 @@ type compileOpts struct {
 	// case, so warning rather than refusing to start strictly improves it.
 	lenientFabricMemberDefined bool
 
-	// lenientLoginClassDeny (#5831) downgrades the custom-login-class
-	// restrictive-regex gate (deny-commands / deny-configuration, which xpf's
-	// coarse RBAC does not enforce) from a hard compile error to a
-	// cfg.Warnings entry PLUS a restrictive fold of the affected class's mapped
-	// permissions. Set ONLY on the tolerant load / peer-sync paths so a config
-	// persisted before this gate existed — or synced from a peer running older
-	// code — still BOOTS (#1960 no-brick). Unlike most lenient flags this one
-	// is not warn-and-continue-unchanged: leaving the permission set intact
-	// would preserve exactly the fail-open the strict gate rejects, so the
-	// tolerant path resolves the un-enforceable restriction in the RESTRICTIVE
-	// direction instead — bounded by a repair floor, because a class the
-	// console operator is bound to must keep the access that deletes the
-	// statement. See foldLoginClassDenyToRepairableFloor.
-	lenientLoginClassDeny bool
-
 	// lenientBridgeDomainVlanID (#6687) downgrades the bridge-domain
 	// `vlan-id-list` parse / range gate from a hard compile error to a
 	// cfg.Warnings entry plus a dropped value. The strict commit /
@@ -3830,34 +3871,37 @@ type compileOpts struct {
 	// authentication limitation as a warning. New strict compiles reject it.
 	lenientSystemAAA10831 bool
 
-	// nodeAware / stampNodeID (#4329) carry the runtime cluster node
-	// identity (from /etc/xpf/node-id, or `-node-id` on `xpfd
-	// check-config`) into compileExpanded so it can be stamped onto the
-	// compiled ClusterConfig.NodeID BEFORE any NodeID-dependent derivation
-	// runs. Only the node-aware entry (compileTree node branch) sets
-	// nodeAware; the standalone CompileConfig path leaves it false so
-	// single-node compiles are unchanged. See the stamp in compileExpanded
-	// for the full rationale and guards.
-	nodeAware   bool
-	stampNodeID int
+	// nodeID (#4329, #17157) carries the runtime cluster node identity (from
+	// /etc/xpf/node-id, or `-node-id` on `xpfd check-config`) into
+	// compileExpanded so it can be stamped onto the compiled
+	// ClusterConfig.NodeID BEFORE any NodeID-dependent derivation runs
+	// (see resolveDerivedConfig). It is the ONLY node-identity channel:
+	// compileTree stamps it from its own *int selector (nodeID != nil
+	// IS the node-aware condition, the #16167 pointer-alone presence),
+	// so no parallel boolean can disagree with the stamped value. Nil:
+	// the standalone CompileConfig path leaves it nil so single-node
+	// compiles are unchanged. A negative id (defensive) never stamps
+	// (resolveDerivedConfig's `>= 0` guard), which also holds the full
+	// rationale and remaining guards.
+	nodeID *int
 	// zoneQuarantineNames (#13095) carries the pre-expansion three-view
 	// runtime zone-name union validateZoneIDCollisionAST computed, so
 	// compileExpanded can stamp it onto cfg.ZoneQuarantineNames BEFORE the
 	// zone-membership / secure-tunnel / advisory gates read the quarantine
-	// set. Both compile wrappers set it right after the collision gate; a
-	// direct compileExpanded caller that leaves it nil stamps the empty set
-	// and ZoneQuarantineNamesForConfig falls back to cfg's own zone keys,
+	// set. compileTree sets it right after the collision gate; a direct
+	// compileExpanded caller that leaves it nil stamps the empty set and
+	// ZoneQuarantineNamesForConfig falls back to cfg's own zone keys,
 	// which is the pre-#13095 behavior.
 	zoneQuarantineNames []string
 	// physicalInterfaces (#15037) carries the pre-expansion physical
 	// interface-name set (top level + every groups block + fabric
 	// members) so compileExpanded can stamp it onto cfg for the
-	// interface-monitor name gate. Both compile wrappers compute it
-	// right after cloneForExpansion, BEFORE ExpandGroups removes the
-	// groups stanza the peer node's declarations live in; a direct
-	// compileExpanded caller that leaves it nil stamps the empty set
-	// and the gate treats every physical-shaped monitor name as
-	// attributable (nothing declared anywhere).
+	// interface-monitor name gate. compileTree computes it right after
+	// cloneForExpansion, BEFORE ExpandGroups removes the groups stanza
+	// the peer node's declarations live in; a direct compileExpanded
+	// caller that leaves it nil stamps the empty set and the gate
+	// treats every physical-shaped monitor name as attributable
+	// (nothing declared anywhere).
 	physicalInterfaces map[string]bool
 	// lenientAPIAuthDuplicateScalar (#14448) downgrades the api-auth
 	// duplicate class/expires gate (validateAPIAuthDuplicateScalarAST)
@@ -3896,348 +3940,385 @@ type compileOpts struct {
 	currentClusterAccepted16858 *clusterAcceptedKeys16858
 }
 
+// strictCompileOpts returns the compileOpts for the strict commit /
+// commit-check path. It is the single source of truth for strict mode,
+// beside lenientCompileOpts (#17148): every production strict entry
+// (CompileConfig, CompileConfigForNode, and the current-cluster-primary
+// variants via currentClusterOpts) and every test helper that claims to
+// measure the strict commit path MUST start from this constructor and
+// then apply its per-call overrides, never from a hand-copied
+// compileOpts{...} literal or the bare zero value.
+//
+// Strict is currently the zero value: no lenient*/sanitize* downgrade is
+// enabled, so a strict compile hard-rejects every gated misconfiguration
+// the tolerant path would warn on. That equality is intentional today,
+// not a licence to spell strict as compileOpts{} at call sites — the
+// #16296/#16849 history shows an always-on strict fold hand-edited into
+// each strict literal and silently absent from every zero-value test
+// compile. If a future fold needs a non-zero strict field, it lands
+// HERE once (under a non-lenient* name if it is not a tolerant-only
+// downgrade, per #16166) and production and strict-named tests move
+// together; TestStrictCompileOptsSingleSource17148 pins that the
+// production entries and strictCompileOpts stay identical, and the AST
+// census in the same test rejects any new bare compileOpts{...} literal
+// outside this file (the tunnelid/reth side compiles excepted, see
+// there).
+func strictCompileOpts() compileOpts {
+	return compileOpts{}
+}
+
 // lenientCompileOpts returns a compileOpts with every tolerant-path
 // severity downgrade enabled. It is the single source of truth for the
 // lenient flag set that CompileConfigLenient and
 // CompileConfigForNodeLenient share; both formerly inlined a byte-
 // identical ~125-field composite literal (#6423 dedup). compileOpts is a
-// value type, so each call returns a fresh copy — equivalent to the
-// original inline literals.
-func lenientCompileOpts() compileOpts {
-	return compileOpts{
-		sanitizeFreeTextControlChars:             true,
-		lenientUnknownTopLevelStanza:             true,
-		lenientVRRPTrackDuplicates:               true,
-		lenientVRRPAuthentication:                true,
-		lenientVRRPGroupChildren15046:            true,
-		lenientJunos9Secret15051:                 true,
-		lenientRenderUnsafeInterfaceNames:        true,
-		lenientDeviceMap:                         true,
-		lenientPolicyMatchAddress:                true,
-		lenientTCPMSSRange:                       true,
-		lenientLogStreamPort:                     true,
-		lenientLogTLSProfile:                     true,
-		lenientFlowTraceFile:                     true,
-		lenientFlowTraceFilter:                   true,
-		lenientFlowTraceSizeFiles:                true,
-		lenientLogEventModeFormat:                true,
-		lenientEventAttributesMatch:              true,
-		suppressClusterNTPAdvisory:               true,
-		suppressContestedTrunkZoneAdvisory:       true,
-		suppressFabricStampAdvisory:              true,
-		suppressDPDThresholdIKEv2Advisory:        true,
-		suppressSSHUnmanagedAdvisory16737:        true,
-		lenientIPsecPolicyProposalRef:            true,
-		lenientPolicySchedulerRef:                true,
-		lenientSchedulerMapRef:                   true,
-		lenientSchedulerDateRange15695:           true,
-		lenientThreeColorBurstFloor16610:         true,
-		lenientSingleRateBurstFloor16714:         true,
-		lenientSchedulerWindowPairs11358:         true,
-		lenientDuplicateRootLogin14447:           true,
-		lenientCodelTarget11825:                  true,
-		lenientCoSInterfaceRefs:                  true,
-		lenientCoSLossPriority:                   true,
-		lenientCoSSchedulerPriority:              true,
-		lenientCoSUnitClassifierConflict:         true,
-		lenientCoSForwardingClassQueue:           true,
-		lenientCoSFairnessRSSExpectation:         true,
-		lenientIPsecGatewayRefs:                  true,
-		lenientIPsecGatewayVRF12089:              true,
-		lenientIKEPolicyChainRef:                 true,
-		lenientIPsecEndpoints:                    true,
-		lenientIPsecSANameCollision:              true,
-		lenientIPsecGatewayNameCollision:         true,
-		lenientIPsecBindTSOverlap:                true,
-		lenientIPsecRouteTrafficSelectors:        true,
-		lenientIPsecProposalLifetime:             true,
-		lenientIPsecDHGroup:                      true,
-		lenientIKEProposalMissingDH:              true,
-		lenientIPsecTrafficSelectors:             true,
-		lenientReservedProposalSetNames:          true,
-		lenientChassisClusterIdentities:          true,
-		lenientRethRedundancyGroup:               true,
-		lenientChassisMonitorWeight:              true,
-		lenientChassisRGStatementArity:           true,
-		lenientChassisClusterUnknown16456:        true,
-		lenientRGNodePriorityShape16672:          true,
-		lenientLoginPackedStatements:             true,
-		lenientLoginClassShadowsBuiltin:          true,
-		lenientLoginClassRegex15712:              true,
-		lenientIPsecProposalProtocol:             true,
-		lenientIPsecProposalAlgorithms:           true,
-		lenientIPsecManualKey:                    true,
-		lenientIPsecSANameDisplay:                true,
-		lenientIPsecSectionName:                  true,
-		lenientIPsecPSKPresence:                  true,
-		lenientIPsecResponderIdentity:            true,
-		lenientIPsecPSKQualifier:                 true,
-		lenientIPsecPSKJunos9:                    true,
-		lenientIPsecCertAuth:                     true,
-		lenientLogProfileStreamRef:               true,
-		lenientAuthTypeAbsent:                    true,
-		lenientISISAuthTypeRequiresKey14399:      true,
-		lenientRIPAuthTypeWithoutKey:             true,
-		lenientRIPAuthKeyLength15013:             true,
-		lenientRIPGroupExport16625:               true,
-		lenientMultiLeafSelfRepeat:               true,
-		lenientDynamicAddressFeedRef:             true,
-		lenientDuplicateNamedBlock:               true,
-		lenientDuplicateNATRuleName:              true,
-		lenientDuplicateNATRuleSetName:           true,
-		lenientSourceNATDuplicateContext:         true,
-		lenientDuplicateNamesExpanded:            true,
-		lenientAPIAuthDuplicateScalar:            true,
-		lenientNATPoolAlarmThreshold:             true,
-		lenientNATHostMask:                       true,
-		lenientUnsupportedInterfaceStanzas:       true,
-		lenientForwardingFilters:                 true,
-		lenientQinQVLANStack:                     true,
-		lenientVLANMap:                           true,
-		lenientVlanIDTagging:                     true,
-		lenientRoutingExportRef:                  true,
-		lenientFRRAuthValues:                     true,
-		lenientOSPFMD5KeyID11794:                 true,
-		lenientOSPFMD5DuplicateKey15935:          true,
-		lenientOSPFAuthKeyPresence14397:          true,
-		lenientOSPFKeyLength16628:                true,
-		lenientISISMetric11823:                   true,
-		lenientBGPPrefixLimit11793:               true,
-		lenientBGPSAFI11815:                      true,
-		lenientBGPCrossFamily12185:               true,
-		lenientRouteFilterMatchTypes:             true,
-		lenientApplicationSpecs:                  true,
-		lenientApplicationNameCollisions:         true,
-		lenientReservedApplicationNames:          true,
-		lenientFirewallFilterFamilyCollisions:    true,
-		lenientRoutingInstanceChildTokens:        true,
-		lenientFirewallFilterFamilyAnyMatches:    true,
-		lenientFilterProtocols:                   true,
-		lenientFilterNextHeaderExt:               true,
-		lenientFilterCrossField:                  true,
-		lenientFilterActions:                     true,
-		lenientFilterMatchValues:                 true,
-		lenientFlexMatch:                         true,
-		lenientFilterPortExcept:                  true,
-		lenientFilterAddressExcept:               true,
-		lenientFilterFromMatch:                   true,
-		lenientFilterAddressLiterals:             true,
-		lenientFilterRoutingInstanceConflict:     true,
-		lenientMemberFBFKernelBand:               true,
-		lenientFilterTerminalConflict:            true,
-		lenientPolicerThenConflict:               true,
-		lenientPolicerUnknownActions:             true,
-		lenientPolicerNameCollision:              true,
-		lenientPolicerMissingLimits:              true,
-		lenientPortMirroring15256:                true,
-		lenientFilterDSCP:                        true,
-		lenientNPTv6:                             true,
-		lenientVRFOverlapPBR:                     true,
-		lenientNAT64Prefix:                       true,
-		lenientNATPoolOverlap:                    true,
-		lenientFirewallRefs:                      true,
-		lenientFlowServerTemplateRef:             true,
-		lenientSamplingInstanceConflicts:         true,
-		lenientSamplingInputRate:                 true,
-		lenientPortMirroringIngressAlias15651:    true,
-		lenientSamplingSourceAddress:             true,
-		lenientSSHKnownHosts16770:                true,
-		lenientFlowExportSeconds:                 true,
-		lenientApplicationSetMembers:             true,
-		lenientPolicyMatchApplications:           true,
-		lenientNATMatchApplications:              true,
-		lenientPolicyExpandedRuleCount:           true,
-		lenientPolicyMatchAddressSetMembers:      true,
-		lenientAddressSetMembersDefined:          true,
-		lenientRibGroupRefs:                      true,
-		lenientRibGroupImportPolicy:              true,
-		lenientGlobalInterfaceRoutesRibGroup:     true,
-		lenientInstanceRibGroupRefs:              true,
-		lenientNextTableRefs:                     true,
-		lenientForwardingInstanceProtocols:       true,
-		lenientForwardingInstanceMembers:         true,
-		protocolScopeOpts:                        protocolScopeOpts{lenientProtocolInterfaceMembership11310: true, lenientOSPFAreaInterface11400: true},
-		lenientDHCPRelayDHCPv6:                   true,
-		lenientWireguardRoutingInstance:          true,
-		lenientTunnelRITarget12520:               true,
-		lenientDHCPRelayChildTokens:              true,
-		lenientApplicationsLevelChildren16459:    true,
-		lenientIPMonThenChildren16712:            true,
-		lenientDHCPRelayV4Config:                 true,
-		lenientRoutingRuleWindows:                true,
-		lenientPolicyRouteMapSeq:                 true,
-		lenientPolicyNextAction11780:             true,
-		lenientPolicyDefaultConflict14433:        true,
-		lenientRoutingTermTerminalConflict:       true,
-		lenientPolicyFromUnknown11779:            true,
-		lenientRoutingPolicyProtocols16577:       true,
-		lenientRouteDispositionConflict:          true,
-		lenientStaticNextHopFamily:               true,
-		lenientStaticRouteCIDRMaskSpelling:       true,
-		lenientGenerateRoutePolicy:               true,
-		lenientGenerateRoutePrefix:               true,
-		lenientDHCPStaticBindings:                true,
-		lenientDHCPPoolSubnets:                   true,
-		lenientDHCPPoolValues:                    true,
-		lenientDHCPGroupInterfaces:               true,
-		lenientDHCPServerIfaceRef:                true,
-		lenientDHCPServerRelayOverlap:            true,
-		lenientWireguardPeers:                    true,
-		lenientTunnelOuterFamily:                 true,
-		lenientGreDuplicateOuter:                 true,
-		lenientWireguardListenPortCollision:      true,
-		lenientIpipTunnelMode:                    true,
-		lenientPolicyZoneRefs:                    true,
-		lenientZoneCount:                         true,
-		lenientWebManagementAuth:                 true,
-		lenientZoneIDCollision:                   true,
-		lenientRoutingInstanceTableIDCollision:   true,
-		lenientReservedRoutingInstanceName:       true,
-		lenientRoutingInstanceKernelName:         true,
-		lenientBridgeDomainKernelName:            true,
-		lenientAddressBookNames:                  true,
-		lenientReservedZoneLocalRefs:             true,
-		lenientReservedAddressNames:              true,
-		lenientHelperStateFile:                   true,
-		lenientAddressBookNameCollision:          true,
-		lenientAddressBookDuplicatePrefix:        true,
-		lenientNamedAddressBookAttach15672:       true,
-		lenientScopedGlobalZoneLocal16596:        true,
-		lenientRIDualClaim11060:                  true,
-		lenientRIMgmtMember11392:                 true,
-		lenientZoneInterfaceMembership:           true,
-		lenientFabricZoneRoutingInstance:         true,
-		lenientZoneInterfaceDefined:              true,
-		lenientZoneInterfacesNonEmpty:            true,
-		lenientNestedZonePair:                    true,
-		lenientZoneInterfacePackedTail:           true,
-		lenientHostInboundTokens:                 true,
-		lenientHostInboundFullAdmitExcept:        true,
-		lenientHostInboundManagedMulticast:       true,
-		lenientDuplicateHostLocalAddress:         true,
-		lenientClusterAuthKey:                    true,
-		lenientDestNATAddresses:                  true,
-		lenientNATUndefinedZone:                  true,
-		lenientNATUndefinedScope:                 true,
-		lenientLoginUserClassRef:                 true,
-		lenientNATMatchAddressLiterals:           true,
-		lenientRPMSourceAddress:                  true,
-		lenientRPMLinkLocalZone:                  true,
-		lenientRPMHTTPGetScheme:                  true,
-		lenientRPMRoutingInstance:                true,
-		lenientBGPNeighborPeerAS:                 true,
-		lenientBGPAllowASIn11795:                 true,
-		lenientBGPCrossField14585:                true,
-		lenientBGPRouterAS:                       true,
-		lenientBGPGroupType16567:                 true,
-		lenientBGPDuplicateNeighbor:              true,
-		lenientBGPNeighborAddress:                true,
-		lenientRouterID:                          true,
-		lenientClusterIGPIdentity16810:           true,
-		lenientISISNETPresence16865:              true,
-		lenientSNMPTrapGroup:                     true,
-		lenientBridgeDomainVlanID:                true,
-		lenientDDNSDuration:                      true,
-		lenientPolicyTerminalAction:              true,
-		lenientPolicyLogAction:                   true,
-		lenientDuplicatePolicyNames:              true,
-		lenientStablePolicyRuleIdentity:          true,
-		lenientDuplicatePolicySchedulerName14449: true,
-		lenientScreenProfileRefs:                 true,
-		lenientScreenNumeric:                     true,
-		lenientScreenUnknown:                     true,
-		lenientScreenMissingValue:                true,
-		lenientUnknownSecurityZoneChild11575:     true,
-		lenientUnknownPoliciesChild12217:         true,
-		lenientTrailingTokens:                    true,
-		lenientAddressUnimplementedForms:         true,
-		lenientAddressBookMappedPrefixes:         true,
-		lenientAddressBookCIDRMaskSpelling:       true,
-		lenientFlowAging:                         true,
-		lenientStrictSynCheck16479:               true,
-		lenientTimeWaitStateAgeout16485:          true,
-		lenientChassisRG:                         true,
-		lenientVRRPGroupID:                       true,
-		lenientVRRPGroupPriority:                 true,
-		lenientVRRPGroupTimers:                   true,
-		lenientRethVRRPGroupID:                   true,
-		lenientIfNameCollision:                   true,
-		lenientRIMemberCollision:                 true,
-		lenientRoutingInstanceType9814:           true,
-		lenientRethMember:                        true,
-		lenientRethRGOwnership:                   true,
-		lenientRethMultiChild:                    true,
-		lenientReservedZoneNames:                 true,
-		lenientBackupRouterDst:                   true,
-		lenientDDNSRequireTSIG:                   true,
-		lenientDDNSUpdateServerUserinfo:          true,
-		lenientSecureTunnelBindIface:             true,
-		lenientPolicyMatchLeaves:                 true,
-		lenientPolicyThenPermit:                  true,
-		lenientPolicyThenReject:                  true,
-		lenientPolicyThenDeny:                    true,
-		lenientPolicyThenCountAlarm:              true,
-		lenientDefaultPolicyBlock11367:           true,
-		lenientDefaultPolicyConflict11821:        true,
-		lenientPolicyStatsSystemWide12825:        true,
-		lenientPolicyThenSiblings:                true,
-		lenientPolicyEnforcementSubtrees:         true,
-		lenientPolicyMissingMatch:                true,
-		lenientPolicyValuelessMatch:              true,
-		lenientFirewallValuelessFrom:             true,
-		lenientFirewallFusedThen12528:            true,
-		lenientEmptySecurityIdentity:             true,
-		lenientZoneStatementTail9656:             true,
-		lenientRAInterfacePackedHeader15257:      true,
-		lenientPolicyCommunityRef:                true,
-		lenientSNMPv3KeyMaterial:                 true,
-		lenientSNMPv3SecurityKeyword:             true,
-		lenientSNMPv3BarePassword:                true,
-		lenientPolicyASPathRef:                   true,
-		lenientPolicyASPathRegex:                 true,
-		lenientPolicyCommunityRegex:              true,
-		lenientBGPNeighborDescriptionPipe16776:   true,
-		lenientPolicyThenOperands:                true,
-		lenientPolicyNamelessTerm12521:           true,
-		lenientPolicyReservedRedistName:          true,
-		lenientPolicyReservedChainName:           true,
-		lenientPrefixListReservedRIPGate16866:    true,
-		lenientPolicyReservedOrName16868:         true,
-		lenientFRRNameAliasCollision16867:        true,
-		lenientVRRPVirtualAddress:                true,
-		lenientVRRPVIPCount:                      true,
-		lenientVRRPVIPEmpty:                      true,
-		lenientVRRPVIPCrossGroup:                 true,
-		lenientVRRPVIPOwner:                      true,
-		lenientVRRPInstanceIdentity:              true,
-		lenientVRRPTrackRef:                      true,
-		lenientVRRPVIPPrefix:                     true,
-		lenientDNATToScope:                       true,
-		lenientNATMixedScope:                     true,
-		lenientNATEmptyScope:                     true,
-		lenientNATTerminalAction:                 true,
-		lenientInterfaceUnitAliasCollisions:      true,
-		lenientEventWithinTrigger:                true,
-		lenientEventInert14660:                   true,
-		lenientFirewallTCPFlags:                  true,
-		lenientCoSNumericCodePoint:               true,
-		lenientNonNumericUnit:                    true,
-		lenientInterfaceUnitRef:                  true,
-		lenientLoginClassDeny:                    true,
-		lenientInterfaceRangeBudget:              true,
-		lenientFabricMemberDefined:               true,
-		lenientInterfaceAddressList:              true,
-		lenientVlanUnitMTU:                       true,
-		lenientIPv6UnitMTU13936:                  true,
-		lenientUserspaceRxMTU16244:               true,
-		lenientInterfaceBandwidth:                true,
-		lenientInterfaceDuplex:                   true,
-		lenientInterfaceSpeed:                    true,
-		lenientInterfaceNumericBounds:            true,
-		lenientBareLeafInstance9838:              true,
-		lenientLLDPInterfaceTokens14616:          true,
-		lenientSystemHostname:                    true,
-		lenientSystemLoginUID11826:               true,
-		lenientSystemAAA10831:                    true,
-	}
+// value type, so each call returns a fresh copy with all collision
+// result channels nil (no pointer-to-map fields remain, #17157) —
+// equivalent to the original inline literals.
+//
+// The set is built with one assignment per flag, not a single composite
+// literal: gofmt aligns the values of a ~300-key literal on the widest
+// key, so adding one longer field name realigned every line (a
+// 200-300-line diff in unrelated commits) and repeatedly left this file
+// gofmt-dirty. Per-flag assignments change exactly one line per flag
+// however long its name is (#17168).
+func lenientCompileOpts() (o compileOpts) {
+	o.tolerant = true
+	o.sanitizeFreeTextControlChars = true
+	o.lenientUnknownTopLevelStanza = true
+	o.lenientVRRPTrackDuplicates = true
+	o.lenientVRRPAuthentication = true
+	o.lenientVRRPGroupChildren15046 = true
+	o.lenientJunos9Secret15051 = true
+	o.lenientRenderUnsafeInterfaceNames = true
+	o.lenientDeviceMap = true
+	o.lenientPolicyMatchAddress = true
+	o.lenientTCPMSSRange = true
+	o.lenientLogStreamPort = true
+	o.lenientLogTLSProfile = true
+	o.lenientFlowTraceFile = true
+	o.lenientFlowTraceFilter = true
+	o.lenientFlowTraceSizeFiles = true
+	o.lenientLogEventModeFormat = true
+	o.lenientEventAttributesMatch = true
+	o.suppressClusterNTPAdvisory = true
+	o.suppressContestedTrunkZoneAdvisory = true
+	o.suppressFabricStampAdvisory = true
+	o.suppressDPDThresholdIKEv2Advisory = true
+	o.suppressSSHUnmanagedAdvisory16737 = true
+	o.lenientIPsecPolicyProposalRef = true
+	o.lenientPolicySchedulerRef = true
+	o.lenientSchedulerMapRef = true
+	o.lenientSchedulerDateRange15695 = true
+	o.lenientThreeColorBurstFloor16610 = true
+	o.lenientSingleRateBurstFloor16714 = true
+	o.lenientSchedulerWindowPairs11358 = true
+	o.lenientDuplicateRootLogin14447 = true
+	o.lenientCodelTarget11825 = true
+	o.lenientCoSInterfaceRefs = true
+	o.lenientCoSLossPriority = true
+	o.lenientCoSSchedulerPriority = true
+	o.lenientCoSUnitClassifierConflict = true
+	o.lenientCoSForwardingClassQueue = true
+	o.lenientCoSFairnessRSSExpectation = true
+	o.lenientIPsecGatewayRefs = true
+	o.lenientIPsecGatewayVRF12089 = true
+	o.lenientIKEPolicyChainRef = true
+	o.lenientIPsecEndpoints = true
+	o.lenientIPsecSANameCollision = true
+	o.lenientIPsecGatewayNameCollision = true
+	o.lenientIPsecBindTSOverlap = true
+	o.lenientIPsecRouteTrafficSelectors = true
+	o.lenientIPsecProposalLifetime = true
+	o.lenientIPsecDHGroup = true
+	o.lenientIKEProposalMissingDH = true
+	o.lenientIPsecTrafficSelectors = true
+	o.lenientReservedProposalSetNames = true
+	o.lenientChassisClusterIdentities = true
+	o.lenientRethRedundancyGroup = true
+	o.lenientChassisMonitorWeight = true
+	o.lenientChassisRGStatementArity = true
+	o.lenientChassisClusterUnknown16456 = true
+	o.lenientRGNodePriorityShape16672 = true
+	o.lenientLoginPackedStatements = true
+	o.lenientLoginClassShadowsBuiltin = true
+	o.lenientLoginClassRegex15712 = true
+	o.lenientIPsecProposalProtocol = true
+	o.lenientIPsecProposalAlgorithms = true
+	o.lenientIPsecManualKey = true
+	o.lenientIPsecSANameDisplay = true
+	o.lenientIPsecSectionName = true
+	o.lenientIPsecPSKPresence = true
+	o.lenientIPsecResponderIdentity = true
+	o.lenientIPsecPSKQualifier = true
+	o.lenientIPsecPSKJunos9 = true
+	o.lenientIPsecCertAuth = true
+	o.lenientLogProfileStreamRef = true
+	o.lenientAuthTypeAbsent = true
+	o.lenientISISAuthTypeRequiresKey14399 = true
+	o.lenientRIPAuthTypeWithoutKey = true
+	o.lenientRIPAuthKeyLength15013 = true
+	o.lenientRIPGroupExport16625 = true
+	o.lenientMultiLeafSelfRepeat = true
+	o.lenientDynamicAddressFeedRef = true
+	o.lenientDuplicateNamedBlock = true
+	o.lenientDuplicateNATRuleName = true
+	o.lenientDuplicateNATRuleSetName = true
+	o.lenientSourceNATDuplicateContext = true
+	o.lenientDuplicateNamesExpanded = true
+	o.lenientAPIAuthDuplicateScalar = true
+	o.lenientNATPoolAlarmThreshold = true
+	o.lenientNATHostMask = true
+	o.lenientUnsupportedInterfaceStanzas = true
+	o.lenientForwardingFilters = true
+	o.lenientQinQVLANStack = true
+	o.lenientVLANMap = true
+	o.lenientVlanIDTagging = true
+	o.lenientRoutingExportRef = true
+	o.lenientFRRAuthValues = true
+	o.lenientOSPFMD5KeyID11794 = true
+	o.lenientOSPFMD5DuplicateKey15935 = true
+	o.lenientOSPFAuthKeyPresence14397 = true
+	o.lenientOSPFKeyLength16628 = true
+	o.lenientISISMetric11823 = true
+	o.lenientBGPPrefixLimit11793 = true
+	o.lenientBGPSAFI11815 = true
+	o.lenientBGPCrossFamily12185 = true
+	o.lenientRouteFilterMatchTypes = true
+	o.lenientApplicationSpecs = true
+	o.lenientApplicationNameCollisions = true
+	o.lenientReservedApplicationNames = true
+	o.lenientFirewallFilterFamilyCollisions = true
+	o.lenientRoutingInstanceChildTokens = true
+	o.lenientFirewallFilterFamilyAnyMatches = true
+	o.lenientFilterProtocols = true
+	o.lenientFilterNextHeaderExt = true
+	o.lenientFilterCrossField = true
+	o.lenientFilterActions = true
+	o.lenientFilterMatchValues = true
+	o.lenientFlexMatch = true
+	o.lenientFilterPortExcept = true
+	o.lenientFilterAddressExcept = true
+	o.lenientFilterFromMatch = true
+	o.lenientFilterAddressLiterals = true
+	o.lenientFilterRoutingInstanceConflict = true
+	o.lenientMemberFBFKernelBand = true
+	o.lenientFilterTerminalConflict = true
+	o.lenientPolicerThenConflict = true
+	o.lenientPolicerUnknownActions = true
+	o.lenientPolicerNameCollision = true
+	o.lenientPolicerMissingLimits = true
+	o.lenientPortMirroring15256 = true
+	o.lenientFilterDSCP = true
+	o.lenientNPTv6 = true
+	o.lenientVRFOverlapPBR = true
+	o.lenientNAT64Prefix = true
+	o.lenientNATPoolOverlap = true
+	o.lenientFirewallRefs = true
+	o.lenientFlowServerTemplateRef = true
+	o.lenientSamplingInstanceConflicts = true
+	o.lenientSamplingInputRate = true
+	o.lenientPortMirroringIngressAlias15651 = true
+	o.lenientSamplingSourceAddress = true
+	o.lenientFamilyMembers17196 = true
+	o.lenientSSHKnownHosts16770 = true
+	o.lenientFlowExportSeconds = true
+	o.lenientApplicationSetMembers = true
+	o.lenientPolicyMatchApplications = true
+	o.lenientNATMatchApplications = true
+	o.lenientPolicyExpandedRuleCount = true
+	o.lenientPolicyMatchAddressSetMembers = true
+	o.lenientAddressSetMembersDefined = true
+	o.lenientRibGroupRefs = true
+	o.lenientRibGroupImportPolicy = true
+	o.lenientGlobalInterfaceRoutesRibGroup = true
+	o.lenientInstanceRibGroupRefs = true
+	o.lenientNextTableRefs = true
+	o.lenientForwardingInstanceProtocols = true
+	o.lenientForwardingInstanceMembers = true
+	o.lenientProtocolInterfaceMembership11310 = true
+	o.lenientOSPFAreaInterface11400 = true
+	o.lenientDHCPRelayDHCPv6 = true
+	o.lenientWireguardRoutingInstance = true
+	o.lenientTunnelRITarget12520 = true
+	o.lenientDHCPRelayChildTokens = true
+	o.lenientApplicationsLevelChildren16459 = true
+	o.lenientIPMonThenChildren16712 = true
+	o.lenientDHCPRelayV4Config = true
+	o.lenientRoutingRuleWindows = true
+	o.lenientPolicyRouteMapSeq = true
+	o.lenientPolicyNextAction11780 = true
+	o.lenientPolicyDefaultConflict14433 = true
+	o.lenientRoutingTermTerminalConflict = true
+	o.lenientPolicyFromUnknown11779 = true
+	o.lenientRoutingPolicyProtocols16577 = true
+	o.lenientRouteDispositionConflict = true
+	o.lenientStaticNextHopFamily = true
+	o.lenientStaticRouteCIDRMaskSpelling = true
+	o.lenientGenerateRoutePolicy = true
+	o.lenientGenerateRoutePrefix = true
+	o.lenientStaticRoutePrefix = true
+	o.lenientDHCPStaticBindings = true
+	o.lenientDHCPPoolSubnets = true
+	o.lenientDHCPPoolValues = true
+	o.lenientDHCPGroupInterfaces = true
+	o.lenientDHCPServerIfaceRef = true
+	o.lenientDHCPServerRelayOverlap = true
+	o.lenientWireguardPeers = true
+	o.lenientTunnelOuterFamily = true
+	o.lenientGreDuplicateOuter = true
+	o.lenientWireguardListenPortCollision = true
+	o.lenientIpipTunnelMode = true
+	o.lenientPolicyZoneRefs = true
+	o.lenientZoneCount = true
+	o.lenientWebManagementAuth = true
+	o.lenientZoneIDCollision = true
+	o.lenientRoutingInstanceTableIDCollision = true
+	o.lenientReservedRoutingInstanceName = true
+	o.lenientRoutingInstanceKernelName = true
+	o.lenientBridgeDomainKernelName = true
+	o.lenientAddressBookNames = true
+	o.lenientReservedZoneLocalRefs = true
+	o.lenientReservedAddressNames = true
+	o.lenientHelperStateFile = true
+	o.lenientAddressBookNameCollision = true
+	o.lenientAddressBookDuplicatePrefix = true
+	o.lenientNamedAddressBookAttach15672 = true
+	o.lenientScopedGlobalZoneLocal16596 = true
+	o.lenientRIDualClaim11060 = true
+	o.lenientRIMgmtMember11392 = true
+	o.lenientZoneInterfaceMembership = true
+	o.lenientFabricZoneRoutingInstance = true
+	o.lenientZoneInterfaceDefined = true
+	o.lenientZoneInterfacesNonEmpty = true
+	o.lenientNestedZonePair = true
+	o.lenientZoneInterfacePackedTail = true
+	o.lenientHostInboundTokens = true
+	o.lenientHostInboundFullAdmitExcept = true
+	o.lenientHostInboundManagedMulticast = true
+	o.lenientDuplicateHostLocalAddress = true
+	o.lenientClusterAuthKey = true
+	o.lenientDestNATAddresses = true
+	o.lenientNATUndefinedZone = true
+	o.lenientNATUndefinedScope = true
+	o.lenientLoginUserClassRef = true
+	o.lenientNATMatchAddressLiterals = true
+	o.lenientRPMSourceAddress = true
+	o.lenientRPMLinkLocalZone = true
+	o.lenientRPMHTTPGetScheme = true
+	o.lenientRPMRoutingInstance = true
+	o.lenientBGPNeighborPeerAS = true
+	o.lenientBGPAllowASIn11795 = true
+	o.lenientBGPCrossField14585 = true
+	o.lenientBGPRouterAS = true
+	o.lenientBGPGroupType16567 = true
+	o.lenientBGPDuplicateNeighbor = true
+	o.lenientBGPNeighborAddress = true
+	o.lenientRouterID = true
+	o.lenientClusterIGPIdentity16810 = true
+	o.lenientISISNETPresence16865 = true
+	o.lenientSNMPTrapGroup = true
+	o.lenientBridgeDomainVlanID = true
+	o.lenientDDNSDuration = true
+	o.lenientPolicyTerminalAction = true
+	o.lenientPolicyLogAction = true
+	o.lenientDuplicatePolicyNames = true
+	o.lenientStablePolicyRuleIdentity = true
+	o.lenientDuplicatePolicySchedulerName14449 = true
+	o.lenientScreenProfileRefs = true
+	o.lenientScreenNumeric = true
+	o.lenientScreenUnknown = true
+	o.lenientScreenMissingValue = true
+	o.lenientUnknownSecurityZoneChild11575 = true
+	o.lenientUnknownPoliciesChild12217 = true
+	o.lenientTrailingTokens = true
+	o.lenientAddressUnimplementedForms = true
+	o.lenientAddressBookMappedPrefixes = true
+	o.lenientAddressBookCIDRMaskSpelling = true
+	o.lenientFlowAging = true
+	o.lenientStrictSynCheck16479 = true
+	o.lenientTimeWaitStateAgeout16485 = true
+	o.lenientChassisRG = true
+	o.lenientVRRPGroupID = true
+	o.lenientVRRPGroupPriority = true
+	o.lenientVRRPGroupTimers = true
+	o.lenientRethVRRPGroupID = true
+	o.lenientIfNameCollision = true
+	o.lenientRIMemberCollision = true
+	o.lenientRoutingInstanceType9814 = true
+	o.lenientRethMember = true
+	o.lenientRethRGOwnership = true
+	o.lenientRethMultiChild = true
+	o.lenientReservedZoneNames = true
+	o.lenientBackupRouterDst = true
+	o.lenientDDNSRequireTSIG = true
+	o.lenientDDNSUpdateServerUserinfo = true
+	o.lenientSecureTunnelBindIface = true
+	o.lenientPolicyMatchLeaves = true
+	o.lenientPolicyThenPermit = true
+	o.lenientPolicyThenReject = true
+	o.lenientPolicyThenDeny = true
+	o.lenientPolicyThenCountAlarm = true
+	o.lenientDefaultPolicyBlock11367 = true
+	o.lenientDefaultPolicyConflict11821 = true
+	o.lenientPolicyStatsSystemWide12825 = true
+	o.lenientPolicyThenSiblings = true
+	o.lenientPolicyEnforcementSubtrees = true
+	o.lenientPolicyMissingMatch = true
+	o.lenientPolicyValuelessMatch = true
+	o.lenientFirewallValuelessFrom = true
+	o.lenientFirewallFusedThen12528 = true
+	o.lenientEmptySecurityIdentity = true
+	o.lenientZoneStatementTail9656 = true
+	o.lenientRAInterfacePackedHeader15257 = true
+	o.lenientPolicyCommunityRef = true
+	o.lenientSNMPv3KeyMaterial = true
+	o.lenientSNMPv3SecurityKeyword = true
+	o.lenientSNMPv3BarePassword = true
+	o.lenientPolicyASPathRef = true
+	o.lenientPolicyASPathRegex = true
+	o.lenientPolicyCommunityRegex = true
+	o.lenientBGPNeighborDescriptionPipe16776 = true
+	o.lenientPolicyThenOperands = true
+	o.lenientPolicyNamelessTerm12521 = true
+	o.lenientPolicyReservedRedistName = true
+	o.lenientPolicyReservedChainName = true
+	o.lenientPrefixListReservedRIPGate16866 = true
+	o.lenientPolicyReservedOrName16868 = true
+	o.lenientFRRNameAliasCollision16867 = true
+	o.lenientVRRPVirtualAddress = true
+	o.lenientVRRPVIPCount = true
+	o.lenientVRRPVIPEmpty = true
+	o.lenientVRRPVIPCrossGroup = true
+	o.lenientVRRPVIPOwner = true
+	o.lenientVRRPInstanceIdentity = true
+	o.lenientVRRPTrackRef = true
+	o.lenientVRRPVIPPrefix = true
+	o.lenientDNATToScope = true
+	o.lenientNATMixedScope = true
+	o.lenientNATEmptyScope = true
+	o.lenientNATTerminalAction = true
+	o.lenientInterfaceUnitAliasCollisions = true
+	o.lenientEventWithinTrigger = true
+	o.lenientEventInert14660 = true
+	o.lenientFirewallTCPFlags = true
+	o.lenientCoSNumericCodePoint = true
+	o.lenientNonNumericUnit = true
+	o.lenientInterfaceUnitRef = true
+	o.lenientInterfaceRangeBudget = true
+	o.lenientFabricMemberDefined = true
+	o.lenientInterfaceAddressList = true
+	o.lenientVlanUnitMTU = true
+	o.lenientIPv6UnitMTU13936 = true
+	o.lenientUserspaceRxMTU16244 = true
+	o.lenientInterfaceBandwidth = true
+	o.lenientInterfaceDuplex = true
+	o.lenientInterfaceSpeed = true
+	o.lenientInterfaceNumericBounds = true
+	o.lenientBareLeafInstance9838 = true
+	o.lenientLLDPInterfaceTokens14616 = true
+	o.lenientSystemHostname = true
+	o.lenientSystemLoginUID11826 = true
+	o.lenientSystemAAA10831 = true
+	return o
 }

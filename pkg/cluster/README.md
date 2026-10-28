@@ -203,8 +203,11 @@ running heartbeat onto the defaults just as a changed value does.
   `SetLocalTransferCommitReadyHook`,
   `SetPeerFailoverFunc`, `SetPeerFailoverCommitFunc`,
   `SetPeerFailoverBatchFunc`,
-  `SetPeerFailoverCommitBatchFunc`, `SetPeerFenceFunc`,
-  `SetPeerTimeoutGuard`) — `hooks.go`.
+  `SetPeerFailoverCommitBatchFunc`, `SetPeerFenceFunc`) — `hooks.go`.
+- Peer sync source (`SetPeerSyncSource`, `SyncSourceInstalled`) —
+  `heartbeat_suppress.go`. The daemon publishes one SessionSync reference;
+  the suppression policy, 5s cap stamp and heartbeat-admission reset live
+  there under `Manager.mu` (#17056).
 - Event-history methods (`RecordEvent`, `EventHistoryFor`) —
   `events_log.go`. Underlying types and `EventHistory` ring
   buffer — `events.go`.
@@ -532,7 +535,7 @@ starts (`armRestart`):
 After that, the ordinary `threshold*interval` staleness applies. A live peer
 whose heartbeats are briefly lost past the restart grace is still covered by the
 sync-recency guard that `handlePeerTimeout` consults
-(`shouldSuppressPeerHeartbeatTimeout`, #1792).
+(`syncSuppressesPeerTimeoutLocked`, #1792/#17056).
 
 Two receivers are never armed and keep the cold-boot floor on both arms:
 - a replacement for a receiver that had NEVER seen the peer;
@@ -997,7 +1000,7 @@ it too.
 
 **This is a FLAG DAY.** A pre-#7163 peer sends the old HELLO, which is not a
 valid Noise message, so the handshake fails and the connection drops.
-`SessionSyncWireVersion` is bumped 1 → 2 so `GateMixedBaseSwap` refuses a
+`SessionSyncWireVersion` is bumped 1 → 2 so the mixed-base gate (`GateProtocolCompat`, via `_gate_mixed_base`) refuses a
 mixed-base swap up front instead of letting an operator discover it as a fabric
 that will not come up. `CurrentHAProtocolVersion` is deliberately NOT bumped:
 that would additionally refuse the peer over heartbeat/failover semantics this
@@ -3548,7 +3551,7 @@ takeover gate, and the marker clears when a peer heartbeat returns.
   No `SessionSyncWireVersion` / `CurrentHAProtocolVersion` bump, for the same
   reason as #2239 and #6650 below: `MinCompatHAProtocolVersion ==
   CurrentHAProtocolVersion`, so the accepted window is a single point and a
-  bump would make `GateMixedBaseSwap` refuse the rolling upgrade.
+  bump would make `GateProtocolCompat` refuse the rolling upgrade.
 - **The ack means peer-CONFIRMED, not received.** It is written only after the
   receiver's `fenceAllRedundancyGroups` returns, and reports what that
   achieved. The decoder REFUSES a short frame rather than zero-filling it:
@@ -3581,7 +3584,12 @@ takeover gate, and the marker clears when a peer heartbeat returns.
   operator's transfer-out must survive. A takeover that proceeds
   (confirmed, or fail-open with no heartbeat) keeps the clears.
   `TestFenceAbortRestoresOperatorIntent15211` (both preempt values) pins
-  the restore; the confirmed/fail-open controls pin the clears.
+  the restore; the confirmed/fail-open controls pin the clears. The
+  snapshot/restore is the shared `operatorHoldSnapshot` pair in
+  `failover.go` (#17117): an operator `ResetFailover` landing in the
+  unlocked fence wait bumps `failoverGen` and the restore abandons, so
+  the reset is honoured instead of silently undone.
+  `TestFenceAbortResetDuringFenceWaitIsHonoured17117` pins that cell.
 - **A never-seen takeover is marked DEGRADED (#15211 A22-02).**
   `handlePeerNeverSeen` cannot fence a peer that was never seen under any
   policy, so it marks the single-node takeover
@@ -3811,10 +3819,9 @@ administrative `IFF_UP` flag. xpfd admin-ups every managed interface, so
 suppress failover (#2070). The rule is: `OperUp` → up; `OperUnknown` →
 fall back to the admin flag (virtual devices and 802.1Q VLAN
 sub-interfaces that report no independent carrier state); `OperDown` /
-`OperLowerLayerDown` / anything else → down. This mirrors
-`pkg/vrrp.linkAttrsUp`, the canonical link-state read used by VRRP
-track-interface detection. `pkg/routing/monitor.go` (the display-side
-`InterfaceMonitorStatus` path) carries its own identical copy.
+`OperLowerLayerDown` / anything else → down. The single definition now lives in `pkg/linkstate.Up` (#17132);
+`LinkAttrsUp` here, `pkg/routing`'s and `pkg/vrrp`'s helpers are aliases
+of it. `pkg/routing/monitor.go` is display-only since #17132.
 
 **Missing local link = down (#5080).** A `LinkByName` failure for a
 monitor on the LOCAL FPC slot means the configured member link is absent
@@ -3961,7 +3968,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
 - Heartbeat staleness is interval × threshold: runtime defaults are 100ms × 5
   = 500ms, and the deployed lab config is 200ms × 5 = 1s. Those raw thresholds
   do not describe silent-node-death detection while session sync stays
-  connected: `shouldSuppressPeerHeartbeatTimeout` suppresses a timeout when
+  connected: `syncSuppressesPeerTimeoutLocked` suppresses a timeout when
   last peer sync traffic is ≤2s old, capped at 5s continuous suppression.
   Silent death with an established sync connection is approximately
   max(threshold, remaining sync-recency window) plus up to one heartbeat tick:
@@ -3971,7 +3978,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   defer handling. These are detection times, not end-to-end restoration SLAs
   (`pkg/cluster/heartbeat.go:61-65,1916-1960`;
   `pkg/cluster/heartbeat_manager.go:790-832`;
-  `pkg/daemon/daemon_ha_sync.go:170-206`;
+  `pkg/cluster/heartbeat_suppress.go`;
   `docs/ha-cluster-userspace.conf:71-72`).
 - Interface/IP monitoring is separate: a 1s poll requires 3 consecutive
   failed checks to mark down, with a default 5s hold-down after a state
@@ -4056,7 +4063,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   and a new explicit transfer retain their normal precedence.
 - **`ResetFailover` ends ALL of the RG's transfer-commit state (#14979,
   D34-04).** The reset cleared only `ManualFailover` / the role pin / the
-  remote lease, leaving `peerTransferOutOverride` (+ snapshot),
+  remote lease, leaving `transferOverrides`,
   `peerTransferCommitGraceUntil`, and `localTransferOutHoldUntil` armed.
   The override has no expiry and re-forces the peer to `SecondaryHold` on
   every heartbeat, so a peer that reclaimed primary after the reset was
@@ -4251,7 +4258,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   `runElection`, then return an error if the local RG did not reach primary.
   The batch caller already aborted on that error; the single-RG caller
   returned it bare and leaked the override. There is no expiry for
-  `peerTransferOutOverride` — `applyTransferCommitOverridesOnPeerStateLocked`
+  `transferOverrides` — `applyTransferCommitOverridesOnPeerStateLocked`
   re-forces the peer to `SecondaryHold` on EVERY subsequent heartbeat with no
   time bound (unlike `peerTransferCommitGraceUntil`, which does expire) — so a
   leaked entry makes `electRG` take its "Peer transfer out" arm forever and
@@ -4276,7 +4283,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   `peerMonitors` and both peer version fields — left this one armed.
 
   That is the other half of the same transfer: `ManualFailover` parks the LOCAL
-  node, `peerTransferOutOverride` forces our view of the PEER. Because it has no
+  node, `transferOverrides` forces our view of the PEER. Because it has no
   expiry and is re-applied to the rebuilt peer-group map on every heartbeat, an
   override that survives peer loss means the peer reconnects — a reboot, a
   rolling deploy, or simply a new process — and from its FIRST heartbeat this
@@ -4300,9 +4307,10 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   routine rather than exceptional. And `RequestPeerFailover` early-returns
   "node is already primary" without touching the peer, which is why re-issuing
   the same failover to diagnose the state changes nothing.
-- HA delete-sync callbacks fire from the GC loop. They must not block, and
-  must log at `slog.Debug` — earlier `slog.Info` flooded at 15 req/s and
-  drowned out real diagnostics (per CLAUDE.md logging rules).
+- HA delete-sync queueing (helper session-delta closes in
+  `daemon_ha_userspace_stream.go`, and commit-time policy invalidation) must
+  not block, and must log at `slog.Debug` — earlier `slog.Info` flooded at
+  15 req/s and drowned out real diagnostics (per CLAUDE.md logging rules).
 - **`Manager.Start` must NOT hold `m.mu` across the monitor's `Stop()` (#4828).**
   The `Monitor` poll goroutine calls back into `SetMonitorWeight`, which takes
   `m.mu`; `Stop()` joins that goroutine via `wg.Wait()`. Holding `m.mu` while
@@ -4373,7 +4381,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   later sweep) carries a higher generation and still installs (last-writer-wins).
   A `gen == 0` (legacy) delete still evicts. The generation maps start bounded by
   `genGuardMapDefaultCap` (200000) and grow on full-of-live demand toward the
-  `genGuardMapCap` ceiling (half of conntrack.MaxSessions; #9915 F-044). On overflow the map is NEVER cleared (#2198 F1): an
+  `genGuardMapCap` ceiling (half of `dataplane.MaxSessions`, moved from the deleted `pkg/conntrack` in #17155; #9915 F-044). On overflow the map is NEVER cleared (#2198 F1): an
   existing key updates in place, and a live entry is never dropped.
   **Tombstones age out oldest-first (#9719).**
   - A tombstone never frees its entry. So a long-lived connection used to fill the
@@ -4602,19 +4610,22 @@ it.
 - Dual-active overlap is intentional: primary sets `rg_active=true`
   immediately on becoming master; secondary defers `rg_active=false` until
   it sees the VRRP BACKUP event. Brief overlap, never both inactive.
-- `handlePeerTimeout` runs its peer-timeout guard (`peerTimeoutGuardFn`) with
-  `m.mu` released, so the receiver read path can run `handlePeerHeartbeat`
-  during the call for ANY guard duration (a configured slow guard only widens
-  the window). After the guard it re-checks heartbeat STALENESS via
-  `peerHeartbeatFreshLocked`, not just `peerAlive` (#2080): a heartbeat that
-  lands during the guard window keeps `peerAlive` true but is a fresh
-  heartbeat, so the only correct post-guard question is "is the heartbeat
-  fresh again?". `peerHeartbeatFreshLocked`
-  re-reads the receiver's `lastSeen` against the live monotonic clock (test
-  seam: `peerHeartbeatFreshFn`); a fresh heartbeat aborts the peer-lost
-  transition and prevents spurious failover churn. A nil receiver / unset seam
-  reports not-fresh, so the no-receiver call paths behave exactly as before the
-  re-check existed.
+- `handlePeerTimeout` decides sync-recency suppression under `m.mu` from
+  the published sync source (`syncSuppressesPeerTimeoutLocked`, #17056);
+  there is no guard callback and no unlock/relock around the decision.
+  Heartbeat admission clears the cap stamp in the same critical section,
+  and every per-connection reconnect dispatch on the published source
+  (`OnPeerReconnected`, bound by `SetPeerSyncSource`) clears it too, so a
+  reconnect on the same `SessionSync` object starts a fresh 5s window.
+  Before the suppression decision it re-checks heartbeat STALENESS via
+  `peerHeartbeatFreshLocked`, not just `peerAlive` (#2080): a heartbeat
+  admitted before the timeout runs keeps `peerAlive` true and is fresh,
+  so the only correct question at that point is "is the heartbeat fresh
+  again?". `peerHeartbeatFreshLocked` re-reads the receiver's `lastSeen`
+  against the live monotonic clock (test seam: `peerHeartbeatFreshFn`);
+  a fresh heartbeat aborts the peer-lost transition and prevents spurious
+  failover churn. A nil receiver / unset seam reports not-fresh, so the
+  no-receiver call paths behave exactly as before the re-check existed.
 
   **#6198/#6666 correction:** the BPF-ABI `SessionID` was described here as
   `now<<16|slot` — a composition #6198 removed (it collapsed every session
@@ -5007,7 +5018,7 @@ it.
     is what bounds that pre-verdict growth: the combined live keys in
     one window may not exceed `bulkRecvCap()` — the forward-session
     table capacity (`maxCap()`: the wired helper capacity, else the
-    200k default, ceiling `conntrack.MaxSessions/2`). The cap is on
+    200k default, ceiling `dataplane.MaxSessions/2`). The cap is on
     live occupancy, not cumulative distinct keys: a successful delete
     during the window frees its key's slot
     (`removeBulkRecvV4/V6` from the delete paths), so delete+reinstall

@@ -1011,6 +1011,44 @@ regressed.
   republished spuriously) — storing a raw 0 for a scope published with the
   leaf unset would be indistinguishable from "never published" and would
   disable the comparison for that scope permanently.
+- **One settled predicate for both surfaces (#17233)** — "is this record
+  settled?" is `needsRepublish(owned, contentEqual, storedFP, currentFP)`
+  (manager.go), called from Surface B's `reconcileOnceLocked` and Surface
+  A's `reconcileScopeLocked`. Before #17233 the two engines each had their
+  own copy: #5814 added the endpoint-fingerprint term to Surface B's copy
+  only, so an in-place Surface A `update-server` edit with an unchanged
+  address published nothing to the new server and raised no #3735 alarm
+  until the 24h forced-refresh floor. Now an endpoint drift (both
+  fingerprints non-empty and different) unsettles the Surface A scope on
+  the first pass: `publishLocked` publishes to the new endpoint and raises
+  the existing in-place orphan alarm; the old endpoint is still never
+  auto-withdrawn (#3735 deferred-withdrawal rule preserved). A fixed test
+  backend (`m.backend != nil`) is a single endpoint and never counts as
+  endpoint-changed, mirroring `classifyOwnedBackend`. Fail-on-revert:
+  `TestSurfaceAProviderInPlaceMutationOrphansOldEndpoint` (H02, no longer
+  needs `ForceRefresh()`) and
+  `TestSurfaceAInPlaceEndpointEditSettlesAfterRepublish17233` /
+  `TestNeedsRepublishTruthTable17233`.
+- **Endpoint identity deliberately differs per surface in its fingerprint
+  NAMESPACE, not in the settled predicate (#17233 decision)** — Surface A
+  feeds `needsRepublish` `backendFingerprint` (fp1: backend type + server /
+  zone / hosted-zone / region / generic URL template via the shared
+  `authorityFingerprint`, #6755), which deliberately excludes TSIG key
+  name/algorithm and the transport bind: TSIG material is credential-
+  adjacent identity and two policies differing only in key are the same
+  AUTHORITY for cross-surface co-ownership. Surface B feeds
+  `dhcpBackendFingerprint` (fpb1), which INCLUDES TSIG key name/algorithm
+  and the source-address / destination-interface / routing-instance bind,
+  because on the lease surface those change which server/credential pair
+  actually receives the UPDATE and the transition must withdraw through
+  the retained previous endpoint. Unifying the two fingerprint DEFINITIONS
+  would either strip Surface B's withdraw-routing signal or poison
+  Surface A's cross-surface authority comparison, so the namespaces stay
+  distinct; what is unified is the both-non-empty mismatch RULE. A TSIG-
+  only or transport-bind-only in-place edit on Surface A therefore still
+  settles until the forced-refresh floor — accepted: the record is already
+  live at the same authority, and the floor (or the operator force verb)
+  re-asserts it under the new key/bind.
 
 - **Route 53 already-gone DELETE is idempotent (#2771)** — `backend_route53.go`
   `DeleteLease` treats a Route 53 DELETE of an already-absent record as success

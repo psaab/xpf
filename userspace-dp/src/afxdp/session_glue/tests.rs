@@ -381,10 +381,7 @@ fn purge_sessions_for_changed_filter_falls_back_for_unknown_ingress_16889() {
                     v4: -1,
                     v6: -1,
                 },
-                tick: Tick {
-                    ns: 2,
-                    secs: 0,
-                },
+                tick: Tick::from_ns(2),
             },
             &forwarding,
             &forwarding,
@@ -522,10 +519,7 @@ fn purge_sessions_for_input_filter_rotation_keeps_unchanged_ingress_16889() {
                     v4: -1,
                     v6: -1,
                 },
-                tick: Tick {
-                    ns: 2,
-                    secs: 0,
-                },
+                tick: Tick::from_ns(2),
             },
             &forwarding,
             &forwarding,
@@ -600,7 +594,7 @@ fn purge_sessions_for_changed_input_filter_resolves_vlan_unit_16889() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
-                tick: Tick { ns: 2, secs: 0 },
+                tick: Tick::from_ns(2),
             },
             &old_forwarding,
             &forwarding,
@@ -668,7 +662,7 @@ fn purge_sessions_for_changed_input_filter_keeps_configured_vlan_child_16889() {
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick { ns: 2, secs: 0 },
+        tick: Tick::from_ns(2),
     };
 
     let unrelated_v4 = [24].into_iter().collect();
@@ -809,7 +803,7 @@ fn maybe_promote_synced_session_sets_fabric_ingress_on_fabric_hit() {
             peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick { ns: 2000000, secs: 0 },
+        tick: Tick::from_ns(2000000),
 };
 
     let promoted = maybe_promote_synced_session(
@@ -889,7 +883,7 @@ fn promote_republishes_the_live_close_class_9412() {
                     peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2000000, secs: 0 },
+            tick: Tick::from_ns(2000000),
 };
         let _ = maybe_promote_synced_session(
             &mut sessions,
@@ -978,7 +972,7 @@ fn promote_republishes_the_session_id_for_replicas_to_adopt_9582() {
             peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick { ns: 2000000, secs: 0 },
+        tick: Tick::from_ns(2000000),
 };
     let _ = maybe_promote_synced_session(
         &mut sessions,
@@ -1064,7 +1058,7 @@ fn maybe_promote_synced_session_skips_worker_local_import() {
             peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick { ns: 2000000, secs: 0 },
+        tick: Tick::from_ns(2000000),
 };
 
     let promoted = maybe_promote_synced_session(
@@ -1169,7 +1163,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -1200,7 +1194,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
     maybe_promote_synced_session_with_conntrack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
-        SharedSessionRefs::detached(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &peer_worker_commands, empty_worker_commands_by_id()).with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, Tick { ns: 1_000_000, secs: 0 }),
+        SharedSessionRefs::detached(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &peer_worker_commands, empty_worker_commands_by_id()).with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, Tick::from_ns(1_000_000)),
         &forwarding,
         0x18,
         0,
@@ -1231,7 +1225,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
     maybe_promote_synced_session_with_conntrack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
-        SharedSessionRefs::detached(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &peer_worker_commands, empty_worker_commands_by_id()).with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, Tick { ns: 1_000_000, secs: 0 }),
+        SharedSessionRefs::detached(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &peer_worker_commands, empty_worker_commands_by_id()).with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, Tick::from_ns(1_000_000)),
         &forwarding,
         0x18,
         0,
@@ -1349,7 +1343,7 @@ fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: empty_worker_commands_by_id(),
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
-                tick: Tick { ns: 1_000_000, secs: 1 },
+                tick: Tick::from_parts(1_000_000, 1),
             },
             &forwarding,
             &ha_state,
@@ -1497,7 +1491,7 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: now_ns, secs: now_secs },
+            tick: Tick::from_ns(now_ns),
         },
         &forwarding,
         &ha_state,
@@ -1798,7 +1792,7 @@ fn resolve_flow_syn_on_closing_tuple_preserves_pair_before_authority_10886() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: now_ns, secs: 0 },
+            tick: Tick::from_parts(now_ns, 0),
         },
         &forwarding,
         &ha_state,
@@ -4343,7 +4337,7 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &BTreeMap::new(),
@@ -4447,7 +4441,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -4637,7 +4631,7 @@ fn fabric_ingress_adopts_established_synced_wire_session_16217() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -5006,7 +5000,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: empty_worker_commands_by_id(),
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
-                tick: Tick { ns: 1_000_000, secs: 1 },
+                tick: Tick::from_parts(1_000_000, 1),
             },
             &forwarding,
             &ha_state,
@@ -5273,7 +5267,7 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: empty_worker_commands_by_id(),
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
-                tick: Tick { ns: 1_000_000, secs: 1 },
+                tick: Tick::from_parts(1_000_000, 1),
             },
             &forwarding,
             &ha_state,
@@ -5524,7 +5518,7 @@ fn adopted_cluster_terminal_recomputes_from_fib_16217() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: empty_worker_commands_by_id(),
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
-                tick: Tick { ns: 1_000_000, secs: 1 },
+                tick: Tick::from_parts(1_000_000, 1),
             },
             &forwarding,
             &ha_state,
@@ -5898,7 +5892,7 @@ fn adopted_cluster_terminal_live_fib_shape_16217() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: empty_worker_commands_by_id(),
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
-                tick: Tick { ns: 1_000_000, secs: 1 },
+                tick: Tick::from_parts(1_000_000, 1),
             },
             &forwarding,
             &ha_state,
@@ -6524,7 +6518,7 @@ fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -6632,7 +6626,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -6752,7 +6746,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -6885,7 +6879,7 @@ fn resolve_flow_session_decision_keeps_local_synced_translated_hit_transient_on_
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -7448,7 +7442,7 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_000, secs: 2 },
+            tick: Tick::from_parts(2_000_000, 2),
         },
         &forwarding,
         &active_state,
@@ -11121,7 +11115,7 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: monotonic_nanos() / 1_000_000_000 },
+            tick: Tick::from_parts(1_000_000, monotonic_nanos() / 1_000_000_000),
         },
         &forwarding,
         &ha_state,
@@ -11249,7 +11243,7 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: empty_worker_commands_by_id(),
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
-                tick: Tick { ns: 1_000_000, secs: now_secs },
+                tick: Tick::from_parts(1_000_000, now_secs),
             },
             &forwarding,
             &ha_state,
@@ -12155,7 +12149,7 @@ fn capped_shared_hit_fixture_10582(
             peer_worker_commands: &[],
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1_000 },
+            tick: Tick::from_parts(1_000_000, 1_000),
         },
         &forwarding,
         &BTreeMap::from([(1, active_ha_runtime(1_000))]),
@@ -12568,7 +12562,7 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
             peer_worker_commands: &[],
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_000, secs: 1_000 },
+            tick: Tick::from_parts(2_000_000, 1_000),
         },
         &forwarding,
         &BTreeMap::from([(1, active_ha_runtime(1_000))]),
@@ -12826,7 +12820,7 @@ fn resolve_shared_hit_no_incumbent_fixture_10613()
             peer_worker_commands: &[],
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_000, secs: 1_000 },
+            tick: Tick::from_parts(2_000_000, 1_000),
         },
         &forwarding,
         &BTreeMap::from([(1, active_ha_runtime(1_000))]),
@@ -12923,7 +12917,7 @@ fn sync_import_legitimate_promotion_remains_enabled_10613() {
                     peer_worker_commands: &[],
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_000, secs: 0 },
+            tick: Tick::from_ns(2_000_000),
 },
         &test_forwarding_state_with_fabric(),
         &key,
@@ -15400,7 +15394,7 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
-                tick: Tick { ns: 2, secs: 0 },
+                tick: Tick::from_ns(2),
             },
             &forwarding,
             &hit_key,
@@ -15547,13 +15541,13 @@ fn purge_translated_synced_hit_releases_source_nat_reservation_5295() {
             peer_worker_commands: &[],
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick::default(),
+        tick: Tick::from_ns(0),
 };
 
     purge_translated_synced_hit(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
-        shared.with_conntrack_tick(shared.conntrack, Tick { ns: 1_000_000, secs: shared.tick.secs }),
+        shared.with_conntrack_tick(shared.conntrack, Tick::from_parts(1_000_000, shared.tick.secs)),
         &wire_key,
         decision,
         &metadata,
@@ -15646,13 +15640,13 @@ fn purge_translated_synced_hit_releases_nat64_reservation_5295() {
             peer_worker_commands: &[],
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick::default(),
+        tick: Tick::from_ns(0),
 };
 
     purge_translated_synced_hit(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
-        shared.with_conntrack_tick(shared.conntrack, Tick { ns: 1_000_000, secs: shared.tick.secs }),
+        shared.with_conntrack_tick(shared.conntrack, Tick::from_parts(1_000_000, shared.tick.secs)),
         &wire_key,
         decision,
         &metadata,
@@ -15780,13 +15774,13 @@ fn purge_translated_synced_hit_reverse_entry_releases_nothing_5295() {
             peer_worker_commands: &[],
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick::default(),
+        tick: Tick::from_ns(0),
 };
 
     purge_translated_synced_hit(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
-        shared.with_conntrack_tick(shared.conntrack, Tick { ns: 1_000_000, secs: shared.tick.secs }),
+        shared.with_conntrack_tick(shared.conntrack, Tick::from_parts(1_000_000, shared.tick.secs)),
         &rev_key,
         rev_decision,
         &rev_metadata,
@@ -15904,7 +15898,7 @@ fn purge_translated_synced_hit_full_teardown_13674() {
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick::default(),
+        tick: Tick::from_ns(0),
     };
     let mut evicted_keys: Vec<SessionKey> = Vec::new();
     let mut resolved = ResolvedFlowSessionDecision {
@@ -15934,7 +15928,7 @@ fn purge_translated_synced_hit_full_teardown_13674() {
     maybe_promote_synced_session_with_conntrack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
-        shared.with_conntrack_tick(ConntrackFds { v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, v6: -1 }, Tick { ns: 1_000_000, secs: shared.tick.secs }),
+        shared.with_conntrack_tick(ConntrackFds { v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, v6: -1 }, Tick::from_parts(1_000_000, shared.tick.secs)),
         &forwarding,
         TCP_FLAG_ACK,
         0,
@@ -16054,7 +16048,7 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: by_id_ref,
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -16087,13 +16081,13 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
             peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: by_id_ref,
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick::default(),
+        tick: Tick::from_ns(0),
 };
     let mut evicted = Vec::new();
     maybe_promote_synced_session_with_conntrack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
-        shared.with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, Tick { ns: 1_000_000, secs: shared.tick.secs }),
+        shared.with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, Tick::from_parts(1_000_000, shared.tick.secs)),
         &forwarding,
         TCP_FLAG_ACK,
         0,
@@ -16190,7 +16184,7 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: &by_id,
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -16219,13 +16213,13 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
             peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: &by_id,
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick::default(),
+        tick: Tick::from_ns(0),
 };
     let mut evicted = Vec::new();
     maybe_promote_synced_session_with_conntrack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
-        shared.with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, Tick { ns: 1_000_000, secs: shared.tick.secs }),
+        shared.with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, Tick::from_parts(1_000_000, shared.tick.secs)),
         &forwarding,
         TCP_FLAG_ACK,
         0,
@@ -19967,15 +19961,11 @@ fn delete_drop_sweep_then_late_delete_preserves_replacement_nat64_port_14961() {
         .nat64
         .allocate_source_for_worker(
             0,
-            PROTO_TCP,
-            "2001:db8::2".parse().unwrap(),
+            &replacement_key,
             "8.8.8.8".parse().unwrap(),
-            5000,
-            443,
             2_500_000,
             WORKER,
             &[],
-            0,
             None,
         )
         .expect("the freed port must be allocatable to a fresh local flow");
@@ -20286,7 +20276,7 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 1_000_000, secs: 1 },
+            tick: Tick::from_parts(1_000_000, 1),
         },
         &forwarding,
         &ha_state,
@@ -21688,7 +21678,7 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
     );
 }
 
-/// Deferred-absent issues no BPF: with remove_mirror == false the
+/// Deferred-absent issues no BPF: with `DeleteOrigin::PolicyBatch` the
 /// already-gone branch must not touch the kernel map — phase 2 executes
 /// the covering forward intent instead ("NO BPF under this fence, ever").
 #[test]
@@ -21713,8 +21703,7 @@ fn deferred_absent_branch_issues_no_bpf_10512() {
         now_ns / 1_000_000_000,
         &mut deleted_keys,
         0,
-        false,
-        false,
+        super::commands::DeleteOrigin::PolicyBatch,
         &mut deferred,
         0,
         None,
@@ -22603,7 +22592,7 @@ fn promote_skips_republish_for_stale_zone_rows_10612() {
             peer_worker_commands: &[],
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick { ns: 1_000_000, secs: 0 },
+        tick: Tick::from_ns(1_000_000),
 };
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let drops_before = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
@@ -23128,7 +23117,7 @@ fn session_hit_reresolves_after_manager_replace_removes_snapshot_neighbor_12255(
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_000, secs: 1 },
+            tick: Tick::from_parts(2_000_000, 1),
         },
         &coordinator.forwarding,
         &ha_state,
@@ -23240,7 +23229,7 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_000, secs: 2 },
+            tick: Tick::from_parts(2_000_000, 2),
         },
         &withdrawn_forwarding,
         &ha_state,
@@ -23293,7 +23282,7 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_001, secs: 2 },
+            tick: Tick::from_parts(2_000_001, 2),
         },
         &withdrawn_forwarding,
         &ha_state,
@@ -23389,7 +23378,7 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_000, secs: 2 },
+            tick: Tick::from_parts(2_000_000, 2),
         },
         &discard_forwarding,
         &ha_state,
@@ -23479,7 +23468,7 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick { ns: 2_000_000, secs: 2 },
+            tick: Tick::from_parts(2_000_000, 2),
         },
         &moved_forwarding,
         &ha_state,
@@ -24342,7 +24331,7 @@ fn worker_list_excludes_promoted_unbound_row_from_positional_matching_12072() {
             peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick { ns: monotonic_nanos(), secs: 0 },
+        tick: Tick::from_parts(monotonic_nanos(), 0),
 };
     let promoted_metadata = maybe_promote_synced_session(
         &mut sessions,
@@ -24553,7 +24542,7 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
 fn deferred_forwarding_revalidation_persist_is_single_sourced_17063() {
     let resolve_raw = include_str!("resolve.rs");
     let poll_raw = include_str!("../poll_descriptor/mod.rs");
-    let blank = crate::afxdp::worker_queue::tests::blank_comments_and_strings;
+    let blank = crate::test_support::source_scan::blank_comments_and_strings;
     let resolve_owned = blank(resolve_raw);
     let poll_owned = blank(poll_raw);
     let resolve = resolve_owned.as_str();
@@ -24867,10 +24856,7 @@ fn wrapper_drives_fabric_ingress_without_fabric_link_17063() {
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id: empty_worker_commands_by_id(),
                 conntrack: ConntrackFds { v4: -1, v6: -1 },
-                tick: Tick {
-                    ns: 1_000_000,
-                    secs: 1,
-                },
+                tick: Tick::from_parts(1_000_000, 1),
             },
             &forwarding2,
             &ha_state,
@@ -25022,8 +25008,7 @@ fn control_plane_delete_emits_harvested_close_13972() {
             now_ns / 1_000_000_000,
             &mut deleted_keys,
             0,
-            false,
-            true,
+            super::commands::DeleteOrigin::LocalClear,
             &mut deferred,
             0,
             None,
@@ -25101,8 +25086,7 @@ fn control_plane_delete_emits_harvested_close_13972() {
             now_ns / 1_000_000_000,
             &mut deleted_keys,
             0,
-            false,
-            false,
+            super::commands::DeleteOrigin::PolicyBatch,
             &mut deferred,
             0,
             None,
@@ -25128,8 +25112,7 @@ fn control_plane_delete_emits_harvested_close_13972() {
             now_ns / 1_000_000_000,
             &mut deleted_keys,
             0,
-            true,
-            true,
+            super::commands::DeleteOrigin::PeerSync,
             &mut deferred,
             0,
             None,
@@ -25139,6 +25122,109 @@ fn control_plane_delete_emits_harvested_close_13972() {
             "peer-originated delete must emit no Close"
         );
     }
+}
+
+/// #17073: the RT_FLOW close reason is a property of `DeleteOrigin`,
+/// never of mirror timing. Before the guard, the reason was selected by
+/// the mirror-timing bool, so `LocalClear` (immediate mirror, CLEAR)
+/// and `PolicyBatch` (deferred mirror, reason POLICY_DELETE) happened
+/// to pair reason with timing only because no caller combined them
+/// otherwise. This cell drives each origin against a live locally-owned
+/// entry and asserts reason AND mirror timing together: LocalClear
+/// removes mirror rows immediately and logs CLEAR (7); PolicyBatch
+/// queues exactly one deferred intent, issues no BPF, and logs
+/// POLICY_DELETE (8); PeerSync removes mirror rows immediately and
+/// logs nothing. The type makes the old cross-pairings (e.g. a
+/// non-deferred policy delete logging CLEAR) unrepresentable — there
+/// is no bool left to flip. Hermetic: recorder-only steering map, no
+/// kernel/BPF/netns access (class U).
+#[test]
+fn delete_origin_close_reason_independent_of_mirror_mode_17073() {
+    use super::commands::DeleteOrigin;
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+    };
+    let now_ns = 1_000_000_000u64;
+    let install = |sessions: &mut SessionTable| {
+        let key = test_key();
+        let mut metadata = test_metadata();
+        metadata.log_session_close = true;
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            metadata,
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        sessions.drain_deltas(16);
+        key
+    };
+    let run = |origin: DeleteOrigin| {
+        let mut sessions = SessionTable::new();
+        let key = install(&mut sessions);
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        clear_session_map_writes();
+        super::commands::handle_delete_synced_with_guard(
+            &mut sessions,
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            key.clone(),
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            0,
+            origin,
+            &mut deferred,
+            0,
+            None,
+        );
+        let deltas = sessions.drain_deltas(16);
+        let writes = session_map_writes();
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "{origin:?}: entry must be gone"
+        );
+        (deltas, writes, deferred)
+    };
+    // LocalClear: immediate mirror removal (BPF deletes recorded), CLEAR.
+    let (deltas, writes, deferred) = run(DeleteOrigin::LocalClear);
+    assert_eq!(deltas.len(), 1, "LocalClear must emit one Close: {deltas:?}");
+    assert_eq!(
+        deltas[0].tcp_close_class,
+        crate::event_stream::codec::RT_FLOW_CLOSE_REASON_CLEAR,
+        "LocalClear reason must be CLEAR"
+    );
+    assert!(
+        writes.iter().any(|w| w.value.is_none()),
+        "LocalClear must remove mirror rows immediately: {writes:?}"
+    );
+    assert!(deferred.is_empty(), "LocalClear must not defer: {deferred:?}");
+    // PolicyBatch: deferred mirror (no BPF, one intent), POLICY_DELETE.
+    let (deltas, writes, deferred) = run(DeleteOrigin::PolicyBatch);
+    assert_eq!(deltas.len(), 1, "PolicyBatch must emit one Close: {deltas:?}");
+    assert_eq!(
+        deltas[0].tcp_close_class,
+        crate::event_stream::codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE,
+        "PolicyBatch reason must be POLICY_DELETE regardless of deferred mirror"
+    );
+    assert!(
+        writes.is_empty(),
+        "PolicyBatch must issue no BPF under the fence: {writes:?}"
+    );
+    assert_eq!(deferred.len(), 1, "PolicyBatch must queue one intent: {deferred:?}");
+    // PeerSync: immediate mirror removal, silent.
+    let (deltas, writes, deferred) = run(DeleteOrigin::PeerSync);
+    assert!(deltas.is_empty(), "PeerSync must emit no Close: {deltas:?}");
+    assert!(
+        writes.iter().any(|w| w.value.is_none()),
+        "PeerSync must remove mirror rows immediately: {writes:?}"
+    );
+    assert!(deferred.is_empty(), "PeerSync must not defer: {deferred:?}");
 }
 
 /// #15126 (A93-01) FAIL-ON-REVERT: a LossResync owner-RG re-export and a

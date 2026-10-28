@@ -125,14 +125,14 @@ func TestDualFormatOpenConsumesOneSlotPerInstance16303(t *testing.T) {
 		}
 	}
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 12346, DstPort: 443, Protocol: 6}
-	if b := d.flowBundle.Load(); b == nil || !b.firstExp().Tracked(key) {
+	if b := d.v9Family().bundle.Load(); b == nil || !b.firstExp().Tracked(key) {
 		t.Fatal("selected v9 open (second flow) must be tracked")
 	}
-	if b := d.ipfixBundlePtr.Load(); b == nil || !b.firstExp().Tracked(key) {
+	if b := d.ipfixFamily().bundle.Load(); b == nil || !b.firstExp().Tracked(key) {
 		t.Fatal("selected ipfix open (second flow) must be tracked")
 	}
 	unsampled := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 12345, DstPort: 443, Protocol: 6}
-	if d.flowBundle.Load().firstExp().Tracked(unsampled) {
+	if d.v9Family().bundle.Load().firstExp().Tracked(unsampled) {
 		t.Fatal("first (sampled-out) open must not be tracked")
 	}
 
@@ -147,10 +147,10 @@ func TestDualFormatOpenConsumesOneSlotPerInstance16303(t *testing.T) {
 			t.Fatalf("close consumed another slot: %+v", s)
 		}
 	}
-	if got := waitFlows(t, d.flowBundle.Load().firstExp().Stats); got < 1 {
+	if got := waitFlows(t, d.v9Family().bundle.Load().firstExp().Stats); got < 1 {
 		t.Fatal("v9 close of sampled open must export")
 	}
-	if got := waitFlows(t, d.ipfixBundlePtr.Load().firstExp().Stats); got < 1 {
+	if got := waitFlows(t, d.ipfixFamily().bundle.Load().firstExp().Stats); got < 1 {
 		t.Fatal("ipfix close of sampled open must export")
 	}
 }
@@ -178,7 +178,7 @@ func TestOutputOnlySampledOpenIsTracked16303(t *testing.T) {
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 23456, DstPort: 443, Protocol: 6}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if d.flowBundle.Load().firstExp().Tracked(key) && d.ipfixBundlePtr.Load().firstExp().Tracked(key) {
+		if d.v9Family().bundle.Load().firstExp().Tracked(key) && d.ipfixFamily().bundle.Load().firstExp().Tracked(key) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

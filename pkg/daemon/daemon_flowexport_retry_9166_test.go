@@ -32,8 +32,8 @@ func TestBuildStatesDistinguishTheThreeCases9166(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			d := &Daemon{}
-			d.flowConfiguredGroups.Store(c.configured)
-			d.flowExportErr = c.err
+			d.v9Family().configured.Store(c.configured)
+			d.v9Family().err = c.err
 
 			var v9 *struct {
 				groups int
@@ -90,7 +90,7 @@ func TestAFailedReconcileArmsTheRetry9166(t *testing.T) {
 
 	d.reconcileFlowExporters(flowSamplingConfigSrc("127.0.0.1", "192.0.2.250", 100))
 
-	if !d.flowExportBuildFailed() {
+	if !d.v9Family().buildFailed() {
 		t.Fatal("fixture: the build did not fail, so this cell is not measuring " +
 			"what it claims")
 	}
@@ -115,7 +115,7 @@ func TestASuccessfulReconcileDoesNotArmTheRetry9166(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("fixture: the healthy reconcile reported no change")
 	}
-	if d.flowExportBuildFailed() {
+	if d.v9Family().buildFailed() {
 		t.Fatal("fixture: the healthy reconcile failed to build")
 	}
 	d.flowRetry.mu.Lock()
@@ -159,7 +159,7 @@ func TestABuildFailureRetriesWithoutACommit9166(t *testing.T) {
 	t.Cleanup(d.stopFlowExportRetryLoop)
 
 	d.reconcileFlowExporters(flowSamplingConfigSrc("127.0.0.1", "192.0.2.250", 100))
-	if !d.flowExportBuildFailed() {
+	if !d.v9Family().buildFailed() {
 		t.Fatal("fixture: the build did not fail")
 	}
 
@@ -177,7 +177,7 @@ func TestABuildFailureRetriesWithoutACommit9166(t *testing.T) {
 			"whose collector bind came back stays without flow export until the " +
 			"next commit (#9166)")
 	}
-	if d.flowExportBuildFailed() {
+	if d.v9Family().buildFailed() {
 		t.Error("converged while the build was still failing")
 	}
 }
@@ -218,10 +218,10 @@ func TestAnIPFIXOnlyFailureKeepsTheRetryArmed9166(t *testing.T) {
 	}
 	d.reconcileFlowExporters(cfg)
 
-	if d.flowExportBuildFailed() {
+	if d.v9Family().buildFailed() {
 		t.Fatal("fixture: NetFlow v9 also failed, so this cell cannot isolate IPFIX")
 	}
-	if !d.ipfixExportBuildFailed() {
+	if !d.ipfixFamily().buildFailed() {
 		t.Fatal("fixture: the IPFIX build did not fail")
 	}
 	d.flowRetry.mu.Lock()
@@ -253,7 +253,7 @@ func TestRepeatedFailingReconcilesStartOneLoop9166(t *testing.T) {
 	failing := flowSamplingConfigSrc("127.0.0.1", "192.0.2.250", 100)
 	for i := 0; i < 5; i++ {
 		d.reconcileFlowExporters(failing)
-		if !d.flowExportBuildFailed() {
+		if !d.v9Family().buildFailed() {
 			t.Fatalf("fixture: reconcile %d built cleanly", i)
 		}
 	}
@@ -269,7 +269,7 @@ func TestRepeatedFailingReconcilesStartOneLoop9166(t *testing.T) {
 func TestArmingIsSingleFlight9166(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &Daemon{daemonCtx: ctx}
-	d.flowExportErr = errors.New("failing")
+	d.v9Family().err = errors.New("failing")
 
 	for i := 0; i < 5; i++ {
 		d.armFlowExportRetry()
@@ -308,7 +308,7 @@ func TestStopIsNilSafeAndIdempotent9166(t *testing.T) {
 func TestArmAfterShutdownDoesNotStartALoop9166(t *testing.T) {
 	d := &Daemon{daemonCtx: context.Background()}
 	d.stopFlowExportRetryLoop()
-	d.flowExportErr = errors.New("late failure")
+	d.v9Family().err = errors.New("late failure")
 	d.armFlowExportRetry()
 
 	d.flowRetry.mu.Lock()

@@ -91,8 +91,8 @@ func httpsBoundAddr14582(m *managementReconciler) string {
 
 // bootWebMgmt14582 commits cfgText through a real store and boots a live
 // management reconciler over the fake listener registry, with the kernel
-// seam installed. The reconciler's TLS cert dir is redirected so generated
-// certs never touch /etc/xpf.
+// seam installed. The reconciler's TLS cert dir is pinned at construction
+// (#17213) so generated certs never touch /etc/xpf.
 func bootWebMgmt14582(t *testing.T, k *webMgmtKernelAddrs, cfgText string) (*Daemon, *managementReconciler, *configstore.Store, *fakeReg) {
 	t.Helper()
 	k.install(t)
@@ -100,7 +100,7 @@ func bootWebMgmt14582(t *testing.T, k *webMgmtKernelAddrs, cfgText string) (*Dae
 	mgmtAuthCommit(t, store, cfgText)
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: store}
 	reg := newFakeReg()
-	m := newManagementReconciler(d, api.Config{ListenFunc: reg.listen})
+	m := newManagementReconciler(d, api.Config{ListenFunc: reg.listen, TLSSelfSignedDir: t.TempDir()})
 	d.mgmt.Store(m)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -113,7 +113,6 @@ func bootWebMgmt14582(t *testing.T, k *webMgmtKernelAddrs, cfgText string) (*Dae
 	if srv == nil {
 		t.Fatal("management server was not constructed; every assertion would be vacuous")
 	}
-	srv.SetTLSCertDirForTest(t.TempDir())
 	return d, m, store, reg
 }
 
@@ -251,9 +250,14 @@ func TestWebMgmtDHCPLeaseChangeRebindsBoundInterface14582(t *testing.T) {
 			"re-driving it on every renew would churn the listener")
 	}
 
+	prevRoute := mgmtRouteRefreshFn
+	t.Cleanup(func() { mgmtRouteRefreshFn = prevRoute })
+	mgmtRouteRefreshFn = func(*Daemon) error { return nil }
+
 	k := newWebMgmtKernelAddrs()
 	k.set(ip4Addr("10.0.0.1"))
-	d, m, _, _ := bootWebMgmt14582(t, k, dhcpWebMgmtConfig14582())
+	d, m, store, _ := bootWebMgmt14582(t, k, dhcpWebMgmtConfig14582())
+	d.reconcileDNSFn = func(*config.Config, bool) error { return nil }
 	if err := d.reconcileWebManagement(d.store.ActiveConfig()); err != nil {
 		t.Fatalf("setup reconcile: %v", err)
 	}
@@ -269,9 +273,9 @@ func TestWebMgmtDHCPLeaseChangeRebindsBoundInterface14582(t *testing.T) {
 		return prevApply(dd, cfg)
 	}
 
-	// Lease renews to a new address; the fast path fires.
+	// Lease renews to a new address; the live management-only fast path fires.
 	k.set(ip4Addr("10.0.0.9"))
-	d.rebindWebMgmtForLeaseChange(d.store.ActiveConfig())
+	d.managementOnlyLeaseRefresh()
 
 	if calls.Load() != 1 {
 		t.Fatalf("lease-change rebind driven %d times, want 1 — the DHCP "+
@@ -281,9 +285,26 @@ func TestWebMgmtDHCPLeaseChangeRebindsBoundInterface14582(t *testing.T) {
 		t.Fatalf("after the lease change: %+v, want Listening at 10.0.0.9:443", got)
 	}
 
-	// Control: the static config is not re-driven.
+	// Control: with a static (non-DHCP) bound interface as the active
+	// config, the live path must not re-drive the bind. Recommit the
+	// store without the dhcp stanza so ActiveConfig is the static shape;
+	// the gate in rebindWebMgmtLocked — not a dead wrapper's pre-gate —
+	// decides.
 	calls.Store(0)
-	d.rebindWebMgmtForLeaseChange(staticCfg)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure(static): %v", err)
+	}
+	if _, err := store.LoadSet("delete interfaces fxp0 unit 0 family inet dhcp\n" +
+		"set interfaces fxp0 unit 0 family inet address 10.0.0.1/24\n"); err != nil {
+		t.Fatalf("LoadSet(static): %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit(static): %v", err)
+	}
+	if webMgmtBindsToDHCPInterface(store.ActiveConfig()) {
+		t.Fatal("gate precondition: recommitted static config must not be DHCP-bound")
+	}
+	d.managementOnlyLeaseRefresh()
 	if calls.Load() != 0 {
 		t.Fatal("a lease change re-drove a web-management bind that no DHCP interface feeds")
 	}

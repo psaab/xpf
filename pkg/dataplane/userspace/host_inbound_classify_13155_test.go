@@ -39,11 +39,11 @@ func Test13155_LifelineOnlyZoneNotDenied(t *testing.T) {
 		"set interfaces fxp0 unit 0 family inet address 10.0.0.1/24",
 		"set security zones security-zone mgmt interfaces fxp0.0",
 	}, false)
-	got := ClassifyHostInbound(cfg, "mgmt", config.HostInboundProtoTCP, true, 22, nil, "ip")
+	got := ClassifyHostInbound(cfg, "mgmt", config.HostInboundProtoTCP, true, 22, true, nil, "ip")
 	if got.Status != HostInboundNotComputed {
 		t.Fatalf("lifeline-only mgmt tcp/22 status = %v (%+v), want NotComputed", got.Status, got)
 	}
-	gotIface := ClassifyHostInboundForInterface(cfg, "mgmt", "fxp0.0", config.HostInboundProtoTCP, true, 22, nil, "ip")
+	gotIface := ClassifyHostInboundForInterface(cfg, "mgmt", "fxp0.0", config.HostInboundProtoTCP, true, 22, true, nil, "ip")
 	if gotIface.Status != HostInboundNotComputed {
 		t.Fatalf("lifeline interface status = %v (%+v), want NotComputed", gotIface.Status, gotIface)
 	}
@@ -62,7 +62,7 @@ func Test13155_QuarantinedConflictInterfaceDenied(t *testing.T) {
 	if _, ok := config.QuarantinedZoneInterfaceKeys(cfg)["ge-0/0/0.0"]; !ok {
 		t.Fatalf("positive control: ge-0/0/0.0 not quarantined")
 	}
-	got := ClassifyHostInboundForInterface(cfg, "a", "ge-0/0/0.0", config.HostInboundProtoTCP, true, 22, nil, "ip")
+	got := ClassifyHostInboundForInterface(cfg, "a", "ge-0/0/0.0", config.HostInboundProtoTCP, true, 22, true, nil, "ip")
 	if got.Status != HostInboundDenied {
 		t.Fatalf("quarantined conflict iface status = %v (%+v), want Denied", got.Status, got)
 	}
@@ -80,14 +80,14 @@ func Test13155_ShapeBBareSt0Rejected(t *testing.T) {
 		"set security zones security-zone vpn interfaces st0.0",
 		"set security zones security-zone vpn interfaces st0.0 host-inbound-traffic system-services ssh",
 	}, false)
-	got := ClassifyHostInboundForInterface(cfg, "vpn", "st0", config.HostInboundProtoTCP, true, 22, nil, "")
+	got := ClassifyHostInboundForInterface(cfg, "vpn", "st0", config.HostInboundProtoTCP, true, 22, true, nil, "")
 	if got.Status == HostInboundTokenAdmit {
 		t.Fatalf("bare st0 returned TokenAdmit %+v, want not admitted (unit override bypass)", got)
 	}
 	if err := ResolveHostInboundIngressInterface(cfg, "vpn", "st0"); err == nil {
 		t.Fatalf("Resolve bare st0 = nil, want bare-interface error")
 	}
-	gotU := ClassifyHostInboundForInterface(cfg, "vpn", "st0.0", config.HostInboundProtoTCP, true, 22, nil, "")
+	gotU := ClassifyHostInboundForInterface(cfg, "vpn", "st0.0", config.HostInboundProtoTCP, true, 22, true, nil, "")
 	if gotU.Status != HostInboundTokenAdmit {
 		t.Fatalf("st0.0 tcp/22 status = %v (%+v), want TokenAdmit", gotU.Status, gotU)
 	}

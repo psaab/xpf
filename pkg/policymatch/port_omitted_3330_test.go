@@ -68,7 +68,7 @@ func TestPortConstrainedAppOmittedQueryPortNoMatch(t *testing.T) {
 func TestPortConstrainedAppMatchingPortStillPermits(t *testing.T) {
 	cfg := portConstrainedAppCfg()
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("concrete in-range port no longer matches (#3330 over-narrowed); res = %+v", res)
 	}
@@ -79,7 +79,7 @@ func TestPortConstrainedAppMatchingPortStillPermits(t *testing.T) {
 func TestPortConstrainedAppWrongPortNoMatch(t *testing.T) {
 	cfg := portConstrainedAppCfg()
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 81})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(81)})
 	if res.Matched {
 		t.Fatalf("out-of-range port matched a port-constrained app; res = %+v", res)
 	}

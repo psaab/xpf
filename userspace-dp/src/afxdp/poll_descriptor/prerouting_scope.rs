@@ -1,10 +1,14 @@
-// #6386 leaf extraction: the #5802 pre-routing NAT ingress-scope
-// resolver (`PreroutingIngressScope` + `prerouting_ingress_scope`),
-// lifted verbatim out of poll_descriptor/mod.rs. Both items were
-// already `pub(super)`; the ONLY non-motion change is the added
-// `#[inline]` on `prerouting_ingress_scope` — it restores same-CGU
-// inlining eligibility across the new module boundary (#6386 hot-path
-// preservation contract). Bodies byte-identical to their prior location.
+// Provenance: extracted from poll_descriptor/mod.rs at
+// b70cdf8357 (2026-07-23, #6386): the #5802 pre-routing NAT
+// ingress-scope resolver (`PreroutingIngressScope` +
+// `prerouting_ingress_scope`). At that commit both items were
+// already `pub(super)`; the ONLY non-motion change was the
+// added `#[inline]` on `prerouting_ingress_scope` — it restored
+// same-CGU inlining eligibility across the new module boundary
+// (#6386 hot-path preservation contract) — and the bodies
+// matched their prior location. That is a split-time record,
+// not a claim about the current tree: this file has been
+// edited since.
 
 use super::*;
 

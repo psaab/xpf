@@ -135,7 +135,7 @@ func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.Ses
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
 		return
 	}
-	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "session_v4") {
 		return
 	}
 	msg := s.encodeSessionV4ForPeer(key, val)
@@ -151,7 +151,7 @@ func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.S
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
 		return
 	}
-	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "session_v6") {
 		return
 	}
 	msg := s.encodeSessionV6ForPeer(key, val)
@@ -178,7 +178,7 @@ func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplan
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
 		return false
 	}
-	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "session_v4") {
 		return false
 	}
 	queued := s.queueMessagePaced(s.encodeSessionV4ForPeer(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
@@ -192,7 +192,7 @@ func (s *SessionSync) QueueSessionV6Paced(key dataplane.SessionKeyV6, val datapl
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
 		return false
 	}
-	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator, "session_v6") {
 		return false
 	}
 	queued := s.queueMessagePaced(s.encodeSessionV6ForPeer(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
@@ -350,14 +350,14 @@ func (s *SessionSync) suppressForwardOnlyDeleteForIncapablePeer(source string) b
 		return false
 	}
 	s.stats.DeletesSuppressedPurgeRetirement.Add(1)
-	if s.purgeRetirementSuppressionWarned.CompareAndSwap(false, true) {
+	if s.peerIncarnationState().purgeRetirementSuppressionWarned.CompareAndSwap(false, true) {
 		slog.Warn("cluster sync: withholding forward-only session deletes — the peer does not advertise "+
 			"#9752 forward-only deletes, so it would derive companions and destroy sessions the purge "+
 			"deliberately preserved. That peer will retain sessions this node has retired until they "+
 			"idle out. Completing the upgrade on both nodes restores delete sync.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 	}
 	return true
 }
@@ -388,14 +388,14 @@ func (s *SessionSync) suppressScopedDeleteForIncapablePeer(source string) bool {
 	// is the worse trade by far.
 	if !s.peerCapabilitiesLearned() || !s.ScopedPolicyDeleteCapable() {
 		s.stats.DeletesSuppressedScopedPolicy.Add(1)
-		if s.scopedPolicySuppressionWarned.CompareAndSwap(false, true) {
+		if s.peerIncarnationState().scopedPolicySuppressionWarned.CompareAndSwap(false, true) {
 			slog.Warn("cluster sync: withholding scoped session deletes — the peer does not advertise "+
 				"#10512 scoped policy deletes, so it would apply them by bare tuple and destroy a surviving "+
 				"tenant's session. That peer will retain sessions this node has revoked until they "+
 				"idle out. Completing the upgrade on both nodes restores delete sync.",
 				"source", source,
 				"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-				"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+				"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 		}
 		return true
 	}
@@ -461,24 +461,31 @@ func (s *SessionSync) suppressStampedInstallForIncapablePeer(domain, check uint3
 		return false
 	}
 	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
-	s.installTableSuppressDebt.Store(true)
-	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
+	s.peerIncarnationState().installTableSuppressDebt.Store(true)
+	if s.peerIncarnationState().installTableSuppressionWarned.CompareAndSwap(false, true) {
 		slog.Warn("cluster sync: withholding stamped session installs — the peer has not advertised "+
 			"#9752 install-table identity (incapable or not yet discovered), so it would install them "+
 			"stamp-less and wrong-table after failover. That peer will miss these sessions until a miss "+
 			"re-establishes them or the upgrade completes on both nodes.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 	}
 	return true
 }
 
-// suppressIpsecDiscriminatorInstallForIncapablePeer withholds the S9.4
-// discriminator class from an unlearned peer or one that did not advertise
-// support. The repeated install sweep and capability-triggered cold prime
-// replay any withheld state after a capable peer is discovered.
-func (s *SessionSync) suppressIpsecDiscriminatorInstallForIncapablePeer(tag uint64) bool {
+// suppressIpsecDiscriminatorInstallForIncapablePeer reports whether an
+// outgoing S9.4 IPsec (class-3 discriminator) session install must be
+// WITHHELD because the peer has not learned capabilities or did not
+// advertise capFlagIpsecTunnelDiscriminator (#9506, counted #17113).
+//
+// Such a peer cannot preserve the IPsec if_id discriminator, so the
+// install would alias onto another tunnel's key. Withholding leaves
+// the session off the peer; the repeated install sweep and
+// capability-triggered cold prime replay any withheld state after a
+// capable peer is discovered. Same counter and one-shot warning as
+// the stamped suppressor (one alarm per incarnation).
+func (s *SessionSync) suppressIpsecDiscriminatorInstallForIncapablePeer(tag uint64, source string) bool {
 	if tag>>32 != 3 || uint32(tag) == 0 {
 		return false
 	}
@@ -488,7 +495,17 @@ func (s *SessionSync) suppressIpsecDiscriminatorInstallForIncapablePeer(tag uint
 	if s.peerCapabilitiesLearned() && s.IpsecTunnelDiscriminatorCapable() {
 		return false
 	}
-	s.ipsecDiscriminatorSuppressDebt.Store(true)
+	s.stats.InstallsSuppressedIpsecDiscriminator.Add(1)
+	s.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Store(true)
+	if s.peerIncarnationState().ipsecDiscriminatorSuppressionWarned.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: withholding IPsec discriminator session installs — the peer has not advertised "+
+			"the S9.4 IPsec tunnel discriminator capability (incapable or not yet discovered), so it would "+
+			"alias these installs onto another tunnel. That peer will miss these sessions until a capable "+
+			"peer is discovered or the upgrade completes on both nodes.",
+			"source", source,
+			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
+	}
 	return true
 }
 
@@ -520,19 +537,19 @@ func suppressUnannouncedForPBRActivePeer(s *SessionSync, announced bool, source 
 	if announced {
 		return false
 	}
-	if s == nil || !s.pbrAnnouncedForFence.Load() || s.InstallTableIdentityCapable() {
+	if s == nil || !s.peerIncarnationState().pbrAnnouncedForFence.Load() || s.InstallTableIdentityCapable() {
 		return false
 	}
 	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
-	s.installTableSuppressDebt.Store(true)
-	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
+	s.peerIncarnationState().installTableSuppressDebt.Store(true)
+	if s.peerIncarnationState().installTableSuppressionWarned.CompareAndSwap(false, true) {
 		slog.Warn("cluster sync: withholding unannounced session installs — this node does PBR and "+
 			"these mirror-sourced (0,0)s were never announced (in-race delta, foreign row, or memo "+
 			"at cap), so the peer would install possibly-PBR sessions stamp-less. They flow once "+
 			"announced, or on upgrade.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 	}
 	return true
 }
@@ -572,14 +589,14 @@ func (s *SessionSync) suppressDeleteForIncapablePeer(source string) bool {
 		return false
 	}
 	s.stats.DeletesSuppressedPeerIncapable.Add(1)
-	if s.deleteSuppressionWarned.CompareAndSwap(false, true) {
+	if s.peerIncarnationState().deleteSuppressionWarned.CompareAndSwap(false, true) {
 		slog.Warn("cluster sync: withholding session deletes — the peer does not advertise #9714 peer-delete "+
 			"ownership, so it would apply them unconditionally and could tear down a flow it is still "+
 			"forwarding. That peer will retain sessions this node has closed until they idle out. "+
 			"Completing the upgrade on both nodes restores delete sync.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnaps.peerSnapshotProtocol.Load(),
-			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+			"peer_capability_flags", uint8(s.peerIncarnationState().peerCapabilityFlags.Load()))
 	}
 	return true
 }
@@ -615,30 +632,121 @@ func (s *SessionSync) armDeleteResync() bool {
 	return s.forceResync.CompareAndSwap(false, true)
 }
 
-// journalDelete stores a delete message in the bounded ring buffer for replay
-// on reconnect. If the journal is full, the oldest entry is evicted,
-// DeletesDropped is incremented, and a full bulk resync is armed (#5450) so the
-// standby does not silently retain the session the evicted delete would have
-// torn down.
-func (s *SessionSync) journalDelete(msg []byte) {
-	s.deleteJournalMu.Lock()
-	cap := s.deleteJournalCap
-	if cap <= 0 {
-		cap = deleteJournalDefaultCap
+// boundedFrameJournal is a bounded FIFO ring of wire frames: the single
+// cap/evict/prepend implementation behind the bare and scoped delete
+// journals (#17110; previously three hand-copied twin pairs whose scoped
+// copy's eviction and overflow branches could not be reached by tests).
+// Every method must be called under SessionSync.deleteJournalMu; the
+// journal itself does no locking, counting, or resync arming — callers
+// own those via journalPush / rejournalTailInto so both instances share
+// one accounting discipline.
+type boundedFrameJournal struct {
+	entries [][]byte
+	cap     int
+}
+
+// effectiveCap resolves a non-positive cap to the production default, so
+// a zero-value journal (tests build &SessionSync{} directly) is still
+// bounded.
+func (j *boundedFrameJournal) effectiveCap() int {
+	if j.cap <= 0 {
+		return deleteJournalDefaultCap
 	}
+	return j.cap
+}
+
+// push appends msg, first evicting the oldest entry when the journal is
+// at cap. It reports whether an entry was evicted.
+func (j *boundedFrameJournal) push(msg []byte) (evicted bool) {
+	if len(j.entries) >= j.effectiveCap() {
+		j.entries = j.entries[1:]
+		evicted = true
+	}
+	j.entries = append(j.entries, msg)
+	return evicted
+}
+
+// take drains the journal, returning its entries in FIFO order.
+func (j *boundedFrameJournal) take() [][]byte {
+	entries := j.entries
+	j.entries = nil
+	return entries
+}
+
+// clear drops every entry and reports how many were dropped.
+func (j *boundedFrameJournal) clear() (dropped int) {
+	dropped = len(j.entries)
+	j.entries = nil
+	return dropped
+}
+
+// prependTail re-inserts an un-sent tail at the FRONT of the journal so
+// it replays before any frames concurrently journaled while a flush ran,
+// preserving FIFO order. On overflow it drops the OLDEST entries from
+// the front of the merged list (the tail is older than the concurrent
+// entries, so the tail is evicted first; only if the entire tail is
+// dropped does it also evict the oldest concurrent entries) and reports
+// how many entries were dropped.
+func (j *boundedFrameJournal) prependTail(tail [][]byte) (dropped int) {
+	if len(tail) == 0 {
+		return 0
+	}
+	capN := j.effectiveCap()
+	total := len(tail) + len(j.entries)
+	if total <= capN {
+		merged := make([][]byte, 0, total)
+		merged = append(merged, tail...)
+		merged = append(merged, j.entries...)
+		j.entries = merged
+		return 0
+	}
+	dropped = total - capN
+	merged := make([][]byte, 0, capN)
+	if dropped < len(tail) {
+		// Drop the oldest prefix of the tail; keep the rest plus all of
+		// the newer concurrently-journaled entries.
+		merged = append(merged, tail[dropped:]...)
+		merged = append(merged, j.entries...)
+	} else {
+		// The entire tail is evicted; also drop the oldest prefix of the
+		// concurrently-journaled entries to fit the cap.
+		merged = append(merged, j.entries[dropped-len(tail):]...)
+	}
+	j.entries = merged
+	return dropped
+}
+
+// journalPush is the shared push discipline for both delete journals:
+// an eviction counts in DeletesDropped and arms a full bulk resync
+// (#5450) so the standby does not silently retain the session the
+// evicted delete would have torn down. The arm is a pure atomic CAS
+// under deleteJournalMu; the warning fires once per overflow episode,
+// outside the lock, and names the journal via fullMsg.
+func (s *SessionSync) journalPush(j *boundedFrameJournal, msg []byte, fullMsg string) {
+	s.deleteJournalMu.Lock()
+	evicted := j.push(msg)
 	armed := false
-	if len(s.deleteJournal) >= cap {
-		s.deleteJournal = s.deleteJournal[1:]
+	if evicted {
 		s.stats.DeletesDropped.Add(1)
 		armed = s.armDeleteResync()
 	}
-	s.deleteJournal = append(s.deleteJournal, msg)
+	capN := j.effectiveCap()
 	s.deleteJournalMu.Unlock()
 	if armed {
-		slog.Warn("cluster sync: delete journal full, evicted oldest delete and armed full bulk resync to reconcile standby",
+		slog.Warn(fullMsg,
 			"deletes_dropped_total", s.stats.DeletesDropped.Load(),
-			"journal_cap", cap)
+			"journal_cap", capN)
 	}
+}
+
+// journalDelete stores a delete message in the bounded ring buffer for
+// replay on reconnect. If the journal is full, the oldest entry is
+// evicted, DeletesDropped is incremented, and a full bulk resync is
+// armed (#5450) so the standby does not silently retain the session the
+// evicted delete would have torn down.
+func (s *SessionSync) journalDelete(msg []byte) {
+	s.journalPush(&s.deleteJournal, msg,
+		"cluster sync: delete journal full, evicted oldest delete and armed full bulk resync to reconcile standby")
 }
 
 // journalScopedDelete stores a scoped delete frame as deferred debt for
@@ -646,24 +754,8 @@ func (s *SessionSync) journalDelete(msg []byte) {
 // discipline as journalDelete, in the separate scoped slice so the bare
 // flush never touches scoped bytes.
 func (s *SessionSync) journalScopedDelete(msg []byte) {
-	s.deleteJournalMu.Lock()
-	cap := s.scopedDeleteJournalCap
-	if cap <= 0 {
-		cap = deleteJournalDefaultCap
-	}
-	armed := false
-	if len(s.scopedDeleteJournal) >= cap {
-		s.scopedDeleteJournal = s.scopedDeleteJournal[1:]
-		s.stats.DeletesDropped.Add(1)
-		armed = s.armDeleteResync()
-	}
-	s.scopedDeleteJournal = append(s.scopedDeleteJournal, msg)
-	s.deleteJournalMu.Unlock()
-	if armed {
-		slog.Warn("cluster sync: scoped delete journal full, evicted oldest delete and armed full bulk resync to reconcile standby",
-			"deletes_dropped_total", s.stats.DeletesDropped.Load(),
-			"journal_cap", cap)
-	}
+	s.journalPush(&s.scopedDeleteJournal, msg,
+		"cluster sync: scoped delete journal full, evicted oldest delete and armed full bulk resync to reconcile standby")
 
 	// Post-append re-check (learn/flush race): a flush that took an empty
 	// journal just before this append would otherwise strand the debt
@@ -676,24 +768,17 @@ func (s *SessionSync) journalScopedDelete(msg []byte) {
 	}
 }
 
-func (s *SessionSync) flushDeleteJournal() {
-	s.deleteJournalMu.Lock()
-	journal := s.deleteJournal
-	s.deleteJournal = nil
-	s.deleteJournalMu.Unlock()
-	if len(journal) == 0 {
-		return
-	}
+// flushJournalEntries replays taken journal entries through the ordered
+// send stream. queueMessage is non-blocking and increments DeletesSent
+// on success; on a full sendCh (or a peer disconnect) it returns false.
+// The un-sent tail is handed to rejournal (which re-journals it
+// FIFO-first) and the flush stops, keeping the suffix contiguous and
+// ordered for the next flush. The failure warning carries the same
+// diagnostic fields for both journals (#17110).
+func (s *SessionSync) flushJournalEntries(journal [][]byte, source string, rejournal func(tail [][]byte), fullMsg, flushedMsg string) {
 	var flushed int
-	// Replay journaled deletes through the ordered send stream. queueMessage
-	// is non-blocking and increments DeletesSent on success; on a full sendCh
-	// (or a peer disconnect) it returns false. Mirror the QueueDeleteV4
-	// contract: re-journal (retain) the un-sent tail instead of dropping it,
-	// so it replays on the next reconnect flush. Previously a full sendCh
-	// here silently dropped the un-sent deletes (the journal was already
-	// nil'd), leaving stale sessions on the peer (#2121).
 	for i, msg := range journal {
-		if s.queueMessage(msg, &s.stats.DeletesSent, "journal_flush") {
+		if s.queueMessage(msg, &s.stats.DeletesSent, source) {
 			flushed++
 			continue
 		}
@@ -701,21 +786,42 @@ func (s *SessionSync) flushDeleteJournal() {
 		// disconnected (queueMessage checks Connected first). Either way the
 		// remaining messages would also fail, so re-journal this message and
 		// the rest (FIFO-prepended ahead of any deletes concurrently journaled
-		// during the flush) and stop. Stopping keeps the un-sent suffix
-		// contiguous and ordered; they replay on the next reconnect flush.
-		s.rejournalTail(journal[i:])
-		// "unsent_tail" is the count handed to rejournalTail; some of those
-		// may still be evicted there if the journal is over cap — that loss is
+		// during the flush) and stop.
+		rejournal(journal[i:])
+		// "unsent_tail" is the count handed to rejournal; some of those may
+		// still be evicted there if the journal is over cap — that loss is
 		// counted in DeletesDropped (logged here as the running total), so
 		// this field is the tail size, not a guarantee that all were retained.
-		slog.Warn("cluster sync: delete journal flush could not enqueue (queue full or disconnected), re-journaled un-sent tail for next reconnect",
+		slog.Warn(fullMsg,
 			"total", len(journal), "flushed", flushed, "unsent_tail", len(journal)-i,
 			"deletes_dropped_total", s.stats.DeletesDropped.Load(),
 			"connected", s.stats.Connected.Load(),
 			"queue_len", len(s.sendCh), "queue_cap", cap(s.sendCh))
 		return
 	}
-	slog.Info("cluster sync: flushed delete journal", "total", len(journal), "flushed", flushed)
+	slog.Info(flushedMsg, "total", len(journal), "flushed", flushed)
+}
+
+func (s *SessionSync) flushDeleteJournal() {
+	if hook := s.testBeforeJournalTake; hook != nil {
+		s.testBeforeJournalTake = nil
+		hook()
+	}
+	s.deleteJournalMu.Lock()
+	journal := s.deleteJournal.take()
+	s.deleteJournalMu.Unlock()
+	if len(journal) == 0 {
+		return
+	}
+	// Replay journaled deletes through the ordered send stream, mirroring
+	// the QueueDeleteV4 contract: re-journal (retain) the un-sent tail
+	// instead of dropping it, so it replays on the next reconnect flush.
+	// Previously a full sendCh here silently dropped the un-sent deletes
+	// (the journal was already nil'd), leaving stale sessions on the peer
+	// (#2121).
+	s.flushJournalEntries(journal, "journal_flush", s.rejournalTail,
+		"cluster sync: delete journal flush could not enqueue (queue full or disconnected), re-journaled un-sent tail for next reconnect",
+		"cluster sync: flushed delete journal")
 }
 
 // flushScopedDeleteJournal replays deferred scoped deletes — ONLY when the
@@ -736,8 +842,7 @@ func (s *SessionSync) flushScopedDeleteJournal() {
 	}
 	if !s.ScopedPolicyDeleteCapable() {
 		s.deleteJournalMu.Lock()
-		dropped := len(s.scopedDeleteJournal)
-		s.scopedDeleteJournal = nil
+		dropped := s.scopedDeleteJournal.clear()
 		s.deleteJournalMu.Unlock()
 		if dropped > 0 {
 			s.stats.DeletesSuppressedScopedPolicy.Add(uint64(dropped))
@@ -747,77 +852,47 @@ func (s *SessionSync) flushScopedDeleteJournal() {
 		return
 	}
 	s.deleteJournalMu.Lock()
-	journal := s.scopedDeleteJournal
-	s.scopedDeleteJournal = nil
+	journal := s.scopedDeleteJournal.take()
 	s.deleteJournalMu.Unlock()
 	if len(journal) == 0 {
 		return
 	}
-	var flushed int
-	for i, msg := range journal {
-		if s.queueMessage(msg, &s.stats.DeletesSent, "scoped_journal_flush") {
-			flushed++
-			continue
-		}
-		s.rejournalScopedTail(journal[i:])
-		slog.Warn("cluster sync: scoped delete journal flush could not enqueue, re-journaled un-sent tail",
-			"total", len(journal), "flushed", flushed, "unsent_tail", len(journal)-i)
+	s.flushJournalEntries(journal, "scoped_journal_flush", s.rejournalScopedTail,
+		"cluster sync: scoped delete journal flush could not enqueue (queue full or disconnected), re-journaled un-sent tail for next reconnect",
+		"cluster sync: flushed scoped delete journal")
+}
+
+// rejournalTailInto is the shared rejournal discipline for both delete
+// journals: FIFO-prepend the un-sent tail via boundedFrameJournal, count
+// any overflow evictions in DeletesDropped, and arm a full bulk resync
+// (#5450) — the evicted deletes are session teardowns the standby still
+// needs; they are gone from our local table, so no incremental install
+// sweep can re-derive them, and only the peer's reconcileStaleSessions
+// (run by the armed bulk) deletes the sessions we already closed instead
+// of carrying ghosts until the next far-off full reconcile. The arm is a
+// pure atomic CAS under deleteJournalMu — no I/O, idempotent, armed once
+// per overflow episode. Acquires deleteJournalMu exactly once.
+func (s *SessionSync) rejournalTailInto(j *boundedFrameJournal, tail [][]byte) {
+	if len(tail) == 0 {
 		return
 	}
-	slog.Info("cluster sync: flushed scoped delete journal", "total", len(journal), "flushed", flushed)
+	s.deleteJournalMu.Lock()
+	defer s.deleteJournalMu.Unlock()
+	if dropped := j.prependTail(tail); dropped > 0 {
+		s.stats.DeletesDropped.Add(uint64(dropped))
+		s.armDeleteResync()
+	}
 }
 
 // rejournalTail re-inserts the un-sent delete tail at the FRONT of the
 // delete journal so it replays before any deletes that were concurrently
 // journaled (by QueueDeleteV4/V6) while the flush ran, preserving FIFO
 // order. On overflow it drops the OLDEST entries from the front of the
-// merged list (the tail is older than the concurrently-journaled deletes,
-// so the tail is evicted first; only if the entire tail is dropped does it
-// also evict the oldest of the concurrent deletes, e.g. when the journal
-// was already at cap), counting the dropped entries in DeletesDropped.
-// Acquires deleteJournalMu exactly once. Used by flushDeleteJournal when
-// the send stream is full or disconnected; the retained deletes replay on
-// the next reconnect flush.
+// merged list, counting the dropped entries in DeletesDropped. Used by
+// flushDeleteJournal when the send stream is full or disconnected; the
+// retained deletes replay on the next reconnect flush.
 func (s *SessionSync) rejournalTail(tail [][]byte) {
-	if len(tail) == 0 {
-		return
-	}
-	s.deleteJournalMu.Lock()
-	defer s.deleteJournalMu.Unlock()
-	capN := s.deleteJournalCap
-	if capN <= 0 {
-		capN = deleteJournalDefaultCap
-	}
-	total := len(tail) + len(s.deleteJournal)
-	if total <= capN {
-		merged := make([][]byte, 0, total)
-		merged = append(merged, tail...)
-		merged = append(merged, s.deleteJournal...)
-		s.deleteJournal = merged
-		return
-	}
-	dropped := total - capN
-	s.stats.DeletesDropped.Add(uint64(dropped))
-	// #5450: the evicted deletes are session teardowns the standby still needs;
-	// they are gone from our local table, so no incremental install sweep can
-	// re-derive them. Arm a full authoritative bulk resync (consumed by the
-	// sweep loop / next reconnect) so the peer's reconcileStaleSessions deletes
-	// the sessions we already closed instead of carrying ghosts until the next
-	// far-off full reconcile. Pure atomic CAS under deleteJournalMu — no I/O,
-	// idempotent, armed once per overflow episode.
-	s.armDeleteResync()
-	merged := make([][]byte, 0, capN)
-	if dropped < len(tail) {
-		// Drop the oldest prefix of the tail; keep the rest plus all of the
-		// newer concurrently-journaled deletes.
-		merged = append(merged, tail[dropped:]...)
-		merged = append(merged, s.deleteJournal...)
-	} else {
-		// The entire tail is evicted; also drop the oldest prefix of the
-		// concurrently-journaled deletes to fit the cap.
-		merged = append(merged, s.deleteJournal[dropped-len(tail):]...)
-	}
-	s.deleteJournal = merged
+	s.rejournalTailInto(&s.deleteJournal, tail)
 }
 
 // rejournalScopedTail is the scoped-journal twin of rejournalTail: FIFO
@@ -825,34 +900,7 @@ func (s *SessionSync) rejournalTail(tail [][]byte) {
 // resync arming. The retained deletes replay on the next learn-triggered
 // flush to a capable peer.
 func (s *SessionSync) rejournalScopedTail(tail [][]byte) {
-	if len(tail) == 0 {
-		return
-	}
-	s.deleteJournalMu.Lock()
-	defer s.deleteJournalMu.Unlock()
-	capN := s.scopedDeleteJournalCap
-	if capN <= 0 {
-		capN = deleteJournalDefaultCap
-	}
-	total := len(tail) + len(s.scopedDeleteJournal)
-	if total <= capN {
-		merged := make([][]byte, 0, total)
-		merged = append(merged, tail...)
-		merged = append(merged, s.scopedDeleteJournal...)
-		s.scopedDeleteJournal = merged
-		return
-	}
-	dropped := total - capN
-	s.stats.DeletesDropped.Add(uint64(dropped))
-	s.armDeleteResync() // #5450: see the bare twin.
-	merged := make([][]byte, 0, capN)
-	if dropped < len(tail) {
-		merged = append(merged, tail[dropped:]...)
-		merged = append(merged, s.scopedDeleteJournal...)
-	} else {
-		merged = append(merged, s.scopedDeleteJournal[dropped-len(tail):]...)
-	}
-	s.scopedDeleteJournal = merged
+	s.rejournalTailInto(&s.scopedDeleteJournal, tail)
 }
 
 // SendLivenessKeepalive writes a sync-level heartbeat to the active peer
@@ -863,7 +911,7 @@ func (s *SessionSync) rejournalScopedTail(tail [][]byte) {
 // this node is still alive is sync traffic — and the sync-level heartbeat is
 // normally emitted only on the 10s read-timeout cadence, far coarser than
 // the 2s recency window of the peer's heartbeat-timeout suppression guard
-// (shouldSuppressPeerHeartbeatTimeout). Best-effort: a no-op when no peer
+// (syncSuppressesPeerTimeoutLocked, #17056). Best-effort: a no-op when no peer
 // connection exists; a write error follows the standard sender pattern and
 // triggers reconnect via handleDisconnect.
 func (s *SessionSync) SendLivenessKeepalive() {

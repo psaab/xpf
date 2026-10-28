@@ -101,7 +101,7 @@ func TestReconcileFlowExporterAddAfterBoot(t *testing.T) {
 	if d.reconcileFlowExporters(&config.Config{}) {
 		t.Fatal("empty config should not start an exporter")
 	}
-	if b := d.flowBundle.Load(); b != nil && b.firstExp() != nil {
+	if b := d.v9Family().bundle.Load(); b != nil && b.firstExp() != nil {
 		t.Fatal("no exporter should exist for empty config")
 	}
 
@@ -109,10 +109,10 @@ func TestReconcileFlowExporterAddAfterBoot(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("adding flow export must start the exporter")
 	}
-	if b := d.flowBundle.Load(); b == nil || b.firstExp() == nil {
+	if b := d.v9Family().bundle.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("exporter must be live after add-after-boot")
 	}
-	if len(d.flowExporters) == 0 {
+	if len(d.v9Family().exporters) == 0 {
 		t.Fatal("d.flowExporter must be set after add-after-boot")
 	}
 }
@@ -126,7 +126,7 @@ func TestReconcileFlowExporterRemoveAfterBoot(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("initial config must start exporter")
 	}
-	if b := d.flowBundle.Load(); b == nil || b.firstExp() == nil {
+	if b := d.v9Family().bundle.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("exporter must be live")
 	}
 
@@ -134,10 +134,10 @@ func TestReconcileFlowExporterRemoveAfterBoot(t *testing.T) {
 	if !d.reconcileFlowExporters(&config.Config{}) {
 		t.Fatal("removing flow export must reconcile (stop exporter)")
 	}
-	if b := d.flowBundle.Load(); b == nil || b.firstExp() != nil {
+	if b := d.v9Family().bundle.Load(); b == nil || b.firstExp() != nil {
 		t.Fatal("exporter must be stopped after removal")
 	}
-	if len(d.flowExporters) > 0 {
+	if len(d.v9Family().exporters) > 0 {
 		t.Fatal("d.flowExporter must be nil after removal")
 	}
 }
@@ -153,7 +153,7 @@ func TestReconcileFlowExporterHashGate(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("initial config must start exporter")
 	}
-	first := d.flowBundle.Load().firstExp()
+	first := d.v9Family().bundle.Load().firstExp()
 	if first == nil {
 		t.Fatal("exporter must be live")
 	}
@@ -162,7 +162,7 @@ func TestReconcileFlowExporterHashGate(t *testing.T) {
 	if d.reconcileFlowExporters(flowSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("identical config must be hash-gated (no restart)")
 	}
-	if got := d.flowBundle.Load().firstExp(); got != first {
+	if got := d.v9Family().bundle.Load().firstExp(); got != first {
 		t.Fatal("hash-gated reconcile must keep the SAME exporter instance")
 	}
 
@@ -170,7 +170,7 @@ func TestReconcileFlowExporterHashGate(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.2", 100)) {
 		t.Fatal("changed collector must re-apply")
 	}
-	if got := d.flowBundle.Load().firstExp(); got == first {
+	if got := d.v9Family().bundle.Load().firstExp(); got == first {
 		t.Fatal("a real config change must swap to a new exporter instance")
 	}
 	// A sampling-rate change also re-applies.
@@ -213,11 +213,11 @@ func TestReconcileV9IPFIXIndependence(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("v9 config must start")
 	}
-	v9 := d.flowBundle.Load().firstExp()
+	v9 := d.v9Family().bundle.Load().firstExp()
 	if v9 == nil {
 		t.Fatal("v9 exporter must be live")
 	}
-	if b := d.ipfixBundlePtr.Load(); b != nil && b.firstExp() != nil {
+	if b := d.ipfixFamily().bundle.Load(); b != nil && b.firstExp() != nil {
 		t.Fatal("IPFIX must not be configured yet")
 	}
 
@@ -225,11 +225,11 @@ func TestReconcileV9IPFIXIndependence(t *testing.T) {
 	if !d.reconcileFlowExporters(ipfixSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("adding IPFIX must reconcile")
 	}
-	if b := d.ipfixBundlePtr.Load(); b == nil || b.firstExp() == nil {
+	if b := d.ipfixFamily().bundle.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("IPFIX exporter must be live after add")
 	}
 	// v9 untouched (same instance).
-	if got := d.flowBundle.Load().firstExp(); got != v9 {
+	if got := d.v9Family().bundle.Load().firstExp(); got != v9 {
 		t.Fatal("adding IPFIX must NOT bounce the running v9 exporter")
 	}
 }
@@ -256,10 +256,10 @@ func TestReconcileFlowExporterRetriesAfterCreateFailure(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfigSrc("127.0.0.1", "192.0.2.250", 100)) {
 		t.Fatal("a create-failing reconcile should still report a change")
 	}
-	if b := d.flowBundle.Load(); b == nil || b.firstExp() != nil {
+	if b := d.v9Family().bundle.Load(); b == nil || b.firstExp() != nil {
 		t.Fatal("no exporter should be live after a create failure")
 	}
-	if d.flowHashSet {
+	if d.v9Family().hasSet {
 		t.Fatal("the hash must NOT be recorded on a create failure " +
 			"(else an identical retry would be gated into a dead exporter)")
 	}
@@ -268,7 +268,7 @@ func TestReconcileFlowExporterRetriesAfterCreateFailure(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("a working config after a create failure must start the exporter")
 	}
-	if b := d.flowBundle.Load(); b == nil || b.firstExp() == nil {
+	if b := d.v9Family().bundle.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("exporter must recover on the next working commit")
 	}
 }
@@ -298,7 +298,7 @@ func TestApplyConfigLockedReconcilesFlowExporters(t *testing.T) {
 		t.Fatalf("applyConfigLocked: %v", err)
 	}
 
-	if len(d.flowExporters) == 0 {
+	if len(d.v9Family().exporters) == 0 {
 		t.Fatal("applyConfigLocked did not reconcile the flow exporter: " +
 			"a committed forwarding-options sampling stanza left the NetFlow " +
 			"exporter unstarted (missing reconcileFlowExporters wiring)")
@@ -336,10 +336,10 @@ func TestReconcileIPFIXOnlyDoesNotStartV9(t *testing.T) {
 	if !d.reconcileFlowExporters(ipfixOnlySamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("an IPFIX-only config must reconcile (the IPFIX exporter starts)")
 	}
-	if b := d.ipfixBundlePtr.Load(); b == nil || b.firstExp() == nil {
+	if b := d.ipfixFamily().bundle.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("IPFIX exporter must be live for an IPFIX-only config")
 	}
-	if b := d.flowBundle.Load(); b != nil && b.firstExp() != nil {
+	if b := d.v9Family().bundle.Load(); b != nil && b.firstExp() != nil {
 		t.Fatal("#2129: no v9 exporter may start without a `version9` stanza " +
 			"— an IPFIX-only operator must not get an unrequested v9 stream")
 	}
@@ -378,10 +378,10 @@ func TestReconcileBothVersionsUnboundServerNoDoubleExport(t *testing.T) {
 	if !d.reconcileFlowExporters(bothVersionsUnboundConfig("127.0.0.1", 100)) {
 		t.Fatal("both-versions config must reconcile (the IPFIX exporter starts)")
 	}
-	if b := d.ipfixBundlePtr.Load(); b == nil || b.firstExp() == nil {
+	if b := d.ipfixFamily().bundle.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("#2136: unbound server under both versions must run the IPFIX exporter")
 	}
-	if b := d.flowBundle.Load(); b != nil && b.firstExp() != nil {
+	if b := d.v9Family().bundle.Load(); b != nil && b.firstExp() != nil {
 		t.Fatal("#2136: an UNBOUND collector under both versions must NOT also " +
 			"start the v9 exporter — that is the double-export bug")
 	}
@@ -408,7 +408,7 @@ func TestReconcileV9RequiresVersion9Stanza(t *testing.T) {
 		t.Fatal("#2129: sampling without any flow-monitoring stanza must " +
 			"NOT start a v9 exporter (no change to reconcile)")
 	}
-	if b := d.flowBundle.Load(); b != nil && b.firstExp() != nil {
+	if b := d.v9Family().bundle.Load(); b != nil && b.firstExp() != nil {
 		t.Fatal("#2129: no v9 exporter may start without a `version9` stanza")
 	}
 
@@ -416,7 +416,7 @@ func TestReconcileV9RequiresVersion9Stanza(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("adding version9 must start the v9 exporter")
 	}
-	if b := d.flowBundle.Load(); b == nil || b.firstExp() == nil {
+	if b := d.v9Family().bundle.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("v9 exporter must be live once version9 is configured")
 	}
 }
@@ -448,7 +448,7 @@ func TestReconcileFlowExporterBuildFailureKeepsOldRunning(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("initial config must start exporter")
 	}
-	first := d.flowBundle.Load().firstExp()
+	first := d.v9Family().bundle.Load().firstExp()
 	if first == nil {
 		t.Fatal("exporter must be live before the failing reconcile")
 	}
@@ -462,15 +462,15 @@ func TestReconcileFlowExporterBuildFailureKeepsOldRunning(t *testing.T) {
 
 	// #3742: the OLD exporter must still be published and live — export is
 	// NOT disabled by the transient build failure.
-	if got := d.flowBundle.Load().firstExp(); got != first {
+	if got := d.v9Family().bundle.Load().firstExp(); got != first {
 		t.Fatal("#3742: a NewExporter build failure must KEEP the old exporter " +
 			"running (export stays up), not tear it down and disable export")
 	}
-	if len(d.flowExporters) == 0 {
+	if len(d.v9Family().exporters) == 0 {
 		t.Fatal("#3742: the old exporter set must be retained after a build failure")
 	}
 	// The hash is NOT recorded, so the next commit retries.
-	if d.flowHashSet {
+	if d.v9Family().hasSet {
 		t.Fatal("#3742: the hash must NOT be recorded on a build failure " +
 			"(else an identical retry would gate into the failed state)")
 	}
@@ -482,7 +482,7 @@ func TestReconcileFlowExporterBuildFailureKeepsOldRunning(t *testing.T) {
 	// A session-close callback firing now still resolves to the LIVE old
 	// exporter (not a dead/empty bundle), so the record is queued into a
 	// still-flushing exporter rather than dropped.
-	d.flowExportCallback(logging.EventRecord{
+	d.v9Family().closeCallback(logging.EventRecord{
 		Type:     "SESSION_CLOSE",
 		SrcAddr:  "10.0.0.1:1234",
 		DstAddr:  "10.0.0.2:80",
@@ -493,7 +493,7 @@ func TestReconcileFlowExporterBuildFailureKeepsOldRunning(t *testing.T) {
 	if !d.reconcileFlowExporters(flowSamplingConfig("127.0.0.2", 100)) {
 		t.Fatal("a working config after a build failure must reconcile")
 	}
-	if got := d.flowBundle.Load().firstExp(); got == nil || got == first {
+	if got := d.v9Family().bundle.Load().firstExp(); got == nil || got == first {
 		t.Fatal("a working reconcile after a failure must swap to a NEW live exporter")
 	}
 	if d.FlowExportError() != nil {
@@ -512,7 +512,7 @@ func TestReconcileIPFIXExporterBuildFailureKeepsOldRunning(t *testing.T) {
 	if !d.reconcileFlowExporters(ipfixSamplingConfig("127.0.0.1", 100)) {
 		t.Fatal("initial config must start the IPFIX exporter")
 	}
-	first := d.ipfixBundlePtr.Load().firstExp()
+	first := d.ipfixFamily().bundle.Load().firstExp()
 	if first == nil {
 		t.Fatal("IPFIX exporter must be live before the failing reconcile")
 	}
@@ -521,14 +521,14 @@ func TestReconcileIPFIXExporterBuildFailureKeepsOldRunning(t *testing.T) {
 		t.Fatal("a build-failing reconcile should still report a change")
 	}
 
-	if got := d.ipfixBundlePtr.Load().firstExp(); got != first {
+	if got := d.ipfixFamily().bundle.Load().firstExp(); got != first {
 		t.Fatal("#3742: an IPFIX NewExporter build failure must KEEP the old " +
 			"exporter running, not disable export")
 	}
-	if len(d.ipfixExporters) == 0 {
+	if len(d.ipfixFamily().exporters) == 0 {
 		t.Fatal("#3742: the old IPFIX exporter set must be retained after a build failure")
 	}
-	if d.ipfixHashSet {
+	if d.ipfixFamily().hasSet {
 		t.Fatal("#3742: the IPFIX hash must NOT be recorded on a build failure")
 	}
 	if d.IPFIXExportError() == nil {
@@ -570,10 +570,10 @@ func TestReconcileFlowExporterSwapNoCallbackLoss(t *testing.T) {
 			}
 			// The published bundle must always be live during a healthy
 			// swap sequence (#3742): it goes old -> new, never empty.
-			if b := d.flowBundle.Load(); b == nil || b.firstExp() == nil {
+			if b := d.v9Family().bundle.Load(); b == nil || b.firstExp() == nil {
 				sawEmpty.Store(true)
 			}
-			d.flowExportCallback(rec, nil)
+			d.v9Family().closeCallback(rec, nil)
 		}
 	}()
 

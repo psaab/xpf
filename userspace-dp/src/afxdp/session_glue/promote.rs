@@ -18,15 +18,45 @@ pub(in crate::afxdp) struct ConntrackFds {
 }
 
 /// #16185: one packet's two clocks. `ns` (monotonic nanoseconds) and
-/// `secs` (seconds for HA leases) travel together at every
-/// resolve/teardown site; bundling them removes the same-typed `u64`
-/// neighbour swap hazard. `Tick` carries only these two: the HA
+/// `secs` (seconds for the HA-lease checks in the resolve path) are
+/// two readings of the same monotonic clock: `secs == ns / 1_000_000_000`.
+/// #17069: construction is only through [`Tick::from_ns`], which
+/// derives `secs` from `ns`, so the pairing the bundle asserts cannot
+/// be broken by a zero-filled or independently sampled `secs`. The
+/// sole `secs` reader is the resolve path (`resolve.rs` reads
+/// `shared.tick.secs` for `should_keep_synced_hit_transient` and the
+/// HA forwarding-active checks); teardown/housekeeping bundles fed
+/// through this constructor therefore carry the real seconds value
+/// instead of the pre-#17069 `secs: 0`, which would have read every
+/// non-zero HA lease as active (fail-open at time 0) had a teardown
+/// consumer ever read it. `Tick` carries only these two: the HA
 /// startup-grace deadline stays a separate named argument because it
 /// is a deadline, not a clock reading.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) struct Tick {
     pub ns: u64,
     pub secs: u64,
+}
+
+impl Tick {
+    /// The only clock constructor: both fields from one monotonic
+    /// reading, `secs` derived so the two can never disagree.
+    pub(in crate::afxdp) fn from_ns(ns: u64) -> Self {
+        Self {
+            ns,
+            secs: ns / 1_000_000_000,
+        }
+    }
+
+    /// Test-only decoupled clock: HA-lease cells need a `secs` that
+    /// `from_ns` cannot express (e.g. `ns: 1_000_000, secs: 1_000`
+    /// against a lease expiring at 500). Production has no caller:
+    /// every production bundle goes through `from_ns`, so the
+    /// `secs == ns / 1_000_000_000` invariant holds outside tests.
+    #[cfg(test)]
+    pub(in crate::afxdp) fn from_parts(ns: u64, secs: u64) -> Self {
+        Self { ns, secs }
+    }
 }
 
 /// Shared-session backing references that travel together at every
@@ -93,7 +123,7 @@ impl<'a> SharedSessionRefs<'a> {
             peer_worker_commands,
             worker_commands_by_id,
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick::default(),
+            tick: Tick::from_ns(0),
         }
     }
 
@@ -188,8 +218,9 @@ fn promote_synced_session_with_conntrack(
     if fabric_ingress {
         promoted.fabric_ingress = true;
     }
-    // #13939: `promote_synced_with_origin` preserves any FIN/RST for the
-    // Owner-only deferred-close step after the authority verdict.
+    // #13939/#17092: `promote_synced_with_origin` strips any FIN/RST; the
+    // Owner-only `Defer::None` replay (`apply_deferred_owner_hit`) after the
+    // authority verdict re-applies the close and propagates it.
     if sessions.promote_synced_with_origin(SessionUpdate {
         key,
         decision,
@@ -237,25 +268,20 @@ fn promote_synced_session_with_conntrack(
             crate::afxdp::bpf_map::SESSION_PUBLISH_ERRORS_SHARED
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let promoted_entry = SyncedSessionEntry { key: key.clone(),
-        decision,
-        metadata: promoted.clone(),
-        leak_incarnation: sessions.leak_incarnation(key).unwrap_or(0),
-        origin: SessionOrigin::SharedPromote,
-        protocol,
-        tcp_flags,
-        // Local shared-promote: no peer install generation (#2170).
-        generation: 0,
-        // #9582: carry the promoted session's stable id (preserved on the live
-        // entry, #5212), so replicas and shared-map materializations ADOPT it.
-        // With 0 each re-import minted its own id, and a replica could not
-        // announce a close under the id the peer and the #9412 memo know.
-        session_id: sessions.session_id_for(key),
-        // #9412: republish the promoted session with its LIVE close class, so
-        // a worker materializing it from the shared maps keeps the close state.
-        tcp_close_class: sessions.close_class_wire_for(key), tcp_handshake_state: sessions.handshake_state_wire_for(key), rev_packets: sessions.rev_packets_for(key), fwd_packets: sessions.fwd_packets_for(key), pptp_call_ids: sessions.pptp_call_ids_wire_for(key),
-        persistent_lease_hold: sessions.persistent_lease_hold_for(key),
-        source_nat_static: sessions.source_nat_static_for(key), };
+        // #17058: build from the live row via the one shared construction,
+        // then apply the promote overrides (origin, promoted metadata,
+        // decision, protocol and the packet's tcp_flags). Every other
+        // wire field (session_id, close/handshake state, counters,
+        // PPTP pair, lease hold, SNAT provenance, leak incarnation) is
+        // the live value `synced_entry_for` read in one lookup.
+        let Some(mut promoted_entry) = sessions.synced_entry_for(key) else {
+            return promoted;
+        };
+        promoted_entry.decision = decision;
+        promoted_entry.metadata = promoted.clone();
+        promoted_entry.origin = SessionOrigin::SharedPromote;
+        promoted_entry.protocol = protocol;
+        promoted_entry.tcp_flags = tcp_flags;
         publish_shared_session(
             shared.sessions,
             shared.nat_sessions,
@@ -347,7 +373,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     // so the promote leg stamps the install time, not the purge's.
     let shared = shared.with_conntrack_tick(
         shared.conntrack,
-        Tick { ns: promotion.now_ns, secs: shared.tick.secs },
+        Tick::from_ns(promotion.now_ns),
     );
     resolved.metadata = promote_synced_session_with_conntrack(
         sessions,

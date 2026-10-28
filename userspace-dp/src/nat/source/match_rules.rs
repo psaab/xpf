@@ -1257,23 +1257,22 @@ fn match_source_nat_result_for_tuple_inner(
                         Some(iface_allocs),
                     )
                 };
-                let translated = match rule
-                    .pool_allocator
-                    .allocate_translation_with_exclusions_and_zones(
-                        flow,
-                        PoolAddressFamily::V4(&rule.pool_addresses_v4),
-                        0,
-                        rule.address_persistent,
-                        rule.persistent_nat,
-                        rule.persistent_nat_permit,
-                        rule.persistent_permit_epoch,
-                        rule.persistent_nat_timeout_ns,
-                        now_ns,
-                        holder,
-                        flow_egress_scope,
-                        Some(from_zone),
-                        &v4_excluded,
-                    ) {
+                let translated = match rule.pool_allocator.allocate(&AllocRequest {
+                    flow,
+                    family_addresses: PoolAddressFamily::V4(&rule.pool_addresses_v4),
+                    family_offset: 0,
+                    address_persistent: rule.address_persistent,
+                    persistent: rule.persistent_nat.then_some(PersistentParams {
+                        permit: rule.persistent_nat_permit,
+                        epoch: rule.persistent_permit_epoch,
+                        timeout_ns: rule.persistent_nat_timeout_ns,
+                    }),
+                    now_ns,
+                    holder,
+                    egress_scope: flow_egress_scope,
+                    mint_from_zone: Some(from_zone),
+                    excluded: &v4_excluded,
+                }) {
                     Ok(translated) => translated,
                     Err(reason) => {
                         // FOLD (#16350 fold-2): probe advanced past a
@@ -1450,23 +1449,22 @@ fn match_source_nat_result_for_tuple_inner(
                         to_zone,
                     )
                 };
-                let translated = match rule
-                    .pool_allocator
-                    .allocate_translation_with_exclusions_and_zones(
-                        flow,
-                        PoolAddressFamily::V6(&rule.pool_addresses_v6),
-                        v6_offset,
-                        rule.address_persistent,
-                        rule.persistent_nat,
-                        rule.persistent_nat_permit,
-                        rule.persistent_permit_epoch,
-                        rule.persistent_nat_timeout_ns,
-                        now_ns,
-                        holder,
-                        flow_egress_scope,
-                        Some(from_zone),
-                        &v6_excluded,
-                    ) {
+                let translated = match rule.pool_allocator.allocate(&AllocRequest {
+                    flow,
+                    family_addresses: PoolAddressFamily::V6(&rule.pool_addresses_v6),
+                    family_offset: v6_offset,
+                    address_persistent: rule.address_persistent,
+                    persistent: rule.persistent_nat.then_some(PersistentParams {
+                        permit: rule.persistent_nat_permit,
+                        epoch: rule.persistent_permit_epoch,
+                        timeout_ns: rule.persistent_nat_timeout_ns,
+                    }),
+                    now_ns,
+                    holder,
+                    egress_scope: flow_egress_scope,
+                    mint_from_zone: Some(from_zone),
+                    excluded: &v6_excluded,
+                }) {
                     Ok(translated) => translated,
                     Err(reason) => {
                         let reason = if reason == SourceNatFailureReason::AllocatorExhausted
