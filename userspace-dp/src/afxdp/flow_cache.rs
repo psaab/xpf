@@ -117,6 +117,13 @@ pub(super) struct CachedInputFilterLog {
     // so the deferred filter-log AppID resolution skips port-constrained
     // catalog entries for a flowless fragment (synthetic ports 0,0).
     pub(super) l4_present: bool,
+    // #17038: which evaluator produced this record — `Pbr` when the
+    // terminating term is a routing-instance term, else `Input`. Frozen at
+    // capture so a flow-cache replay names the same source the session-MISS
+    // path would have named for the same term (#8114 item 1); before this
+    // field existed the replay hard-coded `Input` and a PBR-steered flow's
+    // `then log` reason byte flipped with cache residency.
+    pub(super) source: super::event_emit::FilterLogSource,
 }
 
 /// Precomputed rewrite descriptor for an established flow.

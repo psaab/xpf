@@ -30,8 +30,10 @@ type ForwardFenceMark struct {
 }
 
 // AdjudicatedTransitMark is the skb mark set by the xpf-usp1 ingress queue
-// classifier for userspace-adjudicated reinjects. Keep this outside the
-// reserved RPM probe range (0x1000 + index).
+// classifier for userspace-adjudicated reinjects. It MUST stay equal to the
+// Rust ADJUDICATED_TRANSIT_MARK (userspace-dp/src/slowpath.rs), which the
+// TC program writes in full. Pinned by TestAdjudicatedTransitMarkMatchesRust.
+// Keep this outside the reserved RPM probe range (0x1000 + index).
 const AdjudicatedTransitMark uint32 = 0x58465001
 
 const AdjudicatedTransitMarkMask uint32 = 0xffffffff

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -881,11 +882,11 @@ func TestVIPSpellingAliasKeepsKernelAddressAndMasterReady(t *testing.T) {
 	initialGarpEpoch := vi.garpEpoch.Load()
 	installFakeVIPNetlink(vi)
 
-	kernelVIPs := map[string]bool{canonicalVIPIdentity(oldVIP): true}
+	kernelVIPs := map[string]bool{config.VRRPVIPIdentity(oldVIP): true}
 	var addCalls, deleteCalls int
 	vi.addrAddFn = func(_ netlink.Link, addr *netlink.Addr) error {
 		addCalls++
-		key := canonicalVIPIdentity(addr.IPNet.String())
+		key := config.VRRPVIPIdentity(addr.IPNet.String())
 		if kernelVIPs[key] {
 			return unix.EEXIST
 		}
@@ -894,7 +895,7 @@ func TestVIPSpellingAliasKeepsKernelAddressAndMasterReady(t *testing.T) {
 	}
 	vi.addrDelFn = func(_ netlink.Link, addr *netlink.Addr) error {
 		deleteCalls++
-		key := canonicalVIPIdentity(addr.IPNet.String())
+		key := config.VRRPVIPIdentity(addr.IPNet.String())
 		if !kernelVIPs[key] {
 			return unix.EADDRNOTAVAIL
 		}
@@ -936,7 +937,7 @@ func TestVIPSpellingAliasKeepsKernelAddressAndMasterReady(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("spelling-only update: %v", err)
 	}
-	if !kernelVIPs[canonicalVIPIdentity(newVIP)] {
+	if !kernelVIPs[config.VRRPVIPIdentity(newVIP)] {
 		t.Fatal("canonical VIP is absent from the fake kernel after the update")
 	}
 	if got := vi.garpEpoch.Load(); got != initialGarpEpoch {
@@ -1003,8 +1004,8 @@ func TestVIPFailedAddFiltersCanonicalAliasesAndRetries(t *testing.T) {
 	const aliasA = "2001:0DB8:0:0::1/64"
 	const aliasB = "2001:db8::1/64"
 	const oldVIP = "2001:db8:1147::99/64"
-	failedID := canonicalVIPIdentity(aliasA)
-	if failedID != canonicalVIPIdentity(aliasB) {
+	failedID := config.VRRPVIPIdentity(aliasA)
+	if failedID != config.VRRPVIPIdentity(aliasB) {
 		t.Fatalf("test aliases do not identify the same VIP: %s vs %s", aliasA, aliasB)
 	}
 
@@ -1015,11 +1016,11 @@ func TestVIPFailedAddFiltersCanonicalAliasesAndRetries(t *testing.T) {
 	vi.setState(StateMaster)
 	installFakeVIPNetlink(vi)
 	vi.addrsFn = func() ([]net.Addr, error) { return nil, nil }
-	kernelVIPs := map[string]bool{canonicalVIPIdentity(oldVIP): true}
+	kernelVIPs := map[string]bool{config.VRRPVIPIdentity(oldVIP): true}
 	var addCalls int
 	vi.addrAddFn = func(_ netlink.Link, addr *netlink.Addr) error {
 		addCalls++
-		id := canonicalVIPIdentity(addr.IPNet.String())
+		id := config.VRRPVIPIdentity(addr.IPNet.String())
 		if id == failedID && addCalls == 1 {
 			return fmt.Errorf("injected AddrAdd failure for %s", addr.IPNet)
 		}
@@ -1027,7 +1028,7 @@ func TestVIPFailedAddFiltersCanonicalAliasesAndRetries(t *testing.T) {
 		return nil
 	}
 	vi.addrDelFn = func(_ netlink.Link, addr *netlink.Addr) error {
-		delete(kernelVIPs, canonicalVIPIdentity(addr.IPNet.String()))
+		delete(kernelVIPs, config.VRRPVIPIdentity(addr.IPNet.String()))
 		return nil
 	}
 
@@ -1068,7 +1069,7 @@ func TestVIPFailedAddFiltersCanonicalAliasesAndRetries(t *testing.T) {
 		t.Error("failed alias add did not mark VIP state diverged")
 	}
 	for _, vip := range vi.vipsSnapshot() {
-		if canonicalVIPIdentity(vip) == failedID {
+		if config.VRRPVIPIdentity(vip) == failedID {
 			t.Errorf("failed binary address leaked into stored set: %v", vi.vipsSnapshot())
 		}
 	}
@@ -1112,7 +1113,7 @@ func TestVIPSpellingAliasDuringReservedBurstDoesNotStrandPending(t *testing.T) {
 	}
 	aliasVips := append([]string(nil), vips...)
 	aliasVips[vipCount-1] = "2001:0DB8:1078:0:0:0:0:10/64"
-	if canonicalVIPIdentity(aliasVips[vipCount-1]) != canonicalVIPIdentity(vips[vipCount-1]) {
+	if config.VRRPVIPIdentity(aliasVips[vipCount-1]) != config.VRRPVIPIdentity(vips[vipCount-1]) {
 		t.Fatalf("test alias does not identify the final VIP: %s vs %s",
 			aliasVips[vipCount-1], vips[vipCount-1])
 	}

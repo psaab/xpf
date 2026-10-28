@@ -14,7 +14,6 @@ import (
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -63,7 +62,12 @@ func (d *Daemon) onSessionSyncPeerConnected() {
 	d.configSyncPushedEpoch = 0
 	d.configSyncPushedGen = 0
 	d.configSyncMu.Unlock()
-	d.hbSuppressStart.Store(0) // fresh connection → reset suppression cap
+	// #17056: the suppression cap stamp now lives in pkg/cluster under
+	// Manager.mu. Publishing this connection's sync object via
+	// SetPeerSyncSource (wireClusterPeerFailoverHooks) resets it, and the
+	// per-connection binding that publish installs on the SessionSync
+	// resets it again on every reconnect dispatch of this handler's
+	// caller (OnPeerConnected), so no reset is needed here.
 
 	// Determine whether this is a true cold start or a routine reconnect.
 	// A cold start means no bulk sync has ever completed during this
@@ -171,59 +175,6 @@ func (d *Daemon) onSessionSyncPeerDisconnected() {
 			d.cluster.SetSyncReady(false)
 		}
 	}
-}
-
-const maxPeerSyncSilence = 2 * time.Second
-
-func (d *Daemon) shouldSuppressPeerHeartbeatTimeout() (bool, string) {
-	ss := d.getSessionSync()
-	if ss == nil || !ss.IsConnected() {
-		d.hbSuppressStart.Store(0) // reset when sync disconnected
-		return false, ""
-	}
-	age, ok := ss.LastPeerReceiveAge()
-	if !ok || age > maxPeerSyncSilence {
-		d.hbSuppressStart.Store(0) // reset when sync goes quiet
-		return false, ""
-	}
-
-	// Cap total suppression duration. During graceful shutdown the peer
-	// may send a bulk sync that keeps LastPeerReceiveAge() fresh for tens
-	// of seconds while heartbeats have already stopped. After 5s of
-	// continuous suppression, stop suppressing so the heartbeat timeout
-	// can fire and trigger failover.
-	//
-	// The window is measured in CLOCK_MONOTONIC nanos (#1792): with
-	// wall-clock UnixNano a backward step left suppression stuck on
-	// (blocking failover for the step duration) and a forward step cut
-	// it short.
-	const maxSuppressDuration = 5 * time.Second
-	now := cluster.MonotonicNanos()
-	start := d.hbSuppressStart.Load()
-	if start == 0 {
-		d.hbSuppressStart.Store(now)
-		start = now
-	}
-	if hbSuppressCapExceeded(start, now, maxSuppressDuration) {
-		return false, ""
-	}
-
-	return true, fmt.Sprintf("session sync connected with recent peer traffic age=%s", age.Truncate(10*time.Millisecond))
-}
-
-// notePeerHeartbeatRecovered ends the current continuous suppression window:
-// a later heartbeat-only gap must receive its own 5s cap (#12165).
-func (d *Daemon) notePeerHeartbeatRecovered() {
-	d.hbSuppressStart.Store(0)
-}
-
-// hbSuppressCapExceeded reports whether continuous heartbeat-timeout
-// suppression that began at startMono has lasted longer than cap by nowMono.
-// Both timestamps are CLOCK_MONOTONIC nanos (cluster.MonotonicNanos), so the
-// cap is immune to wall-clock steps (#1792). Split out so tests can inject
-// timestamps and exercise step scenarios directly.
-func hbSuppressCapExceeded(startMono, nowMono int64, capDur time.Duration) bool {
-	return time.Duration(nowMono-startMono) > capDur
 }
 
 func syncPrimeProgressObserved(current, baseline cluster.SyncStatsSnapshot) bool {
@@ -1089,7 +1040,7 @@ func (d *Daemon) publishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSync
 // genGuardCapacityForRuntime resolves provisioned session capacity for sync
 // guard sizing (#9915 F-044): helper-backed runtimes report aggregate logical
 // sessions via cached status; anything else is a kernel/legacy backend whose
-// BPF tables are addressed to conntrack.MaxSessions (forward sessions = half).
+// BPF tables are addressed to dataplane.MaxSessions (forward sessions = half).
 // Second return is false only when neither applies (nil or unknown status).
 func genGuardCapacityForRuntime(rt dataplane.RuntimeDataPlane) (uint64, bool) {
 	if rt == nil {
@@ -1101,7 +1052,7 @@ func genGuardCapacityForRuntime(rt dataplane.RuntimeDataPlane) (uint64, bool) {
 		}
 		return 0, false
 	}
-	return conntrack.MaxSessions / 2, true
+	return dataplane.MaxSessions / 2, true
 }
 
 // publishFabricRefreshChansIfCurrent installs the fabric refresh channels iff
@@ -1128,12 +1079,17 @@ func (d *Daemon) publishFabricRefreshChansIfCurrent(gen uint64, ch0, ch1 chan st
 // teardown owns that instance.
 func (d *Daemon) unpublishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSync) bool {
 	d.clusterCommsMu.Lock()
-	defer d.clusterCommsMu.Unlock()
-	if gen != d.clusterCommsGen || d.sessionSync != ss {
-		return false
+	removed := gen == d.clusterCommsGen && d.sessionSync == ss
+	if removed {
+		d.sessionSync = nil
 	}
-	d.sessionSync = nil
-	return true
+	d.clusterCommsMu.Unlock()
+	if removed && d.cluster != nil {
+		// #17056: the Manager must stop reading recency from a sync object
+		// this epoch no longer owns.
+		d.cluster.SetPeerSyncSource(nil)
+	}
+	return removed
 }
 
 // syncAddressPollAttempts / syncAddressPollDelay bound the primary sync
@@ -1877,6 +1833,11 @@ func (d *Daemon) stopClusterComms() {
 	// cell a clear fails) and TestStepTwentyIgnoresANeverStartedNode_7072.
 	d.clusterCommsMu.Unlock()
 
+	// #17056: unpublish the sync source with the sync object, so the
+	// Manager's suppression policy cannot read a stopped connection.
+	if d.cluster != nil {
+		d.cluster.SetPeerSyncSource(nil)
+	}
 	if ss != nil {
 		d.stopSyncReadyTimer()
 		ss.Stop()

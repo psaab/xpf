@@ -4082,9 +4082,12 @@ plus — since #6714 — every key of each child, which covers every leaf whose
 flat-set path absorbs the list onto the node itself. `interfaces fab0 fabric-options
 member-interfaces` does not: its schema node is a plain `children: nil` leaf
 with no `args` and no `multi`, so `SetPath` files the whole bracket list as ONE
-child carrying every name on that child's Keys — and `firewallMatchValues`
-would keep only the first. `fabricMemberValues` (`compiler_interfaces.go`)
-therefore descends the subtree and takes EVERY key. The same read is now driven
+child carrying every name on that child's Keys. Since #6714
+`firewallMatchValues` reads every key of each DIRECT child, so it would in
+fact keep every name of that bracket list; what it would not do is DESCEND
+below a child, nor does it take a bare self-repeat on the node's own tail
+as a value. `fabricMemberValues` (`compiler_interfaces.go`) therefore uses
+`plainListValues`, which descends the subtree and takes EVERY key. The same read is now driven
 through `FindChildren("member-interfaces")` rather than `FindChild`, because
 repeated hierarchical statements land as sibling nodes. Before the fold the
 hierarchical bracket spelling and the plain single-value spelling
@@ -6042,16 +6045,24 @@ are indistinguishable. `interface-monitor ge-0/0/0 weight nope;` therefore
 committed clean and installed a monitor that deducts NOTHING on link-down —
 the same silent-nothing class as the dropped statement. It is rejected by
 `validateMonitorWeightTokensAST` (`compiler_chassis_monitor_weight.go`), which
-derives its entries from `monitorEntryNodes` / `monitorWeightTokens` so the gate
-and the compiler can never disagree about which token is a weight or which entry
+derives its entries from `monitorEntryNodes` / `monitorEntryAttrTokens` so the gate
+and the compiler can never disagree about which token is an attribute or which entry
 owns it. Strict at commit, warn on the tolerant load / peer-sync path (#1960).
 
 That gate also settles a spelling-dependent answer: a DUPLICATE weight used to
 compile to 200 inline (`weight 100 weight 200` — the inline scan overwrote) but
 to 100 in a block (`{ weight 100; weight 200; }` — `FindChild` returns the
-first). The compiler is now uniformly first-wins via `monitorWeightTokens`, and
-a duplicate is rejected outright, so no operator is relying on which form they
-happened to write.
+first). The compiler is now uniformly first-wins via `monitorEntryAttrTokens`
+(`monitorWeightTokens` is its weight specialisation), and a duplicate is rejected
+outright, so no operator is relying on which form they happened to write. The
+same duplicate rule covers the #15038 ip-monitoring probe binding: the #17232
+generalisation deleted the first-wins-only `ipMonitorTargetProp` clone and made
+the gate loop over the shared `monitorAttrKeywords` slice (`weight`,
+`interface`, `secondary-ip-address`) that `isMonitorAttrKeyword` encodes, so a
+duplicate `interface` / `secondary-ip-address` on one target is rejected at
+commit and warned on the tolerant path instead of binding the probe
+spelling-dependently. A keyword with no value is not flagged for the binding:
+unlike a weight it compiles to the same empty binding as an absent statement.
 
 **A gate that walks ENTRY LISTS will miss the statement's own PROPERTIES.** The
 weight gate above was first written around `monitorEntryNodes`, which produces
@@ -15476,9 +15487,10 @@ the value sits in a single typed slot:
     nonzero) and unknown-leaf rejection live in `validateFlowAgingStrict`
     (`compiler_validate_strict.go`, dispatched from `compiler.go` with a
     `lenientFlowAging` no-brick downgrade) because the schema walker is
-    single-leaf. **#3440 H1:** watermark aging drives only the Go-side
-    conntrack GC hysteresis, which is skipped on the userspace AF_XDP
-    dataplane (the only runtime forwarding path), so setting any aging knob
+    single-leaf. **#3440 H1:** watermark aging drove only the Go-side
+    conntrack GC hysteresis (`pkg/conntrack`, deleted in #17155; that sweep
+    never ran on the userspace AF_XDP dataplane, the only runtime forwarding
+    path), so setting any aging knob
     emits an accepted-only commit advisory (`compiler_validate_warn.go`,
     `security flow aging ... accepted-only`) — typing the schema only stops
     invalid values from persisting, it does not make the knob enforced.

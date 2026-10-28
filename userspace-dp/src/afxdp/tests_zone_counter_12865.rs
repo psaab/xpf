@@ -96,8 +96,9 @@ fn zone_counter_12865_slow_path_fabric_redirect_credits_intended_egress_zone() {
     crate::afxdp::zone_counters::flush_recorded_zone_counters(
         &forwarding.zone_counter_store,
         &forwarding.zone_counter_slot_map,
+        &forwarding.zone_counter_caches,
     );
-    let rows = forwarding.zone_counter_store.snapshot();
+    let rows = crate::afxdp::zone_counters::zone_counter_snapshot(&forwarding.zone_counter_store);
     eprintln!("probe rows: {:?}", rows);
     let lan = rows
         .iter()
@@ -155,8 +156,9 @@ fn zone_counter_12865_slow_path_double_count_with_populated_shim_zone() {
     crate::afxdp::zone_counters::flush_recorded_zone_counters(
         &forwarding.zone_counter_store,
         &forwarding.zone_counter_slot_map,
+        &forwarding.zone_counter_caches,
     );
-    let rows = forwarding.zone_counter_store.snapshot();
+    let rows = crate::afxdp::zone_counters::zone_counter_snapshot(&forwarding.zone_counter_store);
     eprintln!("P3 rows (one packet, shim ingress_zone=lan): {:?}", rows);
     let lan = rows.iter().find(|r| r.zone_id == TEST_LAN_ZONE_ID);
     assert!(
@@ -210,8 +212,9 @@ fn zone_counter_12865_fast_path_second_packet_credits_intended_egress() {
     crate::afxdp::zone_counters::flush_recorded_zone_counters(
         &forwarding.zone_counter_store,
         &forwarding.zone_counter_slot_map,
+        &forwarding.zone_counter_caches,
     );
-    let rows = forwarding.zone_counter_store.snapshot();
+    let rows = crate::afxdp::zone_counters::zone_counter_snapshot(&forwarding.zone_counter_store);
     eprintln!("P4 rows (punt + session-hit packet): {:?}", rows);
     let wan = rows
         .iter()
@@ -258,8 +261,9 @@ fn zone_counter_12865_fast_path_udp_hit_credits_admission_pair() {
     crate::afxdp::zone_counters::flush_recorded_zone_counters(
         &forwarding.zone_counter_store,
         &forwarding.zone_counter_slot_map,
+        &forwarding.zone_counter_caches,
     );
-    let rows = forwarding.zone_counter_store.snapshot();
+    let rows = crate::afxdp::zone_counters::zone_counter_snapshot(&forwarding.zone_counter_store);
     let lan = rows
         .iter()
         .find(|r| r.zone_id == TEST_LAN_ZONE_ID)

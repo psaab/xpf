@@ -523,22 +523,20 @@ func (s *Server) showSecurityAlarms(cfg *config.Config, topic string, buf *strin
 	}
 
 	if s.dp != nil && s.dp.IsLoaded() {
-		// #3345: track a counter-read failure so a degraded counter bridge
-		// is reported as a warning rather than masquerading as "no alarms".
-		var readErr error
-		readCtr := func(idx uint32) uint64 {
-			v, err := s.dp.ReadGlobalCounter(idx)
-			if err != nil && readErr == nil {
-				readErr = err
-			}
-			return v
+		// #17193: shared snapshot classification. #3345: a genuine failure
+		// still warns; unavailable screen counters simply raise no alarm
+		// and no warning.
+		indexes := make([]uint32, 0, len(dataplane.ScreenReasonCounters))
+		for i := range dataplane.ScreenReasonCounters {
+			indexes = append(indexes, dataplane.ScreenReasonCounters[i].Index)
 		}
+		snap := dataplane.ReadGlobalCounters(s.dp, indexes...)
 		// #3343: iterate the shared screen-reason table so port-scan, ip-sweep,
 		// and session-limit (previously omitted) raise alarms too, and the reason
 		// set matches every other screen-statistics surface.
 		for i := range dataplane.ScreenReasonCounters {
 			rc := &dataplane.ScreenReasonCounters[i]
-			val := readCtr(rc.Index)
+			val, _ := snap.Value(rc.Index)
 			if val > 0 {
 				alarmCount++
 				if detail {
@@ -546,8 +544,8 @@ func (s *Server) showSecurityAlarms(cfg *config.Config, topic string, buf *strin
 				}
 			}
 		}
-		if readErr != nil {
-			fmt.Fprintf(buf, "warning: screen counter read failed (counters may be incomplete): %v\n", readErr)
+		if snap.Err != nil {
+			fmt.Fprintf(buf, "warning: screen counter read failed (counters may be incomplete): %v\n", snap.Err)
 		}
 	}
 
@@ -1048,33 +1046,34 @@ func (s *Server) showScreen(cfg *config.Config, buf *strings.Builder) {
 		}
 		// Per-type drop counters
 		if s.dp != nil && s.dp.IsLoaded() {
-			// #3345: surface a counter-read failure rather than printing a
-			// clean zero that hides a degraded counter bridge.
-			var readErr error
-			readCtr := func(idx uint32) uint64 {
-				v, err := s.dp.ReadGlobalCounter(idx)
-				if err != nil && readErr == nil {
-					readErr = err
-				}
-				return v
+			// #17193: shared snapshot classification. #3345: a genuine
+			// failure still warns; an unavailable total renders
+			// "unavailable", never a fabricated 0.
+			indexes := []uint32{dataplane.GlobalCtrScreenDrops}
+			for i := range dataplane.ScreenReasonCounters {
+				indexes = append(indexes, dataplane.ScreenReasonCounters[i].Index)
 			}
-			totalDrops := readCtr(dataplane.GlobalCtrScreenDrops)
-			fmt.Fprintf(buf, "Total screen drops: %d\n", totalDrops)
-			if totalDrops > 0 {
-				// #3343: shared screen-reason table — port-scan / ip-sweep /
-				// session-limit now appear in the per-reason breakdown.
-				for i := range dataplane.ScreenReasonCounters {
-					rc := &dataplane.ScreenReasonCounters[i]
-					v := readCtr(rc.Index)
-					if v > 0 {
-						fmt.Fprintf(buf, "  %-25s %d\n", rc.Label+":", v)
+			snap := dataplane.ReadGlobalCounters(s.dp, indexes...)
+			if snap.IsUnavailable(dataplane.GlobalCtrScreenDrops) {
+				fmt.Fprintf(buf, "Total screen drops: %s\n", "unavailable")
+			} else {
+				totalDrops, _ := snap.Value(dataplane.GlobalCtrScreenDrops)
+				fmt.Fprintf(buf, "Total screen drops: %d\n", totalDrops)
+				if totalDrops > 0 {
+					// #3343: shared screen-reason table — port-scan / ip-sweep /
+					// session-limit now appear in the per-reason breakdown.
+					for i := range dataplane.ScreenReasonCounters {
+						rc := &dataplane.ScreenReasonCounters[i]
+						if v, ok := snap.Value(rc.Index); ok && v > 0 {
+							fmt.Fprintf(buf, "  %-25s %d\n", rc.Label+":", v)
+						}
 					}
 				}
 			}
 			// #3345: check AFTER all reads (incl. the per-type loop) so a
 			// failure on a late read is surfaced, not just the first.
-			if readErr != nil {
-				fmt.Fprintf(buf, "warning: screen counter read failed (counters may be incomplete): %v\n", readErr)
+			if snap.Err != nil {
+				fmt.Fprintf(buf, "warning: screen counter read failed (counters may be incomplete): %v\n", snap.Err)
 			}
 		}
 	}

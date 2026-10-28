@@ -67,7 +67,7 @@ func newPublishedScanFailure12072(t *testing.T) (*convergenceRun12072, *config.C
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	_, applyErr := r.h.d.applyAndSyncCommitted(c0, c1, peerSyncNever)
+	_, applyErr := r.h.d.applyAndSyncCommittedForTest(c0, c1, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	if applyErr == nil {
 		t.Fatal("published incomplete policy scan did not surface its error")
@@ -158,7 +158,7 @@ func TestPolicyInvalidationFullSessionClearRetiresPublishedScanFailure12072(t *t
 		if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 			t.Fatal(err)
 		}
-		_, applyErr := r.h.d.applyAndSyncCommitted(old, next, peerSyncNever)
+		_, applyErr := r.h.d.applyAndSyncCommittedForTest(old, next, peerSyncNever)
 		r.h.d.applySem.Release(1)
 		if applyErr != nil {
 			t.Fatalf("commit %s after full clear: %v", tc.host, applyErr)

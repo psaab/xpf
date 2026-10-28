@@ -44,18 +44,19 @@ import (
 //
 // SCOPE — which consumers are converted. The three OPERATOR-FACING
 // management surfaces (gRPC, REST, console CLI) route through
-// liveDataPlane. Of the three DATA-PATH consumers, TWO deliberately keep
-// their capture-once wiring and the third resolves from the cell itself:
+// liveDataPlane. Of the two DATA-PATH consumers, ONE deliberately keeps
+// its capture-once wiring and the other resolves from the cell itself:
 //
-//   - conntrack GC (daemon_run.go) and cluster SessionSync
-//     (daemon_ha_sync.go) do not take a RuntimeDataPlane at all — they
-//     take the DECOMPOSED dataplane.SessionStore / dataplane.Telemetry
-//     domains, resolved once by SessionStoreOf/TelemetryOf. Making
-//     those live would put an atomic load, an interface assertion and a
-//     SessionStoreOf allocation on every per-session GC sweep and sync
-//     step; both loops are also lifecycle-scoped to the commsCtx/daemon
-//     ctx that the same code path cancels. These two are the remaining
-//     capture-once wiring.
+//   - cluster SessionSync (daemon_ha_sync.go) does not take a
+//     RuntimeDataPlane at all — it takes the DECOMPOSED
+//     dataplane.SessionStore / dataplane.Telemetry domains, resolved once
+//     by SessionStoreOf/TelemetryOf. Making that live would put an atomic
+//     load, an interface assertion and a SessionStoreOf allocation on
+//     every per-session sync step; the loop is also lifecycle-scoped to
+//     the commsCtx/daemon ctx that the same code path cancels. This is
+//     the remaining capture-once wiring. (The other former capture-once
+//     consumer, the Go conntrack GC, was retired with `pkg/conntrack` in
+//     #17155.)
 //   - the userspace event-stream loop (daemon_ha_userspace_stream.go) is
 //     NOT capture-once: it re-resolves the EventStream provider, the
 //     stream instance and the session-delta drainer from the cell on
@@ -68,7 +69,7 @@ import (
 //     dataplane disown, which is precisely why capture-once was wrong
 //     there.
 //
-// The two capture-once consumers are stated as such in
+// The capture-once consumer is stated as such in
 // pkg/daemon/README.md rather than claimed converted.
 
 // errDataplaneUnpublished is returned by every liveDataPlane forwarder

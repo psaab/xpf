@@ -61,7 +61,7 @@ func TestQinQTwoLevelUnitAndNestedFlatRunRejected(t *testing.T) {
 
 // TestQinQTwoLevelApplyGroupsRejected14683 covers the apply-groups variant:
 // the same two-level unit contributed via a group must be caught after
-// per-node expansion (collectQinQFindingsForNode shares the collector).
+// per-node expansion (collectQinQFindings shares the collector).
 func TestQinQTwoLevelApplyGroupsRejected14683(t *testing.T) {
 	mustReject5879(t, hierTree(t, `groups {
     g1 {
