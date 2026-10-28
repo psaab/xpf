@@ -220,25 +220,24 @@ impl Coordinator {
     /// 1. Teardown: preserve synced sessions + healthy slow path,
     ///    stop workers, 500ms quiesce if workers were live AND a rebind
     ///    follows (snapshot-apply path only — #2522).
-    /// 2. Reset: zero per-binding counter fields.
-    /// 3. Snapshot apply (only if `snapshot.is_some()`): install
+    /// 2. Snapshot apply (only if `snapshot.is_some()`): install
     ///    validation/forwarding state, re-arm slow path, open BPF
     ///    map FDs. Returns early on missing pin / open failure with
     ///    `last_reconcile_stage` + per-binding `last_error` set.
-    /// 4. Bringup: build worker plans, replay preserved synced
+    /// 3. Bringup: build worker plans, replay preserved synced
     ///    sessions, per-worker spawn loop (#925 panic-slot inline),
     ///    start neighbor monitor + local tunnel sources.
-    /// 5. Final `refresh_bindings(bindings)` so the operator-visible
+    /// 4. Final `refresh_bindings(bindings)` so the operator-visible
     ///    `BindingStatus` snapshot reflects the just-spawned workers.
     ///
     /// The `no_snapshot` (config-cleared / shutdown) path returns after
-    /// phase 2 but ALSO runs `refresh_bindings(bindings)` before
+    /// phase 1 but ALSO runs `refresh_bindings(bindings)` before
     /// returning (#2515) — phase 1 stopped every worker, so the refresh
     /// routes each now-workerless slot through `zero_unbound_slot`
-    /// (clearing the bind-mode / socket / capacity fields that the phase
-    /// 2 counter reset leaves untouched) and rebuilds the CoS owner map
-    /// empty. Without it, status commands report torn-down slots as if
-    /// still bound and the CoS owner->worker map keeps stale entries.
+    /// (clearing the bind-mode / socket / capacity fields and every
+    /// per-binding counter) and rebuilds the CoS owner map empty.
+    /// Without it, status commands report torn-down slots as if still
+    /// bound and the CoS owner->worker map keeps stale entries.
     pub fn reconcile(
         &mut self,
         snapshot: Option<&ConfigSnapshot>,
