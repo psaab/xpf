@@ -584,11 +584,28 @@ func TestProbePinFailuresHoldMissingEgress12088(t *testing.T) {
 // TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088
 // protects the close-channel recovery path: the loop must not panic or spin,
 // must establish fresh link and address subscriptions, and must verify all
-// pins after the subscription gap.
+// pins after the subscription gap. It must distinguish restore-time verify
+// from lifetime-end verify (#17064 B1): a verify that only fires when a
+// lifetime ends (before the backoff window, against the dead socket, or on
+// subscribe failure) does not catch pin drift that lands while the socket
+// is down. The gate channels below pin each of those orderings: the
+// restored (second) link subscription blocks inside Subscribe until the
+// test asserts no post-close/pre-restore verify ran, then — once released
+// and therefore live — the test requires the verify count to advance while
+// that restored subscription is still open before cancelling.
 func TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := rpmPinnedTestConfig()
 	var linkSubscriptions, addrSubscriptions, verifyCalls atomic.Int32
+	// restoredLinkEntered fires when the restored (2nd) link subscribe
+	// starts; restoredLinkGate holds it inside Subscribe, so no new
+	// socket is live yet and OnGap cannot have fired for it.
+	restoredLinkEntered := make(chan struct{})
+	restoredLinkGate := make(chan struct{})
+	var restoredOnce sync.Once
+	// The address fake never closes its channel, so the address socket
+	// contributes exactly its initial restore verify and nothing
+	// post-close.
 	d := &Daemon{
 		rpm:                   rpm.New(),
 		daemonCtx:             ctx,
@@ -601,15 +618,17 @@ func TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088(t *te
 			return nil
 		},
 		probePinLinkSubscribe: func(ch chan<- netlink.LinkUpdate, _ <-chan struct{}, _ func(error)) error {
-			if linkSubscriptions.Add(1) == 1 {
+			switch linkSubscriptions.Add(1) {
+			case 1:
 				close(ch)
+			case 2:
+				restoredOnce.Do(func() { close(restoredLinkEntered) })
+				<-restoredLinkGate
 			}
 			return nil
 		},
 		probePinAddrSubscribe: func(ch chan<- netlink.AddrUpdate, _ <-chan struct{}, _ func(error)) error {
-			if addrSubscriptions.Add(1) == 1 {
-				close(ch)
-			}
+			addrSubscriptions.Add(1)
 			return nil
 		},
 	}
@@ -621,38 +640,72 @@ func TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088(t *te
 		d.probePinRetryLoop(ctx)
 	}()
 
-	var completedEarly bool
-	var panicValue any
+	// Wait for both initial subscribes and their restore verifies to
+	// settle: each socket's first successful subscribe fires OnGap, so
+	// exactly the initial verifies are in flight. The link channel is
+	// already closed, so its lifetime has ended; if verify (wrongly)
+	// fired at lifetime end / before backoff, it would appear while the
+	// restored subscribe is still gated below.
 	if !waitUntil(t, 2*time.Second, func() bool {
-		if linkSubscriptions.Load() >= 2 &&
-			addrSubscriptions.Load() >= 2 &&
-			verifyCalls.Load() >= 2 {
-			return true
-		}
-		select {
-		case panicValue = <-loopDone:
-			completedEarly = true
-			return true
-		default:
-			return false
-		}
+		return linkSubscriptions.Load() >= 1 && addrSubscriptions.Load() >= 1 && verifyCalls.Load() >= 1
 	}) {
 		cancel()
-		select {
-		case panicValue = <-loopDone:
-		case <-time.After(2 * time.Second):
-			t.Fatal("probe pin retry loop did not exit after cancellation")
-		}
-		t.Fatalf("closed subscriptions did not each resubscribe and resync: link=%d addr=%d verify=%d",
+		t.Fatalf("initial subscriptions/verifies did not settle: link=%d addr=%d verify=%d",
 			linkSubscriptions.Load(), addrSubscriptions.Load(), verifyCalls.Load())
 	}
-	if completedEarly {
+	select {
+	case panicValue := <-loopDone:
 		t.Fatalf("probe pin retry loop exited before recovery (panic=%v)", panicValue)
+	default:
+	}
+
+	// The closed link socket must trigger a resubscribe attempt. While
+	// that restored subscribe is gated (no live socket, OnGap not yet
+	// fired), the verify count must not advance beyond the settled
+	// initial verifies: any advance here is a lifetime-end, pre-restore
+	// or failed-subscribe verify (the B1 regression). B1's post-runOne
+	// signal fires within ~1ms of the close, so 100ms is ample for it
+	// to land; a settle delay also absorbs the initial OnGap verifies.
+	select {
+	case <-restoredLinkEntered:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatalf("closed link subscription did not resubscribe: link=%d", linkSubscriptions.Load())
+	case panicValue := <-loopDone:
+		t.Fatalf("probe pin retry loop exited before link resubscribe (panic=%v)", panicValue)
+	}
+	// Snapshot after a settle window that also lets any erroneous
+	// lifetime-end verify (signalled ~1 backoff after the close) drain
+	// through the single select.
+	time.Sleep(100 * time.Millisecond)
+	verifyBeforeRestore := verifyCalls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := verifyCalls.Load(); got != verifyBeforeRestore {
+		close(restoredLinkGate)
+		cancel()
+		t.Fatalf("verify ran before the restored link subscription was live (lifetime-end/pre-restore verify): before=%d after=%d link=%d", verifyBeforeRestore, got, linkSubscriptions.Load())
+	}
+
+	// Release the restored subscribe: it now succeeds, OnGap fires, and
+	// verify must advance while this restored subscription is still
+	// live (its channel is never closed) and before any cancellation.
+	close(restoredLinkGate)
+	if !waitUntil(t, 2*time.Second, func() bool {
+		return verifyCalls.Load() > verifyBeforeRestore
+	}) {
+		cancel()
+		t.Fatalf("no verify while restored link subscription was live: verify=%d want > %d link=%d addr=%d",
+			verifyCalls.Load(), verifyBeforeRestore, linkSubscriptions.Load(), addrSubscriptions.Load())
+	}
+	select {
+	case panicValue := <-loopDone:
+		t.Fatalf("probe pin retry loop exited while restored subscription was live (panic=%v)", panicValue)
+	default:
 	}
 
 	cancel()
 	select {
-	case panicValue = <-loopDone:
+	case panicValue := <-loopDone:
 		if panicValue != nil {
 			t.Fatalf("probe pin retry loop panicked after subscription close: %v", panicValue)
 		}
@@ -662,11 +715,11 @@ func TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088(t *te
 	if got := linkSubscriptions.Load(); got < 2 {
 		t.Fatalf("link subscription count = %d, want resubscription", got)
 	}
-	if got := addrSubscriptions.Load(); got < 2 {
-		t.Fatalf("address subscription count = %d, want resubscription", got)
+	if got := addrSubscriptions.Load(); got < 1 {
+		t.Fatalf("address subscription count = %d, want initial subscription", got)
 	}
-	if got := verifyCalls.Load(); got < 2 {
-		t.Fatalf("verify calls = %d, want a resync after each subscription is restored", got)
+	if got := verifyCalls.Load(); got <= verifyBeforeRestore {
+		t.Fatalf("verify calls = %d, want a resync while the restored subscription is live (> %d)", got, verifyBeforeRestore)
 	}
 }
 

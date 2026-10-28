@@ -629,14 +629,14 @@ func (d *Daemon) stopPinRetryLoop() {
 	d.pinRetryWg.Wait()
 }
 
-// probePinRetryLoop verifies pins on link/address notifications and on the
-// periodic fallback. A missing pin is held on notification/reconcile and
+// probePinRetryLoop verifies pins on link/address notifications and on
+// the periodic fallback. A missing pin is held on notification/reconcile and
 // restored on the next retry tick; once healthy, the loop remains active as
 // long as pins are configured so later kernel deletions are detected.
-// probePinRetryLoop verifies pins on link/address notifications and on
-// the periodic fallback (#17064: both subscriptions now run as nlWatch
-// lifetimes via probePinWatchPair; the ticker, per-socket retry timers
-// and receive-error fan-in are Watch arms on that pair).
+// #17064: both subscriptions run as nlWatch lifetimes via
+// probePinWatchPair; (re)subscribe gaps and receive errors fan into
+// verifyProbePinsForAll and link/address events fan into the per-pin
+// verifies, all through probePinWatchPair's single select.
 func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 	d.probePinWatchPair(ctx)
 	// Every clean ctx exit clears the active flag (ticker-done exit
@@ -682,18 +682,23 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 	}
 	events := make(chan rpmEvent, 64)
 	subErrors := make(chan struct{}, 1)
-	onError := func(err error) {
+	signalVerify := func() {
 		// nlWatch logs under the watcher name; RPM additionally fans
-		// the gap into a full pin verification (original behaviour).
+		// every subscription gap (successful (re)subscribe via OnGap,
+		// receive error via OnReceiveError) into a full pin verification,
+		// preserving the baseline restored-success verify. Non-blocking:
+		// a pending signal already guarantees a verify, so coalesced
+		// gaps need no queue.
 		select {
 		case subErrors <- struct{}{}:
 		default:
 		}
 	}
-	// makeWatch builds a lifetime runner for one socket. It reports
-	// closed/failure via the returned retry channel pattern: the runner
-	// goroutine runs nlWatch.runOne repeatedly with its own backoff and
-	// forwards events; resubscribe success triggers verifyAll via onGap.
+	onError := func(err error) { signalVerify() }
+	// runSocket owns one socket's lifetimes: the goroutine runs
+	// nlWatch.runOne repeatedly with its own backoff and forwards
+	// events; nlWatch fires OnGap (signalVerify) after every
+	// successful (re)subscribe, including the first.
 	runSocket := func(isAddr bool) (stop func()) {
 		done := make(chan struct{})
 		go func() {
@@ -717,7 +722,7 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 						Enabled: func() bool {
 							return d.probePinVerifyFn() != nil
 						},
-						OnGap: func() {},
+						OnGap: signalVerify,
 						OnEvent: func(u netlink.LinkUpdate) {
 							select {
 							case events <- rpmEvent{link: u}:
@@ -735,7 +740,7 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 						Enabled: func() bool {
 							return d.probePinVerifyFn() != nil
 						},
-						OnGap: func() {},
+						OnGap: signalVerify,
 						OnEvent: func(u netlink.AddrUpdate) {
 							select {
 							case events <- rpmEvent{isAddr: true, addr: u}:
@@ -747,14 +752,10 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 				if !retry {
 					return
 				}
-				// Resubscribe will happen after backoff; on success the
-				// next lifetime's verifyAll is triggered by signalling
-				// the error fan-in (same observable effect as original:
-				// a restored subscription verifies all pins).
-				select {
-				case subErrors <- struct{}{}:
-				default:
-				}
+				// No verify here: nlWatch fires OnGap (signalVerify)
+				// only after the next successful (re)subscribe, so
+				// pin drift during the backoff window is caught at
+				// restore and failed subscribes do not spam verifyAll.
 				timer := time.NewTimer(backoff)
 				select {
 				case <-ctx.Done():
