@@ -485,6 +485,16 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
+		// Multi-value readers consume child Keys but never recurse into the
+		// child's Children. Refuse both non-empty and empty child blocks so
+		// the gate cannot accept content that compilation silently drops.
+		if leafSchema.refuseNonLeafBlockChildren && (len(c.Children) > 0 || !c.IsLeaf) {
+			err := nestedMultiValueContentErrorf(path, leafName, c.Keys[0])
+			if vc.recordTypedLeaf(err) {
+				continue
+			}
+			return err
+		}
 		if len(c.Keys) > 1 && !leafSchema.allChildKeysAreValues {
 			err := typedLeafErrorf(path, "only one value per statement inside a value block; write %q as separate statements (%s { %s; %s; }) or a bracket list (%s [ %s %s ])", strings.Join(c.Keys, " "), leafName, c.Keys[0], c.Keys[1], leafName, c.Keys[0], c.Keys[1])
 			if vc.recordTypedLeaf(err) {

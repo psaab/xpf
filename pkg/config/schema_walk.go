@@ -51,6 +51,105 @@ func walkSchemaChildren(nodes []*Node, parent *schemaNode, path []string, vc *wa
 	}
 	return nil
 }
+// nestedMultiValueContentErrorf rejects a child block under a multi-value
+// leaf. Such a leaf has no declared children, and its readers consume only
+// each direct child's keys; accepting a block there would silently discard
+// every grandchild. This follows the same fail-closed value-list convention
+// as validateMultiValueLeaf's refusal of ambiguous multi-token block rows.
+func nestedMultiValueContentErrorf(path []string, leafName, value string) error {
+	return typedLeafErrorf(path,
+		"nested content under %s value %q is unsupported; the value-list reader does not descend into child blocks, so the nested statement would be silently dropped",
+		leafName, value)
+}
+
+// findNestedMultiValueContentError scans the schema-recognized portions of an
+// expanded tree for nested blocks under multi-value leaves. It is also called
+// from compileTree, which must reject this one data-loss shape even on direct
+// and lenient compiler entry points that do not make SchemaValidate fatal.
+func findNestedMultiValueContentError(nodes []*Node, parent *schemaNode, path []string) error {
+	if parent == nil {
+		return nil
+	}
+	for _, node := range nodes {
+		if node == nil || len(node.Keys) == 0 {
+			continue
+		}
+		keyword := node.Keys[0]
+		childSchema := resolveSchemaChild(parent, keyword)
+		if childSchema == nil {
+			continue
+		}
+		if childSchema.refuseNonLeafBlockChildren {
+			leafPath := append(path, keyword)
+			for _, child := range node.Children {
+				if child == nil || len(child.Keys) == 0 || (len(child.Children) == 0 && child.IsLeaf) {
+					continue
+				}
+				return nestedMultiValueContentErrorf(leafPath, keyword, child.Keys[0])
+			}
+			continue
+		}
+
+		pathLen := len(path)
+		consumed, descendSchema := consumeNodeKeys(node.Keys, childSchema)
+		path = append(path, node.Keys[:consumed]...)
+		missingArgs := 1 + childSchema.args - consumed
+		if missingArgs > 0 && !childSchema.compoundKey {
+			err := findNestedMultiValueContentInInstances(node.Children, childSchema, missingArgs, path)
+			path = path[:pathLen]
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
+		walkChildren := node.Children
+		if keyword == "qualified-next-hop" {
+			walkChildren = expandRunChildren9235(walkChildren, childSchema)
+		}
+		if childSchema.packedTail && len(node.Keys) > consumed {
+			walkChildren = packedBodyChildren(node, childSchema)
+		} else if childSchema.packedFlatRun && len(node.Children) > 0 {
+			walkChildren = expandFlatRun(node.Children, childSchema)
+		}
+		err := findNestedMultiValueContentError(walkChildren, descendSchema, path)
+		path = path[:pathLen]
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// findNestedMultiValueContentInInstances peels hierarchical named-instance
+// keys before resuming the schema scan at that instance's child statements.
+func findNestedMultiValueContentInInstances(nodes []*Node, containerSchema *schemaNode, remaining int, path []string) error {
+	if containerSchema == nil || remaining <= 0 {
+		return nil
+	}
+	for _, node := range nodes {
+		if node == nil || len(node.Keys) == 0 {
+			continue
+		}
+		pathLen := len(path)
+		consumed := len(node.Keys)
+		if consumed > remaining {
+			consumed = remaining
+		}
+		path = append(path, node.Keys[:consumed]...)
+		var err error
+		if stillMissing := remaining - consumed; stillMissing > 0 {
+			err = findNestedMultiValueContentInInstances(node.Children, containerSchema, stillMissing, path)
+		} else {
+			err = findNestedMultiValueContentError(node.Children, containerSchema, path)
+		}
+		path = path[:pathLen]
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // walkSchemaNode matches a single AST node against the current schema
 // level (parent), validates it if it resolves to a typed leaf, then
@@ -349,7 +448,18 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// because this leaf has no validator to validate it with.
 	if childSchema.multi && childSchema.children == nil && exactMatch {
 		for _, c := range node.Children {
-			if c == nil || len(c.Keys) <= 1 {
+			if c == nil || len(c.Keys) == 0 {
+				continue
+			}
+			if childSchema.refuseNonLeafBlockChildren && (len(c.Children) > 0 || !c.IsLeaf) {
+				leafPath := append(append([]string(nil), path...), keyword)
+				err := nestedMultiValueContentErrorf(leafPath, keyword, c.Keys[0])
+				if vc.recordTypedLeaf(err) {
+					continue
+				}
+				return err
+			}
+			if len(c.Keys) <= 1 {
 				continue
 			}
 			leafPath := append(append([]string(nil), path...), keyword)

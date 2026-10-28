@@ -46,6 +46,12 @@ type schemaNode struct {
 	// only for leaves whose compiler reads just the child name; as-path-prepend
 	// sets this because firewallMatchValues consumes each child key.
 	allChildKeysAreValues bool
+	// refuseNonLeafBlockChildren opts a multi-value leaf whose compiler reads
+	// direct child keys but never descends into a child block into rejecting
+	// that nested content. It is intentionally set only on such readers:
+	// other multi leaves can have their own nested grammar (proxy-ARP address
+	// ranges are one example).
+	refuseNonLeafBlockChildren bool
 	// blockChildValidator, when set on a `multi && children == nil` typed
 	// leaf, validates each hierarchical block-list child token
 	// (`leaf { v; }`) instead of validator. Packed Keys
