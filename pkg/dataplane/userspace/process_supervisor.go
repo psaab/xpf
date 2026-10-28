@@ -381,6 +381,7 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	// test in the package — takeoverReadyLocked's first gate among them — reads
 	// the truth.
 	m.proc = nil
+	m.procSup = nil
 	m.resetAfterHelperGoneLocked()
 
 	exitCode, signal := g.exitCodeAndSignal()
