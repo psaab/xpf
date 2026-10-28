@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"sync/atomic"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -137,7 +136,7 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 }
 
 // genGuardMapCap is the ABSOLUTE CEILING for the per-side EFFECTIVE guard
-// caps: half of conntrack.MaxSessions, which counts forward+reverse entries
+// caps: half of dataplane.MaxSessions, which counts forward+reverse entries
 // while guard keys are forward sessions (#9915 F-044). Nothing reads it
 // directly except maxCap()'s clamp; every map goes through sentCap()/recvCap().
 //
@@ -209,7 +208,7 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 //   - Sender: above the cap a new key was not stamped, so its delete went out
 //     with generation 0. After an overflow, a missing stamp now draws a fresh
 //     generation (takeDeleteGenV4).
-const genGuardMapCap = conntrack.MaxSessions / 2
+const genGuardMapCap = dataplane.MaxSessions / 2
 
 // genGuardMapDefaultCap is the starting effective cap: the pre-#9915 static
 // value. Growth past it is strictly demand-driven (full-of-live), so quiet

@@ -380,7 +380,6 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
 | `pkg/daemon/` | Daemon lifecycle (TTY detection, signal handling) |
 | `pkg/cluster/` | Chassis cluster HA (state machine, session sync, config sync, IPsec SA sync) |
 | `pkg/cli/` | Interactive Junos-style CLI |
-| `pkg/conntrack/` | Session garbage collection (with HA delete sync callbacks) |
 | `pkg/logging/` | Ring buffer reader, event buffer, syslog client |
 | `pkg/dhcp/` | DHCPv4/DHCPv6 clients |
 | `pkg/frr/` | FRR config generation + managed section in frr.conf |
@@ -615,7 +614,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   30ms default advertisement; compiler-default private-RG election suppresses
   RETH VRRP. Bondless RETH uses `RethToPhysical` resolution and per-node
   virtual MACs. Private-RG election is the default, with incremental session
-  sync (1s sweep + ring buffer + GC delete callbacks), config sync (RG0
+  sync (1s sweep + ring buffer + helper session-delta deletes), config sync (RG0
   primary → secondary, `${node}` variable quoting, authority enforced on
   reconnect #78), IPsec SA sync, fabric cross-chassis forwarding, and ISSU
   (`compileChassis` in `pkg/config/compiler_chassis.go` — `PrivateRGElection` default;

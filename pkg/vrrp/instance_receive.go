@@ -89,10 +89,6 @@ func (d *arrivalIfindexDetector) observe(arrivalIfindex, expectedIfindex int) bo
 	return true
 }
 
-// count returns how many unreported-arrival adverts have been observed, across
-// all occurrences rather than only the first.
-func (d *arrivalIfindexDetector) count() uint64 { return d.occurrences.Load() }
-
 var unreportedArrivalIfindex arrivalIfindexDetector
 
 func acceptArrivalIfindex(arrivalIfindex, expectedIfindex int) bool {

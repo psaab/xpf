@@ -338,7 +338,7 @@ pub(crate) struct PolicyEvaluationResult {
     pub(crate) log_session_close: bool,
     /// #3227: the matched application term's per-application inactivity (idle)
     /// timeout in SECONDS, carried so the session-install path can stamp it so
-    /// the conntrack GC ages the session out on the app's value instead of the
+    /// the helper's expiry ages the session out on the app's value instead of the
     /// global per-protocol timeout. `None` means "use the global timeout"
     /// (the default-action path and any non-app-timeout match), which is
     /// byte-identical to pre-#3227 behavior.
@@ -1196,7 +1196,7 @@ pub(crate) struct ApplicationMatch {
     /// `Some(t)` (t > 0) overrides the global per-protocol session timeout for a
     /// flow admitted by this term; `None` (or 0) leaves the global timeout in
     /// effect (back-compat). Carried from the matched term into the session at
-    /// install so the conntrack GC ages the session out on the app's value.
+    /// install so the helper's expiry ages the session out on the app's value.
     pub(crate) inactivity_timeout: Option<u32>,
 }
 
@@ -2159,8 +2159,14 @@ impl PolicyState {
 
     pub(crate) fn rule_binding_by_stable_id(&self, rule_id: &str) -> Option<(u32, &PolicyRule)> {
         let index = *self.rule_id_to_index.get(rule_id)?;
-        let counter_idx = u32::try_from(index + 1).ok()?;
-        Some((counter_idx, self.rules.get(index)?))
+        // `index` is a live rule-table position: `rule_id_to_index` is built
+        // by enumerating `self.rules` at snapshot build, so
+        // `counter_handle(index)` cannot saturate onto the reserved
+        // default-policy handle here (that would need ~4.29e9 live rules;
+        // see `DEFAULT_POLICY_COUNTER_IDX`). The previous independent
+        // fallible `index + 1` conversion's failure arm was therefore
+        // unreachable for a live rule.
+        Some((counter_handle(index), self.rules.get(index)?))
     }
     /// Resolve a stable rule ID to the CURRENT snapshot's counter and index.
     /// Unknown identities never fall back to a positional index.
@@ -3958,6 +3964,90 @@ pub(crate) fn count_policy_evaluation_result(
     result
 }
 
+/// #3073/#17100: the 1-based hit-counter handle for the rule at `idx`,
+/// paired with the decoder in `PolicyState::hit_counter_by_idx` (which
+/// resolves `handle - 1` back into `rules`). `0` stays reserved for "no
+/// counter", so rule index 0 carries handle 1. This is the ONLY site that
+/// encodes the handle: every tier of both policy walkers stamps it through
+/// `TierWalk::step`, `note_skipped_frag_deny` records it through here, and
+/// the stable-ID rebinding path (`rule_binding_by_stable_id`, used by HA
+/// session import and worker reconcile) resolves it through here, so a
+/// per-rule semantic change lands in exactly one place.
+#[inline]
+fn counter_handle(idx: usize) -> u32 {
+    (idx as u32).saturating_add(1)
+}
+
+/// #17100: the shared per-rule tier step for both policy walkers
+/// (`evaluate_policy_result_counted` and
+/// `evaluate_junos_host_policy_l3_aware_at_with_hit_count`). The tiers
+/// themselves still differ per walker — the index source (exact pair,
+/// NoRoute deny-only, the from-any/to-any merge, both-any, global with its
+/// scope pre-filter, and the host walker's exact/from-any/host-scoped
+/// global tiers) and each walker's post-walk default posture stay at the
+/// call sites — but the per-rule body is ONE semantics: try the match,
+/// stamp the 1-based counter handle, apply the #4569 frag-deny override
+/// and count (#12226 count-after-override), or note a skipped frag-deny.
+/// Before this extraction that body was copy-pasted at 8 sites and every
+/// per-rule change was an 8-site lockstep edit; the #4569 fix landing in
+/// the transit walker only (host walker fail-open until #6465) is the
+/// defect that structure shipped.
+struct TierWalk<'a> {
+    state: &'a PolicyState,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    l4_present: bool,
+    hit_count: PolicyHitCount,
+    scheduler_expired: bool,
+    /// The first port-bearing DENY skipped only for `l4_present == false`,
+    /// carried across tiers in precedence order (#4569/#6465). Read by the
+    /// walker's post-walk fall-through once the tiers are exhausted.
+    skipped_frag_deny: Option<SkippedFragDeny>,
+}
+
+impl TierWalk<'_> {
+    /// One rule of a tier walk: `Some(result)` decides the flow (the caller
+    /// returns it, wrapping in `Some(..)` on the host walker); `None`
+    /// continues to the next rule/tier.
+    #[inline(always)]
+    fn step(&mut self, idx: usize) -> Option<PolicyEvaluationResult> {
+        let rule = &self.state.rules[idx];
+        match try_match_rule(
+            rule,
+            self.state,
+            self.src_ip,
+            self.dst_ip,
+            self.protocol,
+            self.src_port,
+            self.dst_port,
+            self.packet_icmp,
+            self.l4_present,
+            self.scheduler_expired,
+            !self.l4_present && self.skipped_frag_deny.is_none(),
+        ) {
+            RuleMatchOutcome::Matched(mut result) => {
+                result.policy_counter_idx = counter_handle(idx);
+                Some(apply_frag_deny_override_and_count(
+                    result,
+                    self.skipped_frag_deny,
+                    rule,
+                    self.packet_len,
+                    self.hit_count,
+                ))
+            }
+            RuleMatchOutcome::Miss(reason) => {
+                note_skipped_frag_deny(&mut self.skipped_frag_deny, rule, idx, reason);
+                None
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn evaluate_policy_result_counted(
     state: &PolicyState,
@@ -4037,7 +4127,20 @@ fn evaluate_policy_result_counted(
     // (src, dst, frag-id) that remembers the first-fragment's exact verdict is
     // the deferred principled fix (#4569). On the NoRoute path the same
     // association applies within the eligible tiers above.
-    let mut skipped_frag_deny: Option<SkippedFragDeny> = None;
+    let mut walk = TierWalk {
+        state,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        hit_count,
+        scheduler_expired,
+        skipped_frag_deny: None,
+    };
     // #16021: `to_id == 0` with an unresolved egress is the NoRoute shape;
     // every other `to_id == 0` caller is a resolved unzoned egress, denied
     // below without a walk.
@@ -4068,39 +4171,8 @@ fn evaluate_policy_result_counted(
             let key = zone_pair_key(from_id, to_id);
             if let Some(indices) = state.zone_pair_index.get(&key) {
                 for &idx in indices {
-                    match try_match_rule(
-                        &state.rules[idx],
-                        state,
-                        src_ip,
-                        dst_ip,
-                        protocol,
-                        src_port,
-                        dst_port,
-                        packet_icmp,
-                        l4_present,
-                        scheduler_expired,
-                        !l4_present && skipped_frag_deny.is_none(),
-                    ) {
-                        RuleMatchOutcome::Matched(mut result) => {
-                            // #3073: 1-based handle so the fast path can re-count
-                            // every packet of this flow against the same counter.
-                            result.policy_counter_idx = (idx as u32).saturating_add(1);
-                            return apply_frag_deny_override_and_count(
-                                result,
-                                skipped_frag_deny,
-                                &state.rules[idx],
-                                packet_len,
-                                hit_count,
-                            );
-                        }
-                        RuleMatchOutcome::Miss(reason) => {
-                            note_skipped_frag_deny(
-                                &mut skipped_frag_deny,
-                                &state.rules[idx],
-                                idx,
-                                reason,
-                            );
-                        }
+                    if let Some(result) = walk.step(idx) {
+                        return result;
                     }
                 }
             }
@@ -4114,37 +4186,8 @@ fn evaluate_policy_result_counted(
             // adjudicated), and the walk continues past them.
             if let Some(indices) = state.exact_pair_deny_by_from.get(&from_id) {
                 for &idx in indices {
-                    match try_match_rule(
-                        &state.rules[idx],
-                        state,
-                        src_ip,
-                        dst_ip,
-                        protocol,
-                        src_port,
-                        dst_port,
-                        packet_icmp,
-                        l4_present,
-                        scheduler_expired,
-                        !l4_present && skipped_frag_deny.is_none(),
-                    ) {
-                        RuleMatchOutcome::Matched(mut result) => {
-                            result.policy_counter_idx = (idx as u32).saturating_add(1);
-                            return apply_frag_deny_override_and_count(
-                                result,
-                                skipped_frag_deny,
-                                &state.rules[idx],
-                                packet_len,
-                                hit_count,
-                            );
-                        }
-                        RuleMatchOutcome::Miss(reason) => {
-                            note_skipped_frag_deny(
-                                &mut skipped_frag_deny,
-                                &state.rules[idx],
-                                idx,
-                                reason,
-                            );
-                        }
+                    if let Some(result) = walk.step(idx) {
+                        return result;
                     }
                 }
             }
@@ -4199,61 +4242,13 @@ fn evaluate_policy_result_counted(
                 j += 1;
                 v
             };
-            match try_match_rule(
-                &state.rules[idx],
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        &state.rules[idx],
-                        packet_len,
-                        hit_count,
-                    );
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return result;
             }
         }
         for &idx in &state.both_any_indices {
-            match try_match_rule(
-                &state.rules[idx],
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        &state.rules[idx],
-                        packet_len,
-                        hit_count,
-                    );
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return result;
             }
         }
         for &idx in &state.global_indices {
@@ -4283,33 +4278,8 @@ fn evaluate_policy_result_counted(
             if !rule.global_from_zone.matches(from_id) || !to_ok {
                 continue;
             }
-            match try_match_rule(
-                rule,
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    // #3073: 1-based handle (see zone-pair branch above).
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        rule,
-                        packet_len,
-                        hit_count,
-                    );
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, rule, idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return result;
             }
         }
     }
@@ -4367,7 +4337,7 @@ fn evaluate_policy_result_counted(
     // default-DENY/REJECT already drops, so the override only matters for
     // default-permit; when no deny was skipped this is inert (the L4 path never
     // records one).
-    if let Some(deny) = skipped_frag_deny
+    if let Some(deny) = walk.skipped_frag_deny
         && matches!(state.default_action, PolicyAction::Permit)
     {
         return frag_associated_deny_result(deny);
@@ -4706,8 +4676,21 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
         return None;
     }
     // #6465: fragment-association fail-closed, mirroring
-    // `evaluate_policy_result_l3_aware` (#4569) — inert on the L4 path.
-    let mut skipped_frag_deny: Option<SkippedFragDeny> = None;
+    // `evaluate_policy_result_counted` (#4569) — inert on the L4 path.
+    let mut walk = TierWalk {
+        state,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        hit_count,
+        scheduler_expired,
+        skipped_frag_deny: None,
+    };
     // Most-specific first: an exact `from-zone <ingress> to-zone junos-host`
     // pair before the `from-zone any to-zone junos-host` wildcard. The
     // `from_id != 0` conjunct is the remainder of the old entry guard: zone
@@ -4719,32 +4702,8 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
         && let Some(indices) = state.zone_pair_index.get(&key)
     {
         for &idx in indices {
-            match try_match_rule(
-                &state.rules[idx],
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return Some(apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        &state.rules[idx],
-                        packet_len,
-                        hit_count,
-                    ));
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return Some(result);
             }
         }
     }
@@ -4760,32 +4719,8 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
     // management lifeline.
     if let Some(indices) = state.from_any_index.get(&JUNOS_HOST_ZONE_ID) {
         for &idx in indices {
-            match try_match_rule(
-                &state.rules[idx],
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return Some(apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        &state.rules[idx],
-                        packet_len,
-                        hit_count,
-                    ));
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return Some(result);
             }
         }
     }
@@ -4808,32 +4743,8 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
         if !rule.global_to_zone.is_host_scope() || !rule.global_from_zone.matches(from_id) {
             continue;
         }
-        match try_match_rule(
-            rule,
-            state,
-            src_ip,
-            dst_ip,
-            protocol,
-            src_port,
-            dst_port,
-            packet_icmp,
-            l4_present,
-            scheduler_expired,
-            !l4_present && skipped_frag_deny.is_none(),
-        ) {
-            RuleMatchOutcome::Matched(mut result) => {
-                result.policy_counter_idx = (idx as u32).saturating_add(1);
-                return Some(apply_frag_deny_override_and_count(
-                    result,
-                    skipped_frag_deny,
-                    rule,
-                    packet_len,
-                    hit_count,
-                ));
-            }
-            RuleMatchOutcome::Miss(reason) => {
-                note_skipped_frag_deny(&mut skipped_frag_deny, rule, idx, reason);
-            }
+        if let Some(result) = walk.step(idx) {
+            return Some(result);
         }
     }
     // #6465: the junos-host fall-through is "no implicit default-deny" — an
@@ -4844,7 +4755,7 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
     // fragment-associated DROP (attributed to the skipped DENY) instead of
     // None. When no deny was skipped this is inert — and the L4 path never
     // records one, so the lifeline is byte-identical there.
-    if let Some(deny) = skipped_frag_deny {
+    if let Some(deny) = walk.skipped_frag_deny {
         return Some(frag_associated_deny_result(deny));
     }
     None
@@ -5078,7 +4989,7 @@ fn note_skipped_frag_deny(
             policy_id: rule.policy_id,
             log_session_init: rule.log_session_init,
             log_session_close: rule.log_session_close,
-            policy_counter_idx: (idx as u32).saturating_add(1),
+            policy_counter_idx: counter_handle(idx),
         });
     }
 }
