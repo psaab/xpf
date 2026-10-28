@@ -444,40 +444,6 @@ now_secs: u64,) -> bool {
     true
 }
 
-/// #15958b round-5 r6: is `ifindex`'s routing instance the scope
-/// `table` names? The interface's RI is read from its egress row's
-/// routing instance via the ifindex->RI ledger the FIB builder
-/// maintains (`ifindex_to_routing_instance` / egress table name);
-/// default scope (None) admits only default-instance interfaces.
-/// Unknown ifindex: not in scope (never claim cross-RI ownership
-/// from an unattributed interface).
-pub(in crate::afxdp) fn interface_in_table_scope(
-    forwarding: &ForwardingState,
-    ifindex: i32,
-    table: Option<&str>,
-) -> bool {
-    let instance = forwarding
-        .ifindex_to_routing_instance
-        .get(&ifindex)
-        .map(String::as_str)
-        .unwrap_or("");
-    let Some(want) = table else {
-        return instance.is_empty();
-    };
-    // Exact match (fib.rs `instance_owns_table_*` precedent): the
-    // instance owns exactly `<instance>.inet.0` / `<instance>.inet6.0`
-    // (length + suffix), so "tenant-a" never matches "tenant-ab...".
-    if instance.is_empty() {
-        return want == "inet.0" || want == "inet6.0";
-    }
-    (want.len() == instance.len() + ".inet.0".len()
-        && want.starts_with(instance)
-        && &want[instance.len()..] == ".inet.0")
-        || (want.len() == instance.len() + ".inet6.0".len()
-            && want.starts_with(instance)
-            && &want[instance.len()..] == ".inet6.0")
-}
-
 /// #15958b: the RG that owns `target` as a connected destination:
 /// the redundancy group of the interface whose connected prefix
 /// contains the address (per-address ownership, not per-zone —
@@ -485,6 +451,7 @@ pub(in crate::afxdp) fn interface_in_table_scope(
 /// `connected_*_by_ifindex` is populated for every interface
 /// regardless of HA suppression, so a peer-owned connected prefix
 /// still names its owner here. 0 when no connected prefix matches.
+#[cfg(test)]
 pub(in crate::afxdp) fn connected_owner_rg_for_target(
     forwarding: &ForwardingState,
     target: IpAddr,
@@ -501,149 +468,73 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
     target: IpAddr,
     table: Option<&str>,
 ) -> i32 {
-    // #16217: indexed fast path. When the forwarding state carries
-    // the build-time connected-owner index, probe it (longest
-    // prefix down). `Hit` is authoritative; on `Hit`/`Miss` the
-    // answer below comes only from the interface-NAT/local tail
-    // (Source 2), never from re-scanning the connected rows.
-    // Note: `Hit(0)` — a matched prefix whose interface carries no
-    // RG — is the legacy scan's FINAL answer for that target: the
-    // scan populates `best`, returns its rg, and never reaches
-    // Source 2 either. Preserve that: only `Miss` falls through.
-    let indexed = forwarding.connected_owner_index_lookup(target, table);
-    if let Some(crate::afxdp::ConnectedOwnerIndex::Hit(rg)) = indexed {
-        return rg;
-    }
-    // A Miss is authoritative only when the index was built from
-    // the CURRENT row sets. Production builds the index once per
-    // forwarding-state build (after the connected vecs are final),
-    // so it is; unit fixtures that push connected/ledger rows AFTER
-    // `build_forwarding_state` would otherwise read a stale Miss
-    // and skip rows the legacy scan sees. Detect that cheaply: the
-    // index records how many FIB+ledger rows it was built from
-    // (`connected_owner_index_rows`); a mismatch falls back to the
-    // exact legacy scan below.
-    let index_miss = matches!(
-        indexed,
-        Some(crate::afxdp::ConnectedOwnerIndex::Miss)
-    ) && forwarding.connected_owner_index_current();
-    // Source 1 (legacy scan): connected_* rows (the FIB's own
-    // connected route structs: prefix + ifindex) — longest prefix
-    // wins. Skipped entirely when the index already answered Miss.
-    let mut best: Option<(u8, i32)> = None;
-    if !index_miss {
-    match target {
-        IpAddr::V4(ip) => {
-            for row in &forwarding.connected_v4 {
-                let want_table = table.unwrap_or("inet.0");
-                if row.table != want_table && !row.table.is_empty() {
-                    continue;
-                }
-                if row.prefix.contains(ip) {
-                    let len = row.prefix.prefix_len();
-                    if best.is_none_or(|(best_len, _)| len >= best_len) {
-                        best = Some((len, owner_rg_for_flow(forwarding, row.ifindex)));
-                    }
-                }
-            }
-            if best.is_none() {
-                // Ledger WITH RI filter (round-5 r6): peer-owned
-                // named-RI prefixes exist ONLY here (the FIB row is
-                // suppressed), so scoped lookups must consult it —
-                // filtered to interfaces whose routing instance is
-                // the session's table (default scope: default RIs).
-                for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
-                    if !interface_in_table_scope(forwarding, *ifindex, table) {
-                        continue;
-                    }
-                    for prefix in prefixes {
-                        if prefix.contains(ip) {
-                            let len = prefix.prefix_len();
-                            if best.is_none_or(|(best_len, _)| len >= best_len) {
-                                best = Some((len, owner_rg_for_flow(forwarding, *ifindex)));
-                            }
-                        }
-                    }
-                }
+    // #17053: Source 1 is the canonical LPM (#15917) over the FIB
+    // rows then the ledger — longest prefix wins and equal-length
+    // ties pick the LOWEST ifindex, so the answer no longer depends
+    // on Vec/FastMap iteration order. `Hit(0)` (matched prefix whose
+    // interface has no RG) is final, exactly as the legacy scan's
+    // populated `best` was: only a no-match falls through to
+    // Source 2.
+    // #17053 + #16217: when the build-time index is current, its
+    // probe IS the canonical RowsThenLedger answer (owner RG at
+    // build time); use it and skip the scan. A current `Miss` is
+    // likewise authoritative: skip Source 1 entirely and go
+    // straight to Source 2 (the pre-PR shortcut — the common
+    // routed/WAN flow-cache-hit case must not pay a linear
+    // connected scan per hit). A stale or absent index (unit
+    // fixtures that push rows after the build) falls back to the
+    // canonical LPM below — same answer, old scan cost.
+    let index_current = forwarding.connected_owner_index_current();
+    match forwarding.connected_owner_index_lookup(target, table) {
+        Some(crate::afxdp::ConnectedOwnerIndex::Hit(rg)) if index_current => {
+            return rg;
+        }
+        Some(crate::afxdp::ConnectedOwnerIndex::Miss) if index_current => {
+            // Current Miss: no connected prefix contains the target;
+            // skip Source 1, straight to Source 2 below.
+        }
+        _ => {
+            // #17053 fold (Rev18099 F1): the dispatcher returns
+            // `Option` so a matched winner is final EVEN when its
+            // owner RG is 0 (missing egress row / RG 0) — exactly
+            // the index's `Hit(0)` and the legacy scan's populated
+            // `best`. Only `None` (no match) reaches Source 2.
+            if let Some(ifindex) = crate::afxdp::forwarding::connected_lpm_ifindex(
+                forwarding,
+                target,
+                table,
+                crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+            ) {
+                return crate::afxdp::forwarding::owner_rg_for_flow(forwarding, ifindex);
             }
         }
-        IpAddr::V6(ip) => {
-            for row in &forwarding.connected_v6 {
-                let want_table = table.unwrap_or("inet6.0");
-                if row.table != want_table && !row.table.is_empty() {
-                    continue;
-                }
-                if row.prefix.contains(ip) {
-                    let len = row.prefix.prefix_len();
-                    if best.is_none_or(|(best_len, _)| len >= best_len) {
-                        best = Some((len, owner_rg_for_flow(forwarding, row.ifindex)));
-                    }
-                }
-            }
-            if best.is_none() {
-                // Ledger WITH RI filter (round-5 r6): peer-owned
-                // named-RI prefixes exist ONLY here (the FIB row is
-                // suppressed), so scoped lookups must consult it —
-                // filtered to interfaces whose routing instance is
-                // the session's table (default scope: default RIs).
-                for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
-                    if !interface_in_table_scope(forwarding, *ifindex, table) {
-                        continue;
-                    }
-                    for prefix in prefixes {
-                        if prefix.contains(ip) {
-                            let len = prefix.prefix_len();
-                            if best.is_none_or(|(best_len, _)| len >= best_len) {
-                                best = Some((len, owner_rg_for_flow(forwarding, *ifindex)));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    }
-    if let Some((_, rg)) = best {
-        return rg;
     }
     // Source 2: the interface-NAT local table (an interface address
-    // IS its own connected /32) and the local-address sets: the
-    // target is this node's own interface address; its owner is that
-    // interface's RG.
+    // IS its own connected /32): the target is this node's own
+    // interface address; its owner is that interface's RG.
     match target {
         IpAddr::V4(ip) => {
             if let Some(by_table) = forwarding.interface_nat_v4.get(&ip) {
-                // Scoped by the session table: the map is keyed by
-                // table name; only the session's table entry (or the
-                // canonical default) may claim the address.
                 let want = table.unwrap_or("inet.0");
-                for (table_name, ifindex) in by_table.iter() {
+                for (table_name, nat_ifindex) in by_table.iter() {
                     if table_name != want {
                         continue;
                     }
-                    let rg = owner_rg_for_flow(forwarding, *ifindex);
+                    let rg = crate::afxdp::forwarding::owner_rg_for_flow(forwarding, *nat_ifindex);
                     if rg > 0 {
                         return rg;
                     }
                 }
             }
-            if forwarding.local_v4.contains(&ip) {
-                // Owning interface unknown from the set alone; fall
-                // through to unknown (0) rather than guessing an RG.
-                return 0;
-            }
         }
         IpAddr::V6(ip) => {
             if let Some(by_table) = forwarding.interface_nat_v6.get(&ip) {
-                // Scoped by the session table: the map is keyed by
-                // table name; only the session's table entry (or the
-                // canonical default) may claim the address.
                 let want = table.unwrap_or("inet6.0");
-                for (table_name, ifindex) in by_table.iter() {
+                for (table_name, nat_ifindex) in by_table.iter() {
                     if table_name != want {
                         continue;
                     }
-                    let rg = owner_rg_for_flow(forwarding, *ifindex);
+                    let rg = crate::afxdp::forwarding::owner_rg_for_flow(forwarding, *nat_ifindex);
                     if rg > 0 {
                         return rg;
                     }
@@ -675,6 +566,7 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
 /// serving `target` (the destination's own LAN interface), by
 /// longest connected prefix across the FIB connected rows and the
 /// by-ifindex ledger. 0 when no connected prefix serves it.
+#[cfg(test)]
 pub(in crate::afxdp) fn connected_ifindex_for_target(
     forwarding: &ForwardingState,
     target: IpAddr,
@@ -684,73 +576,23 @@ pub(in crate::afxdp) fn connected_ifindex_for_target(
 
 /// RI-scoped connected ifindex (round-5); see
 /// `connected_owner_rg_for_target_in_table`.
+///
+/// #17053: delegates to the canonical LPM (#15917) in fib.rs —
+/// longest prefix wins, equal-length ties pick the LOWEST ifindex.
+/// The per-family twins and the divergent session_glue scan are
+/// gone; this wrapper only fixes the `RowsThenLedger` source set.
 pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
     forwarding: &ForwardingState,
     target: IpAddr,
     table: Option<&str>,
 ) -> i32 {
-    let mut best: Option<(u8, i32)> = None;
-    match target {
-        IpAddr::V4(ip) => {
-            for row in &forwarding.connected_v4 {
-                let want_table = table.unwrap_or("inet.0");
-                if row.table != want_table && !row.table.is_empty() {
-                    continue;
-                }
-                if row.prefix.contains(ip) {
-                    let len = row.prefix.prefix_len();
-                    if best.is_none_or(|(best_len, _)| len >= best_len) {
-                        best = Some((len, row.ifindex));
-                    }
-                }
-            }
-            if best.is_none() {
-                for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
-                    if !interface_in_table_scope(forwarding, *ifindex, table) {
-                        continue;
-                    }
-                    for prefix in prefixes {
-                        if prefix.contains(ip) {
-                            let len = prefix.prefix_len();
-                            if best.is_none_or(|(best_len, _)| len >= best_len) {
-                                best = Some((len, *ifindex));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        IpAddr::V6(ip) => {
-            for row in &forwarding.connected_v6 {
-                let want_table = table.unwrap_or("inet6.0");
-                if row.table != want_table && !row.table.is_empty() {
-                    continue;
-                }
-                if row.prefix.contains(ip) {
-                    let len = row.prefix.prefix_len();
-                    if best.is_none_or(|(best_len, _)| len >= best_len) {
-                        best = Some((len, row.ifindex));
-                    }
-                }
-            }
-            if best.is_none() {
-                for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
-                    if !interface_in_table_scope(forwarding, *ifindex, table) {
-                        continue;
-                    }
-                    for prefix in prefixes {
-                        if prefix.contains(ip) {
-                            let len = prefix.prefix_len();
-                            if best.is_none_or(|(best_len, _)| len >= best_len) {
-                                best = Some((len, *ifindex));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    best.map(|(_, ifindex)| ifindex).unwrap_or(0)
+    crate::afxdp::forwarding::connected_lpm_ifindex(
+        forwarding,
+        target,
+        table,
+        crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+    )
+    .unwrap_or(0)
 }
 
 /// RI-scoped re-home (round-5): the connected-interface test runs
@@ -794,7 +636,7 @@ pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_scoped_15958b(
 /// five production callers (which compute `dest_rg` themselves)
 /// can re-home routed destinations. `destination_owner_unknown`
 /// is `dest_rg == 0`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_16524(
     forwarding: &ForwardingState,
     stored: ForwardingResolution,
@@ -817,7 +659,7 @@ pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_16524(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn rehome_or_retain_fabric_redirect_inner(
     forwarding: &ForwardingState,
     stored: ForwardingResolution,

@@ -1261,7 +1261,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition_and_knob(
     allow_reverse_policy: bool,
     ha_state: BTreeMap<i32, HAGroupRuntime>,
@@ -10706,7 +10706,7 @@ fn install_pptp_association_9298(
         .expect("fixture: the PPTP association must install")
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn publish_pptp_gre_session_9298(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -12157,7 +12157,6 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn poll_descriptor_untranslated_v4_error_admission_knob_impl(
     install_session: bool,
     cross_zone_arrival: bool,

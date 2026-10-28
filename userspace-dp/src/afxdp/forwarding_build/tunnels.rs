@@ -59,7 +59,8 @@ pub(super) fn populate_tunnel_endpoints(
         // the snapshot closed rather than wrapping (256→0 blackholes the
         // tunnel).
         let ttl = super::validated::TunnelTtl::try_from_snapshot(endpoint.ttl, endpoint.id)?.get();
-        let is_wireguard = endpoint.mode == "wireguard";
+        let kind = tunnel_mode_kind(&endpoint.mode);
+        let is_wireguard = kind == TunnelKind::WireGuard;
         // #16514: carry the tunnel logical MTU (configured
         // `interfaces gr-… [unit N] mtu`) into the runtime endpoint so
         // `native_gre_inner_mtu` can cap the physical-derived budget.
@@ -160,6 +161,7 @@ pub(super) fn populate_tunnel_endpoints(
                 interface: endpoint.interface.clone(),
                 redundancy_group: endpoint.redundancy_group,
                 mode: endpoint.mode.clone(),
+                kind,
                 outer_family,
                 source,
                 destination,
@@ -197,7 +199,7 @@ pub(super) fn populate_tunnel_endpoints(
         // (outer_family, source, destination); the decap lookup queries
         // with the received frame's mirrored (addr_family, outer_dst,
         // outer_src).
-        if tunnel_mode_kind(&endpoint.mode) == TunnelKind::Gre {
+        if kind == TunnelKind::Gre {
             state
                 .gre_decap_index
                 .entry((outer_family, source, destination))
@@ -211,11 +213,14 @@ pub(super) fn populate_tunnel_endpoints(
     Ok(())
 }
 
-/// #2327: the typed kind of a tunnel-endpoint `mode` string. Centralizes
-/// the kind classification that the decap index, the egress encap
-/// dispatcher, and the GRE supervision paths all rely on, so a future
-/// tunnel kind is added in exactly one place and the egress dispatcher's
-/// fail-closed `_ =>` arm cannot silently treat it as GRE.
+/// #2327/#17199: the typed kind of a tunnel-endpoint `mode` string.
+/// Centralizes the kind classification that the decap index, the egress
+/// encap dispatcher, and the GRE supervision paths all rely on, so a
+/// future tunnel kind is added in exactly one place and the egress
+/// dispatcher's fail-closed `_ =>` arm cannot silently treat it as GRE.
+/// This is the ONLY place a tunnel `mode` string is compared against
+/// mode literals (guarded by the #17199 source-scan test); every other
+/// consumer MUST read `TunnelEndpoint.kind`, decoded once here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::afxdp) enum TunnelKind {
     /// `gre` / `ip6gre` — native GRE encapsulation/decapsulation.
@@ -228,9 +233,10 @@ pub(in crate::afxdp) enum TunnelKind {
     Unknown,
 }
 
-/// Classify a tunnel-endpoint `mode` string into a `TunnelKind`. Mirrors
-/// the canonical GRE-kind test used across the supervision paths
-/// (`mode == "gre" || mode == "ip6gre"`).
+/// Classify a tunnel-endpoint `mode` string into a `TunnelKind`. The
+/// sole string-to-kind decoder: `populate_tunnel_endpoints` stores the
+/// result on `TunnelEndpoint.kind` and `hydrate_wg_identity` gates on
+/// it for snapshot rows; no other site compares a `mode` string.
 pub(in crate::afxdp) fn tunnel_mode_kind(mode: &str) -> TunnelKind {
     match mode {
         "gre" | "ip6gre" => TunnelKind::Gre,
@@ -304,7 +310,7 @@ pub(in crate::afxdp) fn wg_peers_eq(a: &[WgRuntimePeer], b: &[WgRuntimePeer]) ->
 pub(in crate::afxdp) fn hydrate_wg_identity(
     row: &crate::protocol::snapshot::TunnelEndpointSnapshot,
 ) -> Option<WgRowIdentity> {
-    if row.mode != "wireguard" {
+    if tunnel_mode_kind(&row.mode) != TunnelKind::WireGuard {
         return None;
     }
     // A WG tunnel with no listen port cannot bind a socket and is
@@ -675,6 +681,298 @@ mod wg_endpoint_shape_7158_tests {
             checked >= 20,
             "only {checked} fixture cases were checked; the file is supposed to \
              cover literals, hostnames, port rules and malformed hosts"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tunnel_kind_17199_tests {
+    use super::*;
+
+    fn snapshot_with_mode(mode: &str) -> crate::protocol::ConfigSnapshot {
+        let mut snap = crate::protocol::ConfigSnapshot::default();
+        snap.tunnel_endpoints = vec![crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id: 9,
+            interface: "gr-0/0/0".into(),
+            ifindex: 50,
+            mode: mode.into(),
+            source: "203.0.113.1".into(),
+            destination: "198.51.100.1".into(),
+            ttl: 64,
+            ..Default::default()
+        }];
+        snap
+    }
+
+    /// #17199 acceptance: an Unknown-mode endpoint is classified ONCE as
+    /// `TunnelKind::Unknown` on the populated endpoint, is absent from
+    /// the GRE decap index, and is absent from `tunnel_outer_egress_rgs`
+    /// (the pre-fix binary string split put it in the GRE arm there).
+    /// FAIL-ON-REVERT: restoring a WireGuard-vs-else split in
+    /// `forwarding_build/mod.rs` puts id 9 back in the outer-RG map.
+    #[test]
+    fn unknown_mode_endpoint_is_unknown_and_absent_from_outer_rg_17199() {
+        let snap = snapshot_with_mode("ipip");
+        let state = crate::afxdp::forwarding_build::build_forwarding_state(&snap);
+        let ep = state
+            .tunnel_endpoints
+            .get(&9)
+            .expect("unknown-mode endpoint must still populate (show/telemetry)");
+        assert_eq!(ep.kind, TunnelKind::Unknown);
+        assert!(
+            state
+                .gre_decap_index
+                .values()
+                .all(|ids| !ids.contains(&9)),
+            "unknown endpoint must not be in the GRE decap index"
+        );
+        assert!(
+            !state.tunnel_outer_egress_rgs.contains_key(&9),
+            "unknown endpoint must be absent from tunnel_outer_egress_rgs"
+        );
+        // MSS: unknown kind yields 0, not the GRE formula.
+        let decision = crate::afxdp::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 9,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: crate::afxdp::NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        assert_eq!(
+            crate::afxdp::forwarding::tunnel_tcp_mss(&state, &decision, 4),
+            0,
+            "unknown endpoint must not get the GRE MSS"
+        );
+    }
+
+    /// #17199: GRE and WireGuard rows still classify and populate their
+    /// kind-specific state (positive control for the cell above).
+    #[test]
+    fn gre_mode_endpoint_is_gre_and_indexed_17199() {
+        let snap = snapshot_with_mode("gre");
+        let state = crate::afxdp::forwarding_build::build_forwarding_state(&snap);
+        assert_eq!(state.tunnel_endpoints[&9].kind, TunnelKind::Gre);
+        assert!(
+            state
+                .gre_decap_index
+                .values()
+                .any(|ids| ids.contains(&9)),
+            "GRE endpoint must be in the decap index"
+        );
+    }
+
+    /// #17199 guard: no production `.rs` file under `src/` may compare a
+    /// tunnel `mode` string against a mode literal outside the sole decoder
+    /// `tunnel_mode_kind`. The earlier form matched only six exact `mode ==/!=`
+    /// needles and skipped any file whose name contained `test`, so
+    /// `m.as_str() != "gre"`, `contains("gre")`, `"gre" == endpoint.mode`,
+    /// spacing / line-break variants, and whole production files with a
+    /// test-looking name all passed green. This broadened scan takes the
+    /// opposite shape (review NEEDS-FOLD on #18264): a production-context
+    /// occurrence of a tunnel-mode literal `"wireguard"|"gre"|"ip6gre"` is a
+    /// violation unless its `(rel,line)` site is allowlisted below with a
+    /// reason. The literal set is deliberately that small — `"gre"` also
+    /// names the IP protocol / host-inbound service, so every allowlist entry
+    /// must say why that hit is not a tunnel-mode compare. Production context
+    /// means: the file is not a `#[cfg(test)]`-declared fixture per
+    /// `crate::test_support::source_scan::cfg_test_modules` (the declaration
+    /// graph, not the basename — a `*test*` production file stays scanned)
+    /// and the line is outside any inline `#[cfg(test)]` module
+    /// (`blank_cfg_test_modules`). Comments are scanned on purpose: a
+    /// commented-out mode compare is still drift bait.
+    /// FAIL-ON-REVERT: reverting to the exact-needle scan, or adding any raw
+    /// mode compare outside `tunnel_mode_kind`, makes this red.
+    #[test]
+    fn no_raw_tunnel_mode_string_compares_outside_ssot_17199() {
+        use crate::test_support::source_scan::{
+            afxdp_rs_files, blank_cfg_test_modules, cfg_test_modules,
+        };
+        // True iff `line` combines a tunnel-mode literal with a compare-ish
+        // token against a `.mode` receiver — the reviewer's evasion class
+        // (as_str / contains / reversed / spaced forms). This is the
+        // RED-proving predicate: on its own it would have caught the two
+        // mutants below even where they do not sit on an allowlisted site.
+        fn compare_like(line: &str) -> bool {
+            let lit = ["\"wireguard\"", "\"gre\"", "\"ip6gre\""]
+                .iter()
+                .any(|l| line.contains(l));
+            if !lit {
+                return false;
+            }
+            // Receiver side: any `mode` mention (field, `.mode`, spaced
+            // `endpoint. mode`, `mode.as_str()`, `tunnel_mode`, a local named
+            // `mode`/`m_mode`). Whitespace inside a field access is legal
+            // Rust, so keying on `.mode` alone would miss `endpoint. mode`.
+            let modeish = line.contains("mode");
+            let cmp = [
+                "==",
+                "!=",
+                ".contains(",
+                "matches!",
+                ".eq(",
+                ".starts_with(",
+                ".ends_with(",
+            ]
+            .iter()
+            .any(|c| line.contains(c));
+            modeish && cmp
+        }
+        // Non-vacuity for `compare_like`: every evasion form the old scan
+        // missed must be recognised, and plain mode authoring must not be.
+        for probe in [
+            "if endpoint.mode.as_str() != \"gre\" { return; }",
+            "if m.mode.contains(\"gre\") { return; }",
+            "if \"gre\" == endpoint.mode { return; }",
+            "if endpoint. mode == \"wireguard\" { return; }",
+            "matches!(iface.tunnel_mode.as_str(), \"gre\" | \"ip6gre\")",
+        ] {
+            assert!(
+                compare_like(probe),
+                "compare_like missed evasion form: {probe}"
+            );
+        }
+        for probe in [
+            "mode: \"gre\".to_string(),",
+            "ep.mode = \"wireguard\".to_string();",
+            "\"gre\" | \"ip6gre\" => TunnelKind::Gre,",
+        ] {
+            assert!(
+                !compare_like(probe),
+                "compare_like flagged plain authoring: {probe}"
+            );
+        }
+        // Allowlisted production literal sites: (rel, needle, reason). `needle`
+        // must occur on the hit line; a new literal at an unlisted site — or a
+        // compare_like line anywhere, listed or not — is a violation. Reasons
+        // are per-hit, not per-file, so an entry cannot hide a future compare
+        // elsewhere in the same file beyond lines matching its needle.
+        const ALLOWED: &[(&str, &str, &str)] = &[
+            // Sole string-to-kind decoder: its match arms ARE the SSOT.
+            (
+                "afxdp/forwarding_build/tunnels.rs",
+                "\"gre\" | \"ip6gre\" =>",
+                "SSOT match arm in tunnel_mode_kind",
+            ),
+            (
+                "afxdp/forwarding_build/tunnels.rs",
+                "\"wireguard\" =>",
+                "SSOT match arm in tunnel_mode_kind",
+            ),
+            (
+                "afxdp/forwarding_build/tunnels.rs",
+                "must be \"wireguard\"",
+                "hydrate_wg_identity doc restating the SSOT gate, not a compare",
+            ),
+            // IP protocol names, not tunnel modes: proto 47 decoder + doc.
+            (
+                "ip_proto.rs",
+                "\"gre\" | \"junos-gre\"",
+                "IP-protocol name decoder (proto 47), not a tunnel mode",
+            ),
+            (
+                "ip_proto.rs",
+                "\"gre\"",
+                "IP-protocol name doc comment, not a tunnel mode",
+            ),
+            // InterfaceSnapshot.tunnel_mode is snapshot DATA classified by the
+            // Go builder (protocol v65), not a TunnelEndpoint.mode: the GRE-input
+            // filter exemption has no Rust TunnelKind for interface rows, so it
+            // matches the snapshot string directly. Not an endpoint compare.
+            (
+                "filter/compiler.rs",
+                "tunnel_mode.as_str()",
+                "InterfaceSnapshot.tunnel_mode (snapshot data) GRE-input gate; no TunnelKind exists for interface rows",
+            ),
+            // Host-inbound system-service token "gre" (proto-47 service name).
+            (
+                "afxdp/forwarding/host_inbound.rs",
+                "\"gre\"",
+                "host-inbound system-service token, not a tunnel mode",
+            ),
+            (
+                "protocol/snapshot.rs",
+                "\"gre\"/\"ip6gre\"/\"wireguard\"/\"ipip\"",
+                "TunnelEndpointSnapshot mode field doc, not a compare",
+            ),
+            // This guard's own literals, probes, allowlist and messages.
+            (
+                "afxdp/forwarding_build/tunnels.rs",
+                "\"wireguard\"",
+                "this guard's literal set / probes / allowlist",
+            ),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let fixtures = cfg_test_modules(&root);
+        let mut files = Vec::new();
+        afxdp_rs_files(&root, &mut files);
+        files.sort();
+        assert!(files.len() > 50, "scan found only {} files", files.len());
+        let mut violations = Vec::new();
+        let mut production_files = 0usize;
+        let mut compared = 0usize;
+        for path in &files {
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if fixtures.contains(&rel) {
+                continue;
+            }
+            production_files += 1;
+            let src = std::fs::read_to_string(path).expect("read rs");
+            // Blank only inline #[cfg(test)] bodies; comments stay scanned.
+            let prod = blank_cfg_test_modules(&src);
+            for (lineno, line) in prod.lines().enumerate() {
+                if !["\"wireguard\"", "\"gre\"", "\"ip6gre\""]
+                    .iter()
+                    .any(|l| line.contains(l))
+                {
+                    continue;
+                }
+                if compare_like(line) {
+                    compared += 1;
+                    // The one legitimate production compare-shape: the snapshot
+                    // interface gate above, allowlisted by its receiver.
+                    if !(rel == "filter/compiler.rs" && line.contains("tunnel_mode.as_str()")) {
+                        violations.push(format!("{rel}:{}: {}", lineno + 1, line.trim()));
+                        continue;
+                    }
+                }
+                let allowed = ALLOWED
+                    .iter()
+                    .any(|(r, needle, _)| *r == rel && line.contains(needle));
+                if !allowed {
+                    violations.push(format!("{rel}:{}: {}", lineno + 1, line.trim()));
+                }
+            }
+        }
+        // Anti-vacuity: the gate must actually have walked production files and
+        // seen the known snapshot-interface compare it deliberately allows.
+        assert!(
+            production_files > 50,
+            "scan walked only {production_files} production files"
+        );
+        assert!(
+            compared >= 1,
+            "scan saw no compare-like line; its literal set is blind"
+        );
+        assert!(
+            violations.is_empty(),
+            "raw tunnel-mode string compares / unallowlisted tunnel-mode literals outside tunnel_mode_kind (#17199):\n{}",
+            violations.join("\n")
         );
     }
 }

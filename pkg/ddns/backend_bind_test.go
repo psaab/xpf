@@ -24,7 +24,7 @@ import (
 // rfc2136 backend installs the custom dialer.
 
 func TestResolveBindConfigEmptyIsNoBinding(t *testing.T) {
-	b, err := resolveBindConfig(&config.DHCPDynamicDNSConfig{}, nil)
+	b, err := resolveBindConfig(config.RFC2136Endpoint{}, nil)
 	if err != nil {
 		t.Fatalf("empty config: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestResolveBindConfigEmptyIsNoBinding(t *testing.T) {
 }
 
 func TestResolveBindConfigSourceAddress(t *testing.T) {
-	b, err := resolveBindConfig(&config.DHCPDynamicDNSConfig{SourceAddress: "10.0.0.9"}, nil)
+	b, err := resolveBindConfig(config.RFC2136Endpoint{SourceAddress: "10.0.0.9"}, nil)
 	if err != nil {
 		t.Fatalf("source-address: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestResolveBindConfigSourceAddress(t *testing.T) {
 }
 
 func TestResolveBindConfigInvalidSourceAddressRejected(t *testing.T) {
-	if _, err := resolveBindConfig(&config.DHCPDynamicDNSConfig{SourceAddress: "not-an-ip"}, nil); err == nil {
+	if _, err := resolveBindConfig(config.RFC2136Endpoint{SourceAddress: "not-an-ip"}, nil); err == nil {
 		t.Fatal("an invalid source-address must be rejected (the manager then falls back to no-op + counts it)")
 	}
 }
@@ -94,9 +94,9 @@ func TestResolveBindConfigDestInterfaceWinsOverVRF(t *testing.T) {
 	// via the committed config's SSOT resolver so SO_BINDTODEVICE targets a real
 	// device (#5070).
 	resolve := bindTestConfig().ResolveKernelIfName
-	b, err := resolveBindConfig(&config.DHCPDynamicDNSConfig{
+	b, err := resolveBindConfig(config.RFC2136Endpoint{
 		DestinationInterface: "ge-0/0/2",
-		RoutingInstance:      "WAN",
+		RoutingInstance: "WAN",
 	}, resolve)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -111,7 +111,7 @@ func TestResolveBindConfigDestInterfaceWinsOverVRF(t *testing.T) {
 }
 
 func TestResolveBindConfigVRFOnlyBindsVRFDevice(t *testing.T) {
-	b, err := resolveBindConfig(&config.DHCPDynamicDNSConfig{RoutingInstance: "WAN"}, bindTestConfig().ResolveKernelIfName)
+	b, err := resolveBindConfig(config.RFC2136Endpoint{RoutingInstance: "WAN"}, bindTestConfig().ResolveKernelIfName)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -137,27 +137,27 @@ func TestResolveBindConfigResolvesKernelDevices(t *testing.T) {
 		want string
 	}{
 		// bare physical → slash-substituted.
-		{"physical", config.DHCPDynamicDNSConfig{DestinationInterface: "ge-0/0/2"}, "ge-0-0-2"},
+		{"physical", config.DHCPDynamicDNSConfig{RFC2136Endpoint: config.RFC2136Endpoint{DestinationInterface: "ge-0/0/2"}}, "ge-0-0-2"},
 		// unit-0 collapse: ".0" is stripped (kernel has no ".0" subif).
-		{"unit-0-collapse", config.DHCPDynamicDNSConfig{DestinationInterface: "ge-0/0/2.0"}, "ge-0-0-2"},
+		{"unit-0-collapse", config.DHCPDynamicDNSConfig{RFC2136Endpoint: config.RFC2136Endpoint{DestinationInterface: "ge-0/0/2.0"}}, "ge-0-0-2"},
 		// unit# ≠ vlan-id: unit 50 carries vlan-id 80, kernel subif is ".80".
-		{"unit-neq-vlanid", config.DHCPDynamicDNSConfig{DestinationInterface: "ge-0/0/2.50"}, "ge-0-0-2.80"},
+		{"unit-neq-vlanid", config.DHCPDynamicDNSConfig{RFC2136Endpoint: config.RFC2136Endpoint{DestinationInterface: "ge-0/0/2.50"}}, "ge-0-0-2.80"},
 		// reth → its LOCAL physical member (no bonded "reth1" kernel device).
-		{"reth", config.DHCPDynamicDNSConfig{DestinationInterface: "reth1"}, "ge-0-0-1"},
+		{"reth", config.DHCPDynamicDNSConfig{RFC2136Endpoint: config.RFC2136Endpoint{DestinationInterface: "reth1"}}, "ge-0-0-1"},
 		// reth VLAN unit → member's VLAN subif (reth0 member ge-0/0/3, vlan-id 100).
-		{"reth-vlan-unit", config.DHCPDynamicDNSConfig{DestinationInterface: "reth0.100"}, "ge-0-0-3.100"},
+		{"reth-vlan-unit", config.DHCPDynamicDNSConfig{RFC2136Endpoint: config.RFC2136Endpoint{DestinationInterface: "reth0.100"}}, "ge-0-0-3.100"},
 		// RI-only → vrf-<name> master (no resolver needed for this half).
-		{"ri-only", config.DHCPDynamicDNSConfig{RoutingInstance: "WAN"}, "vrf-WAN"},
+		{"ri-only", config.DHCPDynamicDNSConfig{RFC2136Endpoint: config.RFC2136Endpoint{RoutingInstance: "WAN"}}, "vrf-WAN"},
 		// #16664: instance "vrf-red" → vrf-vrf-red (prefix unconditional);
 		// "vrf-red" alone is sibling instance "red".
-		{"ri-vrf-prefixed-instance", config.DHCPDynamicDNSConfig{RoutingInstance: "vrf-red"}, "vrf-vrf-red"},
+		{"ri-vrf-prefixed-instance", config.DHCPDynamicDNSConfig{RFC2136Endpoint: config.RFC2136Endpoint{RoutingInstance: "vrf-red"}}, "vrf-vrf-red"},
 		// control: sibling "red" still binds its own device.
-		{"ri-bare-sibling-control", config.DHCPDynamicDNSConfig{RoutingInstance: "red"}, "vrf-red"},
+		{"ri-bare-sibling-control", config.DHCPDynamicDNSConfig{RFC2136Endpoint: config.RFC2136Endpoint{RoutingInstance: "red"}}, "vrf-red"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := tc.cfg
-			b, err := resolveBindConfig(&cfg, resolve)
+			b, err := resolveBindConfig(cfg.RFC2136Endpoint, resolve)
 			if err != nil {
 				t.Fatalf("resolve: %v", err)
 			}
@@ -176,7 +176,10 @@ func TestResolveBindConfigResolvesKernelDevices(t *testing.T) {
 // and uses the injectable netlink seam so the test needs no real interface.
 func TestNewRFC2136UpdaterValidatesBindDeviceExists(t *testing.T) {
 	pol := policyFromConfig(&config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", UpdateServer: "192.0.2.53:53",
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53:53",
+		},
 	})
 	resolve := bindTestConfig().ResolveKernelIfName
 
@@ -192,20 +195,26 @@ func TestNewRFC2136UpdaterValidatesBindDeviceExists(t *testing.T) {
 
 	// Present device: reth1 → member "ge-0-0-1" (resolved) → constructs.
 	ok := &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", UpdateServer: "192.0.2.53:53",
-		DestinationInterface: "reth1",
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53:53",
+			DestinationInterface: "reth1",
+		},
 	}
-	if _, err := newRFC2136Updater(pol, ok, nil, nil, nil, resolve); err != nil {
+	if _, err := newRFC2136Updater(pol, ok.RFC2136Endpoint, nil, nil, nil, resolve); err != nil {
 		t.Fatalf("a present bind device must construct, got %v", err)
 	}
 
 	// Absent device: ge-0/0/2 → "ge-0-0-2" (not in the seam) → clear error
 	// naming the resolved kernel device.
 	bad := &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", UpdateServer: "192.0.2.53:53",
-		DestinationInterface: "ge-0/0/2",
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53:53",
+			DestinationInterface: "ge-0/0/2",
+		},
 	}
-	_, err := newRFC2136Updater(pol, bad, nil, nil, nil, resolve)
+	_, err := newRFC2136Updater(pol, bad.RFC2136Endpoint, nil, nil, nil, resolve)
 	if err == nil {
 		t.Fatal("an absent bind device must fail newRFC2136Updater")
 	}
@@ -220,14 +229,20 @@ func TestNewRFC2136UpdaterValidatesBindDeviceExists(t *testing.T) {
 // nil here so newRFC2136Updater builds the real *dns.Client.
 func TestNewRFC2136UpdaterInstallsCustomDialer(t *testing.T) {
 	pol := policyFromConfig(&config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", UpdateServer: "192.0.2.53:53",
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53:53",
+		},
 	})
 	// With a binding configured → custom dialer installed.
 	withBind := &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", UpdateServer: "192.0.2.53:53",
-		SourceAddress: "10.0.0.9",
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53:53",
+			SourceAddress: "10.0.0.9",
+		},
 	}
-	u, err := newRFC2136Updater(pol, withBind, nil, nil, nil)
+	u, err := newRFC2136Updater(pol, withBind.RFC2136Endpoint, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("newRFC2136Updater (with bind): %v", err)
 	}
@@ -241,9 +256,12 @@ func TestNewRFC2136UpdaterInstallsCustomDialer(t *testing.T) {
 
 	// With NO binding → default dialer (today's behaviour).
 	noBind := &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", UpdateServer: "192.0.2.53:53",
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53:53",
+		},
 	}
-	u2, err := newRFC2136Updater(pol, noBind, nil, nil, nil)
+	u2, err := newRFC2136Updater(pol, noBind.RFC2136Endpoint, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("newRFC2136Updater (no bind): %v", err)
 	}
@@ -258,13 +276,19 @@ func TestNewRFC2136UpdaterInstallsCustomDialer(t *testing.T) {
 // no-op for that family rather than emitting UPDATEs from the wrong source.
 func TestNewRFC2136UpdaterInvalidSourceAddressErrors(t *testing.T) {
 	pol := policyFromConfig(&config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", UpdateServer: "192.0.2.53:53",
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53:53",
+		},
 	})
 	bad := &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", UpdateServer: "192.0.2.53:53",
-		SourceAddress: "garbage",
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53:53",
+			SourceAddress: "garbage",
+		},
 	}
-	if _, err := newRFC2136Updater(pol, bad, nil, nil, nil); err == nil {
+	if _, err := newRFC2136Updater(pol, bad.RFC2136Endpoint, nil, nil, nil); err == nil {
 		t.Fatal("an invalid source-address must fail newRFC2136Updater")
 	}
 }
@@ -333,7 +357,7 @@ var _ syscall.RawConn = rawConnFD(0)
 // test RED.
 func TestDialerSourceBindFamilyGate(t *testing.T) {
 	// A loopback source binds without needing the address assigned to an iface.
-	b4, err := resolveBindConfig(&config.DHCPDynamicDNSConfig{SourceAddress: "127.0.0.1"}, nil)
+	b4, err := resolveBindConfig(config.RFC2136Endpoint{SourceAddress: "127.0.0.1"}, nil)
 	if err != nil {
 		t.Fatalf("resolve v4: %v", err)
 	}
@@ -356,7 +380,7 @@ func TestDialerSourceBindFamilyGate(t *testing.T) {
 		t.Fatalf("v4 source on tcp6 must not error, got %v", err)
 	}
 
-	b6, err := resolveBindConfig(&config.DHCPDynamicDNSConfig{SourceAddress: "::1"}, nil)
+	b6, err := resolveBindConfig(config.RFC2136Endpoint{SourceAddress: "::1"}, nil)
 	if err != nil {
 		t.Fatalf("resolve v6: %v", err)
 	}

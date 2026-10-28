@@ -19,7 +19,10 @@ func TestRFC2136RequireTSIGRefusesUnsigned15992(t *testing.T) {
 	srv := newFakeDNSServer(t, nil)
 	var ptr, conf int
 	u := testUpdater(t, srv, &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", RequireTSIG: true,
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			RequireTSIG: true,
+		},
 	}, &ptr, &conf)
 	// testUpdater points at a loopback fake; force a non-loopback server
 	// string so the require-tsig refusal (not the loopback exemption) fires.
@@ -39,8 +42,13 @@ func TestRFC2136RequireTSIGRefusesUnsigned15992(t *testing.T) {
 	srv2 := newFakeDNSServer(t, secret)
 	var ptr2, conf2 int
 	u2 := testUpdater(t, srv2, &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", RequireTSIG: true,
-		TSIGKeyName: "k1", TSIGAlgorithm: "hmac-sha256", TSIGSecret: config.NewSecret("c2VjcmV0"),
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			RequireTSIG: true,
+			TSIGKeyName:   "k1",
+			TSIGAlgorithm: "hmac-sha256",
+			TSIGSecret:    config.NewSecret("c2VjcmV0"),
+		},
 	}, &ptr2, &conf2)
 	if err := u2.UpsertLease(context.Background(), recV4("laptop.example.com", "10.0.1.5", 300)); err != nil {
 		t.Fatalf("keyed require-tsig updater must publish: %v", err)
@@ -51,7 +59,10 @@ func TestRFC2136RequireTSIGRefusesUnsigned15992(t *testing.T) {
 	srv3 := newFakeDNSServer(t, nil)
 	var ptr3, conf3 int
 	u3 := testUpdater(t, srv3, &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", RequireTSIG: true,
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			RequireTSIG: true,
+		},
 	}, &ptr3, &conf3)
 	if err := u3.UpsertLease(context.Background(), recV4("laptop.example.com", "10.0.1.5", 300)); err != nil {
 		t.Fatalf("loopback require-tsig updater must publish unsigned (commit-gate exemption): %v", err)
@@ -67,7 +78,10 @@ func TestRFC2136RequireTSIGRefusesUnsignedDelete15992(t *testing.T) {
 	srv := newFakeDNSServer(t, nil)
 	var ptr, conf int
 	u := testUpdater(t, srv, &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", RequireTSIG: true,
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			RequireTSIG: true,
+		},
 	}, &ptr, &conf)
 	u.server = "192.0.2.53:53"
 	err := u.DeleteLease(context.Background(), recV4("laptop.example.com", "10.0.1.5", 300))
@@ -84,7 +98,10 @@ func TestRFC2136RequireTSIGRefusesUnsignedDelete15992(t *testing.T) {
 	srv2 := newFakeDNSServer(t, nil)
 	var ptr2, conf2 int
 	u2 := testUpdater(t, srv2, &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", RequireTSIG: true,
+		Enabled: true, Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			RequireTSIG: true,
+		},
 	}, &ptr2, &conf2)
 	if err := u2.UpsertLease(context.Background(), recV4("laptop.example.com", "10.0.1.5", 300)); err != nil {
 		t.Fatalf("loopback publish precondition: %v", err)
@@ -98,7 +115,7 @@ func TestRFC2136RequireTSIGRefusesUnsignedDelete15992(t *testing.T) {
 // non-loopback unsigned is active; loopback, keyed, and disabled are not.
 func TestDDNSUnsignedNonLoopbackPosture15992(t *testing.T) {
 	mk := func(server, key string, enabled bool) (ddnsPolicy, *config.DHCPDynamicDNSConfig) {
-		c := &config.DHCPDynamicDNSConfig{Enabled: enabled, Domain: "example.com", UpdateServer: server, TSIGKeyName: key}
+		c := &config.DHCPDynamicDNSConfig{Enabled: enabled, Domain: "example.com", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: server, TSIGKeyName: key}}
 		if key != "" {
 			c.TSIGSecret = config.NewSecret("c2VjcmV0")
 		}
@@ -146,7 +163,10 @@ func TestDDNSUnsignedGaugeViaReconcile15992(t *testing.T) {
 	// server, then with a loopback one.
 	m := testDDNS(t, newFakeUpdater())
 	unsignedCfg := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", TTLSeconds: 300, UpdateServer: "192.0.2.53",
+		Enabled: true, Domain: "example.com", TTLSeconds: 300,
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53",
+		},
 	}}
 	if err := m.ReconcileScoped(context.Background(), unsignedCfg, ReconcileOptions{}); err != nil {
 		t.Fatalf("reconcile unsigned: %v", err)
@@ -155,7 +175,10 @@ func TestDDNSUnsignedGaugeViaReconcile15992(t *testing.T) {
 		t.Fatal("Stats().UnsignedNonLoopbackActive = false after reconcile with non-loopback unsigned server")
 	}
 	loopbackCfg := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", TTLSeconds: 300, UpdateServer: "127.0.0.1",
+		Enabled: true, Domain: "example.com", TTLSeconds: 300,
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "127.0.0.1",
+		},
 	}}
 	if err := m.ReconcileScoped(context.Background(), loopbackCfg, ReconcileOptions{}); err != nil {
 		t.Fatalf("reconcile loopback: %v", err)
@@ -169,7 +192,7 @@ func TestDDNSUnsignedGaugeViaReconcile15992(t *testing.T) {
 	dir := t.TempDir()
 	sa := newSurfaceAManagerForTesting(filepath.Join(dir, "iface.json"), newFakeUpdater(), nowFn)
 	catalog := map[string]*config.DDNSProvider{
-		"p1": {Backend: "rfc2136", UpdateServer: "192.0.2.53"},
+		"p1": {Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53"}},
 	}
 	if err := sa.Reconcile(context.Background(), nil, fixedObserver("203.0.113.5"), nil, catalog); err != nil {
 		t.Fatalf("surface-a reconcile unsigned: %v", err)
@@ -178,7 +201,7 @@ func TestDDNSUnsignedGaugeViaReconcile15992(t *testing.T) {
 		t.Fatal("SurfaceA Stats().UnsignedNonLoopbackActive = false with non-loopback unsigned provider")
 	}
 	keyed := map[string]*config.DDNSProvider{
-		"p1": {Backend: "rfc2136", UpdateServer: "192.0.2.53", TSIGKeyName: "k1", TSIGSecret: config.NewSecret("c2VjcmV0")},
+		"p1": {Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53", TSIGKeyName: "k1", TSIGSecret: config.NewSecret("c2VjcmV0")}},
 	}
 	if err := sa.Reconcile(context.Background(), nil, fixedObserver("203.0.113.5"), nil, keyed); err != nil {
 		t.Fatalf("surface-a reconcile keyed: %v", err)
@@ -211,7 +234,7 @@ func TestDDNSUnsignedGaugeCleanupAfterDisable15992(t *testing.T) {
 		authored := c.UpdateServer
 		c2 := *c
 		c2.UpdateServer = srv.addrUDP
-		u, err := newRFC2136Updater(pol, &c2, nil,
+		u, err := newRFC2136Updater(pol, c2.RFC2136Endpoint, nil,
 			func() { m.skippedPTRNotAuth.Add(1) },
 			func() { m.skippedConflict.Add(1) })
 		if err != nil {
@@ -233,7 +256,7 @@ func TestDDNSUnsignedGaugeCleanupAfterDisable15992(t *testing.T) {
 	}
 	// Disable DDNS: cleanup UPDATEs still go out unsigned, but the record
 	// is withdrawn this pass, so afterwards the gauge must clear.
-	disabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{Enabled: false, Domain: "example.com", TTLSeconds: 300, Backend: "rfc2136", UpdateServer: "192.0.2.53"}}
+	disabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{Enabled: false, Domain: "example.com", TTLSeconds: 300, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53"}}}
 	src.v4 = nil
 	if err := m.Reconcile(ctx, disabled); err != nil {
 		t.Fatalf("disabled reconcile: %v", err)
@@ -275,7 +298,7 @@ func TestDDNSUnsignedGaugeCleanupAfterDisable15992(t *testing.T) {
 	dir := t.TempDir()
 	fu := newFakeUpdater()
 	sa := newSurfaceAManagerForTesting(filepath.Join(dir, "iface.json"), fu, nowFn)
-	prov := &config.DDNSProvider{Name: "p1", Backend: "rfc2136", UpdateServer: "192.0.2.53"}
+	prov := &config.DDNSProvider{Name: "p1", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53"}}
 	sc := surfaceAScope("wan.example.net", FamilyV4, 0)
 	sc.Key.PolicyID = "p1"
 	sc.Provider = prov
@@ -363,7 +386,7 @@ func TestDDNSUnsignedGaugeInFlightHold15992(t *testing.T) {
 		authored := c.UpdateServer
 		c2 := *c
 		c2.UpdateServer = srv.addrUDP
-		u, err := newRFC2136Updater(pol, &c2, nil,
+		u, err := newRFC2136Updater(pol, c2.RFC2136Endpoint, nil,
 			func() { m.skippedPTRNotAuth.Add(1) },
 			func() { m.skippedConflict.Add(1) })
 		if err != nil {
@@ -386,7 +409,7 @@ func TestDDNSUnsignedGaugeInFlightHold15992(t *testing.T) {
 	m.newUpdater = func(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
 		return bu, nil
 	}
-	disabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{Enabled: false, Domain: "example.com", TTLSeconds: 300, Backend: "rfc2136", UpdateServer: "192.0.2.53"}}
+	disabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{Enabled: false, Domain: "example.com", TTLSeconds: 300, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53"}}}
 	src.v4 = nil
 	done := make(chan error, 1)
 	go func() { done <- m.Reconcile(ctx, disabled) }()
@@ -426,7 +449,7 @@ func TestDDNSUnsignedGaugeKeyedTransition15992(t *testing.T) {
 				c2.TSIGAlgorithm = "hmac-sha256"
 				c2.TSIGSecret = config.NewSecret("c2VjcmV0")
 			}
-			u, err := newRFC2136Updater(policyFromConfig(&c2), &c2, nil,
+			u, err := newRFC2136Updater(policyFromConfig(&c2), c2.RFC2136Endpoint, nil,
 				func() { m.skippedPTRNotAuth.Add(1) },
 				func() { m.skippedConflict.Add(1) })
 			if err != nil {
@@ -529,7 +552,10 @@ func TestDDNSUnsignedGaugeSeededAtRestart15992(t *testing.T) {
 	ctx := context.Background()
 	nowFn := func() time.Time { return time.Unix(1_700_000_000, 0) }
 	disabledUnsigned := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
-		Enabled: false, Domain: "example.com", TTLSeconds: 300, Backend: "rfc2136", UpdateServer: "192.0.2.53",
+		Enabled: false, Domain: "example.com", TTLSeconds: 300, Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53",
+		},
 	}}
 
 	// --- Surface B: persist ownership, then a FRESH manager. ---
@@ -546,7 +572,7 @@ func TestDDNSUnsignedGaugeSeededAtRestart15992(t *testing.T) {
 		authored := c.UpdateServer
 		c2 := *c
 		c2.UpdateServer = srv.addrUDP
-		u, err := newRFC2136Updater(pol, &c2, nil,
+		u, err := newRFC2136Updater(pol, c2.RFC2136Endpoint, nil,
 			func() { m1.skippedPTRNotAuth.Add(1) }, func() { m1.skippedConflict.Add(1) })
 		if err != nil {
 			return nil, err
@@ -588,8 +614,13 @@ func TestDDNSUnsignedGaugeSeededAtRestart15992(t *testing.T) {
 
 	// Negative controls: keyed / loopback / no-ownership seed 0.
 	keyedDisabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
-		Enabled: false, Domain: "example.com", Backend: "rfc2136", UpdateServer: "192.0.2.53",
-		TSIGKeyName: "k1", TSIGAlgorithm: "hmac-sha256", TSIGSecret: config.NewSecret("c2VjcmV0"),
+		Enabled: false, Domain: "example.com", Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53",
+			TSIGKeyName:   "k1",
+			TSIGAlgorithm: "hmac-sha256",
+			TSIGSecret:    config.NewSecret("c2VjcmV0"),
+		},
 	}}
 	mKeyed := newManagerForTesting(nil, nopUpdater{}, statePath,
 		filepath.Join(dir, "l4.csv"), filepath.Join(dir, "l6.csv"), "node0", nowFn)
@@ -598,7 +629,10 @@ func TestDDNSUnsignedGaugeSeededAtRestart15992(t *testing.T) {
 		t.Fatal("keyed endpoint seeded 1 (false alarm)")
 	}
 	loopDisabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
-		Enabled: false, Domain: "example.com", Backend: "rfc2136", UpdateServer: "127.0.0.1",
+		Enabled: false, Domain: "example.com", Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "127.0.0.1",
+		},
 	}}
 	mLoop := newManagerForTesting(nil, nopUpdater{}, statePath,
 		filepath.Join(dir, "l4.csv"), filepath.Join(dir, "l6.csv"), "node0", nowFn)
@@ -620,7 +654,7 @@ func TestDDNSUnsignedGaugeSeededAtRestart15992(t *testing.T) {
 	saPath := filepath.Join(saDir, "iface.json")
 	fu := newFakeUpdater()
 	sa1 := newSurfaceAManagerForTesting(saPath, fu, nowFn)
-	prov := &config.DDNSProvider{Name: "p1", Backend: "rfc2136", UpdateServer: "192.0.2.53"}
+	prov := &config.DDNSProvider{Name: "p1", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53"}}
 	sc := surfaceAScope("wan.example.net", FamilyV4, 0)
 	sc.Key.PolicyID = "p1"
 	sc.Provider = prov
@@ -639,7 +673,7 @@ func TestDDNSUnsignedGaugeSeededAtRestart15992(t *testing.T) {
 	}
 	// Keyed provider control seeds 0.
 	sa3 := newSurfaceAManagerForTesting(saPath, newFakeUpdater(), nowFn)
-	keyedProv := &config.DDNSProvider{Name: "p1", Backend: "rfc2136", UpdateServer: "192.0.2.53", TSIGKeyName: "k1", TSIGSecret: config.NewSecret("c2VjcmV0")}
+	keyedProv := &config.DDNSProvider{Name: "p1", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53", TSIGKeyName: "k1", TSIGSecret: config.NewSecret("c2VjcmV0")}}
 	sa3.SeedUnsignedPosture(map[string]*config.DDNSProvider{"p1": keyedProv})
 	if sa3.Stats().UnsignedNonLoopbackActive {
 		t.Fatal("keyed surface provider seeded 1 (false alarm)")

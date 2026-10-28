@@ -412,7 +412,7 @@ enum DnatDest {
 /// #3164 winner selection over prefix slots (scope tier, then
 /// longest prefix, first wins ties), shared by the single-winner
 /// lookup and the #15934 selector-optional collector.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn match_prefix_slots_winner_slot<'a>(
     slots: &'a [DnatPrefixSlot],
     dst_ip: IpAddr,
@@ -514,7 +514,7 @@ impl DnatTable {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn flowless_l4_rule_possible(
         &self,
         protocol: u8,
@@ -627,7 +627,7 @@ impl DnatTable {
     /// a rule scoped to another zone, source, protocol or port does not claim
     /// the address. An `off` exemption or poisoned claim never claims local
     /// delivery (poisoned packets are dropped by the NAT stage itself).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn nat_local_match_possible(
         &self,
         protocol: u8,
@@ -1138,7 +1138,7 @@ impl DnatTable {
     /// application source-port (H10) or ICMP type/code (H11) constraint fails
     /// closed here — exercise those via [`lookup_with_counter`]. Production
     /// uses [`lookup_with_counter_scoped`] with the real flow fields.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn lookup(
         &self,
         protocol: u8,
@@ -1153,7 +1153,7 @@ impl DnatTable {
 
     /// #2218: as [`lookup`] but also returns the matched entry's per-rule
     /// hit counter (if any), for the cold-path commit site.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn lookup_with_counter(
         &self,
         protocol: u8,
@@ -1185,7 +1185,7 @@ impl DnatTable {
     /// zone, interface, and routing-instance scopes; eligible candidates use
     /// interface > zone > routing-instance > unscoped precedence. Prefixes
     /// then use longest-prefix matching within a context tier.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn lookup_with_counter_scoped(
         &self,
         protocol: u8,
@@ -1308,7 +1308,7 @@ impl DnatTable {
     /// before any non-Translate reproduces `want_dst`/`want_dst_port`,
     /// Some(false) when the deciding tier does not, None when no tier
     /// decides. Streaming: no allocation.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn tier_walk_reproduces_ignoring_icmp_selector_scoped(
         &self,
         protocol: u8,
@@ -1405,7 +1405,7 @@ impl DnatTable {
 
     /// Prefix-LPM leg of the tier walk: first non-empty proto/port
     /// tier, winner's (scope-tier, prefix-length) group decides.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn match_prefix_lpm_tier_walk(
         &self,
         protocol_key: u16,
@@ -1476,7 +1476,7 @@ impl DnatTable {
     /// PROTO_ANY -> prefix LPM). That wrapper collapses `Exempt`/`Poisoned`
     /// to `None`; callers that must distinguish them re-run the chain here
     /// once instead of paying a second full lookup on every non-match.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn outcome_with_counter_scoped(
         &self,
         protocol: u8,
@@ -1555,7 +1555,7 @@ impl DnatTable {
     /// poisoned match returns `Poisoned` (drop) together with the poisoned
     /// rule's hit counter; a healthy `off` exemption and no match both
     /// return `NoMatch` (forward untranslated).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn lookup_result_with_counter_scoped(
         &self,
         protocol: u8,
@@ -1598,7 +1598,7 @@ impl DnatTable {
     /// adjudication. An UNSCOPED translate keeps its ordinary
     /// `Matched` result (it fires under every identity); a healthy
     /// `off` exemption carries no translation and keeps `NoMatch`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn lookup_result_ambiguous_provenance_scoped(
         &self,
         protocol: u8,
@@ -1669,7 +1669,7 @@ impl DnatTable {
     ///
     /// The unknown-protocol sentinel (255) is treated as possibly any
     /// protocol, mirroring `flowless_l4_rule_possible`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn flowless_poisoned_claim(
         &self,
         protocol: u8,
@@ -1734,7 +1734,7 @@ impl DnatTable {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn flowless_poisoned_counter(
         &self,
         protocol: u8,
@@ -1917,7 +1917,7 @@ impl DnatTable {
     /// unrepresented protocol for protocol-agnostic rules. This preserves exact
     /// rule matching without recovering the fragment's real protocol or
     /// performing 255 table lookups.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn has_unknown_protocol_translation_match_scoped(
         &self,
         src_ip: IpAddr,
@@ -1974,7 +1974,7 @@ impl DnatTable {
         false
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn match_entries(
         &self,
         entries: Option<&Vec<DnatEntry>>,
@@ -1989,7 +1989,7 @@ impl DnatTable {
         self.match_entries_mode(entries, src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, false)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn match_entries_mode(
         &self,
         entries: Option<&Vec<DnatEntry>>,
@@ -2044,7 +2044,7 @@ impl DnatTable {
     /// `(protocol, 0)`, then `(PROTO_ANY, 0)` — so proto/port specificity is
     /// honored the same way for prefixes; within each tier the LONGEST matching
     /// prefix wins. Returns the first tier that yields a match.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn match_prefix_lpm(
         &self,
         protocol: u16,
@@ -2060,7 +2060,7 @@ impl DnatTable {
         self.match_prefix_lpm_mode(protocol, src_ip, dst_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, false)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn match_prefix_lpm_mode(
         &self,
         protocol: u16,
@@ -2092,7 +2092,7 @@ impl DnatTable {
     /// specificity is ranked first (interface > zone > routing-instance >
     /// unscoped), then the LONGEST matching prefix whose source-address
     /// constraint holds. The first slot breaks equal-tier/equal-length ties.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn match_prefix_slots(
         &self,
         slots: Option<&Vec<DnatPrefixSlot>>,
@@ -2108,7 +2108,7 @@ impl DnatTable {
         self.match_prefix_slots_mode(slots, dst_ip, src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, false)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn match_prefix_slots_mode(
         &self,
         slots: Option<&Vec<DnatPrefixSlot>>,
@@ -2127,7 +2127,6 @@ impl DnatTable {
             .map(|slot| slot.entry.to_outcome())
     }
 
-    #[allow(clippy::too_many_arguments)]
     
     /// #3164: dedup-insert a prefix slot. Like `insert_entry`, two slots with the
     /// same (from_zone, source constraint) AND the same prefix are the same rule
@@ -2218,7 +2217,6 @@ impl DnatTable {
     }
 
     /// Returns true if the table has any entries (exact-host or prefix).
-    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.prefix_entries.is_empty()
     }

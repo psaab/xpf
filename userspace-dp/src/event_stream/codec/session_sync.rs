@@ -43,7 +43,7 @@ impl EventFrame {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn encode_session_open_with_handshake_state(
         seq: u64,
         key: &SessionKey,
@@ -106,7 +106,7 @@ impl EventFrame {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn encode_session_update_with_handshake_state(
         seq: u64,
         key: &SessionKey,
@@ -140,7 +140,7 @@ impl EventFrame {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn encode_session_record(
         msg_type: u8,
         seq: u64,

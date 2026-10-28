@@ -1373,6 +1373,104 @@ fn handshake_step_staggered_start_waits_genuine_failure_fails() {
     assert_eq!(handshake_step(Live, Starting, true), Ready);
 }
 
+/// #17169: the hermetic constructor must run the production V1 submit.
+/// Each `admit_descriptor` refusal reason maps to exactly one ADMIT wire
+/// reason; mutating the WORKER_QUEUE_BUSY arm to ADMIT_BAD_LEASE must fail
+/// the BUSY cell below. All cells assert V1 routing (q0 queued == 0).
+#[test]
+fn v1_submit_reason_map_table_17169() {
+    use crate::slowpath_reinject_9506::{
+        ReinjectCore, ReinjectLease, ADMIT_BAD_LEASE, ADMIT_FULL, ADMIT_SHUTDOWN,
+    };
+    fn v1_frame(id: u64, flow_tag: u64, deadline: u64) -> SubmitFrame {
+        SubmitFrame {
+            lease: ReinjectLease { permit_epoch: 7, queue_epoch: 11, queue_number: 1, request_id: id },
+            flow_tag, flags: 0,
+            origin: CaptureOrigin::inet_forward(42, "owner", "stn"),
+            bytes: vec![0x45u8; 64],
+            snapshot_generation: 1, config_generation: 1, fib_generation: 1,
+            zone_id: 1, if_id: 1,
+            pmech_inventory_generation: 0, pmech_inventory_fib_generation: 0,
+            pmech_policy_identity: [0; 32],
+            deadline_mono_ns: deadline, deadline_clock_id: 1,
+        }
+    }
+    fn v1_reinjector() -> (SlowPathReinjector, std::sync::Arc<ReinjectCore>) {
+        let core = ReinjectCore::new_shared();
+        core.publish_epochs(7, &[(1, 11)]);
+        let r = SlowPathReinjector::new_without_worker_with_core(1500, core.clone());
+        (r, core)
+    }
+    let future = || crate::afxdp::monotonic_nanos() + 500_000_000;
+    // EVALUATOR_UNAVAILABLE (no published worker) -> ADMIT_SHUTDOWN.
+    {
+        let (r, core) = v1_reinjector();
+        let d = r.submit_adjudicated_frame(v1_frame(1, 1, future()));
+        assert!(!d.admitted);
+        assert_eq!(d.reason, ADMIT_SHUTDOWN, "EVALUATOR_UNAVAILABLE cell");
+        assert_eq!(core.live_count(), 1, "refused entry stays live until purge (socket pin)");
+        assert_eq!(r.delegated_status().queued_packets, 0);
+    }
+    // Success: descriptor lands in worker queue, never q0.
+    {
+        let (r, core) = v1_reinjector();
+        r.ipsec_inner_transport().publish_workers([0]);
+        let d = r.submit_adjudicated_frame(v1_frame(2, 1, future()));
+        assert!(d.admitted, "success cell must admit: {d:?}");
+        assert_eq!(core.live_count(), 1);
+        assert_eq!(r.delegated_status().queued_packets, 0, "V1 never q0");
+        assert_eq!(r.ipsec_inner_transport().worker_pending(0), Some(1));
+    }
+    // WORKER_QUEUE_FULL -> ADMIT_FULL. Fill via transport directly (core
+    // admit would consume request ids, but transport fill is the queue).
+    {
+        let (r, _core) = v1_reinjector();
+        r.ipsec_inner_transport().publish_workers([0]);
+        for i in 0..crate::afxdp::ipsec_inner_queue::IPSEC_INNER_QUEUE_DEPTH {
+            let d = r.submit_adjudicated_frame(v1_frame(100 + i as u64, 1000 + i as u64, future()));
+            assert!(d.admitted, "fill {i} must admit: {d:?}");
+        }
+        let d = r.submit_adjudicated_frame(v1_frame(9999, 9999, future()));
+        assert!(!d.admitted);
+        assert_eq!(d.reason, ADMIT_FULL, "WORKER_QUEUE_FULL cell");
+        assert_eq!(r.delegated_status().queued_packets, 0);
+    }
+    // WORKER_QUEUE_BUSY -> ADMIT_FULL (mutating arm to BAD_LEASE fails here).
+    {
+        let (r, _core) = v1_reinjector();
+        let transport = r.ipsec_inner_transport();
+        transport.publish_workers([0]);
+        transport.authority().add_worker(9);
+        // live {0,9}; flow_tag 1 -> index 1 -> worker 9 (no queue).
+        let d = r.submit_adjudicated_frame(v1_frame(7, 1, future()));
+        assert!(!d.admitted, "BUSY cell must refuse: {d:?}");
+        assert_eq!(d.reason, ADMIT_FULL, "WORKER_QUEUE_BUSY cell");
+        assert_eq!(r.delegated_status().queued_packets, 0);
+    }
+    // Core P2 deadline refusal -> ADMIT_BAD_LEASE.
+    {
+        let (r, _core) = v1_reinjector();
+        r.ipsec_inner_transport().publish_workers([0]);
+        let past = crate::afxdp::monotonic_nanos().saturating_sub(1);
+        let d = r.submit_adjudicated_frame(v1_frame(8, 1, past.max(1)));
+        assert!(!d.admitted);
+        assert_eq!(d.reason, ADMIT_BAD_LEASE, "expired deadline cell");
+        assert_eq!(r.delegated_status().queued_packets, 0);
+    }
+    // Slab exhausted (submit acquire fails) -> ADMIT_FULL.
+    {
+        let (r, _core) = v1_reinjector();
+        r.ipsec_inner_transport().publish_workers([0]);
+        let pool = r.ipsec_inner_transport().pool().clone();
+        let mut held = Vec::new();
+        while let Some(id) = pool.acquire() { held.push(id); }
+        let d = r.submit_adjudicated_frame(v1_frame(9, 1, future()));
+        assert!(!d.admitted);
+        assert_eq!(d.reason, ADMIT_FULL, "slab exhausted cell");
+        for id in held { pool.force_release(id); }
+    }
+}
+
 /// #13707 cross-outlet starvation: flooding the delegated outlet must not
 /// consume the trusted outlet's rate-limit tokens. On the shared-limiter
 /// code every enqueue_* variant spends from one Mutex<RateLimiter>, so a
@@ -1446,5 +1544,156 @@ fn queue_full_refunds_slowpath_rate_limit_tokens_13707() {
             r.enqueue(vec![0u8; 64]).expect("queue-full enqueue"),
             EnqueueOutcome::QueueFull
         ));
+    }
+}
+
+/// #17164 parity table: identical inners through BOTH descriptor builders
+/// — the IPsec-inner descriptor (`ipsec_inner_descriptor`, deny-only
+/// slowpath) and the shared tunnel-inner parser
+/// (`parse_inner_protocol_and_offsets`, GRE/WG decap). A `None` from the
+/// shared parser maps to (0,0,0) on the IPsec side; anything else must
+/// match exactly. Each row cites the divergence it pins: short UDP and
+/// ICMP diverged pre-fix (IPsec admitted short UDP with payload == L4
+/// and stamped ICMP payload == L4 instead of L4+8), and TCP+options was
+/// the #13713 copy-caused bug.
+#[test]
+fn ipsec_inner_descriptor_matches_shared_parser_17164() {
+    use crate::afxdp::frame::parse_inner_protocol_and_offsets;
+    use crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+
+    fn v4(protocol: u8, frag_off: u16, l4: &[u8]) -> Vec<u8> {
+        let total = 20 + l4.len();
+        let mut p = vec![0u8; total];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        p[6..8].copy_from_slice(&frag_off.to_be_bytes());
+        p[9] = protocol;
+        p[20..].copy_from_slice(l4);
+        p
+    }
+    fn v6(next: u8, chain: &[u8], l4: &[u8]) -> Vec<u8> {
+        let mut p = vec![0u8; 40];
+        p[0] = 0x60;
+        p[4..6].copy_from_slice(&((chain.len() + l4.len()) as u16).to_be_bytes());
+        p[6] = next;
+        p.extend_from_slice(chain);
+        p.extend_from_slice(l4);
+        p
+    }
+    fn frag_hdr(next: u8, off_word: u16) -> Vec<u8> {
+        let mut h = vec![0u8; 8];
+        h[0] = next;
+        h[2..4].copy_from_slice(&off_word.to_be_bytes());
+        h
+    }
+    fn hbh_tcp() -> Vec<u8> {
+        // Hop-by-Hop (len 0 => 8 bytes) then TCP.
+        let mut h = vec![0u8; 8];
+        h[0] = 6;
+        h
+    }
+    fn ah_tcp() -> Vec<u8> {
+        // AH: next=TCP, len=0 => (0+2)*4 = 8 bytes, then TCP.
+        let mut h = vec![0u8; 8];
+        h[0] = 6;
+        h[1] = 0;
+        h
+    }
+
+    let mut tcp_opts = vec![0u8; 32 + 4];
+    tcp_opts[12] = 8 << 4; // 32-byte TCP header
+    let mut tcp20 = vec![0u8; 20 + 3];
+    tcp20[12] = 5 << 4;
+
+    // (name, packet, family, expected shared-parser verdict)
+    let cases: Vec<(&str, Vec<u8>, u8, Option<(u8, u16, u16)>)> = vec![
+        // Short UDP: 2 L4 bytes (< 8-byte header) must fail closed on both.
+        (
+            "v4 short UDP",
+            v4(17, 0, &[0u8; 2]),
+            libc::AF_INET as u8,
+            None,
+        ),
+        (
+            "v4 UDP ok",
+            v4(17, 0, &[0u8; 8 + 3]),
+            libc::AF_INET as u8,
+            Some((17, 20, 28)),
+        ),
+        // ICMP payload is L4+8, not L4 (pre-fix IPsec stamped 20).
+        (
+            "v4 ICMP",
+            v4(1, 0, &[0u8; 8 + 2]),
+            libc::AF_INET as u8,
+            Some((1, 20, 28)),
+        ),
+        (
+            "v4 short ICMP",
+            v4(1, 0, &[0u8; 4]),
+            libc::AF_INET as u8,
+            None,
+        ),
+        (
+            "v4 TCP+options",
+            v4(6, 0, &tcp_opts),
+            libc::AF_INET as u8,
+            Some((6, 20, 52)),
+        ),
+        // Non-first fragments: sentinel, payload == L4, on both.
+        (
+            "v4 non-first frag",
+            v4(6, 185, &[0u8; 20]),
+            libc::AF_INET as u8,
+            Some((SHIM_PROTO_FRAGMENT_NO_L4, 20, 20)),
+        ),
+        (
+            "v6 non-first frag",
+            v6(44, &frag_hdr(6, 0x05c8), &[0u8; 20]),
+            libc::AF_INET6 as u8,
+            Some((SHIM_PROTO_FRAGMENT_NO_L4, 48, 48)),
+        ),
+        // IPv6 extension chains resolve to the inner TCP on both.
+        (
+            "v6 HbH->TCP",
+            v6(0, &hbh_tcp(), &tcp20),
+            libc::AF_INET6 as u8,
+            Some((6, 48, 68)),
+        ),
+        (
+            "v6 AH->TCP",
+            v6(51, &ah_tcp(), &tcp20),
+            libc::AF_INET6 as u8,
+            Some((6, 48, 68)),
+        ),
+        (
+            "v6 short UDP",
+            v6(17, &[], &[0u8; 2]),
+            libc::AF_INET6 as u8,
+            None,
+        ),
+        (
+            "v6 ICMPv6",
+            v6(58, &[], &[0u8; 8 + 1]),
+            libc::AF_INET6 as u8,
+            Some((58, 40, 48)),
+        ),
+    ];
+
+    for (name, pkt, family, expected) in cases {
+        assert_eq!(
+            parse_inner_protocol_and_offsets(&pkt, family),
+            expected,
+            "{name}: shared parser verdict changed"
+        );
+        let desc = ipsec_inner_descriptor(&ipsec_descriptor_frame(pkt), 1, 1, 1);
+        let ipsec = match expected {
+            Some((protocol, rel_l4, payload)) => (rel_l4, protocol, payload),
+            None => (0, 0, 0),
+        };
+        assert_eq!(
+            (desc.rel_l4_offset, desc.protocol, desc.payload_offset),
+            ipsec,
+            "{name}: IPsec descriptor diverged from the shared parser"
+        );
     }
 }

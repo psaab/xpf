@@ -36,7 +36,10 @@ func TestChangedResolutionRebuildsTheBoundClient6754(t *testing.T) {
 	c := newHTTPClientCache()
 	dev := "eth0"
 	p := &config.DDNSProvider{
-		Name: "p", Backend: "generic", DestinationInterface: "reth0.50",
+		Name: "p", Backend: "generic",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			DestinationInterface: "reth0.50",
+		},
 	}
 
 	first, err := c.clientFor(p, resolverReturning6754(&dev))
@@ -90,7 +93,7 @@ func TestStaleTransportIsReleasedOnRebuild6754(t *testing.T) {
 
 	c := newHTTPClientCache()
 	dev := "eth0"
-	p := &config.DDNSProvider{Name: "p", Backend: "generic", DestinationInterface: "reth0.50"}
+	p := &config.DDNSProvider{Name: "p", Backend: "generic", RFC2136Endpoint: config.RFC2136Endpoint{DestinationInterface: "reth0.50"}}
 
 	first, err := c.clientFor(p, resolverReturning6754(&dev))
 	if err != nil {
@@ -128,7 +131,7 @@ func TestUnchangedResolutionKeepsThePool6754(t *testing.T) {
 
 	c := newHTTPClientCache()
 	dev := "eth0"
-	p := &config.DDNSProvider{Name: "p", Backend: "generic", DestinationInterface: "reth0.50"}
+	p := &config.DDNSProvider{Name: "p", Backend: "generic", RFC2136Endpoint: config.RFC2136Endpoint{DestinationInterface: "reth0.50"}}
 
 	var prev *http.Client
 	for i := 0; i < 5; i++ {

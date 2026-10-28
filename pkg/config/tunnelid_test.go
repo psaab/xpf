@@ -510,7 +510,63 @@ func TestTunnelEndpointIDGateTerminatesNoRecursion(t *testing.T) {
 		`set apply-groups "${node}"`,
 	})
 	// Direct gate call: must terminate (and reject the real wg collision).
-	if _, err := validateTunnelEndpointIDCollisionAST(tree, false); err == nil {
+	if _, err := validateTunnelEndpointIDCollisionAST(tree, compileOpts{}); err == nil {
 		t.Fatalf("gate accepted a wildcard collision (or recursed before returning)")
+	}
+}
+
+// #17163: the Views 2/3 side compile must inherit the caller's
+// compileOpts. Before the fix it used a hard-coded
+// compileOpts{lenientNonNumericUnit: true}, so on CompileConfigLenient
+// any unrelated interface value the main compile downgrades (speed,
+// duplex, bandwidth, VLAN bound) made the side compile error out, the
+// post-expansion view fell to the empty set, and the #1914 wildcard
+// collision warning silently disappeared. Each interface-level row
+// adds its bad value to wg78 — the interface that only gets its tunnel
+// from the wildcard group, so only Views 2/3 can see its tunnel. A
+// `vlan-id` bound lives on a unit, and its downgrade skips the whole
+// unit; to keep both endpoints it must be unrelated to both tunnels,
+// so that row puts it on a third interface (ge-0/0/0 unit 0). The
+// lenient compile must still warn, and the strict compile must still
+// reject (for the interface value or the collision).
+func TestTunnelIDSideCompileInheritsCallerOpts17163(t *testing.T) {
+	base := []string{
+		"set groups wgtun interfaces <*> unit 0 tunnel mode wireguard",
+		"set groups wgtun interfaces <*> unit 0 tunnel wireguard peer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa allowed-ips 10.0.0.0/24",
+		"set interfaces wg78 apply-groups wgtun",
+		"set interfaces wg1408 unit 0 tunnel mode wireguard",
+		"set interfaces wg1408 unit 0 tunnel wireguard peer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa allowed-ips 10.0.0.0/24",
+	}
+	cases := []struct {
+		name  string
+		extra []string
+	}{
+		{name: "control-no-extra"},
+		{name: "good-description", extra: []string{"set interfaces wg78 description uplink"}},
+		{name: "bad-speed", extra: []string{"set interfaces wg78 speed 7g"}},
+		{name: "bad-duplex", extra: []string{"set interfaces wg78 duplex sideways"}},
+		{name: "bad-bandwidth", extra: []string{"set interfaces wg78 bandwidth notanumber"}},
+		{name: "bad-vlan-id-bound", extra: []string{"set interfaces ge-0/0/0 unit 0 vlan-id 9999"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := append(append([]string{}, base...), tc.extra...)
+			cfg, err := CompileConfigLenient(buildTree(t, lines))
+			if err != nil {
+				t.Fatalf("CompileConfigLenient rejected: %v", err)
+			}
+			found := false
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "collision") && strings.Contains(w, "wg78.0") && strings.Contains(w, "wg1408.0") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("lenient compile carried no wildcard-collision warning: %v", cfg.Warnings)
+			}
+			if _, err := CompileConfig(buildTree(t, lines)); err == nil {
+				t.Fatalf("strict CompileConfig accepted the config")
+			}
+		})
 	}
 }

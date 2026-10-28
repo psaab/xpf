@@ -155,7 +155,6 @@ pub(in crate::afxdp) fn commit_staged_mirror_clone(
     record_mirror_clone_result(&ingress_binding.live, result, staged.frame_len);
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn enqueue_mirror_clone(
     left: &mut [BindingWorker],
     ingress_index: usize,
@@ -384,7 +383,6 @@ fn enqueue_mirror_clone_to_binding(
     MirrorCloneResult::Enqueued
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     mirror_targets: &MirrorTargetMap,
     forwarding: &ForwardingState,
@@ -465,7 +463,7 @@ pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
         .unwrap_or(MirrorCloneResult::QueueFullCrossWorker)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn enqueue_sampled_mirror_clone_to_live(
     live: &BindingLiveState,
     mirror_targets: &MirrorTargetMap,

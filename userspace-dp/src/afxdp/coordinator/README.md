@@ -47,7 +47,7 @@ retained), stale prune, spawn with backoff — reconciled at bring-up
 AND on every armed `refresh_runtime_snapshot` (tunnel interfaces are
 excluded from the binding plan, so tunnel-only commits never reach a
 full reconcile), plus a tombstone-only periodic liveness pass from
-`refresh_status` and a narrow prune on the defer-workers apply leg.
+`supervise_tunnels` and a narrow prune on the defer-workers apply leg.
 
 Shared lifecycle (#17084): both families run the ONE
 `TunnelThreadRegistry` implementation (finished sweep → tombstone,
@@ -61,13 +61,18 @@ until the deferred bring-up.
 
 Differences that matter (#1881):
 
-- WG threads restart when the engine Arc identity OR attachment
-  changes — and also on an underlay outer-MTU change (#2921) and when a
-  snapshot changes whether the thread may deliver kernel-path transport
-  plaintext (`kernel_transport_changed`, #9521). Every WG peer commit
+- WG threads restart when any spawn-time capture changes (#17089):
+  `wg_spawn_inputs` builds the single `WgSpawnInputs` value (engine
+  Arc identity, TUN attachment, listen port, outer MTU + per-peer
+  MTUs (#2921/#5291), outer bind device (#10196), kernel-transport
+  posture (#9521), peer config (#14675), resolver endpoint hosts /
+  preferred family), the entry stores it as `spawned`, and the stale
+  prune restarts the thread when a fresh capture differs — there is
+  no per-capture prune ladder to forget an arm of. Every WG peer commit
   rebuilds the engine (#15950: `wg_peers_eq` compares `endpoint_host`),
   so peer adds/removes and endpoint/hostname changes restart via
-  `engine_changed` (#17094 retired the dead #14675 same-engine guard);
+  `engine_changed` in practice (#17094 retired the dead #14675
+  same-engine guard; `peer_config` stays in the capture per #17089).
   GRE threads restart ONLY
   on attachment drift — endpoint
   content (destination/source/key, routes, CoS) reaches the live GRE
@@ -305,7 +310,7 @@ Differences that matter (#1881):
   the D11 IPsec-inner worker (#7092 / #6979 / #9367 / #15149).**
   `retire_worker_holders_where` walks every worker its predicate selects,
   under a one-shot `holders_retired` CAS, and is driven from the 1 Hz
-  `refresh_status` path. It reclaims the three NAT allocator families for
+  `supervise_tunnels` path. It reclaims the three NAT allocator families for
   every worker the predicate selects and — since #9367 — calls
   `vacate_worker_v_min_slots` for those whose `atomics.dead` is set, releasing
   the worker's slot in every `cos.queue_vtime_floors` entry. Since #15149 the
@@ -588,7 +593,7 @@ Differences that matter (#1881):
     `BindingSetupFailure`s IMMEDIATELY AFTER calling `stop_inner`: that ordering
     IS the fix, and inverting it is one of the mutations the cells kill.
   - The restore is in `refresh_bindings`, not in a one-shot write into
-    `bindings`, because `refresh_status` runs the refresh on EVERY control
+    `bindings`, because `project_status` runs the refresh on EVERY control
     response — a cause restored once is erased within one status poll, well
     inside the Go predicate's 5s dwell.
   - It can never mark a HEALTHY slot: the map is consulted only on the branch

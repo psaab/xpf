@@ -514,7 +514,7 @@ impl FragAssoc {
     /// Zone/shard refusals return `false` and bump `FRAG_QUOTA_REFUSALS`
     /// instead, so callers counting only the bool keep the #7054
     /// live-eviction signal without conflating it with a refusal.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn install_with_session(
         &self,
         key: FragKey,

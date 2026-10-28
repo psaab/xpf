@@ -380,15 +380,14 @@ func TestDecodeRawEventRecordRejectsShortRecord(t *testing.T) {
 	}
 }
 
-// TestDecodeRawEventCarriesCreatedStamp is the #2465 cross-language layout
-// check for the SESSION_CLOSE frame: the Rust encoder
-// (event_stream/codec.rs::encode_session_close_rt_flow) writes the absolute
+// TestDecodeRawEventCarriesCreatedStamp is a Go-side decode check for the
+// SESSION_CLOSE frame (see #17131: the Rust-produced parity anchor is
+// testdata/event_frames/rt_flow_close.hex). The Rust encoder
+// (EventFrame::encode_session_close_rt_flow in event_stream/codec/rt_flow.rs) writes the absolute
 // session-creation Unix SECONDS at offset 108 as a LITTLE-endian u32 and the
 // close instant at offset 0 as a LITTLE-endian u64. This test builds a frame
 // at those exact offsets/endianness and asserts DecodeRawEventRecord surfaces
-// them into EventRecord.Created (and the close timestamp into rec.Time). A
-// one-sided field — Rust writes offset 108 but Go reads a different offset or
-// endianness — would corrupt the StartTime; this pins the contract.
+// them into EventRecord.Created (and the close timestamp into rec.Time).
 func TestDecodeRawEventCarriesCreatedStamp(t *testing.T) {
 	const (
 		createdSecs = uint32(1_700_000_000)

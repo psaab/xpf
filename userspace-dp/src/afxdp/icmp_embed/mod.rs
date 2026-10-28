@@ -233,7 +233,7 @@ pub(in crate::afxdp::icmp_embed) fn outer_datagram_end(
 /// Parse the embedded IP+L4 headers from an ICMP error payload and
 /// look up the corresponding session. Returns the session lookup if
 /// found.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(super) fn try_embedded_icmp_session_match(
     area: &MmapArea,
     desc: XdpDesc,
@@ -295,7 +295,7 @@ pub(super) fn try_embedded_icmp_session_match_from_frame(
 /// frame slice. Dispatches to the v4 / v6 outer family branch. Returns
 /// `BudgetDenied` when a session matched but the F-077 budget refused it —
 /// the poll caller MUST drop the descriptor, never fall through.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline]
 pub(super) fn try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
     frame: &[u8],
@@ -326,7 +326,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn try_embedded_icmp_nat_match_from_frame_without_ingress_zone(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -460,7 +460,7 @@ pub(super) use nat64_match::Nat64IcmpErrorMatch;
 /// same-family reversal and normal flowless enforcement run unchanged);
 /// `BudgetDenied` = a half matched but the F-077 budget refused it (the
 /// poll caller MUST drop the descriptor, never translate NOR fall through).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn try_nat64_icmp_error_match_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,

@@ -46,11 +46,14 @@ func TestParseFlowSessionArgsRejectsMalformed(t *testing.T) {
 		{"bogus-token"},                        // unknown filter keyword
 		{"destination-port"},                   // missing value
 		{"summary", "destination-port", "abc"}, // malformed after a terminal subcmd
-		// A filter combined with a global aggregation (summary/sort-by)
-		// was parsed and then silently ignored — reject it instead
-		// (#3439 Codex MAJOR fold).
-		{"summary", "protocol", "tcp"},
-		{"protocol", "tcp", "summary"},
+		// A filter combined with sort-by (which takes no filter) was
+		// parsed and then silently ignored — reject it instead
+		// (#3439 Codex MAJOR fold). `summary` is NOT in this class
+		// since #15236/#17189: GetSessionSummary carries the selector
+		// set and a filtered summary is forwarded, so the two summary
+		// rows that used to sit here moved to the acceptance test
+		// TestRemoteFilteredSummaryAccepted17189. A malformed value
+		// after `summary` still errors (row above).
 		{"sort-by", "bytes", "destination-port", "443"},
 		{"zone", "1", "sort-by", "packets"},
 	}

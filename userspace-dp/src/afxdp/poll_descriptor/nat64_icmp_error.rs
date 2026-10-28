@@ -34,7 +34,7 @@ use super::*;
 /// same-family arm uses). Only invoked when the packet is classified as an
 /// ICMP error AND at least one NAT64 prefix is configured (both checked by
 /// the caller); the match itself re-verifies the error class.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn try_translate_nat64_icmp_error(
     desc: XdpDesc,
     // #8271: see the note on `try_reverse_embedded_icmp_error`. This is the

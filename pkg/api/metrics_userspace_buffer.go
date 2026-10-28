@@ -281,6 +281,9 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 	c.emitConstMetric(ch, c.userspaceServerHandlerPanics,
 		prometheus.CounterValue,
 		float64(status.ServerHandlerPanics))
+	c.emitConstMetric(ch, c.userspaceReinjectHandlerPanics,
+		prometheus.CounterValue,
+		float64(status.ReinjectHandlerPanics))
 
 	// #7398: emitted unconditionally like their neighbours. A 0 here is a real
 	// "no stale install/delete was refused, no import lost its reservation"

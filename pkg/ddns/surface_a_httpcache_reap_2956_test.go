@@ -36,8 +36,8 @@ func TestHTTPClientCacheReapClosesSupersededTransport(t *testing.T) {
 	}
 	defer func() { closeIdleConns = orig }()
 
-	pOld := &config.DDNSProvider{Name: "p", Backend: "generic", SourceAddress: "192.0.2.1"}
-	pNew := &config.DDNSProvider{Name: "p", Backend: "generic", SourceAddress: "192.0.2.2"}
+	pOld := &config.DDNSProvider{Name: "p", Backend: "generic", RFC2136Endpoint: config.RFC2136Endpoint{SourceAddress: "192.0.2.1"}}
+	pNew := &config.DDNSProvider{Name: "p", Backend: "generic", RFC2136Endpoint: config.RFC2136Endpoint{SourceAddress: "192.0.2.2"}}
 
 	clOld, err := c.clientFor(pOld)
 	if err != nil {
@@ -87,8 +87,8 @@ func TestHTTPClientCacheReapKeepsAllLiveBindings(t *testing.T) {
 	closeIdleConns = func(cl *http.Client) { closed++; orig(cl) }
 	defer func() { closeIdleConns = orig }()
 
-	pA := &config.DDNSProvider{Name: "a", Backend: "generic", SourceAddress: "192.0.2.10"}
-	pB := &config.DDNSProvider{Name: "b", Backend: "generic", SourceAddress: "192.0.2.11"}
+	pA := &config.DDNSProvider{Name: "a", Backend: "generic", RFC2136Endpoint: config.RFC2136Endpoint{SourceAddress: "192.0.2.10"}}
+	pB := &config.DDNSProvider{Name: "b", Backend: "generic", RFC2136Endpoint: config.RFC2136Endpoint{SourceAddress: "192.0.2.11"}}
 	if _, err := c.clientFor(pA); err != nil {
 		t.Fatalf("clientFor a: %v", err)
 	}
@@ -133,10 +133,12 @@ func TestSurfaceAReconcileReapsSupersededHTTPClients(t *testing.T) {
 	for i := 0; i < N; i++ {
 		src := fmt.Sprintf("192.0.2.%d", i+1)
 		p := &config.DDNSProvider{
-			Name:          "p",
-			Backend:       "generic",
-			URLTemplate:   "https://example.test/u?ip=%i",
-			SourceAddress: src,
+			Name:        "p",
+			Backend:     "generic",
+			URLTemplate: "https://example.test/u?ip=%i",
+			RFC2136Endpoint: config.RFC2136Endpoint{
+				SourceAddress: src,
+			},
 		}
 		// Build the backend for this binding — populates the per-binding cache,
 		// exactly as a reconcile pass's resolveBackend would.
