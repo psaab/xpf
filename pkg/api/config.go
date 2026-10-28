@@ -738,8 +738,20 @@ func (s *Server) configCompareHandler(w http.ResponseWriter, r *http.Request) {
 	// selects slot-vs-candidate; absent selects candidate-vs-active),
 	// never a second live-store read.
 	if snaps, has := restConfigReadSnapshotsFrom(r); has && snaps.Present {
+		// #17215: the slot error and the no-candidate mode error
+		// travel inside the gate capture; surface them before the
+		// "renders nothing" branch so a missing slot / absent
+		// candidate never reads as 200 "" ("no diff").
+		if snaps.SlotErr != nil {
+			writeError(w, http.StatusBadRequest, snaps.SlotErr.Error())
+			return
+		}
+		if rollbackN > 0 && snaps.NoCandidate {
+			writeError(w, http.StatusBadRequest, "not in configuration mode")
+			return
+		}
 		if !snaps.Renders {
-			// No candidate arm at pricing: the store compare
+			// rollback=0 with no candidate: the store compare
 			// renders "" (not in configuration mode).
 			writeOK(w, TextResponse{Output: ""})
 			return
@@ -961,10 +973,10 @@ func (s *Server) configShowRollbackHandler(w http.ResponseWriter, r *http.Reques
 
 	// #15995 fold: render the priced slot snapshot when the gate ran.
 	// Fold 3: captured nil Primary = slot absent at pricing — surface
-	// the slot error, never render a later live slot.
+	// the captured SlotErr (#17215), never render a later live slot.
 	if snaps, ok := restConfigReadSnapshotsFrom(r); ok && snaps.Present && snaps.Primary == nil {
-		if err := s.store.RollbackSnapshotErr(n); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+		if snaps.SlotErr != nil {
+			writeError(w, http.StatusBadRequest, snaps.SlotErr.Error())
 			return
 		}
 	}

@@ -290,8 +290,8 @@ const maxSourceNATPoolID uint8 = 255
 //   - result.AddrIDs / result.nextAddrID — the implicit "_snat_match_<cidr>"
 //     address-book entries resolveSNATMatchAddr synthesizes.
 //
-//   - the persistent-NAT table (dp.GetPersistentNAT), which the conntrack GC
-//     and `show security nat source persistent-nat-table` read. This is the
+//   - the persistent-NAT table (dp.GetPersistentNAT), which
+//     `show security nat source persistent-nat-table` reads. This is the
 //     one dataplane call in this file that is NOT a shim no-op.
 //
 //   - the errors: an unknown zone, an unknown pool, and a DNAT match/pool

@@ -18,15 +18,21 @@ fn padded_policy_masks_match_helper_ipnet_grammar_12178() {
         ("10.0.0.0/024", false, true),
         ("2001:db8::/0064", false, false),
     ] {
-        let mut v4 = Vec::new();
-        let mut v6 = Vec::new();
+        // #17114: the shared classifier replaced `parse_address`; a valid
+        // literal classifies as Prefix of the expected family, junk as
+        // Malformed.
+        let (v4_len, v6_len) = match classify_addr_token(prefix) {
+            AddrToken::Prefix(IpNet::V4(_)) => (1, 0),
+            AddrToken::Prefix(IpNet::V6(_)) => (0, 1),
+            _ => (0, 0),
+        };
         assert_eq!(
-            parse_address(prefix, &mut v4, &mut v6),
+            v4_len + v6_len == 1,
             accepted,
             "policy literal parser classified {prefix:?} incorrectly"
         );
         assert_eq!(
-            (v4.len(), v6.len()),
+            (v4_len, v6_len),
             if accepted {
                 if expect_v4 {
                     (1, 0)
@@ -1772,6 +1778,112 @@ fn legacy_address_literal_only_list_is_not_widened() {
     );
     assert!(v4.contains("10.1.2.3".parse().unwrap()));
     assert!(!v4.contains("192.168.1.1".parse().unwrap()));
+}
+
+#[test]
+fn addr_token_legacy_and_v3_classify_identically_17114() {
+    // #17114: legacy and v3 share `classify_addr_token` (mirroring the Go
+    // `PolicyAddressWildcardFamilies` keyword table). RED on the pre-fix
+    // divergence: legacy had no `any4`/`any6` arm, so those fell through to
+    // the literal parser and were reported malformed, while v3 set the
+    // family wildcard. The ONLY permitted difference is the documented
+    // empty-set semantics: legacy empty = MatchAny, v3 empty = MatchNone,
+    // and (consequently) a family-scoped wildcard leaves the unnamed
+    // legacy family MatchNone instead of leaking via empty->MatchAny.
+    for (tok, want_any_v4, want_any_v6, want_malformed) in [
+        ("any", true, true, false),
+        ("any4", true, false, false),
+        ("any6", false, true, false),
+        ("any-ipv4", true, false, false),
+        ("any-ipv6", false, true, false),
+        ("", false, false, true),
+        ("10.0.0.0/8", false, false, false),
+        ("::/0", false, false, false),
+        ("junk", false, false, true),
+    ] {
+        let tokens = vec![tok.to_string()];
+        let (lv4, lv6, lmal) = parse_legacy_address_set(&tokens);
+        let (vv4, vv6, vmal) = parse_v3_literal_set(&tokens);
+        assert_eq!(lmal.is_some(), want_malformed, "legacy malformed {tok:?}");
+        assert_eq!(vmal.is_some(), want_malformed, "v3 malformed {tok:?}");
+        assert_eq!(lmal, vmal, "malformed token must agree for {tok:?}");
+        if want_malformed {
+            // The caller rejects the whole snapshot on `malformed`, so the
+            // accompanying sets are unreachable (legacy would be MatchAny,
+            // v3 MatchNone); classification agreement is the contract here.
+            continue;
+        }
+        // MatchAny expectations apply to the wildcard rows; a literal row
+        // is scoped on the legacy side too (its opposite family stays
+        // MatchAny only via the legacy empty convention, checked via
+        // `contains` agreement below), and `::/0` is a /0 Prefix — match-all
+        // behaviourally but not the MatchAny variant.
+        if matches!(tok, "any" | "any4" | "any6" | "any-ipv4" | "any-ipv6") {
+            assert_eq!(lv4.is_match_any(), want_any_v4, "legacy v4 any {tok:?}");
+            assert_eq!(vv4.is_match_any(), want_any_v4, "v3 v4 any {tok:?}");
+            assert_eq!(lv6.is_match_any(), want_any_v6, "legacy v6 any {tok:?}");
+            assert_eq!(vv6.is_match_any(), want_any_v6, "v3 v6 any {tok:?}");
+        }
+        // Same-family membership must agree. Opposite-family membership of
+        // a literal row MAY differ: that is exactly the documented
+        // empty-set semantics (legacy unnamed family = MatchAny via
+        // from_prefixes, v3 = MatchNone via from_v3_literals).
+        if matches!(classify_addr_token(tok), AddrToken::Prefix(IpNet::V6(_))) {
+            assert_eq!(
+                lv6.contains("2001:db8::1".parse().unwrap()),
+                vv6.contains("2001:db8::1".parse().unwrap()),
+                "v6 membership must agree for {tok:?}"
+            );
+            assert!(lv4.contains("10.1.2.3".parse().unwrap()), "legacy v4 empty = MatchAny");
+            assert!(!vv4.contains("10.1.2.3".parse().unwrap()), "v3 v4 empty = MatchNone");
+        } else if matches!(classify_addr_token(tok), AddrToken::Prefix(IpNet::V4(_))) {
+            assert_eq!(
+                lv4.contains("10.1.2.3".parse().unwrap()),
+                vv4.contains("10.1.2.3".parse().unwrap()),
+                "v4 membership must agree for {tok:?}"
+            );
+            assert!(lv6.contains("2001:db8::1".parse().unwrap()), "legacy v6 empty = MatchAny");
+            assert!(!vv6.contains("2001:db8::1".parse().unwrap()), "v3 v6 empty = MatchNone");
+        } else {
+            assert_eq!(
+                lv4.contains("10.1.2.3".parse().unwrap()),
+                vv4.contains("10.1.2.3".parse().unwrap()),
+                "v4 membership must agree for {tok:?}"
+            );
+            assert_eq!(
+                lv6.contains("2001:db8::1".parse().unwrap()),
+                vv6.contains("2001:db8::1".parse().unwrap()),
+                "v6 membership must agree for {tok:?}"
+            );
+        }
+    }
+    // Documented empty-set divergence, and nothing else.
+    let (lv4, lv6, _) = parse_legacy_address_set(&[]);
+    let (vv4, vv6, _) = parse_v3_literal_set(&[]);
+    assert!(lv4.is_match_any() && lv6.is_match_any(), "legacy empty = MatchAny");
+    assert!(vv4.is_match_none() && vv6.is_match_none(), "v3 empty = MatchNone");
+    // The classifier itself mirrors the Go keyword table exactly.
+    assert_eq!(classify_addr_token("any"), AddrToken::Any);
+    assert_eq!(classify_addr_token("any4"), AddrToken::AnyV4);
+    assert_eq!(classify_addr_token("any-ipv4"), AddrToken::AnyV4);
+    assert_eq!(classify_addr_token("any6"), AddrToken::AnyV6);
+    assert_eq!(classify_addr_token("any-ipv6"), AddrToken::AnyV6);
+    assert_eq!(classify_addr_token(""), AddrToken::Malformed);
+    assert_eq!(classify_addr_token("junk"), AddrToken::Malformed);
+    assert!(matches!(
+        classify_addr_token("10.0.0.0/8"),
+        AddrToken::Prefix(IpNet::V4(_))
+    ));
+    assert!(matches!(
+        classify_addr_token("::/0"),
+        AddrToken::Prefix(IpNet::V6(_))
+    ));
+    // Book surface: same classifier, plus the declared-family check — a
+    // family keyword is accepted only in its own array, bare `any` never.
+    let (mut bv4, mut bv6) = (Vec::new(), Vec::new());
+    assert!(parse_book_prefix_into("any4", true, &mut bv4, &mut bv6));
+    assert!(!parse_book_prefix_into("any4", false, &mut bv4, &mut bv6));
+    assert!(!parse_book_prefix_into("any", true, &mut bv4, &mut bv6));
 }
 
 #[test]
@@ -11161,4 +11273,23 @@ fn count_effect_skips_unzoned_counter_for_functional_zone_17929() {
         before,
         "functional-zone deny must not bump UNZONED_EGRESS_DENIED"
     );
+}
+
+// #17118: PolicyRule's Clone is derived; the sharing contract that matters
+// is on hit_counter — clones must keep counting into the SAME
+// Arc<PolicyRuleCounter> (#3322 carry-forward), not a snapshot copy.
+#[test]
+fn policy_rule_clone_shares_hit_counter_17118() {
+    let rule = PolicyRule {
+        rule_id: "lan->wan/clone-share".to_string(),
+        ..Default::default()
+    };
+    let cloned = rule.clone();
+    assert!(
+        Arc::ptr_eq(&rule.hit_counter, &cloned.hit_counter),
+        "cloned PolicyRule must share the admitting rule's hit counter"
+    );
+    cloned.hit_counter.add(64);
+    assert_eq!(rule.hit_counter.test_packet_count(), 1);
+    assert_eq!(rule.hit_counter.test_byte_count(), 64);
 }

@@ -3,6 +3,7 @@ package vrrp
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -15,6 +16,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/vishvananda/netlink"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // instanceKey identifies a unique VRRP instance.
@@ -128,23 +131,17 @@ func vipClaimKeyFor(iface, vip string) (vipClaimKey, bool) {
 // parseVIPIdentity canonicalizes a VIP to its host identity and family.
 // CIDR and bare spellings of the same host collide; different prefixes on
 // the same host also collide, because both elections would install the
-// same host address.
+// same host address. The parse is config.ParseVRRPVIP (#17150).
 func parseVIPIdentity(vip string) (host, family string, ok bool) {
-	if ip, _, err := net.ParseCIDR(vip); err == nil {
-		family = "inet6"
-		if ip.To4() != nil {
-			family = "inet"
-		}
-		return ip.String(), family, true
+	p, ok := config.ParseVRRPVIP(vip)
+	if !ok {
+		return "", "", false
 	}
-	if ip := net.ParseIP(vip); ip != nil {
-		family = "inet6"
-		if ip.To4() != nil {
-			family = "inet"
-		}
-		return ip.String(), family, true
+	family = "inet6"
+	if p.Addr().Is4() {
+		family = "inet"
 	}
-	return "", "", false
+	return p.Addr().String(), family, true
 }
 
 // secondVIPClaimant reports whether inst claims a VIP already claimed by a
@@ -553,7 +550,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 	needsLinkWatcher := false
 	for _, inst := range desired {
 		if inst != nil {
-			virtualAddresses := dedupeVIPs(inst.VirtualAddresses)
+			virtualAddresses := config.DedupeVRRPVIPs(inst.VirtualAddresses)
 			if len(virtualAddresses) != len(inst.VirtualAddresses) {
 				normalized := *inst
 				normalized.VirtualAddresses = virtualAddresses
@@ -757,7 +754,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 			// and GARPCount (per-VIP gratuitous-ARP burst on failover) are wire/
 			// timer/burst fields the run loop re-reads from cfg, so a day-2 change
 			// to EITHER must break the no-change shortcut and take the in-place
-			// updateConfig arm below — otherwise a commit changing only
+			// updateConfigHeld arm below — otherwise a commit changing only
 			// reth-advertise-interval or gratuitous-arp-count is silently dropped
 			// until an unrelated restart (#5087).
 			existingVIPs := existing.vipsSnapshot()
@@ -971,7 +968,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 // resign arm, #16821); the explicit priority-0 burst after it remains
 // the takeover signal. The resigned instance then keeps priority 0 —
 // so its master-down skew is longest and it cannot win a re-election
-// — until a priority restore (UpdateRGPriority / updateConfig)
+// — until a priority restore (UpdateRGPriority / updateConfigHeld)
 // supersedes and drops the stash.
 // Used when cluster state transitions from Primary to Secondary
 // (manual failover, weight drop, etc.) in non-preempt mode.
@@ -1332,11 +1329,11 @@ func (m *Manager) Status() string {
 		state := vi.getState()
 		// #5718 (codex-182 C-HA C01c): snapshot the mutable cfg fields under
 		// vi.mu.RLock before formatting. Priority/Preempt/AdvertiseInterval are
-		// mutated under vi.mu.Lock (updateConfig, UpdateRGPriority,
+		// mutated under vi.mu.Lock (updateConfigHeld, UpdateRGPriority,
 		// suppressPreempt/restorePreempt); reading them here while holding only
 		// m.mu.RLock races a concurrent failover priority update — a
 		// diagnostic-only data race go test -race flags. Mirrors the snapshot
-		// idiom in advertInterval/getPriority (#6230). VirtualAddresses is
+		// idiom in advertiseIntervalMS/getPriority (#6230). VirtualAddresses is
 		// mutable under vi.mu on an in-place VIP-set commit (#10780), so it is
 		// deep-copied under this same lock alongside the raced scalar fields.
 		// getState() already RLocks internally, so it stays outside this block;
@@ -1372,6 +1369,28 @@ func (m *Manager) Status() string {
 // observable and stays symmetric across families (#2786).
 var bindSocketToDevice = func(fd int, ifName string) error {
 	return unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, ifName)
+}
+
+// rawConnJoinGroup joins a multicast group on the IPv4 raw conn. Package var
+// so tests can stub a join failure and observe the Warn without a real socket
+// (#17217).
+var rawConnJoinGroup = func(rawConn *ipv4.RawConn, ifi *net.Interface, group *net.IPAddr) error {
+	return rawConn.JoinGroup(ifi, group)
+}
+
+// v6JoinGroup performs the IPV6_JOIN_GROUP setsockopt. Package var so tests
+// can stub a join failure (e.g. ENOBUFS) and observe the Warn without a real
+// socket (#17217).
+var v6JoinGroup = func(fd int, mreq *unix.IPv6Mreq) error {
+	return unix.SetsockoptIPv6Mreq(fd, unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq)
+}
+
+// packetAddAllmultiMembership performs the PACKET_ADD_MEMBERSHIP (ALLMULTI)
+// setsockopt. Package var so tests can stub a failure and observe the Warn
+// without CAP_NET_RAW (#17217).
+var packetAddAllmultiMembership = func(fd int, mreq *unix.PacketMreq) error {
+	const level, opt = unix.SOL_PACKET, unix.PACKET_ADD_MEMBERSHIP
+	return unix.SetsockoptPacketMreq(fd, level, opt, mreq)
 }
 
 // maybeBindToDevice applies SO_BINDTODEVICE to fd ONLY when ifName is a plain
@@ -1441,10 +1460,12 @@ func openPerInterfaceSocket(ifName string, iface *net.Interface, isVLAN bool) (*
 		slog.Debug("vrrp: disable ipv4 multicast loopback failed", "interface", ifName, "err", err)
 	}
 
-	// Join VRRP multicast group on this interface.
+	// Join VRRP multicast group on this interface. One-time setup: if the
+	// join fails this socket may never receive peer adverts, so this is a
+	// Warn (visible at the default level), not Debug (#17217).
 	group := net.IPv4(224, 0, 0, 18)
-	if err := rawConn.JoinGroup(iface, &net.IPAddr{IP: group}); err != nil {
-		slog.Debug("vrrp: join multicast failed", "interface", ifName, "err", err)
+	if err := rawConnJoinGroup(rawConn, iface, &net.IPAddr{IP: group}); err != nil {
+		slog.Warn("vrrp: join multicast failed, VRRP adverts may not be received", "interface", ifName, "err", err)
 	}
 
 	return rawConn, conn, nil
@@ -1654,8 +1675,8 @@ func openAfPacketReceiver(ifIndex int) (int, error) {
 	// split-brain. ALLMULTI is the conservative correct choice. See
 	// docs/vrrp-afpacket-receiver.md.
 	mreq := buildAfPacketMembership(ifIndex)
-	if err := unix.SetsockoptPacketMreq(fd, unix.SOL_PACKET, unix.PACKET_ADD_MEMBERSHIP, &mreq); err != nil {
-		slog.Debug("vrrp: failed to set allmulti", "err", err)
+	if err := packetAddAllmultiMembership(fd, &mreq); err != nil {
+		slog.Warn("vrrp: failed to set allmulti, VRRP adverts may not be received", "ifindex", ifIndex, "err", err)
 	}
 
 	// Request PACKET_AUXDATA so recvmsg also delivers the VLAN TCI the
@@ -1749,9 +1770,13 @@ func openIPv6Socket(ifName string, iface *net.Interface, isVLAN bool) (net.Packe
 		Interface: uint32(iface.Index),
 	}
 	copy(mreq.Multiaddr[:], net.ParseIP("ff02::12").To16())
+	// This socket was created above in this function, so it cannot already
+	// have joined ff02::12; only EADDRINUSE is treated as success, any other
+	// errno is a real one-time setup failure and warns (#17217).
 	if err := sc.Control(func(rawfd uintptr) {
-		// Ignore error — may fail if group already joined.
-		_ = unix.SetsockoptIPv6Mreq(int(rawfd), unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq)
+		if err := v6JoinGroup(int(rawfd), mreq); err != nil && !errors.Is(err, unix.EADDRINUSE) {
+			slog.Warn("vrrp: ipv6 join multicast failed, VRRP adverts may not be received", "interface", ifName, "err", err)
+		}
 		// Do not loop our own adverts back to local sockets (#6560) — the v6
 		// twin of the IP_MULTICAST_LOOP disable on the IPv4 raw conn. Same
 		// reasoning: this socket sends AND joins ff02::12, so the default
@@ -1760,7 +1785,7 @@ func openIPv6Socket(ifName string, iface *net.Interface, isVLAN bool) (net.Packe
 			slog.Debug("vrrp: disable ipv6 multicast loopback failed", "interface", ifName, "err", err)
 		}
 	}); err != nil {
-		slog.Debug("vrrp: ipv6 join multicast failed", "interface", ifName, "err", err)
+		slog.Warn("vrrp: ipv6 join multicast failed, VRRP adverts may not be received", "interface", ifName, "err", err)
 	}
 
 	return conn, fd, nil

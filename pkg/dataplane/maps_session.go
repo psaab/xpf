@@ -43,7 +43,7 @@ func IsKeyNotFound(err error) bool {
 // of this function.
 // The helper periodically refreshes LastSeen (~10s) so callers see
 // reasonably accurate idle times.  Session lifetime is owned by the
-// helper, not Go GC (GC.SkipSweep is set).  See #333.
+// helper, not the retired Go conntrack GC (`pkg/conntrack`, deleted in #17155). See #333.
 func (m *Manager) IterateSessions(fn func(SessionKey, SessionValue) bool) error {
 	sm, present, st := m.lookupMapLocked("sessions")
 	if st == registryFresh {

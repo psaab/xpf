@@ -68,7 +68,7 @@ func TestPoisonedZoneOverrideAbsentFromKernelHostInboundView12834(t *testing.T) 
 		{iface: "ge-0/0/0", want: HostInboundNotComputed},
 		{iface: "ge-0/0/0.0", want: HostInboundDenied},
 	} {
-		got := ClassifyHostInboundForInterface(cfg, "zulu", tc.iface, 6, true, 7000, nil, "inet")
+		got := ClassifyHostInboundForInterface(cfg, "zulu", tc.iface, 6, true, 7000, true, nil, "inet")
 		if got.Status != tc.want {
 			t.Errorf("tcp/7000 on %s = %v, want %v for quarantined identity", tc.iface, got.Status, tc.want)
 		}

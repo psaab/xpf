@@ -33,19 +33,19 @@ func (s *Server) buildLocalForwarding() string {
 	return fwdstatus.Format(fs)
 }
 
-type forwardingStatusServerDataPlane struct {
-	server *Server
+// serverMapStatsSource adapts the Server's stored provider to the
+// package-local MapStats shape fwdstatus.NewAccessor needs (#17128).
+type serverMapStatsSource struct{ server *Server }
+
+func (s serverMapStatsSource) IsLoaded() bool {
+	return s.server != nil && s.server.dp != nil && s.server.dp.IsLoaded()
 }
 
-func (a forwardingStatusServerDataPlane) IsLoaded() bool {
-	return a.server != nil && a.server.dp != nil && a.server.dp.IsLoaded()
-}
-
-func (a forwardingStatusServerDataPlane) GetMapStats() []fwdstatus.MapStats {
-	if a.server == nil || a.server.dp == nil {
+func (s serverMapStatsSource) GetMapStats() []fwdstatus.MapStats {
+	if s.server == nil || s.server.dp == nil {
 		return nil
 	}
-	stats := a.server.dp.GetMapStats()
+	stats := s.server.dp.GetMapStats()
 	out := make([]fwdstatus.MapStats, 0, len(stats))
 	for _, ms := range stats {
 		out = append(out, fwdstatus.MapStats{
@@ -55,37 +55,6 @@ func (a forwardingStatusServerDataPlane) GetMapStats() []fwdstatus.MapStats {
 		})
 	}
 	return out
-}
-
-type forwardingStatusServerUserspaceDataPlane struct {
-	forwardingStatusServerDataPlane
-}
-
-func (a forwardingStatusServerUserspaceDataPlane) Status() (dpuserspace.ProcessStatus, error) {
-	return a.server.userspaceDataplaneStatus()
-}
-
-// HelperCrashState feeds fwdstatus's #7250 crash block. Resolves the backend
-// directly rather than via userspaceDataplaneStatus(), because a crash clears
-// the cached ProcessStatus and the crash record is Manager-owned — routing it
-// through the status path would blank the block in the one case it is for.
-func (a forwardingStatusServerUserspaceDataPlane) HelperCrashState() (dpuserspace.HelperCrashRecord, bool) {
-	provider, ok := a.server.dpProbe().(userspaceCrashProvider)
-	if !ok {
-		return dpuserspace.HelperCrashRecord{}, false
-	}
-	return provider.HelperCrashState()
-}
-
-// HelperCrashHistory feeds fwdstatus's #8397 completed-episode summary.
-// Resolve the backend directly: completed history remains available after the
-// live episode closes at its quiet-window or Compile boundary.
-func (a forwardingStatusServerUserspaceDataPlane) HelperCrashHistory() ([]dpuserspace.HelperCrashEpisode, int) {
-	provider, ok := a.server.dpProbe().(userspaceCrashHistoryProvider)
-	if !ok {
-		return nil, 0
-	}
-	return provider.HelperCrashHistory()
 }
 
 func (s *Server) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
@@ -110,15 +79,11 @@ func (s *Server) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
 	// ONE resolution feeds both decisions, as in showBuffers (r7): a
 	// setDataplane(nil) landing between a publication check and a separate
 	// dpProbe() re-creates the confusion the check exists to prevent.
+	// #17128: the shared fwdstatus.NewAccessor owns the adapter; this
+	// surface supplies its three inputs and NewAccessor returns nil on
+	// an empty cell.
 	backend := mgmtview.Probe(s.dp)
-	if backend == nil {
-		return nil
-	}
-	base := forwardingStatusServerDataPlane{server: s}
-	if _, ok := backend.(userspaceStatusProvider); ok {
-		return forwardingStatusServerUserspaceDataPlane{forwardingStatusServerDataPlane: base}
-	}
-	return base
+	return fwdstatus.NewAccessor(serverMapStatsSource{server: s}, backend, s.userspaceDataplaneStatus)
 }
 
 func (s *Server) dialAndShowForwarding(ctx context.Context) (*pb.ShowTextResponse, error) {

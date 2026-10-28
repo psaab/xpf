@@ -18,6 +18,7 @@ import (
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 	"github.com/psaab/xpf/pkg/frr"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/ipsec"
 	"github.com/psaab/xpf/pkg/networkd"
@@ -282,7 +283,7 @@ func (d *Daemon) initManagers(failClosed bool) error {
 	// Only applies when VRRP is enabled — otherwise no RETH VRRP instances.
 	if cfg := d.store.ActiveConfig(); cfg != nil && cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
-		if cc.FabricInterface != "" && cc.FabricPeerAddress != "" && !cc.NoRethVRRP && !cc.PrivateRGElection {
+		if cc.FabricInterface != "" && cc.FabricPeerAddress != "" && cc.UsesRethVRRP() {
 			d.vrrpMgr.SetSyncHold(30 * time.Second)
 			if d.cluster != nil {
 				d.cluster.SetStartupSyncHoldStatus("reth-vrrp", true, "")
@@ -323,7 +324,7 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// this one), and this timer's callback returns early while no sync
 		// peer is connected. Whether promotion SHOULD be sync-gated is
 		// #110; do not read this call as already doing it.
-		if cc.PrivateRGElection && cc.FabricInterface != "" && cc.FabricPeerAddress != "" {
+		if cc.RethOwnershipMode() == config.RethPrivateRG && cc.FabricInterface != "" && cc.FabricPeerAddress != "" {
 			d.armSyncReadyTimer()
 		}
 	}
@@ -889,9 +890,20 @@ var hostForwardingPostureSysctls = map[string]string{
 	"/proc/sys/net/ipv4/conf/all/accept_local": "1",
 }
 
+// applyHostForwardingPosture asserts the daemon-lifetime host posture.
+// It deliberately does NOT register these knobs with the #17068
+// lifecycle registry: daemon-lifetime posture is expressed by asserting
+// through WriteKernelKnob WITHOUT registering (the registry has no
+// keep-forever policy — registering would promise a restore that must
+// never happen). The posture is not tied to a config stanza whose
+// removal should restore a prior (it is re-asserted at boot/naming and
+// nf_conntrack_tcp_loose is separately re-asserted+verified by
+// reassertTCPloosePosture, the knob's single lifecycle owner). Writes
+// go through fsatomic.WriteKernelKnob so the error policy and
+// read-compare are the shared ones, not a fifth hand-rolled convention.
 func applyHostForwardingPosture() {
 	for path, val := range hostForwardingPostureSysctls {
-		if err := os.WriteFile(path, []byte(val), 0644); err != nil {
+		if _, err := fsatomic.WriteKernelKnob(path, val); err != nil {
 			slog.Warn("failed to set sysctl", "path", path, "err", err)
 		}
 	}

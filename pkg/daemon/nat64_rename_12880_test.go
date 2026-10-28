@@ -109,8 +109,8 @@ func TestReauthorizeNAT64Candidate12880(t *testing.T) {
 		},
 		DNAT: true, NATDstIP: "10.0.0.1", NATDstPort: 8443,
 		ExpectedRTFlowSessionID: 12880,
-		IngressZoneID:           uint16(config.StableZoneID("lan")),
-		EgressZoneID:            uint16(config.StableZoneID("wan")),
+		IngressZoneID:           config.StableZoneID("lan"),
+		EgressZoneID:            config.StableZoneID("wan"),
 	}
 	capture := &policyInvalidationCapture{candidateRuleIDs: map[policyInvalidationMatchIdentity]string{}}
 	capture.deleted.policy = append(capture.deleted.policy, match)
