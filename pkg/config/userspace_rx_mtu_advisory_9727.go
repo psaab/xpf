@@ -51,11 +51,11 @@ const (
 // (drops counted) from a zero-copy one (a refused bind), and a jumbo
 // MTU remains correct for the kernel-forwarded traffic of an
 // interface. The strict #16244 gate uses the same effective parents.
-// opts.suppressContestedTrunkZoneAdvisory silences it on the tolerant
+// opts.tolerant silences it on the tolerant
 // boot and peer-sync paths, for the reason given at
 // appendContestedTrunkZoneAdvisoryLocked.
 func appendUserspaceRxMTUAdvisoryLocked(cfg *Config, opts compileOpts) {
-	if cfg == nil || opts.suppressContestedTrunkZoneAdvisory {
+	if cfg == nil || opts.tolerant {
 		return
 	}
 	over := userspaceRxMTUOverBudget(cfg)

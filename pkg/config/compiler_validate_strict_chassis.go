@@ -518,7 +518,7 @@ func validateChassisClusterStrict(cfg *Config) error {
 	// lenientChassisRG (#1960 no-brick): a config persisted by an older
 	// binary still boots (arm (b) is additionally bounded at runtime
 	// by the Manager-owned never-seen clock, #16751).
-	if cfg.Chassis.Cluster.PrivateRGElection {
+	if cfg.Chassis.Cluster.RethOwnershipMode() == RethPrivateRG {
 		hasRG := false
 		for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
 			if rg != nil {
