@@ -98,7 +98,10 @@ func TestRFC2136SOAWalkForwardDeepName15225(t *testing.T) {
 func TestRFC2136ExplicitZones15225(t *testing.T) {
 	c := &config.DHCPDynamicDNSConfig{
 		Enabled: true, Domain: "example.com",
-		ForwardZone: "example.com", ReverseZone: "8.b.d.0.1.0.0.2.ip6.arpa",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			ForwardZone: "example.com",
+			ReverseZone: "8.b.d.0.1.0.0.2.ip6.arpa",
+		},
 	}
 	pol := policyFromConfig(c)
 	if len(pol.forwardZones) != 1 || len(pol.reverseZones) != 1 {

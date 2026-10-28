@@ -415,7 +415,14 @@ mod tcp_syn_check_tests {
         no_syn_check: bool,
         strict_syn_check: bool,
     ) -> bool {
-        if strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, flags, false, no_syn_check, strict_syn_check, 0) {
+        if strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP,
+            flags,
+            false,
+            no_syn_check,
+            strict_syn_check,
+            0,
+        ) {
             return false;
         }
         table.install_with_protocol_with_origin(
@@ -443,7 +450,9 @@ mod tcp_syn_check_tests {
             TCP_RST | TCP_ACK,
         ] {
             assert!(
-                strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, flags, false, false, false, 0),
+                strict_syn_check_drops_new_flow_with_payload(
+                    PROTO_TCP, flags, false, false, false, 0
+                ),
                 "non-SYN TCP flags 0x{flags:02x} must drop on a default-policy miss"
             );
         }
@@ -456,9 +465,11 @@ mod tcp_syn_check_tests {
         ));
         assert!(!strict_syn_check_drops_new_flow_with_payload(
             PROTO_TCP,
-            TCP_SYN | TCP_ACK, false,
+            TCP_SYN | TCP_ACK,
             false,
-            false, 0
+            false,
+            false,
+            0
         ));
         for flags in [
             TCP_SYN | TCP_FIN,
@@ -467,7 +478,9 @@ mod tcp_syn_check_tests {
             TCP_SYN | TCP_ACK | TCP_RST,
         ] {
             assert!(
-                strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, flags, false, false, false, 0),
+                strict_syn_check_drops_new_flow_with_payload(
+                    PROTO_TCP, flags, false, false, false, 0
+                ),
                 "closing SYN flags 0x{flags:02x} must drop"
             );
         }
@@ -478,7 +491,9 @@ mod tcp_syn_check_tests {
         let mut table = SessionTable::new();
         for (port, flags) in [(40400, TCP_ACK), (40401, TCP_ACK | TCP_PSH)] {
             assert!(
-                !strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, flags, false, true, false, 0),
+                !strict_syn_check_drops_new_flow_with_payload(
+                    PROTO_TCP, flags, false, true, false, 0
+                ),
                 "no-syn-check must admit non-closing TCP flags 0x{flags:02x}"
             );
             assert!(
@@ -504,9 +519,11 @@ mod tcp_syn_check_tests {
         // Explicit strict mode has precedence if both knobs are configured.
         assert!(strict_syn_check_drops_new_flow_with_payload(
             PROTO_TCP,
-            TCP_ACK | TCP_PSH, false,
+            TCP_ACK | TCP_PSH,
+            false,
             true,
-            true, 0
+            true,
+            0
         ));
         assert!(
             !install_on_miss_with_checks(&mut table, tcp_key(40406), TCP_ACK, true, true),
@@ -518,11 +535,33 @@ mod tcp_syn_check_tests {
     #[test]
     fn tunnel_no_syn_check_admits_only_tunnel_midstream_15753() {
         // Tunnel ACK admitted only when is_tunnel && knob set.
-        assert!(!strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_ACK, false, false, false, true, true, 0));
-        assert!(strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_ACK, false, false, false, true, false, 0), "non-tunnel must still drop");
-        assert!(strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_ACK, false, false, false, false, true, 0), "tunnel without knob drops");
-        assert!(strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_ACK, false, false, true, true, true, 0), "strict overrides tunnel opt-out");
-        assert!(strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, TCP_RST, false, false, false, true, true, 0), "closing tunnel still drops");
+        assert!(!strict_syn_check_drops_new_flow_tunnel_with_payload(
+            PROTO_TCP, TCP_ACK, false, false, false, true, true, 0
+        ));
+        assert!(
+            strict_syn_check_drops_new_flow_tunnel_with_payload(
+                PROTO_TCP, TCP_ACK, false, false, false, true, false, 0
+            ),
+            "non-tunnel must still drop"
+        );
+        assert!(
+            strict_syn_check_drops_new_flow_tunnel_with_payload(
+                PROTO_TCP, TCP_ACK, false, false, false, false, true, 0
+            ),
+            "tunnel without knob drops"
+        );
+        assert!(
+            strict_syn_check_drops_new_flow_tunnel_with_payload(
+                PROTO_TCP, TCP_ACK, false, false, true, true, true, 0
+            ),
+            "strict overrides tunnel opt-out"
+        );
+        assert!(
+            strict_syn_check_drops_new_flow_tunnel_with_payload(
+                PROTO_TCP, TCP_RST, false, false, false, true, true, 0
+            ),
+            "closing tunnel still drops"
+        );
     }
 
     #[test]
@@ -530,22 +569,45 @@ mod tcp_syn_check_tests {
         use crate::session::SeqVerdict;
         let mut table = SessionTable::new();
         let key = tcp_key(40500);
-        assert!(table.install_with_protocol_with_origin(key.clone(), fwd_decision(), fwd_meta(), SessionOrigin::ForwardFlow, 1_000_000_000, PROTO_TCP, TCP_SYN));
+        assert!(table.install_with_protocol_with_origin(
+            key.clone(),
+            fwd_decision(),
+            fwd_meta(),
+            SessionOrigin::ForwardFlow,
+            1_000_000_000,
+            PROTO_TCP,
+            TCP_SYN
+        ));
         // SYN seq=1000, window 4096 -> rcv_nxt=1001
         table.note_tcp_seq(&key, 1000, 0, 4096, 0, TCP_SYN, 0);
         // data seq 1001 len 100 -> nxt 1101
         table.note_tcp_seq(&key, 1001, 0, 4096, 100, TCP_ACK, 0);
         // #16040 fold: no companion ACK observed yet, so the RST
         // verdict is Unknown (admitted), not exact-vs-send-end.
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 1101, TCP_RST), SeqVerdict::Unknown, "no endpoint ACK observed yet (#16040 fold)");
+        assert_eq!(
+            table.tcp_closing_seq_verdict(&key, 1101, TCP_RST),
+            SeqVerdict::Unknown,
+            "no endpoint ACK observed yet (#16040 fold)"
+        );
         // Single-entry table: no companion ACK is observable here, so
         // RST stays Unknown; paired-table endpoint-exact coverage
         // lives in session::tcp_seq_15753_tests
         // (rst_requires_exact_seq_16040,
         // rst_exact_uses_endpoint_rcv_nxt_not_send_end_16040).
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 1050, TCP_RST), SeqVerdict::Unknown, "RST stays Unknown until endpoint ACK observed");
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 1050, TCP_FIN), SeqVerdict::Valid, "in-window FIN seq retained valid");
-        assert_eq!(table.tcp_closing_seq_verdict(&key, 99999, TCP_FIN), SeqVerdict::Invalid);
+        assert_eq!(
+            table.tcp_closing_seq_verdict(&key, 1050, TCP_RST),
+            SeqVerdict::Unknown,
+            "RST stays Unknown until endpoint ACK observed"
+        );
+        assert_eq!(
+            table.tcp_closing_seq_verdict(&key, 1050, TCP_FIN),
+            SeqVerdict::Valid,
+            "in-window FIN seq retained valid"
+        );
+        assert_eq!(
+            table.tcp_closing_seq_verdict(&key, 99999, TCP_FIN),
+            SeqVerdict::Invalid
+        );
     }
 
     #[test]
@@ -615,7 +677,9 @@ mod tcp_syn_check_tests {
         ));
         let _ = table.expire_stale_entries(now + 1_801_000_000_000);
         assert!(
-            table.probe_with_origin_at(&expired, now + 1_801_000_000_000).is_none(),
+            table
+                .probe_with_origin_at(&expired, now + 1_801_000_000_000)
+                .is_none(),
             "expired tuple must be a session miss before the ACK/PSH burst"
         );
         let fresh = tcp_key(40301);
@@ -639,9 +703,15 @@ mod tcp_syn_check_tests {
         assert_eq!(expired_transit, 0, "expired ACK/PSH burst must not transit");
         assert_eq!(fresh_transit, 0, "fresh ACK/PSH burst must not transit");
         assert!(
-            table.probe_with_origin_at(&expired, now + 1_801_000_000_000).is_none()
+            table
+                .probe_with_origin_at(&expired, now + 1_801_000_000_000)
+                .is_none()
         );
-        assert!(table.probe_with_origin_at(&fresh, now + 1_801_000_000_000).is_none());
+        assert!(
+            table
+                .probe_with_origin_at(&fresh, now + 1_801_000_000_000)
+                .is_none()
+        );
     }
 
     #[test]
@@ -719,9 +789,11 @@ mod tcp_syn_check_tests {
                 assert!(
                     !strict_syn_check_drops_new_flow_with_payload(
                         crate::ip_proto::PROTO_AH,
-                        flags, false,
+                        flags,
+                        false,
                         no_syn,
-                        strict, 0
+                        strict,
+                        0
                     ),
                     "proto AH flags 0x{flags:02x} (no_syn={no_syn}, strict={strict}) must never drop"
                 );
@@ -734,7 +806,8 @@ mod tcp_syn_check_tests {
 #[cfg(test)]
 mod tiny_frag_flags_unknown_tests_16007 {
     use super::super::session_admission::{
-        strict_syn_check_drops_new_flow_with_payload, strict_syn_check_drops_new_flow_tunnel_with_payload,
+        strict_syn_check_drops_new_flow_tunnel_with_payload,
+        strict_syn_check_drops_new_flow_with_payload,
     };
     use crate::ip_proto::PROTO_TCP;
     use crate::tcp_flags::{TCP_ACK, TCP_SYN};
@@ -747,16 +820,26 @@ mod tiny_frag_flags_unknown_tests_16007 {
                 "unknown flags must drop (no_syn={no_syn} strict={strict})"
             );
             assert!(
-                strict_syn_check_drops_new_flow_tunnel_with_payload(PROTO_TCP, 0, true, no_syn, strict, true, true, 0),
+                strict_syn_check_drops_new_flow_tunnel_with_payload(
+                    PROTO_TCP, 0, true, no_syn, strict, true, true, 0
+                ),
                 "unknown flags must drop even with tunnel opt-out"
             );
         }
         // Even a stamped SYN is not proven when unknown is set.
-        assert!(strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, TCP_SYN, true, true, false, 0));
+        assert!(strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP, TCP_SYN, true, true, false, 0
+        ));
         // Controls: known flags keep prior semantics.
-        assert!(!strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, TCP_SYN, false, false, false, 0));
-        assert!(!strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, TCP_ACK, false, true, false, 0));
-        assert!(strict_syn_check_drops_new_flow_with_payload(PROTO_TCP, TCP_ACK, false, false, false, 0));
+        assert!(!strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP, TCP_SYN, false, false, false, 0
+        ));
+        assert!(!strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP, TCP_ACK, false, true, false, 0
+        ));
+        assert!(strict_syn_check_drops_new_flow_with_payload(
+            PROTO_TCP, TCP_ACK, false, false, false, 0
+        ));
     }
 }
 
@@ -767,8 +850,7 @@ mod tiny_frag_flags_unknown_tests_16007 {
 #[cfg(test)]
 mod strict_syn_16479_tests {
     use super::super::session_admission::{
-        strict_syn_check_drops_new_flow_with_payload,
-        strict_syn_check_drops_pre_handshake_data,
+        strict_syn_check_drops_new_flow_with_payload, strict_syn_check_drops_pre_handshake_data,
     };
     use crate::ip_proto::PROTO_TCP;
     use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN};
@@ -777,12 +859,7 @@ mod strict_syn_16479_tests {
     fn syn_with_payload_drops_only_under_strict_16479() {
         // SYN + 100 bytes payload: dropped only with strict on.
         assert!(strict_syn_check_drops_new_flow_with_payload(
-            PROTO_TCP,
-            TCP_SYN,
-            false,
-            false,
-            true,
-            100
+            PROTO_TCP, TCP_SYN, false, false, true, 100
         ));
         assert!(strict_syn_check_drops_new_flow_with_payload(
             PROTO_TCP,
@@ -795,28 +872,13 @@ mod strict_syn_16479_tests {
         // Positive controls: same frame without strict, and bare SYN
         // under strict, are admitted.
         assert!(!strict_syn_check_drops_new_flow_with_payload(
-            PROTO_TCP,
-            TCP_SYN,
-            false,
-            false,
-            false,
-            100
+            PROTO_TCP, TCP_SYN, false, false, false, 100
         ));
         assert!(!strict_syn_check_drops_new_flow_with_payload(
-            PROTO_TCP,
-            TCP_SYN,
-            false,
-            true,
-            false,
-            100
+            PROTO_TCP, TCP_SYN, false, true, false, 100
         ));
         assert!(!strict_syn_check_drops_new_flow_with_payload(
-            PROTO_TCP,
-            TCP_SYN,
-            false,
-            false,
-            true,
-            0
+            PROTO_TCP, TCP_SYN, false, false, true, 0
         ));
         // SYN-ACK with payload under strict also drops; closing SYN
         // drops regardless of payload (prior arm, unchanged).
@@ -1059,7 +1121,9 @@ mod persistent_pressure_shed_17683_tests {
             addr_family: libc::AF_INET as u8,
             protocol: crate::ip_proto::PROTO_TCP,
             src_ip: "8.8.8.8".parse().unwrap(),
-            dst_ip: tenant_a_nat.rewrite_src.expect("fixture has public address"),
+            dst_ip: tenant_a_nat
+                .rewrite_src
+                .expect("fixture has public address"),
             src_port: 53,
             dst_port: tenant_a_nat
                 .rewrite_src_port
@@ -1202,7 +1266,9 @@ mod persistent_pressure_shed_17683_tests {
             addr_family: libc::AF_INET as u8,
             protocol: crate::ip_proto::PROTO_TCP,
             src_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-            dst_ip: tenant_a_nat.rewrite_src.expect("fixture has public address"),
+            dst_ip: tenant_a_nat
+                .rewrite_src
+                .expect("fixture has public address"),
             src_port: 53,
             dst_port: tenant_a_nat
                 .rewrite_src_port
@@ -1241,11 +1307,8 @@ mod persistent_pressure_shed_17683_tests {
             crate::tcp_flags::TCP_SYN,
         ));
         sessions.set_persistent_lease_hold(&key, Some(hold_a));
-        let (admitted, sheds) = sessions.can_admit_new_flow(
-            1,
-            crate::ip_proto::PROTO_TCP,
-            crate::tcp_flags::TCP_SYN,
-        );
+        let (admitted, sheds) =
+            sessions.can_admit_new_flow(1, crate::ip_proto::PROTO_TCP, crate::tcp_flags::TCP_SYN);
         assert!(admitted);
         assert_eq!(sheds.len(), 1);
         let recorded_shed_hold = sheds
@@ -1253,7 +1316,6 @@ mod persistent_pressure_shed_17683_tests {
             .next()
             .and_then(|shed| shed.persistent_lease_hold);
 
-        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
         let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
         let shared_nat_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
         let shared_forward_wire_sessions =
@@ -1269,7 +1331,6 @@ mod persistent_pressure_shed_17683_tests {
                 session_map: SteeringMap::unshared_for_test(-1),
                 conntrack_v4_fd: -1,
                 conntrack_v6_fd: -1,
-                dnat_fds: &dnat_fds,
                 worker_id: 0,
                 peer_worker_commands: &peer_worker_commands,
                 worker_commands_by_id,

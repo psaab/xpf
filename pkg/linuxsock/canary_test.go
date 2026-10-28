@@ -29,6 +29,31 @@ var allowedFunctions = map[string]string{
 	"vrrp::openAfPacketReceiver": "pre-existing #2476 site; ORs SOCK_CLOEXEC + pinned by afpacket_cloexec_test.go",
 }
 
+// allowedRecvfromFunctions are the production functions permitted to keep a
+// direct unix.Recvfrom(...) CALL (#17231). Every other Recvfrom on a socket
+// fd must go through linuxsock.PpollRecv, whose ppoll+eventfd wake makes the
+// receive cancellable; a bare blocking Recvfrom cannot be woken by close(2)
+// and parks on a reused fd number.
+//
+// The exemption covers ONLY the literal direct-call form
+// `unix.Recvfrom(...)` inside one of these functions. A unix.Recvfrom
+// selector used as a value — assigned to a variable, passed as an argument,
+// returned, or bound at package level — is flagged even there: the bound
+// value can be invoked later from anywhere, so no enclosing-function
+// allowlist can vouch for its call sites.
+//
+//   - linuxsock::PpollRecv.Recv IS the primitive: ppoll guarantees
+//     readability before the read, so the Recvfrom itself does not park.
+//   - nfqueue::Queue.Recv and nfqueue::Queue.waitAck are poll-guarded:
+//     each Recvfrom is preceded in the same function by unix.Poll on the
+//     same fd with a bounded timeout, so the read cannot park indefinitely
+//     and close-to-unblock is never the wake mechanism.
+var allowedRecvfromFunctions = map[string]string{
+	"linuxsock::PpollRecv.Recv": "the #17231 cancellable-receive primitive; ppoll precedes the read",
+	"nfqueue::Queue.Recv":       "poll-guarded: unix.Poll with deadline precedes Recvfrom in the same function",
+	"nfqueue::Queue.waitAck":    "poll-guarded: unix.Poll with deadline precedes Recvfrom in the same function",
+}
+
 // funcKey formats the receiver-aware allowlist key for a FuncDecl in the
 // package at pkgRel (mirrors pkg/fsatomic/canary_test.go).
 func funcKey(pkgRel string, fn *ast.FuncDecl) string {
@@ -154,6 +179,137 @@ func TestNoDirectUnixSocket(t *testing.T) {
 
 	// Self-test guard: a walk bug that scans nothing would make this canary
 	// vacuously pass.
+	t.Logf("scanned %d production .go files under pkg/", scanned)
+	if scanned == 0 {
+		t.Fatal("canary scanned 0 files — the repo walk is broken")
+	}
+
+	for _, v := range violations {
+		t.Error(v)
+	}
+}
+
+// TestNoDirectBlockingRecvfrom is the #17231 receive canary. It walks every
+// production (non-test) .go file under pkg/ with go/ast and flags any direct
+// unix.Recvfrom(...) call outside allowedRecvfromFunctions, plus ANY
+// unix.Recvfrom selector used as a value anywhere (variable bindings, argument
+// passes, returns, package-level vars): binding the function to a value and
+// calling through it is the same blocking receive with one rename in between.
+// A new blocking Recvfrom outside linuxsock.PpollRecv (or a poll-guarded
+// nfqueue read) reintroduces the close-does-not-wake defect: the goroutine
+// parks on a silent link, leaks with its bound socket, and can answer through
+// a reused fd number after cancel.
+func TestNoDirectBlockingRecvfrom(t *testing.T) {
+	var violations []string
+	scanned := 0
+
+	root := ".."
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		scanned++
+
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+
+		unixName := ""
+		for _, imp := range f.Imports {
+			ip, _ := strconv.Unquote(imp.Path.Value)
+			if ip != "golang.org/x/sys/unix" {
+				continue
+			}
+			unixName = "unix"
+			if imp.Name != nil {
+				unixName = imp.Name.Name
+				if unixName == "." {
+					violations = append(violations,
+						fmt.Sprintf("%s: dot-import of unix defeats the Recvfrom canary", path))
+				}
+			}
+		}
+		if unixName == "" || unixName == "_" || unixName == "." {
+			return nil
+		}
+
+		pkgRel := pkgRelKey(path)
+		for _, decl := range f.Decls {
+			// inspectDecl flags every unix.Recvfrom selector in one
+			// top-level declaration that is not the Fun of a direct call
+			// inside an allowlisted function. Direct calls elsewhere keep
+			// the original diagnostic; every other occurrence (assignment,
+			// argument, return, package-level binding, parenthesised or
+			// otherwise indirected call) is a used-as-value violation,
+			// including inside allowlisted functions.
+			inspectDecl := func(node ast.Node, key string, allowedFn bool) {
+				directCallFuns := map[*ast.SelectorExpr]bool{}
+				ast.Inspect(node, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					sel, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "Recvfrom" {
+						return true
+					}
+					ident, ok := sel.X.(*ast.Ident)
+					if !ok || ident.Name != unixName {
+						return true
+					}
+					directCallFuns[sel] = true
+					return true
+				})
+				ast.Inspect(node, func(n ast.Node) bool {
+					sel, ok := n.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "Recvfrom" {
+						return true
+					}
+					ident, ok := sel.X.(*ast.Ident)
+					if !ok || ident.Name != unixName {
+						return true
+					}
+					if directCallFuns[sel] {
+						if allowedFn {
+							return true
+						}
+						violations = append(violations, fmt.Sprintf(
+							"%s: direct %s.Recvfrom call in %s — use linuxsock.PpollRecv so the receive is cancellable via ppoll+eventfd (a bare blocking Recvfrom cannot be woken by close and parks on a reused fd); see #17231/#16669",
+							fset.Position(sel.Pos()), unixName, key))
+						return true
+					}
+					violations = append(violations, fmt.Sprintf(
+						"%s: %s.Recvfrom used as a value in %s — Recvfrom may only appear as a direct call inside an allowlisted poll-guarded function; use linuxsock.PpollRecv so the receive is cancellable via ppoll+eventfd (a bare blocking Recvfrom cannot be woken by close and parks on a reused fd); see #17231/#16669",
+						fset.Position(sel.Pos()), unixName, key))
+					return true
+				})
+			}
+			switch decl := decl.(type) {
+			case *ast.FuncDecl:
+				if decl.Body == nil {
+					continue
+				}
+				key := funcKey(pkgRel, decl)
+				_, allowedFn := allowedRecvfromFunctions[key]
+				inspectDecl(decl.Body, key, allowedFn)
+			case *ast.GenDecl:
+				inspectDecl(decl, pkgRel+"::<package-level>", false)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+
 	t.Logf("scanned %d production .go files under pkg/", scanned)
 	if scanned == 0 {
 		t.Fatal("canary scanned 0 files — the repo walk is broken")

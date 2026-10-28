@@ -50,10 +50,6 @@ type cliRuntime interface {
 	DeleteSession(key dataplane.SessionKey) error
 	DeleteSessionV6(key dataplane.SessionKeyV6) error
 
-	// DNAT static entry delete (used by filtered session clear)
-	DeleteDNATEntry(key dataplane.DNATKey) error
-	DeleteDNATEntryV6(key dataplane.DNATKeyV6) error
-
 	// Clear-counter / clear-session bulk ops
 	ClearAllCounters() error
 	ClearAllSessions() (v4, v6 int, err error)

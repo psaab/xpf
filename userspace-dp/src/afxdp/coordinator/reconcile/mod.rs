@@ -11,7 +11,7 @@
 //! invariants" for the load-bearing inventory.
 use super::*;
 // Bring afxdp scope so types like SyncedSessionEntry / SlowPathReinjector
-// / OwnedFd / DnatTableFds / BindingStatus / ConfigSnapshot are usable in
+// / OwnedFd / BindingStatus / ConfigSnapshot are usable in
 // the orchestrator and the PreservedReconcileState/ReconcileSnapshotFds
 // definitions below.
 use super::super::*;
@@ -131,9 +131,6 @@ pub(in crate::afxdp) struct ReconcileSnapshotFds {
     pub(super) session_map_fd: OwnedFd,
     pub(super) conntrack_v4_fd: Option<OwnedFd>,
     pub(super) conntrack_v6_fd: Option<OwnedFd>,
-    pub(super) dnat_table_fd: Option<OwnedFd>,
-    pub(super) dnat_table_v6_fd: Option<OwnedFd>,
-    pub(super) dnat_fds: DnatTableFds,
     /// #2484: the fully-built forwarding state, produced in the
     /// pre-teardown preflight so a snapshot INTEGRITY fault aborts the
     /// reconcile BEFORE `tear_down` stops the workers and resets

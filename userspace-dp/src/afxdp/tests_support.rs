@@ -5,7 +5,7 @@
 // fn is moved verbatim (visibility widened to `pub(super)` so the
 // per-subsystem test modules can call them via `use super::tests_support::*`).
 #![allow(unused_imports)]
-#![allow(dead_code)]
+#![expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 
 use super::test_fixtures::*;
 use super::worker::WorkerTxPipeline;
@@ -605,7 +605,7 @@ pub(super) fn build_icmpv6_te_frame_with_mac(
 /// in the EMBEDDED quoted packet (with caller-controlled raw
 /// offset/flags bytes), and optional trailing bytes inside the ICMPv6
 /// checksum coverage (used to force a computed-zero checksum).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn build_icmpv6_te_frame_ext(
     router_ip: Ipv6Addr,
     snat_ip: Ipv6Addr,
@@ -870,7 +870,9 @@ pub(super) fn run_input_filter_accept_log_poll(
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0, next_table_route: false }];
+        mtu: 0,
+        next_table_route: false,
+    }];
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "log-input".to_string(),
         family: "inet".to_string(),
@@ -943,7 +945,7 @@ pub(super) fn run_input_filter_accept_log_poll(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -980,7 +982,6 @@ pub(super) fn run_input_filter_accept_log_poll(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -1310,7 +1311,7 @@ pub(super) fn txn_run_descriptor_with_neighbors(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let __pptp_control_7699 =
         std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -1336,7 +1337,6 @@ pub(super) fn txn_run_descriptor_with_neighbors(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -1468,7 +1468,7 @@ pub(super) fn txn_run_descriptor_with_injected(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let __pptp_control_7699 =
         std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -1494,7 +1494,6 @@ pub(super) fn txn_run_descriptor_with_injected(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -2169,10 +2168,12 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         shared_owner_rg_indexes_override.unwrap_or(&default_shared_owner_rg_indexes);
     let default_ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
     let ike_exchanges = ike_exchanges.unwrap_or(&default_ike_exchanges);
-    let recent_exceptions = exceptions_out.cloned().unwrap_or_else(|| Arc::new(Mutex::new(ExceptionEventRing::new())));
+    let recent_exceptions = exceptions_out
+        .cloned()
+        .unwrap_or_else(|| Arc::new(Mutex::new(ExceptionEventRing::new())));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let __pptp_control_7699 =
         std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -2198,7 +2199,6 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -2287,7 +2287,7 @@ pub(super) fn txn_run_descriptor_capturing_events(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -2324,7 +2324,6 @@ pub(super) fn txn_run_descriptor_capturing_events(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -3283,7 +3282,9 @@ pub(super) fn inbound_nptv6_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsh
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0, next_table_route: false });
+        mtu: 0,
+        next_table_route: false,
+    });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "reth1.0".to_string(),
         ifindex: 24,
@@ -3838,7 +3839,6 @@ pub(super) fn build_icmpv6_te_frame_pptp(
 /// The single-binding `txn_run_descriptor*` family cannot express this:
 /// their lookup sees only the ingress binding, so a cross-binding (and
 /// cross-UMEM) LAN egress is unresolvable there.
-
 /// #15958b: (ifindex, ip) -> MAC for every static neighbor in the
 /// forwarding snapshot's neighbor table (the production static
 /// neighbor source frame building consults alongside dynamic
@@ -3932,7 +3932,7 @@ pub(super) fn txn_run_multi_binding_with_shared_sessions_17012(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
     let pptp_control = Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>> =
@@ -3962,7 +3962,6 @@ pub(super) fn txn_run_multi_binding_with_shared_sessions_17012(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };

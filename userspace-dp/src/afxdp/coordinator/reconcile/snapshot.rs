@@ -29,8 +29,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// #6243: every snapshot BPF map FD opened by [`open_snapshot_maps`], held
-/// together until the whole seven-pin contract succeeds. The three mandatory
-/// FDs (xsk/heartbeat/sessions) are always present; the four optional FDs are
+/// together until the whole five-pin contract succeeds. The three mandatory
+/// FDs (xsk/heartbeat/sessions) are always present; the two optional FDs are
 /// `Some` only when their pin was configured (present + openable). The
 /// activated caller ([`preflight_map_fds`]) destructures this into a
 /// [`ReconcileSnapshotFds`] and KEEPS the FDs; the deferred caller
@@ -42,11 +42,9 @@ struct OpenedSnapshotMaps {
     sessions: OwnedFd,
     conntrack_v4: Option<OwnedFd>,
     conntrack_v6: Option<OwnedFd>,
-    dnat_table: Option<OwnedFd>,
-    dnat_table_v6: Option<OwnedFd>,
 }
 
-/// #6243: a fault opening the seven snapshot map pins, produced by the single
+/// #6243: a fault opening the five snapshot map pins, produced by the single
 /// shared [`open_snapshot_maps`]. It carries enough identity to reproduce BOTH
 /// operator-visible artifacts the two callers used to build independently:
 ///
@@ -112,7 +110,7 @@ impl MapPinFault {
     }
 }
 
-/// #6243: THE single opener for the seven snapshot BPF map pins — the shared
+/// #6243: THE single opener for the five snapshot BPF map pins — the shared
 /// source of truth both the activated reconcile ([`preflight_map_fds`]) and the
 /// deferred-apply validation ([`validate_map_pins`]) route through, so they can
 /// never drift on which snapshots pass the map-pin gate or how a fault is
@@ -138,8 +136,8 @@ impl MapPinFault {
 ///    the activated path (holding all earlier FDs simultaneously) failed.
 ///    Holding them here gives the deferred path the identical low-FD failure.
 ///
-/// Requiredness (#2444): the 3 mandatory pins are fatal if empty; the 4
-/// optional pins (conntrack v4/v6, dnat tables) are silent-absent if empty but
+/// Requiredness (#2444): the 3 mandatory pins are fatal if empty; the 2
+/// optional pins (conntrack v4/v6) are silent-absent if empty but
 /// FATAL if present-but-unopenable. On any mandatory fault or present-optional
 /// open failure it returns `Err` (never a partial `Ok`), so the caller aborts
 /// BEFORE teardown/publish (#2440).
@@ -193,16 +191,12 @@ fn open_snapshot_maps(pins: &MapPins) -> Result<OpenedSnapshotMaps, MapPinFault>
     // FDs stay held across these opens.
     let conntrack_v4 = open_optional_snapshot_map(&pins.conntrack_v4, "conntrack_v4")?;
     let conntrack_v6 = open_optional_snapshot_map(&pins.conntrack_v6, "conntrack_v6")?;
-    let dnat_table = open_optional_snapshot_map(&pins.dnat_table, "dnat_table")?;
-    let dnat_table_v6 = open_optional_snapshot_map(&pins.dnat_table_v6, "dnat_table_v6")?;
     Ok(OpenedSnapshotMaps {
         xsk,
         heartbeat,
         sessions,
         conntrack_v4,
         conntrack_v6,
-        dnat_table,
-        dnat_table_v6,
     })
 }
 
@@ -238,20 +232,19 @@ fn open_optional_snapshot_map(
 /// and the orchestrator aborts WITHOUT teardown or publish — the prior
 /// generation stays published and the prior workers keep running.
 ///
-/// The optional maps (conntrack v4/v6, dnat tables) are configured
+/// The optional maps (conntrack v4/v6) are configured
 /// per-feature: an EMPTY pin means the feature is absent (silent `None`,
 /// the common case), but a PRESENT pin is the signal the feature IS
 /// configured, so a present pin that fails to open is fatal — it aborts
 /// the reconcile via the same fail-closed path as a mandatory map (#2444,
 /// codex review-033 033-23). This prevents the helper from running
-/// degraded (lost session zone/iface visibility; broken embedded-ICMP NAT
-/// reversal → PMTUD/traceroute breakage) with no readiness signal.
+/// degraded (lost session zone/iface visibility) with no readiness signal.
 pub(super) fn preflight_map_fds(
     coord: &mut Coordinator,
     snapshot: &ConfigSnapshot,
     bindings: &mut [BindingStatus],
 ) -> Option<ReconcileSnapshotFds> {
-    // #6243: open all seven pins through the shared `open_snapshot_maps` (the
+    // #6243: open all five pins through the shared `open_snapshot_maps` (the
     // SSOT both this activated path and the deferred `validate_map_pins` route
     // through). On a fault this is the COLD ADAPTER — the only activated-
     // specific behavior — that stamps `last_reconcile_stage` (from the typed
@@ -271,21 +264,12 @@ pub(super) fn preflight_map_fds(
             return None;
         }
     };
-    // Derive the raw dnat fd ints from the retained `OwnedFd`s (still owned by
-    // `maps` at this point) BEFORE moving the FDs into the returned bundle.
-    let dnat_fds = DnatTableFds {
-        v4: maps.dnat_table.as_ref().map(|f| f.fd),
-        v6: maps.dnat_table_v6.as_ref().map(|f| f.fd),
-    };
     Some(ReconcileSnapshotFds {
         map_fd: maps.xsk,
         heartbeat_map_fd: maps.heartbeat,
         session_map_fd: maps.sessions,
         conntrack_v4_fd: maps.conntrack_v4,
         conntrack_v6_fd: maps.conntrack_v6,
-        dnat_table_fd: maps.dnat_table,
-        dnat_table_v6_fd: maps.dnat_table_v6,
-        dnat_fds,
         // #2484: filled in by `build_reconcile_forwarding`, which the
         // orchestrator runs right after this (still before teardown). A
         // default placeholder until then; the orchestrator never reads it
@@ -341,10 +325,9 @@ pub(super) fn build_reconcile_forwarding(
     }
 }
 
-
 /// #5171/#6243: side-effect-free validation that every MANDATORY BPF map pin
 /// (xsk/heartbeat/sessions) is present and openable, and every PRESENT optional
-/// pin (conntrack v4/v6, dnat tables) is openable.
+/// pin (conntrack v4/v6) is openable.
 ///
 /// #6243: this now routes through the SAME [`open_snapshot_maps`] the activated
 /// [`preflight_map_fds`] uses, then DROPS the returned bundle (`.map(|_| ())`)
@@ -359,7 +342,7 @@ pub(super) fn build_reconcile_forwarding(
 ///   was TWO-pass, so a multi-fault snapshot could report a DIFFERENT stage
 ///   from each path; the shared two-pass order makes them identical.
 /// - the deferred walk dropped each FD immediately, so under FD-table pressure
-///   it could PASS where activated (retaining all seven FDs) FAILED; the shared
+///   it could PASS where activated (retaining all five FDs) FAILED; the shared
 ///   bundle now holds every opened FD until the whole contract succeeds, so the
 ///   deferred path catches the low-FD case too.
 ///
@@ -739,9 +722,7 @@ pub(super) fn apply_snapshot(
 #[cfg(test)]
 mod slow_path_mtu_tests {
     use super::*;
-    use crate::protocol::snapshot::{
-        ConfigSnapshot, InterfaceSnapshot, IpsecTunnelRowSnapshot,
-    };
+    use crate::protocol::snapshot::{ConfigSnapshot, InterfaceSnapshot, IpsecTunnelRowSnapshot};
     use crate::slowpath::SlowPathReinjector;
 
     /// A device name ≥ `IFNAMSIZ` (16) so the reinjector worker's `open_tun`
@@ -766,9 +747,12 @@ mod slow_path_mtu_tests {
         // TUN; whether that open succeeds is irrelevant here — the reconcile
         // path uses the injected programmer and asserts on mtu()/live_mtu,
         // which are set synchronously and read lock-free.
-        let reinjector =
-            SlowPathReinjector::new_without_worker(1500);
-        assert_eq!(reinjector.mtu(), 1500, "reinjector starts at the 1500 ceiling");
+        let reinjector = SlowPathReinjector::new_without_worker(1500);
+        assert_eq!(
+            reinjector.mtu(),
+            1500,
+            "reinjector starts at the 1500 ceiling"
+        );
 
         let mut last_acted = 0i32;
         let acted =
@@ -788,7 +772,10 @@ mod slow_path_mtu_tests {
             !reinjector.status().degraded,
             "a successful reconcile is not degraded"
         );
-        assert_eq!(last_acted, 9000, "the attempted value is recorded for dedup");
+        assert_eq!(
+            last_acted, 9000,
+            "the attempted value is recorded for dedup"
+        );
 
         // A steady-state re-apply with the SAME desired value must NOT re-issue
         // the ioctl (the programmer panics if invoked): both the `desired ==
@@ -812,14 +799,17 @@ mod slow_path_mtu_tests {
     /// assertions below go red.
     #[test]
     fn startup_degraded_tun_self_heals_on_reconcile() {
-        let reinjector =
-            SlowPathReinjector::new_without_worker(9000);
+        let reinjector = SlowPathReinjector::new_without_worker(9000);
         // Reproduce the startup-SIOCSIFMTU-failure divergence deterministically:
         // mtu() records the creation-desired 9000, but the live TUN fell back to
         // 1500 and the path is degraded. (A real worker only reaches this via a
         // failing ioctl, which needs CAP_NET_ADMIN to provoke.)
         reinjector.force_mtu_state_for_test(9000, 1500, true);
-        assert_eq!(reinjector.mtu(), 9000, "mtu() holds the creation-desired jumbo value");
+        assert_eq!(
+            reinjector.mtu(),
+            9000,
+            "mtu() holds the creation-desired jumbo value"
+        );
         assert_eq!(
             reinjector.status().live_mtu,
             1500,
@@ -831,10 +821,23 @@ mod slow_path_mtu_tests {
         // this is a plain day-2 reconcile. The trigger must fire off live_mtu.
         let acted =
             reconcile_preserved_slow_path_mtu(&reinjector, 9000, &mut last_acted, |_n, _m| Ok(()));
-        assert!(acted, "a degraded live TUN must retry the program on reconcile");
-        assert_eq!(reinjector.status().live_mtu, 9000, "the live TUN heals to 9000");
-        assert!(!reinjector.status().degraded, "a successful heal clears degraded");
-        assert_eq!(last_acted, 9000, "the attempted value is recorded for dedup");
+        assert!(
+            acted,
+            "a degraded live TUN must retry the program on reconcile"
+        );
+        assert_eq!(
+            reinjector.status().live_mtu,
+            9000,
+            "the live TUN heals to 9000"
+        );
+        assert!(
+            !reinjector.status().degraded,
+            "a successful heal clears degraded"
+        );
+        assert_eq!(
+            last_acted, 9000,
+            "the attempted value is recorded for dedup"
+        );
 
         // Converged: a steady-state reconcile at the same desired must NOT re-issue
         // the ioctl (now `desired == live_mtu` short-circuits).
@@ -853,8 +856,7 @@ mod slow_path_mtu_tests {
     /// item-1 trigger change from `mtu()` to `live_mtu`.
     #[test]
     fn persistently_degraded_tun_is_deduped_no_ioctl_storm() {
-        let reinjector =
-            SlowPathReinjector::new_without_worker(9000);
+        let reinjector = SlowPathReinjector::new_without_worker(9000);
         reinjector.force_mtu_state_for_test(9000, 1500, true);
 
         let mut last_acted = 0i32;
@@ -871,7 +873,10 @@ mod slow_path_mtu_tests {
             1500,
             "a failed program keeps the live MTU (never converges)"
         );
-        assert!(reinjector.status().degraded, "a failed program stays degraded");
+        assert!(
+            reinjector.status().degraded,
+            "a failed program stays degraded"
+        );
         assert_eq!(last_acted, 9000, "the attempted value is recorded");
 
         // Second reconcile at the SAME desired: live_mtu is still 1500 (!= 9000),
@@ -881,7 +886,10 @@ mod slow_path_mtu_tests {
             reconcile_preserved_slow_path_mtu(&reinjector, 9000, &mut last_acted, |_n, _m| {
                 panic!("must not re-issue SIOCSIFMTU for an unchanged desired value");
             });
-        assert!(!again, "a persistently degraded TUN is deduped by last_acted");
+        assert!(
+            !again,
+            "a persistently degraded TUN is deduped by last_acted"
+        );
     }
 
     /// #9637/#10069 operator narrowing: a PARTIAL MTU-program failure
@@ -895,37 +903,33 @@ mod slow_path_mtu_tests {
         reinjector.force_mtu_state_for_test(9000, 1500, true);
         let mut last_acted = 0i32;
         let mut calls = 0;
-        let acted = reconcile_preserved_slow_path_mtu(
-            &reinjector,
-            9000,
-            &mut last_acted,
-            |_n, _m| {
+        let acted =
+            reconcile_preserved_slow_path_mtu(&reinjector, 9000, &mut last_acted, |_n, _m| {
                 calls += 1;
                 if calls == 1 {
                     Ok(())
                 } else {
                     Err("SIOCSIFMTU: simulated delegated failure".to_string())
                 }
-            },
-        );
+            });
         assert!(acted, "a partially-unconverged pair must attempt");
         assert_eq!(calls, 2, "one program per outlet");
-        assert_eq!(reinjector.status().live_mtu, 9000, "trusted outlet converged");
+        assert_eq!(
+            reinjector.status().live_mtu,
+            9000,
+            "trusted outlet converged"
+        );
         assert_eq!(reinjector.delegated_status().live_mtu, 1500);
         assert!(reinjector.delegated_status().degraded);
         assert!(!reinjector.status().degraded);
 
         let mut retry_calls = 0;
         for _ in 0..8 {
-            let _ = reconcile_preserved_slow_path_mtu(
-                &reinjector,
-                9000,
-                &mut last_acted,
-                |_n, _m| {
+            let _ =
+                reconcile_preserved_slow_path_mtu(&reinjector, 9000, &mut last_acted, |_n, _m| {
                     retry_calls += 1;
                     Err("SIOCSIFMTU: persistent delegated failure".to_string())
-                },
-            );
+                });
         }
         assert!(
             retry_calls > 0,
@@ -936,7 +940,8 @@ mod slow_path_mtu_tests {
             "the delegated retry cap is three ioctls in the rolling window"
         );
         assert_eq!(
-            calls + retry_calls, 5,
+            calls + retry_calls,
+            5,
             "including the two establishing ioctls, this episode issues exactly \
              five ioctls in this 8-tick window (persistent failure retries \
              3-per-8 forever by design)"
@@ -1102,9 +1107,7 @@ mod slow_path_mtu_tests {
         // Oversize name so the preserved reinjector's worker cannot program the
         // real device and race the assertions; its live_mtu stays at the 1500
         // default until reconcile moves it.
-        let preserved = Arc::new(
-            SlowPathReinjector::new_without_worker(1500),
-        );
+        let preserved = Arc::new(SlowPathReinjector::new_without_worker(1500));
         assert_eq!(preserved.mtu(), 1500, "preserved reinjector starts at 1500");
 
         // A snapshot whose largest interface MTU is 9000 -> slow_path_mtu() == 9000.
@@ -1134,11 +1137,13 @@ mod slow_path_mtu_tests {
             }],
             route_table_identities: ["inet.0", "inet6.0"]
                 .into_iter()
-                .map(|name| crate::protocol::snapshot::RouteTableIdentitySnapshot {
+                .map(
+                    |name| crate::protocol::snapshot::RouteTableIdentitySnapshot {
                     name: name.into(),
                     domain: 0,
                     table: 254,
-                })
+                    },
+                )
                 .collect(),
             neighbors: vec![crate::protocol::snapshot::NeighborSnapshot {
                 interface: "st0.0".into(),
@@ -1177,12 +1182,14 @@ mod slow_path_mtu_tests {
                     stn: "st0".into(),
                     if_id: 9,
                     logical_ifindex: 10,
-                    explicit_selectors: vec![crate::protocol::snapshot::IpsecTrafficSelectorSnapshot {
+                    explicit_selectors: vec![
+                        crate::protocol::snapshot::IpsecTrafficSelectorSnapshot {
                         name: "selector".into(),
                         local_ts: "192.0.2.0/24".into(),
                         remote_ts: "10.0.0.1/32".into(),
                         source: "named".into(),
-                    }],
+                        },
+                    ],
                     effective_prefixes: vec!["10.0.0.1/32".into()],
                     ingress_prefixes: vec!["10.0.0.1/32".into()],
                     destination_prefixes: Vec::new(),
@@ -1228,8 +1235,12 @@ mod slow_path_mtu_tests {
             domain: 0,
             table: 254,
         };
-        forwarding.route_table_identities.insert("inet.0".into(), identity);
-        forwarding.route_table_identities.insert("inet6.0".into(), identity);
+        forwarding
+            .route_table_identities
+            .insert("inet.0".into(), identity);
+        forwarding
+            .route_table_identities
+            .insert("inet6.0".into(), identity);
         forwarding.route_table_identity_map_complete = true;
         forwarding.routes_v4.insert(
             "inet.0".into(),
@@ -1246,10 +1257,7 @@ mod slow_path_mtu_tests {
             )],
         );
         forwarding.neighbors.insert(
-            (
-                20,
-                "192.0.2.2".parse().expect("canonical route neighbor"),
-            ),
+            (20, "192.0.2.2".parse().expect("canonical route neighbor")),
             crate::afxdp::types::NeighborEntry {
                 mac: [2, 0, 0, 0, 0, 20],
             },
@@ -1260,9 +1268,6 @@ mod slow_path_mtu_tests {
             session_map_fd: OwnedFd { fd: -1 },
             conntrack_v4_fd: None,
             conntrack_v6_fd: None,
-            dnat_table_fd: None,
-            dnat_table_v6_fd: None,
-            dnat_fds: DnatTableFds::default(),
             forwarding,
         };
 
@@ -1361,7 +1366,11 @@ mod slow_path_mtu_tests {
             decision.is_would_permit(),
             "apply_snapshot publication must complete the D11/D14 join: {decision:?}"
         );
-        assert_eq!(decision.reason(), None, "D11/D14 join must not fail with reason 52");
+        assert_eq!(
+            decision.reason(),
+            None,
+            "D11/D14 join must not fail with reason 52"
+        );
 
         let sp = coord
             .slow_path
@@ -1373,7 +1382,11 @@ mod slow_path_mtu_tests {
             "apply_snapshot must reprogram the preserved live TUN to 9000 on the \
              MTU delta (warn-only revert leaves it at 1500)"
         );
-        assert_eq!(sp.status().live_mtu, 9000, "enqueue-admission live_mtu converged");
+        assert_eq!(
+            sp.status().live_mtu,
+            9000,
+            "enqueue-admission live_mtu converged"
+        );
         assert_eq!(
             coord.last_slow_path_status.live_mtu, 9000,
             "the published status snapshot reflects the reconciled MTU"
@@ -1383,7 +1396,8 @@ mod slow_path_mtu_tests {
             "coordinator publishes the delegated outlet status alongside trusted"
         );
         assert_eq!(
-            coord.slow_path_delegated_status().live_mtu, 9000,
+            coord.slow_path_delegated_status().live_mtu,
+            9000,
             "operator consumer reads the delegated outlet status"
         );
         assert_eq!(

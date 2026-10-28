@@ -4037,7 +4037,7 @@ which leaves the node itself with `Keys=["protocol"]` and files one leaf child
 per value as SIBLINGS. A reader that descends `Children[0]` at each level is
 correct for the flat-set CHAIN (one child deep at every level) and reaches
 exactly one value of a block (N children wide at one level). That was the
-`collectProtocolList` defect: a routing-policy term written to filter three
+`policyFromListValues` reader defect (#6689, unified #17202): a routing-policy term written to filter three
 protocols compiled to one, and with `then reject` the two dropped protocols were
 silently ACCEPTED and installed — a fail-OPEN route-acceptance widening whose
 authored config renders back intact. Descend EVERY child, not the first, and the
@@ -6928,15 +6928,18 @@ these none has been demonstrated; #6693's `mixedChildIsAModifierBlock` is the
 precedent — where a verdict carries no information, drop the verdict rather than
 claim a defect.
 
-**A missing verdict used to read as a passing one.** `spellingVerdicts` builds
-its map by ranging `gateSpellingsMulti`, while a scalar leaf compares over
-`gateSpellingsScalar`. The two are consistent today and nothing enforced it, so
-`state[name]` for an unpopulated spelling yielded `""` — neither
-`err`/`unstable`/`inert` nor a real verdict, and it was counted as usable.
-Found by mutation: removing two entries from `gateSpellingsMulti` made coverage
-appear to RISE 619 → 1034, because every scalar leaf then scored two phantom
-verdicts. The helper now accepts only an explicit `keep`/`drop`, and
-`TestGateSpellingSetsAreConsistent_7484` pins the invariant.
+**A missing verdict used to read as a passing one.** Before #17191
+`spellingVerdicts` built its map by ranging `gateSpellingsMulti`, while a
+scalar leaf compared over `gateSpellingsScalar`. The two were consistent and
+nothing enforced it, so `state[name]` for an unpopulated spelling yielded `""`
+— neither `err`/`unstable`/`inert` nor a real verdict, and it was counted as
+usable. Found by mutation: removing two entries from `gateSpellingsMulti` made
+coverage appear to RISE 619 → 1034, because every scalar leaf then scored two
+phantom verdicts. The helper accepts only an explicit `keep`/`drop`,
+`TestGateSpellingSetsAreConsistent_7484` pins the invariant, and since #17191
+both sets — and the slot-escape sweep's spellings — derive from the one
+`gateSpellingForms` table, so the two-list drift the mutation exploited can no
+longer be authored.
 
 **The remaining gap, measured.** The 228 `unreachable` leaves spread across 46
 top-two-token parent prefixes — a long tail, not one bug. Largest:

@@ -21,11 +21,8 @@ import (
 // by scanning source. A source scan can be satisfied by a comment that happens
 // to contain the name; a reflection assertion cannot.
 //
-// dnat_table and dnat_table_v6 are deliberately NOT in this list: the shim DOES
-// declare them (lib.rs:375, "so dynamic SNAT-return entries are visible here"),
-// and SetDNATEntry/SetDNATEntryV6 are called on the HA session-sync receive
-// path (session_store.go PutClusterSyncedV4). Those are live writes into a live
-// map and must keep working.
+// #17229: dnat_table/dnat_table_v6 joined this list — the shim no longer
+// declares them and no reader remains, so their writers are retired too.
 // #7804 Q2, answered here rather than left open in the issue.
 //
 // The issue asks, of the three stale sweepers that DO have production callers
@@ -60,11 +57,12 @@ func TestRetiredNATWriteSurfaceStaysOff(t *testing.T) {
 		"SetNAT64Config", "SetNAT64Count", "ClearNAT64Configs",
 		"ClearDNATStatic", "ClearDNATStaticV6",
 		"DeleteStaleSNATRules", "DeleteStaleSNATRulesV6",
+		"SetDNATEntry", "SetDNATEntryV6", "DeleteDNATEntry", "DeleteDNATEntryV6",
+		"DeleteStaleDNATStatic", "DeleteStaleDNATStaticV6",
 		// #7804: the same argument, measured again for the two stale sweepers
 		// #7268 left behind. nat64_configs, nat64_prefix_map, nat_pool_configs
 		// and nat_pool_ips_v4/v6 are each declared 0 times in
-		// userspace-xdp/src/lib.rs (dnat_table, the control, is declared 9
-		// times) -- so these wrote to maps that do not exist on the deployed
+		// userspace-xdp/src/lib.rs -- so these wrote to maps that do not exist on the deployed
 		// dataplane, and they had no production caller to write from either.
 		"DeleteStaleNAT64", "ZeroStaleNATPoolConfigs",
 	}
@@ -89,13 +87,11 @@ func TestRetiredNATWriteSurfaceStaysOff(t *testing.T) {
 		}
 	}
 
-	// POSITIVE CONTROL, and it is what stops the loop above from passing
-	// because the names are simply misspelled or the interface is empty: the
-	// LIVE DNAT writes must still be declared.
-	for _, name := range []string{"SetDNATEntry", "SetDNATEntryV6", "DeleteDNATEntry", "DeleteDNATEntryV6"} {
+	// POSITIVE CONTROL: a live writer must still be declared, so the loop
+	// above cannot pass because names are misspelled or the interface empty.
+	for _, name := range []string{"SetSessionV4", "DeleteSession"} {
 		if _, ok := dpType.MethodByName(name); !ok {
-			t.Errorf("DataPlane no longer declares %s, which the HA session-sync receive "+
-				"path calls into the shim-declared dnat_table (#7268)", name)
+			t.Errorf("DataPlane no longer declares live writer %s (#7268 control)", name)
 		}
 	}
 }

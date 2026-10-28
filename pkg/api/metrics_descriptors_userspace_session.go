@@ -413,19 +413,6 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"had no security zone. Separate from ingress-cause denials (#11503).",
 		nil, nil,
 	)
-	c.userspaceDnatPublishErrors = prometheus.NewDesc(
-		"xpf_userspace_dnat_publish_errors_total",
-		"Failed dnat_table reverse-SNAT BPF-map publishes across "+
-			"userspace workers. The dnat_table backs embedded-ICMP NAT "+
-			"reversal — the reverse lookup that maps an inbound ICMP "+
-			"error (PMTUD Packet Too Big / Time Exceeded / traceroute) "+
-			"back to the original pre-NAT source. A failed publish (map "+
-			"at capacity, EINVAL, kernel resource exhaustion) silently "+
-			"omits the reverse record, so the error is dropped or "+
-			"mis-delivered; a rising value attributes that loss to "+
-			"dnat_table map-capacity pressure (#2244).",
-		nil, nil,
-	)
 	c.userspaceSyncedImportCapDrops = prometheus.NewDesc(
 		"xpf_userspace_synced_import_cap_drops_total",
 		"Peer-synced session imports rejected by the coordinator's "+
@@ -667,6 +654,12 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 		"xpf_userspace_server_handler_panics_total",
 		"Request-handler panics contained per-connection; each one "+
 			"quarantined the daemon for a supervisor restart (#9900 F-094).",
+		nil, nil,
+	)
+	c.userspaceReinjectHandlerPanics = prometheus.NewDesc(
+		"xpf_userspace_reinject_handler_panics_total",
+		"Reinject handler panics contained per-connection; each one "+
+			"dropped one connection while the accept loop continued (#17123).",
 		nil, nil,
 	)
 }

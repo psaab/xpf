@@ -59,8 +59,8 @@ type SessionStore interface {
 	GetV4(SessionKey) (SessionValue, error)
 	GetV6(SessionKeyV6) (SessionValueV6, error)
 	// PutClusterSyncedV4/V6 installs a peer-owned forward or reverse session.
-	// Forward entries also install their reverse-key companion and dynamic
-	// DNAT/NAT64 companion state through the same backend-owned path used by
+	// Forward entries also install their reverse-key companion and NAT64
+	// companion state through the same backend-owned path used by
 	// stale bulk reconciliation.
 	PutClusterSyncedV4(SessionKey, SessionValue) error
 	PutClusterSyncedV6(SessionKeyV6, SessionValueV6) error
@@ -312,44 +312,6 @@ func ignoreSessionNotFound(err error) error {
 	return err
 }
 
-// DNATKeyForSessionV4 builds the reverse-SNAT dnat_table KEY for a forward
-// SNAT'd session. It is the single source of truth for the session-derived
-// dnat-table key encoding — every writer AND every companion-delete site (in
-// this package and in pkg/grpcapi, pkg/cli) MUST route through it so a delete
-// finds what an install wrote.
-//
-// The KEY port MUST be host-order numeric to match the AF_XDP shim reader,
-// which builds its dnat lookup key port from u16::from_be_bytes(wire)
-// (host-order numeric) and stores it natively. val.NATSrcPort is stored
-// network-order in the SessionValue, so convert it with ntohs (#2406). The
-// value side of the dnat_table is never read by the shim (steering uses
-// .is_some() only); the reverse-NAT rewrite detail lives in the helper's
-// in-memory session state, not this entry.
-func DNATKeyForSessionV4(key SessionKey, val SessionValue) DNATKey {
-	return DNATKey{
-		Protocol: key.Protocol,
-		DstIP:    val.NATSrcIP,
-		DstPort:  ntohs(val.NATSrcPort),
-	}
-}
-
-// DNATKeyForSessionV6 is the IPv6 sibling of DNATKeyForSessionV4 (#2406).
-func DNATKeyForSessionV6(key SessionKeyV6, val SessionValueV6) DNATKeyV6 {
-	return DNATKeyV6{
-		Protocol: key.Protocol,
-		DstIP:    val.NATSrcIP,
-		DstPort:  ntohs(val.NATSrcPort),
-	}
-}
-
-func dnatKeyForSessionV4(key SessionKey, val SessionValue) DNATKey {
-	return DNATKeyForSessionV4(key, val)
-}
-
-func dnatKeyForSessionV6(key SessionKeyV6, val SessionValueV6) DNATKeyV6 {
-	return DNATKeyForSessionV6(key, val)
-}
-
 func (s dataPlaneSessionStore) snapshotV4(key SessionKey) (sessionSnapshotV4, error) {
 	snap := sessionSnapshotV4{key: key}
 	val, err := s.dp.GetSessionV4(key)
@@ -466,14 +428,6 @@ func (s dataPlaneSessionStore) PutClusterSyncedV4(key SessionKey, val SessionVal
 		}
 		written = append(written, reverseSnap)
 	}
-	if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-		if err := s.dp.SetDNATEntry(dnatKeyForSessionV4(key, val), DNATValue{
-			NewDstIP:   binary.NativeEndian.Uint32(key.SrcIP[:]),
-			NewDstPort: key.SrcPort,
-		}); err != nil {
-			return errors.Join(err, s.rollbackV4(written))
-		}
-	}
 	return nil
 }
 
@@ -536,14 +490,6 @@ func (s dataPlaneSessionStore) PutClusterSyncedV6(key SessionKeyV6, val SessionV
 			return errors.Join(err, s.rollbackV6(written))
 		}
 		written = append(written, reverseSnap)
-	}
-	if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-		if err := s.dp.SetDNATEntryV6(dnatKeyForSessionV6(key, val), DNATValueV6{
-			NewDstIP:   key.SrcIP,
-			NewDstPort: key.SrcPort,
-		}); err != nil {
-			return errors.Join(err, s.rollbackV6(written))
-		}
 	}
 	return nil
 }
@@ -611,15 +557,10 @@ func (s dataPlaneSessionStore) DeleteBatchKnownExactV4(entries []SessionEntryV4,
 	for _, entry := range entries {
 		val := entry.Value
 		s.preservePersistentNATV4(entry.Key, val)
-		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntry(dnatKeyForSessionV4(entry.Key, val))); err != nil {
-				return nil, err
-			}
-		}
 		// #9752: a forward-only delete retires exactly the named keys; the
 		// sender already decided every companion (linked-removed or
 		// deliberately preserved), so deriving here would destroy sessions
-		// the purge kept. DNAT + persistent-NAT handling above still run.
+		// the purge kept. Persistent-NAT handling above still runs.
 		if !forwardOnly && val.ReverseKey.Protocol != 0 {
 			// #9364: the reverse companion is the SAME flow in the SAME tenant,
 			// so it carries the same domain — the identical derivation #9146's
@@ -680,11 +621,6 @@ func (s dataPlaneSessionStore) DeleteBatchKnownExactV6(entries []SessionEntryV6,
 	for _, entry := range entries {
 		val := entry.Value
 		s.preservePersistentNATV6(entry.Key, val)
-		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntryV6(dnatKeyForSessionV6(entry.Key, val))); err != nil {
-				return nil, err
-			}
-		}
 		// #9752: v6 twin of the forward-only gate above.
 		if !forwardOnly && val.ReverseKey.Protocol != 0 {
 			// #9364: same tenant as its forward half — see the V4 twin.
@@ -920,11 +856,10 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV4(dp peerSyncedSessionD
 	}
 	if err != nil {
 		// #14965: a partial peer batch (helper applied a prefix/suffix then
-		// failed) must still retire the applied half: reverse companions
-		// and dynamic dnat_table entries of helper-applied forwards are
+		// failed) must still retire the applied half: reverse companions of helper-applied forwards are
 		// destroyed below. Falling through to the tail BEFORE returning
 		// the error is the fix; refusing the whole tail on error orphaned
-		// those companions/dnat rows. Applied-only filter (appliedEntries)
+		// those companions. Applied-only filter (appliedEntries)
 		// keeps refused/absent forwards untouched.
 		if len(exact) == 0 {
 			exact = nil
@@ -949,16 +884,13 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV4(dp peerSyncedSessionD
 		for _, entry := range appliedEntries {
 			val := entry.Value
 			s.preservePersistentNATV4(entry.Key, val)
-			if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-				_ = ignoreSessionNotFound(s.dp.DeleteDNATEntry(dnatKeyForSessionV4(entry.Key, val)))
-			}
 		}
 		return exact, peerErr
 	}
 	reverseKeys := make([]ScopedSessionKey, 0, len(appliedEntries))
 	for _, entry := range appliedEntries {
 		// #9752: a forward-only delete retires exactly the named keys; the
-		// sender already decided every companion. DNAT + persistent-NAT
+		// sender already decided every companion. Persistent-NAT
 		// handling below still run.
 		if !forwardOnly && entry.Value.ReverseKey.Protocol != 0 {
 			// #9364: the reverse companion is the SAME flow in the SAME tenant.
@@ -977,11 +909,6 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV4(dp peerSyncedSessionD
 	for _, entry := range appliedEntries {
 		val := entry.Value
 		s.preservePersistentNATV4(entry.Key, val)
-		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntry(dnatKeyForSessionV4(entry.Key, val))); err != nil {
-				return exact, err
-			}
-		}
 	}
 	return exact, nil
 }
@@ -1042,9 +969,6 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV6(dp peerSyncedSessionD
 		for _, entry := range appliedEntries {
 			val := entry.Value
 			s.preservePersistentNATV6(entry.Key, val)
-			if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-				_ = ignoreSessionNotFound(s.dp.DeleteDNATEntryV6(dnatKeyForSessionV6(entry.Key, val)))
-			}
 		}
 		return exact, peerErr
 	}
@@ -1069,11 +993,6 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV6(dp peerSyncedSessionD
 	for _, entry := range appliedEntries {
 		val := entry.Value
 		s.preservePersistentNATV6(entry.Key, val)
-		if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
-			if err := ignoreSessionNotFound(s.dp.DeleteDNATEntryV6(dnatKeyForSessionV6(entry.Key, val))); err != nil {
-				return exact, err
-			}
-		}
 	}
 	return exact, nil
 }
@@ -1113,7 +1032,7 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, reason Del
 // deleteSessionV4For issues a single-key delete, marked as a #9714 peer delete
 // when peer is set and the dataplane offers the capability.
 // The helper's refusal is not an error here: a key the mirror could not find has
-// no DNAT row or reverse half of its own for the store to keep.
+// no reverse half of its own for the store to keep.
 func (s dataPlaneSessionStore) deleteSessionV4For(key SessionKey, peer, forwardOnly bool) error {
 	if peerDeleter, ok := s.dp.(peerSyncedSessionDeleter); peer && ok {
 		_, err := peerDeleter.DeletePeerSyncedSession(key, forwardOnly)

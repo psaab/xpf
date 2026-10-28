@@ -56,8 +56,6 @@ func (idProbeDP) SetApplication(protocol uint8, dstPort uint16, appID uint32, ti
 	return nil
 }
 func (idProbeDP) SetAppRange(index uint32, entry AppRangeEntry) error                     { return nil }
-func (idProbeDP) SetDNATEntry(key DNATKey, val DNATValue) error                           { return nil }
-func (idProbeDP) SetDNATEntryV6(key DNATKeyV6, val DNATValueV6) error                     { return nil }
 func (idProbeDP) SetSNATRule(fromZone, toZone, ruleIdx uint16, val SNATValue) error       { return nil }
 func (idProbeDP) SetSNATRuleV6(fromZone, toZone, ruleIdx uint16, val SNATValueV6) error   { return nil }
 func (idProbeDP) SetNATPoolConfig(poolID uint32, cfg NATPoolConfig) error                 { return nil }
@@ -77,8 +75,6 @@ func (idProbeDP) DeleteStaleZonePairPolicies(written map[ZonePairKey]bool) {}
 func (idProbeDP) DeleteStaleApplications(written map[AppKey]bool)          {}
 func (idProbeDP) DeleteStaleSNATRules(written map[SNATKey]bool)            {}
 func (idProbeDP) DeleteStaleSNATRulesV6(written map[SNATKey]bool)          {}
-func (idProbeDP) DeleteStaleDNATStatic(written map[DNATKey]bool)           {}
-func (idProbeDP) DeleteStaleDNATStaticV6(written map[DNATKeyV6]bool)       {}
 func (idProbeDP) DeleteStaleStaticNAT(writtenV4 map[StaticNATKeyV4]bool, writtenV6 map[StaticNATKeyV6]bool) {
 }
 func (idProbeDP) GetPersistentNAT() *PersistentNATTable { var z *PersistentNATTable; return z }
@@ -92,7 +88,7 @@ func (idProbeDP) GetPersistentNAT() *PersistentNATTable { var z *PersistentNATTa
 // prove discardingDataPlane's override set is complete, and that second job is
 // what sizes it (#6894 r3 F1). Reaching every PHASE is not the same as reaching
 // every phase's WRITE SURFACE: measured at r2, this config reached 28 of the 40
-// overrides, and nine of them -- SetDNATEntry, SetDNATEntryV6, SetNAT64Config,
+// overrides, and nine of them -- SetNAT64Config,
 // SetNATPoolIPV6, SetNPTv6Rule, SetSNATEgressIP, SetSNATRuleV6,
 // SetStaticNATEntryV4, SetStaticNATEntryV6 -- were reached by NO test in the
 // package, so any one of them could be deleted with the suite still green while

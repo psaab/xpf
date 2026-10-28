@@ -1007,7 +1007,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -1044,7 +1044,6 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -1107,7 +1106,8 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         PROTO_TCP,
         TCP_FLAG_SYN,
     ));
-    let shared_entry = SyncedSessionEntry { key: flow_key.clone(),
+    let shared_entry = SyncedSessionEntry {
+        key: flow_key.clone(),
     decision: local_decision,
     metadata: local_metadata,
     leak_incarnation: 0,
@@ -1116,9 +1116,14 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
     tcp_flags: TCP_FLAG_SYN,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -1540,6 +1545,7 @@ fn gre_decap_does_not_match_wireguard_row_with_same_outer_tuple() {
     let id = 824u16;
     if let Some(ep) = forwarding.tunnel_endpoints.get_mut(&id) {
         ep.mode = "wireguard".to_string();
+        ep.kind = TunnelKind::WireGuard;
     }
     forwarding.gre_decap_index.clear();
 
@@ -1564,6 +1570,7 @@ fn gre_decap_rejects_non_gre_candidate_even_if_indexed() {
     let id = 824u16;
     if let Some(ep) = forwarding.tunnel_endpoints.get_mut(&id) {
         ep.mode = "wireguard".to_string();
+        ep.kind = TunnelKind::WireGuard;
     }
     // Index intentionally left pointing at the now-WireGuard endpoint to
     // exercise the per-candidate kind re-check.
@@ -2129,7 +2136,11 @@ fn gre_decap_ecmp_both_live_legs_decap_15249() {
         .get("inet.0")
         .and_then(|routes| routes.iter().find(|r| r.prefix.prefix_len() == 0))
         .expect("default route row");
-    assert_eq!(route.next_hops.len(), 2, "ECMP fixture must retain both members");
+    assert_eq!(
+        route.next_hops.len(),
+        2,
+        "ECMP fixture must retain both members"
+    );
 
     for leg in [12, 13] {
         let mut meta = gre_to_self_outer_meta(0, frame.len());

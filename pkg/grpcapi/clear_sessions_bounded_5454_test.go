@@ -1,6 +1,6 @@
 // #5454: the FILTERED ClearSessions gRPC path must bound its handler-goroutine
 // working set to O(batch), not O(matches). The pre-#5454 path materialized
-// every matching forward key, reverse companion, and DNAT companion into
+// every matching forward key and reverse companion into
 // unbounded slices before the first delete — an O(N) allocation (N up to the
 // full multi-million-entry session table) a fabric-reachable PSK peer could
 // weaponize into a control-plane OOM/GC-stall DoS.
@@ -8,7 +8,7 @@
 // These tests drive the clear through a cursor-capable in-memory dataplane
 // (modelling the production LegacyDataPlaneAdapter, which implements
 // sessionCursorIterator) and assert (a) every matching session plus its reverse
-// and DNAT companions is deleted, (b) the collected-key chunk never exceeds
+// is deleted, (b) the collected-key chunk never exceeds
 // clearFilteredBatch (bounded working set), and (c) a mid-clear context cancel
 // stops promptly. RED-on-revert: reverting clearFilteredSessionsV4 to the
 // collect-all-then-delete path reports a single len==matches chunk, so the
@@ -98,7 +98,7 @@ func iterateV6From(sessions map[dataplane.SessionKeyV6]dataplane.SessionValueV6,
 
 // boundedClearDP is a cursor-capable in-memory dataplane fake. DeleteSession
 // actually removes the key (modelling the real map), so the cursor advances and
-// the clear converges; DeleteDNATEntry records the companion delete.
+// the clear converges.
 type boundedClearDP struct {
 	*dataplane.Manager
 
@@ -109,9 +109,6 @@ type boundedClearDP struct {
 	// returns ErrKeyNotExist by delete time (it is left in the map so the
 	// cursor still advances, mimicking "reaped just before deleteAll").
 	fwdNotFound bool
-
-	deletedDNATv4 int
-	deletedDNATv6 int
 }
 
 func (d *boundedClearDP) IsLoaded() bool { return true }
@@ -160,16 +157,6 @@ func (d *boundedClearDP) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 	return nil
 }
 
-func (d *boundedClearDP) DeleteDNATEntry(dataplane.DNATKey) error {
-	d.deletedDNATv4++
-	return nil
-}
-
-func (d *boundedClearDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error {
-	d.deletedDNATv6++
-	return nil
-}
-
 func newBoundedClearServer(t *testing.T, dp grpcRuntime) *Server {
 	t.Helper()
 	return &Server{
@@ -178,8 +165,8 @@ func newBoundedClearServer(t *testing.T, dp grpcRuntime) *Server {
 	}
 }
 
-// seedBoundedClearDP seeds n matching TCP forward sessions (half SNAT so a DNAT
-// companion delete is issued) plus each session's reverse conntrack entry.
+// seedBoundedClearDP seeds n matching TCP forward sessions plus each
+// session's reverse conntrack entry.
 func seedBoundedClearDP(n int) *boundedClearDP {
 	d := &boundedClearDP{
 		Manager: dataplane.New(),
@@ -204,7 +191,7 @@ func seedBoundedClearDP(n int) *boundedClearDP {
 		}
 		val := dataplane.SessionValue{ReverseKey: rev}
 		if i%2 == 0 {
-			val.Flags = dataplane.SessFlagSNAT // dynamic SNAT -> DNAT companion
+			val.Flags = dataplane.SessFlagSNAT
 		}
 		d.v4[fwd] = val
 		d.v4[rev] = dataplane.SessionValue{IsReverse: 1} // reverse conntrack entry
@@ -269,13 +256,6 @@ func TestClearSessionsFilteredBoundedWorkingSet(t *testing.T) {
 	}
 	if len(dp.v6) != 0 {
 		t.Fatalf("v6 sessions remaining after clear: %d, want 0", len(dp.v6))
-	}
-	// DNAT companions deleted for every SNAT session (half of n, v4 and v6).
-	if want := (n + 1) / 2; dp.deletedDNATv4 != want {
-		t.Fatalf("v4 DNAT companion deletes=%d, want %d", dp.deletedDNATv4, want)
-	}
-	if want := (n + 1) / 2; dp.deletedDNATv6 != want {
-		t.Fatalf("v6 DNAT companion deletes=%d, want %d", dp.deletedDNATv6, want)
 	}
 	if resp.Failures != 0 {
 		t.Fatalf("Failures=%d summary=%q, want 0", resp.Failures, resp.FailureSummary)

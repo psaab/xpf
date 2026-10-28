@@ -47,7 +47,6 @@ pub(super) fn poll_binding(
     worker_id: u32,
     worker_commands_by_id: &WorkerCommandQueues,
     shared_recycles: &mut Vec<(u32, u64)>,
-    dnat_fds: &DnatTableFds,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     dbg: &mut DebugPollCounters,
@@ -151,10 +150,7 @@ pub(super) fn poll_binding(
             binding.telemetry.dbg_fill_pending = binding.xsk.device.pending();
             binding.telemetry.dbg_device_avail = binding.xsk.device.available();
         }
-        if available == 0
-            && injected_packet.is_none()
-            && binding.pending_pmech_reverse.is_empty()
-        {
+        if available == 0 && injected_packet.is_none() && binding.pending_pmech_reverse.is_empty() {
             binding.telemetry.dbg_rx_empty += 1;
             maybe_wake_rx(binding, false, now_ns);
             // Check pending neighbor buffer even when RX is empty.
@@ -221,7 +217,6 @@ pub(super) fn poll_binding(
             last_resolution,
             peer_worker_commands,
             worker_commands_by_id,
-            dnat_fds,
             rg_epochs,
             cold_path_sample_mask,
         };
@@ -394,7 +389,7 @@ pub(super) fn poll_binding(
 /// existing cell green while the next RST batch reallocated both
 /// buffers from zero. This helper IS the production path — the test
 /// drives it directly and asserts the capacities survive.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn drain_rst_teardowns(
     left: &mut [BindingWorker],
     current: &mut BindingWorker,
@@ -567,11 +562,11 @@ pub(super) fn invalidate_flow_cache_slots_for_revoked_sessions(
 /// so a call on a non-owning binding either no-ops or drops a stale prior-flow
 /// slot with the same tuple — never another live flow's entry.
 #[inline]
-pub(super) fn invalidate_flow_cache_key_on_binding(
-    binding: &mut BindingWorker,
-    key: &SessionKey,
-) {
-    binding.flow.flow_cache.invalidate_slot(key, binding.ifindex);
+pub(super) fn invalidate_flow_cache_key_on_binding(binding: &mut BindingWorker, key: &SessionKey) {
+    binding
+        .flow
+        .flow_cache
+        .invalidate_slot(key, binding.ifindex);
 }
 /// The per-binding flow-cache eviction in the TCP RST teardown path.
 ///

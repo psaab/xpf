@@ -238,8 +238,16 @@ fn batched_export_window_ships_only_last_rgs_under_last_token() {
     let mut flush_deltas =
         |_: &mut SessionTable, _: &mut [BindingWorker], _: &mut bool, _: &[SessionDelta]| {};
 
-    // Bounded drive: the walk completes in one slice for two sessions,
-    // but loop defensively until the window clears.
+    // Bounded drive (#17200): adopt the drained window on the first
+    // pass, then keep driving the adopted in-flight window — with no
+    // fresh commands — until it clears, at most 16 passes. Two
+    // sessions complete in one slice, so the first continuation pass
+    // already sees `worker_export` cleared; the bound only guards a
+    // regression that stops clearing it (the trailing assertions then
+    // fail instead of the test hanging).
+    let mut window_sequences = results.export_window_sequences.clone();
+    let mut owner_rgs = results.export_owner_rgs.clone();
+    let mut kick_epoch = results.export_kick_epoch;
     for _ in 0..16 {
         let (skip, _did) = run_export_slice(
             &mut sessions,
@@ -247,9 +255,9 @@ fn batched_export_window_ships_only_last_rgs_under_last_token() {
             &binding_lookup,
             &forwarding,
             &mut worker_export,
-            results.export_window_sequences.clone(),
-            results.export_owner_rgs.clone(),
-            results.export_kick_epoch,
+            std::mem::take(&mut window_sequences),
+            std::mem::take(&mut owner_rgs),
+            kick_epoch.take(),
             &export_buffer,
             &mut export_echo_scratch,
             &mut shared_recycles,
@@ -265,11 +273,6 @@ fn batched_export_window_ships_only_last_rgs_under_last_token() {
         if worker_export.is_none() {
             break;
         }
-        // Subsequent passes carry no fresh commands.
-        // (exported_sequences is consumed by value each call; the loop
-        // above re-clones the same window only on the first pass —
-        // after adoption the in-flight window resumes on its own.)
-        break;
     }
 
     let shipped = export_buffer.drain_export(64);

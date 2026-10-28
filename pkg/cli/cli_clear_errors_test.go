@@ -33,9 +33,8 @@ type clearFaultCLIDP struct {
 	// key — i.e. the computed reverse companion. This split lets a test
 	// inject ErrKeyNotExist on the reverse delete (a successful NAT'd
 	// clear) without affecting the forward delete.
-	fwdDelErr  error
-	revDelErr  error
-	delDNATErr error // returned by DeleteDNATEntry (DNAT companion)
+	fwdDelErr error
+	revDelErr error
 }
 
 func (d *clearFaultCLIDP) IsLoaded() bool { return true }
@@ -71,8 +70,6 @@ func (d *clearFaultCLIDP) DeleteSession(key dataplane.SessionKey) error {
 	return d.revDelErr
 }
 func (d *clearFaultCLIDP) DeleteSessionV6(dataplane.SessionKeyV6) error { return nil }
-func (d *clearFaultCLIDP) DeleteDNATEntry(dataplane.DNATKey) error      { return d.delDNATErr }
-func (d *clearFaultCLIDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error  { return nil }
 func (d *clearFaultCLIDP) ClearAllSessions() (int, int, error)          { return 0, 0, nil }
 
 // one matching TCP session (proto-only filter), optionally SNAT. A
@@ -163,25 +160,6 @@ func TestClearFilteredSessionsReportsReverseDeleteRealError(t *testing.T) {
 	}
 }
 
-func TestClearFilteredSessionsReportsDNATCompanionFailure(t *testing.T) {
-	dp := &clearFaultCLIDP{
-		Manager:    dataplane.New(),
-		v4Sessions: seedV4(true), // SNAT -> a DNAT companion entry is deleted
-		delDNATErr: fmt.Errorf("dnat map delete failed"),
-	}
-	c := newClearCLI(t, dp)
-	var callErr error
-	out := captureStdout(t, func() {
-		callErr = c.handleClearSecurity([]string{"flow", "session", "protocol", "tcp"})
-	})
-	if callErr != nil {
-		t.Fatalf("handleClearSecurity error = %v", callErr)
-	}
-	if !strings.Contains(out, "WARNING") || !strings.Contains(out, "DNAT companion") {
-		t.Fatalf("DNAT companion failure not surfaced:\n%s", out)
-	}
-}
-
 // Happy path: every sub-operation succeeds -> clean cleared line, no
 // WARNING. Guards against a regression that warns spuriously.
 func TestClearFilteredSessionsHappyPathNoWarning(t *testing.T) {
@@ -216,7 +194,6 @@ func TestClearFilteredSessionsNATReverseNotFoundNotReported(t *testing.T) {
 		Manager:    dataplane.New(),
 		v4Sessions: seedV4(true),        // SNAT session
 		revDelErr:  ebpf.ErrKeyNotExist, // naive-swap reverse key absent
-		delDNATErr: ebpf.ErrKeyNotExist, // DNAT companion key absent
 		// fwdDelErr nil -> forward delete succeeds (key came from iteration)
 	}
 	c := newClearCLI(t, dp)
@@ -228,7 +205,7 @@ func TestClearFilteredSessionsNATReverseNotFoundNotReported(t *testing.T) {
 		t.Fatalf("handleClearSecurity error = %v", callErr)
 	}
 	if strings.Contains(out, "WARNING") {
-		t.Fatalf("benign ErrKeyNotExist on reverse/DNAT delete spuriously reported:\n%s", out)
+		t.Fatalf("benign ErrKeyNotExist on reverse delete spuriously reported:\n%s", out)
 	}
 	if !strings.Contains(out, "1 IPv4 and 0 IPv6 matching sessions cleared") {
 		t.Fatalf("cleared-count line wrong:\n%s", out)

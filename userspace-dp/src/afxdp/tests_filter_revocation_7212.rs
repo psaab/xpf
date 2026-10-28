@@ -301,7 +301,7 @@ fn drive_packets(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -339,7 +339,6 @@ fn drive_packets(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -404,7 +403,7 @@ fn drive_packets(
         &worker_ctx,
         &mut telemetry,
     );
-    drop(telemetry);
+    // `telemetry`'s borrows end here (no Drop impl beyond its references).
     assert_eq!(
         batch.validated_packets, 1,
         "the descriptor must pass validation before filter revalidation"

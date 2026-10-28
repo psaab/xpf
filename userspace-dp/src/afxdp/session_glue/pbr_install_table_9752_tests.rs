@@ -693,7 +693,7 @@ fn install_table_name_resolver_exposes_stamped_table() {
 fn reverse_session_resolves_unstamped_in_default() {
     let forwarding = pbr_state();
     let forward = ForwardSessionMatch {
-        aux: SessionLookupAux::default(),
+        aux: SessionLookupAux::unknown(),
         synced_synthesis: false,
         key: pbr_key(),
         decision: stamped_decision(unusable_resolution()),
@@ -1548,7 +1548,8 @@ fn synced_entry_for(
     decision: SessionDecision,
     metadata: SessionMetadata,
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry { key: key.clone(),
+    SyncedSessionEntry {
+        key: key.clone(),
     decision,
     metadata,
     leak_incarnation: 0,
@@ -1557,9 +1558,14 @@ fn synced_entry_for(
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 fn flush_deltas_for_test(
@@ -1571,7 +1577,6 @@ fn flush_deltas_for_test(
     event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
     current_sessions: Option<&mut SessionTable>,
 ) {
-    use crate::afxdp::checksum::DnatTableFds;
     let ident = BindingIdentity {
         slot: 0,
         queue_id: 0,
@@ -1579,7 +1584,7 @@ fn flush_deltas_for_test(
         interface: Arc::<str>::from(""),
         ifindex: -1,
     };
-    let dnat_fds = DnatTableFds::default();
+
     let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
     let peer_worker_commands = vec![peer_queue.clone()];
     let mut worker_lossless_wedged = false;
@@ -1589,7 +1594,6 @@ fn flush_deltas_for_test(
         SteeringMap::unshared_for_test(-1),
         -1,
         -1,
-        &dnat_fds,
         deltas,
         &shared.sessions,
         &shared.nat_sessions,

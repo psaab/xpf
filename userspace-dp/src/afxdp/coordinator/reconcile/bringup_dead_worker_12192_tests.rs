@@ -3,7 +3,8 @@ use super::*;
 use std::sync::atomic::Ordering;
 
 fn session_entry() -> SyncedSessionEntry {
-    SyncedSessionEntry { key: SessionKey {
+    SyncedSessionEntry {
+        key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
@@ -58,9 +59,14 @@ fn session_entry() -> SyncedSessionEntry {
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 fn launch(coord: &mut Coordinator, ids: &[u32]) -> Arc<WorkerCommandQueues> {
@@ -72,15 +78,7 @@ fn launch(coord: &mut Coordinator, ids: &[u32]) -> Arc<WorkerCommandQueues> {
     let workers: BTreeMap<u32, Vec<BindingPlan>> = ids.iter().map(|&id| (id, Vec::new())).collect();
     let (tx, _rx) = mpsc::channel::<WorkerStartupReport>();
     coord.force_worker_healthy_stub = true;
-    let outcome = spawn_workers(
-        coord,
-        workers,
-        0,
-        Arc::clone(&queues),
-        &[],
-        DnatTableFds::default(),
-        &tx,
-    );
+    let outcome = spawn_workers(coord, workers, 0, Arc::clone(&queues), &[], &tx);
     assert!(
         matches!(outcome, LaunchOutcome::AllSpawned { .. }),
         "fixture: every stub worker must spawn"

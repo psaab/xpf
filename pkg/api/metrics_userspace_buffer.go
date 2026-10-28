@@ -137,13 +137,6 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.GaugeValue,
 		float64(status.SessionReplicationQueueDepthMax))
 
-	// #2244: failed dnat_table reverse-SNAT BPF-map publishes. Also
-	// emitted unconditionally so a 0 is a real "no reverse-NAT publish
-	// failures" signal rather than an absent series.
-	c.emitConstMetric(ch, c.userspaceDnatPublishErrors,
-		prometheus.CounterValue,
-		float64(status.DnatPublishErrorsTotal))
-
 	// #5674: peer-synced session imports rejected by the coordinator's
 	// aggregate admission bound. Also emitted unconditionally so a 0 is a real
 	// "no over-ceiling synced imports rejected" signal rather than an absent
@@ -281,6 +274,9 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 	c.emitConstMetric(ch, c.userspaceServerHandlerPanics,
 		prometheus.CounterValue,
 		float64(status.ServerHandlerPanics))
+	c.emitConstMetric(ch, c.userspaceReinjectHandlerPanics,
+		prometheus.CounterValue,
+		float64(status.ReinjectHandlerPanics))
 
 	// #7398: emitted unconditionally like their neighbours. A 0 here is a real
 	// "no stale install/delete was refused, no import lost its reservation"
@@ -377,6 +373,9 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 	c.emitConstMetric(ch, c.userspaceIpsecInnerEcnIllegalDrops,
 		prometheus.CounterValue,
 		float64(status.IpsecInnerEcnIllegalDrops))
+	c.emitConstMetric(ch, c.userspaceIpsecInnerNoroute,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerNorouteTotal))
 	c.emitConstMetric(ch, c.userspaceIpsecInnerWorkerQueueFull,
 		prometheus.CounterValue,
 		float64(status.IpsecInnerWorkerQueueFullTotal))

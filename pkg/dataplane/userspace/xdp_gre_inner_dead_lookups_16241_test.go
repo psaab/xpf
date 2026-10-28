@@ -23,10 +23,7 @@ import (
 // by a host test, so the dead-lookup removal itself is pinned
 // structurally (the same source-pin shape as the shim's other
 // verifier-cost invariants): the classifier function bodies must not
-// reference the DNAT helpers or the NAT/local maps. The DNAT map
-// *declarations* are retained on purpose — the loader replaces and
-// shape-validates them — and the second test pins that retention so the
-// cleanup cannot be "completed" into a load break.
+// reference the DNAT helpers or the NAT/local maps.
 
 func shimClassifierBody16241(t *testing.T, src, sig string) string {
 	t.Helper()
@@ -78,24 +75,9 @@ func TestXDPGREInnerClassifiersHaveNoDeadPostSessionLookups16241(t *testing.T) {
 	}
 }
 
-// The DNAT map declarations stay: the loader binds the pinned
-// dataplane-owned tables into the shim by name and validates their
-// shape. Removing the declarations would break shim loading.
-func TestXDPGREInnerDNATMapDeclarationsRetained16241(t *testing.T) {
-	spec, err := ebpf.LoadCollectionSpec("../userspace_xdp_bpfel.o")
-	if err != nil {
-		t.Fatalf("load shim spec: %v", err)
-	}
-	for _, name := range []string{"dnat_table", "dnat_table_v6"} {
-		if spec.Maps[name] == nil {
-			t.Errorf("shipped shim object no longer declares %s; the loader's MapReplacements binding and shape validation require it", name)
-		}
-	}
-}
-
 // Disposition invariance, executed: a native-GRE packet whose inner
 // destination matches ONLY the (now-removed) post-session lookups —
-// a DNAT entry, an interface-NAT row, or a local row for the inner
+// an interface-NAT row or a local row for the inner
 // destination, with NO inner session — took the XSK redirect before the
 // removal (classifier REDIRECT == miss to both consumers) and must take
 // exactly the same redirect after it. With the harness's empty XSK map
@@ -107,32 +89,10 @@ func TestXDPGREInnerDeadLookupDispositionsUnchanged16241(t *testing.T) {
 	innerSrc := [4]byte{10, 0, 0, 1}
 	innerDst := [4]byte{198, 51, 100, 9}
 
-	seedDNAT := func(t *testing.T, coll *ebpf.Collection) {
-		t.Helper()
-		// Shim DnatKeyV4: protocol, pad, dst_ip (BE u32), dst_port, pad2.
-		key := struct {
-			Protocol uint8
-			Pad      [3]byte
-			DstIP    uint32
-			DstPort  uint16
-			Pad2     uint16
-		}{Protocol: 6, DstIP: 0xc6336409, DstPort: 443}
-		val := struct {
-			NewDstIP   uint32
-			NewDstPort uint16
-			Flags      uint8
-			Pad        uint8
-		}{NewDstIP: 0xc0000201, NewDstPort: 443}
-		if m := coll.Maps["dnat_table"]; m != nil {
-			_ = m.Update(key, val, ebpf.UpdateAny)
-		}
-	}
-
 	cases := []struct {
 		name string
 		seed func(*testing.T, *ebpf.Collection)
 	}{
-		{"inner DNAT entry only, no session", seedDNAT},
 		{"inner interface-NAT row only, no session", func(t *testing.T, coll *ebpf.Collection) {
 			updateUserspaceXDPTestInterfaceNATV4(t, coll, innerDst)
 		}},

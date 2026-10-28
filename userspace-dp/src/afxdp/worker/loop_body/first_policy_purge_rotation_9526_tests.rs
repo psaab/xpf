@@ -179,7 +179,8 @@ fn entry(
     is_reverse: bool,
     counter: Option<Arc<PolicyRuleCounter>>,
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry { key,
+    SyncedSessionEntry {
+        key,
     decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
@@ -227,9 +228,14 @@ fn entry(
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 /// Waits until the worker has completed `n` more loop iterations (the loop
@@ -368,13 +374,7 @@ impl RotationHarness {
             None,
             startup_tx,
         );
-        let plan = WorkerLaunchPlan::new(
-            0,
-            0,
-            Vec::new(),
-            crate::PollMode::BusyPoll,
-            DnatTableFds::default(),
-        );
+        let plan = WorkerLaunchPlan::new(0, 0, Vec::new(), crate::PollMode::BusyPoll);
         let cos = WorkerCoSState::from_coord(&coord);
         let runtime_atomics = Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new());
         let telemetry = WorkerPublishedTelemetry::new(
@@ -2010,7 +2010,6 @@ fn extensive_rematch_declines_icmp_with_type_constrained_permit_12859() {
 /// bound to the OLD rule id rather than to the broad ICMP permit's counter.
 /// Packet-scoped enforcement of the DENY is #11064's job on the hit path, not
 /// this frame-independent rematch's.
-
 /// this frame-independent rematch's.
 #[test]
 fn extensive_rematch_declines_icmp_with_type_constrained_deny_then_broad_permit_12859() {
@@ -2094,7 +2093,6 @@ fn extensive_rematch_declines_icmp_with_type_constrained_deny_then_broad_permit_
 /// and rebinds the pair — the decline is scoped to type-constrained verdicts,
 /// not to ICMP as a protocol. Guards against an over-broad fix that declines
 /// every ICMP rematch.
-
 /// every ICMP rematch.
 #[test]
 fn extensive_rematch_retains_icmp_with_unconstrained_permit_12859() {
@@ -2166,7 +2164,6 @@ fn extensive_rematch_retains_icmp_with_unconstrained_permit_12859() {
 /// preserve the existing fail-closed teardown even when the new snapshot has
 /// type-constrained rules; otherwise the ICMP decline would weaken the
 /// established missing-ancestry contract.
-
 /// established missing-ancestry contract.
 #[test]
 fn extensive_rematch_still_purges_icmp_without_ancestry_12859() {

@@ -77,7 +77,7 @@ fn cos_with_one_of_each() -> ClassOfServiceSnapshot {
 /// being quietly unchecked, which is the drift this issue already suffered
 /// once (`cos_inet_precedence_classifier` was added by #6847 after filing and
 /// leaked identically).
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity, reason = "#17200: wide test fixture type; census in docs/log/17200.md")]
 fn ref_kinds() -> Vec<(&'static str, fn(&mut InterfaceSnapshot, &str), &'static str)> {
     vec![
         (

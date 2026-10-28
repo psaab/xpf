@@ -173,7 +173,13 @@ fn tcp_v4_syn_meta_with_l2(frame: &[u8], vlan: Vlan) -> UserspaceDpMeta {
 fn missing_only_screen() -> ScreenState {
     let mut screen = ScreenState::new();
     let mut missing = FxHashMap::default();
-    missing.insert("lan".to_string(), UnresolvedProfileRef { profile: "ghost".to_string(), alarm_without_drop: false });
+    missing.insert(
+        "lan".to_string(),
+        UnresolvedProfileRef {
+            profile: "ghost".to_string(),
+            alarm_without_drop: false,
+        },
+    );
     screen.update_missing_profiles(missing);
     screen
 }
@@ -193,7 +199,13 @@ fn missing_plus_resolved_screen() -> ScreenState {
     let mut screen = ScreenState::new();
     screen.update_profiles(profiles);
     let mut missing = FxHashMap::default();
-    missing.insert("lan".to_string(), UnresolvedProfileRef { profile: "ghost".to_string(), alarm_without_drop: false });
+    missing.insert(
+        "lan".to_string(),
+        UnresolvedProfileRef {
+            profile: "ghost".to_string(),
+            alarm_without_drop: false,
+        },
+    );
     screen.update_missing_profiles(missing);
     screen
 }
@@ -273,7 +285,7 @@ fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -310,7 +322,6 @@ fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -534,7 +545,7 @@ fn unresolved_screen_profile_zone_continues_to_policy_5806() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -571,7 +582,6 @@ fn unresolved_screen_profile_zone_continues_to_policy_5806() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -739,7 +749,7 @@ fn screen_parse_fail_on_unscreened_zone_passes_12875() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -776,7 +786,6 @@ fn screen_parse_fail_on_unscreened_zone_passes_12875() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -942,7 +951,7 @@ fn syn_cookie_ack_stage_parse_fail_on_unscreened_zone_passes_12875() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -979,7 +988,6 @@ fn syn_cookie_ack_stage_parse_fail_on_unscreened_zone_passes_12875() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -1105,7 +1113,7 @@ fn priority_tagged_vlan0_screen_stage_parses_l3_at_offset_18() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -1142,7 +1150,6 @@ fn priority_tagged_vlan0_screen_stage_parses_l3_at_offset_18() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -1321,7 +1328,6 @@ fn neighbor_learn_ctx(
     let recent_exceptions = Box::leak(Box::new(Arc::new(Mutex::new(ExceptionEventRing::new()))));
     let last_resolution = Box::leak(Box::new(Arc::new(Mutex::new(None))));
     let peer_worker_commands = Box::leak(Box::new(Vec::new()));
-    let dnat_fds = Box::leak(Box::new(DnatTableFds::default()));
     let rg_epochs = Box::leak(Box::new(std::array::from_fn(|_| AtomicU32::new(0))));
     let __pptp_control_7699 = Box::leak(Box::new(std::sync::Arc::new(
         crate::session::pptp_control::PptpControlInbox::default(),
@@ -1348,7 +1354,6 @@ fn neighbor_learn_ctx(
         last_resolution,
         peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds,
         rg_epochs,
         cold_path_sample_mask: 0xff,
     }));
@@ -1380,7 +1385,7 @@ fn with_neighbor_learn_ctx_ha<R>(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let ctx = WorkerContext {
         pptp_control: &pptp_control,
@@ -1404,7 +1409,6 @@ fn with_neighbor_learn_ctx_ha<R>(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -1436,7 +1440,7 @@ fn with_neighbor_learn_ctx<R>(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let ctx = WorkerContext {
         pptp_control: &pptp_control,
@@ -1460,7 +1464,6 @@ fn with_neighbor_learn_ctx<R>(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -2196,26 +2199,59 @@ fn off_link_arp_na_not_learned_and_xsk_learn_ages_15247() {
         let meta = link_layer_meta(24, 0);
         let mac = [0x02, 0x00, 0x00, 0x00, 0x15, 0x47];
         let off_ip = Ipv4Addr::new(10, 0, 99, 50);
-        assert!(matches!(classify(&arp_reply_frame(off_ip, mac), meta, ctx), StageOutcome::RecycleAndContinue));
-        assert!(neighbors.get(&(24, IpAddr::V4(off_ip))).is_none(), "off-link ARP sender must not be learned (#15247)");
+        assert!(matches!(
+            classify(&arp_reply_frame(off_ip, mac), meta, ctx),
+            StageOutcome::RecycleAndContinue
+        ));
+        assert!(
+            neighbors.get(&(24, IpAddr::V4(off_ip))).is_none(),
+            "off-link ARP sender must not be learned (#15247)"
+        );
         let on_ip = Ipv4Addr::new(10, 0, 61, 50);
-        assert!(matches!(classify(&arp_reply_frame(on_ip, mac), meta, ctx), StageOutcome::RecycleAndContinue));
-        assert_eq!(neighbors.get(&(24, IpAddr::V4(on_ip))).map(|e| e.mac), Some(mac));
-        let (off_frame, off_target, _) = ndp_na_frame_with_target([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99]);
-        assert!(matches!(classify(&off_frame, meta, ctx), StageOutcome::Continue(())));
-        assert!(neighbors.get(&(24, off_target)).is_none(), "off-link NA target must not be learned (#15247)");
-        let (on_frame, on_target, on_mac) = ndp_na_frame_with_target([0x20, 0x01, 0x05, 0x59, 0x85, 0x85, 0xef, 0x00, 0, 0, 0, 0, 0, 0, 0, 0x42]);
-        assert!(matches!(classify(&on_frame, meta, ctx), StageOutcome::Continue(())));
+        assert!(matches!(
+            classify(&arp_reply_frame(on_ip, mac), meta, ctx),
+            StageOutcome::RecycleAndContinue
+        ));
+        assert_eq!(
+            neighbors.get(&(24, IpAddr::V4(on_ip))).map(|e| e.mac),
+            Some(mac)
+        );
+        let (off_frame, off_target, _) = ndp_na_frame_with_target([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99,
+        ]);
+        assert!(matches!(
+            classify(&off_frame, meta, ctx),
+            StageOutcome::Continue(())
+        ));
+        assert!(
+            neighbors.get(&(24, off_target)).is_none(),
+            "off-link NA target must not be learned (#15247)"
+        );
+        let (on_frame, on_target, on_mac) = ndp_na_frame_with_target([
+            0x20, 0x01, 0x05, 0x59, 0x85, 0x85, 0xef, 0x00, 0, 0, 0, 0, 0, 0, 0, 0x42,
+        ]);
+        assert!(matches!(
+            classify(&on_frame, meta, ctx),
+            StageOutcome::Continue(())
+        ));
         assert_eq!(neighbors.get(&(24, on_target)).map(|e| e.mac), Some(on_mac));
         let (ll_frame, ll_target, ll_mac) = ndp_na_frame();
-        assert!(matches!(classify(&ll_frame, meta, ctx), StageOutcome::Continue(())));
+        assert!(matches!(
+            classify(&ll_frame, meta, ctx),
+            StageOutcome::Continue(())
+        ));
         assert_eq!(neighbors.get(&(24, ll_target)).map(|e| e.mac), Some(ll_mac));
         let removed = neighbors.age_rx_learned_neighbors(
-            TEST_NOW_NS + super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS + super::sharded_neighbor::RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS,
+            TEST_NOW_NS
+                + super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS
+                + super::sharded_neighbor::RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS,
             super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
             &Default::default(),
         );
-        assert_eq!(removed, 3, "XSK ARP/NA learns must age out without kernel backing (#15247)");
+        assert_eq!(
+            removed, 3,
+            "XSK ARP/NA learns must age out without kernel backing (#15247)"
+        );
     });
 }
 
@@ -2734,7 +2770,7 @@ fn screen_zone_lookup_uses_logical_ingress_ifindex_3022() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -2771,7 +2807,6 @@ fn screen_zone_lookup_uses_logical_ingress_ifindex_3022() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -2998,7 +3033,7 @@ fn run_stage_screen_capture_in(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -3035,7 +3070,6 @@ fn run_stage_screen_capture_in(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -3713,7 +3747,7 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -3750,7 +3784,6 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -4034,7 +4067,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -4071,7 +4104,6 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -4282,7 +4314,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -4319,7 +4351,6 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -4540,7 +4571,7 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -4577,7 +4608,6 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -4909,7 +4939,7 @@ fn run_stage11_on_ifindex(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -4946,7 +4976,6 @@ fn run_stage11_on_ifindex(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -5441,7 +5470,7 @@ fn stage_ipsec_ambiguous_claim_does_not_grant_transit_dnat_16047() {
         let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
         let last_resolution = Arc::new(Mutex::new(None));
         let peer_worker_commands = Vec::new();
-        let dnat_fds = DnatTableFds::default();
+
         let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
         let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
             8,
@@ -5478,7 +5507,6 @@ fn stage_ipsec_ambiguous_claim_does_not_grant_transit_dnat_16047() {
             last_resolution: &last_resolution,
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-            dnat_fds: &dnat_fds,
             rg_epochs: &rg_epochs,
             cold_path_sample_mask: 0xff,
         };
@@ -7101,7 +7129,10 @@ fn stage_ipsec_ambiguous_scope_parity_16047() {
                 &ha_both,
                 now_secs,
             ),
-            ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_LAN_ZONE_ID, ifindex: None }
+            ZoneEncodedFabricStamp::Ambiguous {
+                zone_id: TEST_LAN_ZONE_ID,
+                ifindex: None
+            }
         ),
         "FIXTURE: V1 co-moved stamp must classify Ambiguous"
     );
@@ -7187,7 +7218,7 @@ fn tiny_first_fragment_dropped_by_live_screen_stage_16007() {
 /// Build the smallest WorkerContext needed by the screen stages over
 /// `forwarding`, with an event stream whose payloads the caller drains
 /// through the returned receiver.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn screen_test_ctx<'a>(
     forwarding: &'a ForwardingState,
     ident: &'a BindingIdentity,
@@ -7204,7 +7235,6 @@ fn screen_test_ctx<'a>(
     recent_exceptions: &'a Arc<Mutex<ExceptionEventRing>>,
     last_resolution: &'a Arc<Mutex<Option<ResolutionEvent>>>,
     peer_worker_commands: &'a [Arc<Mutex<VecDeque<WorkerCommand>>>],
-    dnat_fds: &'a DnatTableFds,
     rg_epochs: &'a [AtomicU32; MAX_RG_EPOCHS],
     pptp_control: &'a Arc<crate::session::pptp_control::PptpControlInbox>,
     event_handle: &'a crate::event_stream::EventStreamWorkerHandle,
@@ -7230,7 +7260,6 @@ fn screen_test_ctx<'a>(
         last_resolution,
         peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds,
         rg_epochs,
         cold_path_sample_mask: 0xff,
         forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
@@ -7253,7 +7282,6 @@ struct ScreenTestRig {
     recent_exceptions: Arc<Mutex<ExceptionEventRing>>,
     last_resolution: Arc<Mutex<Option<ResolutionEvent>>>,
     peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>>,
-    dnat_fds: DnatTableFds,
     rg_epochs: [AtomicU32; MAX_RG_EPOCHS],
     pptp_control: Arc<crate::session::pptp_control::PptpControlInbox>,
     event_handle: crate::event_stream::EventStreamWorkerHandle,
@@ -7295,7 +7323,6 @@ impl ScreenTestRig {
             recent_exceptions: Arc::new(Mutex::new(ExceptionEventRing::new())),
             last_resolution: Arc::new(Mutex::new(None)),
             peer_worker_commands: Vec::new(),
-            dnat_fds: DnatTableFds::default(),
             rg_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
             pptp_control: Arc::new(crate::session::pptp_control::PptpControlInbox::default()),
             event_handle,
@@ -7320,7 +7347,6 @@ impl ScreenTestRig {
             &self.recent_exceptions,
             &self.last_resolution,
             &self.peer_worker_commands,
-            &self.dnat_fds,
             &self.rg_epochs,
             &self.pptp_control,
             &self.event_handle,
@@ -7461,12 +7487,8 @@ fn claimed_only_cookie_ack_is_not_validated_16051() {
         screen.check_packet_with_zone_id("wan", TEST_WAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
         ScreenVerdict::Pass
     );
-    let challenge = match screen.check_packet_with_zone_id(
-        "wan",
-        TEST_WAN_ZONE_ID,
-        &syn_info,
-        TEST_NOW_SECS,
-    ) {
+    let challenge =
+        match screen.check_packet_with_zone_id("wan", TEST_WAN_ZONE_ID, &syn_info, TEST_NOW_SECS) {
         ScreenVerdict::SynCookieChallenge(challenge) => challenge,
         other => panic!("expected wan SYN-cookie challenge, got {other:?}"),
     };
@@ -7664,13 +7686,19 @@ fn claimed_only_parse_error_drops_under_claimed_zone_16051() {
             matches!(outcome, StageOutcome::RecycleAndContinue),
             "{label}: claimed-only parse error must DROP fail-closed, not Pass"
         );
-        assert_eq!(counters.screen_drops, 1, "{label}: parse drop must be counted");
+        assert_eq!(
+            counters.screen_drops, 1,
+            "{label}: parse drop must be counted"
+        );
         let events = rig.drain_events();
         assert_eq!(events.len(), 1, "{label}: exactly one parse-drop event");
         assert_eq!(
             events[0].ingress_zone_id, TEST_WAN_ZONE_ID as u16,
             "{label}: parse drop must attribute to the claimed zone, never zone 0"
         );
-        assert_eq!(events[0].action, 0, "{label}: parse drop action is DENY (0)");
+        assert_eq!(
+            events[0].action, 0,
+            "{label}: parse drop action is DENY (0)"
+        );
     }
 }
