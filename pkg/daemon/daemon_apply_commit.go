@@ -866,6 +866,15 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		return nil, applyErr
 	}
 	if finalizeOut.deferredNoCompletion {
+		// #1956: pre-consolidation armedActive was set BEFORE the
+		// no-completion check, so this return still ran the deferred
+		// discharge+stamp block — whose device-map passive-admission
+		// alarm is documented never-silent. Arm here too: publication
+		// did not land, so the discharge itself is a no-op
+		// (dischargePromotedLocked gates on PublishLanded) and the
+		// stamp still gates on the joined (non-nil) error, but the
+		// alarm fires.
+		armedActive = true
 		return compiled, applyErr
 	}
 	armedActive = true
@@ -1293,13 +1302,12 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	//      untested on either node. Pinned by
 	//      TestPromotedApplyDrivers17025/rollback_fatalApply_stillResyncs.
 	out := d.finalizePromotedApplyLocked(promotedApply{
-		kind:                   promotedApplyRollback,
-		oldActive:              oldActive,
-		newCfg:                 prevCfg,
-		armKind:                promotedArmRollback,
-		applyCtx:               context.Background(),
-		honorFatalBeforeResync: false,
-		logDischargeErr:        true,
+		kind:            promotedApplyRollback,
+		oldActive:       oldActive,
+		newCfg:          prevCfg,
+		armKind:         promotedArmRollback,
+		applyCtx:        context.Background(),
+		logDischargeErr: true,
 	})
 	_ = out.newCfg // the store already holds the promoted target; nothing to re-read
 	// #3868: RE-SYNC the rolled-back config (C1) to the cluster peer. The

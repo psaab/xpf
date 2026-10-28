@@ -77,11 +77,11 @@ import (
 //     the same reason (see the driver).
 //   - respCfg (commit only): the #9841 MTU-warning response
 //     projection; peer-sync/rollback pass commitOnly=false.
-//   - honorFatalBeforeResync (rollback only): records whether the
-//     rollback's peer resync honours applyErrSkipsPeerSync. It does
-//     NOT — see the decision note at the rollback driver. The
-//     parameter exists so that decision is explicit and tested, not
-//     an accidental unconditional call.
+//   - rollback resync: the rollback's peer resync does NOT honour
+//     applyErrSkipsPeerSync — see the decision note at the rollback
+//     driver. That decision stays in the driver (the resync is
+//     peer-push policy, not part of this sequence), stated at
+//     executeConfirmedRollback and pinned by its cell.
 
 // promotedApplyKind selects the caller-specific obligations of
 // finalizePromotedApplyLocked. The kinds differ in stamp mode and
@@ -137,22 +137,13 @@ type promotedApply struct {
 	appliedDigest string
 	// syncPeer/peerSnapshotAuth drive the post-discharge peer push on
 	// the commit driver. The rollback driver does not push through
-	// the helper (its resync is a separate, unconditional step — see
-	// honorFatalBeforeResync); peer-sync never pushes.
+	// the helper (its resync is a separate, unconditional step);
+	// peer-sync never pushes.
 	syncPeer         peerSyncPolicy
 	peerSnapshotAuth *peerSnapshotProtocolAuthorization
 	// pushPeer selects the commit-driver peer push. False on
 	// peer-sync/rollback.
 	pushPeer bool
-	// honorFatalBeforeResync is the rollback driver's explicit
-	// decision: false means the post-rollback resync to the peer
-	// runs even when the local apply was fatal (see the rollback
-	// driver for why). It is a documented no-op today — the resync
-	// itself stays in the driver because it is peer-push POLICY,
-	// not part of the arm/apply/classify/surface/discharge/stamp
-	// sequence — and its presence forces the decision to be stated
-	// and pinned by TestPromotedApplyDrivers17025.
-	honorFatalBeforeResync bool
 	// logDischargeErr (rollback only): the rollback is a timer
 	// callback with no return path, so a PARTIAL discharge is
 	// surfaced via a loud slog.Error instead of being joined into a
@@ -248,8 +239,8 @@ func (d *Daemon) surfacingIncompleteCapture(newCfg *config.Config, applyErr erro
 //     joins retErr at return time (see syncAndApplyWithAncestry).
 //   - rollback: noteConfigApplyResult(applyErr) latches/discharges
 //     the #9811 retry debt; a fatal apply STILL resyncs to the peer
-//     (honorFatalBeforeResync=false — the decision and its rationale
-//     live at the rollback driver); the discharge runs synchronously
+//     (the decision and its rationale live at the rollback driver);
+//     the discharge runs synchronously
 //     here (not deferred) because the rollback has no caller whose
 //     retErr could carry it.
 func (d *Daemon) finalizePromotedApplyLocked(p promotedApply) promotedApplyOutcome {
@@ -285,9 +276,15 @@ func (d *Daemon) finalizePromotedApplyLocked(p promotedApply) promotedApplyOutco
 	} else {
 		applyErr = d.applyConfigLocked(p.applyCtx, newCfg)
 	}
+	// Classify the BARE apply error BEFORE the #12072 surfacing joins
+	// the capture error in: a capture readErr wrapping
+	// context.Canceled/ErrPolicyReadAuthority must not flip a
+	// non-fatal apply fatal (the pre-consolidation sync copy
+	// classified the bare error; the capture error is surfaced for
+	// the operator, not re-classified).
+	out.fatal = applyErrSkipsPeerSync(applyErr)
 	applyErr = d.surfacingIncompleteCapture(newCfg, applyErr)
 	out.applyErr = applyErr
-	out.fatal = applyErrSkipsPeerSync(applyErr)
 
 	switch p.kind {
 	case promotedApplySync:
