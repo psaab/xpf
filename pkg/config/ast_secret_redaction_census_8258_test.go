@@ -143,11 +143,12 @@ var astLeafForSecretField = map[string]secretLeafClaim{
 	"DDNSProvider.Password": {
 		set: `set system services dynamic-dns provider p1 password "%s"`,
 	},
-	"DDNSProvider.TSIGSecret": {
+	// #17237: TSIGSecret now lives on the embedded RFC2136Endpoint shared by
+	// both DDNSProvider and DHCPDynamicDNSConfig; reflection names it once.
+	// The set below covers the provider leaf; the DHCP leaf is the same AST
+	// keyword (tsig-secret) and redacts via the same secretIndices route.
+	"RFC2136Endpoint.TSIGSecret": {
 		set: `set system services dynamic-dns provider p1 tsig-secret "%s"`,
-	},
-	"DHCPDynamicDNSConfig.TSIGSecret": {
-		set: `set system services dhcp-server dynamic-dns tsig-secret "%s"`,
 	},
 	"IKEPolicy.PSK": {
 		set: `set security ike policy p1 pre-shared-key ascii-text "%s"`,

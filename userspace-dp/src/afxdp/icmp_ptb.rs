@@ -258,7 +258,7 @@ pub(in crate::afxdp) fn post_transform_needs_inner_dst(
     forwarding
         .tunnel_endpoints
         .get(&decision.resolution.tunnel_endpoint_id)
-        .is_some_and(|e| matches!(tunnel_mode_kind(&e.mode), TunnelKind::WireGuard))
+        .is_some_and(|e| e.kind == TunnelKind::WireGuard)
 }
 
 /// #2330: the inner-source post-transform MTU for a size-changing forward
@@ -306,7 +306,6 @@ pub(in crate::afxdp) fn post_transform_needs_inner_dst(
 /// `egress_mtu` is the effective plain-forward MTU (minimum known interface
 /// and selected-route MTU); used only for the NAT64-only arm (tunnel arms
 /// resolve physical transport MTUs separately).
-
 pub(in crate::afxdp) fn post_transform_inner_mtu(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
@@ -439,7 +438,7 @@ fn tunnel_inner_mtu_with_dynamic(
     else {
         return 0;
     };
-    match tunnel_mode_kind(&endpoint.mode) {
+    match endpoint.kind {
         // GRE's `endpoint.destination` is the real outer hop, so
         // `native_gre_inner_mtu`'s `tunnel_outer_mtu` resolves to the
         // physical underlay MTU correctly — leave it.

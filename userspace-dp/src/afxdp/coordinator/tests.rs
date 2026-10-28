@@ -408,6 +408,7 @@ impl Coordinator {
                 interface: "gr-0/0/0".into(),
                 redundancy_group: 1,
                 mode: "gre".into(),
+                kind: TunnelKind::Gre,
                 outer_family: libc::AF_INET,
                 source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
                 destination: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
@@ -5068,7 +5069,7 @@ fn wg1866_apply_time_rename_restarts_thread_on_new_attachment() {
         ))
         .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    assert_eq!(entry.spawned_tunnel_name, "wgt1866i");
+    assert_eq!(entry.spawned_tunnel_name(), "wgt1866i");
     // Rename (same id, same identity): engine Arc is REUSED, but the
     // attachment-aware stale prune must restart the thread.
     coordinator
@@ -5085,10 +5086,10 @@ fn wg1866_apply_time_rename_restarts_thread_on_new_attachment() {
         .get(&1)
         .expect("entry after rename");
     assert_eq!(
-        entry.spawned_tunnel_name, "wgt1866j",
+        entry.spawned_tunnel_name(), "wgt1866j",
         "rename must stop the old thread and spawn against the new TUN"
     );
-    assert_eq!(entry.spawned_ifindex, 4243);
+    assert_eq!(entry.spawned.as_ref().expect("capture").ifindex, 4243);
 }
 
 /// PR #1872 Codex code-r1 F2 regression: rows whose `linux_name` is
@@ -5223,10 +5224,10 @@ fn wg2921_outer_mtu_change_restarts_control_thread() {
         .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(
-        entry.spawned_outer_mtu, 1400,
+        entry.spawned.as_ref().expect("capture").outer_mtu, 1400,
         "spawn must capture the resolved underlay egress MTU (not the 1500 default fallback)"
     );
-    let engine_ptr_before = entry.engine_ptr;
+    let engine_before = entry.spawned.as_ref().expect("capture").engine.clone();
     // Stamp the attempt to NOW so a tombstone (open_tun fails in the test
     // env) cannot self-respawn within the backoff window — isolating the
     // restart to the stale-prune path under test.
@@ -5247,12 +5248,12 @@ fn wg2921_outer_mtu_change_restarts_control_thread() {
         .wg_control_threads
         .get(&1)
         .expect("entry after MTU change");
-    assert_eq!(
-        entry.engine_ptr, engine_ptr_before,
+    assert!(
+        entry.spawned_engine_is(&engine_before),
         "engine Arc must be REUSED (identity unchanged) — exercising the same-engine path"
     );
     assert_eq!(
-        entry.spawned_outer_mtu, 1280,
+        entry.spawned.as_ref().expect("capture").outer_mtu, 1280,
         "outer-MTU change must restart the thread and re-resolve the underlay MTU"
     );
     assert_ne!(
@@ -5273,10 +5274,10 @@ fn wg2921_unchanged_outer_mtu_keeps_control_thread() {
         .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(
-        entry.spawned_outer_mtu, 1400,
+        entry.spawned.as_ref().expect("capture").outer_mtu, 1400,
         "resolved underlay MTU captured"
     );
-    let engine_ptr_before = entry.engine_ptr;
+    let engine_before = entry.spawned.as_ref().expect("capture").engine.clone();
     // Recent attempt stamp: suppresses any tombstone self-respawn so the
     // assertion isolates the prune decision.
     let t0 = monotonic_nanos();
@@ -5294,11 +5295,11 @@ fn wg2921_unchanged_outer_mtu_keeps_control_thread() {
         .wg_control_threads
         .get(&1)
         .expect("entry after no-op refresh");
-    assert_eq!(
-        entry.engine_ptr, engine_ptr_before,
+    assert!(
+        entry.spawned_engine_is(&engine_before),
         "engine Arc reused on the unchanged refresh"
     );
-    assert_eq!(entry.spawned_outer_mtu, 1400, "captured MTU unchanged");
+    assert_eq!(entry.spawned.as_ref().expect("capture").outer_mtu, 1400, "captured MTU unchanged");
     assert_eq!(
         entry.last_spawn_attempt_ns, t0,
         "no restart: the spawn attempt stamp must survive an unchanged-MTU refresh"
@@ -5397,9 +5398,9 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
     // The per-peer map captured at spawn (the output of
     // `resolve_wg_per_peer_outer_mtus`, handed by value into the control
     // thread) is retained on the entry — assert on it directly, mirroring
-    // the wg2921 `spawned_outer_mtu` pattern.
+    // the wg2921 captured-`outer_mtu` pattern.
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    let per_peer = &entry.spawned_per_peer_outer_mtu;
+    let per_peer = &entry.spawned.as_ref().expect("capture").per_peer_outer_mtu;
     assert_eq!(
         per_peer.len(),
         2,
@@ -5428,7 +5429,7 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
     // The interface-level scalar remains peer A's 1500 — the fallback for
     // a peer absent from the per-peer map (learned/roamed endpoint).
     assert_eq!(
-        entry.spawned_outer_mtu, 1500,
+        entry.spawned.as_ref().expect("capture").outer_mtu, 1500,
         "the scalar fallback stays the first endpoint-bearing peer's MTU"
     );
 }
@@ -5436,14 +5437,10 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
 // ---------------------------------------------------------------------
 // #15950 / #17094 — WG peer commits rebuild the engine.
 //
-// `wg_peers_eq` compares `endpoint_host` (#15950), so ANY peer commit
-// — hostname-only included — rebuilds the engine; the coordinator
-// restarts the control thread via `engine_changed` and the respawned
-// resolver captures the fresh `endpoint_hosts`. #17094 retired the
-// #14675 same-engine machinery (coordinator arm +
-// in-thread refresh) that guarded the pre-#15950 reuse path
-// production can no longer reach. These cells pin the live route:
-// they red if `endpoint_host` drops out of `wg_peers_eq`.
+// Since #15950 `wg_peers_eq` compares `endpoint_host`, so a
+// hostname-only change rebuilds the engine (#17094 reachability);
+// these cells pin that the control thread restarts and recaptures its
+// spawn-time peer config / `endpoint_hosts` on every peer change.
 // ---------------------------------------------------------------------
 
 /// #15950 helper: decode a hex pubkey constant to bytes.
@@ -5519,7 +5516,9 @@ fn wg15950_hostname_peer_added_rebuilds_engine_and_restarts_thread() {
         .refresh_runtime_snapshot(&snap1)
         .expect("first apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    let engine_ptr_before = entry.engine_ptr;
+    assert_eq!(entry.spawned.as_ref().expect("capture").peer_config.len(), 1);
+    assert_eq!(entry.spawned.as_ref().expect("capture").peer_config[0].endpoint_host, None);
+    let engine_before = entry.spawned.as_ref().expect("capture").engine.clone();
     let t0 = monotonic_nanos();
     coordinator
         .wg_control_threads
@@ -5540,8 +5539,27 @@ fn wg15950_hostname_peer_added_rebuilds_engine_and_restarts_thread() {
         .refresh_runtime_snapshot(&snap2)
         .expect("second apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
-    assert_ne!(
-        entry.engine_ptr, engine_ptr_before,
+    assert_eq!(
+        entry.spawned.as_ref().expect("capture").peer_config.len(),
+        2,
+        "spawned capture must include the added hostname peer"
+    );
+    let host_peer = entry
+        .spawned
+        .as_ref()
+        .expect("capture")
+        .peer_config
+        .iter()
+        .find(|p| p.pubkey == wg15950_pubkey(WG15950_PUBKEY_B))
+        .expect("hostname peer in capture");
+    assert_eq!(
+        host_peer.endpoint_host.as_deref(),
+        Some("peer-b.example.com:51820"),
+        "resolver hostname must be captured at spawn"
+    );
+    assert_eq!(host_peer.endpoint, None);
+    assert!(
+        !entry.spawned_engine_is(&engine_before),
         "adding a peer must REBUILD the engine (#15950)"
     );
     assert_ne!(
@@ -5592,17 +5610,10 @@ fn wg15950_hostname_only_commit_rebuilds_engine_and_restarts_thread() {
         .expect("first apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(
-        coordinator
-            .forwarding
-            .tunnel_endpoints
-            .get(&1)
-            .expect("endpoint")
-            .wg_peers[0]
-            .endpoint_host
-            .as_deref(),
+        entry.spawned.as_ref().expect("capture").peer_config[0].endpoint_host.as_deref(),
         Some("old.example.com:51820")
     );
-    let engine_ptr_before = entry.engine_ptr;
+    let engine_before = entry.spawned.as_ref().expect("capture").engine.clone();
     let t0 = monotonic_nanos();
     coordinator
         .wg_control_threads
@@ -5620,19 +5631,12 @@ fn wg15950_hostname_only_commit_rebuilds_engine_and_restarts_thread() {
         .refresh_runtime_snapshot(&snap2)
         .expect("second apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
-    assert_ne!(
-        entry.engine_ptr, engine_ptr_before,
+    assert!(
+        !entry.spawned_engine_is(&engine_before),
         "hostname-only change must REBUILD the engine (#15950 H37-01)"
     );
     assert_eq!(
-        coordinator
-            .forwarding
-            .tunnel_endpoints
-            .get(&1)
-            .expect("endpoint after")
-            .wg_peers[0]
-            .endpoint_host
-            .as_deref(),
+        entry.spawned.as_ref().expect("capture").peer_config[0].endpoint_host.as_deref(),
         Some("new.example.com:51820"),
         "hostname rename must restart and recapture endpoint_hosts"
     );
@@ -5679,12 +5683,7 @@ fn wg15950_literal_change_and_responder_add_restart() {
         .get(&1)
         .expect("entry after literal");
     assert_eq!(
-        coordinator
-            .forwarding
-            .tunnel_endpoints
-            .get(&1)
-            .expect("endpoint after literal")
-            .wg_peers[0]
+        entry.spawned.as_ref().expect("capture").peer_config[0]
             .endpoint
             .map(|e| e.to_string())
             .as_deref(),
@@ -5715,14 +5714,16 @@ fn wg15950_literal_change_and_responder_add_restart() {
         .wg_control_threads
         .get(&1)
         .expect("entry after responder");
-    let peers = &coordinator
-        .forwarding
-        .tunnel_endpoints
-        .get(&1)
-        .expect("endpoint after responder")
-        .wg_peers;
-    assert_eq!(peers.len(), 2, "responder peer in forwarding");
-    let resp = peers
+    assert_eq!(
+        entry.spawned.as_ref().expect("capture").peer_config.len(),
+        2,
+        "responder peer captured"
+    );
+    let resp = entry
+        .spawned
+        .as_ref()
+        .expect("capture")
+        .peer_config
         .iter()
         .find(|p| p.pubkey == wg15950_pubkey(WG15950_PUBKEY_B))
         .expect("responder peer");
@@ -5751,7 +5752,7 @@ fn wg15950_unchanged_peer_config_keeps_control_thread() {
         .refresh_runtime_snapshot(&snap)
         .expect("first apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    let engine_ptr_before = entry.engine_ptr;
+    let engine_before = entry.spawned.as_ref().expect("capture").engine.clone();
     let t0 = monotonic_nanos();
     coordinator
         .wg_control_threads
@@ -5762,11 +5763,413 @@ fn wg15950_unchanged_peer_config_keeps_control_thread() {
         .refresh_runtime_snapshot(&snap)
         .expect("no-op apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
-    assert_eq!(entry.engine_ptr, engine_ptr_before);
+    assert!(entry.spawned_engine_is(&engine_before));
     assert_eq!(
         entry.last_spawn_attempt_ns, t0,
         "unchanged peer config must not restart the control thread"
     );
+}
+
+// ---------------------------------------------------------------------
+// #17089 — single-capture guard for WG control-thread spawn inputs.
+//
+// Before this change each spawn-time capture needed a matching
+// hand-written arm in the stale prune; #2921 (outer MTU) and #14675
+// (peer config) shipped as stale-capture defects when the arm was
+// forgotten. Now `wg_spawn_inputs` is the only builder of
+// `WgSpawnInputs`, the entry stores that one value as `spawned`, and
+// the prune compares it whole. The cells below pin both halves:
+// value semantics (equal captures keep the thread, any single-field
+// divergence restarts it with the historical reason) and structure
+// (a by-value `wg_control_loop` parameter that is neither a
+// `WgSpawnInputs` field nor a named live-Arc allowlist entry fails).
+// ---------------------------------------------------------------------
+
+/// #17089 helper: a minimal spawn capture over a fresh engine.
+fn wg17089_inputs() -> crate::afxdp::types::WgSpawnInputs {
+    crate::afxdp::types::WgSpawnInputs {
+        engine: std::sync::Arc::new(crate::afxdp::wg::WgEngine::new(
+            crate::afxdp::wg::WgEngineConfig {
+                local_private_key: [3u8; 32].into(),
+                listen_port: 51820,
+                peers: Vec::new(),
+            },
+        )),
+        ifindex: 47089,
+        tunnel_name: "wg17089".into(),
+        listen_port: 51820,
+        outer_mtu: 1400,
+        per_peer_outer_mtu: std::collections::HashMap::new(),
+        outer_bind_device: None,
+        kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,
+        peer_config: Vec::new(),
+        endpoint_hosts: Vec::new(),
+        preferred_v6: None,
+    }
+}
+
+/// #17089: identical captures are equal (engine by `ptr_eq`), and each
+/// single-field divergence flips equality AND reports the historical
+/// prune reason for that field — the field-diff half of the guard.
+/// A field added to `WgSpawnInputs` without an `eq` conjunct keeps
+/// equality unchanged on divergence, and one without a `diff_reason`
+/// arm falls through to the fall-through reason — in both cases this
+/// cell stays silent because its cases are written by hand. The
+/// structural cell below is what forces new fields into `eq` and
+/// `diff_reason`.
+#[test]
+fn wg_spawn_inputs_diff_reason_names_each_field_17089() {
+    let base = wg17089_inputs();
+    assert!(base == base.clone(), "identical captures must be equal");
+
+    let mut cases: Vec<(&str, crate::afxdp::types::WgSpawnInputs)> = Vec::new();
+    let mut c = base.clone();
+    c.engine = std::sync::Arc::new(crate::afxdp::wg::WgEngine::new(
+        crate::afxdp::wg::WgEngineConfig {
+            local_private_key: [4u8; 32].into(),
+            listen_port: 51820,
+            peers: Vec::new(),
+        },
+    ));
+    cases.push(("engine_changed", c));
+    let mut c = base.clone();
+    c.tunnel_name = "wg17089-renamed".into();
+    cases.push(("attachment_changed", c));
+    let mut c = base.clone();
+    c.ifindex = 47090;
+    cases.push(("attachment_changed", c));
+    let mut c = base.clone();
+    c.outer_mtu = 1280;
+    cases.push(("outer_mtu_changed", c));
+    let mut c = base.clone();
+    c.per_peer_outer_mtu.insert([9u8; 32], 1280);
+    cases.push(("outer_mtu_changed", c));
+    let mut c = base.clone();
+    c.outer_bind_device = Some("vrf-a".into());
+    cases.push(("outer_bind_device_changed", c));
+    let mut c = base.clone();
+    c.kernel_transport = crate::afxdp::types::WgKernelTransport::DropUnsteered;
+    cases.push(("kernel_transport_changed", c));
+    let mut c = base.clone();
+    c.peer_config.push(crate::afxdp::types::WgPeerSpawnConfig {
+        pubkey: [9u8; 32],
+        endpoint: None,
+        endpoint_host: Some("peer.example.com:51820".into()),
+    });
+    cases.push(("peer_config_changed", c));
+    let mut c = base.clone();
+    c.listen_port = 51821;
+    cases.push(("listen_port_changed", c));
+    let mut c = base.clone();
+    c.endpoint_hosts
+        .push(([9u8; 32], "peer.example.com:51820".into()));
+    cases.push(("endpoint_hosts_changed", c));
+    let mut c = base.clone();
+    c.preferred_v6 = Some(true);
+    cases.push(("preferred_v6_changed", c));
+
+    for (reason, changed) in &cases {
+        assert!(*changed != base, "{reason}: divergence must flip equality");
+        assert_eq!(
+            changed.diff_reason(&base),
+            *reason,
+            "diff_reason must name the diverged field"
+        );
+    }
+    // Precedence: engine identity outranks every later field, matching
+    // the pre-#17089 ladder (engine_changed was checked first).
+    let mut both = base.clone();
+    both.engine = cases[0].1.engine.clone();
+    both.outer_mtu = 1280;
+    assert_eq!(both.diff_reason(&base), "engine_changed");
+}
+
+/// #17089 THE RATCHET (the #6961 pattern): parse `wg_control_loop`'s
+/// parameter list and `WgSpawnInputs`' field list from source. Every
+/// by-value parameter of the loop must be either a `WgSpawnInputs`
+/// field (spawn capture — automatically pruned) or on the named
+/// live-Arc allowlist below (shared state the thread reads live, so
+/// no spawn-time staleness is possible). A future spawn-time capture
+/// added as a bare parameter fails here until it is moved into
+/// `WgSpawnInputs` — the exact step whose omission shipped #2921 and
+/// #14675. Moving it into the struct alone is not enough: the prune
+/// fires only when the hand-written `PartialEq::eq` compares the
+/// field, and the reason names only when `diff_reason` tests it, so
+/// the third half below parses both of those bodies and requires
+/// every field name in each — a field whose `eq` conjunct is
+/// forgotten compiles and silently never prunes (the #2921
+/// stale-capture class). The field list is read from the definition,
+/// never restated.
+#[test]
+fn every_wg_control_loop_capture_is_in_spawn_inputs_17089() {
+    // Parameters that are NOT spawn captures: coordinator identity for
+    // this spawn, and live shared Arcs/channels the thread reads or
+    // writes through for its whole lifetime. Adding a name here is a
+    // deliberate claim that the value cannot go stale; a by-value
+    // snapshot (String, integer, map, Vec, enum) does not belong here.
+    const LIVE_ALLOWLIST: &[&str] = &[
+        "tunnel_endpoint_id",     // map key, not a capture
+        "shared_runtime",         // RuntimeViewReader: live ArcSwap view
+        "resolver_telemetry",     // coordinator-owned Arc, read/written live
+        "recent_exceptions",      // shared exception ring Arc
+        "stop",                   // stop flag Arc
+        "ha_state",               // HA runtime ArcSwap Arc
+        "dynamic_neighbors",      // shared neighbor map Arc
+        "shared_sessions",        // shared session table Arc
+        "shared_nat_sessions",    // shared NAT session table Arc
+        "shared_forward_wire_sessions", // shared forward-wire table Arc
+        "shared_owner_rg_indexes", // shared owner-RG index Arc
+        "delivery_rx",            // live mpsc receiver, created per spawn
+        "delivery_wake",          // delivery eventfd Arc
+        "wg_uncovered_queues",    // live ArcSwap queue map Arc
+    ];
+    // `wg_control_loop` parameter name -> `WgSpawnInputs` field name
+    // where the two deliberately differ (the loop's TUN-attachment
+    // parameter predates the capture struct).
+    const RENAMED: &[(&str, &str)] = &[("spawned_logical_ifindex", "ifindex")];
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let control_src = std::fs::read_to_string(
+        manifest.join("src/afxdp/coordinator/wg_control/mod.rs"),
+    )
+    .expect("read wg_control/mod.rs (the #17089 ratchet cannot run)");
+    let sig = control_src
+        .split_once("pub(super) fn wg_control_loop(")
+        .expect("wg_control_loop definition")
+        .1
+        .split_once(") {")
+        .expect("end of wg_control_loop signature")
+        .0;
+    // Parameter names: first token of each top-level comma segment.
+    // The signature contains commas inside generic type arguments, so
+    // split at angle/paren/bracket depth zero only.
+    let mut params: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut segment = String::new();
+    let mut segments: Vec<String> = Vec::new();
+    for ch in sig.chars() {
+        match ch {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                segments.push(std::mem::take(&mut segment));
+                continue;
+            }
+            _ => {}
+        }
+        segment.push(ch);
+    }
+    if !segment.trim().is_empty() {
+        segments.push(segment);
+    }
+    for seg in &segments {
+        // Doc comments sit INSIDE the parameter list, between
+        // parameters, so a comment block and the parameter after it
+        // share one comma segment: keep only the code after the last
+        // comment line, then take `name:`.
+        let mut cleaned = String::new();
+        for line in seg.lines() {
+            // A comment may END mid-line's logical content: e.g. a
+            // multi-line doc whose last line's text precedes the next
+            // parameter in the same segment. Clearing on comment lines
+            // handles the common shape; the name check below rejects
+            // any residual prose instead of silently misparsing it.
+            if line.trim_start().starts_with("//") {
+                cleaned.clear();
+            } else {
+                if !cleaned.is_empty() {
+                    cleaned.push(' ');
+                }
+                cleaned.push_str(line.trim());
+            }
+        }
+        let Some((name, _ty)) = cleaned.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if !name.is_empty() {
+            // A valid parameter name is a single identifier; anything
+            // else means comment prose leaked into the segment (a doc
+            // comment whose final line shares the segment) — drop the
+            // prose before the final token.
+            let name = name.rsplit(|c: char| c.is_whitespace()).next().unwrap_or(name);
+            params.push(name.to_string());
+        }
+    }
+    assert!(
+        params.len() >= 20,
+        "parsed only {} wg_control_loop parameters; the parse broke, so this ratchet is \
+         vacuous. FIX THE PARSE — do not delete the guard",
+        params.len()
+    );
+
+    let types_src = std::fs::read_to_string(manifest.join("src/afxdp/types/runtime.rs"))
+        .expect("read types/runtime.rs (the #17089 ratchet cannot run)");
+    let body = types_src
+        .split_once("pub(crate) struct WgSpawnInputs {")
+        .expect("WgSpawnInputs definition")
+        .1
+        .split_once("\n}")
+        .expect("end of WgSpawnInputs")
+        .0;
+    let mut fields: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let t = line.trim();
+        if t.starts_with("//") {
+            continue;
+        }
+        let Some(rest) = t
+            .strip_prefix("pub(in crate::afxdp) ")
+            .or_else(|| t.strip_prefix("pub(crate) "))
+        else {
+            continue;
+        };
+        if let Some((name, _)) = rest.split_once(':') {
+            fields.push(name.trim().to_string());
+        }
+    }
+    assert!(
+        fields.len() >= 10,
+        "parsed only {} WgSpawnInputs fields; the parse broke, so this ratchet is vacuous. \
+         FIX THE PARSE — do not delete the guard",
+        fields.len()
+    );
+
+    for param in &params {
+        let field = RENAMED
+            .iter()
+            .find(|(p, _)| p == param)
+            .map_or(param.as_str(), |(_, f)| *f);
+        assert!(
+            fields.iter().any(|f| f == field) || LIVE_ALLOWLIST.contains(&param.as_str()),
+            "wg_control_loop parameter `{param}` is a by-value spawn capture that is neither a \
+             WgSpawnInputs field nor on the #17089 live-Arc allowlist. A spawn-time value frozen \
+             in the thread without a WgSpawnInputs field is never compared by the stale prune — \
+             that is exactly how #2921 and #14675 shipped stale state. Move it into \
+             WgSpawnInputs (built by wg_spawn_inputs), or, only if it is a live shared Arc that \
+             cannot go stale, add it to LIVE_ALLOWLIST with a reason"
+        );
+    }
+    // The allowlist must not rot: every name on it must still be a
+    // parameter, and every capture field must still reach the loop
+    // (a field the loop never receives is dead capture weight).
+    for name in LIVE_ALLOWLIST {
+        assert!(
+            params.iter().any(|p| p == name),
+            "LIVE_ALLOWLIST names {name}, which is no longer a wg_control_loop parameter. \
+             Remove the stale entry — a stale exclusion silently widens what the ratchet tolerates"
+        );
+    }
+    for field in &fields {
+        if field == "peer_config" {
+            continue; // prune-only capture: compared, never handed to the loop
+        }
+        let param = RENAMED
+            .iter()
+            .find(|(_, f)| f == field)
+            .map_or(field.as_str(), |(p, _)| *p);
+        assert!(
+            params.iter().any(|p| p == param),
+            "WgSpawnInputs.{field} never reaches wg_control_loop. Either hand it to the loop \
+             or remove the field — a captured-but-unused input misleads the prune"
+        );
+    }
+    // Third half: the prune fires only when the hand-written
+    // `PartialEq::eq` compares a field, and `diff_reason` names it
+    // only when its chain tests it. Both impls live in
+    // `types/runtime.rs` and are parsed from the same source read
+    // above. Whole-word mentions only: a field whose name is a
+    // substring of a longer identifier is not compared. A future
+    // field must appear in BOTH bodies — reaching the loop (second
+    // half above) without an `eq` conjunct compiles and silently
+    // never prunes.
+    // `diff_reason` has ONE deliberate shape exception: its final
+    // `else` arm names the last field's reason ("preferred_v6_changed")
+    // without testing that field — every earlier field missed by the
+    // chain falls through to that same arm, so a forgotten field
+    // cannot be told apart from the last one by reading the reason.
+    // For that one field an explicit test is what proves the `eq`
+    // change is what reaches the arm. Pin the exception instead of
+    // weakening the check: the arm body must be exactly the final
+    // field's reason string, so any other field's fall-through is a
+    // misreport the per-field value cell catches only if listed —
+    // and adding a field past it (appended to the struct, the
+    // natural spot) makes it the new untested fall-through and
+    // reds here until its arm is written.
+    fn mentions_field(body: &str, field: &str) -> bool {
+        body.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == field)
+    }
+    let eq_body = types_src
+        .split_once("impl PartialEq for WgSpawnInputs {")
+        .expect("WgSpawnInputs PartialEq impl")
+        .1
+        .split_once("\n}")
+        .expect("end of WgSpawnInputs PartialEq impl")
+        .0;
+    assert!(
+        eq_body.contains("fn eq("),
+        "parsed no `fn eq` from the WgSpawnInputs PartialEq impl; the parse broke, so this \
+         ratchet is vacuous. FIX THE PARSE — do not delete the guard"
+    );
+    let diff_body = types_src
+        .split_once("fn diff_reason(")
+        .expect("WgSpawnInputs::diff_reason")
+        .1
+        .split_once("\n    }")
+        .expect("end of WgSpawnInputs::diff_reason")
+        .0;
+    assert!(
+        diff_body.contains("engine_changed"),
+        "parsed no reason strings from WgSpawnInputs::diff_reason; the parse broke, so this \
+         ratchet is vacuous. FIX THE PARSE — do not delete the guard"
+    );
+    // The fall-through field is the struct's LAST field: its reason
+    // is the chain's final else (see the exception above). Pin that
+    // identity — if the struct gains a field, the last field moves
+    // and this ratchet reds until the new field is tested explicitly.
+    let fallthrough_field = fields
+        .last()
+        .expect("WgSpawnInputs has at least one field")
+        .clone();
+    let fallthrough_reason = format!("\"{fallthrough_field}_changed\"");
+    // `diff_body` was split at the method's closing brace, so it ends
+    // with the final else block's own closing brace — compare the
+    // last reason literal in the body, not the body's last bytes.
+    let last_reason = diff_body
+        .rsplit('"')
+        .nth(1)
+        .map(|s| format!("\"{s}\""))
+        .expect("diff_reason returns at least one reason string");
+    assert!(
+        last_reason == fallthrough_reason,
+        "WgSpawnInputs::diff_reason must end with the final else arm returning \
+         {fallthrough_reason} for the struct's last field. Test every other field \
+         explicitly in the chain and leave exactly one fall-through — otherwise a \
+         forgotten field silently inherits that reason"
+    );
+    for field in &fields {
+        assert!(
+            mentions_field(eq_body, field),
+            "WgSpawnInputs.{field} is not compared by `PartialEq for WgSpawnInputs::eq` in \
+             types/runtime.rs. The stale prune fires only when a capture CHANGES, so a field \
+             no conjunct compares is never pruned no matter how far it drifts — that is \
+             exactly how #2921 shipped stale state. Add `self.{field} == other.{field}` \
+             (`Arc::ptr_eq` if {field} is an Arc) to `eq`"
+        );
+        if field == &fallthrough_field {
+            continue; // the final else arm IS its test (pinned above)
+        }
+        assert!(
+            mentions_field(diff_body, field),
+            "WgSpawnInputs.{field} is not tested by `WgSpawnInputs::diff_reason` in \
+             types/runtime.rs, so a divergence reports the fall-through reason \
+             ({fallthrough_reason}) instead of its own — and a missing arm is how a \
+             capture silently loses its prune reason. Test {field} in diff_reason's \
+             chain (before the final else) and add its per-field case to \
+             wg_spawn_inputs_diff_reason_names_each_field_17089"
+        );
+    }
 }
 // ---------------------------------------------------------------------
 // #1881 — GRE local-origin thread lifecycle regression suite.
@@ -5818,6 +6221,81 @@ fn gre1881_fake_worker_handle() -> WorkerHandle {
         runtime_atomics: Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new()),
         cold_path_atomics: Arc::new(crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new()),
     }
+}
+
+/// #17084 fold (Rev18138): the WG stop-all on the disarmed refresh leg
+/// must unpublish the WG delivery BEFORE joining its thread, while
+/// preserving any live GRE delivery — the pre-consolidation helper
+/// published excluding the WG batch; the consolidated `stop_all`
+/// initially published nothing, leaving a dead WG sender in
+/// `local_tunnel_deliveries` indefinitely while disarmed.
+///
+/// Both entries are driven live together (one joint snapshot, TUN
+/// stand-ins so neither thread exits on `open_tun`), then
+/// `stop_all_wg_control_threads` — the exact helper the disarmed leg
+/// calls first — runs: the WG entry is gone and its ifindex is
+/// unpublished, while the live GRE entry and its delivery survive
+/// (the leg's later GRE stop-all is what eventually empties the map).
+/// Reverting the publish (plain `stop_all`) leaves the WG sender
+/// published and this cell goes RED; publishing the empty map
+/// instead would withdraw the GRE sender and also go RED.
+#[test]
+fn wg1866_stop_all_unpublishes_wg_delivery_and_preserves_gre() {
+    use crate::afxdp::tunnel::register_tun_standin_10553;
+    // Keep both spawned threads live: without stand-ins they exit on
+    // open_tun, tombstone, and their deliveries are unpublished by
+    // the sweep — the joint precondition below could not hold.
+    let _gre_tun = register_tun_standin_10553("gre1866wg");
+    let _wg_tun = super::wg_control::register_tun_standin_9521("wgt1866wg");
+    let mut coordinator = gre1881_coordinator_with_worker();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let gre_snap = gre1881_snapshot(1, 36291, "gre1866wg", "198.51.100.7");
+    let wg_snap = wg1866_snapshot(2, 4244, "wgt1866wg", port, WG1866_PRIVKEY_A);
+    let mut both = gre_snap;
+    both.interfaces.extend(wg_snap.interfaces.iter().cloned());
+    both.tunnel_endpoints
+        .extend(wg_snap.tunnel_endpoints.iter().cloned());
+    coordinator
+        .refresh_runtime_snapshot(&both)
+        .expect("joint refresh must succeed");
+    assert!(
+        coordinator.tunnel_sources.contains_key(&1),
+        "precondition: GRE entry live"
+    );
+    assert!(
+        coordinator.wg_control_threads.contains_key(&2),
+        "precondition: WG entry live"
+    );
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert!(
+        deliveries.contains_key(&36291),
+        "precondition: GRE delivery published"
+    );
+    assert!(
+        deliveries.contains_key(&4244),
+        "precondition: WG delivery published"
+    );
+    drop(deliveries);
+
+    coordinator.stop_all_wg_control_threads("disarmed");
+
+    assert!(
+        coordinator.wg_control_threads.is_empty(),
+        "stop-all must stop+join+remove every WG entry"
+    );
+    assert!(
+        coordinator.tunnel_sources.contains_key(&1),
+        "WG stop-all must not touch the GRE registry"
+    );
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert!(
+        !deliveries.contains_key(&4244),
+        "WG delivery must be unpublished before/by the stop-all join"
+    );
+    assert!(
+        deliveries.contains_key(&36291),
+        "live GRE delivery must survive the WG stop-all publish"
+    );
 }
 
 fn gre1881_coordinator_with_worker() -> Coordinator {
@@ -6221,80 +6699,6 @@ fn tunnel17084_defer_prune_parity_moved_attachment_and_identity() {
     assert!(wg_keep.wg_control_threads.contains_key(&1));
 }
 
-/// #17084 fold (Rev18138): the WG stop-all on the disarmed refresh leg
-/// must unpublish the WG delivery BEFORE joining its thread, while
-/// preserving any live GRE delivery — the pre-consolidation helper
-/// published excluding the WG batch; the consolidated `stop_all`
-/// initially published nothing, leaving a dead WG sender in
-/// `local_tunnel_deliveries` indefinitely while disarmed.
-///
-/// Both entries are driven live together (one joint snapshot, TUN
-/// stand-ins so neither thread exits on `open_tun`), then
-/// `stop_all_wg_control_threads` — the exact helper the disarmed leg
-/// calls first — runs: the WG entry is gone and its ifindex is
-/// unpublished, while the live GRE entry and its delivery survive
-/// (the leg's later GRE stop-all is what eventually empties the map).
-/// Reverting the publish (plain `stop_all`) leaves the WG sender
-/// published and this cell goes RED; publishing the empty map
-/// instead would withdraw the GRE sender and also go RED.
-#[test]
-fn wg1866_stop_all_unpublishes_wg_delivery_and_preserves_gre() {
-    use crate::afxdp::tunnel::register_tun_standin_10553;
-    // Keep both spawned threads live: without stand-ins they exit on
-    // open_tun, tombstone, and their deliveries are unpublished by
-    // the sweep — the joint precondition below could not hold.
-    let _gre_tun = register_tun_standin_10553("gre1866wg");
-    let _wg_tun = super::wg_control::register_tun_standin_9521("wgt1866wg");
-    let mut coordinator = gre1881_coordinator_with_worker();
-    let port = crate::test_ports::reserve_ephemeral_udp_port();
-    let gre_snap = gre1881_snapshot(1, 36291, "gre1866wg", "198.51.100.7");
-    let wg_snap = wg1866_snapshot(2, 4244, "wgt1866wg", port, WG1866_PRIVKEY_A);
-    let mut both = gre_snap;
-    both.interfaces.extend(wg_snap.interfaces.iter().cloned());
-    both.tunnel_endpoints
-        .extend(wg_snap.tunnel_endpoints.iter().cloned());
-    coordinator
-        .refresh_runtime_snapshot(&both)
-        .expect("joint refresh must succeed");
-    assert!(
-        coordinator.tunnel_sources.contains_key(&1),
-        "precondition: GRE entry live"
-    );
-    assert!(
-        coordinator.wg_control_threads.contains_key(&2),
-        "precondition: WG entry live"
-    );
-    let deliveries = coordinator.local_tunnel_deliveries.load();
-    assert!(
-        deliveries.contains_key(&36291),
-        "precondition: GRE delivery published"
-    );
-    assert!(
-        deliveries.contains_key(&4244),
-        "precondition: WG delivery published"
-    );
-    drop(deliveries);
-
-    coordinator.stop_all_wg_control_threads("disarmed");
-
-    assert!(
-        coordinator.wg_control_threads.is_empty(),
-        "stop-all must stop+join+remove every WG entry"
-    );
-    assert!(
-        coordinator.tunnel_sources.contains_key(&1),
-        "WG stop-all must not touch the GRE registry"
-    );
-    let deliveries = coordinator.local_tunnel_deliveries.load();
-    assert!(
-        !deliveries.contains_key(&4244),
-        "WG delivery must be unpublished before/by the stop-all join"
-    );
-    assert!(
-        deliveries.contains_key(&36291),
-        "live GRE delivery must survive the WG stop-all publish"
-    );
-}
 
 /// #1881 F6: a thread that exits (open_tun failure here) is
 /// tombstoned by the periodic liveness sweep — which must ALSO
@@ -12828,7 +13232,7 @@ fn wg9521_decision(
     coordinator
         .wg_control_threads
         .get(&id)
-        .map(|entry| entry.spawned_kernel_transport)
+        .and_then(|entry| entry.spawned.as_ref().map(|s| s.kernel_transport))
 }
 
 /// #9521/#10527 end to end. Two WireGuard endpoints on distinct listen ports;
@@ -14170,7 +14574,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
     );
     coordinator
         .session_domain()
-        .delete_synced_tunnel_variants(target.clone(), false, false, false);
+        .delete_synced_tunnel_variants(target.clone(), crate::afxdp::SyncedDeleteMode::LOCAL, false);
     let remaining = crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced);
     assert!(
         !remaining.contains_key(&target),
@@ -14256,12 +14660,13 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     source_nat_static: None, };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(target.clone(), entry);
-    let outcome = coordinator.session_domain().delete_synced_tunnel_variants(
-        target.clone(),
-        false,
-        false,
-        true,
-    );
+    let outcome = coordinator
+        .session_domain()
+        .delete_synced_tunnel_variants(
+            target.clone(),
+            crate::afxdp::SyncedDeleteMode::LOCAL_MIRROR,
+            false,
+        );
     assert_eq!(
         outcome,
         SyncedDeleteOutcome::RefusedMirrorDelete,
@@ -14269,11 +14674,153 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     );
     let lenient = coordinator.session_domain().delete_synced_tunnel_variants(
         target.clone(),
-        false,
-        false,
+        crate::afxdp::SyncedDeleteMode::LOCAL,
         false,
     );
     assert_eq!(lenient, SyncedDeleteOutcome::Applied);
+}
+
+/// #17133: every mode must behave identically through the exact delete and
+/// the tunnel-variant purge — the parity #12886 lacked (the variant ladder
+/// had no strict arm, and no scoped arm at all). One GRE fixture per mode:
+/// the stored entry carries session_id 4242 and the scoped mode names a
+/// DIFFERENT incarnation, so the scoped leg is the identity refusal.
+///
+/// Expected outcomes in the unit environment (no BPF fds, so strict mirror
+/// writes fail): LOCAL/PEER apply; LOCAL_MIRROR/PEER_MIRROR surface
+/// RefusedMirrorDelete; the scoped mode refuses identity on BOTH paths and
+/// the live entry survives both.
+#[test]
+fn synced_delete_mode_parity_exact_vs_tunnel_variants_17133() {
+    fn gre_key(discriminator: crate::session::TunnelDiscriminator) -> crate::session::SessionKey {
+        crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_GRE,
+            src_ip: "10.0.0.10".parse().unwrap(),
+            dst_ip: "10.0.0.20".parse().unwrap(),
+            src_port: 0,
+            dst_port: 0,
+            discriminator,
+            routing_domain: 0,
+        }
+    }
+    fn seed(coordinator: &Coordinator, key: &crate::session::SessionKey) {
+        let entry = crate::afxdp::worker::SyncedSessionEntry {
+            key: key.clone(),
+            decision: crate::afxdp::SessionDecision {
+                resolution: crate::afxdp::ForwardingResolution {
+                    disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    source_ifindex: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: crate::nat::NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: crate::session::SessionMetadata {
+                ingress_zone: 1,
+                egress_zone: 2,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 1,
+                fabric_ingress: false,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            leak_incarnation: 0,
+            origin: crate::afxdp::SessionOrigin::SyncImport,
+            protocol: key.protocol,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 4242,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
+            persistent_lease_hold: None,
+            source_nat_static: None,
+        };
+        crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+            .insert(key.clone(), entry);
+    }
+    use crate::afxdp::{SyncedDeleteMode, SyncedDeleteOutcome};
+    let scoped_mismatch = SyncedDeleteMode::peer_mirror_scoped(9999).expect("non-zero");
+    let cases: [(&str, SyncedDeleteMode, SyncedDeleteOutcome, bool); 5] = [
+        ("LOCAL", SyncedDeleteMode::LOCAL, SyncedDeleteOutcome::Applied, false),
+        (
+            "LOCAL_MIRROR",
+            SyncedDeleteMode::LOCAL_MIRROR,
+            SyncedDeleteOutcome::RefusedMirrorDelete,
+            false,
+        ),
+        ("PEER", SyncedDeleteMode::PEER, SyncedDeleteOutcome::Applied, false),
+        (
+            "PEER_MIRROR",
+            SyncedDeleteMode::PEER_MIRROR,
+            SyncedDeleteOutcome::RefusedMirrorDelete,
+            false,
+        ),
+        (
+            "PEER_MIRROR_SCOPED(mismatch)",
+            scoped_mismatch,
+            SyncedDeleteOutcome::RefusedIdentity,
+            true,
+        ),
+    ];
+    for (name, mode, expected, survives) in cases {
+        let exact_coordinator = Coordinator::new();
+        let exact_key = gre_key(crate::session::TunnelDiscriminator::Keyed(1));
+        seed(&exact_coordinator, &exact_key);
+        let exact = exact_coordinator
+            .session_domain()
+            .delete_synced(exact_key.clone(), mode, false);
+        let exact_survives = crate::afxdp::shared_ops::lock_shared_recover(
+            &exact_coordinator.sessions.synced,
+        )
+        .contains_key(&exact_key);
+
+        let variant_coordinator = Coordinator::new();
+        let variant_key = gre_key(crate::session::TunnelDiscriminator::Keyed(2));
+        seed(&variant_coordinator, &variant_key);
+        let variant = variant_coordinator
+            .session_domain()
+            .delete_synced_tunnel_variants(variant_key.clone(), mode, false);
+        let variant_survives = crate::afxdp::shared_ops::lock_shared_recover(
+            &variant_coordinator.sessions.synced,
+        )
+        .contains_key(&variant_key);
+
+        assert_eq!(exact, expected, "{name}: exact delete outcome");
+        assert_eq!(
+            variant, exact,
+            "{name}: variant purge must match the exact delete (#17133/#12886)"
+        );
+        assert_eq!(exact_survives, survives, "{name}: exact delete survival");
+        assert_eq!(
+            variant_survives, exact_survives,
+            "{name}: variant purge survival must match the exact delete"
+        );
+    }
 }
 
 /// #15153 (B11-01): after a full reconcile / worker respawn, synced PPTP GRE

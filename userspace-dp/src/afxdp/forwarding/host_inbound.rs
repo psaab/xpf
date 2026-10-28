@@ -934,7 +934,6 @@ pub(in crate::afxdp) fn host_inbound_admits(
 /// destinations are fail-closed even when the ingress zone is unknown; every
 /// non-catalog destination preserves `host_inbound_admits`' existing unknown
 /// zone behavior and service/protocol semantics.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn host_inbound_admits_for_destination(
     state: &ForwardingState,
     ingress_zone_id: u32,
@@ -961,7 +960,7 @@ pub(in crate::afxdp) fn host_inbound_admits_for_destination(
 /// Ingress-interface-aware, destination-aware entry point for packet paths.
 /// Per-interface override admission is still authoritative; otherwise use the
 /// zone set. A catalog group with no zone entry is fail-closed.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
     state: &ForwardingState,
     ingress_ifindex: i32,
@@ -999,7 +998,6 @@ pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
 /// group), so its verdicts are the production verdicts, never a fourth
 /// hand-copied body.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn host_inbound_admits_iface(
     state: &ForwardingState,
     ingress_ifindex: i32,

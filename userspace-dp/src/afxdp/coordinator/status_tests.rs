@@ -631,6 +631,7 @@ fn wg_tunnel_status_carries_endpoint_resolver_counters_7936() {
             interface: "wg0.0".into(),
             redundancy_group: 0,
             mode: "wireguard".into(),
+            kind: TunnelKind::WireGuard,
             outer_family: libc::AF_INET,
             source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             destination: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
@@ -673,14 +674,11 @@ fn wg_tunnel_status_carries_endpoint_resolver_counters_7936() {
         WgControlEntry {
             handle: None,
             delivery_tx: None,
-            engine_ptr: 0,
-            spawned_ifindex: 41,
-            spawned_tunnel_name: "wg0".into(),
-            spawned_outer_mtu: 1420,
-            spawned_outer_bind_device: None,
-            spawned_per_peer_outer_mtu: std::collections::HashMap::new(),
+            // #17089: no reader of this fixture touches the spawn
+            // capture (the status builder reads only
+            // `resolver_telemetry`), so it carries none.
+            spawned: None,
             last_spawn_attempt_ns: 0,
-            spawned_kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,
             resolver_telemetry: Some(std::sync::Arc::clone(&telemetry)),
         },
     );
@@ -721,6 +719,7 @@ fn wg_tunnel_status_reports_zeros_without_a_resolver_7936() {
             interface: "wg1.0".into(),
             redundancy_group: 0,
             mode: "wireguard".into(),
+            kind: TunnelKind::WireGuard,
             outer_family: libc::AF_INET,
             source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
             destination: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),

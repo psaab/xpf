@@ -93,13 +93,13 @@ func TestGroupsReadScopedGateRefuses15994(t *testing.T) {
 		{"groups"},
 		{"groups", "G"},
 	} {
-		if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", path, "", tree); err == nil {
+		if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", path, "", []*ConfigTree{tree}); err == nil {
 			t.Errorf("ShowConfigRendered %v ALLOWED for deny-configuration ^security (#15994)", path)
 		}
-		if err := AuthorizeConfigShowCompareAtPathRendered(cfgSec, "limited", path, tree); err == nil {
+		if err := AuthorizeConfigShowCompareAtPathRendered(cfgSec, "limited", path, []*ConfigTree{tree}); err == nil {
 			t.Errorf("ShowCompareRendered %v ALLOWED (#15994)", path)
 		}
-		if err := AuthorizeConfigShowRollbackAtPathRendered(cfgSec, "limited", path, "", tree); err == nil {
+		if err := AuthorizeConfigShowRollbackAtPathRendered(cfgSec, "limited", path, "", []*ConfigTree{tree}); err == nil {
 			t.Errorf("ShowRollbackRendered %v ALLOWED (#15994)", path)
 		}
 	}
@@ -110,7 +110,7 @@ func TestGroupsReadScopedGateRefuses15994(t *testing.T) {
 		{"system", "host-name"},
 		{"groups", "G", "system"},
 	} {
-		if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", path, "", tree); err != nil {
+		if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", path, "", []*ConfigTree{tree}); err != nil {
 			// groups G system is under G whose sibling is security;
 			// the descendant walk prices descendants of the scope,
 			// not siblings — but G's body also carries interfaces.
@@ -120,7 +120,7 @@ func TestGroupsReadScopedGateRefuses15994(t *testing.T) {
 			}
 		}
 	}
-	if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", []string{"groups", "G", "system"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", []string{"groups", "G", "system"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("groups G system (allowed sibling of body) refused: %v", err)
 	}
 
@@ -136,13 +136,13 @@ func TestGroupsReadScopedGateRefuses15994(t *testing.T) {
 	// Nested groups: innermost body priced.
 	nested := parseHierText(t, "groups { H { system { host-name h15994; } } G { apply-groups H; } } apply-groups G;")
 	inner := parseHierText(t, "groups { H { security { zones { security-zone trust { description NESTED-15994; } } } } G { apply-groups H; } } apply-groups G;")
-	if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", []string{"groups", "G", "system"}, "", nested); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", []string{"groups", "G", "system"}, "", []*ConfigTree{nested}); err != nil {
 		t.Errorf("nested allowed path refused: %v", err)
 	}
-	if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", []string{"groups", "G", "security"}, "", inner); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", []string{"groups", "G", "security"}, "", []*ConfigTree{inner}); err == nil {
 		t.Errorf("nested denied path ALLOWED (#15994)")
 	}
-	if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", []string{"groups"}, "", inner); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", []string{"groups"}, "", []*ConfigTree{inner}); err == nil {
 		t.Errorf("nested ancestor ALLOWED (#15994)")
 	}
 }
@@ -156,18 +156,18 @@ func TestGroupsReadOpArm15994(t *testing.T) {
 		{"groups"},
 		{"groups", "G"},
 	} {
-		if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", tree); err == nil {
+		if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", []*ConfigTree{tree}); err == nil {
 			t.Errorf("op-arm escaped via %v (#15994 fold 2)", path)
 		}
 	}
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"groups", "G", "interfaces"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"groups", "G", "interfaces"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("op-arm priced wrong subtree: %v", err)
 	}
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"groups", "H", "system"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"groups", "H", "system"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("op-arm allowed sibling refused: %v", err)
 	}
 	// display set form of the denied effective command also refuses.
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"groups", "G", "security"}, "display set", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"groups", "G", "security"}, "display set", []*ConfigTree{tree}); err == nil {
 		t.Errorf("op-arm display set escaped (#15994)")
 	}
 }
@@ -178,10 +178,10 @@ func TestGroupsReadWhole15994(t *testing.T) {
 
 	// deny-configuration ^security: group body refuses whole.
 	cfgSec := cfgOp15994(t, "", "^security", "", "")
-	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", tree); err == nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", []*ConfigTree{tree}); err == nil {
 		t.Error("whole tree with denied group body ALLOWED (#15994)")
 	}
-	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", plain); err == nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", []*ConfigTree{plain}); err == nil {
 		t.Error("groupless whole tree admitted (must keep #14707 refusal)")
 	}
 	if err := AuthorizeConfigShowCompareAtTree(cfgSec, "limited", plain, tree); err == nil {
@@ -191,28 +191,28 @@ func TestGroupsReadWhole15994(t *testing.T) {
 		t.Error("unscoped rollback with denied group body ALLOWED (#15994)")
 	}
 	// Scoped controls stay admitted.
-	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", parseHierText(t,
-		"groups { H { system { host-name ok15994; } } } system { host-name top15994; }")); err != nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", []*ConfigTree{parseHierText(t,
+		"groups { H { system { host-name ok15994; } } } system { host-name top15994; }")}); err != nil {
 		t.Errorf("allowed-only groups whole refused: %v", err)
 	}
 
 	// deny-configuration ^groups: authored definition refuses whole
 	// even though the effective body is allowed (fold 3).
 	cfgGroups := cfgOp15994(t, "", "^groups", "", "")
-	if err := AuthorizeConfigShowWholeAtTree(cfgGroups, "limited", "", tree); err == nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgGroups, "limited", "", []*ConfigTree{tree}); err == nil {
 		t.Error("whole tree with denied group definition ALLOWED (#15994 fold 3)")
 	}
 
 	// Op-only denies are NEVER substituted away (fold B1).
 	cfgSet := cfgOp15994(t, "", "", "", "display set")
-	if err := AuthorizeConfigShowWholeAtTree(cfgSet, "limited", "display set", tree); err == nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgSet, "limited", "display set", []*ConfigTree{tree}); err == nil {
 		t.Error("whole display set escaped op-only deny (#15994 fold B1)")
 	}
-	if err := AuthorizeConfigShowWholeAtTree(cfgSet, "limited", "display set", plain); err == nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgSet, "limited", "display set", []*ConfigTree{plain}); err == nil {
 		t.Error("groupless whole display set escaped op-only deny")
 	}
 	cfgBare := cfgOp15994(t, "", "", "", "^show configuration$")
-	if err := AuthorizeConfigShowWholeAtTree(cfgBare, "limited", "", tree); err == nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgBare, "limited", "", []*ConfigTree{tree}); err == nil {
 		t.Error("whole bare denied command escaped (#15994 fold B1)")
 	}
 	if err := AuthorizeConfigShowCompareAtTree(cfgBare, "limited", plain, tree); err == nil {
@@ -223,13 +223,13 @@ func TestGroupsReadWhole15994(t *testing.T) {
 	}
 	// But the same op-only class with no matching deny admits.
 	cfgOpen := cfgOp15994(t, "", "", "", "^show something-else$")
-	if err := AuthorizeConfigShowWholeAtTree(cfgOpen, "limited", "", tree); err != nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgOpen, "limited", "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("whole tree refused for unrelated op deny: %v", err)
 	}
 	// Fold3: path-scoped op deny on CONTENT supplied only as a group
 	// body refuses every whole render; groupless tree unaffected.
 	cfgScoped := cfgOp15994(t, "", "", "", "^show configuration security")
-	if err := AuthorizeConfigShowWholeAtTree(cfgScoped, "limited", "", tree); err == nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgScoped, "limited", "", []*ConfigTree{tree}); err == nil {
 		t.Error("whole tree with group-supplied security ALLOWED despite ^show configuration security (#15994 fold3)")
 	}
 	if err := AuthorizeConfigShowCompareAtTree(cfgScoped, "limited", plain, tree); err == nil {
@@ -238,7 +238,7 @@ func TestGroupsReadWhole15994(t *testing.T) {
 	if err := AuthorizeConfigShowRollbackAtTree(cfgScoped, "limited", tree, ""); err == nil {
 		t.Error("unscoped rollback with group-supplied security ALLOWED (#15994 fold3)")
 	}
-	if err := AuthorizeConfigShowWholeAtTree(cfgScoped, "limited", "", plain); err != nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgScoped, "limited", "", []*ConfigTree{plain}); err != nil {
 		t.Errorf("groupless whole refused for scoped op deny: %v", err)
 	}
 }
@@ -249,24 +249,24 @@ func TestGroupsReadUnrestricted15994(t *testing.T) {
 	// closed (fold M1).
 	open := cfgOp15994(t, "", "", "", "")
 	groupless := parseHierText(t, "system { host-name plain-15994; }")
-	if err := AuthorizeConfigShowPathRendered(open, "limited", []string{"groups"}, "", groupless); err != nil {
+	if err := AuthorizeConfigShowPathRendered(open, "limited", []string{"groups"}, "", []*ConfigTree{groupless}); err != nil {
 		t.Errorf("unrestricted [groups] on groupless tree refused (fold M1): %v", err)
 	}
-	if err := AuthorizeConfigShowPathRendered(open, "limited", []string{"groups", "MISSING"}, "", groupless); err != nil {
+	if err := AuthorizeConfigShowPathRendered(open, "limited", []string{"groups", "MISSING"}, "", []*ConfigTree{groupless}); err != nil {
 		t.Errorf("unrestricted [groups MISSING] refused (fold M1): %v", err)
 	}
-	if err := AuthorizeConfigShowPathRendered(open, "limited", []string{"groups", "G", "security"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(open, "limited", []string{"groups", "G", "security"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("unrestricted groups read refused: %v", err)
 	}
-	if err := AuthorizeConfigShowPathRendered(open, "", []string{"groups"}, "", groupless); err != nil {
+	if err := AuthorizeConfigShowPathRendered(open, "", []string{"groups"}, "", []*ConfigTree{groupless}); err != nil {
 		t.Errorf("empty class refused: %v", err)
 	}
 	// Restricted class on an unresolvable scope DOES fail closed.
 	restricted := cfgOp15994(t, "", "^security", "", "")
-	if err := AuthorizeConfigShowPathRendered(restricted, "limited", []string{"groups", "MISSING"}, "", groupless); err == nil {
+	if err := AuthorizeConfigShowPathRendered(restricted, "limited", []string{"groups", "MISSING"}, "", []*ConfigTree{groupless}); err == nil {
 		t.Error("restricted [groups MISSING] admitted (must fail closed)")
 	}
-	if err := AuthorizeConfigShowPathRendered(restricted, "limited", []string{"groups"}, "", groupless); err == nil {
+	if err := AuthorizeConfigShowPathRendered(restricted, "limited", []string{"groups"}, "", []*ConfigTree{groupless}); err == nil {
 		t.Error("restricted [groups] on groupless tree admitted (must fail closed)")
 	}
 }
@@ -276,24 +276,24 @@ func TestGroupsReadUnrestricted15994(t *testing.T) {
 func TestGroupsExpandedInheritance15994(t *testing.T) {
 	inner := parseHierText(t, "groups { H { security { zones { security-zone trust { description NESTED-15994; } } } } G { apply-groups H; } } apply-groups G;")
 	sec := cfgOp15994(t, "", "^security", "", "")
-	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups", "G", "security"}, "display inheritance", -1, inner); err == nil {
+	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups", "G", "security"}, "display inheritance", -1, []*ConfigTree{inner}); err == nil {
 		t.Fatal("nested expanded denied path ALLOWED (fold2-4)")
 	}
-	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups"}, "display inheritance", -1, inner); err == nil {
+	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups"}, "display inheritance", -1, []*ConfigTree{inner}); err == nil {
 		t.Fatal("nested expanded ancestor ALLOWED (fold2-4)")
 	}
 	op := cfgOp15994(t, "", "", "", "^show configuration security")
-	if err := AuthorizeExpandedConfigShowPathRendered(op, "limited", []string{"groups", "G", "security"}, "display inheritance", -1, inner); err == nil {
+	if err := AuthorizeExpandedConfigShowPathRendered(op, "limited", []string{"groups", "G", "security"}, "display inheritance", -1, []*ConfigTree{inner}); err == nil {
 		t.Fatal("op nested expanded denied ALLOWED (fold2-4)")
 	}
-	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"security"}, "display inheritance", -1, inner); err == nil {
+	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"security"}, "display inheritance", -1, []*ConfigTree{inner}); err == nil {
 		t.Fatal("expanded effective security ALLOWED")
 	}
 	allowed := parseHierText(t, "groups { G { system { host-name ok15994; } } } apply-groups G;")
-	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups"}, "display inheritance", -1, allowed); err != nil {
+	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups"}, "display inheritance", -1, []*ConfigTree{allowed}); err != nil {
 		t.Fatalf("allowed expanded groups refused: %v", err)
 	}
-	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups", "G", "system"}, "display inheritance", -1, allowed); err != nil {
+	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups", "G", "system"}, "display inheritance", -1, []*ConfigTree{allowed}); err != nil {
 		t.Fatalf("allowed expanded path refused: %v", err)
 	}
 }
@@ -306,7 +306,7 @@ func TestGroupsExpandedInheritance15994(t *testing.T) {
 func TestGroupsReadNodeVarWhole16428(t *testing.T) {
 	allowed := parseHierText(t, `groups { node0 { system { host-name fw0; } } node1 { system { host-name fw1; } } } apply-groups "${node}"; system { host-name top16428; }`)
 	cfgSec := cfgOp15994(t, "", "^security", "", "")
-	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", allowed); err != nil {
+	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", []*ConfigTree{allowed}); err != nil {
 		t.Fatalf("whole read of allowed ${node} cluster refused: %v (#16428)", err)
 	}
 	for name, text := range map[string]string{
@@ -318,7 +318,7 @@ func TestGroupsReadNodeVarWhole16428(t *testing.T) {
 			if err := authorizeConfigReadExpanded15994(cfgSec, "limited", tree); err == nil {
 				t.Fatal("denied leaf via node group admitted on read (#16428)")
 			}
-			if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", tree); err == nil {
+			if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", []*ConfigTree{tree}); err == nil {
 				t.Fatal("whole read with denied node-group leaf ALLOWED (#16428)")
 			}
 		})

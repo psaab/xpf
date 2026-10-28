@@ -404,7 +404,7 @@ fn drive_packets(
         &worker_ctx,
         &mut telemetry,
     );
-    drop(telemetry);
+    // `telemetry`'s borrows end here (no Drop impl beyond its references).
     assert_eq!(
         batch.validated_packets, 1,
         "the descriptor must pass validation before filter revalidation"

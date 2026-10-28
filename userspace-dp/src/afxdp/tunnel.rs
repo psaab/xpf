@@ -218,7 +218,7 @@ pub(super) fn endpoint_attachment_valid(
     let Some(endpoint) = forwarding.tunnel_endpoints.get(&tunnel_endpoint_id) else {
         return false;
     };
-    if endpoint.mode != "gre" && endpoint.mode != "ip6gre" {
+    if endpoint.kind != TunnelKind::Gre {
         return false;
     }
     endpoint.logical_ifindex == spawned_logical_ifindex
@@ -230,7 +230,7 @@ pub(super) fn endpoint_attachment_valid(
 
 // Spawn plumbing: the shared state this thread reads is threaded in by
 // value/Arc at spawn (#1881). #2412 added the `wake` eventfd (16→17).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn local_tunnel_source_loop(
     tunnel_name: String,
     tunnel_endpoint_id: u16,

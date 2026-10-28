@@ -274,36 +274,25 @@ func compileDDNSProvider(name string, nodes ...*Node) *DDNSProvider {
 	}
 
 	p := &DDNSProvider{
-		Name:                 name,
-		Backend:              props["backend"],
-		UpdateServer:         props["update-server"],
-		ForwardZone:          props["forward-zone"],
-		ReverseZone:          props["reverse-zone"],
-		TSIGKeyName:          props["tsig-key"],
-		TSIGAlgorithm:        props["tsig-algorithm"],
-		TSIGSecret:           NewSecret(props["tsig-secret"]),
-		RequireTSIG:          props["require-tsig"] == "true",
-		SourceAddress:        props["source-address"],
-		DestinationInterface: props["destination-interface"],
-		RoutingInstance:      props["routing-instance"],
-		Server:               props["server"],
-		Username:             props["username"],
-		Password:             NewSecret(props["password"]),
-		URLTemplate:          props["url-template"],
-		OKResponse:           props["ok-response"],
-		APIToken:             NewSecret(props["api-token"]),
-		Zone:                 props["zone"],
-		AWSAccessKeyID:       props["aws-access-key"],
-		AWSSecretAccessKey:   NewSecret(props["aws-secret-key"]),
-		AWSRegion:            props["aws-region"],
-		HostedZoneID:         props["hosted-zone-id"],
-		CheckIPURL:           props["checkip-url"],
-		CheckIPAllowlist:     props["checkip-allowlist"],
-		InstallID:            props["install-id"],
+		Name:               name,
+		Backend:            props["backend"],
+		RFC2136Endpoint:    compileRFC2136Endpoint(props),
+		Server:             props["server"],
+		Username:           props["username"],
+		Password:           NewSecret(props["password"]),
+		URLTemplate:        props["url-template"],
+		OKResponse:         props["ok-response"],
+		APIToken:           NewSecret(props["api-token"]),
+		Zone:               props["zone"],
+		AWSAccessKeyID:     props["aws-access-key"],
+		AWSSecretAccessKey: NewSecret(props["aws-secret-key"]),
+		AWSRegion:          props["aws-region"],
+		HostedZoneID:       props["hosted-zone-id"],
+		CheckIPURL:         props["checkip-url"],
+		CheckIPAllowlist:   props["checkip-allowlist"],
+		InstallID:          props["install-id"],
 	}
-	if p.Backend == "" && p.UpdateServer == "" && p.ForwardZone == "" && p.ReverseZone == "" && p.TSIGKeyName == "" &&
-		p.TSIGAlgorithm == "" && p.TSIGSecret.Reveal() == "" && !p.RequireTSIG && p.SourceAddress == "" &&
-		p.DestinationInterface == "" && p.RoutingInstance == "" &&
+	if p.Backend == "" && p.RFC2136Endpoint.IsZero() &&
 		p.Server == "" && p.Username == "" && p.Password.Reveal() == "" &&
 		p.URLTemplate == "" && p.OKResponse == "" && p.APIToken.Reveal() == "" &&
 		p.Zone == "" && p.AWSAccessKeyID == "" && p.AWSSecretAccessKey.Reveal() == "" &&

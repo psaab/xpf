@@ -18,7 +18,7 @@ use super::*;
 ///
 /// The borrowed `&str` fields live for the `forwarding` borrow; `""` = no
 /// scope constraint (unscoped rule, matches every ingress).
-pub(super) struct PreroutingIngressScope<'a> {
+pub(in crate::afxdp) struct PreroutingIngressScope<'a> {
     /// The logical unit ingress ifindex (VLAN sub-interface), or the physical
     /// bind ifindex for an untagged port. Threaded into the later zone-pair
     /// policy so the pre-routing NAT scope and the zone policy share ONE
@@ -61,7 +61,7 @@ pub(super) struct PreroutingIngressScope<'a> {
 /// exactly as the pre-#5802 code did; only the physical→logical ifindex used
 /// for the local-unit fallback lookups changes.
 #[inline]
-pub(super) fn prerouting_ingress_scope(
+pub(in crate::afxdp) fn prerouting_ingress_scope(
     forwarding: &ForwardingState,
     physical_ifindex: i32,
     ingress_vlan_id: u16,
@@ -88,7 +88,7 @@ pub(super) fn prerouting_ingress_scope(
 /// here: granting it before owner proof would violate the #15916
 /// withholding contract.
 #[inline]
-pub(super) fn prerouting_ingress_scope_ambiguous(
+pub(in crate::afxdp) fn prerouting_ingress_scope_ambiguous(
     forwarding: &ForwardingState,
     physical_ifindex: i32,
     ingress_vlan_id: u16,

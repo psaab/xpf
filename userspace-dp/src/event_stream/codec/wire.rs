@@ -29,11 +29,8 @@ pub(crate) const MSG_KEEPALIVE: u8 = 10;
 
 // #1379 codec-only security event foundation. Producer wiring must add
 // fixed-size non-blocking emission, rate limiting, and loss accounting.
-#[allow(dead_code)]
 pub(crate) const MSG_POLICY_DENY: u8 = 11;
-#[allow(dead_code)]
 pub(crate) const MSG_SCREEN_DROP: u8 = 12;
-#[allow(dead_code)]
 pub(crate) const MSG_FILTER_LOG: u8 = 13;
 
 // #2460: RT_FLOW SESSION_CLOSE on the raw dataplane-event channel. This
@@ -90,7 +87,6 @@ pub(crate) const MSG_SESSION_CREATE_RT_FLOW: u8 = 15;
 // #16775: FILTER_LOG frames stamp the filter-snapshot generation at
 // [144:152] under the same GEN1 marker at [140:144]; rule/term stay at
 // [56:64]. Legacy 144-byte frames carry no stamp.
-#[allow(dead_code)]
 pub(crate) const SECURITY_EVENT_PAYLOAD_SIZE: usize = 160;
 pub(crate) const SESSION_POLICY_GENERATION_OFFSET: usize = 160;
 pub(crate) const SESSION_RT_FLOW_PAYLOAD_SIZE: usize = 168;
@@ -131,11 +127,11 @@ pub(crate) const RT_FLOW_CLOSE_REASON_POLICY_DELETE: u8 = 8;
 // DENY/PERMIT are wire-format documentation pinned by codec_tests;
 // like REJECT below they have no non-test reader (#1826: exposed when
 // the stale module-level allow was removed).
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(super) const RT_FLOW_ACTION_DENY: u8 = 0;
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(super) const RT_FLOW_ACTION_PERMIT: u8 = 1;
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(super) const RT_FLOW_ACTION_REJECT: u8 = 2;
 
 /// Disposition encoding for the wire format.
@@ -217,7 +213,6 @@ pub(super) fn write_ip_opt(buf: &mut [u8], pos: usize, ip: Option<IpAddr>, is_v6
     }
 }
 
-#[allow(dead_code)]
 pub(super) fn write_ip_16(buf: &mut [u8], pos: usize, ip: IpAddr) -> usize {
     match ip {
         IpAddr::V4(v4) => buf[pos..pos + 4].copy_from_slice(&v4.octets()),
@@ -226,7 +221,6 @@ pub(super) fn write_ip_16(buf: &mut [u8], pos: usize, ip: IpAddr) -> usize {
     pos + 16
 }
 
-#[allow(dead_code)]
 pub(super) fn write_ip_opt_16(buf: &mut [u8], pos: usize, ip: Option<IpAddr>) -> usize {
     if let Some(addr) = ip {
         write_ip_16(buf, pos, addr)
@@ -235,7 +229,6 @@ pub(super) fn write_ip_opt_16(buf: &mut [u8], pos: usize, ip: Option<IpAddr>) ->
     }
 }
 
-#[allow(dead_code)]
 pub(super) fn rt_flow_addr_family(addr_family: u8, src_ip: IpAddr) -> u8 {
     if addr_family == libc::AF_INET6 as u8 || matches!(src_ip, IpAddr::V6(_)) {
         RT_FLOW_AF_INET6

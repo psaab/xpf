@@ -18,9 +18,8 @@ import (
 // rule-set read as match-any (and, remotely, as unscoped on every axis).
 // This single renderer prints the full admission set: zone union,
 // routing-instance union, source-address union and source-address-name
-// union, each falling back to its singular back-compat field when the
-// plural list is empty (compileNAT64 stamps the plural, but a
-// hand-built or pre-union config may carry only the singular).
+// union (compileNAT64 stamps the plural, but a hand-built or pre-union
+// config may carry only the singular).
 //
 // runtime carries the applied snapshot's NAT64 runtime disarm verdicts
 // (#16547), keyed by rule-set name; nil reproduces the config-only
@@ -44,24 +43,21 @@ func RenderNAT64(w io.Writer, cfg *config.Config, runtime RuntimeVerdicts) {
 		// #15932/#16049: one block per authored rule-set; render its
 		// zone / routing-instance unions so operators see the full
 		// admission set. #16681 adds the source unions beside them.
-		zones := rs.FromZones
-		if len(zones) == 0 && rs.FromZone != "" {
-			zones = []string{rs.FromZone}
-		}
+		// #17139: zones and routing-instances render the effective
+		// union (singular ∪ plural, deduped) via the single-sourced
+		// config normalisers, so a divergent singular is never hidden.
+		zones := config.NAT64EffectiveZones(rs)
 		if len(zones) > 0 {
 			fmt.Fprintf(w, "  From zones:   %s\n", strings.Join(zones, ", "))
 		}
-		ris := rs.FromRoutingInstances
-		if len(ris) == 0 && rs.FromRoutingInstance != "" {
-			ris = []string{rs.FromRoutingInstance}
-		}
+		ris := config.NAT64EffectiveRoutingInstances(cfg, rs)
 		// #16604: a lowered explicit-master member ("") renders as the
 		// authored `default`, never as a blank list entry. Copy before
 		// rewriting so the caller's slice is never mutated.
 		if len(ris) > 0 {
 			ris = append([]string(nil), ris...)
 			for i, ri := range ris {
-				if ri == "" {
+				if ri == "" || config.IsNATDefaultRoutingInstanceWire(ri) {
 					ris[i] = "default"
 				}
 			}

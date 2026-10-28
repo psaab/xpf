@@ -677,9 +677,6 @@ pub struct SlowPathReinjector {
     /// 9506 completion/epoch state. This mutex is independent of the
     /// snapshot-wide ServerState lock and is safe for socket + worker threads.
     reinject_core: Arc<ReinjectCore>,
-    /// V1 production submits enter the deny-only Rust transport; the
-    /// no-worker test constructor keeps the legacy queue-only harness.
-    ipsec_inner_v1_enabled: bool,
     /// D11 per-worker slab transport shared by the submit socket and workers.
     ipsec_inner_transport: Arc<IpsecInnerWorkerTransport>,
     tx: SyncSender<PacketRequest>,
@@ -767,43 +764,32 @@ fn ipsec_inner_descriptor(
         Some(6) => (libc::AF_INET6 as u8, 0x86dd),
         _ => (0, 0),
     };
-    let (rel_l4_offset, protocol, payload_offset) =
-        if inner_family == 0 {
-            (0, 0, 0)
-        } else if let Some((offset, protocol)) =
-            crate::afxdp::packet_rel_l4_offset_and_protocol_for_ipsec(bytes, inner_family)
-        {
-            // #15787: the fragment-no-L4 sentinel (255) falls to the
-            // catch-all arm: payload offset == L4 offset (the first
-            // payload byte), no L4 header is read. Non-first inner
-            // fragments are admitted to the deny-only adjudicator
-            // instead of being stamped (0,0,0) and dropped.
-            let payload = match protocol {
-                6 => offset
-                    .checked_add(12)
-                    .and_then(|field| bytes.get(field))
-                    .map(|byte| usize::from(byte >> 4) * 4)
-                    .filter(|header_len| *header_len >= 20)
-                    .and_then(|header_len| offset.checked_add(header_len))
-                    .filter(|end| *end <= bytes.len()),
-                17 if bytes.len() >= offset.saturating_add(8) => {
-                    Some(offset.saturating_add(8))
-                }
-                6 => None,
-                _ => Some(offset),
-            };
-            if let Some(payload) = payload {
-                (
-                    u16::try_from(offset).unwrap_or(u16::MAX),
-                    protocol,
-                    u16::try_from(payload).unwrap_or(u16::MAX),
-                )
-            } else {
-                (0, 0, 0)
+    // #17164: the shared tunnel-inner parser (GRE/WG/IPsec) is the
+    // single source for (protocol, rel_l4_offset, payload_offset). The
+    // former private copy over `packet_rel_l4_offset_and_protocol`
+    // diverged: short UDP was admitted with payload == L4 instead of
+    // failing closed (the shared parser returns None, mapped to
+    // (0,0,0) here), ICMP got payload == L4 instead of L4+8, and the
+    // TCP arm carried a rustc-flagged unreachable `6 => None`. The
+    // shared parser already resolves the #15787 fragment-no-L4
+    // sentinel (255, payload == L4) and walks HbH/AH chains, so
+    // non-first fragments and extension-headed inners keep their
+    // admitted verdicts; AH identity needs no exception here because
+    // it is resolved downstream (`flowless_effective_protocol`,
+    // ipsec_inner.rs). Unlike the GRE/WG decap paths this descriptor
+    // path does not trim to the IP-declared length first: the slab
+    // holds exactly the decrypted inner datagram and the descriptor's
+    // `len` is its byte length.
+    let (rel_l4_offset, protocol, payload_offset) = if inner_family == 0 {
+        (0, 0, 0)
+    } else {
+        match crate::afxdp::frame::parse_inner_protocol_and_offsets(bytes, inner_family) {
+            Some((protocol, rel_l4_offset, payload_offset)) => {
+                (rel_l4_offset, protocol, payload_offset)
             }
-        } else {
-            (0, 0, 0)
-        };
+            None => (0, 0, 0),
+        }
+    };
     let mut stn = [0u8; IPSEC_INNER_STN_MAX];
     let stn_len = frame.origin.stn.len().min(IPSEC_INNER_STN_MAX);
     stn[..stn_len].copy_from_slice(&frame.origin.stn.as_bytes()[..stn_len]);
@@ -951,7 +937,6 @@ impl SlowPathReinjector {
 
         Ok(Self {
             reinject_core,
-            ipsec_inner_v1_enabled: true,
             ipsec_inner_transport: Arc::new(IpsecInnerWorkerTransport::new([])),
             tx,
             tx_delegated,
@@ -1020,7 +1005,6 @@ impl SlowPathReinjector {
         status_delegated.init_state.store(OutletInit::Live as u8, Ordering::Relaxed);
         Self {
             reinject_core,
-            ipsec_inner_v1_enabled: false,
             ipsec_inner_transport: Arc::new(IpsecInnerWorkerTransport::new([])),
             tx,
             tx_delegated,
@@ -1053,7 +1037,7 @@ impl SlowPathReinjector {
     /// `mtu()` is retained as the reinjector's "installed MTU" accessor (updated
     /// by `reconcile_mtu`) and is exercised by the #5801/#6097 tests, so it is
     /// no longer read on the production path; keep it compiled without warning.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn mtu(&self) -> i32 {
         self.mtu.load(Ordering::Relaxed) as i32
     }
@@ -1296,7 +1280,7 @@ impl SlowPathReinjector {
         self.enqueue_request(tx, status, bytes, queue, None, 0, 0, true)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn enqueue_request(
         &self,
         tx: &SyncSender<PacketRequest>,
@@ -1418,8 +1402,7 @@ impl SlowPathReinjector {
         }
     }
     /// Admit one leased adjudicated frame. V1 submits enter the Rust
-    /// IPsec-inner transport and never create a TUN `PacketRequest`; the
-    /// legacy constructor/test harness retains the queue-backed path below.
+    /// IPsec-inner transport and never create a TUN `PacketRequest`.
     /// Validate-only socket path never allocates a `PacketRequest` or touches
     /// the worker channel/TUN.
     pub(crate) fn validate_dry_run_frame(&self, frame: SubmitFrame) -> AdmitDecision {
@@ -1454,9 +1437,25 @@ impl SlowPathReinjector {
         self.reinject_core.note_dry_run(decision.admitted);
         decision
     }
+    /// #17169 B3: single source of truth for the IPsec-inner transport
+    /// refusal -> ADMIT wire-reason map, shared by the non-pooled and
+    /// pooled V1 submit paths so the production pooled path cannot
+    /// drift from the hermetically tested non-pooled map.
+    fn ipsec_inner_admit_reason(reason: u8) -> u8 {
+        match reason {
+            ipsec_reason::STALE_GENERATION => ADMIT_STALE,
+            ipsec_reason::EVALUATOR_UNAVAILABLE => ADMIT_SHUTDOWN,
+            // #15151: BUSY (61) is Rust-internal, never on the wire;
+            // map it to the same fail-closed ADMIT_FULL drop as FULL.
+            ipsec_reason::WORKER_QUEUE_FULL
+            | ipsec_reason::WORKER_QUEUE_BUSY
+            | ipsec_reason::SLAB_EXHAUSTED => ADMIT_FULL,
+            _ => ADMIT_BAD_LEASE,
+        }
+    }
+
     /// D11/V1 admission: copy the Go-owned submit bytes into a bounded slab
-    /// and hand the descriptor to the Rust worker transport. This branch is
-    /// deliberately before the legacy TUN MTU/limiter path: V1 never enters
+    /// and hand the descriptor to the Rust worker transport. V1 never enters
     /// q0 and never asks Rust to permit a frame.
     fn submit_ipsec_inner_v1(
         &self,
@@ -1507,17 +1506,11 @@ impl SlowPathReinjector {
             connection_id,
         );
         if let Err(reason) = self.ipsec_inner_transport.admit_descriptor(descriptor) {
-            // #15151: BUSY (61) is Rust-internal, never on the wire;
-            // map it to the same fail-closed ADMIT_FULL drop as FULL.
-            let admit_reason = match reason {
-                ipsec_reason::STALE_GENERATION => ADMIT_STALE,
-                ipsec_reason::EVALUATOR_UNAVAILABLE => ADMIT_SHUTDOWN,
-                ipsec_reason::WORKER_QUEUE_FULL
-                | ipsec_reason::WORKER_QUEUE_BUSY
-                | ipsec_reason::SLAB_EXHAUSTED => ADMIT_FULL,
-                _ => ADMIT_BAD_LEASE,
-            };
-            refuse(&mut decision, admit_reason, "ipsec-inner transport refused");
+            refuse(
+                &mut decision,
+                Self::ipsec_inner_admit_reason(reason),
+                "ipsec-inner transport refused",
+            );
         }
         decision
     }
@@ -1537,131 +1530,76 @@ impl SlowPathReinjector {
                 .record_class_refused(AdmissionClass::Adjudicated);
             return self.reinject_core.refuse_non_dry_run(&frame);
         }
-        if self.ipsec_inner_v1_enabled {
-            return self.submit_ipsec_inner_v1(frame, connection_id);
-        }
-        let packet_len = frame.bytes.len() as u64;
-        let live_mtu = self.status_delegated.live_mtu.load(Ordering::Relaxed);
-        if live_mtu > 0 && packet_len > live_mtu as u64 {
-            self.status_delegated
-                .mtu_dropped_packets
-                .fetch_add(1, Ordering::Relaxed);
-            self.status_delegated
-                .dropped_packets
-                .fetch_add(1, Ordering::Relaxed);
-            self.status_delegated
-                .dropped_bytes
-                .fetch_add(packet_len, Ordering::Relaxed);
+        self.submit_ipsec_inner_v1(frame, connection_id)
+    }
+
+    /// Pooled V1 submit: the socket decoder has already copied the packet
+    /// bytes into `pooled.slab_id`, so this path must not copy them again
+    /// into a second slab. On core refusal the slab is released here; on
+    /// transport refusal `admit_descriptor` has already released it; on
+    /// success the descriptor (and slab) is owned by the worker transport.
+    pub(crate) fn submit_ipsec_inner_v1_pooled(
+        &self,
+        pooled: crate::slowpath_reinject_9506::PooledSubmitFrame,
+        connection_id: u64,
+    ) -> AdmitDecision {
+        let pool = self.ipsec_inner_transport.pool().clone();
+        let bytes = pool
+            .buffer(pooled.slab_id)
+            .map(|slab| slab[..pooled.bytes_len as usize].to_vec())
+            .unwrap_or_default();
+        let frame = SubmitFrame {
+            lease: pooled.lease,
+            flow_tag: pooled.flow_tag,
+            flags: pooled.flags,
+            origin: pooled.origin.clone(),
+            bytes,
+            snapshot_generation: pooled.snapshot_generation,
+            config_generation: pooled.config_generation,
+            fib_generation: pooled.fib_generation,
+            zone_id: pooled.zone_id,
+            if_id: pooled.if_id,
+            pmech_inventory_generation: pooled.pmech_inventory_generation,
+            pmech_inventory_fib_generation: pooled.pmech_inventory_fib_generation,
+            pmech_policy_identity: pooled.pmech_policy_identity,
+            deadline_mono_ns: pooled.deadline_mono_ns,
+            deadline_clock_id: pooled.deadline_clock_id,
+        };
+        if frame.flags & SUBMIT_FLAG_DRY_RUN != 0 {
+            pool.force_release(pooled.slab_id);
             self.reinject_core
                 .record_class_refused(AdmissionClass::Adjudicated);
-            return AdmitDecision {
-                request_id: frame.lease.request_id,
-                permit_epoch: frame.lease.permit_epoch,
-                queue_epoch: frame.lease.queue_epoch,
-                queue_number: frame.lease.queue_number,
-                family: frame.origin.family,
-                hook: frame.origin.hook,
-                owned_ifindex: frame.origin.owned_ifindex,
-                admitted: false,
-                reason: ADMIT_BAD_LEASE,
-            };
+            return self.reinject_core.refuse_non_dry_run(&frame);
         }
-
         let mut decision = self.reinject_core.admit_with_class_owner(
             &frame,
             Some(AdmissionClass::Adjudicated),
             connection_id,
-            false,
+            true,
         );
         if !decision.admitted {
+            pool.force_release(pooled.slab_id);
             return decision;
         }
-        let adjudicated_limiter =
-            &self.limiters[rate_limiter_index(PacketQueue::Adjudicated)];
-        let allowed = match adjudicated_limiter.lock() {
-            Ok(mut limiter) => limiter.allow(frame.bytes.len()),
-            Err(_) => false,
-        };
-        if !allowed {
-            self.reinject_core
-                .refuse_queued_for(connection_id, &frame.lease, "rate limited".to_string());
+        let descriptor = ipsec_inner_descriptor(
+            &frame,
+            pooled.slab_id,
+            self.ipsec_inner_transport.authority().generation(),
+            connection_id,
+        );
+        if let Err(reason) = self.ipsec_inner_transport.admit_descriptor(descriptor) {
+            let admit_reason = Self::ipsec_inner_admit_reason(reason);
+            let _ = self.reinject_core.refuse_queued_for(
+                connection_id,
+                &frame.lease,
+                "ipsec-inner transport refused".to_string(),
+            );
             self.reinject_core
                 .record_class_refused(AdmissionClass::Adjudicated);
-            self.status_delegated
-                .rate_limited_packets
-                .fetch_add(1, Ordering::Relaxed);
-            self.status_delegated
-                .dropped_packets
-                .fetch_add(1, Ordering::Relaxed);
-            self.status_delegated
-                .dropped_bytes
-                .fetch_add(packet_len, Ordering::Relaxed);
             decision.admitted = false;
-            decision.reason = ADMIT_BAD_LEASE;
-            return decision;
+            decision.reason = admit_reason;
         }
-
-        self.status_delegated
-            .queued_packets
-            .fetch_add(1, Ordering::Relaxed);
-        let request = PacketRequest {
-            bytes: frame.bytes,
-            queue: PacketQueue::Adjudicated,
-            lease: Some(frame.lease),
-            flow_tag: frame.flow_tag,
-            connection_id,
-        };
-        match self.tx_delegated.try_send(request) {
-            Ok(()) => decision,
-            Err(TrySendError::Full(req)) => {
-                if let Ok(mut limiter) = adjudicated_limiter.lock() {
-                    limiter.refund(req.bytes.len());
-                }
-                self.status_delegated
-                    .queued_packets
-                    .fetch_sub(1, Ordering::Relaxed);
-                self.status_delegated
-                    .queue_full_packets
-                    .fetch_add(1, Ordering::Relaxed);
-                self.status_delegated
-                    .dropped_packets
-                    .fetch_add(1, Ordering::Relaxed);
-                self.status_delegated
-                    .dropped_bytes
-                    .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
-                self.reinject_core
-                    .refuse_queued_for(connection_id, &frame.lease, "queue full".to_string());
-                self.reinject_core
-                    .record_class_refused(AdmissionClass::Adjudicated);
-                decision.admitted = false;
-                decision.reason = ADMIT_BAD_LEASE;
-                decision
-            }
-            Err(TrySendError::Disconnected(req)) => {
-                if let Ok(mut limiter) = adjudicated_limiter.lock() {
-                    limiter.refund(req.bytes.len());
-                }
-                self.status_delegated
-                    .queued_packets
-                    .fetch_sub(1, Ordering::Relaxed);
-                self.status_delegated
-                    .dropped_packets
-                    .fetch_add(1, Ordering::Relaxed);
-                self.status_delegated
-                    .dropped_bytes
-                    .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
-                self.reinject_core.refuse_queued_for(
-                    connection_id,
-                    &frame.lease,
-                    "worker stopped".to_string(),
-                );
-                self.reinject_core
-                    .record_class_refused(AdmissionClass::Adjudicated);
-                decision.admitted = false;
-                decision.reason = ADMIT_BAD_LEASE;
-                decision
-            }
-        }
+        decision
     }
 
     #[cfg(test)]

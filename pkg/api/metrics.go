@@ -727,6 +727,7 @@ type xpfCollector struct {
 	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc
 	userspaceSessionDeleteDroppedReleased     *prometheus.Desc
 	userspaceTunnelPurgeReservationsReleased  *prometheus.Desc
+	userspaceTunnelPurgeDeleteRefused         *prometheus.Desc
 	userspaceSyncedReverseRederived           *prometheus.Desc
 	userspacePeerDeleteRefusedLocalOwned      *prometheus.Desc
 	userspaceS5Reinject                       *prometheus.Desc
@@ -751,6 +752,7 @@ type xpfCollector struct {
 	userspaceWorkerCommandQueueShed      *prometheus.Desc
 	userspaceServerStatePoisonRecoveries *prometheus.Desc
 	userspaceServerHandlerPanics         *prometheus.Desc
+	userspaceReinjectHandlerPanics        *prometheus.Desc
 	// #10695 (#9506): IPsec-inner admission, parse, and D11 queue counters.
 	userspaceZoneGateUnzoned                 *prometheus.Desc
 	userspaceZoneGateAmbiguous               *prometheus.Desc
@@ -758,6 +760,7 @@ type xpfCollector struct {
 	userspaceZoneGateNoGeneration            *prometheus.Desc
 	userspaceIpsecInnerParseDrops            *prometheus.Desc
 	userspaceIpsecInnerEcnIllegalDrops       *prometheus.Desc
+	userspaceIpsecInnerNoroute               *prometheus.Desc
 	userspaceIpsecInnerWorkerQueueFull       *prometheus.Desc
 	userspaceIpsecInnerVerdictQueueFull      *prometheus.Desc
 	userspaceIpsecInnerVerdictQueueContended *prometheus.Desc

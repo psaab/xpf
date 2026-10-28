@@ -57,7 +57,10 @@ func TestDDNSUnsignedNonLoopbackMetrics15992(t *testing.T) {
 		filepath.Join(dir, "state.json"), filepath.Join(dir, "l4.csv"), filepath.Join(dir, "l6.csv"),
 		"node0", nowFn, nil)
 	unsignedCfg := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", TTLSeconds: 300, UpdateServer: "192.0.2.53",
+		Enabled: true, Domain: "example.com", TTLSeconds: 300,
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53",
+		},
 	}}
 	if err := mgr.Reconcile(context.Background(), unsignedCfg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -70,7 +73,7 @@ func TestDDNSUnsignedNonLoopbackMetrics15992(t *testing.T) {
 
 	// Surface A: reconcile a real manager with an unsigned provider catalog.
 	sa := newSurfaceAManager15992(t, dir)
-	catalog := map[string]*config.DDNSProvider{"p1": {Backend: "rfc2136", UpdateServer: "192.0.2.53"}}
+	catalog := map[string]*config.DDNSProvider{"p1": {Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53"}}}
 	observe := func(context.Context, ddns.SurfaceAScope) (ddns.AddressObservation, bool) {
 		return ddns.AddressObservation{}, false
 	}
@@ -85,7 +88,10 @@ func TestDDNSUnsignedNonLoopbackMetrics15992(t *testing.T) {
 
 	// Control: clearing the posture emits 0, not a missing series.
 	loopbackCfg := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com", TTLSeconds: 300, UpdateServer: "127.0.0.1",
+		Enabled: true, Domain: "example.com", TTLSeconds: 300,
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "127.0.0.1",
+		},
 	}}
 	if err := mgr.Reconcile(context.Background(), loopbackCfg); err != nil {
 		t.Fatalf("reconcile loopback: %v", err)

@@ -864,7 +864,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
 /// COMMUTE with publish — the countdown is what keeps it positioned like
 /// in-band rather than trailing the drain).
 ///
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn dispatch_transition_debt_op(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
@@ -1264,7 +1264,6 @@ check: u32,) {
 /// value is what a cell can assert on without racing every other test in the
 /// binary, which the globals cannot offer (they are shared across the parallel
 /// test threads, so `before + 1` is a flake waiting for a busy run).
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn replicate_session_delete_repairing(
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
@@ -1342,7 +1341,7 @@ pub(in crate::afxdp) fn replicate_session_delete_repairing(
 /// queue drains, or the sweep drops the stale local row) without an
 /// unconditional cross-worker release. `repaired` therefore stays 0
 /// for conditional drops; `dropped` still counts them.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn replicate_session_delete_conditional(peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
 worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
 forwarding: &ForwardingState,

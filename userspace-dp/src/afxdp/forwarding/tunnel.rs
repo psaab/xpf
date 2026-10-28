@@ -155,7 +155,7 @@ pub(in crate::afxdp) fn lookup_neighbor_entry(
     None
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn parse_neighbor_entries(output: &str) -> Vec<(IpAddr, NeighborEntry)> {
     let mut out = Vec::new();
     for line in output.lines() {
