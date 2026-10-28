@@ -1938,6 +1938,7 @@ duplicating targets already announced. A cluster-first promotion on the
 default userspace dataplane (which consumes the rg-state edge before
 ForceRGMaster) therefore cannot swallow the announce, and a steady-state
 reconcile tick cannot re-send it.
+`directSendGARPs` (`daemon_ha_vip.go`) sends a broadcast GARP
 burst per VIP plus a supplementary **directed** ARP probe to the subnet
 gateway so a router that ignores broadcast gratuitous ARP still re-binds the
 VIP to the new master's MAC. The probe target is derived by the single source
