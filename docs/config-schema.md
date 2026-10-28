@@ -4082,9 +4082,12 @@ plus — since #6714 — every key of each child, which covers every leaf whose
 flat-set path absorbs the list onto the node itself. `interfaces fab0 fabric-options
 member-interfaces` does not: its schema node is a plain `children: nil` leaf
 with no `args` and no `multi`, so `SetPath` files the whole bracket list as ONE
-child carrying every name on that child's Keys — and `firewallMatchValues`
-would keep only the first. `fabricMemberValues` (`compiler_interfaces.go`)
-therefore descends the subtree and takes EVERY key. The same read is now driven
+child carrying every name on that child's Keys. Since #6714
+`firewallMatchValues` reads every key of each DIRECT child, so it would in
+fact keep every name of that bracket list; what it would not do is DESCEND
+below a child, nor does it take a bare self-repeat on the node's own tail
+as a value. `fabricMemberValues` (`compiler_interfaces.go`) therefore uses
+`plainListValues`, which descends the subtree and takes EVERY key. The same read is now driven
 through `FindChildren("member-interfaces")` rather than `FindChild`, because
 repeated hierarchical statements land as sibling nodes. Before the fold the
 hierarchical bracket spelling and the plain single-value spelling
@@ -15476,9 +15479,10 @@ the value sits in a single typed slot:
     nonzero) and unknown-leaf rejection live in `validateFlowAgingStrict`
     (`compiler_validate_strict.go`, dispatched from `compiler.go` with a
     `lenientFlowAging` no-brick downgrade) because the schema walker is
-    single-leaf. **#3440 H1:** watermark aging drives only the Go-side
-    conntrack GC hysteresis, which is skipped on the userspace AF_XDP
-    dataplane (the only runtime forwarding path), so setting any aging knob
+    single-leaf. **#3440 H1:** watermark aging drove only the Go-side
+    conntrack GC hysteresis (`pkg/conntrack`, deleted in #17155; that sweep
+    never ran on the userspace AF_XDP dataplane, the only runtime forwarding
+    path), so setting any aging knob
     emits an accepted-only commit advisory (`compiler_validate_warn.go`,
     `security flow aging ... accepted-only`) — typing the schema only stops
     invalid values from persisting, it does not make the knob enforced.
@@ -17528,28 +17532,28 @@ blocking the whole config. This is accept-with-advisory now:
   names; only `maintenance` → PermMaint and only `configure` → PermConfig.
 - **advisory** — `loginClassAdvisoryWarnings` emits one `cfg.Warnings` entry
   per custom class naming the mapped permissions, and naming every widened
-  token as "granted full view (wider than Junos <token>)" (#16638).
-  `allow-commands` /
-  `allow-configuration` / `idle-timeout` are named as accepted-but-not-enforced
-  (neutral) — ignoring an ADDITIVE grant can only under-grant, so it is
-  fail-closed. The advisory says nothing about `deny-commands` /
-  `deny-configuration`; the pre-#5831 "MORE PERMISSIVE" advisory for those two
-  is **gone**, not reworded.
-- **restrictive-regex gate (#5831)** — `deny-commands` / `deny-configuration`
-  are RESTRICTIVE, so ignoring them over-grants. `validateLoginClassDenyStrict`
-  hard-**rejects** them at commit / commit-check (keyed on leaf PRESENCE, so
-  `deny-commands ""` and a valueless `deny-commands` are caught too — an empty
-  POSIX regex denies *everything*). On the tolerant load / peer-sync path
-  (#1960 no-brick) `foldLoginClassDenyToRepairableFloor` **folds** the class to
-  `{view, configure} ∩ what it already held` and warns. That is a blast-radius
-  reduction, **not** enforcement: `clear` / `control` / `maintenance` / `all`
-  are dropped, but the two RETAINED buckets are levels at which the statement
-  does nothing — `deny-configuration` targets `configure`, and a
-  `deny-commands` naming `show` / `ping` / `traceroute` / `monitor` targets
-  `view`. Both are retained because they are what an operator needs to delete
-  the statement. The warning is generated FROM the retained set
-  (`loginClassDenyFoldWarning`) so the claim can never be wider than the
-  behaviour. Full per-command deny enforcement is a follow-up on #5831.
+  token as "granted full view (wider than Junos <token>)" (#16638). Only
+  `idle-timeout` is named as accepted-but-not-enforced. Since #7172,
+  `allow-commands` / `allow-configuration` are enforced as allowlists and
+  `deny-commands` / `deny-configuration` as blacklists on both dispatch
+  surfaces, so none of the four regex leaves is inert. The advisory says
+  nothing further about `deny-commands` / `deny-configuration`; the
+  pre-#5831 "MORE PERMISSIVE" advisory for those two is **gone**, not
+  reworded, and a separate #8189 advisory reports whether a deny pattern
+  can ever fire on a registered surface.
+- **regex enforcement (#7172; history: #5831 reject-and-fold gate)** —
+  `deny-commands` / `deny-configuration` are RESTRICTIVE and
+  `allow-commands` / `allow-configuration` are allowlists; all four are
+  enforced with Junos' three-tier precedence on the console and gRPC
+  dispatch surfaces. Leaf PRESENCE is recorded (`DenyLeavesPresent` /
+  `AllowLeavesPresent`) because an empty POSIX regex differs from an
+  absent leaf: `deny-commands ""` denies *everything*. History: between
+  #5831/#6838 and #7172, while the regexes were unenforced, the strict
+  path hard-rejected a deny-* class at commit / commit-check and the
+  tolerant load / peer-sync path folded it to a `{view, configure}`
+  repair floor; #7172 implemented enforcement, so cut 6 retired both
+  the refusal and the fold — a deny-* class now commits unfolded and
+  the denial is real (see `docs/system-login.md`: "A `deny-*` class was REJECTED at commit and now commits").
 - **runtime** — `pkg/cli/permissions.go` `resolveClassPerms` consults the
   built-ins first, then `store.ActiveConfig().System.Login.Classes`, so a
   custom-class user is enforced against the mapped permissions instead of

@@ -1053,12 +1053,16 @@ message MatchPoliciesRequest {
   string to_zone = 2;
   string source_ip = 3;
   string destination_ip = 4;
-  int32 destination_port = 5;
+  // destination_port / source_port are proto3 `optional` (#17081): absent
+  // means the query omitted the port (a port-constrained term never
+  // matches); a present 0 is a literal L4 port 0, which a `0-N` term
+  // matches when L4 is present. Before #17081 the plain int32 encoded
+  // omitted as 0 and returned the inverse verdict for literal port 0.
+  optional int32 destination_port = 5;
   string protocol = 6;
   // source_port lets the simulator honor source-port-constrained application
-  // terms (#3042). 0 = unspecified; a term constrained on source-port never
-  // matches without a value, while unconstrained terms may still match.
-  int32 source_port = 7;
+  // terms (#3042). Absent = unspecified (see destination_port, #17081).
+  optional int32 source_port = 7;
   // icmp_type / icmp_code let the simulator honor ICMP/ICMPv6 type-constrained
   // application terms (#3284, for example junos-icmp-ping = type 8). junos-ping
   // is protocol-only in the version-bounded predefined definitions (#11340).

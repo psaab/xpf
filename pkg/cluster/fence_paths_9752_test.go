@@ -133,7 +133,7 @@ func TestBulkAbortsForAnIncapablePeer9752(t *testing.T) {
 	if bulkEnd {
 		t.Fatal("a fenced bulk completed its window; the receiver reconciled against an incomplete snapshot")
 	}
-	if !senderSS.bulkFencedForPeer.Load() {
+	if !senderSS.peerIncarnationState().bulkFencedForPeer.Load() {
 		t.Error("fence abort did not latch; every redrive would burn a full walk")
 	}
 	// No reconcile ran: the standby's stale session survives (it is NOT
@@ -171,7 +171,7 @@ func TestBulkCompletesForACapablePeer9752(t *testing.T) {
 	senderSS.handleMessage(nil, syncMsgPeerCapabilities,
 		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership|capFlagPurgeRetirementForwardOnly|capFlagInstallTableIdentity))
 	pumpBulk(t, senderSS, receiverSS)
-	if senderSS.bulkFencedForPeer.Load() {
+	if senderSS.peerIncarnationState().bulkFencedForPeer.Load() {
 		t.Error("capable bulk latched the fence")
 	}
 	if _, ok := receiverDP.v4sessions[stampedLive]; !ok {
@@ -220,7 +220,7 @@ func TestSweepWithholdsUnannouncedOnPBRActiveNode9752(t *testing.T) {
 	for len(ss.sendCh) > 0 {
 		<-ss.sendCh
 	}
-	if !ss.pbrAnnouncedForFence.Load() {
+	if !ss.peerIncarnationState().pbrAnnouncedForFence.Load() {
 		t.Fatal("FIXTURE: announcing a stamp must set the PBR-active latch")
 	}
 	ss.handleMessage(nil, syncMsgPeerCapabilities, incapableFrame9752(t))
@@ -332,10 +332,10 @@ func TestBulkHelperTruthUnstampedPasses9752(t *testing.T) {
 	}
 	// PBR-active (sticky set), peer incapable: the authoritative (0,0) must
 	// still flow and the window must complete.
-	senderSS.pbrAnnouncedForFence.Store(true)
+	senderSS.peerIncarnationState().pbrAnnouncedForFence.Store(true)
 	senderSS.handleMessage(nil, syncMsgPeerCapabilities, incapableFrame9752(t))
 	pumpBulk(t, senderSS, receiverSS)
-	if senderSS.bulkFencedForPeer.Load() {
+	if senderSS.peerIncarnationState().bulkFencedForPeer.Load() {
 		t.Error("authoritative bulk latched the fence")
 	}
 }
@@ -361,9 +361,9 @@ func TestBulkRevalidatesLatchedFenceOnCapablePeer9752(t *testing.T) {
 	}
 	senderSS.handleMessage(nil, syncMsgPeerCapabilities, capableFrame9752(t))
 	// The raced outcome: latch stored AFTER the capable clear.
-	senderSS.bulkFencedForPeer.Store(true)
+	senderSS.peerIncarnationState().bulkFencedForPeer.Store(true)
 	pumpBulk(t, senderSS, receiverSS)
-	if senderSS.bulkFencedForPeer.Load() {
+	if senderSS.peerIncarnationState().bulkFencedForPeer.Load() {
 		t.Error("revalidation did not clear the stale latch")
 	}
 	if _, ok := receiverDP.v4sessions[stampedLive]; !ok {

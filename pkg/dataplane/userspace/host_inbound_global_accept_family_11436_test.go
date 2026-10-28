@@ -24,7 +24,7 @@ func TestClassifyHostInboundGlobalAcceptFamilyPairing11436(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ClassifyHostInbound(cfg, "edge", tc.proto, true, 0, u8ptr(tc.icmpType), tc.family)
+			got := ClassifyHostInbound(cfg, "edge", tc.proto, true, 0, false, u8ptr(tc.icmpType), tc.family)
 			if got.Status != tc.want {
 				t.Fatalf("status = %v, want %v (%+v)", got.Status, tc.want, got)
 			}

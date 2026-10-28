@@ -715,12 +715,8 @@ impl SessionDomain {
             );
         }
 
-        let shared_removed = |outcome: &SyncedDeleteOutcome| {
-            matches!(
-                outcome,
-                SyncedDeleteOutcome::Applied | SyncedDeleteOutcome::PartialCompanion
-            )
-        };
+        let shared_removed =
+            |outcome: &SyncedDeleteOutcome| outcome.shared_removed();
 
         // Lease ALL of the batch's keys together (plan §2.4 all-keys lease),
         // before ANY SessionTable mutation: a lease failure then aborts with

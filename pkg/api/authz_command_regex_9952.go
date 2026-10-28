@@ -10,9 +10,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/psaab/xpf/pkg/argforms"
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/optopic"
 )
 
 // #9952: `deny-commands` / `allow-commands` on the REST surface.
@@ -129,7 +131,7 @@ var restRouteCommand = map[string]string{
 // exemption. The coarse permission bits and, for the config routes, the
 // *-configuration regexes still apply on their own paths.
 var restRoutesNoCommand = map[string]string{
-	"GET /health":  "unauthenticated liveness probe; authMiddleware exempts it unconditionally, so there is no principal to charge",
+	"GET /health":  "unauthenticated liveness probe; the auth gate exempts it unconditionally, so there is no principal to charge",
 	"GET /metrics": "Prometheus exposition, not an operational command; on credential-gated legs readAuthz charges the coarse PermView bit (#16727), and it carries no canonical command to charge here",
 
 	// SESSION PLUMBING, NOT COMMANDS (#15077). The REST twins of the
@@ -167,7 +169,7 @@ var restRoutesNoCommand = map[string]string{
 	// Request-decoded routes: the command depends on a field of the request, so
 	// it is resolved at call time by restRequestCommand9952 rather than keyed by
 	// route. They are listed here so the census sees a decision, not a gap.
-	"GET /api/v1/show-text":          "request-decoded: the command is the TOPIC's, resolved per request from cmdtree.ShowTextTopicCommands()",
+	"GET /api/v1/show-text":          "request-decoded: the command is the TOPIC's, resolved per request by optopic.ShowTextCommand (#17108)",
 	"POST /api/v1/system/action":     "request-decoded: the command is the VERB's, resolved per request from authz.SystemActionVerbCommand",
 	"GET /api/v1/system/info":        "request-decoded: the command is the TYPE's, resolved per request (show system uptime / show system memory, as gRPC charges GetSystemInfo)",
 	"GET /api/v1/routing/bgp":        "request-decoded: the command is the ?type='s, resolved per request (show protocols bgp summary / routes, as gRPC charges GetBGPStatus) (#15076)",
@@ -254,28 +256,6 @@ func init() {
 	config.RegisterCommandSurface(restSurfaceName9952, allRESTCanonicalCommands9952)
 }
 
-// restShowTextPrefixRules9952 is the prefix-keyed topic → command rule
-// set for REST show-text, derived from the same registry the gRPC gate
-// reads so a packed topic prices identically on both surfaces (#16067).
-var restShowTextPrefixRules9952 = func() []struct {
-	prefix  string
-	command string
-} {
-	var out []struct {
-		prefix  string
-		command string
-	}
-	for k, cmd := range cmdtree.ShowTextTopicCommands() {
-		if strings.HasSuffix(k, ":") {
-			out = append(out, struct {
-				prefix  string
-				command string
-			}{k, cmd})
-		}
-	}
-	return out
-}()
-
 // restSystemInfoCommands14146 maps the REST system/info `type` selector to the
 // canonical command gRPC charges for the same GetSystemInfo type
 // (systemInfoCanonicalCommand in pkg/grpcapi). REST serves only uptime and
@@ -329,26 +309,11 @@ var restBGPNATCanonicalCommands15076 = []string{
 func restRequestCommand9952(route string, r *http.Request, actionVerb string) (string, bool) {
 	switch route {
 	case "GET /api/v1/show-text":
-		topic := r.URL.Query().Get("topic")
-		if cmd, ok := cmdtree.ShowTextTopicCommands()[topic]; ok {
-			return cmd, true
-		}
-		// #16067: packed-parameter topics resolve through the same
-		// longest-prefix rule the gRPC gate prices them by
-		// (showTextTopicCanonicalCommand); a plain map index made every
-		// packed topic unresolvable and denied it for restricted
-		// classes even when no deny named it.
-		best, cmd := "", ""
-		for _, rule := range restShowTextPrefixRules9952 {
-			if strings.HasPrefix(topic, rule.prefix) && len(rule.prefix) > len(best) {
-				best = rule.prefix
-				cmd = rule.command
-			}
-		}
-		if best != "" {
-			return cmd, true
-		}
-		return "", false
+		// #17108: one resolver — optopic.ShowTextCommand, the same
+		// exact-then-longest-prefix lookup the gRPC gate uses. (#16067:
+		// a plain exact-only map index made every packed topic
+		// unresolvable and denied it for restricted classes.)
+		return optopic.ShowTextCommand(r.URL.Query().Get("topic"))
 	case "POST /api/v1/system/action":
 		cmd, ok := authz.SystemActionVerbCommand[actionVerb]
 		return cmd, ok
@@ -505,7 +470,7 @@ func (s *Server) authorizeRESTCommandBare(r *http.Request, cfg *config.Config, p
 		return fmt.Errorf("permission denied: login class %q restricts commands and this route "+
 			"has no canonical command to evaluate, so the restriction cannot be applied to it", class)
 	}
-	forms := restChargeForms16472(cmd)
+	forms := argforms.ChargeForms(cmd)
 	if len(forms) == 0 {
 		return fmt.Errorf("permission denied: login class %q restricts commands and this "+
 			"request's arguments cannot be named as a command, so the restriction cannot be "+
@@ -529,10 +494,10 @@ func (s *Server) authorizeRESTCommandBare(r *http.Request, cfg *config.Config, p
 	return nil
 }
 
-// restDistinctRescue16472 is the REST twin of the gRPC/console #14687
-// distinct-narrower rescue (#16472), via the shared
-// cmdtree.DistinctNarrowerAllowed. pkg/api keeps its own thin wrapper
-// because it must not import pkg/grpcapi.
+// restDistinctRescue16472 is the REST application of the shared #14687
+// distinct-narrower rescue (#16472), via cmdtree.DistinctNarrowerAllowed
+// — the same helper the gRPC gate applies over the same forms (#17179:
+// both surfaces now reconstruct those forms in pkg/argforms).
 func restDistinctRescue16472(rules config.CompiledLoginRegexes, forms []string) bool {
 	if len(forms) == 0 {
 		return false

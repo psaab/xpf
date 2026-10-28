@@ -10,7 +10,10 @@ import (
 func TestFixRethLinkFileRefusesNegatedKernelName_15079(t *testing.T) {
 	dir := withTempLinkDir(t)
 	for _, kernelName := range []string{"!enp9s0", "!!enp9s0", "!x"} {
-		fixRethLinkFile("ge-0-0-3", kernelName)
+		// #17042: a refusal is now a returned error, not a Warn-only skip.
+		if err := fixRethLinkFile("ge-0-0-3", kernelName); err == nil {
+			t.Fatalf("#15079: fixRethLinkFile(%q) = nil, want refusal error", kernelName)
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -23,7 +26,9 @@ func TestFixRethLinkFileRefusesNegatedKernelName_15079(t *testing.T) {
 
 func TestFixRethLinkFileAllowsNonLeadingBangKernelName_15079(t *testing.T) {
 	dir := withTempLinkDir(t)
-	fixRethLinkFile("ge-0-0-3", "enp9s0!")
+	if err := fixRethLinkFile("ge-0-0-3", "enp9s0!"); err != nil {
+		t.Fatalf("fixRethLinkFile(non-leading bang): %v", err)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, linkPrefix+"ge-0-0-3.link"))
 	if err != nil {
 		t.Fatal(err)

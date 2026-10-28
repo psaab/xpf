@@ -1,10 +1,5 @@
 package config
 
-import (
-	"sort"
-	"strings"
-)
-
 // compiler_login_deny.go classifies the four fine-grained regex leaves a custom
 // `system login class <name>` may carry, and nothing else any more.
 //
@@ -101,18 +96,4 @@ var loginClassLeafRestrictive = map[string]bool{
 	"allow-configuration-regexps": false,
 	"deny-configuration-regexps":  false,
 	"login-tip":                   false,
-}
-
-// describePerms renders a coarse permission set for an operator-facing
-// warning; the empty set is spelled out rather than shown as "{}".
-func describePerms(perms []LoginClassPermission) string {
-	if len(perms) == 0 {
-		return "no permissions at all"
-	}
-	names := make([]string, 0, len(perms))
-	for _, p := range perms {
-		names = append(names, loginClassPermName(p))
-	}
-	sort.Strings(names)
-	return "{" + strings.Join(names, ",") + "}"
 }

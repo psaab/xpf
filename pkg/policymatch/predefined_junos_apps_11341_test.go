@@ -55,7 +55,7 @@ func TestPredefinedJunosApplicationPolicyMatchesEveryTerm_11341(t *testing.T) {
 			for _, term := range tc.terms {
 				res := Match(cfg, Query{
 					FromZone: "trust", ToZone: "untrust",
-					Protocol: term.protocol, DstPort: term.port,
+					Protocol: term.protocol, DstPort: PortPtr(uint16(term.port)),
 				})
 				if res.ContentRejected {
 					t.Errorf("%s %s/%d rejected: %v", tc.set, term.protocol, term.port, res.ContentRejectionReasons)
@@ -76,7 +76,7 @@ func TestPredefinedJunosApplicationPolicyMatchesEveryTerm_11341(t *testing.T) {
 			} {
 				res := Match(cfg, Query{
 					FromZone: "trust", ToZone: "untrust",
-					Protocol: nonMember.protocol, DstPort: nonMember.port,
+					Protocol: nonMember.protocol, DstPort: PortPtr(uint16(nonMember.port)),
 				})
 				if res.Matched {
 					t.Errorf("%s wrongly matched non-member %s/%d", tc.set, nonMember.protocol, nonMember.port)

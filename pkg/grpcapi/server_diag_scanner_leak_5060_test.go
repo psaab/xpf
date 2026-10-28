@@ -28,7 +28,7 @@ import (
 // promptly.
 //
 // Revert the defer{cancel();pr.Close()} in streamDiagCmd and this test
-// fails: streamDiagCmd blocks until at least requestExecWaitDelay (5s) or
+// fails: streamDiagCmd blocks until at least diagcmd.RequestExecWaitDelay (5s) or
 // forever, tripping the 4s watchdog below.
 func TestStreamDiagCmdErrTooLongNoLeak(t *testing.T) {
 	// 80 KiB of a single character, no newline: comfortably past the
@@ -49,7 +49,7 @@ func TestStreamDiagCmdErrTooLongNoLeak(t *testing.T) {
 	}()
 
 	// The fixed path returns in milliseconds. A revert blocks until
-	// requestExecWaitDelay (5s) at best, or forever; a 4s watchdog fails
+	// diagcmd.RequestExecWaitDelay (5s) at best, or forever; a 4s watchdog fails
 	// fast on revert instead of stalling the suite for the package
 	// timeout.
 	watchdog := requestExecWaitDelay - time.Second
