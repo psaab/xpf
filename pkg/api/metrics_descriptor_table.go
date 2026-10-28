@@ -132,6 +132,7 @@ var collectorDescGlobal = []int{
 	xpfCollectorDescFieldIndex("authzDenialsTotal"),
 	xpfCollectorDescFieldIndex("napiProbeTargetSkipsTotal"),
 	xpfCollectorDescFieldIndex("bindingWedgeGiveupsTotal"),
+	xpfCollectorDescFieldIndex("statusPollDecodeErrorsTotal"),
 	xpfCollectorDescFieldIndex("learnedRouteCapHitsTotal"),
 	xpfCollectorDescFieldIndex("learnedRouteImportCapped"),
 	xpfCollectorDescFieldIndex("degradedPathTotal"),

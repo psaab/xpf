@@ -407,11 +407,18 @@ func (l *limitedResponseReader) Read(p []byte) (int, error) {
 // names the wrong component: there is nothing in the helper log to find, the
 // helper answered, and the answer did not fit. Per docs/engineering-style.md a
 // wrong diagnostic is worse than a missing one.
+// errResponseCap marks a responseCapError so callers can tell our truncation
+// of an answered reply from silence without matching the message (#18293).
+var errResponseCap = errors.New("userspace control response exceeded cap")
+
 func responseCapError(verb string, err error) error {
 	return fmt.Errorf(
 		"helper response to %q request exceeded the %d-byte control-response cap "+
 			"(MaxControlResponseBytes) and was truncated; the helper ANSWERED and "+
 			"the answer did not fit — this is not a helper rejection and the helper "+
-			"log will not mention it: %w",
-		verb, controlResponseCapBytes, err)
+			"log will not mention it: %w: %w",
+		verb, controlResponseCapBytes, errResponseCap, err)
 }
+
+// isResponseCapError reports whether err is a responseCapError.
+func isResponseCapError(err error) bool { return errors.Is(err, errResponseCap) }

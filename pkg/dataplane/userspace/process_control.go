@@ -266,14 +266,21 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 		}
 		// A bare EOF here means the helper closed the socket without writing a
 		// response — it rejected the request before replying (e.g. a request
-		// that failed to decode, like the #1961 wire-type mismatch). Surface an
-		// actionable hint instead of the opaque "EOF" that masked #1961 across
-		// multiple sessions.
+		// that failed to decode, like the #1961 wire-type mismatch). This is
+		// silence, NOT a decode failure: no bytes were answered. Keep it
+		// untagged so the #9651 wedge detector still counts it (#18293).
 		if errors.Is(decodeErr, io.EOF) || errors.Is(decodeErr, io.ErrUnexpectedEOF) {
 			return ControlResponse{}, fmt.Errorf(
 				"control socket closed with no response to %q request (EOF); the "+
 					"helper rejected it before replying — check the helper log "+
 					"for a decode/handler error: %w", req.Type, decodeErr)
+		}
+		// #18293: bytes arrived but did not decode. Tag ONLY a status poll:
+		// the wedge detector keys on this class, and tagging other verbs
+		// would let their callers' errors.Is checks see a class meant for
+		// the poll. The message and cause are unchanged.
+		if req.Type == "status" {
+			return ControlResponse{}, &statusDecodeError{cause: decodeErr}
 		}
 		return ControlResponse{}, decodeErr
 	}
@@ -301,7 +308,25 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 var (
 	errHelperRejected     = errors.New("userspace helper rejected the request")
 	errHelperPostTeardown = errors.New("userspace helper refused after dataplane teardown")
+	// errStatusDecode marks a status poll the helper ANSWERED with bytes Go
+	// could not decode (#18293). See statusDecodeError.
+	errStatusDecode = errors.New("userspace status response decode failed")
 )
+
+// statusDecodeError carries a status-poll response-decode failure beside its
+// verbatim cause (the helperRejectedError convention: operator text is the
+// decoder's own message, classification rides Is/Unwrap). It proves the
+// helper answered, so the #9651 wedge detector must not count it as silence.
+// Only requestDetailedAtSocket mints it, and only for req.Type == "status"
+// past the EOF and response-cap arms; statusLoop re-mints the
+// validateRequiredStatusReply failure in the same class.
+type statusDecodeError struct{ cause error }
+
+func (e *statusDecodeError) Error() string { return e.cause.Error() }
+func (e *statusDecodeError) Unwrap() error { return e.cause }
+func (e *statusDecodeError) Is(target error) bool {
+	return target == errStatusDecode
+}
 
 // #10702: machine-readable Rust/Go lockstep marker for a refusal that follows
 // teardown. It deliberately does not match errHelperRejected: outcome handling

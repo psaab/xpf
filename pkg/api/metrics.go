@@ -134,6 +134,7 @@ type xpfCollector struct {
 	// reader; see metrics_dataplane_silent_skips_9019.go.
 	napiProbeTargetSkipsTotal              *prometheus.Desc
 	bindingWedgeGiveupsTotal               *prometheus.Desc
+	statusPollDecodeErrorsTotal            *prometheus.Desc
 	learnedRouteCapHitsTotal               *prometheus.Desc
 	learnedRouteCapGroupShedsTotal         *prometheus.Desc
 	learnedRouteCapGroupShedsByFamilyTotal *prometheus.Desc
