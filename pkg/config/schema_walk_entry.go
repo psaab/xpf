@@ -59,11 +59,12 @@ const MaxCollectedTypedLeafViolations16012 = 16
 // SchemaValidateCollectTypedLeaves returns up to
 // MaxCollectedTypedLeafViolations16012 independent typed-leaf violations
 // (#16012) and, separately, the first non-typed schema error if one stopped
-// the walk. Typed errors collected before that structural error are
-// preserved rather than discarded. Strict callers keep SchemaValidate
-// (first error, unchanged); the tolerant configstore path uses this so
-// every typed-leaf violation reached before any structural error is
-// logged and persisted as its own warning.
+// the walk. A nested-list refusal is the #17241 hard exception: when the
+// normal walk is stopped by an earlier structural error or the typed-error
+// cap, the opted-in leaves are rescanned and that refusal takes precedence.
+// Strict callers keep SchemaValidate (first error, unchanged); the tolerant
+// configstore path uses this to persist ordinary typed-leaf warnings without
+// allowing a truncated nested list through.
 func SchemaValidateCollectTypedLeaves(tree, defsSource *ConfigTree) ([]error, error) {
 	return schemaValidateCollect(tree, defsSource, true)
 }
@@ -134,6 +135,11 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 	// stored configuration as a side effect of validating it.
 	tree = normalizeCompactForValidation(tree)
 	if err := validateStaticRouteQNHTails12813(tree.Children); err != nil {
+		if collect {
+			if nestedErr := findNestedListContentError(tree.Children, setSchema, nil); nestedErr != nil {
+				return nil, scrubSchemaErrorSecrets(tree, nestedErr)
+			}
+		}
 		return nil, scrubSchemaErrorSecrets(tree, err)
 	}
 	// #4060: reject the raw-AST redaction placeholder ("##SECRET-DATA##") on
@@ -174,6 +180,11 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 	// the commit path, which is why the gate below closes ONE level and
 	// inherits nothing.
 	if err := checkUnknownTopLevelStanza(tree); err != nil {
+		if collect {
+			if nestedErr := findNestedListContentError(tree.Children, setSchema, nil); nestedErr != nil {
+				return nil, scrubSchemaErrorSecrets(tree, nestedErr)
+			}
+		}
 		return nil, scrubSchemaErrorSecrets(tree, err)
 	}
 	vc := &walkContext{refs: refs}
@@ -185,15 +196,25 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 		var errs []error
 		cvc := &walkContext{refs: refs, collectErrs: &errs, collectMax: MaxCollectedTypedLeafViolations16012}
 		walkErr := walkSchemaChildren(tree.Children, setSchema, nil, cvc, false)
+		// #17241: the collect cap and a non-typed structural error can stop
+		// the ordinary walk before it reaches a nested-list refusal. On those
+		// error paths only, run the narrow schema-aware scan so neither a
+		// flood of unrelated typed errors nor a tolerated structural finding
+		// can hide values that the compiler will silently drop.
+		if walkErr != nil || len(errs) >= MaxCollectedTypedLeafViolations16012 {
+			if nestedErr := findNestedListContentError(tree.Children, setSchema, nil); nestedErr != nil {
+				walkErr = nestedErr
+			}
+		}
 		for i, e := range errs {
 			errs[i] = scrubSchemaErrorSecrets(tree, e)
 		}
 		if walkErr != nil {
 			// #16012 fold: a later non-typed structural error ends the
-			// walk, but does not erase independent typed-leaf violations
-			// already collected. Return both, scrubbed; the tolerant
-			// caller persists the typed subset and classifies the
-			// structural error through its existing first-error path.
+			// ordinary walk, but does not erase independent typed-leaf
+			// violations already collected. The #17241 nested-list refusal
+			// is found by the bounded fallback scan above and takes
+			// precedence over that structural error when present.
 			return errs, scrubSchemaErrorSecrets(tree, walkErr)
 		}
 		return errs, nil
@@ -269,6 +290,12 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	// per-arm below — path+template+keyword can reassemble a secret
 	// verbatim across field boundaries even when each field alone
 	// was clean.
+	if IsNestedListContentSchemaError(err) {
+		if scrubbed == msg {
+			return err
+		}
+		return &nestedListContentSchemaError{msg: scrubbed}
+	}
 	if IsTypedLeafSchemaError(err) {
 		if scrubbed == msg {
 			return err

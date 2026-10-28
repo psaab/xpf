@@ -494,7 +494,7 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		// virtual-inet6-address, WireGuard allowed-ips) refuse the shape
 		// fail-closed, naming the leaf and the offending child token.
 		if leafSchema.refuseNonLeafBlockChildren && (len(c.Children) > 0 || !c.IsLeaf) {
-			err := typedLeafErrorf(path, "nested content under %s value %q is not supported; write values as separate statements (%s { %s; }) or a bracket list (%s [ %s ])", leafName, c.Keys[0], leafName, c.Keys[0], leafName, c.Keys[0])
+			err := nestedListContentErrorf(path, leafName, c.Keys[0])
 			if vc.recordTypedLeaf(err) {
 				continue
 			}

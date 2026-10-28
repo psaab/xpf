@@ -52,6 +52,56 @@ func walkSchemaChildren(nodes []*Node, parent *schemaNode, path []string, vc *wa
 	return nil
 }
 
+// findNestedListContentError searches only the schema leaves that opt into
+// refuseNonLeafBlockChildren. The collect-all validator uses it as a fallback
+// when an unrelated structural error stops its normal walk or the bounded
+// typed-error list fills first; in either case the #17241 hard refusal must
+// not be hidden by a tolerated finding encountered earlier.
+func findNestedListContentError(nodes []*Node, parent *schemaNode, path []string) error {
+	if parent == nil {
+		return nil
+	}
+	for _, node := range nodes {
+		if node == nil || len(node.Keys) == 0 {
+			continue
+		}
+		keyword := node.Keys[0]
+		childSchema := resolveSchemaChild(parent, keyword)
+		if childSchema == nil {
+			continue
+		}
+		if childSchema.refuseNonLeafBlockChildren {
+			leafPath := append(append([]string(nil), path...), keyword)
+			for _, child := range node.Children {
+				if child == nil || len(child.Keys) == 0 || (len(child.Children) == 0 && child.IsLeaf) {
+					continue
+				}
+				return nestedListContentErrorf(leafPath, keyword, child.Keys[0])
+			}
+			continue
+		}
+
+		consumed, descendSchema := consumeNodeKeys(node.Keys, childSchema)
+		if descendSchema == nil {
+			continue
+		}
+		newPath := append(append([]string(nil), path...), node.Keys[:consumed]...)
+		walkChildren := node.Children
+		if keyword == "qualified-next-hop" {
+			walkChildren = expandRunChildren9235(walkChildren, childSchema)
+		}
+		if childSchema.packedTail && len(node.Keys) > consumed {
+			walkChildren = packedBodyChildren(node, childSchema)
+		} else if childSchema.packedFlatRun && len(node.Children) > 0 {
+			walkChildren = expandFlatRun(node.Children, childSchema)
+		}
+		if err := findNestedListContentError(walkChildren, descendSchema, newPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // walkSchemaNode matches a single AST node against the current schema
 // level (parent), validates it if it resolves to a typed leaf, then
 // recurses into its children.
@@ -105,14 +155,12 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// the very grep it tells you to run, inflating the count by one. An
 		// instruction that corrupts its own measurement is worse than none.
 		//
-		// Strict-vs-tolerant, since it is asked every round and is written
-		// nowhere else: this rejects at the OPERATOR boundary, where the
-		// alternative is a silent drop. It is NOT a reject on the paths where
-		// refusing would mean an outage — configstore's Store.Load (boot) and
-		// Store.SyncApply (HA peer sync) downgrade schema violations to a
-		// warning (pkg/configstore/store.go), so a config an older build
-		// persisted, or a peer sends, still loads. Strict where the operator
-		// can fix it, tolerant where refusing would brick the node.
+		// Strict-vs-tolerant: this closed-world unknown-keyword finding
+		// rejects at the operator boundary, where the alternative is a
+		// silent drop. Store.Load / Store.SyncApply downgrade ordinary
+		// schema violations, but the narrow #17241 nested-list refusal is
+		// hard there too because the compiler discards the nested value
+		// without diagnostic (pkg/configstore/store.go).
 		// #12628: accept only the known non-enforcement shapes. A name-only
 		// exemption would also admit a fused policy/default-policy subtree.
 		if parent == securityPoliciesSchema12217() && nonEnforcementSecurityPoliciesChild12628(node) {

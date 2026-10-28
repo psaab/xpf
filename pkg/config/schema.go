@@ -54,7 +54,8 @@ type schemaNode struct {
 	// would be silently dropped at compile while the gate waved it through.
 	// Only leaves whose Junos grammar is a pure value list set this
 	// (#17241: VRRP virtual-address/virtual-inet6-address, WireGuard
-	// allowed-ips); other multi leaves keep the legacy tolerance.
+	// allowed-ips). compileTreeLenient treats this specific error as hard;
+	// other leaves and typed-leaf errors retain legacy tolerance.
 	refuseNonLeafBlockChildren bool
 	// blockChildValidator, when set on a `multi && children == nil` typed
 	// leaf, validates each hierarchical block-list child token
