@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "cdcf8bdbce46b5fb42d40b5c432a64e2f080cdab24278253f543925ef8f2bc03"
+	snapshotShapeGolden8892 = "48b721b436dbec6334d18a055dc76972cb650fad9d0e2732b69cc64dbe0087e0"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -609,16 +609,15 @@ const (
 	// no new wire field, so the golden below is unchanged in shape but
 	// the version pin moves with ProtocolVersion.
 	// v70 STANDS (#16077): Config.UnimplementedAAALeaves is compile-time
-	// only (`json:"-"`, the LenientNATUndefinedScopeRuleSets precedent).
-	// ConfigSnapshot embeds Config, so this reflection walk sees the
-	// field, but it is absent from ConfigSnapshot JSON and Rust keeps
-	// `config` as an opaque serde_json::Value with no consumer for it.
-	// No helper of any vintage can observe the change, so ProtocolVersion
-	// stays and only this golden moves. The pre-change master digest was
-	// already drifted (base 29de2603… at ProtocolVersion 70 while this
-	// pin still said 68/cf98a6a5…); this entry folds that pre-existing
-	// drift together with the one new walked field into the v70 golden,
-	// it does not blame the drift on #16077.
+	// only (`json:"-"`). ConfigSnapshot embeds Config, so this reflection
+	// walk sees the field, but it is absent from ConfigSnapshot JSON and
+	// Rust keeps `config` as an opaque serde_json.Value with no consumer.
+	// #17247 removes the write-only Config.LenientNATUndefinedScopeRuleSets
+	// field too. Its removal changes the Go reflection digest, not serialized
+	// snapshot JSON, so re-pin this golden without bumping ProtocolVersion.
+	// The pre-change master digest was already drifted (base 29de2603… at
+	// ProtocolVersion 70 while this pin still said 68/cf98a6a5…); this entry
+	// folds that drift together with the field removal into the v70 golden.
 	// v70 STANDS (#16141): CoS LossPriority fields (six CoS entries plus
 	// FirewallFilterTerm), CoSScheduler.Priority (SchedulerPriority),
 	// and TunnelConfig.Mode (TunnelMode) were retyped from string to
@@ -641,7 +640,9 @@ const (
 	// without adding snapshot fields. v75 (#16877) changes the idle-lease
 	// control wire but not the snapshot shape; the protocol pin still moves.
 	// v76 (#17684) changes RulePriority semantics only; the shape is stable.
-	snapshotShapeVersion8892 = 76
+	// v77 (#17099) adds typed pool identity to lease records; the protocol
+	// pin moves, while this field removal is also compile-time-only.
+	snapshotShapeVersion8892 = 77
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
