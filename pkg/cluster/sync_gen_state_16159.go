@@ -206,8 +206,9 @@ type sessionGenState struct {
 //
 // Locking: peerIPsecSAsMu guards the IPsec set, peerDHCPLeasesMu the lease
 // sets, peerSnapshotProtocolWriteMu serializes capability-incarnation
-// changes with gated config writes, and peerSnapshotProtocolGeneration is
-// guarded by SessionSync.mu. See the lock-order graph on SessionSync.
+// changes with gated and ungated config writes, and
+// peerSnapshotProtocolGeneration is guarded by SessionSync.mu. See the
+// lock-order graph on SessionSync.
 type peerSnapshotState struct {
 	peerIPsecSAs   []string
 	peerIPsecSAsMu sync.Mutex
@@ -243,8 +244,10 @@ type peerSnapshotState struct {
 	peerSnapshotProtocol atomic.Uint32
 
 	// peerSnapshotProtocolWriteMu serializes capability-incarnation changes
-	// with the final write of a gated config snapshot. Lock order is mu then
-	// this mutex; the writer releases mu while holding this mutex over write.
+	// with config-send debt sampling and final writes (gated and ungated).
+	// Lock order is mu then this mutex for gated writes; ungated config writers
+	// take this mutex before writeMu. Gated writers release mu while holding
+	// this mutex over the write.
 	peerSnapshotProtocolWriteMu sync.Mutex
 
 	// peerSnapshotProtocolGeneration advances when this incarnation's

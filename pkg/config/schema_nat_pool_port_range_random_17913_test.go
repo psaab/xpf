@@ -71,18 +71,22 @@ func TestSourceNATPoolPortRangeRandomCombined17913(t *testing.T) {
 }
 
 // The allocation modifier must not become a laundering token: bounds,
-// ordering, and malformed tails still reject at SchemaValidate with the
-// #16717 range message. The schema gate also rejects unknown and repeated
-// suffixes that the compiler's range extraction does not diagnose directly.
+// ordering, malformed tails, unknown or repeated suffixes all still reject at
+// SchemaValidate. Range-value errors retain the #16717 range diagnostic;
+// malformed sibling shapes may be rejected by the closed-world child walk.
 func TestSourceNATPoolPortRangeRandomControls17913(t *testing.T) {
-	for _, tc := range []struct{ name, cmd string }{
-		{"zero-low", "set security nat source pool p1 port range 0 to 2048 random-allocation"},
-		{"over-high", "set security nat source pool p1 port range 1024 to 65536 random-allocation"},
-		{"decreasing", "set security nat source pool p1 port range 2048 to 1024 random-allocation"},
-		{"bogus-suffix", "set security nat source pool p1 port range 1024 to 2048 bogus-allocation"},
-		{"double-random", "set security nat source pool p1 port range 1024 to 2048 random-allocation random-allocation"},
-		{"random-first", "set security nat source pool p1 port range random-allocation 1024 to 2048"},
-		{"trailing-junk", "set security nat source pool p1 port range 1024 to 2048 random-allocation junk"},
+	for _, tc := range []struct {
+		name           string
+		cmd            string
+		wantRangeError bool
+	}{
+		{"zero-low", "set security nat source pool p1 port range 0 to 2048 random-allocation", true},
+		{"over-high", "set security nat source pool p1 port range 1024 to 65536 random-allocation", true},
+		{"decreasing", "set security nat source pool p1 port range 2048 to 1024 random-allocation", true},
+		{"bogus-suffix", "set security nat source pool p1 port range 1024 to 2048 bogus-allocation", false},
+		{"double-random", "set security nat source pool p1 port range 1024 to 2048 random-allocation random-allocation", false},
+		{"random-first", "set security nat source pool p1 port range random-allocation 1024 to 2048", false},
+		{"trailing-junk", "set security nat source pool p1 port range 1024 to 2048 random-allocation junk", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := snatPoolTree(t,
@@ -91,17 +95,17 @@ func TestSourceNATPoolPortRangeRandomControls17913(t *testing.T) {
 			if err == nil {
 				t.Fatalf("SchemaValidate accepted %q; want rejection (#17913)", tc.cmd)
 			}
-			if !strings.Contains(err.Error(), "is invalid; source-pool ports") {
+			if tc.wantRangeError && !strings.Contains(err.Error(), "is invalid; source-pool ports") {
 				t.Fatalf("SchemaValidate(%q) error = %v, want the source-pool range message", tc.cmd, err)
 			}
 		})
 	}
 	// Direct tail-validator pins: the modifier is stripped exactly once
 	// and only in trailing position.
-	if err := validateSourcePoolPortTail16717([]string{"range", "1024", "to", "2048", "random-allocation"}, nil); err != nil {
-		t.Fatalf("validateSourcePoolPortTail16717 combined: %v", err)
+	if err := validateSourcePoolPortRangeTail16717([]string{"1024", "to", "2048", "random-allocation"}, nil); err != nil {
+		t.Fatalf("validateSourcePoolPortRangeTail16717 combined: %v", err)
 	}
-	if err := validateSourcePoolPortTail16717([]string{"range", "1024", "to", "2048", "random-allocation", "extra"}, nil); err == nil {
-		t.Fatal("validateSourcePoolPortTail16717 accepted trailing junk after modifier")
+	if err := validateSourcePoolPortRangeTail16717([]string{"1024", "to", "2048", "random-allocation", "extra"}, nil); err == nil {
+		t.Fatal("validateSourcePoolPortRangeTail16717 accepted trailing junk after modifier")
 	}
 }

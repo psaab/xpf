@@ -82,9 +82,19 @@ func (s *Server) rescueAction(action string) (*pb.SystemActionResponse, error) {
 		return &pb.SystemActionResponse{Message: "Rescue configuration saved"}, nil
 	case "rescue-delete":
 		if err := s.store.DeleteRescueConfig(); err != nil {
-			return nil, status.Errorf(codes.Internal, "delete rescue configuration: %v", err)
+			return nil, rescueDeleteRPCError(err)
 		}
 		return &pb.SystemActionResponse{Message: "Rescue configuration deleted"}, nil
 	}
 	return nil, status.Errorf(codes.Internal, "unhandled rescue action %q", action)
+}
+
+// rescueDeleteRPCError reports a delete superseded by a newer applied rescue
+// operation as a failed precondition; other delete failures remain internal errors.
+func rescueDeleteRPCError(err error) error {
+	code := codes.Internal
+	if errors.Is(err, configstore.ErrRescueDeleteSuperseded) {
+		code = codes.FailedPrecondition
+	}
+	return status.Errorf(code, "delete rescue configuration: %v", err)
 }

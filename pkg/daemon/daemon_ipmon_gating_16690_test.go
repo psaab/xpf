@@ -17,8 +17,9 @@ import (
 
 func ipmonGating16690Store(t *testing.T) *configstore.Store {
 	t.Helper()
-	// Build store via set lines so ActiveConfig returns the compiled cfg
-	// (with PrivateRGElection default true => isNoRethVRRP true).
+	// Build store via set lines so ActiveConfig returns the compiled cfg.
+	// Private-RG election is the default; the strict Commit also requires
+	// both control-link leaves (#16746), configured below.
 	return fenceTestStore(t, ""+
 		"set chassis cluster cluster-id 1\n"+
 		"set chassis cluster node 0\n"+

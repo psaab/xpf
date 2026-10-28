@@ -726,8 +726,8 @@ type SyncStatsSnapshot struct {
 	// #6778 receive-edge loss, and #7328's nack counter alongside it: the
 	// queue-full drop is recovered BY a nack, so a drop that is climbing while
 	// nacks are not tells the operator the recovery path itself is broken (a
-	// pre-#7328 peer, or a nack that never matched lastSentConfigGen). Both are
-	// rendered only when nonzero.
+	// pre-#7328 peer, or a nack that never matched the current config-debt
+	// generation). Both are rendered only when nonzero.
 	ConfigsQueueFullDropped              uint64
 	ConfigApplyNacksReceived             uint64
 	IPsecSASent                          uint64
@@ -872,7 +872,7 @@ func (s TransferReadinessSnapshot) Reason() string {
 //	peerSnaps.peerIPsecSAsMu (held IPsec SA set)
 //	peerSnaps.peerDHCPLeasesMu (held DHCP lease snapshots)
 //	peerSnaps.peerSnapshotProtocolWriteMu (capability-incarnation changes
-//	  vs the final write of a gated config snapshot)
+//	  vs config-send debt sampling and final writes on both config paths)
 //	fenceAckMu (fenceAckWaiters)
 //	zoneRGMu (zoneRGMap, foldRGMap, zoneRGMapGen; RWMutex)
 //	deleteJournalMu (deleteJournal, scopedDeleteJournal)
@@ -892,15 +892,24 @@ func (s TransferReadinessSnapshot) Reason() string {
 //	persistentNatLeaseApplyMu (persistent-NAT lease commit order)
 //	ipsecApplyMu (IPsec full-set commit order)
 //	dhcpApplyMu (DHCP full-set commit + chunk state)
+//	configApplyDebtMu (send generation + capability snapshot; leaf)
 //
 // Nesting edges (holder -> acquired). Pin tokens in [brackets] are the
 // exact substrings the pin test searches for in this comment:
 //
 //	[mu -> peerSnapshotProtocolWriteMu] install/capability paths replace
-//	  the advertised protocol under mu, then serialize against gated
-//	  config writes; the gated writer also takes peerSnapshotProtocolWriteMu
-//	  under mu and then RELEASES mu while holding it over the write
-//	  (sync_conn_config.go) — it never acquires mu while holding it.
+//	  the advertised protocol under mu, then serialize against config writes;
+//	  the gated writer takes this mutex under mu and releases mu while holding
+//	  it over write. The ungated writer never acquires mu while holding it.
+//	[peerSnapshotProtocolWriteMu -> writeMu] both config writers sample and
+//	  publish send debt, then perform the socket write under this lock order.
+//	[peerSnapshotProtocolWriteMu -> configApplyDebtMu] both config writers
+//	  publish send debt while serializing peer-incarnation capability changes.
+//	[writeMu -> configApplyDebtMu] the ungated writer publishes debt while
+//	  holding writeMu; the guarded writer does not hold writeMu during publish.
+//	[mu -> configApplyDebtMu] the config-apply ACK handler reads the debt
+//	  snapshot while holding mu; configApplyDebtMu does not acquire another lock.
+//
 //	[mu -> fenceAckMu] handleDisconnect/installConn hold mu and take
 //	  fenceAckMu to release scoped fence waiters.
 //	[bulkSnapshotGenMu -> genSentMu] takeDeleteGen* linearizes a queue-time
@@ -926,10 +935,11 @@ func (s TransferReadinessSnapshot) Reason() string {
 //	[dhcpApplyMu -> peerDHCPLeasesMu] via the commit above; the lease
 //	  store is the innermost lock and never acquires another.
 //
-// Leaf locks (acquire no other SessionSync mutex while held): writeMu,
-// preAuthMu, queuedFrameMu, zoneRGMu, deleteJournalMu, bulkSendMu,
+// Leaf locks (acquire no other SessionSync mutex while held): preAuthMu,
+// queuedFrameMu, zoneRGMu, deleteJournalMu, bulkSendMu,
 // barrierWaitMu, failoverWaitMu, configGenMu, configApplyMu,
-// configEpochRoleMu, fenceAckMu, peerSnaps.peerIPsecSAsMu,
+// configEpochRoleMu, fenceAckMu, configApplyDebtMu,
+// peerSnaps.peerIPsecSAsMu,
 // peerSnaps.peerDHCPLeasesMu. Atomics (genState.genCounter,
 // genState.genGuardSessionCap, and the *SeqCounter / epoch fields) are
 // lock-free by design: genGuardSessionCap is atomic precisely so the
@@ -1162,8 +1172,8 @@ type SessionSync struct {
 	// OnPeerConfigApplyFailed reports that the PEER refused or failed to apply
 	// the config generation this node most recently sent (#7328). It fires on
 	// the sender when a syncMsgConfigApplyNack arrives whose generation matches
-	// lastSentConfigGen — a nack for any other generation is a straggler for a
-	// push this node has already superseded and is ignored.
+	// `lastSentConfigDebt16756.generation` — a nack for any other generation
+	// is a straggler for a push this node has already superseded and is ignored.
 	//
 	// The daemon wires this to invalidate the #5863 (epoch x generation) push
 	// marker, which is the ONLY thing standing between the standby and the
@@ -1725,13 +1735,22 @@ type SessionSync struct {
 	// whose monotonic counter restarts lower — is accepted instead of refused
 	// as stale (the #2198 F2 inverse-of-stale-RETAIN reasoning, applied to
 	// config).
-	// #7328: the config generation this node most recently PUT ON THE WIRE
-	// (QueueConfig). Distinct from configGenCounter, which is the next value to
-	// draw: a nack naming an older generation is a straggler for a push already
-	// superseded and must not re-arm the marker for the current one.
-	lastSentConfigGen atomic.Uint64
+	// #17816: generation and send-time ACK capability are one coherent
+	// config-apply debt. This SessionSync-lifetime state survives peer
+	// incarnation retirement: disconnect alone does not prove the successor
+	// applied a generation already sent.
+	configApplyDebtMu       sync.RWMutex
+	lastSentConfigDebt16756 configApplyDebt16756
+	// peerConfigNackedGen16756 is the generation of the newest
+	// current-send NACK (#16756 legacy fallback), or 0. SessionSync-
+	// lifetime like the debt above — NOT peer-incarnation state — so a
+	// legacy peer's NACK survives incarnation retirement until a newer
+	// send supersedes it. A NACK whose generation is behind
+	// lastSentConfigDebt16756.generation is a straggler and is ignored
+	// by both the re-push marker and the legacy fallback.
+	peerConfigNackedGen16756 atomic.Uint64
 	// Highest config generation the peer positively acknowledged as applied.
-	// PeerConfigStale compares this with lastSentConfigGen.
+	// PeerConfigStale compares this with lastSentConfigDebt16756.generation.
 	peerAppliedConfigGen atomic.Uint64
 
 	configGenCounter     atomic.Uint64
@@ -1906,10 +1925,10 @@ type SessionSync struct {
 	// on it. Taken only by the DHCP arms; the callback must not reenter DHCP
 	// receive paths (see OnDHCPLeasesReceived).
 	dhcpApplyMu sync.Mutex
-	// #15160: per-family pending chunk assemblies, guarded by dhcpApplyMu
-	// (touched only by the DHCP chunk handler's commit section and the
-	// legacy arms' supersede). A pending assembly never commits until its
-	// final chunk lands; a newer committed set discards it.
+	// #15160: per-family pending DHCP chunk assemblies and per-incarnation
+	// committed generations, guarded by dhcpApplyMu. The chunk handler fences
+	// stale completions before replacing the held set; a legacy commit also
+	// discards all pending assemblies.
 	dhcpChunkState4 dhcpChunkState
 	dhcpChunkState6 dhcpChunkState
 	// #16758: pending IPsec SA chunk assemblies and per-incarnation committed
@@ -1959,6 +1978,9 @@ type SessionSync struct {
 	// testBeforePeerSnapshotConfigWrite changes the learned protocol after
 	// queue preparation but immediately before the final guarded socket write.
 	testBeforePeerSnapshotConfigWrite func()
+	// testBeforeLastSentConfigDebtUnlock parks after assigning a complete
+	// debt snapshot but before releasing its publication lock. Nil in production.
+	testBeforeLastSentConfigDebtUnlock func()
 	// testBeforeScopedJournalTake runs in flushScopedDeleteJournal after
 	// the capability re-check and before the journal take, then nils
 	// itself (testBeforeQueuedWrite shape). Test-only; pins the
