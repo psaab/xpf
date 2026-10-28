@@ -65,10 +65,30 @@ type helperGeneration struct {
 	gen    uint64
 	cmd    *exec.Cmd
 	exited chan struct{}
+	// intentionalStop is set only for this generation, before xpfd signals it
+	// as part of an orderly stop. Access is under m.mu; the supervisor checks
+	// it after acquiring the same lock, so a stop racing Wait is ordered.
+	intentionalStop bool
 	// waitErr and state are written by the waiter before it closes exited, so
 	// a reader that has observed the close may read them without a lock.
 	waitErr error
 	state   *os.ProcessState
+}
+
+// MarkHelperStopIntent marks the currently running helper generation as
+// intentionally stopping. The daemon calls this near the beginning of its
+// ordered shutdown sequence, after bounding any in-flight control I/O and
+// before other teardown can wait or signal. The mark is per-generation: a
+// later helper starts clear and genuine failures still count.
+func (m *Manager) MarkHelperStopIntent() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.proc != nil && m.procSup != nil {
+		m.procSup.intentionalStop = true
+	}
 }
 
 // describeExit renders a reaped child's disposition for a log line and the
@@ -301,17 +321,12 @@ func (m *Manager) superviseHelper(g *helperGeneration) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Generation fence, and the ONLY thing that distinguishes an expected exit
-	// from a crash.
-	//
-	// An INTENTIONAL teardown clears procSup under m.mu before releasing it,
-	// and this goroutine cannot acquire m.mu until that release — so a stop is
-	// already `m.procSup != g` by the time we get here and takes the same exit
-	// as a stale generation. An earlier draft also carried a `stoppingHelper`
-	// flag for that case; it was removed because no input made it decide
-	// anything the fence had not already decided, and a branch whose condition
-	// never varies is untestable code pretending to be a safeguard.
-	if m.procSup != g || m.procGen != g.gen {
+	// The explicit per-generation stop mark handles helper exits during the
+	// daemon's ordered shutdown, before Manager.Close reaches stopLocked. A
+	// stale-generation fence remains necessary for any waiter whose process was
+	// superseded before it acquired m.mu. Either path returns before crash
+	// accounting or logging.
+	if g.intentionalStop || m.procSup != g || m.procGen != g.gen {
 		return
 	}
 	m.handleUnexpectedHelperExitLocked(g)

@@ -962,6 +962,12 @@ func (m *Manager) stopLocked() {
 	// debt. The bump is compatible with that path by construction: it already
 	// re-fences its next attempt on whatever `m.procGen` reads after the failed
 	// spawn.
+	// Mark this exact live process before the control shutdown request or
+	// escalation signals below. The supervisor checks the marker under m.mu
+	// before recording any crash, including if the child exits during teardown.
+	if m.proc != nil && m.procSup != nil {
+		m.procSup.intentionalStop = true
+	}
 	m.procGen++
 	// This record bit describes a currently running supervisor retry, not
 	// durable episode history; an intentional stop makes that claim stale.
