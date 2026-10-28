@@ -291,7 +291,7 @@ func TestCommitRefusedWhileHandoffDirty10769(t *testing.T) {
 	if _, err := d.commitConfirmedAndApply(context.Background(), configstore.InternalCommitter(), 1, peerSyncNever); !errors.Is(err, configstore.ErrResetHandoffDirty) {
 		t.Fatalf("commit-confirmed with dirty handoff = %v, want incomplete", err)
 	}
-	if _, err := d.syncAndApply(context.Background(), "system { host-name peer; }", nil); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+	if _, err := d.syncAndApplyForTest(context.Background(), "system { host-name peer; }", nil); !errors.Is(err, configstore.ErrResetHandoffDirty) {
 		t.Fatalf("sync with dirty handoff = %v, want incomplete", err)
 	}
 	if cfg := store.ActiveConfig(); cfg != nil {

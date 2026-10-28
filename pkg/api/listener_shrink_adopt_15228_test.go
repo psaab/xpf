@@ -19,7 +19,6 @@ func TestReconcileShrinkAdoptsSurvivingLeg15228(t *testing.T) {
 	defer cancel()
 	req := []string{"127.0.0.1:0", "[::1]:0"}
 	s := NewServer(Config{Addrs: req})
-	s.SetTLSCertDirForTest(t.TempDir())
 	if err := s.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
