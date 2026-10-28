@@ -268,7 +268,6 @@ impl RouteEntryV6 {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NeighborEntry {
     pub mac: [u8; 6],

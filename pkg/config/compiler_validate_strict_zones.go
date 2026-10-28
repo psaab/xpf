@@ -144,7 +144,7 @@ func validateReservedZoneNamesStrict(cfg *Config) error {
 // MaxUsableZoneID is the largest security-zone id the live AF_XDP userspace
 // dataplane can carry, and therefore the maximum number of DISTINCT zones a
 // config may define. #3075 widened the two same-host event-stream u8 chokepoints
-// (event_stream/codec.rs, forwarding_build/zones.rs + the fabric zone MAC) to
+// (event_stream/codec/session_sync.rs, forwarding_build/zones.rs + the fabric zone MAC) to
 // u16 and replaced the sorted 1..N positional id assignment with a stable
 // name-hash (config.StableZoneID, folded into [1, ZoneIDReservedMin-1]). The
 // binding constraint is therefore no longer the old u8 wire field (#2391, now

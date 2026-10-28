@@ -243,54 +243,15 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 			// the wire as an empty (unconstrained) list.
 			sourceAddrs = []string{natUnresolvedAddressNamePrefix + "nat64-source"}
 		}
-		// #15932/#16049: one snapshot per authored rule-set carries the
-		// whole zone / routing-instance unions. Fold each singular into
-		// its plural wire field (deduped, order-preserved) so the
-		// dataplane unions every authored value behind ONE
-		// (prefix, pool) allocator.
-		fromZones := append([]string(nil), rs.FromZones...)
-		if rs.FromZone != "" {
-			seen := false
-			for _, z := range fromZones {
-				if z == rs.FromZone {
-					seen = true
-					break
-				}
-			}
-			if !seen {
-				fromZones = append(fromZones, rs.FromZone)
-			}
-		}
-		// #16604: stamp every member in wire space — a raw authored
-		// literal `default` or the lowered ""+flag explicit master
-		// becomes the wire token; named instances pass through.
-		fromRIs := append([]string(nil), rs.FromRoutingInstances...)
-		if rs.FromRoutingInstance != "" {
-			seen := false
-			for _, ri := range fromRIs {
-				if ri == rs.FromRoutingInstance {
-					seen = true
-					break
-				}
-			}
-			if !seen {
-				fromRIs = append(fromRIs, rs.FromRoutingInstance)
-			}
-		}
+		// #15932/#16049/#17139: one snapshot per authored rule-set carries
+		// the whole zone / routing-instance unions via the single
+		// config normaliser (deduped union, RI members already lowered
+		// to wire space: a raw authored literal `default` or the lowered
+		// ""+flag explicit master becomes the wire token; named
+		// instances pass through).
+		fromZones := config.NAT64EffectiveZones(rs)
+		fromRIs := config.NAT64EffectiveRoutingInstances(cfg, rs)
 		singularWire := config.NATRoutingInstanceScopeWire(cfg, rs.FromRoutingInstance, rs.FromRoutingInstanceDefault)
-		for i, ri := range fromRIs {
-			fromRIs[i] = config.NormalizeNATRoutingInstanceScope16604(cfg, ri)
-		}
-		if rs.FromRoutingInstanceDefault {
-			for i, ri := range fromRIs {
-				if ri == "" {
-					fromRIs[i] = config.NATDefaultRoutingInstanceWire
-				}
-			}
-			if len(fromRIs) == 0 {
-				fromRIs = []string{config.NATDefaultRoutingInstanceWire}
-			}
-		}
 		out = append(out, NAT64RuleSnapshot{
 			Name:                       rs.Name,
 			Prefix:                     config.NormaliseNAT64PrefixForSnapshot(rs.Prefix),

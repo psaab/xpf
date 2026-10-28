@@ -960,7 +960,7 @@ impl std::ops::Deref for WorkerCommandQueues {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn empty_worker_commands_by_id() -> &'static WorkerCommandQueues {
     static EMPTY: std::sync::LazyLock<WorkerCommandQueues> =
         std::sync::LazyLock::new(|| WorkerCommandQueues::new(BTreeMap::new()));
@@ -970,20 +970,13 @@ pub(in crate::afxdp) fn empty_worker_commands_by_id() -> &'static WorkerCommandQ
 #[derive(Default)]
 pub(in crate::afxdp) struct DebugPollCounters {
     pub(in crate::afxdp) rx: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) tx: u64,
     pub(in crate::afxdp) forward: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) local: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) session_hit: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) session_miss: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) session_create: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) no_route: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) missing_neigh: u64,
     /// #5174: NAT64 MissingNeighbor fail-closed drops. Bumped when a PERMITTED
     /// NAT64 flow (IPv6 dst matching a Pref64) whose extracted-IPv4 next-hop is
@@ -991,26 +984,21 @@ pub(in crate::afxdp) struct DebugPollCounters {
     /// a plain-forward session + buffering the untranslated IPv6 frame (which the
     /// same-family cold-path replay cannot translate). The flow recovers via the
     /// ForwardCandidate path once the IPv4 neighbor resolves.
-    #[allow(dead_code)]
     pub(in crate::afxdp) nat64_missing_neigh_drop: u64,
     /// #1651 B3: dead-host negative-cache fast-fail count. Bumped when a
     /// MissingNeighbor packet to a negatively-cached (un-expired,
     /// still-unresolved) dst is recycled without buffering.
-    #[allow(dead_code)]
     pub(in crate::afxdp) neg_neigh_fast_fail: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) policy_deny: u64,
     /// #3610/M07: host-inbound-traffic admission denies, split out of
     /// `policy_deny` so a control-plane host-inbound drop is not conflated with a
     /// transit security-policy deny in the periodic debug report.
-    #[allow(dead_code)]
     pub(in crate::afxdp) host_inbound_deny: u64,
     /// #10038: solicited TUN-origin replies admitted via the forward-companion
     /// exemption (host-inbound + junos-host NEW-session gates skipped on a
     /// reverse LocalDelivery HIT). Debug-only (no BatchCounters/prometheus
     /// mapping: the mapping cost buys nothing — operators verify via delivery,
     /// and abuse signal comes from the deny side, which still counts).
-    #[allow(dead_code)]
     pub(in crate::afxdp) solicited_tun_origin_exempt: u64,
     /// #7212: established sessions REVOKED by a static interface INPUT filter
     /// revalidation — the operator attached or tightened a purely static
@@ -1020,7 +1008,6 @@ pub(in crate::afxdp) struct DebugPollCounters {
     /// packet without revoking the session. Counted once per revoked session,
     /// not per dropped packet: the session is torn down on the first denied
     /// packet and every later packet of that 5-tuple takes the session-MISS path.
-    #[allow(dead_code)]
     pub(in crate::afxdp) filter_revoked_sessions: u64,
     /// #8356: established sessions revoked because the live ZONE POLICY denies
     /// the flow — the policy sibling of `filter_revoked_sessions` above. A
@@ -1049,17 +1036,12 @@ pub(in crate::afxdp) struct DebugPollCounters {
     /// `policy_deny` (a NEW flow at the session-miss path) and from
     /// `policy_revoked_sessions` (an owner's session its own policy no longer
     /// admits).
-    #[allow(dead_code)]
     pub(in crate::afxdp) foreign_authority_drops: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) ha_inactive: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) no_egress_binding: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) build_fail: u64,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17195: read only by DbgCounters::accumulate in the debug-log gated module; dead without debug-log, so expect fires if that module is removed or a non-gated reader appears"))]
     pub(in crate::afxdp) tx_err: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) metadata_err: u64,
     pub(in crate::afxdp) disposition_other: u64,
     pub(in crate::afxdp) enqueue_ok: u64,
@@ -1073,10 +1055,10 @@ pub(in crate::afxdp) struct DebugPollCounters {
     pub(in crate::afxdp) nat_applied_snat: u64,
     pub(in crate::afxdp) nat_applied_dnat: u64,
     pub(in crate::afxdp) nat_applied_none: u64,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17195: read only by DbgCounters::accumulate in the debug-log gated module; dead without debug-log, so expect fires if that module is removed or a non-gated reader appears"))]
     pub(in crate::afxdp) frame_build_none: u64,
     pub(in crate::afxdp) rx_tcp_rst: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(in crate::afxdp) tx_tcp_rst: u64,
     pub(in crate::afxdp) rx_bytes_total: u64,
     pub(in crate::afxdp) tx_bytes_total: u64,
@@ -1095,7 +1077,7 @@ pub(in crate::afxdp) struct DebugPollCounters {
     pub(in crate::afxdp) tx_max_frame: u32,
     pub(in crate::afxdp) seg_needed_but_none: u64,
     pub(in crate::afxdp) wan_return_hits: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(in crate::afxdp) wan_return_misses: u64,
     pub(in crate::afxdp) rx_tcp_fin: u64,
     pub(in crate::afxdp) rx_tcp_synack: u64,

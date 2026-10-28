@@ -78,6 +78,11 @@ func (c *xpfCollector) initUserspaceStatus13280Descriptors() {
 		"Import-time untracked NAT reservations released during tunnel-remap purge.",
 		nil, nil,
 	)
+	c.userspaceTunnelPurgeDeleteRefused = prometheus.NewDesc(
+		"xpf_userspace_tunnel_purge_delete_refused_total",
+		"Tunnel-remap purge session deletes refused; the session was retained, no Close was emitted and no reservation was released.",
+		nil, nil,
+	)
 	c.userspaceSyncedReverseRederived = prometheus.NewDesc(
 		"xpf_userspace_synced_reverse_rederived_total",
 		"Peer-synced reverse companions re-derived during reconcile replay.",

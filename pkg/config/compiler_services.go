@@ -700,12 +700,7 @@ func mergeDHCPDynamicDNS(dst, src *DHCPDynamicDNSConfig) *DHCPDynamicDNSConfig {
 	if dst.Domain == "" {
 		dst.Domain = src.Domain
 	}
-	if dst.ForwardZone == "" {
-		dst.ForwardZone = src.ForwardZone
-	}
-	if dst.ReverseZone == "" {
-		dst.ReverseZone = src.ReverseZone
-	}
+	dst.RFC2136Endpoint.MergeFrom(src.RFC2136Endpoint)
 	if dst.HostnameSource == "" {
 		dst.HostnameSource = src.HostnameSource
 	}
@@ -714,28 +709,6 @@ func mergeDHCPDynamicDNS(dst, src *DHCPDynamicDNSConfig) *DHCPDynamicDNSConfig {
 	}
 	if dst.Backend == "" {
 		dst.Backend = src.Backend
-	}
-	if dst.UpdateServer == "" {
-		dst.UpdateServer = src.UpdateServer
-	}
-	if dst.TSIGKeyName == "" {
-		dst.TSIGKeyName = src.TSIGKeyName
-	}
-	if dst.TSIGAlgorithm == "" {
-		dst.TSIGAlgorithm = src.TSIGAlgorithm
-	}
-	if dst.TSIGSecret.Reveal() == "" {
-		dst.TSIGSecret = src.TSIGSecret
-	}
-	dst.RequireTSIG = dst.RequireTSIG || src.RequireTSIG
-	if dst.SourceAddress == "" {
-		dst.SourceAddress = src.SourceAddress
-	}
-	if dst.DestinationInterface == "" {
-		dst.DestinationInterface = src.DestinationInterface
-	}
-	if dst.RoutingInstance == "" {
-		dst.RoutingInstance = src.RoutingInstance
 	}
 	if dst.TTLSeconds == 0 {
 		dst.TTLSeconds = src.TTLSeconds
@@ -816,19 +789,10 @@ func compileDHCPDynamicDNS(node *Node) *DHCPDynamicDNSConfig {
 
 	d.Enabled = enabled
 	d.Domain = props["domain"]
-	d.ForwardZone = props["forward-zone"]
-	d.ReverseZone = props["reverse-zone"]
 	d.HostnameSource = props["hostname-source"]
 	d.ConflictPolicy = props["conflict-policy"]
 	d.Backend = props["backend"]
-	d.UpdateServer = props["update-server"]
-	d.TSIGKeyName = props["tsig-key"]
-	d.TSIGAlgorithm = props["tsig-algorithm"]
-	d.TSIGSecret = NewSecret(props["tsig-secret"])
-	d.RequireTSIG = props["require-tsig"] == "true"
-	d.SourceAddress = props["source-address"]
-	d.DestinationInterface = props["destination-interface"]
-	d.RoutingInstance = props["routing-instance"]
+	d.RFC2136Endpoint = compileRFC2136Endpoint(props)
 	if v := props["ttl"]; v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			d.TTLSeconds = n
@@ -837,11 +801,11 @@ func compileDHCPDynamicDNS(node *Node) *DHCPDynamicDNSConfig {
 
 	// Empty block -> treat as absent (no DDNS). A block with only
 	// `enable` is meaningful (defaults apply), so check the union.
+	// #17237: endpoint emptiness is the shared IsZero(), so a zone-only
+	// block (forward-zone/reverse-zone) is kept, not discarded to inherit
+	// the other family's policy.
 	if !d.Enabled && d.Domain == "" && d.HostnameSource == "" &&
-		d.ConflictPolicy == "" && d.Backend == "" && d.UpdateServer == "" &&
-		d.TSIGKeyName == "" && d.TSIGAlgorithm == "" && d.TSIGSecret.Reveal() == "" && !d.RequireTSIG &&
-		d.SourceAddress == "" && d.DestinationInterface == "" &&
-		d.RoutingInstance == "" && d.TTLSeconds == 0 {
+		d.ConflictPolicy == "" && d.Backend == "" && d.RFC2136Endpoint.IsZero() && d.TTLSeconds == 0 {
 		return nil
 	}
 	return d
@@ -2719,15 +2683,11 @@ func compileDHCPRelay(node *Node, fo *ForwardingOptionsConfig) error {
 				// Keys[1:] (flat-set replay may carry trailing values
 				// as children); braced block `interface { a; b; }`
 				// holds one child per interface. nodeVal kept only the
-				// first of each.
-				for _, k := range prop.Keys[1:] {
-					g.Interfaces = append(g.Interfaces, k)
-				}
-				for _, child := range prop.Children {
-					if v := child.Name(); v != "" {
-						g.Interfaces = append(g.Interfaces, v)
-					}
-				}
+				// first of each. The member list itself is read by the
+				// shared dhcpRelayGroupInterfaces (#17205) so the v4
+				// compiler, the v6 compiler and the v6 gate judge the
+				// same tokens.
+				g.Interfaces = append(g.Interfaces, dhcpRelayGroupInterfaces(prop)...)
 			case "active-server-group":
 				g.ActiveServerGroup = nodeVal(prop)
 			case "overrides":

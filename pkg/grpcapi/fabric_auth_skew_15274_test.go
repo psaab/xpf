@@ -26,7 +26,7 @@ func TestGarbageTokenDoesNotEraseMeasuredSkew_15274(t *testing.T) {
 	now := time.Unix(1785600000, 0)
 	s := &Server{}
 
-	clause := s.noteFabricAuthSkew([][]byte{key}, tokenAtOffset(t, key, now, 150*time.Second), now)
+	clause := s.noteFabricAuthSkew([][]byte{key}, tokenAtOffset(t, key, now, 150*time.Second, ""), now, "")
 	if clause == "" {
 		t.Fatal("setup: skewed token produced no clause; fixture is not skewed")
 	}
@@ -35,7 +35,7 @@ func TestGarbageTokenDoesNotEraseMeasuredSkew_15274(t *testing.T) {
 	}
 
 	garbageAt := now.Add(fabricAuthSkewScanInterval + time.Second)
-	if got := s.noteFabricAuthSkew([][]byte{key}, strings.Repeat("cd", 32), garbageAt); got != "" {
+	if got := s.noteFabricAuthSkew([][]byte{key}, strings.Repeat("cd", 32), garbageAt, ""); got != "" {
 		t.Fatalf("garbage token produced a skew clause %q; an unverifiable token must not be labelled a clock problem", got)
 	}
 	if skew, have := s.FabricPeerClockSkew(); !have || skew != 150 {

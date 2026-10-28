@@ -111,18 +111,6 @@ pub(in crate::afxdp) struct ForwardingState {
     /// owned in EVERY table, mirroring `scope_ok`'s empty-instance wildcard.
     /// Interface host addresses are NEVER wildcarded (an interface IP genuinely
     /// lives in exactly one VRF).
-    /// #16131: interned twin of the string set below, kept ONLY as a
-    /// dual-carry agreement source while the string form remains
-    /// authoritative. Derived once per build by
-    /// `forwarding_build::intern_route_tables` from the authoritative
-    /// string sets and the published `route_table_identities`; never
-    /// written by any other code, never read on the packet path. The
-    /// agreement cell in `forwarding_build/intern.rs` proves both
-    /// carries agree on every built state — a disagreement fails the
-    /// build closed rather than letting an unproven interned form
-    /// near a lookup.
-    pub(in crate::afxdp) local_table_ids_v4: FastMap<Ipv4Addr, FastSet<RouteIdentity>>,
-    pub(in crate::afxdp) local_table_ids_v6: FastMap<Ipv6Addr, FastSet<RouteIdentity>>,
     pub(in crate::afxdp) local_tables_v4: FastMap<Ipv4Addr, FastSet<String>>,
     pub(in crate::afxdp) local_tables_v6: FastMap<Ipv6Addr, FastSet<String>>,
     pub(in crate::afxdp) local_nat_any_table_v4: FastSet<Ipv4Addr>,
@@ -154,20 +142,8 @@ pub(in crate::afxdp) struct ForwardingState {
     /// last-write-wins when two VRFs configured the same address on
     /// different interfaces. The nested form also keeps the per-packet
     /// lookup allocation-free (borrowed `&str` table key).
-    /// #16131: dual-carry interned twin of the nested string-keyed map
-    /// below; the inner map is keyed by the interned `RouteIdentity`
-    /// instead of the canonical table string. Derived at build by
-    /// `forwarding_build::intern_route_tables`; the string form stays
-    /// authoritative (see `local_table_ids_v4`).
-    pub(in crate::afxdp) interface_nat_ids_v4: FastMap<Ipv4Addr, FastMap<RouteIdentity, i32>>,
-    pub(in crate::afxdp) interface_nat_ids_v6: FastMap<Ipv6Addr, FastMap<RouteIdentity, i32>>,
     pub(in crate::afxdp) interface_nat_v4: FastMap<Ipv4Addr, FastMap<String, i32>>,
     pub(in crate::afxdp) interface_nat_v6: FastMap<Ipv6Addr, FastMap<String, i32>>,
-    /// #16131: dual-carry interned twins of the string sets below;
-    /// derived at build by `forwarding_build::intern_route_tables`.
-    /// The string form stays authoritative.
-    pub(in crate::afxdp) interface_nat_table_ids_v4: FastMap<Ipv4Addr, FastSet<RouteIdentity>>,
-    pub(in crate::afxdp) interface_nat_table_ids_v6: FastMap<Ipv6Addr, FastSet<RouteIdentity>>,
     /// #12086: owning routing tables for interface-NAT local-delivery
     /// addresses. Like `local_tables_v*`, these interface addresses are not
     /// wildcarded across routing instances.
@@ -180,20 +156,33 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) connected_v6_by_ifindex: FastMap<i32, Vec<PrefixV6>>,
     pub(in crate::afxdp) connected_v4: Vec<ConnectedRouteV4>,
     pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
-    /// #16217: build-time longest-prefix index over `connected_v4`
-    /// (+ the by-ifindex ledger fallback rows), keyed by
-    /// (table, prefix_len, network). `connected_owner_rg_for_target_in_table`
-    /// probes it from the longest length down instead of linearly
-    /// scanning every connected row per flow-cache hit. Built by
+    /// #16217/#17053: build-time cache of the canonical
+    /// `connected_lpm_ifindex(.., RowsThenLedger)` owner answer,
+    /// keyed by (prefix_len, network) with per-table-key slots.
+    /// `connected_owner_rg_for_target_in_table` probes it from the
+    /// longest length down instead of linearly scanning every
+    /// connected row per flow-cache hit. Built by
     /// `rebuild_connected_owner_index` at forwarding-state build;
     /// empty when the state was assembled without that call (unit
-    /// fixtures), in which case the lookup falls back to the exact
-    /// legacy scan — same answer, old cost. Values are the owning
-    /// interface's RG resolved at build (`owner_rg_for_flow`).
+    /// fixtures), in which case callers use the canonical LPM scan
+    /// — same answer, old cost. Slot shape:
+    /// `(table_key, slot_ifindex, winning_rg)` where `slot_ifindex`
+    /// is the raw winning ifindex for FIB slots and `-ifindex - 1`
+    /// for ledger slots (see below); the rebuild keeps
+    /// the LOWEST ifindex at equal (table, len, network) for both
+    /// FIB and ledger entries (#17053). Ledger slots store the
+    /// ifindex negated as `-ifindex - 1` (always negative, so the
+    /// probe's `>= 0` / `< 0` split never confuses them with FIB
+    /// slots). INVARIANT (#17053 fold, Rev18099 F2): ledger keys are
+    /// kernel ifindexes and are therefore > 0 in every production
+    /// state (populated from `iface.ifindex` in
+    /// `forwarding_build`); the negation is computed with
+    /// `checked_neg` and skips (never wraps) the one value it cannot
+    /// encode, `i32::MIN`, whose wrap would alias a FIB slot.
     pub(in crate::afxdp) connected_owner_index_v4:
-        FastMap<(u8, u32), Vec<(Box<str>, u32, i32)>>,
+        FastMap<(u8, u32), Vec<(Box<str>, i32, i32)>>,
     pub(in crate::afxdp) connected_owner_index_v6:
-        FastMap<(u8, u128), Vec<(Box<str>, u32, i32)>>,
+        FastMap<(u8, u128), Vec<(Box<str>, i32, i32)>>,
     /// #16217 (GLM F1): row counts the index was built from
     /// (FIB rows + ledger prefixes, both families). A post-build
     /// mutation of the connected vecs/ledger (unit fixtures) makes
@@ -239,12 +228,6 @@ pub(in crate::afxdp) struct ForwardingState {
     /// Explicit canonical-table identity authority captured with this immutable
     /// FIB generation. Missing keys are never interpreted as the default table.
     pub(in crate::afxdp) route_table_identities: FastMap<String, RouteIdentity>,
-    /// #16131: false when any table name interned into the dual-carry
-    /// `*_ids_*` twins lacked a published `route_table_identities` row
-    /// (identity is never synthesized in that case — the name is simply
-    /// absent from the interned carry). Diagnostic only: the string
-    /// carry stays authoritative and the packet path never reads this.
-    pub(in crate::afxdp) route_table_interning_complete: bool,
     /// False when any selectable FIB table lacks an authoritative identity.
     pub(in crate::afxdp) route_table_identity_map_complete: bool,
     pub(in crate::afxdp) tunnel_endpoints: FastMap<u16, TunnelEndpoint>,
@@ -265,8 +248,8 @@ pub(in crate::afxdp) struct ForwardingState {
     /// decap fast path. Keyed by the OUTER tuple as seen FROM THE
     /// ENDPOINT's perspective — `(outer_family, endpoint.source,
     /// endpoint.destination)` — so a received GRE frame is matched with
-    /// `(meta.addr_family, outer_dst, outer_src)`. Only `mode == "gre"`
-    /// / `"ip6gre"` endpoints are indexed (kind-segregation): a GRE
+    /// `(meta.addr_family, outer_dst, outer_src)`. Only GRE-kind
+    /// endpoints are indexed (kind-segregation): a GRE
     /// (proto-47) packet can NEVER be decapped against a WireGuard or
     /// any non-GRE row even if its outer tuple/key collide. Each bucket
     /// is a `Vec<u16>` of endpoint IDs so a duplicate outer tuple
@@ -276,7 +259,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// `tunnel_endpoints.values().find(...)` scan (agy #4).
     pub(in crate::afxdp) gre_decap_index: FastMap<(i32, IpAddr, IpAddr), Vec<u16>>,
     /// WireGuard engines keyed by tunnel_endpoint_id (#1432 S2a). One
-    /// per `mode == "wireguard"` endpoint. Shared (`Arc`) so workers
+    /// per WireGuard-kind endpoint. Shared (`Arc`) so workers
     /// hold the engine across a forwarding-state ArcSwap; engine
     /// identity is reused across reloads when the endpoint config is
     /// unchanged (see `forwarding_build::wg`), so the TAI64N clock and
@@ -671,7 +654,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// tunnels between the same endpoints map to distinct sessions. The
     /// userspace dataplane keys GRE flows on the 5-tuple only, so this flag is
     /// threaded into ForwardingState for config truth/parity but is NOT yet read
-    /// by any packet/forwarding path — hence `#[allow(dead_code)]`. The consumer
+    /// by any packet/forwarding path. The consumer
     /// #7188: READ by stage_parse_flow_and_learn, which gives transit GRE an
     /// identity keyed on the RFC 2890 discriminator when this is set. Off, the
     /// packet stays flowless exactly as #6837 left it.
@@ -687,7 +670,6 @@ pub(in crate::afxdp) struct ForwardingState {
     /// userspace dataplane has a single forwarding path, so the flag is held
     /// for config truth/parity and does not currently switch behavior (there
     /// is no express/regular split to select between).
-    #[allow(dead_code)]
     pub(in crate::afxdp) power_mode_disable: bool,
     // #2130: the dead Rust FlowExporter + its flow_export_config field were
     // removed. Flow export is owned by the Go control plane (pkg/flowexport);
@@ -721,7 +703,7 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) cold_path_sample_mask: u64,
     /// #1636 option D: how long a queued packet with an unresolved
     /// neighbor is held before being dropped + recycled. Computed per
-    /// snapshot in `build_forwarding_state_with_policy_counters_and_previous`
+    /// snapshot in `build_forwarding_state_with_preparsed_policy_and_previous`
     /// (`compute_pending_neigh_timeout_ns`): 800ms when the kernel
     /// `retrans_time_ms` is <= NEIGH_RETRANS_FAST_THRESHOLD_MS (300ms —
     /// the daemon writes 250 but the kernel jiffy-rounds it to 252 on
@@ -766,7 +748,12 @@ pub(in crate::afxdp) struct ForwardingState {
     /// forwarded packet via `record_zone_traffic` (two array reads, no hash).
     /// Rotated via the ForwardingState ArcSwap alongside `cold_path_slot_map`.
     pub(in crate::afxdp) zone_counter_slot_map:
-        std::sync::Arc<crate::afxdp::zone_counters::ZoneCounterSlotMap>,
+        std::sync::Arc<crate::afxdp::zone_slot_counters::ZoneSlotMap>,
+    /// #17204: per-slot cached atomic blocks for BOTH families, resolved from
+    /// the two stores at build time so the per-batch folds never lock. The
+    /// flood family folds through this same caches value (family 2).
+    pub(in crate::afxdp) zone_counter_caches:
+        std::sync::Arc<crate::afxdp::zone_counters::ZoneCounterCaches>,
     /// #3651: coordinator-owned cumulative per-zone traffic totals. Keyed by
     /// stable zone id, `Clone` shares the inner `Arc<Mutex>`, so cloning this
     /// state (worker publish) and carrying it forward across config applies
@@ -779,7 +766,11 @@ pub(in crate::afxdp) struct ForwardingState {
     /// on the forward path) via `record_zone_flood_drop`. Rotated via the
     /// ForwardingState ArcSwap alongside its siblings.
     pub(in crate::afxdp) flood_counter_slot_map:
-        std::sync::Arc<crate::afxdp::flood_counters::FloodCounterSlotMap>,
+        std::sync::Arc<crate::afxdp::zone_slot_counters::ZoneSlotMap>,
+    /// Alias of `zone_counter_caches` for the flood family's named surface;
+    /// both Arcs point at the one caches value built per apply.
+    pub(in crate::afxdp) flood_counter_caches:
+        std::sync::Arc<crate::afxdp::flood_counters::FloodCounterCaches>,
     /// #3651: coordinator-owned cumulative per-zone flood-event totals. Keyed by
     /// stable zone id, `Clone` shares the inner `Arc<Mutex>`, so cloning this
     /// state (worker publish) and carrying it forward across config applies
@@ -806,51 +797,45 @@ pub(in crate::afxdp) enum ConnectedOwnerIndex {
 }
 
 impl ForwardingState {
-    /// #16217: (re)build the connected-owner longest-prefix indexes
+    /// #17053: (re)build the connected-owner longest-prefix indexes
     /// from `connected_v4`/`connected_v6` plus the by-ifindex ledger
     /// rows. Called once per forwarding-state build (after the
-    /// connected vecs are final). The index mirrors the legacy
-    /// scan's precedence EXACTLY:
+    /// connected vecs are final). The index answers the canonical
+    /// `connected_lpm_ifindex(.., RowsThenLedger)` (owner RG at
+    /// build time) with an indexed probe:
     ///   1. FIB rows in table scope (row.table empty matches every
-    ///      scope), longest prefix wins, LAST row wins ties — an
-    ///      empty-table row is therefore visible under EVERY table
-    ///      key, so it is expanded per distinct table name present
-    ///      in the row set (plus the family defaults).
-    ///   2. The by-ifindex ledger is consulted by the legacy scan
-    ///      ONLY when no FIB row matched in scope, so ledger rows
-    ///      fill only (table, len, network) keys not already claimed
-    ///      by a FIB row for a target that scope can name; a ledger
-    ///      row scoped to instance R contributes under table keys
-    ///      `<R>.inet.0`/`<R>.inet6.0` (and the defaults when R is
-    ///      empty), mirroring `interface_in_table_scope`.
-    /// Equal (len, network) collisions keep the LAST writer, matching
-    /// the scan's `len >= best_len` replacement.
+    ///      scope), longest prefix wins, LOWEST ifindex wins ties
+    ///      (#17053, #10645 precedent). Ties are decided by ifindex,
+    ///      never by insertion order: a stored slot keeps the lowest
+    ///      ifindex at equal (table, len, network).
+    ///   2. The by-ifindex ledger is consulted ONLY when no FIB row
+    ///      matched in scope, so a ledger row fills a probe only
+    ///      when no FIB row covers that (table, len, network); its
+    ///      scope follows `instance_owns_table_{v4,v6}` (empty
+    ///      instance -> family defaults ONLY; named R -> `<R>.inet.*`
+    ///      ONLY). Equal-length ledger ties likewise keep the lowest
+    ///      ifindex.
     pub(in crate::afxdp) fn rebuild_connected_owner_index(&mut self) {
         self.connected_owner_index_v4.clear();
         self.connected_owner_index_v6.clear();
         self.connected_owner_index_rows = (0, 0);
-        // #16217 (Codex #2/#3/#4/#6 + GLM F1): the ledger scope keys
-        // must mirror `interface_in_table_scope` EXACTLY. The legacy
-        // scan, for probe table `want`, includes a ledger row iff:
-        // want=None -> instance empty; want set -> instance empty
-        // only for inet.0/inet6.0, else want == `<instance>.inet.0`
-        // or `<instance>.inet6.0`. So a NAMED instance's ledger rows
-        // are visible ONLY under its own `<R>.inet.*` keys — never
-        // under the family defaults, and a default-instance row is
-        // visible under the defaults ONLY (plus, for empty-instance,
-        // no named key). The probe must therefore use the ORIGINAL
-        // want verbatim (no remap to the default key): remapping a
-        // named want to "inet.0" would (a) hide that instance's own
-        // ledger rows (filed under `<R>.inet.0`) and (b) wrongly
-        // surface default-instance rows under a named scope. Both
-        // diverged from the legacy scan.
-        // Empty-table rows are visible in EVERY scope (legacy:
-        // row.table empty matches any want). They are filed under
-        // the sentinel key "" and the probe considers want-key and
-        // sentinel entries together, newest (highest seq) winning
-        // at equal length — the legacy `len >= best_len` LAST-row
-        // tie-break across the whole row vec.
-        let mut seq4: u32 = 0;
+        // #17053: the ledger scope keys must mirror the canonical
+        // per-family predicate EXACTLY (`instance_owns_table_v4` for
+        // v4 rows, `instance_owns_table_v6` for v6 rows). A probe for
+        // table `want` includes a ledger row iff that predicate holds
+        // for the row's instance: empty instance owns only the family
+        // default; a named R owns only `<R>.inet.0` (v4) /
+        // `<R>.inet6.0` (v6). The probe must therefore use the
+        // ORIGINAL want verbatim (no remap to the default key):
+        // remapping a named want to "inet.0" would hide that
+        // instance's own ledger rows and wrongly surface
+        // default-instance rows under a named scope.
+        // Empty-table FIB rows are visible in EVERY scope; they are
+        // filed under the sentinel key "" and the probe considers
+        // want-key and sentinel entries together. Within one
+        // (table-key, len, network) slot the LOWEST ifindex wins
+        // (#17053 canonical tie), stored in the slot's second field;
+        // the third field is the winning interface's RG.
         for row in &self.connected_v4 {
             let rg = crate::afxdp::forwarding::owner_rg_for_flow(self, row.ifindex);
             let len = row.prefix.prefix_len();
@@ -865,14 +850,14 @@ impl ForwardingState {
                 .entry((len, net))
                 .or_default();
             if let Some(existing) = slot.iter_mut().find(|(k, _, _)| &**k == key) {
-                existing.1 = seq4;
-                existing.2 = rg;
+                if row.ifindex < existing.1 {
+                    existing.1 = row.ifindex;
+                    existing.2 = rg;
+                }
             } else {
-                slot.push((key.into(), seq4, rg));
+                slot.push((key.into(), row.ifindex, rg));
             }
-            seq4 += 1;
         }
-        let mut seq6: u32 = 0;
         for row in &self.connected_v6 {
             let rg = crate::afxdp::forwarding::owner_rg_for_flow(self, row.ifindex);
             let len = row.prefix.prefix_len();
@@ -887,18 +872,33 @@ impl ForwardingState {
                 .entry((len, net))
                 .or_default();
             if let Some(existing) = slot.iter_mut().find(|(k, _, _)| &**k == key) {
-                existing.1 = seq6;
-                existing.2 = rg;
+                if row.ifindex < existing.1 {
+                    existing.1 = row.ifindex;
+                    existing.2 = rg;
+                }
             } else {
-                slot.push((key.into(), seq6, rg));
+                slot.push((key.into(), row.ifindex, rg));
             }
-            seq6 += 1;
         }
-        // Ledger fallback rows: only fill keys no FIB row claimed.
-        // Scope per `interface_in_table_scope` (see above): empty
-        // instance -> family defaults ONLY; named R -> `<R>.inet.*`
-        // ONLY (v4 and v6 keys both, mirroring the predicate, which
-        // accepts either family suffix for a named instance).
+        // Ledger fallback rows: a ledger entry must NEVER displace
+        // a FIB entry at the same (len, network, table) — the
+        // canonical precedence is FIB-then-ledger at ANY length
+        // (a shorter FIB row beats a longer ledger prefix), so the
+        // probe needs two distinguishable phases. Ledger entries
+        // therefore store their ifindex NEGATED (`-ifindex - 1`, so
+        // ifindex 0 stays negative) in the slot's second field; FIB
+        // entries store their raw (>= 0) ifindex. Scope per the
+        // canonical per-family predicate (see above); within one
+        // scoped key the LOWEST ifindex wins (#17053).
+        // #17053 fold (Rev18099 F2): the negation MUST NOT wrap.
+        // Ledger keys are kernel ifindexes (> 0 in production; see
+        // the slot-shape invariant on the index fields), but
+        // `-i32::MIN - 1` overflows (debug panic / release wrap to a
+        // positive value the probe would misread as a FIB slot).
+        // Encode via `checked_neg(..).map(|n| n - 1)` and skip the
+        // unencodable `i32::MIN` key entirely; decoding an existing
+        // slot (`-existing - 1`) is exact because stored ledger
+        // values are in `i32::MIN..=-1` by construction.
         for (ifindex, prefixes) in &self.connected_v4_by_ifindex {
             let rg = crate::afxdp::forwarding::owner_rg_for_flow(self, *ifindex);
             let instance = self
@@ -906,31 +906,29 @@ impl ForwardingState {
                 .get(ifindex)
                 .map(String::as_str)
                 .unwrap_or("");
-            let scoped: Vec<String> = if instance.is_empty() {
-                vec!["inet.0".to_string(), "inet6.0".to_string()]
+            let scoped: String = if instance.is_empty() {
+                "inet.0".to_string()
             } else {
-                vec![format!("{instance}.inet.0"), format!("{instance}.inet6.0")]
+                format!("{instance}.inet.0")
             };
             for prefix in prefixes {
                 let len = prefix.prefix_len();
                 let net = u32::from(prefix.addr());
-                for t in &scoped {
-                    // v4 ledger rows answer v4 probes; the inet6.0
-                    // key in `scoped` is for the predicate's family
-                    // symmetry on v6 rows below — a v4 prefix under
-                    // an inet6.0 key is never probed (family-split
-                    // indexes), so inserting it is inert. Keep only
-                    // the family-correct key to avoid dead rows.
-                    if t.ends_with("inet6.0") {
-                        continue;
+                let slot = self
+                    .connected_owner_index_v4
+                    .entry((len, net))
+                    .or_default();
+                // F2: skip the unencodable i32::MIN ledger key.
+                let Some(encoded) = ifindex.checked_neg().map(|n| n - 1) else {
+                    continue;
+                };
+                if let Some(existing) = slot.iter_mut().find(|(k, _, _)| &**k == scoped.as_str()) {
+                    if existing.1 < 0 && *ifindex < -existing.1 - 1 {
+                        existing.1 = encoded;
+                        existing.2 = rg;
                     }
-                    let slot = self
-                        .connected_owner_index_v4
-                        .entry((len, net))
-                        .or_default();
-                    if !slot.iter().any(|(k, _, _)| &**k == t.as_str()) {
-                        slot.push((t.clone().into_boxed_str(), u32::MAX, rg));
-                    }
+                } else {
+                    slot.push((scoped.clone().into_boxed_str(), encoded, rg));
                 }
             }
         }
@@ -941,22 +939,29 @@ impl ForwardingState {
                 .get(ifindex)
                 .map(String::as_str)
                 .unwrap_or("");
-            let scoped: Vec<String> = if instance.is_empty() {
-                vec!["inet6.0".to_string()]
+            let scoped: String = if instance.is_empty() {
+                "inet6.0".to_string()
             } else {
-                vec![format!("{instance}.inet6.0")]
+                format!("{instance}.inet6.0")
             };
             for prefix in prefixes {
                 let len = prefix.prefix_len();
                 let net = u128::from(prefix.addr());
-                for t in &scoped {
-                    let slot = self
-                        .connected_owner_index_v6
-                        .entry((len, net))
-                        .or_default();
-                    if !slot.iter().any(|(k, _, _)| &**k == t.as_str()) {
-                        slot.push((t.clone().into_boxed_str(), u32::MAX, rg));
+                let slot = self
+                    .connected_owner_index_v6
+                    .entry((len, net))
+                    .or_default();
+                // F2: skip the unencodable i32::MIN ledger key.
+                let Some(encoded) = ifindex.checked_neg().map(|n| n - 1) else {
+                    continue;
+                };
+                if let Some(existing) = slot.iter_mut().find(|(k, _, _)| &**k == scoped.as_str()) {
+                    if existing.1 < 0 && *ifindex < -existing.1 - 1 {
+                        existing.1 = encoded;
+                        existing.2 = rg;
                     }
+                } else {
+                    slot.push((scoped.clone().into_boxed_str(), encoded, rg));
                 }
             }
         }
@@ -991,15 +996,21 @@ impl ForwardingState {
         self.connected_owner_index_rows == (fib, ledger)
     }
 
-    /// #16217: longest-prefix owner probe over the build-time index.
-    /// Returns `None` when the index is empty (state never built it —
-    /// unit fixtures), so the caller falls back to the legacy scan.
-    /// Otherwise `Hit(rg)`/`Miss` exactly mirror the legacy scan's
-    /// FIB+ledger outcome for (target, table). The probe uses the
-    /// ORIGINAL want table verbatim (GLM F1: no remap to the default
-    /// key — a named scope must not see default-instance ledger rows,
-    /// and must see its own). Hot path: borrowed `&str` keys, no
-    /// allocation per probe (Codex #6).
+    /// #16217/#17053: longest-prefix owner probe over the build-time
+    /// index. Returns `None` when the index is empty (state never
+    /// built it — unit fixtures), so the caller uses the canonical
+    /// LPM scan. Otherwise `Hit(rg)`/`Miss` mirror the canonical
+    /// `RowsThenLedger` outcome for (target, table) INCLUDING the
+    /// two-phase precedence: the FIB pass runs first (empty-table
+    /// rows visible in every scope via the "" key, per-length winner
+    /// by LOWEST ifindex) and the ledger pass runs only when no FIB
+    /// row matched at any length — a longer ledger prefix never
+    /// beats a shorter FIB row. The rebuild marks ledger entries by
+    /// storing `-ifindex - 1` (always negative) in the slot; FIB
+    /// entries store their raw ifindex. The probe uses the ORIGINAL
+    /// want verbatim (no remap to the default key — a named scope
+    /// must not see default-instance ledger rows, and must see its
+    /// own). Hot path: borrowed `&str` keys, no allocation per probe.
     pub(in crate::afxdp) fn connected_owner_index_lookup(
         &self,
         target: IpAddr,
@@ -1023,26 +1034,16 @@ impl ForwardingState {
                         .get(&(len, net))
                         .and_then(|slot| {
                             slot.iter()
-                                .filter(|(k, seq, _)| {
-                                    *seq != u32::MAX && (&**k == want || k.is_empty())
+                                .filter(|(k, ifindex, _)| {
+                                    *ifindex >= 0 && (&**k == want || k.is_empty())
                                 })
-                                .max_by_key(|(_, seq, _)| *seq)
+                                .min_by_key(|(_, ifindex, _)| *ifindex)
                         })
                         .map(|(_, _, rg)| rg)
                     {
                         return Some(ConnectedOwnerIndex::Hit(*rg));
                     }
                 }
-                // Ledger pass (legacy Source 1 fallback): only
-                // reached when no FIB row matched at ANY length for
-                // this want — the legacy scan consults the ledger
-                // only when its FIB scan found nothing. Ledger rows
-                // are filed under their exact scope keys (named
-                // instance `<R>.inet.0`, defaults for empty instance)
-                // with seq u32::MAX; longest prefix wins, and the
-                // ledger's own `len >= best_len` tie keeps the last
-                // inserted at equal length (single entry per key by
-                // construction, `or_insert`-style fill at build).
                 for len in (0..=32u8).rev() {
                     let net = if len == 0 {
                         0
@@ -1053,7 +1054,7 @@ impl ForwardingState {
                         .connected_owner_index_v4
                         .get(&(len, net))
                         .and_then(|slot| {
-                            slot.iter().find(|(k, seq, _)| *seq == u32::MAX && &**k == want)
+                            slot.iter().find(|(k, ifindex, _)| *ifindex < 0 && &**k == want)
                         })
                         .map(|(_, _, rg)| rg)
                     {
@@ -1079,10 +1080,10 @@ impl ForwardingState {
                         .get(&(len, net))
                         .and_then(|slot| {
                             slot.iter()
-                                .filter(|(k, seq, _)| {
-                                    *seq != u32::MAX && (&**k == want || k.is_empty())
+                                .filter(|(k, ifindex, _)| {
+                                    *ifindex >= 0 && (&**k == want || k.is_empty())
                                 })
-                                .max_by_key(|(_, seq, _)| *seq)
+                                .min_by_key(|(_, ifindex, _)| *ifindex)
                         })
                         .map(|(_, _, rg)| rg)
                     {
@@ -1099,7 +1100,7 @@ impl ForwardingState {
                         .connected_owner_index_v6
                         .get(&(len, net))
                         .and_then(|slot| {
-                            slot.iter().find(|(k, seq, _)| *seq == u32::MAX && &**k == want)
+                            slot.iter().find(|(k, ifindex, _)| *ifindex < 0 && &**k == want)
                         })
                         .map(|(_, _, rg)| rg)
                     {

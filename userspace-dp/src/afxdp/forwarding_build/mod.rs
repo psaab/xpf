@@ -32,8 +32,6 @@ mod cos;
 mod fib;
 mod install_tables;
 mod interfaces;
-/// #16131: dual-carry route-table interning (see `intern.rs` header).
-pub(super) mod intern;
 mod tunnels;
 mod validated;
 mod wg;
@@ -55,7 +53,6 @@ pub(crate) use fib::fenced_neighbor_mac;
 pub(in crate::afxdp) use interfaces::{
     connected_route_tables, is_host_inbound_lifeline, pick_interface_v4, pick_interface_v6,
 };
-pub(in crate::afxdp) use intern::route_table_dual_carry_agrees;
 // #1866: WG row-identity hydration shared with the coordinator's
 // tombstone-respawn coherence check + defer-branch prune. (The
 // `WgRowIdentity` type itself is only named inside `tunnels`.)
@@ -71,7 +68,8 @@ pub(in crate::afxdp) use tunnels::{TunnelKind, tunnel_mode_kind};
 // by path. The test suite (`tests.rs`, `use super::*`) keeps calling an
 // infallible `build_cos_state(..) -> CoSState` — provided by this
 // `#[cfg(test)]` wrapper that `.expect()`s the valid snapshots the CoS
-// tests build (mirrors the `build_forwarding_state` infallible wrapper).
+// tests build (mirrors the `build_forwarding_state` infallible wrapper in
+// [`build_test_api`]).
 #[cfg(test)]
 fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
     cos::build_cos_state(snapshot).expect("test CoS snapshot must not produce integrity error")
@@ -213,66 +211,125 @@ fn parse_syn_cookie_key_base(base: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-/// Test/legacy entry point — infallible; panics on snapshot
-/// integrity error (which test snapshots never hit). Production
-/// code uses `try_build_forwarding_state_*` instead.
-pub(super) fn build_forwarding_state(snapshot: &ConfigSnapshot) -> ForwardingState {
-    try_build_forwarding_state_with_policy_counters(snapshot, &PolicyCounterStore::default())
-        .expect("test snapshot must not produce policy integrity error")
-}
-
-pub(super) fn build_forwarding_state_with_policy_counters(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-) -> ForwardingState {
-    try_build_forwarding_state_with_policy_counters(snapshot, policy_counters)
-        .expect("test snapshot must not produce policy integrity error")
-}
-
-pub(super) fn try_build_forwarding_state_with_policy_counters(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
-    // #2218: the policy-only wrappers default the NAT counter store; the
-    // resulting `Arc`s are throwaway (a fresh default store per call), used
-    // by tests and any caller that does not yet own a `NatCounterStore`.
-    build_forwarding_state_with_policy_counters_and_previous(
-        snapshot,
-        policy_counters,
-        &crate::nat::NatCounterStore::default(),
-        None,
-    )
-}
-
-/// #2218: test/build entry point that threads BOTH counter stores so a
-/// test can hold the `NatCounterStore` and read back hit counts after a
-/// flow. Mirrors `build_forwarding_state` (infallible).
+/// The production forwarding-build entries.
+///
+/// Exactly two non-`cfg(test)` build entries exist, and both take a
+/// preparsed [`crate::policy::PolicyState`] (from
+/// [`crate::policy::PreparedPolicyState::parse_snapshot`]) so production
+/// never re-parses policy inside the build:
+/// [`build_forwarding_state_with_preparsed_policy_and_previous`] and
+/// [`build_forwarding_state_with_preparsed_policy_previous_and_dynamic`].
+/// Every other `build_forwarding_state*` wrapper (the infallible
+/// `.expect()` shortcuts and the policy-parsing `try_*` / `*_and_previous`
+/// forms) is test scaffolding and lives in [`build_test_api`] under
+/// `#[cfg(test)]` (#17220) — it is not compiled into the production
+/// binary and must never acquire a production caller.
 #[cfg(test)]
-pub(super) fn build_forwarding_state_with_counters(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-    nat_counters: &crate::nat::NatCounterStore,
-) -> ForwardingState {
-    build_forwarding_state_with_policy_counters_and_previous(
-        snapshot,
-        policy_counters,
-        nat_counters,
-        None,
-    )
-    .expect("test snapshot must not produce policy integrity error")
+pub(super) mod build_test_api {
+    use super::*;
+
+    /// Test entry point — infallible; panics on snapshot integrity error
+    /// (which test snapshots never hit).
+    pub fn build_forwarding_state(snapshot: &ConfigSnapshot) -> ForwardingState {
+        try_build_forwarding_state_with_policy_counters(snapshot, &PolicyCounterStore::default())
+            .expect("test snapshot must not produce policy integrity error")
+    }
+
+    pub fn build_forwarding_state_with_policy_counters(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+    ) -> ForwardingState {
+        try_build_forwarding_state_with_policy_counters(snapshot, policy_counters)
+            .expect("test snapshot must not produce policy integrity error")
+    }
+
+    pub fn try_build_forwarding_state_with_policy_counters(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+    ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+        // #2218: the policy-only wrappers default the NAT counter store; the
+        // resulting `Arc`s are throwaway (a fresh default store per call), used
+        // by tests and any caller that does not yet own a `NatCounterStore`.
+        build_forwarding_state_with_policy_counters_and_previous(
+            snapshot,
+            policy_counters,
+            &crate::nat::NatCounterStore::default(),
+            None,
+        )
+    }
+
+    /// #2218: test/build entry point that threads BOTH counter stores so a
+    /// test can hold the `NatCounterStore` and read back hit counts after a
+    /// flow. Mirrors `build_forwarding_state` (infallible).
+    pub fn build_forwarding_state_with_counters(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+        nat_counters: &crate::nat::NatCounterStore,
+    ) -> ForwardingState {
+        build_forwarding_state_with_policy_counters_and_previous(
+            snapshot,
+            policy_counters,
+            nat_counters,
+            None,
+        )
+        .expect("test snapshot must not produce policy integrity error")
+    }
+
+    pub fn build_forwarding_state_with_policy_counters_and_previous(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+        nat_counters: &crate::nat::NatCounterStore,
+        previous: Option<&ForwardingState>,
+    ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+        super::build_forwarding_state_with_policy_state_and_previous(
+            snapshot,
+            policy_counters,
+            nat_counters,
+            previous,
+            None,
+            None,
+        )
+    }
+
+    pub fn build_forwarding_state_with_policy_counters_previous_and_dynamic(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+        nat_counters: &crate::nat::NatCounterStore,
+        previous: Option<&ForwardingState>,
+        dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
+    ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+        super::build_forwarding_state_with_policy_state_and_previous(
+            snapshot,
+            policy_counters,
+            nat_counters,
+            previous,
+            None,
+            dynamic,
+        )
+    }
 }
 
-/// Build a candidate `ForwardingState`, then — and only then — bind it to the
-/// carried-forward per-zone counter stores (traffic, and since #3651's flood
-/// half, flood-event as well, and since #8291 the GRE decap refusal total;
-/// `attach_zone_counters` binds all three).
+#[cfg(test)]
+pub(super) use build_test_api::{
+    build_forwarding_state, build_forwarding_state_with_counters,
+    build_forwarding_state_with_policy_counters,
+    build_forwarding_state_with_policy_counters_and_previous,
+    build_forwarding_state_with_policy_counters_previous_and_dynamic,
+    try_build_forwarding_state_with_policy_counters,
+};
+
+/// Build a candidate `ForwardingState` from a preparsed policy state, then
+/// — and only then — bind it to the carried-forward per-zone counter stores
+/// (traffic, and since #3651's flood half, flood-event as well, and since
+/// #8291 the GRE decap refusal total; `attach_zone_counters` binds all
+/// three).
 ///
 /// #5716: that two-step shape is the load-bearing part. `ZoneCounterStore` is
 /// `Arc`-backed, so the carry-forward `clone()` is a HANDLE ON THE LIVE STORE
 /// the running workers are folding into, not a copy — and binding a candidate
-/// to it mutates it two ways: [`ZoneCounterSlotMap::build`] GET-OR-CREATES a
+/// to it mutates it two ways: [`ZoneSlotMap::build`] GET-OR-CREATES a
 /// block per SLOT-ASSIGNED zone (a SUBSET of the configured set — it skips zone
-/// id 0 and stops at [`ZONE_COUNTER_ASSIGNABLE_SLOTS`]), and `reconcile` DROPS
+/// id 0 and stops at [`ZONE_SLOT_ASSIGNABLE_SLOTS`]), and `reconcile` DROPS
 /// the blocks for zones the candidate no longer configures. A snapshot rejected by one of the fallible
 /// integrity belts is discarded by the reconcile/refresh preflight, which keeps
 /// the previous forwarding state — so neither mutation may have happened.
@@ -315,42 +372,6 @@ pub(super) fn build_forwarding_state_with_counters(
 /// the CoS row catches. Six more rows would only widen the second, weaker
 /// class — a single BELT moved below the binding, which is caught by that
 /// belt's own row and by no other.
-pub(super) fn build_forwarding_state_with_policy_counters_and_previous(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-    nat_counters: &crate::nat::NatCounterStore,
-    previous: Option<&ForwardingState>,
-) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
-    build_forwarding_state_with_policy_state_and_previous(
-        snapshot,
-        policy_counters,
-        nat_counters,
-        previous,
-        None,
-        None,
-    )
-}
-
-/// #16555: production build carrying the live dynamic neighbor map so
-/// `populate_neighbors` can apply the #13951 fence (previous static +
-/// dynamic confirmation) instead of laundering a spoofed kernel MAC.
-pub(super) fn build_forwarding_state_with_policy_counters_previous_and_dynamic(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-    nat_counters: &crate::nat::NatCounterStore,
-    previous: Option<&ForwardingState>,
-    dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
-) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
-    build_forwarding_state_with_policy_state_and_previous(
-        snapshot,
-        policy_counters,
-        nat_counters,
-        previous,
-        None,
-        dynamic,
-    )
-}
-
 pub(super) fn build_forwarding_state_with_preparsed_policy_and_previous(
     snapshot: &ConfigSnapshot,
     policy_counters: &PolicyCounterStore,
@@ -368,7 +389,9 @@ pub(super) fn build_forwarding_state_with_preparsed_policy_and_previous(
     )
 }
 
-/// #16555: preparsed-policy twin of the dynamic-carrying build.
+/// #16555: preparsed-policy twin of the dynamic-carrying build — the
+/// production entry for callers that fence neighbors against the live
+/// dynamic map.
 pub(super) fn build_forwarding_state_with_preparsed_policy_previous_and_dynamic(
     snapshot: &ConfigSnapshot,
     policy_counters: &PolicyCounterStore,
@@ -458,7 +481,7 @@ fn build_forwarding_state_with_policy_state_and_previous(
 /// than getting an `attach_flood_counters` of their own.
 ///
 /// INFALLIBLE, and called only after the fallible builder has returned `Ok` —
-/// see [`build_forwarding_state_with_policy_counters_and_previous`].
+/// see [`build_forwarding_state_with_preparsed_policy_and_previous`].
 ///
 /// This function is now ADDITIVE ONLY. It resolves (get-or-creates) one block
 /// per SLOT-ASSIGNED zone out of the live, `Arc`-shared store, and does not
@@ -485,8 +508,9 @@ fn attach_zone_counters(
     snapshot: &ConfigSnapshot,
     previous: Option<&ForwardingState>,
 ) {
-    use crate::afxdp::flood_counters::{FloodCounterSlotMap, FloodCounterStore};
-    use crate::afxdp::zone_counters::{ZoneCounterSlotMap, ZoneCounterStore};
+    use crate::afxdp::flood_counters::FloodCounterStore;
+    use crate::afxdp::zone_counters::ZoneCounterStore;
+    use crate::afxdp::zone_slot_counters::ZoneSlotMap;
     // `populate_zones` is the admission boundary: only ids represented in
     // `zone_id_to_name` are configured, non-empty, nonzero, and non-reserved.
     // Slot maps must use that exact admitted set, not raw snapshot rows.
@@ -494,23 +518,25 @@ fn attach_zone_counters(
     let store = previous
         .map(|p| p.zone_counter_store.clone())
         .unwrap_or_else(ZoneCounterStore::default);
-    state.zone_counter_slot_map = std::sync::Arc::new(ZoneCounterSlotMap::build(&zone_ids, &store));
-    state.zone_counter_store = store;
-    // #3651 flood half: the SECOND per-zone counter family, bound here rather
-    // than in its own function ON PURPOSE. Both families slot from the SAME
-    // `zone_ids` list in the same order, and a `const _: () = assert!(
-    // FLOOD_COUNTER_SLOTS == ZONE_COUNTER_SLOTS)` in `flood_counters.rs` pins
-    // their capacities equal precisely so a zone is slotted for BOTH or
-    // NEITHER. A separate attach function could be moved, reordered, or dropped
-    // independently of this one, which would make that assert claim a coupling
-    // the code no longer has; sharing one call site makes divergence
-    // unrepresentable instead of merely tested for.
-    let flood_store = previous
+    let flood_store_pre = previous
         .map(|p| p.flood_counter_store.clone())
         .unwrap_or_else(FloodCounterStore::default);
-    state.flood_counter_slot_map =
-        std::sync::Arc::new(FloodCounterSlotMap::build(&zone_ids, &flood_store));
-    state.flood_counter_store = flood_store;
+    // #17204: ONE slot map built once per apply, shared by both families.
+    let (slot_map, caches) = ZoneSlotMap::build(&zone_ids, &store, &flood_store_pre);
+    let slot_map = std::sync::Arc::new(slot_map);
+    let caches = std::sync::Arc::new(caches);
+    state.zone_counter_slot_map = std::sync::Arc::clone(&slot_map);
+    state.zone_counter_caches = std::sync::Arc::clone(&caches);
+    state.zone_counter_store = store;
+    state.flood_counter_slot_map = slot_map;
+    state.flood_counter_caches = caches;
+    state.flood_counter_store = flood_store_pre;
+    // #3651 flood half: the SECOND per-zone counter family, bound here rather
+    // than in its own function ON PURPOSE. #17204: both families share the
+    // ONE slot map and caches built above, so a zone is slotted for BOTH or
+    // NEITHER by construction. A separate attach function could still be
+    // moved, reordered, or dropped independently, so the binding stays at
+    // this one call site.
     // #8291 GRE decap refusals: a THIRD cumulative store, NOT per-zone and not
     // slot-mapped, carried here for the reason the flood half gives above — a
     // separate attach function could be
@@ -679,7 +705,7 @@ fn build_fallible_forwarding_state(
     // narrowing it with an unchecked `as u8` cast that would wrap
     // (256→0 blackholes the tunnel).
     tunnels::populate_tunnel_endpoints(snapshot, &mut state)?;
-    // #1432 S2a: instantiate one WgEngine per mode=="wireguard" endpoint,
+    // #1432 S2a: instantiate one WgEngine per WireGuard-kind endpoint,
     // reusing the previous state's engine Arc when the endpoint config is
     // unchanged (TAI64N + live sessions survive the commit) and seeding a
     // fresh engine's TAI64N high-water from the prior engine otherwise.
@@ -692,7 +718,7 @@ fn build_fallible_forwarding_state(
         &excluded_local_v6,
     )?;
     interfaces::populate_egress(snapshot, &mut state, &iface_ctx)?;
-    state.ingress_unit_by_logical = interfaces::ingress_unit_by_logical(snapshot);
+    state.ingress_unit_by_logical = interfaces::ingress_unit_by_logical(snapshot)?;
     // #6458/#13181: include each admitted member row's RG, not inherited
     // parent ingress aliases.
     interfaces::populate_zone_to_rgs(snapshot, &mut state);
@@ -980,7 +1006,7 @@ fn build_fallible_forwarding_state(
     // store (get-or-create per slot-assigned zone, plus the destructive prune),
     // so it happens in `attach_zone_counters` after this fallible builder has
     // returned `Ok` — see the doc comment on
-    // `build_forwarding_state_with_policy_counters_and_previous`.
+    // `build_forwarding_state_with_preparsed_policy_and_previous`.
     //
     // Build filter state from snapshot. #2505: this is fallible — an
     // unresolvable `from protocol` token raises a SnapshotIntegrityError that
@@ -1033,7 +1059,17 @@ fn build_fallible_forwarding_state(
             rate: mirror.rate,
         };
         if mirror.unit_scoped {
-            let vid = u16::try_from(mirror.ingress_vlan_id).unwrap_or(0);
+            // #17206: decode through the single VlanId decoder and fail
+            // closed — the old `u16::try_from(..).unwrap_or(0)` silently
+            // re-pointed a bad VID at the untagged scope (and let
+            // 4096..=65535 through as keys no 12-bit tag matches). The
+            // error is keyed by the ingress ifindex as a string because
+            // MirrorConfigSnapshot carries no interface name.
+            let vid = validated::VlanId::try_from_snapshot(
+                mirror.ingress_vlan_id,
+                &mirror.ingress_ifindex.to_string(),
+            )?
+            .get();
             state
                 .mirror_configs_scoped
                 .insert((mirror.ingress_ifindex, vid, mirror.ingress_unit), cfg);
@@ -1229,16 +1265,15 @@ fn build_fallible_forwarding_state(
         build_route_table_identity_map(snapshot, &state);
     state.route_table_identities = route_table_identities;
     state.route_table_identity_map_complete = route_table_identity_map_complete;
-    // #16131: dual-carry interning derivation. Runs immediately after the
-    // identity authority above is assigned and after every writer of the
-    // string forms (interfaces, late-stage NAT append); asserts the
-    // string/interned agreement cell before this state can publish.
-    intern::intern_route_tables(&mut state);
     state.tunnel_outer_egress_rgs = state
         .tunnel_endpoints
         .iter()
         .filter_map(|(&id, endpoint)| {
-            if endpoint.mode == "wireguard" {
+            // #17199: only GRE-kind endpoints carry a fixed outer egress;
+            // WireGuard resolves per peer below and Unknown MUST NOT
+            // fall into the GRE arm (a binary WireGuard-vs-else split
+            // would silently classify Unknown as GRE here).
+            if endpoint.kind != TunnelKind::Gre {
                 return None;
             }
             let outer = crate::afxdp::forwarding::resolve_tunnel_outer(&state, None, id, 0)?;
@@ -1248,7 +1283,7 @@ fn build_fallible_forwarding_state(
         .collect();
     let mut wireguard_peer_outer_egress_rgs = FastMap::default();
     for (&id, endpoint) in &state.tunnel_endpoints {
-        if endpoint.mode != "wireguard" {
+        if endpoint.kind != TunnelKind::WireGuard {
             continue;
         }
         for peer in &endpoint.wg_peers {
