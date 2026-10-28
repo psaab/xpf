@@ -1,5 +1,4 @@
-// #1345: per-verb handler for rebind. Body byte-identical to
-// handlers.rs lines 380-408.
+// #1345: per-verb handler for rebind, split out of handlers.rs in #1345.
 
 use super::super::helpers::{reconcile_status_bindings, refresh_status};
 use super::super::ServerState;

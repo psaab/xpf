@@ -85,12 +85,14 @@ func checkVIPReadinessForConfig(cfg *config.Config, rgID int, linkByName func(st
 	return len(reasons) == 0, reasons
 }
 
-// isNoRethVRRP returns true when no-reth-vrrp is explicitly configured,
-// meaning the daemon directly manages VIPs/GARPs without VRRP instances.
-// Default (no flag) uses VRRP for RETH failover.
+// isNoRethVRRP returns true when RETH VRRP is not in use, meaning the
+// daemon directly manages VIPs/GARPs without VRRP instances. Private-RG
+// election is the compiler default, so a compiled cluster config with no
+// mode flag already returns true; opting out with no-private-rg-election
+// (and no no-reth-vrrp) restores legacy RETH VRRP and returns false.
 func (d *Daemon) isNoRethVRRP() bool {
 	cc := d.clusterConfig()
-	return cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection)
+	return cc != nil && !cc.UsesRethVRRP()
 }
 
 func directVIPOwnershipDesired(localState cluster.NodeState) bool {

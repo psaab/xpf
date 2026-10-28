@@ -98,19 +98,19 @@ func TestResolveIPv6LinkLocal_NonLinkLocalVIPUnaffected(t *testing.T) {
 	}
 }
 
-// TestCanonAddr covers the helper directly: canonicalize parseable literals,
-// fall back to the raw string for unparseable input, and reject CIDR (the
-// caller strips "/prefix" first).
+// TestCanonAddr covers the helper directly: canonicalize parseable literals
+// and CIDR hosts (#17150: the shared ParseVRRPVIP parse yields the host for
+// both spellings), and fall back to the raw string for unparseable input.
 func TestCanonAddr(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"fe80::AB", "fe80::ab"},       // uppercase -> lowercase
-		{"fe80::0:ab", "fe80::ab"},     // non-compressed -> compressed
-		{"fe80::ab", "fe80::ab"},       // already canonical
-		{"10.0.61.1", "10.0.61.1"},     // IPv4 unchanged
-		{"not-an-ip", "not-an-ip"},     // unparseable falls back to itself
-		{"fe80::ab/64", "fe80::ab/64"}, // CIDR is not a bare literal -> fallback
+		{"fe80::AB", "fe80::ab"},    // uppercase -> lowercase
+		{"fe80::0:ab", "fe80::ab"},  // non-compressed -> compressed
+		{"fe80::ab", "fe80::ab"},    // already canonical
+		{"10.0.61.1", "10.0.61.1"},  // IPv4 unchanged
+		{"not-an-ip", "not-an-ip"},  // unparseable falls back to itself
+		{"fe80::ab/64", "fe80::ab"}, // CIDR host canonicalized (#17150)
 	}
 	for _, c := range cases {
 		if got := canonAddr(c.in); got != c.want {
