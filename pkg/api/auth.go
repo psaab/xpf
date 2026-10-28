@@ -242,31 +242,6 @@ func effectiveMetricsRequireAuth(cfg AuthConfig, bindRequiresAuth bool) bool {
 	return bindRequiresAuth || cfg.MetricsRequireAuth
 }
 
-// authMiddleware wraps an http.Handler with Basic Auth / Bearer / X-API-Key
-// checks. /health always bypasses authentication (it exposes no sensitive data
-// and is a liveness probe). /metrics bypasses authentication only when
-// metricsRequireAuth is false for a literal loopback bind, the standard
-// Prometheus posture. NewServer derives it independently from the configured
-// address of each enabled HTTP or HTTPS listener. A routable, wildcard,
-// hostname, malformed, or otherwise unprovable bind requires credentials for
-// /metrics like every other endpoint (#4162).
-func authMiddleware(cfg AuthConfig, metricsRequireAuth bool, next http.Handler) http.Handler {
-	throttle := newAuthFailureTracker(nil)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authorized, retryAfter := throttledAuthCheck(throttle, cfg, metricsRequireAuth, r)
-		if authorized {
-			next.ServeHTTP(w, r)
-			return
-		}
-		logRESTAPIAuthFailure(r)
-		if retryAfter > 0 {
-			writeAuthLockedOut(w, retryAfter)
-			return
-		}
-		writeAuthChallenge(w)
-	})
-}
-
 // throttledAuthCheck applies the #10825 per-source/account and per-source
 // budgets plus #11492 global claimed-Basic and IPv6-/64 aggregation before
 // invoking the credential verifier. An active pair/source lockout skips
@@ -310,20 +285,11 @@ func logRESTAPIAuthFailure(r *http.Request) {
 		"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
 }
 
-// authCheck reports whether a request is authorized under cfg (or exempt). It is
-// the shared core of the static authMiddleware and the live-swap
-// dynamicAuthMiddleware (#5866), so both enforce identical semantics — the
-// /health + loopback-/metrics exemptions and the #4157/#5636 constant-time,
-// empty-secret-rejecting credential checks.
-func authCheck(cfg AuthConfig, metricsRequireAuth bool, r *http.Request) bool {
-	authorized, _, _ := authCheckCredential(cfg, metricsRequireAuth, r)
-	return authorized
-}
-
-// authCheckCredential reports the verified account bucket and whether a
-// supplied Authorization header failed before an X-API-Key fallback. The
-// throttled path charges that failed attempt even when the fallback authorizes
-// the request.
+// authCheckCredential is the credential verifier behind the production
+// dynamicAuthMiddleware (reached via throttledAuthCheck). It reports the
+// verified account bucket and whether a supplied Authorization header
+// failed before an X-API-Key fallback. The throttled path charges that
+// failed attempt even when the fallback authorizes the request.
 func authCheckCredential(cfg AuthConfig, metricsRequireAuth bool, r *http.Request) (authorized bool, verified string, authorizationFailed bool) {
 	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !effectiveMetricsRequireAuth(cfg, metricsRequireAuth)) {
 		return true, "", false

@@ -9,7 +9,9 @@
 # this file by CWD.
 #
 # BUMP PROCEDURE: change `channel`, run `make build-userspace-dp test-rust`
-# (both must PASS on the new toolchain), commit together.
+# (both must PASS on the new toolchain, with 0 future-incompatible
+# warnings — enforced by `#![deny(future_incompatible)]` in src/main.rs),
+# commit together.
 # Override: none — unlike the BPF shim's RUST_BPF_TOOLCHAIN, a helper bisect
 # that needs another toolchain invokes cargo directly; the Makefile stays
 # pinned.

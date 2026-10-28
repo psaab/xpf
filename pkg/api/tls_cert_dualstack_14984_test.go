@@ -31,13 +31,13 @@ func TestDualStackPerLegTLSCert14984(t *testing.T) {
 
 	// --- Per-leg SAN invariant -------------------------------------
 	s := NewServer(Config{
-		TLS:        true,
-		HTTPSAddrs: []string{"10.0.0.1:8443", "[2001:db8::1]:8443"},
+		TLS:              true,
+		HTTPSAddrs:       []string{"10.0.0.1:8443", "[2001:db8::1]:8443"},
+		TLSSelfSignedDir: t.TempDir(),
 	})
 	if len(s.httpsServers) != 2 {
 		t.Fatalf("httpsServers = %d, want 2 (one per family)", len(s.httpsServers))
 	}
-	s.SetTLSCertDirForTest(t.TempDir())
 
 	wants := []struct {
 		ip   string
@@ -84,11 +84,11 @@ func TestDualStackPerLegTLSCert14984(t *testing.T) {
 	// --- Serving control: both loopback families answer -------------
 	ctx, cancel := context.WithCancel(context.Background())
 	dual := NewServer(Config{
-		Addrs:      []string{"127.0.0.1:0", "[::1]:0"},
-		TLS:        true,
-		HTTPSAddrs: []string{"127.0.0.1:0", "[::1]:0"},
+		Addrs:            []string{"127.0.0.1:0", "[::1]:0"},
+		TLS:              true,
+		HTTPSAddrs:       []string{"127.0.0.1:0", "[::1]:0"},
+		TLSSelfSignedDir: t.TempDir(),
 	})
-	dual.SetTLSCertDirForTest(t.TempDir())
 	if err := dual.Start(ctx); err != nil {
 		cancel()
 		t.Fatalf("dual-stack Start: %v", err)
@@ -104,7 +104,7 @@ func TestDualStackPerLegTLSCert14984(t *testing.T) {
 	}
 
 	// Single-stack control: an IPv4-only server's one leg covers its bind.
-	single := NewServer(Config{TLS: true, HTTPSAddr: "10.0.0.1:8443"})
+	single := NewServer(Config{TLS: true, HTTPSAddr: "10.0.0.1:8443", TLSSelfSignedDir: t.TempDir()})
 	if got := single.HTTPSCertForTest(); got == nil || got.Leaf == nil || !hasIPSAN(got.Leaf, net.ParseIP("10.0.0.1")) {
 		var ips []net.IP
 		if got != nil && got.Leaf != nil {
