@@ -14,6 +14,7 @@ Each profile must additionally be non-empty on its own: a combined-only
 floor would let a fully-empty release or tests census pass (rc=0, no
 warnings) whenever the other profile alone carried >= MIN_CENSUS pairs.
 Decreases are reported (baseline can be regenerated with --write) but do
+not fail, so burn-down PRs stay green.
 """
 import argparse, collections, json, subprocess, sys, os
 from pathlib import Path
