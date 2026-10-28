@@ -574,7 +574,8 @@ func (d *Daemon) legacyNonVIPAnnouncePending(rgID int) bool {
 	}
 	d.nonVIPAnnounceMu.Lock()
 	defer d.nonVIPAnnounceMu.Unlock()
-	return d.nonVIPAnnounced[rgID] != generation
+	claimed, ok := d.nonVIPAnnounced[rgID]
+	return !ok || claimed < generation
 }
 
 // clearLegacyNonVIPAnnounce drops claims no newer than the deactivated
@@ -588,6 +589,22 @@ func (d *Daemon) clearLegacyNonVIPAnnounce(rgID int, generation uint64) {
 	}
 }
 
+// claimLegacyNonVIPAnnounce records generation only when it does not
+// regress an existing claim. The map membership check distinguishes a
+// missing claim from a stored generation zero.
+func (d *Daemon) claimLegacyNonVIPAnnounce(rgID int, generation uint64) bool {
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	if d.nonVIPAnnounced == nil {
+		d.nonVIPAnnounced = make(map[int]uint64)
+	}
+	if claimed, ok := d.nonVIPAnnounced[rgID]; ok && claimed >= generation {
+		return false
+	}
+	d.nonVIPAnnounced[rgID] = generation
+	return true
+}
+
 // convergeLegacyNonVIPAnnounce attempts the non-VIP announce for the
 // current activation generation (#17052, the #16696 level-triggered
 // pattern applied to announcements). Every producer that observes an
@@ -599,13 +616,33 @@ func (d *Daemon) clearLegacyNonVIPAnnounce(rgID int, generation uint64) {
 // The claim is atomic: the (active, generation) pair is read in ONE
 // rg-state lock hold (CurrentActivation) and the observed generation is
 // claimed under nonVIPAnnounceMu BEFORE any frame is sent, preventing
-// concurrent producers from double-sending it. If every non-VIP send
-// fails (Sent == 0 && FirstErr != nil), only this generation's claim is
-// released so the next producer/reconcile pass can retry; partial success
-// stays claimed to avoid duplicating delivered targets. Keyed to the
-// activation generation, NOT CurrentDesired's epoch: epoch bumps on every
-// reconcileLocked input (every 2s reconcile pass), which would re-send
-// the full burst forever.
+// concurrent producers from double-sending it. Claims are monotonic
+// under that mutex: an existing claim at or beyond the observed
+// generation is never overwritten by an older observation (a producer
+// that read generation 2 before a reactivation claimed 3 must not
+// regress the marker to 2 and so re-admit generation 3 -- or re-send
+// generation 2 -- on a later pass). Absence (entry deleted by the
+// deactivation clear or the all-failed release) is distinguished from
+// a stored value so a missing entry is always claimable.
+//
+// The send is bound to the claim: sendVRRPModeNonVIPAnnounce rechecks,
+// immediately before the first frame and as the stillValid gate for
+// every follow-up/pool frame, that the RG is still active at exactly
+// this generation and that this generation is still the claimed one.
+// A claimant delayed past a deactivate/reactivate cycle therefore emits
+// nothing for its stale generation; the new activation's own producer
+// claims and sends the new generation. This predicate form is smaller
+// than holding nonVIPAnnounceMu through the send: the mutex stays a
+// short claim lock (pending checks and deactivation clears are never
+// blocked behind frame I/O), and the same predicate already gates
+// pool/follow-up frames via SendAnnounceTargets.
+//
+// If every non-VIP send fails (Sent == 0 && FirstErr != nil), only this
+// generation's claim is released so the next producer/reconcile pass
+// can retry; partial success stays claimed to avoid duplicating
+// delivered targets. Keyed to the activation generation, NOT
+// CurrentDesired's epoch: epoch bumps on every reconcileLocked input
+// (every 2s reconcile pass), which would re-send the full burst forever.
 func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
 	if d.isNoRethVRRP() {
 		return
@@ -620,17 +657,10 @@ func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
 	if !active {
 		return
 	}
-	d.nonVIPAnnounceMu.Lock()
-	if d.nonVIPAnnounced == nil {
-		d.nonVIPAnnounced = make(map[int]uint64)
-	}
-	if d.nonVIPAnnounced[rgID] == generation {
-		d.nonVIPAnnounceMu.Unlock()
+	if !d.claimLegacyNonVIPAnnounce(rgID, generation) {
 		return
 	}
-	d.nonVIPAnnounced[rgID] = generation
-	d.nonVIPAnnounceMu.Unlock()
-	res := d.sendVRRPModeNonVIPAnnounce(rgID)
+	res := d.sendVRRPModeNonVIPAnnounce(rgID, generation)
 	if res.Sent == 0 && res.FirstErr != nil {
 		// No non-VIP target accepted a frame. Release only this
 		// activation's claim so the next producer/reconcile pass can
@@ -639,20 +669,46 @@ func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
 		slog.Warn("vrrp-mode announce: all non-VIP targets failed; retrying on next producer/reconcile pass",
 			"rg", rgID, "err", res.FirstErr)
 		d.nonVIPAnnounceMu.Lock()
-		if d.nonVIPAnnounced[rgID] == generation {
+		if claimed, ok := d.nonVIPAnnounced[rgID]; ok && claimed == generation {
 			delete(d.nonVIPAnnounced, rgID)
 		}
 		d.nonVIPAnnounceMu.Unlock()
 	}
 }
 
+// nonVIPAnnounceClaimCurrent reports whether generation is still the
+// claimed generation for rgID AND the RG is still active at exactly
+// that generation (#17052). It is the generation-bound validity
+// predicate for a claimed send: deactivation (inactive), reactivation
+// (a newer generation), a newer claim, or the all-failed release of
+// this claim each make a delayed claimant's send a no-op.
+func (d *Daemon) nonVIPAnnounceClaimCurrent(rgID int, generation uint64) bool {
+	d.rgStatesMu.RLock()
+	s := d.rgStates[rgID]
+	d.rgStatesMu.RUnlock()
+	if s == nil {
+		return false
+	}
+	// Sample activation only after acquiring the claim mutex so this
+	// predicate cannot pair an old activation read with a current claim.
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	claimed, ok := d.nonVIPAnnounced[rgID]
+	if !ok || claimed != generation {
+		return false
+	}
+	active, current := s.CurrentActivation()
+	return active && current == generation
+}
+
 // sendVRRPModeNonVIPAnnounce sends, in legacy VRRP mode, the non-VIP
 // half of the shared target set on RG activation (#17052): the router
 // link-local NAs and the pool GARPs/NAs that pkg/vrrp never sends (it
-// owns only the VIPs). Gated on continued mastership via rgState.
-// Producers reach this ONLY through convergeLegacyNonVIPAnnounce, which
-// owns the generation claim and all-failed retry decision.
-func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int) cluster.AnnounceResult {
+// owns only the VIPs). It is bound to the caller's activation claim:
+// the RG must still be active at exactly this generation, with this
+// generation still claimed, before the first frame and (via stillValid)
+// before every follow-up/pool frame.
+func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int, generation uint64) cluster.AnnounceResult {
 	if d.isNoRethVRRP() {
 		return cluster.AnnounceResult{}
 	}
@@ -661,10 +717,7 @@ func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int) cluster.AnnounceResult {
 		return cluster.AnnounceResult{}
 	}
 	stillValid := func() bool {
-		d.rgStatesMu.RLock()
-		s := d.rgStates[rgID]
-		d.rgStatesMu.RUnlock()
-		return s != nil && s.IsActive()
+		return d.nonVIPAnnounceClaimCurrent(rgID, generation)
 	}
 	if !stillValid() {
 		return cluster.AnnounceResult{}
@@ -676,7 +729,11 @@ func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int) cluster.AnnounceResult {
 			"clamped", clusterClampedCount(cfg, rgID),
 			"max", config.GratuitousARPBurstClamp)
 	}
-	res := cluster.SendAnnounceTargets(cluster.NonVIPAnnounceTargets(cfg, rgID), stillValid, d.directSender())
+	targets := cluster.NonVIPAnnounceTargets(cfg, rgID)
+	if !stillValid() {
+		return cluster.AnnounceResult{}
+	}
+	res := cluster.SendAnnounceTargets(targets, stillValid, d.directSender())
 	if res.PoolTruncated && d.warnPoolTruncOnce(rgID) {
 		slog.Warn("vrrp-mode announce: pool proxy-ARP/NDP announce truncated",
 			"rg", rgID, "attempted", res.PoolAttempted,

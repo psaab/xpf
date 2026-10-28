@@ -308,8 +308,9 @@ func TestAnnounceModeParity17052(t *testing.T) {
 	}
 }
 
-// nonVIPAnnouncedGen17052 reads the claimed activation generation for
-// rgID (0 = no claim) under the marker mutex.
+// nonVIPAnnouncedGen17052 reads the raw claimed generation for rgID
+// under the marker mutex. A returned zero does not distinguish an absent
+// claim from a stored generation zero.
 func nonVIPAnnouncedGen17052(d *Daemon, rgID int) uint64 {
 	d.nonVIPAnnounceMu.Lock()
 	defer d.nonVIPAnnounceMu.Unlock()
@@ -695,6 +696,98 @@ func TestNonVIPAnnounceProducerRace17052(t *testing.T) {
 	}
 	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen {
 		t.Fatalf("marker must claim generation %d after the race, got %d", gen, got)
+	}
+}
+
+// TestNonVIPAnnounceMonotonicClaims17052 models an older producer that
+// observed generation 2 but reaches the claim mutex after generation 3
+// has already been claimed. The stale claim must neither regress the
+// marker nor let a subsequent current-generation pass re-send.
+func TestNonVIPAnnounceMonotonicClaims17052(t *testing.T) {
+	store := fenceTestStore(t, paritySetLines(false))
+	vd := clusterFirstDaemon17052(t, store)
+	var calls []announceCall17052
+	installAnnounceCapture17052(t, &calls)
+	s := vd.getOrCreateRGState(1)
+	s.SetCluster(true)
+	s.SetCluster(false)
+	s.SetCluster(true)
+	_, gen2 := s.CurrentActivation()
+	s.SetCluster(false)
+	s.SetCluster(true)
+	active, gen3 := s.CurrentActivation()
+	if !active || gen3 != gen2+1 {
+		t.Fatalf("setup: expected active generation %d, got active=%v gen=%d", gen2+1, active, gen3)
+	}
+
+	// An absent map entry is different from an existing claim whose
+	// stored generation is zero.
+	if !vd.claimLegacyNonVIPAnnounce(1, 0) {
+		t.Fatal("an absent generation-zero claim must be claimable")
+	}
+	if vd.claimLegacyNonVIPAnnounce(1, 0) {
+		t.Fatal("an existing generation-zero claim must not be claimable again")
+	}
+	if !vd.claimLegacyNonVIPAnnounce(1, gen3) {
+		t.Fatalf("newer generation %d must supersede generation zero", gen3)
+	}
+	if res := vd.sendVRRPModeNonVIPAnnounce(1, gen3); res.Sent == 0 || len(calls) == 0 {
+		t.Fatalf("generation %d setup send emitted no target calls: result=%+v calls=%v", gen3, res, calls)
+	}
+	first := len(calls)
+
+	if vd.claimLegacyNonVIPAnnounce(1, gen2) {
+		t.Fatalf("stale generation %d claim replaced newer generation %d", gen2, gen3)
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen3 {
+		t.Fatalf("stale claim regressed marker: got %d, want %d", got, gen3)
+	}
+	vd.convergeLegacyNonVIPAnnounce(1)
+	if len(calls) != first {
+		t.Fatalf("stale claim caused an extra target send: calls=%d, want %d", len(calls), first)
+	}
+}
+
+// TestNonVIPAnnounceDelayedGenerationSend17052 claims generation 1,
+// completes a deactivate/reactivate cycle, lets generation 2 send, and
+// then starts the old generation-1 sender. It must be rejected before
+// any target call even though the RG is active again.
+func TestNonVIPAnnounceDelayedGenerationSend17052(t *testing.T) {
+	store := fenceTestStore(t, paritySetLines(false))
+	vd := clusterFirstDaemon17052(t, store)
+	var calls []announceCall17052
+	installAnnounceCapture17052(t, &calls)
+	s := vd.getOrCreateRGState(1)
+	s.SetCluster(true)
+	active, gen1 := s.CurrentActivation()
+	if !active || gen1 == 0 {
+		t.Fatalf("setup: expected active generation, got active=%v gen=%d", active, gen1)
+	}
+	if !vd.claimLegacyNonVIPAnnounce(1, gen1) {
+		t.Fatalf("setup: failed to claim generation %d", gen1)
+	}
+
+	s.SetCluster(false)
+	vd.clearLegacyNonVIPAnnounce(1, gen1)
+	s.SetCluster(true)
+	active, gen2 := s.CurrentActivation()
+	if !active || gen2 != gen1+1 {
+		t.Fatalf("setup: expected reactivation generation %d, got active=%v gen=%d", gen1+1, active, gen2)
+	}
+	vd.convergeLegacyNonVIPAnnounce(1)
+	if len(calls) == 0 || nonVIPAnnouncedGen17052(vd, 1) != gen2 {
+		t.Fatalf("setup: generation %d did not send and claim: calls=%v claim=%d", gen2, calls, nonVIPAnnouncedGen17052(vd, 1))
+	}
+	generation2Calls := len(calls)
+
+	if res := vd.sendVRRPModeNonVIPAnnounce(1, gen1); res.Sent != 0 || res.FirstErr != nil {
+		t.Fatalf("delayed generation %d send should be rejected without an error, got %+v", gen1, res)
+	}
+	if len(calls) != generation2Calls {
+		t.Fatalf("delayed generation %d emitted duplicate target calls: calls=%d, want %d", gen1, len(calls), generation2Calls)
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen2 {
+		t.Fatalf("delayed generation %d send changed newer claim: got %d, want %d", gen1, got, gen2)
 	}
 }
 
