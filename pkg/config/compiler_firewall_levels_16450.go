@@ -229,14 +229,14 @@ func (g *firewallLevelGate16450) walkFirewallRoot(fw *Node, rootDeclared []strin
 }
 
 // walkFamilyNode judges one `family` node via its members (the shared
-// firewallFamilyMembers9883 extractor, so the token judged is the token
+// familyMembers extractor, so the token judged is the token
 // the compiler installs under).
 func (g *firewallLevelGate16450) walkFamilyNode(famNode *Node) error {
 	// Every child of the set-command shape becomes a member via the
 	// extractor, and the packed shape's member IS famNode — so the
 	// member walk judges every child at this level. Keys past the
 	// family token on a structured node are residue owned by #9017.
-	for _, m := range firewallFamilyMembers9883(famNode) {
+	for _, m := range familyMembers(famNode) {
 		if err := g.walkFamilyMember(m); err != nil {
 			return err
 		}
@@ -244,7 +244,7 @@ func (g *firewallLevelGate16450) walkFamilyNode(famNode *Node) error {
 	return nil
 }
 
-func (g *firewallLevelGate16450) walkFamilyMember(m firewallFamilyMember) error {
+func (g *firewallLevelGate16450) walkFamilyMember(m familyMember) error {
 	afNode := m.AfNode
 	if afNode == nil {
 		return nil

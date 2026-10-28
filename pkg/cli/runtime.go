@@ -5,8 +5,7 @@
 // CLI-specific surface that lists exactly the methods pkg/cli/*.go
 // invokes via c.dp.*. This mirrors the pattern already shipped by
 // pkg/api (apiRuntimeDataPlane), pkg/fwdstatus (DataPlaneAccessor),
-// pkg/monitoriface (RuntimeDataPlane), and pkg/conntrack
-// (RuntimeDomainProvider).
+// pkg/monitoriface (RuntimeDataPlane).
 //
 // cliRuntime is a strict subset of dataplane.DataPlane. Every concrete
 // dataplane in the tree today (the legacy eBPF Manager, the userspace

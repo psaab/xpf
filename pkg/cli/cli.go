@@ -35,6 +35,7 @@ import (
 	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/natpoolalarm"
 	"github.com/psaab/xpf/pkg/osident"
+	"github.com/psaab/xpf/pkg/policymatch"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/psaab/xpf/pkg/sysservices"
@@ -185,11 +186,12 @@ type CLI struct {
 	renderPath15995        []string
 	renderComparePath15995 []string
 	// renderSlotErr16613 is the rollback slot error captured with the
-	// priced snapshots above (#16613): the gates price a nil slot tree
-	// as "renders nothing" (snapshot_render_15995.go contract), so the
-	// slot error travels with the stash and each handler returns it
-	// before rendering — otherwise a missing slot renders as an empty
-	// or "[no changes]" compare for classed console users.
+	// priced snapshots above (#16613, carried inside RollbackCapture
+	// since #17215): the gates price a nil slot tree as "renders
+	// nothing", so the slot error travels with the stash and each
+	// handler returns it before rendering — otherwise a missing slot
+	// renders as an empty or "[no changes]" compare for classed
+	// console users.
 	renderSlotErr16613 error
 	version            string
 	startTime          time.Time
@@ -390,23 +392,13 @@ func (c *CLI) feedOverlay() map[string][]string {
 	return c.feedOverlayFn()
 }
 
-// feedPublicationDebt reports feeds whose installed snapshot has not been
-// confirmed applied. The simulator uses this with feedOverlay to avoid
-// certifying a verdict from content the dataplane rejected (#10974).
-func (c *CLI) feedPublicationDebt() map[string]bool {
-	if c == nil || c.feedsFn == nil {
-		return nil
+// matchLive assembles shared Live inputs (#17198).
+func (c *CLI) matchLive(cfg *config.Config) policymatch.Live {
+	live := policymatch.Live{FeedOverlay: c.feedOverlay(), PolicyInactiveForFn: c.policyInactiveForFn(cfg)}
+	if c != nil && c.feedsFn != nil {
+		live.Feeds = policymatch.FeedInfos(c.feedsFn(), func(i feeds.FeedInfo) bool { return i.PublicationDebt })
 	}
-	debt := make(map[string]bool)
-	for name, info := range c.feedsFn() {
-		if info.PublicationDebt {
-			debt[name] = true
-		}
-	}
-	if len(debt) == 0 {
-		return nil
-	}
-	return debt
+	return live
 }
 
 // SetLLDPNeighborsFn sets a callback for retrieving live LLDP neighbor data.
