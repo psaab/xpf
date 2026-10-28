@@ -2500,6 +2500,7 @@ fn parse_ipv6(
     // in pkg/dataplane/userspace_xdp_gate_verdict.json, with hashes in
     // pkg/dataplane/userspace_xdp_manifest.json; regenerate with
     // `make generate-userspace-xdp`, which runs cmd/shimverify). This single
+    // post-check compares only the consumed packet-relative L4 end; the
     // scalar truncation verdict never becomes a new packet bound or enters
     // the heavy parse.
     let declared_end = ipv6_declared_end(l3_offset as usize, payload_len);
