@@ -1104,7 +1104,7 @@ xpf has hostname, domain-name, domain-search, timezone, name-servers, NTP, servi
 Features most commonly used in production vSRX deployments:
 
 1. ~~**Proxy ARP/NDP for NAT**~~ - **Done** (proxy ARP with GARP; proxy NDP pneigh install + responder sysctl wired in #2197 item 1; 30s re-assert in #2197 item 2)
-2. ~~**Session Limiting (source/dest-ip)**~~ - **Done** on the legacy BPF path (GC sweep + BPF LRU maps + xdp_screen enforcement); userspace admission is tracked in `userspace-dataplane-gaps.md`.
+2. ~~**Session Limiting (source/dest-ip)**~~ - **Done** on the legacy BPF path (the since-retired Go conntrack GC sweep + BPF LRU maps + xdp_screen enforcement; `pkg/conntrack` deleted in #17155); userspace admission is tracked in `userspace-dataplane-gaps.md`.
 3. ~~**Firewall Filter Policers**~~ - **Legacy done** (token bucket: single-rate, two-rate RFC 2698, single-rate-3c RFC 2697; eBPF + ~~DPDK~~ (DPDK retired #1525)). Userspace supports the color-blind `then discard` three-color slice; #1375 is closed. Remaining color-aware/non-drop and broader Junos parity work is production/future parity, not active #1373 source-removal work.
 4. ~~**BFD**~~ - **Done** (OSPF/IS-IS/BGP BFD via FRR profiles)
 5. **NETCONF/YANG** - Industry-standard management, enables automation tooling
@@ -1294,7 +1294,7 @@ evidence, not as active eBPF source-removal blockers.
 - Config: `set security nat proxy-arp interface <iface> address <addr>` with address range support
 
 ### Session Limiting (Tier 1) -- DONE
-- GC sweep counts active sessions per source/destination IP, pushes to BPF LRU maps
+- (Legacy BPF path, retired with `pkg/conntrack` in #17155) the GC sweep counted active sessions per source/destination IP and pushed to BPF LRU maps
 - xdp_screen enforces limits on TCP SYN
 - Config: `set security screen ids-option <name> limit-session source-ip-based <N>` / `destination-ip-based <N>`
 

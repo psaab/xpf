@@ -21,9 +21,7 @@
 
 use super::counters::WgCounters;
 use super::engine::WgEngine;
-use super::session::{
-    KEEPALIVE_TIMEOUT_NS, NO_REPLY_REINIT_NS, REJECT_AFTER_TIME_NS,
-};
+use super::session::{KEEPALIVE_TIMEOUT_NS, NO_REPLY_REINIT_NS};
 use std::sync::atomic::Ordering;
 
 /// Sentinel for "no deadline" in `TimerActions::next_deadline_ns`
@@ -147,8 +145,7 @@ impl WgEngine {
         let cur = peer.current.read().unwrap_or_else(|e| e.into_inner());
         matches!(
             cur.as_ref(),
-            Some(s) if s.is_confirmed()
-                && now_ns.saturating_sub(s.created_ns) < REJECT_AFTER_TIME_NS
+            Some(s) if s.usable_at(now_ns)
         )
     }
 
@@ -216,7 +213,7 @@ impl WgEngine {
             for slot in [&peer.current, &peer.previous, &peer.next] {
                 let mut guard = slot.write().unwrap_or_else(|e| e.into_inner());
                 if let Some(session) = guard.as_ref() {
-                    if now_ns.saturating_sub(session.created_ns) >= REJECT_AFTER_TIME_NS {
+                    if session.expired_at(now_ns) {
                         dropped_indices.push(session.local_index);
                         *guard = None;
                     }

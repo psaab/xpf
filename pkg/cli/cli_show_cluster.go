@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
@@ -191,51 +192,34 @@ func (c *CLI) showChassisCluster(args []string) error {
 			return err
 		}
 		return c.showChassisClusterFenceStatus()
-	case "fabric":
-		// Bare subsystem renders its default view (parity with remote
-		// #5459/#15775); a present token must be `statistics`.
-		if len(args) == 1 || (len(args) == 2 && args[1] == "statistics") {
+	case "fabric", "control-plane", "data-plane", "ip-monitoring":
+		// Grammar (bare default, exact leaf arity, flows filter)
+		// is shared with the remote CLI via cliterm (#17225).
+		topic, filter, err := cliterm.ClusterSubsystemView(args[0], args[1:])
+		if err != nil {
+			return err
+		}
+		switch topic {
+		case "chassis-cluster-fabric-statistics":
 			return c.showChassisClusterFabricStatistics()
-		}
-		return fmt.Errorf("unknown fabric target: %s (expected `statistics`)", strings.Join(args[1:], " "))
-	case "control-plane":
-		if len(args) == 1 || (len(args) == 2 && args[1] == "statistics") {
+		case "chassis-cluster-control-plane-statistics":
 			return c.showChassisClusterControlPlaneStats()
-		}
-		return fmt.Errorf("unknown control-plane target: %s (expected `statistics`)", strings.Join(args[1:], " "))
-	case "data-plane":
-		if len(args) == 1 {
+		case "chassis-cluster-data-plane-statistics":
 			return c.showChassisClusterDataPlaneStats()
-		}
-		switch args[1] {
-		case "statistics":
-			if err := rejectExtra(args[2:]); err != nil {
-				return err
-			}
-			return c.showChassisClusterDataPlaneStats()
-		case "interfaces":
-			if err := rejectExtra(args[2:]); err != nil {
-				return err
-			}
+		case "chassis-cluster-data-plane-interfaces":
 			return c.showChassisClusterDataPlaneInterfaces()
-		case "fairness":
-			if err := rejectExtra(args[2:]); err != nil {
-				return err
-			}
+		case "chassis-cluster-data-plane-fairness":
 			return c.showChassisClusterDataPlaneFairness()
-		case "flows":
-			limit, err := dpformat.ParseFlowWorkerMapLimitSpec(strings.Join(args[2:], " "))
+		case "chassis-cluster-data-plane-flows":
+			limit, err := dpformat.ParseFlowWorkerMapLimitSpec(filter)
 			if err != nil {
 				return err
 			}
 			return c.showChassisClusterDataPlaneFlows(limit)
-		}
-		return fmt.Errorf("unknown data-plane target: %s (expected `statistics`, `interfaces`, `fairness`, or `flows`)", args[1])
-	case "ip-monitoring":
-		if len(args) == 1 || (len(args) == 2 && args[1] == "status") {
+		case "chassis-cluster-ip-monitoring-status":
 			return c.showChassisClusterIPMonitoringStatus()
 		}
-		return fmt.Errorf("unknown ip-monitoring target: %s (expected `status`)", strings.Join(args[1:], " "))
+		return fmt.Errorf("unknown chassis cluster target: %s", args[0])
 	}
 	return fmt.Errorf("unknown chassis cluster target: %s (expected `status`, `interfaces`, `information`, `statistics`, `fence-status`, `fabric`, `control-plane`, `data-plane`, or `ip-monitoring`)", args[0])
 }

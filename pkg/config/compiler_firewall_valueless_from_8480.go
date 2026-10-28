@@ -279,12 +279,12 @@ func validateFirewallFilterValuelessFromStrict(children []*Node, lenient bool) (
 			switch fam.Name() {
 			case "family":
 				// BOTH shapes compileFirewall compiles, via the shared
-				// firewallFamilyMembers9883 extractor (#9876 over #9883):
+				// familyMembers extractor (#9876 over #9883):
 				// hierarchical `family inet { filter ... }` and nested
 				// `family { inet { filter ... } }`. Quarantined members
 				// compile to NOTHING, so there are no compiled terms to
 				// check — skipped exactly like the compiler skips them.
-				for _, m := range firewallFamilyMembers9883(fam) {
+				for _, m := range familyMembers(fam) {
 					if firewallFamilyQuarantined9883(m, firewallPermitted) {
 						continue
 					}

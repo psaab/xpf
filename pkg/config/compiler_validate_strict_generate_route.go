@@ -51,7 +51,8 @@ func generateRouteInvalidPrefixes(cfg *Config) []string {
 // the blackhole — the split-brain this issue files. Helper-supported
 // padding ("/08", "/032") is not reported: canonicalizeGenerateRoutes has
 // already written it canonically. Each folded alias is checked as well as
-// the surviving prefix, mirroring staticRouteHelperRefusedMaskSpellings.
+// the surviving prefix. The per-spelling logic is the shared
+// helperRefusedMaskSpellings (#17211); only scope and tag differ.
 func generateRouteHelperRefusedMaskSpellings(cfg *Config) []string {
 	if cfg == nil {
 		return nil
@@ -62,18 +63,7 @@ func generateRouteHelperRefusedMaskSpellings(cfg *Config) []string {
 			if gr == nil {
 				continue
 			}
-			for i, spelling := range append([]string{gr.Prefix}, gr.prefixAliases...) {
-				if !CIDRMaskHelperRefusesPadding(spelling) {
-					continue
-				}
-				merged := ""
-				if i > 0 {
-					merged = fmt.Sprintf(" (merged into %q)", gr.Prefix)
-				}
-				out = append(out, fmt.Sprintf(
-					"%s %q%s has redundant leading-zero CIDR mask digits the userspace helper cannot parse; write it as %q (#15658)",
-					scope, spelling, merged, normalizeCIDRMaskPadding(spelling)))
-			}
+			out = append(out, helperRefusedMaskSpellings(scope, "#15658", gr.Prefix, gr.prefixAliases)...)
 		}
 	}
 	check("routing-options generate route", cfg.RoutingOptions.GenerateRoutes)

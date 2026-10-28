@@ -577,7 +577,7 @@ func (c *ctl) handleTraceroute(args []string) error {
 	req := &pb.TracerouteRequest{
 		Target: parsed.Target, Source: parsed.Source, RoutingInstance: parsed.RoutingInstance,
 	}
-	ctx, cancel := context.WithTimeout(c.ctx(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx(), diagcmd.TracerouteTimeout)
 	defer cancel()
 	stream, err := c.client.Traceroute(ctx, req)
 	if err != nil {
