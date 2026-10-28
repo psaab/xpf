@@ -1144,8 +1144,8 @@ Three properties carry the mechanism:
   warning text (a text assertion there passes with the retry deleted); the
   `startHTTPServer` one on the kernel-name read, which sits past the
   nil-reconciler guard, because that call site cannot be handed a serving HTTPS
-  leg in-process — it constructs the `api.Server` itself and the cert-dir test
-  seam exists only afterwards.
+  leg in-process — it constructs the `api.Server` itself from a committed
+  config that names no HTTPS leg in that cell.
 - **The name is read from the kernel at DELIVERY**, never stored at rename time,
   so a deferred diagnosis is never the replay of a name captured at some earlier
   commit. It IS the kernel's current name for every rename the daemon performs

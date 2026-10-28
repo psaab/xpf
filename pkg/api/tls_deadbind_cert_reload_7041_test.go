@@ -20,8 +20,8 @@ import (
 // fails persistently AND whose durable cert is stale, every commit re-emitted
 // the full stale-cert diagnostic, forever.
 //
-// These tests drive the REAL production loader (SetTLSCertDirForTest routes
-// through generateSelfSignedCertAt) against a seeded temp dir and count the
+// These tests drive the REAL production loader (Config.TLSSelfSignedDir
+// routes certGen through generateSelfSignedCertAt) against a seeded temp dir and count the
 // actual operator-visible warning text. They do not count certGen calls: the
 // property is what an operator reads in the log, and a call count is a probe
 // keyed to the implementation that happens to produce it.
@@ -40,8 +40,7 @@ func seedStaleFor(t *testing.T, uncovered string) string {
 	}
 	// Precondition: a LOAD against the target bind must actually warn, or every
 	// count below is trivially zero and the tests prove nothing.
-	s := &Server{}
-	s.SetTLSCertDirForTest(dir)
+	s := &Server{certGen: selfSignedCertGenForDir(dir)}
 	host, _, _ := net.SplitHostPort(uncovered)
 	out := captureWarn(t, func() { _, _, _ = s.certGen([]string{host}) })
 	if !strings.Contains(out, bindHostMsg) {
@@ -74,6 +73,15 @@ func (l *countingLn) Close() error {
 }
 func (l *countingLn) closeCount() int { l.mu.Lock(); defer l.mu.Unlock(); return l.closes }
 
+// selfSignedCertGenForDir returns the production self-signed loader for
+// dir — the same closure NewServer installs for Config.TLSSelfSignedDir
+// (#17213). Bare &Server{} fixtures that bypass NewServer use it directly.
+func selfSignedCertGenForDir(dir string) func([]string) (tls.Certificate, *x509.Certificate, error) {
+	return func(bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
+		return generateSelfSignedCertAtWithStatusHosts(dir, filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"), bindHosts)
+	}
+}
+
 const addr7041 = "10.0.0.1:8443"
 
 // TestFailedHTTPSBindDoesNotReloadTheCertificate_7041 is the defect cell. A leg
@@ -84,7 +92,7 @@ func TestFailedHTTPSBindDoesNotReloadTheCertificate_7041(t *testing.T) {
 	s := &Server{listen: func(string, string) (net.Listener, error) {
 		return nil, errors.New("bind: cannot assign requested address")
 	}}
-	s.SetTLSCertDirForTest(dir)
+	s.certGen = selfSignedCertGenForDir(dir)
 
 	const commits = 3
 	out := captureWarn(t, func() {
@@ -112,7 +120,7 @@ func TestFirstHTTPSBindFailureStillReportsTheBindError_7041(t *testing.T) {
 	s := &Server{listen: func(string, string) (net.Listener, error) {
 		return nil, errors.New("bind: cannot assign requested address")
 	}}
-	s.SetTLSCertDirForTest(dir)
+	s.certGen = selfSignedCertGenForDir(dir)
 
 	for i := 1; i <= 3; i++ {
 		err := s.ReconcileHTTPS(true, addr7041)
@@ -142,7 +150,7 @@ func TestHTTPSCertDiagnosticReturnsWhenTheBindRecovers_7041(t *testing.T) {
 		}
 		return newCountingLn(), nil
 	}}
-	s.SetTLSCertDirForTest(dir)
+	s.certGen = selfSignedCertGenForDir(dir)
 	t.Cleanup(func() { _ = s.ReconcileHTTPS(false, "") })
 
 	// Two commits while the bind is down: silent.
@@ -273,7 +281,7 @@ func TestAChangedBindErrorStillSpeaks_7041(t *testing.T) {
 		i++
 		return nil, e
 	}}
-	s.SetTLSCertDirForTest(dir)
+	s.certGen = selfSignedCertGenForDir(dir)
 
 	var got []string
 	for range errs {

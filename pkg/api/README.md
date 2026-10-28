@@ -2031,15 +2031,16 @@ the drop fails loudly instead of going quietly vacuous.
     passes with the retry deleted. `startHTTPServer`'s boot delivery is bound on
     the kernel-name read plus the fact that the management server already
     exists when it happens; that call site cannot be given a serving HTTPS leg
-    in-process, because `startHTTPServer` CONSTRUCTS the `api.Server` itself and
-    `SetTLSCertDirForTest` only exists after construction, so the alternative is
-    driving the production `/etc/xpf/tls` generator. Deleting either call reds
+    in-process, because `startHTTPServer` CONSTRUCTS the `api.Server` itself
+    from a committed config that names no HTTPS leg in that cell, so there is
+    no leg to serve a certificate. (`Config.TLSSelfSignedDir`, #17213, is the
+    pre-construction seam for WHERE a self-signed pair loads from; it does not
+    create a leg the config did not ask for.) Deleting either call reds
     its own subtest and only its own. The boot cell's limit is stated in the
     test rather than implied: it proves the call happens and happens after the
     server is built, NOT that it reached a certificate, warned, or discharged
     anything — replacing the delivery with a bare `osHostname()` would satisfy
-    it, and a stronger cell needs a pre-construction certificate seam on
-    `api.Config`, which was declined as a production knob added for one test.
+    it.
 - The status-poll path (1 Hz) shares the userspace dataplane control socket
   with HA sync, session installs, snapshot sync, and forwarding sync.
   Adding a new caller at >1 Hz here will starve session installs during
