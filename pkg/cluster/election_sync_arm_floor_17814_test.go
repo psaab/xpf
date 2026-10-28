@@ -28,20 +28,20 @@ func TestSyncAndArmHoldsComposeAtWeightOne17814(t *testing.T) {
 		wantPrimary bool
 	}{
 		{
-			name:         "lone control-interface node keeps primary",
-			configure:    func(m *Manager) {
+			name: "lone control-interface node keeps primary",
+			configure: func(m *Manager) {
 				m.SetRGReady(1, true, nil)
 				if !m.IsLocalPrimary(1) {
 					t.Fatal("precondition: lone node is primary before overlapping holds")
 				}
 				installArmAndSyncHold17814(t, m)
 			},
-			wantWeight:   1,
-			wantPrimary:  true,
+			wantWeight:  1,
+			wantPrimary: true,
 		},
 		{
-			name:         "config reapply preserves shared floor",
-			configure:    func(m *Manager) {
+			name: "config reapply preserves shared floor",
+			configure: func(m *Manager) {
 				m.SetRGReady(1, true, nil)
 				if !m.IsLocalPrimary(1) {
 					t.Fatal("precondition: lone node is primary before overlapping holds")
@@ -54,26 +54,26 @@ func TestSyncAndArmHoldsComposeAtWeightOne17814(t *testing.T) {
 				cfg.ControlInterface = "em0"
 				m.UpdateConfig(cfg)
 			},
-			wantWeight:   1,
-			wantPrimary:  true,
+			wantWeight:  1,
+			wantPrimary: true,
 		},
 		{
-			name:         "retained helper failure still resigns",
-			configure:    func(m *Manager) {
+			name: "retained helper failure still resigns",
+			configure: func(m *Manager) {
 				installArmAndSyncHold17814(t, m)
 				m.SetMonitorWeight(1, HelperCrashLoopMonitorIface, true, HelperCrashLoopMonitorCost)
 			},
-			wantWeight:   0,
-			wantPrimary:  false,
+			wantWeight:  0,
+			wantPrimary: false,
 		},
 		{
-			name:         "genuine monitor failure still resigns",
-			configure:    func(m *Manager) {
+			name: "genuine monitor failure still resigns",
+			configure: func(m *Manager) {
 				installArmAndSyncHold17814(t, m)
 				m.SetMonitorWeight(1, "ge-0/0/1", true, 255)
 			},
-			wantWeight:   0,
-			wantPrimary:  false,
+			wantWeight:  0,
+			wantPrimary: false,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
