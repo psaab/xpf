@@ -138,7 +138,9 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 	if err := validateStaticRouteQNHTails12813(tree.Children); err != nil {
 		if collect {
 			if nestedErr := findNestedListContentError(tree.Children, setSchema, nil); nestedErr != nil {
-				return nil, scrubSchemaErrorSecrets(tree, errors.Join(err, nestedErr))
+				return nil, errors.Join(
+					scrubSchemaErrorSecrets(tree, err),
+					scrubSchemaErrorSecrets(tree, nestedErr))
 			}
 		}
 		return nil, scrubSchemaErrorSecrets(tree, err)
@@ -183,7 +185,9 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 	if err := checkUnknownTopLevelStanza(tree); err != nil {
 		if collect {
 			if nestedErr := findNestedListContentError(tree.Children, setSchema, nil); nestedErr != nil {
-				return nil, scrubSchemaErrorSecrets(tree, errors.Join(err, nestedErr))
+				return nil, errors.Join(
+					scrubSchemaErrorSecrets(tree, err),
+					scrubSchemaErrorSecrets(tree, nestedErr))
 			}
 		}
 		return nil, scrubSchemaErrorSecrets(tree, err)
@@ -202,13 +206,12 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 		// error paths only, run the narrow schema-aware scan so neither a
 		// flood of unrelated typed errors nor a tolerated structural finding
 		// can hide values that the compiler will silently drop.
+		var nestedErr error
 		if walkErr != nil || len(errs) >= MaxCollectedTypedLeafViolations16012 {
-			if nestedErr := findNestedListContentError(tree.Children, setSchema, nil); nestedErr != nil {
-				if walkErr == nil || IsNestedListContentSchemaError(walkErr) {
-					walkErr = nestedErr
-				} else {
-					walkErr = errors.Join(walkErr, nestedErr)
-				}
+			nestedErr = findNestedListContentError(tree.Children, setSchema, nil)
+			if nestedErr != nil && (walkErr == nil || IsNestedListContentSchemaError(walkErr)) {
+				walkErr = nestedErr
+				nestedErr = nil
 			}
 		}
 		for i, e := range errs {
@@ -220,7 +223,14 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 			// violations already collected. The #17241 nested-list refusal
 			// is found by the bounded fallback scan above and is joined with
 			// an earlier structural error when both are present.
-			return errs, scrubSchemaErrorSecrets(tree, walkErr)
+			walkErr = scrubSchemaErrorSecrets(tree, walkErr)
+			if nestedErr != nil {
+				return errs, errors.Join(walkErr, scrubSchemaErrorSecrets(tree, nestedErr))
+			}
+			return errs, walkErr
+		}
+		if nestedErr != nil {
+			return errs, scrubSchemaErrorSecrets(tree, nestedErr)
 		}
 		return errs, nil
 	}
