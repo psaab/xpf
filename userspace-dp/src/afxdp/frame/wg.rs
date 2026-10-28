@@ -18,7 +18,7 @@
 //! `&str` already loaded for the GRE lookup — no new branch on the
 //! plain-forward path.
 
-use super::super::wg::{EncapError, POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, pad_to_16, padded_len_capped};
+use super::super::wg::{EncapError, POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, padded_len_capped};
 use super::super::*;
 use super::checksum::checksum16_ipv6;
 use super::headers::{

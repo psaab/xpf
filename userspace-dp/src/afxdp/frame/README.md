@@ -12,7 +12,7 @@ inspect or rewrite a packet sitting in a UMEM frame.
 | `byte_writes.rs` | In-place IP and L4 port rewrites (`write_ipv4_dst`, `write_ipv4_src`, `write_ipv6_dst`, `write_ipv6_src`, `write_l4_dst_port`, `write_l4_src_port`). |
 | `checksum.rs` | IPv4 header + L4 checksum incremental adjust + recompute. Owns the `checksum16_*` family, the `ChecksumFamily` enum, and the two zero-checksum predicates (`l4_udp_checksum_optional` — RFC 768 received-0 skip, IPv4 UDP only (#1840); `adjust_zero_checksum_illegal` — computed-0 → 0xFFFF canonicalization, v4 UDP / v6 UDP+ICMPv6 (#1839)). The v6 adjusters/recompute take a caller-supplied `rel_l4` (ext-aware offset, #1838). |
 | `inspect.rs` | Read-only parsers / matchers used by screen, policy, conntrack hot paths. |
-| `addr_class.rs` | Address classification (#6926) — broadcast / multicast / directed-broadcast / invalid-ICMP-error-source predicates, split out of `inspect.rs` when it crossed the 2000-LOC [REFACTOR] tier. Chosen as the seam because it is the one group in that file with **zero** internal dependencies, so the move carried the whole property rather than scattering it. `inspect.rs` re-exports the six `pub(in crate::afxdp)` names, because the tree reaches them by both a bare `use` and a fully-qualified `frame::inspect::` path. |
+| `addr_class.rs` | Address classification (#6926) — broadcast / multicast / directed-broadcast / invalid-ICMP-error-source predicates, split out of `inspect.rs` when it crossed the 2000-LOC [REFACTOR] tier. Chosen as the seam because it is the one group in that file with **zero** internal dependencies, so the move carried the whole property rather than scattering it. `inspect.rs` re-exports the consumed `pub(in crate::afxdp)` names because current callers use both a bare `use` and a fully-qualified `frame::inspect::` path. |
 | `generated.rs` | #2238: `generated_reply_session_key()` — parse a LOCALLY-GENERATED reply frame (Time Exceeded / policy-reject RST/ICMP-unreachable / SYN-cookie SYN-ACK/ACK-RST) back into its OWN egress `(SessionKey, ForwardPacketMeta)` so the output classifier (`tx::classify_generated_reply`) keys on the reply's real tuple, not the trigger's. Reuses `frame_l3_offset` + the bounded v6 ext-header walk (one wire parser). Cold path only; `None` on a parse failure → caller fails CLOSED. |
 | `generated_tests.rs` | Co-located unit tests for `generated.rs`. |
 | `tcp.rs` | TCP-specific inspection + mutation kernels (#989) — flags, MSS clamp, header munging. |
@@ -331,9 +331,9 @@ inspect or rewrite a packet sitting in a UMEM frame.
   `recompute_l4_checksum_ipv6` is unchanged and still runs on the
   `repaired_ports` path; the incremental write is idempotent with it.)
 - **TCP inspection helpers are ext-header-aware (#2148)**: the read-only
-  diagnostic/telemetry helpers `frame_has_tcp_rst`,
-  `extract_tcp_flags_and_window`, and `extract_tcp_window` (`tcp.rs`) all
-  derive the IPv6 L4 offset via the shared `packet_rel_l4_offset_and_protocol`
+  diagnostic/telemetry helpers `frame_has_tcp_rst` and
+  `extract_tcp_flags_and_window` (`tcp.rs`) derive the IPv6 L4 offset via the
+  shared `packet_rel_l4_offset_and_protocol`
   ext-header walker, NOT a fixed L3+40. Before #2148 they hard-coded the
   TCP header at L3+40, so an IPv6 flow carrying any extension header
   (hop-by-hop, routing, fragment, dest-opts) had its RST/flags/window read
