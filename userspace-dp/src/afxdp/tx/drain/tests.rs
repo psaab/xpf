@@ -575,13 +575,15 @@ fn drain_pending_tx_counts_initial_noop_and_idle_guard_17151() {
     );
 }
 
-/// #17151: the shared step applies its ONE noop policy on every
-/// pass. A pass that drains its queue dry exits via the entry
-/// guard — its terminating condition is "no queued work", not a
-/// `None` drain — so it counts nothing extra; each serviced drain
-/// is attributed exactly once.
+/// #17151: attribution/guard pin for the shared step — this cell
+/// produces NO terminating `None` of its own. It pins that the helper
+/// attributes each serviced drain exactly once (hist buckets sum to
+/// `drain_invocations`), that a pass which drains its queue dry exits
+/// via the entry guard (counting nothing extra), and that a later
+/// idle pass also counts nothing. The terminating-`None` counting
+/// itself is pinned by the two `drain_pending_tx_counts_*` cells.
 #[test]
-fn service_shaped_until_noop_counts_terminating_noop_once_17151() {
+fn service_shaped_until_noop_attributes_and_guards_17151() {
     let mut root = test_cos_interface_runtime(0);
     root.tokens = 100_000;
     root.queues[0].hot.tokens = 1500;
@@ -676,19 +678,83 @@ fn service_shaped_until_noop_counts_terminating_noop_once_17151() {
         "idle pass adds no noop (#1318/#17151)"
     );
 }
-/// #17151: the re-ingest pass counts its terminating noop too.
+/// #17151: the re-ingest pass counts its terminating noop too —
+/// ATTRIBUTABLE by construction: the initial pass counts 0 and the
+/// peer arrival is injected between the initial and re-ingest passes.
 ///
 /// PRODUCTION PATH: `drain_pending_tx` is the ONLY caller of the
-/// re-ingest budget, so this drives it directly. One pending item
-/// sits in the redirect inbox (so the re-ingest budget admits an
-/// iteration) and fails ingest, while the token-starved queue makes
-/// every drain return `None`. Removing the re-ingest call, or the
-/// helper's noop arm, drops the count from 2 to 1 -> RED.
+/// re-ingest budget, so this drives it directly. The binding starts
+/// with an EMPTY CoS queue, so the initial shaped pass admits no
+/// drain at all (entry guard, #1318) and counts 0. The
+/// `AFTER_INITIAL_DRAIN_HOOK` seam then enqueues the peer arrival
+/// into the redirect inbox — after the initial pass, before the
+/// re-ingest budget — mirroring a peer worker pushing work DURING
+/// the shaped drain. The re-ingest ingest admits it into the
+/// token-starved queue (`hot.tokens == 0`,
+/// `last_refill_ns == u64::MAX - 1_500`, so no refill can rescue it
+/// at `now_ns`), and the re-ingest service call's terminating `None`
+/// is the ONLY drain that can count. Stubbing that service call (or
+/// removing the helper's noop arm) therefore leaves the count at 0
+/// -> RED; in the pre-fold cell the same stub stayed green because
+/// the initial pass had already counted 1.
 #[test]
 fn drain_pending_tx_counts_reingest_noop_17151() {
-    // Same starved setup as the initial-pass test: the first
-    // drain_pending_tx counts ONE noop (initial terminating None).
-    let mut binding = token_starved_binding_17151();
+    let mut root = test_cos_interface_runtime(0);
+    root.queues[0].hot.tokens = 0;
+    root.queues[0].hot.last_refill_ns = u64::MAX - 1_500;
+    let fast_path = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    )
+    .remove(&42)
+    .expect("fast path");
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    assert_eq!(
+        binding.cos.cos_nonempty_interfaces, 0,
+        "precondition: empty queue, so the initial pass admits no drain"
+    );
+    // Seed pending work so `drain_pending_tx` enters at all
+    // (`binding_has_pending_tx_work`). The item is non-CoS: the
+    // initial ingest leaves it for the backup path, the initial
+    // shaped pass still admits no drain over the empty queue, and
+    // the item is transmitted unshaped after the re-ingest pass.
+    binding.tx_pipeline.pending_tx_local.push_back(TxRequest {
+        bytes: vec![9u8; 64].into(),
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 99,
+        cos_queue_id: None,
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: 0,
+    });
+    AFTER_INITIAL_DRAIN_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(|binding: &mut BindingWorker| {
+            binding
+                .live
+                .enqueue_tx_owned(TxRequest {
+                    bytes: vec![3u8; 64].into(),
+                    expected_ports: None,
+                    expected_addr_family: libc::AF_INET as u8,
+                    expected_protocol: PROTO_TCP,
+                    flow_key: None,
+                    egress_ifindex: 42,
+                    cos_queue_id: Some(0),
+                    dscp_rewrite: None,
+                    mirror_clone: false,
+                    overlap_admissions: None,
+                    enqueue_ns: 0,
+                })
+                .expect("fresh inbox accepts the late peer arrival");
+        }));
+    });
     let forwarding = forwarding_with_cos_17151();
     let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
         BTreeMap::new();
@@ -701,38 +767,21 @@ fn drain_pending_tx_counts_reingest_noop_17151() {
         0,
         &worker_commands_by_id,
     ));
-    assert_eq!(noop_count_17151(&binding), 1, "first drain_pending_tx");
-
-    // A late peer arrival lands in the redirect inbox; the queue is
-    // still token-starved, so the second drain_pending_tx runs the
-    // re-ingest budget and counts a SECOND terminating None.
-    binding
-        .live
-        .enqueue_tx_owned(TxRequest {
-            bytes: vec![3u8; 64].into(),
-            expected_ports: None,
-            expected_addr_family: libc::AF_INET as u8,
-            expected_protocol: PROTO_TCP,
-            flow_key: None,
-            egress_ifindex: 99,
-            cos_queue_id: Some(7),
-            dscp_rewrite: None,
-            mirror_clone: false,
-            overlap_admissions: None,
-            enqueue_ns: 0,
-        })
-        .expect("fresh inbox accepts the late peer arrival");
-    assert!(drain_pending_tx(
-        &mut binding,
-        1_000_000_000,
-        &mut shared,
-        &forwarding,
-        0,
-        &worker_commands_by_id,
-    ));
     assert_eq!(
         noop_count_17151(&binding),
-        2,
-        "initial pass + re-ingest pass must EACH count their terminating None (#17151)"
+        1,
+        "exactly one terminating None may count, and only the re-ingest \
+         pass can have produced it: the initial pass counted 0 over the \
+         empty queue (#17151)"
+    );
+    assert_eq!(
+        shaped_serviced_counts_17151(&binding, 42),
+        (1, 0),
+        "the re-ingest-admitted peer item stays queued (starved); \
+         no drain serviced it"
+    );
+    assert!(
+        binding.tx_pipeline.pending_tx_local.is_empty(),
+        "the re-ingest ingest must consume the inbox item into the queue"
     );
 }

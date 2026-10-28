@@ -12,6 +12,19 @@ use super::super::*;
 use super::DrainCtx;
 use super::should_enter_shaped_drain;
 
+/// #17151: test-only seam between the initial shaped pass and the
+/// re-ingest budget in `drain_phase_drain_cos`. A regression cell arms it
+/// to enqueue a peer arrival into the redirect inbox AFTER the initial
+/// pass has run, so a re-ingest terminating noop cannot be satisfied by
+/// the initial pass. Thread-local storage isolates concurrent tests and
+/// adds no release-build state or call.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AFTER_INITIAL_DRAIN_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce(&mut BindingWorker)>>>
+        = std::cell::RefCell::new(None);
+}
+
 /// Phase 4 entry point — orchestrator-facing.
 #[inline]
 pub(super) fn drain_phase_drain_cos(
@@ -21,6 +34,15 @@ pub(super) fn drain_phase_drain_cos(
     did_work: &mut bool,
 ) {
     shaped_initial_drain(binding, ctx, shared_recycles, did_work);
+    // #17151: the hook block is `#[cfg(test)]` only; release builds keep
+    // the bare two-call sequence with zero added cost.
+    #[cfg(test)]
+    {
+        let hook = AFTER_INITIAL_DRAIN_HOOK.with(|h| h.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(binding);
+        }
+    }
     shaped_reingest_budget(binding, ctx, shared_recycles, did_work);
 }
 
@@ -33,8 +55,8 @@ pub(super) fn drain_phase_drain_cos(
 /// bumps `binding.live.owner_profile_owner.drain_noop_invocations`
 /// exactly once per call. This matches the counter's written
 /// contracts — `worker/cos/mod.rs`: "counts drain calls that made no
-/// progress on *any* queue" and `binding_state/mod.rs`: "a subset
-/// counter (drains that returned `false`)" — because that terminating
+/// progress on *any* queue" and `binding_state/mod.rs`: "terminating
+/// `drain_shaped_tx` calls that returned `None`" — because that terminating
 /// drain made no progress on any queue, whether or not earlier
 /// iterations of this same call serviced work. The initial pass and
 /// every re-ingest pass therefore count identically; callers MUST
@@ -43,7 +65,7 @@ pub(super) fn drain_phase_drain_cos(
 /// Sets `*did_work` when any queue was serviced and returns whether
 /// any queue was serviced (`serviced_any`).
 #[inline]
-pub(crate) fn service_shaped_until_noop(
+pub(super) fn service_shaped_until_noop(
     binding: &mut BindingWorker,
     ctx: &DrainCtx<'_>,
     shared_recycles: &mut Vec<(u32, u64)>,

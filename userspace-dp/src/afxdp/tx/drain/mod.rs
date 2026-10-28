@@ -8,7 +8,9 @@ mod phase_shaped;
 mod phase_trivial;
 
 use phase_backup::{BackupOutcome, drain_phase_drain_local_backup};
-use phase_shaped::{drain_phase_drain_cos, service_shaped_until_noop};
+use phase_shaped::drain_phase_drain_cos;
+#[cfg(test)]
+use phase_shaped::{AFTER_INITIAL_DRAIN_HOOK, service_shaped_until_noop};
 use phase_trivial::{
     drain_phase_ingest_cos, drain_phase_maybe_rekick, drain_phase_reap_completions,
     drain_phase_submit_and_wake,
@@ -17,11 +19,11 @@ use phase_trivial::{
 /// Per-tick drain context — references-only, stack-built once
 /// per drain call; passed to phase helpers by `&DrainCtx<'_>`.
 /// Hot-path allocation contract: zero new allocations.
-pub(crate) struct DrainCtx<'a> {
-    pub(crate) forwarding: &'a ForwardingState,
-    pub(crate) worker_id: u32,
-    pub(crate) worker_commands_by_id: &'a BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
-    pub(crate) now_ns: u64,
+pub(in crate::afxdp) struct DrainCtx<'a> {
+    pub forwarding: &'a ForwardingState,
+    pub worker_id: u32,
+    pub worker_commands_by_id: &'a BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    pub now_ns: u64,
 }
 
 pub(in crate::afxdp) fn pending_tx_capacity(ring_entries: u32) -> usize {
