@@ -457,8 +457,10 @@ func fingerprintCompareNodes(nodes []*Node, base []string) {
 // a secret keyword are masked regardless of the leading verb. When the
 // command does not lex cleanly end-to-end, the lenient lexer's prefix is
 // judged; if it marks nothing, the credential may sit in the dropped tail,
-// so the whole payload is replaced by SecretDataPlaceholder. An empty
-// command is returned unchanged (there is no payload to mask).
+// so the whole payload is replaced by SecretDataPlaceholder. A nonempty
+// payload that lexes to zero tokens (for example, a comment-only command) is
+// also replaced whole. Only an actually empty or whitespace-only command is
+// returned unchanged.
 // Masked tokens are replaced by SecretDataPlaceholder; tokens are re-joined
 // with quoteKey so a multi-word value stays one re-parseable token.
 func RedactEmbeddedChangeConfigCommand(cmd string) string {
@@ -477,14 +479,16 @@ func RedactEmbeddedChangeConfigCommand(cmd string) string {
 // credential URL — `@` is not an identifier char, so every bare URL lexes
 // as a prefix), that token is masked and the command renders from the
 // masked prefix: the raw credential tail is never re-joined. Only when the
-// prefix marks NOTHING but the line still does not lex cleanly — the
-// credential may sit in the dropped tail (`… ascii-text "<secret>`) — is
-// the whole payload replaced (fingerprinted as one unit in compare mode,
-// so two different unjudgeable credentials still diff as changed).
+// prefix marks NOTHING and the payload is nonempty — either because the line
+// does not lex cleanly and the credential may sit in the dropped tail
+// (`… ascii-text "<secret>`), or because the lexer discarded a comment-only
+// command — is the whole payload replaced (fingerprinted as one unit in
+// compare mode, so two different unjudgeable credentials still diff as
+// changed). Empty and whitespace-only commands alone stay unchanged.
 func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 	tokens, _, lexOK := lexConfigMutationLineStrict15167(cmd)
 	if len(tokens) == 0 {
-		if lexOK || strings.TrimSpace(cmd) == "" {
+		if strings.TrimSpace(cmd) == "" {
 			return cmd, false
 		}
 		return wholePayloadMask16726(cmd, fingerprint)
@@ -701,6 +705,12 @@ func redactJoinedTail14413(n *Node, tailStart int) {
 	}
 	tokens, _ := lexConfigMutationLine9938(redacted)
 	if len(tokens) == 0 {
+		// Whole-payload masks begin with `#`, so the config lexer treats the
+		// placeholder itself as a comment. Preserve it as one AST key rather
+		// than dropping the replacement with the empty token list.
+		n.Keys = append(n.Keys[:tailStart], redacted)
+		n.KeysQuoted = nil
+		n.KeysBracketed = nil
 		return
 	}
 	keys := make([]string, 0, tailStart+len(tokens))
@@ -722,6 +732,9 @@ func redactJoinedTail14413(n *Node, tailStart int) {
 func applyRedactedJoin14413(child *Node, redacted string) {
 	tokens, _ := lexConfigMutationLine9938(redacted)
 	if len(tokens) == 0 {
+		child.Keys = []string{redacted}
+		child.KeysQuoted = nil
+		child.KeysBracketed = nil
 		return
 	}
 	child.Keys = tokens
@@ -775,6 +788,11 @@ func fingerprintEmbeddedCommands14413(n *Node, full, base []string) {
 	if redacted, changed := redactEmbeddedCommand(joined, true); changed {
 		tokens, _ := lexConfigMutationLine9938(redacted)
 		if len(tokens) == 0 {
+			// See redactJoinedTail14413: whole-payload masks lex as comments,
+			// but still need to replace the stored joined tail.
+			n.Keys = append(n.Keys[:tailStart], redacted)
+			n.KeysQuoted = nil
+			n.KeysBracketed = nil
 			return
 		}
 		keys := make([]string, 0, tailStart+len(tokens))
